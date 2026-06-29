@@ -1,6 +1,7 @@
 require "time"
 
 require "hive/daemon/auto_retry_safety"
+require "hive/daemon/healer_support"
 require "hive/daemon/health_probe"
 require "hive/daemon/health_signal"
 require "hive/daemon/recoverable_error_classifier"
@@ -14,6 +15,8 @@ module Hive
     # Tick-time healer for a narrow allowlist of terminal ERROR markers whose
     # cause is an external dependency outage rather than task-domain failure.
     class RecoverableErrorHealer
+      include HealerSupport
+
       MAX_AUTO_RETRIES = 2
       BACKOFF_SECOND_SEC = 1800
 
@@ -56,35 +59,49 @@ module Hive
         return if row.live_task_lock == true
         return if @controller.running_task?(project: row.project, slug: row.slug)
 
+        cleared = decide_and_clear(row, now: now)
+        return unless cleared
+
+        # Post-clear bookkeeping runs OUTSIDE the decision rescue below: by
+        # here the marker is already cleared, so a raised audit/requeue must
+        # NOT be relabeled `auto_retry_failed` (the retry DID happen).
+        record_successful_clear(row, now: now, **cleared)
+      end
+
+      # The probe-gated decision logic, up to and including the marker clear.
+      # Returns the post-clear context on a successful clear, or nil on any
+      # skip/no-op. Its broad rescue maps to `auto_retry_failed` because a
+      # failure HERE genuinely means we could not retry — the marker is still
+      # red and untouched.
+      def decide_and_clear(row, now:)
         reason = marker_reason(row)
-        category = @classifier.classify(
-          reason: reason,
-          attrs: marker_attrs(row),
-          stage: row.stage,
-          workflow: row.workflow
-        )
+        category = @classifier.classify(reason: reason, attrs: marker_attrs_for(row))
         unless category
+          # Non-allowlisted reason: keep the daemon-log audit but suppress the
+          # task-channel (events.jsonl) event — otherwise every genuine domain
+          # failure gets a "not retried" line on its task timeline.
           audit_skip(row, now: now, reason: reason, category: nil, action: "unknown_reason",
-                    rationale: "marker reason or diagnostic is not on the recoverable allowlist")
-          return
+                    rationale: "marker reason or diagnostic is not on the recoverable allowlist",
+                    emit_task: false)
+          return nil
         end
 
         safe, safety_reason = @safety.safe_to_retry?(row)
         unless safe
           audit_skip(row, now: now, reason: reason, category: category, action: "unsafe_work_area",
                     rationale: safety_reason)
-          return
+          return nil
         end
 
-        key = recovery_key(row, reason)
+        key = error_recovery_key(row, reason)
         attempts = @attempts[key]
         if attempts >= MAX_AUTO_RETRIES
           log_exhausted_once(row, key, reason: reason, category: category, attempts: attempts)
-          return
+          return nil
         end
 
         fingerprint = @health_signal.fingerprint(
-          reason: category,
+          category: category,
           config: @config,
           project_root: nil,
           env: ENV,
@@ -99,14 +116,14 @@ module Hive
           audit_skip(row, now: now, reason: reason, category: category, action: "unchanged_signal",
                     rationale: "health signal unchanged within fallback window", fingerprint: fingerprint,
                     attempts: attempts)
-          return
+          return nil
         end
 
         if attempts.positive? && @last_clear_at[key] && now - @last_clear_at[key] < BACKOFF_SECOND_SEC
           audit_skip(row, now: now, reason: reason, category: category, action: "backoff",
                     rationale: "waiting for second retry backoff", fingerprint: fingerprint,
                     attempts: attempts)
-          return
+          return nil
         end
 
         probe = @health_probe.probe(category)
@@ -116,24 +133,23 @@ module Hive
           audit_skip(row, now: now, reason: reason, category: category, action: "probe_failed",
                     rationale: "health probe failed", fingerprint: fingerprint,
                     attempts: attempts, probes: probe[:probes])
-          return
+          return nil
         end
 
-        return unless Hive::Markers.clear_current(
+        # Clearing the marker makes a markerless terminal-error row take the
+        # edit-resume path; without a pre-clear mtime to seed as the dispatch
+        # baseline, that row can strand as first-sight `record_baseline`. Bail
+        # before the clear (mirrors StaleAgentHealer#heal_error_if_auto_recoverable).
+        return nil if row.state_file_mtime.nil?
+
+        return nil unless Hive::Markers.clear_current(
           row.state_file,
           expected_name: :error,
           match_attrs: marker_match_attrs(row, reason)
         )
 
-        observe_pre_clear_mtime(row)
-        attempts += 1
-        @attempts[key] = attempts
-        @last_fingerprint[key] = fingerprint
-        @last_attempt_at[key] = now
-        @last_clear_at[key] = now
-        audit_retry(row, now: now, reason: reason, category: category, fingerprint: fingerprint,
-                    attempts: attempts, probes: probe[:probes])
-        requeue_plan_rerun(row) if Hive::Workflows.coding_row?(row) && row.stage.to_s == "3-plan"
+        { reason: reason, category: category, key: key, fingerprint: fingerprint,
+          attempts: attempts, probes: probe[:probes] }
       rescue StandardError => e
         @logger.event(:auto_retry_failed,
                       project: row.project,
@@ -141,6 +157,26 @@ module Hive
                       stage: row.stage,
                       reason: marker_reason(row),
                       error: "#{e.class}: #{e.message}")
+        nil
+      end
+
+      # Bookkeeping after a confirmed clear. The budget/state writes are plain
+      # assignments that cannot raise, so they always run once cleared. A
+      # raised audit/requeue must not crash the tick NOR be relabeled
+      # `auto_retry_failed` (the clear succeeded and the budget is recorded) —
+      # `requeue_plan_rerun` carries its own rescue, and the outer rescue here
+      # swallows a broken-logger emit rather than inventing a false failure.
+      def record_successful_clear(row, now:, reason:, category:, key:, fingerprint:, attempts:, probes:)
+        @attempts[key] = attempts + 1
+        @last_fingerprint[key] = fingerprint
+        @last_attempt_at[key] = now
+        @last_clear_at[key] = now
+        observe_pre_clear_mtime(row)
+        audit_retry(row, now: now, reason: reason, category: category, fingerprint: fingerprint,
+                    attempts: @attempts[key], probes: probes)
+        requeue_plan_rerun(row, trigger: "recoverable_error_auto_retry") if Hive::Workflows.coding_row?(row) && row.stage.to_s == "3-plan"
+      rescue StandardError
+        nil
       end
 
       def enabled?
@@ -158,21 +194,24 @@ module Hive
       end
 
       def audit_skip(row, now:, reason:, category:, action:, rationale:, fingerprint: nil,
-                     attempts: nil, probes: nil)
+                     attempts: nil, probes: nil, emit_task: true)
         key = [
           row.project.to_s, row.slug.to_s, row.stage.to_s, reason.to_s,
           action.to_s, fingerprint.to_s, rationale.to_s
         ]
         return if @negative_audits[key]
 
-        @negative_audits[key] = true
         message = "not retried: #{rationale}"
-        emit_task_event(row, :auto_retry_skipped, message)
+        emit_task_event(row, :auto_retry_skipped, message) if emit_task
         @logger.event(:auto_retry_skipped,
                       **audit_attrs(row, reason: reason, category: category,
                                     fingerprint: fingerprint, attempts: attempts,
                                     action: action, rationale: rationale,
                                     probes: probes, now: now))
+        # Set the dedup flag only AFTER a successful emit. If emission raises,
+        # the flag stays unset so the next tick re-attempts the audit rather
+        # than permanently suppressing this skip rationale for the key.
+        @negative_audits[key] = true
       end
 
       def log_exhausted_once(row, key, reason:, category:, attempts:)
@@ -190,7 +229,7 @@ module Hive
 
       def audit_attrs(row, reason:, category:, action:, rationale:, now:, fingerprint: nil,
                       attempts: nil, max_attempts: MAX_AUTO_RETRIES, probes: nil)
-        attrs = marker_attrs(row)
+        attrs = marker_attrs_for(row)
         {
           project: row.project,
           slug: row.slug,
@@ -230,58 +269,9 @@ module Hive
         nil
       end
 
-      def observe_pre_clear_mtime(row)
-        return unless row.state_file_mtime
-        return unless @controller.respond_to?(:observe_state_file_mtime)
-
-        @controller.observe_state_file_mtime(
-          project: row.project,
-          slug: row.slug,
-          mtime: row.state_file_mtime
-        )
-      end
-
-      def requeue_plan_rerun(row)
-        request_id = @request_queue.write_request!(
-          project: row.project,
-          slug: row.slug,
-          argv: [ "hive", "plan", row.slug, "--project", row.project, "--from", "3-plan" ],
-          requestor: "healer",
-          trigger: "recoverable_error_auto_retry"
-        )
-        @logger.event(:heal_requeued,
-                      project: row.project,
-                      slug: row.slug,
-                      stage: row.stage,
-                      request_id: request_id)
-      rescue StandardError => e
-        @logger.event(:heal_requeue_failed,
-                      project: row.project,
-                      slug: row.slug,
-                      stage: row.stage,
-                      error: "#{e.class}: #{e.message}",
-                      remediation: "hive plan #{row.slug} --project #{row.project} --from 3-plan")
-      end
-
-      def marker_match_attrs(row, reason)
-        attrs = marker_attrs(row)
-        marker_id = attrs["marker_id"].to_s
-        match = { "reason" => reason }
-        match["marker_id"] = marker_id.empty? ? nil : marker_id
-        match
-      end
-
-      def marker_reason(row)
-        marker_attrs(row)["reason"].to_s
-      end
-
-      def marker_attrs(row)
-        row.respond_to?(:marker_attrs) && row.marker_attrs.is_a?(Hash) ? row.marker_attrs : {}
-      end
-
-      def recovery_key(row, reason)
-        [ row.project.to_s, row.slug.to_s, row.stage.to_s, reason.to_s ]
-      end
+      # marker_attrs_for / marker_reason / marker_match_attrs /
+      # error_recovery_key / observe_pre_clear_mtime / requeue_plan_rerun are
+      # provided by HealerSupport (shared with StaleAgentHealer).
     end
   end
 end

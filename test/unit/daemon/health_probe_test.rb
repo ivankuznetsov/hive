@@ -168,4 +168,60 @@ class HiveDaemonHealthProbeTest < Minitest::Test
       end
     end
   end
+
+  def test_doctor_config_error_with_nil_rows_fails_closed
+    doctor = FakeDoctor.new(rows: nil, exit_code: Hive::Commands::Doctor::EXIT_CONFIG_ERROR)
+    probe = Hive::Daemon::HealthProbe.new(
+      config: Hive::Config::DEFAULTS,
+      project_root: Dir.pwd,
+      env: { "CODEX_HOME" => "/tmp/codex-home" },
+      tick_id: "tick-1",
+      doctor_factory: -> { doctor },
+      capture3: ->(_env, *_cmd) { [ "", "", Status.new(success_value: true, exitstatus: 0) ] },
+      timeout_runner: ->(_seconds, &block) { block.call }
+    )
+
+    result = probe.probe(:codex_auth)
+
+    assert_equal false, result[:ok], "a doctor that errored with no rows must block, not pass the gate"
+    assert_equal [ "doctor" ], result[:probes].map { |p| p[:name] }
+    doctor_probe = result[:probes].first
+    assert_equal false, doctor_probe[:ok]
+    assert_includes doctor_probe[:stdout_tail], "no rows"
+  end
+
+  def test_doctor_nonzero_exit_with_clean_rows_fails_closed
+    doctor = FakeDoctor.new(rows: [ { label: "claude", status: "present" } ], exit_code: 65)
+    probe = Hive::Daemon::HealthProbe.new(
+      config: Hive::Config::DEFAULTS,
+      project_root: Dir.pwd,
+      doctor_factory: -> { doctor },
+      capture3: ->(_env, *_cmd) { [ "", "", Status.new(success_value: true, exitstatus: 0) ] },
+      timeout_runner: ->(_seconds, &block) { block.call }
+    )
+
+    result = probe.probe(:codex_auth)
+
+    assert_equal false, result[:ok]
+    assert_equal [ "doctor" ], result[:probes].map { |p| p[:name] }
+  end
+
+  def test_unknown_category_is_not_healthy
+    result = health_probe.probe(:mystery_category)
+
+    assert_equal false, result[:ok]
+    assert_equal %w[doctor unknown_reason], result[:probes].map { |p| p[:name] }
+    assert_includes result[:probes].last[:stderr_tail], "unknown health probe category"
+  end
+
+  def test_run_probe_top_level_rescue_emits_health_probe_error
+    probe = health_probe
+    probe.define_singleton_method(:doctor_probe) { raise "kaboom" }
+
+    result = probe.probe(:codex_auth)
+
+    assert_equal false, result[:ok]
+    assert_equal [ "health_probe_error" ], result[:probes].map { |p| p[:name] }
+    assert_includes result[:probes].first[:stderr_tail], "kaboom"
+  end
 end

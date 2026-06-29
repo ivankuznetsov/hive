@@ -6,9 +6,19 @@ module Hive
       CODEX_AUTH_401 = /401/.freeze
       CODEX_AUTH_TEXT = /missing\s+bearer|basic\s+auth/i.freeze
 
+      # The closed set of recoverable categories this classifier can emit.
+      # Single source of truth: `HealthProbe` and `HealthSignal` each branch
+      # on every member, so a new category is added here and wired into both
+      # of those `case` statements together — a missing branch falls through
+      # to their `unknown_reason` arm rather than being silently mishandled.
+      CATEGORIES = %i[codex_auth claude_launcher].freeze
+
       module_function
 
-      def classify(reason:, attrs:, stage: nil, workflow: nil)
+      # `reason` is the marker's `reason=` attribute; `attrs` the marker's
+      # other attributes. Returns a member of CATEGORIES or nil. (Stage and
+      # workflow are not consulted — the allowlist is purely reason/attrs.)
+      def classify(reason:, attrs:)
         attrs = attrs.is_a?(Hash) ? attrs : {}
 
         case reason.to_s

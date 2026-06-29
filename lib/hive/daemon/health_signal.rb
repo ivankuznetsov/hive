@@ -6,6 +6,7 @@ require "hive"
 require "hive/agent_profiles"
 require "hive/commands/doctor"
 require "hive/config"
+require "hive/daemon/recoverable_error_classifier"
 
 module Hive
   module Daemon
@@ -15,15 +16,19 @@ module Hive
 
       module_function
 
-      def fingerprint(reason:, config: Hive::Config::DEFAULTS, project_root: nil,
+      # `category` is the recoverable category symbol the classifier emits
+      # (a member of RecoverableErrorClassifier::CATEGORIES) — NOT the
+      # marker-reason string. The healer passes the classifier's symbol here.
+      def fingerprint(category:, config: Hive::Config::DEFAULTS, project_root: nil,
                       env: ENV, now: Time.now, doctor_rows: nil)
         parts = [
           "hive_version=#{Hive::VERSION}",
           "daemon_binary=#{File.expand_path($PROGRAM_NAME)}",
-          "reason=#{reason}"
+          "category=#{category}"
         ]
 
-        case reason.to_sym
+        # Keep these branches in sync with RecoverableErrorClassifier::CATEGORIES.
+        case category.to_sym
         when :codex_auth
           parts.concat(codex_parts(config, env))
         when :claude_launcher
@@ -76,7 +81,13 @@ module Hive
       def profile_version(name, config)
         Hive::AgentProfiles.lookup(name, cfg: config).check_version!
       rescue StandardError => e
-        "#{e.class}: #{e.message}"
+        # Fold a STABLE sentinel (the error class, never the message) into the
+        # fingerprint. A transient PATH/exec error carries a varying message;
+        # folding that raw string in would change the fingerprint on noise and
+        # re-arm `changed_or_fallback?` without a genuine dependency-state
+        # change. The success path still returns the real version string, so an
+        # error→healthy transition flips the fingerprint as intended.
+        "error:#{e.class}"
       end
 
       def doctor_rows_digest(config, project_root, rows)
@@ -91,7 +102,8 @@ module Hive
           doctor.call
           doctor.rows
         rescue StandardError => e
-          [ { error: "#{e.class}: #{e.message}" } ]
+          # Stable sentinel only (class, not message) — see profile_version.
+          [ { error: "error:#{e.class}" } ]
         end
 
         normalized = Array(rows).map do |row|

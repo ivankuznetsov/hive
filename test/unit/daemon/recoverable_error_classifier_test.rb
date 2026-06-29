@@ -5,9 +5,7 @@ class HiveDaemonRecoverableErrorClassifierTest < Minitest::Test
   def classify(reason, attrs = {})
     Hive::Daemon::RecoverableErrorClassifier.classify(
       reason: reason,
-      attrs: attrs,
-      stage: "4-execute",
-      workflow: "coding"
+      attrs: attrs
     )
   end
 

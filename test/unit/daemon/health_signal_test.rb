@@ -6,9 +6,9 @@ class HiveDaemonHealthSignalTest < Minitest::Test
 
   Stat = Struct.new(:mtime, keyword_init: true)
 
-  def fingerprint(reason, **kwargs)
+  def fingerprint(category, **kwargs)
     Hive::Daemon::HealthSignal.fingerprint(
-      reason: reason,
+      category: category,
       config: Hive::Config::DEFAULTS,
       project_root: Dir.pwd,
       **kwargs
@@ -66,6 +66,14 @@ class HiveDaemonHealthSignalTest < Minitest::Test
 
       refute_equal first, second
     end
+  end
+
+  def test_unknown_category_uses_stable_unknown_reason_fingerprint
+    unknown = fingerprint(:mystery_category)
+
+    refute_equal unknown, fingerprint(:codex_auth)
+    refute_equal unknown, fingerprint(:claude_launcher, doctor_rows: [])
+    assert_equal unknown, fingerprint(:mystery_category), "unknown-category fingerprint must be stable"
   end
 
   def test_changed_or_fallback_gate_allows_first_changed_and_elapsed_fallback

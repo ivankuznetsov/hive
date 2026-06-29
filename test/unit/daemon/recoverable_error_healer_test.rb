@@ -245,4 +245,95 @@ class HiveDaemonRecoverableErrorHealerTest < Minitest::Test
                    @queue.requests.first.fetch(:argv)
     end
   end
+
+  def test_skips_clearing_while_task_running
+    @controller = FakeController.new(running: true)
+    with_error_row do |row, state_file, _dir|
+      stub_safe do
+        healer.heal([ row ], now: NOW)
+      end
+
+      assert_equal :error, Hive::Markers.current(state_file).name
+      assert_empty @probe.calls
+    end
+  end
+
+  def test_skips_row_with_live_task_lock
+    with_error_row do |row, state_file, _dir|
+      row.live_task_lock = true
+      stub_safe do
+        healer.heal([ row ], now: NOW)
+      end
+
+      assert_equal :error, Hive::Markers.current(state_file).name
+      assert_empty @probe.calls
+    end
+  end
+
+  def test_skips_legacy_layout_projects
+    with_error_row do |row, state_file, _dir|
+      stub_safe do
+        healer.heal([ row ], now: NOW, legacy_layout_projects: { "p" => true })
+      end
+
+      assert_equal :error, Hive::Markers.current(state_file).name
+      assert_empty @probe.calls
+    end
+  end
+
+  def test_nil_state_file_mtime_skips_clear_to_avoid_baseline_stranding
+    with_error_row do |row, state_file, _dir|
+      row.state_file_mtime = nil
+      stub_safe do
+        healer.heal([ row ], now: NOW)
+      end
+
+      assert_equal :error, Hive::Markers.current(state_file).name
+    end
+  end
+
+  def test_unexpected_error_before_clear_logs_auto_retry_failed
+    with_error_row do |row, state_file, _dir|
+      @signal.define_singleton_method(:fingerprint) { |**| raise "boom" }
+      stub_safe do
+        healer.heal([ row ], now: NOW)
+      end
+
+      assert_equal :error, Hive::Markers.current(state_file).name
+      assert @logger.events.any? { |name, attrs|
+        name == :auto_retry_failed && attrs[:error].to_s.include?("boom")
+      }
+    end
+  end
+
+  def test_requeue_failure_after_clear_logs_heal_requeue_failed
+    attrs = { "reason" => "claude_launch_failed" }
+    @queue.define_singleton_method(:write_request!) { |**| raise "queue down" }
+    with_error_row(stage: "3-plan", attrs: attrs) do |row, state_file, _dir|
+      stub_safe do
+        healer.heal([ row ], now: NOW)
+      end
+
+      # The clear already succeeded; a failed requeue must not be relabeled a
+      # heal/auto-retry failure — it logs heal_requeue_failed with remediation.
+      assert_equal :none, Hive::Markers.current(state_file).name
+      assert @logger.events.any? { |name, _attrs| name == :auto_retry }
+      assert @logger.events.any? { |name, attrs|
+        name == :heal_requeue_failed && attrs[:remediation].to_s.include?("--from 3-plan")
+      }
+      refute @logger.events.any? { |name, _attrs| name == :auto_retry_failed }
+    end
+  end
+
+  def test_unknown_reason_keeps_daemon_audit_but_suppresses_task_event
+    attrs = { "reason" => "implementer_failed", "provider" => "codex", "message" => "exit_code=1 compile" }
+    with_error_row(attrs: attrs) do |row, _state_file, dir|
+      stub_safe do
+        healer.heal([ row ], now: NOW)
+      end
+
+      refute File.exist?(File.join(dir, "events.jsonl")), "non-allowlisted reason must not write a task-timeline event"
+      assert @logger.events.any? { |name, attrs| name == :auto_retry_skipped && attrs[:action] == "unknown_reason" }
+    end
+  end
 end

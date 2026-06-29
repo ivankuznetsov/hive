@@ -123,12 +123,12 @@ class DaemonAutoRetryTest < Minitest::Test
     d
   end
 
-  def with_error_row(attrs:)
+  def with_error_row(attrs:, stage: "4-execute")
     with_tmp_dir do |dir|
       state_file = File.join(dir, "task.md")
       Hive::Markers.set(state_file, :error, attrs)
       row = Row.new(
-        project: "p", slug: "auto-retry-task", stage: "4-execute", workflow: "coding",
+        project: "p", slug: "auto-retry-task", stage: stage, workflow: "coding",
         marker: "error", marker_attrs: Hive::Markers.current(state_file).attrs,
         folder: dir, state_file: state_file, state_file_mtime: File.mtime(state_file),
         action: "error", suggested_command: nil, claude_pid_alive: nil,
@@ -213,6 +213,50 @@ class DaemonAutoRetryTest < Minitest::Test
       assert_equal :error, Hive::Markers.current(state_file).name
       assert_empty @probe.calls
       assert @logger.events.any? { |name, attrs| name == :auto_retry_skipped && attrs[:action] == "unsafe_work_area" }
+    end
+  end
+
+  # Drives the REAL AutoRetrySafety, HealthSignal, and HealthProbe through the
+  # healer (only the probe's shell-outs are stubbed via injected collaborators)
+  # so keyword-seam drift between the healer's calls — fingerprint(category:),
+  # probe(category) — and the real implementations fails the build instead of
+  # passing unnoticed behind FakeProbe/FakeSignal/stub_safe.
+  def test_real_collaborators_clear_codex_auth_marker_end_to_end
+    real_status = Struct.new(:ok) do
+      def success? = ok
+      def exitstatus = ok ? 0 : 1
+    end
+    doctor = Object.new
+    doctor.define_singleton_method(:call) { 0 }
+    doctor.define_singleton_method(:rows) { [ { status: "present", label: "claude" } ] }
+    config = { "daemon" => { "auto_retry" => { "enabled" => true } } }
+    probe = Hive::Daemon::HealthProbe.new(
+      config: config,
+      project_root: nil,
+      env: { "CODEX_HOME" => "/tmp/codex-real-collab" },
+      doctor_factory: -> { doctor },
+      capture3: ->(_env, *_cmd) { [ "ok", "", real_status.new(true) ] },
+      timeout_runner: ->(_seconds, &block) { block.call }
+    )
+    healer = Hive::Daemon::RecoverableErrorHealer.new(
+      controller: @controller,
+      logger: @logger,
+      config: config,
+      health_probe: probe,
+      health_signal: Hive::Daemon::HealthSignal
+    )
+    attrs = {
+      "reason" => "implementer_failed",
+      "provider" => "codex",
+      "message" => "401 Missing bearer/basic auth"
+    }
+    # 2-brainstorm with no brainstorm.md keeps real AutoRetrySafety happy
+    # without a worktree, exercising the real safety seam too.
+    with_error_row(attrs: attrs, stage: "2-brainstorm") do |row, state_file, _dir|
+      healer.heal([ row ], now: T0)
+
+      assert_equal :none, Hive::Markers.current(state_file).name
+      assert @logger.events.any? { |name, attrs2| name == :auto_retry && attrs2[:action] == "cleared" }
     end
   end
 

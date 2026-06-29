@@ -6,6 +6,7 @@ require "hive/agent_profiles"
 require "hive/claude_launcher"
 require "hive/commands/doctor"
 require "hive/config"
+require "hive/daemon/recoverable_error_classifier"
 
 module Hive
   module Daemon
@@ -36,38 +37,42 @@ module Hive
         @cache.clear
       end
 
-      def probe(reason)
-        key = [ @tick_id, reason.to_sym ]
+      # `category` is the recoverable category symbol the classifier emits
+      # (a member of RecoverableErrorClassifier::CATEGORIES) — NOT the
+      # marker-reason string. The healer passes the classifier's symbol here.
+      def probe(category)
+        key = [ @tick_id, category.to_sym ]
         return @cache[key] if @cache.key?(key)
 
-        @cache[key] = run_probe(reason.to_sym)
+        @cache[key] = run_probe(category.to_sym)
       end
 
       private
 
-      def run_probe(reason)
+      def run_probe(category)
         probes = []
         doctor = doctor_probe
         probes << doctor
-        return result(reason, probes) unless doctor[:ok]
+        return result(category, probes) unless doctor[:ok]
 
-        case reason
+        # Keep these branches in sync with RecoverableErrorClassifier::CATEGORIES.
+        case category
         when :codex_auth
           probes.concat(codex_probes)
         when :claude_launcher
           probes.concat(claude_probes)
         else
-          probes << probe_result(name: "unknown_reason", ok: false, stderr: "unknown health probe reason #{reason}")
+          probes << probe_result(name: "unknown_reason", ok: false, stderr: "unknown health probe category #{category}")
         end
 
-        result(reason, probes)
+        result(category, probes)
       rescue StandardError => e
-        result(reason, [ probe_result(name: "health_probe_error", ok: false, stderr: "#{e.class}: #{e.message}") ])
+        result(category, [ probe_result(name: "health_probe_error", ok: false, stderr: "#{e.class}: #{e.message}") ])
       end
 
-      def result(reason, probes)
+      def result(category, probes)
         {
-          reason: reason.to_s,
+          reason: category.to_s,
           ok: probes.all? { |probe| probe[:ok] },
           probes: probes
         }
@@ -77,12 +82,27 @@ module Hive
         started = monotonic_ms
         doctor = @doctor_factory.call
         exit_code = doctor.call
-        rows = Array(doctor.rows)
-        failing = rows.select { |row| FAILING_DOCTOR_STATUSES.include?(row[:status].to_s) }
-        message = failing.map { |row| "#{row[:label] || row[:stage]}=#{row[:status]}" }.join(", ")
+        rows = doctor.rows
+        failing = Array(rows).select { |row| FAILING_DOCTOR_STATUSES.include?(row[:status].to_s) }
+        # Fail CLOSED on the universal precondition. `Hive::Commands::Doctor`
+        # rescues a ConfigError/KeyError/ArgumentError to EXIT_CONFIG_ERROR
+        # with `@rows` still nil, so `failing.empty?` would otherwise be true
+        # (no rows to fail) and a broken doctor would silently pass the gate
+        # guarding auto-clear. Require a clean exit AND a real row set, not
+        # merely the absence of failing rows.
+        healthy = exit_code == Hive::Commands::Doctor::EXIT_SUCCESS && !rows.nil? && failing.empty?
+        message = if rows.nil?
+          "doctor produced no rows (exit #{exit_code})"
+        elsif !failing.empty?
+          failing.map { |row| "#{row[:label] || row[:stage]}=#{row[:status]}" }.join(", ")
+        elsif exit_code != Hive::Commands::Doctor::EXIT_SUCCESS
+          "doctor exited #{exit_code}"
+        else
+          ""
+        end
         probe_result(
           name: "doctor",
-          ok: failing.empty?,
+          ok: healthy,
           exit: exit_code,
           stdout: message,
           ms: elapsed_ms(started)
@@ -162,6 +182,11 @@ module Hive
         probe_result(name: name, ok: false, stderr: "#{e.class}: #{e.message}", ms: elapsed_ms(started))
       end
 
+      # Result-shape contract: only `:name` and `:ok` are guaranteed present.
+      # `.compact` drops any nil value, so `:exit`/`:ms`/`:stdout_tail`/
+      # `:stderr_tail` are absent-vs-nil ambiguous — a missing key means the
+      # value was nil. Consumers iterating probes (beyond the audit log, which
+      # persists the hash verbatim) must treat a missing key as nil.
       def probe_result(name:, ok:, exit: nil, stdout: nil, stderr: nil, ms: nil)
         {
           name: name,

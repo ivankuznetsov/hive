@@ -13,7 +13,7 @@ class WebCommandTest < Minitest::Test
         command = Hive::Commands::Web.new
         # Singleton override instead of minitest/mock (not bundled): the
         # checkout itself contains web/, so the fallback path would resolve.
-        command.define_singleton_method(:rails_app_dir) { nil }
+        command.define_singleton_method(:rails_app_dir) { |**| nil }
         err = assert_raises(SystemExit) do
           capture_io { command.call }
         end

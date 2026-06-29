@@ -398,6 +398,44 @@ class HiveCommandsDaemonTest < Minitest::Test
   end
 
 
+  def drift_for(service_state, version: nil)
+    command = daemon("status", json: true)
+    command.define_singleton_method(:binary_version) { |_binary| version }
+    command.send(:daemon_binary_state, service_state).fetch("binary_drift")
+  end
+
+  def test_binary_drift_not_applicable_when_no_unit_installed
+    assert_equal "not_applicable",
+                 drift_for({ "service_installed" => false, "installed_binary" => nil, "expected_binary" => nil })
+  end
+
+  def test_binary_drift_unparseable_when_unit_present_but_binary_unreadable
+    # service_installed true but the parser could not extract a binary (nil):
+    # distinct from "no unit", so the operator gets a corrupt-unit signal.
+    assert_equal "unparseable",
+                 drift_for({ "service_installed" => true, "installed_binary" => nil, "expected_binary" => "/x/hive" })
+  end
+
+  def test_binary_drift_path_when_installed_differs_from_expected
+    assert_equal "path",
+                 drift_for({ "service_installed" => true,
+                             "installed_binary" => "/old/hive", "expected_binary" => "/new/hive" })
+  end
+
+  def test_binary_drift_version_when_same_path_older_version
+    assert_equal "version",
+                 drift_for({ "service_installed" => true,
+                             "installed_binary" => "/x/hive", "expected_binary" => "/x/hive" },
+                           version: "0.0.1")
+  end
+
+  def test_binary_drift_none_when_path_and_version_match
+    assert_equal "none",
+                 drift_for({ "service_installed" => true,
+                             "installed_binary" => "/x/hive", "expected_binary" => "/x/hive" },
+                           version: Hive::VERSION)
+  end
+
   def test_status_text_reports_running_daemon
     command = daemon("status")
     write_pid_payload(pid: 2468)

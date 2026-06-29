@@ -3124,6 +3124,47 @@ end
     end
   end
 
+  # The web "Repair daemon" button enqueues under the __global__ sentinel.
+  # The consumer must special-case it (not reject as unknown_project) and
+  # dispatch `hive daemon install --force` even though no project is registered.
+  def test_global_maintenance_repair_dispatches_without_registered_project
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home
+      )
+      write_request_file(state_home, slug: "daemon-repair", request_id: "REP",
+                         project: Q::GLOBAL_MAINTENANCE_PROJECT,
+                         argv: %w[hive daemon install --force], trigger: "web_daemon_repair")
+
+      dispatcher.tick(now: T0)
+
+      refute logger.events.any? { |(n, a)| n == :dispatch_request_rejected && a[:request_id] == "REP" },
+             "global maintenance request must not be rejected as unknown_project"
+      assert sup.spawned.any? { |f| f[:command].include?("daemon install --force") },
+             "the repair command must actually be dispatched"
+    end
+  end
+
+  def test_global_maintenance_rejects_argv_outside_allowlist
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home
+      )
+      # An allowlisted verb (so write/valid_argv passes) but NOT a permitted
+      # global-maintenance argv: must be refused, not dispatched.
+      write_request_file(state_home, slug: "daemon-repair", request_id: "REPX",
+                         project: Q::GLOBAL_MAINTENANCE_PROJECT,
+                         argv: %w[hive daemon stop], trigger: "web_daemon_repair")
+
+      dispatcher.tick(now: T0)
+
+      rejected = logger.events.find { |(n, a)| n == :dispatch_request_rejected && a[:request_id] == "REPX" }
+      refute_nil rejected
+      assert_equal "disallowed_global_request", rejected[1][:reason]
+      assert_empty sup.spawned
+    end
+  end
+
   def test_dispatch_request_blocked_when_in_flight_for_same_slug
     Dir.mktmpdir("hive-dispatch-queue") do |state_home|
       dispatcher, sup, ctrl, logger, _mw = make_dispatcher(

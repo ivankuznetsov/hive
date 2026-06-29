@@ -36,16 +36,19 @@ module Hive
         add_phase("web", true, "url" => web_url)
 
         emit(diagnostics)
-        # Exit non-zero if EITHER a diagnostics hard failure OR a provisioning
-        # phase (qmd / web_bundle / daemon_service / web_service) failed, so
-        # automation branching on the exit status (AE5) is never told a
-        # half-provisioned setup succeeded.
-        hard_failures = diagnostics.results.reject { |row| row.ok? || row.bootstrappable }
-        phases_ok = @phases.all? { |phase| phase["ok"] }
-        (hard_failures.empty? && phases_ok) ? 0 : 1
+        successful?(diagnostics) ? 0 : 1
       end
 
       private
+
+      # Setup succeeded only if BOTH diagnostics have no hard failure AND every
+      # provisioning phase (qmd / web_bundle / daemon_service / web_service)
+      # reported ok. The exit code derives from this so automation branching on
+      # the exit status (AE5) is never told a half-provisioned setup succeeded.
+      def successful?(diagnostics)
+        hard_failures = diagnostics.results.reject { |row| row.ok? || row.bootstrappable }
+        hard_failures.empty? && @phases.all? { |phase| phase["ok"] }
+      end
 
       def add_phase(name, ok, data = {})
         @phases << { "name" => name, "ok" => ok }.merge(data)

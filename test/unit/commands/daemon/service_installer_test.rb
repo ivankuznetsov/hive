@@ -125,6 +125,34 @@ class DaemonServiceInstallerTest < Minitest::Test
     end
   end
 
+  # Regression: ProgramArguments wrap the binary in a /bin/sh precheck, so the
+  # `exec "$0" "$@"` marker is embedded in the -c script string. The probe must
+  # return the hive binary ($0 slot), NOT the "daemon"/"web" subcommand that
+  # follows it (which previously produced a permanent false "path" drift).
+  def test_installed_launchd_exec_binary_returns_hive_not_subcommand
+    with_tmp_dir do |dir|
+      installer = Hive::Commands::Daemon::ServiceInstaller.new(
+        host_os: "darwin23", home: dir, binary_path: "/opt/hive/bin/hive",
+        runner: ->(_argv) {}
+      )
+      installer.install!(autostart: false)
+
+      assert_equal "/opt/hive/bin/hive", installer.installed_exec_binary
+    end
+  end
+
+  def test_installed_systemd_exec_binary_returns_hive_path
+    with_tmp_dir do |dir|
+      installer = Hive::Commands::Daemon::ServiceInstaller.new(
+        host_os: "linux-gnu", home: dir, binary_path: "/usr/local/bin/hive",
+        systemctl_available: true, runner: ->(_argv) {}
+      )
+      installer.install!(autostart: false)
+
+      assert_equal "/usr/local/bin/hive", installer.installed_exec_binary
+    end
+  end
+
   def test_macos_autostart_returns_failed_when_launchctl_load_fails
     with_tmp_dir do |dir|
       installer = Hive::Commands::Daemon::ServiceInstaller.new(

@@ -81,6 +81,45 @@ class SetupDiagnosticsTest < Minitest::Test
     end
   end
 
+  def test_agent_authenticated_via_on_disk_token_without_env_var
+    Dir.mktmpdir("hive-diag") do |dir|
+      %w[git tmux gh claude codex node npm sqlite3].each { |name| executable(dir, name) }
+      runner = ->(argv) { [ "#{File.basename(argv.first)} 9.9.9", "", Status.new(true) ] }
+      # `claude setup-token` persists ~/.claude/.credentials.json with no env
+      # var; the diagnostics engine must not report that as unauthenticated.
+      Dir.mktmpdir("hive-home") do |home|
+        FileUtils.mkdir_p(File.join(home, ".claude"))
+        File.write(File.join(home, ".claude", ".credentials.json"), '{"token":"x"}')
+
+        env = { "PATH" => dir, "HOME" => home }
+        row = Hive::Setup::Diagnostics.new(path: dir, runner: runner, ruby_version: "3.4.1", env: env)
+                                       .run.results.find { |r| r.name == "claude" }
+        assert_equal "ok", row.status
+      end
+    end
+  end
+
+  def test_agent_unauthenticated_when_no_env_and_no_token_file
+    Dir.mktmpdir("hive-diag") do |dir|
+      %w[git tmux gh claude codex node npm sqlite3].each { |name| executable(dir, name) }
+      runner = ->(argv) { [ "#{File.basename(argv.first)} 9.9.9", "", Status.new(true) ] }
+      Dir.mktmpdir("hive-home") do |home|
+        env = { "PATH" => dir, "HOME" => home }
+        row = Hive::Setup::Diagnostics.new(path: dir, runner: runner, ruby_version: "3.4.1", env: env)
+                                       .run.results.find { |r| r.name == "claude" }
+        assert_equal "unauthenticated", row.status
+        assert_equal "claude setup-token", row.fix_command
+      end
+    end
+  end
+
+  def test_result_rejects_unknown_status
+    assert_raises(ArgumentError) do
+      Hive::Setup::Diagnostics::Result.new(name: "x", status: "bogus", detail: "d",
+                                           fix_command: nil, bootstrappable: false)
+    end
+  end
+
   def test_json_shape_is_stable
     result = Hive::Setup::Diagnostics::Aggregate.new(
       results: [

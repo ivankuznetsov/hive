@@ -15,6 +15,7 @@ require "hive/commands/generate_name"
 require "hive/commands/run"
 require "hive/commands/rebase_status"
 require "hive/commands/stage_action"
+require "hive/commands/adhoc_review"
 require "hive/commands/status"
 require "hive/commands/approve"
 require "hive/commands/findings"
@@ -33,6 +34,13 @@ class HiveCliTest < Minitest::Test
   CommandDouble = Struct.new(:return_value, :calls) do
     def call
       calls << :call
+      return_value
+    end
+
+    # `hive review --pr` drives AdhocReview through #enqueue (not #call) so it
+    # can return the resolved {slug:, project:} the CLI forwards to StageAction.
+    def enqueue
+      calls << :enqueue
       return_value
     end
   end
@@ -271,6 +279,85 @@ class HiveCliTest < Minitest::Test
       actual = calls.grep(Hash).map { |call| [ call.fetch(:args), call.fetch(:kwargs) ] }
       assert_equal expected.values.map { |verb| [ [ verb, "slug" ], { project: "proj", from: "inbox", json: true } ] }, actual
     end
+  end
+
+  def test_review_pr_dispatches_adhoc_enqueue_then_stage_action
+    # enqueue returns the RESOLVED project (here "resolved-proj"), deliberately
+    # different from the raw --project "proj", so the assertion proves the CLI
+    # forwards the resolved name to StageAction rather than the raw option.
+    enqueue_result = { slug: "adhoc-review-pr-197", project: "resolved-proj" }
+    with_command_new_stub(Hive::Commands::AdhocReview, return_value: enqueue_result) do |adhoc_calls|
+      with_command_new_stub(Hive::Commands::StageAction) do |stage_calls|
+        Hive::CLI.start([ "review", "--pr", "#197", "--project", "proj", "--json" ])
+
+        adhoc_ctor = adhoc_calls.grep(Hash).first
+        assert_equal [], adhoc_ctor.fetch(:args)
+        assert_equal({ pr: "#197", project: "proj", json: true }, adhoc_ctor.fetch(:kwargs))
+        assert_equal :enqueue, adhoc_calls.last
+
+        stage_ctor = stage_calls.grep(Hash).first
+        assert_equal [ "review", "adhoc-review-pr-197" ], stage_ctor.fetch(:args)
+        assert_equal({ project: "resolved-proj", json: true }, stage_ctor.fetch(:kwargs))
+        assert_equal :call, stage_calls.last
+      end
+    end
+  end
+
+  def test_review_bare_number_still_dispatches_as_task_target
+    with_command_new_stub(Hive::Commands::StageAction) do |calls|
+      Hive::CLI.start([ "review", "197", "--project", "proj", "--json" ])
+
+      ctor = calls.grep(Hash).first
+      assert_equal [ "review", "197" ], ctor.fetch(:args)
+      assert_equal({ project: "proj", from: nil, json: true }, ctor.fetch(:kwargs))
+      assert_equal :call, calls.last
+    end
+  end
+
+  def test_review_pr_rejects_positional_target
+    _out, err, status = with_captured_exit do
+      Hive::CLI.start([ "review", "197", "--pr", "198" ])
+    end
+
+    assert_equal Hive::ExitCodes::USAGE, status
+    assert_match(/pass either TARGET or --pr/, err)
+  end
+
+  def test_review_pr_rejects_from_flag
+    # --from only disambiguates a TARGET lookup; combining it with --pr must
+    # be a usage error, not a silently-dropped flag.
+    _out, err, status = with_captured_exit do
+      Hive::CLI.start([ "review", "--pr", "197", "--from", "6-review" ])
+    end
+
+    assert_equal Hive::ExitCodes::USAGE, status
+    assert_match(/--from is not valid with --pr/, err)
+  end
+
+  def test_review_requires_target_or_pr
+    _out, err, status = with_captured_exit { Hive::CLI.start([ "review" ]) }
+
+    assert_equal Hive::ExitCodes::USAGE, status
+    assert_match(/missing TARGET/, err)
+  end
+
+  def test_review_usage_error_warns_when_envelope_is_not_serialisable
+    # The JSON usage-error envelope's GeneratorError arm must warn (a
+    # non-serialisable payload is a bug) rather than be silently swallowed;
+    # the bare-text rescue in bin/hive still carries the failure.
+    with_replaced_singleton_method(JSON, :generate, ->(*_args) { raise JSON::GeneratorError, "nope" }) do
+      _out, err, status = with_captured_exit { Hive::CLI.start([ "review", "--json" ]) }
+
+      assert_equal Hive::ExitCodes::USAGE, status
+      assert_match(/review usage-error envelope was not serialisable/, err)
+    end
+  end
+
+  def test_review_help_mentions_pr_option
+    out, _err = capture_io { Hive::CLI.start([ "help", "review" ]) }
+
+    assert_match(/--pr/, out)
+    assert_match(/ad-hoc review/, out)
   end
 
   def test_archive_without_target_lists_archived_tasks_via_status

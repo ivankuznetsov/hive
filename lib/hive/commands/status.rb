@@ -860,6 +860,10 @@ module Hive
         "Ready to open PR",
         "Ready for review",
         "Ready to collect artifacts",
+        # Clean ad-hoc PR review parked at 6-review (REVIEW_PARKED): complete and
+        # non-advancing, so it sorts with the other review-complete rows rather
+        # than falling below "Error" as an unknown label.
+        "Ad-hoc review complete (parked)",
         "Ready to finalize",
         "Ready to archive",
         "Archived",

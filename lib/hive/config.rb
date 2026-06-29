@@ -1,6 +1,7 @@
 require "yaml"
 require "fileutils"
 require "securerandom"
+require "pathname"
 require "hive/agent_profiles"
 require "hive/babysitter/interval"
 require "hive/permission_scope"
@@ -140,6 +141,16 @@ module Hive
           "prompt_template" => "ci_fix_prompt.md.erb"
         },
         "reviewers" => [],
+        # Ad-hoc PR reviews (`hive review --pr N`). `reviewers` is a load-bearing
+        # tri-state: nil (the default) INHERITS `review.reviewers`, while an
+        # explicit `[]` runs ZERO reviewers. An operator who sets `[]` expecting
+        # "inherit" gets a silently unreviewed PR — use nil/omit to inherit.
+        # `fix` gates whether the fix agent runs + auto-commits on ad-hoc tasks
+        # (default false: review-only).
+        "adhoc" => {
+          "reviewers" => nil,
+          "fix" => false
+        },
         "triage" => {
           "enabled" => true,
           "agent" => "claude",
@@ -1079,6 +1090,50 @@ module Hive
       registered_projects.find { |p| p["name"] == name }
     end
 
+    def project_for_path(dir)
+      expanded_dir = File.expand_path(dir)
+      registered_projects
+        .select { |entry| path_prefix?(expanded_dir, entry["path"]) }
+        .max_by { |entry| File.expand_path(entry["path"]).length }
+    end
+
+    def registered_project!(name: nil, cwd:)
+      project = if name && !name.to_s.strip.empty?
+        find_project(name.to_s)
+      else
+        project_for_path(cwd)
+      end
+
+      unless project
+        raise ConfigError,
+              "not a hive-invited repo — run `hive init` here first, or pass --project NAME"
+      end
+
+      hive_state_path = project_hive_state_path(project)
+      return project if File.directory?(hive_state_path)
+
+      # The project IS registered but its hive state directory is gone — a
+      # different failure from "not invited". `hive init` here still repairs
+      # it, but say so accurately rather than implying the repo was never
+      # invited.
+      raise ConfigError,
+            "project #{project.fetch('name').inspect} is registered but its hive state directory " \
+            "#{hive_state_path} is missing — run `hive init` in #{project.fetch('path')} to repair it"
+    end
+
+    def path_prefix?(path, prefix)
+      expanded_prefix = File.expand_path(prefix)
+      path == expanded_prefix || path.start_with?("#{expanded_prefix}#{File::SEPARATOR}")
+    end
+
+    def project_hive_state_path(project)
+      configured = project["hive_state_path"]
+      return File.join(project.fetch("path"), ".hive-state") if configured.nil? || configured.to_s.empty?
+      return File.expand_path(configured) if Pathname.new(configured).absolute?
+
+      File.expand_path(configured, project.fetch("path"))
+    end
+
     # Load and validate the global `daemon` block from
     # the global config.yml under `Hive::Paths.config_home`. Returns the merged Hash (operator
     # overrides on top of `Config::DEFAULTS["daemon"]`). Used by
@@ -1499,6 +1554,7 @@ module Hive
       validate_hash_shaped_keys!(cfg, source_path)
       validate_stage_skill_by_agent!(cfg, source_path)
       validate_reviewers!(cfg, source_path)
+      validate_review_adhoc!(cfg, source_path)
       validate_review_fix_auto_commit!(cfg, source_path)
       validate_role_agent_names!(cfg, source_path)
       validate_claude_mode!(cfg, source_path)
@@ -1708,6 +1764,27 @@ module Hive
       end
 
       validate_reviewer_entries!(reviewers, "review.reviewers", source_path)
+    end
+
+    def validate_review_adhoc!(cfg, source_path)
+      adhoc = cfg.dig("review", "adhoc")
+      unless adhoc.is_a?(Hash)
+        raise ConfigError,
+              "review.adhoc in #{describe_source(source_path)} must be a Hash; got #{adhoc.inspect} (#{adhoc.class})"
+      end
+
+      reviewers = adhoc["reviewers"]
+      unless reviewers.nil? || reviewers.is_a?(Array)
+        raise ConfigError,
+              "review.adhoc.reviewers in #{describe_source(source_path)} must be an Array of reviewer entries or nil; got #{reviewers.class}"
+      end
+      validate_reviewer_entries!(reviewers, "review.adhoc.reviewers", source_path) if reviewers
+
+      fix = adhoc["fix"]
+      return if fix == true || fix == false
+
+      raise ConfigError,
+            "review.adhoc.fix in #{describe_source(source_path)} must be a boolean; got #{fix.inspect} (#{fix.class})"
     end
 
     def validate_reviewer_entries!(reviewers, label, source_path)
@@ -1956,6 +2033,12 @@ module Hive
         Array(review["reviewers"]).each_with_index do |entry, idx|
           collect.call("review.reviewers[#{idx}]", entry)
         end
+        adhoc = review["adhoc"]
+        if adhoc.is_a?(Hash)
+          Array(adhoc["reviewers"]).each_with_index do |entry, idx|
+            collect.call("review.adhoc.reviewers[#{idx}]", entry)
+          end
+        end
       end
 
       patrol_review = cfg["patrol"].is_a?(Hash) ? cfg["patrol"]["review"] : nil
@@ -1982,6 +2065,11 @@ module Hive
       reject_unsupported_permissions_at!(
         cfg["review"], "review.permissions", source_path,
         "set permissions per role under review.{ci,triage,fix,browser_test} or per reviewer entry"
+      )
+      review_adhoc = cfg["review"].is_a?(Hash) ? cfg["review"]["adhoc"] : nil
+      reject_unsupported_permissions_at!(
+        review_adhoc, "review.adhoc.permissions", source_path,
+        "set permissions per reviewer entry under review.adhoc.reviewers"
       )
       patrol_review = cfg["patrol"].is_a?(Hash) ? cfg["patrol"]["review"] : nil
       reject_unsupported_permissions_at!(

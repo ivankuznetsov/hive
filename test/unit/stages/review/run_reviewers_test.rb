@@ -217,6 +217,78 @@ class RunReviewersTest < Minitest::Test
     end
   end
 
+  def test_reviewer_specs_for_adhoc_task_uses_adhoc_reviewers
+    cfg = {
+      "review" => {
+        "reviewers" => [ { "name" => "normal-reviewer" } ],
+        "adhoc" => {
+          "reviewers" => [ { "name" => "adhoc-reviewer" } ]
+        }
+      },
+      "patrol" => {
+        "review" => {
+          "reviewers" => [ { "name" => "patrol-reviewer" } ]
+        }
+      }
+    }
+
+    with_tmp_dir do |dir|
+      task_file = File.join(dir, "task.md")
+      File.write(task_file, "---\nsource: ad-hoc\n---\n\n# Ad-hoc PR\n")
+      task = Task.new(dir, task_file)
+
+      specs = Hive::Stages::Review.reviewer_specs_for(cfg, task)
+      assert_equal [ "adhoc-reviewer" ], specs.map { |spec| spec.fetch("name") }
+    end
+  end
+
+  def test_reviewer_specs_for_adhoc_task_passes_through_a_malformed_entry
+    # A malformed ENTRY (a non-Hash) inside review.adhoc.reviewers is distinct
+    # from a malformed array SHAPE: the ad-hoc branch is still taken (an
+    # explicit non-nil adhoc.reviewers does NOT fall back to the normal set),
+    # and the entry is threaded through unchanged for the reviewer dispatcher
+    # to reject — it is not silently dropped or swapped for the normal set.
+    cfg = {
+      "review" => {
+        "reviewers" => [ { "name" => "normal-reviewer" } ],
+        "adhoc" => { "reviewers" => [ "not-a-hash-entry" ] }
+      }
+    }
+
+    with_tmp_dir do |dir|
+      task_file = File.join(dir, "task.md")
+      File.write(task_file, "---\nsource: ad-hoc\n---\n\n# Ad-hoc PR\n")
+      task = Task.new(dir, task_file)
+
+      specs = Hive::Stages::Review.reviewer_specs_for(cfg, task)
+      assert_equal [ "not-a-hash-entry" ], specs,
+                   "an explicit ad-hoc reviewers list is used as-is, not replaced by the normal set"
+    end
+  end
+
+  def test_reviewer_specs_for_adhoc_task_falls_back_to_standard_reviewers
+    cfg = {
+      "review" => {
+        "reviewers" => [ { "name" => "normal-reviewer" } ],
+        "adhoc" => { "reviewers" => nil }
+      },
+      "patrol" => {
+        "review" => {
+          "reviewers" => [ { "name" => "patrol-reviewer" } ]
+        }
+      }
+    }
+
+    with_tmp_dir do |dir|
+      task_file = File.join(dir, "task.md")
+      File.write(task_file, "---\nsource: AD-HOC\n---\n\n# Ad-hoc PR\n")
+      task = Task.new(dir, task_file)
+
+      specs = Hive::Stages::Review.reviewer_specs_for(cfg, task)
+      assert_equal [ "normal-reviewer" ], specs.map { |spec| spec.fetch("name") }
+    end
+  end
+
   # cfg with distinct normal vs patrol reviewer sets, reused by the
   # task_frontmatter / patrol_task? edge-case tests below.
   def scoped_reviewer_cfg
@@ -319,6 +391,88 @@ class RunReviewersTest < Minitest::Test
     end
   end
 
+  def test_adhoc_task_io_error_falls_back_to_normal_with_warn
+    with_tmp_dir do |dir|
+      task = Task.new(dir, dir)
+
+      specs = nil
+      _out, err = capture_io do
+        specs = Hive::Stages::Review.reviewer_specs_for(scoped_reviewer_cfg, task)
+      end
+
+      assert_equal [ "normal-reviewer" ], specs.map { |spec| spec.fetch("name") }
+      assert_match(/adhoc_task\? could not read/, err)
+      assert_match(/routing as a normal/, err)
+    end
+  end
+
+  def test_adhoc_fix_enabled_predicate
+    cfg = { "review" => { "adhoc" => { "fix" => false } } }
+    enabled_cfg = { "review" => { "adhoc" => { "fix" => true } } }
+
+    with_tmp_dir do |dir|
+      adhoc_file = File.join(dir, "adhoc.md")
+      normal_file = File.join(dir, "normal.md")
+      File.write(adhoc_file, "---\nsource: ad-hoc\n---\n\n# Ad-hoc\n")
+      File.write(normal_file, "---\nsource: telegram\n---\n\n# Normal\n")
+      adhoc_task = Task.new(dir, adhoc_file)
+      normal_task = Task.new(dir, normal_file)
+
+      refute Hive::Stages::Review.adhoc_fix_enabled?(cfg, adhoc_task)
+      assert Hive::Stages::Review.adhoc_fix_enabled?(enabled_cfg, adhoc_task)
+      assert Hive::Stages::Review.adhoc_fix_enabled?(cfg, normal_task)
+    end
+  end
+
+  def test_adhoc_fix_gate_fails_closed_on_state_file_read_error
+    # The fix gate is a SAFETY check: when the source can't be read it must
+    # fail CLOSED (treat as ad-hoc → auto-fix disabled by default), the
+    # opposite of reviewer selection's fail-open. Point state_file at a
+    # directory so File.read raises Errno::EISDIR.
+    cfg = { "review" => { "adhoc" => { "fix" => false } } }
+
+    with_tmp_dir do |dir|
+      task = Task.new(dir, dir) # state_file is a directory → File.read raises
+
+      enabled = nil
+      _out, err = capture_io do
+        enabled = Hive::Stages::Review.adhoc_fix_enabled?(cfg, task)
+      end
+
+      refute enabled, "unreadable source must disable auto-fix (fail closed)"
+      assert_match(/adhoc fix-gate could not read/, err)
+      assert_match(/failing closed \(auto-fix disabled, source unconfirmable\)/, err)
+    end
+  end
+
+  def test_adhoc_fix_gate_classifies_the_three_source_states
+    # The gate must report WHY auto-fix is disabled so a Phase 4 park reason
+    # can tell a review-only ad-hoc task apart from a normal task whose source
+    # couldn't be read (otherwise a normal task halts as adhoc_fix_disabled).
+    fix_off = { "review" => { "adhoc" => { "fix" => false } } }
+    fix_on = { "review" => { "adhoc" => { "fix" => true } } }
+
+    with_tmp_dir do |dir|
+      adhoc_file = File.join(dir, "adhoc.md")
+      File.write(adhoc_file, "---\nsource: ad-hoc\n---\n\n# Ad-hoc\n")
+      normal_file = File.join(dir, "normal.md")
+      File.write(normal_file, "---\nsource: telegram\n---\n\n# Normal\n")
+
+      assert_equal :disabled_adhoc,
+                   Hive::Stages::Review.adhoc_fix_gate(fix_off, Task.new(dir, adhoc_file))
+      assert_equal :enabled,
+                   Hive::Stages::Review.adhoc_fix_gate(fix_on, Task.new(dir, adhoc_file))
+      assert_equal :enabled,
+                   Hive::Stages::Review.adhoc_fix_gate(fix_off, Task.new(dir, normal_file))
+
+      capture_io do
+        assert_equal :disabled_source_unknown,
+                     Hive::Stages::Review.adhoc_fix_gate(fix_off, Task.new(dir, dir)),
+                     "an unreadable source must classify as source-unknown, not adhoc"
+      end
+    end
+  end
+
   def test_empty_patrol_reviewers_warns_so_patrol_pr_is_not_silently_unreviewed
     cfg = {
       "review" => { "reviewers" => [ { "name" => "normal-reviewer" } ] },
@@ -338,6 +492,53 @@ class RunReviewersTest < Minitest::Test
       assert_equal :ok, result, "empty patrol reviewers still returns :ok (intentional opt-out)"
       assert_match(/zero patrol\.review\.reviewers/, err,
                    "a patrol task with no reviewers must warn rather than pass silently")
+    end
+  end
+
+  def test_empty_adhoc_reviewers_warns_so_adhoc_pr_is_not_silently_unreviewed
+    cfg = {
+      "review" => {
+        "reviewers" => [ { "name" => "normal-reviewer" } ],
+        "adhoc" => { "reviewers" => [] } # explicit [] runs zero reviewers
+      }
+    }
+
+    with_tmp_dir do |dir|
+      task_file = File.join(dir, "task.md")
+      File.write(task_file, "---\nsource: ad-hoc\n---\n\n# Ad-hoc PR\n")
+      task = Task.new(dir, task_file)
+
+      result = nil
+      _out, err = capture_io do
+        result = Hive::Stages::Review.run_reviewers(cfg, make_ctx(dir), task)
+      end
+
+      assert_equal :ok, result, "empty ad-hoc reviewers still returns :ok (explicit opt-out)"
+      assert_match(/zero reviewers \(review\.adhoc\.reviewers is empty\)/, err,
+                   "an explicit empty review.adhoc.reviewers must name that knob")
+    end
+  end
+
+  def test_empty_inherited_reviewers_warns_and_names_review_reviewers
+    # nil review.adhoc.reviewers inherits review.reviewers; when that is ALSO
+    # empty (the DEFAULT) the ad-hoc task DOES reach the zero-reviewer branch,
+    # and the warning must name review.reviewers (the actually-empty knob),
+    # not review.adhoc.reviewers.
+    cfg = { "review" => { "reviewers" => [] } } # adhoc.reviewers omitted → inherits
+
+    with_tmp_dir do |dir|
+      task_file = File.join(dir, "task.md")
+      File.write(task_file, "---\nsource: ad-hoc\n---\n\n# Ad-hoc PR\n")
+      task = Task.new(dir, task_file)
+
+      result = nil
+      _out, err = capture_io do
+        result = Hive::Stages::Review.run_reviewers(cfg, make_ctx(dir), task)
+      end
+
+      assert_equal :ok, result
+      assert_match(/zero reviewers \(review\.reviewers is empty\)/, err,
+                   "the inherit case must name review.reviewers, not review.adhoc.reviewers")
     end
   end
 

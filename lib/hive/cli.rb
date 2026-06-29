@@ -537,11 +537,42 @@ module Hive
     map "open-pr" => :open_pr
     map "pr" => :open_pr
 
-    desc "review TARGET", "Move a completed open-pr task into review, or run an existing review task"
+    desc "review [TARGET]", "Move a completed open-pr task into review, run an existing review task, or --pr PR"
     option :from, type: :string,
                   desc: "expected current stage; use to disambiguate same-slug tasks (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
-    def review(target)
+    option :pr, type: :string, desc: "run an ad-hoc review for PR number, #number, or GitHub PR URL"
+    def review(target = nil)
+      if options[:pr]
+        emit_review_usage_error("hive review: pass either TARGET or --pr, not both") if target
+        # `--from` only disambiguates same-slug tasks for a TARGET lookup; an
+        # ad-hoc `--pr` review resolves a deterministic slug and never consults
+        # it. Refuse the combo (mirroring the TARGET + `--pr` guard above)
+        # rather than silently dropping the flag.
+        emit_review_usage_error("hive review: --from is not valid with --pr") if options[:from]
+
+        require "hive/commands/adhoc_review"
+        require "hive/commands/stage_action"
+        # AdhocReview emits its own --json error envelope on create-phase
+        # failures and re-raises. On success it returns the resolved project
+        # name; forward it (not the raw, possibly-nil options[:project]) so
+        # StageAction resolves the slug against the same project AdhocReview
+        # used, never a same-named slug in another registered repo.
+        result = Hive::Commands::AdhocReview.new(
+          pr: options[:pr],
+          project: options[:project],
+          json: options[:json]
+        ).enqueue
+        return Hive::Commands::StageAction.new(
+          "review",
+          result.fetch(:slug),
+          project: result.fetch(:project),
+          json: options[:json]
+        ).call
+      end
+
+      emit_review_usage_error("hive review: missing TARGET (or pass --pr PR)") unless target
+
       run_stage_action("review", target)
     end
 
@@ -1155,6 +1186,39 @@ module Hive
           end
         else
           warn message
+        end
+        raise error
+      end
+
+      # `hive review` raises usage errors from inside the method body: the
+      # optional TARGET (so `--pr` can stand alone) and the
+      # both/neither-given checks surface as Hive::Error, not the Thor::Error
+      # that bin/hive's JSON usage envelope keys on. Emit the same
+      # hive-stage-action envelope StageAction emits for `hive review <slug>
+      # --json` so every `hive review --json` failure stays symmetric, then
+      # raise so bin/hive maps the exit code (and prints the stderr line).
+      # AdhocReview and StageAction own their own envelopes, so neither is
+      # wrapped by this helper — no double emit.
+      def emit_review_usage_error(message)
+        require "json"
+        error = Hive::InvalidTaskPath.new(message)
+        if options[:json]
+          payload = Hive::Schemas::ErrorEnvelope.build(
+            schema: "hive-stage-action",
+            error: error,
+            error_kind: "invalid_task_path",
+            extras: { "verb" => "review" }
+          )
+          begin
+            puts JSON.generate(payload)
+          rescue Errno::EPIPE
+            # caller went away — fall through to the bare-text rescue in bin/hive.
+          rescue JSON::GeneratorError => e
+            # A non-serialisable payload is a bug, not a closed pipe — surface
+            # it rather than hide it (the bare-text rescue in bin/hive still
+            # carries the failure for the exit code + stderr line).
+            warn "[hive.review] review usage-error envelope was not serialisable: #{e.class}: #{e.message}"
+          end
         end
         raise error
       end

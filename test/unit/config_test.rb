@@ -20,6 +20,8 @@ class ConfigTest < Minitest::Test
       assert_equal 1800, cfg["timeout_sec"]["digest"]
       assert_equal "8-finalize", cfg["dependency_gate_stage"]
       assert_equal "coding", cfg["default_workflow"]
+      assert_nil cfg.dig("review", "adhoc", "reviewers")
+      assert_equal false, cfg.dig("review", "adhoc", "fix")
       assert_equal dir, cfg["project_root"]
     end
   end
@@ -985,6 +987,105 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_project_for_path_resolves_registered_repo_from_cwd
+    with_tmp_global_config do
+      with_tmp_dir do |repo|
+        FileUtils.mkdir_p(File.join(repo, ".hive-state"))
+        Hive::Config.register_project(name: "repo", path: repo)
+
+        project = Hive::Config.project_for_path(repo)
+
+        assert_equal "repo", project["name"]
+        assert_equal File.expand_path(repo), project["path"]
+      end
+    end
+  end
+
+  def test_project_for_path_resolves_nested_subdirectory
+    with_tmp_global_config do
+      with_tmp_dir do |repo|
+        nested = File.join(repo, "lib", "hive")
+        FileUtils.mkdir_p([ File.join(repo, ".hive-state"), nested ])
+        Hive::Config.register_project(name: "repo", path: repo)
+
+        project = Hive::Config.project_for_path(nested)
+
+        assert_equal "repo", project["name"]
+      end
+    end
+  end
+
+  def test_project_for_path_uses_most_specific_registered_prefix
+    with_tmp_global_config do
+      with_tmp_dir do |parent|
+        child = File.join(parent, "child")
+        FileUtils.mkdir_p([ File.join(parent, ".hive-state"), File.join(child, ".hive-state") ])
+        Hive::Config.register_project(name: "parent", path: parent)
+        Hive::Config.register_project(name: "child", path: child)
+
+        project = Hive::Config.project_for_path(File.join(child, "subdir"))
+
+        assert_equal "child", project["name"]
+      end
+    end
+  end
+
+  def test_registered_project_resolves_by_project_name_override
+    with_tmp_global_config do
+      with_tmp_dir do |repo|
+        FileUtils.mkdir_p(File.join(repo, ".hive-state"))
+        Hive::Config.register_project(name: "repo", path: repo)
+
+        project = Hive::Config.registered_project!(name: "repo", cwd: "/tmp/not-inside")
+
+        assert_equal "repo", project["name"]
+      end
+    end
+  end
+
+  def test_registered_project_rejects_unknown_project_name
+    with_tmp_global_config do
+      err = assert_raises(Hive::ConfigError) do
+        Hive::Config.registered_project!(name: "missing", cwd: "/tmp/not-inside")
+      end
+
+      assert_includes err.message, "not a hive-invited repo"
+      assert_includes err.message, "hive init"
+    end
+  end
+
+  def test_registered_project_rejects_cwd_outside_registered_repos
+    with_tmp_global_config do
+      with_tmp_dir do |outside|
+        err = assert_raises(Hive::ConfigError) do
+          Hive::Config.registered_project!(cwd: outside)
+        end
+
+        assert_includes err.message, "not a hive-invited repo"
+        assert_includes err.message, "--project NAME"
+      end
+    end
+  end
+
+  def test_registered_project_rejects_missing_hive_state_directory
+    with_tmp_global_config do
+      with_tmp_dir do |repo|
+        Hive::Config.register_project(name: "repo", path: repo)
+
+        err = assert_raises(Hive::ConfigError) do
+          Hive::Config.registered_project!(cwd: repo)
+        end
+
+        # Distinct from the not-invited message: the project is registered but
+        # its hive state directory is gone.
+        assert_includes err.message, "registered but its hive state directory"
+        assert_includes err.message, "is missing"
+        assert_includes err.message, "hive init"
+        refute_includes err.message, "not a hive-invited repo"
+      end
+    end
+  end
+
   def test_register_project_replaces_existing_by_name
     with_tmp_global_config do
       Hive::Config.register_project(name: "foo", path: "/tmp/old")
@@ -1166,6 +1267,30 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_review_adhoc_reviewers_accepts_reviewer_entries
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          adhoc:
+            fix: true
+            reviewers:
+              - name: adhoc-one
+                kind: agent
+                agent: claude
+                skill: ce-code-review
+                output_basename: adhoc-one
+                prompt_template: reviewer_claude_ce_code_review.md.erb
+                permissions: yolo
+      YAML
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal true, cfg.dig("review", "adhoc", "fix")
+      assert_equal [ "adhoc-one" ], cfg.dig("review", "adhoc", "reviewers").map { |entry| entry.fetch("name") }
+    end
+  end
+
   # --- Validation --------------------------------------------------------
 
   def test_load_raises_when_reviewers_is_not_an_array
@@ -1193,6 +1318,70 @@ class ConfigTest < Minitest::Test
 
       err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
       assert_match(/review\.reviewers\[0\].*must be a Hash/, err.message)
+    end
+  end
+
+  def test_load_raises_when_review_adhoc_is_not_a_hash
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          adhoc: false
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+      assert_match(/review\.adhoc/, err.message)
+      assert_match(/must be a Hash/, err.message)
+    end
+  end
+
+  def test_load_raises_when_review_adhoc_reviewers_is_not_array_or_nil
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          adhoc:
+            reviewers:
+              name: not-array
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+      assert_match(/review\.adhoc\.reviewers/, err.message)
+      assert_match(/must be an Array/, err.message)
+    end
+  end
+
+  def test_load_raises_when_review_adhoc_fix_is_not_boolean
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          adhoc:
+            fix: yes-please
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+      assert_match(/review\.adhoc\.fix/, err.message)
+      assert_match(/must be a boolean/, err.message)
+    end
+  end
+
+  def test_load_rejects_review_adhoc_permissions_block
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          adhoc:
+            permissions: yolo
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+      assert_match(/review\.adhoc\.permissions/, err.message)
+      assert_match(/review\.adhoc\.reviewers/, err.message)
     end
   end
 

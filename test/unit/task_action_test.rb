@@ -1,8 +1,10 @@
 require "test_helper"
 require "fileutils"
+require "tmpdir"
 require "hive/task"
 require "hive/task_action"
 require "hive/markers"
+require "hive/daemon/policy"
 
 # Pin Hive::TaskAction's classification matrix and command-emission rules.
 # This module is the central decision point for `hive status` action
@@ -166,6 +168,65 @@ class TaskActionTest < Minitest::Test
     action = Hive::TaskAction.for(task, marker(:review_complete))
     assert_equal "ready_to_artifacts", action.key
     assert_equal "hive artifacts demo-260426-aaaa --from 6-review", action.command
+  end
+
+  def test_clean_adhoc_review_complete_parks_instead_of_advancing
+    # A clean ad-hoc PR review (source: ad-hoc) parks at 6-review rather than
+    # advancing to artifacts. Its key is deliberately NOT an advance action so
+    # the daemon never auto-dispatches `hive artifacts` to finalize a borrowed
+    # PR (the ad-hoc plan's non-goal "Finalizing someone else's PR").
+    Dir.mktmpdir("task-action-adhoc") do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "6-review", "adhoc-review-pr-7")
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "task.md")
+      File.write(state_file, "---\nsource: ad-hoc\n---\n\n# Ad-hoc review\n")
+      task = FakeTask.new(stage_name: "review", stage_index: 6, slug: "adhoc-review-pr-7",
+                          project_root: dir, project_name: File.basename(dir),
+                          folder: folder, state_file: state_file)
+
+      action = Hive::TaskAction.for(task, marker(:review_complete))
+      assert_equal Hive::Schemas::TaskActionKind::REVIEW_PARKED, action.key
+      assert_equal "Ad-hoc review complete (parked)", action.label
+      assert_nil action.command, "a parked ad-hoc review offers no advance command"
+      refute_includes Hive::Daemon::Policy::ADVANCE_ACTIONS, action.key,
+                      "the parked key must not be a daemon advance action"
+    end
+  end
+
+  def test_drifted_source_casing_adhoc_review_complete_still_parks
+    # The reuse validator and review stage route `source: Ad-Hoc` as ad-hoc
+    # (strip + casecmp?); the parking classifier must agree so a casing drift
+    # doesn't reopen the auto-advance path.
+    Dir.mktmpdir("task-action-adhoc-cased") do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "6-review", "adhoc-review-pr-8")
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "task.md")
+      File.write(state_file, "---\nsource: Ad-Hoc\n---\n\n# Ad-hoc review\n")
+      task = FakeTask.new(stage_name: "review", stage_index: 6, slug: "adhoc-review-pr-8",
+                          project_root: dir, project_name: File.basename(dir),
+                          folder: folder, state_file: state_file)
+
+      action = Hive::TaskAction.for(task, marker(:review_complete))
+      assert_equal Hive::Schemas::TaskActionKind::REVIEW_PARKED, action.key
+    end
+  end
+
+  def test_normal_review_complete_with_source_still_advances
+    # The park is scoped to ad-hoc: a normal review (any non-ad-hoc source)
+    # keeps advancing to artifacts unchanged.
+    Dir.mktmpdir("task-action-normal-source") do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "6-review", "demo-260426-aaaa")
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "task.md")
+      File.write(state_file, "---\nsource: telegram\n---\n\n# Normal review\n")
+      task = FakeTask.new(stage_name: "review", stage_index: 6, slug: "demo-260426-aaaa",
+                          project_root: dir, project_name: File.basename(dir),
+                          folder: folder, state_file: state_file)
+
+      action = Hive::TaskAction.for(task, marker(:review_complete))
+      assert_equal "ready_to_artifacts", action.key
+      assert_equal "hive artifacts demo-260426-aaaa --from 6-review", action.command
+    end
   end
 
   def test_markerless_artifacts_is_ready_to_collect_artifacts

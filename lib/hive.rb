@@ -163,6 +163,11 @@ module Hive
       READY_TO_ARCHIVE    = "ready_to_archive".freeze
       READY_TO_ADVANCE    = "ready_to_advance".freeze
       READY_TO_RUN        = "ready_to_run".freeze
+      # A clean ad-hoc PR review that has completed: it stays PARKED at
+      # 6-review rather than advancing to 7-artifacts. Deliberately NOT in
+      # Daemon::Policy::ADVANCE_ACTIONS, so a daemon-enrolled project never
+      # auto-dispatches `hive artifacts` to finalize someone else's PR.
+      REVIEW_PARKED       = "review_parked".freeze
       NEEDS_INPUT         = "needs_input".freeze
       RECOVER_EXECUTE     = "recover_execute".freeze
       RECOVER_REVIEW      = "recover_review".freeze
@@ -233,12 +238,16 @@ module Hive
     #   * `envelope_error_kind(error)` — map an exception to a
     #     closed-enum `error_kind` value
     #
-    # Used by `Hive::Commands::Forget`, `Hive::Commands::Prune`, and
-    # `Hive::Commands::Daemon` (enable/disable). The eight pre-existing
-    # emit sites (Approve, Markers, Metrics, FindingToggle, Status, Run,
-    # Findings, StageAction) have not yet been migrated — see Issue for
-    # the full sweep. This module exists so new emit sites do not add
-    # an 11th copy.
+    # Used by `Hive::Commands::Forget`, `Hive::Commands::Prune`,
+    # `Hive::Commands::Daemon` (enable/disable), and
+    # `Hive::Commands::AdhocReview`. The eight pre-existing emit sites
+    # (Approve, Markers, Metrics, FindingToggle, Status, Run, Findings,
+    # StageAction) have not yet been migrated — see Issue for the full
+    # sweep. This module exists so new emit sites do not add an 11th copy.
+    #
+    # Consumers may also override `envelope_extras` to merge per-command
+    # fields (e.g. `{"verb" => "review"}`) into the envelope; the default is
+    # no extras.
     module EnvelopeEmitter
       def call_with_envelope
         @stdout_written = false
@@ -256,12 +265,26 @@ module Hive
         payload = Hive::Schemas::ErrorEnvelope.build(
           schema: envelope_schema,
           error: error,
-          error_kind: envelope_error_kind(error)
+          error_kind: envelope_error_kind(error),
+          extras: envelope_extras
         )
         puts JSON.generate(payload)
         @stdout_written = true
-      rescue Errno::EPIPE, JSON::GeneratorError
+      rescue Errno::EPIPE
+        # stdout closed; the re-raise still carries the failure to bin/hive
+        # for the exit code + stderr line. Nothing to surface.
         @stdout_written = true
+      rescue JSON::GeneratorError => e
+        # A non-serialisable payload is a bug, not a closed pipe — don't hide
+        # it. The real error still re-raises through call_with_envelope.
+        warn "[hive] #{envelope_schema} error envelope was not serialisable: #{e.class}: #{e.message}"
+        @stdout_written = true
+      end
+
+      # Per-command fields merged into the error envelope. Override to add
+      # e.g. `{"verb" => "review"}`; the default is no extras.
+      def envelope_extras
+        {}
       end
     end
 

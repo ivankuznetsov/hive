@@ -547,6 +547,32 @@ class ClaudeLauncherTest < Minitest::Test
            "the idle caret at line end (with a hint footer below it) must read as ready"
   end
 
+  # Claude Code 2.1.179 paints the idle input as
+  # separator/caret/separator/footer, with a non-breaking space after the
+  # caret. The detector must not depend on the caret being one fixed number
+  # of lines above the footer.
+  def test_claude_ready_prompt_accepts_2179_nbsp_caret_with_separator_footer
+    pane = "Claude Code v2.1.179\n\n" \
+           "╭────────────────────────────────────────────────────────────────────────╮\n" \
+           "❯ \n" \
+           "╰────────────────────────────────────────────────────────────────────────╯\n" \
+           "⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+
+    assert Hive::ClaudeLauncher.claude_ready_prompt?(pane),
+           "the 2.1.179 NBSP caret with separator/footer chrome must read as ready"
+  end
+
+  def test_claude_ready_prompt_accepts_trailing_caret_with_unicode_separator_before_it
+    pane = "Claude Code v2.1.179\n\n" \
+           "╭────────────────────────────────────────────────────────────────────────╮\n" \
+           ".hive-state/stages/4-execute/fix-claude-tmux-ready-detector hive/state ❯\n" \
+           "╰────────────────────────────────────────────────────────────────────────╯\n" \
+           "⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+
+    assert Hive::ClaudeLauncher.claude_ready_prompt?(pane),
+           "a Unicode separator before a trailing caret must match the idle prompt"
+  end
+
   def test_claude_ready_prompt_accepts_current_footer_when_banner_scrolled_out
     pane = "?────────────────────────────────────────────────────────────────────────\n" \
            "  hive-patrol-command-bin-hive-babysitter-stub-gh-5031d524 hive-patrol/command-bin-hive-babysitter-stub-gh-5031d524  ❯\n" \
@@ -561,6 +587,20 @@ class ClaudeLauncherTest < Minitest::Test
   # the caret does not start treating an interactive selection as idle.
   def test_claude_ready_prompt_rejects_menu_option_with_hint_footer
     pane = "Claude Code v2.1.133\nProceed with the action?\n❯ 1. Yes\n" \
+           "⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+
+    refute Hive::ClaudeLauncher.claude_ready_prompt?(pane)
+  end
+
+  def test_claude_ready_prompt_rejects_permission_prompt_with_footer
+    pane = "Claude Code v2.1.179\nDo you want to edit this file?\n❯ 1. Yes\n" \
+           "⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+
+    refute Hive::ClaudeLauncher.claude_ready_prompt?(pane)
+  end
+
+  def test_claude_ready_prompt_rejects_trust_prompt_with_footer
+    pane = "Claude Code v2.1.179\nQuick safety check\n❯ 1. Yes, I trust this folder\n" \
            "⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
 
     refute Hive::ClaudeLauncher.claude_ready_prompt?(pane)

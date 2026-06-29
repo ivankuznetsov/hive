@@ -31,9 +31,11 @@ module Hive
     CLAUDE_READY_POLL_INTERVAL_SEC = 0.25
     MIN_TMUX_VERSION = "3.0"
     TERMINAL_MARKERS = %i[waiting complete error execute_complete review_complete review_waiting review_error].freeze
-    # Observed against Claude Code 2.1.133 (2026-05-25 dogfood) and the
+    # Observed against Claude Code 2.1.133 (2026-05-25 dogfood), the
     # 2026-05-27 build that moved the input caret to the end of a
-    # context-prefixed line and added a hint footer beneath it.
+    # context-prefixed line, and Claude Code 2.1.179 (2026-06-29), which
+    # renders a separator/caret/separator/footer shape and may use a Unicode
+    # separator such as NBSP around the caret.
     #
     # Robustness note: readiness detection keys on the `❯` input caret, the
     # most stable signal across the Claude Code TUI revisions seen so far.
@@ -43,9 +45,10 @@ module Hive
     # hint footer, so the caret is no longer the last line). To tolerate that
     # without treating a `❯` Claude prints in its OWN output (shell snippets,
     # prose, bullets) as ready, we (a) require the caret to be the first or
-    # last glyph of its line — never mid-prose — and (b) only look at the
-    # bottom of the input box: the last non-blank line, or the line above it
-    # when a one-line hint footer renders beneath the caret.
+    # last glyph of its line — never mid-prose — and (b) inspect only the
+    # current input region, accepting a caret only when every line below it is
+    # terminal chrome (box/separator/footer/blank). The detector deliberately
+    # does not assume a fixed footer distance.
     #
     # Copy strings still gate readiness in two places, both version-coupled
     # and both to update when Claude Code changes them: the positive
@@ -60,14 +63,19 @@ module Hive
     CLAUDE_READY_FOOTER_MARKER = "for agents".freeze
     # The caret as the FIRST glyph (`❯ …`, older builds) or the LAST glyph
     # (`… ?  ❯`, the line-end caret newer builds render after the cwd/git
-    # context). A caret embedded mid-line is Claude's own output, not the
+    # context). Ruby's `String#strip` does not normalize every Unicode
+    # separator Claude can paint, so match `\p{Zs}` explicitly on both sides
+    # of the caret. A caret embedded mid-line is Claude's own output, not the
     # idle prompt, so it is intentionally not matched.
-    CLAUDE_READY_PROMPT_LINE = /\A❯(?:\s|\z)|\s❯\z/.freeze
+    CLAUDE_READY_PROMPT_LINE = /\A❯(?:[\p{Zs}\s]|\z)|(?:[\p{Zs}\s])❯\z/u.freeze
     CLAUDE_MENU_OPTION_LINE = /\A\s*❯\s*\d+\./.freeze
-    CLAUDE_PROMPT_CONTEXT_LINES = 4
-    # Lines at the bottom of the input box to inspect for the idle caret:
-    # the caret line itself plus at most one hint footer rendered below it.
-    CLAUDE_PROMPT_TAIL_LINES = 2
+    CLAUDE_PROMPT_CHROME_LINE = /\A[\p{Zs}\s?+\-─━│┄┈┉┅┇┊┋┆┌┐└┘├┤┬┴┼═║╔╗╚╝╠╣╦╩╬╭╮╰╯╴╵╶╷╸╹╺╻╼╽╾╿]+\z/u.freeze
+    CLAUDE_PROMPT_CONTEXT_LINES = 12
+    # Lines at the bottom of the current input region to inspect for the idle
+    # caret. The scan is wide enough for separator/caret/separator/footer
+    # layouts; acceptance is content-anchored by the chrome-only rule above,
+    # not by a fixed footer offset.
+    CLAUDE_PROMPT_TAIL_LINES = 12
     # Allowed-tool sets shared by every stage that spawns Claude. Keeping
     # them as constants means a policy change lands in one place; previous
     # PRs inlined the string literal across 11 sites and silently drifted
@@ -616,15 +624,22 @@ module Hive
       return false unless pane.include?(CLAUDE_READY_BANNER_MARKER) ||
                           current_text.include?(CLAUDE_READY_FOOTER_MARKER)
 
-      # The idle caret sits at the bottom of the input box: it is the last
-      # non-blank line, or the line above it when a one-line hint footer
-      # renders beneath it. Limiting the scan to those two lines (rather than
-      # the whole region) keeps a caret Claude printed earlier in its own
-      # output from reading as ready. A numbered menu option (`❯ 1.`) is an
-      # interactive selection, not the idle prompt, so it never counts.
-      current_lines.last(CLAUDE_PROMPT_TAIL_LINES).any? do |line|
+      prompt_tail = current_lines.last(CLAUDE_PROMPT_TAIL_LINES)
+      caret_index = prompt_tail.rindex do |line|
         line.match?(CLAUDE_READY_PROMPT_LINE) && !line.match?(CLAUDE_MENU_OPTION_LINE)
       end
+      return false unless caret_index
+
+      prompt_tail[(caret_index + 1)..].all? do |line|
+        claude_prompt_chrome_line?(line)
+      end
+    end
+
+    def claude_prompt_chrome_line?(line)
+      line.empty? ||
+        line.include?(CLAUDE_READY_FOOTER_MARKER) ||
+        line.start_with?("⏵⏵") ||
+        line.match?(CLAUDE_PROMPT_CHROME_LINE)
     end
 
     def current_prompt_text(pane)

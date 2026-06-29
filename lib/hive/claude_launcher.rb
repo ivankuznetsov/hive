@@ -47,8 +47,9 @@ module Hive
     # prose, bullets) as ready, we (a) require the caret to be the first or
     # last glyph of its line — never mid-prose — and (b) inspect only the
     # current input region, accepting a caret only when every line below it is
-    # terminal chrome (box/separator/footer/blank). The detector deliberately
-    # does not assume a fixed footer distance.
+    # terminal chrome (box/separator/footer). Blank lines are stripped before
+    # the chrome check runs, so the predicate only ever sees non-empty chrome.
+    # The detector deliberately does not assume a fixed footer distance.
     #
     # Copy strings still gate readiness in two places, both version-coupled
     # and both to update when Claude Code changes them: the positive
@@ -75,6 +76,11 @@ module Hive
     # caret. The scan is wide enough for separator/caret/separator/footer
     # layouts; acceptance is content-anchored by the chrome-only rule above,
     # not by a fixed footer offset.
+    #
+    # MUST stay reconciled with CLAUDE_PROMPT_CONTEXT_LINES (both 12):
+    # `current_prompt_text` already caps the region at CONTEXT_LINES, so the
+    # `.last(TAIL_LINES)` below is a no-op only while the two match. Narrowing
+    # one without the other would silently shrink the scan vs. context window.
     CLAUDE_PROMPT_TAIL_LINES = 12
     # Allowed-tool sets shared by every stage that spawns Claude. Keeping
     # them as constants means a policy change lands in one place; previous
@@ -624,6 +630,9 @@ module Hive
       return false unless pane.include?(CLAUDE_READY_BANNER_MARKER) ||
                           current_text.include?(CLAUDE_READY_FOOTER_MARKER)
 
+      # No-op while CLAUDE_PROMPT_TAIL_LINES == CLAUDE_PROMPT_CONTEXT_LINES
+      # (current_lines is already capped at CONTEXT_LINES); kept as a defensive
+      # bound. The two constants must stay reconciled — see their definitions.
       prompt_tail = current_lines.last(CLAUDE_PROMPT_TAIL_LINES)
       caret_index = prompt_tail.rindex do |line|
         line.match?(CLAUDE_READY_PROMPT_LINE) && !line.match?(CLAUDE_MENU_OPTION_LINE)
@@ -636,8 +645,10 @@ module Hive
     end
 
     def claude_prompt_chrome_line?(line)
-      line.empty? ||
-        line.include?(CLAUDE_READY_FOOTER_MARKER) ||
+      # Callers pass lines from `current_lines`, which is already
+      # `.reject(&:empty?)`-filtered, so blank lines never reach this
+      # predicate — only non-empty footer/separator chrome does.
+      line.include?(CLAUDE_READY_FOOTER_MARKER) ||
         line.start_with?("⏵⏵") ||
         line.match?(CLAUDE_PROMPT_CHROME_LINE)
     end

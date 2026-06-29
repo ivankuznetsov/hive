@@ -22,7 +22,12 @@ module Hive
         when "3-plan"
           plan_safe?(row)
         else
-          [ true, "no stage-specific unsafe state detected" ]
+          # Fail CLOSED for any stage without a bespoke work-area check. A
+          # category like :claude_launcher can be classified on a marker in
+          # ANY stage, and "when uncertain, do not retry" (plan R8) governs:
+          # we will not blind-clear a terminal error in a stage whose
+          # re-entry safety we have not verified here.
+          [ false, "no work-area safety check for stage #{row.stage}" ]
         end
       rescue StandardError => e
         [ false, "inspection failed: #{e.class}: #{e.message}" ]
@@ -58,6 +63,13 @@ module Hive
 
         [ true, "no plan feedback detected" ]
       end
+
+      # The per-stage helpers are implementation detail, not part of the
+      # module's public surface — only `safe_to_retry?` is. Keep them off the
+      # singleton's public API so a future helper that forgot to return the
+      # `[bool, reason]` tuple can't be called directly and silently
+      # destructure `safety_reason = nil` at an external call site.
+      private_class_method :execute_safe?, :brainstorm_safe?, :plan_safe?
     end
   end
 end

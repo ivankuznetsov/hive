@@ -3,7 +3,7 @@ title: Hive::Daemon
 type: module
 source: lib/hive/daemon/
 created: 2026-05-06
-updated: 2026-06-27
+updated: 2026-06-20
 tags: [daemon, module, automation, dispatcher]
 ---
 
@@ -11,7 +11,7 @@ tags: [daemon, module, automation, dispatcher]
 the auto-advancing dispatcher (ADR-024). Pure logic (`Policy`,
 `ConcurrencyController`) is separated from I/O (`StatusConsumer`,
 `ChildSupervisor`, `Logger`, `PrMergeWatcher`, `DigestScheduler`,
-`AnswerDigestScheduler`, `StaleAgentHealer`, `DisplayNameBackfiller`) so
+`StaleAgentHealer`, `DisplayNameBackfiller`) so
 the safety-relevant decisions are unit-testable without forking.
 
 ## Module map
@@ -31,7 +31,6 @@ the safety-relevant decisions are unit-testable without forking.
 | `Hive::Daemon::TaskIdBackfiller` | `lib/hive/daemon/task_id_backfiller.rb` | Tick-time self-heal for tasks created outside `hive new` (hand-made folder, one `mv`-ed in) whose `meta.yml` has no `id` — `hive new` allocates ids from `Hive::TaskCounter`, so a task that skipped it shows a blank id everywhere (TUI, status, digest, dependency refs). For any row whose `Hive::TaskMeta` `id` is nil it allocates `TaskCounter.next!`, writes it via `TaskMeta.update_id` (every other meta field preserved), and commits the meta on `hive/state` under the per-project commit lock (`Hive::Lock.with_commit_lock`, as every durable committer does) with the per-task `hive_commit(stage_name:, slug:, action: "id-assigned")` call. The `task_id_backfill` event carries `committed:` so a swallowed commit (lock timeout / git error) is visible rather than masquerading as fully durable. Synchronous (no spawn/inflight — assignment is instant), `max_per_tick` (default 5) bounds the per-tick commits, and an assigned id is a natural fixed point. Guards `File.directory?(folder)` first so a row that outlived its folder (e.g. `hive drop` between snapshot and tick) is NOT resurrected by `TaskMeta.write`'s `mkdir_p`. Row/commit errors degrade through `:fatal` / `task_id_backfill_commit_skipped` logging while preserving the no-raise tick contract. Purely additive — never touches markers or dispatch. Logs `task_id_backfill`. |
 | `Hive::Daemon::PrMergeWatcher` | `lib/hive/daemon/pr_merge_watcher.rb` | Polls `gh pr view --json state` for tasks at 8-finalize/`:complete` and for a narrow set of finalize `ERROR` rows whose PR can still be retired after merge (`git_status_failed`, `claude_launch_failed`). On `MERGED` returns an archive dispatch entry the dispatcher fires. Backs off + drops on persistent gh failures. |
 | `Hive::Daemon::DigestScheduler` | `lib/hive/daemon/digest_scheduler.rb` | Global daily shipped-digest cadence. Persists `last_digested_date` in `<state_home>/digest_state.json`, applies a first-run no-history guard, computes owed local calendar days after midnight, caps catch-up with `digest.max_catchup_days`, and emits one `hive digest --date D --json` dispatch at a time. |
-| `Hive::Daemon::AnswerDigestScheduler` | `lib/hive/daemon/answer_digest_scheduler.rb` | Global daily pending-answer digest cadence. Persists `last_fired_date` in `<state_home>/answer_digest_state.json`, fires once per local calendar day at/after `answer_digest.hour` (default 9) when enabled, and emits `hive answer-digest --date D --json`. Empty snapshots still count as a successful fired day because the child exits 0 without sending Telegram. |
 | `Hive::Daemon::DispatchRequestQueue` | `lib/hive/daemon/dispatch_request_queue.rb` | File-backed queue (`<state_home>/dispatch_requests/*.json`) of dispatch requests written by producer paths (Telegram bot via `Hive::Bot::DispatchRequestWriter`, hivebox stage-run dispatches, and the 3-plan healer requeue) and consumed by the dispatcher's tick loop. Current wire schema is `hive-dispatch-request.v2`: `requestor` is the closed enum `bot|healer`, and any other `schema_version` is rejected as `unknown_schema_version`. Allowlists state-mutating verbs (`run develop brainstorm plan review open-pr artifacts finalize archive markers`); rejects everything else with a logged `:dispatch_request_rejected` event. The single-dispatcher invariant lives here: producers write, the daemon dispatches. See [[architecture]] §"Single-dispatcher contract". |
 | `Hive::Daemon::QueueDirectory` | `lib/hive/daemon/queue_directory.rb` | Shared `directory_for(dirname:, state_home:)` helper used by both dispatch queues so the owner-only (0700) per-queue directory invariant — the de-facto auth boundary for the dispatch channel — lives in one place (#253). |
 | `Hive::Commands::Daemon` | `lib/hive/commands/daemon.rb` | Thor subcommand surface (`start` / `stop` / `status` / `reload` / `tail` / `install` / `enable` / `disable` / `queue`). Owns PID/signal lifecycle, service installation, per-project enrollment, and read-only dispatch-request queue inspection. `queue` delegates to `Hive::Commands::Daemon::QueueCommand`. |
@@ -51,7 +50,6 @@ hive daemon start
             ├─ Hive::Daemon::DispatchRequestQueue (<state_home>/dispatch_requests/*.json)
             ├─ Hive::Daemon::PrMergeWatcher      (Open3.capture3 gh pr view)
             ├─ Hive::Daemon::DigestScheduler     (<state_home>/digest_state.json)
-            ├─ Hive::Daemon::AnswerDigestScheduler (<state_home>/answer_digest_state.json)
             ├─ Hive::Daemon::StaleAgentHealer    (AGENT_WORKING repair)
             ├─ Hive::Daemon::DisplayNameBackfiller (missing display_name retry)
             ├─ Hive::Daemon::TaskIdBackfiller    (missing meta id assign)
@@ -67,7 +65,6 @@ cadence for changes the cheap probe cannot see.
 
 Each full tick runs in order: reap completed children -> enforce child
 timeouts -> prune dispatch-result notices -> **tick the digest scheduler** ->
-**tick the answer-digest scheduler** ->
 fetch status -> heal stale agent markers -> backfill missing display names ->
 backfill missing meta ids -> tick the PR-merge watcher -> **process dispatch requests** -> patrol dispatches
 -> per-row dispatch -> prune baselines -> refresh cheap-probe mtime
@@ -83,17 +80,18 @@ dispatched this tick is already in-flight in the controller and the row
 scan's per-slug in-flight gate (`controller.running_task?`) keeps the same
 tick from double-spawning.
 
-Digest-like dispatches happen before status fetch because they are global, not
-project-row driven. The dispatcher tracks shipped digests with synthetic
-project/stage `digest/digest` and answer digests with
-`answer_digest/answer_digest`; both are recorded as `kind: :digest`, so they
-share the single global digest concurrency slot and do not consume task
-capacity. When a child is reaped, the matching scheduler advances its cursor
-only on exit 0. Scheduler `tick` and `complete` calls are wrapped so state I/O
-failures log `fatal` with `keeping_previous: true` instead of crashing the poll
-loop. Dry-run pseudo-children use the same completion hooks when reaped, so a
-dry-run daemon does not leave either scheduler pending forever after the first
-dispatch.
+Digest dispatches happen before status fetch because they are global, not
+project-row driven. The dispatcher tracks them with synthetic project/stage
+`digest/digest`; when the child is reaped, the scheduler advances its cursor
+only on exit 0. The dry-run pseudo-child reap path mirrors the same completion
+hook so dry-run daemons do not wedge after one digest dispatch; if the scheduler
+cursor write fails there, the dispatcher logs `:fatal` and keeps the tick alive
+instead of crashing.
+only on exit 0. Scheduler `tick` and `complete` calls are wrapped so digest
+state I/O failures log `fatal` with `keeping_previous: true` instead of
+crashing the poll loop. Dry-run digest pseudo-children use the same completion
+hook when reaped, so a dry-run daemon does not leave the scheduler pending
+forever after the first digest dispatch.
 
 `Hive::Daemon::Policy` and `Hive::Daemon::ConcurrencyController` have no
 I/O at all — fully unit-testable without forking. The other modules

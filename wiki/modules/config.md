@@ -3,11 +3,11 @@ title: Hive::Config
 type: module
 source: lib/hive/config.rb
 created: 2026-04-25
-updated: 2026-06-27
+updated: 2026-06-22
 tags: [config, yaml, validation]
 ---
 
-**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects plus daemon, bot, digest, answer_digest, update, web, and Screenote base-url settings, including voice-transcription defaults; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, default workflow, worktree root, budgets, timeouts, **stage agents**, project/top-level and per-stage `permissions`, project-global `claude.mode`/`claude.permission_mode` plus `claude.model`/`claude.effort` pins, review-stage roles, daemon enrollment, experimental babysitter enrollment, patrol mode/enrollment and PR handoff). `Config.load(project_root)` resolves `patrol.mode` into scheduler knobs, **recursively** deep-merges per-project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays (notably `review.reviewers`, `patrol.review.reviewers`, `bot.transcription.supported_languages`, and `babysitter.labels_ignore`) are replaced wholesale, never per-element merged. The daily shipped digest uses `digest.agent`, `digest.max_catchup_days`, `budget_usd.digest`, `timeout_sec.digest`, and `bot.chat_id_allowlist[0]`; `Hive::Digest.run` defaults through `Config.load_global_digest_config`. The pending-answer digest uses `answer_digest.enabled` and `answer_digest.hour` for daemon scheduling, while delivery still uses the bot chat/token config. Screenote OAuth tokens live outside YAML in `screenote.json`, created by `hive connect screenote`.
+**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects plus daemon, bot, digest, update, web, and Screenote base-url settings, including voice-transcription defaults; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, default workflow, worktree root, budgets, timeouts, **stage agents**, project/top-level and per-stage `permissions`, project-global `claude.mode`/`claude.permission_mode` plus `claude.model`/`claude.effort` pins, review-stage roles, daemon enrollment, experimental babysitter enrollment, patrol mode/enrollment and PR handoff). `Config.load(project_root)` resolves `patrol.mode` into scheduler knobs, **recursively** deep-merges per-project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays (notably `review.reviewers`, `patrol.review.reviewers`, `bot.transcription.supported_languages`, and `babysitter.labels_ignore`) are replaced wholesale, never per-element merged. The daily shipped digest uses `digest.agent`, `digest.max_catchup_days`, `budget_usd.digest`, `timeout_sec.digest`, and `bot.chat_id_allowlist[0]`; `Hive::Digest.run` defaults through `Config.load_global_digest_config`. Screenote OAuth tokens live outside YAML in `screenote.json`, created by `hive connect screenote`.
 
 ## Defaults (`Config::DEFAULTS`)
 
@@ -105,7 +105,6 @@ tags: [config, yaml, validation]
     }
   },
   "digest" => { "enabled" => false, "agent" => nil, "max_catchup_days" => 7 },
-  "answer_digest" => { "enabled" => false, "hour" => 9 },
   "screenote" => { "base_url" => "https://screenote.ai" },
   "bot" => {
     "idea_attachment_max_bytes" => 20 * 1024 * 1024,
@@ -159,21 +158,6 @@ scheduler-config callers (`Commands::Daemon#start_daemon` and the dispatcher
 SIGHUP reconfigure) load through `load_global_digest_block`, so the derived
 value applies in both.
 
-## Answer Digest Config
-
-`answer_digest` is the daemon schedule block for the pending-answer Telegram
-digest documented in [[commands/answer-digest]]. It is deliberately separate
-from `digest`, which reports completed work. `answer_digest.enabled` defaults
-to `false`, so the pending-answer digest is explicit opt-in. `answer_digest.hour`
-defaults to `9` and is validated as an integer in `0..23`; the scheduler compares
-it against local time and fires once per local calendar day at or after that
-hour. Delivery still uses the bot config and environment: `bot.chat_id_allowlist`
-for the recipient and `HIVE_TELEGRAM_BOT_TOKEN` for the Bot API token.
-
-`load_global_answer_digest_block` returns only the validated scheduler-facing
-block for `Hive::Commands::Daemon` and dispatcher reconfigure paths. Unlike
-`load_global_digest_block`, it does not derive `enabled` from bot enrollment.
-
 ## Screenote config
 
 `Hive::Config.load_global_screenote` reads the global `screenote:` block,
@@ -207,7 +191,6 @@ expiry, client id, issuer, MCP resource URL, base URL, and default
 | `load_global_config(path)` | Reads + `YAML.safe_load`; rewraps `Psych::SyntaxError` AND `Errno::EACCES`/`EISDIR` as `ConfigError` (exit 78) so `chmod 000` on the file surfaces as bad-config, not internal-error. |
 | `load_global_digest_block` | Reads global config, deep-merges the `digest` section over defaults, validates `enabled`, `agent`, and `max_catchup_days`, and returns the scheduler-facing digest block. |
 | `load_global_digest_config` | Reads global config, deep-merges full defaults, injects bot runtime paths, validates the result, and returns the config hash used by `Hive::Digest.run`. |
-| `load_global_answer_digest_block` | Reads global config, deep-merges the `answer_digest` section over defaults, validates `enabled` and `hour`, and returns the scheduler-facing pending-answer digest block. |
 | `load_global_web` | Reads global config, deep-merges the `web` section onto web defaults, fills `session_secret_file` with `<state_home>/.web.session_secret` when omitted, validates bind/port/origin/GitHub fields, and returns the merged web config for [[commands/web]]. |
 | `global_web_defaults` | Returns a deep copy of `DEFAULTS["web"]` with the state-home session-secret path injected. |
 | `update_global_config!` | Locks sibling `config.yml.lock`, yields the mutable global config Hash, then writes via tempfile + `fsync` + atomic rename. Use for read-modify-write registry/global-config changes. |
@@ -234,7 +217,7 @@ Rules:
 
 Runs after merge so a default value can never trigger a failure — only user input does. Raises `Hive::ConfigError` (single class for all "config is bad" cases). Key checks include:
 
-1. **`validate_hash_shaped_keys!`** — every hash-shaped top-level key (`brainstorm`, `claude`, `plan`, `execute`, `open_pr`, `artifacts`, `finalize`, `budget_usd`, `timeout_sec`, `review`, `agents`, `daemon`, `bot`, `web`, `babysitter`, `patrol`, `digest`, `answer_digest`, `rebase`) must be a Hash when present. Catches scalar/nil/integer overrides (e.g. YAML `brainstorm: claude`, `budget_usd: ~`, `timeout_sec: 600`) that would otherwise survive `deep_merge` and crash later as `TypeError`/`NoMethodError`.
+1. **`validate_hash_shaped_keys!`** — every hash-shaped top-level key (`brainstorm`, `claude`, `plan`, `execute`, `open_pr`, `artifacts`, `finalize`, `budget_usd`, `timeout_sec`, `review`, `agents`, `daemon`, `bot`, `web`, `babysitter`, `patrol`, `digest`, `rebase`) must be a Hash when present. Catches scalar/nil/integer overrides (e.g. YAML `brainstorm: claude`, `budget_usd: ~`, `timeout_sec: 600`) that would otherwise survive `deep_merge` and crash later as `TypeError`/`NoMethodError`.
 2. **`validate_reviewers!`** — `review.reviewers` must be an Array (nil fails with a hint to remove the key vs. set `[]`). Each entry must be a Hash. `name` and `output_basename` must be unique across the list (basename uniqueness prevents concurrent file-write collisions on `reviews/<basename>-NN.md`). Empty/whitespace `output_basename` is rejected (would yield `reviews/-01.md`). Each entry's `agent` is checked via `validate_agent_name!`.
 3. **`validate_review_fix_auto_commit!`** — `review.fix` and `review.fix.auto_commit` must stay Hash-shaped. `review.fix.auto_commit.sign_policy` is optional and must be one of `inherit`, `bypass`, or `fail`; `scope_check.enabled` must be boolean; `scope_check.allowed_paths` / `denied_paths` must be relative path-glob arrays without traversal, absolute paths, or null bytes.
 4. **`validate_role_agent_names!`** — every stage/review role agent path is checked via `validate_agent_name!`.

@@ -3,7 +3,7 @@ title: Hive::TaskAction
 type: module
 source: lib/hive/task_action.rb
 created: 2026-04-26
-updated: 2026-06-27
+updated: 2026-06-23
 tags: [module, status, action, classifier, diagnostic]
 ---
 
@@ -42,27 +42,25 @@ Entries are keyed by an internal symbol resolved by routing on the descriptor st
 | Internal key | TaskActionKind | Label | Verb |
 |---|---|---|---|
 | `inbox` | `READY_TO_BRAINSTORM` | "Ready to brainstorm" | brainstorm |
-| `brainstorm_waiting` | `NEEDS_INPUT` | "Answer questions" | brainstorm |
+| `brainstorm_waiting` | `NEEDS_INPUT` | "Needs your input" | brainstorm |
 | `brainstorm_complete` | `READY_TO_PLAN` | "Ready to plan" | plan |
-| `plan_waiting` | `NEEDS_INPUT` | "Review plan draft" | plan |
+| `plan_waiting` | `NEEDS_INPUT` | "Needs your input" | plan |
 | `plan_complete` | `READY_TO_DEVELOP` | "Ready to develop" | develop |
 | `execute_waiting` | `NEEDS_INPUT` | "Needs your input" | develop |
 | `execute_complete` | `READY_TO_OPEN_PR` | "Ready to open PR" | open-pr |
-| `open_pr_ready` | `READY_TO_OPEN_PR` | "Ready to open PR" | open-pr |
 | `open_pr_complete` | `READY_FOR_REVIEW` | "Ready for review" | review |
 | `execute_stale` | `RECOVER_EXECUTE` | "Needs recovery" | findings |
 | `review_ready` | `READY_FOR_REVIEW` | "Ready for review" | review |
-| `review_waiting` | `NEEDS_INPUT` | "Needs review decision" | review |
+| `review_waiting` | `NEEDS_INPUT` | "Needs your input" | review |
 | `review_complete` | `READY_TO_ARTIFACTS` | "Ready to collect artifacts" | artifacts |
 | `artifacts_ready` | `READY_TO_ARTIFACTS` | "Ready to collect artifacts" | artifacts |
 | `artifacts_complete` | `READY_TO_FINALIZE` | "Ready to finalize" | finalize |
 | `review_stale` | `RECOVER_REVIEW` | "Needs recovery" | nil |
-| `finalize_waiting` | `NEEDS_INPUT` | "Confirm finalize" | finalize |
+| `finalize_waiting` | `NEEDS_INPUT` | "Needs your input" | finalize |
 | `finalize_complete` | `READY_TO_ARCHIVE` | "Ready to archive" | archive |
 | `ready_to_advance` | `READY_TO_ADVANCE` | "Ready to advance" | approve |
 | `generic_ready_to_run` | `READY_TO_RUN` | "Ready to run" | run |
 | `generic_needs_input` | `NEEDS_INPUT` | "Needs your input" | run |
-| `manual_steering` | `MANUAL_STEERING` | "Manually steered" | nil |
 | `agent_running` | `AGENT_RUNNING` | "Agent running" | nil |
 | `done` | `ARCHIVED` | "Archived" | nil |
 | `error` | `ERROR` | "Error" | nil |

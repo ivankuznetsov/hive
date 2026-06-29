@@ -1,9 +1,9 @@
 ---
 title: Interaction Surface
 type: commands
-source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/cli.rb, lib/hive/commands/connect.rb, lib/hive/commands/disconnect.rb, lib/hive/commands/bench_submit.rb, lib/hive/commands/digest.rb, lib/hive/commands/answer_digest.rb, lib/hive/digest.rb, lib/hive/digest/, lib/hive/web/, public/, hive.gemspec, packaging/docker/, .github/workflows/release.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
+source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/cli.rb, lib/hive/commands/connect.rb, lib/hive/commands/disconnect.rb, lib/hive/commands/bench_submit.rb, lib/hive/commands/digest.rb, lib/hive/digest.rb, lib/hive/digest/, lib/hive/web/, public/, hive.gemspec, packaging/docker/, .github/workflows/release.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-14
-updated: 2026-06-27
+updated: 2026-06-22
 tags: [commands, api]
 ---
 
@@ -11,8 +11,7 @@ tags: [commands, api]
 `hv` fallback launcher), the opt-in e2e harness, the hivebox web command/routes
 documented in [[commands/web]], `hive connect screenote` as the Screenote OAuth
 setup surface for artifacts MCP uploads, `hive bench submit` as the hive-bench
-corpus producer, `hive digest` as the daily shipped digest producer,
-`hive answer-digest` as the pending-human-answer digest producer, and the
+corpus producer, `hive digest` as the daily shipped digest producer, and the
 single ClawHub `hive-cli` OpenClaw skill whose installed slash command is `/hive`.
 The Ruby command/API contract lives in [[cli]] and the
 per-command pages. OpenClaw does not add a second runtime and does not publish
@@ -53,8 +52,7 @@ one ClawHub listing per Hive verb.
 `archive`), project workflow authoring via [[commands/workflow]], daemon/bot/babysitter
 lifecycle commands, diagnostics, markers, findings, metrics, update/uninstall,
 registry maintenance, Screenote connect/disconnect, the `hive bench submit`
-corpus-submission producer, the `hive digest` shipped-digest producer,
-the `hive answer-digest` pending-answer producer, and
+corpus-submission producer, the `hive digest` shipped-digest producer, and
 `--json` envelopes where the command page says they exist.
 The wrapper also normalizes command-local help before Thor dispatch:
 `hive <cmd> --help`, `hive <cmd> -h`, and option-bearing forms such as
@@ -88,18 +86,6 @@ digest for one local calendar date, with dry-run and success JSON output. It
 does not create task-state commits. The daemon can schedule it as a global,
 non-project-scoped child after local midnight when `digest.enabled: true`. See
 [[commands/digest]] and [[modules/digest]].
-
-`hive answer-digest` is the CLI bridge to the bot waiting-row selector: it
-builds one Telegram message for tasks currently blocked on human input, with
-inline buttons whose callbacks are byte-identical to the original push
-notifications. Because it runs as a separate subprocess, buttons whose callback
-exceeds Telegram's 64-byte limit (compacted in the subprocess's own in-memory
-registry) reply "button expired" when tapped — only short callbacks like
-`answer:` are reliably tap-actionable from the digest; see the caveat in
-[[commands/answer-digest]]. Empty snapshots send nothing and still exit
-successfully. The daemon can schedule it once per local calendar day at/after
-`answer_digest.hour` when `answer_digest.enabled: true`.
-See [[commands/answer-digest]].
 
 `hive connect screenote` and `hive disconnect screenote` manage the operator's
 Screenote OAuth credential for MCP-backed artifact uploads. The connect flow
@@ -192,5 +178,4 @@ exit `78`; JSON mode distinguishes them as `missing_repro` and
 - [[e2e]]
 - [[commands/web]]
 - [[commands/digest]]
-- [[commands/answer-digest]]
 - [[commands/screenote]]

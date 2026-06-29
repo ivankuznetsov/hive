@@ -159,10 +159,10 @@ class HiveStagesExecuteTest < Minitest::Test
       assert_equal({ commit: "implementer_failed", status: :error }, run_result)
       assert_equal :error, marker.name
       assert_equal "implementer_failed", marker.attrs["reason"]
+      assert_equal "codex", marker.attrs["provider"]
       assert_equal "error", marker.attrs["status"]
       assert_equal "exit_code=1 compile error", marker.attrs["message"]
       refute marker.attrs.key?("retry_after")
-      refute marker.attrs.key?("provider")
     end
   end
 
@@ -186,10 +186,10 @@ class HiveStagesExecuteTest < Minitest::Test
       assert_equal({ commit: "implementer_failed", status: :error }, run_result)
       assert_equal :error, marker.name
       assert_equal "implementer_failed", marker.attrs["reason"]
+      assert_equal "codex", marker.attrs["provider"]
       assert_equal "timeout", marker.attrs["status"]
       assert_equal "claude stop hook did not signal completion", marker.attrs["message"]
       refute marker.attrs.key?("retry_after")
-      refute marker.attrs.key?("provider")
     end
   end
 

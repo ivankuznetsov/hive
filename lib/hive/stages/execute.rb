@@ -215,6 +215,7 @@ module Hive
 
         Hive::Markers.set(task.state_file, :error,
                           reason: "implementer_failed",
+                          provider: execute_agent_name(cfg),
                           status: impl_result&.fetch(:status, nil),
                           message: impl_result&.fetch(:error_message, nil))
         { commit: "implementer_failed", status: :error }

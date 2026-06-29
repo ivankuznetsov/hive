@@ -1,4 +1,31 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Sample launchd plist for `hive web` (macOS).
+
+  Install:
+    mkdir -p ~/Library/LaunchAgents
+    cp examples/launchd/hive-web.plist ~/Library/LaunchAgents/
+    $EDITOR ~/Library/LaunchAgents/hive-web.plist   # confirm absolute paths
+    launchctl load ~/Library/LaunchAgents/hive-web.plist
+
+  Note the absolute-path requirement: launchd doesn't read your shell's
+  rc files, so the `hive` binary must be invoked at its real location.
+  Replace `/Users/YOU/.local/bin/hive` with the path on your machine
+  (run `which hive` to find it). `hive web install` writes these paths
+  for you.
+
+  RESPAWN-LOOP CIRCUIT-BREAKER: launchd has no native equivalent of
+  systemd's StartLimitBurst. With KeepAlive { SuccessfulExit: false }
+  and a wrong ProgramArguments path, launchd would respawn every 30 s
+  forever, filling ~/Library/Logs/hive-web.err.log with `command not
+  found`. The /bin/sh wrapper below converts "binary not executable"
+  into a clean exit 0 — which KeepAlive { SuccessfulExit: false } then
+  respects (no respawn). A real crash still exits non-zero through
+  `exec` and respawns normally per ThrottleInterval. The check is
+  `[ -x "$0" ]` so a missing OR non-executable hive binary stops the
+  loop after one attempt, while a working binary that crashes keeps
+  the auto-restart contract.
+-->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -6,6 +33,13 @@
   <key>Label</key>
   <string>local.hive-web</string>
 
+  <!-- ProgramArguments wraps the real invocation in a tiny /bin/sh
+       precheck. If the binary path passed as $0 is missing or not
+       executable, the wrapper exits 0 (clean) so KeepAlive's
+       SuccessfulExit:false STOPS respawning. If it IS executable, exec
+       hands the process tree to hive and a real crash will re-trigger
+       respawn through KeepAlive normally. See the RESPAWN-LOOP
+       CIRCUIT-BREAKER note above for the rationale. -->
   <key>ProgramArguments</key>
   <array>
     <string>/bin/sh</string>

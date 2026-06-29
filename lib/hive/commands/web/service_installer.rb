@@ -32,12 +32,10 @@ module Hive
         private
 
         def render_systemd
-          template = File.read(File.expand_path("../../../../examples/systemd/hive-web.service", __dir__))
-          escaped = Shellwords.escape(resolved_binary)
-          template
-            .sub(/^ExecStart=.*$/, "ExecStart=#{escaped} web")
-            .sub(/^Environment=HIVE_BIN=.*$/, "Environment=HIVE_BIN=#{escaped}")
-            .sub(/^Environment=PATH=.*$/, build_path_line)
+          render_systemd_from(
+            File.expand_path("../../../../examples/systemd/hive-web.service", __dir__),
+            "web"
+          )
         end
 
         def render_launchd

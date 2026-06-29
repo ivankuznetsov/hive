@@ -1,0 +1,16 @@
+[Unit]
+Description=Hive web UI
+After=network.target
+StartLimitBurst=3
+StartLimitIntervalSec=300
+
+[Service]
+Type=simple
+Environment=HIVE_BIN=/Users/YOU/.local/bin/hive
+Environment=PATH=/Users/YOU/.local/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin
+ExecStart=/Users/YOU/.local/bin/hive web
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

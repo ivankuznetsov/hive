@@ -454,11 +454,15 @@ end
 # repo, and enterprise credentials from the environment. GH_HOST / GH_REPO redirect an
 # allowlisted read at an agent-chosen host (GH_REPO carries an optional `[HOST/]`), and
 # GH_ENTERPRISE_TOKEN / GITHUB_ENTERPRISE_TOKEN supply the credentials for it, so scrub
-# them too, the same host-redirect threat the argv gate defends against.
+# them too, the same host-redirect threat the argv gate defends against. Generic proxy
+# and TLS trust overrides can redirect or inspect credential-bearing transport, so the
+# passthrough drops those at the same exec boundary.
 %w[
   GH_PAGER PAGER GH_BROWSER BROWSER GH_EDITOR GIT_EDITOR VISUAL EDITOR GH_FORCE_TTY
   GH_CONFIG_DIR XDG_CONFIG_HOME HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR
   GH_HOST GH_REPO GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN
+  HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy
+  SSL_CERT_FILE SSL_CERT_DIR
 ].each { |key| ENV.delete(key) }
 # Unlike git — which treats GIT_CONFIG_GLOBAL=/dev/null (and GIT_CONFIG_NOSYSTEM) as an explicit
 # "no config" sentinel — gh has no such escape hatch. It derives its config dir as

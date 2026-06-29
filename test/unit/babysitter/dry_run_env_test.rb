@@ -886,6 +886,8 @@ class BabysitterDryRunEnvTest < Minitest::Test
       env_keys = %w[
         GH_PAGER PAGER GH_BROWSER BROWSER GH_EDITOR GIT_EDITOR VISUAL EDITOR GH_FORCE_TTY
         GH_CONFIG_DIR XDG_CONFIG_HOME HOME
+        HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy
+        SSL_CERT_FILE SSL_CERT_DIR
       ]
       real_gh = recording_env_binary(dir, "real-gh", env_keys)
       env = {
@@ -902,7 +904,17 @@ class BabysitterDryRunEnvTest < Minitest::Test
         "GH_FORCE_TTY" => "80",
         "GH_CONFIG_DIR" => File.join(dir, "evil-gh-config"),
         "XDG_CONFIG_HOME" => File.join(dir, "evil-xdg-config"),
-        "HOME" => File.join(dir, "evil-home")
+        "HOME" => File.join(dir, "evil-home"),
+        "HTTP_PROXY" => "http://proxy.invalid",
+        "HTTPS_PROXY" => "http://proxy.invalid",
+        "ALL_PROXY" => "http://proxy.invalid",
+        "NO_PROXY" => "github.com",
+        "http_proxy" => "http://proxy.invalid",
+        "https_proxy" => "http://proxy.invalid",
+        "all_proxy" => "http://proxy.invalid",
+        "no_proxy" => "github.com",
+        "SSL_CERT_FILE" => File.join(dir, "evil-cert.pem"),
+        "SSL_CERT_DIR" => File.join(dir, "evil-certs")
       }
 
       _out, err, status = Open3.capture3(env, stub_path("gh"), "repo", "view", "owner/repo")

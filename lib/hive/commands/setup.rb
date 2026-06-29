@@ -36,8 +36,13 @@ module Hive
         add_phase("web", true, "url" => web_url)
 
         emit(diagnostics)
+        # Exit non-zero if EITHER a diagnostics hard failure OR a provisioning
+        # phase (qmd / web_bundle / daemon_service / web_service) failed, so
+        # automation branching on the exit status (AE5) is never told a
+        # half-provisioned setup succeeded.
         hard_failures = diagnostics.results.reject { |row| row.ok? || row.bootstrappable }
-        hard_failures.empty? ? 0 : 1
+        phases_ok = @phases.all? { |phase| phase["ok"] }
+        (hard_failures.empty? && phases_ok) ? 0 : 1
       end
 
       private
@@ -58,8 +63,13 @@ module Hive
       def bootstrap_web_bundle
         Hive::Web::AppBundle.ensure!
         add_phase("web_bundle", true, "path" => Hive::Web::AppBundle.app_dir)
-      rescue Hive::Error => e
-        add_phase("web_bundle", false, "message" => e.message)
+      rescue StandardError => e
+        # `ensure!` downloads + unpacks a release tarball, so beyond
+        # Hive::Error it can raise OpenURI::HTTPError (404), SocketError /
+        # Errno::ECONNREFUSED (offline), or Zlib errors (corrupt asset).
+        # Record any of these as a phase failure (→ non-zero exit) instead of
+        # aborting `hive setup` with a raw backtrace.
+        add_phase("web_bundle", false, "message" => "#{e.class}: #{e.message}")
       end
 
       def install_daemon
@@ -87,7 +97,9 @@ module Hive
 
       def install_web_service
         require "hive/commands/web/service_installer"
-        installer = Hive::Commands::Web::ServiceInstaller.new
+        # Pass the same resolved binary as install_daemon so both managed
+        # services point at one hive binary (R8 same-binary guarantee).
+        installer = Hive::Commands::Web::ServiceInstaller.new(binary_path: Hive::InvokedBinary.path)
         outcome = installer.install!(autostart: true, force: true)
         add_phase("web_service", outcome.success?, "outcome" => outcome.wire_outcome, "target_path" => installer.target_path)
       end
@@ -98,7 +110,13 @@ module Hive
           File.exist?(project["path"].to_s) && File.realpath(project["path"].to_s) == current
         end
         entry ? entry.fetch("name") : File.basename(current)
-      rescue StandardError
+      rescue Hive::ConfigError, SystemCallError => e
+        # A corrupt registry or a realpath/stat failure is recoverable — fall
+        # back to the directory name — but surface it so `daemon enable`
+        # running against a guessed name isn't silent. Programming errors are
+        # NOT swallowed: they propagate.
+        warn "hive setup: could not resolve registered project name " \
+             "(#{e.class}: #{e.message}); using directory name #{File.basename(Dir.pwd)}"
         File.basename(Dir.pwd)
       end
 

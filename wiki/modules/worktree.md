@@ -3,7 +3,7 @@ title: Hive::Worktree
 type: module
 source: lib/hive/worktree.rb
 created: 2026-04-25
-updated: 2026-06-27
+updated: 2026-06-29
 tags: [worktree, git, pointer, dependencies]
 ---
 
@@ -80,7 +80,7 @@ only when neither the remote nor local prerequisite branch is available.
 
 ## `materialize_pr`
 
-Shared fork-agnostic PR-head materializer used by `hive review --pr` and the babysitter. It runs:
+`materialize_pr` is the shared fork-agnostic PR-head materializer for `hive review --pr` and the babysitter. It runs:
 
 ```bash
 git -C <repo> fetch origin +pull/<n>/head:refs/<branch>

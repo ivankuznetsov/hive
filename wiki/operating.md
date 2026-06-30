@@ -189,6 +189,14 @@ packaging/verify-release.sh --version=v0.3.1
 packaging/verify-release.sh --version=v0.3.1 --report=json | jq .ok
 ```
 
+For unreleased packaging fixes, validate against the locally built gem rather
+than by copying files into an installed gem directory. Build the artifact with
+`gem build hive.gemspec`, install it into an isolated `GEM_HOME`/XDG prefix,
+run `hive doctor`, then replay the affected `hive run <task-folder>` path from
+that install. Claude tmux launcher-script fixes should prove the target task
+reaches `WAITING` or later instead of `claude_launch_failed`, confirming the
+packaged `lib/hive/scripts/*.sh` files are present in the real artifact.
+
 Exit codes:
 
 - `0` — all verifications passed; tmp prefix removed
@@ -354,13 +362,6 @@ environments where the installer could not write or enable the unit (read-only
 home, restricted user, custom layout) or for migrating an existing install onto
 a newer template.
 
-The local web UI has its own optional service. `hive web install` writes
-`~/.config/systemd/user/hive-web.service` on Linux or
-`~/Library/LaunchAgents/local.hive-web.plist` on macOS, and
-`hive web start --detach` starts that service. It always runs separately from
-`hive-daemon`; foreground `hive web` remains the fallback when a host has no
-usable service manager.
-
 ### Linux (systemd-user)
 
 A sample unit ships at `examples/systemd/hive-daemon.service`. Install
@@ -395,6 +396,12 @@ losing in-flight work.
 If `hive` lives behind a version manager (rbenv / asdf / mise), edit
 the `ExecStart=` line to use the shim's absolute path — systemd-user
 doesn't load your shell's rc files.
+
+When testing a freshly built local gem, make sure the daemon's installed
+`ExecStart=` path resolves to that patched install. A stale service unit can
+keep running an older `/usr/bin/hive` or prior `~/.local/bin/hive` even while
+the shell points at the new binary; `hive daemon install --force` rewrites the
+unit to the current resolved path.
 
 ### macOS (launchd)
 

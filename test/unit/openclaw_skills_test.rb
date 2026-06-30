@@ -154,7 +154,7 @@ class OpenClawSkillsTest < Minitest::Test
     refute_nil start_index, "#{heading} section must exist"
 
     remainder = body[start_index..]
-    next_heading_index = remainder.index(/\n## /, heading.length)
+    next_heading_index = remainder.index(/\n## /)
     next_heading_index ? remainder[0...next_heading_index] : remainder
   end
 end

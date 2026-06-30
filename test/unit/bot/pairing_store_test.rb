@@ -110,6 +110,20 @@ class HiveBotPairingStoreTest < Minitest::Test
     end
   end
 
+  def test_invalid_created_at_payload_is_ignored
+    Dir.mktmpdir("hive-pairing-store") do |dir|
+      File.write(File.join(dir, STORE::FILENAME), JSON.generate(
+                                                    "ABCDEFGH" => {
+                                                      "chat_id" => 111,
+                                                      "created_at" => "not-a-time"
+                                                    }
+                                                  ))
+      store = STORE.new(state_home: dir)
+
+      assert_empty store.pending
+    end
+  end
+
   def test_interleaved_writers_leave_valid_json
     Dir.mktmpdir("hive-pairing-store") do |dir|
       current = Time.utc(2026, 6, 30, 12, 0, 0)

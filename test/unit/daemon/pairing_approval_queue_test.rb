@@ -87,6 +87,33 @@ class HiveBotPairingApprovalQueueTest < Minitest::Test
     end
   end
 
+  def test_remove_tolerates_file_disappearing_after_parse
+    Dir.mktmpdir("hive-pairing-approval") do |dir|
+      notice_id = Q.write!(chat_id: 42, state_home: dir)
+
+      with_file_unlink_raising(Errno::ENOENT) do
+        refute Q.remove(notice_id, state_home: dir)
+      end
+    end
+  end
+
+  def test_pending_rejects_invalid_created_at
+    Dir.mktmpdir("hive-pairing-approval") do |dir|
+      bad_path = File.join(Q.directory(state_home: dir), "20260630-bad-time.json")
+      File.write(bad_path, JSON.generate(
+                             "schema" => Q::SCHEMA,
+                             "schema_version" => Q::SCHEMA_VERSION,
+                             "notice_id" => "notice",
+                             "created_at" => "not-a-time",
+                             "chat_id" => 42
+                           ))
+      seen = []
+
+      assert_empty Q.pending(state_home: dir, bad_handler: ->(path:, reason:) { seen << [ path, reason ] })
+      assert_equal [ [ bad_path, "invalid_created_at" ] ], seen
+    end
+  end
+
   def test_written_notice_is_valid_json
     Dir.mktmpdir("hive-pairing-approval") do |dir|
       Q.write!(chat_id: 42, state_home: dir)
@@ -98,5 +125,17 @@ class HiveBotPairingApprovalQueueTest < Minitest::Test
       assert_equal Q::SCHEMA_VERSION, doc.fetch("schema_version")
       assert_equal 42, doc.fetch("chat_id")
     end
+  end
+
+  private
+
+  def with_file_unlink_raising(error_class)
+    singleton = class << File; self; end
+    singleton.alias_method :hive_original_unlink, :unlink
+    singleton.define_method(:unlink) { |_path| raise error_class }
+    yield
+  ensure
+    singleton&.alias_method(:unlink, :hive_original_unlink)
+    singleton&.remove_method(:hive_original_unlink)
   end
 end

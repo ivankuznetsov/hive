@@ -1270,6 +1270,21 @@ class ClaudeLauncherTest < Minitest::Test
     end
   end
 
+  def test_completion_evidence_defensive_helpers_degrade_conservatively
+    with_tmp_task do |task|
+      with_replaced_singleton_method(Hive::ClaudeLauncher, :claude_ready_prompt?, ->(_tail) { raise "bad pane" }) do
+        assert_nil Hive::ClaudeLauncher.completion_pane_idle?("Claude Code")
+      end
+
+      File.write(File.join(task.folder, ".lock"), "[")
+      assert_nil Hive::ClaudeLauncher.recorded_claude_pid(task)
+
+      with_replaced_singleton_method(Process, :kill, ->(_signal, _pid) { raise Errno::EPERM }) do
+        assert_equal true, Hive::ClaudeLauncher.process_alive?(12_345)
+      end
+    end
+  end
+
   # A quota wall stalls the default claude/tmux execute spawn without ever
   # touching `.done`; the exit_code_only wait must surface it as an :error
   # carrying the limit message (not drain to the generic stop-hook timeout)

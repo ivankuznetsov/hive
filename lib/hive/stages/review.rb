@@ -587,6 +587,11 @@ module Hive
                      status: :review_error }
           end
 
+          # Compute the post-fix worktree status once and reuse it for both
+          # the completion-fallback evidence and the auto-commit branch
+          # below, rather than spawning the git subprocess twice.
+          post_fix_status = worktree_status(worktree_path)
+
           if agent_failed?(fix_result) &&
              !handle_fix_completion_fallback(
                task,
@@ -594,7 +599,7 @@ module Hive
                fix_result,
                before_fix_head: before_fix_head,
                after_fix_head: after_fix_head,
-               worktree_path: worktree_path
+               worktree_status: post_fix_status
              )
             limited = mark_review_phase_failure(
               task, phase: :fix, terminal_reason: "fix_failed",
@@ -605,7 +610,6 @@ module Hive
                      status: :review_error }
           end
 
-          post_fix_status = worktree_status(worktree_path)
           case post_fix_status
           when :dirty
             auto_commit = auto_commit_fix_worktree(task, cfg, ctx_pass, accepted_findings)
@@ -893,7 +897,7 @@ module Hive
           status: :review_stale }
       end
 
-      def handle_fix_completion_fallback(task, ctx, fix_result, before_fix_head:, after_fix_head:, worktree_path:)
+      def handle_fix_completion_fallback(task, ctx, fix_result, before_fix_head:, after_fix_head:, worktree_status:)
         evidence = fix_result && fix_result[:completion_evidence]
         return false unless evidence
 
@@ -901,7 +905,7 @@ module Hive
           ctx,
           before_fix_head: before_fix_head,
           after_fix_head: after_fix_head,
-          worktree_path: worktree_path,
+          worktree_status: worktree_status,
           error_message: fix_result[:error_message]
         )
         decision = Hive::ClaudeCompletionFallback.suppress?(
@@ -910,22 +914,32 @@ module Hive
         )
         return false unless decision[:suppress]
 
-        write_fix_success(ctx)
-        emit_fix_completion_fallback(task, ctx, evidence, phase_facts, decision)
+        # Do NOT write the success sentinel here. Control falls through to
+        # the normal post-fix path, where the FixGuardrail may trip and
+        # return review_waiting WITHOUT a sentinel (by design, so the
+        # pending human approval can't be bypassed). The legitimate
+        # write_fix_success there owns the sentinel; writing it early would
+        # let a stale sentinel launder a guardrail-blocked pass as complete.
+        emit_fix_completion_fallback(
+          task, ctx, evidence, phase_facts, decision,
+          before_fix_head: before_fix_head,
+          after_fix_head: after_fix_head,
+          worktree_status: worktree_status
+        )
         true
       end
 
-      def fix_completion_fallback_phase_facts(ctx, before_fix_head:, after_fix_head:, worktree_path:, error_message:)
-        worktree = worktree_status(worktree_path)
+      def fix_completion_fallback_phase_facts(ctx, before_fix_head:, after_fix_head:, worktree_status:, error_message:)
         {
           artifacts_present: fix_completion_fallback_artifacts_present?(ctx),
           commit_or_no_change: fix_completion_commit_or_no_change?(
             ctx,
             before_fix_head: before_fix_head,
-            after_fix_head: after_fix_head
+            after_fix_head: after_fix_head,
+            worktree_status: worktree_status
           ),
           no_unresolved_escalation: count_escalations(ctx).zero?,
-          worktree_readable: !worktree.is_a?(Array),
+          worktree_readable: !worktree_status.is_a?(Array),
           missing_output_absent: !missing_output_error?(error_message)
         }
       end
@@ -939,41 +953,83 @@ module Hive
         false
       end
 
-      def fix_completion_commit_or_no_change?(ctx, before_fix_head:, after_fix_head:)
+      def fix_completion_commit_or_no_change?(ctx, before_fix_head:, after_fix_head:, worktree_status:)
         return true if before_fix_head.to_s != "" &&
                        after_fix_head.to_s != "" &&
                        before_fix_head != after_fix_head
 
+        # A dirty worktree is a real, uncommitted code change the
+        # orchestrator's post-fix auto_commit_fix_worktree will land. HEAD
+        # is captured BEFORE that auto-commit, so for the normal case (the
+        # fix agent leaves changes uncommitted) before_fix_head ==
+        # after_fix_head and the SHA branch above misses it — treat a dirty
+        # worktree as a code change, not a no-change pass (KTD4/HLD).
+        return true if worktree_status == :dirty
+
         no_change_evidence_present?(ctx)
       end
 
+      # "Whole-pass no-change": the fallback may treat the pass as needing
+      # no code change ONLY when no AUTO-FIX work remained unapplied (every
+      # finding was dispositioned RESOLVED/NO-FIX). A single no-fix line
+      # alongside an unapplied `[x] AUTO-FIX:` finding is NOT proof — that
+      # mixed pass still owes a real change and must not be suppressed
+      # without a commit/dirty worktree (brainstorm A2). Reuses
+      # `auto_fix_finding_line?` so this gate and the accepted-findings
+      # collector can never drift.
       def no_change_evidence_present?(ctx)
         pass_suffix = format("%02d", ctx.pass)
-        Dir[File.join(ctx.task_folder, "reviews", "*-#{pass_suffix}.md")].any? do |path|
-          File.readlines(path).any? { |line| line =~ /^\s*-\s+\[x\]\s+RESOLVED\/NO-FIX:/i }
+        saw_no_fix = false
+        Dir[File.join(ctx.task_folder, "reviews", "*-#{pass_suffix}.md")].each do |path|
+          next unless reviewer_file?(File.basename(path))
+
+          File.readlines(path).each do |line|
+            return false if auto_fix_finding_line?(line)
+
+            saw_no_fix = true if line =~ /^\s*-\s+\[x\]\s+RESOLVED\/NO-FIX:/i
+          end
         end
+        saw_no_fix
       rescue SystemCallError, IOError
         false
       end
 
+      # Forward-compat guard for the shared completion predicate. On the
+      # current exit_code_only fix path `error_message` is fixed to "claude
+      # stop hook did not signal completion", so this never matches and
+      # `missing_output_absent` is always true here. It stays so that any
+      # future `:output_file_exists`-mode caller of the fallback (whose
+      # errors DO read "expected output file missing") is gated correctly.
       def missing_output_error?(message)
         message.to_s.match?(/expected output file missing|missing output|output .* missing/i)
       end
 
-      def emit_fix_completion_fallback(task, ctx, evidence, phase_facts, decision)
+      def emit_fix_completion_fallback(task, ctx, evidence, phase_facts, decision,
+                                       before_fix_head:, after_fix_head:, worktree_status:)
         Hive::Events.emit(
           task_folder: task.folder,
           slug: task.slug,
           stage: stage_label_for(task),
           event_type: :claude_completion_fallback,
           agent: "phase=fix pass=#{format('%02d', ctx.pass)}",
-          message: claude_completion_fallback_message(task, ctx, evidence, phase_facts, decision)
+          message: claude_completion_fallback_message(
+            task, ctx, evidence, phase_facts, decision,
+            before_fix_head: before_fix_head,
+            after_fix_head: after_fix_head,
+            worktree_status: worktree_status
+          )
         )
       rescue SystemCallError, IOError, JSON::JSONError
         nil
       end
 
-      def claude_completion_fallback_message(task, ctx, evidence, phase_facts, decision)
+      def claude_completion_fallback_message(task, ctx, evidence, phase_facts, decision,
+                                             before_fix_head:, after_fix_head:, worktree_status:)
+        # R5: record WHAT was checked, not just booleans — the artifact path
+        # inspected and the concrete commit (before→after head SHA) or the
+        # no-change basis — so a suppressed fallback is auditable after the
+        # fact. Events.emit truncates to MAX_MESSAGE_BYTES, so keep values
+        # compact (short SHAs, basename of the artifact).
         parts = {
           phase: "fix",
           pass: format("%02d", ctx.pass),
@@ -984,11 +1040,32 @@ module Hive
           result: evidence[:expected_result_path],
           reason: evidence[:reason],
           artifacts: phase_facts[:artifacts_present],
+          artifacts_checked: File.basename(Hive::Stages::Review::Triage.escalations_path(ctx).to_s),
           commit_or_no_change: phase_facts[:commit_or_no_change],
+          commit_evidence: fix_completion_commit_evidence(
+            ctx,
+            before_fix_head: before_fix_head,
+            after_fix_head: after_fix_head,
+            worktree_status: worktree_status
+          ),
           no_unresolved_escalation: phase_facts[:no_unresolved_escalation],
           missing: Array(decision[:missing]).join("|")
         }
         parts.map { |key, value| "#{key}=#{value}" }.join(" ")
+      end
+
+      # Compact, human-auditable description of WHY commit_or_no_change held:
+      # the concrete before→after head SHAs when a commit landed, a dirty
+      # worktree (the auto-commit will land), or the whole-pass no-change
+      # basis. Mirrors fix_completion_commit_or_no_change?'s branch order.
+      def fix_completion_commit_evidence(ctx, before_fix_head:, after_fix_head:, worktree_status:)
+        before = before_fix_head.to_s
+        after = after_fix_head.to_s
+        return "commit:#{before[0, 12]}->#{after[0, 12]}" if before != "" && after != "" && before != after
+        return "dirty_worktree" if worktree_status == :dirty
+        return "whole_pass_no_change" if no_change_evidence_present?(ctx)
+
+        "none"
       end
 
       # A per-pass review-phase agent (triage, fix) that died because the

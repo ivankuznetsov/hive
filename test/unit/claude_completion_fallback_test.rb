@@ -35,10 +35,34 @@ class ClaudeCompletionFallbackTest < Minitest::Test
   end
 
   def test_process_crash_blocks_suppression
-    result = decision(evidence: base_evidence.merge(pane_idle: false, process_exited: true, exit_code: 137))
+    # The tmux REPL never produces a real per-turn exit_code (it is
+    # advisory-only / always nil — see ClaudeLauncher#completion_evidence),
+    # so crash protection does NOT rest on a synthetic 137. A crashed
+    # Claude leaves no commit and no whole-pass no-change evidence, so the
+    # commit_or_no_change phase fact is what actually blocks suppression.
+    result = decision(
+      evidence: base_evidence.merge(pane_idle: false, process_exited: true, exit_code: nil),
+      phase_facts: base_phase_facts.merge(commit_or_no_change: false)
+    )
 
     assert_equal false, result.fetch(:suppress)
-    assert_includes result.fetch(:missing), "clean_exit_code"
+    assert_includes result.fetch(:missing), "commit_or_no_change"
+  end
+
+  def test_gone_session_blocks_suppression
+    # A clean `session_exists? == false` reports session_alive: false with
+    # an empty session_error; the tmux_readable/session_error guard misses
+    # it, so the explicit session_alive guard must keep gone tmux terminal.
+    result = decision(evidence: base_evidence.merge(session_alive: false))
+
+    assert_equal false, result.fetch(:suppress)
+    assert_includes result.fetch(:missing), "session_alive"
+  end
+
+  def test_unknown_session_alive_does_not_block_suppression
+    result = decision(evidence: base_evidence.merge(session_alive: nil))
+
+    assert_equal true, result.fetch(:suppress)
   end
 
   def test_missing_artifacts_block_suppression

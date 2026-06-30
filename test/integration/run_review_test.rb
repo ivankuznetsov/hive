@@ -2366,17 +2366,20 @@ class RunReviewTest < Minitest::Test
         folder = setup_review_task(dir)
         reviews_dir = File.join(folder, "reviews")
         FileUtils.mkdir_p(reviews_dir)
-        File.write(File.join(reviews_dir, "stub-reviewer-01.md"), <<~MD)
-          ## High
-          - [x] apply a fix
-          - [x] RESOLVED/NO-FIX: lib/foo.rb already handles the case <!-- triage: existing guard -->
-        MD
+        reviewer_file = File.join(reviews_dir, "stub-reviewer-01.md")
+        File.write(reviewer_file, "## High\n- [x] apply a fix\n")
         File.write(File.join(reviews_dir, "escalations-01.md"), "# Escalations for pass 01\n\n_All clean._\n")
         Hive::Markers.set(File.join(folder, "task.md"), :review_waiting, pass: 1, escalations: 1)
 
         accepted_seen = nil
         with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:|
           accepted_seen = accepted
+          # Whole-pass no-change: the fix agent investigated the finding,
+          # found the code already correct, and dispositioned it
+          # RESOLVED/NO-FIX — leaving NO unapplied AUTO-FIX work and no
+          # commit. (A do-nothing agent that left `- [x] apply a fix`
+          # unapplied is exercised by the review_errors test below.)
+          File.write(reviewer_file, "## High\n- [x] RESOLVED/NO-FIX: lib/foo.rb already handles the case\n")
           {
             status: :timeout,
             error_message: "claude stop hook did not signal completion",
@@ -2400,6 +2403,10 @@ class RunReviewTest < Minitest::Test
         marker = Hive::Markers.current(File.join(folder, "task.md"))
         assert_equal :review_complete, marker.name
         assert File.exist?(File.join(reviews_dir, "fix-success-01.md"))
+        events = File.readlines(File.join(folder, "events.jsonl"), chomp: true).map { |line| JSON.parse(line) }
+        fallback = events.select { |event| event["event_type"] == "claude_completion_fallback" }
+        assert_equal 1, fallback.size
+        assert_includes fallback.first.fetch("message"), "commit_evidence=whole_pass_no_change"
       end
     end
   end

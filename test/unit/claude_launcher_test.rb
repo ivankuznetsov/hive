@@ -1159,11 +1159,21 @@ class ClaudeLauncherTest < Minitest::Test
 
   def test_wait_for_done_signal_returns_timeout_evidence_when_pane_is_idle
     with_tmp_task do |task|
-      tail = "Claude Code v2.1.128\n\n/home/project  ❯"
-      runner = Struct.new(:tail) do
+      # Cold-start guard: the launcher must first observe the turn underway
+      # (a non-idle pane) before it trusts a later idle pane as "turn
+      # ended". So feed a busy pane on the first poll, then idle.
+      busy = "Claude Code v2.1.128\nworking…\n"
+      idle = "Claude Code v2.1.128\n\n/home/project  ❯"
+      runner = Struct.new(:tails) do
         def session_exists? = true
-        def capture_pane_tail(bytes:) = tail
-      end.new(tail)
+
+        def capture_pane_tail(bytes:)
+          @i ||= 0
+          tail = tails[[ @i, tails.size - 1 ].min]
+          @i += 1
+          tail
+        end
+      end.new([ busy, idle ])
 
       result = Hive::ClaudeLauncher.wait_for_done_signal(task, runner, 10, "fix")
 
@@ -1173,6 +1183,26 @@ class ClaudeLauncherTest < Minitest::Test
       assert_equal true, evidence.fetch(:session_alive)
       assert_nil evidence.fetch(:process_exited)
       assert_equal "turn_ended_without_stop_hook", evidence.fetch(:reason)
+    end
+  end
+
+  def test_wait_for_done_signal_ignores_cold_start_idle_before_work_starts
+    with_tmp_task do |task|
+      # The input box can still show the idle `❯` caret between our Enter
+      # keystroke and Claude's first streamed token. With no observed work,
+      # the launcher must NOT report turn_ended on that pre-work prompt — it
+      # drains to the deadline rather than sealing an untouched run done.
+      idle = "Claude Code v2.1.128\n\n/home/project  ❯"
+      runner = Struct.new(:tail) do
+        def session_exists? = true
+        def capture_pane_tail(bytes:) = tail
+      end.new(idle)
+
+      result = Hive::ClaudeLauncher.wait_for_done_signal(task, runner, 0, "fix")
+
+      assert_equal :timeout, result.fetch(:status)
+      evidence = result.fetch(:completion_evidence)
+      assert_equal "deadline_without_stop_hook", evidence.fetch(:reason)
     end
   end
 

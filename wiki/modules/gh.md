@@ -3,7 +3,7 @@ title: Hive::Gh
 type: module
 source: lib/hive/gh.rb
 created: 2026-06-08
-updated: 2026-06-29
+updated: 2026-06-27
 tags: [github, gh, module, pr]
 ---
 
@@ -20,7 +20,7 @@ tags: [github, gh, module, pr]
 | `lookup_existing_pr(...)` | Returns only `OPEN` PRs from `lookup_prs_for_branch`; closed/merged PRs are excluded from the normal open-pr path. |
 | `lookup_merged_pr(..., head_oid: nil)` | Returns a `MERGED` PR, optionally requiring `headRefOid` to match the current local `HEAD`. [[stages/open-pr]] uses this for already-merged branch recovery. |
 | `pr_state(pr_url, cfg: nil)` | Runs `gh pr view <url> --json state` and returns the state string. `Hive::Commands::StageAction` uses it to re-confirm a daemon-only merged-finalize-error archive recovery before moving the task to `9-done`. |
-| `pr_metadata(number, cfg: nil, chdir: nil)` | Runs `gh pr view <n> --json number,url,baseRefName,headRefOid,isCrossRepository,state` and returns `PrMetadata`. `Hive::Commands::AdhocReview` uses it to confirm the PR exists, record declared base/head state, and cross-check the materialized worktree HEAD. The load-bearing `chdir:` kwarg runs the `gh` call in the resolved project root because `gh` has no `-C`; this makes `hive review --pr N --project NAME` query the selected repository instead of the caller's cwd. |
+| `pr_metadata(number, cfg: nil, chdir: nil)` | Runs `gh pr view <n> --json number,url,baseRefName,headRefOid,isCrossRepository,state` and returns `PrMetadata`. `Hive::Commands::AdhocReview` uses it to confirm the PR exists, record the declared base/head state, and cross-check materialized worktree HEAD. The load-bearing `chdir:` kwarg runs the `gh` call in the resolved project root (`gh` has no `-C`, so cwd selects the repo) — that is exactly what makes `hive review --pr N --project NAME` query the right repository instead of the caller's cwd. |
 | `list_open_prs(worktree_path, cfg: nil)` | Runs `gh pr list --state open --limit 1000` and includes `mergeStateStatus`; [[modules/babysitter]] uses that field to prioritize dirty/conflicted PRs before age. |
 | `pr_status_rollup` / `pr_failing_job_logs` | Fetch PR merge/check state and tail-clipped failing job logs for babysitter repair context. |
 | `pr_diff_stat` / `pr_base_divergence` | Fetch base and compute diff/divergence context for babysitter prompts. `pr_base_divergence` is best-effort and returns blank fields on git hiccups. |
@@ -41,7 +41,7 @@ Normal workflow commands do not treat a PR URL as sufficient proof that a task c
 
 ## Tests
 
-- `test/unit/gh_test.rb` covers frontmatter parsing, secret-scan fetch-failure semantics, open/merged PR lookup contracts, `pr_state` success/error parsing, `pr_metadata` parsing/error handling/project `chdir:` scoping, `PushResult`, subprocess timeout/termination, `list_open_prs` JSON fields, failing-job log clipping, and malformed JSON failures.
+- `test/unit/gh_test.rb` covers frontmatter parsing, secret-scan fetch-failure semantics, open/merged PR lookup contracts, `pr_state` success/error parsing, `pr_metadata` parsing/error handling, `PushResult`, subprocess timeout/termination, `list_open_prs` JSON fields, failing-job log clipping, and malformed JSON failures.
 - `test/unit/daemon/pr_merge_watcher_test.rb`, `test/unit/daemon/dispatcher_test.rb`, and `test/integration/run_stage_action_test.rb` cover the merged-finalize-error archive path that uses `pr_state`.
 
 ## Backlinks

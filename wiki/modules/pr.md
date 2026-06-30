@@ -3,7 +3,7 @@ title: Hive::Pr
 type: module
 source: lib/hive/pr.rb
 created: 2026-06-15
-updated: 2026-06-29
+updated: 2026-06-27
 tags: [module, pr, tui, status, bot, telegram]
 ---
 

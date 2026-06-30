@@ -20,6 +20,10 @@ class HiveDigestRunTest < Minitest::Test
     def for_items(_items) = totals
   end
 
+  FakePairingStore = Struct.new(:count) do
+    def pending = Array.new(count) { Object.new }
+  end
+
   FakeSender = Struct.new(:deliveries) do
     def preflight! = nil
 
@@ -53,7 +57,8 @@ class HiveDigestRunTest < Minitest::Test
       dry_run: false,
       cfg: {},
       collector: FakeCollector.new({}),
-      sender: sender
+      sender: sender,
+      pairing_store: pairing_store(0)
     )
 
     assert_equal :empty, result.status
@@ -73,7 +78,8 @@ class HiveDigestRunTest < Minitest::Test
       collector: FakeCollector.new({ "alpha" => [ item ] }),
       categorizer: FakeCategorizer.new(categorized, nil, "Shipped the digest."),
       sender: sender,
-      stats: FakeStats.new(totals)
+      stats: FakeStats.new(totals),
+      pairing_store: pairing_store(0)
     )
 
     assert_equal :sent, result.status
@@ -96,7 +102,8 @@ class HiveDigestRunTest < Minitest::Test
       cfg: {},
       collector: FakeCollector.new({ "alpha" => [ shipped_item ] }),
       categorizer: FakeCategorizer.new(nil, Hive::Digest::ModelError.new("model down")),
-      sender: sender
+      sender: sender,
+      pairing_store: pairing_store(0)
     )
 
     assert_equal :failed_notice, result.status
@@ -121,7 +128,8 @@ class HiveDigestRunTest < Minitest::Test
         dry_run: false,
         cfg: {},
         collector: FakeCollector.new({}),
-        sender: FakeSender.new([])
+        sender: FakeSender.new([]),
+        pairing_store: pairing_store(0)
       )
     end
 
@@ -137,7 +145,8 @@ class HiveDigestRunTest < Minitest::Test
         dry_run: true,
         cfg: {},
         collector: FakeCollector.new({}),
-        sender: FakeSender.new([])
+        sender: FakeSender.new([]),
+        pairing_store: pairing_store(0)
       )
     end
 
@@ -166,7 +175,8 @@ class HiveDigestRunTest < Minitest::Test
         { "alpha" => [ Hive::Digest::CategorizedItem.new(item: shipped_item, category: "feature", summary: "x") ] },
         nil
       ),
-      sender: sender
+      sender: sender,
+      pairing_store: pairing_store(0)
     )
 
     assert_equal :load, order.first,
@@ -183,10 +193,54 @@ class HiveDigestRunTest < Minitest::Test
       cfg: {},
       clock: -> { Time.local(2026, 6, 14, 0, 10, 0) },
       collector: FakeCollector.new({}),
-      sender: FakeSender.new([])
+      sender: FakeSender.new([]),
+      pairing_store: pairing_store(0)
     )
 
     assert_equal Date.new(2026, 6, 13), result.date
+  end
+
+  def test_empty_digest_appends_pairing_notice_when_pending
+    sender = FakeSender.new([])
+    result = Hive::Digest.run(
+      date: Date.new(2026, 6, 13),
+      dry_run: true,
+      cfg: {},
+      collector: FakeCollector.new({}),
+      sender: sender,
+      pairing_store: pairing_store(1)
+    )
+
+    assert_equal :empty, result.status
+    assert_equal "Nothing shipped today 🌙\n\n🔑 1 pairing request waiting — run `hive pairing list`",
+                 result.message
+    assert_equal result.message, sender.deliveries.first.fetch(:text)
+  end
+
+  def test_successful_digest_appends_plural_pairing_notice_when_pending
+    item = shipped_item
+    categorized = {
+      "alpha" => [
+        Hive::Digest::CategorizedItem.new(item: item, category: "feature", summary: "Adds digest.")
+      ]
+    }
+    sender = FakeSender.new([])
+
+    result = Hive::Digest.run(
+      date: Date.new(2026, 6, 13),
+      dry_run: true,
+      cfg: {},
+      collector: FakeCollector.new({ "alpha" => [ item ] }),
+      categorizer: FakeCategorizer.new(categorized, nil, "Shipped the digest."),
+      sender: sender,
+      stats: FakeStats.new(nil),
+      pairing_store: pairing_store(2)
+    )
+
+    assert_equal :sent, result.status
+    assert_includes result.message, "Adds digest"
+    assert_includes result.message, "🔑 2 pairing requests waiting — run `hive pairing list`"
+    assert_equal result.message, sender.deliveries.first.fetch(:text)
   end
 
   private
@@ -218,5 +272,9 @@ class HiveDigestRunTest < Minitest::Test
       pr_body: "body",
       shipped_at: Time.utc(2026, 6, 13, 12)
     )
+  end
+
+  def pairing_store(count)
+    FakePairingStore.new(count)
   end
 end

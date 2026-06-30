@@ -10,6 +10,7 @@ require "hive/digest/categorizer"
 require "hive/digest/renderer"
 require "hive/digest/sender"
 require "hive/digest/stats"
+require "hive/bot/pairing_store"
 
 module Hive
   module Digest
@@ -33,7 +34,8 @@ module Hive
     module_function
 
     def run(date: nil, dry_run: false, cfg: nil, clock: -> { Time.now },
-            collector: nil, categorizer: nil, sender: nil, stats: nil)
+            collector: nil, categorizer: nil, sender: nil, stats: nil,
+            pairing_store: Hive::Bot::PairingStore.new)
       local_date = date ? Window.parse_date(date) : Window.previous_local_day(now: clock.call)
       cfg ||= Hive::Config.load_global_digest_config
       # Load ~/.config/hive/.env (if present) so a real send can authenticate
@@ -51,6 +53,7 @@ module Hive
       stats ||= Stats.new
 
       grouped = collector.for_date(local_date)
+      pending_pairings = pairing_store.pending.size
       message, status =
         if empty_grouped?(grouped)
           [ Renderer.empty, :empty ]
@@ -62,6 +65,7 @@ module Hive
           sender.preflight! unless dry_run
           render_digest(grouped, local_date, cfg, categorizer, stats)
         end
+      message = append_pairing_notice(message, pending_pairings)
 
       delivery = sender.deliver(message, dry_run: dry_run)
       Result.new(status: status, date: local_date, message: message, delivery: delivery)
@@ -71,6 +75,14 @@ module Hive
       message = Renderer.failed(local_date)
       delivery = sender.deliver(message, dry_run: dry_run)
       Result.new(status: :failed_notice, date: local_date, message: message, delivery: delivery)
+    end
+
+    def append_pairing_notice(message, count)
+      count = count.to_i
+      return message if count <= 0
+
+      noun = count == 1 ? "request" : "requests"
+      "#{message}\n\n🔑 #{count} pairing #{noun} waiting — run `hive pairing list`"
     end
 
     def empty_grouped?(grouped)

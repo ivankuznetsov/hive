@@ -16,6 +16,13 @@ module Hive
 
       attr_reader :path
 
+      # Codes are minted from an A–Z alphabet, so an operator who retypes one
+      # by hand may pad it with whitespace or lowercase it. Strip + upcase so
+      # those harmless variations still match the stored key.
+      def self.normalize_code(code)
+        code.to_s.strip.upcase
+      end
+
       def initialize(state_home: Hive::Paths.state_home, now: -> { Time.now })
         @state_home = state_home
         @path = File.join(state_home, FILENAME)
@@ -24,11 +31,17 @@ module Hive
 
       def mint_or_get(chat_id:)
         with_lock do
-          entries = pruned_entries(load_entries)
+          loaded = load_entries
+          entries = pruned_entries(loaded)
           existing = entries.find do |_code, payload|
             payload["chat_id"] == chat_id && !expired_payload?(payload)
           end
-          return existing.first if existing
+          if existing
+            # Persist the prune even on the reuse path, so expired sibling
+            # codes don't linger on disk until some later write.
+            write_entries(entries) if entries.length != loaded.length
+            return existing.first
+          end
 
           code = fresh_code(entries)
           entries[code] = {
@@ -42,14 +55,25 @@ module Hive
 
       def pending
         with_lock do
-          entries = pruned_entries(load_entries)
-          write_entries(entries)
-          entry_structs(entries)
+          entries = load_entries
+          pruned = pruned_entries(entries)
+          # `pending` is a read-mostly query (the digest and `hive pairing
+          # list` both call it). Only rewrite when pruning actually removed an
+          # entry — an unconditional tmp+rename+fsync on every call turned a
+          # count into a write and crashed those paths on a read-only/full
+          # state dir.
+          write_entries(pruned) if pruned.length != entries.length
+          entry_structs(pruned)
         end
       end
 
-      def resolve_and_consume(code:)
-        normalized = code.to_s.strip
+      # Look up a code WITHOUT consuming it. Returns the chat_id, :expired, or
+      # :unknown. Kept separate from `consume` so callers can run their
+      # fallible work (allowlist write, notice queue) before the destructive
+      # delete — a failure before consume then leaves the code pending for a
+      # clean retry instead of silently losing it.
+      def resolve(code:)
+        normalized = self.class.normalize_code(code)
         return :unknown if normalized.empty?
 
         with_lock do
@@ -61,12 +85,31 @@ module Hive
             return :unknown
           end
 
-          entries.delete(normalized)
-          write_entries(pruned_entries(entries))
-          return :expired if expired_payload?(payload)
-
-          payload["chat_id"]
+          expired_payload?(payload) ? :expired : payload["chat_id"]
         end
+      end
+
+      # Delete a code from the pending set. Idempotent: returns true when an
+      # entry was removed, false when nothing matched.
+      def consume(code:)
+        normalized = self.class.normalize_code(code)
+        return false if normalized.empty?
+
+        with_lock do
+          entries = load_entries
+          removed = entries.delete(normalized)
+          write_entries(pruned_entries(entries)) unless removed.nil?
+          !removed.nil?
+        end
+      end
+
+      # Atomic resolve-then-delete. Retained as a convenience for callers that
+      # don't need the two-phase guarantee; `approve` deliberately splits the
+      # phases via `resolve` + `consume`.
+      def resolve_and_consume(code:)
+        result = resolve(code: code)
+        consume(code: code) unless result == :unknown
+        result
       end
 
       def prune_expired!

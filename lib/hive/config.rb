@@ -453,6 +453,7 @@ module Hive
       # only in HIVE_TELEGRAM_BOT_TOKEN and is never persisted.
       "bot" => {
         "enabled" => false,
+        "pairing_enabled" => false,
         "chat_id_allowlist" => [],
         "poll_interval_sec" => 30,
         "long_poll_timeout_sec" => 25,
@@ -2332,6 +2333,13 @@ module Hive
               "(true / false); got #{enabled.inspect} (#{enabled.class})"
       end
 
+      pairing_enabled = bot["pairing_enabled"]
+      unless pairing_enabled.nil? || pairing_enabled == true || pairing_enabled == false
+        raise ConfigError,
+              "bot.pairing_enabled in #{describe_source(source_path)} must be a boolean " \
+              "(true / false); got #{pairing_enabled.inspect} (#{pairing_enabled.class})"
+      end
+
       validate_bot_allowlist!(bot, source_path)
       warn_deprecated_bot_dedupe!(bot, source_path)
       validate_bot_numbers!(bot, source_path)
@@ -2343,6 +2351,7 @@ module Hive
       telegram_bot_token!
       allowlist = bot["chat_id_allowlist"]
       return if allowlist.is_a?(Array) && !allowlist.empty?
+      return if bot["pairing_enabled"]
 
       raise ConfigError,
             "bot.chat_id_allowlist in #{describe_source(source_path)} must contain at least one chat_id " \

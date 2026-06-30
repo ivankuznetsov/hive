@@ -3249,6 +3249,7 @@ class ConfigTest < Minitest::Test
       cfg = Hive::Config.load(dir)
 
       assert_equal false, cfg.dig("bot", "enabled")
+      assert_equal false, cfg.dig("bot", "pairing_enabled")
       assert_equal [], cfg.dig("bot", "chat_id_allowlist")
       assert_equal 30, cfg.dig("bot", "poll_interval_sec")
       assert_equal 25, cfg.dig("bot", "long_poll_timeout_sec")
@@ -3291,6 +3292,19 @@ class ConfigTest < Minitest::Test
 
       err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_bot }
       assert_match(/bot\.enabled.*must be a boolean/, err.message)
+    end
+  end
+
+  def test_load_global_bot_rejects_non_boolean_pairing_enabled
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        bot:
+          pairing_enabled: sometimes
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_bot }
+      assert_match(/bot\.pairing_enabled.*must be a boolean/, err.message)
     end
   end
 
@@ -3559,6 +3573,69 @@ class ConfigTest < Minitest::Test
 
       err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_bot(require_runtime: true) }
       assert_match(/bot.chat_id_allowlist.*at least one chat_id/, err.message)
+    ensure
+      if old
+        ENV["HIVE_TELEGRAM_BOT_TOKEN"] = old
+      else
+        ENV.delete("HIVE_TELEGRAM_BOT_TOKEN")
+      end
+    end
+  end
+
+  def test_load_global_bot_runtime_allows_empty_allowlist_when_pairing_enabled
+    with_tmp_global_config do |home|
+      old = ENV["HIVE_TELEGRAM_BOT_TOKEN"]
+      ENV["HIVE_TELEGRAM_BOT_TOKEN"] = "token"
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        bot:
+          pairing_enabled: true
+          chat_id_allowlist: []
+      YAML
+
+      cfg = Hive::Config.load_global_bot(require_runtime: true)
+
+      assert_equal true, cfg["pairing_enabled"]
+      assert_equal [], cfg["chat_id_allowlist"]
+    ensure
+      if old
+        ENV["HIVE_TELEGRAM_BOT_TOKEN"] = old
+      else
+        ENV.delete("HIVE_TELEGRAM_BOT_TOKEN")
+      end
+    end
+  end
+
+  def test_load_global_bot_runtime_pairing_still_requires_token
+    with_tmp_global_config do |home|
+      old = ENV.delete("HIVE_TELEGRAM_BOT_TOKEN")
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        bot:
+          pairing_enabled: true
+          chat_id_allowlist: []
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_bot(require_runtime: true) }
+      assert_match(/HIVE_TELEGRAM_BOT_TOKEN/, err.message)
+    ensure
+      ENV["HIVE_TELEGRAM_BOT_TOKEN"] = old if old
+    end
+  end
+
+  def test_load_global_bot_runtime_pairing_still_requires_integer_allowlist_entries
+    with_tmp_global_config do |home|
+      old = ENV["HIVE_TELEGRAM_BOT_TOKEN"]
+      ENV["HIVE_TELEGRAM_BOT_TOKEN"] = "token"
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        bot:
+          pairing_enabled: true
+          chat_id_allowlist: ["12345"]
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_bot(require_runtime: true) }
+      assert_match(/bot.chat_id_allowlist\[0\].*Integer/, err.message)
     ensure
       if old
         ENV["HIVE_TELEGRAM_BOT_TOKEN"] = old

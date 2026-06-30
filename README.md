@@ -76,7 +76,9 @@ hive web
 QMD, SQLite, and the Rails bundle. It installs Hive-owned pieces it can
 manage, installs the daemon service, and enrolls the current project. Bare
 `hive web` serves `http://127.0.0.1:4567` in the foreground with
-loopback-only no-auth mode. For autostart, run `hive setup --service` or
+loopback-only no-auth mode (set `web.local_loopback: false` to require GitHub
+login even on a loopback bind — see [wiki/commands/web.md](wiki/commands/web.md)).
+For autostart, run `hive setup --service` or
 `hive web install` and `hive web start --detach`; the web service is separate
 from the daemon service. Docker/hivebox remains supported for container-first
 installs.

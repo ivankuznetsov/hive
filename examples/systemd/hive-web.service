@@ -3,10 +3,9 @@
 # BEFORE INSTALLING: edit ExecStart= to match where YOUR `hive` binary
 # lives. `which hive` shows it. Common paths:
 #
-#   %h/.local/bin/hive                           ← README install (option-A
-#                                                  symlink: ln -s ~/Dev/hive/bin/hive ~/.local/bin/hive)
-#   %h/Dev/hive/bin/hive                         ← README install (option-B,
-#                                                  direct from clone, no symlink)
+#   %h/.local/bin/hive                           ← README dev-clone symlink
+#                                                  (ln -sf ~/Dev/hive/bin/hive ~/.local/bin/hive)
+#   %h/Dev/hive/bin/hive                         ← direct from a clone, no symlink
 #   /usr/local/bin/hive                          ← system gem install
 #   %h/.local/share/mise/shims/hive              ← mise / rbenv / asdf / chruby shim
 #

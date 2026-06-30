@@ -135,9 +135,10 @@ When the user wants the browser UI, prefer the first-class local setup command:
 
 It runs diagnostics, installs Hive-owned QMD/web pieces, ensures the daemon
 service, enrolls the current project, and leaves the web UI runnable with
-`"$hive_cmd" web` at `http://127.0.0.1:4567`. Use
-`"$hive_cmd" setup --service` when the user also wants a managed `hive-web`
-service.
+`"$hive_cmd" web` at `http://127.0.0.1:4567`. Bare `hive web` on a loopback
+bind runs no-auth by default; set `web.local_loopback: false` to require
+GitHub login even on loopback. Use `"$hive_cmd" setup --service` when the user
+also wants a managed `hive-web` service.
 
 ## Initialize Project
 

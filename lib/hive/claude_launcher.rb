@@ -62,6 +62,11 @@ module Hive
     CLAUDE_PERMISSION_PROMPT_MARKER = "Do you want to".freeze
     CLAUDE_READY_BANNER_MARKER = "Claude Code".freeze
     CLAUDE_READY_FOOTER_MARKER = "for agents".freeze
+    # The `⏵⏵ bypass permissions …` hint footer that renders beneath the idle
+    # caret. Match the copy, not the bare `⏵⏵` glyph: a stale caret followed by
+    # real output Claude prints with that glyph (e.g. `⏵⏵ running build step
+    # 1/2`) must NOT be mistaken for terminal chrome.
+    CLAUDE_PROMPT_FOOTER_HINT_MARKER = "bypass permissions".freeze
     # The caret as the FIRST glyph (`❯ …`, older builds) or the LAST glyph
     # (`… ?  ❯`, the line-end caret newer builds render after the cwd/git
     # context). Ruby's `String#strip` does not normalize every Unicode
@@ -649,7 +654,7 @@ module Hive
       # `.reject(&:empty?)`-filtered, so blank lines never reach this
       # predicate — only non-empty footer/separator chrome does.
       line.include?(CLAUDE_READY_FOOTER_MARKER) ||
-        line.start_with?("⏵⏵") ||
+        (line.start_with?("⏵⏵") && line.include?(CLAUDE_PROMPT_FOOTER_HINT_MARKER)) ||
         line.match?(CLAUDE_PROMPT_CHROME_LINE)
     end
 

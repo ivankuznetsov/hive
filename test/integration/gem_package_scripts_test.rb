@@ -1,6 +1,7 @@
 require "test_helper"
 require "open3"
 require "rubygems/package"
+require "tmpdir"
 
 class GemPackageScriptsTest < Minitest::Test
   ROOT = File.expand_path("../..", __dir__)

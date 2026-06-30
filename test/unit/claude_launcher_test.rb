@@ -641,6 +641,21 @@ class ClaudeLauncherTest < Minitest::Test
            "a caret with non-footer output below it is not the live idle prompt"
   end
 
+  # Claude can paint the `⏵⏵` glyph in its OWN output (e.g. a build/progress
+  # line), not only the `⏵⏵ bypass permissions …` hint footer. A stale caret
+  # with such a line below it must stay rejected: only the bypass-permissions
+  # footer copy counts as terminal chrome, never a bare `⏵⏵` prefix.
+  def test_claude_ready_prompt_rejects_caret_above_non_footer_caret_glyph_line
+    pane = "Claude Code v2.1.179\n\n" \
+           "╭────────────────────────────────────────────────────────────────────────╮\n" \
+           "❯\n" \
+           "╰────────────────────────────────────────────────────────────────────────╯\n" \
+           "⏵⏵ running build step 1/2"
+
+    refute Hive::ClaudeLauncher.claude_ready_prompt?(pane),
+           "a `⏵⏵`-prefixed output line that is not the bypass-permissions footer is not terminal chrome"
+  end
+
   # A bare caret line is a legitimate idle prompt; lock it as intentional.
   def test_claude_ready_prompt_accepts_bare_caret
     pane = "Claude Code v2.1.133\n\n❯"

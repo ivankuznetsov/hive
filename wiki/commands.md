@@ -1,9 +1,9 @@
 ---
 title: Interaction Surface
 type: commands
-source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/cli.rb, lib/hive/commands/adhoc_review.rb, lib/hive/commands/setup.rb, lib/hive/commands/connect.rb, lib/hive/commands/disconnect.rb, lib/hive/commands/bench_submit.rb, lib/hive/commands/digest.rb, lib/hive/digest.rb, lib/hive/digest/, lib/hive/web/, public/, hive.gemspec, packaging/docker/, .github/workflows/release.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
+source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/cli.rb, lib/hive/commands/connect.rb, lib/hive/commands/disconnect.rb, lib/hive/commands/bench_submit.rb, lib/hive/commands/digest.rb, lib/hive/digest.rb, lib/hive/digest/, lib/hive/web/, public/, hive.gemspec, packaging/docker/, .github/workflows/release.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-14
-updated: 2026-06-30
+updated: 2026-06-22
 tags: [commands, api]
 ---
 
@@ -23,7 +23,6 @@ one ClawHub listing per Hive verb.
 - `bin/hv`
 - `bin/hive-e2e`
 - `lib/hive/cli.rb`
-- `lib/hive/commands/adhoc_review.rb`
 - `lib/hive/commands/connect.rb`
 - `lib/hive/commands/disconnect.rb`
 - `lib/hive/commands/bench_submit.rb`
@@ -50,9 +49,8 @@ one ClawHub listing per Hive verb.
 `bin/hive` loads `Hive::CLI` and exposes the public command set documented in
 [[cli]] and `wiki/commands/*`. The CLI includes workflow verbs (`new`,
 `brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`,
-`archive`), the `hive review --pr` overlay for ad-hoc review of an existing
-GitHub PR, project workflow authoring via [[commands/workflow]], daemon/bot/babysitter
-lifecycle commands, diagnostics, markers, findings, metrics, update/uninstall,
+`archive`), project workflow authoring via [[commands/workflow]], [[commands/setup]],
+daemon/bot/babysitter lifecycle commands, diagnostics, markers, findings, metrics, update/uninstall,
 registry maintenance, Screenote connect/disconnect, the `hive bench submit`
 corpus-submission producer, the `hive digest` shipped-digest producer, and
 `--json` envelopes where the command page says they exist.
@@ -89,13 +87,6 @@ does not create task-state commits. The daemon can schedule it as a global,
 non-project-scoped child after local midnight when `digest.enabled: true`. See
 [[commands/digest]] and [[modules/digest]].
 
-`hive setup` is the local workstation provisioning bridge for installs that
-want the same first-run shape as hivebox without Docker: it emits a `hive-setup`
-phase report, installs/repairs Hive-owned QMD and managed web bundle assets when
-allowed, installs the daemon service, enrolls the current project unless
-disabled, and can install the separate web service with `--service`. See
-[[commands/setup]].
-
 `hive connect screenote` and `hive disconnect screenote` manage the operator's
 Screenote OAuth credential for MCP-backed artifact uploads. The connect flow
 uses loopback auth-code + PKCE, lists projects through Screenote MCP, and
@@ -113,8 +104,8 @@ The checked-in skill version is `0.1.1`. Its frontmatter `description` is the
 public listing/search summary, while the opening markdown body documents the
 install and common workflow paths. `/hive setup`, `/hive install`, and
 `/hive bootstrap` enter the guided setup flow: verify or install the Hive CLI,
-run strict `hive`/`hv` version detection, install/enable the per-user daemon,
-and optionally run non-interactive `hive init` for the current repository.
+run strict `hive`/`hv` version detection, then delegate local provisioning to
+`hive setup --json`.
 
 For normal use, the slash-command text after `/hive` is treated as arguments
 for the detected Hive CLI binary. Examples in the skill include
@@ -132,10 +123,7 @@ CLI.
 
 ### Hivebox Web
 
-`hive web` boots the hivebox Rails 8 + Turbo app from `web/` or the managed
-version-stamped bundle (see [[commands/web]]): it derives SECRET_KEY_BASE from
-the persisted session secret, keeps the solid-stack sqlite under state_home,
-runs db:prepare, and execs `bin/rails server`. The web app reuses the same status, approval, daemon-queue,
+`hive web` boots the hivebox Rails 8 + Turbo app from `web/` (see [[commands/web]]): it derives SECRET_KEY_BASE from the persisted session secret, keeps the solid-stack sqlite under state_home, runs db:prepare, and execs `bin/rails server`. The web app reuses the same status, approval, daemon-queue,
 task-drop, agent-auth, repo, and Telegram setup contracts as the
 CLI/bot/daemon stack; it does not introduce a separate workflow engine. GitHub
 device-flow auth can either use a pre-pinned `web.github.owner` or first-login
@@ -157,10 +145,9 @@ mount persistent data, and print the local URL; the PowerShell script is the
 native Windows shape for Docker Desktop hosts where `sh` or MSYS path conversion
 would be the wrong interface. The release workflow publishes versioned and
 `latest` multi-arch hivebox images to GHCR after `release-finalize`. The gem
-deliberately does NOT package the Rails app in the gem itself (gemspec_test pins
-this); the local CLI can fetch the versioned release bundle into Hive's data
-home, and the app also ships in the Docker image at `/app/web` or runs from a
-source checkout.
+deliberately does NOT package the web app (gemspec_test pins this); the Rails
+app ships in the Docker image at /app/web or runs from a source checkout.
+`hive web` command has the same renderable UI assets as a source checkout.
 
 ### E2E Harness
 
@@ -190,6 +177,5 @@ exit `78`; JSON mode distinguishes them as `missing_repro` and
 - [[operating]]
 - [[e2e]]
 - [[commands/web]]
-- [[commands/setup]]
 - [[commands/digest]]
 - [[commands/screenote]]

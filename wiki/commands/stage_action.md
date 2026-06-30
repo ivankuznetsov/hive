@@ -1,13 +1,13 @@
 ---
 title: Workflow verbs
 type: command
-source: lib/hive/cli.rb, lib/hive/commands/stage_action.rb, lib/hive/commands/adhoc_review.rb, lib/hive/workflows.rb, lib/hive/gh.rb
+source: lib/hive/cli.rb, lib/hive/commands/stage_action.rb, lib/hive/workflows.rb, lib/hive/gh.rb
 created: 2026-04-26
-updated: 2026-06-29
+updated: 2026-06-14
 tags: [command, workflow, verbs, stage_action, json]
 ---
 
-**TLDR**: Eight Thor commands wrap promote-or-run for the stage transitions defined in `Hive::Workflows::VERBS`: `brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, and `archive <target>`. The CLI also gives `hive archive` a no-target listing mode that delegates to [[commands/status]] archive mode instead of `StageAction`; a daemon-only archive recovery flag can retire two whitelisted `8-finalize` error markers after GitHub reports the PR as merged. `hive review --pr PR` is the workflow-verb overlay for ad-hoc review: it creates or reuses an ad-hoc `6-review` task, then calls the same StageAction review path for the generated slug.
+**TLDR**: Eight Thor commands wrap promote-or-run for the stage transitions defined in `Hive::Workflows::VERBS`: `brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, and `archive <target>`. The CLI also gives `hive archive` a no-target listing mode that delegates to [[commands/status]] archive mode instead of `StageAction`; a daemon-only archive recovery flag can retire two whitelisted `8-finalize` error markers after GitHub reports the PR as merged. `hive review --pr <n>` is the one workflow-verb overlay: it first creates or reuses an ad-hoc `6-review` task and then calls this same StageAction path with the generated slug.
 
 ## Usage
 
@@ -31,7 +31,7 @@ hive plan <slug> --json                   # machine-readable hive-stage-action e
 
 No-target `hive archive` is a CLI overlay in `Hive::CLI#archive`: when `target.nil?`, it constructs `Hive::Commands::Status.new(json: options[:json], archive: true)` and returns before `StageAction` is involved. Only `hive archive <target>` uses the promote-or-run workflow semantics below.
 
-`hive review --pr PR` is a CLI overlay in `Hive::CLI#review`. `PR` accepts a bare number, `#number`, or a GitHub `/pull/number` URL; bare positional `hive review 197` is unchanged and still resolves task id `197`. The overlay uses `Hive::Commands::AdhocReview` to resolve the registered project from the current directory or `--project NAME`, fetch PR metadata through `Hive::Gh.pr_metadata`, create/reuse `6-review/adhoc-review-pr-N/`, refuse if another Hive task already owns that PR, and materialize the PR head at the normal worktree root through `Hive::Worktree.materialize_pr`. After the task exists it calls `StageAction.new("review", slug, project:, json:)`, so a fresh ad-hoc task is already at the review stage and emits normal `phase: "ran"` text/JSON behavior.
+`hive review --pr PR` is a CLI overlay in `Hive::CLI#review`. `PR` accepts a bare number, `#number`, or a GitHub `/pull/number` URL; bare positional `hive review 197` is unchanged and still resolves task id `197`. The overlay uses `Hive::Commands::AdhocReview` to resolve the registered project from the current directory or `--project NAME`, fetch PR metadata through `gh`, create/reuse `6-review/adhoc-review-pr-N/`, and refuse if another Hive task already owns that PR. It then calls `StageAction.new("review", slug, project:, json:)`, so a fresh ad-hoc task is already at the target stage and emits the normal `phase: "ran"` text/JSON behavior.
 
 `hive archive TARGET --recover-merged-error-reason REASON` is internal daemon plumbing, not an operator workflow. `Hive::Daemon::PrMergeWatcher` appends it only after polling `gh pr view --json state` and seeing `MERGED` for a task that is still at `8-finalize` with one of the whitelisted stale-local-error reasons. `StageAction` re-checks the current marker and GitHub state before accepting it.
 

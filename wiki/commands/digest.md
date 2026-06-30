@@ -3,7 +3,7 @@ title: hive digest
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/digest.rb, lib/hive/digest.rb, lib/hive/digest/
 created: 2026-06-14
-updated: 2026-06-19
+updated: 2026-06-30
 tags: [command, digest, telegram, json]
 ---
 
@@ -69,6 +69,11 @@ Options:
 7. `Digest::Sender` sends the message with `parse_mode: :markdown_v2` (one
    `send_message` per chunk above Telegram's 4096-char limit), or returns the
    text without credentials in dry-run mode.
+
+If pending Telegram pairing requests exist, `Hive::Digest.run` appends one
+reminder line to the empty or successful digest body: `🔑 N pairing request(s)
+waiting — run hive pairing list`. The count comes from the local
+`PairingStore`, not from the categorizer prompt.
 
 If categorization raises `Hive::Digest::ModelError`, `Hive::Digest.run` sends
 a failed-generation notice for the date and returns `status: :failed_notice`.

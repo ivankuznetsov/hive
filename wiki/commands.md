@@ -1,9 +1,9 @@
 ---
 title: Interaction Surface
 type: commands
-source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/cli.rb, lib/hive/commands/connect.rb, lib/hive/commands/disconnect.rb, lib/hive/commands/bench_submit.rb, lib/hive/commands/digest.rb, lib/hive/digest.rb, lib/hive/digest/, lib/hive/web/, public/, hive.gemspec, packaging/docker/, .github/workflows/release.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
+source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/cli.rb, lib/hive/commands/connect.rb, lib/hive/commands/disconnect.rb, lib/hive/commands/bench_submit.rb, lib/hive/commands/digest.rb, lib/hive/commands/pairing.rb, lib/hive/digest.rb, lib/hive/digest/, lib/hive/web/, public/, hive.gemspec, packaging/docker/, .github/workflows/release.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-14
-updated: 2026-06-22
+updated: 2026-06-30
 tags: [commands, api]
 ---
 
@@ -11,7 +11,8 @@ tags: [commands, api]
 `hv` fallback launcher), the opt-in e2e harness, the hivebox web command/routes
 documented in [[commands/web]], `hive connect screenote` as the Screenote OAuth
 setup surface for artifacts MCP uploads, `hive bench submit` as the hive-bench
-corpus producer, `hive digest` as the daily shipped digest producer, and the
+corpus producer, `hive digest` as the daily shipped digest producer,
+`hive pairing` as the Telegram first-contact approval surface, and the
 single ClawHub `hive-cli` OpenClaw skill whose installed slash command is `/hive`.
 The Ruby command/API contract lives in [[cli]] and the
 per-command pages. OpenClaw does not add a second runtime and does not publish
@@ -27,6 +28,7 @@ one ClawHub listing per Hive verb.
 - `lib/hive/commands/disconnect.rb`
 - `lib/hive/commands/bench_submit.rb`
 - `lib/hive/commands/digest.rb`
+- `lib/hive/commands/pairing.rb`
 - `lib/hive/digest.rb`
 - `lib/hive/digest/**/*.rb`
 - `lib/hive/web/**/*.rb`
@@ -52,7 +54,8 @@ one ClawHub listing per Hive verb.
 `archive`), project workflow authoring via [[commands/workflow]], daemon/bot/babysitter
 lifecycle commands, diagnostics, markers, findings, metrics, update/uninstall,
 registry maintenance, Screenote connect/disconnect, the `hive bench submit`
-corpus-submission producer, the `hive digest` shipped-digest producer, and
+corpus-submission producer, the `hive digest` shipped-digest producer,
+the [[commands/pairing]] Telegram pairing approval surface, and
 `--json` envelopes where the command page says they exist.
 The wrapper also normalizes command-local help before Thor dispatch:
 `hive <cmd> --help`, `hive <cmd> -h`, and option-bearing forms such as
@@ -86,6 +89,11 @@ digest for one local calendar date, with dry-run and success JSON output. It
 does not create task-state commits. The daemon can schedule it as a global,
 non-project-scoped child after local midnight when `digest.enabled: true`. See
 [[commands/digest]] and [[modules/digest]].
+
+`hive pairing` lists and approves Telegram pairing requests minted by unknown
+DM chats that send `/start` while `bot.pairing_enabled: true`. Approval appends
+the chat id to the global bot allowlist, requests a live bot reload, and queues
+an approval DM for the running bot. See [[commands/pairing]] and [[modules/bot]].
 
 `hive connect screenote` and `hive disconnect screenote` manage the operator's
 Screenote OAuth credential for MCP-backed artifact uploads. The connect flow

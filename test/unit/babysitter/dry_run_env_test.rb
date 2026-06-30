@@ -689,6 +689,13 @@ class BabysitterDryRunEnvTest < Minitest::Test
       # Arbitrary file-write options defeat the no-mutation boundary on allowed reads.
       assert_stubbed env, "git", "diff", "--output=/tmp/hive-output-pwn"
       assert_stubbed env, "git", "log", "-p", "--output", "/tmp/hive-output-sep-pwn"
+      # A separate-word `--pretty` / `--format` on log/show/rev-list is stuck-only: git does NOT
+      # consume the next token as its format value (a bare `--pretty` uses the default format),
+      # so the argv scan must keep scanning the following token. Otherwise a trailing file-writing
+      # `--output` rides past the write guard and the stub execs real git, creating the file.
+      assert_stubbed env, "git", "log", "--pretty", "--output=/tmp/hive-pretty-output-pwn"
+      assert_stubbed env, "git", "show", "--pretty", "--output", "/tmp/hive-show-pretty-output-sep-pwn"
+      assert_stubbed env, "git", "rev-list", "--format", "--output=/tmp/hive-revlist-format-output-pwn", "HEAD"
       assert_stubbed env, "git", "diff", "-o", "/tmp/hive-output-short-pwn"
       assert_stubbed env, "git", "diff", "-o/tmp/hive-output-glued-pwn"
       assert_stubbed env, "git", "diff", "--ext-diff"

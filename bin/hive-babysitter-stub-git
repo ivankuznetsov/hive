@@ -134,14 +134,17 @@ def command_option_scan(subcommand, args)
 end
 
 def command_option_consumes_next?(subcommand, arg)
-  case subcommand
-  when "grep"
-    grep_option_consumes_next?(arg)
-  when "log", "show", "rev-list"
-    long_option_prefix?(arg, %w[--format --pretty])
-  else
-    false
-  end
+  # Only `git grep`'s value-taking options (`-e PATTERN`, `--file FILE`, ...) consume the
+  # following token. log/show/rev-list's `--pretty`/`--format` look value-taking but git
+  # registers them stuck-only (PARSE_OPT_OPTARG): a bare `--pretty` uses the default format and
+  # the next argv element is parsed on its own — e.g. `git log --pretty --output=/tmp/x` makes
+  # git write the file via `--output`, it is NOT consumed as a format value. Skipping that token
+  # here would slip the trailing `--output`/`-o` past the write-file guard, so do not consume it.
+  # The `%G` signature over-block is unaffected: command_option_scan still records
+  # `args[index + 1]` as next_arg regardless, so signature_verification_option? still inspects it.
+  return grep_option_consumes_next?(arg) if subcommand == "grep"
+
+  false
 end
 
 def grep_option_consumes_next?(arg)

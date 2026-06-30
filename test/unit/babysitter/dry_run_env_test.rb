@@ -664,6 +664,8 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "git", "--config-env=core.pager=HIVE_TEST_PAGER", "log", "--oneline"
       assert_stubbed env, "git", "--paginate", "log", "--oneline"
       assert_stubbed env, "git", "grep", "--open-files-in-pager=touch /tmp/hive-pager-pwn", "needle"
+      assert_stubbed env, "git", "grep", "-e", "--", "--open-files-in-pager=/tmp/hive-pager-sep-pwn"
+      assert_stubbed env, "git", "grep", "-e", "--", "--textconv"
       # On `git grep`, `-O` is the short form of `--open-files-in-pager`; both glued and
       # separate forms run an attacker-controlled pager command and must be rejected. (On
       # diff/log/show `-O` is the read-only `--output-ordering` — see the passthrough cases.)
@@ -862,6 +864,8 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes skipped, "git --config-env=core.pager=HIVE_TEST_PAGER log --oneline skipped"
       assert_includes skipped, "git --paginate log --oneline skipped"
       assert_includes skipped, "git grep --open-files-in-pager=touch /tmp/hive-pager-pwn needle skipped"
+      assert_includes skipped, "git grep -e -- --open-files-in-pager=/tmp/hive-pager-sep-pwn skipped"
+      assert_includes skipped, "git grep -e -- --textconv skipped"
       assert_includes skipped, "git remote show origin skipped"
 
       real_invocations = File.read(File.join(dir, "real.log"))

@@ -96,11 +96,10 @@ def split_global_options(argv)
 end
 
 def unsafe_command_options?(rest)
-  subcommand = rest.first
-  # Only tokens before the `--` pathspec separator are options; everything after it is a
-  # literal pathspec, so `git log -- -o` targets a file named `-o`, not the output flag.
-  options = (rest[1..] || []).take_while { |arg| arg != "--" }
-  options.each_with_index.any? { |arg, index| unsafe_read_option?(subcommand, arg, options[index + 1]) }
+  subcommand = rest.first.to_s
+  command_option_scan(subcommand, rest[1..] || []).any? do |arg, next_arg|
+    unsafe_read_option?(subcommand, arg, next_arg)
+  end
 end
 
 # `git grep` short options that consume the remainder of a cluster as their value. Once one
@@ -108,8 +107,60 @@ end
 # flags — so cluster scanning must stop there; e.g. `-eTODO` is the pattern `TODO`, not a
 # hidden `-O` pager flag.
 GREP_VALUE_TAKING_SHORT = "efmABC".chars.freeze
+GREP_VALUE_TAKING_LONG = %w[
+  --regexp
+  --file
+  --max-count
+  --after-context
+  --before-context
+  --context
+].freeze
 SIGNATURE_FORMAT_SUBCOMMANDS = %w[log show rev-list].freeze
 SHOW_SIGNATURE_SUBCOMMANDS = %w[log show].freeze
+
+# Walk command arguments in the same order git parses them: a `--` token only becomes the
+# pathspec separator after a preceding value-taking option has had a chance to consume it.
+def command_option_scan(subcommand, args)
+  options = []
+  index = 0
+  while index < args.length
+    arg = args[index]
+    break if arg == "--"
+
+    options << [ arg, args[index + 1] ]
+    index += command_option_consumes_next?(subcommand, arg) ? 2 : 1
+  end
+  options
+end
+
+def command_option_consumes_next?(subcommand, arg)
+  case subcommand
+  when "grep"
+    grep_option_consumes_next?(arg)
+  when "log", "show", "rev-list"
+    long_option_prefix?(arg, %w[--format --pretty])
+  else
+    false
+  end
+end
+
+def grep_option_consumes_next?(arg)
+  return false if arg.include?("=")
+  return true if long_option_prefix?(arg, GREP_VALUE_TAKING_LONG)
+  return false unless arg.start_with?("-") && !arg.start_with?("--")
+
+  chars = arg[1..].chars
+  chars.each_with_index do |ch, index|
+    return index == chars.length - 1 if GREP_VALUE_TAKING_SHORT.include?(ch)
+  end
+  false
+end
+
+def long_option_prefix?(arg, options)
+  return false unless arg.start_with?("--") && arg.length > 2
+
+  options.any? { |option| option.start_with?(arg) }
+end
 
 def grep_short_cluster_has_pager?(arg)
   arg[1..].each_char do |ch|

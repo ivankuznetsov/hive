@@ -325,7 +325,7 @@ class ClaudeLauncherTest < Minitest::Test
     with_replaced_singleton_method(Process, :clock_gettime, ->(_clock, *_args) { monotonic_now }) do
       # The post-wait classification is now the ONLY limit check (readiness
       # wins inside the loop), so the stub answers that single call.
-      with_replaced_singleton_method(Hive::AgentLimit, :limit_reached?, ->(_text) { true }) do
+      with_replaced_singleton_method(Hive::AgentLimit, :live_limit_line, ->(_text) { "after wait" }) do
         with_replaced_singleton_method(Hive::AgentLimit, :error_message, ->(_text, agent:) { "limits reached for #{agent}: after wait" }) do
           err = assert_raises(Hive::AgentError) do
             Hive::ClaudeLauncher.prepare_claude_session!(runner, deadline: monotonic_now)
@@ -822,6 +822,10 @@ class ClaudeLauncherTest < Minitest::Test
     end
   end
 
+  def pane_fixture(name)
+    File.read(File.expand_path("../fixtures/panes/#{name}", __dir__))
+  end
+
   # Unify on the UnboundMethod capture+rebind stub pattern used in
   # brainstorm_tmux_sentinel_test.rb (Q1 / pr-test-analyzer #9). The
   # earlier `define_singleton_method` lambda-rebind approach could
@@ -1059,7 +1063,7 @@ class ClaudeLauncherTest < Minitest::Test
   def test_wait_for_expected_output_reports_limits_before_tmux_session_death
     with_tmp_task do |task|
       output = File.join(task.folder, "missing.md")
-      limit_menu = "What do you want to do?\n❯ 1. Stop and wait for limit to reset\n"
+      limit_menu = pane_fixture("limit_menu_live.txt")
       runner = Struct.new(:name, :tail) do
         def session_exists? = false
         def capture_pane_tail(bytes:) = tail
@@ -1068,7 +1072,9 @@ class ClaudeLauncherTest < Minitest::Test
       result = Hive::ClaudeLauncher.wait_for_expected_output(task, runner, 10, output, "review")
 
       assert_equal :error, result.fetch(:status)
-      assert_match(/\Alimits reached for claude:/, result.fetch(:error_message))
+      assert_equal "❯ 1. Stop and wait for limit to reset", result.fetch(:limit_text)
+      assert_equal "limits reached for claude: ❯ 1. Stop and wait for limit to reset",
+                   result.fetch(:error_message)
       refute_match(/tmux_session_terminated/, result.fetch(:error_message))
     end
   end
@@ -1159,7 +1165,7 @@ class ClaudeLauncherTest < Minitest::Test
   # wait_for_expected_output's limit test.
   def test_wait_for_done_signal_reports_limit_wall_before_done_signal
     with_tmp_task do |task|
-      limit_menu = "What do you want to do?\n❯ 1. Stop and wait for limit to reset\n"
+      limit_menu = pane_fixture("limit_menu_live.txt")
       runner = Struct.new(:tail) do
         def capture_pane_tail(bytes:) = tail
       end.new(limit_menu)
@@ -1167,8 +1173,41 @@ class ClaudeLauncherTest < Minitest::Test
       result = Hive::ClaudeLauncher.wait_for_done_signal(task, runner, 10, "ci")
 
       assert_equal :error, result.fetch(:status)
-      assert_match(/\Alimits reached for claude:/, result.fetch(:error_message))
+      assert_equal "❯ 1. Stop and wait for limit to reset", result.fetch(:limit_text)
+      assert_equal "limits reached for claude: ❯ 1. Stop and wait for limit to reset",
+                   result.fetch(:error_message)
       refute_match(/stop hook did not signal/, result.fetch(:error_message))
+    end
+  end
+
+  def test_waits_ignore_quoted_limit_menu_after_agent_moved_on
+    quoted_pane = pane_fixture("limit_quoted_7456.txt")
+
+    with_tmp_task do |task|
+      output = File.join(task.folder, "result.md")
+      File.write(output, "review findings")
+      File.write(Hive::ClaudeLauncher.done_path(task), "done")
+      runner = Struct.new(:tail) do
+        def session_exists? = true
+        def capture_pane_tail(bytes:) = tail
+      end.new(quoted_pane)
+
+      result = Hive::ClaudeLauncher.wait_for_expected_output(task, runner, 10, output, "review")
+
+      assert_equal({ status: :ok, log_label: "review" }, result)
+      refute result.key?(:limit_text)
+    end
+
+    with_tmp_task do |task|
+      File.write(Hive::ClaudeLauncher.done_path(task), "done")
+      runner = Struct.new(:tail) do
+        def capture_pane_tail(bytes:) = tail
+      end.new(quoted_pane)
+
+      result = Hive::ClaudeLauncher.wait_for_done_signal(task, runner, 10, "ci")
+
+      assert_equal({ status: :ok, log_label: "ci" }, result)
+      refute result.key?(:limit_text)
     end
   end
 
@@ -1234,7 +1273,7 @@ class ClaudeLauncherTest < Minitest::Test
       Hive::Markers.set(task.state_file, :agent_working,
                         pid: Process.pid,
                         started: Time.now.utc.iso8601)
-      limit_menu = "What do you want to do?\n❯ 1. Stop and wait for limit to reset\n"
+      limit_menu = pane_fixture("limit_menu_live.txt")
       runner = Struct.new(:name, :tail) do
         def session_exists? = true
         def capture_pane_tail(bytes:) = tail

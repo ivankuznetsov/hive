@@ -214,6 +214,14 @@ module Hive
             Hive::Markers.set(task.state_file, :review_ci_stale, attempts: ci_result.attempts)
             return { commit: "ci_stale_attempts_#{ci_result.attempts}", status: :review_ci_stale }
           when :error
+            if limit_failure?(limit_text: ci_result.limit_text, error_message: ci_result.error_message)
+              Hive::Markers.set(task.state_file, :review_error,
+                                phase: :ci, reason: "limits_reached",
+                                message: "ci hit a usage/credit limit",
+                                retry_after: Hive::AgentLimit.retry_after)
+              return { commit: "ci_limits_reached", status: :review_error }
+            end
+
             Hive::Markers.set(task.state_file, :review_error,
                               phase: :ci, reason: "ci_unrunnable")
             return { commit: "ci_error", status: :review_error }
@@ -438,7 +446,8 @@ module Hive
               when :error
                 limited = mark_review_phase_failure(
                   task, phase: :triage, terminal_reason: "triage_failed",
-                  pass: pass, error_message: triage_result.error_message
+                  pass: pass, error_message: triage_result.error_message,
+                  limit_text: triage_result.limit_text
                 )
                 label = limited ? "triage_limits_reached" : "triage_error"
                 return { commit: "#{label}_pass_#{format('%02d', pass)}",
@@ -588,7 +597,8 @@ module Hive
           if agent_failed?(fix_result)
             limited = mark_review_phase_failure(
               task, phase: :fix, terminal_reason: "fix_failed",
-              pass: pass, error_message: fix_result && fix_result[:error_message]
+              pass: pass, error_message: fix_result && fix_result[:error_message],
+              limit_text: fix_result && fix_result[:limit_text]
             )
             label = limited ? "fix_limits_reached" : "fix_error"
             return { commit: "#{label}_pass_#{format('%02d', pass)}",
@@ -893,8 +903,8 @@ module Hive
       # A timeout (no limit text) stays terminal — only an actual limit
       # earns the self-healing retry stamp. Returns whether the limit path
       # was taken so the caller can label its commit.
-      def mark_review_phase_failure(task, phase:, terminal_reason:, pass:, error_message:)
-        if Hive::AgentLimit.limit_reached?(error_message.to_s)
+      def mark_review_phase_failure(task, phase:, terminal_reason:, pass:, error_message:, limit_text: nil)
+        if limit_failure?(limit_text: limit_text, error_message: error_message)
           Hive::Markers.set(task.state_file, :review_error,
                             phase: phase, reason: "limits_reached", pass: pass,
                             message: "#{phase} hit a usage/credit limit",
@@ -906,6 +916,10 @@ module Hive
                             message: review_phase_error_summary(error_message))
           false
         end
+      end
+
+      def limit_failure?(limit_text:, error_message:)
+        !limit_text.to_s.empty? || Hive::AgentLimit.from_limit?(error_message.to_s)
       end
 
       # Condense a phase agent's `error_message` into a single-line marker
@@ -957,7 +971,7 @@ module Hive
 
           return result if result.status == :ok
           return result if result.status == :tampered
-          return result if Hive::AgentLimit.limit_reached?(result.error_message.to_s)
+          return result if limit_failure?(limit_text: result.limit_text, error_message: result.error_message)
           return result if attempt >= max_attempts
 
           # Don't start another full triage spawn (timeout_sec default 1800s) if
@@ -1305,7 +1319,7 @@ module Hive
           # errors (e.g. codex "you've hit your usage limit"), surface that
           # distinctly so the run is marked limits_reached rather than a
           # generic all_failed.
-          if error_messages.any? { |m| Hive::AgentLimit.limit_reached?(m.to_s) }
+          if error_messages.any? { |m| Hive::AgentLimit.from_limit?(m.to_s) }
             :all_failed_limit
           else
             :all_failed

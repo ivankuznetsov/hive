@@ -449,6 +449,32 @@ class CiFixTest < Minitest::Test
     end
   end
 
+  def test_error_result_preserves_fix_agent_limit_text
+    with_ci_dir do |dir, task_folder|
+      ci = write_ci_script(dir, "echo fail >&2\nexit 1")
+      cfg = cfg_with(ci, "review" => { "ci" => { "max_attempts" => 2 } })
+      replacement = lambda do |_task, _cfg, **_kwargs|
+        {
+          status: :error,
+          error_message: "limits reached for claude: Claude Code v2.1.170",
+          limit_text: "You've hit your session limit"
+        }
+      end
+
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_claude!, replacement) do
+        result = Hive::Stages::Review::CiFix.run!(
+          cfg: cfg,
+          ctx: make_ctx(dir, task_folder)
+        )
+
+        assert_equal :error, result.status
+        assert_equal 1, result.attempts
+        assert_equal "You've hit your session limit", result.limit_text
+        assert_equal "limits reached for claude: Claude Code v2.1.170", result.error_message
+      end
+    end
+  end
+
   def test_run_ci_once_reports_empty_command_after_shell_parsing
     result = Hive::Stages::Review::CiFix.run_ci_once("   ", Dir.pwd, 1024, 1)
 

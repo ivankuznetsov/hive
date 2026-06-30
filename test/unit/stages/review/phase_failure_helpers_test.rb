@@ -84,7 +84,8 @@ class ReviewPhaseFailureHelpersTest < Minitest::Test
     # spent → don't start another ~1800s triage spawn; signal the caller to
     # finalize REVIEW_STALE reason=wall_clock.
     error = Hive::Stages::Review::Triage::Result.new(
-      status: :error, escalations_path: nil, error_message: "transient boom", tampered_files: []
+      status: :error, escalations_path: nil, error_message: "transient boom",
+      tampered_files: [], limit_text: nil
     )
     with_replaced_singleton_method(Hive::Stages::Review, :mark_working, ->(*) { }) do
       with_replaced_singleton_method(Hive::Stages::Review, :triage_retry_backoff, ->(*) { }) do
@@ -98,6 +99,59 @@ class ReviewPhaseFailureHelpersTest < Minitest::Test
           end
         end
       end
+    end
+  end
+
+  def test_run_triage_with_retries_returns_immediately_on_limit_text
+    error = Hive::Stages::Review::Triage::Result.new(
+      status: :error, escalations_path: nil,
+      error_message: "limits reached for claude: Claude Code v2.1.170",
+      tampered_files: [], limit_text: "You've hit your session limit"
+    )
+    calls = 0
+
+    with_replaced_singleton_method(Hive::Stages::Review, :mark_working, ->(*) { }) do
+      with_replaced_singleton_method(Hive::Stages::Review, :triage_retry_backoff, ->(*) { flunk "limit must not retry" }) do
+        with_replaced_singleton_method(Hive::Stages::Review::Triage, :run!, lambda { |cfg:, ctx:|
+          calls += 1
+          error
+        }) do
+          result = Hive::Stages::Review.send(
+            :run_triage_with_retries,
+            { "review" => { "triage" => { "max_attempts" => 3 } } },
+            nil, :task,
+            pass: 1, started_at: Time.now, max_wall_clock_sec: 100
+          )
+
+          assert_equal error, result
+          assert_equal 1, calls
+        end
+      end
+    end
+  end
+
+  def test_mark_review_phase_failure_uses_limit_text_for_lossy_messages
+    with_tmp_dir do |dir|
+      state_file = File.join(dir, "task.md")
+      File.write(state_file, "# task\n")
+      task = Struct.new(:state_file).new(state_file)
+
+      limited = Hive::Stages::Review.send(
+        :mark_review_phase_failure,
+        task,
+        phase: :triage,
+        terminal_reason: "triage_failed",
+        pass: 1,
+        error_message: "limits reached for claude: Claude Code v2.1.170",
+        limit_text: "You've hit your session limit"
+      )
+
+      marker = Hive::Markers.current(state_file)
+      assert limited
+      assert_equal :review_error, marker.name
+      assert_equal "limits_reached", marker.attrs.fetch("reason")
+      assert_equal "triage hit a usage/credit limit", marker.attrs.fetch("message")
+      refute_nil marker.attrs["retry_after"]
     end
   end
 

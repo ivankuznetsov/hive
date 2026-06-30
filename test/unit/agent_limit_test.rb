@@ -211,14 +211,78 @@ class AgentLimitTest < Minitest::Test
                                    "retry_after" => "not-a-timestamp"))
   end
 
-  private
+  def test_live_limit_menu_detects_tail_wall_and_returns_matched_line
+    pane = pane_fixture("limit_menu_live.txt")
 
-  def with_env(values)
-    original = values.keys.to_h { |key| [ key, ENV[key] ] }
-    values.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
-    yield
-  ensure
-    original.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
+    assert Hive::AgentLimit.live_limit_menu?(pane)
+    assert_equal "❯ 1. Stop and wait for limit to reset",
+                 Hive::AgentLimit.live_limit_line(pane)
+  end
+
+  def test_live_limit_menu_rejects_quoted_menu_after_agent_moved_on
+    pane = pane_fixture("limit_quoted_7456.txt")
+
+    refute Hive::AgentLimit.live_limit_menu?(pane),
+           "a fresh ready/activity prompt below the quote means the run moved on"
+    assert_nil Hive::AgentLimit.live_limit_line(pane)
+  end
+
+  def test_live_limit_menu_rejects_old_menu_outside_true_tail
+    pane = <<~TEXT
+      What do you want to do?
+      ❯ 1. Stop and wait for limit to reset
+        2. Add funds to continue with usage credits
+      line one after old quoted menu
+      line two after old quoted menu
+      line three after old quoted menu
+      line four after old quoted menu
+      line five after old quoted menu
+      line six after old quoted menu
+      line seven after old quoted menu
+      line eight after old quoted menu
+      line nine after old quoted menu
+    TEXT
+
+    refute Hive::AgentLimit.live_limit_menu?(pane)
+    assert_nil Hive::AgentLimit.live_limit_line(pane)
+  end
+
+  def test_live_limit_menu_requires_limit_and_menu_signals
+    menu_without_limit = <<~TEXT
+      What do you want to do?
+      ❯ 1. Continue working
+        2. Change model
+    TEXT
+
+    limit_without_menu = <<~TEXT
+      Claude says you have hit your session limit.
+      It will reset later.
+    TEXT
+
+    refute Hive::AgentLimit.live_limit_menu?(menu_without_limit)
+    refute Hive::AgentLimit.live_limit_menu?(limit_without_menu)
+  end
+
+  def test_live_limit_menu_rejects_benign_chrome_only_pane
+    pane = <<~TEXT
+      ▐▛███▜▌   Claude Code v2.1.170
+      ▎ Included in your plan limits until Jun 22, then switch to usage credits to continue.
+      What do you want to do?
+      ❯ 1. Continue
+    TEXT
+
+    refute Hive::AgentLimit.live_limit_menu?(pane)
+  end
+
+  def test_from_limit_matches_only_agent_limit_wire_format
+    assert Hive::AgentLimit.from_limit?("limits reached")
+    assert Hive::AgentLimit.from_limit?("limits reached for claude: Claude Code v2.1.170")
+    assert Hive::AgentLimit.from_limit?("  limits reached for codex_agent-1: wall")
+
+    refute Hive::AgentLimit.from_limit?("healthy run said limits reached for claude: in a quote")
+    refute Hive::AgentLimit.from_limit?("not limits reached")
+    refute Hive::AgentLimit.held?(:review_error, "reason" => "triage_failed",
+                                                 "message" => "healthy run said limits reached")
   end
 
   # Regression for task 47: a finalize agent describing a scrollable-TUI help
@@ -249,5 +313,19 @@ class AgentLimitTest < Minitest::Test
       assert Hive::AgentLimit.limit_reached?(line),
              "a real provider wall must still classify: #{line.inspect}"
     end
+  end
+
+  private
+
+  def with_env(values)
+    original = values.keys.to_h { |key| [ key, ENV[key] ] }
+    values.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
+    yield
+  ensure
+    original.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
+  end
+
+  def pane_fixture(name)
+    File.read(File.expand_path("../fixtures/panes/#{name}", __dir__))
   end
 end

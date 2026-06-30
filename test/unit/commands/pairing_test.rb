@@ -52,6 +52,24 @@ class HiveCommandsPairingTest < Minitest::Test
     end
   end
 
+  # Loads fine (so validation passes) but blows up on the allowlist write —
+  # stands in for a read-only/full config dir or a malformed-on-disk config.
+  StubConfigRaisingOnUpdate = Struct.new(:bot_config) do
+    def load_global_bot(*) = bot_config
+    def update_global_config!(*) = raise(Hive::ConfigError, "config dir is read-only")
+  end
+
+  # Fails the approval-notice write the way a full/read-only state dir would.
+  module RaisingApprovalQueue
+    def self.write!(chat_id:) = raise(Errno::ENOSPC)
+  end
+
+  # Returns a value outside the documented Integer | :expired | :unknown
+  # contract, to exercise the loud-failure arm of resolve_code!.
+  UnexpectedResolveStore = Class.new do
+    def resolve(code:) = :surprise
+  end
+
   def test_list_prints_empty_message
     Dir.mktmpdir("hive-pairing-command") do |state_home|
       output = StringIO.new
@@ -371,19 +389,93 @@ class HiveCommandsPairingTest < Minitest::Test
     end
   end
 
+  def test_approve_json_echoes_the_normalized_code
+    with_tmp_global_config do |home|
+      pairing_store = store(home)
+      code = pairing_store.mint_or_get(chat_id: 999)
+      output = StringIO.new
+
+      payload = command("approve", args: [ "telegram", "  #{code.downcase}  " ], json: true,
+                                   store: pairing_store, output: output).call
+
+      assert_equal code, payload.fetch("code"), "the echoed code must be the normalized, stored form"
+      assert_match(/\A[A-Z]{8}\z/, payload.fetch("code"))
+      assert_empty pairing_store.pending
+      assert_schema_valid("hive-pairing-approve", payload)
+    end
+  end
+
+  def test_approve_allowlist_write_failure_leaves_code_pending
+    with_tmp_global_config do |home|
+      pairing_store = store(home)
+      code = pairing_store.mint_or_get(chat_id: 999)
+      output = StringIO.new
+      config = StubConfigRaisingOnUpdate.new({ "chat_id_allowlist" => [] })
+
+      assert_raises(Hive::ConfigError) do
+        command("approve", args: [ "telegram", code ], json: true,
+                           store: pairing_store, output: output, config: config).call
+      end
+
+      assert_equal [ code ], pairing_store.pending.map(&:code),
+                   "a failed allowlist write must leave the code pending for retry"
+      assert_empty Hive::Bot::PairingApprovalQueue.pending(state_home: home)
+      payload = JSON.parse(output.string)
+      assert_equal "config", payload.fetch("error_kind")
+    end
+  end
+
+  def test_approve_notice_write_failure_leaves_code_pending_with_clean_envelope
+    with_tmp_global_config do |home|
+      pairing_store = store(home)
+      code = pairing_store.mint_or_get(chat_id: 999)
+      output = StringIO.new
+
+      error = assert_raises(Hive::Commands::Pairing::ApprovalError) do
+        command("approve", args: [ "telegram", code ], json: true, store: pairing_store,
+                           output: output, approval_queue: RaisingApprovalQueue).call
+      end
+
+      assert_equal "notice_write_failed", error.error_kind
+      assert_equal [ code ], pairing_store.pending.map(&:code),
+                   "a failed notice write must leave the code pending for retry"
+      payload = JSON.parse(output.string)
+      assert_equal false, payload.fetch("ok")
+      assert_equal "notice_write_failed", payload.fetch("error_kind")
+      assert_schema_valid("hive-pairing-approve", payload)
+    end
+  end
+
+  def test_approve_raises_loudly_on_unexpected_resolve_value
+    with_tmp_global_config do |home|
+      output = StringIO.new
+
+      error = assert_raises(Hive::Commands::Pairing::ApprovalError) do
+        command("approve", args: [ "telegram", "ABCDEFGH" ], json: true,
+                           store: UnexpectedResolveStore.new, output: output).call
+      end
+
+      assert_equal "internal_error", error.error_kind
+      assert_match(/unexpected value/, error.message)
+    end
+  end
+
   private
 
   def command(subcommand, args: [], json: false, output: StringIO.new, store: nil,
-              process: FakeProcess.new(alive: false, kills: []), now: -> { Time.now })
-    Hive::Commands::Pairing.new(
-      subcommand,
+              process: FakeProcess.new(alive: false, kills: []), now: -> { Time.now },
+              config: nil, approval_queue: nil)
+    kwargs = {
       args: args,
       json: json,
       output: output,
       store: store || self.store(Dir.mktmpdir("hive-pairing-command")),
       process: process,
       now: now
-    )
+    }
+    kwargs[:config] = config if config
+    kwargs[:approval_queue] = approval_queue if approval_queue
+    Hive::Commands::Pairing.new(subcommand, **kwargs)
   end
 
   def store(state_home, now: -> { Time.now })

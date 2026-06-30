@@ -6,6 +6,7 @@ require "hive/config"
 require "hive/paths"
 require "hive/bot/pairing_store"
 require "hive/bot/pairing_approval_queue"
+require "hive/pid_file"
 
 module Hive
   module Commands
@@ -82,12 +83,19 @@ module Hive
         end
 
         validate_current_bot_config!
-        chat_id = resolve_code!(code)
+        normalized_code = Hive::Bot::PairingStore.normalize_code(code)
+        # Resolve (peek) without consuming, then run every fallible side
+        # effect — the allowlist write and the approval-notice write — and
+        # ONLY THEN consume the code. A failure before the consume leaves the
+        # code pending so a retry works, instead of deleting it first and
+        # losing it when the allowlist write or notice write blows up.
+        chat_id = resolve_code!(normalized_code)
         already_allowlisted = append_allowlist(chat_id)
         reloaded = signal_bot_reload
-        notice_id = @approval_queue.write!(chat_id: chat_id)
+        notice_id = write_approval_notice!(chat_id)
+        @store.consume(code: normalized_code)
         payload = approve_payload(
-          code: code,
+          code: normalized_code,
           chat_id: chat_id,
           already_allowlisted: already_allowlisted,
           reloaded: reloaded,
@@ -112,20 +120,39 @@ module Hive
       end
 
       def validate_current_bot_config!
-        @config.load_global_bot
+        # Load + validate once. `bot_config` memoizes the same load that
+        # `signal_bot_reload` later reuses, so the global config is read a
+        # single time per approve.
+        bot_config
       end
 
       def resolve_code!(code)
-        resolved = @store.resolve_and_consume(code: code)
+        resolved = @store.resolve(code: code)
         case resolved
         when Integer
           resolved
         when :expired
           raise ApprovalError.new("pairing code #{code} expired; ask the user to run /start again",
                                   error_kind: "expired_code")
-        else
+        when :unknown
           raise ApprovalError.new("pairing code #{code} was not found", error_kind: "unknown_code")
+        else
+          # The store contract is Integer | :expired | :unknown. Anything else
+          # is a programming error — fail loudly instead of folding it into the
+          # "not found" arm where a future sentinel could hide silently.
+          raise ApprovalError.new("pairing code resolution returned unexpected value #{resolved.inspect}",
+                                  error_kind: "internal_error")
         end
+      end
+
+      def write_approval_notice!(chat_id)
+        @approval_queue.write!(chat_id: chat_id)
+      rescue SystemCallError => e
+        # The code is still pending at this point (consume runs after this), so
+        # surface a clean envelope and leave it for a retry rather than
+        # crashing with a raw backtrace after the chat was already allowlisted.
+        raise ApprovalError.new("failed to queue approval notice: #{e.message}",
+                                error_kind: "notice_write_failed")
       end
 
       def append_allowlist(chat_id)
@@ -157,21 +184,13 @@ module Hive
       end
 
       def pid_file_payload(path)
-        return {} unless File.exist?(path)
-
-        data = YAML.safe_load(File.read(path)) || {}
-        data.is_a?(Hash) ? data : {}
+        Hive::PidFile.read(path)
       rescue Psych::Exception, SystemCallError, IOError
         {}
       end
 
       def pid_alive?(pid)
-        @process.kill(0, pid)
-        true
-      rescue Errno::ESRCH
-        false
-      rescue Errno::EPERM
-        true
+        Hive::PidFile.alive?(pid, process: @process)
       end
 
       def list_payload(entries)

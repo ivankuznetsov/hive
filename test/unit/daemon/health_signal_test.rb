@@ -76,6 +76,21 @@ class HiveDaemonHealthSignalTest < Minitest::Test
     assert_equal unknown, fingerprint(:mystery_category), "unknown-category fingerprint must be stable"
   end
 
+  def test_doctor_timeout_folds_into_stable_sentinel_digest
+    timeout_digest = nil
+    with_replaced_singleton_method(Timeout, :timeout, ->(_sec, *_args, &_block) { raise Timeout::Error }) do
+      timeout_digest = Hive::Daemon::HealthSignal.doctor_rows_digest(Hive::Config::DEFAULTS, Dir.pwd, nil)
+    end
+
+    # A timed-out in-process doctor must fold into the SAME stable sentinel an
+    # errored doctor produces, so the fingerprint stays stable instead of
+    # hanging the tick that computes it.
+    error_digest = Hive::Daemon::HealthSignal.doctor_rows_digest(
+      Hive::Config::DEFAULTS, Dir.pwd, [ { error: "error:Timeout::Error" } ]
+    )
+    assert_equal error_digest, timeout_digest
+  end
+
   def test_changed_or_fallback_gate_allows_first_changed_and_elapsed_fallback
     now = Time.utc(2026, 6, 29, 12, 0, 0)
 

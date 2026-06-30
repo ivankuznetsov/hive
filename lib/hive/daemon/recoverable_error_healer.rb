@@ -190,9 +190,16 @@ module Hive
           category: category,
           config: @config,
           project_root: nil,
-          env: ENV,
+          env: probe_env,
           now: now
         )
+      end
+
+      # Couple the fingerprint's env to the probe's, so a custom-env probe and
+      # the changed-signal gate observe the same environment. Fall back to ENV
+      # for probe doubles that don't expose an `env` reader.
+      def probe_env
+        @health_probe.respond_to?(:env) ? @health_probe.env : ENV
       end
 
       def enabled?

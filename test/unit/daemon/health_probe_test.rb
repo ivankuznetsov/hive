@@ -74,9 +74,12 @@ class HiveDaemonHealthProbeTest < Minitest::Test
 
   def test_codex_smoke_timeout_is_not_healthy
     calls = 0
+    # Call order is doctor (1), codex_login_status (2), codex_exec_smoke (3):
+    # the doctor probe now shares this injected timeout runner, so the smoke
+    # probe is the third invocation.
     timeout_runner = lambda do |_seconds, &block|
       calls += 1
-      raise Timeout::Error if calls == 2
+      raise Timeout::Error if calls == 3
 
       block.call
     end
@@ -204,6 +207,25 @@ class HiveDaemonHealthProbeTest < Minitest::Test
 
     assert_equal false, result[:ok]
     assert_equal [ "doctor" ], result[:probes].map { |p| p[:name] }
+  end
+
+  def test_doctor_timeout_fails_closed
+    doctor = FakeDoctor.new(rows: [ { label: "claude", status: "present" } ])
+    probe = Hive::Daemon::HealthProbe.new(
+      config: Hive::Config::DEFAULTS,
+      project_root: Dir.pwd,
+      doctor_factory: -> { doctor },
+      capture3: ->(_env, *_cmd) { [ "", "", Status.new(success_value: true, exitstatus: 0) ] },
+      # First invocation is the doctor probe; time it out to prove the outer
+      # timeout wraps the in-process doctor and fails CLOSED.
+      timeout_runner: ->(_seconds, &_block) { raise Timeout::Error }
+    )
+
+    result = probe.probe(:codex_auth)
+
+    assert_equal false, result[:ok]
+    assert_equal [ "doctor" ], result[:probes].map { |p| p[:name] }
+    assert_includes result[:probes].first[:stderr_tail], "timed out"
   end
 
   def test_unknown_category_is_not_healthy

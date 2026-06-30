@@ -1,6 +1,7 @@
 require "digest"
 require "json"
 require "stringio"
+require "timeout"
 
 require "hive"
 require "hive/agent_profiles"
@@ -13,6 +14,7 @@ module Hive
     # Computes dependency-health fingerprints and the retry signal gate.
     module HealthSignal
       FALLBACK_REPROBE_SEC = 3600
+      DOCTOR_TIMEOUT_SEC = 15
 
       module_function
 
@@ -99,8 +101,15 @@ module Hive
             json: true,
             output: output
           )
-          doctor.call
-          doctor.rows
+          # Outer timeout on the in-process doctor: each sub-check carries its
+          # own today, but a future check added without one would otherwise
+          # stall the daemon tick that computes this fingerprint. A timeout
+          # folds into the stable sentinel below (Timeout::Error is a
+          # StandardError), keeping the digest stable rather than hanging.
+          Timeout.timeout(DOCTOR_TIMEOUT_SEC) do
+            doctor.call
+            doctor.rows
+          end
         rescue StandardError => e
           # Stable sentinel only (class, not message) — see profile_version.
           [ { error: "error:#{e.class}" } ]

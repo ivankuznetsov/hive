@@ -20,6 +20,11 @@ module Hive
       TAIL_BYTES = 512
       FAILING_DOCTOR_STATUSES = %w[missing version_too_old].freeze
 
+      # Exposed so the healer's fingerprint observes the SAME environment this
+      # probe does — otherwise a custom-env injection here would silently
+      # decouple the changed-signal gate from what the probe actually checks.
+      attr_reader :env
+
       def initialize(config:, project_root:, env: ENV, tick_id: nil,
                      doctor_factory: nil, capture3: nil, timeout_runner: nil)
         @config = config || Hive::Config::DEFAULTS
@@ -81,8 +86,13 @@ module Hive
       def doctor_probe
         started = monotonic_ms
         doctor = @doctor_factory.call
-        exit_code = doctor.call
-        rows = doctor.rows
+        # Wrap the in-process doctor in the same injected timeout the shell
+        # probes use. Each doctor sub-check carries its own timeout today, but a
+        # future check added without one would otherwise stall the daemon tick
+        # indefinitely; the outer Timeout fails CLOSED (ok:false) instead.
+        exit_code, rows = @timeout_runner.call(DEFAULT_TIMEOUT_SEC) do
+          [ doctor.call, doctor.rows ]
+        end
         failing = Array(rows).select { |row| FAILING_DOCTOR_STATUSES.include?(row[:status].to_s) }
         # Fail CLOSED on the universal precondition. `Hive::Commands::Doctor`
         # rescues a ConfigError/KeyError/ArgumentError to EXIT_CONFIG_ERROR
@@ -107,6 +117,8 @@ module Hive
           stdout: message,
           ms: elapsed_ms(started)
         )
+      rescue Timeout::Error
+        probe_result(name: "doctor", ok: false, stderr: "timed out after #{DEFAULT_TIMEOUT_SEC}s", ms: elapsed_ms(started))
       rescue StandardError => e
         probe_result(name: "doctor", ok: false, stderr: "#{e.class}: #{e.message}", ms: elapsed_ms(started))
       end
@@ -126,6 +138,13 @@ module Hive
 
         [
           login,
+          # Deliberately narrow: this is an AUTH/CONNECTIVITY smoke, not a
+          # faithful replay of the execute launch. It uses the headless
+          # `exec --json` shape but intentionally OMITS the `--add-dir`, model,
+          # and sandbox flags `agent_profiles/codex.rb` passes on a real launch
+          # (see plan Open Question on smoke-shape). It therefore catches auth +
+          # connectivity failures but NOT launch-shape regressions beyond auth —
+          # which is the recoverable category (codex_auth) this probe gates.
           shell_probe(
             "codex_exec_smoke",
             [ codex_bin, "exec", "--json", "Reply with OK." ],

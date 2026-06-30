@@ -3,6 +3,7 @@ require "json"
 require "open3"
 require "shellwords"
 require "tmpdir"
+require "hive/claude_launcher"
 require "hive/stop_hook_installer"
 
 class StopHookInstallerTest < Minitest::Test
@@ -66,6 +67,38 @@ class StopHookInstallerTest < Minitest::Test
           command = data.fetch("hooks").fetch("Stop").first.fetch("hooks").first.fetch("command")
           assert_includes command, "HIVE_TASK_STAGE_DIR=#{Shellwords.escape(dir)}"
         end
+      end
+    end
+  end
+
+  def test_installed_hook_paths_match_claude_launcher_signal_contract
+    with_tmp_dir do |stage_dir|
+      Dir.mktmpdir do |worktree_dir|
+        task = Struct.new(:folder).new(stage_dir)
+        paths = Hive::StopHookInstaller.install(stage_dir: stage_dir, extra_dirs: [ worktree_dir ])
+
+        assert_equal File.join(stage_dir, ".done"), Hive::ClaudeLauncher.done_path(task)
+        assert_equal File.join(stage_dir, "result.json"), Hive::ClaudeLauncher.result_path(task)
+        assert_equal(
+          [
+            File.join(stage_dir, ".claude", "settings.json"),
+            File.join(worktree_dir, ".claude", "settings.json")
+          ].sort,
+          paths.sort
+        )
+
+        paths.each do |settings_path|
+          data = JSON.parse(File.read(settings_path))
+          command = data.fetch("hooks").fetch("Stop").first.fetch("hooks").first.fetch("command")
+
+          assert_includes command, "HIVE_TASK_STAGE_DIR=#{Shellwords.escape(stage_dir)}"
+          assert_includes command, Shellwords.escape(HOOK)
+          refute_includes command, "HIVE_TASK_STAGE_DIR=#{Shellwords.escape(worktree_dir)}"
+        end
+
+        script = File.read(HOOK)
+        assert_includes script, 'result_path="${HIVE_TASK_STAGE_DIR}/result.json"'
+        assert_includes script, 'touch "${HIVE_TASK_STAGE_DIR}/.done"'
       end
     end
   end

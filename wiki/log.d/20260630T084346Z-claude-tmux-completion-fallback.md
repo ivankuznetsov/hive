@@ -1,7 +1,4 @@
----
-timestamp: 2026-06-30T08:43:46Z
-slug: claude-tmux-completion-fallback
----
+## [2026-06-30T08:43:46Z] modules/agent — claude tmux Stop-hook completion fallback
 
 **Action:** Documented the tmux Stop-hook completion fallback and the 2026-06-30 root-cause finding. `ClaudeLauncher` now attaches additive `completion_evidence` to missing-Stop-hook `:exit_code_only` timeouts, and [[stages/review]] review-fix can suppress `REVIEW_ERROR phase=fix reason=fix_failed` only when both launcher evidence and review artifacts/commit-or-no-change facts prove completion.
 

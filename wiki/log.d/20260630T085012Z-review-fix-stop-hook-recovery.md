@@ -1,7 +1,4 @@
----
-timestamp: 2026-06-30T08:50:12Z
-slug: review-fix-stop-hook-recovery
----
+## [2026-06-30T08:50:12Z] stages/review — operator recovery for tmux review-fix Stop-hook timeouts
 
 **Action:** Added operator recovery guidance for tmux review-fix Stop-hook timeouts, including the constrained `hive markers clear FOLDER --name REVIEW_ERROR --match-attr phase=fix,reason=fix_failed` command and the evidence checklist for tasks 58 / PR #622, 287 / PR #623, and 288 / PR #624.
 

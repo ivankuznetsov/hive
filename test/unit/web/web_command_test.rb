@@ -115,4 +115,112 @@ class WebCommandTest < Minitest::Test
       end
     end
   end
+
+  # ── `hive web install` orchestration ────────────────────────────────
+  # install_service maps the installer outcome onto the CLI error contract:
+  # a drifted unit → InvalidTaskPath (retry with --force), a failed install →
+  # Hive::Error, and --json emits the hive-web-install envelope. Swap in a fake
+  # installer so the mapping is asserted without touching launchctl/systemctl.
+  def with_fake_web_installer(outcome_kind)
+    require "hive/commands/web/service_installer"
+    require "hive/commands/service_installer/outcome"
+    outcome = Hive::Commands::ServiceInstaller::Outcome.new(outcome_kind)
+    fake = Class.new do
+      define_method(:initialize) { |binary_path: nil| }
+      define_method(:install!) { |autostart:, force:| outcome }
+      define_method(:messages) { [ "installed note" ] }
+      define_method(:target_path) { "/tmp/local.hive-web.plist" }
+      define_method(:envelope_platform) { "macos" }
+    end
+    original = Hive::Commands::Web.const_get(:ServiceInstaller)
+    Hive::Commands::Web.send(:remove_const, :ServiceInstaller)
+    Hive::Commands::Web.const_set(:ServiceInstaller, fake)
+    begin
+      yield
+    ensure
+      Hive::Commands::Web.send(:remove_const, :ServiceInstaller)
+      Hive::Commands::Web.const_set(:ServiceInstaller, original)
+    end
+  end
+
+  def test_install_service_maps_drift_to_invalid_task_path
+    with_tmp_global_config do
+      with_fake_web_installer(:drifted) do
+        assert_raises(Hive::InvalidTaskPath) do
+          capture_io { Hive::Commands::Web.new("install", no_bootstrap: true).call }
+        end
+      end
+    end
+  end
+
+  def test_install_service_maps_failure_to_error
+    with_tmp_global_config do
+      with_fake_web_installer(:failed) do
+        error = assert_raises(Hive::Error) do
+          capture_io { Hive::Commands::Web.new("install", no_bootstrap: true).call }
+        end
+        refute_instance_of Hive::InvalidTaskPath, error,
+                           "a failed install is a hard error, not a retry-with-force drift"
+      end
+    end
+  end
+
+  def test_install_service_json_envelope_shape
+    with_tmp_global_config do
+      with_fake_web_installer(:written) do
+        out, = capture_io { Hive::Commands::Web.new("install", no_bootstrap: true, json: true).call }
+        payload = JSON.parse(out)
+        assert_equal "hive-web-install", payload["schema"]
+        assert_equal true, payload["ok"]
+        assert_equal "written", payload["outcome"]
+        assert_equal "macos", payload["platform"]
+        assert_equal "/tmp/local.hive-web.plist", payload["target_path"]
+        assert payload.key?("backup_path"), "envelope must carry backup_path"
+        assert payload.key?("restarted"), "envelope must carry restarted"
+        assert_kind_of Array, payload["messages"]
+      end
+    end
+  end
+
+  # ── loopback no-auth env export matrix ──────────────────────────────
+  # `call` sets HIVEBOX_LOCAL_LOOPBACK=1 only when the bind is loopback AND
+  # web.local_loopback is still true; the Rails side trusts that env var to
+  # enable the no-auth bypass, so the CLI must export it exactly in that case.
+  def captured_exec_env(bind:, unsafe: false, web_config: nil)
+    caught = nil
+    with_tmp_global_config do |dir|
+      if web_config
+        File.write(File.join(dir, "config.yml"),
+                   { "registered_projects" => [], "web" => web_config }.to_yaml)
+      end
+      with_stub_rails_app(prepare_exit: 0) do
+        original = Kernel.method(:exec)
+        Kernel.define_singleton_method(:exec) { |env, *argv| raise ExecCaught.new(env, argv) }
+        begin
+          capture_io { Hive::Commands::Web.new(bind: bind, unsafe: unsafe).call }
+        rescue ExecCaught => e
+          caught = e
+        ensure
+          Kernel.define_singleton_method(:exec, original)
+        end
+      end
+    end
+    caught&.env || {}
+  end
+
+  def test_loopback_env_set_on_loopback_bind_with_default_config
+    assert_equal "1", captured_exec_env(bind: "127.0.0.1")["HIVEBOX_LOCAL_LOOPBACK"],
+                 "a loopback bind with local_loopback enabled must signal the no-auth bypass"
+  end
+
+  def test_loopback_env_omitted_on_non_loopback_bind
+    refute captured_exec_env(bind: "0.0.0.0", unsafe: true).key?("HIVEBOX_LOCAL_LOOPBACK"),
+           "a non-loopback bind must never signal the loopback bypass"
+  end
+
+  def test_loopback_env_omitted_when_config_opts_out
+    refute captured_exec_env(bind: "127.0.0.1", web_config: { "local_loopback" => false })
+           .key?("HIVEBOX_LOCAL_LOOPBACK"),
+           "web.local_loopback:false must suppress the bypass even on a loopback bind"
+  end
 end

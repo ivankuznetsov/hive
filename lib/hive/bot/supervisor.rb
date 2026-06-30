@@ -373,18 +373,24 @@ module Hive
       end
 
       PAIRING_APPROVED_TEXT = "✅ Approved — you can use hive now. Try /status.".freeze
+      PAIRING_APPROVAL_SEND_CAP = 10
 
       def drain_pairing_approvals(now: Time.now)
         notices = Hive::Bot::PairingApprovalQueue.pending(
           state_home: pairing_approval_state_home,
           bad_handler: ->(path:, reason:) { FileUtils.rm_f(path) }
         )
-        notices.each do |notice|
-          if Hive::Bot::PairingApprovalQueue.expired?(notice, now: now)
-            remove_pairing_approval(notice)
-            next
-          end
+        fresh = notices.reject do |notice|
+          next false unless Hive::Bot::PairingApprovalQueue.expired?(notice, now: now)
 
+          remove_pairing_approval(notice) # stale: drop without sending
+          true
+        end
+
+        # Per-tick send cap mirroring drain_dispatch_results: a reconnect burst
+        # or backlog must not blow past Telegram's per-chat rate limit. Notices
+        # over the cap stay queued and drain on subsequent reaper ticks.
+        fresh.first(PAIRING_APPROVAL_SEND_CAP).each do |notice|
           sent = safe_send_message(chat_id: notice.chat_id, text: PAIRING_APPROVED_TEXT)
           remove_pairing_approval(notice) if sent
         end
@@ -392,7 +398,7 @@ module Hive
 
       def remove_pairing_approval(notice)
         Hive::Bot::PairingApprovalQueue.remove(
-          notice.notice_id, state_home: pairing_approval_state_home
+          notice.notice_id, state_home: pairing_approval_state_home, path: notice.path
         )
       end
 

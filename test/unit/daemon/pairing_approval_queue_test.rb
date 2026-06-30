@@ -127,6 +127,63 @@ class HiveBotPairingApprovalQueueTest < Minitest::Test
     end
   end
 
+  def test_remove_uses_known_path_for_direct_unlink
+    Dir.mktmpdir("hive-pairing-approval") do |dir|
+      Q.write!(chat_id: 42, state_home: dir)
+      notice = Q.pending(state_home: dir).first
+
+      assert Q.remove(notice.notice_id, state_home: dir, path: notice.path)
+      assert_empty Q.pending(state_home: dir)
+    end
+  end
+
+  def test_remove_known_path_returns_false_when_file_absent
+    Dir.mktmpdir("hive-pairing-approval") do |dir|
+      refute Q.remove("deadbeef", state_home: dir, path: File.join(dir, "gone.json"))
+    end
+  end
+
+  def test_remove_known_path_refuses_mismatched_notice_id
+    Dir.mktmpdir("hive-pairing-approval") do |dir|
+      Q.write!(chat_id: 42, state_home: dir)
+      notice = Q.pending(state_home: dir).first
+
+      refute Q.remove("not-this-notice", state_home: dir, path: notice.path)
+      assert_equal 1, Q.pending(state_home: dir).size, "a mismatched id must not delete the file"
+    end
+  end
+
+  def test_remove_known_path_skips_malformed_file
+    Dir.mktmpdir("hive-pairing-approval") do |dir|
+      bad = File.join(Q.directory(state_home: dir), "20260630-bad.json")
+      File.write(bad, "{not json")
+
+      refute Q.remove("whatever", state_home: dir, path: bad)
+      assert File.exist?(bad)
+    end
+  end
+
+  def test_remove_known_path_tolerates_file_disappearing_after_parse
+    Dir.mktmpdir("hive-pairing-approval") do |dir|
+      Q.write!(chat_id: 42, state_home: dir)
+      notice = Q.pending(state_home: dir).first
+
+      with_file_unlink_raising(Errno::ENOENT) do
+        refute Q.remove(notice.notice_id, state_home: dir, path: notice.path)
+      end
+    end
+  end
+
+  def test_expired_uses_a_strict_greater_than_boundary
+    created = Time.utc(2026, 6, 30, 12, 0, 0)
+    notice = Q::Notice.new(notice_id: "n", created_at: created, chat_id: 1, path: nil)
+
+    refute Q.expired?(notice, now: created + Q::EXPIRY_SEC),
+           "a notice exactly at the expiry age is not yet expired"
+    assert Q.expired?(notice, now: created + Q::EXPIRY_SEC + 1),
+           "one second past the expiry age is expired"
+  end
+
   private
 
   def with_file_unlink_raising(error_class)

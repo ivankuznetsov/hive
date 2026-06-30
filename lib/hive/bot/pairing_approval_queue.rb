@@ -77,26 +77,31 @@ module Hive
           .each do |notice|
           next unless expired?(notice, now: now, expiry_sec: expiry_sec)
 
-          removed += 1 if remove(notice.notice_id, state_home: state_home)
+          removed += 1 if remove(notice.notice_id, state_home: state_home, path: notice.path)
         end
         removed
       end
 
-      def remove(notice_id, state_home: Hive::Paths.state_home)
+      def remove(notice_id, state_home: Hive::Paths.state_home, path: nil)
         return false if notice_id.to_s.empty?
 
+        # Fast path: `pending` already resolved each notice to its on-disk
+        # path, so a caller that hands that path back lets us unlink directly
+        # instead of re-globbing and re-parsing the whole directory.
+        return remove_known_path(path, notice_id) unless path.nil?
+
         dir = directory(state_home: state_home)
-        Dir.glob(File.join(dir, "*.json")).each do |path|
-          next unless path.include?(notice_id.to_s)
+        Dir.glob(File.join(dir, "*.json")).each do |candidate|
+          next unless candidate.include?(notice_id.to_s)
 
           data = begin
-            JSON.parse(File.read(path))
+            JSON.parse(File.read(candidate))
           rescue StandardError
             next
           end
           next unless data.is_a?(Hash) && data["notice_id"] == notice_id.to_s
 
-          File.unlink(path)
+          File.unlink(candidate)
           return true
         end
         false
@@ -106,6 +111,25 @@ module Hive
 
       class << self
         private
+
+        # Unlink the notice at its known path, verifying the notice_id still
+        # matches the file's contents (a forged/stale path must not delete the
+        # wrong file). Mirrors the by-id glob path's verification.
+        def remove_known_path(path, notice_id)
+          return false unless File.exist?(path)
+
+          data = begin
+            JSON.parse(File.read(path))
+          rescue StandardError
+            return false
+          end
+          return false unless data.is_a?(Hash) && data["notice_id"] == notice_id.to_s
+
+          File.unlink(path)
+          true
+        rescue Errno::ENOENT
+          false
+        end
 
         def parse_file(path)
           data = JSON.parse(File.read(path))

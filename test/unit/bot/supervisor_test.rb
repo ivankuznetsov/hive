@@ -2326,6 +2326,24 @@ class HiveBotSupervisorTest < Minitest::Test
     end
   end
 
+  def test_drain_pairing_approvals_caps_sends_per_tick
+    Dir.mktmpdir("hive-pairing-approval") do |home|
+      @supervisor.instance_variable_set(:@pairing_approval_state_home, home)
+      cap = Hive::Bot::Supervisor::PAIRING_APPROVAL_SEND_CAP
+      (cap + 1).times do |i|
+        Hive::Bot::PairingApprovalQueue.write!(
+          chat_id: 1000 + i, state_home: home, now: Time.utc(2026, 6, 30, 12, 0, i)
+        )
+      end
+
+      @supervisor.send(:drain_pairing_approvals, now: Time.utc(2026, 6, 30, 12, 5, 0))
+
+      assert_equal cap, @telegram.messages.size, "must not exceed the per-tick send cap"
+      assert_equal 1, Hive::Bot::PairingApprovalQueue.pending(state_home: home).size,
+                   "the over-cap notice stays queued for the next tick"
+    end
+  end
+
   def test_clear_inline_keyboard_swallows_telegram_errors
     @telegram.define_singleton_method(:edit_message_reply_markup) do |*|
       raise IOError, "telegram offline"

@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-pairing-list.v1.json",
+  "title": "hive pairing list envelope (v1)",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["schema", "schema_version", "ok", "pending"],
+      "properties": {
+        "schema": { "const": "hive-pairing-list" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": true },
+        "pending": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["code", "chat_id", "created_at", "age_sec", "expires_in_sec"],
+            "properties": {
+              "code": { "type": "string", "pattern": "^[A-Z]{8}$" },
+              "chat_id": { "type": "integer" },
+              "created_at": { "type": "string", "format": "date-time" },
+              "age_sec": { "type": "integer", "minimum": 0 },
+              "expires_in_sec": { "type": "integer", "minimum": 0 }
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["schema", "schema_version", "ok", "error_class", "error_kind", "exit_code", "message"],
+      "properties": {
+        "schema": { "const": "hive-pairing-list" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "error_class": { "type": "string" },
+        "error_kind": { "type": "string" },
+        "exit_code": { "type": "integer" },
+        "message": { "type": "string" }
+      }
+    }
+  ]
+}

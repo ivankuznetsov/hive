@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-pairing-approve.v1.json",
+  "title": "hive pairing approve envelope (v1)",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "platform",
+        "code",
+        "chat_id",
+        "already_allowlisted",
+        "reloaded",
+        "notice_queued",
+        "notice_id"
+      ],
+      "properties": {
+        "schema": { "const": "hive-pairing-approve" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": true },
+        "platform": { "const": "telegram" },
+        "code": { "type": "string", "pattern": "^[A-Z]{8}$" },
+        "chat_id": { "type": "integer" },
+        "already_allowlisted": { "type": "boolean" },
+        "reloaded": { "type": "boolean" },
+        "notice_queued": { "const": true },
+        "notice_id": { "type": "string" }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["schema", "schema_version", "ok", "error_class", "error_kind", "exit_code", "message"],
+      "properties": {
+        "schema": { "const": "hive-pairing-approve" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "error_class": { "type": "string" },
+        "error_kind": { "type": "string" },
+        "exit_code": { "type": "integer" },
+        "message": { "type": "string" }
+      }
+    }
+  ]
+}

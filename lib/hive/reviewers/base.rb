@@ -14,7 +14,20 @@ module Hive
 
     # Reviewer outcome. Status is :ok | :error. error_message is set when
     # status == :error so the runner can surface it as a stub finding.
-    Result = Data.define(:name, :output_path, :status, :error_message) do
+    #
+    # limit_text carries the RAW provider usage/credit-wall text (e.g. codex's
+    # free-form "you've hit your usage limit") when a failure is a quota wall.
+    # It defaults to nil so every existing/legacy Result.new site — and any
+    # custom v1-API reviewer adapter (see the backward-compat note above) —
+    # keeps working unchanged. The runner's all-failed classifier treats a
+    # non-empty limit_text as a wall (mirroring triage/ci_fix's Result),
+    # because a native producer's quota text never carries Hive's
+    # `limits reached for …` wire prefix that AgentLimit.from_limit? needs.
+    Result = Data.define(:name, :output_path, :status, :error_message, :limit_text) do
+      def initialize(name:, output_path:, status:, error_message:, limit_text: nil)
+        super
+      end
+
       def ok?
         status == :ok
       end

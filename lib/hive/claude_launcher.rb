@@ -590,9 +590,9 @@ module Hive
       end
 
       reason = caller_deadline && deadline == caller_deadline ? "before caller deadline" : "in tmux session #{runner.name}"
-      if Hive::AgentLimit.limit_reached?(last_tail)
+      if (limit_line = Hive::AgentLimit.live_limit_line(last_tail))
         raise Hive::AgentError,
-              Hive::AgentLimit.error_message(last_tail, agent: "claude")
+              Hive::AgentLimit.error_message(limit_line, agent: "claude")
       end
 
       raise Hive::AgentError,
@@ -704,11 +704,12 @@ module Hive
 
     def limits_reached_marker(task, runner)
       pane = capture_limit_tail(runner)
-      return nil unless Hive::AgentLimit.limit_reached?(pane)
+      limit_line = Hive::AgentLimit.live_limit_line(pane)
+      return nil unless limit_line
 
       Hive::Markers.set(task.state_file, :error,
                         reason: "limits_reached",
-                        message: Hive::AgentLimit.error_message(pane, agent: "claude"),
+                        message: Hive::AgentLimit.error_message(limit_line, agent: "claude"),
                         retry_after: Hive::AgentLimit.retry_after)
       Hive::Markers.current(task.state_file)
     end
@@ -739,10 +740,11 @@ module Hive
       loop do
         output_available = expected_output_available?(expected_output)
         pane_tail = capture_limit_tail(runner)
-        if Hive::AgentLimit.limit_reached?(pane_tail)
+        if (limit_line = Hive::AgentLimit.live_limit_line(pane_tail))
           return {
             status: :error,
-            error_message: Hive::AgentLimit.error_message(pane_tail, agent: "claude")
+            limit_text: limit_line,
+            error_message: Hive::AgentLimit.error_message(limit_line, agent: "claude")
           }
         end
 
@@ -824,10 +826,11 @@ module Hive
         # execute stage stamps `reason="limits_reached"` and the cooldown
         # healer can hold/retry. `capture_limit_tail` is nil-runner safe.
         pane_tail = capture_limit_tail(runner)
-        if Hive::AgentLimit.limit_reached?(pane_tail)
+        if (limit_line = Hive::AgentLimit.live_limit_line(pane_tail))
           return {
             status: :error,
-            error_message: Hive::AgentLimit.error_message(pane_tail, agent: "claude")
+            limit_text: limit_line,
+            error_message: Hive::AgentLimit.error_message(limit_line, agent: "claude")
           }
         end
 

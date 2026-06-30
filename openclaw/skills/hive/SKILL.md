@@ -106,7 +106,7 @@ systemctl --user status hive-daemon.service --no-pager
 For each task with a `pr_url` from `hive status --json`, derive `<number>` from the URL and run `gh pr checks <number>`; without a PR, CI is not applicable.
 
 Summarize one bullet/block per task, not a table, with fields in this order: `stage`, `marker`, `action`, `PR URL`, `CI status`, `live PID`, `held/retry`, `suggested command`.
-Source `marker`, `action`, `held/retry`, and `suggested command` from `hive status --json`; use daemon status for live PID when present.
+Source `stage`, `PR URL`, `marker`, `action`, `held/retry`, and `suggested command` from `hive status --json`; use daemon status for live PID when present, and `gh pr checks` for CI status.
 
 Degrade gracefully: if `systemctl` is unavailable (for example macOS/launchd), report service status unavailable or use the obvious platform check.
 If `gh` is missing, unauthenticated, or the task has no PR, report CI as unknown/not applicable.

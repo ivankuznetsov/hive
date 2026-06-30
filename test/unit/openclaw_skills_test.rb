@@ -101,7 +101,6 @@ class OpenClawSkillsTest < Minitest::Test
     _metadata, body = read_skill("hive")
     status_bundle = section(body, "## Status Bundle")
 
-    assert_includes body, "## Status Bundle"
     assert_operator body.index("## Status Bundle"), :<, body.index("## Safety Boundaries")
 
     [

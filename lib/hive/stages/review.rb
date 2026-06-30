@@ -901,12 +901,19 @@ module Hive
         evidence = fix_result && fix_result[:completion_evidence]
         return false unless evidence
 
+        # Scan the reviewer files for whole-pass no-change evidence ONCE and
+        # thread the boolean through both the phase-fact gate and the audit
+        # message, rather than re-globbing/re-reading `reviews/*-NN.md` twice
+        # per fallback (mirrors the "compute worktree_status once" change).
+        no_change = no_change_evidence_present?(ctx)
+
         phase_facts = fix_completion_fallback_phase_facts(
           ctx,
           before_fix_head: before_fix_head,
           after_fix_head: after_fix_head,
           worktree_status: worktree_status,
-          error_message: fix_result[:error_message]
+          error_message: fix_result[:error_message],
+          no_change: no_change
         )
         decision = Hive::ClaudeCompletionFallback.suppress?(
           evidence: evidence,
@@ -920,23 +927,30 @@ module Hive
         # pending human approval can't be bypassed). The legitimate
         # write_fix_success there owns the sentinel; writing it early would
         # let a stale sentinel launder a guardrail-blocked pass as complete.
+        #
+        # R5/R6: a suppression MUST be auditable. If the
+        # claude_completion_fallback event can't be recorded, do NOT laundry
+        # the pass to success silently — return false so control falls
+        # through to a terminal (but daemon-recoverable) REVIEW_ERROR instead
+        # of a SUCCESS with no audit trail.
         emit_fix_completion_fallback(
           task, ctx, evidence, phase_facts, decision,
           before_fix_head: before_fix_head,
           after_fix_head: after_fix_head,
-          worktree_status: worktree_status
+          worktree_status: worktree_status,
+          no_change: no_change
         )
-        true
       end
 
-      def fix_completion_fallback_phase_facts(ctx, before_fix_head:, after_fix_head:, worktree_status:, error_message:)
+      def fix_completion_fallback_phase_facts(ctx, before_fix_head:, after_fix_head:, worktree_status:, error_message:, no_change:)
         {
           artifacts_present: fix_completion_fallback_artifacts_present?(ctx),
           commit_or_no_change: fix_completion_commit_or_no_change?(
             ctx,
             before_fix_head: before_fix_head,
             after_fix_head: after_fix_head,
-            worktree_status: worktree_status
+            worktree_status: worktree_status,
+            no_change: no_change
           ),
           no_unresolved_escalation: count_escalations(ctx).zero?,
           worktree_readable: !worktree_status.is_a?(Array),
@@ -953,7 +967,7 @@ module Hive
         false
       end
 
-      def fix_completion_commit_or_no_change?(ctx, before_fix_head:, after_fix_head:, worktree_status:)
+      def fix_completion_commit_or_no_change?(ctx, before_fix_head:, after_fix_head:, worktree_status:, no_change:)
         return true if before_fix_head.to_s != "" &&
                        after_fix_head.to_s != "" &&
                        before_fix_head != after_fix_head
@@ -966,7 +980,9 @@ module Hive
         # worktree as a code change, not a no-change pass (KTD4/HLD).
         return true if worktree_status == :dirty
 
-        no_change_evidence_present?(ctx)
+        # `no_change` is the whole-pass no-change scan, computed once by the
+        # caller and threaded in to avoid re-reading the reviewer files.
+        no_change
       end
 
       # "Whole-pass no-change": the fallback may treat the pass as needing
@@ -1004,8 +1020,12 @@ module Hive
         message.to_s.match?(/expected output file missing|missing output|output .* missing/i)
       end
 
+      # Emit the audit event and report whether it was actually recorded.
+      # Returns true on a successful emit, false if recording failed — the
+      # caller treats a false here as "suppression is not auditable" and
+      # declines to launder the pass to success (R5/R6).
       def emit_fix_completion_fallback(task, ctx, evidence, phase_facts, decision,
-                                       before_fix_head:, after_fix_head:, worktree_status:)
+                                       before_fix_head:, after_fix_head:, worktree_status:, no_change:)
         Hive::Events.emit(
           task_folder: task.folder,
           slug: task.slug,
@@ -1016,23 +1036,33 @@ module Hive
             task, ctx, evidence, phase_facts, decision,
             before_fix_head: before_fix_head,
             after_fix_head: after_fix_head,
-            worktree_status: worktree_status
+            worktree_status: worktree_status,
+            no_change: no_change
           )
         )
+        true
       rescue SystemCallError, IOError, JSON::JSONError
-        nil
+        false
       end
 
       def claude_completion_fallback_message(task, ctx, evidence, phase_facts, decision,
-                                             before_fix_head:, after_fix_head:, worktree_status:)
+                                             before_fix_head:, after_fix_head:, worktree_status:, no_change:)
         # R5: record WHAT was checked, not just booleans — the artifact path
         # inspected and the concrete commit (before→after head SHA) or the
         # no-change basis — so a suppressed fallback is auditable after the
         # fact. Events.emit truncates to MAX_MESSAGE_BYTES, so keep values
         # compact (short SHAs, basename of the artifact).
+        #
+        # `outcome=fallback_evaluated` is deliberate: this event records that
+        # the completion fallback FIRED and its evidence held — NOT that the
+        # pass was accepted as complete. It is emitted before the post-fix
+        # guardrail runs, which may still trip and return review_waiting
+        # (pending human approval) WITHOUT a success sentinel. Wording it as
+        # "evaluated" keeps a guardrail-blocked pass from reading as done.
         parts = {
           phase: "fix",
           pass: format("%02d", ctx.pass),
+          outcome: "fallback_evaluated",
           task: task.slug,
           pid: evidence[:pid],
           session_alive: evidence[:session_alive],
@@ -1046,7 +1076,8 @@ module Hive
             ctx,
             before_fix_head: before_fix_head,
             after_fix_head: after_fix_head,
-            worktree_status: worktree_status
+            worktree_status: worktree_status,
+            no_change: no_change
           ),
           no_unresolved_escalation: phase_facts[:no_unresolved_escalation],
           missing: Array(decision[:missing]).join("|")
@@ -1058,12 +1089,14 @@ module Hive
       # the concrete before→after head SHAs when a commit landed, a dirty
       # worktree (the auto-commit will land), or the whole-pass no-change
       # basis. Mirrors fix_completion_commit_or_no_change?'s branch order.
-      def fix_completion_commit_evidence(ctx, before_fix_head:, after_fix_head:, worktree_status:)
+      def fix_completion_commit_evidence(ctx, before_fix_head:, after_fix_head:, worktree_status:, no_change:)
         before = before_fix_head.to_s
         after = after_fix_head.to_s
         return "commit:#{before[0, 12]}->#{after[0, 12]}" if before != "" && after != "" && before != after
         return "dirty_worktree" if worktree_status == :dirty
-        return "whole_pass_no_change" if no_change_evidence_present?(ctx)
+        # `no_change` is threaded in from the caller (computed once) so this
+        # audit string doesn't re-scan the reviewer files.
+        return "whole_pass_no_change" if no_change
 
         "none"
       end

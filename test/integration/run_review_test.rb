@@ -2447,7 +2447,63 @@ class RunReviewTest < Minitest::Test
         marker = Hive::Markers.current(File.join(folder, "task.md"))
         assert_equal :review_error, marker.name
         assert_equal "fix_failed", marker.attrs["reason"]
+        # R9: the launcher's stop-hook diagnostic must reach the terminal
+        # marker so an operator sees WHY the fix failed, not a bare reason.
+        assert_includes marker.attrs["message"].to_s, "stop hook did not signal completion"
         refute File.exist?(File.join(reviews_dir, "fix-success-01.md"))
+      end
+    end
+  end
+
+  # R4: an unresolved escalation (count_escalations > 0) must keep the pass
+  # terminal even when a commit landed and the launcher evidence looks clean.
+  # Covered at the unit level (no_unresolved_escalation phase fact) — this
+  # locks the wiring end-to-end through the full review-stage branch.
+  def test_fix_agent_stop_hook_timeout_with_unresolved_escalation_still_review_errors
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+        worktree_path = YAML.safe_load(File.read(File.join(folder, "worktree.yml"))).fetch("path")
+        reviews_dir = File.join(folder, "reviews")
+        FileUtils.mkdir_p(reviews_dir)
+        File.write(File.join(reviews_dir, "stub-reviewer-01.md"), "## High\n- [x] apply a fix\n")
+        # An escalation the human has NOT answered (a `- [ ]` item) — a real
+        # commit lands below, but the unresolved escalation alone blocks
+        # suppression.
+        File.write(File.join(reviews_dir, "escalations-01.md"),
+                   "# Escalations for pass 01\n\n- [ ] needs human review\n")
+        Hive::Markers.set(File.join(folder, "task.md"), :review_waiting, pass: 1, escalations: 1)
+
+        with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:|
+          File.write(File.join(worktree_path, "fix.txt"), "fixed\n")
+          system("git", "-C", worktree_path, "add", "fix.txt") || raise("git add failed")
+          system("git", "-C", worktree_path, "commit", "-m", "fix review finding", "--quiet") ||
+            raise("git commit failed")
+          {
+            status: :timeout,
+            error_message: "claude stop hook did not signal completion",
+            completion_evidence: {
+              pane_idle: true,
+              process_exited: nil,
+              exit_code: nil,
+              tmux_readable: true,
+              session_alive: true,
+              reason: "turn_ended_without_stop_hook",
+              expected_done_path: File.join(folder, ".done"),
+              expected_result_path: File.join(folder, "result.json")
+            }
+          }
+        }) do
+          _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+          assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        end
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_error, marker.name
+        assert_equal "fix_failed", marker.attrs["reason"]
+        refute File.exist?(File.join(reviews_dir, "fix-success-01.md"))
+        events = File.readlines(File.join(folder, "events.jsonl"), chomp: true).map { |line| JSON.parse(line) }
+        assert_empty events.select { |event| event["event_type"] == "claude_completion_fallback" }
       end
     end
   end

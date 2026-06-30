@@ -1,9 +1,9 @@
 ---
 title: Interaction Surface
 type: commands
-source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/cli.rb, lib/hive/commands/connect.rb, lib/hive/commands/disconnect.rb, lib/hive/commands/bench_submit.rb, lib/hive/commands/digest.rb, lib/hive/digest.rb, lib/hive/digest/, lib/hive/web/, public/, hive.gemspec, packaging/docker/, .github/workflows/release.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
+source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/cli.rb, lib/hive/commands/adhoc_review.rb, lib/hive/commands/connect.rb, lib/hive/commands/disconnect.rb, lib/hive/commands/bench_submit.rb, lib/hive/commands/digest.rb, lib/hive/digest.rb, lib/hive/digest/, lib/hive/web/, public/, hive.gemspec, packaging/docker/, .github/workflows/release.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-14
-updated: 2026-06-22
+updated: 2026-06-30
 tags: [commands, api]
 ---
 
@@ -23,6 +23,7 @@ one ClawHub listing per Hive verb.
 - `bin/hv`
 - `bin/hive-e2e`
 - `lib/hive/cli.rb`
+- `lib/hive/commands/adhoc_review.rb`
 - `lib/hive/commands/connect.rb`
 - `lib/hive/commands/disconnect.rb`
 - `lib/hive/commands/bench_submit.rb`
@@ -49,7 +50,8 @@ one ClawHub listing per Hive verb.
 `bin/hive` loads `Hive::CLI` and exposes the public command set documented in
 [[cli]] and `wiki/commands/*`. The CLI includes workflow verbs (`new`,
 `brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`,
-`archive`), project workflow authoring via [[commands/workflow]], daemon/bot/babysitter
+`archive`), the branch `make-the-hive-daemon-automatically-260629-223d`
+`hive review --pr` overlay for ad-hoc review of an existing GitHub PR, project workflow authoring via [[commands/workflow]], daemon/bot/babysitter
 lifecycle commands, diagnostics, markers, findings, metrics, update/uninstall,
 registry maintenance, Screenote connect/disconnect, the `hive bench submit`
 corpus-submission producer, the `hive digest` shipped-digest producer, and

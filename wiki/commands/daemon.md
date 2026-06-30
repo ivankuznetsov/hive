@@ -3,7 +3,7 @@ title: hive daemon
 type: command
 source: lib/hive/commands/daemon.rb, lib/hive/daemon/*
 created: 2026-05-06
-updated: 2026-06-18
+updated: 2026-06-30
 tags: [command, daemon, automation, json]
 ---
 
@@ -77,10 +77,17 @@ step, so selected no-live-lock `error` rows may be cleared into markerless
 edit-resume rows first: `8-finalize` `reason=unpushed_commits`, plus
 `2-brainstorm` / `3-plan` / `4-execute` / `7-artifacts` / `8-finalize`
 `reason=tmux_session_terminated` or `reason=agent_orphaned`, and elapsed
-`limits_reached` markers whose `retry_after` cooldown has passed. `3-plan`
+`limits_reached` markers whose `retry_after` cooldown has passed. Immediately
+after that, `Hive::Daemon::RecoverableErrorHealer` may clear the fixed v1
+recoverable dependency-outage allowlist: Codex-auth `implementer_failed`
+markers with a 401 missing bearer/basic-auth diagnostic, and
+`claude_launch_failed` markers, but only after safety checks, changed health
+signal/backoff/budget gates, and dependency probes pass. Set
+`daemon.auto_retry.enabled: false` to disable that probe-gated path. `3-plan`
 terminal-error clears also enqueue a same-stage `hive plan ... --from 3-plan`
 request with `requestor=healer`, because a markerless empty `plan.md` would
-otherwise remain an error row. Independently, `Hive::Daemon::DisplayNameBackfiller`
+otherwise remain an error row. Independently,
+`Hive::Daemon::DisplayNameBackfiller`
 runs each tick and re-spawns `hive generate-name <folder>` (fire-and-forget,
 bounded by `max_per_tick`) for any task whose `display_name` never landed at
 `hive new`, so an interrupted name generation self-heals instead of leaving the
@@ -140,6 +147,7 @@ All under `daemon:` in `~/Dev/hive/config.yml`:
 |-----|---------|---------|
 | `poll_interval_sec` | 30 | Backstop cadence for full status scans. Min 5. |
 | `fast_poll_sec` | 1 | Cheap wake cadence for child reaps and state-file/stage-dir mtime probes between full scans. Min 1. |
+| `auto_retry.enabled` | `true` | Global kill switch for the recoverable terminal-error healer. `false` keeps otherwise-recoverable dependency-outage markers parked for manual `hive markers clear`. |
 | `edit_debounce_sec` | 30 | Settle window for `kind: edit` resumes. 0 disables debounce. |
 | `pr_merge_poll_interval_sec` | 300 | PrMergeWatcher cadence (per-task). Min 60 to respect GitHub rate limits. |
 | `max_concurrent_runs` | 3 | Global cap. Raise carefully — multiplies cost ceiling. |

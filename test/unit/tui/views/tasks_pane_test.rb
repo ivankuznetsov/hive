@@ -317,7 +317,7 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
                  "a blocked error row must surface BOTH its error state and the dependency block"
   end
 
-  def test_recover_review_status_shows_marker_reason
+  def test_recover_review_status_shows_classified_marker_reason
     snap = make_snapshot([
       { "name" => "hive", "tasks" => [
         make_task(
@@ -326,13 +326,13 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
           action: "recover_review",
           action_label: "Needs recovery",
           marker: "review_error",
-          attrs: { "phase" => "triage", "reason" => "triage_failed", "pass" => "2" },
+          attrs: { "phase" => "triage", "reason" => "merge_conflict", "pass" => "2" },
           suggested: nil
         )
       ] }
     ])
     out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
-    assert_includes out, "triage_failed",
+    assert_includes out, "merge_conflict",
                     "review recovery rows must show the exact marker reason, not generic status text"
     refute_includes out, "Needs recovery"
   end
@@ -388,8 +388,8 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     # max_passes-hit REVIEW_STALE markers carry `pass=N` but no
     # `reason` attr. Operator needs to see the pass count to
     # understand WHY this row is stuck (cap was reached) without
-    # opening the file. Mirrors the existing `wall_clock` /
-    # `triage_failed` inline-diagnostic pattern.
+    # opening the file. Mirrors the existing `wall_clock` / classified-reason
+    # inline-diagnostic pattern.
     snap = make_snapshot([
       { "name" => "hive", "tasks" => [
         make_task(
@@ -411,7 +411,7 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
 
   def test_recover_review_status_reason_wins_over_pass
     # Regression: when both `reason` and `pass` are present (the
-    # retryable wall_clock / triage_failed shapes), `reason` wins.
+    # retryable wall_clock / classified-reason shapes), `reason` wins.
     # The pass-attr branch must never override the existing reason
     # rendering, or `Enter` routing diverges from status display.
     snap = make_snapshot([

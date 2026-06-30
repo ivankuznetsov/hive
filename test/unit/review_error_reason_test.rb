@@ -54,6 +54,84 @@ class ReviewErrorReasonTest < Minitest::Test
     assert_empty emitted - Hive::ReviewErrorReason::REASONS
   end
 
+  # Drift guard: CLASSIFIED is a hand-maintained list that must mirror the
+  # reasons actually keyed in PATTERNS. Without this, a future PATTERNS row
+  # with a new/typo'd reason would be returned by classify yet fall outside
+  # CLASSIFIED/REASONS and ship green.
+  def test_classified_matches_pattern_reason_keys
+    assert_equal Hive::ReviewErrorReason::CLASSIFIED.sort,
+                 Hive::ReviewErrorReason::PATTERNS.map(&:first).uniq.sort
+  end
+
+  # One representative line per regex alternative. Each line is crafted to
+  # match EXACTLY its target alternative (not a sibling alternative of the
+  # same reason), so a one-character typo in any single regex flips that row
+  # to "unknown" and fails here — the 100% line-coverage gate cannot catch
+  # this because the regex array literals read as covered after one classify
+  # call. Keep this table in lockstep with PATTERNS.
+  REPRESENTATIVE_LINES = {
+    # merge_conflict
+    "CONFLICT (content): collision in file" => "merge_conflict",
+    "Merge conflict in lib/app.rb" => "merge_conflict",
+    "Automatic merge failed; stopping" => "merge_conflict",
+    "path/to/file.rb: needs merge" => "merge_conflict",
+    "You have unmerged paths." => "merge_conflict",
+    "hint: fix conflicts and then commit the result" => "merge_conflict",
+    "rebase conflict" => "merge_conflict",
+    # network_timeout
+    "connection timed out" => "network_timeout",
+    "Error: ETIMEDOUT opening socket" => "network_timeout",
+    "connect to host github.com: Network is unreachable" => "network_timeout",
+    "getaddrinfo: Temporary failure in name resolution" => "network_timeout",
+    "fatal: unable to access: Could not resolve host: github.com" => "network_timeout",
+    "Error: ECONNRESET" => "network_timeout",
+    "Connection reset by peer" => "network_timeout",
+    # tool_permission_denied
+    "bash: /usr/bin/foo: Permission denied" => "tool_permission_denied",
+    "Error: EACCES open '/etc/hosts'" => "tool_permission_denied",
+    "rm: cannot remove: Operation not permitted" => "tool_permission_denied",
+    "agent is not allowed to run Bash" => "tool_permission_denied",
+    "tool shell_command blocked" => "tool_permission_denied",
+    "hook: refusing to run untrusted command" => "tool_permission_denied",
+    # agent_crashed
+    "Segmentation fault" => "agent_crashed",
+    "Process received SIGSEGV" => "agent_crashed",
+    "Aborted by SIGABRT" => "agent_crashed",
+    "panic: runtime error: index out of range" => "agent_crashed",
+    "fatal error: runtime: out of memory" => "agent_crashed",
+    "Uncaught exception: TypeError" => "agent_crashed",
+    "Traceback (most recent call last):" => "agent_crashed",
+    "Killed" => "agent_crashed",
+    "process exited: core dumped" => "agent_crashed",
+    "terminated by SIGKILL" => "agent_crashed"
+  }.freeze
+
+  def test_every_pattern_alternative_has_a_representative_line
+    alternative_count = Hive::ReviewErrorReason::PATTERNS.sum { |_, regexes| regexes.size }
+
+    assert_equal alternative_count, REPRESENTATIVE_LINES.size,
+                 "every regex alternative in PATTERNS needs one representative line in REPRESENTATIVE_LINES"
+  end
+
+  def test_representative_lines_classify_to_expected_reason
+    REPRESENTATIVE_LINES.each do |line, expected|
+      assert_equal expected, Hive::ReviewErrorReason.classify(line),
+                   "#{line.inspect} should classify as #{expected}"
+    end
+  end
+
+  # The classifier matches per stripped line, never across the whole blob:
+  # a signal whose words straddle a newline must NOT match. Pinning this
+  # stops a future refactor to whole-string match? from silently changing
+  # behavior under a green suite.
+  def test_signal_split_across_newline_is_not_matched
+    straddling = "automatic merge\nfailed to write output"
+    assert_equal "unknown", Hive::ReviewErrorReason.classify(straddling)
+
+    on_one_line = "automatic merge failed to write output"
+    assert_equal "merge_conflict", Hive::ReviewErrorReason.classify(on_one_line)
+  end
+
   def test_rate_limit_language_is_reserved_for_agent_limit_gate
     assert_equal "unknown", Hive::ReviewErrorReason.classify("rate limit reached")
     assert Hive::AgentLimit.limit_reached?("rate limit reached")

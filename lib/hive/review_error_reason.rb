@@ -2,6 +2,11 @@ require "hive/agent_limit"
 
 module Hive
   module ReviewErrorReason
+    # The complete `reason=` vocabulary a review_error marker can carry. NOT
+    # all of these are produced here: `limits_reached`/`rate_limited` are
+    # stamped by the AgentLimit gate (Stages::Review's limit arm), never by
+    # `classify`; they are listed so this constant is the one authoritative
+    # reason list (the wiki points readers here).
     REASONS = %w[
       limits_reached
       rate_limited
@@ -12,6 +17,9 @@ module Hive
       unknown
     ].freeze
 
+    # The subset of REASONS that `classify` can actually emit (in addition to
+    # the always-available `unknown` fallback). Must stay in lockstep with
+    # PATTERNS.map(&:first) — the closure test guards against drift.
     CLASSIFIED = %w[
       merge_conflict
       network_timeout
@@ -19,6 +27,8 @@ module Hive
       agent_crashed
     ].freeze
 
+    # The regex tables driving `classify`: ordered [reason, [regexes...]] rows.
+    # Order is priority — the first reason with any line-level match wins.
     PATTERNS = [
       [
         "merge_conflict",
@@ -29,7 +39,7 @@ module Hive
           /needs merge/i,
           /you have unmerged paths/i,
           /fix conflicts and then commit/i,
-          /rebase .* conflict/i
+          /rebase .*conflict/i
         ]
       ],
       [

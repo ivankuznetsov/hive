@@ -110,6 +110,7 @@ module Hive
         fix_auto_commit_sign_policy_failed
         fix_auto_commit_signing_failed
       ].freeze
+      FIX_CLAUDE_STOP_HOOK_MESSAGE = "claude stop hook did not signal completion".freeze
 
       def initialize(controller:, logger:, grace_sec: 300,
                      review_error_auto_recovery_limit: REVIEW_ERROR_AUTO_RECOVERY_LIMIT,
@@ -431,6 +432,9 @@ module Hive
         reason = marker_reason(row)
         marker_attrs = review_marker_attrs(row)
         marker_attrs["reason"] = reason
+        if fix_claude_stop_hook_failure?(marker_attrs_for(row))
+          marker_attrs["message"] = FIX_CLAUDE_STOP_HOOK_MESSAGE
+        end
         recovery_key = review_error_auto_recovery_key(row, reason: reason)
         attempts = @review_error_auto_recoveries[recovery_key]
         if attempts >= @review_error_auto_recovery_limit
@@ -525,6 +529,7 @@ module Hive
         when "review_agent_died" then "review_agent_died"
         when "limits_reached" then "reviewer_limits_reached"
         when "all_failed" then "reviewer_all_failed"
+        when "fix_failed" then "fix_claude_stop_hook"
         when *FIX_AUTO_COMMIT_RETRYABLE_REASONS then "fix_auto_commit_retry"
         else "reviewer_tmux_session_terminated"
         end
@@ -608,6 +613,13 @@ module Hive
         return true if attrs["phase"].to_s == "fix" &&
                        FIX_AUTO_COMMIT_RETRYABLE_REASONS.include?(attrs["reason"].to_s)
 
+        # Legacy Claude Code stop-hook failures are environmental: the fix run
+        # completed far enough to hit the stop hook, but the hook failed to
+        # signal completion and Review stamped a generic fix_failed marker.
+        # Keep ordinary fix_failed manual; this bounded retry only covers the
+        # exact known stop-hook signature and still re-runs the normal fix path.
+        return true if fix_claude_stop_hook_failure?(attrs)
+
         return false unless attrs["phase"].to_s == "reviewers"
         return false unless attrs["reason"].to_s == "reviewer_partial_failure"
         return false if attrs["pass"].to_s.empty?
@@ -623,6 +635,12 @@ module Hive
         end
       rescue SystemCallError
         false
+      end
+
+      def fix_claude_stop_hook_failure?(attrs)
+        attrs["phase"].to_s == "fix" &&
+          attrs["reason"].to_s == "fix_failed" &&
+          attrs["message"].to_s == FIX_CLAUDE_STOP_HOOK_MESSAGE
       end
 
       def reviewer_errors_path(row)

@@ -358,6 +358,15 @@ module Hive
 
         verb = argv[1].to_s
         return false unless ALLOWED_VERBS.include?(verb)
+
+        # The `daemon` verb runs host-global maintenance, not project-scoped
+        # work. Constrain it to the explicit GLOBAL_MAINTENANCE_ARGVS allowlist
+        # so a request carrying a real registered+enabled project can't smuggle
+        # `hive daemon stop|disable|restart` through the generic project route
+        # (which would execute a host-wide daemon command). The feature only
+        # needs `hive daemon install --force` under the __global__ sentinel.
+        return GLOBAL_MAINTENANCE_ARGVS.include?(argv) if verb == "daemon"
+
         return true if argv.length < 3
         return true if argv[2].start_with?("-")
         return true if verb == "markers"

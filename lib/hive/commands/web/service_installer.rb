@@ -26,6 +26,12 @@ module Hive
           case platform
           when :macos then File.join(@home, "Library/LaunchAgents/local.hive-web.plist")
           when :linux then File.join(@home, ".config/systemd/user/hive-web.service")
+          else
+            # An unrecognized platform has no autostart unit path; returning nil
+            # would silently flow into systemctl/launchctl argv. Fail loudly so
+            # `:other` is not a silently-representable illegal state.
+            raise Hive::InvalidTaskPath,
+                  "hive web: autostart is not supported on this platform (#{platform})"
           end
         end
 
@@ -39,16 +45,7 @@ module Hive
         end
 
         def render_launchd
-          template = File.read(File.expand_path("../../../../examples/launchd/hive-web.plist", __dir__))
-          binary = resolved_binary
-          binary_dir = File.dirname(binary)
-          escaped_binary = CGI.escapeHTML(binary)
-          escaped_binary_dir = CGI.escapeHTML(binary_dir)
-          escaped_home = CGI.escapeHTML(@home)
-          template
-            .gsub(%r{<string>/Users/YOU/\.local/bin/hive</string>}, "<string>#{escaped_binary}</string>")
-            .gsub("/Users/YOU/Library/Logs", "#{escaped_home}/Library/Logs")
-            .gsub("/Users/YOU/.local/bin", escaped_binary_dir)
+          render_launchd_from(File.expand_path("../../../../examples/launchd/hive-web.plist", __dir__))
         end
       end
     end

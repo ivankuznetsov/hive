@@ -53,29 +53,32 @@ module Hive
           raise Hive::Error, "hive web: downloaded web bundle does not contain config/application.rb"
         end
 
+        # Run `bundle install` against the staged tmp bundle BEFORE swapping it
+        # into place. A transient Bundler / native-extension failure then leaves
+        # the previous working install untouched instead of replacing it with an
+        # unstamped broken bundle. Only after Bundler succeeds do we swap and
+        # stamp the version (the stamp is last so a crash between swap and stamp
+        # leaves `installed_version` nil → `stale?` true → next `ensure!`
+        # re-bootstraps rather than trusting a half-provisioned bundle).
+        bundle_install!(dir: tmp, runner: runner, output: output)
         FileUtils.rm_rf(app_dir)
         FileUtils.mkdir_p(File.dirname(app_dir))
         FileUtils.mv(tmp, app_dir)
-        # Stamp the version ONLY after `bundle install` succeeds. If bundler
-        # fails the app dir is present but unstamped, so `installed_version`
-        # is nil and `stale?` stays true — the next `ensure!` re-bootstraps
-        # instead of treating the broken bundle as an up-to-date install.
-        bundle_install!(runner: runner, output: output)
         File.write(File.join(app_dir, VERSION_FILE), "#{Hive::VERSION}\n")
         app_dir
       ensure
         FileUtils.rm_rf(tmp) if tmp && File.exist?(tmp)
       end
 
-      def bundle_install!(runner: nil, output: $stderr)
-        return app_dir unless File.file?(File.join(app_dir, "Gemfile"))
+      def bundle_install!(dir: app_dir, runner: nil, output: $stderr)
+        return dir unless File.file?(File.join(dir, "Gemfile"))
 
         runner ||= ->(argv, env) { system(env, *argv) }
-        ok = runner.call(%w[bundle install], { "BUNDLE_GEMFILE" => File.join(app_dir, "Gemfile") })
-        raise Hive::Error, "hive web: bundle install failed in #{app_dir}" unless ok
+        ok = runner.call(%w[bundle install], { "BUNDLE_GEMFILE" => File.join(dir, "Gemfile") })
+        raise Hive::Error, "hive web: bundle install failed in #{dir}" unless ok
 
-        output.puts "hive web: installed Rails bundle in #{app_dir}" if output
-        app_dir
+        output.puts "hive web: installed Rails bundle in #{dir}" if output
+        dir
       end
 
       def default_bundle_url
@@ -93,7 +96,10 @@ module Hive
           return
         end
 
-        io = URI.open(bundle_url)
+        # Bound the one network call in the bootstrap path: a slow/wedged
+        # release host must not stall `hive setup` / `hive web install`
+        # indefinitely, matching the timeout discipline used elsewhere.
+        io = URI.open(bundle_url, open_timeout: 30, read_timeout: 120)
         Zlib::GzipReader.wrap(io) do |gz|
           Gem::Package::TarReader.new(gz) do |tar|
             tar.each { |entry| extract_entry(entry, dest) }
@@ -123,7 +129,10 @@ module Hive
         else
           FileUtils.mkdir_p(File.dirname(target))
           File.open(target, "wb") { |file| IO.copy_stream(entry, file) }
-          FileUtils.chmod(entry.header.mode, target) if entry.header.mode
+          # Strip setuid/setgid/sticky bits (07000) from the tar member's mode
+          # so a crafted bundle member can't land a setuid file; a Rails app
+          # bundle only needs ordinary file/dir permission bits.
+          FileUtils.chmod(entry.header.mode & 0o0777, target) if entry.header.mode
         end
       end
     end

@@ -65,11 +65,16 @@ module Hive
           doc.elements.each("//array/string") { |el| strings << el.text.to_s }
           # ProgramArguments wraps the real invocation in a /bin/sh precheck:
           #   /bin/sh -c '[ -x "$0" ] || exit 0; exec "$0" "$@"' <hive> <subcmd...>
-          # The `exec "$0" "$@"` marker is embedded INSIDE the `-c` script
-          # string, so it is never an exact array element — and the element
-          # after the script is the hive binary itself ($0), not a subcommand.
-          # Return the `$0` slot directly: the array element that is the hive
-          # binary, not the element following any marker.
+          # The `-c` script is the element after "-c"; the next element is the
+          # hive binary itself ($0). Identify the $0 slot POSITIONALLY rather
+          # than by a `basename == "hive"` check — a binary resolved as `hv`, a
+          # shim, or a renamed path is still the $0 slot, but the name check
+          # would miss it and falsely report binary_drift "unparseable".
+          dash_c = strings.index("-c")
+          return strings[dash_c + 2] if dash_c && strings.length > dash_c + 2
+
+          # Fallback for a plist without the /bin/sh wrapper: accept the hive
+          # binary by basename or trailing path segment.
           strings.find { |value| File.basename(value) == "hive" || value.end_with?("/hive") }
         rescue REXML::ParseException, SystemCallError
           nil
@@ -83,19 +88,7 @@ module Hive
         end
 
         def render_launchd
-          template = File.read(File.expand_path("../../../../examples/launchd/hive-daemon.plist", __dir__))
-          binary = resolved_binary
-          # dirname BEFORE HTML-escaping so paths with `&`/`<`/`>` get
-          # the correct directory segmentation; then escape both for
-          # plist XML safety.
-          binary_dir = File.dirname(binary)
-          escaped_binary = CGI.escapeHTML(binary)
-          escaped_binary_dir = CGI.escapeHTML(binary_dir)
-          escaped_home = CGI.escapeHTML(@home)
-          template
-            .gsub(%r{<string>/Users/YOU/\.local/bin/hive</string>}, "<string>#{escaped_binary}</string>")
-            .gsub("/Users/YOU/Library/Logs", "#{escaped_home}/Library/Logs")
-            .gsub("/Users/YOU/.local/bin", escaped_binary_dir)
+          render_launchd_from(File.expand_path("../../../../examples/launchd/hive-daemon.plist", __dir__))
         end
       end
     end

@@ -50,8 +50,8 @@ module Hive
       # read the same source and can't drift apart. ACTIONABLE is the subset
       # that means "the installed unit points at the wrong/unreadable binary"
       # and should surface a repair affordance; "none"/"not_applicable" do not.
-      BINARY_DRIFT_STATES = %w[none path version unparseable not_applicable].freeze
-      BINARY_DRIFT_ACTIONABLE = %w[path version unparseable].freeze
+      BINARY_DRIFT_STATES = %w[none path version unparseable unreadable not_applicable].freeze
+      BINARY_DRIFT_ACTIONABLE = %w[path version unparseable unreadable].freeze
 
       # USAGE-class error specific to enable/disable. Carries an
       # error_kind drawn from Hive::Schemas::EnrollErrorKind so the
@@ -472,11 +472,23 @@ module Hive
             "unparseable"
           elsif expected.to_s != "" && File.expand_path(installed) != File.expand_path(expected)
             "path"
-          elsif installed_version && installed_version != Hive::VERSION
+          elsif installed_version.nil?
+            # Unit present and the binary is at the expected path, but
+            # `--version` failed or timed out — the binary is wedged/unreadable.
+            # Surface as actionable drift so a broken-but-correct-path binary
+            # doesn't masquerade as healthy ("none") in status/the web repair.
+            "unreadable"
+          elsif installed_version != Hive::VERSION
             "version"
           else
             "none"
           end
+        # The producer is the only writer of binary_drift; assert its output is
+        # a member of the declared source of truth so the schema, the web view
+        # guard, and the docs table can't silently drift from what is emitted.
+        unless BINARY_DRIFT_STATES.include?(drift)
+          raise "BUG: binary_drift #{drift.inspect} not in BINARY_DRIFT_STATES"
+        end
         {
           "installed_binary" => installed,
           "expected_binary" => expected,

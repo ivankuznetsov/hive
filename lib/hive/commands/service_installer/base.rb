@@ -325,6 +325,32 @@ module Hive
             .sub(/^Environment=PATH=.*$/, build_path_line)
         end
 
+        # Render a launchd plist from `template_path`, substituting the resolved
+        # binary into ProgramArguments ($0), the PATH/HIVE_BIN environment, the
+        # log directory, and (for the web plist) the bare WorkingDirectory.
+        # plist values are XML, so each substituted path is HTML-escaped. Shared
+        # by the daemon and web installers, which differ only in the template.
+        def render_launchd_from(template_path)
+          template = File.read(template_path)
+          binary = resolved_binary
+          # dirname BEFORE HTML-escaping so paths with `&`/`<`/`>` get the
+          # correct directory segmentation; then escape both for plist XML safety.
+          binary_dir = File.dirname(binary)
+          escaped_binary = CGI.escapeHTML(binary)
+          escaped_binary_dir = CGI.escapeHTML(binary_dir)
+          escaped_home = CGI.escapeHTML(@home)
+          template
+            .gsub(%r{<string>/Users/YOU/\.local/bin/hive</string>}, "<string>#{escaped_binary}</string>")
+            .gsub("/Users/YOU/Library/Logs", "#{escaped_home}/Library/Logs")
+            .gsub("/Users/YOU/.local/bin", escaped_binary_dir)
+            # The web plist sets <key>WorkingDirectory</key><string>/Users/YOU
+            # </string>; launchd chdir()s there before exec, so a literal
+            # /Users/YOU never exists on a real host and the service fails to
+            # spawn. Rewrite the bare element to the real home. The daemon plist
+            # has no WorkingDirectory, so this is a no-op there.
+            .gsub(%r{<string>/Users/YOU</string>}, "<string>#{escaped_home}</string>")
+        end
+
         def resolved_binary
           if (brew_binary = homebrew_stable_binary)
             return File.expand_path(brew_binary)

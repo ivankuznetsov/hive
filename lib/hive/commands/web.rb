@@ -4,6 +4,8 @@ require "hive/config"
 require "hive/paths"
 require "hive/web/session_secret"
 require "hive/web/app_bundle"
+require "hive/web/loopback"
+require "hive/invoked_binary"
 
 module Hive
   module Commands
@@ -100,16 +102,26 @@ module Hive
       end
 
       def rails_app_dir(bootstrap: true)
-        candidates = [
-          ENV["HIVEBOX_WEB_APP_DIR"],
-          Hive::Paths.web_app_home,
-          File.expand_path("../../../web", __dir__)
-        ].compact
-        found = candidates.find { |dir| File.file?(File.join(dir, "config", "application.rb")) }
-        return found if found
-        return nil unless bootstrap
+        # An explicit override is operator-managed, not the version-stamped
+        # managed bundle — use it verbatim when it points at a real app.
+        if (override = ENV["HIVEBOX_WEB_APP_DIR"]) &&
+           File.file?(File.join(override, "config", "application.rb"))
+          return override
+        end
 
-        Hive::Web::AppBundle.ensure!
+        # The managed bundle takes precedence over a source checkout (matching
+        # the original candidate order). Refresh it when present-but-stale (U2):
+        # after a CLI upgrade the old Rails app is still on disk, so returning
+        # it unconditionally would keep serving the pre-upgrade app. `ensure!`
+        # re-provisions on missing OR stale and is a no-op when current.
+        if Hive::Web::AppBundle.present?
+          return bootstrap ? Hive::Web::AppBundle.ensure! : Hive::Web::AppBundle.app_dir
+        end
+
+        source = File.expand_path("../../../web", __dir__)
+        return source if File.file?(File.join(source, "config", "application.rb"))
+
+        bootstrap ? Hive::Web::AppBundle.ensure! : nil
       end
 
       # Rails' production host authorization is inactive by default — the box
@@ -131,6 +143,15 @@ module Hive
         # gate. In BOTH allowed paths re-issue the 0.0.0.0-without-https
         # DNS-rebinding warning — previously lost when an owner was configured.
         if @unsafe || cfg.dig("github", "owner").to_s != ""
+          # Make the security decision explicit: a configured owner (set for
+          # OAuth) doubles as the gate that authorizes a non-loopback bind, so
+          # an operator who set it for login reasons has implicitly opted into
+          # a public bind. Say so loudly rather than only on the 0.0.0.0 path.
+          unless @unsafe
+            warn "hive web: binding non-loopback #{bind} — the GitHub owner gate " \
+                 "(web.github.owner) is the only thing requiring login. Pass --unsafe " \
+                 "to bind without an owner gate."
+          end
           warn_on_public_bind(bind, cfg)
           return
         end
@@ -141,15 +162,11 @@ module Hive
       end
 
       def loopback_bind?(bind)
-        value = bind.to_s.downcase
-        return true if value == "localhost" || value == "::1"
-        return false unless value.match?(/\A\d+\.\d+\.\d+\.\d+\z/)
-
-        value.split(".").first == "127"
+        Hive::Web::Loopback.address?(bind)
       end
 
       def install_service
-        installer = Hive::Commands::Web::ServiceInstaller.new
+        installer = Hive::Commands::Web::ServiceInstaller.new(binary_path: Hive::InvokedBinary.path)
         outcome = installer.install!(autostart: true, force: @force)
         if @json
           puts JSON.generate(service_envelope(installer, outcome))
@@ -177,6 +194,10 @@ module Hive
           if installer.envelope_platform == "macos"
             [ "launchctl", launchctl, installer.target_path ]
           else
+            # A unit written while systemd-user was unavailable stays invisible
+            # until a daemon-reload, so `start` would fail with "unit not found".
+            # Reload before starting so a freshly written unit is picked up.
+            system("systemctl", "--user", "daemon-reload") if verb == "start"
             [ "systemctl", "--user", systemctl, installer.service_name ]
           end
         ok = system(*argv)

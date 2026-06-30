@@ -25,14 +25,17 @@ module Hive
         diagnostics = Hive::Setup::Diagnostics.new.run
         add_phase("diagnostics", diagnostics.ok?, diagnostics.to_h)
 
+        # `--no-bootstrap` is diagnose-only (U6): it must provision NOTHING —
+        # not the qmd/web bundles, and not the daemon/web services or project
+        # enrollment either. Otherwise a "diagnose" run silently force-installs
+        # the daemon and enrolls the cwd.
         unless @no_bootstrap
           bootstrap_qmd_if_missing(diagnostics)
           bootstrap_web_bundle
+          install_daemon
+          enroll_project unless @no_init
+          install_web_service if @service
         end
-
-        install_daemon
-        enroll_project unless @no_init
-        install_web_service if @service
         add_phase("web", true, "url" => web_url)
 
         emit(diagnostics)
@@ -42,12 +45,17 @@ module Hive
       private
 
       # Setup succeeded only if BOTH diagnostics have no hard failure AND every
-      # provisioning phase (qmd / web_bundle / daemon_service / web_service)
-      # reported ok. The exit code derives from this so automation branching on
-      # the exit status (AE5) is never told a half-provisioned setup succeeded.
+      # recorded phase (diagnostics / qmd / web_bundle / daemon_service /
+      # enroll / web_service / web) reported ok. The exit code AND the --json
+      # `ok` field both derive from this, so automation branching on either
+      # (AE5) is never told a half-provisioned setup succeeded.
       def successful?(diagnostics)
         hard_failures = diagnostics.results.reject { |row| row.ok? || row.bootstrappable }
-        hard_failures.empty? && @phases.all? { |phase| phase["ok"] }
+        hard_failures.empty? && all_phases_ok?
+      end
+
+      def all_phases_ok?
+        @phases.all? { |phase| phase["ok"] }
       end
 
       def add_phase(name, ok, data = {})
@@ -59,8 +67,13 @@ module Hive
         return unless row&.bootstrappable && row.status == "missing"
 
         prefix = File.join(Hive::Paths.data_home, "qmd")
-        ok = system("npm", "install", "--global", "--prefix", prefix, "@tobilu/qmd")
-        add_phase("qmd", ok, "prefix" => prefix)
+        # Capture npm's stderr so a failed install records WHY on the phase
+        # (mirrors bootstrap_web_bundle), instead of a bare ok:false with no
+        # reason for the operator/automation to act on.
+        _out, err, status = Open3.capture3("npm", "install", "--global", "--prefix", prefix, "@tobilu/qmd")
+        data = { "prefix" => prefix }
+        data["message"] = err.strip unless status.success?
+        add_phase("qmd", status.success?, data)
       end
 
       def bootstrap_web_bundle
@@ -86,6 +99,11 @@ module Hive
           "target_path" => installer.target_path,
           "messages" => installer.messages
         )
+      rescue StandardError => e
+        # A permission-denied / write failure in the installer must not abort
+        # `hive setup` with a raw backtrace before `emit` — record the phase
+        # ok:false (→ non-zero exit) so the --json envelope still emits (AE5).
+        add_phase("daemon_service", false, "message" => "#{e.class}: #{e.message}")
       end
 
       def enroll_project
@@ -96,6 +114,11 @@ module Hive
         require "hive/commands/daemon"
         Hive::Commands::Daemon.new("enable", current_project_name).call
         add_phase("enroll", true, "path" => Dir.pwd)
+      rescue StandardError => e
+        # Any other init/enable failure (write error, corrupt registry) records
+        # the phase ok:false so `emit` still produces a --json envelope instead
+        # of aborting with a backtrace (AE5).
+        add_phase("enroll", false, "message" => "#{e.class}: #{e.message}")
       end
 
       def install_web_service
@@ -105,6 +128,10 @@ module Hive
         installer = Hive::Commands::Web::ServiceInstaller.new(binary_path: Hive::InvokedBinary.path)
         outcome = installer.install!(autostart: true, force: true)
         add_phase("web_service", outcome.success?, "outcome" => outcome.wire_outcome, "target_path" => installer.target_path)
+      rescue StandardError => e
+        # Mirror install_daemon: a service-write failure records ok:false so the
+        # --json envelope still emits instead of aborting with a backtrace (AE5).
+        add_phase("web_service", false, "message" => "#{e.class}: #{e.message}")
       end
 
       def current_project_name
@@ -129,7 +156,10 @@ module Hive
       end
 
       def emit(diagnostics)
-        payload = { "schema" => "hive-setup", "ok" => @phases.all? { |p| p["ok"] }, "phases" => @phases }
+        # `ok` derives from successful? (the same predicate the exit code uses)
+        # so the JSON envelope and the process exit status can never disagree —
+        # a hard diagnostic failure must not report "ok": true while exiting 1.
+        payload = { "schema" => "hive-setup", "ok" => successful?(diagnostics), "phases" => @phases }
         if @json
           @output.puts JSON.generate(payload)
         else

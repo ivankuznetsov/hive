@@ -183,6 +183,43 @@ class HiveBotRouterTest < Minitest::Test
     end
   end
 
+  def test_pairing_reply_survives_prior_unauthorized_contact
+    Dir.mktmpdir("hive-router-pairing") do |dir|
+      pairing_store = Hive::Bot::PairingStore.new(state_home: dir)
+      router = build_test_router(
+        bot_config: { "chat_id_allowlist" => [ 12345 ], "pairing_enabled" => true },
+        pairing_store: pairing_store
+      )
+
+      # A non-/start message from a stranger must NOT suppress the pairing
+      # reply for the chat's lifetime — the bug was that any earlier
+      # unauthorized contact latched the chat shut (R2/R4).
+      junk = router.handle(update(text: "hello there", chat_id: 999))
+      start = router.handle(update(text: "/start", chat_id: 999))
+
+      assert_equal :noop, junk.action
+      assert_equal :reply, start.action
+      assert_match(/\Ahive: access not configured\./, start.text)
+      assert_includes start.text, "Pairing code: #{pairing_store.pending.first.code}"
+      assert_equal 1, @logger.events.count { |event, _| event == :pairing_code_issued }
+    end
+  end
+
+  def test_first_start_routed_to_pairing_is_not_logged_as_a_rejection
+    Dir.mktmpdir("hive-router-pairing") do |dir|
+      router = build_test_router(
+        bot_config: { "chat_id_allowlist" => [ 12345 ], "pairing_enabled" => true },
+        pairing_store: Hive::Bot::PairingStore.new(state_home: dir)
+      )
+
+      router.handle(update(text: "/start", chat_id: 999))
+
+      refute @logger.events.any? { |event, _| event == :update_rejected_unauthorized },
+             "a /start routed to pairing is a handled update, not a rejection"
+      assert_equal 1, @logger.events.count { |event, _| event == :pairing_code_issued }
+    end
+  end
+
   def test_status_returns_dispatch_descriptor
     result = @router.handle(update(text: "/status"))
 

@@ -86,6 +86,7 @@ module Hive
                                         now: @now, logger: @logger)
         @projects_provider = projects_provider
         @unauthorized_logged = {}
+        @pairing_reply_sent = {}
         @pending_ideas = {}
         @last_project = nil
 
@@ -121,12 +122,18 @@ module Hive
       def classify(update)
         prune_pending_ideas!
         prune_unauthorized_log!
-        already_unauthorized = @unauthorized_logged.key?(update.chat_id)
-        unless authorized?(update.chat_id)
-          if pairing_enabled? && !already_unauthorized && start_command?(effective_text(update))
+        unless allowed?(update.chat_id)
+          # Gate the pairing reply on whether we have ALREADY issued a pairing
+          # code to this chat — not on whether the chat has any unauthorized
+          # contact on record. Keying the throttle on the rejection log meant
+          # any earlier non-/start message (or a probe) latched the chat shut,
+          # so a later /start fell through to a silent rejection instead of
+          # replying with a code (R2/R4).
+          if pairing_enabled? && !pairing_reply_sent?(update.chat_id) && start_command?(effective_text(update))
             return :unauthorized_pairing
           end
 
+          log_unauthorized(update.chat_id)
           return :unauthorized
         end
 
@@ -194,14 +201,24 @@ module Hive
 
       private
 
-      def authorized?(chat_id)
-        return true if allowed_chat_ids.include?(chat_id)
+      def allowed?(chat_id)
+        allowed_chat_ids.include?(chat_id)
+      end
 
+      # Log a rejection at most once per chat per bot lifetime (R3). Called
+      # only for updates that actually resolve to a silent rejection — a
+      # /start routed to pairing is a handled update, not a rejection, so it
+      # must NOT stamp this log or emit the misleading
+      # :update_rejected_unauthorized event.
+      def log_unauthorized(chat_id)
         unless @unauthorized_logged[chat_id]
           @logger.event(:update_rejected_unauthorized, chat_id: chat_id)
         end
         @unauthorized_logged[chat_id] = @now.call
-        false
+      end
+
+      def pairing_reply_sent?(chat_id)
+        @pairing_reply_sent.key?(chat_id)
       end
 
       def allowed_chat_ids
@@ -343,6 +360,9 @@ module Hive
 
       def unauthorized_pairing(update)
         code = @pairing_store.mint_or_get(chat_id: update.chat_id)
+        # Mark the pairing reply as sent only once we have actually produced
+        # it — this is the throttle gate `classify` reads (R3).
+        @pairing_reply_sent[update.chat_id] = @now.call
         @logger.event(:pairing_code_issued, chat_id: update.chat_id)
         Result.new(action: :reply, text: pairing_reply_text(chat_id: update.chat_id, code: code))
       end
@@ -354,7 +374,7 @@ module Hive
       end
 
       def pairing_enabled?
-        @bot_config.fetch("pairing_enabled", false) ? true : false
+        @bot_config.fetch("pairing_enabled", false)
       end
 
       def start_command?(text)

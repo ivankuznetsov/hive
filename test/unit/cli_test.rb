@@ -519,7 +519,11 @@ class HiveCliTest < Minitest::Test
     require "hive/commands/web"
     captured = []
     recorder = Class.new do
-      define_method(:initialize) { |bind:, port:| captured << { bind: bind, port: port } }
+      # The constructor now takes a positional `subcommand` (nil for the
+      # foreground server) plus the bind/port/no_bootstrap/unsafe/force/json/
+      # detach kwargs the CLI forwards. Accept the positional + swallow the
+      # extra kwargs so the recorder matches the real signature.
+      define_method(:initialize) { |subcommand = nil, bind:, port:, **| captured << { bind: bind, port: port } }
       define_method(:call) { captured << :called }
     end
 

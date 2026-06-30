@@ -461,7 +461,8 @@ hive pairing approve telegram ABCDEFGH
 ```
 
 Approval writes the chat id to `bot.chat_id_allowlist`, signals the running bot
-to reload when a bot PID file exists, and queues a short approved DM to the new
+to reload when a live bot PID is found (a stale or dead PID file yields
+`reloaded: false` and no SIGHUP), and queues a short approved DM to the new
 chat. Pairing codes expire after 24 hours. See [[commands/pairing]].
 
 Runtime token:

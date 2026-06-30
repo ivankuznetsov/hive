@@ -539,8 +539,8 @@ class RunReviewTest < Minitest::Test
 
   # A triage agent that dies on a provider usage/credit limit must self-heal
   # like the reviewers phase already does — reason=limits_reached + a
-  # retry_after the daemon healer honors — not sit terminally on
-  # triage_failed. (Patrol PRs review with codex but still triage with
+  # retry_after the daemon healer honors — not sit terminally as a generic
+  # phase failure. (Patrol PRs review with codex but still triage with
   # claude, so a claude session-limit wall stranded three patrol tasks.)
   def test_triage_usage_limit_self_heals_as_limits_reached_with_retry_after
     with_tmp_global_config do
@@ -563,7 +563,7 @@ class RunReviewTest < Minitest::Test
           assert_equal :review_error, marker.name
           assert_equal "triage", marker.attrs["phase"]
           assert_equal "limits_reached", marker.attrs["reason"],
-                       "a triage usage-limit failure must self-heal, not sit terminal on triage_failed"
+                       "a triage usage-limit failure must self-heal, not sit terminal as unknown"
           refute_nil marker.attrs["retry_after"],
                      "the limits_reached marker must carry the retry_after cooldown the healer reads"
           assert Time.parse(marker.attrs["retry_after"]) > Time.now - 5,
@@ -579,7 +579,7 @@ class RunReviewTest < Minitest::Test
   # A non-limit triage failure (e.g. a timeout) must stay terminal: only an
   # actual usage/credit limit earns the self-healing retry stamp, so a real
   # bug can't masquerade as a transient limit and loop forever.
-  def test_triage_non_limit_error_stays_terminal_triage_failed
+  def test_triage_non_limit_error_stays_terminal_unknown
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         folder = setup_review_task(dir)
@@ -601,15 +601,58 @@ class RunReviewTest < Minitest::Test
           marker = Hive::Markers.current(File.join(folder, "task.md"))
           assert_equal :review_error, marker.name
           assert_equal "triage", marker.attrs["phase"]
-          assert_equal "triage_failed", marker.attrs["reason"],
+          assert_equal "unknown", marker.attrs["reason"],
                        "a non-limit triage failure must stay terminal (no false self-heal)"
           assert_nil marker.attrs["retry_after"],
-                     "a terminal triage_failed must not carry a retry_after"
+                     "a terminal unknown triage failure must not carry a retry_after"
           assert_includes marker.attrs["message"].to_s, "triage agent failed (timeout)",
-                          "the terminal triage_failed marker must surface the real error_message"
+                          "the terminal unknown marker must surface the real error_message"
         ensure
           Hive::Stages::Review::Triage.singleton_class.alias_method(:run!, :__orig_triage_run_np!)
           Hive::Stages::Review::Triage.singleton_class.send(:remove_method, :__orig_triage_run_np!)
+        end
+      end
+    end
+  end
+
+  def test_triage_non_limit_error_is_classified_from_captured_output
+    cases = {
+      "merge_conflict" => "Automatic merge failed; fix conflicts and then commit the result.",
+      "network_timeout" => "Connection timed out while connecting to api.github.com",
+      "tool_permission_denied" => "tool shell_command denied: operation not permitted",
+      "agent_crashed" => "panic: runtime error: invalid memory address"
+    }
+
+    cases.each do |expected_reason, error_message|
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          folder = setup_review_task(dir)
+          Hive::Stages::Review::Triage.singleton_class.alias_method(:__orig_triage_run_classify!, :run!)
+          Hive::Stages::Review::Triage.define_singleton_method(:run!) do |cfg:, ctx:|
+            Hive::Stages::Review::Triage::Result.new(
+              status: :error,
+              escalations_path: File.join(ctx.task_folder, "reviews", "escalations-#{format('%02d', ctx.pass)}.md"),
+              error_message: error_message,
+              tampered_files: []
+            )
+          end
+          begin
+            capture_io do
+              with_replaced_singleton_method(Hive::Stages::Review, :triage_retry_backoff, ->(_attempt) { }) do
+                assert_raises(Hive::TaskInErrorState) { Hive::Commands::Run.new(folder).call }
+              end
+            end
+
+            marker = Hive::Markers.current(File.join(folder, "task.md"))
+            assert_equal :review_error, marker.name
+            assert_equal "triage", marker.attrs["phase"]
+            assert_equal expected_reason, marker.attrs["reason"]
+            assert_nil marker.attrs["retry_after"]
+            assert_includes marker.attrs["message"].to_s, error_message
+          ensure
+            Hive::Stages::Review::Triage.singleton_class.alias_method(:run!, :__orig_triage_run_classify!)
+            Hive::Stages::Review::Triage.singleton_class.send(:remove_method, :__orig_triage_run_classify!)
+          end
         end
       end
     end
@@ -1539,7 +1582,7 @@ class RunReviewTest < Minitest::Test
   # A transient triage failure (e.g. a momentary tmux blip misread as a dead
   # session) must not stick the task: the bounded retry re-runs triage and,
   # on recovery, the pass advances normally instead of parking on a terminal
-  # triage_failed marker the daemon never auto-retries.
+  # terminal review-error marker the daemon never auto-retries.
   def test_triage_transient_error_is_retried_then_recovers
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -2003,7 +2046,7 @@ class RunReviewTest < Minitest::Test
   def test_triage_tampered_and_error_statuses_yield_review_error
     cases = [
       [ :tampered, "triage_tampered", [ "reviews/stub-reviewer-01.md" ] ],
-      [ :error, "triage_failed", [] ]
+      [ :error, "unknown", [] ]
     ]
 
     cases.each do |triage_status, expected_reason, tampered_files|
@@ -2134,8 +2177,47 @@ class RunReviewTest < Minitest::Test
         marker = Hive::Markers.current(File.join(folder, "task.md"))
         assert_equal :review_error, marker.name
         assert_equal "fix", marker.attrs["phase"]
-        assert_equal "fix_failed", marker.attrs["reason"]
+        assert_equal "unknown", marker.attrs["reason"]
         assert_equal "1", marker.attrs["pass"]
+      end
+    end
+  end
+
+  def test_fix_agent_failure_reason_is_classified_from_captured_output
+    cases = {
+      "merge_conflict" => "CONFLICT (content): Merge conflict in lib/review.rb",
+      "network_timeout" => "Fetch failed: ECONNRESET connection reset by peer",
+      "tool_permission_denied" => "Permission denied while calling shell tool",
+      "agent_crashed" => "segmentation fault (core dumped)"
+    }
+
+    cases.each do |expected_reason, error_message|
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          folder = setup_review_task(dir)
+          FileUtils.mkdir_p(File.join(folder, "reviews"))
+          File.write(File.join(folder, "reviews", "stub-reviewer-01.md"), "## High\n- [x] apply a fix\n")
+          Hive::Markers.set(File.join(folder, "task.md"), :review_waiting, pass: 1, escalations: 1)
+
+          accepted_seen = nil
+          with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:|
+            accepted_seen = accepted
+            { status: :error, error_message: error_message }
+          }) do
+            out, err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+            assert_equal Hive::ExitCodes::TASK_IN_ERROR, status,
+                         "expected #{expected_reason}, got status=#{status}, out=#{out.inspect}, err=#{err.inspect}"
+          end
+
+          assert_match(/apply a fix/, accepted_seen)
+          marker = Hive::Markers.current(File.join(folder, "task.md"))
+          assert_equal :review_error, marker.name
+          assert_equal "fix", marker.attrs["phase"]
+          assert_equal expected_reason, marker.attrs["reason"]
+          assert_equal "1", marker.attrs["pass"]
+          assert_nil marker.attrs["retry_after"]
+          assert_includes marker.attrs["message"].to_s, error_message
+        end
       end
     end
   end

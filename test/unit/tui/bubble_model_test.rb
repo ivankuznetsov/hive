@@ -2446,7 +2446,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       stage: "6-review",
       folder: folder,
       marker: "review_error",
-      attrs: { "phase" => "triage", "reason" => "triage_failed", "pass" => "2" },
+      attrs: { "phase" => "triage", "reason" => "merge_conflict", "pass" => "2" },
       suggested_command: nil
     )
     clear_argv = nil
@@ -2470,7 +2470,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_match(/clearing/, sync_flash, "synchronous flash must announce the in-progress clear")
     assert_match(/REVIEW_ERROR/, sync_flash)
     assert_match(/phase=triage/, sync_flash)
-    assert_match(/reason=triage_failed/, sync_flash)
+    assert_match(/reason=merge_conflict/, sync_flash)
     assert_match(/pass=2/, sync_flash)
 
     final_flash = last_async_flash_text
@@ -2486,7 +2486,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       stage: "6-review",
       folder: "/tmp/hive/recover-me",
       marker: "review_error",
-      attrs: { "reason" => "triage_failed", "pass" => "3" },
+      attrs: { "reason" => "merge_conflict", "pass" => "3" },
       suggested_command: nil
     )
     run_count = 0
@@ -2742,7 +2742,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       stage: "6-review",
       folder: folder,
       marker: "review_error",
-      attrs: { "reason" => "triage_failed", "pass" => "2" },
+      attrs: { "reason" => "merge_conflict", "pass" => "2" },
       suggested_command: nil
     )
 
@@ -2771,7 +2771,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       stage: "6-review",
       folder: folder,
       marker: "review_error",
-      attrs: { "reason" => "triage_failed", "pass" => "2" },
+      attrs: { "reason" => "merge_conflict", "pass" => "2" },
       suggested_command: nil
     )
     clear_argv = nil
@@ -2817,7 +2817,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       stage: "6-review",
       folder: "",
       marker: "review_error",
-      attrs: { "reason" => "triage_failed" },
+      attrs: { "reason" => "merge_conflict" },
       suggested_command: nil
     )
     ran_clear = false
@@ -2870,7 +2870,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       stage: "6-review",
       folder: "/tmp/hive/io-fail",
       marker: "review_error",
-      attrs: { "reason" => "triage_failed" },
+      attrs: { "reason" => "merge_conflict" },
       suggested_command: nil
     )
     ran_dispatch = false
@@ -2901,7 +2901,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       stage: "6-review",
       folder: "/tmp/hive/logic-bug",
       marker: "review_error",
-      attrs: { "reason" => "triage_failed" },
+      attrs: { "reason" => "merge_conflict" },
       suggested_command: nil
     )
 
@@ -2933,7 +2933,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       stage: "6-review",
       folder: folder,
       marker: "review_error",
-      attrs: { "reason" => "triage_failed", "pass" => "2" },
+      attrs: { "reason" => "merge_conflict", "pass" => "2" },
       suggested_command: nil
     )
     # Block the worker on a latch so the second Enter sees an
@@ -3032,7 +3032,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       stage: "6-review",
       folder: "/tmp/hive/extra-attrs",
       marker: "review_error",
-      attrs: { "reason" => "triage_failed", "zebra" => "z", "apple" => "a" },
+      attrs: { "reason" => "merge_conflict", "zebra" => "z", "apple" => "a" },
       suggested_command: nil
     )
 
@@ -3044,7 +3044,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
     end
 
     flash = @model.hive_model.flash.to_s
-    reason_idx = flash.index("reason=triage_failed")
+    reason_idx = flash.index("reason=merge_conflict")
     apple_idx = flash.index("apple=a")
     zebra_idx = flash.index("zebra=z")
     refute_nil reason_idx

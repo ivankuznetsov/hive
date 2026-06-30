@@ -319,7 +319,7 @@ class RunReviewTest < Minitest::Test
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         folder = setup_review_task(dir)
-        File.write(File.join(folder, "task.md"), "<!-- REVIEW_ERROR phase=fix reason=fix_failed pass=2 -->\n")
+        File.write(File.join(folder, "task.md"), "<!-- REVIEW_ERROR phase=fix reason=merge_conflict pass=2 -->\n")
 
         out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder, json: true).call }
         # Hive run --json on a :review_error pre-flight emits a parseable
@@ -335,7 +335,7 @@ class RunReviewTest < Minitest::Test
         next_action = payload["next_action"]
         refute_nil next_action, "review_error envelopes must include next_action"
         assert_equal "fix", next_action["phase"]
-        assert_equal "fix_failed", next_action["reason"]
+        assert_equal "merge_conflict", next_action["reason"]
         assert_match(/REVIEW_ERROR/, next_action["instructions"].to_s)
       end
     end
@@ -1628,7 +1628,7 @@ class RunReviewTest < Minitest::Test
           marker = Hive::Markers.current(File.join(folder, "task.md"))
           assert_equal :review_waiting, marker.name,
                        "a recovered triage must advance to the normal waiting state, not stay review_error"
-          refute_equal "triage_failed", marker.attrs["reason"]
+          assert_nil marker.attrs["reason"]
         ensure
           Hive::Stages::Review.singleton_class.alias_method(:run_reviewers, :__orig_run_reviewers_retry)
           Hive::Stages::Review.singleton_class.send(:remove_method, :__orig_run_reviewers_retry)

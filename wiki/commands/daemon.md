@@ -3,7 +3,7 @@ title: hive daemon
 type: command
 source: lib/hive/commands/daemon.rb, lib/hive/daemon/*
 created: 2026-05-06
-updated: 2026-06-30
+updated: 2026-06-18
 tags: [command, daemon, automation, json]
 ---
 
@@ -86,8 +86,7 @@ signal/backoff/budget gates, and dependency probes pass. Set
 `daemon.auto_retry.enabled: false` to disable that probe-gated path. `3-plan`
 terminal-error clears also enqueue a same-stage `hive plan ... --from 3-plan`
 request with `requestor=healer`, because a markerless empty `plan.md` would
-otherwise remain an error row. Independently,
-`Hive::Daemon::DisplayNameBackfiller`
+otherwise remain an error row. Independently, `Hive::Daemon::DisplayNameBackfiller`
 runs each tick and re-spawns `hive generate-name <folder>` (fire-and-forget,
 bounded by `max_per_tick`) for any task whose `display_name` never landed at
 `hive new`, so an interrupted name generation self-heals instead of leaving the
@@ -147,7 +146,6 @@ All under `daemon:` in `~/Dev/hive/config.yml`:
 |-----|---------|---------|
 | `poll_interval_sec` | 30 | Backstop cadence for full status scans. Min 5. |
 | `fast_poll_sec` | 1 | Cheap wake cadence for child reaps and state-file/stage-dir mtime probes between full scans. Min 1. |
-| `auto_retry.enabled` | `true` | Global kill switch for the recoverable terminal-error healer. `false` keeps otherwise-recoverable dependency-outage markers parked for manual `hive markers clear`. |
 | `edit_debounce_sec` | 30 | Settle window for `kind: edit` resumes. 0 disables debounce. |
 | `pr_merge_poll_interval_sec` | 300 | PrMergeWatcher cadence (per-task). Min 60 to respect GitHub rate limits. |
 | `max_concurrent_runs` | 3 | Global cap. Raise carefully — multiplies cost ceiling. |
@@ -158,6 +156,7 @@ All under `daemon:` in `~/Dev/hive/config.yml`:
 | `child_timeout_sec` | 0 | Per-child wall-clock cap (R-02). `0` disables the default cap, preserving the historical unbounded behavior and avoiding surprise kills of long autonomous review loops. Set a positive value to SIGTERM then SIGKILL children past their deadline. Min 0. |
 | `child_verb_timeouts` | `{digest: 3600}` | Per-verb overrides of `child_timeout_sec`, e.g. `{review: 10800, brainstorm: 1800}`. Each value an integer ≥ 0 (0 disables for that verb). The `digest` verb ships a non-zero default (3600s) because a wedged digest child holds the single global digest slot (`can_dispatch_digest?`) and would otherwise disable all future digests until restart; user overrides deep-merge, so setting other verbs keeps the digest default. Raise it alongside a raised `timeout_sec.digest` (default 1800), or set `{digest: 0}` to disable. |
 | `child_kill_grace_sec` | 30 | SIGTERM→SIGKILL escalation window for a timed-out child. Min 0 (0 = SIGKILL immediately after TERM). |
+| `auto_retry.enabled` | true | Global kill-switch for health-probe-gated daemon auto-retry of the fixed v1 recoverable terminal-error allowlist. Set `daemon.auto_retry.enabled: false` to leave those markers parked for manual `hive markers clear`. |
 | `log_file` | `~/Dev/hive/logs/daemon.log` | Structured-log destination. |
 | `log_max_bytes` | 10485760 | 10 MB rotation threshold. |
 | `log_max_files` | 5 | 5 × 10 MB = 50 MB log budget. |

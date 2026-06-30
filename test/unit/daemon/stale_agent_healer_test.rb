@@ -2226,13 +2226,13 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
 
   # --- all_failed reviewers auto-retry (non-limit total reviewer crash) ---
 
-  def make_review_error_row(state_file, reason:, phase:, pass: "1")
+  def make_review_error_row(state_file, reason:, phase:, pass: "1", attrs: {})
     make_row(
       state_file,
       pid_alive: nil,
       stage: "6-review",
       marker: "review_error",
-      marker_attrs: { "phase" => phase, "reason" => reason, "pass" => pass },
+      marker_attrs: { "phase" => phase, "reason" => reason, "pass" => pass }.merge(attrs),
       action: "recover_review",
       live_task_lock: false
     )
@@ -2297,6 +2297,51 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
 
       refute @logger.events.any? { |name, _| name == :marker_healed },
              "git-level/integrity fix reasons must stay manual"
+      assert_match(/REVIEW_ERROR/, File.read(state_file))
+    end
+  end
+
+  def test_auto_recovers_review_error_fix_failed_when_claude_stop_hook_did_not_signal
+    with_marker_file do |state_file|
+      message = "claude stop hook did not signal completion"
+      File.write(
+        state_file,
+        "# task\n\n<!-- REVIEW_ERROR phase=fix reason=fix_failed pass=1 message=\"#{message}\" -->\n"
+      )
+      row = make_review_error_row(
+        state_file,
+        reason: "fix_failed",
+        phase: "fix",
+        attrs: { "message" => message }
+      )
+
+      heal([ row ])
+
+      heal_event = @logger.events.find { |name, _| name == :marker_healed }
+      assert heal_event, "expected stop-hook fix auto-recovery, got: #{@logger.events.inspect}"
+      assert_equal "fix_claude_stop_hook", heal_event[1][:reason]
+      assert_equal 1, heal_event[1][:attempts]
+      refute_match(/REVIEW_ERROR/, File.read(state_file))
+    end
+  end
+
+  def test_does_not_auto_recover_plain_review_fix_failed
+    with_marker_file do |state_file|
+      File.write(
+        state_file,
+        "# task\n\n<!-- REVIEW_ERROR phase=fix reason=fix_failed pass=1 message=\"agent exited 1\" -->\n"
+      )
+      row = make_review_error_row(
+        state_file,
+        reason: "fix_failed",
+        phase: "fix",
+        attrs: { "message" => "agent exited 1" }
+      )
+
+      heal([ row ])
+
+      refute @logger.events.any? { |name, _| name == :marker_healed },
+             "generic fix_failed must stay manual"
       assert_match(/REVIEW_ERROR/, File.read(state_file))
     end
   end

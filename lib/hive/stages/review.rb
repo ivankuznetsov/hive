@@ -1,9 +1,11 @@
 require "digest"
 require "fileutils"
+require "json"
 require "open3"
 require "time"
 require "yaml"
 require "hive/events"
+require "hive/claude_completion_fallback"
 require "hive/config"
 require "hive/protected_files"
 require "hive/claude_launcher"
@@ -585,7 +587,15 @@ module Hive
                      status: :review_error }
           end
 
-          if agent_failed?(fix_result)
+          if agent_failed?(fix_result) &&
+             !handle_fix_completion_fallback(
+               task,
+               ctx_pass,
+               fix_result,
+               before_fix_head: before_fix_head,
+               after_fix_head: after_fix_head,
+               worktree_path: worktree_path
+             )
             limited = mark_review_phase_failure(
               task, phase: :fix, terminal_reason: "fix_failed",
               pass: pass, error_message: fix_result && fix_result[:error_message]
@@ -881,6 +891,104 @@ module Hive
                           reason: "wall_clock", pass: pass, elapsed: elapsed)
         { commit: "stale_wall_clock_pass_#{format('%02d', pass)}",
           status: :review_stale }
+      end
+
+      def handle_fix_completion_fallback(task, ctx, fix_result, before_fix_head:, after_fix_head:, worktree_path:)
+        evidence = fix_result && fix_result[:completion_evidence]
+        return false unless evidence
+
+        phase_facts = fix_completion_fallback_phase_facts(
+          ctx,
+          before_fix_head: before_fix_head,
+          after_fix_head: after_fix_head,
+          worktree_path: worktree_path,
+          error_message: fix_result[:error_message]
+        )
+        decision = Hive::ClaudeCompletionFallback.suppress?(
+          evidence: evidence,
+          phase_facts: phase_facts
+        )
+        return false unless decision[:suppress]
+
+        write_fix_success(ctx)
+        emit_fix_completion_fallback(task, ctx, evidence, phase_facts, decision)
+        true
+      end
+
+      def fix_completion_fallback_phase_facts(ctx, before_fix_head:, after_fix_head:, worktree_path:, error_message:)
+        worktree = worktree_status(worktree_path)
+        {
+          artifacts_present: fix_completion_fallback_artifacts_present?(ctx),
+          commit_or_no_change: fix_completion_commit_or_no_change?(
+            ctx,
+            before_fix_head: before_fix_head,
+            after_fix_head: after_fix_head
+          ),
+          no_unresolved_escalation: count_escalations(ctx).zero?,
+          worktree_readable: !worktree.is_a?(Array),
+          missing_output_absent: !missing_output_error?(error_message)
+        }
+      end
+
+      def fix_completion_fallback_artifacts_present?(ctx)
+        path = Hive::Stages::Review::Triage.escalations_path(ctx)
+        return false unless File.exist?(path) && File.size(path).positive?
+
+        count_escalations(ctx).is_a?(Integer)
+      rescue SystemCallError, IOError
+        false
+      end
+
+      def fix_completion_commit_or_no_change?(ctx, before_fix_head:, after_fix_head:)
+        return true if before_fix_head.to_s != "" &&
+                       after_fix_head.to_s != "" &&
+                       before_fix_head != after_fix_head
+
+        no_change_evidence_present?(ctx)
+      end
+
+      def no_change_evidence_present?(ctx)
+        pass_suffix = format("%02d", ctx.pass)
+        Dir[File.join(ctx.task_folder, "reviews", "*-#{pass_suffix}.md")].any? do |path|
+          File.readlines(path).any? { |line| line =~ /^\s*-\s+\[x\]\s+RESOLVED\/NO-FIX:/i }
+        end
+      rescue SystemCallError, IOError
+        false
+      end
+
+      def missing_output_error?(message)
+        message.to_s.match?(/expected output file missing|missing output|output .* missing/i)
+      end
+
+      def emit_fix_completion_fallback(task, ctx, evidence, phase_facts, decision)
+        Hive::Events.emit(
+          task_folder: task.folder,
+          slug: task.slug,
+          stage: stage_label_for(task),
+          event_type: :claude_completion_fallback,
+          agent: "phase=fix pass=#{format('%02d', ctx.pass)}",
+          message: claude_completion_fallback_message(task, ctx, evidence, phase_facts, decision)
+        )
+      rescue SystemCallError, IOError, JSON::JSONError
+        nil
+      end
+
+      def claude_completion_fallback_message(task, ctx, evidence, phase_facts, decision)
+        parts = {
+          phase: "fix",
+          pass: format("%02d", ctx.pass),
+          task: task.slug,
+          pid: evidence[:pid],
+          session_alive: evidence[:session_alive],
+          done: evidence[:expected_done_path],
+          result: evidence[:expected_result_path],
+          reason: evidence[:reason],
+          artifacts: phase_facts[:artifacts_present],
+          commit_or_no_change: phase_facts[:commit_or_no_change],
+          no_unresolved_escalation: phase_facts[:no_unresolved_escalation],
+          missing: Array(decision[:missing]).join("|")
+        }
+        parts.map { |key, value| "#{key}=#{value}" }.join(" ")
       end
 
       # A per-pass review-phase agent (triage, fix) that died because the

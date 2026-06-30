@@ -2,6 +2,7 @@ require "fileutils"
 require "json"
 require "open3"
 require "time"
+require "yaml"
 
 require "hive/agent_profiles"
 require "hive/agent_limit"
@@ -848,12 +849,92 @@ module Hive
           return { status: :ok, log_label: log_label }
         end
 
+        evidence = completion_evidence(task, runner, pane_tail: pane_tail, reason: "turn_ended_without_stop_hook")
+        if completion_evidence_turn_ended?(evidence)
+          return {
+            status: :timeout,
+            error_message: "claude stop hook did not signal completion",
+            completion_evidence: evidence
+          }
+        end
+
         if Time.now >= deadline
-          return { status: :timeout, error_message: "claude stop hook did not signal completion" }
+          return {
+            status: :timeout,
+            error_message: "claude stop hook did not signal completion",
+            completion_evidence: completion_evidence(
+              task,
+              runner,
+              pane_tail: pane_tail,
+              reason: "deadline_without_stop_hook"
+            )
+          }
         end
 
         sleep [ poll_interval, deadline - Time.now ].min
       end
+    end
+
+    def completion_evidence_turn_ended?(evidence)
+      evidence[:pane_idle] == true || evidence[:process_exited] == true
+    end
+
+    def completion_evidence(task, runner, pane_tail:, reason:)
+      session_alive, session_error = completion_session_alive(runner)
+      pid = recorded_claude_pid(task)
+      process_exited = pid ? !process_alive?(pid) : nil
+      pane_idle = completion_pane_idle?(pane_tail)
+      tmux_readable = !pane_tail.nil?
+
+      {
+        reason: reason,
+        process_exited: process_exited,
+        exit_code: nil,
+        pane_idle: pane_idle,
+        sentinel_present: File.exist?(done_path(task)),
+        expected_done_path: done_path(task),
+        expected_result_path: result_path(task),
+        session_alive: session_alive,
+        session_error: session_error,
+        tmux_readable: tmux_readable,
+        pid: pid
+      }
+    end
+
+    def completion_pane_idle?(pane_tail)
+      return nil if pane_tail.nil? || pane_tail.empty?
+
+      claude_ready_prompt?(pane_tail)
+    rescue StandardError
+      nil
+    end
+
+    def completion_session_alive(runner)
+      return [ nil, nil ] unless runner.respond_to?(:session_exists?)
+
+      [ runner.session_exists?, nil ]
+    rescue Hive::TmuxError => e
+      [ false, e.message ]
+    end
+
+    def recorded_claude_pid(task)
+      path = File.join(task.folder, ".lock")
+      return nil unless File.exist?(path)
+
+      data = YAML.safe_load(File.read(path)) || {}
+      pid = data["claude_pid"]
+      pid.is_a?(Integer) && pid.positive? ? pid : nil
+    rescue Psych::Exception, SystemCallError, IOError
+      nil
+    end
+
+    def process_alive?(pid)
+      Process.kill(0, pid)
+      true
+    rescue Errno::ESRCH
+      false
+    rescue Errno::EPERM
+      true
     end
 
     # Read `result.json` (if present) and translate `status` into the

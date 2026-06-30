@@ -1149,6 +1149,88 @@ class ClaudeLauncherTest < Minitest::Test
       timeout = Hive::ClaudeLauncher.wait_for_done_signal(task, nil, 0, "ci")
       assert_equal :timeout, timeout.fetch(:status)
       assert_match(/stop hook did not signal/, timeout.fetch(:error_message))
+      evidence = timeout.fetch(:completion_evidence)
+      assert_equal false, evidence.fetch(:sentinel_present)
+      assert_equal Hive::ClaudeLauncher.done_path(task), evidence.fetch(:expected_done_path)
+      assert_equal Hive::ClaudeLauncher.result_path(task), evidence.fetch(:expected_result_path)
+      assert_equal "deadline_without_stop_hook", evidence.fetch(:reason)
+    end
+  end
+
+  def test_wait_for_done_signal_returns_timeout_evidence_when_pane_is_idle
+    with_tmp_task do |task|
+      tail = "Claude Code v2.1.128\n\n/home/project  ❯"
+      runner = Struct.new(:tail) do
+        def session_exists? = true
+        def capture_pane_tail(bytes:) = tail
+      end.new(tail)
+
+      result = Hive::ClaudeLauncher.wait_for_done_signal(task, runner, 10, "fix")
+
+      assert_equal :timeout, result.fetch(:status)
+      evidence = result.fetch(:completion_evidence)
+      assert_equal true, evidence.fetch(:pane_idle)
+      assert_equal true, evidence.fetch(:session_alive)
+      assert_nil evidence.fetch(:process_exited)
+      assert_equal "turn_ended_without_stop_hook", evidence.fetch(:reason)
+    end
+  end
+
+  def test_wait_for_done_signal_returns_timeout_evidence_when_recorded_pid_exited
+    with_tmp_task do |task|
+      File.write(File.join(task.folder, ".lock"), { "claude_pid" => 99_999_999 }.to_yaml)
+      runner = Struct.new(:tail) do
+        def session_exists? = true
+        def capture_pane_tail(bytes:) = tail
+      end.new("Claude Code v2.1.128\nworking\n")
+
+      result = Hive::ClaudeLauncher.wait_for_done_signal(task, runner, 10, "fix")
+
+      assert_equal :timeout, result.fetch(:status)
+      evidence = result.fetch(:completion_evidence)
+      assert_equal true, evidence.fetch(:process_exited)
+      assert_equal 99_999_999, evidence.fetch(:pid)
+      assert_equal "turn_ended_without_stop_hook", evidence.fetch(:reason)
+    end
+  end
+
+  def test_wait_for_done_signal_deadline_evidence_preserves_busy_state
+    with_tmp_task do |task|
+      runner = Struct.new(:tail) do
+        def session_exists? = true
+        def capture_pane_tail(bytes:) = tail
+      end.new("Claude Code v2.1.128\nstill working\n")
+
+      result = Hive::ClaudeLauncher.wait_for_done_signal(task, runner, 0, "fix")
+
+      assert_equal :timeout, result.fetch(:status)
+      evidence = result.fetch(:completion_evidence)
+      assert_equal false, evidence.fetch(:pane_idle)
+      assert_nil evidence.fetch(:process_exited)
+      assert_equal true, evidence.fetch(:session_alive)
+      assert_equal "deadline_without_stop_hook", evidence.fetch(:reason)
+    end
+  end
+
+  def test_wait_for_done_signal_evidence_handles_tmux_errors
+    with_tmp_task do |task|
+      runner = Struct.new(:tail) do
+        def session_exists?
+          raise Hive::TmuxError, "server disappeared"
+        end
+
+        def capture_pane_tail(bytes:)
+          raise Hive::TmuxError, "pane unreadable"
+        end
+      end.new
+
+      result = Hive::ClaudeLauncher.wait_for_done_signal(task, runner, 0, "fix")
+
+      assert_equal :timeout, result.fetch(:status)
+      evidence = result.fetch(:completion_evidence)
+      assert_nil evidence.fetch(:pane_idle)
+      assert_equal false, evidence.fetch(:session_alive)
+      assert_equal "server disappeared", evidence.fetch(:session_error)
     end
   end
 

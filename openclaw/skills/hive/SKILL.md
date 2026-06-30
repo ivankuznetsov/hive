@@ -91,6 +91,27 @@ Prefer `--json` when the Hive command supports it and you need structured output
 
 For `hive wiki compile-log`, prefer `--check` when verifying an aggregate wiki changelog. Run the mutating compile command only after merge/rebase or when the user explicitly wants `wiki/log.md` refreshed; feature PRs should add `wiki/log.d/<timestamp>-<slug>.md` fragments instead of editing the compiled log directly.
 
+## Status Bundle
+
+Use this read-only bundle for a one-shot health overview; these commands need no confirmation, and this section does not weaken confirmation rules for destructive or foreground/streaming commands.
+
+Gather:
+
+```bash
+hive daemon status --json
+hive status --json
+systemctl --user status hive-daemon.service --no-pager
+```
+
+For each task with a `pr_url` from `hive status --json`, derive `<number>` from the URL and run `gh pr checks <number>`; without a PR, CI is not applicable.
+
+Summarize one bullet/block per task, not a table, with fields in this order: `stage`, `marker`, `action`, `PR URL`, `CI status`, `live PID`, `held/retry`, `suggested command`.
+Source `marker`, `action`, `held/retry`, and `suggested command` from `hive status --json`; use daemon status for live PID when present.
+
+Degrade gracefully: if `systemctl` is unavailable (for example macOS/launchd), report service status unavailable or use the obvious platform check.
+If `gh` is missing, unauthenticated, or the task has no PR, report CI as unknown/not applicable.
+If the daemon is stopped or has no live PID, report that plainly instead of failing the bundle.
+
 ## Safety Boundaries
 
 Before running destructive admin verbs (`drop`, `uninstall`, `update`, `forget`, `prune`, `migrate`, or `metrics`), restate the effect and get explicit user confirmation. These verbs can kill agents, remove worktrees, close draft PRs, drop registry entries, or rewrite installed software — they are not undoable.

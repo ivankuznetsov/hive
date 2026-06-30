@@ -12,9 +12,22 @@
       <span class="task-meta">binary drift: <%= drift %></span>
     <% end %>
   </div>
-  <% if actionable_drift || daemon_status["service_installed"] == false %>
+  <%#
+    The Repair button only ENQUEUES a daemon-consumed dispatch request
+    (web/dispatcher.rb#repair_daemon); the web tier never shells out to start
+    a daemon itself (KTD-4/U5). So the affordance can only work when the daemon
+    is already running to drain the queue — gate on running==true. When the
+    daemon is down or not installed (drift can't even be measured, or no unit
+    exists), an enqueued repair would sit unconsumed forever, so show CLI
+    guidance instead of a button that silently does nothing.
+  %>
+  <% if running && actionable_drift %>
     <%= button_to "Repair", daemon_repair_path, method: :post,
           class: "btn btn-sm",
           form: { data: { turbo_confirm: "Reinstall the daemon service with the current hive binary?" } } %>
+  <% elsif actionable_drift || daemon_status["service_installed"] == false %>
+    <span class="task-meta">
+      daemon is down — run <code>hive daemon install --force</code> to repair
+    </span>
   <% end %>
 </section>

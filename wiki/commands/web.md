@@ -3,7 +3,7 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-06-25
+updated: 2026-06-30
 tags: [command, web, hivebox, rails, turbo]
 ---
 

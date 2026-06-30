@@ -153,6 +153,34 @@ class DaemonAutoRetryTest < Minitest::Test
     end
   end
 
+  # Re-stamp the cleared error marker (legacy no-id, like the dead run would
+  # leave), refresh the row's attrs + status payload, and advance the fake
+  # health signal so the changed-signal gate re-arms on the next tick.
+  def repark(row, state_file, fingerprint:)
+    Hive::Markers.set(state_file, :error, row.marker_attrs.merge("marker_id" => nil))
+    row.marker_attrs = Hive::Markers.current(state_file).attrs
+    set_status_rows([ row ])
+    @signal.fingerprint = fingerprint
+  end
+
+  # Dispatcher wired with a caller-supplied health probe (e.g. the real
+  # HealthProbe) but the fake signal, so the changed-signal gate stays
+  # deterministic while the probe runs for real.
+  def dispatcher_with_probe(config:, probe:)
+    d = dispatcher(config: config)
+    d.instance_variable_set(
+      :@recoverable_error_healer,
+      Hive::Daemon::RecoverableErrorHealer.new(
+        controller: @controller,
+        logger: @logger,
+        config: config,
+        health_probe: probe,
+        health_signal: @signal
+      )
+    )
+    d
+  end
+
   def test_codex_auth_marker_clears_and_audits_through_dispatcher_tick
     attrs = {
       "reason" => "implementer_failed",
@@ -257,6 +285,109 @@ class DaemonAutoRetryTest < Minitest::Test
 
       assert_equal :none, Hive::Markers.current(state_file).name
       assert @logger.events.any? { |name, attrs2| name == :auto_retry && attrs2[:action] == "cleared" }
+    end
+  end
+
+  # AE4 (plan U9): the full retry lifecycle across dispatcher ticks — two
+  # clears bounded by MAX_AUTO_RETRIES, the 30-minute backoff that holds the
+  # second retry, and the permanent park once the budget is exhausted. The
+  # individual gates are unit-tested (recoverable_error_healer_test
+  # test_exhausts_after_two_clears / test_second_retry_waits_for_backoff);
+  # this drives them together through real Dispatcher#tick calls.
+  def test_auto_retry_lifecycle_across_dispatcher_ticks_clears_backs_off_then_parks
+    attrs = {
+      "reason" => "implementer_failed",
+      "provider" => "codex",
+      "message" => "401 Missing bearer/basic auth"
+    }
+    d = dispatcher
+    with_error_row(attrs: attrs) do |row, state_file, _dir|
+      stub_safe do
+        # Tick 1: fresh signal → first clear (attempt 1/2).
+        set_status_rows([ row ])
+        d.tick(now: T0)
+        assert_equal :none, Hive::Markers.current(state_file).name
+
+        # Re-park with a changed signal but still inside the 30-min backoff
+        # window → the second retry is held off, not cleared.
+        repark(row, state_file, fingerprint: "fp-2")
+        d.tick(now: T0 + 60)
+        assert_equal :error, Hive::Markers.current(state_file).name
+        assert @logger.events.any? { |name, attrs2| name == :auto_retry_skipped && attrs2[:action] == "backoff" }
+
+        # Past the backoff window → second clear (attempt 2/2).
+        repark(row, state_file, fingerprint: "fp-3")
+        d.tick(now: T0 + 1900)
+        assert_equal :none, Hive::Markers.current(state_file).name
+
+        # Budget exhausted (2/2): the marker stays red permanently, with a
+        # single exhausted audit no matter how many further ticks observe it.
+        repark(row, state_file, fingerprint: "fp-4")
+        d.tick(now: T0 + 3800)
+        repark(row, state_file, fingerprint: "fp-5")
+        d.tick(now: T0 + 5700)
+        assert_equal :error, Hive::Markers.current(state_file).name
+        assert_equal 1, @logger.events.count { |name, _attrs| name == :auto_retry_exhausted }
+      end
+    end
+  end
+
+  # AE2 (plan U9): a claude_launcher marker clears ONLY when every claude
+  # sub-probe passes — the in-process doctor AND the wrapper-file/tmux/version
+  # trio. Drives the REAL HealthProbe (only the tmux/version seams stubbed)
+  # through Dispatcher#tick so the doctor+wrapper+tmux+version conjunction is
+  # exercised end-to-end, not just per-sub-probe at the unit level.
+  def test_claude_marker_clears_only_when_doctor_wrapper_tmux_version_all_pass
+    attrs = { "reason" => "claude_launch_failed" }
+    config = { "daemon" => { "auto_retry" => { "enabled" => true }, "poll_interval_sec" => 30 } }
+    profile = Struct.new(:bin, :version) do
+      def check_version! = version
+    end.new("claude", "2.1.120")
+    doctor = Object.new
+    doctor.define_singleton_method(:call) { 0 }
+    doctor.define_singleton_method(:rows) { [ { status: "present", label: "claude" } ] }
+    build_probe = lambda do
+      Hive::Daemon::HealthProbe.new(
+        config: config,
+        project_root: nil,
+        doctor_factory: -> { doctor },
+        capture3: ->(_env, *_cmd) { raise "claude probes must not shell out via capture3" },
+        timeout_runner: ->(_seconds, &block) { block.call }
+      )
+    end
+
+    # tmux DOWN: the conjunction fails even though doctor + wrapper + version
+    # are healthy → the marker stays parked with a probe_failed audit.
+    with_error_row(attrs: attrs) do |row, state_file, _dir|
+      d = dispatcher_with_probe(config: config, probe: build_probe.call)
+      set_status_rows([ row ])
+      with_replaced_singleton_method(Hive::ClaudeLauncher, :tmux_status, -> { [ :absent, "no tmux server" ] }) do
+        with_replaced_singleton_method(Hive::AgentProfiles, :lookup, ->(_name, cfg: nil) { profile }) do
+          stub_safe { d.tick(now: T0) }
+        end
+      end
+
+      assert_equal :error, Hive::Markers.current(state_file).name
+      skip = @logger.events.find { |name, a| name == :auto_retry_skipped && a[:action] == "probe_failed" }
+      assert skip, "expected a probe_failed skip, got: #{@logger.events.inspect}"
+      assert_equal :claude_launcher, skip[1][:category]
+    end
+
+    # All four sub-probes pass → the marker clears and audits the retry.
+    with_error_row(attrs: attrs) do |row, state_file, _dir|
+      d = dispatcher_with_probe(config: config, probe: build_probe.call)
+      set_status_rows([ row ])
+      with_replaced_singleton_method(Hive::ClaudeLauncher, :tmux_status, -> { [ :present, "tmux ok" ] }) do
+        with_replaced_singleton_method(Hive::AgentProfiles, :lookup, ->(_name, cfg: nil) { profile }) do
+          stub_safe { d.tick(now: T0) }
+        end
+      end
+
+      assert_equal :none, Hive::Markers.current(state_file).name
+      retry_event = @logger.events.find { |name, _a| name == :auto_retry }
+      assert retry_event, "expected an auto_retry clear, got: #{@logger.events.inspect}"
+      assert_equal %w[doctor claude_wrapper claude_tmux claude_version],
+                   retry_event[1][:probes].map { |p| p[:name] }
     end
   end
 

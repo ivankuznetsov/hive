@@ -3,11 +3,11 @@ title: Hive::Pr
 type: module
 source: lib/hive/pr.rb
 created: 2026-06-15
-updated: 2026-06-29
+updated: 2026-06-27
 tags: [module, pr, tui, status, bot, telegram]
 ---
 
-**TLDR**: Tiny pull-request display/helper module. `Hive::Pr.number(url)` turns a pull-request URL into a short `#<number>` token for operator UIs without making network calls or treating the URL as workflow proof. Branch `make-the-hive-daemon-automatically-260629-223d` adds `Hive::Pr.identifier_to_number(value)`, the stricter command-input normalizer for `hive review --pr`, accepting bare numbers, `#numbers`, and GitHub PR URLs. `Hive::Pr.valid_http_url?(url)` is the shared safety gate for clickable PR links.
+**TLDR**: Tiny pull-request display/helper module. `Hive::Pr.number(url)` turns a pull-request URL into a short `#<number>` token for operator UIs without making network calls or treating the URL as workflow proof. `Hive::Pr.identifier_to_number(value)` is the stricter command-input normalizer for `hive review --pr`, accepting bare numbers, `#numbers`, and GitHub PR URLs. `Hive::Pr.valid_http_url?(url)` is the shared safety gate for clickable PR links.
 
 ## API
 
@@ -35,7 +35,7 @@ Accepted shapes are URLs or path-like strings ending in `/pull/<digits>`, with a
 
 ## Tests
 
-- `test/unit/pr_test.rb` covers numeric extraction plus nil returns for missing, issue, non-number, and subpage URLs; branch `make-the-hive-daemon-automatically-260629-223d` adds `identifier_to_number` acceptance/rejection; and http(s) URL validation including invalid-URI rejection.
+- `test/unit/pr_test.rb` covers numeric extraction plus nil returns for missing, issue, non-number, and subpage URLs; `identifier_to_number` acceptance/rejection; and http(s) URL validation including invalid-URI rejection.
 
 ## Backlinks
 

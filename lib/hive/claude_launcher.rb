@@ -865,10 +865,14 @@ module Hive
         # so an idle pane on the very first poll is the PRE-work prompt —
         # reading it as "turn ended" would seal an untouched worktree as
         # complete (the cold-start false positive this guard exists to
-        # prevent). Only trust idle/exited as turn-end evidence once we've
-        # observed the turn actually underway: a non-idle pane, or a live
-        # recorded process.
-        work_started ||= pane_idle == false || process_exited == false
+        # prevent). Only a non-idle pane proves the turn is actually
+        # underway. A live recorded process is NOT proof: the recorded pid is
+        # the persistent tmux REPL pane (record_claude_pid → pane_pid), which
+        # stays alive before, during and after every turn, so
+        # `process_exited == false` is true on poll 1 before Claude does any
+        # work — latching it would defeat this guard. Rely solely on
+        # `pane_idle == false`; absent that, we drain to the deadline backstop.
+        work_started ||= pane_idle == false
 
         if work_started && (pane_idle == true || process_exited == true)
           evidence = completion_evidence(
@@ -964,6 +968,15 @@ module Hive
       [ false, e.message ]
     end
 
+    # ADVISORY-ONLY: the recorded pid is trusted as written without
+    # confirming it belongs to this run's process (a stale/reused pid in
+    # `.lock["claude_pid"]` is taken at face value). This is safe because the
+    # pid only ever feeds `process_exited`, which after the cold-start-latch
+    # fix no longer gates work_started — a wrongly-"alive" pid makes the
+    # turn-end predicate strictly MORE conservative (it never reports
+    # `process_exited == true`, so it can only delay sealing, never falsely
+    # seal). A session-ownership check would make the safety explicit but is
+    # not required for correctness today.
     def recorded_claude_pid(task)
       path = File.join(task.folder, ".lock")
       return nil unless File.exist?(path)
@@ -981,6 +994,10 @@ module Hive
     rescue Errno::ESRCH
       false
     rescue Errno::EPERM
+      # We lack permission to signal the pid, but it EXISTS and belongs to
+      # another user — report alive. This is the conservative reading: an
+      # "alive" answer only ever withholds a `process_exited == true`
+      # turn-end signal, never manufactures one (see recorded_claude_pid).
       true
     end
 

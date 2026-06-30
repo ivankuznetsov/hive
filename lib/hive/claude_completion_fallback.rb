@@ -18,13 +18,14 @@ module Hive
       missing << "completion_evidence" if evidence.empty?
       missing << "limit_wall" if limit_wall?(evidence)
       missing << "tmux_readable" if evidence[:tmux_readable] == false || evidence[:session_error].to_s != ""
-      # A gone tmux session must stay a terminal REVIEW_ERROR (R4): the
-      # session_error guard above only catches a raised TmuxError, but a
-      # clean `session_exists? == false` reports `session_alive: false`
-      # with an empty `session_error`. Reject that explicitly. `nil` means
-      # "unknown" (no runner / not probed) and is left to the other guards
-      # so we stay conservative rather than blocking on missing info.
-      missing << "session_alive" if evidence[:session_alive] == false
+      # A live tmux session must be PROVEN before suppression (R4 / plan U3
+      # "unknown or ambiguous evidence ⇒ suppress:false"). A clean
+      # `session_exists? == false` reports `session_alive: false` with an
+      # empty `session_error`, which the tmux_readable/session_error guard
+      # above misses — reject it here. `nil` ("unknown": no runner, or the
+      # probe was never run) is treated the same way: the docs require a
+      # live tmux session, so anything short of an affirmative `true` blocks.
+      missing << "session_alive" unless evidence[:session_alive] == true
       missing << "normal_completion" unless normal_completion?(evidence)
       missing << "clean_exit_code" unless clean_exit_code?(evidence)
 
@@ -40,7 +41,13 @@ module Hive
     end
 
     def normal_completion?(evidence)
-      evidence[:pane_idle] == true || evidence[:process_exited] == true
+      # On the persistent tmux REPL the recorded pid is the long-lived pane
+      # process, so `process_exited == true` does NOT mean a clean turn-end —
+      # it means the REPL itself died (a crash), exactly the case R3 keeps
+      # terminal ("normal completion rather than crash"). Only an idle ready
+      # prompt (`pane_idle == true`) is affirmative evidence the turn ended
+      # cleanly; a dead process must fall through to REVIEW_ERROR.
+      evidence[:pane_idle] == true
     end
 
     def clean_exit_code?(evidence)
@@ -55,6 +62,11 @@ module Hive
 
     def limit_wall?(evidence)
       reason = evidence[:reason].to_s
+      # `error_message` is FORWARD-COMPAT only: the current tmux launcher
+      # path (ClaudeLauncher#completion_evidence) sets `reason`/`session_error`
+      # but never an `error_message` key, so this branch is dead today. It
+      # stays for any future caller that supplies a richer evidence hash, in
+      # the same spirit as the clean_exit_code?/missing_output_error? docs.
       message = evidence[:error_message].to_s
       reason.include?("limit") || message.include?("limits reached")
     end

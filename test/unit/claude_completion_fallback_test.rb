@@ -59,10 +59,15 @@ class ClaudeCompletionFallbackTest < Minitest::Test
     assert_includes result.fetch(:missing), "session_alive"
   end
 
-  def test_unknown_session_alive_does_not_block_suppression
+  def test_unknown_session_alive_blocks_suppression
+    # The docs require a PROVEN-live tmux session (plan U3: unknown/ambiguous
+    # evidence ⇒ suppress:false). `nil` means the session liveness was never
+    # established, so it must block exactly as `false` does — only an
+    # affirmative `true` clears the guard.
     result = decision(evidence: base_evidence.merge(session_alive: nil))
 
-    assert_equal true, result.fetch(:suppress)
+    assert_equal false, result.fetch(:suppress)
+    assert_includes result.fetch(:missing), "session_alive"
   end
 
   def test_missing_artifacts_block_suppression
@@ -84,6 +89,27 @@ class ClaudeCompletionFallbackTest < Minitest::Test
 
     assert_equal false, result.fetch(:suppress)
     assert_includes result.fetch(:missing), "no_unresolved_escalation"
+  end
+
+  def test_unreadable_worktree_phase_fact_blocks_suppression
+    # Distinct from the generic `tmux_readable` evidence field: this is the
+    # R3 phase fact the review runner sets false when worktree_status came
+    # back as an error pair (a `git status` probe failure). It must
+    # independently block and appear in `missing`.
+    result = decision(phase_facts: base_phase_facts.merge(worktree_readable: false))
+
+    assert_equal false, result.fetch(:suppress)
+    assert_includes result.fetch(:missing), "worktree_readable"
+  end
+
+  def test_missing_output_phase_fact_blocks_suppression
+    # `missing_output_absent: false` models a future :output_file_exists
+    # caller whose error text reads "expected output file missing"; it must
+    # independently block suppression and surface in `missing`.
+    result = decision(phase_facts: base_phase_facts.merge(missing_output_absent: false))
+
+    assert_equal false, result.fetch(:suppress)
+    assert_includes result.fetch(:missing), "missing_output_absent"
   end
 
   def test_unknown_completion_evidence_blocks_suppression

@@ -1188,10 +1188,16 @@ class ClaudeLauncherTest < Minitest::Test
 
   def test_wait_for_done_signal_ignores_cold_start_idle_before_work_starts
     with_tmp_task do |task|
-      # The input box can still show the idle `❯` caret between our Enter
-      # keystroke and Claude's first streamed token. With no observed work,
-      # the launcher must NOT report turn_ended on that pre-work prompt — it
-      # drains to the deadline rather than sealing an untouched run done.
+      # Faithful to production: the recorded `claude_pid` is the persistent
+      # tmux REPL pane process, which is ALIVE on poll 1 — so `process_exited`
+      # is false before Claude does any work. Write a live pid (this test's
+      # own process) to exercise that path. The input box can still show the
+      # idle `❯` caret between our Enter keystroke and Claude's first token;
+      # with no non-idle pane observed, the launcher must NOT latch
+      # work_started off the live pid and must NOT report turn_ended on that
+      # pre-work prompt — it drains to the deadline instead of sealing an
+      # untouched run done.
+      File.write(File.join(task.folder, ".lock"), { "claude_pid" => Process.pid }.to_yaml)
       idle = "Claude Code v2.1.128\n\n/home/project  ❯"
       runner = Struct.new(:tail) do
         def session_exists? = true

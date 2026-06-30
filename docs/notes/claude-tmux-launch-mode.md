@@ -114,6 +114,30 @@ after session teardown). No deterministic local reproduction was found, so
 the shipped fix is a conservative fallback in `ClaudeLauncher` plus
 review-fix phase evidence checks rather than a speculative hook rewrite.
 
+## Workaround and Recovery
+
+`claude.mode: headless` remains the recommended workaround for affected
+versions, daemon/service hosts, and any project where unattended reliability
+matters more than using the operator's interactive Claude subscription. This
+change does not automatically rewrite or revert local `.hive-state/config.yml`
+or user-level config; operators own that setting.
+
+If a task is already parked on `REVIEW_ERROR phase=fix reason=fix_failed`
+with `claude stop hook did not signal completion`, recover it only after
+verifying the evidence described in `docs/recipes.md`: review-fix artifacts
+exist, unresolved escalation count is zero, the worktree is readable, and a
+new fix commit or checked `RESOLVED/NO-FIX:` no-change artifact proves the
+pass completed. Then clear only the matching marker:
+
+```sh
+hive markers clear <FOLDER> --name REVIEW_ERROR --match-attr phase=fix,reason=fix_failed
+hive run <FOLDER>
+```
+
+This is the documented recovery path for the known stuck tasks 58 / PR #622,
+287 / PR #623, and 288 / PR #624 when their on-disk evidence satisfies the
+same predicate.
+
 ## Teardown
 
 `ClaudeLauncher` kills the tmux session in an `ensure` block, removes the

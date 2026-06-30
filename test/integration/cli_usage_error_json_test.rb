@@ -1,5 +1,6 @@
 require "test_helper"
 require "json"
+require "json_schemer"
 require "open3"
 require "rbconfig"
 
@@ -150,6 +151,25 @@ class CliUsageErrorJsonTest < Minitest::Test
       assert_equal "InvalidTaskPath", payload["error_class"]
       assert_equal "error", payload["error_kind"]
       assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
+    end
+  end
+
+  def test_bot_extra_positional_json_usage_error_uses_bot_status_envelope
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-bot-status"))))
+    with_tmp_global_config do |home|
+      out, _err, status = run_hive(home, "bot", "status", "extra", "--json")
+
+      refute status.success?
+      assert_equal Hive::ExitCodes::USAGE, status.exitstatus
+      payload = JSON.parse(out)
+      assert_equal "hive-bot-status", payload["schema"]
+      assert_equal Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-bot-status"), payload["schema_version"]
+      assert_equal false, payload["ok"]
+      assert_equal "InvalidTaskPath", payload["error_class"]
+      assert_equal "extra_arguments", payload["error_kind"]
+      assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
+      assert_match(/was called with arguments \["status", "extra"\]/, payload["message"])
+      assert_empty schemer.validate(payload).map { |e| e["error"] }
     end
   end
 

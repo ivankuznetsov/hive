@@ -39,6 +39,9 @@ JSON_USAGE_ERROR_CONTRACTS = {
   # (for example too many positionals) must ride the same JSON envelope as the
   # command's own UsageError. Bare `hive workflow` is handled in-command.
   "workflow" => { schema: "hive-workflow-new", error_kind: "usage" },
+  # Extra `hive bot SUBCOMMAND ...` positionals are rejected by Thor before
+  # Hive::Commands::Bot can emit a command-shaped JSON usage error.
+  "bot" => { schema: "hive-bot-status", error_kind: "extra_arguments" },
   "pr" => {
     schema: "hive-stage-action",
     error_kind: "invalid_task_path",

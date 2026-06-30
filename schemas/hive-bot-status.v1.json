@@ -2,9 +2,10 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-bot-status.v1.json",
   "title": "hive bot status output (v1)",
-  "description": "Stable contract emitted by `hive bot status --json`. Reports whether the Telegram bot process is running, its PID, and uptime. Exit code is 0 when running, 1 when not.",
+  "description": "Stable contract emitted by `hive bot status --json`. Reports whether the Telegram bot process is running, its PID, and uptime. Exit code is 0 when running, 1 when not. Wrapper-level extra positional usage errors for `hive bot ... --json` emit the ErrorPayload arm before command dispatch.",
   "oneOf": [
-    { "$ref": "#/$defs/SuccessPayload" }
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
   ],
   "$defs": {
     "SuccessPayload": {
@@ -59,6 +60,36 @@
           "type": ["string", "null"],
           "description": "Absolute path of the autostart unit file; null on unsupported platforms or if the probe could not run."
         }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "error_class",
+        "error_kind",
+        "exit_code",
+        "message"
+      ],
+      "properties": {
+        "schema": { "const": "hive-bot-status" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "error_class": { "const": "InvalidTaskPath" },
+        "error_kind": {
+          "type": "string",
+          "enum": [ "extra_arguments" ],
+          "description": "An extra positional argument was passed after the bot subcommand, e.g. `hive bot status extra`."
+        },
+        "exit_code": {
+          "type": "integer",
+          "enum": [64],
+          "description": "Hive::ExitCodes::USAGE."
+        },
+        "message": { "type": "string" }
       }
     }
   }

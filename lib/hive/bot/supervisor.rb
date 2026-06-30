@@ -19,6 +19,7 @@ require "hive/bot/idea_draft_store"
 require "hive/bot/idea_attachment_policy"
 require "hive/bot/router"
 require "hive/bot/pairing_store"
+require "hive/bot/pairing_approval_queue"
 require "hive/bot/child_supervisor"
 require "hive/bot/dispatch_request_writer"
 require "hive/bot/format"
@@ -53,6 +54,7 @@ module Hive
                      notification_dispatcher: nil, router: nil, child_supervisor: nil,
                      conversation_store: nil, dry_run: false, update_state: nil,
                      dispatch_request_writer: nil, dispatch_result_state_home: nil,
+                     pairing_approval_state_home: nil,
                      idea_draft_store: nil, transcriber: nil, transcriber_factory: nil,
                      pairing_store: nil)
         @config = config
@@ -60,6 +62,7 @@ module Hive
         # ADV-1: where the daemon drops dispatch-result notices.
         # Tests inject a sandbox; production resolves Hive::Paths.state_home.
         @dispatch_result_state_home = dispatch_result_state_home
+        @pairing_approval_state_home = pairing_approval_state_home
         # Shared update-check state (written by the daemon). The bot owns the
         # once-per-version push; the daemon never touches last_notified_version.
         @update_state = update_state || Hive::UpdateCheck::State.new
@@ -278,6 +281,7 @@ module Hive
           begin
             reap_children
             drain_dispatch_results
+            drain_pairing_approvals
           rescue StandardError => e
             @logger.event(:fatal, source: "reaper_loop", error_class: e.class.name,
                                    message: e.message, backtrace: Array(e.backtrace).first(10).join("\n"))
@@ -368,6 +372,30 @@ module Hive
         )
       end
 
+      PAIRING_APPROVED_TEXT = "✅ Approved — you can use hive now. Try /status.".freeze
+
+      def drain_pairing_approvals(now: Time.now)
+        notices = Hive::Bot::PairingApprovalQueue.pending(
+          state_home: pairing_approval_state_home,
+          bad_handler: ->(path:, reason:) { FileUtils.rm_f(path) }
+        )
+        notices.each do |notice|
+          if Hive::Bot::PairingApprovalQueue.expired?(notice, now: now)
+            remove_pairing_approval(notice)
+            next
+          end
+
+          sent = safe_send_message(chat_id: notice.chat_id, text: PAIRING_APPROVED_TEXT)
+          remove_pairing_approval(notice) if sent
+        end
+      end
+
+      def remove_pairing_approval(notice)
+        Hive::Bot::PairingApprovalQueue.remove(
+          notice.notice_id, state_home: pairing_approval_state_home
+        )
+      end
+
       def dispatch_result_text(notice)
         return dispatch_success_text(notice) unless dispatch_failure_notice?(notice)
 
@@ -400,6 +428,10 @@ module Hive
 
       def dispatch_result_state_home
         @dispatch_result_state_home || Hive::Paths.state_home
+      end
+
+      def pairing_approval_state_home
+        @pairing_approval_state_home || Hive::Paths.state_home
       end
 
       def safe_send_message(chat_id:, text:, reply_markup: nil, parse_mode: nil)

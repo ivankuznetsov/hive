@@ -1,0 +1,102 @@
+require "test_helper"
+require "json"
+require "tmpdir"
+require "hive/bot/pairing_approval_queue"
+
+class HiveBotPairingApprovalQueueTest < Minitest::Test
+  Q = Hive::Bot::PairingApprovalQueue
+
+  def test_write_then_pending_roundtrip
+    Dir.mktmpdir("hive-pairing-approval") do |dir|
+      Q.write!(chat_id: 42, state_home: dir, now: Time.utc(2026, 6, 30, 18, 14, 2))
+
+      pending = Q.pending(state_home: dir)
+      assert_equal 1, pending.size
+      notice = pending.first
+      assert_equal 42, notice.chat_id
+      assert_equal Time.utc(2026, 6, 30, 18, 14, 2), notice.created_at
+      assert_match(/\A[0-9a-f]{16}\z/, notice.notice_id)
+    end
+  end
+
+  def test_directory_is_owner_only
+    Dir.mktmpdir("hive-pairing-approval") do |dir|
+      qdir = Q.directory(state_home: dir)
+
+      assert_equal 0o700, File.stat(qdir).mode & 0o777
+    end
+  end
+
+  def test_pending_sorted_by_created_at
+    Dir.mktmpdir("hive-pairing-approval") do |dir|
+      Q.write!(chat_id: 2, state_home: dir, now: Time.utc(2026, 6, 30, 18, 14, 9))
+      Q.write!(chat_id: 1, state_home: dir, now: Time.utc(2026, 6, 30, 18, 11, 0))
+
+      assert_equal [ 1, 2 ], Q.pending(state_home: dir).map(&:chat_id)
+    end
+  end
+
+  def test_remove_is_idempotent
+    Dir.mktmpdir("hive-pairing-approval") do |dir|
+      notice_id = Q.write!(chat_id: 42, state_home: dir)
+
+      assert Q.remove(notice_id, state_home: dir)
+      refute Q.remove(notice_id, state_home: dir)
+      assert_empty Q.pending(state_home: dir)
+    end
+  end
+
+  def test_pending_routes_malformed_to_bad_handler
+    Dir.mktmpdir("hive-pairing-approval") do |dir|
+      bad_path = File.join(Q.directory(state_home: dir), "20260630-bad.json")
+      File.write(bad_path, "{not json")
+      seen = []
+
+      pending = Q.pending(state_home: dir, bad_handler: ->(path:, reason:) { seen << [ path, reason ] })
+
+      assert_empty pending
+      assert_equal [ [ bad_path, "malformed_json" ] ], seen
+      assert File.exist?(bad_path), "pending must not delete; the consumer decides"
+    end
+  end
+
+  def test_prune_expired_removes_old_and_malformed_keeps_fresh
+    Dir.mktmpdir("hive-pairing-approval") do |dir|
+      Q.write!(chat_id: 1, state_home: dir, now: Time.utc(2026, 6, 30, 17, 0, 0))
+      Q.write!(chat_id: 2, state_home: dir, now: Time.utc(2026, 6, 30, 18, 59, 50))
+      File.write(File.join(Q.directory(state_home: dir), "20260630-bad.json"), "{not json")
+
+      removed = Q.prune_expired(state_home: dir, now: Time.utc(2026, 6, 30, 19, 0, 1))
+
+      assert_equal 2, removed
+      assert_equal [ 2 ], Q.pending(state_home: dir).map(&:chat_id)
+    end
+  end
+
+  def test_expired_false_for_invalid_notice
+    refute Q.expired?(Object.new)
+    refute Q.expired?(Q::Notice.new(notice_id: "n", created_at: nil, chat_id: 1, path: nil))
+  end
+
+  def test_remove_skips_malformed_file_matching_id
+    Dir.mktmpdir("hive-pairing-approval") do |dir|
+      File.write(File.join(Q.directory(state_home: dir), "20260630-rmbad001.json"), "{not json")
+
+      refute Q.remove("rmbad001", state_home: dir)
+      assert File.exist?(File.join(Q.directory(state_home: dir), "20260630-rmbad001.json"))
+    end
+  end
+
+  def test_written_notice_is_valid_json
+    Dir.mktmpdir("hive-pairing-approval") do |dir|
+      Q.write!(chat_id: 42, state_home: dir)
+      path = Dir.glob(File.join(dir, Q::DIRNAME, "*.json")).first
+
+      doc = JSON.parse(File.read(path))
+
+      assert_equal Q::SCHEMA, doc.fetch("schema")
+      assert_equal Q::SCHEMA_VERSION, doc.fetch("schema_version")
+      assert_equal 42, doc.fetch("chat_id")
+    end
+  end
+end

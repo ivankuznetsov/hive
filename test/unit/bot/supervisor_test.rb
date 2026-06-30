@@ -2250,6 +2250,82 @@ class HiveBotSupervisorTest < Minitest::Test
     end
   end
 
+  # ── Pairing approval notices: CLI → running bot DM ───────────────────
+
+  def test_drain_pairing_approvals_sends_approved_message_and_removes_notice
+    Dir.mktmpdir("hive-pairing-approval") do |home|
+      @supervisor.instance_variable_set(:@pairing_approval_state_home, home)
+      Hive::Bot::PairingApprovalQueue.write!(chat_id: 999, state_home: home)
+
+      @supervisor.send(:drain_pairing_approvals)
+
+      assert_equal 1, @telegram.messages.size
+      msg = @telegram.messages.first
+      assert_equal 999, msg[:chat_id]
+      assert_equal Hive::Bot::Supervisor::PAIRING_APPROVED_TEXT, msg[:text]
+      assert_empty Hive::Bot::PairingApprovalQueue.pending(state_home: home),
+                   "a sent approval notice must be removed"
+    end
+  end
+
+  def test_drain_pairing_approvals_does_not_drop_on_allowlist_miss
+    Dir.mktmpdir("hive-pairing-approval") do |home|
+      @supervisor.instance_variable_set(:@pairing_approval_state_home, home)
+      # 999 is not in @config["chat_id_allowlist"]. Approval notices are
+      # owner-authored and may arrive before SIGHUP reload updates memory.
+      Hive::Bot::PairingApprovalQueue.write!(chat_id: 999, state_home: home)
+
+      @supervisor.send(:drain_pairing_approvals)
+
+      assert_equal 999, @telegram.messages.first[:chat_id]
+      assert_empty Hive::Bot::PairingApprovalQueue.pending(state_home: home)
+    end
+  end
+
+  def test_drain_pairing_approvals_keeps_notice_when_send_fails
+    Dir.mktmpdir("hive-pairing-approval") do |home|
+      @supervisor.instance_variable_set(:@pairing_approval_state_home, home)
+      Hive::Bot::PairingApprovalQueue.write!(chat_id: 999, state_home: home)
+      @telegram.raise_on_send = IOError.new("telegram down")
+
+      @supervisor.send(:drain_pairing_approvals)
+
+      assert_empty @telegram.messages
+      refute_empty Hive::Bot::PairingApprovalQueue.pending(state_home: home),
+                   "failed sends must leave approval notices for retry"
+    end
+  end
+
+  def test_drain_pairing_approvals_removes_malformed_notice
+    Dir.mktmpdir("hive-pairing-approval") do |home|
+      @supervisor.instance_variable_set(:@pairing_approval_state_home, home)
+      bad = File.join(Hive::Bot::PairingApprovalQueue.directory(state_home: home), "bad.json")
+      File.write(bad, "{not json")
+
+      @supervisor.send(:drain_pairing_approvals)
+
+      assert_empty @telegram.messages
+      refute File.exist?(bad), "malformed approval notice must be removed"
+    end
+  end
+
+  def test_drain_pairing_approvals_drops_stale_without_sending
+    Dir.mktmpdir("hive-pairing-approval") do |home|
+      @supervisor.instance_variable_set(:@pairing_approval_state_home, home)
+      Hive::Bot::PairingApprovalQueue.write!(
+        chat_id: 999,
+        state_home: home,
+        now: Time.utc(2026, 6, 30, 17, 0, 0)
+      )
+
+      @supervisor.send(:drain_pairing_approvals, now: Time.utc(2026, 6, 30, 18, 0, 1))
+
+      assert_empty @telegram.messages
+      assert_empty Hive::Bot::PairingApprovalQueue.pending(state_home: home),
+                   "stale approval notices must be pruned"
+    end
+  end
+
   def test_clear_inline_keyboard_swallows_telegram_errors
     @telegram.define_singleton_method(:edit_message_reply_markup) do |*|
       raise IOError, "telegram offline"
@@ -2691,13 +2767,16 @@ class HiveBotSupervisorTest < Minitest::Test
   def test_reaper_loop_drains_dispatch_results_each_iteration
     supervisor = @supervisor
     @supervisor.define_singleton_method(:reap_children) { supervisor.request_shutdown! }
-    drained = false
-    @supervisor.define_singleton_method(:drain_dispatch_results) { drained = true }
+    dispatch_drained = false
+    approvals_drained = false
+    @supervisor.define_singleton_method(:drain_dispatch_results) { dispatch_drained = true }
+    @supervisor.define_singleton_method(:drain_pairing_approvals) { approvals_drained = true }
     @supervisor.define_singleton_method(:sleep) { |_seconds| }
 
     @supervisor.send(:reaper_loop)
 
-    assert drained, "reaper_loop must drain the daemon's dispatch-result notice channel (ADV-1)"
+    assert dispatch_drained, "reaper_loop must drain the daemon's dispatch-result notice channel (ADV-1)"
+    assert approvals_drained, "reaper_loop must drain queued pairing approval notices"
   end
 
   def test_reaper_loop_logs_reap_failures

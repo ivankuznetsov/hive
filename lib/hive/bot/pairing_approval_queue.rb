@@ -1,0 +1,140 @@
+require "json"
+require "fileutils"
+require "securerandom"
+require "time"
+require "hive/paths"
+require "hive/daemon/queue_directory"
+
+module Hive
+  module Bot
+    module PairingApprovalQueue
+      module_function
+
+      SCHEMA = "hive-pairing-approval".freeze
+      SCHEMA_VERSION = 1
+      DIRNAME = "pairing_approvals".freeze
+      EXPIRY_SEC = 3600
+
+      Notice = Struct.new(:notice_id, :created_at, :chat_id, :path, keyword_init: true)
+
+      def directory(state_home: Hive::Paths.state_home)
+        Hive::Daemon::QueueDirectory.directory_for(dirname: DIRNAME, state_home: state_home)
+      end
+
+      def write!(chat_id:, state_home: Hive::Paths.state_home, now: Time.now)
+        notice_id = SecureRandom.hex(8)
+        created_at = now.utc
+        payload = {
+          "schema" => SCHEMA,
+          "schema_version" => SCHEMA_VERSION,
+          "notice_id" => notice_id,
+          "created_at" => created_at.iso8601,
+          "chat_id" => chat_id
+        }
+
+        dir = directory(state_home: state_home)
+        filename = "#{created_at.strftime('%Y%m%dT%H%M%S%6N')}-#{notice_id}.json"
+        final_path = File.join(dir, filename)
+        tmp_path = File.join(dir, ".#{filename}.tmp.#{Process.pid}")
+        File.open(tmp_path, File::WRONLY | File::CREAT | File::TRUNC, 0o644) do |file|
+          file.write(JSON.generate(payload))
+          file.flush
+          file.fsync
+        end
+        File.rename(tmp_path, final_path)
+        notice_id
+      ensure
+        FileUtils.rm_f(tmp_path) if tmp_path && File.exist?(tmp_path)
+      end
+
+      def pending(state_home: Hive::Paths.state_home, bad_handler: nil)
+        dir = directory(state_home: state_home)
+        entries = []
+        Dir.glob(File.join(dir, "*.json")).each do |path|
+          parsed = parse_file(path)
+          if parsed.is_a?(Symbol)
+            bad_handler&.call(path: path, reason: parsed.to_s)
+            next
+          end
+          entries << parsed
+        end
+        entries.sort_by { |notice| [ notice.created_at, notice.notice_id.to_s ] }
+      end
+
+      def expired?(notice, now: Time.now, expiry_sec: EXPIRY_SEC)
+        return false unless notice.respond_to?(:created_at)
+
+        created_at = notice.created_at
+        return false unless created_at.is_a?(Time)
+
+        (now - created_at) > expiry_sec
+      end
+
+      def prune_expired(state_home: Hive::Paths.state_home, now: Time.now, expiry_sec: EXPIRY_SEC)
+        removed = 0
+        pending(state_home: state_home,
+                bad_handler: ->(path:, reason:) { FileUtils.rm_f(path); removed += 1 })
+          .each do |notice|
+          next unless expired?(notice, now: now, expiry_sec: expiry_sec)
+
+          removed += 1 if remove(notice.notice_id, state_home: state_home)
+        end
+        removed
+      end
+
+      def remove(notice_id, state_home: Hive::Paths.state_home)
+        return false if notice_id.to_s.empty?
+
+        dir = directory(state_home: state_home)
+        Dir.glob(File.join(dir, "*.json")).each do |path|
+          next unless path.include?(notice_id.to_s)
+
+          data = begin
+            JSON.parse(File.read(path))
+          rescue StandardError
+            next
+          end
+          next unless data.is_a?(Hash) && data["notice_id"] == notice_id.to_s
+
+          File.unlink(path)
+          return true
+        end
+        false
+      rescue Errno::ENOENT
+        false
+      end
+
+      class << self
+        private
+
+        def parse_file(path)
+          data = JSON.parse(File.read(path))
+        rescue JSON::ParserError, Errno::ENOENT, Errno::EACCES, IOError
+          :malformed_json
+        else
+          return :not_a_hash unless data.is_a?(Hash)
+          return :wrong_schema unless data["schema"] == SCHEMA
+          return :unknown_schema_version unless data["schema_version"] == SCHEMA_VERSION
+
+          notice_id = data["notice_id"].to_s
+          return :missing_notice_id if notice_id.empty?
+
+          created_at = begin
+            Time.parse(data["created_at"].to_s)
+          rescue ArgumentError
+            nil
+          end
+          return :invalid_created_at if created_at.nil?
+          return :invalid_chat_id unless data["chat_id"].is_a?(Integer)
+
+          Notice.new(
+            notice_id: notice_id,
+            created_at: created_at,
+            chat_id: data["chat_id"],
+            path: path
+          )
+        end
+      end
+    end
+  end
+end

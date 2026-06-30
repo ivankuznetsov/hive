@@ -5,6 +5,7 @@ require "hive/config"
 require "hive/bot/notification_builders"
 require "hive/bot/idea_draft_store"
 require "hive/bot/idea_attachment_policy"
+require "hive/bot/pairing_store"
 require "hive/bot/handlers/slash_handlers"
 require "hive/bot/handlers/callback_handlers"
 require "hive/bot/handlers/free_text_handler"
@@ -51,6 +52,7 @@ module Hive
         idea_media
         idea_text_capture
         free_text_answer
+        unauthorized_pairing
         unauthorized
         unknown
       ].freeze
@@ -72,11 +74,13 @@ module Hive
       def initialize(bot_config:, logger:, conversation_store:, idea_draft_store: nil,
                      projects_provider: -> { Hive::Config.registered_projects },
                      now: -> { Time.now },
-                     status_snapshot_provider: -> { [] })
+                     status_snapshot_provider: -> { [] },
+                     pairing_store: Hive::Bot::PairingStore.new)
         @bot_config = bot_config
         @logger = logger
         @conversation_store = conversation_store
         @now = now
+        @pairing_store = pairing_store
         @idea_draft_store = idea_draft_store ||
           Hive::Bot::IdeaDraftStore.new(ttl_sec: bot_config.fetch("idea_draft_ttl_sec", PENDING_IDEA_TTL_SEC),
                                         now: @now, logger: @logger)
@@ -106,8 +110,7 @@ module Hive
           projects_provider: @projects_provider,
           status_snapshot_provider: status_snapshot_provider,
           last_project: -> { @last_project },
-          logger: @logger,
-          status_snapshot_provider: status_snapshot_provider
+          logger: @logger
         )
         @free_text_handler = Handlers::FreeTextHandler.new(
           conversation_store: @conversation_store,
@@ -118,7 +121,14 @@ module Hive
       def classify(update)
         prune_pending_ideas!
         prune_unauthorized_log!
-        return :unauthorized unless authorized?(update.chat_id)
+        already_unauthorized = @unauthorized_logged.key?(update.chat_id)
+        unless authorized?(update.chat_id)
+          if pairing_enabled? && !already_unauthorized && start_command?(effective_text(update))
+            return :unauthorized_pairing
+          end
+
+          return :unauthorized
+        end
 
         if update.callback_query?
           data = Hive::Bot::NotificationBuilders.resolve_callback(update.callback_data.to_s)
@@ -290,6 +300,7 @@ module Hive
 
       def dispatch(intent, update)
         case intent
+        when :unauthorized_pairing then unauthorized_pairing(update)
         when :unauthorized then Result.new(action: :noop)
         when :slash_status then @slash_handlers.status(update)
         when :slash_queue then @slash_handlers.queue(update)
@@ -328,6 +339,26 @@ module Hive
         result.mode = context[:mode] || :path_b
         result.attachment = result.attachment.merge(purpose: :answer)
         result
+      end
+
+      def unauthorized_pairing(update)
+        code = @pairing_store.mint_or_get(chat_id: update.chat_id)
+        @logger.event(:pairing_code_issued, chat_id: update.chat_id)
+        Result.new(action: :reply, text: pairing_reply_text(chat_id: update.chat_id, code: code))
+      end
+
+      def pairing_reply_text(chat_id:, code:)
+        "hive: access not configured. Your Telegram user id: #{chat_id}. " \
+          "Pairing code: #{code}. Ask the owner to approve with: " \
+          "hive pairing approve telegram #{code}"
+      end
+
+      def pairing_enabled?
+        @bot_config.fetch("pairing_enabled", false) ? true : false
+      end
+
+      def start_command?(text)
+        text.to_s.strip.match?(%r{\A/start\b})
       end
     end
   end

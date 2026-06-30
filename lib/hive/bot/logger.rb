@@ -17,6 +17,7 @@ module Hive
         poll_schema_skew
         update_received
         update_rejected_unauthorized
+        pairing_code_issued
         dispatch_result_rejected_unauthorized
         notification_sent
         notification_skipped_dedupe

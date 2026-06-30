@@ -18,6 +18,7 @@ require "hive/bot/conversation_store"
 require "hive/bot/idea_draft_store"
 require "hive/bot/idea_attachment_policy"
 require "hive/bot/router"
+require "hive/bot/pairing_store"
 require "hive/bot/child_supervisor"
 require "hive/bot/dispatch_request_writer"
 require "hive/bot/format"
@@ -52,7 +53,8 @@ module Hive
                      notification_dispatcher: nil, router: nil, child_supervisor: nil,
                      conversation_store: nil, dry_run: false, update_state: nil,
                      dispatch_request_writer: nil, dispatch_result_state_home: nil,
-                     idea_draft_store: nil, transcriber: nil, transcriber_factory: nil)
+                     idea_draft_store: nil, transcriber: nil, transcriber_factory: nil,
+                     pairing_store: nil)
         @config = config
         @dry_run = dry_run
         # ADV-1: where the daemon drops dispatch-result notices.
@@ -76,6 +78,7 @@ module Hive
           Hive::Bot::ConversationStore.new(ttl_sec: config.fetch("conversation_ttl_sec"))
         @idea_draft_store = idea_draft_store ||
           Hive::Bot::IdeaDraftStore.new(ttl_sec: config.fetch("idea_draft_ttl_sec", 900), logger: @logger)
+        @pairing_store = pairing_store || Hive::Bot::PairingStore.new
         @transcriber_factory = transcriber_factory || method(:default_transcriber)
         @transcriber = transcriber || build_transcriber(config)
         @router = router || build_router(config)
@@ -216,6 +219,7 @@ module Hive
           logger: @logger,
           conversation_store: @conversation_store,
           idea_draft_store: @idea_draft_store,
+          pairing_store: @pairing_store,
           status_snapshot_provider: -> { latest_status_rows }
         )
       end

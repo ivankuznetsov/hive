@@ -14,13 +14,21 @@ class HiveBotRouterTest < Minitest::Test
       { "name" => "hive", "path" => "/tmp/hive", "hive_state_path" => "/tmp/hive/.hive-state" },
       { "name" => "writero", "path" => "/tmp/writero", "hive_state_path" => "/tmp/writero/.hive-state" }
     ]
-    @router = Hive::Bot::Router.new(
-      bot_config: { "chat_id_allowlist" => [ 12345 ] },
+    @router = build_test_router(
+      bot_config: { "chat_id_allowlist" => [ 12345 ] }
+    )
+  end
+
+  def build_test_router(bot_config:, pairing_store: nil)
+    kwargs = {
+      bot_config: bot_config,
       logger: @logger,
       conversation_store: @store,
       idea_draft_store: @draft_store,
       projects_provider: -> { @projects }
-    )
+    }
+    kwargs[:pairing_store] = pairing_store if pairing_store
+    Hive::Bot::Router.new(**kwargs)
   end
 
   def update(text: nil, callback_data: nil, chat_id: 12345, reply_to_text: nil,
@@ -80,6 +88,99 @@ class HiveBotRouterTest < Minitest::Test
 
     assert_equal :noop, result.action
     assert_equal 1, @logger.events.count { |event, _| event == :update_rejected_unauthorized }
+  end
+
+  def test_unauthorized_start_with_pairing_enabled_replies_with_pairing_code
+    Dir.mktmpdir("hive-router-pairing") do |dir|
+      pairing_store = Hive::Bot::PairingStore.new(state_home: dir, now: -> { Time.utc(2026, 6, 30, 12, 0, 0) })
+      router = build_test_router(
+        bot_config: { "chat_id_allowlist" => [ 12345 ], "pairing_enabled" => true },
+        pairing_store: pairing_store
+      )
+
+      classify_router = build_test_router(
+        bot_config: { "chat_id_allowlist" => [ 12345 ], "pairing_enabled" => true },
+        pairing_store: pairing_store
+      )
+      assert_equal :unauthorized_pairing, classify_router.classify(update(text: "/start", chat_id: 999))
+
+      result = router.handle(update(text: "/start", chat_id: 999))
+      code = pairing_store.pending.first.code
+
+      assert_equal :reply, result.action
+      assert_match(/\Ahive: access not configured\./, result.text)
+      assert_includes result.text, "Your Telegram user id: 999"
+      assert_includes result.text, "Pairing code: #{code}"
+      assert_includes result.text, "hive pairing approve telegram #{code}"
+      assert_equal 999, pairing_store.pending.first.chat_id
+      assert_equal 1, @logger.events.count { |event, _| event == :pairing_code_issued }
+      event_attrs = @logger.events.find { |event, _| event == :pairing_code_issued }.last
+      assert_equal({ chat_id: 999 }, event_attrs)
+    end
+  end
+
+  def test_unauthorized_start_pairing_reply_is_throttled_once_per_bot_lifetime
+    Dir.mktmpdir("hive-router-pairing") do |dir|
+      pairing_store = Hive::Bot::PairingStore.new(state_home: dir)
+      router = build_test_router(
+        bot_config: { "chat_id_allowlist" => [ 12345 ], "pairing_enabled" => true },
+        pairing_store: pairing_store
+      )
+
+      first = router.handle(update(text: "/start", chat_id: 999))
+      second = router.handle(update(text: "/start", chat_id: 999))
+
+      assert_equal :reply, first.action
+      assert_equal :noop, second.action
+      assert_equal 1, pairing_store.pending.length
+      assert_equal 1, @logger.events.count { |event, _| event == :pairing_code_issued }
+    end
+  end
+
+  def test_unauthorized_non_start_is_silent_even_when_pairing_enabled
+    Dir.mktmpdir("hive-router-pairing") do |dir|
+      router = build_test_router(
+        bot_config: { "chat_id_allowlist" => [ 12345 ], "pairing_enabled" => true },
+        pairing_store: Hive::Bot::PairingStore.new(state_home: dir)
+      )
+
+      result = router.handle(update(text: "/status", chat_id: 999))
+
+      assert_equal :noop, result.action
+      assert_empty Dir.glob(File.join(dir, Hive::Bot::PairingStore::FILENAME))
+      refute @logger.events.any? { |event, _| event == :pairing_code_issued }
+    end
+  end
+
+  def test_unauthorized_start_with_pairing_disabled_preserves_noop_behavior
+    Dir.mktmpdir("hive-router-pairing") do |dir|
+      router = build_test_router(
+        bot_config: { "chat_id_allowlist" => [ 12345 ], "pairing_enabled" => false },
+        pairing_store: Hive::Bot::PairingStore.new(state_home: dir)
+      )
+
+      result = router.handle(update(text: "/start", chat_id: 999))
+
+      assert_equal :noop, result.action
+      assert_empty Dir.glob(File.join(dir, Hive::Bot::PairingStore::FILENAME))
+    end
+  end
+
+  def test_pairing_code_is_stable_across_router_rebuilds
+    Dir.mktmpdir("hive-router-pairing") do |dir|
+      pairing_store = Hive::Bot::PairingStore.new(state_home: dir)
+      config = { "chat_id_allowlist" => [ 12345 ], "pairing_enabled" => true }
+      first_router = build_test_router(bot_config: config, pairing_store: pairing_store)
+      second_router = build_test_router(bot_config: config, pairing_store: pairing_store)
+
+      first = first_router.handle(update(text: "/start", chat_id: 999))
+      second = second_router.handle(update(text: "/start", chat_id: 999))
+      code = pairing_store.pending.first.code
+
+      assert_includes first.text, "Pairing code: #{code}"
+      assert_includes second.text, "Pairing code: #{code}"
+      assert_equal 1, pairing_store.pending.length
+    end
   end
 
   def test_status_returns_dispatch_descriptor

@@ -357,6 +357,28 @@ class TriageTest < Minitest::Test
     end
   end
 
+  def test_error_result_preserves_spawn_limit_text
+    with_triage_dir do |dir, task_folder|
+      ctx = make_ctx(dir, task_folder)
+      File.write(File.join(task_folder, "reviews", "claude-ce-code-review-01.md"), "## Nit\n- [ ] x: y\n")
+      replacement = lambda do |_task, _cfg, **_kwargs|
+        {
+          status: :error,
+          error_message: "limits reached for claude: Claude Code v2.1.170",
+          limit_text: "You've hit your session limit"
+        }
+      end
+
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_claude!, replacement) do
+        result = Hive::Stages::Review::Triage.run!(cfg: default_cfg, ctx: ctx)
+
+        assert_equal :error, result.status
+        assert_equal "You've hit your session limit", result.limit_text
+        assert_equal "limits reached for claude: Claude Code v2.1.170", result.error_message
+      end
+    end
+  end
+
   # --- partial-file cleanup on :error path (correctness #15) ---------
   #
   # If the triage spawn fails AFTER the agent wrote a partial

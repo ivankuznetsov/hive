@@ -583,7 +583,8 @@ class RunReviewTest < Minitest::Test
             status: :error,
             escalations_path: File.join(ctx.task_folder, "reviews", "escalations-#{format('%02d', ctx.pass)}.md"),
             error_message: "limits reached for claude: You've hit your session limit · resets 8pm (Europe/London)",
-            tampered_files: []
+            tampered_files: [],
+            limit_text: "You've hit your session limit · resets 8pm (Europe/London)"
           )
         end
         begin
@@ -620,7 +621,8 @@ class RunReviewTest < Minitest::Test
             status: :error,
             escalations_path: File.join(ctx.task_folder, "reviews", "escalations-#{format('%02d', ctx.pass)}.md"),
             error_message: "triage agent failed (timeout)",
-            tampered_files: []
+            tampered_files: [],
+            limit_text: nil
           )
         end
         begin
@@ -1167,7 +1169,7 @@ class RunReviewTest < Minitest::Test
             FileUtils.mkdir_p(File.dirname(esc))
             File.write(esc, "# Escalations for pass #{format('%02d', ctx.pass)}\n")
             Hive::Stages::Review::Triage::Result.new(
-              status: :ok, escalations_path: esc, error_message: nil, tampered_files: []
+              status: :ok, escalations_path: esc, error_message: nil, tampered_files: [], limit_text: nil
             )
           end
 
@@ -1251,7 +1253,7 @@ class RunReviewTest < Minitest::Test
           FileUtils.mkdir_p(File.dirname(esc))
           File.write(esc, "# Escalations for pass #{format('%02d', ctx.pass)}\n\n_All clean._\n")
           Hive::Stages::Review::Triage::Result.new(
-            status: :ok, escalations_path: esc, error_message: nil, tampered_files: []
+            status: :ok, escalations_path: esc, error_message: nil, tampered_files: [], limit_text: nil
           )
         end
 
@@ -1305,7 +1307,7 @@ class RunReviewTest < Minitest::Test
             esc = File.join(ctx.task_folder, "reviews", "escalations-#{format('%02d', ctx.pass)}.md")
             File.write(esc, "# Escalations for pass #{format('%02d', ctx.pass)}\n\n_All clean._\n")
             Hive::Stages::Review::Triage::Result.new(
-              status: :ok, escalations_path: esc, error_message: nil, tampered_files: []
+              status: :ok, escalations_path: esc, error_message: nil, tampered_files: [], limit_text: nil
             )
           }) do
             with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:|
@@ -1395,7 +1397,7 @@ class RunReviewTest < Minitest::Test
               esc = File.join(ctx.task_folder, "reviews", "escalations-#{format('%02d', ctx.pass)}.md")
               File.write(esc, "# Escalations for pass #{format('%02d', ctx.pass)}\n\n_All clean._\n")
               Hive::Stages::Review::Triage::Result.new(
-                status: :ok, escalations_path: esc, error_message: nil, tampered_files: []
+                status: :ok, escalations_path: esc, error_message: nil, tampered_files: [], limit_text: nil
               )
             }) do
               capture_io { Hive::Commands::Run.new(folder).call }
@@ -1447,7 +1449,7 @@ class RunReviewTest < Minitest::Test
           FileUtils.mkdir_p(File.dirname(esc))
           File.write(esc, "# Escalations for pass #{format('%02d', ctx.pass)}\n\n_All clean._\n")
           Hive::Stages::Review::Triage::Result.new(
-            status: :ok, escalations_path: esc, error_message: nil, tampered_files: []
+            status: :ok, escalations_path: esc, error_message: nil, tampered_files: [], limit_text: nil
           )
         end
 
@@ -1535,7 +1537,7 @@ class RunReviewTest < Minitest::Test
             MD
           end
           Hive::Stages::Review::Triage::Result.new(
-            status: :ok, escalations_path: esc, error_message: nil, tampered_files: []
+            status: :ok, escalations_path: esc, error_message: nil, tampered_files: [], limit_text: nil
           )
         end
 
@@ -1615,7 +1617,7 @@ class RunReviewTest < Minitest::Test
           FileUtils.mkdir_p(File.dirname(esc))
           File.write(esc, "# Escalations for pass #{format('%02d', ctx.pass)}\n\n_All clean._\n")
           Hive::Stages::Review::Triage::Result.new(
-            status: :ok, escalations_path: esc, error_message: nil, tampered_files: []
+            status: :ok, escalations_path: esc, error_message: nil, tampered_files: [], limit_text: nil
           )
         end
 
@@ -1684,7 +1686,7 @@ class RunReviewTest < Minitest::Test
           FileUtils.mkdir_p(File.dirname(esc))
           File.write(esc, "# Escalations for pass #{format('%02d', ctx.pass)}\n\n- [ ] needs human review\n")
           Hive::Stages::Review::Triage::Result.new(
-            status: :ok, escalations_path: esc, error_message: nil, tampered_files: []
+            status: :ok, escalations_path: esc, error_message: nil, tampered_files: [], limit_text: nil
           )
         end
 
@@ -1731,13 +1733,14 @@ class RunReviewTest < Minitest::Test
               status: :error,
               escalations_path: nil,
               error_message: "tmux_session_terminated before writing expected output file",
-              tampered_files: []
+              tampered_files: [],
+              limit_text: nil
             )
           else
             esc = File.join(ctx.task_folder, "reviews", "escalations-#{format('%02d', ctx.pass)}.md")
             File.write(esc, "# Escalations for pass #{format('%02d', ctx.pass)}\n\n- [ ] needs human review\n")
             Hive::Stages::Review::Triage::Result.new(
-              status: :ok, escalations_path: esc, error_message: nil, tampered_files: []
+              status: :ok, escalations_path: esc, error_message: nil, tampered_files: [], limit_text: nil
             )
           end
         end
@@ -1954,7 +1957,7 @@ class RunReviewTest < Minitest::Test
           FileUtils.mkdir_p(File.dirname(esc))
           File.write(esc, "# Escalations for pass #{format('%02d', ctx.pass)}\n")
           Hive::Stages::Review::Triage::Result.new(
-            status: :ok, escalations_path: esc, error_message: nil, tampered_files: []
+            status: :ok, escalations_path: esc, error_message: nil, tampered_files: [], limit_text: nil
           )
         end
 
@@ -1983,7 +1986,7 @@ class RunReviewTest < Minitest::Test
       with_tmp_git_repo do |dir|
         folder = setup_review_task(dir)
         result = Hive::Stages::Review::CiFix::Result.new(
-          status: :error, attempts: 1, last_output: "ci failed", error_message: "no runner"
+          status: :error, attempts: 1, last_output: "ci failed", error_message: "no runner", limit_text: nil
         )
 
         with_replaced_singleton_method(Hive::Stages::Review::CiFix, :run!, ->(**_kwargs) { result }) do
@@ -1995,6 +1998,37 @@ class RunReviewTest < Minitest::Test
         assert_equal :review_error, marker.name
         assert_equal "ci", marker.attrs["phase"]
         assert_equal "ci_unrunnable", marker.attrs["reason"]
+      end
+    end
+  end
+
+  def test_ci_error_result_with_limit_text_yields_limits_reached_marker
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+        result = Hive::Stages::Review::CiFix::Result.new(
+          status: :error,
+          attempts: 1,
+          last_output: "ci failed",
+          error_message: "limits reached for claude: Claude Code v2.1.170",
+          limit_text: "You've hit your session limit"
+        )
+
+        before = Time.now.utc.floor
+        with_replaced_singleton_method(Hive::Stages::Review::CiFix, :run!, ->(**_kwargs) { result }) do
+          _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+          assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        end
+        after = Time.now.utc
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_error, marker.name
+        assert_equal "ci", marker.attrs["phase"]
+        assert_equal "limits_reached", marker.attrs["reason"]
+        assert_equal "ci hit a usage/credit limit", marker.attrs["message"]
+        retry_after = Time.parse(marker.attrs.fetch("retry_after"))
+        assert retry_after >= before + Hive::AgentLimit::RETRY_COOLDOWN_SEC
+        assert retry_after <= after + Hive::AgentLimit::RETRY_COOLDOWN_SEC
       end
     end
   end
@@ -2190,7 +2224,8 @@ class RunReviewTest < Minitest::Test
                 status: triage_status,
                 escalations_path: nil,
                 error_message: "triage #{triage_status}",
-                tampered_files: tampered_files
+                tampered_files: tampered_files,
+                limit_text: nil
               )
             }) do
               with_replaced_singleton_method(Hive::Stages::Review, :triage_retry_backoff, ->(_attempt) { }) do
@@ -2228,7 +2263,7 @@ class RunReviewTest < Minitest::Test
             escalations = File.join(ctx.task_folder, "reviews", "escalations-01.md")
             File.write(escalations, "# Escalations for pass 01\n")
             Hive::Stages::Review::Triage::Result.new(
-              status: :ok, escalations_path: escalations, error_message: nil, tampered_files: []
+              status: :ok, escalations_path: escalations, error_message: nil, tampered_files: [], limit_text: nil
             )
           }) do
             _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
@@ -2266,7 +2301,7 @@ class RunReviewTest < Minitest::Test
             escalations = File.join(ctx.task_folder, "reviews", "escalations-01.md")
             File.write(escalations, "# Escalations for pass 01\n")
             Hive::Stages::Review::Triage::Result.new(
-              status: :ok, escalations_path: escalations, error_message: nil, tampered_files: []
+              status: :ok, escalations_path: escalations, error_message: nil, tampered_files: [], limit_text: nil
             )
           }) do
             capture_io { Hive::Commands::Run.new(folder).call }
@@ -2304,6 +2339,38 @@ class RunReviewTest < Minitest::Test
         assert_equal "fix", marker.attrs["phase"]
         assert_equal "fix_failed", marker.attrs["reason"]
         assert_equal "1", marker.attrs["pass"]
+      end
+    end
+  end
+
+  def test_fix_agent_limit_text_yields_limits_reached_marker
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+        FileUtils.mkdir_p(File.join(folder, "reviews"))
+        File.write(File.join(folder, "reviews", "stub-reviewer-01.md"), "## High\n- [x] apply a fix\n")
+        Hive::Markers.set(File.join(folder, "task.md"), :review_waiting, pass: 1, escalations: 1)
+
+        accepted_seen = nil
+        with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:|
+          accepted_seen = accepted
+          {
+            status: :error,
+            error_message: "limits reached for claude: Claude Code v2.1.170",
+            limit_text: "You've hit your session limit"
+          }
+        }) do
+          _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+          assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        end
+
+        assert_match(/apply a fix/, accepted_seen)
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_error, marker.name
+        assert_equal "fix", marker.attrs["phase"]
+        assert_equal "limits_reached", marker.attrs["reason"]
+        assert_equal "1", marker.attrs["pass"]
+        refute_nil marker.attrs["retry_after"]
       end
     end
   end

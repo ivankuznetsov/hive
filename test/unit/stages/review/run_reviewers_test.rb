@@ -1041,6 +1041,15 @@ class RunReviewersTest < Minitest::Test
     end
   end
 
+  class QuotedLimitErroringReviewer < Hive::Reviewers::Base
+    def run!(deadline: nil)
+      Hive::Reviewers::Result.new(
+        name: name, output_path: output_path, status: :error,
+        error_message: "reviewer analyzed code that quoted limits reached for codex: not an agent wall"
+      )
+    end
+  end
+
   def test_all_failed_due_to_usage_limit_returns_all_failed_limit
     with_tmp_dir do |dir|
       cfg = {
@@ -1057,6 +1066,26 @@ class RunReviewersTest < Minitest::Test
         result = Hive::Stages::Review.run_reviewers(cfg, make_ctx(dir), Task.new(dir, File.join(dir, "task.md")))
         assert_equal :all_failed_limit, result,
                      "all reviewers failing with a usage-limit error must surface :all_failed_limit"
+      end
+    end
+  end
+
+  def test_all_failed_with_quoted_limit_text_returns_all_failed
+    with_tmp_dir do |dir|
+      cfg = {
+        "review" => {
+          "reviewers" => [
+            { "name" => "a", "output_basename" => "a" },
+            { "name" => "b", "output_basename" => "b" }
+          ]
+        }
+      }
+      adapters = cfg["review"]["reviewers"].map { |spec| QuotedLimitErroringReviewer.new(spec, make_ctx(dir)) }
+
+      with_stubbed_dispatch(adapters) do
+        result = Hive::Stages::Review.run_reviewers(cfg, make_ctx(dir), Task.new(dir, File.join(dir, "task.md")))
+        assert_equal :all_failed, result,
+                     "quoted limit prose must not promote all reviewers to limits_reached"
       end
     end
   end

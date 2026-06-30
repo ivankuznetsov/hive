@@ -42,12 +42,14 @@ module Hive
         @last_clear_at = {}
         @exhausted_logged = {}
         @negative_audits = {}
+        @tick_fingerprints = {}
       end
 
       def heal(rows, now: Time.now, legacy_layout_projects: {})
         return unless enabled?
 
         @health_probe.start_tick(now.to_f) if @health_probe.respond_to?(:start_tick)
+        @tick_fingerprints = {}
         rows.each { |row| heal_row(row, now: now, legacy_layout_projects: legacy_layout_projects) }
       end
 
@@ -100,13 +102,7 @@ module Hive
           return nil
         end
 
-        fingerprint = @health_signal.fingerprint(
-          category: category,
-          config: @config,
-          project_root: nil,
-          env: ENV,
-          now: now
-        )
+        fingerprint = tick_fingerprint(category, now)
         unless @health_signal.changed_or_fallback?(
           current_fingerprint: fingerprint,
           last_fingerprint: @last_fingerprint[key],
@@ -177,6 +173,26 @@ module Hive
         requeue_plan_rerun(row, trigger: "recoverable_error_auto_retry") if Hive::Workflows.coding_row?(row) && row.stage.to_s == "3-plan"
       rescue StandardError
         nil
+      end
+
+      # The health-signal fingerprint depends only on (category, config, env) —
+      # never on the row — so every parked row of one category in a single tick
+      # yields the identical fingerprint. Memoize it per category per tick so
+      # the expensive `claude` fingerprint (a `claude --version` shell-out plus
+      # an in-process `hive doctor`) is computed once per category per tick
+      # instead of once per parked row. Without this the fingerprint — the
+      # *input* to the changed-signal gate — re-ran that work for every parked
+      # row on every tick, defeating the gate it feeds. The cache is reset at
+      # the top of each `heal` so a genuine cross-tick dependency-state change
+      # is still detected.
+      def tick_fingerprint(category, now)
+        @tick_fingerprints[category] ||= @health_signal.fingerprint(
+          category: category,
+          config: @config,
+          project_root: nil,
+          env: ENV,
+          now: now
+        )
       end
 
       def enabled?

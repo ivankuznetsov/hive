@@ -60,12 +60,15 @@ class HiveDaemonRecoverableErrorHealerTest < Minitest::Test
 
   class FakeSignal
     attr_accessor :fingerprint
+    attr_reader :fingerprint_calls
 
     def initialize(fingerprint = "fp-1")
       @fingerprint = fingerprint
+      @fingerprint_calls = 0
     end
 
     def fingerprint(**)
+      @fingerprint_calls += 1
       @fingerprint
     end
 
@@ -322,6 +325,33 @@ class HiveDaemonRecoverableErrorHealerTest < Minitest::Test
         name == :heal_requeue_failed && attrs[:remediation].to_s.include?("--from 3-plan")
       }
       refute @logger.events.any? { |name, _attrs| name == :auto_retry_failed }
+    end
+  end
+
+  def test_fingerprint_computed_once_per_category_per_tick
+    attrs = { "reason" => "claude_launch_failed" }
+    h = healer
+    with_tmp_dir do |dir_a|
+      with_tmp_dir do |dir_b|
+        rows = [ dir_a, dir_b ].map.with_index do |dir, idx|
+          state_file = File.join(dir, "task.md")
+          Hive::Markers.set(state_file, :error, attrs)
+          Row.new(
+            project: "p", slug: "s#{idx}", stage: "4-execute", workflow: "coding",
+            marker: "error", marker_attrs: Hive::Markers.current(state_file).attrs,
+            folder: dir, state_file: state_file, state_file_mtime: File.mtime(state_file),
+            action: "error", suggested_command: nil, claude_pid_alive: nil,
+            live_task_lock: nil, diagnostic: nil
+          )
+        end
+        stub_safe do
+          h.heal(rows, now: NOW)
+        end
+
+        # Both rows share one claude_launcher category, and the fingerprint is
+        # row-independent, so it must be computed exactly once for the tick.
+        assert_equal 1, @signal.fingerprint_calls
+      end
     end
   end
 

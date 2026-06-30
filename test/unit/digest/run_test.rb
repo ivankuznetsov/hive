@@ -243,6 +243,69 @@ class HiveDigestRunTest < Minitest::Test
     assert_equal result.message, sender.deliveries.first.fetch(:text)
   end
 
+  def test_empty_digest_appends_plural_pairing_notice
+    sender = FakeSender.new([])
+    result = Hive::Digest.run(
+      date: Date.new(2026, 6, 13),
+      dry_run: true,
+      cfg: {},
+      collector: FakeCollector.new({}),
+      sender: sender,
+      pairing_store: pairing_store(3)
+    )
+
+    assert_equal :empty, result.status
+    assert_includes result.message, "🔑 3 pairing requests waiting — run `hive pairing list`"
+  end
+
+  def test_successful_digest_appends_singular_pairing_notice
+    item = shipped_item
+    categorized = {
+      "alpha" => [
+        Hive::Digest::CategorizedItem.new(item: item, category: "feature", summary: "Adds digest.")
+      ]
+    }
+    sender = FakeSender.new([])
+
+    result = Hive::Digest.run(
+      date: Date.new(2026, 6, 13),
+      dry_run: true,
+      cfg: {},
+      collector: FakeCollector.new({ "alpha" => [ item ] }),
+      categorizer: FakeCategorizer.new(categorized, nil, "Shipped the digest."),
+      sender: sender,
+      stats: FakeStats.new(nil),
+      pairing_store: pairing_store(1)
+    )
+
+    assert_equal :sent, result.status
+    assert_includes result.message, "🔑 1 pairing request waiting — run `hive pairing list`"
+  end
+
+  def test_successful_digest_omits_pairing_notice_when_none_pending
+    item = shipped_item
+    categorized = {
+      "alpha" => [
+        Hive::Digest::CategorizedItem.new(item: item, category: "feature", summary: "Adds digest.")
+      ]
+    }
+    sender = FakeSender.new([])
+
+    result = Hive::Digest.run(
+      date: Date.new(2026, 6, 13),
+      dry_run: true,
+      cfg: {},
+      collector: FakeCollector.new({ "alpha" => [ item ] }),
+      categorizer: FakeCategorizer.new(categorized, nil, "Shipped the digest."),
+      sender: sender,
+      stats: FakeStats.new(nil),
+      pairing_store: pairing_store(0)
+    )
+
+    assert_equal :sent, result.status
+    refute_includes result.message, "pairing", "a non-empty digest with no pending pairings adds no notice"
+  end
+
   private
 
   # Singleton override instead of minitest/mock (not bundled): count how many

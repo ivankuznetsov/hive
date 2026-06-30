@@ -1,15 +1,16 @@
 ---
 title: Interaction Surface
 type: commands
-source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/cli.rb, lib/hive/commands/connect.rb, lib/hive/commands/disconnect.rb, lib/hive/commands/bench_submit.rb, lib/hive/commands/digest.rb, lib/hive/digest.rb, lib/hive/digest/, lib/hive/web/, public/, hive.gemspec, packaging/docker/, .github/workflows/release.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
+source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/cli.rb, lib/hive/commands/adhoc_review.rb, lib/hive/commands/setup.rb, lib/hive/setup/diagnostics.rb, lib/hive/commands/connect.rb, lib/hive/commands/disconnect.rb, lib/hive/commands/bench_submit.rb, lib/hive/commands/digest.rb, lib/hive/digest.rb, lib/hive/digest/, lib/hive/web/, public/, hive.gemspec, packaging/docker/, .github/workflows/release.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-14
-updated: 2026-06-22
+updated: 2026-06-29
 tags: [commands, api]
 ---
 
 **TLDR**: Hive's external interaction surface is the Thor CLI (`hive` plus the
-`hv` fallback launcher), the opt-in e2e harness, the hivebox web command/routes
-documented in [[commands/web]], `hive connect screenote` as the Screenote OAuth
+`hv` fallback launcher), the opt-in e2e harness, `hive setup` for local
+non-Docker web/daemon provisioning, the hivebox web command/routes documented
+in [[commands/web]], `hive connect screenote` as the Screenote OAuth
 setup surface for artifacts MCP uploads, `hive bench submit` as the hive-bench
 corpus producer, `hive digest` as the daily shipped digest producer, and the
 single ClawHub `hive-cli` OpenClaw skill whose installed slash command is `/hive`.
@@ -23,6 +24,9 @@ one ClawHub listing per Hive verb.
 - `bin/hv`
 - `bin/hive-e2e`
 - `lib/hive/cli.rb`
+- `lib/hive/commands/adhoc_review.rb`
+- `lib/hive/commands/setup.rb`
+- `lib/hive/setup/diagnostics.rb`
 - `lib/hive/commands/connect.rb`
 - `lib/hive/commands/disconnect.rb`
 - `lib/hive/commands/bench_submit.rb`
@@ -49,9 +53,10 @@ one ClawHub listing per Hive verb.
 `bin/hive` loads `Hive::CLI` and exposes the public command set documented in
 [[cli]] and `wiki/commands/*`. The CLI includes workflow verbs (`new`,
 `brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`,
-`archive`), project workflow authoring via [[commands/workflow]], daemon/bot/babysitter
+`archive`), the branch `make-the-hive-daemon-automatically-260629-223d`
+`hive review --pr` overlay for ad-hoc review of an existing GitHub PR, project workflow authoring via [[commands/workflow]], daemon/bot/babysitter
 lifecycle commands, diagnostics, markers, findings, metrics, update/uninstall,
-registry maintenance, Screenote connect/disconnect, the `hive bench submit`
+registry maintenance, local setup provisioning, Screenote connect/disconnect, the `hive bench submit`
 corpus-submission producer, the `hive digest` shipped-digest producer, and
 `--json` envelopes where the command page says they exist.
 The wrapper also normalizes command-local help before Thor dispatch:
@@ -74,6 +79,12 @@ errors use the last recognized JSON boolean flag, so `--json --no-json` and
 owned Hive CLI locations and `HIVE_BIN_OVERRIDE`; it intentionally does not
 fall through to common Apache Hive paths. See [[operating]] for install-channel
 behavior.
+
+`hive setup` is the local source/gem first-run helper for running hivebox
+without Docker. It diagnoses host prerequisites, bootstraps managed QMD and the
+managed Rails web bundle when allowed, force-repairs the daemon service to the
+current invoked Hive binary, initializes or enrolls the current project, and can
+install the managed web service with `--service`. See [[commands/setup]].
 
 `hive bench submit SLUG` is a CLI-only bridge from completed Hive tasks to the
 separate hive-bench corpus. It resolves a `9-done` task from registered
@@ -177,5 +188,6 @@ exit `78`; JSON mode distinguishes them as `missing_repro` and
 - [[operating]]
 - [[e2e]]
 - [[commands/web]]
+- [[commands/setup]]
 - [[commands/digest]]
 - [[commands/screenote]]

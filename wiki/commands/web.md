@@ -3,7 +3,7 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-06-25
+updated: 2026-06-29
 tags: [command, web, hivebox, rails, turbo]
 ---
 
@@ -129,6 +129,13 @@ usable. The local dev/test seam is exempt only for tokenless local sessions.
   `HIVEBOX_DIFF_TIMEOUT_SEC` (default 15s), writes combined output to a
   tempfile, and renders at most the first 512 KiB with an explicit truncation
   notice.
+  The daemon panel at the top of the grid calls
+  `Hive::Commands::Daemon#status_payload` in-process instead of redirecting the
+  process-global `$stdout` around `hive daemon status --json`, avoiding
+  cross-request capture races under threaded Puma. It renders service-installed
+  state plus binary drift from the same daemon-status envelope as the CLI, and
+  shows the Repair button when the daemon command's shared actionable set says
+  drift is `path`, `version`, or `unparseable`, or when no service is installed.
   Red diagnostic rows also render a danger banner from
   `tasks[].diagnostic.summary` so the page says why the row is stuck before
   offering Retry.

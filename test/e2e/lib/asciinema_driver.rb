@@ -53,7 +53,7 @@ module Hive
         @pid = Process.spawn(
           self.class.binary, "rec", "--overwrite",
           *recorder_size_args,
-          "--output-format=asciicast-v2",
+          *recorder_output_format_args,
           "--command", command,
           @cast_path,
           out: File::NULL,
@@ -133,6 +133,12 @@ module Hive
         return [ "--window-size", "#{@cols}x#{@rows}" ] if @version.segments.first >= 3
 
         [ "--rows", @rows.to_s, "--cols", @cols.to_s ]
+      end
+
+      def recorder_output_format_args
+        return [ "--output-format=asciicast-v2" ] if @version.segments.first >= 3
+
+        []
       end
     end
   end

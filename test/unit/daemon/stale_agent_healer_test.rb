@@ -717,7 +717,6 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
         :mark_review_phase_failure,
         task,
         phase: :triage,
-        terminal_reason: "triage_failed",
         pass: 1,
         error_message: message
       )

@@ -295,3 +295,27 @@ Before running destructive admin verbs (`drop`, `uninstall`, `update`, `forget`,
 Before running nested destructive or bypass commands (`daemon stop`, `daemon disable --all`, `daemon install --force`, `bot stop`, `bot install --force`, `markers clear`, or `approve --force`), restate the effect and get explicit user confirmation. These can stop background automation, replace autostart services, clear recovery markers, or skip terminal-marker safety.
 
 Prefer `hive daemon start --detach` for daemon startup. Before running `hive daemon start` without `--detach`, `hive daemon tail`, `hive bot start --foreground`, or `hive bot tail`, restate that the command can hold the agent in a foreground or streaming process and get explicit user confirmation.
+
+## Marker Recovery
+
+Inspect before acting. Use `hive status --json` as the canonical non-mutating inspection command; read `stage`, `slug`, `folder`, `state_file`, `marker`, `attrs`, `claude_pid`, `claude_pid_alive`, `live_task_lock`, `held`, and suggested-action fields before deciding. Use `hive daemon status --json` to check whether the daemon and healer are running. Fall back to `kill -0 <pid>` or `ps -p <pid>` only to double-check PID liveness, and compare `attrs.retry_after` to now for a held `limits_reached` cooldown. `hive markers clear` is mutation, not inspection.
+
+Daemon trigger rule: if the daemon is running, wait and let the healer recover known auto-recoverable markers. If it is stopped or dead, use `hive daemon start --detach`. Do not recommend `daemon stop`, foreground daemon startup, or daemon log tailing for normal marker recovery; those commands remain governed by `## Safety Boundaries`.
+
+Per-marker decisions:
+
+1. `REVIEW_ERROR phase=fix reason=fix_failed message="claude stop hook did not signal completion"` -> environmental stop-hook completion failure -> let the healer auto-recover, bounded to 3 attempts; restart the daemon if it is not running; do not hand-clear. Ask first only if the healer budget is exhausted and a human wants to use manual marker clearing.
+2. Generic `fix_failed` with any other message -> manual fix failure -> investigate, typically write a code fix, then re-run the task. It is never auto-cleared; the distinction from the previous entry is the byte-for-byte `claude stop hook did not signal completion` message. Ask before any marker clear.
+3. `limits_reached` with a valid `retry_after` -> provider usage or credit cooldown -> wait until the cooldown elapses and let the healer requeue. Missing or malformed `retry_after` is manual. Ask before any manual clear.
+4. Stale `agent_working` -> the healer classifies by child-PID liveness, so the recovery path splits: a **dead** child PID (`claude_pid_alive == false`) is rewritten to terminal `ERROR reason=agent_died`, which is not in the auto-recovery allowlist -> treat as terminal/manual and ask before clearing (do not wait for a requeue that never comes); a **missing** child PID with a stale state-file mtime is rewritten to `ERROR reason=agent_orphaned`, which the healer does auto-recover -> let the healer requeue, restarting the daemon if it is not running. A live task lock or PID alive means work is still in progress; wait.
+5. Other healer-managed bounded signatures -> environmental or retryable operational failure -> let the healer retry within its budget. This includes `REVIEW_ERROR reason=review_agent_died`; reviewers `all_failed`; reviewer partial failures where every error is `tmux_session_terminated before writing expected output file`; and fix auto-commit retryable reasons `fix_auto_commit_scope_failed`, `fix_auto_commit_sign_policy_failed`, and `fix_auto_commit_signing_failed`. Ask first only after the bounded retry budget is exhausted.
+6. Terminal/manual `ERROR` -> any `ERROR` whose reason is not a known healer-managed signature is terminal/manual; ask before clearing. Known healer-managed `ERROR` reasons are `limits_reached` after `retry_after`, `tmux_session_terminated`, `agent_orphaned`, `ensure_clean_on_exit_failed`, `8-finalize reason=unpushed_commits`, and `reason=timeout` only on `5-open-pr` or `7-artifacts`. Explicit manual examples are `dirty_worktree` and post-budget/exhausted `ensure_clean_on_exit_failed`; both need human worktree inspection.
+
+For manual-clear remediation, follow the `## Safety Boundaries` confirmation rule for `markers clear`; restate the effect and get explicit user confirmation first. Canonical forms:
+
+```bash
+hive markers clear <slug> --name REVIEW_ERROR --project <project> --json
+hive markers clear <folder> --name ERROR --match-attr marker_id=<id>
+```
+
+Prefer `--match-attr marker_id=<id>` when the marker has a marker id; otherwise use observed attrs such as `--match-attr reason=<reason>,exit_code=<code>`. After a confirmed clear, rerun with `hive run <slug> --project <project>` or the stage-specific retry command printed by status or review.

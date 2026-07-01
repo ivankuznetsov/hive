@@ -163,6 +163,11 @@ version verification, `hive daemon install`, and optional non-interactive
 The skill also documents `/hive wiki compile-log --check` as the read-only
 aggregate-changelog verification path and tells agents to reserve mutating
 `hive wiki compile-log` runs for merge/rebase cleanup or explicit user requests.
+Its marker-recovery guidance mirrors [[modules/daemon]]: inspect first with
+`hive status --json` and `hive daemon status --json`, wait for known
+healer-managed cooldown/retry signatures, start a stopped daemon with
+`hive daemon start --detach`, and treat manual `hive markers clear` as guarded
+mutation under the skill's Safety Boundaries.
 The naked `hive` ClawHub slug is already owned by another publisher, so it is
 intentionally not used.
 

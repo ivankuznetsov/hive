@@ -16,7 +16,7 @@ module Hive
       def self.available?
         _out, _err, status = Open3.capture3(binary, "--version")
         status.success?
-      rescue Errno::ENOENT
+      rescue SystemCallError, ArgumentError
         false
       end
 
@@ -26,7 +26,7 @@ module Hive
 
         text = out.split(/\s+/).find { |part| part.match?(/\A\d+\.\d+(?:\.\d+)?/) }
         text ? Gem::Version.new(text) : nil
-      rescue Errno::ENOENT
+      rescue SystemCallError, ArgumentError
         nil
       end
 
@@ -60,6 +60,8 @@ module Hive
           err: File::NULL,
           pgroup: true
         )
+      rescue SystemCallError, ArgumentError => e
+        raise Unavailable, "failed to start asciinema: #{e.message}"
       end
 
       def stop

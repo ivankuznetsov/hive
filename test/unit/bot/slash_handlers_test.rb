@@ -58,6 +58,14 @@ class HiveBotSlashHandlersTest < Minitest::Test
     assert_equal "hive", result.project
   end
 
+  def test_waiting_dispatches_status_in_waiting_mode
+    result = @handlers.waiting(Update.new(text: "/waiting"))
+
+    assert_equal :dispatch_then_reply, result.action
+    assert_equal [ "hive", "status", "--json" ], result.command_argv
+    assert_equal :waiting, result.mode
+  end
+
   def test_status_preserves_multi_word_project_names
     result = @handlers.status(Update.new(text: "/status my project"))
 
@@ -71,13 +79,16 @@ class HiveBotSlashHandlersTest < Minitest::Test
     assert_equal :reply, result.action
     assert_match(/Connected/, result.text)
     assert_match(%r{/status}, result.text, "the welcome must hand the operator a next step")
+    assert_match(/send any message to capture a new idea/, result.text)
     assert_match(%r{/help}, result.text)
   end
 
   def test_help_documents_project_status_argument
     result = @handlers.help(Update.new(text: "/help"))
 
+    assert_includes result.text, "Send any message to capture an idea."
     assert_includes result.text, "/status [project]"
+    assert_includes result.text, "/waiting"
     assert_includes result.text, "/answer <id|slug>"
     assert_includes result.text, "/approve <id|slug>"
     assert_includes result.text, "/autofix <id|slug>"
@@ -686,7 +697,7 @@ class HiveBotSlashHandlersTest < Minitest::Test
       project: "hive", slug: "plan-task-260525-abcd", stage: "3-plan", workflow: "coding",
       marker: "waiting", attrs: {}, folder: "/tmp/plan-task-260525-abcd",
       state_file: "/tmp/plan-task-260525-abcd/plan.md",
-      action: "needs_input", action_label: "Needs your input", diagnostic: nil
+      action: "needs_input", action_label: "Review plan draft", diagnostic: nil
     )
     handlers = autofix_handlers([ plan_row ])
 
@@ -707,7 +718,7 @@ class HiveBotSlashHandlersTest < Minitest::Test
       project: "hive", slug: "plan-task-260525-abcd", stage: "3-plan", workflow: "coding",
       marker: "waiting", attrs: {}, folder: "/tmp/plan-task-260525-abcd",
       state_file: "/tmp/plan-task-260525-abcd/plan.md",
-      action: "needs_input", action_label: "Needs your input",
+      action: "needs_input", action_label: "Review plan draft",
       diagnostic: { "summary" => "PLAN_DIAG summary", "detail" => "plan diagnostic detail" }
     )
     handlers = autofix_handlers([ plan_row ])

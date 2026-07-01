@@ -2,6 +2,43 @@
 
 All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with terse bullets — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
+## 0.3.2
+
+Setup, the Telegram bot, and TUI performance are the focus of this release. Selected agent backends now persist globally so new projects inherit them; the bot gains idea-by-default capture, a `/waiting` view backed by a daily pending-answer digest, task-id slash commands, and structured JSON errors; and TUI status polling now scales with the number of active tasks instead of the whole archive.
+
+### Setup
+
+- Selected agent backends now persist globally, so new projects inherit your choice instead of re-prompting each time.
+
+### Telegram bot
+
+- Bare text sent to the bot is now captured as an idea by default instead of erroring.
+- New `/waiting` command lists tasks awaiting your input, backed by a daily pending-answer digest so nothing stalls unseen.
+- Slash commands accept a bare task id (e.g. `/approve 42`).
+- Added log severity levels and quieted routine `bot.log` noise.
+- `--json` usage errors now return a structured `hive-bot-status` envelope instead of prose.
+- Fixed: every needs-input row now gets a working action button or is suppressed — no dead buttons.
+- Fixed: "Show details" always renders row content.
+- Fixed: stuck-task alerts are suppressed for healthy live-agent retries.
+
+### Performance
+
+- TUI status polling cost now scales with the number of active tasks rather than the full archive.
+
+### Pipeline & status
+
+- Fixed: markerless `3-plan` tasks are runnable instead of being parked behind a needs-input gate.
+- Fixed: tmux review-fix no longer stamps terminal `REVIEW_ERROR phase=fix reason=fix_failed` when Claude finished cleanly but the interactive Stop hook missed `.done` / `result.json`; Hive now requires artifacts plus commit/no-change evidence and emits `claude_completion_fallback`.
+- Needs-input status labels now differentiate by the reason a task paused.
+
+### Packaging
+
+- Fixed: the published arm64 hivebox image is smoke-tested on native arm64 Linux instead of macOS/colima.
+
+### Also
+
+- A batch of `hive patrol` dry-run sandbox hardening fixes.
+
 ## 0.3.1
 
 Custom workflows: Hive's pipeline engine is now generic data. Author your own per-project workflow — writing, research, triage, translation, anything — in a few lines of YAML, scaffold it from a sample, and let the daemon run it the same way it runs `coding`. This release also lands a large patrol-driven security-hardening wave, a redesigned daily digest, task dependencies with stacked PRs, and device-flow agent logins in hivebox.

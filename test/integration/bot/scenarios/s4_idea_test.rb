@@ -16,7 +16,7 @@ class HiveBotScenarioIdeaTest < Minitest::Test
       projects_provider: -> { projects }
     )
 
-    picker = router.handle(update(text: "/idea fix the broken cron"))
+    picker = router.handle(update(text: "fix the broken cron"))
     hive_button = picker.reply_markup.flatten.detect { |button| button[:text].to_s.include?("hive") }
     refute_nil hive_button, "picker keyboard should expose a 'hive' option"
     collect = router.handle(update(callback_data: hive_button[:callback_data]))

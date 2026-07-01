@@ -81,6 +81,10 @@ module Hive
           }
         end
 
+        def expected_binary
+          resolved_binary
+        end
+
         # launchd plist Label for this service. Matches the `<key>Label</key>`
         # value in the bundled plists (local.hive-daemon / local.hive-bot).
         def launchd_label
@@ -303,6 +307,48 @@ module Hive
             return shim_template if resolved.start_with?("#{mgr_root}/")
           end
           nil
+        end
+
+        # Render a systemd unit from `template_path`, substituting the
+        # resolved binary into ExecStart (with `exec_suffix` as the hive
+        # subcommand), HIVE_BIN, and PATH. systemd .service files are
+        # POSIX-shell-ish, so the resolved binary path is shell-escaped —
+        # whitespace, `%`, or other specials would otherwise produce a
+        # malformed unit. Shared by the daemon and web installers, which
+        # differ only in the template path and ExecStart suffix.
+        def render_systemd_from(template_path, exec_suffix)
+          template = File.read(template_path)
+          escaped = Shellwords.escape(resolved_binary)
+          template
+            .sub(/^ExecStart=.*$/, "ExecStart=#{escaped} #{exec_suffix}")
+            .sub(/^Environment=HIVE_BIN=.*$/, "Environment=HIVE_BIN=#{escaped}")
+            .sub(/^Environment=PATH=.*$/, build_path_line)
+        end
+
+        # Render a launchd plist from `template_path`, substituting the resolved
+        # binary into ProgramArguments ($0), the PATH/HIVE_BIN environment, the
+        # log directory, and (for the web plist) the bare WorkingDirectory.
+        # plist values are XML, so each substituted path is HTML-escaped. Shared
+        # by the daemon and web installers, which differ only in the template.
+        def render_launchd_from(template_path)
+          template = File.read(template_path)
+          binary = resolved_binary
+          # dirname BEFORE HTML-escaping so paths with `&`/`<`/`>` get the
+          # correct directory segmentation; then escape both for plist XML safety.
+          binary_dir = File.dirname(binary)
+          escaped_binary = CGI.escapeHTML(binary)
+          escaped_binary_dir = CGI.escapeHTML(binary_dir)
+          escaped_home = CGI.escapeHTML(@home)
+          template
+            .gsub(%r{<string>/Users/YOU/\.local/bin/hive</string>}, "<string>#{escaped_binary}</string>")
+            .gsub("/Users/YOU/Library/Logs", "#{escaped_home}/Library/Logs")
+            .gsub("/Users/YOU/.local/bin", escaped_binary_dir)
+            # The web plist sets <key>WorkingDirectory</key><string>/Users/YOU
+            # </string>; launchd chdir()s there before exec, so a literal
+            # /Users/YOU never exists on a real host and the service fails to
+            # spawn. Rewrite the bare element to the real home. The daemon plist
+            # has no WorkingDirectory, so this is a no-op there.
+            .gsub(%r{<string>/Users/YOU</string>}, "<string>#{escaped_home}</string>")
         end
 
         def resolved_binary

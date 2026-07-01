@@ -36,6 +36,10 @@ module Hive
       File.expand_path(env_or_blank("XDG_BIN_HOME") || File.join(home, ".local/bin"))
     end
 
+    def web_app_home
+      File.join(data_home, "web")
+    end
+
     # True when HIVE_HOME collapses every XDG directory onto one path:
     # state_home == config_home == data_home == cache_home. Uninstall uses
     # this to refuse deletes like `rm_rf(config_home)`, which would also

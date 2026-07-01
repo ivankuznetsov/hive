@@ -112,11 +112,13 @@ module Hive
         hive_model: Hive::Tui::Model.initial,
         dispatch: ->(_msg) { },
         clipboard_probe: ->(pasted_text:) { Hive::Tui::Clipboard.probe(pasted_text: pasted_text) },
+        archive_refresh: -> { },
         update_state: nil
       )
         @hive_model = hive_model
         @dispatch = dispatch
         @clipboard_probe = clipboard_probe
+        @archive_refresh = archive_refresh
         # Shared update-check state (written by the daemon). Read on a short
         # TTL so the footer reflects a new nudge without re-reading the file
         # on every render frame. Lazily constructed so tests and non-daemon
@@ -412,6 +414,9 @@ module Hive
           open_red_status_detail(message)
         when Hive::Tui::Messages::OpenTokenStats
           open_token_stats
+        when Hive::Tui::Messages::OpenArchivePane
+          @archive_refresh.call
+          nil
         when Hive::Tui::Messages::RecoverReview
           recover_review(message.row, force: message.force)
         when Hive::Tui::Messages::RecoverError

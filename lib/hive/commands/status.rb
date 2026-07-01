@@ -10,6 +10,9 @@ require "hive/workflows"
 require "hive/workflows/project"
 require "hive/archive_filter"
 require "hive/dependencies"
+require "hive/diagnostic_evidence"
+require "hive/diagnostic_helpers"
+require "hive/secret_patterns"
 require "hive/task_action"
 require "hive/task_resolver"
 require "hive/brainstorm_parser"
@@ -134,13 +137,21 @@ module Hive
       # non-breaking; removing or renaming keys must bump a documented
       # version. `tasks[].marker` is the lowercased symbol name as a string;
       # `tasks[].attrs` is the marker's attribute map.
-      def json_payload(projects)
+      def json_payload(projects, stages: nil, exclude_archived: false, extra_dependency_tasks: nil)
         {
           "schema" => "hive-status",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
           "ok" => true,
           "generated_at" => Time.now.utc.iso8601,
-          "projects" => projects.map { |p| project_payload_or_degraded(p, project_count: projects.size) }
+          "projects" => projects.map do |p|
+            project_payload_or_degraded(
+              p,
+              project_count: projects.size,
+              stages: stages,
+              exclude_archived: exclude_archived,
+              extra_dependency_tasks: dependency_tasks_for(extra_dependency_tasks, p)
+            )
+          end
         }
       end
 
@@ -152,8 +163,14 @@ module Hive
       # project to an empty task list (with a stderr breadcrumb in
       # daemon.log) so the rest of the fleet keeps advancing. The fallback
       # entry still validates against the published hive-status schema.
-      def project_payload_or_degraded(project, project_count:)
-        project_payload(project, project_count: project_count)
+      def project_payload_or_degraded(project, project_count:, stages: nil, exclude_archived: false, extra_dependency_tasks: nil)
+        project_payload(
+          project,
+          project_count: project_count,
+          stages: stages,
+          exclude_archived: exclude_archived,
+          extra_dependency_tasks: extra_dependency_tasks
+        )
       rescue StandardError => e
         warn "hive: status: project #{project['name'].inspect} payload failed " \
              "(#{e.class}: #{e.message}); reporting it with no tasks so other projects still advance"
@@ -167,7 +184,7 @@ module Hive
         }
       end
 
-      def project_payload(project, project_count:)
+      def project_payload(project, project_count:, stages: nil, exclude_archived: false, extra_dependency_tasks: nil)
         path = project["path"]
         hive_state = project["hive_state_path"]
         base = {
@@ -191,8 +208,8 @@ module Hive
             # JSON path: pay the diagnostic-extraction cost because
             # external consumers (TUI, daemon, bots) read `diagnostic` off
             # every row. Schema mandates the field.
-            rows = annotate_actions(collect_rows(hive_state), project, project_count, with_diagnostic: true)
-            rows = annotate_dependencies(rows, project)
+            rows = annotate_actions(collect_rows(hive_state, stages: stages, exclude_archived: exclude_archived), project, project_count, with_diagnostic: true)
+            rows = annotate_dependencies(rows, project, extra_dependency_tasks: extra_dependency_tasks)
             rows = archive_rows(rows) if @archive
             out = base.merge("tasks" => rows.map { |r| task_payload(r) })
             # Always emit `legacy_stage_dirs` (default empty array) so
@@ -326,6 +343,9 @@ module Hive
           stage_filter: @stage
         ).resolve
         marker = Hive::Markers.current(task.state_file)
+        # Local renamed off the same-named method (marker_summary) it is the
+        # result of, so the shadowing doesn't obscure intent at the call sites.
+        marker_summary_text = marker_summary(marker)
         liveness = liveness_kwargs_for(task)
         action = Hive::TaskAction.for(task, marker, project_name: project_name_for(task), **liveness)
         diagnostic = action.diagnostic
@@ -348,16 +368,24 @@ module Hive
           # generated_by != "local"). Pass --force to re-spawn anyway.
           # See PR #84 review finding #21.
           if !@force && diagnostic["source"] == "artifact" && diagnostic["generated_by"] != "local"
-            emit_diagnose_result(task, diagnostic, diagnostic["source_path"])
+            emit_diagnose_result(task, diagnostic, diagnostic["source_path"], marker_summary: marker_summary_text)
             return
           end
 
           require "hive/diagnosis_agent"
           result = Hive::DiagnosisAgent.run!(task: task, local_diagnostic: diagnostic)
           diagnostic = Hive::TaskAction.for(task, marker, project_name: project_name_for(task), **liveness).diagnostic
-          emit_diagnose_result(task, diagnostic, result[:path])
+          emit_diagnose_result(task, diagnostic, result[:path], marker_summary: marker_summary_text)
         else
-          emit_diagnose_result(task, diagnostic, nil)
+          if diagnostic.nil?
+            evidence = Hive::DiagnosticEvidence.summarize(
+              folder: task.folder,
+              marker_summary: marker_summary_text,
+              state_file: task.state_file
+            )
+            diagnostic = evidence_diagnostic(task, marker, evidence) if evidence
+          end
+          emit_diagnose_result(task, diagnostic, nil, marker_summary: marker_summary_text)
         end
       end
 
@@ -381,7 +409,7 @@ module Hive
         }
       end
 
-      def emit_diagnose_result(task, diagnostic, path)
+      def emit_diagnose_result(task, diagnostic, path, marker_summary: nil)
         if @json
           puts JSON.generate(
             "schema" => "hive-status-diagnose",
@@ -391,6 +419,13 @@ module Hive
             "id" => task.id,
             "display_name" => task.display_name,
             "task_folder" => task.folder,
+            "marker_summary" => marker_summary,
+            # The authoritative task state file the marker_summary was read
+            # from. Threaded so the bot's evidence fallback can pin the marker
+            # tier's source_path to the SAME file (mirroring the CLI's
+            # state_file: pin), instead of mislabelling whatever *.md it globs
+            # first under an advanced folder.
+            "state_file" => task.state_file,
             "diagnostic" => diagnostic,
             "path" => path
           )
@@ -402,10 +437,62 @@ module Hive
             puts diagnostic["summary"]
             puts diagnostic["detail"]
           else
-            puts "no red-status diagnostic for #{task.slug}"
+            puts "no diagnostic evidence on disk for #{task.slug}"
           end
         end
       end
+
+      # The canonical NAME+attrs marker rendering (shared with the diagnostic
+      # surfaces via Hive::Markers.summary, plan R-5), routed through redact for
+      # symmetry with the rest of the diagnose payload — the field is emitted
+      # raw into the envelope and only the bot re-feeds it through SecretPatterns
+      # otherwise. Returns nil for the :none marker so a markerless task's
+      # envelope reads `marker_summary: null` (not "NONE") and the evidence
+      # resolver omits the prefix, matching its unsupplied-marker_summary path.
+      def marker_summary(marker)
+        summary = Hive::Markers.summary(marker)
+        summary && Hive::SecretPatterns.redact(summary)
+      end
+
+      # Synthesizes the schema-governed Diagnostic shape (hive-status-diagnose
+      # `diagnostic`) from on-disk evidence for the nil-diagnostic read path.
+      # Keep these nine keys in sync with Hive::TaskAction::Diagnostic#to_h and
+      # the published schema — a field added there must be mirrored here or this
+      # branch emits an invalid envelope (guarded by a JSONSchemer round-trip in
+      # status_diagnose_test.rb). The evidence `kind` tier picks the detail
+      # prefix (Diagnostics:/Log:/Marker:) and the schema `source` value
+      # (marker tier -> "marker", artifact tiers -> "artifact").
+      def evidence_diagnostic(task, marker, evidence)
+        kind = evidence.fetch(:kind)
+        source = Hive::DiagnosticEvidence.source_kind(kind)
+        raw_source_path = evidence.fetch(:source_path)
+        # Redact the path-bearing fields (detail / source_path / artifact_paths)
+        # for symmetry with the already-redacted summary and the canonical
+        # Diagnostic#to_h. The source_path is server-controlled under
+        # .hive-state/, so this is cheap defense-in-depth rather than a known
+        # leak. The mtime stat below uses the RAW path so a (hypothetical)
+        # redaction can't break the timestamp.
+        source_path = raw_source_path && Hive::SecretPatterns.redact(raw_source_path)
+        detail = Hive::SecretPatterns.redact("#{Hive::DiagnosticEvidence.source_label(kind)}: #{source_path}")
+        {
+          "summary" => evidence.fetch(:summary),
+          # Cap like the canonical Diagnostic#to_h (truncate(detail, DETAIL_MAX))
+          # so a pathologically long source_path can't emit an envelope that
+          # fails the schema's own detail.maxLength.
+          "detail" => Hive::DiagnosticHelpers.truncate(detail, Hive::TaskAction::Diagnostic::DETAIL_MAX),
+          "source" => source,
+          "source_path" => source_path,
+          # [source_path].compact so a future artifact-kind tier returning a nil
+          # source_path can't emit schema-invalid artifact_paths:[nil].
+          "artifact_paths" => source == "artifact" ? [ source_path ].compact : [],
+          "generated_by" => "local",
+          "marker_signature" => Hive::TaskAction.marker_signature(marker),
+          "suggested_next_action" => nil,
+          "updated_at" => (safe_mtime(raw_source_path) || safe_mtime(task.state_file) || Time.now).utc.iso8601
+        }
+      end
+
+      def safe_mtime(path) = Hive::DiagnosticHelpers.safe_mtime(path)
 
       def project_name_for(task)
         project = Hive::Config.registered_projects.find { |entry| entry["path"] == task.project_root }
@@ -540,9 +627,22 @@ module Hive
         puts "    run `hive migrate` to move them into the current layout"
       end
 
-      def collect_rows(hive_state)
+      # Stage dirs to walk when no explicit `stages:` list is given are
+      # computed from `Hive::Workflows.all_stage_dirs` AT CALL TIME. For
+      # the TUI's active-only re-parse this runs INSIDE the per-project
+      # `Workflows::Project.synchronize { load!(path); ... }` block, so a
+      # project's custom-workflow active stages are honored instead of
+      # being dropped by a union pre-computed against a different project's
+      # overlay. `exclude_archived: true` subtracts only the terminal
+      # archive dir from that per-project union.
+      def default_stage_dirs(exclude_archived)
+        dirs = Hive::Workflows.all_stage_dirs
+        exclude_archived ? dirs - [ Hive::ArchiveFilter::ARCHIVE_STAGE_DIR ] : dirs
+      end
+
+      def collect_rows(hive_state, stages: nil, exclude_archived: false)
         rows = []
-        Hive::Workflows.all_stage_dirs.each do |stage|
+        Array(stages || default_stage_dirs(exclude_archived)).each do |stage|
           stage_dir = File.join(hive_state, "stages", stage)
           next unless File.directory?(stage_dir)
 
@@ -655,7 +755,7 @@ module Hive
         drop_transient_stage_moves(rows)
       end
 
-      def annotate_dependencies(rows, project)
+      def annotate_dependencies(rows, project, extra_dependency_tasks: nil)
         threshold_stage = dependency_gate_stage_for(project)
         # filter_map + next: a future row source lacking :task must not
         # KeyError on this never-fail surface (production rows always carry
@@ -671,9 +771,19 @@ module Hive
             stage_index: task.stage_index
           }
         end
+        snapshot.concat(Array(extra_dependency_tasks))
 
         rows.each { |row| apply_dependency_result(row, snapshot, threshold_stage) }
         rows
+      end
+
+      def dependency_tasks_for(extra_dependency_tasks, project)
+        return nil unless extra_dependency_tasks
+
+        # `project["path"]` (not `fetch`): this never-fail status surface must
+        # degrade, not KeyError, if a future path-less project entry reaches
+        # here alongside non-nil extra_dependency_tasks.
+        extra_dependency_tasks[project["path"]]
       end
 
       # Threshold stage for the dependency gate. Config.load validates the
@@ -807,7 +917,15 @@ module Hive
         # don't fall to the bottom (below "Error") as unknown labels would.
         "Ready to run",
         "Ready to advance",
+        # Per-stage "needs input" labels (the differentiated NEEDS_INPUT rows
+        # plus the shared generic "Needs your input"). Deliberately ordered
+        # between "Ready to advance" and "Ready to plan" so these actionable
+        # rows sort high alongside the other "ready"/"needs" rows.
+        "Answer questions",
+        "Review plan draft",
         "Needs your input",
+        "Needs review decision",
+        "Confirm finalize",
         "Ready to plan",
         "Ready to develop",
         "Needs recovery",
@@ -815,6 +933,10 @@ module Hive
         "Ready to open PR",
         "Ready for review",
         "Ready to collect artifacts",
+        # Clean ad-hoc PR review parked at 6-review (REVIEW_PARKED): complete and
+        # non-advancing, so it sorts with the other review-complete rows rather
+        # than falling below "Error" as an unknown label.
+        "Ad-hoc review complete (parked)",
         "Ready to finalize",
         "Ready to archive",
         "Archived",

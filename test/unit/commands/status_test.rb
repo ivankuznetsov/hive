@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/commands/status"
+require "hive/task_action"
 
 class CommandsStatusTest < Minitest::Test
   include HiveTestHelper
@@ -75,6 +76,53 @@ class CommandsStatusTest < Minitest::Test
 
       refute_nil archived, "default JSON must keep old archived rows visible to bots and daemons"
       assert_equal old.utc.iso8601(6), archived.fetch("folder_mtime")
+    end
+  end
+
+  def test_json_payload_default_path_matches_explicit_full_stage_inputs
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      write_status_task(hive_state, "4-execute", "active-task-260626-abcd",
+                        state_file: "task.md", marker: "EXECUTE_COMPLETE")
+      write_status_task(hive_state, "9-done", "archived-task-260626-abcd",
+                        state_file: "task.md", marker: "COMPLETE")
+      projects = [ status_project(project_root, hive_state) ]
+      now = Time.utc(2026, 6, 26, 12, 0, 0)
+
+      default_json = explicit_json = nil
+      with_replaced_singleton_method(Time, :now, -> { now }) do
+        default_json = JSON.generate(Hive::Commands::Status.new.json_payload(projects))
+        explicit_json = JSON.generate(
+          Hive::Commands::Status.new.json_payload(
+            projects,
+            stages: Hive::Workflows.all_stage_dirs,
+            extra_dependency_tasks: {}
+          )
+        )
+      end
+
+      assert_equal default_json, explicit_json,
+                   "no-kwargs status JSON must match the explicit full-snapshot path byte-for-byte"
+    end
+  end
+
+  def test_json_payload_with_stage_filter_returns_only_requested_stages
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      active = write_status_task(hive_state, "4-execute", "active-task-260626-abcd",
+                                 state_file: "task.md", marker: "EXECUTE_COMPLETE")
+      archived = write_status_task(hive_state, "9-done", "archived-task-260626-abcd",
+                                   state_file: "task.md", marker: "COMPLETE")
+      Hive::TaskMeta.write(active, id: 1, slug: File.basename(active), display_name: nil)
+      Hive::TaskMeta.write(archived, id: 2, slug: File.basename(archived), display_name: nil)
+      active_stages = Hive::Workflows.all_stage_dirs - [ Hive::ArchiveFilter::ARCHIVE_STAGE_DIR ]
+
+      tasks = Hive::Commands::Status.new.json_payload(
+        [ status_project(project_root, hive_state) ],
+        stages: active_stages
+      ).fetch("projects").first.fetch("tasks")
+
+      assert_equal [ "active-task-260626-abcd" ], tasks.map { |task| task.fetch("slug") }
     end
   end
 
@@ -346,6 +394,49 @@ class CommandsStatusTest < Minitest::Test
       assert_equal File.basename(base), row.fetch("blocked_by")
       assert_equal "8-finalize", row.fetch("dependency_stage")
       assert_equal false, row.fetch("blocked")
+    end
+  end
+
+  def test_active_only_payload_resolves_dependency_from_extra_dependency_tasks
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      dependent = write_status_task(hive_state, "4-execute", "dependent-task-260626-bbbb",
+                                    state_file: "task.md", marker: "EXECUTE_COMPLETE")
+      Hive::TaskMeta.write(dependent, id: 2, slug: File.basename(dependent),
+                                      display_name: nil, depends_on: "archived-task-260626-aaaa")
+      active_stages = Hive::Workflows.all_stage_dirs - [ Hive::ArchiveFilter::ARCHIVE_STAGE_DIR ]
+      project = status_project(project_root, hive_state)
+
+      unresolved = Hive::Commands::Status.new.json_payload([ project ], stages: active_stages)
+                      .fetch("projects").first.fetch("tasks").first
+      blocked = Hive::Commands::Status.new.json_payload(
+        [ project ],
+        stages: active_stages,
+        extra_dependency_tasks: {
+          project.fetch("path") => [
+            { slug: "archived-task-260626-aaaa", id: 1, stage: "7-artifacts", stage_index: 7 }
+          ]
+        }
+      ).fetch("projects").first.fetch("tasks").first
+      unblocked = Hive::Commands::Status.new.json_payload(
+        [ project ],
+        stages: active_stages,
+        extra_dependency_tasks: {
+          project.fetch("path") => [
+            { "slug" => "archived-task-260626-aaaa", "id" => 1, "stage" => "9-done" }
+          ]
+        }
+      ).fetch("projects").first.fetch("tasks").first
+
+      assert_equal true, unresolved.fetch("blocked")
+      assert_nil unresolved.fetch("blocked_by"),
+                 "without archived identities, active-only dependency resolution is unresolved"
+      assert_equal true, blocked.fetch("blocked")
+      assert_equal "archived-task-260626-aaaa", blocked.fetch("blocked_by")
+      assert_equal "7-artifacts", blocked.fetch("dependency_stage")
+      assert_equal false, unblocked.fetch("blocked")
+      assert_equal "archived-task-260626-aaaa", unblocked.fetch("blocked_by")
+      assert_equal "9-done", unblocked.fetch("dependency_stage")
     end
   end
 
@@ -1254,25 +1345,37 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
-  # Generic-workflow labels ("Ready to run" / "Ready to advance") must sort with
-  # the actionable rows, ABOVE "Error" — a regression dropping either entry from
-  # ACTION_LABEL_ORDER gives it index `length` (an unknown label) and silently
-  # sinks generic status rows below "Error". `action_labels` is the live sorter
-  # consumed by render_project and the TUI snapshot, so pin both labels here.
-  def test_action_labels_sorts_generic_labels_above_error
+  # Generic and differentiated needs-input labels must sort with the actionable
+  # rows, ABOVE "Error" — a regression dropping any entry from ACTION_LABEL_ORDER
+  # gives it index `length` (an unknown label) and silently sinks those status
+  # rows below "Error". `action_labels` is the live sorter consumed by
+  # render_project and the TUI snapshot, so pin the labels here.
+  def test_action_labels_sorts_actionable_waiting_labels_above_error
     cmd = Hive::Commands::Status.new
     rows = [
       { action_label: "Error" },
       { action_label: "Ready to advance" },
-      { action_label: "Ready to run" }
+      { action_label: "Ready to run" },
+      { action_label: "Answer questions" },
+      { action_label: "Review plan draft" },
+      { action_label: "Needs your input" },
+      { action_label: "Needs review decision" },
+      { action_label: "Confirm finalize" }
     ]
 
     sorted = cmd.send(:action_labels, rows)
 
-    assert_operator sorted.index("Ready to run"), :<, sorted.index("Error"),
-                    "generic 'Ready to run' rows must sort above 'Error'"
-    assert_operator sorted.index("Ready to advance"), :<, sorted.index("Error"),
-                    "generic 'Ready to advance' rows must sort above 'Error'"
+    [ "Ready to run", "Ready to advance", "Answer questions", "Review plan draft",
+      "Needs your input", "Needs review decision", "Confirm finalize" ].each do |label|
+      assert_operator sorted.index(label), :<, sorted.index("Error"),
+                      "#{label.inspect} rows must sort above 'Error'"
+    end
+  end
+
+  def test_action_label_order_covers_every_task_action_label
+    action_labels = Hive::TaskAction::ACTIONS.values.map { |action| action.fetch(:label) }.uniq
+
+    assert_empty action_labels - Hive::Commands::Status::ACTION_LABEL_ORDER
   end
 
   def test_render_project_skips_empty_action_label_groups
@@ -1649,7 +1752,34 @@ class CommandsStatusTest < Minitest::Test
     assert_includes out, "detail"
 
     out, = capture_io { cmd.send(:emit_diagnose_result, task, nil, nil) }
-    assert_includes out, "no red-status diagnostic"
+    assert_includes out, "no diagnostic evidence on disk"
+  end
+
+  def test_diagnose_safe_mtime_degrades_for_missing_source_path
+    cmd = Hive::Commands::Status.new
+
+    assert_nil cmd.send(:safe_mtime, "/tmp/missing-diagnose-evidence-source")
+  end
+
+  def test_evidence_diagnostic_detail_is_capped_at_detail_max
+    # Round-trip tests use short tmpdir paths, so the cap is never stressed
+    # there. Feed a pathologically long source_path directly and assert the
+    # hand-built detail line is truncated to the schema's detail.maxLength.
+    Dir.mktmpdir("hive-status-evidence-detail") do |project_root|
+      slug = "evi-task-260628-abcd"
+      folder = File.join(project_root, ".hive-state", "stages", "3-plan", slug)
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(folder, "plan.md"), "<!-- COMPLETE -->\n")
+      task = Hive::Task.new(folder)
+      marker = Hive::Markers.current(task.state_file)
+      cap = Hive::TaskAction::Diagnostic::DETAIL_MAX
+      evidence = { summary: "s", source_path: "/#{'a' * (cap + 500)}", kind: :log }
+
+      diag = Hive::Commands::Status.new.send(:evidence_diagnostic, task, marker, evidence)
+
+      assert_operator diag["detail"].length, :<=, cap
+      assert diag["detail"].end_with?("…"), "over-long detail must be truncated with an ellipsis"
+    end
   end
 
   def test_invalid_task_row_degrades_when_folder_mtime_is_unreadable

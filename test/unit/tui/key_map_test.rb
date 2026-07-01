@@ -835,7 +835,7 @@ class TuiKeyMapMessageForTest < Minitest::Test
     # RecoverError. The force-retry path is REVIEW_STALE-specific.
     row = make_row(action_key: "recover_review", action_label: "Needs recovery",
                    stage: "5-review", marker: "review_error",
-                   attrs: { "phase" => "fix", "reason" => "fix_failed" },
+                   attrs: { "phase" => "fix", "reason" => "merge_conflict" },
                    suggested_command: nil)
     msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "r", row: row)
     assert_kind_of Hive::Tui::Messages::Flash, msg

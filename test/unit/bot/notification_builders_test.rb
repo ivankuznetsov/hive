@@ -279,6 +279,26 @@ class HiveBotNotificationBuildersTest < Minitest::Test
                  notification.keyboard.flatten.first[:callback_data]
   end
 
+  def test_needs_input_raises_for_unexpected_resolution_kind
+    original = Hive::Bot::RowActions.method(:resolve)
+    fake_resolution_class = Struct.new(:actions, :kind) do
+      def suppress
+        false
+      end
+    end
+    fake_resolution = fake_resolution_class.new([ Object.new ], :unexpected_waiting)
+    Hive::Bot::RowActions.define_singleton_method(:resolve) { |_row| fake_resolution }
+
+    error = assert_raises(ArgumentError) do
+      Hive::Bot::NotificationBuilders.build(row(action: "needs_input", marker: "agent_waiting"))
+    end
+
+    assert_match(/unexpected resolution kind :unexpected_waiting/, error.message)
+  ensure
+    Hive::Bot::RowActions.singleton_class.send(:remove_method, :resolve)
+    Hive::Bot::RowActions.define_singleton_method(:resolve, &original)
+  end
+
   def test_plan_waiting_builds_approve_and_details_keyboard
     notification = Hive::Bot::NotificationBuilders.build(
       row(action: "needs_input", marker: "waiting", stage: "3-plan")
@@ -346,6 +366,24 @@ class HiveBotNotificationBuildersTest < Minitest::Test
       assert_nil Hive::Bot::NotificationBuilders.build(row(action: "needs_input", marker: marker)),
                  "marker=#{marker} needs_input rows must not push a notification"
     end
+  end
+
+  def test_needs_input_raises_for_unmapped_resolution_kind
+    action = Hive::Bot::RowActions.action(:details, "details:hive:slug-260514-abcd:3-plan", primary: true)
+    unexpected_resolution = Struct.new(:suppress, :actions, :kind).new(false, [ action ], :mystery)
+    original = Hive::Bot::RowActions.method(:resolve)
+    Hive::Bot::RowActions.define_singleton_method(:resolve) { |_row| unexpected_resolution }
+
+    error = begin
+      assert_raises(ArgumentError) do
+        Hive::Bot::NotificationBuilders.build(row(action: "needs_input", marker: "waiting"))
+      end
+    ensure
+      Hive::Bot::RowActions.singleton_class.send(:remove_method, :resolve)
+      Hive::Bot::RowActions.define_singleton_method(:resolve, &original)
+    end
+
+    assert_match(/unexpected resolution kind :mystery/, error.message)
   end
 
   def test_details_reply_for_default_needs_input_has_summary_and_laptop_hint

@@ -35,6 +35,7 @@ Gem::Specification.new do |spec|
     "bin/hive-babysitter-stub-git",
     "bin/hv",
     "lib/**/*.rb",
+    "lib/hive/scripts/**/*.sh",
     "templates/**/*",
     "schemas/**/*.json",
     "examples/systemd/*",
@@ -59,6 +60,11 @@ Gem::Specification.new do |spec|
   spec.add_dependency "faraday", ">= 2.14.2", "< 3.0"
   spec.add_dependency "faraday-multipart", "~> 1.0"
   spec.add_dependency "lipgloss", "~> 0.2.2"
+  # rexml stopped being a default gem in Ruby 3.4, so it is not guaranteed
+  # present. The launchd service-installer drift probe parses plists with
+  # REXML::Document; without this declaration `hive daemon install/status`
+  # and `hive setup` raise LoadError on a stock 3.4 install.
+  spec.add_dependency "rexml", "~> 3.2"
   spec.add_dependency "sqlite3", "~> 2.0"
   spec.add_dependency "telegram-bot-ruby", "~> 2.7"
   spec.add_dependency "thor", "~> 1.3"

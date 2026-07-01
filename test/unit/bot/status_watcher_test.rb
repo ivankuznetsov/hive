@@ -66,7 +66,7 @@ class HiveBotStatusWatcherTest < Minitest::Test
       "claude_pid" => nil,
       "claude_pid_alive" => nil,
       "action" => action,
-      "action_label" => "Needs your input",
+      "action_label" => "Answer questions",
       "suggested_command" => "hive brainstorm #{slug} --from 2-brainstorm",
       "next_action" => nil,
       "diagnostic" => nil

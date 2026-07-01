@@ -130,7 +130,7 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     snap = make_snapshot([
       { "name" => "hive", "tasks" => [
         make_task(slug: "abc-001", id: 7, display_name: "Readable Task", stage: "3-plan",
-                  action_label: "Needs your input", age: 90,
+                  action_label: "Review plan draft", age: 90,
                   pr_url: "https://github.com/example/repo/pull/561")
       ] }
     ])
@@ -141,8 +141,26 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     assert_includes out, "Readable Task",    "display name column must render"
     refute_includes out, "abc-001",          "slug must not render when a display name is present"
     assert_includes out, "3-plan",           "stage column must render"
-    assert_includes out, "Needs your input", "status column must render"
+    assert_includes out, "Review plan draft", "status column must render"
     assert_includes out, "1m",               "age column must render (90s → 1m)"
+  end
+
+  def test_needs_review_decision_fits_status_column_without_truncation
+    label = "Needs review decision"
+    assert_operator Hive::Tui::Views::Format.display_width(label),
+                    :<=,
+                    Hive::Tui::Views::TasksPane::STATUS_WIDTH
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(slug: "review-row", stage: "6-review", action: "needs_input",
+                  action_label: label, marker: "review_waiting",
+                  suggested: "hive review review-row --from 6-review")
+      ] }
+    ])
+
+    out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
+
+    assert_includes out, label
   end
 
   def test_renders_dash_pr_column_without_url
@@ -317,7 +335,7 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
                  "a blocked error row must surface BOTH its error state and the dependency block"
   end
 
-  def test_recover_review_status_shows_marker_reason
+  def test_recover_review_status_shows_classified_marker_reason
     snap = make_snapshot([
       { "name" => "hive", "tasks" => [
         make_task(
@@ -326,13 +344,13 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
           action: "recover_review",
           action_label: "Needs recovery",
           marker: "review_error",
-          attrs: { "phase" => "triage", "reason" => "triage_failed", "pass" => "2" },
+          attrs: { "phase" => "triage", "reason" => "merge_conflict", "pass" => "2" },
           suggested: nil
         )
       ] }
     ])
     out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
-    assert_includes out, "triage_failed",
+    assert_includes out, "merge_conflict",
                     "review recovery rows must show the exact marker reason, not generic status text"
     refute_includes out, "Needs recovery"
   end
@@ -388,8 +406,8 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     # max_passes-hit REVIEW_STALE markers carry `pass=N` but no
     # `reason` attr. Operator needs to see the pass count to
     # understand WHY this row is stuck (cap was reached) without
-    # opening the file. Mirrors the existing `wall_clock` /
-    # `triage_failed` inline-diagnostic pattern.
+    # opening the file. Mirrors the existing `wall_clock` / classified-reason
+    # inline-diagnostic pattern.
     snap = make_snapshot([
       { "name" => "hive", "tasks" => [
         make_task(
@@ -411,7 +429,7 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
 
   def test_recover_review_status_reason_wins_over_pass
     # Regression: when both `reason` and `pass` are present (the
-    # retryable wall_clock / triage_failed shapes), `reason` wins.
+    # retryable wall_clock / classified-reason shapes), `reason` wins.
     # The pass-attr branch must never override the existing reason
     # rendering, or `Enter` routing diverges from status display.
     snap = make_snapshot([

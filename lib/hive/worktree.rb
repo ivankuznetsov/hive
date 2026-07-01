@@ -282,6 +282,29 @@ module Hive
       status.success?
     end
 
+    def self.materialize_pr(repo_root:, pr_number:, path:, branch:)
+      repo_root = File.expand_path(repo_root)
+      path = File.expand_path(path)
+      pr_number = pr_number.to_i
+      local_ref = "refs/#{branch}"
+
+      FileUtils.mkdir_p(File.dirname(path))
+      # Use the same non-interactive fetch env as every other fetch in this
+      # file (GIT_TERMINAL_PROMPT=0 + SSH BatchMode + the HTTPS low-speed
+      # abort). `hive review --pr N` fetches a PR head from an arbitrary
+      # origin through the new CLI/--json entry point; without this an
+      # unreachable or auth-required remote could hang on a credential
+      # prompt or a dead connection instead of failing fast.
+      run_materialize_git!(repo_root, "fetch", "origin", "+pull/#{pr_number}/head:#{local_ref}",
+                           env: NONINTERACTIVE_FETCH_ENV)
+      run_materialize_git!(repo_root, "worktree", "add", "-B", branch, path, local_ref)
+      {
+        path: path,
+        branch: branch,
+        head_sha: run_materialize_git!(path, "rev-parse", "HEAD").strip
+      }
+    end
+
     # Resolve symlinks before the prefix check — File.expand_path normalises
     # `..` and `~` lexically but does not follow symlinks. An agent that
     # writes a symlink at the worktree path could otherwise escape the root.
@@ -301,6 +324,19 @@ module Hive
     rescue Errno::ENOENT
       # Path doesn't exist yet (init pass before mkdir); fall back to lexical.
       File.expand_path(path)
+    end
+
+    # Run one `git -C <dir>` command for the materialize path and return its
+    # stdout. `dir` is the directory git runs in — the repo root for fetch /
+    # worktree-add, or the worktree `path` for `rev-parse HEAD`. `env: {}` is
+    # an empty env (≡ no env arg to Open3.capture3); pass NONINTERACTIVE_FETCH_ENV
+    # for the network fetch. Callers that ignore the return value simply discard
+    # the stdout.
+    def self.run_materialize_git!(dir, *args, env: {})
+      out, err, status = Open3.capture3(env, "git", "-C", dir, *args)
+      return out if status.success?
+
+      raise WorktreeError, "git #{args.join(' ')} failed: #{err.to_s.strip.empty? ? out : err}"
     end
 
     private

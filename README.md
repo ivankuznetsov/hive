@@ -42,7 +42,7 @@ Hive ships as a rubygem (`hive-cli`) attached to each GitHub Release, signed wit
 | Platform | Channel |
 |----------|---------|
 | macOS arm64 | [`brew install ivankuznetsov/hive/hive`](https://github.com/ivankuznetsov/homebrew-hive) |
-| Ubuntu 22.04+ / glibc Linux x86_64/aarch64 | <code>tmpdir="$(mktemp -d)" && trap 'rm -rf "$tmpdir"' EXIT && curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.3.1/install.sh -o "$tmpdir/hive-install.sh" && bash "$tmpdir/hive-install.sh"</code> |
+| Ubuntu 22.04+ / glibc Linux x86_64/aarch64 | <code>tmpdir="$(mktemp -d)" && trap 'rm -rf "$tmpdir"' EXIT && curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.3.2/install.sh -o "$tmpdir/hive-install.sh" && bash "$tmpdir/hive-install.sh"</code> |
 | Arch Linux x86_64/aarch64 | [`yay -S hive-bin`](https://aur.archlinux.org/packages/hive-bin) |
 
 Prerequisites: **Ruby 3.4** (the gem and its runtime deps install against this), git ≥ 2.40, authenticated `claude` ≥ 2.1.118, `codex` ≥ 0.125.0 for the default execute agent, authenticated `gh`, `tmux` ≥ 3.0 when the project uses the default `claude.mode: tmux`, and Node.js/npm for managed QMD install/repair. The bash installer reports its own installer-side prereqs (`curl`, `jq`, `gem`, checksum tool) on first run; if npm is missing, Hive still installs and `hive doctor` reports the QMD gap non-fatally.
@@ -62,6 +62,26 @@ ln -sf ~/Dev/hive/bin/hive ~/.local/bin/hive
 ```
 
 If `~/.local/bin` is not on `PATH`, put the symlink in a directory that is. Verify with `hive --version`, then run `hive daemon install` once to install and enable the per-user daemon service from that symlink. The dev-clone path skips signed-release verification, but the same daemon installer writes the current systemd-user or launchd template.
+
+### Local Web UI
+
+Hive can run the Rails web UI locally without Docker:
+
+```bash
+hive setup
+hive web
+```
+
+`hive setup` checks Ruby 3.4, git, tmux, `gh`, Claude, Codex, Node/npm,
+QMD, SQLite, and the Rails bundle. It installs Hive-owned pieces it can
+manage, installs the daemon service, and enrolls the current project. Bare
+`hive web` serves `http://127.0.0.1:4567` in the foreground with
+loopback-only no-auth mode (set `web.local_loopback: false` to require GitHub
+login even on a loopback bind — see [wiki/commands/web.md](wiki/commands/web.md)).
+For autostart, run `hive setup --service` or
+`hive web install` and `hive web start --detach`; the web service is separate
+from the daemon service. Docker/hivebox remains supported for container-first
+installs.
 
 ### Install via a coding agent
 

@@ -7,7 +7,8 @@ class HiveBotSupervisorTest < Minitest::Test
 
   ChildExit = Hive::Bot::ChildSupervisor::ChildExit
   Update = Struct.new(:chat_id, :update_id, :message_id, keyword_init: true)
-  Row = Struct.new(:project, :slug, :stage, :workflow, :action, :action_label, :marker, :attrs, :diagnostic,
+  Row = Struct.new(:project, :project_path, :hive_state_path, :slug, :stage, :workflow, :action, :action_label,
+                   :marker, :attrs, :diagnostic,
                    :id, :display_name, :pr_url,
                    keyword_init: true)
   StatusResult = Struct.new(:ok, :rows, :legacy_stage_dirs, :error, :envelope, :warning, keyword_init: true)
@@ -240,8 +241,9 @@ class HiveBotSupervisorTest < Minitest::Test
 
   def row(project: "hive", slug: "task", stage: "3-plan", workflow: "coding", action: "ready_to_develop",
           action_label: "Develop", marker: "COMPLETE", attrs: {}, diagnostic: nil,
-          id: nil, display_name: nil, pr_url: nil)
-    Row.new(project: project, slug: slug, stage: stage, workflow: workflow, action: action,
+          id: nil, display_name: nil, pr_url: nil, project_path: "/tmp/#{project}")
+    Row.new(project: project, project_path: project_path, hive_state_path: File.join(project_path, ".hive-state"),
+            slug: slug, stage: stage, workflow: workflow, action: action,
             action_label: action_label, marker: marker, attrs: attrs, diagnostic: diagnostic,
             id: id, display_name: display_name, pr_url: pr_url)
   end
@@ -354,12 +356,140 @@ class HiveBotSupervisorTest < Minitest::Test
     refute_includes text, "exit 0"
   end
 
-  def test_reply_for_child_renders_empty_success_diagnostic_fallback
+  def test_reply_for_child_renders_empty_success_diagnostic_from_logs
+    Dir.mktmpdir("hive-bot-diagnose") do |folder|
+      logs = File.join(folder, "logs")
+      FileUtils.mkdir_p(logs)
+      log_path = File.join(logs, "diagnose.log")
+      File.write(log_path, "first line\nlast useful line\n")
+      envelope = {
+        "schema" => "hive-status-diagnose",
+        "ok" => true,
+        "slug" => "stuck-task",
+        "task_folder" => folder,
+        "marker_summary" => "ERROR reason=boom"
+      }
+
+      @supervisor.send(:reply_for_child, child_exit(envelope: envelope))
+
+      text = @telegram.messages.first.fetch(:text)
+      assert_includes text, "Refreshed diagnosis for"
+      assert_includes text, "ERROR reason=boom: last useful line"
+      assert_includes text, "Log: #{log_path}"
+      refute_includes text, "No diagnostic available"
+    end
+  end
+
+  def test_reply_for_child_renders_empty_success_diagnostic_from_red_status
+    Dir.mktmpdir("hive-bot-diagnose") do |folder|
+      path = File.join(folder, "diagnostics", "red-status.md")
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, <<~MD)
+        ---
+        summary: Cached agent verdict
+        generated_by: codex
+        ---
+        ignored body
+      MD
+      envelope = {
+        "schema" => "hive-status-diagnose",
+        "ok" => true,
+        "slug" => "red-status-task",
+        "task_folder" => folder
+      }
+
+      @supervisor.send(:reply_for_child, child_exit(envelope: envelope))
+
+      text = @telegram.messages.first.fetch(:text)
+      assert_includes text, "Cached agent verdict"
+      # red-status.md is a diagnostic artifact, not a log — labelled accordingly.
+      assert_includes text, "Diagnostics: #{path}"
+      refute_includes text, "Log: #{path}"
+      refute_includes text, "No diagnostic available"
+    end
+  end
+
+  def test_reply_for_child_renders_empty_success_diagnostic_from_marker
+    Dir.mktmpdir("hive-bot-diagnose") do |folder|
+      state_file = File.join(folder, "task.md")
+      File.write(state_file, "<!-- ERROR reason=worktree_git_failed -->\n")
+      envelope = {
+        "schema" => "hive-status-diagnose",
+        "ok" => true,
+        "slug" => "marker-only-task",
+        "task_folder" => folder,
+        "marker_summary" => "ERROR reason=worktree_git_failed"
+      }
+
+      @supervisor.send(:reply_for_child, child_exit(envelope: envelope))
+
+      text = @telegram.messages.first.fetch(:text)
+      assert_includes text, "ERROR reason=worktree_git_failed"
+      # The marker state file is labelled Marker:, not Log:.
+      assert_includes text, "Marker: #{state_file}"
+      refute_includes text, "Log: #{state_file}"
+      refute_includes text, "No diagnostic available"
+    end
+  end
+
+  def test_reply_for_child_marker_tier_pins_threaded_state_file
+    Dir.mktmpdir("hive-bot-diagnose") do |folder|
+      # An advanced folder carries a stale marker in an earlier-stage file
+      # (task.md) AND the authoritative state file (pr.md). Without the threaded
+      # state_file the bot would glob task.md first and mislabel the source.
+      File.write(File.join(folder, "task.md"), "<!-- COMPLETE -->\n")
+      pr_md = File.join(folder, "pr.md")
+      File.write(pr_md, "<!-- REVIEW_STALE pass=2 -->\n")
+      envelope = {
+        "schema" => "hive-status-diagnose",
+        "ok" => true,
+        "slug" => "advanced-task",
+        "task_folder" => folder,
+        "marker_summary" => "REVIEW_STALE pass=2",
+        "state_file" => pr_md
+      }
+
+      @supervisor.send(:reply_for_child, child_exit(envelope: envelope))
+
+      text = @telegram.messages.first.fetch(:text)
+      assert_includes text, "REVIEW_STALE pass=2"
+      assert_includes text, "Marker: #{pr_md}"
+      refute_includes text, "Marker: #{File.join(folder, 'task.md')}"
+    end
+  end
+
+  def test_reply_for_child_empty_success_with_evidence_empty_folder_hints_task_folder
+    Dir.mktmpdir("hive-bot-diagnose") do |folder|
+      # A real folder that exists but holds no red-status / log / marker
+      # evidence: the resolver returns nil and the reply appends the folder hint.
+      envelope = {
+        "schema" => "hive-status-diagnose",
+        "ok" => true,
+        "slug" => "no-evidence-task",
+        "task_folder" => folder
+      }
+
+      @supervisor.send(:reply_for_child, child_exit(envelope: envelope))
+
+      text = @telegram.messages.first.fetch(:text)
+      assert_includes text, "Couldn't find a cached diagnosis"
+      assert_includes text, "Task folder: #{folder}"
+      # The empty-folder case is the original bug's exact scenario — guard the
+      # stale "No diagnostic available" copy explicitly, not just the positive
+      # "Couldn't find a cached diagnosis" assertion.
+      refute_includes text, "No diagnostic available"
+    end
+  end
+
+  def test_reply_for_child_empty_success_without_evidence_is_graceful
     envelope = { "schema" => "hive-status-diagnose", "ok" => true, "slug" => "stuck-task" }
 
     @supervisor.send(:reply_for_child, child_exit(envelope: envelope))
 
-    assert_equal "No diagnostic available for stuck-task.", @telegram.messages.first.fetch(:text)
+    text = @telegram.messages.first.fetch(:text)
+    assert_includes text, "Couldn't find a cached diagnosis"
+    assert_includes text, "Stuck task"
+    refute_includes text, "No diagnostic available for"
   end
 
   CallbackUpdate = Struct.new(:callback_query_id, :update_id, keyword_init: true) do
@@ -1221,12 +1351,15 @@ class HiveBotSupervisorTest < Minitest::Test
     commands = registered.first
     assert_equal Hive::Bot::Supervisor::BOT_COMMANDS, commands
     slash_names = commands.map { |cmd| cmd.fetch(:command) }
-    assert_equal %w[idea status queue answer approve autofix details done help], slash_names
+    assert_equal %w[idea status waiting queue answer approve autofix details done help], slash_names
     assert(commands.all? { |cmd| cmd.fetch(:description).length.between?(1, 256) },
            "every command description must be non-empty and within Telegram's 256-char cap")
     # Pin the A5 discoverability copy: the typeable command menu must advertise
     # the <id|slug> argument so operators learn they can paste a numeric id.
     descriptions = commands.to_h { |cmd| [ cmd.fetch(:command), cmd.fetch(:description) ] }
+    # Pin the bare-text discoverability copy so a silent revert to a terser
+    # "Capture an idea" fails here: the menu must advertise that any message works.
+    assert_equal "Capture an idea, or just send any message", descriptions.fetch("idea")
     assert_includes descriptions.fetch("answer"), "/answer <id|slug>"
     assert_includes descriptions.fetch("approve"), "/approve <id|slug>"
     assert_includes descriptions.fetch("autofix"), "/autofix <id|slug>"
@@ -1580,6 +1713,17 @@ class HiveBotSupervisorTest < Minitest::Test
     assert_equal 9, callbacks.length, "inert agent_running rows produce no button"
   end
 
+  def test_status_keyboard_caps_buttons_at_display_cap
+    rows = 11.times.map do |i|
+      row(slug: "ask-#{i}-260526-aaaa", stage: "2-brainstorm", action: "needs_input", marker: "waiting")
+    end
+
+    keyboard = @supervisor.send(:status_keyboard, rows)
+
+    assert_equal 10, keyboard.flatten.length,
+                 "Telegram rejects an oversized keyboard; >10 actionable rows must cap at the 10-button display slice"
+  end
+
   def test_status_keyboard_suppresses_none_and_complete_needs_input_rows
     suppressed = [
       row(slug: "none-260624-abcd", action: "needs_input", marker: "none"),
@@ -1634,7 +1778,7 @@ class HiveBotSupervisorTest < Minitest::Test
 
   def test_status_action_button_isolates_a_resolver_failure
     # A row whose resolution raises (typo'd/unmapped role at the RowActions
-    # boundary, or an unmapped status_action_emoji key) must drop only its own
+    # boundary, or an unmapped ROLE_EMOJI key) must drop only its own
     # /status button, not abort the whole keyboard's filter_map.
     bad = row(slug: "boom-260624-abcd", action: "ready_to_develop", marker: "complete")
     original = Hive::Bot::RowActions.method(:resolve)
@@ -1651,18 +1795,41 @@ class HiveBotSupervisorTest < Minitest::Test
            "the dropped button must be logged for an audit trail")
   end
 
-  def test_status_action_emoji_covers_every_row_action_role
-    # status_action_emoji renders the primary /status button; `.fetch` raises on
-    # an unmapped role and status_action_button's rescue swallows it (silently
-    # dropping the button). `:findings_reject` is structurally never the primary
-    # today, so button_coverage_test's primary-role sweep never reaches it —
-    # this parity sweep is what pins the table to the closed RowActions::ROLES
+  def test_role_emoji_covers_every_row_action_role
+    # WaitingRows::ROLE_EMOJI renders the primary button on every surface
+    # (/status via status_action_button, /waiting, the digest); `.fetch` raises
+    # on an unmapped role and button_for's rescue swallows it (silently dropping
+    # the button). `:findings_reject` is structurally never the primary today,
+    # so button_coverage_test's primary-role sweep never reaches it — this
+    # parity sweep is what pins the table to the closed RowActions::ROLES
     # vocabulary if a future refactor ever promotes it to primary.
     Hive::Bot::RowActions::ROLES.each do |role|
-      emoji = @supervisor.send(:status_action_emoji, role)
-      assert_kind_of String, emoji, "status_action_emoji must map #{role.inspect}"
-      refute_empty emoji, "status_action_emoji must not be blank for #{role.inspect}"
+      emoji = Hive::Bot::WaitingRows::ROLE_EMOJI.fetch(role)
+      assert_kind_of String, emoji, "ROLE_EMOJI must map #{role.inspect}"
+      refute_empty emoji, "ROLE_EMOJI must not be blank for #{role.inspect}"
     end
+  end
+
+  def test_row_project_path_falls_back_to_registered_project_path
+    project_only_row = Struct.new(:project).new("hive")
+
+    with_replaced_singleton_method(Hive::Config, :find_project, ->(_project) { { "path" => "/tmp/fallback" } }) do
+      assert_equal "/tmp/fallback", Hive::Bot::WaitingRows.row_project_path(project_only_row)
+    end
+  end
+
+  def test_waiting_daemon_enabled_resolver_logs_project_config_errors
+    bad_row = row(project: "hive", project_path: "/tmp/bad-config")
+
+    with_replaced_singleton_method(Hive::Config, :load, ->(_path) { raise Hive::ConfigError, "bad config" }) do
+      assert_equal false, @supervisor.send(:waiting_daemon_enabled_resolver).call(bad_row)
+    end
+
+    event = @logger.events.find { |entry| entry[:name] == :poll_failure }
+    refute_nil event
+    assert_equal "waiting_daemon_check", event[:payload][:source]
+    assert_equal "hive", event[:payload][:project]
+    assert_equal "Hive::ConfigError", event[:payload][:error_class]
   end
 
   def test_next_step_hint_maps_findings_reject_primary
@@ -1700,6 +1867,83 @@ class HiveBotSupervisorTest < Minitest::Test
     # ready_to_develop row → an approve button on the /status reply.
     callbacks = @telegram.messages.last.fetch(:reply_markup).flatten.map { |btn| btn[:callback_data] }
     assert_includes callbacks, "approve:develop:hive:alpha:3-plan"
+  end
+
+  def test_execute_dispatch_waiting_mode_filters_to_needs_input_rows_with_buttons
+    rows = [
+      row(slug: "answer-me-260625-abcd", stage: "2-brainstorm", action: "needs_input", marker: "waiting"),
+      row(slug: "ready-260625-abcd", stage: "3-plan", action: "ready_to_develop", marker: "complete")
+    ]
+    @status_watcher.result = StatusResult.new(ok: true, rows: rows)
+    result = FakeRouter::Result.new(
+      action: :dispatch_then_reply,
+      command_argv: [ "hive", "status", "--json" ],
+      mode: :waiting
+    )
+
+    @supervisor.send(:execute_dispatch, result, Update.new(chat_id: 42, update_id: 10))
+
+    message = @telegram.messages.last
+    assert_includes message.fetch(:text), "Answer me…"
+    refute_includes message.fetch(:text), "Ready…"
+    assert_equal :html, message.fetch(:parse_mode)
+    callbacks = message.fetch(:reply_markup).flatten.map { |btn| btn[:callback_data] }
+    assert_equal [ "answer:hive:answer-me-260625-abcd" ], callbacks
+  end
+
+  def test_execute_dispatch_waiting_mode_replies_empty_without_keyboard
+    rows = [ row(slug: "ready-260625-abcd", stage: "3-plan", action: "ready_to_develop", marker: "complete") ]
+    @status_watcher.result = StatusResult.new(ok: true, rows: rows)
+    result = FakeRouter::Result.new(
+      action: :dispatch_then_reply,
+      command_argv: [ "hive", "status", "--json" ],
+      mode: :waiting
+    )
+
+    @supervisor.send(:execute_dispatch, result, Update.new(chat_id: 42, update_id: 10))
+
+    assert_equal "Nothing is waiting on you.", @telegram.messages.last.fetch(:text)
+    assert_nil @telegram.messages.last[:reply_markup]
+  end
+
+  def test_execute_dispatch_waiting_mode_suppresses_daemon_enabled_plan_pause
+    with_tmp_dir do |project_path|
+      FileUtils.mkdir_p(File.join(project_path, ".hive-state"))
+      File.write(File.join(project_path, ".hive-state", "config.yml"), "daemon:\n  enabled: true\n")
+      rows = [
+        row(slug: "plan-260625-abcd", project_path: project_path,
+            stage: "3-plan", action: "needs_input", marker: "waiting"),
+        row(slug: "brainstorm-260625-abcd", project_path: project_path,
+            stage: "2-brainstorm", action: "needs_input", marker: "waiting")
+      ]
+      @status_watcher.result = StatusResult.new(ok: true, rows: rows)
+      result = FakeRouter::Result.new(
+        action: :dispatch_then_reply,
+        command_argv: [ "hive", "status", "--json" ],
+        mode: :waiting
+      )
+
+      @supervisor.send(:execute_dispatch, result, Update.new(chat_id: 42, update_id: 10))
+
+      text = @telegram.messages.last.fetch(:text)
+      refute_includes text, "Plan…"
+      assert_includes text, "Brainstorm…"
+    end
+  end
+
+  def test_execute_dispatch_status_mode_still_lists_full_queue_for_same_rows
+    rows = [
+      row(slug: "answer-me-260625-abcd", stage: "2-brainstorm", action: "needs_input", marker: "waiting"),
+      row(slug: "ready-260625-abcd", stage: "3-plan", action: "ready_to_develop", marker: "complete")
+    ]
+    @status_watcher.result = StatusResult.new(ok: true, rows: rows)
+    result = FakeRouter::Result.new(action: :dispatch_then_reply, command_argv: [ "hive", "status", "--json" ])
+
+    @supervisor.send(:execute_dispatch, result, Update.new(chat_id: 42, update_id: 10))
+
+    text = @telegram.messages.last.fetch(:text)
+    assert_includes text, "Answer me…"
+    assert_includes text, "Ready…"
   end
 
   def test_execute_dispatch_renders_legacy_stage_dirs_in_status_queue

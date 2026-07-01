@@ -1,10 +1,12 @@
 require "test_helper"
+require "json"
 require "hive/web/dispatcher"
 require "hive/commands/init"
 require "hive/commands/new"
 require "hive/commands/workflow"
 require "hive/workflows/project"
 require "hive/brainstorm_parser"
+require "hive/daemon/dispatch_request_queue"
 
 # Unit coverage for the web Dispatcher's gate logic: reject must derive the
 # task's *prior* gate from its current stage (not hardcode 2-brainstorm), and
@@ -26,17 +28,52 @@ class WebDispatcherTest < Minitest::Test
     [ project, slug, dest ]
   end
 
+  # The web "Repair daemon" button enqueues `hive daemon install --force` under
+  # the __global__ maintenance sentinel; the daemon consumer special-cases that
+  # project instead of dropping it as unknown_project. Only the consumer half is
+  # covered elsewhere — assert the PRODUCER's sentinel/argv so the two can't
+  # drift apart (a wrong sentinel or argv would be caught by neither suite).
+  def test_repair_daemon_enqueues_global_maintenance_install_force
+    with_tmp_global_config do
+      request_id = Hive::Web::Dispatcher.new.repair_daemon
+      refute_nil request_id, "repair_daemon must return the enqueued request id"
+
+      files = Dir[File.join(Hive::Paths.state_home, "dispatch_requests", "**", "*#{request_id}*")]
+              .select { |f| File.file?(f) }
+      refute_empty files, "repair_daemon must enqueue a dispatch request"
+      payload = JSON.parse(File.read(files.first))
+      assert_equal Hive::Daemon::DispatchRequestQueue::GLOBAL_MAINTENANCE_PROJECT,
+                   payload["project"], "repair must ride the __global__ sentinel"
+      assert_equal %w[hive daemon install --force], payload["argv"]
+      assert_equal "web_daemon_repair", payload["trigger"]
+    end
+  end
+
+  def test_repair_daemon_maps_queue_rejection_to_typed_error
+    with_tmp_global_config do
+      original = Hive::Bot::DispatchRequestWriter.method(:write!)
+      Hive::Bot::DispatchRequestWriter.define_singleton_method(:write!) do |**|
+        raise ArgumentError, "argv not allowlisted"
+      end
+      error = assert_raises(Hive::Error) { Hive::Web::Dispatcher.new.repair_daemon }
+      assert_match(/daemon install --force/, error.message,
+                   "a write-time rejection must surface CLI guidance, not run repair from a worker")
+    ensure
+      Hive::Bot::DispatchRequestWriter.define_singleton_method(:write!, original) if original
+    end
+  end
+
   def test_recover_queues_marker_clear_then_stage_rerun_as_one_sequence
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         project, slug, dest = seed_task_at(dir, "6-review")
         File.write(File.join(dest, "task.md"),
-                   "# t\n\n<!-- REVIEW_ERROR phase=triage reason=triage_failed pass=1 -->\n")
+                   "# t\n\n<!-- REVIEW_ERROR phase=triage reason=merge_conflict pass=1 -->\n")
 
         request_id = Hive::Web::Dispatcher.new.recover(
           slug: slug, project: project, stage: "6-review",
           marker: "review_error",
-          attrs: { "phase" => "triage", "reason" => "triage_failed", "pass" => "1" }
+          attrs: { "phase" => "triage", "reason" => "merge_conflict", "pass" => "1" }
         )
 
         requests = Dir[File.join(Hive::Paths.state_home, "dispatch_requests", "**", "*#{request_id}*")]
@@ -64,7 +101,7 @@ class WebDispatcherTest < Minitest::Test
         Hive::Web::Dispatcher.new.recover(
           slug: "stuck-260612-bbbb", project: "p", stage: "6-review",
           marker: "review_error",
-          attrs: { "phase" => "triage", "reason" => "triage_failed", "pass" => "1" }
+          attrs: { "phase" => "triage", "reason" => "merge_conflict", "pass" => "1" }
         )
       end
 

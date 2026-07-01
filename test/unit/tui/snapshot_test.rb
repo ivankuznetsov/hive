@@ -357,6 +357,40 @@ class TuiSnapshotTest < Minitest::Test
     assert_equal "Ready to develop", rows[2].action_label
   end
 
+  def test_build_project_view_sorts_differentiated_waiting_labels_above_error
+    waiting_labels = [
+      "Answer questions",
+      "Review plan draft",
+      "Needs review decision",
+      "Confirm finalize"
+    ]
+    rows = waiting_labels.map.with_index do |label, index|
+      sample_task(slug: "waiting-#{index}").merge(
+        "action" => "needs_input",
+        "action_label" => label
+      )
+    end
+    error = sample_task(slug: "error-row").merge(
+      "action" => "error",
+      "action_label" => "Error"
+    )
+    payload = sample_payload([
+                               {
+                                 "name" => "alpha",
+                                 "path" => "/tmp/alpha",
+                                 "hive_state_path" => "/tmp/alpha/.hive-state",
+                                 "tasks" => [ error, *rows ]
+                               }
+                             ])
+
+    snapshot = Hive::Tui::Snapshot.from_payload(payload)
+    sorted_labels = snapshot.projects.first.rows.map(&:action_label)
+
+    waiting_labels.each do |label|
+      assert_operator sorted_labels.index(label), :<, sorted_labels.index("Error")
+    end
+  end
+
   def test_build_project_view_preserves_json_order_within_action_label_group
     # Two rows share the same label; their JSON order must survive the
     # sort so `Status`'s upstream mtime-desc ranking is honoured.

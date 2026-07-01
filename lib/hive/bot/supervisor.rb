@@ -24,8 +24,10 @@ require "hive/bot/child_supervisor"
 require "hive/bot/dispatch_request_writer"
 require "hive/bot/format"
 require "hive/bot/row_actions"
+require "hive/bot/waiting_rows"
 require "hive/daemon/dispatch_request_queue"
 require "hive/daemon/dispatch_result_queue"
+require "hive/diagnostic_evidence"
 require "hive/paths"
 require "hive/bot/brainstorm_answer_writer"
 require "hive/bot/brainstorm_parser"
@@ -39,8 +41,9 @@ module Hive
   module Bot
     class Supervisor
       BOT_COMMANDS = [
-        { command: "idea",    description: "Capture a new idea with optional files" },
+        { command: "idea",    description: "Capture an idea, or just send any message" },
         { command: "status",  description: "Show active tasks" },
+        { command: "waiting", description: "Show tasks waiting on your answer" },
         { command: "queue",   description: "Show queued and waiting tasks" },
         { command: "answer",  description: "Answer brainstorm questions: /answer <id|slug>" },
         { command: "approve", description: "Approve a task at its current stage: /approve <id|slug>" },
@@ -1040,6 +1043,15 @@ module Hive
               text: render_details(rows, result.project, result.slug, stage: result.stage)
             )
           else
+            if result.respond_to?(:mode) && result.mode == :waiting
+              rows = Hive::Bot::WaitingRows.select(rows, daemon_enabled: waiting_daemon_enabled_resolver,
+                                                         logger: @logger)
+              if rows.empty?
+                safe_send_message(chat_id: update.chat_id, text: "Nothing is waiting on you.")
+                return nil
+              end
+              legacy_stage_dirs = []
+            end
             safe_send_message(chat_id: update.chat_id,
                               text: render_queue(rows, legacy_stage_dirs: legacy_stage_dirs),
                               parse_mode: :html,
@@ -1347,8 +1359,12 @@ module Hive
           # Show details renders directly from the cached status row now.
           # This remains defensive for the refresh_diagnose child path, the
           # sole producer of this envelope, which can still return an empty
-          # success envelope.
-          return "No diagnostic available for #{slug}." if diagnostic.empty? && envelope["path"].to_s.strip.empty?
+          # success envelope — which `empty_diagnose_success_reply` now backfills
+          # from on-disk evidence (red-status / newest log / marker) before
+          # falling back to a try-again message.
+          if diagnostic.empty? && envelope["path"].to_s.strip.empty?
+            return empty_diagnose_success_reply(envelope, slug)
+          end
 
           # The freshly written verdict isn't in the cached snapshot row until
           # the next poll, and Show details renders a summary, not a raw dump —
@@ -1366,6 +1382,38 @@ module Hive
         prefix += " (#{kind})" unless kind.empty?
         text = "#{prefix}: #{message.empty? ? "exit #{exit_code}" : message}"
         child.log_path ? "#{text}; see #{child.log_path}" : text
+      end
+
+      def empty_diagnose_success_reply(envelope, slug)
+        title = Hive::Bot::TitleFormatter.title_from_slug(slug)
+        evidence = Hive::DiagnosticEvidence.summarize(
+          folder: envelope["task_folder"],
+          marker_summary: envelope["marker_summary"],
+          # Pin the marker tier to the authoritative state file the CLI read
+          # marker_summary from, so the marker-tier source_path can't name a
+          # different *.md than the summary describes (older envelopes omit this
+          # field; summarize treats nil as "glob the folder", the prior path).
+          state_file: envelope["state_file"]
+        )
+        if evidence
+          # Label the source by its tier (Diagnostics:/Log:/Marker:) rather than
+          # hardcoding "Log:" — the top tier is a diagnostic artifact and the
+          # marker tier is a state file, neither of which is a log.
+          return "Refreshed diagnosis for \"#{title}\".\n" \
+                 "#{evidence.fetch(:summary)}\n" \
+                 "#{Hive::DiagnosticEvidence.source_label(evidence.fetch(:kind))}: #{evidence.fetch(:source_path)}"
+        end
+
+        folder = envelope["task_folder"].to_s.strip
+        # On a hard fault (e.g. an EACCES storm) the resolver logs a breadcrumb
+        # to daemon.log but returns nil here, so the operator sees only this
+        # copy. Append a soft pointer to daemon.log so a persistent failure
+        # doesn't read as merely transient, without changing the plan-specified
+        # no-evidence wording above it.
+        text = "Couldn't find a cached diagnosis for \"#{title}\" yet. " \
+               "Tap Refresh diagnosis again, or open the task on a laptop. " \
+               "If this keeps happening, check daemon.log."
+        folder.empty? ? text : "#{text}\nTask folder: #{folder}"
       end
 
       # Success is gated on the process exit code alone. The hive-status-
@@ -1522,46 +1570,20 @@ module Hive
 
       # One primary action button for a row, or nil when the canonical
       # row-action resolver says the row is suppressed or has no Telegram-side
-      # action. Labels carry the task title so the operator can tell rows apart.
+      # action. Delegates to the shared `WaitingRows.button_for` so /status,
+      # /waiting, and the answer-digest render the same conceptual button
+      # through one builder; the per-row rescue (drop just this row's button on
+      # a malformed row, logging :status_button_failed) lives there now.
       def status_action_button(row)
-        nb = Hive::Bot::NotificationBuilders
-        # Capture attribution into locals before the begin so the rescue's log
-        # line can't re-raise (and re-abort the keyboard's filter_map) on a row
-        # whose own top-level readers are malformed.
-        project = row.project
-        slug = row.slug
-        marker = row.marker
-        row_action = row.action
-        begin
-          resolution = Hive::Bot::RowActions.resolve(row)
-          return nil if resolution.suppress || resolution.actions.empty?
-
-          action = resolution.primary
-          title = nb.display_title(row)
-          nb.button("#{status_action_emoji(action.role)} #{title}", action.callback)
-        rescue StandardError => e
-          # Isolate a malformed row (typo'd/unmapped role at the closed RowActions
-          # boundary, an unmapped status_action_emoji key, or any NoMethodError/
-          # TypeError on a bad attrs/workflow value) so it drops just its own
-          # /status button instead of aborting the whole keyboard's filter_map.
-          @logger&.event(:status_button_failed, project: project, slug: slug,
-                                                 marker: marker, action: row_action,
-                                                 error_class: e.class.name, message: e.message)
-          nil
-        end
+        Hive::Bot::WaitingRows.button_for(row, logger: @logger)
       end
 
-      def status_action_emoji(role)
-        {
-          answer: "✏️",
-          approve: "✅",
-          approve_plan: "✅",
-          findings_accept: "✅",
-          findings_reject: "🚫",
-          autofix: "🔧",
-          details: "🔍",
-          rerun: "▶️"
-        }.fetch(role)
+      # Delegates to the shared WaitingRows builder so /waiting and the
+      # answer-digest resolve daemon-managed plan pauses through one
+      # memoizing, fail-open, config-error-logging implementation; only the log
+      # `source:` differs.
+      def waiting_daemon_enabled_resolver
+        Hive::Bot::WaitingRows.daemon_enabled_resolver(source: "waiting_daemon_check", logger: @logger)
       end
 
       def render_details(rows, project, slug, stage: nil)
@@ -1602,7 +1624,7 @@ module Hive
         # every other role maps to a static line below.
         return rerun_hint(action.verb) if action.role == :rerun
 
-        # Static per-role hints, mirroring status_action_emoji: a `.fetch` so a
+        # Static per-role hints, mirroring WaitingRows::ROLE_EMOJI's `.fetch` so a
         # new primary-capable role added to RowActions::ROLES without a hint
         # fails loud (KeyError) here instead of silently degrading to the laptop
         # hint. button_coverage_test sweeps every representative row's primary

@@ -403,6 +403,25 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_stubs_refuse_hardlinked_skip_log
+    with_tmp_dir do |dir|
+      target = File.join(dir, "target.log")
+      link = File.join(dir, "skipped.log")
+      File.write(target, "existing\n")
+      File.link(target, link)
+      env = { "HIVE_BABYSITTER_DRY_RUN_LOG" => link }
+
+      _out, git_err, git_status = Open3.capture3(env, stub_path("git"), "commit", "-m", "through-hardlink")
+      _out, gh_err, gh_status = Open3.capture3(env, stub_path("gh"), "pr", "comment", "42", "--body", "hi")
+
+      assert git_status.success?, git_err
+      assert gh_status.success?, gh_err
+      assert_equal "existing\n", File.read(target)
+      assert_includes git_err, "[dry-run] failed to write skip log #{link}: dry-run skip log link count is not 1"
+      assert_includes gh_err, "[dry-run] failed to write skip log #{link}: dry-run skip log link count is not 1"
+    end
+  end
+
   def test_stubs_refuse_fifo_skip_log_without_blocking
     with_tmp_dir do |dir|
       fifo = File.join(dir, "skipped.fifo")
@@ -540,6 +559,8 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "gh", "pr", "view", "42", "-Revil.example.com/octo/repo"
       assert_stubbed env, "gh", "pr", "view", "42", "-R=evil.example.com/octo/repo"
       assert_stubbed env, "gh", "pr", "view", "42", "-Rhttps://evil.example.com/octo/repo"
+      assert_stubbed env, "gh", "pr", "view", "42", "-cRevil.example.com/octo/repo"
+      assert_stubbed env, "gh", "pr", "view", "42", "-cR", "evil.example.com/octo/repo"
       # `gh api`/`auth` honor `--hostname` after the subcommand too, so the gate must
       # reject command-position host overrides, not just leading globals.
       assert_stubbed env, "gh", "api", "rate_limit", "--hostname", "evil.example.com"
@@ -581,6 +602,8 @@ class BabysitterDryRunEnvTest < Minitest::Test
       # stays out of the trailing case.)
       assert_passes env, "gh", "-Rowner/repo", "pr", "view", "42"
       assert_passes env, "gh", "pr", "view", "42", "-Rocto/repo"
+      assert_passes env, "gh", "pr", "view", "42", "-cRocto/repo"
+      assert_passes env, "gh", "pr", "view", "42", "-cR", "octo/repo"
       assert_passes env, "gh", "--repo=owner/repo", "pr", "view", "42"
       assert_passes env, "gh", "auth", "status"
       assert_passes env, "gh", "auth", "status", "-a"
@@ -641,6 +664,8 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "git", "--config-env=core.pager=HIVE_TEST_PAGER", "log", "--oneline"
       assert_stubbed env, "git", "--paginate", "log", "--oneline"
       assert_stubbed env, "git", "grep", "--open-files-in-pager=touch /tmp/hive-pager-pwn", "needle"
+      assert_stubbed env, "git", "grep", "-e", "--", "--open-files-in-pager=/tmp/hive-pager-sep-pwn"
+      assert_stubbed env, "git", "grep", "-e", "--", "--textconv"
       # On `git grep`, `-O` is the short form of `--open-files-in-pager`; both glued and
       # separate forms run an attacker-controlled pager command and must be rejected. (On
       # diff/log/show `-O` is the read-only `--output-ordering` — see the passthrough cases.)
@@ -664,6 +689,13 @@ class BabysitterDryRunEnvTest < Minitest::Test
       # Arbitrary file-write options defeat the no-mutation boundary on allowed reads.
       assert_stubbed env, "git", "diff", "--output=/tmp/hive-output-pwn"
       assert_stubbed env, "git", "log", "-p", "--output", "/tmp/hive-output-sep-pwn"
+      # A separate-word `--pretty` / `--format` on log/show/rev-list is stuck-only: git does NOT
+      # consume the next token as its format value (a bare `--pretty` uses the default format),
+      # so the argv scan must keep scanning the following token. Otherwise a trailing file-writing
+      # `--output` rides past the write guard and the stub execs real git, creating the file.
+      assert_stubbed env, "git", "log", "--pretty", "--output=/tmp/hive-pretty-output-pwn"
+      assert_stubbed env, "git", "show", "--pretty", "--output", "/tmp/hive-show-pretty-output-sep-pwn"
+      assert_stubbed env, "git", "rev-list", "--format", "--output=/tmp/hive-revlist-format-output-pwn", "HEAD"
       assert_stubbed env, "git", "diff", "-o", "/tmp/hive-output-short-pwn"
       assert_stubbed env, "git", "diff", "-o/tmp/hive-output-glued-pwn"
       assert_stubbed env, "git", "diff", "--ext-diff"
@@ -806,6 +838,8 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes skipped, "gh pr view 42 -Revil.example.com/octo/repo skipped"
       assert_includes skipped, "gh pr view 42 -R=evil.example.com/octo/repo skipped"
       assert_includes skipped, "gh pr view 42 -Rhttps://evil.example.com/octo/repo skipped"
+      assert_includes skipped, "gh pr view 42 -cRevil.example.com/octo/repo skipped"
+      assert_includes skipped, "gh pr view 42 -cR evil.example.com/octo/repo skipped"
       assert_includes skipped, "gh api -ip shadow-cat https://evil.example.com skipped"
       assert_includes skipped, "gh api -iX POST repos/owner/repo/dispatches skipped"
       assert_includes skipped, "gh api repos/owner/repo/issues/123/comments -if body=hi skipped"
@@ -837,6 +871,8 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes skipped, "git --config-env=core.pager=HIVE_TEST_PAGER log --oneline skipped"
       assert_includes skipped, "git --paginate log --oneline skipped"
       assert_includes skipped, "git grep --open-files-in-pager=touch /tmp/hive-pager-pwn needle skipped"
+      assert_includes skipped, "git grep -e -- --open-files-in-pager=/tmp/hive-pager-sep-pwn skipped"
+      assert_includes skipped, "git grep -e -- --textconv skipped"
       assert_includes skipped, "git remote show origin skipped"
 
       real_invocations = File.read(File.join(dir, "real.log"))
@@ -886,6 +922,8 @@ class BabysitterDryRunEnvTest < Minitest::Test
       env_keys = %w[
         GH_PAGER PAGER GH_BROWSER BROWSER GH_EDITOR GIT_EDITOR VISUAL EDITOR GH_FORCE_TTY
         GH_CONFIG_DIR XDG_CONFIG_HOME HOME
+        HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy
+        SSL_CERT_FILE SSL_CERT_DIR ssl_cert_file ssl_cert_dir
       ]
       real_gh = recording_env_binary(dir, "real-gh", env_keys)
       env = {
@@ -902,7 +940,19 @@ class BabysitterDryRunEnvTest < Minitest::Test
         "GH_FORCE_TTY" => "80",
         "GH_CONFIG_DIR" => File.join(dir, "evil-gh-config"),
         "XDG_CONFIG_HOME" => File.join(dir, "evil-xdg-config"),
-        "HOME" => File.join(dir, "evil-home")
+        "HOME" => File.join(dir, "evil-home"),
+        "HTTP_PROXY" => "http://127.0.0.1:8080",
+        "HTTPS_PROXY" => "http://127.0.0.1:8443",
+        "ALL_PROXY" => "socks5://127.0.0.1:1080",
+        "NO_PROXY" => "",
+        "http_proxy" => "http://127.0.0.1:8081",
+        "https_proxy" => "http://127.0.0.1:8444",
+        "all_proxy" => "socks5://127.0.0.1:1081",
+        "no_proxy" => "",
+        "SSL_CERT_FILE" => File.join(dir, "agent-ca.pem"),
+        "SSL_CERT_DIR" => File.join(dir, "agent-ca-dir"),
+        "ssl_cert_file" => File.join(dir, "agent-ca-lower.pem"),
+        "ssl_cert_dir" => File.join(dir, "agent-ca-dir-lower")
       }
 
       _out, err, status = Open3.capture3(env, stub_path("gh"), "repo", "view", "owner/repo")
@@ -1113,6 +1163,57 @@ class BabysitterDryRunEnvTest < Minitest::Test
 
       assert status.success?, err
       assert_equal "GIT_OPTIONAL_LOCKS=0\nGIT_PAGER=<unset>\nPAGER=<unset>\n", File.read(File.join(dir, "env.log"))
+    end
+  end
+
+  def test_git_stub_disables_lazy_fetch_before_read_only_passthrough
+    with_tmp_dir do |dir|
+      source = File.join(dir, "source")
+      clone = File.join(dir, "clone")
+      run!("git", "init", "-b", "master", "--quiet", source)
+      run!("git", "-C", source, "config", "user.email", "test@example.com")
+      run!("git", "-C", source, "config", "user.name", "Test")
+      run!("git", "-C", source, "config", "uploadpack.allowFilter", "true")
+      File.write(File.join(source, "payload.txt"), "payload\n")
+      run!("git", "-C", source, "add", "payload.txt")
+      run!("git", "-C", source, "commit", "-m", "initial", "--quiet")
+      blob = run!("git", "-C", source, "rev-parse", "HEAD:payload.txt").strip
+      run!(
+        "git",
+        "-c",
+        "protocol.file.allow=always",
+        "clone",
+        "--filter=blob:none",
+        "--no-checkout",
+        "--quiet",
+        "file://#{source}",
+        clone
+      )
+
+      _out, _err, before_status = Open3.capture3(
+        { "GIT_NO_LAZY_FETCH" => "1" },
+        "git",
+        "-C",
+        clone,
+        "cat-file",
+        "-e",
+        blob
+      )
+      skip "local git did not leave the partial-clone blob missing" if before_status.success?
+
+      out, err, status = Open3.capture3(real_git_env(dir), stub_path("git"), "-C", clone, "show", "HEAD:payload.txt")
+
+      refute status.success?, "allowlisted git show unexpectedly succeeded: stdout=#{out.inspect} stderr=#{err.inspect}"
+      _out, _err, after_status = Open3.capture3(
+        { "GIT_NO_LAZY_FETCH" => "1" },
+        "git",
+        "-C",
+        clone,
+        "cat-file",
+        "-e",
+        blob
+      )
+      refute after_status.success?, "allowlisted git show lazy-fetched the missing blob"
     end
   end
 

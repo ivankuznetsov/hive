@@ -29,6 +29,11 @@ module Hive
       end
     end
 
+    # Immutable value object (Ruby 3.4 Data.define) so `pr_metadata` stays the
+    # single validated constructor and the result is tamper-proof downstream.
+    # Keyword construction + field readers are unchanged for consumers.
+    PrMetadata = Data.define(:number, :url, :base_ref_name, :head_ref_oid, :is_cross_repository, :state)
+
     # Returned by scan_pr_for_secrets so a remote-fetch failure is
     # distinguishable from a clean scan. A blanket rescue that
     # returned `[]` on any error would reduce a security-critical
@@ -109,6 +114,32 @@ module Hive
     # silently flow into draft-finalization commands.
     def lookup_existing_pr(worktree_path, branch, cfg: nil)
       lookup_prs_for_branch(worktree_path, branch, cfg: cfg).find { |p| p["state"] == "OPEN" }
+    end
+
+    # `chdir` scopes `gh pr view` to a specific repo checkout. Ad-hoc review
+    # passes the resolved project root so `hive review --pr N --project NAME`
+    # run from another repo queries the right PR instead of cwd's repo.
+    def pr_metadata(number, cfg: nil, chdir: nil)
+      ensure_authenticated!(cfg)
+      fields = "number,url,baseRefName,headRefOid,isCrossRepository,state"
+      out, err, status = capture3("gh", "pr", "view", number.to_s, "--json", fields, cfg: cfg, chdir: chdir)
+      unless status.success?
+        raise Hive::GhError, "`gh pr view #{number}` failed: #{err.to_s.strip.empty? ? out : err.strip}"
+      end
+
+      doc = JSON.parse(out)
+      raise Hive::GhError, "`gh pr view #{number}` returned #{doc.class}; expected Hash" unless doc.is_a?(Hash)
+
+      PrMetadata.new(
+        number: doc["number"].to_i,
+        url: doc["url"].to_s,
+        base_ref_name: doc["baseRefName"].to_s,
+        head_ref_oid: doc["headRefOid"].to_s,
+        is_cross_repository: doc["isCrossRepository"] == true,
+        state: doc["state"].to_s
+      )
+    rescue JSON::ParserError => e
+      raise Hive::GhError, "`gh pr view #{number}` returned unparseable JSON: #{e.message}"
     end
 
     def pr_state(pr_url, cfg: nil)

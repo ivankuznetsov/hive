@@ -63,6 +63,17 @@ module Hive
       /billing[^\n]{0,80}(?:credit|quota|limit)/i
     ].freeze
 
+    LIVE_LIMIT_TAIL_LINES = 8
+    LIVE_MENU_TAIL_LINES = 4
+    LIVE_MENU_PROMPT_LINE = /\A(?:│\s*)?what do you want to do\?/i.freeze
+    LIVE_MENU_OPTION_LINE = /\A\s*(?:│\s*)?❯\s*\d+\./.freeze
+    LIVE_MENU_BOX_LINE = /\A[╭╰╮╯│][╭╰╮╯│─\s]*\z/.freeze
+    # Keep a local copy instead of depending on ClaudeLauncher: AgentLimit owns
+    # live-wall classification, and Claude Code prompt chrome is version-coupled.
+    LIVE_READY_PROMPT_LINE = /\A❯(?:\s|\z)|\s❯(?:\s*(?:[●✻✢✽✶]|·|\/).*)?\z/.freeze
+    LIVE_ACTIVITY_LINE = /[●✻✢✽✶]\s*(?:high|medium|low|thinking|working|esc|\/)/i.freeze
+    OWN_ERROR_MESSAGE_RE = /\Alimits reached( for [a-z0-9_-]+)?(:|\z)/.freeze
+
     module_function
 
     # Line-based with a benign filter, and biased toward false NEGATIVES:
@@ -76,11 +87,34 @@ module Hive
       return false if normalized.empty?
 
       normalized.each_line.any? do |line|
-        stripped = line.strip
-        next false if stripped.empty?
-        next false if BENIGN_PATTERNS.any? { |pattern| stripped.match?(pattern) }
+        limit_line?(line)
+      end
+    end
 
-        LIMIT_PATTERNS.any? { |pattern| stripped.match?(pattern) }
+    def live_limit_menu?(pane)
+      !!live_limit_line(pane)
+    end
+
+    def live_limit_line(pane)
+      indexed_lines = normalized_non_empty_lines(pane)
+      return nil if indexed_lines.empty?
+
+      bottom_lines = indexed_lines.last(LIVE_MENU_TAIL_LINES).map(&:first)
+      return nil unless bottom_lines.any? { |line| live_menu_signal_line?(line) }
+
+      indexed_lines.last(LIVE_LIMIT_TAIL_LINES).each do |line, index|
+        next unless limit_line?(line)
+        next if ready_or_activity_below?(indexed_lines, index)
+
+        return line
+      end
+
+      nil
+    end
+
+    def from_limit?(text)
+      normalize(text).each_line.any? do |line|
+        line.strip.match?(OWN_ERROR_MESSAGE_RE)
       end
     end
 
@@ -177,6 +211,36 @@ module Hive
           .scrub
           .gsub(/\e\[[0-9;?]*[ -\/]*[@-~]/, "")
           .gsub(/[[:cntrl:]&&[^\n\t]]/, "")
+    end
+
+    def normalized_non_empty_lines(text)
+      normalize(text).each_line.with_index.filter_map do |line, index|
+        stripped = line.strip
+        [ stripped, index ] unless stripped.empty?
+      end
+    end
+
+    def limit_line?(line)
+      stripped = line.to_s.strip
+      return false if stripped.empty?
+      return false if BENIGN_PATTERNS.any? { |pattern| stripped.match?(pattern) }
+
+      LIMIT_PATTERNS.any? { |pattern| stripped.match?(pattern) }
+    end
+
+    def live_menu_signal_line?(line)
+      stripped = line.to_s.strip
+      LIVE_MENU_PROMPT_LINE.match?(stripped) ||
+        LIVE_MENU_OPTION_LINE.match?(stripped) ||
+        LIVE_MENU_BOX_LINE.match?(stripped)
+    end
+
+    def ready_or_activity_below?(indexed_lines, source_index)
+      indexed_lines.any? do |line, index|
+        index > source_index &&
+          ((LIVE_READY_PROMPT_LINE.match?(line) && !LIVE_MENU_OPTION_LINE.match?(line)) ||
+           LIVE_ACTIVITY_LINE.match?(line))
+      end
     end
 
     def attr_value(attrs, key)

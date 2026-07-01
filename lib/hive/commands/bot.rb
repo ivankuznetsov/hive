@@ -15,6 +15,15 @@ module Hive
   module Commands
     class Bot
       VALID_SUBCOMMANDS = %w[start stop status reload tail install].freeze
+      JSON_USAGE_ERROR_SCHEMA = "hive-bot-status".freeze
+
+      def self.json_usage_error_payload(error:, error_kind:)
+        Hive::Schemas::ErrorEnvelope.build(
+          schema: JSON_USAGE_ERROR_SCHEMA,
+          error: error,
+          error_kind: error_kind
+        )
+      end
 
       def initialize(subcommand, detach: nil, foreground: false, dry_run: false, json: false,
                      force: false, hive_home: Hive::Paths.state_home)
@@ -27,10 +36,18 @@ module Hive
       end
 
       def call
+        if @subcommand.nil?
+          raise_usage_error(
+            "hive bot: missing SUBCOMMAND (expected: #{VALID_SUBCOMMANDS.join(', ')})",
+            error_kind: "missing_subcommand"
+          )
+        end
         unless VALID_SUBCOMMANDS.include?(@subcommand)
-          raise Hive::InvalidTaskPath,
-                "hive bot: unknown subcommand #{@subcommand.inspect} " \
-                "(expected: #{VALID_SUBCOMMANDS.join(', ')})"
+          raise_usage_error(
+            "hive bot: unknown subcommand #{@subcommand.inspect} " \
+            "(expected: #{VALID_SUBCOMMANDS.join(', ')})",
+            error_kind: "unknown_subcommand"
+          )
         end
 
         case @subcommand
@@ -56,6 +73,21 @@ module Hive
       end
 
       private
+
+      def raise_usage_error(message, error_kind:)
+        error = Hive::InvalidTaskPath.new(message)
+        emit_usage_error(error, error_kind: error_kind) if @json
+        raise error
+      end
+
+      def emit_usage_error(error, error_kind:)
+        puts_json(self.class.json_usage_error_payload(
+          error: error,
+          error_kind: error_kind
+        ))
+      rescue Errno::EPIPE, JSON::GeneratorError
+        nil
+      end
 
       def start_bot
         # Load ~/.config/hive/.env (if present) so operators don't have to

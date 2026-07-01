@@ -1,5 +1,6 @@
 require "fileutils"
 require "open3"
+require "hive/worktree"
 
 module Hive
   module Babysitter
@@ -16,12 +17,14 @@ module Hive
       end
 
       def materialize
-        FileUtils.mkdir_p(File.dirname(path))
         remove_existing!
-        local_ref = "refs/hive-babysitter/pr-#{@pr.fetch('number')}"
-        run_git!("fetch", "origin", "+pull/#{@pr.fetch('number')}/head:#{local_ref}")
-        run_git!("worktree", "add", "-B", branch, path, local_ref)
-        Result.new(path: path, branch: branch)
+        materialized = Hive::Worktree.materialize_pr(
+          repo_root: @project.fetch("path"),
+          pr_number: @pr.fetch("number"),
+          path: path,
+          branch: branch
+        )
+        Result.new(path: materialized.fetch(:path), branch: materialized.fetch(:branch))
       end
 
       def path
@@ -44,13 +47,6 @@ module Hive
         Open3.capture3("git", "-C", @project.fetch("path"), "worktree", "remove", "--force", path)
         Open3.capture3("git", "-C", @project.fetch("path"), "worktree", "prune")
         FileUtils.rm_rf(path)
-      end
-
-      def run_git!(*args)
-        out, err, status = Open3.capture3("git", "-C", @project.fetch("path"), *args)
-        return if status.success?
-
-        raise Hive::WorktreeError, "git #{args.join(' ')} failed: #{err.to_s.strip.empty? ? out : err}"
       end
     end
   end

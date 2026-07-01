@@ -43,6 +43,7 @@ Folder-as-agent workflow engine: a Ruby 3.4 / Thor CLI control plane where descr
 - [[commands/rebase-status]] — `wiki/commands/rebase-status.md`
 - [[commands/run]] — `wiki/commands/run.md`
 - [[commands/screenote]] — `wiki/commands/screenote.md`
+- [[commands/setup]] — `wiki/commands/setup.md`
 - [[commands/stage_action]] — `wiki/commands/stage_action.md`
 - [[commands/status]] — `wiki/commands/status.md`
 - [[commands/tui]] — `wiki/commands/tui.md`

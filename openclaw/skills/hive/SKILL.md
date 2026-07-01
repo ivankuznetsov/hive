@@ -41,7 +41,7 @@ That listing installs the `/hive` slash command. First run should normally be:
 
 ## Common Paths
 
-- `/hive setup` installs or verifies the Hive CLI, enables the per-user daemon service, and optionally initializes the current repository.
+- `/hive setup` installs or verifies the Hive CLI, then delegates local provisioning to `hive setup`.
 - `/hive status --json` shows the task board and next actions.
 - `/hive new . "build this feature"` creates a new Hive task in the current project.
 - `/hive plan <task-slug>`, `/hive develop <task-slug>`, and `/hive review <task-slug>` advance a task through the main coding workflow.
@@ -81,7 +81,7 @@ curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.2.0/install.s
 bash "$tmpdir/hive-install.sh"
 ```
 
-After install, run the strict `hive` / `hv` version check again. If neither command prints a bare `X.Y.Z` version, stop and report that setup failed or Apache Hive may be shadowing the command. If verification succeeds, run `"${hive_cmd}" daemon install` once. Then ask whether to initialize the current project; if yes, run `"${hive_cmd}" init . --json </dev/null`, followed by `"${hive_cmd}" doctor` non-fatally. Summarize the installed version, daemon setup result, project initialization result, and any missing runtime dependencies.
+After install, run the strict `hive` / `hv` version check again. If neither command prints a bare `X.Y.Z` version, stop and report that setup failed or Apache Hive may be shadowing the command. If verification succeeds, run `"${hive_cmd}" setup --json` from the current project. Summarize the installed version, setup phases, local web URL, and any diagnose-only fix commands such as `gh auth login`, `claude setup-token`, or `codex login`.
 
 ## Dispatch Rules
 
@@ -91,6 +91,203 @@ Prefer `--json` when the Hive command supports it and you need structured output
 
 For `hive wiki compile-log`, prefer `--check` when verifying an aggregate wiki changelog. Run the mutating compile command only after merge/rebase or when the user explicitly wants `wiki/log.md` refreshed; feature PRs should add `wiki/log.d/<timestamp>-<slug>.md` fragments instead of editing the compiled log directly.
 
+## Local Dogfood
+
+Use this checklist to dogfood a merged but unreleased Hive PR against the active local runtime. Prefer a clean worktree runtime so the installed gem, package, or standalone binary stays untouched. The goal is to preserve dirty worktree state while proving the merged change locally; do not bump or release during dogfood.
+
+1. Verify the PR is merged and green:
+
+```bash
+gh pr view <number> --json state,mergedAt,baseRefName,statusCheckRollup
+```
+
+Proceed only when `state` is `MERGED`, `mergedAt` is present, `baseRefName` is the expected main branch, and all required checks pass with none required-pending. Hard-stop when the PR is unmerged, red, or still has required checks pending.
+
+2. Identify the active runtime:
+
+```bash
+command -v hive
+readlink -f "$(command -v hive)"
+hive --version
+systemctl --user cat hive-daemon.service
+systemctl --user show hive-daemon.service
+```
+
+Compare the interactive binary with any daemon `HIVE_BIN` or unit override. Handle the install shape that is actually active: gem/rbenv/rvm/bundler, Homebrew Cellar, Arch package, standalone binary, or a user-local wrapper.
+
+3. Guard worktrees:
+
+```bash
+git status --short
+```
+
+Refuse to mutate any worktree with uncommitted changes. Require a separate clean checkout or clean `git worktree` for the merged PR.
+
+4. Apply the change:
+
+First record the prior override so rollback can restore it, not clobber it. Capture the daemon's current `HIVE_BIN` (and any drop-in `Environment=`) from step 2's `systemctl --user show hive-daemon.service` / interactive `command -v hive`; note whether an intentional override already existed and its exact value. Preferred worktree mode points the daemon override or `HIVE_BIN` at the clean merged checkout and leaves the installed binary untouched. See `## Daemon Diagnostics And Repair` for how to set `HIVE_BIN` or the unit `Environment=` via a systemd drop-in override. Patch-in-place is only a tiny single-file emergency fallback: back up the exact installed file first, then copy the changed file from the clean checkout. Do not run broad `git apply` or `cherry-pick` inside an installed package tree.
+
+5. Run checks:
+
+```bash
+ruby -c path/to/changed_file.rb
+bundle exec ruby -Itest test/path/to/focused_test.rb
+```
+
+Use the syntax check and the smallest focused or targeted test set that proves the merged change in the selected runtime.
+
+6. Restart the daemon:
+
+Restart with the command that matches how the override was applied. `hive daemon stop` / `hive daemon start --detach` forks a direct process that reads `HIVE_BIN` from the launching shell, so a drop-in-only `HIVE_BIN` is never picked up by this path — export the intended `HIVE_BIN` in the shell that runs `hive daemon start --detach`:
+
+```bash
+hive daemon stop
+HIVE_BIN=<clean-merged-checkout> hive daemon start --detach
+hive daemon status --json
+systemctl --user status hive-daemon.service --no-pager
+```
+
+For a systemd-managed unit whose override lives in a drop-in `override.conf`, reload and restart the unit instead so the new `Environment=` takes effect (a newly added or edited drop-in requires `daemon-reload` first), following the restart sequence in `## Daemon Diagnostics And Repair`:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user restart hive-daemon.service
+hive daemon status --json
+systemctl --user status hive-daemon.service --no-pager
+```
+
+Stopping or restarting the daemon is guarded by `## Safety Boundaries`; restate the effect and get explicit confirmation before running guarded restart commands. Step 7's `readlink -f` / version / runtime verify confirms the restart actually adopted the intended runtime.
+
+7. Verify behavior:
+
+```bash
+hive --version
+readlink -f "$(command -v hive)"
+hive daemon status --json
+systemctl --user status hive-daemon.service --no-pager
+```
+
+Run one targeted smoke workflow or status check that exercises the changed behavior. Accept only when the daemon is running the intended runtime, the smoke check shows the expected behavior, and status/log output has no new terminal-error marker.
+
+8. Rollback:
+
+The rollback depends on the mode used. For worktree mode, restore the prior daemon override or `HIVE_BIN` captured in step 4 — set it back to the operator's intentional pre-dogfood value, or clear it only when none existed — then restart back to the intended release runtime using the step 6 restart path that matches how the override was applied. For patch-in-place mode, restore the saved backup; if the backup is untrusted, use the package-appropriate repair path such as `gem pristine`, `brew reinstall`, or reinstalling the package or standalone binary. Re-run the version, path, daemon status, and `git status --short` checks to prove the release runtime and worktrees are restored.
+
+Guardrails: preserve dirty worktree state; do not bump or release. Dogfooding must not include `git commit`, version bumps, tag creation, gem release, package publish, destructive cleanup, or release automation.
+
+## Status Bundle
+
+Use this read-only bundle for a one-shot health overview; these commands need no confirmation, and this section does not weaken confirmation rules for destructive or foreground/streaming commands.
+
+Gather:
+
+```bash
+hive daemon status --json
+hive status --json
+systemctl --user status hive-daemon.service --no-pager
+```
+
+For each task with a `pr_url` from `hive status --json`, derive `<number>` from the URL and run `gh pr checks <number>`; without a PR, CI is not applicable.
+
+Summarize one bullet/block per task, not a table, with fields in this order: `stage`, `marker`, `action`, `PR URL`, `CI status`, `live PID`, `held/retry`, `suggested command`.
+Source `stage`, `PR URL`, `marker`, `action`, `held/retry`, and `suggested command` from `hive status --json`; use daemon status for live PID when present, and `gh pr checks` for CI status.
+
+Degrade gracefully: if `systemctl` is unavailable (for example macOS/launchd), report service status unavailable or use the obvious platform check.
+If `gh` is missing, unauthenticated, or the task has no PR, report CI as unknown/not applicable.
+If the daemon is stopped or has no live PID, report that plainly instead of failing the bundle.
+
+## Daemon Diagnostics And Repair
+
+Use this when interactive `hive` works but the rootless user-systemd `hive-daemon.service` misbehaves. Run the read-only diagnostics in order before any repair so the operator can see whether the service is using the wrong binary, a missing gem environment, or a Ruby `LoadError`.
+
+Read-only diagnostics — binary alignment:
+
+```bash
+command -v hive
+hive --version
+systemctl --user cat hive-daemon.service
+systemctl --user show hive-daemon.service -p Environment
+hive daemon status --json
+```
+
+Compare the interactive `command -v hive` path with the service `HIVE_BIN`. The expected default is the interactive binary unless the operator intentionally chose another path. A mismatch such as `/usr/bin/hive` versus `~/.local/bin/hive` usually means the daemon is not running the same Hive CLI the shell runs. When `/usr/bin/hive` appears, flag possible Apache Hive shadowing or an unintended system-package path.
+
+Read-only diagnostics — gem and environment validation:
+
+```bash
+ruby -e 'puts Gem.user_dir'
+gem env home
+gem env path
+printf '%s\n' "$PATH"
+systemctl --user show hive-daemon.service -p Environment
+```
+
+Compare the working shell's `PATH`, `GEM_HOME`, and `GEM_PATH` with the unit's `Environment=` lines. The daemon environment is broken when it lacks the user gem dir, lacks the directory containing the intended `hive` binary, points at a different `HIVE_BIN`, or works interactively while the daemon or status path raises a Ruby `LoadError`.
+
+Read-only diagnostics — Arch `ruby-erb` LoadError:
+
+```text
+cannot load such file -- erb (LoadError)
+```
+
+Prefer the system package fix on Arch:
+
+```bash
+sudo pacman -S ruby-erb
+```
+
+If a user-local fallback is required, install the gem and read the actual gem paths from the local Ruby rather than hardcoding a version fragment:
+
+```bash
+gem install --user-install erb
+ruby -e 'puts Gem.user_dir'
+gem env path
+```
+
+These commands print full gem directory paths that already contain the correct Ruby minor-version segment; copy those paths verbatim when adding `GEM_PATH` to the service environment rather than hand-assembling a version fragment.
+
+### Safe repair (mutating)
+
+Prefer a user systemd drop-in override instead of editing the generated unit in place. Inspect first, preserve existing `Environment=` values, and merge only the missing `PATH`, `GEM_HOME`, `GEM_PATH`, or `HIVE_BIN` entries.
+
+`systemctl --user edit hive-daemon.service` and `sudo pacman -S ruby-erb` are interactive/operator-run: the first opens `$SYSTEMD_EDITOR`/`$EDITOR` and the second prompts for a sudo password, so both block (or no-op with no TTY) when an agent runs them non-interactively. When acting non-interactively, write the drop-in override file directly instead of opening the editor, adding only the missing `Environment=` lines:
+
+```bash
+systemctl --user cat hive-daemon.service
+mkdir -p ~/.config/systemd/user/hive-daemon.service.d
+cat > ~/.config/systemd/user/hive-daemon.service.d/override.conf <<'EOF'
+[Service]
+Environment=GEM_PATH=<derived-value>
+# Add only the entries that were actually missing, e.g.:
+# Environment=PATH=<derived-value>
+# Environment=GEM_HOME=<derived-value>
+# Environment=HIVE_BIN=<derived-value>
+EOF
+```
+
+The interactive editor path stays available for an operator running this by hand:
+
+```bash
+systemctl --user edit hive-daemon.service
+```
+
+Reloading and restarting the service stops and restarts background automation, so — like `daemon stop` in `## Safety Boundaries` — restate the effect and get explicit user confirmation before running:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user restart hive-daemon.service
+```
+
+Verify the service is active, responding, and running with the intended binary and environment:
+
+```bash
+systemctl --user status hive-daemon.service --no-pager
+hive daemon status --json
+systemctl --user show hive-daemon.service -p Environment
+```
+
+If the repair changed `HIVE_BIN`, confirm it matches `command -v hive` or the operator's intentional chosen path.
+
 ## Safety Boundaries
 
 Before running destructive admin verbs (`drop`, `uninstall`, `update`, `forget`, `prune`, `migrate`, or `metrics`), restate the effect and get explicit user confirmation. These verbs can kill agents, remove worktrees, close draft PRs, drop registry entries, or rewrite installed software — they are not undoable.
@@ -98,3 +295,27 @@ Before running destructive admin verbs (`drop`, `uninstall`, `update`, `forget`,
 Before running nested destructive or bypass commands (`daemon stop`, `daemon disable --all`, `daemon install --force`, `bot stop`, `bot install --force`, `markers clear`, or `approve --force`), restate the effect and get explicit user confirmation. These can stop background automation, replace autostart services, clear recovery markers, or skip terminal-marker safety.
 
 Prefer `hive daemon start --detach` for daemon startup. Before running `hive daemon start` without `--detach`, `hive daemon tail`, `hive bot start --foreground`, or `hive bot tail`, restate that the command can hold the agent in a foreground or streaming process and get explicit user confirmation.
+
+## Marker Recovery
+
+Inspect before acting. Use `hive status --json` as the canonical non-mutating inspection command; read `stage`, `slug`, `folder`, `state_file`, `marker`, `attrs`, `claude_pid`, `claude_pid_alive`, `live_task_lock`, `held`, and suggested-action fields before deciding. Use `hive daemon status --json` to check whether the daemon and healer are running. Fall back to `kill -0 <pid>` or `ps -p <pid>` only to double-check PID liveness, and compare `attrs.retry_after` to now for a held `limits_reached` cooldown. `hive markers clear` is mutation, not inspection.
+
+Daemon trigger rule: if the daemon is running, wait and let the healer recover known auto-recoverable markers. If it is stopped or dead, use `hive daemon start --detach`. Do not recommend `daemon stop`, foreground daemon startup, or daemon log tailing for normal marker recovery; those commands remain governed by `## Safety Boundaries`.
+
+Per-marker decisions:
+
+1. `REVIEW_ERROR phase=fix reason=fix_failed message="claude stop hook did not signal completion"` -> environmental stop-hook completion failure -> let the healer auto-recover, bounded to 3 attempts; restart the daemon if it is not running; do not hand-clear. Ask first only if the healer budget is exhausted and a human wants to use manual marker clearing.
+2. Generic `fix_failed` with any other message -> manual fix failure -> investigate, typically write a code fix, then re-run the task. It is never auto-cleared; the distinction from the previous entry is the byte-for-byte `claude stop hook did not signal completion` message. Ask before any marker clear.
+3. `limits_reached` with a valid `retry_after` -> provider usage or credit cooldown -> wait until the cooldown elapses and let the healer requeue. Missing or malformed `retry_after` is manual. Ask before any manual clear.
+4. Stale `agent_working` -> the healer classifies by child-PID liveness, so the recovery path splits: a **dead** child PID (`claude_pid_alive == false`) is rewritten to terminal `ERROR reason=agent_died`, which is not in the auto-recovery allowlist -> treat as terminal/manual and ask before clearing (do not wait for a requeue that never comes); a **missing** child PID with a stale state-file mtime is rewritten to `ERROR reason=agent_orphaned`, which the healer does auto-recover -> let the healer requeue, restarting the daemon if it is not running. A live task lock or PID alive means work is still in progress; wait.
+5. Other healer-managed bounded signatures -> environmental or retryable operational failure -> let the healer retry within its budget. This includes `REVIEW_ERROR reason=review_agent_died`; reviewers `all_failed`; reviewer partial failures where every error is `tmux_session_terminated before writing expected output file`; and fix auto-commit retryable reasons `fix_auto_commit_scope_failed`, `fix_auto_commit_sign_policy_failed`, and `fix_auto_commit_signing_failed`. Ask first only after the bounded retry budget is exhausted.
+6. Terminal/manual `ERROR` -> any `ERROR` whose reason is not a known healer-managed signature is terminal/manual; ask before clearing. Known healer-managed `ERROR` reasons are `limits_reached` after `retry_after`, `tmux_session_terminated`, `agent_orphaned`, `ensure_clean_on_exit_failed`, `8-finalize reason=unpushed_commits`, and `reason=timeout` only on `5-open-pr` or `7-artifacts`. Explicit manual examples are `dirty_worktree` and post-budget/exhausted `ensure_clean_on_exit_failed`; both need human worktree inspection.
+
+For manual-clear remediation, follow the `## Safety Boundaries` confirmation rule for `markers clear`; restate the effect and get explicit user confirmation first. Canonical forms:
+
+```bash
+hive markers clear <slug> --name REVIEW_ERROR --project <project> --json
+hive markers clear <folder> --name ERROR --match-attr marker_id=<id>
+```
+
+Prefer `--match-attr marker_id=<id>` when the marker has a marker id; otherwise use observed attrs such as `--match-attr reason=<reason>,exit_code=<code>`. After a confirmed clear, rerun with `hive run <slug> --project <project>` or the stage-specific retry command printed by status or review.

@@ -51,8 +51,8 @@ one ClawHub listing per Hive verb.
 `bin/hive` loads `Hive::CLI` and exposes the public command set documented in
 [[cli]] and `wiki/commands/*`. The CLI includes workflow verbs (`new`,
 `brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`,
-`archive`), project workflow authoring via [[commands/workflow]], daemon/bot/babysitter
-lifecycle commands, diagnostics, markers, findings, metrics, update/uninstall,
+`archive`), project workflow authoring via [[commands/workflow]], [[commands/setup]],
+daemon/bot/babysitter lifecycle commands, diagnostics, markers, findings, metrics, update/uninstall,
 registry maintenance, Screenote connect/disconnect, the `hive bench submit`
 corpus-submission producer, the `hive digest` shipped-digest producer,
 the [[commands/pairing]] Telegram pairing approval surface, and
@@ -112,8 +112,8 @@ The checked-in skill version is `0.1.1`. Its frontmatter `description` is the
 public listing/search summary, while the opening markdown body documents the
 install and common workflow paths. `/hive setup`, `/hive install`, and
 `/hive bootstrap` enter the guided setup flow: verify or install the Hive CLI,
-run strict `hive`/`hv` version detection, install/enable the per-user daemon,
-and optionally run non-interactive `hive init` for the current repository.
+run strict `hive`/`hv` version detection, then delegate local provisioning to
+`hive setup --json`.
 
 For normal use, the slash-command text after `/hive` is treated as arguments
 for the detected Hive CLI binary. Examples in the skill include

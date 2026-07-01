@@ -198,11 +198,16 @@ If the daemon is stopped or has no live PID, report that plainly instead of fail
 
 ## Watch Selected Tasks
 
-Use this read-only recipe when an operator wants to wait on selected in-flight tasks and see only real state changes. It assumes `bash` 4+ (the no-args path uses `mapfile`; default macOS `/bin/bash` is 3.2, so run it under a Homebrew `bash`), `jq`, and the standard `awk`, `date`, and `mktemp` utilities. It polls `hive status --json`, ignores noisy `mtime`, `folder_mtime`, and `age_seconds` churn, and uses `HIVE_WATCH_INTERVAL` (default 15 seconds) plus `HIVE_WATCH_TIMEOUT` (default 1800 seconds / 30 minutes), both env-overridable. The loop touches no Hive state: Ctrl-C is safe, it never kills Hive agents or the task's `claude_pid`, never clears markers, and never advances stages. If a loop is left running, find it with `pgrep -af 'hive status --json'` or the shell job table (`jobs`) and stop that shell job.
+Use this read-only recipe when an operator wants to wait on selected in-flight tasks and see only real state changes. It assumes `bash` 4+ (the recipe uses `mapfile`; default macOS `/bin/bash` is 3.2, so run it under a Homebrew `bash`), `jq`, and the standard `awk`, `date`, and `mktemp` utilities. It polls `hive status --json`, ignores noisy `mtime`, `folder_mtime`, and `age_seconds` churn, and uses `HIVE_WATCH_INTERVAL` (default 15 seconds) plus `HIVE_WATCH_TIMEOUT` (default 1800 seconds / 30 minutes), both env-overridable. The loop touches no Hive state: Ctrl-C is safe, it never kills Hive agents or the task's `claude_pid`, never clears markers, and never advances stages. If a loop is left running, find it with `pgrep -af 'hive status --json'` or the shell job table (`jobs`) and stop that shell job.
 
 ```bash
 : "${HIVE_WATCH_INTERVAL:=15}"
 : "${HIVE_WATCH_TIMEOUT:=1800}"
+
+# Snapshot/field delimiter. Must NOT be IFS-whitespace: a tab lets `read`
+# collapse empty fields (e.g. an empty marker), corrupting the stage/action/
+# marker/pr_url split. Unit Separator (0x1f) never appears in Hive values.
+us=$'\x1f'
 
 tasks_jq='(.tasks // ([.projects[]?.tasks[]?]))'
 if [ "$#" -gt 0 ]; then
@@ -221,7 +226,8 @@ cleanup() {
   rm -f "$snap" "$snap.next"
 }
 trap cleanup EXIT
-trap 'cleanup; exit 130' INT TERM
+trap 'cleanup; exit 130' INT   # 128 + SIGINT
+trap 'cleanup; exit 143' TERM  # 128 + SIGTERM
 : >"$snap"
 started_at="$(date +%s)"
 first_poll=1
@@ -234,23 +240,23 @@ state_key() {
     .attrs.phase // "",
     (.attrs.pass // "" | tostring),
     (.claude_pid_alive // "" | tostring),
-    .held.retry_after // "",
+    (if .held == null then "" else "\(.held.reason // "held"):\(.held.retry_after // "")" end),
     .pr_url // ""
   ]' <<<"$1"
 }
 
 state_fields() {
-  jq -r '[.stage // "", .action // "", .marker // "", .pr_url // ""] | @tsv' <<<"$1"
+  jq -r --arg us "$us" '[.stage // "", .action // "", .marker // "", .pr_url // ""] | join($us)' <<<"$1"
 }
 
-# Hidden fields (phase, pass, pid_alive, retry_after) from a composite key,
-# one per line so mapfile preserves empty values by position.
+# Hidden fields (phase, pass, pid_alive, held=reason:retry_after) from a
+# composite key, one per line so mapfile preserves empty values by position.
 hidden_fields() {
   jq -r '.[3], .[4], .[5], .[6]' <<<"$1"
 }
 
 line_for() {
-  awk -F '\t' -v slug="$1" '$1 == slug { print; exit }' "$snap"
+  awk -F "$us" -v slug="$1" '$1 == slug { print; exit }' "$snap"
 }
 
 print_change() {
@@ -286,20 +292,20 @@ while :; do
       new_pr=""
     else
       key="$(state_key "$row")"
-      IFS=$'\t' read -r new_stage new_action new_marker new_pr < <(state_fields "$row")
+      IFS="$us" read -r new_stage new_action new_marker new_pr < <(state_fields "$row")
     fi
 
     old="$(line_for "$slug")"
-    IFS=$'\t' read -r _ old_key old_stage old_action old_marker old_pr <<<"$old"
+    IFS="$us" read -r _ old_key old_stage old_action old_marker old_pr <<<"$old"
 
     if [ "$first_poll" -eq 0 ] && [ "$key" != "$old_key" ]; then
-      # Surface hidden-field changes (phase, pass, pid_alive, held/retry_after)
+      # Surface hidden-field changes (phase, pass, pid_alive, held reason/retry_after)
       # that leave the stage/action/marker label identical.
       mapfile -t oh < <(hidden_fields "${old_key:-[]}")
       mapfile -t nh < <(hidden_fields "$key")
       extras=""
       [ "${oh[2]}" != "${nh[2]}" ] && extras+=" pid_alive=${nh[2]:-unknown}"
-      [ "${oh[3]}" != "${nh[3]}" ] && extras+=" held/retry_after=${nh[3]:-none}"
+      [ "${oh[3]}" != "${nh[3]}" ] && extras+=" held=${nh[3]:-none}"
       [ "${oh[0]}" != "${nh[0]}" ] && extras+=" phase=${nh[0]:-none}"
       [ "${oh[1]}" != "${nh[1]}" ] && extras+=" pass=${nh[1]:-none}"
       print_change "$slug" "$old_stage" "$old_action" "$old_marker" "$new_stage" "$new_action" "$new_marker" "$extras"
@@ -314,7 +320,7 @@ while :; do
       fi
     fi
 
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$slug" "$key" "$new_stage" "$new_action" "$new_marker" "$new_pr" >>"$snap.next"
+    printf '%s%s%s%s%s%s%s%s%s%s%s\n' "$slug" "$us" "$key" "$us" "$new_stage" "$us" "$new_action" "$us" "$new_marker" "$us" "$new_pr" >>"$snap.next"
 
     if [ "$new_stage" = "9-done" ] ||
        { [ "$new_stage" = "8-finalize" ] && [ "$new_marker" = "complete" ]; }; then
@@ -328,7 +334,7 @@ while :; do
   [ "${#slugs[@]}" -gt 0 ] && [ "$terminal_count" -eq "${#slugs[@]}" ] && exit 0
 
   if [ $((now - started_at)) -ge "$HIVE_WATCH_TIMEOUT" ]; then
-    while IFS=$'\t' read -r slug _ stage action marker pr; do
+    while IFS="$us" read -r slug _ stage action marker pr; do
       print_final "$slug" "$stage" "$action" "$marker" "$pr"
     done <"$snap"
     exit 0

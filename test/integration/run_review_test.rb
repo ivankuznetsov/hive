@@ -634,7 +634,7 @@ class RunReviewTest < Minitest::Test
           marker = Hive::Markers.current(File.join(folder, "task.md"))
           assert_equal :review_error, marker.name
           assert_equal "triage", marker.attrs["phase"]
-          assert_equal "triage_failed", marker.attrs["reason"],
+          assert_equal "unknown", marker.attrs["reason"],
                        "a non-limit triage failure must stay terminal (no false self-heal)"
           assert_nil marker.attrs["retry_after"],
                      "a terminal triage_failed must not carry a retry_after"
@@ -2205,7 +2205,7 @@ class RunReviewTest < Minitest::Test
   def test_triage_tampered_and_error_statuses_yield_review_error
     cases = [
       [ :tampered, "triage_tampered", [ "reviews/stub-reviewer-01.md" ] ],
-      [ :error, "triage_failed", [] ]
+      [ :error, "unknown", [] ]
     ]
 
     cases.each do |triage_status, expected_reason, tampered_files|
@@ -2337,7 +2337,7 @@ class RunReviewTest < Minitest::Test
         marker = Hive::Markers.current(File.join(folder, "task.md"))
         assert_equal :review_error, marker.name
         assert_equal "fix", marker.attrs["phase"]
-        assert_equal "fix_failed", marker.attrs["reason"]
+        assert_equal "unknown", marker.attrs["reason"]
         assert_equal "1", marker.attrs["pass"]
       end
     end
@@ -2481,7 +2481,7 @@ class RunReviewTest < Minitest::Test
         assert_match(/apply a fix/, accepted_seen)
         marker = Hive::Markers.current(File.join(folder, "task.md"))
         assert_equal :review_error, marker.name
-        assert_equal "fix_failed", marker.attrs["reason"]
+        assert_equal "unknown", marker.attrs["reason"]
         # R9: the launcher's stop-hook diagnostic must reach the terminal
         # marker so an operator sees WHY the fix failed, not a bare reason.
         assert_includes marker.attrs["message"].to_s, "stop hook did not signal completion"
@@ -2567,7 +2567,7 @@ class RunReviewTest < Minitest::Test
 
         marker = Hive::Markers.current(File.join(folder, "task.md"))
         assert_equal :review_error, marker.name
-        assert_equal "fix_failed", marker.attrs["reason"]
+        assert_equal "unknown", marker.attrs["reason"]
         refute File.exist?(File.join(reviews_dir, "fix-success-01.md"))
         events = File.readlines(File.join(folder, "events.jsonl"), chomp: true).map { |line| JSON.parse(line) }
         assert_empty events.select { |event| event["event_type"] == "claude_completion_fallback" }

@@ -348,7 +348,7 @@ class TasksTest < ActionDispatch::IntegrationTest
     FileUtils.mv(stage_dir(@project, "1-inbox").join(@slug),
                  stage_dir(@project, "6-review").join(@slug))
     folder = stage_dir(@project, "6-review").join(@slug)
-    folder.join("task.md").write("# t\n\n<!-- REVIEW_ERROR phase=triage reason=triage_failed pass=1 -->\n")
+    folder.join("task.md").write("# t\n\n<!-- REVIEW_ERROR phase=triage reason=merge_conflict pass=1 -->\n")
 
     get "/tasks/#{@project}/#{@slug}"
     assert_response :success

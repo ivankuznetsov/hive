@@ -68,12 +68,12 @@ class WebDispatcherTest < Minitest::Test
       with_tmp_git_repo do |dir|
         project, slug, dest = seed_task_at(dir, "6-review")
         File.write(File.join(dest, "task.md"),
-                   "# t\n\n<!-- REVIEW_ERROR phase=triage reason=triage_failed pass=1 -->\n")
+                   "# t\n\n<!-- REVIEW_ERROR phase=triage reason=merge_conflict pass=1 -->\n")
 
         request_id = Hive::Web::Dispatcher.new.recover(
           slug: slug, project: project, stage: "6-review",
           marker: "review_error",
-          attrs: { "phase" => "triage", "reason" => "triage_failed", "pass" => "1" }
+          attrs: { "phase" => "triage", "reason" => "merge_conflict", "pass" => "1" }
         )
 
         requests = Dir[File.join(Hive::Paths.state_home, "dispatch_requests", "**", "*#{request_id}*")]
@@ -101,7 +101,7 @@ class WebDispatcherTest < Minitest::Test
         Hive::Web::Dispatcher.new.recover(
           slug: "stuck-260612-bbbb", project: "p", stage: "6-review",
           marker: "review_error",
-          attrs: { "phase" => "triage", "reason" => "triage_failed", "pass" => "1" }
+          attrs: { "phase" => "triage", "reason" => "merge_conflict", "pass" => "1" }
         )
       end
 

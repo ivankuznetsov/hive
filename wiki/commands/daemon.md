@@ -77,7 +77,13 @@ step, so selected no-live-lock `error` rows may be cleared into markerless
 edit-resume rows first: `8-finalize` `reason=unpushed_commits`, plus
 `2-brainstorm` / `3-plan` / `4-execute` / `7-artifacts` / `8-finalize`
 `reason=tmux_session_terminated` or `reason=agent_orphaned`, and elapsed
-`limits_reached` markers whose `retry_after` cooldown has passed. `3-plan`
+`limits_reached` markers whose `retry_after` cooldown has passed. Immediately
+after that, `Hive::Daemon::RecoverableErrorHealer` may clear the fixed v1
+recoverable dependency-outage allowlist: Codex-auth `implementer_failed`
+markers with a 401 missing bearer/basic-auth diagnostic, and
+`claude_launch_failed` markers, but only after safety checks, changed health
+signal/backoff/budget gates, and dependency probes pass. Set
+`daemon.auto_retry.enabled: false` to disable that probe-gated path. `3-plan`
 terminal-error clears also enqueue a same-stage `hive plan ... --from 3-plan`
 request with `requestor=healer`, because a markerless empty `plan.md` would
 otherwise remain an error row. Independently, `Hive::Daemon::DisplayNameBackfiller`
@@ -150,6 +156,7 @@ All under `daemon:` in `~/Dev/hive/config.yml`:
 | `child_timeout_sec` | 0 | Per-child wall-clock cap (R-02). `0` disables the default cap, preserving the historical unbounded behavior and avoiding surprise kills of long autonomous review loops. Set a positive value to SIGTERM then SIGKILL children past their deadline. Min 0. |
 | `child_verb_timeouts` | `{digest: 3600}` | Per-verb overrides of `child_timeout_sec`, e.g. `{review: 10800, brainstorm: 1800}`. Each value an integer ≥ 0 (0 disables for that verb). The `digest` verb ships a non-zero default (3600s) because a wedged digest child holds the single global digest slot (`can_dispatch_digest?`) and would otherwise disable all future digests until restart; user overrides deep-merge, so setting other verbs keeps the digest default. Raise it alongside a raised `timeout_sec.digest` (default 1800), or set `{digest: 0}` to disable. |
 | `child_kill_grace_sec` | 30 | SIGTERM→SIGKILL escalation window for a timed-out child. Min 0 (0 = SIGKILL immediately after TERM). |
+| `auto_retry.enabled` | true | Global kill-switch for health-probe-gated daemon auto-retry of the fixed v1 recoverable terminal-error allowlist. Set `daemon.auto_retry.enabled: false` to leave those markers parked for manual `hive markers clear`. |
 | `log_file` | `~/Dev/hive/logs/daemon.log` | Structured-log destination. |
 | `log_max_bytes` | 10485760 | 10 MB rotation threshold. |
 | `log_max_files` | 5 | 5 × 10 MB = 50 MB log budget. |

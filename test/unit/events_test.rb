@@ -48,6 +48,19 @@ class EventsTest < Minitest::Test
     end
   end
 
+  def test_auto_retry_event_types_are_accepted
+    with_tmp_dir do |dir|
+      Hive::Events.emit(task_folder: dir, slug: "event-test-260522-aaaa", stage: "4-execute",
+                        event_type: :auto_retry, message: "auto-retry cleared marker")
+      Hive::Events.emit(task_folder: dir, slug: "event-test-260522-aaaa", stage: "4-execute",
+                        event_type: :auto_retry_skipped, message: "not retried: probe failed")
+
+      lines = File.readlines(File.join(dir, "events.jsonl"), chomp: true)
+      assert_equal %w[auto_retry auto_retry_skipped],
+                   lines.map { |line| JSON.parse(line).fetch("event_type") }
+    end
+  end
+
   def test_claude_completion_fallback_event_is_allowed
     with_tmp_dir do |dir|
       Hive::Events.emit(

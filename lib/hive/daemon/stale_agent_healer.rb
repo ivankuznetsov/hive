@@ -6,6 +6,7 @@ require "hive/lock"
 require "hive/markers"
 require "hive/workflows"
 require "hive/daemon/dispatch_request_queue"
+require "hive/daemon/healer_support"
 
 module Hive
   module Daemon
@@ -72,7 +73,7 @@ module Hive
     # stage's own re-dispatch runtime, not any delay enforced here.
     #
     # Unlike the review path (`review_error_signature`), the terminal
-    # ERROR recovery key (`error_auto_recovery_key`) deliberately omits a
+    # ERROR recovery key (`HealerSupport#error_recovery_key`) deliberately omits a
     # failure signature: repeated failures for the same task/stage/reason
     # share one retry budget by design, so a fresh marker id does not
     # silently earn a fresh budget. This asymmetry is intentional, not an
@@ -90,6 +91,8 @@ module Hive
     #     advance these)
     #   - placeholder marker still within grace (slow but normal dispatch)
     class StaleAgentHealer
+      include HealerSupport
+
       REVIEW_ERROR_AUTO_RECOVERY_LIMIT = 3
       ERROR_AUTO_RECOVERY_LIMIT = 3
       # `reason=timeout` recovers EXACTLY ONCE, and only on the two stages whose
@@ -189,7 +192,7 @@ module Hive
 
         marker_reason = marker_reason(row)
         heal_label = error_heal_label(row, marker_reason)
-        recovery_key = error_auto_recovery_key(row, reason: marker_reason)
+        recovery_key = error_recovery_key(row, marker_reason)
         recovery_limit = error_auto_recovery_limit_for(marker_reason)
         attempts = @error_auto_recoveries[recovery_key]
         if attempts >= recovery_limit
@@ -216,7 +219,7 @@ module Hive
         return unless Hive::Markers.clear_current(
           row.state_file,
           expected_name: :error,
-          match_attrs: auto_recoverable_error_match_attrs(row, reason: marker_reason)
+          match_attrs: marker_match_attrs(row, marker_reason)
         )
 
         observe_pre_clear_mtime(row)
@@ -235,7 +238,7 @@ module Hive
         # Every 3-plan heal needs the explicit requeue — limits_reached
         # cooldown heals leave the same markerless empty plan.md as agent
         # loss does (PR review P2 #7).
-        requeue_plan_rerun(row) if Hive::Workflows.coding_row?(row) && row.stage.to_s == "3-plan" # coding-scoped: coding plan pause needs bespoke rerun after marker clear
+        requeue_plan_rerun(row, trigger: "terminal_agent_loss") if Hive::Workflows.coding_row?(row) && row.stage.to_s == "3-plan" # coding-scoped: coding plan pause needs bespoke rerun after marker clear
       rescue StandardError => e
         @logger.event(:marker_heal_failed,
                       project: row.project,
@@ -251,39 +254,15 @@ module Hive
       # :error (TaskAction#incomplete_plan_artifact?) — an action Policy
       # skips, and with no marker reason left this healer can never match it
       # again. Re-entry must be explicit: enqueue the exact rerun an operator
-      # would type. The daemon executes it like any web/bot request, so the
-      # usual concurrency gates (caps, cooldown, quarantine) still apply —
-      # which also means a request blocked longer than the queue's expiry
-      # (~10 min) is silently dropped and the row stays red until the web
-      # Retry button / bot Autofix re-enter it; acceptable, since both
-      # remain available on the markerless red row.
-      def requeue_plan_rerun(row)
-        request_id = @request_queue.write_request!(
-          project: row.project,
-          slug: row.slug,
-          argv: [ "hive", "plan", row.slug, "--project", row.project, "--from", "3-plan" ], # coding-scoped: healer re-enters coding plan verb
-          requestor: "healer",
-          trigger: "terminal_agent_loss"
-        )
-        @logger.event(:heal_requeued,
-                      project: row.project,
-                      slug: row.slug,
-                      stage: row.stage,
-                      request_id: request_id)
-      rescue StandardError => e
-        # Own rescue, NOT the caller's marker_heal_failed: by this point the
-        # clear already SUCCEEDED, so "heal failed, next tick retries" would
-        # be a lie — the marker is gone, this healer can never re-match the
-        # row, and no retry will come. The distinct event says exactly that
-        # and carries the manual re-entry command (the web Retry button and
-        # bot Autofix also still work on the markerless red row).
-        @logger.event(:heal_requeue_failed,
-                      project: row.project,
-                      slug: row.slug,
-                      stage: row.stage,
-                      error: "#{e.class}: #{e.message}",
-                      remediation: "hive plan #{row.slug} --project #{row.project} --from 3-plan") # coding-scoped: healer re-enters coding plan verb
-      end
+      # would type (see HealerSupport#requeue_plan_rerun, which carries its
+      # own rescue so a failed request write logs `heal_requeue_failed`
+      # rather than the caller's `marker_heal_failed`). The daemon executes
+      # it like any web/bot request, so the usual concurrency gates (caps,
+      # cooldown, quarantine) still apply — which also means a request
+      # blocked longer than the queue's expiry (~10 min) is silently dropped
+      # and the row stays red until the web Retry button / bot Autofix
+      # re-enter it; acceptable, since both remain available on the
+      # markerless red row.
 
       def auto_recoverable_error?(row, now:)
         reason = marker_reason(row)
@@ -379,51 +358,10 @@ module Hive
           "after confirming no live agent still owns the task"
       end
 
-      def auto_recoverable_error_match_attrs(row, reason:)
-        attrs = marker_attrs_for(row)
-        marker_id = attrs["marker_id"].to_s
-        match_attrs = { "reason" => reason }
-        if marker_id.empty?
-          # Match legacy no-id markers only. `clear_current` evaluates this
-          # under the markers lock, so a stale row without marker_id cannot
-          # clear a newer marker that gained one between status and heal.
-          match_attrs["marker_id"] = nil
-        else
-          match_attrs["marker_id"] = marker_id
-        end
-        match_attrs
-      end
-
-      def observe_pre_clear_mtime(row)
-        # Production always satisfies this (ConcurrencyController defines
-        # the method). A future controller swap that dropped it would
-        # silently reintroduce the first-sight `record_baseline` stranding
-        # the seeded baseline exists to prevent — so emit a debug event
-        # instead of a silent no-op, giving the gap a log signal.
-        unless @controller.respond_to?(:observe_state_file_mtime)
-          @logger.event(:marker_heal_observer_missing,
-                        project: row.project,
-                        slug: row.slug,
-                        stage: row.stage,
-                        state_file: row.state_file)
-          return
-        end
-
-        @controller.observe_state_file_mtime(
-          project: row.project,
-          slug: row.slug,
-          mtime: row.state_file_mtime
-        )
-      end
-
-      def error_auto_recovery_key(row, reason:)
-        [
-          row.project.to_s,
-          row.slug.to_s,
-          row.stage.to_s,
-          reason.to_s
-        ]
-      end
+      # marker_match_attrs (legacy no-id match semantics),
+      # observe_pre_clear_mtime (baseline seeding + missing-observer event),
+      # and error_recovery_key are provided by HealerSupport (shared with
+      # RecoverableErrorHealer).
 
       def heal_review_error_if_auto_recoverable(row, now:)
         return if row.live_task_lock == true
@@ -511,12 +449,9 @@ module Hive
                       }.merge(attrs))
       end
 
-      # The marker's own `reason=` attribute, the single source the
-      # finalize and review auto-recovery paths both key recovery budgets
-      # and match-attrs off of.
-      def marker_reason(row)
-        marker_attrs_for(row)["reason"].to_s
-      end
+      # marker_reason (the marker's own `reason=` attribute, keyed by both
+      # the finalize and review auto-recovery paths) is provided by
+      # HealerSupport.
 
       # Map a review marker reason to the healer's `reason:` log label.
       # `review_agent_died` keeps its own label; every other
@@ -768,12 +703,7 @@ module Hive
         out
       end
 
-      def marker_attrs_for(row)
-        return {} unless row.respond_to?(:marker_attrs)
-        return row.marker_attrs if row.marker_attrs.is_a?(Hash)
-
-        {}
-      end
+      # marker_attrs_for is provided by HealerSupport.
 
       def pid_alive?(pid)
         Process.kill(0, pid)

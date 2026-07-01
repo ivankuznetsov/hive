@@ -13,7 +13,7 @@ class WebServiceInstallerTest < Minitest::Test
 
       installer = Hive::Commands::Web::ServiceInstaller.new(
         host_os: "linux-gnu", home: dir, binary_path: hive,
-        systemctl_available: true, runner: ->(_argv) {}
+        systemctl_available: true, runner: ->(_argv) { }
       )
 
       installer.install!(autostart: false)
@@ -38,5 +38,36 @@ class WebServiceInstallerTest < Minitest::Test
       assert_includes File.read(plist), "<string>/opt/hive/bin/hive</string>"
       assert_equal [ [ "launchctl", "load", plist ] ], commands
     end
+  end
+
+  # The service-identity hooks the base class reads when rendering units and
+  # composing messages. Pinning their exact strings keeps the web unit's
+  # filename/label/noun stable (a rename here silently repoints the plist
+  # Label and systemd unit name).
+  def test_service_identity_strings
+    installer = Hive::Commands::Web::ServiceInstaller.new(host_os: "linux")
+
+    assert_equal "hive-web", installer.service_name
+    assert_equal "web", installer.cli_label
+    assert_equal "web service", installer.send(:service_noun)
+    assert_equal "web unit", installer.send(:unit_noun)
+    assert_equal "local.hive-web", installer.launchd_label
+  end
+
+  def test_target_path_maps_per_platform
+    linux = Hive::Commands::Web::ServiceInstaller.new(host_os: "linux", home: "/h")
+    macos = Hive::Commands::Web::ServiceInstaller.new(host_os: "darwin23", home: "/h")
+
+    assert_equal "/h/.config/systemd/user/hive-web.service", linux.target_path
+    assert_equal "/h/Library/LaunchAgents/local.hive-web.plist", macos.target_path
+  end
+
+  def test_target_path_raises_on_unsupported_platform
+    installer = Hive::Commands::Web::ServiceInstaller.new(host_os: "freebsd14", home: "/h")
+
+    error = assert_raises(Hive::InvalidTaskPath) { installer.target_path }
+    assert_match(/autostart is not supported on this platform/, error.message)
+    assert_match(/unsupported_host/, error.message,
+                 "the message must name the platform so :other is not a silent illegal state")
   end
 end

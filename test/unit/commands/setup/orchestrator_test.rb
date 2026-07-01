@@ -1,0 +1,535 @@
+require "test_helper"
+require "open3"
+require "hive/commands/setup"
+require "hive/setup/diagnostics"
+require "hive/web/app_bundle"
+require "hive/config"
+require "hive/invoked_binary"
+require "hive/commands/init"
+require "hive/commands/daemon"
+require "hive/commands/daemon/service_installer"
+require "hive/commands/web/service_installer"
+
+# End-to-end coverage of the `hive setup` orchestrator (lib/hive/commands/setup.rb):
+# #call phase ordering, the --no-bootstrap / --no-init / --service branches, each
+# private phase helper's success + failure recording, and the JSON/human emit.
+#
+# Every collaborator is stubbed via with_replaced_singleton_method so no real
+# npm/launchctl/systemctl/git runs, but each test asserts a real behavior:
+# recorded phase order, phase ok flag, the message captured from a failure, the
+# JSON envelope shape, the exit code, and the human-readable lines.
+class SetupOrchestratorTest < Minitest::Test
+  include HiveTestHelper
+
+  # ── diagnostics fakes ────────────────────────────────────────────────
+
+  def diag(*rows, ok: nil)
+    Diag.new(rows, ok)
+  end
+
+  # Minimal Aggregate stand-in: #ok?, #results, #to_h — the three the
+  # orchestrator reads. `ok` overrides the derived value when a test wants
+  # to pin the diagnostics phase flag independently of the rows.
+  Diag = Struct.new(:results, :forced_ok) do
+    def ok?
+      forced_ok.nil? ? results.all? { |r| r.ok? || r.bootstrappable } : forced_ok
+    end
+
+    def to_h
+      { "ok" => ok?, "results" => results.map(&:to_h) }
+    end
+  end
+
+  def result(name:, status: "ok", detail: "d", fix_command: nil, bootstrappable: false)
+    Hive::Setup::Diagnostics::Result.new(
+      name: name, status: status, detail: detail,
+      fix_command: fix_command, bootstrappable: bootstrappable
+    )
+  end
+
+  def ok_row(name = "ruby")
+    result(name: name, status: "ok")
+  end
+
+  def qmd_missing_bootstrappable
+    result(name: "qmd", status: "missing", detail: "installable", bootstrappable: true)
+  end
+
+  # ── installer / init fakes ───────────────────────────────────────────
+
+  FakeOutcome = Struct.new(:success, :wire) do
+    def success?
+      success
+    end
+
+    def wire_outcome
+      wire
+    end
+  end
+
+  def fake_installer(success: true, wire: "written", target_path: "/tmp/unit.service", messages: [ "note" ])
+    installer = Object.new
+    installer.define_singleton_method(:install!) { |**_kw| FakeOutcome.new(success, wire) }
+    installer.define_singleton_method(:target_path) { target_path }
+    installer.define_singleton_method(:messages) { messages }
+    installer
+  end
+
+  # A no-op web bind config for web_url; the default from Config is loopback.
+  def stub_web_config(bind: "127.0.0.1", port: 4567)
+    with_replaced_singleton_method(Hive::Config, :load_global_web,
+      ->(*) { { "bind" => bind, "port" => port } }) do
+      yield
+    end
+  end
+
+  # Run the given block with EVERY provisioning collaborator stubbed to a
+  # benign success. Individual tests re-stub the one collaborator they
+  # exercise on top of this baseline.
+  def with_all_collaborators_ok(diagnostics:)
+    fake_diag = Object.new
+    fake_diag.define_singleton_method(:run) { diagnostics }
+    # Precompute the installers in local scope: the `new` stubs are defined as
+    # singleton methods on the installer classes, so `self` inside the lambda is
+    # the class, not this test — a bare `fake_installer` call would NameError.
+    daemon_installer = fake_installer
+    web_installer = fake_installer
+    with_replaced_singleton_method(Hive::Setup::Diagnostics, :new, ->(*) { fake_diag }) do
+      with_replaced_singleton_method(Hive::Web::AppBundle, :ensure!, ->(*) { "/bundle" }) do
+        with_replaced_singleton_method(Hive::Web::AppBundle, :app_dir, ->(*) { "/bundle" }) do
+          with_replaced_singleton_method(Hive::InvokedBinary, :path, ->(*) { "/usr/bin/hive" }) do
+            with_replaced_singleton_method(Hive::Commands::Daemon::ServiceInstaller, :new,
+              ->(**_kw) { daemon_installer }) do
+              with_replaced_singleton_method(Hive::Commands::Web::ServiceInstaller, :new,
+                ->(**_kw) { web_installer }) do
+                stub_web_config { yield }
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+
+  def with_fake_init(success: true)
+    fake = Object.new
+    if success
+      fake.define_singleton_method(:call) { true }
+    else
+      fake.define_singleton_method(:call) { raise Hive::AlreadyInitialized, "already" }
+    end
+    with_replaced_singleton_method(Hive::Commands::Init, :new, ->(*_a, **_kw) { fake }) do
+      yield
+    end
+  end
+
+  # ── #call happy path ─────────────────────────────────────────────────
+
+  def test_call_happy_path_records_all_phases_in_order_and_returns_zero
+    output = StringIO.new
+    diagnostics = diag(ok_row)
+    require "hive/commands/init"
+    require "hive/commands/daemon/service_installer"
+    require "hive/commands/web/service_installer"
+
+    exit_code = with_all_collaborators_ok(diagnostics: diagnostics) do
+      with_fake_init do
+        setup = Hive::Commands::Setup.new(json: true, output: output)
+        setup.call
+      end
+    end
+
+    assert_equal 0, exit_code, "clean diagnostics + all phases ok must exit 0"
+    payload = JSON.parse(output.string)
+    assert_equal "hive-setup", payload["schema"]
+    assert_equal true, payload["ok"]
+    names = payload["phases"].map { |p| p["name"] }
+    assert_equal %w[diagnostics web_bundle daemon_service enroll web], names,
+                 "phases must be recorded in provisioning order"
+    assert payload["phases"].all? { |p| p["ok"] }, "every phase ok on the happy path"
+  end
+
+  # ── --no-bootstrap (diagnose-only) ───────────────────────────────────
+
+  def test_no_bootstrap_provisions_nothing_and_only_records_diagnostics_and_web
+    output = StringIO.new
+    diagnostics = diag(ok_row)
+    fake_diag = Object.new
+    fake_diag.define_singleton_method(:run) { diagnostics }
+
+    # Trip-wire stubs: if --no-bootstrap wrongly provisions, these raise.
+    exit_code =
+      with_replaced_singleton_method(Hive::Setup::Diagnostics, :new, ->(*) { fake_diag }) do
+        with_replaced_singleton_method(Hive::Web::AppBundle, :ensure!,
+          ->(*) { flunk "web bundle must not be provisioned in --no-bootstrap" }) do
+          with_replaced_singleton_method(Hive::Commands::Daemon::ServiceInstaller, :new,
+            ->(**_kw) { flunk "daemon must not be installed in --no-bootstrap" }) do
+            stub_web_config do
+              Hive::Commands::Setup.new(json: true, no_bootstrap: true, output: output).call
+            end
+          end
+        end
+      end
+
+    payload = JSON.parse(output.string)
+    assert_equal %w[diagnostics web], payload["phases"].map { |p| p["name"] },
+                 "diagnose-only run records only diagnostics + web"
+    assert_equal 0, exit_code, "clean diagnostics with no provisioning still exits via successful?"
+  end
+
+  def test_no_bootstrap_exit_reflects_hard_diagnostic_failure
+    output = StringIO.new
+    hard = result(name: "git", status: "missing", fix_command: "brew install git", bootstrappable: false)
+    diagnostics = diag(ok_row, hard)
+    fake_diag = Object.new
+    fake_diag.define_singleton_method(:run) { diagnostics }
+
+    exit_code =
+      with_replaced_singleton_method(Hive::Setup::Diagnostics, :new, ->(*) { fake_diag }) do
+        stub_web_config do
+          Hive::Commands::Setup.new(json: true, no_bootstrap: true, output: output).call
+        end
+      end
+
+    assert_equal 1, exit_code, "a hard diagnostic failure must fail the exit-code contract"
+    assert_equal false, JSON.parse(output.string)["ok"]
+  end
+
+  # ── --no-init: enroll skipped ────────────────────────────────────────
+
+  def test_no_init_skips_enroll_phase
+    output = StringIO.new
+    diagnostics = diag(ok_row)
+    require "hive/commands/init"
+
+    with_all_collaborators_ok(diagnostics: diagnostics) do
+      with_replaced_singleton_method(Hive::Commands::Init, :new,
+        ->(*_a, **_kw) { flunk "enroll must be skipped with --no-init" }) do
+        Hive::Commands::Setup.new(json: true, no_init: true, output: output).call
+      end
+    end
+
+    names = JSON.parse(output.string)["phases"].map { |p| p["name"] }
+    refute_includes names, "enroll", "--no-init must not record an enroll phase"
+    assert_equal %w[diagnostics web_bundle daemon_service web], names
+  end
+
+  # ── --service: web service installed ─────────────────────────────────
+
+  def test_service_flag_installs_web_service_phase
+    output = StringIO.new
+    diagnostics = diag(ok_row)
+
+    with_all_collaborators_ok(diagnostics: diagnostics) do
+      with_fake_init do
+        Hive::Commands::Setup.new(json: true, service: true, output: output).call
+      end
+    end
+
+    names = JSON.parse(output.string)["phases"].map { |p| p["name"] }
+    assert_includes names, "web_service", "--service must record the web_service phase"
+    web_service = JSON.parse(output.string)["phases"].find { |p| p["name"] == "web_service" }
+    assert_equal true, web_service["ok"]
+    assert_equal "written", web_service["outcome"]
+    assert_equal "/tmp/unit.service", web_service["target_path"]
+  end
+
+  def test_web_service_failure_records_message_and_fails_exit
+    output = StringIO.new
+    diagnostics = diag(ok_row)
+
+    exit_code =
+      with_all_collaborators_ok(diagnostics: diagnostics) do
+        with_fake_init do
+          with_replaced_singleton_method(Hive::Commands::Web::ServiceInstaller, :new,
+            ->(**_kw) { raise Errno::EACCES, "/Library/LaunchAgents" }) do
+            Hive::Commands::Setup.new(json: true, service: true, output: output).call
+          end
+        end
+      end
+
+    assert_equal 1, exit_code
+    phase = JSON.parse(output.string)["phases"].find { |p| p["name"] == "web_service" }
+    assert_equal false, phase["ok"]
+    assert_match(/Errno::EACCES/, phase["message"], "the raised class+message must be recorded")
+  end
+
+  # ── bootstrap_qmd_if_missing ─────────────────────────────────────────
+
+  def test_qmd_bootstrap_success_records_ok_phase_with_prefix
+    output = StringIO.new
+    setup = Hive::Commands::Setup.new(json: true, output: output)
+    diagnostics = diag(qmd_missing_bootstrappable)
+    ok_status = Object.new
+    ok_status.define_singleton_method(:success?) { true }
+
+    captured = nil
+    with_replaced_singleton_method(Open3, :capture3, lambda { |*argv|
+      captured = argv
+      [ "", "", ok_status ]
+    }) do
+      setup.send(:bootstrap_qmd_if_missing, diagnostics)
+    end
+
+    assert_equal %w[npm install --global --prefix], captured[0..3],
+                 "must invoke the global npm install for the qmd package"
+    assert_equal "@tobilu/qmd", captured.last
+    phase = setup.instance_variable_get(:@phases).last
+    assert_equal "qmd", phase["name"]
+    assert_equal true, phase["ok"]
+    assert phase["prefix"].end_with?("qmd"), "the install prefix must be recorded"
+    refute phase.key?("message"), "a successful install records no error message"
+  end
+
+  def test_qmd_bootstrap_failure_records_stderr_message_and_ok_false
+    output = StringIO.new
+    setup = Hive::Commands::Setup.new(json: true, output: output)
+    diagnostics = diag(qmd_missing_bootstrappable)
+    fail_status = Object.new
+    fail_status.define_singleton_method(:success?) { false }
+
+    with_replaced_singleton_method(Open3, :capture3, ->(*_argv) { [ "", "  EACCES: permission denied  ", fail_status ] }) do
+      setup.send(:bootstrap_qmd_if_missing, diagnostics)
+    end
+
+    phase = setup.instance_variable_get(:@phases).last
+    assert_equal false, phase["ok"]
+    assert_equal "EACCES: permission denied", phase["message"], "stripped npm stderr must be the phase message"
+  end
+
+  def test_qmd_bootstrap_skipped_when_not_bootstrappable
+    setup = Hive::Commands::Setup.new(output: StringIO.new)
+    # qmd present (ok) → not bootstrappable → early return, no phase, no npm.
+    diagnostics = diag(result(name: "qmd", status: "ok"))
+
+    with_replaced_singleton_method(Open3, :capture3, ->(*_a) { flunk "npm must not run when qmd is not bootstrappable" }) do
+      setup.send(:bootstrap_qmd_if_missing, diagnostics)
+    end
+
+    assert_empty setup.instance_variable_get(:@phases), "no qmd phase when qmd is already present"
+  end
+
+  def test_qmd_bootstrap_skipped_when_row_absent
+    setup = Hive::Commands::Setup.new(output: StringIO.new)
+    diagnostics = diag(ok_row("ruby")) # no qmd row at all
+
+    with_replaced_singleton_method(Open3, :capture3, ->(*_a) { flunk "npm must not run without a qmd row" }) do
+      setup.send(:bootstrap_qmd_if_missing, diagnostics)
+    end
+
+    assert_empty setup.instance_variable_get(:@phases)
+  end
+
+  # ── bootstrap_web_bundle ─────────────────────────────────────────────
+
+  def test_web_bundle_success_records_path
+    setup = Hive::Commands::Setup.new(output: StringIO.new)
+    with_replaced_singleton_method(Hive::Web::AppBundle, :ensure!, ->(*) { "/managed/web" }) do
+      with_replaced_singleton_method(Hive::Web::AppBundle, :app_dir, ->(*) { "/managed/web" }) do
+        setup.send(:bootstrap_web_bundle)
+      end
+    end
+
+    phase = setup.instance_variable_get(:@phases).last
+    assert_equal "web_bundle", phase["name"]
+    assert_equal true, phase["ok"]
+    assert_equal "/managed/web", phase["path"]
+  end
+
+  def test_web_bundle_failure_records_class_and_message
+    setup = Hive::Commands::Setup.new(output: StringIO.new)
+    with_replaced_singleton_method(Hive::Web::AppBundle, :ensure!, ->(*) { raise SocketError, "offline" }) do
+      setup.send(:bootstrap_web_bundle)
+    end
+
+    phase = setup.instance_variable_get(:@phases).last
+    assert_equal false, phase["ok"]
+    assert_equal "SocketError: offline", phase["message"],
+                 "a download/network failure must be recorded, not raised"
+  end
+
+  # ── install_daemon ───────────────────────────────────────────────────
+
+  def test_install_daemon_success_records_outcome_target_and_messages
+    setup = Hive::Commands::Setup.new(output: StringIO.new)
+    require "hive/commands/daemon/service_installer"
+    installer = fake_installer(success: true, wire: "upgraded",
+                               target_path: "/etc/hive-daemon.service", messages: [ "restarted" ])
+
+    with_replaced_singleton_method(Hive::InvokedBinary, :path, ->(*) { "/usr/bin/hive" }) do
+      with_replaced_singleton_method(Hive::Commands::Daemon::ServiceInstaller, :new, ->(**_kw) { installer }) do
+        setup.send(:install_daemon)
+      end
+    end
+
+    phase = setup.instance_variable_get(:@phases).last
+    assert_equal "daemon_service", phase["name"]
+    assert_equal true, phase["ok"]
+    assert_equal "upgraded", phase["outcome"]
+    assert_equal "/etc/hive-daemon.service", phase["target_path"]
+    assert_equal [ "restarted" ], phase["messages"]
+  end
+
+  def test_install_daemon_raise_records_message_and_ok_false
+    setup = Hive::Commands::Setup.new(output: StringIO.new)
+    require "hive/commands/daemon/service_installer"
+
+    with_replaced_singleton_method(Hive::InvokedBinary, :path, ->(*) { "/usr/bin/hive" }) do
+      with_replaced_singleton_method(Hive::Commands::Daemon::ServiceInstaller, :new,
+        ->(**_kw) { raise Errno::EACCES, "/etc/systemd" }) do
+        setup.send(:install_daemon)
+      end
+    end
+
+    phase = setup.instance_variable_get(:@phases).last
+    assert_equal false, phase["ok"]
+    assert_match(/Errno::EACCES/, phase["message"])
+  end
+
+  # ── enroll_project ───────────────────────────────────────────────────
+
+  def test_enroll_success_via_init
+    setup = Hive::Commands::Setup.new(output: StringIO.new)
+    require "hive/commands/init"
+
+    with_fake_init(success: true) do
+      setup.send(:enroll_project)
+    end
+
+    phase = setup.instance_variable_get(:@phases).last
+    assert_equal "enroll", phase["name"]
+    assert_equal true, phase["ok"]
+    assert_equal Dir.pwd, phase["path"]
+  end
+
+  def test_enroll_already_initialized_falls_back_to_daemon_enable
+    setup = Hive::Commands::Setup.new(output: StringIO.new)
+    require "hive/commands/init"
+    require "hive/commands/daemon"
+
+    enable_calls = []
+    fake_daemon = Object.new
+    fake_daemon.define_singleton_method(:call) { enable_calls << :called }
+
+    with_fake_init(success: false) do
+      with_replaced_singleton_method(Hive::Commands::Daemon, :new, lambda { |verb, name|
+        enable_calls << [ verb, name ]
+        fake_daemon
+      }) do
+        # current_project_name resolves against the registry; stub to a name.
+        setup.define_singleton_method(:current_project_name) { "myproj" }
+        setup.send(:enroll_project)
+      end
+    end
+
+    assert_equal [ "enable", "myproj" ], enable_calls.first,
+                 "an already-enrolled project must fall through to `daemon enable <name>`"
+    assert_includes enable_calls, :called
+    phase = setup.instance_variable_get(:@phases).last
+    assert_equal true, phase["ok"]
+  end
+
+  def test_enroll_other_error_records_ok_false
+    setup = Hive::Commands::Setup.new(output: StringIO.new)
+    require "hive/commands/init"
+    fake = Object.new
+    fake.define_singleton_method(:call) { raise Hive::Error, "corrupt registry" }
+
+    with_replaced_singleton_method(Hive::Commands::Init, :new, ->(*_a, **_kw) { fake }) do
+      setup.send(:enroll_project)
+    end
+
+    phase = setup.instance_variable_get(:@phases).last
+    assert_equal false, phase["ok"]
+    assert_match(/corrupt registry/, phase["message"])
+  end
+
+  # ── current_project_name ─────────────────────────────────────────────
+
+  def test_current_project_name_returns_registered_name_on_realpath_match
+    setup = Hive::Commands::Setup.new(output: StringIO.new)
+    current = File.realpath(Dir.pwd)
+    with_replaced_singleton_method(Hive::Config, :registered_projects,
+      ->(*) { [ { "name" => "registered-name", "path" => current } ] }) do
+      assert_equal "registered-name", setup.send(:current_project_name)
+    end
+  end
+
+  def test_current_project_name_falls_back_to_basename_when_unregistered
+    setup = Hive::Commands::Setup.new(output: StringIO.new)
+    with_replaced_singleton_method(Hive::Config, :registered_projects, ->(*) { [] }) do
+      assert_equal File.basename(Dir.pwd), setup.send(:current_project_name)
+    end
+  end
+
+  def test_current_project_name_warns_and_uses_basename_on_config_error
+    setup = Hive::Commands::Setup.new(output: StringIO.new)
+    result_name = nil
+    _out, err = capture_io do
+      with_replaced_singleton_method(Hive::Config, :registered_projects,
+        ->(*) { raise Hive::ConfigError, "bad registry" }) do
+        result_name = setup.send(:current_project_name)
+      end
+    end
+
+    assert_equal File.basename(Dir.pwd), result_name
+    assert_match(/could not resolve registered project name/, err)
+    assert_match(/Hive::ConfigError/, err)
+  end
+
+  # ── web_url ──────────────────────────────────────────────────────────
+
+  def test_web_url_builds_from_global_web_config
+    setup = Hive::Commands::Setup.new(output: StringIO.new)
+    with_replaced_singleton_method(Hive::Config, :load_global_web,
+      ->(*) { { "bind" => "127.0.0.1", "port" => 8080 } }) do
+      assert_equal "http://127.0.0.1:8080", setup.send(:web_url)
+    end
+  end
+
+  # ── emit (human path) ────────────────────────────────────────────────
+
+  def test_emit_human_lists_phase_lines_fix_hints_and_web_url
+    output = StringIO.new
+    setup = Hive::Commands::Setup.new(json: false, output: output)
+    setup.send(:add_phase, "diagnostics", true)
+    setup.send(:add_phase, "web_bundle", false, "message" => "boom")
+    # A hard-failing, non-bootstrappable row with a fix_command → prints a fix line.
+    # A bootstrappable row and an ok row must NOT print fix lines.
+    diagnostics = diag(
+      ok_row("ruby"),
+      result(name: "git", status: "missing", fix_command: "brew install git", bootstrappable: false),
+      qmd_missing_bootstrappable
+    )
+
+    with_replaced_singleton_method(Hive::Config, :load_global_web,
+      ->(*) { { "bind" => "127.0.0.1", "port" => 4567 } }) do
+      setup.send(:emit, diagnostics)
+    end
+
+    text = output.string
+    assert_includes text, "hive setup: diagnostics ok"
+    assert_includes text, "hive setup: web_bundle needs attention"
+    assert_includes text, "fix git: brew install git", "a hard-failing row with a fix_command must print a fix hint"
+    refute_includes text, "fix qmd", "a bootstrappable row must not print a fix hint"
+    refute_includes text, "fix ruby", "an ok row must not print a fix hint"
+    assert_includes text, "hive setup: web available with `hive web` at http://127.0.0.1:4567"
+  end
+
+  def test_emit_json_matches_successful_predicate
+    output = StringIO.new
+    setup = Hive::Commands::Setup.new(json: true, output: output)
+    setup.send(:add_phase, "diagnostics", true)
+    setup.send(:add_phase, "web_bundle", false) # a failed phase forces ok:false
+
+    with_replaced_singleton_method(Hive::Config, :load_global_web,
+      ->(*) { { "bind" => "127.0.0.1", "port" => 4567 } }) do
+      setup.send(:emit, diag(ok_row))
+    end
+
+    payload = JSON.parse(output.string)
+    assert_equal "hive-setup", payload["schema"]
+    assert_equal false, payload["ok"], "a failed phase must make the JSON envelope ok:false"
+    assert_equal 2, payload["phases"].size
+  end
+end

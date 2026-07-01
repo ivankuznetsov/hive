@@ -63,4 +63,20 @@ class WebConfigTest < Minitest::Test
   def test_blank_web_session_secret_file_is_rejected
     assert_web_config_error({ "session_secret_file" => "  " }, /web\.session_secret_file/)
   end
+
+  def test_non_boolean_web_local_loopback_is_rejected
+    # local_loopback is the opt-out for the loopback no-auth bypass; a non-bool
+    # (e.g. the string "yes") must be rejected so a typo can't silently leave
+    # the bypass enabled or disabled ambiguously.
+    assert_web_config_error({ "local_loopback" => "yes" }, /web\.local_loopback.*must be true or false/)
+  end
+
+  def test_boolean_web_local_loopback_is_accepted
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), { "web" => { "local_loopback" => false } }.to_yaml)
+
+      assert_equal false, Hive::Config.load_global_web["local_loopback"],
+                   "an explicit boolean local_loopback must load without error"
+    end
+  end
 end

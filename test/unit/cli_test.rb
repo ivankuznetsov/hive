@@ -27,6 +27,7 @@ require "hive/commands/markers"
 require "hive/commands/daemon"
 require "hive/commands/bot"
 require "hive/commands/metrics"
+require "hive/commands/setup"
 
 class HiveCliTest < Minitest::Test
   include HiveTestHelper
@@ -138,6 +139,35 @@ class HiveCliTest < Minitest::Test
         assert_equal [ Dir.pwd ], loaded
         assert_equal({ config: { "ok" => true }, project_root: Dir.pwd, json: true }, calls.first.fetch(:kwargs))
       end
+    end
+  end
+
+  def test_setup_wires_options_and_exits_with_command_status
+    with_command_new_stub(Hive::Commands::Setup, return_value: 3) do |calls|
+      _out, _err, status = with_captured_exit do
+        Hive::CLI.start([ "setup", "--json", "--yes", "--service", "--no-bootstrap", "--no-init" ])
+      end
+
+      assert_equal 3, status, "the CLI must exit with the Setup command's return value"
+      assert_equal(
+        { json: true, yes: true, service: true, no_bootstrap: true, no_init: true },
+        calls.first.fetch(:kwargs),
+        "every setup flag must be forwarded to Hive::Commands::Setup.new"
+      )
+      assert_includes calls, :call, "the setup command must actually be invoked"
+    end
+  end
+
+  def test_setup_defaults_when_no_flags_given
+    with_command_new_stub(Hive::Commands::Setup, return_value: 0) do |calls|
+      _out, _err, status = with_captured_exit { Hive::CLI.start([ "setup" ]) }
+
+      assert_equal 0, status
+      assert_equal(
+        { json: false, yes: false, service: false, no_bootstrap: false, no_init: false },
+        calls.first.fetch(:kwargs),
+        "with no flags the CLI must pass the documented defaults"
+      )
     end
   end
 

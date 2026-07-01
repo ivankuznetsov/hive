@@ -120,7 +120,84 @@ class WebAppBundleTest < Minitest::Test
     end
   end
 
+  def test_ensure_raises_when_bundle_url_is_empty
+    with_hive_home do
+      refute Hive::Web::AppBundle.present?, "precondition: no managed app installed yet"
+      error = assert_raises(Hive::Error) do
+        Hive::Web::AppBundle.ensure!(bundle_url: "", output: nil, runner: ->(_argv, _env) { true })
+      end
+      assert_match(/managed web app is missing/, error.message)
+      assert_match(/HIVE_WEB_BUNDLE_URL/, error.message)
+    end
+  end
+
+  def test_ensure_raises_when_bundle_lacks_config_application_rb
+    with_hive_home do
+      # A source dir with content but no config/application.rb (and no nested
+      # wrapper that contains one) must be rejected rather than installed.
+      src = Dir.mktmpdir("hive-web-bad")
+      FileUtils.mkdir_p(File.join(src, "lib"))
+      File.write(File.join(src, "lib", "thing.rb"), "# not the app\n")
+
+      error = assert_raises(Hive::Error) do
+        Hive::Web::AppBundle.ensure!(bundle_url: src, output: nil, runner: ->(_argv, _env) { true })
+      end
+      assert_match(/does not contain config\/application\.rb/, error.message)
+      refute Hive::Web::AppBundle.present?, "a rejected bundle must not leave a managed app behind"
+    end
+  end
+
+  def test_default_bundle_url_prefers_env_override_then_falls_back_to_release_url
+    with_env("HIVE_WEB_BUNDLE_URL" => "https://example.test/custom-bundle.tar.gz") do
+      assert_equal "https://example.test/custom-bundle.tar.gz", Hive::Web::AppBundle.default_bundle_url
+    end
+    with_env("HIVE_WEB_BUNDLE_URL" => nil) do
+      assert_equal Hive::Web::AppBundle.github_release_url, Hive::Web::AppBundle.default_bundle_url
+    end
+  end
+
+  def test_fetch_and_extract_downloads_gunzips_and_unpacks_via_uri_open
+    with_hive_home do
+      # Build a gzipped tar in memory containing a DIRECTORY entry (exercises
+      # the entry.directory? branch) plus config/application.rb + a Gemfile.
+      gz_bytes = build_gzipped_tar do |w|
+        w.mkdir("config", 0o755)
+        w.add_file("config/application.rb", 0o644) { |f| f.write("# fetched app\n") }
+        w.add_file("Gemfile", 0o644) { |f| f.write("source 'https://rubygems.org'\n") }
+      end
+
+      ran = false
+      opened_url = nil
+      with_replaced_singleton_method(URI, :open, lambda { |url, **_opts|
+        opened_url = url
+        StringIO.new(gz_bytes)
+      }) do
+        Hive::Web::AppBundle.ensure!(bundle_url: "https://example.test/bundle.tar.gz",
+                                     output: nil, runner: ->(_argv, _env) { ran = true })
+      end
+
+      assert_equal "https://example.test/bundle.tar.gz", opened_url,
+                   "fetch must route the bundle url through the timeout-bounded URI.open"
+      assert ran, "bundle install runner should have run after a successful fetch"
+      assert Hive::Web::AppBundle.present?, "the gunzipped tar must unpack to a present app"
+      assert_equal "# fetched app\n",
+                   File.read(File.join(Hive::Web::AppBundle.app_dir, "config", "application.rb"))
+      assert File.directory?(File.join(Hive::Web::AppBundle.app_dir, "config")),
+             "the directory tar entry must have been created via mkdir_p"
+    end
+  end
+
   private
+
+  def build_gzipped_tar(&block)
+    tar = build_tar(&block)
+    io = StringIO.new
+    gz = Zlib::GzipWriter.new(io)
+    gz.write(tar)
+    gz.close
+    io.string
+  end
+
 
   # Build a "source checkout" whose contents are wrapped in a single
   # top-level versioned directory — the shape `tar -czf` produces for a

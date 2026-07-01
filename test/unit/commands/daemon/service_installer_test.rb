@@ -133,7 +133,7 @@ class DaemonServiceInstallerTest < Minitest::Test
     with_tmp_dir do |dir|
       installer = Hive::Commands::Daemon::ServiceInstaller.new(
         host_os: "darwin23", home: dir, binary_path: "/opt/hive/bin/hive",
-        runner: ->(_argv) {}
+        runner: ->(_argv) { }
       )
       installer.install!(autostart: false)
 
@@ -145,7 +145,7 @@ class DaemonServiceInstallerTest < Minitest::Test
     with_tmp_dir do |dir|
       installer = Hive::Commands::Daemon::ServiceInstaller.new(
         host_os: "linux-gnu", home: dir, binary_path: "/usr/local/bin/hive",
-        systemctl_available: true, runner: ->(_argv) {}
+        systemctl_available: true, runner: ->(_argv) { }
       )
       installer.install!(autostart: false)
 
@@ -576,6 +576,67 @@ class DaemonServiceInstallerTest < Minitest::Test
     end
 
     refute installer.send(:systemctl_available?)
+  end
+
+  def test_installed_systemd_exec_binary_returns_nil_on_unparseable_exec_line
+    # A malformed ExecStart with an unterminated quote makes Shellwords.split
+    # raise ArgumentError; the probe must degrade to nil (→ "unparseable"
+    # binary_drift), never propagate the parse error out of a status probe.
+    with_tmp_dir do |dir|
+      unit = File.join(dir, ".config/systemd/user/hive-daemon.service")
+      FileUtils.mkdir_p(File.dirname(unit))
+      File.write(unit, %(ExecStart=/opt/hive 'unterminated daemon start\n))
+      installer = Hive::Commands::Daemon::ServiceInstaller.new(
+        host_os: "linux", home: dir, binary_path: "/tmp/hive", systemctl_available: false
+      )
+
+      assert_nil installer.installed_exec_binary,
+                 "an unparseable ExecStart line must yield nil, not raise"
+    end
+  end
+
+  def test_installed_launchd_exec_binary_fallback_without_sh_wrapper
+    # A plist without the /bin/sh -c precheck (no "-c" element) exercises the
+    # basename/trailing-segment fallback that finds the hive binary directly.
+    with_tmp_dir do |dir|
+      plist = File.join(dir, "Library/LaunchAgents/local.hive-daemon.plist")
+      FileUtils.mkdir_p(File.dirname(plist))
+      File.write(plist, <<~PLIST)
+        <?xml version="1.0" encoding="UTF-8"?>
+        <plist version="1.0">
+        <dict>
+          <key>ProgramArguments</key>
+          <array>
+            <string>/opt/hive/bin/hive</string>
+            <string>daemon</string>
+            <string>start</string>
+          </array>
+        </dict>
+        </plist>
+      PLIST
+      installer = Hive::Commands::Daemon::ServiceInstaller.new(
+        host_os: "darwin23", home: dir, binary_path: "/opt/hive/bin/hive", runner: ->(_argv) { }
+      )
+
+      assert_equal "/opt/hive/bin/hive", installer.installed_exec_binary,
+                   "a plist without the sh wrapper must still resolve the hive binary by trailing /hive"
+    end
+  end
+
+  def test_installed_launchd_exec_binary_returns_nil_on_malformed_plist_xml
+    # Corrupt plist XML raises REXML::ParseException; the probe swallows it and
+    # returns nil so a broken unit surfaces as "unparseable", not a backtrace.
+    with_tmp_dir do |dir|
+      plist = File.join(dir, "Library/LaunchAgents/local.hive-daemon.plist")
+      FileUtils.mkdir_p(File.dirname(plist))
+      File.write(plist, "<plist><dict><key>Program</key><string>oops</dict>")
+      installer = Hive::Commands::Daemon::ServiceInstaller.new(
+        host_os: "darwin23", home: dir, binary_path: "/opt/hive/bin/hive", runner: ->(_argv) { }
+      )
+
+      assert_nil installer.installed_exec_binary,
+                 "malformed plist XML must degrade to nil in a status probe"
+    end
   end
 
   def test_missing_binary_fallback_warns_loudly

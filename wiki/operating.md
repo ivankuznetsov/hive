@@ -3,12 +3,12 @@ title: Operating Hive
 type: operating
 source: README.md, bin/hv, install.sh, lib/hive/commands/daemon.rb, lib/hive/commands/babysit.rb, lib/hive/commands/bot.rb, examples/systemd/, examples/launchd/, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-07
-updated: 2026-06-25
+updated: 2026-06-30
 tags: [operating, daemon, bot, systemd, launchd, install]
 ---
 
 **TLDR**: Day-2 guide for running the hive daemon, experimental PR babysitter, and Telegram bot.
-Covers install-time daemon autostart, per-project daemon/babysitter enrollment, bot token/allowlist setup,
+Covers install-time daemon autostart, per-project daemon/babysitter enrollment, bot token/allowlist/pairing setup,
 autostart on macOS (launchd) and Linux (systemd), dry-run shakedowns,
 log inspection, community support, and how to disable automation mid-flight.
 
@@ -458,6 +458,27 @@ bot:
   chat_id_allowlist: [123456789]
 ```
 
+First-contact pairing can replace the initial manual allowlist edit. Enable
+pairing with an empty allowlist, start the bot, have the Telegram user DM
+`/start`, then approve the printed code:
+
+```yaml
+bot:
+  enabled: true
+  pairing_enabled: true
+  chat_id_allowlist: []
+```
+
+```bash
+hive pairing list
+hive pairing approve telegram ABCDEFGH
+```
+
+Approval writes the chat id to `bot.chat_id_allowlist`, signals the running bot
+to reload when a live bot PID is found (a stale or dead PID file yields
+`reloaded: false` and no SIGHUP), and queues a short approved DM to the new
+chat. Pairing codes expire after 24 hours. See [[commands/pairing]].
+
 Runtime token:
 
 ```bash
@@ -472,8 +493,9 @@ hive bot status
 jq -r '.event' ~/.local/state/hive/logs/bot.log | sort | uniq -c
 ```
 
-Unauthorized chat IDs are logged once and receive no reply. Missing
-token or empty allowlist exits 78 (`CONFIG`).
+With pairing disabled, unauthorized chat IDs are logged once and receive no
+reply. Missing token exits 78 (`CONFIG`); an empty allowlist also exits 78
+unless `bot.pairing_enabled: true`.
 
 ### Bot autostart
 
@@ -517,6 +539,8 @@ drain path when you are not using systemd/launchd.
 | Bot status / uptime                           | `hive bot status` (`--json` for envelope)          |
 | Follow bot log                                | `hive bot tail`                                    |
 | Reload bot allowlist / polling config         | edit `~/.config/hive/config.yml` → `hive bot reload` |
+| List pending Telegram pairing requests        | `hive pairing list` (`--json` for envelope)       |
+| Approve a Telegram pairing request            | `hive pairing approve telegram CODE`              |
 | Drain + stop bot                              | `hive bot stop`                                    |
 
 \* `hive daemon reload` clears the per-tick enable cache, but the

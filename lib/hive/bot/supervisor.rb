@@ -18,6 +18,8 @@ require "hive/bot/conversation_store"
 require "hive/bot/idea_draft_store"
 require "hive/bot/idea_attachment_policy"
 require "hive/bot/router"
+require "hive/bot/pairing_store"
+require "hive/bot/pairing_approval_queue"
 require "hive/bot/child_supervisor"
 require "hive/bot/dispatch_request_writer"
 require "hive/bot/format"
@@ -55,12 +57,15 @@ module Hive
                      notification_dispatcher: nil, router: nil, child_supervisor: nil,
                      conversation_store: nil, dry_run: false, update_state: nil,
                      dispatch_request_writer: nil, dispatch_result_state_home: nil,
-                     idea_draft_store: nil, transcriber: nil, transcriber_factory: nil)
+                     pairing_approval_state_home: nil,
+                     idea_draft_store: nil, transcriber: nil, transcriber_factory: nil,
+                     pairing_store: nil)
         @config = config
         @dry_run = dry_run
         # ADV-1: where the daemon drops dispatch-result notices.
         # Tests inject a sandbox; production resolves Hive::Paths.state_home.
         @dispatch_result_state_home = dispatch_result_state_home
+        @pairing_approval_state_home = pairing_approval_state_home
         # Shared update-check state (written by the daemon). The bot owns the
         # once-per-version push; the daemon never touches last_notified_version.
         @update_state = update_state || Hive::UpdateCheck::State.new
@@ -79,6 +84,7 @@ module Hive
           Hive::Bot::ConversationStore.new(ttl_sec: config.fetch("conversation_ttl_sec"))
         @idea_draft_store = idea_draft_store ||
           Hive::Bot::IdeaDraftStore.new(ttl_sec: config.fetch("idea_draft_ttl_sec", 900), logger: @logger)
+        @pairing_store = pairing_store || Hive::Bot::PairingStore.new
         @transcriber_factory = transcriber_factory || method(:default_transcriber)
         @transcriber = transcriber || build_transcriber(config)
         @router = router || build_router(config)
@@ -219,6 +225,7 @@ module Hive
           logger: @logger,
           conversation_store: @conversation_store,
           idea_draft_store: @idea_draft_store,
+          pairing_store: @pairing_store,
           status_snapshot_provider: -> { latest_status_rows }
         )
       end
@@ -277,6 +284,7 @@ module Hive
           begin
             reap_children
             drain_dispatch_results
+            drain_pairing_approvals
           rescue StandardError => e
             @logger.event(:fatal, source: "reaper_loop", error_class: e.class.name,
                                    message: e.message, backtrace: Array(e.backtrace).first(10).join("\n"))
@@ -367,6 +375,58 @@ module Hive
         )
       end
 
+      PAIRING_APPROVED_TEXT = "✅ Approved — you can use hive now. Try /status.".freeze
+      PAIRING_APPROVAL_SEND_CAP = 10
+
+      def drain_pairing_approvals(now: Time.now)
+        notices = Hive::Bot::PairingApprovalQueue.pending(
+          state_home: pairing_approval_state_home,
+          bad_handler: ->(path:, reason:) { FileUtils.rm_f(path) }
+        )
+        fresh = notices.reject do |notice|
+          next false unless Hive::Bot::PairingApprovalQueue.expired?(notice, now: now)
+
+          # Stale: drop without sending. A failed unlink (the clean `false` the
+          # queue returns on EACCES, or a mismatched/corrupt file) would
+          # otherwise silently re-evaluate-and-re-drop this notice every reaper
+          # tick with no observability — mirror the successful-send branch and
+          # log the same distinct event so a wedged notice is attributable.
+          unless remove_pairing_approval(notice)
+            @logger.event(:pairing_approval_notice_unremovable,
+                          chat_id: notice.chat_id, notice_id: notice.notice_id)
+          end
+          true
+        end
+
+        # Per-tick send cap — mirroring only the send cap of
+        # drain_dispatch_results, NOT its overflow-summary or allowlist
+        # re-check (the latter omission is deliberate — approval notices are
+        # owner-authored and may arrive before SIGHUP reload updates memory):
+        # a reconnect burst or backlog must not blow past Telegram's per-chat
+        # rate limit. Over-cap notices simply stay queued and drain on
+        # subsequent reaper ticks.
+        fresh.first(PAIRING_APPROVAL_SEND_CAP).each do |notice|
+          sent = safe_send_message(chat_id: notice.chat_id, text: PAIRING_APPROVED_TEXT)
+          next unless sent
+
+          # A successful send followed by a failed unlink (e.g. EACCES, now a
+          # clean `false` from the queue) would otherwise silently re-send the
+          # "✅ Approved" DM every tick until the notice expires (1h). We can't
+          # un-send, but log a distinct event so the duplicate DMs are
+          # attributable instead of mysterious.
+          next if remove_pairing_approval(notice)
+
+          @logger.event(:pairing_approval_notice_unremovable,
+                        chat_id: notice.chat_id, notice_id: notice.notice_id)
+        end
+      end
+
+      def remove_pairing_approval(notice)
+        Hive::Bot::PairingApprovalQueue.remove(
+          notice.notice_id, state_home: pairing_approval_state_home, path: notice.path
+        )
+      end
+
       def dispatch_result_text(notice)
         return dispatch_success_text(notice) unless dispatch_failure_notice?(notice)
 
@@ -399,6 +459,10 @@ module Hive
 
       def dispatch_result_state_home
         @dispatch_result_state_home || Hive::Paths.state_home
+      end
+
+      def pairing_approval_state_home
+        @pairing_approval_state_home || Hive::Paths.state_home
       end
 
       def safe_send_message(chat_id:, text:, reply_markup: nil, parse_mode: nil)

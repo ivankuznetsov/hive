@@ -35,6 +35,7 @@ JSON_USAGE_ERROR_CONTRACTS = {
   },
   "markers" => { schema: "hive-markers-clear", error_kind: "invalid_task_path" },
   "digest" => { schema: "hive-digest", error_kind: "usage" },
+  "pairing" => { schema: "hive-pairing-approve", error_kind: "usage" },
   "answer-digest" => { schema: "hive-answer-digest", error_kind: "usage" },
   # Residual workflow argv-shape errors raised by Thor before command dispatch
   # (for example too many positionals) must ride the same JSON envelope as the

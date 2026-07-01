@@ -57,6 +57,8 @@ module Hive
       "hive-bot-stop" => 1,
       "hive-bot-reload" => 1,
       "hive-bot-install" => 1,
+      "hive-pairing-list" => 1,
+      "hive-pairing-approve" => 1,
       # File-backed dispatch request the bot writes for the daemon to
       # consume. One JSON file per pending request under the state-home
       # `dispatch_requests/` directory. See

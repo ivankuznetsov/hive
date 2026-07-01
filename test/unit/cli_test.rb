@@ -22,6 +22,7 @@ require "hive/commands/findings"
 require "hive/commands/finding_toggle"
 require "hive/commands/patrol"
 require "hive/commands/digest"
+require "hive/commands/pairing"
 require "hive/commands/answer_digest"
 require "hive/commands/markers"
 require "hive/commands/daemon"
@@ -485,6 +486,12 @@ class HiveCliTest < Minitest::Test
       Hive::CLI.start([ "bot", "start", "--detach", "--dry-run", "--json" ])
       assert_equal [ "start" ], calls.first.fetch(:args)
       assert_equal({ foreground: false, dry_run: true, json: true, force: false }, calls.first.fetch(:kwargs))
+    end
+
+    with_command_new_stub(Hive::Commands::Pairing) do |calls|
+      Hive::CLI.start([ "pairing", "approve", "telegram", "ABCDEFGH", "--json" ])
+      assert_equal [ "approve" ], calls.first.fetch(:args)
+      assert_equal({ args: [ "telegram", "ABCDEFGH" ], json: true }, calls.first.fetch(:kwargs))
     end
 
     with_command_new_stub(Hive::Commands::Metrics) do |calls|

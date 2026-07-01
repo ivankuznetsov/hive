@@ -7,6 +7,7 @@ require "hive/env_file"
 require "hive/lock"
 require "hive/bot/supervisor"
 require "hive/bot/logger"
+require "hive/pid_file"
 require "hive/paths"
 require "hive/update_check/state"
 
@@ -405,22 +406,14 @@ module Hive
       end
 
       def pid_file_payload
-        return {} unless File.exist?(pid_file)
-
-        data = YAML.safe_load(File.read(pid_file)) || {}
-        data.is_a?(Hash) ? data : {}
+        Hive::PidFile.read(pid_file)
       rescue Psych::Exception => e
         warn "hive: bot PID file at #{pid_file} is corrupted (#{e.class}: #{e.message}); refusing to assume bot state"
         raise Hive::Error, "bot pid file at #{pid_file} is corrupted"
       end
 
       def pid_alive?(pid)
-        Process.kill(0, pid)
-        true
-      rescue Errno::ESRCH
-        false
-      rescue Errno::EPERM
-        true
+        Hive::PidFile.alive?(pid)
       end
 
       def stop_envelope(running:, was_running:)

@@ -12,7 +12,15 @@ module Hive
       CODE_ALPHABET = ("A".."Z").to_a.freeze
       FILENAME = ".bot.pairings.json".freeze
 
-      Entry = Struct.new(:code, :chat_id, :created_at, keyword_init: true)
+      # Frozen on construction: `pending` hands these back as a point-in-time
+      # snapshot, so a consumer must not be able to mutate one and think it
+      # changed the store.
+      Entry = Struct.new(:code, :chat_id, :created_at, keyword_init: true) do
+        def initialize(*)
+          super
+          freeze
+        end
+      end
 
       attr_reader :path
 
@@ -91,6 +99,15 @@ module Hive
 
       # Delete a code from the pending set. Idempotent: returns true when an
       # entry was removed, false when nothing matched.
+      #
+      # Protocol: `consume` is the SECOND phase of `resolve` → fallible work →
+      # `consume`. It performs no validity check of its own — it deletes
+      # whatever `code` you pass — so callers must `resolve` first and run
+      # their fallible work BEFORE consuming. `approve` is the reference
+      # implementation: it resolves (peeks), writes the allowlist + notice, and
+      # only then consumes, so a failure in between leaves the code pending for
+      # a clean retry. Consuming a code you never resolved (or one that resolved
+      # `:expired`) silently drops it.
       def consume(code:)
         normalized = self.class.normalize_code(code)
         return false if normalized.empty?
@@ -100,24 +117,6 @@ module Hive
           removed = entries.delete(normalized)
           write_entries(pruned_entries(entries)) unless removed.nil?
           !removed.nil?
-        end
-      end
-
-      # Atomic resolve-then-delete. Retained as a convenience for callers that
-      # don't need the two-phase guarantee; `approve` deliberately splits the
-      # phases via `resolve` + `consume`.
-      def resolve_and_consume(code:)
-        result = resolve(code: code)
-        consume(code: code) unless result == :unknown
-        result
-      end
-
-      def prune_expired!
-        with_lock do
-          entries = load_entries
-          pruned = pruned_entries(entries)
-          write_entries(pruned)
-          entries.length - pruned.length
         end
       end
 
@@ -152,7 +151,17 @@ module Hive
             "created_at" => payload["created_at"].to_s
           }
         end
-      rescue JSON::ParserError, Errno::ENOENT, Errno::EACCES, IOError
+      rescue JSON::ParserError, Errno::EACCES, IOError => e
+        # A garbled or unreadable pairings file must not read as "no pending":
+        # `hive pairing list` would print "No pending pairing requests." and
+        # the owner could not tell empty from broken. Warn (the only
+        # observability channel here — the store has no logger), then keep the
+        # {} fallback so a corrupt file can't wedge minting/approval.
+        warn "hive: pairing store at #{@path} is unreadable " \
+             "(#{e.class}: #{e.message}); treating as empty"
+        {}
+      rescue Errno::ENOENT
+        # Benign: the file vanished between the exist? check and the read.
         {}
       end
 

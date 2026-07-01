@@ -60,7 +60,7 @@ module Hive
 
       def list
         ensure_no_args!("list")
-        entries = @store.pending
+        entries = pending_entries
         if @json
           @output.puts JSON.generate(list_payload(entries))
         elsif entries.empty?
@@ -82,7 +82,11 @@ module Hive
                 "hive pairing approve: platform must be `telegram`; got #{platform.inspect}"
         end
 
-        validate_current_bot_config!
+        # Load + validate the global bot config once before any side effect.
+        # `bot_config` memoizes the same load `signal_bot_reload` reuses, so
+        # the config is read a single time per approve and a bad config fails
+        # fast (exit 78) before the allowlist is touched.
+        bot_config
         normalized_code = Hive::Bot::PairingStore.normalize_code(code)
         # Resolve (peek) without consuming, then run every fallible side
         # effect — the allowlist write and the approval-notice write — and
@@ -93,7 +97,7 @@ module Hive
         already_allowlisted = append_allowlist(chat_id)
         reloaded = signal_bot_reload
         notice_id = write_approval_notice!(chat_id)
-        @store.consume(code: normalized_code)
+        consume_code!(normalized_code)
         payload = approve_payload(
           code: normalized_code,
           chat_id: chat_id,
@@ -119,11 +123,15 @@ module Hive
               "hive pairing #{subcommand}: unexpected arguments: #{@args.join(' ')}"
       end
 
-      def validate_current_bot_config!
-        # Load + validate once. `bot_config` memoizes the same load that
-        # `signal_bot_reload` later reuses, so the global config is read a
-        # single time per approve.
-        bot_config
+      # `PairingStore#pending` prunes-on-read and opens a lock file, so a
+      # read-only/full state dir can make it raise SystemCallError/IOError. Turn
+      # that into a clean envelope instead of a raw backtrace on `hive pairing
+      # list`.
+      def pending_entries
+        @store.pending
+      rescue SystemCallError, IOError => e
+        raise ApprovalError.new("failed to read pending pairing requests: #{e.message}",
+                                error_kind: "store_read_failed")
       end
 
       def resolve_code!(code)
@@ -147,12 +155,26 @@ module Hive
 
       def write_approval_notice!(chat_id)
         @approval_queue.write!(chat_id: chat_id)
-      rescue SystemCallError => e
+      rescue SystemCallError, IOError => e
         # The code is still pending at this point (consume runs after this), so
         # surface a clean envelope and leave it for a retry rather than
         # crashing with a raw backtrace after the chat was already allowlisted.
         raise ApprovalError.new("failed to queue approval notice: #{e.message}",
                                 error_kind: "notice_write_failed")
+      end
+
+      # Consume runs LAST, after the allowlist write, reload, and notice write
+      # have all succeeded — at which point the approval is complete. A
+      # read-only/full state dir can still make `consume → write_entries`
+      # raise, but that is best-effort cleanup of a now-redundant pending code:
+      # never let it mask a completed approval with a raw backtrace (which
+      # would also make a retry resolve into `unknown_code`). Warn and let the
+      # success envelope through; the stale code expires on its own (24h).
+      def consume_code!(code)
+        @store.consume(code: code)
+      rescue SystemCallError, IOError => e
+        warn "hive: approval for code #{code} succeeded but the pending code " \
+             "could not be consumed (#{e.class}: #{e.message}); it will expire on its own"
       end
 
       def append_allowlist(chat_id)
@@ -170,12 +192,26 @@ module Hive
 
       def signal_bot_reload
         pid_file = File.expand_path(bot_config.fetch("pid_file", File.join(Hive::Paths.state_home, ".bot.pid")))
-        pid = pid_file_payload(pid_file)["pid"]
+        # Coerce defensively: a hand-edited `pid: "4242"` (string) would make
+        # Process.kill raise TypeError *after* the allowlist write. Integer(…,
+        # exception: false) yields nil for a non-numeric/missing pid, which we
+        # treat as "bot not running".
+        pid = Integer(pid_file_payload(pid_file)["pid"], exception: false)
         return false unless pid && pid_alive?(pid)
 
         @process.kill("HUP", pid)
         true
-      rescue Errno::ESRCH, Errno::EPERM, Psych::Exception, SystemCallError, IOError
+      rescue Errno::ESRCH
+        # The process vanished between the alive probe and the signal — a
+        # genuine "bot not running" race, not a failure to reach a live bot.
+        false
+      rescue SystemCallError, IOError => e
+        # The bot IS live (the alive probe passed) but the SIGHUP did not land
+        # (EPERM, a transient IOError, …). Surface it: the running bot keeps
+        # serving the STALE allowlist until restart, so the freshly-approved
+        # chat stays locked out — the operator must know to restart it.
+        warn "hive: failed to signal live bot (pid #{pid}) to reload " \
+             "(#{e.class}: #{e.message}); restart the bot so the new allowlist takes effect"
         false
       end
 
@@ -185,7 +221,16 @@ module Hive
 
       def pid_file_payload(path)
         Hive::PidFile.read(path)
-      rescue Psych::Exception, SystemCallError, IOError
+      rescue Psych::Exception => e
+        # Mirror commands/bot.rb: a corrupt PID file must not silently read as
+        # "bot down". Surface it so the operator knows the live bot (if any)
+        # was NOT reloaded — but, unlike bot.rb, do NOT raise: the allowlist
+        # write has already landed, and aborting here would mask a completed
+        # approval.
+        warn "hive: bot PID file at #{path} is corrupted " \
+             "(#{e.class}: #{e.message}); skipping live reload"
+        {}
+      rescue SystemCallError, IOError
         {}
       end
 

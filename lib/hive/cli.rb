@@ -1206,8 +1206,12 @@ module Hive
       bot.chat_id_allowlist, requests a live bot reload when a bot PID is
       present, and queues an approval DM for the running bot to send.
 
-      Exit codes: 0 success; 1 unknown/expired code; 64 invalid arguments;
-      78 bad global bot config.
+      Exit codes: 0 success; 64 invalid arguments; 78 bad global bot config;
+      1 is a catch-all for every other failure (unknown/expired code, but also
+      a failed approval-notice write, an unreadable pairing store, or an
+      internal error). With --json, branch on the `error_kind` field — not the
+      exit code — to tell these apart (e.g. `unknown_code`, `expired_code`,
+      `notice_write_failed`, `store_read_failed`, `internal_error`).
     DESC
     def pairing(subcommand = nil, *pairing_args)
       require "hive/commands/pairing"

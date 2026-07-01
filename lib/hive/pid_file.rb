@@ -30,7 +30,11 @@ module Hive
     def self.read(path)
       return {} unless File.exist?(path)
 
-      data = YAML.safe_load(File.read(path)) || {}
+      # Permit Time so this stateless reader matches the writer and the
+      # instance-level `read_pid_file_payload`: a daemon PID file embeds a
+      # `process_start_time`/`started_at` Time, which would otherwise raise
+      # Psych::DisallowedClass here. Strictly more permissive, never less safe.
+      data = YAML.safe_load(File.read(path), permitted_classes: [ Time ]) || {}
       data.is_a?(Hash) ? data : {}
     end
 

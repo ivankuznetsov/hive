@@ -15,7 +15,15 @@ module Hive
       DIRNAME = "pairing_approvals".freeze
       EXPIRY_SEC = 3600
 
-      Notice = Struct.new(:notice_id, :created_at, :chat_id, :path, keyword_init: true)
+      # Frozen on construction: `pending` hands these back as a point-in-time
+      # snapshot, so a consumer must not be able to mutate one and think it
+      # changed the on-disk queue.
+      Notice = Struct.new(:notice_id, :created_at, :chat_id, :path, keyword_init: true) do
+        def initialize(*)
+          super
+          freeze
+        end
+      end
 
       def directory(state_home: Hive::Paths.state_home)
         Hive::Daemon::QueueDirectory.directory_for(dirname: DIRNAME, state_home: state_home)
@@ -105,7 +113,10 @@ module Hive
           return true
         end
         false
-      rescue Errno::ENOENT
+      rescue Errno::ENOENT, Errno::EACCES
+        # ENOENT: the file vanished (another drainer, or the reaper's prune).
+        # EACCES: a read-only/perm-locked dir left the unlink un-performable —
+        # a clean `false` lets the caller log + retry rather than crash.
         false
       end
 
@@ -127,7 +138,10 @@ module Hive
 
           File.unlink(path)
           true
-        rescue Errno::ENOENT
+        rescue Errno::ENOENT, Errno::EACCES
+          # ENOENT: the file vanished between resolve and unlink. EACCES: a
+          # read-only/perm-locked dir — return a clean `false` so the caller
+          # can log + retry instead of crashing the reaper tick.
           false
         end
 

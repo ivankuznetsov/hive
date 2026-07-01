@@ -2282,6 +2282,30 @@ class HiveBotSupervisorTest < Minitest::Test
     end
   end
 
+  def test_drain_pairing_approvals_logs_when_sent_notice_cannot_be_removed
+    Dir.mktmpdir("hive-pairing-approval") do |home|
+      @supervisor.instance_variable_set(:@pairing_approval_state_home, home)
+      Hive::Bot::PairingApprovalQueue.write!(chat_id: 999, state_home: home)
+
+      # Send succeeds but the unlink cannot (e.g. EACCES → a clean false from
+      # the queue): the DM is out and can't be un-sent, so a distinct event
+      # must make the unavoidable re-send attributable. minitest/mock is not
+      # bundled, so override the module method and restore it after.
+      original = Hive::Bot::PairingApprovalQueue.method(:remove)
+      Hive::Bot::PairingApprovalQueue.define_singleton_method(:remove) { |*, **| false }
+      begin
+        @supervisor.send(:drain_pairing_approvals)
+      ensure
+        Hive::Bot::PairingApprovalQueue.define_singleton_method(:remove, original)
+      end
+
+      assert_equal 999, @telegram.messages.first[:chat_id], "the approval DM must still be sent"
+      event = @logger.events.find { |e| e[:name] == :pairing_approval_notice_unremovable }
+      assert event, "a notice that sent but could not be removed must log a distinct event"
+      assert_equal 999, event.fetch(:payload).fetch(:chat_id)
+    end
+  end
+
   def test_drain_pairing_approvals_keeps_notice_when_send_fails
     Dir.mktmpdir("hive-pairing-approval") do |home|
       @supervisor.instance_variable_set(:@pairing_approval_state_home, home)

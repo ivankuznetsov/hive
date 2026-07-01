@@ -387,12 +387,26 @@ module Hive
           true
         end
 
-        # Per-tick send cap mirroring drain_dispatch_results: a reconnect burst
-        # or backlog must not blow past Telegram's per-chat rate limit. Notices
-        # over the cap stay queued and drain on subsequent reaper ticks.
+        # Per-tick send cap — mirroring only the send cap of
+        # drain_dispatch_results, NOT its overflow-summary or allowlist
+        # re-check (the latter omission is deliberate — approval notices are
+        # owner-authored and may arrive before SIGHUP reload updates memory):
+        # a reconnect burst or backlog must not blow past Telegram's per-chat
+        # rate limit. Over-cap notices simply stay queued and drain on
+        # subsequent reaper ticks.
         fresh.first(PAIRING_APPROVAL_SEND_CAP).each do |notice|
           sent = safe_send_message(chat_id: notice.chat_id, text: PAIRING_APPROVED_TEXT)
-          remove_pairing_approval(notice) if sent
+          next unless sent
+
+          # A successful send followed by a failed unlink (e.g. EACCES, now a
+          # clean `false` from the queue) would otherwise silently re-send the
+          # "✅ Approved" DM every tick until the notice expires (1h). We can't
+          # un-send, but log a distinct event so the duplicate DMs are
+          # attributable instead of mysterious.
+          next if remove_pairing_approval(notice)
+
+          @logger.event(:pairing_approval_notice_unremovable,
+                        chat_id: notice.chat_id, notice_id: notice.notice_id)
         end
       end
 

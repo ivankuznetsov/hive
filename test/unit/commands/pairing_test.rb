@@ -70,6 +70,30 @@ class HiveCommandsPairingTest < Minitest::Test
     def resolve(code:) = :surprise
   end
 
+  # `pending` raises the way a read-only/full state dir would (prune-on-read +
+  # lock-file open both write), exercising the clean-envelope guard on list.
+  RaisingPendingStore = Class.new do
+    def pending = raise(Errno::EROFS, "state dir is read-only")
+  end
+
+  # Approval succeeds through every fallible side effect, then the best-effort
+  # consume cleanup blows up (full/read-only dir) — must not mask the approval.
+  ConsumeRaisingStore = Class.new do
+    def resolve(code:) = 999
+    def consume(code:) = raise(Errno::ENOSPC)
+  end
+
+  # Probe (signal 0) reports the bot alive, but the process vanishes before the
+  # SIGHUP lands — a genuine "bot not running" race, not a signal failure.
+  VanishingProcess = Struct.new(:kills, keyword_init: true) do
+    def kill(signal, pid)
+      kills << [ signal, pid ]
+      raise Errno::ESRCH if signal == "HUP"
+
+      true
+    end
+  end
+
   def test_list_prints_empty_message
     Dir.mktmpdir("hive-pairing-command") do |state_home|
       output = StringIO.new
@@ -157,6 +181,19 @@ class HiveCommandsPairingTest < Minitest::Test
     assert_equal "hive-pairing-list", payload.fetch("schema")
   end
 
+  def test_list_surfaces_store_read_failure_as_clean_envelope
+    output = StringIO.new
+    command = command("list", json: true, store: RaisingPendingStore.new, output: output)
+
+    error = assert_raises(Hive::Commands::Pairing::ApprovalError) { command.call }
+
+    assert_equal "store_read_failed", error.error_kind
+    payload = JSON.parse(output.string)
+    assert_equal false, payload.fetch("ok")
+    assert_equal "store_read_failed", payload.fetch("error_kind")
+    assert_equal "hive-pairing-list", payload.fetch("schema")
+  end
+
   def test_unknown_subcommand_is_rejected
     error = assert_raises(Hive::InvalidTaskPath) do
       command("deny", output: StringIO.new).call
@@ -223,6 +260,10 @@ class HiveCommandsPairingTest < Minitest::Test
       config = YAML.safe_load(File.read(File.join(home, "config.yml")))
       assert_equal [ 999 ], config.dig("bot", "chat_id_allowlist")
       assert_equal true, payload.fetch("already_allowlisted")
+      assert_empty pairing_store.pending,
+                   "an already-allowlisted approval still consumes the code"
+      assert_equal [ 999 ], Hive::Bot::PairingApprovalQueue.pending(state_home: home).map(&:chat_id),
+                   "an already-allowlisted approval still queues the approval notice"
     end
   end
 
@@ -236,6 +277,33 @@ class HiveCommandsPairingTest < Minitest::Test
     payload = JSON.parse(output.string)
     assert_equal "invalid_arguments", payload.fetch("error_kind")
     assert_equal "hive-pairing-approve", payload.fetch("schema")
+  end
+
+  def test_approve_rejects_trailing_arguments_without_side_effects
+    with_tmp_global_config do |home|
+      pairing_store = store(home)
+      code = pairing_store.mint_or_get(chat_id: 999)
+      original = File.read(File.join(home, "config.yml"))
+      output = StringIO.new
+
+      # The `extra.empty?` false arm: trailing garbage after the code must be
+      # rejected as a usage error, not silently accepted.
+      error = assert_raises(Hive::InvalidTaskPath) do
+        command("approve", args: [ "telegram", code, "extra" ], json: true,
+                           store: pairing_store, output: output).call
+      end
+
+      assert_match(/usage/, error.message)
+      assert_equal original, File.read(File.join(home, "config.yml")),
+                   "a usage error must not mutate the allowlist"
+      assert_equal [ code ], pairing_store.pending.map(&:code),
+                   "a usage error must not consume the code"
+      assert_empty Hive::Bot::PairingApprovalQueue.pending(state_home: home),
+                   "a usage error must not queue a notice"
+      payload = JSON.parse(output.string)
+      assert_equal "invalid_arguments", payload.fetch("error_kind")
+      assert_equal "hive-pairing-approve", payload.fetch("schema")
+    end
   end
 
   def test_approve_config_error_is_emitted_before_code_is_consumed
@@ -360,6 +428,38 @@ class HiveCommandsPairingTest < Minitest::Test
     end
   end
 
+  def test_approve_treats_hup_esrch_as_bot_not_running
+    with_tmp_global_config do |home|
+      pairing_store = store(home)
+      code = pairing_store.mint_or_get(chat_id: 999)
+      File.write(File.join(home, ".bot.pid"), { "pid" => 4242 }.to_yaml)
+      process = VanishingProcess.new(kills: [])
+
+      payload = command("approve", args: [ "telegram", code ], json: true,
+                                   store: pairing_store, output: StringIO.new,
+                                   process: process).call
+
+      assert_equal false, payload.fetch("reloaded"),
+                   "a process that vanishes before the SIGHUP lands is treated as not running"
+      assert_equal [ [ 0, 4242 ], [ "HUP", 4242 ] ], process.kills
+    end
+  end
+
+  def test_approve_treats_unreadable_pid_file_as_bot_down
+    with_tmp_global_config do |home|
+      pairing_store = store(home)
+      code = pairing_store.mint_or_get(chat_id: 999)
+      # A directory at the pid path passes File.exist? but makes File.read
+      # raise EISDIR (a SystemCallError): degrade to "bot down", never crash.
+      Dir.mkdir(File.join(home, ".bot.pid"))
+
+      payload = command("approve", args: [ "telegram", code ], json: true,
+                                   store: pairing_store, output: StringIO.new).call
+
+      assert_equal false, payload.fetch("reloaded")
+    end
+  end
+
   def test_approve_treats_probe_permission_as_alive
     with_tmp_global_config do |home|
       pairing_store = store(home)
@@ -437,12 +537,33 @@ class HiveCommandsPairingTest < Minitest::Test
       end
 
       assert_equal "notice_write_failed", error.error_kind
+      config = YAML.safe_load(File.read(File.join(home, "config.yml")))
+      assert_equal [ 999 ], config.dig("bot", "chat_id_allowlist"),
+                   "the allowlist write lands before the notice write fails (partial success)"
       assert_equal [ code ], pairing_store.pending.map(&:code),
                    "a failed notice write must leave the code pending for retry"
       payload = JSON.parse(output.string)
       assert_equal false, payload.fetch("ok")
       assert_equal "notice_write_failed", payload.fetch("error_kind")
       assert_schema_valid("hive-pairing-approve", payload)
+    end
+  end
+
+  def test_approve_succeeds_even_when_consume_cleanup_fails
+    with_tmp_global_config do |home|
+      output = StringIO.new
+
+      # resolve → allowlist → notice all land; only the trailing best-effort
+      # consume raises. The approval is complete, so a success envelope must
+      # still emit (the stale code expires on its own).
+      payload = command("approve", args: [ "telegram", "ABCDEFGH" ], json: true,
+                                   store: ConsumeRaisingStore.new, output: output).call
+
+      assert_equal true, payload.fetch("ok")
+      config = YAML.safe_load(File.read(File.join(home, "config.yml")))
+      assert_equal [ 999 ], config.dig("bot", "chat_id_allowlist")
+      assert_equal [ 999 ], Hive::Bot::PairingApprovalQueue.pending(state_home: home).map(&:chat_id)
+      assert_equal payload, JSON.parse(output.string)
     end
   end
 

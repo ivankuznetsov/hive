@@ -198,7 +198,7 @@ If the daemon is stopped or has no live PID, report that plainly instead of fail
 
 ## Watch Selected Tasks
 
-Use this read-only recipe when an operator wants to wait on selected in-flight tasks and see only real state changes. It assumes `bash` and `jq`, polls `hive status --json`, ignores noisy `mtime`, `folder_mtime`, and `age_seconds` churn, and uses `HIVE_WATCH_INTERVAL` (default 15 seconds) plus `HIVE_WATCH_TIMEOUT` (default 1800 seconds / 30 minutes), both env-overridable. The loop touches no Hive state: Ctrl-C is safe, it never kills Hive agents or the task's `claude_pid`, never clears markers, and never advances stages. If a loop is left running, find it with `pgrep -af 'hive status --json'` or the shell job table (`jobs`) and stop that shell job.
+Use this read-only recipe when an operator wants to wait on selected in-flight tasks and see only real state changes. It assumes `bash` 4+ (the no-args path uses `mapfile`; default macOS `/bin/bash` is 3.2, so run it under a Homebrew `bash`), `jq`, and the standard `awk`, `date`, and `mktemp` utilities. It polls `hive status --json`, ignores noisy `mtime`, `folder_mtime`, and `age_seconds` churn, and uses `HIVE_WATCH_INTERVAL` (default 15 seconds) plus `HIVE_WATCH_TIMEOUT` (default 1800 seconds / 30 minutes), both env-overridable. The loop touches no Hive state: Ctrl-C is safe, it never kills Hive agents or the task's `claude_pid`, never clears markers, and never advances stages. If a loop is left running, find it with `pgrep -af 'hive status --json'` or the shell job table (`jobs`) and stop that shell job.
 
 ```bash
 : "${HIVE_WATCH_INTERVAL:=15}"
@@ -211,6 +211,11 @@ else
   mapfile -t slugs < <(hive status --json | jq -r "$tasks_jq[] | select(.stage != \"9-done\") | .slug")
 fi
 
+if [ "${#slugs[@]}" -eq 0 ]; then
+  echo "nothing to watch: no active (non-9-done) tasks" >&2
+  exit 0
+fi
+
 snap="$(mktemp)"
 cleanup() {
   rm -f "$snap" "$snap.next"
@@ -219,6 +224,7 @@ trap cleanup EXIT
 trap 'cleanup; exit 130' INT TERM
 : >"$snap"
 started_at="$(date +%s)"
+first_poll=1
 
 state_key() {
   jq -cr '[
@@ -237,18 +243,24 @@ state_fields() {
   jq -r '[.stage // "", .action // "", .marker // "", .pr_url // ""] | @tsv' <<<"$1"
 }
 
+# Hidden fields (phase, pass, pid_alive, retry_after) from a composite key,
+# one per line so mapfile preserves empty values by position.
+hidden_fields() {
+  jq -r '.[3], .[4], .[5], .[6]' <<<"$1"
+}
+
 line_for() {
   awk -F '\t' -v slug="$1" '$1 == slug { print; exit }' "$snap"
 }
 
 print_change() {
-  local slug="$1" old_stage="$2" old_action="$3" old_marker="$4" new_stage="$5" new_action="$6" new_marker="$7"
+  local slug="$1" old_stage="$2" old_action="$3" old_marker="$4" new_stage="$5" new_action="$6" new_marker="$7" extras="$8"
   local old_label="${old_stage:-unknown}"
   local new_label="${new_stage:-unknown}"
 
   [ -n "$old_action$old_marker" ] && old_label="$old_label/${old_action:-none}/${old_marker:-none}"
   [ -n "$new_action$new_marker" ] && new_label="$new_label/${new_action:-none}/${new_marker:-none}"
-  printf '%s: %s → %s\n' "$slug" "$old_label" "$new_label"
+  printf '%s: %s → %s%s\n' "$slug" "$old_label" "$new_label" "$extras"
 }
 
 print_final() {
@@ -280,8 +292,17 @@ while :; do
     old="$(line_for "$slug")"
     IFS=$'\t' read -r _ old_key old_stage old_action old_marker old_pr <<<"$old"
 
-    if [ "$key" != "$old_key" ]; then
-      print_change "$slug" "$old_stage" "$old_action" "$old_marker" "$new_stage" "$new_action" "$new_marker"
+    if [ "$first_poll" -eq 0 ] && [ "$key" != "$old_key" ]; then
+      # Surface hidden-field changes (phase, pass, pid_alive, held/retry_after)
+      # that leave the stage/action/marker label identical.
+      mapfile -t oh < <(hidden_fields "${old_key:-[]}")
+      mapfile -t nh < <(hidden_fields "$key")
+      extras=""
+      [ "${oh[2]}" != "${nh[2]}" ] && extras+=" pid_alive=${nh[2]:-unknown}"
+      [ "${oh[3]}" != "${nh[3]}" ] && extras+=" held/retry_after=${nh[3]:-none}"
+      [ "${oh[0]}" != "${nh[0]}" ] && extras+=" phase=${nh[0]:-none}"
+      [ "${oh[1]}" != "${nh[1]}" ] && extras+=" pass=${nh[1]:-none}"
+      print_change "$slug" "$old_stage" "$old_action" "$old_marker" "$new_stage" "$new_action" "$new_marker" "$extras"
       if [ -z "$old_pr" ] && [ -n "$new_pr" ]; then
         printf '%s: pr_url became available: %s\n' "$slug" "$new_pr"
       fi
@@ -302,6 +323,7 @@ while :; do
   done
 
   mv "$snap.next" "$snap"
+  first_poll=0
 
   [ "${#slugs[@]}" -gt 0 ] && [ "$terminal_count" -eq "${#slugs[@]}" ] && exit 0
 

@@ -2,6 +2,7 @@ require "json"
 require "fileutils"
 require "securerandom"
 require "time"
+require "hive/atomic_file"
 require "hive/paths"
 
 module Hive
@@ -168,17 +169,7 @@ module Hive
       end
 
       def write_entries(entries)
-        FileUtils.mkdir_p(File.dirname(@path))
-        tmp_path = File.join(File.dirname(@path), ".#{File.basename(@path)}.tmp.#{Process.pid}.#{SecureRandom.hex(4)}")
-        File.open(tmp_path, File::WRONLY | File::CREAT | File::TRUNC, 0o600) do |file|
-          file.write(JSON.pretty_generate(entries))
-          file.write("\n")
-          file.flush
-          file.fsync
-        end
-        File.rename(tmp_path, @path)
-      ensure
-        FileUtils.rm_f(tmp_path) if tmp_path && File.exist?(tmp_path)
+        Hive::AtomicFile.write(@path, "#{JSON.pretty_generate(entries)}\n", mode: 0o600)
       end
 
       def pruned_entries(entries)

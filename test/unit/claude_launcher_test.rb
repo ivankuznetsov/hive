@@ -547,6 +547,46 @@ class ClaudeLauncherTest < Minitest::Test
            "the idle caret at line end (with a hint footer below it) must read as ready"
   end
 
+  # Claude Code 2.1.179 paints the idle input as
+  # separator/caret/separator/footer, with a non-breaking space after the
+  # caret. The detector must not depend on the caret being one fixed number
+  # of lines above the footer.
+  def test_claude_ready_prompt_accepts_2179_nbsp_caret_with_separator_footer
+    pane = "Claude Code v2.1.179\n\n" \
+           "╭────────────────────────────────────────────────────────────────────────╮\n" \
+           "❯ \n" \
+           "╰────────────────────────────────────────────────────────────────────────╯\n" \
+           "⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+
+    assert Hive::ClaudeLauncher.claude_ready_prompt?(pane),
+           "the 2.1.179 NBSP caret with separator/footer chrome must read as ready"
+  end
+
+  # The caret separator can also be a narrow no-break space (U+202F), not just
+  # the regular NBSP (U+00A0). Both are covered by `\p{Zs}`; this pins the
+  # narrow variant so a future regex narrowing can't silently drop it.
+  def test_claude_ready_prompt_accepts_narrow_no_break_space_caret
+    pane = "Claude Code v2.1.179\n\n" \
+           "╭────────────────────────────────────────────────────────────────────────╮\n" \
+           "❯\u{202F}\n" \
+           "╰────────────────────────────────────────────────────────────────────────╯\n" \
+           "⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+
+    assert Hive::ClaudeLauncher.claude_ready_prompt?(pane),
+           "a narrow no-break space (U+202F) after the caret must read as ready"
+  end
+
+  def test_claude_ready_prompt_accepts_trailing_caret_with_unicode_separator_before_it
+    pane = "Claude Code v2.1.179\n\n" \
+           "╭────────────────────────────────────────────────────────────────────────╮\n" \
+           ".hive-state/stages/4-execute/fix-claude-tmux-ready-detector hive/state ❯\n" \
+           "╰────────────────────────────────────────────────────────────────────────╯\n" \
+           "⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+
+    assert Hive::ClaudeLauncher.claude_ready_prompt?(pane),
+           "a Unicode separator before a trailing caret must match the idle prompt"
+  end
+
   def test_claude_ready_prompt_accepts_current_footer_when_banner_scrolled_out
     pane = "?────────────────────────────────────────────────────────────────────────\n" \
            "  hive-patrol-command-bin-hive-babysitter-stub-gh-5031d524 hive-patrol/command-bin-hive-babysitter-stub-gh-5031d524  ❯\n" \
@@ -561,6 +601,20 @@ class ClaudeLauncherTest < Minitest::Test
   # the caret does not start treating an interactive selection as idle.
   def test_claude_ready_prompt_rejects_menu_option_with_hint_footer
     pane = "Claude Code v2.1.133\nProceed with the action?\n❯ 1. Yes\n" \
+           "⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+
+    refute Hive::ClaudeLauncher.claude_ready_prompt?(pane)
+  end
+
+  def test_claude_ready_prompt_rejects_permission_prompt_with_footer
+    pane = "Claude Code v2.1.179\nDo you want to edit this file?\n❯ 1. Yes\n" \
+           "⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+
+    refute Hive::ClaudeLauncher.claude_ready_prompt?(pane)
+  end
+
+  def test_claude_ready_prompt_rejects_trust_prompt_with_footer
+    pane = "Claude Code v2.1.179\nQuick safety check\n❯ 1. Yes, I trust this folder\n" \
            "⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
 
     refute Hive::ClaudeLauncher.claude_ready_prompt?(pane)
@@ -585,6 +639,21 @@ class ClaudeLauncherTest < Minitest::Test
 
     refute Hive::ClaudeLauncher.claude_ready_prompt?(pane),
            "a caret with non-footer output below it is not the live idle prompt"
+  end
+
+  # Claude can paint the `⏵⏵` glyph in its OWN output (e.g. a build/progress
+  # line), not only the `⏵⏵ bypass permissions …` hint footer. A stale caret
+  # with such a line below it must stay rejected: only the bypass-permissions
+  # footer copy counts as terminal chrome, never a bare `⏵⏵` prefix.
+  def test_claude_ready_prompt_rejects_caret_above_non_footer_caret_glyph_line
+    pane = "Claude Code v2.1.179\n\n" \
+           "╭────────────────────────────────────────────────────────────────────────╮\n" \
+           "❯\n" \
+           "╰────────────────────────────────────────────────────────────────────────╯\n" \
+           "⏵⏵ running build step 1/2"
+
+    refute Hive::ClaudeLauncher.claude_ready_prompt?(pane),
+           "a `⏵⏵`-prefixed output line that is not the bypass-permissions footer is not terminal chrome"
   end
 
   # A bare caret line is a legitimate idle prompt; lock it as intentional.

@@ -63,6 +63,26 @@ ln -sf ~/Dev/hive/bin/hive ~/.local/bin/hive
 
 If `~/.local/bin` is not on `PATH`, put the symlink in a directory that is. Verify with `hive --version`, then run `hive daemon install` once to install and enable the per-user daemon service from that symlink. The dev-clone path skips signed-release verification, but the same daemon installer writes the current systemd-user or launchd template.
 
+### Local Web UI
+
+Hive can run the Rails web UI locally without Docker:
+
+```bash
+hive setup
+hive web
+```
+
+`hive setup` checks Ruby 3.4, git, tmux, `gh`, Claude, Codex, Node/npm,
+QMD, SQLite, and the Rails bundle. It installs Hive-owned pieces it can
+manage, installs the daemon service, and enrolls the current project. Bare
+`hive web` serves `http://127.0.0.1:4567` in the foreground with
+loopback-only no-auth mode (set `web.local_loopback: false` to require GitHub
+login even on a loopback bind — see [wiki/commands/web.md](wiki/commands/web.md)).
+For autostart, run `hive setup --service` or
+`hive web install` and `hive web start --detach`; the web service is separate
+from the daemon service. Docker/hivebox remains supported for container-first
+installs.
+
 ### Install via a coding agent
 
 To have Claude Code, Codex, or another agent CLI install Hive for you (with OS detection, channel selection, Apache Hive collision handling, and `hive init` follow-up), paste the prompt at [install.md](install.md) into the agent. It's the canonical source for agent-driven install — keep it pinned in your agent's context if you reinstall often.

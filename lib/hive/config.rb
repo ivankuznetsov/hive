@@ -373,6 +373,7 @@ module Hive
         "bind" => "127.0.0.1",
         "port" => 4567,
         "origin" => "http://127.0.0.1:4567",
+        "local_loopback" => true,
         "github" => {
           "owner" => nil,
           # The shared hivebox OAuth app (device flow only — public by
@@ -2275,6 +2276,12 @@ module Hive
       unless origin.is_a?(String) && origin.match?(%r{\Ahttps?://})
         raise ConfigError,
               "web.origin in #{describe_source(source_path)} must be an http(s) URL"
+      end
+
+      local_loopback = web["local_loopback"]
+      unless local_loopback == true || local_loopback == false
+        raise ConfigError,
+              "web.local_loopback in #{describe_source(source_path)} must be true or false"
       end
 
       github = web["github"]

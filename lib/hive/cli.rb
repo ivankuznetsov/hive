@@ -257,6 +257,22 @@ module Hive
       ).call
     end
 
+    desc "setup", "Provision local Hive web mode, daemon service, and project enrollment"
+    option :yes, type: :boolean, default: false, desc: "accept non-interactive defaults"
+    option :service, type: :boolean, default: false, desc: "also install the managed web service"
+    option :no_bootstrap, type: :boolean, default: false, desc: "diagnose only; do not install qmd or web bundle"
+    option :no_init, type: :boolean, default: false, desc: "do not initialize or enroll the current project"
+    def setup
+      require "hive/commands/setup"
+      exit Hive::Commands::Setup.new(
+        json: options[:json],
+        yes: options[:yes],
+        service: options[:service],
+        no_bootstrap: options[:no_bootstrap],
+        no_init: options[:no_init]
+      ).call
+    end
+
     desc "update", "Update hive via the install channel that installed it"
     long_desc <<~DESC
       Reads the install-channel marker written by the installer and delegates
@@ -1332,30 +1348,45 @@ module Hive
       ).call
     end
 
-    desc "web", "Run the hivebox web UI"
+    desc "web [SUBCOMMAND]", "Run or manage the hive web UI"
     option :bind, type: :string, desc: "override web.bind"
     option :port, type: :numeric, desc: "override web.port"
-    def web
+    option :no_bootstrap, type: :boolean, default: false, desc: "do not install the managed web app if missing"
+    option :unsafe, type: :boolean, default: false, desc: "allow non-loopback bind without configured owner"
+    option :allow_public, type: :boolean, default: false, desc: "alias for --unsafe"
+    option :force, type: :boolean, default: false, desc: "for install: overwrite existing service unit"
+    option :detach, type: :boolean, default: false, desc: "for start: start the managed service instead of foreground Rails"
+    def web(subcommand = nil)
       if options[:json]
-        require "json"
-        message = "hive web has no JSON output (it runs a long-lived server). " \
-                  "Use 'hive status --json' for machine-readable task data."
-        # Mirror `hive tui`'s rejection: emit a structured error envelope (sans
-        # `schema`, since web has no registered hive-* schema) and raise
-        # InvalidTaskPath for the USAGE (64) exit code — parity with every
-        # other --json failure on this surface.
-        puts JSON.generate(
-          "ok" => false,
-          "error_class" => "InvalidTaskPath",
-          "error_kind" => "invalid_task_path",
-          "exit_code" => Hive::ExitCodes::USAGE,
-          "message" => message
-        )
-        raise Hive::InvalidTaskPath, message
+        unless %w[install status].include?(subcommand.to_s)
+          require "json"
+          message = "hive web has no JSON output for foreground server commands. " \
+                    "Use 'hive web status --json' or 'hive status --json'."
+          puts JSON.generate(
+            "ok" => false,
+            "error_class" => "InvalidTaskPath",
+            "error_kind" => "invalid_task_path",
+            "exit_code" => Hive::ExitCodes::USAGE,
+            "message" => message
+          )
+          raise Hive::InvalidTaskPath, message
+        end
       end
 
       require "hive/commands/web"
-      Hive::Commands::Web.new(bind: options[:bind], port: options[:port]).call
+      # Every option defaults to false/nil, so there is no present-vs-defaulted
+      # distinction to preserve — pass them straight through (subcommand is nil
+      # for the foreground server, which is the constructor's default).
+      Hive::Commands::Web.new(
+        subcommand,
+        bind: options[:bind],
+        port: options[:port],
+        no_bootstrap: options[:no_bootstrap],
+        unsafe: options[:unsafe] || options[:allow_public],
+        force: options[:force],
+        json: options[:json],
+        detach: options[:detach]
+      ).call
     end
 
     desc "tui", "Open the live, keystroke-driven dashboard for every active task"

@@ -3180,6 +3180,80 @@ end
     end
   end
 
+  # The web "Repair daemon" button enqueues under the __global__ sentinel.
+  # The consumer must special-case it (not reject as unknown_project) and
+  # dispatch `hive daemon install --force` even though no project is registered.
+  def test_global_maintenance_repair_dispatches_without_registered_project
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home
+      )
+      write_request_file(state_home, slug: "daemon-repair", request_id: "REP",
+                         project: Q::GLOBAL_MAINTENANCE_PROJECT,
+                         argv: %w[hive daemon install --force], trigger: "web_daemon_repair")
+
+      dispatcher.tick(now: T0)
+
+      refute logger.events.any? { |(n, a)| n == :dispatch_request_rejected && a[:request_id] == "REP" },
+             "global maintenance request must not be rejected as unknown_project"
+      assert sup.spawned.any? { |f| f[:command].include?("daemon install --force") },
+             "the repair command must actually be dispatched"
+    end
+  end
+
+  def test_global_maintenance_rejects_argv_outside_allowlist
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home
+      )
+      # An allowlisted verb that passes valid_argv? (a `daemon` verb outside the
+      # maintenance allowlist is already rejected as invalid_argv upstream, so use
+      # a non-daemon read verb) but is NOT in GLOBAL_MAINTENANCE_ARGVS: it reaches
+      # process_global_maintenance_request and must be refused there, not dispatched.
+      write_request_file(state_home, slug: "global-maint", request_id: "REPX",
+                         project: Q::GLOBAL_MAINTENANCE_PROJECT,
+                         argv: %w[hive markers clear global-maint], trigger: "web_daemon_repair")
+
+      dispatcher.tick(now: T0)
+
+      rejected = logger.events.find { |(n, a)| n == :dispatch_request_rejected && a[:request_id] == "REPX" }
+      refute_nil rejected
+      assert_equal "disallowed_global_request", rejected[1][:reason]
+      assert_empty sup.spawned
+    end
+  end
+
+  # A valid global-maintenance argv (in GLOBAL_MAINTENANCE_ARGVS) that is
+  # ALREADY in flight for the same (__global__, slug) must be blocked
+  # reason=in_flight — not dispatched a second time. Exercises the
+  # running_task? guard in process_global_maintenance_request.
+  def test_global_maintenance_blocked_when_repair_already_in_flight
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      dispatcher, sup, ctrl, logger, _mw = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home
+      )
+      # Pre-seed an in-flight repair for the SAME (__global__, daemon-repair).
+      ctrl.record_dispatch(pid: 8888, project: Q::GLOBAL_MAINTENANCE_PROJECT,
+                           slug: "daemon-repair", stage: nil,
+                           command: "hive daemon install --force", started_at: T0,
+                           state_file_mtime: nil)
+      write_request_file(state_home, slug: "daemon-repair", request_id: "REPDUP",
+                         project: Q::GLOBAL_MAINTENANCE_PROJECT,
+                         argv: %w[hive daemon install --force], trigger: "web_daemon_repair")
+
+      dispatcher.tick(now: T0)
+
+      blocked = logger.events.find { |(n, a)| n == :dispatch_request_blocked && a[:request_id] == "REPDUP" }
+      refute_nil blocked, "an already-in-flight global repair must log blocked, not re-dispatch"
+      assert_equal "in_flight", blocked[1][:reason]
+      # Only the pre-seeded slot exists; the duplicate request must NOT spawn.
+      assert_empty sup.spawned, "the duplicate repair request must not spawn a second install"
+      # The request file stays on disk for a later tick once the slot frees.
+      files = Dir.glob(File.join(Q.directory(state_home: state_home), "*.json"))
+      assert_equal 1, files.size, "a blocked request must remain queued for the next tick"
+    end
+  end
+
   def test_dispatch_request_blocked_when_in_flight_for_same_slug
     Dir.mktmpdir("hive-dispatch-queue") do |state_home|
       dispatcher, sup, ctrl, logger, _mw = make_dispatcher(

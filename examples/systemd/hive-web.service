@@ -1,0 +1,56 @@
+# Sample systemd-user unit for `hive web` (Linux).
+#
+# BEFORE INSTALLING: edit ExecStart= to match where YOUR `hive` binary
+# lives. `which hive` shows it. Common paths:
+#
+#   %h/.local/bin/hive                           ← README dev-clone symlink
+#                                                  (ln -sf ~/Dev/hive/bin/hive ~/.local/bin/hive)
+#   %h/Dev/hive/bin/hive                         ← direct from a clone, no symlink
+#   /usr/local/bin/hive                          ← system gem install
+#   %h/.local/share/mise/shims/hive              ← mise / rbenv / asdf / chruby shim
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp examples/systemd/hive-web.service ~/.config/systemd/user/
+#   $EDITOR ~/.config/systemd/user/hive-web.service   # confirm ExecStart=
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now hive-web
+#
+# Verify it actually started (catches a wrong ExecStart= path before the
+# StartLimitBurst kicks in):
+#   systemctl --user status hive-web
+#   journalctl --user -u hive-web -n 50
+#
+# To survive logout (run when no user session is active):
+#   sudo loginctl enable-linger $USER
+#
+# `hive web install` rewrites HIVE_BIN=, Environment=PATH=, and ExecStart=
+# to match the resolved binary + Ruby manager detected on the host. If you
+# copy this template verbatim, the default %h/.local/bin/hive is the
+# option-A install location and system Ruby is assumed. StartLimit* caps
+# the respawn loop so a wrong ExecStart= path stops cleanly with `failed`
+# instead of relaunching forever.
+
+[Unit]
+Description=Hive web UI
+After=network.target
+StartLimitBurst=3
+StartLimitIntervalSec=300
+
+[Service]
+Type=simple
+# systemd user services do NOT inherit your interactive shell's PATH:
+#   1. HIVE_BIN — absolute path to the binary.
+#   2. PATH — covers incidental shell-outs and the gem's bin/hive wrapper
+#      whose `#!/usr/bin/env ruby` shebang needs a Ruby with the gem's
+#      dependencies. `hive web install` detects mise/rbenv/asdf and prepends
+#      the matching shim directory; otherwise the minimal PATH below covers
+#      system-Ruby installs.
+Environment=HIVE_BIN=%h/.local/bin/hive
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/.local/bin/hive web
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

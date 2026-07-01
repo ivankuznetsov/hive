@@ -56,7 +56,7 @@ class OpenClawSkillsTest < Minitest::Test
     assert_includes body, "yay -S --noconfirm --needed hive-bin"
     assert_includes body, "v0.2.0/install.sh"
     assert_includes body, "daemon install"
-    assert_includes body, "init . --json </dev/null"
+    assert_includes body, "setup --json"
     assert_includes body, "slash-command text after `/hive` as arguments for `hive_cmd`"
     assert_includes body, '"${hive_cmd}" --help'
     assert_includes body, "Pass arguments safely"

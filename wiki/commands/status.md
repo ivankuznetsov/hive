@@ -1,9 +1,9 @@
 ---
 title: hive status
 type: command
-source: lib/hive/commands/status.rb
+source: lib/hive/commands/status.rb, lib/hive/diagnostic_evidence.rb
 created: 2026-04-25
-updated: 2026-06-28
+updated: 2026-06-30
 tags: [command, status, observability, json, diagnostics, legacy-dirs, task-id, archive, dependencies, pr]
 ---
 
@@ -112,13 +112,13 @@ hive status --diagnose <slug-or-folder> [--project <name>] [--stage <stage>] [--
 hive status --diagnose <slug-or-folder> [--project <name>] [--stage <stage>] --write [--json]
 ```
 
-Without `--write`, `--diagnose` resolves the target via `Hive::TaskResolver` and is read-only. For a **red-recovery** row it prints the same local diagnostic payload `hive status --json` carries on that row. For any **other** row with evidence on disk it diverges deliberately (R5): where `hive status --json` reports `diagnostic: null` (the field doubles as a health signal there), `--diagnose` instead synthesizes a non-null diagnostic via `Hive::DiagnosticEvidence`. So `diagnostic == null` is **not** a health signal on this surface — a healthy/`COMPLETE` task can carry a non-null evidence diagnostic here.
+Without `--write`, `--diagnose` resolves the target via `Hive::TaskResolver` and is read-only. For a **red-recovery** row it prints the same local diagnostic payload `hive status --json` carries on that row. For any **other** row with evidence on disk it diverges deliberately: where `hive status --json` reports `diagnostic: null` because the field doubles as a health signal there, `--diagnose` can synthesize a non-null diagnostic through `Hive::DiagnosticEvidence`. So `diagnostic == null` is not a health signal on this surface.
 
-`Hive::DiagnosticEvidence` fills the nil-diagnostic gap in tier order: `diagnostics/red-status.md` (a prior agent verdict), then the newest meaningful `logs/*.log` line (newest by **mtime**, picked before the `LOG_GLOB_CAP` cap so a fresh-but-earlier-named log isn't dropped), then the current marker on the task state file. Logs are globbed from both the in-folder `logs/` **and** the inferred global per-task log dir `.hive-state/logs/<slug>/` (the primary run-log dir for coding tasks, derived from `Hive::Task::PATH_RE`). The result carries an explicit tier so the detail line is prefixed by source — `Diagnostics:` (red-status), `Log:` (a log), or `Marker:` (the state file) — instead of always saying "Log:". The resolver must never block and never raise: every tier gates on `File.file?` (so a FIFO / device / directory named like evidence is refused before any `open(2)`), symlinked evidence — a `*.log`/`*.md` *file* symlink **or** a `logs -> /outside` *directory* symlink — escaping the task/log roots is rejected, and the marker read is byte-capped so an oversized state file can't OOM. That fallback emits a one-line summary plus a source path instead of a bare "no diagnostic" result.
+`Hive::DiagnosticEvidence` fills the nil-diagnostic gap in tier order: `diagnostics/red-status.md` (a prior agent verdict), then the newest meaningful `logs/*.log` line by mtime, then the current marker on the task state file. It checks both in-folder `logs/` and the inferred global per-task log directory `.hive-state/logs/<slug>/`, derived from `Hive::Task::PATH_RE`. The result carries an explicit source label (`Diagnostics:`, `Log:`, or `Marker:`). The resolver is best-effort and must not block or raise: it refuses non-regular files, refuses symlinked evidence that escapes the trusted roots, byte-caps marker reads, catches deep YAML parse failures, and degrades to `nil` when evidence is unusable.
 
 With `--write`, `Hive::DiagnosisAgent` uses the configured development profile (`execute.agent` via `Hive::Stages::Base.stage_profile`) to produce a concise markdown diagnosis, then atomically writes `<task>/diagnostics/red-status.md`. Defaults are `timeout_sec.diagnose || 600` and `budget_usd.diagnose || 5`. The agent gets the task folder as an add-dir and runs from the task worktree when one exists, otherwise the project root. The worktree pointer is validated against the configured worktree root before it is used as cwd. Custom execute profiles are rejected for diagnose unless their `generated_by` value has first been added to `Hive::Schemas::DIAGNOSTIC_GENERATORS` and the published schemas. The command does not claim the task lock and does not write workflow markers.
 
-JSON output uses schema `hive-status-diagnose`, version `2`, and returns `slug`, `id`, `display_name`, `task_folder`, `marker_summary`, `state_file`, `diagnostic`, and `path` (set only when `--write` wrote an artifact). `marker_summary` is the current marker name plus display attrs (null on a markerless task, never `"NONE"`). `state_file` is the authoritative state file `marker_summary` was read from, threaded so the bot's evidence fallback can pin the marker tier to the same file. Both `marker_summary` and `state_file` are **optional** in the schema (not `required`) so adding them stayed a non-breaking additive change per `lib/hive.rb` — no schema-version bump.
+JSON output uses schema `hive-status-diagnose`, version `2`, and returns `slug`, `id`, `display_name`, `task_folder`, `diagnostic`, and `path` (set only when `--write` wrote an artifact).
 
 ## Read-only
 
@@ -128,7 +128,8 @@ Normal `status` and `status --diagnose` without `--write` do not mutate filesyst
 
 - `test/integration/status_test.rb` — empty registry, action grouping, suggested commands, stale-lock decoration.
 - `test/unit/commands/status_test.rb` — status row collection, vanished-folder and transient duplicate stage-move races, non-finalize forward moves, state-file `ENOENT` re-raise when the folder survives, multi-row duplicate pruning, genuine collision preservation, corrupted finalize rows, legacy dir warnings, live task-lock action override, `folder_mtime` JSON emission, `pr_url` extraction from `pr.md` frontmatter, text/archive PR-column rendering, old-archive hiding, and archive-mode listing.
-- `test/unit/commands/status_diagnose_test.rb` — local diagnose JSON and agent-written artifact refresh.
+- `test/unit/commands/status_diagnose_test.rb` — local diagnose JSON, read-only `DiagnosticEvidence` fallback for non-red rows, schema validation of evidence payloads, and agent-written artifact refresh.
+- `test/unit/diagnostic_evidence_test.rb` — evidence-tier ordering, source labels, newest-log selection, global log-dir inference, marker-tier fallback, redaction/truncation, invalid UTF-8 handling, symlink/regular-file safety, never-raise degradation, and deep YAML hardening.
 - `test/unit/task_action_test.rb` — diagnostic extraction, redaction, artifact selection, marker fallback, non-red nil.
 
 ## Backlinks

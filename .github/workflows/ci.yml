@@ -156,7 +156,11 @@ jobs:
         run: |
           set -euo pipefail
           plist="$HOME/Library/LaunchAgents/local.hive-web.plist"
-          bundle exec hive web install
+          # --no-bootstrap: skip the managed-web-bundle fetch (its release asset
+          # doesn't exist until a version is tagged, so a plain `install` 404s).
+          # The plist's WorkingDirectory is rewritten to $HOME, not the app dir,
+          # so the install mechanics need no bundle.
+          bundle exec hive web install --no-bootstrap
           test -f "$plist" || { echo "web plist not written to $plist" >&2; exit 1; }
           if grep -q "/Users/YOU" "$plist"; then echo "web plist WorkingDirectory placeholder not rewritten to \$HOME" >&2; exit 1; fi
           if ! launchctl list | grep -q local.hive-web; then echo "web job not loaded into launchd" >&2; exit 1; fi

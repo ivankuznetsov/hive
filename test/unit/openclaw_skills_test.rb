@@ -97,6 +97,39 @@ class OpenClawSkillsTest < Minitest::Test
     assert_includes body, "hive bot tail"
   end
 
+  def test_umbrella_skill_documents_local_dogfood_workflow
+    _metadata, body = read_skill("hive")
+    dogfood = section(body, "## Local Dogfood")
+    safety = section(body, "## Safety Boundaries")
+
+    assert_operator body.index(/^## Local Dogfood$/), :<, body.index(/^## Safety Boundaries$/)
+
+    [
+      "gh pr view <number> --json state,mergedAt,baseRefName,statusCheckRollup",
+      "command -v hive",
+      'readlink -f "$(command -v hive)"',
+      "hive daemon status --json",
+      "systemctl --user status hive-daemon.service --no-pager",
+      "preserve dirty worktree",
+      "do not bump or release",
+      "rollback",
+      # Pin the numbered Rollback step heading, not just the prose "rollback"
+      # token, so a future prose reword cannot silently drop the section.
+      "8. Rollback:"
+    ].each do |literal|
+      assert_includes dogfood, literal
+    end
+
+    # The dogfood restart guidance must not weaken or relocate the Safety
+    # Boundaries confirmation contract, so pin these literals to that section.
+    [
+      "restate the effect",
+      "daemon stop"
+    ].each do |literal|
+      assert_includes safety, literal
+    end
+  end
+
   def test_umbrella_skill_documents_status_bundle_playbook
     _metadata, body = read_skill("hive")
     status_bundle = section(body, "## Status Bundle")
@@ -183,7 +216,7 @@ class OpenClawSkillsTest < Minitest::Test
   end
 
   def section(body, heading)
-    start_index = body.index(heading)
+    start_index = body.index(/^#{Regexp.escape(heading)}$/)
     refute_nil start_index, "#{heading} section must exist"
 
     remainder = body[start_index..]

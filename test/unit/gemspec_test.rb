@@ -10,6 +10,13 @@ class GemspecTest < Minitest::Test
     assert_includes spec.files, "bin/hive-babysitter-stub-git"
   end
 
+  def test_gem_package_includes_launcher_scripts
+    spec = Gem::Specification.load(GEMSPEC_PATH)
+
+    assert_includes spec.files, "lib/hive/scripts/interactive_claude_wrapper.sh"
+    assert_includes spec.files, "lib/hive/scripts/stop_hook.sh"
+  end
+
   def test_gem_executables_exclude_bash_hv_launcher
     spec = Gem::Specification.load(GEMSPEC_PATH)
 

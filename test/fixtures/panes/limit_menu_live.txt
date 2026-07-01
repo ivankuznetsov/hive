@@ -1,0 +1,8 @@
+▐▛███▜▌   Claude Code v2.1.170
+Fable 5 with high effort · Claude Max
+/home/asterio/Dev/hive
+
+What do you want to do?
+❯ 1. Stop and wait for limit to reset
+  2. Add funds to continue with usage credits
+  3. Switch to Team plan

@@ -583,7 +583,8 @@ class RunReviewTest < Minitest::Test
             status: :error,
             escalations_path: File.join(ctx.task_folder, "reviews", "escalations-#{format('%02d', ctx.pass)}.md"),
             error_message: "limits reached for claude: You've hit your session limit · resets 8pm (Europe/London)",
-            tampered_files: []
+            tampered_files: [],
+            limit_text: "You've hit your session limit · resets 8pm (Europe/London)"
           )
         end
         begin
@@ -620,7 +621,8 @@ class RunReviewTest < Minitest::Test
             status: :error,
             escalations_path: File.join(ctx.task_folder, "reviews", "escalations-#{format('%02d', ctx.pass)}.md"),
             error_message: "triage agent failed (timeout)",
-            tampered_files: []
+            tampered_files: [],
+            limit_text: nil
           )
         end
         begin
@@ -1167,7 +1169,7 @@ class RunReviewTest < Minitest::Test
             FileUtils.mkdir_p(File.dirname(esc))
             File.write(esc, "# Escalations for pass #{format('%02d', ctx.pass)}\n")
             Hive::Stages::Review::Triage::Result.new(
-              status: :ok, escalations_path: esc, error_message: nil, tampered_files: []
+              status: :ok, escalations_path: esc, error_message: nil, tampered_files: [], limit_text: nil
             )
           end
 
@@ -1251,7 +1253,7 @@ class RunReviewTest < Minitest::Test
           FileUtils.mkdir_p(File.dirname(esc))
           File.write(esc, "# Escalations for pass #{format('%02d', ctx.pass)}\n\n_All clean._\n")
           Hive::Stages::Review::Triage::Result.new(
-            status: :ok, escalations_path: esc, error_message: nil, tampered_files: []
+            status: :ok, escalations_path: esc, error_message: nil, tampered_files: [], limit_text: nil
           )
         end
 
@@ -1305,7 +1307,7 @@ class RunReviewTest < Minitest::Test
             esc = File.join(ctx.task_folder, "reviews", "escalations-#{format('%02d', ctx.pass)}.md")
             File.write(esc, "# Escalations for pass #{format('%02d', ctx.pass)}\n\n_All clean._\n")
             Hive::Stages::Review::Triage::Result.new(
-              status: :ok, escalations_path: esc, error_message: nil, tampered_files: []
+              status: :ok, escalations_path: esc, error_message: nil, tampered_files: [], limit_text: nil
             )
           }) do
             with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:|
@@ -1395,7 +1397,7 @@ class RunReviewTest < Minitest::Test
               esc = File.join(ctx.task_folder, "reviews", "escalations-#{format('%02d', ctx.pass)}.md")
               File.write(esc, "# Escalations for pass #{format('%02d', ctx.pass)}\n\n_All clean._\n")
               Hive::Stages::Review::Triage::Result.new(
-                status: :ok, escalations_path: esc, error_message: nil, tampered_files: []
+                status: :ok, escalations_path: esc, error_message: nil, tampered_files: [], limit_text: nil
               )
             }) do
               capture_io { Hive::Commands::Run.new(folder).call }
@@ -1447,7 +1449,7 @@ class RunReviewTest < Minitest::Test
           FileUtils.mkdir_p(File.dirname(esc))
           File.write(esc, "# Escalations for pass #{format('%02d', ctx.pass)}\n\n_All clean._\n")
           Hive::Stages::Review::Triage::Result.new(
-            status: :ok, escalations_path: esc, error_message: nil, tampered_files: []
+            status: :ok, escalations_path: esc, error_message: nil, tampered_files: [], limit_text: nil
           )
         end
 
@@ -1535,7 +1537,7 @@ class RunReviewTest < Minitest::Test
             MD
           end
           Hive::Stages::Review::Triage::Result.new(
-            status: :ok, escalations_path: esc, error_message: nil, tampered_files: []
+            status: :ok, escalations_path: esc, error_message: nil, tampered_files: [], limit_text: nil
           )
         end
 
@@ -1615,7 +1617,7 @@ class RunReviewTest < Minitest::Test
           FileUtils.mkdir_p(File.dirname(esc))
           File.write(esc, "# Escalations for pass #{format('%02d', ctx.pass)}\n\n_All clean._\n")
           Hive::Stages::Review::Triage::Result.new(
-            status: :ok, escalations_path: esc, error_message: nil, tampered_files: []
+            status: :ok, escalations_path: esc, error_message: nil, tampered_files: [], limit_text: nil
           )
         end
 
@@ -1684,7 +1686,7 @@ class RunReviewTest < Minitest::Test
           FileUtils.mkdir_p(File.dirname(esc))
           File.write(esc, "# Escalations for pass #{format('%02d', ctx.pass)}\n\n- [ ] needs human review\n")
           Hive::Stages::Review::Triage::Result.new(
-            status: :ok, escalations_path: esc, error_message: nil, tampered_files: []
+            status: :ok, escalations_path: esc, error_message: nil, tampered_files: [], limit_text: nil
           )
         end
 
@@ -1731,13 +1733,14 @@ class RunReviewTest < Minitest::Test
               status: :error,
               escalations_path: nil,
               error_message: "tmux_session_terminated before writing expected output file",
-              tampered_files: []
+              tampered_files: [],
+              limit_text: nil
             )
           else
             esc = File.join(ctx.task_folder, "reviews", "escalations-#{format('%02d', ctx.pass)}.md")
             File.write(esc, "# Escalations for pass #{format('%02d', ctx.pass)}\n\n- [ ] needs human review\n")
             Hive::Stages::Review::Triage::Result.new(
-              status: :ok, escalations_path: esc, error_message: nil, tampered_files: []
+              status: :ok, escalations_path: esc, error_message: nil, tampered_files: [], limit_text: nil
             )
           end
         end
@@ -1954,7 +1957,7 @@ class RunReviewTest < Minitest::Test
           FileUtils.mkdir_p(File.dirname(esc))
           File.write(esc, "# Escalations for pass #{format('%02d', ctx.pass)}\n")
           Hive::Stages::Review::Triage::Result.new(
-            status: :ok, escalations_path: esc, error_message: nil, tampered_files: []
+            status: :ok, escalations_path: esc, error_message: nil, tampered_files: [], limit_text: nil
           )
         end
 
@@ -1983,7 +1986,7 @@ class RunReviewTest < Minitest::Test
       with_tmp_git_repo do |dir|
         folder = setup_review_task(dir)
         result = Hive::Stages::Review::CiFix::Result.new(
-          status: :error, attempts: 1, last_output: "ci failed", error_message: "no runner"
+          status: :error, attempts: 1, last_output: "ci failed", error_message: "no runner", limit_text: nil
         )
 
         with_replaced_singleton_method(Hive::Stages::Review::CiFix, :run!, ->(**_kwargs) { result }) do
@@ -1995,6 +1998,37 @@ class RunReviewTest < Minitest::Test
         assert_equal :review_error, marker.name
         assert_equal "ci", marker.attrs["phase"]
         assert_equal "ci_unrunnable", marker.attrs["reason"]
+      end
+    end
+  end
+
+  def test_ci_error_result_with_limit_text_yields_limits_reached_marker
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+        result = Hive::Stages::Review::CiFix::Result.new(
+          status: :error,
+          attempts: 1,
+          last_output: "ci failed",
+          error_message: "limits reached for claude: Claude Code v2.1.170",
+          limit_text: "You've hit your session limit"
+        )
+
+        before = Time.now.utc.floor
+        with_replaced_singleton_method(Hive::Stages::Review::CiFix, :run!, ->(**_kwargs) { result }) do
+          _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+          assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        end
+        after = Time.now.utc
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_error, marker.name
+        assert_equal "ci", marker.attrs["phase"]
+        assert_equal "limits_reached", marker.attrs["reason"]
+        assert_equal "ci hit a usage/credit limit", marker.attrs["message"]
+        retry_after = Time.parse(marker.attrs.fetch("retry_after"))
+        assert retry_after >= before + Hive::AgentLimit::RETRY_COOLDOWN_SEC
+        assert retry_after <= after + Hive::AgentLimit::RETRY_COOLDOWN_SEC
       end
     end
   end
@@ -2190,7 +2224,8 @@ class RunReviewTest < Minitest::Test
                 status: triage_status,
                 escalations_path: nil,
                 error_message: "triage #{triage_status}",
-                tampered_files: tampered_files
+                tampered_files: tampered_files,
+                limit_text: nil
               )
             }) do
               with_replaced_singleton_method(Hive::Stages::Review, :triage_retry_backoff, ->(_attempt) { }) do
@@ -2228,7 +2263,7 @@ class RunReviewTest < Minitest::Test
             escalations = File.join(ctx.task_folder, "reviews", "escalations-01.md")
             File.write(escalations, "# Escalations for pass 01\n")
             Hive::Stages::Review::Triage::Result.new(
-              status: :ok, escalations_path: escalations, error_message: nil, tampered_files: []
+              status: :ok, escalations_path: escalations, error_message: nil, tampered_files: [], limit_text: nil
             )
           }) do
             _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
@@ -2266,7 +2301,7 @@ class RunReviewTest < Minitest::Test
             escalations = File.join(ctx.task_folder, "reviews", "escalations-01.md")
             File.write(escalations, "# Escalations for pass 01\n")
             Hive::Stages::Review::Triage::Result.new(
-              status: :ok, escalations_path: escalations, error_message: nil, tampered_files: []
+              status: :ok, escalations_path: escalations, error_message: nil, tampered_files: [], limit_text: nil
             )
           }) do
             capture_io { Hive::Commands::Run.new(folder).call }
@@ -2304,6 +2339,238 @@ class RunReviewTest < Minitest::Test
         assert_equal "fix", marker.attrs["phase"]
         assert_equal "fix_failed", marker.attrs["reason"]
         assert_equal "1", marker.attrs["pass"]
+      end
+    end
+  end
+
+  def test_fix_agent_stop_hook_timeout_with_commit_artifacts_uses_completion_fallback
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+        worktree_path = YAML.safe_load(File.read(File.join(folder, "worktree.yml"))).fetch("path")
+        reviews_dir = File.join(folder, "reviews")
+        FileUtils.mkdir_p(reviews_dir)
+        File.write(File.join(reviews_dir, "stub-reviewer-01.md"), "## High\n- [x] apply a fix\n")
+        File.write(File.join(reviews_dir, "escalations-01.md"), "# Escalations for pass 01\n\n_All clean._\n")
+        Hive::Markers.set(File.join(folder, "task.md"), :review_waiting, pass: 1, escalations: 1)
+
+        accepted_seen = nil
+        with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:|
+          accepted_seen = accepted
+          File.write(File.join(worktree_path, "fix.txt"), "fixed\n")
+          system("git", "-C", worktree_path, "add", "fix.txt") || raise("git add failed")
+          system("git", "-C", worktree_path, "commit", "-m", "fix review finding", "--quiet") ||
+            raise("git commit failed")
+          {
+            status: :timeout,
+            error_message: "claude stop hook did not signal completion",
+            completion_evidence: {
+              pane_idle: true,
+              process_exited: nil,
+              exit_code: nil,
+              tmux_readable: true,
+              session_alive: true,
+              reason: "turn_ended_without_stop_hook",
+              expected_done_path: File.join(folder, ".done"),
+              expected_result_path: File.join(folder, "result.json"),
+              pid: 12_345
+            }
+          }
+        }) do
+          capture_io { Hive::Commands::Run.new(folder).call }
+        end
+
+        assert_match(/apply a fix/, accepted_seen)
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_complete, marker.name
+        assert File.exist?(File.join(reviews_dir, "fix-success-01.md"))
+        events = File.readlines(File.join(folder, "events.jsonl"), chomp: true).map { |line| JSON.parse(line) }
+        fallback = events.select { |event| event["event_type"] == "claude_completion_fallback" }
+        assert_equal 1, fallback.size
+        assert_includes fallback.first.fetch("message"), "phase=fix"
+        assert_includes fallback.first.fetch("message"), "pass=01"
+        assert_includes fallback.first.fetch("message"), "reason=turn_ended_without_stop_hook"
+        refute_includes File.read(File.join(folder, "task.md")), "REVIEW_ERROR"
+      end
+    end
+  end
+
+  def test_fix_agent_stop_hook_timeout_with_no_change_evidence_uses_completion_fallback
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+        reviews_dir = File.join(folder, "reviews")
+        FileUtils.mkdir_p(reviews_dir)
+        reviewer_file = File.join(reviews_dir, "stub-reviewer-01.md")
+        File.write(reviewer_file, "## High\n- [x] apply a fix\n")
+        File.write(File.join(reviews_dir, "escalations-01.md"), "# Escalations for pass 01\n\n_All clean._\n")
+        Hive::Markers.set(File.join(folder, "task.md"), :review_waiting, pass: 1, escalations: 1)
+
+        accepted_seen = nil
+        with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:|
+          accepted_seen = accepted
+          # Whole-pass no-change: the fix agent investigated the finding,
+          # found the code already correct, and dispositioned it
+          # RESOLVED/NO-FIX — leaving NO unapplied AUTO-FIX work and no
+          # commit. (A do-nothing agent that left `- [x] apply a fix`
+          # unapplied is exercised by the review_errors test below.)
+          File.write(reviewer_file, "## High\n- [x] RESOLVED/NO-FIX: lib/foo.rb already handles the case\n")
+          {
+            status: :timeout,
+            error_message: "claude stop hook did not signal completion",
+            completion_evidence: {
+              pane_idle: true,
+              process_exited: nil,
+              exit_code: nil,
+              tmux_readable: true,
+              session_alive: true,
+              reason: "turn_ended_without_stop_hook",
+              expected_done_path: File.join(folder, ".done"),
+              expected_result_path: File.join(folder, "result.json")
+            }
+          }
+        }) do
+          capture_io { Hive::Commands::Run.new(folder).call }
+        end
+
+        assert_match(/apply a fix/, accepted_seen)
+        refute_match(/RESOLVED\/NO-FIX/, accepted_seen)
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_complete, marker.name
+        assert File.exist?(File.join(reviews_dir, "fix-success-01.md"))
+        events = File.readlines(File.join(folder, "events.jsonl"), chomp: true).map { |line| JSON.parse(line) }
+        fallback = events.select { |event| event["event_type"] == "claude_completion_fallback" }
+        assert_equal 1, fallback.size
+        assert_includes fallback.first.fetch("message"), "commit_evidence=whole_pass_no_change"
+      end
+    end
+  end
+
+  def test_fix_agent_stop_hook_timeout_without_commit_or_no_change_still_review_errors
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+        reviews_dir = File.join(folder, "reviews")
+        FileUtils.mkdir_p(reviews_dir)
+        File.write(File.join(reviews_dir, "stub-reviewer-01.md"), "## High\n- [x] apply a fix\n")
+        File.write(File.join(reviews_dir, "escalations-01.md"), "# Escalations for pass 01\n\n_All clean._\n")
+        Hive::Markers.set(File.join(folder, "task.md"), :review_waiting, pass: 1, escalations: 1)
+
+        accepted_seen = nil
+        with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:|
+          accepted_seen = accepted
+          {
+            status: :timeout,
+            error_message: "claude stop hook did not signal completion",
+            completion_evidence: {
+              pane_idle: true,
+              process_exited: nil,
+              exit_code: nil,
+              tmux_readable: true,
+              session_alive: true,
+              reason: "turn_ended_without_stop_hook",
+              expected_done_path: File.join(folder, ".done"),
+              expected_result_path: File.join(folder, "result.json")
+            }
+          }
+        }) do
+          _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+          assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        end
+
+        assert_match(/apply a fix/, accepted_seen)
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_error, marker.name
+        assert_equal "fix_failed", marker.attrs["reason"]
+        # R9: the launcher's stop-hook diagnostic must reach the terminal
+        # marker so an operator sees WHY the fix failed, not a bare reason.
+        assert_includes marker.attrs["message"].to_s, "stop hook did not signal completion"
+        refute File.exist?(File.join(reviews_dir, "fix-success-01.md"))
+      end
+    end
+  end
+
+  def test_fix_agent_limit_text_yields_limits_reached_marker
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+        FileUtils.mkdir_p(File.join(folder, "reviews"))
+        File.write(File.join(folder, "reviews", "stub-reviewer-01.md"), "## High\n- [x] apply a fix\n")
+        Hive::Markers.set(File.join(folder, "task.md"), :review_waiting, pass: 1, escalations: 1)
+
+        accepted_seen = nil
+        with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:|
+          accepted_seen = accepted
+          {
+            status: :error,
+            error_message: "limits reached for claude: Claude Code v2.1.170",
+            limit_text: "You've hit your session limit"
+          }
+        }) do
+          _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+          assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        end
+
+        assert_match(/apply a fix/, accepted_seen)
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_error, marker.name
+        assert_equal "fix", marker.attrs["phase"]
+        assert_equal "limits_reached", marker.attrs["reason"]
+        assert_equal "1", marker.attrs["pass"]
+        refute_nil marker.attrs["retry_after"]
+      end
+    end
+  end
+
+  # R4: an unresolved escalation (count_escalations > 0) must keep the pass
+  # terminal even when a commit landed and the launcher evidence looks clean.
+  # Covered at the unit level (no_unresolved_escalation phase fact) — this
+  # locks the wiring end-to-end through the full review-stage branch.
+  def test_fix_agent_stop_hook_timeout_with_unresolved_escalation_still_review_errors
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+        worktree_path = YAML.safe_load(File.read(File.join(folder, "worktree.yml"))).fetch("path")
+        reviews_dir = File.join(folder, "reviews")
+        FileUtils.mkdir_p(reviews_dir)
+        File.write(File.join(reviews_dir, "stub-reviewer-01.md"), "## High\n- [x] apply a fix\n")
+        # An escalation the human has NOT answered (a `- [ ]` item) — a real
+        # commit lands below, but the unresolved escalation alone blocks
+        # suppression.
+        File.write(File.join(reviews_dir, "escalations-01.md"),
+                   "# Escalations for pass 01\n\n- [ ] needs human review\n")
+        Hive::Markers.set(File.join(folder, "task.md"), :review_waiting, pass: 1, escalations: 1)
+
+        with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:|
+          File.write(File.join(worktree_path, "fix.txt"), "fixed\n")
+          system("git", "-C", worktree_path, "add", "fix.txt") || raise("git add failed")
+          system("git", "-C", worktree_path, "commit", "-m", "fix review finding", "--quiet") ||
+            raise("git commit failed")
+          {
+            status: :timeout,
+            error_message: "claude stop hook did not signal completion",
+            completion_evidence: {
+              pane_idle: true,
+              process_exited: nil,
+              exit_code: nil,
+              tmux_readable: true,
+              session_alive: true,
+              reason: "turn_ended_without_stop_hook",
+              expected_done_path: File.join(folder, ".done"),
+              expected_result_path: File.join(folder, "result.json")
+            }
+          }
+        }) do
+          _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+          assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        end
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_error, marker.name
+        assert_equal "fix_failed", marker.attrs["reason"]
+        refute File.exist?(File.join(reviews_dir, "fix-success-01.md"))
+        events = File.readlines(File.join(folder, "events.jsonl"), chomp: true).map { |line| JSON.parse(line) }
+        assert_empty events.select { |event| event["event_type"] == "claude_completion_fallback" }
       end
     end
   end

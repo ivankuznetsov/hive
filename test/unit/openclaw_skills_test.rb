@@ -97,6 +97,43 @@ class OpenClawSkillsTest < Minitest::Test
     assert_includes body, "hive bot tail"
   end
 
+  def test_umbrella_skill_classifies_recovery_markers
+    _metadata, body = read_skill("hive")
+    recovery = section(body, "## Marker Recovery")
+    safety = section(body, "## Safety Boundaries")
+
+    assert_operator body.index(/^## Safety Boundaries$/), :<, body.index(/^## Marker Recovery$/)
+
+    [
+      "## Marker Recovery",
+      "hive status --json",
+      "hive daemon status --json",
+      "hive daemon start --detach",
+      "claude stop hook did not signal completion",
+      "fix_failed",
+      "limits_reached",
+      "retry_after",
+      "agent_working",
+      "REVIEW_ERROR",
+      "ERROR",
+      "let the healer",
+      "ask before",
+      "markers clear",
+      "--match-attr marker_id=<id>"
+    ].each do |literal|
+      assert_includes recovery, literal
+    end
+
+    # Anchor decision entry 6 on its rule-specific phrase so the terminal/manual
+    # `ERROR` guidance is pinned independently of the "ERROR" substring inside
+    # "REVIEW_ERROR" (which the bare literal above matches trivially).
+    assert_includes recovery, "Terminal/manual `ERROR`"
+
+    assert_includes safety, "markers clear"
+    assert_includes safety, "restate the effect"
+    assert_includes safety, "explicit user confirmation"
+  end
+
   def test_umbrella_skill_documents_local_dogfood_workflow
     _metadata, body = read_skill("hive")
     dogfood = section(body, "## Local Dogfood")

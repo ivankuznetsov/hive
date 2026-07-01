@@ -2,6 +2,7 @@ require "fileutils"
 require "json"
 require "open3"
 require "time"
+require "yaml"
 
 require "hive/agent_profiles"
 require "hive/agent_limit"
@@ -843,6 +844,7 @@ module Hive
 
     def wait_for_done_signal(task, runner, timeout, log_label)
       deadline = Time.now + timeout
+      work_started = false
       loop do
         # A usage/credit wall stalls claude WITHOUT ever touching `.done`,
         # so this exit_code_only path (the default `claude`/tmux execute
@@ -882,12 +884,155 @@ module Hive
           return { status: :ok, log_label: log_label }
         end
 
+        # Cheap per-poll turn-end signals, read off the already-captured
+        # pane tail and the recorded PID. The full evidence bundle (which
+        # adds a session_exists? tmux round-trip) is assembled only once a
+        # candidate turn-end appears — not on every poll for the whole
+        # timeout.
+        pane_idle = completion_pane_idle?(pane_tail)
+        pid = recorded_claude_pid(task)
+        process_exited = pid ? !process_alive?(pid) : nil
+
+        # Work-started latch. Between our send_keys("Enter") (tmux_runner
+        # returns with no confirmation the turn began) and Claude's first
+        # streamed token, the input box can still show the idle `❯` caret,
+        # so an idle pane on the very first poll is the PRE-work prompt —
+        # reading it as "turn ended" would seal an untouched worktree as
+        # complete (the cold-start false positive this guard exists to
+        # prevent). Only a non-idle pane proves the turn is actually
+        # underway. A live recorded process is NOT proof: the recorded pid is
+        # the persistent tmux REPL pane (record_claude_pid → pane_pid), which
+        # stays alive before, during and after every turn, so
+        # `process_exited == false` is true on poll 1 before Claude does any
+        # work — latching it would defeat this guard. Rely solely on
+        # `pane_idle == false`; absent that, we drain to the deadline backstop.
+        work_started ||= pane_idle == false
+
+        if work_started && (pane_idle == true || process_exited == true)
+          evidence = completion_evidence(
+            task, runner,
+            pane_tail: pane_tail,
+            reason: "turn_ended_without_stop_hook",
+            pane_idle: pane_idle,
+            process_exited: process_exited,
+            pid: pid
+          )
+          if completion_evidence_turn_ended?(evidence)
+            return {
+              status: :timeout,
+              error_message: "claude stop hook did not signal completion",
+              completion_evidence: evidence
+            }
+          end
+        end
+
         if Time.now >= deadline
-          return { status: :timeout, error_message: "claude stop hook did not signal completion" }
+          return {
+            status: :timeout,
+            error_message: "claude stop hook did not signal completion",
+            completion_evidence: completion_evidence(
+              task,
+              runner,
+              pane_tail: pane_tail,
+              reason: "deadline_without_stop_hook"
+            )
+          }
         end
 
         sleep [ poll_interval, deadline - Time.now ].min
       end
+    end
+
+    def completion_evidence_turn_ended?(evidence)
+      evidence[:pane_idle] == true || evidence[:process_exited] == true
+    end
+
+    # `pane_idle`, `process_exited` and `pid` may be passed in when the
+    # caller already computed them for its cheap per-poll candidate check,
+    # so we don't re-read `.lock` / re-probe the process here. They default
+    # to `:unset`, in which case we compute them (the deadline path does).
+    def completion_evidence(task, runner, pane_tail:, reason:,
+                            pane_idle: :unset, process_exited: :unset, pid: :unset)
+      session_alive, session_error = completion_session_alive(runner)
+      pid = recorded_claude_pid(task) if pid == :unset
+      process_exited = (pid ? !process_alive?(pid) : nil) if process_exited == :unset
+      pane_idle = completion_pane_idle?(pane_tail) if pane_idle == :unset
+      # `tmux_readable` is ADVISORY-ONLY: capture_limit_tail rescues
+      # TmuxError to "" (never nil), so this is effectively always true in
+      # production. Real gone-tmux protection comes from `session_alive`
+      # (the session_exists? probe below), which ClaudeCompletionFallback
+      # rejects on false — not from this field.
+      tmux_readable = !pane_tail.nil?
+
+      {
+        reason: reason,
+        process_exited: process_exited,
+        # ADVISORY-ONLY in the tmux REPL: there is no real per-turn exit
+        # code (the stop hook signals completion out-of-band and this loop
+        # never observes a process exit status), so this is always nil and
+        # ClaudeCompletionFallback.clean_exit_code? treats nil as "no
+        # objection". Crash protection does NOT rest on this field — it
+        # rests on the phase-fact conjunction (artifacts + commit/no-change)
+        # the review runner supplies.
+        exit_code: nil,
+        pane_idle: pane_idle,
+        sentinel_present: File.exist?(done_path(task)),
+        expected_done_path: done_path(task),
+        expected_result_path: result_path(task),
+        session_alive: session_alive,
+        session_error: session_error,
+        tmux_readable: tmux_readable,
+        pid: pid
+      }
+    end
+
+    def completion_pane_idle?(pane_tail)
+      return nil if pane_tail.nil? || pane_tail.empty?
+
+      claude_ready_prompt?(pane_tail)
+    rescue StandardError
+      nil
+    end
+
+    def completion_session_alive(runner)
+      return [ nil, nil ] unless runner.respond_to?(:session_exists?)
+
+      [ runner.session_exists?, nil ]
+    rescue Hive::TmuxError => e
+      [ false, e.message ]
+    end
+
+    # ADVISORY-ONLY: the recorded pid is trusted as written without
+    # confirming it belongs to this run's process (a stale/reused pid in
+    # `.lock["claude_pid"]` is taken at face value). This is safe because the
+    # pid only ever feeds `process_exited`, which after the cold-start-latch
+    # fix no longer gates work_started — a wrongly-"alive" pid makes the
+    # turn-end predicate strictly MORE conservative (it never reports
+    # `process_exited == true`, so it can only delay sealing, never falsely
+    # seal). A session-ownership check would make the safety explicit but is
+    # not required for correctness today.
+    def recorded_claude_pid(task)
+      path = File.join(task.folder, ".lock")
+      return nil unless File.exist?(path)
+
+      data = YAML.safe_load(File.read(path)) || {}
+      pid = data["claude_pid"]
+      pid.is_a?(Integer) && pid.positive? ? pid : nil
+    rescue Psych::Exception, SystemCallError, IOError
+      nil
+    end
+
+    def process_alive?(pid)
+      Process.kill(0, pid)
+      true
+    rescue Errno::ESRCH
+      false
+    rescue Errno::EPERM
+      # We lack permission to signal the pid, but it EXISTS and belongs to
+      # another user — report alive. This is the conservative reading: an
+      # "alive" answer only ever withholds a `process_exited == true`
+      # turn-end signal, never manufactures one (see recorded_claude_pid).
+      true
     end
 
     # Read `result.json` (if present) and translate `status` into the

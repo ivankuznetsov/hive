@@ -140,7 +140,6 @@ class ReviewPhaseFailureHelpersTest < Minitest::Test
         :mark_review_phase_failure,
         task,
         phase: :triage,
-        terminal_reason: "triage_failed",
         pass: 1,
         error_message: "limits reached for claude: Claude Code v2.1.170",
         limit_text: "You've hit your session limit"

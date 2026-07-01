@@ -579,6 +579,11 @@ class RunReviewTest < Minitest::Test
   # A non-limit triage failure (e.g. a timeout) must stay terminal: only an
   # actual usage/credit limit earns the self-healing retry stamp, so a real
   # bug can't masquerade as a transient limit and loop forever.
+  # Load-bearing real-path negative: this feeds the actual wrapper string a
+  # non-limit triage failure produces ("triage agent failed (timeout)") — the
+  # kind of input production classify sees — and pins it to terminal `unknown`
+  # with no false self-heal. Unlike the injected-signal wiring positive above,
+  # this exercises the reason the plumbing genuinely emits in the field.
   def test_triage_non_limit_error_stays_terminal_unknown
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -615,44 +620,42 @@ class RunReviewTest < Minitest::Test
     end
   end
 
+  # One wiring positive for the triage phase: a captured error carrying a
+  # specific signal must reach classify and stamp that reason on the marker.
+  # The full per-reason mapping is proven by the unit suite
+  # (ReviewErrorReasonTest); this only guards the mark_review_phase_failure →
+  # classify → marker plumbing, so a single representative reason suffices —
+  # extra synthetic reasons here just re-test the unit suite through the runner.
   def test_triage_non_limit_error_is_classified_from_captured_output
-    cases = {
-      "merge_conflict" => "Automatic merge failed; fix conflicts and then commit the result.",
-      "network_timeout" => "Connection timed out while connecting to api.github.com",
-      "tool_permission_denied" => "tool shell_command denied: operation not permitted",
-      "agent_crashed" => "panic: runtime error: invalid memory address"
-    }
-
-    cases.each do |expected_reason, error_message|
-      with_tmp_global_config do
-        with_tmp_git_repo do |dir|
-          folder = setup_review_task(dir)
-          Hive::Stages::Review::Triage.singleton_class.alias_method(:__orig_triage_run_classify!, :run!)
-          Hive::Stages::Review::Triage.define_singleton_method(:run!) do |cfg:, ctx:|
-            Hive::Stages::Review::Triage::Result.new(
-              status: :error,
-              escalations_path: File.join(ctx.task_folder, "reviews", "escalations-#{format('%02d', ctx.pass)}.md"),
-              error_message: error_message,
-              tampered_files: []
-            )
-          end
-          begin
-            capture_io do
-              with_replaced_singleton_method(Hive::Stages::Review, :triage_retry_backoff, ->(_attempt) { }) do
-                assert_raises(Hive::TaskInErrorState) { Hive::Commands::Run.new(folder).call }
-              end
+    error_message = "Automatic merge failed; fix conflicts and then commit the result."
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+        Hive::Stages::Review::Triage.singleton_class.alias_method(:__orig_triage_run_classify!, :run!)
+        Hive::Stages::Review::Triage.define_singleton_method(:run!) do |cfg:, ctx:|
+          Hive::Stages::Review::Triage::Result.new(
+            status: :error,
+            escalations_path: File.join(ctx.task_folder, "reviews", "escalations-#{format('%02d', ctx.pass)}.md"),
+            error_message: error_message,
+            tampered_files: []
+          )
+        end
+        begin
+          capture_io do
+            with_replaced_singleton_method(Hive::Stages::Review, :triage_retry_backoff, ->(_attempt) { }) do
+              assert_raises(Hive::TaskInErrorState) { Hive::Commands::Run.new(folder).call }
             end
-
-            marker = Hive::Markers.current(File.join(folder, "task.md"))
-            assert_equal :review_error, marker.name
-            assert_equal "triage", marker.attrs["phase"]
-            assert_equal expected_reason, marker.attrs["reason"]
-            assert_nil marker.attrs["retry_after"]
-            assert_includes marker.attrs["message"].to_s, error_message
-          ensure
-            Hive::Stages::Review::Triage.singleton_class.alias_method(:run!, :__orig_triage_run_classify!)
-            Hive::Stages::Review::Triage.singleton_class.send(:remove_method, :__orig_triage_run_classify!)
           end
+
+          marker = Hive::Markers.current(File.join(folder, "task.md"))
+          assert_equal :review_error, marker.name
+          assert_equal "triage", marker.attrs["phase"]
+          assert_equal "merge_conflict", marker.attrs["reason"]
+          assert_nil marker.attrs["retry_after"]
+          assert_includes marker.attrs["message"].to_s, error_message
+        ensure
+          Hive::Stages::Review::Triage.singleton_class.alias_method(:run!, :__orig_triage_run_classify!)
+          Hive::Stages::Review::Triage.singleton_class.send(:remove_method, :__orig_triage_run_classify!)
         end
       end
     end
@@ -2183,41 +2186,70 @@ class RunReviewTest < Minitest::Test
     end
   end
 
+  # One wiring positive for the fix phase (mirror of the triage wiring positive):
+  # a captured error carrying a specific signal reaches classify and stamps that
+  # reason. Per-reason mapping lives in the unit suite; one reason suffices here.
   def test_fix_agent_failure_reason_is_classified_from_captured_output
-    cases = {
-      "merge_conflict" => "CONFLICT (content): Merge conflict in lib/review.rb",
-      "network_timeout" => "Fetch failed: ECONNRESET connection reset by peer",
-      "tool_permission_denied" => "Permission denied while calling shell tool",
-      "agent_crashed" => "segmentation fault (core dumped)"
-    }
+    error_message = "CONFLICT (content): Merge conflict in lib/review.rb"
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+        FileUtils.mkdir_p(File.join(folder, "reviews"))
+        File.write(File.join(folder, "reviews", "stub-reviewer-01.md"), "## High\n- [x] apply a fix\n")
+        Hive::Markers.set(File.join(folder, "task.md"), :review_waiting, pass: 1, escalations: 1)
 
-    cases.each do |expected_reason, error_message|
-      with_tmp_global_config do
-        with_tmp_git_repo do |dir|
-          folder = setup_review_task(dir)
-          FileUtils.mkdir_p(File.join(folder, "reviews"))
-          File.write(File.join(folder, "reviews", "stub-reviewer-01.md"), "## High\n- [x] apply a fix\n")
-          Hive::Markers.set(File.join(folder, "task.md"), :review_waiting, pass: 1, escalations: 1)
-
-          accepted_seen = nil
-          with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:|
-            accepted_seen = accepted
-            { status: :error, error_message: error_message }
-          }) do
-            out, err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
-            assert_equal Hive::ExitCodes::TASK_IN_ERROR, status,
-                         "expected #{expected_reason}, got status=#{status}, out=#{out.inspect}, err=#{err.inspect}"
-          end
-
-          assert_match(/apply a fix/, accepted_seen)
-          marker = Hive::Markers.current(File.join(folder, "task.md"))
-          assert_equal :review_error, marker.name
-          assert_equal "fix", marker.attrs["phase"]
-          assert_equal expected_reason, marker.attrs["reason"]
-          assert_equal "1", marker.attrs["pass"]
-          assert_nil marker.attrs["retry_after"]
-          assert_includes marker.attrs["message"].to_s, error_message
+        accepted_seen = nil
+        with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:|
+          accepted_seen = accepted
+          { status: :error, error_message: error_message }
+        }) do
+          out, err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+          assert_equal Hive::ExitCodes::TASK_IN_ERROR, status,
+                       "expected merge_conflict, got status=#{status}, out=#{out.inspect}, err=#{err.inspect}"
         end
+
+        assert_match(/apply a fix/, accepted_seen)
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_error, marker.name
+        assert_equal "fix", marker.attrs["phase"]
+        assert_equal "merge_conflict", marker.attrs["reason"]
+        assert_equal "1", marker.attrs["pass"]
+        assert_nil marker.attrs["retry_after"]
+        assert_includes marker.attrs["message"].to_s, error_message
+      end
+    end
+  end
+
+  # Load-bearing real-path negative for the fix phase (mirror of
+  # test_triage_non_limit_error_stays_terminal_unknown): the wrapper string the
+  # launcher actually forwards on a session death is not a classifier signal, so
+  # it must stay terminal `unknown` — never a false crash/merge bucket — with no
+  # retry_after and the raw cause preserved in message=.
+  def test_fix_agent_non_limit_error_stays_terminal_unknown
+    error_message = "tmux_session_terminated before writing expected output file: /tmp/out/fix.md"
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        folder = setup_review_task(dir)
+        FileUtils.mkdir_p(File.join(folder, "reviews"))
+        File.write(File.join(folder, "reviews", "stub-reviewer-01.md"), "## High\n- [x] apply a fix\n")
+        Hive::Markers.set(File.join(folder, "task.md"), :review_waiting, pass: 1, escalations: 1)
+
+        with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:|
+          { status: :error, error_message: error_message }
+        }) do
+          _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+          assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        end
+
+        marker = Hive::Markers.current(File.join(folder, "task.md"))
+        assert_equal :review_error, marker.name
+        assert_equal "fix", marker.attrs["phase"]
+        assert_equal "unknown", marker.attrs["reason"],
+                     "a non-limit fix failure with no classifier signal must stay terminal unknown"
+        assert_nil marker.attrs["retry_after"],
+                   "a terminal unknown fix failure must not carry a retry_after"
+        assert_includes marker.attrs["message"].to_s, error_message,
+                        "the terminal unknown marker must surface the real fix error_message"
       end
     end
   end

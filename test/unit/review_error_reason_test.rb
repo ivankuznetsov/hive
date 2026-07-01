@@ -54,12 +54,17 @@ class ReviewErrorReasonTest < Minitest::Test
     assert_empty emitted - Hive::ReviewErrorReason::REASONS
   end
 
-  # One representative line per regex alternative. Each line is crafted to
-  # match EXACTLY its target alternative (not a sibling alternative of the
-  # same reason), so a one-character typo in any single regex flips that row
-  # to "unknown" and fails here — the 100% line-coverage gate cannot catch
-  # this because the regex array literals read as covered after one classify
-  # call. Keep this table in lockstep with PATTERNS.
+  # One representative line per regex alternative, in PATTERNS order. Each line
+  # is crafted to match EXACTLY its target alternative (not a sibling of the
+  # same reason). test_every_pattern_alternative_has_a_representative_line zips
+  # this table against the flattened PATTERNS regexes and asserts line[i]
+  # matches regex[i], so a one-character typo in any single regex flips its
+  # bound line to a non-match and fails there. Count parity alone would let an
+  # edit double-cover one alternative and orphan another while staying green;
+  # binding each line to its own regex closes that gap. The 100% line-coverage
+  # gate cannot catch this because the regex array literals read as covered
+  # after one classify call. Keep this table in lockstep with PATTERNS (order
+  # included).
   REPRESENTATIVE_LINES = {
     # merge_conflict
     "CONFLICT (content): collision in file" => "merge_conflict",
@@ -98,10 +103,23 @@ class ReviewErrorReasonTest < Minitest::Test
   }.freeze
 
   def test_every_pattern_alternative_has_a_representative_line
-    alternative_count = Hive::ReviewErrorReason::PATTERNS.sum { |_, regexes| regexes.size }
+    flat_regexes = Hive::ReviewErrorReason::PATTERNS.flat_map do |reason, regexes|
+      regexes.map { |regex| [ reason, regex ] }
+    end
+    bound = REPRESENTATIVE_LINES.to_a
 
-    assert_equal alternative_count, REPRESENTATIVE_LINES.size,
-                 "every regex alternative in PATTERNS needs one representative line in REPRESENTATIVE_LINES"
+    assert_equal flat_regexes.size, bound.size,
+                 "every regex alternative in PATTERNS needs exactly one representative line (same order)"
+
+    # Bind line[i] to regex[i]: a per-regex typo flips its own line to a
+    # non-match and fails here even if a sibling alternative still classifies
+    # the reason (the double-cover/orphan hole count parity alone leaves open).
+    flat_regexes.zip(bound).each do |(reason, regex), (line, expected)|
+      assert_equal reason, expected,
+                   "representative line #{line.inspect} is out of PATTERNS order: bound to #{reason}, tagged #{expected}"
+      assert_match regex, line.strip,
+                   "#{line.inspect} must match its bound #{reason} alternative #{regex.inspect}"
+    end
   end
 
   def test_representative_lines_classify_to_expected_reason
@@ -126,5 +144,33 @@ class ReviewErrorReasonTest < Minitest::Test
   def test_rate_limit_language_is_reserved_for_agent_limit_gate
     assert_equal "unknown", Hive::ReviewErrorReason.classify("rate limit reached")
     assert Hive::AgentLimit.limit_reached?("rate limit reached")
+  end
+
+  # The realistic wrapper strings the triage/fix plumbing actually forwards
+  # (see ReviewErrorReason.classify's input-contract note) plus benign agent
+  # narration must classify to `unknown`, not a specific bucket. The positive
+  # tables above prove the patterns FIRE; this proves they don't OVER-fire on
+  # prose. Notably the launcher's own `tmux_session_terminated` signature — a
+  # real error_message that reaches classify — is pinned here, so a future
+  # regex broadening (e.g. adding /terminated/i to agent_crashed) that
+  # reclassified an infra timeout as a crash fails loudly instead of silently.
+  NON_FIRING_LINES = [
+    "expected output file missing or empty: /tmp/out/review.md",
+    "tmux_session_terminated before writing expected output file: /tmp/out/review.md",
+    "tmux_pane_unreadable: no server running on /tmp/tmux-1000/default",
+    "claude stop hook did not signal completion",
+    "triage agent failed (timeout)",
+    "fix agent failed (error)",
+    "exit_code=1",
+    "deadline reached before prompt was sent",
+    "Applied the requested fix and committed it cleanly.",
+    "All checks passed; nothing else to do."
+  ].freeze
+
+  def test_realistic_wrapper_strings_and_narration_stay_unknown
+    NON_FIRING_LINES.each do |line|
+      assert_equal "unknown", Hive::ReviewErrorReason.classify(line),
+                   "#{line.inspect} must fall back to unknown, not a specific bucket"
+    end
   end
 end

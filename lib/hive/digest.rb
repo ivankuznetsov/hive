@@ -53,7 +53,18 @@ module Hive
       stats ||= Stats.new
 
       grouped = collector.for_date(local_date)
-      pending_pairings = pairing_store.pending.size
+      # `PairingStore#pending` prunes-on-read and opens a `.lock` file, so an
+      # I/O-faulted state dir (read-only/full: EROFS/ENOSPC/EACCES) can make it
+      # raise SystemCallError/IOError. The pairing count is purely
+      # informational — never let it abort the whole digest. The only rescue
+      # below (ModelError) would not catch it, `Commands::Digest#call` only
+      # rescues Hive::Error, and the daemon would then hot-loop the crash.
+      pending_pairings =
+        begin
+          pairing_store.pending.size
+        rescue SystemCallError, IOError
+          0
+        end
       message, status =
         if empty_grouped?(grouped)
           [ Renderer.empty, :empty ]

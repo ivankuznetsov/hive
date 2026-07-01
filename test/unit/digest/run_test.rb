@@ -24,6 +24,12 @@ class HiveDigestRunTest < Minitest::Test
     def pending = Array.new(count) { Object.new }
   end
 
+  # Stands in for a read-only/full state dir: PairingStore#pending prunes-on-
+  # read and opens a lock file, so it can raise SystemCallError there.
+  RaisingPairingStore = Class.new do
+    def pending = raise(Errno::EROFS, "state dir is read-only")
+  end
+
   FakeSender = Struct.new(:deliveries) do
     def preflight! = nil
 
@@ -304,6 +310,24 @@ class HiveDigestRunTest < Minitest::Test
 
     assert_equal :sent, result.status
     refute_includes result.message, "pairing", "a non-empty digest with no pending pairings adds no notice"
+  end
+
+  def test_digest_survives_pairing_store_io_failure
+    sender = FakeSender.new([])
+    result = Hive::Digest.run(
+      date: Date.new(2026, 6, 13),
+      dry_run: true,
+      cfg: {},
+      collector: FakeCollector.new({}),
+      sender: sender,
+      pairing_store: RaisingPairingStore.new
+    )
+
+    assert_equal :empty, result.status,
+                 "an I/O-faulted pairing store must not abort the digest"
+    refute_includes result.message, "pairing",
+                    "a failed pairing count degrades to no notice, not a crash"
+    assert_equal result.message, sender.deliveries.first.fetch(:text)
   end
 
   private

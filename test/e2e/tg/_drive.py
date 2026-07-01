@@ -80,8 +80,35 @@ def drive(client, bot, project):
         return 1
     target.click()
 
+    # The current /idea text flow has a file-collection step: after picking a
+    # project the bot replies "Send any files now, or press Done." and only
+    # finalizes the capture on Done (or after files). Older/direct flows ack
+    # immediately. Handle both: wait for either the ack or a button message,
+    # and tap Done when the collection keyboard appears.
+    follow = wait_for(
+        client, bot,
+        lambda m: (ACK_MARKER in (m.message or "")) or bool(m.buttons),
+        after_id=picker.id,
+    )
+    after_for_ack = picker.id
+    if follow and ACK_MARKER not in (follow.message or "") and follow.buttons:
+        done = None
+        for row in follow.buttons:
+            for btn in row:
+                if "done" in (btn.text or "").lower():
+                    done = btn
+                    break
+            if done:
+                break
+        if not done:
+            labels = [b.text for row in follow.buttons for b in row]
+            print(f"FAIL file-collection step had no Done button; saw {labels}")
+            return 1
+        done.click()
+        after_for_ack = follow.id
+
     ack = wait_for(client, bot, lambda m: ACK_MARKER in (m.message or ""),
-                   after_id=picker.id)
+                   after_id=after_for_ack)
     if not ack:
         print("FAIL no capture acknowledgment after tapping picker")
         return 1

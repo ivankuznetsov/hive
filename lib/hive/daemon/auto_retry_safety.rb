@@ -14,6 +14,7 @@ module Hive
       def safe_to_retry?(row)
         return [ false, "terminal success marker present" ] if SUCCESS_MARKERS.include?(row.marker.to_s)
 
+        # coding-scoped (block): per-stage work-area safety checks are specific to the coding workflow's execute/brainstorm/plan stages
         case row.stage.to_s
         when "4-execute"
           execute_safe?(row)

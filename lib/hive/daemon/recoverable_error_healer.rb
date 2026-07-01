@@ -170,7 +170,7 @@ module Hive
         observe_pre_clear_mtime(row)
         audit_retry(row, now: now, reason: reason, category: category, fingerprint: fingerprint,
                     attempts: @attempts[key], probes: probes)
-        requeue_plan_rerun(row, trigger: "recoverable_error_auto_retry") if Hive::Workflows.coding_row?(row) && row.stage.to_s == "3-plan"
+        requeue_plan_rerun(row, trigger: "recoverable_error_auto_retry") if Hive::Workflows.coding_row?(row) && row.stage.to_s == "3-plan" # coding-scoped: plan re-run requeue only applies to the coding workflow's 3-plan stage
       rescue StandardError
         nil
       end

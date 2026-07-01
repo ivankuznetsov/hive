@@ -313,6 +313,9 @@ module Hive
       "daemon" => {
         "enabled" => false,
         "autostart" => false,
+        "auto_retry" => {
+          "enabled" => true
+        },
         "poll_interval_sec" => 30,
         "fast_poll_sec" => 1,
         "edit_debounce_sec" => 30,
@@ -2223,6 +2226,19 @@ module Hive
         raise ConfigError,
               "daemon.autostart in #{describe_source(source_path)} must be a boolean " \
               "(true / false); got #{autostart.inspect} (#{autostart.class})"
+      end
+
+      auto_retry = daemon["auto_retry"]
+      unless auto_retry.nil? || auto_retry.is_a?(Hash)
+        raise ConfigError,
+              "daemon.auto_retry in #{describe_source(source_path)} must be a hash; " \
+              "got #{auto_retry.inspect} (#{auto_retry.class})"
+      end
+      auto_retry_enabled = auto_retry && auto_retry["enabled"]
+      unless auto_retry_enabled.nil? || auto_retry_enabled == true || auto_retry_enabled == false
+        raise ConfigError,
+              "daemon.auto_retry.enabled in #{describe_source(source_path)} must be a boolean " \
+              "(true / false); got #{auto_retry_enabled.inspect} (#{auto_retry_enabled.class})"
       end
 
       DAEMON_NUMERIC_BOUNDS.each do |key, min|

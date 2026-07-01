@@ -20,9 +20,58 @@ class ConfigTest < Minitest::Test
       assert_equal 1800, cfg["timeout_sec"]["digest"]
       assert_equal "8-finalize", cfg["dependency_gate_stage"]
       assert_equal "coding", cfg["default_workflow"]
+      assert_equal true, cfg.dig("daemon", "auto_retry", "enabled")
       assert_nil cfg.dig("review", "adhoc", "reviewers")
       assert_equal false, cfg.dig("review", "adhoc", "fix")
       assert_equal dir, cfg["project_root"]
+    end
+  end
+
+  def test_load_allows_daemon_auto_retry_enabled_override
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        daemon:
+          auto_retry:
+            enabled: false
+      YAML
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal false, cfg.dig("daemon", "auto_retry", "enabled")
+      assert_equal 30, cfg.dig("daemon", "poll_interval_sec"),
+                   "nested daemon auto_retry override must deep-merge without dropping siblings"
+    end
+  end
+
+  def test_load_rejects_non_hash_daemon_auto_retry
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        daemon:
+          auto_retry: nope
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+      assert_includes err.message, "daemon.auto_retry"
+      assert_includes err.message, "must be a hash"
+    end
+  end
+
+  def test_load_rejects_non_boolean_daemon_auto_retry_enabled
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        daemon:
+          auto_retry:
+            enabled: sometimes
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+      assert_includes err.message, "daemon.auto_retry.enabled"
+      assert_includes err.message, "must be a boolean"
     end
   end
 

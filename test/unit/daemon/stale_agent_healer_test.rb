@@ -2281,6 +2281,30 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     )
   end
 
+  def test_auto_recovers_review_error_fix_failed_when_claude_stop_hook_did_not_signal
+    with_marker_file do |state_file|
+      message = "claude stop hook did not signal completion"
+      File.write(
+        state_file,
+        "# task\n\n<!-- REVIEW_ERROR phase=fix reason=fix_failed pass=1 message=\"#{message}\" -->\n"
+      )
+      row = make_review_error_row(
+        state_file,
+        reason: "fix_failed",
+        phase: "fix",
+        attrs: { "message" => message }
+      )
+
+      heal([ row ])
+
+      heal_event = @logger.events.find { |name, _| name == :marker_healed }
+      assert heal_event, "expected stop-hook fix auto-recovery, got: #{@logger.events.inspect}"
+      assert_equal "fix_claude_stop_hook", heal_event[1][:reason]
+      assert_equal 1, heal_event[1][:attempts]
+      refute_match(/REVIEW_ERROR/, File.read(state_file))
+    end
+  end
+
   def test_auto_recovers_review_error_all_failed
     with_marker_file do |state_file|
       File.write(state_file, "# task\n\n<!-- REVIEW_ERROR phase=reviewers reason=all_failed pass=1 -->\n")

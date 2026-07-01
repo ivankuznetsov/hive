@@ -49,16 +49,21 @@ The terminal state is still the last marker in the stage state file:
 - `<!-- COMPLETE -->` means brainstorm is ready to advance;
 - `<!-- ERROR ... -->` means the stage failed and normal recovery applies.
 
-The Stop hook writes two sibling files in the task folder:
+The Stop hook writes two sibling files in the orchestrator-owned task
+folder, even when Claude's process cwd is the feature worktree:
 
 - `.done` tells Hive that an interactive Claude turn ended;
 - `result.json` keeps the raw hook payload for forensics.
 
-`.done` is only a wake-up event. On every wake-up, Hive re-reads
-the stage file; if the marker is still non-terminal, `.done` is deleted
-and the watchdog keeps waiting. This preserves the manual-intervention
-model: a human may type in the attached pane, but completion still requires
-Claude to write the expected terminal marker.
+For marker-owned stages, `.done` is only a wake-up event. On every wake-up,
+Hive re-reads the stage file; if the marker is still non-terminal, `.done`
+is deleted and the watchdog keeps waiting. For `:exit_code_only` spawns
+such as review-fix, Hive reads `result.json` and treats `ok`, `complete`,
+or `success` as a clean exit. The path contract is pinned in
+`test/unit/stop_hook_installer_test.rb`: `StopHookInstaller` installs
+`.claude/settings.json` under both the task folder and launch cwd, but
+both copies set `HIVE_TASK_STAGE_DIR` to the task folder, which matches
+`ClaudeLauncher.done_path` and `ClaudeLauncher.result_path`.
 
 The wrapper resolves `claude.permission_mode` (default `bypassPermissions`)
 to the same CLI flags the headless `-p` path uses: `bypassPermissions` becomes
@@ -74,8 +79,12 @@ the allowed tool list, and the prompt still instructs Claude to modify only
 ## Failure Modes
 
 - **Stop hook does not fire:** Hive periodically captures the pane tail.
-  It only exits if the pane shows a terminal marker and `brainstorm.md`
-  has the same terminal marker.
+  For marker-owned waits, it only exits if the pane shows a terminal marker
+  and the stage file has the same terminal marker. For `:exit_code_only`
+  waits, Hive attaches conservative completion evidence to the timeout
+  result when the pane has returned to Claude's idle prompt or the recorded
+  Claude PID has exited. Review-fix can accept that evidence only when its
+  own artifacts and commit/no-change checks also pass.
 - **Pane crashes:** no terminal marker appears, so the existing brainstorm
   timeout applies and Hive writes `<!-- ERROR reason=timeout ... -->`.
 - **Duplicate session name:** Hive refuses to start a second pane and tells
@@ -88,6 +97,46 @@ the allowed tool list, and the prompt still instructs Claude to modify only
   interactive Claude prompt before pasting. This avoids losing the prompt
   into the folder-trust screen or submitting before Claude's input box is
   ready.
+
+## Stop-Hook Signaling Finding
+
+The production failure investigated on 2026-06-30 was isolated to
+interactive tmux `:exit_code_only` waits, especially review-fix: Claude
+finished its turn and the worktree/artifacts were complete, but
+`result.json` and `.done` never appeared before the wait deadline. The
+most likely root cause is Claude Code interactive REPL Stop-hook delivery
+being absent or late for some turn completions. The alternative causes
+checked in code were path drift (`StopHookInstaller` now installs in both
+task folder and cwd while pointing both at the task folder), script write
+ordering (`stop_hook.sh` writes `result.json` before touching `.done`),
+and cleanup races (`reset_signal_files` runs before launch and cleanup runs
+after session teardown). No deterministic local reproduction was found, so
+the shipped fix is a conservative fallback in `ClaudeLauncher` plus
+review-fix phase evidence checks rather than a speculative hook rewrite.
+
+## Workaround and Recovery
+
+`claude.mode: headless` remains the recommended workaround for affected
+versions, daemon/service hosts, and any project where unattended reliability
+matters more than using the operator's interactive Claude subscription. This
+change does not automatically rewrite or revert local `.hive-state/config.yml`
+or user-level config; operators own that setting.
+
+If a task is already parked on `REVIEW_ERROR phase=fix reason=fix_failed`
+with `claude stop hook did not signal completion`, recover it only after
+verifying the evidence described in `docs/recipes.md`: review-fix artifacts
+exist, unresolved escalation count is zero, the worktree is readable, and a
+new fix commit or checked `RESOLVED/NO-FIX:` no-change artifact proves the
+pass completed. Then clear only the matching marker:
+
+```sh
+hive markers clear <FOLDER> --name REVIEW_ERROR --match-attr phase=fix,reason=fix_failed
+hive run <FOLDER>
+```
+
+This is the documented recovery path for the known stuck tasks 58 / PR #622,
+287 / PR #623, and 288 / PR #624 when their on-disk evidence satisfies the
+same predicate.
 
 ## Teardown
 

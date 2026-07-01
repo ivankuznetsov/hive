@@ -101,7 +101,7 @@ class OpenClawSkillsTest < Minitest::Test
     _metadata, body = read_skill("hive")
     status_bundle = section(body, "## Status Bundle")
 
-    assert_operator body.index("## Status Bundle"), :<, body.index("## Safety Boundaries")
+    assert_operator body.index(/^## Status Bundle$/), :<, body.index(/^## Safety Boundaries$/)
 
     [
       "hive daemon status --json",
@@ -126,6 +126,40 @@ class OpenClawSkillsTest < Minitest::Test
     end
 
     assert_includes status_bundle, "read-only"
+  end
+
+  def test_umbrella_skill_documents_daemon_diagnostics_and_repair
+    _metadata, body = read_skill("hive")
+    diagnostics = section(body, "## Daemon Diagnostics And Repair")
+
+    diagnostics_index = body.index(/^## Daemon Diagnostics And Repair$/)
+    safety_index = body.index(/^## Safety Boundaries$/)
+    assert_operator diagnostics_index, :<, safety_index
+    between = body[diagnostics_index...safety_index].sub(/\A## Daemon Diagnostics And Repair\n/, "")
+    refute_match(/^## /, between,
+      "## Daemon Diagnostics And Repair must sit immediately before ## Safety Boundaries")
+
+    [
+      "systemctl --user cat hive-daemon.service",
+      "systemctl --user show hive-daemon.service -p Environment",
+      "command -v hive",
+      "HIVE_BIN",
+      "/usr/bin/hive",
+      "~/.local/bin/hive",
+      "GEM_HOME",
+      "GEM_PATH",
+      "PATH",
+      "cannot load such file -- erb (LoadError)",
+      "ruby-erb",
+      "sudo pacman -S ruby-erb",
+      "gem install --user-install erb",
+      "systemctl --user edit hive-daemon.service",
+      "systemctl --user daemon-reload",
+      "systemctl --user restart hive-daemon.service",
+      "hive daemon status --json"
+    ].each do |literal|
+      assert_includes diagnostics, literal
+    end
   end
 
   def test_openclaw_docs_publish_only_the_single_hive_cli_slug

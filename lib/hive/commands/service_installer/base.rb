@@ -9,12 +9,12 @@ module Hive
   module Commands
     module ServiceInstaller
       # Platform-agnostic mechanics shared by per-user autostart service
-      # installers (daemon, bot). Subclasses supply only the service
+      # installers (daemon, bot, web). Subclasses supply only the service
       # identity (`service_name`, `cli_label`, `service_noun`, `unit_noun`),
-      # the target unit paths (`target_path`), the rendered unit/plist
-      # bodies (`render_systemd` / `render_launchd`), and an optional
-      # `upgrade_restart_warning` string appended on a Linux force-upgrade
-      # restart.
+      # the rendered unit/plist bodies (`render_systemd` / `render_launchd`),
+      # and an optional `upgrade_restart_warning` string appended on a Linux
+      # force-upgrade restart. The unit path derives from `service_name`
+      # (see `target_path`).
       class Base
         attr_reader :messages
 
@@ -91,6 +91,19 @@ module Hive
           "local.#{service_name}"
         end
 
+        # Per-user unit path for this service, derived from `service_name`:
+        # `~/Library/LaunchAgents/local.<name>.plist` on macOS,
+        # `~/.config/systemd/user/<name>.service` on Linux. nil on an
+        # unsupported host — `install!` reports :unsupported before touching
+        # it and `service_state` guards nil, so callers never see a path
+        # for a platform that has no service manager.
+        def target_path
+          case platform
+          when :macos then File.join(@home, "Library/LaunchAgents", "#{launchd_label}.plist")
+          when :linux then File.join(@home, ".config/systemd/user", "#{service_name}.service")
+          end
+        end
+
         # ── Subclass hooks ─────────────────────────────────────────────
         # Subclasses MUST override these. The base raises so a missing
         # override fails loudly rather than rendering a half-built unit.
@@ -109,10 +122,6 @@ module Hive
 
         def unit_noun
           raise NotImplementedError, "#{self.class} must define #unit_noun"
-        end
-
-        def target_path
-          raise NotImplementedError, "#{self.class} must define #target_path"
         end
 
         def render_systemd

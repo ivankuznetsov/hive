@@ -62,12 +62,15 @@ class WebServiceInstallerTest < Minitest::Test
     assert_equal "/h/Library/LaunchAgents/local.hive-web.plist", macos.target_path
   end
 
-  def test_target_path_raises_on_unsupported_platform
+  def test_target_path_nil_on_unsupported_platform
+    # Same contract as the daemon/bot installers: no service manager, no unit
+    # path. install! reports :unsupported and service_state guards nil, so an
+    # unsupported host degrades to "not installed" instead of raising.
     installer = Hive::Commands::Web::ServiceInstaller.new(host_os: "freebsd14", home: "/h")
 
-    error = assert_raises(Hive::InvalidTaskPath) { installer.target_path }
-    assert_match(/autostart is not supported on this platform/, error.message)
-    assert_match(/unsupported_host/, error.message,
-                 "the message must name the platform so :other is not a silent illegal state")
+    assert_nil installer.target_path
+    state = installer.service_state
+    assert_equal "unsupported", state["platform"]
+    assert_equal false, state["service_installed"]
   end
 end

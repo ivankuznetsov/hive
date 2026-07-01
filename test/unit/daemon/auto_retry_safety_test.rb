@@ -121,4 +121,24 @@ class HiveDaemonAutoRetrySafetyTest < Minitest::Test
       end
     end
   end
+
+  def test_plan_without_feedback_is_safe
+    with_tmp_dir do |dir|
+      File.write(File.join(dir, "plan.md"), "## Steps\n1. Build the thing.\n2. Ship it.\n")
+
+      ok, reason = Hive::Daemon::AutoRetrySafety.safe_to_retry?(row(folder: dir, stage: "3-plan"))
+
+      assert_equal true, ok, "a plan with no feedback keywords must be safe to retry"
+      assert_equal "no plan feedback detected", reason
+    end
+  end
+
+  def test_unenumerated_stage_fails_closed
+    with_tmp_dir do |dir|
+      ok, reason = Hive::Daemon::AutoRetrySafety.safe_to_retry?(row(folder: dir, stage: "7-artifacts"))
+
+      assert_equal false, ok, "a stage with no bespoke work-area check must fail closed"
+      assert_match(/no work-area safety check for stage 7-artifacts/, reason)
+    end
+  end
 end

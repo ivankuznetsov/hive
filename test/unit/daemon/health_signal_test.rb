@@ -6,6 +6,20 @@ class HiveDaemonHealthSignalTest < Minitest::Test
 
   Stat = Struct.new(:mtime, keyword_init: true)
 
+  FakeProfile = Struct.new(:bin, :version_error, keyword_init: true) do
+    def check_version!
+      raise version_error if version_error
+
+      "2.1.118"
+    end
+  end
+
+  FakeDoctor = Struct.new(:rows, keyword_init: true) do
+    def call
+      0
+    end
+  end
+
   def fingerprint(category, **kwargs)
     Hive::Daemon::HealthSignal.fingerprint(
       category: category,
@@ -89,6 +103,61 @@ class HiveDaemonHealthSignalTest < Minitest::Test
       Hive::Config::DEFAULTS, Dir.pwd, [ { error: "error:Timeout::Error" } ]
     )
     assert_equal error_digest, timeout_digest
+  end
+
+  def test_profile_lookup_failure_folds_into_stable_fallback_bin_and_version
+    rows = [ { label: "doctor", status: "present" } ]
+    # When AgentProfiles.lookup raises, profile_bin falls back to "claude" and
+    # profile_version folds to the stable "error:<class>" sentinel. A profile
+    # whose bin IS "claude" and whose check_version! raises the same class must
+    # therefore produce the IDENTICAL fingerprint.
+    raising = with_replaced_singleton_method(Hive::AgentProfiles, :lookup, ->(_name, cfg: nil) { raise KeyError, "no profile" }) do
+      fingerprint(:claude_launcher, doctor_rows: rows)
+    end
+    equivalent = with_replaced_singleton_method(Hive::AgentProfiles, :lookup, lambda { |_name, cfg: nil|
+      FakeProfile.new(bin: "claude", version_error: KeyError.new("no profile"))
+    }) do
+      fingerprint(:claude_launcher, doctor_rows: rows)
+    end
+
+    assert_equal equivalent, raising,
+                 "a raised lookup must fold to fallback bin 'claude' + 'error:KeyError' version sentinel"
+  end
+
+  def test_profile_version_error_sentinel_is_stable_across_messages
+    rows = [ { label: "doctor", status: "present" } ]
+    first = with_replaced_singleton_method(Hive::AgentProfiles, :lookup, lambda { |_name, cfg: nil|
+      FakeProfile.new(bin: "claude", version_error: Hive::AgentError.new("PATH exec error alpha"))
+    }) do
+      fingerprint(:claude_launcher, doctor_rows: rows)
+    end
+    second = with_replaced_singleton_method(Hive::AgentProfiles, :lookup, lambda { |_name, cfg: nil|
+      FakeProfile.new(bin: "claude", version_error: Hive::AgentError.new("PATH exec error beta"))
+    }) do
+      fingerprint(:claude_launcher, doctor_rows: rows)
+    end
+
+    # profile_version folds only the error CLASS, never the (varying) message,
+    # so two failures of the same class must yield the same fingerprint.
+    assert_equal first, second, "profile_version must fold class only, not the message"
+  end
+
+  def test_doctor_rows_digest_runs_in_process_doctor_when_rows_absent
+    digest_a = with_replaced_singleton_method(Hive::Commands::Doctor, :new, lambda { |**_kwargs|
+      FakeDoctor.new(rows: [ { label: "claude", status: "present" } ])
+    }) do
+      Hive::Daemon::HealthSignal.doctor_rows_digest(Hive::Config::DEFAULTS, Dir.pwd, nil)
+    end
+    digest_b = with_replaced_singleton_method(Hive::Commands::Doctor, :new, lambda { |**_kwargs|
+      FakeDoctor.new(rows: [ { label: "claude", status: "missing" } ])
+    }) do
+      Hive::Daemon::HealthSignal.doctor_rows_digest(Hive::Config::DEFAULTS, Dir.pwd, nil)
+    end
+
+    # With rows absent, doctor_rows_digest builds and runs the in-process
+    # doctor (doctor.call; doctor.rows inside the Timeout block); the returned
+    # rows must flow into the digest so different doctor state differs.
+    refute_equal digest_a, digest_b, "in-process doctor rows must drive the digest"
   end
 
   def test_changed_or_fallback_gate_allows_first_changed_and_elapsed_fallback

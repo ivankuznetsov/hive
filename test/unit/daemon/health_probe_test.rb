@@ -246,4 +246,127 @@ class HiveDaemonHealthProbeTest < Minitest::Test
     assert_equal [ "health_probe_error" ], result[:probes].map { |p| p[:name] }
     assert_includes result[:probes].first[:stderr_tail], "kaboom"
   end
+
+  def test_doctor_generic_error_fails_closed
+    doctor = Object.new
+    doctor.define_singleton_method(:call) { raise RuntimeError, "doctor blew up" }
+    doctor.define_singleton_method(:rows) { [] }
+    probe = Hive::Daemon::HealthProbe.new(
+      config: Hive::Config::DEFAULTS,
+      project_root: Dir.pwd,
+      doctor_factory: -> { doctor },
+      capture3: ->(_env, *_cmd) { [ "", "", Status.new(success_value: true, exitstatus: 0) ] },
+      timeout_runner: ->(_seconds, &block) { block.call }
+    )
+
+    result = probe.probe(:codex_auth)
+
+    assert_equal false, result[:ok], "a non-timeout doctor error must fail closed"
+    doctor_probe = result[:probes].find { |p| p[:name] == "doctor" }
+    assert_equal false, doctor_probe[:ok]
+    assert_includes doctor_probe[:stderr_tail], "RuntimeError: doctor blew up"
+  end
+
+  def test_default_doctor_constructor_is_used_without_injection
+    fake = FakeDoctor.new(rows: [ { label: "claude", status: "present" } ], exit_code: 0)
+    # No doctor_factory injected: the probe must build its doctor via the real
+    # default_doctor -> Hive::Commands::Doctor.new(...) path. Stub .new to keep
+    # the doctor hermetic while still exercising the constructor call site.
+    probe = with_replaced_singleton_method(Hive::Commands::Doctor, :new, ->(**_kwargs) { fake }) do
+      built = Hive::Daemon::HealthProbe.new(
+        config: Hive::Config::DEFAULTS,
+        project_root: Dir.pwd,
+        capture3: ->(_env, *_cmd) { [ "", "", Status.new(success_value: true, exitstatus: 0) ] },
+        timeout_runner: ->(_seconds, &block) { block.call }
+      )
+      built.probe(:codex_auth)
+      built
+    end
+
+    result = probe.probe(:codex_auth)
+    doctor_probe = result[:probes].find { |p| p[:name] == "doctor" }
+    assert_equal "doctor", doctor_probe[:name]
+    assert_equal true, doctor_probe[:ok], "the default_doctor path must run a real Doctor.new"
+  end
+
+  def test_claude_wrapper_syscall_error_fails_closed
+    with_replaced_singleton_method(Hive::ClaudeLauncher, :tmux_status, -> { [ :present, "tmux ok" ] }) do
+      with_replaced_singleton_method(File, :file?, lambda { |path|
+        raise Errno::EACCES, path.to_s if path.to_s.end_with?("interactive_claude_wrapper.sh")
+
+        File.exist?(path)
+      }) do
+        result = health_probe.probe(:claude_launcher)
+
+        assert_equal false, result[:ok]
+        wrapper = result[:probes].find { |p| p[:name] == "claude_wrapper" }
+        assert_equal false, wrapper[:ok], "a SystemCallError on File.file? must fail the wrapper probe closed"
+        assert_includes wrapper[:stderr_tail], "Errno::EACCES"
+      end
+    end
+  end
+
+  def test_claude_tmux_status_error_fails_closed
+    profile = FakeProfile.new(bin: "claude", version: "2.1.120")
+    with_replaced_singleton_method(Hive::ClaudeLauncher, :tmux_status, -> { raise "tmux server unreachable" }) do
+      with_replaced_singleton_method(Hive::AgentProfiles, :lookup, ->(_name, cfg: nil) { profile }) do
+        result = health_probe.probe(:claude_launcher)
+
+        assert_equal false, result[:ok]
+        tmux = result[:probes].find { |p| p[:name] == "claude_tmux" }
+        assert_equal false, tmux[:ok], "a raised tmux_status must fail the tmux probe closed"
+        assert_includes tmux[:stderr_tail], "tmux server unreachable"
+      end
+    end
+  end
+
+  def test_shell_probe_generic_error_fails_closed
+    capture3 = ->(_env, *_cmd) { raise "spawn failed: ENOENT" }
+    probe = health_probe(capture3: capture3)
+
+    result = probe.probe(:codex_auth)
+
+    assert_equal false, result[:ok]
+    login = result[:probes].find { |p| p[:name] == "codex_login_status" }
+    assert_equal false, login[:ok], "a non-timeout shell error must fail the probe closed"
+    assert_includes login[:stderr_tail], "spawn failed: ENOENT"
+  end
+
+  def test_codex_bin_lookup_failure_falls_back_to_codex_literal
+    calls = []
+    capture3 = lambda do |_env, *cmd|
+      calls << cmd
+      [ "ok", "", Status.new(success_value: true, exitstatus: 0) ]
+    end
+    probe = health_probe(capture3: capture3)
+
+    with_replaced_singleton_method(Hive::AgentProfiles, :lookup, ->(_name, cfg: nil) { raise "no codex profile" }) do
+      result = probe.probe(:codex_auth)
+
+      assert_equal true, result[:ok]
+    end
+
+    # codex_bin rescues the failed lookup and falls back to the "codex" literal,
+    # so the shell probe argv must still begin with "codex".
+    assert_equal "codex", calls[0][0], "codex_bin must fall back to the 'codex' literal on lookup failure"
+    assert_equal [ "codex", "login", "status" ], calls[0]
+  end
+
+  def test_elapsed_ms_swallows_clock_error_and_omits_ms
+    probe = health_probe
+    calls = 0
+    # First monotonic_ms call seeds `started`; the second (inside elapsed_ms)
+    # raises, so elapsed_ms rescues to nil and probe_result.compact drops :ms.
+    probe.define_singleton_method(:monotonic_ms) do
+      calls += 1
+      raise "clock unavailable" if calls >= 2
+
+      0
+    end
+
+    result = probe.probe(:codex_auth)
+
+    doctor_probe = result[:probes].find { |p| p[:name] == "doctor" }
+    refute doctor_probe.key?(:ms), "a raised clock read in elapsed_ms must drop the :ms key (nil compacted away)"
+  end
 end

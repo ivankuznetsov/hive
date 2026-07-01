@@ -366,4 +366,57 @@ class HiveDaemonRecoverableErrorHealerTest < Minitest::Test
       assert @logger.events.any? { |name, attrs| name == :auto_retry_skipped && attrs[:action] == "unknown_reason" }
     end
   end
+
+  def test_audit_carries_task_id_from_meta_yml
+    require "hive/task_meta"
+    with_error_row do |row, _state_file, dir|
+      Hive::TaskMeta.write(dir, id: 42, slug: "s", display_name: "S")
+      stub_safe do
+        healer.heal([ row ], now: NOW)
+      end
+
+      cleared = @logger.events.find { |name, attrs| name == :auto_retry && attrs[:action] == "cleared" }
+      refute_nil cleared, "the successful clear must be audited"
+      assert_equal 42, cleared.last[:task_id], "audit must read the task id from meta.yml"
+    end
+  end
+
+  def test_audit_task_id_read_failure_degrades_to_no_id
+    require "hive/task_meta"
+    with_error_row do |row, state_file, dir|
+      Hive::TaskMeta.write(dir, id: 99, slug: "s", display_name: "S")
+      with_replaced_singleton_method(Hive::TaskMeta, :read, ->(_folder) { raise "meta corrupt" }) do
+        stub_safe do
+          healer.heal([ row ], now: NOW)
+        end
+      end
+
+      # task_id rescues the read failure to nil; the audit still fires (compact
+      # drops the nil task_id) and the marker is still cleared.
+      assert_equal :none, Hive::Markers.current(state_file).name, "the clear must still succeed"
+      cleared = @logger.events.find { |name, attrs| name == :auto_retry && attrs[:action] == "cleared" }
+      refute_nil cleared, "the clear must still be audited"
+      refute cleared.last.key?(:task_id), "a failed meta read must drop task_id, not crash the tick"
+    end
+  end
+
+  def test_post_clear_bookkeeping_error_is_swallowed_after_clear
+    with_error_row do |row, state_file, _dir|
+      # Make the post-clear audit_retry emit raise ONLY for the :auto_retry
+      # event. The clear already happened, so record_successful_clear's rescue
+      # must swallow it and leave the marker cleared without raising.
+      original = @logger.method(:event)
+      @logger.define_singleton_method(:event) do |name, **attrs|
+        raise "logger down" if name == :auto_retry
+
+        original.call(name, **attrs)
+      end
+      stub_safe do
+        healer.heal([ row ], now: NOW)
+      end
+
+      assert_equal :none, Hive::Markers.current(state_file).name,
+                   "a raised post-clear audit must not un-clear the marker nor crash the tick"
+    end
+  end
 end

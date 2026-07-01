@@ -93,6 +93,39 @@ hive review <slug> --from 6-review
 
 Use `--name REVIEW_ERROR` when the runner recorded a phase error.
 
+### Recover a tmux review-fix Stop-hook timeout
+
+For affected versions, a tmux-launched review-fix agent can finish, write
+artifacts, and even commit, but still leave `REVIEW_ERROR phase=fix
+reason=fix_failed` because Claude's interactive Stop hook did not write
+`.done` / `result.json`. Hive now accepts that case only when it can prove
+completion from on-disk evidence and emits `claude_completion_fallback`.
+
+For already-stuck tasks such as task 58 / PR #622, task 287 / PR #623, and
+task 288 / PR #624, do not clear the marker blindly. First verify all of
+these:
+
+- `reviews/escalations-<NN>.md` exists and has no unresolved `[ ]` items;
+- the fix pass produced `reviews/fix-success-<NN>.md`, or the branch has a
+  fix commit after the pass began, or the reviewed files contain a checked
+  `RESOLVED/NO-FIX:` line explaining why no code change was needed;
+- the worktree is readable and `git status --porcelain` is clean;
+- there is no provider-limit, missing-output, protected-file tamper, or
+  unresolved escalation marker explaining a real failure.
+
+When the evidence is present, clear only the matching fix failure and rerun
+review:
+
+```bash
+hive markers clear <FOLDER> --name REVIEW_ERROR --match-attr phase=fix,reason=fix_failed
+hive run <FOLDER>
+```
+
+If any evidence is missing, inspect the task manually and rerun without
+clearing only after you understand the failure. `claude.mode: headless`
+remains the recommended workaround for affected versions and service hosts;
+this fix does not rewrite or revert local operator config.
+
 ## Recover From EXECUTE_STALE
 
 `EXECUTE_STALE` means execute exhausted its retry budget without leaving a clean implementation commit on the feature worktree. Start by reading what the agent produced:

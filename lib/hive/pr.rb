@@ -1,11 +1,13 @@
 require "uri"
 
 module Hive
-  # PR-URL helpers shared by every surface that displays a pull-request
-  # link: the `hive status` command, the TUI tasks pane, and the Telegram
-  # bot. Keeping `number`/`valid_http_url?` here is what stops those
-  # surfaces from drifting apart on how a PR number is parsed or which
-  # hrefs are considered safe.
+  # PR helpers shared across surfaces. Two roles live here:
+  #   * Display helpers (`number`, `valid_http_url?`, `NUMBER_WIDTH`) shared by
+  #     every surface that renders a pull-request link — the `hive status`
+  #     command, the TUI tasks pane, and the Telegram bot — so those surfaces
+  #     can't drift on how a PR number is parsed or which hrefs are safe.
+  #   * The command-input parser `identifier_to_number`, which normalises a
+  #     user-supplied PR argument (number, #number, or URL) for ad-hoc review.
   module Pr
     module_function
 
@@ -31,6 +33,34 @@ module Hive
     def number(url)
       match = url.to_s.strip.match(%r{(?:\A|/)pull/(\d+)/?(?:[?#].*)?\z})
       match ? "##{match[1]}" : nil
+    end
+
+    # Parse a user-supplied PR argument — a bare number, `#number`, or a
+    # GitHub pull-request URL — into an Integer PR number. Unlike `number`
+    # (which returns nil for unparseable input, since it scans display URLs),
+    # this is a strict command-input parser: it RAISES ArgumentError on junk
+    # so `hive review --pr <garbage>` fails loudly as a usage error rather
+    # than silently materialising the wrong PR.
+    def identifier_to_number(identifier)
+      value = identifier.to_s.strip
+
+      parsed =
+        if (match = value.match(/\A#?(\d+)\z/))
+          match[1].to_i
+        elsif (pr_number = number(value))
+          pr_number.delete_prefix("#").to_i
+        end
+
+      # A real PR number is always >= 1. `0`, `#0`, and `…/pull/0` all parse
+      # to a non-positive Integer that would otherwise yield a bogus
+      # `adhoc-review-pr-0` slug, a doomed `gh pr view 0`, and a false
+      # collision against any pr.md lacking a pr_number (nil.to_i == 0).
+      # Reject it here so the parser stays loud on junk rather than
+      # materialising the wrong PR.
+      return parsed if parsed&.positive?
+
+      raise ArgumentError,
+            "invalid PR identifier #{identifier.inspect}; pass a PR number, #number, or GitHub pull request URL"
     end
 
     # Injection-gating predicate shared by the OSC 8 (TUI) and HTML (bot)

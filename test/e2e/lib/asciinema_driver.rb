@@ -16,7 +16,7 @@ module Hive
       def self.available?
         _out, _err, status = Open3.capture3(binary, "--version")
         status.success?
-      rescue Errno::ENOENT
+      rescue SystemCallError, ArgumentError
         false
       end
 
@@ -26,7 +26,7 @@ module Hive
 
         text = out.split(/\s+/).find { |part| part.match?(/\A\d+\.\d+(?:\.\d+)?/) }
         text ? Gem::Version.new(text) : nil
-      rescue Errno::ENOENT
+      rescue SystemCallError, ArgumentError
         nil
       end
 
@@ -53,13 +53,15 @@ module Hive
         @pid = Process.spawn(
           self.class.binary, "rec", "--overwrite",
           *recorder_size_args,
-          "--output-format=asciicast-v2",
+          *recorder_output_format_args,
           "--command", command,
           @cast_path,
           out: File::NULL,
           err: File::NULL,
           pgroup: true
         )
+      rescue SystemCallError, ArgumentError => e
+        raise Unavailable, "failed to start asciinema: #{e.message}"
       end
 
       def stop
@@ -133,6 +135,12 @@ module Hive
         return [ "--window-size", "#{@cols}x#{@rows}" ] if @version.segments.first >= 3
 
         [ "--rows", @rows.to_s, "--cols", @cols.to_s ]
+      end
+
+      def recorder_output_format_args
+        return [ "--output-format=asciicast-v2" ] if @version.segments.first >= 3
+
+        []
       end
     end
   end

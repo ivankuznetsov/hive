@@ -325,7 +325,7 @@ class ClaudeLauncherTest < Minitest::Test
     with_replaced_singleton_method(Process, :clock_gettime, ->(_clock, *_args) { monotonic_now }) do
       # The post-wait classification is now the ONLY limit check (readiness
       # wins inside the loop), so the stub answers that single call.
-      with_replaced_singleton_method(Hive::AgentLimit, :limit_reached?, ->(_text) { true }) do
+      with_replaced_singleton_method(Hive::AgentLimit, :live_limit_line, ->(_text) { "after wait" }) do
         with_replaced_singleton_method(Hive::AgentLimit, :error_message, ->(_text, agent:) { "limits reached for #{agent}: after wait" }) do
           err = assert_raises(Hive::AgentError) do
             Hive::ClaudeLauncher.prepare_claude_session!(runner, deadline: monotonic_now)
@@ -547,6 +547,46 @@ class ClaudeLauncherTest < Minitest::Test
            "the idle caret at line end (with a hint footer below it) must read as ready"
   end
 
+  # Claude Code 2.1.179 paints the idle input as
+  # separator/caret/separator/footer, with a non-breaking space after the
+  # caret. The detector must not depend on the caret being one fixed number
+  # of lines above the footer.
+  def test_claude_ready_prompt_accepts_2179_nbsp_caret_with_separator_footer
+    pane = "Claude Code v2.1.179\n\n" \
+           "╭────────────────────────────────────────────────────────────────────────╮\n" \
+           "❯ \n" \
+           "╰────────────────────────────────────────────────────────────────────────╯\n" \
+           "⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+
+    assert Hive::ClaudeLauncher.claude_ready_prompt?(pane),
+           "the 2.1.179 NBSP caret with separator/footer chrome must read as ready"
+  end
+
+  # The caret separator can also be a narrow no-break space (U+202F), not just
+  # the regular NBSP (U+00A0). Both are covered by `\p{Zs}`; this pins the
+  # narrow variant so a future regex narrowing can't silently drop it.
+  def test_claude_ready_prompt_accepts_narrow_no_break_space_caret
+    pane = "Claude Code v2.1.179\n\n" \
+           "╭────────────────────────────────────────────────────────────────────────╮\n" \
+           "❯\u{202F}\n" \
+           "╰────────────────────────────────────────────────────────────────────────╯\n" \
+           "⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+
+    assert Hive::ClaudeLauncher.claude_ready_prompt?(pane),
+           "a narrow no-break space (U+202F) after the caret must read as ready"
+  end
+
+  def test_claude_ready_prompt_accepts_trailing_caret_with_unicode_separator_before_it
+    pane = "Claude Code v2.1.179\n\n" \
+           "╭────────────────────────────────────────────────────────────────────────╮\n" \
+           ".hive-state/stages/4-execute/fix-claude-tmux-ready-detector hive/state ❯\n" \
+           "╰────────────────────────────────────────────────────────────────────────╯\n" \
+           "⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+
+    assert Hive::ClaudeLauncher.claude_ready_prompt?(pane),
+           "a Unicode separator before a trailing caret must match the idle prompt"
+  end
+
   def test_claude_ready_prompt_accepts_current_footer_when_banner_scrolled_out
     pane = "?────────────────────────────────────────────────────────────────────────\n" \
            "  hive-patrol-command-bin-hive-babysitter-stub-gh-5031d524 hive-patrol/command-bin-hive-babysitter-stub-gh-5031d524  ❯\n" \
@@ -561,6 +601,20 @@ class ClaudeLauncherTest < Minitest::Test
   # the caret does not start treating an interactive selection as idle.
   def test_claude_ready_prompt_rejects_menu_option_with_hint_footer
     pane = "Claude Code v2.1.133\nProceed with the action?\n❯ 1. Yes\n" \
+           "⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+
+    refute Hive::ClaudeLauncher.claude_ready_prompt?(pane)
+  end
+
+  def test_claude_ready_prompt_rejects_permission_prompt_with_footer
+    pane = "Claude Code v2.1.179\nDo you want to edit this file?\n❯ 1. Yes\n" \
+           "⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
+
+    refute Hive::ClaudeLauncher.claude_ready_prompt?(pane)
+  end
+
+  def test_claude_ready_prompt_rejects_trust_prompt_with_footer
+    pane = "Claude Code v2.1.179\nQuick safety check\n❯ 1. Yes, I trust this folder\n" \
            "⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents"
 
     refute Hive::ClaudeLauncher.claude_ready_prompt?(pane)
@@ -585,6 +639,21 @@ class ClaudeLauncherTest < Minitest::Test
 
     refute Hive::ClaudeLauncher.claude_ready_prompt?(pane),
            "a caret with non-footer output below it is not the live idle prompt"
+  end
+
+  # Claude can paint the `⏵⏵` glyph in its OWN output (e.g. a build/progress
+  # line), not only the `⏵⏵ bypass permissions …` hint footer. A stale caret
+  # with such a line below it must stay rejected: only the bypass-permissions
+  # footer copy counts as terminal chrome, never a bare `⏵⏵` prefix.
+  def test_claude_ready_prompt_rejects_caret_above_non_footer_caret_glyph_line
+    pane = "Claude Code v2.1.179\n\n" \
+           "╭────────────────────────────────────────────────────────────────────────╮\n" \
+           "❯\n" \
+           "╰────────────────────────────────────────────────────────────────────────╯\n" \
+           "⏵⏵ running build step 1/2"
+
+    refute Hive::ClaudeLauncher.claude_ready_prompt?(pane),
+           "a `⏵⏵`-prefixed output line that is not the bypass-permissions footer is not terminal chrome"
   end
 
   # A bare caret line is a legitimate idle prompt; lock it as intentional.
@@ -820,6 +889,10 @@ class ClaudeLauncherTest < Minitest::Test
       FileUtils.mkdir_p(folder)
       yield Hive::Task.new(folder)
     end
+  end
+
+  def pane_fixture(name)
+    File.read(File.expand_path("../fixtures/panes/#{name}", __dir__))
   end
 
   # Unify on the UnboundMethod capture+rebind stub pattern used in
@@ -1059,7 +1132,7 @@ class ClaudeLauncherTest < Minitest::Test
   def test_wait_for_expected_output_reports_limits_before_tmux_session_death
     with_tmp_task do |task|
       output = File.join(task.folder, "missing.md")
-      limit_menu = "What do you want to do?\n❯ 1. Stop and wait for limit to reset\n"
+      limit_menu = pane_fixture("limit_menu_live.txt")
       runner = Struct.new(:name, :tail) do
         def session_exists? = false
         def capture_pane_tail(bytes:) = tail
@@ -1068,7 +1141,9 @@ class ClaudeLauncherTest < Minitest::Test
       result = Hive::ClaudeLauncher.wait_for_expected_output(task, runner, 10, output, "review")
 
       assert_equal :error, result.fetch(:status)
-      assert_match(/\Alimits reached for claude:/, result.fetch(:error_message))
+      assert_equal "❯ 1. Stop and wait for limit to reset", result.fetch(:limit_text)
+      assert_equal "limits reached for claude: ❯ 1. Stop and wait for limit to reset",
+                   result.fetch(:error_message)
       refute_match(/tmux_session_terminated/, result.fetch(:error_message))
     end
   end
@@ -1149,6 +1224,139 @@ class ClaudeLauncherTest < Minitest::Test
       timeout = Hive::ClaudeLauncher.wait_for_done_signal(task, nil, 0, "ci")
       assert_equal :timeout, timeout.fetch(:status)
       assert_match(/stop hook did not signal/, timeout.fetch(:error_message))
+      evidence = timeout.fetch(:completion_evidence)
+      assert_equal false, evidence.fetch(:sentinel_present)
+      assert_equal Hive::ClaudeLauncher.done_path(task), evidence.fetch(:expected_done_path)
+      assert_equal Hive::ClaudeLauncher.result_path(task), evidence.fetch(:expected_result_path)
+      assert_equal "deadline_without_stop_hook", evidence.fetch(:reason)
+    end
+  end
+
+  def test_wait_for_done_signal_returns_timeout_evidence_when_pane_is_idle
+    with_tmp_task do |task|
+      # Cold-start guard: the launcher must first observe the turn underway
+      # (a non-idle pane) before it trusts a later idle pane as "turn
+      # ended". So feed a busy pane on the first poll, then idle.
+      busy = "Claude Code v2.1.128\nworking…\n"
+      idle = "Claude Code v2.1.128\n\n/home/project  ❯"
+      runner = Struct.new(:tails) do
+        def session_exists? = true
+
+        def capture_pane_tail(bytes:)
+          @i ||= 0
+          tail = tails[[ @i, tails.size - 1 ].min]
+          @i += 1
+          tail
+        end
+      end.new([ busy, idle ])
+
+      result = Hive::ClaudeLauncher.wait_for_done_signal(task, runner, 10, "fix")
+
+      assert_equal :timeout, result.fetch(:status)
+      evidence = result.fetch(:completion_evidence)
+      assert_equal true, evidence.fetch(:pane_idle)
+      assert_equal true, evidence.fetch(:session_alive)
+      assert_nil evidence.fetch(:process_exited)
+      assert_equal "turn_ended_without_stop_hook", evidence.fetch(:reason)
+    end
+  end
+
+  def test_wait_for_done_signal_ignores_cold_start_idle_before_work_starts
+    with_tmp_task do |task|
+      # Faithful to production: the recorded `claude_pid` is the persistent
+      # tmux REPL pane process, which is ALIVE on poll 1 — so `process_exited`
+      # is false before Claude does any work. Write a live pid (this test's
+      # own process) to exercise that path. The input box can still show the
+      # idle `❯` caret between our Enter keystroke and Claude's first token;
+      # with no non-idle pane observed, the launcher must NOT latch
+      # work_started off the live pid and must NOT report turn_ended on that
+      # pre-work prompt — it drains to the deadline instead of sealing an
+      # untouched run done.
+      File.write(File.join(task.folder, ".lock"), { "claude_pid" => Process.pid }.to_yaml)
+      idle = "Claude Code v2.1.128\n\n/home/project  ❯"
+      runner = Struct.new(:tail) do
+        def session_exists? = true
+        def capture_pane_tail(bytes:) = tail
+      end.new(idle)
+
+      result = Hive::ClaudeLauncher.wait_for_done_signal(task, runner, 0, "fix")
+
+      assert_equal :timeout, result.fetch(:status)
+      evidence = result.fetch(:completion_evidence)
+      assert_equal "deadline_without_stop_hook", evidence.fetch(:reason)
+    end
+  end
+
+  def test_wait_for_done_signal_returns_timeout_evidence_when_recorded_pid_exited
+    with_tmp_task do |task|
+      File.write(File.join(task.folder, ".lock"), { "claude_pid" => 99_999_999 }.to_yaml)
+      runner = Struct.new(:tail) do
+        def session_exists? = true
+        def capture_pane_tail(bytes:) = tail
+      end.new("Claude Code v2.1.128\nworking\n")
+
+      result = Hive::ClaudeLauncher.wait_for_done_signal(task, runner, 10, "fix")
+
+      assert_equal :timeout, result.fetch(:status)
+      evidence = result.fetch(:completion_evidence)
+      assert_equal true, evidence.fetch(:process_exited)
+      assert_equal 99_999_999, evidence.fetch(:pid)
+      assert_equal "turn_ended_without_stop_hook", evidence.fetch(:reason)
+    end
+  end
+
+  def test_wait_for_done_signal_deadline_evidence_preserves_busy_state
+    with_tmp_task do |task|
+      runner = Struct.new(:tail) do
+        def session_exists? = true
+        def capture_pane_tail(bytes:) = tail
+      end.new("Claude Code v2.1.128\nstill working\n")
+
+      result = Hive::ClaudeLauncher.wait_for_done_signal(task, runner, 0, "fix")
+
+      assert_equal :timeout, result.fetch(:status)
+      evidence = result.fetch(:completion_evidence)
+      assert_equal false, evidence.fetch(:pane_idle)
+      assert_nil evidence.fetch(:process_exited)
+      assert_equal true, evidence.fetch(:session_alive)
+      assert_equal "deadline_without_stop_hook", evidence.fetch(:reason)
+    end
+  end
+
+  def test_wait_for_done_signal_evidence_handles_tmux_errors
+    with_tmp_task do |task|
+      runner = Struct.new(:tail) do
+        def session_exists?
+          raise Hive::TmuxError, "server disappeared"
+        end
+
+        def capture_pane_tail(bytes:)
+          raise Hive::TmuxError, "pane unreadable"
+        end
+      end.new
+
+      result = Hive::ClaudeLauncher.wait_for_done_signal(task, runner, 0, "fix")
+
+      assert_equal :timeout, result.fetch(:status)
+      evidence = result.fetch(:completion_evidence)
+      assert_nil evidence.fetch(:pane_idle)
+      assert_equal false, evidence.fetch(:session_alive)
+      assert_equal "server disappeared", evidence.fetch(:session_error)
+    end
+  end
+
+  def test_completion_evidence_defensive_helpers_degrade_conservatively
+    with_tmp_task do |task|
+      with_replaced_singleton_method(Hive::ClaudeLauncher, :claude_ready_prompt?, ->(_tail) { raise "bad pane" }) do
+        assert_nil Hive::ClaudeLauncher.completion_pane_idle?("Claude Code")
+      end
+
+      File.write(File.join(task.folder, ".lock"), "[")
+      assert_nil Hive::ClaudeLauncher.recorded_claude_pid(task)
+
+      with_replaced_singleton_method(Process, :kill, ->(_signal, _pid) { raise Errno::EPERM }) do
+        assert_equal true, Hive::ClaudeLauncher.process_alive?(12_345)
+      end
     end
   end
 
@@ -1159,7 +1367,7 @@ class ClaudeLauncherTest < Minitest::Test
   # wait_for_expected_output's limit test.
   def test_wait_for_done_signal_reports_limit_wall_before_done_signal
     with_tmp_task do |task|
-      limit_menu = "What do you want to do?\n❯ 1. Stop and wait for limit to reset\n"
+      limit_menu = pane_fixture("limit_menu_live.txt")
       runner = Struct.new(:tail) do
         def capture_pane_tail(bytes:) = tail
       end.new(limit_menu)
@@ -1167,8 +1375,41 @@ class ClaudeLauncherTest < Minitest::Test
       result = Hive::ClaudeLauncher.wait_for_done_signal(task, runner, 10, "ci")
 
       assert_equal :error, result.fetch(:status)
-      assert_match(/\Alimits reached for claude:/, result.fetch(:error_message))
+      assert_equal "❯ 1. Stop and wait for limit to reset", result.fetch(:limit_text)
+      assert_equal "limits reached for claude: ❯ 1. Stop and wait for limit to reset",
+                   result.fetch(:error_message)
       refute_match(/stop hook did not signal/, result.fetch(:error_message))
+    end
+  end
+
+  def test_waits_ignore_quoted_limit_menu_after_agent_moved_on
+    quoted_pane = pane_fixture("limit_quoted_7456.txt")
+
+    with_tmp_task do |task|
+      output = File.join(task.folder, "result.md")
+      File.write(output, "review findings")
+      File.write(Hive::ClaudeLauncher.done_path(task), "done")
+      runner = Struct.new(:tail) do
+        def session_exists? = true
+        def capture_pane_tail(bytes:) = tail
+      end.new(quoted_pane)
+
+      result = Hive::ClaudeLauncher.wait_for_expected_output(task, runner, 10, output, "review")
+
+      assert_equal({ status: :ok, log_label: "review" }, result)
+      refute result.key?(:limit_text)
+    end
+
+    with_tmp_task do |task|
+      File.write(Hive::ClaudeLauncher.done_path(task), "done")
+      runner = Struct.new(:tail) do
+        def capture_pane_tail(bytes:) = tail
+      end.new(quoted_pane)
+
+      result = Hive::ClaudeLauncher.wait_for_done_signal(task, runner, 10, "ci")
+
+      assert_equal({ status: :ok, log_label: "ci" }, result)
+      refute result.key?(:limit_text)
     end
   end
 
@@ -1234,7 +1475,7 @@ class ClaudeLauncherTest < Minitest::Test
       Hive::Markers.set(task.state_file, :agent_working,
                         pid: Process.pid,
                         started: Time.now.utc.iso8601)
-      limit_menu = "What do you want to do?\n❯ 1. Stop and wait for limit to reset\n"
+      limit_menu = pane_fixture("limit_menu_live.txt")
       runner = Struct.new(:name, :tail) do
         def session_exists? = true
         def capture_pane_tail(bytes:) = tail

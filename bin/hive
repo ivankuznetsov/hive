@@ -36,10 +36,18 @@ JSON_USAGE_ERROR_CONTRACTS = {
   "markers" => { schema: "hive-markers-clear", error_kind: "invalid_task_path" },
   "digest" => { schema: "hive-digest", error_kind: "usage" },
   "pairing" => { schema: "hive-pairing-approve", error_kind: "usage" },
+  "answer-digest" => { schema: "hive-answer-digest", error_kind: "usage" },
   # Residual workflow argv-shape errors raised by Thor before command dispatch
   # (for example too many positionals) must ride the same JSON envelope as the
   # command's own UsageError. Bare `hive workflow` is handled in-command.
   "workflow" => { schema: "hive-workflow-new", error_kind: "usage" },
+  # `hive bot` takes a single SUBCOMMAND positional and (unlike `daemon`) has no
+  # `*targets` splat, so an extra positional such as `hive bot status extra` is
+  # rejected by Thor before `Hive::Commands::Bot#call` runs — bypassing the
+  # command-level usage-error emitters. Ride the same hive-bot-status envelope
+  # those emitters use so every `hive bot ... --json` usage error still produces
+  # an ok:false document on stdout instead of bare Thor prose on stderr.
+  "bot" => { schema: "hive-bot-status", error_kind: "extra_arguments" },
   "pr" => {
     schema: "hive-stage-action",
     error_kind: "invalid_task_path",

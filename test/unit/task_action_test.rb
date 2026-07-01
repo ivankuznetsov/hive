@@ -1,8 +1,10 @@
 require "test_helper"
 require "fileutils"
+require "tmpdir"
 require "hive/task"
 require "hive/task_action"
 require "hive/markers"
+require "hive/daemon/policy"
 
 # Pin Hive::TaskAction's classification matrix and command-emission rules.
 # This module is the central decision point for `hive status` action
@@ -51,14 +53,27 @@ class TaskActionTest < Minitest::Test
     assert_equal "Ready to plan", action.label
   end
 
-  def test_brainstorm_waiting_is_needs_input
+  def test_brainstorm_waiting_label_is_distinct
     task = fake_task(stage_name: "brainstorm", stage_index: 2)
-    assert_equal "needs_input", Hive::TaskAction.for(task, marker(:waiting)).key
+    action = Hive::TaskAction.for(task, marker(:waiting))
+
+    assert_equal "needs_input", action.key
+    assert_equal "Answer questions", action.label
+    assert_equal "hive brainstorm demo-260426-aaaa --from 2-brainstorm", action.command
   end
 
   def test_plan_complete_is_ready_to_develop
     task = fake_task(stage_name: "plan", stage_index: 3)
     assert_equal "ready_to_develop", Hive::TaskAction.for(task, marker(:complete)).key
+  end
+
+  def test_plan_waiting_label_is_distinct
+    task = fake_task(stage_name: "plan", stage_index: 3)
+    action = Hive::TaskAction.for(task, marker(:waiting))
+
+    assert_equal "needs_input", action.key
+    assert_equal "Review plan draft", action.label
+    assert_equal "hive plan demo-260426-aaaa --from 3-plan", action.command
   end
 
   def test_markerless_plan_is_ready_to_run_not_needs_input
@@ -155,6 +170,65 @@ class TaskActionTest < Minitest::Test
     assert_equal "hive artifacts demo-260426-aaaa --from 6-review", action.command
   end
 
+  def test_clean_adhoc_review_complete_parks_instead_of_advancing
+    # A clean ad-hoc PR review (source: ad-hoc) parks at 6-review rather than
+    # advancing to artifacts. Its key is deliberately NOT an advance action so
+    # the daemon never auto-dispatches `hive artifacts` to finalize a borrowed
+    # PR (the ad-hoc plan's non-goal "Finalizing someone else's PR").
+    Dir.mktmpdir("task-action-adhoc") do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "6-review", "adhoc-review-pr-7")
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "task.md")
+      File.write(state_file, "---\nsource: ad-hoc\n---\n\n# Ad-hoc review\n")
+      task = FakeTask.new(stage_name: "review", stage_index: 6, slug: "adhoc-review-pr-7",
+                          project_root: dir, project_name: File.basename(dir),
+                          folder: folder, state_file: state_file)
+
+      action = Hive::TaskAction.for(task, marker(:review_complete))
+      assert_equal Hive::Schemas::TaskActionKind::REVIEW_PARKED, action.key
+      assert_equal "Ad-hoc review complete (parked)", action.label
+      assert_nil action.command, "a parked ad-hoc review offers no advance command"
+      refute_includes Hive::Daemon::Policy::ADVANCE_ACTIONS, action.key,
+                      "the parked key must not be a daemon advance action"
+    end
+  end
+
+  def test_drifted_source_casing_adhoc_review_complete_still_parks
+    # The reuse validator and review stage route `source: Ad-Hoc` as ad-hoc
+    # (strip + casecmp?); the parking classifier must agree so a casing drift
+    # doesn't reopen the auto-advance path.
+    Dir.mktmpdir("task-action-adhoc-cased") do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "6-review", "adhoc-review-pr-8")
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "task.md")
+      File.write(state_file, "---\nsource: Ad-Hoc\n---\n\n# Ad-hoc review\n")
+      task = FakeTask.new(stage_name: "review", stage_index: 6, slug: "adhoc-review-pr-8",
+                          project_root: dir, project_name: File.basename(dir),
+                          folder: folder, state_file: state_file)
+
+      action = Hive::TaskAction.for(task, marker(:review_complete))
+      assert_equal Hive::Schemas::TaskActionKind::REVIEW_PARKED, action.key
+    end
+  end
+
+  def test_normal_review_complete_with_source_still_advances
+    # The park is scoped to ad-hoc: a normal review (any non-ad-hoc source)
+    # keeps advancing to artifacts unchanged.
+    Dir.mktmpdir("task-action-normal-source") do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "6-review", "demo-260426-aaaa")
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "task.md")
+      File.write(state_file, "---\nsource: telegram\n---\n\n# Normal review\n")
+      task = FakeTask.new(stage_name: "review", stage_index: 6, slug: "demo-260426-aaaa",
+                          project_root: dir, project_name: File.basename(dir),
+                          folder: folder, state_file: state_file)
+
+      action = Hive::TaskAction.for(task, marker(:review_complete))
+      assert_equal "ready_to_artifacts", action.key
+      assert_equal "hive artifacts demo-260426-aaaa --from 6-review", action.command
+    end
+  end
+
   def test_markerless_artifacts_is_ready_to_collect_artifacts
     task = fake_task(stage_name: "artifacts", stage_index: 7)
     action = Hive::TaskAction.for(task, marker(:none))
@@ -187,11 +261,12 @@ class TaskActionTest < Minitest::Test
     assert_nil action.command
   end
 
-  def test_review_waiting_is_needs_input
+  def test_review_waiting_label_is_distinct
     task = fake_task(stage_name: "review", stage_index: 6)
     action = Hive::TaskAction.for(task, marker(:review_waiting, "pass" => "2"))
     assert_equal "needs_input", action.key
-    assert_equal "Needs your input", action.label
+    assert_equal "Needs review decision", action.label
+    assert_equal "hive review demo-260426-aaaa --from 6-review", action.command
   end
 
   # REVIEW_WORKING is the review stage's in-flight marker. Pre-fix, it
@@ -213,6 +288,8 @@ class TaskActionTest < Minitest::Test
     task = fake_task(stage_name: "execute", stage_index: 4)
     action = Hive::TaskAction.for(task, marker(:execute_waiting))
     assert_equal "needs_input", action.key
+    assert_equal "Needs your input", action.label
+    assert_equal "hive develop demo-260426-aaaa --from 4-execute", action.command
   end
 
   def test_legacy_execute_waiting_with_findings_surfaces_recovery_findings_cli
@@ -308,6 +385,29 @@ class TaskActionTest < Minitest::Test
       assert_equal "ready_to_finalize", open_pr_marker.key,
                    "open-pr's is_draft=true COMPLETE marker must not look archive-ready"
       assert_equal "hive finalize demo-260426-aaaa --from 8-finalize", open_pr_marker.command
+    end
+  end
+
+  def test_finalize_waiting_label_is_distinct
+    Dir.mktmpdir("task-action-finalize") do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "8-finalize", "demo-260426-aaaa")
+      FileUtils.mkdir_p(folder)
+      task = FakeTask.new(
+        stage_name: "finalize",
+        stage_index: 8,
+        slug: "demo-260426-aaaa",
+        project_root: dir,
+        project_name: File.basename(dir),
+        folder: folder,
+        state_file: File.join(folder, "pr.md")
+      )
+      File.write(task.state_file, "---\npr_url: https://example.com/pr/9\n---\n")
+
+      action = Hive::TaskAction.for(task, marker(:waiting))
+
+      assert_equal "needs_input", action.key
+      assert_equal "Confirm finalize", action.label
+      assert_equal "hive finalize demo-260426-aaaa --from 8-finalize", action.command
     end
   end
 
@@ -675,6 +775,27 @@ class TaskActionTest < Minitest::Test
       refute_includes diagnostic["artifact_paths"], symlink
       refute_includes diagnostic["detail"], "outside diagnostic secret"
       assert_equal "marker", diagnostic["source"]
+    end
+  end
+
+  # Mirror of DiagnosticEvidence's dir-symlink guard: a logs/ *directory*
+  # symlink pointing outside the task roots must not resolve into a trusted
+  # diagnostic root, otherwise every *.log under the target leaks.
+  def test_diagnostic_rejects_log_dir_symlink_escape
+    Dir.mktmpdir("hive-task-action-symlink") do |root|
+      task = fake_task(stage_name: "execute", stage_index: 4, project_root: root)
+      FileUtils.mkdir_p(task.folder)
+      File.write(task.state_file, "<!-- ERROR reason=boom -->\n")
+      outside = File.join(root, "outside-logs")
+      FileUtils.mkdir_p(outside)
+      File.write(File.join(outside, "agent.log"), "outside log secret\n")
+      File.symlink(outside, File.join(task.folder, "logs"))
+
+      diagnostic = Hive::TaskAction.for(task, marker(:error, "reason" => "boom")).diagnostic
+
+      refute_includes diagnostic["detail"].to_s, "outside log secret"
+      refute(diagnostic["artifact_paths"].any? { |path| path.end_with?("agent.log") },
+             "a symlinked log dir's contents must not enter artifact_paths")
     end
   end
 
@@ -1588,13 +1709,67 @@ class TaskActionTest < Minitest::Test
     end
   end
 
-  def test_private_path_helpers_cover_missing_and_empty_inputs
+  # The symlink-escape containment helper now lives in
+  # Hive::DiagnosticHelpers.evidence_root_realpath (shared with
+  # Hive::DiagnosticEvidence so the guard can't drift). Nil/blank inputs return
+  # nil; a missing path falls back to File.expand_path (the realpath ENOENT
+  # rescue) for BOTH the trust-anchor and the subdir-root callers.
+  def test_evidence_root_realpath_covers_missing_and_empty_inputs
     task = fake_task(stage_name: "review", stage_index: 6)
-    diagnostic = diagnostic_for(task, marker(:review_error))
 
-    assert_nil diagnostic.send(:realpath_or_expand, nil)
-    assert_equal File.expand_path(File.join(task.folder, "missing")),
-                 diagnostic.send(:realpath_or_expand, File.join(task.folder, "missing"))
+    assert_nil Hive::DiagnosticHelpers.evidence_root_realpath(nil, trust_anchor: true)
+    assert_nil Hive::DiagnosticHelpers.evidence_root_realpath("", trust_anchor: false)
+    expected = File.expand_path(File.join(task.folder, "missing"))
+    assert_equal expected,
+                 Hive::DiagnosticHelpers.evidence_root_realpath(File.join(task.folder, "missing"), trust_anchor: true)
+    assert_equal expected,
+                 Hive::DiagnosticHelpers.evidence_root_realpath(File.join(task.folder, "missing"), trust_anchor: false)
+  end
+
+  # The task folder is the trust ANCHOR: realpath'd even when it is itself a
+  # symlink (Task uses File.expand_path, which doesn't resolve symlinks). A
+  # red-status.md under a symlinked folder must therefore stay a trusted
+  # diagnostic artifact — regression for the pass-2 symlink-leaf rejection
+  # over-firing on the trust anchor (mirrors the DiagnosticEvidence guard).
+  def test_safe_diagnostic_artifact_accepts_red_status_under_symlinked_folder
+    Dir.mktmpdir("task-action-symlink-real") do |real_parent|
+      real = File.join(real_parent, ".hive-state", "stages", "6-review", "demo-260426-aaaa")
+      FileUtils.mkdir_p(File.join(real, "diagnostics"))
+      File.write(File.join(real, "diagnostics", "red-status.md"), "verdict\n")
+
+      Dir.mktmpdir("task-action-symlink-link") do |link_parent|
+        link = File.join(link_parent, "task-folder")
+        File.symlink(real, link)
+        task = FakeTask.new(
+          stage_name: "review", stage_index: 6, slug: "demo-260426-aaaa",
+          project_root: real_parent, project_name: File.basename(real_parent),
+          folder: link, state_file: File.join(link, "task.md")
+        )
+        diagnostic = diagnostic_for(task, marker(:review_error))
+
+        assert diagnostic.send(:safe_diagnostic_artifact?, File.join(link, "diagnostics", "red-status.md")),
+               "red-status.md under a symlinked task folder must stay a trusted artifact"
+      end
+    end
+  end
+
+  # Deeply-nested flow YAML in red-status.md frontmatter raises
+  # SystemStackError from YAML.safe_load — NOT a StandardError — which would
+  # otherwise escape the per-project `rescue StandardError` in
+  # Hive::Commands::Status and crash the whole `hive status --json` snapshot.
+  # diagnostic_frontmatter must degrade to {} instead.
+  def test_diagnostic_frontmatter_degrades_on_nested_yaml_system_stack_error
+    Dir.mktmpdir("task-action-nested-frontmatter") do |root|
+      task = fake_task(stage_name: "review", stage_index: 6, project_root: root)
+      path = File.join(task.folder, "diagnostics", "red-status.md")
+      FileUtils.mkdir_p(File.dirname(path))
+      nested = ("[" * 6000) + ("]" * 6000) # ~12 KB, inside the 16 KB scan window
+      File.write(path, "---\nsummary: #{nested}\n---\nbody\n")
+      diagnostic = diagnostic_for(task, marker(:review_error))
+
+      assert_equal({}, diagnostic.send(:diagnostic_frontmatter, path),
+                   "nested frontmatter must degrade to {}, not raise SystemStackError")
+    end
   end
 
   def test_safe_diagnostic_artifact_handles_realpath_failures

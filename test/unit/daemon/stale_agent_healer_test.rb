@@ -1,9 +1,11 @@
 require "test_helper"
 require "tmpdir"
 require "time"
+require "hive/agent_limit"
 require "hive/markers"
 require "hive/daemon/stale_agent_healer"
 require "hive/daemon/status_consumer"
+require "hive/stages/review"
 
 # Healer's job: rewrite AGENT_WORKING markers whose backing agent isn't
 # alive to ERROR reason=agent_{died,orphaned}. Anything else (live
@@ -662,6 +664,47 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     attrs = retry_after ? " retry_after=#{retry_after}" : ""
     File.write(state_file,
                "# task\n\n<!-- REVIEW_ERROR phase=reviewers reason=limits_reached pass=1#{attrs} -->\n")
+  end
+
+  def test_agent_limit_wire_message_marks_review_hold_and_respects_cooldown_boundary
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n")
+      message = "limits reached for claude: Claude Code v2.1.170"
+      task = Struct.new(:state_file).new(state_file)
+
+      assert Hive::AgentLimit.from_limit?(message)
+      limited = Hive::Stages::Review.send(
+        :mark_review_phase_failure,
+        task,
+        phase: :triage,
+        terminal_reason: "triage_failed",
+        pass: 1,
+        error_message: message
+      )
+
+      marker = Hive::Markers.current(state_file)
+      attrs = marker.attrs
+      assert limited
+      assert_equal :review_error, marker.name
+      assert_equal "limits_reached", attrs.fetch("reason")
+      assert Time.parse(attrs.fetch("retry_after")) > Time.now.utc - 5
+      assert Hive::AgentLimit.held?(:review_error, attrs)
+
+      retry_after = Time.parse(attrs.fetch("retry_after"))
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "6-review",
+        marker: "review_error",
+        marker_attrs: attrs,
+        action: "recover_review",
+        live_task_lock: false
+      )
+      refute @healer.send(:cooldown_elapsed?, row, now: retry_after - 1),
+             "cooldown must not be elapsed before retry_after"
+      assert @healer.send(:cooldown_elapsed?, row, now: retry_after),
+             "cooldown must be elapsed at retry_after"
+    end
   end
 
   def test_does_not_auto_recover_review_limits_reached_before_cooldown
@@ -2226,16 +2269,40 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
 
   # --- all_failed reviewers auto-retry (non-limit total reviewer crash) ---
 
-  def make_review_error_row(state_file, reason:, phase:, pass: "1")
+  def make_review_error_row(state_file, reason:, phase:, pass: "1", attrs: {})
     make_row(
       state_file,
       pid_alive: nil,
       stage: "6-review",
       marker: "review_error",
-      marker_attrs: { "phase" => phase, "reason" => reason, "pass" => pass },
+      marker_attrs: { "phase" => phase, "reason" => reason, "pass" => pass }.merge(attrs),
       action: "recover_review",
       live_task_lock: false
     )
+  end
+
+  def test_auto_recovers_review_error_fix_failed_when_claude_stop_hook_did_not_signal
+    with_marker_file do |state_file|
+      message = "claude stop hook did not signal completion"
+      File.write(
+        state_file,
+        "# task\n\n<!-- REVIEW_ERROR phase=fix reason=fix_failed pass=1 message=\"#{message}\" -->\n"
+      )
+      row = make_review_error_row(
+        state_file,
+        reason: "fix_failed",
+        phase: "fix",
+        attrs: { "message" => message }
+      )
+
+      heal([ row ])
+
+      heal_event = @logger.events.find { |name, _| name == :marker_healed }
+      assert heal_event, "expected stop-hook fix auto-recovery, got: #{@logger.events.inspect}"
+      assert_equal "fix_claude_stop_hook", heal_event[1][:reason]
+      assert_equal 1, heal_event[1][:attempts]
+      refute_match(/REVIEW_ERROR/, File.read(state_file))
+    end
   end
 
   def test_auto_recovers_review_error_all_failed
@@ -2297,6 +2364,51 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
 
       refute @logger.events.any? { |name, _| name == :marker_healed },
              "git-level/integrity fix reasons must stay manual"
+      assert_match(/REVIEW_ERROR/, File.read(state_file))
+    end
+  end
+
+  def test_auto_recovers_review_error_fix_failed_when_claude_stop_hook_did_not_signal
+    with_marker_file do |state_file|
+      message = "claude stop hook did not signal completion"
+      File.write(
+        state_file,
+        "# task\n\n<!-- REVIEW_ERROR phase=fix reason=fix_failed pass=1 message=\"#{message}\" -->\n"
+      )
+      row = make_review_error_row(
+        state_file,
+        reason: "fix_failed",
+        phase: "fix",
+        attrs: { "message" => message }
+      )
+
+      heal([ row ])
+
+      heal_event = @logger.events.find { |name, _| name == :marker_healed }
+      assert heal_event, "expected stop-hook fix auto-recovery, got: #{@logger.events.inspect}"
+      assert_equal "fix_claude_stop_hook", heal_event[1][:reason]
+      assert_equal 1, heal_event[1][:attempts]
+      refute_match(/REVIEW_ERROR/, File.read(state_file))
+    end
+  end
+
+  def test_does_not_auto_recover_plain_review_fix_failed
+    with_marker_file do |state_file|
+      File.write(
+        state_file,
+        "# task\n\n<!-- REVIEW_ERROR phase=fix reason=fix_failed pass=1 message=\"agent exited 1\" -->\n"
+      )
+      row = make_review_error_row(
+        state_file,
+        reason: "fix_failed",
+        phase: "fix",
+        attrs: { "message" => "agent exited 1" }
+      )
+
+      heal([ row ])
+
+      refute @logger.events.any? { |name, _| name == :marker_healed },
+             "generic fix_failed must stay manual"
       assert_match(/REVIEW_ERROR/, File.read(state_file))
     end
   end

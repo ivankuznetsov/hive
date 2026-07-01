@@ -409,6 +409,15 @@ class HiveDaemonPolicyTest < Minitest::Test
                                command: nil)
   end
 
+  def test_review_parked_skips_so_clean_adhoc_review_is_not_auto_finalized
+    # A clean ad-hoc PR review classifies as review_parked (TaskAction). It
+    # must NOT auto-advance on a daemon-enrolled project — the daemon would
+    # otherwise dispatch `hive artifacts` and finalize someone else's PR.
+    assert_equal :skip, decide(action: "review_parked", command: nil)
+    refute_includes Hive::Daemon::Policy::ADVANCE_ACTIONS, "review_parked",
+                    "review_parked must never be an advance action"
+  end
+
   # ── defensive / forward-compat ─────────────────────────────────────────
 
   def test_unknown_action_skips

@@ -25,7 +25,7 @@ module Hive
       },
       brainstorm_waiting: {
         key: Hive::Schemas::TaskActionKind::NEEDS_INPUT,
-        label: "Needs your input",
+        label: "Answer questions",
         command: "brainstorm"
       },
       brainstorm_complete: {
@@ -35,7 +35,7 @@ module Hive
       },
       plan_waiting: {
         key: Hive::Schemas::TaskActionKind::NEEDS_INPUT,
-        label: "Needs your input",
+        label: "Review plan draft",
         command: "plan"
       },
       plan_complete: {
@@ -75,7 +75,7 @@ module Hive
       },
       review_waiting: {
         key: Hive::Schemas::TaskActionKind::NEEDS_INPUT,
-        label: "Needs your input",
+        label: "Needs review decision",
         command: "review"
       },
       review_ready: {
@@ -87,6 +87,16 @@ module Hive
         key: Hive::Schemas::TaskActionKind::READY_TO_ARTIFACTS,
         label: "Ready to collect artifacts",
         command: "artifacts"
+      },
+      # A clean ad-hoc PR review: complete, but parked at 6-review with no
+      # advance command. Hive does not auto-finalize a borrowed PR (the
+      # ad-hoc plan's non-goal "Finalizing someone else's PR"), so this
+      # carries a non-advancing key the daemon's ADVANCE_ACTIONS never fires
+      # on. The operator can still run `hive artifacts` by hand.
+      review_complete_adhoc: {
+        key: Hive::Schemas::TaskActionKind::REVIEW_PARKED,
+        label: "Ad-hoc review complete (parked)",
+        command: nil
       },
       review_stale: {
         key: Hive::Schemas::TaskActionKind::RECOVER_REVIEW,
@@ -122,7 +132,7 @@ module Hive
       },
       finalize_waiting: {
         key: Hive::Schemas::TaskActionKind::NEEDS_INPUT,
-        label: "Needs your input",
+        label: "Confirm finalize",
         command: "finalize"
       },
       finalize_complete: {
@@ -375,7 +385,10 @@ module Hive
     def review_action
       case marker.name
       when :review_complete
-        ACTIONS.fetch(:review_complete)
+        # A clean ad-hoc PR review parks at 6-review instead of advancing to
+        # artifacts (the daemon must not auto-finalize a borrowed PR). Normal
+        # tasks are unchanged.
+        adhoc_task? ? ACTIONS.fetch(:review_complete_adhoc) : ACTIONS.fetch(:review_complete)
       when :review_stale, :review_ci_stale, :review_error
         ACTIONS.fetch(:review_stale)
       when :review_working
@@ -625,6 +638,16 @@ module Hive
         parsed = state_file_frontmatter
         parsed.fetch("pr_url", "").to_s
       end
+    end
+
+    # True when this is an ad-hoc PR review (`source: ad-hoc` in the review
+    # stage's task.md). Used to park a clean ad-hoc review at 6-review rather
+    # than auto-advancing it. casecmp? matches the review stage's reader so a
+    # drifted `source: Ad-Hoc` routes consistently. An unreadable source falls
+    # back to non-ad-hoc (state_file_frontmatter swallows SystemCallError → {}),
+    # so a normal task is never mis-parked.
+    def adhoc_task?
+      state_file_frontmatter["source"].to_s.strip.casecmp?("ad-hoc")
     end
 
     def state_file_frontmatter

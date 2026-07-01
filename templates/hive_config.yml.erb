@@ -39,3 +39,11 @@ registered_projects: <%= registered_projects.empty? ? "[]" : "" %>
 #   enabled: false         # only needed to opt OUT; otherwise auto-on with the bot
 #   agent: ~               # defaults to patrol.agent, then claude
 #   max_catchup_days: 7
+
+# Daily pending-answer digest. When enabled, the daemon schedules one global
+# `hive answer-digest` subprocess at/after the configured local hour. Empty
+# snapshots are silent.
+#
+# answer_digest:
+#   enabled: false
+#   hour: 9

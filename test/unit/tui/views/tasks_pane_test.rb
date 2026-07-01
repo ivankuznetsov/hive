@@ -130,7 +130,7 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     snap = make_snapshot([
       { "name" => "hive", "tasks" => [
         make_task(slug: "abc-001", id: 7, display_name: "Readable Task", stage: "3-plan",
-                  action_label: "Needs your input", age: 90,
+                  action_label: "Review plan draft", age: 90,
                   pr_url: "https://github.com/example/repo/pull/561")
       ] }
     ])
@@ -141,8 +141,26 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     assert_includes out, "Readable Task",    "display name column must render"
     refute_includes out, "abc-001",          "slug must not render when a display name is present"
     assert_includes out, "3-plan",           "stage column must render"
-    assert_includes out, "Needs your input", "status column must render"
+    assert_includes out, "Review plan draft", "status column must render"
     assert_includes out, "1m",               "age column must render (90s → 1m)"
+  end
+
+  def test_needs_review_decision_fits_status_column_without_truncation
+    label = "Needs review decision"
+    assert_operator Hive::Tui::Views::Format.display_width(label),
+                    :<=,
+                    Hive::Tui::Views::TasksPane::STATUS_WIDTH
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(slug: "review-row", stage: "6-review", action: "needs_input",
+                  action_label: label, marker: "review_waiting",
+                  suggested: "hive review review-row --from 6-review")
+      ] }
+    ])
+
+    out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
+
+    assert_includes out, label
   end
 
   def test_renders_dash_pr_column_without_url

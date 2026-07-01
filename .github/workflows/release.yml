@@ -116,6 +116,20 @@ jobs:
         with:
           name: hive-cli-gem
           path: dist
+      - name: Package managed web bundle
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          # The CLI's local web mode (`hive web` / `hive setup`) downloads
+          # hive-web-<version>.tar.gz from this release and unpacks it as the
+          # managed Rails app (lib/hive/web/app_bundle.rb). Package the tracked
+          # web/ tree — `git archive` skips untracked/ignored dev cruft — with
+          # config/application.rb at the archive root, matching what
+          # AppBundle#ensure! expects.
+          version="${REF_NAME#v}"
+          mkdir -p dist
+          git archive --format=tar.gz -o "dist/hive-web-${version}.tar.gz" HEAD:web
+          echo "packaged dist/hive-web-${version}.tar.gz"
       - name: Build checksums
         run: |
           cd dist

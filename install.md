@@ -59,8 +59,8 @@ Ubuntu 22.04+ / glibc Linux fallback (pin to the current release tag, not `main`
 ```bash
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
-# Release maintainers: bump v0.3.1 in both installer URLs when cutting a new stable release.
-curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.3.1/install.sh -o "$tmpdir/hive-install.sh"
+# Release maintainers: bump v0.3.2 in both installer URLs when cutting a new stable release.
+curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.3.2/install.sh -o "$tmpdir/hive-install.sh"
 bash "$tmpdir/hive-install.sh"
 ```
 
@@ -69,8 +69,8 @@ To inspect the installer first, run a dry-run before the real invocation. State 
 ```bash
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
-# Release maintainers: bump v0.3.1 in both installer URLs when cutting a new stable release.
-curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.3.1/install.sh -o "$tmpdir/hive-install.sh"
+# Release maintainers: bump v0.3.2 in both installer URLs when cutting a new stable release.
+curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.3.2/install.sh -o "$tmpdir/hive-install.sh"
 bash "$tmpdir/hive-install.sh" --dry-run
 bash "$tmpdir/hive-install.sh"
 ```
@@ -124,6 +124,21 @@ Do not ask the user whether to initialize the daemon. Hive install includes the 
 ```
 
 The bash installer already runs the same command after installing the gem; rerunning it is idempotent when the unit matches. If the command reports a drifted/customized unit, leave it untouched and report the `"$hive_cmd" daemon install --force` recovery command instead of forcing an overwrite. If systemd-user or launchd is unavailable, keep Hive installed and report that daemon autostart could not be enabled on this host.
+
+## Local Web Setup
+
+When the user wants the browser UI, prefer the first-class local setup command:
+
+```bash
+"$hive_cmd" setup
+```
+
+It runs diagnostics, installs Hive-owned QMD/web pieces, ensures the daemon
+service, enrolls the current project, and leaves the web UI runnable with
+`"$hive_cmd" web` at `http://127.0.0.1:4567`. Bare `hive web` on a loopback
+bind runs no-auth by default; set `web.local_loopback: false` to require
+GitHub login even on loopback. Use `"$hive_cmd" setup --service` when the user
+also wants a managed `hive-web` service.
 
 ## Initialize Project
 

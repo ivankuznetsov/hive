@@ -286,8 +286,9 @@ class HiveCommandsDaemonTest < Minitest::Test
     command = daemon("status", json: true)
     write_pid_payload(pid: 1234)
     File.utime(Time.now - 7, Time.now - 7, command.pid_file)
-    command.define_singleton_method(:pid_alive?) { |pid| pid == 1234 }
-    command.define_singleton_method(:pid_owned_by_us?) { |_payload, pid| pid == 1234 }
+    report = command.status_report
+    report.define_singleton_method(:pid_alive?) { |pid| pid == 1234 }
+    report.define_singleton_method(:pid_owned_by_us?) { |_payload, pid| pid == 1234 }
 
     out, _err = capture_io { command.call }
 
@@ -304,8 +305,9 @@ class HiveCommandsDaemonTest < Minitest::Test
                                              command: "brew upgrade ivankuznetsov/hive/hive")
       command = daemon("status", json: true)
       write_pid_payload(pid: 1234)
-      command.define_singleton_method(:pid_alive?) { |pid| pid == 1234 }
-      command.define_singleton_method(:pid_owned_by_us?) { |_payload, pid| pid == 1234 }
+      report = command.status_report
+      report.define_singleton_method(:pid_alive?) { |pid| pid == 1234 }
+      report.define_singleton_method(:pid_owned_by_us?) { |_payload, pid| pid == 1234 }
 
       out, _err = capture_io { command.call }
       doc = JSON.parse(out)
@@ -318,8 +320,9 @@ class HiveCommandsDaemonTest < Minitest::Test
   def test_status_json_update_nudge_null_when_state_raises
     command = daemon("status", json: true)
     write_pid_payload(pid: 1234)
-    command.define_singleton_method(:pid_alive?) { |pid| pid == 1234 }
-    command.define_singleton_method(:pid_owned_by_us?) { |_payload, pid| pid == 1234 }
+    report = command.status_report
+    report.define_singleton_method(:pid_alive?) { |pid| pid == 1234 }
+    report.define_singleton_method(:pid_owned_by_us?) { |_payload, pid| pid == 1234 }
 
     out, _err = with_replaced_singleton_method(
       Hive::UpdateCheck::State, :new, ->(*_a, **_k) { raise "state boom" }
@@ -333,12 +336,13 @@ class HiveCommandsDaemonTest < Minitest::Test
     command = daemon("status", json: true)
     write_pid_payload(pid: 1234)
     File.utime(Time.now - 7, Time.now - 7, command.pid_file)
-    command.define_singleton_method(:pid_alive?) { |pid| pid == 1234 }
-    command.define_singleton_method(:pid_owned_by_us?) { |_payload, pid| pid == 1234 }
+    report = command.status_report
+    report.define_singleton_method(:pid_alive?) { |pid| pid == 1234 }
+    report.define_singleton_method(:pid_owned_by_us?) { |_payload, pid| pid == 1234 }
     # Stub the version probe so a same-path binary that can't actually be
     # `--version`ed (the fake path below does not exist) still resolves to a
     # deterministic non-drift ("none") state rather than "unreadable".
-    command.define_singleton_method(:binary_version) { |_binary| Hive::VERSION }
+    report.define_singleton_method(:binary_version) { |_binary| Hive::VERSION }
     # Inject a fake installer so the merged service-state fields are
     # deterministic and we exercise the merge, not the host's systemd.
     state = {
@@ -380,8 +384,9 @@ class HiveCommandsDaemonTest < Minitest::Test
     command = daemon("status", json: true)
     write_pid_payload(pid: 1234)
     File.utime(Time.now - 7, Time.now - 7, command.pid_file)
-    command.define_singleton_method(:pid_alive?) { |pid| pid == 1234 }
-    command.define_singleton_method(:pid_owned_by_us?) { |_payload, pid| pid == 1234 }
+    report = command.status_report
+    report.define_singleton_method(:pid_alive?) { |pid| pid == 1234 }
+    report.define_singleton_method(:pid_owned_by_us?) { |_payload, pid| pid == 1234 }
     fake = Object.new
     fake.define_singleton_method(:service_state) { raise "probe blew up" }
     require "hive/commands/daemon/service_installer"
@@ -403,9 +408,9 @@ class HiveCommandsDaemonTest < Minitest::Test
 
 
   def drift_for(service_state, version: nil)
-    command = daemon("status", json: true)
-    command.define_singleton_method(:binary_version) { |_binary| version }
-    command.send(:daemon_binary_state, service_state).fetch("binary_drift")
+    report = Hive::Daemon::StatusReport.new(hive_home: @home)
+    report.define_singleton_method(:binary_version) { |_binary| version }
+    report.send(:binary_state, service_state).fetch("binary_drift")
   end
 
   def test_binary_drift_not_applicable_when_no_unit_installed
@@ -449,21 +454,21 @@ class HiveCommandsDaemonTest < Minitest::Test
                            version: nil)
   end
 
-  def test_daemon_binary_state_raises_when_drift_not_in_declared_states
+  def test_binary_state_raises_when_drift_not_in_declared_states
     # The producer asserts every drift value against BINARY_DRIFT_STATES so the
     # schema/web/docs can't silently diverge. Shrink the constant to exclude
     # the value this input produces ("none") and confirm the guard fires.
-    command = daemon("status", json: true)
-    command.define_singleton_method(:binary_version) { |_binary| Hive::VERSION }
-    klass = Hive::Commands::Daemon
+    report = Hive::Daemon::StatusReport.new(hive_home: @home)
+    report.define_singleton_method(:binary_version) { |_binary| Hive::VERSION }
+    klass = Hive::Daemon::StatusReport
     original = klass.const_get(:BINARY_DRIFT_STATES)
     klass.send(:remove_const, :BINARY_DRIFT_STATES)
     klass.const_set(:BINARY_DRIFT_STATES, %w[path version].freeze)
     begin
       error = assert_raises(RuntimeError) do
-        command.send(:daemon_binary_state,
-                     { "service_installed" => true, "installed_binary" => "/x/hive",
-                       "expected_binary" => "/x/hive" })
+        report.send(:binary_state,
+                    { "service_installed" => true, "installed_binary" => "/x/hive",
+                      "expected_binary" => "/x/hive" })
       end
       assert_match(/BUG: binary_drift "none" not in BINARY_DRIFT_STATES/, error.message)
     ensure
@@ -472,16 +477,16 @@ class HiveCommandsDaemonTest < Minitest::Test
     end
   end
 
-  # status_payload is the in-process ($stdout-free) status snapshot the web
+  # safe_payload is the in-process ($stdout-free) status snapshot the web
   # dashboard renders directly. Happy path returns the full envelope hash.
-  def test_status_payload_returns_full_status_hash_for_running_daemon
-    command = daemon("status")
+  def test_safe_payload_returns_full_status_hash_for_running_daemon
+    report = Hive::Daemon::StatusReport.new(hive_home: @home)
     write_pid_payload(pid: 1234)
-    File.utime(Time.now - 5, Time.now - 5, command.pid_file)
-    command.define_singleton_method(:pid_alive?) { |pid| pid == 1234 }
-    command.define_singleton_method(:pid_owned_by_us?) { |_payload, pid| pid == 1234 }
+    File.utime(Time.now - 5, Time.now - 5, report.pid_file)
+    report.define_singleton_method(:pid_alive?) { |pid| pid == 1234 }
+    report.define_singleton_method(:pid_owned_by_us?) { |_payload, pid| pid == 1234 }
 
-    payload = command.status_payload
+    payload = report.safe_payload
 
     assert_equal "hive-daemon-status", payload.fetch("schema")
     assert_equal true, payload.fetch("ok")
@@ -491,11 +496,11 @@ class HiveCommandsDaemonTest < Minitest::Test
 
   # A probe failure must degrade to a minimal not-running hash rather than
   # raising out of the web render path.
-  def test_status_payload_degrades_to_not_running_hash_on_probe_failure
-    command = daemon("status")
-    command.define_singleton_method(:daemon_running_state) { raise "probe exploded" }
+  def test_safe_payload_degrades_to_not_running_hash_on_probe_failure
+    report = Hive::Daemon::StatusReport.new(hive_home: @home)
+    report.define_singleton_method(:running_state) { raise "probe exploded" }
 
-    payload = command.status_payload
+    payload = report.safe_payload
 
     assert_equal false, payload.fetch("ok")
     assert_equal false, payload.fetch("running")
@@ -506,8 +511,9 @@ class HiveCommandsDaemonTest < Minitest::Test
     command = daemon("status")
     write_pid_payload(pid: 2468)
     File.utime(Time.now - 3, Time.now - 3, command.pid_file)
-    command.define_singleton_method(:pid_alive?) { |_pid| true }
-    command.define_singleton_method(:pid_owned_by_us?) { |_payload, _pid| true }
+    report = command.status_report
+    report.define_singleton_method(:pid_alive?) { |_pid| true }
+    report.define_singleton_method(:pid_owned_by_us?) { |_payload, _pid| true }
 
     out, _err = capture_io { command.call }
 
@@ -516,50 +522,50 @@ class HiveCommandsDaemonTest < Minitest::Test
 
 
   def test_binary_version_extracts_semver_from_probe_output
-    command = daemon("status")
+    report = Hive::Daemon::StatusReport.new(hive_home: @home)
     ok = Struct.new(:success) { def success? = success }.new(true)
 
     version = with_replaced_singleton_method(
       Open3, :capture3, ->(*_args) { [ "hive 0.3.2 (build abc)\n", "", ok ] }
-    ) { command.send(:binary_version, "/x/hive") }
+    ) { report.send(:binary_version, "/x/hive") }
 
     assert_equal "0.3.2", version, "the X.Y.Z version must be extracted from --version stdout"
   end
 
   def test_binary_version_falls_back_to_stripped_output_without_a_version_pattern
-    command = daemon("status")
+    report = Hive::Daemon::StatusReport.new(hive_home: @home)
     ok = Struct.new(:success) { def success? = success }.new(true)
 
     version = with_replaced_singleton_method(
       Open3, :capture3, ->(*_args) { [ "  unreleased-dev  \n", "", ok ] }
-    ) { command.send(:binary_version, "/x/hive") }
+    ) { report.send(:binary_version, "/x/hive") }
 
     assert_equal "unreleased-dev", version,
                  "stdout without an X.Y.Z pattern falls back to the stripped raw output"
   end
 
   def test_binary_version_returns_nil_on_unsuccessful_probe
-    command = daemon("status")
+    report = Hive::Daemon::StatusReport.new(hive_home: @home)
     fail_status = Struct.new(:success) { def success? = success }.new(false)
 
     version = with_replaced_singleton_method(
       Open3, :capture3, ->(*_args) { [ "9.9.9", "", fail_status ] }
-    ) { command.send(:binary_version, "/x/hive") }
+    ) { report.send(:binary_version, "/x/hive") }
 
     assert_nil version, "a non-success probe status must yield nil, not a parsed version"
   end
 
   def test_binary_version_returns_nil_when_probe_raises_syscall_or_timeout
-    command = daemon("status")
+    report = Hive::Daemon::StatusReport.new(hive_home: @home)
 
     enoent = with_replaced_singleton_method(
       Open3, :capture3, ->(*_args) { raise Errno::ENOENT, "no such binary" }
-    ) { command.send(:binary_version, "/x/hive") }
+    ) { report.send(:binary_version, "/x/hive") }
     assert_nil enoent, "a spawn failure (SystemCallError) must degrade to nil, not raise"
 
     timed_out = with_replaced_singleton_method(
       Open3, :capture3, ->(*_args) { raise Timeout::Error, "probe wedged" }
-    ) { command.send(:binary_version, "/x/hive") }
+    ) { report.send(:binary_version, "/x/hive") }
     assert_nil timed_out, "a wedged binary (Timeout::Error) must degrade to nil, not hang the caller"
   end
 

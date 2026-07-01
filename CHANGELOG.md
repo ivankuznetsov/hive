@@ -28,6 +28,7 @@ Setup, the Telegram bot, and TUI performance are the focus of this release. Sele
 ### Pipeline & status
 
 - Fixed: markerless `3-plan` tasks are runnable instead of being parked behind a needs-input gate.
+- Fixed: tmux review-fix no longer stamps terminal `REVIEW_ERROR phase=fix reason=fix_failed` when Claude finished cleanly but the interactive Stop hook missed `.done` / `result.json`; Hive now requires artifacts plus commit/no-change evidence and emits `claude_completion_fallback`.
 - Needs-input status labels now differentiate by the reason a task paused.
 
 ### Packaging

@@ -84,6 +84,13 @@ Cause: the CI-fix phase exhausted its attempts. Fix: inspect `reviews/ci-blocked
 
 Cause: a review phase failed or protected-file tampering was detected. Fix: inspect `task.md`, `logs/`, and `reviews/`, clear with `hive markers clear <folder> --name REVIEW_ERROR`, then re-run.
 
+If the marker is `phase=fix reason=fix_failed` and the message says
+`claude stop hook did not signal completion`, it may be the tmux Stop-hook
+failure covered in [recipes](recipes.md#recover-a-tmux-review-fix-stop-hook-timeout).
+Clear only with `--match-attr phase=fix,reason=fix_failed` after verifying
+the review artifacts and fix commit/no-change evidence. `claude.mode:
+headless` is still the safest workaround on affected versions.
+
 ### `reviewer_tampered`, `triage_tampered`, or `fix_tampered`
 
 Cause: an agent changed a protected file such as `plan.md`, `worktree.yml`, or `task.md` during a phase that must not touch it. Fix: inspect the worktree, restore the protected file from git if needed, clear the error marker, and re-run.

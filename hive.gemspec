@@ -35,6 +35,7 @@ Gem::Specification.new do |spec|
     "bin/hive-babysitter-stub-git",
     "bin/hv",
     "lib/**/*.rb",
+    "lib/hive/scripts/**/*.sh",
     "templates/**/*",
     "schemas/**/*.json",
     "examples/systemd/*",

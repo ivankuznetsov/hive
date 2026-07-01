@@ -91,6 +91,119 @@ Prefer `--json` when the Hive command supports it and you need structured output
 
 For `hive wiki compile-log`, prefer `--check` when verifying an aggregate wiki changelog. Run the mutating compile command only after merge/rebase or when the user explicitly wants `wiki/log.md` refreshed; feature PRs should add `wiki/log.d/<timestamp>-<slug>.md` fragments instead of editing the compiled log directly.
 
+## Status Bundle
+
+Use this read-only bundle for a one-shot health overview; these commands need no confirmation, and this section does not weaken confirmation rules for destructive or foreground/streaming commands.
+
+Gather:
+
+```bash
+hive daemon status --json
+hive status --json
+systemctl --user status hive-daemon.service --no-pager
+```
+
+For each task with a `pr_url` from `hive status --json`, derive `<number>` from the URL and run `gh pr checks <number>`; without a PR, CI is not applicable.
+
+Summarize one bullet/block per task, not a table, with fields in this order: `stage`, `marker`, `action`, `PR URL`, `CI status`, `live PID`, `held/retry`, `suggested command`.
+Source `stage`, `PR URL`, `marker`, `action`, `held/retry`, and `suggested command` from `hive status --json`; use daemon status for live PID when present, and `gh pr checks` for CI status.
+
+Degrade gracefully: if `systemctl` is unavailable (for example macOS/launchd), report service status unavailable or use the obvious platform check.
+If `gh` is missing, unauthenticated, or the task has no PR, report CI as unknown/not applicable.
+If the daemon is stopped or has no live PID, report that plainly instead of failing the bundle.
+
+## Daemon Diagnostics And Repair
+
+Use this when interactive `hive` works but the rootless user-systemd `hive-daemon.service` misbehaves. Run the read-only diagnostics in order before any repair so the operator can see whether the service is using the wrong binary, a missing gem environment, or a Ruby `LoadError`.
+
+Read-only diagnostics — binary alignment:
+
+```bash
+command -v hive
+hive --version
+systemctl --user cat hive-daemon.service
+systemctl --user show hive-daemon.service -p Environment
+hive daemon status --json
+```
+
+Compare the interactive `command -v hive` path with the service `HIVE_BIN`. The expected default is the interactive binary unless the operator intentionally chose another path. A mismatch such as `/usr/bin/hive` versus `~/.local/bin/hive` usually means the daemon is not running the same Hive CLI the shell runs. When `/usr/bin/hive` appears, flag possible Apache Hive shadowing or an unintended system-package path.
+
+Read-only diagnostics — gem and environment validation:
+
+```bash
+ruby -e 'puts Gem.user_dir'
+gem env home
+gem env path
+printf '%s\n' "$PATH"
+systemctl --user show hive-daemon.service -p Environment
+```
+
+Compare the working shell's `PATH`, `GEM_HOME`, and `GEM_PATH` with the unit's `Environment=` lines. The daemon environment is broken when it lacks the user gem dir, lacks the directory containing the intended `hive` binary, points at a different `HIVE_BIN`, or works interactively while the daemon or status path raises a Ruby `LoadError`.
+
+Read-only diagnostics — Arch `ruby-erb` LoadError:
+
+```text
+cannot load such file -- erb (LoadError)
+```
+
+Prefer the system package fix on Arch:
+
+```bash
+sudo pacman -S ruby-erb
+```
+
+If a user-local fallback is required, install the gem and read the actual gem paths from the local Ruby rather than hardcoding a version fragment:
+
+```bash
+gem install --user-install erb
+ruby -e 'puts Gem.user_dir'
+gem env path
+```
+
+These commands print full gem directory paths that already contain the correct Ruby minor-version segment; copy those paths verbatim when adding `GEM_PATH` to the service environment rather than hand-assembling a version fragment.
+
+### Safe repair (mutating)
+
+Prefer a user systemd drop-in override instead of editing the generated unit in place. Inspect first, preserve existing `Environment=` values, and merge only the missing `PATH`, `GEM_HOME`, `GEM_PATH`, or `HIVE_BIN` entries.
+
+`systemctl --user edit hive-daemon.service` and `sudo pacman -S ruby-erb` are interactive/operator-run: the first opens `$SYSTEMD_EDITOR`/`$EDITOR` and the second prompts for a sudo password, so both block (or no-op with no TTY) when an agent runs them non-interactively. When acting non-interactively, write the drop-in override file directly instead of opening the editor, adding only the missing `Environment=` lines:
+
+```bash
+systemctl --user cat hive-daemon.service
+mkdir -p ~/.config/systemd/user/hive-daemon.service.d
+cat > ~/.config/systemd/user/hive-daemon.service.d/override.conf <<'EOF'
+[Service]
+Environment=GEM_PATH=<derived-value>
+# Add only the entries that were actually missing, e.g.:
+# Environment=PATH=<derived-value>
+# Environment=GEM_HOME=<derived-value>
+# Environment=HIVE_BIN=<derived-value>
+EOF
+```
+
+The interactive editor path stays available for an operator running this by hand:
+
+```bash
+systemctl --user edit hive-daemon.service
+```
+
+Reloading and restarting the service stops and restarts background automation, so — like `daemon stop` in `## Safety Boundaries` — restate the effect and get explicit user confirmation before running:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user restart hive-daemon.service
+```
+
+Verify the service is active, responding, and running with the intended binary and environment:
+
+```bash
+systemctl --user status hive-daemon.service --no-pager
+hive daemon status --json
+systemctl --user show hive-daemon.service -p Environment
+```
+
+If the repair changed `HIVE_BIN`, confirm it matches `command -v hive` or the operator's intentional chosen path.
+
 ## Safety Boundaries
 
 Before running destructive admin verbs (`drop`, `uninstall`, `update`, `forget`, `prune`, `migrate`, or `metrics`), restate the effect and get explicit user confirmation. These verbs can kill agents, remove worktrees, close draft PRs, drop registry entries, or rewrite installed software — they are not undoable.

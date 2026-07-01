@@ -664,6 +664,8 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "git", "--config-env=core.pager=HIVE_TEST_PAGER", "log", "--oneline"
       assert_stubbed env, "git", "--paginate", "log", "--oneline"
       assert_stubbed env, "git", "grep", "--open-files-in-pager=touch /tmp/hive-pager-pwn", "needle"
+      assert_stubbed env, "git", "grep", "-e", "--", "--open-files-in-pager=/tmp/hive-pager-sep-pwn"
+      assert_stubbed env, "git", "grep", "-e", "--", "--textconv"
       # On `git grep`, `-O` is the short form of `--open-files-in-pager`; both glued and
       # separate forms run an attacker-controlled pager command and must be rejected. (On
       # diff/log/show `-O` is the read-only `--output-ordering` — see the passthrough cases.)
@@ -687,6 +689,13 @@ class BabysitterDryRunEnvTest < Minitest::Test
       # Arbitrary file-write options defeat the no-mutation boundary on allowed reads.
       assert_stubbed env, "git", "diff", "--output=/tmp/hive-output-pwn"
       assert_stubbed env, "git", "log", "-p", "--output", "/tmp/hive-output-sep-pwn"
+      # A separate-word `--pretty` / `--format` on log/show/rev-list is stuck-only: git does NOT
+      # consume the next token as its format value (a bare `--pretty` uses the default format),
+      # so the argv scan must keep scanning the following token. Otherwise a trailing file-writing
+      # `--output` rides past the write guard and the stub execs real git, creating the file.
+      assert_stubbed env, "git", "log", "--pretty", "--output=/tmp/hive-pretty-output-pwn"
+      assert_stubbed env, "git", "show", "--pretty", "--output", "/tmp/hive-show-pretty-output-sep-pwn"
+      assert_stubbed env, "git", "rev-list", "--format", "--output=/tmp/hive-revlist-format-output-pwn", "HEAD"
       assert_stubbed env, "git", "diff", "-o", "/tmp/hive-output-short-pwn"
       assert_stubbed env, "git", "diff", "-o/tmp/hive-output-glued-pwn"
       assert_stubbed env, "git", "diff", "--ext-diff"
@@ -862,6 +871,8 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes skipped, "git --config-env=core.pager=HIVE_TEST_PAGER log --oneline skipped"
       assert_includes skipped, "git --paginate log --oneline skipped"
       assert_includes skipped, "git grep --open-files-in-pager=touch /tmp/hive-pager-pwn needle skipped"
+      assert_includes skipped, "git grep -e -- --open-files-in-pager=/tmp/hive-pager-sep-pwn skipped"
+      assert_includes skipped, "git grep -e -- --textconv skipped"
       assert_includes skipped, "git remote show origin skipped"
 
       real_invocations = File.read(File.join(dir, "real.log"))

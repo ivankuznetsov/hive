@@ -5,6 +5,7 @@ require "hive/agent_limit"
 require "hive/markers"
 require "hive/daemon/stale_agent_healer"
 require "hive/daemon/status_consumer"
+require "hive/review_error_reason"
 require "hive/stages/review"
 
 # Healer's job: rewrite AGENT_WORKING markers whose backing agent isn't
@@ -644,6 +645,45 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
+  # Safety invariant (plan Q5's two-tier guarantee): the reasons
+  # ReviewErrorReason.classify can emit are agent-influenceable — a triage/fix
+  # agent's own captured error text decides them (Stages::Review#mark_review_
+  # phase_failure) — so NONE of them, nor the `unknown` fallback, may be
+  # auto-recoverable. Today this holds only by inspection: no allow-list in
+  # auto_recoverable_review_error? happens to name these strings. This guard
+  # feeds every classified reason across each review phase that carries a
+  # recovery allow-list (triage/fix/reviewers) and pins non-recovery, so a
+  # future allow-list edit that admitted one of these strings — silently
+  # re-arming an agent-controllable signal into a free rerun — fails loudly
+  # instead of shipping green. Driven off CLASSIFIED so a new enum member is
+  # covered the moment it is added.
+  def test_classified_review_reasons_are_never_auto_recovered
+    reasons = Hive::ReviewErrorReason::CLASSIFIED + [ "unknown" ]
+
+    reasons.product(%w[triage fix reviewers]).each do |reason, phase|
+      with_marker_file do |state_file|
+        File.write(state_file,
+                   "# task\n\n<!-- REVIEW_ERROR phase=#{phase} reason=#{reason} pass=1 -->\n")
+        row = make_row(
+          state_file,
+          pid_alive: nil,
+          stage: "6-review",
+          marker: "review_error",
+          marker_attrs: { "phase" => phase, "reason" => reason, "pass" => "1" },
+          action: "recover_review",
+          live_task_lock: false
+        )
+
+        heal([ row ])
+
+        assert_match(/REVIEW_ERROR/, File.read(state_file),
+                     "classified reason #{reason.inspect} on phase #{phase.inspect} must stay terminal, never auto-recover")
+        refute @logger.events.any? { |name, _| name == :marker_healed },
+               "no classified reason may fire a heal; #{reason.inspect}/#{phase.inspect} did. events: #{@logger.events.inspect}"
+      end
+    end
+  end
+
   # --- limits_reached cooldown auto-retry (review path) ----------------
 
   def make_review_limit_row(state_file, retry_after:, pass: "1")
@@ -677,7 +717,6 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
         :mark_review_phase_failure,
         task,
         phase: :triage,
-        terminal_reason: "triage_failed",
         pass: 1,
         error_message: message
       )

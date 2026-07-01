@@ -278,8 +278,8 @@ Progress" — an activity description, not a name. The prompt should pin
 ## Triage phase ~5.5-min failure cause unconfirmed (2026-06-17)
 
 Live task `xbookmark` #1333 (`we-need-to-add-an-260616-094b`) failed at the
-triage phase ~5.5 min in across two separate runs (5m42s and 5m32s) with
-`reason=triage_failed`. The real `error_message` was discarded by
+triage phase ~5.5 min in across two separate runs (5m42s and 5m32s) with a
+legacy generic triage failure reason. The real `error_message` was discarded by
 `mark_review_phase_failure` (now fixed — it surfaces a `message=` attr and
 triage retries; see [[stages/review]]), so the underlying trigger was never
 captured. Open questions:

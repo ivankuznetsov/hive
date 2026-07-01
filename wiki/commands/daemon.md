@@ -40,7 +40,7 @@ hive daemon queue   [list | show <id> | prune]  [--json]
 |-----------|----------|
 | `start`    | Acquires the PID file (`~/Dev/hive/.daemon.pid`); without `--detach` runs in the foreground. With `--detach` calls `Process.daemon(true, true)` and the parent returns immediately. With `--dry-run` logs every dispatch decision but does NOT spawn child `hive ...` processes. Refuses with exit `75 (TEMPFAIL)` if a live daemon already holds the PID file. |
 | `stop`     | Sends `SIGTERM` to the running daemon's PID. Waits up to `daemon.shutdown_grace_sec` (default 600s) for the daemon to exit, then escalates to `SIGKILL`. Idempotent: `stop` with no PID file exits 0 with `daemon not running` on stderr; a stale PID file (process gone) is removed and the call exits 0. With `--json`, emits a `hive-daemon-stop` envelope (fields: `running`, `was_running`, `stale_pid?`, `reason?` — `pid_reused` / `unverified` for safety bailouts). |
-| `status`   | Reports running / not running. Exit code 0 if running, 1 if not. With `--json`, emits a `hive-daemon-status` envelope with `running`, `pid`, `uptime_sec`, `pid_file`, `log_file`, plus the autostart-service state `service_installed`, `service_enabled`, and `unit_path` (read-only probe) so an agent can tell whether `hive daemon install` has run without a mutating call. |
+| `status`   | Reports running / not running. Exit code 0 if running, 1 if not. With `--json`, emits a `hive-daemon-status` envelope with `running`, `pid`, `uptime_sec`, `pid_file`, `log_file`, plus the autostart-service state `service_installed`, `service_enabled`, and `unit_path` (read-only probe) so an agent can tell whether `hive daemon install` has run without a mutating call. The JSON envelope also reports `installed_binary`, `expected_binary`, `installed_binary_version`, `cli_version`, and `binary_drift` (`none`, `path`, `version`, `unparseable`, `unreadable`, or `not_applicable`) so local setup and the web UI can detect a stale unit. `unparseable` means the unit is present but its ExecStart/ProgramArguments binary could not be read — distinct from `not_applicable` (no unit installed). `unreadable` means the unit points at the expected binary path but that binary's `--version` failed or timed out (wedged/broken binary); like `path`/`version`/`unparseable` it is actionable and surfaces a repair affordance. The allowed values are defined once as `Hive::Commands::Daemon::BINARY_DRIFT_STATES`. |
 | `reload`   | Sends `SIGHUP` to the running daemon's PID, which triggers config reload at the next tick boundary. In-flight children continue uninterrupted. Exit 1 if no daemon running. With `--json`, emits a `hive-daemon-reload` envelope (`ok`, `reason`, `pid`, `message`). |
 | `tail`     | `tail -F` semantics on `~/Dev/hive/logs/daemon.log` (self-implemented; doesn't shell out to the `tail` binary). Exit 1 if the log file doesn't exist. |
 | `install`  | (Re)writes the platform-native unit file (`~/.config/systemd/user/hive-daemon.service` on Linux, `~/Library/LaunchAgents/local.hive-daemon.plist` on macOS) and starts/enables the service. Installers and agent-assisted setup run this by default so daemon autostart is global install-time infrastructure, independent of any project. Without `--force`, refuses to overwrite a pre-existing unit (preserving operator hand-edits); exit `64` (USAGE) with a message pointing at `--force` so automation can branch without clobbering local changes. With `--force`, saves the previous content to a timestamped `<path>.bak-YYYYMMDDTHHMMSSZ` (rotated, never overwritten) via atomic write, then — only when an existing unit was actually overwritten (the `upgraded` outcome) — restarts the running daemon on Linux / unloads-then-loads on macOS so new `Environment=` lines take effect (a first-time `--force` install with no prior unit just starts/enables, no restart). A service-manager failure (systemctl reload/enable, or launchctl load rejecting the unit) exits `70` (SOFTWARE). A host with no systemd-user manager at all is different: the unit is still written, but autostart cannot be enabled, so it exits `0` with the `unsupported` outcome (and `target_path` set to the written unit) — a known-platform limitation, not a failure. With `--json`, every outcome (success and error) emits a `hive-daemon-install.v1` envelope. Units point at the user-facing wrapper path when installers provide it, so bash/Homebrew installs preserve the GEM_HOME/GEM_PATH wrapper across login/reboot; `hv` invocations remain valid when Apache Hive shadows `hive`. Use this after upgrading hive when the unit template has changed or when autostart needs repair. |
@@ -77,7 +77,13 @@ step, so selected no-live-lock `error` rows may be cleared into markerless
 edit-resume rows first: `8-finalize` `reason=unpushed_commits`, plus
 `2-brainstorm` / `3-plan` / `4-execute` / `7-artifacts` / `8-finalize`
 `reason=tmux_session_terminated` or `reason=agent_orphaned`, and elapsed
-`limits_reached` markers whose `retry_after` cooldown has passed. `3-plan`
+`limits_reached` markers whose `retry_after` cooldown has passed. Immediately
+after that, `Hive::Daemon::RecoverableErrorHealer` may clear the fixed v1
+recoverable dependency-outage allowlist: Codex-auth `implementer_failed`
+markers with a 401 missing bearer/basic-auth diagnostic, and
+`claude_launch_failed` markers, but only after safety checks, changed health
+signal/backoff/budget gates, and dependency probes pass. Set
+`daemon.auto_retry.enabled: false` to disable that probe-gated path. `3-plan`
 terminal-error clears also enqueue a same-stage `hive plan ... --from 3-plan`
 request with `requestor=healer`, because a markerless empty `plan.md` would
 otherwise remain an error row. Independently, `Hive::Daemon::DisplayNameBackfiller`
@@ -150,6 +156,7 @@ All under `daemon:` in `~/Dev/hive/config.yml`:
 | `child_timeout_sec` | 0 | Per-child wall-clock cap (R-02). `0` disables the default cap, preserving the historical unbounded behavior and avoiding surprise kills of long autonomous review loops. Set a positive value to SIGTERM then SIGKILL children past their deadline. Min 0. |
 | `child_verb_timeouts` | `{digest: 3600}` | Per-verb overrides of `child_timeout_sec`, e.g. `{review: 10800, brainstorm: 1800}`. Each value an integer ≥ 0 (0 disables for that verb). The `digest` verb ships a non-zero default (3600s) because a wedged digest child holds the single global digest slot (`can_dispatch_digest?`) and would otherwise disable all future digests until restart; user overrides deep-merge, so setting other verbs keeps the digest default. Raise it alongside a raised `timeout_sec.digest` (default 1800), or set `{digest: 0}` to disable. |
 | `child_kill_grace_sec` | 30 | SIGTERM→SIGKILL escalation window for a timed-out child. Min 0 (0 = SIGKILL immediately after TERM). |
+| `auto_retry.enabled` | true | Global kill-switch for health-probe-gated daemon auto-retry of the fixed v1 recoverable terminal-error allowlist. Set `daemon.auto_retry.enabled: false` to leave those markers parked for manual `hive markers clear`. |
 | `log_file` | `~/Dev/hive/logs/daemon.log` | Structured-log destination. |
 | `log_max_bytes` | 10485760 | 10 MB rotation threshold. |
 | `log_max_files` | 5 | 5 × 10 MB = 50 MB log budget. |
@@ -195,6 +202,14 @@ new events are caught at CI rather than logged silently.
   not require `systemd`. Sample autostart units ship at
   `examples/systemd/hive-daemon.service` (Linux) and
   `examples/launchd/hive-daemon.plist` (macOS).
+- The web dashboard reads `hive daemon status --json` for daemon health and
+  binary drift. Its Repair button queues `hive daemon install --force` through
+  the daemon dispatch queue rather than executing from the Rails process. The
+  request is enqueued under the `__global__` maintenance sentinel
+  (`Hive::Daemon::DispatchRequestQueue::GLOBAL_MAINTENANCE_PROJECT`), which the
+  daemon consumer special-cases (`process_global_maintenance_request`) and runs
+  against the maintenance argv allowlist — so the repair executes end-to-end
+  instead of being dropped as `unknown_project`.
 - **Pausing a single task:** edit the state file to remove the terminal
   marker (e.g., delete `<!-- EXECUTE_COMPLETE -->`) so the row no
   longer classifies as advance-ready. Daemon will skip until you write

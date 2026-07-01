@@ -22,6 +22,11 @@
         "service_installed",
         "service_enabled",
         "unit_path",
+        "installed_binary",
+        "expected_binary",
+        "installed_binary_version",
+        "cli_version",
+        "binary_drift",
         "current_version",
         "update_nudge"
       ],
@@ -60,6 +65,27 @@
         "unit_path": {
           "type": ["string", "null"],
           "description": "Absolute path of the autostart unit file; null on unsupported platforms or if the probe could not run."
+        },
+        "installed_binary": {
+          "type": ["string", "null"],
+          "description": "Path to the hive binary the installed autostart unit invokes; null when no unit is installed or the probe could not run."
+        },
+        "expected_binary": {
+          "type": ["string", "null"],
+          "description": "Path to the hive binary an install/repair would write into the unit (the resolved current binary); null if the probe could not run."
+        },
+        "installed_binary_version": {
+          "type": ["string", "null"],
+          "description": "Version string reported by `installed_binary --version`; null when unreadable, the probe timed out, or no unit is installed."
+        },
+        "cli_version": {
+          "type": "string",
+          "description": "The version of the hive binary that produced this envelope (same as current_version)."
+        },
+        "binary_drift": {
+          "type": "string",
+          "enum": ["none", "path", "version", "unparseable", "not_applicable"],
+          "description": "Whether the installed unit's binary diverges from the current one: none (matches), path (different binary path), version (same path, older version), unparseable (unit present but its binary could not be read), not_applicable (no unit installed / probe could not run)."
         },
         "current_version": {
           "type": "string",

@@ -15,16 +15,19 @@ require "hive/commands/generate_name"
 require "hive/commands/run"
 require "hive/commands/rebase_status"
 require "hive/commands/stage_action"
+require "hive/commands/adhoc_review"
 require "hive/commands/status"
 require "hive/commands/approve"
 require "hive/commands/findings"
 require "hive/commands/finding_toggle"
 require "hive/commands/patrol"
 require "hive/commands/digest"
+require "hive/commands/answer_digest"
 require "hive/commands/markers"
 require "hive/commands/daemon"
 require "hive/commands/bot"
 require "hive/commands/metrics"
+require "hive/commands/setup"
 
 class HiveCliTest < Minitest::Test
   include HiveTestHelper
@@ -32,6 +35,13 @@ class HiveCliTest < Minitest::Test
   CommandDouble = Struct.new(:return_value, :calls) do
     def call
       calls << :call
+      return_value
+    end
+
+    # `hive review --pr` drives AdhocReview through #enqueue (not #call) so it
+    # can return the resolved {slug:, project:} the CLI forwards to StageAction.
+    def enqueue
+      calls << :enqueue
       return_value
     end
   end
@@ -129,6 +139,35 @@ class HiveCliTest < Minitest::Test
         assert_equal [ Dir.pwd ], loaded
         assert_equal({ config: { "ok" => true }, project_root: Dir.pwd, json: true }, calls.first.fetch(:kwargs))
       end
+    end
+  end
+
+  def test_setup_wires_options_and_exits_with_command_status
+    with_command_new_stub(Hive::Commands::Setup, return_value: 3) do |calls|
+      _out, _err, status = with_captured_exit do
+        Hive::CLI.start([ "setup", "--json", "--yes", "--service", "--no-bootstrap", "--no-init" ])
+      end
+
+      assert_equal 3, status, "the CLI must exit with the Setup command's return value"
+      assert_equal(
+        { json: true, yes: true, service: true, no_bootstrap: true, no_init: true },
+        calls.first.fetch(:kwargs),
+        "every setup flag must be forwarded to Hive::Commands::Setup.new"
+      )
+      assert_includes calls, :call, "the setup command must actually be invoked"
+    end
+  end
+
+  def test_setup_defaults_when_no_flags_given
+    with_command_new_stub(Hive::Commands::Setup, return_value: 0) do |calls|
+      _out, _err, status = with_captured_exit { Hive::CLI.start([ "setup" ]) }
+
+      assert_equal 0, status
+      assert_equal(
+        { json: false, yes: false, service: false, no_bootstrap: false, no_init: false },
+        calls.first.fetch(:kwargs),
+        "with no flags the CLI must pass the documented defaults"
+      )
     end
   end
 
@@ -272,6 +311,85 @@ class HiveCliTest < Minitest::Test
     end
   end
 
+  def test_review_pr_dispatches_adhoc_enqueue_then_stage_action
+    # enqueue returns the RESOLVED project (here "resolved-proj"), deliberately
+    # different from the raw --project "proj", so the assertion proves the CLI
+    # forwards the resolved name to StageAction rather than the raw option.
+    enqueue_result = { slug: "adhoc-review-pr-197", project: "resolved-proj" }
+    with_command_new_stub(Hive::Commands::AdhocReview, return_value: enqueue_result) do |adhoc_calls|
+      with_command_new_stub(Hive::Commands::StageAction) do |stage_calls|
+        Hive::CLI.start([ "review", "--pr", "#197", "--project", "proj", "--json" ])
+
+        adhoc_ctor = adhoc_calls.grep(Hash).first
+        assert_equal [], adhoc_ctor.fetch(:args)
+        assert_equal({ pr: "#197", project: "proj", json: true }, adhoc_ctor.fetch(:kwargs))
+        assert_equal :enqueue, adhoc_calls.last
+
+        stage_ctor = stage_calls.grep(Hash).first
+        assert_equal [ "review", "adhoc-review-pr-197" ], stage_ctor.fetch(:args)
+        assert_equal({ project: "resolved-proj", json: true }, stage_ctor.fetch(:kwargs))
+        assert_equal :call, stage_calls.last
+      end
+    end
+  end
+
+  def test_review_bare_number_still_dispatches_as_task_target
+    with_command_new_stub(Hive::Commands::StageAction) do |calls|
+      Hive::CLI.start([ "review", "197", "--project", "proj", "--json" ])
+
+      ctor = calls.grep(Hash).first
+      assert_equal [ "review", "197" ], ctor.fetch(:args)
+      assert_equal({ project: "proj", from: nil, json: true }, ctor.fetch(:kwargs))
+      assert_equal :call, calls.last
+    end
+  end
+
+  def test_review_pr_rejects_positional_target
+    _out, err, status = with_captured_exit do
+      Hive::CLI.start([ "review", "197", "--pr", "198" ])
+    end
+
+    assert_equal Hive::ExitCodes::USAGE, status
+    assert_match(/pass either TARGET or --pr/, err)
+  end
+
+  def test_review_pr_rejects_from_flag
+    # --from only disambiguates a TARGET lookup; combining it with --pr must
+    # be a usage error, not a silently-dropped flag.
+    _out, err, status = with_captured_exit do
+      Hive::CLI.start([ "review", "--pr", "197", "--from", "6-review" ])
+    end
+
+    assert_equal Hive::ExitCodes::USAGE, status
+    assert_match(/--from is not valid with --pr/, err)
+  end
+
+  def test_review_requires_target_or_pr
+    _out, err, status = with_captured_exit { Hive::CLI.start([ "review" ]) }
+
+    assert_equal Hive::ExitCodes::USAGE, status
+    assert_match(/missing TARGET/, err)
+  end
+
+  def test_review_usage_error_warns_when_envelope_is_not_serialisable
+    # The JSON usage-error envelope's GeneratorError arm must warn (a
+    # non-serialisable payload is a bug) rather than be silently swallowed;
+    # the bare-text rescue in bin/hive still carries the failure.
+    with_replaced_singleton_method(JSON, :generate, ->(*_args) { raise JSON::GeneratorError, "nope" }) do
+      _out, err, status = with_captured_exit { Hive::CLI.start([ "review", "--json" ]) }
+
+      assert_equal Hive::ExitCodes::USAGE, status
+      assert_match(/review usage-error envelope was not serialisable/, err)
+    end
+  end
+
+  def test_review_help_mentions_pr_option
+    out, _err = capture_io { Hive::CLI.start([ "help", "review" ]) }
+
+    assert_match(/--pr/, out)
+    assert_match(/ad-hoc review/, out)
+  end
+
   def test_archive_without_target_lists_archived_tasks_via_status
     with_command_new_stub(Hive::Commands::Status) do |calls|
       Hive::CLI.start([ "archive", "--json" ])
@@ -344,6 +462,12 @@ class HiveCliTest < Minitest::Test
       assert_equal({ date: "2026-06-13", json: true, dry_run: true }, calls.first.fetch(:kwargs))
     end
 
+    with_command_new_stub(Hive::Commands::AnswerDigest) do |calls|
+      Hive::CLI.start([ "answer-digest", "--date", "2026-06-27", "--dry-run", "--json" ])
+      assert_equal [], calls.first.fetch(:args)
+      assert_equal({ date: "2026-06-27", json: true, dry_run: true }, calls.first.fetch(:kwargs))
+    end
+
     with_command_new_stub(Hive::Commands::Markers) do |calls|
       Hive::CLI.start([ "markers", "clear", "slug", "--name", "ERROR", "--project", "proj", "--match-attr", "exit_code=1", "--json" ])
       assert_equal [ "clear", "slug" ], calls.first.fetch(:args)
@@ -389,6 +513,19 @@ class HiveCliTest < Minitest::Test
     assert_match(/--force only applies to `install`/, err)
   end
 
+  # A closed stdout (broken pipe) while writing the bot argv-error --json
+  # envelope must be swallowed: emit_bot_argv_error still raises the
+  # InvalidTaskPath usage failure rather than letting a raw Errno::EPIPE
+  # escape. Covers the `rescue Errno::EPIPE, JSON::GeneratorError` arm around
+  # `puts JSON.generate(payload)`.
+  def test_bot_argv_error_json_swallows_broken_pipe
+    cli = Hive::CLI.new([], { json: true, force: true })
+    cli.define_singleton_method(:puts) { |_payload| raise Errno::EPIPE, "closed pipe" }
+
+    error = assert_raises(Hive::InvalidTaskPath) { cli.bot("status") }
+    assert_match(/--force only applies to `install`/, error.message)
+  end
+
   # P3: `hive web --json` previously accepted the global --json and silently
   # ignored it. Mirror `hive tui`'s rejection: emit a structured error
   # envelope and exit with EX_USAGE rather than booting a long-lived server.
@@ -412,7 +549,11 @@ class HiveCliTest < Minitest::Test
     require "hive/commands/web"
     captured = []
     recorder = Class.new do
-      define_method(:initialize) { |bind:, port:| captured << { bind: bind, port: port } }
+      # The constructor now takes a positional `subcommand` (nil for the
+      # foreground server) plus the bind/port/no_bootstrap/unsafe/force/json/
+      # detach kwargs the CLI forwards. Accept the positional + swallow the
+      # extra kwargs so the recorder matches the real signature.
+      define_method(:initialize) { |subcommand = nil, bind:, port:, **| captured << { bind: bind, port: port } }
       define_method(:call) { captured << :called }
     end
 

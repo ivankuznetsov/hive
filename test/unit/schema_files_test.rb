@@ -1,7 +1,9 @@
 require "test_helper"
 require "json"
 require "json_schemer"
+require "hive/commands/answer_digest"
 require "hive/commands/approve"
+require "hive/commands/bot"
 require "hive/commands/daemon"
 require "hive/commands/drop"
 require "hive/commands/forget"
@@ -504,6 +506,7 @@ class SchemaFilesTest < Minitest::Test
       "id" => 42,
       "display_name" => "Probe",
       "task_folder" => "/tmp/probe",
+      "marker_summary" => "REVIEW_ERROR phase=fix pass=1",
       "path" => nil,
       "diagnostic" => {
         "summary" => "REVIEW_ERROR phase=fix pass=1",
@@ -537,6 +540,7 @@ class SchemaFilesTest < Minitest::Test
       "id" => nil,
       "display_name" => nil,
       "task_folder" => "/tmp/probe",
+      "marker_summary" => nil,
       "diagnostic" => nil,
       "path" => nil
     }
@@ -1471,7 +1475,9 @@ class SchemaFilesTest < Minitest::Test
     # are required-but-nullable in the schema.
     producer_required = %w[
       schema schema_version ok running pid uptime_sec pid_file log_file
-      service_installed service_enabled unit_path current_version update_nudge
+      service_installed service_enabled unit_path
+      installed_binary expected_binary installed_binary_version cli_version binary_drift
+      current_version update_nudge
     ].sort
     assert_equal producer_required, schema_required,
                  "schema/producer required-key drift in hive-daemon-status.v1.json"
@@ -1599,6 +1605,89 @@ class SchemaFilesTest < Minitest::Test
     # Reasons emitted by the four refusal branches in compute_reload_outcome.
     producer_reasons = %w[not_running pid_dead pid_reused unverified].sort
     assert_equal producer_reasons, schema_reasons
+  end
+
+  # ── hive-bot-status ────────────────────────────────────────────────────
+
+  # The usage-error kinds the `hive bot` surface emits through
+  # Hive::Commands::Bot.json_usage_error_payload. missing_subcommand /
+  # unknown_subcommand are raised in Hive::Commands::Bot#call; the cli.rb
+  # `bot` dispatcher raises wrong_subcommand_flag before the command runs
+  # (e.g. `bot status --force`); and extra_arguments rides the bin/hive
+  # JSON_USAGE_ERROR_CONTRACTS `bot` entry when Thor rejects an extra
+  # positional (e.g. `bot status extra`) before dispatch. All ride the
+  # hive-bot-status schema because there is no separate bot-usage-error
+  # schema — JSON_USAGE_ERROR_SCHEMA points here.
+  BOT_USAGE_ERROR_KINDS = %w[
+    missing_subcommand unknown_subcommand wrong_subcommand_flag extra_arguments
+  ].freeze
+
+  def test_hive_bot_status_schema_file_exists_and_is_valid_json
+    path = Hive::Schemas.schema_path("hive-bot-status")
+    assert File.exist?(path), "schema file missing: #{path}"
+
+    doc = JSON.parse(File.read(path))
+    assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
+    assert_equal "hive-bot-status",
+                 doc.dig("$defs", "SuccessPayload", "properties", "schema", "const")
+    assert_equal 1,
+                 doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+  end
+
+  # The usage-error arm (ErrorPayload) must exist in the oneOf alongside the
+  # SuccessPayload — without it, every `hive bot ... --json` usage error
+  # (which carries ok:false) is rejected by schema-validating agent clients.
+  def test_hive_bot_status_oneof_carries_success_and_error_arms
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-bot-status")))
+    refs = doc.fetch("oneOf").map { |arm| arm["$ref"] }
+    assert_includes refs, "#/$defs/SuccessPayload"
+    assert_includes refs, "#/$defs/ErrorPayload",
+                    "hive-bot-status must carry an ErrorPayload arm for usage errors"
+    assert_equal "hive-bot-status",
+                 doc.dig("$defs", "ErrorPayload", "properties", "schema", "const")
+    assert_equal false,
+                 doc.dig("$defs", "ErrorPayload", "properties", "ok", "const"),
+                 "ErrorPayload.ok must pin false so it never collides with SuccessPayload (ok:true)"
+  end
+
+  def test_hive_bot_status_error_kinds_match_producer_emission
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-bot-status")))
+    schema_kinds = doc.dig("$defs", "ErrorPayload", "properties", "error_kind", "enum").sort
+    assert_equal BOT_USAGE_ERROR_KINDS.sort, schema_kinds,
+                 "schema ErrorPayload.error_kind enum must mirror the bot usage-error kinds"
+  end
+
+  # Round-trip: every bot usage-error kind, built through the real producer
+  # (Hive::Commands::Bot.json_usage_error_payload), must validate against the
+  # published schema. This is the direct guard for the bug — before the
+  # ErrorPayload arm existed, `bot status --force --json` / `bot --json`
+  # emitted an ok:false envelope claiming schema "hive-bot-status" that the
+  # schema rejected.
+  def test_hive_bot_status_usage_error_payload_validates_for_every_kind
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-bot-status"))))
+    error = Hive::InvalidTaskPath.new("hive bot: usage error")
+    BOT_USAGE_ERROR_KINDS.each do |kind|
+      payload = Hive::Commands::Bot.json_usage_error_payload(error: error, error_kind: kind)
+      assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
+      assert schemer.valid?(payload),
+             "hive-bot-status ErrorPayload arm must accept error_kind=#{kind.inspect} " \
+             "(validation errors: #{schemer.validate(payload).map { |e| e['error'] }.inspect})"
+    end
+  end
+
+  def test_hive_bot_status_error_payload_rejects_unknown_kind
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-bot-status"))))
+    payload = {
+      "schema" => "hive-bot-status",
+      "schema_version" => 1,
+      "ok" => false,
+      "error_class" => "InvalidTaskPath",
+      "error_kind" => "made_up_kind",
+      "exit_code" => 64,
+      "message" => "nope"
+    }
+    refute schemer.valid?(payload),
+           "schema must reject error_kind values outside the bot usage-error set"
   end
 
   # ── hive-daemon-enroll ─────────────────────────────────────────────────
@@ -1842,6 +1931,138 @@ class SchemaFilesTest < Minitest::Test
     }
     errors = JSONSchemer.schema(doc).validate(payload).map { |e| e["error"] }
     assert_empty errors, "durable patrol finding record must validate"
+  end
+
+  # ── hive-answer-digest ───────────────────────────────────────────────────
+
+  def answer_digest_command(output: StringIO.new)
+    Hive::Commands::AnswerDigest.new(json: true, output: output, cfg: {})
+  end
+
+  def answer_digest_task
+    Hive::Commands::AnswerDigest::Task.new(
+      project: "hive", slug: "answer-me-260625-abcd", id: 17, title: "#17 Answer Me",
+      stage: "2-brainstorm", pr: "#42"
+    )
+  end
+
+  def test_hive_answer_digest_schema_file_exists_and_is_valid_json
+    path = Hive::Schemas.schema_path("hive-answer-digest")
+    assert File.exist?(path), "schema file missing: #{path}"
+
+    doc = JSON.parse(File.read(path))
+    assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
+    assert_equal "hive-answer-digest",
+                 doc.dig("$defs", "SuccessPayload", "properties", "schema", "const")
+    assert_equal 1,
+                 doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+  end
+
+  def test_hive_answer_digest_required_keys_match_producer_emission
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-answer-digest")))
+    schema_required = doc.dig("$defs", "SuccessPayload", "required").sort
+
+    # Drive the producer (#json_payload) so an added/dropped/renamed key in the
+    # emitted hash fails here against the schema's required set.
+    result = Hive::Commands::AnswerDigest::Result.new(
+      date: Date.new(2026, 6, 27), message: "", button_count: 0, chat_id: nil,
+      reason: "empty", dry_run: false, count: 0, tasks: []
+    )
+    producer_keys = answer_digest_command.send(:json_payload, result).keys.sort
+    assert_equal producer_keys, schema_required,
+                 "schema/producer required-key drift in hive-answer-digest SuccessPayload"
+
+    # The Task value object's members must equal the schema Task's required keys.
+    task_required = doc.dig("$defs", "Task", "required").sort
+    assert_equal Hive::Commands::AnswerDigest::Task.members.map(&:to_s).sort, task_required,
+                 "schema/producer required-key drift in hive-answer-digest Task"
+  end
+
+  def test_hive_answer_digest_error_kinds_match_producer_emission
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-answer-digest")))
+    schema_kinds = doc.dig("$defs", "ErrorPayload", "properties", "error_kind", "enum").sort
+
+    # Producer-routed: every representative error classifies to a schema kind,
+    # and the enum mirrors exactly the kinds the producer can emit.
+    cmd = answer_digest_command
+    representatives = {
+      "config" => Hive::ConfigError.new("bad --date"),
+      "status_unavailable" => Hive::Commands::AnswerDigest::StatusUnavailableError.new("status down"),
+      "usage" => Hive::Commands::AnswerDigest::UsageError.new("bad flag"),
+      "internal" => Hive::InternalError.new("boom")
+    }
+    representatives.each do |expected_kind, error|
+      assert_equal expected_kind, cmd.send(:error_kind_for, error),
+                   "error_kind_for(#{error.class}) must route to #{expected_kind.inspect}"
+    end
+    assert_equal representatives.keys.sort, schema_kinds,
+                 "schema ErrorPayload.error_kind enum must mirror the producer's routed kinds"
+  end
+
+  def test_hive_answer_digest_success_payloads_validate_against_published_schema
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-answer-digest"))))
+    cmd = answer_digest_command
+    task = answer_digest_task
+
+    empty = Hive::Commands::AnswerDigest::Result.new(
+      date: Date.new(2026, 6, 27), message: "", button_count: 0, chat_id: nil,
+      reason: "empty", dry_run: false, count: 0, tasks: []
+    )
+    dry_run = Hive::Commands::AnswerDigest::Result.new(
+      date: Date.new(2026, 6, 27), message: "⏳ Waiting on you (1)\n…", button_count: 1,
+      chat_id: nil, reason: "dry_run", dry_run: true, count: 1, tasks: [ task ]
+    )
+    real_send = Hive::Commands::AnswerDigest::Result.new(
+      date: Date.new(2026, 6, 27), message: "⏳ Waiting on you (1)\n…", button_count: 1,
+      chat_id: 4242, reason: nil, dry_run: false, count: 1, tasks: [ task ]
+    )
+
+    { "empty" => empty, "dry_run" => dry_run, "real_send" => real_send }.each do |label, result|
+      # Validate the JSON WIRE form a consumer sees (string keys throughout),
+      # not the Ruby hash whose task entries carry symbol keys.
+      payload = JSON.parse(JSON.generate(cmd.send(:json_payload, result)))
+      errors = schemer.validate(payload).map { |e| e["error"] }
+      assert_empty errors,
+                   "hive-answer-digest #{label} SuccessPayload (populated tasks where applicable) " \
+                   "must validate (errors: #{errors.inspect})"
+    end
+
+    # Pin the real-send shape: a populated task plus a null message (the text
+    # went to Telegram), so a schema tightening or a nil→"" drift fails here.
+    real_payload = JSON.parse(JSON.generate(cmd.send(:json_payload, real_send)))
+    assert_nil real_payload["message"], "message is null on a real send"
+    assert_equal 1, real_payload["tasks"].length
+    assert_equal "#42", real_payload.dig("tasks", 0, "pr")
+  end
+
+  def test_hive_answer_digest_error_payload_validates_for_every_kind
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-answer-digest"))))
+    {
+      "config" => Hive::ConfigError.new("bad --date"),
+      "status_unavailable" => Hive::Commands::AnswerDigest::StatusUnavailableError.new("status down"),
+      "usage" => Hive::Commands::AnswerDigest::UsageError.new("bad flag"),
+      "internal" => Hive::InternalError.new("boom")
+    }.each do |kind, error|
+      out = StringIO.new
+      answer_digest_command(output: out).send(:emit_error_envelope, error)
+      payload = JSON.parse(out.string)
+      assert_equal kind, payload.fetch("error_kind")
+      validation = schemer.validate(payload).map { |e| e["error"] }
+      assert_empty validation,
+                   "hive-answer-digest ErrorPayload (#{kind}, exit #{payload['exit_code']}) " \
+                   "must validate (errors: #{validation.inspect})"
+    end
+  end
+
+  def test_hive_answer_digest_error_payload_rejects_unknown_kind
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-answer-digest"))))
+    payload = {
+      "schema" => "hive-answer-digest", "schema_version" => 1, "ok" => false,
+      "error_class" => "MysteryError", "error_kind" => "made_up_kind",
+      "exit_code" => 70, "message" => "nope"
+    }
+    refute schemer.valid?(payload),
+           "schema must reject error_kind values outside the closed enum"
   end
 
   # ── schema metadata identity ─────────────────────────────────────────────

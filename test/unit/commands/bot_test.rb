@@ -571,4 +571,20 @@ class HiveCommandsBotTest < Minitest::Test
     assert_equal [], doc.fetch("messages"),
                  "raising messages must fall back to an empty list"
   end
+
+  # A closed stdout (broken pipe) while writing the --json usage-error
+  # envelope must be swallowed, not surface a raw Errno::EPIPE: the operator
+  # still gets the InvalidTaskPath usage failure, just without the JSON line
+  # the dead pipe could no longer carry. Covers emit_usage_error's
+  # `rescue Errno::EPIPE, JSON::GeneratorError` arm.
+  def test_emit_usage_error_swallows_broken_pipe
+    command = bot("status", json: true)
+    command.define_singleton_method(:puts_json) { |_payload| raise Errno::EPIPE, "closed pipe" }
+
+    assert_nil command.send(
+      :emit_usage_error,
+      Hive::InvalidTaskPath.new("hive bot: boom"),
+      error_kind: "unknown_subcommand"
+    )
+  end
 end

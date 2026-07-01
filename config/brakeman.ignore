@@ -50,7 +50,7 @@
     },
     {
       "fingerprint": "c5383e38ce67101d42861fc17ef61be803b4270f300f47b186f531104b9bada6",
-      "note": "False positive. Open3.capture3 array form. base/head are SHAs returned by `git rev-parse HEAD` inside Stages::Review.run! — internal values, not attacker-controlled. The `base..head` revspec is a single argv element passed to execve(2); no shell ever sees it."
+      "note": "False positive. Open3.capture3 array form. base/head are SHAs returned by `git rev-parse HEAD` inside Stages::Review.run! \u2014 internal values, not attacker-controlled. The `base..head` revspec is a single argv element passed to execve(2); no shell ever sees it."
     },
     {
       "fingerprint": "c5c39c0a1135e3fb33c9ce0cd68e30931e3068a9d4e27393fd53987df1c3ceea",
@@ -63,8 +63,12 @@
     {
       "fingerprint": "f4e0dcfe7fbb847c09d2b929e3566c2092dbee71a4c34865e8d86248fad239d4",
       "note": "False positive. Hive::Gh.capture3 uses Process.spawn argv form in Gh#pr_diff_stat. base_ref comes from the PR base ref and head_ref is the local literal HEAD in the babysitter context path; the `origin/<base>...HEAD` revspec is passed as one argv element to execve(2), not through a shell."
+    },
+    {
+      "fingerprint": "4b583b6ba991f77bc4b66bacbad69cc1275ab5fa2df33e1cfb742cfe7124e44f",
+      "note": "False positive. Open3.capture3 array form in Commands::AdhocReview#remove_orphan_worktree!. branch_for(pr_number) is \"hive/review/pr-#{pr_number}\" where pr_number is a normalized positive Integer (Pr.normalize rejects non-positive ids); the `refs/hive/review/pr-<n>` ref is passed as one argv element to execve(2), not through a shell."
     }
   ],
-  "updated": "2026-06-24 00:00:00 +0000",
+  "updated": "2026-06-29 00:00:00 +0000",
   "brakeman_version": "8.0.5"
 }

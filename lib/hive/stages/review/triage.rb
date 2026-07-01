@@ -32,7 +32,7 @@ module Hive
       # :triage_tampered error result; the U9 runner converts that to a
       # REVIEW_ERROR marker.
       module Triage
-        Result = Data.define(:status, :escalations_path, :error_message, :tampered_files)
+        Result = Data.define(:status, :escalations_path, :error_message, :tampered_files, :limit_text)
 
         # Files the triage agent must NOT modify. The reviewer files
         # are deliberately NOT in this list — triage's job is to edit
@@ -72,7 +72,8 @@ module Hive
               status: :ok,
               escalations_path: escalations,
               error_message: nil,
-              tampered_files: []
+              tampered_files: [],
+              limit_text: nil
             )
           end
 
@@ -125,7 +126,8 @@ module Hive
               status: :tampered,
               escalations_path: escalations,
               error_message: "triage agent modified protected files: #{tampered.join(', ')}",
-              tampered_files: tampered
+              tampered_files: tampered,
+              limit_text: nil
             )
           end
 
@@ -134,7 +136,8 @@ module Hive
               status: :ok,
               escalations_path: escalations,
               error_message: nil,
-              tampered_files: []
+              tampered_files: [],
+              limit_text: nil
             )
           else
             # Clean up any partial escalations file the agent wrote
@@ -146,7 +149,8 @@ module Hive
               status: :error,
               escalations_path: escalations,
               error_message: spawn_result[:error_message] || "triage agent failed (#{spawn_result[:status]})",
-              tampered_files: []
+              tampered_files: [],
+              limit_text: spawn_result[:limit_text]
             )
           end
         end

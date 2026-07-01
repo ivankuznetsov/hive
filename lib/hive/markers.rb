@@ -163,6 +163,23 @@ module Hive
       attrs.to_h.reject { |key, _value| INTERNAL_ATTR_KEYS.include?(key.to_s) }
     end
 
+    # Single-line uppercase marker summary: the marker NAME plus its display
+    # attrs rendered as `key=value` pairs. This is the canonical rendering
+    # shared by every diagnose surface — `Diagnostic#marker_summary`,
+    # `Status#marker_summary`, and `DiagnosticEvidence` — so the bot reply, the
+    # envelope's `marker_summary` field, and `diagnostic.summary` can't drift on
+    # attr rendering (plan R-5). Returns nil for the :none marker (and a nil
+    # marker) so a markerless task yields "no summary" instead of "NONE".
+    def summary(marker)
+      return nil if marker.nil? || marker.name == :none
+
+      attrs = display_attrs(marker.attrs)
+              .map { |key, value| "#{key}=#{value}" }
+              .join(" ")
+      marker_name = marker.name.to_s.upcase
+      attrs.empty? ? marker_name : "#{marker_name} #{attrs}"
+    end
+
     def error_recovery_match_attr(attrs)
       attrs = attrs ? attrs.to_h.transform_keys(&:to_s) : {}
       marker_id = attrs["marker_id"].to_s

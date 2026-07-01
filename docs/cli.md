@@ -12,12 +12,15 @@ This page documents the command surface exposed by `bin/hive` in this checkout. 
 | `hive plan TARGET` | Promote completed brainstorm to plan or re-run plan. | `hive plan <slug> --from 2-brainstorm` |
 | `hive develop TARGET` | Promote completed plan to execute or re-run execute. | `hive develop <slug> --from 3-plan` |
 | `hive open-pr TARGET` | Promote completed execute to draft PR creation. | `hive open-pr <slug> --from 4-execute` |
-| `hive review TARGET` | Run the autonomous review loop. | `hive review <slug> --from 5-open-pr` |
+| `hive review TARGET` | Run the autonomous review loop for a hive task. | `hive review <slug> --from 5-open-pr` |
+| `hive review --pr PR` | Create or reuse an ad-hoc review task for an existing GitHub PR in the current registered repo. | `hive review --pr 197` |
 | `hive artifacts TARGET` | Collect the reviewed task's release artifacts. | `hive artifacts <slug> --from 6-review` |
 | `hive finalize TARGET` | Refresh PR body and mark the draft PR ready. | `hive finalize <slug> --from 7-artifacts` |
 | `hive archive TARGET` | Move finalized work to `9-done/`. | `hive archive <slug> --from 8-finalize` |
 
 The workflow verbs promote then run when the task is at the previous stage. If the task is already at the target stage, they only run that stage.
+
+`hive review --pr PR` is the disambiguated ad-hoc path for reviewing a PR Hive did not open. `PR` may be `197`, `#197`, or a GitHub `/pull/197` URL. The command must run inside a repo already registered by `hive init` unless `--project NAME` selects one explicitly. It creates a synthetic `6-review/adhoc-review-pr-197/` task, fetches the PR head into a normal Hive worktree, then runs the same review stage. Re-running the command reuses that task; if another Hive task already owns the PR, Hive refuses to create a duplicate. The bare form `hive review 197` is unchanged and still resolves task id `197`.
 
 ## Findings Triage
 

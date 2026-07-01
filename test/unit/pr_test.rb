@@ -17,6 +17,38 @@ class PrTest < Minitest::Test
     assert_nil Hive::Pr.number("https://github.com/o/r/pull/561/files")
   end
 
+  def test_identifier_to_number_accepts_bare_number_hash_number_and_pr_url
+    assert_equal 197, Hive::Pr.identifier_to_number("197")
+    assert_equal 197, Hive::Pr.identifier_to_number("#197")
+    assert_equal 197, Hive::Pr.identifier_to_number(" https://github.com/o/r/pull/197 ")
+  end
+
+  def test_identifier_to_number_accepts_pr_url_suffixes_supported_by_number
+    assert_equal 197, Hive::Pr.identifier_to_number("https://github.com/o/r/pull/197/")
+    assert_equal 197, Hive::Pr.identifier_to_number("https://github.com/o/r/pull/197?diff=split")
+    assert_equal 197, Hive::Pr.identifier_to_number("https://github.com/o/r/pull/197#discussion")
+  end
+
+  def test_identifier_to_number_rejects_junk_and_deeper_pr_urls
+    [
+      "",
+      "abc",
+      "-5",
+      # Non-positive numbers parse to a 0 that would otherwise become a
+      # bogus adhoc-review-pr-0 slug + a doomed `gh pr view 0`.
+      "0",
+      "#0",
+      "00",
+      "https://github.com/o/r/pull/0",
+      "https://github.com/o/r/pull/197/files"
+    ].each do |identifier|
+      err = assert_raises(ArgumentError) { Hive::Pr.identifier_to_number(identifier) }
+
+      assert_includes err.message, "invalid PR identifier"
+      assert_includes err.message, "PR number"
+    end
+  end
+
   def test_valid_http_url_accepts_http_and_https_with_host
     assert Hive::Pr.valid_http_url?("https://github.com/o/r/pull/1")
     assert Hive::Pr.valid_http_url?("http://example.com")

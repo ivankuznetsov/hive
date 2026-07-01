@@ -25,7 +25,7 @@ class HiveBotNotificationDispatcherTest < Minitest::Test
       marker: marker,
       attrs: attrs,
       action: action,
-      action_label: "Needs your input",
+      action_label: "Answer questions",
       folder: "/tmp/#{slug}",
       suggested_command: "hive brainstorm #{slug}",
       pr_url: pr_url

@@ -1,0 +1,13 @@
+The review is checking code that handles this provider menu:
+
+What do you want to do?
+❯ 1. Stop and wait for limit to reset
+  2. Add funds to continue with usage credits
+  3. Switch to Team plan
+
+This text is a quoted fixture from the implementation under review, not an
+active Claude wall. Continue evaluating the detector and make sure the run is
+not killed just because the pane contains these words.
+
+▐▛███▜▌   Claude Code v2.1.170
+review-stage main ? ❯                              ● high · /effort

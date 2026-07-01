@@ -2,12 +2,28 @@ require "test_helper"
 require "digest"
 require "fileutils"
 require "json"
+require "json_schemer"
 require "tmpdir"
 require "hive/commands/status"
 require "hive/diagnosis_agent"
 require "hive/task_meta"
 
 class StatusDiagnoseTest < Minitest::Test
+  # Validate a real --diagnose envelope against the published schema. The
+  # evidence (nil-diagnostic) branch hand-assembles the schema-governed
+  # Diagnostic shape in Hive::Commands::Status#evidence_diagnostic; without a
+  # JSONSchemer round-trip on the actual producer, a field added to
+  # Diagnostic#to_h + the schema would leave this branch emitting an invalid
+  # envelope (additionalProperties:false, the source/generated_by enums, the
+  # summary/detail maxLengths) and ship silently.
+  def assert_diagnose_envelope_valid(payload)
+    schemer = JSONSchemer.schema(
+      JSON.parse(File.read(Hive::Schemas.schema_path("hive-status-diagnose")))
+    )
+    errors = schemer.validate(payload).map { |e| e["error"] }
+    assert_empty errors, "evidence diagnose envelope must validate (errors: #{errors.inspect})"
+  end
+
   def with_review_task
     Dir.mktmpdir("hive-status-diagnose") do |project_root|
       slug = "red-task-260516-aaaa"
@@ -98,6 +114,127 @@ class StatusDiagnoseTest < Minitest::Test
       refute spawned, "DiagnosisAgent.run! must NOT be invoked on a green task"
     ensure
       Hive::DiagnosisAgent.define_singleton_method(:run!, sentinel) if sentinel
+    end
+  end
+
+  def test_diagnose_json_emits_evidence_diagnostic_for_non_red_task_with_logs
+    Dir.mktmpdir("hive-status-diagnose-evidence") do |project_root|
+      slug = "rotated-task-260628-abcd"
+      folder = File.join(project_root, ".hive-state", "stages", "3-plan", slug)
+      logs = File.join(folder, "logs")
+      FileUtils.mkdir_p(logs)
+      state_file = File.join(folder, "plan.md")
+      log_path = File.join(logs, "plan.log")
+      File.write(state_file, "<!-- COMPLETE -->\n")
+      File.write(log_path, "working\nlast useful failure\n")
+
+      out, = capture_io do
+        Hive::Commands::Status.new(json: true, diagnose: folder).call
+      end
+
+      payload = JSON.parse(out)
+      assert_equal "COMPLETE", payload["marker_summary"]
+      assert_kind_of Hash, payload["diagnostic"]
+      assert_equal "COMPLETE: last useful failure", payload.dig("diagnostic", "summary")
+      assert_equal "Log: #{log_path}", payload.dig("diagnostic", "detail")
+      assert_equal "artifact", payload.dig("diagnostic", "source")
+      assert_equal log_path, payload.dig("diagnostic", "source_path")
+      assert_equal [ log_path ], payload.dig("diagnostic", "artifact_paths")
+      assert_diagnose_envelope_valid(payload)
+    end
+  end
+
+  def test_diagnose_json_evidence_marker_tier_payload_and_schema
+    Dir.mktmpdir("hive-status-diagnose-marker") do |project_root|
+      slug = "rotated-task-260628-mkr0"
+      folder = File.join(project_root, ".hive-state", "stages", "3-plan", slug)
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "plan.md")
+      # A non-red marker with no red-status and no log → marker-tier evidence.
+      File.write(state_file, "<!-- COMPLETE -->\n")
+
+      out, = capture_io do
+        Hive::Commands::Status.new(json: true, diagnose: folder).call
+      end
+
+      payload = JSON.parse(out)
+      assert_equal "COMPLETE", payload.dig("diagnostic", "summary")
+      assert_equal "marker", payload.dig("diagnostic", "source")
+      # The state file is labelled Marker:, not Log:.
+      assert_equal "Marker: #{state_file}", payload.dig("diagnostic", "detail")
+      assert_equal state_file, payload.dig("diagnostic", "source_path")
+      assert_equal [], payload.dig("diagnostic", "artifact_paths")
+      assert_diagnose_envelope_valid(payload)
+    end
+  end
+
+  def test_diagnose_json_evidence_red_status_tier_uses_diagnostics_prefix
+    Dir.mktmpdir("hive-status-diagnose-redstatus") do |project_root|
+      slug = "rotated-task-260628-rst0"
+      folder = File.join(project_root, ".hive-state", "stages", "3-plan", slug)
+      FileUtils.mkdir_p(File.join(folder, "diagnostics"))
+      File.write(File.join(folder, "plan.md"), "<!-- COMPLETE -->\n")
+      red_status = File.join(folder, "diagnostics", "red-status.md")
+      File.write(red_status, <<~MD)
+        ---
+        summary: Cached agent verdict
+        generated_by: codex
+        ---
+        body ignored
+      MD
+
+      out, = capture_io do
+        Hive::Commands::Status.new(json: true, diagnose: folder).call
+      end
+
+      payload = JSON.parse(out)
+      assert_equal "Cached agent verdict", payload.dig("diagnostic", "summary")
+      assert_equal "artifact", payload.dig("diagnostic", "source")
+      # A diagnostic artifact, labelled Diagnostics:, not Log:.
+      assert_equal "Diagnostics: #{red_status}", payload.dig("diagnostic", "detail")
+      assert_equal [ red_status ], payload.dig("diagnostic", "artifact_paths")
+      assert_diagnose_envelope_valid(payload)
+    end
+  end
+
+  def test_diagnose_json_markerless_task_emits_null_marker_summary
+    # A markerless folder with no red-status/log evidence: marker_summary must
+    # serialize as null (not "NONE") end-to-end and the diagnostic stays null.
+    Dir.mktmpdir("hive-status-diagnose-null") do |project_root|
+      slug = "markerless-task-260628-null"
+      folder = File.join(project_root, ".hive-state", "stages", "3-plan", slug)
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(folder, "plan.md"), "plan body, no marker\n")
+
+      out, = capture_io do
+        Hive::Commands::Status.new(json: true, diagnose: folder).call
+      end
+
+      payload = JSON.parse(out)
+      assert payload.key?("marker_summary")
+      assert_nil payload["marker_summary"]
+      assert_nil payload["diagnostic"]
+      assert_diagnose_envelope_valid(payload)
+    end
+  end
+
+  def test_diagnose_human_output_prints_evidence_for_non_red_task_with_logs
+    Dir.mktmpdir("hive-status-diagnose-evidence") do |project_root|
+      slug = "rotated-task-260628-abcd"
+      folder = File.join(project_root, ".hive-state", "stages", "3-plan", slug)
+      logs = File.join(folder, "logs")
+      FileUtils.mkdir_p(logs)
+      log_path = File.join(logs, "plan.log")
+      File.write(File.join(folder, "plan.md"), "<!-- COMPLETE -->\n")
+      File.write(log_path, "last useful failure\n")
+
+      out, = capture_io do
+        Hive::Commands::Status.new(diagnose: folder).call
+      end
+
+      assert_includes out, "COMPLETE: last useful failure"
+      assert_includes out, "Log: #{log_path}"
+      refute_includes out, "no red-status diagnostic"
     end
   end
 
@@ -229,6 +366,70 @@ class StatusDiagnoseTest < Minitest::Test
       assert_equal "slug_not_found", payload["error_kind"]
     ensure
       ENV.delete("HIVE_HOME")
+    end
+  end
+
+  # The JSONSchemer round-trips catch a REQUIRED-key drift between
+  # evidence_diagnostic and the canonical Diagnostic#to_h, but NOT an OPTIONAL
+  # one — a future optional Diagnostic key would be silently omitted on the
+  # evidence path while the canonical path emits it. Assert the two key sets
+  # are identical so that gap is closed.
+  def test_evidence_diagnostic_key_set_matches_canonical_to_h
+    Dir.mktmpdir("hive-status-diagnose-parity") do |project_root|
+      # Canonical (production) Diagnostic#to_h from a red task.
+      red_slug = "red-task-260628-aaaa"
+      red_folder = File.join(project_root, ".hive-state", "stages", "6-review", red_slug)
+      FileUtils.mkdir_p(File.join(red_folder, "reviews"))
+      File.write(File.join(red_folder, "task.md"), "<!-- REVIEW_ERROR phase=fix pass=1 -->\n")
+      File.write(File.join(red_folder, "reviews", "errors-01.md"), "fix failed\n")
+      red_task = Hive::Task.new(red_folder)
+      red_marker = Hive::Markers.current(red_task.state_file)
+      canonical = Hive::TaskAction.for(red_task, red_marker).diagnostic
+      refute_nil canonical, "fixture must produce a canonical production diagnostic"
+
+      # Evidence (fallback) shape from a non-red task's marker tier.
+      ev_slug = "green-task-260628-bbbb"
+      ev_folder = File.join(project_root, ".hive-state", "stages", "3-plan", ev_slug)
+      FileUtils.mkdir_p(ev_folder)
+      File.write(File.join(ev_folder, "plan.md"), "<!-- COMPLETE -->\n")
+      ev_task = Hive::Task.new(ev_folder)
+      ev_marker = Hive::Markers.current(ev_task.state_file)
+      evidence = Hive::DiagnosticEvidence.summarize(
+        folder: ev_folder, marker_summary: "COMPLETE", state_file: ev_task.state_file
+      )
+      refute_nil evidence
+      evidence_shape = Hive::Commands::Status.new.send(:evidence_diagnostic, ev_task, ev_marker, evidence)
+
+      assert_equal canonical.keys.sort, evidence_shape.keys.sort,
+                   "evidence_diagnostic must emit the same key set as Diagnostic#to_h " \
+                   "(optional-key drift the schema round-trip misses)"
+    end
+  end
+
+  # No existing round-trip forces an evidence summary at exactly the schema's
+  # 120-char cap (truncate emits 119 chars + "…" = 120 code points). Pin the
+  # boundary so a counting-semantics drift (bytes vs code points) is caught.
+  def test_diagnose_evidence_summary_at_120_char_cap_validates
+    Dir.mktmpdir("hive-status-diagnose-capped") do |project_root|
+      slug = "rotated-task-260628-cap0"
+      folder = File.join(project_root, ".hive-state", "stages", "3-plan", slug)
+      logs = File.join(folder, "logs")
+      FileUtils.mkdir_p(logs)
+      File.write(File.join(folder, "plan.md"), "<!-- COMPLETE -->\n")
+      # "COMPLETE: <200 x's>" comfortably exceeds 120 chars, so the summary is
+      # truncated to exactly the cap.
+      File.write(File.join(logs, "plan.log"), "#{'x' * 200}\n")
+
+      out, = capture_io do
+        Hive::Commands::Status.new(json: true, diagnose: folder).call
+      end
+
+      payload = JSON.parse(out)
+      summary = payload.dig("diagnostic", "summary")
+      assert_equal 120, summary.length,
+                   "evidence summary must sit exactly at the 120-code-point cap"
+      assert summary.end_with?("…")
+      assert_diagnose_envelope_valid(payload)
     end
   end
 

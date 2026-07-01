@@ -22,17 +22,34 @@ path with separate gates.
 
 ## CLI
 
-`hive web [--bind] [--port]` (defaults from the `web:` config block). The
-command locates the Rails app (`HIVEBOX_WEB_APP_DIR` override, else `web/`
-next to `lib/`), exports `SECRET_KEY_BASE` (derived from the same persisted
-`Hive::Web::SessionSecret` file as before — sessions survive container
-recreation), `HIVEBOX_ORIGIN` (extra Action Cable origin allow; same-origin
+`hive web [--bind] [--port]` (defaults from the `web:` config block). Bare
+`hive web` runs the Rails app in the foreground. `hive web install`,
+`hive web start --detach`, `hive web stop`, and `hive web status [--json]`
+manage the separate per-user `hive-web` service through the same
+systemd-user/launchd installer base as the daemon.
+
+The command locates the Rails app in this order: `HIVEBOX_WEB_APP_DIR`, the
+managed local app at `${XDG_DATA_HOME}/hive/web`, then source-checkout `web/`.
+If no app exists and bootstrapping is allowed, it fetches the versioned
+`hive-web-<version>.tar.gz` release asset into the managed app dir and runs
+`bundle install`; `--no-bootstrap` reports the missing bundle instead. It then
+exports `SECRET_KEY_BASE` (derived from the same persisted
+`Hive::Web::SessionSecret` file as before — sessions survive a web-service
+restart), `HIVEBOX_ORIGIN` (extra Action Cable origin allow; same-origin
 host traffic is accepted without config), and
 `HIVEBOX_STORAGE_DIR` (the solid-stack sqlite files, under
-`Hive::Paths.state_home/web-storage` so they live on the `/data` mount), runs
-`bin/rails db:prepare`, then execs `bin/rails server`. Outside the container
-or a source checkout the command exits 1 with guidance — the gem itself does
-not package the Rails app (`test/unit/gemspec_test.rb` pins that).
+`Hive::Paths.state_home/web-storage` so they survive a web-bundle upgrade,
+which replaces the app dir wholesale), runs
+`bin/rails db:prepare`, then execs `bin/rails server`. The gem itself still
+does not package `web/`; the managed bundle is a runtime dependency.
+
+Loopback binds (`127.0.0.0/8`, `::1`, `localhost`) export
+`HIVEBOX_LOCAL_LOOPBACK=1` and bypass login only for loopback peer requests —
+unless `web.local_loopback: false` is set, which keeps the GitHub login
+requirement even on a loopback bind.
+Non-loopback binds are refused unless `web.github.owner` is configured or the
+operator passes `--unsafe` / `--allow-public`, in which case the GitHub owner
+gate remains active.
 
 ## Auth
 

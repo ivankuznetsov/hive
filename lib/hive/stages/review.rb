@@ -1,9 +1,11 @@
 require "digest"
 require "fileutils"
+require "json"
 require "open3"
 require "time"
 require "yaml"
 require "hive/events"
+require "hive/claude_completion_fallback"
 require "hive/config"
 require "hive/protected_files"
 require "hive/claude_launcher"
@@ -187,7 +189,18 @@ module Hive
         # green when we got there (otherwise we'd be at :review_ci_stale).
         # Skip CI on REVIEW_WAITING resume to honor the user's manual
         # edits without re-running everything.
-        unless marker.name == :review_waiting
+        #
+        # Ad-hoc fix-off gate: an ad-hoc review with `review.adhoc.fix`
+        # disabled (the default) is review-only. CiFix.run! spawns a fix
+        # agent that edits files and auto-commits when `review.ci.command`
+        # is set, so running it here would mutate a borrowed PR worktree
+        # and burn budget despite the review-only contract. Skip CI
+        # entirely in that case and review the PR as-is (brainstorm A5/A6:
+        # comment, don't auto-fix someone else's PR; acceptance bar A9:
+        # the review is still produced). This mirrors the Phase 4
+        # `adhoc_fix_enabled?` gate below — both must agree or an ad-hoc
+        # review would still write fix commits here.
+        if marker.name != :review_waiting && adhoc_fix_enabled?(cfg, task)
           @current_phase = :ci
           mark_working(task, phase: :ci, pass: 1)
           ci_result = Hive::Stages::Review::CiFix.run!(
@@ -204,6 +217,14 @@ module Hive
             Hive::Markers.set(task.state_file, :review_ci_stale, attempts: ci_result.attempts)
             return { commit: "ci_stale_attempts_#{ci_result.attempts}", status: :review_ci_stale }
           when :error
+            if limit_failure?(limit_text: ci_result.limit_text, error_message: ci_result.error_message)
+              Hive::Markers.set(task.state_file, :review_error,
+                                phase: :ci, reason: "limits_reached",
+                                message: "ci hit a usage/credit limit",
+                                retry_after: Hive::AgentLimit.retry_after)
+              return { commit: "ci_limits_reached", status: :review_error }
+            end
+
             Hive::Markers.set(task.state_file, :review_error,
                               phase: :ci, reason: "ci_unrunnable")
             return { commit: "ci_error", status: :review_error }
@@ -428,7 +449,8 @@ module Hive
               when :error
                 limited = mark_review_phase_failure(
                   task, phase: :triage, pass: pass,
-                  error_message: triage_result.error_message
+                  error_message: triage_result.error_message,
+                  limit_text: triage_result.limit_text
                 )
                 label = limited ? "triage_limits_reached" : "triage_error"
                 return { commit: "#{label}_pass_#{format('%02d', pass)}",
@@ -491,6 +513,20 @@ module Hive
             Hive::Markers.set(task.state_file, :review_waiting,
                               escalations: escalations_count, pass: pass)
             return { commit: "review_waiting_pass_#{format('%02d', pass)}",
+                     status: :review_waiting }
+          end
+
+          fix_gate = adhoc_fix_gate(cfg, task)
+          unless fix_gate == :enabled
+            # Distinguish the deliberate review-only ad-hoc park from a normal
+            # task that halted only because its source was unconfirmable, so
+            # the reason string doesn't misdescribe why it stopped.
+            reason = fix_gate == :disabled_source_unknown ? "fix_source_unknown" : "adhoc_fix_disabled"
+            Hive::Markers.set(task.state_file, :review_waiting,
+                              reason: reason,
+                              accepted: accepted_findings.count,
+                              pass: pass)
+            return { commit: "review_waiting_#{reason}_pass_#{format('%02d', pass)}",
                      status: :review_waiting }
           end
 
@@ -561,17 +597,30 @@ module Hive
                      status: :review_error }
           end
 
-          if agent_failed?(fix_result)
+          # Compute the post-fix worktree status once and reuse it for both
+          # the completion-fallback evidence and the auto-commit branch
+          # below, rather than spawning the git subprocess twice.
+          post_fix_status = worktree_status(worktree_path)
+
+          if agent_failed?(fix_result) &&
+             !handle_fix_completion_fallback(
+               task,
+               ctx_pass,
+               fix_result,
+               before_fix_head: before_fix_head,
+               after_fix_head: after_fix_head,
+               worktree_status: post_fix_status
+             )
             limited = mark_review_phase_failure(
               task, phase: :fix, pass: pass,
-              error_message: fix_result && fix_result[:error_message]
+              error_message: fix_result && fix_result[:error_message],
+              limit_text: fix_result && fix_result[:limit_text]
             )
             label = limited ? "fix_limits_reached" : "fix_error"
             return { commit: "#{label}_pass_#{format('%02d', pass)}",
                      status: :review_error }
           end
 
-          post_fix_status = worktree_status(worktree_path)
           case post_fix_status
           when :dirty
             auto_commit = auto_commit_fix_worktree(task, cfg, ctx_pass, accepted_findings)
@@ -859,6 +908,210 @@ module Hive
           status: :review_stale }
       end
 
+      def handle_fix_completion_fallback(task, ctx, fix_result, before_fix_head:, after_fix_head:, worktree_status:)
+        evidence = fix_result && fix_result[:completion_evidence]
+        return false unless evidence
+
+        # Scan the reviewer files for whole-pass no-change evidence ONCE and
+        # thread the boolean through both the phase-fact gate and the audit
+        # message, rather than re-globbing/re-reading `reviews/*-NN.md` twice
+        # per fallback (mirrors the "compute worktree_status once" change).
+        no_change = no_change_evidence_present?(ctx)
+
+        phase_facts = fix_completion_fallback_phase_facts(
+          ctx,
+          before_fix_head: before_fix_head,
+          after_fix_head: after_fix_head,
+          worktree_status: worktree_status,
+          error_message: fix_result[:error_message],
+          no_change: no_change
+        )
+        decision = Hive::ClaudeCompletionFallback.suppress?(
+          evidence: evidence,
+          phase_facts: phase_facts
+        )
+        return false unless decision[:suppress]
+
+        # Do NOT write the success sentinel here. Control falls through to
+        # the normal post-fix path, where the FixGuardrail may trip and
+        # return review_waiting WITHOUT a sentinel (by design, so the
+        # pending human approval can't be bypassed). The legitimate
+        # write_fix_success there owns the sentinel; writing it early would
+        # let a stale sentinel launder a guardrail-blocked pass as complete.
+        #
+        # R5/R6: a suppression MUST be auditable. If the
+        # claude_completion_fallback event can't be recorded, do NOT laundry
+        # the pass to success silently — return false so control falls
+        # through to a terminal (but daemon-recoverable) REVIEW_ERROR instead
+        # of a SUCCESS with no audit trail.
+        emit_fix_completion_fallback(
+          task, ctx, evidence, phase_facts, decision,
+          before_fix_head: before_fix_head,
+          after_fix_head: after_fix_head,
+          worktree_status: worktree_status,
+          no_change: no_change
+        )
+      end
+
+      def fix_completion_fallback_phase_facts(ctx, before_fix_head:, after_fix_head:, worktree_status:, error_message:, no_change:)
+        {
+          artifacts_present: fix_completion_fallback_artifacts_present?(ctx),
+          commit_or_no_change: fix_completion_commit_or_no_change?(
+            ctx,
+            before_fix_head: before_fix_head,
+            after_fix_head: after_fix_head,
+            worktree_status: worktree_status,
+            no_change: no_change
+          ),
+          no_unresolved_escalation: count_escalations(ctx).zero?,
+          worktree_readable: !worktree_status.is_a?(Array),
+          missing_output_absent: !missing_output_error?(error_message)
+        }
+      end
+
+      def fix_completion_fallback_artifacts_present?(ctx)
+        path = Hive::Stages::Review::Triage.escalations_path(ctx)
+        return false unless File.exist?(path) && File.size(path).positive?
+
+        count_escalations(ctx).is_a?(Integer)
+      rescue SystemCallError, IOError
+        false
+      end
+
+      def fix_completion_commit_or_no_change?(ctx, before_fix_head:, after_fix_head:, worktree_status:, no_change:)
+        return true if before_fix_head.to_s != "" &&
+                       after_fix_head.to_s != "" &&
+                       before_fix_head != after_fix_head
+
+        # A dirty worktree is a real, uncommitted code change the
+        # orchestrator's post-fix auto_commit_fix_worktree will land. HEAD
+        # is captured BEFORE that auto-commit, so for the normal case (the
+        # fix agent leaves changes uncommitted) before_fix_head ==
+        # after_fix_head and the SHA branch above misses it — treat a dirty
+        # worktree as a code change, not a no-change pass (KTD4/HLD).
+        return true if worktree_status == :dirty
+
+        # `no_change` is the whole-pass no-change scan, computed once by the
+        # caller and threaded in to avoid re-reading the reviewer files.
+        no_change
+      end
+
+      # "Whole-pass no-change": the fallback may treat the pass as needing
+      # no code change ONLY when no AUTO-FIX work remained unapplied (every
+      # finding was dispositioned RESOLVED/NO-FIX). A single no-fix line
+      # alongside an unapplied `[x] AUTO-FIX:` finding is NOT proof — that
+      # mixed pass still owes a real change and must not be suppressed
+      # without a commit/dirty worktree (brainstorm A2). Reuses
+      # `auto_fix_finding_line?` so this gate and the accepted-findings
+      # collector can never drift.
+      def no_change_evidence_present?(ctx)
+        pass_suffix = format("%02d", ctx.pass)
+        saw_no_fix = false
+        Dir[File.join(ctx.task_folder, "reviews", "*-#{pass_suffix}.md")].each do |path|
+          next unless reviewer_file?(File.basename(path))
+
+          File.readlines(path).each do |line|
+            return false if auto_fix_finding_line?(line)
+
+            saw_no_fix = true if line =~ /^\s*-\s+\[x\]\s+RESOLVED\/NO-FIX:/i
+          end
+        end
+        saw_no_fix
+      rescue SystemCallError, IOError
+        false
+      end
+
+      # Forward-compat guard for the shared completion predicate. On the
+      # current exit_code_only fix path `error_message` is fixed to "claude
+      # stop hook did not signal completion", so this never matches and
+      # `missing_output_absent` is always true here. It stays so that any
+      # future `:output_file_exists`-mode caller of the fallback (whose
+      # errors DO read "expected output file missing") is gated correctly.
+      def missing_output_error?(message)
+        message.to_s.match?(/expected output file missing|missing output|output .* missing/i)
+      end
+
+      # Emit the audit event and report whether it was actually recorded.
+      # Returns true on a successful emit, false if recording failed — the
+      # caller treats a false here as "suppression is not auditable" and
+      # declines to launder the pass to success (R5/R6).
+      def emit_fix_completion_fallback(task, ctx, evidence, phase_facts, decision,
+                                       before_fix_head:, after_fix_head:, worktree_status:, no_change:)
+        Hive::Events.emit(
+          task_folder: task.folder,
+          slug: task.slug,
+          stage: stage_label_for(task),
+          event_type: :claude_completion_fallback,
+          agent: "phase=fix pass=#{format('%02d', ctx.pass)}",
+          message: claude_completion_fallback_message(
+            task, ctx, evidence, phase_facts, decision,
+            before_fix_head: before_fix_head,
+            after_fix_head: after_fix_head,
+            worktree_status: worktree_status,
+            no_change: no_change
+          )
+        )
+        true
+      rescue SystemCallError, IOError, JSON::JSONError
+        false
+      end
+
+      def claude_completion_fallback_message(task, ctx, evidence, phase_facts, decision,
+                                             before_fix_head:, after_fix_head:, worktree_status:, no_change:)
+        # R5: record WHAT was checked, not just booleans — the artifact path
+        # inspected and the concrete commit (before→after head SHA) or the
+        # no-change basis — so a suppressed fallback is auditable after the
+        # fact. Events.emit truncates to MAX_MESSAGE_BYTES, so keep values
+        # compact (short SHAs, basename of the artifact).
+        #
+        # `outcome=fallback_evaluated` is deliberate: this event records that
+        # the completion fallback FIRED and its evidence held — NOT that the
+        # pass was accepted as complete. It is emitted before the post-fix
+        # guardrail runs, which may still trip and return review_waiting
+        # (pending human approval) WITHOUT a success sentinel. Wording it as
+        # "evaluated" keeps a guardrail-blocked pass from reading as done.
+        parts = {
+          phase: "fix",
+          pass: format("%02d", ctx.pass),
+          outcome: "fallback_evaluated",
+          task: task.slug,
+          pid: evidence[:pid],
+          session_alive: evidence[:session_alive],
+          done: evidence[:expected_done_path],
+          result: evidence[:expected_result_path],
+          reason: evidence[:reason],
+          artifacts: phase_facts[:artifacts_present],
+          artifacts_checked: File.basename(Hive::Stages::Review::Triage.escalations_path(ctx).to_s),
+          commit_or_no_change: phase_facts[:commit_or_no_change],
+          commit_evidence: fix_completion_commit_evidence(
+            ctx,
+            before_fix_head: before_fix_head,
+            after_fix_head: after_fix_head,
+            worktree_status: worktree_status,
+            no_change: no_change
+          ),
+          no_unresolved_escalation: phase_facts[:no_unresolved_escalation],
+          missing: Array(decision[:missing]).join("|")
+        }
+        parts.map { |key, value| "#{key}=#{value}" }.join(" ")
+      end
+
+      # Compact, human-auditable description of WHY commit_or_no_change held:
+      # the concrete before→after head SHAs when a commit landed, a dirty
+      # worktree (the auto-commit will land), or the whole-pass no-change
+      # basis. Mirrors fix_completion_commit_or_no_change?'s branch order.
+      def fix_completion_commit_evidence(ctx, before_fix_head:, after_fix_head:, worktree_status:, no_change:)
+        before = before_fix_head.to_s
+        after = after_fix_head.to_s
+        return "commit:#{before[0, 12]}->#{after[0, 12]}" if before != "" && after != "" && before != after
+        return "dirty_worktree" if worktree_status == :dirty
+        # `no_change` is threaded in from the caller (computed once) so this
+        # audit string doesn't re-scan the reviewer files.
+        return "whole_pass_no_change" if no_change
+
+        "none"
+      end
+
       # A per-pass review-phase agent (triage, fix) that died because the
       # provider hit a usage/credit limit must self-heal like the reviewers
       # phase already does — not sit terminally red until a human retries.
@@ -870,8 +1123,8 @@ module Hive
       # A timeout (no limit text) stays terminal — only an actual limit
       # earns the self-healing retry stamp. Returns whether the limit path
       # was taken so the caller can label its commit.
-      def mark_review_phase_failure(task, phase:, pass:, error_message:)
-        if Hive::AgentLimit.limit_reached?(error_message.to_s)
+      def mark_review_phase_failure(task, phase:, pass:, error_message:, limit_text: nil)
+        if limit_failure?(limit_text: limit_text, error_message: error_message)
           Hive::Markers.set(task.state_file, :review_error,
                             phase: phase, reason: "limits_reached", pass: pass,
                             message: "#{phase} hit a usage/credit limit",
@@ -884,6 +1137,10 @@ module Hive
                             message: review_phase_error_summary(error_message))
           false
         end
+      end
+
+      def limit_failure?(limit_text:, error_message:)
+        !limit_text.to_s.empty? || Hive::AgentLimit.from_limit?(error_message.to_s)
       end
 
       # Condense a phase agent's `error_message` into a single-line marker
@@ -934,7 +1191,7 @@ module Hive
 
           return result if result.status == :ok
           return result if result.status == :tampered
-          return result if Hive::AgentLimit.limit_reached?(result.error_message.to_s)
+          return result if limit_failure?(limit_text: result.limit_text, error_message: result.error_message)
           return result if attempt >= max_attempts
 
           # Don't start another full triage spawn (timeout_sec default 1800s) if
@@ -1172,6 +1429,19 @@ module Hive
             warn "[hive.review] patrol task resolved to zero patrol.review.reviewers; " \
                  "6-review will pass with no reviewers run — set patrol.review.reviewers " \
                  "in .hive-state/config.yml to review patrol PRs"
+          elsif adhoc_task?(task)
+            # An ad-hoc review that resolves to zero reviewers would clear
+            # 6-review with nobody reviewing the PR — the footgun the config
+            # comment flags ("a silently unreviewed PR"). Mirror the patrol
+            # warning so it is observable instead of silent. The empty knob
+            # differs by case: an explicit `review.adhoc.reviewers: []` is empty
+            # itself, while a nil (omitted) `review.adhoc.reviewers` inherits an
+            # equally-empty `review.reviewers` (the DEFAULT) and DOES reach
+            # here — so name whichever knob is actually empty.
+            empty_knob = cfg.dig("review", "adhoc", "reviewers").nil? ? "review.reviewers" : "review.adhoc.reviewers"
+            warn "[hive.review] ad-hoc review resolved to zero reviewers (#{empty_knob} is empty); " \
+                 "6-review will pass with no reviewers run — set review.adhoc.reviewers " \
+                 "or review.reviewers in .hive-state/config.yml to review the PR"
           end
           return :ok
         end
@@ -1269,7 +1539,7 @@ module Hive
           # errors (e.g. codex "you've hit your usage limit"), surface that
           # distinctly so the run is marked limits_reached rather than a
           # generic all_failed.
-          if error_messages.any? { |m| Hive::AgentLimit.limit_reached?(m.to_s) }
+          if error_messages.any? { |m| Hive::AgentLimit.from_limit?(m.to_s) }
             :all_failed_limit
           else
             :all_failed
@@ -1282,7 +1552,50 @@ module Hive
       def reviewer_specs_for(cfg, task)
         return Array(cfg.dig("patrol", "review", "reviewers")) if patrol_task?(task)
 
+        if adhoc_task?(task)
+          reviewers = cfg.dig("review", "adhoc", "reviewers")
+          return Array(reviewers) unless reviewers.nil?
+        end
+
         Array(cfg.dig("review", "reviewers"))
+      end
+
+      def adhoc_fix_enabled?(cfg, task)
+        adhoc_fix_gate(cfg, task) == :enabled
+      end
+
+      # Classify whether the auto-fix agent may run, and WHY when it may not.
+      # Returns:
+      #   :enabled                 — run the fix agent (normal task, or ad-hoc
+      #                              with `review.adhoc.fix: true`)
+      #   :disabled_adhoc          — confirmed ad-hoc review with fix off
+      #                              (review-only; the deliberate park)
+      #   :disabled_source_unknown — task.md unreadable, so the source can't be
+      #                              confirmed; fail CLOSED (never auto-commit on
+      #                              a possibly-borrowed PR) but report the real
+      #                              cause so a NORMAL task's halt isn't
+      #                              mislabeled adhoc_fix_disabled.
+      # (Reviewer SELECTION fails open — see adhoc_task?'s on_read_error.)
+      def adhoc_fix_gate(cfg, task)
+        case adhoc_source_status(task)
+        when :source_unknown then :disabled_source_unknown
+        when :normal then :enabled
+        else # :adhoc
+          cfg.dig("review", "adhoc", "fix") == true ? :enabled : :disabled_adhoc
+        end
+      end
+
+      # Tri-state read of the task source for the fix gate: :adhoc, :normal, or
+      # :source_unknown (task.md unreadable). Distinct from adhoc_task?'s
+      # boolean so the Phase 4 park reason can tell a review-only ad-hoc task
+      # apart from a normal task whose source merely couldn't be read.
+      def adhoc_source_status(task)
+        frontmatter = task_frontmatter(task.state_file)
+        frontmatter["source"].to_s.strip.casecmp?("ad-hoc") ? :adhoc : :normal
+      rescue SystemCallError => e
+        warn "[hive.review] adhoc fix-gate could not read #{task.state_file.inspect}: " \
+             "#{e.class}: #{e.message} — failing closed (auto-fix disabled, source unconfirmable)"
+        :source_unknown
       end
 
       # Group reviewers that share an effective permission scope so they can
@@ -1331,6 +1644,23 @@ module Hive
         warn "[hive.review] patrol_task? could not read #{task.state_file.inspect}: " \
              "#{e.class}: #{e.message} — routing as a normal (non-patrol) task"
         false
+      end
+
+      # Near-clone of patrol_task? — see its comment for the strip + casecmp?
+      # (producer/consumer drift) and SystemCallError-only rescue + warn (don't
+      # swallow programmer errors) rationale. `on_read_error:` picks the safe
+      # direction per caller: reviewer SELECTION passes false (fall back to the
+      # broader normal reviewer set), while the fix-gate SAFETY check
+      # (adhoc_fix_enabled?) passes true (treat unknown as ad-hoc so auto-fix
+      # stays disabled).
+      def adhoc_task?(task, on_read_error: false)
+        frontmatter = task_frontmatter(task.state_file)
+        frontmatter["source"].to_s.strip.casecmp?("ad-hoc") || false
+      rescue SystemCallError => e
+        consequence = on_read_error ? "treating as ad-hoc (auto-fix disabled)" : "routing as a normal (non-ad-hoc) task"
+        warn "[hive.review] adhoc_task? could not read #{task.state_file.inspect}: " \
+             "#{e.class}: #{e.message} — #{consequence}"
+        on_read_error
       end
 
       def task_frontmatter(path)

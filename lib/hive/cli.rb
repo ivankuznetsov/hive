@@ -257,6 +257,22 @@ module Hive
       ).call
     end
 
+    desc "setup", "Provision local Hive web mode, daemon service, and project enrollment"
+    option :yes, type: :boolean, default: false, desc: "accept non-interactive defaults"
+    option :service, type: :boolean, default: false, desc: "also install the managed web service"
+    option :no_bootstrap, type: :boolean, default: false, desc: "diagnose only; do not install qmd or web bundle"
+    option :no_init, type: :boolean, default: false, desc: "do not initialize or enroll the current project"
+    def setup
+      require "hive/commands/setup"
+      exit Hive::Commands::Setup.new(
+        json: options[:json],
+        yes: options[:yes],
+        service: options[:service],
+        no_bootstrap: options[:no_bootstrap],
+        no_init: options[:no_init]
+      ).call
+    end
+
     desc "update", "Update hive via the install channel that installed it"
     long_desc <<~DESC
       Reads the install-channel marker written by the installer and delegates
@@ -537,11 +553,42 @@ module Hive
     map "open-pr" => :open_pr
     map "pr" => :open_pr
 
-    desc "review TARGET", "Move a completed open-pr task into review, or run an existing review task"
+    desc "review [TARGET]", "Move a completed open-pr task into review, run an existing review task, or --pr PR"
     option :from, type: :string,
                   desc: "expected current stage; use to disambiguate same-slug tasks (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
-    def review(target)
+    option :pr, type: :string, desc: "run an ad-hoc review for PR number, #number, or GitHub PR URL"
+    def review(target = nil)
+      if options[:pr]
+        emit_review_usage_error("hive review: pass either TARGET or --pr, not both") if target
+        # `--from` only disambiguates same-slug tasks for a TARGET lookup; an
+        # ad-hoc `--pr` review resolves a deterministic slug and never consults
+        # it. Refuse the combo (mirroring the TARGET + `--pr` guard above)
+        # rather than silently dropping the flag.
+        emit_review_usage_error("hive review: --from is not valid with --pr") if options[:from]
+
+        require "hive/commands/adhoc_review"
+        require "hive/commands/stage_action"
+        # AdhocReview emits its own --json error envelope on create-phase
+        # failures and re-raises. On success it returns the resolved project
+        # name; forward it (not the raw, possibly-nil options[:project]) so
+        # StageAction resolves the slug against the same project AdhocReview
+        # used, never a same-named slug in another registered repo.
+        result = Hive::Commands::AdhocReview.new(
+          pr: options[:pr],
+          project: options[:project],
+          json: options[:json]
+        ).enqueue
+        return Hive::Commands::StageAction.new(
+          "review",
+          result.fetch(:slug),
+          project: result.fetch(:project),
+          json: options[:json]
+        ).call
+      end
+
+      emit_review_usage_error("hive review: missing TARGET (or pass --pr PR)") unless target
+
       run_stage_action("review", target)
     end
 
@@ -690,6 +737,61 @@ module Hive
     def digest
       require "hive/commands/digest"
       Hive::Commands::Digest.new(
+        date: options[:date],
+        dry_run: options[:dry_run],
+        json: options[:json]
+      ).call
+    end
+
+    desc "answer-digest", "Send a daily digest of tasks waiting on human input"
+    # wrap: false so the Examples / Exit codes blocks keep their line breaks.
+    long_desc <<~DESC, wrap: false
+      Fetches the global hive status snapshot, filters it to tasks waiting on
+      human input, and sends one Telegram message with inline buttons for each
+      listed task. Empty snapshots are silent and still exit successfully.
+
+      --date does NOT scope the waiting set (always the live snapshot) and does
+      NOT dedup sends — it is only echoed into the JSON `date` field. Scheduler
+      idempotency (once per local day) lives in the daemon's
+      answer_digest_state.json, not this command.
+
+      With --json, emits the hive-answer-digest (v1) envelope. The SuccessPayload
+      carries `sent` (true only on a real send), `reason`
+      (null=sent / "empty" / "dry_run"), `chat_id`, `button_count` (capped at the
+      10-task display cap), `count` (the true waiting total), and `tasks[]` (one
+      `{project,slug,id,title,stage,pr}` per waiting task, present even on a real
+      send). The ErrorPayload carries `error_kind`: `config` (bad --date / missing
+      chat), `status_unavailable` (status snapshot unusable — retryable),
+      `usage` (bad flags), or `internal`.
+
+      Agent read path: `--dry-run --json` is side-effect-free — it loads no .env,
+      resolves no chat/token, and sends NOTHING to Telegram — so an agent may run
+      it purely to READ the waiting set (count / tasks[]). Omitting --dry-run
+      SENDS a Telegram message as a side effect.
+
+      There is no `hive answer` verb for the brainstorm "answer" button an agent
+      sees as an answer-waiting task: to clear one, an agent fills the matching
+      `### A` slot in that task's brainstorm.md — the same edit the bot/web
+      "Answer" button performs via BrainstormAnswerWriter.
+
+      Examples:
+        hive answer-digest
+        hive answer-digest --date 2026-06-27 --json
+        hive answer-digest --dry-run --json   # side-effect-free read
+
+      Exit codes:
+        0  sent / nothing waiting (empty is silent) / dry-run
+        64 bad flags / malformed invocation (error_kind=usage)
+        69 status snapshot unavailable (error_kind=status_unavailable, retryable)
+        70 internal error (error_kind=internal)
+        78 bad --date or missing chat config (error_kind=config)
+    DESC
+    option :date, type: :string,
+                  desc: "local calendar date echoed into the JSON `date` field; does not scope data or dedup (YYYY-MM-DD)"
+    option :dry_run, type: :boolean, default: false, desc: "print the digest instead of sending Telegram"
+    def answer_digest
+      require "hive/commands/answer_digest"
+      Hive::Commands::AnswerDigest.new(
         date: options[:date],
         dry_run: options[:dry_run],
         json: options[:json]
@@ -1104,6 +1206,39 @@ module Hive
         raise error
       end
 
+      # `hive review` raises usage errors from inside the method body: the
+      # optional TARGET (so `--pr` can stand alone) and the
+      # both/neither-given checks surface as Hive::Error, not the Thor::Error
+      # that bin/hive's JSON usage envelope keys on. Emit the same
+      # hive-stage-action envelope StageAction emits for `hive review <slug>
+      # --json` so every `hive review --json` failure stays symmetric, then
+      # raise so bin/hive maps the exit code (and prints the stderr line).
+      # AdhocReview and StageAction own their own envelopes, so neither is
+      # wrapped by this helper — no double emit.
+      def emit_review_usage_error(message)
+        require "json"
+        error = Hive::InvalidTaskPath.new(message)
+        if options[:json]
+          payload = Hive::Schemas::ErrorEnvelope.build(
+            schema: "hive-stage-action",
+            error: error,
+            error_kind: "invalid_task_path",
+            extras: { "verb" => "review" }
+          )
+          begin
+            puts JSON.generate(payload)
+          rescue Errno::EPIPE
+            # caller went away — fall through to the bare-text rescue in bin/hive.
+          rescue JSON::GeneratorError => e
+            # A non-serialisable payload is a bug, not a closed pipe — surface
+            # it rather than hide it (the bare-text rescue in bin/hive still
+            # carries the failure for the exit code + stderr line).
+            warn "[hive.review] review usage-error envelope was not serialisable: #{e.class}: #{e.message}"
+          end
+        end
+        raise error
+      end
+
       def emit_daemon_queue_argv_error(action:, message:)
         require "hive/commands/daemon"
         require "json"
@@ -1120,6 +1255,24 @@ module Hive
           warn message
         end
         raise Hive::InvalidTaskPath, message
+      end
+
+      def emit_bot_argv_error(message:, error_kind:)
+        require "hive/commands/bot"
+        require "json"
+        error = Hive::InvalidTaskPath.new(message)
+        if options[:json]
+          payload = Hive::Commands::Bot.json_usage_error_payload(
+            error: error,
+            error_kind: error_kind
+          )
+          begin
+            puts JSON.generate(payload)
+          rescue Errno::EPIPE, JSON::GeneratorError
+            nil
+          end
+        end
+        raise error
       end
     end
 
@@ -1173,13 +1326,17 @@ module Hive
     def bot(subcommand = nil)
       require "hive/commands/bot"
       if options[:foreground] && options[:detach]
-        raise Hive::InvalidTaskPath,
-              "hive bot start: --detach is the default; do not combine it with --foreground"
+        emit_bot_argv_error(
+          message: "hive bot start: --detach is the default; do not combine it with --foreground",
+          error_kind: "wrong_subcommand_flag"
+        )
       end
       if options[:force] && subcommand != "install"
-        raise Hive::InvalidTaskPath,
-              "hive bot #{subcommand}: --force only applies to `install`; " \
-              "drop it or use `hive bot install --force`"
+        emit_bot_argv_error(
+          message: "hive bot #{subcommand}: --force only applies to `install`; " \
+                   "drop it or use `hive bot install --force`",
+          error_kind: "wrong_subcommand_flag"
+        )
       end
 
       Hive::Commands::Bot.new(
@@ -1191,30 +1348,45 @@ module Hive
       ).call
     end
 
-    desc "web", "Run the hivebox web UI"
+    desc "web [SUBCOMMAND]", "Run or manage the hive web UI"
     option :bind, type: :string, desc: "override web.bind"
     option :port, type: :numeric, desc: "override web.port"
-    def web
+    option :no_bootstrap, type: :boolean, default: false, desc: "do not install the managed web app if missing"
+    option :unsafe, type: :boolean, default: false, desc: "allow non-loopback bind without configured owner"
+    option :allow_public, type: :boolean, default: false, desc: "alias for --unsafe"
+    option :force, type: :boolean, default: false, desc: "for install: overwrite existing service unit"
+    option :detach, type: :boolean, default: false, desc: "for start: start the managed service instead of foreground Rails"
+    def web(subcommand = nil)
       if options[:json]
-        require "json"
-        message = "hive web has no JSON output (it runs a long-lived server). " \
-                  "Use 'hive status --json' for machine-readable task data."
-        # Mirror `hive tui`'s rejection: emit a structured error envelope (sans
-        # `schema`, since web has no registered hive-* schema) and raise
-        # InvalidTaskPath for the USAGE (64) exit code — parity with every
-        # other --json failure on this surface.
-        puts JSON.generate(
-          "ok" => false,
-          "error_class" => "InvalidTaskPath",
-          "error_kind" => "invalid_task_path",
-          "exit_code" => Hive::ExitCodes::USAGE,
-          "message" => message
-        )
-        raise Hive::InvalidTaskPath, message
+        unless %w[install status].include?(subcommand.to_s)
+          require "json"
+          message = "hive web has no JSON output for foreground server commands. " \
+                    "Use 'hive web status --json' or 'hive status --json'."
+          puts JSON.generate(
+            "ok" => false,
+            "error_class" => "InvalidTaskPath",
+            "error_kind" => "invalid_task_path",
+            "exit_code" => Hive::ExitCodes::USAGE,
+            "message" => message
+          )
+          raise Hive::InvalidTaskPath, message
+        end
       end
 
       require "hive/commands/web"
-      Hive::Commands::Web.new(bind: options[:bind], port: options[:port]).call
+      # Every option defaults to false/nil, so there is no present-vs-defaulted
+      # distinction to preserve — pass them straight through (subcommand is nil
+      # for the foreground server, which is the constructor's default).
+      Hive::Commands::Web.new(
+        subcommand,
+        bind: options[:bind],
+        port: options[:port],
+        no_bootstrap: options[:no_bootstrap],
+        unsafe: options[:unsafe] || options[:allow_public],
+        force: options[:force],
+        json: options[:json],
+        detach: options[:detach]
+      ).call
     end
 
     desc "tui", "Open the live, keystroke-driven dashboard for every active task"

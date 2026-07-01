@@ -166,6 +166,35 @@ class HiveCommandsDaemonEnvelopeTest < Minitest::Test
     assert emitter.stdout_written?, "closed stdout must still mark the envelope as written"
   end
 
+  def test_emit_envelope_warns_when_payload_is_not_serialisable
+    # A non-serialisable payload is a bug, not a closed pipe — the mixin must
+    # warn (not silently swallow) while still marking stdout written so the
+    # re-raise carries the real failure to bin/hive.
+    emitter = Class.new do
+      include Hive::Schemas::EnvelopeEmitter
+
+      def envelope_schema
+        "hive-daemon-enroll"
+      end
+
+      def envelope_error_kind(_error)
+        Hive::Schemas::EnrollErrorKind::INTERNAL
+      end
+
+      def stdout_written?
+        @stdout_written
+      end
+    end.new
+
+    err = nil
+    with_replaced_singleton_method(JSON, :generate, ->(*_args) { raise JSON::GeneratorError, "bad json" }) do
+      _out, err = capture_io { emitter.send(:emit_envelope, Hive::Error.new("boom")) }
+    end
+
+    assert emitter.stdout_written?, "a non-serialisable payload must still mark the envelope as written"
+    assert_match(/error envelope was not serialisable/, err)
+  end
+
 
   # Disk-class errors during the atomic rewrite (ENOSPC / EROFS / EACCES /
   # EXDEV / EDQUOT / EIO) must surface as Hive::ConfigError (exit 78),

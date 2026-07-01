@@ -16,6 +16,7 @@ Rails.application.routes.draw do
   post "logout" => "sessions#destroy", as: :logout
 
   root "status#index"
+  post "daemon/repair" => "daemon#repair", as: :daemon_repair
 
   post "ideas" => "ideas#create", as: :ideas
 

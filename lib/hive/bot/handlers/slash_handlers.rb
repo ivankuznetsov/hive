@@ -42,13 +42,19 @@ module Hive
                             format: json ? :json : nil)
         end
 
+        def waiting(_update)
+          @result_class.new(action: :dispatch_then_reply,
+                            command_argv: [ "hive", "status", "--json" ],
+                            mode: :waiting)
+        end
+
         def queue(_update)
           @result_class.new(action: :dispatch_then_reply,
                             command_argv: [ "hive", "status", "--json" ])
         end
 
         def idea(update)
-          text = update.effective_text.to_s.sub(%r{\A/idea\b}, "").strip
+          text = effective_text(update).to_s.sub(%r{\A/idea\b}, "").strip
           if text.empty?
             return start_text_capture(update) if @idea_draft_store
 
@@ -109,7 +115,7 @@ module Hive
         def media(update)
           draft = @idea_draft_store.get(chat_id: update.chat_id)
           started_here = draft.nil?
-          caption = update.effective_text.to_s.strip
+          caption = effective_text(update).to_s.strip
           if draft.nil?
             text = caption.empty? || caption.start_with?("/") ? nil : caption
             draft = @idea_draft_store.start(
@@ -130,6 +136,19 @@ module Hive
         end
 
         private
+
+        # Byte-identical to Router#effective_text — those two ARE interchangeable
+        # and share its nil-able contract (returns nil when neither read is set).
+        # Only FreeTextHandler#effective_text differs, coercing the read with
+        # `.to_s` (returns "", never nil), so that one variant is not. A media
+        # message carries its text in the caption (update.text is nil), so prefer
+        # #effective_text. The respond_to? guard supports lean unit-test fixtures
+        # that expose only #text (e.g. router_test's LegacyMessageUpdate);
+        # production Telegram::Update always responds to #effective_text
+        # (telegram.rb), so the `: update.text` fallback never runs in production.
+        def effective_text(update)
+          update.respond_to?(:effective_text) ? update.effective_text : update.text
+        end
 
         def start_text_capture(update)
           draft = @idea_draft_store.start(chat_id: update.chat_id, phase: :awaiting_text,
@@ -267,8 +286,9 @@ module Hive
         def help(_update)
           @result_class.new(
             action: :reply,
-            text: "Commands: /status [project], /queue, /idea [text], /answer <id|slug>, " \
-                  "/approve <id|slug>, /autofix <id|slug>, /details <id|slug>, /done, /help"
+            text: "Send any message to capture an idea. Commands: /status [project], /waiting, " \
+                  "/queue, /idea [text], /answer <id|slug>, /approve <id|slug>, /autofix <id|slug>, " \
+                  "/details <id|slug>, /done, /help"
           )
         end
 
@@ -280,7 +300,7 @@ module Hive
             action: :reply,
             text: "Connected. This bot drives your hive pipeline: it notifies you when " \
                   "tasks need answers or approvals, and you can reply right here.\n\n" \
-                  "Try /status to see your tasks, /idea to capture a new one, " \
+                  "Try /status to see your tasks, send any message to capture a new idea, " \
                   "or /help for every command."
           )
         end

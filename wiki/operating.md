@@ -163,6 +163,11 @@ version verification, `hive daemon install`, and optional non-interactive
 The skill also documents `/hive wiki compile-log --check` as the read-only
 aggregate-changelog verification path and tells agents to reserve mutating
 `hive wiki compile-log` runs for merge/rebase cleanup or explicit user requests.
+Its marker-recovery guidance mirrors [[modules/daemon]]: inspect first with
+`hive status --json` and `hive daemon status --json`, wait for known
+healer-managed cooldown/retry signatures, start a stopped daemon with
+`hive daemon start --detach`, and treat manual `hive markers clear` as guarded
+mutation under the skill's Safety Boundaries.
 The naked `hive` ClawHub slug is already owned by another publisher, so it is
 intentionally not used.
 
@@ -188,6 +193,14 @@ Local usage:
 packaging/verify-release.sh --version=v0.3.1
 packaging/verify-release.sh --version=v0.3.1 --report=json | jq .ok
 ```
+
+For unreleased packaging fixes, validate against the locally built gem rather
+than by copying files into an installed gem directory. Build the artifact with
+`gem build hive.gemspec`, install it into an isolated `GEM_HOME`/XDG prefix,
+run `hive doctor`, then replay the affected `hive run <task-folder>` path from
+that install. Claude tmux launcher-script fixes should prove the target task
+reaches `WAITING` or later instead of `claude_launch_failed`, confirming the
+packaged `lib/hive/scripts/*.sh` files are present in the real artifact.
 
 Exit codes:
 
@@ -354,6 +367,13 @@ environments where the installer could not write or enable the unit (read-only
 home, restricted user, custom layout) or for migrating an existing install onto
 a newer template.
 
+The local web UI has its own optional service. `hive web install` writes
+`~/.config/systemd/user/hive-web.service` on Linux or
+`~/Library/LaunchAgents/local.hive-web.plist` on macOS, and
+`hive web start --detach` starts that service. It always runs separately from
+`hive-daemon`; foreground `hive web` remains the fallback when a host has no
+usable service manager.
+
 ### Linux (systemd-user)
 
 A sample unit ships at `examples/systemd/hive-daemon.service`. Install
@@ -388,6 +408,12 @@ losing in-flight work.
 If `hive` lives behind a version manager (rbenv / asdf / mise), edit
 the `ExecStart=` line to use the shim's absolute path — systemd-user
 doesn't load your shell's rc files.
+
+When testing a freshly built local gem, make sure the daemon's installed
+`ExecStart=` path resolves to that patched install. A stale service unit can
+keep running an older `/usr/bin/hive` or prior `~/.local/bin/hive` even while
+the shell points at the new binary; `hive daemon install --force` rewrites the
+unit to the current resolved path.
 
 ### macOS (launchd)
 

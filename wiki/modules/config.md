@@ -106,6 +106,7 @@ tags: [config, yaml, validation]
     }
   },
   "digest" => { "enabled" => false, "agent" => nil, "max_catchup_days" => 7 },
+  "daemon" => { ..., "auto_retry" => { "enabled" => true } },
   "screenote" => { "base_url" => "https://screenote.ai" },
   "bot" => {
     "idea_attachment_max_bytes" => 20 * 1024 * 1024,
@@ -229,7 +230,8 @@ Runs after merge so a default value can never trigger a failure — only user in
 7. **`validate_claude_permission_mode!`** — `claude.permission_mode` must be one of `acceptEdits`, `auto`, `bypassPermissions`, `default`, `dontAsk`, or `plan`. Both the tmux launcher and the headless `-p` path resolve this value to the same Claude Code flags via `AgentProfile#permission_flags`: `bypassPermissions` → `--dangerously-skip-permissions`, any other mode → `--permission-mode <mode>`. Fresh init suggests `bypassPermissions` so dogfood runs do not pause on file-operation approval prompts, while `auto` keeps Claude Code auto-mode rules.
 8. **`validate_permissions!`** — top-level, stage-level, review-role, and reviewer-entry `permissions:` specs are parsed by `Hive::PermissionScope` and must be `yolo`, `read-only`, or a valid `scoped` map. Shape errors, unknown presets/keys, and `bash:` plus `tools:` fail during config load; runner capability is checked later when the stage profile is known. `reject_unsupported_permissions_at!` also rejects a block-level `review.adhoc.permissions` key here (put permissions on the individual ad-hoc reviewer entries under `review.adhoc.reviewers` instead).
 9. **`validate_babysitter!`** — `babysitter.enabled` and `babysitter.dry_run` must be booleans; `interval` must be integer seconds or a `\d+[smh]` string; `max_concurrent_prs`, `budget_minutes`, and `budget_usd` must be integers >= 1; `labels_ignore` must be an array of strings.
-10. **`validate_patrol!`** — `patrol.mode` must be one of `ultrapatrol`, `high`, `medium`, `low`, or `off`; `patrol.enabled`, `patrol.draft_prs`, and `patrol.review_prs` must be booleans when present; `trigger` must be one of the patrol trigger enum values; confidence/severity/count/interval/command shape are validated before the scheduler or `hive patrol` command can run. `patrol.review.reviewers` uses the same reviewer-entry validation as `review.reviewers`, but it is a separate list used only by synthetic `Patrol: ...` review tasks.
+10. **`validate_daemon!`** — `daemon.enabled`, `daemon.autostart`, and `daemon.auto_retry.enabled` must be booleans when present; `daemon.auto_retry` itself must be a mapping. Numeric daemon scheduler, concurrency, timeout, and log limits keep their documented lower bounds.
+11. **`validate_patrol!`** — `patrol.mode` must be one of `ultrapatrol`, `high`, `medium`, `low`, or `off`; `patrol.enabled`, `patrol.draft_prs`, and `patrol.review_prs` must be booleans when present; `trigger` must be one of the patrol trigger enum values; confidence/severity/count/interval/command shape are validated before the scheduler or `hive patrol` command can run. `patrol.review.reviewers` uses the same reviewer-entry validation as `review.reviewers`, but it is a separate list used only by synthetic `Patrol: ...` review tasks.
 
 Bot attachment capture settings are validated with the other bot numeric
 keys: `bot.idea_attachment_max_bytes` defaults to 20 MiB and may not

@@ -2,6 +2,22 @@ require_relative "../../test_helper"
 require_relative "asciinema_driver"
 
 class E2EAsciinemaDriverTest < Minitest::Test
+  def test_non_executable_env_override_binary_is_unavailable
+    Dir.mktmpdir("asciinema") do |dir|
+      script = File.join(dir, "asciinema")
+      File.write(script, "not executable\n")
+      File.chmod(0o644, script)
+
+      old = ENV["HIVE_ASCIINEMA_BIN"]
+      ENV["HIVE_ASCIINEMA_BIN"] = script
+
+      refute Hive::E2E::AsciinemaDriver.available?
+      assert_nil Hive::E2E::AsciinemaDriver.version
+    ensure
+      ENV["HIVE_ASCIINEMA_BIN"] = old
+    end
+  end
+
   def test_records_with_env_override_binary
     Dir.mktmpdir("asciinema") do |dir|
       script = File.join(dir, "asciinema")
@@ -29,6 +45,31 @@ class E2EAsciinemaDriverTest < Minitest::Test
       driver.stop
 
       assert_equal :ok, driver.integrity_status
+    ensure
+      ENV["HIVE_ASCIINEMA_BIN"] = old
+    end
+  end
+
+  def test_start_raises_unavailable_when_recorder_spawn_fails
+    Dir.mktmpdir("asciinema") do |dir|
+      script = File.join(dir, "asciinema")
+      cast = File.join(dir, "cast.json")
+      File.write(script, <<~RUBY)
+        #!/usr/bin/env ruby
+        if ARGV == ["--version"]
+          puts "asciinema 3.1.0"
+          exit 0
+        end
+      RUBY
+      File.chmod(0o755, script)
+
+      old = ENV["HIVE_ASCIINEMA_BIN"]
+      ENV["HIVE_ASCIINEMA_BIN"] = script
+      driver = Hive::E2E::AsciinemaDriver.new(socket_name: "fake", session_name: "fake", cast_path: cast)
+      File.chmod(0o644, script)
+
+      error = assert_raises(Hive::E2E::AsciinemaDriver::Unavailable) { driver.start }
+      assert_match(/failed to start asciinema/, error.message)
     ensure
       ENV["HIVE_ASCIINEMA_BIN"] = old
     end

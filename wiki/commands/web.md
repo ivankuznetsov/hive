@@ -3,7 +3,7 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-06-30
+updated: 2026-06-25
 tags: [command, web, hivebox, rails, turbo]
 ---
 
@@ -13,9 +13,7 @@ repo root, shipped in the Docker image at `/app/web`. The web tier adds no
 pipeline logic: status reads call `Hive::Commands::Status#json_payload` (via
 `Hive::Web::StatusFeed`), gate approval calls `Hive::Commands::Approve`
 in-process, task Drop calls `Hive::Commands::Drop` in-process, stage runs go
-through the daemon dispatch queue (`Hive::Web::Dispatcher`), daemon status
-renders the shared `Hive::Daemon::StatusReport.safe_payload` producer used by
-`hive daemon status --json`, and setup flows
+through the daemon dispatch queue (`Hive::Web::Dispatcher`), and setup flows
 reuse `Hive::Web::GithubAuth`, `AgentsAuth`, and the Telegram validators from
 the gem. Red task recovery uses the bot's `RecoverySequence` path so the web
 Retry button and Telegram Autofix share the same guarded clear plus rerun
@@ -24,29 +22,34 @@ path with separate gates.
 
 ## CLI
 
-`hive web [--bind] [--port]` (defaults from the `web:` config block). The
-command locates the Rails app in this order: `HIVEBOX_WEB_APP_DIR` when it
-points at a real Rails app, the managed version-stamped app under
-`Hive::Paths.web_app_home` (refreshed when stale unless `--no-bootstrap` is
-passed), then a source checkout `web/` next to `lib/`; if none exists and
-bootstrap is allowed, it downloads/extracts the versioned web release bundle.
-It exports `SECRET_KEY_BASE` (derived from the same persisted
-`Hive::Web::SessionSecret` file as before — sessions survive container
-recreation), `HIVEBOX_ORIGIN` (extra Action Cable origin allow; same-origin
+`hive web [--bind] [--port]` (defaults from the `web:` config block). Bare
+`hive web` runs the Rails app in the foreground. `hive web install`,
+`hive web start --detach`, `hive web stop`, and `hive web status [--json]`
+manage the separate per-user `hive-web` service through the same
+systemd-user/launchd installer base as the daemon.
+
+The command locates the Rails app in this order: `HIVEBOX_WEB_APP_DIR`, the
+managed local app at `${XDG_DATA_HOME}/hive/web`, then source-checkout `web/`.
+If no app exists and bootstrapping is allowed, it fetches the versioned
+`hive-web-<version>.tar.gz` release asset into the managed app dir and runs
+`bundle install`; `--no-bootstrap` reports the missing bundle instead. It then
+exports `SECRET_KEY_BASE` (derived from the same persisted
+`Hive::Web::SessionSecret` file as before — sessions survive a web-service
+restart), `HIVEBOX_ORIGIN` (extra Action Cable origin allow; same-origin
 host traffic is accepted without config), and
 `HIVEBOX_STORAGE_DIR` (the solid-stack sqlite files, under
-`Hive::Paths.state_home/web-storage` so they live on the `/data` mount), runs
-`bin/rails db:prepare`, then execs `bin/rails server`. Outside the container,
-a source checkout, or a bootstrapped managed bundle the command exits 1 with
-guidance — the gem itself does not package the Rails app
-(`test/unit/gemspec_test.rb` pins that).
+`Hive::Paths.state_home/web-storage` so they survive a web-bundle upgrade,
+which replaces the app dir wholesale), runs
+`bin/rails db:prepare`, then execs `bin/rails server`. The gem itself still
+does not package `web/`; the managed bundle is a runtime dependency.
 
-`hive web install [--force] [--json]` installs the separate `hive-web` autostart
-service using the invoked user-facing binary path; `hive web start --detach`
-starts that service and reloads systemd-user first on Linux so a unit written
-while systemd-user was unavailable becomes visible. Foreground
-`hive web start` is equivalent to `hive web`. `status --json` emits
-`hive-web-status`; `install --json` emits `hive-web-install`.
+Loopback binds (`127.0.0.0/8`, `::1`, `localhost`) export
+`HIVEBOX_LOCAL_LOOPBACK=1` and bypass login only for loopback peer requests —
+unless `web.local_loopback: false` is set, which keeps the GitHub login
+requirement even on a loopback bind.
+Non-loopback binds are refused unless `web.github.owner` is configured or the
+operator passes `--unsafe` / `--allow-public`, in which case the GitHub owner
+gate remains active.
 
 ## Auth
 
@@ -69,15 +72,6 @@ owner-gated request, not just at sign-in. If `web.github.owner` changes while
 an old session is still live, `ApplicationController#require_login` resets that
 session and redirects to login so the old repo-scoped token does not remain
 usable. The local dev/test seam is exempt only for tokenless local sessions.
-
-Local loopback mode is a deliberate no-auth bypass for local foreground use:
-when the CLI bind address is `localhost`, `::1`, or any `127.0.0.0/8` address
-and `web.local_loopback` is not `false`, it exports `HIVEBOX_LOCAL_LOOPBACK=1`.
-Rails still checks that the request peer is loopback before skipping login.
-Non-loopback binds require either `--unsafe` or a configured `web.github.owner`;
-when an owner gate authorizes a non-loopback bind, the CLI warns that
-`web.github.owner` is the only login gate, and `0.0.0.0` without an HTTPS
-origin also prints the Host-header/reverse-proxy warning.
 
 ## Surfaces
 
@@ -103,11 +97,7 @@ origin also prints the Host-header/reverse-proxy warning.
   with scroll preservation so a live row arrival does not yank the operator
   back to the top; the composer form is `data-turbo-permanent` because
   typed-but-unsent idea text and staged image chips live in browser state. No
-  polling JS, no SSE. The daemon strip on the grid uses
-  `Hive::Daemon::StatusReport.safe_payload` directly instead of constructing a
-  `Hive::Commands::Daemon` CLI object; the view also reads
-  `StatusReport::BINARY_DRIFT_ACTIONABLE` for the Repair affordance, so CLI
-  JSON and web drift handling share the same producer constants.
+  polling JS, no SSE.
 - **Task page** — state-driven actions (Retry stage for red
   `recover_review` / `recover_execute` / `error` rows; Approve only when the
   marker makes a forward move possible; Run <verb> only when the project daemon
@@ -283,8 +273,7 @@ seconds, drives Chromium through Playwright, and writes
 `packaging/docker/Dockerfile`: agent CLIs install in an early cached layer;
 the gem builds/installs from `/app`; the Rails app bundles and precompiles
 assets (propshaft — no node build) at `/app/web` with a dummy build-time
-secret. Local non-Docker installs instead use the managed release bundle
-described in [[commands/setup]]. The image includes `asciinema` (records a terminal `.cast`) and
+secret. The image includes `asciinema` (records a terminal `.cast`) and
 `ffmpeg`, but NOT a terminal-GIF encoder (`agg`/`vhs`) — `ffmpeg` cannot read a
 `.cast`, so an in-box TUI/CLI demo records a `.cast` and then writes a `failed`
 capture unless the agent installs `agg`/`vhs`. Browser capture depends on the

@@ -163,6 +163,11 @@ version verification, `hive daemon install`, and optional non-interactive
 The skill also documents `/hive wiki compile-log --check` as the read-only
 aggregate-changelog verification path and tells agents to reserve mutating
 `hive wiki compile-log` runs for merge/rebase cleanup or explicit user requests.
+Its marker-recovery guidance mirrors [[modules/daemon]]: inspect first with
+`hive status --json` and `hive daemon status --json`, wait for known
+healer-managed cooldown/retry signatures, start a stopped daemon with
+`hive daemon start --detach`, and treat manual `hive markers clear` as guarded
+mutation under the skill's Safety Boundaries.
 The naked `hive` ClawHub slug is already owned by another publisher, so it is
 intentionally not used.
 
@@ -361,6 +366,13 @@ project is enrolled for dispatch. The recipes below are the manual fallback for
 environments where the installer could not write or enable the unit (read-only
 home, restricted user, custom layout) or for migrating an existing install onto
 a newer template.
+
+The local web UI has its own optional service. `hive web install` writes
+`~/.config/systemd/user/hive-web.service` on Linux or
+`~/Library/LaunchAgents/local.hive-web.plist` on macOS, and
+`hive web start --detach` starts that service. It always runs separately from
+`hive-daemon`; foreground `hive web` remains the fallback when a host has no
+usable service manager.
 
 ### Linux (systemd-user)
 

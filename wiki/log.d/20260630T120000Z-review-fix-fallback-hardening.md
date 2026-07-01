@@ -1,0 +1,14 @@
+## [2026-06-30T12:00:00Z] review — harden the claude stop-hook completion fallback
+
+**Action:** Closed several false-positive/over-acceptance gaps in the tmux `claude stop hook did not signal completion` fallback:
+- **Cold-start latch.** `ClaudeLauncher#wait_for_done_signal` now only trusts an idle pane (or exited process) as "turn ended" after it has first observed the turn underway (a non-idle pane or a live recorded process). The pre-work idle `❯` prompt that can flash between the Enter keystroke and Claude's first token no longer seals an untouched worktree as complete. Full `completion_evidence` (session_exists? round-trip) is built only once a candidate turn-end appears, not on every poll.
+- **Whole-pass no-change.** `no_change_evidence_present?` now passes only when no unapplied `[x] AUTO-FIX:` finding remains in the pass's reviewer files (reusing `auto_fix_finding_line?` so it can't drift from the accepted-findings collector). A single no-fix line in a mixed pass no longer satisfies `commit_or_no_change`.
+- **Dirty worktree = code change.** `fix_completion_commit_or_no_change?` treats a dirty worktree (the uncommitted fix the orchestrator's post-fix auto-commit will land) as code-change evidence; HEAD is captured before that commit so the SHA branch alone missed the normal case. `worktree_status` is now computed once and threaded through (no duplicate git subprocess).
+- **Gone session stays terminal.** `ClaudeCompletionFallback.suppress?` now rejects `session_alive == false` (a clean `session_exists? == false` with empty `session_error`), leaving `nil` as "unknown".
+- **Sentinel ownership.** Removed the premature `write_fix_success` in `handle_fix_completion_fallback`; the post-guardrail `write_fix_success` owns the sentinel so a guardrail trip withholds it.
+- **Audit detail.** The `claude_completion_fallback` event now records the artifact checked and the concrete commit (before→after short SHA) / dirty-worktree / whole-pass-no-change basis, not just booleans.
+- **Advisory fields documented.** `exit_code` (always nil) and `tmux_readable` (always true) are documented as advisory-only on the tmux path; crash protection rests on the code-change + artifacts conjunction. Dropped the unreachable `code == "0"` branch in `clean_exit_code?`; annotated `missing_output_error?` as a forward-compat guard for future `:output_file_exists` callers.
+
+**Tests:** Reworked the launcher idle test to require the work-started latch and added a cold-start regression test; reworked the crash-blocking fallback unit test to assert real blocking via `commit_or_no_change` (the synthetic `exit_code: 137` the launcher never produces is gone) and added gone-session / unknown-session cases; reworked the no-change integration test to a legitimate whole-pass no-change (fix agent dispositions the finding `RESOLVED/NO-FIX`) and assert the enriched audit message.
+
+**Docs:** Updated [[stages/review]].

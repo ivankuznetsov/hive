@@ -91,6 +91,90 @@ Prefer `--json` when the Hive command supports it and you need structured output
 
 For `hive wiki compile-log`, prefer `--check` when verifying an aggregate wiki changelog. Run the mutating compile command only after merge/rebase or when the user explicitly wants `wiki/log.md` refreshed; feature PRs should add `wiki/log.d/<timestamp>-<slug>.md` fragments instead of editing the compiled log directly.
 
+## Local Dogfood
+
+Use this checklist to dogfood a merged but unreleased Hive PR against the active local runtime. Prefer a clean worktree runtime so the installed gem, package, or standalone binary stays untouched. The goal is to preserve dirty worktree state while proving the merged change locally; do not bump or release during dogfood.
+
+1. Verify the PR is merged and green:
+
+```bash
+gh pr view <number> --json state,mergedAt,baseRefName,statusCheckRollup
+```
+
+Proceed only when `state` is `MERGED`, `mergedAt` is present, `baseRefName` is the expected main branch, and all required checks pass with none required-pending. Hard-stop when the PR is unmerged, red, or still has required checks pending.
+
+2. Identify the active runtime:
+
+```bash
+command -v hive
+readlink -f "$(command -v hive)"
+hive --version
+systemctl --user cat hive-daemon.service
+systemctl --user show hive-daemon.service
+```
+
+Compare the interactive binary with any daemon `HIVE_BIN` or unit override. Handle the install shape that is actually active: gem/rbenv/rvm/bundler, Homebrew Cellar, Arch package, standalone binary, or a user-local wrapper.
+
+3. Guard worktrees:
+
+```bash
+git status --short
+```
+
+Refuse to mutate any worktree with uncommitted changes. Require a separate clean checkout or clean `git worktree` for the merged PR.
+
+4. Apply the change:
+
+First record the prior override so rollback can restore it, not clobber it. Capture the daemon's current `HIVE_BIN` (and any drop-in `Environment=`) from step 2's `systemctl --user show hive-daemon.service` / interactive `command -v hive`; note whether an intentional override already existed and its exact value. Preferred worktree mode points the daemon override or `HIVE_BIN` at the clean merged checkout and leaves the installed binary untouched. See `## Daemon Diagnostics And Repair` for how to set `HIVE_BIN` or the unit `Environment=` via a systemd drop-in override. Patch-in-place is only a tiny single-file emergency fallback: back up the exact installed file first, then copy the changed file from the clean checkout. Do not run broad `git apply` or `cherry-pick` inside an installed package tree.
+
+5. Run checks:
+
+```bash
+ruby -c path/to/changed_file.rb
+bundle exec ruby -Itest test/path/to/focused_test.rb
+```
+
+Use the syntax check and the smallest focused or targeted test set that proves the merged change in the selected runtime.
+
+6. Restart the daemon:
+
+Restart with the command that matches how the override was applied. `hive daemon stop` / `hive daemon start --detach` forks a direct process that reads `HIVE_BIN` from the launching shell, so a drop-in-only `HIVE_BIN` is never picked up by this path — export the intended `HIVE_BIN` in the shell that runs `hive daemon start --detach`:
+
+```bash
+hive daemon stop
+HIVE_BIN=<clean-merged-checkout> hive daemon start --detach
+hive daemon status --json
+systemctl --user status hive-daemon.service --no-pager
+```
+
+For a systemd-managed unit whose override lives in a drop-in `override.conf`, reload and restart the unit instead so the new `Environment=` takes effect (a newly added or edited drop-in requires `daemon-reload` first), following the restart sequence in `## Daemon Diagnostics And Repair`:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user restart hive-daemon.service
+hive daemon status --json
+systemctl --user status hive-daemon.service --no-pager
+```
+
+Stopping or restarting the daemon is guarded by `## Safety Boundaries`; restate the effect and get explicit confirmation before running guarded restart commands. Step 7's `readlink -f` / version / runtime verify confirms the restart actually adopted the intended runtime.
+
+7. Verify behavior:
+
+```bash
+hive --version
+readlink -f "$(command -v hive)"
+hive daemon status --json
+systemctl --user status hive-daemon.service --no-pager
+```
+
+Run one targeted smoke workflow or status check that exercises the changed behavior. Accept only when the daemon is running the intended runtime, the smoke check shows the expected behavior, and status/log output has no new terminal-error marker.
+
+8. Rollback:
+
+The rollback depends on the mode used. For worktree mode, restore the prior daemon override or `HIVE_BIN` captured in step 4 — set it back to the operator's intentional pre-dogfood value, or clear it only when none existed — then restart back to the intended release runtime using the step 6 restart path that matches how the override was applied. For patch-in-place mode, restore the saved backup; if the backup is untrusted, use the package-appropriate repair path such as `gem pristine`, `brew reinstall`, or reinstalling the package or standalone binary. Re-run the version, path, daemon status, and `git status --short` checks to prove the release runtime and worktrees are restored.
+
+Guardrails: preserve dirty worktree state; do not bump or release. Dogfooding must not include `git commit`, version bumps, tag creation, gem release, package publish, destructive cleanup, or release automation.
+
 ## Status Bundle
 
 Use this read-only bundle for a one-shot health overview; these commands need no confirmation, and this section does not weaken confirmation rules for destructive or foreground/streaming commands.

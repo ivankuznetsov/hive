@@ -362,6 +362,13 @@ environments where the installer could not write or enable the unit (read-only
 home, restricted user, custom layout) or for migrating an existing install onto
 a newer template.
 
+The local web UI has its own optional service. `hive web install` writes
+`~/.config/systemd/user/hive-web.service` on Linux or
+`~/Library/LaunchAgents/local.hive-web.plist` on macOS, and
+`hive web start --detach` starts that service. It always runs separately from
+`hive-daemon`; foreground `hive web` remains the fallback when a host has no
+usable service manager.
+
 ### Linux (systemd-user)
 
 A sample unit ships at `examples/systemd/hive-daemon.service`. Install

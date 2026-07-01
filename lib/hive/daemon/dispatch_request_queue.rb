@@ -17,10 +17,21 @@ module Hive
 
       ALLOWED_VERBS = %w[
         run develop brainstorm plan review open-pr artifacts finalize
-        archive markers
+        archive markers daemon
       ].freeze
 
       DIRNAME = "dispatch_requests".freeze
+
+      # Sentinel project for host-global maintenance requests that aren't tied
+      # to any registered project (e.g. the web "Repair daemon" button enqueues
+      # `hive daemon install --force`). The consumer special-cases this value
+      # instead of rejecting it as unknown_project. The argv allowlist below
+      # bounds what a global request may run.
+      GLOBAL_MAINTENANCE_PROJECT = "__global__".freeze
+      GLOBAL_MAINTENANCE_ARGVS = [
+        %w[hive daemon install --force]
+      ].freeze
+
       CLAIMED_SUFFIX = ".claimed".freeze
       CLAIM_META_SUFFIX = ".claim".freeze
       SEQUENCE_SUFFIX = ".sequence".freeze
@@ -347,6 +358,15 @@ module Hive
 
         verb = argv[1].to_s
         return false unless ALLOWED_VERBS.include?(verb)
+
+        # The `daemon` verb runs host-global maintenance, not project-scoped
+        # work. Constrain it to the explicit GLOBAL_MAINTENANCE_ARGVS allowlist
+        # so a request carrying a real registered+enabled project can't smuggle
+        # `hive daemon stop|disable|restart` through the generic project route
+        # (which would execute a host-wide daemon command). The feature only
+        # needs `hive daemon install --force` under the __global__ sentinel.
+        return GLOBAL_MAINTENANCE_ARGVS.include?(argv) if verb == "daemon"
+
         return true if argv.length < 3
         return true if argv[2].start_with?("-")
         return true if verb == "markers"

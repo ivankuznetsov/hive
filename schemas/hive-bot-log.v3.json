@@ -26,6 +26,8 @@
         "poll_schema_skew",
         "update_received",
         "update_rejected_unauthorized",
+        "pairing_code_issued",
+        "pairing_approval_notice_unremovable",
         "dispatch_result_rejected_unauthorized",
         "notification_sent",
         "notification_skipped_dedupe",

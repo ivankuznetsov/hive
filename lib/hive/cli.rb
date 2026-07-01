@@ -32,7 +32,7 @@ module Hive
     end
 
     # `--json` is honoured by `init`, `status`, `run`, `approve`, `findings`,
-    # `accept-finding`, `reject-finding`, and the workflow verbs
+    # `accept-finding`, `reject-finding`, `pairing`, and the workflow verbs
     # (`brainstorm`, `plan`, `develop`, `pr`, `archive`). `new` accepts
     # the flag silently so an automated caller can pass it uniformly. Most
     # emitting commands produce a typed JSON document on success and a
@@ -1345,6 +1345,37 @@ module Hive
         dry_run: options[:dry_run],
         json: options[:json],
         force: options[:force]
+      ).call
+    end
+
+    desc "pairing SUBCOMMAND", "Approve Telegram pairing requests (list / approve)"
+    long_desc <<~DESC
+      Subcommands:
+        list [--json]                         Show pending Telegram pairing requests.
+                                              --json emits hive-pairing-list.v1.
+        approve telegram <CODE> [--json]      Approve a pending Telegram pairing code.
+                                              The platform argument is the fixed
+                                              literal `telegram`.
+                                              --json emits hive-pairing-approve.v1.
+
+      Pairing requests are created when an unknown Telegram DM sends /start and
+      bot.pairing_enabled is true. Approval appends the chat_id to the global
+      bot.chat_id_allowlist, requests a live bot reload when a live bot PID is
+      present, and queues an approval DM for the running bot to send.
+
+      Exit codes: 0 success; 64 invalid arguments; 78 bad global bot config;
+      1 is a catch-all for every other failure (unknown/expired code, but also
+      a failed approval-notice write, an unreadable pairing store, or an
+      internal error). With --json, branch on the `error_kind` field — not the
+      exit code — to tell these apart (e.g. `unknown_code`, `expired_code`,
+      `notice_write_failed`, `store_read_failed`, `internal_error`).
+    DESC
+    def pairing(subcommand = nil, *pairing_args)
+      require "hive/commands/pairing"
+      Hive::Commands::Pairing.new(
+        subcommand,
+        args: pairing_args,
+        json: options[:json]
       ).call
     end
 

@@ -17,6 +17,8 @@ module Hive
         poll_schema_skew
         update_received
         update_rejected_unauthorized
+        pairing_code_issued
+        pairing_approval_notice_unremovable
         dispatch_result_rejected_unauthorized
         notification_sent
         notification_skipped_dedupe
@@ -73,6 +75,7 @@ module Hive
         poll_unhealthy: :warn,
         poll_schema_skew: :warn,
         update_rejected_unauthorized: :warn,
+        pairing_approval_notice_unremovable: :warn,
         dispatch_result_rejected_unauthorized: :warn,
         answer_lock_contention: :warn,
         answer_slot_missing: :warn,

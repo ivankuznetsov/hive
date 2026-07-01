@@ -3,7 +3,7 @@ title: Hive::Digest
 type: module
 source: lib/hive/digest.rb, lib/hive/digest/, templates/digest_prompt.md.erb
 created: 2026-06-14
-updated: 2026-06-19
+updated: 2026-06-30
 tags: [digest, shipped, telegram, module]
 ---
 
@@ -19,7 +19,7 @@ through `Hive::Config.load_global_digest_config`.
 
 | API | Purpose |
 |-----|---------|
-| `Hive::Digest.run(date: nil, dry_run: false, cfg: nil, clock: -> { Time.now }, collector: nil, categorizer: nil, sender: nil, stats: nil)` | Orchestrates collection, categorization, stats, rendering, and delivery. Defaults `cfg` via `Config.load_global_digest_config` and `stats` to `Stats.new`. For a real send (not `dry_run`) it first calls `Hive::EnvFile.load!` so `~/.config/hive/.env` supplies `HIVE_TELEGRAM_BOT_TOKEN` even when the environment doesn't export it — this is what lets the daemon-dispatched `hive digest` authenticate (its systemd/detached launch env has no token; previously only `hive bot start` loaded the `.env`). An exported env var still wins; a dry-run never loads it. Returns `Result(status:, date:, message:, delivery:)`. |
+| `Hive::Digest.run(date: nil, dry_run: false, cfg: nil, clock: -> { Time.now }, collector: nil, categorizer: nil, sender: nil, stats: nil, pairing_store: Hive::Bot::PairingStore.new)` | Orchestrates collection, categorization, stats, rendering, pairing-request reminder appending, and delivery. Defaults `cfg` via `Config.load_global_digest_config` and `stats` to `Stats.new`. For a real send (not `dry_run`) it first calls `Hive::EnvFile.load!` so `~/.config/hive/.env` supplies `HIVE_TELEGRAM_BOT_TOKEN` even when the environment doesn't export it — this is what lets the daemon-dispatched `hive digest` authenticate (its systemd/detached launch env has no token; previously only `hive bot start` loaded the `.env`). An exported env var still wins; a dry-run never loads it. Returns `Result(status:, date:, message:, delivery:)`. |
 | `Digest::Window.local_today`, `previous_local_day`, `on_local_date?`, `parse_date`, `parse_time` | Local-date window helpers. `previous_local_day(now:)` is the shared "yesterday local" default used by both the CLI command and `Digest.run`. Collection compares `shipped_at.getlocal.to_date` to the requested date. |
 | `Digest::ShipTimes#shipped_at(hive_state_path:, slug:)` | Reads git log on `hive/state` (fixed-string `-F` grep) and picks the ship commit by **action preference** — `pr_finalized`, else `archived`, else approval into `9-done` — not whichever commit is chronologically first. |
 | `Digest::Collector#for_date(date)` | Scans registered projects and builds grouped `ShippedItem` rows from `9-done` task folders, `meta.yml`, `pr.md`, and ship times. |
@@ -57,6 +57,11 @@ fallback), one **per-project** section (`*Hive*`, capitalized) each with
 under a divider — `Lines +A/-D · PRs P · Commits C`. Lines/Commits are shown
 only when `Totals#measured_prs` is positive, so a `gh`-unavailable run degrades
 to just the PR count instead of a misleading `+0/-0`.
+When `PairingStore#pending.size` is positive, `Digest.run` appends one final
+line shaped as `🔑 N pairing request(s) waiting — run hive pairing list` to both the
+empty and successfully-rendered digest paths. This local file read happens
+outside the categorizer prompt, so pending pairing requests do not spend agent
+budget.
 
 Collection is deliberately tolerant of incomplete task artifacts:
 

@@ -221,7 +221,9 @@ module Hive
       end
 
       def write_manifest
-        files = Dir[File.join(@scenario_dir, "**", "*")].select { |path| File.file?(path) }.sort
+        files = Dir.glob(File.join(@scenario_dir, "**", "*"), File::FNM_DOTMATCH)
+          .select { |path| File.file?(path) }
+          .sort
         file_entries = files.filter_map { |path| manifest_entry(path) }
         manifest = {
           "schema" => "hive-e2e-manifest",

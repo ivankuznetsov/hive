@@ -62,6 +62,23 @@ class OpenClawSkillsTest < Minitest::Test
     assert_includes body, "Pass arguments safely"
   end
 
+  def test_umbrella_skill_documents_daemon_auto_advance
+    _metadata, body = read_skill("hive")
+
+    [
+      "auto-advance",
+      "normal OpenClaw setups",
+      "hive daemon status --json",
+      "next:",
+      "manual fallback or recovery command",
+      "do not ask before ordinary stage advancement",
+      "needs_input",
+      "Safety Boundaries"
+    ].each do |literal|
+      assert_includes body, literal
+    end
+  end
+
   def test_umbrella_skill_guards_destructive_and_blocking_commands
     _metadata, body = read_skill("hive")
 

@@ -2368,6 +2368,63 @@ class HiveBotSupervisorTest < Minitest::Test
     end
   end
 
+  def test_drain_pairing_approvals_prunes_expired_before_applying_send_cap
+    Dir.mktmpdir("hive-pairing-approval") do |home|
+      @supervisor.instance_variable_set(:@pairing_approval_state_home, home)
+      cap = Hive::Bot::Supervisor::PAIRING_APPROVAL_SEND_CAP
+
+      # Two expired notices, timestamped oldest so they sort ahead of the fresh
+      # ones. The load-bearing property is prune-BEFORE-cap: a regression that
+      # capped first would burn cap slots on these stale notices and starve the
+      # fresh approvals, leaving fewer than `cap` DMs sent this tick.
+      2.times do |i|
+        Hive::Bot::PairingApprovalQueue.write!(
+          chat_id: 500 + i, state_home: home, now: Time.utc(2026, 6, 30, 10, 0, i)
+        )
+      end
+      cap.times do |i|
+        Hive::Bot::PairingApprovalQueue.write!(
+          chat_id: 1000 + i, state_home: home, now: Time.utc(2026, 6, 30, 12, 0, i)
+        )
+      end
+
+      @supervisor.send(:drain_pairing_approvals, now: Time.utc(2026, 6, 30, 12, 5, 0))
+
+      assert_equal cap, @telegram.messages.size,
+                   "expired notices must be pruned before the cap so all CAP fresh approvals send"
+      assert_equal (1000...(1000 + cap)).to_a, @telegram.messages.map { |m| m[:chat_id] },
+                   "only fresh notices are sent; the expired ones never consume a send slot"
+      assert_empty Hive::Bot::PairingApprovalQueue.pending(state_home: home),
+                   "expired notices pruned without a send; every fresh notice sent and removed"
+    end
+  end
+
+  def test_drain_pairing_approvals_logs_when_expired_notice_cannot_be_removed
+    Dir.mktmpdir("hive-pairing-approval") do |home|
+      @supervisor.instance_variable_set(:@pairing_approval_state_home, home)
+      Hive::Bot::PairingApprovalQueue.write!(
+        chat_id: 999, state_home: home, now: Time.utc(2026, 6, 30, 17, 0, 0)
+      )
+
+      # An expired notice whose unlink keeps failing (a clean false from the
+      # queue on EACCES, or a mismatched/corrupt file) would otherwise be
+      # silently re-dropped every reaper tick — the expired branch must log the
+      # same distinct event as the successful-send branch.
+      original = Hive::Bot::PairingApprovalQueue.method(:remove)
+      Hive::Bot::PairingApprovalQueue.define_singleton_method(:remove) { |*, **| false }
+      begin
+        @supervisor.send(:drain_pairing_approvals, now: Time.utc(2026, 6, 30, 18, 0, 1))
+      ensure
+        Hive::Bot::PairingApprovalQueue.define_singleton_method(:remove, original)
+      end
+
+      assert_empty @telegram.messages, "an expired notice is dropped without sending"
+      event = @logger.events.find { |e| e[:name] == :pairing_approval_notice_unremovable }
+      assert event, "an expired notice that cannot be removed must log a distinct event"
+      assert_equal 999, event.fetch(:payload).fetch(:chat_id)
+    end
+  end
+
   def test_clear_inline_keyboard_swallows_telegram_errors
     @telegram.define_singleton_method(:edit_message_reply_markup) do |*|
       raise IOError, "telegram offline"

@@ -60,16 +60,23 @@ class HiveBotPairingApprovalQueueTest < Minitest::Test
     end
   end
 
-  def test_prune_expired_removes_old_and_malformed_keeps_fresh
+  def test_pending_leaves_transiently_unreadable_notice_for_retry
     Dir.mktmpdir("hive-pairing-approval") do |dir|
-      Q.write!(chat_id: 1, state_home: dir, now: Time.utc(2026, 6, 30, 17, 0, 0))
-      Q.write!(chat_id: 2, state_home: dir, now: Time.utc(2026, 6, 30, 18, 59, 50))
-      File.write(File.join(Q.directory(state_home: dir), "20260630-bad.json"), "{not json")
+      Q.write!(chat_id: 42, state_home: dir)
+      path = Dir.glob(File.join(dir, Q::DIRNAME, "*.json")).first
+      routed = []
 
-      removed = Q.prune_expired(state_home: dir, now: Time.utc(2026, 6, 30, 19, 0, 1))
+      # A structurally-valid notice hit by a transient read fault (EACCES) must
+      # NOT be folded into corruption: it is neither returned this tick nor
+      # handed to bad_handler (whose drain deletes), so it survives for a retry.
+      with_file_read_raising(Errno::EACCES) do
+        assert_empty Q.pending(state_home: dir, bad_handler: ->(path:, reason:) { routed << reason }),
+                     "an unreadable notice is not returned this tick"
+      end
 
-      assert_equal 2, removed
-      assert_equal [ 2 ], Q.pending(state_home: dir).map(&:chat_id)
+      assert_empty routed,
+                   "a transient read fault must not be routed to bad_handler (which would delete owner state)"
+      assert File.exist?(path), "the notice must be left on disk for a later tick"
     end
   end
 
@@ -194,5 +201,15 @@ class HiveBotPairingApprovalQueueTest < Minitest::Test
   ensure
     singleton&.alias_method(:unlink, :hive_original_unlink)
     singleton&.remove_method(:hive_original_unlink)
+  end
+
+  def with_file_read_raising(error_class)
+    singleton = class << File; self; end
+    singleton.alias_method :hive_original_read, :read
+    singleton.define_method(:read) { |*_args| raise error_class }
+    yield
+  ensure
+    singleton&.alias_method(:read, :hive_original_read)
+    singleton&.remove_method(:hive_original_read)
   end
 end

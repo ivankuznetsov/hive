@@ -383,7 +383,15 @@ module Hive
         fresh = notices.reject do |notice|
           next false unless Hive::Bot::PairingApprovalQueue.expired?(notice, now: now)
 
-          remove_pairing_approval(notice) # stale: drop without sending
+          # Stale: drop without sending. A failed unlink (the clean `false` the
+          # queue returns on EACCES, or a mismatched/corrupt file) would
+          # otherwise silently re-evaluate-and-re-drop this notice every reaper
+          # tick with no observability — mirror the successful-send branch and
+          # log the same distinct event so a wedged notice is attributable.
+          unless remove_pairing_approval(notice)
+            @logger.event(:pairing_approval_notice_unremovable,
+                          chat_id: notice.chat_id, notice_id: notice.notice_id)
+          end
           true
         end
 

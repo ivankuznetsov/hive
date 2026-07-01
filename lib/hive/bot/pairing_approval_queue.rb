@@ -60,7 +60,12 @@ module Hive
         entries = []
         Dir.glob(File.join(dir, "*.json")).each do |path|
           parsed = parse_file(path)
-          if parsed.is_a?(Symbol)
+          if parsed == :io_error
+            # Transient read fault: leave the file untouched for a later tick.
+            # It is never routed to bad_handler, so a deleting drain cannot
+            # discard a structurally-valid notice we simply could not read.
+            next
+          elsif parsed.is_a?(Symbol)
             bad_handler&.call(path: path, reason: parsed.to_s)
             next
           end
@@ -76,18 +81,6 @@ module Hive
         return false unless created_at.is_a?(Time)
 
         (now - created_at) > expiry_sec
-      end
-
-      def prune_expired(state_home: Hive::Paths.state_home, now: Time.now, expiry_sec: EXPIRY_SEC)
-        removed = 0
-        pending(state_home: state_home,
-                bad_handler: ->(path:, reason:) { FileUtils.rm_f(path); removed += 1 })
-          .each do |notice|
-          next unless expired?(notice, now: now, expiry_sec: expiry_sec)
-
-          removed += 1 if remove(notice.notice_id, state_home: state_home, path: notice.path)
-        end
-        removed
       end
 
       def remove(notice_id, state_home: Hive::Paths.state_home, path: nil)
@@ -147,7 +140,14 @@ module Hive
 
         def parse_file(path)
           data = JSON.parse(File.read(path))
-        rescue JSON::ParserError, Errno::ENOENT, Errno::EACCES, IOError
+        rescue Errno::ENOENT, Errno::EACCES, IOError
+          # A transient FS fault (perm-locked/NFS-hiccup dir, or the file
+          # vanishing mid-drain) is NOT corruption. Keep it distinct from
+          # :malformed_json so the caller leaves the notice on disk for a later
+          # tick instead of deleting owner-authored state we merely failed to
+          # read.
+          :io_error
+        rescue JSON::ParserError
           :malformed_json
         else
           return :not_a_hash unless data.is_a?(Hash)

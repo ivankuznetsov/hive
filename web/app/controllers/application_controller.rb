@@ -66,11 +66,13 @@ class ApplicationController < ActionController::Base
     redirect_to login_path, alert: "Signed out: this box's owner changed."
   end
 
+  # Hive::Web::Loopback is the same test the CLI bind policy uses, so the
+  # "which addresses count as loopback" rule can't drift between the tier
+  # that sets HIVEBOX_LOCAL_LOOPBACK and the tier that honors it.
   def local_loopback_request?
     return false unless ENV["HIVEBOX_LOCAL_LOOPBACK"] == "1"
 
-    remote = request.remote_ip.to_s
-    remote == "::1" || remote.start_with?("127.")
+    Hive::Web::Loopback.address?(request.remote_ip)
   end
 
   def registered_projects

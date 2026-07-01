@@ -3,19 +3,16 @@ require "hive/agent_limit"
 module Hive
   module ReviewErrorReason
     # The `reason=` vocabulary `mark_review_phase_failure` can stamp onto a
-    # review_error marker, plus one reserved slot. Its limit arm writes
-    # `limits_reached`; `classify` emits the CLASSIFIED subset below (plus the
-    # always-available `unknown` fallback). `rate_limited` is reserved-but-
-    # unemitted: it is accepted on read, but nothing in lib/ ever writes
-    # `reason=rate_limited` (the gate only stamps `limits_reached`) — it is
-    # kept so the enum tolerates the value without tripping the drift guards.
+    # review_error marker. Its limit arm writes `limits_reached`; `classify`
+    # emits the CLASSIFIED subset below (plus the always-available `unknown`
+    # fallback). Every member is written by exactly one live code path — add
+    # a member only together with the code that emits it.
     #
     # This is NOT the complete set of review_error reasons: markers stamped
     # elsewhere in lib/ also carry ci_unrunnable, reviewer_partial_failure,
     # fix_status_check_failed, fix_tampered, and the phase=resume reasons.
     REASONS = %w[
       limits_reached
-      rate_limited
       merge_conflict
       network_timeout
       tool_permission_denied

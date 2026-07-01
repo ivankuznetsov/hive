@@ -23,8 +23,8 @@ module Hive
       unknown
     ].freeze
 
-    # The regex tables driving `classify`: ordered [reason, [regexes...]] rows.
-    # Order is priority — the first reason with any line-level match wins.
+    # The regex tables driving `classify`. Order is priority — the first
+    # reason with any line-level match wins.
     PATTERNS = [
       [
         "merge_conflict",
@@ -32,7 +32,7 @@ module Hive
           /conflict \(content\)/i,
           /merge conflict in /i,
           /automatic merge failed/i,
-          /needs merge/i,
+          /: needs merge\b/i,
           /you have unmerged paths/i,
           /fix conflicts and then commit/i,
           /rebase .*conflict/i
@@ -67,11 +67,11 @@ module Hive
           /\bsegmentation fault\b/i,
           /\bsigsegv\b/i,
           /\bsigabrt\b/i,
-          /panic:/i,
-          /fatal error:/i,
+          /^panic:/i,
+          /^fatal error:/i,
           /uncaught exception/i,
           /traceback \(most recent call last\)/i,
-          /\bkilled\b/i,
+          /^killed\b/i,
           /core dumped/i,
           /\bsigkill\b/i
         ]
@@ -81,13 +81,20 @@ module Hive
     # The subset of REASONS that `classify` can actually emit (in addition to
     # the always-available `unknown` fallback). Derived from PATTERNS so the
     # lockstep invariant holds by construction — there is no hand-maintained
-    # copy to drift and no guard test to keep it honest.
+    # duplicate reason list to drift.
     CLASSIFIED = PATTERNS.map(&:first).uniq.freeze
 
-    # Load-time closed-enum guard: a PATTERNS row keyed to a reason absent from
-    # REASONS would let `classify` return a value outside the enum. Fail at
-    # require time (one always-executed line) rather than only under the suite.
-    raise "ReviewErrorReason: CLASSIFIED reasons escape REASONS: #{(CLASSIFIED - REASONS).inspect}" if (CLASSIFIED - REASONS).any?
+    # The always-available fallback `classify` returns when no pattern fires.
+    # Named (not a bare literal) so the load-time guard below covers it too —
+    # otherwise the most-emitted value's membership in REASONS would rest only
+    # on a hand-written literal and a unit test, not on a require-time check.
+    FALLBACK = "unknown"
+
+    # Load-time closed-enum guard: a PATTERNS row, or the fallback, keyed to a
+    # reason absent from REASONS would let `classify` return a value outside
+    # the enum. Fail at require time (one always-executed line) rather than
+    # only under the suite.
+    raise "ReviewErrorReason: emitted reasons escape REASONS: #{((CLASSIFIED + [ FALLBACK ]) - REASONS).inspect}" if ((CLASSIFIED + [ FALLBACK ]) - REASONS).any?
 
     module_function
 
@@ -96,14 +103,13 @@ module Hive
     # cooldown-based auto-heal path.
     def classify(error_message)
       text = Hive::AgentLimit.normalize(error_message)
-      return "unknown" if text.strip.empty?
 
       lines = text.each_line.map(&:strip).reject(&:empty?)
       PATTERNS.each do |reason, regexes|
         return reason if lines.any? { |line| regexes.any? { |regex| line.match?(regex) } }
       end
 
-      "unknown"
+      FALLBACK
     end
   end
 end

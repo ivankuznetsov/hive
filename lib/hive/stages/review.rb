@@ -878,7 +878,7 @@ module Hive
                             retry_after: Hive::AgentLimit.retry_after)
           true
         else
-          reason = Hive::ReviewErrorReason.classify(error_message)
+          reason = Hive::ReviewErrorReason.classify(error_message.to_s)
           Hive::Markers.set(task.state_file, :review_error,
                             phase: phase, reason: reason, pass: pass,
                             message: review_phase_error_summary(error_message))

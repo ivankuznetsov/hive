@@ -205,8 +205,9 @@ module Hive
         allowed_chat_ids.include?(chat_id)
       end
 
-      # Log a rejection at most once per chat per bot lifetime (R3). Called
-      # only for updates that actually resolve to a silent rejection — a
+      # Log a rejection at most once per chat per bot lifetime (the
+      # unauthorized-log throttle). Called only for updates that actually
+      # resolve to a silent rejection — a
       # /start routed to pairing is a handled update, not a rejection, so it
       # must NOT stamp this log or emit the misleading
       # :update_rejected_unauthorized event.
@@ -237,8 +238,9 @@ module Hive
       end
 
       def prune_unauthorized_log!
-        # R3 is "once per chat per bot lifetime". Keep the set bounded only
-        # by process lifetime; do not prune hostile probes back into logging.
+        # The unauthorized-log throttle guarantees "once per chat per bot
+        # lifetime". Keep the set bounded only by process lifetime; do not
+        # prune hostile probes back into logging.
       end
 
       def callback_intent(data)
@@ -361,7 +363,8 @@ module Hive
       def unauthorized_pairing(update)
         code = @pairing_store.mint_or_get(chat_id: update.chat_id)
         # Mark the pairing reply as sent only once we have actually produced
-        # it — this is the throttle gate `classify` reads (R3).
+        # it — this is the once-per-chat pairing-reply latch `classify` reads
+        # (distinct from the unauthorized-log throttle above).
         @pairing_reply_sent[update.chat_id] = @now.call
         @logger.event(:pairing_code_issued, chat_id: update.chat_id)
         Result.new(action: :reply, text: pairing_reply_text(chat_id: update.chat_id, code: code))

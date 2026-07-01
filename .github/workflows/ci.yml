@@ -120,3 +120,52 @@ jobs:
           ruby-version: "3.4"
           bundler-cache: true
       - run: bundle exec bundler-audit check --update
+
+  # The launchd path in Commands::ServiceInstaller::Base (plist write +
+  # `launchctl load` + the `launchctl list <label>` enabled-probe, plus the
+  # web plist's `/Users/YOU` WorkingDirectory rewrite) is macOS-only, so unit
+  # tests can only stub launchctl. This job exercises the real round-trip on a
+  # hosted macOS runner (which runs the user in a GUI session, so user-agent
+  # `launchctl load` works). Scope is the install mechanics — not that the
+  # service stays up (that needs the web bundle / a bound port). No untrusted
+  # workflow input is used in any run step.
+  launchd-macos:
+    name: launchd service install (macOS)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+      - name: daemon launchd install round-trip
+        run: |
+          set -euo pipefail
+          plist="$HOME/Library/LaunchAgents/local.hive-daemon.plist"
+          bundle exec hive daemon install --force
+          test -f "$plist" || { echo "daemon plist not written to $plist" >&2; exit 1; }
+          if grep -q "/Users/YOU" "$plist"; then echo "daemon plist WorkingDirectory placeholder not rewritten" >&2; exit 1; fi
+          if ! launchctl list | grep -q local.hive-daemon; then echo "daemon job not loaded into launchd" >&2; exit 1; fi
+          # Status exits non-zero when the daemon isn't running (RunAtLoad may
+          # not stay up without a bundle-context ExecStart), so tolerate it and
+          # assert only the install/enabled fields the launchd path controls.
+          out="$(bundle exec hive daemon status --json || true)"
+          echo "$out" | grep -o '{.*}' \
+            | ruby -rjson -e 'd = JSON.parse($stdin.read); abort("daemon status: service not installed/enabled") unless d["service_installed"] && d["service_enabled"]'
+      - name: web launchd install round-trip (plist + WorkingDirectory rewrite)
+        run: |
+          set -euo pipefail
+          plist="$HOME/Library/LaunchAgents/local.hive-web.plist"
+          bundle exec hive web install
+          test -f "$plist" || { echo "web plist not written to $plist" >&2; exit 1; }
+          if grep -q "/Users/YOU" "$plist"; then echo "web plist WorkingDirectory placeholder not rewritten to \$HOME" >&2; exit 1; fi
+          if ! launchctl list | grep -q local.hive-web; then echo "web job not loaded into launchd" >&2; exit 1; fi
+      - name: teardown (unload the test agents)
+        if: always()
+        run: |
+          for label in local.hive-daemon local.hive-web; do
+            plist="$HOME/Library/LaunchAgents/$label.plist"
+            [ -f "$plist" ] || continue
+            launchctl bootout "gui/$(id -u)" "$plist" 2>/dev/null \
+              || launchctl unload "$plist" 2>/dev/null || true
+          done

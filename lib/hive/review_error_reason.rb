@@ -2,11 +2,17 @@ require "hive/agent_limit"
 
 module Hive
   module ReviewErrorReason
-    # The complete `reason=` vocabulary a review_error marker can carry. NOT
-    # all of these are produced here: `limits_reached`/`rate_limited` are
-    # stamped by the AgentLimit gate (Stages::Review's limit arm), never by
-    # `classify`; they are listed so this constant is the one authoritative
-    # reason list (the wiki points readers here).
+    # The `reason=` vocabulary `mark_review_phase_failure` can stamp onto a
+    # review_error marker, plus one reserved slot. Its limit arm writes
+    # `limits_reached`; `classify` emits the CLASSIFIED subset below (plus the
+    # always-available `unknown` fallback). `rate_limited` is reserved-but-
+    # unemitted: it is accepted on read, but nothing in lib/ ever writes
+    # `reason=rate_limited` (the gate only stamps `limits_reached`) — it is
+    # kept so the enum tolerates the value without tripping the drift guards.
+    #
+    # This is NOT the complete set of review_error reasons: markers stamped
+    # elsewhere in lib/ also carry ci_unrunnable, reviewer_partial_failure,
+    # fix_status_check_failed, fix_tampered, and the phase=resume reasons.
     REASONS = %w[
       limits_reached
       rate_limited
@@ -15,16 +21,6 @@ module Hive
       tool_permission_denied
       agent_crashed
       unknown
-    ].freeze
-
-    # The subset of REASONS that `classify` can actually emit (in addition to
-    # the always-available `unknown` fallback). Must stay in lockstep with
-    # PATTERNS.map(&:first) — the closure test guards against drift.
-    CLASSIFIED = %w[
-      merge_conflict
-      network_timeout
-      tool_permission_denied
-      agent_crashed
     ].freeze
 
     # The regex tables driving `classify`: ordered [reason, [regexes...]] rows.
@@ -81,6 +77,17 @@ module Hive
         ]
       ]
     ].freeze
+
+    # The subset of REASONS that `classify` can actually emit (in addition to
+    # the always-available `unknown` fallback). Derived from PATTERNS so the
+    # lockstep invariant holds by construction — there is no hand-maintained
+    # copy to drift and no guard test to keep it honest.
+    CLASSIFIED = PATTERNS.map(&:first).uniq.freeze
+
+    # Load-time closed-enum guard: a PATTERNS row keyed to a reason absent from
+    # REASONS would let `classify` return a value outside the enum. Fail at
+    # require time (one always-executed line) rather than only under the suite.
+    raise "ReviewErrorReason: CLASSIFIED reasons escape REASONS: #{(CLASSIFIED - REASONS).inspect}" if (CLASSIFIED - REASONS).any?
 
     module_function
 

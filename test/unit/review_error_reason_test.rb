@@ -54,15 +54,6 @@ class ReviewErrorReasonTest < Minitest::Test
     assert_empty emitted - Hive::ReviewErrorReason::REASONS
   end
 
-  # Drift guard: CLASSIFIED is a hand-maintained list that must mirror the
-  # reasons actually keyed in PATTERNS. Without this, a future PATTERNS row
-  # with a new/typo'd reason would be returned by classify yet fall outside
-  # CLASSIFIED/REASONS and ship green.
-  def test_classified_matches_pattern_reason_keys
-    assert_equal Hive::ReviewErrorReason::CLASSIFIED.sort,
-                 Hive::ReviewErrorReason::PATTERNS.map(&:first).uniq.sort
-  end
-
   # One representative line per regex alternative. Each line is crafted to
   # match EXACTLY its target alternative (not a sibling alternative of the
   # same reason), so a one-character typo in any single regex flips that row

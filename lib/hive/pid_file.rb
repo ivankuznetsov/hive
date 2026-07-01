@@ -50,13 +50,11 @@ module Hive
       pid
     end
 
+    # Delegate to the module-level `alive?` so the liveness/EPERM/ESRCH policy
+    # lives in exactly one place — a future change to signal probing touches one
+    # method, not two that must be kept byte-identical.
     def pid_alive?(pid)
-      Process.kill(0, pid)
-      true
-    rescue Errno::ESRCH
-      false
-    rescue Errno::EPERM
-      true
+      Hive::PidFile.alive?(pid)
     end
 
     def pid_ownership(payload, pid)
@@ -75,6 +73,11 @@ module Hive
       ownership == :verified || ownership == :legacy
     end
 
+    # Deliberately NOT a thin wrapper over the stateless `self.read`: this
+    # ownership-aware reader has a different contract that callers depend on —
+    # it returns nil (not {}) when the file is absent, swallows parse errors to
+    # nil instead of propagating them, and still accepts a legacy bare-integer
+    # PID file. Collapsing it into `self.read` would shift all three behaviors.
     def read_pid_file_payload
       return nil unless File.exist?(pid_file)
 

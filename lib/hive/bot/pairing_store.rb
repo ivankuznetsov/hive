@@ -69,7 +69,9 @@ module Hive
           # list` both call it). Only rewrite when pruning actually removed an
           # entry — an unconditional tmp+rename+fsync on every call turned a
           # count into a write and crashed those paths on a read-only/full
-          # state dir.
+          # state dir. Note the write is not the only raise point: `with_lock`
+          # still opens `<path>.lock` with RDWR|CREAT (and mkdir_p's the dir),
+          # which can itself raise on such a dir — callers rescue accordingly.
           write_entries(pruned) if pruned.length != entries.length
           entry_structs(pruned)
         end

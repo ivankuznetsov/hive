@@ -1203,7 +1203,7 @@ module Hive
 
       Pairing requests are created when an unknown Telegram DM sends /start and
       bot.pairing_enabled is true. Approval appends the chat_id to the global
-      bot.chat_id_allowlist, requests a live bot reload when a bot PID is
+      bot.chat_id_allowlist, requests a live bot reload when a live bot PID is
       present, and queues an approval DM for the running bot to send.
 
       Exit codes: 0 success; 64 invalid arguments; 78 bad global bot config;

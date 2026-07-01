@@ -418,13 +418,45 @@ class HiveCommandsPairingTest < Minitest::Test
       code = pairing_store.mint_or_get(chat_id: 999)
       File.write(File.join(home, ".bot.pid"), { "pid" => 4242 }.to_yaml)
       process = HupFailureProcess.new(kills: [])
+      payload = nil
+
+      # The bot IS live (the probe passed) but the SIGHUP failed (EPERM): the
+      # running bot keeps serving the stale allowlist, so the operator MUST be
+      # warned on stderr to restart it — a covered-but-unasserted warn could be
+      # dropped by a refactor with every test still green.
+      _out, err = capture_io do
+        payload = command("approve", args: [ "telegram", code ], json: true,
+                                     store: pairing_store, output: StringIO.new,
+                                     process: process).call
+      end
+
+      assert_equal false, payload.fetch("reloaded")
+      assert_equal [ [ 0, 4242 ], [ "HUP", 4242 ] ], process.kills
+      assert_match(/failed to signal live bot \(pid 4242\)/, err,
+                   "a live bot whose SIGHUP failed must warn the operator on stderr")
+      assert_match(/restart the bot/, err,
+                   "the warn must tell the operator to restart so the new allowlist takes effect")
+    end
+  end
+
+  def test_approve_treats_non_positive_pid_as_bot_down_without_signalling
+    with_tmp_global_config do |home|
+      pairing_store = store(home)
+      code = pairing_store.mint_or_get(chat_id: 999)
+      # A corrupt/hand-edited `pid: 0` coerces to a truthy 0; without a `pid > 0`
+      # guard `Process.kill("HUP", 0)` would broadcast SIGHUP to the whole
+      # process group. It must be treated as bot-down and never signalled.
+      File.write(File.join(home, ".bot.pid"), { "pid" => 0 }.to_yaml)
+      process = FakeProcess.new(alive: true, kills: [])
 
       payload = command("approve", args: [ "telegram", code ], json: true,
                                    store: pairing_store, output: StringIO.new,
                                    process: process).call
 
-      assert_equal false, payload.fetch("reloaded")
-      assert_equal [ [ 0, 4242 ], [ "HUP", 4242 ] ], process.kills
+      assert_equal false, payload.fetch("reloaded"),
+                   "a non-positive pid must be treated as bot-down"
+      assert_empty process.kills,
+                   "a pid of 0 must never be signalled — not even the alive probe"
     end
   end
 

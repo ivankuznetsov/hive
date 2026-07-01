@@ -197,7 +197,12 @@ module Hive
         # exception: false) yields nil for a non-numeric/missing pid, which we
         # treat as "bot not running".
         pid = Integer(pid_file_payload(pid_file)["pid"], exception: false)
-        return false unless pid && pid_alive?(pid)
+        # Require pid > 0, matching the codebase-wide convention (pid_file.rb,
+        # babysit.rb, daemon.rb). A hand-edited `pid: 0`/`-1`/`"0"` coerces to a
+        # truthy 0/negative, and `Process.kill(0, 0)` does NOT raise ESRCH — it
+        # probes the caller's process group — so `kill("HUP", 0)` (or -1) would
+        # broadcast SIGHUP to every process the user can signal.
+        return false unless pid && pid > 0 && pid_alive?(pid)
 
         @process.kill("HUP", pid)
         true

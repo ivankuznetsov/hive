@@ -97,6 +97,37 @@ class OpenClawSkillsTest < Minitest::Test
     assert_includes body, "hive bot tail"
   end
 
+  def test_umbrella_skill_documents_status_bundle_playbook
+    _metadata, body = read_skill("hive")
+    status_bundle = section(body, "## Status Bundle")
+
+    assert_operator body.index("## Status Bundle"), :<, body.index("## Safety Boundaries")
+
+    [
+      "hive daemon status --json",
+      "hive status --json",
+      "systemctl --user status hive-daemon.service",
+      "gh pr checks"
+    ].each do |command|
+      assert_includes status_bundle, command
+    end
+
+    [
+      "stage",
+      "marker",
+      "action",
+      "PR URL",
+      "CI status",
+      "live PID",
+      "held/retry",
+      "suggested command"
+    ].each do |field|
+      assert_includes status_bundle, field
+    end
+
+    assert_includes status_bundle, "read-only"
+  end
+
   def test_openclaw_docs_publish_only_the_single_hive_cli_slug
     readme = Pathname.new(__dir__).join("../../openclaw/README.md").expand_path.read
 
@@ -115,5 +146,14 @@ class OpenClawSkillsTest < Minitest::Test
     refute_nil match, "#{skill} must start with YAML frontmatter"
 
     [ YAML.safe_load(match[:frontmatter], aliases: false), match[:body] ]
+  end
+
+  def section(body, heading)
+    start_index = body.index(heading)
+    refute_nil start_index, "#{heading} section must exist"
+
+    remainder = body[start_index..]
+    next_heading_index = remainder.index(/\n## /)
+    next_heading_index ? remainder[0...next_heading_index] : remainder
   end
 end

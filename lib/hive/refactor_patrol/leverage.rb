@@ -47,11 +47,12 @@ module Hive
       end
 
       def collect(feature, changed_since: nil)
+        fan_in_count = fan_in(feature)
         {
           "churn" => churn(feature, changed_since: changed_since),
-          "fan_in" => fan_in(feature),
+          "fan_in" => fan_in_count,
           "complexity" => complexity(feature),
-          "coupling" => coupling(feature),
+          "coupling" => coupling(feature, fan_in_count),
           "bug_density" => 0,
           "coverage_gap" => 0
         }
@@ -94,15 +95,14 @@ module Hive
         end
       end
 
-      def coupling(feature)
+      def coupling(feature, inbound = nil)
         owned = Array(feature.owned_files).to_set
         files = tracked_files
         outbound = Array(feature.owned_files).sum do |path|
           content = read(path)
           files.count { |candidate| !owned.include?(candidate) && references_path?(content, candidate) }
         end
-        inbound = fan_in(feature)
-        outbound + inbound
+        outbound + (inbound || fan_in(feature))
       end
 
       def reference_needles(feature)
@@ -123,15 +123,34 @@ module Hive
       end
 
       def tracked_files
+        @tracked_files ||= compute_tracked_files
+      end
+
+      def compute_tracked_files
         out, _err, status = @command_runner.call("git", "-C", @project_root, "ls-files", "-z")
         files = status.success? ? out.split("\0").reject(&:empty?) : []
         files = Dir.glob("**/*", File::FNM_DOTMATCH, base: @project_root).select do |path|
           File.file?(File.join(@project_root, path))
         end if files.empty?
 
-        files.map { |path| path.tr("\\", "/") }.reject { |path| path.split("/").include?(".git") }.sort
+        files.map { |path| path.tr("\\", "/") }
+             .reject { |path| path.split("/").include?(".git") }
+             .reject { |path| excluded?(path) }
+             .sort
       rescue StandardError
         []
+      end
+
+      def excluded?(path)
+        exclude_globs.any? do |glob|
+          File.fnmatch?(glob, path, File::FNM_PATHNAME | File::FNM_EXTGLOB) ||
+            path == glob ||
+            path.start_with?("#{glob}/")
+        end
+      end
+
+      def exclude_globs
+        @exclude_globs ||= Array(@cfg.dig("refactor_patrol", "exclude")).map { |glob| glob.to_s.tr("\\", "/") }
       end
 
       def normalize(raw)
@@ -148,7 +167,10 @@ module Hive
       end
 
       def read(path)
-        File.read(File.join(@project_root, path))
+        # Tracked files may be binary or non-UTF-8; scrub invalid byte
+        # sequences so downcase/match? in the signal passes cannot raise
+        # ArgumentError and abort the whole scan (R5/U4 graceful degradation).
+        File.read(File.join(@project_root, path), encoding: "UTF-8").scrub("")
       rescue SystemCallError, ArgumentError
         ""
       end

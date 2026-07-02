@@ -75,6 +75,36 @@ class RefactorPatrolLeverageTest < Minitest::Test
     end
   end
 
+  def test_non_utf8_tracked_file_does_not_crash_scoring
+    with_tmp_git_repo do |dir|
+      write(dir, "lib/checkout.rb", "require 'lib/blob'\nclass Checkout\nend\n")
+      File.binwrite(File.join(dir, "assets", "blob.bin").tap { |p| FileUtils.mkdir_p(File.dirname(p)) }, "\xFF\xFE\x00\x81binary".b)
+      commit_all(dir, "code")
+
+      result = Hive::RefactorPatrol::Leverage.new(dir, cfg: cfg)
+                                             .score(feature("checkout", [ "lib/checkout.rb" ], entrypoints: [ "lib/checkout.rb" ]))
+
+      assert result.key?("score")
+      assert_operator result.dig("signals", "complexity"), :>, 0
+    end
+  end
+
+  def test_excluded_globs_are_skipped_in_content_scans
+    with_tmp_git_repo do |dir|
+      write(dir, "lib/checkout.rb", "class Checkout\nend\n")
+      write(dir, "vendor/order.rb", "Checkout.new\n")
+      commit_all(dir, "code")
+
+      excluded = cfg.merge("refactor_patrol" => cfg.fetch("refactor_patrol").merge("exclude" => [ "vendor/**" ]))
+      checkout = feature("checkout", [ "lib/checkout.rb" ], entrypoints: [ "lib/checkout.rb" ])
+
+      with_exclude = Hive::RefactorPatrol::Leverage.new(dir, cfg: excluded).score(checkout).dig("signals", "fan_in")
+      without_exclude = Hive::RefactorPatrol::Leverage.new(dir, cfg: cfg).score(checkout).dig("signals", "fan_in")
+
+      assert_operator without_exclude, :>, with_exclude
+    end
+  end
+
   def test_optional_zero_weight_signals_are_excluded
     with_tmp_dir do |dir|
       write(dir, "lib/checkout.rb", "class Checkout\nend\n")

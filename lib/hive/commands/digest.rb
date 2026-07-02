@@ -132,6 +132,10 @@ module Hive
       def emit_merged_pr_human(result)
         if @dry_run
           @output.puts result.message
+        elsif result.count.zero?
+          # A zero-count digest is still delivered (a "Total: 0 PRs" message is
+          # sent); say so explicitly so the line doesn't read as "sent nothing".
+          @output.puts "hive digest: sent empty digest (0 merged PRs) for #{result.date.iso8601}"
         else
           @output.puts "hive digest: sent #{result.count} merged PRs for #{result.date.iso8601}"
         end

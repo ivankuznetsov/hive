@@ -1,0 +1,195 @@
+require "json"
+require "open3"
+require "time"
+require "hive/config"
+require "hive/git_ops"
+require "hive/patrol/mapper"
+require "hive/refactor_patrol/caps"
+require "hive/refactor_patrol/collisions"
+require "hive/refactor_patrol/fingerprint"
+require "hive/refactor_patrol/leverage"
+require "hive/refactor_patrol/reporter"
+require "hive/refactor_patrol/reviewer"
+require "hive/refactor_patrol/state_store"
+
+module Hive
+  module Commands
+    class RefactorPatrol
+      def initialize(project, json: false, dry_run: false, feature: nil, entrypoint: nil, path: nil, changed_since: nil,
+                     mapper_factory: nil, reviewer_factory: nil, leverage_factory: nil,
+                     caps_factory: nil, collisions_factory: nil)
+        @project = project
+        @json = json
+        @dry_run = dry_run
+        @feature_hint = feature
+        @entrypoint_hint = entrypoint
+        @path_hint = path
+        @changed_since = changed_since
+        @mapper_factory = mapper_factory || ->(root, cfg, state) { Hive::Patrol::Mapper.new(root, cfg: mapper_cfg(cfg), state: state) }
+        @reviewer_factory = reviewer_factory || ->(root, cfg, state) { Hive::RefactorPatrol::Reviewer.new(root, cfg: cfg, state: state) }
+        @leverage_factory = leverage_factory || ->(root, cfg) { Hive::RefactorPatrol::Leverage.new(root, cfg: cfg) }
+        @caps_factory = caps_factory || ->(cfg) { Hive::RefactorPatrol::Caps.new(cfg) }
+        @collisions_factory = collisions_factory || ->(root, state) { Hive::RefactorPatrol::Collisions.new(root, state: state) }
+      end
+
+      def call
+        payload, theses = run_cycle
+        emit(payload, theses)
+      rescue Hive::Error => e
+        emit_error(e)
+        raise
+      rescue StandardError => e
+        wrapped = Hive::InternalError.new("internal error: #{e.class}: #{e.message}")
+        emit_error(wrapped)
+        raise wrapped
+      end
+
+      private
+
+      def run_cycle
+        entry = Hive::Config.find_project(@project)
+        raise Hive::ConfigError, "hive refactor-patrol: unknown project #{@project.inspect}" unless entry
+
+        project_root = entry.fetch("path")
+        cfg = Hive::Config.load(project_root)
+        refactor_cfg = cfg["refactor_patrol"] || {}
+        unless refactor_cfg["enabled"]
+          raise Hive::ConfigError, "hive refactor-patrol: project #{entry.fetch('name').inspect} must opt in with refactor_patrol.enabled: true"
+        end
+
+        state = Hive::RefactorPatrol::StateStore.new(project_root)
+        state.ensure!
+        features = @mapper_factory.call(project_root, cfg, state).call
+        features = apply_scope_hints(features, project_root)
+        changed_files = changed_files(project_root)
+        leverage = @leverage_factory.call(project_root, cfg)
+        leverage_by_feature = features.to_h do |feature|
+          boost = @changed_since && !changed_files.empty? && (Array(feature.owned_files) & changed_files).any?
+          [ feature.id, leverage.score(feature, changed_since: @changed_since, changed_boost: boost) ]
+        end
+
+        reviewer = @reviewer_factory.call(project_root, cfg, state)
+        theses = reviewer.call(features, leverage_by_feature: leverage_by_feature)
+        caps = @caps_factory.call(cfg)
+        collisions = @collisions_factory.call(project_root, state)
+        suppressed = []
+
+        theses.each do |thesis|
+          caps.apply(thesis)
+          collision = collisions.check(thesis)
+          if collision.suppressed
+            suppressed << { "id" => thesis.id, "reason" => collision.reason, "reference" => collision.reference }
+          end
+        end
+
+        unless @dry_run
+          persist(state, theses, suppressed)
+          update_scan_state(state, project_root, cfg, reviewer)
+        end
+        scanned_sha = @dry_run ? current_default_sha(project_root, cfg) : state.state["last_scanned_sha"].to_s
+        reporter = Hive::RefactorPatrol::Reporter.new(cfg)
+        payload = reporter.envelope(
+          project: entry.fetch("name"),
+          project_root: project_root,
+          dry_run: @dry_run,
+          features: features,
+          theses: theses,
+          suppressed: suppressed,
+          last_scanned_sha: scanned_sha
+        )
+        [ payload, theses ]
+      end
+
+      def persist(state, theses, suppressed)
+        suppressed_ids = suppressed.map { |item| item.fetch("id") }
+        fingerprints = state.fingerprints
+        theses.each do |thesis|
+          state.write_thesis(thesis)
+          next if suppressed_ids.include?(thesis.id)
+
+          Hive::RefactorPatrol::Fingerprint.record_seen(fingerprints, thesis.fingerprint, thesis: thesis)
+        end
+        state.write_fingerprints(fingerprints)
+      end
+
+      def update_scan_state(state, project_root, cfg, reviewer)
+        now_iso = Time.now.utc.iso8601
+        if reviewer.respond_to?(:review_errors) && Array(reviewer.review_errors).any?
+          state.update_state("last_run_at" => now_iso)
+        else
+          state.update_state("last_run_at" => now_iso, "last_scanned_sha" => current_default_sha(project_root, cfg))
+        end
+      end
+
+      def apply_scope_hints(features, project_root)
+        scoped = if @feature_hint
+                   features.select { |feature| feature.id == @feature_hint || feature.id.include?(@feature_hint) }
+                 elsif @entrypoint_hint
+                   features.select { |feature| Array(feature.entrypoints).include?(@entrypoint_hint) }
+                 elsif @path_hint
+                   normalized = @path_hint.tr("\\", "/")
+                   features.select { |feature| Array(feature.owned_files).any? { |path| path == normalized || path.start_with?("#{normalized}/") || path.start_with?(normalized) } }
+                 else
+                   features
+                 end
+
+        return scoped unless @changed_since && (@feature_hint || @entrypoint_hint || @path_hint)
+
+        changed = changed_files(project_root)
+        scoped.select { |feature| (Array(feature.owned_files) & changed).any? }
+      end
+
+      def changed_files(project_root)
+        return [] unless @changed_since
+
+        out, _err, status = Open3.capture3("git", "-C", project_root, "diff", "--name-only", "#{@changed_since}..HEAD")
+        return [] unless status.success?
+
+        out.lines.map { |line| line.strip.tr("\\", "/") }.reject(&:empty?)
+      rescue StandardError
+        []
+      end
+
+      def current_default_sha(project_root, cfg)
+        branch = cfg["default_branch"] || Hive::GitOps.new(project_root).detect_default_branch
+        out, _err, status = Open3.capture3("git", "-C", project_root, "rev-parse", branch)
+        return "" unless status.success?
+
+        out.strip
+      end
+
+      def mapper_cfg(cfg)
+        clone = Marshal.load(Marshal.dump(cfg))
+        clone["patrol"] = (clone["patrol"] || {}).merge(
+          "include" => cfg.dig("refactor_patrol", "include"),
+          "exclude" => cfg.dig("refactor_patrol", "exclude"),
+          "review" => cfg.dig("refactor_patrol", "review")
+        )
+        clone
+      end
+
+      def emit(payload, theses)
+        if @json
+          puts JSON.generate(payload)
+        else
+          puts Hive::RefactorPatrol::Reporter.new({ "refactor_patrol" => { "max_theses_per_run" => payload.fetch("ranked").size } }).text(payload, theses)
+        end
+        payload
+      end
+
+      def emit_error(error)
+        return unless @json
+
+        puts JSON.generate(
+          "schema" => "hive-refactor-patrol",
+          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-refactor-patrol"),
+          "ok" => false,
+          "error_class" => error.class.name.split("::").last,
+          "error_kind" => error.is_a?(Hive::ConfigError) ? "config" : "error",
+          "exit_code" => error.exit_code,
+          "message" => error.message
+        )
+      end
+    end
+  end
+end

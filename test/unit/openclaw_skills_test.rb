@@ -23,7 +23,7 @@ class OpenClawSkillsTest < Minitest::Test
 
     assert_equal "hive", metadata.fetch("name")
     assert_equal CLAWHUB_DESCRIPTION, metadata.fetch("description")
-    assert_equal "0.1.1", metadata.fetch("version")
+    assert_equal "0.1.2", metadata.fetch("version")
     assert_equal true, metadata.fetch("user-invocable")
     assert_equal HOMEPAGE, openclaw_metadata.fetch("homepage")
     assert_equal true, openclaw_metadata.fetch("always"), "umbrella skill must remain visible for setup"
@@ -60,6 +60,16 @@ class OpenClawSkillsTest < Minitest::Test
     assert_includes body, "slash-command text after `/hive` as arguments for `hive_cmd`"
     assert_includes body, '"${hive_cmd}" --help'
     assert_includes body, "Pass arguments safely"
+  end
+
+  def test_umbrella_skill_documents_custom_workflows
+    _metadata, body = read_skill("hive")
+
+    assert_includes body, "Custom Workflows"
+    assert_includes body, "--workflow"
+    assert_includes body, "writing"
+    assert_includes body, "feedback triage"
+    assert_includes body, "hive workflow new"
   end
 
   def test_umbrella_skill_documents_daemon_auto_advance

@@ -922,6 +922,9 @@ class BabysitterDryRunEnvTest < Minitest::Test
       env_keys = %w[
         GH_PAGER PAGER GH_BROWSER BROWSER GH_EDITOR GIT_EDITOR VISUAL EDITOR GH_FORCE_TTY
         GH_CONFIG_DIR XDG_CONFIG_HOME HOME
+        GIT_ASKPASS GIT_EXEC_PATH GIT_EXTERNAL_DIFF GIT_PAGER GIT_PROXY_COMMAND GIT_SSH GIT_SSH_COMMAND
+        GIT_SSH_VARIANT SSH_ASKPASS GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
+        GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_TRACE GIT_TRACE_PACKET GIT_TRACE2_EVENT
         HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy
         SSL_CERT_FILE SSL_CERT_DIR ssl_cert_file ssl_cert_dir
       ]
@@ -941,6 +944,24 @@ class BabysitterDryRunEnvTest < Minitest::Test
         "GH_CONFIG_DIR" => File.join(dir, "evil-gh-config"),
         "XDG_CONFIG_HOME" => File.join(dir, "evil-xdg-config"),
         "HOME" => File.join(dir, "evil-home"),
+        "GIT_ASKPASS" => "touch git-askpass-pwned",
+        "GIT_EXEC_PATH" => File.join(dir, "evil-git-exec-path"),
+        "GIT_EXTERNAL_DIFF" => "touch git-ext-diff-pwned",
+        "GIT_PAGER" => "touch git-pager-pwned",
+        "GIT_PROXY_COMMAND" => "touch git-proxy-pwned",
+        "GIT_SSH" => "touch git-ssh-pwned",
+        "GIT_SSH_COMMAND" => "touch git-ssh-command-pwned",
+        "GIT_SSH_VARIANT" => "ssh",
+        "SSH_ASKPASS" => "touch ssh-askpass-pwned",
+        "GIT_CONFIG_PARAMETERS" => "'diff.external=touch git-config-parameters-pwned'",
+        "GIT_CONFIG_COUNT" => "1",
+        "GIT_CONFIG_KEY_0" => "diff.external",
+        "GIT_CONFIG_VALUE_0" => "touch git-env-config-pwned",
+        "GIT_CONFIG_GLOBAL" => File.join(dir, "evil-global.gitconfig"),
+        "GIT_CONFIG_SYSTEM" => File.join(dir, "evil-system.gitconfig"),
+        "GIT_TRACE" => File.join(dir, "git-trace.log"),
+        "GIT_TRACE_PACKET" => File.join(dir, "git-trace-packet.log"),
+        "GIT_TRACE2_EVENT" => File.join(dir, "git-trace2-event.log"),
         "HTTP_PROXY" => "http://127.0.0.1:8080",
         "HTTPS_PROXY" => "http://127.0.0.1:8443",
         "ALL_PROXY" => "socks5://127.0.0.1:1080",
@@ -979,6 +1000,34 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert File.directory?(config_dir), "GH_CONFIG_DIR should point at a real directory gh can use"
       assert_empty Dir.children(config_dir),
                    "gh's config dir should start empty so no attacker-controlled config is honored"
+    end
+  end
+
+  def test_gh_stub_scrubs_git_trace_env_before_allowlisted_pr_view_passthrough
+    with_tmp_git_repo do |dir|
+      trace_path = File.join(dir, "gh-git-trace.log")
+      marker_path = File.join(dir, "real-gh-ran")
+      real_gh = File.join(dir, "real-gh")
+      File.write(real_gh, <<~RUBY)
+        #!#{RbConfig.ruby}
+        File.write(#{marker_path.dump}, ARGV.join(" "))
+        ok = system("git", "-C", #{dir.dump}, "status", "--short", out: File::NULL, err: File::NULL)
+        exit(ok ? 0 : 1)
+      RUBY
+      FileUtils.chmod("+x", real_gh)
+
+      env = {
+        "HIVE_BABYSITTER_REAL_GH" => real_gh,
+        "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "skipped.log"),
+        "GIT_TRACE" => trace_path
+      }
+
+      _out, err, status = Open3.capture3(env, stub_path("gh"), "pr", "view", "42")
+
+      assert status.success?, err
+      assert_equal "pr view 42", File.read(marker_path)
+      refute_path_exists File.join(dir, "skipped.log")
+      refute_path_exists trace_path
     end
   end
 

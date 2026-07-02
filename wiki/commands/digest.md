@@ -3,7 +3,7 @@ title: hive digest
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/digest.rb, lib/hive/digest.rb, lib/hive/digest/
 created: 2026-06-14
-updated: 2026-06-19
+updated: 2026-06-30
 tags: [command, digest, telegram, json]
 ---
 
@@ -12,7 +12,9 @@ builds the daily shipped digest for completed `9-done` tasks across
 registered projects. The pipeline collects tasks shipped on one local
 calendar date, asks an agent to classify and summarize them when there is
 work to report, renders Telegram MarkdownV2, and sends through the bot
-Telegram client. Runtime config is loaded through
+Telegram client. `hive digest --source merged-prs` switches to a read-only
+GitHub merged-PR report for the same local date; that source is mechanical
+and does not invoke the digest agent. Runtime config is loaded through
 `Hive::Config.load_global_digest_config`, so real sends can use
 `digest.agent`, `budget_usd.digest`, `timeout_sec.digest`, and
 `bot.chat_id_allowlist`. See [[modules/digest]].
@@ -21,6 +23,7 @@ Telegram client. Runtime config is loaded through
 
 ```bash
 hive digest [--date YYYY-MM-DD] [--dry-run] [--json]
+hive digest --source merged-prs [--date YYYY-MM-DD] [--repo owner/name ...] [--dry-run] [--json]
 ```
 
 Options:
@@ -31,8 +34,12 @@ Options:
 | omitted `--date` | Uses the local calendar day that just ended via `Hive::Digest::Window.previous_local_day`. |
 | `--dry-run` | Avoids Telegram auth/chat lookup and prints the composed message. |
 | `--json` | Emits a small versioned JSON delivery document instead of prose. |
+| `--source merged-prs` | Reports GitHub PRs merged on the local date instead of shipped Hive tasks. |
+| `--repo owner/name` | Restricts the merged-PR source to explicit repositories. Repeatable; implies `--source merged-prs`. |
 
 ## Behavior
+
+Default source:
 
 1. `Hive::Commands::Digest#parse_date` accepts only `YYYY-MM-DD`; omitted
    dates default to yesterday in the host local timezone.
@@ -70,8 +77,58 @@ Options:
    `send_message` per chunk above Telegram's 4096-char limit), or returns the
    text without credentials in dry-run mode.
 
+If pending Telegram pairing requests exist, `Hive::Digest.run` appends one
+reminder line to the empty or successful digest body: `🔑 N pairing request(s)
+waiting — run hive pairing list`. The count comes from the local
+`PairingStore`, not from the categorizer prompt.
+
 If categorization raises `Hive::Digest::ModelError`, `Hive::Digest.run` sends
 a failed-generation notice for the date and returns `status: :failed_notice`.
+
+## Merged-PR Source
+
+`hive digest --source merged-prs` reports pull requests merged on one local
+calendar date. It is a read-only GitHub reporting source: it calls `gh`, reads
+registered Hive project state for optional task annotation, never mutates Hive
+state, and never runs the paid digest agent.
+
+Repository selection:
+
+- Without `--repo`, Hive scans `Hive::Config.registered_projects` and resolves
+  each project path with `gh repo view --json nameWithOwner`.
+- A project that cannot be resolved is warned and dropped; other repos still
+  report.
+- `--repo owner/name` bypasses discovery, validates the slug shape, de-dupes
+  repeats, and can be repeated.
+
+Collection:
+
+- The command asks GitHub for merged PR candidates with
+  `gh pr list --repo owner/name --state merged --search merged:<D-1>..<D+1>`
+  and final membership is `mergedAt.getlocal.to_date == D`.
+- Open, closed-unmerged, and draft-but-not-merged PRs are excluded by GitHub's
+  merged state. Bot authors, non-Hive PRs, and fork PRs are included; bot/fork
+  metadata is carried in JSON.
+- A per-repo `gh` failure is warned and dropped while the digest still
+  succeeds with a partial result.
+- Branches named `hive/<slug>` are best-effort matched against registered
+  projects' `.hive-state/stages/*/<slug>` directories to fill optional
+  `hive_slug` / `hive_stage`. Match failures are swallowed.
+
+Rendering is mechanical and grouped by repo:
+
+```text
+Merged PR digest — 2026-06-13
+
+Total: 2 PRs
+
+`owner/repo — 2`
+• #12 Add export — alice
+• #13 Fix docs — Hive task matched
+```
+
+Dry-run prints the message and sends nothing. A real run sends through the
+same `Digest::Sender` / Telegram MarkdownV2 path as the shipped-task digest.
 
 ## Output
 
@@ -80,7 +137,7 @@ Human output:
 - Dry-run: prints the composed message body.
 - Real send: prints `hive digest: <status> for <date>`.
 
-`--json` prints a delivery document for empty/sent/failed_notice: a model
+For the default shipped-task source, `--json` prints a delivery document for empty/sent/failed_notice: a model
 failure still prints this shape with `ok: false` and `status:
 "failed_notice"`.
 
@@ -102,6 +159,42 @@ failure still prints this shape with `ok: false` and `status:
 it is an optional field, so older consumers that ignore it stay compatible.
 `hive-digest` is registered in `Hive::Schemas::SCHEMA_VERSIONS` (v1) and
 published under `schemas/hive-digest.v1.json`.
+
+The merged-PR source emits `hive-merged-pr-digest` v1:
+
+```json
+{
+  "ok": true,
+  "schema": "hive-merged-pr-digest",
+  "schema_version": 1,
+  "date": "2026-06-13",
+  "source": "merged-prs",
+  "dry_run": true,
+  "repos": ["owner/repo"],
+  "count": 1,
+  "prs": [
+    {
+      "repo": "owner/repo",
+      "number": 12,
+      "title": "Add export",
+      "url": "https://github.com/owner/repo/pull/12",
+      "mergedAt": "2026-06-13T12:00:00Z",
+      "author": "alice",
+      "authorIsBot": false,
+      "headRefName": "hive/add-export-260613-abcd",
+      "isCrossRepository": false,
+      "hive_slug": "add-export-260613-abcd",
+      "hive_stage": "9-done"
+    }
+  ],
+  "message": "...",
+  "chat_id": null
+}
+```
+
+Real-send JSON sets `message` to `null` and `chat_id` to the resolved
+recipient. Partial repo drops still return `ok: true`; only command-level
+errors use the ErrorPayload arm.
 
 Usage errors emit the shared `ErrorPayload` (same `hive-digest` schema):
 
@@ -160,7 +253,9 @@ otherwise. An explicit `digest.enabled: false` is the opt-out (and an explicit
 
 - `test/unit/cli_test.rb` covers Thor option threading for `hive digest`.
 - `test/unit/commands/digest_test.rb` covers dry-run output, success JSON, and
-  date validation.
+  date validation, plus merged-PR dispatch and envelope validation.
+- `test/unit/digest/merged_pr/*_test.rb` covers repo resolution, collection
+  boundaries, Hive matching, rendering, and runner orchestration.
 - `test/unit/digest/run_test.rb` covers empty, successful, failed-notice, and
   default-date pipeline behavior through injected seams.
 - `test/unit/digest/sender_test.rb` covers chat-id resolution, dry-run token

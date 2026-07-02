@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/ci.yml, .github/workflows/release.yml, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-07-02
+updated: 2026-07-01
 tags: [test, minitest, fixtures]
 ---
 
@@ -63,7 +63,6 @@ task default: :test
 | `workflow_selection_test.rb`, `content_workflow_fixture_test.rb`, `workflows/content_test.rb`, `workflows/descriptor_parser_test.rb`, `workflows/loader_test.rb`, `workflows/project_test.rb`, `commands/workflow_new_test.rb` | Workflow selection, descriptor parsing/loading, project overlay registration, scaffolded workflow authoring, content descriptor shape, and test-only fixture support — CLI selector validation, valid-name listing, scoped fixture registration, runtime project descriptor discovery, cache invalidation, deterministic content-agent artifact writes, registry leak guards, and the built-in `:content` stage order/files/skills/budgets/timeouts. |
 | `task_test.rb` | `Hive::Task` — path regex, descriptor-driven stage/index validation, workflow selector/default fallback, derived paths, slug edge cases. |
 | `markers_test.rb` | `Hive::Markers` — set/get round-trip, attribute quoting, last-marker semantics. |
-| `atomic_file_test.rb` | `Hive::AtomicFile` — parent-directory creation, requested file mode, return value, successful replacement, `fsync: false` replacement path, failed-rename preservation of the previous target, and tempfile cleanup. |
 | `lock_test.rb` | `Hive::Lock` — acquire/release, stale-PID detection, commit lock parallelism. |
 | `worktree_test.rb` | `Hive::Worktree` — create attach-vs-new, dependency override stacking (incl. narrow-refspec and origin-ahead-of-local **and** local-ahead-of-origin placeholders), empty placeholder re-pointing, fail-closed preservation when the emptiness check errors, local-only prerequisite fallback, real-commit preservation, PR-head materialization/retry/failure handling, delete-failure errors, `local_branch_ref_exists?` blank-name guard, remove, exists?, pointer round-trip, prefix validation. |
 | `git_ops_test.rb` | `Hive::GitOps` — default-branch detection, orphan worktree bootstrap, idempotent gitignore, empty-diff commit skip. |
@@ -127,7 +126,7 @@ task default: :test
 | `run_plan_test.rb` | `hive run` of `3-plan/`. |
 | `stages/execute_test.rb`, `run_execute_test.rb` | `Hive::Stages::Execute` and `hive run` of `4-execute/` — init pass, iteration pass, stale handling, worktree-missing recovery, execute-agent quota wall classification from `error_message` and raw `limit_text`, and the non-limit `implementer_failed` marker invariant. |
 | `run_open_pr_test.rb` | `hive run` of `5-open-pr/` — push, draft PR creation, idempotent existing-PR path. |
-| `run_review_test.rb`, `adhoc_review_test.rb` | `hive run` of `6-review/` and ad-hoc review — pre-flight states, reviewer/triage/fix/browser branching, no-fix suppression convergence and negative cases, manual wait and stale/error recovery, auto-commit/guardrail boundaries, provider-limit marker behavior for reviewers, triage/fix limit vs non-limit failures, bounded transient triage retry recovery including wall-clock handoff to `REVIEW_STALE`, Claude/tmux fix Stop-hook fallback success for commit and whole-pass no-change evidence plus rejection for missing evidence/unresolved escalations, ad-hoc PR create/reuse/error paths, ad-hoc fix-disabled/fix-opt-in branching, and `message=` surfacing on terminal phase-agent (triage and fix) errors — the CI phase writes `reason=ci_unrunnable` directly and carries no `message=`. |
+| `run_review_test.rb`, `adhoc_review_test.rb` | `hive run` of `6-review/` and ad-hoc review — pre-flight states, reviewer/triage/fix/browser branching, no-fix suppression convergence and negative cases, manual wait and stale/error recovery, auto-commit/guardrail boundaries, provider-limit marker behavior for reviewers, CI-fix and triage/fix limit vs non-limit failures, classified residual triage/fix failure reasons, bounded transient triage retry recovery including wall-clock handoff to `REVIEW_STALE`, Claude/tmux fix Stop-hook fallback success for commit and whole-pass no-change evidence plus rejection for missing evidence/unresolved escalations, ad-hoc PR create/reuse/error paths, ad-hoc fix-disabled/fix-opt-in branching, and `message=` surfacing on terminal phase-agent (triage and fix) errors. |
 | `run_finalize_test.rb` | `hive run` of `8-finalize/` — clean/pushed verification, already-merged PR short-circuit (`merged=true`, no `gh pr ready`, no `summary.md`), PR-ready wrap-up, and summary rendering. |
 | `run_done_test.rb` | `hive run` of `9-done/` — cleanup instructions, complete marker. |
 | `run_stage_action_test.rb` | Workflow verbs — archive idempotency plus internal merged-error archive recovery, including rejection when the current `ERROR reason=` does not match the recovery reason or when the PR still reports `OPEN`. |
@@ -141,6 +140,7 @@ task default: :test
 | `wiki_command_test.rb` | `hive wiki` — compile-log writes the generated aggregate, `--check` distinguishes stale vs up-to-date output, invalid subcommands/missing wiki dirs raise usage errors, CLI dispatch reaches the command, and help lists the wiki surface. |
 | `tui_smoke_test.rb`, `tui_smoke_charm_test.rb` | PTY-driven `bin/hive tui` smokes — boot, first useful paint with a seeded project, clean `q` exit, horizontal and vertical resize handling, and the startup regression gate (a generous 5s bound that catches a revert to the starved-poll loading grid without flaking; the 10s read_until is the hard gate). |
 | `skip_worktree_test.rb` | Verifies hive-state commits on master don't leak into feature worktrees. |
+| `bot/pairing_flow_test.rb` | Telegram pairing flow acceptance — empty-allowlist bootstrap with pairing enabled, unauthorized `/start` reply/throttle, owner approval writing global config and approval notice, reaper-delivered approved DM, reload authorization, and unknown/expired code rejection without allowlist mutation. |
 
 ## E2E suite (`test/e2e/`)
 

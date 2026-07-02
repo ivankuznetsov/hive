@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-07-02
+updated: 2026-07-01
 tags: [gap, todo]
 ---
 
@@ -23,7 +23,7 @@ tags: [gap, todo]
 | `lib/hive/patrol/*`, `lib/hive/commands/patrol.rb` | ✓ [[modules/patrol]] and [[commands/patrol]] cover the repository-patrol engine, PR opener, fingerprint/dismissal state, and patrol-to-`6-review` handoff. |
 | `lib/hive/daemon/*` | ✓ [[modules/daemon]] and [[commands/daemon]] cover dispatcher, healer, display-name backfiller, queues, merge watcher, status consumer, logging, and service/queue command surfaces. |
 | `lib/hive/babysitter/**`, `lib/hive/commands/babysit.rb`, `bin/hive-babysitter-stub-git`, `bin/hive-babysitter-stub-gh` | ✓ [[modules/babysitter]] and [[commands/babysit]] cover the experimental PR babysitter process, lifecycle command, GitHub PR repair loop, dry-run wrapper-launcher handoff, and executable `git`/`gh` default-deny stub API boundaries. |
-| `lib/hive/bot/*` | ✓ [[modules/bot]] and [[commands/bot]] cover the Telegram supervisor, routing, notification, voice/idea/answer, pairing state, and queue-producer surfaces. |
+| `lib/hive/bot/*` | ✓ [[modules/bot]] and [[commands/bot]] |
 | `lib/hive/web/**`, `public/`, `hive.gemspec`, `lib/hive/commands/web.rb`, `lib/hive/commands/setup.rb`, `packaging/docker/`, `.github/workflows/release.yml` hivebox image job | ✓ [[commands/web]], [[commands/setup]], [[commands]], [[architecture]], [[modules/config]], [[dependencies]], and [[testing]] cover the web routes, managed bundle/install payload, config/API surface, Docker entrypoints/install scripts, GHCR image publish job, agent-login relay/polling boundaries, favicon assets, and manual e2e contract. |
 | `lib/hive/tui/**` | ✓ [[commands/tui]], [[architecture]], and [[token-usage]] cover the MVU/TUI surfaces. |
 | `lib/hive/agent.rb`, `lib/hive/agent_limit.rb`, `lib/hive/claude_launcher.rb`, `lib/hive/scripts/interactive_claude_wrapper.sh`, `lib/hive/agent_profile*.rb`, `lib/hive/agent_profiles/**` | ✓ [[modules/agent]], [[modules/agent_profile]], [[stages/index]], [[stages/brainstorm]], [[token-usage]] |
@@ -34,7 +34,7 @@ tags: [gap, todo]
 | `lib/hive/gh.rb` | ✓ [[modules/gh]] covers the shared GitHub CLI helper surface; [[dependencies]], stage pages, [[commands/stage_action]], and [[modules/babysitter]] cover its command-level consumers. |
 | `lib/hive/pr.rb` | ✓ [[modules/pr]] covers the local PR URL → `#number` formatter used by the TUI PR column. |
 | `lib/hive/digest.rb`, `lib/hive/digest/**`, `lib/hive/commands/digest.rb`, `templates/digest_prompt.md.erb` | ✓ [[commands/digest]], [[modules/digest]], [[modules/config]], [[templates]], and [[testing]] cover the shipped-digest command, direct API, agent categorizer prompt, Telegram delivery seam, and focused unit tests. |
-| Core task/state helpers: `task`, `markers`, `lock`, `worktree`, `git_ops`, `rebase`, `workflows`, `metrics`, `secret_patterns`, `protected_files`, `events`, `atomic_file` | ✓ `wiki/modules/*` pages exist for each named domain. [[modules/atomic_file]] covers the shared small-state tempfile/rename/fsync helper introduced by `arch-review-pairing`; older local atomic-write copies remain as migration debt. |
+| Core task/state helpers: `task`, `markers`, `lock`, `worktree`, `git_ops`, `rebase`, `workflows`, `metrics`, `secret_patterns`, `protected_files`, `events` | ✓ `wiki/modules/*` pages exist for each named domain. |
 | `templates/*.erb` and prompt files | ✓ [[templates]] plus stage pages |
 | `openclaw/skills/hive/SKILL.md`, `openclaw/README.md` | ✓ [[commands]], [[operating]], and [[commands/wiki]] cover the single ClawHub `hive-cli` skill, `/hive` slash-command dispatch, guided setup, wiki changelog verification, and publish-shape constraints. |
 | `test/unit`, `test/integration`, `test/e2e`, `test/eval`, `Rakefile`, `bin/hive-e2e`, `bin/hive-eval` | ✓ [[testing]] and [[e2e]], including manual-gated hivebox Playwright coverage and eval-runner selector coverage. |
@@ -151,8 +151,6 @@ completed real GitHub/Codex/Claude provider login plus a daemon-owned PR push.
 
 53. **Daemon status `unreadable` drift is source/test-pinned but schema-unpinned.** Branch `arch-review-local-web-install` extracts the daemon-status envelope into `Hive::Daemon::StatusReport`; that producer now owns `BINARY_DRIFT_STATES` / `BINARY_DRIFT_ACTIONABLE`, can emit `binary_drift: "unreadable"` when an installed same-path binary cannot answer `--version`, and the hivebox `_daemon` view treats that value as actionable through `StatusReport::BINARY_DRIFT_ACTIONABLE`. Focused daemon tests cover `StatusReport#safe_payload`, `binary_state`, `binary_version`, and the `unreadable` drift branch. However, `schemas/hive-daemon-status.v1.json` still enumerates only `none`, `path`, `version`, `unparseable`, and `not_applicable`, so an actual `unreadable` payload would not validate against the published daemon-status schema. A follow-up should add `unreadable` to the schema enum/description and pin a schema validation test for that payload shape. The 2026-07-01 post-commit audit for `arch-review-local-web-install` rechecked the branch diff, `Hive::Daemon::StatusReport`, daemon CLI wiring, hivebox `_daemon` rendering, the daemon-status schema, and focused daemon tests; it found no schema update or live repair artifact closing this gap.
 
-54. **Managed llm-wiki refresh-script hardening is source/test-pinned but not hook-smoked on a real install.** Branch `HEAD` normalizes managed LLM WIKI instructions in `AGENTS.md` / `CLAUDE.md`, marks `.llm-wiki/config.json` as `created_by: "hive"`, and hardens `.llm-wiki/refresh-wiki.sh` so it discovers QMD through `HIVE_QMD_BIN`, PATH, Hive's managed QMD install, or the recorded install prefix; strips Git hook-local environment from nested QMD/Codex calls; and treats missing/failing/timed-out QMD as a warning/no-op instead of aborting under `set -e`. `Hive::LlmWikiBootstrap` and `test/integration/init_test.rb` pin the generated file content, but this refresh did not find an in-tree artifact from a real post-commit hook or systemd timer run proving the generated script survives a stale `GIT_INDEX_FILE`, a missing managed QMD binary, and a failing `qmd embed` on an installed project.
-
 ## 2026-06-16/17 refresh uncertainty
 
 The 2026-06-17 audit rechecked recent source, tests, git history, project wiki
@@ -195,14 +193,6 @@ from the v0.3.1 dependency/security-bump claim or still needs a follow-up relock
 3. **Two patterns for marker writes** — `Markers.set` (now uses flock + tempfile-rename atomic write) vs the agent writing into the state file via `Edit`/`Write`. The orchestrator now owns the terminal marker after every stage (the reviewer template explicitly does not write `task.md`), so concurrent-write races on the state file should not arise during normal flow. The remaining unprotected case is a user editing the state file in vim/VSCode while AGENT_WORKING — documented as "don't do that" in the README.
 
 ## Open enhancements
-
-- **Migrate legacy atomic-write copies to `Hive::AtomicFile`** — the
-  `arch-review-pairing` pass introduced [[modules/atomic_file]] for new small
-  state writers and migrated only `PairingStore#write_entries` plus
-  `PairingApprovalQueue.write!`. Existing local variants in `Markers`, `Events`
-  status rendering, init/setup/service installer writes, and review
-  suppression were intentionally left for a dedicated follow-up so the pairing
-  PR stayed reviewable.
 
 - **Generic workflows have no dedicated stale/error resting-marker surface** — `TaskAction#generic_action`'s `else` arm classifies every non-`{complete,waiting,none}` marker as `generic_ready_to_run` / `ready_to_run` ("Ready to run") with no diagnostic, so a future non-coding workflow that invents a stale/error-style resting marker (other than `:error`/`:agent_working`, which the universal overrides already catch) would read as "ready to run" with no signal, unlike the coding path's dedicated stale/error arms. Dormant today for production workflows; a future descriptor-workflow follow-up should wire a generic error/stale surface without changing coding's bespoke action map. See [[modules/task_action]].
 
@@ -297,8 +287,8 @@ Progress" — an activity description, not a name. The prompt should pin
 ## Triage phase ~5.5-min failure cause unconfirmed (2026-06-17)
 
 Live task `xbookmark` #1333 (`we-need-to-add-an-260616-094b`) failed at the
-triage phase ~5.5 min in across two separate runs (5m42s and 5m32s) with
-`reason=triage_failed`. The real `error_message` was discarded by
+triage phase ~5.5 min in across two separate runs (5m42s and 5m32s) with a
+legacy generic triage failure reason. The real `error_message` was discarded by
 `mark_review_phase_failure` (now fixed — it surfaces a `message=` attr and
 triage retries; see [[stages/review]]), so the underlying trigger was never
 captured. Open questions:

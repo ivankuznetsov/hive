@@ -205,7 +205,7 @@ module Hive
       end
 
       def tui_scenario?(scenario)
-        scenario.steps.any? { |step| %w[tui_keys tui_expect wait_subprocess].include?(step.kind) }
+        scenario.steps.any? { |step| %w[tui_keys tui_expect tui_refute wait_subprocess].include?(step.kind) }
       end
 
       def exit_with_error(error, error_kind:, exit_code:)

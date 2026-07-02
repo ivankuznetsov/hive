@@ -1,6 +1,7 @@
 require_relative "../../test_helper"
 require "json"
 require "open3"
+require "rbconfig"
 require_relative "paths"
 
 class E2EBinaryTest < Minitest::Test
@@ -12,6 +13,14 @@ class E2EBinaryTest < Minitest::Test
     JSON.parse(out)
   rescue JSON::ParserError => e
     flunk "expected exactly one parseable JSON document on stdout: #{e.message}"
+  end
+
+  def with_temp_scenario(name, body)
+    path = File.join(Hive::E2E::Paths.scenarios_dir, "#{name}.yml")
+    File.write(path, body)
+    yield
+  ensure
+    FileUtils.rm_f(path) if path
   end
 
   def test_list_json_emits_parseable_envelope_with_schema_version_1
@@ -202,6 +211,31 @@ class E2EBinaryTest < Minitest::Test
     assert_equal "no_scenarios", payload["error_kind"]
     assert_equal 64, payload["exit_code"]
     assert_match(/no scenarios match definitely-no-scenario/, payload["message"])
+  end
+
+  def test_tui_refute_only_scenario_preflights_missing_tmux
+    name = "tui_refute_preflight_#{Process.pid}"
+    with_temp_scenario(name, <<~YAML) do
+      name: #{name}
+      description: patrol regression for tui_refute tmux preflight
+      tags: [patrol]
+      steps:
+        - kind: tui_refute
+          anchor: "not present"
+    YAML
+      Dir.mktmpdir("missing-tmux") do |empty_path|
+        out, err, status = Open3.capture3(
+          { "PATH" => empty_path },
+          RbConfig.ruby, hive_e2e, "run", name, "--json"
+        )
+
+        assert_equal 78, status.exitstatus
+        assert_empty err
+        payload = JSON.parse(out)
+        assert_equal "preflight", payload["error_kind"]
+        assert_match(/tmux not found/, payload["message"])
+      end
+    end
   end
 
   def test_replay_rejects_traversal_components

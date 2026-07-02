@@ -2,6 +2,98 @@
 
 All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with terse bullets — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
+## 0.3.3
+
+Hive goes local-first: one `hive setup` command installs and runs the web UI without
+Docker, strangers can pair with the Telegram bot via a one-time code approved from the
+CLI, the daemon auto-retries recoverable failures, and review errors now carry
+classified, actionable reasons. Any GitHub PR can be reviewed ad hoc without a
+pipeline task.
+
+### Local web install & run (non-Docker)
+
+- New `hive setup`: one-command local provisioning — dependency diagnostics with exact
+  fix commands (external CLIs like `gh`/`claude`/`codex` are diagnosed, never silently
+  installed or authenticated), bootstraps qmd and the managed Rails web bundle,
+  installs the daemon service pinned to the invoking binary, and enrolls the current
+  project. `--service` also installs the managed web service; `--no-bootstrap` is
+  diagnose-only; `--json` emits an ordered phase envelope whose `ok` always matches
+  the exit code.
+- `hive web` grows a managed-service lifecycle: `install`, `start --detach`, `stop`,
+  `status [--json]` via systemd-user (Linux) / launchd (macOS). Foreground `hive web`
+  works as before.
+- Loopback binds (default `127.0.0.1:4567`) need no login; `web.local_loopback: false`
+  opts back into GitHub login. Non-loopback binds are refused without a configured
+  owner or an explicit `--unsafe`/`--allow-public`.
+- The managed web bundle is fetched per-version from the release asset, bundle-installed
+  in staging before swap (a failed upgrade can't break the working install), and
+  auto-refreshed when stale after a CLI upgrade.
+- Binary-drift detection: `hive daemon status --json` reports the unit's installed
+  binary vs the expected one (`binary_drift`: path/version/unparseable/unreadable);
+  the web dashboard shows daemon health and a "Repair daemon" button that queues
+  `hive daemon install --force` through the daemon's own maintenance queue.
+
+### Telegram bot: self-service pairing
+
+- With `bot.pairing_enabled`, an unknown chat's `/start` now gets a one-time pairing
+  code instead of silence. The owner approves with
+  `hive pairing approve telegram <CODE>`: the chat lands on the allowlist, a live bot
+  is SIGHUP-reloaded, and the user gets a "✅ Approved" DM. `hive pairing list` shows
+  pending codes; both commands take `--json` (`hive-pairing-list.v1` /
+  `hive-pairing-approve.v1`). The bot can boot with an empty allowlist when pairing
+  is enabled, so a fresh install is reachable before any chat is approved.
+
+### Daemon self-healing
+
+- The daemon auto-retries recoverable terminal error markers (kill switch:
+  `daemon.auto_retry.enabled`, default on).
+- Fixed: Claude stop-hook fix failures are retried instead of parking the task.
+
+### Review pipeline
+
+- `hive review --pr <number|#number|URL>` reviews any GitHub PR ad hoc — no pipeline
+  task needed; fix commits on borrowed PRs stay opt-in.
+- Non-limit triage/fix failures now stamp a classified `reason=` (`merge_conflict`,
+  `network_timeout`, `tool_permission_denied`, `agent_crashed`, `unknown`) instead of
+  flat `triage_failed`/`fix_failed`; the condensed raw cause is preserved in
+  `message=`.
+- Fixed: provider usage-limit failures in 6-review are classified correctly and keep
+  the cooldown-based self-heal.
+- Fixed: `hive diagnose` surfaces on-disk evidence instead of a bare fallback.
+- Fixed: launcher scripts ship in the gem, and the Claude 2.1.179 tmux ready prompt
+  is detected.
+
+### Internals
+
+- Architecture pass over the local web mode: the daemon-status envelope moved to
+  `Hive::Daemon::StatusReport` (CLI and web dashboard share one producer); the
+  daemon/bot/web service installers share one unit-path rule and one renderer pair;
+  `hive setup` phases run through a single failure-recording runner; the unused
+  `--yes` flag was removed before ever shipping.
+- New `Hive::AtomicFile` — the one atomic tempfile+rename write helper; the pairing
+  store and approval queue use it. Dropped the unemitted `rate_limited` enum member.
+
+### CI & testing
+
+- A macOS runner now exercises the real launchd install round-trip for the daemon and
+  web services (previously stub-only).
+- Fixed: `web/Gemfile.lock` path-gem sync restored the hivebox-web CI job after the
+  root lockfile gained `rexml`.
+- The Telegram `/idea` e2e driver handles the bot's file-collection "Done" step.
+
+### Docs
+
+- OpenClaw hive-skill playbooks: status bundle, daemon diagnostics & safe repair,
+  local dogfood workflow, marker recovery, daemon auto-advance fallback, and a task
+  watch recipe.
+
+### Also
+
+- A batch of `hive patrol` hardening fixes: git-grep separator smuggling, asciinema
+  2.4/v3 flag compatibility, hidden copied artifacts in manifests, optional-asciinema
+  TUI aborts, gh Git-trace env scrub, tui_refute tmux preflight, dry-run skip-log
+  dedup.
+
 ## 0.3.2
 
 Setup, the Telegram bot, and TUI performance are the focus of this release. Selected agent backends now persist globally so new projects inherit them; the bot gains idea-by-default capture, a `/waiting` view backed by a daily pending-answer digest, task-id slash commands, and structured JSON errors; and TUI status polling now scales with the number of active tasks instead of the whole archive.

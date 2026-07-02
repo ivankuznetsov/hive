@@ -53,7 +53,7 @@ That listing installs the `/hive` slash command. First run should normally be:
 
 Beyond the default coding pipeline, Hive can run project-authored custom workflows: multi-stage agent work with several stages, agents, and checkpoints for non-coding domains. Teams can use these for writing, feedback triage, research, content pipelines, and other repeatable work that benefits from the same folder-based handoff model.
 
-The `/hive` slash examples below map to the underlying `hive ...` CLI arguments:
+These `/hive` commands map to the underlying `hive ...` CLI; the scaffold command is shown in bare CLI form:
 
 - `/hive init . --workflow <id>` chooses the workflow for the whole project at initialization time, so tasks created there use that default.
 - `/hive new . "draft launch notes" --workflow <id>` overrides the workflow for one task when creating it.

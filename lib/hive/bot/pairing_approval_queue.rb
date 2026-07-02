@@ -1,7 +1,7 @@
 require "json"
-require "fileutils"
 require "securerandom"
 require "time"
+require "hive/atomic_file"
 require "hive/paths"
 require "hive/daemon/queue_directory"
 
@@ -42,17 +42,8 @@ module Hive
 
         dir = directory(state_home: state_home)
         filename = "#{created_at.strftime('%Y%m%dT%H%M%S%6N')}-#{notice_id}.json"
-        final_path = File.join(dir, filename)
-        tmp_path = File.join(dir, ".#{filename}.tmp.#{Process.pid}")
-        File.open(tmp_path, File::WRONLY | File::CREAT | File::TRUNC, 0o644) do |file|
-          file.write(JSON.generate(payload))
-          file.flush
-          file.fsync
-        end
-        File.rename(tmp_path, final_path)
+        Hive::AtomicFile.write(File.join(dir, filename), JSON.generate(payload))
         notice_id
-      ensure
-        FileUtils.rm_f(tmp_path) if tmp_path && File.exist?(tmp_path)
       end
 
       def pending(state_home: Hive::Paths.state_home, bad_handler: nil)

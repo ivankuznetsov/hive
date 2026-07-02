@@ -57,7 +57,9 @@ GitHub PR, project workflow authoring via [[commands/workflow]], daemon/bot/baby
 lifecycle commands, diagnostics, markers, findings, metrics, update/uninstall,
 registry maintenance, Screenote connect/disconnect, the `hive bench submit`
 corpus-submission producer, the `hive digest` shipped-digest producer,
-the [[commands/pairing]] Telegram pairing approval surface, and
+the [[commands/pairing]] Telegram pairing approval surface,
+[[commands/refactor-patrol]] as the reporting-only architecture refactor thesis
+scanner, and
 `--json` envelopes where the command page says they exist.
 The wrapper also normalizes command-local help before Thor dispatch:
 `hive <cmd> --help`, `hive <cmd> -h`, and option-bearing forms such as

@@ -4,7 +4,7 @@ description: >-
   Run Hive's folder-based coding-agent pipeline from OpenClaw: guided CLI setup,
   project init, task creation, plan/develop/review workflows, status, daemon,
   and guarded admin commands.
-version: 0.1.1
+version: 0.1.2
 user-invocable: true
 metadata:
   openclaw:

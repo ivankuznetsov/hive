@@ -36,10 +36,24 @@ module Hive
         end
 
         def find_slug(hive_state_path, slug)
+          # A real Hive slug is a single path segment; reject anything with a
+          # separator or a `.`/`..` component so a crafted branch like
+          # `hive/..` (which would collapse to the stages dir on join) or
+          # `hive/foo/bar` cannot escape the per-stage lookup below.
+          return nil if slug.include?("/") || slug.include?(File::SEPARATOR)
+          return nil if slug == "." || slug == ".."
+
           stages_root = File.join(hive_state_path, STAGES_DIR)
-          Dir[File.join(stages_root, "*", slug)].find { |path| File.directory?(path) }&.then do |path|
-            { slug: slug, stage: File.basename(File.dirname(path)) }
+          return nil unless File.directory?(stages_root)
+
+          # Enumerate real stage dirs and test a literal join per stage rather
+          # than globbing the untrusted slug into Dir[...]: a crafted branch
+          # like `hive/*` would otherwise match `stages/*/<glob>` and fabricate
+          # a bogus Hive-task annotation.
+          stage = Dir.children(stages_root).find do |st|
+            File.directory?(File.join(stages_root, st, slug))
           end
+          stage && { slug: slug, stage: stage }
         end
       end
     end

@@ -137,6 +137,118 @@ class RefactorPatrolCommandTest < Minitest::Test
     end
   end
 
+  def test_entrypoint_scope_is_used_when_feature_hint_absent
+    with_refactor_patrol_project do
+      reviewer = FakeReviewer.new({ "search" => [ thesis("search", feature_id: "search", fingerprint: "fp-search") ] })
+      out, _err, status = with_captured_exit do
+        command_for(
+          entrypoint_hint: "bin/search",
+          features: [
+            feature("checkout", files: [ "lib/checkout.rb" ]),
+            feature("search", files: [ "lib/search.rb" ], entrypoints: [ "bin/search" ])
+          ],
+          reviewer: reviewer,
+          leverage_scores: leverage_scores("checkout" => 0.1, "search" => 0.9)
+        ).call
+      end
+
+      assert_equal Hive::ExitCodes::SUCCESS, status
+      assert_equal [ "search" ], reviewer.seen_feature_ids
+      assert_equal 1, JSON.parse(out).fetch("features_mapped")
+    end
+  end
+
+  def test_path_scope_can_be_further_restricted_to_changed_files
+    with_refactor_patrol_project do |repo|
+      FileUtils.mkdir_p(File.join(repo, "lib", "checkout"))
+      File.write(File.join(repo, "lib", "checkout", "flow.rb"), "initial\n")
+      FileUtils.mkdir_p(File.join(repo, "lib", "search"))
+      File.write(File.join(repo, "lib", "search", "index.rb"), "initial\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "baseline", "--quiet")
+      baseline = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      File.write(File.join(repo, "lib", "checkout", "flow.rb"), "changed\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "checkout change", "--quiet")
+
+      reviewer = FakeReviewer.new({ "checkout" => [ thesis("checkout", feature_id: "checkout", fingerprint: "fp-checkout") ] })
+      out, _err, status = with_captured_exit do
+        command_for(
+          path_hint: "lib",
+          changed_since: baseline,
+          features: [
+            feature("checkout", files: [ "lib/checkout/flow.rb" ]),
+            feature("search", files: [ "lib/search/index.rb" ])
+          ],
+          reviewer: reviewer,
+          leverage_scores: leverage_scores("checkout" => 0.9, "search" => 0.1)
+        ).call
+      end
+
+      assert_equal Hive::ExitCodes::SUCCESS, status
+      assert_equal [ "checkout" ], reviewer.seen_feature_ids
+      assert_equal 1, JSON.parse(out).fetch("features_mapped")
+    end
+  end
+
+  def test_changed_since_git_failure_keeps_scoped_features
+    with_refactor_patrol_project do
+      reviewer = FakeReviewer.new({ "checkout" => [ thesis("checkout", feature_id: "checkout", fingerprint: "fp-checkout") ] })
+      out, _err, status = with_captured_exit do
+        command_for(
+          path_hint: "lib",
+          changed_since: "missing-ref",
+          features: [ feature("checkout", files: [ "lib/checkout.rb" ]) ],
+          reviewer: reviewer,
+          leverage_scores: leverage_scores("checkout" => 0.9)
+        ).call
+      end
+
+      assert_equal Hive::ExitCodes::SUCCESS, status
+      assert_equal [ "checkout" ], reviewer.seen_feature_ids
+      assert_equal 1, JSON.parse(out).fetch("features_mapped")
+    end
+  end
+
+  def test_text_output_includes_ranked_thesis_details
+    with_refactor_patrol_project do
+      out, _err, status = with_captured_exit do
+        command_for(
+          json: false,
+          features: [ feature("checkout") ],
+          theses_by_feature: { "checkout" => [ thesis("clean", fingerprint: "fp-clean") ] },
+          leverage_scores: leverage_scores("checkout" => 0.9)
+        ).call
+      end
+
+      assert_equal Hive::ExitCodes::SUCCESS, status
+      assert_includes out, "hive refactor-patrol: demo"
+      assert_includes out, "1. Checkout"
+      assert_includes out, "problem:"
+      assert_includes out, "validation:"
+      assert_includes out, "flagged=0 suppressed=0"
+    end
+  end
+
+  def test_internal_error_emits_json_error_envelope
+    with_refactor_patrol_project do
+      bad_mapper = ->(_root, _cfg, _state) { raise "boom" }
+      out, _err, status = with_captured_exit do
+        Hive::Commands::RefactorPatrol.new(
+          "demo",
+          json: true,
+          mapper_factory: bad_mapper
+        ).call
+      end
+
+      payload = JSON.parse(out)
+      assert_equal Hive::ExitCodes::SOFTWARE, status
+      assert_equal false, payload.fetch("ok")
+      assert_equal "InternalError", payload.fetch("error_class")
+      assert_equal "error", payload.fetch("error_kind")
+    end
+  end
+
   def test_project_without_refactor_patrol_block_errors_clearly
     with_tmp_global_config do
       with_tmp_git_repo do |repo|
@@ -196,7 +308,7 @@ class RefactorPatrolCommandTest < Minitest::Test
     end
   end
 
-  def command_for(project: "demo", json: true, dry_run: false, feature_hint: nil, path_hint: nil,
+  def command_for(project: "demo", json: true, dry_run: false, feature_hint: nil, entrypoint_hint: nil, path_hint: nil, changed_since: nil,
                   features: [], theses_by_feature: {}, reviewer: nil, leverage_scores: {})
     reviewer ||= FakeReviewer.new(theses_by_feature)
     Hive::Commands::RefactorPatrol.new(
@@ -204,18 +316,20 @@ class RefactorPatrolCommandTest < Minitest::Test
       json: json,
       dry_run: dry_run,
       feature: feature_hint,
+      entrypoint: entrypoint_hint,
       path: path_hint,
+      changed_since: changed_since,
       mapper_factory: ->(_root, _cfg, _state) { FakeMapper.new(features) },
       reviewer_factory: ->(_root, _cfg, _state) { reviewer },
       leverage_factory: ->(_root, _cfg) { FakeLeverage.new(leverage_scores) }
     )
   end
 
-  def feature(id, files: [ "lib/#{id}.rb" ])
+  def feature(id, files: [ "lib/#{id}.rb" ], entrypoints: files)
     Hive::Patrol::Feature.new(
       id: id,
       kind: "command",
-      entrypoints: [ files.first ],
+      entrypoints: entrypoints,
       owned_files: files,
       context_files: [],
       tests: [ "test/#{id}_test.rb" ]

@@ -124,16 +124,17 @@ module Hive
       end
 
       def apply_scope_hints(features, project_root)
-        scoped = if @feature_hint
-                   features.select { |feature| feature.id == @feature_hint }
-                 elsif @entrypoint_hint
-                   features.select { |feature| Array(feature.entrypoints).include?(@entrypoint_hint) }
-                 elsif @path_hint
-                   normalized = @path_hint.tr("\\", "/")
-                   features.select { |feature| Array(feature.owned_files).any? { |path| path == normalized || path.start_with?("#{normalized}/") } }
-                 else
-                   features
-                 end
+        scoped =
+          if @feature_hint
+            features.select { |feature| feature.id == @feature_hint }
+          elsif @entrypoint_hint
+            features.select { |feature| Array(feature.entrypoints).include?(@entrypoint_hint) }
+          elsif @path_hint
+            normalized = @path_hint.tr("\\", "/")
+            features.select { |feature| Array(feature.owned_files).any? { |path| path == normalized || path.start_with?("#{normalized}/") } }
+          else
+            features
+          end
 
         return scoped unless @changed_since && (@feature_hint || @entrypoint_hint || @path_hint)
 
@@ -155,7 +156,7 @@ module Hive
       def compute_changed_files(project_root)
         return [] unless @changed_since
 
-        out, _err, status = Open3.capture3("git", "-C", project_root, "diff", "--name-only", "#{@changed_since}..HEAD")
+        out, _err, status = Open3.capture3("git", "-C", project_root, "diff", "--name-only", @changed_since, "HEAD")
         # nil signals a git failure so callers can degrade gracefully; [] means
         # the diff succeeded with no changed files.
         return nil unless status.success?
@@ -174,7 +175,7 @@ module Hive
       end
 
       def mapper_cfg(cfg)
-        clone = Marshal.load(Marshal.dump(cfg))
+        clone = Hive::Config.deep_dup(cfg)
         clone["patrol"] = (clone["patrol"] || {}).merge(
           "include" => cfg.dig("refactor_patrol", "include"),
           "exclude" => cfg.dig("refactor_patrol", "exclude"),

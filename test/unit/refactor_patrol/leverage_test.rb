@@ -75,6 +75,43 @@ class RefactorPatrolLeverageTest < Minitest::Test
     end
   end
 
+  def test_git_exception_degrades_churn_to_zero
+    with_tmp_dir do |dir|
+      write(dir, "lib/checkout.rb", "class Checkout\nend\n")
+      runner = ->(*) { raise "git unavailable" }
+
+      result = Hive::RefactorPatrol::Leverage.new(dir, cfg: cfg, command_runner: runner)
+                                             .score(feature("checkout", [ "lib/checkout.rb" ]))
+
+      assert_equal 0, result.dig("signals", "churn")
+      assert_equal [], result.dig("normalized").keys - Hive::RefactorPatrol::Leverage::SIGNALS
+    end
+  end
+
+  def test_ls_files_failure_falls_back_to_directory_scan
+    with_tmp_dir do |dir|
+      write(dir, "lib/checkout.rb", "class Checkout\nend\n")
+      write(dir, ".git/ignored", "ignored")
+      failed = Struct.new(:success?).new(false)
+      runner = ->(*) { [ "", "no git", failed ] }
+
+      result = Hive::RefactorPatrol::Leverage.new(dir, cfg: cfg, command_runner: runner)
+                                             .score(feature("checkout", [ "lib/checkout.rb" ], entrypoints: [ "lib/checkout.rb" ]))
+
+      assert_operator result.dig("signals", "complexity"), :>, 0
+    end
+  end
+
+  def test_missing_owned_file_degrades_to_empty_content
+    with_tmp_dir do |dir|
+      result = Hive::RefactorPatrol::Leverage.new(dir, cfg: cfg)
+                                             .score(feature("checkout", [ "lib/missing.rb" ], entrypoints: [ "lib/missing.rb" ]))
+
+      assert_equal 0, result.dig("signals", "complexity")
+      assert result.key?("score")
+    end
+  end
+
   def test_non_utf8_tracked_file_does_not_crash_scoring
     with_tmp_git_repo do |dir|
       write(dir, "lib/checkout.rb", "require 'lib/blob'\nclass Checkout\nend\n")

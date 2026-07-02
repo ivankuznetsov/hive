@@ -20,6 +20,15 @@ class RefactorPatrolCapsTest < Minitest::Test
     refute_includes thesis.risk.fetch("flags"), "exceeds_max_diff_lines"
   end
 
+  def test_non_single_feature_is_flagged_when_cap_requires_single_feature
+    thesis = sample_thesis(risk_hash: default_risk.merge("caps" => default_risk.fetch("caps").merge("single_feature" => false)))
+
+    result = Hive::RefactorPatrol::Caps.new(cfg("single_feature_only" => true)).apply(thesis)
+
+    refute result.blocked
+    assert_includes thesis.risk.fetch("flags"), "not_single_feature"
+  end
+
   def test_cli_and_schema_boundaries_mark_public_api_impact
     cli = sample_thesis(boundary_files: [ "lib/hive/cli.rb" ])
     schema = sample_thesis(boundary_files: [ "schemas/foo.v1.json" ])
@@ -49,6 +58,8 @@ class RefactorPatrolCapsTest < Minitest::Test
     Hive::RefactorPatrol::Caps.new(cfg).apply(thesis)
 
     assert_includes thesis.risk.fetch("flags"), "dependency_bump"
+    assert_equal true, thesis.risk.fetch("cross_feature_impact")
+    assert_includes thesis.risk.fetch("cross_feature_details"), "Gemfile"
   end
 
   def test_in_bounds_thesis_has_no_flags

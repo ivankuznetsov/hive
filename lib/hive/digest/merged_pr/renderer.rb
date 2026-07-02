@@ -28,7 +28,7 @@ module Hive
 
         def grouped_sections(prs)
           prs.group_by(&:repo).sort_by { |repo, _| repo }.map do |repo, rows|
-            lines = [ "`#{escape(repo)} — #{rows.size}`" ]
+            lines = [ "`#{escape_code(repo)} — #{rows.size}`" ]
             lines.concat(rows.sort_by { |pr| Window.parse_time(pr.mergedAt) }.map { |pr| render_line(pr) })
             lines.join("\n")
           end
@@ -63,6 +63,14 @@ module Hive
 
         def escape_link(url)
           Hive::Digest::Renderer.escape_link_target(url)
+        end
+
+        # The repo header wraps the name in a `` `…` `` code entity, where only
+        # `` ` `` and `\` may be escaped — using the general escape_mdv2 there
+        # would render literal backslashes on the near-universal `-`/`.`/`_`
+        # repo names and risk a MarkdownV2 400 that fails the whole send.
+        def escape_code(text)
+          Hive::Digest::Renderer.escape_code_span(text)
         end
       end
     end

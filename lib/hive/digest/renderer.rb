@@ -44,6 +44,13 @@ module Hive
       # malformed URL would otherwise fail the whole day's send_message.
       RESERVED_LINK_TARGET = /([\\)])/
 
+      # Inside a MarkdownV2 code entity (`` `…` ``) Telegram treats only '`'
+      # and '\' as special; every other char (including the general reserved
+      # set `-`/`.`/`_` etc.) is literal. Escaping with the full escape_mdv2
+      # set would render stray backslashes and can even 400 the send, so a
+      # code span must use this reduced set — mirrors RESERVED_LINK_TARGET.
+      RESERVED_CODE_SPAN = /([\\`])/
+
       module_function
 
       def render(grouped, date:, summary: nil, totals: nil)
@@ -169,6 +176,12 @@ module Hive
 
       def escape_link_target(url)
         url.to_s.gsub(RESERVED_LINK_TARGET) { "\\#{$1}" }
+      end
+
+      # Escape text destined for the inside of a MarkdownV2 code entity: only
+      # '`' and '\' may be escaped there (see RESERVED_CODE_SPAN).
+      def escape_code_span(text)
+        text.to_s.gsub(RESERVED_CODE_SPAN) { "\\#{$1}" }
       end
     end
   end

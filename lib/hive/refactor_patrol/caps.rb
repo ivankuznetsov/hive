@@ -70,8 +70,11 @@ module Hive
       def detect_cross_feature(thesis)
         return [] if caps.fetch("allow_cross_feature", false)
 
-        owned = Array(thesis.feature_boundary && thesis.feature_boundary["owned_files"]).map(&:to_s)
-        out_of_boundary = candidate_paths(thesis).reject { |path| owned.include?(path) }.uniq
+        boundary = thesis.feature_boundary || {}
+        # A feature's own entrypoints are part of its boundary; only paths
+        # outside both owned_files and entrypoints count as cross-feature.
+        own = (Array(boundary["owned_files"]) + Array(boundary["entrypoints"])).map { |path| path.to_s.tr("\\", "/") }
+        out_of_boundary = candidate_paths(thesis).reject { |path| own.include?(path) }.uniq
         return [] if out_of_boundary.empty?
 
         thesis.risk["cross_feature_impact"] = true

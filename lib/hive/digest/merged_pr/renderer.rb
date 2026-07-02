@@ -6,6 +6,14 @@ module Hive
   module Digest
     module MergedPr
       module Renderer
+        # Cap the "#<number> <title>" label the same way the sibling shipped
+        # renderer caps its labels: bound the raw text BEFORE MarkdownV2
+        # escaping so a Telegram chunk hard-cut can never land between a `\`
+        # and the char it escapes (an invalid escape fails the whole send).
+        # GitHub already caps titles at 256 chars, so this is a structural
+        # guarantee rather than an incidental one.
+        MAX_LABEL_LENGTH = Hive::Digest::Renderer::MAX_LABEL_LENGTH
+
         module_function
 
         def render(prs, date:)
@@ -27,9 +35,18 @@ module Hive
         end
 
         def render_line(pr)
-          label = "##{pr.number} #{pr.title}"
+          label = truncate_label("##{pr.number} #{pr.title}")
           link = pr.url.to_s.empty? ? escape(label) : "[#{escape(label)}](#{escape_link(pr.url)})"
           "#{escape('•')} #{link} #{escape('—')} #{suffix(pr)}"
+        end
+
+        # Bound the label on the raw text (before escaping) so an overlong
+        # title can't push a rendered line toward Telegram's chunk boundary.
+        def truncate_label(text)
+          text = text.to_s
+          return text if text.length <= MAX_LABEL_LENGTH
+
+          "#{text[0, MAX_LABEL_LENGTH - 1].rstrip}…"
         end
 
         def suffix(pr)

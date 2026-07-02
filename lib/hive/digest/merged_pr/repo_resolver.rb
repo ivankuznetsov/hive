@@ -28,7 +28,7 @@ module Hive
           slugs = []
           @registry.call.each do |entry|
             slugs << resolve_project(entry)
-          rescue Hive::GhError, StandardError => e
+          rescue StandardError => e
             warn("merged-pr digest: dropping project #{entry_name(entry)} during repo resolution: #{e.message}")
           end
           Resolution.new(repos: slugs.compact.uniq, warnings: warnings)

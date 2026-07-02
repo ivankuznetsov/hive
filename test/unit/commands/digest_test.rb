@@ -248,6 +248,30 @@ class HiveCommandsDigestTest < Minitest::Test
     assert_empty schema.validate(payload).map { |e| e["error"] }
   end
 
+  def test_merged_pr_dry_run_json_payload_validates_against_schema
+    # The dry-run envelope (message set, chat_id null) is a distinct shape from
+    # the real-send one above; validate it against the schema file too so the
+    # inverted message/chat_id nullability can't silently drift out of contract.
+    output = StringIO.new
+    merged = MergedRunner.new([], merged_result(delivery: nil))
+
+    Hive::Commands::Digest.new(
+      date: "2026-06-13",
+      dry_run: true,
+      source: "merged-prs",
+      json: true,
+      merged_runner: merged,
+      output: output
+    ).call
+
+    payload = JSON.parse(output.string)
+    assert_equal true, payload.fetch("dry_run")
+    assert_nil payload.fetch("chat_id")
+    assert_equal "Merged PR digest — 2026-06-13\n\nTotal: 1 PR", payload.fetch("message")
+    schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-merged-pr-digest"))))
+    assert_empty schema.validate(payload).map { |e| e["error"] }
+  end
+
   private
 
   def result(status:, message:)

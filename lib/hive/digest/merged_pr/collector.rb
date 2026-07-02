@@ -21,10 +21,9 @@ module Hive
 
         def for_date(date, repos:)
           @warnings = []
-          local_date = Window.parse_date(date)
           Array(repos).flat_map do |repo|
-            collect_repo(repo, local_date)
-          rescue Hive::GhError, StandardError => e
+            collect_repo(repo, date)
+          rescue StandardError => e
             warn("merged-pr digest: dropping repo #{repo}: #{e.message}")
             []
           end
@@ -39,20 +38,26 @@ module Hive
             until_date: (date + 1).iso8601,
             cfg: @cfg
           )
+          # No sort here: Renderer#grouped_sections is the display authority and
+          # sorts each repo's rows by mergedAt itself, so a sort here would be
+          # dead work.
           candidates.filter_map { |doc| build_pr(repo, doc, date) }
-                    .sort_by { |pr| Window.parse_time(pr.mergedAt) }
         end
 
         def build_pr(repo, doc, date)
           merged_at = doc.fetch("mergedAt").to_s
           return nil unless Window.on_local_date?(merged_at, date)
 
+          # Like mergedAt, fetch the number so a missing key drops the record
+          # (schema requires number >= 1); Integer() drops a blank/unexpected
+          # value via the ArgumentError rescue instead of coercing it to 0.
+          number = Integer(doc.fetch("number").to_s)
           head_ref = doc["headRefName"].to_s
           match = match_hive(head_ref)
           author = doc["author"].is_a?(Hash) ? doc["author"] : {}
           PullRequest.new(
             repo: repo,
-            number: doc["number"].to_i,
+            number: number,
             title: doc["title"].to_s,
             url: doc["url"].to_s,
             mergedAt: merged_at,

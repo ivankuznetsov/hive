@@ -1,5 +1,4 @@
 require "test_helper"
-require "json_schemer"
 require "hive/digest/merged_pr"
 
 class HiveDigestMergedPrRunTest < Minitest::Test

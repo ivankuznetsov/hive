@@ -35,6 +35,18 @@ class HiveDigestMergedPrRendererTest < Minitest::Test
     assert_equal "Merged PR digest — 2026\\-06\\-13\n\nTotal: 0 PRs", text
   end
 
+  def test_long_title_is_length_capped_before_escaping
+    # Mirror the sibling renderer's cap so a Telegram chunk hard-cut can never
+    # land between a MarkdownV2 `\` and the char it escapes.
+    cap = Hive::Digest::MergedPr::Renderer::MAX_LABEL_LENGTH
+    text = Hive::Digest::MergedPr::Renderer.render(
+      [ pr(title: "x" * (cap + 50)) ], date: Date.new(2026, 6, 13)
+    )
+
+    assert_includes text, "…"
+    refute_includes text, "x" * (cap + 1)
+  end
+
   private
 
   def pr(repo: "owner/repo", number: 1, title: "Title", merged_at: "2026-06-13T12:00:00Z",

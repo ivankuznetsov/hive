@@ -115,9 +115,6 @@ tags: [config, yaml, validation]
   "digest" => { "enabled" => false, "agent" => nil, "max_catchup_days" => 7 },
   "screenote" => { "base_url" => "https://screenote.ai" },
   "bot" => {
-    "enabled" => false,
-    "pairing_enabled" => false,
-    "chat_id_allowlist" => [],
     "idea_attachment_max_bytes" => 20 * 1024 * 1024,
     "idea_attachment_max_count" => 10,
     "idea_draft_ttl_sec" => 900,

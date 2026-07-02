@@ -3,7 +3,7 @@ title: hive init
 type: command
 source: lib/hive/commands/init.rb
 created: 2026-04-25
-updated: 2026-06-23
+updated: 2026-07-02
 tags: [command, bootstrap, git, prompts, llm-wiki]
 ---
 
@@ -46,9 +46,9 @@ hive init --new-workflow ID [PROJECT_PATH]
 8. **Ignore `.hive-state/` on master** via `GitOps#add_hive_state_to_master_gitignore!`: appends `/.hive-state/` to `.gitignore` (idempotent), then commits `chore: ignore .hive-state worktree` on master.
 9. **Bootstrap managed llm-wiki files** via `Hive::LlmWikiBootstrap.install!(post_commit_hook: false, scheduler: false)`:
    - `.llm-wiki/config.json` with `headless_agent: "codex"`, `context_agents: ["claude", "codex", "pi"]`, `created_by: "hive"`, and a detected `main_wiki_path` when one exists.
-   - `.llm-wiki/refresh-wiki.sh` and `.llm-wiki/post-commit-refresh.sh`, both Codex-owned and run with `codex exec --add-dir <qmd-cache> -C <project>`. Both scripts keep qmd's normal GPU auto-detection, fall back to `.llm-wiki/qmd-cache` when the normal qmd cache is not writable, and discover QMD through `HIVE_QMD_BIN`, PATH, or Hive's managed `${XDG_DATA_HOME:-~/.local/share}/hive/qmd/bin/qmd` install path (including `install-prefix` installs). Nested Codex and QMD calls run with Git hook-local environment variables unset so `GIT_INDEX_FILE`, `GIT_DIR`, and `GIT_WORK_TREE` cannot leak into plugin marketplace or indexing checkouts.
+   - `.llm-wiki/refresh-wiki.sh` and `.llm-wiki/post-commit-refresh.sh`, both Codex-owned and run with `codex exec --add-dir <qmd-cache> -C <project>`. Both scripts keep qmd's normal GPU auto-detection, fall back to `.llm-wiki/qmd-cache` when the normal qmd cache is not writable, and discover QMD through `HIVE_QMD_BIN`, PATH, or Hive's managed `${XDG_DATA_HOME:-~/.local/share}/hive/qmd/bin/qmd` install path (including `install-prefix` installs). QMD update/embed failures and timeouts are warning-only for the refresh wrapper: missing QMD is a no-op, and a non-zero QMD exit logs that the wiki index may be stale without changing the Codex refresh exit status. Nested Codex and QMD calls run with Git hook-local environment variables unset so `GIT_INDEX_FILE`, `GIT_DIR`, and `GIT_WORK_TREE` cannot leak into plugin marketplace or indexing checkouts.
    - `wiki/index.md`, `wiki/log.md`, `wiki/gaps.md`, `wiki/architecture.md`, `wiki/decisions.md`, `wiki/dependencies.md`, and `raw/notes/.gitkeep`.
-   - Managed LLM WIKI blocks in `AGENTS.md` and `CLAUDE.md`, plus `.claude/settings.json` with a managed `SessionStart` hook that prints `wiki/index.md` and recent `wiki/log.md`.
+   - Managed LLM WIKI blocks in `AGENTS.md` and `CLAUDE.md` that require reading `wiki/index.md`, searching the project wiki, checking configured `main_wiki_path`, using `/llm-wiki:wiki-plan` for planning, adding `wiki/log.d/` fragments instead of editing compiled `wiki/log.md`, and recording uncertainty in `wiki/gaps.md`; plus `.claude/settings.json` with a managed `SessionStart` hook that prints `wiki/index.md` and recent `wiki/log.md`.
 10. **Commit llm-wiki bootstrap files** via `GitOps#commit_llm_wiki_bootstrap!`, committing tracked project context as `chore: initialize llm-wiki` so future Hive worktrees inherit wiki context.
 11. **Install runtime wiki hooks** via `Hive::LlmWikiBootstrap.install_runtime_hooks!`: adds/replaces only the managed block in `.git/hooks/post-commit`, writes Linux user systemd service/timer files for daily refresh, and enables the timer through `timers.target.wants`.
 12. **Register globally** via `Hive::Config.register_project(name: basename(path), path: path)`, writing into the XDG global config path (`~/.config/hive/config.yml`, or `HIVE_HOME/config.yml`).

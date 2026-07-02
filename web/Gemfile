@@ -70,4 +70,10 @@ end
 # The hive control plane: status payloads, gate approval, daemon dispatch,
 # the GitHub device-flow gate, the agent OAuth relay, and Telegram
 # validation all come from the gem — the web tier adds no pipeline logic.
-gem "hive-cli", path: ".."
+#
+# In a source checkout the gem lives at the repo root (".."). The MANAGED
+# bundle (the extracted hive-web-<version>.tar.gz release asset) has no gem
+# at ".." — and hive-cli is not on rubygems — so `hive web`/`hive setup`
+# export HIVE_CLI_ROOT pointing at the installed gem's own root before
+# running bundler or the Rails server.
+gem "hive-cli", path: ENV.fetch("HIVE_CLI_ROOT", "..")

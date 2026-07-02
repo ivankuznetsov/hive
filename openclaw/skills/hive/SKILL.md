@@ -4,7 +4,7 @@ description: >-
   Run Hive's folder-based coding-agent pipeline from OpenClaw: guided CLI setup,
   project init, task creation, plan/develop/review workflows, status, daemon,
   and guarded admin commands.
-version: 0.1.1
+version: 0.1.2
 user-invocable: true
 metadata:
   openclaw:
@@ -48,6 +48,16 @@ That listing installs the `/hive` slash command. First run should normally be:
 - `/hive web` starts the Hivebox browser surface when a user wants the local web UI.
 - `/hive wiki compile-log --check` verifies that `wiki/log.md` matches the fragments in `wiki/log.d/`.
 - `/hive doctor` checks local runtime and skill configuration.
+
+## Custom Workflows
+
+Beyond the default coding pipeline, Hive can run project-authored custom workflows: multi-stage agent work with stages, agents, and checkpoints for non-coding domains. Teams can use these for writing, feedback triage, research, content pipelines, and other repeatable work that benefits from the same folder-based handoff model.
+
+These `/hive` commands map to the underlying `hive ...` CLI; the scaffold command is shown in bare CLI form:
+
+- `/hive init . --workflow <id>` chooses the workflow for the whole project at initialization time, so tasks created there use that default.
+- `/hive new . --workflow <id> "draft launch notes"` overrides the workflow for one task when creating it.
+- `hive workflow new <id> [--template <name>]` is the existing scaffold command for creating a project-local workflow descriptor under `<hive_state_path>/workflows/`.
 
 ## CLI Detection
 

@@ -2,6 +2,7 @@ require "test_helper"
 require "json"
 require "json_schemer"
 require "yaml"
+require "hive/cli"
 require "hive/commands/refactor_patrol"
 require "hive/config"
 require "hive/patrol/feature"
@@ -249,6 +250,19 @@ class RefactorPatrolCommandTest < Minitest::Test
     end
   end
 
+  def test_cli_dispatches_refactor_patrol_command
+    with_refactor_patrol_project do
+      out, _err, status = with_captured_exit do
+        Hive::CLI.start(%w[refactor-patrol demo --dry-run --feature checkout --json])
+      end
+
+      assert_equal Hive::ExitCodes::SUCCESS, status
+      payload = JSON.parse(out)
+      assert_equal true, payload.fetch("dry_run")
+      assert_equal "demo", payload.fetch("project")
+    end
+  end
+
   def test_project_without_refactor_patrol_block_errors_clearly
     with_tmp_global_config do
       with_tmp_git_repo do |repo|
@@ -281,6 +295,57 @@ class RefactorPatrolCommandTest < Minitest::Test
       assert_equal Hive::ExitCodes::SUCCESS, status
       assert_equal "PRIOR", JSON.parse(out).fetch("last_scanned_sha")
       assert_equal "PRIOR", JSON.parse(File.read(File.join(state_dir, "state.json"))).fetch("last_scanned_sha")
+    end
+  end
+
+  def test_changed_since_exception_keeps_scoped_features
+    with_refactor_patrol_project do |repo|
+      reviewer = FakeReviewer.new({ "checkout" => [ thesis("checkout", feature_id: "checkout", fingerprint: "fp-checkout") ] })
+      command = command_for(
+        dry_run: true,
+        path_hint: "lib",
+        changed_since: "HEAD",
+        features: [ feature("checkout", files: [ "lib/checkout.rb" ]) ],
+        reviewer: reviewer,
+        leverage_scores: leverage_scores("checkout" => 0.9)
+      )
+      original_capture3 = Open3.method(:capture3)
+      begin
+        Open3.define_singleton_method(:capture3) do |*args|
+          if args[0, 4] == [ "git", "-C", repo, "diff" ]
+            raise "git unavailable"
+          end
+
+          original_capture3.call(*args)
+        end
+        out, _err, status = with_captured_exit { command.call }
+      ensure
+        Open3.define_singleton_method(:capture3, original_capture3)
+      end
+
+      assert_equal Hive::ExitCodes::SUCCESS, status
+      assert_equal [ "checkout" ], reviewer.seen_feature_ids
+      assert_equal 1, JSON.parse(out).fetch("features_mapped")
+      refute File.exist?(File.join(repo, ".hive-state", "refactor_patrol", "state.json"))
+    end
+  end
+
+  def test_mapper_cfg_deep_copies_refactor_patrol_settings
+    with_refactor_patrol_project do
+      cfg = {
+        "patrol" => { "review" => { "max_owned_files" => 99 } },
+        "refactor_patrol" => {
+          "include" => [ "lib/**" ],
+          "exclude" => [ "vendor/**" ],
+          "review" => { "max_owned_files" => 3 }
+        }
+      }
+      mapped = command_for.send(:mapper_cfg, cfg)
+
+      assert_equal [ "lib/**" ], mapped.dig("patrol", "include")
+      assert_equal [ "vendor/**" ], mapped.dig("patrol", "exclude")
+      assert_equal({ "max_owned_files" => 3 }, mapped.dig("patrol", "review"))
+      refute_same cfg, mapped
     end
   end
 

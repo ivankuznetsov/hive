@@ -355,6 +355,18 @@ class ConfigTest < Minitest::Test
       assert_includes err.message, "refactor_patrol.review"
       assert_includes err.message, "must be a Hash"
     end
+
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        refactor_patrol:
+          enabled: maybe
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_includes err.message, "refactor_patrol.enabled"
+      assert_includes err.message, "must be a boolean"
+    end
   end
 
   # An unset `mode` must NOT inject medium's knobs (opt-in). A patrol

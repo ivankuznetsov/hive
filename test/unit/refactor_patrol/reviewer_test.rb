@@ -123,9 +123,124 @@ class RefactorPatrolReviewerTest < Minitest::Test
     end
   end
 
+  def test_runner_error_records_agent_failure_message
+    with_tmp_dir do |dir|
+      runner = ->(**) { { status: :error, error_message: "agent stopped" } }
+      reviewer = Hive::RefactorPatrol::Reviewer.new(dir, cfg: cfg, state: Hive::RefactorPatrol::StateStore.new(dir), agent_runner: runner)
+
+      assert_empty reviewer.call([ feature ], leverage_by_feature: leverage)
+      assert_equal "agent_failed", reviewer.review_errors.first.fetch("error")
+      assert_equal "agent stopped", reviewer.review_errors.first.fetch("message")
+    end
+  end
+
+  def test_unexpected_runner_exception_records_review_error
+    with_tmp_dir do |dir|
+      runner = ->(**) { raise ArgumentError, "bad prompt" }
+      reviewer = Hive::RefactorPatrol::Reviewer.new(dir, cfg: cfg, state: Hive::RefactorPatrol::StateStore.new(dir), agent_runner: runner)
+
+      assert_empty reviewer.call([ feature ], leverage_by_feature: leverage)
+      assert_equal "review_error", reviewer.review_errors.first.fetch("error")
+      assert_includes reviewer.review_errors.first.fetch("message"), "ArgumentError: bad prompt"
+    end
+  end
+
+  def test_test_rich_slice_without_known_test_command_requires_characterization
+    with_tmp_dir do |dir|
+      raw = valid_raw_thesis.merge(
+        "required_validation" => { "commands" => [], "characterization_first" => false, "notes" => "" }
+      )
+      reviewer = reviewer_for(dir, [ raw ], cfg: cfg.merge("refactor_patrol" => cfg.fetch("refactor_patrol").merge("commands" => {})))
+
+      thesis = reviewer.call([ feature(tests: [ "test/checkout_test.rb" ]) ], leverage_by_feature: leverage).first
+
+      assert_equal true, thesis.required_validation.fetch("characterization_first")
+      assert_includes thesis.required_validation.fetch("notes"), "Name explicit validation commands"
+    end
+  end
+
+  def test_evidence_less_thesis_is_retained_as_inadmissible
+    with_tmp_dir do |dir|
+      raw = valid_raw_thesis.merge("evidence" => [])
+
+      thesis = reviewer_for(dir, [ raw ]).call([ feature(tests: [ "test/checkout_test.rb" ]) ], leverage_by_feature: leverage).first
+
+      refute thesis.admissible
+      assert_equal [ { "snippet" => "no evidence supplied; retained as inadmissible" } ],
+                   thesis.evidence
+    end
+  end
+
+  def test_non_dry_run_review_error_writes_run_log
+    with_tmp_dir do |dir|
+      state = Hive::RefactorPatrol::StateStore.new(dir)
+      reviewer = Hive::RefactorPatrol::Reviewer.new(dir, cfg: cfg, state: state, agent_runner: ->(**) { raise "boom" })
+
+      assert_empty reviewer.call([ feature ], leverage_by_feature: leverage)
+      logs = Dir[File.join(state.root, "runs", "review-error-*.json")]
+
+      assert_equal 1, logs.size
+      assert_equal "review_error", JSON.parse(File.read(logs.first)).fetch("error")
+    end
+  end
+
+  def test_run_agent_records_usage_and_profile_fallback
+    with_tmp_dir do |dir|
+      state = Hive::RefactorPatrol::StateStore.new(dir)
+      reviewer = Hive::RefactorPatrol::Reviewer.new(dir, cfg: cfg, state: state)
+      fake_profile = Object.new
+      fake_agent = Class.new do
+        def initialize(**); end
+
+        def run!
+          { usage: { model: "m", input: 1, output: 2, cached: 3 } }
+        end
+      end
+      records = []
+
+      original_lookup = Hive::AgentProfiles.method(:lookup)
+      original_record = Hive::UsageDb.method(:record!)
+      original_agent = Hive.const_get(:Agent)
+      begin
+        Hive::AgentProfiles.define_singleton_method(:lookup) { |*| fake_profile }
+        Hive::UsageDb.define_singleton_method(:record!) { |**kwargs| records << kwargs }
+        Hive.send(:remove_const, :Agent)
+        Hive.const_set(:Agent, fake_agent)
+        reviewer.send(:run_agent, prompt: "p", output_path: File.join(dir, "out.json"), run_dir: state.run_dir("review"))
+      ensure
+        Hive.send(:remove_const, :Agent)
+        Hive.const_set(:Agent, original_agent)
+        Hive::AgentProfiles.define_singleton_method(:lookup, original_lookup)
+        Hive::UsageDb.define_singleton_method(:record!, original_record)
+      end
+
+      assert_equal 1, records.size
+      assert_equal "claude", records.first.fetch(:agent)
+      assert_equal "refactor-patrol-review", records.first.fetch(:stage)
+    end
+  end
+
+  def test_record_usage_warning_is_non_fatal
+    with_tmp_dir do |dir|
+      reviewer = Hive::RefactorPatrol::Reviewer.new(dir, cfg: cfg, state: Hive::RefactorPatrol::StateStore.new(dir))
+      original_record = Hive::UsageDb.method(:record!)
+      begin
+        Hive::UsageDb.define_singleton_method(:record!) { |**_kwargs| raise "db down" }
+
+        _out, err = capture_io do
+          reviewer.send(:record_usage, { usage: { input: 1 } }, Struct.new(:name).new("claude"), "stage", Time.now.utc)
+        end
+
+        assert_includes err, "usage record failed"
+      ensure
+        Hive::UsageDb.define_singleton_method(:record!, original_record)
+      end
+    end
+  end
+
   private
 
-  def reviewer_for(dir, raw_theses)
+  def reviewer_for(dir, raw_theses, cfg: self.cfg)
     runner = lambda do |output_path:, **|
       FileUtils.mkdir_p(File.dirname(output_path))
       File.write(output_path, JSON.generate("theses" => raw_theses))

@@ -20,6 +20,32 @@ class RefactorPatrolFingerprintTest < Minitest::Test
     end
   end
 
+  def test_feature_round_trips_through_state_store
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::StateStore.new(dir)
+      feature = Hive::Patrol::Feature.new(
+        id: "checkout",
+        kind: "command",
+        entrypoints: [ "bin/hive" ],
+        owned_files: [ "lib/checkout.rb" ],
+        context_files: [],
+        tests: []
+      )
+
+      store.write_feature(feature)
+
+      assert_equal feature.to_h, JSON.parse(File.read(File.join(store.root, "features", "checkout.json")))
+    end
+  end
+
+  def test_read_json_returns_empty_hash_for_unreadable_path
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::StateStore.new(dir)
+
+      assert_equal({}, store.read_json(dir))
+    end
+  end
+
   def test_write_json_preserves_existing_file_when_temp_garbage_exists
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::StateStore.new(dir)

@@ -130,6 +130,7 @@
         "patrol_reviewers",
         "patrol_mode",
         "triage_bias",
+        "adhoc_auto_fix",
         "budgets",
         "timeouts",
         "daemon_enabled",
@@ -203,6 +204,10 @@
             "safetyist"
           ]
         },
+        "adhoc_auto_fix": {
+          "type": "boolean",
+          "description": "Whether `hive init` enabled auto-fix for ad-hoc PR reviews created by `hive review --pr`. False means review-only: publish comments, do not prepare local fix commits."
+        },
         "budgets": {
           "$ref": "#/$defs/LimitMap"
         },
@@ -242,6 +247,7 @@
         "patrol_reviewers",
         "patrol_mode",
         "triage_bias",
+        "adhoc_auto_fix",
         "budgets",
         "timeouts",
         "daemon_enabled",
@@ -351,6 +357,10 @@
             "courageous",
             "safetyist"
           ]
+        },
+        "adhoc_auto_fix": {
+          "type": "boolean",
+          "description": "Whether `hive init` enabled auto-fix for ad-hoc PR reviews created by `hive review --pr`. False means review-only: publish comments, do not prepare local fix commits."
         },
         "budgets": {
           "$ref": "#/$defs/LimitMap"

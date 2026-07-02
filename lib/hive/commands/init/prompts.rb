@@ -50,6 +50,7 @@ module Hive
         raise "permission-mode choices/allowlist drift: #{CLAUDE_PERMISSION_MODE_CHOICES.sort.inspect} vs #{CLAUDE_PERMISSION_MODES.sort.inspect}" unless CLAUDE_PERMISSION_MODE_CHOICES.sort == CLAUDE_PERMISSION_MODES.sort
         DEFAULT_TRIAGE_BIAS = "courageous".freeze
         TRIAGE_BIASES = %w[courageous safetyist].freeze
+        DEFAULT_ADHOC_AUTO_FIX = Hive::Config::DEFAULTS.fetch("review").fetch("adhoc").fetch("fix")
 
         # Reviewer entries shipped in templates/project_config.yml.erb. The
         # multi-select prompt offers these as the toggleable set; rendering
@@ -132,6 +133,7 @@ module Hive
         #     "patrol_reviewers"  => Array<String>,    # subset of PATROL_REVIEWER_NAMES
         #     "patrol_mode"       => String,           # ultrapatrol | high | medium | low | off
         #     "triage_bias"       => String,           # courageous | safetyist
+        #     "adhoc_auto_fix"    => Boolean           # auto-fix ad-hoc PR reviews
         #     "budgets"  => Hash<String, Integer>,     # 10 keys (LIMIT_KEYS)
         #     "timeouts" => Hash<String, Integer>,     # 10 keys (LIMIT_KEYS)
         #     "daemon_enabled"    => Boolean           # auto-advance pipeline (ADR-024)
@@ -153,6 +155,7 @@ module Hive
           patrol_reviewers = prompt_patrol_reviewers
           patrol_mode = prompt_patrol_mode
           triage_bias = prompt_triage_bias
+          adhoc_auto_fix = prompt_adhoc_auto_fix
           budgets, timeouts = prompt_limits
           daemon_enabled = prompt_daemon_enabled
           babysitter_enabled = prompt_babysitter_enabled
@@ -169,6 +172,7 @@ module Hive
             "patrol_reviewers" => patrol_reviewers,
             "patrol_mode" => patrol_mode,
             "triage_bias" => triage_bias,
+            "adhoc_auto_fix" => adhoc_auto_fix,
             "budgets" => budgets,
             "timeouts" => timeouts,
             "daemon_enabled" => daemon_enabled,
@@ -212,6 +216,7 @@ module Hive
             "patrol_reviewers" => DEFAULT_PATROL_REVIEWER_NAMES.dup,
             "patrol_mode" => DEFAULT_PATROL_MODE,
             "triage_bias" => DEFAULT_TRIAGE_BIAS,
+            "adhoc_auto_fix" => DEFAULT_ADHOC_AUTO_FIX,
             "budgets" => default_budgets,
             "timeouts" => default_timeouts,
             "daemon_enabled" => true,
@@ -230,8 +235,9 @@ module Hive
             "reviewers=all#{DEFAULT_REVIEWER_NAMES.size}, " \
             "patrol_reviewers=codex-native-review, " \
             "patrol_mode=#{DEFAULT_PATROL_MODE}, " \
-            "triage=#{DEFAULT_TRIAGE_BIAS}, limits=defaults, daemon=enabled, " \
-            "babysitter=enabled, daemon_autostart=disabled"
+            "triage=#{DEFAULT_TRIAGE_BIAS}, " \
+            "adhoc_auto_fix=#{DEFAULT_ADHOC_AUTO_FIX ? 'enabled' : 'disabled'}, " \
+            "limits=defaults, daemon=enabled, babysitter=enabled, daemon_autostart=disabled"
           )
           answers
         end
@@ -525,6 +531,23 @@ module Hive
           TRIAGE_BIASES.find { |bias| bias.casecmp(answer).zero? }
         end
 
+        def prompt_adhoc_auto_fix
+          @output.puts ""
+          @output.puts "Ad-hoc PR auto-fix — for `hive review --pr` on existing GitHub PRs."
+          @output.puts "  Leave disabled for review-only mode: Hive publishes review comments"
+          @output.puts "  but does not prepare local fix commits for someone else's PR."
+          @output.puts "  Enable only when you want accepted ad-hoc findings to enter the fix loop."
+          loop do
+            @output.print "Enable auto-fix for ad-hoc PR reviews? [y/N]: "
+            @output.flush
+            answer = read_line.downcase
+            return false if answer.empty? || answer == "n" || answer == "no"
+            return true  if answer == "y" || answer == "yes"
+
+            @output.puts "  please answer y or n"
+          end
+        end
+
         def prompt_limits
           @output.puts ""
           @output.puts "Limits for each stage / review role. Format: <budget_usd>,<timeout_sec> (blank = defaults)."
@@ -648,6 +671,7 @@ module Hive
           @output.puts "  patrol_reviewers  = [#{answers['patrol_reviewers'].join(', ')}]"
           @output.puts "  patrol_mode       = #{answers['patrol_mode']}"
           @output.puts "  triage_bias       = #{answers['triage_bias']}"
+          @output.puts "  adhoc_auto_fix    = #{answers['adhoc_auto_fix'] ? 'enabled' : 'disabled'}"
           @output.puts "  limits            = #{summarize_limits(answers)}"
           @output.puts "  daemon            = #{answers['daemon_enabled'] ? 'enabled' : 'disabled'}"
           @output.puts "  babysitter        = #{answers['babysitter_enabled'] ? 'enabled' : 'disabled'}"

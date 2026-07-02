@@ -42,6 +42,7 @@ class HiveCommandsInitTest < Minitest::Test
       "claude_mode" => "headless",
       "patrol_mode" => "high",
       "triage_bias" => "safetyist",
+      "adhoc_auto_fix" => true,
       "daemon_enabled" => false
     )
 
@@ -57,6 +58,7 @@ class HiveCommandsInitTest < Minitest::Test
     assert_equal Hive::Commands::Init::Prompts::DEFAULT_PATROL_REVIEWER_NAMES, config_binding.patrol_reviewers
     assert_equal "high", config_binding.patrol_mode
     assert_equal "safetyist", config_binding.triage_bias
+    assert_equal true, config_binding.adhoc_auto_fix
     assert_equal default_init_limits("budget_usd"), config_binding.budgets
     assert_equal default_init_limits("timeout_sec"), config_binding.timeouts
     refute config_binding.daemon_enabled
@@ -99,6 +101,16 @@ class HiveCommandsInitTest < Minitest::Test
       end
       assert_includes error.message, section
     end
+  end
+
+  def test_project_config_renders_adhoc_auto_fix_choice
+    disabled = render_fresh_config(:coding)
+    assert_match(/github_publish:\n    enabled: true\n    max_attempts: 2/, disabled)
+    assert_match(/adhoc:\n    reviewers: null\n    fix: false/, disabled)
+
+    enabled_answers = project_config_answers.merge("adhoc_auto_fix" => true)
+    enabled = render_fresh_config(:coding, answers: enabled_answers)
+    assert_match(/adhoc:\n    reviewers: null\n    fix: true/, enabled)
   end
 
   def test_run_init_preflight_warns_when_doctor_reports_config_error
@@ -249,14 +261,14 @@ class HiveCommandsInitTest < Minitest::Test
                  "fresh-render and rebind paths must emit byte-identical default_workflow quoting"
   end
 
-  def render_fresh_config(default_workflow)
+  def render_fresh_config(default_workflow, answers: project_config_answers)
     require "erb"
     template = File.read(File.expand_path("../../../templates/project_config.yml.erb", __dir__))
     binding_object = Hive::Commands::Init::ProjectConfigBinding.new(
       project_name: "example",
       default_branch: "main",
       worktree_root: "/tmp/example.worktrees",
-      answers: project_config_answers,
+      answers: answers,
       default_workflow: default_workflow
     )
     ERB.new(template, trim_mode: "-").result(binding_object.binding_for_erb)

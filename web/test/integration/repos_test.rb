@@ -54,6 +54,8 @@ class ReposTest < ActionDispatch::IntegrationTest
                   "coding", "fresh setup must preselect the coding workflow"
     assert_select "input[name='settings[enabled_reviewers][]']", { minimum: 2 },
                   "the reviewer multi-select must offer the same set the TTY prompt does"
+    assert_select "input[name='settings[adhoc_auto_fix]'][type='checkbox']", 1,
+                  "the web setup must expose the same ad-hoc auto-fix choice as hive init"
     assert_select "input[name='settings[budgets][brainstorm]']", 1
   end
 
@@ -85,6 +87,7 @@ class ReposTest < ActionDispatch::IntegrationTest
         settings: {
           workflow: "content",
           claude_mode: "headless", triage_bias: "safetyist", patrol_mode: "off",
+          adhoc_auto_fix: "1",
           enabled_reviewers_submitted: "1", enabled_reviewers: [ "claude-ce-code-review" ],
           daemon_enabled: "0", babysitter_enabled: "0",
           budgets: { brainstorm: "3" }
@@ -98,8 +101,13 @@ class ReposTest < ActionDispatch::IntegrationTest
     config = File.read(File.join(dir, ".hive-state", "config.yml"))
     assert_match(/headless/, config, "the chosen claude mode must land in the project config")
     assert_match(/safetyist/, config, "the chosen triage bias must land in the project config")
-    assert_equal "content", YAML.safe_load(config).fetch("default_workflow"),
+    parsed_config = YAML.safe_load(config)
+    assert_equal "content", parsed_config.fetch("default_workflow"),
                  "the chosen workflow must land in the project config through Init.new(workflow:)"
+    assert_equal true, parsed_config.dig("review", "adhoc", "fix"),
+                 "the web path must pass ad-hoc auto-fix through the prompts seam"
+    assert_equal true, parsed_config.dig("review", "github_publish", "enabled"),
+                 "GitHub publishing must stay enabled by default for PR review comments"
   ensure
     Hive::Commands::Init.define_singleton_method(:new, original_init_new) if original_init_new
   end

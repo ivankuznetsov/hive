@@ -806,6 +806,7 @@ module Hive
           "patrol_reviewers" => answers.fetch("patrol_reviewers"),
           "patrol_mode" => answers.fetch("patrol_mode", Hive::Commands::Init::Prompts::DEFAULT_PATROL_MODE),
           "triage_bias" => answers.fetch("triage_bias", Hive::Commands::Init::Prompts::DEFAULT_TRIAGE_BIAS),
+          "adhoc_auto_fix" => answers.fetch("adhoc_auto_fix", Hive::Commands::Init::Prompts::DEFAULT_ADHOC_AUTO_FIX),
           "budgets" => answers.fetch("budgets"),
           "timeouts" => answers.fetch("timeouts"),
           "daemon_enabled" => answers.fetch("daemon_enabled", true),
@@ -874,6 +875,7 @@ module Hive
           [ "default branch", ops.default_branch ],
           [ "hive state",     ops.hive_state_path ],
           [ "worktree root",  worktree_root ],
+          [ "ad-hoc auto-fix", answers.fetch("adhoc_auto_fix", Hive::Commands::Init::Prompts::DEFAULT_ADHOC_AUTO_FIX) ? "enabled" : "disabled" ],
           [ "daemon",         answers.fetch("daemon_enabled", true) ? "enabled" : "disabled" ],
           [ "babysitter",     answers.fetch("babysitter_enabled", true) ? "enabled" : "disabled" ]
         ]
@@ -1144,8 +1146,9 @@ module Hive
       # worktree root) plus the prompted answers hash from
       # Hive::Commands::Init::Prompts (planning_agent / claude_mode /
       # claude_permission_mode / development_agent / enabled_reviewers /
-      # patrol_reviewers / patrol_mode / triage_bias / budgets / timeouts /
-      # daemon_enabled / babysitter_enabled / daemon_autostart). The single source of truth
+      # patrol_reviewers / patrol_mode / triage_bias / adhoc_auto_fix /
+      # budgets / timeouts / daemon_enabled / babysitter_enabled /
+      # daemon_autostart). The single source of truth
       # for the answers hash is `Prompts#collect`; this binding never invents
       # defaults of its own — callers always supply `answers:` (production:
       # from Prompts; tests: explicit hashes).
@@ -1174,6 +1177,7 @@ module Hive
           @patrol_reviewers = answers.fetch("patrol_reviewers")
           @patrol_mode = answers.fetch("patrol_mode")
           @triage_bias = answers.fetch("triage_bias")
+          @adhoc_auto_fix = answers.fetch("adhoc_auto_fix")
           @budgets = required_limit_answers(answers.fetch("budgets"), "budgets")
           @timeouts = required_limit_answers(answers.fetch("timeouts"), "timeouts")
           @daemon_enabled = answers.fetch("daemon_enabled")
@@ -1185,7 +1189,7 @@ module Hive
                     :default_workflow,
                     :planning_agent, :claude_mode, :claude_permission_mode,
                     :claude_model, :claude_effort, :development_agent,
-                    :enabled_reviewers, :patrol_reviewers, :patrol_mode, :triage_bias, :budgets, :timeouts,
+                    :enabled_reviewers, :patrol_reviewers, :patrol_mode, :triage_bias, :adhoc_auto_fix, :budgets, :timeouts,
                     :daemon_enabled, :babysitter_enabled, :daemon_autostart
 
         def binding_for_erb

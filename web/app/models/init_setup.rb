@@ -10,7 +10,7 @@ class InitSetup
 
   TRIAGE_CHOICES = %w[courageous safetyist].freeze
   EFFORT_CHOICES = Prompts::CLAUDE_EFFORT_CHOICES
-  BOOLEAN_KEYS = %w[daemon_enabled babysitter_enabled daemon_autostart].freeze
+  BOOLEAN_KEYS = %w[adhoc_auto_fix daemon_enabled babysitter_enabled daemon_autostart].freeze
 
   class << self
     # registered_names yields symbols; everything downstream (form values,
@@ -48,6 +48,7 @@ class InitSetup
         "patrol_reviewers" => Prompts::DEFAULT_PATROL_REVIEWER_NAMES.dup,
         "patrol_mode" => Prompts::DEFAULT_PATROL_MODE,
         "triage_bias" => Prompts::DEFAULT_TRIAGE_BIAS,
+        "adhoc_auto_fix" => Prompts::DEFAULT_ADHOC_AUTO_FIX,
         "budgets" => limit_keys.index_with { |k| Hive::Config::DEFAULTS["budget_usd"].fetch(k) },
         "timeouts" => limit_keys.index_with { |k| Hive::Config::DEFAULTS["timeout_sec"].fetch(k) },
         "daemon_enabled" => true,

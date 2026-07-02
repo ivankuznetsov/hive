@@ -7,16 +7,18 @@ class HiveBotSupervisorTest < Minitest::Test
 
   ChildExit = Hive::Bot::ChildSupervisor::ChildExit
   Update = Struct.new(:chat_id, :update_id, :message_id, keyword_init: true)
-  Row = Struct.new(:project, :slug, :stage, :action, :action_label, :marker, :attrs, :diagnostic,
+  Row = Struct.new(:project, :project_path, :hive_state_path, :slug, :stage, :workflow, :action, :action_label,
+                   :marker, :attrs, :diagnostic,
+                   :id, :display_name, :pr_url,
                    keyword_init: true)
   StatusResult = Struct.new(:ok, :rows, :legacy_stage_dirs, :error, :envelope, :warning, keyword_init: true)
 
   FakeTelegram = Struct.new(:messages, :raise_on_send, :keyboard_clears,
                             :commands_registered, :raise_on_set_my_commands, keyword_init: true) do
-    def send_message(chat_id:, text:, reply_markup: nil)
+    def send_message(chat_id:, text:, reply_markup: nil, parse_mode: nil)
       raise raise_on_send if raise_on_send
 
-      messages << { chat_id: chat_id, text: text, reply_markup: reply_markup }
+      messages << { chat_id: chat_id, text: text, reply_markup: reply_markup, parse_mode: parse_mode }
     end
 
     def edit_message_reply_markup(chat_id:, message_id:, reply_markup: nil)
@@ -58,7 +60,7 @@ class HiveBotSupervisorTest < Minitest::Test
 
   class FakeRouter
     Result = Struct.new(:action, :text, :reply_markup, :command_argv, :commands, :project, :slug,
-                        :question_n, :answer_text, :mode, :alert_reset, :clear_keyboard, :format,
+                        :stage, :question_n, :answer_text, :mode, :alert_reset, :clear_keyboard, :format,
                         :intent, :attachment,
                         keyword_init: true)
   end
@@ -237,10 +239,13 @@ class HiveBotSupervisorTest < Minitest::Test
     )
   end
 
-  def row(project: "hive", slug: "task", stage: "3-plan", action: "ready_to_develop",
-          action_label: "Develop", marker: "COMPLETE", attrs: {}, diagnostic: nil)
-    Row.new(project: project, slug: slug, stage: stage, action: action,
-            action_label: action_label, marker: marker, attrs: attrs, diagnostic: diagnostic)
+  def row(project: "hive", slug: "task", stage: "3-plan", workflow: "coding", action: "ready_to_develop",
+          action_label: "Develop", marker: "COMPLETE", attrs: {}, diagnostic: nil,
+          id: nil, display_name: nil, pr_url: nil, project_path: "/tmp/#{project}")
+    Row.new(project: project, project_path: project_path, hive_state_path: File.join(project_path, ".hive-state"),
+            slug: slug, stage: stage, workflow: workflow, action: action,
+            action_label: action_label, marker: marker, attrs: attrs, diagnostic: diagnostic,
+            id: id, display_name: display_name, pr_url: pr_url)
   end
 
 
@@ -313,7 +318,8 @@ class HiveBotSupervisorTest < Minitest::Test
     @supervisor.send(:reply_for_child, child_exit(envelope: envelope))
 
     text = @telegram.messages.first.fetch(:text)
-    assert_equal 'Diagnosis is available for "Red task…". Tap Show details to dump it here.', text
+    assert_equal 'Refreshed diagnosis for "Red task…". ' \
+                 "Tap Show details for the summary (updates on the next status refresh).", text
     refute_includes text, "REVIEW_ERROR"
     refute_includes text, "fix attempt timed out"
     refute_includes text, "/tmp/red-status.md"
@@ -350,12 +356,140 @@ class HiveBotSupervisorTest < Minitest::Test
     refute_includes text, "exit 0"
   end
 
-  def test_reply_for_child_renders_empty_success_diagnostic_fallback
+  def test_reply_for_child_renders_empty_success_diagnostic_from_logs
+    Dir.mktmpdir("hive-bot-diagnose") do |folder|
+      logs = File.join(folder, "logs")
+      FileUtils.mkdir_p(logs)
+      log_path = File.join(logs, "diagnose.log")
+      File.write(log_path, "first line\nlast useful line\n")
+      envelope = {
+        "schema" => "hive-status-diagnose",
+        "ok" => true,
+        "slug" => "stuck-task",
+        "task_folder" => folder,
+        "marker_summary" => "ERROR reason=boom"
+      }
+
+      @supervisor.send(:reply_for_child, child_exit(envelope: envelope))
+
+      text = @telegram.messages.first.fetch(:text)
+      assert_includes text, "Refreshed diagnosis for"
+      assert_includes text, "ERROR reason=boom: last useful line"
+      assert_includes text, "Log: #{log_path}"
+      refute_includes text, "No diagnostic available"
+    end
+  end
+
+  def test_reply_for_child_renders_empty_success_diagnostic_from_red_status
+    Dir.mktmpdir("hive-bot-diagnose") do |folder|
+      path = File.join(folder, "diagnostics", "red-status.md")
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, <<~MD)
+        ---
+        summary: Cached agent verdict
+        generated_by: codex
+        ---
+        ignored body
+      MD
+      envelope = {
+        "schema" => "hive-status-diagnose",
+        "ok" => true,
+        "slug" => "red-status-task",
+        "task_folder" => folder
+      }
+
+      @supervisor.send(:reply_for_child, child_exit(envelope: envelope))
+
+      text = @telegram.messages.first.fetch(:text)
+      assert_includes text, "Cached agent verdict"
+      # red-status.md is a diagnostic artifact, not a log — labelled accordingly.
+      assert_includes text, "Diagnostics: #{path}"
+      refute_includes text, "Log: #{path}"
+      refute_includes text, "No diagnostic available"
+    end
+  end
+
+  def test_reply_for_child_renders_empty_success_diagnostic_from_marker
+    Dir.mktmpdir("hive-bot-diagnose") do |folder|
+      state_file = File.join(folder, "task.md")
+      File.write(state_file, "<!-- ERROR reason=worktree_git_failed -->\n")
+      envelope = {
+        "schema" => "hive-status-diagnose",
+        "ok" => true,
+        "slug" => "marker-only-task",
+        "task_folder" => folder,
+        "marker_summary" => "ERROR reason=worktree_git_failed"
+      }
+
+      @supervisor.send(:reply_for_child, child_exit(envelope: envelope))
+
+      text = @telegram.messages.first.fetch(:text)
+      assert_includes text, "ERROR reason=worktree_git_failed"
+      # The marker state file is labelled Marker:, not Log:.
+      assert_includes text, "Marker: #{state_file}"
+      refute_includes text, "Log: #{state_file}"
+      refute_includes text, "No diagnostic available"
+    end
+  end
+
+  def test_reply_for_child_marker_tier_pins_threaded_state_file
+    Dir.mktmpdir("hive-bot-diagnose") do |folder|
+      # An advanced folder carries a stale marker in an earlier-stage file
+      # (task.md) AND the authoritative state file (pr.md). Without the threaded
+      # state_file the bot would glob task.md first and mislabel the source.
+      File.write(File.join(folder, "task.md"), "<!-- COMPLETE -->\n")
+      pr_md = File.join(folder, "pr.md")
+      File.write(pr_md, "<!-- REVIEW_STALE pass=2 -->\n")
+      envelope = {
+        "schema" => "hive-status-diagnose",
+        "ok" => true,
+        "slug" => "advanced-task",
+        "task_folder" => folder,
+        "marker_summary" => "REVIEW_STALE pass=2",
+        "state_file" => pr_md
+      }
+
+      @supervisor.send(:reply_for_child, child_exit(envelope: envelope))
+
+      text = @telegram.messages.first.fetch(:text)
+      assert_includes text, "REVIEW_STALE pass=2"
+      assert_includes text, "Marker: #{pr_md}"
+      refute_includes text, "Marker: #{File.join(folder, 'task.md')}"
+    end
+  end
+
+  def test_reply_for_child_empty_success_with_evidence_empty_folder_hints_task_folder
+    Dir.mktmpdir("hive-bot-diagnose") do |folder|
+      # A real folder that exists but holds no red-status / log / marker
+      # evidence: the resolver returns nil and the reply appends the folder hint.
+      envelope = {
+        "schema" => "hive-status-diagnose",
+        "ok" => true,
+        "slug" => "no-evidence-task",
+        "task_folder" => folder
+      }
+
+      @supervisor.send(:reply_for_child, child_exit(envelope: envelope))
+
+      text = @telegram.messages.first.fetch(:text)
+      assert_includes text, "Couldn't find a cached diagnosis"
+      assert_includes text, "Task folder: #{folder}"
+      # The empty-folder case is the original bug's exact scenario — guard the
+      # stale "No diagnostic available" copy explicitly, not just the positive
+      # "Couldn't find a cached diagnosis" assertion.
+      refute_includes text, "No diagnostic available"
+    end
+  end
+
+  def test_reply_for_child_empty_success_without_evidence_is_graceful
     envelope = { "schema" => "hive-status-diagnose", "ok" => true, "slug" => "stuck-task" }
 
     @supervisor.send(:reply_for_child, child_exit(envelope: envelope))
 
-    assert_equal "No diagnostic available for stuck-task.", @telegram.messages.first.fetch(:text)
+    text = @telegram.messages.first.fetch(:text)
+    assert_includes text, "Couldn't find a cached diagnosis"
+    assert_includes text, "Stuck task"
+    refute_includes text, "No diagnostic available for"
   end
 
   CallbackUpdate = Struct.new(:callback_query_id, :update_id, keyword_init: true) do
@@ -1178,6 +1312,7 @@ class HiveBotSupervisorTest < Minitest::Test
   def test_trigger_for_result_maps_intents_for_telemetry
     %i[
       slash_done callback_autofix callback_clear_and_retry callback_approve
+      callback_approve_plan callback_rerun
       callback_findings_accept_all callback_findings_reject_all callback_show_details
     ].each do |intent|
       result = FakeRouter::Result.new(intent: intent)
@@ -1216,9 +1351,19 @@ class HiveBotSupervisorTest < Minitest::Test
     commands = registered.first
     assert_equal Hive::Bot::Supervisor::BOT_COMMANDS, commands
     slash_names = commands.map { |cmd| cmd.fetch(:command) }
-    assert_equal %w[idea status queue answer approve autofix details done help], slash_names
+    assert_equal %w[idea status waiting queue answer approve autofix details done help], slash_names
     assert(commands.all? { |cmd| cmd.fetch(:description).length.between?(1, 256) },
            "every command description must be non-empty and within Telegram's 256-char cap")
+    # Pin the A5 discoverability copy: the typeable command menu must advertise
+    # the <id|slug> argument so operators learn they can paste a numeric id.
+    descriptions = commands.to_h { |cmd| [ cmd.fetch(:command), cmd.fetch(:description) ] }
+    # Pin the bare-text discoverability copy so a silent revert to a terser
+    # "Capture an idea" fails here: the menu must advertise that any message works.
+    assert_equal "Capture an idea, or just send any message", descriptions.fetch("idea")
+    assert_includes descriptions.fetch("answer"), "/answer <id|slug>"
+    assert_includes descriptions.fetch("approve"), "/approve <id|slug>"
+    assert_includes descriptions.fetch("autofix"), "/autofix <id|slug>"
+    assert_includes descriptions.fetch("details"), "/details <id|slug>"
   end
 
   def test_register_bot_commands_swallows_telegram_failure_and_logs_send_failure
@@ -1365,15 +1510,20 @@ class HiveBotSupervisorTest < Minitest::Test
                  "a verb that splits to no words must fall back to the literal 'Command' label"
   end
 
-  def test_inferred_success_slug_resolves_status_diagnose_target
+  def test_status_success_text_does_not_infer_a_diagnose_slug
+    # Plain `hive status --json` (Show details / /details) is rendered
+    # in-process by render_details and never reaches success-text inference;
+    # a `--diagnose` child short-circuits via diagnose_reply_for_child. The
+    # old `--diagnose` slug lookup was therefore dead and has been dropped —
+    # a status child carries no inferable slug, so only the project qualifies.
     text = @supervisor.send(
       :command_success_text,
       command_argv: [ "hive", "status", "--diagnose", "diag-slug", "--json" ],
       project: "hive", slug: ""
     )
 
-    assert_equal "Status check completed for hive/diag-slug.", text,
-                 "a blank slug on a status --diagnose run must be inferred from the argv that follows --diagnose"
+    assert_equal "Status check completed for hive.", text,
+                 "status runs no longer infer a slug from the removed --diagnose lookup"
   end
 
   def test_inferred_success_slug_resolves_markers_target_from_argv3
@@ -1435,12 +1585,77 @@ class HiveBotSupervisorTest < Minitest::Test
     text = @supervisor.send(:render_queue, rows)
 
     assert_includes text, "12 active tasks"
-    assert_includes text, "Task 0… — Plan"
+    assert_includes text, "Task 0… — — — Plan"
     assert_includes text, "+ 2 more tasks"
     refute_includes text, "hive/task-0"
     refute_includes text, "COMPLETE"
     refute_includes text, "done"
     refute_includes text, "running"
+  end
+
+  # The cap path is the fixture most likely to exceed Telegram's 4096-char
+  # body limit and to interleave HTML entities with anchors: exercise it
+  # with PR links AND HTML-special display names at once.
+  def test_render_queue_cap_path_interleaves_pr_links_with_escaped_special_names
+    rows = 12.times.map do |i|
+      row(slug: "task-#{i}-260615-abcd", id: 100 + i,
+          display_name: "Fix <Login> & Logout",
+          stage: "6-review",
+          pr_url: "https://github.com/example/repo/pull/#{500 + i}")
+    end
+
+    text = @supervisor.send(:render_queue, rows)
+
+    assert_includes text, "12 active tasks"
+    assert_includes text, "+ 2 more tasks", "the cap path must report the overflow count"
+    assert_includes text, "#100 Fix &lt;Login&gt; &amp; Logout",
+                    "an HTML-special display name must be entity-escaped on the cap path"
+    assert_includes text, '<a href="https://github.com/example/repo/pull/500">#500</a>',
+                    "each shown row keeps its clickable PR anchor alongside the escaped name"
+    refute_includes text, "<Login>",
+                    "no raw angle brackets from a display name may reach the HTML payload"
+    refute_includes text, '<a href="https://github.com/example/repo/pull/510">#510</a>',
+                    "rows past QUEUE_DISPLAY_CAP must not render"
+  end
+
+  def test_render_queue_adds_clickable_pr_link_and_escapes_html
+    rows = [
+      row(
+        slug: "fix-login-260615-abcd",
+        id: 12,
+        display_name: "Fix <Login> & More",
+        stage: "6-review",
+        pr_url: "https://github.com/example/repo/pull/561"
+      )
+    ]
+
+    text = @supervisor.send(:render_queue, rows)
+
+    assert_includes text, "#12 Fix &lt;Login&gt; &amp; More"
+    assert_includes text, '<a href="https://github.com/example/repo/pull/561">#561</a>'
+    assert_includes text, " — Review"
+  end
+
+  # /status now ships parse_mode: :html, so the legacy stage-dir lines —
+  # which are prepended to the rendered queue — must also be entity-escaped,
+  # not just the actionable rows. An HTML-special project name flows into the
+  # legacy line via NotificationBuilders.legacy_stage_dirs; without the
+  # html_escape on the legacy path, raw `<`/`&` would reach the HTML payload.
+  def test_render_queue_escapes_html_special_chars_in_legacy_stage_dir_line
+    legacy = legacy_stage_dirs(project: "a<b>&c")
+
+    text = @supervisor.send(:render_queue, [], legacy_stage_dirs: [ legacy ])
+
+    assert_includes text, "Project a&lt;b&gt;&amp;c has",
+                    "an HTML-special project name in a legacy stage-dir line must be entity-escaped"
+    refute_includes text, "<b>",
+                    "no raw angle brackets from a legacy stage-dir line may reach the HTML payload"
+  end
+
+  def test_safe_send_message_forwards_parse_mode
+    @supervisor.send(:safe_send_message, chat_id: 42, text: "<b>hi</b>", parse_mode: :html)
+
+    assert_equal :html, @telegram.messages.last.fetch(:parse_mode)
   end
 
   def test_status_keyboard_has_callback_button_per_actionable_row_type
@@ -1452,6 +1667,16 @@ class HiveBotSupervisorTest < Minitest::Test
                      action: "needs_input", marker: "waiting")
     ready_to_x = row(slug: "ship-it-260526-bbbb", stage: "7-artifacts",
                      action: "ready_to_finalize", marker: "complete")
+    plan_waiting = row(slug: "plan-260624-abcd", stage: "3-plan",
+                       action: "needs_input", marker: "waiting")
+    execute_waiting = row(slug: "execute-260624-abcd", stage: "4-execute",
+                          action: "needs_input", marker: "execute_waiting")
+    finalize_waiting = row(slug: "finalize-260624-abcd", stage: "8-finalize",
+                           action: "needs_input", marker: "waiting")
+    generic_waiting = row(slug: "generic-260624-abcd", stage: "1-intake", workflow: "blank",
+                          action: "needs_input", marker: "waiting")
+    review_waiting = row(slug: "review-260624-abcd", stage: "6-review",
+                         action: "needs_input", marker: "review_waiting")
     retryable_recovery = row(slug: "stuck-260526-cccc", stage: "6-review",
                              action: "recover_review", marker: "review_error",
                              attrs: { "phase" => "fix", "pass" => "2" },
@@ -1462,18 +1687,50 @@ class HiveBotSupervisorTest < Minitest::Test
     inert = row(slug: "agent-running-260526-eeee", action: "agent_running")
 
     keyboard = @supervisor.send(:status_keyboard,
-                                [ brainstorm, ready_to_x, retryable_recovery, manual_recovery, inert ])
+                                [ brainstorm, ready_to_x, plan_waiting, execute_waiting,
+                                  finalize_waiting, generic_waiting, review_waiting,
+                                  retryable_recovery, manual_recovery, inert ])
     callbacks = keyboard.flatten.map { |btn| btn[:callback_data] }
 
     assert_includes callbacks, "answer:hive:ask-q-260526-aaaa",
                     "brainstorm-waiting rows get an answer button"
     assert_includes callbacks, "approve:finalize:hive:ship-it-260526-bbbb:7-artifacts",
                     "ready_to_X rows get an approve button with the workflow verb"
+    assert_includes callbacks, "approve_plan:hive:plan-260624-abcd:3-plan",
+                    "plan waiting rows get a plan-approve button"
+    assert_includes callbacks, "rerun:hive:execute-260624-abcd:4-execute:develop",
+                    "execute waiting rows get a develop rerun button"
+    assert_includes callbacks, "rerun:hive:finalize-260624-abcd:8-finalize:finalize",
+                    "finalize waiting rows get a finalize run button"
+    assert_includes callbacks, "rerun:hive:generic-260624-abcd:1-intake:run",
+                    "generic needs-input rows get a universal run button"
+    assert_includes callbacks, "findings:accept_all:hive:review-260624-abcd:6-review",
+                    "review waiting rows get an accept-all primary button"
     assert_includes callbacks, "autofix:hive:stuck-260526-cccc:6-review:review_error:pass=2",
                     "retryable recovery rows get an autofix button"
     assert_includes callbacks, "details:hive:stale-260526-dddd:4-execute",
                     "manual-only recovery rows get a details button"
-    assert_equal 4, callbacks.length, "inert agent_running rows produce no button"
+    assert_equal 9, callbacks.length, "inert agent_running rows produce no button"
+  end
+
+  def test_status_keyboard_caps_buttons_at_display_cap
+    rows = 11.times.map do |i|
+      row(slug: "ask-#{i}-260526-aaaa", stage: "2-brainstorm", action: "needs_input", marker: "waiting")
+    end
+
+    keyboard = @supervisor.send(:status_keyboard, rows)
+
+    assert_equal 10, keyboard.flatten.length,
+                 "Telegram rejects an oversized keyboard; >10 actionable rows must cap at the 10-button display slice"
+  end
+
+  def test_status_keyboard_suppresses_none_and_complete_needs_input_rows
+    suppressed = [
+      row(slug: "none-260624-abcd", action: "needs_input", marker: "none"),
+      row(slug: "complete-260624-abcd", action: "needs_input", marker: "complete")
+    ]
+
+    assert_nil @supervisor.send(:status_keyboard, suppressed)
   end
 
   def test_status_keyboard_is_nil_when_no_row_is_actionable
@@ -1489,11 +1746,111 @@ class HiveBotSupervisorTest < Minitest::Test
 
     text = @supervisor.send(:render_details, rows, "hive", "task")
 
+    # The adjacent assert_includes lines below pin the rendered delegation;
+    # a self-comparison to details_reply(rows.first) would only restate the
+    # method render_details delegates to, proving nothing.
     assert_includes text, "hive/task (3-plan)"
     assert_includes text, "Action: ready_to_develop"
     assert_includes text, "Marker: none"
     assert_includes text, "Attrs: a=1 z=9"
+    refute_includes text, "No diagnostic available"
     assert_equal "No active row found for hive/missing.", @supervisor.send(:render_details, rows, "hive", "missing")
+  end
+
+  def test_render_details_degrades_and_logs_when_render_raises
+    # render_details renders details_reply from a live Row outside any rescue;
+    # the /status-intercept branch that calls it skips write_last_seen on a
+    # raise. A render-time fault must degrade to the soft hint and log, never
+    # escape to the :fatal poll handler. Inject a row whose attrs read raises.
+    raising_row = Class.new do
+      def project = "hive"
+      def slug = "boom-260525-abcd"
+      def attrs = raise("render boom")
+    end.new
+
+    text = @supervisor.send(:render_details, [ raising_row ], "hive", "boom-260525-abcd")
+
+    assert_includes text, "Status lookup failed"
+    logged = @logger.events.find { |event| event[:name] == :details_render_failed }
+    refute_nil logged, "a render-time fault must be logged, not a silent dead end"
+    assert_equal "RuntimeError", logged[:payload][:error_class]
+  end
+
+  def test_status_action_button_isolates_a_resolver_failure
+    # A row whose resolution raises (typo'd/unmapped role at the RowActions
+    # boundary, or an unmapped ROLE_EMOJI key) must drop only its own
+    # /status button, not abort the whole keyboard's filter_map.
+    bad = row(slug: "boom-260624-abcd", action: "ready_to_develop", marker: "complete")
+    original = Hive::Bot::RowActions.method(:resolve)
+    Hive::Bot::RowActions.define_singleton_method(:resolve) { |_r| raise KeyError, "boom" }
+    button = begin
+      @supervisor.send(:status_action_button, bad)
+    ensure
+      Hive::Bot::RowActions.singleton_class.send(:remove_method, :resolve)
+      Hive::Bot::RowActions.define_singleton_method(:resolve, &original)
+    end
+
+    assert_nil button, "a row whose resolution raises drops only its own button"
+    assert(@logger.events.any? { |e| e[:name] == :status_button_failed },
+           "the dropped button must be logged for an audit trail")
+  end
+
+  def test_role_emoji_covers_every_row_action_role
+    # WaitingRows::ROLE_EMOJI renders the primary button on every surface
+    # (/status via status_action_button, /waiting, the digest); `.fetch` raises
+    # on an unmapped role and button_for's rescue swallows it (silently dropping
+    # the button). `:findings_reject` is structurally never the primary today,
+    # so button_coverage_test's primary-role sweep never reaches it — this
+    # parity sweep is what pins the table to the closed RowActions::ROLES
+    # vocabulary if a future refactor ever promotes it to primary.
+    Hive::Bot::RowActions::ROLES.each do |role|
+      emoji = Hive::Bot::WaitingRows::ROLE_EMOJI.fetch(role)
+      assert_kind_of String, emoji, "ROLE_EMOJI must map #{role.inspect}"
+      refute_empty emoji, "ROLE_EMOJI must not be blank for #{role.inspect}"
+    end
+  end
+
+  def test_row_project_path_falls_back_to_registered_project_path
+    project_only_row = Struct.new(:project).new("hive")
+
+    with_replaced_singleton_method(Hive::Config, :find_project, ->(_project) { { "path" => "/tmp/fallback" } }) do
+      assert_equal "/tmp/fallback", Hive::Bot::WaitingRows.row_project_path(project_only_row)
+    end
+  end
+
+  def test_waiting_daemon_enabled_resolver_logs_project_config_errors
+    bad_row = row(project: "hive", project_path: "/tmp/bad-config")
+
+    with_replaced_singleton_method(Hive::Config, :load, ->(_path) { raise Hive::ConfigError, "bad config" }) do
+      assert_equal false, @supervisor.send(:waiting_daemon_enabled_resolver).call(bad_row)
+    end
+
+    event = @logger.events.find { |entry| entry[:name] == :poll_failure }
+    refute_nil event
+    assert_equal "waiting_daemon_check", event[:payload][:source]
+    assert_equal "hive", event[:payload][:project]
+    assert_equal "Hive::ConfigError", event[:payload][:error_class]
+  end
+
+  def test_next_step_hint_maps_findings_reject_primary
+    # Mirror of the emoji parity above for next_step_hint: `:findings_reject` is
+    # never the primary today (review_waiting makes findings_accept primary), so
+    # only a stubbed promotion exercises the grouped arm. Pin it so the closed-
+    # vocabulary `else` raise can't surprise a future refactor.
+    reject = Hive::Bot::RowActions.action(
+      :findings_reject, "findings:reject_all:hive:tri-260624-abcd:6-review", primary: true
+    )
+    resolution = Hive::Bot::RowActions::Resolution.new(actions: [ reject ], kind: :review_waiting)
+    original = Hive::Bot::RowActions.method(:resolve)
+    Hive::Bot::RowActions.define_singleton_method(:resolve) { |_r| resolution }
+    hint = begin
+      @supervisor.send(:next_step_hint, row(stage: "6-review", action: "needs_input", marker: "review_waiting"))
+    ensure
+      Hive::Bot::RowActions.singleton_class.send(:remove_method, :resolve)
+      Hive::Bot::RowActions.define_singleton_method(:resolve, &original)
+    end
+
+    assert_equal "Next: tap Accept all or Reject all to triage findings.", hint
   end
 
   def test_execute_dispatch_renders_status_queue_without_spawning_child
@@ -1506,9 +1863,87 @@ class HiveBotSupervisorTest < Minitest::Test
     assert_nil pid
     assert_empty @child_supervisor.dispatched
     assert_includes @telegram.messages.last.fetch(:text), "1 active task"
+    assert_equal :html, @telegram.messages.last.fetch(:parse_mode)
     # ready_to_develop row → an approve button on the /status reply.
     callbacks = @telegram.messages.last.fetch(:reply_markup).flatten.map { |btn| btn[:callback_data] }
     assert_includes callbacks, "approve:develop:hive:alpha:3-plan"
+  end
+
+  def test_execute_dispatch_waiting_mode_filters_to_needs_input_rows_with_buttons
+    rows = [
+      row(slug: "answer-me-260625-abcd", stage: "2-brainstorm", action: "needs_input", marker: "waiting"),
+      row(slug: "ready-260625-abcd", stage: "3-plan", action: "ready_to_develop", marker: "complete")
+    ]
+    @status_watcher.result = StatusResult.new(ok: true, rows: rows)
+    result = FakeRouter::Result.new(
+      action: :dispatch_then_reply,
+      command_argv: [ "hive", "status", "--json" ],
+      mode: :waiting
+    )
+
+    @supervisor.send(:execute_dispatch, result, Update.new(chat_id: 42, update_id: 10))
+
+    message = @telegram.messages.last
+    assert_includes message.fetch(:text), "Answer me…"
+    refute_includes message.fetch(:text), "Ready…"
+    assert_equal :html, message.fetch(:parse_mode)
+    callbacks = message.fetch(:reply_markup).flatten.map { |btn| btn[:callback_data] }
+    assert_equal [ "answer:hive:answer-me-260625-abcd" ], callbacks
+  end
+
+  def test_execute_dispatch_waiting_mode_replies_empty_without_keyboard
+    rows = [ row(slug: "ready-260625-abcd", stage: "3-plan", action: "ready_to_develop", marker: "complete") ]
+    @status_watcher.result = StatusResult.new(ok: true, rows: rows)
+    result = FakeRouter::Result.new(
+      action: :dispatch_then_reply,
+      command_argv: [ "hive", "status", "--json" ],
+      mode: :waiting
+    )
+
+    @supervisor.send(:execute_dispatch, result, Update.new(chat_id: 42, update_id: 10))
+
+    assert_equal "Nothing is waiting on you.", @telegram.messages.last.fetch(:text)
+    assert_nil @telegram.messages.last[:reply_markup]
+  end
+
+  def test_execute_dispatch_waiting_mode_suppresses_daemon_enabled_plan_pause
+    with_tmp_dir do |project_path|
+      FileUtils.mkdir_p(File.join(project_path, ".hive-state"))
+      File.write(File.join(project_path, ".hive-state", "config.yml"), "daemon:\n  enabled: true\n")
+      rows = [
+        row(slug: "plan-260625-abcd", project_path: project_path,
+            stage: "3-plan", action: "needs_input", marker: "waiting"),
+        row(slug: "brainstorm-260625-abcd", project_path: project_path,
+            stage: "2-brainstorm", action: "needs_input", marker: "waiting")
+      ]
+      @status_watcher.result = StatusResult.new(ok: true, rows: rows)
+      result = FakeRouter::Result.new(
+        action: :dispatch_then_reply,
+        command_argv: [ "hive", "status", "--json" ],
+        mode: :waiting
+      )
+
+      @supervisor.send(:execute_dispatch, result, Update.new(chat_id: 42, update_id: 10))
+
+      text = @telegram.messages.last.fetch(:text)
+      refute_includes text, "Plan…"
+      assert_includes text, "Brainstorm…"
+    end
+  end
+
+  def test_execute_dispatch_status_mode_still_lists_full_queue_for_same_rows
+    rows = [
+      row(slug: "answer-me-260625-abcd", stage: "2-brainstorm", action: "needs_input", marker: "waiting"),
+      row(slug: "ready-260625-abcd", stage: "3-plan", action: "ready_to_develop", marker: "complete")
+    ]
+    @status_watcher.result = StatusResult.new(ok: true, rows: rows)
+    result = FakeRouter::Result.new(action: :dispatch_then_reply, command_argv: [ "hive", "status", "--json" ])
+
+    @supervisor.send(:execute_dispatch, result, Update.new(chat_id: 42, update_id: 10))
+
+    text = @telegram.messages.last.fetch(:text)
+    assert_includes text, "Answer me…"
+    assert_includes text, "Ready…"
   end
 
   def test_execute_dispatch_renders_legacy_stage_dirs_in_status_queue
@@ -1561,7 +1996,7 @@ class HiveBotSupervisorTest < Minitest::Test
     @supervisor.send(:execute_dispatch, result, Update.new(chat_id: 42, update_id: 10))
 
     text = @telegram.messages.last.fetch(:text)
-    assert_includes text, "Beta… — Plan"
+    assert_includes text, "Beta… — — — Plan"
     refute_includes text, "Alpha"
     # Only the project-filtered row contributes a button.
     callbacks = @telegram.messages.last.fetch(:reply_markup).flatten.map { |btn| btn[:callback_data] }
@@ -2059,6 +2494,181 @@ class HiveBotSupervisorTest < Minitest::Test
     end
   end
 
+  # ── Pairing approval notices: CLI → running bot DM ───────────────────
+
+  def test_drain_pairing_approvals_sends_approved_message_and_removes_notice
+    Dir.mktmpdir("hive-pairing-approval") do |home|
+      @supervisor.instance_variable_set(:@pairing_approval_state_home, home)
+      Hive::Bot::PairingApprovalQueue.write!(chat_id: 999, state_home: home)
+
+      @supervisor.send(:drain_pairing_approvals)
+
+      assert_equal 1, @telegram.messages.size
+      msg = @telegram.messages.first
+      assert_equal 999, msg[:chat_id]
+      assert_equal Hive::Bot::Supervisor::PAIRING_APPROVED_TEXT, msg[:text]
+      assert_empty Hive::Bot::PairingApprovalQueue.pending(state_home: home),
+                   "a sent approval notice must be removed"
+    end
+  end
+
+  def test_drain_pairing_approvals_does_not_drop_on_allowlist_miss
+    Dir.mktmpdir("hive-pairing-approval") do |home|
+      @supervisor.instance_variable_set(:@pairing_approval_state_home, home)
+      # 999 is not in @config["chat_id_allowlist"]. Approval notices are
+      # owner-authored and may arrive before SIGHUP reload updates memory.
+      Hive::Bot::PairingApprovalQueue.write!(chat_id: 999, state_home: home)
+
+      @supervisor.send(:drain_pairing_approvals)
+
+      assert_equal 999, @telegram.messages.first[:chat_id]
+      assert_empty Hive::Bot::PairingApprovalQueue.pending(state_home: home)
+    end
+  end
+
+  def test_drain_pairing_approvals_logs_when_sent_notice_cannot_be_removed
+    Dir.mktmpdir("hive-pairing-approval") do |home|
+      @supervisor.instance_variable_set(:@pairing_approval_state_home, home)
+      Hive::Bot::PairingApprovalQueue.write!(chat_id: 999, state_home: home)
+
+      # Send succeeds but the unlink cannot (e.g. EACCES → a clean false from
+      # the queue): the DM is out and can't be un-sent, so a distinct event
+      # must make the unavoidable re-send attributable. minitest/mock is not
+      # bundled, so override the module method and restore it after.
+      original = Hive::Bot::PairingApprovalQueue.method(:remove)
+      Hive::Bot::PairingApprovalQueue.define_singleton_method(:remove) { |*, **| false }
+      begin
+        @supervisor.send(:drain_pairing_approvals)
+      ensure
+        Hive::Bot::PairingApprovalQueue.define_singleton_method(:remove, original)
+      end
+
+      assert_equal 999, @telegram.messages.first[:chat_id], "the approval DM must still be sent"
+      event = @logger.events.find { |e| e[:name] == :pairing_approval_notice_unremovable }
+      assert event, "a notice that sent but could not be removed must log a distinct event"
+      assert_equal 999, event.fetch(:payload).fetch(:chat_id)
+    end
+  end
+
+  def test_drain_pairing_approvals_keeps_notice_when_send_fails
+    Dir.mktmpdir("hive-pairing-approval") do |home|
+      @supervisor.instance_variable_set(:@pairing_approval_state_home, home)
+      Hive::Bot::PairingApprovalQueue.write!(chat_id: 999, state_home: home)
+      @telegram.raise_on_send = IOError.new("telegram down")
+
+      @supervisor.send(:drain_pairing_approvals)
+
+      assert_empty @telegram.messages
+      refute_empty Hive::Bot::PairingApprovalQueue.pending(state_home: home),
+                   "failed sends must leave approval notices for retry"
+    end
+  end
+
+  def test_drain_pairing_approvals_removes_malformed_notice
+    Dir.mktmpdir("hive-pairing-approval") do |home|
+      @supervisor.instance_variable_set(:@pairing_approval_state_home, home)
+      bad = File.join(Hive::Bot::PairingApprovalQueue.directory(state_home: home), "bad.json")
+      File.write(bad, "{not json")
+
+      @supervisor.send(:drain_pairing_approvals)
+
+      assert_empty @telegram.messages
+      refute File.exist?(bad), "malformed approval notice must be removed"
+    end
+  end
+
+  def test_drain_pairing_approvals_drops_stale_without_sending
+    Dir.mktmpdir("hive-pairing-approval") do |home|
+      @supervisor.instance_variable_set(:@pairing_approval_state_home, home)
+      Hive::Bot::PairingApprovalQueue.write!(
+        chat_id: 999,
+        state_home: home,
+        now: Time.utc(2026, 6, 30, 17, 0, 0)
+      )
+
+      @supervisor.send(:drain_pairing_approvals, now: Time.utc(2026, 6, 30, 18, 0, 1))
+
+      assert_empty @telegram.messages
+      assert_empty Hive::Bot::PairingApprovalQueue.pending(state_home: home),
+                   "stale approval notices must be pruned"
+    end
+  end
+
+  def test_drain_pairing_approvals_caps_sends_per_tick
+    Dir.mktmpdir("hive-pairing-approval") do |home|
+      @supervisor.instance_variable_set(:@pairing_approval_state_home, home)
+      cap = Hive::Bot::Supervisor::PAIRING_APPROVAL_SEND_CAP
+      (cap + 1).times do |i|
+        Hive::Bot::PairingApprovalQueue.write!(
+          chat_id: 1000 + i, state_home: home, now: Time.utc(2026, 6, 30, 12, 0, i)
+        )
+      end
+
+      @supervisor.send(:drain_pairing_approvals, now: Time.utc(2026, 6, 30, 12, 5, 0))
+
+      assert_equal cap, @telegram.messages.size, "must not exceed the per-tick send cap"
+      assert_equal 1, Hive::Bot::PairingApprovalQueue.pending(state_home: home).size,
+                   "the over-cap notice stays queued for the next tick"
+    end
+  end
+
+  def test_drain_pairing_approvals_prunes_expired_before_applying_send_cap
+    Dir.mktmpdir("hive-pairing-approval") do |home|
+      @supervisor.instance_variable_set(:@pairing_approval_state_home, home)
+      cap = Hive::Bot::Supervisor::PAIRING_APPROVAL_SEND_CAP
+
+      # Two expired notices, timestamped oldest so they sort ahead of the fresh
+      # ones. The load-bearing property is prune-BEFORE-cap: a regression that
+      # capped first would burn cap slots on these stale notices and starve the
+      # fresh approvals, leaving fewer than `cap` DMs sent this tick.
+      2.times do |i|
+        Hive::Bot::PairingApprovalQueue.write!(
+          chat_id: 500 + i, state_home: home, now: Time.utc(2026, 6, 30, 10, 0, i)
+        )
+      end
+      cap.times do |i|
+        Hive::Bot::PairingApprovalQueue.write!(
+          chat_id: 1000 + i, state_home: home, now: Time.utc(2026, 6, 30, 12, 0, i)
+        )
+      end
+
+      @supervisor.send(:drain_pairing_approvals, now: Time.utc(2026, 6, 30, 12, 5, 0))
+
+      assert_equal cap, @telegram.messages.size,
+                   "expired notices must be pruned before the cap so all CAP fresh approvals send"
+      assert_equal (1000...(1000 + cap)).to_a, @telegram.messages.map { |m| m[:chat_id] },
+                   "only fresh notices are sent; the expired ones never consume a send slot"
+      assert_empty Hive::Bot::PairingApprovalQueue.pending(state_home: home),
+                   "expired notices pruned without a send; every fresh notice sent and removed"
+    end
+  end
+
+  def test_drain_pairing_approvals_logs_when_expired_notice_cannot_be_removed
+    Dir.mktmpdir("hive-pairing-approval") do |home|
+      @supervisor.instance_variable_set(:@pairing_approval_state_home, home)
+      Hive::Bot::PairingApprovalQueue.write!(
+        chat_id: 999, state_home: home, now: Time.utc(2026, 6, 30, 17, 0, 0)
+      )
+
+      # An expired notice whose unlink keeps failing (a clean false from the
+      # queue on EACCES, or a mismatched/corrupt file) would otherwise be
+      # silently re-dropped every reaper tick — the expired branch must log the
+      # same distinct event as the successful-send branch.
+      original = Hive::Bot::PairingApprovalQueue.method(:remove)
+      Hive::Bot::PairingApprovalQueue.define_singleton_method(:remove) { |*, **| false }
+      begin
+        @supervisor.send(:drain_pairing_approvals, now: Time.utc(2026, 6, 30, 18, 0, 1))
+      ensure
+        Hive::Bot::PairingApprovalQueue.define_singleton_method(:remove, original)
+      end
+
+      assert_empty @telegram.messages, "an expired notice is dropped without sending"
+      event = @logger.events.find { |e| e[:name] == :pairing_approval_notice_unremovable }
+      assert event, "an expired notice that cannot be removed must log a distinct event"
+      assert_equal 999, event.fetch(:payload).fetch(:chat_id)
+    end
+  end
+
   def test_clear_inline_keyboard_swallows_telegram_errors
     @telegram.define_singleton_method(:edit_message_reply_markup) do |*|
       raise IOError, "telegram offline"
@@ -2500,13 +3110,16 @@ class HiveBotSupervisorTest < Minitest::Test
   def test_reaper_loop_drains_dispatch_results_each_iteration
     supervisor = @supervisor
     @supervisor.define_singleton_method(:reap_children) { supervisor.request_shutdown! }
-    drained = false
-    @supervisor.define_singleton_method(:drain_dispatch_results) { drained = true }
+    dispatch_drained = false
+    approvals_drained = false
+    @supervisor.define_singleton_method(:drain_dispatch_results) { dispatch_drained = true }
+    @supervisor.define_singleton_method(:drain_pairing_approvals) { approvals_drained = true }
     @supervisor.define_singleton_method(:sleep) { |_seconds| }
 
     @supervisor.send(:reaper_loop)
 
-    assert drained, "reaper_loop must drain the daemon's dispatch-result notice channel (ADV-1)"
+    assert dispatch_drained, "reaper_loop must drain the daemon's dispatch-result notice channel (ADV-1)"
+    assert approvals_drained, "reaper_loop must drain queued pairing approval notices"
   end
 
   def test_reaper_loop_logs_reap_failures

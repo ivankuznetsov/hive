@@ -16,9 +16,10 @@ module Hive
       # the runner has written its claude_pid to the lock. The daemon
       # healer and dispatcher both need this so they don't race the runner
       # during the pre-claude window (issue #144).
-      Row = Struct.new(:project, :slug, :stage, :marker, :marker_attrs, :folder, :state_file,
+      Row = Struct.new(:project, :slug, :stage, :workflow, :marker, :marker_attrs, :folder, :state_file,
                        :state_file_mtime, :action, :suggested_command, :claude_pid_alive,
-                       :live_task_lock, :diagnostic,
+                       :live_task_lock, :diagnostic, :depends_on, :blocked_by,
+                       :dependency_stage, :blocked,
                        keyword_init: true)
       # Aggregated per-project legacy-layout signal lifted out of each
       # project payload's `legacy_stage_dirs` array. The dispatcher uses
@@ -31,9 +32,17 @@ module Hive
           !Array(legacy_stage_dirs).empty?
         end
       end
-      # `warning` carries a non-fatal advisory (currently: a forward
-      # schema-version skew was tolerated and parsed best-effort). The
-      # dispatcher logs it once per tick. nil on a clean fetch.
+      # `warning` carries a non-fatal advisory the dispatcher logs once per
+      # tick. Two sources feed it: (1) a forward schema-version skew that was
+      # tolerated and parsed best-effort, and (2) any non-empty stderr from an
+      # otherwise-successful (exit-0) `hive status --json` fetch. In JSON mode
+      # stdout carries the payload and stderr is empty on a healthy run, so
+      # non-empty stderr is the status command's own degradation breadcrumbs
+      # (fail-open dependency gate, dropped depends_on). (The collapsed-stack
+      # warn fires only from the execute/open_pr child processes, never the
+      # status command, so it never reaches this channel.)
+      # Surfacing it here makes those breadcrumbs observable in daemon.log
+      # instead of being silently discarded. nil on a clean fetch.
       Result = Struct.new(:ok, :rows, :projects, :error, :warning, keyword_init: true)
 
       def initialize(hive_bin: ENV.fetch("HIVE_BIN", "hive"),
@@ -84,7 +93,7 @@ module Hive
                             error: forward_skew_message(doc, underlying: e))
         end
         Result.new(ok: true, rows: rows, projects: projects, error: nil,
-                   warning: (skew == :newer ? forward_skew_warning(doc) : nil))
+                   warning: success_warning(skew, doc, err))
       rescue JSON::ParserError => e
         Result.new(ok: false, rows: [], projects: [],
                    error: "malformed JSON from hive status: #{e.message}")
@@ -118,6 +127,18 @@ module Hive
         return :newer if got.is_a?(Integer) && got > expected
 
         :older
+      end
+
+      # Compose the success-path advisory from the (optional) tolerated-skew
+      # message and any non-empty stderr this fetch emitted, so one warning
+      # channel surfaces both. On a healthy JSON fetch stderr is empty and
+      # there is no skew → both arms are nil → warning is nil.
+      def success_warning(skew, doc, stderr)
+        parts = []
+        parts << forward_skew_warning(doc) if skew == :newer
+        breadcrumbs = stderr.to_s.strip
+        parts << "hive status stderr: #{breadcrumbs}" unless breadcrumbs.empty?
+        parts.empty? ? nil : parts.join(" | ")
       end
 
       def forward_skew_warning(doc)
@@ -161,6 +182,7 @@ module Hive
               project: project,
               slug: task["slug"],
               stage: task["stage"],
+              workflow: task["workflow"],
               marker: task["marker"],
               marker_attrs: task["attrs"].is_a?(Hash) ? task["attrs"] : {},
               folder: task["folder"],
@@ -170,7 +192,11 @@ module Hive
               suggested_command: task["suggested_command"],
               claude_pid_alive: task["claude_pid_alive"],
               live_task_lock: task["live_task_lock"] == true,
-              diagnostic: task["diagnostic"]
+              diagnostic: task["diagnostic"],
+              depends_on: task["depends_on"],
+              blocked_by: task["blocked_by"],
+              dependency_stage: task["dependency_stage"],
+              blocked: task["blocked"] == true
             )
           end
         end

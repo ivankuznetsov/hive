@@ -3,11 +3,11 @@ title: Hive::Config
 type: module
 source: lib/hive/config.rb
 created: 2026-04-25
-updated: 2026-06-14
+updated: 2026-07-01
 tags: [config, yaml, validation]
 ---
 
-**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects plus daemon, bot, digest, update, and web settings, including voice-transcription defaults; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, worktree root, budgets, timeouts, **stage agents**, project-global `claude.mode`/`claude.permission_mode` plus `claude.model`/`claude.effort` pins, review-stage roles, daemon enrollment, experimental babysitter enrollment, patrol mode/enrollment and PR handoff). `Config.load(project_root)` resolves `patrol.mode` into scheduler knobs, **recursively** deep-merges per-project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays (notably `review.reviewers`, `patrol.review.reviewers`, `bot.transcription.supported_languages`, and `babysitter.labels_ignore`) are replaced wholesale, never per-element merged. The daily shipped digest uses `digest.agent`, `digest.max_catchup_days`, `budget_usd.digest`, `timeout_sec.digest`, and `bot.digest_chat_id`; `Hive::Digest.run` defaults through `Config.load_global_digest_config`.
+**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects plus daemon, bot, digest, update, web, and Screenote base-url settings, including voice-transcription defaults; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, default workflow, worktree root, budgets, timeouts, **stage agents**, project/top-level and per-stage `permissions`, project-global `claude.mode`/`claude.permission_mode` plus `claude.model`/`claude.effort` pins, review-stage roles, daemon enrollment, experimental babysitter enrollment, patrol mode/enrollment and PR handoff). `Config.load(project_root)` resolves `patrol.mode` into scheduler knobs, **recursively** deep-merges per-project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays (notably `review.reviewers`, `patrol.review.reviewers`, `bot.transcription.supported_languages`, and `babysitter.labels_ignore`) are replaced wholesale, never per-element merged. The daily shipped digest uses `digest.agent`, `digest.max_catchup_days`, `budget_usd.digest`, `timeout_sec.digest`, and `bot.chat_id_allowlist[0]`; `Hive::Digest.run` defaults through `Config.load_global_digest_config`. Screenote OAuth tokens live outside YAML in `screenote.json`, created by `hive connect screenote`.
 
 ## Defaults (`Config::DEFAULTS`)
 
@@ -16,7 +16,9 @@ tags: [config, yaml, validation]
   "hive_state_path"   => ".hive-state",
   "worktree_root"     => nil,
   "default_branch"    => nil,
+  "default_workflow"  => "coding",
   "project_name"      => nil,
+  "permissions"       => "yolo",
   "claude"            => { "mode" => "tmux", "permission_mode" => "bypassPermissions",
                            "model" => "default", "effort" => "default" },
   # Bumped ~5x in plan 2026-05-04-001 (ADR-023). These are GENEROUS sanity
@@ -58,6 +60,7 @@ tags: [config, yaml, validation]
     "ci"           => { "command" => nil, "max_attempts" => 3, "agent" => "claude",
                         "prompt_template" => "ci_fix_prompt.md.erb" },
     "reviewers"    => [],
+    "adhoc"        => { "reviewers" => nil, "fix" => false },
     "triage"       => { "enabled" => true, "agent" => "claude", "bias" => "courageous",
                         "prompt_template" => nil, "custom_prompt" => nil },
     "fix"          => { "agent" => "claude", "prompt_template" => "fix_prompt.md.erb" },
@@ -70,6 +73,7 @@ tags: [config, yaml, validation]
     "bind" => "127.0.0.1",
     "port" => 4567,
     "origin" => "http://127.0.0.1:4567",
+    "local_loopback" => true,
     "github" => { "owner" => nil, "client_id" => "Ov23liYChIkP5PU4bvo1" }, # nil owner => first-login claimable
     "session_secret_file" => nil
   },
@@ -102,9 +106,18 @@ tags: [config, yaml, validation]
       "reviewers" => [ { "name" => "codex-native-review", "kind" => "codex_review", "agent" => "codex", ... } ]
     }
   },
+  "daemon" => {
+    "enabled" => false,
+    "autostart" => false,
+    "auto_retry" => { "enabled" => true },
+    ...
+  },
   "digest" => { "enabled" => false, "agent" => nil, "max_catchup_days" => 7 },
+  "screenote" => { "base_url" => "https://screenote.ai" },
   "bot" => {
-    "digest_chat_id" => nil,
+    "enabled" => false,
+    "pairing_enabled" => false,
+    "chat_id_allowlist" => [],
     "idea_attachment_max_bytes" => 20 * 1024 * 1024,
     "idea_attachment_max_count" => 10,
     "idea_draft_ttl_sec" => 900,
@@ -123,7 +136,9 @@ tags: [config, yaml, validation]
 }
 ```
 
-`worktree_root: nil` is intentional — the actual default is computed lazily by `Worktree#worktree_root` as `~/Dev/<project>.worktrees`. `review.reviewers` defaults to `[]`; the recommended set ships live (uncommented) in `templates/project_config.yml.erb` so a fresh `hive init` produces a populated reviewer list. `patrol.review.reviewers` defaults to the single native Codex reviewer (`name: codex-native-review`, `kind: codex_review`), which runs Codex's built-in `review` subcommand and needs no CE skill; fresh init can optionally add Codex or Claude CE `ce-code-review` entries for patrol PRs. `daemon.max_concurrent_patrol_scans` (default `1`, validated `>= 1`) is a **per-project** cap bounding daemon-scheduled `hive patrol PROJECT` scans on a **separate** in-flight budget from task dispatch: a long codex-backed scan never consumes a `daemon.max_concurrent_runs` task slot — scans are tagged `kind: :patrol_scan` in the dispatcher and excluded from the per-project/global task caps, counted only against this independent cap. `ConcurrencyController#can_dispatch_patrol_scan?` counts only the **given project's** running scans (`entry[:kind] == :patrol_scan && entry[:project] == project`), so the default `1` means one scan per project at a time and **different projects patrol in parallel** rather than being serialized/starved by a global count (see `→ :patrol_scan_cap`).
+`default_workflow` is the middle tier in task workflow selection: `<task>/meta.yml workflow:` wins first, then `Config.load(project_root)["default_workflow"]`, then built-in `coding`. It is deliberately not registry-validated during config load; unknown names fail when `Hive::Task` resolves the workflow so the error is tied to the affected task path.
+
+`worktree_root: nil` is intentional — the actual default is computed lazily by `Worktree#worktree_root` as `~/Dev/<project>.worktrees`. `permissions: "yolo"` preserves existing launch behavior unless a project or stage opts into a narrower Claude tool scope; `Config.permission_spec(cfg, stage)` returns the exact stage spec (`plan.permissions`, `review.ci.permissions`, reviewer-entry `permissions`, etc.) when present, otherwise the project default, with no field merge. `review.reviewers` defaults to `[]`; the recommended set ships live (uncommented) in `templates/project_config.yml.erb` so a fresh `hive init` produces a populated reviewer list. `review.adhoc.reviewers: nil` inherits `review.reviewers`, while an explicit `[]` means zero ad-hoc reviewers, and `review.adhoc.fix: false` keeps ad-hoc PR reviews review-only unless an operator opts into local fix commits with `true`. `daemon.auto_retry.enabled` defaults to `true` and can be set to `false` to disable the recoverable terminal-error healer while leaving ordinary daemon dispatch enabled. `patrol.review.reviewers` defaults to the single native Codex reviewer (`name: codex-native-review`, `kind: codex_review`), which runs Codex's built-in `review` subcommand and needs no CE skill; fresh init can optionally add Codex or Claude CE `ce-code-review` entries for patrol PRs. `daemon.max_concurrent_patrol_scans` (default `1`, validated `>= 1`) is a **per-project** cap bounding daemon-scheduled `hive patrol PROJECT` scans on a **separate** in-flight budget from task dispatch: a long codex-backed scan never consumes a `daemon.max_concurrent_runs` task slot — scans are tagged `kind: :patrol_scan` in the dispatcher and excluded from the per-project/global task caps, counted only against this independent cap. `ConcurrencyController#can_dispatch_patrol_scan?` counts only the **given project's** running scans (`entry[:kind] == :patrol_scan && entry[:project] == project`), so the default `1` means one scan per project at a time and **different projects patrol in parallel** rather than being serialized/starved by a global count (see `→ :patrol_scan_cap`).
 
 **Patrol is opt-in.** `resolve_patrol_mode!` runs on the raw YAML before `merge_defaults` and only derives/injects mode knobs when `mode:` is **explicitly present** in the raw config (`return unless nested_key?(data, "patrol", "mode")`). A config with **no patrol section** — or a patrol section that omits `mode:` — injects nothing and falls through to `DEFAULTS["patrol"]["enabled"] = false`, so patrol stays **disabled**. `medium` is the default offered by the `hive init` *prompt* (which writes the chosen mode — `medium` unless overridden — into `templates/project_config.yml.erb`), **never** a config-resolution default — the `DEFAULT_PATROL_MODE` constant (`"medium"`) exists solely for that prompt. `medium`'s steady `timer`/4h cadence is the default because `low`'s `new_commits` trigger fires on **every** commit, which is costlier on a high-velocity repo than a 4h timer; with the cheap native codex-review reviewer the per-cycle review cost is low, so cadence dominates and `medium` wins. The explicit modes are `ultrapatrol` (`trigger: timer`, `poll_interval_sec: 1800`, `enabled: true`), `high` (`timer`, `7200`, `true`), `medium` (`timer`, `14400`, `true`), `low` (`new_commits`, `enabled: true`, leaving the baseline `poll_interval_sec: 600` SHA-check cadence), and `off` (`enabled: false`). The mode never changes `max_findings_per_feature`, `max_prs_per_cycle`, or `min_confidence_to_fix`. Explicit granular knobs (e.g. an explicit `enabled: true` with no `mode:`) always win over a set mode and survive the deep-merge, so legacy configs that carry `enabled`, `trigger`, and `poll_interval_sec` keep those values until the owner replaces them with the single mode key.
 
@@ -139,13 +154,37 @@ keys are:
   agent.
 - `budget_usd.digest` and `timeout_sec.digest` for categorizer limits,
   defaulting inside `Hive::Digest::Categorizer` to `50` and `1800`.
-- `bot.digest_chat_id`, then `bot.chat_id_allowlist[0]`, for Telegram delivery.
+- `bot.chat_id_allowlist[0]` for Telegram delivery.
 - `bot.log_file` for the sender's bot logger path.
 
 `load_global_digest_block` returns only the validated `digest` block for
-`Hive::Commands::Daemon`, which wires `DigestScheduler`. `bot.digest_chat_id`
-is optional and must be an Integer when set; delivery falls back to the first
-`bot.chat_id_allowlist` entry.
+`Hive::Commands::Daemon`, which wires `DigestScheduler`. Delivery resolves to
+`bot.chat_id_allowlist[0]`. The digest is **opt-out**: when the operator has not
+set `digest.enabled`, `load_global_digest_block` derives it from the bot config —
+`true` when `bot.enabled == true` and `bot.chat_id_allowlist` has at least one
+integer chat id, else `false` (the predicate is the private
+`Config.telegram_digest_default?(data)` helper). An explicit `digest.enabled`
+(true or false) is always honored; only the unset case is derived. Both
+scheduler-config callers (`Commands::Daemon#start_daemon` and the dispatcher
+SIGHUP reconfigure) load through `load_global_digest_block`, so the derived
+value applies in both.
+
+## Screenote config
+
+`Hive::Config.load_global_screenote` reads the global `screenote:` block,
+deep-merges it over `Config::DEFAULTS["screenote"]`, applies
+`HIVE_SCREENOTE_BASE_URL`, validates the shape, and returns a hash with
+`base_url`. `screenote.base_url` defaults to `https://screenote.ai` and may be
+overridden for self-hosted or staging Screenote deployments.
+
+`screenote.api_token` and `HIVE_SCREENOTE_API_TOKEN` are intentionally removed.
+If a YAML config still sets `screenote.api_token`, validation raises the
+migration error "Screenote now connects via OAuth — run `hive connect
+screenote`." OAuth material is stored separately by
+`Hive::Screenote::CredentialStore` in `~/.config/hive/screenote.json` (or
+`HIVE_HOME/screenote.json`) with mode `0600`; the file contains the access token,
+expiry, client id, issuer, MCP resource URL, base URL, and default
+`project_id`. See [[commands/screenote]] and [[stages/artifacts]].
 
 ## Module functions
 
@@ -171,6 +210,7 @@ is optional and must be an Integer when set; delivery falls back to the first
 | `claude_mode(cfg)` | Returns `:tmux` or `:headless` after validating `claude.mode`. |
 | `claude_cli_flags(cfg)` | Returns the Claude-only argv fragment for model/effort pins: `["--model", model]` unless `model` is blank/`inherit`; `["--effort", effort]` only for explicit non-default effort values. Shared by headless `Hive::Agent` and tmux `Hive::ClaudeLauncher`. |
 | `claude_permission_mode(cfg)` | Returns the configured Claude Code permission mode, defaulting to `bypassPermissions`. Valid values mirror Claude Code: `acceptEdits`, `auto`, `bypassPermissions`, `default`, `dontAsk`, `plan`. |
+| `permission_spec(cfg, stage)` | Returns a stage's complete `permissions:` spec when declared; otherwise returns the project default. Dotted review paths are supported. |
 | `deep_merge(base, override)` | Recursive merge: Hash-vs-Hash recurses; everything else (scalar, Array, mismatched types) replaces. |
 | `deep_dup(obj)` | Recursive Hash/Array deep-copy. |
 
@@ -189,13 +229,15 @@ Rules:
 Runs after merge so a default value can never trigger a failure — only user input does. Raises `Hive::ConfigError` (single class for all "config is bad" cases). Key checks include:
 
 1. **`validate_hash_shaped_keys!`** — every hash-shaped top-level key (`brainstorm`, `claude`, `plan`, `execute`, `open_pr`, `artifacts`, `finalize`, `budget_usd`, `timeout_sec`, `review`, `agents`, `daemon`, `bot`, `web`, `babysitter`, `patrol`, `digest`, `rebase`) must be a Hash when present. Catches scalar/nil/integer overrides (e.g. YAML `brainstorm: claude`, `budget_usd: ~`, `timeout_sec: 600`) that would otherwise survive `deep_merge` and crash later as `TypeError`/`NoMethodError`.
-2. **`validate_reviewers!`** — `review.reviewers` must be an Array (nil fails with a hint to remove the key vs. set `[]`). Each entry must be a Hash. `name` and `output_basename` must be unique across the list (basename uniqueness prevents concurrent file-write collisions on `reviews/<basename>-NN.md`). Empty/whitespace `output_basename` is rejected (would yield `reviews/-01.md`). Each entry's `agent` is checked via `validate_agent_name!`.
+2. **`validate_reviewers!` / `validate_review_adhoc!`** — `review.reviewers` must be an Array (nil fails with a hint to remove the key vs. set `[]`). Each entry must be a Hash. `name` and `output_basename` must be unique across the list (basename uniqueness prevents concurrent file-write collisions on `reviews/<basename>-NN.md`). Empty/whitespace `output_basename` is rejected (would yield `reviews/-01.md`). Each entry's `agent` is checked via `validate_agent_name!`. `review.adhoc.reviewers` is either nil or the same reviewer-entry Array shape, and `review.adhoc.fix` is boolean.
 3. **`validate_review_fix_auto_commit!`** — `review.fix` and `review.fix.auto_commit` must stay Hash-shaped. `review.fix.auto_commit.sign_policy` is optional and must be one of `inherit`, `bypass`, or `fail`; `scope_check.enabled` must be boolean; `scope_check.allowed_paths` / `denied_paths` must be relative path-glob arrays without traversal, absolute paths, or null bytes.
 4. **`validate_role_agent_names!`** — every stage/review role agent path is checked via `validate_agent_name!`.
 5. **`validate_claude_mode!`** — `claude.mode` must be `tmux` or `headless`.
 6. **`validate_claude_permission_mode!`** — `claude.permission_mode` must be one of `acceptEdits`, `auto`, `bypassPermissions`, `default`, `dontAsk`, or `plan`. Both the tmux launcher and the headless `-p` path resolve this value to the same Claude Code flags via `AgentProfile#permission_flags`: `bypassPermissions` → `--dangerously-skip-permissions`, any other mode → `--permission-mode <mode>`. Fresh init suggests `bypassPermissions` so dogfood runs do not pause on file-operation approval prompts, while `auto` keeps Claude Code auto-mode rules.
-7. **`validate_babysitter!`** — `babysitter.enabled` and `babysitter.dry_run` must be booleans; `interval` must be integer seconds or a `\d+[smh]` string; `max_concurrent_prs`, `budget_minutes`, and `budget_usd` must be integers >= 1; `labels_ignore` must be an array of strings.
-8. **`validate_patrol!`** — `patrol.mode` must be one of `ultrapatrol`, `high`, `medium`, `low`, or `off`; `patrol.enabled`, `patrol.draft_prs`, and `patrol.review_prs` must be booleans when present; `trigger` must be one of the patrol trigger enum values; confidence/severity/count/interval/command shape are validated before the scheduler or `hive patrol` command can run. `patrol.review.reviewers` uses the same reviewer-entry validation as `review.reviewers`, but it is a separate list used only by synthetic `Patrol: ...` review tasks.
+7. **`validate_permissions!`** — top-level, stage-level, review-role, and reviewer-entry `permissions:` specs are parsed by `Hive::PermissionScope` and must be `yolo`, `read-only`, or a valid `scoped` map. Shape errors, unknown presets/keys, and `bash:` plus `tools:` fail during config load; runner capability is checked later when the stage profile is known.
+8. **`validate_babysitter!`** — `babysitter.enabled` and `babysitter.dry_run` must be booleans; `interval` must be integer seconds or a `\d+[smh]` string; `max_concurrent_prs`, `budget_minutes`, and `budget_usd` must be integers >= 1; `labels_ignore` must be an array of strings.
+9. **`validate_patrol!`** — `patrol.mode` must be one of `ultrapatrol`, `high`, `medium`, `low`, or `off`; `patrol.enabled`, `patrol.draft_prs`, and `patrol.review_prs` must be booleans when present; `trigger` must be one of the patrol trigger enum values; confidence/severity/count/interval/command shape are validated before the scheduler or `hive patrol` command can run. `patrol.review.reviewers` uses the same reviewer-entry validation as `review.reviewers`, but it is a separate list used only by synthetic `Patrol: ...` review tasks.
+10. **`validate_daemon!`** — daemon numeric bounds, booleans, and nested hashes are checked before the daemon starts. The nested `daemon.auto_retry` block must be a hash, and `daemon.auto_retry.enabled` must be boolean when present.
 
 Bot attachment capture settings are validated with the other bot numeric
 keys: `bot.idea_attachment_max_bytes` defaults to 20 MiB and may not
@@ -214,6 +256,7 @@ language array is accepted and means "do not filter language". See
 Global web settings are validated separately for [[commands/web]]:
 `web.bind` must be a non-empty string, `web.port` must be an integer in
 `1..65535`, `web.origin` must start with `http://` or `https://`,
+`web.local_loopback` must be boolean,
 `web.github` must be a hash, optional `web.github.owner` and
 `web.github.client_id` must be non-empty strings when set, and
 `web.session_secret_file` must be a non-empty string when set. A blank/missing
@@ -223,6 +266,11 @@ lock; pre-setting the owner keeps the older pinned-owner gate. GitHub sign-in
 uses the OAuth device flow (see [[decisions]] ADR-036), so no client secret
 exists anywhere; `web.github.client_id` defaults to the shared hivebox OAuth
 app — public by design, since device flow is a public-client grant.
+`web.local_loopback: true` is the local foreground default: when `hive web`
+binds `localhost`, `::1`, or `127.0.0.0/8`, the CLI exports
+`HIVEBOX_LOCAL_LOOPBACK=1` and Rails skips GitHub login only for requests whose
+peer IP is also loopback. Setting it to `false` forces the normal GitHub owner
+gate even on a loopback bind.
 
 The `hive init` JSON summary envelope (`schemas/hive-init.v1.json`) carries the chosen value as a required `claude_permission_mode` string (same enum as the validator), alongside the existing `claude_mode` field — so an agent reading init output sees both the launch mode and the permission mode. See [[commands/init]].
 
@@ -251,14 +299,17 @@ cfg.dig("budget_usd", "brainstorm")
 cfg.dig("timeout_sec", "execute_implementation")
 cfg.dig("review", "ci", "agent")
 cfg.dig("review", "reviewers")
+cfg.dig("review", "adhoc", "reviewers")
+cfg.dig("review", "adhoc", "fix")
 cfg.dig("babysitter", "enabled")
 cfg.dig("babysitter", "max_concurrent_prs")
 cfg.dig("patrol", "review_prs")
 cfg.dig("patrol", "review", "reviewers")
 cfg.dig("digest", "agent")
+cfg.dig("daemon", "auto_retry", "enabled")
 cfg.dig("budget_usd", "digest")
 cfg.dig("timeout_sec", "digest")
-cfg.dig("bot", "digest_chat_id")
+cfg.dig("bot", "chat_id_allowlist")
 cfg["worktree_root"]
 ```
 

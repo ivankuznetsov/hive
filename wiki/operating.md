@@ -3,12 +3,12 @@ title: Operating Hive
 type: operating
 source: README.md, bin/hv, install.sh, lib/hive/commands/daemon.rb, lib/hive/commands/babysit.rb, lib/hive/commands/bot.rb, examples/systemd/, examples/launchd/, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-07
-updated: 2026-06-12
+updated: 2026-06-30
 tags: [operating, daemon, bot, systemd, launchd, install]
 ---
 
 **TLDR**: Day-2 guide for running the hive daemon, experimental PR babysitter, and Telegram bot.
-Covers install-time daemon autostart, per-project daemon/babysitter enrollment, bot token/allowlist setup,
+Covers install-time daemon autostart, per-project daemon/babysitter enrollment, bot token/allowlist/pairing setup,
 autostart on macOS (launchd) and Linux (systemd), dry-run shakedowns,
 log inspection, community support, and how to disable automation mid-flight.
 
@@ -60,7 +60,7 @@ yay -S hive-bin
 # glibc Linux fallback / Ubuntu 22.04+ (pin to the release tag, not main)
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
-curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.3.0/install.sh -o "$tmpdir/hive-install.sh"
+curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.3.1/install.sh -o "$tmpdir/hive-install.sh"
 bash "$tmpdir/hive-install.sh"
 ```
 
@@ -163,6 +163,11 @@ version verification, `hive daemon install`, and optional non-interactive
 The skill also documents `/hive wiki compile-log --check` as the read-only
 aggregate-changelog verification path and tells agents to reserve mutating
 `hive wiki compile-log` runs for merge/rebase cleanup or explicit user requests.
+Its marker-recovery guidance mirrors [[modules/daemon]]: inspect first with
+`hive status --json` and `hive daemon status --json`, wait for known
+healer-managed cooldown/retry signatures, start a stopped daemon with
+`hive daemon start --detach`, and treat manual `hive markers clear` as guarded
+mutation under the skill's Safety Boundaries.
 The naked `hive` ClawHub slug is already owned by another publisher, so it is
 intentionally not used.
 
@@ -185,9 +190,17 @@ the published schemas, and asserts no state leaks outside the prefix.
 Local usage:
 
 ```bash
-packaging/verify-release.sh --version=v0.3.0
-packaging/verify-release.sh --version=v0.3.0 --report=json | jq .ok
+packaging/verify-release.sh --version=v0.3.1
+packaging/verify-release.sh --version=v0.3.1 --report=json | jq .ok
 ```
+
+For unreleased packaging fixes, validate against the locally built gem rather
+than by copying files into an installed gem directory. Build the artifact with
+`gem build hive.gemspec`, install it into an isolated `GEM_HOME`/XDG prefix,
+run `hive doctor`, then replay the affected `hive run <task-folder>` path from
+that install. Claude tmux launcher-script fixes should prove the target task
+reaches `WAITING` or later instead of `claude_launch_failed`, confirming the
+packaged `lib/hive/scripts/*.sh` files are present in the real artifact.
 
 Exit codes:
 
@@ -389,6 +402,12 @@ If `hive` lives behind a version manager (rbenv / asdf / mise), edit
 the `ExecStart=` line to use the shim's absolute path — systemd-user
 doesn't load your shell's rc files.
 
+When testing a freshly built local gem, make sure the daemon's installed
+`ExecStart=` path resolves to that patched install. A stale service unit can
+keep running an older `/usr/bin/hive` or prior `~/.local/bin/hive` even while
+the shell points at the new binary; `hive daemon install --force` rewrites the
+unit to the current resolved path.
+
 ### macOS (launchd)
 
 `hive daemon install` writes the resolved plist at
@@ -444,6 +463,27 @@ bot:
   chat_id_allowlist: [123456789]
 ```
 
+First-contact pairing can replace the initial manual allowlist edit. Enable
+pairing with an empty allowlist, start the bot, have the Telegram user DM
+`/start`, then approve the printed code:
+
+```yaml
+bot:
+  enabled: true
+  pairing_enabled: true
+  chat_id_allowlist: []
+```
+
+```bash
+hive pairing list
+hive pairing approve telegram ABCDEFGH
+```
+
+Approval writes the chat id to `bot.chat_id_allowlist`, signals the running bot
+to reload when a live bot PID is found (a stale or dead PID file yields
+`reloaded: false` and no SIGHUP), and queues a short approved DM to the new
+chat. Pairing codes expire after 24 hours. See [[commands/pairing]].
+
 Runtime token:
 
 ```bash
@@ -458,8 +498,9 @@ hive bot status
 jq -r '.event' ~/.local/state/hive/logs/bot.log | sort | uniq -c
 ```
 
-Unauthorized chat IDs are logged once and receive no reply. Missing
-token or empty allowlist exits 78 (`CONFIG`).
+With pairing disabled, unauthorized chat IDs are logged once and receive no
+reply. Missing token exits 78 (`CONFIG`); an empty allowlist also exits 78
+unless `bot.pairing_enabled: true`.
 
 ### Bot autostart
 
@@ -503,6 +544,8 @@ drain path when you are not using systemd/launchd.
 | Bot status / uptime                           | `hive bot status` (`--json` for envelope)          |
 | Follow bot log                                | `hive bot tail`                                    |
 | Reload bot allowlist / polling config         | edit `~/.config/hive/config.yml` → `hive bot reload` |
+| List pending Telegram pairing requests        | `hive pairing list` (`--json` for envelope)       |
+| Approve a Telegram pairing request            | `hive pairing approve telegram CODE`              |
 | Drain + stop bot                              | `hive bot stop`                                    |
 
 \* `hive daemon reload` clears the per-tick enable cache, but the

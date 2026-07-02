@@ -6,12 +6,28 @@ class HiveDigestRunTest < Minitest::Test
     def for_date(_date) = grouped
   end
 
-  FakeCategorizer = Struct.new(:categorized, :error) do
+  FakeCategorizer = Struct.new(:categorized, :error, :summary) do
     def categorize(_grouped, date:)
       raise error if error
 
-      categorized
+      Hive::Digest::Output.new(
+        by_project: categorized, summary: summary || "Overall summary."
+      )
     end
+  end
+
+  FakeStats = Struct.new(:totals) do
+    def for_items(_items) = totals
+  end
+
+  FakePairingStore = Struct.new(:count) do
+    def pending = Array.new(count) { Object.new }
+  end
+
+  # Stands in for a read-only/full state dir: PairingStore#pending prunes-on-
+  # read and opens a lock file, so it can raise SystemCallError there.
+  RaisingPairingStore = Class.new do
+    def pending = raise(Errno::EROFS, "state dir is read-only")
   end
 
   FakeSender = Struct.new(:deliveries) do
@@ -27,6 +43,19 @@ class HiveDigestRunTest < Minitest::Test
     end
   end
 
+  # Records the order of preflight!/deliver so a test can assert EnvFile.load!
+  # ran before them (the timing the fix depends on).
+  OrderingSender = Struct.new(:order) do
+    def preflight! = order << :preflight
+
+    def deliver(text, dry_run:)
+      order << :deliver
+      Hive::Digest::Sender::SendResult.new(
+        chat_id: dry_run ? nil : 1, responses: [], dry_run: dry_run, text: text
+      )
+    end
+  end
+
   def test_empty_digest_sends_nothing_shipped_message
     sender = FakeSender.new([])
     result = Hive::Digest.run(
@@ -34,7 +63,8 @@ class HiveDigestRunTest < Minitest::Test
       dry_run: false,
       cfg: {},
       collector: FakeCollector.new({}),
-      sender: sender
+      sender: sender,
+      pairing_store: pairing_store(0)
     )
 
     assert_equal :empty, result.status
@@ -46,22 +76,28 @@ class HiveDigestRunTest < Minitest::Test
     categorized = { "alpha" => [ Hive::Digest::CategorizedItem.new(item: item, category: "feature", summary: "Adds digest.") ] }
     sender = FakeSender.new([])
 
+    totals = Hive::Digest::Totals.new(prs: 1, commits: 3, additions: 10, deletions: 2, measured_prs: 1)
     result = Hive::Digest.run(
       date: Date.new(2026, 6, 13),
       dry_run: true,
       cfg: {},
       collector: FakeCollector.new({ "alpha" => [ item ] }),
-      categorizer: FakeCategorizer.new(categorized, nil),
-      sender: sender
+      categorizer: FakeCategorizer.new(categorized, nil, "Shipped the digest."),
+      sender: sender,
+      stats: FakeStats.new(totals),
+      pairing_store: pairing_store(0)
     )
 
     assert_equal :sent, result.status
     assert_equal true, sender.deliveries.first.fetch(:dry_run)
-    # Assert the categorized summary and display label reached the message,
-    # not the renderer's exact link markdown (which renderer_test owns).
+    # Assert the categorized summary, the overall summary, and the footer
+    # totals reached the message — not the renderer's exact markdown (which
+    # renderer_test owns).
     delivered = sender.deliveries.first.fetch(:text)
     assert_includes delivered, "Adds digest"
     assert_includes delivered, "Task"
+    assert_includes delivered, "Shipped the digest"
+    assert_includes delivered, "PRs 1"
   end
 
   def test_model_error_sends_failed_notice
@@ -72,7 +108,8 @@ class HiveDigestRunTest < Minitest::Test
       cfg: {},
       collector: FakeCollector.new({ "alpha" => [ shipped_item ] }),
       categorizer: FakeCategorizer.new(nil, Hive::Digest::ModelError.new("model down")),
-      sender: sender
+      sender: sender,
+      pairing_store: pairing_store(0)
     )
 
     assert_equal :failed_notice, result.status
@@ -87,19 +124,229 @@ class HiveDigestRunTest < Minitest::Test
     end
   end
 
+  def test_real_run_loads_env_file_so_daemon_dispatched_send_can_authenticate
+    # The daemon dispatches `hive digest` with no HIVE_TELEGRAM_BOT_TOKEN in
+    # its environment, so a real run must load ~/.config/hive/.env itself
+    # (mirroring `hive bot start`) or preflight/deliver fail with exit 78.
+    loaded = count_env_file_loads do
+      Hive::Digest.run(
+        date: Date.new(2026, 6, 13),
+        dry_run: false,
+        cfg: {},
+        collector: FakeCollector.new({}),
+        sender: FakeSender.new([]),
+        pairing_store: pairing_store(0)
+      )
+    end
+
+    assert_equal 1, loaded, "a real digest run must load the env file before sending"
+  end
+
+  def test_dry_run_does_not_load_env_file
+    # A dry-run never sends, so it must not touch the env file — matching the
+    # dry-run "no token/chat lookup" contract.
+    loaded = count_env_file_loads do
+      Hive::Digest.run(
+        date: Date.new(2026, 6, 13),
+        dry_run: true,
+        cfg: {},
+        collector: FakeCollector.new({}),
+        sender: FakeSender.new([]),
+        pairing_store: pairing_store(0)
+      )
+    end
+
+    assert_equal 0, loaded, "a dry-run must not load the env file"
+  end
+
+  def test_env_file_loads_before_preflight_so_the_token_is_present
+    # The bug this PR fixes is timing: the token must be in ENV BEFORE
+    # Sender#preflight! reads it. A test that only counts that load! ran would
+    # still pass if a refactor moved the load after preflight, silently
+    # reintroducing the exit-78 failure. Pin the order.
+    order = []
+    sender = OrderingSender.new(order)
+    original = Hive::EnvFile.method(:load!)
+    Hive::EnvFile.define_singleton_method(:load!) do |*|
+      order << :load
+      []
+    end
+
+    Hive::Digest.run(
+      date: Date.new(2026, 6, 13),
+      dry_run: false,
+      cfg: {},
+      collector: FakeCollector.new({ "alpha" => [ shipped_item ] }),
+      categorizer: FakeCategorizer.new(
+        { "alpha" => [ Hive::Digest::CategorizedItem.new(item: shipped_item, category: "feature", summary: "x") ] },
+        nil
+      ),
+      sender: sender,
+      pairing_store: pairing_store(0)
+    )
+
+    assert_equal :load, order.first,
+                 "env must load before preflight/send so the token is present when preflight reads it"
+    assert_operator order.index(:load), :<, order.index(:preflight),
+                    "EnvFile.load! must run before Sender#preflight!"
+  ensure
+    Hive::EnvFile.define_singleton_method(:load!, original)
+  end
+
   def test_default_date_is_yesterday_local
     result = Hive::Digest.run(
       dry_run: true,
       cfg: {},
       clock: -> { Time.local(2026, 6, 14, 0, 10, 0) },
       collector: FakeCollector.new({}),
-      sender: FakeSender.new([])
+      sender: FakeSender.new([]),
+      pairing_store: pairing_store(0)
     )
 
     assert_equal Date.new(2026, 6, 13), result.date
   end
 
+  def test_empty_digest_appends_pairing_notice_when_pending
+    sender = FakeSender.new([])
+    result = Hive::Digest.run(
+      date: Date.new(2026, 6, 13),
+      dry_run: true,
+      cfg: {},
+      collector: FakeCollector.new({}),
+      sender: sender,
+      pairing_store: pairing_store(1)
+    )
+
+    assert_equal :empty, result.status
+    assert_equal "Nothing shipped today 🌙\n\n🔑 1 pairing request waiting — run `hive pairing list`",
+                 result.message
+    assert_equal result.message, sender.deliveries.first.fetch(:text)
+  end
+
+  def test_successful_digest_appends_plural_pairing_notice_when_pending
+    item = shipped_item
+    categorized = {
+      "alpha" => [
+        Hive::Digest::CategorizedItem.new(item: item, category: "feature", summary: "Adds digest.")
+      ]
+    }
+    sender = FakeSender.new([])
+
+    result = Hive::Digest.run(
+      date: Date.new(2026, 6, 13),
+      dry_run: true,
+      cfg: {},
+      collector: FakeCollector.new({ "alpha" => [ item ] }),
+      categorizer: FakeCategorizer.new(categorized, nil, "Shipped the digest."),
+      sender: sender,
+      stats: FakeStats.new(nil),
+      pairing_store: pairing_store(2)
+    )
+
+    assert_equal :sent, result.status
+    assert_includes result.message, "Adds digest"
+    assert_includes result.message, "🔑 2 pairing requests waiting — run `hive pairing list`"
+    assert_equal result.message, sender.deliveries.first.fetch(:text)
+  end
+
+  def test_empty_digest_appends_plural_pairing_notice
+    sender = FakeSender.new([])
+    result = Hive::Digest.run(
+      date: Date.new(2026, 6, 13),
+      dry_run: true,
+      cfg: {},
+      collector: FakeCollector.new({}),
+      sender: sender,
+      pairing_store: pairing_store(3)
+    )
+
+    assert_equal :empty, result.status
+    assert_includes result.message, "🔑 3 pairing requests waiting — run `hive pairing list`"
+  end
+
+  def test_successful_digest_appends_singular_pairing_notice
+    item = shipped_item
+    categorized = {
+      "alpha" => [
+        Hive::Digest::CategorizedItem.new(item: item, category: "feature", summary: "Adds digest.")
+      ]
+    }
+    sender = FakeSender.new([])
+
+    result = Hive::Digest.run(
+      date: Date.new(2026, 6, 13),
+      dry_run: true,
+      cfg: {},
+      collector: FakeCollector.new({ "alpha" => [ item ] }),
+      categorizer: FakeCategorizer.new(categorized, nil, "Shipped the digest."),
+      sender: sender,
+      stats: FakeStats.new(nil),
+      pairing_store: pairing_store(1)
+    )
+
+    assert_equal :sent, result.status
+    assert_includes result.message, "🔑 1 pairing request waiting — run `hive pairing list`"
+  end
+
+  def test_successful_digest_omits_pairing_notice_when_none_pending
+    item = shipped_item
+    categorized = {
+      "alpha" => [
+        Hive::Digest::CategorizedItem.new(item: item, category: "feature", summary: "Adds digest.")
+      ]
+    }
+    sender = FakeSender.new([])
+
+    result = Hive::Digest.run(
+      date: Date.new(2026, 6, 13),
+      dry_run: true,
+      cfg: {},
+      collector: FakeCollector.new({ "alpha" => [ item ] }),
+      categorizer: FakeCategorizer.new(categorized, nil, "Shipped the digest."),
+      sender: sender,
+      stats: FakeStats.new(nil),
+      pairing_store: pairing_store(0)
+    )
+
+    assert_equal :sent, result.status
+    refute_includes result.message, "pairing", "a non-empty digest with no pending pairings adds no notice"
+  end
+
+  def test_digest_survives_pairing_store_io_failure
+    sender = FakeSender.new([])
+    result = Hive::Digest.run(
+      date: Date.new(2026, 6, 13),
+      dry_run: true,
+      cfg: {},
+      collector: FakeCollector.new({}),
+      sender: sender,
+      pairing_store: RaisingPairingStore.new
+    )
+
+    assert_equal :empty, result.status,
+                 "an I/O-faulted pairing store must not abort the digest"
+    refute_includes result.message, "pairing",
+                    "a failed pairing count degrades to no notice, not a crash"
+    assert_equal result.message, sender.deliveries.first.fetch(:text)
+  end
+
   private
+
+  # Singleton override instead of minitest/mock (not bundled): count how many
+  # times Hive::EnvFile.load! is invoked inside the block, then restore the
+  # original module method so other tests see the real loader.
+  def count_env_file_loads
+    loaded = 0
+    original = Hive::EnvFile.method(:load!)
+    Hive::EnvFile.define_singleton_method(:load!) do |*|
+      loaded += 1
+      []
+    end
+    yield
+    loaded
+  ensure
+    Hive::EnvFile.define_singleton_method(:load!, original)
+  end
 
   def shipped_item
     Hive::Digest::ShippedItem.new(
@@ -112,5 +359,9 @@ class HiveDigestRunTest < Minitest::Test
       pr_body: "body",
       shipped_at: Time.utc(2026, 6, 13, 12)
     )
+  end
+
+  def pairing_store(count)
+    FakePairingStore.new(count)
   end
 end

@@ -15,12 +15,14 @@ JSON_TRUE_OPTIONS = %w[--json --json=true --json=TRUE --json=t --json=T].freeze
 JSON_FALSE_OPTIONS = %w[--no-json --skip-json --json=false --json=FALSE --json=f --json=F].freeze
 JSON_BOOLEAN_OPTIONS = (JSON_TRUE_OPTIONS + JSON_FALSE_OPTIONS).freeze
 STAGE_ACTION_USAGE_COMMANDS = %w[brainstorm plan develop open-pr review artifacts finalize archive].freeze
+NEW_VALUE_OPTIONS = %w[--depends-on --workflow].freeze
 JSON_USAGE_ERROR_CONTRACTS = {
   "run" => { schema: "hive-run", error_kind: "invalid_task_path" },
   "rebase-status" => { schema: "hive-rebase-status", schema_version: 1, error_kind: "invalid_task_path" },
   "approve" => { schema: "hive-approve", error_kind: "invalid_task_path" },
   "drop" => { schema: "hive-drop", error_kind: "invalid_task_path" },
   "findings" => { schema: "hive-findings", error_kind: "invalid_task_path" },
+  "patrol" => { schema: "hive-patrol", error_kind: "error" },
   "accept-finding" => {
     schema: "hive-findings",
     error_kind: "invalid_task_path",
@@ -33,6 +35,19 @@ JSON_USAGE_ERROR_CONTRACTS = {
   },
   "markers" => { schema: "hive-markers-clear", error_kind: "invalid_task_path" },
   "digest" => { schema: "hive-digest", error_kind: "usage" },
+  "pairing" => { schema: "hive-pairing-approve", error_kind: "usage" },
+  "answer-digest" => { schema: "hive-answer-digest", error_kind: "usage" },
+  # Residual workflow argv-shape errors raised by Thor before command dispatch
+  # (for example too many positionals) must ride the same JSON envelope as the
+  # command's own UsageError. Bare `hive workflow` is handled in-command.
+  "workflow" => { schema: "hive-workflow-new", error_kind: "usage" },
+  # `hive bot` takes a single SUBCOMMAND positional and (unlike `daemon`) has no
+  # `*targets` splat, so an extra positional such as `hive bot status extra` is
+  # rejected by Thor before `Hive::Commands::Bot#call` runs — bypassing the
+  # command-level usage-error emitters. Ride the same hive-bot-status envelope
+  # those emitters use so every `hive bot ... --json` usage error still produces
+  # an ok:false document on stdout instead of bare Thor prose on stderr.
+  "bot" => { schema: "hive-bot-status", error_kind: "extra_arguments" },
   "pr" => {
     schema: "hive-stage-action",
     error_kind: "invalid_task_path",
@@ -57,18 +72,48 @@ def normalize_leading_json_options!(argv)
   argv.insert(cmd_idx + 1, *leading)
 end
 
+# True for an allow-listed value option in `--name=VALUE` form (e.g.
+# `--workflow=content`). Single-sources the predicate shared by
+# new_text_start_index and lift_new_options!.
+def new_value_assignment?(arg)
+  NEW_VALUE_OPTIONS.any? { |name| arg.start_with?("#{name}=") }
+end
+
 def new_text_start_index(argv)
   cmd_idx = argv.index { |a| !a.start_with?("-") }
   return nil unless cmd_idx && argv[cmd_idx] == "new"
 
-  project_idx = argv.each_index.find do |idx|
-    next false if idx <= cmd_idx
-
+  idx = cmd_idx + 1
+  project_idx = nil
+  while idx < argv.length
     arg = argv[idx]
-    next false if JSON_BOOLEAN_OPTIONS.include?(arg)
-    next false if arg.start_with?("-")
+    if JSON_BOOLEAN_OPTIONS.include?(arg)
+      idx += 1
+      next
+    end
+    if NEW_VALUE_OPTIONS.include?(arg)
+      # Boundary scan only: advance past the value unconditionally. This
+      # intentionally diverges from lift_new_options!, which keeps a
+      # trailing/option-like value option as literal text (the
+      # `!value.start_with?("-")` guard). The two only differ for the
+      # out-of-scope "value option before PROJECT with a missing/option-like
+      # value" case, and the sole consumer of this index
+      # (reject_unsupported_json_assignments!) runs first and inspects only
+      # `--json=` tokens, so the divergence is harmless. Keep both guards in
+      # sync if a future edit changes the allow-list or that consumer.
+      idx += 2
+      next
+    end
+    if new_value_assignment?(arg)
+      idx += 1
+      next
+    end
+    unless arg.start_with?("-")
+      project_idx = idx
+      break
+    end
 
-    true
+    idx += 1
   end
   return nil unless project_idx
 
@@ -97,16 +142,64 @@ def rewrite_help_flag!(argv)
   argv.replace(argv[0...cmd_idx] + [ "help", cmd ])
 end
 
-def terminate_new_text_options!(argv)
-  text_start_idx = new_text_start_index(argv)
-  return unless text_start_idx && text_start_idx < argv.length
-  return if argv[text_start_idx] == "--"
+# Thor stops parsing options at the first positional (PROJECT), so allow-listed
+# options must be lifted ahead of it before dispatch wherever they appear after
+# `new` — before the project, between the project and the task text, or after the
+# text.
+def lift_new_options!(argv)
+  cmd_idx = argv.index { |a| !a.start_with?("-") }
+  return unless cmd_idx && argv[cmd_idx] == "new"
 
-  argv.insert(text_start_idx, "--")
+  lifted = []
+  rest = []
+  protected_tail = false
+  idx = cmd_idx + 1
+  while idx < argv.length
+    arg = argv[idx]
+    if protected_tail
+      rest << arg
+    elsif arg == "--"
+      protected_tail = true
+    elsif JSON_BOOLEAN_OPTIONS.include?(arg)
+      lifted << arg
+    elsif NEW_VALUE_OPTIONS.include?(arg)
+      # Only consume the next token as the value when it exists and does not
+      # begin with `-`; otherwise the bare option stays literal text so a trailing
+      # or value-less `--workflow`/`--depends-on` cannot eat PROJECT on rebuild.
+      # (new_text_start_index's boundary scan intentionally advances past the
+      # value unconditionally — see the note there for why the divergence is
+      # harmless.)
+      value = argv[idx + 1]
+      if value && !value.start_with?("-")
+        lifted << arg << value
+        idx += 1
+      else
+        rest << arg
+      end
+    elsif new_value_assignment?(arg)
+      lifted << arg
+    else
+      rest << arg
+    end
+    idx += 1
+  end
+
+  project = rest.shift
+  return unless project
+
+  tail = rest.empty? ? [] : [ "--", *rest ]
+  argv.replace(argv[0...cmd_idx] + [ "new" ] + lifted + [ project ] + tail)
 end
 
 def json_requested?(argv)
   JSON_TRUE_OPTIONS.include?(argv.reverse.find { |arg| JSON_BOOLEAN_OPTIONS.include?(arg) })
+end
+
+def reject_invalid_argv_encoding!(argv)
+  idx = argv.index { |arg| !arg.valid_encoding? }
+  return unless idx
+
+  raise Thor::MalformattedArgumentError, "invalid byte sequence in argument #{idx + 1}"
 end
 
 def reject_unsupported_json_assignments!(argv)
@@ -161,10 +254,11 @@ rescue Errno::EPIPE, JSON::GeneratorError
 end
 
 begin
+  reject_invalid_argv_encoding!(ARGV)
   reject_unsupported_json_assignments!(ARGV)
   normalize_leading_json_options!(ARGV)
   rewrite_help_flag!(ARGV)
-  terminate_new_text_options!(ARGV)
+  lift_new_options!(ARGV)
   Hive::CLI.start(ARGV, debug: true)
 rescue Thor::Error => e
   error = Hive::InvalidTaskPath.new(e.message)

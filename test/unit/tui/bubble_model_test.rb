@@ -183,6 +183,42 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_equal :archive, @model.hive_model.mode
   end
 
+  def test_open_archive_pane_requests_archive_refresh
+    calls = 0
+    @model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial,
+      dispatch: @dispatch,
+      archive_refresh: -> { calls += 1 }
+    )
+
+    @model.update(Hive::Tui::Messages::OPEN_ARCHIVE_PANE)
+
+    assert_equal 1, calls
+    assert_equal :archive, @model.hive_model.mode
+  end
+
+  # U4 end-to-end wiring (App#run_charm injects
+  # state_source.method(:request_archive_refresh) as the archive_refresh
+  # hook). BubbleModel calling its hook and StateSource#request_archive_refresh
+  # are each unit-tested in isolation; this pins the actual bound-method
+  # handoff so the binding can't be dropped/mis-wired with both halves green.
+  def test_open_archive_pane_marks_state_source_cache_dirty_through_bound_method
+    require "hive/tui/state_source"
+    source = Hive::Tui::StateSource.new(poll_interval_seconds: 60)
+    model = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial,
+      dispatch: @dispatch,
+      archive_refresh: source.method(:request_archive_refresh)
+    )
+    refute source.instance_variable_get(:@archive_refresh_dirty),
+           "a fresh StateSource starts with a clean archive cache"
+
+    model.update(Hive::Tui::Messages::OPEN_ARCHIVE_PANE)
+
+    assert source.instance_variable_get(:@archive_refresh_dirty),
+           "opening the archive pane must flip StateSource's dirty flag via the bound hook"
+  end
+
   # F2: full filter happy path through KeyMessage → KeyMap → Update.
   # Open filter, type chars, commit; assert filter committed and mode
   # back to :grid. Pins the regression we found in the /ce-code-review
@@ -839,7 +875,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
     out = @model.view
     assert_includes out, "Projects",      "left pane (Projects header) must render at >=70 cols"
     assert_includes out, "★ All projects"
-    assert_includes out, "fix-cache-x",   "right pane task row must render"
+    assert_includes out, "Ready to plan", "right pane task row must render"
     assert_includes out, "Tasks ·",       "tasks pane title must render"
     assert_includes out, "[Tab] switch",  "default footer hints must appear"
     assert_includes out, "[Enter] action", "Enter footer hint must describe contextual behavior"
@@ -2446,7 +2482,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       stage: "6-review",
       folder: folder,
       marker: "review_error",
-      attrs: { "phase" => "triage", "reason" => "triage_failed", "pass" => "2" },
+      attrs: { "phase" => "triage", "reason" => "merge_conflict", "pass" => "2" },
       suggested_command: nil
     )
     clear_argv = nil
@@ -2470,7 +2506,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
     assert_match(/clearing/, sync_flash, "synchronous flash must announce the in-progress clear")
     assert_match(/REVIEW_ERROR/, sync_flash)
     assert_match(/phase=triage/, sync_flash)
-    assert_match(/reason=triage_failed/, sync_flash)
+    assert_match(/reason=merge_conflict/, sync_flash)
     assert_match(/pass=2/, sync_flash)
 
     final_flash = last_async_flash_text
@@ -2486,7 +2522,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       stage: "6-review",
       folder: "/tmp/hive/recover-me",
       marker: "review_error",
-      attrs: { "reason" => "triage_failed", "pass" => "3" },
+      attrs: { "reason" => "merge_conflict", "pass" => "3" },
       suggested_command: nil
     )
     run_count = 0
@@ -2742,7 +2778,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       stage: "6-review",
       folder: folder,
       marker: "review_error",
-      attrs: { "reason" => "triage_failed", "pass" => "2" },
+      attrs: { "reason" => "merge_conflict", "pass" => "2" },
       suggested_command: nil
     )
 
@@ -2771,7 +2807,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       stage: "6-review",
       folder: folder,
       marker: "review_error",
-      attrs: { "reason" => "triage_failed", "pass" => "2" },
+      attrs: { "reason" => "merge_conflict", "pass" => "2" },
       suggested_command: nil
     )
     clear_argv = nil
@@ -2817,7 +2853,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       stage: "6-review",
       folder: "",
       marker: "review_error",
-      attrs: { "reason" => "triage_failed" },
+      attrs: { "reason" => "merge_conflict" },
       suggested_command: nil
     )
     ran_clear = false
@@ -2870,7 +2906,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       stage: "6-review",
       folder: "/tmp/hive/io-fail",
       marker: "review_error",
-      attrs: { "reason" => "triage_failed" },
+      attrs: { "reason" => "merge_conflict" },
       suggested_command: nil
     )
     ran_dispatch = false
@@ -2901,7 +2937,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       stage: "6-review",
       folder: "/tmp/hive/logic-bug",
       marker: "review_error",
-      attrs: { "reason" => "triage_failed" },
+      attrs: { "reason" => "merge_conflict" },
       suggested_command: nil
     )
 
@@ -2933,7 +2969,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       stage: "6-review",
       folder: folder,
       marker: "review_error",
-      attrs: { "reason" => "triage_failed", "pass" => "2" },
+      attrs: { "reason" => "merge_conflict", "pass" => "2" },
       suggested_command: nil
     )
     # Block the worker on a latch so the second Enter sees an
@@ -3032,7 +3068,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
       stage: "6-review",
       folder: "/tmp/hive/extra-attrs",
       marker: "review_error",
-      attrs: { "reason" => "triage_failed", "zebra" => "z", "apple" => "a" },
+      attrs: { "reason" => "merge_conflict", "zebra" => "z", "apple" => "a" },
       suggested_command: nil
     )
 
@@ -3044,7 +3080,7 @@ class HiveTuiBubbleModelTest < Minitest::Test
     end
 
     flash = @model.hive_model.flash.to_s
-    reason_idx = flash.index("reason=triage_failed")
+    reason_idx = flash.index("reason=merge_conflict")
     apple_idx = flash.index("apple=a")
     zebra_idx = flash.index("zebra=z")
     refute_nil reason_idx

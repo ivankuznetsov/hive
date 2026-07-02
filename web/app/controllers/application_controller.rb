@@ -23,20 +23,34 @@ class ApplicationController < ActionController::Base
   # a request as 422 user errors. The dispatcher owns its verb-map KeyError;
   # ParameterMissing (a KeyError subclass) is a genuine user error.
   rescue_from Hive::Error, ActionController::ParameterMissing do |e|
-    render "errors/show", status: :unprocessable_entity, locals: { heading: "Action failed", message: e.message }
+    render_typed_error(:unprocessable_entity, "Action failed", e.message)
   end
 
   rescue_from Hive::InvalidTaskPath do |e|
-    render "errors/show", status: :not_found, locals: { heading: "Not found", message: e.message }
+    render_typed_error(:not_found, "Not found", e.message)
   end
 
   private
+
+  # Hive's typed errors render an HTML error page for browser requests. Binary
+  # endpoints (the task media route streams png/jpg/gif) carry a non-HTML
+  # request format with no matching errors/show template, so an unknown
+  # task/project there must HEAD the status — otherwise the rescue itself
+  # raises ActionView::MissingTemplate and the clean 404 becomes a 500.
+  def render_typed_error(status, heading, message)
+    if request.format.html?
+      render "errors/show", status: status, locals: { heading: heading, message: message }
+    else
+      head status
+    end
+  end
 
   def current_login
     session[:github_login]
   end
 
   def require_login
+    return if local_loopback_request?
     return redirect_to login_path unless current_login
 
     # Sessions must track the CURRENT owner, not the owner at sign-in time:
@@ -50,6 +64,15 @@ class ApplicationController < ActionController::Base
 
     reset_session
     redirect_to login_path, alert: "Signed out: this box's owner changed."
+  end
+
+  # Hive::Web::Loopback is the same test the CLI bind policy uses, so the
+  # "which addresses count as loopback" rule can't drift between the tier
+  # that sets HIVEBOX_LOCAL_LOOPBACK and the tier that honors it.
+  def local_loopback_request?
+    return false unless ENV["HIVEBOX_LOCAL_LOOPBACK"] == "1"
+
+    Hive::Web::Loopback.address?(request.remote_ip)
   end
 
   def registered_projects

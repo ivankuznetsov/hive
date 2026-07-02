@@ -27,16 +27,32 @@ module Hive
       # Hive::ConfigError.
       #
       # ADR-013-style protected-files SHA-256 check wraps the spawn:
-      # plan.md, worktree.yml, and task.md must NOT be modified by the
-      # triage agent. Tampering yields a :triage_tampered error result;
-      # the U9 runner converts that to a REVIEW_ERROR marker.
+      # plan.md, worktree.yml, task.md, and reviews/suppressed.md must NOT
+      # be modified by the triage agent. Tampering yields a
+      # :triage_tampered error result; the U9 runner converts that to a
+      # REVIEW_ERROR marker.
       module Triage
-        Result = Data.define(:status, :escalations_path, :error_message, :tampered_files)
+        Result = Data.define(:status, :escalations_path, :error_message, :tampered_files, :limit_text)
 
         # Files the triage agent must NOT modify. The reviewer files
         # are deliberately NOT in this list — triage's job is to edit
         # them in place. The escalations file is new and SHA-irrelevant.
         PROTECTED_FILES = Hive::ProtectedFiles::ORCHESTRATOR_OWNED
+
+        # The base-bound suppression list is orchestrator-owned: only the
+        # runner's strip_suppressed! (before this spawn) and
+        # seed_from_triage! (after it) may write it, so a triage agent
+        # editing reviewer files in place must NOT touch it — clearing or
+        # rewriting suppressions would defeat the no-fix convergence
+        # guarantee (plan U3 / Req-Trace A4 require fix AND triage
+        # protection, not fix alone). Snapshotted as a triage-local
+        # addition so the shared ORCHESTRATOR_OWNED constant (also consumed
+        # by ci-fix and the review fix phase via FIX_PROTECTED_FILES;
+        # 4-execute carries its own PROTECTED_FILES list) stays untouched.
+        # Timing is safe: strip
+        # writes before this snapshot and seed after it, so the
+        # orchestrator's own legitimate writes never trip the check.
+        TRIAGE_PROTECTED_FILES = (PROTECTED_FILES + [ "reviews/suppressed.md" ]).freeze
 
         BIAS_PRESETS = {
           "courageous" => "triage_courageous.md.erb",
@@ -56,7 +72,8 @@ module Hive
               status: :ok,
               escalations_path: escalations,
               error_message: nil,
-              tampered_files: []
+              tampered_files: [],
+              limit_text: nil
             )
           end
 
@@ -72,17 +89,22 @@ module Hive
             escalations_path: escalations
           )
 
-          before = Hive::ProtectedFiles.snapshot(ctx.task_folder, PROTECTED_FILES)
+          before = Hive::ProtectedFiles.snapshot(ctx.task_folder, TRIAGE_PROTECTED_FILES)
           task = synthetic_task(ctx)
+          scope = Hive::Stages::Base.stage_permission_scope(
+            cfg, "review.triage", task, profile,
+            default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
+          )
           kwargs = {
             prompt: prompt,
-            add_dirs: [ ctx.task_folder ],
+            add_dirs: scope.fetch(:add_dirs),
             cwd: ctx.worktree_path,
             max_budget_usd: cfg.dig("budget_usd", "review_triage") || 75,
             timeout_sec: cfg.dig("timeout_sec", "review_triage") || 1800,
             log_label: "review-triage-pass#{format('%02d', ctx.pass)}",
             profile: profile,
             expected_output: escalations,
+            **Hive::Stages::Base.tool_scope_kwargs(scope),
             status_mode: :output_file_exists
           }
           spawn_result =
@@ -91,13 +113,12 @@ module Hive
                 task,
                 cfg,
                 **kwargs,
-                session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-triage-pass#{ctx.pass}", task),
-                allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
+                session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-triage-pass#{ctx.pass}", task)
               )
             else
               Hive::Stages::Base.spawn_agent(task, **kwargs)
             end
-          after = Hive::ProtectedFiles.snapshot(ctx.task_folder, PROTECTED_FILES)
+          after = Hive::ProtectedFiles.snapshot(ctx.task_folder, TRIAGE_PROTECTED_FILES)
 
           tampered = Hive::ProtectedFiles.diff(before, after)
           if tampered.any?
@@ -105,7 +126,8 @@ module Hive
               status: :tampered,
               escalations_path: escalations,
               error_message: "triage agent modified protected files: #{tampered.join(', ')}",
-              tampered_files: tampered
+              tampered_files: tampered,
+              limit_text: nil
             )
           end
 
@@ -114,7 +136,8 @@ module Hive
               status: :ok,
               escalations_path: escalations,
               error_message: nil,
-              tampered_files: []
+              tampered_files: [],
+              limit_text: nil
             )
           else
             # Clean up any partial escalations file the agent wrote
@@ -126,7 +149,8 @@ module Hive
               status: :error,
               escalations_path: escalations,
               error_message: spawn_result[:error_message] || "triage agent failed (#{spawn_result[:status]})",
-              tampered_files: []
+              tampered_files: [],
+              limit_text: spawn_result[:limit_text]
             )
           end
         end
@@ -144,9 +168,10 @@ module Hive
 
         # Test helper: list of files the protected-SHA check covers, in
         # discovery order. Exposed so tests can trigger the tampering
-        # path deterministically.
+        # path deterministically. Mirrors the snapshot set in run!, which
+        # protects the suppression list alongside ORCHESTRATOR_OWNED.
         def protected_paths(ctx)
-          PROTECTED_FILES.map { |name| File.join(ctx.task_folder, name) }
+          TRIAGE_PROTECTED_FILES.map { |name| File.join(ctx.task_folder, name) }
         end
 
         def escalations_path(ctx)

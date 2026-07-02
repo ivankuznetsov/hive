@@ -3,7 +3,7 @@ title: Hive::Digest
 type: module
 source: lib/hive/digest.rb, lib/hive/digest/, templates/digest_prompt.md.erb
 created: 2026-06-14
-updated: 2026-06-14
+updated: 2026-06-30
 tags: [digest, shipped, telegram, module]
 ---
 
@@ -19,13 +19,14 @@ through `Hive::Config.load_global_digest_config`.
 
 | API | Purpose |
 |-----|---------|
-| `Hive::Digest.run(date: nil, dry_run: false, cfg: nil, clock: -> { Time.now }, collector: nil, categorizer: nil, sender: nil)` | Orchestrates collection, categorization/rendering, and delivery. Defaults `cfg` via `Config.load_global_digest_config`. Returns `Result(status:, date:, message:, delivery:)`. |
+| `Hive::Digest.run(date: nil, dry_run: false, cfg: nil, clock: -> { Time.now }, collector: nil, categorizer: nil, sender: nil, stats: nil, pairing_store: Hive::Bot::PairingStore.new)` | Orchestrates collection, categorization, stats, rendering, pairing-request reminder appending, and delivery. Defaults `cfg` via `Config.load_global_digest_config` and `stats` to `Stats.new`. For a real send (not `dry_run`) it first calls `Hive::EnvFile.load!` so `~/.config/hive/.env` supplies `HIVE_TELEGRAM_BOT_TOKEN` even when the environment doesn't export it — this is what lets the daemon-dispatched `hive digest` authenticate (its systemd/detached launch env has no token; previously only `hive bot start` loaded the `.env`). An exported env var still wins; a dry-run never loads it. Returns `Result(status:, date:, message:, delivery:)`. |
 | `Digest::Window.local_today`, `previous_local_day`, `on_local_date?`, `parse_date`, `parse_time` | Local-date window helpers. `previous_local_day(now:)` is the shared "yesterday local" default used by both the CLI command and `Digest.run`. Collection compares `shipped_at.getlocal.to_date` to the requested date. |
 | `Digest::ShipTimes#shipped_at(hive_state_path:, slug:)` | Reads git log on `hive/state` (fixed-string `-F` grep) and picks the ship commit by **action preference** — `pr_finalized`, else `archived`, else approval into `9-done` — not whichever commit is chronologically first. |
 | `Digest::Collector#for_date(date)` | Scans registered projects and builds grouped `ShippedItem` rows from `9-done` task folders, `meta.yml`, `pr.md`, and ship times. |
-| `Digest::Categorizer#categorize(grouped, date:)` | Renders the digest prompt and runs an `AgentProfile` expecting an `items.json` file. |
-| `Digest::Categorizer.map_output_file` / `map_document` | Validates and maps model JSON rows back to shipped items, defaulting bad/missing categories safely. |
-| `Digest::Renderer.render`, `.empty`, `.failed`, `.escape_mdv2` | Builds Telegram MarkdownV2 text. |
+| `Digest::Categorizer#categorize(grouped, date:)` | Renders the digest prompt and runs an `AgentProfile` expecting an `items.json` file. Returns `Digest::Output(by_project:, summary:)`. |
+| `Digest::Categorizer.map_output_file` / `map_document` | Validates and maps model JSON rows back to shipped items (the `{project => [CategorizedItem]}` shape), defaulting bad/missing categories safely. `load_doc!` reads/parses the file; `summary_from` extracts the overall summary with a count fallback. |
+| `Digest::Stats#for_items(items)` | Sums per-PR `Hive::Gh.pr_stats(pr_url)` (injectable `fetch:`) into `Totals(prs:, commits:, additions:, deletions:, measured_prs:)`; a per-PR `gh` failure is logged and skipped. |
+| `Digest::Renderer.render(by_project, date:, summary:, totals:)`, `.empty`, `.failed`, `.escape_mdv2` | Builds the Telegram MarkdownV2 message: brand header + date, `_Summary_`, per-project sections, and the global stats footer. |
 | `Digest::Sender#deliver(text, dry_run:)` | Returns dry-run text or sends the Telegram MarkdownV2 message (chunked into one `send_message` per chunk above Telegram's 4096-char limit). |
 
 `Digest::Result#status` is one of:
@@ -42,11 +43,25 @@ registered projects
   -> .hive-state/stages/9-done/* folders
   -> Digest::ShipTimes over git log hive/state
   -> ShippedItem(project, slug, display_name, pr_url, pr_number, pr_title, pr_body, shipped_at)
-  -> Digest::Categorizer (agent writes items.json)
-  -> CategorizedItem(item, category, summary)
-  -> Digest::Renderer (Telegram MarkdownV2)
+  -> Digest::Categorizer (agent writes {summary, items} to items.json)
+  -> Output(by_project: {project => [CategorizedItem(item, category, summary)]}, summary:)
+  -> Digest::Stats.for_items (gh pr view per PR) -> Totals(prs, commits, additions, deletions, measured_prs)
+  -> Digest::Renderer.render(by_project, date:, summary:, totals:) (Telegram MarkdownV2)
   -> Digest::Sender (Telegram bot client)
 ```
+
+The rendered message is: a brand header (`*Hive* #Digest`) + human date, an
+italic `_Summary_` block (the model's one-line overview, or a neutral count
+fallback), one **per-project** section (`*Hive*`, capitalized) each with
+`Features`/`Fixes`/`Patrol` subsections in fixed order, then a global footer
+under a divider — `Lines +A/-D · PRs P · Commits C`. Lines/Commits are shown
+only when `Totals#measured_prs` is positive, so a `gh`-unavailable run degrades
+to just the PR count instead of a misleading `+0/-0`.
+When `PairingStore#pending.size` is positive, `Digest.run` appends one final
+line shaped as `🔑 N pairing request(s) waiting — run hive pairing list` to both the
+empty and successfully-rendered digest paths. This local file read happens
+outside the categorizer prompt, so pending pairing requests do not spend agent
+budget.
 
 Collection is deliberately tolerant of incomplete task artifacts:
 
@@ -98,9 +113,10 @@ falls back to the PR title or display label for summary when needed.
 
 ## Delivery Contract
 
-`Digest::Sender.resolve_chat_id(cfg)` prefers `bot.digest_chat_id`, then the
-first `bot.chat_id_allowlist` entry. Missing both raises `Hive::ConfigError`.
-Dry-run bypasses token and chat lookup entirely.
+`Digest::Sender.resolve_chat_id(cfg)` resolves to `bot.chat_id_allowlist[0]`
+only and raises `Hive::ConfigError`
+(`"bot.chat_id_allowlist[0] must be configured before sending digest"`) when no
+allowlisted chat is set. Dry-run bypasses token and chat lookup entirely.
 
 Real delivery builds `Hive::Bot::Telegram` with
 `Hive::Config.telegram_bot_token!` and calls:
@@ -141,8 +157,19 @@ the dispatch through the concurrency controller (tagged `kind: :digest`, off
 the task caps, at most one in flight). A successful child exit advances the
 cursor; a non-zero exit clears the pending marker, leaves the cursor for retry,
 and records an escalating failure backoff (`60`/`300`/`900`s) so the same date
-is **not** re-dispatched every tick. `digest.enabled` / `max_catchup_days` are
-re-read on SIGHUP (the scheduler is reconfigured in place within one tick).
+is **not** re-dispatched every tick. The dispatcher isolates scheduler
+`tick` / `complete` exceptions as `fatal` log events with
+`keeping_previous: true`, so digest-state I/O faults do not crash the daemon
+poll loop. Dry-run pseudo-child reaping calls the same `complete` hook as real
+child reaping, which prevents dry-run digest dispatches from wedging behind a
+stale pending marker. `digest.enabled` / `max_catchup_days` are re-read on
+SIGHUP (the scheduler is reconfigured in place within one tick).
+
+`digest.enabled` is **opt-out**: when the operator has not set it, both
+scheduler-config callers load it through `Config.load_global_digest_block`,
+which derives the flag ON from the bot config (the bot is enabled with an
+allowlisted chat) and OFF otherwise — see [[commands/daemon]] and
+[[modules/config]]. An explicit value (true or false) is always honored.
 
 ## Tests
 
@@ -155,6 +182,9 @@ re-read on SIGHUP (the scheduler is reconfigured in place within one tick).
 - `test/unit/digest/sender_test.rb` — chat-id resolution, dry-run bypass, Telegram send args.
 - `test/unit/daemon/digest_scheduler_test.rb` — first-run guard, catch-up,
   cap logging, retry, disabled mode, and DST local-date behavior.
+- `test/unit/daemon/dispatcher_test.rb` — scheduler dispatch/reap wiring,
+  dry-run digest completion, and fatal-log isolation when scheduler completion
+  raises.
 - `test/digest/e2e_test.rb` — opt-in live model + Telegram fixture run; fails
   loudly when required live env vars are missing.
 

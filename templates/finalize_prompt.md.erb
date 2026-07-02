@@ -22,6 +22,10 @@ Behavior:
 - Refresh the PR description with a final body containing these exact level-2
   markdown headings: `## Summary`, `## Test plan`, `## Review summary`, and
   `## Linked task`.
+- If `<%= task_folder %>/media/manifest.json` exists and contains items with
+  non-empty `screenote_url` values, include a concise `## Demo` section in the
+  PR body linking each screenote URL with its caption. Preserve or re-add this
+  section on body refresh. If there are no screenote URLs, omit the section.
 - Write that body to a temporary markdown file and run:
 
   gh pr edit <%= pr_url %> --body-file <path-to-body-file>

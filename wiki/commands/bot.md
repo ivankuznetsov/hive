@@ -3,7 +3,7 @@ title: hive bot
 type: command
 source: lib/hive/commands/bot.rb, lib/hive/bot/*
 created: 2026-05-14
-updated: 2026-06-12
+updated: 2026-06-30
 tags: [command, bot, telegram, mobile, json]
 ---
 
@@ -43,10 +43,10 @@ hive bot install [--force] [--json]
 | `/status [--json] [project]` | Renders actionable rows from `hive status --json` as `Title… — Stage`; when a project name is supplied, filters to that project. Pass `--json` to receive the raw `hive-status` envelope instead of human prose (intended for automated callers). The prose form is intentionally not a versioned contract — automated tooling that needs a stable shape MUST use `--json`, which echoes the `hive-status` envelope schema. |
 | `/queue` | Same actionable-row view as `/status`, without a project filter. |
 | `/idea [text]` | Starts a new inbox idea draft. With text, the bot shows a project picker; without text, it asks for the next message's text. After project selection the draft enters file collection and shows `Done` / `Skip`. Pressing either finalizes through `Hive::Commands::New#call!`; successful capture replies `"Captured your idea in <project>. It's in the inbox - move it to 2-brainstorm to start."` Expired picker/draft callbacks ask the operator to send `/idea` again. Bare Telegram voice notes also enter idea capture: the bot transcribes the note and shows a transcript confirmation keyboard; the project picker appears only after the operator taps `Confirm`. |
-| `/answer <slug>` | Starts deterministic brainstorm answering; each free-text reply or voice note writes the current unanswered `### A<N>.` block under the task lock. The historical Path A/B distinction is compatibility-only now, and both modes use the same answer writer. Voice answers are transcribed first, then reuse the same answer writer and auto-advance replies as typed answers. |
-| `/approve <slug>` | Dispatches `hive approve <slug> --json` for the direct approval surface. Inline approval buttons usually use the workflow verb instead. |
-| `/autofix <slug>` | Dispatches the same `hive markers clear` + retry-verb sequence the inline 🔧 Autofix button dispatches. Resolves the slug against the latest `StatusWatcher` snapshot. Replies `"Hive has no automatic recovery for this state - open it on a laptop."` for manual-only markers and `"No retry verb for stage X."` when the stage has none. |
-| `/details <slug>` | Dispatches `hive status --diagnose <slug> --project <project> --stage <stage> --json` — same payload as the inline "Show details" button. |
+| `/answer <id\|slug>` | Starts deterministic brainstorm answering; numeric ids (`9281` or `#9281`) resolve through the current status snapshot to the task slug before the conversation starts. Each free-text reply or voice note writes the current unanswered `### A<N>.` block under the task lock. The historical Path A/B distinction is compatibility-only now, and both modes use the same answer writer. Voice answers are transcribed first, then reuse the same answer writer and auto-advance replies as typed answers. |
+| `/approve <id\|slug>` | Dispatches `hive approve <slug> --json` for the direct approval surface after resolving numeric ids through the current status snapshot. Inline approval buttons usually use the workflow verb instead. |
+| `/autofix <id\|slug>` | Dispatches the same `hive markers clear` + retry-verb sequence the inline 🔧 Autofix button dispatches. Resolves an id or slug against the latest `StatusWatcher` snapshot. Replies `"Hive has no automatic recovery for this state - open it on a laptop."` for manual-only markers and `"No retry verb for stage X."` when the stage has none. |
+| `/details <id\|slug>` | Resolves an id or slug against the latest `StatusWatcher` snapshot and replies with the same in-process details text as the inline "Show details" button: row summary, next-step hint, and cached diagnostic summary/detail when the row carries one. |
 | `/done` | Ends the active brainstorm conversation and dispatches `hive run <slug> --json` so the brainstorm runner re-checks the round. There is no remaining draft-confirm substate; without an active conversation it replies with the friendly no-conversation hint. |
 | `/help` | Lists the typeable workflow command set. |
 
@@ -113,8 +113,8 @@ push-notification buttons):
 
 The reply stays text-only when no row is actionable. The `/answer`,
 `/approve`, `/autofix`, `/details` slash commands remain typeable
-(and appear in the quick-actions menu) for operators who prefer
-typing or scripting.
+(and appear in the quick-actions menu as `<id|slug>`) for operators who
+prefer typing or scripting.
 
 ### Dispatch acknowledgment on success
 
@@ -154,10 +154,10 @@ Push notifications use callback data that routes to:
 - Stage approvals: `Approve` dispatches `hive brainstorm|plan|develop|review|pr|archive <slug> --from <stage> --project <project> --json`.
 - Brainstorm waits: `Answer in chat` starts the same `/answer` conversation.
 - Review triage: `Accept all` / `Reject all` dispatch `hive accept-finding` or `hive reject-finding` with `--all`.
-- Recovery markers: `Autofix` appears only when the diagnostic suggested action is `retry`. It dispatches `hive markers clear ... --name <MARKER> --match-attr <key=value> --json` when a marker attribute is available, then dispatches the stage's workflow verb when one exists and resets the persisted alert entry for that task. `ERROR` rows prefer `marker_id=<current>` and use observed reason/exit_code attrs only for legacy markers. Manual-only recovery states show `Open laptop` / `Show details`; legacy `Clear and retry` buttons from older messages still route to the same guarded recovery sequence.
+- Recovery markers: `Autofix` appears only when the diagnostic suggested action is `retry`. It dispatches `hive markers clear ... --name <MARKER> --match-attr <key=value> --json` when a marker attribute is available, then dispatches the stage's workflow verb when one exists and resets the persisted alert entry for that task. `ERROR` rows prefer `marker_id=<current>` and use observed reason/exit_code attrs only for legacy markers. Manual-only recovery states show `Show details`, which renders the cached row summary plus manual-repair hint and any cached diagnostic; legacy `Clear and retry` buttons from older messages still route to the same guarded recovery sequence.
 - Legacy stage-directory warnings are text-only project-level alerts. They tell the operator to run `hive migrate <project_path>`, have no inline action, dedupe while the project remains legacy-dirty, and re-alert after the project reports clean then regresses.
 - Idea project pickers use `idea_project:<project>:<token>`. Current drafts enter attachment collection instead of immediately spawning `hive new`; the follow-up keyboard emits `idea_done:<token>` and `idea_skip:<token>`, both of which finalize the current draft. `idea_project_new:<token>` clears the draft/picker token and replies that registering a new project from Telegram is out of MVP scope.
-- Legacy Path-A buttons (`path_a_yes:` / `path_a_type:`) from messages sent before Codex draft-assist retirement do not start a draft flow; they reply with instructions to tap **Answer in chat** or send `/answer <slug>`. Retired `codex_write:` / `codex_edit:` / `codex_cancel:` data is unknown callback data.
+- Legacy Path-A buttons (`path_a_yes:` / `path_a_type:`) from messages sent before Codex draft-assist retirement do not start a draft flow; they reply with instructions to tap **Answer in chat** or send `/answer <id|slug>`. Retired `codex_write:` / `codex_edit:` / `codex_cancel:` data is unknown callback data.
 - `Open laptop` is an explicit no-op reply for disagreements that do not fit the MVP button set.
 
 ## Config
@@ -167,8 +167,8 @@ The bot is global, not per-project:
 ```yaml
 bot:
   enabled: false
+  pairing_enabled: false
   chat_id_allowlist: [123456789]
-  digest_chat_id: 123456789
   poll_interval_sec: 30
   long_poll_timeout_sec: 25
   notification_dedupe_window_sec: 300
@@ -205,15 +205,17 @@ on first start, do not configure `alert_state_file` (running without
 persistence means every restart is a burst — accept the trade-off).
 
 `HIVE_TELEGRAM_BOT_TOKEN` is the only supported token source. Missing
-token or empty allowlist makes `hive bot start` raise `Hive::ConfigError`
-(exit 78). Unknown chat IDs are logged once per bot lifetime and ignored
+token makes `hive bot start` raise `Hive::ConfigError` (exit 78). An empty
+allowlist also raises unless `bot.pairing_enabled: true`, in which case an
+unknown DM `/start` receives a one-time pairing code and the owner approves it
+with `hive pairing approve telegram <CODE>` (see [[commands/pairing]]). Unknown
+non-`/start` chat IDs are still logged once per bot lifetime and ignored
 silently.
 
-The shipped-digest sender reuses the same Telegram token and bot client. Its
-direct API prefers `bot.digest_chat_id` for the daily digest destination and
-falls back to the first `bot.chat_id_allowlist` entry; see [[commands/digest]]
-and [[modules/digest]]. `bot.digest_chat_id` is optional and does not authorize
-normal bot chats; the allowlist remains the bot's chat-auth boundary.
+The shipped-digest sender reuses the same Telegram token and bot client. The
+daily digest delivers to `bot.chat_id_allowlist[0]`; there is no separate digest
+chat setting. See [[commands/digest]] and [[modules/digest]]. The allowlist
+remains the bot's chat-auth boundary.
 
 Voice transcription uses `bot.transcription.api_key_env` for the OpenAI
 audio API key (default `HIVE_WHISPER_API_KEY`); the key is not persisted.
@@ -254,13 +256,18 @@ the bot after rotating).
 ## Structured log
 
 `~/.local/state/hive/logs/bot.log` is one JSON document per line with schema
-`hive-bot-log.v2` (`SCHEMA_VERSION = 2`). The event enum is closed in
-`Hive::Bot::Logger::EVENTS`; unknown events raise at the call site.
+`hive-bot-log.v3` (`SCHEMA_VERSION = 3`). The event enum is closed in
+`Hive::Bot::Logger::EVENTS`; unknown events raise at the call site. Every v3
+line carries `level` (`debug`, `info`, `warn`, or `error`) and may carry
+`category` for cross-cutting tags such as `noise`.
 
-`v2` was introduced when the Telegram "Codex draft-assist" feature was
-retired: it drops the `codex_spawned` / `codex_succeeded` / `codex_failed`
-events from the enum. `schemas/hive-bot-log.v1.json` is kept as-is for
-historical log lines emitted before the bump.
+`v3` keeps event names stable and adds severity. Benign Telegram long-poll
+transport timeouts still emit `poll_failure`, but at `debug`/`noise`; real poll
+failures remain `warn`, and sustained outages also emit `poll_unhealthy` at
+`warn`. `notification_skipped_dedupe` and `notification_skipped_backoff` are
+debug/noise and are logged only on skip-state transitions. `v2` was introduced
+when the Telegram "Codex draft-assist" feature was retired; `schemas/hive-bot-log.v1.json`
+and `schemas/hive-bot-log.v2.json` are kept as-is for historical log lines.
 
 The schema evolves additively: new event values may be appended to the
 current version without changing `schema_version`. Breaking changes
@@ -270,9 +277,9 @@ bumped `$id` and a synchronized `schema_version` constant — exactly what
 the v1 → v2 retirement did. Downstream consumers that pin on the `$id`
 URL must therefore tolerate unknown event values; that's the read-side
 compat invariant.
-Events include `bot_started`, `poll_failure`, `update_received`,
-`notification_sent`, `dispatched_command`, `command_completed`,
-`answer_written`, `reconnect_summary`, and `fatal`.
+Events include `bot_started`, `poll_failure`, `poll_unhealthy`,
+`update_received`, `notification_sent`, `dispatched_command`,
+`command_completed`, `answer_written`, `reconnect_summary`, and `fatal`.
 
 ## Forward-tolerant `hive status` schema-version skew
 
@@ -280,7 +287,7 @@ Events include `bot_started`, `poll_failure`, `update_received`,
 on a `hive-status` `schema_version` mismatch — that would hard-crash
 `/status` whenever the `hive` gem is bumped under a running bot. A newer
 payload is parsed best-effort (additive-envelope contract) and logs a
-`poll_failure` skew warning; an older payload (stale binary on PATH) or a
+`poll_schema_skew` skew warning; an older payload (stale binary on PATH) or a
 newer payload that genuinely fails to parse returns an actionable
 `failure(...)` result telling the operator to restart the bot or
 update/reinstall the binary. The full classification (`:match` /

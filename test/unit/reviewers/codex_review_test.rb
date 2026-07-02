@@ -121,7 +121,7 @@ class ReviewersCodexReviewTest < Minitest::Test
   def test_trims_banner_and_trailing_blanks_to_exact_findings_body
     with_tmp_dir do |dir|
       # Banner before the first header, plus trailing blank lines after the
-      # findings. normalize_output must drop the banner, rstrip the trailing
+      # findings. review_body must drop the banner, rstrip the trailing
       # blanks, and append exactly one newline.
       ENV["HIVE_FAKE_CODEX_STDOUT"] = "OpenAI Codex v0.139.0\nsome banner\n## High\n- [ ] x: y\n\n\n"
       reviewer = build_reviewer(dir)
@@ -144,16 +144,13 @@ class ReviewersCodexReviewTest < Minitest::Test
       ENV["HIVE_FAKE_CODEX_STDOUT"] = <<~OUT
         OpenAI Codex v0.139.0
         ## High
-        - [ ] <finding>: <one-line justification>
+        - [ ] uses subtraction instead of addition: breaks add()
 
         ## Medium
         No findings.
 
         ## Nit
         No findings.
-
-        Rules:
-        - Always print all three headers, in order.
         exec
         /usr/bin/bash -lc "cat SKILL.md && git diff origin/main...HEAD" in /worktree
          succeeded in 12ms:
@@ -276,6 +273,382 @@ class ReviewersCodexReviewTest < Minitest::Test
       assert result.error?
       assert_match(/exited with status=1/, result.error_message)
       refute File.exist?(reviewer.output_path)
+    end
+  end
+
+  # Observability: a failed codex run must carry its captured stdout/stderr tail
+  # into the error message (→ reviews/errors-NN.md) so an `all_failed` is
+  # diagnosable instead of an opaque "exited status=1".
+  def test_failure_message_captures_codex_output_tail
+    with_tmp_dir do |dir|
+      ENV["HIVE_FAKE_CODEX_EXIT"] = "1"
+      ENV["HIVE_FAKE_CODEX_STDOUT"] = "panic: codex internal assertion failed at frobnicate.rs:42\n"
+      reviewer = build_reviewer(dir, "max_attempts" => 1)
+
+      result = reviewer.run!
+
+      assert result.error?
+      assert_match(/exited with status=1/, result.error_message)
+      assert_includes result.error_message, "codex output (last",
+                      "the captured codex transcript tail must be surfaced"
+      assert_includes result.error_message, "frobnicate.rs:42",
+                      "the actual codex error text must reach errors-NN.md"
+    end
+  end
+
+  # Because the failed output now reaches the error message, a codex usage-limit
+  # that exits non-zero becomes detectable by AgentLimit — which lets the review
+  # phase route it to the cooldown (limits_reached) path instead of all_failed.
+  def test_usage_limit_in_failed_output_is_detectable
+    with_tmp_dir do |dir|
+      ENV["HIVE_FAKE_CODEX_EXIT"] = "1"
+      ENV["HIVE_FAKE_CODEX_STDOUT"] = "stream error: You've hit your usage limit. Try again later.\n"
+      reviewer = build_reviewer(dir, "max_attempts" => 1)
+
+      result = reviewer.run!
+
+      assert result.error?
+      assert Hive::AgentLimit.limit_reached?(result.error_message),
+             "a codex usage-limit failure must be limit-detectable via the captured tail"
+    end
+  end
+
+  # codex sometimes echoes the prompt's own example block (with the literal
+  # `<finding>: <one-line justification>` placeholders) instead of reviewing.
+  # It has the severity headers but is hollow — reject it as a failure so it
+  # retries, rather than recording a fake clean pass.
+  def test_template_echo_is_rejected_as_failure
+    with_tmp_dir do |dir|
+      ENV["HIVE_FAKE_CODEX_STDOUT"] = <<~ECHO
+        ## High
+        - [ ] <finding>: <one-line justification>
+
+        ## Medium
+        - [ ] <finding>: <one-line justification>
+
+        ## Nit
+        - [ ] <finding>: <one-line justification>
+      ECHO
+      reviewer = build_reviewer(dir, "max_attempts" => 1)
+
+      result = reviewer.run!
+
+      assert result.error?, "an echoed prompt template must not count as a clean review"
+      assert_match(/echoed the prompt template/, result.error_message)
+      refute File.exist?(reviewer.output_path),
+             "a hollow template echo must not be left as a findings file"
+    end
+  end
+
+  # The flip side: a genuine clean review (`No findings.` under each header)
+  # must still pass — the echo guard must not over-reject real output.
+  def test_legitimate_no_findings_review_is_accepted
+    with_tmp_dir do |dir|
+      ENV["HIVE_FAKE_CODEX_STDOUT"] = "## High\nNo findings.\n## Medium\nNo findings.\n## Nit\nNo findings.\n"
+      reviewer = build_reviewer(dir)
+
+      result = reviewer.run!
+
+      assert result.ok?, "a real 'No findings.' review must be accepted, got: #{result.error_message}"
+      assert File.exist?(reviewer.output_path)
+    end
+  end
+
+  # The real all_failed regression: codex echoes the prompt (carrying the
+  # template's ## headers AND the <finding> placeholder) at the top of its
+  # session, runs a real review, then gives a PROSE "no regressions" verdict
+  # in its final message. The echoed placeholder must NOT fail the pass — the
+  # decision must read codex's real answer, not the prompt-echoed transcript.
+  def test_clean_prose_verdict_after_prompt_echo_is_accepted_as_clean
+    with_tmp_dir do |dir|
+      ENV["HIVE_FAKE_CODEX_STDOUT"] = <<~OUT
+        OpenAI Codex v0.139.0
+        ## High
+        - [ ] <finding>: <one-line justification>
+
+        ## Medium
+        - [ ] <finding>: <one-line justification>
+
+        ## Nit
+        - [ ] <finding>: <one-line justification>
+        thinking
+        Let me inspect the branch diff.
+        exec
+        /usr/bin/bash -lc "git diff main...HEAD" in /worktree
+         succeeded in 12ms:
+        some diff output
+        codex
+        No plan was found. I did not find a correctness, security, or maintainability regression in the diff.
+      OUT
+      reviewer = build_reviewer(dir, "max_attempts" => 1)
+
+      result = reviewer.run!
+
+      assert result.ok?,
+             "a real clean review whose transcript echoes the prompt must pass, got: #{result.error_message}"
+      body = File.read(reviewer.output_path)
+      assert_includes body, "## High", "a clean pass must publish the canonical headers"
+      assert_includes body, "No findings.", "a clean pass must record No findings."
+      refute_includes body, "<finding>",
+                       "the echoed prompt placeholder must never reach the findings file"
+      refute_includes body, "succeeded in", "the tool transcript must be dropped"
+    end
+  end
+
+  # codex echoes the prompt placeholder, then its FINAL message carries REAL
+  # findings. The published file must keep the real findings and drop both the
+  # echoed placeholder and the transcript.
+  def test_real_findings_in_final_message_survive_a_prompt_echo
+    with_tmp_dir do |dir|
+      ENV["HIVE_FAKE_CODEX_STDOUT"] = <<~OUT
+        ## High
+        - [ ] <finding>: <one-line justification>
+        ## Medium
+        - [ ] <finding>: <one-line justification>
+        ## Nit
+        - [ ] <finding>: <one-line justification>
+        exec
+        /usr/bin/bash -lc "git diff" in /worktree
+         succeeded in 5ms:
+        diff output
+        codex
+        ## High
+        - [ ] off-by-one in paginate(): drops the last row
+        ## Medium
+        No findings.
+        ## Nit
+        No findings.
+      OUT
+      reviewer = build_reviewer(dir, "max_attempts" => 1)
+
+      result = reviewer.run!
+
+      assert result.ok?,
+             "real findings in codex's final message must be accepted, got: #{result.error_message}"
+      body = File.read(reviewer.output_path)
+      assert_includes body, "off-by-one in paginate()", "codex's real finding must be published"
+      refute_includes body, "<finding>", "the echoed placeholder must not reach the file"
+      refute_includes body, "succeeded in", "the transcript must be dropped"
+    end
+  end
+
+  # The real patrol all_failed regression: codex-cli ignores the prompt's GFM
+  # coercion and emits its NATIVE `codex review` format — a "No plan was found"
+  # preamble and `[P1]/[P2]` priority bullets instead of `## High/Medium/Nit`
+  # checkboxes. That real finding must be normalized and published, not rejected
+  # as "missing headers" (which deterministically fails every retry).
+  def test_native_priority_findings_are_normalized_to_gfm
+    with_tmp_dir do |dir|
+      ENV["HIVE_FAKE_CODEX_STDOUT"] = <<~OUT
+        OpenAI Codex v0.141.0
+        ## High
+        - [ ] <finding>: <one-line justification>
+        ## Medium
+        - [ ] <finding>: <one-line justification>
+        ## Nit
+        - [ ] <finding>: <one-line justification>
+        exec
+        /usr/bin/bash -lc "git diff main...HEAD" in /worktree
+         succeeded in 12ms:
+        some diff output
+        codex
+        No plan was found; the diff still leaves a config-driven signature-verification path.
+
+        Review comment:
+
+        - [P1] Block config-driven signature checks — bin/hive-babysitter-stub-git:169-169
+          When local git config enables signature verification the passthrough honors repo-local gpg.program.
+        - [P2] Tighten the read-only allowlist — bin/hive-babysitter-stub-git:200
+      OUT
+      reviewer = build_reviewer(dir, "max_attempts" => 1)
+
+      result = reviewer.run!
+
+      assert result.ok?,
+             "codex's native [Pn] findings must be normalized, not failed, got: #{result.error_message}"
+      body = File.read(reviewer.output_path)
+      assert body.start_with?("## High"), "normalized output must lead with the High header"
+      assert_includes body, "- [ ] Block config-driven signature checks — bin/hive-babysitter-stub-git:169-169",
+                      "the P1 finding must become a High checkbox"
+      assert_includes body, "honors repo-local gpg.program",
+                      "the finding's indented justification must fold onto its line"
+      assert_includes body, "## Medium\n- [ ] Tighten the read-only allowlist",
+                      "the P2 finding must become a Medium checkbox"
+      assert_includes body, "## Nit\nNo findings.", "an empty severity still prints its header"
+      refute_includes body, "[P1]", "the native priority tag must be stripped"
+      refute_includes body, "No plan was found", "the codex preamble must not leak into findings"
+      refute_includes body, "<finding>", "the echoed prompt placeholder must not reach the file"
+      refute_includes body, "succeeded in", "the tool transcript must be dropped"
+    end
+  end
+
+  # codex sometimes echoes the same native finding twice; the normalized output
+  # must carry it once so triage doesn't see a phantom duplicate.
+  def test_native_findings_are_deduplicated
+    with_tmp_dir do |dir|
+      ENV["HIVE_FAKE_CODEX_STDOUT"] = <<~OUT
+        ## High
+        - [ ] <finding>: <one-line justification>
+        ## Medium
+        - [ ] <finding>: <one-line justification>
+        ## Nit
+        - [ ] <finding>: <one-line justification>
+        codex
+        - [P1] Duplicate finding — a.rb:1
+        - [P1] Duplicate finding — a.rb:1
+      OUT
+      reviewer = build_reviewer(dir, "max_attempts" => 1)
+
+      result = reviewer.run!
+
+      assert result.ok?, "expected :ok, got #{result.status} (#{result.error_message})"
+      body = File.read(reviewer.output_path)
+      assert_equal 1, body.scan("- [ ] Duplicate finding").size,
+                   "a repeated native finding must be published once"
+    end
+  end
+
+  # A finding codex describes in PROSE (no checkbox) must NOT be laundered into a
+  # clean pass — the :clean branch requires an affirmative no-findings verdict.
+  def test_prose_finding_without_checkbox_is_not_a_clean_pass
+    with_tmp_dir do |dir|
+      ENV["HIVE_FAKE_CODEX_STDOUT"] = <<~OUT
+        ## High
+        - [ ] <finding>: <one-line justification>
+        ## Medium
+        - [ ] <finding>: <one-line justification>
+        ## Nit
+        - [ ] <finding>: <one-line justification>
+        exec
+        /usr/bin/bash -lc "git diff" in /worktree
+         succeeded in 5ms:
+        diff output
+        codex
+        I found an off-by-one bug in paginate() that drops the last row; this should be fixed before merge.
+      OUT
+      reviewer = build_reviewer(dir, "max_attempts" => 1)
+
+      result = reviewer.run!
+
+      assert result.error?,
+             "a finding codex described in prose (no checkbox) must NOT be recorded as a clean pass"
+      refute File.exist?(reviewer.output_path),
+             "no clean findings file may be written when codex flagged a problem in prose"
+    end
+  end
+
+  # An exit-0 soft-error / abort verdict ("couldn't complete the review") must
+  # not be laundered into a clean pass either.
+  def test_soft_error_final_message_is_not_a_clean_pass
+    with_tmp_dir do |dir|
+      ENV["HIVE_FAKE_CODEX_STDOUT"] = <<~OUT
+        ## High
+        - [ ] <finding>: <one-line justification>
+        ## Medium
+        - [ ] <finding>: <one-line justification>
+        ## Nit
+        - [ ] <finding>: <one-line justification>
+        exec
+        /usr/bin/bash -lc "git diff" in /worktree
+         succeeded in 5ms:
+        diff output
+        codex
+        Stream error: connection reset. I was unable to complete the review.
+      OUT
+      reviewer = build_reviewer(dir, "max_attempts" => 1)
+
+      result = reviewer.run!
+
+      assert result.error?,
+             "an exit-0 soft-error verdict must not be recorded as a clean pass"
+      refute File.exist?(reviewer.output_path)
+    end
+  end
+
+  # codex concluded in pure prose (no severity headers anywhere): an affirmative
+  # no-findings verdict must still pass as a clean review.
+  def test_header_less_clean_prose_verdict_is_accepted_as_clean
+    with_tmp_dir do |dir|
+      ENV["HIVE_FAKE_CODEX_STDOUT"] = <<~OUT
+        OpenAI Codex v0.139.0
+        thinking
+        Reviewing the diff.
+        exec
+        /usr/bin/bash -lc "git diff main...HEAD" in /worktree
+         succeeded in 8ms:
+        diff output
+        codex
+        I reviewed the branch diff and found no correctness, security, or maintainability regressions.
+      OUT
+      reviewer = build_reviewer(dir, "max_attempts" => 1)
+
+      result = reviewer.run!
+
+      assert result.ok?,
+             "an affirmative no-findings prose verdict must pass, got: #{result.error_message}"
+      assert_includes File.read(reviewer.output_path), "No findings."
+    end
+  end
+
+  # codex emits several `codex`-marked turns; only the FINAL verdict drives the
+  # result (an intermediate planning note must be discarded).
+  def test_multiple_codex_markers_use_only_the_final_verdict
+    with_tmp_dir do |dir|
+      ENV["HIVE_FAKE_CODEX_STDOUT"] = <<~OUT
+        ## High
+        - [ ] <finding>: <one-line justification>
+        ## Medium
+        - [ ] <finding>: <one-line justification>
+        ## Nit
+        - [ ] <finding>: <one-line justification>
+        thinking
+        Planning the review.
+        codex
+        Let me start by checking the tests.
+        exec
+        /usr/bin/bash -lc "git diff" in /worktree
+         succeeded in 5ms:
+        diff output
+        codex
+        I did not find any regressions in the diff.
+      OUT
+      reviewer = build_reviewer(dir, "max_attempts" => 1)
+
+      result = reviewer.run!
+
+      assert result.ok?, "the final codex verdict must drive the result, got: #{result.error_message}"
+      body = File.read(reviewer.output_path)
+      assert_includes body, "No findings."
+      refute_includes body, "Let me start by checking",
+                       "an intermediate codex note must not be treated as the verdict"
+    end
+  end
+
+  # A clean pass preserves codex's verdict as an inert one-line HTML comment,
+  # with angle brackets stripped so it can't break the comment or re-introduce a
+  # `<finding>` placeholder.
+  def test_clean_pass_preserves_codex_verdict_as_an_inert_comment
+    with_tmp_dir do |dir|
+      ENV["HIVE_FAKE_CODEX_STDOUT"] = <<~OUT
+        thinking
+        Reviewing.
+        exec
+        /usr/bin/bash -lc "git diff" in /worktree
+         succeeded in 5ms:
+        diff output
+        codex
+        No findings; the <diff> looks clean and I found no regressions.
+      OUT
+      reviewer = build_reviewer(dir, "max_attempts" => 1)
+
+      result = reviewer.run!
+
+      assert result.ok?
+      body = File.read(reviewer.output_path)
+      assert_includes body, "<!-- codex review summary:",
+                       "codex's verdict must be preserved as an audit comment"
+      refute_includes body, "<diff>",
+                       "angle brackets must be stripped so the verdict can't break the comment"
     end
   end
 
@@ -588,6 +961,60 @@ class ReviewersCodexReviewTest < Minitest::Test
         Hive::Reviewers.dispatch(make_spec("kind" => "bogus"), ctx)
       end
       assert_match(/codex_review/, err.message)
+    end
+  end
+
+  # --- A8 permission-scope gate -----------------------------------------
+
+  # A8 verified VIA codex_review.rb (the plan requires it via both adapters):
+  # a non-yolo `permissions:` on a codex_review reviewer can never be honored
+  # (`codex review` is read-only and takes no tool-list args), so run! must
+  # raise Hive::ConfigError BEFORE any spawn — not silently run codex review
+  # with the scope discarded. The standard `agent: codex` entry trips
+  # PermissionScope's runner gate (codex can't enforce scoping).
+  def test_non_yolo_permissions_raises_before_spawn_for_codex_agent
+    with_tmp_dir do |dir|
+      log = File.join(dir, "argv.log")
+      ENV["HIVE_FAKE_CODEX_ARGV_LOG"] = log
+      reviewer = build_reviewer(dir, "permissions" => "read-only")
+
+      assert_raises(Hive::ConfigError) { reviewer.run! }
+
+      refute File.exist?(log), "the A8 gate must raise before any codex spawn"
+      refute File.exist?(reviewer.output_path), "no findings file may be written when the gate raises"
+    end
+  end
+
+  # A8 bypass guard: a `kind: codex_review, agent: claude` entry resolves
+  # cleanly through the claude profile (claude CAN scope), so the runner gate
+  # alone would NOT fire and the declared scope would be silently discarded.
+  # The adapter must still fail closed — `codex review` ignores the profile
+  # class and never enforces scoping — so any non-yolo effective scope raises
+  # regardless of the configured agent.
+  def test_non_yolo_permissions_raises_even_with_claude_agent
+    with_tmp_dir do |dir|
+      log = File.join(dir, "argv.log")
+      ENV["HIVE_FAKE_CODEX_ARGV_LOG"] = log
+      reviewer = build_reviewer(dir, "agent" => "claude", "permissions" => "read-only")
+
+      error = assert_raises(Hive::ConfigError) { reviewer.run! }
+      assert_match(/codex review/, error.message)
+      assert_match(/cannot enforce tool scoping/, error.message)
+
+      refute File.exist?(log), "no codex spawn may occur when the scope is non-yolo"
+      refute File.exist?(reviewer.output_path)
+    end
+  end
+
+  # Control: an explicit `permissions: yolo` passes the gate and runs normally
+  # — the gate rejects ONLY non-yolo scopes, so the happy path is unaffected.
+  def test_explicit_yolo_permissions_passes_the_gate
+    with_tmp_dir do |dir|
+      reviewer = build_reviewer(dir, "permissions" => "yolo")
+
+      result = reviewer.run!
+
+      assert result.ok?, "explicit yolo must pass the A8 gate and run normally"
     end
   end
 end

@@ -68,7 +68,7 @@
               "finding_id": { "type": "string" },
               "fingerprint": { "type": "string" },
               "reason": {
-                "enum": ["dismissed", "existing_pr", "low_confidence", "low_severity"]
+                "enum": ["dismissed", "existing_pr", "similar_to_existing", "low_confidence", "low_severity"]
               }
             }
           }

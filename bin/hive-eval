@@ -6,8 +6,15 @@ require "optparse"
 
 root = File.expand_path("..", __dir__)
 SAFE_SCENARIO_BASENAME = /\A[A-Za-z0-9_-]+\z/
+REPORT_INLINE_OPTION = "--report="
+# Keep the default report path in a standalone local: parse! overwrites
+# options[:report] with whatever value follows --report, even an option-looking
+# or empty token, so the usage-error cleanup below can no longer recover the
+# default from options once that happens. Holding it separately lets the rescue
+# fall back to the true default and still clear a stale report there.
+default_report = File.join(root, "tmp", "hive-eval-report.json")
 options = {
-  report: File.join(root, "tmp", "hive-eval-report.json"),
+  report: default_report,
   scenario: nil,
   no_judge: false
 }
@@ -23,19 +30,105 @@ parser = OptionParser.new do |opts|
   opts.on("--no-judge", "Skip Codex judge assertions") do
     options[:no_judge] = true
   end
+  # Define help explicitly so it survives require_exact below; the officious -h
+  # is otherwise rejected once exact matching is on. Printing to stdout and
+  # exiting 0 inside parse! keeps --help/-h a read-only path.
+  opts.on("-h", "--help", "Show this message") do
+    puts opts
+    exit
+  end
 end
+# Reject abbreviated long options (e.g. --rep for --report). OptionParser accepts
+# unambiguous prefixes by default, but the exact-only manual scan in
+# selected_report_path only recognizes --report/--report=, so an abbreviation
+# could select a report the usage-error cleanup below would fail to clear. Exact
+# matching keeps both paths in agreement.
+parser.require_exact = true
+
+def expanded_report_path(root, value)
+  return nil if value.to_s.empty?
+
+  File.expand_path(value, root)
+end
+
+def selected_report_path(root, argv, default_report)
+  report = default_report
+  index = 0
+
+  while index < argv.length
+    arg = argv[index]
+    break if arg == "--"
+
+    if arg == "--report"
+      value = argv[index + 1]
+      unless option_value_missing?(value)
+        report = value
+        index += 1
+      end
+    elsif arg.start_with?(REPORT_INLINE_OPTION)
+      value = arg.byteslice(REPORT_INLINE_OPTION.bytesize, arg.bytesize)
+      # An option-looking or empty inline value (--report=, --report=-x) is not a
+      # real path: leave `report` on the default so the cleanup clears the stale
+      # default rather than a junk token.
+      report = value unless option_value_missing?(value)
+    end
+
+    index += 1
+  end
+
+  expanded_report_path(root, report)
+end
+
+def option_value_missing?(value)
+  value.to_s.empty? || value.start_with?("-")
+end
+
+# Snapshot ARGV before parse! mutates it in place. The rescue scan below relies
+# on the original tokens: when --scenario swallows a following --report as its
+# value (e.g. `--scenario --report /tmp/x.json`), parse! removes that --report
+# token from ARGV, so scanning the post-parse ARGV would miss the report the
+# user named and leave it behind. Scanning the snapshot still sees it.
+argv_snapshot = ARGV.dup
 
 begin
   remaining = parser.parse!
-rescue OptionParser::ParseError => e
+  raise OptionParser::MissingArgument, "--report" if option_value_missing?(options[:report])
+  raise OptionParser::MissingArgument, "--scenario" if options[:scenario] && option_value_missing?(options[:scenario])
+rescue OptionParser::ParseError, ArgumentError => e
+  raise if e.is_a?(ArgumentError) && !e.message.include?("invalid byte sequence")
+
+  # A usage error must not leave a stale report behind. We can't clear before
+  # parsing, because the --help/-h switch prints help and exits 0 inside parse!,
+  # and that read-only path must not delete the report.
+  # So clear here, covering both ways the selected report can be named:
+  #   * OptionParser captured it into options (exact --report only; abbreviations
+  #     are rejected via require_exact, matching the manual scan). When --report's
+  #     value was option-looking or empty (e.g. `--report --no-judge`, `--report=`),
+  #     parse! has already overwritten options[:report] with that junk token, so we
+  #     fall back to the true default and clear the stale report there instead.
+  #   * the report token never reached options — an invalid option raised before
+  #     it, or --scenario consumed it as its value — leaving it in the pre-parse
+  #     ARGV snapshot (the manual scan recognizes the exact --report/--report=
+  #     forms and likewise falls back to the default for junk values). parse! may
+  #     have stripped it from the live ARGV, so we scan the snapshot, not ARGV.
+  captured_report = options.fetch(:report)
+  captured_report = default_report if option_value_missing?(captured_report)
+  [ expanded_report_path(root, captured_report),
+    selected_report_path(root, argv_snapshot, default_report) ].compact.each do |path|
+    FileUtils.rm_f(path)
+  end
   warn "hive-eval: #{e.message}"
   warn parser
   exit 64
 end
 
+report_path = expanded_report_path(root, options.fetch(:report))
+FileUtils.rm_f(report_path)
+
 unless remaining.empty?
   unexpected = remaining.join(" ")
-  warn "hive-eval: unexpected argument: #{unexpected} (unexpected argument(s): #{unexpected})"
+  label = remaining.length == 1 ? "argument" : "arguments"
+  warn "hive-eval: unexpected #{label}: #{unexpected}"
   warn parser
   exit 64
 end
@@ -58,11 +151,11 @@ scenario_root = File.expand_path(
 )
 
 env = {
-  "HIVE_EVAL_REPORT" => File.expand_path(options.fetch(:report), root),
+  "HIVE_EVAL_REPORT" => report_path,
   "HIVE_EVAL_SCENARIOS_ONLY" => "1",
+  "HIVE_EVAL_NO_JUDGE" => (options[:no_judge] ? "1" : nil),
   "TEST" => nil
 }
-env["HIVE_EVAL_NO_JUDGE"] = "1" if options[:no_judge]
 
 begin
   path = scenario_path(scenario_root, options[:scenario])

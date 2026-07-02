@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-bot-log.v3.json",
+  "title": "hive bot structured log line (v3)",
+  "description": "One JSON-line event emitted by Hive::Bot::Logger. v3 adds a required `level` field to every log line plus an optional `category` tag (present only on events that carry one, e.g. noise; omitted otherwise), and adds `poll_unhealthy` for loud poll-health escalation. v2 is kept as-is for historical log lines. Like prior versions, v3 follows additive-only evolution: new enum values may be appended to `event` without a SCHEMA_VERSION bump. Breaking changes (removing or renaming an event, changing the value shape of an existing event, or removing required fields) require a v4 schema file with $id and `schema_version` bumped.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["ts", "schema", "schema_version", "event", "level"],
+  "properties": {
+    "ts": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "schema": {
+      "const": "hive-bot-log"
+    },
+    "schema_version": {
+      "const": 3
+    },
+    "event": {
+      "enum": [
+        "bot_started",
+        "bot_stopping",
+        "poll_failure",
+        "poll_unhealthy",
+        "poll_schema_skew",
+        "update_received",
+        "update_rejected_unauthorized",
+        "pairing_code_issued",
+        "pairing_approval_notice_unremovable",
+        "dispatch_result_rejected_unauthorized",
+        "notification_sent",
+        "notification_skipped_dedupe",
+        "notification_skipped_backoff",
+        "notification_skipped_active_conversation",
+        "notification_skipped_daemon_plan_pause",
+        "notification_skipped_live_agent",
+        "fresh_install_seeded",
+        "answer_lock_contention",
+        "dispatched_command",
+        "command_completed",
+        "answer_written",
+        "answer_skipped_already_answered",
+        "answer_slot_missing",
+        "reconnect_summary",
+        "config_reloaded",
+        "envelope_parse_failure",
+        "send_failure",
+        "callback_malformed",
+        "callback_marker_write_failed",
+        "callback_plan_state_corrupt",
+        "notification_build_failed",
+        "status_button_failed",
+        "details_lookup_failed",
+        "details_render_failed",
+        "status_lookup_failed",
+        "pid_file_corrupted",
+        "unknown_stage_label",
+        "alert_store_corrupt",
+        "deprecated_config",
+        "update_nudge_pushed",
+        "update_nudge_error",
+        "transcription_failed",
+        "fatal"
+      ]
+    },
+    "level": {
+      "enum": ["debug", "info", "warn", "error"]
+    },
+    "category": {
+      "type": "string",
+      "description": "Optional open-set tag. The only convention-bearing value is \"noise\", marking high-frequency, low-signal lines (benign poll-transport failures, dedupe/backoff skips). Nothing in the producer gem filters on it — it is a downstream-only contract for a log viewer or forwarder to drop category=noise lines."
+    }
+  }
+}

@@ -5,23 +5,30 @@ require "hive/commands/forget"
 require "hive/commands/prune"
 require "hive/commands/doctor"
 require "hive/commands/update"
+require "hive/commands/connect"
+require "hive/commands/disconnect"
 require "hive/commands/uninstall"
 require "hive/commands/migrate"
 require "hive/commands/new"
+require "hive/commands/workflow"
 require "hive/commands/generate_name"
 require "hive/commands/run"
 require "hive/commands/rebase_status"
 require "hive/commands/stage_action"
+require "hive/commands/adhoc_review"
 require "hive/commands/status"
 require "hive/commands/approve"
 require "hive/commands/findings"
 require "hive/commands/finding_toggle"
 require "hive/commands/patrol"
 require "hive/commands/digest"
+require "hive/commands/pairing"
+require "hive/commands/answer_digest"
 require "hive/commands/markers"
 require "hive/commands/daemon"
 require "hive/commands/bot"
 require "hive/commands/metrics"
+require "hive/commands/setup"
 
 class HiveCliTest < Minitest::Test
   include HiveTestHelper
@@ -29,6 +36,13 @@ class HiveCliTest < Minitest::Test
   CommandDouble = Struct.new(:return_value, :calls) do
     def call
       calls << :call
+      return_value
+    end
+
+    # `hive review --pr` drives AdhocReview through #enqueue (not #call) so it
+    # can return the resolved {slug:, project:} the CLI forwards to StageAction.
+    def enqueue
+      calls << :enqueue
       return_value
     end
   end
@@ -54,9 +68,18 @@ class HiveCliTest < Minitest::Test
 
   def test_init_forget_prune_update_uninstall_and_migrate_pass_options
     with_command_new_stub(Hive::Commands::Init) do |calls|
-      Hive::CLI.start([ "init", "/tmp/project", "--force", "--json" ])
+      Hive::CLI.start([ "init", "/tmp/project", "--force", "--json", "--workflow", "content_fixture" ])
       assert_equal [ "/tmp/project" ], calls.first.fetch(:args)
-      assert_equal({ force: true, json: true }, calls.first.fetch(:kwargs))
+      assert_equal({ force: true, json: true, workflow: "content_fixture", new_workflow: nil },
+                   calls.first.fetch(:kwargs))
+      assert_equal :call, calls.last
+    end
+
+    with_command_new_stub(Hive::Commands::Init) do |calls|
+      Hive::CLI.start([ "init", "/tmp/project", "--new-workflow", "writing" ])
+      assert_equal [ "/tmp/project" ], calls.first.fetch(:args)
+      assert_equal({ force: false, json: false, workflow: nil, new_workflow: "writing" },
+                   calls.first.fetch(:kwargs))
       assert_equal :call, calls.last
     end
 
@@ -79,6 +102,18 @@ class HiveCliTest < Minitest::Test
     with_command_new_stub(Hive::Commands::Update) do |calls|
       Hive::CLI.start([ "update", "--dry-run" ])
       assert_equal({ dry_run: true }, calls.first.fetch(:kwargs))
+    end
+
+    with_command_new_stub(Hive::Commands::Connect) do |calls|
+      Hive::CLI.start([ "connect", "screenote", "--base-url", "https://screenote.test", "--json" ])
+      assert_equal [ "screenote" ], calls.first.fetch(:args)
+      assert_equal({ base_url: "https://screenote.test", json: true }, calls.first.fetch(:kwargs))
+    end
+
+    with_command_new_stub(Hive::Commands::Disconnect) do |calls|
+      Hive::CLI.start([ "disconnect", "screenote", "--json" ])
+      assert_equal [ "screenote" ], calls.first.fetch(:args)
+      assert_equal({ json: true }, calls.first.fetch(:kwargs))
     end
 
     with_command_new_stub(Hive::Commands::Uninstall) do |calls|
@@ -108,15 +143,126 @@ class HiveCliTest < Minitest::Test
     end
   end
 
+  def test_setup_wires_options_and_exits_with_command_status
+    with_command_new_stub(Hive::Commands::Setup, return_value: 3) do |calls|
+      _out, _err, status = with_captured_exit do
+        Hive::CLI.start([ "setup", "--json", "--service", "--no-bootstrap", "--no-init" ])
+      end
+
+      assert_equal 3, status, "the CLI must exit with the Setup command's return value"
+      assert_equal(
+        { json: true, service: true, no_bootstrap: true, no_init: true },
+        calls.first.fetch(:kwargs),
+        "every setup flag must be forwarded to Hive::Commands::Setup.new"
+      )
+      assert_includes calls, :call, "the setup command must actually be invoked"
+    end
+  end
+
+  def test_setup_defaults_when_no_flags_given
+    with_command_new_stub(Hive::Commands::Setup, return_value: 0) do |calls|
+      _out, _err, status = with_captured_exit { Hive::CLI.start([ "setup" ]) }
+
+      assert_equal 0, status
+      assert_equal(
+        { json: false, service: false, no_bootstrap: false, no_init: false },
+        calls.first.fetch(:kwargs),
+        "with no flags the CLI must pass the documented defaults"
+      )
+    end
+  end
+
   def test_new_task_dispatches_joined_text_and_rejects_blank_text
     with_command_new_stub(Hive::Commands::New) do |calls|
       Hive::CLI.start([ "new", "proj", "build", "thing" ])
       assert_equal [ "proj", "build thing" ], calls.first.fetch(:args)
+      assert_equal({ depends_on: nil, workflow: nil }, calls.first.fetch(:kwargs))
+    end
+
+    with_command_new_stub(Hive::Commands::New) do |calls|
+      Hive::CLI.start([ "new", "proj", "--depends-on", "base-task", "--workflow", "content_fixture", "build", "thing" ])
+      assert_equal [ "proj", "build thing" ], calls.first.fetch(:args)
+      assert_equal({ depends_on: "base-task", workflow: "content_fixture" }, calls.first.fetch(:kwargs))
     end
 
     _out, err, status = with_captured_exit { Hive::CLI.start([ "new", "proj" ]) }
     assert_equal Hive::ExitCodes::GENERIC, status
     assert_match(/missing task text/, err)
+  end
+
+  def test_workflow_option_help_advertises_project_authored_workflows
+    new_out, _new_err = capture_io { Hive::CLI.start([ "help", "new" ]) }
+    init_out, _init_err = capture_io { Hive::CLI.start([ "help", "init" ]) }
+
+    [ new_out, init_out ].each do |out|
+      assert_match(/or any project-authored workflow/, out,
+                   "--workflow help must say project-authored workflows are valid")
+      assert_match(/hive workflow new/, out,
+                   "--workflow help must point at the authoring command")
+      assert_includes out, Hive::CLI::WORKFLOW_VOCABULARY,
+                      "--workflow help must advertise the built-in workflows (#{Hive::CLI::WORKFLOW_VOCABULARY})"
+    end
+  end
+
+  def test_workflow_option_help_does_not_enumerate_project_workflows
+    # Plan-central contract: `--workflow` help lists built-ins only and never
+    # enumerates active-project descriptors, so the rendered string stays static
+    # regardless of which project is registered (WORKFLOW_VOCABULARY is frozen to
+    # built-ins at class load). Register a fixture into the runtime overlay and
+    # assert its id never leaks into `help new`.
+    with_registered_workflow(content_workflow) do
+      # Direct helper-level guard: assert the contract at its source, not only
+      # after Thor renders the option desc. A future rewrite of
+      # `workflow_option_desc` to dynamically enumerate `Registry.ids` would
+      # leave the frozen, class-load option desc unchanged, so the rendered
+      # check below would stay green while the helper silently became
+      # project-dependent. Calling the helper inside the runtime overlay catches
+      # that regression directly. (A deliberate dynamic upgrade would update
+      # this assertion on purpose.)
+      refute_includes Hive::CLI.workflow_option_desc, content_workflow.id.to_s,
+                      "workflow_option_desc must stay built-ins-only, independent of the registered project workflow"
+
+      new_out, _new_err = capture_io { Hive::CLI.start([ "help", "new" ]) }
+      refute_includes new_out, content_workflow.id.to_s,
+                      "--workflow help must list built-ins only, never active-project workflows"
+    end
+  end
+
+  def test_workflow_option_desc_is_symmetric_and_dry
+    desc = Hive::CLI.workflow_option_desc
+    # Anchor on the frozen constant the helper actually interpolates, not a live
+    # Registry.ids recomputation: WORKFLOW_VOCABULARY is built-ins-only at class
+    # load, so a sibling test that registers a project/runtime workflow (even
+    # under Minitest's randomized order) can't make this diverge and flake.
+    built_ins = Hive::CLI::WORKFLOW_VOCABULARY
+
+    assert_includes desc, built_ins
+    assert_includes desc, "or any project-authored workflow"
+    assert_includes desc, "hive workflow new ID"
+
+    new_out, _new_err = capture_io { Hive::CLI.start([ "help", "new" ]) }
+    init_out, _init_err = capture_io { Hive::CLI.start([ "help", "init" ]) }
+    assert_includes new_out, desc
+    assert_includes init_out, desc
+
+    cli_source = File.read(File.expand_path("../../lib/hive/cli.rb", __dir__))
+    # Match the bare built-in names regardless of a leading prefix: the prior
+    # `/["']coding, content/` only caught a quote-hugging literal, so it would
+    # have missed the most-likely regression — the pre-PR prefixed form
+    # `"valid: coding, content"`. The names never appear verbatim in cli.rb;
+    # they must come from the registry.
+    refute_match(/coding, content/, cli_source,
+                 "built-in workflow names must come from the registry")
+  end
+
+  def test_workflow_new_dispatches_to_command_with_json
+    with_command_new_stub(Hive::Commands::Workflow) do |calls|
+      Hive::CLI.start([ "workflow", "new", "my-flow", "--json" ])
+
+      assert_equal [ "new", "my-flow" ], calls.first.fetch(:args)
+      assert_equal({ project_root: Dir.pwd, json: true, template: nil }, calls.first.fetch(:kwargs))
+      assert_equal :call, calls.last
+    end
   end
 
   def test_generate_name_passes_lookup_options
@@ -166,6 +312,85 @@ class HiveCliTest < Minitest::Test
     end
   end
 
+  def test_review_pr_dispatches_adhoc_enqueue_then_stage_action
+    # enqueue returns the RESOLVED project (here "resolved-proj"), deliberately
+    # different from the raw --project "proj", so the assertion proves the CLI
+    # forwards the resolved name to StageAction rather than the raw option.
+    enqueue_result = { slug: "adhoc-review-pr-197", project: "resolved-proj" }
+    with_command_new_stub(Hive::Commands::AdhocReview, return_value: enqueue_result) do |adhoc_calls|
+      with_command_new_stub(Hive::Commands::StageAction) do |stage_calls|
+        Hive::CLI.start([ "review", "--pr", "#197", "--project", "proj", "--json" ])
+
+        adhoc_ctor = adhoc_calls.grep(Hash).first
+        assert_equal [], adhoc_ctor.fetch(:args)
+        assert_equal({ pr: "#197", project: "proj", json: true }, adhoc_ctor.fetch(:kwargs))
+        assert_equal :enqueue, adhoc_calls.last
+
+        stage_ctor = stage_calls.grep(Hash).first
+        assert_equal [ "review", "adhoc-review-pr-197" ], stage_ctor.fetch(:args)
+        assert_equal({ project: "resolved-proj", json: true }, stage_ctor.fetch(:kwargs))
+        assert_equal :call, stage_calls.last
+      end
+    end
+  end
+
+  def test_review_bare_number_still_dispatches_as_task_target
+    with_command_new_stub(Hive::Commands::StageAction) do |calls|
+      Hive::CLI.start([ "review", "197", "--project", "proj", "--json" ])
+
+      ctor = calls.grep(Hash).first
+      assert_equal [ "review", "197" ], ctor.fetch(:args)
+      assert_equal({ project: "proj", from: nil, json: true }, ctor.fetch(:kwargs))
+      assert_equal :call, calls.last
+    end
+  end
+
+  def test_review_pr_rejects_positional_target
+    _out, err, status = with_captured_exit do
+      Hive::CLI.start([ "review", "197", "--pr", "198" ])
+    end
+
+    assert_equal Hive::ExitCodes::USAGE, status
+    assert_match(/pass either TARGET or --pr/, err)
+  end
+
+  def test_review_pr_rejects_from_flag
+    # --from only disambiguates a TARGET lookup; combining it with --pr must
+    # be a usage error, not a silently-dropped flag.
+    _out, err, status = with_captured_exit do
+      Hive::CLI.start([ "review", "--pr", "197", "--from", "6-review" ])
+    end
+
+    assert_equal Hive::ExitCodes::USAGE, status
+    assert_match(/--from is not valid with --pr/, err)
+  end
+
+  def test_review_requires_target_or_pr
+    _out, err, status = with_captured_exit { Hive::CLI.start([ "review" ]) }
+
+    assert_equal Hive::ExitCodes::USAGE, status
+    assert_match(/missing TARGET/, err)
+  end
+
+  def test_review_usage_error_warns_when_envelope_is_not_serialisable
+    # The JSON usage-error envelope's GeneratorError arm must warn (a
+    # non-serialisable payload is a bug) rather than be silently swallowed;
+    # the bare-text rescue in bin/hive still carries the failure.
+    with_replaced_singleton_method(JSON, :generate, ->(*_args) { raise JSON::GeneratorError, "nope" }) do
+      _out, err, status = with_captured_exit { Hive::CLI.start([ "review", "--json" ]) }
+
+      assert_equal Hive::ExitCodes::USAGE, status
+      assert_match(/review usage-error envelope was not serialisable/, err)
+    end
+  end
+
+  def test_review_help_mentions_pr_option
+    out, _err = capture_io { Hive::CLI.start([ "help", "review" ]) }
+
+    assert_match(/--pr/, out)
+    assert_match(/ad-hoc review/, out)
+  end
+
   def test_archive_without_target_lists_archived_tasks_via_status
     with_command_new_stub(Hive::Commands::Status) do |calls|
       Hive::CLI.start([ "archive", "--json" ])
@@ -196,14 +421,14 @@ class HiveCliTest < Minitest::Test
 
   def test_status_approve_findings_and_finding_toggles_pass_options
     with_command_new_stub(Hive::Commands::Status) do |calls|
-      Hive::CLI.start([ "status", "--diagnose", "slug", "--project", "proj", "--stage", "execute", "--write", "--force", "--json" ])
-      assert_equal({ json: true, diagnose: "slug", project: "proj", stage: "execute", write: true, force: true }, calls.first.fetch(:kwargs))
+      Hive::CLI.start([ "status", "--diagnose", "slug", "--project", "proj", "--stage", "2-gather", "--write", "--force", "--json" ])
+      assert_equal({ json: true, diagnose: "slug", project: "proj", stage: "2-gather", write: true, force: true }, calls.first.fetch(:kwargs))
     end
 
     with_command_new_stub(Hive::Commands::Approve) do |calls|
-      Hive::CLI.start([ "approve", "slug", "--to", "review", "--from", "open-pr", "--project", "proj", "--force", "--json" ])
+      Hive::CLI.start([ "approve", "slug", "--to", "3-report", "--from", "2-gather", "--project", "proj", "--force", "--json" ])
       assert_equal [ "slug" ], calls.first.fetch(:args)
-      assert_equal({ to: "review", from: "open-pr", project: "proj", force: true, json: true }, calls.first.fetch(:kwargs))
+      assert_equal({ to: "3-report", from: "2-gather", project: "proj", force: true, json: true }, calls.first.fetch(:kwargs))
     end
 
     with_command_new_stub(Hive::Commands::Findings) do |calls|
@@ -238,6 +463,12 @@ class HiveCliTest < Minitest::Test
       assert_equal({ date: "2026-06-13", json: true, dry_run: true }, calls.first.fetch(:kwargs))
     end
 
+    with_command_new_stub(Hive::Commands::AnswerDigest) do |calls|
+      Hive::CLI.start([ "answer-digest", "--date", "2026-06-27", "--dry-run", "--json" ])
+      assert_equal [], calls.first.fetch(:args)
+      assert_equal({ date: "2026-06-27", json: true, dry_run: true }, calls.first.fetch(:kwargs))
+    end
+
     with_command_new_stub(Hive::Commands::Markers) do |calls|
       Hive::CLI.start([ "markers", "clear", "slug", "--name", "ERROR", "--project", "proj", "--match-attr", "exit_code=1", "--json" ])
       assert_equal [ "clear", "slug" ], calls.first.fetch(:args)
@@ -255,6 +486,12 @@ class HiveCliTest < Minitest::Test
       Hive::CLI.start([ "bot", "start", "--detach", "--dry-run", "--json" ])
       assert_equal [ "start" ], calls.first.fetch(:args)
       assert_equal({ foreground: false, dry_run: true, json: true, force: false }, calls.first.fetch(:kwargs))
+    end
+
+    with_command_new_stub(Hive::Commands::Pairing) do |calls|
+      Hive::CLI.start([ "pairing", "approve", "telegram", "ABCDEFGH", "--json" ])
+      assert_equal [ "approve" ], calls.first.fetch(:args)
+      assert_equal({ args: [ "telegram", "ABCDEFGH" ], json: true }, calls.first.fetch(:kwargs))
     end
 
     with_command_new_stub(Hive::Commands::Metrics) do |calls|
@@ -283,6 +520,19 @@ class HiveCliTest < Minitest::Test
     assert_match(/--force only applies to `install`/, err)
   end
 
+  # A closed stdout (broken pipe) while writing the bot argv-error --json
+  # envelope must be swallowed: emit_bot_argv_error still raises the
+  # InvalidTaskPath usage failure rather than letting a raw Errno::EPIPE
+  # escape. Covers the `rescue Errno::EPIPE, JSON::GeneratorError` arm around
+  # `puts JSON.generate(payload)`.
+  def test_bot_argv_error_json_swallows_broken_pipe
+    cli = Hive::CLI.new([], { json: true, force: true })
+    cli.define_singleton_method(:puts) { |_payload| raise Errno::EPIPE, "closed pipe" }
+
+    error = assert_raises(Hive::InvalidTaskPath) { cli.bot("status") }
+    assert_match(/--force only applies to `install`/, error.message)
+  end
+
   # P3: `hive web --json` previously accepted the global --json and silently
   # ignored it. Mirror `hive tui`'s rejection: emit a structured error
   # envelope and exit with EX_USAGE rather than booting a long-lived server.
@@ -306,7 +556,11 @@ class HiveCliTest < Minitest::Test
     require "hive/commands/web"
     captured = []
     recorder = Class.new do
-      define_method(:initialize) { |bind:, port:| captured << { bind: bind, port: port } }
+      # The constructor now takes a positional `subcommand` (nil for the
+      # foreground server) plus the bind/port/no_bootstrap/unsafe/force/json/
+      # detach kwargs the CLI forwards. Accept the positional + swallow the
+      # extra kwargs so the recorder matches the real signature.
+      define_method(:initialize) { |subcommand = nil, bind:, port:, **| captured << { bind: bind, port: port } }
       define_method(:call) { captured << :called }
     end
 

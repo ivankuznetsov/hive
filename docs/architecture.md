@@ -47,6 +47,17 @@ The project checkout holds code. `.hive-state/` holds durable Hive state on the 
 
 Each stage has one state file: `idea.md` (1-inbox), `brainstorm.md` (2-brainstorm), `plan.md` (3-plan), `task.md` (shared across 4-execute, 6-review, 9-done), `artifact.md` (7-artifacts), `pr.md` (shared across 5-open-pr and 8-finalize), or `summary.md` (8-finalize). `worktree.yml` points from Hive state to the feature worktree created during execute. The xbookmark walkthrough captures a mid-run tree in [docs/assets/xbookmark-state-tree.txt](assets/xbookmark-state-tree.txt).
 
+## Local Web Runtime
+
+The local Rails web UI is a managed runtime dependency, not part of the CLI
+gem payload. `hive web` resolves `HIVEBOX_WEB_APP_DIR`, then
+`${XDG_DATA_HOME}/hive/web`, then a source checkout `web/`. `hive setup` and
+`hive web` can bootstrap the managed app from the versioned web release bundle
+and run its Rails bundle install. The web storage directory remains under
+`${XDG_STATE_HOME}/hive/web-storage`, so the TUI, daemon, and web UI operate
+on the same local registry, project `.hive-state/` directories, and task
+folders.
+
 ## Agents
 
 Hive has built-in agent profiles for `claude`, `codex`, and `pi`. A profile defines the binary, version check, prompt flag, add-dir behavior, skill invocation syntax, and status-detection mode. Stage runners look up the configured profile before spawning the subprocess.

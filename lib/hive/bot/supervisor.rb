@@ -18,10 +18,16 @@ require "hive/bot/conversation_store"
 require "hive/bot/idea_draft_store"
 require "hive/bot/idea_attachment_policy"
 require "hive/bot/router"
+require "hive/bot/pairing_store"
+require "hive/bot/pairing_approval_queue"
 require "hive/bot/child_supervisor"
 require "hive/bot/dispatch_request_writer"
+require "hive/bot/format"
+require "hive/bot/row_actions"
+require "hive/bot/waiting_rows"
 require "hive/daemon/dispatch_request_queue"
 require "hive/daemon/dispatch_result_queue"
+require "hive/diagnostic_evidence"
 require "hive/paths"
 require "hive/bot/brainstorm_answer_writer"
 require "hive/bot/brainstorm_parser"
@@ -35,13 +41,14 @@ module Hive
   module Bot
     class Supervisor
       BOT_COMMANDS = [
-        { command: "idea",    description: "Capture a new idea with optional files" },
+        { command: "idea",    description: "Capture an idea, or just send any message" },
         { command: "status",  description: "Show active tasks" },
+        { command: "waiting", description: "Show tasks waiting on your answer" },
         { command: "queue",   description: "Show queued and waiting tasks" },
-        { command: "answer",  description: "Answer brainstorm questions: /answer <slug>" },
-        { command: "approve", description: "Approve a task at its current stage: /approve <slug>" },
-        { command: "autofix", description: "Retry a stuck task: /autofix <slug>" },
-        { command: "details", description: "Show diagnostic detail: /details <slug>" },
+        { command: "answer",  description: "Answer brainstorm questions: /answer <id|slug>" },
+        { command: "approve", description: "Approve a task at its current stage: /approve <id|slug>" },
+        { command: "autofix", description: "Retry a stuck task: /autofix <id|slug>" },
+        { command: "details", description: "Show diagnostic detail: /details <id|slug>" },
         { command: "done",    description: "Mark a brainstorm as done after answering" },
         { command: "help",    description: "Show available commands" }
       ].freeze
@@ -50,12 +57,15 @@ module Hive
                      notification_dispatcher: nil, router: nil, child_supervisor: nil,
                      conversation_store: nil, dry_run: false, update_state: nil,
                      dispatch_request_writer: nil, dispatch_result_state_home: nil,
-                     idea_draft_store: nil, transcriber: nil, transcriber_factory: nil)
+                     pairing_approval_state_home: nil,
+                     idea_draft_store: nil, transcriber: nil, transcriber_factory: nil,
+                     pairing_store: nil)
         @config = config
         @dry_run = dry_run
         # ADV-1: where the daemon drops dispatch-result notices.
         # Tests inject a sandbox; production resolves Hive::Paths.state_home.
         @dispatch_result_state_home = dispatch_result_state_home
+        @pairing_approval_state_home = pairing_approval_state_home
         # Shared update-check state (written by the daemon). The bot owns the
         # once-per-version push; the daemon never touches last_notified_version.
         @update_state = update_state || Hive::UpdateCheck::State.new
@@ -74,6 +84,7 @@ module Hive
           Hive::Bot::ConversationStore.new(ttl_sec: config.fetch("conversation_ttl_sec"))
         @idea_draft_store = idea_draft_store ||
           Hive::Bot::IdeaDraftStore.new(ttl_sec: config.fetch("idea_draft_ttl_sec", 900), logger: @logger)
+        @pairing_store = pairing_store || Hive::Bot::PairingStore.new
         @transcriber_factory = transcriber_factory || method(:default_transcriber)
         @transcriber = transcriber || build_transcriber(config)
         @router = router || build_router(config)
@@ -214,6 +225,7 @@ module Hive
           logger: @logger,
           conversation_store: @conversation_store,
           idea_draft_store: @idea_draft_store,
+          pairing_store: @pairing_store,
           status_snapshot_provider: -> { latest_status_rows }
         )
       end
@@ -272,6 +284,7 @@ module Hive
           begin
             reap_children
             drain_dispatch_results
+            drain_pairing_approvals
           rescue StandardError => e
             @logger.event(:fatal, source: "reaper_loop", error_class: e.class.name,
                                    message: e.message, backtrace: Array(e.backtrace).first(10).join("\n"))
@@ -362,6 +375,58 @@ module Hive
         )
       end
 
+      PAIRING_APPROVED_TEXT = "✅ Approved — you can use hive now. Try /status.".freeze
+      PAIRING_APPROVAL_SEND_CAP = 10
+
+      def drain_pairing_approvals(now: Time.now)
+        notices = Hive::Bot::PairingApprovalQueue.pending(
+          state_home: pairing_approval_state_home,
+          bad_handler: ->(path:, reason:) { FileUtils.rm_f(path) }
+        )
+        fresh = notices.reject do |notice|
+          next false unless Hive::Bot::PairingApprovalQueue.expired?(notice, now: now)
+
+          # Stale: drop without sending. A failed unlink (the clean `false` the
+          # queue returns on EACCES, or a mismatched/corrupt file) would
+          # otherwise silently re-evaluate-and-re-drop this notice every reaper
+          # tick with no observability — mirror the successful-send branch and
+          # log the same distinct event so a wedged notice is attributable.
+          unless remove_pairing_approval(notice)
+            @logger.event(:pairing_approval_notice_unremovable,
+                          chat_id: notice.chat_id, notice_id: notice.notice_id)
+          end
+          true
+        end
+
+        # Per-tick send cap — mirroring only the send cap of
+        # drain_dispatch_results, NOT its overflow-summary or allowlist
+        # re-check (the latter omission is deliberate — approval notices are
+        # owner-authored and may arrive before SIGHUP reload updates memory):
+        # a reconnect burst or backlog must not blow past Telegram's per-chat
+        # rate limit. Over-cap notices simply stay queued and drain on
+        # subsequent reaper ticks.
+        fresh.first(PAIRING_APPROVAL_SEND_CAP).each do |notice|
+          sent = safe_send_message(chat_id: notice.chat_id, text: PAIRING_APPROVED_TEXT)
+          next unless sent
+
+          # A successful send followed by a failed unlink (e.g. EACCES, now a
+          # clean `false` from the queue) would otherwise silently re-send the
+          # "✅ Approved" DM every tick until the notice expires (1h). We can't
+          # un-send, but log a distinct event so the duplicate DMs are
+          # attributable instead of mysterious.
+          next if remove_pairing_approval(notice)
+
+          @logger.event(:pairing_approval_notice_unremovable,
+                        chat_id: notice.chat_id, notice_id: notice.notice_id)
+        end
+      end
+
+      def remove_pairing_approval(notice)
+        Hive::Bot::PairingApprovalQueue.remove(
+          notice.notice_id, state_home: pairing_approval_state_home, path: notice.path
+        )
+      end
+
       def dispatch_result_text(notice)
         return dispatch_success_text(notice) unless dispatch_failure_notice?(notice)
 
@@ -396,8 +461,12 @@ module Hive
         @dispatch_result_state_home || Hive::Paths.state_home
       end
 
-      def safe_send_message(chat_id:, text:, reply_markup: nil)
-        @telegram.send_message(chat_id: chat_id, text: text, reply_markup: reply_markup)
+      def pairing_approval_state_home
+        @pairing_approval_state_home || Hive::Paths.state_home
+      end
+
+      def safe_send_message(chat_id:, text:, reply_markup: nil, parse_mode: nil)
+        @telegram.send_message(chat_id: chat_id, text: text, reply_markup: reply_markup, parse_mode: parse_mode)
       rescue StandardError => e
         @logger.event(:send_failure, chat_id: chat_id, error_class: e.class.name, message: e.message)
         nil
@@ -969,10 +1038,23 @@ module Hive
             legacy_stage_dirs = filtered_legacy_stage_dirs
           end
           if result.slug
-            safe_send_message(chat_id: update.chat_id, text: render_details(rows, result.project, result.slug))
+            safe_send_message(
+              chat_id: update.chat_id,
+              text: render_details(rows, result.project, result.slug, stage: result.stage)
+            )
           else
+            if result.respond_to?(:mode) && result.mode == :waiting
+              rows = Hive::Bot::WaitingRows.select(rows, daemon_enabled: waiting_daemon_enabled_resolver,
+                                                         logger: @logger)
+              if rows.empty?
+                safe_send_message(chat_id: update.chat_id, text: "Nothing is waiting on you.")
+                return nil
+              end
+              legacy_stage_dirs = []
+            end
             safe_send_message(chat_id: update.chat_id,
                               text: render_queue(rows, legacy_stage_dirs: legacy_stage_dirs),
+                              parse_mode: :html,
                               reply_markup: status_keyboard(rows))
           end
           return nil
@@ -988,10 +1070,12 @@ module Hive
         # through the daemon's dispatch-request queue so there is one
         # writer of those verbs — the daemon — and the
         # post-completion mtime baseline stays current. Plan
-        # 2026-05-28-002. Read-only verbs (status/--diagnose, new,
-        # approve) keep the in-process spawn path because they don't
-        # bump task state-file mtime and don't cause the dual-writer
-        # bug.
+        # 2026-05-28-002. The remaining in-process verbs (status, new,
+        # approve, and the surviving `status --diagnose --write --force`
+        # refresh) keep the in-process spawn path because none of them
+        # bump the task state-file mtime — the diagnose refresh only
+        # writes a diagnostics artifact — so they don't cause the
+        # dual-writer bug.
         if queue_routable?(result.command_argv)
           return enqueue_dispatch_request(result, update)
         end
@@ -1006,8 +1090,9 @@ module Hive
           slug: result.slug
         )
         # No "Queued command pid=..." ack — that's operational chatter the
-        # operator does not need. The reaper still surfaces failures (and
-        # diagnose replies still fire for Show details), so silence here
+        # operator does not need. The reaper still surfaces failures (and the
+        # Refresh diagnosis reply still fires for `refresh_diagnose`; Show
+        # details now renders in-process via render_details), so silence here
         # is signal-preserving.
         pid
       end
@@ -1071,7 +1156,8 @@ module Hive
         case intent
         when :slash_done then "slash_done"
         when :callback_autofix, :callback_clear_and_retry then "autofix"
-        when :callback_approve then "callback_approve"
+        when :callback_approve, :callback_approve_plan then "callback_approve"
+        when :callback_rerun then "callback_rerun"
         when :callback_findings_accept_all then "findings_accept"
         when :callback_findings_reject_all then "findings_reject"
         else "bot_dispatch"
@@ -1270,10 +1356,21 @@ module Hive
         if envelope["ok"] == true
           diagnostic = envelope["diagnostic"].is_a?(Hash) ? envelope["diagnostic"] : {}
           slug = envelope["slug"] || child.slug
-          return "No diagnostic available for #{slug}." if diagnostic.empty? && envelope["path"].to_s.strip.empty?
+          # Show details renders directly from the cached status row now.
+          # This remains defensive for the refresh_diagnose child path, the
+          # sole producer of this envelope, which can still return an empty
+          # success envelope — which `empty_diagnose_success_reply` now backfills
+          # from on-disk evidence (red-status / newest log / marker) before
+          # falling back to a try-again message.
+          if diagnostic.empty? && envelope["path"].to_s.strip.empty?
+            return empty_diagnose_success_reply(envelope, slug)
+          end
 
-          return "Diagnosis is available for \"#{Hive::Bot::TitleFormatter.title_from_slug(slug)}\". " \
-                 "Tap Show details to dump it here."
+          # The freshly written verdict isn't in the cached snapshot row until
+          # the next poll, and Show details renders a summary, not a raw dump —
+          # so the copy promises a summarized render, not "dump it here".
+          return "Refreshed diagnosis for \"#{Hive::Bot::TitleFormatter.title_from_slug(slug)}\". " \
+                 "Tap Show details for the summary (updates on the next status refresh)."
         end
 
         kind = envelope["error_kind"].to_s.strip
@@ -1285,6 +1382,38 @@ module Hive
         prefix += " (#{kind})" unless kind.empty?
         text = "#{prefix}: #{message.empty? ? "exit #{exit_code}" : message}"
         child.log_path ? "#{text}; see #{child.log_path}" : text
+      end
+
+      def empty_diagnose_success_reply(envelope, slug)
+        title = Hive::Bot::TitleFormatter.title_from_slug(slug)
+        evidence = Hive::DiagnosticEvidence.summarize(
+          folder: envelope["task_folder"],
+          marker_summary: envelope["marker_summary"],
+          # Pin the marker tier to the authoritative state file the CLI read
+          # marker_summary from, so the marker-tier source_path can't name a
+          # different *.md than the summary describes (older envelopes omit this
+          # field; summarize treats nil as "glob the folder", the prior path).
+          state_file: envelope["state_file"]
+        )
+        if evidence
+          # Label the source by its tier (Diagnostics:/Log:/Marker:) rather than
+          # hardcoding "Log:" — the top tier is a diagnostic artifact and the
+          # marker tier is a state file, neither of which is a log.
+          return "Refreshed diagnosis for \"#{title}\".\n" \
+                 "#{evidence.fetch(:summary)}\n" \
+                 "#{Hive::DiagnosticEvidence.source_label(evidence.fetch(:kind))}: #{evidence.fetch(:source_path)}"
+        end
+
+        folder = envelope["task_folder"].to_s.strip
+        # On a hard fault (e.g. an EACCES storm) the resolver logs a breadcrumb
+        # to daemon.log but returns nil here, so the operator sees only this
+        # copy. Append a soft pointer to daemon.log so a persistent failure
+        # doesn't read as merely transient, without changing the plan-specified
+        # no-evidence wording above it.
+        text = "Couldn't find a cached diagnosis for \"#{title}\" yet. " \
+               "Tap Refresh diagnosis again, or open the task on a laptop. " \
+               "If this keeps happening, check daemon.log."
+        folder.empty? ? text : "#{text}\nTask folder: #{folder}"
       end
 
       # Success is gated on the process exit code alone. The hive-status-
@@ -1379,8 +1508,11 @@ module Hive
       def inferred_success_slug(verb, argv)
         case verb
         when "status"
-          idx = argv.index("--diagnose")
-          idx ? argv[idx + 1].to_s : ""
+          # Any plain `hive status --json` is rendered in-process by
+          # render_details and never reaches success-text inference; a
+          # `--diagnose` child short-circuits via diagnose_reply_for_child. So a
+          # status child here carries no inferable slug.
+          ""
         when "markers"
           argv[3].to_s
         else
@@ -1397,19 +1529,24 @@ module Hive
       def render_queue(rows, legacy_stage_dirs: [])
         actionable = actionable_queue_rows(rows)
         legacy_lines = legacy_stage_dirs.map do |row|
-          Hive::Bot::NotificationBuilders.legacy_stage_dirs(row).text
+          Hive::Bot::Format.html_escape(Hive::Bot::NotificationBuilders.legacy_stage_dirs(row).text)
         end
         return (legacy_lines + [ "No active Hive tasks." ]).join("\n") if actionable.empty?
 
         lines = actionable.first(QUEUE_DISPLAY_CAP).map do |row|
-          "#{Hive::Bot::NotificationBuilders.display_title(row)} — " \
-            "#{Hive::Bot::TitleFormatter.stage_label(row.stage, logger: @logger)}"
+          title = Hive::Bot::Format.html_escape(Hive::Bot::NotificationBuilders.display_title(row))
+          stage = Hive::Bot::Format.html_escape(Hive::Bot::TitleFormatter.stage_label(row.stage, logger: @logger))
+          "#{title} — #{pr_link_or_dash(row)} — #{stage}"
         end
         header = "#{actionable.size} active task#{actionable.size == 1 ? '' : 's'}"
         if actionable.size > QUEUE_DISPLAY_CAP
           lines << "+ #{actionable.size - QUEUE_DISPLAY_CAP} more tasks — open on a laptop for the full list."
         end
         (legacy_lines + [ header ] + lines).join("\n")
+      end
+
+      def pr_link_or_dash(row)
+        Hive::Bot::Format.html_pr_link(row.pr_url) || "—"
       end
 
       # Inline keyboard for the /status (and /queue) reply: one button per
@@ -1431,45 +1568,92 @@ module Hive
         buttons.empty? ? nil : buttons.map { |btn| [ btn ] }
       end
 
-      # One primary action button for a row, or nil when the row has no
-      # Telegram-side next step. Mirrors the push-notification surface:
-      #   needs_input + 2-brainstorm + waiting → Answer  (answer: callback)
-      #   ready_to_*                            → Approve (approve: callback)
-      #   recover_* AND retryable_recovery?     → Autofix (autofix: callback)
-      #   recover_* AND manual_only_recovery?   → Details (details: callback)
-      #   else                                  → nil
-      # Labels carry the task title so the operator can tell rows apart.
+      # One primary action button for a row, or nil when the canonical
+      # row-action resolver says the row is suppressed or has no Telegram-side
+      # action. Delegates to the shared `WaitingRows.button_for` so /status,
+      # /waiting, and the answer-digest render the same conceptual button
+      # through one builder; the per-row rescue (drop just this row's button on
+      # a malformed row, logging :status_button_failed) lives there now.
       def status_action_button(row)
-        nb = Hive::Bot::NotificationBuilders
-        title = nb.display_title(row)
-        action = row.action.to_s
-
-        if action == "needs_input" && row.stage.to_s == "2-brainstorm" && row.marker.to_s == "waiting"
-          nb.button("✏️ #{title}", "answer:#{row.project}:#{row.slug}")
-        elsif action.start_with?("ready_to_")
-          verb = nb.verb_for_action(row.action)
-          nb.button("✅ #{title}", "approve:#{verb}:#{row.project}:#{row.slug}:#{row.stage}") if verb
-        elsif nb.recovery?(row)
-          if nb.retryable_recovery?(row)
-            nb.button("🔧 #{title}", nb.autofix_callback(row))
-          else
-            nb.button("🔍 #{title}", nb.details_callback(row))
-          end
-        end
+        Hive::Bot::WaitingRows.button_for(row, logger: @logger)
       end
 
-      def render_details(rows, project, slug)
-        row = Array(rows).find { |candidate| candidate.project == project && candidate.slug == slug }
-        return "No active row found for #{project}/#{slug}." unless row
+      # Delegates to the shared WaitingRows builder so /waiting and the
+      # answer-digest resolve daemon-managed plan pauses through one
+      # memoizing, fail-open, config-error-logging implementation; only the log
+      # `source:` differs.
+      def waiting_daemon_enabled_resolver
+        Hive::Bot::WaitingRows.daemon_enabled_resolver(source: "waiting_daemon_check", logger: @logger)
+      end
 
-        attrs = row.attrs.to_h.transform_keys(&:to_s).to_a.sort_by(&:first)
-                   .map { |key, value| "#{key}=#{value}" }
-        [
-          "#{Hive::Bot::NotificationBuilders.display_title(row)} — #{row.project}/#{row.slug} (#{row.stage})",
-          "Action: #{row.action_label || row.action}",
-          "Marker: #{row.marker || 'none'}",
-          ("Attrs: #{attrs.join(' ')}" unless attrs.empty?)
-        ].compact.join("\n")
+      def render_details(rows, project, slug, stage: nil)
+        row = Array(rows).find do |candidate|
+          candidate.project == project && candidate.slug == slug &&
+            (stage.to_s.empty? || candidate.stage.to_s == stage.to_s)
+        end
+        target = [ project, slug ].compact.join("/")
+        target = "#{target} (#{stage})" unless stage.to_s.empty?
+        return "No active row found for #{target}." unless row
+
+        Hive::Bot::NotificationBuilders.details_reply(row)
+      rescue StandardError => e
+        # Same soft-degrade as the Show-details handlers: details_reply renders
+        # from a live Row and never raises today, but a render-time fault here
+        # would escape execute_dispatch's /status-intercept branch to the :fatal
+        # poll handler and skip write_last_seen, denying the operator any reply.
+        @logger&.event(:details_render_failed, source: "render_details",
+                                                project: project, slug: slug,
+                                                error_class: e.class.name, message: e.message,
+                                                backtrace: Array(e.backtrace).first(3))
+        Hive::Bot::NotificationBuilders::STATUS_LOOKUP_FAILED_REPLY
+      end
+
+      # Closed per-role hint vocabulary for needs-input/recovery rows, swept by
+      # button_coverage_test so every primary-capable RowActions role has a
+      # hint. Kept as the guard spec for that closed vocabulary; the operator-
+      # facing details copy is rendered by NotificationBuilders.details_reply.
+      def next_step_hint(row)
+        action = Hive::Bot::RowActions.resolve(row).primary
+        return "Next: open on a laptop to inspect." unless action
+        # A row whose only chat action is a terminal Show-details (manual-only
+        # recovery or a tripped review fix-guardrail) has no in-chat next step.
+        # RowActions owns that predicate so the hint and the button-coverage
+        # guard agree on what "terminal" means.
+        return "Next: open on a laptop to inspect." if action.role == :details && Hive::Bot::RowActions.terminal_details?(row)
+        # :rerun renders a verb-derived hint ("Re-run develop" / "Run finalize");
+        # every other role maps to a static line below.
+        return rerun_hint(action.verb) if action.role == :rerun
+
+        # Static per-role hints, mirroring WaitingRows::ROLE_EMOJI's `.fetch` so a
+        # new primary-capable role added to RowActions::ROLES without a hint
+        # fails loud (KeyError) here instead of silently degrading to the laptop
+        # hint. button_coverage_test sweeps every representative row's primary
+        # role through here. A non-terminal :details recovery row (not manual-
+        # only, no retry suggestion) gets the laptop hint; terminal details
+        # already returned above.
+        {
+          answer: "Next: tap Answer to answer in chat.",
+          approve: "Next: tap Approve to advance this task.",
+          approve_plan: "Next: tap Approve to advance this task.",
+          findings_accept: "Next: tap Accept all or Reject all to triage findings.",
+          findings_reject: "Next: tap Accept all or Reject all to triage findings.",
+          autofix: "Next: tap Autofix to retry the stage cleanly.",
+          details: "Next: open on a laptop to inspect."
+        }.fetch(action.role)
+      end
+
+      # Paused-stage re-run hint, mirroring NotificationBuilders.rerun_label's
+      # purely lexical verb split: the "develop" verb reads "Re-run", every
+      # other verb (finalize, generic run) reads "Run". The split is lexical,
+      # not an execution-history claim — a "finalize" rerun is only produced for
+      # a finalize agent that already ran and paused. The literal "run" verb
+      # reads as the stage to avoid "run run".
+      def rerun_hint(verb)
+        case verb.to_s
+        when "develop" then "Next: tap Re-run to re-run develop."
+        when "run" then "Next: tap Run to run this stage."
+        else "Next: tap Run to run #{verb}."
+        end
       end
 
       def actionable_queue_rows(rows)
@@ -1519,7 +1703,7 @@ module Hive
 
       def brainstorm_path_for(slug, project: nil)
         entry = brainstorm_project_entry_for(slug, project: project)
-        entry ? File.join(entry["hive_state_path"], "stages", "2-brainstorm", slug, "brainstorm.md") : nil
+        entry ? File.join(entry["hive_state_path"], "stages", "2-brainstorm", slug, "brainstorm.md") : nil # coding-scoped: Telegram answer flow edits coding brainstorm.md
       end
 
       # Resolve the project name a brainstorm slug currently lives in.
@@ -1536,7 +1720,7 @@ module Hive
         projects = Hive::Config.registered_projects
         projects = projects.select { |entry| entry["name"] == project } if project && !project.empty?
         projects.find do |entry|
-          path = File.join(entry["hive_state_path"], "stages", "2-brainstorm", slug, "brainstorm.md")
+          path = File.join(entry["hive_state_path"], "stages", "2-brainstorm", slug, "brainstorm.md") # coding-scoped: Telegram answer flow edits coding brainstorm.md
           File.exist?(path)
         end
       end

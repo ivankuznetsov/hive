@@ -5,6 +5,7 @@ require "hive/config"
 require "hive/bot/notification_builders"
 require "hive/bot/idea_draft_store"
 require "hive/bot/idea_attachment_policy"
+require "hive/bot/pairing_store"
 require "hive/bot/handlers/slash_handlers"
 require "hive/bot/handlers/callback_handlers"
 require "hive/bot/handlers/free_text_handler"
@@ -14,6 +15,7 @@ module Hive
     class Router
       INTENTS = %i[
         slash_status
+        slash_waiting
         slash_queue
         slash_idea
         slash_answer
@@ -24,6 +26,8 @@ module Hive
         slash_help
         slash_start
         callback_approve
+        callback_approve_plan
+        callback_rerun
         callback_reject
         callback_autofix
         callback_clear_and_retry
@@ -41,19 +45,22 @@ module Hive
         callback_findings_accept_all
         callback_findings_reject_all
         callback_idea_project_new
+        callback_expired
         idea_voice
         idea_voice_during_draft
         idea_voice_edit_text
         answer_voice
         idea_media
+        idea_bare_text
         idea_text_capture
         free_text_answer
+        unauthorized_pairing
         unauthorized
         unknown
       ].freeze
 
       Result = Struct.new(:action, :text, :reply_markup, :command_argv, :commands,
-                          :project, :slug, :question_n, :answer_text, :mode,
+                          :project, :slug, :stage, :question_n, :answer_text, :mode,
                           :intent, :alert_reset, :clear_keyboard, :format,
                           :attachment, keyword_init: true)
 
@@ -69,16 +76,19 @@ module Hive
       def initialize(bot_config:, logger:, conversation_store:, idea_draft_store: nil,
                      projects_provider: -> { Hive::Config.registered_projects },
                      now: -> { Time.now },
-                     status_snapshot_provider: -> { [] })
+                     status_snapshot_provider: -> { [] },
+                     pairing_store: Hive::Bot::PairingStore.new)
         @bot_config = bot_config
         @logger = logger
         @conversation_store = conversation_store
         @now = now
+        @pairing_store = pairing_store
         @idea_draft_store = idea_draft_store ||
           Hive::Bot::IdeaDraftStore.new(ttl_sec: bot_config.fetch("idea_draft_ttl_sec", PENDING_IDEA_TTL_SEC),
                                         now: @now, logger: @logger)
         @projects_provider = projects_provider
         @unauthorized_logged = {}
+        @pairing_reply_sent = {}
         @pending_ideas = {}
         @last_project = nil
 
@@ -91,7 +101,8 @@ module Hive
           idea_attachment_policy: Hive::Bot::IdeaAttachmentPolicy,
           max_attachment_bytes: bot_config.fetch("idea_attachment_max_bytes", 20 * 1024 * 1024),
           max_attachment_count: bot_config.fetch("idea_attachment_max_count", 10),
-          status_snapshot_provider: status_snapshot_provider
+          status_snapshot_provider: status_snapshot_provider,
+          logger: @logger
         )
         @callback_handlers = Handlers::CallbackHandlers.new(
           pending_ideas: @pending_ideas,
@@ -112,7 +123,20 @@ module Hive
       def classify(update)
         prune_pending_ideas!
         prune_unauthorized_log!
-        return :unauthorized unless authorized?(update.chat_id)
+        unless allowed?(update.chat_id)
+          # Gate the pairing reply on whether we have ALREADY issued a pairing
+          # code to this chat — not on whether the chat has any unauthorized
+          # contact on record. Keying the throttle on the rejection log meant
+          # any earlier non-/start message (or a probe) latched the chat shut,
+          # so a later /start fell through to a silent rejection instead of
+          # replying with a code (R2/R4).
+          if pairing_enabled? && !pairing_reply_sent?(update.chat_id) && start_command?(effective_text(update))
+            return :unauthorized_pairing
+          end
+
+          log_unauthorized(update.chat_id)
+          return :unauthorized
+        end
 
         if update.callback_query?
           data = Hive::Bot::NotificationBuilders.resolve_callback(update.callback_data.to_s)
@@ -123,6 +147,7 @@ module Hive
         text = effective_text(update).to_s.strip
         case text
         when %r{\A/status\b} then :slash_status
+        when %r{\A/waiting\b} then :slash_waiting
         when %r{\A/queue\b} then :slash_queue
         when %r{\A/idea\b} then :slash_idea
         when %r{\A/answer\b} then :slash_answer
@@ -154,7 +179,15 @@ module Hive
           return :idea_media if update.respond_to?(:media?) && update.media?
           return :idea_text_capture if draft&.phase == :awaiting_text
 
-          :unknown
+          # Bare non-slash text now defaults to idea capture. Text-less updates
+          # with no media/voice (stickers, locations, contacts, video) reach
+          # here too with an empty `text` and likewise open idea capture
+          # (`idea` -> awaiting_text draft) rather than the unknown-command
+          # reply. Unknown slash commands must keep the unknown-command reply
+          # instead of being swallowed as idea text.
+          return :unknown if text.start_with?("/")
+
+          :idea_bare_text
         end
       end
 
@@ -178,14 +211,25 @@ module Hive
 
       private
 
-      def authorized?(chat_id)
-        return true if allowed_chat_ids.include?(chat_id)
+      def allowed?(chat_id)
+        allowed_chat_ids.include?(chat_id)
+      end
 
+      # Log a rejection at most once per chat per bot lifetime (the
+      # unauthorized-log throttle). Called only for updates that actually
+      # resolve to a silent rejection — a
+      # /start routed to pairing is a handled update, not a rejection, so it
+      # must NOT stamp this log or emit the misleading
+      # :update_rejected_unauthorized event.
+      def log_unauthorized(chat_id)
         unless @unauthorized_logged[chat_id]
           @logger.event(:update_rejected_unauthorized, chat_id: chat_id)
         end
         @unauthorized_logged[chat_id] = @now.call
-        false
+      end
+
+      def pairing_reply_sent?(chat_id)
+        @pairing_reply_sent.key?(chat_id)
       end
 
       def allowed_chat_ids
@@ -204,13 +248,16 @@ module Hive
       end
 
       def prune_unauthorized_log!
-        # R3 is "once per chat per bot lifetime". Keep the set bounded only
-        # by process lifetime; do not prune hostile probes back into logging.
+        # The unauthorized-log throttle guarantees "once per chat per bot
+        # lifetime". Keep the set bounded only by process lifetime; do not
+        # prune hostile probes back into logging.
       end
 
       def callback_intent(data)
         case data
         when /\Aapprove:/ then :callback_approve
+        when /\Aapprove_plan:/ then :callback_approve_plan
+        when /\Arerun:/ then :callback_rerun
         when /\Areject:/ then :callback_reject
         when /\Aautofix:/ then :callback_autofix
         when /\Aclear_retry:/ then :callback_clear_and_retry
@@ -228,6 +275,13 @@ module Hive
         when /\Afindings:accept_all:/ then :callback_findings_accept_all
         when /\Afindings:reject_all:/ then :callback_findings_reject_all
         when /\Aidea_project_new:/ then :callback_idea_project_new
+        # A `#`-prefixed token that survived resolve_callback is a compacted
+        # callback whose registry entry is gone (bot restart, or TTL/size
+        # eviction) — the long approve_plan:/rerun: callbacks on this project's
+        # slugs routinely exceed Telegram's 64-byte cap and rely on that
+        # registry. Tell the operator the button expired instead of the
+        # generic "I did not understand that".
+        when /\A#/ then :callback_expired
         else :unknown
         end
       end
@@ -269,14 +323,20 @@ module Hive
         }
       end
 
+      # Nil-able: returns nil when neither read is set (SlashHandlers#effective_text
+      # is byte-identical; FreeTextHandler's variant coerces to "" instead). The
+      # respond_to? guard supports lean test fixtures that expose only #text;
+      # production Telegram::Update always responds to #effective_text (telegram.rb).
       def effective_text(update)
         update.respond_to?(:effective_text) ? update.effective_text : update.text
       end
 
       def dispatch(intent, update)
         case intent
+        when :unauthorized_pairing then unauthorized_pairing(update)
         when :unauthorized then Result.new(action: :noop)
         when :slash_status then @slash_handlers.status(update)
+        when :slash_waiting then @slash_handlers.waiting(update)
         when :slash_queue then @slash_handlers.queue(update)
         when :slash_idea then @slash_handlers.idea(update)
         when :slash_answer then @slash_handlers.answer(update, @conversation_store)
@@ -291,8 +351,11 @@ module Hive
         when :idea_voice_during_draft then Result.new(action: :reply, text: Hive::Bot::IdeaDraftStore::VOICE_DURING_DRAFT_MESSAGE)
         when :idea_voice_edit_text then @slash_handlers.edit_transcript_text(update)
         when :idea_media then @slash_handlers.media(update)
+        when :idea_bare_text then @slash_handlers.idea(update)
         when :idea_text_capture then @slash_handlers.capture_idea_text(update)
         when :free_text_answer then @free_text_handler.handle(update)
+        when :callback_expired
+          Result.new(action: :reply, text: "That button expired — reopen /queue to get a fresh one.")
         when :unknown then Result.new(action: :reply, text: "I did not understand that. Send /help for commands.")
         else @callback_handlers.handle(intent, update)
         end
@@ -300,7 +363,7 @@ module Hive
 
       def answer_voice(update)
         context = answer_context(update)
-        return Result.new(action: :reply, text: "Send /answer <slug> before sending a voice answer.") unless context
+        return Result.new(action: :reply, text: "Send /answer <id|slug> before sending a voice answer.") unless context
 
         result = @slash_handlers.voice(update)
         return result unless result.action == :transcribe_voice
@@ -311,6 +374,30 @@ module Hive
         result.mode = context[:mode] || :path_b
         result.attachment = result.attachment.merge(purpose: :answer)
         result
+      end
+
+      def unauthorized_pairing(update)
+        code = @pairing_store.mint_or_get(chat_id: update.chat_id)
+        # Mark the pairing reply as sent only once we have actually produced
+        # it — this is the once-per-chat pairing-reply latch `classify` reads
+        # (distinct from the unauthorized-log throttle above).
+        @pairing_reply_sent[update.chat_id] = @now.call
+        @logger.event(:pairing_code_issued, chat_id: update.chat_id)
+        Result.new(action: :reply, text: pairing_reply_text(chat_id: update.chat_id, code: code))
+      end
+
+      def pairing_reply_text(chat_id:, code:)
+        "hive: access not configured. Your Telegram user id: #{chat_id}. " \
+          "Pairing code: #{code}. Ask the owner to approve with: " \
+          "hive pairing approve telegram #{code}"
+      end
+
+      def pairing_enabled?
+        @bot_config.fetch("pairing_enabled", false)
+      end
+
+      def start_command?(text)
+        text.to_s.strip.match?(%r{\A/start\b})
       end
     end
   end

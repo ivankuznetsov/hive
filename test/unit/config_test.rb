@@ -18,7 +18,115 @@ class ConfigTest < Minitest::Test
       assert_equal 3600, cfg["timeout_sec"]["patrol"]
       assert_equal 50, cfg["budget_usd"]["digest"]
       assert_equal 1800, cfg["timeout_sec"]["digest"]
+      assert_equal "8-finalize", cfg["dependency_gate_stage"]
+      assert_equal "coding", cfg["default_workflow"]
+      assert_equal true, cfg.dig("daemon", "auto_retry", "enabled")
+      assert_nil cfg.dig("review", "adhoc", "reviewers")
+      assert_equal false, cfg.dig("review", "adhoc", "fix")
       assert_equal dir, cfg["project_root"]
+    end
+  end
+
+  def test_load_allows_daemon_auto_retry_enabled_override
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        daemon:
+          auto_retry:
+            enabled: false
+      YAML
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal false, cfg.dig("daemon", "auto_retry", "enabled")
+      assert_equal 30, cfg.dig("daemon", "poll_interval_sec"),
+                   "nested daemon auto_retry override must deep-merge without dropping siblings"
+    end
+  end
+
+  def test_load_rejects_non_hash_daemon_auto_retry
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        daemon:
+          auto_retry: nope
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+      assert_includes err.message, "daemon.auto_retry"
+      assert_includes err.message, "must be a hash"
+    end
+  end
+
+  def test_load_rejects_non_boolean_daemon_auto_retry_enabled
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        daemon:
+          auto_retry:
+            enabled: sometimes
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+      assert_includes err.message, "daemon.auto_retry.enabled"
+      assert_includes err.message, "must be a boolean"
+    end
+  end
+
+  def test_load_accepts_default_workflow_override
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        default_workflow: research
+      YAML
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal "research", cfg["default_workflow"]
+    end
+  end
+
+  def test_load_keeps_default_workflow_when_other_keys_override
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        dependency_gate_stage: 9-done
+      YAML
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal "coding", cfg["default_workflow"]
+      assert_equal "9-done", cfg["dependency_gate_stage"]
+    end
+  end
+
+  def test_load_accepts_dependency_gate_stage_done_override
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        dependency_gate_stage: 9-done
+      YAML
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal "9-done", cfg["dependency_gate_stage"]
+    end
+  end
+
+  def test_load_rejects_invalid_dependency_gate_stage
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        dependency_gate_stage: 7-artifacts
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+      assert_includes err.message, "dependency_gate_stage"
+      assert_includes err.message, "8-finalize"
+      assert_includes err.message, "9-done"
     end
   end
 
@@ -430,6 +538,185 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_permission_spec_defaults_to_yolo
+    with_tmp_dir do |dir|
+      cfg = Hive::Config.load(dir)
+
+      assert_equal "yolo", cfg["permissions"]
+      assert_equal "yolo", Hive::Config.permission_spec(cfg, "plan")
+      assert_equal "yolo", Hive::Config.permission_spec(cfg, "review.triage")
+    end
+  end
+
+  def test_permission_spec_uses_project_default_when_stage_is_silent
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        permissions: read-only
+      YAML
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal "read-only", Hive::Config.permission_spec(cfg, "plan")
+      assert_equal "read-only", Hive::Config.permission_spec(cfg, "execute")
+      assert_equal "read-only", Hive::Config.permission_spec(cfg, "review.fix")
+    end
+  end
+
+  def test_stage_permission_spec_fully_replaces_project_default
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        permissions:
+          preset: scoped
+          tools: [Read]
+          dirs:
+            - shared
+        execute:
+          permissions:
+            preset: scoped
+            tools: [Read, Write]
+      YAML
+
+      cfg = Hive::Config.load(dir)
+
+      execute_permissions = Hive::Config.permission_spec(cfg, "execute")
+      assert_equal({ "preset" => "scoped", "tools" => [ "Read", "Write" ] }, execute_permissions)
+      refute execute_permissions.key?("dirs"), "stage override must not inherit dirs from project default"
+      assert_equal [ "shared" ], Hive::Config.permission_spec(cfg, "plan")["dirs"]
+    end
+  end
+
+  def test_nested_review_permission_spec_is_read_by_dot_stage_name
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        permissions: yolo
+        review:
+          triage:
+            permissions: read-only
+      YAML
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal "read-only", Hive::Config.permission_spec(cfg, "review.triage")
+      assert_equal "yolo", Hive::Config.permission_spec(cfg, "review.fix")
+    end
+  end
+
+  def test_review_level_permissions_key_is_rejected_at_load
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          permissions: read-only
+      YAML
+
+      # A bare `review.permissions` is never resolved (only review.<role>
+      # and per-reviewer entries are), so honoring it silently would be a
+      # fail-open downgrade. Load must reject it loudly.
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/review\.permissions/, error.message)
+      assert_match(/not a supported/, error.message)
+      assert_match(/review\.\{ci,triage,fix,browser_test\}/, error.message)
+    end
+  end
+
+  def test_per_role_review_permissions_still_load_when_review_has_no_bare_key
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          ci:
+            permissions: read-only
+          triage:
+            permissions:
+              preset: scoped
+              tools: [Read, Write, Edit]
+      YAML
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal "read-only", Hive::Config.permission_spec(cfg, "review.ci")
+      assert_equal({ "preset" => "scoped", "tools" => %w[Read Write Edit] },
+                   Hive::Config.permission_spec(cfg, "review.triage"))
+    end
+  end
+
+  def test_permission_config_errors_fail_closed_at_load
+    cases = [
+      [ "permissions: reckless\n", /unknown preset "reckless"/ ],
+      [ "plan:\n  permissions:\n    tools: [Read]\n", /map must include preset/ ],
+      [ "execute:\n  permissions:\n    preset: scoped\n    tools: [Read, Bash]\n    bash: true\n", /express Bash via tools/ ],
+      [ "review:\n  triage:\n    permissions:\n      preset: scoped\n", /scoped requires tools: or bash:/ ],
+      # Mirror the resolver table's malformed shapes at the operator-facing
+      # load path: an unknown key for the preset, and a non-string/non-map
+      # scalar spec.
+      [ "plan:\n  permissions:\n    preset: read-only\n    dirs: [tmp]\n", /unknown key/ ],
+      [ "permissions: 42\n", /must be a preset string or a map/ ]
+    ]
+
+    cases.each do |yaml, pattern|
+      with_tmp_dir do |dir|
+        FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+        File.write(File.join(dir, ".hive-state", "config.yml"), yaml)
+
+        error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+        assert_match(/permissions/, error.message)
+        assert_match(pattern, error.message)
+      end
+    end
+  end
+
+  # Fail-closed: a present-but-blank `permissions:` (YAML key with no value →
+  # nil) must hard-error at load, NOT silently resolve to yolo. permission_at
+  # returns the literal nil (not the MISSING_PERMISSION sentinel), so the
+  # value is the operator's explicit-but-empty scope, which we reject.
+  def test_blank_stage_permissions_fails_closed_at_load
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        execute:
+          permissions:
+      YAML
+
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/present but blank/, error.message)
+      assert_match(/yolo/, error.message)
+    end
+  end
+
+  def test_blank_project_level_permissions_fails_closed_at_load
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        permissions:
+      YAML
+
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/present but blank/, error.message)
+      assert_match(/yolo/, error.message)
+    end
+  end
+
+  # Guard against over-correcting: a fully-ABSENT permissions key must still
+  # default to yolo with NO error. Only a present-but-blank key fails closed.
+  def test_absent_permissions_still_defaults_to_yolo_without_error
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        max_passes: 4
+      YAML
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal "yolo", cfg["permissions"]
+      assert_equal "yolo", Hive::Config.permission_spec(cfg, "plan")
+      assert_equal "yolo", Hive::Config.permission_spec(cfg, "execute")
+      assert_equal "yolo", Hive::Config.permission_spec(cfg, "review.triage")
+    end
+  end
+
   def test_load_raises_when_claude_permission_mode_is_unknown
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))
@@ -749,6 +1036,105 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_project_for_path_resolves_registered_repo_from_cwd
+    with_tmp_global_config do
+      with_tmp_dir do |repo|
+        FileUtils.mkdir_p(File.join(repo, ".hive-state"))
+        Hive::Config.register_project(name: "repo", path: repo)
+
+        project = Hive::Config.project_for_path(repo)
+
+        assert_equal "repo", project["name"]
+        assert_equal File.expand_path(repo), project["path"]
+      end
+    end
+  end
+
+  def test_project_for_path_resolves_nested_subdirectory
+    with_tmp_global_config do
+      with_tmp_dir do |repo|
+        nested = File.join(repo, "lib", "hive")
+        FileUtils.mkdir_p([ File.join(repo, ".hive-state"), nested ])
+        Hive::Config.register_project(name: "repo", path: repo)
+
+        project = Hive::Config.project_for_path(nested)
+
+        assert_equal "repo", project["name"]
+      end
+    end
+  end
+
+  def test_project_for_path_uses_most_specific_registered_prefix
+    with_tmp_global_config do
+      with_tmp_dir do |parent|
+        child = File.join(parent, "child")
+        FileUtils.mkdir_p([ File.join(parent, ".hive-state"), File.join(child, ".hive-state") ])
+        Hive::Config.register_project(name: "parent", path: parent)
+        Hive::Config.register_project(name: "child", path: child)
+
+        project = Hive::Config.project_for_path(File.join(child, "subdir"))
+
+        assert_equal "child", project["name"]
+      end
+    end
+  end
+
+  def test_registered_project_resolves_by_project_name_override
+    with_tmp_global_config do
+      with_tmp_dir do |repo|
+        FileUtils.mkdir_p(File.join(repo, ".hive-state"))
+        Hive::Config.register_project(name: "repo", path: repo)
+
+        project = Hive::Config.registered_project!(name: "repo", cwd: "/tmp/not-inside")
+
+        assert_equal "repo", project["name"]
+      end
+    end
+  end
+
+  def test_registered_project_rejects_unknown_project_name
+    with_tmp_global_config do
+      err = assert_raises(Hive::ConfigError) do
+        Hive::Config.registered_project!(name: "missing", cwd: "/tmp/not-inside")
+      end
+
+      assert_includes err.message, "not a hive-invited repo"
+      assert_includes err.message, "hive init"
+    end
+  end
+
+  def test_registered_project_rejects_cwd_outside_registered_repos
+    with_tmp_global_config do
+      with_tmp_dir do |outside|
+        err = assert_raises(Hive::ConfigError) do
+          Hive::Config.registered_project!(cwd: outside)
+        end
+
+        assert_includes err.message, "not a hive-invited repo"
+        assert_includes err.message, "--project NAME"
+      end
+    end
+  end
+
+  def test_registered_project_rejects_missing_hive_state_directory
+    with_tmp_global_config do
+      with_tmp_dir do |repo|
+        Hive::Config.register_project(name: "repo", path: repo)
+
+        err = assert_raises(Hive::ConfigError) do
+          Hive::Config.registered_project!(cwd: repo)
+        end
+
+        # Distinct from the not-invited message: the project is registered but
+        # its hive state directory is gone.
+        assert_includes err.message, "registered but its hive state directory"
+        assert_includes err.message, "is missing"
+        assert_includes err.message, "hive init"
+        refute_includes err.message, "not a hive-invited repo"
+      end
+    end
+  end
+
   def test_register_project_replaces_existing_by_name
     with_tmp_global_config do
       Hive::Config.register_project(name: "foo", path: "/tmp/old")
@@ -930,6 +1316,30 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_review_adhoc_reviewers_accepts_reviewer_entries
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          adhoc:
+            fix: true
+            reviewers:
+              - name: adhoc-one
+                kind: agent
+                agent: claude
+                skill: ce-code-review
+                output_basename: adhoc-one
+                prompt_template: reviewer_claude_ce_code_review.md.erb
+                permissions: yolo
+      YAML
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal true, cfg.dig("review", "adhoc", "fix")
+      assert_equal [ "adhoc-one" ], cfg.dig("review", "adhoc", "reviewers").map { |entry| entry.fetch("name") }
+    end
+  end
+
   # --- Validation --------------------------------------------------------
 
   def test_load_raises_when_reviewers_is_not_an_array
@@ -957,6 +1367,70 @@ class ConfigTest < Minitest::Test
 
       err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
       assert_match(/review\.reviewers\[0\].*must be a Hash/, err.message)
+    end
+  end
+
+  def test_load_raises_when_review_adhoc_is_not_a_hash
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          adhoc: false
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+      assert_match(/review\.adhoc/, err.message)
+      assert_match(/must be a Hash/, err.message)
+    end
+  end
+
+  def test_load_raises_when_review_adhoc_reviewers_is_not_array_or_nil
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          adhoc:
+            reviewers:
+              name: not-array
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+      assert_match(/review\.adhoc\.reviewers/, err.message)
+      assert_match(/must be an Array/, err.message)
+    end
+  end
+
+  def test_load_raises_when_review_adhoc_fix_is_not_boolean
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          adhoc:
+            fix: yes-please
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+      assert_match(/review\.adhoc\.fix/, err.message)
+      assert_match(/must be a boolean/, err.message)
+    end
+  end
+
+  def test_load_rejects_review_adhoc_permissions_block
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          adhoc:
+            permissions: yolo
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+      assert_match(/review\.adhoc\.permissions/, err.message)
+      assert_match(/review\.adhoc\.reviewers/, err.message)
     end
   end
 
@@ -1628,6 +2102,46 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_load_raises_when_review_triage_max_attempts_is_zero
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          triage:
+            max_attempts: 0
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/review\.triage\.max_attempts/, err.message)
+      assert_match(/positive integer/, err.message)
+    end
+  end
+
+  def test_load_raises_when_review_triage_max_attempts_is_negative
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          triage:
+            max_attempts: -1
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/review\.triage\.max_attempts/, err.message)
+    end
+  end
+
+  def test_load_raises_when_review_triage_max_attempts_is_non_integer
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        review:
+          triage:
+            max_attempts: 1.5
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/review\.triage\.max_attempts/, err.message)
+    end
+  end
+
   def test_load_raises_when_review_browser_test_max_attempts_is_zero
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))
@@ -1695,7 +2209,7 @@ class ConfigTest < Minitest::Test
       assert_equal "courageous", cfg.dig("review", "triage", "bias")
       assert_equal false,     cfg.dig("review", "browser_test", "enabled")
       assert_equal 2,         cfg.dig("review", "max_passes")
-      assert_equal 14_400,    cfg.dig("review", "max_wall_clock_sec")
+      assert_equal 28_800,    cfg.dig("review", "max_wall_clock_sec")
       assert_equal "claude",  cfg.dig("agents", "claude", "bin")
       assert_equal "codex",   cfg.dig("agents", "codex", "bin")
       assert_equal "pi",      cfg.dig("agents", "pi", "bin")
@@ -2322,10 +2836,11 @@ class ConfigTest < Minitest::Test
       # R-02 per-child timeout knobs.
       assert_equal 0,     cfg.dig("daemon", "child_timeout_sec")
       assert_equal 30,    cfg.dig("daemon", "child_kill_grace_sec")
-      # The digest verb ships a non-zero default cap so a wedged digest child
-      # can't pin the single global digest slot forever; every other verb
-      # stays at the (disabled) child_timeout_sec default.
-      assert_equal({ "digest" => 3600 }, cfg.dig("daemon", "child_verb_timeouts"))
+      # The digest and answer-digest verbs ship a non-zero default cap so a
+      # wedged child can't pin the single global digest slot forever; every
+      # other verb stays at the (disabled) child_timeout_sec default.
+      assert_equal({ "digest" => 3600, "answer-digest" => 3600 },
+                   cfg.dig("daemon", "child_verb_timeouts"))
     end
   end
 
@@ -2672,6 +3187,103 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_load_global_screenote_honors_base_url_config_and_env_override
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        screenote:
+          base_url: https://screenote.example
+      YAML
+
+      with_env("HIVE_SCREENOTE_BASE_URL" => "https://screenote.env") do
+        cfg = Hive::Config.load_global_screenote
+
+        assert_equal "https://screenote.env", cfg["base_url"]
+        refute cfg.key?("api_token")
+      end
+    end
+  end
+
+  def test_load_global_screenote_defaults_to_screenote_ai
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), { "registered_projects" => [] }.to_yaml)
+      cfg = Hive::Config.load_global_screenote
+
+      assert_equal "https://screenote.ai", cfg["base_url"]
+      refute cfg.key?("api_token")
+    end
+  end
+
+  def test_load_global_screenote_validates_shape_and_url
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        screenote:
+          base_url: ftp://screenote.example
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_screenote }
+      assert_match(/screenote\.base_url.*http\(s\) URL/, err.message)
+
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        screenote: enabled
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_screenote }
+      assert_match(/screenote.*must be a Hash/, err.message)
+
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        screenote:
+          api_token: old-secret
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_screenote }
+      assert_match(/remove `screenote\.api_token`/, err.message)
+      assert_match(/hive connect screenote/, err.message)
+    end
+  end
+
+  def test_load_global_screenote_tolerates_blank_or_null_api_token_leftover
+    # A bare `api_token:` (null) or empty string is inert config the old
+    # config.example.yml shipped, so it must NOT fail. The catch-22 (the
+    # prescribed `hive connect screenote` loads this same validation) is lifted
+    # ONLY for these blank leftovers: a non-blank token still raises, so a
+    # genuine leftover token keeps bricking bare connect until the key is
+    # removed — that intended hard failure is covered by the sibling
+    # rejects-non-blank test above.
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        screenote:
+          base_url: https://screenote.example
+          api_token: null
+      YAML
+
+      cfg = Hive::Config.load_global_screenote
+      assert_equal "https://screenote.example", cfg["base_url"]
+
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        screenote:
+          api_token: ""
+      YAML
+      assert Hive::Config.load_global_screenote
+    end
+  end
+
+  def test_project_config_with_screenote_api_token_gets_migration_error
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        screenote:
+          api_token: old-secret
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/remove `screenote\.api_token`/, err.message)
+      assert_match(/hive connect screenote/, err.message)
+    end
+  end
+
   # ── Daily digest global settings ─────────────────────────────────────
 
   def test_load_returns_documented_digest_defaults_when_key_absent
@@ -2681,7 +3293,63 @@ class ConfigTest < Minitest::Test
       assert_equal false, cfg.dig("digest", "enabled")
       assert_nil cfg.dig("digest", "agent")
       assert_equal 7, cfg.dig("digest", "max_catchup_days")
-      assert_nil cfg.dig("bot", "digest_chat_id")
+      assert_equal false, cfg.dig("answer_digest", "enabled")
+      assert_equal 9, cfg.dig("answer_digest", "hour")
+    end
+  end
+
+  def test_load_global_answer_digest_block_honors_overrides
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        answer_digest:
+          enabled: true
+          hour: 11
+      YAML
+
+      cfg = Hive::Config.load_global_answer_digest_block
+
+      assert_equal true, cfg["enabled"]
+      assert_equal 11, cfg["hour"]
+    end
+  end
+
+  def test_load_global_answer_digest_block_rejects_bad_shapes_and_values
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        answer_digest: enabled
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_answer_digest_block }
+      assert_match(/answer_digest.*must be a Hash/, err.message)
+
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        answer_digest:
+          enabled: sometimes
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_answer_digest_block }
+      assert_match(/answer_digest\.enabled.*must be a boolean/, err.message)
+
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        answer_digest:
+          hour: 24
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_answer_digest_block }
+      assert_match(/answer_digest\.hour.*between 0 and 23/, err.message)
+
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        answer_digest:
+          hour: -1
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_answer_digest_block }
+      assert_match(/answer_digest\.hour.*between 0 and 23/, err.message)
     end
   end
 
@@ -2700,6 +3368,72 @@ class ConfigTest < Minitest::Test
       assert_equal true, cfg["enabled"]
       assert_equal "codex", cfg["agent"]
       assert_equal 3, cfg["max_catchup_days"]
+    end
+  end
+
+  def test_load_global_digest_block_defaults_enabled_on_when_bot_configured
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        bot:
+          enabled: true
+          chat_id_allowlist:
+            - 60499527
+      YAML
+
+      cfg = Hive::Config.load_global_digest_block
+
+      assert_equal true, cfg["enabled"],
+                   "digest should auto-enable when the Telegram bot is configured with a chat"
+    end
+  end
+
+  def test_load_global_digest_block_honors_explicit_disable_even_with_bot
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        digest:
+          enabled: false
+        bot:
+          enabled: true
+          chat_id_allowlist:
+            - 60499527
+      YAML
+
+      cfg = Hive::Config.load_global_digest_block
+
+      assert_equal false, cfg["enabled"],
+                   "an explicit digest.enabled: false must always be honored as an opt-out"
+    end
+  end
+
+  def test_load_global_digest_block_stays_off_without_a_deliverable_bot
+    with_tmp_global_config do |home|
+      # Bot enabled but no chat to deliver to: auto-enabling would only
+      # dispatch a paid categorizer that then fails at send time.
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        bot:
+          enabled: true
+          chat_id_allowlist: []
+      YAML
+
+      assert_equal false, Hive::Config.load_global_digest_block["enabled"],
+                   "no allowlisted chat means no deliverable digest, so stay off"
+    end
+
+    with_tmp_global_config do |home|
+      # Chat present but bot disabled: the user has not turned Telegram on.
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        bot:
+          enabled: false
+          chat_id_allowlist:
+            - 60499527
+      YAML
+
+      assert_equal false, Hive::Config.load_global_digest_block["enabled"],
+                   "a disabled bot means Telegram is not set up, so stay off"
     end
   end
 
@@ -2758,7 +3492,8 @@ class ConfigTest < Minitest::Test
         timeout_sec:
           digest: 34
         bot:
-          digest_chat_id: 12345
+          chat_id_allowlist:
+            - 12345
       YAML
 
       cfg = Hive::Config.load_global_digest_config
@@ -2766,7 +3501,7 @@ class ConfigTest < Minitest::Test
       assert_equal true, cfg.dig("digest", "enabled")
       assert_equal 12, cfg.dig("budget_usd", "digest")
       assert_equal 34, cfg.dig("timeout_sec", "digest")
-      assert_equal 12_345, cfg.dig("bot", "digest_chat_id")
+      assert_equal [ 12_345 ], cfg.dig("bot", "chat_id_allowlist")
       assert_equal File.join(home, "logs", "bot.log"), cfg.dig("bot", "log_file")
     end
   end
@@ -2810,6 +3545,7 @@ class ConfigTest < Minitest::Test
       cfg = Hive::Config.load(dir)
 
       assert_equal false, cfg.dig("bot", "enabled")
+      assert_equal false, cfg.dig("bot", "pairing_enabled")
       assert_equal [], cfg.dig("bot", "chat_id_allowlist")
       assert_equal 30, cfg.dig("bot", "poll_interval_sec")
       assert_equal 25, cfg.dig("bot", "long_poll_timeout_sec")
@@ -2852,6 +3588,19 @@ class ConfigTest < Minitest::Test
 
       err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_bot }
       assert_match(/bot\.enabled.*must be a boolean/, err.message)
+    end
+  end
+
+  def test_load_global_bot_rejects_non_boolean_pairing_enabled
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        bot:
+          pairing_enabled: sometimes
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_bot }
+      assert_match(/bot\.pairing_enabled.*must be a boolean/, err.message)
     end
   end
 
@@ -2928,19 +3677,6 @@ class ConfigTest < Minitest::Test
 
       err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_bot }
       assert_match(/bot.chat_id_allowlist\[0\].*Integer/, err.message)
-    end
-  end
-
-  def test_load_global_bot_rejects_string_digest_chat_id
-    with_tmp_global_config do |home|
-      File.write(File.join(home, "config.yml"), <<~YAML)
-        registered_projects: []
-        bot:
-          digest_chat_id: "12345"
-      YAML
-
-      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_bot }
-      assert_match(/bot\.digest_chat_id.*Integer/, err.message)
     end
   end
 
@@ -3133,6 +3869,69 @@ class ConfigTest < Minitest::Test
 
       err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_bot(require_runtime: true) }
       assert_match(/bot.chat_id_allowlist.*at least one chat_id/, err.message)
+    ensure
+      if old
+        ENV["HIVE_TELEGRAM_BOT_TOKEN"] = old
+      else
+        ENV.delete("HIVE_TELEGRAM_BOT_TOKEN")
+      end
+    end
+  end
+
+  def test_load_global_bot_runtime_allows_empty_allowlist_when_pairing_enabled
+    with_tmp_global_config do |home|
+      old = ENV["HIVE_TELEGRAM_BOT_TOKEN"]
+      ENV["HIVE_TELEGRAM_BOT_TOKEN"] = "token"
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        bot:
+          pairing_enabled: true
+          chat_id_allowlist: []
+      YAML
+
+      cfg = Hive::Config.load_global_bot(require_runtime: true)
+
+      assert_equal true, cfg["pairing_enabled"]
+      assert_equal [], cfg["chat_id_allowlist"]
+    ensure
+      if old
+        ENV["HIVE_TELEGRAM_BOT_TOKEN"] = old
+      else
+        ENV.delete("HIVE_TELEGRAM_BOT_TOKEN")
+      end
+    end
+  end
+
+  def test_load_global_bot_runtime_pairing_still_requires_token
+    with_tmp_global_config do |home|
+      old = ENV.delete("HIVE_TELEGRAM_BOT_TOKEN")
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        bot:
+          pairing_enabled: true
+          chat_id_allowlist: []
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_bot(require_runtime: true) }
+      assert_match(/HIVE_TELEGRAM_BOT_TOKEN/, err.message)
+    ensure
+      ENV["HIVE_TELEGRAM_BOT_TOKEN"] = old if old
+    end
+  end
+
+  def test_load_global_bot_runtime_pairing_still_requires_integer_allowlist_entries
+    with_tmp_global_config do |home|
+      old = ENV["HIVE_TELEGRAM_BOT_TOKEN"]
+      ENV["HIVE_TELEGRAM_BOT_TOKEN"] = "token"
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        bot:
+          pairing_enabled: true
+          chat_id_allowlist: ["12345"]
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_bot(require_runtime: true) }
+      assert_match(/bot.chat_id_allowlist\[0\].*Integer/, err.message)
     ensure
       if old
         ENV["HIVE_TELEGRAM_BOT_TOKEN"] = old

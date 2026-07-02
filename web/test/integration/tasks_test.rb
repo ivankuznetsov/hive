@@ -1,6 +1,10 @@
 require "test_helper"
+require "tmpdir"
+require_relative "../../../test/support/workflow_helpers"
 
 class TasksTest < ActionDispatch::IntegrationTest
+  include HiveWorkflowTestHelper
+
   setup do
     @project = create_hive_project!
     @slug = create_task!(@project, "actions probe")
@@ -63,6 +67,25 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert css_select("details[data-artifact-name='artifact.md']").first["open"],
            "the leading artifact must render expanded"
     assert_includes names, "idea.md", "the chronological story still follows"
+  end
+
+  test "a non-coding workflow renders its own stage artifacts, derived from the descriptor" do
+    with_registered_workflow(content_workflow) do
+      project = create_hive_project!("content-app")
+      slug = "content-piece-260620-aaaa"
+      folder = stage_dir(project, "2-research").join(slug)
+      folder.mkpath
+      folder.join("idea.md").write("---\ncreated_at: 2026-06-20\n---\nWrite about hive\n")
+      folder.join("research.md").write("# Research\n\nFindings here.\n")
+      Hive::TaskMeta.write(folder.to_s, id: 1, slug: slug, display_name: nil, workflow: "content_fixture")
+
+      get "/tasks/#{project}/#{slug}"
+      assert_response :success
+      names = css_select("details[data-artifact-name]").map { |d| d["data-artifact-name"] }
+      assert_includes names, "research.md",
+                      "a non-coding stage artifact (research.md) must render — ARTIFACT_ORDER never lists it"
+      assert_equal "idea.md", names.first, "content workflow still reads idea-first"
+    end
   end
 
   test "earlier stages keep the chronological order, idea first" do
@@ -129,11 +152,203 @@ class TasksTest < ActionDispatch::IntegrationTest
                     "the standalone marker line must be stripped"
   end
 
+  test "media route streams committed stills and gifs inline" do
+    folder = stage_dir(@project, "1-inbox").join(@slug)
+    media_fixture!(folder)
+
+    get "/tasks/#{@project}/#{@slug}/media/01-home.png"
+    assert_response :success
+    assert_equal "image/png", response.media_type
+    assert_equal png_bytes, response.body.b
+
+    get "/tasks/#{@project}/#{@slug}/media/demo.gif"
+    assert_response :success
+    assert_equal "image/gif", response.media_type
+    assert_equal gif_bytes, response.body.b
+  end
+
+  test "media route streams committed jpeg stills inline" do
+    folder = stage_dir(@project, "1-inbox").join(@slug)
+    media_dir = folder.join("media")
+    media_dir.mkpath
+    File.binwrite(media_dir.join("02-state.jpg"), jpg_bytes)
+
+    get "/tasks/#{@project}/#{@slug}/media/02-state.jpg"
+    assert_response :success
+    assert_equal "image/jpeg", response.media_type
+    assert_equal jpg_bytes, response.body.b
+  end
+
+  test "media responses are privately cached, never shared-proxy cacheable" do
+    folder = stage_dir(@project, "1-inbox").join(@slug)
+    media_fixture!(folder)
+
+    get "/tasks/#{@project}/#{@slug}/media/01-home.png"
+    assert_response :success
+    cache_control = response.headers["Cache-Control"].to_s
+    assert_includes cache_control, "max-age=60", "the media response must carry the 60s freshness window"
+    assert_includes cache_control, "private",
+                    "a user's task screenshots must not be cacheable by a shared proxy"
+    refute_includes cache_control, "public",
+                    "a regression to public:true would leak authenticated screenshots into shared caches"
+  end
+
+  test "a manifest with an unknown schema version hides the demo section" do
+    folder = stage_dir(@project, "1-inbox").join(@slug)
+    media_fixture!(folder)
+    # Bump the on-disk manifest to a future schema the reader must not render.
+    manifest = JSON.parse(folder.join("media", "manifest.json").read)
+    manifest["schema"] = 2
+    folder.join("media", "manifest.json").write("#{JSON.pretty_generate(manifest)}\n")
+
+    get "/tasks/#{@project}/#{@slug}"
+    assert_response :success
+    assert_select "section.demo", count: 0,
+                  message: "a future-schema manifest must be ignored, not rendered as garbage v1 items"
+  end
+
+  test "media route refuses traversal disallowed extensions and missing files" do
+    folder = stage_dir(@project, "1-inbox").join(@slug)
+    media_fixture!(folder)
+    folder.join("media", "secret.rb").write("puts :nope")
+
+    get "/tasks/#{@project}/#{@slug}/media/..%2f..%2fconfig.yml"
+    assert_response :not_found
+
+    get "/tasks/#{@project}/#{@slug}/media/secret.rb"
+    assert_response :not_found
+
+    get "/tasks/#{@project}/#{@slug}/media/missing.png"
+    assert_response :not_found
+  end
+
+  test "media route refuses a symlinked media directory" do
+    folder = stage_dir(@project, "1-inbox").join(@slug)
+    media_fixture!(folder)
+    outside = Pathname.new(Dir.mktmpdir("hive-media-escape"))
+    File.binwrite(outside.join("01-home.png"), png_bytes)
+    FileUtils.rm_rf(folder.join("media"))
+    File.symlink(outside, folder.join("media"))
+
+    get "/tasks/#{@project}/#{@slug}/media/01-home.png"
+    assert_response :not_found
+  ensure
+    FileUtils.rm_rf(outside) if outside
+  end
+
+  test "media route 404s a valid-shape slug that names no task" do
+    # A slug that satisfies the route constraint but matches no task row hits
+    # the shared task_row! -> InvalidTaskPath -> 404 path, the same handling
+    # every other action gets for an unknown task (plan U3/U5).
+    get "/tasks/#{@project}/ghost-task-260101-zzzz/media/01-home.png"
+    assert_response :not_found
+  end
+
+  test "task page renders captured media gallery and screenote links" do
+    folder = stage_dir(@project, "1-inbox").join(@slug)
+    media_fixture!(folder)
+
+    get "/tasks/#{@project}/#{@slug}"
+
+    assert_response :success
+    assert_select "section.demo h2", text: "Demo", count: 1
+    assert_select "img[src=?][alt=?]", "/tasks/#{@project}/#{@slug}/media/01-home.png", "Home page after load", count: 1
+    assert_select "img[src=?][alt=?]", "/tasks/#{@project}/#{@slug}/media/demo.gif", "Dark mode toggle", count: 1
+    assert_select "figcaption", text: /Home page after load/
+    assert_select "a[href='https://screenote.test/shot']", text: "View / annotate on screenote", count: 1
+  end
+
+  test "task page renders capture failed banner without broken images" do
+    folder = stage_dir(@project, "1-inbox").join(@slug)
+    write_media_manifest(folder, {
+      "schema" => 1,
+      "status" => "failed",
+      "reason" => "dev server did not boot",
+      "surface" => "ui",
+      "items" => []
+    })
+
+    get "/tasks/#{@project}/#{@slug}"
+
+    assert_response :success
+    assert_select ".demo-banner", text: /Demo capture failed/
+    assert_select ".demo-banner", text: /dev server did not boot/
+    assert_select "section.demo img", count: 0
+  end
+
+  test "task page hides demo section for skipped or absent manifest" do
+    folder = stage_dir(@project, "1-inbox").join(@slug)
+    write_media_manifest(folder, {
+      "schema" => 1,
+      "status" => "skipped",
+      "reason" => "no observable surface",
+      "surface" => "none",
+      "items" => []
+    })
+
+    get "/tasks/#{@project}/#{@slug}"
+    assert_response :success
+    assert_select "section.demo", count: 0
+
+    FileUtils.rm_rf(folder.join("media"))
+    get "/tasks/#{@project}/#{@slug}"
+    assert_response :success
+    assert_select "section.demo", count: 0
+    assert_match "idea.md", response.body
+  end
+
+  test "a valid-JSON manifest with a non-object top level does not 500 the page" do
+    folder = stage_dir(@project, "1-inbox").join(@slug)
+    media_dir = folder.join("media")
+    media_dir.mkpath
+
+    [ "[]", "42", "null" ].each do |body|
+      media_dir.join("manifest.json").write(body)
+      get "/tasks/#{@project}/#{@slug}"
+      assert_response :success, "a #{body.inspect} manifest must render the page, not raise"
+      assert_select "section.demo", count: 0
+    end
+  end
+
+  test "a captured manifest with only malformed items renders no empty demo section" do
+    folder = stage_dir(@project, "1-inbox").join(@slug)
+    write_media_manifest(folder, {
+      "schema" => 1,
+      "status" => "captured",
+      "surface" => "ui",
+      "items" => [
+        "not-a-hash",
+        { "file" => "../../etc/passwd.png", "type" => "still", "caption" => "traversal" },
+        { "file" => "missing.png", "type" => "still", "caption" => "no file on disk" }
+      ]
+    })
+
+    get "/tasks/#{@project}/#{@slug}"
+    assert_response :success
+    assert_select "section.demo", count: 0,
+                  message: "all items filtered out → no bare Demo heading"
+  end
+
+  test "a captured manifest with a literal empty items list renders no demo section" do
+    folder = stage_dir(@project, "1-inbox").join(@slug)
+    write_media_manifest(folder, {
+      "schema" => 1,
+      "status" => "captured",
+      "surface" => "ui",
+      "items" => []
+    })
+
+    get "/tasks/#{@project}/#{@slug}"
+    assert_response :success
+    assert_select "section.demo", count: 0,
+                  message: "a captured manifest with no items must not render a bare Demo heading"
+  end
+
   test "a red task offers Retry which queues the clear-then-rerun pair" do
     FileUtils.mv(stage_dir(@project, "1-inbox").join(@slug),
                  stage_dir(@project, "6-review").join(@slug))
     folder = stage_dir(@project, "6-review").join(@slug)
-    folder.join("task.md").write("# t\n\n<!-- REVIEW_ERROR phase=triage reason=triage_failed pass=1 -->\n")
+    folder.join("task.md").write("# t\n\n<!-- REVIEW_ERROR phase=triage reason=merge_conflict pass=1 -->\n")
 
     get "/tasks/#{@project}/#{@slug}"
     assert_response :success
@@ -375,5 +590,52 @@ class TasksTest < ActionDispatch::IntegrationTest
     get "/tasks/#{@project}/#{@slug}/diff"
     assert_response :not_found
     assert_match "no worktree", response.body
+  end
+
+  private
+
+  def media_fixture!(folder)
+    media_dir = folder.join("media")
+    media_dir.mkpath
+    File.binwrite(media_dir.join("01-home.png"), png_bytes)
+    File.binwrite(media_dir.join("demo.gif"), gif_bytes)
+    write_media_manifest(folder, {
+      "schema" => 1,
+      "status" => "captured",
+      "surface" => "ui",
+      "items" => [
+        {
+          "file" => "01-home.png",
+          "type" => "still",
+          "caption" => "Home page after load",
+          "screenote_url" => "https://screenote.test/shot"
+        },
+        {
+          "file" => "demo.gif",
+          "type" => "gif",
+          "caption" => "Dark mode toggle",
+          "screenote_url" => nil,
+          "screenote_skipped_reason" => "Screenote is not connected; run `hive connect screenote`."
+        }
+      ]
+    })
+  end
+
+  def write_media_manifest(folder, manifest)
+    media_dir = folder.join("media")
+    media_dir.mkpath
+    media_dir.join("manifest.json").write("#{JSON.pretty_generate(manifest)}\n")
+  end
+
+  def png_bytes
+    [ 137, 80, 78, 71, 13, 10, 26, 10 ].pack("C*") + "fake-png-body"
+  end
+
+  def jpg_bytes
+    [ 0xFF, 0xD8, 0xFF, 0xE0 ].pack("C*") + "fake-jpg-body"
+  end
+
+  def gif_bytes
+    "GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;".b
   end
 end

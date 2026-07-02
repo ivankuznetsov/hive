@@ -14,16 +14,24 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
                 action_label: "Ready to plan", age: 120,
                 marker: "complete", attrs: {},
                 id: 42, display_name: nil,
+                pr_url: nil,
                 mtime: "2026-05-01T00:00:00Z",
                 folder_mtime: "2026-05-01T00:00:00Z",
+                depends_on: nil, blocked_by: nil, dependency_stage: nil,
+                blocked: false,
                 suggested: "hive plan #{slug} --from 2-brainstorm")
     {
       "slug" => slug,
       "id" => id,
       "display_name" => display_name,
+      "depends_on" => depends_on,
+      "blocked_by" => blocked_by,
+      "dependency_stage" => dependency_stage,
+      "blocked" => blocked,
       "stage" => stage,
       "folder" => "/tmp/#{slug}",
       "state_file" => "/tmp/#{slug}/brainstorm.md",
+      "pr_url" => pr_url,
       "marker" => marker,
       "attrs" => attrs,
       "mtime" => mtime,
@@ -48,6 +56,19 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     Hive::Tui::Model.initial.with(snapshot: snapshot, scope: scope,
                                   pane_focus: pane_focus, cursor: cursor,
                                   filter: filter)
+  end
+
+  # Run the block with `$stdout.tty?` reporting true so the OSC 8 path in
+  # Hyperlink/pr_cell is exercised. Swaps in a tty-reporting StringIO and
+  # restores the original $stdout afterward.
+  def with_tty_stdout
+    original = $stdout
+    io = StringIO.new
+    io.define_singleton_method(:tty?) { true }
+    $stdout = io
+    yield
+  ensure
+    $stdout = original
   end
 
   # ---- Title / scope ----
@@ -105,20 +126,105 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
 
   # ---- Column rendering ----
 
-  def test_renders_5_columns_per_row
+  def test_renders_pr_column_after_id
     snap = make_snapshot([
       { "name" => "hive", "tasks" => [
         make_task(slug: "abc-001", id: 7, display_name: "Readable Task", stage: "3-plan",
-                  action_label: "Needs your input", age: 90)
+                  action_label: "Review plan draft", age: 90,
+                  pr_url: "https://github.com/example/repo/pull/561")
       ] }
     ])
     out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
     assert_includes out, "   7",             "id column must render"
+    assert_match(/\s7\s+#561\s+Readable Task/, out,
+                 "PR number must render between id and display name")
     assert_includes out, "Readable Task",    "display name column must render"
     refute_includes out, "abc-001",          "slug must not render when a display name is present"
     assert_includes out, "3-plan",           "stage column must render"
-    assert_includes out, "Needs your input", "status column must render"
+    assert_includes out, "Review plan draft", "status column must render"
     assert_includes out, "1m",               "age column must render (90s → 1m)"
+  end
+
+  def test_needs_review_decision_fits_status_column_without_truncation
+    label = "Needs review decision"
+    assert_operator Hive::Tui::Views::Format.display_width(label),
+                    :<=,
+                    Hive::Tui::Views::TasksPane::STATUS_WIDTH
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(slug: "review-row", stage: "6-review", action: "needs_input",
+                  action_label: label, marker: "review_waiting",
+                  suggested: "hive review review-row --from 6-review")
+      ] }
+    ])
+
+    out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
+
+    assert_includes out, label
+  end
+
+  def test_renders_dash_pr_column_without_url
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(slug: "abc-001", id: 7, display_name: "Readable Task")
+      ] }
+    ])
+
+    out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
+
+    assert_match(/\s7\s+—\s+Readable Task/, out,
+                 "rows without a PR must keep the fixed PR column with a dash")
+  end
+
+  # Exercises the TTY/OSC 8 `pr_cell` path directly: the TUI render
+  # pipeline routes rows through lipgloss, which rewrites ANSI under a tty,
+  # so the link contract is pinned on pr_cell itself. Assert the BEHAVIOR
+  # (the two rjust spaces stay outside the link, the link wraps the #561
+  # token) by reconstructing the expected link through the same osc8
+  # builder, so a legitimate framing change (e.g. an added `id=`) doesn't
+  # break the test as long as padding stays outside and the token inside.
+  def test_pr_cell_wraps_token_and_keeps_padding_outside_link_under_tty
+    url = "https://github.com/example/repo/pull/561"
+    row = Struct.new(:pr_url).new(url)
+
+    out = with_tty_stdout { Hive::Tui::Views::TasksPane.pr_cell(row, 6) }
+
+    link = Hive::Tui::Views::Hyperlink.osc8("#561", url, enabled: true)
+    assert_equal "  #{link}", out,
+                 "two rjust spaces stay outside the OSC 8 link; the link wraps the #561 token"
+  end
+
+  # Over-width PR pin (plan accepts the >99999 width cap): rjust_cells
+  # truncates "#100000" to the 6-cell column and the OSC 8 link must wrap
+  # the *displayed* (truncated) token instead of being silently dropped —
+  # the bug the pre-fix `cell.sub(/#token\z/)` produced once truncation
+  # changed the suffix. Behavior is pinned via the osc8 builder so the
+  # assertion survives an OSC 8 framing change.
+  def test_pr_cell_wraps_displayed_truncated_token_for_over_width_pr_under_tty
+    url = "https://github.com/example/repo/pull/100000"
+    row = Struct.new(:pr_url).new(url)
+
+    out = with_tty_stdout { Hive::Tui::Views::TasksPane.pr_cell(row, 6) }
+
+    link = Hive::Tui::Views::Hyperlink.osc8("#1000…", url, enabled: true)
+    assert_equal link, out,
+                 "over-width PR must still emit the link, wrapping the truncated #1000… token"
+  end
+
+  # Symmetric negative of the tty pin (and of the status-text path's
+  # refute_match(/\e\]8;;/) guard): a populated pr_url rendered through
+  # pr_cell in a NON-tty must emit zero OSC 8 bytes, so the link is gated on
+  # `$stdout.tty?` and never leaks escape sequences into piped/captured
+  # output. The default test $stdout is non-tty, so pr_cell takes the
+  # disabled branch here without any stubbing.
+  def test_pr_cell_emits_no_osc8_in_non_tty
+    url = "https://github.com/example/repo/pull/561"
+    row = Struct.new(:pr_url).new(url)
+
+    out = Hive::Tui::Views::TasksPane.pr_cell(row, 6)
+
+    refute_match(/\e\]8;;/, out, "non-tty pr_cell must not emit OSC 8 bytes")
+    assert_includes out, "#561", "the plain PR token must still render in non-tty"
   end
 
   def test_name_column_falls_back_to_slug_when_display_name_missing
@@ -129,7 +235,107 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     assert_includes out, "abc-001"
   end
 
-  def test_recover_review_status_shows_marker_reason
+  def test_blocked_row_status_shows_dependency
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(slug: "dependent-task", depends_on: "base-task",
+                  blocked_by: "base-task", dependency_stage: "7-artifacts",
+                  blocked: true)
+      ] }
+    ])
+    out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
+
+    # The dependency block is APPENDED to the action-state label, not a
+    # replacement — so both appear. The fixed-width status column truncates
+    # the tail, so assert the leading, truncation-stable portion here; the
+    # exact composition is pinned by the direct status_label tests below.
+    assert_includes out, "Ready to plan",
+                    "a blocked row must keep its action-state label, not drop it for the block"
+    assert_includes out, "blocked by",
+                    "a blocked row must still surface the dependency block"
+  end
+
+  def test_status_label_appends_dependency_to_action_state
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(slug: "dependent-task", depends_on: "base-task",
+                  blocked_by: "base-task", dependency_stage: "7-artifacts",
+                  blocked: true)
+      ] }
+    ])
+    row = snap.projects.first.rows.first
+
+    assert_equal "Ready to plan ⏸ blocked by base-task (7-artifacts)",
+                 Hive::Tui::Views::TasksPane.status_label(row),
+                 "a blocked row must append the dependency block to its action-state label"
+  end
+
+  # CLAUDE.md test-rule 10: an at-gate dependent (blocked:false, prereq past
+  # the gate) still carries depends_on/blocked_by but must NOT render the
+  # "⏸ blocked by" indicator — status_label keys off `blocked`, not field
+  # presence. Only an absence check catches a regression that keyed the badge
+  # off depends_on/blocked_by presence and labelled a dispatchable task held.
+  def test_status_label_omits_dependency_block_for_unblocked_dependent
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(slug: "unblocked-dependent", depends_on: "base-task",
+                  blocked_by: "base-task", dependency_stage: "8-finalize",
+                  blocked: false)
+      ] }
+    ])
+    row = snap.projects.first.rows.first
+
+    assert_equal "Ready to plan",
+                 Hive::Tui::Views::TasksPane.status_label(row),
+                 "an unblocked dependent must show only its action-state label"
+    refute_includes Hive::Tui::Views::TasksPane.status_label(row), "blocked by",
+                    "an unblocked dependent must NOT render the dependency block"
+  end
+
+  def test_render_omits_dependency_block_for_unblocked_dependent
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(slug: "unblocked-dependent", depends_on: "base-task",
+                  blocked_by: "base-task", dependency_stage: "8-finalize",
+                  blocked: false)
+      ] }
+    ])
+    out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
+
+    refute_includes out, "blocked by",
+                    "a dispatchable (unblocked) dependent must not render the held indicator"
+  end
+
+  # A task can be blocked AND in an error/recover_review state (e.g. a human
+  # manually `hive run`s a frozen dependent). Text mode appends the
+  # dependency block to the error label via compact.join; the TUI must do the
+  # same instead of dropping the error context for only the block.
+  def test_status_label_blocked_error_row_keeps_both_error_and_dependency
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(
+          slug: "blocked-and-errored",
+          stage: "4-execute",
+          action: "error",
+          action_label: "Error",
+          marker: "error",
+          attrs: { "reason" => "exit_code", "exit_code" => "1" },
+          depends_on: "base-task",
+          blocked_by: "base-task",
+          dependency_stage: "7-artifacts",
+          blocked: true,
+          suggested: nil
+        )
+      ] }
+    ])
+    row = snap.projects.first.rows.first
+
+    assert_equal "ERROR exit_code=1 ⏸ blocked by base-task (7-artifacts)",
+                 Hive::Tui::Views::TasksPane.status_label(row),
+                 "a blocked error row must surface BOTH its error state and the dependency block"
+  end
+
+  def test_recover_review_status_shows_classified_marker_reason
     snap = make_snapshot([
       { "name" => "hive", "tasks" => [
         make_task(
@@ -138,15 +344,42 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
           action: "recover_review",
           action_label: "Needs recovery",
           marker: "review_error",
-          attrs: { "phase" => "triage", "reason" => "triage_failed", "pass" => "2" },
+          attrs: { "phase" => "triage", "reason" => "merge_conflict", "pass" => "2" },
           suggested: nil
         )
       ] }
     ])
     out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
-    assert_includes out, "triage_failed",
+    assert_includes out, "merge_conflict",
                     "review recovery rows must show the exact marker reason, not generic status text"
     refute_includes out, "Needs recovery"
+  end
+
+  def test_recover_review_status_shows_quota_hold_label
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(
+          slug: "quota-review",
+          stage: "6-review",
+          action: "recover_review",
+          action_label: "Needs recovery",
+          marker: "review_error",
+          attrs: {
+            "reason" => "limits_reached",
+            "provider" => "codex",
+            "retry_after" => "2026-06-24T23:20:00Z"
+          },
+          suggested: nil
+        )
+      ] }
+    ])
+    row = snap.projects.first.rows.first
+
+    # Assert the renderer output equals the shared contract it delegates to,
+    # so this test verifies the no-divergence invariant rather than re-pinning
+    # the literal (the canonical literal pin lives in agent_limit_test.rb).
+    assert_equal Hive::AgentLimit.held_label(row.attrs),
+                 Hive::Tui::Views::TasksPane.status_label(row)
   end
 
   def test_recover_review_status_falls_back_to_marker_when_reason_missing
@@ -173,8 +406,8 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     # max_passes-hit REVIEW_STALE markers carry `pass=N` but no
     # `reason` attr. Operator needs to see the pass count to
     # understand WHY this row is stuck (cap was reached) without
-    # opening the file. Mirrors the existing `wall_clock` /
-    # `triage_failed` inline-diagnostic pattern.
+    # opening the file. Mirrors the existing `wall_clock` / classified-reason
+    # inline-diagnostic pattern.
     snap = make_snapshot([
       { "name" => "hive", "tasks" => [
         make_task(
@@ -196,7 +429,7 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
 
   def test_recover_review_status_reason_wins_over_pass
     # Regression: when both `reason` and `pass` are present (the
-    # retryable wall_clock / triage_failed shapes), `reason` wins.
+    # retryable wall_clock / classified-reason shapes), `reason` wins.
     # The pass-attr branch must never override the existing reason
     # rendering, or `Enter` routing diverges from status display.
     snap = make_snapshot([
@@ -335,7 +568,7 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
   end
 
   def test_error_status_falls_back_to_reason_when_exit_code_missing
-    # `panic` keeps the status string under the 18-char column width so
+    # `panic` keeps the status string under the fixed status column width so
     # the assertion compares against unrenderered text. Longer reasons
     # are truncated by the layout and a fragile substring assertion
     # would couple this test to STATUS_WIDTH; the renderer guarantee
@@ -356,6 +589,33 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
     assert_includes out, "ERROR panic",
                     "error rows must fall back to the reason attr when no exit_code is set"
+  end
+
+  def test_error_status_shows_quota_hold_label
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(
+          slug: "quota-error",
+          stage: "4-execute",
+          action: "error",
+          action_label: "Error",
+          marker: "error",
+          attrs: {
+            "reason" => "limits_reached",
+            "provider" => "codex",
+            "retry_after" => "2026-06-24T23:20:00Z"
+          },
+          suggested: nil
+        )
+      ] }
+    ])
+    row = snap.projects.first.rows.first
+
+    # Assert against the shared contract the renderer delegates to (the
+    # canonical literal pin lives in agent_limit_test.rb) so a label tweak
+    # is a one-line edit there, and this test stays a divergence guard.
+    assert_equal Hive::AgentLimit.held_label(row.attrs),
+                 Hive::Tui::Views::TasksPane.status_label(row)
   end
 
   def test_error_status_falls_back_to_action_label_when_attrs_blank
@@ -449,21 +709,28 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     # Contrast a wide double-cell emoji (🤖) against an action that
     # falls back to the narrow DEFAULT_ICON ("agent_working" is not in
     # ICONS): if either icon mis-pads to the fixed ICON_WIDTH the id
-    # column shifts, so the offsets must stay equal across both.
+    # column shifts, so the offsets must stay equal across both. Both rows
+    # carry a pr_url so the PR column is populated; the id offset is
+    # located by each row's own id token rather than "first digit", which
+    # the PR number would otherwise make ambiguous.
+    pr_url = "https://github.com/example/repo/pull/561"
     snap = make_snapshot([
       { "name" => "hive", "tasks" => [
-        make_task(slug: "running-task", id: 7, action: "agent_running", action_label: "Agent running"),
-        make_task(slug: "working-task", id: 8, action: "agent_working", action_label: "Agent working")
+        make_task(slug: "running-task", id: 7, action: "agent_running",
+                  action_label: "Agent running", pr_url: pr_url),
+        make_task(slug: "working-task", id: 8, action: "agent_working",
+                  action_label: "Agent working", pr_url: pr_url)
       ] }
     ])
     out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 100)
-    rows = out.lines.grep(/running-task|working-task/)
+    ids = { "running-task" => "7", "working-task" => "8" }
 
-    id_offsets = rows.map do |row|
-      prefix = row.split(/\d/, 2).first
+    id_offsets = out.lines.grep(/running-task|working-task/).map do |row|
+      slug = ids.keys.find { |candidate| row.include?(candidate) }
+      prefix = row.split(ids.fetch(slug), 2).first
       Hive::Tui::Views::Format.display_width(prefix)
     end
-    assert_equal [ 7, 7 ], id_offsets,
+    assert_equal [ 7, 7 ], id_offsets.sort,
                  "wide emoji icons must not shift fixed-width columns"
   end
 
@@ -598,41 +865,45 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
   end
 
   # ---- compute_layout adaptive column dropping ----
-  # The full 6-column layout needs ~53 inner cells (icon=2, id=4,
-  # stage=12, status=18, age=4, separators=5, name_min=8). Below that, columns
+  # The full 7-column layout needs ~83 inner cells (icon=2, id=4,
+  # pr=6, stage=12, status=36, age=4, separators=6, name_min=13). Below that, columns
   # drop in priority order: stage first (mostly redundant with status),
   # then status. These tests pin each branch so a future refactor of
   # the threshold values can't silently regress narrow-terminal
-  # behavior — the BubbleModel composer tests at cols=60/69/70 only
-  # exercise the full-5-column branch via single-pane fallback.
+  # behavior — the BubbleModel composer tests at cols=60/69/70 pin
+  # the single-pane and two-pane boundary composition.
 
   def test_compute_layout_full_columns_at_wide_inner_width
-    layout = Hive::Tui::Views::TasksPane.compute_layout(64)
-    assert_operator layout[:name], :>=, 8
+    layout = Hive::Tui::Views::TasksPane.compute_layout(84)
+    assert_operator layout[:name], :>=, 13
+    assert_equal 6, layout[:pr]
     assert_equal 12, layout[:stage]
-    assert_equal 18, layout[:status]
+    assert_equal 36, layout[:status]
   end
 
   def test_compute_layout_drops_stage_at_medium_narrow_width
-    layout = Hive::Tui::Views::TasksPane.compute_layout(45)
+    layout = Hive::Tui::Views::TasksPane.compute_layout(70)
+    assert_equal 6, layout[:pr], "PR column must never drop"
     assert_equal 0, layout[:stage], "medium-narrow widths must drop the stage column first"
     assert_operator layout[:status], :>, 0, "status survives when stage is dropped"
-    assert_operator layout[:name], :>=, 8
+    assert_operator layout[:name], :>=, 13
   end
 
   def test_compute_layout_drops_stage_and_status_at_very_narrow_width
-    # Even narrower — only icon, id, name, age fit.
-    layout = Hive::Tui::Views::TasksPane.compute_layout(24)
+    # Even narrower — only icon, id, PR, name, age fit.
+    layout = Hive::Tui::Views::TasksPane.compute_layout(35)
+    assert_equal 6, layout[:pr], "PR column must survive the narrowest fitted branch"
     assert_equal 0, layout[:stage]
     assert_equal 0, layout[:status]
-    assert_operator layout[:name], :>=, 8
+    assert_operator layout[:name], :>=, 13
   end
 
   def test_compute_layout_floors_slug_below_extreme_minimum
     # Below the very-narrow threshold: floor at name_min, dropping all
-    # but icon/id/name/age. Visual overflow is acknowledged — but no crash.
+    # but icon/id/PR/name/age. Visual overflow is acknowledged — but no crash.
     layout = Hive::Tui::Views::TasksPane.compute_layout(10)
-    assert_equal 8, layout[:name]
+    assert_equal 13, layout[:name]
+    assert_equal 6, layout[:pr]
     assert_equal 0, layout[:stage]
     assert_equal 0, layout[:status]
   end

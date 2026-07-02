@@ -1,2 +1,19 @@
 ---
 registered_projects: []
+
+# Global daemon defaults. Project enrollment still lives in each
+# project's .hive-state/config.yml; this kill-switch disables daemon
+# auto-clearing of allowlisted recoverable terminal error markers.
+# daemon:
+#   auto_retry:
+#     enabled: true
+
+# Optional hosted screenshot links for 7-artifacts visual demos.
+# Run `hive connect screenote` to authorize uploads. HIVE_SCREENOTE_BASE_URL
+# can override the default service URL for staging/self-hosted deployments.
+screenote:
+  base_url: https://screenote.ai
+
+# Project .hive-state/config.yml files can opt Claude-backed stages into
+# permission presets with `permissions:`. See docs/permissions.md for the
+# yolo/read-only/scoped reference and the tool-level caveat.

@@ -36,11 +36,90 @@ class StatusTest < Minitest::Test
         out, _err = capture_io { Hive::Commands::Status.new.call }
         assert_includes out, project
         assert_includes out, "Ready to brainstorm"
-        assert_includes out, "Needs your input"
+        assert_includes out, "Answer questions"
         assert_includes out, "hive brainstorm"
         assert_includes out, "#1"
         assert_includes out, "#2"
         assert_includes out, "⏸"
+      end
+    end
+  end
+
+  # Headline acceptance for this task (plan-R10 / brainstorm-A8): a 6-review
+  # REVIEW_WAITING row must render in text-mode `hive status` under its own
+  # "Needs review decision" group, NOT collapse into the generic
+  # "Needs your input" label. Mirrors the brainstorm assertion above so the
+  # rendered-text contract is covered for the review case too.
+  def test_text_mode_groups_review_waiting_under_needs_review_decision
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        project = File.basename(dir)
+        slug = "review-decision-260426-aaaa"
+        folder = File.join(dir, ".hive-state", "stages", "6-review", slug)
+        FileUtils.mkdir_p(folder)
+        File.write(File.join(folder, "task.md"), "<!-- REVIEW_WAITING escalations=2 pass=1 -->\n")
+
+        out, _err = capture_io { Hive::Commands::Status.new.call }
+
+        assert_includes out, project
+        assert_includes out, "Needs review decision",
+                         "6-review REVIEW_WAITING must render under the 'Needs review decision' group"
+        assert_includes out, "hive review"
+        refute_includes out, "Needs your input",
+                         "review-stage needs-input must not collapse into the generic 'Needs your input' label"
+      end
+    end
+  end
+
+  # R10 symmetry: a 3-plan WAITING row must render in text-mode `hive status`
+  # under its own "Review plan draft" group, NOT collapse into the generic
+  # "Needs your input" label. Mirrors the brainstorm/review assertions so the
+  # rendered-text contract is covered for the plan case too.
+  def test_text_mode_groups_plan_waiting_under_review_plan_draft
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        project = File.basename(dir)
+        slug = "plan-decision-260426-aaaa"
+        folder = File.join(dir, ".hive-state", "stages", "3-plan", slug)
+        FileUtils.mkdir_p(folder)
+        File.write(File.join(folder, "plan.md"), "## Plan\n<!-- WAITING -->\n")
+
+        out, _err = capture_io { Hive::Commands::Status.new.call }
+
+        assert_includes out, project
+        assert_includes out, "Review plan draft",
+                         "3-plan WAITING must render under the 'Review plan draft' group"
+        assert_includes out, "hive plan"
+        refute_includes out, "Needs your input",
+                         "plan-stage needs-input must not collapse into the generic 'Needs your input' label"
+      end
+    end
+  end
+
+  # R10 symmetry: an 8-finalize WAITING row must render in text-mode
+  # `hive status` under its own "Confirm finalize" group, NOT collapse into the
+  # generic "Needs your input" label. Mirrors the brainstorm/review assertions
+  # so the rendered-text contract is covered for the finalize case too.
+  def test_text_mode_groups_finalize_waiting_under_confirm_finalize
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        project = File.basename(dir)
+        slug = "finalize-decision-260426-aaaa"
+        folder = File.join(dir, ".hive-state", "stages", "8-finalize", slug)
+        FileUtils.mkdir_p(folder)
+        File.write(File.join(folder, "pr.md"), "## PR\n<!-- WAITING -->\n")
+
+        out, _err = capture_io { Hive::Commands::Status.new.call }
+
+        assert_includes out, project
+        assert_includes out, "Confirm finalize",
+                         "8-finalize WAITING must render under the 'Confirm finalize' group"
+        assert_includes out, "hive finalize"
+        refute_includes out, "Needs your input",
+                         "finalize-stage needs-input must not collapse into the generic 'Needs your input' label"
       end
     end
   end
@@ -64,6 +143,52 @@ class StatusTest < Minitest::Test
     end
   end
 
+  def test_status_json_renders_content_fixture_stage_set
+    with_registered_workflow(content_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          capture_io { Hive::Commands::Init.new(dir, workflow: "content_fixture").call }
+          project = File.basename(dir)
+          capture_io { Hive::Commands::New.new(project, "content status").call }
+          slug = File.basename(Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "content-status-*")].first)
+          move_content_task(dir, slug, "1-inbox", "2-research", "research.md", "<!-- COMPLETE -->\n")
+          seed_content_task(dir, "3-draft", "draft-row-260620-abcd", "draft.md", "<!-- COMPLETE -->\n")
+
+          out, = capture_io { Hive::Commands::Status.new(json: true).call }
+          rows = JSON.parse(out).dig("projects", 0, "tasks")
+
+          assert_equal %w[2-research 3-draft], rows.map { |row| row.fetch("stage") }.sort
+          assert(rows.all? { |row| row.fetch("workflow") == "content_fixture" })
+          refute(rows.any? { |row| row.fetch("stage") == "2-brainstorm" || row.fetch("stage") == "5-open-pr" })
+        end
+      end
+    end
+  end
+
+  def test_status_json_renders_mixed_coding_and_content_tasks
+    with_registered_workflow(content_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          capture_io { Hive::Commands::Init.new(dir).call }
+          project = File.basename(dir)
+          capture_io { Hive::Commands::New.new(project, "coding status row").call }
+          capture_io { Hive::Commands::New.new(project, "content status row", workflow: "content_fixture").call }
+
+          out, = capture_io { Hive::Commands::Status.new(json: true).call }
+          rows = JSON.parse(out).dig("projects", 0, "tasks")
+
+          coding = rows.find { |row| row.fetch("slug").start_with?("coding-status-row-") }
+          content = rows.find { |row| row.fetch("slug").start_with?("content-status-row-") }
+          assert_equal "coding", coding.fetch("workflow")
+          assert_equal "ready_to_brainstorm", coding.fetch("action")
+          assert_equal "content_fixture", content.fetch("workflow")
+          assert_equal "ready_to_advance", content.fetch("action")
+          assert_match(/\Ahive approve /, content.fetch("suggested_command"))
+        end
+      end
+    end
+  end
+
   def test_status_json_preserves_subsecond_task_mtimes
     payload = Hive::Commands::Status.new(json: true).send(:task_payload, {
       stage: "2-brainstorm",
@@ -73,6 +198,7 @@ class StatusTest < Minitest::Test
       folder: "/tmp/task",
       state_file: "/tmp/task/brainstorm.md",
       worktree_path: nil,
+      pr_url: nil,
       marker_name: :waiting,
       marker_attrs: {},
       mtime: Time.utc(2026, 6, 14, 18, 31, 27, 899_132),
@@ -81,7 +207,7 @@ class StatusTest < Minitest::Test
       claude_pid_alive: nil,
       live_task_lock: false,
       action_key: "needs_input",
-      action_label: "Needs your input",
+      action_label: "Answer questions",
       suggested_command: "hive brainstorm answered-260614-abcd --from 2-brainstorm",
       next_action: nil,
       diagnostic: nil
@@ -104,8 +230,8 @@ class StatusTest < Minitest::Test
 
         out, = capture_io { Hive::Commands::Status.new.call }
 
-        assert_includes out, "#1 Pretty Row"
-        assert_includes out, "#2 #{File.basename(fallback)}"
+        assert_match(/#1\s+—\s+Pretty Row/, out)
+        assert_match(/#2\s+—\s+#{Regexp.escape(File.basename(fallback))}/, out)
       end
     end
   end
@@ -188,5 +314,19 @@ class StatusTest < Minitest::Test
         refute_match(/"status\.md"/, out, "status --json must not reference status.md")
       end
     end
+  end
+
+  def seed_content_task(dir, stage_dir, slug, state_file, body)
+    folder = File.join(dir, ".hive-state", "stages", stage_dir, slug)
+    Hive::TaskMeta.write(folder, id: nil, slug: slug, display_name: nil, workflow: "content_fixture")
+    File.write(File.join(folder, state_file), body)
+  end
+
+  def move_content_task(dir, slug, from_stage, to_stage, state_file, body)
+    from = File.join(dir, ".hive-state", "stages", from_stage, slug)
+    to = File.join(dir, ".hive-state", "stages", to_stage, slug)
+    FileUtils.mkdir_p(File.dirname(to))
+    FileUtils.mv(from, to)
+    File.write(File.join(to, state_file), body)
   end
 end

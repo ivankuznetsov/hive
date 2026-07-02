@@ -43,7 +43,7 @@
         },
         "chat_id": {
           "type": ["integer", "string", "null"],
-          "description": "The Telegram chat the digest was sent to (the resolved bot.digest_chat_id / first allowlist entry). null on a --dry-run, which resolves no recipient. Optional: older producers omitted it, so consumers must tolerate its absence."
+          "description": "The Telegram chat the digest was sent to (the first bot.chat_id_allowlist entry). null on a --dry-run, which resolves no recipient. Optional: older producers omitted it, so consumers must tolerate its absence."
         },
         "message": {
           "type": ["string", "null"],

@@ -1,5 +1,5 @@
 module Hive
-  VERSION = "0.3.0".freeze
+  VERSION = "0.3.2".freeze
   MIN_CLAUDE_VERSION = "2.1.118".freeze
   # Canonical GitHub org + repo. Referenced by the release probe
   # (UpdateCheck), the brew tap + installer URL (Commands::Update), etc.
@@ -13,7 +13,7 @@ module Hive
     # removed; adding new keys is non-breaking and does NOT require a bump.
     # Single source of truth so the two emit sites can't drift.
     SCHEMA_VERSIONS = {
-      "hive-status" => 3,
+      "hive-status" => 4,
       "hive-init" => 1,
       "hive-status-diagnose" => 2,
       "hive-run" => 2,
@@ -36,15 +36,29 @@ module Hive
       "hive-daemon-queue" => 1,
       "hive-patrol" => 1,
       "hive-patrol-finding" => 1,
+      # Scaffold a blank per-project workflow descriptor (`hive workflow new ID
+      # --json`). The error arm routes through Hive::Schemas::ErrorEnvelope so
+      # its output carries the same schema/schema_version/error_kind keys as
+      # every other agent-callable command's error envelope; the success arm
+      # builds its hash directly.
+      "hive-workflow-new" => 1,
       # Global daily shipped digest (`hive digest --json`). The success
       # envelope carries the delivery outcome (status/date/message); hard
       # failures use stderr + exit code, and the Thor-usage error path
       # emits the shared error envelope (see JSON_USAGE_ERROR_CONTRACTS).
       "hive-digest" => 1,
+      # Daily digest of tasks waiting on human input (`hive answer-digest
+      # --json`). The success envelope reports the send outcome plus the full
+      # waiting set (count/tasks); the Thor-usage error path emits the shared
+      # error envelope via JSON_USAGE_ERROR_CONTRACTS, and a bad --date / status
+      # outage emit the in-command error envelope.
+      "hive-answer-digest" => 1,
       "hive-bot-status" => 1,
       "hive-bot-stop" => 1,
       "hive-bot-reload" => 1,
       "hive-bot-install" => 1,
+      "hive-pairing-list" => 1,
+      "hive-pairing-approve" => 1,
       # File-backed dispatch request the bot writes for the daemon to
       # consume. One JSON file per pending request under the state-home
       # `dispatch_requests/` directory. See
@@ -149,6 +163,13 @@ module Hive
       READY_TO_ARTIFACTS  = "ready_to_artifacts".freeze
       READY_TO_FINALIZE   = "ready_to_finalize".freeze
       READY_TO_ARCHIVE    = "ready_to_archive".freeze
+      READY_TO_ADVANCE    = "ready_to_advance".freeze
+      READY_TO_RUN        = "ready_to_run".freeze
+      # A clean ad-hoc PR review that has completed: it stays PARKED at
+      # 6-review rather than advancing to 7-artifacts. Deliberately NOT in
+      # Daemon::Policy::ADVANCE_ACTIONS, so a daemon-enrolled project never
+      # auto-dispatches `hive artifacts` to finalize someone else's PR.
+      REVIEW_PARKED       = "review_parked".freeze
       NEEDS_INPUT         = "needs_input".freeze
       RECOVER_EXECUTE     = "recover_execute".freeze
       RECOVER_REVIEW      = "recover_review".freeze
@@ -219,12 +240,16 @@ module Hive
     #   * `envelope_error_kind(error)` — map an exception to a
     #     closed-enum `error_kind` value
     #
-    # Used by `Hive::Commands::Forget`, `Hive::Commands::Prune`, and
-    # `Hive::Commands::Daemon` (enable/disable). The eight pre-existing
-    # emit sites (Approve, Markers, Metrics, FindingToggle, Status, Run,
-    # Findings, StageAction) have not yet been migrated — see Issue for
-    # the full sweep. This module exists so new emit sites do not add
-    # an 11th copy.
+    # Used by `Hive::Commands::Forget`, `Hive::Commands::Prune`,
+    # `Hive::Commands::Daemon` (enable/disable), and
+    # `Hive::Commands::AdhocReview`. The eight pre-existing emit sites
+    # (Approve, Markers, Metrics, FindingToggle, Status, Run, Findings,
+    # StageAction) have not yet been migrated — see Issue for the full
+    # sweep. This module exists so new emit sites do not add an 11th copy.
+    #
+    # Consumers may also override `envelope_extras` to merge per-command
+    # fields (e.g. `{"verb" => "review"}`) into the envelope; the default is
+    # no extras.
     module EnvelopeEmitter
       def call_with_envelope
         @stdout_written = false
@@ -242,12 +267,26 @@ module Hive
         payload = Hive::Schemas::ErrorEnvelope.build(
           schema: envelope_schema,
           error: error,
-          error_kind: envelope_error_kind(error)
+          error_kind: envelope_error_kind(error),
+          extras: envelope_extras
         )
         puts JSON.generate(payload)
         @stdout_written = true
-      rescue Errno::EPIPE, JSON::GeneratorError
+      rescue Errno::EPIPE
+        # stdout closed; the re-raise still carries the failure to bin/hive
+        # for the exit code + stderr line. Nothing to surface.
         @stdout_written = true
+      rescue JSON::GeneratorError => e
+        # A non-serialisable payload is a bug, not a closed pipe — don't hide
+        # it. The real error still re-raises through call_with_envelope.
+        warn "[hive] #{envelope_schema} error envelope was not serialisable: #{e.class}: #{e.message}"
+        @stdout_written = true
+      end
+
+      # Per-command fields merged into the error envelope. Override to add
+      # e.g. `{"verb" => "review"}`; the default is no extras.
+      def envelope_extras
+        {}
       end
     end
 
@@ -325,6 +364,20 @@ module Hive
       USAGE    = "usage".freeze
       CONFIG   = "config".freeze
       INTERNAL = "internal".freeze
+      ALL = constants(false).reject { |c| c == :ALL }.map { |c| const_get(c) }.freeze
+    end
+
+    # Closed enum of `error_kind` values emitted by `hive workflow new --json`.
+    # `usage` covers a missing/invalid/reserved id and an unknown subcommand
+    # (exit 64). `concurrent_run` is the commit-lock contention case (exit 75,
+    # retryable) — surfaced as JSON now instead of plain stderr. `config`/`git`
+    # are config.yml / commit failures; `error` is the uncategorised fallback.
+    module WorkflowNewErrorKind
+      USAGE          = "usage".freeze
+      CONFIG         = "config".freeze
+      GIT            = "git".freeze
+      CONCURRENT_RUN = "concurrent_run".freeze
+      ERROR          = "error".freeze
       ALL = constants(false).reject { |c| c == :ALL }.map { |c| const_get(c) }.freeze
     end
   end
@@ -622,4 +675,7 @@ module Hive
       ExitCodes::GENERIC
     end
   end
+
+  autoload :DiagnosticEvidence, File.expand_path("hive/diagnostic_evidence.rb", __dir__)
+  autoload :DiagnosticHelpers, File.expand_path("hive/diagnostic_helpers.rb", __dir__)
 end

@@ -1,9 +1,12 @@
 require "yaml"
 require "fileutils"
 require "securerandom"
+require "pathname"
 require "hive/agent_profiles"
 require "hive/babysitter/interval"
+require "hive/permission_scope"
 require "hive/paths"
+require "hive/screenote/oauth_client"
 
 module Hive
   module Config
@@ -11,7 +14,12 @@ module Hive
       "hive_state_path" => ".hive-state",
       "worktree_root" => nil,
       "default_branch" => nil,
+      "default_workflow" => "coding",
+      "dependency_gate_stage" => "8-finalize", # coding-scoped: default dependency gate is the coding finalize stage
       "project_name" => nil,
+      # Project-wide default for per-stage permission scoping. "yolo"
+      # preserves today's launch behavior; narrower scopes are opt-in.
+      "permissions" => Hive::PermissionScope::YOLO,
       "claude" => {
         "mode" => "tmux",
         "permission_mode" => "bypassPermissions",
@@ -133,6 +141,16 @@ module Hive
           "prompt_template" => "ci_fix_prompt.md.erb"
         },
         "reviewers" => [],
+        # Ad-hoc PR reviews (`hive review --pr N`). `reviewers` is a load-bearing
+        # tri-state: nil (the default) INHERITS `review.reviewers`, while an
+        # explicit `[]` runs ZERO reviewers. An operator who sets `[]` expecting
+        # "inherit" gets a silently unreviewed PR — use nil/omit to inherit.
+        # `fix` gates whether the fix agent runs + auto-commits on ad-hoc tasks
+        # (default false: review-only).
+        "adhoc" => {
+          "reviewers" => nil,
+          "fix" => false
+        },
         "triage" => {
           "enabled" => true,
           "agent" => "claude",
@@ -164,6 +182,27 @@ module Hive
                 "docs/**/*",
                 "wiki/**",
                 "wiki/**/*",
+                # Nested project roots (monorepo layout): a Rails/JS app under
+                # `web/` keeps its source in `web/app`, `web/lib`, `web/test`,
+                # etc. Mirror the top-level source/test/docs categories under
+                # `web/` so the fix-phase auto-commit can land legitimate web
+                # changes. Sensitive nested dirs (`web/config`, `web/bin`,
+                # `web/db`) are intentionally NOT listed, so they stay outside
+                # the allowlist exactly like their top-level counterparts.
+                "web/app/**",
+                "web/app/**/*",
+                "web/lib/**",
+                "web/lib/**/*",
+                "web/src/**",
+                "web/src/**/*",
+                "web/test/**",
+                "web/test/**/*",
+                "web/tests/**",
+                "web/tests/**/*",
+                "web/spec/**",
+                "web/spec/**/*",
+                "web/docs/**",
+                "web/docs/**/*",
                 "README",
                 "README.*",
                 "CHANGELOG",
@@ -257,7 +296,7 @@ module Hive
         # review legitimately takes 1-2h. Each reviewer is bounded by its
         # own timeout, NOT by an even split of this budget, so this only
         # needs to cover the sum (raise it if you run more reviewers).
-        "max_wall_clock_sec" => 14_400
+        "max_wall_clock_sec" => 28_800
       },
       # Hive daemon settings (ADR-024). The daemon polls
       # `hive status --json`, dispatches workflow verbs on tasks the
@@ -274,6 +313,9 @@ module Hive
       "daemon" => {
         "enabled" => false,
         "autostart" => false,
+        "auto_retry" => {
+          "enabled" => true
+        },
         "poll_interval_sec" => 30,
         "fast_poll_sec" => 1,
         "edit_debounce_sec" => 30,
@@ -298,20 +340,23 @@ module Hive
         # `child_kill_grace_sec: 0` does NOT mean immediate KILL (it means
         # "KILL on the next tick after TERM"). (#266)
         #
-        # The `digest` verb ships a non-zero DEFAULT cap (every other verb
-        # stays at `child_timeout_sec`=0/disabled) because the digest holds
-        # the single global digest slot (can_dispatch_digest?): a child that
-        # wedges on an unbounded leg — a hung `ship_times` `git log`, or a
-        # black-holed Telegram socket — would otherwise pin that slot forever
-        # and silently disable ALL future digests until a daemon restart. A
-        # reaped child exits non-zero, so DigestScheduler retries the date on
-        # backoff. 3600s sits well above the categorizer's own agent cap
-        # (timeout_sec.digest, default 1800) so it never kills a healthy run;
-        # raise it alongside a raised timeout_sec.digest, or set it to 0 to
-        # disable.
+        # The `digest` and `answer-digest` verbs ship a non-zero DEFAULT cap
+        # (every other verb stays at `child_timeout_sec`=0/disabled) because
+        # each holds the single global digest slot (can_dispatch_digest?): a
+        # child that wedges on an unbounded leg — a hung `ship_times` `git
+        # log`, or a black-holed Telegram socket — would otherwise pin that
+        # slot forever, leave the scheduler's in-memory `@pending` marker set,
+        # and silently disable ALL future digests/answer-digests until a
+        # daemon restart. A reaped child exits non-zero, so the scheduler
+        # retries the date on backoff. 3600s sits well above the categorizer's
+        # own agent cap (timeout_sec.digest, default 1800) so it never kills a
+        # healthy run; raise it alongside a raised timeout_sec.digest, or set
+        # it to 0 to disable. `answer-digest` shares the same cap: it spawns
+        # no categorizer agent (it only fetches status + sends Telegram), so
+        # 3600s is a generous ceiling that still bounds a wedged socket.
         "child_timeout_sec" => 0,
         "child_kill_grace_sec" => 30,
-        "child_verb_timeouts" => { "digest" => 3600 },
+        "child_verb_timeouts" => { "digest" => 3600, "answer-digest" => 3600 },
         "log_max_bytes" => 10_485_760,
         "log_max_files" => 5
       },
@@ -328,6 +373,7 @@ module Hive
         "bind" => "127.0.0.1",
         "port" => 4567,
         "origin" => "http://127.0.0.1:4567",
+        "local_loopback" => true,
         "github" => {
           "owner" => nil,
           # The shared hivebox OAuth app (device flow only — public by
@@ -336,6 +382,13 @@ module Hive
           "client_id" => "Ov23liYChIkP5PU4bvo1"
         },
         "session_secret_file" => nil
+      },
+      # Optional hosted screenshot publishing for 7-artifacts visual
+      # manifests. OAuth credentials are stored by `hive connect screenote`;
+      # this block only selects the Screenote base URL. The default is the
+      # OAuth client's DEFAULT_BASE_URL so the two can't drift.
+      "screenote" => {
+        "base_url" => Hive::Screenote::OAuthClient::DEFAULT_BASE_URL
       },
       # Experimental PR babysitter. This is intentionally separate
       # from the pipeline daemon: it polls open GitHub PRs and asks a
@@ -412,13 +465,20 @@ module Hive
         "agent" => nil,
         "max_catchup_days" => 7
       },
+      # Daily pending-answer digest. The daemon schedules one global
+      # `hive answer-digest` subprocess at/after the configured local hour;
+      # the subprocess is silent when no task is waiting on human input.
+      "answer_digest" => {
+        "enabled" => false,
+        "hour" => 9
+      },
       # Global Telegram bot settings. The bot is an operator surface
       # across every registered project, so runtime code loads these
       # from the global config via load_global_bot. The token lives
       # only in HIVE_TELEGRAM_BOT_TOKEN and is never persisted.
       "bot" => {
         "enabled" => false,
-        "digest_chat_id" => nil,
+        "pairing_enabled" => false,
         "chat_id_allowlist" => [],
         "poll_interval_sec" => 30,
         "long_poll_timeout_sec" => 25,
@@ -511,6 +571,30 @@ module Hive
     # config-load time but rejected at dispatch with a pointer to
     # review.ci.command (Hive::Reviewers.dispatch).
     REVIEWER_KINDS = %w[agent codex_review linter].freeze
+    # The agent backends `hive setup` can persist globally, in canonical
+    # listing/storage order. Every method that filters or reorders a
+    # selection iterates this list so the on-disk order is stable
+    # regardless of the order the operator typed. The names are frozen so
+    # callers that receive them back from `normalize_global_agents` cannot
+    # mutate the shared constant in place.
+    GLOBAL_AGENT_BACKENDS = %w[claude codex pi].map(&:freeze).freeze
+    # Recommended default selection when the operator accepts the prompt
+    # default or runs non-interactively — Claude + Codex; Pi is opt-in.
+    DEFAULT_GLOBAL_AGENTS = %w[claude codex].map(&:freeze).freeze
+    # Boot-time parity guard, the analogue of Init::Prompts' CHOICES/MODES
+    # check (init/prompts.rb): a recommended default that isn't also a
+    # known backend would let `default_global_agents` emit a value that
+    # `normalize_global_agents`/`write_global_agents!` then reject. Enforce
+    # the subset here rather than letting it surface only as a runtime
+    # ConfigError. Single-line modifier (like the sibling guard) so the
+    # never-taken raise stays on the evaluated line for the coverage gate.
+    raise "DEFAULT_GLOBAL_AGENTS must be a subset of GLOBAL_AGENT_BACKENDS: #{(DEFAULT_GLOBAL_AGENTS - GLOBAL_AGENT_BACKENDS).inspect} not in #{GLOBAL_AGENT_BACKENDS.inspect}" unless (DEFAULT_GLOBAL_AGENTS - GLOBAL_AGENT_BACKENDS).empty?
+    # The last two stages of `Hive::Stages::DIRS` (lib/hive/stages.rb).
+    # Kept as an explicit policy literal rather than derived via
+    # `Hive::Stages::DIRS.last(2)` so a stage rename/addition is a
+    # deliberate review point here, not a silent propagation — if DIRS
+    # changes, update this list to match.
+    DEPENDENCY_GATE_STAGES = %w[8-finalize 9-done].freeze # coding-scoped: coding dependency-gate stages (last two of Stages::DIRS)
     EXPLICIT_CLAUDE_MODE_KEY = :__hive_explicit_claude_mode
     EXPLICIT_BRAINSTORM_RUNTIME_KEY = :__hive_explicit_brainstorm_runtime
 
@@ -522,6 +606,42 @@ module Hive
 
     def global_config_path
       File.join(hive_home, "config.yml")
+    end
+
+    # Single source of the registry's string representation. The agent
+    # registry keys on symbols, but every backend-selection path (the
+    # defaults, normalize, the setup prompt) compares against backend-name
+    # *strings*, so the symbol→string projection lives here — the
+    # registry-representation coupling is then a one-line edit rather than
+    # several drifting copies.
+    def registered_agent_names
+      AgentProfiles.registered_names.map(&:to_s)
+    end
+
+    # The default selection filtered down to the backends actually
+    # registered on this machine, in canonical order. Returns a frozen
+    # array of frozen strings with at least one entry — the same return
+    # contract as `normalize_global_agents` on BOTH mutability and
+    # cardinality, so a consumer never sees a mutable result on one path and
+    # a frozen one on the other (a latent FrozenError trap), nor an empty
+    # selection the prompt boundary can never produce. Raises ConfigError
+    # when no default backend is registered — unreachable while claude/codex
+    # auto-register on `require "hive/config"`, but the guarantee is enforced
+    # here rather than merely asserted in this comment.
+    def default_global_agents
+      registered = registered_agent_names
+      # Derive order from the canonical GLOBAL_AGENT_BACKENDS rather than
+      # iterating the DEFAULT_* literal, so reordering the default literal
+      # can't make this producer disagree with `normalize_global_agents`,
+      # and the result is guaranteed ⊆ GLOBAL_AGENT_BACKENDS (a value
+      # normalize/write would accept). Left-ordered `&` dedups too.
+      selected = GLOBAL_AGENT_BACKENDS & DEFAULT_GLOBAL_AGENTS & registered
+      if selected.empty?
+        raise ConfigError,
+              "no default agent backend is registered (expected one of #{DEFAULT_GLOBAL_AGENTS.inspect})"
+      end
+
+      selected.freeze
     end
 
     def hive_state_dir(project_root, hive_state_name = ".hive-state")
@@ -733,6 +853,118 @@ module Hive
       end
     end
 
+    # The operator's persisted backend selection from the global config,
+    # or `default_global_agents` when nothing is stored yet. Three "unset"
+    # shapes all fall through to the defaults: an absent `agents:` block, an
+    # absent `agents.selected` key, and a present-but-null `selected:` (a
+    # bare `selected:` with no value). A present-but-malformed block
+    # (non-Hash `agents:`, non-Array `selected`) is a hand-edit error and
+    # raises ConfigError. Note the deliberate asymmetry against an empty
+    # `selected: []`: a null `selected:` is treated as "unset" and yields
+    # the defaults, whereas an explicit empty list raises via
+    # `normalize_global_agents` — an empty array is a hand-edit mistake the
+    # prompt can never produce, a null value is just "nothing stored yet".
+    def load_global_agents
+      Hive::Paths.ensure_migrated!
+      validate_hive_home!
+      path = global_config_path
+      data = File.exist?(path) ? load_global_config(path) : {}
+      raise ConfigError, "global config at #{path} must be a hash" unless data.is_a?(Hash)
+
+      agents = data["agents"]
+      return default_global_agents if agents.nil?
+
+      unless agents.is_a?(Hash)
+        raise ConfigError, "agents in #{describe_source(path)} must be a Hash; got #{agents.class}"
+      end
+
+      selected = agents["selected"]
+      return default_global_agents if selected.nil?
+
+      normalize_global_agents(selected, source: describe_source(path))
+    end
+
+    # Persist a backend selection, writing the normalized (validated,
+    # canonical-order) list to `agents.selected` and returning it. Merging
+    # into `(existing || {})` preserves any operator-owned sibling keys
+    # under `agents:` (e.g. per-agent override blocks, freeform notes) —
+    # only `selected` is rewritten. A pre-existing non-Hash `agents:` value
+    # is a hand-edit error and raises rather than being clobbered.
+    def write_global_agents!(agents)
+      normalized = normalize_global_agents(agents, source: "the write_global_agents! argument")
+      update_global_config! do |data|
+        existing = data["agents"]
+        unless existing.nil? || existing.is_a?(Hash)
+          raise ConfigError, "agents in #{describe_source(global_config_path)} must be a Hash; got #{existing.class}"
+        end
+
+        data["agents"] = (existing || {}).merge("selected" => normalized)
+        normalized
+      end
+    end
+
+    # Validate and canonicalize a raw selection (from disk or a caller)
+    # into the persisted contract: a frozen array of frozen backend names
+    # in `GLOBAL_AGENT_BACKENDS` order, deduped, with at least one entry.
+    # Enforcing "≥1 backend" here mirrors the prompt boundary
+    # (BackendPrompt) so neither a hand-edited `selected: []` nor a
+    # `write_global_agents!([])` can persist a zero-backend state the
+    # prompt can never produce. Each name must be a non-empty String that
+    # resolves to a registered backend; anything else is a hand-edit error
+    # and raises ConfigError.
+    def normalize_global_agents(agents, source:)
+      unless agents.is_a?(Array)
+        raise ConfigError,
+              "agents.selected in #{source} must be an Array of agent names; got #{agents.class}"
+      end
+
+      if agents.empty?
+        raise ConfigError,
+              "agents.selected in #{source} must list at least one backend " \
+              "(omit or null out the `selected:` key to fall back to the " \
+              "defaults #{DEFAULT_GLOBAL_AGENTS.inspect})"
+      end
+
+      registered = registered_agent_names
+      allowed = GLOBAL_AGENT_BACKENDS & registered
+      selected = []
+      agents.each do |agent|
+        unless agent.is_a?(String) && !agent.strip.empty?
+          raise ConfigError,
+                "agents.selected in #{source} must contain non-empty strings"
+        end
+
+        # Downcase before the allowed-list check so a hand-edited
+        # `selected: [Claude]` — the exact capitalization the setup prompt
+        # displays — loads, matching the prompt's case-insensitive name
+        # resolution (BackendPrompt#resolve_token).
+        name = agent.strip.downcase
+        unless allowed.include?(name)
+          if GLOBAL_AGENT_BACKENDS.include?(name)
+            # Valid backend name, just not installed/registered on THIS
+            # machine — the synced-dotfiles case. Distinct from a typo so
+            # the operator knows to install it / re-run `hive setup`, not
+            # to hunt for a misspelling.
+            raise ConfigError,
+                  "agents.selected in #{source} names backend #{name.inspect}, which is valid but " \
+                  "not installed or registered on this machine; install it or re-run `hive setup` " \
+                  "(registered here: #{allowed.inspect})"
+          end
+
+          raise ConfigError,
+                "agents.selected in #{source} contains unknown backend #{name.inspect}; " \
+                "expected one of #{GLOBAL_AGENT_BACKENDS.inspect}"
+        end
+
+        selected << name
+      end
+
+      # Reorder to canonical order and dedupe in a single intersection over
+      # the canonical constant (iterating the unique constant means a
+      # repeated name collapses to a single entry).
+      (GLOBAL_AGENT_BACKENDS & selected).freeze
+    end
+
     # Shape gate shared by the loader and `prune`'s predicate so the
     # two surfaces agree on what counts as a valid registry row.
     # Without this, the loader would silently skip a corrupted entry
@@ -760,7 +992,11 @@ module Hive
       YAML.safe_load(File.read(path)) || {}
     rescue Psych::Exception => e
       raise ConfigError, "global config at #{path} is not valid YAML: #{e.message}"
-    rescue Errno::EACCES, Errno::EISDIR => e
+    rescue Errno::EACCES, Errno::EISDIR, Errno::ENOENT => e
+      # ENOENT closes the narrow TOCTOU on every `File.exist?(path) ?
+      # load_global_config(path) : {}` reader: a config deleted between the
+      # existence check and the read here surfaces as exit-78 ConfigError
+      # instead of an exit-70 InternalError.
       raise ConfigError, "global config at #{path} is not readable: #{e.message}"
     end
 
@@ -859,6 +1095,50 @@ module Hive
       registered_projects.find { |p| p["name"] == name }
     end
 
+    def project_for_path(dir)
+      expanded_dir = File.expand_path(dir)
+      registered_projects
+        .select { |entry| path_prefix?(expanded_dir, entry["path"]) }
+        .max_by { |entry| File.expand_path(entry["path"]).length }
+    end
+
+    def registered_project!(name: nil, cwd:)
+      project = if name && !name.to_s.strip.empty?
+        find_project(name.to_s)
+      else
+        project_for_path(cwd)
+      end
+
+      unless project
+        raise ConfigError,
+              "not a hive-invited repo — run `hive init` here first, or pass --project NAME"
+      end
+
+      hive_state_path = project_hive_state_path(project)
+      return project if File.directory?(hive_state_path)
+
+      # The project IS registered but its hive state directory is gone — a
+      # different failure from "not invited". `hive init` here still repairs
+      # it, but say so accurately rather than implying the repo was never
+      # invited.
+      raise ConfigError,
+            "project #{project.fetch('name').inspect} is registered but its hive state directory " \
+            "#{hive_state_path} is missing — run `hive init` in #{project.fetch('path')} to repair it"
+    end
+
+    def path_prefix?(path, prefix)
+      expanded_prefix = File.expand_path(prefix)
+      path == expanded_prefix || path.start_with?("#{expanded_prefix}#{File::SEPARATOR}")
+    end
+
+    def project_hive_state_path(project)
+      configured = project["hive_state_path"]
+      return File.join(project.fetch("path"), ".hive-state") if configured.nil? || configured.to_s.empty?
+      return File.expand_path(configured) if Pathname.new(configured).absolute?
+
+      File.expand_path(configured, project.fetch("path"))
+    end
+
     # Load and validate the global `daemon` block from
     # the global config.yml under `Hive::Paths.config_home`. Returns the merged Hash (operator
     # overrides on top of `Config::DEFAULTS["daemon"]`). Used by
@@ -911,26 +1191,60 @@ module Hive
       merged
     end
 
-    # The `digest` block only (enabled / agent / max_catchup_days), merged
-    # over defaults. Used by the daemon scheduler. Distinct from
-    # `load_global_digest_config`, which returns the FULL merged config
-    # (incl. `bot`) for the digest runner.
-    def load_global_digest_block
+    # Shared loader for a single named global config block (`digest`,
+    # `answer_digest`): runs the ensure_migrated!/validate_hive_home!/path +
+    # shape-check preamble, deep-merges the override over DEFAULTS[key], runs the
+    # block's own validator, and returns the merged hash. An optional block
+    # receives (merged, data, override) for per-block derivations (e.g. the
+    # digest's telegram-default `enabled`) and returns the merged hash to validate.
+    def load_global_block(key, validator:)
       Hive::Paths.ensure_migrated!
       validate_hive_home!
       path = global_config_path
       data = File.exist?(path) ? load_global_config(path) : {}
       raise ConfigError, "global config at #{path} must be a hash" unless data.is_a?(Hash)
 
-      override = data["digest"] || {}
+      override = data[key] || {}
       unless override.is_a?(Hash)
         raise ConfigError,
-              "digest in #{describe_source(path)} must be a Hash; got #{override.class}"
+              "#{key} in #{describe_source(path)} must be a Hash; got #{override.class}"
       end
 
-      merged = deep_merge(deep_dup(DEFAULTS["digest"]), override)
-      validate_digest!({ "digest" => merged }, path)
+      merged = deep_merge(deep_dup(DEFAULTS[key]), override)
+      merged = yield(merged, data, override) if block_given?
+      send(validator, { key => merged }, path)
       merged
+    end
+
+    # The `digest` block only (enabled / agent / max_catchup_days), merged
+    # over defaults. Used by the daemon scheduler. Distinct from
+    # `load_global_digest_config`, which returns the FULL merged config
+    # (incl. `bot`) for the digest runner.
+    def load_global_digest_block
+      load_global_block("digest", validator: :validate_digest!) do |merged, data, override|
+        # Opt-out beats opt-in: when the operator hasn't pinned digest.enabled
+        # either way, default it ON for anyone who already has the Telegram bot
+        # configured with a deliverable chat. An explicit digest.enabled (true
+        # OR false) is always honored — only the unset case is derived.
+        merged["enabled"] = telegram_digest_default?(data) unless override.key?("enabled")
+        merged
+      end
+    end
+
+    def load_global_answer_digest_block
+      load_global_block("answer_digest", validator: :validate_answer_digest!)
+    end
+
+    # True when the global Telegram bot is enabled and has at least one
+    # allowlisted chat to deliver to — the signal that "the user has Telegram
+    # set up", used to default the daily digest on. Reads the raw config so
+    # it never depends on bot-block defaults; the bot block's own shape is
+    # validated on its own load path.
+    def telegram_digest_default?(data)
+      bot = data["bot"]
+      return false unless bot.is_a?(Hash) && bot["enabled"] == true
+
+      Array(bot["chat_id_allowlist"]).any? { |id| id.is_a?(Integer) }
     end
 
     def load_global_digest_config
@@ -963,6 +1277,40 @@ module Hive
       merged = deep_merge(global_web_defaults, override)
       validate_web_config!({ "web" => merged }, path)
       merged
+    end
+
+    def load_global_screenote
+      Hive::Paths.ensure_migrated!
+      validate_hive_home!
+      path = global_config_path
+      data = File.exist?(path) ? load_global_config(path) : {}
+      raise ConfigError, "global config at #{path} must be a hash" unless data.is_a?(Hash)
+
+      override = data["screenote"] || {}
+      unless override.is_a?(Hash)
+        raise ConfigError,
+              "screenote in #{describe_source(path)} must be a Hash; got #{override.class}"
+      end
+
+      merged = deep_merge(deep_dup(DEFAULTS["screenote"]), override)
+      apply_screenote_env_overrides!(merged)
+      validate_screenote!({ "screenote" => merged }, path)
+      merged
+    end
+
+    # The resolved global Screenote base URL. `connect` (when no --base-url
+    # is given) and `disconnect` (when the stored credential has no base_url)
+    # both need it, so the `load_global_screenote.fetch("base_url")` lookup
+    # lives here once instead of being duplicated in two commands.
+    def global_screenote_base_url
+      load_global_screenote.fetch("base_url")
+    end
+
+    def apply_screenote_env_overrides!(screenote)
+      if ENV.key?("HIVE_SCREENOTE_BASE_URL")
+        screenote["base_url"] = ENV["HIVE_SCREENOTE_BASE_URL"]
+      end
+      screenote
     end
 
     def global_web_defaults
@@ -1211,17 +1559,22 @@ module Hive
       validate_hash_shaped_keys!(cfg, source_path)
       validate_stage_skill_by_agent!(cfg, source_path)
       validate_reviewers!(cfg, source_path)
+      validate_review_adhoc!(cfg, source_path)
       validate_review_fix_auto_commit!(cfg, source_path)
       validate_role_agent_names!(cfg, source_path)
       validate_claude_mode!(cfg, source_path)
       validate_claude_permission_mode!(cfg, source_path)
+      validate_permissions!(cfg, source_path)
+      validate_dependency_gate_stage!(cfg, source_path)
       validate_brainstorm_runtime!(cfg, source_path)
       validate_review_attempts!(cfg, source_path)
       validate_daemon!(cfg, source_path)
       validate_web_config!(cfg, source_path)
+      validate_screenote!(cfg, source_path)
       validate_babysitter!(cfg, source_path)
       validate_patrol!(cfg, source_path)
       validate_digest!(cfg, source_path)
+      validate_answer_digest!(cfg, source_path)
       validate_bot_config!(cfg, source_path)
       validate_rebase!(cfg, source_path)
     end
@@ -1247,9 +1600,11 @@ module Hive
       agents
       daemon
       web
+      screenote
       babysitter
       patrol
       digest
+      answer_digest
       bot
       rebase
     ].freeze
@@ -1299,6 +1654,7 @@ module Hive
     # review.max_wall_clock_sec         | 0 → wall_clock_exceeded? trips on first check
     POSITIVE_INTEGER_KEYS = [
       [ %w[review ci max_attempts], "review.ci.max_attempts" ],
+      [ %w[review triage max_attempts], "review.triage.max_attempts" ],
       [ %w[review browser_test max_attempts], "review.browser_test.max_attempts" ],
       [ %w[review max_passes], "review.max_passes" ],
       [ %w[review max_wall_clock_sec], "review.max_wall_clock_sec" ]
@@ -1413,6 +1769,27 @@ module Hive
       end
 
       validate_reviewer_entries!(reviewers, "review.reviewers", source_path)
+    end
+
+    def validate_review_adhoc!(cfg, source_path)
+      adhoc = cfg.dig("review", "adhoc")
+      unless adhoc.is_a?(Hash)
+        raise ConfigError,
+              "review.adhoc in #{describe_source(source_path)} must be a Hash; got #{adhoc.inspect} (#{adhoc.class})"
+      end
+
+      reviewers = adhoc["reviewers"]
+      unless reviewers.nil? || reviewers.is_a?(Array)
+        raise ConfigError,
+              "review.adhoc.reviewers in #{describe_source(source_path)} must be an Array of reviewer entries or nil; got #{reviewers.class}"
+      end
+      validate_reviewer_entries!(reviewers, "review.adhoc.reviewers", source_path) if reviewers
+
+      fix = adhoc["fix"]
+      return if fix == true || fix == false
+
+      raise ConfigError,
+            "review.adhoc.fix in #{describe_source(source_path)} must be a boolean; got #{fix.inspect} (#{fix.class})"
     end
 
     def validate_reviewer_entries!(reviewers, label, source_path)
@@ -1603,6 +1980,156 @@ module Hive
             "#{CLAUDE_PERMISSION_MODES.inspect}; got #{permission_mode.inspect} (#{permission_mode.class})"
     end
 
+    def validate_permissions!(cfg, source_path)
+      validate_permission_spec!(cfg["permissions"], "project default", source_path)
+      reject_unsupported_review_permissions!(cfg, source_path)
+
+      permission_entries(cfg).each do |label, spec|
+        validate_permission_spec!(spec, label, source_path)
+      end
+    end
+
+    # Collect `permissions:` specs to shape-validate at load, paired with a
+    # human label for error messages. This is ONLY a load-time SHAPE check; it
+    # does NOT mean every collected block is a resolved scope. `permissions:` is
+    # a stage-level control: it is resolved only for pipeline STAGE spawns and
+    # for REVIEW REVIEWERS. The project-level default is the default *for those*,
+    # not a global permission floor. A `permissions:` key on a non-stage block
+    # (daemon, rebase, babysitter, digest, web, patrol, bot, update, …) is NOT a
+    # per-stage scope and never gates those internal agents — they stay
+    # write-capable by design.
+    #
+    # The top-level `cfg.each` is a deliberate SUPERSET of the stages
+    # Config.permission_spec actually resolves: it scans every top-level Hash,
+    # because generic-workflow stage names aren't known at load time, so it
+    # CANNOT enumerate exactly the resolved set. Over-collecting is intentional —
+    # a malformed `permissions:` under any block fails the *load* instead of
+    # surviving to a confusing spawn-time error. A well-formed `permissions:` key
+    # on a non-stage block passes the shape check and is then simply ignored at
+    # runtime (not resolved into a scope); that is the documented stage/reviewer
+    # boundary above, not a bug this scan tries to catch. `review` is the one
+    # top-level key the scan explicitly skips (see the `next` below) because
+    # its own `permissions` key is NOT a resolved location
+    # (reject_unsupported_review_permissions! rejects it) — only its per-role
+    # sub-blocks and per-reviewer entries, added explicitly below, are
+    # resolved. `patrol.review` is NOT explicitly skipped; it is simply never
+    # reached, because this scan is shallow (a top-level `patrol` Hash IS
+    # collected and shape-validated, but the scan does not recurse into its
+    # `review` child). Its per-reviewer entries are added explicitly below.
+    # Patrol tasks dispatch `patrol.review.reviewers` through the same adapters
+    # as `review.reviewers`, so those entries are validated too.
+    def permission_entries(cfg)
+      entries = []
+      # One guard shape, several call sites: only collect a `permissions:`
+      # value when the block is a Hash that declares the key.
+      collect = lambda do |label, block|
+        entries << [ label, block["permissions"] ] if block.is_a?(Hash) && block.key?("permissions")
+      end
+
+      cfg.each do |key, value|
+        next if key.to_s == "review"
+
+        collect.call(key.to_s, value)
+      end
+
+      review = cfg["review"]
+      if review.is_a?(Hash)
+        %w[ci triage fix browser_test].each { |role| collect.call("review.#{role}", review[role]) }
+        Array(review["reviewers"]).each_with_index do |entry, idx|
+          collect.call("review.reviewers[#{idx}]", entry)
+        end
+        adhoc = review["adhoc"]
+        if adhoc.is_a?(Hash)
+          Array(adhoc["reviewers"]).each_with_index do |entry, idx|
+            collect.call("review.adhoc.reviewers[#{idx}]", entry)
+          end
+        end
+      end
+
+      patrol_review = cfg["patrol"].is_a?(Hash) ? cfg["patrol"]["review"] : nil
+      if patrol_review.is_a?(Hash)
+        Array(patrol_review["reviewers"]).each_with_index do |entry, idx|
+          collect.call("patrol.review.reviewers[#{idx}]", entry)
+        end
+      end
+
+      entries
+    end
+
+    # A top-level `review: { permissions: ... }` is never resolved —
+    # permission_spec only reads review.{ci,triage,fix,browser_test} and the
+    # per-reviewer entries — so honoring it silently would be a fail-OPEN
+    # downgrade: the operator believes review is scoped while every review
+    # sub-stage still runs the project default (often yolo). Reject it
+    # loudly and point at the supported per-role / per-reviewer locations.
+    # `patrol.review.permissions` is the exact patrol analog — patrol tasks
+    # dispatch `patrol.review.reviewers` through the same adapters, and no
+    # resolver reads a `patrol.review.permissions` key — so reject it too,
+    # pointing at the patrol per-reviewer location.
+    def reject_unsupported_review_permissions!(cfg, source_path)
+      reject_unsupported_permissions_at!(
+        cfg["review"], "review.permissions", source_path,
+        "set permissions per role under review.{ci,triage,fix,browser_test} or per reviewer entry"
+      )
+      review_adhoc = cfg["review"].is_a?(Hash) ? cfg["review"]["adhoc"] : nil
+      reject_unsupported_permissions_at!(
+        review_adhoc, "review.adhoc.permissions", source_path,
+        "set permissions per reviewer entry under review.adhoc.reviewers"
+      )
+      patrol_review = cfg["patrol"].is_a?(Hash) ? cfg["patrol"]["review"] : nil
+      reject_unsupported_permissions_at!(
+        patrol_review, "patrol.review.permissions", source_path,
+        "set permissions per reviewer entry under patrol.review.reviewers"
+      )
+    end
+
+    def reject_unsupported_permissions_at!(block, label, source_path, suggestion)
+      return unless block.is_a?(Hash) && block.key?("permissions")
+
+      raise ConfigError,
+            "#{label} in #{describe_source(source_path)} is not a supported " \
+            "scope location; #{suggestion} instead."
+    end
+
+    def validate_permission_spec!(spec, label, source_path)
+      Hive::PermissionScope.validate!(spec, stage: label)
+    rescue Hive::ConfigError => e
+      raise ConfigError, "#{e.message} in #{describe_source(source_path)}"
+    end
+
+    # Sentinel distinguishing "stage declared no permissions key" from a
+    # stage that explicitly declared `permissions: nil`. permission_spec and
+    # permission_at — its only collaborators — live alongside it here.
+    MISSING_PERMISSION = Object.new.freeze
+
+    # Resolve a stage's effective permission spec: the stage's own
+    # `permissions:` block when declared, otherwise the project default.
+    # Dotted review paths (e.g. "review.triage") are supported.
+    def permission_spec(cfg, stage)
+      stage_value = permission_at(cfg, stage)
+      return stage_value unless stage_value.equal?(MISSING_PERMISSION)
+
+      cfg.fetch("permissions", DEFAULTS.fetch("permissions"))
+    end
+
+    def permission_at(cfg, stage)
+      # `cfg.dig(*parts)` already handles the single-element case identically
+      # to `cfg[parts.first]`, so no length branch is needed.
+      block = cfg.dig(*stage.to_s.split("."))
+      return MISSING_PERMISSION unless block.is_a?(Hash) && block.key?("permissions")
+
+      block["permissions"]
+    end
+
+    def validate_dependency_gate_stage!(cfg, source_path)
+      stage = cfg["dependency_gate_stage"]
+      return if DEPENDENCY_GATE_STAGES.include?(stage)
+
+      raise ConfigError,
+            "dependency_gate_stage in #{describe_source(source_path)} must be one of " \
+            "#{DEPENDENCY_GATE_STAGES.inspect}; got #{stage.inspect} (#{stage.class})"
+    end
+
     def validate_brainstorm_runtime!(cfg, source_path)
       runtime = cfg.dig("brainstorm", "runtime")
       return if runtime.nil?
@@ -1703,6 +2230,19 @@ module Hive
               "(true / false); got #{autostart.inspect} (#{autostart.class})"
       end
 
+      auto_retry = daemon["auto_retry"]
+      unless auto_retry.nil? || auto_retry.is_a?(Hash)
+        raise ConfigError,
+              "daemon.auto_retry in #{describe_source(source_path)} must be a hash; " \
+              "got #{auto_retry.inspect} (#{auto_retry.class})"
+      end
+      auto_retry_enabled = auto_retry && auto_retry["enabled"]
+      unless auto_retry_enabled.nil? || auto_retry_enabled == true || auto_retry_enabled == false
+        raise ConfigError,
+              "daemon.auto_retry.enabled in #{describe_source(source_path)} must be a boolean " \
+              "(true / false); got #{auto_retry_enabled.inspect} (#{auto_retry_enabled.class})"
+      end
+
       DAEMON_NUMERIC_BOUNDS.each do |key, min|
         value = daemon[key]
         next if value.nil?
@@ -1739,6 +2279,12 @@ module Hive
               "web.origin in #{describe_source(source_path)} must be an http(s) URL"
       end
 
+      local_loopback = web["local_loopback"]
+      unless local_loopback == true || local_loopback == false
+        raise ConfigError,
+              "web.local_loopback in #{describe_source(source_path)} must be true or false"
+      end
+
       github = web["github"]
       unless github.is_a?(Hash)
         raise ConfigError,
@@ -1758,6 +2304,35 @@ module Hive
 
       raise ConfigError,
             "web.session_secret_file in #{describe_source(source_path)} must be a non-empty String when set"
+    end
+
+    def validate_screenote!(cfg, source_path)
+      screenote = cfg["screenote"]
+      return if screenote.nil?
+
+      base_url = screenote["base_url"]
+      unless base_url.nil? || (base_url.is_a?(String) && (base_url.strip.empty? || base_url.match?(%r{\Ahttps?://})))
+        raise ConfigError,
+              "screenote.base_url in #{describe_source(source_path)} must be blank or an http(s) URL"
+      end
+
+      # Migration guard for the removed REST uploader. A blank/null leftover
+      # (a bare `api_token:` or `api_token: null`, as the old
+      # config.example.yml shipped) is now inert: the prior guard raised on the
+      # mere presence of the key, a catch-22 since the prescribed remedy
+      # `hive connect screenote` loads exactly this validation (via
+      # Hive::Config.load_global_screenote, called from commands/connect.rb).
+      # A NON-BLANK token is NOT softened — it is a genuine leftover, so bare
+      # `hive connect screenote` still raises ConfigError here and stays
+      # blocked until the operator removes the key (passing --base-url, which
+      # skips this global load, is the only other escape). That hard failure on
+      # a real leftover token is intended.
+      api_token = screenote["api_token"]
+      return if api_token.nil? || (api_token.is_a?(String) && api_token.strip.empty?)
+
+      raise ConfigError,
+            "Screenote now connects via OAuth — remove `screenote.api_token` from " \
+            "#{describe_source(source_path)} and run `hive connect screenote`."
     end
 
     # R-02: `daemon.child_verb_timeouts` is an optional map of hive verb
@@ -2036,6 +2611,26 @@ module Hive
       end
     end
 
+    def validate_answer_digest!(cfg, source_path)
+      answer_digest = cfg["answer_digest"]
+      return if answer_digest.nil?
+
+      enabled = answer_digest["enabled"]
+      unless enabled.nil? || enabled == true || enabled == false
+        raise ConfigError,
+              "answer_digest.enabled in #{describe_source(source_path)} must be a boolean " \
+              "(true / false); got #{enabled.inspect} (#{enabled.class})"
+      end
+
+      hour = answer_digest["hour"]
+      return if hour.nil?
+      return if hour.is_a?(Integer) && hour.between?(0, 23)
+
+      raise ConfigError,
+            "answer_digest.hour in #{describe_source(source_path)} must be an integer between 0 and 23; " \
+            "got #{hour.inspect} (#{hour.class})"
+    end
+
     BOT_NUMERIC_BOUNDS = [
       [ "poll_interval_sec", 5, nil ],
       [ "long_poll_timeout_sec", 5, 50 ],
@@ -2068,8 +2663,14 @@ module Hive
               "(true / false); got #{enabled.inspect} (#{enabled.class})"
       end
 
+      pairing_enabled = bot["pairing_enabled"]
+      unless pairing_enabled.nil? || pairing_enabled == true || pairing_enabled == false
+        raise ConfigError,
+              "bot.pairing_enabled in #{describe_source(source_path)} must be a boolean " \
+              "(true / false); got #{pairing_enabled.inspect} (#{pairing_enabled.class})"
+      end
+
       validate_bot_allowlist!(bot, source_path)
-      validate_bot_digest_chat_id!(bot, source_path)
       warn_deprecated_bot_dedupe!(bot, source_path)
       validate_bot_numbers!(bot, source_path)
       validate_bot_paths!(bot, source_path)
@@ -2080,6 +2681,7 @@ module Hive
       telegram_bot_token!
       allowlist = bot["chat_id_allowlist"]
       return if allowlist.is_a?(Array) && !allowlist.empty?
+      return if bot["pairing_enabled"]
 
       raise ConfigError,
             "bot.chat_id_allowlist in #{describe_source(source_path)} must contain at least one chat_id " \
@@ -2101,16 +2703,6 @@ module Hive
               "bot.chat_id_allowlist[#{idx}] in #{describe_source(source_path)} must be an Integer; " \
               "got #{entry.inspect} (#{entry.class})"
       end
-    end
-
-    def validate_bot_digest_chat_id!(bot, source_path)
-      chat_id = bot["digest_chat_id"]
-      return if chat_id.nil?
-      return if chat_id.is_a?(Integer)
-
-      raise ConfigError,
-            "bot.digest_chat_id in #{describe_source(source_path)} must be an Integer; " \
-            "got #{chat_id.inspect} (#{chat_id.class})"
     end
 
     def validate_bot_numbers!(bot, source_path)

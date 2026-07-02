@@ -1,13 +1,13 @@
 ---
 title: hive tui
 type: command
-source: lib/hive/tui.rb
+source: lib/hive/tui.rb, lib/hive/tui/**
 created: 2026-04-27
-updated: 2026-06-14
-tags: [command, tui, observability, interactive, diagnostics, task-id, archive]
+updated: 2026-06-15
+tags: [command, tui, observability, interactive, diagnostics, task-id, archive, pr]
 ---
 
-**TLDR**: `hive tui` is the human-only, two-pane Charm bubbletea + lipgloss dashboard over `hive status`. v2 (2026-05-01) renders a left pane listing registered projects (with `★ All projects` virtual entry on top) and a right pane showing scoped tasks as a compact table — icon · id · display name · stage · status · age. It polls the same data source at 1 Hz and dispatches every workflow verb as a fresh subprocess on a single keystroke. The TUI never writes markers directly, never invents pipeline behavior, and never emits JSON — agent-callable surfaces stay on `hive status` and the typed verbs (see [[commands/status]], [[commands/stage_action]]).
+**TLDR**: `hive tui` is the human-only, two-pane Charm bubbletea + lipgloss dashboard over `hive status`. v2 (2026-05-01) renders a left pane listing registered projects (with `★ All projects` virtual entry on top) and a right pane showing scoped tasks as a compact table — icon · id · PR · display name · stage · status · age. It polls the same data source at 1 Hz and dispatches every workflow verb as a fresh subprocess on a single keystroke. The TUI never writes markers directly, never invents pipeline behavior, and never emits JSON — agent-callable surfaces stay on `hive status` and the typed verbs (see [[commands/status]], [[commands/stage_action]]).
 
 ## Backend
 
@@ -22,9 +22,9 @@ The legacy curses backend was removed in plan #003 U11. `HIVE_TUI_BACKEND=curses
 │  ProjectsPane   │  TasksPane                                             │
 │  (left, 18-28)  │  (right, cols - left)                                  │
 │                 │                                                        │
-│  ★ All projects │  ▶   42  Fix cache       2-brainstorm  Ready to plan 2h │
-│  hive           │  🤖  43  Metrics pass    4-execute     Agent running 1m │
-│  myapp          │  ⚠   —  oauth-…          6-review      Needs recov.  1h │
+│  ★ All projects │  ▶   42  #561  Fix cache    2-brainstorm Ready to p. 2h │
+│  hive           │  🤖  43  —     Metrics pass 4-execute    Agent run.  1m │
+│  myapp          │  ⚠   —  #612  oauth-…      6-review     Needs rec.  1h │
 │  appcrawl       │                                                        │
 ├─────────────────┴────────────────────────────────────────────────────────┤
 │ Footer: [Tab] ... [q] quit · today ... • 7d ... • all ... • tokens       │
@@ -166,7 +166,9 @@ JRuby/TruffleRuby would need a `Mutex`/`AtomicReference` upgrade — a
 `SnapshotArrived` message only when `state_source.current` differs from
 the last dispatched snapshot. Identical snapshots do not redraw.
 
-`Hive::Tui::Snapshot::Row` carries `slug`, `id`, `display_name`, `mtime`, and `folder_mtime` from status JSON. The task list hides the slug in favor of the id/name columns, using the slug as the name fallback when display generation has not succeeded or a legacy task has not been backfilled. Detail views keep the slug visible beside `#id display_name`. Filtering still matches the slug and now also matches display name and stringified id.
+`Hive::Tui::Snapshot::Row` carries `slug`, `id`, `display_name`, `pr_url`, `mtime`, and `folder_mtime` from status JSON. The task list hides the slug in favor of the id/name columns, using the slug as the name fallback when display generation has not succeeded or a legacy task has not been backfilled. Detail views keep the slug visible beside `#id display_name`. Filtering still matches the slug and now also matches display name and stringified id.
+
+The task grid has a fixed PR column between id and display name. Rows with no parseable pull-request URL render `—`; rows whose `pr_url` ends in `/pull/<number>` render `#<number>` via [[modules/pr]]. When stdout is a TTY, the number is wrapped in an OSC 8 hyperlink by `Hive::Tui::Views::Hyperlink`; invalid or non-http URLs fall back to the plain label. The PR column does not drop under narrow-width layout branches, so very small terminals first hide stage and status before sacrificing the PR signal.
 
 The grid view derives its visible snapshot through scope, slug/name/id filter, and `Snapshot#without_old_archived`. That drops `9-done` rows older than 3 days by row `mtime` (the same state-file timestamp rendered as task age), falling back to `folder_mtime` only for legacy payloads. Marker state is intentionally ignored: complete, unresolved, and markerless done rows all hide by the same age rule. Rows with neither timestamp fail open and stay visible. Cursor movement and `BubbleModel#current_row` use the same filtered projection, so keystrokes cannot dispatch against a hidden row. The default footer does not surface the hidden-archive count; `z` opens the Archive pane when the operator wants the unfiltered archive list. The Archive pane itself renders directly from the unfiltered snapshot and therefore lists every `9-done` task regardless of age.
 
@@ -223,7 +225,7 @@ The grid still preserves the established direct paths where the right answer is 
 - `recover_execute` rows keep the old findings/recovery hint; there is no autofix detail action in v1.
 - `REVIEW_ERROR phase=fix reason=fix_status_check_failed` and manual-only `ERROR` reasons such as `ensure_clean_on_exit_failed` refuse automated recovery and point the operator at `Open in agent`; clearing those markers without repairing the worktree would reproduce the same failure.
 
-`recover_review` rows show the observed recovery cause in the status column (for example `triage_failed` from `<!-- REVIEW_ERROR phase=triage reason=triage_failed pass=2 -->`, or `stale pass=N` for a `REVIEW_STALE` max_passes-hit row that carries the runner's pass attr) instead of the generic `Needs recovery` label; control bytes and ANSI CSI escapes embedded in the reason are stripped through `Hive::Tui::Text.sanitize` before render so a stdout-tail snippet captured into the marker cannot corrupt column alignment or hijack the cursor. The recovery implementation sequences the documented CLI recovery flow on a background worker thread (mirroring `auto_heal_kill_class_errors` so the bubbletea render loop never blocks on `run_quiet!`'s 30 s upper bound): first `hive markers clear <folder> --name REVIEW_ERROR|REVIEW_CI_STALE`, guarded with one observed `--match-attr` when available, then `hive run <folder>` in the normal background-spawn path. Grid Enter now opens red-status detail for ambiguous `REVIEW_ERROR` / `REVIEW_CI_STALE` rows; Enter inside that detail view starts this recovery. `REVIEW_STALE` uses the same clear+rerun path in two retryable cases:
+`recover_review` rows show the observed recovery cause in the status column (for example `merge_conflict` from `<!-- REVIEW_ERROR phase=triage reason=merge_conflict pass=2 -->`, or `stale pass=N` for a `REVIEW_STALE` max_passes-hit row that carries the runner's pass attr) instead of the generic `Needs recovery` label; control bytes and ANSI CSI escapes embedded in the reason are stripped through `Hive::Tui::Text.sanitize` before render so a stdout-tail snippet captured into the marker cannot corrupt column alignment or hijack the cursor. The recovery implementation sequences the documented CLI recovery flow on a background worker thread (mirroring `auto_heal_kill_class_errors` so the bubbletea render loop never blocks on `run_quiet!`'s 30 s upper bound): first `hive markers clear <folder> --name REVIEW_ERROR|REVIEW_CI_STALE`, guarded with one observed `--match-attr` when available, then `hive run <folder>` in the normal background-spawn path. Grid Enter now opens red-status detail for ambiguous `REVIEW_ERROR` / `REVIEW_CI_STALE` rows; Enter inside that detail view starts this recovery. `REVIEW_STALE` uses the same clear+rerun path in two retryable cases:
 
 - **`reason=wall_clock`**: the runner's aggregate wall-clock budget elapsed mid-phase. The operator's correct response is "give it more time and retry"; this can fire BEFORE any reviewer files exist (e.g. during Phase 1 CI-fix), and a missing-file state has no operator action to take, so retry must not require reviewer-file presence.
 - **incomplete-triage shape**: the highest pass has reviewer files but no matching `reviews/escalations-NN.md` — triage never completed and the same pass is retryable.

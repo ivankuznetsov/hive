@@ -1,8 +1,12 @@
 require "test_helper"
+require "json"
 require "hive/web/dispatcher"
 require "hive/commands/init"
 require "hive/commands/new"
+require "hive/commands/workflow"
+require "hive/workflows/project"
 require "hive/brainstorm_parser"
+require "hive/daemon/dispatch_request_queue"
 
 # Unit coverage for the web Dispatcher's gate logic: reject must derive the
 # task's *prior* gate from its current stage (not hardcode 2-brainstorm), and
@@ -24,17 +28,52 @@ class WebDispatcherTest < Minitest::Test
     [ project, slug, dest ]
   end
 
+  # The web "Repair daemon" button enqueues `hive daemon install --force` under
+  # the __global__ maintenance sentinel; the daemon consumer special-cases that
+  # project instead of dropping it as unknown_project. Only the consumer half is
+  # covered elsewhere — assert the PRODUCER's sentinel/argv so the two can't
+  # drift apart (a wrong sentinel or argv would be caught by neither suite).
+  def test_repair_daemon_enqueues_global_maintenance_install_force
+    with_tmp_global_config do
+      request_id = Hive::Web::Dispatcher.new.repair_daemon
+      refute_nil request_id, "repair_daemon must return the enqueued request id"
+
+      files = Dir[File.join(Hive::Paths.state_home, "dispatch_requests", "**", "*#{request_id}*")]
+              .select { |f| File.file?(f) }
+      refute_empty files, "repair_daemon must enqueue a dispatch request"
+      payload = JSON.parse(File.read(files.first))
+      assert_equal Hive::Daemon::DispatchRequestQueue::GLOBAL_MAINTENANCE_PROJECT,
+                   payload["project"], "repair must ride the __global__ sentinel"
+      assert_equal %w[hive daemon install --force], payload["argv"]
+      assert_equal "web_daemon_repair", payload["trigger"]
+    end
+  end
+
+  def test_repair_daemon_maps_queue_rejection_to_typed_error
+    with_tmp_global_config do
+      original = Hive::Bot::DispatchRequestWriter.method(:write!)
+      Hive::Bot::DispatchRequestWriter.define_singleton_method(:write!) do |**|
+        raise ArgumentError, "argv not allowlisted"
+      end
+      error = assert_raises(Hive::Error) { Hive::Web::Dispatcher.new.repair_daemon }
+      assert_match(/daemon install --force/, error.message,
+                   "a write-time rejection must surface CLI guidance, not run repair from a worker")
+    ensure
+      Hive::Bot::DispatchRequestWriter.define_singleton_method(:write!, original) if original
+    end
+  end
+
   def test_recover_queues_marker_clear_then_stage_rerun_as_one_sequence
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         project, slug, dest = seed_task_at(dir, "6-review")
         File.write(File.join(dest, "task.md"),
-                   "# t\n\n<!-- REVIEW_ERROR phase=triage reason=triage_failed pass=1 -->\n")
+                   "# t\n\n<!-- REVIEW_ERROR phase=triage reason=merge_conflict pass=1 -->\n")
 
         request_id = Hive::Web::Dispatcher.new.recover(
           slug: slug, project: project, stage: "6-review",
           marker: "review_error",
-          attrs: { "phase" => "triage", "reason" => "triage_failed", "pass" => "1" }
+          attrs: { "phase" => "triage", "reason" => "merge_conflict", "pass" => "1" }
         )
 
         requests = Dir[File.join(Hive::Paths.state_home, "dispatch_requests", "**", "*#{request_id}*")]
@@ -62,7 +101,7 @@ class WebDispatcherTest < Minitest::Test
         Hive::Web::Dispatcher.new.recover(
           slug: "stuck-260612-bbbb", project: "p", stage: "6-review",
           marker: "review_error",
-          attrs: { "phase" => "triage", "reason" => "triage_failed", "pass" => "1" }
+          attrs: { "phase" => "triage", "reason" => "merge_conflict", "pass" => "1" }
         )
       end
 
@@ -98,6 +137,26 @@ class WebDispatcherTest < Minitest::Test
     end
   end
 
+  # Web recover threads the row's workflow so a non-coding task retries via the
+  # universal `hive run --stage` instead of falling to a coding retry verb (or
+  # an invalid `hive run --from`). All other recover tests use coding rows.
+  def test_recover_uses_hive_run_for_a_generic_workflow_row
+    with_tmp_global_config do
+      request_id = Hive::Web::Dispatcher.new.recover(
+        slug: "generic-260620-aaaa", project: "p", stage: "2-gather",
+        marker: "error", attrs: {}, workflow: "research"
+      )
+
+      contents = Dir[File.join(Hive::Paths.state_home, "**", "*#{request_id}*")]
+                 .select { |f| File.file?(f) }
+                 .map { |f| File.read(f) }.join("\n")
+
+      assert_includes contents, "2-gather", "the generic rerun must target the generic stage dir"
+      assert_includes contents, "--stage", "generic rerun scopes by --stage"
+      refute_includes contents, "--from", "generic `hive run` must never use --from"
+    end
+  end
+
   def test_answer_questions_requires_an_awaiting_brainstorm
     Dir.mktmpdir("no-brainstorm") do |dir|
       error = assert_raises(Hive::Error) do
@@ -121,6 +180,60 @@ class WebDispatcherTest < Minitest::Test
         assert_includes File.read(File.join(inbox.first, "idea.md")), "from the web composer"
       end
     end
+  end
+
+  # Seed a task pinned to a scaffolded CUSTOM workflow (inbox -> work -> done),
+  # returning [project, slug]. The descriptor lives only in the project's
+  # overlay, so the dispatcher must load it before resolving the task.
+  def seed_custom_task(dir, workflow_id)
+    capture_io { Hive::Commands::Init.new(dir).call }
+    project = File.basename(dir)
+    capture_io { Hive::Commands::Workflow.new!(workflow_id, project_root: dir) }
+    capture_io { Hive::Commands::New.new(project, "custom dispatcher probe", workflow: workflow_id).call }
+    inbox = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "*")].first
+    [ project, File.basename(inbox) ]
+  end
+
+  # The in-process drop/approve overlay-registration path must work on a
+  # CUSTOM-workflow stage dir, not just coding stages — a regression in
+  # per-project overlay loading on a generic stage would otherwise slip the
+  # dispatcher unit suite (it's only indirectly covered by the CLI-driven e2e).
+  def test_drop_removes_a_custom_workflow_task
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        project, slug = seed_custom_task(dir, "flow")
+        Hive::Workflows::Project.reset! # fresh process: no overlay pre-loaded
+
+        capture_io do
+          Hive::Web::Dispatcher.new.drop(slug: slug, project: project, from: "1-inbox")
+        end
+
+        assert_empty Dir[File.join(dir, ".hive-state", "stages", "*", slug)],
+                     "drop must remove a custom-workflow task by loading its project overlay"
+      end
+    end
+  ensure
+    Hive::Workflows::Project.reset!
+  end
+
+  def test_approve_advances_a_custom_workflow_task
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        project, slug = seed_custom_task(dir, "flow")
+        Hive::Workflows::Project.reset!
+
+        capture_io do
+          Hive::Web::Dispatcher.new.approve(slug: slug, project: project, from: "1-inbox")
+        end
+
+        assert File.directory?(File.join(dir, ".hive-state", "stages", "2-work", slug)),
+               "approve must advance a custom-workflow task from 1-inbox to its 2-work stage"
+        refute File.directory?(File.join(dir, ".hive-state", "stages", "1-inbox", slug)),
+               "the source stage folder must not survive an advance"
+      end
+    end
+  ensure
+    Hive::Workflows::Project.reset!
   end
 
   def test_drop_hard_deletes_the_task_folder
@@ -321,6 +434,33 @@ Already answered
 
       assert_equal "plan", plan[:argv][1], "ready_to_plan must map to `plan`"
       assert_equal "develop", develop[:argv][1], "ready_to_develop must map to `develop`"
+    end
+  end
+
+  def test_dispatch_rejects_ready_to_advance_because_approve_is_not_queue_routable
+    with_tmp_global_config do
+      # `ready_to_advance`'s verb is `hive approve`, which the daemon queue
+      # allowlist excludes (approve is spawned in-process). The web drives
+      # generic advance through the in-process `#approve` method, so the
+      # queue `dispatch` must NOT silently accept it.
+      assert_raises(Hive::Error) do
+        Hive::Web::Dispatcher.new.dispatch(
+          slug: "generic-task", project: "demo", action: "ready_to_advance", stage: "2-gather"
+        )
+      end
+    end
+  end
+
+  def test_dispatch_maps_generic_ready_to_run_to_run_with_stage
+    with_tmp_global_config do
+      # `hive run` has no --from — the web dispatcher must scope it with
+      # --stage, not build an invalid `hive run --from`.
+      result = Hive::Web::Dispatcher.new.dispatch(
+        slug: "generic-task", project: "demo", action: "ready_to_run", stage: "1-intake"
+      )
+
+      assert_equal [ "hive", "run", "generic-task", "--project", "demo", "--stage", "1-intake" ],
+                   result[:argv]
     end
   end
 end

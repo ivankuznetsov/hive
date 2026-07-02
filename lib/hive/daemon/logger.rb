@@ -26,7 +26,7 @@ module Hive
         tick_begin
         tick_end
         status_failure
-        status_schema_skew
+        status_warning
         dispatched
         skipped
         debouncing
@@ -50,6 +50,10 @@ module Hive
         marker_heal_failed
         marker_heal_exhausted
         marker_heal_observer_missing
+        auto_retry
+        auto_retry_skipped
+        auto_retry_exhausted
+        auto_retry_failed
         display_name_backfill
         update_available
         update_check_no_result
@@ -74,6 +78,8 @@ module Hive
         digest_catchup_skipped
         digest_failure_backoff
         digest_state_unreadable
+        answer_digest_failure_backoff
+        answer_digest_state_unreadable
         fatal
       ].freeze
 

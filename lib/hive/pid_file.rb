@@ -5,7 +5,39 @@ require "hive/lock"
 module Hive
   # Shared PID-file helpers for long-running hive-owned processes.
   # Consumers provide a `pid_file` method and include this module.
+  #
+  # The module-level `read`/`alive?` below are the stateless variant: they
+  # take an explicit path (or injectable process) and apply no ownership
+  # verification, for callers that merely read *another* process's PID file
+  # (e.g. `hive bot stop/status`, `hive pairing approve` signalling the bot).
   module PidFile
+    # Probe whether `pid` names a live process. EPERM means the process
+    # exists but is owned by another user — still alive. The `process:`
+    # seam lets callers inject a stub in tests.
+    def self.alive?(pid, process: Process)
+      process.kill(0, pid)
+      true
+    rescue Errno::ESRCH
+      false
+    rescue Errno::EPERM
+      true
+    end
+
+    # Parse a YAML PID file into a Hash. Returns {} when the file is absent
+    # or its top-level document is not a mapping. Lets read/parse errors
+    # (Psych::Exception, SystemCallError, IOError) propagate so the caller
+    # can apply its own corruption policy.
+    def self.read(path)
+      return {} unless File.exist?(path)
+
+      # Permit Time so this stateless reader matches the writer and the
+      # instance-level `read_pid_file_payload`: a daemon PID file embeds a
+      # `process_start_time`/`started_at` Time, which would otherwise raise
+      # Psych::DisallowedClass here. Strictly more permissive, never less safe.
+      data = YAML.safe_load(File.read(path), permitted_classes: [ Time ]) || {}
+      data.is_a?(Hash) ? data : {}
+    end
+
     def read_live_pid
       return nil unless File.exist?(pid_file)
 
@@ -18,13 +50,11 @@ module Hive
       pid
     end
 
+    # Delegate to the module-level `alive?` so the liveness/EPERM/ESRCH policy
+    # lives in exactly one place — a future change to signal probing touches one
+    # method, not two that must be kept byte-identical.
     def pid_alive?(pid)
-      Process.kill(0, pid)
-      true
-    rescue Errno::ESRCH
-      false
-    rescue Errno::EPERM
-      true
+      Hive::PidFile.alive?(pid)
     end
 
     def pid_ownership(payload, pid)
@@ -43,6 +73,11 @@ module Hive
       ownership == :verified || ownership == :legacy
     end
 
+    # Deliberately NOT a thin wrapper over the stateless `self.read`: this
+    # ownership-aware reader has a different contract that callers depend on —
+    # it returns nil (not {}) when the file is absent, swallows parse errors to
+    # nil instead of propagating them, and still accepts a legacy bare-integer
+    # PID file. Collapsing it into `self.read` would shift all three behaviors.
     def read_pid_file_payload
       return nil unless File.exist?(pid_file)
 

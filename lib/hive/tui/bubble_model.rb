@@ -112,11 +112,13 @@ module Hive
         hive_model: Hive::Tui::Model.initial,
         dispatch: ->(_msg) { },
         clipboard_probe: ->(pasted_text:) { Hive::Tui::Clipboard.probe(pasted_text: pasted_text) },
+        archive_refresh: -> { },
         update_state: nil
       )
         @hive_model = hive_model
         @dispatch = dispatch
         @clipboard_probe = clipboard_probe
+        @archive_refresh = archive_refresh
         # Shared update-check state (written by the daemon). Read on a short
         # TTL so the footer reflects a new nudge without re-reading the file
         # on every render frame. Lazily constructed so tests and non-daemon
@@ -412,6 +414,9 @@ module Hive
           open_red_status_detail(message)
         when Hive::Tui::Messages::OpenTokenStats
           open_token_stats
+        when Hive::Tui::Messages::OpenArchivePane
+          @archive_refresh.call
+          nil
         when Hive::Tui::Messages::RecoverReview
           recover_review(message.row, force: message.force)
         when Hive::Tui::Messages::RecoverError
@@ -1734,9 +1739,9 @@ module Hive
 
       def stage_extra_for(row)
         case row.stage.to_s
-        when "2-brainstorm" then read_capped(File.join(row.folder, "brainstorm.md"))
-        when "3-plan" then read_capped(File.join(row.folder, "plan.md"))
-        when "4-execute" then tail_capped(latest_execute_log_for(row))
+        when "2-brainstorm" then read_capped(File.join(row.folder, "brainstorm.md")) # coding-scoped: TUI preview for coding brainstorm artifact
+        when "3-plan" then read_capped(File.join(row.folder, "plan.md")) # coding-scoped: TUI preview for coding plan artifact
+        when "4-execute" then tail_capped(latest_execute_log_for(row)) # coding-scoped: TUI preview for coding execute logs
         else nil
         end
       rescue Errno::ENOENT, Errno::EACCES, Errno::EISDIR, Errno::ENXIO, SystemCallError
@@ -2393,6 +2398,9 @@ module Hive
         return :silent unless exit_code == 0
         return :silent unless row.action_key == "needs_input"
 
+        # coding-scoped (block): the TUI's per-stage outcome panes are coding
+        # presentation work; a generic workflow renders no bespoke pane and
+        # falls through to :silent.
         case row.stage.to_s
         when "2-brainstorm"
           brainstorm_outcome(row, path, changed)

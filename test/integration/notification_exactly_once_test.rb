@@ -24,8 +24,8 @@ class HiveBotNotificationExactlyOnceTest < Minitest::Test
       @messages = []
     end
 
-    def send_message(chat_id:, text:, reply_markup: nil)
-      @messages << { chat_id: chat_id, text: text, reply_markup: reply_markup }
+    def send_message(chat_id:, text:, reply_markup: nil, parse_mode: nil)
+      @messages << { chat_id: chat_id, text: text, reply_markup: reply_markup, parse_mode: parse_mode }
     end
   end
 

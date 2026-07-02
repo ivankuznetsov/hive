@@ -63,6 +63,21 @@ class E2EArtifactCaptureTest < Minitest::Test
     end
   end
 
+  def test_sandbox_tree_excludes_top_level_git_metadata
+    with_dirs do |scenario_dir, sandbox, run_home|
+      assert system("git", "-C", sandbox, "init", "-b", "master", "--quiet"),
+        "expected git init fixture setup to succeed"
+      File.write(File.join(sandbox, "visible.txt"), "visible\n")
+
+      collect(scenario_dir, sandbox, run_home)
+
+      tree = File.read(File.join(scenario_dir, "sandbox-tree.txt"))
+      assert_includes tree, "visible.txt\n"
+      refute tree.lines.any? { |line| line == ".git\n" || line.start_with?(".git/") },
+        "sandbox-tree.txt must not publish git metadata paths"
+    end
+  end
+
   def test_log_tails_are_last_n_lines_per_log_file
     with_dirs do |scenario_dir, sandbox, run_home|
       logs_root = File.join(sandbox, ".hive-state", "logs", "myslug")
@@ -183,6 +198,26 @@ class E2EArtifactCaptureTest < Minitest::Test
       refute paths.any? { |path| path.start_with?("tui-subprocess-live/") },
         "manifest should publish only curated tui-subprocess copies, not live logs"
       assert_includes paths, "tui-subprocess/hive-tui-spawn-LIVE.log"
+    end
+  end
+
+  def test_manifest_includes_hidden_state_files
+    with_dirs do |scenario_dir, sandbox, run_home|
+      task_dir = File.join(sandbox, ".hive-state", "stages", "2-brainstorm", "task-1")
+      FileUtils.mkdir_p(task_dir)
+      lock_path = File.join(task_dir, ".lock")
+      File.write(lock_path, "pid: 123\n")
+
+      collect(scenario_dir, sandbox, run_home)
+
+      copied_lock = File.join(scenario_dir, "state", "2-brainstorm", "task-1", ".lock")
+      assert File.exist?(copied_lock), "hidden task lock should be copied into the artifact bundle"
+
+      manifest = JSON.parse(File.read(File.join(scenario_dir, "manifest.json")))
+      lock_entry = manifest.fetch("files").find { |file| file.fetch("path") == "state/2-brainstorm/task-1/.lock" }
+      assert lock_entry, "manifest should include copied hidden state files"
+      assert_equal File.size(copied_lock), lock_entry.fetch("size")
+      assert_equal Digest::SHA256.file(copied_lock).hexdigest, lock_entry.fetch("sha256")
     end
   end
 

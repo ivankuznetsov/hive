@@ -1,21 +1,22 @@
+require "hive/workflows/registry"
+
 module Hive
-  # Single source of truth for the stage list. Consumers (GitOps init, Status
-  # ordering, Run#next_stage_dir, Approve resolution) all read from here so
-  # adding or renaming a stage is a one-file change.
+  # Public source of truth for the CODING stage list. `DIRS` derives from the
+  # default (coding) workflow descriptor, so renaming a coding stage flows
+  # through to every coding-pinned consumer (GitOps init, coding status
+  # ordering). The generic `Run#next_stage_dir` and `Approve` resolution paths
+  # no longer read from here — they route per-task through `task.workflow` and
+  # scan the runtime union via `Hive::Workflows.all_stage_dirs` (U6) so a
+  # non-coding workflow's stages resolve correctly.
   module Stages
-    DIRS = %w[
-      1-inbox
-      2-brainstorm
-      3-plan
-      4-execute
-      5-open-pr
-      6-review
-      7-artifacts
-      8-finalize
-      9-done
-    ].freeze
-    NAMES = DIRS.map { |d| d.split("-", 2).last }.freeze
-    SHORT_TO_FULL = DIRS.each_with_object({}) { |d, h| h[d.split("-", 2).last] = d }.freeze
+    # Read the canonical short name/dir straight from the descriptor's
+    # structured `Stage#name`/`Stage#dir` rather than re-deriving the short name
+    # by string-splitting the formatted dir — the descriptor already exposes
+    # both, so a split-round-trip would just risk drifting from the source.
+    DIRS = Hive::Workflows::Registry.default.stages.map(&:dir).freeze
+    NAMES = Hive::Workflows::Registry.default.stages.map(&:name).freeze
+    SHORT_TO_FULL = Hive::Workflows::Registry.default.stages
+                                             .each_with_object({}) { |stage, h| h[stage.name] = stage.dir }.freeze
 
     # Slug shape for task-folder names (see Task::PATH_RE / Migrate::SLUG_RE).
     # Single source of truth so the legacy-stage detector in
@@ -60,7 +61,7 @@ module Hive
       DIRS[current_array_idx - 1]
     end
 
-    # Resolve a user-provided stage string ("3-plan" or "plan") to a
+    # Resolve a user-provided stage string ("3-plan" or "plan") to a # not-a-stage-ref: documentation of accepted input shape
     # canonical DIRS entry, or nil if neither shape matches.
     def resolve(name)
       return name if DIRS.include?(name)

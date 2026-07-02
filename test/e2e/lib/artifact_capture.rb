@@ -191,7 +191,10 @@ module Hive
 
         Dir.chdir(@sandbox_dir) do
           Dir.glob("**/*", File::FNM_DOTMATCH)
-            .reject { |path| path == "." || path == ".." || path.include?("/.git/") }
+            .reject do |path|
+              path == "." || path == ".." || path == ".git" ||
+                path.start_with?(".git/") || path.include?("/.git/")
+            end
             .sort
             .join("\n") + "\n"
         end
@@ -218,7 +221,9 @@ module Hive
       end
 
       def write_manifest
-        files = Dir[File.join(@scenario_dir, "**", "*")].select { |path| File.file?(path) }.sort
+        files = Dir.glob(File.join(@scenario_dir, "**", "*"), File::FNM_DOTMATCH)
+          .select { |path| File.file?(path) }
+          .sort
         file_entries = files.filter_map { |path| manifest_entry(path) }
         manifest = {
           "schema" => "hive-e2e-manifest",

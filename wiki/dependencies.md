@@ -3,7 +3,7 @@ title: Dependencies
 type: dependencies
 source: Gemfile, hive.gemspec, Gemfile.lock, web/Gemfile, web/Gemfile.lock
 created: 2026-04-25
-updated: 2026-06-14
+updated: 2026-06-25
 tags: [dependencies, gems, runtime]
 ---
 
@@ -11,12 +11,14 @@ tags: [dependencies, gems, runtime]
 
 `hive.gemspec` owns runtime gem constraints; `Gemfile` uses `gemspec`
 to pull those constraints into Bundler, then adds development/test-only
-tools. The current checkout is `0.3.0`: `lib/hive.rb`, root
+tools. The current checkout is `0.3.1`: `lib/hive.rb`, root
 `Gemfile.lock`, and `web/Gemfile.lock` all pin the local path gem as
-`hive-cli (0.3.0)`. Recent release lockfile commits `c7d8aa4f`
-(`0.2.4`) and `8146d481` (`0.3.0`) changed only local path gem
-metadata; they did not change third-party gem constraints or resolved
-third-party versions.
+`hive-cli (0.3.1)`. Commit `9efbca2a` is the release-prep sync that bumped
+both lockfiles alongside public installer URLs and the changelog. Recent root
+bundle dependency commits also bumped RuboCop from 1.87 to 1.88, Brakeman from
+8.0.4 to 8.0.5, and `concurrent-ruby` from 1.3.6 to 1.3.7; the separate web
+bundle still resolves its own Brakeman 8.0.4 and `concurrent-ruby` 1.3.6 locks
+as of this refresh.
 
 ## Runtime gems
 
@@ -74,9 +76,9 @@ Why Bubble Tea + Lipgloss (over the original curses choice): MVU keeps every sta
 | `minitest` | `~> 6.0` (locked 6.0.6) | Test framework — all tests under `test/` extend `Minitest::Test`. Chosen over RSpec for lower ceremony. Bumped 5.x → 6.0 in commit `429ff4c`. |
 | `rake` | `~> 13.0` (locked 13.4.2) | Task runner — `Rakefile` defines `rake test` (default) using `Rake::TestTask`. |
 | `json_schemer` | `~> 2.5` (locked 2.5.0) | Test/e2e JSON Schema validator for `schemas/hive-*.json` contracts. Used by `test/e2e/lib/json_validator.rb`; not loaded by runtime commands. |
-| `rubocop` | `~> 1.87` (locked 1.87.0) | Linter — config in `.rubocop.yml`. `bin/rubocop` is the canonical lint command. |
+| `rubocop` | `~> 1.88` (locked 1.88.0 in the root bundle) | Linter — config in `.rubocop.yml`. `bin/rubocop` is the canonical lint command. |
 | `rubocop-rails-omakase` | `~> 1.1` (locked 1.1.0) | Rails/Omakase lint rules layered onto RuboCop. Declared in the root dev/test bundle and mirrored in the web bundle. |
-| `brakeman` | `~> 8.0` (locked 8.0.4) | Static security scanner. `CONTRIBUTING.md` lists `bundle exec brakeman --no-pager`; the web app also has `web/bin/brakeman`. |
+| `brakeman` | `~> 8.0` (locked 8.0.5 in the root bundle; 8.0.4 in the web bundle) | Static security scanner. `CONTRIBUTING.md` lists `bundle exec brakeman --no-pager`; the web app also has `web/bin/brakeman`. |
 | `bundler-audit` | `~> 0.9` (locked 0.9.3) | Gem vulnerability audit tool. `CONTRIBUTING.md` lists `bundle exec bundler-audit check --update`; the web app also wraps it with `web/bin/bundler-audit`. |
 
 Commit `b0a31edf` removed the root `rack-test` declaration from `Gemfile`,
@@ -99,6 +101,7 @@ The codebase leans heavily on stdlib (no extra gems for these):
 | `File.open(... LOCK_EX \| EXCL)` | Per-task lock acquisition | `lock.rb` |
 | `YAML.safe_load` | All config / lock / pointer files | `config.rb`, `lock.rb`, `task.rb`, `worktree.rb` |
 | `ERB` (`trim_mode: "-"`) | Prompt and config templates | `commands/init.rb`, `commands/new.rb`, `stages/base.rb` |
+| `Net::HTTP` | Screenote OAuth discovery/registration/token/revoke, MCP project listing, and live-test signed upload PUTs without adding a gem dependency | `screenote/oauth_client.rb`, `screenote/mcp_client.rb`, `commands/connect.rb`, `commands/disconnect.rb` |
 | `SecureRandom.hex` | 4-char slug suffix and unique global-config tempfile names | `commands/new.rb`, `config.rb` |
 | `Digest::SHA256` | Reviewer-tamper detection on `plan.md` / `worktree.yml` | `stages/execute.rb` |
 | `Time.now.utc.iso8601` | Lock timestamps, marker `started=`, `worktree.yml#created_at` | `lock.rb`, `agent.rb`, `worktree.rb` |
@@ -121,7 +124,10 @@ These are not gems but the CLI tools the runtime invokes:
 | `tmux` | 3.0+ (3.6a verified locally) | runtime dependency when `claude.mode: tmux`; also used by TUI/e2e tests on private sockets |
 | `qmd` | installed from `@tobilu/qmd` when npm is available | managed llm-wiki semantic search/index maintenance; installed by `install.sh` into `${XDG_DATA_HOME:-~/.local/share}/hive/qmd` and discovered by generated wiki scripts through `HIVE_QMD_BIN`, PATH, or Hive's managed install path |
 | `npm` | any recent npm with Node.js | installer for the QMD npm package; Hive reports missing npm but does not install Node.js/npm itself |
-| `asciinema` | 2.4+ (3.x accepted with v2 output flag) | test-time optional; `test/e2e/lib/asciinema_driver.rb` records TUI failure casts when installed |
+| `asciinema` | 2.4+ (3.x accepted with v2 output flag) | optional TUI capture support; `test/e2e/lib/asciinema_driver.rb` records TUI failure casts when installed. Records a `.cast` only — rendering it to a terminal-demo GIF needs `agg` (or `vhs`), which the hivebox image does NOT ship |
+| `ffmpeg` | any recent | media conversion for manual `web/script/record_box_demo.rb` output (webm/mp4). NOT a terminal-GIF encoder: it cannot read an asciinema `.cast`, so it does not turn TUI recordings into GIFs on its own |
+| `agg` / `vhs` | not shipped in the hivebox image | the terminal-GIF encoders for artifacts-stage TUI/CLI demos (`agg` renders an asciinema `.cast`; `vhs` records straight to GIF). Absent in-box, so a TUI/CLI demo degrades to a `failed` capture unless the agent installs one |
+| agent-browser or Playwright | project/environment specific | optional UI visual capture support for the artifacts prompt; absence records a failed media manifest rather than failing the stage |
 
 `HIVE_CLAUDE_BIN` env var overrides the `claude` binary, used by tests with `test/fixtures/fake-claude` and `fake-gh`.
 
@@ -130,7 +136,7 @@ These are not gems but the CLI tools the runtime invokes:
 `Gemfile` declares `ruby "~> 3.4"`. `hive.gemspec` requires Ruby
 `>= 3.4.0` for the packaged gem. `.rubocop.yml` pins
 `TargetRubyVersion: 3.4`. `Gemfile.lock` records Ruby 3.4.7, Bundler
-2.7.2, and the current local path gem as `hive-cli (0.3.0)`.
+2.7.2, and the current local path gem as `hive-cli (0.3.1)`.
 
 ## Backlinks
 

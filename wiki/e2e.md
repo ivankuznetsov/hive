@@ -3,7 +3,7 @@ title: Agentic E2E Suite
 type: reference
 source: test/e2e/, bin/hive-e2e, Rakefile
 created: 2026-04-29
-updated: 2026-06-11
+updated: 2026-06-21
 tags: [test, e2e, tui, artifacts]
 ---
 
@@ -30,10 +30,19 @@ bin/hive-e2e clean              # old run cleanup
 | `0` | all selected scenarios passed |
 | `1` | one or more scenarios failed, or an unclassified harness error occurred |
 | `64` | usage error: unknown command, missing required Thor arguments, unsafe replay path, invalid retention window, or no matching scenarios |
-| `78` | preflight/config failure: missing `tmux`, missing `asciinema` when required, or missing replay repro artifact |
+| `78` | preflight/config failure: missing `tmux`, missing `asciinema` when required, missing replay repro artifact, or a replay `repro.sh` that is not a regular executable file |
 
-Thor is started exactly once with `debug: true` so `Thor::Error` re-raises into the executable's outer rescue instead of taking Thor's built-in human path; a second `Binary.start` call would rerun successful commands and emit duplicate JSON envelopes. That outer rescue maps both human and `--json` usage failures to `64`. With `--json`, usage and preflight failures emit a `hive-e2e-error` envelope on stdout with `ok: false`, `error_kind`, `message`, and `exit_code`; human mode prefixes prose errors with `hive-e2e:` on stderr and exits with the same code. Top-level `--version` / `-v` is intercepted before Thor dispatch so binary smoke tests get only `Hive::VERSION`.
+Thor is started exactly once with `debug: true` so `Thor::Error` re-raises into the executable's outer rescue instead of taking Thor's built-in human path; a second `Binary.start` call would rerun successful commands and emit duplicate JSON envelopes. That outer rescue maps both human and `--json` usage failures to `64`. With `--json`, usage and preflight failures emit a `hive-e2e-error` envelope on stdout with `ok: false`, `error_kind`, `message`, and `exit_code`; human mode prefixes prose errors with `hive-e2e:` on stderr and exits with the same code. Replay artifact failures are split: a missing `repro.sh` emits `error_kind: "missing_repro"`, while an existing but non-executable `repro.sh` emits `error_kind: "unusable_repro"`; both exit `78`. Top-level `--version` / `-v` is intercepted before Thor dispatch so binary smoke tests get only `Hive::VERSION`.
 Successful `--json` commands emit exactly one top-level JSON document on stdout, including `list --json` and `clean --json`, so wrapper callers can parse stdout directly.
+
+`bin/hive-e2e replay RUN_ID SCENARIO` validates safe run/scenario basenames,
+resolves the stored `scenarios/<scenario>/repro.sh` under the selected run
+directory, and only `exec`s it when it is both a regular file and executable.
+Missing scripts return `error_kind: missing_repro`; existing but unusable
+scripts, including symlinked repro entries (even dangling symlinks, which are a
+present-but-unusable repro entry rather than a missing one), return
+`error_kind: unusable_repro`. Both are config failures (`78`) and use the
+`hive-e2e-error` envelope in `--json` mode.
 
 `bin/hive-e2e` is a checkout-only harness entrypoint, not a packaged
 `hive-cli` executable. It handles top-level `--version` / `-v` before Thor
@@ -48,7 +57,10 @@ as `--json=1` or `--json=yes` are usage errors before the value can become the
 default `run` pattern. Wrapper-owned error formatting checks the last
 recognized JSON boolean flag rather than any truthy flag, so duplicate flags
 with a final false form, such as `--json --no-json`, emit the human
-`hive-e2e:` stderr path.
+`hive-e2e:` stderr path. Invalid-byte `ARGV` entries are rejected before those
+rewrites and before Thor dispatch, and are reported as usage errors (`64`);
+JSON callers receive the normal `hive-e2e-error` envelope with
+`error_kind: "usage"`.
 
 ## Layout
 

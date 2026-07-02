@@ -151,10 +151,18 @@ module Hive
         scenario_root = PathSafety.contained_path!(run_dir, "scenarios", "scenario root")
         scenario_dir = PathSafety.contained_path!(scenario_root, scenario, "scenario dir")
         script = PathSafety.contained_path!(scenario_dir, "repro.sh", "repro script")
-        unless File.exist?(script)
+        unless File.exist?(script) || File.symlink?(script)
           exit_with_error(
             "Run ##{run_id} scenario #{scenario} has no repro.sh; the run may have completed successfully (#{script})",
             error_kind: "missing_repro",
+            exit_code: BinaryExit::CONFIG
+          )
+        end
+        unless artifact_path_without_symlinks?(run_dir, scenario_root, scenario_dir, script) &&
+               File.lstat(script).file? && File.executable?(script)
+          exit_with_error(
+            "Run ##{run_id} scenario #{scenario} repro.sh is not executable (#{script})",
+            error_kind: "unusable_repro",
             exit_code: BinaryExit::CONFIG
           )
         end
@@ -206,6 +214,12 @@ module Hive
 
       def tui_scenario?(scenario)
         scenario.steps.any? { |step| %w[tui_keys tui_expect tui_refute wait_subprocess].include?(step.kind) }
+      end
+
+      def artifact_path_without_symlinks?(*paths)
+        paths.none? { |path| File.lstat(path).symlink? }
+      rescue Errno::ENOENT
+        false
       end
 
       def exit_with_error(error, error_kind:, exit_code:)
@@ -276,6 +290,13 @@ def json_requested?(argv)
   JSON_TRUE_OPTIONS.include?(argv.reverse.find { |arg| JSON_BOOLEAN_OPTIONS.include?(arg) })
 end
 
+def reject_invalid_argv_encoding!(argv)
+  idx = argv.index { |arg| !arg.valid_encoding? }
+  return unless idx
+
+  raise Thor::MalformattedArgumentError, "invalid byte sequence in argument #{idx + 1}"
+end
+
 def reject_unsupported_json_assignments!(argv)
   arg = argv.find { |candidate| candidate.start_with?("--json=") && !JSON_BOOLEAN_OPTIONS.include?(candidate) }
   return unless arg
@@ -296,6 +317,7 @@ def normalize_leading_global_options!(argv)
 end
 
 begin
+  reject_invalid_argv_encoding!(ARGV)
   reject_unsupported_json_assignments!(ARGV)
   normalize_leading_global_options!(ARGV)
   rewrite_help_flag!(ARGV)

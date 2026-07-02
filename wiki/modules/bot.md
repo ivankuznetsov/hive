@@ -3,12 +3,12 @@ title: Hive::Bot
 type: module
 source: lib/hive/bot/
 created: 2026-05-14
-updated: 2026-06-12
+updated: 2026-06-30
 tags: [bot, telegram, module, mobile]
 ---
 
 **TLDR**: `Hive::Bot::*` is the Telegram operator surface for daemon
-human-input gates. The supervisor has three loops: Telegram long-poll,
+human-input gates and first-contact pairing. The supervisor has three loops: Telegram long-poll,
 `hive status --json` notification polling, and child reaping. Pure
 routing/parsing logic is split away from Telegram, filesystem,
 and subprocess I/O. (The earlier "Codex draft-assist" brainstorm flow —
@@ -20,23 +20,29 @@ answering is now deterministic Q-by-Q.)
 | Module | File | Purpose |
 |--------|------|---------|
 | `Supervisor` | `lib/hive/bot/supervisor.rb` | Long-running loop. Polls Telegram, runs status ticks, reaps child commands, handles TERM/INT/HUP, writes last-seen update IDs. |
-| `Telegram` | `lib/hive/bot/telegram.rb` | Thin `telegram-bot-ruby` wrapper for `getUpdates`, `sendMessage`, message splitting, markdown escaping, typed `Update` records, media/voice metadata extraction, `getFile`, and file download. |
+| `Telegram` | `lib/hive/bot/telegram.rb` | Thin `telegram-bot-ruby` wrapper for `getUpdates`, `sendMessage`, message splitting, markdown escaping, typed `Update` records, media/voice metadata extraction, `getFile`, and file download. Benign `getUpdates` transport errors (`Faraday::TimeoutError`, `Faraday::ConnectionFailed`, `Net::ReadTimeout`) still emit `poll_failure`, but at `level=debug category=noise`; other poll errors remain warnings. |
+| `PollHealth` | `lib/hive/bot/poll_health.rb` | Small injectable health tracker for the Telegram long-poll loop. It escalates a sustained outage once per unhealthy episode via `poll_unhealthy` after the consecutive-failure or no-success silence threshold, then re-arms after the next successful poll. |
+| `Format` | `lib/hive/bot/format.rb` | Telegram-safe HTML helpers for status/queue and notification messages: text/attribute escaping, control-character stripping, http(s) URL validation, and `pr_url` → clickable `#<number>` links via [[modules/pr]]. |
 | `Router` | `lib/hive/bot/router.rb` | Closed-enum intent classifier and pure dispatch into slash/callback/free-text handlers. Performs allowlist auth before any handler sees an update. The first-contact `/start` command has its own `:slash_start` intent so a newly connected Telegram chat receives a welcome instead of the unknown-command hint. Idea capture includes media updates, voice-note transcription/edit intents, awaiting-text drafts, project-pick callbacks, transcript confirm/discard callbacks, and Done/Skip callbacks. Voice notes sent during an active or reattached `/answer` conversation route to the transcription action with answer context instead of being treated as blank free text. Legacy `path_a_yes:` / `path_a_type:` callbacks classify only to retirement replies; retired `codex_*` callback data has no live intent. |
+| `PairingStore` | `lib/hive/bot/pairing_store.rb` | File-backed pending Telegram pairing requests under `<state_home>/.bot.pairings.json`. Codes are 8-character `A-Z`, chat-id bound, stable while pending, and expire after 24 hours. Cross-process bot/CLI writes use a sidecar flock plus atomic replace. |
+| `PairingApprovalQueue` | `lib/hive/bot/pairing_approval_queue.rb` | Owner-only approval notice queue under `<state_home>/pairing_approvals/`. The `hive pairing approve telegram <CODE>` CLI writes notices here so the running bot, which owns the Telegram token, can proactively DM approved chats. |
 | `Handlers::*` | `lib/hive/bot/handlers/` | Slash command, callback, and free-text logic returning descriptors; no direct Telegram I/O. `SlashHandlers#start` is a pure reply descriptor with a "Connected" welcome plus `/status`, `/idea`, and `/help` next steps. |
 | `IdeaDraftStore` | `lib/hive/bot/idea_draft_store.rb` | In-memory per-chat `/idea` draft state with TTL, project/text/attachment metadata, voice-origin and transcript-confirm phases, monotonic attachment counters, temp staging-dir allocation, and cleanup on clear/prune. |
 | `IdeaAttachmentPolicy` | `lib/hive/bot/idea_attachment_policy.rb` | Pure classifier for Telegram photo/document attachments. Allows jpg/jpeg/png/webp/gif/pdf/txt/md/docx, enforces count/byte caps, and normalizes extensions through `Hive::Tui::ComposerStaging`. |
 | `Transcriber` | `lib/hive/bot/transcriber.rb` | OpenAI-compatible audio transcription client for Telegram voice notes used by idea capture and audio answers. Posts `multipart/form-data` to `bot.transcription.endpoint` with `model`, retries transient failures, maps empty/high no-speech-prob results to `:no_speech`, applies `supported_languages`, and logs failures through the bot logger. |
-| `StatusWatcher` | `lib/hive/bot/status_watcher.rb` | Runs `hive status --json`, validates the envelope, returns typed task rows carrying slug/id/display_name plus project-level legacy-stage warnings. |
-| `NotificationDispatcher` | `lib/hive/bot/notification_dispatcher.rb` | Sends newly-entered waiting/recovery rows, daemon-disabled ready approvals, and project-level legacy-stage warnings through a persistent alert lifecycle store. Ready notifications are suppressed when the daemon is enabled for that project; recovery rows get one confirmation when they leave the active set, same-task recovery fingerprint changes are treated as superseded rather than recovered, and unchanged recovery rows get one reminder. **`needs_input` (brainstorm/review "waiting") pushes are suppressed for a project+slug with an active answer conversation** (`ConversationStore#active_for_slug?(slug, project:)`, injected): the operator is already answering, so a row that briefly flaps out of and back into `WAITING` (e.g. a mid-answer daemon resume) won't re-fire the "questions waiting" push. Suppression is lenient when either side lacks a project, but two fully resolved different projects sharing a slug do not cross-suppress. The first alert still fires (no conversation exists until the operator taps **Answer in chat**), error/recovery alerts are never gated this way, and a TTL-expired/abandoned conversation stops suppressing (re-engaging the operator). Suppressed rows are logged as `notification_skipped_active_conversation` and never enter the alert store, so ending the conversation can re-alert if the task is still waiting. |
+| `StatusWatcher` | `lib/hive/bot/status_watcher.rb` | Runs `hive status --json`, validates the envelope, returns typed task rows carrying slug/id/display_name/`pr_url` plus project-level legacy-stage warnings. |
+| `NotificationDispatcher` | `lib/hive/bot/notification_dispatcher.rb` | Sends newly-entered waiting/recovery rows, daemon-disabled ready approvals, and project-level legacy-stage warnings through a persistent alert lifecycle store. Ready notifications are suppressed when the daemon is enabled for that project; recovery rows get one confirmation when they leave the active set, same-task recovery fingerprint changes are treated as superseded rather than recovered, and unchanged recovery rows get one reminder. A stored recovery alert is held while the current raw snapshot still has the same project/slug/stage at `action=agent_running`; that live-agent hold prevents a stale marker suppressed by `NotificationBuilders` from producing a premature "Recovered" message while a retry is still running. Persistent `AlertStore` entries still dedupe delivery; in-memory per-dispatcher sets now separately dedupe the `notification_skipped_dedupe` and `notification_skipped_backoff` log lines so each active fingerprint logs the debug/noise skip only on state entry, after a fingerprint change, or after the row leaves and returns. **`needs_input` (brainstorm/review "waiting") pushes are suppressed for a project+slug with an active answer conversation** (`ConversationStore#active_for_slug?(slug, project:)`, injected): the operator is already answering, so a row that briefly flaps out of and back into `WAITING` (e.g. a mid-answer daemon resume) won't re-fire the "questions waiting" push. Suppression is lenient when either side lacks a project, but two fully resolved different projects sharing a slug do not cross-suppress. The first alert still fires (no conversation exists until the operator taps **Answer in chat**), error/recovery alerts are never gated this way, and a TTL-expired/abandoned conversation stops suppressing (re-engaging the operator). Suppressed rows are logged as `notification_skipped_active_conversation` and never enter the alert store, so ending the conversation can re-alert if the task is still waiting. |
 | `AlertStore` | `lib/hive/bot/alert_store.rb` | JSON sidecar for alert fingerprints, first-seen timestamps, reminder timestamps, and row snapshots. Corrupt files are renamed aside so the bot keeps running. |
-| `NotificationBuilders` | `lib/hive/bot/notification_builders.rb` | Marker/action-specific text and inline keyboards. Recovery alerts are human-readable; Autofix is exposed only when the diagnostic `suggested_next_action.kind` is `retry`, while manual-only states show laptop/details actions. Fingerprints include project, slug, stage, marker, and marker attrs. |
+| `RowActions` | `lib/hive/bot/row_actions.rb` | Canonical pure resolver from a status row to Telegram chat action descriptors. Both push notifications and `/status` buttons consume this resolver so needs-input rows cannot drift between surfaces. |
+| `NotificationBuilders` | `lib/hive/bot/notification_builders.rb` | Renders notification text and inline keyboards from `RowActions` descriptors. Recovery alerts are human-readable; Autofix is exposed only when the diagnostic `suggested_next_action.kind` is `retry`, while manual-only states show laptop/details actions. Rows whose live action is `agent_running` or `archived` are never announced, even when the on-disk marker is a stale recovery marker such as `ERROR` or `REVIEW_ERROR`; the builder logs `notification_skipped_live_agent` with project/slug/stage/marker/action and returns nil before fingerprinting. `details_reply(row)` is the shared Show-details renderer for inline callbacks, `/details`, and status row details: it always includes the row summary and next-step hint, appends cached diagnostic summary/detail when present, and caps replies to Telegram's 4096-character limit. All three render sites wrap the call in a soft-degrade rescue (`render_details_reply` in the handlers, an inline rescue in `Supervisor#render_details`): a render-time fault logs `details_render_failed` and replies "Status lookup failed — try again in a moment." rather than escaping past the already-ack'd callback / poll loop and leaving the operator with no reply. The slash `resolve_status_row` degrade now also logs `status_lookup_failed`. The `ready_for_review` approval push appends a clickable PR link when `row.pr_url` is valid. Fingerprints include project, slug, stage, marker, and marker attrs, deliberately excluding `pr_url` and rendered text. |
 | `BrainstormParser` | `lib/hive/bot/brainstorm_parser.rb` | **Back-compat alias for `Hive::BrainstormParser`** (`lib/hive/brainstorm_parser.rb`) — the pure parser moved to the top-level namespace so the daemon can share it for the answers-pending gate (see [[modules/daemon]] §"Brainstorm answers-pending gate"). Parses `## Round`, `### Q<N>.`, and `### A<N>.` blocks. **Lenient A-header**: accepts the first A-section under each Q as that Q's answer slot regardless of A-number, so a brainstorm-agent off-by-one (e.g. `### A2.` after `### Q1.`) doesn't strand the operator. `parse` is total — invalid UTF-8 and a torn concurrent read degrade rather than raise. Also exposes canonical heading helpers (`question_header(n)`, `answer_header(n)`) so writer / supervisor / future renderers share one format source of truth. |
 | `BrainstormAnswerWriter` | `lib/hive/bot/brainstorm_answer_writer.rb` | Locked, first-write-wins insertion into the next answer block, with atomic rewrite. Slot location is **Q-context-aware**: walks forward from the parser-identified target Q's line, returning the first empty A-section before the next block boundary. When Q{n} is present and unanswered but has **no `### A` slot at all**, the writer **creates** the slot at the end of the Q-block (before the next Q/Round/marker boundary, via the parser's canonical `answer_header`) and writes the answer there — so a brainstorm agent that emitted a question without an answer block no longer dead-ends the operator (issue #269; previously `:answer_slot_missing`, which with the daemon's answers-pending gate held the task indefinitely). `:answer_slot_missing` remains only as a defensive fallback when the Q line can't be located. `Errno::ENOENT` on the underlying file is mapped to `:question_not_found` (not lock contention). |
 | `ConversationStore` | `lib/hive/bot/conversation_store.rb` | In-memory per-chat active answer state with TTL. No sidecar file; `brainstorm.md` stays canonical. State now carries only `chat_id`, `project`, `slug`, `question_n`, `mode`, and `updated_at`; the retired Codex draft-assist fields (`history`, `draft`, `awaiting_confirm`) and `pending_confirm_count` API are gone. All `@states` reads/writes are mutex-guarded because the Telegram poll thread mutates conversations while the status-poll thread calls `active_for_slug?` and prunes. `active_for_slug?(slug, project: nil)` is prune-aware and returns true when any chat has a non-expired answer conversation for that slug. Project scoping is lenient: two fully resolved different projects do not cross-suppress, but an unscoped/project-less side still suppresses to avoid reintroducing duplicate waiting alerts. `NotificationDispatcher` uses this to avoid duplicate proactive waiting pushes while the operator is already answering. |
-| `ChildSupervisor` | `lib/hive/bot/child_supervisor.rb` | Spawns child `hive ...` commands with `pgroup: true`, writes per-dispatch logs, reaps with `Process.wait2(-1, WNOHANG)`. After plan 2026-05-28-002 the bot only reaches this path for **non-queue-routable** verbs (read-only `hive status --diagnose` for /details, `hive new` for the idea picker, `hive approve` for the /approve slash command, `hive accept-finding` / `hive reject-finding` for findings replies). State-mutating workflow verbs are written to the daemon's dispatch-request queue instead — see `DispatchRequestWriter` below. |
+| `ChildSupervisor` | `lib/hive/bot/child_supervisor.rb` | Spawns child `hive ...` commands with `pgroup: true`, writes per-dispatch logs, reaps with `Process.wait2(-1, WNOHANG)`. After plan 2026-05-28-002 the bot only reaches this path for **non-queue-routable** verbs (`hive status --diagnose --write --force` for Refresh diagnostic, `hive new` for the idea picker, `hive approve` for the /approve slash command, `hive accept-finding` / `hive reject-finding` for findings replies). State-mutating workflow verbs are written to the daemon's dispatch-request queue instead — see `DispatchRequestWriter` below. |
 | `DispatchRequestWriter` | `lib/hive/bot/dispatch_request_writer.rb` | Producer-only client of the daemon's dispatch-request queue. Atomic tmp+rename JSON write into `<state_home>/dispatch_requests/`. Argv validated against `Hive::Daemon::DispatchRequestQueue::ALLOWED_VERBS` at the call site too, so a typo in a slash handler raises locally rather than silently writing a request the daemon would discard. Returns a `request_id` the daemon echoes back in its `dispatch_request_*` events. |
-| `Logger` | `lib/hive/bot/logger.rb` | JSON-line structured logger with size rotation and closed event enum. `SCHEMA_VERSION` is now `2`: `hive-bot-log.v2` (`schemas/hive-bot-log.v2.json`) drops the retired `codex_spawned` / `codex_succeeded` / `codex_failed` events; `v1` is kept as-is for historical log lines. `notification_skipped_active_conversation` remains part of the schema, so suppress-while-answering decisions have the same audit trail shape as other notification skip paths. |
+| `Logger` | `lib/hive/bot/logger.rb` | JSON-line structured logger with size rotation, closed event enum, and centralized severity defaults. `SCHEMA_VERSION` is now `3`: `hive-bot-log.v3` requires `level` (`debug`/`info`/`warn`/`error`), accepts optional `category`, and adds `poll_unhealthy`; `v1` and `v2` stay checked in for historical lines. Event names remain stable, while `notification_skipped_dedupe` and `notification_skipped_backoff` default to debug/noise and meaningful operator events such as `notification_sent`, `notification_skipped_active_conversation`, `notification_skipped_live_agent`, and `notification_skipped_daemon_plan_pause` remain info by default. The `noise` category (`Logger::CATEGORY_NOISE`, the one load-bearing category value) is a **downstream-only convention**: producers tag high-frequency, low-signal lines (benign poll-transport failures, dedupe/backoff skips) with it, but nothing in this gem filters on it — an external log viewer or forwarder is expected to drop `category=noise` lines. |
 | `Commands::Bot` | `lib/hive/commands/bot.rb` | Thor command surface and PID-file lifecycle. |
+| `Commands::Pairing` | `lib/hive/commands/pairing.rb` | Owner CLI for listing and approving Telegram pairing requests; appends approved chat ids to the global bot allowlist, requests bot reload, and queues approval DMs. |
 
 ## Wiring
 
@@ -48,10 +54,14 @@ hive bot start
        └─ Hive::Bot::Supervisor.run_forever
             ├─ poll loop: Telegram.getUpdates → Router → handler descriptors
             ├─ status loop: hive status --json → NotificationDispatcher
-            └─ reaper loop: ChildSupervisor.reap_all → Telegram reply
+            └─ reaper loop: ChildSupervisor.reap_all + notice drains → Telegram reply
 ```
 
-Task notifications use `NotificationBuilders.display_title(row)`: `#<id> <display_name>` when both are present, plain `display_name` when only the name is available, and `TitleFormatter.title_from_slug(slug)` as the legacy fallback. Human text and `/status`/queue/detail rows use that title, but callback data and slash-command arguments remain slug-based.
+Task notifications use `NotificationBuilders.display_title(row)`: `#<id> <display_name>` when both are present, plain `display_name` when only the name is available, and `TitleFormatter.title_from_slug(slug)` as the legacy fallback. Human text and `/status`/queue/detail rows use that title. Inline callback data remains slug-based, while typeable `/answer`, `/approve`, `/autofix`, and `/details` slash commands accept either that numeric id (with or without `#`) or the slug; numeric targets resolve through the current `StatusWatcher` snapshot before the existing slug-based action runs.
+
+`RowActions.resolve(row)` is the source of truth for Telegram buttons. Notable needs-input mappings: coding brainstorm `waiting` -> Answer; coding plan `waiting` -> Approve + Details; `review_waiting` -> Accept all / Reject all + Details (fix guardrail is Details-only); `execute_waiting` -> Re-run develop + Details; finalize `waiting` -> Run finalize + Details; generic needs-input -> Run. Rows that pair `needs_input` with `marker=none` or `marker=complete` are suppressed as incoherent presentation-layer backstops for [[modules/task_action]].
+
+The Details button and `/details <slug>` route through the cached `hive status --json` snapshot and `Supervisor#render_details`, not `hive status --diagnose`. Replies include the same row summary as `/status <slug>` plus a next-step hint derived from `RowActions` ("tap Re-run", "tap Approve", or "open on a laptop" for terminal Details/manual-only states). `refresh_diagnose:` remains the explicit path that runs `hive status --diagnose --write --force` for recovery diagnostics.
 
 `Router::Result` is the handoff API between pure routing and side
 effects. The normal command actions remain `reply`,
@@ -66,6 +76,26 @@ in-process to create the inbox task. There is no `start_codex` /
 `confirm_codex_draft` result action; Path A/B remains only as an answer
 mode value for compatibility, and both modes use `write_answer_then_reply`.
 
+## Telegram pairing
+
+When `bot.pairing_enabled: true`, an unknown DM chat that sends `/start` no
+longer disappears into the default unauthorized `noop`. `Router#classify`
+returns `:unauthorized_pairing` only for the first unauthorized `/start` seen
+from that chat in the current bot lifetime, mints or reuses a pending
+`PairingStore` code, and replies:
+
+`hive: access not configured. Your Telegram user id: <chat_id>. Pairing code: <CODE>. Ask the owner to approve with: hive pairing approve telegram <CODE>`
+
+Other unauthorized text remains silent. If the bot restarts, the in-memory
+throttle resets but the pending code stays stable on disk until it is approved
+or expires. `hive pairing approve telegram <CODE>` consumes the code, appends
+the chat id to `bot.chat_id_allowlist`, signals `SIGHUP` to the bot when a live
+PID file exists, and writes a `PairingApprovalQueue` notice. The reaper loop
+drains that queue next to dispatch results and sends
+`✅ Approved — you can use hive now. Try /status.`; it removes the notice only
+after a confirmed send and deliberately does not re-check the in-memory
+allowlist, avoiding the reload race between config write and SIGHUP handling.
+
 Recovery push notifications intentionally hide marker attrs, exception
 classes, phase names, diagnostic summaries, and diagnostic artifact
 paths. The operator-facing message is `Stage stuck` plus one
@@ -77,9 +107,21 @@ available, so stale Telegram buttons cannot clear a newer marker. For
 `ERROR` rows they prefer the generated `marker_id` and fall back to
 observed `reason`/`exit_code` attrs for legacy markers. The dispatcher
 clears the persisted alert entry for that task before
-spawning the retry sequence. `/status [project]` is an explicit pull
-surface and renders actionable rows as `#id Title… — Stage` without inline
-buttons when task metadata is available.
+spawning the retry sequence. `/status [project]` and `/queue` are explicit
+pull surfaces and render actionable rows as `#id Title… — #561 — Stage`
+or `#id Title… — — — Stage`. They use Telegram HTML parse mode so valid
+`pr_url` values become clickable `#<number>` links; all dynamic title,
+stage, and legacy-warning text is escaped through `Hive::Bot::Format`.
+Inline callback buttons remain slug-based and unaffected by parse mode.
+
+The open-PR completion push is the existing `ready_for_review`
+stage-approval notification, not a new notification type. When that row
+has a valid `pr_url`, `NotificationBuilders#stage_approval` appends
+`PR: #<number>` as a Telegram HTML link and sets the notification
+`parse_mode`; `NotificationDispatcher#send_notification` forwards it.
+Because the alert fingerprint still hashes only project, slug, stage,
+marker, and marker attrs, adding or rendering `pr_url` does not re-send an
+already-seen ready-for-review alert.
 
 Legacy stage-directory warnings are proactive as project-level notifications. `StatusWatcher` converts non-empty `legacy_stage_dirs` project payloads into synthetic notification inputs, `Supervisor#status_tick` feeds them through the same `NotificationDispatcher` as task rows, and `NotificationBuilders` renders a message like `Project P has N tasks hidden in legacy stage dirs (...) - run hive migrate <project_path>`. The same warning appears in `/status` and `/queue` replies. The alert-store fingerprint is project-level rather than count-level, so the warning dedupes while the project remains legacy-dirty, drops when the project returns clean, and alerts again on a later clean-to-legacy transition. Fresh alert-store seeding still suppresses historical task backlog, but legacy-stage warnings alert immediately because first bot startup after an upgrade is when operators need the migration prompt.
 
@@ -99,8 +141,7 @@ schema-version skew*. Bot-specific behaviour (fix-forward on #416):
 - The success-path skew advisory is logged under the **distinct**
   `:poll_schema_skew` event (not the overloaded `:poll_failure`), so it
   isn't conflated with real fetch failures. `:poll_schema_skew` is in
-  `Hive::Bot::Logger::EVENTS` and the `hive-bot-log.v2` schema enum
-  (additive append — no schema-version bump).
+  `Hive::Bot::Logger::EVENTS` and the `hive-bot-log.v3` schema enum.
 - `validate_envelope!` (shape / `ok=false`) runs OUTSIDE the best-effort
   extraction rescue: a `:newer` envelope that ALSO has `ok=false` surfaces
   its real `envelope ok=false: <reason>`, never the skew hint. A throw

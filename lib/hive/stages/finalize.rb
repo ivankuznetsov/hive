@@ -102,14 +102,19 @@ module Hive
       end
 
       def spawn_finalize_agent(task, cfg, prompt, profile, worktree_path)
+        scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
+          cfg, "finalize", task, profile,
+          default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
+        )
         kwargs = {
           prompt: prompt,
-          add_dirs: [ task.folder ],
+          add_dirs: scope.fetch(:add_dirs),
           cwd: worktree_path,
           max_budget_usd: finalize_budget(cfg),
           timeout_sec: finalize_timeout(cfg),
           log_label: "finalize",
           profile: profile,
+          **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :state_file_marker
         }
         if profile.name == :claude
@@ -117,8 +122,7 @@ module Hive
             task,
             cfg,
             **kwargs,
-            session_name: Hive::ClaudeLauncher.tmux_session_name("8-finalize", task),
-            allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
+            session_name: Hive::ClaudeLauncher.tmux_session_name("8-finalize", task) # coding-scoped: coding finalize stage tmux session
           )
         else
           Hive::Stages::Base.spawn_agent(task, **kwargs)
@@ -187,7 +191,7 @@ module Hive
         unless out.empty?
           result = Hive::Stages::CleanExit.run!(
             worktree_path: worktree_path,
-            stage: "8-finalize",
+            stage: "8-finalize", # coding-scoped: coding finalize stage event
             task: task,
             cfg: cfg || {},
             reason: :finalize_entry_backstop
@@ -227,10 +231,38 @@ module Hive
         # instead of erroring.
         return nil if resync_stale_rebase!(worktree_path, branch)
 
+        # The branch was auto-rebased (e.g. during review): history was
+        # rewritten while real local fix commits accrued, so the plain push is
+        # non-fast-forward and resync_stale_rebase! (local already on remote by
+        # patch-id) does not apply. Force-push ONLY when HEAD is a superset of
+        # its upstream — every commit on the remote is already present in HEAD
+        # by patch-id — so nothing remote-only is clobbered (--force-with-lease
+        # additionally aborts on a concurrent third-party update). A genuinely
+        # diverged upstream (a commit whose change is NOT in HEAD) falls
+        # through to the error below, preserving that work for a human.
+        forced = nil
+        if head_supersedes_upstream?(worktree_path, branch)
+          forced = Hive::Gh.push_branch(worktree_path, branch, cfg: cfg, force: true)
+          return nil if forced.success? && pushed?(worktree_path, branch)
+        end
+
         Hive::Markers.set(task.state_file, :error,
                           reason: "unpushed_commits",
-                          detail: push_result.stderr.to_s.strip[0, 200])
+                          detail: ((forced&.stderr).to_s.strip.empty? ? push_result.stderr : forced.stderr).to_s.strip[0, 200])
         { commit: "finalize_unpushed_commits", status: :error }
+      end
+
+      # True only when HEAD already contains, by patch-id, every commit on the
+      # branch's upstream — so force-pushing HEAD cannot drop remote-only work.
+      # `git cherry HEAD <upstream>` lists upstream commits relative to HEAD; a
+      # `+` marks an upstream commit whose change is NOT in HEAD (genuine
+      # divergence), so any `+` — or a git failure — returns false and the
+      # caller errors instead of force-pushing over real work.
+      def head_supersedes_upstream?(worktree_path, branch)
+        cherry, status = capture_git(worktree_path, "cherry", "HEAD", "#{branch}@{u}")
+        return false unless status.success?
+
+        cherry.to_s.lines.none? { |line| line.start_with?("+") }
       end
 
       # Fast-forward a worktree whose local commits are all already on the

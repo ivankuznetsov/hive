@@ -32,7 +32,13 @@ Originally `Policy.decide` treated every `needs_input` row identically: apply an
 
 ## Symptom
 
-A generated plan would sit in `3-plan` with `<!-- WAITING -->` and TUI status "Needs your input" indefinitely. The daemon log showed `event: skipped` every 30s with `in_flight: 0`. Manually running `hive run --json` on the row flipped the marker to `<!-- COMPLETE -->`, after which the daemon immediately dispatched `hive develop ... --from 3-plan` on its next tick.
+A generated plan would sit in `3-plan` with `<!-- WAITING -->` and TUI status
+"Needs your input" indefinitely (the current label for that same
+`plan_waiting` action is "Review plan draft"). The daemon log showed
+`event: skipped` every 30s with `in_flight: 0`. Manually running
+`hive run --json` on the row flipped the marker to `<!-- COMPLETE -->`, after
+which the daemon immediately dispatched `hive develop ... --from 3-plan` on its
+next tick.
 
 Symptom signature for future debugging:
 - `hive status --json` reports the row as `stage: "3-plan", action: "needs_input", marker: "waiting"`

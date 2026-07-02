@@ -1,5 +1,6 @@
 require "thor"
 require "hive/stages"
+require "hive/workflows/registry"
 
 module Hive
   class CLI < Thor
@@ -7,8 +8,31 @@ module Hive
       true
     end
 
+    # Stage vocabulary embedded in `--from`/`--to`/`--stage` option help so
+    # `hive help run|approve|status` still advertises the valid stages to an
+    # agent reading `--help`. R1 dropped Thor's static `enum:` (it couldn't
+    # hold runtime workflows and auto-generated a "Possible values:" list), so
+    # this derives the same list from the default coding workflow descriptor —
+    # no literal stage dirs in source, so it stays in sync with a renumber.
+    STAGE_VOCABULARY = "stages: #{Hive::Stages::DIRS.join(', ')}".freeze
+
+    # Built-in workflow names embedded in the `--workflow` help on both `init`
+    # and `new`. Frozen at class load, when only built-ins are registered;
+    # project workflows load later via Workflows::Project.load!, so this stays
+    # built-ins-only by design. The static tail in .workflow_option_desc covers
+    # project-authored workflows; making the list project-aware later means
+    # editing only that one method.
+    WORKFLOW_VOCABULARY = Hive::Workflows::Registry.ids.join(", ").freeze
+
+    # The one place the `--workflow` help is composed, shared by `init` and
+    # `new` so they stay symmetric.
+    def self.workflow_option_desc
+      "#{WORKFLOW_VOCABULARY}, or any project-authored workflow " \
+        "(author one with `hive workflow new ID`)"
+    end
+
     # `--json` is honoured by `init`, `status`, `run`, `approve`, `findings`,
-    # `accept-finding`, `reject-finding`, and the workflow verbs
+    # `accept-finding`, `reject-finding`, `pairing`, and the workflow verbs
     # (`brainstorm`, `plan`, `develop`, `pr`, `archive`). `new` accepts
     # the flag silently so an automated caller can pass it uniformly. Most
     # emitting commands produce a typed JSON document on success and a
@@ -18,7 +42,6 @@ module Hive
     class_option :json, type: :boolean, default: false,
                         desc: "emit a single JSON document on stdout (commands that support it)"
 
-    APPROVE_TO_ENUM = (Hive::Stages::DIRS + Hive::Stages::NAMES).freeze
     FINDING_SEVERITY_ENUM = %w[high medium low nit].freeze
 
     desc "version", "Print hive version"
@@ -39,6 +62,7 @@ module Hive
       On a TTY, init asks the operator the following questions before
       writing anything to disk:
 
+        0. Workflow (when >1 workflow is registered)             — default coding
         1. Planning agent (drives 2-brainstorm + 3-plan)         — default claude
         2. Claude launch mode (project-global, tmux/headless)    — default tmux
         3. Claude permission mode (all Claude-backed stages)     — default bypassPermissions
@@ -56,6 +80,15 @@ module Hive
       OR a 1-based index. Blank input takes the default. Answer `n` at
       the final confirmation to abort with no disk side effects.
 
+      The Workflow step (item 0) is shown only when the project has more
+      than one workflow registered; it lists the workflow ids plus an
+      `author a new workflow` entry. A bare Enter keeps the current
+      default — `coding` on a fresh init, the project's existing
+      `default_workflow` on a re-init — so it never silently downgrades a
+      non-coding default. Choosing the author entry prompts for a new id
+      and scaffolds it through the same path as `--new-workflow` (below)
+      before the remaining questions resume.
+
       On non-TTY (CI, pipes, scripted callers) the prompts are skipped
       and a one-line summary is emitted to stdout so the caller can see
       which defaults landed:
@@ -68,6 +101,23 @@ module Hive
       With --json, init suppresses that prose and emits a single
       hive-init.v1 success payload containing the resolved answers plus
       project path, default branch, hive-state path, and worktree root.
+      When used with --new-workflow, the payload also includes
+      descriptor_path and instruction_path.
+
+      To bootstrap a new custom workflow in one pass, use:
+
+        hive init --new-workflow writing ~/Dev/writing
+
+      This scaffolds `.hive-state/workflows/writing.yml` plus
+      `.hive-state/workflows/writing/work.md`, binds
+      `default_workflow: "writing"`, and prints the paths to edit before
+      running `hive new` without --workflow. The descriptor and the
+      `config.yml` binding are committed together on `hive/state` on both the
+      fresh and already-initialized paths, so the bound default survives a
+      hive-state reset. `--new-workflow` is mutually exclusive with
+      `--workflow`, reuses `hive workflow new`'s reserved-id checks, and on an
+      already-initialized project scaffolds the workflow and rebinds the
+      default in one hive-state commit.
 
       To set non-default values from automation, run init and then
       hand-edit `.hive-state/config.yml` (see `wiki/modules/config.md`
@@ -85,9 +135,18 @@ module Hive
       See `wiki/commands/init.md` for the full prompt flow and ADR-023.
     DESC
     option :force, type: :boolean, default: false, desc: "skip clean-tree check"
+    option :workflow, type: :string, desc: workflow_option_desc
+    option :new_workflow, type: :string,
+                          desc: "scaffold custom workflow ID, bind it as this project's default, and print paths to edit"
     def init(project_path = Dir.pwd)
       require "hive/commands/init"
-      Hive::Commands::Init.new(project_path, force: options[:force], json: options[:json]).call
+      Hive::Commands::Init.new(
+        project_path,
+        force: options[:force],
+        json: options[:json],
+        workflow: options[:workflow],
+        new_workflow: options[:new_workflow]
+      ).call
     end
 
     desc "forget NAME", "Remove a project from the global registry (inverse of `hive init`)"
@@ -198,6 +257,20 @@ module Hive
       ).call
     end
 
+    desc "setup", "Provision local Hive web mode, daemon service, and project enrollment"
+    option :service, type: :boolean, default: false, desc: "also install the managed web service"
+    option :no_bootstrap, type: :boolean, default: false, desc: "diagnose only; do not install qmd or web bundle"
+    option :no_init, type: :boolean, default: false, desc: "do not initialize or enroll the current project"
+    def setup
+      require "hive/commands/setup"
+      exit Hive::Commands::Setup.new(
+        json: options[:json],
+        service: options[:service],
+        no_bootstrap: options[:no_bootstrap],
+        no_init: options[:no_init]
+      ).call
+    end
+
     desc "update", "Update hive via the install channel that installed it"
     long_desc <<~DESC
       Reads the install-channel marker written by the installer and delegates
@@ -215,6 +288,52 @@ module Hive
     def update
       require "hive/commands/update"
       Hive::Commands::Update.new(dry_run: options[:dry_run]).call
+    end
+
+    desc "connect SERVICE", "Connect an external service (screenote)"
+    long_desc <<~DESC
+      Runs the OAuth 2.1 setup flow for SERVICE (currently only `screenote`).
+      Discovers Screenote OAuth/MCP metadata, opens an authorize URL in the
+      browser via a loopback redirect + PKCE, lists Screenote projects over
+      MCP, prompts for a default project, and stores the credential at
+      `~/.config/hive/screenote.json` (mode 0600). The loopback waits up to
+      300s for the browser callback before timing out, so an automated driver
+      should set an outer deadline above that.
+
+      --base-url overrides the resolved Screenote base URL (config /
+      HIVE_SCREENOTE_BASE_URL / default https://screenote.ai).
+
+      --json streams structured lines: an `authorize` line carrying the
+      `authorize_url` (the fallback when the browser cannot auto-open),
+      followed by a success document with `issuer`, `client_id`,
+      `project_id`, `base_url`, and `credential_path`. A lone project is
+      auto-selected; when several projects exist and no default can be chosen
+      non-interactively, connect instead emits a `{ "ok": false, "stage":
+      "needs_project_selection", "projects": [...] }` line and exits non-zero
+      — re-run connect interactively (without --json) to pick the default.
+    DESC
+    option :base_url, type: :string, desc: "Screenote base URL (defaults to config or https://screenote.ai)"
+    def connect(service)
+      require "hive/commands/connect"
+      Hive::Commands::Connect.new(service, base_url: options[:base_url], json: options[:json]).call
+    end
+
+    desc "disconnect SERVICE", "Disconnect an external service (screenote)"
+    long_desc <<~DESC
+      Revokes the stored token for SERVICE (currently only `screenote`) when
+      possible and clears the local credential at
+      `~/.config/hive/screenote.json`. Missing credentials are an idempotent
+      no-op; a revoke failure (or unreachable endpoint) is warned about but
+      still clears the local file.
+
+      --json emits `{ "disconnected": ..., "revoked": ..., "reason": ... }`.
+      Revocation is idempotent (RFC 7009), so when `revoked` is false the
+      `reason` is `no_token`, `unreadable_credential`, or the raw revoke
+      error message.
+    DESC
+    def disconnect(service)
+      require "hive/commands/disconnect"
+      Hive::Commands::Disconnect.new(service, json: options[:json]).call
     end
 
     desc "uninstall", "Remove hive user registrations and runtime files without destroying work"
@@ -265,6 +384,31 @@ module Hive
       ).call
     end
 
+    desc "workflow SUBCOMMAND [ID]", "Manage per-project workflow descriptors"
+    long_desc <<~DESC
+      Subcommands:
+        new ID    Scaffold a per-project workflow descriptor under
+                  <hive_state_path>/workflows/ID.yml plus its stage
+                  instruction(s) under <hive_state_path>/workflows/ID/.
+
+      By default `new` scaffolds the blank `inbox -> work -> done` stub. Pass
+      `--template NAME` to seed from a richer sample workflow instead (e.g.
+      writing, research). Either way: edit the scaffolded stage instruction(s),
+      then run `hive new PROJECT --workflow ID "<your idea>"`.
+    DESC
+    option :template, type: :string,
+                      desc: "for `new`: seed from a named sample workflow (e.g. writing, research) instead of the blank stub"
+    def workflow(subcommand = nil, id = nil)
+      require "hive/commands/workflow"
+      Hive::Commands::Workflow.new(
+        subcommand,
+        id,
+        project_root: Dir.pwd,
+        json: options[:json],
+        template: options[:template]
+      ).call
+    end
+
     desc "bench SUBCOMMAND [SLUG]", "Contribute to hive-bench: `bench submit SLUG` extracts a 9-done task and opens a PR"
     long_desc <<~DESC
       Subcommands:
@@ -287,20 +431,49 @@ module Hive
       end
     end
 
-    desc "new PROJECT TEXT", "Create a new task in 1-inbox of PROJECT"
+    desc "new PROJECT TEXT", "Create a new task in PROJECT"
+    long_desc <<~DESC
+      Create a new task in PROJECT from the free-text TEXT. By default, the task
+      uses the project's default workflow; pass --workflow to pin a registered
+      workflow for this task. (Options may also follow the text.)
+
+      --depends-on stacks this task on a prerequisite: the daemon holds
+      auto-advance until the prerequisite reaches the project's dependency
+      gate stage (8-finalize by default, configurable via
+      `dependency_gate_stage`). The value is a prerequisite task id (a
+      positive integer) or slug (lowercase, starts with a letter).
+
+      Examples:
+
+        hive new myproj --workflow content "write the launch post"
+
+        hive new myproj --depends-on 42 "add export button"
+
+        hive new myproj --depends-on add-export-endpoint-260618-ab12 "wire up export API"
+    DESC
+    option :depends_on, type: :string,
+                        desc: "stack on a prerequisite task id or slug; hold daemon " \
+                              "auto-advance until it reaches the dependency gate stage " \
+                              "(8-finalize by default)"
+    option :workflow, type: :string, desc: workflow_option_desc
     def new_task(project, *text_parts)
       require "hive/commands/new"
       text = text_parts.join(" ")
       raise Hive::Error, "missing task text" if text.strip.empty?
 
-      Hive::Commands::New.new(project, text).call
+      Hive::Commands::New.new(
+        project,
+        text,
+        depends_on: options[:depends_on],
+        workflow: options[:workflow]
+      ).call
     end
     map "new" => :new_task
 
     desc "generate-name TARGET", "Generate a human-readable display name for TARGET"
     option :project, type: :string, desc: "scope lookup to one registered project"
-    option :stage, type: :string, enum: APPROVE_TO_ENUM,
-                   desc: "scope lookup to one stage (full '1-inbox' or short 'inbox')"
+    option :stage, type: :string,
+                   desc: "scope lookup to one stage, full or short form (#{STAGE_VOCABULARY})"
     def generate_name(target)
       require "hive/commands/generate_name"
       Hive::Commands::GenerateName.new(
@@ -313,8 +486,8 @@ module Hive
 
     desc "run TARGET", "Run the stage agent for TARGET (slug or task folder)"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
-    option :stage, type: :string, enum: APPROVE_TO_ENUM,
-                   desc: "scope slug lookup to one stage (full '4-execute' or short 'execute')"
+    option :stage, type: :string,
+                   desc: "scope slug lookup to one stage, full or short form (#{STAGE_VOCABULARY})"
     option :no_rebase, type: :boolean, default: false,
                        desc: "skip the auto-rebase pre-step for this run only (one-off override of cfg.rebase.enabled)"
     def run_task(target)
@@ -331,8 +504,8 @@ module Hive
 
     desc "rebase-status TARGET", "Print the auto-rebase status for TARGET without running anything (read-only)"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
-    option :stage, type: :string, enum: APPROVE_TO_ENUM,
-                   desc: "scope slug lookup to one stage (full '4-execute' or short 'execute')"
+    option :stage, type: :string,
+                   desc: "scope slug lookup to one stage, full or short form (#{STAGE_VOCABULARY})"
     def rebase_status(target)
       require "hive/commands/rebase_status"
       Hive::Commands::RebaseStatus.new(
@@ -345,32 +518,32 @@ module Hive
     map "rebase-status" => :rebase_status
 
     desc "brainstorm TARGET", "Move an inbox task into brainstorm, or run an existing brainstorm task"
-    option :from, type: :string, enum: APPROVE_TO_ENUM,
-                  desc: "expected current stage; use to disambiguate same-slug tasks"
+    option :from, type: :string,
+                  desc: "expected current stage; use to disambiguate same-slug tasks (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     def brainstorm(target)
       run_stage_action("brainstorm", target)
     end
 
     desc "plan TARGET", "Move a completed brainstorm task into plan, or run an existing plan task"
-    option :from, type: :string, enum: APPROVE_TO_ENUM,
-                  desc: "expected current stage; use to disambiguate same-slug tasks"
+    option :from, type: :string,
+                  desc: "expected current stage; use to disambiguate same-slug tasks (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     def plan(target)
       run_stage_action("plan", target)
     end
 
     desc "develop TARGET", "Move a completed plan task into execute, or run an existing execute task"
-    option :from, type: :string, enum: APPROVE_TO_ENUM,
-                  desc: "expected current stage; use to disambiguate same-slug tasks"
+    option :from, type: :string,
+                  desc: "expected current stage; use to disambiguate same-slug tasks (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     def develop(target)
       run_stage_action("develop", target)
     end
 
     desc "open-pr TARGET", "Move a completed execute task into open-pr, or run an existing open-pr task"
-    option :from, type: :string, enum: APPROVE_TO_ENUM,
-                  desc: "expected current stage; use to disambiguate same-slug tasks"
+    option :from, type: :string,
+                  desc: "expected current stage; use to disambiguate same-slug tasks (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     def open_pr(target)
       run_stage_action("open-pr", target)
@@ -378,25 +551,56 @@ module Hive
     map "open-pr" => :open_pr
     map "pr" => :open_pr
 
-    desc "review TARGET", "Move a completed open-pr task into review, or run an existing review task"
-    option :from, type: :string, enum: APPROVE_TO_ENUM,
-                  desc: "expected current stage; use to disambiguate same-slug tasks"
+    desc "review [TARGET]", "Move a completed open-pr task into review, run an existing review task, or --pr PR"
+    option :from, type: :string,
+                  desc: "expected current stage; use to disambiguate same-slug tasks (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
-    def review(target)
+    option :pr, type: :string, desc: "run an ad-hoc review for PR number, #number, or GitHub PR URL"
+    def review(target = nil)
+      if options[:pr]
+        emit_review_usage_error("hive review: pass either TARGET or --pr, not both") if target
+        # `--from` only disambiguates same-slug tasks for a TARGET lookup; an
+        # ad-hoc `--pr` review resolves a deterministic slug and never consults
+        # it. Refuse the combo (mirroring the TARGET + `--pr` guard above)
+        # rather than silently dropping the flag.
+        emit_review_usage_error("hive review: --from is not valid with --pr") if options[:from]
+
+        require "hive/commands/adhoc_review"
+        require "hive/commands/stage_action"
+        # AdhocReview emits its own --json error envelope on create-phase
+        # failures and re-raises. On success it returns the resolved project
+        # name; forward it (not the raw, possibly-nil options[:project]) so
+        # StageAction resolves the slug against the same project AdhocReview
+        # used, never a same-named slug in another registered repo.
+        result = Hive::Commands::AdhocReview.new(
+          pr: options[:pr],
+          project: options[:project],
+          json: options[:json]
+        ).enqueue
+        return Hive::Commands::StageAction.new(
+          "review",
+          result.fetch(:slug),
+          project: result.fetch(:project),
+          json: options[:json]
+        ).call
+      end
+
+      emit_review_usage_error("hive review: missing TARGET (or pass --pr PR)") unless target
+
       run_stage_action("review", target)
     end
 
     desc "artifacts TARGET", "Move a completed review task into artifacts, or run an existing artifacts task"
-    option :from, type: :string, enum: APPROVE_TO_ENUM,
-                  desc: "expected current stage; use to disambiguate same-slug tasks"
+    option :from, type: :string,
+                  desc: "expected current stage; use to disambiguate same-slug tasks (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     def artifacts(target)
       run_stage_action("artifacts", target)
     end
 
     desc "finalize TARGET", "Move a completed artifacts task into finalize, or run an existing finalize task"
-    option :from, type: :string, enum: APPROVE_TO_ENUM,
-                  desc: "expected current stage; use to disambiguate same-slug tasks"
+    option :from, type: :string,
+                  desc: "expected current stage; use to disambiguate same-slug tasks (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     def finalize(target)
       run_stage_action("finalize", target)
@@ -410,8 +614,8 @@ module Hive
       With TARGET, preserves the workflow behavior: move a completed finalize
       task into done, or run an existing done task.
     DESC
-    option :from, type: :string, enum: APPROVE_TO_ENUM,
-                  desc: "expected current stage; use to disambiguate same-slug tasks"
+    option :from, type: :string,
+                  desc: "expected current stage; use to disambiguate same-slug tasks (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     option :recover_merged_error_reason, type: :string,
                                           desc: "internal: archive a merged PR despite this finalize ERROR reason"
@@ -451,8 +655,8 @@ module Hive
         75 — hive/state commit-lock contention (retryable; error_kind: error)
         78 — malformed project or global config (config)
     DESC
-    option :from, type: :string, enum: APPROVE_TO_ENUM,
-                  desc: "expected current stage; raises WRONG_STAGE on mismatch"
+    option :from, type: :string,
+                  desc: "expected current stage; raises WRONG_STAGE on mismatch (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     def drop(target)
       require "hive/commands/drop"
@@ -537,14 +741,73 @@ module Hive
       ).call
     end
 
+    desc "answer-digest", "Send a daily digest of tasks waiting on human input"
+    # wrap: false so the Examples / Exit codes blocks keep their line breaks.
+    long_desc <<~DESC, wrap: false
+      Fetches the global hive status snapshot, filters it to tasks waiting on
+      human input, and sends one Telegram message with inline buttons for each
+      listed task. Empty snapshots are silent and still exit successfully.
+
+      --date does NOT scope the waiting set (always the live snapshot) and does
+      NOT dedup sends — it is only echoed into the JSON `date` field. Scheduler
+      idempotency (once per local day) lives in the daemon's
+      answer_digest_state.json, not this command.
+
+      With --json, emits the hive-answer-digest (v1) envelope. The SuccessPayload
+      carries `sent` (true only on a real send), `reason`
+      (null=sent / "empty" / "dry_run"), `chat_id`, `button_count` (capped at the
+      10-task display cap), `count` (the true waiting total), and `tasks[]` (one
+      `{project,slug,id,title,stage,pr}` per waiting task, present even on a real
+      send). The ErrorPayload carries `error_kind`: `config` (bad --date / missing
+      chat), `status_unavailable` (status snapshot unusable — retryable),
+      `usage` (bad flags), or `internal`.
+
+      Agent read path: `--dry-run --json` is side-effect-free — it loads no .env,
+      resolves no chat/token, and sends NOTHING to Telegram — so an agent may run
+      it purely to READ the waiting set (count / tasks[]). Omitting --dry-run
+      SENDS a Telegram message as a side effect.
+
+      There is no `hive answer` verb for the brainstorm "answer" button an agent
+      sees as an answer-waiting task: to clear one, an agent fills the matching
+      `### A` slot in that task's brainstorm.md — the same edit the bot/web
+      "Answer" button performs via BrainstormAnswerWriter.
+
+      Examples:
+        hive answer-digest
+        hive answer-digest --date 2026-06-27 --json
+        hive answer-digest --dry-run --json   # side-effect-free read
+
+      Exit codes:
+        0  sent / nothing waiting (empty is silent) / dry-run
+        64 bad flags / malformed invocation (error_kind=usage)
+        69 status snapshot unavailable (error_kind=status_unavailable, retryable)
+        70 internal error (error_kind=internal)
+        78 bad --date or missing chat config (error_kind=config)
+    DESC
+    option :date, type: :string,
+                  desc: "local calendar date echoed into the JSON `date` field; does not scope data or dedup (YYYY-MM-DD)"
+    option :dry_run, type: :boolean, default: false, desc: "print the digest instead of sending Telegram"
+    def answer_digest
+      require "hive/commands/answer_digest"
+      Hive::Commands::AnswerDigest.new(
+        date: options[:date],
+        dry_run: options[:dry_run],
+        json: options[:json]
+      ).call
+    end
+
     desc "status", "Show all active tasks across registered projects"
     long_desc <<~DESC
       Default: prints a grouped table of every task across registered
       projects, ordered by stage. Combine with --json to emit the
-      `hive-status` envelope (schema v2); every row carries a required
+      `hive-status` envelope (schema v#{Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status")}); every row carries a required
       nullable `diagnostic` field — null for green rows, populated with
       a bounded summary + artifact tail + marker signature for red
-      recovery/error rows.
+      recovery/error rows, plus a nullable `pr_url` field — null until a
+      PR exists, then the pull-request URL once one is opened. Each row also
+      carries an optional `workflow` field — the descriptor id that resolved
+      the task (e.g. "coding"); omitted on older/synthetic producers, where
+      consumers should default to "coding".
 
       --diagnose <slug>: switch to the `hive-status-diagnose` envelope
       (schema v1) and emit the diagnostic for a single task. Useful
@@ -569,8 +832,8 @@ module Hive
     DESC
     option :diagnose, type: :string, desc: "diagnose one red task slug or folder"
     option :project, type: :string, desc: "scope --diagnose slug lookup to one registered project"
-    option :stage, type: :string, enum: APPROVE_TO_ENUM,
-                   desc: "scope --diagnose slug lookup to one stage"
+    option :stage, type: :string,
+                   desc: "scope --diagnose slug lookup to one stage (#{STAGE_VOCABULARY})"
     option :write, type: :boolean, default: false,
                    desc: "with --diagnose, write diagnostics/red-status.md using the configured execute agent"
     option :force, type: :boolean, default: false,
@@ -603,10 +866,10 @@ module Hive
       before advancing — a previously successful call would fail with exit
       code 4 (WRONG_STAGE) instead of silently advancing a second stage.
     DESC
-    option :to, type: :string, enum: APPROVE_TO_ENUM,
-                desc: "destination stage (full '3-plan' or short 'plan'); default: next stage"
-    option :from, type: :string, enum: APPROVE_TO_ENUM,
-                  desc: "expected current stage; raises WRONG_STAGE on mismatch (idempotency)"
+    option :to, type: :string,
+                desc: "destination stage, full or short form; default: next stage (#{STAGE_VOCABULARY})"
+    option :from, type: :string,
+                  desc: "expected current stage; raises WRONG_STAGE on mismatch, idempotency (#{STAGE_VOCABULARY})"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
     option :force, type: :boolean, default: false, desc: "skip terminal-marker check on forward move"
     def approve(target)
@@ -634,8 +897,8 @@ module Hive
     DESC
     option :pass, type: :numeric, desc: "review pass to inspect (default: latest on disk)"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
-    option :stage, type: :string, enum: APPROVE_TO_ENUM,
-                   desc: "scope slug lookup to one stage (default: any stage)"
+    option :stage, type: :string,
+                   desc: "scope slug lookup to one stage, default any (#{STAGE_VOCABULARY})"
     def findings(target)
       require "hive/commands/findings"
       Hive::Commands::Findings.new(
@@ -660,8 +923,8 @@ module Hive
                       desc: "accept all findings of the given severity"
     option :pass, type: :numeric, desc: "review pass to edit (default: latest on disk)"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
-    option :stage, type: :string, enum: APPROVE_TO_ENUM,
-                   desc: "scope slug lookup to one stage (default: any stage)"
+    option :stage, type: :string,
+                   desc: "scope slug lookup to one stage, default any (#{STAGE_VOCABULARY})"
     def accept_finding(target, *ids)
       require "hive/commands/finding_toggle"
       Hive::Commands::FindingToggle.new(
@@ -683,8 +946,8 @@ module Hive
                       desc: "reject all findings of the given severity"
     option :pass, type: :numeric, desc: "review pass to edit (default: latest on disk)"
     option :project, type: :string, desc: "scope slug lookup to one registered project"
-    option :stage, type: :string, enum: APPROVE_TO_ENUM,
-                   desc: "scope slug lookup to one stage (default: any stage)"
+    option :stage, type: :string,
+                   desc: "scope slug lookup to one stage, default any (#{STAGE_VOCABULARY})"
     def reject_finding(target, *ids)
       require "hive/commands/finding_toggle"
       Hive::Commands::FindingToggle.new(
@@ -941,6 +1204,39 @@ module Hive
         raise error
       end
 
+      # `hive review` raises usage errors from inside the method body: the
+      # optional TARGET (so `--pr` can stand alone) and the
+      # both/neither-given checks surface as Hive::Error, not the Thor::Error
+      # that bin/hive's JSON usage envelope keys on. Emit the same
+      # hive-stage-action envelope StageAction emits for `hive review <slug>
+      # --json` so every `hive review --json` failure stays symmetric, then
+      # raise so bin/hive maps the exit code (and prints the stderr line).
+      # AdhocReview and StageAction own their own envelopes, so neither is
+      # wrapped by this helper — no double emit.
+      def emit_review_usage_error(message)
+        require "json"
+        error = Hive::InvalidTaskPath.new(message)
+        if options[:json]
+          payload = Hive::Schemas::ErrorEnvelope.build(
+            schema: "hive-stage-action",
+            error: error,
+            error_kind: "invalid_task_path",
+            extras: { "verb" => "review" }
+          )
+          begin
+            puts JSON.generate(payload)
+          rescue Errno::EPIPE
+            # caller went away — fall through to the bare-text rescue in bin/hive.
+          rescue JSON::GeneratorError => e
+            # A non-serialisable payload is a bug, not a closed pipe — surface
+            # it rather than hide it (the bare-text rescue in bin/hive still
+            # carries the failure for the exit code + stderr line).
+            warn "[hive.review] review usage-error envelope was not serialisable: #{e.class}: #{e.message}"
+          end
+        end
+        raise error
+      end
+
       def emit_daemon_queue_argv_error(action:, message:)
         require "hive/commands/daemon"
         require "json"
@@ -957,6 +1253,24 @@ module Hive
           warn message
         end
         raise Hive::InvalidTaskPath, message
+      end
+
+      def emit_bot_argv_error(message:, error_kind:)
+        require "hive/commands/bot"
+        require "json"
+        error = Hive::InvalidTaskPath.new(message)
+        if options[:json]
+          payload = Hive::Commands::Bot.json_usage_error_payload(
+            error: error,
+            error_kind: error_kind
+          )
+          begin
+            puts JSON.generate(payload)
+          rescue Errno::EPIPE, JSON::GeneratorError
+            nil
+          end
+        end
+        raise error
       end
     end
 
@@ -1010,13 +1324,17 @@ module Hive
     def bot(subcommand = nil)
       require "hive/commands/bot"
       if options[:foreground] && options[:detach]
-        raise Hive::InvalidTaskPath,
-              "hive bot start: --detach is the default; do not combine it with --foreground"
+        emit_bot_argv_error(
+          message: "hive bot start: --detach is the default; do not combine it with --foreground",
+          error_kind: "wrong_subcommand_flag"
+        )
       end
       if options[:force] && subcommand != "install"
-        raise Hive::InvalidTaskPath,
-              "hive bot #{subcommand}: --force only applies to `install`; " \
-              "drop it or use `hive bot install --force`"
+        emit_bot_argv_error(
+          message: "hive bot #{subcommand}: --force only applies to `install`; " \
+                   "drop it or use `hive bot install --force`",
+          error_kind: "wrong_subcommand_flag"
+        )
       end
 
       Hive::Commands::Bot.new(
@@ -1028,30 +1346,76 @@ module Hive
       ).call
     end
 
-    desc "web", "Run the hivebox web UI"
+    desc "pairing SUBCOMMAND", "Approve Telegram pairing requests (list / approve)"
+    long_desc <<~DESC
+      Subcommands:
+        list [--json]                         Show pending Telegram pairing requests.
+                                              --json emits hive-pairing-list.v1.
+        approve telegram <CODE> [--json]      Approve a pending Telegram pairing code.
+                                              The platform argument is the fixed
+                                              literal `telegram`.
+                                              --json emits hive-pairing-approve.v1.
+
+      Pairing requests are created when an unknown Telegram DM sends /start and
+      bot.pairing_enabled is true. Approval appends the chat_id to the global
+      bot.chat_id_allowlist, requests a live bot reload when a live bot PID is
+      present, and queues an approval DM for the running bot to send.
+
+      Exit codes: 0 success; 64 invalid arguments; 78 bad global bot config;
+      1 is a catch-all for every other failure (unknown/expired code, but also
+      a failed approval-notice write, an unreadable pairing store, or an
+      internal error). With --json, branch on the `error_kind` field — not the
+      exit code — to tell these apart (e.g. `unknown_code`, `expired_code`,
+      `notice_write_failed`, `store_read_failed`, `internal_error`).
+    DESC
+    def pairing(subcommand = nil, *pairing_args)
+      require "hive/commands/pairing"
+      Hive::Commands::Pairing.new(
+        subcommand,
+        args: pairing_args,
+        json: options[:json]
+      ).call
+    end
+
+    desc "web [SUBCOMMAND]", "Run or manage the hive web UI"
     option :bind, type: :string, desc: "override web.bind"
     option :port, type: :numeric, desc: "override web.port"
-    def web
+    option :no_bootstrap, type: :boolean, default: false, desc: "do not install the managed web app if missing"
+    option :unsafe, type: :boolean, default: false, desc: "allow non-loopback bind without configured owner"
+    option :allow_public, type: :boolean, default: false, desc: "alias for --unsafe"
+    option :force, type: :boolean, default: false, desc: "for install: overwrite existing service unit"
+    option :detach, type: :boolean, default: false, desc: "for start: start the managed service instead of foreground Rails"
+    def web(subcommand = nil)
       if options[:json]
-        require "json"
-        message = "hive web has no JSON output (it runs a long-lived server). " \
-                  "Use 'hive status --json' for machine-readable task data."
-        # Mirror `hive tui`'s rejection: emit a structured error envelope (sans
-        # `schema`, since web has no registered hive-* schema) and raise
-        # InvalidTaskPath for the USAGE (64) exit code — parity with every
-        # other --json failure on this surface.
-        puts JSON.generate(
-          "ok" => false,
-          "error_class" => "InvalidTaskPath",
-          "error_kind" => "invalid_task_path",
-          "exit_code" => Hive::ExitCodes::USAGE,
-          "message" => message
-        )
-        raise Hive::InvalidTaskPath, message
+        unless %w[install status].include?(subcommand.to_s)
+          require "json"
+          message = "hive web has no JSON output for foreground server commands. " \
+                    "Use 'hive web status --json' or 'hive status --json'."
+          puts JSON.generate(
+            "ok" => false,
+            "error_class" => "InvalidTaskPath",
+            "error_kind" => "invalid_task_path",
+            "exit_code" => Hive::ExitCodes::USAGE,
+            "message" => message
+          )
+          raise Hive::InvalidTaskPath, message
+        end
       end
 
       require "hive/commands/web"
-      Hive::Commands::Web.new(bind: options[:bind], port: options[:port]).call
+      # Every option defaults to false/nil, so there is no present-vs-defaulted
+      # distinction to preserve — pass them straight through (subcommand is nil
+      # for the foreground server, which is the constructor's default).
+      Hive::Commands::Web.new(
+        subcommand,
+        bind: options[:bind],
+        port: options[:port],
+        no_bootstrap: options[:no_bootstrap],
+        unsafe: options[:unsafe] || options[:allow_public],
+        force: options[:force],
+        json: options[:json],
+        detach: options[:detach]
+      ).call
     end
 
     desc "tui", "Open the live, keystroke-driven dashboard for every active task"

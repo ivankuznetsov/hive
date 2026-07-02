@@ -45,8 +45,21 @@ module ActiveSupport
     end
 
     def create_task!(project, text)
-      capture_io { Hive::Commands::New.new(project, text).call! }
-      stage_dir(project, "1-inbox").children.max_by(&:mtime).basename.to_s
+      inbox = stage_dir(project, "1-inbox")
+      attempts = 0
+
+      begin
+        before = inbox.children.map { |child| child.basename.to_s }
+        capture_io { Hive::Commands::New.new(project, text).call! }
+        created = inbox.children.reject { |child| before.include?(child.basename.to_s) }
+        return created.max_by(&:mtime).basename.to_s unless created.empty?
+      rescue Hive::Commands::New::SlugCollisionError
+        attempts += 1
+        retry if attempts < 5
+        raise
+      end
+
+      raise "hive test helper could not identify the task created for #{text.inspect}"
     end
 
     def stage_dir(project, stage)

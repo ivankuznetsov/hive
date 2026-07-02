@@ -6,21 +6,26 @@ module Hive
   module Bot
     class Logger
       SCHEMA = "hive-bot-log".freeze
-      SCHEMA_VERSION = 2
+      SCHEMA_VERSION = 3
+      LEVEL_NAMES = %i[debug info warn error].freeze
 
       EVENTS = %i[
         bot_started
         bot_stopping
         poll_failure
+        poll_unhealthy
         poll_schema_skew
         update_received
         update_rejected_unauthorized
+        pairing_code_issued
+        pairing_approval_notice_unremovable
         dispatch_result_rejected_unauthorized
         notification_sent
         notification_skipped_dedupe
         notification_skipped_backoff
         notification_skipped_active_conversation
         notification_skipped_daemon_plan_pause
+        notification_skipped_live_agent
         fresh_install_seeded
         answer_lock_contention
         dispatched_command
@@ -33,6 +38,13 @@ module Hive
         envelope_parse_failure
         send_failure
         callback_malformed
+        callback_marker_write_failed
+        callback_plan_state_corrupt
+        notification_build_failed
+        status_button_failed
+        details_lookup_failed
+        details_render_failed
+        status_lookup_failed
         pid_file_corrupted
         unknown_stage_label
         alert_store_corrupt
@@ -42,6 +54,42 @@ module Hive
         transcription_failed
         fatal
       ].freeze
+
+      # The one load-bearing category value. The bot's producers tag
+      # high-frequency, low-signal lines (benign poll-transport failures,
+      # dedupe/backoff skips) with `CATEGORY_NOISE`. Extracted as a constant so
+      # the single significant category is greppable while the category field
+      # itself stays open-set (see below).
+      CATEGORY_NOISE = :noise
+
+      # Unlike `level` (a closed enum guarded against LEVEL_NAMES below),
+      # `category` is intentionally open-set: the v3 schema specifies it as
+      # free-form `type: string`, so new categories can be introduced without a
+      # schema bump. `noise` is a downstream-only convention: nothing in this
+      # gem filters on it — the contract is for an external log viewer or
+      # forwarder to drop `category=noise` lines.
+      LEVELS = {
+        notification_skipped_dedupe: :debug,
+        notification_skipped_backoff: :debug,
+        poll_failure: :warn,
+        poll_unhealthy: :warn,
+        poll_schema_skew: :warn,
+        update_rejected_unauthorized: :warn,
+        pairing_approval_notice_unremovable: :warn,
+        dispatch_result_rejected_unauthorized: :warn,
+        answer_lock_contention: :warn,
+        answer_slot_missing: :warn,
+        envelope_parse_failure: :warn,
+        send_failure: :warn,
+        callback_malformed: :warn,
+        pid_file_corrupted: :warn,
+        unknown_stage_label: :warn,
+        alert_store_corrupt: :warn,
+        deprecated_config: :warn,
+        update_nudge_error: :warn,
+        transcription_failed: :warn,
+        fatal: :error
+      }.freeze
 
       attr_reader :path
 
@@ -58,9 +106,14 @@ module Hive
         warn "hive bot: log file #{path} is unwritable (#{e.message}); falling back to stderr"
       end
 
-      def event(name, **attrs)
+      def event(name, level: nil, category: nil, **attrs)
         unless EVENTS.include?(name)
           raise ArgumentError, "unknown bot log event: #{name.inspect} (valid: #{EVENTS.inspect})"
+        end
+
+        level = (level || LEVELS.fetch(name, :info)).to_sym
+        unless LEVEL_NAMES.include?(level)
+          raise ArgumentError, "invalid bot log level: #{level.inspect} (valid: #{LEVEL_NAMES.inspect})"
         end
 
         payload = {
@@ -69,6 +122,11 @@ module Hive
           schema_version: SCHEMA_VERSION,
           event: name.to_s
         }.merge(attrs.transform_keys(&:to_sym))
+        # Stamp the validated level AFTER merging caller attrs so a string-keyed
+        # `level` attr (e.g. **{"level" => "verbose"}) can't overwrite it and emit
+        # a v3 line that fails the schema's closed level enum.
+        payload[:level] = level.to_s
+        payload[:category] = category.to_s unless category.nil?
 
         line = JSON.generate(payload)
         if @stderr_fallback

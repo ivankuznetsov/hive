@@ -16,6 +16,7 @@ Rails.application.routes.draw do
   post "logout" => "sessions#destroy", as: :logout
 
   root "status#index"
+  post "daemon/repair" => "daemon#repair", as: :daemon_repair
 
   post "ideas" => "ideas#create", as: :ideas
 
@@ -24,6 +25,9 @@ Rails.application.routes.draw do
     get  "" => "tasks#show", as: :task
     get  "diff" => "tasks#diff", as: :task_diff
     get  "log" => "tasks#log", as: :task_log
+    get  "media/:filename" => "tasks#media", as: :task_media,
+         format: false,
+         constraints: { filename: /[\w.-]+\.(?:png|jpe?g|gif)/i }
     post "approve" => "tasks#approve", as: :task_approve
     post "reject" => "tasks#reject", as: :task_reject
     post "drop" => "tasks#drop", as: :task_drop

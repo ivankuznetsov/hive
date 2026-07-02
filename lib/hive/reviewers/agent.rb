@@ -23,10 +23,15 @@ module Hive
 
       def run!(deadline: nil)
         run_with_spawn(deadline: deadline) do |profile, prompt, configured_timeout, spawn_timeout, attempts|
+          scope = Hive::Stages::Base.stage_permission_scope(
+            @cfg || {}, "review.reviewers", synthetic_task, profile,
+            base_add_dirs: [ ctx.task_folder ],
+            **Hive::Stages::Base.explicit_permission_kwargs(spec)
+          )
           Hive::Stages::Base.spawn_agent(
             synthetic_task,
             prompt: prompt,
-            add_dirs: [ ctx.task_folder ],
+            add_dirs: scope.fetch(:add_dirs),
             cwd: ctx.worktree_path,
             max_budget_usd: spec["budget_usd"] || 50,
             timeout_sec: spawn_timeout || configured_timeout,
@@ -34,6 +39,7 @@ module Hive
             profile: profile,
             expected_output: output_path,
             cfg: @cfg,
+            **Hive::Stages::Base.tool_scope_kwargs(scope),
             # Reviewer spawns own a per-pass output file, not the task
             # marker — the orchestrator's REVIEW_WORKING marker must
             # persist across each reviewer's spawn.
@@ -176,7 +182,7 @@ module Hive
       end
 
       def backoff_seconds_for(failed_attempt)
-        [ 2**(failed_attempt - 1), Hive::Reviewers::REVIEWER_BACKOFF_CAP_SEC ].min
+        Hive::Reviewers.backoff_seconds_for(failed_attempt)
       end
 
       # ce-review round-3 P1 #3 helpers. `deadline` is a monotonic

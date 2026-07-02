@@ -101,9 +101,11 @@ module Hive
           @output = output
           @summary_io = summary_io
           # registered_agents is a list of strings (agent profile names).
-          # When not injected, ask the live registry. Tests inject a fixed
-          # list so they don't depend on registration order.
-          @registered_agents = (registered_agents || Hive::AgentProfiles.registered_names.map(&:to_s))
+          # When not injected, ask the live registry through Config's
+          # symbol→string projection (the one wrapper this PR added to
+          # centralize exactly that). Tests inject a fixed list so they
+          # don't depend on registration order.
+          @registered_agents = (registered_agents || Hive::Config.registered_agent_names)
 
           # Construction-time guards: turn latent invariant violations
           # (empty registry, recommended-default not in the registry)
@@ -184,7 +186,16 @@ module Hive
         # in plan U3 (R9 testability — agents not yet installed on the
         # machine still get listed if registered).
         def interactive?
-          @input.respond_to?(:tty?) && @input.tty?
+          return false unless @input.respond_to?(:tty?)
+
+          @input.tty?
+        rescue IOError
+          # A closed real IO answers respond_to?(:tty?) with true but raises
+          # IOError on #tty?; degrade to the non-interactive defaults path
+          # (hive init under a closed stdin: daemon / CI) instead of
+          # escaping #collect with an IOError. Shared guard with
+          # Setup::BackendPrompt#interactive?.
+          false
         end
 
         private

@@ -30,7 +30,7 @@ module Hive
       # ecosystem-agnostic while letting projects pick their own
       # tooling.
       module CiFix
-        Result = Data.define(:status, :attempts, :last_output, :error_message)
+        Result = Data.define(:status, :attempts, :last_output, :error_message, :limit_text)
 
         # ANSI escape sequence regex — matches CSI sequences (ESC [ ... letter)
         # which cover colors, cursor movement, text styling. Some CI
@@ -51,7 +51,8 @@ module Hive
               status: :skipped,
               attempts: 0,
               last_output: nil,
-              error_message: nil
+              error_message: nil,
+              limit_text: nil
             )
           end
 
@@ -78,7 +79,8 @@ module Hive
                 status: :stale,
                 attempts: attempts,
                 last_output: last_output,
-                error_message: "wall_clock_exceeded"
+                error_message: "wall_clock_exceeded",
+                limit_text: nil
               )
             end
 
@@ -98,7 +100,8 @@ module Hive
               status: :green,
               attempts: attempts,
               last_output: output,
-              error_message: nil
+              error_message: nil,
+              limit_text: nil
             ) if run_result.exit_code && run_result.exit_code.zero?
 
             if attempts >= max_attempts
@@ -106,7 +109,8 @@ module Hive
                 status: :stale,
                 attempts: attempts,
                 last_output: output,
-                error_message: nil
+                error_message: nil,
+                limit_text: nil
               )
             end
 
@@ -126,7 +130,8 @@ module Hive
                 status: :error,
                 attempts: attempts,
                 last_output: output,
-                error_message: "ci fix agent modified protected files: #{tampered.join(', ')}"
+                error_message: "ci fix agent modified protected files: #{tampered.join(', ')}",
+                limit_text: nil
               )
             end
 
@@ -135,7 +140,8 @@ module Hive
                 status: :error,
                 attempts: attempts,
                 last_output: output,
-                error_message: spawn_result[:error_message] || "fix agent failed (#{spawn_result[:status]})"
+                error_message: spawn_result[:error_message] || "fix agent failed (#{spawn_result[:status]})",
+                limit_text: spawn_result[:limit_text]
               )
             end
 
@@ -144,7 +150,8 @@ module Hive
                 status: :error,
                 attempts: attempts,
                 last_output: output,
-                error_message: "ci fix agent left uncommitted worktree changes"
+                error_message: "ci fix agent left uncommitted worktree changes",
+                limit_text: nil
               )
             end
           end
@@ -305,7 +312,8 @@ module Hive
               status: :error,
               attempts: attempts,
               last_output: nil,
-              error_message: reason
+              error_message: reason,
+              limit_text: nil
             )
           end
         end
@@ -347,14 +355,19 @@ module Hive
           )
 
           task = synthetic_task(ctx)
+          scope = Hive::Stages::Base.stage_permission_scope(
+            cfg, "review.ci", task, profile,
+            default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
+          )
           kwargs = {
             prompt: prompt,
-            add_dirs: [ ctx.task_folder ],
+            add_dirs: scope.fetch(:add_dirs),
             cwd: ctx.worktree_path,
             max_budget_usd: cfg.dig("budget_usd", "review_ci") || 25,
             timeout_sec: cfg.dig("timeout_sec", "review_ci") || 600,
             log_label: "review-ci-fix-attempt#{format('%02d', attempt)}",
             profile: profile,
+            **Hive::Stages::Base.tool_scope_kwargs(scope),
             status_mode: :exit_code_only
           }
           if profile.name == :claude
@@ -362,8 +375,7 @@ module Hive
               task,
               cfg,
               **kwargs,
-              session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-ci-fix-attempt#{attempt}", task),
-              allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
+              session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-ci-fix-attempt#{attempt}", task)
             )
           else
             Hive::Stages::Base.spawn_agent(task, **kwargs)

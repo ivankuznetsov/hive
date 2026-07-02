@@ -56,10 +56,27 @@ class OpenClawSkillsTest < Minitest::Test
     assert_includes body, "yay -S --noconfirm --needed hive-bin"
     assert_includes body, "v0.2.0/install.sh"
     assert_includes body, "daemon install"
-    assert_includes body, "init . --json </dev/null"
+    assert_includes body, "setup --json"
     assert_includes body, "slash-command text after `/hive` as arguments for `hive_cmd`"
     assert_includes body, '"${hive_cmd}" --help'
     assert_includes body, "Pass arguments safely"
+  end
+
+  def test_umbrella_skill_documents_daemon_auto_advance
+    _metadata, body = read_skill("hive")
+
+    [
+      "auto-advance",
+      "normal OpenClaw setups",
+      "hive daemon status --json",
+      "next:",
+      "manual fallback or recovery command",
+      "do not ask before ordinary stage advancement",
+      "needs_input",
+      "Safety Boundaries"
+    ].each do |literal|
+      assert_includes body, literal
+    end
   end
 
   def test_umbrella_skill_guards_destructive_and_blocking_commands
@@ -97,6 +114,165 @@ class OpenClawSkillsTest < Minitest::Test
     assert_includes body, "hive bot tail"
   end
 
+  def test_umbrella_skill_classifies_recovery_markers
+    _metadata, body = read_skill("hive")
+    recovery = section(body, "## Marker Recovery")
+    safety = section(body, "## Safety Boundaries")
+
+    assert_operator body.index(/^## Safety Boundaries$/), :<, body.index(/^## Marker Recovery$/)
+
+    [
+      "## Marker Recovery",
+      "hive status --json",
+      "hive daemon status --json",
+      "hive daemon start --detach",
+      "claude stop hook did not signal completion",
+      "fix_failed",
+      "limits_reached",
+      "retry_after",
+      "agent_working",
+      "REVIEW_ERROR",
+      "ERROR",
+      "let the healer",
+      "ask before",
+      "markers clear",
+      "--match-attr marker_id=<id>"
+    ].each do |literal|
+      assert_includes recovery, literal
+    end
+
+    # Anchor decision entry 6 on its rule-specific phrase so the terminal/manual
+    # `ERROR` guidance is pinned independently of the "ERROR" substring inside
+    # "REVIEW_ERROR" (which the bare literal above matches trivially).
+    assert_includes recovery, "Terminal/manual `ERROR`"
+
+    assert_includes safety, "markers clear"
+    assert_includes safety, "restate the effect"
+    assert_includes safety, "explicit user confirmation"
+  end
+
+  def test_umbrella_skill_documents_local_dogfood_workflow
+    _metadata, body = read_skill("hive")
+    dogfood = section(body, "## Local Dogfood")
+    safety = section(body, "## Safety Boundaries")
+
+    assert_operator body.index(/^## Local Dogfood$/), :<, body.index(/^## Safety Boundaries$/)
+
+    [
+      "gh pr view <number> --json state,mergedAt,baseRefName,statusCheckRollup",
+      "command -v hive",
+      'readlink -f "$(command -v hive)"',
+      "hive daemon status --json",
+      "systemctl --user status hive-daemon.service --no-pager",
+      "preserve dirty worktree",
+      "do not bump or release",
+      "rollback",
+      # Pin the numbered Rollback step heading, not just the prose "rollback"
+      # token, so a future prose reword cannot silently drop the section.
+      "8. Rollback:"
+    ].each do |literal|
+      assert_includes dogfood, literal
+    end
+
+    # The dogfood restart guidance must not weaken or relocate the Safety
+    # Boundaries confirmation contract, so pin these literals to that section.
+    [
+      "restate the effect",
+      "daemon stop"
+    ].each do |literal|
+      assert_includes safety, literal
+    end
+  end
+
+  def test_umbrella_skill_documents_status_bundle_playbook
+    _metadata, body = read_skill("hive")
+    status_bundle = section(body, "## Status Bundle")
+
+    assert_operator body.index(/^## Status Bundle$/), :<, body.index(/^## Safety Boundaries$/)
+
+    [
+      "hive daemon status --json",
+      "hive status --json",
+      "systemctl --user status hive-daemon.service",
+      "gh pr checks"
+    ].each do |command|
+      assert_includes status_bundle, command
+    end
+
+    [
+      "stage",
+      "marker",
+      "action",
+      "PR URL",
+      "CI status",
+      "live PID",
+      "held/retry",
+      "suggested command"
+    ].each do |field|
+      assert_includes status_bundle, field
+    end
+
+    assert_includes status_bundle, "read-only"
+  end
+
+  def test_umbrella_skill_documents_watch_selected_tasks
+    _metadata, body = read_skill("hive")
+
+    [
+      "## Watch Selected Tasks",
+      "hive status --json",
+      "jq",
+      "HIVE_WATCH_INTERVAL",
+      "HIVE_WATCH_TIMEOUT",
+      "claude_pid_alive",
+      "retry_after",
+      "pr_url",
+      "7-artifacts",
+      "8-finalize",
+      "trap",
+      "Ctrl-C is safe",
+      "never kills Hive agents",
+      "never clears markers",
+      "never advances stages"
+    ].each do |literal|
+      assert_includes body, literal
+    end
+  end
+
+  def test_umbrella_skill_documents_daemon_diagnostics_and_repair
+    _metadata, body = read_skill("hive")
+    diagnostics = section(body, "## Daemon Diagnostics And Repair")
+
+    diagnostics_index = body.index(/^## Daemon Diagnostics And Repair$/)
+    safety_index = body.index(/^## Safety Boundaries$/)
+    assert_operator diagnostics_index, :<, safety_index
+    between = body[diagnostics_index...safety_index].sub(/\A## Daemon Diagnostics And Repair\n/, "")
+    refute_match(/^## /, between,
+      "## Daemon Diagnostics And Repair must sit immediately before ## Safety Boundaries")
+
+    [
+      "systemctl --user cat hive-daemon.service",
+      "systemctl --user show hive-daemon.service -p Environment",
+      "command -v hive",
+      "HIVE_BIN",
+      "/usr/bin/hive",
+      "~/.local/bin/hive",
+      "GEM_HOME",
+      "GEM_PATH",
+      "PATH",
+      "cannot load such file -- erb (LoadError)",
+      "ruby-erb",
+      "sudo pacman -S ruby-erb",
+      "gem install --user-install erb",
+      "systemctl --user edit hive-daemon.service",
+      "systemctl --user daemon-reload",
+      "systemctl --user restart hive-daemon.service",
+      "hive daemon status --json"
+    ].each do |literal|
+      assert_includes diagnostics, literal
+    end
+  end
+
   def test_openclaw_docs_publish_only_the_single_hive_cli_slug
     readme = Pathname.new(__dir__).join("../../openclaw/README.md").expand_path.read
 
@@ -115,5 +291,14 @@ class OpenClawSkillsTest < Minitest::Test
     refute_nil match, "#{skill} must start with YAML frontmatter"
 
     [ YAML.safe_load(match[:frontmatter], aliases: false), match[:body] ]
+  end
+
+  def section(body, heading)
+    start_index = body.index(/^#{Regexp.escape(heading)}$/)
+    refute_nil start_index, "#{heading} section must exist"
+
+    remainder = body[start_index..]
+    next_heading_index = remainder.index(/\n## /)
+    next_heading_index ? remainder[0...next_heading_index] : remainder
   end
 end

@@ -3,7 +3,7 @@ title: hive digest
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/digest.rb, lib/hive/digest.rb, lib/hive/digest/
 created: 2026-06-14
-updated: 2026-06-14
+updated: 2026-06-30
 tags: [command, digest, telegram, json]
 ---
 
@@ -14,8 +14,8 @@ calendar date, asks an agent to classify and summarize them when there is
 work to report, renders Telegram MarkdownV2, and sends through the bot
 Telegram client. Runtime config is loaded through
 `Hive::Config.load_global_digest_config`, so real sends can use
-`digest.agent`, `budget_usd.digest`, `timeout_sec.digest`,
-`bot.digest_chat_id`, and `bot.chat_id_allowlist`. See [[modules/digest]].
+`digest.agent`, `budget_usd.digest`, `timeout_sec.digest`, and
+`bot.chat_id_allowlist`. See [[modules/digest]].
 
 ## Synopsis
 
@@ -46,18 +46,34 @@ Options:
    today" message and no agent is spawned.
 4. If items shipped, `Digest::Categorizer` renders `templates/digest_prompt.md.erb`,
    spawns the resolved `AgentProfile` with `status_mode: :output_file_exists`,
-   requires an `items.json` output, then maps rows back by the project-scoped
-   categorizer id (`<project_name>/<pr_number>`, or `<project_name>/<slug>` when
-   there is no PR number) so two projects sharing a PR number on one day don't
-   collide. Allowed categories are `feature`, `fix`, and `patrol`;
-   missing/invalid/duplicate-id rows log a warning and default to `feature`
-   with a fallback summary.
-5. `Digest::Renderer` groups by project, renders categories in fixed order
-   (`New features`, `Fixes`, `Patrol tasks`), escapes Telegram MarkdownV2
-   dynamic text, and links to PR URLs when present.
-6. `Digest::Sender` sends the message with `parse_mode: :markdown_v2` (one
+   requires an `items.json` output (`{"summary": "...", "items": [...]}`), then
+   maps rows back by the project-scoped categorizer id (`<project_name>/<pr_number>`,
+   or `<project_name>/<slug>` when there is no PR number) so two projects sharing
+   a PR number on one day don't collide. Allowed categories are `feature`, `fix`,
+   and `patrol`; missing/invalid/duplicate-id rows log a warning and default to
+   `feature` with a fallback summary. The model's top-level `summary` (one
+   sentence about the day) is surfaced too, falling back to a neutral count when
+   omitted. `categorize` returns a `Digest::Output(by_project:, summary:)`.
+5. `Digest::Stats` fetches per-PR additions/deletions/commits via
+   `Hive::Gh.pr_stats(pr_url)` (keyed off the PR URL, no worktree needed) and
+   aggregates global `Totals(prs:, commits:, additions:, deletions:, measured_prs:)`.
+   A per-PR `gh` failure is logged and skipped — the digest never fails for want
+   of footer numbers.
+6. `Digest::Renderer` renders the brand header `*Hive* #Digest` + a human date
+   (`Fri, 19 June 2026`), an italic `_Summary_` block, then **per-project**
+   sections (`*Hive*`, `*Screenote*`, …) each with categories in fixed order
+   (`Features`, `Fixes`, `Patrol`), and a global footer under a divider
+   (`Lines +A/-D · PRs P · Commits C`; Lines/Commits appear only when at least
+   one PR's stats were measured). All dynamic text is MarkdownV2-escaped and
+   links to PR URLs when present.
+7. `Digest::Sender` sends the message with `parse_mode: :markdown_v2` (one
    `send_message` per chunk above Telegram's 4096-char limit), or returns the
    text without credentials in dry-run mode.
+
+If pending Telegram pairing requests exist, `Hive::Digest.run` appends one
+reminder line to the empty or successful digest body: `🔑 N pairing request(s)
+waiting — run hive pairing list`. The count comes from the local
+`PairingStore`, not from the categorizer prompt.
 
 If categorization raises `Hive::Digest::ModelError`, `Hive::Digest.run` sends
 a failed-generation notice for the date and returns `status: :failed_notice`.
@@ -116,17 +132,34 @@ the direct API can still override that with `cfg:`. Supported keys:
 - `patrol.agent` — fallback summarizer agent.
 - `budget_usd.digest` — categorizer budget override; default is `50`.
 - `timeout_sec.digest` — categorizer timeout override; default is `1800`.
-- `bot.digest_chat_id` — preferred Telegram chat id for delivery.
-- `bot.chat_id_allowlist[0]` — delivery fallback when no digest chat is set.
+- `bot.chat_id_allowlist[0]` — Telegram chat id the digest is delivered to.
 - `bot.log_file` — Telegram client log path fallback.
 
 `Digest::Sender` always gets the bot token from
 `Hive::Config.telegram_bot_token!`, so the token source is still
 `HIVE_TELEGRAM_BOT_TOKEN`.
 
+For a **real** send (not `--dry-run`), `Hive::Digest.run` first calls
+`Hive::EnvFile.load!`, loading `~/.config/hive/.env` so the token is available
+even when the surrounding environment does not export it. This matters most
+for the daemon: the `DigestScheduler` dispatches `hive digest --date <day>
+--json` from a systemd/detached process whose environment has **no**
+`HIVE_TELEGRAM_BOT_TOKEN`, and only `hive bot start` used to load the `.env`
+(see [[commands/bot]]). Before this, every daemon-scheduled digest failed
+`Sender#preflight!` with exit 78 and the scheduler hot-looped on its failure
+backoff. An exported env var still wins over the file, and a dry-run never
+loads it (it never sends). See [[modules/digest]] and [[modules/config]].
+
 The daemon schedules the command through `Hive::Daemon::DigestScheduler` when
-`digest.enabled: true`, dispatching `hive digest --date <day> --json` once per
-owed local day.
+`digest.enabled` is on, dispatching `hive digest --date <day> --json` once per
+owed local day. The digest is **opt-out**: when the operator has not set
+`digest.enabled` either way, `Hive::Config.load_global_digest_block` derives it
+from the bot config — it auto-enables (`true`) when the Telegram bot is
+configured with an allowlisted chat (`bot.enabled == true` and
+`bot.chat_id_allowlist` has at least one integer chat id), and is `false`
+otherwise. An explicit `digest.enabled: false` is the opt-out (and an explicit
+`digest.enabled: true` is always honored). See [[modules/config]] and
+[[commands/daemon]].
 
 ## Tests
 

@@ -1,6 +1,7 @@
 require "test_helper"
 require "hive/commands/init"
 require "hive/commands/new"
+require "hive/task"
 require "hive/task_counter"
 require "hive/task_meta"
 
@@ -35,6 +36,10 @@ class NewTest < Minitest::Test
         assert_equal 1, meta[:id]
         assert_equal File.basename(glob.first), meta[:slug]
         assert_nil meta[:display_name]
+        assert_nil meta[:depends_on]
+        assert_nil meta[:workflow]
+        refute_includes File.read(File.join(glob.first, "meta.yml")), "depends_on:"
+        refute_includes File.read(File.join(glob.first, "meta.yml")), "workflow:"
         refute File.directory?(File.join(glob.first, "assets")),
                "plain CLI-compatible ideas must not create an empty assets directory"
 
@@ -42,6 +47,231 @@ class NewTest < Minitest::Test
         assert_match(%r{\Ahive: 1-inbox/add-inbox-filter-\d{6}-[0-9a-f]{4} captured\z}, log)
         diff_files = run!("git", "-C", File.join(dir, ".hive-state"), "show", "--name-only", "--format=")
         assert_includes diff_files, "stages/1-inbox/#{File.basename(glob.first)}/meta.yml"
+      end
+    end
+  end
+
+  def test_new_workflow_override_seeds_descriptor_entry_and_pins_meta
+    with_registered_workflow(content_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          setup_project { initialize_project(dir) }
+          project = File.basename(dir)
+
+          capture_io { Hive::Commands::New.new(project, "write article", workflow: "content_fixture").call }
+
+          folders = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "write-article-*")]
+          assert_equal 1, folders.size
+          meta = Hive::TaskMeta.read(folders.first)
+          assert_equal "content_fixture", meta[:workflow]
+          assert_equal :content_fixture, Hive::Task.new(folders.first).workflow.id
+          refute_includes File.read(File.join(folders.first, "idea.md")), "<!-- WAITING -->"
+          assert_includes File.read(File.join(folders.first, "idea.md")), "<!-- COMPLETE -->"
+        end
+      end
+    end
+  end
+
+  def test_new_workflow_override_with_agent_entry_seeds_markerless_state
+    with_registered_workflow(agent_entry_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          setup_project { initialize_project(dir) }
+          project = File.basename(dir)
+
+          capture_io { Hive::Commands::New.new(project, "agent entry task", workflow: "agent_entry").call }
+
+          folders = Dir[File.join(dir, ".hive-state", "stages", "1-draft", "agent-entry-task-*")]
+          assert_equal 1, folders.size
+          state = File.read(File.join(folders.first, "draft.md"))
+          refute_includes state, "<!-- WAITING -->"
+          refute_includes state, "<!-- COMPLETE -->"
+        end
+      end
+    end
+  end
+
+  def test_new_single_stage_workflow_prints_run_hint_without_move
+    with_registered_workflow(single_stage_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          setup_project { initialize_project(dir) }
+          project = File.basename(dir)
+
+          out, = capture_io { Hive::Commands::New.new(project, "single stage", workflow: "single").call }
+
+          folder = Dir[File.join(dir, ".hive-state", "stages", "1-only", "single-stage-*")].first
+          assert File.directory?(folder)
+          assert_includes out, "next: hive run 1"
+          refute_includes out, "next: mv"
+        end
+      end
+    end
+  end
+
+  def test_new_without_override_in_non_coding_default_project_pins_effective_workflow
+    with_registered_workflow(content_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          setup_project { Hive::Commands::Init.new(dir, workflow: "content_fixture").call }
+          project = File.basename(dir)
+
+          capture_io { Hive::Commands::New.new(project, "content default task").call }
+
+          folder = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "content-default-task-*")].first
+          assert_equal "content_fixture", Hive::TaskMeta.read(folder)[:workflow]
+          assert_equal :content_fixture, Hive::Task.new(folder).workflow.id
+
+          cfg_path = File.join(dir, ".hive-state", "config.yml")
+          config = YAML.safe_load(File.read(cfg_path))
+          config["default_workflow"] = "coding"
+          File.write(cfg_path, config.to_yaml)
+
+          assert_equal :content_fixture, Hive::Task.new(folder).workflow.id,
+                       "pinned non-coding task must not re-resolve after project default changes"
+        end
+      end
+    end
+  end
+
+  def test_new_workflow_override_allows_coding_in_non_coding_default_project
+    with_registered_workflow(content_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          setup_project { Hive::Commands::Init.new(dir, workflow: "content_fixture").call }
+          project = File.basename(dir)
+
+          capture_io { Hive::Commands::New.new(project, "coding override task", workflow: "coding").call }
+
+          folder = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "coding-override-task-*")].first
+          assert_equal "coding", Hive::TaskMeta.read(folder)[:workflow]
+          assert_equal :coding, Hive::Task.new(folder).workflow.id
+          assert_includes File.read(File.join(folder, "idea.md")), "<!-- WAITING -->"
+        end
+      end
+    end
+  end
+
+  def test_new_unknown_workflow_fails_without_seeding
+    with_registered_workflow(content_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          setup_project { initialize_project(dir) }
+          project = File.basename(dir)
+
+          _out, err, status = with_captured_exit do
+            Hive::Commands::New.new(project, "bad workflow", workflow: "bogus").call
+          end
+
+          assert_equal Hive::ExitCodes::USAGE, status,
+                       "a typo'd --workflow is a USAGE (64) error so an agent can tell it from a transient failure"
+          assert_includes err, "unknown workflow \"bogus\""
+          assert_includes err, "content_fixture"
+          assert_empty Dir[File.join(dir, ".hive-state", "stages", "*", "bad-workflow-*")]
+        end
+      end
+    end
+  end
+
+  def test_new_unregistered_project_default_names_config_without_seeding
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        project = File.basename(dir)
+
+        # A hand-edit (or a later-removed workflow) leaves the project default
+        # pointing at an unregistered workflow. Without an override, `hive new`
+        # must fail with a typed error that names config.yml — not a bare
+        # UnknownWorkflow that escapes the rescue and blocks all task creation.
+        cfg_path = File.join(dir, ".hive-state", "config.yml")
+        config = YAML.safe_load(File.read(cfg_path))
+        config["default_workflow"] = "ghost"
+        File.write(cfg_path, config.to_yaml)
+
+        _out, err, status = with_captured_exit do
+          Hive::Commands::New.new(project, "orphaned default").call
+        end
+
+        assert_equal 1, status
+        assert_includes err, "config.yml"
+        assert_includes err, "not a registered workflow"
+        assert_empty Dir[File.join(dir, ".hive-state", "stages", "*", "orphaned-default-*")]
+      end
+    end
+  end
+
+  def test_new_corrupt_config_fails_typed_without_seeding
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        project = File.basename(dir)
+
+        # A corrupt config.yml makes Config.load raise Psych::SyntaxError, which
+        # is neither a Hive::Error nor in call's rescue list — it would crash
+        # with a raw backtrace. It must instead fail with a typed error naming
+        # config.yml, and seed nothing.
+        File.write(File.join(dir, ".hive-state", "config.yml"), "default_workflow: [unclosed\n")
+
+        _out, err, status = with_captured_exit do
+          Hive::Commands::New.new(project, "corrupt config probe").call
+        end
+
+        assert_equal 1, status
+        assert_includes err, "config.yml"
+        assert_empty Dir[File.join(dir, ".hive-state", "stages", "*", "corrupt-config-probe-*")]
+      end
+    end
+  end
+
+  def test_new_with_explicit_workflow_ignores_corrupt_config
+    with_registered_workflow(content_workflow) do
+      with_tmp_global_config do
+        with_tmp_git_repo do |dir|
+          setup_project { initialize_project(dir) }
+          project = File.basename(dir)
+
+          # An explicit --workflow never reads the project default, so a corrupt
+          # config.yml must not block a fully-specified `hive new`.
+          File.write(File.join(dir, ".hive-state", "config.yml"), "default_workflow: [unclosed\n")
+
+          capture_io { Hive::Commands::New.new(project, "explicit workflow", workflow: "content_fixture").call }
+
+          folder = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "explicit-workflow-*")].first
+          assert folder, "an explicit --workflow must create the task despite a corrupt config"
+          assert_equal "content_fixture", Hive::TaskMeta.read(folder)[:workflow]
+        end
+      end
+    end
+  end
+
+  def test_creates_idea_with_dependency
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        project = File.basename(dir)
+
+        capture_io { Hive::Commands::New.new(project, "dependent task", depends_on: "base-task").call }
+
+        folder = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "dependent-task-*")].first
+        assert_equal "base-task", Hive::TaskMeta.read(folder)[:depends_on]
+        assert_includes File.read(File.join(folder, "meta.yml")), "depends_on: base-task"
+      end
+    end
+  end
+
+  def test_rejects_invalid_dependency
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        project = File.basename(dir)
+
+        _, err, status = with_captured_exit do
+          Hive::Commands::New.new(project, "dependent task", depends_on: "../base").call
+        end
+
+        assert_equal 1, status
+        assert_includes err, "invalid dependency"
+        assert_empty Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "dependent-task-*")]
       end
     end
   end
@@ -179,6 +409,22 @@ class NewTest < Minitest::Test
         setup_project { initialize_project(dir) }
         project = File.basename(dir)
         capture_io { Hive::Commands::New.new(project, "!!! ???").call }
+        glob = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "*")]
+        assert_equal 1, glob.size
+        assert_match(/\Atask-\d{6}-[0-9a-f]{4}\z/, File.basename(glob.first))
+      end
+    end
+  end
+
+  def test_digit_leading_text_falls_back_to_task_slug
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        project = File.basename(dir)
+        # The derived prefix "404-page-broken" leaves a digit as the leading
+        # char, which fails SLUG_RE's leading-letter rule — derive_slug swaps
+        # in the `task-` prefix rather than emit an invalid slug.
+        capture_io { Hive::Commands::New.new(project, "404 page broken").call }
         glob = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "*")]
         assert_equal 1, glob.size
         assert_match(/\Atask-\d{6}-[0-9a-f]{4}\z/, File.basename(glob.first))

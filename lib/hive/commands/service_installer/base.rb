@@ -9,12 +9,12 @@ module Hive
   module Commands
     module ServiceInstaller
       # Platform-agnostic mechanics shared by per-user autostart service
-      # installers (daemon, bot). Subclasses supply only the service
+      # installers (daemon, bot, web). Subclasses supply only the service
       # identity (`service_name`, `cli_label`, `service_noun`, `unit_noun`),
-      # the target unit paths (`target_path`), the rendered unit/plist
-      # bodies (`render_systemd` / `render_launchd`), and an optional
-      # `upgrade_restart_warning` string appended on a Linux force-upgrade
-      # restart.
+      # the rendered unit/plist bodies (`render_systemd` / `render_launchd`),
+      # and an optional `upgrade_restart_warning` string appended on a Linux
+      # force-upgrade restart. The unit path derives from `service_name`
+      # (see `target_path`).
       class Base
         attr_reader :messages
 
@@ -81,10 +81,27 @@ module Hive
           }
         end
 
+        def expected_binary
+          resolved_binary
+        end
+
         # launchd plist Label for this service. Matches the `<key>Label</key>`
         # value in the bundled plists (local.hive-daemon / local.hive-bot).
         def launchd_label
           "local.#{service_name}"
+        end
+
+        # Per-user unit path for this service, derived from `service_name`:
+        # `~/Library/LaunchAgents/local.<name>.plist` on macOS,
+        # `~/.config/systemd/user/<name>.service` on Linux. nil on an
+        # unsupported host — `install!` reports :unsupported before touching
+        # it and `service_state` guards nil, so callers never see a path
+        # for a platform that has no service manager.
+        def target_path
+          case platform
+          when :macos then File.join(@home, "Library/LaunchAgents", "#{launchd_label}.plist")
+          when :linux then File.join(@home, ".config/systemd/user", "#{service_name}.service")
+          end
         end
 
         # ── Subclass hooks ─────────────────────────────────────────────
@@ -105,10 +122,6 @@ module Hive
 
         def unit_noun
           raise NotImplementedError, "#{self.class} must define #unit_noun"
-        end
-
-        def target_path
-          raise NotImplementedError, "#{self.class} must define #target_path"
         end
 
         def render_systemd
@@ -303,6 +316,48 @@ module Hive
             return shim_template if resolved.start_with?("#{mgr_root}/")
           end
           nil
+        end
+
+        # Render a systemd unit from `template_path`, substituting the
+        # resolved binary into ExecStart (with `exec_suffix` as the hive
+        # subcommand), HIVE_BIN, and PATH. systemd .service files are
+        # POSIX-shell-ish, so the resolved binary path is shell-escaped —
+        # whitespace, `%`, or other specials would otherwise produce a
+        # malformed unit. Shared by the daemon and web installers, which
+        # differ only in the template path and ExecStart suffix.
+        def render_systemd_from(template_path, exec_suffix)
+          template = File.read(template_path)
+          escaped = Shellwords.escape(resolved_binary)
+          template
+            .sub(/^ExecStart=.*$/, "ExecStart=#{escaped} #{exec_suffix}")
+            .sub(/^Environment=HIVE_BIN=.*$/, "Environment=HIVE_BIN=#{escaped}")
+            .sub(/^Environment=PATH=.*$/, build_path_line)
+        end
+
+        # Render a launchd plist from `template_path`, substituting the resolved
+        # binary into ProgramArguments ($0), the PATH/HIVE_BIN environment, the
+        # log directory, and (for the web plist) the bare WorkingDirectory.
+        # plist values are XML, so each substituted path is HTML-escaped. Shared
+        # by the daemon and web installers, which differ only in the template.
+        def render_launchd_from(template_path)
+          template = File.read(template_path)
+          binary = resolved_binary
+          # dirname BEFORE HTML-escaping so paths with `&`/`<`/`>` get the
+          # correct directory segmentation; then escape both for plist XML safety.
+          binary_dir = File.dirname(binary)
+          escaped_binary = CGI.escapeHTML(binary)
+          escaped_binary_dir = CGI.escapeHTML(binary_dir)
+          escaped_home = CGI.escapeHTML(@home)
+          template
+            .gsub(%r{<string>/Users/YOU/\.local/bin/hive</string>}, "<string>#{escaped_binary}</string>")
+            .gsub("/Users/YOU/Library/Logs", "#{escaped_home}/Library/Logs")
+            .gsub("/Users/YOU/.local/bin", escaped_binary_dir)
+            # The web plist sets <key>WorkingDirectory</key><string>/Users/YOU
+            # </string>; launchd chdir()s there before exec, so a literal
+            # /Users/YOU never exists on a real host and the service fails to
+            # spawn. Rewrite the bare element to the real home. The daemon plist
+            # has no WorkingDirectory, so this is a no-op there.
+            .gsub(%r{<string>/Users/YOU</string>}, "<string>#{escaped_home}</string>")
         end
 
         def resolved_binary

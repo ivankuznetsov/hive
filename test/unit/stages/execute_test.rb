@@ -5,7 +5,22 @@ require "hive/markers"
 class HiveStagesExecuteTest < Minitest::Test
   include HiveTestHelper
 
-  TaskStub = Struct.new(:folder, :state_file, :worktree_yml_path, :project_root, :slug, :reviews_dir, keyword_init: true)
+  TaskStub = Struct.new(:folder, :state_file, :worktree_yml_path, :project_root, :slug, :reviews_dir, :depends_on, :id, keyword_init: true)
+
+  FakeWorktree = Struct.new(:path, :create_calls, keyword_init: true) do
+    def create!(branch_name, default_branch:, base_override: nil)
+      create_calls << { branch_name: branch_name, default_branch: default_branch, base_override: base_override }
+      FileUtils.mkdir_p(path)
+    end
+
+    def write_pointer!(task_folder, branch_name, execute_base_head: nil)
+      File.write(File.join(task_folder, "worktree.yml"), {
+        "path" => path,
+        "branch" => branch_name,
+        "execute_base_head" => execute_base_head
+      }.to_yaml)
+    end
+  end
 
   FakeGit = Struct.new(:head, :branch, :dirty, :ancestor_result, :raise_head, :raise_ancestor, keyword_init: true) do
     def head_sha
@@ -78,6 +93,132 @@ class HiveStagesExecuteTest < Minitest::Test
     end
   end
 
+  def test_run_pass_marks_limits_reached_when_implementation_error_message_hits_quota
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      write_pointer(task, "path" => File.join(dir, "worktree"), "branch" => task.slug, "execute_base_head" => "base")
+      git = FakeGit.new(head: "base", branch: task.slug, dirty: false, ancestor_result: true)
+      result = {
+        status: :error,
+        error_message: "limits reached for codex: quota exhausted, try again at Jun 24th"
+      }
+
+      run_result = with_fake_git_and_spawn(git, result: result) do
+        Hive::Stages::Execute.run_pass(task, execute_cfg("codex"), File.join(dir, "worktree"))
+      end
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal({ commit: "limits_reached", status: :error }, run_result)
+      assert_equal :error, marker.name
+      assert_equal "limits_reached", marker.attrs["reason"]
+      assert_equal "codex", marker.attrs["provider"]
+      assert_equal "implementer hit a usage/credit limit", marker.attrs["message"]
+      assert Time.parse(marker.attrs.fetch("retry_after")) > Time.now.utc
+    end
+  end
+
+  def test_run_pass_marks_limits_reached_when_limit_text_hits_quota
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      write_pointer(task, "path" => File.join(dir, "worktree"), "branch" => task.slug, "execute_base_head" => "base")
+      git = FakeGit.new(head: "base", branch: task.slug, dirty: false, ancestor_result: true)
+      result = {
+        status: :error,
+        limit_text: "rate limit reached",
+        error_message: "exit_code=1"
+      }
+
+      run_result = with_fake_git_and_spawn(git, result: result) do
+        Hive::Stages::Execute.run_pass(task, execute_cfg("codex"), File.join(dir, "worktree"))
+      end
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal({ commit: "limits_reached", status: :error }, run_result)
+      assert_equal :error, marker.name
+      assert_equal "limits_reached", marker.attrs["reason"]
+      assert_equal "codex", marker.attrs["provider"]
+      assert Time.parse(marker.attrs.fetch("retry_after")) > Time.now.utc
+    end
+  end
+
+  def test_run_pass_preserves_non_limit_implementation_failure_marker
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      write_pointer(task, "path" => File.join(dir, "worktree"), "branch" => task.slug, "execute_base_head" => "base")
+      git = FakeGit.new(head: "base", branch: task.slug, dirty: false, ancestor_result: true)
+      result = { status: :error, error_message: "exit_code=1 compile error" }
+
+      run_result = with_fake_git_and_spawn(git, result: result) do
+        Hive::Stages::Execute.run_pass(task, execute_cfg("codex"), File.join(dir, "worktree"))
+      end
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal({ commit: "implementer_failed", status: :error }, run_result)
+      assert_equal :error, marker.name
+      assert_equal "implementer_failed", marker.attrs["reason"]
+      assert_equal "codex", marker.attrs["provider"]
+      assert_equal "error", marker.attrs["status"]
+      assert_equal "exit_code=1 compile error", marker.attrs["message"]
+      refute marker.attrs.key?("retry_after")
+    end
+  end
+
+  # `agent_failed?` is true for :timeout as well as :error, and the
+  # non-limit branch records `status: impl_result[:status]` verbatim — so a
+  # timeout (e.g. the exit_code_only "stop hook did not signal completion"
+  # drain) must attribute as `implementer_failed status=timeout`.
+  def test_run_pass_records_timeout_status_for_non_limit_implementation_timeout
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      write_pointer(task, "path" => File.join(dir, "worktree"), "branch" => task.slug, "execute_base_head" => "base")
+      git = FakeGit.new(head: "base", branch: task.slug, dirty: false, ancestor_result: true)
+      result = { status: :timeout, error_message: "claude stop hook did not signal completion" }
+
+      run_result = with_fake_git_and_spawn(git, result: result) do
+        Hive::Stages::Execute.run_pass(task, execute_cfg("codex"), File.join(dir, "worktree"))
+      end
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal({ commit: "implementer_failed", status: :error }, run_result)
+      assert_equal :error, marker.name
+      assert_equal "implementer_failed", marker.attrs["reason"]
+      assert_equal "codex", marker.attrs["provider"]
+      assert_equal "timeout", marker.attrs["status"]
+      assert_equal "claude stop hook did not signal completion", marker.attrs["message"]
+      refute marker.attrs.key?("retry_after")
+    end
+  end
+
+  # When the execute agent name can't be resolved (unregistered profile),
+  # `execute_agent_name` rescues to nil rather than letting the exception
+  # escape; the limits_reached marker is still written, just with provider
+  # dropped (markers compact nil attrs away).
+  def test_run_pass_marks_limits_reached_with_no_provider_when_execute_agent_unresolvable
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      write_pointer(task, "path" => File.join(dir, "worktree"), "branch" => task.slug, "execute_base_head" => "base")
+      git = FakeGit.new(head: "base", branch: task.slug, dirty: false, ancestor_result: true)
+      result = { status: :error, limit_text: "rate limit reached", error_message: "exit_code=1" }
+
+      run_result = with_fake_git_and_spawn(git, result: result) do
+        Hive::Stages::Execute.run_pass(task, execute_cfg("nonexistent-agent"), File.join(dir, "worktree"))
+      end
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal({ commit: "limits_reached", status: :error }, run_result)
+      assert_equal :error, marker.name
+      assert_equal "limits_reached", marker.attrs["reason"]
+      refute marker.attrs.key?("provider"),
+             "an unresolvable execute agent must drop provider, not crash"
+      assert Time.parse(marker.attrs.fetch("retry_after")) > Time.now.utc
+    end
+  end
+
   def test_execute_baseline_head_returns_nil_when_git_head_fails
     with_tmp_dir do |dir|
       task = build_task(dir)
@@ -93,6 +234,33 @@ class HiveStagesExecuteTest < Minitest::Test
       git = FakeGit.new(raise_head: true)
 
       assert_nil Hive::Stages::Execute.inspect_worktree_state(task, git)
+    end
+  end
+
+  def test_run_init_pass_bases_worktree_on_dependency_branch
+    with_tmp_dir do |dir|
+      task = build_task(dir, depends_on: "base-task")
+      write_plan(task)
+      Hive::TaskMeta.write(task.folder, id: 2, slug: task.slug, display_name: nil, depends_on: "base-task")
+      base_folder = File.join(dir, ".hive-state", "stages", "8-finalize", "base-task")
+      FileUtils.mkdir_p(base_folder)
+      Hive::TaskMeta.write(base_folder, id: 1, slug: "base-task", display_name: nil)
+
+      fake_wt = FakeWorktree.new(path: File.join(dir, "worktrees", task.slug), create_calls: [])
+      project_git = Struct.new(:default_branch).new("master")
+      worktree_git = Struct.new(:head_sha).new("base-head")
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(path) { path == dir ? project_git : worktree_git }) do
+        with_replaced_singleton_method(Hive::Worktree, :new, ->(_project_root, _slug, worktree_root:) { fake_wt }) do
+          with_replaced_singleton_method(Hive::Stages::Execute, :run_pass, ->(_task, _cfg, _path) { { commit: nil, status: :ok } }) do
+            Hive::Stages::Execute.run_init_pass(task, { "worktree_root" => File.join(dir, "worktrees") })
+          end
+        end
+      end
+
+      assert_equal [
+        { branch_name: task.slug, default_branch: "master", base_override: "base-task" }
+      ], fake_wt.create_calls
     end
   end
 
@@ -117,7 +285,32 @@ class HiveStagesExecuteTest < Minitest::Test
     end
   end
 
-  def build_task(project_root)
+  # End-to-end through the real 4-execute spawn helper: a non-yolo scope on
+  # a non-claude runner (the A8 gate) must replace the stale AGENT_WORKING
+  # marker with an attributed :error before the ConfigError propagates,
+  # rather than escaping uncaught and leaving 4-execute looking alive.
+  def test_spawn_implementation_attributes_error_marker_on_non_claude_scope
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      Hive::Markers.set(task.state_file, :agent_working)
+      cfg = {
+        "permissions" => "yolo",
+        "execute" => { "agent" => "codex", "permissions" => "read-only" }
+      }
+
+      error = assert_raises(Hive::ConfigError) do
+        Hive::Stages::Execute.spawn_implementation(task, cfg, File.join(dir, "worktree"))
+      end
+      assert_match(/runner :codex/, error.message)
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, marker.name, "stale AGENT_WORKING must become attributed :error"
+      assert_equal "permission_config_error", marker.attrs["reason"]
+    end
+  end
+
+  def build_task(project_root, depends_on: nil)
     folder = File.join(project_root, ".hive-state", "stages", "4-execute", "demo-260522-aaaa")
     FileUtils.mkdir_p(folder)
     TaskStub.new(
@@ -126,7 +319,9 @@ class HiveStagesExecuteTest < Minitest::Test
       worktree_yml_path: File.join(folder, "worktree.yml"),
       project_root: project_root,
       slug: "demo-260522-aaaa",
-      reviews_dir: File.join(folder, "reviews")
+      reviews_dir: File.join(folder, "reviews"),
+      depends_on: depends_on,
+      id: 2
     )
   end
 
@@ -138,10 +333,14 @@ class HiveStagesExecuteTest < Minitest::Test
     File.write(task.worktree_yml_path, attrs.to_yaml)
   end
 
-  def with_fake_git_and_spawn(git, status:)
+  def execute_cfg(agent)
+    { "execute" => { "agent" => agent } }
+  end
+
+  def with_fake_git_and_spawn(git, status: :ok, result: nil)
     with_replaced_singleton_method(Hive::GitOps, :new, ->(_path) { git }) do
       with_replaced_singleton_method(Hive::Stages::Execute, :spawn_implementation, lambda { |_task, _cfg, _path|
-        { status: status }
+        result || { status: status }
       }) do
         yield
       end

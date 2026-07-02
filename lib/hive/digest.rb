@@ -1,5 +1,6 @@
 require "date"
 require "hive/config"
+require "hive/env_file"
 require "hive/digest/errors"
 require "hive/digest/window"
 require "hive/digest/shipped_item"
@@ -8,6 +9,8 @@ require "hive/digest/collector"
 require "hive/digest/categorizer"
 require "hive/digest/renderer"
 require "hive/digest/sender"
+require "hive/digest/stats"
+require "hive/bot/pairing_store"
 
 module Hive
   module Digest
@@ -31,13 +34,37 @@ module Hive
     module_function
 
     def run(date: nil, dry_run: false, cfg: nil, clock: -> { Time.now },
-            collector: nil, categorizer: nil, sender: nil)
+            collector: nil, categorizer: nil, sender: nil, stats: nil,
+            pairing_store: Hive::Bot::PairingStore.new)
       local_date = date ? Window.parse_date(date) : Window.previous_local_day(now: clock.call)
       cfg ||= Hive::Config.load_global_digest_config
+      # Load ~/.config/hive/.env (if present) so a real send can authenticate
+      # even when the surrounding environment carries no HIVE_TELEGRAM_BOT_TOKEN
+      # — most importantly the daemon-dispatched `hive digest`, whose
+      # systemd/detached launch environment does not inherit the token (until
+      # now only `hive bot start` loaded it, via lib/hive/commands/bot.rb, so a
+      # daemon-scheduled digest failed preflight with exit 78 every tick). An
+      # existing exported env var always wins. A dry-run never sends, so it
+      # skips this entirely — matching the dry-run "no token/chat lookup"
+      # contract.
+      Hive::EnvFile.load! unless dry_run
       collector ||= Collector.new
       sender ||= Sender.new(cfg: cfg)
+      stats ||= Stats.new
 
       grouped = collector.for_date(local_date)
+      # `PairingStore#pending` prunes-on-read and opens a `.lock` file, so an
+      # I/O-faulted state dir (read-only/full: EROFS/ENOSPC/EACCES) can make it
+      # raise SystemCallError/IOError. The pairing count is purely
+      # informational — never let it abort the whole digest. The only rescue
+      # below (ModelError) would not catch it, `Commands::Digest#call` only
+      # rescues Hive::Error, and the daemon would then hot-loop the crash.
+      pending_pairings =
+        begin
+          pairing_store.pending.size
+        rescue SystemCallError, IOError
+          0
+        end
       message, status =
         if empty_grouped?(grouped)
           [ Renderer.empty, :empty ]
@@ -47,8 +74,9 @@ module Hive
           # wasting a full LLM run (and, with the scheduler's backoff,
           # hot-looping it). Skipped for dry-run, which never sends.
           sender.preflight! unless dry_run
-          render_digest(grouped, local_date, cfg, categorizer)
+          render_digest(grouped, local_date, cfg, categorizer, stats)
         end
+      message = append_pairing_notice(message, pending_pairings)
 
       delivery = sender.deliver(message, dry_run: dry_run)
       Result.new(status: status, date: local_date, message: message, delivery: delivery)
@@ -60,14 +88,24 @@ module Hive
       Result.new(status: :failed_notice, date: local_date, message: message, delivery: delivery)
     end
 
+    def append_pairing_notice(message, count)
+      count = count.to_i
+      return message if count <= 0
+
+      noun = count == 1 ? "request" : "requests"
+      "#{message}\n\n🔑 #{count} pairing #{noun} waiting — run `hive pairing list`"
+    end
+
     def empty_grouped?(grouped)
       grouped.empty? || grouped.values.all? { |items| Array(items).empty? }
     end
 
-    def render_digest(grouped, date, cfg, categorizer)
+    def render_digest(grouped, date, cfg, categorizer, stats)
       categorizer ||= Categorizer.new(cfg: cfg)
-      categorized = categorizer.categorize(grouped, date: date)
-      [ Renderer.render(categorized), :sent ]
+      output = categorizer.categorize(grouped, date: date)
+      totals = stats.for_items(grouped.values.flatten)
+      message = Renderer.render(output.by_project, date: date, summary: output.summary, totals: totals)
+      [ message, :sent ]
     end
   end
 end

@@ -46,11 +46,24 @@ module Hive
         :slug,
         :id,
         :display_name,
+        :workflow,
+        :depends_on,
+        :blocked_by,
+        :dependency_stage,
+        :blocked,
         :folder,
         :state_file,
         :worktree_path,
+        :pr_url,
         :marker,
         :attrs,
+        # Carried verbatim from the JSON `held` object for payload↔Row
+        # schema-correspondence only (schema_correspondence_test). The
+        # renderer does NOT read this — it derives the hold label from
+        # `attrs` via `Hive::AgentLimit.held_label` (tasks_pane.rb). Asymmetric
+        # with `blocked`, which IS consumed by the renderer; do not "fix" a
+        # hold-label bug by editing `row.held`.
+        :held,
         :mtime,
         :folder_mtime,
         :age_seconds,
@@ -68,17 +81,29 @@ module Hive
         # predate PR #84 finding #8 can keep their existing Row.new
         # calls; production code in build_row always passes the value
         # explicitly. New tests should pass it explicitly too.
+        # pr_url defaults to nil so payloads / test factories that predate
+        # the PR-link feature keep building Row without it; production
+        # payloads always emit the value (string or null) explicitly.
         # live_task_lock defaults to false so older JSON payloads (and
         # tests written before issue #144) keep classifying correctly;
         # production payloads always emit the boolean explicitly.
         # unanswered_questions defaults to 0 so payloads / test factories
         # that predate issue #270 keep working; production payloads always
         # emit the integer explicitly.
-        def initialize(id: nil, display_name: nil, worktree_path: nil,
-                       folder_mtime: nil, live_task_lock: false,
-                       unanswered_questions: 0, **rest)
+        def initialize(id: nil, display_name: nil, workflow: nil, worktree_path: nil,
+                       pr_url: nil, folder_mtime: nil, live_task_lock: false,
+                       unanswered_questions: 0, depends_on: nil,
+                       blocked_by: nil, dependency_stage: nil,
+                       blocked: false, held: nil, **rest)
           super(id: id, display_name: display_name,
+                workflow: workflow,
+                depends_on: depends_on,
+                blocked_by: blocked_by,
+                dependency_stage: dependency_stage,
+                blocked: blocked,
                 worktree_path: worktree_path,
+                pr_url: pr_url,
+                held: held,
                 folder_mtime: folder_mtime,
                 live_task_lock: live_task_lock,
                 unanswered_questions: unanswered_questions, **rest)
@@ -138,11 +163,18 @@ module Hive
           slug: payload["slug"],
           id: payload["id"],
           display_name: payload["display_name"],
+          workflow: payload["workflow"],
+          depends_on: payload["depends_on"],
+          blocked_by: payload["blocked_by"],
+          dependency_stage: payload["dependency_stage"],
+          blocked: payload["blocked"] == true,
           folder: payload["folder"],
           state_file: payload["state_file"],
           worktree_path: payload["worktree_path"],
+          pr_url: payload["pr_url"],
           marker: payload["marker"],
           attrs: payload["attrs"],
+          held: payload["held"],
           mtime: payload["mtime"],
           folder_mtime: payload["folder_mtime"],
           age_seconds: payload["age_seconds"],

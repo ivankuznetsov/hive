@@ -1,14 +1,25 @@
+require "hive/workflows/registry"
+require "hive/workflows/project"
+
 module Hive
-  # Single source of truth for the workflow verbs (brainstorm, plan,
-  # develop, open-pr, review, artifacts, finalize, archive). Each verb advances a task from one
-  # stage to the next; `Hive::Commands::StageAction` consumes this map
-  # directly, `Hive::TaskAction` uses it to label the "ready to <verb>"
-  # status bucket per stage, and `Hive::Commands::Approve` /
-  # `FindingToggle` use it to derive the next-action command after a
-  # successful move.
+  # Public source of truth for the CODING workflow verbs (brainstorm, plan,
+  # develop, open-pr, review, artifacts, finalize, archive), derived from
+  # the default (coding) workflow descriptor. Each verb advances a task from
+  # one stage to the next; the derived `VERBS` map drives the coding paths:
+  # `Hive::Commands::StageAction` consumes it to dispatch the move and
+  # `Hive::TaskAction` uses it to label the "ready to <verb>" status bucket
+  # per coding stage. The generic `Hive::Commands::Approve` next-action path
+  # no longer reads `VERBS` — it derives the verb per-task via
+  # `task.workflow.advance_verb_for` (U6) so non-coding descriptors resolve
+  # their own verbs.
   #
-  # Adding or removing a verb is a one-file change here.
+  # Adding or removing a coding verb follows the default workflow descriptor.
   module Workflows
+    # Descriptor id of the built-in coding workflow. The "nil/blank/coding
+    # ⟹ coding" defaulting rule gates every coding-only daemon/bot branch,
+    # so it lives here once instead of being re-spelled at each consumer.
+    CODING_ID = :coding
+
     # Optional `interactive: true` flag marks verbs that need the user's
     # tty during execution (stdin prompts, interactive `gh pr create`,
     # claude tool-permission asks). The TUI's `BubbleModel#dispatch_command`
@@ -24,16 +35,26 @@ module Hive
     # verb that DOES need stdin (e.g., a manual review prompt) can
     # opt in with one line — without re-introducing foreground
     # takeover for everything.
-    VERBS = {
-      "brainstorm" => { source: "1-inbox", target: "2-brainstorm", force_source: true },
-      "plan"       => { source: "2-brainstorm", target: "3-plan" },
-      "develop"    => { source: "3-plan", target: "4-execute" },
-      "open-pr"    => { source: "4-execute", target: "5-open-pr" },
-      "review"     => { source: "5-open-pr", target: "6-review" },
-      "artifacts"  => { source: "6-review", target: "7-artifacts" },
-      "finalize"   => { source: "7-artifacts", target: "8-finalize" },
-      "archive"    => { source: "8-finalize", target: "9-done" }
-    }.freeze
+    stages = Hive::Workflows::Registry.default.stages
+    # each_cons(2) walks adjacent [source, target] pairs so a verb's `source`
+    # is always the stage that PRECEDES its target — expressed directly instead
+    # of via `fetch(index - 1)`, whose negative index at index 0 would wrap a
+    # first-stage advance_verb to the terminal stage. The descriptor's first
+    # stage never carries an advance_verb (enforced by Workflow's
+    # construction-time validation), so starting the pairing at the second
+    # stage drops no verb.
+    VERBS = stages.each_cons(2).each_with_object({}) do |(source, target), verbs|
+      advance_verb = target.advance_verb
+      next unless advance_verb
+
+      entry = {
+        source: source.dir,
+        target: target.dir
+      }
+      entry[:force_source] = true if advance_verb.force_source
+      entry[:interactive] = true if advance_verb.interactive
+      verbs[advance_verb.name] = entry
+    end.freeze
 
     # Reverse lookup by source: verb that advances OUT of stage_dir.
     # nil for `9-done` (no further verb).
@@ -57,8 +78,8 @@ module Hive
     end
 
     # Stage directory that follows stage_dir in the pipeline, or nil at the
-    # terminal stage. Use this instead of hardcoding `"7-artifacts"` /
-    # `"8-finalize"` etc. so a future renumber doesn't strand call sites.
+    # terminal stage. Use this instead of hardcoding `"7-artifacts"` / # not-a-stage-ref: documentation example
+    # `"8-finalize"` etc. so a future renumber doesn't strand call sites. # not-a-stage-ref: documentation example
     def next_dir_after(stage_dir)
       verb = VERB_BY_SOURCE[stage_dir]
       verb && VERBS.fetch(verb).fetch(:target)
@@ -85,6 +106,160 @@ module Hive
 
     def workflow_verb?(verb)
       VERBS.key?(verb)
+    end
+
+    # True when a workflow *value* (a descriptor id as Symbol or String, or
+    # nil/blank from older status payloads / test doubles) denotes the
+    # coding workflow. Single source of truth for the "nil/blank/coding ⟹
+    # coding" rule that several daemon/bot consumers used to re-spell.
+    def coding_id?(value)
+      return true if value.nil?
+
+      string = value.to_s
+      string.empty? || string == CODING_ID.to_s
+    end
+
+    # True when a status *row* resolves to the coding workflow. A row that
+    # does not respond to `#workflow` (older payloads / test doubles)
+    # defaults to coding so legacy consumers keep the coding behavior.
+    #
+    # The workflow selector travels in three row shapes across the codebase,
+    # and new reads should route through these two predicates rather than
+    # reaching for one accessor and risking a silent nil:
+    #   - status builder Hash  → `row[:workflow]`  (use coding_id?)
+    #   - status JSON payload  → `task["workflow"]` (use coding_id?)
+    #   - StatusWatcher::Row   → `row.workflow`    (use coding_row?)
+    # coding_row? is the row-shaped front door (it `respond_to?`-guards the
+    # accessor); coding_id? is the value-shaped one for the Hash/JSON forms.
+    def coding_row?(row)
+      return true unless row.respond_to?(:workflow)
+
+      coding_id?(row.workflow)
+    end
+
+    # Memoized: the built-in registry is fixed at boot, so this union is
+    # computed once and cached. It is NOT permanent, though — project workflow
+    # overlays register at runtime (Hive::Workflows::Project.load!), which is
+    # why the cache is explicitly dropped via reset_union_cache! whenever the
+    # project (or test) registrations change. Recomputing a frozen array on
+    # every call (status snapshots, drop, resolver) when nothing changed is
+    # pure waste. Not an eager constant — that would re-enter the require cycle
+    # (workflows.rb ⇆ registry.rb) before the registry is populated.
+    def all_stage_dirs
+      @all_stage_dirs ||= Registry.all.flat_map(&:stage_dirs).uniq.freeze
+    end
+
+    def all_stage_names
+      @all_stage_names ||= Registry.all.flat_map(&:stage_names).uniq.freeze
+    end
+
+    # Memoized (same rationale as all_stage_dirs): the terminal ("archived")
+    # stage dir of EVERY registered workflow. Single source for drop's
+    # hard-delete archive guard and init's fieldless-task scan, which both
+    # computed `Registry.all.map { |w| w.stages.last.dir }.uniq` inline — a
+    # drift on the drop side re-opens an archived-task delete bug.
+    def all_terminal_stage_dirs
+      @all_terminal_stage_dirs ||= Registry.all.map { |workflow| workflow.stages.last.dir }.uniq.freeze
+    end
+
+    def reset_union_cache!
+      @all_stage_dirs = nil
+      @all_stage_names = nil
+      @all_terminal_stage_dirs = nil
+    end
+
+    # The shared "valid stage refs" hint tail — "<full dirs> or short names
+    # <short names>" — appended to every union-scope unknown-stage error so the
+    # two emit sites (resolve_stage_ref_across_workflows below and Approve's
+    # early --from/--to check) can't drift apart.
+    def stage_ref_hint
+      "#{all_stage_dirs.join(', ')} or short names #{all_stage_names.join(', ')}"
+    end
+
+    # Resolve a user-provided stage ref (a full N-name dir or a bare short
+    # name) against EVERY registered workflow (not just coding) and return the
+    # single canonical `N-name` dir it maps to. Returns nil for a blank ref; raises
+    # `Hive::InvalidTaskPath` on an ambiguous ref (matches >1 workflow) or an
+    # unknown one. Shared by `Hive::TaskResolver` and `Hive::Commands::Drop`
+    # so a generic `--from`/`--stage <stage>` is accepted identically and the
+    # two error strings stay in lockstep instead of drifting apart.
+    def resolve_stage_ref_across_workflows(stage_ref)
+      return nil if stage_ref.nil? || stage_ref.to_s.strip.empty?
+
+      raw = stage_ref.to_s.strip
+      matches = Registry.all.filter_map { |workflow| workflow.resolve_stage_ref(raw) }.uniq
+      return matches.first if matches.one?
+
+      if matches.size > 1
+        raise Hive::InvalidTaskPath, "ambiguous stage '#{stage_ref}'; matches: #{matches.join(', ')}"
+      end
+
+      raise Hive::InvalidTaskPath,
+            "unknown stage '#{stage_ref}'; valid: #{stage_ref_hint}"
+    end
+
+    # Resolve which stage dirs to scan when locating a task by slug/id inside
+    # one registered project. Loads that project's workflow overlay first (so
+    # its owner-authored stages are registered), then returns the cross-workflow
+    # stage-dir union — or, when `stage_filter` is given, the single canonical
+    # dir it resolves to (wrapped in an array).
+    #
+    # Cross-project tolerance (U9-3): a `stage_filter` that names a stage which
+    # exists in a DIFFERENT project's workflow (but not this one) resolves to
+    # nil here rather than raising, so scanning a project that lacks the filter's
+    # stage skips it (returns []) instead of aborting the whole cross-project
+    # search for tasks living in healthy projects. An AMBIGUOUS ref (valid in
+    # >1 of THIS project's workflows) still raises, mirroring approve.rb's
+    # known_stage_ref?.
+    #
+    # Shared by Hive::TaskResolver and Hive::Commands::Drop so the per-project
+    # resolution rule lives in exactly one place (no byte-for-byte duplicate to
+    # drift between the two cross-project resolution paths).
+    def stages_for_project(project, stage_filter: nil)
+      # Load the overlay and read its stage dirs / resolve the filter under the
+      # SAME lock hold: both `all_stage_dirs` and `resolve_stage_ref_across_workflows`
+      # read the active project overlay, so a concurrent `load!(otherProject)`
+      # between the load and the read would scan THIS project against another
+      # project's stage set. Project::LOCK is reentrant, so the nested load! is fine.
+      Hive::Workflows::Project.synchronize do
+        Hive::Workflows::Project.load!(project["path"])
+        return all_stage_dirs if stage_filter.nil? || stage_filter.to_s.strip.empty?
+
+        resolved = resolve_stage_ref_across_workflows(stage_filter)
+        resolved ? [ resolved ] : []
+      end
+    rescue Hive::InvalidTaskPath => e
+      raise if e.message.start_with?("ambiguous stage")
+
+      []
+    end
+
+    # Restore the specific "unknown stage" diagnostic for a `--from`/`--stage`
+    # filter that resolves in NO registered project. stages_for_project
+    # deliberately tolerates a filter that's unknown in a GIVEN project (it may
+    # be valid in another — U9-3 cross-project tolerance), swallowing the
+    # unknown-stage error to []. That means a truly bogus stage degrades to a
+    # generic "no task folder for slug" — losing the message the eager
+    # constructor used to emit. Callers (Drop / TaskResolver) invoke this on the
+    # no-match path so a bogus filter still names itself. Per-project resolution
+    # under the overlay lock, mirroring stages_for_project; an AMBIGUOUS ref in
+    # any project propagates as before.
+    def assert_known_stage_filter!(stage_filter, projects)
+      return if stage_filter.nil? || stage_filter.to_s.strip.empty?
+
+      known = Array(projects).any? do |project|
+        Hive::Workflows::Project.synchronize do
+          Hive::Workflows::Project.load!(project["path"])
+          !resolve_stage_ref_across_workflows(stage_filter).nil?
+        rescue Hive::InvalidTaskPath => e
+          raise if e.message.start_with?("ambiguous stage")
+
+          false
+        end
+      end
+      return if known
+
+      raise Hive::InvalidTaskPath, "unknown stage '#{stage_filter}'; valid: #{stage_ref_hint}"
     end
   end
 end

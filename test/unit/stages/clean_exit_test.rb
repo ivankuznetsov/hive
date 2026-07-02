@@ -45,6 +45,40 @@ class HiveStagesCleanExitTest < Minitest::Test
     end
   end
 
+  # Regression: babysitter dry-run runs leave a skip log + overlay-bin shims at
+  # the worktree root. With those paths gitignored (see the repo `.gitignore`),
+  # CleanExit's `git status --porcelain` reports nothing and the stage exits
+  # clean — instead of `git add -A` staging them and the scope check failing
+  # with :error reason=ensure_clean_on_exit_failed. The ignore patterns are
+  # replicated here because the tmp repo has no inherited root `.gitignore`;
+  # `dry_run_env_test.rb` separately asserts the real repo carries them.
+  def test_gitignored_dry_run_residue_exits_clean
+    with_tmp_dir do |worktree|
+      init_git(worktree)
+      File.write(File.join(worktree, ".gitignore"), <<~IGNORE)
+        .babysitter-dry-run-skipped.log
+        .babysitter-dry-run-plan.md
+        .hive-babysitter-dry-run-bin/
+      IGNORE
+      run!("git", "-C", worktree, "add", ".gitignore")
+      run!("git", "-C", worktree, "commit", "-m", "ignore dry-run artifacts", "--quiet")
+
+      File.write(File.join(worktree, ".babysitter-dry-run-skipped.log"),
+                 "git push origin HEAD:feature skipped\n")
+      FileUtils.mkdir_p(File.join(worktree, ".hive-babysitter-dry-run-bin"))
+      File.write(File.join(worktree, ".hive-babysitter-dry-run-bin", "git"),
+                 "#!/usr/bin/env ruby\n")
+
+      result = Hive::Stages::CleanExit.run!(
+        worktree_path: worktree, stage: "6-review",
+        task: fake_task, cfg: @default_cfg
+      )
+
+      assert_equal :clean, result[:status],
+                   "gitignored dry-run artifacts must not be flagged as out-of-scope residue"
+    end
+  end
+
   def test_residue_in_scope_is_auto_committed_with_canonical_message
     with_tmp_dir do |worktree|
       init_git(worktree)
@@ -102,6 +136,45 @@ class HiveStagesCleanExitTest < Minitest::Test
       # And the worktree still has the residue file (we don't discard).
       assert File.exist?(File.join(worktree, "unrelated", "path.txt")),
              "scope_violation must not delete agent edits"
+    end
+  end
+
+  # Regression for the nested-Rails-app (`web/`) scope gap: a fix touching
+  # `web/app/**` / `web/test/**` must auto-commit (those mirror the top-level
+  # source/test allowlist), while sensitive nested dirs like `web/config/**`
+  # stay outside the allowlist and surface as a scope violation.
+  def test_web_subdir_source_is_in_scope_but_web_config_is_not
+    with_tmp_dir do |worktree|
+      init_git(worktree)
+      FileUtils.mkdir_p(File.join(worktree, "web", "app", "controllers"))
+      FileUtils.mkdir_p(File.join(worktree, "web", "test", "integration"))
+      File.write(File.join(worktree, "web", "app", "controllers", "tasks_controller.rb"), "class TasksController; end\n")
+      File.write(File.join(worktree, "web", "test", "integration", "tasks_test.rb"), "# test\n")
+
+      result = Hive::Stages::CleanExit.run!(
+        worktree_path: worktree, stage: "6-review",
+        task: fake_task, cfg: @default_cfg
+      )
+
+      assert_equal :auto_committed, result[:status],
+                   "web/app and web/test source must be in the auto-commit allowlist"
+      assert_includes Array(result[:paths]), "web/app/controllers/tasks_controller.rb"
+      assert_includes Array(result[:paths]), "web/test/integration/tasks_test.rb"
+    end
+
+    with_tmp_dir do |worktree|
+      init_git(worktree)
+      FileUtils.mkdir_p(File.join(worktree, "web", "config"))
+      File.write(File.join(worktree, "web", "config", "credentials.yml"), "secret: x\n")
+
+      result = Hive::Stages::CleanExit.run!(
+        worktree_path: worktree, stage: "6-review",
+        task: fake_task, cfg: @default_cfg
+      )
+
+      assert_equal :scope_violation, result[:status],
+                   "web/config must stay outside the allowlist like top-level config/"
+      assert_includes result[:paths] || [], "web/config/credentials.yml"
     end
   end
 

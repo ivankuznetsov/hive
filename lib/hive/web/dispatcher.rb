@@ -19,7 +19,16 @@ module Hive
         "ready_for_review" => "review",
         "ready_to_artifacts" => "artifacts",
         "ready_to_finalize" => "finalize",
-        "ready_to_archive" => "archive"
+        "ready_to_archive" => "archive",
+        # Generic-workflow first-run rows dispatch the generic stage agent
+        # via `hive run`; without this the web dispatcher rejected the new
+        # `ready_to_run` action as unknown (422). `ready_to_advance` is
+        # deliberately NOT mapped here: its verb is `hive approve`, which the
+        # daemon dispatch-request queue's allowlist excludes (approve is
+        # spawned in-process, not queued — see DispatchRequestQueue and the
+        # bot supervisor). Generic advance is driven by the in-process
+        # `#approve` method (the "Approve" button), not this queue path.
+        "ready_to_run" => "run"
       }.freeze
 
       def approve(slug:, project:, from: nil, to: nil, force: false)
@@ -72,7 +81,7 @@ module Hive
       # for the argvs and the manual-only guard, so web and bot recover
       # byte-identically; the TUI has its own subprocess-based clear +
       # `hive run` path with separate gates.
-      def recover(slug:, project:, stage:, marker:, attrs: nil)
+      def recover(slug:, project:, stage:, marker:, attrs: nil, workflow: nil)
         attrs = (attrs || {}).to_h.transform_keys(&:to_s)
         # No failure marker = nothing to recover. RecoverySequence would
         # skip the clear and queue a bare, UNGUARDED stage rerun behind a
@@ -89,7 +98,8 @@ module Hive
 
         match_attr = Hive::Bot::NotificationBuilders.recovery_match_attr(RecoveryRow.new(marker, attrs))
         commands = Hive::Bot::Handlers::RecoverySequence.retry_commands(
-          project: project, slug: slug, stage: stage, marker: marker, match_attr: match_attr
+          project: project, slug: slug, stage: stage, marker: marker, match_attr: match_attr,
+          workflow: workflow
         )
         raise Hive::Error, "no retry verb for stage #{stage.inspect}" if commands.empty?
 
@@ -139,7 +149,10 @@ module Hive
           raise Hive::Error, "unknown dispatch action: #{action.inspect}"
         end
         argv = [ "hive", verb, slug, "--project", project ]
-        argv += [ "--from", stage ] if stage
+        # `hive run` (generic-stage agent, from a `ready_to_run` row) scopes
+        # the slug lookup with --stage and has no --from; every other
+        # advance/approve verb asserts the source stage with --from.
+        argv += [ verb == "run" ? "--stage" : "--from", stage ] if stage
         begin
           request_id = Hive::Bot::DispatchRequestWriter.write!(
             project: project,
@@ -154,6 +167,27 @@ module Hive
           raise Hive::Error, "cannot queue this dispatch: #{e.message}"
         end
         { ok: true, request_id: request_id, argv: argv }
+      end
+
+      def repair_daemon
+        request_id = Hive::Bot::DispatchRequestWriter.generate_request_id
+        # Enqueued under the GLOBAL_MAINTENANCE_PROJECT sentinel, which the
+        # daemon consumer special-cases (process_global_maintenance_request)
+        # instead of dropping as unknown_project — so `hive daemon install
+        # --force` actually runs end-to-end (R10/AE3).
+        Hive::Bot::DispatchRequestWriter.write!(
+          project: Hive::Daemon::DispatchRequestQueue::GLOBAL_MAINTENANCE_PROJECT,
+          slug: "daemon-repair",
+          argv: %w[hive daemon install --force],
+          trigger: "web_daemon_repair",
+          request_id: request_id
+        )
+        request_id
+      rescue ArgumentError
+        # Write-time guard only: the queue's argv/slug grammar rejects a
+        # malformed request before it lands. Surface a typed error instead of
+        # executing repair directly from a web worker.
+        raise Hive::Error, "cannot queue daemon repair on this host; run `hive daemon install --force`"
       end
 
       # Write an operator's steer/answer into the task's brainstorm.md via
@@ -238,12 +272,18 @@ module Hive
 
       private
 
-      # Map the task's current stage dir (e.g. "6-review") to the directory
+      # Map the task's current stage dir (e.g. "6-review") to the directory # not-a-stage-ref: documentation example
       # of the stage immediately before it. An absent `from` falls back to
       # the first stage (a supported call shape), but an unparseable one
       # RAISES: reject runs forced, so "guess 1-inbox" would silently drag
       # a late-stage task back to the idea pile on a caller bug — the one
       # place a sane-fallback is less safe than failing.
+      #
+      # coding-scoped: web reject/backstage is a coding-only action today.
+      # `Hive::Stages.parse`/`prev_dir`/`DIRS` all read the coding descriptor,
+      # so a generic task's `from` raises "unknown stage" here rather than
+      # being silently mis-routed to a coding gate. Descriptor-driven generic
+      # reject is deferred to U7/U9 alongside the Rails reject button.
       def prior_gate(from)
         return Hive::Stages::DIRS.first if from.nil? || from.to_s.empty?
 

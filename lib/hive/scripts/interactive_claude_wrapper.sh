@@ -2,7 +2,7 @@
 set -eu
 
 usage() {
-  echo "usage: interactive_claude_wrapper.sh --cwd DIR [--add-dir DIR ...] [--permission-mode MODE | --dangerously-skip-permissions] [--allowedTools TOOLS] [--model MODEL] [--effort LEVEL] [--bin PATH]" >&2
+  echo "usage: interactive_claude_wrapper.sh --cwd DIR [--add-dir DIR ...] [--permission-mode MODE | --dangerously-skip-permissions] [--mcp-config FILE] [--strict-mcp-config] [--allowedTools TOOLS] [--disallowedTools TOOLS] [--model MODEL] [--effort LEVEL] [--bin PATH]" >&2
   exit 64
 }
 
@@ -46,6 +46,21 @@ while [ "$remaining" -gt 0 ]; do
       shift
       remaining=$((remaining - 1))
       ;;
+    --mcp-config)
+      [ "$remaining" -ge 1 ] || usage
+      set -- "$@" "--mcp-config" "$1"
+      shift
+      remaining=$((remaining - 1))
+      ;;
+    --strict-mcp-config)
+      set -- "$@" "--strict-mcp-config"
+      ;;
+    --disallowedTools)
+      [ "$remaining" -ge 1 ] || usage
+      set -- "$@" "--disallowedTools" "$1"
+      shift
+      remaining=$((remaining - 1))
+      ;;
     --model)
       [ "$remaining" -ge 1 ] || usage
       set -- "$@" "--model" "$1"
@@ -79,5 +94,12 @@ cd "$cwd"
 
 unset ANTHROPIC_API_KEY
 unset CLAUDE_API_KEY
+# Threat model: hive passes the Screenote base_url to claude explicitly (and
+# the OAuth token rides a 0600 temp MCP config that's deleted right after the
+# run — it never enters this environment). Unsetting HIVE_SCREENOTE_BASE_URL
+# stops an operator's exported value from silently overriding hive's chosen
+# base_url for the child — a redundant, unvalidated second source. Do NOT
+# delete this `unset` thinking the explicit pass-through makes it a no-op.
+unset HIVE_SCREENOTE_BASE_URL
 
 exec "$bin" "$@"

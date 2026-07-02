@@ -8,10 +8,21 @@ require "hive/agent_limit"
 require "hive/agent/message_extractor"
 require "hive/events"
 require "hive/lock"
+require "hive/permission_scope"
 
 module Hive
   class Agent
     FINAL_MESSAGE_TAIL_BYTES = 64 * 1024
+
+    # Screenote's base URL reaches the agent as prompt/MCP-config context,
+    # not as a child-environment input. nil unsets the var for the child so
+    # an operator's exported HIVE_SCREENOTE_BASE_URL can't become a
+    # redundant, unvalidated second source that overrides hive's chosen
+    # base_url. Mirrors the tmux path's blanking in
+    # Hive::ClaudeLauncher.build_runner and the wrapper's `unset`.
+    SCRUBBED_CHILD_ENV = {
+      "HIVE_SCREENOTE_BASE_URL" => nil
+    }.freeze
 
     attr_reader :task, :prompt, :add_dirs, :cwd, :max_budget_usd, :timeout_sec,
                 :profile, :expected_output, :status_mode, :permission_mode
@@ -19,7 +30,8 @@ module Hive
     def initialize(task:, prompt:, max_budget_usd:, timeout_sec:,
                    add_dirs: [], cwd: nil, log_label: nil,
                    profile: nil, expected_output: nil, status_mode: nil,
-                   permission_mode: nil, cli_flags: [])
+                   permission_mode: nil, allowed_tools: nil,
+                   disallowed_tools: nil, cli_flags: [])
       @task = task
       @prompt = prompt
       @add_dirs = Array(add_dirs)
@@ -41,6 +53,8 @@ module Hive
       end
       @status_mode = status_mode
       @permission_mode = permission_mode
+      @allowed_tools = allowed_tools
+      @disallowed_tools = disallowed_tools
       @cli_flags = Array(cli_flags)
     end
 
@@ -124,7 +138,7 @@ module Hive
       r, w = IO.pipe
       spawn_opts = { chdir: @cwd, pgroup: true, out: w, err: w }
       spawn_opts[:in] = stdin_file if stdin_file
-      pid = Process.spawn(*cmd, **spawn_opts)
+      pid = Process.spawn(SCRUBBED_CHILD_ENV, *cmd, **spawn_opts)
       w.close
       pgid = begin
         Process.getpgid(pid)
@@ -246,6 +260,7 @@ module Hive
     # Order is fixed:
     #   bin, headless_flag, permission flags (if any),
     #   --add-dir <dir> repeated for each add_dir (if profile supports),
+    #   Claude-only tool scope flags (if supplied),
     #   budget_flag <amount> (if profile supports),
     #   output_format_flags...,
     #   extra_flags...,
@@ -262,6 +277,14 @@ module Hive
       if @profile.add_dir_flag
         @add_dirs.each do |d|
           cmd << @profile.add_dir_flag << d
+        end
+      end
+      if @profile.name == :claude
+        if (allowed = Hive::PermissionScope.tool_csv(@allowed_tools))
+          cmd << "--allowedTools" << allowed
+        end
+        if (disallowed = Hive::PermissionScope.tool_csv(@disallowed_tools))
+          cmd << "--disallowedTools" << disallowed
         end
       end
       if @profile.budget_flag && @max_budget_usd
@@ -477,9 +500,11 @@ module Hive
     # @task is a Hive::Task on stage-runner-owned spawns (4-execute,
     # brainstorm, plan, open-pr) but a Hive::Reviewers::SyntheticTask
     # on 6-review sub-spawns (reviewers, triage, ci-fix, browser-test).
-    # SyntheticTask is a Struct that intentionally omits `slug` /
-    # `stage_index` and stores the full "6-review" label in `stage_name`.
-    # The respond_to? fallback covers both shapes from one call site.
+    # SyntheticTask is a live Struct that intentionally omits `slug` /
+    # `stage_index` and stores the full "6-review" label in `stage_name` # not-a-stage-ref: documents the SyntheticTask stage_name label, not a routing literal
+    # unchanged (no coercion — synthetic_task.rb annotates the same fact as
+    # coding-scoped). The respond_to? fallback covers both shapes from one
+    # call site.
     def event_slug
       @task.respond_to?(:slug) ? @task.slug : File.basename(@task.folder)
     end

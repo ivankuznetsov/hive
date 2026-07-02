@@ -29,6 +29,11 @@ module Hive
       end
     end
 
+    # Immutable value object (Ruby 3.4 Data.define) so `pr_metadata` stays the
+    # single validated constructor and the result is tamper-proof downstream.
+    # Keyword construction + field readers are unchanged for consumers.
+    PrMetadata = Data.define(:number, :url, :base_ref_name, :head_ref_oid, :is_cross_repository, :state)
+
     # Returned by scan_pr_for_secrets so a remote-fetch failure is
     # distinguishable from a clean scan. A blanket rescue that
     # returned `[]` on any error would reduce a security-critical
@@ -51,8 +56,13 @@ module Hive
     # Push the branch and return a PushResult. Callers that want to
     # exit on failure can do so explicitly; finalize prefers to write
     # a structured marker.
-    def push_branch(worktree_path, branch, cfg: nil)
-      out, err, status = capture3("git", "-C", worktree_path, "push", "-u", "origin", branch, cfg: cfg)
+    def push_branch(worktree_path, branch, cfg: nil, force: false)
+      args = [ "git", "-C", worktree_path, "push", "-u" ]
+      # --force-with-lease (not --force): a concurrent third-party update to
+      # the branch aborts the push instead of being clobbered.
+      args << "--force-with-lease" if force
+      args.push("origin", branch)
+      out, err, status = capture3(*args, cfg: cfg)
       PushResult.new(success: status.success?, stdout: out, stderr: err)
     rescue Hive::GhError => e
       PushResult.new(success: false, stdout: "", stderr: e.message)
@@ -104,6 +114,32 @@ module Hive
     # silently flow into draft-finalization commands.
     def lookup_existing_pr(worktree_path, branch, cfg: nil)
       lookup_prs_for_branch(worktree_path, branch, cfg: cfg).find { |p| p["state"] == "OPEN" }
+    end
+
+    # `chdir` scopes `gh pr view` to a specific repo checkout. Ad-hoc review
+    # passes the resolved project root so `hive review --pr N --project NAME`
+    # run from another repo queries the right PR instead of cwd's repo.
+    def pr_metadata(number, cfg: nil, chdir: nil)
+      ensure_authenticated!(cfg)
+      fields = "number,url,baseRefName,headRefOid,isCrossRepository,state"
+      out, err, status = capture3("gh", "pr", "view", number.to_s, "--json", fields, cfg: cfg, chdir: chdir)
+      unless status.success?
+        raise Hive::GhError, "`gh pr view #{number}` failed: #{err.to_s.strip.empty? ? out : err.strip}"
+      end
+
+      doc = JSON.parse(out)
+      raise Hive::GhError, "`gh pr view #{number}` returned #{doc.class}; expected Hash" unless doc.is_a?(Hash)
+
+      PrMetadata.new(
+        number: doc["number"].to_i,
+        url: doc["url"].to_s,
+        base_ref_name: doc["baseRefName"].to_s,
+        head_ref_oid: doc["headRefOid"].to_s,
+        is_cross_repository: doc["isCrossRepository"] == true,
+        state: doc["state"].to_s
+      )
+    rescue JSON::ParserError => e
+      raise Hive::GhError, "`gh pr view #{number}` returned unparseable JSON: #{e.message}"
     end
 
     def pr_state(pr_url, cfg: nil)
@@ -167,6 +203,31 @@ module Hive
       doc
     rescue JSON::ParserError => e
       raise Hive::GhError, "`gh pr view #{number}` returned unparseable JSON: #{e.message}"
+    end
+
+    # PR diff/commit stats for the digest footer, keyed off the PR URL (which
+    # carries its own owner/repo context, so no worktree/chdir is needed).
+    # Returns { additions:, deletions:, commits: } where commits is the commit
+    # count. Raises Hive::GhError on a failed/unparseable lookup so the caller
+    # can drop just that PR's numbers without failing the whole digest send.
+    def pr_stats(pr_url, cfg: nil)
+      out, err, status = capture3("gh", "pr", "view", pr_url.to_s,
+                                  "--json", "additions,deletions,commits",
+                                  cfg: cfg)
+      unless status.success?
+        raise Hive::GhError, "`gh pr view #{pr_url}` failed: #{err.to_s.strip.empty? ? out : err.strip}"
+      end
+
+      doc = JSON.parse(out)
+      raise Hive::GhError, "`gh pr view #{pr_url}` returned #{doc.class}; expected Hash" unless doc.is_a?(Hash)
+
+      {
+        additions: doc["additions"].to_i,
+        deletions: doc["deletions"].to_i,
+        commits: Array(doc["commits"]).size
+      }
+    rescue JSON::ParserError => e
+      raise Hive::GhError, "`gh pr view #{pr_url}` returned unparseable JSON: #{e.message}"
     end
 
     def pr_failing_job_logs(worktree_path, number, cfg: nil, byte_cap: 50 * 1024)

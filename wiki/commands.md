@@ -1,17 +1,19 @@
 ---
 title: Interaction Surface
 type: commands
-source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/cli.rb, lib/hive/commands/bench_submit.rb, lib/hive/commands/digest.rb, lib/hive/digest.rb, lib/hive/digest/, lib/hive/web/, public/, hive.gemspec, packaging/docker/, .github/workflows/release.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
+source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/cli.rb, lib/hive/commands/adhoc_review.rb, lib/hive/commands/setup.rb, lib/hive/commands/connect.rb, lib/hive/commands/disconnect.rb, lib/hive/commands/bench_submit.rb, lib/hive/commands/digest.rb, lib/hive/commands/pairing.rb, lib/hive/digest.rb, lib/hive/digest/, lib/hive/web/, public/, hive.gemspec, packaging/docker/, .github/workflows/release.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-14
-updated: 2026-06-15
+updated: 2026-06-30
 tags: [commands, api]
 ---
 
 **TLDR**: Hive's external interaction surface is the Thor CLI (`hive` plus the
 `hv` fallback launcher), the opt-in e2e harness, the hivebox web command/routes
-documented in [[commands/web]], `hive bench submit` as the hive-bench corpus
-producer, `hive digest` as the daily shipped digest producer, and the single
-ClawHub `hive-cli` OpenClaw skill whose installed slash command is `/hive`.
+documented in [[commands/web]], `hive connect screenote` as the Screenote OAuth
+setup surface for artifacts MCP uploads, `hive bench submit` as the hive-bench
+corpus producer, `hive digest` as the daily shipped digest producer,
+`hive pairing` as the Telegram first-contact approval surface, and the
+single ClawHub `hive-cli` OpenClaw skill whose installed slash command is `/hive`.
 The Ruby command/API contract lives in [[cli]] and the
 per-command pages. OpenClaw does not add a second runtime and does not publish
 one ClawHub listing per Hive verb.
@@ -22,8 +24,12 @@ one ClawHub listing per Hive verb.
 - `bin/hv`
 - `bin/hive-e2e`
 - `lib/hive/cli.rb`
+- `lib/hive/commands/adhoc_review.rb`
+- `lib/hive/commands/connect.rb`
+- `lib/hive/commands/disconnect.rb`
 - `lib/hive/commands/bench_submit.rb`
 - `lib/hive/commands/digest.rb`
+- `lib/hive/commands/pairing.rb`
 - `lib/hive/digest.rb`
 - `lib/hive/digest/**/*.rb`
 - `lib/hive/web/**/*.rb`
@@ -46,10 +52,13 @@ one ClawHub listing per Hive verb.
 `bin/hive` loads `Hive::CLI` and exposes the public command set documented in
 [[cli]] and `wiki/commands/*`. The CLI includes workflow verbs (`new`,
 `brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`,
-`archive`), daemon/bot/babysitter lifecycle commands, diagnostics, markers,
-findings, metrics, update/uninstall, registry maintenance, the `hive bench
-submit` corpus-submission producer, the `hive digest` shipped-digest producer,
-and `--json` envelopes where the command page says they exist.
+`archive`), the `hive review --pr` overlay for ad-hoc review of an existing
+GitHub PR, project workflow authoring via [[commands/workflow]], daemon/bot/babysitter
+lifecycle commands, diagnostics, markers, findings, metrics, update/uninstall,
+registry maintenance, Screenote connect/disconnect, the `hive bench submit`
+corpus-submission producer, the `hive digest` shipped-digest producer,
+the [[commands/pairing]] Telegram pairing approval surface, and
+`--json` envelopes where the command page says they exist.
 The wrapper also normalizes command-local help before Thor dispatch:
 `hive <cmd> --help`, `hive <cmd> -h`, and option-bearing forms such as
 `hive approve --from 2-brainstorm --help` are routed to `hive help <cmd>`
@@ -83,6 +92,24 @@ does not create task-state commits. The daemon can schedule it as a global,
 non-project-scoped child after local midnight when `digest.enabled: true`. See
 [[commands/digest]] and [[modules/digest]].
 
+`hive setup` is the local workstation provisioning bridge for installs that
+want the same first-run shape as hivebox without Docker: it emits a `hive-setup`
+phase report, installs/repairs Hive-owned QMD and managed web bundle assets when
+allowed, installs the daemon service, enrolls the current project unless
+disabled, and can install the separate web service with `--service`. See
+[[commands/setup]].
+
+`hive pairing` lists and approves Telegram pairing requests minted by unknown
+DM chats that send `/start` while `bot.pairing_enabled: true`. Approval appends
+the chat id to the global bot allowlist, requests a live bot reload, and queues
+an approval DM for the running bot. See [[commands/pairing]] and [[modules/bot]].
+
+`hive connect screenote` and `hive disconnect screenote` manage the operator's
+Screenote OAuth credential for MCP-backed artifact uploads. The connect flow
+uses loopback auth-code + PKCE, lists projects through Screenote MCP, and
+persists the selected default project in `screenote.json`; disconnect revokes
+and clears it. See [[commands/screenote]].
+
 ### OpenClaw / ClawHub
 
 `openclaw/skills/hive/SKILL.md` is the only checked-in OpenClaw skill source
@@ -113,7 +140,10 @@ CLI.
 
 ### Hivebox Web
 
-`hive web` boots the hivebox Rails 8 + Turbo app from `web/` (see [[commands/web]]): it derives SECRET_KEY_BASE from the persisted session secret, keeps the solid-stack sqlite under state_home, runs db:prepare, and execs `bin/rails server`. The web app reuses the same status, approval, daemon-queue,
+`hive web` boots the hivebox Rails 8 + Turbo app from `web/` or the managed
+version-stamped bundle (see [[commands/web]]): it derives SECRET_KEY_BASE from
+the persisted session secret, keeps the solid-stack sqlite under state_home,
+runs db:prepare, and execs `bin/rails server`. The web app reuses the same status, approval, daemon-queue,
 task-drop, agent-auth, repo, and Telegram setup contracts as the
 CLI/bot/daemon stack; it does not introduce a separate workflow engine. GitHub
 device-flow auth can either use a pre-pinned `web.github.owner` or first-login
@@ -135,9 +165,10 @@ mount persistent data, and print the local URL; the PowerShell script is the
 native Windows shape for Docker Desktop hosts where `sh` or MSYS path conversion
 would be the wrong interface. The release workflow publishes versioned and
 `latest` multi-arch hivebox images to GHCR after `release-finalize`. The gem
-deliberately does NOT package the web app (gemspec_test pins this); the Rails
-app ships in the Docker image at /app/web or runs from a source checkout.
-`hive web` command has the same renderable UI assets as a source checkout.
+deliberately does NOT package the Rails app in the gem itself (gemspec_test pins
+this); the local CLI can fetch the versioned release bundle into Hive's data
+home, and the app also ships in the Docker image at `/app/web` or runs from a
+source checkout.
 
 ### E2E Harness
 
@@ -155,6 +186,11 @@ last recognized JSON boolean flag, matching the main CLI wrapper. Successful
 contracts: `list --json` emits `hive-e2e-scenarios`, and `clean --json` emits
 `hive-e2e-clean`.
 
+The replay subcommand stays a config-gated harness action: a missing stored
+`repro.sh` and an existing but non-regular or non-executable `repro.sh` both
+exit `78`; JSON mode distinguishes them as `missing_repro` and
+`unusable_repro`, respectively.
+
 ## Backlinks
 
 - [[index]]
@@ -162,4 +198,6 @@ contracts: `list --json` emits `hive-e2e-scenarios`, and `clean --json` emits
 - [[operating]]
 - [[e2e]]
 - [[commands/web]]
+- [[commands/setup]]
 - [[commands/digest]]
+- [[commands/screenote]]

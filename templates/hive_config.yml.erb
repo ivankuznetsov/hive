@@ -12,6 +12,7 @@ registered_projects: <%= registered_projects.empty? ? "[]" : "" %>
 #
 # bot:
 #   enabled: false
+#   pairing_enabled: false # when true, unknown DM /start requests get pairing codes
 #   chat_id_allowlist: []   # integers only, e.g. [123456789]
 #   poll_interval_sec: 30
 #   long_poll_timeout_sec: 25
@@ -28,15 +29,21 @@ registered_projects: <%= registered_projects.empty? ? "[]" : "" %>
 #   log_max_files: 5
 #   last_seen_state_file: ~/Dev/hive/.bot.last_seen_update_id
 
-# Daily shipped digest. When enabled, the daemon schedules one global
-# `hive digest` subprocess after local midnight; it sends a Telegram
-# MarkdownV2 message (chunked into several messages when it exceeds Telegram's
-# length limit) to bot.digest_chat_id, or the first allowlisted chat.
+# Daily shipped digest. Defaults ON whenever the Telegram bot is enabled with
+# at least one allowlisted chat — the daemon then schedules one global
+# `hive digest` subprocess after local midnight and sends a Telegram MarkdownV2
+# message (chunked when it exceeds Telegram's length limit) to the first
+# allowlisted chat. Set enabled: false to opt out.
 #
 # digest:
-#   enabled: false
-#   agent: ~              # defaults to patrol.agent, then claude
+#   enabled: false         # only needed to opt OUT; otherwise auto-on with the bot
+#   agent: ~               # defaults to patrol.agent, then claude
 #   max_catchup_days: 7
+
+# Daily pending-answer digest. When enabled, the daemon schedules one global
+# `hive answer-digest` subprocess at/after the configured local hour. Empty
+# snapshots are silent.
 #
-# bot:
-#   digest_chat_id: ~      # optional integer override for digest delivery
+# answer_digest:
+#   enabled: false
+#   hour: 9

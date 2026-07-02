@@ -3,8 +3,8 @@ title: Hive::Worktree
 type: module
 source: lib/hive/worktree.rb
 created: 2026-04-25
-updated: 2026-05-13
-tags: [worktree, git, pointer]
+updated: 2026-06-29
+tags: [worktree, git, pointer, dependencies]
 ---
 
 **TLDR**: Wrapper around `git worktree add/remove/list` with a YAML pointer file (`worktree.yml`) inside the task folder, plus path-prefix validation that rejects pointers outside the configured `worktree_root`.
@@ -15,7 +15,7 @@ tags: [worktree, git, pointer]
 Hive::Worktree.new(project_root, slug, worktree_root: nil)
 #path   → "<worktree_root>/<slug>"
 #exists? → bool (sees both filesystem dir and `git worktree list`)
-#create!(branch_name, default_branch:) → :created
+#create!(branch_name, default_branch:, base_override: nil) → :created
 #remove! → :removed
 #write_pointer!(task_folder, branch_name, execute_base_head: nil) → writes worktree.yml
 ```
@@ -25,6 +25,7 @@ Class methods:
 ```ruby
 Hive::Worktree.read_pointer(task_folder) → Hash | nil
 Hive::Worktree.validate_pointer_path(path, expected_root) → expanded_path | raises
+Hive::Worktree.materialize_pr(repo_root:, pr_number:, path:, branch:) → {path:, branch:, head_sha:}
 ```
 
 ## `worktree_root` resolution
@@ -40,15 +41,16 @@ If passed explicitly, that's used. Otherwise:
 
 `Hive::Worktree.worktree_base` returns `ENV["HIVE_WORKTREE_BASE"] || File.expand_path("~/Dev")`, and every fallback site (`worktree.rb`, `task.rb`, `diagnosis_agent.rb`, `stages/execute.rb`, `stages/review.rb`, `commands/init.rb`) routes the default through `default_worktree_root`. The env override exists so the test suite can point the default base at a tmp sandbox (`test_helper.rb` sets `HIVE_WORKTREE_BASE ||= Dir.mktmpdir("hive-test-wtbase")`); previously the hardcoded `~/Dev/<project>.worktrees` fallback seeded the developer's real `~/Dev` with thousands of `hive-test<...>.worktrees` dirs. When unset, behavior is identical to the old hardcoded `~/Dev` default.
 
-## `create!(branch_name, default_branch:)`
+## `create!(branch_name, default_branch:, base_override: nil)`
 
 1. `mkdir -p` the parent of `path`.
 2. Probe `git show-ref --verify refs/heads/<branch_name>`:
-   - If it exists, run `git worktree add <path> <branch_name>` (attach to existing branch).
-   - If not, **resolve the freshest base** via `freshest_base(default_branch)` (see below), then run `git worktree add <path> -b <branch_name> <base>`.
+   - If it exists with no stacked `base_override`, run `git worktree add <path> <branch_name>` (attach to existing branch).
+   - If it exists with a stacked `base_override`, `empty_placeholder?` measures `git rev-list --count <base>..<branch_name>` against **both** default refs that exist — `origin/<default>` (when its tracking ref `refs/remotes/origin/<default>` exists) and local `<default>` — and treats the branch as an empty placeholder if it carries **no unique commits beyond either** ref. Consulting both refs catches placeholders left by drift in either direction: one created from `origin/<default>` (via `freshest_base`) sits ahead of a lagging local default, while one created from a local default that runs ahead of a stale origin (`freshest_base`'s fetch-failure fallback) sits ahead of `origin/<default>` — measuring against only one ref would misread the other as carrying work. This emptiness check is a *heuristic* and its base differs from the origin→local→default base the branch is recreated on. When some ref measures zero, Hive deletes the branch with `git branch -D <branch_name>` and falls through to the normal first-creation path below. If every measurable ref is non-zero the branch is preserved and attached as-is; a branch is deleted only on positive proof of emptiness, so any git error skips that ref (warned to stderr) rather than counting as proof, and if no default ref could be measured the branch is preserved (fail-closed) and warned. Delete failure raises `Hive::WorktreeError` naming the branch (and hinting it may be checked out in another worktree).
+   - If not, resolve the base via `base_override` when present, otherwise `freshest_base(default_branch)` (see below), then run `git worktree add <path> -b <branch_name> <base>`.
 3. On non-zero exit, raise `Hive::WorktreeError` with the captured stderr.
 
-This handles re-attaching to a previously-created branch (e.g. after manually deleting a worktree) without losing history.
+This handles re-attaching to a previously-created branch (e.g. after manually deleting a worktree) without losing history, while allowing dependency-stacked empty placeholders to be recreated on the intended prerequisite base.
 
 ### `freshest_base(default_branch)` — origin-first base resolution
 
@@ -62,9 +64,31 @@ The helper:
 
 Local `<default>` is never modified — any unpushed commits there are preserved. Only the new feature branch's starting point is affected.
 
+### Dependency base override
+
+`base_override` is used by [[modules/task_dependencies]] when a dependent task
+enters `4-execute`. Hive tries to fetch and branch from
+`origin/<base_override>` so stacked tasks start from their prerequisite branch.
+If there is no origin, the fetch fails, or the remote branch is unavailable,
+Hive next checks local `refs/heads/<base_override>` and stacks on that local
+branch when present. It warns and falls back through `freshest_base(default_branch)`
+only when neither the remote nor local prerequisite branch is available.
+
 ## `remove!`
 
 `git -C <project_root> worktree remove <path>`. Raises `WorktreeError` on failure (most commonly when the worktree has uncommitted changes — git refuses to remove dirty worktrees without `--force`).
+
+## `materialize_pr`
+
+`materialize_pr` is the shared fork-agnostic PR-head materializer for `hive review --pr` and the babysitter. It runs:
+
+```bash
+git -C <repo> fetch origin +pull/<n>/head:refs/<branch>
+git -C <repo> worktree add -B <branch> <path> refs/<branch>
+git -C <path> rev-parse HEAD
+```
+
+The caller chooses `path` and `branch`; ad-hoc review uses the normal `worktree_root/<slug>` path and branch `hive/review/pr-N`, while babysitter keeps its own babysitter worktree path. The returned `head_sha` lets callers compare the materialized checkout to GitHub's `headRefOid`. Failures raise `Hive::WorktreeError`.
 
 ## `exists?`
 
@@ -102,10 +126,12 @@ This prevents an agent (with Write access to `worktree.yml`) from setting `path:
 - `Stages::OpenPr#run!` — reads pointer for the worktree path; `git push` runs there.
 - `Stages::Finalize#run!` — reads pointer to verify the final branch state before wrapping up the PR.
 - `Stages::Done#run!` — reads pointer to print cleanup instructions.
+- `Hive::Commands::AdhocReview` — materializes a PR head at the normal worktree root before creating a synthetic `6-review` task.
+- `Hive::Babysitter::Worktree` — delegates PR-head materialization here while keeping babysitter-specific cleanup and fork policy around it.
 
 ## Tests
 
-- `test/unit/worktree_test.rb` — create attach-vs-new branch, remove, exists?, pointer round-trip, prefix-validation rejection.
+- `test/unit/worktree_test.rb` — create attach-vs-new, dependency override stacking (incl. narrow-refspec and origin-ahead-of-local **and** local-ahead-of-origin placeholders), empty placeholder re-pointing, fail-closed preservation when the emptiness check errors, local-only prerequisite fallback, real-commit preservation, PR-head materialization/retry/failure handling, delete-failure errors, `local_branch_ref_exists?` blank-name guard, remove, exists?, pointer round-trip, prefix-validation rejection.
 
 ## Backlinks
 

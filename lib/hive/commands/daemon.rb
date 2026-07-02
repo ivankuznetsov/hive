@@ -14,8 +14,10 @@ require "hive/daemon/status_consumer"
 require "hive/daemon/pr_merge_watcher"
 require "hive/daemon/patrol_scheduler"
 require "hive/daemon/digest_scheduler"
+require "hive/daemon/answer_digest_scheduler"
 require "hive/daemon/logger"
 require "hive/daemon/dispatch_request_queue"
+require "hive/daemon/status_report"
 require "hive/invoked_binary"
 require "hive/update_check/state"
 
@@ -98,6 +100,13 @@ module Hive
         @log_file ||= File.join(@hive_home, "logs", "daemon.log")
       end
 
+      # The status-envelope producer, shared with the web dashboard (which
+      # instantiates its own StatusReport). Memoized so a test can stub the
+      # probe seams on one object before invoking `call`.
+      def status_report
+        @status_report ||= Hive::Daemon::StatusReport.new(hive_home: @hive_home)
+      end
+
       private
 
       def start_daemon
@@ -151,7 +160,13 @@ module Hive
         # path in Dispatcher#reload_config!, which also calls the config
         # method straight) so the two stay symmetric.
         digest_cfg = Hive::Config.load_global_digest_block
-        config = { "daemon" => daemon_cfg, "update" => Hive::Config.load_global_update, "digest" => digest_cfg }
+        answer_digest_cfg = Hive::Config.load_global_answer_digest_block
+        config = {
+          "daemon" => daemon_cfg,
+          "update" => Hive::Config.load_global_update,
+          "digest" => digest_cfg,
+          "answer_digest" => answer_digest_cfg
+        }
 
         # Build the logger BEFORE the controller so both the controller and
         # the persisted-baselines store get wired to it. Otherwise a torn
@@ -196,12 +211,20 @@ module Hive
           ),
           logger: logger
         )
+        answer_digest_scheduler = Hive::Daemon::AnswerDigestScheduler.new(
+          enabled: answer_digest_cfg.fetch("enabled", false),
+          hour: answer_digest_cfg.fetch(
+            "hour", Hive::Daemon::AnswerDigestScheduler::DEFAULT_HOUR
+          ),
+          logger: logger
+        )
 
         dispatcher = Hive::Daemon::Dispatcher.new(
           config: config, controller: controller, supervisor: supervisor,
           status_consumer: status_consumer, logger: logger,
           merge_watcher: merge_watcher, patrol_scheduler: patrol_scheduler,
-          digest_scheduler: digest_scheduler, dry_run: @dry_run,
+          digest_scheduler: digest_scheduler, answer_digest_scheduler: answer_digest_scheduler,
+          dry_run: @dry_run,
           update_state: Hive::UpdateCheck::State.new
         )
 
@@ -340,69 +363,17 @@ module Hive
       end
 
       def status_daemon
-        running = false
-        pid = nil
-        uptime_sec = nil
-
-        if File.exist?(pid_file)
-          payload = read_pid_file_payload
-          pid = payload && payload["pid"]
-          if pid && pid > 0 && pid_alive?(pid) && pid_owned_by_us?(payload, pid)
-            running = true
-            stat = File.stat(pid_file)
-            uptime_sec = (Time.now - stat.mtime).to_i
-          end
-        end
-
+        report = status_report
+        state = report.running_state
         if @json
-          service_state = probe_service_state
-          puts JSON.generate(
-            "schema" => "hive-daemon-status",
-            "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-daemon-status"),
-            "ok" => true,
-            "running" => running,
-            "pid" => running ? pid : nil,
-            "uptime_sec" => uptime_sec,
-            "pid_file" => pid_file,
-            "log_file" => log_file,
-            "service_installed" => service_state["service_installed"],
-            "service_enabled" => service_state["service_enabled"],
-            "unit_path" => service_state["unit_path"],
-            # Agent-native parity with the TUI footer / bot push: expose the
-            # update nudge so a programmatic caller can detect "behind" too.
-            "current_version" => Hive::VERSION,
-            "update_nudge" => update_nudge_payload
-          )
-        elsif running
-          puts "hive daemon: running (pid #{pid}, uptime #{uptime_sec}s)"
+          puts JSON.generate(report.payload(state))
+        elsif state[:running]
+          puts "hive daemon: running (pid #{state[:pid]}, uptime #{state[:uptime_sec]}s)"
         else
           puts "hive daemon: not running"
         end
         # Exit code: 0 for running, 1 for not running (per plan U8)
-        raise Hive::Error, "daemon not running" unless running
-      end
-
-      # Read-only autostart-state snapshot for the status envelope. A status
-      # probe must never take down the running/pid reporting that precedes
-      # it, so any failure degrades the three service fields to null (the
-      # status schema marks them required-but-nullable) instead of raising
-      # out of the whole command.
-      def probe_service_state
-        require "hive/commands/daemon/service_installer"
-        Hive::Commands::Daemon::ServiceInstaller.new.service_state
-      rescue StandardError
-        { "service_installed" => nil, "service_enabled" => nil, "unit_path" => nil }
-      end
-
-      # The daemon-written update nudge, as a plain Hash for the status
-      # envelope (nil when current or unknown). Never raises out of status.
-      def update_nudge_payload
-        nudge = Hive::UpdateCheck::State.new.nudge
-        return nil unless nudge
-
-        { "latest" => nudge.latest, "channel" => nudge.channel, "command" => nudge.command }
-      rescue StandardError
-        nil
+        raise Hive::Error, "daemon not running" unless state[:running]
       end
 
       def reload_daemon

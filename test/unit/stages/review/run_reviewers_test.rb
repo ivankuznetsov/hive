@@ -121,6 +121,58 @@ class RunReviewersTest < Minitest::Test
     assert_equal "origin/trunk", Hive::Stages::Review.reviewer_compare_ref(cfg, ops)
   end
 
+  # Minimal ops for reviewer_compare_base_sha, which only reads
+  # project_root to shell `git -C <root> rev-parse`.
+  BaseOps = Struct.new(:project_root)
+
+  def test_reviewer_compare_base_sha_resolves_a_real_ref
+    with_tmp_git_repo do |dir|
+      head = run!("git", "-C", dir, "rev-parse", "--verify", "HEAD").strip
+
+      result = nil
+      _out, err = capture_io do
+        result = Hive::Stages::Review.reviewer_compare_base_sha(BaseOps.new(dir), "master")
+      end
+
+      assert_equal head, result.sha
+      refute result.degraded, "a ref that resolves is not the degraded fallback"
+      assert_empty err
+    end
+  end
+
+  def test_reviewer_compare_base_sha_falls_back_to_head_when_ref_unresolvable
+    with_tmp_git_repo do |dir|
+      head = run!("git", "-C", dir, "rev-parse", "--verify", "HEAD").strip
+
+      result = nil
+      _out, err = capture_io do
+        result = Hive::Stages::Review.reviewer_compare_base_sha(BaseOps.new(dir), "no-such-ref")
+      end
+
+      assert_equal head, result.sha, "an unresolvable ref must fall back to the worktree HEAD"
+      assert result.degraded, "the HEAD fallback is the degraded mode that resets suppression each pass"
+      assert_match(/did not resolve/, err)
+      assert_match(/falling back to worktree HEAD/, err)
+    end
+  end
+
+  def test_reviewer_compare_base_sha_uses_unresolved_token_when_head_missing
+    # A brand-new repo with no commits: neither the compare ref nor HEAD
+    # resolves, so the base degrades to a deterministic unresolved-ref token.
+    with_tmp_dir do |dir|
+      run!("git", "-C", dir, "init", "-b", "master", "--quiet")
+
+      result = nil
+      _out, err = capture_io do
+        result = Hive::Stages::Review.reviewer_compare_base_sha(BaseOps.new(dir), "no-such-ref")
+      end
+
+      assert_match(/\Aunresolved-[0-9a-f]{16}\z/, result.sha)
+      assert result.degraded
+      assert_match(/unresolved-ref token/, err)
+    end
+  end
+
   def test_reviewer_specs_for_normal_task_uses_standard_reviewers
     cfg = {
       "review" => {
@@ -162,6 +214,78 @@ class RunReviewersTest < Minitest::Test
 
       specs = Hive::Stages::Review.reviewer_specs_for(cfg, task)
       assert_equal [ "patrol-reviewer" ], specs.map { |spec| spec.fetch("name") }
+    end
+  end
+
+  def test_reviewer_specs_for_adhoc_task_uses_adhoc_reviewers
+    cfg = {
+      "review" => {
+        "reviewers" => [ { "name" => "normal-reviewer" } ],
+        "adhoc" => {
+          "reviewers" => [ { "name" => "adhoc-reviewer" } ]
+        }
+      },
+      "patrol" => {
+        "review" => {
+          "reviewers" => [ { "name" => "patrol-reviewer" } ]
+        }
+      }
+    }
+
+    with_tmp_dir do |dir|
+      task_file = File.join(dir, "task.md")
+      File.write(task_file, "---\nsource: ad-hoc\n---\n\n# Ad-hoc PR\n")
+      task = Task.new(dir, task_file)
+
+      specs = Hive::Stages::Review.reviewer_specs_for(cfg, task)
+      assert_equal [ "adhoc-reviewer" ], specs.map { |spec| spec.fetch("name") }
+    end
+  end
+
+  def test_reviewer_specs_for_adhoc_task_passes_through_a_malformed_entry
+    # A malformed ENTRY (a non-Hash) inside review.adhoc.reviewers is distinct
+    # from a malformed array SHAPE: the ad-hoc branch is still taken (an
+    # explicit non-nil adhoc.reviewers does NOT fall back to the normal set),
+    # and the entry is threaded through unchanged for the reviewer dispatcher
+    # to reject — it is not silently dropped or swapped for the normal set.
+    cfg = {
+      "review" => {
+        "reviewers" => [ { "name" => "normal-reviewer" } ],
+        "adhoc" => { "reviewers" => [ "not-a-hash-entry" ] }
+      }
+    }
+
+    with_tmp_dir do |dir|
+      task_file = File.join(dir, "task.md")
+      File.write(task_file, "---\nsource: ad-hoc\n---\n\n# Ad-hoc PR\n")
+      task = Task.new(dir, task_file)
+
+      specs = Hive::Stages::Review.reviewer_specs_for(cfg, task)
+      assert_equal [ "not-a-hash-entry" ], specs,
+                   "an explicit ad-hoc reviewers list is used as-is, not replaced by the normal set"
+    end
+  end
+
+  def test_reviewer_specs_for_adhoc_task_falls_back_to_standard_reviewers
+    cfg = {
+      "review" => {
+        "reviewers" => [ { "name" => "normal-reviewer" } ],
+        "adhoc" => { "reviewers" => nil }
+      },
+      "patrol" => {
+        "review" => {
+          "reviewers" => [ { "name" => "patrol-reviewer" } ]
+        }
+      }
+    }
+
+    with_tmp_dir do |dir|
+      task_file = File.join(dir, "task.md")
+      File.write(task_file, "---\nsource: AD-HOC\n---\n\n# Ad-hoc PR\n")
+      task = Task.new(dir, task_file)
+
+      specs = Hive::Stages::Review.reviewer_specs_for(cfg, task)
+      assert_equal [ "normal-reviewer" ], specs.map { |spec| spec.fetch("name") }
     end
   end
 
@@ -267,6 +391,88 @@ class RunReviewersTest < Minitest::Test
     end
   end
 
+  def test_adhoc_task_io_error_falls_back_to_normal_with_warn
+    with_tmp_dir do |dir|
+      task = Task.new(dir, dir)
+
+      specs = nil
+      _out, err = capture_io do
+        specs = Hive::Stages::Review.reviewer_specs_for(scoped_reviewer_cfg, task)
+      end
+
+      assert_equal [ "normal-reviewer" ], specs.map { |spec| spec.fetch("name") }
+      assert_match(/adhoc_task\? could not read/, err)
+      assert_match(/routing as a normal/, err)
+    end
+  end
+
+  def test_adhoc_fix_enabled_predicate
+    cfg = { "review" => { "adhoc" => { "fix" => false } } }
+    enabled_cfg = { "review" => { "adhoc" => { "fix" => true } } }
+
+    with_tmp_dir do |dir|
+      adhoc_file = File.join(dir, "adhoc.md")
+      normal_file = File.join(dir, "normal.md")
+      File.write(adhoc_file, "---\nsource: ad-hoc\n---\n\n# Ad-hoc\n")
+      File.write(normal_file, "---\nsource: telegram\n---\n\n# Normal\n")
+      adhoc_task = Task.new(dir, adhoc_file)
+      normal_task = Task.new(dir, normal_file)
+
+      refute Hive::Stages::Review.adhoc_fix_enabled?(cfg, adhoc_task)
+      assert Hive::Stages::Review.adhoc_fix_enabled?(enabled_cfg, adhoc_task)
+      assert Hive::Stages::Review.adhoc_fix_enabled?(cfg, normal_task)
+    end
+  end
+
+  def test_adhoc_fix_gate_fails_closed_on_state_file_read_error
+    # The fix gate is a SAFETY check: when the source can't be read it must
+    # fail CLOSED (treat as ad-hoc → auto-fix disabled by default), the
+    # opposite of reviewer selection's fail-open. Point state_file at a
+    # directory so File.read raises Errno::EISDIR.
+    cfg = { "review" => { "adhoc" => { "fix" => false } } }
+
+    with_tmp_dir do |dir|
+      task = Task.new(dir, dir) # state_file is a directory → File.read raises
+
+      enabled = nil
+      _out, err = capture_io do
+        enabled = Hive::Stages::Review.adhoc_fix_enabled?(cfg, task)
+      end
+
+      refute enabled, "unreadable source must disable auto-fix (fail closed)"
+      assert_match(/adhoc fix-gate could not read/, err)
+      assert_match(/failing closed \(auto-fix disabled, source unconfirmable\)/, err)
+    end
+  end
+
+  def test_adhoc_fix_gate_classifies_the_three_source_states
+    # The gate must report WHY auto-fix is disabled so a Phase 4 park reason
+    # can tell a review-only ad-hoc task apart from a normal task whose source
+    # couldn't be read (otherwise a normal task halts as adhoc_fix_disabled).
+    fix_off = { "review" => { "adhoc" => { "fix" => false } } }
+    fix_on = { "review" => { "adhoc" => { "fix" => true } } }
+
+    with_tmp_dir do |dir|
+      adhoc_file = File.join(dir, "adhoc.md")
+      File.write(adhoc_file, "---\nsource: ad-hoc\n---\n\n# Ad-hoc\n")
+      normal_file = File.join(dir, "normal.md")
+      File.write(normal_file, "---\nsource: telegram\n---\n\n# Normal\n")
+
+      assert_equal :disabled_adhoc,
+                   Hive::Stages::Review.adhoc_fix_gate(fix_off, Task.new(dir, adhoc_file))
+      assert_equal :enabled,
+                   Hive::Stages::Review.adhoc_fix_gate(fix_on, Task.new(dir, adhoc_file))
+      assert_equal :enabled,
+                   Hive::Stages::Review.adhoc_fix_gate(fix_off, Task.new(dir, normal_file))
+
+      capture_io do
+        assert_equal :disabled_source_unknown,
+                     Hive::Stages::Review.adhoc_fix_gate(fix_off, Task.new(dir, dir)),
+                     "an unreadable source must classify as source-unknown, not adhoc"
+      end
+    end
+  end
+
   def test_empty_patrol_reviewers_warns_so_patrol_pr_is_not_silently_unreviewed
     cfg = {
       "review" => { "reviewers" => [ { "name" => "normal-reviewer" } ] },
@@ -286,6 +492,53 @@ class RunReviewersTest < Minitest::Test
       assert_equal :ok, result, "empty patrol reviewers still returns :ok (intentional opt-out)"
       assert_match(/zero patrol\.review\.reviewers/, err,
                    "a patrol task with no reviewers must warn rather than pass silently")
+    end
+  end
+
+  def test_empty_adhoc_reviewers_warns_so_adhoc_pr_is_not_silently_unreviewed
+    cfg = {
+      "review" => {
+        "reviewers" => [ { "name" => "normal-reviewer" } ],
+        "adhoc" => { "reviewers" => [] } # explicit [] runs zero reviewers
+      }
+    }
+
+    with_tmp_dir do |dir|
+      task_file = File.join(dir, "task.md")
+      File.write(task_file, "---\nsource: ad-hoc\n---\n\n# Ad-hoc PR\n")
+      task = Task.new(dir, task_file)
+
+      result = nil
+      _out, err = capture_io do
+        result = Hive::Stages::Review.run_reviewers(cfg, make_ctx(dir), task)
+      end
+
+      assert_equal :ok, result, "empty ad-hoc reviewers still returns :ok (explicit opt-out)"
+      assert_match(/zero reviewers \(review\.adhoc\.reviewers is empty\)/, err,
+                   "an explicit empty review.adhoc.reviewers must name that knob")
+    end
+  end
+
+  def test_empty_inherited_reviewers_warns_and_names_review_reviewers
+    # nil review.adhoc.reviewers inherits review.reviewers; when that is ALSO
+    # empty (the DEFAULT) the ad-hoc task DOES reach the zero-reviewer branch,
+    # and the warning must name review.reviewers (the actually-empty knob),
+    # not review.adhoc.reviewers.
+    cfg = { "review" => { "reviewers" => [] } } # adhoc.reviewers omitted → inherits
+
+    with_tmp_dir do |dir|
+      task_file = File.join(dir, "task.md")
+      File.write(task_file, "---\nsource: ad-hoc\n---\n\n# Ad-hoc PR\n")
+      task = Task.new(dir, task_file)
+
+      result = nil
+      _out, err = capture_io do
+        result = Hive::Stages::Review.run_reviewers(cfg, make_ctx(dir), task)
+      end
+
+      assert_equal :ok, result
+      assert_match(/zero reviewers \(review\.reviewers is empty\)/, err,
+                   "the inherit case must name review.reviewers, not review.adhoc.reviewers")
     end
   end
 
@@ -788,6 +1041,15 @@ class RunReviewersTest < Minitest::Test
     end
   end
 
+  class QuotedLimitErroringReviewer < Hive::Reviewers::Base
+    def run!(deadline: nil)
+      Hive::Reviewers::Result.new(
+        name: name, output_path: output_path, status: :error,
+        error_message: "reviewer analyzed code that quoted limits reached for codex: not an agent wall"
+      )
+    end
+  end
+
   def test_all_failed_due_to_usage_limit_returns_all_failed_limit
     with_tmp_dir do |dir|
       cfg = {
@@ -804,6 +1066,26 @@ class RunReviewersTest < Minitest::Test
         result = Hive::Stages::Review.run_reviewers(cfg, make_ctx(dir), Task.new(dir, File.join(dir, "task.md")))
         assert_equal :all_failed_limit, result,
                      "all reviewers failing with a usage-limit error must surface :all_failed_limit"
+      end
+    end
+  end
+
+  def test_all_failed_with_quoted_limit_text_returns_all_failed
+    with_tmp_dir do |dir|
+      cfg = {
+        "review" => {
+          "reviewers" => [
+            { "name" => "a", "output_basename" => "a" },
+            { "name" => "b", "output_basename" => "b" }
+          ]
+        }
+      }
+      adapters = cfg["review"]["reviewers"].map { |spec| QuotedLimitErroringReviewer.new(spec, make_ctx(dir)) }
+
+      with_stubbed_dispatch(adapters) do
+        result = Hive::Stages::Review.run_reviewers(cfg, make_ctx(dir), Task.new(dir, File.join(dir, "task.md")))
+        assert_equal :all_failed, result,
+                     "quoted limit prose must not promote all reviewers to limits_reached"
       end
     end
   end
@@ -1199,6 +1481,14 @@ class RunReviewersTest < Minitest::Test
     refute Hive::Stages::Review.reviewer_file?("errors-01.md"),
            "errors-NN.md must be classified as orchestrator-owned"
     refute Hive::Stages::Review.reviewer_file?("errors-99.md")
+    refute Hive::Stages::Review.reviewer_file?("suppressed.md"),
+           "suppressed.md must be classified as orchestrator-owned"
+    # The `suppressed.` prefix is dot-terminated, so a reviewer file that
+    # merely begins with `suppressed` is NOT swept into orchestrator-owned.
+    assert Hive::Stages::Review.reviewer_file?("suppressed-checks-01.md"),
+           "suppressed-checks-01.md is a reviewer file, not the suppression doc"
+    assert Hive::Stages::Review.reviewer_file?("suppression-audit-01.md"),
+           "suppression-* must stay an ordinary reviewer file"
     # Sanity: a real reviewer file is still recognized.
     assert Hive::Stages::Review.reviewer_file?("claude-ce-code-review-01.md")
   end
@@ -1832,5 +2122,134 @@ class RunReviewersTest < Minitest::Test
     FileUtils.rm_rf(gh_dir) if gh_dir
     FileUtils.rm_rf(log_dir) if log_dir
     ENV.delete("HIVE_FAKE_GH_LOG_DIR")
+  end
+
+  # A8 fail-closed: a reviewer carrying a non-yolo permission scope on a
+  # runner that cannot enforce tool scoping (codex / pi) makes
+  # stage_permission_scope raise Hive::ConfigError. The real Agent#run!
+  # raises it before spawning; model that here.
+  class UnenforceableScopeReviewer < Hive::Reviewers::Base
+    def run!(deadline: nil)
+      raise Hive::ConfigError,
+            "stage review.reviewers requests permissions \"read-only\" but runner :codex " \
+            "cannot enforce tool scoping (claude only)"
+    end
+  end
+
+  # A8 contract: an unenforceable reviewer permission scope must HARD-ERROR
+  # the whole review. The Hive::ConfigError must propagate out of
+  # run_reviewers so Stages::Review.run!'s ConfigError rescue lands
+  # :review_error — it must NOT be silently caught by run_reviewer_spec's
+  # per-reviewer rescue and dropped, which would let a mixed pass continue
+  # after dropping the unenforceable reviewer (a silent security downgrade).
+  def test_unenforceable_reviewer_scope_hard_errors_the_run
+    with_tmp_dir do |dir|
+      cfg = {
+        "claude" => { "mode" => "headless" },
+        "review" => {
+          "reviewers" => [
+            { "name" => "scoped-codex", "output_basename" => "scoped-codex",
+              "kind" => "agent", "agent" => "codex",
+              "permissions" => "read-only" },
+            { "name" => "ok", "output_basename" => "ok" }
+          ]
+        }
+      }
+      ctx = make_ctx(dir)
+      adapters = [
+        UnenforceableScopeReviewer.new(cfg["review"]["reviewers"][0], ctx),
+        OkReviewer.new(cfg["review"]["reviewers"][1], ctx)
+      ]
+
+      err = nil
+      with_stubbed_dispatch(adapters) do
+        err = assert_raises(Hive::ConfigError) do
+          Hive::Stages::Review.run_reviewers(
+            cfg, ctx, Task.new(dir, File.join(dir, "task.md"))
+          )
+        end
+      end
+
+      assert_match(/cannot enforce tool scoping/, err.message,
+                   "the unenforceable-scope ConfigError must propagate, not be swallowed")
+
+      # The pass must NOT continue past the unenforceable reviewer: the
+      # surviving OK reviewer never publishes a finding, because the run
+      # hard-errored instead of silently dropping the bad reviewer.
+      refute File.exist?(File.join(dir, "reviews", "ok-01.md")),
+             "review must hard-error, not silently drop the reviewer and continue"
+    end
+  end
+
+  # --- shared-session reviewer grouping (multi-scope) -------------------
+
+  # Reviewers that resolve to the SAME effective permission scope share one
+  # group (one tmux session); a reviewer with a DIFFERING scope splits into
+  # its own group. An explicit `permissions: yolo` and a reviewer inheriting
+  # the project default yolo are the same effective scope → one group; a
+  # read-only reviewer is a different scope → a second group.
+  def test_shared_reviewer_groups_dedups_equal_scopes_and_splits_differing_ones
+    cfg = { "permissions" => "yolo" }
+    specs = [
+      { "name" => "inherits-default" },
+      { "name" => "explicit-yolo", "permissions" => "yolo" },
+      { "name" => "read-only", "permissions" => "read-only" }
+    ]
+
+    groups = Hive::Stages::Review.shared_reviewer_groups(cfg, specs)
+
+    assert_equal 2, groups.length,
+                 "equal-scope reviewers share one group; the read-only reviewer splits off"
+    yolo_group = groups.find { |g| g.map { |s| s["name"] }.sort == %w[explicit-yolo inherits-default] }
+    refute_nil yolo_group,
+               "explicit yolo and inherited-default yolo must land in the SAME group"
+    read_only_group = groups.find { |g| g.map { |s| s["name"] } == %w[read-only] }
+    refute_nil read_only_group, "the read-only reviewer must be its own group"
+  end
+
+  # Only the first group reuses the base session name; each subsequent
+  # differing-scope group gets a distinct "-scopeN" suffix so two scopes
+  # never collide on one tmux session.
+  def test_shared_reviewer_session_name_suffixes_only_secondary_scope_groups
+    with_tmp_dir do |dir|
+      task = Task.new(dir, File.join(dir, "task.md"))
+
+      base = Hive::Stages::Review.shared_reviewer_session_name(task, 2, 0)
+      second = Hive::Stages::Review.shared_reviewer_session_name(task, 2, 1)
+
+      refute_includes base, "-scope", "the first group keeps the base session name"
+      assert_includes second, "-scope2", "the second scope group gets a -scope2 suffix"
+      refute_equal base, second, "differing-scope groups must not share a session name"
+    end
+  end
+
+  # The reviewer path builds each group's scope from group.first via
+  # stage_permission_scope("review.reviewers", base_add_dirs: [ctx.task_folder]).
+  # A `scoped` reviewer's `dirs:` must EXTEND that base list (relative resolved
+  # from the task folder, absolute honored) rather than replacing it.
+  def test_shared_reviewer_permission_scope_extends_task_folder_with_scoped_dirs
+    with_tmp_dir do |dir|
+      ctx = make_ctx(dir)
+      task = Task.new(dir, File.join(dir, "task.md"))
+      absolute = File.join(dir, "abs-extra")
+      spec = {
+        "name" => "scoped-reviewer",
+        "permissions" => {
+          "preset" => "scoped",
+          "tools" => %w[Read Grep],
+          "dirs" => [ "./notes", absolute ]
+        }
+      }
+
+      scope = Hive::Stages::Review.shared_reviewer_permission_scope(
+        { "claude" => { "mode" => "tmux" } }, ctx, task, spec
+      )
+
+      assert_equal [ ctx.task_folder, File.join(ctx.task_folder, "notes"), absolute ],
+                   scope.fetch(:add_dirs),
+                   "scoped dirs must EXTEND [ctx.task_folder], not replace it"
+      assert_equal %w[Read Grep], scope.fetch(:allowed_tools)
+      assert_equal "default", scope.fetch(:permission_mode)
+    end
   end
 end

@@ -80,7 +80,10 @@ module Hive
             snapshot: seed_snapshot,
             last_error: seed_error
           )
-          bubble_model = Hive::Tui::BubbleModel.new(hive_model: seed_model)
+          bubble_model = Hive::Tui::BubbleModel.new(
+            hive_model: seed_model,
+            archive_refresh: state_source.method(:request_archive_refresh)
+          )
           # `input_timeout: 5` (ms) trades a tiny amount of GVL-yield
           # latency for substantially less escape-sequence fragmentation.
           # bubbletea-ruby's `tea_input_read_raw` C call holds the GVL for

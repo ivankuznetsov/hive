@@ -1,0 +1,532 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:hive:schema:status:v4",
+  "title": "hive status output (v4)",
+  "description": "Stable contract emitted by `hive status --json`. Either a SuccessPayload (the projects+tasks snapshot) or an ErrorPayload (a Hive::Error envelope). Discriminate by `ok`. v4 includes task PR URLs and adds task dependency fields so daemon consumers can honor blocked rows without re-deriving dependency state. CONSUMER AUDIT (U6): `stage`/`dependency_stage` were relaxed from the closed 9-value coding enum to the `^[0-9]+-...$` pattern so runtime-registered (generic) workflow dirs validate — any consumer that previously relied on the closed enum to whitelist-validate stage dirs now accepts arbitrary `N-name` shapes and must close-default on an unknown dir (see those fields' descriptions).",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/SuccessPayload"
+    },
+    {
+      "$ref": "#/$defs/ErrorPayload"
+    }
+  ],
+  "$defs": {
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "generated_at",
+        "projects"
+      ],
+      "properties": {
+        "schema": {
+          "const": "hive-status"
+        },
+        "schema_version": {
+          "const": 4
+        },
+        "ok": {
+          "const": true
+        },
+        "generated_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "projects": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Project"
+          }
+        }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "error_class",
+        "error_kind",
+        "exit_code",
+        "message"
+      ],
+      "description": "Emitted by the top-level rescue in Hive::Commands::Status when an error is raised before json_payload wrote a SuccessPayload. `hive status` doesn't carry slug/stage context — those fields are absent here.",
+      "properties": {
+        "schema": {
+          "const": "hive-status"
+        },
+        "schema_version": {
+          "const": 4
+        },
+        "ok": {
+          "const": false
+        },
+        "error_class": {
+          "type": "string"
+        },
+        "error_kind": {
+          "type": "string",
+          "enum": [
+            "config",
+            "internal",
+            "error"
+          ]
+        },
+        "exit_code": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "message": {
+          "type": "string"
+        },
+        "candidates": {
+          "type": "array",
+          "description": "Present on AmbiguousSlug. Each candidate identifies a project + stage + folder.",
+          "items": {
+            "type": "object",
+            "required": [
+              "project",
+              "stage",
+              "folder"
+            ],
+            "properties": {
+              "project": {
+                "type": "string"
+              },
+              "stage": {
+                "type": "string"
+              },
+              "folder": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "id": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      }
+    },
+    "Project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "path",
+        "hive_state_path",
+        "tasks"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "hive_state_path": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string",
+          "enum": [
+            "missing_project_path",
+            "not_initialised"
+          ]
+        },
+        "tasks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Task"
+          }
+        },
+        "legacy_stage_dirs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["stage_dir", "task_count"],
+            "properties": {
+              "stage_dir": { "type": "string" },
+              "task_count": { "type": "integer", "minimum": 1 }
+            }
+          }
+        },
+        "legacy_migrate_command": {
+          "description": "Machine-readable parity of the text-mode `hive migrate` recovery hint. \"hive migrate\" when `legacy_stage_dirs` is non-empty; `null` when the project is clean. Always present (never absent) — the same diagnostic-field-always-present convention `diagnostic` uses on Task.",
+          "type": ["string", "null"]
+        }
+      }
+    },
+    "Task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage",
+        "slug",
+        "id",
+        "display_name",
+        "depends_on",
+        "blocked_by",
+        "dependency_stage",
+        "blocked",
+        "folder",
+        "state_file",
+        "worktree_path",
+        "pr_url",
+        "marker",
+        "attrs",
+        "mtime",
+        "folder_mtime",
+        "age_seconds",
+        "claude_pid",
+        "claude_pid_alive",
+        "live_task_lock",
+        "unanswered_questions",
+        "action",
+        "action_label",
+        "suggested_command",
+        "next_action",
+        "diagnostic"
+      ],
+      "properties": {
+        "stage": {
+          "description": "Task stage dir as `N-name`. The pattern is intentionally relaxed from the closed coding enum so runtime-registered (generic) workflow dirs validate; it admits any `N-name` shape, but the producer only emits dirs that pass `validate_workflow_stage!`. The real valid set is the runtime union `Hive::Workflows.all_stage_dirs` — downstream readers must close-default on an unknown stage dir (e.g. `Stages::DIRS.index(stage) || -1`) rather than assume any `N-name` is meaningful input.",
+          "type": "string",
+          "pattern": "^[0-9]+-[a-z0-9][a-z0-9-]*$"
+        },
+        "slug": {
+          "type": "string"
+        },
+        "id": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "display_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "workflow": {
+          "description": "Workflow descriptor id that resolved this task. Present on rows emitted by status scans; older/synthetic producers may omit it. Typed `[string, null]` to match the sibling optional Task strings — the scan producer omits the key when absent rather than emitting null, but a future producer mirroring the sibling idiom may emit null.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "depends_on": {
+          "description": "Raw dependency id or slug from task meta.yml, or null when the task has no dependency.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "blocked_by": {
+          "description": "Resolved prerequisite slug when depends_on points at a known same-project task; null when absent or unresolved.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "dependency_stage": {
+          "description": "Current stage of the resolved prerequisite; null when absent or unresolved. Same relaxed `N-name` pattern as `stage`: it admits any well-formed dir, but the real valid set is the runtime union `Hive::Workflows.all_stage_dirs`, so readers must close-default on an unknown stage dir. (`pattern` is ignored for the null branch.)",
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9]+-[a-z0-9][a-z0-9-]*$"
+        },
+        "blocked": {
+          "description": "True when the daemon must suppress automatic forward dispatch for this task because its dependency is unresolved or below dependency_gate_stage.",
+          "type": "boolean"
+        },
+        "folder": {
+          "type": "string"
+        },
+        "state_file": {
+          "type": "string"
+        },
+        "worktree_path": {
+          "description": "Absolute path of the task's git worktree, or null for pre-execute stages (1-inbox, 2-brainstorm, 3-plan) and for tasks whose worktree was never created. Agents that want to open the worktree, edit files, and retry get the path here without re-implementing Hive::Task#worktree_path resolution. See PR #84 review finding #8.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pr_url": {
+          "description": "Pull request URL read from pr.md frontmatter once a task reaches 5-open-pr or later; null before a PR exists or when pr.md is missing/unparseable.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "marker": {
+          "type": "string",
+          "enum": [
+            "none",
+            "waiting",
+            "complete",
+            "agent_working",
+            "manual_steering",
+            "execute_waiting",
+            "execute_complete",
+            "execute_stale",
+            "review_working",
+            "review_waiting",
+            "review_ci_stale",
+            "review_stale",
+            "review_complete",
+            "review_error",
+            "error"
+          ]
+        },
+        "attrs": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "held": {
+          "description": "Present only when this task is held because an agent provider quota/usage wall was detected. Distinct from dependency blocking; do not infer from blocked_by.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "reason",
+            "provider",
+            "retry_after"
+          ],
+          "properties": {
+            "reason": {
+              "type": "string",
+              "enum": [
+                "quota"
+              ]
+            },
+            "provider": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "pattern": "^[A-Za-z0-9_-]+$"
+            },
+            "retry_after": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          }
+        },
+        "mtime": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "folder_mtime": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "age_seconds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "claude_pid": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "claude_pid_alive": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "live_task_lock": {
+          "description": "True when the task's .lock file points at a process that is still running (PID alive + start time matches). False when the lock is absent, the PID is dead, or PID reuse was detected. Coerced from nil/true/false to a strict boolean so external consumers (TUI, bots) never see JSON null.",
+          "type": "boolean"
+        },
+        "unanswered_questions": {
+          "description": "Count of still-unanswered brainstorm Q&A questions (`### Q{n}.` slots with no answer) for a 2-brainstorm needs_input row; 0 for every other row. Lets a consumer distinguish a brainstorm the daemon is intentionally holding (answers outstanding) from one genuinely waiting for a first answer or broken — the daemon's answers-pending gate is otherwise only visible in daemon.log. Degrades to 0 if the file is missing/mid-write/malformed.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "ready_to_brainstorm",
+            "ready_to_plan",
+            "ready_to_develop",
+            "ready_to_open_pr",
+            "ready_for_review",
+            "ready_to_artifacts",
+            "ready_to_finalize",
+            "ready_to_archive",
+            "ready_to_advance",
+            "ready_to_run",
+            "review_parked",
+            "needs_input",
+            "recover_execute",
+            "recover_review",
+            "agent_running",
+            "archived",
+            "manual_steering",
+            "error"
+          ]
+        },
+        "action_label": {
+          "type": "string"
+        },
+        "suggested_command": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "next_action": {
+          "description": "Optional row-local structured recovery action. Present today for EXECUTE_WAITING reason states; null when the generic action/suggested_command fields are sufficient.",
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": true,
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "edit",
+                "mv",
+                "approve",
+                "run",
+                "recover_stale",
+                "no_op"
+              ]
+            }
+          }
+        },
+        "diagnostic": {
+          "description": "Red-row diagnostic payload for recovery/error states; null for ordinary actionable rows.",
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Diagnostic"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "Diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "summary",
+        "detail",
+        "source",
+        "source_path",
+        "artifact_paths",
+        "generated_by",
+        "marker_signature",
+        "suggested_next_action",
+        "updated_at"
+      ],
+      "properties": {
+        "summary": {
+          "description": "Single-line operator summary. Producer caps at 120 chars (TaskAction::DIAGNOSTIC_SUMMARY_MAX); see Hive::TaskAction#diagnostic.",
+          "type": "string",
+          "maxLength": 120
+        },
+        "detail": {
+          "description": "Multi-line operator detail. Producer caps at 4000 chars (TaskAction::DIAGNOSTIC_DETAIL_MAX); see Hive::TaskAction#diagnostic.",
+          "type": "string",
+          "maxLength": 4000
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "marker",
+            "artifact"
+          ]
+        },
+        "source_path": {
+          "description": "Absolute filesystem path of the primary artifact backing this diagnostic, or null when source == marker.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "artifact_paths": {
+          "description": "Absolute paths to the bounded set of artifacts the local extractor inspected. Capped at 20 entries.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 20
+        },
+        "generated_by": {
+          "description": "Origin of the diagnostic body. \"local\" = TaskAction's bounded marker+artifact extraction; agent-profile names (claude / codex / pi) = a headless Hive::DiagnosisAgent run wrote diagnostics/red-status.md. Extending this enum requires registering a new profile in Hive::AgentProfiles AND updating this enum in the same PR (covered by test/unit/schema_files_test.rb).",
+          "type": "string",
+          "enum": [
+            "local",
+            "claude",
+            "codex",
+            "pi"
+          ]
+        },
+        "marker_signature": {
+          "description": "SHA256 hex of the marker name + sorted attrs (key=value joined by newline). Pinned freshness key shared by local extraction, TUI live-update gating, and the headless DiagnosisAgent artifact frontmatter. Length 64.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "suggested_next_action": {
+          "description": "Optional structured recovery hint for agent consumers. Today populated for recover_review and error rows whose existing suggested_command path applies; null when the operator must edit before retry (max_passes-hit REVIEW_STALE).",
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "kind",
+                "command"
+              ],
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "retry",
+                    "clear_marker",
+                    "manual_fix"
+                  ]
+                },
+                "command": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "updated_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    }
+  }
+}

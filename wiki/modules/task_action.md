@@ -3,7 +3,7 @@ title: Hive::TaskAction
 type: module
 source: lib/hive/task_action.rb
 created: 2026-04-26
-updated: 2026-06-11
+updated: 2026-06-23
 tags: [module, status, action, classifier, diagnostic]
 ---
 
@@ -37,7 +37,7 @@ EXECUTE_STALE rows and legacy `EXECUTE_WAITING findings_count>0` rows emit a non
 
 ## Action map (`Hive::TaskAction::ACTIONS`)
 
-Entries are keyed by an internal symbol that's resolved via `(stage_name, marker_name)` lookup. Each value carries `key` (TaskActionKind constant), `label` (human prose), and `command` (verb name string, or nil).
+Entries are keyed by an internal symbol resolved by routing on the descriptor stage's `kind` (see the "Kind-Routed Classification" section below): coding `:agent`/`:inert` stages map through `Hive::Workflows::Coding::ACTION_DISPATCH`, the coding runtime kinds (`:execute`/`:review_council`/`:finalize`) select their helpers directly, and non-coding stages fall through to the descriptor-generic classifier — the older `(stage_name, marker_name)` case lookup is retired. Each value carries `key` (TaskActionKind constant), `label` (human prose), and `command` (verb name string, or nil).
 
 | Internal key | TaskActionKind | Label | Verb |
 |---|---|---|---|
@@ -58,9 +58,56 @@ Entries are keyed by an internal symbol that's resolved via `(stage_name, marker
 | `review_stale` | `RECOVER_REVIEW` | "Needs recovery" | nil |
 | `finalize_waiting` | `NEEDS_INPUT` | "Needs your input" | finalize |
 | `finalize_complete` | `READY_TO_ARCHIVE` | "Ready to archive" | archive |
+| `ready_to_advance` | `READY_TO_ADVANCE` | "Ready to advance" | approve |
+| `generic_ready_to_run` | `READY_TO_RUN` | "Ready to run" | run |
+| `generic_needs_input` | `NEEDS_INPUT` | "Needs your input" | run |
 | `agent_running` | `AGENT_RUNNING` | "Agent running" | nil |
 | `done` | `ARCHIVED` | "Archived" | nil |
 | `error` | `ERROR` | "Error" | nil |
+
+`generic_ready_to_run` and `generic_needs_input` are distinct on the JSON wire.
+Markerless generic stages emit `READY_TO_RUN` so the daemon can dispatch
+`hive run <slug>` on first sight. Generic `WAITING` markers still emit
+`NEEDS_INPUT` and go through the edit/mtime debounce path. Coding also uses
+`generic_ready_to_run` for markerless brainstorm and execute rows, and for
+markerless finalize rows once `pr.md` exists; those are runnable states, not
+operator-input gates. This split is additive to `Hive::Schemas::TaskActionKind`
+and is mirrored by `hive-status` and `hive-stage-action` schemas.
+
+## Kind-Routed Classification
+
+`TaskAction#action` first applies the workflow-agnostic short-circuits
+(`live_task_lock`, `AGENT_WORKING`, `ERROR`, and `MANUAL_STEERING`), then routes
+through the resolved descriptor stage's `kind`. Coding no longer has a
+production `case task.stage_name` branch: `:execute`, `:review_council`, and
+`:finalize` select the coding runtime-specific helpers directly, while coding
+`:agent`/`:inert` stages consult `Hive::Workflows::Coding::ACTION_DISPATCH` for
+their per-stage user-facing action keys. Non-coding `:agent`/`:inert`/nil
+stages fall through to the descriptor-generic classifier:
+
+- `COMPLETE` at the terminal descriptor stage -> `archived`.
+- `COMPLETE` at any earlier descriptor stage -> `ready_to_advance`.
+- `WAITING` -> `generic_needs_input` (wire kind `NEEDS_INPUT`).
+- markerless any non-terminal inert stage -> `ready_to_advance`. The gate is
+  `!terminal && stage.kind == :inert` with no entry-stage condition: the
+  entry-only restriction was intentionally dropped so an inert MIDDLE stage
+  advances rather than stranding (`Resolver.resolve` raises `StageError` for
+  `kind: :inert`, so it can neither run nor advance otherwise).
+- markerless stage of any non-inert kind (`:agent`, coding runtime kinds, or
+  `nil`), or a
+  terminal inert stage (degenerate single-stage workflow, entry == terminal) ->
+  `generic_ready_to_run` with label "Ready to run".
+
+Coding behavior is pinned by the same matrix while the classifier routes through
+descriptor `kind:`. A test-only parity harness compares the retired stage-name
+case against the production kind path across coding markers, diagnostics, and
+command strings. `Commands::Approve` and `Commands::Run` resolve generic advance
+destinations through the task's descriptor, the CLI accepts runtime-registered
+stage refs for `--from`/`--to`/`--stage`, `Status#collect_rows` scans
+`Hive::Workflows.all_stage_dirs`, and `TaskResolver` can find generic-only stage
+dirs by bare slug. U6's integration test proves a registered generic task
+advancing through status -> policy -> `hive run`/`hive approve` for two stage
+hops.
 
 ## Marker carve-outs
 
@@ -72,6 +119,13 @@ Runtime liveness can short-circuit per-stage dispatch before marker lookup:
 
 `:execute_stale` maps to `RECOVER_EXECUTE` and emits `hive findings <slug>` rather than a workflow verb. Legacy `:execute_waiting findings_count>0` uses the same recovery surface so old state folders do not fall through to generic edit guidance. Running `hive develop <slug>` on either shape would refuse or loop on a non-terminal marker; pointing the user at `findings` opens the recovery loop instead.
 
+Markerless coding rows are not input gates. `2-brainstorm` and `4-execute`
+with `:none` now emit `READY_TO_RUN`; `8-finalize` with `:none` emits
+`READY_TO_RUN` once `pr.md` exists (missing `pr.md` remains `ERROR`). A stray
+`:complete` marker at execute-stage is treated like `:execute_complete` and
+surfaces `READY_TO_OPEN_PR`; other unexpected terminal markers at execute-stage
+become `ERROR` rather than phantom `NEEDS_INPUT`.
+
 Markerless `6-review` tasks map to `READY_FOR_REVIEW`, not `NEEDS_INPUT`. This matters after a recovery marker is cleared: the next useful action is to run the review stage, while only an explicit `REVIEW_WAITING` marker should open the input-editor path.
 
 ## Command emission
@@ -79,6 +133,12 @@ Markerless `6-review` tasks map to `READY_FOR_REVIEW`, not `NEEDS_INPUT`. This m
 Workflow verbs (`brainstorm`/`plan`/`develop`/`open-pr`/`review`/`artifacts`/`finalize`/`archive`) ALWAYS include `--from <stage>`. That's the idempotency lever: a retry after a successful advance fails with `WRONG_STAGE` (4) instead of silently advancing twice.
 
 Generic verbs (`findings`/`accept-finding`/`reject-finding`) include `--stage <stage>` only when slug-stage ambiguity actually exists (`stage_collision: true`).
+
+For non-coding workflows, command emission bypasses the coding
+`Hive::Workflows::VERBS` table. `ready_to_advance` emits
+`hive approve <slug> --from <descriptor-stage-dir>` and generic run/input rows
+emit `hive run <slug>` (plus `--project` when the status snapshot spans multiple
+projects, and `--stage` for run rows only when a stage collision was reported).
 
 `--project <name>` is appended whenever `project_count > 1` so multi-project status output emits unambiguous commands.
 

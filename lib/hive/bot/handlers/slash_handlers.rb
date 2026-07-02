@@ -12,7 +12,8 @@ module Hive
                        idea_draft_store: nil, idea_attachment_policy: nil,
                        max_attachment_bytes: nil, max_attachment_count: nil,
                        now: -> { Time.now },
-                       status_snapshot_provider: -> { [] })
+                       status_snapshot_provider: -> { [] },
+                       logger: nil)
           @projects_provider = projects_provider
           @pending_ideas = pending_ideas
           @last_project = last_project
@@ -23,6 +24,7 @@ module Hive
           @max_attachment_count = max_attachment_count
           @now = now
           @status_snapshot_provider = status_snapshot_provider
+          @logger = logger
         end
 
         def status(update)
@@ -40,13 +42,19 @@ module Hive
                             format: json ? :json : nil)
         end
 
+        def waiting(_update)
+          @result_class.new(action: :dispatch_then_reply,
+                            command_argv: [ "hive", "status", "--json" ],
+                            mode: :waiting)
+        end
+
         def queue(_update)
           @result_class.new(action: :dispatch_then_reply,
                             command_argv: [ "hive", "status", "--json" ])
         end
 
         def idea(update)
-          text = update.effective_text.to_s.sub(%r{\A/idea\b}, "").strip
+          text = effective_text(update).to_s.sub(%r{\A/idea\b}, "").strip
           if text.empty?
             return start_text_capture(update) if @idea_draft_store
 
@@ -107,7 +115,7 @@ module Hive
         def media(update)
           draft = @idea_draft_store.get(chat_id: update.chat_id)
           started_here = draft.nil?
-          caption = update.effective_text.to_s.strip
+          caption = effective_text(update).to_s.strip
           if draft.nil?
             text = caption.empty? || caption.start_with?("/") ? nil : caption
             draft = @idea_draft_store.start(
@@ -128,6 +136,19 @@ module Hive
         end
 
         private
+
+        # Byte-identical to Router#effective_text — those two ARE interchangeable
+        # and share its nil-able contract (returns nil when neither read is set).
+        # Only FreeTextHandler#effective_text differs, coercing the read with
+        # `.to_s` (returns "", never nil), so that one variant is not. A media
+        # message carries its text in the caption (update.text is nil), so prefer
+        # #effective_text. The respond_to? guard supports lean unit-test fixtures
+        # that expose only #text (e.g. router_test's LegacyMessageUpdate);
+        # production Telegram::Update always responds to #effective_text
+        # (telegram.rb), so the `: update.text` fallback never runs in production.
+        def effective_text(update)
+          update.respond_to?(:effective_text) ? update.effective_text : update.text
+        end
 
         def start_text_capture(update)
           draft = @idea_draft_store.start(chat_id: update.chat_id, phase: :awaiting_text,
@@ -230,15 +251,21 @@ module Hive
         public
 
         def answer(update, _conversation_store)
-          slug = update.text.to_s.split(/\s+/, 2)[1].to_s.strip
-          return @result_class.new(action: :reply, text: "Use /answer <slug>.") if slug.empty?
+          target = update.text.to_s.split(/\s+/, 2)[1].to_s.strip
+          return @result_class.new(action: :reply, text: "Use /answer <id|slug>.") if target.empty?
+
+          slug, error = resolve_numeric_target_slug(target)
+          return @result_class.new(action: :reply, text: error) if error
 
           @result_class.new(action: :start_answer, slug: slug, mode: :path_b)
         end
 
         def approve(update)
-          slug = update.text.to_s.split(/\s+/, 2)[1].to_s.strip
-          return @result_class.new(action: :reply, text: "Use /approve <slug>.") if slug.empty?
+          target = update.text.to_s.split(/\s+/, 2)[1].to_s.strip
+          return @result_class.new(action: :reply, text: "Use /approve <id|slug>.") if target.empty?
+
+          slug, error = resolve_numeric_target_slug(target)
+          return @result_class.new(action: :reply, text: error) if error
 
           @result_class.new(action: :dispatch_then_reply,
                             command_argv: [ "hive", "approve", slug, "--json" ],
@@ -259,8 +286,9 @@ module Hive
         def help(_update)
           @result_class.new(
             action: :reply,
-            text: "Commands: /status [project], /queue, /idea [text], /answer <slug>, " \
-                  "/approve <slug>, /autofix <slug>, /details <slug>, /done, /help"
+            text: "Send any message to capture an idea. Commands: /status [project], /waiting, " \
+                  "/queue, /idea [text], /answer <id|slug>, /approve <id|slug>, /autofix <id|slug>, " \
+                  "/details <id|slug>, /done, /help"
           )
         end
 
@@ -272,16 +300,16 @@ module Hive
             action: :reply,
             text: "Connected. This bot drives your hive pipeline: it notifies you when " \
                   "tasks need answers or approvals, and you can reply right here.\n\n" \
-                  "Try /status to see your tasks, /idea to capture a new one, " \
+                  "Try /status to see your tasks, send any message to capture a new idea, " \
                   "or /help for every command."
           )
         end
 
         def autofix(update)
-          slug = update.text.to_s.split(/\s+/, 2)[1].to_s.strip
-          return @result_class.new(action: :reply, text: "Use /autofix <slug>.") if slug.empty?
+          target = update.text.to_s.split(/\s+/, 2)[1].to_s.strip
+          return @result_class.new(action: :reply, text: "Use /autofix <id|slug>.") if target.empty?
 
-          row, error = resolve_status_row(slug)
+          row, error = resolve_status_row(target)
           return @result_class.new(action: :reply, text: error) if error
 
           # Gate on retryable_recovery? exactly as the inline 🔧 Autofix button
@@ -307,28 +335,43 @@ module Hive
           RecoverySequence.build(
             project: row.project, slug: row.slug, stage: row.stage,
             marker: row.marker, match_attr: match_attr, attrs: row.attrs,
+            workflow: row.respond_to?(:workflow) ? row.workflow : nil,
             result_class: @result_class, clear_keyboard: false
           )
         end
 
         def details(update)
-          slug = update.text.to_s.split(/\s+/, 2)[1].to_s.strip
-          return @result_class.new(action: :reply, text: "Use /details <slug>.") if slug.empty?
+          target = update.text.to_s.split(/\s+/, 2)[1].to_s.strip
+          return @result_class.new(action: :reply, text: "Use /details <id|slug>.") if target.empty?
 
-          row, error = resolve_status_row(slug)
+          row, error = resolve_status_row(target)
           return @result_class.new(action: :reply, text: error) if error
 
-          stage_argv = row.stage ? [ "--stage", row.stage ] : []
-          @result_class.new(
-            action: :dispatch_then_reply,
-            project: row.project,
-            slug: row.slug,
-            command_argv: [ "hive", "status", "--diagnose", row.slug,
-                            "--project", row.project, *stage_argv, "--json" ]
-          )
+          @result_class.new(action: :reply, text: render_details_reply(row))
         end
 
         private
+
+        # details_reply renders from a live Row and never raises today, but it
+        # runs OUTSIDE resolve_status_row's degrade rescue. A render-time fault
+        # (e.g. a row whose attrs aren't a Hash) would escape to the poll loop
+        # and leave the operator with no reply — and skip write_last_seen, so
+        # Telegram redelivers the update. Degrade to the soft retry hint and log
+        # (with a backtrace) so the fault stays diagnosable.
+        def render_details_reply(row)
+          Hive::Bot::NotificationBuilders.details_reply(row)
+        rescue StandardError => e
+          # resolve_status_row matches on :slug alone, so a slug-only provider
+          # row need not respond to :project (or even :slug). Guard both reads
+          # here — an unguarded row.project would re-raise and defeat this very
+          # soft-degrade path.
+          @logger&.event(:details_render_failed,
+                         project: (row.project if row.respond_to?(:project)),
+                         slug: (row.slug if row.respond_to?(:slug)),
+                         error_class: e.class.name, message: e.message,
+                         backtrace: Array(e.backtrace).first(3))
+          Hive::Bot::NotificationBuilders::STATUS_LOOKUP_FAILED_REPLY
+        end
 
         # Operator-facing refusal for a /autofix on a non-retryable row.
         # Manual-only states (execute_stale, fix_tampered) point at a laptop;
@@ -342,34 +385,65 @@ module Hive
           end
         end
 
-        # Resolves a slug against the latest status snapshot. Returns
+        def numeric_id(target)
+          match = /\A#?(\d+)\z/.match(target.to_s)
+          match ? Integer(match[1], 10) : nil
+        end
+
+        def resolve_numeric_target_slug(target)
+          id = numeric_id(target)
+          return [ target, nil ] unless id
+
+          row, error = resolve_status_row(target, id: id)
+          return [ nil, error ] if error
+
+          [ row.slug, nil ]
+        end
+
+        # Resolves an id or slug against the latest status snapshot. Returns
         # [row, nil] on a unique match, or [nil, error_text] otherwise:
         #   - snapshot nil        → status not loaded yet (bot just started);
         #                           we never sync-fetch here (see
         #                           Supervisor#latest_status_rows for why)
-        #   - zero matches        → slug not found / archived
-        #   - more than one match → ambiguous across projects. A slash
+        #   - id zero matches     → id not found / archived
+        #   - id multi-match      → ids are globally unique, so we take the
+        #                           head row with no ambiguity guard (unlike
+        #                           the slug arm below); a duplicate id would
+        #                           mean a corrupt snapshot, not a real choice
+        #   - slug zero matches   → slug not found / archived
+        #   - slug multi-match    → ambiguous across projects. A slash
         #                           command carries no project, so we refuse
         #                           rather than dispatch against a guessed
         #                           project (slugs are date+hex so this is
         #                           rare, but a silent wrong-project dispatch
         #                           would be worse than asking the operator).
-        def resolve_status_row(slug)
+        def resolve_status_row(target, id: numeric_id(target))
           snapshot = @status_snapshot_provider.call
-          return [ nil, "Status is still loading — try again in a moment." ] if snapshot.nil?
+          return [ nil, Hive::Bot::NotificationBuilders::STATUS_STILL_LOADING_REPLY ] if snapshot.nil?
 
-          matches = Array(snapshot).select { |row| row.respond_to?(:slug) && row.slug == slug }
+          if id
+            matches = Array(snapshot).select { |row| row.respond_to?(:id) && row.id == id }
+            return [ nil, "No active task ##{id} — was it archived?" ] if matches.empty?
+
+            return [ matches.first, nil ]
+          end
+
+          matches = Array(snapshot).select { |row| row.respond_to?(:slug) && row.slug == target }
           case matches.length
           when 0 then [ nil, "Slug not found, was it archived?" ]
           when 1 then [ matches.first, nil ]
-          else [ nil, "Multiple active tasks match #{slug}; open on a laptop to pick the right project." ]
+          else [ nil, "Multiple active tasks match #{target}; open on a laptop to pick the right project." ]
           end
-        rescue StandardError
+        rescue StandardError => e
           # The production provider just reads a cached ivar and cannot raise,
           # but a future provider that does I/O must never crash the poll loop
-          # (an escape here would skip write_last_seen and let Telegram
-          # redeliver the update). Degrade to a soft retry hint instead.
-          [ nil, "Status lookup failed — try again in a moment." ]
+          # (an escape here would skip write_last_seen_update_id and let
+          # Telegram redeliver the update). Log before degrading — otherwise a
+          # recurring fault stays invisible in bot.log — then return a soft retry hint.
+          @logger&.event(:status_lookup_failed, slug: target,
+                                                 error_class: e.class.name, message: e.message,
+                                                 backtrace: Array(e.backtrace).first(3))
+          [ nil, Hive::Bot::NotificationBuilders::STATUS_LOOKUP_FAILED_REPLY ]
         end
       end
     end

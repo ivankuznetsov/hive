@@ -3,6 +3,7 @@ require "fileutils"
 require "shellwords"
 require "hive/config"
 require "hive/stages"
+require "hive/workflows"
 require "hive/task_action"
 require "hive/brainstorm_parser"
 require "hive/daemon/policy"
@@ -11,11 +12,14 @@ require "hive/daemon/concurrency_controller"
 require "hive/daemon/child_supervisor"
 require "hive/daemon/status_consumer"
 require "hive/daemon/stale_agent_healer"
+require "hive/daemon/recoverable_error_healer"
 require "hive/daemon/display_name_backfiller"
+require "hive/daemon/task_id_backfiller"
 require "hive/daemon/dispatch_request_queue"
 require "hive/daemon/dispatch_result_queue"
 require "hive/daemon/logger"
 require "hive/daemon/digest_scheduler"
+require "hive/daemon/answer_digest_scheduler"
 require "hive/daemon/patrol_scheduler"
 require "hive/daemon/pr_merge_watcher"
 require "hive/lock"
@@ -41,7 +45,7 @@ module Hive
 
       # Stage dir whose `needs_input` rows carry a brainstorm Q&A file the
       # daemon gates auto-resume on (see `brainstorm_answers_pending?`).
-      BRAINSTORM_STAGE_DIR = "2-brainstorm".freeze
+      BRAINSTORM_STAGE_DIR = "2-brainstorm".freeze # coding-scoped: answer-pending daemon gate only parses coding brainstorm.md
 
       # @param config [Hash] merged config (Hive::Config.load) — used for
       #   the `daemon` block defaults; per-project enrollment is read from
@@ -54,7 +58,8 @@ module Hive
       # @param patrol_scheduler [PatrolScheduler, nil]
       # @param dry_run [Boolean]
       def initialize(config:, controller:, supervisor:, status_consumer:, logger:,
-                     merge_watcher: nil, patrol_scheduler: nil, digest_scheduler: nil, dry_run: false,
+                     merge_watcher: nil, patrol_scheduler: nil, digest_scheduler: nil,
+                     answer_digest_scheduler: nil, dry_run: false,
                      update_state: nil, update_checker: nil, channel_detector: nil,
                      dispatch_request_state_home: nil, dispatch_result_state_home: nil)
         @config = config
@@ -65,6 +70,7 @@ module Hive
         @merge_watcher = merge_watcher
         @patrol_scheduler = patrol_scheduler
         @digest_scheduler = digest_scheduler
+        @answer_digest_scheduler = answer_digest_scheduler
         @dry_run = dry_run
 
         # Update-flow collaborators (plan 2026-05-27-002). The check runs
@@ -100,11 +106,23 @@ module Hive
           logger: @logger,
           grace_sec: agent_marker_grace_sec
         )
+        @recoverable_error_healer = RecoverableErrorHealer.new(
+          controller: @controller,
+          logger: @logger,
+          config: @config
+        )
         # Additive self-heal for tasks whose one-shot name generation at
         # `hive new` never landed (agent/codex outage). Re-spawns
         # `hive generate-name <folder>` on later ticks; never touches
         # markers or dispatch.
         @display_name_backfiller = DisplayNameBackfiller.new(
+          logger: @logger,
+          dry_run: @dry_run
+        )
+        # Additive self-heal for tasks created outside `hive new` (hand-made
+        # folder, `mv`-ed in) whose meta.yml has no id. Assigns the next
+        # counter id and commits it; never touches markers or dispatch.
+        @task_id_backfiller = TaskIdBackfiller.new(
           logger: @logger,
           dry_run: @dry_run
         )
@@ -159,6 +177,11 @@ module Hive
         # brainstorm-gate parse-error log dedup (see
         # `brainstorm_answers_pending?`).
         @brainstorm_parse_errors = {}
+        # `op-label → last-logged error signature` for the global-digest
+        # scheduler tick/complete :fatal dedup, mirroring the brainstorm-gate
+        # pattern so a persistently-raising scheduler logs once per distinct
+        # fault (and re-logs after a clean run), not on every ~30s poll.
+        @digest_scheduler_fatal_signatures = {}
       end
 
       # Single tick: reap, fetch, dispatch. Pure dispatcher — no signal
@@ -203,15 +226,8 @@ module Hive
         # + catch-up-cap `write_state`), and an unguarded SystemCallError
         # (ENOSPC/EROFS/EACCES) would otherwise crash the whole tick and
         # trip the unit's restart-loop cap.
-        begin
-          @digest_scheduler&.tick(now: now)&.each do |digest_dispatch|
-            dispatch_digest(digest_dispatch, now: now)
-          end
-        rescue StandardError => e
-          @logger.event(:fatal,
-                        message: "digest_scheduler.tick raised: #{e.class}: #{e.message}",
-                        keeping_previous: true)
-        end
+        run_digest_scheduler_tick(@digest_scheduler, "digest_scheduler.tick", now: now)
+        run_digest_scheduler_tick(@answer_digest_scheduler, "answer_digest_scheduler.tick", now: now)
 
         # 2. Fetch status
         result = @status_consumer.fetch
@@ -220,11 +236,17 @@ module Hive
           @logger.event(:tick_end, now: Time.now.utc.iso8601, action: "status_failure")
           return
         end
-        # Forward schema-version skew (tolerated, parsed best-effort): an
-        # updated `hive` binary emitted a newer hive-status envelope than
-        # this long-running daemon was built for. Log once; the tick
-        # proceeds on the additive payload. Restart picks up the schema.
-        @logger.event(:status_schema_skew, message: result.warning) if result.warning
+        # Non-fatal status advisory (logged once per tick). `result.warning`
+        # combines TWO sources: a tolerated forward schema-version skew (an
+        # updated `hive` binary emitted a newer hive-status envelope than this
+        # long-running daemon was built for, parsed best-effort) AND any
+        # status-command stderr breadcrumbs surfaced on an
+        # otherwise-successful fetch (fail-open dependency gate, dropped
+        # depends_on). The event name is deliberately NEUTRAL — not
+        # schema-skew-only — so an operator grepping daemon.log for
+        # dependency-gate degradation finds it here instead of being misled by
+        # a schema-version event name. Tick proceeds on the additive payload.
+        @logger.event(:status_warning, message: result.warning) if result.warning
         # Rebuild the per-tick set of half-migrated projects from the
         # status snapshot. Stays empty when the daemon talks to an old
         # status binary that didn't ship the field (Result#projects
@@ -253,6 +275,16 @@ module Hive
                         keeping_previous: true)
         end
 
+        begin
+          @recoverable_error_healer.heal(
+            result.rows, now: now, legacy_layout_projects: @legacy_layout_projects
+          )
+        rescue StandardError => e
+          @logger.event(:fatal,
+                        message: "recoverable_error_healer raised: #{e.class}: #{e.message}",
+                        keeping_previous: true)
+        end
+
         # Self-heal tasks left showing their raw slug because name
         # generation never landed at `hive new`. Purely additive and
         # marker-free, so order relative to dispatch is irrelevant — but
@@ -263,6 +295,17 @@ module Hive
         rescue StandardError => e
           @logger.event(:fatal,
                         message: "display_name_backfiller raised: #{e.class}: #{e.message}",
+                        keeping_previous: true)
+        end
+
+        # Self-heal tasks created outside `hive new` that never got an id.
+        # Same additive, marker-free, defensively-rescued contract as the
+        # name backfiller above.
+        begin
+          @task_id_backfiller.backfill(result.rows, now: now)
+        rescue StandardError => e
+          @logger.event(:fatal,
+                        message: "task_id_backfiller raised: #{e.class}: #{e.message}",
                         keeping_previous: true)
         end
 
@@ -567,33 +610,64 @@ module Hive
                           envelope_ok: entry.json_envelope&.dig("ok"))
             notify_dispatch_result(entry, meta, now: now) unless continuation
           end
-          # The global digest is a pseudo-project ("digest"), not a real
-          # registry entry. A digest ConfigError (exit 78) is handled by the
-          # scheduler's own backoff (below); dropping a phantom "digest"
-          # project would emit a misleading :project_dropped event and leave
-          # a permanent phantom entry the digest gate never consults.
+          # The global digests are pseudo-projects ("digest" and "answer_digest"),
+          # not real registry entries. A digest ConfigError (exit 78) is handled
+          # by the scheduler's own backoff (below); dropping a phantom digest
+          # project would emit a misleading :project_dropped event and leave a
+          # permanent phantom entry the digest gate never consults. The
+          # `!global_digest_stage?` guard covers BOTH pseudo-projects.
           if entry.exit_code == Hive::ExitCodes::CONFIG &&
-             entry.stage != Hive::Daemon::DigestScheduler::DIGEST_STAGE
+             !global_digest_stage?(entry.stage)
             @controller.record_project_dropped(project: entry.project)
             @logger.event(:project_dropped, project: entry.project)
           end
           if entry.stage == Hive::Daemon::PatrolScheduler::PATROL_STAGE
             @patrol_scheduler&.complete(project: entry.project, exit_code: entry.exit_code, now: now)
           end
-          if entry.stage == Hive::Daemon::DigestScheduler::DIGEST_STAGE
-            # `complete` advances the cursor via `write_state`; isolate its
-            # disk I/O so an ENOSPC/EROFS fault on the digest can't crash the
-            # reap (and with it the whole poll loop).
-            begin
-              @digest_scheduler&.complete(date: entry.slug, exit_code: entry.exit_code, now: now)
-            rescue StandardError => e
-              @logger.event(:fatal,
-                            message: "digest_scheduler.complete raised: #{e.class}: #{e.message}",
-                            keeping_previous: true)
-            end
-          end
+          complete_digest_scheduler_for(entry, now: now)
         end
         entries.any?
+      end
+
+      # Advance the matching global-digest scheduler's cursor after one of its
+      # pseudo-children exits, isolating the scheduler's disk I/O (an
+      # ENOSPC/EROFS `write_state` fault) so it can't crash the reap and with
+      # it the whole poll loop. A no-op for non-digest stages (the resolver
+      # returns nil), so both reap paths can call it unconditionally; a third
+      # digest type needs no new copy-paste branch.
+      def complete_digest_scheduler_for(entry, now:)
+        scheduler = global_digest_scheduler(entry.stage)
+        return unless scheduler
+
+        label = "#{global_digest_action(entry.stage)}_scheduler.complete"
+        scheduler.complete(date: entry.slug, exit_code: entry.exit_code, now: now)
+        @digest_scheduler_fatal_signatures.delete(label)
+      rescue StandardError => e
+        log_digest_scheduler_fatal(label, e)
+      end
+
+      # Run one global-digest scheduler's tick and dispatch any returned
+      # pseudo-children, isolating a tick crash as a deduped :fatal so a
+      # persistently-raising scheduler can't crash the poll loop or spam the
+      # log every ~30s. A clean run clears the dedup so a later distinct fault
+      # re-logs.
+      def run_digest_scheduler_tick(scheduler, label, now:)
+        return unless scheduler
+
+        scheduler.tick(now: now)&.each { |digest_dispatch| dispatch_digest(digest_dispatch, now: now) }
+        @digest_scheduler_fatal_signatures.delete(label)
+      rescue StandardError => e
+        log_digest_scheduler_fatal(label, e)
+      end
+
+      # Log a global-digest scheduler tick/complete crash as :fatal, deduped
+      # per op-label on the error signature (mirrors `log_brainstorm_parse_error`).
+      def log_digest_scheduler_fatal(label, error)
+        signature = "#{error.class}: #{error.message}"
+        return if @digest_scheduler_fatal_signatures[label] == signature
+
+        @digest_scheduler_fatal_signatures[label] = signature
+        @logger.event(:fatal, message: "#{label} raised: #{signature}", keeping_previous: true)
       end
 
       # Snapshot each tracked state file's on-disk mtime so the next fast
@@ -675,9 +749,14 @@ module Hive
       def find_post_advance_state_file(hive_state_path, slug)
         return nil unless hive_state_path && Dir.exist?(hive_state_path)
 
-        # Stage names from the SSOT — covers all seven directories,
-        # so adding a new stage in modules/stages.rb auto-extends.
-        Hive::Stages::DIRS.each do |stage_dir|
+        # Scan the runtime union of every registered workflow's stage dirs
+        # (Hive::Workflows.all_stage_dirs), not just the coding descriptor's:
+        # a generic `hive approve` advances a task into a non-coding dir
+        # (e.g. `2-gather`), and a coding-only scan would miss it — leaving
+        # the moved task's mtime baseline stale so its fresh `ready_to_run`
+        # stage mis-debounces or stalls. Mirrors the sibling-gate migration
+        # in task_resolver/status (U6.4).
+        Hive::Workflows.all_stage_dirs.each do |stage_dir|
           slug_dir = File.join(hive_state_path, "stages", stage_dir, slug)
           next unless Dir.exist?(slug_dir)
 
@@ -701,17 +780,9 @@ module Hive
           # Mirror reap_completed's digest hook: a dry-run digest pseudo-child
           # must also clear the scheduler's `@pending` marker, or `tick`
           # returns [] forever (`@pending.any?`) and the dry-run daemon wedges
-          # after dispatching the digest exactly once. Isolate the disk I/O the
-          # same way the sibling branch does.
-          if entry.stage == Hive::Daemon::DigestScheduler::DIGEST_STAGE
-            begin
-              @digest_scheduler&.complete(date: entry.slug, exit_code: entry.exit_code, now: now)
-            rescue StandardError => e
-              @logger.event(:fatal,
-                            message: "digest_scheduler.complete raised: #{e.class}: #{e.message}",
-                            keeping_previous: true)
-            end
-          end
+          # after dispatching the digest exactly once. Same isolation as the
+          # real reap path, via the shared helper.
+          complete_digest_scheduler_for(entry, now: now)
           @logger.event(:child_exited,
                         pid: entry.pid, exit_code: entry.exit_code,
                         project: entry.project, slug: entry.slug, stage: entry.stage,
@@ -730,13 +801,15 @@ module Hive
         decision = Policy.decide(
           action: row.action,
           stage: row.stage,
+          workflow: row.workflow,
           command: row.suggested_command,
           state_file_mtime: row.state_file_mtime,
           last_dispatched_state_file_mtime:
             @controller.last_dispatched_state_file_mtime_for(project: row.project, slug: row.slug),
           now: now,
           edit_debounce_sec: @edit_debounce_sec,
-          answers_pending: brainstorm_answers_pending?(row)
+          answers_pending: brainstorm_answers_pending?(row),
+          blocked: row.blocked == true
         )
 
         case decision
@@ -746,7 +819,7 @@ module Hive
           # auto-advance from regular advance-action dispatches. An
           # agent or operator reading daemon.log can then audit WHICH
           # policy branch fired without re-implementing Policy.decide.
-          trigger = Policy.plan_approval?(row.action, row.stage) ? "plan_approval" : "advance"
+          trigger = Policy.plan_approval?(row.action, row.stage, row.workflow) ? "plan_approval" : "advance"
           dispatch_or_block(row, now: now, trigger: trigger)
         when :wait_for_debounce
           @logger.event(:debouncing, project: row.project, slug: row.slug,
@@ -771,8 +844,31 @@ module Hive
           @logger.event(:skipped, project: row.project, slug: row.slug,
                                   stage: row.stage, action: row.action,
                                   reason: "answers_pending")
+        when :blocked_on_dependency
+          # `unresolved` distinguishes a real waiting-on-prereq block
+          # (blocked_by names the prerequisite) from a mistyped/unknown
+          # depends_on (blocked_by nil — a config error, not a wait). The
+          # hive-status JSON carries no `unresolved` field, so derive it
+          # from blocked_by presence — the same discriminator the status
+          # and TUI renderers use (see Dependencies.blocked_label).
+          @logger.event(:blocked, project: row.project, slug: row.slug,
+                                  stage: row.stage, action: row.action,
+                                  reason: "dependency_unmet",
+                                  unresolved: row.blocked_by.nil?,
+                                  depends_on: row.depends_on,
+                                  blocked_by: row.blocked_by,
+                                  dependency_stage: row.dependency_stage)
         when :poll_for_merge
           enqueue_merge_watch(row)
+        when :markerless_stalled
+          # A generic :agent stage exited 0 without writing a WAITING/COMPLETE
+          # marker and its state file shows no progress, so it re-classifies to
+          # ready_to_run indefinitely. Log it explicitly (not a bare :skipped)
+          # so the stall is observable rather than silent. The per-project daily
+          # dispatch cap bounds re-dispatch if the file does keep changing.
+          @logger.event(:markerless_stalled, project: row.project, slug: row.slug,
+                                              stage: row.stage, action: row.action,
+                                              reason: "agent_exited_without_marker")
         when :skip
           @logger.event(:skipped, project: row.project, slug: row.slug,
                                   stage: row.stage, action: row.action)
@@ -798,6 +894,11 @@ module Hive
       # actively answering.
       def brainstorm_answers_pending?(row)
         return false unless row.action == Hive::Schemas::TaskActionKind::NEEDS_INPUT
+        # The brainstorm Q&A hold is a coding-workflow gate: only the coding
+        # `2-brainstorm` stage drives the `### Q{n}.` answer flow. A generic
+        # workflow that reuses the `2-brainstorm` dir must take the debounced
+        # generic path, not be held as `answers_pending`.
+        return false unless Hive::Workflows.coding_id?(row.workflow)
         return false unless row.stage == BRAINSTORM_STAGE_DIR
 
         path = row.state_file
@@ -919,8 +1020,11 @@ module Hive
 
       # Pipeline position of a stage dir (higher = closer to done); -1 for
       # an unrecognized stage so it deprioritizes behind every known stage.
+      # Indexes the runtime union of all registered workflows' stage dirs so
+      # a generic stage gets a real rank instead of sorting behind every
+      # coding row under slot scarcity (consistent with the sibling gates).
       def stage_rank(stage)
-        Hive::Stages::DIRS.index(stage.to_s) || -1
+        Hive::Workflows.all_stage_dirs.index(stage.to_s) || -1
       end
 
       def observe_external_running_rows(rows)
@@ -1069,6 +1173,9 @@ module Hive
       def dispatch_digest(digest_dispatch, now:)
         date = digest_dispatch[:slug]
         project = digest_dispatch[:project]
+        stage = digest_dispatch[:stage]
+        action = global_digest_action(stage)
+        scheduler = global_digest_scheduler(stage)
 
         # Gate the global digest through the controller so it (a) never
         # holds a task slot or pushes the daemon past max_concurrent_runs,
@@ -1080,9 +1187,9 @@ module Hive
         gate = digest_dispatch_gate(project: project, date: date, now: now)
         unless gate == :ok
           @logger.event(:blocked, project: project, slug: date,
-                                  stage: digest_dispatch[:stage],
-                                  action: "digest", reason: gate.to_s)
-          @digest_scheduler&.cancel(date: date)
+                                  stage: stage,
+                                  action: action, reason: gate.to_s)
+          scheduler&.cancel(date: date)
           return
         end
 
@@ -1090,12 +1197,12 @@ module Hive
           digest_dispatch[:command],
           project: project,
           slug: date,
-          stage: digest_dispatch[:stage],
+          stage: stage,
           state_file_mtime: digest_dispatch[:state_file_mtime],
           state_file_path: digest_dispatch[:state_file_path],
           hive_state_path: digest_dispatch[:hive_state_path],
           now: now,
-          trigger: "digest",
+          trigger: action,
           kind: :digest
         )
       rescue StandardError => e
@@ -1105,9 +1212,9 @@ module Hive
         # dispatch, double-incrementing the backoff count. Only complete when
         # no child is in flight for this date (spawn failed before recording).
         if date && !@controller.running_task?(project: project, slug: date)
-          @digest_scheduler&.complete(date: date, exit_code: 1, now: now)
+          scheduler&.complete(date: date, exit_code: 1, now: now)
         end
-        @logger.event(:fatal, message: "digest dispatch error: #{e.class}: #{e.message}",
+        @logger.event(:fatal, message: "#{action} dispatch error: #{e.class}: #{e.message}",
                               project: digest_dispatch[:project], slug: date)
       end
 
@@ -1115,6 +1222,33 @@ module Hive
         return :in_flight if @controller.running_task?(project: project, slug: date)
 
         @controller.can_dispatch_digest?(now: now)
+      end
+
+      # The two global-digest pseudo-stages mapped to their action label. Both
+      # `global_digest_stage?` and `global_digest_action` read this so the
+      # stage↔label pairing lives in one place; `global_digest_scheduler` still
+      # maps a stage to the per-instance scheduler ivar, which can't live in a
+      # frozen constant.
+      GLOBAL_DIGEST_ACTIONS = {
+        Hive::Daemon::DigestScheduler::DIGEST_STAGE => "digest",
+        Hive::Daemon::AnswerDigestScheduler::ANSWER_DIGEST_STAGE => "answer_digest"
+      }.freeze
+
+      def global_digest_stage?(stage)
+        GLOBAL_DIGEST_ACTIONS.key?(stage)
+      end
+
+      def global_digest_scheduler(stage)
+        case stage
+        when Hive::Daemon::DigestScheduler::DIGEST_STAGE
+          @digest_scheduler
+        when Hive::Daemon::AnswerDigestScheduler::ANSWER_DIGEST_STAGE
+          @answer_digest_scheduler
+        end
+      end
+
+      def global_digest_action(stage)
+        GLOBAL_DIGEST_ACTIONS[stage]
       end
 
       # Consume the file-backed dispatch-request queue (plan
@@ -1202,6 +1336,11 @@ module Hive
           return
         end
 
+        if req.project == Hive::Daemon::DispatchRequestQueue::GLOBAL_MAINTENANCE_PROJECT
+          process_global_maintenance_request(req, now: now)
+          return
+        end
+
         unless Hive::Config.find_project(req.project)
           reject_request(req, reason: "unknown_project")
           return
@@ -1239,6 +1378,29 @@ module Hive
           @logger.event(:dispatch_request_blocked,
                         request_id: req.request_id, project: req.project,
                         slug: req.slug, reason: gate.to_s)
+          return
+        end
+
+        dispatch_request!(req, now: now)
+      end
+
+      # Host-global maintenance request (project == "__global__"): not tied to
+      # any registered project, so the project-scoped gates above don't apply.
+      # Constrained to the maintenance argv allowlist and de-duplicated against
+      # an in-flight repair, then dispatched directly. This is the consume-time
+      # half of the web "Repair daemon" button (`hive daemon install --force`):
+      # without it the request was enqueued and then silently dropped as
+      # unknown_project, so the repair never ran (R10/AE3).
+      def process_global_maintenance_request(req, now:)
+        unless Hive::Daemon::DispatchRequestQueue::GLOBAL_MAINTENANCE_ARGVS.include?(req.argv)
+          reject_request(req, reason: "disallowed_global_request")
+          return
+        end
+
+        if @controller.running_task?(project: req.project, slug: req.slug)
+          @logger.event(:dispatch_request_blocked,
+                        request_id: req.request_id, project: req.project,
+                        slug: req.slug, reason: "in_flight")
           return
         end
 
@@ -1658,7 +1820,13 @@ module Hive
         @daemon_cfg = Hive::Config.load_global_daemon
         @update_cfg = Hive::Config.load_global_update
         @digest_cfg = Hive::Config.load_global_digest_block
-        @config = { "daemon" => @daemon_cfg, "update" => @update_cfg, "digest" => @digest_cfg }
+        @answer_digest_cfg = Hive::Config.load_global_answer_digest_block
+        @config = {
+          "daemon" => @daemon_cfg,
+          "update" => @update_cfg,
+          "digest" => @digest_cfg,
+          "answer_digest" => @answer_digest_cfg
+        }
         @update_check_enabled = @update_cfg.fetch("check", true)
         # Reconfigure the digest scheduler in place so enabling the digest
         # (or retuning max_catchup_days) via config + SIGHUP takes effect
@@ -1668,6 +1836,12 @@ module Hive
           enabled: @digest_cfg.fetch("enabled", false),
           max_catchup_days: @digest_cfg.fetch(
             "max_catchup_days", Hive::Daemon::DigestScheduler::DEFAULT_MAX_CATCHUP_DAYS
+          )
+        )
+        @answer_digest_scheduler&.reconfigure(
+          enabled: @answer_digest_cfg.fetch("enabled", false),
+          hour: @answer_digest_cfg.fetch(
+            "hour", Hive::Daemon::AnswerDigestScheduler::DEFAULT_HOUR
           )
         )
         @edit_debounce_sec = @daemon_cfg.fetch("edit_debounce_sec", 30)
@@ -1701,10 +1875,19 @@ module Hive
             Hive::TaskAction::DEFAULT_AGENT_MARKER_GRACE_SEC
           )
         )
+        @recoverable_error_healer = RecoverableErrorHealer.new(
+          controller: @controller,
+          logger: @logger,
+          config: @config
+        )
         # Rebuild alongside the healer on SIGHUP reload so a future
         # operator-tunable knob (e.g. max_per_tick) would take effect
         # within one tick; today it carries only the dry_run flag.
         @display_name_backfiller = DisplayNameBackfiller.new(
+          logger: @logger,
+          dry_run: @dry_run
+        )
+        @task_id_backfiller = TaskIdBackfiller.new(
           logger: @logger,
           dry_run: @dry_run
         )

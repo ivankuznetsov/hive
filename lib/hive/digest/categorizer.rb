@@ -29,6 +29,11 @@ module Hive
       end
     end
 
+    # The categorizer's full result: items grouped by project (the same
+    # `{project => [CategorizedItem]}` shape the renderer expects) plus the
+    # model's single-sentence overall summary of the day.
+    Output = Data.define(:by_project, :summary)
+
     class Categorizer
       DEFAULT_CATEGORY = Categories::DEFAULT
       DEFAULT_BUDGET_USD = 50
@@ -95,20 +100,32 @@ module Hive
                               output_path: output_path, logger: logger)
           end
 
-          map_output_file(output_path, grouped: grouped, logger: logger)
+          doc = load_doc!(output_path, logger: logger)
+          Output.new(
+            by_project: map_document(doc, grouped: grouped, logger: logger),
+            summary: summary_from(doc, grouped: grouped)
+          )
         end
 
-        def map_output_file(output_path, grouped:, logger: Logger.new($stderr))
+        # Read + parse the model's items.json, raising a ModelError (the
+        # failed-notice trigger) when it is missing, empty, or not valid JSON.
+        def load_doc!(output_path, logger: Logger.new($stderr))
           unless File.exist?(output_path) && File.size(output_path).positive?
             raise_model_error("digest categorizer output missing or empty: #{output_path}",
                               output_path: output_path, logger: logger)
           end
 
-          doc = JSON.parse(File.read(output_path))
-          map_document(doc, grouped: grouped, logger: logger)
+          JSON.parse(File.read(output_path))
         rescue JSON::ParserError => e
           raise_model_error("digest categorizer output was not valid JSON: #{e.message}",
                             output_path: output_path, logger: logger)
+        end
+
+        # Items-only mapping, kept as its own entry point (and `{project =>
+        # [CategorizedItem]}` return shape) for the focused mapping tests;
+        # parse_result! composes it with the overall summary into an Output.
+        def map_output_file(output_path, grouped:, logger: Logger.new($stderr))
+          map_document(load_doc!(output_path, logger: logger), grouped: grouped, logger: logger)
         end
 
         def map_document(doc, grouped:, logger: Logger.new($stderr))
@@ -155,6 +172,21 @@ module Hive
           return result.inspect unless result.is_a?(Hash)
 
           result[:error_message] || result[:status] || result.inspect
+        end
+
+        # The model's one-line overall summary, falling back to a neutral
+        # count when it omits or blanks the field so the Summary block is
+        # never empty (and a half-bad model run still renders sensibly).
+        def summary_from(doc, grouped:)
+          raw = doc.is_a?(Hash) ? doc["summary"].to_s.strip : ""
+          return raw unless raw.empty?
+
+          default_overall_summary(grouped)
+        end
+
+        def default_overall_summary(grouped)
+          total = grouped.values.sum { |items| Array(items).size }
+          "#{total} #{total == 1 ? 'update' : 'updates'} shipped today."
         end
 
         def categorized_item(item, row, logger:)

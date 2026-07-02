@@ -13,6 +13,7 @@ class ConfigBotIntegrationTest < Minitest::Test
 
     assert_includes rendered, "bot:"
     assert_includes rendered, "HIVE_TELEGRAM_BOT_TOKEN"
+    assert_includes rendered, "pairing_enabled"
     assert_includes rendered, "chat_id_allowlist"
     assert_includes rendered, "alert_state_file"
     assert_includes rendered, "recovery_reminder_window_sec"

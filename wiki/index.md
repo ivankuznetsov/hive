@@ -3,17 +3,17 @@ title: hive Wiki
 type: index
 source: wiki/**/*.md
 created: 2026-05-14
-updated: 2026-06-15
+updated: 2026-06-30
 tags: [index, wiki]
 ---
 
 
 **TLDR**: Catalog of the LLM-maintained wiki for `hive`.
 
-Page count: 80
-Updated: 2026-06-15
+Page count: 85
+Updated: 2026-06-30
 
-Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a nine-stage filesystem state machine (`1-inbox` → `2-brainstorm` → `3-plan` → `4-execute` → `5-open-pr` → `6-review` → `7-artifacts` → `8-finalize` → `9-done`) where stage agents run via configurable AgentProfile CLIs (`claude` default, `codex`, `pi`) and `mv` between directories is the approval primitive. The public release surface is the `hive-cli` rubygem installed through Homebrew, AUR, or `install.sh`, with `hv` as the Apache Hive collision fallback entrypoint, plus the hivebox GHCR Docker image and one-command `hivecli.sh/box` shell / `hivecli.sh/box.ps1` PowerShell installers; `hive web`/hivebox, `hive init`'s normal-vs-patrol reviewer split and project-global Claude model/effort pins, `hive patrol` handoff into `6-review`, `hive babysit`, `hive bench submit` for hive-bench corpus submissions, `hive digest` for the daily shipped digest, and the single ClawHub `hive-cli` listing that installs the OpenClaw `/hive` skill are covered by dedicated command/module pages.
+Folder-as-agent workflow engine: a Ruby 3.4 / Thor CLI control plane where descriptor-backed workflows move task folders through filesystem stages, stage agents run via configurable AgentProfile CLIs (`claude` default, `codex`, `pi`), and `mv` between directories remains the approval primitive. The built-in `coding` workflow drives the nine-stage PR pipeline (`1-inbox` → `2-brainstorm` → `3-plan` → `4-execute` → `5-open-pr` → `6-review` → `7-artifacts` → `8-finalize` → `9-done`), while `content` and project-authored workflows share the same generic runner/status/action machinery. The public release surface is the `hive-cli` rubygem installed through Homebrew, AUR, or `install.sh`, with `hv` as the Apache Hive collision fallback entrypoint, plus the hivebox GHCR Docker image and one-command `hivecli.sh/box` shell / `hivecli.sh/box.ps1` PowerShell installers; `hive web`/hivebox, `hive init` workflow selection and normal-vs-patrol reviewer split, project-global Claude model/effort pins, `hive connect screenote` for OAuth-backed Screenote MCP uploads, `hive patrol` handoff into `6-review`, `hive babysit`, `hive bench submit` for hive-bench corpus submissions, `hive digest` for the daily shipped digest, and the single ClawHub `hive-cli` listing that installs the OpenClaw `/hive` skill are covered by dedicated command/module pages.
 
 ## Pages
 
@@ -38,9 +38,12 @@ Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a nine
 - [[commands/migrate]] — `wiki/commands/migrate.md`
 - [[commands/new]] — `wiki/commands/new.md`
 - [[commands/patrol]] — `wiki/commands/patrol.md`
+- [[commands/pairing]] — `wiki/commands/pairing.md`
 - [[commands/prune]] — `wiki/commands/prune.md`
 - [[commands/rebase-status]] — `wiki/commands/rebase-status.md`
 - [[commands/run]] — `wiki/commands/run.md`
+- [[commands/screenote]] — `wiki/commands/screenote.md`
+- [[commands/setup]] — `wiki/commands/setup.md`
 - [[commands/stage_action]] — `wiki/commands/stage_action.md`
 - [[commands/status]] — `wiki/commands/status.md`
 - [[commands/tui]] — `wiki/commands/tui.md`
@@ -48,6 +51,7 @@ Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a nine
 - [[commands/update]] — `wiki/commands/update.md`
 - [[commands/web]] — `wiki/commands/web.md`
 - [[commands/wiki]] — `wiki/commands/wiki.md`
+- [[commands/workflow]] — `wiki/commands/workflow.md`
 - [[decisions]] — `wiki/decisions.md`
 - [[dependencies]] — `wiki/dependencies.md`
 - [[e2e]] — `wiki/e2e.md`
@@ -72,6 +76,7 @@ Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a nine
 - [[modules/markers]] — `wiki/modules/markers.md`
 - [[modules/metrics]] — `wiki/modules/metrics.md`
 - [[modules/patrol]] — `wiki/modules/patrol.md`
+- [[modules/pr]] — `wiki/modules/pr.md`
 - [[modules/protected_files]] — `wiki/modules/protected_files.md`
 - [[modules/rebase]] — `wiki/modules/rebase.md`
 - [[modules/reviewers]] — `wiki/modules/reviewers.md`
@@ -79,10 +84,12 @@ Folder-as-agent pipeline: a Ruby 3.4 / Thor CLI control plane that drives a nine
 - [[modules/stages]] — `wiki/modules/stages.md`
 - [[modules/task]] — `wiki/modules/task.md`
 - [[modules/task_action]] — `wiki/modules/task_action.md`
+- [[modules/task_dependencies]] — `wiki/modules/task_dependencies.md`
 - [[modules/task_resolver]] — `wiki/modules/task_resolver.md`
 - [[modules/workflows]] — `wiki/modules/workflows.md`
 - [[modules/worktree]] — `wiki/modules/worktree.md`
 - [[operating]] — `wiki/operating.md`
+- [[stages/agent]] — `wiki/stages/agent.md`
 - [[stages/artifacts]] — `wiki/stages/artifacts.md`
 - [[stages/brainstorm]] — `wiki/stages/brainstorm.md`
 - [[stages/done]] — `wiki/stages/done.md`

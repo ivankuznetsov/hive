@@ -14,8 +14,13 @@ class TuiSnapshotTest < Minitest::Test
       "slug" => slug,
       "id" => 42,
       "display_name" => "First Task",
+      "depends_on" => "base-task",
+      "blocked_by" => "base-task",
+      "dependency_stage" => "7-artifacts",
+      "blocked" => true,
       "folder" => "/tmp/hive/#{slug}",
       "state_file" => "/tmp/hive/#{slug}/idea.md",
+      "pr_url" => nil,
       "marker" => marker,
       "attrs" => {},
       "mtime" => "2026-04-27T12:00:00Z",
@@ -64,8 +69,13 @@ class TuiSnapshotTest < Minitest::Test
     assert_equal "first-task", first.slug
     assert_equal 42, first.id
     assert_equal "First Task", first.display_name
+    assert_equal "base-task", first.depends_on
+    assert_equal "base-task", first.blocked_by
+    assert_equal "7-artifacts", first.dependency_stage
+    assert_equal true, first.blocked
     assert_equal "/tmp/hive/first-task", first.folder
     assert_equal "/tmp/hive/first-task/idea.md", first.state_file
+    assert_nil first.pr_url
     assert_equal "waiting", first.marker
     assert_equal({}, first.attrs)
     assert_equal "2026-04-27T12:00:00Z", first.mtime
@@ -103,6 +113,56 @@ class TuiSnapshotTest < Minitest::Test
     snapshot = Hive::Tui::Snapshot.from_payload(payload)
 
     assert_nil snapshot.rows.first.folder_mtime
+  end
+
+  def test_from_payload_preserves_content_workflow_stage_rows
+    row = sample_task(slug: "content-row", stage: "2-research")
+    row["workflow"] = "content_fixture"
+    row["action"] = "ready_to_run"
+    row["action_label"] = "Ready to run"
+    row["suggested_command"] = "hive run content-row"
+    payload = sample_payload([
+                               {
+                                 "name" => "alpha",
+                                 "path" => "/tmp/alpha",
+                                 "hive_state_path" => "/tmp/alpha/.hive-state",
+                                 "tasks" => [ row ]
+                               }
+                             ])
+
+    snapshot = Hive::Tui::Snapshot.from_payload(payload)
+    content = snapshot.rows.first
+
+    assert_equal "content_fixture", content.workflow
+    assert_equal "2-research", content.stage
+    assert_equal "ready_to_run", content.action_key
+    assert_equal "hive run content-row", content.suggested_command
+  end
+
+  def test_from_payload_preserves_quota_held_field
+    row = sample_task(slug: "quota-row", stage: "4-execute", marker: "error")
+    row["attrs"] = {
+      "reason" => "limits_reached",
+      "provider" => "codex",
+      "retry_after" => "2026-06-24T23:20:00Z"
+    }
+    row["held"] = {
+      "reason" => "quota",
+      "provider" => "codex",
+      "retry_after" => "2026-06-24T23:20:00Z"
+    }
+    payload = sample_payload([
+                               {
+                                 "name" => "alpha",
+                                 "path" => "/tmp/alpha",
+                                 "hive_state_path" => "/tmp/alpha/.hive-state",
+                                 "tasks" => [ row ]
+                               }
+                             ])
+
+    snapshot = Hive::Tui::Snapshot.from_payload(payload)
+
+    assert_equal row.fetch("held"), snapshot.rows.first.held
   end
 
   def test_from_payload_handles_nil_payload
@@ -154,6 +214,7 @@ class TuiSnapshotTest < Minitest::Test
     first = sample_task(slug: "slug-a")
     first["id"] = 17
     first["display_name"] = "Readable Alpha"
+    first["pr_url"] = "https://github.com/example/repo/pull/561"
     second = sample_task(slug: "slug-b")
     second["id"] = 23
     second["display_name"] = "Other Beta"
@@ -169,6 +230,7 @@ class TuiSnapshotTest < Minitest::Test
 
     assert_equal [ "slug-a" ], snapshot.filter_by_slug("readable").rows.map(&:slug)
     assert_equal [ "slug-b" ], snapshot.filter_by_slug("23").rows.map(&:slug)
+    assert_equal "https://github.com/example/repo/pull/561", snapshot.rows.first.pr_url
   end
 
   def test_filter_by_slug_with_empty_substring_returns_self
@@ -293,6 +355,40 @@ class TuiSnapshotTest < Minitest::Test
                  "first row must be the highest-ranked label per ACTION_LABEL_ORDER"
     assert_equal "Needs your input", rows[1].action_label
     assert_equal "Ready to develop", rows[2].action_label
+  end
+
+  def test_build_project_view_sorts_differentiated_waiting_labels_above_error
+    waiting_labels = [
+      "Answer questions",
+      "Review plan draft",
+      "Needs review decision",
+      "Confirm finalize"
+    ]
+    rows = waiting_labels.map.with_index do |label, index|
+      sample_task(slug: "waiting-#{index}").merge(
+        "action" => "needs_input",
+        "action_label" => label
+      )
+    end
+    error = sample_task(slug: "error-row").merge(
+      "action" => "error",
+      "action_label" => "Error"
+    )
+    payload = sample_payload([
+                               {
+                                 "name" => "alpha",
+                                 "path" => "/tmp/alpha",
+                                 "hive_state_path" => "/tmp/alpha/.hive-state",
+                                 "tasks" => [ error, *rows ]
+                               }
+                             ])
+
+    snapshot = Hive::Tui::Snapshot.from_payload(payload)
+    sorted_labels = snapshot.projects.first.rows.map(&:action_label)
+
+    waiting_labels.each do |label|
+      assert_operator sorted_labels.index(label), :<, sorted_labels.index("Error")
+    end
   end
 
   def test_build_project_view_preserves_json_order_within_action_label_group

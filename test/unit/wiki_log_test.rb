@@ -55,6 +55,49 @@ class WikiLogTest < Minitest::Test
     end
   end
 
+  def test_compile_uses_project_local_compiler_when_present
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "wiki", "log.d"))
+      FileUtils.mkdir_p(File.join(dir, ".llm-wiki"))
+      # A project's own bootstrapped copy of the shared compiler is preferred
+      # over hive's bundled fallback.
+      FileUtils.cp(File.expand_path("../../.llm-wiki/compile-log.sh", __dir__),
+                   File.join(dir, ".llm-wiki", "compile-log.sh"))
+      File.write(File.join(dir, "wiki", "log.d", "20260605-x.md"), "## [2026-06-05T10:00:00Z] frag\n")
+
+      assert_equal File.join(dir, ".llm-wiki", "compile-log.sh"),
+                   Hive::WikiLog.compiler_path(dir),
+                   "the project-local compiler copy must be preferred when present"
+      assert_includes Hive::WikiLog.compile(dir), "## [2026-06-05T10:00:00Z] frag"
+    end
+  end
+
+  def test_compile_raises_when_the_compiler_fails
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "wiki", "log.d"))
+      FileUtils.mkdir_p(File.join(dir, ".llm-wiki"))
+      File.write(File.join(dir, ".llm-wiki", "compile-log.sh"), "#!/usr/bin/env bash\necho boom >&2\nexit 1\n")
+      FileUtils.chmod("+x", File.join(dir, ".llm-wiki", "compile-log.sh"))
+
+      assert_raises(Hive::Error) { Hive::WikiLog.compile(dir) }
+      assert_raises(Hive::Error) { Hive::WikiLog.compile!(dir) }
+    end
+  end
+
+  def test_compile_bang_raises_hive_error_when_log_unreadable_after_success
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "wiki"))
+      FileUtils.mkdir_p(File.join(dir, ".llm-wiki"))
+      # A compiler that exits 0 but writes no log.md must surface a Hive::Error,
+      # not a raw Errno::ENOENT, so the contract stays consistent.
+      File.write(File.join(dir, ".llm-wiki", "compile-log.sh"), "#!/usr/bin/env bash\nexit 0\n")
+      FileUtils.chmod("+x", File.join(dir, ".llm-wiki", "compile-log.sh"))
+
+      error = assert_raises(Hive::Error) { Hive::WikiLog.compile!(dir) }
+      assert_match(/log\.md is unreadable/, error.message)
+    end
+  end
+
   def test_compile_drops_template_prose_without_legacy_entries
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, "wiki", "log.d"))

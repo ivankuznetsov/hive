@@ -14,13 +14,21 @@ class HiveBotRouterTest < Minitest::Test
       { "name" => "hive", "path" => "/tmp/hive", "hive_state_path" => "/tmp/hive/.hive-state" },
       { "name" => "writero", "path" => "/tmp/writero", "hive_state_path" => "/tmp/writero/.hive-state" }
     ]
-    @router = Hive::Bot::Router.new(
-      bot_config: { "chat_id_allowlist" => [ 12345 ] },
+    @router = build_test_router(
+      bot_config: { "chat_id_allowlist" => [ 12345 ] }
+    )
+  end
+
+  def build_test_router(bot_config:, pairing_store: nil)
+    kwargs = {
+      bot_config: bot_config,
       logger: @logger,
       conversation_store: @store,
       idea_draft_store: @draft_store,
       projects_provider: -> { @projects }
-    )
+    }
+    kwargs[:pairing_store] = pairing_store if pairing_store
+    Hive::Bot::Router.new(**kwargs)
   end
 
   def update(text: nil, callback_data: nil, chat_id: 12345, reply_to_text: nil,
@@ -41,6 +49,7 @@ class HiveBotRouterTest < Minitest::Test
 
   def test_classifies_slash_commands
     assert_equal :slash_status, @router.classify(update(text: "/status"))
+    assert_equal :slash_waiting, @router.classify(update(text: "/waiting"))
     assert_equal :slash_queue, @router.classify(update(text: "/queue"))
     assert_equal :slash_idea, @router.classify(update(text: "/idea fix cron"))
     assert_equal :slash_answer, @router.classify(update(text: "/answer slug"))
@@ -82,11 +91,149 @@ class HiveBotRouterTest < Minitest::Test
     assert_equal 1, @logger.events.count { |event, _| event == :update_rejected_unauthorized }
   end
 
+  def test_unauthorized_start_with_pairing_enabled_replies_with_pairing_code
+    Dir.mktmpdir("hive-router-pairing") do |dir|
+      pairing_store = Hive::Bot::PairingStore.new(state_home: dir, now: -> { Time.utc(2026, 6, 30, 12, 0, 0) })
+      router = build_test_router(
+        bot_config: { "chat_id_allowlist" => [ 12345 ], "pairing_enabled" => true },
+        pairing_store: pairing_store
+      )
+
+      classify_router = build_test_router(
+        bot_config: { "chat_id_allowlist" => [ 12345 ], "pairing_enabled" => true },
+        pairing_store: pairing_store
+      )
+      assert_equal :unauthorized_pairing, classify_router.classify(update(text: "/start", chat_id: 999))
+
+      result = router.handle(update(text: "/start", chat_id: 999))
+      code = pairing_store.pending.first.code
+
+      assert_equal :reply, result.action
+      assert_match(/\Ahive: access not configured\./, result.text)
+      assert_includes result.text, "Your Telegram user id: 999"
+      assert_includes result.text, "Pairing code: #{code}"
+      assert_includes result.text, "hive pairing approve telegram #{code}"
+      assert_equal 999, pairing_store.pending.first.chat_id
+      assert_equal 1, @logger.events.count { |event, _| event == :pairing_code_issued }
+      event_attrs = @logger.events.find { |event, _| event == :pairing_code_issued }.last
+      assert_equal({ chat_id: 999 }, event_attrs)
+    end
+  end
+
+  def test_unauthorized_start_pairing_reply_is_throttled_once_per_bot_lifetime
+    Dir.mktmpdir("hive-router-pairing") do |dir|
+      pairing_store = Hive::Bot::PairingStore.new(state_home: dir)
+      router = build_test_router(
+        bot_config: { "chat_id_allowlist" => [ 12345 ], "pairing_enabled" => true },
+        pairing_store: pairing_store
+      )
+
+      first = router.handle(update(text: "/start", chat_id: 999))
+      second = router.handle(update(text: "/start", chat_id: 999))
+
+      assert_equal :reply, first.action
+      assert_equal :noop, second.action
+      assert_equal 1, pairing_store.pending.length
+      assert_equal 1, @logger.events.count { |event, _| event == :pairing_code_issued }
+    end
+  end
+
+  def test_unauthorized_non_start_is_silent_even_when_pairing_enabled
+    Dir.mktmpdir("hive-router-pairing") do |dir|
+      router = build_test_router(
+        bot_config: { "chat_id_allowlist" => [ 12345 ], "pairing_enabled" => true },
+        pairing_store: Hive::Bot::PairingStore.new(state_home: dir)
+      )
+
+      result = router.handle(update(text: "/status", chat_id: 999))
+
+      assert_equal :noop, result.action
+      assert_empty Dir.glob(File.join(dir, Hive::Bot::PairingStore::FILENAME))
+      refute @logger.events.any? { |event, _| event == :pairing_code_issued }
+    end
+  end
+
+  def test_unauthorized_start_with_pairing_disabled_preserves_noop_behavior
+    Dir.mktmpdir("hive-router-pairing") do |dir|
+      router = build_test_router(
+        bot_config: { "chat_id_allowlist" => [ 12345 ], "pairing_enabled" => false },
+        pairing_store: Hive::Bot::PairingStore.new(state_home: dir)
+      )
+
+      result = router.handle(update(text: "/start", chat_id: 999))
+
+      assert_equal :noop, result.action
+      assert_empty Dir.glob(File.join(dir, Hive::Bot::PairingStore::FILENAME))
+    end
+  end
+
+  def test_pairing_code_is_stable_across_router_rebuilds
+    Dir.mktmpdir("hive-router-pairing") do |dir|
+      pairing_store = Hive::Bot::PairingStore.new(state_home: dir)
+      config = { "chat_id_allowlist" => [ 12345 ], "pairing_enabled" => true }
+      first_router = build_test_router(bot_config: config, pairing_store: pairing_store)
+      second_router = build_test_router(bot_config: config, pairing_store: pairing_store)
+
+      first = first_router.handle(update(text: "/start", chat_id: 999))
+      second = second_router.handle(update(text: "/start", chat_id: 999))
+      code = pairing_store.pending.first.code
+
+      assert_includes first.text, "Pairing code: #{code}"
+      assert_includes second.text, "Pairing code: #{code}"
+      assert_equal 1, pairing_store.pending.length
+    end
+  end
+
+  def test_pairing_reply_survives_prior_unauthorized_contact
+    Dir.mktmpdir("hive-router-pairing") do |dir|
+      pairing_store = Hive::Bot::PairingStore.new(state_home: dir)
+      router = build_test_router(
+        bot_config: { "chat_id_allowlist" => [ 12345 ], "pairing_enabled" => true },
+        pairing_store: pairing_store
+      )
+
+      # A non-/start message from a stranger must NOT suppress the pairing
+      # reply for the chat's lifetime — the bug was that any earlier
+      # unauthorized contact latched the chat shut (R2/R4).
+      junk = router.handle(update(text: "hello there", chat_id: 999))
+      start = router.handle(update(text: "/start", chat_id: 999))
+
+      assert_equal :noop, junk.action
+      assert_equal :reply, start.action
+      assert_match(/\Ahive: access not configured\./, start.text)
+      assert_includes start.text, "Pairing code: #{pairing_store.pending.first.code}"
+      assert_equal 1, @logger.events.count { |event, _| event == :pairing_code_issued }
+    end
+  end
+
+  def test_first_start_routed_to_pairing_is_not_logged_as_a_rejection
+    Dir.mktmpdir("hive-router-pairing") do |dir|
+      router = build_test_router(
+        bot_config: { "chat_id_allowlist" => [ 12345 ], "pairing_enabled" => true },
+        pairing_store: Hive::Bot::PairingStore.new(state_home: dir)
+      )
+
+      router.handle(update(text: "/start", chat_id: 999))
+
+      refute @logger.events.any? { |event, _| event == :update_rejected_unauthorized },
+             "a /start routed to pairing is a handled update, not a rejection"
+      assert_equal 1, @logger.events.count { |event, _| event == :pairing_code_issued }
+    end
+  end
+
   def test_status_returns_dispatch_descriptor
     result = @router.handle(update(text: "/status"))
 
     assert_equal :dispatch_then_reply, result.action
     assert_equal [ "hive", "status", "--json" ], result.command_argv
+  end
+
+  def test_waiting_returns_dispatch_descriptor
+    result = @router.handle(update(text: "/waiting"))
+
+    assert_equal :dispatch_then_reply, result.action
+    assert_equal [ "hive", "status", "--json" ], result.command_argv
+    assert_equal :waiting, result.mode
   end
 
   def test_idea_returns_project_picker_keyboard
@@ -96,6 +243,124 @@ class HiveBotRouterTest < Minitest::Test
     assert_match(/Pick a project/, result.text)
     assert_equal "hive", result.reply_markup.first.first[:text]
     assert_match(/\Aidea_project:hive:/, result.reply_markup.first.first[:callback_data])
+  end
+
+  def test_bare_text_defaults_to_idea_project_picker
+    text = "add retry to webhook"
+
+    assert_equal :idea_bare_text, @router.classify(update(text: text))
+
+    result = @router.handle(update(text: text))
+
+    assert_equal :reply, result.action
+    assert_match(/Pick a project/, result.text)
+    refute_match(/did not understand/i, result.text)
+    assert_equal text, @draft_store.get(chat_id: 12345).text
+  end
+
+  def test_one_character_bare_text_defaults_to_idea_project_picker
+    result = @router.handle(update(text: "k"))
+
+    assert_equal :reply, result.action
+    assert_match(/Pick a project/, result.text)
+    assert_equal "k", @draft_store.get(chat_id: 12345).text
+  end
+
+  def test_forwarded_style_bare_text_defaults_to_idea_project_picker
+    forwarded_text = "Forwarded: retry the webhook on timeout"
+
+    assert_equal :idea_bare_text, @router.classify(update(text: forwarded_text))
+
+    result = @router.handle(update(text: forwarded_text))
+
+    assert_equal :reply, result.action
+    assert_match(/Pick a project/, result.text)
+    assert_equal forwarded_text, @draft_store.get(chat_id: 12345).text
+  end
+
+  def test_blank_bare_text_starts_idea_text_capture
+    assert_equal :idea_bare_text, @router.classify(update(text: "   "))
+
+    result = @router.handle(update(text: "   "))
+
+    assert_equal :reply, result.action
+    assert_match(/Send the idea text/, result.text)
+    refute_match(/did not understand/i, result.text)
+    draft = @draft_store.get(chat_id: 12345)
+    assert_equal :awaiting_text, draft.phase
+    assert_nil draft.text
+  end
+
+  def test_content_less_update_opens_idea_text_capture
+    # A non-text / non-media / non-voice update (sticker, location, contact,
+    # video) carries no effective_text, so it falls through to :idea_bare_text
+    # and opens an awaiting_text draft asking for the idea text — rather than the
+    # old "I did not understand that" reply. Contrast a rejected attachment,
+    # which leaves no draft behind.
+    assert_equal :idea_bare_text, @router.classify(update)
+
+    result = @router.handle(update)
+
+    assert_equal :reply, result.action
+    assert_match(/Send the idea text/, result.text)
+    refute_match(/did not understand/i, result.text)
+    draft = @draft_store.get(chat_id: 12345)
+    assert_equal :awaiting_text, draft.phase
+    assert_nil draft.text
+  end
+
+  def test_bare_text_during_active_draft_clobbers_prior_draft
+    # Most-aggressive accepted default: bare text arriving while a draft is
+    # mid-flight starts a fresh idea, discarding the in-progress draft and any
+    # staged attachments with no "previous idea discarded" notice. Stage a real
+    # attachment first so the clobber actually exercises
+    # IdeaDraftStore#start -> clear -> cleanup_draft (otherwise the
+    # staging-cleanup path is never run), then pin the chosen behavior so a
+    # future protect/notify change is a deliberate, test-visible decision.
+    @draft_store.start(chat_id: 12345, phase: :collecting_files, text: "old idea", token: "tok")
+    staging_dir = @draft_store.ensure_staging_dir(chat_id: 12345)
+    File.write(File.join(staging_dir, "image-1.png"), "staged bytes")
+    assert File.directory?(staging_dir), "precondition: the prior draft has a staging dir on disk"
+
+    result = @router.handle(update(text: "new idea"))
+
+    assert_equal :reply, result.action
+    assert_match(/Pick a project/, result.text)
+    draft = @draft_store.get(chat_id: 12345)
+    assert_equal "new idea", draft.text
+    assert_equal :awaiting_project, draft.phase
+    refute_equal "tok", draft.token,
+                 "the prior draft is clobbered into a fresh one, not continued"
+    refute File.exist?(staging_dir),
+           "clobbering the prior draft must clean up its staged attachments on disk"
+  end
+
+  def test_unknown_slash_command_stays_unknown
+    assert_equal :unknown, @router.classify(update(text: "/foobar"))
+
+    result = @router.handle(update(text: "/foobar"))
+
+    assert_equal :reply, result.action
+    assert_match(/did not understand/, result.text)
+    assert_nil @draft_store.get(chat_id: 12345)
+  end
+
+  def test_unknown_slash_during_awaiting_text_draft_is_captured_as_literal_idea_text
+    # With an open awaiting_text draft the awaiting_text branch wins before the
+    # unknown-slash guard, so even "/foobar" is recorded as the idea's literal
+    # text rather than refused as an unknown command. Pin this so a future
+    # reorder of the classifier's awaiting_text vs unknown-slash checks stays a
+    # deliberate, test-visible decision (contrast
+    # test_unknown_slash_command_stays_unknown, where no draft is open).
+    @draft_store.start(chat_id: 12345, phase: :awaiting_text, token: "tok")
+
+    assert_equal :idea_text_capture, @router.classify(update(text: "/foobar"))
+
+    result = @router.handle(update(text: "/foobar"))
+
+    assert_equal :reply, result.action
+    assert_match(/Pick a project/, result.text)
+    assert_equal "/foobar", @draft_store.get(chat_id: 12345).text
   end
 
   def test_idea_project_callback_enters_file_collection
@@ -258,11 +523,17 @@ class HiveBotRouterTest < Minitest::Test
     assert_nil @draft_store.get(chat_id: 12345),
                "A rejected bare media file must not leave a phantom draft that hijacks the next message"
 
-    # The phantom-draft regression: the next ordinary text must NOT be routed
-    # into idea capture (it used to become :idea_text_capture → project picker).
+    # The assert_nil above is the authoritative phantom-draft guard — do not
+    # delete it. The follow-up below is only a smoke check that a fresh idea
+    # still works after a rejected attachment: under the bare-text-idea default
+    # a leaked :awaiting_text draft and a fresh idea produce identical
+    # observable output (both reply "Pick a project" with draft.text ==
+    # "just chatting"), so the follow-up can no longer catch the regression on
+    # its own.
     followup = @router.handle(update(text: "just chatting"))
     assert_equal :reply, followup.action
-    assert_match(/did not understand/, followup.text)
+    assert_match(/Pick a project/, followup.text)
+    assert_equal "just chatting", @draft_store.get(chat_id: 12345).text
   end
 
   def test_idea_text_capture_does_not_hijack_active_brainstorm_conversation
@@ -373,6 +644,17 @@ class HiveBotRouterTest < Minitest::Test
     assert_nil result.question_n
   end
 
+  def test_answer_voice_without_context_hints_id_or_slug
+    # The classifier only routes :answer_voice when answer_context is present,
+    # so the defensive no-context branch is unreachable via classify. Drive it
+    # directly to pin the operator hint copy: a silent revert to the old
+    # `<slug>`-only phrasing must fail here.
+    result = @router.send(:answer_voice, update(voice: { file_id: "voice", file_size: 1 }))
+
+    assert_equal :reply, result.action
+    assert_match(%r{/answer <id\|slug>}, result.text)
+  end
+
   def test_slash_answer_returns_start_answer_action_not_immediate_start
     result = @router.handle(update(text: "/answer slug-260514-abcd"))
 
@@ -381,11 +663,12 @@ class HiveBotRouterTest < Minitest::Test
     assert_equal :path_b, result.mode
   end
 
-  def test_free_text_outside_conversation_gets_help_hint
+  def test_free_text_outside_conversation_defaults_to_idea_capture
     result = @router.handle(update(text: "hello"))
 
     assert_equal :reply, result.action
-    assert_match(/\/help/, result.text)
+    assert_match(/Pick a project/, result.text)
+    assert_equal "hello", @draft_store.get(chat_id: 12345).text
   end
 
   def test_approve_callback_dispatches_workflow_verb
@@ -436,9 +719,55 @@ class HiveBotRouterTest < Minitest::Test
     end
   end
 
+  def test_bare_text_without_registered_projects_replies_gracefully
+    with_tmp_global_config do
+      router = Hive::Bot::Router.new(
+        bot_config: { "chat_id_allowlist" => [ 12345 ] },
+        logger: @logger,
+        conversation_store: @store,
+        idea_draft_store: @draft_store
+      )
+
+      result = router.handle(update(text: "fix broken cron"))
+
+      assert_equal :reply, result.action
+      assert_match(/No Hive projects are registered yet/, result.text)
+      assert_nil @draft_store.get(chat_id: 12345),
+                 "the empty-registry refusal must not leave a draft behind (start_idea checks the registry before opening a draft)"
+    end
+  end
+
+  def test_blank_bare_text_without_registered_projects_still_opens_text_capture
+    # Divergence from the content-bearing case above: a content-less / blank
+    # update routes to :idea_bare_text -> SlashHandlers#idea -> start_text_capture,
+    # which opens an awaiting_text draft WITHOUT consulting the registry. So
+    # even with no projects registered it replies "Send the idea text" and
+    # leaves a draft, rather than refusing with "No Hive projects are
+    # registered yet" and leaving nothing behind.
+    with_tmp_global_config do
+      router = Hive::Bot::Router.new(
+        bot_config: { "chat_id_allowlist" => [ 12345 ] },
+        logger: @logger,
+        conversation_store: @store,
+        idea_draft_store: @draft_store
+      )
+
+      result = router.handle(update(text: "   "))
+
+      assert_equal :reply, result.action
+      assert_match(/Send the idea text/, result.text)
+      refute_match(/No Hive projects are registered/, result.text)
+      draft = @draft_store.get(chat_id: 12345)
+      assert_equal :awaiting_text, draft.phase
+      assert_nil draft.text
+    end
+  end
+
   def test_classifies_all_callback_prefixes
     cases = {
       "reject:anything" => :callback_reject,
+      "approve_plan:hive:slug-260514-abcd:3-plan" => :callback_approve_plan,
+      "rerun:hive:slug-260514-abcd:4-execute:develop" => :callback_rerun,
       "autofix:hive:slug-260514-abcd:6-review:REVIEW_ERROR" => :callback_autofix,
       "open_laptop:hive:slug-260514-abcd" => :callback_open_laptop,
       "details:hive:slug-260514-abcd" => :callback_show_details,
@@ -465,6 +794,20 @@ class HiveBotRouterTest < Minitest::Test
     end
   end
 
+  def test_unresolved_compacted_callback_classifies_as_expired_button
+    # A `#`-prefixed compacted token whose registry entry is gone (bot
+    # restart, or TTL/size eviction) survives resolve_callback unchanged and
+    # must route to the actionable "button expired" reply rather than the
+    # generic "I did not understand that".
+    expired = "#approve_plan:deadbeefdeadbeef"
+    assert_equal :callback_expired, @router.classify(update(callback_data: expired))
+
+    result = @router.handle(update(callback_data: expired))
+    assert_equal :reply, result.action
+    assert_match(/button expired/i, result.text)
+    assert_match(%r{/queue}, result.text)
+  end
+
   def test_slash_approve_dispatches_approve_command
     result = @router.handle(update(text: "/approve slug-260514-abcd"))
 
@@ -477,7 +820,8 @@ class HiveBotRouterTest < Minitest::Test
 
     assert_equal :reply, result.action
     assert_includes result.text, "/status"
-    assert_includes result.text, "/approve <slug>"
+    assert_includes result.text, "/waiting"
+    assert_includes result.text, "/approve <id|slug>"
   end
 
   def test_legacy_callback_update_without_with_still_dispatches
@@ -494,11 +838,12 @@ class HiveBotRouterTest < Minitest::Test
     assert_equal "Left unchanged.", result.text
   end
 
-  def test_legacy_message_update_without_reply_to_text_gets_help_hint
+  def test_legacy_message_update_without_effective_text_defaults_to_idea_capture
     result = @router.handle(LegacyMessageUpdate.new(update_id: 1, chat_id: 12345, text: "hello"))
 
     assert_equal :reply, result.action
-    assert_match(/\/help/, result.text)
+    assert_match(/Pick a project/, result.text)
+    assert_equal "hello", @draft_store.get(chat_id: 12345).text
   end
 
   def test_handle_rejects_impossible_classifier_intent

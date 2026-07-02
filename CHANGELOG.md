@@ -2,6 +2,16 @@
 
 All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with terse bullets — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
+## 0.3.4
+
+- Added an `hive init` prompt for ad-hoc PR auto-fix, so `hive review --pr`
+  defaults to review-only mode while still letting operators opt into local fix
+  commits.
+- Enabled GitHub review publishing in freshly rendered project configs by
+  default, so ad-hoc PR review comments land back on the PR.
+- Updated Hivebox project setup to expose the same ad-hoc auto-fix choice and
+  pass it through the shared `hive init` prompts contract.
+
 ## 0.3.3
 
 Hive goes local-first: one `hive setup` command installs and runs the web UI without

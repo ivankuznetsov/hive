@@ -103,10 +103,12 @@ module Hive
       # rg'ing through a multi-MB log.
       def copy_logs_with_tails
         source = File.join(@sandbox_dir, ".hive-state", "logs")
-        return unless File.directory?(source)
+        return unless regular_artifact_directory?(source, "logs")
 
         Dir.glob(File.join(source, "**", "*.log")).each do |full_path|
           relative = full_path.sub("#{source}/", "")
+          next unless regular_artifact_file?(full_path, "logs:#{relative}")
+
           dest = File.join(@scenario_dir, "logs", relative)
           FileUtils.mkdir_p(File.dirname(dest))
           FileUtils.cp(full_path, dest)
@@ -122,12 +124,12 @@ module Hive
       # mid-dispatch. Absence of the directory is normal (no TUI invoked, or a
       # non-TUI scenario) — silently skipped.
       def copy_tui_subprocess_diagnostics
-        return unless @tui_log_dir && File.directory?(@tui_log_dir)
+        return unless @tui_log_dir && regular_artifact_directory?(@tui_log_dir, "tui-subprocess-live")
 
         sources = Dir.glob(File.join(@tui_log_dir, "hive-tui-spawn-*.log"))
         %w[hive-tui-subprocess.log hive-tui-subprocess.log.1].each do |name|
           marker_log = File.join(@tui_log_dir, name)
-          sources << marker_log if File.exist?(marker_log)
+          sources << marker_log if artifact_path_present?(marker_log)
         end
         return if sources.empty?
 
@@ -135,12 +137,16 @@ module Hive
         FileUtils.mkdir_p(dest_root)
         sources.each do |source|
           dest = File.join(dest_root, File.basename(source))
-          copy_tui_diagnostic(source, dest)
+          next unless copy_tui_diagnostic(source, dest)
+
           File.write("#{dest}.tail", tail_lines(dest, LOG_TAIL_LINES))
         end
       end
 
       def copy_tui_diagnostic(source, dest)
+        label = "tui-subprocess:#{File.basename(source)}"
+        return false unless regular_artifact_file?(source, label)
+
         if File.basename(source).start_with?("hive-tui-spawn-") &&
            File.size(source) > TUI_SPAWN_CAPTURE_MAX_BYTES
           notice = "[truncated to last #{TUI_SPAWN_CAPTURE_MAX_BYTES} bytes]\n"
@@ -149,6 +155,10 @@ module Hive
         else
           FileUtils.cp(source, dest)
         end
+        true
+      rescue StandardError => e
+        @capture_errors << { "label" => label, "error" => "#{e.class}: #{e.message}" }
+        false
       end
 
       def remove_live_tui_subprocess_diagnostics
@@ -203,11 +213,33 @@ module Hive
       end
 
       def copy_tree(source, dest)
-        return unless File.directory?(source)
+        return unless regular_artifact_directory?(source, "state")
 
         FileUtils.rm_rf(dest)
-        FileUtils.mkdir_p(File.dirname(dest))
-        FileUtils.cp_r(source, dest)
+        FileUtils.mkdir_p(dest)
+        copy_tree_entries(source, dest, source)
+      end
+
+      def copy_tree_entries(source, dest, root)
+        Dir.children(source).sort.each do |entry|
+          source_path = File.join(source, entry)
+          dest_path = File.join(dest, entry)
+          relative = source_path.sub("#{root}/", "")
+          label = "state:#{relative}"
+          stat = File.lstat(source_path)
+
+          if stat.directory? && !stat.symlink?
+            FileUtils.mkdir_p(dest_path)
+            copy_tree_entries(source_path, dest_path, root)
+          elsif stat.file? && !stat.symlink?
+            FileUtils.mkdir_p(File.dirname(dest_path))
+            FileUtils.cp(source_path, dest_path)
+          else
+            record_non_regular_artifact(label, stat)
+          end
+        rescue SystemCallError => e
+          @capture_errors << { "label" => label || "state", "error" => "#{e.class}: #{e.message}" }
+        end
       end
 
       def write(relative, content)
@@ -224,7 +256,7 @@ module Hive
 
       def write_manifest
         files = Dir.glob(File.join(@scenario_dir, "**", "*"), File::FNM_DOTMATCH)
-          .select { |path| File.file?(path) }
+          .filter_map { |path| manifest_file_path(path) }
           .sort
         file_entries = files.filter_map { |path| manifest_entry(path) }
         manifest = {
@@ -240,8 +272,22 @@ module Hive
         File.rename(tmp, path)
       end
 
+      def manifest_file_path(path)
+        stat = File.lstat(path)
+        return path if stat.file? && !stat.symlink?
+        return nil if stat.directory? && !stat.symlink?
+
+        record_non_regular_artifact("manifest:#{relative_artifact_path(path)}", stat)
+        nil
+      rescue SystemCallError => e
+        @capture_errors << { "label" => "manifest:#{relative_artifact_path(path)}", "error" => "#{e.class}: #{e.message}" }
+        nil
+      end
+
       def manifest_entry(path)
-        relative = path.sub("#{@scenario_dir}/", "")
+        relative = relative_artifact_path(path)
+        return nil unless regular_artifact_file?(path, "manifest:#{relative}")
+
         {
           "path" => relative,
           "size" => File.size(path),
@@ -250,6 +296,42 @@ module Hive
       rescue StandardError => e
         @capture_errors << { "label" => "manifest:#{relative || path}", "error" => "#{e.class}: #{e.message}" }
         nil
+      end
+
+      def relative_artifact_path(path)
+        path.sub("#{@scenario_dir}/", "")
+      end
+
+      def artifact_path_present?(path)
+        File.exist?(path) || File.symlink?(path)
+      end
+
+      def regular_artifact_directory?(path, label)
+        return false unless artifact_path_present?(path)
+
+        stat = File.lstat(path)
+        return true if stat.directory? && !stat.symlink?
+
+        record_non_regular_artifact(label, stat)
+        false
+      rescue SystemCallError => e
+        @capture_errors << { "label" => label, "error" => "#{e.class}: #{e.message}" }
+        false
+      end
+
+      def regular_artifact_file?(path, label)
+        stat = File.lstat(path)
+        return true if stat.file? && !stat.symlink?
+
+        record_non_regular_artifact(label, stat)
+        false
+      rescue SystemCallError => e
+        @capture_errors << { "label" => label, "error" => "#{e.class}: #{e.message}" }
+        false
+      end
+
+      def record_non_regular_artifact(label, stat)
+        @capture_errors << { "label" => label, "error" => "skipped non-regular artifact (#{stat.ftype})" }
       end
     end
   end

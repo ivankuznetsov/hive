@@ -73,8 +73,13 @@ class SetupDiagnosticsTest < Minitest::Test
       %w[git tmux gh claude codex node npm sqlite3].each { |name| executable(dir, name) }
       runner = ->(argv) { [ "#{File.basename(argv.first)} 9.9.9", "", Status.new(true) ] }
 
-      row = Hive::Setup::Diagnostics.new(path: dir, runner: runner, ruby_version: "3.4.1")
-                                     .run.results.find { |r| r.name == "qmd" }
+      # check_qmd falls back to the managed install under Paths.data_home, so
+      # isolate HIVE_HOME — on a workstation with a real managed qmd the row
+      # would otherwise read "ok" and this test only passes on qmd-less CI.
+      row = with_env("HIVE_HOME" => File.join(dir, "hive-home")) do
+        Hive::Setup::Diagnostics.new(path: dir, runner: runner, ruby_version: "3.4.1")
+                                .run.results.find { |r| r.name == "qmd" }
+      end
 
       assert_equal "missing", row.status
       assert row.bootstrappable

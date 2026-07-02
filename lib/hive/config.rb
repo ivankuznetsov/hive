@@ -457,6 +457,45 @@ module Hive
           ]
         }
       },
+      # Refactor patrol is opt-in and reporting-only in v1. Keep its config
+      # and state independent from patrol so the two commands can diverge.
+      "refactor_patrol" => {
+        "enabled" => false,
+        "agent" => "claude",
+        "min_confidence" => "medium",
+        "max_theses_per_feature" => 3,
+        "max_theses_per_run" => 10,
+        "include" => [],
+        "exclude" => [ "node_modules", "dist", "build", "vendor", ".git" ],
+        "commands" => {
+          "format" => nil,
+          "lint" => nil,
+          "typecheck" => nil,
+          "test" => nil
+        },
+        "caps" => {
+          "single_feature_only" => true,
+          "allow_dependency_bumps" => false,
+          "allow_public_api_changes" => false,
+          "max_files" => 8,
+          "max_diff_lines" => 400,
+          "allow_cross_feature" => false
+        },
+        "leverage" => {
+          "weights" => {
+            "churn" => 0.3,
+            "fan_in" => 0.25,
+            "complexity" => 0.25,
+            "coupling" => 0.2,
+            "bug_density" => 0.0,
+            "coverage_gap" => 0.0
+          }
+        },
+        "review" => {
+          "max_context_files" => 24,
+          "max_owned_files" => 12
+        }
+      },
       # Daily shipped digest. The daemon schedules one global `hive digest`
       # subprocess after each local midnight; the subprocess sends a single
       # Telegram message across all registered projects.
@@ -1573,6 +1612,7 @@ module Hive
       validate_screenote!(cfg, source_path)
       validate_babysitter!(cfg, source_path)
       validate_patrol!(cfg, source_path)
+      validate_refactor_patrol!(cfg, source_path)
       validate_digest!(cfg, source_path)
       validate_answer_digest!(cfg, source_path)
       validate_bot_config!(cfg, source_path)
@@ -1603,6 +1643,7 @@ module Hive
       screenote
       babysitter
       patrol
+      refactor_patrol
       digest
       answer_digest
       bot
@@ -2561,6 +2602,150 @@ module Hive
       end
 
       validate_reviewer_entries!(reviewers, "patrol.review.reviewers", source_path)
+    end
+
+    REFACTOR_PATROL_CONFIDENCE_LEVELS = %w[low medium high].freeze
+    REFACTOR_PATROL_BOOLEAN_KEYS = %w[
+      enabled
+    ].freeze
+    REFACTOR_PATROL_CAP_BOOLEAN_KEYS = %w[
+      single_feature_only
+      allow_dependency_bumps
+      allow_public_api_changes
+      allow_cross_feature
+    ].freeze
+    REFACTOR_PATROL_NUMERIC_BOUNDS = {
+      "max_theses_per_feature" => 1,
+      "max_theses_per_run" => 1
+    }.freeze
+    REFACTOR_PATROL_CAP_BOUNDS = {
+      "max_files" => 1,
+      "max_diff_lines" => 1
+    }.freeze
+    REFACTOR_PATROL_WEIGHT_KEYS = %w[
+      churn
+      fan_in
+      complexity
+      coupling
+      bug_density
+      coverage_gap
+    ].freeze
+
+    def validate_refactor_patrol!(cfg, source_path)
+      refactor = cfg["refactor_patrol"]
+      return if refactor.nil?
+
+      REFACTOR_PATROL_BOOLEAN_KEYS.each do |key|
+        validate_boolean!(refactor[key], "refactor_patrol.#{key}", source_path)
+      end
+
+      confidence = refactor["min_confidence"]
+      unless REFACTOR_PATROL_CONFIDENCE_LEVELS.include?(confidence)
+        raise ConfigError,
+              "refactor_patrol.min_confidence in #{describe_source(source_path)} must be one of " \
+              "#{REFACTOR_PATROL_CONFIDENCE_LEVELS.inspect}; got #{confidence.inspect} (#{confidence.class})"
+      end
+
+      REFACTOR_PATROL_NUMERIC_BOUNDS.each do |key, min|
+        validate_integer_min!(refactor[key], "refactor_patrol.#{key}", min, source_path)
+      end
+
+      validate_agent_name!(refactor["agent"], "refactor_patrol.agent", source_path)
+      validate_path_glob_list!(refactor["include"], "refactor_patrol.include", source_path)
+      validate_path_glob_list!(refactor["exclude"], "refactor_patrol.exclude", source_path)
+      validate_refactor_patrol_commands!(refactor, source_path)
+      validate_refactor_patrol_caps!(refactor, source_path)
+      validate_refactor_patrol_leverage!(refactor, source_path)
+      validate_refactor_patrol_review!(refactor, source_path)
+    end
+
+    def validate_refactor_patrol_commands!(refactor, source_path)
+      commands = refactor["commands"]
+      unless commands.is_a?(Hash)
+        raise ConfigError,
+              "refactor_patrol.commands in #{describe_source(source_path)} must be a Hash; " \
+              "got #{commands.inspect} (#{commands.class})"
+      end
+
+      %w[format lint typecheck test].each do |key|
+        value = commands[key]
+        next if value.nil?
+        next if value.is_a?(String) && !value.strip.empty?
+
+        raise ConfigError,
+              "refactor_patrol.commands.#{key} in #{describe_source(source_path)} must be null or a non-empty String; " \
+              "got #{value.inspect} (#{value.class})"
+      end
+    end
+
+    def validate_refactor_patrol_caps!(refactor, source_path)
+      caps = refactor["caps"]
+      unless caps.is_a?(Hash)
+        raise ConfigError,
+              "refactor_patrol.caps in #{describe_source(source_path)} must be a Hash; " \
+              "got #{caps.inspect} (#{caps.class})"
+      end
+
+      REFACTOR_PATROL_CAP_BOOLEAN_KEYS.each do |key|
+        validate_boolean!(caps[key], "refactor_patrol.caps.#{key}", source_path)
+      end
+      REFACTOR_PATROL_CAP_BOUNDS.each do |key, min|
+        validate_integer_min!(caps[key], "refactor_patrol.caps.#{key}", min, source_path)
+      end
+    end
+
+    def validate_refactor_patrol_leverage!(refactor, source_path)
+      leverage = refactor["leverage"]
+      unless leverage.is_a?(Hash)
+        raise ConfigError,
+              "refactor_patrol.leverage in #{describe_source(source_path)} must be a Hash; " \
+              "got #{leverage.inspect} (#{leverage.class})"
+      end
+
+      weights = leverage["weights"]
+      unless weights.is_a?(Hash)
+        raise ConfigError,
+              "refactor_patrol.leverage.weights in #{describe_source(source_path)} must be a Hash; " \
+              "got #{weights.inspect} (#{weights.class})"
+      end
+
+      REFACTOR_PATROL_WEIGHT_KEYS.each do |key|
+        value = weights[key]
+        next if value.is_a?(Numeric) && value >= 0
+
+        raise ConfigError,
+              "refactor_patrol.leverage.weights.#{key} in #{describe_source(source_path)} must be a number >= 0; " \
+              "got #{value.inspect} (#{value.class})"
+      end
+    end
+
+    def validate_refactor_patrol_review!(refactor, source_path)
+      review = refactor["review"]
+      unless review.is_a?(Hash)
+        raise ConfigError,
+              "refactor_patrol.review in #{describe_source(source_path)} must be a Hash; " \
+              "got #{review.inspect} (#{review.class})"
+      end
+
+      { "max_context_files" => 0, "max_owned_files" => 1 }.each do |key, min|
+        validate_integer_min!(review[key], "refactor_patrol.review.#{key}", min, source_path)
+      end
+    end
+
+    def validate_boolean!(value, label, source_path)
+      return if value.nil? || value == true || value == false
+
+      raise ConfigError,
+            "#{label} in #{describe_source(source_path)} must be a boolean " \
+            "(true / false); got #{value.inspect} (#{value.class})"
+    end
+
+    def validate_integer_min!(value, label, min, source_path)
+      return if value.nil? || (value.is_a?(Integer) && value >= min)
+
+      raise ConfigError,
+            "#{label} in #{describe_source(source_path)} must be an integer " \
+            ">= #{min}; got #{value.inspect} (#{value.class})"
     end
 
     def validate_digest!(cfg, source_path)

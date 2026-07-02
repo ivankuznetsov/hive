@@ -545,6 +545,38 @@ def test_list_open_prs_raises_on_gh_error
   end
 end
 
+def test_repo_name_with_owner_parses_repo_view
+  status = Hive::Gh::CommandStatus.new(exitstatus: 0)
+  captured = nil
+  with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*cmd, **kwargs|
+    captured = [ cmd, kwargs ]
+    [ '{"nameWithOwner":"owner/repo"}', "", status ]
+  }) do
+    assert_equal "owner/repo", Hive::Gh.repo_name_with_owner("/tmp/repo", cfg: { "cfg" => true })
+  end
+
+  assert_equal [ "gh", "repo", "view", "--json", "nameWithOwner" ], captured.first
+  assert_equal "/tmp/repo", captured.last.fetch(:chdir)
+  assert_equal({ "cfg" => true }, captured.last.fetch(:cfg))
+end
+
+def test_list_merged_prs_uses_repo_search_window
+  status = Hive::Gh::CommandStatus.new(exitstatus: 0)
+  captured = nil
+  with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*cmd, **kwargs|
+    captured = [ cmd, kwargs ]
+    [ '[{"number":1,"mergedAt":"2026-06-13T12:00:00Z"}]', "", status ]
+  }) do
+    prs = Hive::Gh.list_merged_prs("owner/repo", since: "2026-06-12", until_date: "2026-06-14")
+    assert_equal 1, prs.first.fetch("number")
+  end
+
+  assert_includes captured.first, "--repo"
+  assert_includes captured.first, "owner/repo"
+  assert_includes captured.first, "merged:2026-06-12..2026-06-14"
+  assert_match(/mergedAt/, captured.first.fetch(captured.first.index("--json") + 1))
+end
+
 def test_pr_stats_returns_line_and_commit_counts_keyed_off_the_url
   status = Hive::Gh::CommandStatus.new(exitstatus: 0)
   json = '{"additions":2111,"deletions":1102,"commits":[{"oid":"a"},{"oid":"b"}]}'

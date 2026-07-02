@@ -53,6 +53,9 @@ module Hive
       # error envelope via JSON_USAGE_ERROR_CONTRACTS, and a bad --date / status
       # outage emit the in-command error envelope.
       "hive-answer-digest" => 1,
+      # Read-only GitHub merged-pull-request digest source
+      # (`hive digest --source merged-prs --json`).
+      "hive-merged-pr-digest" => 1,
       "hive-bot-status" => 1,
       "hive-bot-stop" => 1,
       "hive-bot-reload" => 1,

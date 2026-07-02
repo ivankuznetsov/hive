@@ -1,10 +1,18 @@
 require "test_helper"
+require "json_schemer"
 require "hive/commands/digest"
 
 class HiveCommandsDigestTest < Minitest::Test
   Runner = Struct.new(:calls, :result) do
     def run(date:, dry_run:)
       calls << { date: date, dry_run: dry_run }
+      result
+    end
+  end
+
+  MergedRunner = Struct.new(:calls, :result) do
+    def run(date:, dry_run:, repos:)
+      calls << { date: date, dry_run: dry_run, repos: repos }
       result
     end
   end
@@ -145,6 +153,101 @@ class HiveCommandsDigestTest < Minitest::Test
     assert_equal "hive digest: sent for 2026-06-13\n", output.string
   end
 
+  def test_source_omitted_uses_shipped_digest_runner_unchanged
+    output = StringIO.new
+    runner = Runner.new([], result(status: :empty, message: "Nothing shipped today 🌙"))
+    merged = MergedRunner.new([], nil)
+
+    Hive::Commands::Digest.new(
+      date: "2026-06-13",
+      dry_run: true,
+      runner: runner,
+      merged_runner: merged,
+      output: output
+    ).call
+
+    assert_equal [ { date: Date.new(2026, 6, 13), dry_run: true } ], runner.calls
+    assert_empty merged.calls
+  end
+
+  def test_source_merged_prs_dispatches_to_merged_runner
+    output = StringIO.new
+    runner = Runner.new([], nil)
+    merged = MergedRunner.new([], merged_result)
+
+    Hive::Commands::Digest.new(
+      date: "2026-06-13",
+      dry_run: true,
+      source: "merged-prs",
+      repos: [ "owner/repo" ],
+      runner: runner,
+      merged_runner: merged,
+      output: output
+    ).call
+
+    assert_empty runner.calls
+    assert_equal [ { date: Date.new(2026, 6, 13), dry_run: true, repos: [ "owner/repo" ] } ], merged.calls
+    assert_includes output.string, "Merged PR digest"
+  end
+
+  def test_repo_without_source_implies_merged_prs
+    output = StringIO.new
+    merged = MergedRunner.new([], merged_result)
+
+    Hive::Commands::Digest.new(
+      date: "2026-06-13",
+      dry_run: true,
+      repos: [ "owner/repo" ],
+      runner: Runner.new([], nil),
+      merged_runner: merged,
+      output: output
+    ).call
+
+    assert_equal [ { date: Date.new(2026, 6, 13), dry_run: true, repos: [ "owner/repo" ] } ], merged.calls
+  end
+
+  def test_unknown_source_raises_config_error_and_json_uses_shipped_schema
+    output = StringIO.new
+    command = Hive::Commands::Digest.new(
+      date: "2026-06-13",
+      source: "unknown",
+      json: true,
+      runner: Runner.new([], nil),
+      output: output
+    )
+
+    error = assert_raises(Hive::ConfigError) { command.call }
+
+    assert_match(/--source must be 'merged-prs'/, error.message)
+    payload = JSON.parse(output.string)
+    assert_equal "hive-digest", payload.fetch("schema")
+    assert_equal "config", payload.fetch("error_kind")
+  end
+
+  def test_merged_pr_json_payload_validates_against_schema
+    output = StringIO.new
+    delivery = Hive::Digest::Sender::SendResult.new(
+      chat_id: 4242, responses: [], dry_run: false, text: "body"
+    )
+    merged = MergedRunner.new([], merged_result(delivery: delivery))
+
+    Hive::Commands::Digest.new(
+      date: "2026-06-13",
+      source: "merged-prs",
+      json: true,
+      merged_runner: merged,
+      output: output
+    ).call
+
+    payload = JSON.parse(output.string)
+    assert_equal "hive-merged-pr-digest", payload.fetch("schema")
+    assert_equal "merged-prs", payload.fetch("source")
+    assert_nil payload.fetch("message")
+    assert_equal 4242, payload.fetch("chat_id")
+    schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-merged-pr-digest"))))
+    assert_empty schema.validate(payload).map { |e| e["error"] }
+  end
+
   private
 
   def result(status:, message:)
@@ -153,6 +256,32 @@ class HiveCommandsDigestTest < Minitest::Test
       date: Date.new(2026, 6, 13),
       message: message,
       delivery: nil
+    )
+  end
+
+  def merged_result(delivery: nil)
+    pr = Hive::Digest::MergedPr::PullRequest.new(
+      repo: "owner/repo",
+      number: 1,
+      title: "Title",
+      url: "https://github.com/owner/repo/pull/1",
+      mergedAt: "2026-06-13T12:00:00Z",
+      author: "alice",
+      authorIsBot: false,
+      headRefName: "feature",
+      isCrossRepository: false,
+      hive_slug: nil,
+      hive_stage: nil
+    )
+    Hive::Digest::MergedPr::Result.new(
+      date: Date.new(2026, 6, 13),
+      repos: [ "owner/repo" ],
+      prs: [ pr ],
+      count: 1,
+      dry_run: delivery.nil?,
+      warnings: [],
+      message: "Merged PR digest — 2026-06-13\n\nTotal: 1 PR",
+      delivery: delivery
     )
   end
 end

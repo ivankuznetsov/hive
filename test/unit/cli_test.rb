@@ -204,6 +204,15 @@ class HiveCliTest < Minitest::Test
     end
   end
 
+  def test_digest_help_exposes_merged_pr_source
+    out, _err = capture_io { Hive::CLI.start([ "help", "digest" ]) }
+
+    assert_includes out, "--source"
+    assert_includes out, "merged-prs"
+    assert_includes out, "--repo"
+    assert_includes out, "never mutates Hive state"
+  end
+
   def test_workflow_option_help_does_not_enumerate_project_workflows
     # Plan-central contract: `--workflow` help lists built-ins only and never
     # enumerates active-project descriptors, so the rendered string stays static
@@ -458,9 +467,16 @@ class HiveCliTest < Minitest::Test
     end
 
     with_command_new_stub(Hive::Commands::Digest) do |calls|
-      Hive::CLI.start([ "digest", "--date", "2026-06-13", "--dry-run", "--json" ])
+      Hive::CLI.start([ "digest", "--date", "2026-06-13", "--dry-run", "--json",
+                        "--source", "merged-prs", "--repo", "owner/repo" ])
       assert_equal [], calls.first.fetch(:args)
-      assert_equal({ date: "2026-06-13", json: true, dry_run: true }, calls.first.fetch(:kwargs))
+      assert_equal({
+        date: "2026-06-13",
+        json: true,
+        dry_run: true,
+        source: "merged-prs",
+        repos: [ "owner/repo" ]
+      }, calls.first.fetch(:kwargs))
     end
 
     with_command_new_stub(Hive::Commands::AnswerDigest) do |calls|

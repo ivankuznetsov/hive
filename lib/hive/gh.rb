@@ -188,6 +188,53 @@ module Hive
       raise Hive::GhError, "`gh pr list` returned unparseable JSON: #{e.message}"
     end
 
+    def repo_name_with_owner(worktree_path, cfg: nil)
+      out, err, status = capture3("gh", "repo", "view", "--json", "nameWithOwner",
+                                  chdir: worktree_path, cfg: cfg)
+      unless status.success?
+        raise Hive::GhError, "`gh repo view` failed in #{worktree_path}: #{err.to_s.strip.empty? ? out : err.strip}"
+      end
+
+      doc = JSON.parse(out)
+      raise Hive::GhError, "`gh repo view` returned #{doc.class}; expected Hash" unless doc.is_a?(Hash)
+
+      slug = doc["nameWithOwner"].to_s
+      raise Hive::GhError, "`gh repo view` returned blank nameWithOwner in #{worktree_path}" if slug.empty?
+
+      slug
+    rescue JSON::ParserError => e
+      raise Hive::GhError, "`gh repo view` returned unparseable JSON in #{worktree_path}: #{e.message}"
+    end
+
+    def list_merged_prs(repo, since:, until_date:, cfg: nil)
+      fields = %w[
+        number
+        title
+        url
+        mergedAt
+        author
+        headRefName
+        isCrossRepository
+      ].join(",")
+      out, err, status = capture3("gh", "pr", "list",
+                                  "--repo", repo.to_s,
+                                  "--state", "merged",
+                                  "--search", "merged:#{since}..#{until_date}",
+                                  "--limit", "1000",
+                                  "--json", fields,
+                                  cfg: cfg)
+      unless status.success?
+        raise Hive::GhError, "`gh pr list` failed for #{repo}: #{err.to_s.strip.empty? ? out : err.strip}"
+      end
+
+      list = JSON.parse(out)
+      raise Hive::GhError, "`gh pr list` returned #{list.class} for #{repo}; expected Array" unless list.is_a?(Array)
+
+      list
+    rescue JSON::ParserError => e
+      raise Hive::GhError, "`gh pr list` returned unparseable JSON for #{repo}: #{e.message}"
+    end
+
     def pr_status_rollup(worktree_path, number, cfg: nil)
       out, err, status = capture3("gh", "pr", "view", number.to_s,
                                   "--json", "mergeable,mergeStateStatus,statusCheckRollup,headRefOid,url",

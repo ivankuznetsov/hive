@@ -55,9 +55,18 @@ class WebAppBundleTest < Minitest::Test
     with_hive_home do
       source = seed_source_app
       ran = false
+      captured_env = nil
       Hive::Web::AppBundle.ensure!(bundle_url: source, output: nil,
-                                   runner: ->(_argv, _env) { ran = true })
+                                   runner: ->(_argv, env) { captured_env = env; ran = true })
       assert ran, "bundle install runner should have run"
+      # The managed bundle's Gemfile resolves the hive-cli path gem through
+      # HIVE_CLI_ROOT (its ".." holds no gem, and hive-cli is not on
+      # rubygems) — without this export the extracted release asset can never
+      # bundle-install, so `hive setup`/`hive web install` would fail on
+      # every non-source-checkout install.
+      assert_equal Hive::Web::AppBundle.hive_cli_root, captured_env["HIVE_CLI_ROOT"]
+      assert File.file?(File.join(Hive::Web::AppBundle.hive_cli_root, "hive.gemspec")),
+             "HIVE_CLI_ROOT must point at the gem root (hive.gemspec present)"
       assert Hive::Web::AppBundle.present?
       assert_equal Hive::VERSION, Hive::Web::AppBundle.installed_version
       refute Hive::Web::AppBundle.stale?

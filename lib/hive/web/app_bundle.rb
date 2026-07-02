@@ -17,6 +17,15 @@ module Hive
         Hive::Paths.web_app_home
       end
 
+      # Root of the hive-cli gem this code is running from. The managed
+      # bundle's Gemfile resolves `gem "hive-cli"` through HIVE_CLI_ROOT
+      # (there is no gem at its `..`, and hive-cli is not on rubygems), so
+      # every bundler/Rails invocation against the managed app must export
+      # this. Works identically for an installed gem and a source checkout.
+      def hive_cli_root
+        File.expand_path("../../..", __dir__)
+      end
+
       def present?
         File.file?(File.join(app_dir, "config", "application.rb"))
       end
@@ -74,7 +83,9 @@ module Hive
         return dir unless File.file?(File.join(dir, "Gemfile"))
 
         runner ||= ->(argv, env) { system(env, *argv) }
-        ok = runner.call(%w[bundle install], { "BUNDLE_GEMFILE" => File.join(dir, "Gemfile") })
+        ok = runner.call(%w[bundle install],
+                         { "BUNDLE_GEMFILE" => File.join(dir, "Gemfile"),
+                           "HIVE_CLI_ROOT" => hive_cli_root })
         raise Hive::Error, "hive web: bundle install failed in #{dir}" unless ok
 
         output.puts "hive web: installed Rails bundle in #{dir}" if output

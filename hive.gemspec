@@ -31,6 +31,7 @@ Gem::Specification.new do |spec|
   # plans, dev-only docs, packaging templates, and the e2e harness binary.
   spec.files = Dir[
     "bin/hive",
+    "bin/hive-babysitter-skip-log.rb",
     "bin/hive-babysitter-stub-gh",
     "bin/hive-babysitter-stub-git",
     "bin/hv",

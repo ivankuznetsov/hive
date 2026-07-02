@@ -1,48 +1,7 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-def log_skip(argv)
-  path = ENV.fetch("HIVE_BABYSITTER_DRY_RUN_LOG", ".babysitter-dry-run-skipped.log")
-  message = "[dry-run] gh #{escaped_argv(argv)} skipped"
-  append_skip_log(path) { |file| file.puts(message) }
-rescue SystemCallError, IOError => e
-  warn "[dry-run] failed to write skip log #{path}: #{e.message}"
-end
-
-def append_skip_log(path)
-  raise IOError, "File::NOFOLLOW unavailable" unless File.const_defined?(:NOFOLLOW)
-  raise IOError, "File::NONBLOCK unavailable" unless File.const_defined?(:NONBLOCK)
-
-  begin
-    stat = File.lstat(path)
-    raise IOError, "dry-run skip log is not a regular file" unless stat.file?
-    raise IOError, "dry-run skip log is not owned by uid #{Process.uid}" unless stat.uid == Process.uid
-    raise IOError, "dry-run skip log link count is not 1" unless stat.nlink == 1
-  rescue Errno::ENOENT
-    # Missing logs are created below; the fstat check still verifies the opened target.
-  end
-
-  File.open(path, File::WRONLY | File::APPEND | File::CREAT | File::NOFOLLOW | File::NONBLOCK, 0o600) do |file|
-    stat = file.stat
-    raise IOError, "dry-run skip log is not a regular file" unless stat.file?
-    raise IOError, "dry-run skip log is not owned by uid #{Process.uid}" unless stat.uid == Process.uid
-    raise IOError, "dry-run skip log link count is not 1" unless stat.nlink == 1
-
-    yield file
-  end
-end
-
-def escaped_argv(argv)
-  argv.map { |arg| escape_control_chars(arg) }.join(" ")
-end
-
-def escape_control_chars(arg)
-  # Scan bytes, not characters: argv can carry non-UTF-8 bytes (agent-supplied messages), and
-  # a UTF-8 `gsub` would raise ArgumentError on an invalid sequence — crashing log_skip before
-  # its `rescue` and dropping the skip-log record. Binary-encode first so the regex matches
-  # control bytes byte-by-byte; high bytes pass through unescaped, as before.
-  arg.to_s.b.gsub(/[\x00-\x1f\x7f]/n) { |char| "\\x%02X" % char.ord }
-end
+require_relative "hive-babysitter-skip-log"
 
 argv = ARGV.map(&:b)
 
@@ -482,7 +441,7 @@ end
 rest = stripped_global_options(argv)
 
 unless read_only?(rest) && !external_launcher_option?(rest) && !host_override?(argv, rest) && !positional_host_override?(rest)
-  log_skip(argv)
+  log_skip("gh", argv)
   warn "[dry-run] gh #{escaped_argv(argv)} skipped"
   exit 0
 end

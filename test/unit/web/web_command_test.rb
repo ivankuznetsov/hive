@@ -312,10 +312,10 @@ class WebCommandTest < Minitest::Test
   end
 
   def test_start_without_detach_falls_through_to_foreground_call
-    # `start` sans --detach clears @subcommand and re-enters #call, which then
-    # runs the foreground boot path. Stub rails_app_dir → nil so it exits 1
-    # with guidance rather than exec-ing a real server; the point is that it
-    # took the foreground branch, not start_service.
+    # `start` sans --detach dispatches to the foreground boot path. Stub
+    # rails_app_dir → nil so it exits 1 with guidance rather than exec-ing a
+    # real server; the point is that it took the foreground branch, not
+    # start_service.
     with_tmp_global_config do
       command = Hive::Commands::Web.new("start")
       command.define_singleton_method(:rails_app_dir) { |**| nil }

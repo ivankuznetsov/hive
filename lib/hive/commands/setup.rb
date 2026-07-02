@@ -10,10 +10,9 @@ require "hive/web/app_bundle"
 module Hive
   module Commands
     class Setup
-      def initialize(json: false, yes: false, service: false, no_bootstrap: false,
+      def initialize(json: false, service: false, no_bootstrap: false,
                      no_init: false, output: $stdout)
         @json = json
-        @yes = yes
         @service = service
         @no_bootstrap = no_bootstrap
         @no_init = no_init
@@ -62,76 +61,78 @@ module Hive
         @phases << { "name" => name, "ok" => ok }.merge(data)
       end
 
+      # Run one provisioning phase. The block returns [ok, data]; ANY raise
+      # is recorded as a failed phase (→ non-zero exit) instead of aborting
+      # `hive setup` with a raw backtrace before `emit` — the --json envelope
+      # must still emit for automation branching on it (AE5). Provisioning
+      # raises more than Hive::Error: OpenURI::HTTPError (404), SocketError /
+      # Errno::ECONNREFUSED (offline), Zlib errors (corrupt asset), and
+      # permission-denied writes from the service installers.
+      def phase(name)
+        ok, data = yield
+        add_phase(name, ok, data)
+      rescue StandardError => e
+        add_phase(name, false, "message" => "#{e.class}: #{e.message}")
+      end
+
       def bootstrap_qmd_if_missing(diagnostics)
         row = diagnostics.results.find { |result| result.name == "qmd" }
         return unless row&.bootstrappable && row.status == "missing"
 
-        prefix = File.join(Hive::Paths.data_home, "qmd")
-        # Capture npm's stderr so a failed install records WHY on the phase
-        # (mirrors bootstrap_web_bundle), instead of a bare ok:false with no
-        # reason for the operator/automation to act on.
-        _out, err, status = Open3.capture3("npm", "install", "--global", "--prefix", prefix, "@tobilu/qmd")
-        data = { "prefix" => prefix }
-        data["message"] = err.strip unless status.success?
-        add_phase("qmd", status.success?, data)
+        phase("qmd") do
+          prefix = File.join(Hive::Paths.data_home, "qmd")
+          # Capture npm's stderr so a failed install records WHY on the phase,
+          # instead of a bare ok:false with no reason for the operator or
+          # automation to act on.
+          _out, err, status = Open3.capture3("npm", "install", "--global", "--prefix", prefix, "@tobilu/qmd")
+          data = { "prefix" => prefix }
+          data["message"] = err.strip unless status.success?
+          [ status.success?, data ]
+        end
       end
 
       def bootstrap_web_bundle
-        Hive::Web::AppBundle.ensure!
-        add_phase("web_bundle", true, "path" => Hive::Web::AppBundle.app_dir)
-      rescue StandardError => e
-        # `ensure!` downloads + unpacks a release tarball, so beyond
-        # Hive::Error it can raise OpenURI::HTTPError (404), SocketError /
-        # Errno::ECONNREFUSED (offline), or Zlib errors (corrupt asset).
-        # Record any of these as a phase failure (→ non-zero exit) instead of
-        # aborting `hive setup` with a raw backtrace.
-        add_phase("web_bundle", false, "message" => "#{e.class}: #{e.message}")
+        phase("web_bundle") do
+          Hive::Web::AppBundle.ensure!
+          [ true, { "path" => Hive::Web::AppBundle.app_dir } ]
+        end
       end
 
       def install_daemon
-        require "hive/commands/daemon/service_installer"
-        installer = Hive::Commands::Daemon::ServiceInstaller.new(binary_path: Hive::InvokedBinary.path)
-        outcome = installer.install!(autostart: true, force: true)
-        add_phase(
-          "daemon_service",
-          outcome.success?,
-          "outcome" => outcome.wire_outcome,
-          "target_path" => installer.target_path,
-          "messages" => installer.messages
-        )
-      rescue StandardError => e
-        # A permission-denied / write failure in the installer must not abort
-        # `hive setup` with a raw backtrace before `emit` — record the phase
-        # ok:false (→ non-zero exit) so the --json envelope still emits (AE5).
-        add_phase("daemon_service", false, "message" => "#{e.class}: #{e.message}")
+        phase("daemon_service") do
+          require "hive/commands/daemon/service_installer"
+          installer = Hive::Commands::Daemon::ServiceInstaller.new(binary_path: Hive::InvokedBinary.path)
+          outcome = installer.install!(autostart: true, force: true)
+          [ outcome.success?, {
+            "outcome" => outcome.wire_outcome,
+            "target_path" => installer.target_path,
+            "messages" => installer.messages
+          } ]
+        end
       end
 
       def enroll_project
-        require "hive/commands/init"
-        Hive::Commands::Init.new(Dir.pwd, force: true, json: false).call
-        add_phase("enroll", true, "path" => Dir.pwd)
-      rescue Hive::AlreadyInitialized
-        require "hive/commands/daemon"
-        Hive::Commands::Daemon.new("enable", current_project_name).call
-        add_phase("enroll", true, "path" => Dir.pwd)
-      rescue StandardError => e
-        # Any other init/enable failure (write error, corrupt registry) records
-        # the phase ok:false so `emit` still produces a --json envelope instead
-        # of aborting with a backtrace (AE5).
-        add_phase("enroll", false, "message" => "#{e.class}: #{e.message}")
+        phase("enroll") do
+          require "hive/commands/init"
+          begin
+            Hive::Commands::Init.new(Dir.pwd, force: true, json: false).call
+          rescue Hive::AlreadyInitialized
+            require "hive/commands/daemon"
+            Hive::Commands::Daemon.new("enable", current_project_name).call
+          end
+          [ true, { "path" => Dir.pwd } ]
+        end
       end
 
       def install_web_service
-        require "hive/commands/web/service_installer"
-        # Pass the same resolved binary as install_daemon so both managed
-        # services point at one hive binary (R8 same-binary guarantee).
-        installer = Hive::Commands::Web::ServiceInstaller.new(binary_path: Hive::InvokedBinary.path)
-        outcome = installer.install!(autostart: true, force: true)
-        add_phase("web_service", outcome.success?, "outcome" => outcome.wire_outcome, "target_path" => installer.target_path)
-      rescue StandardError => e
-        # Mirror install_daemon: a service-write failure records ok:false so the
-        # --json envelope still emits instead of aborting with a backtrace (AE5).
-        add_phase("web_service", false, "message" => "#{e.class}: #{e.message}")
+        phase("web_service") do
+          require "hive/commands/web/service_installer"
+          # Pass the same resolved binary as install_daemon so both managed
+          # services point at one hive binary (R8 same-binary guarantee).
+          installer = Hive::Commands::Web::ServiceInstaller.new(binary_path: Hive::InvokedBinary.path)
+          outcome = installer.install!(autostart: true, force: true)
+          [ outcome.success?, { "outcome" => outcome.wire_outcome, "target_path" => installer.target_path } ]
+        end
       end
 
       def current_project_name

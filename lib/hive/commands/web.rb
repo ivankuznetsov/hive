@@ -24,9 +24,25 @@ module Hive
         @detach = detach
       end
 
+      # Bare `hive web` (and `start` without --detach) runs the Rails server
+      # in the foreground; install/start/stop/status manage the per-user
+      # systemd/launchd service.
       def call
-        return service_command if @subcommand
+        case @subcommand
+        when nil then run_foreground
+        when "install" then install_command
+        when "start" then @detach ? start_service : run_foreground
+        when "stop" then stop_service
+        when "status" then status_service
+        else
+          raise Hive::InvalidTaskPath,
+                "hive web: unknown subcommand #{@subcommand.inspect} (expected: #{VALID_SUBCOMMANDS.join(', ')})"
+        end
+      end
 
+      private
+
+      def run_foreground
         cfg = Hive::Config.load_global_web
         bind = @bind || cfg.fetch("bind")
         port = (@port || cfg.fetch("port")).to_i
@@ -78,27 +94,9 @@ module Hive
         end
       end
 
-      private
-
-      def service_command
-        require "hive/commands/web/service_installer"
-        case @subcommand
-        when "install"
-          Hive::Web::AppBundle.ensure! unless @no_bootstrap
-          install_service
-        when "start"
-          if @detach
-            start_service
-          else
-            @subcommand = nil
-            call
-          end
-        when "stop" then stop_service
-        when "status" then status_service
-        else
-          raise Hive::InvalidTaskPath,
-                "hive web: unknown subcommand #{@subcommand.inspect} (expected: #{VALID_SUBCOMMANDS.join(', ')})"
-        end
+      def install_command
+        Hive::Web::AppBundle.ensure! unless @no_bootstrap
+        install_service
       end
 
       def rails_app_dir(bootstrap: true)
@@ -166,6 +164,7 @@ module Hive
       end
 
       def install_service
+        require "hive/commands/web/service_installer"
         installer = Hive::Commands::Web::ServiceInstaller.new(binary_path: Hive::InvokedBinary.path)
         outcome = installer.install!(autostart: true, force: @force)
         if @json
@@ -189,6 +188,7 @@ module Hive
       # start/stop differ only in the launchctl (load/unload) and systemctl
       # (start/stop) verbs, so the platform branch lives here once.
       def run_service_action(launchctl:, systemctl:, verb:)
+        require "hive/commands/web/service_installer"
         installer = Hive::Commands::Web::ServiceInstaller.new
         argv =
           if installer.envelope_platform == "macos"
@@ -205,6 +205,7 @@ module Hive
       end
 
       def status_service
+        require "hive/commands/web/service_installer"
         installer = Hive::Commands::Web::ServiceInstaller.new
         state = installer.service_state
         if @json

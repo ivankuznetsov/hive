@@ -342,13 +342,22 @@ class ServiceInstallerBaseTest < Minitest::Test
   def test_abstract_hooks_raise_not_implemented
     installer = BareInstaller.new(host_os: "linux")
 
-    %i[service_name cli_label service_noun unit_noun target_path
+    %i[service_name cli_label service_noun unit_noun
        render_systemd render_launchd].each do |hook|
       error = assert_raises(NotImplementedError, "#{hook} must raise on the bare base") do
         installer.public_send(hook)
       end
       assert_match(/must define ##{hook}/, error.message)
     end
+  end
+
+  # target_path is derived, not abstract: `<service_name>.service` under
+  # systemd-user on Linux, `local.<service_name>.plist` under LaunchAgents
+  # on macOS, nil on unsupported hosts. A bare subclass still fails loudly
+  # because the derivation reads `service_name`.
+  def test_target_path_derives_from_service_name_per_platform
+    assert_raises(NotImplementedError) { BareInstaller.new(host_os: "linux").target_path }
+    assert_nil BareInstaller.new(host_os: "freebsd14").target_path
   end
 
   def test_upgrade_restart_warning_defaults_to_nil

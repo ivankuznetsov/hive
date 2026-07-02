@@ -1,5 +1,3 @@
-require "cgi"
-require "shellwords"
 require "hive/commands/service_installer/base"
 
 module Hive
@@ -32,41 +30,19 @@ module Hive
           "bot unit"
         end
 
-        def target_path
-          case platform
-          when :macos then File.join(@home, "Library/LaunchAgents/local.hive-bot.plist")
-          when :linux then File.join(@home, ".config/systemd/user/hive-bot.service")
-          end
-        end
-
         private
 
+        # No HIVE_BIN line in the bot unit (only the daemon's status_consumer
+        # needs that) — the shared renderer's HIVE_BIN substitution is a no-op.
         def render_systemd
-          template = File.read(File.expand_path("../../../../examples/systemd/hive-bot.service", __dir__))
-          # systemd .service files are POSIX-shell-ish — escape the
-          # resolved binary path so whitespace, `%`, or other special
-          # characters don't produce a malformed unit. No HIVE_BIN line to
-          # rewrite (only the daemon's status_consumer needs that).
-          escaped = Shellwords.escape(resolved_binary)
-          template
-            .sub(/^ExecStart=.*$/, "ExecStart=#{escaped} bot start --foreground")
-            .sub(/^Environment=PATH=.*$/, build_path_line)
+          render_systemd_from(
+            File.expand_path("../../../../examples/systemd/hive-bot.service", __dir__),
+            "bot start --foreground"
+          )
         end
 
         def render_launchd
-          template = File.read(File.expand_path("../../../../examples/launchd/hive-bot.plist", __dir__))
-          binary = resolved_binary
-          # dirname BEFORE HTML-escaping so paths with `&`/`<`/`>` get
-          # the correct directory segmentation; then escape both for
-          # plist XML safety.
-          binary_dir = File.dirname(binary)
-          escaped_binary = CGI.escapeHTML(binary)
-          escaped_binary_dir = CGI.escapeHTML(binary_dir)
-          escaped_home = CGI.escapeHTML(@home)
-          template
-            .gsub(%r{<string>/Users/YOU/\.local/bin/hive</string>}, "<string>#{escaped_binary}</string>")
-            .gsub("/Users/YOU/Library/Logs", "#{escaped_home}/Library/Logs")
-            .gsub("/Users/YOU/.local/bin", escaped_binary_dir)
+          render_launchd_from(File.expand_path("../../../../examples/launchd/hive-bot.plist", __dir__))
         end
       end
     end

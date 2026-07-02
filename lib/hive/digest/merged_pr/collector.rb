@@ -21,12 +21,16 @@ module Hive
 
         def for_date(date, repos:)
           @warnings = []
-          Array(repos).flat_map do |repo|
+          collected = Array(repos).flat_map do |repo|
             collect_repo(repo, date)
           rescue StandardError => e
             warn("merged-pr digest: dropping repo #{repo}: #{e.message}")
             []
           end
+          # Order the machine-readable prs[] deterministically (plan U4: by repo
+          # then chronologically by mergedAt). The renderer re-sorts each repo's
+          # rows for display, but the JSON array carries this order verbatim.
+          collected.sort_by { |pr| [ pr.repo, Window.parse_time(pr.mergedAt) ] }
         end
 
         private
@@ -38,9 +42,10 @@ module Hive
             until_date: (date + 1).iso8601,
             cfg: @cfg
           )
-          # No sort here: Renderer#grouped_sections is the display authority and
-          # sorts each repo's rows by mergedAt itself, so a sort here would be
-          # dead work.
+          # No per-repo sort here: for_date sorts the whole collection once (by
+          # repo then mergedAt) and the renderer re-sorts each repo's rows for
+          # display, so sorting the single repo's candidates too would be dead
+          # work.
           candidates.filter_map { |doc| build_pr(repo, doc, date) }
         end
 
@@ -50,8 +55,11 @@ module Hive
 
           # Like mergedAt, fetch the number so a missing key drops the record
           # (schema requires number >= 1); Integer() drops a blank/unexpected
-          # value via the ArgumentError rescue instead of coercing it to 0.
+          # value via the ArgumentError rescue instead of coercing it to 0. A
+          # non-positive number would violate the schema's minimum:1, so raise
+          # to drop it via the same rescue rather than emit an out-of-spec row.
           number = Integer(doc.fetch("number").to_s)
+          raise ArgumentError, "PR number must be positive, got #{number}" unless number.positive?
           head_ref = doc["headRefName"].to_s
           match = match_hive(head_ref)
           author = doc["author"].is_a?(Hash) ? doc["author"] : {}

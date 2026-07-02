@@ -22,8 +22,20 @@ module Hive
 
         def resolve(repos: [])
           @warnings = []
-          explicit = Array(repos).flat_map { |repo| repo.to_s.split(/\s+/) }.reject(&:empty?)
-          return Resolution.new(repos: validate_explicit(explicit).uniq, warnings: warnings) unless explicit.empty?
+          # A present-but-blank --repo (e.g. "  ") is an explicit scope attempt,
+          # not "resolve everything": keep it out of `explicit` (no valid tokens)
+          # but remember it so we raise the owner/name error instead of silently
+          # inverting the user's intent into auto-resolve-all-projects.
+          requested = Array(repos).reject { |repo| repo.to_s.empty? }
+          explicit = requested.flat_map { |repo| repo.to_s.split(/\s+/) }.reject(&:empty?)
+          unless requested.empty?
+            if explicit.empty?
+              raise Hive::ConfigError,
+                    "hive digest: --repo must be owner/name; got #{requested.first.inspect}"
+            end
+
+            return Resolution.new(repos: dedup(validate_explicit(explicit)), warnings: warnings)
+          end
 
           slugs = []
           @registry.call.each do |entry|
@@ -31,10 +43,17 @@ module Hive
           rescue StandardError => e
             warn("merged-pr digest: dropping project #{entry_name(entry)} during repo resolution: #{e.message}")
           end
-          Resolution.new(repos: slugs.compact.uniq, warnings: warnings)
+          Resolution.new(repos: dedup(slugs.compact), warnings: warnings)
         end
 
         private
+
+        # GitHub owner/name slugs are case-insensitive, so dedup accordingly and
+        # keep the first-seen casing — otherwise `Owner/Repo` and `owner/repo`
+        # survive as two entries and produce duplicate gh calls / repo sections.
+        def dedup(repos)
+          repos.uniq { |repo| repo.downcase }
+        end
 
         def validate_explicit(repos)
           repos.each do |repo|

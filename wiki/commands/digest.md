@@ -3,7 +3,7 @@ title: hive digest
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/digest.rb, lib/hive/digest.rb, lib/hive/digest/
 created: 2026-06-14
-updated: 2026-07-02
+updated: 2026-06-30
 tags: [command, digest, telegram, json]
 ---
 
@@ -39,7 +39,7 @@ Options:
 
 ## Behavior
 
-Default shipped-task source:
+Default source:
 
 1. `Hive::Commands::Digest#parse_date` accepts only `YYYY-MM-DD`; omitted
    dates default to yesterday in the host local timezone.
@@ -77,11 +77,10 @@ Default shipped-task source:
    `send_message` per chunk above Telegram's 4096-char limit), or returns the
    text without credentials in dry-run mode.
 
-If pending Telegram pairing requests exist, `Hive::Digest.run` appends a
-single reminder line to the empty or successful digest body:
-`N pairing request(s) waiting - run hive pairing list`. The count comes from
-the local `Hive::Bot::PairingStore`; pairing state is not sent to the
-categorizer prompt.
+If pending Telegram pairing requests exist, `Hive::Digest.run` appends one
+reminder line to the empty or successful digest body: `🔑 N pairing request(s)
+waiting — run hive pairing list`. The count comes from the local
+`PairingStore`, not from the categorizer prompt.
 
 If categorization raises `Hive::Digest::ModelError`, `Hive::Digest.run` sends
 a failed-generation notice for the date and returns `status: :failed_notice`.
@@ -97,28 +96,39 @@ Repository selection:
 
 - Without `--repo`, Hive scans `Hive::Config.registered_projects` and resolves
   each project path with `gh repo view --json nameWithOwner`.
-- A project that cannot be resolved is warned and dropped; other repositories
-  still report.
+- A project that cannot be resolved is warned and dropped; other repos still
+  report.
 - `--repo owner/name` bypasses discovery, validates the slug shape, de-dupes
   repeats, and can be repeated.
 
 Collection:
 
 - The command asks GitHub for merged PR candidates with
-  `gh pr list --repo owner/name --state merged --search merged:<D-1>..<D+1>`;
-  final membership is `mergedAt.getlocal.to_date == D`.
+  `gh pr list --repo owner/name --state merged --search merged:<D-1>..<D+1>`
+  and final membership is `mergedAt.getlocal.to_date == D`.
 - Open, closed-unmerged, and draft-but-not-merged PRs are excluded by GitHub's
-  merged state. Bot authors and fork PRs are included; bot/fork metadata is
-  carried in JSON.
-- A per-repository `gh` failure is warned and dropped while the digest still
+  merged state. Bot authors, non-Hive PRs, and fork PRs are included; bot/fork
+  metadata is carried in JSON.
+- A per-repo `gh` failure is warned and dropped while the digest still
   succeeds with a partial result.
 - Branches named `hive/<slug>` are best-effort matched against registered
   projects' `.hive-state/stages/*/<slug>` directories to fill optional
   `hive_slug` / `hive_stage`. Match failures are swallowed.
 
-Rendering is mechanical and grouped by repository. Dry-run prints the message
-and sends nothing; a real run sends through the same `Digest::Sender` /
-Telegram MarkdownV2 path as the shipped-task digest.
+Rendering is mechanical and grouped by repo:
+
+```text
+Merged PR digest — 2026-06-13
+
+Total: 2 PRs
+
+`owner/repo — 2`
+• #12 Add export — alice
+• #13 Fix docs — Hive task matched
+```
+
+Dry-run prints the message and sends nothing. A real run sends through the
+same `Digest::Sender` / Telegram MarkdownV2 path as the shipped-task digest.
 
 ## Output
 
@@ -127,9 +137,9 @@ Human output:
 - Dry-run: prints the composed message body.
 - Real send: prints `hive digest: <status> for <date>`.
 
-For the default shipped-task source, `--json` prints a delivery document for
-empty/sent/failed_notice: a model failure still prints this shape with
-`ok: false` and `status: "failed_notice"`.
+For the default shipped-task source, `--json` prints a delivery document for empty/sent/failed_notice: a model
+failure still prints this shape with `ok: false` and `status:
+"failed_notice"`.
 
 ```json
 {
@@ -183,8 +193,8 @@ The merged-PR source emits `hive-merged-pr-digest` v1:
 ```
 
 Real-send JSON sets `message` to `null` and `chat_id` to the resolved
-recipient. Partial repository drops still return `ok: true`; only
-command-level errors use the `ErrorPayload` arm.
+recipient. Partial repo drops still return `ok: true`; only command-level
+errors use the ErrorPayload arm.
 
 Usage errors emit the shared `ErrorPayload` (same `hive-digest` schema):
 
@@ -247,8 +257,7 @@ otherwise. An explicit `digest.enabled: false` is the opt-out (and an explicit
 - `test/unit/digest/merged_pr/*_test.rb` covers repo resolution, collection
   boundaries, Hive matching, rendering, and runner orchestration.
 - `test/unit/digest/run_test.rb` covers empty, successful, failed-notice, and
-  default-date pipeline behavior through injected seams, including the
-  pending-pairing reminder and I/O-failure degradation.
+  default-date pipeline behavior through injected seams.
 - `test/unit/digest/sender_test.rb` covers chat-id resolution, dry-run token
   avoidance, and MarkdownV2 Telegram send arguments.
 - `test/unit/daemon/digest_scheduler_test.rb` covers daemon due/catch-up

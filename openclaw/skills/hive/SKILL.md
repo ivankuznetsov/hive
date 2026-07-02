@@ -196,6 +196,154 @@ Degrade gracefully: if `systemctl` is unavailable (for example macOS/launchd), r
 If `gh` is missing, unauthenticated, or the task has no PR, report CI as unknown/not applicable.
 If the daemon is stopped or has no live PID, report that plainly instead of failing the bundle.
 
+## Watch Selected Tasks
+
+Use this read-only recipe when an operator wants to wait on selected in-flight tasks and see only real state changes. It assumes `bash` 4+ (the recipe uses `mapfile`; default macOS `/bin/bash` is 3.2, so run it under a Homebrew `bash`), `jq`, and the standard `awk`, `date`, and `mktemp` utilities. It polls `hive status --json`, ignores noisy `mtime`, `folder_mtime`, and `age_seconds` churn, and uses `HIVE_WATCH_INTERVAL` (default 15 seconds) plus `HIVE_WATCH_TIMEOUT` (default 1800 seconds / 30 minutes), both env-overridable. The loop touches no Hive state: Ctrl-C is safe, it never kills Hive agents or the task's `claude_pid`, never clears markers, and never advances stages. If a loop is left running, find it with `pgrep -af 'hive status --json'` or the shell job table (`jobs`) and stop that shell job.
+
+```bash
+: "${HIVE_WATCH_INTERVAL:=15}"
+: "${HIVE_WATCH_TIMEOUT:=1800}"
+
+# Snapshot/field delimiter. Must NOT be IFS-whitespace: a tab lets `read`
+# collapse empty fields (e.g. an empty marker), corrupting the stage/action/
+# marker/pr_url split. Unit Separator (0x1f) never appears in Hive values.
+us=$'\x1f'
+
+tasks_jq='(.tasks // ([.projects[]?.tasks[]?]))'
+if [ "$#" -gt 0 ]; then
+  slugs=("$@")
+else
+  mapfile -t slugs < <(hive status --json | jq -r "$tasks_jq[] | select(.stage != \"9-done\") | .slug")
+fi
+
+if [ "${#slugs[@]}" -eq 0 ]; then
+  echo "nothing to watch: no active (non-9-done) tasks" >&2
+  exit 0
+fi
+
+snap="$(mktemp)"
+cleanup() {
+  rm -f "$snap" "$snap.next"
+}
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT   # 128 + SIGINT
+trap 'cleanup; exit 143' TERM  # 128 + SIGTERM
+: >"$snap"
+started_at="$(date +%s)"
+first_poll=1
+
+state_key() {
+  jq -cr '[
+    .stage // "",
+    .action // "",
+    .marker // "",
+    .attrs.phase // "",
+    (.attrs.pass // "" | tostring),
+    (.claude_pid_alive // "" | tostring),
+    (if .held == null then "" else "\(.held.reason // "held"):\(.held.retry_after // "")" end),
+    .pr_url // ""
+  ]' <<<"$1"
+}
+
+state_fields() {
+  jq -r --arg us "$us" '[.stage // "", .action // "", .marker // "", .pr_url // ""] | join($us)' <<<"$1"
+}
+
+# Hidden fields (phase, pass, pid_alive, held=reason:retry_after) from a
+# composite key, one per line so mapfile preserves empty values by position.
+hidden_fields() {
+  jq -r '.[3], .[4], .[5], .[6]' <<<"$1"
+}
+
+line_for() {
+  awk -F "$us" -v slug="$1" '$1 == slug { print; exit }' "$snap"
+}
+
+print_change() {
+  local slug="$1" old_stage="$2" old_action="$3" old_marker="$4" new_stage="$5" new_action="$6" new_marker="$7" extras="$8"
+  local old_label="${old_stage:-unknown}"
+  local new_label="${new_stage:-unknown}"
+
+  [ -n "$old_action$old_marker" ] && old_label="$old_label/${old_action:-none}/${old_marker:-none}"
+  [ -n "$new_action$new_marker" ] && new_label="$new_label/${new_action:-none}/${new_marker:-none}"
+  printf '%s: %s → %s%s\n' "$slug" "$old_label" "$new_label" "$extras"
+}
+
+print_final() {
+  local slug="$1" stage="$2" action="$3" marker="$4" pr_url="$5"
+  printf '%s: final %s/%s/%s' "$slug" "${stage:-unknown}" "${action:-none}" "${marker:-none}"
+  [ -n "$pr_url" ] && printf ' pr_url=%s' "$pr_url"
+  printf '\n'
+}
+
+while :; do
+  now="$(date +%s)"
+  status="$(hive status --json)"
+  : >"$snap.next"
+  terminal_count=0
+
+  for slug in "${slugs[@]}"; do
+    row="$(jq -c --arg slug "$slug" "first($tasks_jq[] | select(.slug == \$slug)) // empty" <<<"$status")"
+    if [ -z "$row" ]; then
+      key='["missing"]'
+      new_stage="missing"
+      new_action=""
+      new_marker=""
+      new_pr=""
+    else
+      key="$(state_key "$row")"
+      IFS="$us" read -r new_stage new_action new_marker new_pr < <(state_fields "$row")
+    fi
+
+    old="$(line_for "$slug")"
+    IFS="$us" read -r _ old_key old_stage old_action old_marker old_pr <<<"$old"
+
+    if [ "$first_poll" -eq 0 ] && [ "$key" != "$old_key" ]; then
+      # Surface hidden-field changes (phase, pass, pid_alive, held reason/retry_after)
+      # that leave the stage/action/marker label identical.
+      mapfile -t oh < <(hidden_fields "${old_key:-[]}")
+      mapfile -t nh < <(hidden_fields "$key")
+      extras=""
+      [ "${oh[2]}" != "${nh[2]}" ] && extras+=" pid_alive=${nh[2]:-unknown}"
+      [ "${oh[3]}" != "${nh[3]}" ] && extras+=" held=${nh[3]:-none}"
+      [ "${oh[0]}" != "${nh[0]}" ] && extras+=" phase=${nh[0]:-none}"
+      [ "${oh[1]}" != "${nh[1]}" ] && extras+=" pass=${nh[1]:-none}"
+      print_change "$slug" "$old_stage" "$old_action" "$old_marker" "$new_stage" "$new_action" "$new_marker" "$extras"
+      if [ -z "$old_pr" ] && [ -n "$new_pr" ]; then
+        printf '%s: pr_url became available: %s\n' "$slug" "$new_pr"
+      fi
+      if { [ "$new_stage" = "7-artifacts" ] || [ "$new_stage" = "8-finalize" ]; } &&
+         [ "$old_stage" != "$new_stage" ]; then
+        printf '%s: entered %s' "$slug" "$new_stage"
+        [ -n "$new_pr" ] && printf ' pr_url=%s' "$new_pr"
+        printf '\n'
+      fi
+    fi
+
+    printf '%s%s%s%s%s%s%s%s%s%s%s\n' "$slug" "$us" "$key" "$us" "$new_stage" "$us" "$new_action" "$us" "$new_marker" "$us" "$new_pr" >>"$snap.next"
+
+    if [ "$new_stage" = "9-done" ] ||
+       { [ "$new_stage" = "8-finalize" ] && [ "$new_marker" = "complete" ]; }; then
+      terminal_count=$((terminal_count + 1))
+    fi
+  done
+
+  mv "$snap.next" "$snap"
+  first_poll=0
+
+  [ "${#slugs[@]}" -gt 0 ] && [ "$terminal_count" -eq "${#slugs[@]}" ] && exit 0
+
+  if [ $((now - started_at)) -ge "$HIVE_WATCH_TIMEOUT" ]; then
+    while IFS="$us" read -r slug _ stage action marker pr; do
+      print_final "$slug" "$stage" "$action" "$marker" "$pr"
+    done <"$snap"
+    exit 0
+  fi
+
+  sleep "$HIVE_WATCH_INTERVAL"
+done
+```
+
 ## Daemon Diagnostics And Repair
 
 Use this when interactive `hive` works but the rootless user-systemd `hive-daemon.service` misbehaves. Run the read-only diagnostics in order before any repair so the operator can see whether the service is using the wrong binary, a missing gem environment, or a Ruby `LoadError`.

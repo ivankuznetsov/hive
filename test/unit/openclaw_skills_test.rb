@@ -198,6 +198,30 @@ class OpenClawSkillsTest < Minitest::Test
     assert_includes status_bundle, "read-only"
   end
 
+  def test_umbrella_skill_documents_watch_selected_tasks
+    _metadata, body = read_skill("hive")
+
+    [
+      "## Watch Selected Tasks",
+      "hive status --json",
+      "jq",
+      "HIVE_WATCH_INTERVAL",
+      "HIVE_WATCH_TIMEOUT",
+      "claude_pid_alive",
+      "retry_after",
+      "pr_url",
+      "7-artifacts",
+      "8-finalize",
+      "trap",
+      "Ctrl-C is safe",
+      "never kills Hive agents",
+      "never clears markers",
+      "never advances stages"
+    ].each do |literal|
+      assert_includes body, literal
+    end
+  end
+
   def test_umbrella_skill_documents_daemon_diagnostics_and_repair
     _metadata, body = read_skill("hive")
     diagnostics = section(body, "## Daemon Diagnostics And Repair")

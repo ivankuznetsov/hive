@@ -112,6 +112,10 @@ class WebCommandTest < Minitest::Test
         assert_equal %w[bin/rails server -b], caught.argv[0..2]
         assert caught.env.key?("SECRET_KEY_BASE"), "the persisted session secret must reach Rails"
         assert caught.env.key?("HIVEBOX_STORAGE_DIR")
+        # The managed bundle's Gemfile resolves the hive-cli path gem via
+        # HIVE_CLI_ROOT; the Rails server re-evaluates the Gemfile at boot,
+        # so the exec env must carry it too (not just bundle install).
+        assert_equal Hive::Web::AppBundle.hive_cli_root, caught.env["HIVE_CLI_ROOT"]
       end
     end
   end

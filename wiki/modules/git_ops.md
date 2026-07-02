@@ -3,7 +3,7 @@ title: Hive::GitOps
 type: module
 source: lib/hive/git_ops.rb
 created: 2026-04-25
-updated: 2026-06-14
+updated: 2026-07-02
 tags: [git, init, commit]
 ---
 
@@ -83,7 +83,7 @@ Stages the managed llm-wiki context paths written by `Hive::LlmWikiBootstrap`:
 - `wiki/{index,log,gaps,architecture,decisions,dependencies}.md`
 - `raw/notes/.gitkeep`
 
-If staging produces a diff, commits `chore: initialize llm-wiki`; otherwise returns `:nothing_to_commit`. `hive init` calls this before installing the runtime post-commit hook so the bootstrap commit does not launch a wiki refresh immediately.
+If staging produces a diff, commits `chore: initialize llm-wiki`; otherwise returns `:nothing_to_commit`. `hive init` calls this before installing the runtime post-commit hook so the bootstrap commit does not launch a wiki refresh immediately. The committed context is reusable by linked worktrees: `.llm-wiki/config.json` is marked `created_by: "hive"`, generated `AGENTS.md`/`CLAUDE.md` managed blocks carry the wiki-first read/search/update rules, and the refresh scripts are the Codex-owned automation that later post-commit hooks call.
 
 ## `hive_commit(stage_name:, slug:, action:, body: nil, pathspecs: nil, allow_empty: false)`
 

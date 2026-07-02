@@ -3,7 +3,7 @@ title: hive bot
 type: command
 source: lib/hive/commands/bot.rb, lib/hive/bot/*
 created: 2026-05-14
-updated: 2026-06-30
+updated: 2026-06-24
 tags: [command, bot, telegram, mobile, json]
 ---
 
@@ -167,7 +167,6 @@ The bot is global, not per-project:
 ```yaml
 bot:
   enabled: false
-  pairing_enabled: false
   chat_id_allowlist: [123456789]
   poll_interval_sec: 30
   long_poll_timeout_sec: 25
@@ -205,11 +204,8 @@ on first start, do not configure `alert_state_file` (running without
 persistence means every restart is a burst — accept the trade-off).
 
 `HIVE_TELEGRAM_BOT_TOKEN` is the only supported token source. Missing
-token makes `hive bot start` raise `Hive::ConfigError` (exit 78). An empty
-allowlist also raises unless `bot.pairing_enabled: true`, in which case an
-unknown DM `/start` receives a one-time pairing code and the owner approves it
-with `hive pairing approve telegram <CODE>` (see [[commands/pairing]]). Unknown
-non-`/start` chat IDs are still logged once per bot lifetime and ignored
+token or empty allowlist makes `hive bot start` raise `Hive::ConfigError`
+(exit 78). Unknown chat IDs are logged once per bot lifetime and ignored
 silently.
 
 The shipped-digest sender reuses the same Telegram token and bot client. The

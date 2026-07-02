@@ -3,6 +3,416 @@
 Append-only log of all wiki operations.
 
 <!-- BEGIN GENERATED WIKI LOG FRAGMENTS -->
+## [2026-07-02T01:21:41Z] digest — audit residual wiki refresh coverage
+
+**Action:** Refreshed main-checkout wiki coverage for branch
+`add-a-digest-cli-mode-260702-2eed` after its 6-review residual commit touched
+wiki pages and log fragments. Read `AGENTS.md`, `.llm-wiki/config.json`,
+[[index]], [[decisions]], [[gaps]], and recent [[log]] entries first. Searched
+the project wiki for `digest cli mode merged PR Telegram delivery`; `qmd search`
+had no exact indexed hit, so verification used `rg` and the configured
+main-wiki path check. The configured main-wiki path was absent in this
+checkout, so no external wiki results were available.
+
+Inspected the residual diff with `git show`, read committed snapshots with
+git's `<revision>:<path>` form, and compared them with the current main wiki
+and source for `Hive::Commands::Digest`, `Hive::Digest`,
+`Hive::Digest::MergedPr`, schemas, and focused digest tests. Confirmed current
+[[commands/digest]], [[modules/digest]], [[testing]], and [[gaps]] already
+cover the public digest CLI mode, `--source merged-prs`, repeatable
+`--repo owner/name`, the `hive-merged-pr-digest.v1` envelope, pending Telegram
+pairing reminders, `.env` loading for real sends, and the remaining live
+provider uncertainty. Updated [[gaps]] only to record that this residual audit
+found no new live GitHub/Telegram evidence. Page coverage did not change, so
+[[index]] did not need a page-list update.
+
+Did not edit compiled `wiki/log.md` and did not run `qmd update` or
+`qmd embed`.
+
+**Refreshed pages:**
+- [[gaps]]
+- [[log]]
+
+## [2026-07-02T01:16:26+01:00] wiki — refresh HEAD llm-wiki bootstrap coverage
+
+**Action:** Refreshed planning/documentation coverage after branch `HEAD`
+committed the managed llm-wiki bootstrap update. Read `AGENTS.md`,
+`.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent
+[[log]] entries first; `qmd search "digest cli mode command API dry run"` had
+no indexed hits for the worktree slug, so verification switched to the actual
+commit surface and searched wiki/main-wiki context for llm-wiki bootstrap,
+refresh-script, `main_wiki_path`, and QMD behavior. Inspected the committed diff
+plus current `Hive::LlmWikiBootstrap`, generated script/context sources, and
+focused init coverage.
+
+Documented that the generated refresh script now resolves QMD through
+`HIVE_QMD_BIN`, PATH, Hive's managed QMD install, and install-prefix fallback;
+keeps nested QMD/Codex calls free of Git hook-local environment; and reports
+missing/failing/timed-out QMD as stale-index warnings/no-ops rather than
+aborting the Codex refresh. Also recorded the normalized managed LLM WIKI block
+and `created_by: "hive"` bootstrap ownership. Did not run `qmd update` or
+`qmd embed`.
+
+**Refreshed pages:**
+- [[commands/init]]
+- [[modules/git_ops]]
+- [[gaps]]
+
+## [2026-07-02T00:54:43Z] digest — post-review wiki correction pass
+
+**Action:** Refreshed main-checkout wiki coverage for branch
+`add-a-digest-cli-mode-260702-2eed` after inspecting the post-review wiki-only
+commit and current digest/pairing source. Read `AGENTS.md`, [[index]],
+[[decisions]], [[gaps]], recent [[log]] entries, and `.llm-wiki/config.json`;
+searched the project wiki plus configured main wiki for digest CLI coverage;
+and verified `Hive::Commands::Digest`, `Hive::Digest`,
+`Hive::Digest::MergedPr`, `Hive::Commands::Pairing`, `PairingStore`,
+`PairingApprovalQueue`, schemas, and focused tests.
+
+Corrected the digest command/module pages to match source-backed details that
+were easy to misread in the review-fix diff: the pending-pairing reminder text
+uses the key-icon line with a backticked `hive pairing list` command, merged-PR
+dry-run rendering is grouped by repository with total counts, and JSON
+config/usage error envelopes use the merged-PR schema when that source is
+selected. Existing [[gaps]] uncertainty remains current: this pass found no
+new in-tree artifact proving live GitHub merged-PR collection plus Telegram
+delivery, or a real delivered shipped digest.
+
+Did not edit compiled `wiki/log.md` and did not run `qmd update` or
+`qmd embed`.
+
+**Refreshed pages:**
+- [[commands/digest]]
+- [[modules/digest]]
+- [[gaps]]
+
+## [2026-07-02T00:46:52Z] digest — merged-PR source and pairing approval coverage
+
+**Action:** Refreshed wiki planning/documentation coverage for branch
+`add-a-digest-cli-mode-260702-2eed` after a wiki-residue commit documented
+digest and Telegram pairing surfaces. Read `AGENTS.md`, [[index]],
+[[decisions]], [[gaps]], recent [[log]] entries, `.llm-wiki/config.json`, and
+searched the project wiki plus configured main wiki for `digest cli mode`.
+Inspected the committed diff with `git show`, read committed snapshots with
+git's `<revision>:<path>` form, and verified current source for
+`Hive::Commands::Digest`, `Hive::Digest`, `Hive::Digest::MergedPr`,
+`Hive::Commands::Pairing`, `PairingStore`, `PairingApprovalQueue`, schemas, and
+focused tests.
+
+Documented `hive digest --source merged-prs` / repeatable `--repo owner/name`
+as an agent-free, read-only GitHub merged-PR report with its own
+`hive-merged-pr-digest.v1` envelope; recorded that the default shipped-task
+digest appends pending Telegram pairing reminders from the local pairing
+store. Added [[commands/pairing]] for owner-side Telegram pairing approval,
+updated command/module/testing coverage, bumped [[index]] for the new page,
+and carried forward live-provider uncertainty in [[gaps]]: no in-tree artifact
+proves a real merged-PR digest against GitHub plus Telegram delivery, nor a
+real delivered shipped digest from the opt-in live test.
+
+Did not edit compiled `wiki/log.md` and did not run `qmd update` or
+`qmd embed`.
+
+**Refreshed pages:**
+- [[commands]]
+- [[commands/digest]]
+- [[commands/pairing]]
+- [[modules/digest]]
+- [[testing]]
+- [[gaps]]
+- [[index]]
+
+# 2026-07-02 — arch-review-pairing atomic file helper coverage
+
+Refreshed wiki coverage after `arch-review-pairing` extracted
+`Hive::AtomicFile` and pointed the two new Telegram pairing state writers at
+it. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]],
+[[gaps]], and recent [[log]] entries first; `qmd search "AtomicFile atomic
+write pairing queue tempfile rename fsync"` had no indexed hits, and the
+configured master wiki path had no matching prior context. Inspected the
+committed diff plus `lib/hive/atomic_file.rb`,
+`lib/hive/bot/pairing_store.rb`,
+`lib/hive/bot/pairing_approval_queue.rb`, and
+`test/unit/atomic_file_test.rb`.
+
+Added [[modules/atomic_file]] for the shared tempfile/rename/fsync state-write
+contract, updated [[modules/bot]] so `PairingStore` and
+`PairingApprovalQueue` point at the helper, updated [[testing]] for
+`atomic_file_test.rb`, and updated [[gaps]]/[[index]] for source coverage and
+the remaining migration debt. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[modules/atomic_file]]
+- [[modules/bot]]
+- [[testing]]
+- [[gaps]]
+- [[index]]
+
+## [2026-07-02T00:03:40+01:00] setup — post-commit audit for arch-review-local-web-install
+
+**Action:** Refreshed wiki planning/documentation coverage after branch `arch-review-local-web-install` committed the `hive setup` cleanup that removed the dead `--yes` flag and extracted a shared setup phase runner. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "setup phase runner --yes local web install"` returned no indexed hits, and the configured main wiki path had no matching setup context. Inspected the committed diff plus current `lib/hive/cli.rb`, `lib/hive/commands/setup.rb`, `test/unit/cli_test.rb`, focused setup tests under `test/unit/commands/setup/`, and the current main-checkout wiki pages.
+
+**Coverage:** Confirmed the main wiki already matches the commit: [[commands/setup]] lists `hive setup [--json] [--service] [--no-bootstrap] [--no-init]`, explicitly notes that `--yes` was removed because setup has no interactive prompt path, and documents the shared `phase(name)` contract where provisioning blocks return `[ok, data]` and `StandardError` becomes an `ok:false` phase message instead of aborting before the `hive-setup` JSON envelope. [[testing]] already names the focused setup tests for that shared failure shape, and [[gaps]] already carries forward that this remains source/test-pinned with no live Homebrew/AUR/install.sh release-install smoke artifact. Page coverage did not change, so [[index]] needed no catalog edit. Did not edit compiled [[log]], and did not run `qmd update` or `qmd embed`.
+
+## [2026-07-01T23:01:42Z] setup — remove dead --yes flag and document shared phase runner
+
+**Action:** Refreshed command/API wiki coverage after branch `arch-review-local-web-install` touched the `hive setup` CLI surface, setup command handler, CLI tests, and the committed setup wiki page. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "arch-review-local-web-install local web install command api routes handlers executable README"` returned no indexed hits, and the configured main wiki path had no matching setup context. Inspected the committed diff plus current `lib/hive/cli.rb`, `lib/hive/commands/setup.rb`, `test/unit/cli_test.rb`, and focused `test/unit/commands/setup/*_test.rb`.
+
+**Coverage:** Updated [[commands/setup]] to remove the stale `--yes` flag from the canonical setup synopsis and document that setup has no interactive prompt path. Preserved the broader main-checkout local web install coverage while adding the shared `phase(name)` contract: provisioning blocks return `[ok, data]`, and any `StandardError` becomes an `ok:false` phase with a class/message instead of aborting before the `hive-setup` JSON envelope. Refreshed [[testing]] to describe the focused setup tests for that shared failure shape, and carried forward in [[gaps]] that this refresh found source/test coverage only, not a live Homebrew/AUR/install.sh release-install smoke artifact. Page count stayed 86, so [[index]] did not need a catalog edit. Did not edit compiled [[log]], and did not run `qmd update` or `qmd embed`.
+
+## [2026-07-01T23:58:03+01:00] daemon/web — post-commit wiki audit for arch-review-local-web-install
+
+**Action:** Refreshed wiki planning/documentation coverage after branch `arch-review-local-web-install` committed its wiki refresh for the shared daemon-status producer. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "arch-review-local-web-install local web install daemon status unreadable setup web bundle"` returned no indexed hits, and the configured main wiki path had no relevant matches. Inspected the committed diff plus `git show` path reads for the branch's wiki fragment/gaps page, then checked current `lib/hive/daemon/status_report.rb`, `lib/hive/commands/daemon.rb`, `web/app/controllers/status_controller.rb`, `web/app/views/status/_daemon.html.erb`, `schemas/hive-daemon-status.v1.json`, and focused daemon tests.
+
+Confirmed the main wiki already documents `Hive::Daemon::StatusReport` as the shared `hive-daemon-status` producer for CLI JSON and hivebox, including the web-safe `safe_payload` path and `StatusReport::BINARY_DRIFT_ACTIONABLE` repair-affordance enum. Carried forward the remaining uncertainty in [[gaps]]: source and tests cover source-level `binary_drift: "unreadable"`, but the published `hive-daemon-status` schema still omits that enum value, and no live daemon/web repair artifact was found. Page coverage stayed within existing pages, so [[index]] did not need a page-list update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[gaps]]
+
+## [2026-07-01T23:55:06+01:00] daemon/web — refresh StatusReport command and API coverage
+
+**Action:** Refreshed command/API and web route coverage after branch `arch-review-local-web-install` extracted the `hive-daemon-status` producer from `Hive::Commands::Daemon` into `Hive::Daemon::StatusReport`. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "daemon status status_payload StatusReport binary_drift web dashboard"` returned no indexed hits, and the configured main wiki path had no relevant matches. Inspected the committed diff plus `lib/hive/daemon/status_report.rb`, `lib/hive/commands/daemon.rb`, `web/app/controllers/status_controller.rb`, `web/app/views/status/_daemon.html.erb`, `schemas/hive-daemon-status.v1.json`, and focused daemon tests.
+
+Documented that `hive daemon status --json` and hivebox now share `Hive::Daemon::StatusReport`, with `safe_payload` as the web-safe in-process path and `StatusReport::BINARY_DRIFT_ACTIONABLE` as the web Repair affordance enum source. Updated the daemon command docs to include the source-level `unreadable` drift state. Narrowed the old unreadable-binary gap: source and tests now cover `unreadable`, but the published `hive-daemon-status` schema still omits it from the enum, so an actual unreadable payload is schema-unpinned. Page coverage count stayed the same, so [[index]] did not need a page-list update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/daemon]]
+- [[commands/web]]
+- [[modules/daemon]]
+- [[testing]]
+- [[gaps]]
+
+---
+timestamp: 2026-07-01T09:32:32Z
+title: HEAD review-fix Stop-hook recovery coverage refresh
+---
+
+Refreshed wiki coverage after branch HEAD narrowed `docs/notes/claude-tmux-launch-mode.md` recovery guidance for Claude/tmux review-fix Stop-hook failures. Inspected the committed diff, the committed note via `git show HEAD:docs/notes/claude-tmux-launch-mode.md`, `docs/recipes.md`, `lib/hive/claude_launcher.rb`, `lib/hive/stages/review.rb`, `lib/hive/daemon/stale_agent_healer.rb`, `lib/hive/events.rb`, `test/integration/run_review_test.rb`, and `test/unit/daemon/stale_agent_healer_test.rb`. Updated [[stages/review]], [[state-model]], and [[testing]] so the wiki documents the actual fallback predicate: session-alive launcher evidence plus review facts, artifacts, zero unresolved escalations, readable worktree, and commit / dirty-worktree / whole-pass `RESOLVED/NO-FIX` evidence before `claude_completion_fallback` can suppress the known stop-hook timeout. Added [[gaps]] uncertainty because this is still source/integration-pinned; no checked-in live Claude/tmux replay artifact was found. Did not edit compiled [[log]] and did not run `qmd update` or `qmd embed`.
+
+## [2026-07-01T00:00:00Z] web/setup — refresh local web install command/API coverage
+
+**Action:** Refreshed command/API and executable-service coverage for HEAD after it added local managed web mode. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "hive web setup local bundle service installer app bundle"` had no exact indexed hits, and the configured main wiki path had no matching local-web context. Inspected the committed diff and current source for `lib/hive/cli.rb`, `lib/hive/commands/web.rb`, `lib/hive/commands/web/service_installer.rb`, `lib/hive/web/app_bundle.rb`, `lib/hive/config.rb`, `lib/hive/paths.rb`, `web/app/controllers/application_controller.rb`, and the launchd/systemd example units, plus focused web command, app-bundle, bind-policy, service-installer, and Rails loopback-auth tests.
+
+**Notes:** Existing [[commands/web]], [[commands/setup]], [[commands]], [[architecture]], and [[gaps]] already covered the managed bundle, `hive web install|start|stop|status`, loopback no-auth gate, and separate `hive-web` service. Updated [[modules/config]] so the defaults and validation summary now include `web.local_loopback`, and carried forward the missing live Homebrew/AUR/install.sh release-install smoke evidence in [[gaps]]. Page coverage count did not change, so [[index]] did not need a page-list update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[modules/config]]
+- [[gaps]]
+
+## [2026-06-30T23:06:15Z] setup/web — pass-02 wiki cleanup audit
+
+**Action:** Refreshed planning/documentation coverage after branch `add-local-hive-web-install-260629-f4ca` produced a pass-02 review-fix commit that touched wiki pages and changelog fragments. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first. Ran `qmd search "local web setup install hive setup web bundle daemon web same binary"` (no hits), checked the configured main wiki path, inspected the committed diff and committed wiki pages via `git show`, and rechecked current source/tests for `Hive::Commands::Setup`, `Hive::Web::AppBundle`, `Hive::Commands::Web`, daemon/web service installers, daemon-status drift handling, and focused setup/web/daemon coverage.
+
+**Coverage:** Kept the main-checkout setup/web pages as canonical because current source still supports their broader coverage for `hive setup`, managed web-bundle refresh/install safety, daemon/web same-binary service install, local loopback/no-auth gating, and `hive web start --detach` systemd reload behavior. Corrected [[commands/daemon]] to match the inspected daemon-status enum: current source/schema/tests expose `none`, `path`, `version`, `unparseable`, and `not_applicable`, not a separate `unreadable` state. Updated [[gaps]] to carry forward the missing live release-install smoke evidence and to record the actual same-path unreadable-binary behavior gap. Page coverage did not change, so [[index]] needed no catalog edit. Did not edit compiled [[log]], and did not run `qmd update` or `qmd embed`.
+
+## [2026-06-30T22:53:24Z] wiki — final audit local web install residue
+
+**Action:** Refreshed planning/documentation coverage after branch `add-local-hive-web-install-260629-f4ca` produced another residual 6-review wiki-only commit. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first. Ran `qmd search "add-local-hive-web-install setup web install"` (no hits), checked the configured main wiki path plus the main-checkout wiki, inspected the committed diff with `git show`, and used committed-path reads for `wiki/commands/setup.md` and `wiki/gaps.md`. Rechecked current setup/web/daemon source and focused tests for `Hive::Commands::Setup`, `Hive::Web::AppBundle`, `Hive::Commands::Web`, `Hive::Commands::Daemon`, service installers, and daemon-status schema coverage.
+
+**Coverage:** Kept the global main-checkout wiki pages as canonical. The committed residue is stale relative to the main wiki: it narrows `[[commands/setup]]`, removes `hive setup` from `[[cli]]`, drops managed web-bundle wording from `[[commands]]`, narrows `[[commands/web]]` back toward source-checkout/Docker-only language, and removes focused setup/AppBundle/service-installer coverage from `[[testing]]`. Current source still supports the broader main-wiki coverage for local setup, managed web-bundle install/refresh, same-binary daemon/web service install, loopback/no-auth gating, `hive web start --detach` systemd reload behavior, daemon binary-drift reporting, and focused tests. Updated [[gaps]] only to carry forward that no live Homebrew/AUR/install.sh local-install smoke artifact was found and that `binary_drift: unreadable` remains a schema/test uncertainty. Page coverage did not change, so [[index]] needed no catalog edit. Did not edit compiled [[log]], and did not run `qmd update` or `qmd embed`.
+
+## [2026-06-30T17:53:39Z] wiki — post-commit audit local web install residue
+
+**Action:** Refreshed planning/documentation coverage after branch `add-local-hive-web-install-260629-f4ca` produced a 6-review residual wiki-only commit. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first. Ran `qmd search "add-local-hive-web-install local setup web install daemon service binary drift unreadable"` (no hits), checked the configured main wiki path, inspected the committed diff with `git show`, and used the required commit-path form for `wiki/commands/setup.md`, `wiki/commands/daemon.md`, and `wiki/gaps.md` to compare the committed wiki residue with the global main wiki. Rechecked current setup/web/daemon source and focused tests.
+
+**Coverage:** Kept the global main-checkout wiki pages as canonical. They already contain fuller current coverage for `hive setup`, managed web-bundle install/refresh, daemon/web same-binary service install, local loopback/no-auth gating, `hive web start --detach` systemd reload behavior, daemon binary-drift reporting, and focused AppBundle/service-installer/daemon drift test coverage. Updated [[gaps]] to carry forward that no live Homebrew/AUR/install.sh local-install smoke artifact was found and that `binary_drift: unreadable` remains a schema/test uncertainty. Page coverage did not change, so [[index]] needed no catalog edit. Did not edit compiled [[log]], and did not run `qmd update` or `qmd embed`.
+
+---
+title: Residual wiki cleanup for daemon auto-retry and ad-hoc review
+date: 2026-06-30
+---
+
+Refreshed main-checkout LLM wiki coverage for `make-the-hive-daemon-automatically-260629-223d` after its residual 6-review commit changed wiki pages and changelog fragments.
+
+Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], recent [[log]] entries, and the configured main-wiki path first. `qmd search "make hive daemon automatically auto retry recoverable ad hoc review"` returned no indexed hits, so verification used direct wiki/source search and the branch diff.
+
+Inspected the committed diff plus current source/tests: `Hive::Daemon::RecoverableErrorHealer` still emits task-local `auto_retry` / `auto_retry_skipped` while daemon logs accept `auto_retry`, `auto_retry_skipped`, `auto_retry_exhausted`, and `auto_retry_failed`; `daemon.auto_retry.enabled` remains the kill switch; and `hive review --pr` is implemented through `Hive::Commands::AdhocReview`, `Hive::Gh.pr_metadata`, `Hive::Pr.identifier_to_number`, and `Hive::Worktree.materialize_pr`.
+
+Normalized branch-only wording in [[cli]], [[commands]], [[commands/stage_action]], [[modules/config]], [[modules/gh]], [[modules/pr]], [[modules/worktree]], [[state-model]], [[stages/review]], and [[testing]]. Carried forward [[gaps]] uncertainty for the missing live-daemon recoverable-error smoke and missing live `hive review --pr` smoke. No page was created, so [[index]] page coverage did not change. Did not edit compiled [[log]], and did not run `qmd update` or `qmd embed`.
+
+## [2026-06-30T16:52:33Z] wiki — audit local web install residue commit
+
+**Action:** Refreshed planning/documentation coverage after branch `add-local-hive-web-install-260629-f4ca` produced a 6-review residual wiki-only commit. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], recent [[log]] entries, ran `qmd search "local hive web install setup service web bundle binary drift unreadable"` (no hits), checked the configured main wiki path, inspected the committed diff with `git show`, and rechecked current setup/web/daemon source and tests for the documented local install surface.
+
+**Coverage:** Kept the main-checkout wiki pages as canonical because they already contain the stronger current coverage for `hive setup`, managed web-bundle bootstrap, daemon/web same-binary service install, loopback no-auth gating, daemon binary-drift reporting, web service start behavior, and focused test coverage. No page/index edits were needed beyond this changelog fragment: [[gaps]] already records that this residue audit did not add live local-install smoke evidence and did not resolve the `binary_drift: unreadable` schema/test uncertainty. Did not edit compiled [[log]], and did not run `qmd update` or `qmd embed`.
+
+---
+slug: claude-tmux-ready-detector-refresh
+created: 2026-06-30T16:30:00Z
+---
+
+**Action:** Refreshed main-checkout wiki coverage for branch `fix-claude-tmux-ready-detector-260629-50cc` after its finalize backstop commit touched wiki files. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "claude tmux ready detector packaging detector review limit text threading"` returned no indexed hits. Inspected the committed wiki diff plus current `lib/hive/claude_launcher.rb`, `test/unit/claude_launcher_test.rb`, `hive.gemspec`, `test/unit/gemspec_test.rb`, `test/integration/gem_package_scripts_test.rb`, and existing wiki pages. Updated the shared Claude/tmux ready-prompt docs for Claude Code 2.1.179 separator/caret/footer prompt chrome, Unicode separator spaces, and the stricter bypass-permissions footer check; carried forward the local-gem live replay gap using the branch slug rather than a raw commit reference. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[modules/agent]]
+- [[stages/brainstorm]]
+- [[testing]]
+- [[gaps]]
+
+## [2026-06-30T15:52:48Z] setup/web/daemon — residual wiki coverage audit
+
+**Action:** Refreshed wiki planning/documentation coverage after branch `add-local-hive-web-install-260629-f4ca` produced a residual 6-review wiki-only commit. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], recent [[log]] entries, ran `qmd search "local setup web install daemon status binary drift unreadable"` (no hits), checked the configured main wiki path, inspected the committed diff and committed wiki pages via `git show`, and rechecked current source/tests for `Hive::Commands::Setup`, `Hive::Commands::Web`, `Hive::Web::AppBundle`, `Hive::Commands::Daemon`, `schemas/hive-daemon-status.v1.json`, and related unit coverage.
+
+**Coverage:** Kept the main-checkout wiki pages as the canonical coverage because they are already more complete than the residual committed `commands/setup` page and include the current local setup, managed web-bundle, same-binary service install, loopback auth, daemon-status, and test coverage details. Updated [[gaps]] only to record that this residual refresh did not close the missing live local-install smoke evidence and did not resolve the `binary_drift: unreadable` daemon-status schema/test uncertainty. Did not edit compiled [[log]], and did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[gaps]]
+
+---
+slug: claude-tmux-packaging-detector-refresh
+created: 2026-06-30T15:30:00Z
+---
+
+**Action:** Refreshed main-checkout wiki coverage for branch HEAD after it
+documented the local validation path for unreleased Claude tmux launcher-script
+packaging fixes. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]],
+[[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search
+"Claude tmux packaging detector ready"` returned no indexed hits, and the
+configured master wiki path did not exist in this checkout. Inspected the
+committed diff plus current `hive.gemspec`, `lib/hive/claude_launcher.rb`,
+`lib/hive/commands/daemon.rb`,
+`lib/hive/commands/daemon/service_installer.rb`,
+`test/unit/gemspec_test.rb`, and
+`test/integration/gem_package_scripts_test.rb`. Copied the operating guidance
+into the global main wiki and recorded that source/tests prove the script
+packaging contract, but no in-tree artifact proves a locally built gem replayed
+the affected Claude tmux task to `WAITING` or later. Did not run `qmd update`
+or `qmd embed`.
+
+**Refreshed pages:**
+- [[operating]]
+- [[gaps]]
+
+## [2026-06-30T14:54:19Z] setup/web/daemon — residual local install coverage refresh
+
+**Action:** Refreshed command/API wiki coverage for branch `add-local-hive-web-install-260629-f4ca` after its residual 6-review commit touched `Hive::Commands::Setup`, `Hive::Commands::Web`, daemon/web service installers, `Hive::Web::AppBundle`, `Hive::Web::Loopback`, and `Hive::Daemon::DispatchRequestQueue`. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[architecture]], [[decisions]], [[gaps]], recent [[log]] entries, ran `qmd search "local hive web install service installer daemon web loopback app bundle"` (no hits), and inspected the committed diff plus current source/tests.
+
+**Coverage:** Added missing [[commands/setup]] for the local non-Docker provisioning surface, added it to [[index]]/[[cli]]/[[commands]], and refreshed [[commands/daemon]], [[commands/web]], [[modules/daemon]], [[testing]], and [[gaps]]. Documented `--no-bootstrap` as diagnose-only, setup phase/exit semantics, QMD/web-bundle bootstrap failure reporting, managed web-bundle stale refresh and safe extraction, same-binary daemon/web service install, shared launchd rendering and daemon plist `$0` parsing, web loopback/no-auth gating, `hive web start --detach` systemd reload behavior, and the narrowed daemon queue global-maintenance allowlist. Recorded remaining uncertainty that source can emit `binary_drift: unreadable` while the inspected `hive-daemon-status.v1` schema enum still lacks that value, plus missing live smoke for `hive setup --service` against a real local release install. Did not edit compiled [[log]], and did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/setup]]
+- [[index]]
+- [[cli]]
+- [[commands]]
+- [[commands/daemon]]
+- [[commands/web]]
+- [[modules/daemon]]
+- [[testing]]
+- [[gaps]]
+
+## [2026-06-30T14:48:32Z] wiki — audit make-the-hive-daemon-automatically-260629-223d docs cleanup
+
+**Action:** Refreshed the global project wiki after branch `make-the-hive-daemon-automatically-260629-223d` touched wiki pages and log fragments. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "adhoc review daemon auto retry diagnostic evidence"` returned no indexed hits, and the configured `main_wiki_path` (`/home/asterio/wikis/master/wiki`) was absent, so verification used direct source/wiki reads. Inspected the branch diff plus current `Hive::Commands::AdhocReview`, `Hive::Worktree.materialize_pr`, `Hive::Gh.pr_metadata`, `Hive::Pr.identifier_to_number`, daemon recoverable/stale healer code, `Hive::DiagnosticEvidence`, and focused tests.
+
+The existing global wiki already preserved the ad-hoc PR review source mappings and daemon auto-retry coverage that the branch diff touched. Updated [[commands/status]] because it still described read-only `hive status --diagnose` as identical to status-row JSON; current code uses `Hive::DiagnosticEvidence` to synthesize diagnostics for non-red rows when on-disk evidence exists. Updated [[testing]] and [[gaps]] so `lib/hive/diagnostic_evidence.rb` and `test/unit/diagnostic_evidence_test.rb` are discoverable. Carried forward the live-evidence uncertainty in [[gaps]]: no new artifact was found proving a real daemon recoverable-error retry or a real registered-project ad-hoc PR review flow. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/status]]
+- [[testing]]
+- [[gaps]]
+
+---
+title: Review-fix wiki cleanup for daemon auto-retry and ad-hoc review
+date: 2026-06-30
+---
+
+Refreshed main-checkout LLM wiki coverage for branch `make-the-hive-daemon-automatically-260629-223d` after its review-fix commit changed wiki pages and changelog fragments.
+
+Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], recent [[log]] entries, and the configured main-wiki path first. `qmd search "make-the-hive-daemon-automatically recoverable error healer adhoc review"` returned no hits, and the configured main-wiki path had no branch-specific context.
+
+Inspected the committed wiki diff plus current branch source/tests: `Hive::Daemon::RecoverableErrorHealer` still provides the fixed v1 dependency-outage auto-retry path with task-local `auto_retry` / `auto_retry_skipped` and broader daemon-log audit names, and `Hive::Commands::AdhocReview` still creates/reuses `6-review/adhoc-review-pr-N` tasks through PR metadata, PR-head materialization, and normal `6-review` dispatch. The same source check found no `lib/hive/commands/setup.rb` and no daemon binary-drift status payload in the branch.
+
+Removed stale setup-command and daemon binary-drift coverage from [[index]], [[cli]], [[commands]], [[commands/daemon]], [[commands/web]], [[testing]], and [[gaps]], and deleted the stale [[commands/setup]] page from the main wiki. Carried forward [[gaps]] uncertainty for the missing live-daemon recoverable-error smoke and missing live `hive review --pr` smoke. Did not edit compiled [[log]], and did not run `qmd update` or `qmd embed`.
+
+---
+title: Residual wiki refresh for daemon auto-retry and ad-hoc review
+date: 2026-06-30
+---
+
+Refreshed LLM wiki coverage for branch `make-the-hive-daemon-automatically-260629-223d` after its residual 6-review commit touched command/module/state/test wiki pages, gaps, index metadata, and changelog fragments.
+
+Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], recent [[log]] entries, and existing branch-specific log fragments first. `qmd search "make-the-hive-daemon-automatically recoverable auto retry adhoc review"` returned no indexed hits, so verification used direct wiki/source search plus the configured main-wiki path.
+
+Verified the committed wiki diff and source/test evidence with `git show make-the-hive-daemon-automatically-260629-223d:<path>`: `Hive::Daemon::RecoverableErrorHealer` handles only the fixed dependency-outage allowlist, emits task-local `auto_retry` / `auto_retry_skipped` events while daemon logs keep `auto_retry_exhausted` / `auto_retry_failed`, observes pre-clear mtimes, and requeues `3-plan` after successful clears; `Hive::Commands::AdhocReview` creates or reuses synthetic `6-review/adhoc-review-pr-N` tasks through `Hive::Gh.pr_metadata`, `Hive::Pr.identifier_to_number`, and `Hive::Worktree.materialize_pr`, with ad-hoc fixes disabled by default through `review.adhoc.fix: false`.
+
+Updated [[state-model]] to include the recoverable dependency-outage healer alongside existing terminal-`ERROR` auto-clear semantics, and carried forward [[gaps]] uncertainty for the missing live-daemon Codex/Claude retry smoke and missing live `hive review --pr` smoke. No page was created, so [[index]] page coverage did not change. Did not edit compiled [[log]], and did not run `qmd update` or `qmd embed`.
+
+## [2026-06-30T11:21:02Z] babysitter - extract shared skip-log/escaping helper for the dry-run stubs
+
+**Action:** Fixed Hive patrol finding `command-bin-hive-babysitter-stub-git-2`
+(maintainability/medium): the security-critical skip-log and control-char
+escaping helpers (`log_skip`, `append_skip_log`, `escaped_argv`,
+`escape_control_chars`) were copy-pasted byte-for-byte across
+`bin/hive-babysitter-stub-git` and `bin/hive-babysitter-stub-gh`, so a future
+hardening pass on the audit-log open path or the binary-safe escaping could land
+in one stub and silently diverge from the other.
+
+Extracted the four helpers into a single `bin/hive-babysitter-skip-log.rb` that
+both stubs `require_relative`. require_relative resolves from each stub's real
+`bin/` dir, which survives the PATH-overlay shim handoff because
+`Hive::Babysitter::DryRunEnv#prepare_overlay` execs the stub by its absolute
+`bin/` path through the pinned interpreter. `log_skip` now takes the
+`"git"`/`"gh"` label as its first argument so the audit line still names the
+entrypoint; the only per-stub difference is removed from the duplicated body.
+Added the shared file to `hive.gemspec` `spec.files` so it ships with the gem
+(verified `Gem::Specification.load`).
+
+Verified behaviorally: both stubs still skip a mutating command, write the
+correct command-prefixed line to the skip log, exit 0, and the escaping path
+stays binary-safe (control bytes -> `\xHH`, high bytes pass through, non-UTF-8
+argv does not raise). Full minitest suite (`test/babysitter/acceptance/dry_run_test.rb`,
+`test/unit/gemspec_test.rb`) runs under Hive validation; minitest is not
+installed in this worktree's gem home for a local run.
+
+**Refreshed pages:**
+- [[modules/babysitter]]
+
+---
+timestamp: 2026-06-30T11:05:00Z
+title: Review fix stop-hook failures are bounded auto-recoverable
+---
+
+- `StaleAgentHealer` now treats `REVIEW_ERROR phase=fix reason=fix_failed message="claude stop hook did not signal completion"` as a narrow recoverable infrastructure failure.
+- Generic `fix_failed` markers remain manual; the healer includes the stop-hook `message` in the guarded marker clear so stale rows cannot clear a different fix failure.
+
+---
+title: Recoverable healer and ad-hoc review wiki refresh
+date: 2026-06-29
+---
+
+Refreshed LLM wiki coverage for branch `make-the-hive-daemon-automatically-260629-223d` after its residual docs commit touched command/module/state/test wiki pages and changelog fragments.
+
+Verified the committed wiki diff against committed source and tests using `git show <branch-change>:<path>`: `Hive::Daemon::RecoverableErrorHealer` keeps task-local events to `auto_retry` / `auto_retry_skipped` while daemon logs also accept `auto_retry_exhausted` / `auto_retry_failed`; `daemon.auto_retry.enabled` is the global kill switch; and the branch also adds the `hive review --pr` ad-hoc PR review path through `Hive::Commands::AdhocReview`, `Hive::Gh.pr_metadata`, `Hive::Pr.identifier_to_number`, and `Hive::Worktree.materialize_pr`.
+
+Updated [[cli]], [[commands]], [[commands/daemon]], [[commands/stage_action]], [[modules/config]], [[modules/gh]], [[modules/pr]], [[modules/worktree]], [[stages/review]], [[testing]], and [[gaps]]. No page was created, so [[index]] page coverage did not change. Did not edit compiled [[log]], and did not run `qmd update` or `qmd embed`.
+
+---
+title: Recoverable error healer routing refresh
+date: 2026-06-29
+---
+
+Refreshed LLM wiki coverage for branch `make-the-hive-daemon-automatically-260629-223d` after its docs-only review fix corrected recoverable auto-retry event-channel routing.
+
+Verified the committed wiki diff against current source and tests: `Hive::Events::EVENT_TYPES` only allows task-local `auto_retry` / `auto_retry_skipped`, while `Hive::Daemon::Logger::EVENTS` allows the broader daemon-log audit set (`auto_retry`, `auto_retry_skipped`, `auto_retry_exhausted`, `auto_retry_failed`). `RecoverableErrorHealer` suppresses task events for non-allowlisted reasons, maps exhausted retries to task `auto_retry_skipped`, keeps all four names in the daemon log, guards nil `state_file_mtime` before clears, and lets `HealerSupport#requeue_plan_rerun` log `heal_requeue_failed` after a successful clear without relabeling the clear as `auto_retry_failed`.
+
+Updated [[modules/daemon]] because the main wiki still lacked the recoverable-healer module row and tick-order placement, and added [[gaps]] uncertainty for the missing live-daemon smoke of the Codex-auth / Claude-launch recoverable auto-retry path. No page was created, so [[index]] page coverage did not change.
+
+## [2026-06-29T12:32:47Z] setup/daemon/web — local setup and daemon binary-drift status
+
+**Action:** Refreshed command/API wiki coverage after branch `add-local-hive-web-install-260629-f4ca` touched the local setup command, daemon status payload/schema, daemon service-installer parsing, setup diagnostics, and hivebox status rendering. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "daemon status binary drift installed_binary hive-daemon-status"` returned no indexed hits, and the configured main wiki path had no matching context. Inspected the committed diff plus committed versions of `lib/hive/commands/setup.rb`, `lib/hive/setup/diagnostics.rb`, `lib/hive/commands/daemon.rb`, `lib/hive/commands/daemon/service_installer.rb`, `schemas/hive-daemon-status.v1.json`, `web/app/controllers/status_controller.rb`, `web/app/views/status/_daemon.html.erb`, and focused tests.
+
+**Coverage:** Added [[commands/setup]] for the local non-Docker web/daemon provisioning path and updated [[cli]], [[commands]], [[commands/daemon]], [[commands/web]], [[modules/agent_profile]], [[testing]], [[gaps]], and [[index]]. Documented the `hive-setup` phase report, setup diagnostic status/auth semantics, daemon-status binary-drift fields and enum, bounded installed-binary version probe, macOS launchd `$0` binary parsing, and hivebox's in-process daemon status payload plus actionable repair states. Recorded missing live evidence for real `hive setup` service repair and concurrent web dashboard daemon-status rendering. Did not edit compiled [[log]], and did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/setup]]
+- [[cli]]
+- [[commands]]
+- [[commands/daemon]]
+- [[commands/web]]
+- [[modules/agent_profile]]
+- [[testing]]
+- [[gaps]]
+- [[index]]
+
 ---
 timestamp: 2026-06-25T17:34:45Z
 slug: release-smoke-wiki-refresh

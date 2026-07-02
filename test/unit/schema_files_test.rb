@@ -1068,8 +1068,9 @@ class SchemaFilesTest < Minitest::Test
   def test_hive_init_required_keys_match_producer_emission
     doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-init")))
     schema_required = doc.dig("$defs", "SuccessPayload", "required").sort
+    answers_required = doc.dig("$defs", "Answers", "required").sort
     expected = %w[
-      answers babysitter_enabled budgets claude_mode daemon_autostart_requested daemon_enabled
+      adhoc_auto_fix answers babysitter_enabled budgets claude_mode daemon_autostart_requested daemon_enabled
       default_branch development_agent enabled_reviewers hints hive_state_path ok path patrol_mode patrol_reviewers planning_agent
       project schema schema_version timeouts triage_bias workflow worktree_root
     ].sort
@@ -1084,6 +1085,8 @@ class SchemaFilesTest < Minitest::Test
       ops = Struct.new(:default_branch, :hive_state_path).new("main", state_path)
       entry = { "name" => "demo", "path" => dir, "hive_state_path" => state_path }
       answers = Hive::Commands::Init::Prompts.new(input: StringIO.new, summary_io: StringIO.new).collect
+      assert_equal answers.keys.sort, answers_required,
+                   "schema/prompt answer-key drift in hive-init.v1.json"
       producer = Hive::Commands::Init.new(dir, json: true).send(
         :success_payload, entry: entry, ops: ops, answers: answers, workflow: :coding
       )

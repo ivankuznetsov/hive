@@ -171,6 +171,12 @@ review:
   github_publish:
     enabled: true
     max_attempts: 2
+  # Ad-hoc PR reviews (`hive review --pr`) are review-only by default:
+  # reviewer/escalation comments can be published to GitHub, but Hive does
+  # not prepare local fix commits unless init/operator explicitly enables it.
+  adhoc:
+    reviewers: null
+    fix: <%= adhoc_auto_fix ? "true" : "false" %>
   max_passes: 2
   # Aggregate wall-clock cap across all phases of one `hive run` on a
   # 6-review folder. 28800s = 8h — generous headroom so the cap is not hit

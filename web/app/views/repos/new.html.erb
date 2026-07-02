@@ -112,6 +112,13 @@
         <%= select_tag "settings[triage_bias]", options_for_select(InitSetup::TRIAGE_CHOICES, @defaults["triage_bias"]) %>
       </div>
     </div>
+    <div class="checks checks-column">
+      <label class="check">
+        <%= hidden_field_tag "settings[adhoc_auto_fix]", "0" %>
+        <%= check_box_tag "settings[adhoc_auto_fix]", "1", @defaults["adhoc_auto_fix"] %>
+        Auto-fix ad-hoc PR review findings
+      </label>
+    </div>
   </div>
 
   <div class="card setup-section">

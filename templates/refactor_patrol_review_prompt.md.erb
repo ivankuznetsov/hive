@@ -1,0 +1,45 @@
+You are reviewing one mapped feature slice for high-leverage refactoring work.
+
+Write JSON only to:
+
+<%= output_path %>
+
+Return this shape:
+
+```json
+{
+  "theses": []
+}
+```
+
+Each thesis must argue: feature X has architecture problem Y causing cost Z;
+refactor A reduces that cost while preserving behavior.
+
+Feature:
+- id: <%= feature.id %>
+- kind: <%= feature.kind %>
+- entrypoints: <%= Array(feature.entrypoints).join(", ") %>
+- owned_files: <%= Array(feature.owned_files).join(", ") %>
+- context_files: <%= Array(feature.context_files).join(", ") %>
+- tests: <%= Array(feature.tests).join(", ") %>
+
+Measured leverage:
+<%= JSON.pretty_generate(leverage || {}) %>
+
+Available validation command names:
+<%= commands.keys.join(", ") %>
+
+Rules:
+- Emit at most <%= max_theses %> theses.
+- Cite concrete file paths in every evidence item.
+- Include at least one measurable signal in evidence using one of: churn,
+  fan_in, complexity, coupling, repeated_dependency, bug_density, coverage_gap.
+- Copy the feature boundary from the mapped feature unless you have a concrete
+  reason to flag a cross-feature risk.
+- Include expected_leverage.score and expected_leverage.breakdown; do not emit
+  an unexplained score.
+- Include required_validation.commands using the available command names. If
+  this slice lacks useful tests, set characterization_first true and explain the
+  characterization test needed before refactoring.
+- This is reporting only. Do not propose applying code, opening PRs, or
+  enqueueing review tasks.

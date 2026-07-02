@@ -79,7 +79,6 @@
         "value": {
           "oneOf": [
             { "type": "number" },
-            { "type": "integer" },
             { "type": "string" },
             { "type": "boolean" }
           ]

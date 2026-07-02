@@ -45,6 +45,60 @@ class RefactorPatrolReviewerTest < Minitest::Test
     end
   end
 
+  def test_evidence_without_file_is_flagged_inadmissible_not_dropped
+    with_tmp_dir do |dir|
+      raw = valid_raw_thesis.merge("evidence" => [ { "signal" => "churn", "value" => 10 } ])
+      reviewer = reviewer_for(dir, [ raw ])
+      theses = reviewer.call([ feature(tests: [ "test/checkout_test.rb" ]) ], leverage_by_feature: leverage)
+
+      assert_empty reviewer.review_errors
+      assert_equal 1, theses.size
+      refute theses.first.admissible
+      assert_includes theses.first.admissibility_reason, "missing concrete file path"
+      assert_includes theses.first.risk.fetch("flags"), "inadmissible"
+    end
+  end
+
+  def test_test_rich_slice_with_empty_commands_gets_configured_test_command
+    with_tmp_dir do |dir|
+      raw = valid_raw_thesis.merge(
+        "required_validation" => { "commands" => [], "characterization_first" => false, "notes" => "" }
+      )
+      thesis = reviewer_for(dir, [ raw ]).call([ feature(tests: [ "test/checkout_test.rb" ]) ], leverage_by_feature: leverage).first
+
+      assert_equal [ "test" ], thesis.required_validation.fetch("commands")
+      refute thesis.required_validation.fetch("characterization_first")
+    end
+  end
+
+  def test_agent_supplied_score_does_not_override_measured_leverage
+    with_tmp_dir do |dir|
+      raw = valid_raw_thesis.merge("expected_leverage" => { "score" => 999.0, "breakdown" => { "bogus" => 999.0 } })
+      thesis = reviewer_for(dir, [ raw ]).call([ feature(tests: [ "test/checkout_test.rb" ]) ], leverage_by_feature: leverage).first
+
+      assert_in_delta 0.8, thesis.expected_leverage.fetch("score"), 0.0001
+      assert_equal({ "churn" => 0.5, "fan_in" => 0.3 }, thesis.expected_leverage.fetch("breakdown"))
+    end
+  end
+
+  def test_dry_run_reviewer_does_not_write_theses_or_run_logs
+    with_tmp_dir do |dir|
+      state = Hive::RefactorPatrol::StateStore.new(dir)
+      runner = lambda do |output_path:, **|
+        FileUtils.mkdir_p(File.dirname(output_path))
+        File.write(output_path, JSON.generate("theses" => [ valid_raw_thesis ]))
+        {}
+      end
+      reviewer = Hive::RefactorPatrol::Reviewer.new(dir, cfg: cfg, state: state, agent_runner: runner, dry_run: true)
+
+      theses = reviewer.call([ feature(tests: [ "test/checkout_test.rb" ]) ], leverage_by_feature: leverage)
+
+      assert_equal 1, theses.size
+      assert_empty Dir.glob(File.join(dir, ".hive-state", "refactor_patrol", "theses", "*.json"))
+      assert_empty Dir.glob(File.join(dir, ".hive-state", "refactor_patrol", "runs", "*"))
+    end
+  end
+
   def test_malformed_json_records_review_error_and_continues
     with_tmp_dir do |dir|
       runner = lambda do |output_path:, **|

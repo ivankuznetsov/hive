@@ -1,7 +1,9 @@
+require "fileutils"
 require "json"
 require "json_schemer"
 require "pathname"
 require "securerandom"
+require "tmpdir"
 require "hive"
 require "hive/agent"
 require "hive/agent_profiles"
@@ -36,10 +38,11 @@ module Hive
 
       attr_reader :review_errors
 
-      def initialize(project_root, cfg:, state: StateStore.new(project_root), agent_runner: nil)
+      def initialize(project_root, cfg:, state: StateStore.new(project_root), agent_runner: nil, dry_run: false)
         @project_root = File.expand_path(project_root)
         @cfg = cfg
         @state = state
+        @dry_run = dry_run
         @agent_runner = agent_runner || method(:run_agent)
         @review_errors = []
         @schemer = JSONSchemer.schema(Pathname.new(Hive::Schemas.schema_path("hive-refactor-patrol-thesis")))
@@ -54,7 +57,9 @@ module Hive
       private
 
       def review_feature(feature, leverage)
-        run_dir = @state.run_dir("review")
+        # In dry-run mode we must not create durable artifacts under
+        # .hive-state/refactor_patrol/; scratch the agent output in a temp dir.
+        run_dir = @dry_run ? Dir.mktmpdir("refactor-patrol-review") : @state.run_dir("review")
         output_path = File.join(run_dir, "theses.json")
         prompt = render_prompt(feature, leverage, output_path)
         result = @agent_runner.call(feature: feature, prompt: prompt, output_path: output_path, run_dir: run_dir)
@@ -65,6 +70,8 @@ module Hive
         record_feature_error(feature, "malformed_json", e.message)
       rescue StandardError => e
         record_feature_error(feature, "review_error", "#{e.class}: #{e.message}")
+      ensure
+        FileUtils.remove_entry(run_dir) if @dry_run && run_dir && File.directory?(run_dir)
       end
 
       def render_prompt(feature, leverage, output_path)
@@ -105,9 +112,7 @@ module Hive
           return nil
         end
 
-        thesis = Thesis.from_h(hash)
-        @state.write_thesis(thesis)
-        thesis
+        Thesis.from_h(hash)
       end
 
       def defaulted_hash(feature, leverage, raw, idx)
@@ -115,7 +120,6 @@ module Hive
           "owned_files" => Array(feature.owned_files),
           "entrypoints" => Array(feature.entrypoints)
         }
-        score = raw["expected_leverage"].is_a?(Hash) ? raw["expected_leverage"] : {}
         risk = raw["risk"].is_a?(Hash) ? raw["risk"] : {}
         required_validation = raw["required_validation"].is_a?(Hash) ? raw["required_validation"] : {}
 
@@ -128,9 +132,12 @@ module Hive
           "evidence" => Array(raw["evidence"]),
           "proposed_refactor" => raw["proposed_refactor"].to_s,
           "feature_boundary" => boundary.merge(raw["feature_boundary"].is_a?(Hash) ? raw["feature_boundary"] : {}),
+          # R5: rank by the deterministic measured-signal blend. The agent's
+          # own expected_leverage.score/breakdown is advisory only and is
+          # discarded here so it cannot override the computed ranking.
           "expected_leverage" => {
-            "score" => score.fetch("score", leverage["score"] || 0).to_f,
-            "breakdown" => score.fetch("breakdown", leverage["breakdown"] || {})
+            "score" => (leverage["score"] || 0).to_f,
+            "breakdown" => leverage["breakdown"].is_a?(Hash) ? leverage["breakdown"] : {}
           },
           "confidence" => VALID_CONFIDENCE.include?(raw["confidence"].to_s) ? raw["confidence"].to_s : "low",
           "risk" => default_risk(risk),
@@ -167,10 +174,24 @@ module Hive
         known_commands = configured_commands.keys
         validation["commands"] = Array(validation["commands"]).map(&:to_s).select { |key| known_commands.include?(key) }
         has_tests = Array(feature.tests).any?
-        if !has_tests && validation["commands"].empty?
-          validation["characterization_first"] = true
-          validation["notes"] = "Add characterization tests before refactoring this test-poor slice."
+
+        # R8/A3: every admissible thesis must name validation commands OR opt
+        # into characterization-first guidance. When the agent supplies
+        # neither, inject the configured test command for test-rich slices and
+        # fall back to characterization-first when no command is available.
+        if validation["commands"].empty? && !validation["characterization_first"]
+          if has_tests && known_commands.include?("test")
+            validation["commands"] = [ "test" ]
+          else
+            validation["characterization_first"] = true
+            validation["notes"] = if has_tests
+              "Name explicit validation commands or characterize behavior before refactoring."
+            else
+              "Add characterization tests before refactoring this test-poor slice."
+            end
+          end
         end
+
         hash["confidence"] = "medium" if !has_tests && validation["characterization_first"] && hash["confidence"] == "high"
       end
 
@@ -208,11 +229,13 @@ module Hive
 
       def record_feature_error(feature, kind, message)
         @review_errors << { "feature_id" => feature.id, "error" => kind, "message" => message }
-        @state.write_run_log("review-error-#{SecureRandom.hex(4)}", {
-          "feature_id" => feature.id,
-          "error" => kind,
-          "message" => message
-        })
+        unless @dry_run
+          @state.write_run_log("review-error-#{SecureRandom.hex(4)}", {
+            "feature_id" => feature.id,
+            "error" => kind,
+            "message" => message
+          })
+        end
         []
       end
 

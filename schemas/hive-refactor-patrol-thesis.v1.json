@@ -60,7 +60,6 @@
     "Evidence": {
       "type": "object",
       "additionalProperties": true,
-      "required": ["file"],
       "properties": {
         "file": { "type": "string" },
         "line": { "type": "integer", "minimum": 1 },

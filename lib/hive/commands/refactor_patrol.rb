@@ -26,7 +26,7 @@ module Hive
         @path_hint = path
         @changed_since = changed_since
         @mapper_factory = mapper_factory || ->(root, cfg, state) { Hive::Patrol::Mapper.new(root, cfg: mapper_cfg(cfg), state: state) }
-        @reviewer_factory = reviewer_factory || ->(root, cfg, state) { Hive::RefactorPatrol::Reviewer.new(root, cfg: cfg, state: state) }
+        @reviewer_factory = reviewer_factory || ->(root, cfg, state) { Hive::RefactorPatrol::Reviewer.new(root, cfg: cfg, state: state, dry_run: @dry_run) }
         @leverage_factory = leverage_factory || ->(root, cfg) { Hive::RefactorPatrol::Leverage.new(root, cfg: cfg) }
         @caps_factory = caps_factory || ->(cfg) { Hive::RefactorPatrol::Caps.new(cfg) }
         @collisions_factory = collisions_factory || ->(root, state) { Hive::RefactorPatrol::Collisions.new(root, state: state) }
@@ -58,7 +58,9 @@ module Hive
         end
 
         state = Hive::RefactorPatrol::StateStore.new(project_root)
-        state.ensure!
+        # A dry run must not create durable artifacts under
+        # .hive-state/refactor_patrol/; all reads tolerate a missing dir.
+        state.ensure! unless @dry_run
         features = @mapper_factory.call(project_root, cfg, state).call
         features = apply_scope_hints(features, project_root)
         changed_files = changed_files(project_root)
@@ -87,8 +89,8 @@ module Hive
           update_scan_state(state, project_root, cfg, reviewer)
         end
         scanned_sha = @dry_run ? current_default_sha(project_root, cfg) : state.state["last_scanned_sha"].to_s
-        reporter = Hive::RefactorPatrol::Reporter.new(cfg)
-        payload = reporter.envelope(
+        @reporter = Hive::RefactorPatrol::Reporter.new(cfg)
+        payload = @reporter.envelope(
           project: entry.fetch("name"),
           project_root: project_root,
           dry_run: @dry_run,
@@ -123,12 +125,12 @@ module Hive
 
       def apply_scope_hints(features, project_root)
         scoped = if @feature_hint
-                   features.select { |feature| feature.id == @feature_hint || feature.id.include?(@feature_hint) }
+                   features.select { |feature| feature.id == @feature_hint }
                  elsif @entrypoint_hint
                    features.select { |feature| Array(feature.entrypoints).include?(@entrypoint_hint) }
                  elsif @path_hint
                    normalized = @path_hint.tr("\\", "/")
-                   features.select { |feature| Array(feature.owned_files).any? { |path| path == normalized || path.start_with?("#{normalized}/") || path.start_with?(normalized) } }
+                   features.select { |feature| Array(feature.owned_files).any? { |path| path == normalized || path.start_with?("#{normalized}/") } }
                  else
                    features
                  end
@@ -172,7 +174,7 @@ module Hive
         if @json
           puts JSON.generate(payload)
         else
-          puts Hive::RefactorPatrol::Reporter.new({ "refactor_patrol" => { "max_theses_per_run" => payload.fetch("ranked").size } }).text(payload, theses)
+          puts @reporter.text(payload, theses)
         end
         payload
       end

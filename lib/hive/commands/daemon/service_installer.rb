@@ -1,4 +1,3 @@
-require "cgi"
 require "shellwords"
 require "rexml/document"
 require "hive/commands/service_installer/base"
@@ -21,13 +20,6 @@ module Hive
 
         def unit_noun
           "daemon unit"
-        end
-
-        def target_path
-          case platform
-          when :macos then File.join(@home, "Library/LaunchAgents/local.hive-daemon.plist")
-          when :linux then File.join(@home, ".config/systemd/user/hive-daemon.service")
-          end
         end
 
         def installed_exec_binary

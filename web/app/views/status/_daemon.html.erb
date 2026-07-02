@@ -1,7 +1,7 @@
 <section class="daemon-panel">
   <% running = daemon_status["running"] %>
   <% drift = daemon_status["binary_drift"].to_s %>
-  <% actionable_drift = Hive::Commands::Daemon::BINARY_DRIFT_ACTIONABLE.include?(drift) %>
+  <% actionable_drift = Hive::Daemon::StatusReport::BINARY_DRIFT_ACTIONABLE.include?(drift) %>
   <div>
     <strong>Daemon</strong>
     <span class="task-meta"><%= running ? "running" : "not running" %></span>

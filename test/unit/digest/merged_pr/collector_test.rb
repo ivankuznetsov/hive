@@ -75,6 +75,22 @@ class HiveDigestMergedPrCollectorTest < Minitest::Test
     assert_nil prs.first.hive_slug
   end
 
+  def test_malformed_pr_is_dropped_with_warning
+    gh = FakeGh.new({
+      "owner/repo" => [
+        pr(1, "2026-06-13T12:00:00Z"),
+        pr(0, "2026-06-13T13:00:00Z")
+      ]
+    }, [])
+    collector = Hive::Digest::MergedPr::Collector.new(gh: gh, matcher: FakeMatcher.new({}, []), logger: nil)
+
+    prs = collector.for_date(Date.new(2026, 6, 13), repos: [ "owner/repo" ])
+
+    assert_equal [ 1 ], prs.map(&:number)
+    assert_equal 1, collector.warnings.size
+    assert_match(/dropping malformed PR/, collector.warnings.first)
+  end
+
   private
 
   def pr(number, merged_at, author: { "login" => "alice", "is_bot" => false }, fork: false, head: "feature")

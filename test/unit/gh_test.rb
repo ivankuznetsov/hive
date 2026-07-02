@@ -560,6 +560,23 @@ def test_repo_name_with_owner_parses_repo_view
   assert_equal({ "cfg" => true }, captured.last.fetch(:cfg))
 end
 
+def test_repo_name_with_owner_raises_on_gh_error
+  status = Hive::Gh::CommandStatus.new(exitstatus: 1)
+  with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_cmd, **_kwargs) { [ "", "no remote", status ] }) do
+    err = assert_raises(Hive::GhError) { Hive::Gh.repo_name_with_owner("/tmp/repo") }
+    assert_match(/gh repo view.*failed/, err.message)
+    assert_match(/no remote/, err.message)
+  end
+end
+
+def test_repo_name_with_owner_raises_on_unparseable_json
+  status = Hive::Gh::CommandStatus.new(exitstatus: 0)
+  with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_cmd, **_kwargs) { [ "not json", "", status ] }) do
+    err = assert_raises(Hive::GhError) { Hive::Gh.repo_name_with_owner("/tmp/repo") }
+    assert_match(/unparseable JSON/, err.message)
+  end
+end
+
 def test_list_merged_prs_uses_repo_search_window
   status = Hive::Gh::CommandStatus.new(exitstatus: 0)
   captured = nil
@@ -575,6 +592,27 @@ def test_list_merged_prs_uses_repo_search_window
   assert_includes captured.first, "owner/repo"
   assert_includes captured.first, "merged:2026-06-12..2026-06-14"
   assert_match(/mergedAt/, captured.first.fetch(captured.first.index("--json") + 1))
+end
+
+def test_list_merged_prs_raises_on_gh_error
+  status = Hive::Gh::CommandStatus.new(exitstatus: 1)
+  with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_cmd, **_kwargs) { [ "", "api unavailable", status ] }) do
+    err = assert_raises(Hive::GhError) do
+      Hive::Gh.list_merged_prs("owner/repo", since: "2026-06-12", until_date: "2026-06-14")
+    end
+    assert_match(/gh pr list.*failed for owner\/repo/, err.message)
+    assert_match(/api unavailable/, err.message)
+  end
+end
+
+def test_list_merged_prs_raises_on_unparseable_json
+  status = Hive::Gh::CommandStatus.new(exitstatus: 0)
+  with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_cmd, **_kwargs) { [ "not json", "", status ] }) do
+    err = assert_raises(Hive::GhError) do
+      Hive::Gh.list_merged_prs("owner/repo", since: "2026-06-12", until_date: "2026-06-14")
+    end
+    assert_match(/unparseable JSON/, err.message)
+  end
 end
 
 def test_pr_stats_returns_line_and_commit_counts_keyed_off_the_url

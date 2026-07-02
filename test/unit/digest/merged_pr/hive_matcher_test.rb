@@ -24,4 +24,28 @@ class HiveDigestMergedPrHiveMatcherTest < Minitest::Test
 
     assert_nil matcher.match("feature")
   end
+
+  def test_registry_entry_failure_is_warned_and_skipped
+    io = StringIO.new
+    logger = Logger.new(io)
+    matcher = Hive::Digest::MergedPr::HiveMatcher.new(
+      registry: -> { [ {}, { "hive_state_path" => "/tmp/missing" } ] },
+      logger: logger
+    )
+
+    assert_nil matcher.match("hive/task-260613-abcd")
+    assert_match(/Hive match skipped/, io.string)
+  end
+
+  def test_registry_failure_returns_nil
+    io = StringIO.new
+    logger = Logger.new(io)
+    matcher = Hive::Digest::MergedPr::HiveMatcher.new(
+      registry: -> { raise "registry unavailable" },
+      logger: logger
+    )
+
+    assert_nil matcher.match("hive/task-260613-abcd")
+    assert_match(/Hive match failed/, io.string)
+  end
 end

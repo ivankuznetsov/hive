@@ -3,7 +3,7 @@ title: hive init
 type: command
 source: lib/hive/commands/init.rb
 created: 2026-04-25
-updated: 2026-06-23
+updated: 2026-07-02
 tags: [command, bootstrap, git, prompts, llm-wiki]
 ---
 

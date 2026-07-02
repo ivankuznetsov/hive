@@ -190,6 +190,34 @@ class HiveCommandsDigestTest < Minitest::Test
     assert_includes output.string, "Merged PR digest"
   end
 
+  def test_merged_pr_real_send_prints_empty_digest_wording_for_zero_count
+    output = StringIO.new
+    merged = MergedRunner.new([], merged_result(prs: [], count: 0))
+
+    Hive::Commands::Digest.new(
+      date: "2026-06-13",
+      source: "merged-prs",
+      merged_runner: merged,
+      output: output
+    ).call
+
+    assert_equal "hive digest: sent empty digest (0 merged PRs) for 2026-06-13\n", output.string
+  end
+
+  def test_merged_pr_real_send_prints_count
+    output = StringIO.new
+    merged = MergedRunner.new([], merged_result)
+
+    Hive::Commands::Digest.new(
+      date: "2026-06-13",
+      source: "merged-prs",
+      merged_runner: merged,
+      output: output
+    ).call
+
+    assert_equal "hive digest: sent 1 merged PRs for 2026-06-13\n", output.string
+  end
+
   def test_repo_without_source_implies_merged_prs
     output = StringIO.new
     merged = MergedRunner.new([], merged_result)
@@ -283,25 +311,27 @@ class HiveCommandsDigestTest < Minitest::Test
     )
   end
 
-  def merged_result(delivery: nil)
-    pr = Hive::Digest::MergedPr::PullRequest.new(
-      repo: "owner/repo",
-      number: 1,
-      title: "Title",
-      url: "https://github.com/owner/repo/pull/1",
-      mergedAt: "2026-06-13T12:00:00Z",
-      author: "alice",
-      authorIsBot: false,
-      headRefName: "feature",
-      isCrossRepository: false,
-      hive_slug: nil,
-      hive_stage: nil
-    )
+  def merged_result(delivery: nil, prs: nil, count: nil)
+    prs ||= [
+      Hive::Digest::MergedPr::PullRequest.new(
+        repo: "owner/repo",
+        number: 1,
+        title: "Title",
+        url: "https://github.com/owner/repo/pull/1",
+        mergedAt: "2026-06-13T12:00:00Z",
+        author: "alice",
+        authorIsBot: false,
+        headRefName: "feature",
+        isCrossRepository: false,
+        hive_slug: nil,
+        hive_stage: nil
+      )
+    ]
     Hive::Digest::MergedPr::Result.new(
       date: Date.new(2026, 6, 13),
       repos: [ "owner/repo" ],
-      prs: [ pr ],
-      count: 1,
+      prs: prs,
+      count: count || prs.size,
       dry_run: delivery.nil?,
       warnings: [],
       message: "Merged PR digest — 2026-06-13\n\nTotal: 1 PR",

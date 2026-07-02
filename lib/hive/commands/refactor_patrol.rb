@@ -25,7 +25,7 @@ module Hive
         @entrypoint_hint = entrypoint
         @path_hint = path
         @changed_since = changed_since
-        @mapper_factory = mapper_factory || ->(root, cfg, state) { Hive::Patrol::Mapper.new(root, cfg: mapper_cfg(cfg), state: state) }
+        @mapper_factory = mapper_factory || ->(root, cfg, state) { Hive::Patrol::Mapper.new(root, cfg: mapper_cfg(cfg), state: state, dry_run: @dry_run) }
         @reviewer_factory = reviewer_factory || ->(root, cfg, state) { Hive::RefactorPatrol::Reviewer.new(root, cfg: cfg, state: state, dry_run: @dry_run) }
         @leverage_factory = leverage_factory || ->(root, cfg) { Hive::RefactorPatrol::Leverage.new(root, cfg: cfg) }
         @caps_factory = caps_factory || ->(cfg) { Hive::RefactorPatrol::Caps.new(cfg) }
@@ -63,10 +63,10 @@ module Hive
         state.ensure! unless @dry_run
         features = @mapper_factory.call(project_root, cfg, state).call
         features = apply_scope_hints(features, project_root)
-        changed_files = changed_files(project_root)
+        changed = changed_files(project_root)
         leverage = @leverage_factory.call(project_root, cfg)
         leverage_by_feature = features.to_h do |feature|
-          boost = @changed_since && !changed_files.empty? && (Array(feature.owned_files) & changed_files).any?
+          boost = @changed_since && !Array(changed).empty? && (Array(feature.owned_files) & Array(changed)).any?
           [ feature.id, leverage.score(feature, changed_since: @changed_since, changed_boost: boost) ]
         end
 
@@ -138,18 +138,31 @@ module Hive
         return scoped unless @changed_since && (@feature_hint || @entrypoint_hint || @path_hint)
 
         changed = changed_files(project_root)
+        # A git failure yields nil (distinct from an empty "no changes" diff);
+        # degrade to the scoped set rather than filtering it down to zero, in
+        # keeping with the churn/leverage graceful-degradation posture.
+        return scoped if changed.nil?
+
         scoped.select { |feature| (Array(feature.owned_files) & changed).any? }
       end
 
       def changed_files(project_root)
+        return @changed_files if defined?(@changed_files)
+
+        @changed_files = compute_changed_files(project_root)
+      end
+
+      def compute_changed_files(project_root)
         return [] unless @changed_since
 
         out, _err, status = Open3.capture3("git", "-C", project_root, "diff", "--name-only", "#{@changed_since}..HEAD")
-        return [] unless status.success?
+        # nil signals a git failure so callers can degrade gracefully; [] means
+        # the diff succeeded with no changed files.
+        return nil unless status.success?
 
         out.lines.map { |line| line.strip.tr("\\", "/") }.reject(&:empty?)
       rescue StandardError
-        []
+        nil
       end
 
       def current_default_sha(project_root, cfg)

@@ -112,7 +112,7 @@ module Hive
           return nil
         end
 
-        Thesis.from_h(hash)
+        thesis
       end
 
       def defaulted_hash(feature, leverage, raw, idx)
@@ -213,6 +213,14 @@ module Hive
         reasons << "missing measurable signal" unless has_signal
         hash["admissibility_reason"] = reasons.join("; ")
         hash["risk"]["flags"] |= [ "inadmissible" ]
+
+        # R7/R10/DoD flag-not-drop: a truly evidence-less thesis would fail the
+        # schema's evidence.minItems and be dropped as schema_invalid (pinning
+        # last_scanned_sha and forcing perpetual re-scan). Seed a synthetic
+        # marker so it survives to the report as a flagged inadmissible record.
+        if evidence.empty?
+          hash["evidence"] = [ { "snippet" => "no evidence supplied; retained as inadmissible" } ]
+        end
       end
 
       def schema_errors(hash)
@@ -244,7 +252,10 @@ module Hive
           folder: run_dir,
           project_root: @project_root,
           state_file: File.join(run_dir, "review.md"),
-          log_dir: File.join(@state.root, "logs"),
+          # In dry-run mode the run_dir is a throwaway tmp dir; route agent
+          # logs there too so a preview creates no durable artifacts under
+          # .hive-state/refactor_patrol/.
+          log_dir: @dry_run ? File.join(run_dir, "logs") : File.join(@state.root, "logs"),
           slug: "refactor-patrol-review"
         )
         profile = Hive::AgentProfiles.lookup(@cfg.dig("refactor_patrol", "agent") || "claude", cfg: @cfg)

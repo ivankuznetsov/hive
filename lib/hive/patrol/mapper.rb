@@ -9,14 +9,17 @@ module Hive
     class Mapper
       DEFAULT_EXCLUDES = [ ".git", ".hive-state" ].freeze
 
-      def initialize(project_root, cfg:, state: StateStore.new(project_root))
+      def initialize(project_root, cfg:, state: StateStore.new(project_root), dry_run: false)
         @project_root = File.expand_path(project_root)
         @cfg = cfg
         @state = state
+        @dry_run = dry_run
       end
 
       def call
-        @state.ensure!
+        # A dry run must not create durable artifacts under the state tree, so
+        # skip ensure!/write_feature and only compute the mapping in memory.
+        @state.ensure! unless @dry_run
         files = tracked_files
         features = []
         features.concat(route_features(files))
@@ -24,7 +27,7 @@ module Hive
         features.concat(package_features(files))
         features.concat(test_features(files))
         features = dedupe(features)
-        features.each { |feature| @state.write_feature(feature) }
+        features.each { |feature| @state.write_feature(feature) } unless @dry_run
         features
       end
 

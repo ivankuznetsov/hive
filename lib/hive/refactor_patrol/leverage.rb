@@ -99,8 +99,8 @@ module Hive
         owned = Array(feature.owned_files).to_set
         files = tracked_files
         outbound = Array(feature.owned_files).sum do |path|
-          content = read(path)
-          files.count { |candidate| !owned.include?(candidate) && references_path?(content, candidate) }
+          lowered = read(path).downcase
+          files.count { |candidate| !owned.include?(candidate) && references_path?(lowered, candidate) }
         end
         outbound + (inbound || fan_in(feature))
       end
@@ -116,9 +116,11 @@ module Hive
         end.compact.reject(&:empty?).uniq
       end
 
-      def references_path?(content, path)
+      # +lowered+ is the already-downcased content of an owned file; callers
+      # hoist the downcase out of the per-candidate loop so it is computed
+      # once per owned file rather than once per (owned file × candidate).
+      def references_path?(lowered, path)
         stem = path.sub(/\.[^.]+\z/, "")
-        lowered = content.downcase
         lowered.include?(path.downcase) || lowered.include?(stem.downcase)
       end
 
@@ -167,6 +169,17 @@ module Hive
       end
 
       def read(path)
+        # The Leverage instance is shared across every mapped feature and each
+        # signal pass re-reads the tracked-file set, so memoize content to keep
+        # the scan O(tracked_files) rather than O(features × tracked_files).
+        content_cache[path] ||= read_uncached(path)
+      end
+
+      def content_cache
+        @content_cache ||= {}
+      end
+
+      def read_uncached(path)
         # Tracked files may be binary or non-UTF-8; scrub invalid byte
         # sequences so downcase/match? in the signal passes cannot raise
         # ArgumentError and abort the whole scan (R5/U4 graceful degradation).

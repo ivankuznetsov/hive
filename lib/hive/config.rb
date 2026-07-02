@@ -2717,6 +2717,14 @@ module Hive
               "refactor_patrol.leverage.weights.#{key} in #{describe_source(source_path)} must be a number >= 0; " \
               "got #{value.inspect} (#{value.class})"
       end
+
+      # An all-zero weight set produces an empty leverage breakdown, which fails
+      # the thesis schema's expected_leverage.breakdown.minProperties and
+      # silently drops every thesis; require at least one positive weight.
+      unless REFACTOR_PATROL_WEIGHT_KEYS.any? { |key| weights[key].is_a?(Numeric) && weights[key].positive? }
+        raise ConfigError,
+              "refactor_patrol.leverage.weights in #{describe_source(source_path)} must have at least one positive weight"
+      end
     end
 
     def validate_refactor_patrol_review!(refactor, source_path)

@@ -60,7 +60,10 @@ module Hive
 
         paths = candidate_paths(thesis)
         details = paths.select { |path| public_api_path?(path) || public_api_content?(path) }.uniq
-        return [] if details.empty?
+        # R9/R10 never-silently-clean: honor an agent-declared risk even when no
+        # heuristic path matches, so a disallowed cap is always flagged.
+        declared = thesis.risk["public_api_impact"] == true
+        return [] if details.empty? && !declared
 
         thesis.risk["public_api_impact"] = true
         thesis.risk["public_api_details"] |= details
@@ -75,7 +78,10 @@ module Hive
         # outside both owned_files and entrypoints count as cross-feature.
         own = (Array(boundary["owned_files"]) + Array(boundary["entrypoints"])).map { |path| path.to_s.tr("\\", "/") }
         out_of_boundary = candidate_paths(thesis).reject { |path| own.include?(path) }.uniq
-        return [] if out_of_boundary.empty?
+        # R9/R10 never-silently-clean: honor an agent-declared risk even when no
+        # out-of-boundary path is detected, so a disallowed cap is always flagged.
+        declared = thesis.risk["cross_feature_impact"] == true
+        return [] if out_of_boundary.empty? && !declared
 
         thesis.risk["cross_feature_impact"] = true
         thesis.risk["cross_feature_details"] |= out_of_boundary
@@ -92,6 +98,10 @@ module Hive
         details = (manifests + mentions).uniq
         return [] if details.empty?
 
+        # A dependency bump crosses the feature boundary, so flag the impact
+        # too — otherwise populated cross_feature_details with
+        # cross_feature_impact: false reads as inconsistent.
+        thesis.risk["cross_feature_impact"] = true
         thesis.risk["cross_feature_details"] |= details
         [ "dependency_bump" ]
       end
@@ -108,7 +118,10 @@ module Hive
       end
 
       def public_api_content?(path)
-        path.end_with?(".rb") && path.include?("cli")
+        # Only genuine CLI command surfaces, not any *.rb whose name merely
+        # contains the "cli" substring (e.g. client.rb). Matches bin/ scripts
+        # and files named exactly cli.rb, mirroring PUBLIC_API_PATTERNS.
+        path.start_with?("bin/") || File.basename(path) == "cli.rb"
       end
 
       def dependency_manifest?(path)

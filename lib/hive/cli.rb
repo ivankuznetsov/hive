@@ -743,7 +743,12 @@ module Hive
     option :dry_run, type: :boolean, default: false, desc: "print the digest instead of sending Telegram"
     option :source, type: :string,
                     desc: "digest data source: 'merged-prs' for a GitHub merged-PR report (default: shipped Hive tasks)"
-    option :repo, type: :array, default: [],
+    # repeatable: true so a repeated `--repo a/b --repo c/d` accumulates
+    # (Thor collects each occurrence into a nested array) instead of the last
+    # flag silently overwriting the earlier ones — the space-listed form
+    # `--repo a/b c/d` still works too. `.flatten` collapses both forms to a
+    # flat list of owner/name slugs for the command.
+    option :repo, type: :array, default: [], repeatable: true,
                   desc: "restrict merged-PR source to explicit owner/name repos (repeatable); implies --source merged-prs"
     def digest
       require "hive/commands/digest"
@@ -752,7 +757,7 @@ module Hive
         dry_run: options[:dry_run],
         json: options[:json],
         source: options[:source],
-        repos: options[:repo]
+        repos: options[:repo].flatten
       ).call
     end
 

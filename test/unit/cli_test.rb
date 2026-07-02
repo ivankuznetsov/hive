@@ -479,6 +479,23 @@ class HiveCliTest < Minitest::Test
       }, calls.first.fetch(:kwargs))
     end
 
+    # Repeated `--repo` must accumulate, not silently keep only the last repo —
+    # the documented multi-repo form (`--repo a/b --repo c/d`).
+    with_command_new_stub(Hive::Commands::Digest) do |calls|
+      Hive::CLI.start([ "digest", "--source", "merged-prs",
+                        "--repo", "owner/repo", "--repo", "other/repo" ])
+      assert_equal [ "owner/repo", "other/repo" ], calls.first.fetch(:kwargs).fetch(:repos),
+                   "repeated --repo flags must accumulate every repo, not overwrite"
+    end
+
+    # The undocumented space-listed form (`--repo a/b c/d`) must also flatten
+    # to the same list of slugs.
+    with_command_new_stub(Hive::Commands::Digest) do |calls|
+      Hive::CLI.start([ "digest", "--source", "merged-prs",
+                        "--repo", "owner/repo", "other/repo" ])
+      assert_equal [ "owner/repo", "other/repo" ], calls.first.fetch(:kwargs).fetch(:repos)
+    end
+
     with_command_new_stub(Hive::Commands::AnswerDigest) do |calls|
       Hive::CLI.start([ "answer-digest", "--date", "2026-06-27", "--dry-run", "--json" ])
       assert_equal [], calls.first.fetch(:args)

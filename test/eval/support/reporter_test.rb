@@ -500,6 +500,32 @@ class HiveEvalReporterTest < Minitest::Test
     end
   end
 
+  def test_cli_invalid_invocations_preserve_non_report_files_passed_as_report
+    Dir.mktmpdir("hive-eval-report") do |dir|
+      cases = [
+        [ "parse error", [ "--report", :report, "--bogus" ], /invalid option: --bogus/ ],
+        [ "missing scenario", [ "--report", :report, "--scenario", "definitely_missing", "--no-judge" ], /scenario not found/ ]
+      ]
+
+      cases.each do |label, argv_template, expected_error|
+        report = File.join(dir, "#{label.tr(" ", "-")}.txt")
+        contents = "not a hive eval report\n"
+        File.write(report, contents)
+        argv = argv_template.map { |arg| arg == :report ? report : arg }
+
+        _out, err, status = Open3.capture3(
+          { "HIVE_EVAL_NO_JUDGE" => "1" },
+          "bin/hive-eval", *argv
+        )
+
+        refute status.success?
+        assert_equal 64, status.exitstatus, err
+        assert_match(expected_error, err)
+        assert_equal contents, File.read(report), "#{label} must not delete a non-report file"
+      end
+    end
+  end
+
   def test_cli_help_is_read_only_and_preserves_selected_report
     [ "--help", "-h" ].each do |help_flag|
       Dir.mktmpdir("hive-eval-report") do |dir|

@@ -1945,6 +1945,12 @@ class BabysitterDryRunEnvTest < Minitest::Test
     path
   end
 
+  def dynamic_loader_env_values
+    # Empty values still prove the keys were present and then deleted, without asking
+    # the host dynamic loader to resolve a deliberately bogus test library.
+    Hive::Babysitter::DryRunEnv::DYNAMIC_LOADER_ENV.to_h { |key| [ key, "" ] }
+  end
+
   def real_git_env(dir)
     {
       "HIVE_BABYSITTER_REAL_GIT" => real_git_binary,

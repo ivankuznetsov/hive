@@ -79,7 +79,7 @@ Closed outcome enum: `success`, `failure`, `conflict`, `timeout`, `budget_exhaus
 - Help/manual dispatch hardening: the `git` dry-run stub skips `--help`, `--man`, `--web`, `--html`, and `--info` before allowlisted read passthrough because `git <command> --help` routes through configured manual, web, or info viewers.
 - Both dry-run stubs normalize `ARGV` to binary strings before classification, so invalid/non-UTF-8 bytes in skipped commands reach the default-deny audit path instead of raising during regex option parsing.
 - Current source/test coverage also treats `GIT_EXEC_PATH`, `GIT_ASKPASS`, and `SSH_ASKPASS` as fail-closed git env seams in that same dry-run boundary.
-- Current source/test coverage also scrubs inherited dynamic-loader env (`LD_*` / `DYLD_*`) before generated overlay wrappers hand off to Ruby, and removes the same env family before `bin/hive-babysitter-stub-git` execs real git.
+- Current source/test coverage also scrubs inherited dynamic-loader env (`LD_*` / `DYLD_*`) before generated overlay wrappers hand off to Ruby, and removes the same env family before both dry-run stubs exec real `git` or `gh`.
 - The GH browser-flag scanner is command-aware: it still skips real `--web` / short `-w` browser flags, but treats `w` inside value-taking read-option values as data, so reads such as `pr diff -eworkflow.yml`, `pr list -lwip`, `pr view -qweb`, and `pr list --search -wip` pass through.
 
 - Skip-log FIFO hardening: both dry-run stubs now preflight existing skip-log targets with `File.lstat`, open with `File::NOFOLLOW | File::NONBLOCK`, keep the post-open regular-file/owner check, and warn while still skipping when a FIFO, symlink, device, or non-owned path is configured.

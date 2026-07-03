@@ -3,6 +3,8 @@
 
 require_relative "hive-babysitter-skip-log"
 
+scrub_dynamic_loader_env!
+
 argv = ARGV.map(&:b)
 
 # Walk only the leading global-option region (everything before the subcommand) and

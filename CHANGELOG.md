@@ -2,6 +2,14 @@
 
 All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with terse bullets — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
+## 0.3.5
+
+- Fixed the hivebox container startup path so the supervisor passes
+  `--allow-public` when binding the web UI to `0.0.0.0`; the GitHub owner gate
+  still protects the UI, and the release image smoke can boot a fresh box.
+- Fixed AUR channel verification to retry the fallback `hive-bin` clone, so a
+  transient AUR HTTPS EOF does not fail post-release verification after publish.
+
 ## 0.3.4
 
 - Added an `hive init` prompt for ad-hoc PR auto-fix, so `hive review --pr`

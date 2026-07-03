@@ -41,7 +41,11 @@ class E2ECliDriverTest < Minitest::Test
         driver = Hive::E2E::CliDriver.new(sandbox, home)
         driver.define_singleton_method(:command) { |_args| [ command, marker ] }
 
-        result = driver.call([ "ignored" ], expect_exit: nil, cwd: sandbox, timeout: 0.2)
+        # Keep the timeout well under the fixture's 30s child sleep, but generous
+        # enough that a slow/loaded CI worker reliably forks the shell and writes
+        # "#{marker}.pgid" before the timeout kills it. A sub-second timeout races
+        # fixture startup and makes the later File.read of the marker raise ENOENT.
+        result = driver.call([ "ignored" ], expect_exit: nil, cwd: sandbox, timeout: 5.0)
 
         assert result.timed_out
         pgid = Integer(File.read("#{marker}.pgid").strip)

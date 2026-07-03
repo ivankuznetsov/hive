@@ -8,6 +8,7 @@ class GemspecTest < Minitest::Test
 
     assert_includes spec.files, "bin/hive-babysitter-skip-log.rb"
     assert_includes spec.files, "bin/hive-babysitter-stub-gh"
+    assert_includes spec.files, "bin/hive-babysitter-stub-gh.rb"
     assert_includes spec.files, "bin/hive-babysitter-stub-git"
   end
 

@@ -31,4 +31,66 @@ class E2ECliDriverTest < Minitest::Test
       end
     end
   end
+
+  def test_timeout_marks_result_and_kills_process_group
+    Dir.mktmpdir("sandbox") do |sandbox|
+      Dir.mktmpdir("home") do |home|
+        File.write(File.join(sandbox, "Gemfile"), "source \"https://rubygems.org\"\n")
+        marker = File.join(sandbox, "timeout-fixture")
+        command = write_timeout_fixture(sandbox)
+        driver = Hive::E2E::CliDriver.new(sandbox, home)
+        driver.define_singleton_method(:command) { |_args| [ command, marker ] }
+
+        result = driver.call([ "ignored" ], expect_exit: nil, cwd: sandbox, timeout: 0.2)
+
+        assert result.timed_out
+        pgid = Integer(File.read("#{marker}.pgid").strip)
+        refute_process_group_alive pgid
+      ensure
+        kill_process_group(marker)
+      end
+    end
+  end
+
+  def write_timeout_fixture(dir)
+    command = File.join(dir, "timeout-fixture-command")
+    File.write(command, <<~SH)
+      #!/bin/sh
+      marker="$1"
+      (
+        trap '' TERM
+        sleep 30
+      ) >/dev/null 2>&1 &
+      child="$!"
+      printf '%s\\n' "$child" > "$marker.pid"
+      printf '%s\\n' "$$" > "$marker.pgid"
+      wait "$child"
+    SH
+    File.chmod(0o755, command)
+    command
+  end
+
+  def refute_process_group_alive(pgid)
+    deadline = Time.now + 2
+    sleep 0.05 while process_group_alive?(pgid) && Time.now < deadline
+    refute process_group_alive?(pgid), "timeout must terminate the spawned process group"
+  end
+
+  def process_group_alive?(pgid)
+    Process.kill(0, -pgid)
+    true
+  rescue Errno::ESRCH
+    false
+  rescue Errno::EPERM
+    true
+  end
+
+  def kill_process_group(marker)
+    return unless marker && File.exist?("#{marker}.pgid")
+
+    pgid = Integer(File.read("#{marker}.pgid").strip)
+    Process.kill("KILL", -pgid) if process_group_alive?(pgid)
+  rescue StandardError
+    nil
+  end
 end

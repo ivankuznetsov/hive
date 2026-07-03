@@ -207,8 +207,8 @@ class WebSupervisorTest < Minitest::Test
       with_tmp_global_config do
         sup = build
         started = []
-        sup.define_singleton_method(:start_child) do |name, _argv|
-          started << name
+        sup.define_singleton_method(:start_child) do |name, argv|
+          started << [ name, argv ]
           published_pids << ENV["HIVEBOX_SUPERVISOR_PID"]
         end
         # Make the loop exit on its first iteration and turn terminate_all into a
@@ -220,8 +220,11 @@ class WebSupervisorTest < Minitest::Test
 
         sup.run
 
-        assert_includes started, "daemon", "run must start the daemon child"
-        assert_includes started, "web", "run must start the web child"
+        assert_includes started.map(&:first), "daemon", "run must start the daemon child"
+        assert_includes started.map(&:first), "web", "run must start the web child"
+        web = started.find { |name, _argv| name == "web" }
+        assert_equal %w[hive web --bind 0.0.0.0 --allow-public], web.last,
+                     "container web child must opt into public bind; owner gate still protects UI"
         assert_equal [ Process.pid.to_s, Process.pid.to_s ], published_pids,
                      "run must publish its pid before children are spawned"
         assert sup.instance_variable_get(:@terminated), "run must terminate_all on exit"

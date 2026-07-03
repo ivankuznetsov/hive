@@ -18,6 +18,12 @@ module Hive
       # A run shorter than this counts as a fast failure and earns a backoff.
       FAST_FAILURE_SEC = 10
 
+      # The container binds all interfaces by design: hivebox's front door is
+      # the GitHub device-flow gate (an ownerless box is claimable; first login
+      # pins the owner), not the CLI's ownerless-bind refusal. Actual network
+      # exposure remains the operator's compose port-mapping choice.
+      WEB_CHILD_ARGV = %w[hive web --bind 0.0.0.0 --allow-public].freeze
+
       def initialize
         @children = []
         @stopping = false
@@ -34,7 +40,7 @@ module Hive
         ENV["HIVEBOX_SUPERVISOR_PID"] = Process.pid.to_s
         previous_signal_handlers = trap_signals
         start_child("daemon", %w[hive daemon start])
-        start_child("web", %w[hive web --bind 0.0.0.0])
+        start_child("web", WEB_CHILD_ARGV)
         start_child("bot", %w[hive bot start --foreground]) if bot_enabled?
         loop do
           break if @stopping

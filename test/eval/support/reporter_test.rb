@@ -526,6 +526,45 @@ class HiveEvalReporterTest < Minitest::Test
     end
   end
 
+  def test_cli_report_link_to_non_report_file_is_not_followed
+    # A --report path that is a symlink or hard link to an unrelated file must
+    # not be followed when the report is written: the report lands on a fresh
+    # regular file (its own inode) and the linked target is left untouched.
+    # Otherwise File.write in ReportStore.write! would clobber the target the
+    # link points at.
+    link_kinds = {
+      "symlink" => ->(target, report) { File.symlink(target, report) },
+      "hard link" => ->(target, report) { File.link(target, report) }
+    }
+
+    link_kinds.each do |kind, make_link|
+      Dir.mktmpdir("hive-eval-report") do |dir|
+        target = File.join(dir, "precious.txt")
+        target_contents = "do not clobber me via #{kind}\n"
+        File.write(target, target_contents)
+
+        report = File.join(dir, "report.json")
+        make_link.call(target, report)
+
+        _out, err, status = Open3.capture3(
+          { "HIVE_EVAL_NO_JUDGE" => "1" },
+          "bin/hive-eval", "--scenario", "s1_status", "--no-judge", "--report", report
+        )
+
+        assert status.success?, "#{kind}: #{err}"
+        assert_equal target_contents, File.read(target),
+          "#{kind}: writing the report must not follow the link and clobber its target"
+        refute File.symlink?(report),
+          "#{kind}: the report path must be replaced with a fresh regular file, not a #{kind}"
+        refute_equal File.stat(target).ino, File.stat(report).ino,
+          "#{kind}: the report must land on a fresh inode, not the linked target's"
+        doc = JSON.parse(File.read(report))
+        assert_equal "hive-eval-report", doc.fetch("schema"),
+          "#{kind}: the report must be a valid hive-eval-report on a fresh file"
+      end
+    end
+  end
+
   def test_cli_help_is_read_only_and_preserves_selected_report
     [ "--help", "-h" ].each do |help_flag|
       Dir.mktmpdir("hive-eval-report") do |dir|

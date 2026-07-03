@@ -75,6 +75,24 @@ ok()   { printf '  ok   %s\n' "$*"; PASS=$((PASS + 1)); }
 fail() { printf '  FAIL %s\n' "$*" >&2; FAIL=$((FAIL + 1)); }
 log()  { printf '[verify-channel:%s] %s\n' "$CHANNEL" "$*"; }
 
+git_clone_retry() {
+  local url="$1"
+  local dest="$2"
+  local attempt rc
+  for attempt in 1 2 3; do
+    rm -rf "$dest"
+    if git clone --depth 1 "$url" "$dest"; then
+      return 0
+    fi
+    rc=$?
+    if [[ "$attempt" -eq 3 ]]; then
+      return "$rc"
+    fi
+    log "git clone failed (attempt ${attempt}/3, rc=${rc}); retrying"
+    sleep $((attempt * 2))
+  done
+}
+
 # Resolve the channel's install command, expected binary, and marker path.
 HIVE_BIN=""
 MARKER_PATH=""
@@ -109,7 +127,7 @@ install_aur() {
     command -v makepkg >/dev/null 2>&1 || { echo "neither yay/paru nor makepkg found" >&2; exit 3; }
     local build
     build="$(mktemp -d)"
-    git clone --depth 1 "https://aur.archlinux.org/hive-bin.git" "$build/hive-bin"
+    git_clone_retry "https://aur.archlinux.org/hive-bin.git" "$build/hive-bin"
     ( cd "$build/hive-bin" && makepkg -si --noconfirm --needed )
   fi
   HIVE_BIN="/usr/bin/hive"

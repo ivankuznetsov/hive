@@ -153,6 +153,19 @@ The normal Hive loop is simple: the daemon advances ready tasks, and the TUI is 
 
 That is enough to understand what Hive does: it turns a rough idea into durable stage files, then keeps advancing the same task toward code, a pull request, review, and archive. Manual TUI keys still exist for power users who want to steer a specific stage themselves; the happy path is daemon-first. See [wiki/commands/tui.md](wiki/commands/tui.md) for the full dashboard reference.
 
+## Digest Reports
+
+`hive digest` sends the daily shipped-task digest for the local day that just ended. It scans completed `9-done` tasks, uses the configured digest agent for summaries when there is work to report, and delivers through Telegram.
+
+For a read-only GitHub report of pull requests merged on a local day, use:
+
+```bash
+hive digest --source merged-prs --dry-run
+hive digest --source merged-prs --date 2026-06-13 --repo owner/name --json
+```
+
+The merged-PR source never mutates Hive state and does not run an LLM; it groups merged PRs by repo with mechanical MarkdownV2 output. See [wiki/commands/digest.md](wiki/commands/digest.md) for the full contract and JSON schema details.
+
 ## Manage Hive From Telegram in 2 Minutes
 
 Hive can notify you, show the queue, and accept approvals from Telegram. It uses long polling, so there is no webhook, public URL, or tunnel to configure.

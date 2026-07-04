@@ -718,11 +718,20 @@ module Hive
       or an ErrorPayload (ok:false/error_kind/exit_code/message) for a bad
       --date (error_kind=config) or bad flags (error_kind=usage).
 
+      The default source is the shipped-task digest described above. Use
+      --source merged-prs to build a read-only GitHub report of pull requests
+      merged on the requested local day. That source never mutates Hive state
+      and uses a mechanical renderer instead of the digest agent. Add --repo
+      owner/name to restrict the merged-PR report to one or more explicit
+      repositories; --repo implies --source merged-prs.
+
       Examples:
         hive digest                          # yesterday, send to Telegram
         hive digest --date 2026-06-13        # a specific local day
         hive digest --dry-run                # print the composed message, send nothing
         hive digest --date 2026-06-13 --json # machine-readable hive-digest envelope
+        hive digest --source merged-prs --dry-run
+        hive digest --repo owner/name --repo other/repo --json
 
       Exit codes:
         0  empty / sent / failed_notice (a notice was delivered)
@@ -732,12 +741,23 @@ module Hive
     DESC
     option :date, type: :string, desc: "local calendar date to digest (YYYY-MM-DD)"
     option :dry_run, type: :boolean, default: false, desc: "print the digest instead of sending Telegram"
+    option :source, type: :string,
+                    desc: "digest data source: 'merged-prs' for a GitHub merged-PR report (default: shipped Hive tasks)"
+    # repeatable: true so a repeated `--repo a/b --repo c/d` accumulates
+    # (Thor collects each occurrence into a nested array) instead of the last
+    # flag silently overwriting the earlier ones — the space-listed form
+    # `--repo a/b c/d` still works too. `.flatten` collapses both forms to a
+    # flat list of owner/name slugs for the command.
+    option :repo, type: :array, default: [], repeatable: true,
+                  desc: "restrict merged-PR source to explicit owner/name repos (repeatable); implies --source merged-prs"
     def digest
       require "hive/commands/digest"
       Hive::Commands::Digest.new(
         date: options[:date],
         dry_run: options[:dry_run],
-        json: options[:json]
+        json: options[:json],
+        source: options[:source],
+        repos: options[:repo].flatten
       ).call
     end
 

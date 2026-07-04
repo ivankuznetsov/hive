@@ -133,7 +133,10 @@ class GoldenPathE2E < ApplicationSystemTestCase
     wait_for_answer_window!(slug)
     answer_field.fill_in with: "Yes — ship it."
     click_button "Send answers"
-    assert_text "Recorded answer", wait: 10
+    # The daemon can advance quickly enough that a Turbo morph replaces the
+    # flash before Capybara observes it. The durable contract is the answer
+    # landing in brainstorm.md before the pipeline resumes.
+    wait_for_answer_persisted!(slug, "Yes — ship it.")
 
     # --- The daemon drives brainstorm→plan→execute on its own --------------
     # Each hop is a real dispatch + real fake-agent run + real stage logic;
@@ -215,6 +218,29 @@ class GoldenPathE2E < ApplicationSystemTestCase
       end
 
       sleep 0.05
+    end
+  end
+
+  def wait_for_answer_persisted!(slug, answer, timeout: 10)
+    path_glob = File.join(ENV["HIVE_TEST_HOME_ROOT"], "repos", @project,
+                          ".hive-state", "stages", "*", slug, "brainstorm.md")
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
+    loop do
+      content = Dir[path_glob].filter_map do |path|
+        File.read(path)
+      rescue Errno::ENOENT
+        nil
+      end.find { |text| text.include?(answer) }
+      if content
+        assert_includes content, answer, "submitted answer must persist before daemon resumes"
+        return
+      end
+
+      if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
+        flunk "answer #{answer.inspect} never appeared in #{path_glob}"
+      end
+
+      sleep 0.1
     end
   end
 

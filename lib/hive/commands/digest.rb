@@ -1,21 +1,35 @@
 require "date"
 require "json"
 require "hive/digest"
+require "hive/digest/merged_pr"
 
 module Hive
   module Commands
     class Digest
-      def initialize(date: nil, dry_run: false, json: false, runner: Hive::Digest, output: $stdout)
+      MERGED_PRS_SOURCE = "merged-prs".freeze
+
+      def initialize(date: nil, dry_run: false, json: false, runner: Hive::Digest,
+                     merged_runner: Hive::Digest::MergedPr, output: $stdout,
+                     source: nil, repos: [])
         @date = date
         @dry_run = dry_run
         @json = json
         @runner = runner
+        @merged_runner = merged_runner
         @output = output
+        @source = source
+        @repos = Array(repos)
       end
 
       def call
         local_date = parse_date
-        result = @runner.run(date: local_date, dry_run: @dry_run)
+        result =
+          if merged_pr_source?
+            @merged_runner.run(date: local_date, dry_run: @dry_run, repos: @repos)
+          else
+            validate_source!
+            @runner.run(date: local_date, dry_run: @dry_run)
+          end
         emit(result)
         result
       rescue Hive::Error => e
@@ -47,9 +61,29 @@ module Hive
         raise Hive::ConfigError, "hive digest: --date must be YYYY-MM-DD; got #{@date.inspect}"
       end
 
+      def normalized_source
+        source = @source.to_s.strip
+        return MERGED_PRS_SOURCE if source.empty? && @repos.any?
+        return nil if source.empty?
+
+        source
+      end
+
+      def merged_pr_source?
+        normalized_source == MERGED_PRS_SOURCE
+      end
+
+      def validate_source!
+        return if normalized_source.nil?
+
+        raise Hive::ConfigError, "hive digest: --source must be 'merged-prs'; got #{@source.inspect}"
+      end
+
       def emit(result)
         if @json
           @output.puts JSON.generate(json_payload(result))
+        elsif merged_pr_source?
+          emit_merged_pr_human(result)
         elsif @dry_run
           @output.puts result.message
         else
@@ -58,6 +92,8 @@ module Hive
       end
 
       def json_payload(result)
+        return merged_pr_json_payload(result) if merged_pr_source?
+
         {
           # Derive from status so a machine consumer can tell a delivered
           # digest from one that fell back to a failure notice.
@@ -77,10 +113,39 @@ module Hive
         }
       end
 
+      def merged_pr_json_payload(result)
+        {
+          "ok" => true,
+          "schema" => "hive-merged-pr-digest",
+          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-merged-pr-digest"),
+          "date" => result.date.iso8601,
+          "source" => MERGED_PRS_SOURCE,
+          "dry_run" => @dry_run,
+          "repos" => result.repos,
+          "count" => result.count,
+          "prs" => result.prs.map(&:to_h),
+          "chat_id" => result.delivery&.chat_id,
+          "message" => @dry_run ? result.message : nil
+        }
+      end
+
+      def emit_merged_pr_human(result)
+        if @dry_run
+          @output.puts result.message
+        elsif result.count.zero?
+          # A zero-count digest is still delivered (a "Total: 0 PRs" message is
+          # sent); say so explicitly so the line doesn't read as "sent nothing".
+          @output.puts "hive digest: sent empty digest (0 merged PRs) for #{result.date.iso8601}"
+        else
+          @output.puts "hive digest: sent #{result.count} merged PRs for #{result.date.iso8601}"
+        end
+      end
+
       def emit_error_envelope(error)
+        schema = merged_pr_source? ? "hive-merged-pr-digest" : "hive-digest"
         @output.puts JSON.generate(
-          "schema" => "hive-digest",
-          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-digest"),
+          "schema" => schema,
+          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch(schema),
           "ok" => false,
           "error_class" => error.class.name.split("::").last,
           "error_kind" => error.is_a?(Hive::ConfigError) ? "config" : "internal",

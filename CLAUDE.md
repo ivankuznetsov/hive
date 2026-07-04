@@ -41,36 +41,30 @@ Before making architectural decisions, check ~/wikis/master/wiki/ for existing p
 All new feature, bugfix, or refactor work must start in an isolated git worktree (use the `Agent` tool with `isolation: "worktree"` for delegated tasks, or `git worktree add` for direct work). Never mutate the main checkout for non-trivial changes — the worktree keeps the main branch clean and lets parallel work proceed without conflicts.
 
 <!-- BEGIN LLM WIKI -->
-## Wiki
+## LLM Wiki
 
-This project has an LLM-maintained knowledge base in `wiki/`.
+This project has a managed LLM wiki. Treat it as required project context.
 
-- `wiki/` — project knowledge pages maintained by the agent
-- `wiki/index.md` — catalog of all pages
-- `wiki/log.md` — compiled append-only changelog
-- `wiki/log.d/` — per-change changelog fragments
-- `wiki/gaps.md` — known gaps and open questions
-- `raw/notes/` — manually added reference material
+- Project wiki: `wiki/`
+- Index: `wiki/index.md`
+- Change log: `wiki/log.md` compiled from `wiki/log.d/*.md`
+- Known gaps: `wiki/gaps.md`
+- Raw notes: `raw/notes/`
 
-Always check `wiki/` before answering questions about this project's architecture, patterns, or decisions.
+Before planning, implementation, review, or debugging:
 
-When you learn something new about the project or make a decision:
-1. Create or update the relevant page in `wiki/`
-2. Update `wiki/index.md` if a new page was created
-3. Add a `wiki/log.d/<timestamp>-<slug>.md` fragment; do not edit compiled `wiki/log.md` directly in feature PRs
+1. Read `wiki/index.md`.
+2. Search the project wiki with `qmd search "<topic>"` when QMD is available, or `rg "<topic>" wiki/` otherwise.
+3. Use `qmd query "<topic>"` only when local model generation is acceptable; if it hangs or errors, fall back to `qmd search` or `rg`.
+4. If `.llm-wiki/config.json` has `main_wiki_path`, search that main wiki too.
+5. Use `/llm-wiki:wiki-plan` for planning-stage work when available.
 
-Never hallucinate. Ground everything in code or existing wiki pages. If unsure, note it in `wiki/gaps.md`.
+When code behavior, architecture, commands, or dependencies change:
 
-Use `[[page-name]]` backlinks between wiki pages.
+1. Update affected wiki pages.
+2. Add a new `wiki/log.d/<timestamp>-<slug>.md` fragment; do not edit compiled `wiki/log.md` directly in feature PRs.
+3. Record uncertainty in `wiki/gaps.md`.
 
-Query protocol:
-1. Read `.llm-wiki/config.json` when it exists.
-2. Run `qmd search "<topic>"` when QMD is available. Use `qmd query "<topic>"` only when local model generation is acceptable; if it hangs or errors, fall back to `qmd search` or `rg`.
-3. Fall back to `rg "<topic>" wiki/`.
-4. Check the configured `main_wiki_path` before making architectural decisions when it exists.
-5. Also check default main cross-project wiki paths when they exist:
-   - `~/wikis/master/wiki/`
-   - `~/wikis/main/wiki/`
-   - `<parent-of-project>/wikis/master/wiki/`
-   - `<parent-of-project>/wikis/main/wiki/`
+Headless wiki refresh is managed by `.llm-wiki/refresh-wiki.sh` and
+`.llm-wiki/post-commit-refresh.sh`. Codex is the configured headless wiki agent.
 <!-- END LLM WIKI -->

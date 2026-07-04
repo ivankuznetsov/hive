@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-merged-pr-digest.v1.json",
+  "title": "hive merged-PR digest output (v1)",
+  "description": "Stable contract emitted by `hive digest --source merged-prs --json`. The success envelope reports GitHub pull requests merged on one local calendar day. Per-repo GitHub failures are non-fatal and produce a partial successful digest. Usage/config errors emit the ErrorPayload.",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
+  ],
+  "$defs": {
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "date",
+        "source",
+        "dry_run",
+        "repos",
+        "count",
+        "prs",
+        "message"
+      ],
+      "properties": {
+        "schema": { "const": "hive-merged-pr-digest" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": true },
+        "date": {
+          "type": "string",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+        },
+        "source": { "const": "merged-prs" },
+        "dry_run": { "type": "boolean" },
+        "repos": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[^/\\s]+/[^/\\s]+$" }
+        },
+        "count": { "type": "integer", "minimum": 0 },
+        "prs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/PullRequest" }
+        },
+        "chat_id": {
+          "type": ["integer", "string", "null"]
+        },
+        "message": {
+          "type": ["string", "null"],
+          "description": "The rendered digest text on a --dry-run; null on a real send."
+        }
+      }
+    },
+    "PullRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repo",
+        "number",
+        "title",
+        "url",
+        "mergedAt",
+        "author",
+        "authorIsBot",
+        "headRefName"
+      ],
+      "properties": {
+        "repo": { "type": "string", "pattern": "^[^/\\s]+/[^/\\s]+$" },
+        "number": { "type": "integer", "minimum": 1 },
+        "title": { "type": "string" },
+        "url": { "type": "string" },
+        "mergedAt": { "type": "string" },
+        "author": { "type": "string" },
+        "authorIsBot": { "type": "boolean" },
+        "headRefName": { "type": "string" },
+        "isCrossRepository": { "type": "boolean" },
+        "hive_slug": { "type": "string" },
+        "hive_stage": { "type": "string" }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "error_class",
+        "error_kind",
+        "exit_code",
+        "message"
+      ],
+      "properties": {
+        "schema": { "const": "hive-merged-pr-digest" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "error_class": { "type": "string" },
+        "error_kind": {
+          "type": "string",
+          "enum": ["usage", "config", "internal"]
+        },
+        "exit_code": {
+          "type": "integer",
+          "enum": [1, 64, 70, 78]
+        },
+        "message": { "type": "string" }
+      }
+    }
+  }
+}

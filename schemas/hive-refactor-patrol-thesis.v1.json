@@ -147,6 +147,10 @@
         "flags": {
           "type": "array",
           "items": { "type": "string" }
+        },
+        "advisories": {
+          "type": "array",
+          "items": { "type": "string" }
         }
       }
     },

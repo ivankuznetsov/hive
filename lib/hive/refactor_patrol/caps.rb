@@ -28,6 +28,7 @@ module Hive
       def apply(thesis)
         risk = thesis.risk ||= {}
         risk["flags"] = Array(risk["flags"]).map(&:to_s)
+        risk["advisories"] = Array(risk["advisories"]).map(&:to_s)
         risk["public_api_details"] = Array(risk["public_api_details"])
         risk["cross_feature_details"] = Array(risk["cross_feature_details"])
 
@@ -60,14 +61,20 @@ module Hive
 
         paths = candidate_paths(thesis)
         details = paths.select { |path| public_api_path?(path) || public_api_content?(path) }.uniq
-        # R9/R10 never-silently-clean: honor an agent-declared risk even when no
-        # heuristic path matches, so a disallowed cap is always flagged.
-        declared = thesis.risk["public_api_impact"] == true
-        return [] if details.empty? && !declared
-
-        thesis.risk["public_api_impact"] = true
         thesis.risk["public_api_details"] |= details
-        [ "public_api_impact" ]
+
+        # R9/R10 never-silently-clean: an agent-declared contract change is
+        # always flagged, even when no heuristic path matches.
+        if thesis.risk["public_api_impact"] == true
+          return [ "public_api_impact" ]
+        end
+
+        # A thesis is behavior-preserving by contract, so merely working
+        # inside files that host public surface (bin/, cli.rb, schemas/…) is
+        # not an API change. Surface it as an advisory — visible in the
+        # report, weighed by the human — without disqualifying the thesis.
+        thesis.risk["advisories"] |= [ "touches_public_api_surface" ] unless details.empty?
+        []
       end
 
       def detect_cross_feature(thesis)

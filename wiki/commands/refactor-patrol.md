@@ -54,8 +54,12 @@ is on-demand only.
 6. Validate each thesis against `hive-refactor-patrol-thesis.v1`, stamp a
    refactor-patrol fingerprint, enforce admissibility, and require behavior
    preservation guidance.
-7. Run `Hive::RefactorPatrol::Caps` to flag cap breaches, public API surfaces,
-   cross-feature impact, and dependency-bump risk.
+7. Run `Hive::RefactorPatrol::Caps` to flag cap breaches, declared public-API
+   impact, cross-feature impact, and dependency-bump risk. Refactoring
+   preserves the public contract by definition, so merely working inside
+   public-surface files (`bin/`, `cli.rb`, `schemas/`) is a non-blocking
+   `touches_public_api_surface` advisory, not a flag — only an agent-declared
+   contract change flags `public_api_impact`.
 8. Run `Hive::RefactorPatrol::Collisions` to suppress already-seen/dismissed
    refactor theses and flag open patrol activity on the same slice.
 9. Persist under `.hive-state/refactor_patrol/` unless `--dry-run`, and emit

@@ -29,17 +29,41 @@ class RefactorPatrolCapsTest < Minitest::Test
     assert_includes thesis.risk.fetch("flags"), "not_single_feature"
   end
 
-  def test_cli_and_schema_boundaries_mark_public_api_impact
+  # A thesis is behavior-preserving by contract: working inside files that
+  # host public surface is an advisory, not an API change, so it must not
+  # disqualify the thesis (no flag, public_api_impact stays false).
+  def test_public_surface_paths_are_advisory_not_flagged
     cli = sample_thesis(boundary_files: [ "lib/hive/cli.rb" ])
     schema = sample_thesis(boundary_files: [ "schemas/foo.v1.json" ])
 
     Hive::RefactorPatrol::Caps.new(cfg).apply(cli)
     Hive::RefactorPatrol::Caps.new(cfg).apply(schema)
 
-    assert_equal true, cli.risk.fetch("public_api_impact")
+    [ cli, schema ].each do |thesis|
+      assert_equal false, thesis.risk.fetch("public_api_impact")
+      refute_includes thesis.risk.fetch("flags"), "public_api_impact"
+      assert_includes thesis.risk.fetch("advisories"), "touches_public_api_surface"
+    end
     assert_includes cli.risk.fetch("public_api_details"), "lib/hive/cli.rb"
-    assert_equal true, schema.risk.fetch("public_api_impact")
     assert_includes schema.risk.fetch("public_api_details"), "schemas/foo.v1.json"
+  end
+
+  def test_agent_declared_public_api_impact_is_flagged
+    thesis = sample_thesis(risk_hash: default_risk.merge("public_api_impact" => true))
+
+    Hive::RefactorPatrol::Caps.new(cfg).apply(thesis)
+
+    assert_includes thesis.risk.fetch("flags"), "public_api_impact"
+    assert_empty thesis.risk.fetch("advisories")
+  end
+
+  def test_allowed_public_api_changes_produce_no_flag_or_advisory
+    thesis = sample_thesis(boundary_files: [ "lib/hive/cli.rb" ])
+
+    Hive::RefactorPatrol::Caps.new(cfg("allow_public_api_changes" => true)).apply(thesis)
+
+    assert_empty thesis.risk.fetch("flags")
+    assert_empty thesis.risk.fetch("advisories")
   end
 
   def test_out_of_boundary_evidence_marks_cross_feature_impact
@@ -68,6 +92,7 @@ class RefactorPatrolCapsTest < Minitest::Test
     Hive::RefactorPatrol::Caps.new(cfg).apply(thesis)
 
     assert_empty thesis.risk.fetch("flags")
+    assert_empty thesis.risk.fetch("advisories")
     assert_equal false, thesis.risk.fetch("public_api_impact")
     assert_equal false, thesis.risk.fetch("cross_feature_impact")
   end

@@ -58,6 +58,12 @@ Available validation command names:
 
 Rules:
 - Emit at most <%= max_theses %> theses.
+- Refactoring preserves the public contract by definition: CLI commands and
+  flags, output schemas, exit codes, and routes must behave identically after
+  the refactor. Working *inside* files that host that contract is fine. If a
+  proposal cannot avoid changing the contract, it is not a refactor thesis —
+  either drop it or declare `risk.public_api_impact: true` with details so it
+  is reported as out-of-contract rather than accepted.
 - Every evidence item must set `file` to one repository-relative path string —
   the key is singular `file`, never a `files` array. A thesis with no
   file-backed evidence item is inadmissible and will be rejected.

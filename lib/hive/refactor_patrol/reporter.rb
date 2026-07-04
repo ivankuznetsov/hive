@@ -33,7 +33,10 @@ module Hive
           thesis = theses.find { |candidate| candidate.id == item.fetch("id") }
           next unless thesis
 
-          lines << "#{idx + 1}. #{thesis.feature} score=#{format('%.2f', item.fetch('score'))} flags=#{item.fetch('flagged').join(',')}"
+          line = "#{idx + 1}. #{thesis.feature} score=#{format('%.2f', item.fetch('score'))} flags=#{item.fetch('flagged').join(',')}"
+          advisories = item.fetch("advisories")
+          line += " advisories=#{advisories.join(',')}" unless advisories.empty?
+          lines << line
           lines << "   problem: #{thesis.problem}"
           lines << "   refactor: #{thesis.proposed_refactor}"
           lines << "   validation: #{validation_summary(thesis)}"
@@ -55,7 +58,8 @@ module Hive
             "score" => score(thesis),
             "breakdown" => thesis.expected_leverage.fetch("breakdown", {}),
             "admissible" => thesis.admissible == true,
-            "flagged" => Array(thesis.risk["flags"])
+            "flagged" => Array(thesis.risk["flags"]),
+            "advisories" => Array(thesis.risk["advisories"])
           }
         end
       end

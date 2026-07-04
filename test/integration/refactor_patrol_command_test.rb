@@ -101,6 +101,32 @@ class RefactorPatrolCommandTest < Minitest::Test
     end
   end
 
+  # Behavior-preserving work inside public-surface files (bin/, cli.rb) is an
+  # advisory, not an API change: the thesis still counts as accepted and the
+  # advisory is visible on its ranked entry.
+  def test_public_surface_thesis_is_accepted_with_advisory
+    with_refactor_patrol_project do
+      surface = thesis("surface", feature_id: "checkout", fingerprint: "fp-surface", boundary_files: [ "bin/checkout" ])
+
+      out, _err, status = with_captured_exit do
+        command_for(
+          features: [ feature("checkout", files: [ "bin/checkout" ]) ],
+          theses_by_feature: { "checkout" => [ surface ] },
+          leverage_scores: leverage_scores("checkout" => 0.9)
+        ).call
+      end
+
+      assert_equal Hive::ExitCodes::SUCCESS, status
+      payload = JSON.parse(out)
+      assert_equal 1, payload.fetch("theses"), "surface-touching thesis must count as accepted"
+      ranked = payload.fetch("ranked").first
+      assert_empty ranked.fetch("flagged")
+      assert_equal [ "touches_public_api_surface" ], ranked.fetch("advisories")
+      assert_equal false, surface.risk.fetch("public_api_impact")
+      assert thesis_schemer.valid?(surface.to_h), thesis_schemer.validate(surface.to_h).map { |e| e["error"] }.inspect
+    end
+  end
+
   def test_dry_run_does_not_write_state_or_theses
     with_refactor_patrol_project do |repo|
       out, _err, status = with_captured_exit do
@@ -409,16 +435,17 @@ class RefactorPatrolCommandTest < Minitest::Test
 
   def thesis(id, feature_id: "checkout", score: 0.9, fingerprint: "fp", est_files: 2,
              admissible: true, admissibility_reason: "evidence cites concrete paths and measurable signals",
-             flags: [])
+             flags: [], boundary_files: nil)
+    boundary_files ||= [ "lib/#{feature_id}.rb" ]
     Hive::RefactorPatrol::Thesis.new(
       id: id,
       feature_id: feature_id,
       feature: feature_id.capitalize,
       problem: "#{feature_id} mixes validation and orchestration",
       cost: "Frequent changes fan out across callers",
-      evidence: [ { "file" => "lib/#{feature_id}.rb", "signal" => "churn", "value" => 10 } ],
+      evidence: [ { "file" => boundary_files.first, "signal" => "churn", "value" => 10 } ],
       proposed_refactor: "Extract a #{feature_id} boundary service",
-      feature_boundary: { "owned_files" => [ "lib/#{feature_id}.rb" ], "entrypoints" => [ "lib/#{feature_id}.rb" ] },
+      feature_boundary: { "owned_files" => boundary_files, "entrypoints" => boundary_files },
       expected_leverage: { "score" => score, "breakdown" => { "churn" => score } },
       confidence: "medium",
       risk: {

@@ -47,50 +47,65 @@ module Hive
       private
 
       def run_cycle
-        entry = Hive::Config.find_project(@project)
-        raise Hive::ConfigError, "hive refactor-patrol: unknown project #{@project.inspect}" unless entry
-
-        project_root = entry.fetch("path")
-        cfg = Hive::Config.load(project_root)
-        refactor_cfg = cfg["refactor_patrol"] || {}
-        unless refactor_cfg["enabled"]
-          raise Hive::ConfigError, "hive refactor-patrol: project #{entry.fetch('name').inspect} must opt in with refactor_patrol.enabled: true"
-        end
-
+        entry, project_root, cfg = resolve_project!
         state = Hive::RefactorPatrol::StateStore.new(project_root)
         # A dry run must not create durable artifacts under
         # .hive-state/refactor_patrol/; all reads tolerate a missing dir.
         state.ensure! unless @dry_run
-        features = @mapper_factory.call(project_root, cfg, state).call
-        features = apply_scope_hints(features, project_root)
-        changed = changed_files(project_root)
-        leverage = @leverage_factory.call(project_root, cfg)
-        leverage_by_feature = features.to_h do |feature|
-          boost = @changed_since && !Array(changed).empty? && (Array(feature.owned_files) & Array(changed)).any?
-          [ feature.id, leverage.score(feature, changed_since: @changed_since, changed_boost: boost) ]
-        end
 
+        features = scoped_features(project_root, cfg, state)
         reviewer = @reviewer_factory.call(project_root, cfg, state)
-        theses = reviewer.call(features, leverage_by_feature: leverage_by_feature)
-        caps = @caps_factory.call(cfg)
-        collisions = @collisions_factory.call(project_root, state)
-        suppressed = []
-
-        theses.each do |thesis|
-          caps.apply(thesis)
-          collision = collisions.check(thesis)
-          if collision.suppressed
-            suppressed << { "id" => thesis.id, "reason" => collision.reason, "reference" => collision.reference }
-          end
-        end
+        theses = reviewer.call(features, leverage_by_feature: score_features(features, project_root, cfg))
+        suppressed = guard_theses(theses, project_root, cfg, state)
 
         unless @dry_run
           persist(state, theses, suppressed)
           update_scan_state(state, project_root, cfg, reviewer)
         end
+        [ build_payload(entry, project_root, cfg, state, features, theses, suppressed), theses ]
+      end
+
+      def resolve_project!
+        entry = Hive::Config.find_project(@project)
+        raise Hive::ConfigError, "hive refactor-patrol: unknown project #{@project.inspect}" unless entry
+
+        project_root = entry.fetch("path")
+        cfg = Hive::Config.load(project_root)
+        unless (cfg["refactor_patrol"] || {})["enabled"]
+          raise Hive::ConfigError, "hive refactor-patrol: project #{entry.fetch('name').inspect} must opt in with refactor_patrol.enabled: true"
+        end
+
+        [ entry, project_root, cfg ]
+      end
+
+      def scoped_features(project_root, cfg, state)
+        features = @mapper_factory.call(project_root, cfg, state).call
+        apply_scope_hints(features, project_root)
+      end
+
+      def score_features(features, project_root, cfg)
+        changed = changed_files(project_root)
+        leverage = @leverage_factory.call(project_root, cfg)
+        features.to_h do |feature|
+          boost = @changed_since && !Array(changed).empty? && (Array(feature.owned_files) & Array(changed)).any?
+          [ feature.id, leverage.score(feature, changed_since: @changed_since, changed_boost: boost) ]
+        end
+      end
+
+      def guard_theses(theses, project_root, cfg, state)
+        caps = @caps_factory.call(cfg)
+        collisions = @collisions_factory.call(project_root, state)
+        theses.filter_map do |thesis|
+          caps.apply(thesis)
+          collision = collisions.check(thesis)
+          { "id" => thesis.id, "reason" => collision.reason, "reference" => collision.reference } if collision.suppressed
+        end
+      end
+
+      def build_payload(entry, project_root, cfg, state, features, theses, suppressed)
         scanned_sha = @dry_run ? current_default_sha(project_root, cfg) : state.state["last_scanned_sha"].to_s
         @reporter = Hive::RefactorPatrol::Reporter.new(cfg)
-        payload = @reporter.envelope(
+        @reporter.envelope(
           project: entry.fetch("name"),
           project_root: project_root,
           dry_run: @dry_run,
@@ -99,7 +114,6 @@ module Hive
           suppressed: suppressed,
           last_scanned_sha: scanned_sha
         )
-        [ payload, theses ]
       end
 
       def persist(state, theses, suppressed)

@@ -3,20 +3,17 @@ require "json"
 require "securerandom"
 require "tmpdir"
 require "hive"
-require "hive/agent"
-require "hive/agent_profiles"
-require "hive/patrol/runner_task"
+require "hive/refactor_patrol/review_agent_runner"
 require "hive/refactor_patrol/state_store"
 require "hive/refactor_patrol/thesis_normalizer"
 require "hive/stages/base"
-require "hive/usage_db"
 
 module Hive
   module RefactorPatrol
     # Per-feature review orchestration: render the review prompt, run the
     # agent, parse its output, and record errors. What counts as an acceptable
-    # thesis (normalization, admissibility, guidance) is ThesisNormalizer's
-    # job, not this class's.
+    # thesis is ThesisNormalizer's job; how the agent is spawned is
+    # ReviewAgentRunner's.
     class Reviewer
       TemplateBindings = Struct.new(
         :project_root, :feature, :leverage, :commands, :output_path,
@@ -33,7 +30,8 @@ module Hive
         @cfg = cfg
         @state = state
         @dry_run = dry_run
-        @agent_runner = agent_runner || method(:run_agent)
+        @agent_runner = agent_runner ||
+                        ReviewAgentRunner.new(project_root: @project_root, cfg: cfg, state: state, dry_run: dry_run)
         @review_errors = []
         @normalizer = ThesisNormalizer.new(project_root: @project_root, commands: configured_commands)
       end
@@ -111,61 +109,6 @@ module Hive
           })
         end
         []
-      end
-
-      def run_agent(prompt:, output_path:, run_dir:, **)
-        task = Hive::Patrol::RunnerTask.new(
-          folder: run_dir,
-          project_root: @project_root,
-          state_file: File.join(run_dir, "review.md"),
-          # In dry-run mode the run_dir is a throwaway tmp dir; route agent
-          # logs there too so a preview creates no durable artifacts under
-          # .hive-state/refactor_patrol/.
-          log_dir: @dry_run ? File.join(run_dir, "logs") : File.join(@state.root, "logs"),
-          slug: "refactor-patrol-review"
-        )
-        profile = Hive::AgentProfiles.lookup(@cfg.dig("refactor_patrol", "agent") || "claude", cfg: @cfg)
-        started_at = Time.now.utc
-        result = Hive::Agent.new(
-          task: task,
-          prompt: prompt,
-          add_dirs: [ @project_root ],
-          cwd: @project_root,
-          max_budget_usd: @cfg.dig("budget_usd", "patrol") || 100,
-          timeout_sec: @cfg.dig("timeout_sec", "patrol") || 3600,
-          log_label: "refactor-patrol-review",
-          profile: profile,
-          expected_output: output_path,
-          status_mode: :output_file_exists
-        ).run!
-        record_usage(result, profile, "refactor-patrol-review", started_at)
-        result
-      end
-
-      def record_usage(result, profile, stage, started_at)
-        usage = result && result[:usage]
-        return unless usage
-
-        Hive::UsageDb.record!(
-          agent: profile_name(profile),
-          model: usage[:model] || result[:model],
-          project_slug: File.basename(@project_root.to_s),
-          task_slug: stage,
-          stage: stage,
-          started_at: started_at,
-          ended_at: Time.now.utc.iso8601,
-          input: usage[:input] || 0,
-          output: usage[:output] || 0,
-          cached: usage[:cached] || 0
-        )
-      rescue StandardError => e
-        warn "[hive] usage record failed: #{e.message}"
-      end
-
-      def profile_name(profile)
-        return profile.name.to_s if profile.respond_to?(:name)
-
-        (@cfg.dig("refactor_patrol", "agent") || "claude").to_s
       end
 
       def configured_commands

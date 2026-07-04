@@ -1,15 +1,16 @@
 require "test_helper"
 require "json_schemer"
 require "hive/refactor_patrol/reviewer"
-require "hive/patrol/feature"
+require_relative "thesis_fixtures"
 
 class RefactorPatrolReviewerTest < Minitest::Test
   include HiveTestHelper
+  include RefactorPatrolThesisFixtures
 
   def test_valid_agent_json_returns_schema_valid_fingerprinted_thesis
     with_tmp_dir do |dir|
       reviewer = reviewer_for(dir, [ valid_raw_thesis ])
-      theses = reviewer.call([ feature(tests: [ "test/checkout_test.rb" ]) ], leverage_by_feature: leverage)
+      theses = reviewer.call([ feature(tests: [ "test/checkout_test.rb" ]) ], leverage_by_feature: leverage_by_feature)
 
       assert_empty reviewer.review_errors
       assert_equal 1, theses.size
@@ -17,31 +18,6 @@ class RefactorPatrolReviewerTest < Minitest::Test
       refute_empty thesis.fingerprint
       assert thesis.admissible
       assert thesis_schemer.valid?(thesis.to_h), thesis_schemer.validate(thesis.to_h).map { |e| e["error"] }.inspect
-    end
-  end
-
-  def test_missing_file_or_measurable_signal_marks_inadmissible_but_returns
-    with_tmp_dir do |dir|
-      raw = valid_raw_thesis.merge("evidence" => [ { "file" => "lib/checkout.rb", "snippet" => "messy" } ])
-      theses = reviewer_for(dir, [ raw ]).call([ feature(tests: [ "test/checkout_test.rb" ]) ], leverage_by_feature: leverage)
-
-      assert_equal 1, theses.size
-      refute theses.first.admissible
-      assert_includes theses.first.admissibility_reason, "missing measurable signal"
-      assert_includes theses.first.risk.fetch("flags"), "inadmissible"
-    end
-  end
-
-  def test_slice_without_tests_prescribes_characterization_and_lowers_high_confidence
-    with_tmp_dir do |dir|
-      raw = valid_raw_thesis.merge(
-        "confidence" => "high",
-        "required_validation" => { "commands" => [], "characterization_first" => false, "notes" => "" }
-      )
-      thesis = reviewer_for(dir, [ raw ]).call([ feature(tests: []) ], leverage_by_feature: leverage).first
-
-      assert_equal true, thesis.required_validation.fetch("characterization_first")
-      assert_equal "medium", thesis.confidence
     end
   end
 
@@ -63,7 +39,7 @@ class RefactorPatrolReviewerTest < Minitest::Test
         "required_validation" => { "commands" => [ "test" ], "characterization_first" => true, "characterization_notes" => "pin argv behavior first" }
       )
       reviewer = reviewer_for(dir, [ raw ])
-      theses = reviewer.call([ feature(tests: [ "test/checkout_test.rb" ]) ], leverage_by_feature: leverage)
+      theses = reviewer.call([ feature(tests: [ "test/checkout_test.rb" ]) ], leverage_by_feature: leverage_by_feature)
 
       assert_empty reviewer.review_errors
       thesis = theses.first
@@ -78,54 +54,6 @@ class RefactorPatrolReviewerTest < Minitest::Test
     end
   end
 
-  def test_fileless_evidence_naming_owned_file_in_text_is_anchored
-    with_tmp_dir do |dir|
-      raw = valid_raw_thesis.merge(
-        "evidence" => [ { "snippet" => "lib/checkout.rb:42 duplicates the retry loop", "signal" => "churn", "value" => 10 } ]
-      )
-      thesis = reviewer_for(dir, [ raw ]).call([ feature(tests: [ "test/checkout_test.rb" ]) ], leverage_by_feature: leverage).first
-
-      assert thesis.admissible, thesis.admissibility_reason
-      assert_equal "lib/checkout.rb", thesis.evidence.first["file"]
-    end
-  end
-
-  def test_evidence_without_file_is_flagged_inadmissible_not_dropped
-    with_tmp_dir do |dir|
-      raw = valid_raw_thesis.merge("evidence" => [ { "signal" => "churn", "value" => 10 } ])
-      reviewer = reviewer_for(dir, [ raw ])
-      theses = reviewer.call([ feature(tests: [ "test/checkout_test.rb" ]) ], leverage_by_feature: leverage)
-
-      assert_empty reviewer.review_errors
-      assert_equal 1, theses.size
-      refute theses.first.admissible
-      assert_includes theses.first.admissibility_reason, "missing concrete file path"
-      assert_includes theses.first.risk.fetch("flags"), "inadmissible"
-    end
-  end
-
-  def test_test_rich_slice_with_empty_commands_gets_configured_test_command
-    with_tmp_dir do |dir|
-      raw = valid_raw_thesis.merge(
-        "required_validation" => { "commands" => [], "characterization_first" => false, "notes" => "" }
-      )
-      thesis = reviewer_for(dir, [ raw ]).call([ feature(tests: [ "test/checkout_test.rb" ]) ], leverage_by_feature: leverage).first
-
-      assert_equal [ "test" ], thesis.required_validation.fetch("commands")
-      refute thesis.required_validation.fetch("characterization_first")
-    end
-  end
-
-  def test_agent_supplied_score_does_not_override_measured_leverage
-    with_tmp_dir do |dir|
-      raw = valid_raw_thesis.merge("expected_leverage" => { "score" => 999.0, "breakdown" => { "bogus" => 999.0 } })
-      thesis = reviewer_for(dir, [ raw ]).call([ feature(tests: [ "test/checkout_test.rb" ]) ], leverage_by_feature: leverage).first
-
-      assert_in_delta 0.8, thesis.expected_leverage.fetch("score"), 0.0001
-      assert_equal({ "churn" => 0.5, "fan_in" => 0.3 }, thesis.expected_leverage.fetch("breakdown"))
-    end
-  end
-
   def test_dry_run_reviewer_does_not_write_theses_or_run_logs
     with_tmp_dir do |dir|
       state = Hive::RefactorPatrol::StateStore.new(dir)
@@ -136,7 +64,7 @@ class RefactorPatrolReviewerTest < Minitest::Test
       end
       reviewer = Hive::RefactorPatrol::Reviewer.new(dir, cfg: cfg, state: state, agent_runner: runner, dry_run: true)
 
-      theses = reviewer.call([ feature(tests: [ "test/checkout_test.rb" ]) ], leverage_by_feature: leverage)
+      theses = reviewer.call([ feature(tests: [ "test/checkout_test.rb" ]) ], leverage_by_feature: leverage_by_feature)
 
       assert_equal 1, theses.size
       assert_empty Dir.glob(File.join(dir, ".hive-state", "refactor_patrol", "theses", "*.json"))
@@ -152,7 +80,7 @@ class RefactorPatrolReviewerTest < Minitest::Test
       end
       reviewer = Hive::RefactorPatrol::Reviewer.new(dir, cfg: cfg, state: Hive::RefactorPatrol::StateStore.new(dir), agent_runner: runner)
 
-      assert_empty reviewer.call([ feature ], leverage_by_feature: leverage)
+      assert_empty reviewer.call([ feature ], leverage_by_feature: leverage_by_feature)
       assert_equal "malformed_json", reviewer.review_errors.first.fetch("error")
     end
   end
@@ -173,7 +101,7 @@ class RefactorPatrolReviewerTest < Minitest::Test
       runner = ->(**) { { status: :error, error_message: "agent stopped" } }
       reviewer = Hive::RefactorPatrol::Reviewer.new(dir, cfg: cfg, state: Hive::RefactorPatrol::StateStore.new(dir), agent_runner: runner)
 
-      assert_empty reviewer.call([ feature ], leverage_by_feature: leverage)
+      assert_empty reviewer.call([ feature ], leverage_by_feature: leverage_by_feature)
       assert_equal "agent_failed", reviewer.review_errors.first.fetch("error")
       assert_equal "agent stopped", reviewer.review_errors.first.fetch("message")
     end
@@ -184,35 +112,9 @@ class RefactorPatrolReviewerTest < Minitest::Test
       runner = ->(**) { raise ArgumentError, "bad prompt" }
       reviewer = Hive::RefactorPatrol::Reviewer.new(dir, cfg: cfg, state: Hive::RefactorPatrol::StateStore.new(dir), agent_runner: runner)
 
-      assert_empty reviewer.call([ feature ], leverage_by_feature: leverage)
+      assert_empty reviewer.call([ feature ], leverage_by_feature: leverage_by_feature)
       assert_equal "review_error", reviewer.review_errors.first.fetch("error")
       assert_includes reviewer.review_errors.first.fetch("message"), "ArgumentError: bad prompt"
-    end
-  end
-
-  def test_test_rich_slice_without_known_test_command_requires_characterization
-    with_tmp_dir do |dir|
-      raw = valid_raw_thesis.merge(
-        "required_validation" => { "commands" => [], "characterization_first" => false, "notes" => "" }
-      )
-      reviewer = reviewer_for(dir, [ raw ], cfg: cfg.merge("refactor_patrol" => cfg.fetch("refactor_patrol").merge("commands" => {})))
-
-      thesis = reviewer.call([ feature(tests: [ "test/checkout_test.rb" ]) ], leverage_by_feature: leverage).first
-
-      assert_equal true, thesis.required_validation.fetch("characterization_first")
-      assert_includes thesis.required_validation.fetch("notes"), "Name explicit validation commands"
-    end
-  end
-
-  def test_evidence_less_thesis_is_retained_as_inadmissible
-    with_tmp_dir do |dir|
-      raw = valid_raw_thesis.merge("evidence" => [])
-
-      thesis = reviewer_for(dir, [ raw ]).call([ feature(tests: [ "test/checkout_test.rb" ]) ], leverage_by_feature: leverage).first
-
-      refute thesis.admissible
-      assert_equal [ { "snippet" => "no evidence supplied; retained as inadmissible" } ],
-                   thesis.evidence
     end
   end
 
@@ -221,7 +123,7 @@ class RefactorPatrolReviewerTest < Minitest::Test
       state = Hive::RefactorPatrol::StateStore.new(dir)
       reviewer = Hive::RefactorPatrol::Reviewer.new(dir, cfg: cfg, state: state, agent_runner: ->(**) { raise "boom" })
 
-      assert_empty reviewer.call([ feature ], leverage_by_feature: leverage)
+      assert_empty reviewer.call([ feature ], leverage_by_feature: leverage_by_feature)
       logs = Dir[File.join(state.root, "runs", "review-error-*.json")]
 
       assert_equal 1, logs.size
@@ -299,31 +201,6 @@ class RefactorPatrolReviewerTest < Minitest::Test
     )
   end
 
-  def thesis_schemer
-    @thesis_schemer ||= JSONSchemer.schema(Pathname.new(Hive::Schemas.schema_path("hive-refactor-patrol-thesis")))
-  end
-
-  def feature(tests: [])
-    Hive::Patrol::Feature.new(
-      id: "checkout",
-      kind: "command",
-      entrypoints: [ "lib/checkout.rb" ],
-      owned_files: [ "lib/checkout.rb" ],
-      context_files: [ "README.md" ],
-      tests: tests
-    )
-  end
-
-  def leverage
-    {
-      "checkout" => {
-        "score" => 0.8,
-        "breakdown" => { "churn" => 0.5, "fan_in" => 0.3 },
-        "signals" => { "churn" => 10, "fan_in" => 4 }
-      }
-    }
-  end
-
   def cfg
     {
       "budget_usd" => { "patrol" => 100 },
@@ -333,28 +210,6 @@ class RefactorPatrolReviewerTest < Minitest::Test
         "max_theses_per_feature" => 3,
         "commands" => { "test" => "ruby -Itest test/foo_test.rb", "lint" => nil }
       }
-    }
-  end
-
-  def valid_raw_thesis
-    {
-      "feature" => "Checkout",
-      "problem" => "Checkout mixes validation and payment orchestration",
-      "cost" => "Frequent changes touch the same file and its callers",
-      "evidence" => [ { "file" => "lib/checkout.rb", "signal" => "churn", "value" => 10 } ],
-      "proposed_refactor" => "Extract payment orchestration behind a checkout boundary",
-      "expected_leverage" => { "score" => 0.8, "breakdown" => { "churn" => 0.5, "fan_in" => 0.3 } },
-      "confidence" => "medium",
-      "risk" => {
-        "caps" => { "est_files" => 3, "est_diff_lines" => 120, "single_feature" => true },
-        "public_api_impact" => false,
-        "public_api_details" => [],
-        "cross_feature_impact" => false,
-        "cross_feature_details" => [],
-        "flags" => []
-      },
-      "required_validation" => { "commands" => [ "test" ], "characterization_first" => false, "notes" => "Run checkout tests" },
-      "follow_up_approval_state" => "pending"
     }
   end
 end

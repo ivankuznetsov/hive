@@ -4,11 +4,32 @@ Write JSON only to:
 
 <%= output_path %>
 
-Return this shape:
+Return this shape — field names are a strict contract, follow the example
+exactly (in particular each evidence item carries a singular `file` string
+plus a numeric `value` for its signal):
 
 ```json
 {
-  "theses": []
+  "theses": [
+    {
+      "id": "extract-payment-orchestration",
+      "problem": "checkout mixes validation and payment orchestration in one class",
+      "cost": "every payment change forces edits and re-review of validation code",
+      "proposed_refactor": "extract payment orchestration behind a checkout-owned boundary",
+      "evidence": [
+        { "file": "lib/checkout.rb", "line": 42, "snippet": "def charge_and_validate", "signal": "churn", "value": 93 },
+        { "file": "lib/checkout.rb", "snippet": "duplicated retry loop also in lib/billing.rb", "signal": "coupling", "value": 49 }
+      ],
+      "confidence": "medium",
+      "risk": {
+        "caps": { "est_files": 3, "est_diff_lines": 120, "single_feature": true },
+        "public_api_impact": false,
+        "cross_feature_impact": false
+      },
+      "required_validation": { "commands": ["test"], "characterization_first": false, "notes": "run checkout tests" },
+      "expected_leverage": { "score": 0.8, "breakdown": { "churn": 0.5, "coupling": 0.3 } }
+    }
+  ]
 }
 ```
 
@@ -37,9 +58,14 @@ Available validation command names:
 
 Rules:
 - Emit at most <%= max_theses %> theses.
-- Cite concrete file paths in every evidence item.
-- Include at least one measurable signal in evidence using one of: churn,
-  fan_in, complexity, coupling, repeated_dependency, bug_density, coverage_gap.
+- Every evidence item must set `file` to one repository-relative path string —
+  the key is singular `file`, never a `files` array. A thesis with no
+  file-backed evidence item is inadmissible and will be rejected.
+- Include at least one evidence item whose `signal` is one of churn, fan_in,
+  complexity, coupling, repeated_dependency, bug_density, coverage_gap AND
+  whose `value` carries its measured number (take it from the measured
+  leverage signals above where applicable). A signal without a `value` does
+  not count as measurable.
 - Copy the feature boundary from the mapped feature unless you have a concrete
   reason to flag a cross-feature risk.
 - Include expected_leverage.score and expected_leverage.breakdown; do not emit

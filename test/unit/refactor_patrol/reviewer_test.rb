@@ -45,6 +45,51 @@ class RefactorPatrolReviewerTest < Minitest::Test
     end
   end
 
+  # Replays the evidence shape the first dogfood run actually produced
+  # (plural "files" + "claim" prose, named signal without a value, "refactor"
+  # instead of "proposed_refactor", "feature" as an object): file-backed
+  # substance must be accepted, not flagged for its spelling.
+  def test_dogfood_shaped_file_backed_thesis_is_normalized_and_accepted
+    with_tmp_dir do |dir|
+      raw = valid_raw_thesis
+      raw.delete("proposed_refactor")
+      raw = raw.merge(
+        "feature" => { "id" => "checkout", "kind" => "command" },
+        "refactor" => "Extract the shared prelude into a required library file",
+        "evidence" => [
+          { "claim" => "byte-identical constants in both binaries", "files" => [ "lib/checkout.rb", "lib/billing.rb" ], "signal" => "churn" },
+          { "claim" => "dead copy drift", "files" => [ "lib/checkout.rb" ], "signal" => "repeated_dependency" }
+        ],
+        "required_validation" => { "commands" => [ "test" ], "characterization_first" => true, "characterization_notes" => "pin argv behavior first" }
+      )
+      reviewer = reviewer_for(dir, [ raw ])
+      theses = reviewer.call([ feature(tests: [ "test/checkout_test.rb" ]) ], leverage_by_feature: leverage)
+
+      assert_empty reviewer.review_errors
+      thesis = theses.first
+      assert thesis.admissible, thesis.admissibility_reason
+      assert_equal "checkout", thesis.feature
+      assert_equal "Extract the shared prelude into a required library file", thesis.proposed_refactor
+      assert_equal [ "lib/checkout.rb", "lib/billing.rb", "lib/checkout.rb" ], thesis.evidence.map { |e| e["file"] }
+      assert_equal 10, thesis.evidence.first["value"] # backfilled from measured churn
+      refute thesis.evidence.last.key?("value") # repeated_dependency is not a measured signal here
+      assert_equal "pin argv behavior first", thesis.required_validation.fetch("notes")
+      assert thesis_schemer.valid?(thesis.to_h), thesis_schemer.validate(thesis.to_h).map { |e| e["error"] }.inspect
+    end
+  end
+
+  def test_fileless_evidence_naming_owned_file_in_text_is_anchored
+    with_tmp_dir do |dir|
+      raw = valid_raw_thesis.merge(
+        "evidence" => [ { "snippet" => "lib/checkout.rb:42 duplicates the retry loop", "signal" => "churn", "value" => 10 } ]
+      )
+      thesis = reviewer_for(dir, [ raw ]).call([ feature(tests: [ "test/checkout_test.rb" ]) ], leverage_by_feature: leverage).first
+
+      assert thesis.admissible, thesis.admissibility_reason
+      assert_equal "lib/checkout.rb", thesis.evidence.first["file"]
+    end
+  end
+
   def test_evidence_without_file_is_flagged_inadmissible_not_dropped
     with_tmp_dir do |dir|
       raw = valid_raw_thesis.merge("evidence" => [ { "signal" => "churn", "value" => 10 } ])

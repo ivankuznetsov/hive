@@ -122,15 +122,16 @@ module Hive
         }
         risk = raw["risk"].is_a?(Hash) ? raw["risk"] : {}
         required_validation = raw["required_validation"].is_a?(Hash) ? raw["required_validation"] : {}
+        raw_feature = raw["feature"].is_a?(Hash) ? raw["feature"]["id"] : raw["feature"]
 
         {
           "id" => raw["id"].to_s.empty? ? "#{feature.id}-refactor-#{idx + 1}" : raw["id"].to_s,
           "feature_id" => feature.id.to_s,
-          "feature" => raw["feature"].to_s.empty? ? feature.id.to_s : raw["feature"].to_s,
+          "feature" => raw_feature.to_s.empty? ? feature.id.to_s : raw_feature.to_s,
           "problem" => raw["problem"].to_s,
           "cost" => raw["cost"].to_s,
-          "evidence" => Array(raw["evidence"]),
-          "proposed_refactor" => raw["proposed_refactor"].to_s,
+          "evidence" => normalize_evidence(feature, leverage, Array(raw["evidence"])),
+          "proposed_refactor" => raw["proposed_refactor"].to_s.empty? ? raw["refactor"].to_s : raw["proposed_refactor"].to_s,
           "feature_boundary" => boundary.merge(raw["feature_boundary"].is_a?(Hash) ? raw["feature_boundary"] : {}),
           # R5: rank by the deterministic measured-signal blend. The agent's
           # own expected_leverage.score/breakdown is advisory only and is
@@ -144,13 +145,52 @@ module Hive
           "required_validation" => {
             "commands" => Array(required_validation["commands"]),
             "characterization_first" => required_validation["characterization_first"] == true,
-            "notes" => required_validation["notes"].to_s
+            "notes" => (required_validation["notes"] || required_validation["characterization_notes"]).to_s
           },
           "admissible" => raw.key?("admissible") ? raw["admissible"] == true : true,
           "admissibility_reason" => raw["admissibility_reason"].to_s,
           "follow_up_approval_state" => raw["follow_up_approval_state"].to_s.empty? ? "pending" : raw["follow_up_approval_state"].to_s,
           "fingerprint" => raw["fingerprint"].to_s
         }
+      end
+
+      # Dogfooding showed agents drift from the evidence contract in
+      # predictable, recoverable ways: a plural "files" array instead of
+      # "file", a named signal without the measured "value". Repair only what
+      # stays honest — paths the agent itself named and values we measured —
+      # so admissibility judges the substance of the evidence, not its spelling.
+      def normalize_evidence(feature, leverage, items)
+        items.flat_map do |item|
+          next [ item ] unless item.is_a?(Hash)
+
+          expand_evidence_files(feature, item).map { |entry| backfill_signal_value(leverage, entry) }
+        end
+      end
+
+      def expand_evidence_files(feature, item)
+        return [ item ] unless item["file"].to_s.strip.empty?
+
+        files = Array(item["files"] || item["paths"] || item["path"]).map(&:to_s).reject { |f| f.strip.empty? }
+        files = anchored_owned_files(feature, item) if files.empty?
+        return [ item ] if files.empty?
+
+        rest = item.reject { |key, _| %w[file files paths path].include?(key) }
+        files.map { |file| rest.merge("file" => file) }
+      end
+
+      # Anchor file-less evidence to owned files only when the evidence text
+      # literally names them — never invent an anchor the agent didn't cite.
+      def anchored_owned_files(feature, item)
+        text = "#{item["snippet"]} #{item["claim"]}"
+        (Array(feature.owned_files) + Array(feature.entrypoints)).uniq.select { |path| text.include?(path) }
+      end
+
+      def backfill_signal_value(leverage, item)
+        signal = item["signal"].to_s
+        return item if item.key?("value") || !MEASURABLE_SIGNALS.include?(signal)
+
+        measured = leverage.is_a?(Hash) ? leverage.dig("signals", signal) : nil
+        measured.nil? ? item : item.merge("value" => measured)
       end
 
       def default_risk(risk)

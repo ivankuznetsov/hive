@@ -2,6 +2,16 @@
 
 All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with terse bullets — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
+## 0.3.6
+
+- Fixed the hivebox Docker image build: `hive web` now exports `HIVE_CLI_ROOT`
+  only when serving the managed web bundle, so the image's prebuilt `/app/web`
+  bundle (installed against its own `..`) is no longer invalidated at boot and
+  the pre-push smoke passes — the image publishes again for the first time
+  since v0.3.2.
+- The daily digest gains a merged-PR source: PRs merged the previous day are
+  listed alongside task activity.
+
 ## 0.3.5
 
 - Fixed the hivebox container startup path so the supervisor passes

@@ -1290,6 +1290,22 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_git_stub_skips_help_viewer_dispatch
+    with_tmp_git_repo do |dir|
+      marker = File.join(dir, "help-viewer-ran")
+      viewer = executable_touch_binary(dir, "help-viewer", marker)
+      run!("git", "-C", dir, "config", "man.viewer", "hivepatrol")
+      run!("git", "-C", dir, "config", "man.hivepatrol.cmd", viewer)
+
+      _out, err, status = Open3.capture3(real_git_env(dir), stub_path("git"), "-C", dir, "status", "--help")
+
+      assert status.success?, err
+      assert_includes err, "[dry-run] git -C #{dir} status --help skipped"
+      refute_path_exists marker, "repo-local help viewer executed during dry-run passthrough"
+      assert_includes File.read(File.join(dir, "skipped.log")), "git -C #{dir} status --help skipped"
+    end
+  end
+
   def test_git_stub_skips_exec_path_remote_helpers
     with_tmp_git_repo do |dir|
       helper_dir = File.join(dir, "helpers")

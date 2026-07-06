@@ -145,93 +145,6 @@ class HvTest < Minitest::Test
     end
   end
 
-  def test_timeout_probe_uses_kill_after_when_supported
-    with_tmp_dir do |dir|
-      override = File.join(dir, "custom", "hive")
-      FileUtils.mkdir_p(File.dirname(override))
-      File.write(override, <<~SH)
-        #!/bin/sh
-        if [ "$1" = "--version" ]; then echo "1.2.3"; exit 0; fi
-        echo override:$1
-      SH
-      FileUtils.chmod(0o755, override)
-
-      log = File.join(dir, "timeout.log")
-      fake_bin = File.join(dir, "bin")
-      FileUtils.mkdir_p(fake_bin)
-      File.write(File.join(fake_bin, "timeout"), <<~SH)
-        #!/bin/sh
-        printf '%s\\n' "$*" >> "#{log}"
-        if [ "$1" != "-k" ]; then
-          exit 125
-        fi
-        shift 2
-        shift
-        exec "$@"
-      SH
-      FileUtils.chmod(0o755, File.join(fake_bin, "timeout"))
-
-      out, err, status = capture_hv_with_timeout(
-        {
-          "HIVE_BIN_OVERRIDE" => override,
-          "XDG_BIN_HOME" => File.join(dir, "empty-xdg"),
-          "HOMEBREW_PREFIX" => File.join(dir, "empty-homebrew"),
-          "PATH" => [ fake_bin, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR)
-        },
-        "probe"
-      )
-
-      assert status.success?, err
-      assert_equal "override:probe\n", out
-      lines = File.readlines(log, chomp: true)
-      assert_includes lines, "-k 1 1 true"
-      assert_includes lines, "-k 1 5 #{override} --version"
-    end
-  end
-
-  def test_timeout_probe_falls_back_when_kill_after_is_unsupported
-    with_tmp_dir do |dir|
-      override = File.join(dir, "custom", "hive")
-      FileUtils.mkdir_p(File.dirname(override))
-      File.write(override, <<~SH)
-        #!/bin/sh
-        if [ "$1" = "--version" ]; then echo "1.2.3"; exit 0; fi
-        echo override:$1
-      SH
-      FileUtils.chmod(0o755, override)
-
-      log = File.join(dir, "timeout.log")
-      fake_bin = File.join(dir, "bin")
-      FileUtils.mkdir_p(fake_bin)
-      File.write(File.join(fake_bin, "timeout"), <<~SH)
-        #!/bin/sh
-        printf '%s\\n' "$*" >> "#{log}"
-        if [ "$1" = "-k" ]; then
-          exit 125
-        fi
-        shift
-        exec "$@"
-      SH
-      FileUtils.chmod(0o755, File.join(fake_bin, "timeout"))
-
-      out, err, status = capture_hv_with_timeout(
-        {
-          "HIVE_BIN_OVERRIDE" => override,
-          "XDG_BIN_HOME" => File.join(dir, "empty-xdg"),
-          "HOMEBREW_PREFIX" => File.join(dir, "empty-homebrew"),
-          "PATH" => [ fake_bin, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR)
-        },
-        "probe"
-      )
-
-      assert status.success?, err
-      assert_equal "override:probe\n", out
-      lines = File.readlines(log, chomp: true)
-      assert_includes lines, "-k 1 1 true"
-      assert_includes lines, "5 #{override} --version"
-    end
-  end
-
   def test_timed_out_probe_tree_is_group_killed_when_timeout_binary_is_absent
     with_tmp_dir do |dir|
       pidfile = File.join(dir, "probe-child.pid")
@@ -373,6 +286,72 @@ class HvTest < Minitest::Test
              "probe_version must sweep the probe's process group so a TERM-ignoring helper is not orphaned"
     ensure
       reap_probe_child(pidfile)
+    end
+  end
+
+  def test_candidate_that_prints_semver_then_hangs_is_rejected_not_exec_d
+    with_tmp_dir do |dir|
+      # The regression the watchdog-fired sentinel guards: a candidate that
+      # prints a bare semver, then hangs and handles the watchdog's TERM by
+      # exiting 0. `wait "$pid"` would record status 0, the captured semver
+      # matches the version regex, and `hv` would exec the hung candidate —
+      # silently regressing the GNU `timeout` path, which returned 124 for the
+      # same overrun and fell through. The sentinel forces a non-zero status
+      # when the watchdog fires, so the candidate is rejected.
+      hang = File.join(dir, "custom", "hive")
+      FileUtils.mkdir_p(File.dirname(hang))
+      File.write(hang, <<~SH)
+        #!/bin/sh
+        if [ "$1" = "--version" ]; then
+          echo "1.2.3"
+          trap 'exit 0' TERM
+          sleep 60 &
+          wait
+          exit 0
+        fi
+        echo semverhang:$1
+      SH
+      FileUtils.chmod(0o755, hang)
+
+      bash_env = File.join(dir, "bash-env")
+      File.write(bash_env, <<~SH)
+        command() {
+          if [ "$1" = "-v" ] && [ "${2:-}" = "timeout" ]; then return 1; fi
+          builtin command "$@"
+        }
+
+        sleep() {
+          case "${1:-}" in
+            5|1) builtin command sleep 0.1 ;;
+            *) builtin command sleep "$@" ;;
+          esac
+        }
+      SH
+
+      xdg_bin = File.join(dir, "xdg-bin")
+      FileUtils.mkdir_p(xdg_bin)
+      File.write(File.join(xdg_bin, "hive"), <<~SH)
+        #!/bin/sh
+        if [ "$1" = "--version" ]; then echo "2.3.4"; exit 0; fi
+        echo xdg:$1
+      SH
+      FileUtils.chmod(0o755, File.join(xdg_bin, "hive"))
+
+      out, err, status = capture_hv_with_timeout(
+        {
+          "HIVE_BIN_OVERRIDE" => hang,
+          "XDG_BIN_HOME" => xdg_bin,
+          "HOMEBREW_PREFIX" => File.join(dir, "empty-homebrew"),
+          "BASH_ENV" => bash_env
+        },
+        "probe"
+      )
+
+      assert status.success?, err
+      assert_equal "xdg:probe\n", out,
+                   "hv must reject a candidate that printed a semver then hung and fall through to the good one"
+      refute_includes out, "semverhang:probe",
+                       "hv must not exec a candidate whose --version probe overran the watchdog timeout"
     end
   end
 

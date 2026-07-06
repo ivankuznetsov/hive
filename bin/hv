@@ -32,8 +32,12 @@ xdg_bin_home="${XDG_BIN_HOME:-${HOME:+$HOME/.local/bin}}"
 # helpers cannot keep the caller's command substitution pipe open.
 
 probe_version() {
-  local output_file pid status watchdog
+  local output_file fired_file pid status watchdog
   output_file="$(mktemp "${TMPDIR:-/tmp}/hv-version.XXXXXX")" || return
+  # A marker the watchdog creates only when its timeout elapses. Its presence
+  # after teardown means the probe overran, so we reject the candidate even if
+  # it trapped our TERM and exited 0 — see the forced status below.
+  fired_file="$output_file.timed-out"
 
   # Launch the probe in its own process group so the watchdog can signal the
   # whole probe tree, not just the direct child. A candidate that forks a child
@@ -62,6 +66,13 @@ probe_version() {
     sleep 5 &
     nap=$!
     wait "$nap" 2>/dev/null
+    # Reaching here means the arming delay elapsed without teardown: the probe
+    # overran its budget. Record the timeout before signalling so the caller
+    # rejects this candidate even if it traps our TERM and exits 0 — the GNU
+    # `timeout` path this replaced returned 124 for the same overrun. `|| true`
+    # keeps a stray write error from aborting the kills below and orphaning the
+    # probe.
+    echo 1 >"$fired_file" 2>/dev/null || true
     # Signal the probe's whole process group (negative PID). Fall back to the
     # bare PID if the group is gone; `exit 0` only when both miss, i.e. the
     # probe already finished and there is nothing left to escalate against.
@@ -88,6 +99,14 @@ probe_version() {
   # ourselves. On the fast path the probe (and its group) is already gone, so
   # this KILL matches nothing and is a no-op.
   kill -KILL "-$pid" 2>/dev/null || true
+  # If the watchdog fired, the probe overran its timeout. Force a non-zero
+  # status even when the probe trapped TERM and exited 0, so a candidate that
+  # printed a semver and then hung is rejected instead of exec'd. 124 mirrors
+  # the GNU `timeout` exit status this path replaced.
+  if [[ -s "$fired_file" ]]; then
+    status=124
+  fi
+  rm -f "$fired_file"
   if [[ "$status" -eq 0 ]]; then
     cat "$output_file" || status=$?
   fi

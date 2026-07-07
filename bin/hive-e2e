@@ -310,7 +310,20 @@ def normalize_leading_global_options!(argv)
   leading = []
   leading << argv.shift while JSON_BOOLEAN_OPTIONS.include?(argv.first)
   return if leading.empty?
-  return if TOP_LEVEL_FLAGS.include?(argv.first)
+
+  # A *bare* top-level flag (`--json --version`, `--json -h`) is handled as
+  # human-only version/help output, so the leading --json is irrelevant and
+  # stays dropped. But when tokens trail the flag (`--json --version --filter
+  # tui`) it is no longer a standalone top-level invocation: Thor consumes it
+  # as a pattern and dispatches into `run_scenarios`, whose body reads
+  # `options[:json]`. Restore --json there so the command honors the caller's
+  # JSON request instead of emitting prose (the outer rescue's json_mode
+  # snapshot only guards Thor-level errors, not the command body).
+  if TOP_LEVEL_FLAGS.include?(argv.first)
+    return if argv.length == 1
+
+    return argv.unshift(*leading)
+  end
 
   commands = Hive::E2E::Binary.all_tasks.keys + [ "run" ]
   cmd_idx = argv.index { |arg| commands.include?(arg) }

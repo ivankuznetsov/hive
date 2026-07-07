@@ -198,6 +198,27 @@ class E2EBinaryTest < Minitest::Test
     assert_equal 64, payload["exit_code"]
   end
 
+  # A leading --json followed by a top-level flag AND a recognized option
+  # (e.g. `--json --version --filter tui`) does not raise a Thor error: Thor
+  # consumes the flag as the run pattern and dispatches into run_scenarios,
+  # whose body reads options[:json]. The stripped --json must be restored so
+  # the command honors the JSON contract instead of printing prose on stderr;
+  # the outer rescue's json_mode snapshot cannot cover this dispatch path.
+  def test_leading_json_top_level_flag_then_option_emits_envelope_on_stdout
+    %w[--version -v --help -h].each do |flag|
+      out, err, status = Open3.capture3(hive_e2e, "--json", flag, "--filter", "tui")
+      assert_equal 64, status.exitstatus, "#{flag}: usage error must exit 64"
+      assert_empty err, "#{flag}: human prose must not leak to stderr when --json leads"
+
+      payload = JSON.parse(out)
+      assert_equal "hive-e2e-error", payload["schema"]
+      assert_equal false, payload["ok"]
+      assert_equal "no_scenarios", payload["error_kind"]
+      assert_equal 64, payload["exit_code"]
+      assert_match(/no scenarios match #{Regexp.escape(flag)}/, payload["message"])
+    end
+  end
+
   def test_run_help_after_option_value_shows_usage
     out, err, status = Open3.capture3(hive_e2e, "run", "--filter", "tui", "--help")
     assert status.success?, "bin/hive-e2e run --filter tui --help should exit 0, stderr was: #{err}"

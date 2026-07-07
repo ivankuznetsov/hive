@@ -143,6 +143,7 @@ On failure, the harness writes a scenario bundle containing:
 ## Operational Notes
 
 The harness prepends repo `bin/` to the tmux environment PATH because TUI rows dispatch commands like `hive plan ...`. `tui_keys` with `text:` sends literal text one character at a time by default for deterministic slow typing; `paste: true` sends the full `text:` value as one literal tmux chunk to exercise the TUI paste-aware runner.
+`CliDriver` starts CLI subprocesses in their own process group and applies the step timeout to both the direct child and stdout/stderr reader threads, so descendants that inherit the capture pipes cannot hold an e2e step open after their parent exits.
 
 `tmux` is required for TUI scenarios. `asciinema` is test-time optional until a TUI failure needs a cast, but missing/corrupt casts are recorded in artifacts instead of crashing unrelated CLI scenarios. If `asciinema` is installed outside PATH, set `HIVE_ASCIINEMA_BIN=/absolute/path/to/asciinema`.
 

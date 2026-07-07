@@ -306,10 +306,14 @@ def reject_unsupported_json_assignments!(argv)
   raise Thor::MalformattedArgumentError, "invalid boolean value for --json: #{arg.split('=', 2).last.inspect}"
 end
 
+HELP_FLAGS = %w[--help -h].freeze
+
 def normalize_leading_global_options!(argv)
   leading = []
   leading << argv.shift while JSON_BOOLEAN_OPTIONS.include?(argv.first)
   return if leading.empty?
+
+  commands = Hive::E2E::Binary.all_tasks.keys + [ "run" ]
 
   # A *bare* top-level flag (`--json --version`, `--json -h`) is handled as
   # human-only version/help output, so the leading --json is irrelevant and
@@ -322,10 +326,20 @@ def normalize_leading_global_options!(argv)
   if TOP_LEVEL_FLAGS.include?(argv.first)
     return if argv.length == 1
 
+    # `--json --help <command>` / `--json -h <command>` requests that command's
+    # help. Thor renders command help natively when a help flag leads and a
+    # recognized command follows (exactly as `--help run` does) — but only while
+    # the leading --json stays dropped. Restoring --json ahead of --help makes
+    # Thor stop treating --help as the help switch and instead dispatch into
+    # run_scenarios with [--help, <command>], exiting 64. Help output is human
+    # prose, so the now-irrelevant --json can stay dropped. Non-command trailers
+    # (`--json --help missing`, `--json --help --filter tui`) fall through to the
+    # restore path so their usage errors still honor the JSON-envelope contract.
+    return if HELP_FLAGS.include?(argv.first) && commands.include?(argv[1])
+
     return argv.unshift(*leading)
   end
 
-  commands = Hive::E2E::Binary.all_tasks.keys + [ "run" ]
   cmd_idx = argv.index { |arg| commands.include?(arg) }
   return argv.unshift(*leading) unless cmd_idx
 

@@ -169,6 +169,23 @@ class E2EBinaryTest < Minitest::Test
     end
   end
 
+  # A leading --json followed by a help flag and a recognized command
+  # (`--json --help run`, `--json -h run`) requests that command's help, exactly
+  # like `--help run`. Help is human prose, so the leading --json is dropped and
+  # Thor renders the command's usage with exit 0 — it must not regress into a
+  # run_scenarios usage error (exit 64) as it did when --json was restored ahead
+  # of the help flag.
+  def test_leading_json_help_with_command_shows_command_help
+    %w[--help -h].each do |flag|
+      out, err, status = Open3.capture3(hive_e2e, "--json", flag, "run")
+      assert status.success?, "bin/hive-e2e --json #{flag} run should exit 0, stderr was: #{err}"
+      assert_includes out, "hive-e2e run [PATTERN]"
+      assert_includes out, "Run e2e scenarios"
+      refute_includes out, "hive-e2e-error"
+      refute_includes err, "no scenarios match"
+    end
+  end
+
   # A leading --json followed by a top-level flag plus a trailing token
   # (e.g. `--json --help missing`) must still honor the JSON-envelope
   # contract. Normalization shifts the leading --json out of ARGV and returns

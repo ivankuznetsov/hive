@@ -319,6 +319,14 @@ def normalize_leading_global_options!(argv)
   argv.insert(cmd_idx + 1, *leading)
 end
 
+# Snapshot the caller's JSON request from the pristine ARGV. Normalization can
+# shift a leading `--json` out of ARGV and then return early without restoring
+# it (e.g. `--json --help missing`, `--json --version extra`, where a top-level
+# flag follows the class option). If Thor later raises a usage error, the rescue
+# blocks below would otherwise consult a mutated ARGV that no longer carries the
+# flag and emit prose on stderr instead of honoring the JSON-envelope contract.
+json_mode = json_requested?(ARGV)
+
 begin
   reject_invalid_argv_encoding!(ARGV)
   reject_unsupported_json_assignments!(ARGV)
@@ -334,7 +342,7 @@ begin
   # mapping usage failures to BinaryExit::USAGE.
   Hive::E2E::Binary.start(ARGV, debug: true)
 rescue Hive::E2E::PreflightError => e
-  if json_requested?(ARGV)
+  if json_mode
     puts JSON.pretty_generate(Hive::E2E::JsonError.payload(error_kind: "preflight", message: e.message,
                                                           exit_code: Hive::E2E::BinaryExit::CONFIG))
   else
@@ -342,7 +350,7 @@ rescue Hive::E2E::PreflightError => e
   end
   exit Hive::E2E::BinaryExit::CONFIG
 rescue Thor::Error => e
-  if json_requested?(ARGV)
+  if json_mode
     puts JSON.pretty_generate(Hive::E2E::JsonError.payload(error_kind: "usage", message: e.message,
                                                           exit_code: Hive::E2E::BinaryExit::USAGE))
   else
@@ -350,7 +358,7 @@ rescue Thor::Error => e
   end
   exit Hive::E2E::BinaryExit::USAGE
 rescue StandardError => e
-  if json_requested?(ARGV)
+  if json_mode
     puts JSON.pretty_generate(Hive::E2E::JsonError.payload(error_kind: "error", message: e.message,
                                                           exit_code: Hive::E2E::BinaryExit::FAILURE))
   else

@@ -169,6 +169,35 @@ class E2EBinaryTest < Minitest::Test
     end
   end
 
+  # A leading --json followed by a top-level flag plus a trailing token
+  # (e.g. `--json --help missing`) must still honor the JSON-envelope
+  # contract. Normalization shifts the leading --json out of ARGV and returns
+  # early on the top-level flag without restoring it, so the rescue path must
+  # consult the caller's original JSON request rather than the mutated ARGV.
+  def test_leading_json_help_with_trailing_token_emits_envelope_on_stdout
+    out, err, status = Open3.capture3(hive_e2e, "--json", "--help", "missing")
+    assert_equal 64, status.exitstatus
+    assert_empty err, "human prose must not leak to stderr when --json precedes --help"
+
+    payload = JSON.parse(out)
+    assert_equal "hive-e2e-error", payload["schema"]
+    assert_equal false, payload["ok"]
+    assert_equal "usage", payload["error_kind"]
+    assert_equal 64, payload["exit_code"]
+  end
+
+  def test_leading_json_version_with_trailing_token_emits_envelope_on_stdout
+    out, err, status = Open3.capture3(hive_e2e, "--json", "--version", "extra")
+    assert_equal 64, status.exitstatus
+    assert_empty err, "human prose must not leak to stderr when --json precedes --version"
+
+    payload = JSON.parse(out)
+    assert_equal "hive-e2e-error", payload["schema"]
+    assert_equal false, payload["ok"]
+    assert_equal "usage", payload["error_kind"]
+    assert_equal 64, payload["exit_code"]
+  end
+
   def test_run_help_after_option_value_shows_usage
     out, err, status = Open3.capture3(hive_e2e, "run", "--filter", "tui", "--help")
     assert status.success?, "bin/hive-e2e run --filter tui --help should exit 0, stderr was: #{err}"

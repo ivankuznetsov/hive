@@ -268,6 +268,7 @@ end
 JSON_TRUE_OPTIONS = %w[--json --json=true --json=TRUE --json=t --json=T].freeze
 JSON_FALSE_OPTIONS = %w[--no-json --skip-json --json=false --json=FALSE --json=f --json=F].freeze
 JSON_BOOLEAN_OPTIONS = (JSON_TRUE_OPTIONS + JSON_FALSE_OPTIONS).freeze
+TOP_LEVEL_FLAGS = %w[--help -h --version -v].freeze
 
 def normalize_leading_class_options!(argv)
   return if argv.length < 2
@@ -309,6 +310,7 @@ def normalize_leading_global_options!(argv)
   leading = []
   leading << argv.shift while JSON_BOOLEAN_OPTIONS.include?(argv.first)
   return if leading.empty?
+  return if TOP_LEVEL_FLAGS.include?(argv.first)
 
   commands = Hive::E2E::Binary.all_tasks.keys + [ "run" ]
   cmd_idx = argv.index { |arg| commands.include?(arg) }
@@ -321,6 +323,10 @@ begin
   reject_invalid_argv_encoding!(ARGV)
   reject_unsupported_json_assignments!(ARGV)
   normalize_leading_global_options!(ARGV)
+  if ARGV == [ "--version" ] || ARGV == [ "-v" ]
+    puts Hive::VERSION
+    exit 0
+  end
   rewrite_help_flag!(ARGV)
   # Thor::Base#start rescues Thor::Error internally and exits 1 when
   # exit_on_failure? is true. Passing `debug: true` makes Thor re-raise

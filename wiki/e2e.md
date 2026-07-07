@@ -52,9 +52,11 @@ options precede the help flag, e.g. `bin/hive-e2e run --filter tui --help`.
 Leading JSON class options are normalized with the same Thor-style boolean
 grammar as `bin/hive`: bare `--json`, exact truthy assignments
 (`--json=true`/`TRUE`/`t`/`T`), bare negative forms, and exact false
-assignments are moved behind a recognized command. Unsupported assignments such
-as `--json=1` or `--json=yes` are usage errors before the value can become the
-default `run` pattern. Wrapper-owned error formatting checks the last
+assignments are moved behind a recognized command, or stripped before top-level
+`--help` / `-h` / `--version` / `-v` so those flags remain wrapper requests.
+Unsupported assignments such as `--json=1` or `--json=yes` are usage errors
+before the value can become the default `run` pattern. Wrapper-owned error
+formatting checks the last
 recognized JSON boolean flag rather than any truthy flag, so duplicate flags
 with a final false form, such as `--json --no-json`, emit the human
 `hive-e2e:` stderr path. Invalid-byte `ARGV` entries are rejected before those

@@ -129,6 +129,14 @@ class E2EBinaryTest < Minitest::Test
     assert_equal "#{Hive::VERSION}\n", out
   end
 
+  def test_leading_json_top_level_version_prints_hive_version
+    %w[--version -v].each do |flag|
+      out, err, status = Open3.capture3(hive_e2e, "--json", flag)
+      assert status.success?, "bin/hive-e2e --json #{flag} should exit 0, stderr was: #{err}"
+      assert_equal "#{Hive::VERSION}\n", out
+    end
+  end
+
   # Thor's default for unknown commands is to print a deprecation warning
   # and exit 0; we override `exit_on_failure?` to true so wrappers / CI
   # see a non-zero status instead. Pin the contract here.
@@ -149,6 +157,16 @@ class E2EBinaryTest < Minitest::Test
     assert status.success?, "bin/hive-e2e run --help should exit 0, stderr was: #{err}"
     assert_includes out, "Run e2e scenarios"
     refute_includes err, "no scenarios match"
+  end
+
+  def test_leading_json_top_level_help_shows_usage
+    %w[--help -h].each do |flag|
+      out, err, status = Open3.capture3(hive_e2e, "--json", flag)
+      assert status.success?, "bin/hive-e2e --json #{flag} should exit 0, stderr was: #{err}"
+      assert_includes out, "Commands:"
+      refute_includes out, "hive-e2e-error"
+      refute_includes err, "no scenarios match"
+    end
   end
 
   def test_run_help_after_option_value_shows_usage

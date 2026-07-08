@@ -93,6 +93,48 @@ class StagesCouncilTest < Minitest::Test
     end
   end
 
+  def test_command_revise_runs_before_next_round
+    with_tmp_dir do |project|
+      revise = Hive::Workflow::Revise.new(
+        command: "printf '\\ncommand revised round=%s\\n' \"$HIVE_COUNCIL_ROUND\" >> \"$HIVE_COUNCIL_INPUT\""
+      )
+      workflow = council_workflow(exit_rule: :consensus, max_rounds: 2, revise: revise)
+      task = task_for(project, workflow: workflow)
+      File.write(File.join(task.folder, "draft.md"), "Architecture draft\n")
+      outputs = [
+        "Verdict: changes_requested\n\n## Required edits\n- Expand risks.\n",
+        "Verdict: changes_requested\n\n## Required edits\n- Expand risks.\n",
+        "Verdict: ready\n",
+        "Verdict: ready\n"
+      ]
+
+      with_stubbed_spawn(outputs) do
+        result = Hive::Stages::Council.run!(task, {})
+
+        assert_equal({ commit: "complete", status: :complete }, result)
+        assert_includes File.read(File.join(task.folder, "draft.md")), "command revised round=1"
+      end
+    end
+  end
+
+  def test_command_revise_failure_marks_error
+    with_tmp_dir do |project|
+      revise = Hive::Workflow::Revise.new(command: "printf 'revise boom' >&2; exit 9")
+      workflow = council_workflow(exit_rule: :consensus, max_rounds: 2, revise: revise)
+      task = task_for(project, workflow: workflow)
+      File.write(File.join(task.folder, "draft.md"), "Architecture draft\n")
+
+      with_stubbed_spawn([ "Verdict: changes_requested\n", "Verdict: changes_requested\n" ]) do
+        result = Hive::Stages::Council.run!(task, {})
+
+        marker = Hive::Markers.current(task.state_file)
+        assert_equal({ commit: "error", status: :error }, result)
+        assert_equal "council_failed", marker.attrs.fetch("reason")
+        assert_includes marker.attrs.fetch("message"), "council revise failed: revise boom"
+      end
+    end
+  end
+
   def test_max_rounds_waits_instead_of_looping_forever
     with_tmp_dir do |project|
       workflow = council_workflow(exit_rule: :consensus, max_rounds: 1, revise: true)
@@ -135,6 +177,21 @@ class StagesCouncilTest < Minitest::Test
     end
   end
 
+  def test_command_reviewer_failure_surfaces_stage_error
+    with_tmp_dir do |project|
+      workflow = command_council_workflow(command: "printf 'boom' >&2; exit 7")
+      task = task_for(project, workflow: workflow)
+      File.write(File.join(task.folder, "draft.md"), "Architecture draft\n")
+
+      result = Hive::Stages::Council.run!(task, {})
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal({ commit: "error", status: :error }, result)
+      assert_equal "council_failed", marker.attrs.fetch("reason")
+      assert_includes marker.attrs.fetch("message"), "council reviewer shell failed: boom"
+    end
+  end
+
   def test_failed_reviewer_spawn_surfaces_error_marker
     with_tmp_dir do |project|
       task = task_for(project, workflow: council_workflow)
@@ -148,6 +205,22 @@ class StagesCouncilTest < Minitest::Test
         assert_equal :error, marker.name
         assert_equal "council_failed", marker.attrs.fetch("reason")
       end
+    end
+  end
+
+  def test_missing_reviewer_instruction_marks_council_io_error
+    with_tmp_dir do |project|
+      missing = File.join(project, "missing-reviewer.md")
+      workflow = instruction_council_workflow(reviewer_instruction: missing)
+      task = task_for(project, workflow: workflow)
+      File.write(File.join(task.folder, "draft.md"), "Architecture draft\n")
+
+      result = Hive::Stages::Council.run!(task, {})
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal({ commit: "error", status: :error }, result)
+      assert_equal "council_io_error", marker.attrs.fetch("reason")
+      assert_includes marker.attrs.fetch("message"), "No such file"
     end
   end
 
@@ -219,6 +292,23 @@ class StagesCouncilTest < Minitest::Test
     end
   end
 
+  def test_custom_triage_output_rounds_skip_non_round_suffixes
+    with_tmp_dir do |project|
+      workflow = council_workflow(triage_output: "audit/summary.md")
+      task = task_for(project, workflow: workflow)
+      FileUtils.mkdir_p(File.join(task.folder, "audit"))
+      File.write(File.join(task.folder, "audit", "summary-02.md"), "prior round\n")
+      File.write(File.join(task.folder, "audit", "summary-draft.md"), "ignore me\n")
+
+      assert_equal 3, Hive::Stages::Council.next_round(task.folder, workflow.stage_named("review"))
+    end
+  end
+
+  def test_action_for_none_and_unknown_marker_names
+    assert_nil Hive::Stages::Council.action_for(:none)
+    assert_equal "paused", Hive::Stages::Council.action_for(:paused)
+  end
+
   private
 
     def with_failing_spawn
@@ -255,7 +345,17 @@ class StagesCouncilTest < Minitest::Test
       end
     end
 
-    def council_workflow(quorum: 2, max_rounds: 1, exit_rule: :human, revise: false, input: nil)
+    def council_workflow(quorum: 2, max_rounds: 1, exit_rule: :human, revise: false, input: nil,
+                         triage_output: nil)
+      revise_config =
+        case revise
+        when Hive::Workflow::Revise
+          revise
+        when true
+          Hive::Workflow::Revise.new(skill: "/revise")
+        else
+          nil
+        end
       Hive::Workflow.new(
         id: :council_test,
         stages: [
@@ -274,7 +374,8 @@ class StagesCouncilTest < Minitest::Test
               quorum: quorum,
               max_rounds: max_rounds,
               exit_rule: exit_rule,
-              revise: revise ? Hive::Workflow::Revise.new(skill: "/revise") : nil
+              triage_output: triage_output,
+              revise: revise_config
             )
           ),
           Hive::Workflow::Stage.new(name: "done", index: 3, state_file: "done.md", kind: :inert)
@@ -282,7 +383,7 @@ class StagesCouncilTest < Minitest::Test
       )
     end
 
-    def command_council_workflow
+    def command_council_workflow(command: "printf 'Verdict: ready\\n' > \"$HIVE_COUNCIL_OUTPUT\"")
       Hive::Workflow.new(
         id: :command_council,
         stages: [
@@ -295,7 +396,7 @@ class StagesCouncilTest < Minitest::Test
             reviewers: [
               Hive::Workflow::Reviewer.new(
                 name: "shell",
-                command: "printf 'Verdict: ready\\n' > \"$HIVE_COUNCIL_OUTPUT\""
+                command: command
               )
             ],
             council: Hive::Workflow::Council.new(quorum: 1)
@@ -303,5 +404,21 @@ class StagesCouncilTest < Minitest::Test
           Hive::Workflow::Stage.new(name: "done", index: 3, state_file: "done.md", kind: :inert)
         ]
       )
+    end
+
+    def instruction_council_workflow(reviewer_instruction:)
+      workflow = council_workflow
+      review = workflow.stage_named("review")
+      replacement = Hive::Workflow::Stage.new(
+        name: review.name,
+        index: review.index,
+        state_file: review.state_file,
+        kind: review.kind,
+        reviewers: [
+          Hive::Workflow::Reviewer.new(name: "one", instruction: reviewer_instruction)
+        ],
+        council: Hive::Workflow::Council.new(quorum: 1)
+      )
+      Hive::Workflow.new(id: workflow.id, stages: [ workflow.stages.first, replacement, workflow.stages.last ])
     end
 end

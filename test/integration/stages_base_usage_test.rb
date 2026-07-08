@@ -127,6 +127,52 @@ class StagesBaseUsageTest < Minitest::Test
     end
   end
 
+  def test_non_claude_profile_model_effort_warning_is_logged
+    with_tmp_dir do |root|
+      task = make_task(root)
+      with_usage_db(root) do
+        configure_fake_agent(task, usage: false)
+        profile = Hive::AgentProfile.new(
+          name: :codex,
+          bin_default: FAKE_BIN,
+          env_bin_override_key: "HIVE_CLAUDE_BIN",
+          headless_flag: "-p",
+          version_flag: "--version",
+          skill_syntax_format: "/%{skill}",
+          status_detection_mode: :state_file_marker
+        )
+
+        result = Hive::Stages::Base.spawn_agent(
+          task,
+          prompt: "collect usage",
+          max_budget_usd: 1,
+          timeout_sec: 5,
+          profile: profile,
+          model: "opus",
+          effort: "high"
+        )
+
+        assert_equal :waiting, result[:status]
+        warning = File.read(File.join(task.log_dir, "config-warnings.log"))
+        assert_includes warning, "agent profile :codex does not honor per-stage model=\"opus\", effort=\"high\""
+      end
+    end
+  end
+
+  def test_non_claude_profile_model_effort_warning_falls_back_to_stderr
+    task = Struct.new(:log_dir).new(File.join(Dir.tmpdir, "hive-warning-as-file"))
+    profile = Struct.new(:name).new(:codex)
+    File.write(task.log_dir, "not a directory\n")
+
+    _out, err = capture_io do
+      Hive::Stages::Base.warn_model_effort_dropped(task, profile, model: "opus", effort: nil)
+    end
+
+    assert_includes err, "agent profile :codex does not honor per-stage model=\"opus\""
+  ensure
+    FileUtils.rm_f(task&.log_dir)
+  end
+
   def test_non_zero_exit_still_records_captured_usage
     with_tmp_dir do |root|
       task = make_task(root)

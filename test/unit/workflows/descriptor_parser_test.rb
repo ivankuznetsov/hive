@@ -344,6 +344,33 @@ class WorkflowsDescriptorParserTest < Minitest::Test
     assert_nil review.council.revise
   end
 
+  def test_nonterminal_deliverable_is_rejected
+    error = assert_config_error(
+      {
+        "id" => "bad",
+        "stages" => [
+          { "name" => "draft", "kind" => "agent", "state_file" => "draft.md", "skill" => "/draft",
+            "deliverable" => "draft.md" },
+          { "name" => "done", "kind" => "terminal", "state_file" => "done.md" }
+        ]
+      },
+      path: "/tmp/bad.yml"
+    )
+
+    assert_includes error.message, "deliverable is only consumed on the last stage"
+  end
+
+  def test_parser_terminal_last_stage_validation_reports_internal_kind_drift
+    parser = Hive::Workflows::DescriptorParser.new("/tmp/bad.yml")
+    stage = Hive::Workflow::Stage.new(name: "execute", index: 1, state_file: "x.md", kind: :execute)
+
+    error = assert_raises(Hive::ConfigError) do
+      parser.send(:validate_terminal_last_stage!, [ stage ])
+    end
+
+    assert_includes error.message, 'last stage "execute" must be terminal, agent, or council'
+  end
+
   def test_council_stage_requires_reviewers
     error = assert_config_error(
       {
@@ -357,6 +384,37 @@ class WorkflowsDescriptorParserTest < Minitest::Test
     )
 
     assert_includes error.message, "council stage must declare reviewers"
+  end
+
+  def test_council_rejects_duplicate_reviewer_names_and_sanitized_outputs
+    [
+      [
+        [
+          { "name" => "same", "prompt" => "Review." },
+          { "name" => "same", "prompt" => "Review." }
+        ],
+        'duplicate reviewer names: ["same"]'
+      ],
+      [
+        [
+          { "name" => "one", "prompt" => "Review.", "output_basename" => "a b" },
+          { "name" => "two", "prompt" => "Review.", "output_basename" => "a/b" }
+        ],
+        'duplicate reviewer output_basenames: ["a-b"]'
+      ]
+    ].each do |reviewers, message|
+      error = assert_config_error(
+        {
+          "id" => "bad",
+          "stages" => [
+            { "name" => "review", "kind" => "council", "state_file" => "review.md", "reviewers" => reviewers },
+            { "name" => "done", "kind" => "terminal", "state_file" => "done.md" }
+          ]
+        },
+        path: "/tmp/bad.yml"
+      )
+      assert_includes error.message, message
+    end
   end
 
   def test_council_stage_rejects_invalid_quorum_exit_rule_and_rounds
@@ -406,6 +464,72 @@ class WorkflowsDescriptorParserTest < Minitest::Test
         path: "/tmp/bad.yml"
       )
       assert_includes error.message, message
+    end
+  end
+
+  def test_council_revise_requires_exactly_one_instruction_source
+    [
+      [ {}, "must declare exactly one of" ],
+      [ { "skill" => "/revise", "prompt" => "Revise." }, "must declare exactly one of" ]
+    ].each do |revise, message|
+      error = assert_config_error(
+        {
+          "id" => "bad",
+          "stages" => [
+            {
+              "name" => "review",
+              "kind" => "council",
+              "state_file" => "review.md",
+              "reviewers" => [ { "name" => "one", "prompt" => "Review." } ],
+              "council" => { "revise" => revise }
+            },
+            { "name" => "done", "kind" => "terminal", "state_file" => "done.md" }
+          ]
+        },
+        path: "/tmp/bad.yml"
+      )
+      assert_includes error.message, message
+    end
+  end
+
+  def test_council_revise_noop_combinations_warn
+    [
+      [ { "revise" => { "skill" => "/revise" } }, /max_rounds: 1/ ],
+      [ { "max_rounds" => 2, "exit_rule" => "human", "revise" => { "skill" => "/revise" } }, /exit_rule: human/ ]
+    ].each do |council, warning|
+      _out, err = capture_io do
+        Hive::Workflows::DescriptorParser.parse_hash(
+          {
+            "id" => "warn",
+            "stages" => [
+              { "name" => "review", "kind" => "council", "state_file" => "review.md",
+                "reviewers" => [ { "name" => "one", "prompt" => "Review." } ],
+                "council" => council },
+              { "name" => "done", "kind" => "terminal", "state_file" => "done.md" }
+            ]
+          },
+          path: "/tmp/warn.yml"
+        )
+      end
+      assert_match warning, err
+    end
+  end
+
+  def test_council_triage_output_stays_inside_stage_folder
+    [ "/tmp/triage.md", "../triage.md", "reviews/../triage.md" ].each do |triage_output|
+      error = assert_config_error(
+        {
+          "id" => "bad",
+          "stages" => [
+            { "name" => "review", "kind" => "council", "state_file" => "review.md",
+              "reviewers" => [ { "name" => "one", "prompt" => "Review." } ],
+              "council" => { "triage_output" => triage_output } },
+            { "name" => "done", "kind" => "terminal", "state_file" => "done.md" }
+          ]
+        },
+        path: "/tmp/bad.yml"
+      )
+      assert_includes error.message, "must stay inside the stage folder"
     end
   end
 
@@ -462,6 +586,32 @@ class WorkflowsDescriptorParserTest < Minitest::Test
       end
       assert_includes both.message, "agent stages must declare exactly one"
     end
+  end
+
+  def test_kind_specific_fields_are_rejected
+    agent_error = assert_config_error(
+      {
+        "id" => "bad",
+        "stages" => [
+          { "name" => "work", "kind" => "agent", "state_file" => "work.md", "skill" => "/ship",
+            "reviewers" => [ { "name" => "one", "prompt" => "Review." } ] }
+        ]
+      },
+      path: "/tmp/bad.yml"
+    )
+    assert_includes agent_error.message, '["reviewers"] is only valid on a council stage'
+
+    council_error = assert_config_error(
+      {
+        "id" => "bad",
+        "stages" => [
+          { "name" => "review", "kind" => "council", "state_file" => "review.md",
+            "skill" => "/ship", "reviewers" => [ { "name" => "one", "prompt" => "Review." } ] }
+        ]
+      },
+      path: "/tmp/bad.yml"
+    )
+    assert_includes council_error.message, '["skill"] is only valid on a agent stage'
   end
 
   def test_instruction_must_reference_readable_file

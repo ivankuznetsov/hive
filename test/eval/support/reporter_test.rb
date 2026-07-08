@@ -462,6 +462,43 @@ class HiveEvalReporterTest < Minitest::Test
     end
   end
 
+  def test_cli_usage_errors_preserve_existing_non_report_files
+    cases = [
+      [
+        "parse error",
+        ->(report) { [ "--report", report, "--scenario" ] },
+        /missing argument: --scenario/
+      ],
+      [
+        "unexpected positional",
+        ->(report) { [ "--scenario", "s1_status", "--no-judge", "--report", report, "extra" ] },
+        /unexpected argument: extra/
+      ],
+      [
+        "missing scenario",
+        ->(report) { [ "--report", report, "--scenario", "definitely_missing", "--no-judge" ] },
+        /scenario not found/
+      ]
+    ]
+
+    cases.each do |label, argv_for, message|
+      Dir.mktmpdir("hive-eval-report") do |dir|
+        report = File.join(dir, "#{label.tr(" ", "-")}.txt")
+        File.write(report, "keep me")
+
+        _out, err, status = Open3.capture3(
+          { "HIVE_EVAL_NO_JUDGE" => "1" },
+          "bin/hive-eval", *argv_for.call(report)
+        )
+
+        refute status.success?, "#{label} must be a usage error"
+        assert_equal 64, status.exitstatus, err
+        assert_match(message, err)
+        assert_equal "keep me", File.read(report), "#{label} must preserve existing non-report files"
+      end
+    end
+  end
+
   def test_cli_help_is_read_only_and_preserves_selected_report
     [ "--help", "-h" ].each do |help_flag|
       Dir.mktmpdir("hive-eval-report") do |dir|

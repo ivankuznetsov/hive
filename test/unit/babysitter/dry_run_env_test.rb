@@ -147,7 +147,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
                       "git -c core.fsmonitor=false -c core.askPass= -c log.showSignature=false " \
                       "-c log.diffMerges=separate " \
                       "-c gpg.program=false -c gpg.openpgp.program=false -c gpg.x509.program=false " \
-                      "-c gpg.ssh.program=false --no-pager status --short"
+                      "-c gpg.ssh.program=false -c diff.submodule=short --no-pager status --short"
       assert_includes real_invocations, "gh repo view owner/repo"
       refute_includes real_invocations, "pwn-git"
       refute_includes real_invocations, "pwn-gh"
@@ -1760,6 +1760,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       "-c", "gpg.openpgp.program=false",
       "-c", "gpg.x509.program=false",
       "-c", "gpg.ssh.program=false",
+      "-c", "diff.submodule=short",
       "--no-pager"
     ] + passthrough).join(' ')}"
   end

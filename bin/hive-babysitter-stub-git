@@ -363,6 +363,14 @@ def hardened_passthrough_argv(argv, rest)
     "-c", "gpg.openpgp.program=false",
     "-c", "gpg.x509.program=false",
     "-c", "gpg.ssh.program=false",
+    # The argv `--submodule=diff` guard cannot see a worktree-local `diff.submodule=diff`
+    # (or `=log`): with the mode selected by config, no `--submodule` token appears in argv,
+    # yet git still enters each submodule repo and runs its local diff drivers — the very exec
+    # seam the top-level `--no-ext-diff --no-textconv` do not reach inside a nested submodule.
+    # Pin the submodule format to the inert `short` (a bare old/new commit-hash summary that
+    # never enters the submodule repo); this `-c` override outranks the worktree config, exactly
+    # as the gpg/core overrides above do.
+    "-c", "diff.submodule=short",
     # A read can otherwise auto-spawn a repo/caller-controlled `core.pager` on a TTY; force
     # `--no-pager` so a dry-run read cannot launch a pager (PAGER/GIT_PAGER are also scrubbed below).
     "--no-pager",

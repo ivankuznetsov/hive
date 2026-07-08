@@ -535,12 +535,15 @@ module Hive
         if derive_flags_from_cfg && cfg && profile.name == :claude
           permission_mode ||= Hive::Config.claude_permission_mode(cfg)
           cli_flags = Hive::Config.claude_cli_flags(cfg, model: model, effort: effort)
-        elsif model || effort
+        elsif (model || effort) && profile.name != :claude
           # model/effort are only translated to CLI flags on the :claude profile
           # (above). A per-stage/per-reviewer `model:`/`effort:` on a codex/fable/
           # pi stage is therefore a no-op — plan U2 requires it be a LOGGED no-op,
           # not a silent drop, so an author who sets it on a non-claude profile
-          # gets a breadcrumb rather than surprising unchanged behavior.
+          # gets a breadcrumb rather than surprising unchanged behavior. Gate on
+          # `profile.name != :claude` so a claude caller that supplied explicit
+          # `cli_flags:` (derive_flags_from_cfg == false) with model/effort does
+          # NOT get the misleading "does not honor per-stage model/effort" note.
           warn_model_effort_dropped(task, profile, model: model, effort: effort)
         end
 

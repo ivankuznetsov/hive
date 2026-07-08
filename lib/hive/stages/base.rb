@@ -535,6 +535,13 @@ module Hive
         if derive_flags_from_cfg && cfg && profile.name == :claude
           permission_mode ||= Hive::Config.claude_permission_mode(cfg)
           cli_flags = Hive::Config.claude_cli_flags(cfg, model: model, effort: effort)
+        elsif model || effort
+          # model/effort are only translated to CLI flags on the :claude profile
+          # (above). A per-stage/per-reviewer `model:`/`effort:` on a codex/fable/
+          # pi stage is therefore a no-op — plan U2 requires it be a LOGGED no-op,
+          # not a silent drop, so an author who sets it on a non-claude profile
+          # gets a breadcrumb rather than surprising unchanged behavior.
+          warn_model_effort_dropped(task, profile, model: model, effort: effort)
         end
 
         started_at = Time.now.utc.iso8601
@@ -666,6 +673,23 @@ module Hive
 
         def respond_to_missing?(name, _include_private = false)
           name.match?(/\A\w+\z/) || super
+        end
+      end
+
+      def warn_model_effort_dropped(task, profile, model:, effort:)
+        fields = { "model" => model, "effort" => effort }.compact
+        message = "[hive] agent profile #{profile.name.inspect} does not honor per-stage " \
+                  "#{fields.map { |key, value| "#{key}=#{value.inspect}" }.join(', ')}; " \
+                  "these are only applied on the :claude profile and are ignored for this spawn."
+        # Best-effort log write mirroring warn_isolation_reduced; never blocks spawn.
+        begin
+          FileUtils.mkdir_p(task.log_dir)
+          ts = Time.now.utc.iso8601
+          File.open(File.join(task.log_dir, "config-warnings.log"), "a") do |f|
+            f.puts "#{ts} #{message}"
+          end
+        rescue StandardError
+          warn message
         end
       end
 

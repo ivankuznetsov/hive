@@ -85,6 +85,11 @@ def option_value_missing?(value)
 end
 
 def hive_eval_report?(path)
+  # Guard File.read to regular files: the cleanup now inspects arbitrary caller
+  # paths, and File.read on a FIFO or blocking device would wait for EOF,
+  # stalling the usage-error path instead of printing the error promptly.
+  return false unless File.file?(path)
+
   doc = JSON.parse(File.read(path))
   doc.is_a?(Hash) && doc["schema"] == "hive-eval-report"
 rescue EncodingError, SystemCallError, JSON::ParserError

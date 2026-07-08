@@ -2,6 +2,46 @@
 
 These recipes are meant to be copied into real project work. They use the current nine-stage workflow.
 
+## Build A Document Review Council Workflow
+
+Start from the architecture template when the deliverable is a plan or design
+document rather than code:
+
+```bash
+hive workflow new architecture --template architecture
+hive new <project> --workflow architecture "Plan the system..."
+```
+
+The template captures the seed in `idea.md`, drafts `draft.md`, runs a native
+`kind: council` review over that draft, and ends on an agent terminal stage that
+produces `architecture.md`. The council writes reviewer artifacts under
+`reviews/` and a triage summary at `reviews/triage.md`.
+
+Minimal council descriptor:
+
+```yaml
+- name: review
+  kind: council
+  state_file: review.md
+  input: draft.md
+  council:
+    quorum: 2
+    max_rounds: 3
+    exit_rule: consensus
+    triage_output: reviews/triage.md
+  reviewers:
+    - name: claude-doc
+      agent: claude
+      prompt: Review the draft for clarity and missing decisions.
+    - name: codex-doc
+      agent: codex
+      prompt: Review the draft for implementation risk.
+```
+
+Use `exit_rule: human` when disagreement should pause for manual edits instead
+of invoking a revise agent. Keep `max_rounds` small; it is the guard against an
+unbounded review loop.
+
 ## Xbookmark End-To-End
 
 The xbookmark dogfood task started from this idea (typo `conenct` preserved from the original):

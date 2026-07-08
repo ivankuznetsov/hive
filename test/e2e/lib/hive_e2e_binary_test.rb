@@ -277,6 +277,35 @@ class E2EBinaryTest < Minitest::Test
     end
   end
 
+  def test_replay_symlinked_runs_root_emits_json_artifact_error_when_requested
+    Dir.mktmpdir("e2e-replay-target") do |target_runs_dir|
+      Dir.mktmpdir("e2e-replay-link-parent") do |link_parent|
+        runs_link = File.join(link_parent, "runs")
+        File.symlink(target_runs_dir, runs_link)
+
+        script = File.join(target_runs_dir, "run-1", "scenarios", "scenario-1", "repro.sh")
+        FileUtils.mkdir_p(File.dirname(script))
+        File.write(script, "#!/usr/bin/env bash\nexit 42\n")
+        File.chmod(0o755, script)
+
+        out, err, status = Open3.capture3(
+          { "HIVE_E2E_RUNS_DIR" => runs_link },
+          hive_e2e, "replay", "--json", "run-1", "scenario-1"
+        )
+
+        assert_equal 78, status.exitstatus
+        assert_empty err
+
+        payload = JSON.parse(out)
+        assert_equal "hive-e2e-error", payload["schema"]
+        assert_equal false, payload["ok"]
+        assert_equal "unusable_repro", payload["error_kind"]
+        assert_equal 78, payload["exit_code"]
+        assert_match(/not executable/, payload["message"])
+      end
+    end
+  end
+
   def test_replay_dangling_symlinked_repro_emits_unusable_not_missing_when_requested
     Dir.mktmpdir("e2e-replay-test") do |tmp_runs_dir|
       target = File.join(tmp_runs_dir, "deleted-repro.sh")

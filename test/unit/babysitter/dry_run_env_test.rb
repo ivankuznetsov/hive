@@ -145,6 +145,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       real_invocations = File.read(File.join(dir, "real.log"))
       assert_includes real_invocations,
                       "git -c core.fsmonitor=false -c core.askPass= -c log.showSignature=false " \
+                      "-c log.diffMerges=separate " \
                       "-c gpg.program=false -c gpg.openpgp.program=false -c gpg.x509.program=false " \
                       "-c gpg.ssh.program=false --no-pager status --short"
       assert_includes real_invocations, "gh repo view owner/repo"
@@ -778,6 +779,12 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "git", "diff", "-o", "/tmp/hive-output-short-pwn"
       assert_stubbed env, "git", "diff", "-o/tmp/hive-output-glued-pwn"
       assert_stubbed env, "git", "diff", "--ext-diff"
+      # `git show --remerge-diff` / `--diff-merges=remerge` replay merge machinery and honor
+      # repo-local merge drivers, so they are not safe read passthroughs.
+      assert_stubbed env, "git", "log", "--remerge-diff", "--no-patch", "-1", "HEAD"
+      assert_stubbed env, "git", "show", "--remerge-diff", "--no-patch", "HEAD"
+      assert_stubbed env, "git", "show", "--diff-merges=remerge", "--no-patch", "HEAD"
+      assert_stubbed env, "git", "show", "--diff-merges=r", "--no-patch", "HEAD"
       # `--textconv` runs the repo-local `diff.<driver>.textconv` command — an exec seam. The
       # spelled-out flag must skip, and so must every prefix git accepts as the long option
       # (`--text`, `--textc`, ...), e.g. `git cat-file --text` / `git grep --textc`.
@@ -1622,6 +1629,53 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_git_stub_skips_remerge_diff_options_before_merge_driver_runs
+    with_tmp_remerge_driver_repo do |dir, marker_path, merge_oid|
+      env = real_git_env(dir)
+      cases = [
+        [ "log", "--remerge-diff", "--no-patch", "-1", merge_oid ],
+        [ "show", "--remerge-diff", "--no-patch", merge_oid ],
+        [ "show", "--diff-merges=remerge", "--no-patch", merge_oid ],
+        [ "show", "--diff-merges=r", "--no-patch", merge_oid ]
+      ]
+
+      cases.each do |args|
+        FileUtils.rm_f(marker_path)
+
+        _out, err, status = Open3.capture3(env, stub_path("git"), "-C", dir, *args)
+
+        assert status.success?, err
+        assert_includes err, "[dry-run] git -C #{dir} #{args.join(' ')} skipped"
+        refute_path_exists marker_path,
+                           "merge driver ran during skipped #{args.join(' ')}"
+      end
+    end
+  end
+
+  def test_git_stub_neutralizes_configured_remerge_default_before_passthrough
+    with_tmp_remerge_driver_repo(log_diff_merges: "remerge") do |dir, marker_path, merge_oid|
+      env = real_git_env(dir)
+      cases = [
+        [ "log", "-m", "--format=%H", "--no-patch", "-1", merge_oid ],
+        [ "show", "-m", "--format=%H", "--no-patch", merge_oid ],
+        [ "show", "--diff-merges=on", "--format=%H", "--no-patch", merge_oid ],
+        [ "show", "--diff-merges=m", "--format=%H", "--no-patch", merge_oid ]
+      ]
+
+      cases.each do |args|
+        FileUtils.rm_f(marker_path)
+
+        out, err, status = Open3.capture3(env, stub_path("git"), "-C", dir, *args)
+
+        assert status.success?, err
+        assert_equal "#{merge_oid}\n", out
+        refute_includes err, "skipped"
+        refute_path_exists marker_path,
+                           "repo-local log.diffMerges=remerge ran merge driver during #{args.join(' ')}"
+      end
+    end
+  end
+
   def test_git_stub_skips_remote_show_without_no_query_flag
     with_tmp_git_repo do |dir|
       pwn_path = File.join(dir, "remote-show-ran")
@@ -1695,6 +1749,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       "-c", "core.fsmonitor=false",
       "-c", "core.askPass=",
       "-c", "log.showSignature=false",
+      "-c", "log.diffMerges=separate",
       "-c", "gpg.program=false",
       "-c", "gpg.openpgp.program=false",
       "-c", "gpg.x509.program=false",
@@ -1822,6 +1877,44 @@ class BabysitterDryRunEnvTest < Minitest::Test
 
   def real_git_binary
     Hive::Babysitter::DryRunEnv.which("git") || raise("git binary not found on PATH")
+  end
+
+  def with_tmp_remerge_driver_repo(log_diff_merges: nil)
+    with_tmp_dir do |dir|
+      marker_path = File.join(dir, "merge-driver-ran")
+
+      run!("git", "-C", dir, "init", "-b", "master", "--quiet")
+      run!("git", "-C", dir, "config", "user.email", "test@example.com")
+      run!("git", "-C", dir, "config", "user.name", "Test")
+      File.write(File.join(dir, ".gitattributes"), "payload merge=pwn\n")
+      File.write(File.join(dir, "payload"), "base\n")
+      run!("git", "-C", dir, "add", ".")
+      run!("git", "-C", dir, "commit", "-m", "base", "--quiet")
+
+      run!("git", "-C", dir, "checkout", "-b", "left", "--quiet")
+      File.write(File.join(dir, "payload"), "left\n")
+      run!("git", "-C", dir, "commit", "-am", "left", "--quiet")
+
+      run!("git", "-C", dir, "checkout", "-b", "right", "master", "--quiet")
+      File.write(File.join(dir, "payload"), "right\n")
+      run!("git", "-C", dir, "commit", "-am", "right", "--quiet")
+
+      run!("git", "-C", dir, "config", "merge.pwn.name", "pwn")
+      run!(
+        "git",
+        "-C",
+        dir,
+        "config",
+        "merge.pwn.driver",
+        "sh -c 'touch \"$0\"; exit 0' #{marker_path.shellescape}"
+      )
+      run!("git", "-C", dir, "config", "log.diffMerges", log_diff_merges) if log_diff_merges
+      run!("git", "-C", dir, "merge", "left", "-m", "merge", "--quiet")
+      merge_oid = run!("git", "-C", dir, "rev-parse", "HEAD").strip
+      FileUtils.rm_f(marker_path)
+
+      yield dir, marker_path, merge_oid
+    end
   end
 
   def with_tmp_signed_git_repo(log_show_signature: false)

@@ -221,7 +221,7 @@ Voice-note idea capture also needs an OpenAI-compatible transcription key. Put i
 
 ## Drive Hive From Your Coding Agent
 
-Hive's other primary surface is a coding agent — Claude Code, Codex, Gemini, Pi, or anything that can read terminal output and run shell commands. You describe intent in natural language ("brainstorm the bookmark service idea", "run review on the failing task and report the findings"), the agent translates that into `hive <verb>` calls, and you watch the result in the TUI or read the markdown artefacts directly. Every workflow verb supports `--json` and emits a typed envelope (schemas under [schemas/](schemas/), contract in [docs/cli.md#json-output](docs/cli.md#json-output)), so agent-side parsing is structured rather than scraped.
+Hive's other primary surface is a coding agent — Claude Code, Codex, Gemini, Pi, or anything that can read terminal output and run shell commands. You describe intent in natural language ("brainstorm the bookmark service idea", "run review on the failing task and report the findings"), the agent translates that into `hive <verb>` calls, and you watch the result in the TUI or read the markdown artefacts directly. The stage-driving workflow verbs support `--json` and emit typed envelopes (schemas under [schemas/](schemas/), contract in [docs/cli.md#json-output](docs/cli.md#json-output)), so agent-side parsing is structured rather than scraped. `hive new` is the capture exception: it still prints prose, so agents should read the printed task path/slug instead of JSON-parsing it.
 
 Useful prompt shapes once Hive is installed:
 
@@ -230,7 +230,7 @@ Useful prompt shapes once Hive is installed:
 - *Drive a task through one stage:* `Run hive review <slug> --json and summarize the resulting envelope, including any waiting markers.`
 - *Watch a long-running task:* `Run hive status --json --project <name> every 30 seconds and stop when the task at <slug> reaches a needs_input or completed action_key.`
 
-The `--json` envelope is stable across versions (schemas live under [schemas/](schemas/)), so agent prompts can rely on field shapes without scraping. `hive tui` is intentionally human-only and rejects `--json` — use the CLI verbs and `hive status --json` for programmatic use. For installation via an agent, point it at [install.md](install.md).
+For commands that emit JSON, the `--json` envelope is stable across versions (schemas live under [schemas/](schemas/)), so agent prompts can rely on field shapes without scraping. `hive tui` is intentionally human-only and rejects `--json` — use the CLI verbs and `hive status --json` for programmatic use. For installation via an agent, point it at [install.md](install.md).
 
 ## Custom Workflows
 
@@ -266,7 +266,7 @@ Three commands cover authoring: `hive workflow new ID` (scaffold a blank starter
 
 ## Power-User / Scripting CLI
 
-The TUI is the recommended human interface and an agent-driven CLI is the recommended automation surface, but every workflow verb is also available directly on `bin/hive` (or the `hv` shim when Apache Hive shadows the name) for scripting, debugging, and recovery. Each verb supports `--json` and returns a typed envelope.
+The TUI is the recommended human interface and an agent-driven CLI is the recommended automation surface, but the workflow commands are also available directly on `bin/hive` (or the `hv` shim when Apache Hive shadows the name) for scripting, debugging, and recovery. Stage-driving verbs support `--json` and return typed envelopes; `hive new` remains plain text and prints the captured task path plus the next-step hint.
 
 | Group | Verbs | What it's for |
 |---|---|---|

@@ -42,8 +42,12 @@ class StagesCouncilTest < Minitest::Test
         assert_equal({ commit: "complete", status: :complete }, result)
         assert_equal :complete, marker.name
         assert File.exist?(triage), "triage-01.md must be written"
-        assert_includes File.read(triage), "Readiness: 2/2 ready"
-        assert_includes File.read(triage), "## Required edits"
+        triage_body = File.read(triage)
+        assert_includes triage_body, "Readiness: 2/2 ready"
+        assert_includes triage_body, "## Required edits"
+        # Plan R2 lists all triage sections as required content.
+        assert_includes triage_body, "## Accepted findings"
+        assert_includes triage_body, "## Rejected findings"
       end
     end
   end
@@ -131,7 +135,103 @@ class StagesCouncilTest < Minitest::Test
     end
   end
 
+  def test_failed_reviewer_spawn_surfaces_error_marker
+    with_tmp_dir do |project|
+      task = task_for(project, workflow: council_workflow)
+      File.write(File.join(task.folder, "draft.md"), "Architecture draft\n")
+
+      with_failing_spawn do
+        result = Hive::Stages::Council.run!(task, {})
+
+        marker = Hive::Markers.current(task.state_file)
+        assert_equal({ commit: "error", status: :error }, result)
+        assert_equal :error, marker.name
+        assert_equal "council_failed", marker.attrs.fetch("reason")
+      end
+    end
+  end
+
+  def test_explicit_input_reviews_that_file_not_prior_stage_fallback
+    with_tmp_dir do |project|
+      workflow = council_workflow(input: "custom-input.md")
+      task = task_for(project, workflow: workflow)
+      # The prior stage's state_file (draft.md) is intentionally NOT created:
+      # if `input:` were ignored the council would resolve to draft.md and
+      # fail with missing_input rather than reviewing custom-input.md.
+      File.write(File.join(task.folder, "custom-input.md"), "CUSTOM-INPUT-MARKER document\n")
+
+      with_stubbed_spawn([ "Verdict: ready\n", "Verdict: ready\n" ]) do |captured|
+        result = Hive::Stages::Council.run!(task, {})
+
+        assert_equal({ commit: "complete", status: :complete }, result)
+        prompts = captured.map { |kwargs| kwargs[:prompt].to_s }
+        assert prompts.any? { |p| p.include?("CUSTOM-INPUT-MARKER") },
+               "reviewer prompt must embed the explicit input: document"
+      end
+    end
+  end
+
+  def test_resume_after_waiting_re_triages_same_round
+    with_tmp_dir do |project|
+      workflow = council_workflow(exit_rule: :human, quorum: 2)
+      task = task_for(project, workflow: workflow)
+      File.write(File.join(task.folder, "draft.md"), "Architecture draft\n")
+
+      # First run: reviewers disagree, human exit_rule -> :waiting on round 1.
+      with_stubbed_spawn([ "Verdict: ready\n", "Verdict: changes_requested\n" ]) do
+        Hive::Stages::Council.run!(task, {})
+      end
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :waiting, marker.name
+      assert_equal "1", marker.attrs.fetch("round")
+
+      # Human edits the document and re-runs. Pre-flight must re-triage the SAME
+      # round (no round++), not open round 2.
+      File.write(File.join(task.folder, "draft.md"), "Architecture draft, revised.\n")
+      with_stubbed_spawn([ "Verdict: changes_requested\n", "Verdict: changes_requested\n" ]) do
+        result = Hive::Stages::Council.run!(task, {})
+        assert_equal({ commit: "round_waiting", status: :waiting }, result)
+      end
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal "1", marker.attrs.fetch("round"), "resume must not increment the round"
+      refute File.exist?(File.join(task.folder, "reviews", "triage-02.md")),
+             "resume-after-waiting must re-triage round 1, not open round 2"
+    end
+  end
+
+  def test_complete_council_short_circuits_without_respawning
+    with_tmp_dir do |project|
+      task = task_for(project, workflow: council_workflow)
+      File.write(File.join(task.folder, "draft.md"), "Architecture draft\n")
+
+      with_stubbed_spawn([ "Verdict: ready\n", "Verdict: ready\n" ]) do
+        Hive::Stages::Council.run!(task, {})
+      end
+      assert_equal :complete, Hive::Markers.current(task.state_file).name
+
+      # Re-running a :complete council must not spawn any reviewers.
+      with_stubbed_spawn([]) do |captured|
+        result = Hive::Stages::Council.run!(task, {})
+        assert_equal({ commit: "complete", status: :complete }, result)
+        assert_empty captured, "a complete council must short-circuit without re-spawning"
+      end
+    end
+  end
+
   private
+
+    def with_failing_spawn
+      original = Hive::Stages::Base.method(:spawn_agent)
+      Hive::Stages::Base.define_singleton_method(:spawn_agent) do |_task, **_kwargs|
+        { status: :error, error_message: "reviewer spawn blew up" }
+      end
+      yield
+    ensure
+      Hive::Stages::Base.define_singleton_method(:spawn_agent) do |*args, **kwargs, &block|
+        original.call(*args, **kwargs, &block)
+      end
+    end
 
     def with_stubbed_spawn(outputs)
       captured = []
@@ -155,7 +255,7 @@ class StagesCouncilTest < Minitest::Test
       end
     end
 
-    def council_workflow(quorum: 2, max_rounds: 1, exit_rule: :human, revise: false)
+    def council_workflow(quorum: 2, max_rounds: 1, exit_rule: :human, revise: false, input: nil)
       Hive::Workflow.new(
         id: :council_test,
         stages: [
@@ -165,6 +265,7 @@ class StagesCouncilTest < Minitest::Test
             index: 2,
             state_file: "review.md",
             kind: :council,
+            input: input,
             reviewers: [
               Hive::Workflow::Reviewer.new(name: "one", skill: "/review"),
               Hive::Workflow::Reviewer.new(name: "two", skill: "/review")

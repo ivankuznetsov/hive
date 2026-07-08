@@ -71,6 +71,26 @@ class StagesResolverTest < Minitest::Test
     assert_equal Hive::Stages::Agent.method(:run!), runner
   end
 
+  def test_non_coding_council_stage_resolves_to_council_runner
+    descriptor = Hive::Workflow.new(
+      id: :synthetic,
+      stages: [
+        Hive::Workflow::Stage.new(
+          name: "review",
+          index: 1,
+          state_file: "review.md",
+          kind: :council,
+          reviewers: [ Hive::Workflow::Reviewer.new(name: "one", prompt: "Review.") ],
+          council: Hive::Workflow::Council.new(quorum: 1)
+        )
+      ]
+    )
+
+    runner = Hive::Stages::Resolver.resolve(task("review", workflow: descriptor), descriptor: descriptor)
+
+    assert_equal Hive::Stages::Council.method(:run!), runner
+  end
+
   def test_non_coding_stage_name_collision_resolves_by_descriptor_kind
     descriptor = Hive::Workflow.new(
       id: :synthetic,

@@ -18,7 +18,7 @@ module Hive
         stage = task.workflow.stage_named(task.stage_name)
         stage or raise Hive::StageError, "no agent stage #{task.stage_name}"
         output_path = File.join(task.folder, stage.state_file)
-        profile = Hive::Stages::Base.stage_profile(cfg, task.stage_name)
+        profile = Hive::Stages::Base.stage_profile(cfg, task.stage_name, explicit_agent: stage.agent)
 
         # Read the descriptor's instruction defensively: it can be renamed,
         # deleted, or chmod'd between descriptor parse and this run (a normal
@@ -47,6 +47,8 @@ module Hive
           timeout_sec: cfg.dig("timeout_sec", task.stage_name) || stage.timeout_sec || DEFAULT_TIMEOUT_SEC,
           log_label: task.stage_name,
           profile: profile,
+          model: stage.model,
+          effort: stage.effort,
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           # Honor the descriptor's declared status_mode; fall back to the
           # marker-file convention only when the stage leaves it unset.

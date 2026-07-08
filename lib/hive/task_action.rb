@@ -315,7 +315,7 @@ module Hive
         review_action
       when :finalize
         finalize_action
-      when :agent, :inert
+      when :agent, :council, :inert
         # `|| generic_action(stage)` is the LIVE path for NON-coding
         # `:agent`/`:inert` workflows: `coding_table_action` returns nil for any
         # non-coding id. It is dead-for-coding — `coding_test.rb` pins every
@@ -354,6 +354,8 @@ module Hive
 
       case marker.name
       when :complete
+        return ACTIONS.fetch(:error) if terminal && active_terminal_missing_deliverable?(stage)
+
         terminal ? ACTIONS.fetch(:done) : ACTIONS.fetch(:ready_to_advance)
       when :waiting
         ACTIONS.fetch(:generic_needs_input)
@@ -380,6 +382,14 @@ module Hive
       else
         ACTIONS.fetch(:generic_ready_to_run)
       end
+    end
+
+    def active_terminal_missing_deliverable?(stage)
+      return false unless [ :agent, :council ].include?(stage.kind)
+
+      deliverable = stage.deliverable || stage.state_file
+      path = File.join(task.folder, deliverable)
+      !File.exist?(path) || File.size(path).zero?
     end
 
     def review_action

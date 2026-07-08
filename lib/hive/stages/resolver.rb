@@ -61,6 +61,10 @@ module Hive
           require "hive/stages/agent"
           return Hive::Stages::Agent.method(:run!)
         end
+        if stage&.kind == :council
+          require "hive/stages/council"
+          return Hive::Stages::Council.method(:run!)
+        end
 
         raise Hive::StageError, "no runner for stage #{task.stage_name}"
       end

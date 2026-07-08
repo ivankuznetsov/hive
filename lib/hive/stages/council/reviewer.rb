@@ -22,12 +22,25 @@ module Hive
 
         def run!
           FileUtils.mkdir_p(File.dirname(output_path))
-          if @reviewer.command
-            run_command!
-          else
-            run_agent!
+          # Honor the parsed `max_attempts` (defaults to 1): retry a failed
+          # reviewer spawn/command up to that many times before surfacing the
+          # failure to the council. Without this loop the field parsed and
+          # validated in the descriptor would be a silent no-op.
+          attempts = @reviewer.max_attempts || 1
+          last_error = nil
+          attempts.times do
+            begin
+              if @reviewer.command
+                run_command!
+              else
+                run_agent!
+              end
+              return output_path
+            rescue Hive::StageError => e
+              last_error = e
+            end
           end
-          output_path
+          raise last_error
         end
 
         private

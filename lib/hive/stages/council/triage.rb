@@ -1,4 +1,5 @@
 require "fileutils"
+require "hive/workflow"
 
 module Hive
   module Stages
@@ -58,7 +59,14 @@ module Hive
           return true if body.match?(READY_RE)
           return false if body.match?(CHANGES_RE)
 
-          body.match?(/\bready\b/i) && !body.match?(/\bnot\s+ready\b/i)
+          # No structured `Verdict:`/`Status:` line. Free-text prose is too
+          # ambiguous to trust — "not yet ready", "nearly ready", and
+          # "almost ready to merge" all contain `ready` without the exact
+          # `not ready` phrase, so guessing from prose can drive a false
+          # :complete and advance a document the reviewer rejected. Default
+          # to not-ready; a reviewer that wants to pass must emit the
+          # templated verdict line.
+          false
         end
 
         def extract_section(body, heading)
@@ -91,7 +99,7 @@ module Hive
             #{entries.map { |entry| "### #{entry.fetch(:name)}\n#{entry.fetch(:findings)}" }.join("\n")}
 
             ## Rejected findings
-            - None recorded by deterministic triage.
+            - Not derivable by deterministic triage (no reviewer adjudication step).
 
             ## Required edits
             #{entries.map { |entry| "### #{entry.fetch(:name)}\n#{entry.fetch(:required_edits)}" }.join("\n")}
@@ -112,14 +120,14 @@ module Hive
         end
 
         def triage_path
-          base = @stage.council.triage_output || "reviews/triage.md"
+          base = @stage.council.triage_output || Hive::Workflow::DEFAULT_TRIAGE_OUTPUT
           dir = File.dirname(base)
           basename = File.basename(base, ".md")
           File.join(@task_folder, dir, "#{basename}-#{format('%02d', @round)}.md")
         end
 
         def copy_latest(path)
-          latest = File.join(@task_folder, @stage.council.triage_output || "reviews/triage.md")
+          latest = File.join(@task_folder, @stage.council.triage_output || Hive::Workflow::DEFAULT_TRIAGE_OUTPUT)
           return if latest == path
 
           FileUtils.mkdir_p(File.dirname(latest))

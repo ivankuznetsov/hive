@@ -20,6 +20,12 @@ module Hive
     # Stages::Resolver), and nil is the unspecified default.
     KNOWN_KINDS = [ nil, :agent, :council, :inert, :execute, :review_council, :finalize ].freeze
 
+    # Single source of truth for the council triage artifact default. Referenced
+    # by the Council default below, the descriptor parser, and both council
+    # runners (council.rb round-tracking + triage.rb path building) so the value
+    # can't drift across those copies.
+    DEFAULT_TRIAGE_OUTPUT = "reviews/triage.md"
+
     def each(&) = stages.each(&)
 
     def stage_named(name) = find { |stage| stage.name == name }
@@ -74,7 +80,7 @@ module Hive
 
     Council = Data.define(:quorum, :max_rounds, :exit_rule, :triage_output, :revise) do
       def initialize(quorum:, max_rounds: 1, exit_rule: :human,
-                     triage_output: "reviews/triage.md", revise: nil)
+                     triage_output: DEFAULT_TRIAGE_OUTPUT, revise: nil)
         super
       end
     end

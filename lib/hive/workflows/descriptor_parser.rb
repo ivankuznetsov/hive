@@ -26,6 +26,7 @@ module Hive
         input
         reviewers
         council
+        deliverable
         permissions
       ].freeze
       REVIEWER_KEYS = %w[
@@ -75,25 +76,17 @@ module Hive
 
       private
 
-      # A project workflow's last stage must be terminal (kind: terminal →
-      # :inert). `Hive::Workflows.all_terminal_stage_dirs` treats every workflow's
-      # last stage dir as the archive guard, and a task at the final stage has
-      # nowhere to advance — so a descriptor ending in `kind: agent` yields a task
-      # that can neither advance NOR drop (brainstorm A4). The blank scaffold
-      # (inbox -> work -> done, kind: terminal) already complies. Built-in
-      # workflows are Ruby-constructed and bypass this parser (coding's 9-done is
-      # inert; content's terminal stage is intentionally an agent), so the rule is
-      # scoped to owner-authored YAML descriptors. Skip the empty case — Workflow.new
-      # raises its own "at least one stage" error.
+      # A project workflow's last stage may be inert or an active producer
+      # (:agent/:council). Active terminal stages are gated at status time by
+      # a terminal marker plus a non-empty deliverable artifact.
       def validate_terminal_last_stage!(stages)
         return if stages.empty?
 
         last = stages.last
-        return if last.kind == :inert
+        return if [ :inert, :agent, :council ].include?(last.kind)
 
         raise descriptor_error(
-          "last stage #{last.name.inspect} must be a terminal stage (kind: terminal); a task at the " \
-          "final stage cannot advance, so a non-terminal last stage would be undroppable"
+          "last stage #{last.name.inspect} must be terminal, agent, or council"
         )
       end
 
@@ -150,6 +143,7 @@ module Hive
         effort = optional_string(stage["effort"], label: "#{label} effort")
         permissions = parse_permissions(stage, id: id, stage_name: name, label: label)
         input = optional_string(stage["input"], label: "#{label} input")
+        deliverable = parse_deliverable(stage["deliverable"], label: label)
         reviewers = parse_reviewers(stage["reviewers"], id: id, label: label) if kind == :council
         council = parse_council(stage["council"], id: id, label: label, reviewer_count: reviewers&.length) if kind == :council
         validate_agent_instruction!(skill: skill, instruction: instruction, label: label) if kind == :agent
@@ -168,6 +162,7 @@ module Hive
           input: input,
           reviewers: reviewers,
           council: council,
+          deliverable: deliverable,
           permissions: permissions
         )
       end
@@ -232,6 +227,12 @@ module Hive
           "#{label} agent #{raw.inspect} is not registered " \
           "(registered: #{Hive::AgentProfiles.registered_names.inspect})"
         )
+      end
+
+      def parse_deliverable(value, label:)
+        return nil if value.nil?
+
+        parse_state_file(value, label: "#{label} deliverable")
       end
 
       def parse_permissions(stage, id:, stage_name:, label:)
@@ -344,7 +345,7 @@ module Hive
       def reject_agent_only_fields!(stage, kind:, label:)
         return if [ :agent, :council ].include?(kind)
 
-        present = %w[skill instruction agent model effort input reviewers council permissions].select { |key| stage.key?(key) }
+        present = %w[skill instruction agent model effort input reviewers council deliverable permissions].select { |key| stage.key?(key) }
         return if present.empty?
 
         raise descriptor_error(

@@ -100,6 +100,27 @@ class TaskActionGenericTest < Minitest::Test
     assert_equal "hive approve #{SLUG} --from 2-review", complete_middle.command
   end
 
+  def test_terminal_agent_complete_requires_non_empty_deliverable
+    missing = action_for_terminal_active(:agent, write_deliverable: false)
+    assert_equal "error", missing.fetch(:key)
+    assert_nil missing.fetch(:command)
+
+    empty = action_for_terminal_active(:agent, write_deliverable: "")
+    assert_equal "error", empty.fetch(:key)
+
+    present = action_for_terminal_active(:agent, write_deliverable: "Architecture\n")
+    assert_equal "archived", present.fetch(:key)
+    assert_nil present.fetch(:command)
+  end
+
+  def test_terminal_council_complete_requires_non_empty_deliverable
+    missing = action_for_terminal_active(:council, write_deliverable: false)
+    assert_equal "error", missing.fetch(:key)
+
+    present = action_for_terminal_active(:council, write_deliverable: "Reviewed\n")
+    assert_equal "archived", present.fetch(:key)
+  end
+
   # Generic stale-agent "orphaned placeholder" branch: a no-pid AGENT_WORKING
   # marker (`pid_alive: nil`, no `pid` attr) whose state-file mtime is older
   # than the grace window classifies as :agent_orphaned -> error, mirroring the
@@ -288,6 +309,48 @@ class TaskActionGenericTest < Minitest::Test
         Hive::Workflow::Stage.new(name: "done", index: 3, state_file: "done.md", kind: :inert)
       ]
     )
+  end
+
+  def terminal_active_workflow(kind)
+    terminal = if kind == :council
+      Hive::Workflow::Stage.new(
+        name: "produce",
+        index: 2,
+        state_file: "status.md",
+        kind: :council,
+        deliverable: "architecture.md",
+        reviewers: [ Hive::Workflow::Reviewer.new(name: "one", prompt: "Review.") ],
+        council: Hive::Workflow::Council.new(quorum: 1)
+      )
+    else
+      Hive::Workflow::Stage.new(
+        name: "produce",
+        index: 2,
+        state_file: "status.md",
+        kind: :agent,
+        skill: "/ship",
+        deliverable: "architecture.md"
+      )
+    end
+
+    Hive::Workflow.new(
+      id: :"terminal_#{kind}",
+      stages: [
+        Hive::Workflow::Stage.new(name: "inbox", index: 1, state_file: "idea.md", kind: :inert),
+        terminal
+      ]
+    )
+  end
+
+  def action_for_terminal_active(kind, write_deliverable:)
+    descriptor = terminal_active_workflow(kind)
+    with_research_task("produce", descriptor: descriptor) do |task|
+      if write_deliverable != false
+        File.write(File.join(task.folder, "architecture.md"), write_deliverable)
+      end
+      action = Hive::TaskAction.for(task, marker(:complete))
+      return { key: action.key, command: action.command }
+    end
   end
 
   # A degenerate single-stage workflow has its only stage as both entry and

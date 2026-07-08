@@ -602,20 +602,47 @@ class WorkflowsDescriptorParserTest < Minitest::Test
     assert_nil workflow.stage_named("work").advance_verb
   end
 
-  def test_last_stage_must_be_terminal
-    error = assert_config_error(
+  def test_last_stage_may_be_agent_with_deliverable
+    workflow = Hive::Workflows::DescriptorParser.parse_hash(
       {
-        "id" => "no-terminal",
+        "id" => "agent-terminal",
         "stages" => [
           { "name" => "inbox", "kind" => "terminal", "state_file" => "idea.md" },
-          { "name" => "work", "kind" => "agent", "state_file" => "work.md", "skill" => "/ship" }
+          {
+            "name" => "work",
+            "kind" => "agent",
+            "state_file" => "work.md",
+            "skill" => "/ship",
+            "deliverable" => "architecture.md"
+          }
         ]
       },
-      path: "/tmp/no-terminal.yml"
+      path: "/tmp/agent-terminal.yml"
     )
 
-    assert_includes error.message, "last stage \"work\" must be a terminal stage"
-    assert_includes error.message, "undroppable"
+    assert_equal :agent, workflow.stage_named("work").kind
+    assert_equal "architecture.md", workflow.stage_named("work").deliverable
+  end
+
+  def test_last_stage_may_be_council
+    workflow = Hive::Workflows::DescriptorParser.parse_hash(
+      {
+        "id" => "council-terminal",
+        "stages" => [
+          { "name" => "draft", "kind" => "agent", "state_file" => "draft.md", "skill" => "/draft" },
+          {
+            "name" => "review",
+            "kind" => "council",
+            "state_file" => "review.md",
+            "reviewers" => [ { "name" => "one", "prompt" => "Review." } ],
+            "council" => { "quorum" => 1 }
+          }
+        ]
+      },
+      path: "/tmp/council-terminal.yml"
+    )
+
+    assert_equal :council, workflow.stage_named("review").kind
   end
 
   def test_terminal_stage_rejects_agent_only_fields

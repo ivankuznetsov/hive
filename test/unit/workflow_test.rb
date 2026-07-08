@@ -24,6 +24,10 @@ class WorkflowTest < Minitest::Test
     assert_nil stage.agent
     assert_nil stage.model
     assert_nil stage.effort
+    assert_nil stage.input
+    assert_nil stage.reviewers
+    assert_nil stage.council
+    assert_nil stage.deliverable
   end
 
   def test_known_kinds_include_coding_runtime_primitives

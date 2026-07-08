@@ -70,6 +70,7 @@ module Hive
         validate_filename_id!(id)
         stages = parse_stages(descriptor["stages"], id: id)
         validate_terminal_last_stage!(stages)
+        validate_deliverable_position!(stages)
 
         build_workflow(id, stages)
       end
@@ -88,6 +89,21 @@ module Hive
         raise descriptor_error(
           "last stage #{last.name.inspect} must be terminal, agent, or council"
         )
+      end
+
+      # `deliverable` is read only by the terminal completion gate
+      # (TaskAction#active_terminal_missing_deliverable?, called only when
+      # `stage == stages.last`). On any earlier stage it parses, freezes, and is
+      # never read — the same silent no-op the field guards reject elsewhere. So
+      # allow `deliverable` only on the last stage.
+      def validate_deliverable_position!(stages)
+        stages[0...-1].each do |stage|
+          next unless stage.deliverable
+
+          raise descriptor_error(
+            "stage #{stage.name.inspect} deliverable is only consumed on the last stage"
+          )
+        end
       end
 
       # Narrowed to JUST the Workflow.new construction. `validate_structure!`
@@ -136,6 +152,7 @@ module Hive
         name = parse_stage_name(stage["name"], label: label)
         kind = parse_kind(stage["kind"], label: label)
         reject_agent_only_fields!(stage, kind: kind, label: label)
+        reject_wrong_kind_fields!(stage, kind: kind, label: label)
         skill = optional_string(stage["skill"], label: "#{label} skill")
         instruction = parse_instruction(stage["instruction"], label: label)
         agent = parse_agent(stage["agent"], label: label)
@@ -257,9 +274,18 @@ module Hive
         # reviews/<base>-NN.md path — one overwrites the other and triage
         # double-counts the single surviving file toward quorum. Reject at load
         # time, mirroring Workflow#validate_structure!'s stage name/dir checks.
+        # Compare the SANITIZED basename (the same gsub Council::Reviewer#output_path
+        # applies), so collisions like "a/b" vs "a-b" — distinct raw strings that
+        # both resolve to "a-b" — are caught here rather than at run time.
         reject_reviewer_duplicates!(reviewers.map(&:name), "reviewer names", label: label)
-        reject_reviewer_duplicates!(reviewers.map(&:output_basename), "reviewer output_basenames", label: label)
+        reject_reviewer_duplicates!(reviewers.map { |r| sanitize_output_basename(r.output_basename) }, "reviewer output_basenames", label: label)
         reviewers.freeze
+      end
+
+      # Mirror Council::Reviewer#output_path's sanitization so the duplicate
+      # check above compares the paths reviewers actually resolve to.
+      def sanitize_output_basename(base)
+        base.gsub(/[^a-zA-Z0-9_.-]+/, "-")
       end
 
       def reject_reviewer_duplicates!(values, what, label:)
@@ -315,12 +341,20 @@ module Hive
           warn "hive: #{@path}: #{label} council declares a revise agent with max_rounds: 1; " \
                "revise never runs at max_rounds 1 (increase max_rounds to enable it)"
         end
+        # The council loop also refuses to revise unless `exit_rule == :consensus`
+        # (Stages::Council#run!); `exit_rule` defaults to "human". So a revise
+        # agent under any non-consensus exit_rule is the same silent no-op —
+        # warn at load time here too, rather than let it vanish at run time.
+        if revise && exit_rule != "consensus"
+          warn "hive: #{@path}: #{label} council declares a revise agent with exit_rule: #{exit_rule}; " \
+               "revise only runs under exit_rule: consensus (set exit_rule: consensus to enable it)"
+        end
 
         Hive::Workflow::Council.new(
           quorum: quorum,
           max_rounds: max_rounds,
           exit_rule: exit_rule.to_sym,
-          triage_output: optional_string(council["triage_output"], label: "#{label} council triage_output") || Hive::Workflow::DEFAULT_TRIAGE_OUTPUT,
+          triage_output: parse_triage_output(council["triage_output"], label: "#{label} council triage_output"),
           revise: revise
         )
       end
@@ -344,6 +378,24 @@ module Hive
           prompt: optional_string(revise["prompt"], label: "#{label} prompt"),
           command: optional_string(revise["command"], label: "#{label} command"),
           permissions: parse_permissions(revise, id: id, stage_name: "revise", label: label)
+        )
+      end
+
+      # `triage_output` is joined onto the task folder by the runner
+      # (Triage#triage_path and Council#next_round both `File.join(task_folder,
+      # File.dirname(triage_output), ...)`), and R2 requires the triage artifact
+      # to be written inside the stage folder. A leading "/" (absolute) or a
+      # ".." segment escapes that folder, so reject both at load time. Unlike
+      # `state_file` a subdirectory IS allowed (e.g. "reviews/triage.md") — the
+      # runner mkdir_p's the triage dir — so this is looser than a bare basename.
+      def parse_triage_output(value, label:)
+        raw = optional_string(value, label: label)
+        return Hive::Workflow::DEFAULT_TRIAGE_OUTPUT if raw.nil?
+        return raw unless raw.start_with?("/") || raw.split("/").include?("..")
+
+        raise descriptor_error(
+          "#{label} #{raw.inspect} must stay inside the stage folder " \
+          "(no leading '/' and no '..' path segment)"
         )
       end
 
@@ -376,6 +428,40 @@ module Hive
         raise descriptor_error(
           "#{label} #{present.inspect} #{present.one? ? 'is' : 'are'} only valid on an agent stage " \
           "(kind: agent or council), not a #{stage['kind'].inspect} stage"
+        )
+      end
+
+      # Even on an active (:agent/:council) stage each remaining optional field
+      # is consumed by exactly one kind, so a field on the wrong active kind is
+      # the same silent no-op the inert guard above rejects:
+      #   - `skill`/`instruction` drive the :agent prompt only. A council reads
+      #     each reviewer's skill/instruction (REVIEWER_KEYS), never the stage's.
+      #   - `input`/`reviewers`/`council` are read only by the council runner
+      #     (Stages::Council). The :agent runner ignores them, so a typo'd
+      #     `kind: agent` carrying a `council:`/`reviewers:` block would run as a
+      #     plain agent with no error.
+      # `agent`/`model`/`effort`/`deliverable`/`permissions` are shared and stay
+      # valid on both. Reject the mismatches here (fail-fast, same contract as
+      # reject_agent_only_fields!).
+      COUNCIL_ONLY_FIELDS = %w[input reviewers council].freeze
+      AGENT_ONLY_FIELDS = %w[skill instruction].freeze
+
+      def reject_wrong_kind_fields!(stage, kind:, label:)
+        case kind
+        when :agent
+          reject_fields_for_kind!(stage, COUNCIL_ONLY_FIELDS, kind: :agent, other: "council", label: label)
+        when :council
+          reject_fields_for_kind!(stage, AGENT_ONLY_FIELDS, kind: :council, other: "agent", label: label)
+        end
+      end
+
+      def reject_fields_for_kind!(stage, fields, kind:, other:, label:)
+        present = fields.select { |key| stage.key?(key) }
+        return if present.empty?
+
+        raise descriptor_error(
+          "#{label} #{present.inspect} #{present.one? ? 'is' : 'are'} only valid on a #{other} stage, " \
+          "not a #{kind} stage"
         )
       end
 

@@ -29,6 +29,13 @@ module Hive
           attempts = @reviewer.max_attempts || 1
           last_error = nil
           attempts.times do
+            # Clear any stale output from a prior attempt/resume before running.
+            # Both success paths (command exit + :output_file_exists) treat a
+            # non-empty output file as a pass, so a leftover <name>-NN.md from an
+            # earlier failed attempt or an interrupted run would falsely satisfy
+            # the check and count toward quorum without this reviewer producing
+            # a fresh verdict.
+            FileUtils.rm_f(output_path)
             begin
               if @reviewer.command
                 run_command!
@@ -109,6 +116,13 @@ module Hive
           )
         end
 
+        # Reviewer verdict files always live in `reviews/<base>-NN.md`, a fixed
+        # directory that does NOT track `council.triage_output`'s dir (triage
+        # derives its own dir via File.dirname(triage_output)). This split is
+        # intentional and not a functional bug: review paths are handed to
+        # Triage explicitly (never globbed), so a custom `triage_output: audit/…`
+        # relocates only the triage artifact while reviewer files stay in
+        # reviews/.
         def output_path
           @output_path ||= begin
             base = @reviewer.output_basename || @reviewer.name

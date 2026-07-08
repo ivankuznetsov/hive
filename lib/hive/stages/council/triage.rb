@@ -5,8 +5,12 @@ module Hive
   module Stages
     module Council
       class Triage
-        READY_RE = /^\s*(?:verdict|status)\s*:\s*(ready|approved|pass|passes)\b/i
-        CHANGES_RE = /^\s*(?:verdict|status)\s*:\s*(changes_requested|needs_changes|blocked|fail|fails)\b/i
+        # Tolerate an optional leading Markdown-heading prefix (`## Verdict: ready`)
+        # so a reviewer that puts its verdict in a heading still matches — the
+        # bare `#` would otherwise break the leading-whitespace anchor and the
+        # passing reviewer would silently count as changes-requested.
+        READY_RE = /^\s*(?:#+\s*)?(?:verdict|status)\s*:\s*(ready|approved|pass|passes)\b/i
+        CHANGES_RE = /^\s*(?:#+\s*)?(?:verdict|status)\s*:\s*(changes_requested|needs_changes|blocked|fail|fails)\b/i
 
         Result = Data.define(:path, :ready_count, :reviewer_count, :ready) do
           def initialize(path:, ready_count:, reviewer_count:, ready:)

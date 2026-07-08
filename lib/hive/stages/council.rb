@@ -42,7 +42,11 @@ module Hive
             next_round(task.folder, stage)
           end
         loop do
-          Hive::Markers.set(output_path, :agent_working, phase: "council", round: round)
+          # Include pid/started for parity with the agent runner's working
+          # marker (Hive::Agent#run!), so `hive status` can show which runner
+          # owns an in-flight council rather than just the phase/round.
+          Hive::Markers.set(output_path, :agent_working, phase: "council", round: round,
+                            pid: Process.pid, started: Time.now.utc.iso8601)
           review_paths = stage.reviewers.map do |reviewer|
             Hive::Stages::Council::Reviewer.run!(
               task: task,

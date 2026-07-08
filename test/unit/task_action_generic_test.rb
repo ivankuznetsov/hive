@@ -86,6 +86,20 @@ class TaskActionGenericTest < Minitest::Test
     assert_nil errored.command
   end
 
+  def test_council_marker_to_action_matrix
+    fresh = action_for("review", :none, descriptor: council_workflow)
+    assert_equal "ready_to_run", fresh.key
+    assert_equal "hive run #{SLUG}", fresh.command
+
+    waiting = action_for("review", :waiting, descriptor: council_workflow)
+    assert_equal "needs_input", waiting.key
+    assert_equal "hive run #{SLUG}", waiting.command
+
+    complete_middle = action_for("review", :complete, descriptor: council_workflow)
+    assert_equal "ready_to_advance", complete_middle.key
+    assert_equal "hive approve #{SLUG} --from 2-review", complete_middle.command
+  end
+
   # Generic stale-agent "orphaned placeholder" branch: a no-pid AGENT_WORKING
   # marker (`pid_alive: nil`, no `pid` attr) whose state-file mtime is older
   # than the grace window classifies as :agent_orphaned -> error, mirroring the
@@ -256,6 +270,24 @@ class TaskActionGenericTest < Minitest::Test
     assert_equal "needs_input", action.key
     assert_equal "Needs your input", action.label
     assert_equal "hive run #{SLUG}", action.command
+  end
+
+  def council_workflow
+    Hive::Workflow.new(
+      id: :council_status,
+      stages: [
+        Hive::Workflow::Stage.new(name: "draft", index: 1, state_file: "draft.md", kind: :agent, skill: "/draft"),
+        Hive::Workflow::Stage.new(
+          name: "review",
+          index: 2,
+          state_file: "review.md",
+          kind: :council,
+          reviewers: [ Hive::Workflow::Reviewer.new(name: "one", prompt: "Review.") ],
+          council: Hive::Workflow::Council.new(quorum: 1)
+        ),
+        Hive::Workflow::Stage.new(name: "done", index: 3, state_file: "done.md", kind: :inert)
+      ]
+    )
   end
 
   # A degenerate single-stage workflow has its only stage as both entry and

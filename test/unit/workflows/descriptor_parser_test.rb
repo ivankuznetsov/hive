@@ -264,13 +264,149 @@ class WorkflowsDescriptorParserTest < Minitest::Test
     end
   end
 
-  def test_council_kind_is_reserved
+  def test_council_stage_parses_reviewers_and_config
+    workflow = Hive::Workflows::DescriptorParser.parse_hash(
+      {
+        "id" => "doc-review",
+        "stages" => [
+          { "name" => "draft", "kind" => "agent", "state_file" => "draft.md", "skill" => "/draft" },
+          {
+            "name" => "review",
+            "kind" => "council",
+            "state_file" => "review.md",
+            "input" => "draft.md",
+            "agent" => "claude",
+            "model" => "opus",
+            "effort" => "high",
+            "reviewers" => [
+              { "name" => "fable-doc", "agent" => "codex", "skill" => "/doc-review", "output_basename" => "fable" },
+              { "name" => "codex-doc", "prompt" => "Review the document." }
+            ],
+            "council" => {
+              "quorum" => 2,
+              "max_rounds" => 3,
+              "exit_rule" => "consensus",
+              "triage_output" => "reviews/triage.md",
+              "revise" => { "agent" => "claude", "skill" => "/revise" }
+            }
+          },
+          { "name" => "done", "kind" => "terminal", "state_file" => "done.md" }
+        ]
+      },
+      path: "/tmp/doc-review.yml"
+    )
+
+    review = workflow.stage_named("review")
+    assert_equal :council, review.kind
+    assert_equal "draft.md", review.input
+    assert_equal "claude", review.agent
+    assert_equal "opus", review.model
+    assert_equal "high", review.effort
+    assert_equal 2, review.reviewers.length
+    assert_equal "fable-doc", review.reviewers.first.name
+    assert_equal "codex", review.reviewers.first.agent
+    assert_equal "/doc-review", review.reviewers.first.skill
+    assert_equal "fable", review.reviewers.first.output_basename
+    assert_equal "Review the document.", review.reviewers.last.prompt
+    assert_equal 2, review.council.quorum
+    assert_equal 3, review.council.max_rounds
+    assert_equal :consensus, review.council.exit_rule
+    assert_equal "reviews/triage.md", review.council.triage_output
+    assert_equal "/revise", review.council.revise.skill
+  end
+
+  def test_council_defaults_input_to_nil_and_config_to_reviewer_count
+    workflow = Hive::Workflows::DescriptorParser.parse_hash(
+      {
+        "id" => "doc-review",
+        "stages" => [
+          { "name" => "draft", "kind" => "agent", "state_file" => "draft.md", "skill" => "/draft" },
+          {
+            "name" => "review",
+            "kind" => "council",
+            "state_file" => "review.md",
+            "reviewers" => [
+              { "name" => "one", "prompt" => "Review." }
+            ]
+          },
+          { "name" => "done", "kind" => "terminal", "state_file" => "done.md" }
+        ]
+      },
+      path: "/tmp/doc-review.yml"
+    )
+
+    review = workflow.stage_named("review")
+    assert_nil review.input
+    assert_equal 1, review.council.quorum
+    assert_equal 1, review.council.max_rounds
+    assert_equal :human, review.council.exit_rule
+    assert_equal "reviews/triage.md", review.council.triage_output
+    assert_nil review.council.revise
+  end
+
+  def test_council_stage_requires_reviewers
     error = assert_config_error(
-      { "id" => "bad", "stages" => [ { "name" => "review", "kind" => "council", "state_file" => "review.md" } ] },
+      {
+        "id" => "bad",
+        "stages" => [
+          { "name" => "review", "kind" => "council", "state_file" => "review.md" },
+          { "name" => "done", "kind" => "terminal", "state_file" => "done.md" }
+        ]
+      },
       path: "/tmp/bad.yml"
     )
 
-    assert_includes error.message, "kind 'council' is not yet supported"
+    assert_includes error.message, "council stage must declare reviewers"
+  end
+
+  def test_council_stage_rejects_invalid_quorum_exit_rule_and_rounds
+    [
+      [ { "quorum" => 2 }, "quorum 2 cannot exceed reviewer count 1" ],
+      [ { "max_rounds" => 0 }, "max_rounds must be a positive integer" ],
+      [ { "exit_rule" => "whatever" }, 'exit_rule "whatever" must be one of' ]
+    ].each do |council, message|
+      error = assert_config_error(
+        {
+          "id" => "bad",
+          "stages" => [
+            {
+              "name" => "review",
+              "kind" => "council",
+              "state_file" => "review.md",
+              "reviewers" => [ { "name" => "one", "prompt" => "Review." } ],
+              "council" => council
+            },
+            { "name" => "done", "kind" => "terminal", "state_file" => "done.md" }
+          ]
+        },
+        path: "/tmp/bad.yml"
+      )
+      assert_includes error.message, message
+    end
+  end
+
+  def test_council_reviewer_requires_exactly_one_instruction_source
+    [
+      [ {}, "must declare exactly one of" ],
+      [ { "skill" => "/review", "prompt" => "Review." }, "must declare exactly one of" ]
+    ].each do |extra, message|
+      error = assert_config_error(
+        {
+          "id" => "bad",
+          "stages" => [
+            {
+              "name" => "review",
+              "kind" => "council",
+              "state_file" => "review.md",
+              "reviewers" => [ { "name" => "one" }.merge(extra) ]
+            },
+            { "name" => "done", "kind" => "terminal", "state_file" => "done.md" }
+          ]
+        },
+        path: "/tmp/bad.yml"
+      )
+      assert_includes error.message, message
+    end
   end
 
   def test_unknown_kind_is_rejected
@@ -279,7 +415,7 @@ class WorkflowsDescriptorParserTest < Minitest::Test
       path: "/tmp/bad.yml"
     )
 
-    assert_includes error.message, 'stage 1 kind "marker" must be agent or terminal'
+    assert_includes error.message, 'stage 1 kind "marker" must be agent, council, or terminal'
 
     # The coding runtime kinds (execute/review_council/finalize) are Ruby-only:
     # only Workflows::Coding declares them via Stage.new, and parse_kind must keep
@@ -295,7 +431,7 @@ class WorkflowsDescriptorParserTest < Minitest::Test
         path: "/tmp/bad.yml"
       )
 
-      assert_includes runtime_error.message, %(stage 1 kind "#{coding_runtime_kind}" must be agent or terminal),
+      assert_includes runtime_error.message, %(stage 1 kind "#{coding_runtime_kind}" must be agent, council, or terminal),
                       "YAML descriptors must not be able to declare Ruby-only coding runtime kind " \
                       "#{coding_runtime_kind.inspect}"
     end

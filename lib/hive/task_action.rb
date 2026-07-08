@@ -315,7 +315,7 @@ module Hive
         review_action
       when :finalize
         finalize_action
-      when :agent, :inert
+      when :agent, :council, :inert
         # `|| generic_action(stage)` is the LIVE path for NON-coding
         # `:agent`/`:inert` workflows: `coding_table_action` returns nil for any
         # non-coding id. It is dead-for-coding — `coding_test.rb` pins every

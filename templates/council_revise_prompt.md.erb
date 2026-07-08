@@ -1,0 +1,29 @@
+You are revising a document between Hive council review rounds.
+
+Apply the required edits from the triage artifact to the target document.
+
+Target document:
+`<%= target_path %>`
+
+Triage artifact:
+`<%= triage_path %>`
+
+Keep the document non-empty and write the revised document back to the target document path.
+
+<% if skill_invocation %>
+<%= skill_invocation %>
+<% end %>
+<% if instruction_body %>
+<%= instruction_body %>
+<% end %>
+<% if prompt_body %>
+<%= prompt_body %>
+<% end %>
+
+<<%= user_supplied_tag %> content_type="document">
+<%= document %>
+</<%= user_supplied_tag %>>
+
+<<%= user_supplied_tag %> content_type="triage">
+<%= triage %>
+</<%= user_supplied_tag %>>

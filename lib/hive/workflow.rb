@@ -13,11 +13,12 @@ module Hive
   class Workflow
     include Enumerable
 
-    # :agent selects the agent runner, :inert auto-advances with no runner,
+    # :agent selects the agent runner, :council selects the generic document
+    # council runner, :inert auto-advances with no runner,
     # :execute/:review_council/:finalize drive coding status/action
     # classification (the coding runners are selected by name, not kind — see
     # Stages::Resolver), and nil is the unspecified default.
-    KNOWN_KINDS = [ nil, :agent, :inert, :execute, :review_council, :finalize ].freeze
+    KNOWN_KINDS = [ nil, :agent, :council, :inert, :execute, :review_council, :finalize ].freeze
 
     def each(&) = stages.each(&)
 
@@ -58,16 +59,42 @@ module Hive
     Stage = Data.define(
       :name, :index, :state_file, :advance_verb, :kind, :skill, :instruction,
       :permissions, :status_mode, :budget_usd, :timeout_sec, :capability,
-      :agent, :model, :effort
+      :agent, :model, :effort, :input, :reviewers, :council
     ) do
       def initialize(name:, index:, state_file:, advance_verb: nil, kind: nil,
                      skill: nil, instruction: nil, permissions: nil,
                      status_mode: nil, budget_usd: nil, timeout_sec: nil,
-                     capability: nil, agent: nil, model: nil, effort: nil)
+                     capability: nil, agent: nil, model: nil, effort: nil,
+                     input: nil, reviewers: nil, council: nil)
         super
       end
 
       def dir = "#{index}-#{name}"
+    end
+
+    Council = Data.define(:quorum, :max_rounds, :exit_rule, :triage_output, :revise) do
+      def initialize(quorum:, max_rounds: 1, exit_rule: :human,
+                     triage_output: "reviews/triage.md", revise: nil)
+        super
+      end
+    end
+
+    Reviewer = Data.define(
+      :name, :agent, :model, :effort, :skill, :instruction, :prompt,
+      :command, :output_basename, :permissions, :max_attempts
+    ) do
+      def initialize(name:, agent: nil, model: nil, effort: nil, skill: nil,
+                     instruction: nil, prompt: nil, command: nil,
+                     output_basename: nil, permissions: nil, max_attempts: nil)
+        super
+      end
+    end
+
+    Revise = Data.define(:agent, :model, :effort, :skill, :instruction, :prompt, :command, :permissions) do
+      def initialize(agent: nil, model: nil, effort: nil, skill: nil,
+                     instruction: nil, prompt: nil, command: nil, permissions: nil)
+        super
+      end
     end
 
     AdvanceVerb = Data.define(:name, :force_source, :interactive) do

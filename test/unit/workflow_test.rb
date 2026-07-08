@@ -27,6 +27,7 @@ class WorkflowTest < Minitest::Test
   end
 
   def test_known_kinds_include_coding_runtime_primitives
+    assert_includes Hive::Workflow::KNOWN_KINDS, :council
     assert_includes Hive::Workflow::KNOWN_KINDS, :execute
     assert_includes Hive::Workflow::KNOWN_KINDS, :review_council
     assert_includes Hive::Workflow::KNOWN_KINDS, :finalize

@@ -250,9 +250,23 @@ module Hive
         raise descriptor_error("#{label} reviewers must be an array") unless data.is_a?(Array)
         raise descriptor_error("#{label} council stage must declare at least one reviewer") if data.empty?
 
-        data.each_with_index.map do |raw_reviewer, offset|
+        reviewers = data.each_with_index.map do |raw_reviewer, offset|
           parse_reviewer(raw_reviewer, id: id, label: "#{label} reviewer #{offset + 1}")
-        end.freeze
+        end
+        # Two reviewers sharing a name or output_basename resolve to the same
+        # reviews/<base>-NN.md path — one overwrites the other and triage
+        # double-counts the single surviving file toward quorum. Reject at load
+        # time, mirroring Workflow#validate_structure!'s stage name/dir checks.
+        reject_reviewer_duplicates!(reviewers.map(&:name), "reviewer names", label: label)
+        reject_reviewer_duplicates!(reviewers.map(&:output_basename), "reviewer output_basenames", label: label)
+        reviewers.freeze
+      end
+
+      def reject_reviewer_duplicates!(values, what, label:)
+        return if values.uniq.length == values.length
+
+        duplicates = values.select { |value| values.count(value) > 1 }.uniq
+        raise descriptor_error("#{label} has duplicate #{what}: #{duplicates.inspect}")
       end
 
       def parse_reviewer(data, id:, label:)
@@ -292,12 +306,22 @@ module Hive
           raise descriptor_error("#{label} council exit_rule #{exit_rule.inspect} must be one of #{EXIT_RULES.inspect}")
         end
 
+        revise = parse_revise(council["revise"], id: id, label: "#{label} council revise")
+        # A revise agent only runs when the loop takes a second round
+        # (`round >= max_rounds` short-circuits at the default max_rounds: 1),
+        # so pairing revise with max_rounds: 1 is a silent no-op. Warn at load
+        # time rather than fail — the descriptor is still runnable.
+        if revise && max_rounds <= 1
+          warn "hive: #{@path}: #{label} council declares a revise agent with max_rounds: 1; " \
+               "revise never runs at max_rounds 1 (increase max_rounds to enable it)"
+        end
+
         Hive::Workflow::Council.new(
           quorum: quorum,
           max_rounds: max_rounds,
           exit_rule: exit_rule.to_sym,
-          triage_output: optional_string(council["triage_output"], label: "#{label} council triage_output") || "reviews/triage.md",
-          revise: parse_revise(council["revise"], id: id, label: "#{label} council revise")
+          triage_output: optional_string(council["triage_output"], label: "#{label} council triage_output") || Hive::Workflow::DEFAULT_TRIAGE_OUTPUT,
+          revise: revise
         )
       end
 
@@ -337,11 +361,12 @@ module Hive
         Hive::Workflow::AdvanceVerb.new(name: verb_name)
       end
 
-      # These fields are consumed by active stage runners. On a terminal (inert) stage they are
-      # validated, deep-frozen, and stored but never read — a silent no-op config
-      # trap. Reject them at parse time (fail-fast, consistent with the parser's
-      # other strict checks) so a typo'd-kind or misplaced field surfaces at load
-      # rather than vanishing at run time.
+      # These fields are consumed by active stage runners — both :agent and
+      # :council kinds (the guard below allows either). On a terminal (inert)
+      # stage they are validated, deep-frozen, and stored but never read — a
+      # silent no-op config trap. Reject them at parse time (fail-fast,
+      # consistent with the parser's other strict checks) so a typo'd-kind or
+      # misplaced field surfaces at load rather than vanishing at run time.
       def reject_agent_only_fields!(stage, kind:, label:)
         return if [ :agent, :council ].include?(kind)
 

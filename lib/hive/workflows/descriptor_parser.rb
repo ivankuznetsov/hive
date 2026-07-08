@@ -1,4 +1,5 @@
 require "yaml"
+require "hive/agent_profiles"
 require "hive/permission_scope"
 require "hive/workflow"
 
@@ -19,6 +20,9 @@ module Hive
         advance_verb
         skill
         instruction
+        agent
+        model
+        effort
         permissions
       ].freeze
 
@@ -121,6 +125,9 @@ module Hive
         reject_agent_only_fields!(stage, kind: kind, label: label)
         skill = optional_string(stage["skill"], label: "#{label} skill")
         instruction = parse_instruction(stage["instruction"], label: label)
+        agent = parse_agent(stage["agent"], label: label)
+        model = optional_string(stage["model"], label: "#{label} model")
+        effort = optional_string(stage["effort"], label: "#{label} effort")
         permissions = parse_permissions(stage, id: id, stage_name: name, label: label)
         validate_agent_instruction!(skill: skill, instruction: instruction, label: label) if kind == :agent
 
@@ -132,6 +139,9 @@ module Hive
           kind: kind,
           skill: skill,
           instruction: instruction,
+          agent: agent,
+          model: model,
+          effort: effort,
           permissions: permissions
         )
       end
@@ -188,6 +198,17 @@ module Hive
         raise descriptor_error("#{label} instruction #{raw.inspect} must reference a readable file (#{resolved})")
       end
 
+      def parse_agent(value, label:)
+        raw = optional_string(value, label: "#{label} agent")
+        return nil if raw.nil?
+        return raw if Hive::AgentProfiles.registered?(raw)
+
+        raise descriptor_error(
+          "#{label} agent #{raw.inspect} is not registered " \
+          "(registered: #{Hive::AgentProfiles.registered_names.inspect})"
+        )
+      end
+
       def parse_permissions(stage, id:, stage_name:, label:)
         return nil unless stage.key?("permissions")
 
@@ -212,7 +233,7 @@ module Hive
         Hive::Workflow::AdvanceVerb.new(name: verb_name)
       end
 
-      # `skill`, `instruction`, and `permissions` are consumed ONLY by the agent
+      # `skill`, `instruction`, `agent`/`model`/`effort`, and `permissions` are consumed ONLY by the agent
       # stage runner (Hive::Stages::Agent). On a terminal (inert) stage they are
       # validated, deep-frozen, and stored but never read — a silent no-op config
       # trap. Reject them at parse time (fail-fast, consistent with the parser's
@@ -221,7 +242,7 @@ module Hive
       def reject_agent_only_fields!(stage, kind:, label:)
         return if kind == :agent
 
-        present = %w[skill instruction permissions].select { |key| stage.key?(key) }
+        present = %w[skill instruction agent model effort permissions].select { |key| stage.key?(key) }
         return if present.empty?
 
         raise descriptor_error(

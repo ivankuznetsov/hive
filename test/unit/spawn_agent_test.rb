@@ -222,6 +222,32 @@ class SpawnAgentTest < Minitest::Test
     end
   end
 
+  def test_model_and_effort_overrides_win_over_config_derivation
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      log_dir = Dir.mktmpdir("fake-claude-argv")
+      ENV["HIVE_FAKE_CLAUDE_LOG_DIR"] = log_dir
+      Hive::Stages::Base.spawn_agent(
+        task,
+        prompt: "x", max_budget_usd: 1, timeout_sec: 5,
+        cfg: { "claude" => { "model" => "sonnet", "effort" => "medium" } },
+        model: "opus",
+        effort: "high"
+      )
+
+      argv = File.read(File.join(log_dir, "fake-claude-argv.log"))
+      assert_includes argv, "arg=--model"
+      assert_includes argv, "arg=opus"
+      assert_includes argv, "arg=--effort"
+      assert_includes argv, "arg=high"
+      refute_includes argv, "arg=sonnet"
+      refute_includes argv, "arg=medium"
+    ensure
+      FileUtils.rm_rf(log_dir) if log_dir
+    end
+  end
+
   # --- preflight ordering --------------------------------------------------
 
   def test_preflight_runs_before_agent_spawn_returns_error_envelope
@@ -441,6 +467,12 @@ class SpawnAgentTest < Minitest::Test
   def test_stage_profile_resolves_configured_agent_name
     cfg = { "brainstorm" => { "agent" => "codex" } }
     profile = Hive::Stages::Base.stage_profile(cfg, "brainstorm")
+    assert_equal :codex, profile.name
+  end
+
+  def test_stage_profile_explicit_agent_wins_over_configured_agent_name
+    cfg = { "brainstorm" => { "agent" => "pi" } }
+    profile = Hive::Stages::Base.stage_profile(cfg, "brainstorm", explicit_agent: "codex")
     assert_equal :codex, profile.name
   end
 

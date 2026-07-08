@@ -71,6 +71,51 @@ class WorkflowsDescriptorParserTest < Minitest::Test
     assert_equal "/ship", workflow.stage_named("work").skill
   end
 
+  def test_agent_stage_accepts_per_stage_agent_model_and_effort
+    workflow = Hive::Workflows::DescriptorParser.parse_hash(
+      {
+        "id" => "agent-choice",
+        "stages" => [
+          { "name" => "inbox", "kind" => "terminal", "state_file" => "idea.md" },
+          {
+            "name" => "work",
+            "kind" => "agent",
+            "state_file" => "work.md",
+            "skill" => "/ship",
+            "agent" => "codex",
+            "model" => "opus",
+            "effort" => "high"
+          },
+          { "name" => "done", "kind" => "terminal", "state_file" => "done.md" }
+        ]
+      },
+      path: "/tmp/agent-choice.yml"
+    )
+
+    work = workflow.stage_named("work")
+    assert_equal "codex", work.agent
+    assert_equal "opus", work.model
+    assert_equal "high", work.effort
+  end
+
+  def test_agent_stage_defaults_per_stage_agent_model_and_effort_to_nil
+    workflow = Hive::Workflows::DescriptorParser.parse_hash(
+      {
+        "id" => "agent-defaults",
+        "stages" => [
+          { "name" => "work", "kind" => "agent", "state_file" => "work.md", "skill" => "/ship" },
+          { "name" => "done", "kind" => "terminal", "state_file" => "done.md" }
+        ]
+      },
+      path: "/tmp/agent-defaults.yml"
+    )
+
+    work = workflow.stage_named("work")
+    assert_nil work.agent
+    assert_nil work.model
+    assert_nil work.effort
+  end
+
   def test_parse_file_wraps_yaml_errors_with_path
     with_tmp_dir do |dir|
       path = File.join(dir, "broken.yml")
@@ -367,6 +412,38 @@ class WorkflowsDescriptorParserTest < Minitest::Test
     assert_includes error.message, "stage 1 skill must be a non-empty string"
   end
 
+  def test_per_stage_model_and_effort_must_be_non_empty_when_present
+    %w[model effort].each do |field|
+      error = assert_config_error(
+        {
+          "id" => "bad",
+          "stages" => [
+            { "name" => "work", "kind" => "agent", "state_file" => "work.md", "skill" => "/ship", field => " " }
+          ]
+        },
+        path: "/tmp/bad.yml"
+      )
+
+      assert_includes error.message, "stage 1 #{field} must be a non-empty string"
+    end
+  end
+
+  def test_unknown_per_stage_agent_is_rejected_with_registered_names
+    error = assert_config_error(
+      {
+        "id" => "bad",
+        "stages" => [
+          { "name" => "work", "kind" => "agent", "state_file" => "work.md", "skill" => "/ship", "agent" => "nonesuch" },
+          { "name" => "done", "kind" => "terminal", "state_file" => "done.md" }
+        ]
+      },
+      path: "/tmp/bad.yml"
+    )
+
+    assert_includes error.message, 'agent "nonesuch" is not registered'
+    assert_includes error.message, "registered:"
+  end
+
   def test_nil_advance_verb_is_allowed_for_bare_mv_stage
     workflow = Hive::Workflows::DescriptorParser.parse_hash(
       {
@@ -406,7 +483,7 @@ class WorkflowsDescriptorParserTest < Minitest::Test
   end
 
   def test_terminal_stage_rejects_agent_only_fields
-    %w[skill instruction permissions].each do |field|
+    %w[skill instruction agent model effort permissions].each do |field|
       error = assert_config_error(
         {
           "id" => "bad",

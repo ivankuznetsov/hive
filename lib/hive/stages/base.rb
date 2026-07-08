@@ -113,8 +113,8 @@ module Hive
       # configured value is not a registered profile — but that case is
       # already prevented at config-load time by validate_role_agent_names!,
       # so callers see UnknownAgent only if they bypass Config.load.
-      def stage_profile(cfg, stage_name)
-        name = cfg.dig(stage_name, "agent") || "claude"
+      def stage_profile(cfg, stage_name, explicit_agent: nil)
+        name = explicit_agent || cfg.dig(stage_name, "agent") || "claude"
         Hive::AgentProfiles.lookup(name, cfg: cfg)
       end
 
@@ -503,7 +503,8 @@ module Hive
                       add_dirs: [], cwd: nil, log_label: nil,
                       profile: nil, expected_output: nil, status_mode: nil,
                       cfg: nil, permission_mode: nil, allowed_tools: nil,
-                      disallowed_tools: nil, cli_flags: nil)
+                      disallowed_tools: nil, cli_flags: nil,
+                      model: nil, effort: nil)
         profile ||= Hive::AgentProfiles.lookup(:claude)
         # Translate preflight/version-check failures (e.g. Pi missing
         # ~/.pi/agent/auth.json mid-loop) into a typed :error envelope
@@ -533,7 +534,7 @@ module Hive
         cli_flags ||= []
         if derive_flags_from_cfg && cfg && profile.name == :claude
           permission_mode ||= Hive::Config.claude_permission_mode(cfg)
-          cli_flags = Hive::Config.claude_cli_flags(cfg)
+          cli_flags = Hive::Config.claude_cli_flags(cfg, model: model, effort: effort)
         end
 
         started_at = Time.now.utc.iso8601

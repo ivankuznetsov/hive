@@ -190,7 +190,7 @@ class StagesAgentTest < Minitest::Test
       task = task_for(project, "plan")
       profile = RaisingProfile.new(name: :no_skill)
 
-      with_replaced_singleton_method(Hive::Stages::Base, :stage_profile, ->(_cfg, _stage_name) { profile }) do
+      with_replaced_singleton_method(Hive::Stages::Base, :stage_profile, ->(_cfg, _stage_name, **_kwargs) { profile }) do
         with_stubbed_spawn do |captured|
           Hive::Stages::Agent.run!(task, {})
 
@@ -306,6 +306,34 @@ class StagesAgentTest < Minitest::Test
         assert_equal 60, kwargs.fetch(:timeout_sec)
         assert_equal "gather", kwargs.fetch(:log_label)
         assert_equal File.join(task.folder, "gather.md"), task.state_file
+      end
+    end
+  end
+
+  def test_descriptor_agent_overrides_project_stage_agent
+    with_tmp_dir do |project|
+      descriptor = instruction_workflow_with_agent(agent: "codex")
+      task = task_for(project, "work", descriptor: descriptor)
+
+      with_stubbed_spawn do |captured|
+        Hive::Stages::Agent.run!(task, { "work" => { "agent" => "pi" } })
+
+        assert_equal :codex, captured.first.fetch(:kwargs).fetch(:profile).name
+      end
+    end
+  end
+
+  def test_descriptor_model_and_effort_are_passed_to_spawn
+    with_tmp_dir do |project|
+      descriptor = instruction_workflow_with_agent(model: "opus", effort: "high")
+      task = task_for(project, "work", descriptor: descriptor)
+
+      with_stubbed_spawn do |captured|
+        Hive::Stages::Agent.run!(task, {})
+
+        kwargs = captured.first.fetch(:kwargs)
+        assert_equal "opus", kwargs.fetch(:model)
+        assert_equal "high", kwargs.fetch(:effort)
       end
     end
   end
@@ -509,6 +537,26 @@ class StagesAgentTest < Minitest::Test
             kind: :agent,
             instruction: instruction_path,
             permissions: permissions
+          )
+        ]
+      )
+    end
+
+    def instruction_workflow_with_agent(agent: nil, model: nil, effort: nil)
+      Hive::Workflow.new(
+        id: :instruction,
+        stages: [
+          Hive::Workflow::Stage.new(name: "inbox", index: 1, state_file: "idea.md", kind: :inert),
+          Hive::Workflow::Stage.new(
+            name: "work",
+            index: 2,
+            state_file: "work.md",
+            advance_verb: Hive::Workflow::AdvanceVerb.new(name: "work"),
+            kind: :agent,
+            skill: "/ship",
+            agent: agent,
+            model: model,
+            effort: effort
           )
         ]
       )

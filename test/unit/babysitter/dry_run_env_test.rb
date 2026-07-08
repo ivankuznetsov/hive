@@ -785,6 +785,10 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "git", "show", "--remerge-diff", "--no-patch", "HEAD"
       assert_stubbed env, "git", "show", "--diff-merges=remerge", "--no-patch", "HEAD"
       assert_stubbed env, "git", "show", "--diff-merges=r", "--no-patch", "HEAD"
+      # `--submodule=diff` expands nested diffs inside submodule repositories, where the
+      # top-level `--no-ext-diff --no-textconv` passthrough hardening does not apply.
+      assert_stubbed env, "git", "diff", "--submodule=diff"
+      assert_stubbed env, "git", "diff", "--submodule", "diff"
       # `--textconv` runs the repo-local `diff.<driver>.textconv` command — an exec seam. The
       # spelled-out flag must skip, and so must every prefix git accepts as the long option
       # (`--text`, `--textc`, ...), e.g. `git cat-file --text` / `git grep --textc`.
@@ -959,6 +963,8 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes skipped, "git grep --open-files-in-pager=touch /tmp/hive-pager-pwn needle skipped"
       assert_includes skipped, "git grep -e -- --open-files-in-pager=/tmp/hive-pager-sep-pwn skipped"
       assert_includes skipped, "git grep -e -- --textconv skipped"
+      assert_includes skipped, "git diff --submodule=diff skipped"
+      assert_includes skipped, "git diff --submodule diff skipped"
       assert_includes skipped, "git remote show origin skipped"
 
       real_invocations = File.read(File.join(dir, "real.log"))

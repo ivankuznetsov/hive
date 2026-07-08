@@ -1424,6 +1424,24 @@ class InitTest < Minitest::Test
     assert_includes summary.string, "adhoc_auto_fix=disabled"
   end
 
+  def test_non_tty_default_prompt_summary_mentions_enabled_adhoc_auto_fix
+    prompts = Hive::Commands::Init::Prompts
+    original = prompts.const_get(:DEFAULT_ADHOC_AUTO_FIX)
+    prompts.send(:remove_const, :DEFAULT_ADHOC_AUTO_FIX)
+    prompts.const_set(:DEFAULT_ADHOC_AUTO_FIX, true)
+    summary = StringIO.new
+
+    answers = prompts.new(input: StringIO.new, summary_io: summary).collect
+
+    assert_equal true, answers.fetch("adhoc_auto_fix")
+    assert_includes summary.string, "adhoc_auto_fix=enabled"
+  ensure
+    if defined?(prompts) && defined?(original)
+      prompts.send(:remove_const, :DEFAULT_ADHOC_AUTO_FIX)
+      prompts.const_set(:DEFAULT_ADHOC_AUTO_FIX, original)
+    end
+  end
+
   # Same on-disk-descriptor arm, human path: the `tip:` line must be suppressed
   # while the rest of the summary still renders.
   def test_print_summary_suppresses_workflow_authoring_tip_when_custom_workflow_authored

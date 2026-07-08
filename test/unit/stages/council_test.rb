@@ -135,6 +135,45 @@ class StagesCouncilTest < Minitest::Test
     end
   end
 
+  def test_agent_revise_failure_marks_error
+    with_tmp_dir do |project|
+      workflow = council_workflow(exit_rule: :consensus, max_rounds: 2, revise: true)
+      task = task_for(project, workflow: workflow)
+      File.write(File.join(task.folder, "draft.md"), "Architecture draft\n")
+
+      with_revise_spawn_failure([ "Verdict: changes_requested\n", "Verdict: changes_requested\n" ]) do
+        result = Hive::Stages::Council.run!(task, {})
+
+        marker = Hive::Markers.current(task.state_file)
+        assert_equal({ commit: "error", status: :error }, result)
+        assert_equal "council_failed", marker.attrs.fetch("reason")
+        assert_includes marker.attrs.fetch("message"), "council revise failed: revise agent failed"
+      end
+    end
+  end
+
+  def test_unstructured_review_defaults_to_not_ready
+    with_tmp_dir do |project|
+      workflow = council_workflow(quorum: 1)
+      task = task_for(project, workflow: workflow)
+      File.write(File.join(task.folder, "draft.md"), "Architecture draft\n")
+      review_path = File.join(task.folder, "reviews", "one-01.md")
+      FileUtils.mkdir_p(File.dirname(review_path))
+      File.write(review_path, "Looks close, probably ready soon.\n")
+
+      triage = Hive::Stages::Council::Triage.run!(
+        stage: workflow.stage_named("review"),
+        review_paths: [ review_path ],
+        round: 1,
+        target_path: File.join(task.folder, "draft.md"),
+        task_folder: task.folder
+      )
+
+      refute triage.ready
+      assert_includes File.read(triage.path), "Readiness: 0/1 ready"
+    end
+  end
+
   def test_max_rounds_waits_instead_of_looping_forever
     with_tmp_dir do |project|
       workflow = council_workflow(exit_rule: :consensus, max_rounds: 1, revise: true)
@@ -337,6 +376,27 @@ class StagesCouncilTest < Minitest::Test
           File.write(expected, body)
         end
         { status: :ok }
+      end
+      yield captured
+    ensure
+      Hive::Stages::Base.define_singleton_method(:spawn_agent) do |*args, **kwargs, &block|
+        original.call(*args, **kwargs, &block)
+      end
+    end
+
+    def with_revise_spawn_failure(outputs)
+      captured = []
+      original = Hive::Stages::Base.method(:spawn_agent)
+      Hive::Stages::Base.define_singleton_method(:spawn_agent) do |_task, **kwargs|
+        captured << kwargs
+        if kwargs[:log_label].to_s.end_with?("-revise")
+          { status: :error, error_message: "revise agent failed" }
+        else
+          body = outputs.shift || "Verdict: ready\n"
+          FileUtils.mkdir_p(File.dirname(kwargs[:expected_output]))
+          File.write(kwargs[:expected_output], body)
+          { status: :ok }
+        end
       end
       yield captured
     ensure

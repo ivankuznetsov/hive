@@ -1,0 +1,5 @@
+## [2026-07-03T09:55:00Z] testing - hive-eval report write neutralizes symlinks/hard links
+
+**Action:** Fixed a follow-on regression from the schema-gated report cleanup: on the valid write path, a `--report` path that is a symlink or hard link to a non-report file survived the schema-gated `remove_existing_eval_report`, and `ReportStore.write!`'s bare `File.write` then followed the link and clobbered the target. `write!` now routes through `write_fresh_report`, which unlinks any existing entry (dropping the symlink itself or one hard-link reference, never the linked data) and opens with `O_CREAT|O_EXCL|O_NOFOLLOW`, so the report always lands on a fresh regular file. The schema-gated cleanup on invalid-invocation exits (`bin/hive-eval` parse-error, unexpected-args, unsafe-scenario, and missing-scenario paths) is unchanged.
+
+**Tests:** Added `test_cli_report_link_to_non_report_file_is_not_followed` in `test/eval/support/reporter_test.rb`, covering both symlink and hard-link `--report` targets; verified it fails against the bare `File.write` and passes after the guard. Ran the full `test/eval/support/reporter_test.rb` (28 runs, 197 assertions, green).

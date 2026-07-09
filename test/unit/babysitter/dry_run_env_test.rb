@@ -238,12 +238,18 @@ class BabysitterDryRunEnvTest < Minitest::Test
       poison_dir = File.join(dir, "rubylib")
       FileUtils.mkdir_p(poison_dir)
       marker = File.join(dir, "rubylib-loaded")
+      File.write(
+        File.join(poison_dir, "pwn.rb"),
+        "File.write(ENV.fetch(\"HIVE_RUBYOPT_MARKER\"), \"loaded\")\n"
+      )
       %w[tmpdir uri].each do |feature|
         File.write(File.join(poison_dir, "#{feature}.rb"), "File.write(#{marker.dump}, #{feature.dump})\n")
       end
 
       env = {
+        "RUBYOPT" => "-rpwn",
         "RUBYLIB" => poison_dir,
+        "HIVE_RUBYOPT_MARKER" => marker,
         "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "skipped.log")
       }
 
@@ -1012,6 +1018,15 @@ class BabysitterDryRunEnvTest < Minitest::Test
   def test_gh_stub_scrubs_exec_influencing_environment_before_passthrough
     with_tmp_dir do |dir|
       env_keys = %w[
+        LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT
+        DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH DYLD_FRAMEWORK_PATH
+        DYLD_FALLBACK_LIBRARY_PATH DYLD_FALLBACK_FRAMEWORK_PATH
+        DYLD_VERSIONED_LIBRARY_PATH DYLD_VERSIONED_FRAMEWORK_PATH DYLD_PRINT_TO_FILE
+        RUBYOPT RUBYLIB BUNDLE_GEMFILE BUNDLE_BIN_PATH GEM_HOME GEM_PATH
+        BUNDLER_SETUP BUNDLER_VERSION
+        BUNDLER_ORIG_RUBYOPT BUNDLER_ORIG_RUBYLIB
+        BUNDLER_ORIG_BUNDLE_GEMFILE BUNDLER_ORIG_BUNDLE_BIN_PATH
+        BUNDLER_ORIG_GEM_HOME BUNDLER_ORIG_GEM_PATH
         GH_PAGER PAGER GH_BROWSER BROWSER GH_EDITOR GIT_EDITOR VISUAL EDITOR GH_FORCE_TTY
         GH_CONFIG_DIR XDG_CONFIG_HOME HOME
         GIT_ASKPASS GIT_EXEC_PATH GIT_EXTERNAL_DIFF GIT_PAGER GIT_PROXY_COMMAND GIT_SSH GIT_SSH_COMMAND
@@ -1024,6 +1039,23 @@ class BabysitterDryRunEnvTest < Minitest::Test
       env = {
         "HIVE_BABYSITTER_REAL_GH" => real_gh,
         "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "skipped.log"),
+        "LD_PRELOAD" => File.join(dir, "missing-preload.so"),
+        "LD_LIBRARY_PATH" => dir,
+        "LD_AUDIT" => File.join(dir, "missing-audit.so"),
+        "DYLD_INSERT_LIBRARIES" => File.join(dir, "missing-dyld.dylib"),
+        "DYLD_LIBRARY_PATH" => dir,
+        "DYLD_FRAMEWORK_PATH" => dir,
+        "DYLD_FALLBACK_LIBRARY_PATH" => dir,
+        "DYLD_FALLBACK_FRAMEWORK_PATH" => dir,
+        "DYLD_VERSIONED_LIBRARY_PATH" => dir,
+        "DYLD_VERSIONED_FRAMEWORK_PATH" => dir,
+        "DYLD_PRINT_TO_FILE" => File.join(dir, "dyld.log"),
+        "RUBYOPT" => "-W0",
+        "RUBYLIB" => dir,
+        "BUNDLE_GEMFILE" => File.expand_path("../../../Gemfile", __dir__),
+        "BUNDLE_BIN_PATH" => ENV.fetch("BUNDLE_BIN_PATH", ""),
+        "GEM_HOME" => ENV.fetch("GEM_HOME", ""),
+        "GEM_PATH" => ENV.fetch("GEM_PATH", ""),
         "GH_PAGER" => "touch pager-pwned",
         "PAGER" => "touch pager-pwned",
         "GH_BROWSER" => "touch browser-pwned",

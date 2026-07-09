@@ -18,6 +18,11 @@ module Hive
       SKIP_LOG_BASENAME = ".babysitter-dry-run-skipped.log"
       RUBY_STARTUP_ENV = %w[
         RUBYOPT RUBYLIB BUNDLE_GEMFILE BUNDLE_BIN_PATH GEM_HOME GEM_PATH
+        BUNDLER_SETUP BUNDLER_VERSION
+        BUNDLER_ORIG_RUBYOPT BUNDLER_ORIG_RUBYLIB
+        BUNDLER_ORIG_BUNDLE_GEMFILE BUNDLER_ORIG_BUNDLE_BIN_PATH
+        BUNDLER_ORIG_GEM_HOME BUNDLER_ORIG_GEM_PATH
+        BUNDLER_ORIG_BUNDLER_SETUP BUNDLER_ORIG_BUNDLER_VERSION
       ].freeze
       DYNAMIC_LOADER_ENV = %w[
         LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT LD_BIND_NOT LD_BIND_NOW LD_DEBUG LD_DEBUG_OUTPUT
@@ -29,6 +34,7 @@ module Hive
         DYLD_IMAGE_SUFFIX DYLD_PRINT_TO_FILE
       ].freeze
       DYNAMIC_LOADER_ENV_PATTERN = /\A(?:LD|DYLD)_/.freeze
+      STUB_STARTUP_ENV = (RUBY_STARTUP_ENV + DYNAMIC_LOADER_ENV).freeze
 
       def with_env(worktree_path)
         # Resolve real git/gh *before* prepending the overlay onto PATH,
@@ -76,7 +82,7 @@ module Hive
             }
           ],
           "gh" => [
-            File.join(root, "bin", "hive-babysitter-stub-gh"),
+            File.join(root, "bin", "hive-babysitter-stub-gh.rb"),
             {
               "HIVE_BABYSITTER_REAL_GH" => real_gh,
               "HIVE_BABYSITTER_DRY_RUN_LOG" => skip_log,
@@ -93,7 +99,7 @@ module Hive
           # then invokes the shared Ruby stub through the running Ruby's absolute path.
           File.write(link, <<~SH)
             #!/bin/sh
-            unset #{(RUBY_STARTUP_ENV + DYNAMIC_LOADER_ENV).join(' ')}
+            unset #{STUB_STARTUP_ENV.join(' ')}
             #{env_setup}
             exec #{shell_word(RbConfig.ruby)} #{shell_word(target)} "$@"
           SH

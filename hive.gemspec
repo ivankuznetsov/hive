@@ -33,6 +33,7 @@ Gem::Specification.new do |spec|
     "bin/hive",
     "bin/hive-babysitter-skip-log.rb",
     "bin/hive-babysitter-stub-gh",
+    "bin/hive-babysitter-stub-gh.rb",
     "bin/hive-babysitter-stub-git",
     "bin/hv",
     "lib/**/*.rb",

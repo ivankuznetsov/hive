@@ -123,6 +123,42 @@ class WebCommandTest < Minitest::Test
     end
   end
 
+  def test_relative_env_override_exec_env_uses_absolute_gemfile
+    with_tmp_global_config do
+      Dir.mktmpdir("hive-web-parent") do |parent|
+        app_name = "relapp"
+        app_dir = File.join(parent, app_name)
+        FileUtils.mkdir_p(File.join(app_dir, "config"))
+        File.write(File.join(app_dir, "config", "application.rb"), "# rails app marker")
+        File.write(File.join(app_dir, "Gemfile"), "# test gemfile")
+        FileUtils.mkdir_p(File.join(app_dir, "bin"))
+        File.write(File.join(app_dir, "bin", "rails"), "#!/usr/bin/env bash\nexit 0\n")
+        FileUtils.chmod(0o755, File.join(app_dir, "bin", "rails"))
+
+        original = Kernel.method(:exec)
+        caught = nil
+        Dir.chdir(parent) do
+          with_env("HIVEBOX_WEB_APP_DIR" => app_name) do
+            Kernel.define_singleton_method(:exec) do |env, *argv|
+              raise ExecCaught.new(env, argv)
+            end
+
+            begin
+              capture_io { Hive::Commands::Web.new.call }
+            rescue ExecCaught => e
+              caught = e
+            ensure
+              Kernel.define_singleton_method(:exec, original)
+            end
+          end
+        end
+
+        refute_nil caught, "the command must reach Kernel.exec for a relative app override"
+        assert_equal File.join(app_dir, "Gemfile"), caught.env["BUNDLE_GEMFILE"]
+      end
+    end
+  end
+
   # The MANAGED bundle is the one place whose Gemfile can only resolve the
   # hive-cli path gem through HIVE_CLI_ROOT (its ".." holds no gem, and its
   # bundle was installed with the same export). The Rails server re-evaluates

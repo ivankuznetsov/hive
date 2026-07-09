@@ -112,7 +112,7 @@ module Hive
         # managed bundle — use it verbatim when it points at a real app.
         if (override = ENV["HIVEBOX_WEB_APP_DIR"]) &&
            File.file?(File.join(override, "config", "application.rb"))
-          return override
+          return File.expand_path(override)
         end
 
         # The managed bundle takes precedence over a source checkout (matching

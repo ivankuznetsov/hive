@@ -30,6 +30,9 @@ points at a real Rails app, the managed version-stamped app under
 `Hive::Paths.web_app_home` (refreshed when stale unless `--no-bootstrap` is
 passed), then a source checkout `web/` next to `lib/`; if none exists and
 bootstrap is allowed, it downloads/extracts the versioned web release bundle.
+Relative `HIVEBOX_WEB_APP_DIR` values are accepted but normalized before the
+Rails env is built, so `BUNDLE_GEMFILE` points at the real app Gemfile after
+the command changes into the app directory.
 It exports `SECRET_KEY_BASE` (derived from the same persisted
 `Hive::Web::SessionSecret` file as before — sessions survive container
 recreation), `HIVEBOX_ORIGIN` (extra Action Cable origin allow; same-origin

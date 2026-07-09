@@ -102,6 +102,29 @@ class E2EArtifactCaptureTest < Minitest::Test
     end
   end
 
+  def test_log_capture_skips_symlinked_logs
+    with_dirs do |scenario_dir, sandbox, run_home|
+      Dir.mktmpdir("outside-log") do |outside_dir|
+        outside_log = File.join(outside_dir, "secret.log")
+        File.write(outside_log, "SECRET\n")
+        logs_root = File.join(sandbox, ".hive-state", "logs", "myslug")
+        FileUtils.mkdir_p(logs_root)
+        File.symlink(outside_log, File.join(logs_root, "stage.log"))
+
+        collect(scenario_dir, sandbox, run_home)
+
+        copied_log = File.join(scenario_dir, "logs", "myslug", "stage.log")
+        refute File.exist?(copied_log), "symlinked logs must not be copied into the bundle"
+        refute File.exist?("#{copied_log}.tail"), "symlinked logs must not be tailed"
+
+        manifest = JSON.parse(File.read(File.join(scenario_dir, "manifest.json")))
+        refute_includes manifest.fetch("files").map { |entry| entry.fetch("path") }, "logs/myslug/stage.log"
+        assert manifest.fetch("capture_errors").any? { |entry| entry.fetch("label") == "logs:myslug/stage.log" },
+               "skipped symlinked logs should leave a capture_errors breadcrumb"
+      end
+    end
+  end
+
   def test_pane_before_and_after_both_written_on_tui_failure
     with_dirs do |scenario_dir, sandbox, run_home|
       fake_tmux = Object.new
@@ -162,6 +185,34 @@ class E2EArtifactCaptureTest < Minitest::Test
       paths = manifest.fetch("files").map { |file| file.fetch("path") }
       assert_includes paths, "tui-subprocess/hive-tui-subprocess.log"
       assert_includes paths, "tui-subprocess/hive-tui-subprocess.log.1"
+    end
+  end
+
+  def test_tui_subprocess_diagnostics_skip_symlinked_live_logs
+    with_dirs do |scenario_dir, sandbox, run_home|
+      Dir.mktmpdir("outside-tui-log") do |outside_dir|
+        outside_log = File.join(outside_dir, "secret.log")
+        File.write(outside_log, "SECRET\n")
+        log_dir = File.join(scenario_dir, "tui-live")
+        FileUtils.mkdir_p(log_dir)
+        File.symlink(outside_log, File.join(log_dir, "hive-tui-spawn-FAKE.log"))
+        File.symlink(outside_log, File.join(log_dir, "hive-tui-subprocess.log"))
+
+        collect(scenario_dir, sandbox, run_home, tui_log_dir: log_dir)
+
+        copied_spawn = File.join(scenario_dir, "tui-subprocess", "hive-tui-spawn-FAKE.log")
+        copied_marker = File.join(scenario_dir, "tui-subprocess", "hive-tui-subprocess.log")
+        refute File.exist?(copied_spawn), "symlinked TUI spawn logs must not be copied"
+        refute File.exist?(copied_marker), "symlinked TUI marker logs must not be copied"
+
+        manifest = JSON.parse(File.read(File.join(scenario_dir, "manifest.json")))
+        paths = manifest.fetch("files").map { |entry| entry.fetch("path") }
+        refute_includes paths, "tui-subprocess/hive-tui-spawn-FAKE.log"
+        refute_includes paths, "tui-subprocess/hive-tui-subprocess.log"
+        labels = manifest.fetch("capture_errors").map { |entry| entry.fetch("label") }
+        assert_includes labels, "tui-subprocess:hive-tui-spawn-FAKE.log"
+        assert_includes labels, "tui-subprocess:hive-tui-subprocess.log"
+      end
     end
   end
 
@@ -233,6 +284,29 @@ class E2EArtifactCaptureTest < Minitest::Test
     end
   end
 
+  def test_state_capture_skips_symlinked_state_files
+    with_dirs do |scenario_dir, sandbox, run_home|
+      Dir.mktmpdir("outside-state") do |outside_dir|
+        outside_state = File.join(outside_dir, "task.md")
+        File.write(outside_state, "SECRET\n")
+        task_dir = File.join(sandbox, ".hive-state", "stages", "2-brainstorm", "task-1")
+        FileUtils.mkdir_p(task_dir)
+        File.symlink(outside_state, File.join(task_dir, "task.md"))
+
+        collect(scenario_dir, sandbox, run_home)
+
+        copied_state = File.join(scenario_dir, "state", "2-brainstorm", "task-1", "task.md")
+        refute File.exist?(copied_state), "symlinked state files must not be copied into the bundle"
+
+        manifest = JSON.parse(File.read(File.join(scenario_dir, "manifest.json")))
+        refute_includes manifest.fetch("files").map { |entry| entry.fetch("path") },
+                        "state/2-brainstorm/task-1/task.md"
+        assert manifest.fetch("capture_errors").any? { |entry| entry.fetch("label") == "state:2-brainstorm/task-1/task.md" },
+               "skipped symlinked state should leave a capture_errors breadcrumb"
+      end
+    end
+  end
+
   def test_env_snapshot_is_json_with_schema_version
     with_dirs do |scenario_dir, sandbox, run_home|
       collect(scenario_dir, sandbox, run_home)
@@ -245,6 +319,24 @@ class E2EArtifactCaptureTest < Minitest::Test
       assert_equal 1, payload["schema_version"]
       assert_kind_of String, payload["ruby"]
       assert_kind_of String, payload["platform"]
+    end
+  end
+
+  def test_manifest_skips_preexisting_symlinked_bundle_files
+    with_dirs do |scenario_dir, sandbox, run_home|
+      Dir.mktmpdir("outside-manifest") do |outside_dir|
+        outside_file = File.join(outside_dir, "secret.txt")
+        File.write(outside_file, "SECRET\n")
+        FileUtils.mkdir_p(scenario_dir)
+        File.symlink(outside_file, File.join(scenario_dir, "linked-secret.txt"))
+
+        collect(scenario_dir, sandbox, run_home)
+
+        manifest = JSON.parse(File.read(File.join(scenario_dir, "manifest.json")))
+        refute_includes manifest.fetch("files").map { |entry| entry.fetch("path") }, "linked-secret.txt"
+        assert manifest.fetch("capture_errors").any? { |entry| entry.fetch("label") == "manifest:linked-secret.txt" },
+               "skipped symlinked manifest inputs should leave a capture_errors breadcrumb"
+      end
     end
   end
 

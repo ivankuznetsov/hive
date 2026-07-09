@@ -72,6 +72,7 @@ GREP_VALUE_TAKING_LONG = %w[
 HELP_DISPATCH_OPTIONS = %w[--help --man --web --html --info].freeze
 SIGNATURE_FORMAT_SUBCOMMANDS = %w[log show rev-list].freeze
 SHOW_SIGNATURE_SUBCOMMANDS = %w[log show].freeze
+REMERGE_DIFF_FORMATS = %w[remerge r].freeze
 
 # Walk command arguments in the same order git parses them: a `--` token only becomes the
 # pathspec separator after a preceding value-taking option has had a chance to consume it.
@@ -147,6 +148,8 @@ def unsafe_read_option?(subcommand, arg, next_arg = nil)
   # Signature display and `%G*` pretty placeholders verify commit signatures, which executes
   # the configured gpg.program / gpg.<format>.program helper from repo config.
   return true if signature_verification_option?(subcommand, arg, next_arg)
+  # Remerge diffs replay Git's merge machinery and honor repo-local merge drivers.
+  return true if remerge_diff_option?(subcommand, arg)
 
   # `--open-files-in-pager` / `-O` (including glued or clustered short forms like
   # `-nO<cmd>`) runs an arbitrary pager command, but only on `git grep` — that is the
@@ -195,6 +198,14 @@ end
 def signature_format_placeholder?(arg)
   option, value = arg.split("=", 2)
   [ "--format", "--pretty" ].include?(option) && value.to_s.include?("%G")
+end
+
+def remerge_diff_option?(subcommand, arg)
+  return false unless %w[log show].include?(subcommand.to_s)
+  return true if arg == "--remerge-diff"
+
+  option, value = arg.split("=", 2)
+  option == "--diff-merges" && REMERGE_DIFF_FORMATS.include?(value)
 end
 
 def textconv_abbreviation?(arg)
@@ -330,6 +341,7 @@ def hardened_passthrough_argv(argv, rest)
     "-c", "core.fsmonitor=false",
     "-c", "core.askPass=",
     "-c", "log.showSignature=false",
+    "-c", "log.diffMerges=separate",
     # `log.showSignature=false` only suppresses the implicit `--show-signature`; it does NOT
     # stop `%G*` pretty placeholders from verifying signatures. A `%G` format can reach git
     # without ever appearing in argv: a worktree-local `pretty.<name>=format:%G?` alias selected

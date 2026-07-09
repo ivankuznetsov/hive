@@ -79,6 +79,32 @@ class CliUsageErrorJsonTest < Minitest::Test
     end
   end
 
+  def test_merged_pr_digest_json_usage_errors_use_merged_pr_schema
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-merged-pr-digest"))))
+    cases = [
+      %w[digest --source merged-prs --bad --json],
+      %w[digest --repo owner/repo --bad --json]
+    ]
+
+    with_tmp_global_config do |home|
+      cases.each do |argv|
+        out, _err, status = run_hive(home, *argv)
+
+        refute status.success?, "#{argv.join(' ')} should fail"
+        assert_equal Hive::ExitCodes::USAGE, status.exitstatus
+        payload = JSON.parse(out)
+        assert_equal "hive-merged-pr-digest", payload["schema"]
+        assert_equal Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-merged-pr-digest"), payload["schema_version"]
+        assert_equal false, payload["ok"]
+        assert_equal "InvalidTaskPath", payload["error_class"]
+        assert_equal "usage", payload["error_kind"]
+        assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
+        assert_empty schemer.validate(payload).map { |e| e["error"] },
+                     "#{argv.join(' ')} envelope must validate against hive-merged-pr-digest schema"
+      end
+    end
+  end
+
   def test_setup_extra_positional_json_usage_error_uses_setup_envelope
     with_tmp_global_config do |home|
       out, err, status = run_hive(home, "setup", "extra", "--json")

@@ -3,6 +3,7 @@ PATH
   specs:
     hive-cli (0.3.6)
       bubbletea (= 0.1.4)
+      erb (>= 4.0)
       faraday (>= 2.14.2, < 3.0)
       faraday-multipart (~> 1.0)
       lipgloss (~> 0.2.2)

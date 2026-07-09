@@ -150,7 +150,7 @@ class ConfigGlobalAgentsTest < Minitest::Test
     # normalize_global_agents both depend on.
     names = Hive::Config.registered_agent_names
 
-    assert_equal %w[claude codex pi], names.sort
+    assert_equal %w[claude codex grok pi], names.sort
     assert(names.all?(String), "registered_agent_names must be strings, not symbols")
   end
 

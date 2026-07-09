@@ -2,6 +2,22 @@
 
 All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with terse bullets — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
+## 0.3.7
+
+- Fixed hive failing to start on Arch Linux with `cannot load such file -- erb`:
+  erb is now a declared runtime dependency. Distros ship erb as a separate
+  package since ruby unbundled it, so every verb (`tui`, `plan`, the daemon)
+  crashed on a vendored install that lacked it. (#693)
+- Fixed the daemon crashing on its first tick — and systemd restart-looping to
+  `start-limit-hit` — whenever a legacy-layout project is registered: the
+  dispatcher's `:legacy_layout_detected` log event was missing from the daemon
+  logger's whitelist, so the log call itself raised. Legacy projects now log
+  and continue. (#694)
+- Custom workflows learned review councils, per-stage agent/model overrides,
+  and agent-terminal stages. (#687)
+- Fixed the patrol babysitter's dry-run git stub blocking help-viewer
+  execution. (#673)
+
 ## 0.3.6
 
 - Fixed the hivebox Docker image build: `hive web` now exports `HIVE_CLI_ROOT`

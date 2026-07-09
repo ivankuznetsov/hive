@@ -1123,6 +1123,38 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_gh_stub_pins_path_before_allowlisted_pr_view_passthrough
+    with_tmp_dir do |dir|
+      poison_dir = File.join(dir, "poison-bin")
+      FileUtils.mkdir_p(poison_dir)
+      poison_marker = File.join(dir, "poison-git-ran")
+      executable_touch_binary(poison_dir, "git", poison_marker)
+
+      marker_path = File.join(dir, "real-gh-ran")
+      real_gh = File.join(dir, "real-gh")
+      File.write(real_gh, <<~RUBY)
+        #!#{RbConfig.ruby}
+        File.write(#{marker_path.dump}, ARGV.join(" "))
+        ok = system("git", "--version", out: File::NULL, err: File::NULL)
+        exit(ok ? 0 : 1)
+      RUBY
+      FileUtils.chmod("+x", real_gh)
+
+      env = {
+        "HIVE_BABYSITTER_REAL_GH" => real_gh,
+        "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "skipped.log"),
+        "PATH" => [ poison_dir, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR)
+      }
+
+      _out, err, status = Open3.capture3(env, stub_path("gh"), "pr", "view", "--json", "number")
+
+      assert status.success?, err
+      assert_equal "pr view --json number", File.read(marker_path)
+      refute_path_exists File.join(dir, "skipped.log")
+      refute_path_exists poison_marker
+    end
+  end
+
   def test_gh_stub_scrubs_host_repo_and_enterprise_token_environment_before_passthrough
     with_tmp_dir do |dir|
       # The argv gate inspects argv only; gh also reads the target host/repo and enterprise

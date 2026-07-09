@@ -98,6 +98,96 @@ class WorkflowsDescriptorParserTest < Minitest::Test
     assert_equal "high", work.effort
   end
 
+  def test_active_stages_accept_per_stage_budget_and_timeout
+    workflow = Hive::Workflows::DescriptorParser.parse_hash(
+      {
+        "id" => "resource-limits",
+        "stages" => [
+          {
+            "name" => "work",
+            "kind" => "agent",
+            "state_file" => "work.md",
+            "skill" => "/ship",
+            "budget_usd" => 12.5,
+            "timeout_sec" => 7200
+          },
+          {
+            "name" => "review",
+            "kind" => "council",
+            "state_file" => "review.md",
+            "budget_usd" => 25,
+            "timeout_sec" => 3600,
+            "reviewers" => [ { "name" => "one", "prompt" => "Review." } ]
+          },
+          { "name" => "done", "kind" => "terminal", "state_file" => "done.md" }
+        ]
+      },
+      path: "/tmp/resource-limits.yml"
+    )
+
+    work = workflow.stage_named("work")
+    assert_equal 12.5, work.budget_usd
+    assert_equal 7200, work.timeout_sec
+
+    review = workflow.stage_named("review")
+    assert_equal 25, review.budget_usd
+    assert_equal 3600, review.timeout_sec
+  end
+
+  def test_per_stage_budget_and_timeout_default_to_nil
+    workflow = Hive::Workflows::DescriptorParser.parse_hash(
+      {
+        "id" => "resource-defaults",
+        "stages" => [
+          { "name" => "work", "kind" => "agent", "state_file" => "work.md", "skill" => "/ship" },
+          { "name" => "done", "kind" => "terminal", "state_file" => "done.md" }
+        ]
+      },
+      path: "/tmp/resource-defaults.yml"
+    )
+
+    work = workflow.stage_named("work")
+    assert_nil work.budget_usd
+    assert_nil work.timeout_sec
+  end
+
+  def test_per_stage_budget_and_timeout_must_be_positive
+    {
+      "budget_usd" => [ 0, -1, "12" ],
+      "timeout_sec" => [ 0, -1, 1.5, "7200" ]
+    }.each do |field, invalid_values|
+      invalid_values.each do |value|
+        error = assert_config_error(
+          {
+            "id" => "bad",
+            "stages" => [
+              { "name" => "work", "kind" => "agent", "state_file" => "work.md", "skill" => "/ship",
+                field => value }
+            ]
+          },
+          path: "/tmp/bad.yml"
+        )
+
+        assert_includes error.message, "stage 1 #{field} must be a positive"
+      end
+    end
+  end
+
+  def test_terminal_stage_rejects_budget_and_timeout
+    error = assert_config_error(
+      {
+        "id" => "bad",
+        "stages" => [
+          { "name" => "done", "kind" => "terminal", "state_file" => "done.md",
+            "budget_usd" => 10, "timeout_sec" => 60 }
+        ]
+      },
+      path: "/tmp/bad.yml"
+    )
+
+    assert_includes error.message, '["budget_usd", "timeout_sec"] are only valid on an agent stage'
+  end
+
   def test_agent_stage_defaults_per_stage_agent_model_and_effort_to_nil
     workflow = Hive::Workflows::DescriptorParser.parse_hash(
       {

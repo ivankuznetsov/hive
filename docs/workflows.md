@@ -52,6 +52,8 @@ stages:
     agent: claude
     model: opus
     effort: high
+    budget_usd: 12.50
+    timeout_sec: 7200
     permissions: read-only
   - name: done
     kind: terminal
@@ -68,9 +70,12 @@ Rules:
 - `agent:`, `model:`, and `effort:` are optional on `kind: agent` and
   `kind: council`. Descriptor values override project stage config; Claude
   stages receive `model` / `effort` as CLI flags.
-- `skill:`, `instruction:`, `agent:`, `model:`, `effort:`, `permissions:`,
-  `input:`, `reviewers:`, `council:`, and `deliverable:` are rejected on
-  `kind: terminal` stages.
+- `budget_usd:` and `timeout_sec:` provide optional resource defaults for
+  `kind: agent` and `kind: council`; project stage config takes precedence.
+  `budget_usd` must be a positive number and `timeout_sec` a positive integer.
+- `skill:`, `instruction:`, `agent:`, `model:`, `effort:`, `budget_usd:`,
+  `timeout_sec:`, `permissions:`, `input:`, `reviewers:`, `council:`, and
+  `deliverable:` are rejected on `kind: terminal` stages.
 - `instruction:` is resolved relative to the descriptor file and must point to a readable file (any extension; `.md` is conventional but not required).
 - `permissions:` is optional and uses the same syntax as [permissions.md](permissions.md).
 - The last stage may be `kind: terminal`, `kind: agent`, or `kind: council`.

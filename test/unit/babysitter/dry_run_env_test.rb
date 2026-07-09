@@ -48,6 +48,57 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_with_env_replaces_preexisting_overlay_symlink_before_writing_wrappers
+    with_tmp_dir do |dir|
+      redirect = File.join(dir, "redirect")
+      overlay = File.join(dir, ".hive-babysitter-dry-run-bin")
+      FileUtils.mkdir_p(redirect)
+      File.symlink(redirect, overlay)
+
+      Hive::Babysitter::DryRunEnv.with_env(dir) do
+        refute File.lstat(overlay).symlink?, "overlay must be a real directory"
+        assert File.executable?(File.join(overlay, "git"))
+        assert File.executable?(File.join(overlay, "gh"))
+      end
+
+      assert File.directory?(redirect), "symlink target must not be removed"
+      refute_path_exists File.join(redirect, "git")
+      refute_path_exists File.join(redirect, "gh")
+    end
+  end
+
+  def test_with_env_refuses_overlay_directory_that_fails_post_create_safety_check
+    with_tmp_dir do |dir|
+      overlay = File.join(dir, ".hive-babysitter-dry-run-bin")
+      original_lstat = File.method(:lstat)
+      calls = 0
+
+      File.define_singleton_method(:lstat) do |path|
+        stat = original_lstat.call(path)
+        calls += 1 if path == overlay
+        next stat unless path == overlay && calls == 1
+
+        unsafe_stat = Object.new
+        unsafe_stat.define_singleton_method(:directory?) { true }
+        unsafe_stat.define_singleton_method(:uid) { Process.uid }
+        unsafe_stat.define_singleton_method(:mode) { 0o777 }
+        unsafe_stat
+      end
+
+      begin
+        error = assert_raises(RuntimeError) do
+          Hive::Babysitter::DryRunEnv.with_env(dir) { }
+        end
+
+        assert_match(/refusing unsafe dry-run overlay/, error.message)
+      ensure
+        File.define_singleton_method(:lstat, original_lstat)
+      end
+
+      refute_path_exists overlay
+    end
+  end
+
   # The dry-run artifacts must be gitignored in the real repo so a stage-exit
   # CleanExit treats them as clean rather than out-of-scope residue. Removing
   # any of these `.gitignore` entries turns this red.

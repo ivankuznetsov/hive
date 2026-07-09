@@ -56,6 +56,47 @@ class CliUsageErrorJsonTest < Minitest::Test
     end
   end
 
+  def test_screenote_commands_json_usage_errors_emit_unversioned_envelopes
+    with_tmp_global_config do |home|
+      [
+        [ %w[connect --json], /Usage: "hive connect SERVICE"/ ],
+        [ %w[disconnect --json], /Usage: "hive disconnect SERVICE"/ ]
+      ].each do |argv, message_pattern|
+        out, err, status = run_hive(home, *argv)
+
+        refute status.success?, "#{argv.join(' ')} should fail"
+        assert_equal Hive::ExitCodes::USAGE, status.exitstatus
+        payload = JSON.parse(out)
+        assert_equal false, payload["ok"]
+        assert_equal "screenote", payload["service"]
+        assert_equal "InvalidTaskPath", payload["error_class"]
+        assert_equal "usage", payload["error_kind"]
+        assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
+        assert_match message_pattern, payload["message"]
+        refute payload.key?("schema"), "Screenote connect/disconnect JSON failures are unversioned"
+        assert_match(/^hive: ERROR: /, err.lines.first)
+      end
+    end
+  end
+
+  def test_setup_extra_positional_json_usage_error_uses_setup_envelope
+    with_tmp_global_config do |home|
+      out, err, status = run_hive(home, "setup", "extra", "--json")
+
+      refute status.success?
+      assert_equal Hive::ExitCodes::USAGE, status.exitstatus
+      payload = JSON.parse(out)
+      assert_equal "hive-setup", payload["schema"]
+      refute payload.key?("schema_version"), "hive-setup JSON is unversioned"
+      assert_equal false, payload["ok"]
+      assert_equal "InvalidTaskPath", payload["error_class"]
+      assert_equal "usage", payload["error_kind"]
+      assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
+      assert_match(/Usage: "hive setup"/, payload["message"])
+      assert_match(/^hive: ERROR: /, err.lines.first)
+    end
+  end
+
   # Bare `hive workflow` (no subcommand) with --json must ride the
   # hive-workflow-new envelope (error_kind "usage"), not Thor's generic arity
   # prose. The sibling `hive workflow new` no-id case raises the command's own

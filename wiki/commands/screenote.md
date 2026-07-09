@@ -27,6 +27,12 @@ hive disconnect screenote [--json]
 `screenote` is currently the only supported service name. Other service names
 raise `Hive::ConfigError`.
 
+If Thor rejects a missing `SERVICE` before the command runs
+(`hive connect --json` or `hive disconnect --json`), `bin/hive` emits the same
+schema-less Screenote failure family on stdout: `ok:false`,
+`service:"screenote"`, `error_kind:"usage"`, exit 64, and the Thor usage
+message.
+
 ## Connect Behavior
 
 1. Resolve `screenote.base_url` from global config, `HIVE_SCREENOTE_BASE_URL`, or

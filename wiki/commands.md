@@ -73,7 +73,11 @@ exception: after `hive new PROJECT`, later `--help`, `-h`, or malformed
 `--json=...` tokens are treated as literal task text, with `bin/hive` inserting
 `--` before the tail so Thor leaves the idea text alone. Wrapper-owned usage
 errors use the last recognized JSON boolean flag, so `--json --no-json` and
-`--json --json=false` choose human prose instead of an error envelope.
+`--json --json=false` choose human prose instead of an error envelope. When the
+final recognized JSON flag is truthy, pre-dispatch Thor usage errors listed in
+`JSON_USAGE_ERROR_CONTRACTS` emit command-shaped JSON before stderr, including
+unversioned `hive-setup` usage failures and Screenote connect/disconnect
+missing-`SERVICE` failures.
 
 `bin/hv` is the Apache Hive collision fallback entrypoint. It probes only the
 owned Hive CLI locations and `HIVE_BIN_OVERRIDE`; it intentionally does not

@@ -45,21 +45,24 @@ class E2EArtifactCaptureTest < Minitest::Test
 
   def test_capture_failures_dont_mask_original_error
     with_dirs do |scenario_dir, sandbox, run_home|
-      # Stub ENV["TERM"] to nil and force git -C $sandbox to fail by using a
-      # sandbox without .git. The capture step that depends on it raises,
-      # but the original RuntimeError is still the surfaced scenario error.
+      fake_tmux = Object.new
+      fake_tmux.define_singleton_method(:keystrokes) do
+        raise RuntimeError, "FORCED_CAPTURE_FAILURE"
+      end
+      fake_tmux.define_singleton_method(:capture_pane) { "PANE_TEXT\n" }
       original_error = RuntimeError.new("ORIGINAL_ERROR_TEXT")
-      collect(scenario_dir, sandbox, run_home, error: original_error)
+      collect(scenario_dir, sandbox, run_home, error: original_error, tmux_driver: fake_tmux)
 
       exception_text = File.read(File.join(scenario_dir, "exception.txt"))
       assert_includes exception_text, "ORIGINAL_ERROR_TEXT",
         "original error must surface in exception.txt regardless of capture failures"
 
       manifest = JSON.parse(File.read(File.join(scenario_dir, "manifest.json")))
-      # capture_errors may or may not be empty (sandbox-tree.txt + git status
-      # both succeed against an empty dir); the contract is that the manifest
-      # is well-formed and the original error is preserved.
-      assert manifest.key?("capture_errors")
+      capture_error = manifest.fetch("capture_errors").find do |entry|
+        entry["label"] == "keystrokes.log"
+      end
+      assert capture_error, "manifest should record the guarded artifact writer failure"
+      assert_includes capture_error.fetch("error"), "RuntimeError: FORCED_CAPTURE_FAILURE"
     end
   end
 

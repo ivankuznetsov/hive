@@ -694,6 +694,38 @@ module Hive
       ).call
     end
 
+    desc "refactor-patrol PROJECT", "Discover ranked refactor theses for a registered project"
+    long_desc <<~DESC
+      Maps the registered project's repository into feature slices, asks the
+      configured refactor-patrol agent for evidence-backed architecture
+      theses, scores them by leverage, flags scope/guardrail risks, and emits
+      a ranked report. v1 is reporting-only: it does not edit worktrees, open
+      PRs, or enqueue review tasks.
+
+      Scope hints use precedence --feature, then --entrypoint, then --path.
+      With --changed-since alone, changed features are boosted but full
+      discovery still runs; combined with a scope hint, changed files further
+      restrict that scoped set. With --json, emits hive-refactor-patrol.v1.
+    DESC
+    option :dry_run, type: :boolean, default: false,
+                     desc: "preview without persisting refactor-patrol state"
+    option :feature, type: :string, desc: "only review matching mapped feature id"
+    option :entrypoint, type: :string, desc: "only review the feature owning this entrypoint"
+    option :path, type: :string, desc: "only review features with owned files under this path"
+    option :changed_since, type: :string, desc: "git ref used for changed-feature ranking/filtering"
+    def refactor_patrol(project)
+      require "hive/commands/refactor_patrol"
+      Hive::Commands::RefactorPatrol.new(
+        project,
+        json: options[:json],
+        dry_run: options[:dry_run],
+        feature: options[:feature],
+        entrypoint: options[:entrypoint],
+        path: options[:path],
+        changed_since: options[:changed_since]
+      ).call
+    end
+
     desc "digest", "Generate and send the daily shipped digest"
     # wrap: false so the Examples / Exit codes blocks keep their line breaks
     # instead of being reflowed into one paragraph.

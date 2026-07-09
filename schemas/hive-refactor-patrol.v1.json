@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-refactor-patrol.v1.json",
+  "title": "hive refactor patrol output (v1)",
+  "description": "Stable contract emitted by `hive refactor-patrol PROJECT --json`.",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
+  ],
+  "$defs": {
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "project",
+        "project_root",
+        "dry_run",
+        "features_mapped",
+        "theses",
+        "ranked",
+        "flagged_theses",
+        "suppressed",
+        "last_scanned_sha"
+      ],
+      "properties": {
+        "schema": { "const": "hive-refactor-patrol" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": true },
+        "project": { "type": "string" },
+        "project_root": { "type": "string" },
+        "dry_run": { "type": "boolean" },
+        "features_mapped": { "type": "integer", "minimum": 0 },
+        "theses": { "type": "integer", "minimum": 0 },
+        "ranked": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/RankedThesis" }
+        },
+        "flagged_theses": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/FlaggedThesis" }
+        },
+        "suppressed": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/SuppressedThesis" }
+        },
+        "last_scanned_sha": { "type": "string" }
+      }
+    },
+    "RankedThesis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "feature_id", "score", "breakdown", "admissible", "flagged", "advisories"],
+      "properties": {
+        "id": { "type": "string" },
+        "feature_id": { "type": "string" },
+        "score": { "type": "number" },
+        "breakdown": {
+          "type": "object",
+          "additionalProperties": { "type": "number" }
+        },
+        "admissible": { "type": "boolean" },
+        "flagged": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "advisories": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "FlaggedThesis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "reason"],
+      "properties": {
+        "id": { "type": "string" },
+        "reason": { "type": "string" }
+      }
+    },
+    "SuppressedThesis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "reason"],
+      "properties": {
+        "id": { "type": "string" },
+        "reason": { "type": "string" },
+        "reference": { "type": "string" }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "error_class",
+        "error_kind",
+        "exit_code",
+        "message"
+      ],
+      "properties": {
+        "schema": { "const": "hive-refactor-patrol" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "error_class": { "type": "string" },
+        "error_kind": { "enum": ["config", "error"] },
+        "exit_code": { "type": "integer" },
+        "message": { "type": "string" }
+      }
+    }
+  }
+}

@@ -1,0 +1,171 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-refactor-patrol-thesis.v1.json",
+  "title": "hive refactor patrol thesis record (v1)",
+  "description": "Durable refactor thesis record stored under .hive-state/refactor_patrol/theses/.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "feature_id",
+    "feature",
+    "problem",
+    "cost",
+    "evidence",
+    "proposed_refactor",
+    "feature_boundary",
+    "expected_leverage",
+    "confidence",
+    "risk",
+    "required_validation",
+    "admissible",
+    "admissibility_reason",
+    "follow_up_approval_state",
+    "fingerprint"
+  ],
+  "properties": {
+    "id": { "type": "string" },
+    "feature_id": { "type": "string" },
+    "feature": { "type": "string" },
+    "problem": { "type": "string" },
+    "cost": { "type": "string" },
+    "evidence": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/Evidence" }
+    },
+    "proposed_refactor": { "type": "string" },
+    "feature_boundary": { "$ref": "#/$defs/FeatureBoundary" },
+    "expected_leverage": { "$ref": "#/$defs/ExpectedLeverage" },
+    "confidence": { "enum": ["low", "medium", "high"] },
+    "risk": { "$ref": "#/$defs/Risk" },
+    "required_validation": { "$ref": "#/$defs/RequiredValidation" },
+    "admissible": { "type": "boolean" },
+    "admissibility_reason": { "type": "string" },
+    "follow_up_approval_state": {
+      "enum": ["pending", "not_requested", "approved", "rejected"]
+    },
+    "fingerprint": { "type": "string" },
+    "collision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "reference"],
+      "properties": {
+        "kind": { "type": "string" },
+        "reference": { "type": "string" }
+      }
+    }
+  },
+  "$defs": {
+    "Evidence": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "file": { "type": "string" },
+        "line": { "type": "integer", "minimum": 1 },
+        "snippet": { "type": "string" },
+        "signal": {
+          "enum": [
+            "churn",
+            "fan_in",
+            "complexity",
+            "coupling",
+            "repeated_dependency",
+            "bug_density",
+            "coverage_gap"
+          ]
+        },
+        "value": {
+          "oneOf": [
+            { "type": "number" },
+            { "type": "string" },
+            { "type": "boolean" }
+          ]
+        }
+      }
+    },
+    "FeatureBoundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["owned_files", "entrypoints"],
+      "properties": {
+        "owned_files": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "entrypoints": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "ExpectedLeverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["score", "breakdown"],
+      "properties": {
+        "score": { "type": "number", "minimum": 0 },
+        "breakdown": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": { "type": "number" }
+        }
+      }
+    },
+    "Risk": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "caps",
+        "public_api_impact",
+        "public_api_details",
+        "cross_feature_impact",
+        "cross_feature_details",
+        "flags"
+      ],
+      "properties": {
+        "caps": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["est_files", "est_diff_lines", "single_feature"],
+          "properties": {
+            "est_files": { "type": "integer", "minimum": 0 },
+            "est_diff_lines": { "type": "integer", "minimum": 0 },
+            "single_feature": { "type": "boolean" }
+          }
+        },
+        "public_api_impact": { "type": "boolean" },
+        "public_api_details": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "cross_feature_impact": { "type": "boolean" },
+        "cross_feature_details": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "flags": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "advisories": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "RequiredValidation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commands", "characterization_first", "notes"],
+      "properties": {
+        "commands": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "characterization_first": { "type": "boolean" },
+        "notes": { "type": "string" }
+      }
+    }
+  }
+}

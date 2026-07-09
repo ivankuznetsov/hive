@@ -97,4 +97,30 @@ class E2ECliDriverTest < Minitest::Test
   rescue StandardError
     nil
   end
+
+  def test_descendant_holding_streams_open_is_bounded_by_timeout
+    Dir.mktmpdir("sandbox") do |sandbox|
+      Dir.mktmpdir("home") do |home|
+        script = File.join(sandbox, "forked_descendant.rb")
+        File.write(script, <<~'RUBY')
+          fork do
+            sleep 2
+          end
+          puts "parent done"
+          warn "parent err"
+          exit 0
+        RUBY
+        driver = Hive::E2E::CliDriver.new(sandbox, home)
+        driver.define_singleton_method(:command) { |_args| [ RbConfig.ruby, script ] }
+
+        error = assert_raises(Hive::E2E::CliDriver::ExitMismatchError) do
+          driver.call([], cwd: sandbox, timeout: 0.2)
+        end
+
+        assert_nil error.actual
+        assert_includes error.stdout, "parent done"
+        assert_includes error.stderr, "parent err"
+      end
+    end
+  end
 end

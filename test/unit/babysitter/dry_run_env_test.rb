@@ -252,6 +252,34 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_with_env_scrubs_dynamic_loader_environment_before_overlay_handoff
+    with_tmp_dir do |dir|
+      preload = preload_marker_library(dir)
+      marker = File.join(dir, "ld-preload-loaded")
+      recording_binary(dir, "git")
+
+      with_env(
+        "PATH" => [ dir, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR),
+        "LD_PRELOAD" => preload,
+        "LD_LIBRARY_PATH" => dir,
+        "DYLD_INSERT_LIBRARIES" => preload,
+        "DYLD_LIBRARY_PATH" => dir,
+        "HIVE_PRELOAD_MARKER" => marker
+      ) do
+        Hive::Babysitter::DryRunEnv.with_env(dir) do
+          _out, err, status = Open3.capture3("git", "status", "--short")
+
+          assert status.success?, err
+        end
+      end
+
+      refute_path_exists marker, "dynamic-loader env loaded code before the dry-run git guard"
+      real_invocations = File.read(File.join(dir, "real.log"))
+      assert_includes real_invocations, "git -c core.fsmonitor=false"
+      assert_includes real_invocations, "--no-pager status --short"
+    end
+  end
+
   def test_stubs_refuse_relative_real_binary_paths
     with_tmp_dir do |dir|
       bin_dir = File.join(dir, "bin")
@@ -1215,6 +1243,31 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_git_stub_scrubs_dynamic_loader_environment_before_read_only_passthrough
+    with_tmp_dir do |dir|
+      loader_env_keys = %w[
+        LD_PRELOAD LD_LIBRARY_PATH LD_FAKE_LOADER_SEAM
+        DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH DYLD_FAKE_LOADER_SEAM
+      ]
+      real_git = recording_env_binary(dir, "real-git", loader_env_keys)
+      env = {
+        "HIVE_BABYSITTER_REAL_GIT" => real_git,
+        "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "skipped.log")
+      }
+      script = <<~RUBY
+        #{loader_env_keys.inspect}.each { |key| ENV[key] = "loader-pwned" }
+        ARGV.replace(["status", "--short"])
+        load #{stub_path("git").dump}
+      RUBY
+
+      _out, err, status = Open3.capture3(env, RbConfig.ruby, "-e", script)
+
+      assert status.success?, err
+      assert_equal loader_env_keys.map { |key| "#{key}=<unset>" }.join("\n") + "\n",
+                   File.read(File.join(dir, "env.log"))
+    end
+  end
+
   def test_git_stub_disables_lazy_fetch_before_read_only_passthrough
     with_tmp_dir do |dir|
       source = File.join(dir, "source")
@@ -1623,6 +1676,32 @@ class BabysitterDryRunEnvTest < Minitest::Test
     RUBY
     FileUtils.chmod("+x", path)
     path
+  end
+
+  def preload_marker_library(dir)
+    skip "LD_PRELOAD constructor regression is Linux-specific" unless RbConfig::CONFIG.fetch("host_os").include?("linux")
+
+    source = File.join(dir, "preload_marker.c")
+    library = File.join(dir, "preload_marker.so")
+    File.write(source, <<~C)
+      #include <fcntl.h>
+      #include <stdlib.h>
+      #include <unistd.h>
+
+      __attribute__((constructor)) static void hive_mark(void) {
+        const char *path = getenv("HIVE_PRELOAD_MARKER");
+        if (path == NULL || path[0] == '\\0') return;
+        int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0600);
+        if (fd >= 0) {
+          write(fd, "loaded\\n", 7);
+          close(fd);
+        }
+      }
+    C
+    _out, err, status = Open3.capture3({ "LD_PRELOAD" => nil }, "gcc", "-shared", "-fPIC", source, "-o", library)
+    skip "gcc unavailable for LD_PRELOAD constructor regression: #{err}" unless status.success?
+
+    library
   end
 
   def capture_pty_stub(env, binary, *args)

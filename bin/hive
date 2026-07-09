@@ -23,6 +23,9 @@ JSON_USAGE_ERROR_CONTRACTS = {
   "drop" => { schema: "hive-drop", error_kind: "invalid_task_path" },
   "findings" => { schema: "hive-findings", error_kind: "invalid_task_path" },
   "patrol" => { schema: "hive-patrol", error_kind: "error" },
+  "setup" => { schema: "hive-setup", schema_version: false, error_kind: "usage" },
+  "connect" => { error_kind: "usage", extras: { "service" => "screenote" } },
+  "disconnect" => { error_kind: "usage", extras: { "service" => "screenote" } },
   "accept-finding" => {
     schema: "hive-findings",
     error_kind: "invalid_task_path",
@@ -249,10 +252,10 @@ def json_usage_error_contract(argv)
 end
 
 def json_usage_error_payload(contract, error)
-  schema = contract.fetch(:schema)
+  schema = contract[:schema]
   error_kind = contract.fetch(:error_kind)
   extras = contract.fetch(:extras, {})
-  if Hive::Schemas::SCHEMA_VERSIONS.key?(schema)
+  if schema && Hive::Schemas::SCHEMA_VERSIONS.key?(schema)
     return Hive::Schemas::ErrorEnvelope.build(
       schema: schema,
       error: error,
@@ -261,15 +264,19 @@ def json_usage_error_payload(contract, error)
     )
   end
 
-  {
-    "schema" => schema,
-    "schema_version" => contract.fetch(:schema_version, 1),
+  payload = {}
+  if schema
+    payload["schema"] = schema
+    payload["schema_version"] = contract.fetch(:schema_version, 1) unless contract[:schema_version] == false
+  end
+
+  payload.merge!(
     "ok" => false,
     "error_class" => error.class.name.split("::").last,
     "error_kind" => error_kind,
     "exit_code" => error.respond_to?(:exit_code) ? error.exit_code : Hive::ExitCodes::GENERIC,
     "message" => error.message
-  }.merge(extras)
+  ).merge(extras)
 end
 
 def emit_json_usage_error(argv, error)

@@ -129,6 +129,14 @@ class E2EBinaryTest < Minitest::Test
     assert_equal "#{Hive::VERSION}\n", out
   end
 
+  def test_leading_json_top_level_version_prints_hive_version
+    %w[--version -v].each do |flag|
+      out, err, status = Open3.capture3(hive_e2e, "--json", flag)
+      assert status.success?, "bin/hive-e2e --json #{flag} should exit 0, stderr was: #{err}"
+      assert_equal "#{Hive::VERSION}\n", out
+    end
+  end
+
   # Thor's default for unknown commands is to print a deprecation warning
   # and exit 0; we override `exit_on_failure?` to true so wrappers / CI
   # see a non-zero status instead. Pin the contract here.
@@ -149,6 +157,83 @@ class E2EBinaryTest < Minitest::Test
     assert status.success?, "bin/hive-e2e run --help should exit 0, stderr was: #{err}"
     assert_includes out, "Run e2e scenarios"
     refute_includes err, "no scenarios match"
+  end
+
+  def test_leading_json_top_level_help_shows_usage
+    %w[--help -h].each do |flag|
+      out, err, status = Open3.capture3(hive_e2e, "--json", flag)
+      assert status.success?, "bin/hive-e2e --json #{flag} should exit 0, stderr was: #{err}"
+      assert_includes out, "Commands:"
+      refute_includes out, "hive-e2e-error"
+      refute_includes err, "no scenarios match"
+    end
+  end
+
+  # A leading --json followed by a help flag and a recognized command
+  # (`--json --help run`, `--json -h run`) requests that command's help, exactly
+  # like `--help run`. Help is human prose, so the leading --json is dropped and
+  # Thor renders the command's usage with exit 0 — it must not regress into a
+  # run_scenarios usage error (exit 64) as it did when --json was restored ahead
+  # of the help flag.
+  def test_leading_json_help_with_command_shows_command_help
+    %w[--help -h].each do |flag|
+      out, err, status = Open3.capture3(hive_e2e, "--json", flag, "run")
+      assert status.success?, "bin/hive-e2e --json #{flag} run should exit 0, stderr was: #{err}"
+      assert_includes out, "hive-e2e run [PATTERN]"
+      assert_includes out, "Run e2e scenarios"
+      refute_includes out, "hive-e2e-error"
+      refute_includes err, "no scenarios match"
+    end
+  end
+
+  # A leading --json followed by a top-level flag plus a trailing token
+  # (e.g. `--json --help missing`) must still honor the JSON-envelope
+  # contract. Normalization shifts the leading --json out of ARGV and returns
+  # early on the top-level flag without restoring it, so the rescue path must
+  # consult the caller's original JSON request rather than the mutated ARGV.
+  def test_leading_json_help_with_trailing_token_emits_envelope_on_stdout
+    out, err, status = Open3.capture3(hive_e2e, "--json", "--help", "missing")
+    assert_equal 64, status.exitstatus
+    assert_empty err, "human prose must not leak to stderr when --json precedes --help"
+
+    payload = JSON.parse(out)
+    assert_equal "hive-e2e-error", payload["schema"]
+    assert_equal false, payload["ok"]
+    assert_equal "usage", payload["error_kind"]
+    assert_equal 64, payload["exit_code"]
+  end
+
+  def test_leading_json_version_with_trailing_token_emits_envelope_on_stdout
+    out, err, status = Open3.capture3(hive_e2e, "--json", "--version", "extra")
+    assert_equal 64, status.exitstatus
+    assert_empty err, "human prose must not leak to stderr when --json precedes --version"
+
+    payload = JSON.parse(out)
+    assert_equal "hive-e2e-error", payload["schema"]
+    assert_equal false, payload["ok"]
+    assert_equal "usage", payload["error_kind"]
+    assert_equal 64, payload["exit_code"]
+  end
+
+  # A leading --json followed by a top-level flag AND a recognized option
+  # (e.g. `--json --version --filter tui`) does not raise a Thor error: Thor
+  # consumes the flag as the run pattern and dispatches into run_scenarios,
+  # whose body reads options[:json]. The stripped --json must be restored so
+  # the command honors the JSON contract instead of printing prose on stderr;
+  # the outer rescue's json_mode snapshot cannot cover this dispatch path.
+  def test_leading_json_top_level_flag_then_option_emits_envelope_on_stdout
+    %w[--version -v --help -h].each do |flag|
+      out, err, status = Open3.capture3(hive_e2e, "--json", flag, "--filter", "tui")
+      assert_equal 64, status.exitstatus, "#{flag}: usage error must exit 64"
+      assert_empty err, "#{flag}: human prose must not leak to stderr when --json leads"
+
+      payload = JSON.parse(out)
+      assert_equal "hive-e2e-error", payload["schema"]
+      assert_equal false, payload["ok"]
+      assert_equal "no_scenarios", payload["error_kind"]
+      assert_equal 64, payload["exit_code"]
+      assert_match(/no scenarios match #{Regexp.escape(flag)}/, payload["message"])
+    end
   end
 
   def test_run_help_after_option_value_shows_usage

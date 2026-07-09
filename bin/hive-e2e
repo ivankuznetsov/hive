@@ -268,6 +268,7 @@ end
 JSON_TRUE_OPTIONS = %w[--json --json=true --json=TRUE --json=t --json=T].freeze
 JSON_FALSE_OPTIONS = %w[--no-json --skip-json --json=false --json=FALSE --json=f --json=F].freeze
 JSON_BOOLEAN_OPTIONS = (JSON_TRUE_OPTIONS + JSON_FALSE_OPTIONS).freeze
+TOP_LEVEL_FLAGS = %w[--help -h --version -v].freeze
 
 def normalize_leading_class_options!(argv)
   return if argv.length < 2
@@ -305,22 +306,62 @@ def reject_unsupported_json_assignments!(argv)
   raise Thor::MalformattedArgumentError, "invalid boolean value for --json: #{arg.split('=', 2).last.inspect}"
 end
 
+HELP_FLAGS = %w[--help -h].freeze
+
 def normalize_leading_global_options!(argv)
   leading = []
   leading << argv.shift while JSON_BOOLEAN_OPTIONS.include?(argv.first)
   return if leading.empty?
 
   commands = Hive::E2E::Binary.all_tasks.keys + [ "run" ]
+
+  # A *bare* top-level flag (`--json --version`, `--json -h`) is handled as
+  # human-only version/help output, so the leading --json is irrelevant and
+  # stays dropped. But when tokens trail the flag (`--json --version --filter
+  # tui`) it is no longer a standalone top-level invocation: Thor consumes it
+  # as a pattern and dispatches into `run_scenarios`, whose body reads
+  # `options[:json]`. Restore --json there so the command honors the caller's
+  # JSON request instead of emitting prose (the outer rescue's json_mode
+  # snapshot only guards Thor-level errors, not the command body).
+  if TOP_LEVEL_FLAGS.include?(argv.first)
+    return if argv.length == 1
+
+    # `--json --help <command>` / `--json -h <command>` requests that command's
+    # help. Thor renders command help natively when a help flag leads and a
+    # recognized command follows (exactly as `--help run` does) — but only while
+    # the leading --json stays dropped. Restoring --json ahead of --help makes
+    # Thor stop treating --help as the help switch and instead dispatch into
+    # run_scenarios with [--help, <command>], exiting 64. Help output is human
+    # prose, so the now-irrelevant --json can stay dropped. Non-command trailers
+    # (`--json --help missing`, `--json --help --filter tui`) fall through to the
+    # restore path so their usage errors still honor the JSON-envelope contract.
+    return if HELP_FLAGS.include?(argv.first) && commands.include?(argv[1])
+
+    return argv.unshift(*leading)
+  end
+
   cmd_idx = argv.index { |arg| commands.include?(arg) }
   return argv.unshift(*leading) unless cmd_idx
 
   argv.insert(cmd_idx + 1, *leading)
 end
 
+# Snapshot the caller's JSON request from the pristine ARGV. Normalization can
+# shift a leading `--json` out of ARGV and then return early without restoring
+# it (e.g. `--json --help missing`, `--json --version extra`, where a top-level
+# flag follows the class option). If Thor later raises a usage error, the rescue
+# blocks below would otherwise consult a mutated ARGV that no longer carries the
+# flag and emit prose on stderr instead of honoring the JSON-envelope contract.
+json_mode = json_requested?(ARGV)
+
 begin
   reject_invalid_argv_encoding!(ARGV)
   reject_unsupported_json_assignments!(ARGV)
   normalize_leading_global_options!(ARGV)
+  if ARGV == [ "--version" ] || ARGV == [ "-v" ]
+    puts Hive::VERSION
+    exit 0
+  end
   rewrite_help_flag!(ARGV)
   # Thor::Base#start rescues Thor::Error internally and exits 1 when
   # exit_on_failure? is true. Passing `debug: true` makes Thor re-raise
@@ -328,7 +369,7 @@ begin
   # mapping usage failures to BinaryExit::USAGE.
   Hive::E2E::Binary.start(ARGV, debug: true)
 rescue Hive::E2E::PreflightError => e
-  if json_requested?(ARGV)
+  if json_mode
     puts JSON.pretty_generate(Hive::E2E::JsonError.payload(error_kind: "preflight", message: e.message,
                                                           exit_code: Hive::E2E::BinaryExit::CONFIG))
   else
@@ -336,7 +377,7 @@ rescue Hive::E2E::PreflightError => e
   end
   exit Hive::E2E::BinaryExit::CONFIG
 rescue Thor::Error => e
-  if json_requested?(ARGV)
+  if json_mode
     puts JSON.pretty_generate(Hive::E2E::JsonError.payload(error_kind: "usage", message: e.message,
                                                           exit_code: Hive::E2E::BinaryExit::USAGE))
   else
@@ -344,7 +385,7 @@ rescue Thor::Error => e
   end
   exit Hive::E2E::BinaryExit::USAGE
 rescue StandardError => e
-  if json_requested?(ARGV)
+  if json_mode
     puts JSON.pretty_generate(Hive::E2E::JsonError.payload(error_kind: "error", message: e.message,
                                                           exit_code: Hive::E2E::BinaryExit::FAILURE))
   else

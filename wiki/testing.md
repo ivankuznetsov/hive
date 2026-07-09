@@ -158,7 +158,8 @@ The current scenarios copy `test/e2e/sample-project/` into a per-run sandbox, se
 scenario inventory JSON, cleanup JSON, the single-document stdout invariant for
 successful `list --json` / `clean --json` calls, unknown-command JSON errors,
 missing argument errors, top-level version output, command-local help after
-command options (`run --filter tui --help`), leading JSON option normalization,
+command options (`run --filter tui --help`), leading JSON option normalization
+for commands and top-level help/version flags,
 malformed JSON assignment rejection, last-JSON-boolean-wins usage-error mode,
 replay path safety, missing, non-executable, symlinked runs-root, and symlinked
 replay artifact validation, cleanup retention validation, and the single-dispatch invariant for

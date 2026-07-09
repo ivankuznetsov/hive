@@ -66,6 +66,8 @@ module Hive
           credential_present?(File.join(home, ".codex", "auth.json"))
         when :pi
           credential_present?(File.join(home, ".pi", "agent", "auth.json"))
+        when :grok
+          credential_present?(File.join(home, ".grok", "auth.json"))
         else
           false
         end
@@ -95,3 +97,4 @@ end
 require "hive/agent_profiles/claude"
 require "hive/agent_profiles/codex"
 require "hive/agent_profiles/pi"
+require "hive/agent_profiles/grok"

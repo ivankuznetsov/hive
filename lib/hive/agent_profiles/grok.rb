@@ -1,0 +1,92 @@
+require "hive/agent_profile"
+require "hive/agent_profiles/usage_extractors"
+
+module Hive
+  module AgentProfiles
+    # xAI Grok CLI profile (x.ai/cli). Headless via -p / --single; the JSON
+    # stream comes from --output-format streaming-json.
+    #
+    # ADR-008 boundary notes:
+    # - --always-approve is grok's full permission bypass (its --allow/--deny
+    #   rules document Claude Code equivalences, but hive's single-developer
+    #   trust model wants the bypass, matching claude/codex profiles).
+    # - No --add-dir equivalent; filesystem isolation is the OS user's bound
+    #   only (same trade-off as pi, covered by ADR-018).
+    # - No native dollar budget cap; hive enforces wall-clock timeout only.
+    # - The stream carries NO token usage events (thought/text/tool events,
+    #   then a terminal `end`); session-side signals.json holds only a
+    #   context-size gauge. The usage extractor therefore closes sessions
+    #   with a zero-usage record — grok cost/token telemetry is "not
+    #   reported", never estimated.
+    #
+    # Model and reasoning effort ride the CLI defaults unless the invoker
+    # pins them (-m / --reasoning-effort); grok's default model is the
+    # current flagship (grok-4.5 at profile-authoring time).
+    #
+    # Grok requires an interactive `grok login` (or GROK_DEPLOYMENT_KEY)
+    # before headless use; preflight enforces the credential the same way
+    # pi's does.
+    GROK_PREFLIGHT = -> {
+      auth_path =
+        begin
+          File.expand_path("~/.grok/auth.json")
+        rescue ArgumentError => e
+          raise Hive::AgentError,
+                "grok profile preflight failed: cannot resolve home directory (#{e.message}). " \
+                "Set $HOME or run `grok login` before using grok as a hive agent CLI."
+        end
+
+      unless File.exist?(auth_path)
+        raise Hive::AgentError,
+              "grok profile preflight failed: #{auth_path} not found. " \
+              "Run `grok login` (or set GROK_DEPLOYMENT_KEY) before using grok as a hive agent CLI."
+      end
+
+      content =
+        begin
+          File.read(auth_path)
+        rescue SystemCallError => e
+          raise Hive::AgentError,
+                "grok profile preflight failed: cannot read #{auth_path} (#{e.class.name.split('::').last}: #{e.message})."
+        end
+
+      stripped = content.strip
+      not_logged_in = stripped.empty? ||
+                      stripped == "{}" ||
+                      stripped.match?(/\A\{\s*\}\z/m)
+
+      if not_logged_in
+        raise Hive::AgentError,
+              "grok profile preflight failed: no credential in #{auth_path}. " \
+              "Run `grok login` before using grok as a hive agent CLI."
+      end
+
+      nil
+    }
+
+    GROK = AgentProfile.new(
+      name: :grok,
+      bin_default: "grok",
+      env_bin_override_key: "HIVE_GROK_BIN",
+      headless_flag: "-p",
+      permission_skip_flag: "--always-approve",
+      add_dir_flag: nil,
+      budget_flag: nil,
+      output_format_flags: [ "--output-format", "streaming-json" ],
+      version_flag: "--version",
+      # Grok registers extension commands at the top level (`/<name>`), like
+      # codex. UNVERIFIED against a skill-invoking stage — grok has no
+      # skill_verifier yet, so stage prompts fall back to plain instruction
+      # text when the skill is absent.
+      skill_syntax_format: "/%{skill}",
+      headless_supported: true,
+      min_version: "0.2.90",
+      status_detection_mode: :output_file_exists,
+      preflight: GROK_PREFLIGHT,
+      usage_extractor: Hive::AgentProfiles::UsageExtractors::GROK,
+      skill_verifier: nil
+    )
+
+    register(:grok, GROK)
+  end
+end

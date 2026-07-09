@@ -26,6 +26,20 @@ module Hive
         end
       end
 
+      # Grok's streaming-json carries no usage events; the terminal `end`
+      # event closes the session with an explicit zero-usage record so
+      # telemetry reads "not reported" instead of silently missing.
+      GROK = lambda do |event|
+        next nil unless event.is_a?(Hash)
+
+        usage = usage_hash(event)
+        if usage
+          usage_result(event, usage, model_from(event))
+        elsif final_type?(event, %w[end result])
+          zero_result(model_from(event))
+        end
+      end
+
       PI = lambda do |event|
         next nil unless event.is_a?(Hash)
 

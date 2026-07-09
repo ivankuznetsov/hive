@@ -616,7 +616,7 @@ module Hive
     # regardless of the order the operator typed. The names are frozen so
     # callers that receive them back from `normalize_global_agents` cannot
     # mutate the shared constant in place.
-    GLOBAL_AGENT_BACKENDS = %w[claude codex pi].map(&:freeze).freeze
+    GLOBAL_AGENT_BACKENDS = %w[claude codex pi grok].map(&:freeze).freeze
     # Recommended default selection when the operator accepts the prompt
     # default or runs non-interactively — Claude + Codex; Pi is opt-in.
     DEFAULT_GLOBAL_AGENTS = %w[claude codex].map(&:freeze).freeze

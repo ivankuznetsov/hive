@@ -194,6 +194,33 @@ class E2EBinaryTest < Minitest::Test
     end
   end
 
+  def test_replay_executes_executable_repro_and_preserves_argv0
+    skip "/bin/bash is required to verify argv0 handoff" unless File.executable?("/bin/bash")
+
+    Dir.mktmpdir("e2e-replay-test") do |tmp_runs_dir|
+      script = File.join(tmp_runs_dir, "run-1", "scenarios", "scenario-1", "repro.sh")
+      FileUtils.mkdir_p(File.dirname(script))
+      FileUtils.cp("/bin/bash", script)
+      File.chmod(0o755, script)
+
+      hook = File.join(tmp_runs_dir, "argv0-hook")
+      File.write(hook, <<~BASH)
+        printf 'replay ok\\n'
+        printf 'argv0=%s\\n' "$0"
+        exit 23
+      BASH
+
+      out, err, status = Open3.capture3(
+        { "HIVE_E2E_RUNS_DIR" => tmp_runs_dir, "BASH_ENV" => hook },
+        hive_e2e, "replay", "run-1", "scenario-1"
+      )
+
+      assert_equal 23, status.exitstatus
+      assert_empty err
+      assert_equal "replay ok\nargv0=repro.sh\n", out
+    end
+  end
+
   def test_replay_symlinked_repro_emits_json_artifact_error_when_requested
     Dir.mktmpdir("e2e-replay-test") do |tmp_runs_dir|
       target = File.join(tmp_runs_dir, "outside-repro.sh")

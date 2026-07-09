@@ -65,7 +65,7 @@ module Hive
 
       def prepare_overlay(worktree_path, real_git:, real_gh:, gh_config_dir: nil, skip_log:)
         overlay = File.join(worktree_path, OVERLAY_DIRNAME)
-        FileUtils.mkdir_p(overlay)
+        prepare_overlay_dir(overlay)
         root = File.expand_path("../../..", __dir__)
         {
           "git" => [
@@ -100,6 +100,23 @@ module Hive
           FileUtils.chmod("+x", link)
         end
         overlay
+      end
+
+      def prepare_overlay_dir(overlay)
+        begin
+          File.lstat(overlay)
+          FileUtils.rm_rf(overlay)
+        rescue Errno::ENOENT
+        end
+
+        FileUtils.mkdir_p(File.dirname(overlay))
+        Dir.mkdir(overlay, 0o700)
+
+        stat = File.lstat(overlay)
+        return if stat.directory? && stat.uid == Process.uid && (stat.mode & 0o077).zero?
+
+        FileUtils.rm_rf(overlay)
+        raise "refusing unsafe dry-run overlay: #{overlay}"
       end
 
       def dynamic_loader_env

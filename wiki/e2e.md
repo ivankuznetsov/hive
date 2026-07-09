@@ -119,7 +119,7 @@ On failure, the harness writes a scenario bundle containing:
 - copied `.hive-state/stages/` and per-`.log` copies under `logs/<slug>/<basename>.log` plus a sibling `<basename>.tail` (last 200 lines) for fast agent reads
 - `repro.sh`
 - `manifest.json` with size and SHA-256 per artifact
-- TUI failures also include keystroke captures, run-scoped TUI subprocess marker/capture logs under `tui-subprocess/`, plus `pane-before.txt` (snapshot taken just before the most recent `tui_keys`) and `pane-after.txt`. Cast recording is implemented by `AsciinemaDriver`, but depends on local `asciinema >= 2.4`.
+- TUI failures also include keystroke captures, run-scoped TUI subprocess marker/capture logs under `tui-subprocess/` (including the current shared marker log and its single `.log.1` rotation), plus `pane-before.txt` (snapshot taken just before the most recent `tui_keys`) and `pane-after.txt`. Cast recording is implemented by `AsciinemaDriver`, but depends on local `asciinema >= 2.4`.
 
 ## Current Scenarios
 

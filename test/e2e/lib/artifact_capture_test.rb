@@ -140,19 +140,28 @@ class E2EArtifactCaptureTest < Minitest::Test
       FileUtils.mkdir_p(log_dir)
       spawn_log = File.join(log_dir, "hive-tui-spawn-FAKE.log")
       marker_log = File.join(log_dir, "hive-tui-subprocess.log")
+      rotated_marker_log = File.join(log_dir, "hive-tui-subprocess.log.1")
       File.write(spawn_log, "FAKE-SPAWN-OUTPUT\n")
       File.write(marker_log, "----- BEGIN[FAKE]: hive plan -----\n")
+      File.write(rotated_marker_log, "----- BEGIN[OLD]: hive run -----\n")
 
       collect(scenario_dir, sandbox, run_home, tui_log_dir: log_dir)
 
       copied_spawn = File.join(scenario_dir, "tui-subprocess", "hive-tui-spawn-FAKE.log")
       copied_marker = File.join(scenario_dir, "tui-subprocess", "hive-tui-subprocess.log")
+      copied_rotated_marker = File.join(scenario_dir, "tui-subprocess", "hive-tui-subprocess.log.1")
       assert File.exist?(copied_spawn), "per-spawn capture file should be copied into the bundle"
       assert File.exist?(copied_marker), "shared TUI marker log should be copied into the bundle"
+      assert File.exist?(copied_rotated_marker), "rotated shared TUI marker log should be copied into the bundle"
       assert_includes File.read(copied_spawn), "FAKE-SPAWN-OUTPUT",
                       "per-spawn capture body should round-trip into the bundle"
       assert File.exist?("#{copied_spawn}.tail"),
              "per-spawn capture should also get a .tail companion (matching log-tails pattern)"
+
+      manifest = JSON.parse(File.read(File.join(scenario_dir, "manifest.json")))
+      paths = manifest.fetch("files").map { |file| file.fetch("path") }
+      assert_includes paths, "tui-subprocess/hive-tui-subprocess.log"
+      assert_includes paths, "tui-subprocess/hive-tui-subprocess.log.1"
     end
   end
 

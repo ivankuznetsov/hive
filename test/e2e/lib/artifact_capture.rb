@@ -125,8 +125,10 @@ module Hive
         return unless @tui_log_dir && File.directory?(@tui_log_dir)
 
         sources = Dir.glob(File.join(@tui_log_dir, "hive-tui-spawn-*.log"))
-        marker_log = File.join(@tui_log_dir, "hive-tui-subprocess.log")
-        sources << marker_log if File.exist?(marker_log)
+        %w[hive-tui-subprocess.log hive-tui-subprocess.log.1].each do |name|
+          marker_log = File.join(@tui_log_dir, name)
+          sources << marker_log if File.exist?(marker_log)
+        end
         return if sources.empty?
 
         dest_root = File.join(@scenario_dir, "tui-subprocess")

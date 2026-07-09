@@ -3,6 +3,7 @@ PATH
   specs:
     hive-cli (0.3.6)
       bubbletea (= 0.1.4)
+      erb (>= 4.0)
       faraday (>= 2.14.2, < 3.0)
       faraday-multipart (~> 1.0)
       lipgloss (~> 0.2.2)
@@ -71,6 +72,7 @@ GEM
       dry-inflector (~> 1.0)
       dry-logic (~> 1.4)
       zeitwerk (~> 2.6)
+    erb (6.0.4)
     faraday (2.14.3)
       faraday-net_http (>= 2.0, < 3.5)
       json
@@ -97,7 +99,6 @@ GEM
     lipgloss (0.2.2-x86_64-linux-gnu)
     lipgloss (0.2.2-x86_64-linux-musl)
     logger (1.7.0)
-    mini_portile2 (2.8.9)
     minitest (6.0.6)
       drb (~> 2.0)
       prism (~> 1.5)
@@ -146,8 +147,6 @@ GEM
     ruby-progressbar (1.13.0)
     securerandom (0.4.1)
     simpleidn (0.2.3)
-    sqlite3 (2.9.5)
-      mini_portile2 (~> 2.8.0)
     sqlite3 (2.9.5-aarch64-linux-gnu)
     sqlite3 (2.9.5-arm64-darwin)
     sqlite3 (2.9.5-x86_64-linux-gnu)
@@ -169,7 +168,6 @@ GEM
 PLATFORMS
   aarch64-linux-gnu
   arm64-darwin
-  ruby
   x86_64-linux
   x86_64-linux-musl
 

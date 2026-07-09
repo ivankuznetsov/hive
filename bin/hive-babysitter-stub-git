@@ -69,6 +69,7 @@ GREP_VALUE_TAKING_LONG = %w[
   --before-context
   --context
 ].freeze
+HELP_DISPATCH_OPTIONS = %w[--help --man --web --html --info].freeze
 SIGNATURE_FORMAT_SUBCOMMANDS = %w[log show rev-list].freeze
 SHOW_SIGNATURE_SUBCOMMANDS = %w[log show].freeze
 
@@ -128,6 +129,9 @@ def grep_short_cluster_has_pager?(arg)
 end
 
 def unsafe_read_option?(subcommand, arg, next_arg = nil)
+  # `git <command> --help` dispatches through `git help`, which can execute
+  # repo/user configured manual, web, or info viewers.
+  return true if help_dispatch_option?(arg)
   # `--ext-diff` runs external diff drivers — an exec seam on any subcommand that honors it.
   return true if arg == "--ext-diff"
   # `--textconv` runs the repo-local `diff.<driver>.textconv` command. Git accepts any
@@ -173,6 +177,10 @@ def unsafe_read_option?(subcommand, arg, next_arg = nil)
   # The file-writing `--output` / `-o` (separate or glued `-o<path>`) defeats the no-mutation
   # boundary on an allowed read (`diff` / `log` / `show` write the requested file).
   arg == "--output" || arg.start_with?("--output=", "-o")
+end
+
+def help_dispatch_option?(arg)
+  HELP_DISPATCH_OPTIONS.include?(arg.split("=", 2).first)
 end
 
 def signature_verification_option?(subcommand, arg, next_arg)

@@ -29,6 +29,7 @@ module Hive
     # the per-stage timeouts the runner enforces around spawn_and_wait.
     VERSION_CHECK_TIMEOUT_SEC = 10
 
+    attr_reader :prompt_style
     attr_reader :name, :bin_default, :env_bin_override_key,
                 :headless_flag, :permission_skip_flag, :add_dir_flag,
                 :budget_flag, :output_format_flags, :version_flag,
@@ -86,7 +87,13 @@ module Hive
                    status_detection_mode: :output_file_exists,
                    preflight: nil,
                    usage_extractor: nil,
-                   skill_verifier: nil)
+                   skill_verifier: nil,
+                   prompt_style: :positional)
+      unless %i[positional headless_flag_value].include?(prompt_style)
+        raise ArgumentError,
+              "unknown prompt_style: #{prompt_style.inspect}; valid: [:positional, :headless_flag_value]"
+      end
+
       unless STATUS_DETECTION_MODES.include?(status_detection_mode)
         raise ArgumentError,
               "unknown status_detection_mode: #{status_detection_mode.inspect}; " \
@@ -109,6 +116,7 @@ module Hive
       @preflight = preflight
       @usage_extractor = usage_extractor || ->(_event) { nil }
       @skill_verifier = skill_verifier
+      @prompt_style = prompt_style
 
       freeze
     end

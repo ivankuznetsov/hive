@@ -125,6 +125,12 @@ class AgentProfilesTest < Minitest::Test
     assert_includes names, :grok
   end
 
+  def test_grok_prompt_rides_the_headless_flag_value
+    grok = Hive::AgentProfiles.lookup(:grok)
+
+    assert_equal :headless_flag_value, grok.prompt_style
+  end
+
   def test_grok_profile_shape
     grok = Hive::AgentProfiles.lookup(:grok)
 

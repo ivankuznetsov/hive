@@ -69,6 +69,7 @@ module Hive
       bin_default: "grok",
       env_bin_override_key: "HIVE_GROK_BIN",
       headless_flag: "-p",
+      prompt_style: :headless_flag_value, # -p/--single TAKES the prompt as its value
       permission_skip_flag: "--always-approve",
       add_dir_flag: nil,
       budget_flag: nil,

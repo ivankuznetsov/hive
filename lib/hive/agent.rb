@@ -272,7 +272,13 @@ module Hive
     # the refactor — the claude profile's flag set IS today's flag set).
     def build_cmd
       cmd = [ @profile.bin ]
-      cmd << @profile.headless_flag if @profile.headless_flag
+      if @profile.headless_flag
+        cmd << @profile.headless_flag
+        # Some CLIs' headless flag TAKES the prompt as its value (grok's
+        # -p/--single) rather than reading a trailing positional — the prompt
+        # must sit adjacent to the flag, before any other flags.
+        cmd << @prompt if @profile.prompt_style == :headless_flag_value
+      end
       cmd.concat(permission_flags)
       if @profile.add_dir_flag
         @add_dirs.each do |d|
@@ -299,7 +305,7 @@ module Hive
       end
       cmd.concat(@cli_flags)
       cmd.concat(@profile.output_format_flags)
-      cmd << (prompt_via_stdin? ? "-" : @prompt)
+      cmd << (prompt_via_stdin? ? "-" : @prompt) unless @profile.prompt_style == :headless_flag_value
       cmd
     end
 

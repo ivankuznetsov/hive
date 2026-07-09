@@ -287,7 +287,7 @@ class HiveEvalReporterTest < Minitest::Test
     end
   end
 
-  def test_cli_invalid_byte_report_value_clears_selected_report
+  def test_cli_invalid_byte_report_value_preserves_selected_report
     Dir.mktmpdir("hive-eval-report") do |dir|
       report = File.join(dir, "stale\xFF.json")
       File.write(report, JSON.dump({ "schema" => "hive-eval-report", "stale" => true }))
@@ -303,7 +303,7 @@ class HiveEvalReporterTest < Minitest::Test
         assert_match(/hive-eval: invalid byte sequence in UTF-8/, err)
         assert_match(%r{Usage: bin/hive-eval}, err)
         refute_match(/ArgumentError/, err)
-        refute File.exist?(report), "usage errors must not leave invalid-byte selected reports behind"
+        assert File.exist?(report), "parser errors must not delete a caller-provided report path"
         refute File.exist?(marker), "hive-eval must reject the usage error before launching rake"
       end
     end
@@ -325,7 +325,7 @@ class HiveEvalReporterTest < Minitest::Test
     end
   end
 
-  def test_cli_rejects_scenario_value_that_looks_like_option_and_clears_report
+  def test_cli_rejects_scenario_value_that_looks_like_option_and_preserves_report
     Dir.mktmpdir("hive-eval-report") do |dir|
       report = File.join(dir, "stale.json")
       File.write(report, JSON.dump({ "schema" => "hive-eval-report", "stale" => true }))
@@ -341,18 +341,17 @@ class HiveEvalReporterTest < Minitest::Test
         assert_match(/hive-eval: missing argument: --scenario/, err)
         assert_match(%r{Usage: bin/hive-eval}, err)
         refute_match(/OptionParser::/, err)
-        refute File.exist?(report), "usage errors must not leave stale eval reports behind"
+        assert File.exist?(report), "parser errors must not delete a caller-provided report path"
         refute File.exist?(marker), "hive-eval must reject the usage error before launching rake"
       end
     end
   end
 
-  def test_cli_rejects_scenario_consuming_report_flag_and_clears_named_report
+  def test_cli_rejects_scenario_consuming_report_flag_and_preserves_named_report
     # `--scenario --report <path>` makes --scenario swallow the --report flag
-    # itself, leaving <path> a stray positional. parse! strips the consumed
-    # --report token from ARGV, so the rescue cleanup must scan the pre-parse
-    # ARGV snapshot — not the mutated ARGV — to still recognize and delete the
-    # report the user named.
+    # itself, leaving <path> a stray positional. Even though the pre-parse ARGV
+    # snapshot still shows the named report, parser errors must not delete a
+    # caller-provided path.
     Dir.mktmpdir("hive-eval-report") do |dir|
       report = File.join(dir, "stale.json")
       File.write(report, JSON.dump({ "schema" => "hive-eval-report", "stale" => true }))
@@ -368,7 +367,7 @@ class HiveEvalReporterTest < Minitest::Test
         assert_match(/hive-eval: missing argument: --scenario/, err)
         assert_match(%r{Usage: bin/hive-eval}, err)
         refute_match(/OptionParser::/, err)
-        refute File.exist?(report), "usage errors must not leave the named eval report behind"
+        assert File.exist?(report), "parser errors must not delete a caller-provided report path"
         refute File.exist?(marker), "hive-eval must reject the usage error before launching rake"
       end
     end
@@ -377,6 +376,7 @@ class HiveEvalReporterTest < Minitest::Test
   def test_cli_rejects_unexpected_positional_arguments
     Dir.mktmpdir("hive-eval-report") do |dir|
       report = File.join(dir, "unexpected.json")
+      File.write(report, JSON.dump({ "schema" => "hive-eval-report", "stale" => true }))
 
       _out, err, status = Open3.capture3(
         { "HIVE_EVAL_NO_JUDGE" => "1" },
@@ -387,7 +387,7 @@ class HiveEvalReporterTest < Minitest::Test
       assert_equal 64, status.exitstatus
       assert_match(/hive-eval: unexpected arguments: extra bonus/, err)
       refute_match(/argument\(s\)/, err)
-      refute File.exist?(report)
+      assert File.exist?(report), "unexpected positional args must not delete a caller-provided report path"
     end
   end
 
@@ -430,6 +430,7 @@ class HiveEvalReporterTest < Minitest::Test
   def test_cli_rejects_missing_option_values_with_usage
     Dir.mktmpdir("hive-eval-report") do |dir|
       report = File.join(dir, "missing-scenario.json")
+      File.write(report, JSON.dump({ "schema" => "hive-eval-report", "stale" => true }))
 
       _out, err, status = Open3.capture3(
         { "HIVE_EVAL_NO_JUDGE" => "1" },
@@ -441,11 +442,11 @@ class HiveEvalReporterTest < Minitest::Test
       assert_match(/missing argument: --scenario/, err)
       assert_match(%r{Usage: bin/hive-eval}, err)
       refute_match(/OptionParser::/, err)
-      refute File.exist?(report)
+      assert File.exist?(report), "missing option values must not delete a caller-provided report path"
     end
   end
 
-  def test_cli_usage_error_removes_existing_selected_report
+  def test_cli_missing_scenario_preserves_existing_selected_report
     Dir.mktmpdir("hive-eval-report") do |dir|
       report = File.join(dir, "stale.json")
       File.write(report, JSON.dump({ "schema" => "hive-eval-report", "stale" => true }))
@@ -458,7 +459,7 @@ class HiveEvalReporterTest < Minitest::Test
       refute status.success?
       assert_equal 64, status.exitstatus
       assert_match(/scenario not found/, err)
-      refute File.exist?(report), "usage errors must not leave stale eval reports behind"
+      assert File.exist?(report), "missing scenarios must not delete a caller-provided report path"
     end
   end
 

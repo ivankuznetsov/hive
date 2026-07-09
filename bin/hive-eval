@@ -84,29 +84,9 @@ def option_value_missing?(value)
   value.to_s.empty? || value.start_with?("-")
 end
 
-def hive_eval_report?(path)
-  # Guard File.read to regular files: the cleanup now inspects arbitrary caller
-  # paths, and File.read on a FIFO or blocking device would wait for EOF,
-  # stalling the usage-error path instead of printing the error promptly.
-  return false unless File.file?(path)
-
-  doc = JSON.parse(File.read(path))
-  doc.is_a?(Hash) && doc["schema"] == "hive-eval-report"
-rescue EncodingError, SystemCallError, JSON::ParserError
-  false
-end
-
-def remove_report_if_stale(path, default_report)
-  return if path.nil?
-
-  FileUtils.rm_f(path) if path == default_report || hive_eval_report?(path)
-end
-
-# Snapshot ARGV before parse! mutates it in place. The rescue scan below relies
-# on the original tokens: when --scenario swallows a following --report as its
-# value (e.g. `--scenario --report /tmp/x.json`), parse! removes that --report
-# token from ARGV, so scanning the post-parse ARGV would miss the report the
-# user named and leave it behind. Scanning the snapshot still sees it.
+# Snapshot ARGV before parse! mutates it in place. The parser-error cleanup
+# below uses the original tokens to tell when an unusable --report value should
+# fall back to the default report.
 argv_snapshot = ARGV.dup
 
 begin
@@ -116,25 +96,27 @@ begin
 rescue OptionParser::ParseError, ArgumentError => e
   raise if e.is_a?(ArgumentError) && !e.message.include?("invalid byte sequence")
 
-  # A usage error must not leave a stale report behind. We can't clear before
-  # parsing, because the --help/-h switch prints help and exits 0 inside parse!,
-  # and that read-only path must not delete the report.
-  # So clear here, covering both ways the selected report can be named:
+  # A parser-level usage error may still clear the default report, but custom
+  # report paths must not be deleted until all validation passes and eval is
+  # about to run. We can't clear before parsing, because the --help/-h switch
+  # prints help and exits 0 inside parse!, and that read-only path must not
+  # delete the report.
+  # Cover both ways the default report can be selected:
   #   * OptionParser captured it into options (exact --report only; abbreviations
   #     are rejected via require_exact, matching the manual scan). When --report's
   #     value was option-looking or empty (e.g. `--report --no-judge`, `--report=`),
   #     parse! has already overwritten options[:report] with that junk token, so we
   #     fall back to the true default and clear the stale report there instead.
-  #   * the report token never reached options — an invalid option raised before
-  #     it, or --scenario consumed it as its value — leaving it in the pre-parse
+  #   * the report token never reached options - an invalid option raised before
+  #     it, or --scenario consumed it as its value - leaving it in the pre-parse
   #     ARGV snapshot (the manual scan recognizes the exact --report/--report=
-  #     forms and likewise falls back to the default for junk values). parse! may
-  #     have stripped it from the live ARGV, so we scan the snapshot, not ARGV.
+  #     forms and likewise falls back to the default for junk values). Custom
+  #     paths found there are preserved by the default_report guard below.
   captured_report = options.fetch(:report)
   captured_report = default_report if option_value_missing?(captured_report)
   [ expanded_report_path(root, captured_report),
     selected_report_path(root, argv_snapshot, default_report) ].compact.each do |path|
-    remove_report_if_stale(path, default_report)
+    FileUtils.rm_f(path) if path == default_report
   end
   warn "hive-eval: #{e.message}"
   warn parser
@@ -146,7 +128,7 @@ report_path = expanded_report_path(root, options.fetch(:report))
 unless remaining.empty?
   unexpected = remaining.join(" ")
   label = remaining.length == 1 ? "argument" : "arguments"
-  remove_report_if_stale(report_path, default_report)
+  FileUtils.rm_f(report_path) if report_path == default_report
   warn "hive-eval: unexpected #{label}: #{unexpected}"
   warn parser
   exit 64
@@ -179,14 +161,14 @@ env = {
 begin
   path = scenario_path(scenario_root, options[:scenario])
 rescue ArgumentError => e
-  remove_report_if_stale(report_path, default_report)
+  FileUtils.rm_f(report_path) if report_path == default_report
   warn "hive-eval: #{e.message}"
   exit 64
 end
 
 if path
   unless File.exist?(path)
-    remove_report_if_stale(report_path, default_report)
+    FileUtils.rm_f(report_path) if report_path == default_report
     warn "hive-eval: scenario not found: #{path}"
     exit 64
   end

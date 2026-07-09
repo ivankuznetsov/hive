@@ -621,6 +621,39 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_spawn_records_agent_pid_and_start_time_in_one_lock_update
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = task.state_file
+      ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "## Round 1\n<!-- WAITING -->\n"
+      updates = []
+      start_time_pids = []
+
+      with_replaced_singleton_method(Hive::Lock, :process_start_time, lambda { |pid|
+        start_time_pids << pid
+        "spawn-start-time"
+      }) do
+        with_replaced_singleton_method(Hive::Lock, :update_task_lock, lambda { |folder, additions|
+          updates << [ folder, additions ]
+        }) do
+          result = Hive::Agent.new(task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5).run!
+
+          assert_equal [ result[:pid] ], start_time_pids
+          assert_equal [
+            [
+              task.folder,
+              {
+                "claude_pid" => result[:pid],
+                "claude_pid_start_time" => "spawn-start-time"
+              }
+            ]
+          ], updates
+        end
+      end
+    end
+  end
+
   def test_signaled_subprocess_reports_negative_exit_code
     with_tmp_dir do |dir|
       task = make_task(dir)

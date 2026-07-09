@@ -3,11 +3,11 @@ title: hive drop
 type: command
 source: lib/hive/commands/drop.rb, lib/hive/web/dispatcher.rb, web/app/controllers/tasks_controller.rb, web/config/routes.rb
 created: 2026-05-22
-updated: 2026-06-23
+updated: 2026-07-09
 tags: [command, task, cleanup, json, tui, web]
 ---
 
-**TLDR**: `hive drop TARGET [--project NAME] [--from STAGE] [--json]` hard-deletes an active task. It kills any recorded agent process, closes the draft PR best-effort, removes the task's worktree and branch, deletes the task folder from every active stage, removes per-slug logs, and records an audit commit on `hive/state`. There is no dropped bucket, archive, undo, reason prompt, or confirmation.
+**TLDR**: `hive drop TARGET [--project NAME] [--from STAGE] [--json]` hard-deletes an active task. It identity-checks the recorded agent with `.lock` start-time metadata (including `claude_pid_start_time`), kills that process plus descendant tool processes present in a successful process-tree snapshot, closes the draft PR best-effort, removes the task's worktree and branch, deletes the task folder from every active stage, removes per-slug logs, and records an audit commit on `hive/state`. There is no dropped bucket, archive, undo, reason prompt, or confirmation.
 
 ## Usage
 
@@ -54,7 +54,7 @@ When a recorded draft PR exists but `gh` is not installed on PATH, draft-PR clos
 
 1. Resolve the task target (`TaskResolver` for paths/ids, Drop's project/stage scan for slugs).
 2. Refuse archived-only tasks in `9-done`.
-3. Kill recorded agent PIDs from `.lock` and `AGENT_WORKING pid=...`, guarded by process start time when available.
+3. Kill recorded agent PIDs from `.lock` and `AGENT_WORKING pid=...`, guarded by process start time when available. In particular, `.lock`'s `claude_pid_start_time` verifies the recorded `claude_pid` identity before cleanup. Before signalling that root PID, snapshot its descendants and terminate the verified PIDs present in that snapshot too. If process-tree discovery fails, cleanup falls back to the recorded root PID only and reports `process_tree_unavailable` instead of claiming a complete tree cleanup.
 4. Close `pr_url` from `pr.md` frontmatter with `gh pr close <url> --comment "task dropped"` best-effort.
 5. Remove the task worktree from `worktree.yml` or the derived path, retrying with force when needed, then prune stale git worktree metadata.
 6. Delete the task branch (`branch name == slug`) best-effort.
@@ -63,6 +63,20 @@ When a recorded draft PR exists but `gh` is not installed on PATH, draft-PR clos
 9. Commit an audit record on `hive/state` as `hive: dropped/<slug> dropped`.
 
 Re-running after an interrupted cleanup converges: already-missing processes, folders, worktrees, PRs, and branches are treated as complete.
+
+`agent_killed_pids` reports the recorded root candidates whose cleanup
+succeeded. It does not enumerate the descendant PIDs terminated as part of that
+root's process tree. `agent_killed` is true when
+at least one recorded candidate was cleaned up, so
+`agent_kill_skipped_reason` can be non-null alongside it when another candidate
+was skipped or only received incomplete cleanup. A
+`process_tree_unavailable` reason means the recorded root cleanup was attempted
+but descendant discovery could not be completed.
+
+The descendant set is a one-time snapshot. A process forked after discovery can
+escape that cleanup window; closing that residual race requires durable
+OS-level containment (for example, a cgroup or equivalent process-lifetime
+boundary), not another assertion around the snapshot algorithm.
 
 ## JSON Contract
 

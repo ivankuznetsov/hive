@@ -157,6 +157,8 @@ records; and isolates concurrent report generation before atomic publication.
 The remaining gap is still a real judge-enabled run, not structural report
 integrity.
 
+54. **Drop's descendant cleanup still has a snapshot/concurrent-fork race.** `Hive::ProcessKill` can terminate the agent and every verified descendant PID present in a successful process-table snapshot, and it reports `process_tree_unavailable` when discovery cannot support that claim. A child created after the snapshot can still escape before the captured processes are stopped. Fully closing this race requires durable OS-level containment such as a cgroup (or an equivalent cross-platform process-lifetime boundary); repeated best-effort snapshots can narrow but cannot remove the race.
+
 ## 2026-06-16/17 refresh uncertainty
 
 The 2026-06-17 audit rechecked recent source, tests, git history, project wiki

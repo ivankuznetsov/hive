@@ -534,7 +534,11 @@ module Hive
       end
       return unless pid
 
-      Hive::Lock.update_task_lock(task.folder, "claude_pid" => pid)
+      Hive::Lock.update_task_lock(
+        task.folder,
+        "claude_pid" => pid,
+        "claude_pid_start_time" => Hive::Lock.process_start_time(pid)
+      )
     rescue Hive::TmuxError => e
       # Losing the pid means `hive lock` can no longer kill claude
       # cleanly; warn so an operator running interactively sees the

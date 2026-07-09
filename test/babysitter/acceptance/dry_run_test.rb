@@ -15,15 +15,18 @@ class BabysitterAcceptanceDryRunTest < Minitest::Test
       install_tripwire_binary(tripwire_bin, "gh", tripwire_log)
       pr = babysitter_pr
       command_results = []
+      assert_equal_method = method(:assert_equal)
 
       with_env("PATH" => [ tripwire_bin, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR)) do
         with_non_green_babysitter_context(project, worktree_path, pr) do
           with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, lambda { |_task, **kwargs|
+            assert_equal_method.call(worktree_path, kwargs.fetch(:cwd))
+            assert_equal_method.call([ worktree_path ], kwargs.fetch(:add_dirs))
             Dir.chdir(kwargs.fetch(:cwd)) do
               command_results << system("git", "push", "origin", "HEAD:feature", "--force-with-lease", out: File::NULL, err: File::NULL)
               command_results << system("gh", "pr", "comment", "42", "--body", "would comment", out: File::NULL, err: File::NULL)
               command_results << system("gh", "--repo=owner/repo", "pr", "close", "42", out: File::NULL, err: File::NULL)
-              File.write(File.join(worktree_path, ".babysitter-dry-run-plan.md"), "would repair PR 42\n")
+              File.write(".babysitter-dry-run-plan.md", "would repair PR 42\n")
               { status: :ok }
             end
           }) do

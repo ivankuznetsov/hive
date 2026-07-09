@@ -48,6 +48,8 @@ class GrokPreflightTest < Minitest::Test
   end
 
   def test_raises_when_auth_file_unreadable
+    skip "running as root: file mode 000 still readable" if Process.uid.zero?
+
     with_fake_grok_home do |home|
       File.write(auth_path_for(home), '{"access_token":"x"}')
       File.chmod(0o000, auth_path_for(home))
@@ -69,7 +71,7 @@ class GrokPreflightTest < Minitest::Test
 
     assert_match(/cannot resolve home directory/, err.message)
   ensure
-    File.singleton_class.send(:remove_method, :expand_path)
+    File.define_singleton_method(:expand_path, original_expand_path) if original_expand_path
   end
 
   def test_passes_with_real_credential

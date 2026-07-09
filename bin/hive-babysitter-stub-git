@@ -246,6 +246,10 @@ def env_set?(name)
   !ENV.fetch(name, "").empty?
 end
 
+def scrub_dynamic_loader_env!
+  ENV.keys.grep(/\A(?:LD|DYLD)_/).each { |key| ENV.delete(key) }
+end
+
 def read_only_remote?(rest)
   args = rest[1..] || []
   args.shift while [ "-v", "--verbose" ].include?(args.first)
@@ -367,6 +371,7 @@ end
 # write files if these env vars or config files reach real git, and argv
 # screening structurally cannot see them. Scrub the whole side-effect-capable
 # family before handing off, then install only our hermetic config controls.
+scrub_dynamic_loader_env!
 %w[GIT_ASKPASS GIT_EXEC_PATH GIT_EXTERNAL_DIFF GIT_PAGER GIT_SSH GIT_SSH_COMMAND PAGER SSH_ASKPASS].each { |key| ENV.delete(key) }
 ENV.keys.grep(/\AGIT_CONFIG/).each { |key| ENV.delete(key) }
 ENV.keys.grep(/\AGIT_TRACE/).each { |key| ENV.delete(key) }

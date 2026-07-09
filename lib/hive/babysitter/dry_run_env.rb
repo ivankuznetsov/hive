@@ -19,6 +19,16 @@ module Hive
       RUBY_STARTUP_ENV = %w[
         RUBYOPT RUBYLIB BUNDLE_GEMFILE BUNDLE_BIN_PATH GEM_HOME GEM_PATH
       ].freeze
+      DYNAMIC_LOADER_ENV = %w[
+        LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT LD_BIND_NOT LD_BIND_NOW LD_DEBUG LD_DEBUG_OUTPUT
+        LD_DYNAMIC_WEAK LD_HWCAP_MASK LD_ORIGIN_PATH LD_PROFILE LD_SHOW_AUXV
+        LD_TRACE_LOADED_OBJECTS LD_USE_LOAD_BIAS LD_VERBOSE LD_WARN
+        DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH DYLD_FRAMEWORK_PATH
+        DYLD_FALLBACK_LIBRARY_PATH DYLD_FALLBACK_FRAMEWORK_PATH
+        DYLD_VERSIONED_LIBRARY_PATH DYLD_VERSIONED_FRAMEWORK_PATH
+        DYLD_IMAGE_SUFFIX DYLD_PRINT_TO_FILE
+      ].freeze
+      DYNAMIC_LOADER_ENV_PATTERN = /\A(?:LD|DYLD)_/.freeze
 
       def with_env(worktree_path)
         # Resolve real git/gh *before* prepending the overlay onto PATH,
@@ -40,6 +50,8 @@ module Hive
           "HIVE_BABYSITTER_REAL_GIT" => ENV["HIVE_BABYSITTER_REAL_GIT"],
           "HIVE_BABYSITTER_REAL_GH" => ENV["HIVE_BABYSITTER_REAL_GH"]
         }
+        old_dynamic_loader_env = dynamic_loader_env
+        scrub_dynamic_loader_env!
         ENV["PATH"] = [ overlay, ENV["PATH"] ].compact.join(File::PATH_SEPARATOR)
         ENV["HIVE_BABYSITTER_DRY_RUN_LOG"] = skip_log
         ENV["HIVE_BABYSITTER_REAL_GIT"] = real_git
@@ -47,6 +59,7 @@ module Hive
         yield
       ensure
         old&.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
+        restore_dynamic_loader_env(old_dynamic_loader_env) if old_dynamic_loader_env
         FileUtils.rm_rf(File.join(worktree_path, OVERLAY_DIRNAME))
       end
 
@@ -80,13 +93,28 @@ module Hive
           # then invokes the shared Ruby stub through the running Ruby's absolute path.
           File.write(link, <<~SH)
             #!/bin/sh
-            unset #{RUBY_STARTUP_ENV.join(' ')}
+            unset #{(RUBY_STARTUP_ENV + DYNAMIC_LOADER_ENV).join(' ')}
             #{env_setup}
             exec #{shell_word(RbConfig.ruby)} #{shell_word(target)} "$@"
           SH
           FileUtils.chmod("+x", link)
         end
         overlay
+      end
+
+      def dynamic_loader_env
+        ENV.each_with_object({}) do |(key, value), memo|
+          memo[key] = value if key.match?(DYNAMIC_LOADER_ENV_PATTERN)
+        end
+      end
+
+      def scrub_dynamic_loader_env!
+        ENV.keys.grep(DYNAMIC_LOADER_ENV_PATTERN).each { |key| ENV.delete(key) }
+      end
+
+      def restore_dynamic_loader_env(values)
+        scrub_dynamic_loader_env!
+        values.each { |key, value| ENV[key] = value }
       end
 
       def shell_env_assignment(name, value)

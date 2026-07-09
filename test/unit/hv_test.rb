@@ -145,6 +145,93 @@ class HvTest < Minitest::Test
     end
   end
 
+  def test_timeout_probe_uses_kill_after_when_supported
+    with_tmp_dir do |dir|
+      override = File.join(dir, "custom", "hive")
+      FileUtils.mkdir_p(File.dirname(override))
+      File.write(override, <<~SH)
+        #!/bin/sh
+        if [ "$1" = "--version" ]; then echo "1.2.3"; exit 0; fi
+        echo override:$1
+      SH
+      FileUtils.chmod(0o755, override)
+
+      log = File.join(dir, "timeout.log")
+      fake_bin = File.join(dir, "bin")
+      FileUtils.mkdir_p(fake_bin)
+      File.write(File.join(fake_bin, "timeout"), <<~SH)
+        #!/bin/sh
+        printf '%s\\n' "$*" >> "#{log}"
+        if [ "$1" != "-k" ]; then
+          exit 125
+        fi
+        shift 2
+        shift
+        exec "$@"
+      SH
+      FileUtils.chmod(0o755, File.join(fake_bin, "timeout"))
+
+      out, err, status = capture_hv_with_timeout(
+        {
+          "HIVE_BIN_OVERRIDE" => override,
+          "XDG_BIN_HOME" => File.join(dir, "empty-xdg"),
+          "HOMEBREW_PREFIX" => File.join(dir, "empty-homebrew"),
+          "PATH" => [ fake_bin, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR)
+        },
+        "probe"
+      )
+
+      assert status.success?, err
+      assert_equal "override:probe\n", out
+      lines = File.readlines(log, chomp: true)
+      assert_includes lines, "-k 1 1 true"
+      assert_includes lines, "-k 1 5 #{override} --version"
+    end
+  end
+
+  def test_timeout_probe_falls_back_when_kill_after_is_unsupported
+    with_tmp_dir do |dir|
+      override = File.join(dir, "custom", "hive")
+      FileUtils.mkdir_p(File.dirname(override))
+      File.write(override, <<~SH)
+        #!/bin/sh
+        if [ "$1" = "--version" ]; then echo "1.2.3"; exit 0; fi
+        echo override:$1
+      SH
+      FileUtils.chmod(0o755, override)
+
+      log = File.join(dir, "timeout.log")
+      fake_bin = File.join(dir, "bin")
+      FileUtils.mkdir_p(fake_bin)
+      File.write(File.join(fake_bin, "timeout"), <<~SH)
+        #!/bin/sh
+        printf '%s\\n' "$*" >> "#{log}"
+        if [ "$1" = "-k" ]; then
+          exit 125
+        fi
+        shift
+        exec "$@"
+      SH
+      FileUtils.chmod(0o755, File.join(fake_bin, "timeout"))
+
+      out, err, status = capture_hv_with_timeout(
+        {
+          "HIVE_BIN_OVERRIDE" => override,
+          "XDG_BIN_HOME" => File.join(dir, "empty-xdg"),
+          "HOMEBREW_PREFIX" => File.join(dir, "empty-homebrew"),
+          "PATH" => [ fake_bin, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR)
+        },
+        "probe"
+      )
+
+      assert status.success?, err
+      assert_equal "override:probe\n", out
+      lines = File.readlines(log, chomp: true)
+      assert_includes lines, "-k 1 1 true"
+      assert_includes lines, "5 #{override} --version"
+    end
+  end
+
   def test_timed_out_probe_tree_is_group_killed_when_timeout_binary_is_absent
     with_tmp_dir do |dir|
       pidfile = File.join(dir, "probe-child.pid")

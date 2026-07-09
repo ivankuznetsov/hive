@@ -56,6 +56,11 @@ envelope can be emitted. This covers QMD bootstrap, web-bundle refresh, daemon
 service install, enrollment, and optional web-service install through the same
 failure shape.
 
+If Thor rejects argv before `Hive::Commands::Setup` runs (for example
+`hive setup extra --json`), `bin/hive` emits an unversioned `hive-setup`
+`ok:false` usage payload on stdout and exits 64 before the human `hive:` stderr
+line.
+
 ## Web Bundle
 
 The managed web app lives under `Hive::Paths.web_app_home` and is version-stamped with `.hive-web-version`. `Hive::Web::AppBundle.ensure!` refreshes when the bundle is missing or when the stamp differs from `Hive::VERSION`; this keeps a CLI upgrade from continuing to serve an old Rails app. `HIVEBOX_WEB_APP_DIR` remains an operator-managed override for `hive web` and is not overwritten by setup.

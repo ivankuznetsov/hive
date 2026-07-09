@@ -2,6 +2,7 @@
 
 require "fileutils"
 require "English"
+require "json"
 require "optparse"
 
 root = File.expand_path("..", __dir__)
@@ -83,6 +84,24 @@ def option_value_missing?(value)
   value.to_s.empty? || value.start_with?("-")
 end
 
+def hive_eval_report?(path)
+  # Guard File.read to regular files: the cleanup now inspects arbitrary caller
+  # paths, and File.read on a FIFO or blocking device would wait for EOF,
+  # stalling the usage-error path instead of printing the error promptly.
+  return false unless File.file?(path)
+
+  doc = JSON.parse(File.read(path))
+  doc.is_a?(Hash) && doc["schema"] == "hive-eval-report"
+rescue EncodingError, SystemCallError, JSON::ParserError
+  false
+end
+
+def remove_report_if_stale(path, default_report)
+  return if path.nil?
+
+  FileUtils.rm_f(path) if path == default_report || hive_eval_report?(path)
+end
+
 # Snapshot ARGV before parse! mutates it in place. The rescue scan below relies
 # on the original tokens: when --scenario swallows a following --report as its
 # value (e.g. `--scenario --report /tmp/x.json`), parse! removes that --report
@@ -115,7 +134,7 @@ rescue OptionParser::ParseError, ArgumentError => e
   captured_report = default_report if option_value_missing?(captured_report)
   [ expanded_report_path(root, captured_report),
     selected_report_path(root, argv_snapshot, default_report) ].compact.each do |path|
-    FileUtils.rm_f(path)
+    remove_report_if_stale(path, default_report)
   end
   warn "hive-eval: #{e.message}"
   warn parser
@@ -123,11 +142,11 @@ rescue OptionParser::ParseError, ArgumentError => e
 end
 
 report_path = expanded_report_path(root, options.fetch(:report))
-FileUtils.rm_f(report_path)
 
 unless remaining.empty?
   unexpected = remaining.join(" ")
   label = remaining.length == 1 ? "argument" : "arguments"
+  remove_report_if_stale(report_path, default_report)
   warn "hive-eval: unexpected #{label}: #{unexpected}"
   warn parser
   exit 64
@@ -160,18 +179,21 @@ env = {
 begin
   path = scenario_path(scenario_root, options[:scenario])
 rescue ArgumentError => e
+  remove_report_if_stale(report_path, default_report)
   warn "hive-eval: #{e.message}"
   exit 64
 end
 
 if path
   unless File.exist?(path)
+    remove_report_if_stale(report_path, default_report)
     warn "hive-eval: scenario not found: #{path}"
     exit 64
   end
   env["TEST"] = path
 end
 
+FileUtils.rm_f(report_path)
 FileUtils.mkdir_p(File.dirname(env.fetch("HIVE_EVAL_REPORT")))
 ok = system(env, "bundle", "exec", "rake", "test:eval", chdir: root)
 exit($CHILD_STATUS&.exitstatus || (ok ? 0 : 1))

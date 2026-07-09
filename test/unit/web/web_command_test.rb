@@ -112,11 +112,47 @@ class WebCommandTest < Minitest::Test
         assert_equal %w[bin/rails server -b], caught.argv[0..2]
         assert caught.env.key?("SECRET_KEY_BASE"), "the persisted session secret must reach Rails"
         assert caught.env.key?("HIVEBOX_STORAGE_DIR")
-        # The managed bundle's Gemfile resolves the hive-cli path gem via
-        # HIVE_CLI_ROOT; the Rails server re-evaluates the Gemfile at boot,
-        # so the exec env must carry it too (not just bundle install).
-        assert_equal Hive::Web::AppBundle.hive_cli_root, caught.env["HIVE_CLI_ROOT"]
+        # A HIVEBOX_WEB_APP_DIR override (like the hivebox image's baked
+        # /app/web) was bundle-installed against its own ".." — exporting
+        # HIVE_CLI_ROOT would re-point the Gemfile's path source and
+        # invalidate that prebuilt bundle (the v0.3.4/v0.3.5 image-smoke
+        # db:prepare failure). Only the managed bundle gets the export.
+        refute caught.env.key?("HIVE_CLI_ROOT"),
+               "an operator-managed app dir must not have its path-gem source re-pointed"
       end
+    end
+  end
+
+  # The MANAGED bundle is the one place whose Gemfile can only resolve the
+  # hive-cli path gem through HIVE_CLI_ROOT (its ".." holds no gem, and its
+  # bundle was installed with the same export). The Rails server re-evaluates
+  # the Gemfile at boot, so the exec env must carry it there — and only there.
+  def test_managed_bundle_exec_env_carries_hive_cli_root
+    with_tmp_global_config do
+      dir = Hive::Web::AppBundle.app_dir
+      FileUtils.mkdir_p(File.join(dir, "config"))
+      File.write(File.join(dir, "config", "application.rb"), "# rails app marker")
+      File.write(File.join(dir, Hive::Web::AppBundle::VERSION_FILE), "#{Hive::VERSION}\n")
+      FileUtils.mkdir_p(File.join(dir, "bin"))
+      File.write(File.join(dir, "bin", "rails"), "#!/usr/bin/env bash\nexit 0\n")
+      FileUtils.chmod(0o755, File.join(dir, "bin", "rails"))
+
+      original = Kernel.method(:exec)
+      Kernel.define_singleton_method(:exec) do |env, *argv|
+        raise ExecCaught.new(env, argv)
+      end
+
+      caught = nil
+      begin
+        capture_io { Hive::Commands::Web.new.call }
+      rescue ExecCaught => e
+        caught = e
+      ensure
+        Kernel.define_singleton_method(:exec, original)
+      end
+
+      refute_nil caught, "the command must end in Kernel.exec of the rails server"
+      assert_equal Hive::Web::AppBundle.hive_cli_root, caught.env["HIVE_CLI_ROOT"]
     end
   end
 

@@ -3,7 +3,7 @@ title: Generic Agent Stage Runner
 type: stage
 source: lib/hive/stages/agent.rb, templates/agent_prompt.md.erb
 created: 2026-06-19
-updated: 2026-06-20
+updated: 2026-07-08
 tags: [stage, agent, workflow]
 ---
 
@@ -13,8 +13,11 @@ coding runner. `Hive::Stages::Resolver` reaches it as the fallback after the
 coding-name runner table. The runner resolves the active stage per-task via
 `task.workflow.stage_named(task.stage_name)` (the core U6 generic behavior — NOT
 the coding-pinned `Hive::Workflows::Registry.default`), renders
-`templates/agent_prompt.md.erb`, spawns one folder-isolated agent, and maps the
-resulting state-file marker to the same commit actions as [[stages/brainstorm]].
+`templates/agent_prompt.md.erb`, resolves descriptor-level `agent`/`model`/`effort`
+overrides, spawns one folder-isolated agent, and maps the resulting state-file
+marker to the same commit actions as [[stages/brainstorm]]. A workflow may end
+on this runner; terminal agent stages require `COMPLETE` plus a non-empty
+deliverable before status reports them archived.
 
 ## Runtime Contract
 
@@ -28,14 +31,17 @@ resulting state-file marker to the same commit actions as [[stages/brainstorm]].
    prior artifacts are treated as untrusted input.
 5. Use `stage.skill` through `profile.format_skill_invocation` when present;
    otherwise use the generic "produce the best stage output" instruction.
-6. Spawn via `Hive::Stages::Base.spawn_agent` with `add_dirs:` from the resolved
+6. Resolve the profile using descriptor `stage.agent`, then project
+   `cfg[stage]["agent"]`, then `claude`. Descriptor `stage.model` /
+   `stage.effort` override project Claude defaults for this spawn.
+7. Spawn via `Hive::Stages::Base.spawn_agent` with `add_dirs:` from the resolved
    permission scope (`scope.fetch(:add_dirs)` — `[task.folder]` by default, but a
    `scoped` permissions block with `dirs:` appends extra directories beyond the
    task folder), `cwd: task.folder`, the descriptor's `status_mode` (falling back
    to `:state_file_marker` only when unset), a `timeout_sec` defaulting to
    `DEFAULT_TIMEOUT_SEC` when neither cfg nor descriptor provides one, and the
    stage profile.
-7. Re-read `stage.state_file` and map markers: `WAITING` → `round_waiting`,
+8. Re-read `stage.state_file` and map markers: `WAITING` → `round_waiting`,
    `COMPLETE` → `complete`, `ERROR` → `error`, `NONE` → `nil` (an explicit arm —
    a markerless run has nothing to commit, so `commit_after` skips the commit),
    otherwise `marker.name.to_s`.

@@ -114,6 +114,29 @@ class WorkflowNewTest < Minitest::Test
     end
   end
 
+  def test_scaffolds_architecture_template_with_council_and_agent_terminal
+    with_initialized_project do |project_root|
+      payload = Hive::Commands::Workflow.new!(
+        "arch-plan", project_root: project_root, stdout: StringIO.new, template: "architecture"
+      )
+      workflows = File.join(project_root, ".hive-state", "workflows")
+      descriptor_path = File.join(workflows, "arch-plan.yml")
+
+      assert_equal "arch-plan", payload.fetch("id")
+      workflow = Hive::Workflows::DescriptorParser.parse_file(descriptor_path)
+      assert_equal %w[inbox draft review architecture], workflow.stage_names
+      assert_equal %i[inert agent council agent], workflow.stages.map(&:kind)
+      assert_equal "architecture.md", workflow.stage_named("architecture").deliverable
+      assert_equal 2, workflow.stage_named("review").reviewers.length
+      assert_match(/kind:\s+council/, File.read(descriptor_path))
+      refute_match(/name:\s+done/, File.read(descriptor_path))
+
+      %w[draft revise architecture].each do |name|
+        assert File.file?(File.join(workflows, "arch-plan", "#{name}.md")), "#{name}.md should be scaffolded"
+      end
+    end
+  end
+
   def test_unknown_template_is_a_usage_error_listing_available
     with_initialized_project do |project_root|
       error = assert_raises(Hive::Commands::Workflow::UsageError) do
@@ -124,6 +147,7 @@ class WorkflowNewTest < Minitest::Test
       assert_includes error.message, %(unknown workflow template "bogus")
       assert_includes error.expected, "blank"
       assert_includes error.expected, "writing"
+      assert_includes error.expected, "architecture"
       # An invalid template is rejected before any scaffold is written.
       refute File.exist?(File.join(project_root, ".hive-state", "workflows", "x.yml"))
     end

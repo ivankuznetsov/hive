@@ -88,6 +88,19 @@ Markers are HTML comments at the bottom of the stage state file. The last marker
 
 Human edits are part of the protocol. You can edit `brainstorm.md`, `plan.md`, `reviews/escalations-NN.md`, or a recovery file, then re-run the same stage command.
 
+## Councils
+
+A council is a descriptor-backed document review stage. It runs multiple
+reviewers over one target artifact, writes one review file per reviewer, and
+aggregates the round into a triage artifact. Quorum decides whether the document
+is ready; disagreement either pauses for human edits or runs a configured revise
+agent until `max_rounds`.
+
+Council triage artifacts are ordinary Markdown files in the task folder. They
+record reviewer verdicts, accepted findings, rejected findings, required edits,
+open disagreements, and readiness, so a human can inspect or edit the document
+before re-running the stage.
+
 ## Compound Engineering In Practice
 
 Compound engineering means structuring software work so each stage leaves behind a durable result that the next stage can trust. Hive applies that to agent work by making every transition explicit and every intermediate artefact reviewable.

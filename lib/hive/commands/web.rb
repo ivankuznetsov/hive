@@ -67,12 +67,16 @@ module Hive
           # bundle is replaced wholesale on a version upgrade).
           "HIVEBOX_STORAGE_DIR" => ENV["HIVEBOX_STORAGE_DIR"] ||
             File.join(Hive::Paths.state_home, "web-storage"),
-          "BUNDLE_GEMFILE" => File.join(app_dir, "Gemfile"),
-          # The managed bundle's Gemfile resolves the hive-cli path gem via
-          # HIVE_CLI_ROOT (its `..` holds no gem); harmless no-op for a
-          # source checkout, where the default ".." already resolves.
-          "HIVE_CLI_ROOT" => Hive::Web::AppBundle.hive_cli_root
+          "BUNDLE_GEMFILE" => File.join(app_dir, "Gemfile")
         }
+        # Only the MANAGED bundle resolves the hive-cli path gem via
+        # HIVE_CLI_ROOT — its ".." holds no gem, and its bundle was installed
+        # with this same export. A source checkout or a HIVEBOX_WEB_APP_DIR
+        # override (e.g. the hivebox image's baked /app/web) was
+        # bundle-installed against its own ".."; re-pointing the path source
+        # at runtime invalidates that prebuilt bundle (the v0.3.4/v0.3.5
+        # image-smoke db:prepare failure).
+        env["HIVE_CLI_ROOT"] = Hive::Web::AppBundle.hive_cli_root if app_dir == Hive::Web::AppBundle.app_dir
         # The loopback no-auth bypass is opt-out: an operator can set
         # web.local_loopback: false to force GitHub login even on a loopback
         # bind. Only signal the bypass when both the bind is loopback AND the

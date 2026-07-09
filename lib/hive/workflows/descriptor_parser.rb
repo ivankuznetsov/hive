@@ -1,4 +1,5 @@
 require "yaml"
+require "hive/agent_profiles"
 require "hive/permission_scope"
 require "hive/workflow"
 
@@ -19,8 +20,32 @@ module Hive
         advance_verb
         skill
         instruction
+        agent
+        model
+        effort
+        input
+        reviewers
+        council
+        deliverable
         permissions
       ].freeze
+      REVIEWER_KEYS = %w[
+        name
+        agent
+        model
+        effort
+        skill
+        instruction
+        prompt
+        command
+        output_basename
+        permissions
+        max_attempts
+      ].freeze
+      COUNCIL_KEYS = %w[quorum max_rounds exit_rule triage_output revise].freeze
+      REVISE_KEYS = %w[agent model effort skill instruction prompt command permissions].freeze
+      REVIEWER_INSTRUCTION_KEYS = %w[skill instruction prompt command].freeze
+      EXIT_RULES = %w[consensus human].freeze
 
       def self.parse_file(path) = new(path).parse_file
       def self.parse_hash(data, path:) = new(path).parse_hash(data)
@@ -45,32 +70,40 @@ module Hive
         validate_filename_id!(id)
         stages = parse_stages(descriptor["stages"], id: id)
         validate_terminal_last_stage!(stages)
+        validate_deliverable_position!(stages)
 
         build_workflow(id, stages)
       end
 
       private
 
-      # A project workflow's last stage must be terminal (kind: terminal →
-      # :inert). `Hive::Workflows.all_terminal_stage_dirs` treats every workflow's
-      # last stage dir as the archive guard, and a task at the final stage has
-      # nowhere to advance — so a descriptor ending in `kind: agent` yields a task
-      # that can neither advance NOR drop (brainstorm A4). The blank scaffold
-      # (inbox -> work -> done, kind: terminal) already complies. Built-in
-      # workflows are Ruby-constructed and bypass this parser (coding's 9-done is
-      # inert; content's terminal stage is intentionally an agent), so the rule is
-      # scoped to owner-authored YAML descriptors. Skip the empty case — Workflow.new
-      # raises its own "at least one stage" error.
+      # A project workflow's last stage may be inert or an active producer
+      # (:agent/:council). Active terminal stages are gated at status time by
+      # a terminal marker plus a non-empty deliverable artifact.
       def validate_terminal_last_stage!(stages)
         return if stages.empty?
 
         last = stages.last
-        return if last.kind == :inert
+        return if [ :inert, :agent, :council ].include?(last.kind)
 
         raise descriptor_error(
-          "last stage #{last.name.inspect} must be a terminal stage (kind: terminal); a task at the " \
-          "final stage cannot advance, so a non-terminal last stage would be undroppable"
+          "last stage #{last.name.inspect} must be terminal, agent, or council"
         )
+      end
+
+      # `deliverable` is read only by the terminal completion gate
+      # (TaskAction#active_terminal_missing_deliverable?, called only when
+      # `stage == stages.last`). On any earlier stage it parses, freezes, and is
+      # never read — the same silent no-op the field guards reject elsewhere. So
+      # allow `deliverable` only on the last stage.
+      def validate_deliverable_position!(stages)
+        stages[0...-1].each do |stage|
+          next unless stage.deliverable
+
+          raise descriptor_error(
+            "stage #{stage.name.inspect} deliverable is only consumed on the last stage"
+          )
+        end
       end
 
       # Narrowed to JUST the Workflow.new construction. `validate_structure!`
@@ -119,9 +152,17 @@ module Hive
         name = parse_stage_name(stage["name"], label: label)
         kind = parse_kind(stage["kind"], label: label)
         reject_agent_only_fields!(stage, kind: kind, label: label)
+        reject_wrong_kind_fields!(stage, kind: kind, label: label)
         skill = optional_string(stage["skill"], label: "#{label} skill")
         instruction = parse_instruction(stage["instruction"], label: label)
+        agent = parse_agent(stage["agent"], label: label)
+        model = optional_string(stage["model"], label: "#{label} model")
+        effort = optional_string(stage["effort"], label: "#{label} effort")
         permissions = parse_permissions(stage, id: id, stage_name: name, label: label)
+        input = optional_string(stage["input"], label: "#{label} input")
+        deliverable = parse_deliverable(stage["deliverable"], label: label)
+        reviewers = parse_reviewers(stage["reviewers"], id: id, label: label) if kind == :council
+        council = parse_council(stage["council"], id: id, label: label, reviewer_count: reviewers&.length) if kind == :council
         validate_agent_instruction!(skill: skill, instruction: instruction, label: label) if kind == :agent
 
         Hive::Workflow::Stage.new(
@@ -132,6 +173,13 @@ module Hive
           kind: kind,
           skill: skill,
           instruction: instruction,
+          agent: agent,
+          model: model,
+          effort: effort,
+          input: input,
+          reviewers: reviewers,
+          council: council,
+          deliverable: deliverable,
           permissions: permissions
         )
       end
@@ -170,11 +218,10 @@ module Hive
         raw = required_string(value, label: "#{label} kind")
         case raw
         when "agent" then :agent
+        when "council" then :council
         when "terminal" then :inert
-        when "council"
-          raise descriptor_error("#{label} kind 'council' is not yet supported (reserved for a future release)")
         else
-          raise descriptor_error("#{label} kind #{raw.inspect} must be agent or terminal")
+          raise descriptor_error("#{label} kind #{raw.inspect} must be agent, council, or terminal")
         end
       end
 
@@ -188,6 +235,23 @@ module Hive
         raise descriptor_error("#{label} instruction #{raw.inspect} must reference a readable file (#{resolved})")
       end
 
+      def parse_agent(value, label:)
+        raw = optional_string(value, label: "#{label} agent")
+        return nil if raw.nil?
+        return raw if Hive::AgentProfiles.registered?(raw)
+
+        raise descriptor_error(
+          "#{label} agent #{raw.inspect} is not registered " \
+          "(registered: #{Hive::AgentProfiles.registered_names.inspect})"
+        )
+      end
+
+      def parse_deliverable(value, label:)
+        return nil if value.nil?
+
+        parse_state_file(value, label: "#{label} deliverable")
+      end
+
       def parse_permissions(stage, id:, stage_name:, label:)
         return nil unless stage.key?("permissions")
 
@@ -196,6 +260,143 @@ module Hive
         deep_freeze(value)
       rescue Hive::ConfigError => e
         raise descriptor_error("#{label} #{e.message}")
+      end
+
+      def parse_reviewers(data, id:, label:)
+        raise descriptor_error("#{label} council stage must declare reviewers") if data.nil?
+        raise descriptor_error("#{label} reviewers must be an array") unless data.is_a?(Array)
+        raise descriptor_error("#{label} council stage must declare at least one reviewer") if data.empty?
+
+        reviewers = data.each_with_index.map do |raw_reviewer, offset|
+          parse_reviewer(raw_reviewer, id: id, label: "#{label} reviewer #{offset + 1}")
+        end
+        # Two reviewers sharing a name or output_basename resolve to the same
+        # reviews/<base>-NN.md path — one overwrites the other and triage
+        # double-counts the single surviving file toward quorum. Reject at load
+        # time, mirroring Workflow#validate_structure!'s stage name/dir checks.
+        # Compare the SANITIZED basename (the same gsub Council::Reviewer#output_path
+        # applies), so collisions like "a/b" vs "a-b" — distinct raw strings that
+        # both resolve to "a-b" — are caught here rather than at run time.
+        reject_reviewer_duplicates!(reviewers.map(&:name), "reviewer names", label: label)
+        reject_reviewer_duplicates!(reviewers.map { |r| sanitize_output_basename(r.output_basename) }, "reviewer output_basenames", label: label)
+        reviewers.freeze
+      end
+
+      # Mirror Council::Reviewer#output_path's sanitization so the duplicate
+      # check above compares the paths reviewers actually resolve to.
+      def sanitize_output_basename(base)
+        base.gsub(/[^a-zA-Z0-9_.-]+/, "-")
+      end
+
+      def reject_reviewer_duplicates!(values, what, label:)
+        return if values.uniq.length == values.length
+
+        duplicates = values.select { |value| values.count(value) > 1 }.uniq
+        raise descriptor_error("#{label} has duplicate #{what}: #{duplicates.inspect}")
+      end
+
+      def parse_reviewer(data, id:, label:)
+        reviewer = stringify_hash(data, label: label)
+        reject_unknown_keys!(reviewer, REVIEWER_KEYS, label: label)
+        name = parse_stage_name(reviewer["name"], label: label)
+        instruction_fields = REVIEWER_INSTRUCTION_KEYS.select { |key| reviewer.key?(key) && !reviewer[key].nil? }
+        unless instruction_fields.length == 1
+          raise descriptor_error("#{label} must declare exactly one of #{REVIEWER_INSTRUCTION_KEYS.join(', ')}")
+        end
+
+        Hive::Workflow::Reviewer.new(
+          name: name,
+          agent: parse_agent(reviewer["agent"], label: label),
+          model: optional_string(reviewer["model"], label: "#{label} model"),
+          effort: optional_string(reviewer["effort"], label: "#{label} effort"),
+          skill: optional_string(reviewer["skill"], label: "#{label} skill"),
+          instruction: parse_instruction(reviewer["instruction"], label: label),
+          prompt: optional_string(reviewer["prompt"], label: "#{label} prompt"),
+          command: optional_string(reviewer["command"], label: "#{label} command"),
+          output_basename: optional_string(reviewer["output_basename"], label: "#{label} output_basename") || name,
+          permissions: parse_permissions(reviewer, id: id, stage_name: name, label: label),
+          max_attempts: optional_positive_integer(reviewer["max_attempts"], label: "#{label} max_attempts")
+        )
+      end
+
+      def parse_council(data, id:, label:, reviewer_count:)
+        council = data.nil? ? {} : stringify_hash(data, label: "#{label} council")
+        reject_unknown_keys!(council, COUNCIL_KEYS, label: "#{label} council")
+        quorum = optional_positive_integer(council["quorum"], label: "#{label} council quorum") || reviewer_count
+        if quorum > reviewer_count
+          raise descriptor_error("#{label} council quorum #{quorum} cannot exceed reviewer count #{reviewer_count}")
+        end
+        max_rounds = optional_positive_integer(council["max_rounds"], label: "#{label} council max_rounds") || 1
+        exit_rule = optional_string(council["exit_rule"], label: "#{label} council exit_rule") || "human"
+        unless EXIT_RULES.include?(exit_rule)
+          raise descriptor_error("#{label} council exit_rule #{exit_rule.inspect} must be one of #{EXIT_RULES.inspect}")
+        end
+
+        revise = parse_revise(council["revise"], id: id, label: "#{label} council revise")
+        # A revise agent only runs when the loop takes a second round
+        # (`round >= max_rounds` short-circuits at the default max_rounds: 1),
+        # so pairing revise with max_rounds: 1 is a silent no-op. Warn at load
+        # time rather than fail — the descriptor is still runnable.
+        if revise && max_rounds <= 1
+          warn "hive: #{@path}: #{label} council declares a revise agent with max_rounds: 1; " \
+               "revise never runs at max_rounds 1 (increase max_rounds to enable it)"
+        end
+        # The council loop also refuses to revise unless `exit_rule == :consensus`
+        # (Stages::Council#run!); `exit_rule` defaults to "human". So a revise
+        # agent under any non-consensus exit_rule is the same silent no-op —
+        # warn at load time here too, rather than let it vanish at run time.
+        if revise && exit_rule != "consensus"
+          warn "hive: #{@path}: #{label} council declares a revise agent with exit_rule: #{exit_rule}; " \
+               "revise only runs under exit_rule: consensus (set exit_rule: consensus to enable it)"
+        end
+
+        Hive::Workflow::Council.new(
+          quorum: quorum,
+          max_rounds: max_rounds,
+          exit_rule: exit_rule.to_sym,
+          triage_output: parse_triage_output(council["triage_output"], label: "#{label} council triage_output"),
+          revise: revise
+        )
+      end
+
+      def parse_revise(data, id:, label:)
+        return nil if data.nil?
+
+        revise = stringify_hash(data, label: label)
+        reject_unknown_keys!(revise, REVISE_KEYS, label: label)
+        instruction_fields = REVIEWER_INSTRUCTION_KEYS.select { |key| revise.key?(key) && !revise[key].nil? }
+        unless instruction_fields.length == 1
+          raise descriptor_error("#{label} must declare exactly one of #{REVIEWER_INSTRUCTION_KEYS.join(', ')}")
+        end
+
+        Hive::Workflow::Revise.new(
+          agent: parse_agent(revise["agent"], label: label),
+          model: optional_string(revise["model"], label: "#{label} model"),
+          effort: optional_string(revise["effort"], label: "#{label} effort"),
+          skill: optional_string(revise["skill"], label: "#{label} skill"),
+          instruction: parse_instruction(revise["instruction"], label: label),
+          prompt: optional_string(revise["prompt"], label: "#{label} prompt"),
+          command: optional_string(revise["command"], label: "#{label} command"),
+          permissions: parse_permissions(revise, id: id, stage_name: "revise", label: label)
+        )
+      end
+
+      # `triage_output` is joined onto the task folder by the runner
+      # (Triage#triage_path and Council#next_round both `File.join(task_folder,
+      # File.dirname(triage_output), ...)`), and R2 requires the triage artifact
+      # to be written inside the stage folder. A leading "/" (absolute) or a
+      # ".." segment escapes that folder, so reject both at load time. Unlike
+      # `state_file` a subdirectory IS allowed (e.g. "reviews/triage.md") — the
+      # runner mkdir_p's the triage dir — so this is looser than a bare basename.
+      def parse_triage_output(value, label:)
+        raw = optional_string(value, label: label)
+        return Hive::Workflow::DEFAULT_TRIAGE_OUTPUT if raw.nil?
+        return raw unless raw.start_with?("/") || raw.split("/").include?("..")
+
+        raise descriptor_error(
+          "#{label} #{raw.inspect} must stay inside the stage folder " \
+          "(no leading '/' and no '..' path segment)"
+        )
       end
 
       def parse_advance_verb(stage, name:, index:, label:)
@@ -212,21 +413,55 @@ module Hive
         Hive::Workflow::AdvanceVerb.new(name: verb_name)
       end
 
-      # `skill`, `instruction`, and `permissions` are consumed ONLY by the agent
-      # stage runner (Hive::Stages::Agent). On a terminal (inert) stage they are
-      # validated, deep-frozen, and stored but never read — a silent no-op config
-      # trap. Reject them at parse time (fail-fast, consistent with the parser's
-      # other strict checks) so a typo'd-kind or misplaced field surfaces at load
-      # rather than vanishing at run time.
+      # These fields are consumed by active stage runners — both :agent and
+      # :council kinds (the guard below allows either). On a terminal (inert)
+      # stage they are validated, deep-frozen, and stored but never read — a
+      # silent no-op config trap. Reject them at parse time (fail-fast,
+      # consistent with the parser's other strict checks) so a typo'd-kind or
+      # misplaced field surfaces at load rather than vanishing at run time.
       def reject_agent_only_fields!(stage, kind:, label:)
-        return if kind == :agent
+        return if [ :agent, :council ].include?(kind)
 
-        present = %w[skill instruction permissions].select { |key| stage.key?(key) }
+        present = %w[skill instruction agent model effort input reviewers council deliverable permissions].select { |key| stage.key?(key) }
         return if present.empty?
 
         raise descriptor_error(
           "#{label} #{present.inspect} #{present.one? ? 'is' : 'are'} only valid on an agent stage " \
-          "(kind: agent), not a #{stage['kind'].inspect} stage"
+          "(kind: agent or council), not a #{stage['kind'].inspect} stage"
+        )
+      end
+
+      # Even on an active (:agent/:council) stage each remaining optional field
+      # is consumed by exactly one kind, so a field on the wrong active kind is
+      # the same silent no-op the inert guard above rejects:
+      #   - `skill`/`instruction` drive the :agent prompt only. A council reads
+      #     each reviewer's skill/instruction (REVIEWER_KEYS), never the stage's.
+      #   - `input`/`reviewers`/`council` are read only by the council runner
+      #     (Stages::Council). The :agent runner ignores them, so a typo'd
+      #     `kind: agent` carrying a `council:`/`reviewers:` block would run as a
+      #     plain agent with no error.
+      # `agent`/`model`/`effort`/`deliverable`/`permissions` are shared and stay
+      # valid on both. Reject the mismatches here (fail-fast, same contract as
+      # reject_agent_only_fields!).
+      COUNCIL_ONLY_FIELDS = %w[input reviewers council].freeze
+      AGENT_ONLY_FIELDS = %w[skill instruction].freeze
+
+      def reject_wrong_kind_fields!(stage, kind:, label:)
+        case kind
+        when :agent
+          reject_fields_for_kind!(stage, COUNCIL_ONLY_FIELDS, kind: :agent, other: "council", label: label)
+        when :council
+          reject_fields_for_kind!(stage, AGENT_ONLY_FIELDS, kind: :council, other: "agent", label: label)
+        end
+      end
+
+      def reject_fields_for_kind!(stage, fields, kind:, other:, label:)
+        present = fields.select { |key| stage.key?(key) }
+        return if present.empty?
+
+        raise descriptor_error(
+          "#{label} #{present.inspect} #{present.one? ? 'is' : 'are'} only valid on a #{other} stage, " \
+          "not a #{kind} stage"
         )
       end
 
@@ -272,6 +507,13 @@ module Hive
         return value.strip if value.is_a?(String) && !value.strip.empty?
 
         raise descriptor_error("#{label} must be a non-empty string")
+      end
+
+      def optional_positive_integer(value, label:)
+        return nil if value.nil?
+        return value if value.is_a?(Integer) && value.positive?
+
+        raise descriptor_error("#{label} must be a positive integer")
       end
 
       def deep_freeze(value)

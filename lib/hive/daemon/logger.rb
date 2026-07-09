@@ -22,6 +22,7 @@ module Hive
 
       EVENTS = %i[
         dispatcher_started
+        legacy_layout_detected
         dispatcher_stopping
         tick_begin
         tick_end

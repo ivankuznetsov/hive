@@ -464,7 +464,8 @@ end
 # Proxy and TLS trust-store env can still redirect a safe read through an agent-controlled
 # MITM before real gh sees GitHub credentials, so scrub those at the same exec seam.
 # Real gh can also invoke git for repo probes; scrub git's trace, config, and helper-command
-# env seams before those child git processes can inherit them.
+# env seams before those child git processes can inherit them. Pin PATH too, so those child
+# git probes cannot resolve an agent-controlled git binary from the caller's PATH.
 %w[
   GH_PAGER PAGER GH_BROWSER BROWSER GH_EDITOR GIT_EDITOR VISUAL EDITOR GH_FORCE_TTY
   GH_CONFIG_DIR XDG_CONFIG_HOME HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR
@@ -488,6 +489,7 @@ ENV["PATH"] = "/usr/bin:/bin"
 config_home = make_gh_config_home
 ENV["HOME"] = config_home
 ENV["GH_CONFIG_DIR"] = config_home
+ENV["PATH"] = "/usr/bin:/bin"
 
 begin
   exec real, *argv

@@ -145,6 +145,9 @@ def unsafe_read_option?(subcommand, arg, next_arg = nil)
   # `filter.<driver>.smudge` command — an exec seam the diff/log/show `--no-textconv`
   # hardening never sees, since cat-file stays a plain allowlisted passthrough.
   return true if arg == "--filters"
+  # `--submodule=diff` expands nested diffs inside submodule repositories; the top-level
+  # `--no-ext-diff --no-textconv` flags do not harden those nested git invocations.
+  return true if submodule_diff_option?(arg, next_arg)
   # Signature display and `%G*` pretty placeholders verify commit signatures, which executes
   # the configured gpg.program / gpg.<format>.program helper from repo config.
   return true if signature_verification_option?(subcommand, arg, next_arg)
@@ -206,6 +209,12 @@ def remerge_diff_option?(subcommand, arg)
 
   option, value = arg.split("=", 2)
   option == "--diff-merges" && REMERGE_DIFF_FORMATS.include?(value)
+end
+
+def submodule_diff_option?(arg, next_arg)
+  option, value = arg.split("=", 2)
+  (option == "--submodule" && value == "diff") ||
+    (arg == "--submodule" && next_arg.to_s == "diff")
 end
 
 def textconv_abbreviation?(arg)
@@ -354,6 +363,14 @@ def hardened_passthrough_argv(argv, rest)
     "-c", "gpg.openpgp.program=false",
     "-c", "gpg.x509.program=false",
     "-c", "gpg.ssh.program=false",
+    # The argv `--submodule=diff` guard cannot see a worktree-local `diff.submodule=diff`
+    # (or `=log`): with the mode selected by config, no `--submodule` token appears in argv,
+    # yet git still enters each submodule repo and runs its local diff drivers — the very exec
+    # seam the top-level `--no-ext-diff --no-textconv` do not reach inside a nested submodule.
+    # Pin the submodule format to the inert `short` (a bare old/new commit-hash summary that
+    # never enters the submodule repo); this `-c` override outranks the worktree config, exactly
+    # as the gpg/core overrides above do.
+    "-c", "diff.submodule=short",
     # A read can otherwise auto-spawn a repo/caller-controlled `core.pager` on a TTY; force
     # `--no-pager` so a dry-run read cannot launch a pager (PAGER/GIT_PAGER are also scrubbed below).
     "--no-pager",

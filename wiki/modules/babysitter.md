@@ -83,6 +83,7 @@ Closed outcome enum: `success`, `failure`, `conflict`, `timeout`, `budget_exhaus
 - The GH browser-flag scanner is command-aware: it still skips real `--web` / short `-w` browser flags, but treats `w` inside value-taking read-option values as data, so reads such as `pr diff -eworkflow.yml`, `pr list -lwip`, `pr view -qweb`, and `pr list --search -wip` pass through.
 
 - Skip-log FIFO hardening: both dry-run stubs now preflight existing skip-log targets with `File.lstat`, open with `File::NOFOLLOW | File::NONBLOCK`, keep the post-open regular-file/owner check, and warn while still skipping when a FIFO, symlink, device, or non-owned path is configured.
+- Git dry-run passthrough skips `--submodule=diff` and the split `--submodule diff` form because expanded submodule diffs can enter nested repositories outside the top-level `--no-ext-diff --no-textconv` hardening. The same submodule mode can also be selected by worktree config (`diff.submodule=diff`/`log`) with no `--submodule` token in argv, so passthrough injects `-c diff.submodule=short` to pin the inert commit-hash summary format.
 
 ## Backlinks
 

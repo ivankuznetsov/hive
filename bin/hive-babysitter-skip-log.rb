@@ -1,5 +1,14 @@
 # frozen_string_literal: true
 
+BABYSITTER_DYNAMIC_LOADER_ENV = %w[
+  LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT LD_DEBUG_OUTPUT
+  DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH DYLD_FRAMEWORK_PATH DYLD_FALLBACK_LIBRARY_PATH
+].freeze
+
+def scrub_dynamic_loader_env!
+  BABYSITTER_DYNAMIC_LOADER_ENV.each { |key| ENV.delete(key) }
+end
+
 def log_skip(command, argv)
   path = ENV.fetch("HIVE_BABYSITTER_DRY_RUN_LOG", ".babysitter-dry-run-skipped.log")
   message = "[dry-run] #{command} #{escaped_argv(argv)} skipped"

@@ -139,6 +139,26 @@ class GhUnitTest < Minitest::Test
 
   # --- lookup_existing_pr fail-loud on remote unavailable --------------
 
+  def test_lookup_prs_for_branch_requests_reconciliation_identity_fields
+    captured = nil
+    status = Hive::Gh::CommandStatus.new(exitstatus: 0)
+    stub = lambda do |*args, **kwargs|
+      captured = [ args, kwargs ]
+      [ "[]", "", status ]
+    end
+
+    with_replaced_singleton_method(Hive::Gh, :capture3, stub) do
+      assert_empty Hive::Gh.lookup_prs_for_branch("/repo", "patrol-fix", cfg: { "x" => true })
+    end
+
+    args, kwargs = captured
+    fields = args.fetch(args.index("--json") + 1).split(",")
+    assert_includes fields, "body"
+    assert_includes fields, "baseRefName"
+    assert_includes fields, "headRepository"
+    assert_equal "/repo", kwargs.fetch(:chdir)
+  end
+
   def test_lookup_existing_pr_hard_fails_on_gh_pr_list_error
     # Plan R5 regression guard: a network failure during gh pr list
     # must hard-fail (exit 1) so the caller cannot misinterpret a

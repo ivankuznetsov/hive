@@ -173,6 +173,7 @@ class ConfigTest < Minitest::Test
       assert_equal false, cfg.dig("refactor_patrol", "auto_fix", "enabled")
       assert_equal "codex", cfg.dig("refactor_patrol", "auto_fix", "agent")
       assert_equal false, cfg.dig("refactor_patrol", "issue_filing", "enabled")
+      assert_equal 0.25, cfg.dig("refactor_patrol", "issue_filing", "min_leverage_score")
       assert_equal "claude", cfg.dig("refactor_patrol", "agent")
       assert_equal "medium", cfg.dig("refactor_patrol", "min_confidence")
       assert_equal 3, cfg.dig("refactor_patrol", "max_theses_per_feature")
@@ -204,6 +205,7 @@ class ConfigTest < Minitest::Test
             agent: codex
           issue_filing:
             enabled: true
+            min_leverage_score: 0.5
           agent: codex
           min_confidence: high
           max_theses_per_run: 4
@@ -223,6 +225,7 @@ class ConfigTest < Minitest::Test
       assert_equal true, cfg.dig("refactor_patrol", "auto_fix", "enabled")
       assert_equal "codex", cfg.dig("refactor_patrol", "auto_fix", "agent")
       assert_equal true, cfg.dig("refactor_patrol", "issue_filing", "enabled")
+      assert_equal 0.5, cfg.dig("refactor_patrol", "issue_filing", "min_leverage_score")
       assert_equal "codex", cfg.dig("refactor_patrol", "agent")
       assert_equal "high", cfg.dig("refactor_patrol", "min_confidence")
       assert_equal 4, cfg.dig("refactor_patrol", "max_theses_per_run")
@@ -247,6 +250,19 @@ class ConfigTest < Minitest::Test
       assert_includes err.message, "low"
       assert_includes err.message, "medium"
       assert_includes err.message, "high"
+    end
+
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        refactor_patrol:
+          issue_filing:
+            min_leverage_score: 1.1
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_includes err.message, "refactor_patrol.issue_filing.min_leverage_score"
+      assert_includes err.message, "between 0 and 1"
     end
 
     with_tmp_dir do |dir|

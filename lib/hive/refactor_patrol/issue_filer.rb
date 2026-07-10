@@ -102,6 +102,7 @@ module Hive
       def eligible?(thesis, reasons)
         return false unless thesis.admissible == true
         return false if confidence(thesis.confidence) < minimum_confidence
+        return false if thesis.expected_leverage.to_h.fetch("score", 0).to_f < minimum_leverage_score
 
         flags = Array(thesis.risk && thesis.risk["flags"]).map(&:to_s)
         strategic = (flags + Array(reasons).map(&:to_s)) & STRATEGIC_REASONS
@@ -114,6 +115,10 @@ module Hive
 
       def minimum_confidence
         confidence(@cfg.dig("refactor_patrol", "min_confidence") || "medium")
+      end
+
+      def minimum_leverage_score
+        @cfg.dig("refactor_patrol", "issue_filing", "min_leverage_score").to_f
       end
 
       def valid_family_id?(family_id)
@@ -185,6 +190,10 @@ module Hive
 
           #{thesis.proposed_refactor}
 
+          ### Expected leverage
+
+          #{leverage_lines(thesis.expected_leverage)}
+
           ### Strategic reasons
 
           #{flags.map { |flag| "- #{flag}" }.join("\n")}
@@ -222,6 +231,17 @@ module Hive
         lines << "- characterization first: #{validation['notes']}" if validation["characterization_first"] == true
         lines << "- notes: #{validation['notes']}" if lines.empty? && !validation["notes"].to_s.empty?
         lines.empty? ? "- no validation supplied" : lines.join("\n")
+      end
+
+      def leverage_lines(leverage)
+        leverage ||= {}
+        lines = [ "Expected leverage score: #{leverage.fetch('score', 0).to_f.round(3)}" ]
+        Array(leverage["drivers"]).each do |driver|
+          next unless driver.is_a?(Hash)
+
+          lines << "- #{driver['signal']}: relief #{driver['relief']} — #{driver['mechanism']}"
+        end
+        lines.join("\n")
       end
 
       def title_for(thesis)

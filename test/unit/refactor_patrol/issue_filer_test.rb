@@ -45,6 +45,8 @@ class RefactorPatrolIssueFilerTest < Minitest::Test
     assert_equal "acme/demo", created.fetch(:repository)
     assert_includes created.fetch(:body), "Source PR: https://github.com/acme/demo/pull/7"
     assert_includes created.fetch(:body), "Problem evidence"
+    assert_includes created.fetch(:body), "Expected leverage score: 0.4"
+    assert_includes created.fetch(:body), "isolate repeated edits"
     assert_includes created.fetch(:body), marker
   end
 
@@ -117,6 +119,7 @@ class RefactorPatrolIssueFilerTest < Minitest::Test
     cases = [
       thesis(flags: [ "exceeds_max_files" ], confidence: "low"),
       thesis(flags: [ "exceeds_max_files" ], admissible: false),
+      thesis(flags: [ "exceeds_max_files" ], score: 0.1),
       thesis(flags: [ "missing_docs_validation" ]),
       thesis(flags: [ "collision_patrol_pr" ])
     ]
@@ -176,7 +179,7 @@ class RefactorPatrolIssueFilerTest < Minitest::Test
     Hive::RefactorPatrol::IssueFiler.new(Dir.pwd, cfg: cfg, gh: gh)
   end
 
-  def thesis(flags:, confidence: "medium", admissible: true)
+  def thesis(flags:, confidence: "medium", admissible: true, score: 0.4)
     Hive::RefactorPatrol::Thesis.new(
       id: "extract", feature_id: "architecture-services-checkout", feature: "Checkout",
       problem: "Checkout mixes validation and payment policy",
@@ -189,7 +192,12 @@ class RefactorPatrolIssueFilerTest < Minitest::Test
       ],
       proposed_refactor: "Extract a payment-policy boundary",
       feature_boundary: { "owned_files" => [ "services/checkout/core.ts" ], "entrypoints" => [] },
-      expected_leverage: { "score" => 0.4, "breakdown" => { "coupling" => 0.4 }, "drivers" => [] },
+      expected_leverage: {
+        "score" => score, "breakdown" => { "coupling" => score },
+        "drivers" => [
+          { "signal" => "coupling", "relief" => 0.5, "mechanism" => "isolate repeated edits" }
+        ]
+      },
       confidence: confidence,
       risk: {
         "flags" => flags, "caps" => { "est_files" => 9, "est_diff_lines" => 200 },

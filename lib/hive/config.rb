@@ -478,7 +478,11 @@ module Hive
           "agent" => "codex"
         },
         "issue_filing" => {
-          "enabled" => false
+          "enabled" => false,
+          # Avoid turning every cap warning into tracker noise. Issue filing
+          # is reserved for proposals with material, proposal-specific
+          # leverage in addition to a strategic routing reason.
+          "min_leverage_score" => 0.25
         },
         "agent" => "claude",
         "min_confidence" => "medium",
@@ -2721,6 +2725,14 @@ module Hive
 
       validate_required_boolean!(gate["enabled"], "refactor_patrol.#{key}.enabled", source_path)
       validate_agent_name!(gate["agent"], "refactor_patrol.auto_fix.agent", source_path) if key == "auto_fix"
+      if key == "issue_filing"
+        score = gate["min_leverage_score"]
+        unless score.is_a?(Numeric) && score.between?(0, 1)
+          raise ConfigError,
+                "refactor_patrol.issue_filing.min_leverage_score in #{describe_source(source_path)} " \
+                "must be a number between 0 and 1; got #{score.inspect} (#{score.class})"
+        end
+      end
     end
 
     def validate_required_boolean!(value, label, source_path)

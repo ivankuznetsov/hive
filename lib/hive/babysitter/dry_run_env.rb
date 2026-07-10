@@ -19,8 +19,21 @@ module Hive
       RUBY_STARTUP_ENV = %w[
         RUBYOPT RUBYLIB BUNDLE_GEMFILE BUNDLE_BIN_PATH GEM_HOME GEM_PATH
       ].freeze
+      DYNAMIC_LOADER_ENV_PATTERN = /\A(?:LD|DYLD)_/
+      DYNAMIC_LOADER_STARTUP_ENV = %w[
+        LD_AUDIT LD_LIBRARY_PATH LD_PRELOAD
+        DYLD_FALLBACK_FRAMEWORK_PATH DYLD_FALLBACK_LIBRARY_PATH DYLD_FRAMEWORK_PATH
+        DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH DYLD_VERSIONED_FRAMEWORK_PATH DYLD_VERSIONED_LIBRARY_PATH
+      ].freeze
 
       def with_env(worktree_path)
+        old = {
+          "PATH" => ENV["PATH"],
+          "HIVE_BABYSITTER_DRY_RUN_LOG" => ENV["HIVE_BABYSITTER_DRY_RUN_LOG"],
+          "HIVE_BABYSITTER_REAL_GIT" => ENV["HIVE_BABYSITTER_REAL_GIT"],
+          "HIVE_BABYSITTER_REAL_GH" => ENV["HIVE_BABYSITTER_REAL_GH"]
+        }.merge(ENV.to_h.select { |key, _value| DYNAMIC_LOADER_ENV_PATTERN.match?(key) })
+        clear_dynamic_loader_env
         # Resolve real git/gh *before* prepending the overlay onto PATH,
         # otherwise `which` finds the overlay wrappers and the stubs `exec`
         # themselves recursively until the babysitter timeout.
@@ -34,18 +47,13 @@ module Hive
           gh_config_dir: gh_config_dir,
           skip_log: skip_log
         )
-        old = {
-          "PATH" => ENV["PATH"],
-          "HIVE_BABYSITTER_DRY_RUN_LOG" => ENV["HIVE_BABYSITTER_DRY_RUN_LOG"],
-          "HIVE_BABYSITTER_REAL_GIT" => ENV["HIVE_BABYSITTER_REAL_GIT"],
-          "HIVE_BABYSITTER_REAL_GH" => ENV["HIVE_BABYSITTER_REAL_GH"]
-        }
         ENV["PATH"] = [ overlay, ENV["PATH"] ].compact.join(File::PATH_SEPARATOR)
         ENV["HIVE_BABYSITTER_DRY_RUN_LOG"] = skip_log
         ENV["HIVE_BABYSITTER_REAL_GIT"] = real_git
         ENV["HIVE_BABYSITTER_REAL_GH"] = real_gh
         yield
       ensure
+        clear_dynamic_loader_env
         old&.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
         FileUtils.rm_rf(File.join(worktree_path, OVERLAY_DIRNAME))
       end
@@ -81,6 +89,7 @@ module Hive
           File.write(link, <<~SH)
             #!/bin/sh
             unset #{RUBY_STARTUP_ENV.join(' ')}
+            unset #{DYNAMIC_LOADER_STARTUP_ENV.join(' ')}
             #{env_setup}
             exec #{shell_word(RbConfig.ruby)} #{shell_word(target)} "$@"
           SH
@@ -91,6 +100,10 @@ module Hive
 
       def shell_env_assignment(name, value)
         value.nil? ? "unset #{name}" : "export #{name}=#{shell_word(value)}"
+      end
+
+      def clear_dynamic_loader_env
+        ENV.keys.grep(DYNAMIC_LOADER_ENV_PATTERN).each { |key| ENV.delete(key) }
       end
 
       def shell_word(value)

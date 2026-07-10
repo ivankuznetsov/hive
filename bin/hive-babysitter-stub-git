@@ -382,6 +382,7 @@ ENV["GIT_OPTIONAL_LOCKS"] = "0"
 # purpose: it is user-writable under Homebrew, which would reopen the same poisoning vector.
 #
 ENV["PATH"] = "/usr/bin:/bin"
+ENV.keys.grep(/\A(?:LD|DYLD)_/).each { |key| ENV.delete(key) }
 
 begin
   # Array-form exec (no shell) hands argv straight to the real git binary.

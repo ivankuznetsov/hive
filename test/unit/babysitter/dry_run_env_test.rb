@@ -48,6 +48,27 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_with_env_scrubs_and_restores_dynamic_loader_environment
+    parent_env = {
+      "LD_HIVE_TEST" => "parent-ld",
+      "DYLD_HIVE_TEST" => "parent-dyld"
+    }
+
+    with_env(parent_env) do
+      with_tmp_dir do |dir|
+        Hive::Babysitter::DryRunEnv.with_env(dir) do
+          parent_env.each_key { |key| refute ENV.key?(key), "#{key} must not reach the dry-run agent" }
+          ENV["LD_AGENT_ADDED"] = "agent-ld"
+          ENV["DYLD_AGENT_ADDED"] = "agent-dyld"
+        end
+
+        assert_equal parent_env, ENV.to_h.slice(*parent_env.keys)
+        refute ENV.key?("LD_AGENT_ADDED")
+        refute ENV.key?("DYLD_AGENT_ADDED")
+      end
+    end
+  end
+
   # The dry-run artifacts must be gitignored in the real repo so a stage-exit
   # CleanExit treats them as clean rather than out-of-scope residue. Removing
   # any of these `.gitignore` entries turns this red.
@@ -249,6 +270,28 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes real_invocations, "git -c core.fsmonitor=false"
       assert_includes real_invocations, "--no-pager status --short"
       assert_includes real_invocations, "gh repo view owner/repo"
+    end
+  end
+
+  def test_overlay_shims_unset_known_dynamic_loader_environment_before_ruby_handoff
+    with_tmp_dir do |dir|
+      recording_binary(dir, "git")
+      recording_binary(dir, "gh")
+
+      with_env("PATH" => [ dir, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR)) do
+        Hive::Babysitter::DryRunEnv.with_env(dir) do
+          %w[git gh].each do |binary|
+            launcher = File.read(File.join(dir, ".hive-babysitter-dry-run-bin", binary))
+            %w[
+              LD_AUDIT LD_LIBRARY_PATH LD_PRELOAD
+              DYLD_FALLBACK_FRAMEWORK_PATH DYLD_FALLBACK_LIBRARY_PATH DYLD_FRAMEWORK_PATH
+              DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH DYLD_VERSIONED_FRAMEWORK_PATH DYLD_VERSIONED_LIBRARY_PATH
+            ].each do |key|
+              assert_match(/\b#{key}\b/, launcher, "#{binary} launcher must unset #{key}")
+            end
+          end
+        end
+      end
     end
   end
 
@@ -1000,6 +1043,38 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert File.directory?(config_dir), "GH_CONFIG_DIR should point at a real directory gh can use"
       assert_empty Dir.children(config_dir),
                    "gh's config dir should start empty so no attacker-controlled config is honored"
+    end
+  end
+
+  def test_stubs_scrub_all_dynamic_loader_environment_before_passthrough
+    with_tmp_dir do |dir|
+      loader_env = {
+        "LD_AUDIT" => "",
+        "LD_LIBRARY_PATH" => dir,
+        "LD_PRELOAD" => "",
+        "LD_HIVE_TEST" => "agent-ld",
+        "DYLD_INSERT_LIBRARIES" => "",
+        "DYLD_LIBRARY_PATH" => dir,
+        "DYLD_HIVE_TEST" => "agent-dyld"
+      }
+
+      {
+        "git" => [ "status", "--short" ],
+        "gh" => [ "repo", "view", "owner/repo" ]
+      }.each do |binary, args|
+        FileUtils.rm_f(File.join(dir, "env.log"))
+        real = recording_env_binary(dir, "real-#{binary}", loader_env.keys)
+        env = loader_env.merge(
+          "HIVE_BABYSITTER_REAL_#{binary.upcase}" => real,
+          "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "skipped.log")
+        )
+
+        _out, err, status = Open3.capture3(env, stub_path(binary), *args)
+
+        assert status.success?, err
+        expected = loader_env.keys.map { |key| "#{key}=<unset>\n" }.join
+        assert_equal expected, File.read(File.join(dir, "env.log"))
+      end
     end
   end
 

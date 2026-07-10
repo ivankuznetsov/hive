@@ -487,6 +487,7 @@ ENV.keys.grep(/\AGIT_TRACE/).each { |key| ENV.delete(key) }
 config_home = make_gh_config_home
 ENV["HOME"] = config_home
 ENV["GH_CONFIG_DIR"] = config_home
+ENV.keys.grep(/\A(?:LD|DYLD)_/).each { |key| ENV.delete(key) }
 
 begin
   exec real, *argv

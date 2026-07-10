@@ -21,7 +21,8 @@ module Hive
     # pins them (-m / --reasoning-effort); grok's default model is the
     # current flagship (grok-4.5 at profile-authoring time).
     #
-    # Grok accepts an interactive device login or XAI_API_KEY. GROK_HOME
+    # Grok accepts an interactive device login or XAI_API_KEY.
+    # GROK_AUTH_PATH selects the credential file directly, while GROK_HOME
     # relocates the CLI state directory; GROK_CODE_XAI_API_KEY remains a
     # backward-compatible key for custom-model configurations.
     GROK_PREFLIGHT = -> {
@@ -32,16 +33,11 @@ module Hive
 
       auth_path =
         begin
-          grok_home = ENV["GROK_HOME"]
-          if grok_home.to_s.strip.empty?
-            File.expand_path("~/.grok/auth.json")
-          else
-            File.expand_path("auth.json", grok_home)
-          end
+          Hive::AgentProfiles.grok_auth_path
         rescue ArgumentError => e
           raise Hive::AgentError,
-                "grok profile preflight failed: cannot resolve home directory (#{e.message}). " \
-                "Set $HOME/GROK_HOME, XAI_API_KEY, or run `grok login --device-auth`."
+                "grok profile preflight failed: cannot resolve auth path (#{e.message}). " \
+                "Set $HOME/GROK_AUTH_PATH/GROK_HOME, XAI_API_KEY, or run `grok login --device-auth`."
         end
 
       unless File.exist?(auth_path)

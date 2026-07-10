@@ -199,7 +199,7 @@ origin also prints the Host-header/reverse-proxy warning.
   the CLI keeps polling, and the status turbo-frame keeps refreshing until the
   PTY child exits while hiding the paste-back form. Claude remains the
   paste-back `claude setup-token` flow. Grok status also recognizes
-  `XAI_API_KEY` and credentials under `GROK_HOME`. Raw PTY bytes are scrubbed to
+  `XAI_API_KEY`, `GROK_AUTH_PATH`, and credentials under `GROK_HOME`. Raw PTY bytes are scrubbed to
   render-safe UTF-8 before the `<pre>` output is interpolated, and captured
   URLs are sanitized by replacing ANSI/terminal-control runs with spaces
   before re-extracting the first URL so adjacent URLs are split rather than

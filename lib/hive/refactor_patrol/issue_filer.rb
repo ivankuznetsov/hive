@@ -34,16 +34,13 @@ module Hive
 
       def publish(thesis:, family_id:, canonical_action_id:, job_id:, source:, reasons: [],
                   record_intent:, creation_attempted: false)
-        return result("issue_disabled", true) unless issue_enabled?
-        return result("quality_gate_failed", true) unless eligible?(thesis, reasons)
+        return result("issue_disabled", true) unless issue_enabled? || creation_attempted
+        return result("quality_gate_failed", true) unless creation_attempted || eligible?(thesis, reasons)
         return result("invalid_family", true) unless valid_family_id?(family_id)
         return result("invalid_action", true) unless valid_action_id?(canonical_action_id)
 
         action_id = canonical_action_id.to_s
         marker = marker_for(family_id, action_id)
-        body = body_for(thesis, family_id, job_id, source, reasons, marker)
-        return result("secret_detected", true) if Hive::SecretPatterns.scan(body).any?
-
         existing = lookup_existing(source.fetch("repository"), marker)
         return existing if existing.is_a?(Result)
         unless existing.empty?
@@ -56,6 +53,9 @@ module Hive
             receipts: base_receipts(family_id, action_id).merge("creation_intent" => true)
           )
         end
+
+        body = body_for(thesis, family_id, job_id, source, reasons, marker)
+        return result("secret_detected", true) if Hive::SecretPatterns.scan(body).any?
 
         intent_receipt = record_intent.call
         unless intent_receipt.equal?(true)

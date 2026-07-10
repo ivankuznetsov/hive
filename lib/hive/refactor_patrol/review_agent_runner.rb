@@ -1,8 +1,11 @@
+require "json"
+require "fileutils"
 require "time"
 require "hive"
 require "hive/agent"
 require "hive/agent_profiles"
 require "hive/patrol/runner_task"
+require "hive/permission_scope"
 require "hive/usage_db"
 
 module Hive
@@ -14,11 +17,12 @@ module Hive
     class ReviewAgentRunner
       STAGE = "refactor-patrol-review".freeze
 
-      def initialize(project_root:, cfg:, state:, dry_run: false)
+      def initialize(project_root:, cfg:, state:, dry_run: false, read_only: false)
         @project_root = project_root
         @cfg = cfg
         @state = state
         @dry_run = dry_run
+        @read_only = read_only
       end
 
       def call(prompt:, output_path:, run_dir:, **)
@@ -33,6 +37,7 @@ module Hive
           slug: STAGE
         )
         profile = Hive::AgentProfiles.lookup(configured_agent, cfg: @cfg)
+        scope = read_only_scope(profile)
         started_at = Time.now.utc
         result = Hive::Agent.new(
           task: task,
@@ -43,14 +48,51 @@ module Hive
           timeout_sec: @cfg.dig("timeout_sec", "patrol") || 3600,
           log_label: STAGE,
           profile: profile,
-          expected_output: output_path,
-          status_mode: :output_file_exists
+          expected_output: @read_only ? nil : output_path,
+          status_mode: @read_only ? :exit_code_only : :output_file_exists,
+          **scope
         ).run!
+        result = materialize_read_only_output(result, output_path) if @read_only
         record_usage(result, profile, started_at)
         result
       end
 
       private
+
+      def read_only_scope(profile)
+        return {} unless @read_only
+        unless profile.name == :claude
+          raise Hive::ConfigError,
+                "refactor patrol provider #{profile.name.inspect} cannot enforce read-only discovery; " \
+                "configure refactor_patrol.agent: claude"
+        end
+
+        scope = Hive::PermissionScope.resolve(
+          "read-only",
+          task_folder: @project_root,
+          profile: profile,
+          stage: STAGE
+        )
+        {
+          permission_mode: scope.permission_mode,
+          allowed_tools: scope.allowed_tools,
+          disallowed_tools: scope.disallowed_tools
+        }
+      end
+
+      def materialize_read_only_output(result, output_path)
+        return result unless result.is_a?(Hash) && result[:status] == :ok
+
+        doc = JSON.parse(result[:final_message].to_s)
+        unless doc.is_a?(Hash) && doc["theses"].is_a?(Array)
+          raise JSON::ParserError, "read-only review final message must be an object with a theses array"
+        end
+        FileUtils.mkdir_p(File.dirname(output_path))
+        File.write(output_path, "#{JSON.generate(doc)}\n")
+        result
+      rescue JSON::ParserError => e
+        result.merge(status: :error, error_message: "invalid read-only review output: #{e.message}")
+      end
 
       def record_usage(result, profile, started_at)
         usage = result && result[:usage]

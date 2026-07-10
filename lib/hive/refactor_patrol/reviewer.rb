@@ -17,7 +17,7 @@ module Hive
     class Reviewer
       TemplateBindings = Struct.new(
         :project_root, :feature, :leverage, :commands, :output_path,
-        :max_theses, :user_supplied_tag,
+        :max_theses, :source_pr, :output_mode, :user_supplied_tag,
         keyword_init: true
       ) do
         def binding_for_erb = binding
@@ -25,13 +25,19 @@ module Hive
 
       attr_reader :review_errors
 
-      def initialize(project_root, cfg:, state: StateStore.new(project_root), agent_runner: nil, dry_run: false)
+      def initialize(project_root, cfg:, state: StateStore.new(project_root), agent_runner: nil, dry_run: false,
+                     source_pr: nil, read_only: false)
         @project_root = File.expand_path(project_root)
         @cfg = cfg
         @state = state
         @dry_run = dry_run
+        @source_pr = source_pr
+        @read_only = read_only
         @agent_runner = agent_runner ||
-                        ReviewAgentRunner.new(project_root: @project_root, cfg: cfg, state: state, dry_run: dry_run)
+                        ReviewAgentRunner.new(
+                          project_root: @project_root, cfg: cfg, state: state,
+                          dry_run: dry_run, read_only: read_only
+                        )
         @review_errors = []
         @normalizer = ThesisNormalizer.new(project_root: @project_root, commands: configured_commands)
       end
@@ -72,6 +78,8 @@ module Hive
             commands: configured_commands,
             output_path: output_path,
             max_theses: max_theses,
+            source_pr: @source_pr,
+            output_mode: @read_only ? "final_message" : "output_file",
             user_supplied_tag: Hive::Stages::Base.user_supplied_tag
           )
         )

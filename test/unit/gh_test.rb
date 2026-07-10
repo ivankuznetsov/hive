@@ -577,6 +577,66 @@ def test_repo_name_with_owner_raises_on_unparseable_json
   end
 end
 
+def test_merged_pr_details_fetches_complete_paginated_file_metadata
+  status = Hive::Gh::CommandStatus.new(exitstatus: 0)
+  calls = []
+  metadata = {
+    "number" => 7, "url" => "https://github.com/acme/demo/pull/7", "state" => "MERGED",
+    "baseRefName" => "main", "baseRefOid" => "a" * 40,
+    "mergeCommit" => { "oid" => "b" * 40 }, "mergedAt" => "2026-07-10T10:00:00Z",
+    "changedFiles" => 2
+  }
+  pages = [
+    [ { "filename" => "lib/a.rb", "status" => "modified" } ],
+    [ { "filename" => "lib/b.rb", "status" => "renamed", "previous_filename" => "lib/old.rb" } ]
+  ]
+
+  with_replaced_singleton_method(Hive::Gh, :ensure_authenticated!, ->(*) { }) do
+    with_replaced_singleton_method(Hive::Gh, :repo_name_with_owner, ->(*) { "acme/demo" }) do
+      with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*cmd, **kwargs|
+        calls << [ cmd, kwargs ]
+        body = cmd[1] == "pr" ? JSON.generate(metadata) : JSON.generate(pages)
+        [ body, "", status ]
+      }) do
+        details = Hive::Gh.merged_pr_details("7", worktree_path: "/tmp/demo", cfg: { "x" => true })
+        assert_equal 2, details.fetch("files").size
+        assert_equal "lib/old.rb", details.fetch("files").last.fetch("previous_path")
+      end
+    end
+  end
+
+  api = calls.find { |cmd, _| cmd[1] == "api" }
+  assert_includes api.first, "--paginate"
+  assert_includes api.first, "--slurp"
+  assert_equal "/tmp/demo", calls.first.last.fetch(:chdir)
+end
+
+def test_merged_pr_details_rejects_url_from_another_repository_before_file_fetch
+  status = Hive::Gh::CommandStatus.new(exitstatus: 0)
+  metadata = {
+    "number" => 7, "url" => "https://github.com/other/repo/pull/7", "state" => "MERGED",
+    "baseRefName" => "main", "baseRefOid" => "a" * 40,
+    "mergeCommit" => { "oid" => "b" * 40 }, "mergedAt" => "2026-07-10T10:00:00Z",
+    "changedFiles" => 1
+  }
+  calls = []
+
+  with_replaced_singleton_method(Hive::Gh, :ensure_authenticated!, ->(*) { }) do
+    with_replaced_singleton_method(Hive::Gh, :repo_name_with_owner, ->(*) { "acme/demo" }) do
+      with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*cmd, **_kwargs|
+        calls << cmd
+        [ JSON.generate(metadata), "", status ]
+      }) do
+        assert_raises(Hive::GhError) do
+          Hive::Gh.merged_pr_details("https://github.com/other/repo/pull/7", worktree_path: "/tmp/demo")
+        end
+      end
+    end
+  end
+
+  assert_equal 1, calls.size, "repository mismatch must fail before fetching local-repository file pages"
+end
+
 def test_list_merged_prs_uses_repo_search_window
   status = Hive::Gh::CommandStatus.new(exitstatus: 0)
   captured = nil

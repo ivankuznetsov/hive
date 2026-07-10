@@ -1,5 +1,6 @@
 require "json"
 require "timeout"
+require "uri"
 require "yaml"
 require "hive/secret_patterns"
 
@@ -140,6 +141,75 @@ module Hive
       )
     rescue JSON::ParserError => e
       raise Hive::GhError, "`gh pr view #{number}` returned unparseable JSON: #{e.message}"
+    end
+
+    # Resolve the complete immutable inputs needed by PR-scoped architecture
+    # patrol. `gh pr view` supplies merge identity while the REST files endpoint
+    # supplies status/rename metadata and is explicitly paginated.
+    def merged_pr_details(pr, worktree_path:, cfg: nil)
+      ensure_authenticated!(cfg)
+      fields = %w[number url state baseRefName baseRefOid mergeCommit mergedAt changedFiles].join(",")
+      out, err, status = capture3(
+        "gh", "pr", "view", pr.to_s, "--json", fields,
+        chdir: worktree_path, cfg: cfg
+      )
+      unless status.success?
+        raise Hive::GhError, "`gh pr view #{pr}` failed: #{err.to_s.strip.empty? ? out : err.strip}"
+      end
+      doc = JSON.parse(out)
+      raise Hive::GhError, "`gh pr view #{pr}` returned #{doc.class}; expected Hash" unless doc.is_a?(Hash)
+
+      repository = repo_name_with_owner(worktree_path, cfg: cfg)
+      number = doc["number"]
+      validate_pr_repository_identity!(doc["url"], repository, number)
+      pages_out, pages_err, pages_status = capture3(
+        "gh", "api", "repos/#{repository}/pulls/#{number}/files?per_page=100",
+        "--paginate", "--slurp", chdir: worktree_path, cfg: cfg
+      )
+      unless pages_status.success?
+        message = pages_err.to_s.strip.empty? ? pages_out : pages_err.strip
+        raise Hive::GhError, "`gh api` failed while listing files for PR #{number}: #{message}"
+      end
+      pages = JSON.parse(pages_out)
+      unless pages.is_a?(Array) && pages.all? { |page| page.is_a?(Array) }
+        raise Hive::GhError, "`gh api` returned incomplete file pages for PR #{number}"
+      end
+      files = pages.flatten.map do |file|
+        raise Hive::GhError, "`gh api` returned a non-object file for PR #{number}" unless file.is_a?(Hash)
+
+        {
+          "path" => file["filename"].to_s,
+          "status" => file["status"].to_s,
+          "previous_path" => file["previous_filename"].to_s.empty? ? nil : file["previous_filename"].to_s
+        }.compact
+      end
+
+      {
+        "number" => number,
+        "url" => doc["url"],
+        "repository" => repository,
+        "state" => doc["state"],
+        "base_branch" => doc["baseRefName"],
+        "base_sha" => doc["baseRefOid"],
+        "merge_sha" => doc.dig("mergeCommit", "oid"),
+        "merged_at" => doc["mergedAt"],
+        "changed_files" => doc["changedFiles"],
+        "files" => files
+      }
+    rescue JSON::ParserError => e
+      raise Hive::GhError, "merged PR metadata for #{pr} was unparseable: #{e.message}"
+    end
+
+    def validate_pr_repository_identity!(url, repository, number)
+      uri = URI.parse(url.to_s)
+      match = uri.path.match(%r{\A/([^/]+/[^/]+)/pull/([1-9]\d*)\z})
+      unless uri.host && match && match[1].casecmp?(repository.to_s) && match[2].to_i == number
+        raise Hive::GhError,
+              "resolved PR URL #{url.inspect} does not match registered repository #{repository.inspect} and PR #{number.inspect}"
+      end
+      true
+    rescue URI::InvalidURIError
+      raise Hive::GhError, "resolved PR URL #{url.inspect} is invalid"
     end
 
     def pr_state(pr_url, cfg: nil)

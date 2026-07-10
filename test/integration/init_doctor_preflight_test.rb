@@ -10,12 +10,42 @@ require "hive/commands/init"
 class InitDoctorPreflightTest < Minitest::Test
   include HiveTestHelper
 
+  class ResolutionInspector
+    def initialize(config:, project_root:)
+      @config = config
+      @project_root = project_root
+    end
+
+    def inspect
+      Hive::AgentSkills::TargetResolver.new(config: @config, project_root: @project_root).resolve.map do |target|
+        resolver = case target.agent
+        when "claude" then Hive::SkillCheck::Claude
+        when "codex" then Hive::SkillCheck::Codex
+        when "pi" then Hive::SkillCheck::Pi
+        end
+        found = resolver.resolve(target.invocation, project_root: @project_root)
+        health = found.status == :present ? "healthy" : "missing"
+        Hive::AgentSkills::Inspection.new(
+          target: target, expected: {}, native: { "available" => true },
+          resolution: { "path" => found.path }, health: health,
+          severity: health == "healthy" ? "info" : "error", explanation: found.message,
+          remediation: "hive setup-agents --agent #{target.agent} --skill #{target.capability_id}"
+        )
+      end
+    end
+  end
+
   def with_fake_home
     with_tmp_dir do |dir|
       old = ENV["HOME"]
+      original_inspector_new = Hive::AgentSkills::Inspector.method(:new)
       ENV["HOME"] = dir
+      Hive::AgentSkills::Inspector.define_singleton_method(:new) do |config:, project_root:, **|
+        ResolutionInspector.new(config: config, project_root: project_root)
+      end
       yield dir
     ensure
+      Hive::AgentSkills::Inspector.define_singleton_method(:new, original_inspector_new) if original_inspector_new
       old.nil? ? ENV.delete("HOME") : ENV["HOME"] = old
     end
   end
@@ -146,12 +176,8 @@ class InitDoctorPreflightTest < Minitest::Test
           end
           out, err = capture_io { Hive::Commands::Init.new(dir).call }
           assert_includes out, "hive: initialized"
-          # Hive::ConfigError IS StandardError, so this hits the bug-rescue
-          # branch (not the EXIT_CONFIG_ERROR branch — that requires the
-          # error to be caught BY Doctor, not by Hive::Config.load).
-          # The test still exercises a real failure mode and the user
-          # gets a clear pointer.
-          assert_match(/doctor pre-flight failed/, err)
+          assert_match(/doctor pre-flight — config issue detected/, err)
+          assert_match(/run `hive doctor` for details/, err)
         ensure
           Hive::Config.define_singleton_method(:load, original) if original
         end

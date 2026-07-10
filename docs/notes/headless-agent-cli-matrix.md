@@ -205,9 +205,11 @@ not report token counts, so Hive records usage only if a future event includes
 a real usage object—it does not fabricate a zero-token session.
 
 Authentication supports `XAI_API_KEY`, the backward-compatible
-`GROK_CODE_XAI_API_KEY`, or `grok login --device-auth`. `GROK_HOME` relocates
-the default `~/.grok` state directory, while `GROK_AUTH_PATH` selects the
-credential file directly and takes precedence over `GROK_HOME`. Grok has no
+`GROK_CODE_XAI_API_KEY`, or `grok login --device-auth`. An absolute `GROK_HOME`
+relocates the default `~/.grok` state directory, while an absolute `GROK_AUTH_PATH`
+selects the credential file directly and takes precedence over `GROK_HOME`.
+Hive rejects relative path overrides so preflight and a child spawned in another
+working directory cannot resolve different credential files or state directories. Grok has no
 `--add-dir` equivalent or native dollar-budget flag, so Hive retains its
 process-group wall-clock limit and emits the normal reduced-isolation warning.
 No Grok skill verifier exists yet; the bundled Grok CE reviewer therefore uses

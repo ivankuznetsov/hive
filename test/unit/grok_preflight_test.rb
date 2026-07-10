@@ -60,20 +60,49 @@ class GrokPreflightTest < Minitest::Test
     end
   end
 
-  def test_translates_home_resolution_failure_to_agent_error
-    original_expand_path = File.method(:expand_path)
-    File.define_singleton_method(:expand_path) do |target, *args|
-      raise ArgumentError, "could not resolve auth path" if target == "bad-auth-path"
-
-      original_expand_path.call(target, *args)
-    end
-    err = with_env("GROK_AUTH_PATH" => "bad-auth-path") do
+  def test_rejects_relative_grok_auth_path
+    err = with_env(
+      "GROK_AUTH_PATH" => "relative/auth.json",
+      "XAI_API_KEY" => nil,
+      "GROK_CODE_XAI_API_KEY" => nil
+    ) do
       assert_raises(Hive::AgentError) { Hive::AgentProfiles::GROK_PREFLIGHT.call }
     end
 
-    assert_match(/cannot resolve auth path/, err.message)
-  ensure
-    File.define_singleton_method(:expand_path, original_expand_path) if original_expand_path
+    assert_match(/GROK_AUTH_PATH must be absolute/, err.message)
+  end
+
+  def test_rejects_relative_grok_auth_path_even_with_api_key
+    err = with_env("GROK_AUTH_PATH" => "relative/auth.json", "XAI_API_KEY" => "test-key") do
+      assert_raises(Hive::AgentError) { Hive::AgentProfiles::GROK_PREFLIGHT.call }
+    end
+
+    assert_match(/GROK_AUTH_PATH must be absolute/, err.message)
+  end
+
+  def test_rejects_relative_grok_home
+    err = with_env("GROK_AUTH_PATH" => nil, "GROK_HOME" => "relative/grok-home") do
+      assert_raises(Hive::AgentError) { Hive::AgentProfiles::GROK_PREFLIGHT.call }
+    end
+
+    assert_match(/GROK_HOME must be absolute/, err.message)
+  end
+
+  def test_rejects_relative_grok_home_when_auth_path_and_api_key_are_set
+    Dir.mktmpdir do |dir|
+      auth_path = File.join(dir, "auth.json")
+      File.write(auth_path, '{"access_token":"x"}')
+
+      err = with_env(
+        "GROK_AUTH_PATH" => auth_path,
+        "GROK_HOME" => "relative/grok-home",
+        "XAI_API_KEY" => "test-key"
+      ) do
+        assert_raises(Hive::AgentError) { Hive::AgentProfiles::GROK_PREFLIGHT.call }
+      end
+
+      assert_match(/GROK_HOME must be absolute/, err.message)
+    end
   end
 
   def test_passes_with_real_credential

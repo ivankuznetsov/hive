@@ -165,6 +165,32 @@ class AgentProfilesTest < Minitest::Test
     end
   end
 
+  def test_grok_logged_in_rejects_relative_auth_path
+    Dir.mktmpdir do |dir|
+      File.write(File.join(dir, "auth.json"), '{"access_token":"x"}')
+
+      Dir.chdir(dir) do
+        with_env(
+          "GROK_AUTH_PATH" => "auth.json",
+          "XAI_API_KEY" => nil,
+          "GROK_CODE_XAI_API_KEY" => nil
+        ) { refute Hive::AgentProfiles.logged_in?(:grok) }
+      end
+    end
+  end
+
+  def test_grok_logged_in_rejects_relative_auth_path_even_with_api_key
+    with_env("GROK_AUTH_PATH" => "auth.json", "XAI_API_KEY" => "test-key") do
+      refute Hive::AgentProfiles.logged_in?(:grok)
+    end
+  end
+
+  def test_grok_logged_in_rejects_relative_grok_home
+    with_env("GROK_AUTH_PATH" => nil, "GROK_HOME" => "relative/grok-home") do
+      refute Hive::AgentProfiles.logged_in?(:grok)
+    end
+  end
+
   def test_grok_logged_in_explicit_locations_do_not_require_home_resolution
     Dir.mktmpdir do |auth_dir|
       auth_path = File.join(auth_dir, "shared-auth.json")

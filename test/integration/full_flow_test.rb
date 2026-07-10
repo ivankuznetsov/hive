@@ -165,6 +165,8 @@ class FullFlowTest < Minitest::Test
         # Override worktree_root so tests don't pollute ~/Dev.
         cfg_path = File.join(dir, ".hive-state", "config.yml")
         cfg = YAML.safe_load(File.read(cfg_path))
+        refute cfg.key?("models"),
+               "legacy rendered configs keep models examples commented and active defaults unchanged"
         worktree_root = Dir.mktmpdir("flow-wt-root-")
         @spawned_worktrees << worktree_root
         cfg["worktree_root"] = worktree_root

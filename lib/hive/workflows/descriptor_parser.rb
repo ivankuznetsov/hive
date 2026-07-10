@@ -239,6 +239,8 @@ module Hive
       end
 
       def validate_profile_model_controls!(agent, model, effort, label)
+        return if model.nil? && effort.nil?
+
         profile = Hive::AgentProfiles.lookup(agent)
         profile.validate_model_control!(model, path: "#{label} model")
         profile.validate_effort_control!(effort, path: "#{label} effort")

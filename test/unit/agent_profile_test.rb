@@ -200,6 +200,7 @@ class AgentProfileTest < Minitest::Test
     refute profile.supports_model_control?
     refute profile.supports_effort_control?
     assert_raises(Hive::ConfigError) { profile.render_model_controls(model: "x") }
+    assert_raises(Hive::ConfigError) { profile.render_model_controls(effort: "high") }
   end
 
   def test_declared_renderers_validate_and_render_controls
@@ -212,6 +213,7 @@ class AgentProfileTest < Minitest::Test
     assert_equal [ "--choose-model", "custom", "--reasoning", "high" ],
                  profile.render_model_controls(model: "custom", effort: "high")
     assert_raises(Hive::ConfigError) { profile.render_model_controls(effort: "xhigh") }
+    assert_raises(Hive::ConfigError) { profile.render_model_controls(model: Object.new) }
     assert_equal "claude", profile.with_overrides({}).bin_default
   end
 end

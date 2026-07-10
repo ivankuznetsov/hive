@@ -118,12 +118,31 @@ class ClaudeLauncherTest < Minitest::Test
     end
   end
 
-  def test_shared_session_derives_cli_flags_from_config_when_none_are_passed
+  def test_launch_without_config_omits_config_flags_before_rejecting_missing_mode
+    with_tmp_task do |task|
+      assert_raises(NoMethodError) do
+        Hive::ClaudeLauncher.launch!(
+          task: task,
+          cfg: nil,
+          prompt: "prompt",
+          add_dirs: [],
+          cwd: task.folder,
+          max_budget_usd: 1,
+          timeout_sec: 1,
+          log_label: "test",
+          session_name: "hive-test-session",
+          permission_mode: "auto"
+        )
+      end
+    end
+  end
+
+  def test_shared_session_derives_cli_flags_from_config_or_omits_them_without_config
     with_tmp_task do |task|
       runner = Object.new
       runner.define_singleton_method(:start_detached) { |command:| @command = command }
       runner.define_singleton_method(:kill_session) { }
-      captured_flags = nil
+      captured_flags = []
       cfg = {
         "claude" => {
           "permission_mode" => "bypassPermissions",
@@ -137,7 +156,7 @@ class ClaudeLauncherTest < Minitest::Test
           with_replaced_singleton_method(Hive::ClaudeLauncher, :reset_signal_files, ->(*) { }) do
             with_replaced_singleton_method(Hive::StopHookInstaller, :install, ->(**) { [] }) do
               with_replaced_singleton_method(Hive::ClaudeLauncher, :wrapper_command, lambda { |**kwargs|
-                captured_flags = kwargs.fetch(:cli_flags)
+                captured_flags << kwargs.fetch(:cli_flags)
                 [ "claude" ]
               }) do
                 with_replaced_singleton_method(Hive::ClaudeLauncher, :wait_until_session_exists!, ->(*) { }) do
@@ -153,6 +172,14 @@ class ClaudeLauncherTest < Minitest::Test
                               cwd: task.folder,
                               add_dirs: []
                             ) { |_handle| }
+                            Hive::ClaudeLauncher.with_shared_session(
+                              task: task,
+                              cfg: nil,
+                              session_name: "hive-test-session",
+                              cwd: task.folder,
+                              add_dirs: [],
+                              permission_mode: "auto"
+                            ) { |_handle| }
                           end
                         end
                       end
@@ -165,7 +192,7 @@ class ClaudeLauncherTest < Minitest::Test
         end
       end
 
-      assert_equal %w[--model sonnet --effort medium], captured_flags
+      assert_equal [ %w[--model sonnet --effort medium], [] ], captured_flags
     end
   end
 

@@ -16,7 +16,6 @@ module Hive
         stage = task.workflow.stage_named(task.stage_name)
         stage or raise Hive::StageError, "no council stage #{task.stage_name}"
         output_path = File.join(task.folder, stage.state_file)
-        Hive::Config.validate_council_model_controls!(cfg, stage)
 
         # Pre-flight resume (plan U4). Inspect the current marker BEFORE opening a
         # round so re-running behaves like the design flowchart's pre-flight node:
@@ -28,6 +27,7 @@ module Hive
         preflight = Hive::Markers.current(output_path)
         return { commit: action_for(:complete), status: :complete } if preflight.name == :complete
 
+        Hive::Config.validate_council_model_controls!(cfg, stage)
         target_path = resolve_target_path(task, stage)
 
         unless File.exist?(target_path) && File.size(target_path).positive?

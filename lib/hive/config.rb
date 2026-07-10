@@ -832,12 +832,10 @@ module Hive
 
     def resolve_model_control_field(cfg, profile, stage, field, call_value)
       if stage
-        exact = cfg.dig("models", stage)
-        return exact[field] if exact.is_a?(Hash) && exact.key?(field)
+        return cfg.dig("models", stage, field) if nested_key?(cfg, "models", stage, field)
 
         parent = MODEL_STAGE_PARENTS.fetch(stage)
-        coarse = parent && cfg.dig("models", parent)
-        return coarse[field] if coarse.is_a?(Hash) && coarse.key?(field)
+        return cfg.dig("models", parent, field) if parent && nested_key?(cfg, "models", parent, field)
       end
       return call_value unless call_value.nil?
 
@@ -1844,34 +1842,35 @@ module Hive
     end
 
     def model_profiles_for_stage(cfg, stage)
-      names = case stage
-              when "brainstorm" then [ cfg.dig("brainstorm", "agent") ]
-              when "plan" then [ cfg.dig("plan", "agent") ]
-              when "execute", "execute_implementation", "rebase", "diagnose", "babysitter"
-                [ cfg.dig("execute", "agent") ]
-              when "open_pr" then [ cfg.dig("open_pr", "agent") ]
-              when "artifacts" then [ cfg.dig("artifacts", "agent") ]
-              when "finalize" then [ cfg.dig("finalize", "agent") ]
-              when "review_ci" then [ cfg.dig("review", "ci", "agent") ]
-              when "review_triage" then [ cfg.dig("review", "triage", "agent") ]
-              when "review_fix" then [ cfg.dig("review", "fix", "agent") ]
-              when "review_browser" then [ cfg.dig("review", "browser_test", "agent") ]
-              when "review_reviewers" then reviewer_agent_names(cfg)
-              when "review"
-                [
-                  cfg.dig("review", "ci", "agent"),
-                  cfg.dig("review", "triage", "agent"),
-                  cfg.dig("review", "fix", "agent"),
-                  cfg.dig("review", "browser_test", "agent"),
-                  *reviewer_agent_names(cfg)
-                ]
-              when "patrol", "patrol_review", "patrol_fix"
-                [ cfg.dig("patrol", "agent") ]
-              when "digest"
-                [ cfg.dig("digest", "agent") || cfg.dig("patrol", "agent") || "claude" ]
-              else
-                []
-              end
+      names =
+        case stage
+        when "brainstorm" then [ cfg.dig("brainstorm", "agent") ]
+        when "plan" then [ cfg.dig("plan", "agent") ]
+        when "execute", "execute_implementation", "rebase", "diagnose", "babysitter"
+          [ cfg.dig("execute", "agent") ]
+        when "open_pr" then [ cfg.dig("open_pr", "agent") ]
+        when "artifacts" then [ cfg.dig("artifacts", "agent") ]
+        when "finalize" then [ cfg.dig("finalize", "agent") ]
+        when "review_ci" then [ cfg.dig("review", "ci", "agent") ]
+        when "review_triage" then [ cfg.dig("review", "triage", "agent") ]
+        when "review_fix" then [ cfg.dig("review", "fix", "agent") ]
+        when "review_browser" then [ cfg.dig("review", "browser_test", "agent") ]
+        when "review_reviewers" then reviewer_agent_names(cfg)
+        when "review"
+          [
+            cfg.dig("review", "ci", "agent"),
+            cfg.dig("review", "triage", "agent"),
+            cfg.dig("review", "fix", "agent"),
+            cfg.dig("review", "browser_test", "agent"),
+            *reviewer_agent_names(cfg)
+          ]
+        when "patrol", "patrol_review", "patrol_fix"
+          [ cfg.dig("patrol", "agent") ]
+        when "digest"
+          [ cfg.dig("digest", "agent") || cfg.dig("patrol", "agent") || "claude" ]
+        else
+          []
+        end
 
       names.compact.uniq.map { |name| Hive::AgentProfiles.lookup(name, cfg: cfg) }
     end

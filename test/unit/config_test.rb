@@ -71,6 +71,7 @@ class ConfigTest < Minitest::Test
       "models:\n  surprise:\n    model: opus\n" => /models\.surprise/,
       "models:\n  plan: {}\n" => /models\.plan.*non-empty Hash/,
       "models:\n  plan:\n    typo: opus\n" => /unknown fields.*typo/,
+      "models:\n  plan:\n    model: 42\n" => /models\.plan\.model.*non-blank String/,
       "models:\n  plan:\n    model: '  '\n" => /models\.plan\.model.*non-blank/,
       "models:\n  digest:\n    model: opus\n" => /models\.digest.*project config/
     }
@@ -82,6 +83,41 @@ class ConfigTest < Minitest::Test
         assert_match pattern, assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }.message
       end
     end
+  end
+
+  def test_model_routing_rejects_unknown_resolver_stage
+    profile = Hive::AgentProfiles.lookup(:claude)
+    error = assert_raises(Hive::ConfigError) do
+      Hive::Config.resolve_model_controls({}, profile: profile, stage: :surprise)
+    end
+
+    assert_match(/unknown model-routing stage/, error.message)
+  end
+
+  def test_model_profile_targets_cover_every_static_stage_family
+    cfg = Marshal.load(Marshal.dump(Hive::Config::DEFAULTS))
+    cfg["review"]["adhoc"]["reviewers"] = [
+      { "kind" => "agent", "agent" => "codex" },
+      { "kind" => "linter", "agent" => "pi" },
+      "ignored"
+    ]
+    cfg["patrol"]["review"] = {
+      "reviewers" => [ { "kind" => "agent", "agent" => "claude" } ]
+    }
+
+    %w[
+      brainstorm artifacts finalize review_ci review_triage review_fix
+      review_browser review_reviewers review patrol patrol_review patrol_fix
+    ].each do |stage|
+      profiles = Hive::Config.model_profiles_for_stage(cfg, stage)
+      refute_empty profiles, "#{stage} should resolve at least one profile"
+      assert profiles.all? { |profile| profile.is_a?(Hive::AgentProfile) }
+    end
+
+    reviewer_names = Hive::Config.reviewer_agent_names(cfg)
+    assert_includes reviewer_names, "codex"
+    refute_includes reviewer_names, "pi"
+    assert_empty Hive::Config.model_profiles_for_stage(cfg, "not-a-stage")
   end
 
   def test_load_rejects_control_unsupported_by_selected_profile

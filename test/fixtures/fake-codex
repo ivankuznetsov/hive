@@ -6,6 +6,10 @@
 #                    override with HIVE_FAKE_CODEX_VERSION, e.g. "0.1.0"
 #                    to simulate a too-old binary below min_version).
 #
+#   exec [...]       logs argv, drains the prompt from stdin, optionally writes
+#                    HIVE_FAKE_CODEX_WRITE_CONTENT to
+#                    HIVE_FAKE_CODEX_WRITE_FILE, and exits.
+#
 #   review [...]     logs argv to HIVE_FAKE_CODEX_ARGV_LOG (if set), then
 #                    prints HIVE_FAKE_CODEX_STDOUT (default: a valid
 #                    GFM-checkbox findings block) and exits with
@@ -25,7 +29,7 @@ if [[ "${1:-}" == "--version" ]]; then
   exit 0
 fi
 
-if [[ "${1:-}" == "review" ]]; then
+log_argv() {
   if [[ -n "${HIVE_FAKE_CODEX_ARGV_LOG:-}" ]]; then
     mkdir -p "$(dirname "${HIVE_FAKE_CODEX_ARGV_LOG}")"
     {
@@ -36,6 +40,19 @@ if [[ "${1:-}" == "review" ]]; then
       done
     } >> "${HIVE_FAKE_CODEX_ARGV_LOG}"
   fi
+}
+
+if [[ "${1:-}" == "exec" ]]; then
+  log_argv "$@"
+  cat > /dev/null
+  if [[ -n "${HIVE_FAKE_CODEX_WRITE_FILE:-}" && -n "${HIVE_FAKE_CODEX_WRITE_CONTENT:-}" ]]; then
+    printf '%s' "${HIVE_FAKE_CODEX_WRITE_CONTENT}" > "${HIVE_FAKE_CODEX_WRITE_FILE}"
+  fi
+  exit "${HIVE_FAKE_CODEX_EXIT:-0}"
+fi
+
+if [[ "${1:-}" == "review" ]]; then
+  log_argv "$@"
 
   if [[ -n "${HIVE_FAKE_CODEX_HANG:-}" ]]; then
     sleep "${HIVE_FAKE_CODEX_HANG}"

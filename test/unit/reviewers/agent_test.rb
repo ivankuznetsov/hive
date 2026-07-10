@@ -366,16 +366,13 @@ class ReviewersAgentTest < Minitest::Test
         dir, "model" => "opus", "effort" => "high"
       )
       captured = nil
-      original = Hive::Stages::Base.method(:spawn_agent)
-      Hive::Stages::Base.define_singleton_method(:spawn_agent) do |_task, **kwargs|
+      replacement = lambda do |_task, **kwargs|
         captured = kwargs
         { status: :ok }
       end
-      begin
+
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, replacement) do
         reviewer.run!
-      ensure
-        Hive::Stages::Base.singleton_class.send(:remove_method, :spawn_agent)
-        Hive::Stages::Base.define_singleton_method(:spawn_agent, &original)
       end
 
       assert_equal :review_reviewers, captured[:stage]

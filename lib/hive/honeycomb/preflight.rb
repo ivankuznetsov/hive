@@ -119,7 +119,7 @@ module Hive
         end
 
         package.files.reject { |path| path == "manifest.yml" }.sort.each do |relative|
-          bytes = File.binread(File.join(package.package_root, relative))
+          bytes = read_for_scan(package, relative)
           Hive::SecretPatterns.safe_scan(bytes, file: relative).each do |finding|
             blocked << Finding.new(
               kind: "secret",
@@ -149,6 +149,16 @@ module Hive
           end
         end
         [ blocked, review_required ]
+      end
+
+      # Reads a packaged file for the secret/deny scan, re-raising any read
+      # failure with scan context so a partially completed scan can never be
+      # mistaken for a clean one. The wrapped error keeps its original class so
+      # the CLI's SystemCallError/IOError handling still applies.
+      def read_for_scan(package, relative)
+        File.binread(File.join(package.package_root, relative))
+      rescue SystemCallError, IOError => e
+        raise e.class, "could not read #{relative} during secret/deny scan: #{e.message}"
       end
 
       def justified?(owners, permission_contexts)

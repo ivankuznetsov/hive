@@ -62,6 +62,40 @@ class WorktreeTest < Minitest::Test
     end
   end
 
+  def test_create_exact_pins_the_requested_commit_without_moving_registered_head
+    with_initialized_project do |dir, root|
+      pinned = run!("git", "-C", dir, "rev-parse", "HEAD").strip
+      File.write(File.join(dir, "later.txt"), "later\n")
+      run!("git", "-C", dir, "add", ".")
+      run!("git", "-C", dir, "commit", "-m", "later", "--quiet")
+      registered_head = run!("git", "-C", dir, "rev-parse", "HEAD").strip
+      wt = Hive::Worktree.new(dir, "exact-pinned", worktree_root: root)
+
+      wt.create_exact!("hive-refactor/exact-pinned", base_sha: pinned)
+
+      assert_equal pinned, run!("git", "-C", wt.path, "rev-parse", "HEAD").strip
+      assert_equal registered_head, run!("git", "-C", dir, "rev-parse", "HEAD").strip
+    end
+  end
+
+  def test_create_exact_rejects_same_named_branch_outside_pinned_history
+    with_initialized_project do |dir, root|
+      pinned = run!("git", "-C", dir, "rev-parse", "HEAD").strip
+      tree = run!("git", "-C", dir, "rev-parse", "HEAD^{tree}").strip
+      unrelated = run!("git", "-C", dir, "commit-tree", tree, "-m", "unrelated root").strip
+      branch = "hive-refactor/exact-conflict"
+      run!("git", "-C", dir, "branch", branch, unrelated)
+      wt = Hive::Worktree.new(dir, "exact-conflict", worktree_root: root)
+
+      error = assert_raises(Hive::WorktreeError) do
+        wt.create_exact!(branch, base_sha: pinned)
+      end
+
+      assert_includes error.message, "does not descend from pinned commit"
+      refute wt.exists?
+    end
+  end
+
   def test_pointer_validation_blocks_path_traversal
     Dir.mktmpdir do |root|
       assert_raises(Hive::WorktreeError) do

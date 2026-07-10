@@ -160,7 +160,7 @@ module Hive
             content = File.binread(path)
             {
               "exists" => true,
-              "digest" => Digest::SHA256.hexdigest(content),
+              "digest" => ::Digest::SHA256.hexdigest(content),
               "mode" => File.stat(path).mode & 0o777,
               "content" => content
             }

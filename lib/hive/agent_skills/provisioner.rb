@@ -180,7 +180,7 @@ module Hive
           "conflicts" => conflicts,
           "filters" => filters
         }
-        Digest::SHA256.hexdigest(JSON.generate(canonical(data)))
+        ::Digest::SHA256.hexdigest(JSON.generate(canonical(data)))
       end
 
       def canonical(value)

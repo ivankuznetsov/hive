@@ -163,7 +163,7 @@ module Hive
         end
 
         def unrelated_digest(content, native_spec)
-          Digest::SHA256.hexdigest(strip_owned_sections(content, native_spec))
+          ::Digest::SHA256.hexdigest(strip_owned_sections(content, native_spec))
         end
 
         def strip_owned_sections(content, native_spec)

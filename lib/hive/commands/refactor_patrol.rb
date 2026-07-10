@@ -1,5 +1,4 @@
 require "json"
-require "digest"
 require "open3"
 require "set"
 require "time"
@@ -11,6 +10,7 @@ require "hive/refactor_patrol/collisions"
 require "hive/refactor_patrol/checkout_guard"
 require "hive/refactor_patrol/fingerprint"
 require "hive/refactor_patrol/leverage"
+require "hive/refactor_patrol/pr_manifest"
 require "hive/refactor_patrol/pr_manifest_resolver"
 require "hive/refactor_patrol/reporter"
 require "hive/refactor_patrol/reviewer"
@@ -275,79 +275,13 @@ module Hive
           raise Hive::ConfigError, "refactor patrol job manifest must be a published file under #{root}"
         end
 
-        manifest = JSON.parse(File.binread(path))
-        required = %w[schema schema_version job_id source files changed_paths manifest_checksum]
-        unless manifest.is_a?(Hash) && manifest.keys.sort == required.sort &&
-               manifest["schema"] == Hive::RefactorPatrol::PrManifestResolver::SCHEMA &&
-               manifest["schema_version"] == Hive::RefactorPatrol::PrManifestResolver::SCHEMA_VERSION
-          raise Hive::ConfigError, "refactor patrol job manifest schema is invalid"
-        end
-        unless File.basename(path, ".json") == manifest.fetch("job_id").to_s
-          raise Hive::ConfigError, "refactor patrol job manifest id does not match its filename"
-        end
-
-        source = manifest.fetch("source")
-        source_keys = %w[url number repository registration base_branch base_sha merge_sha merged_at]
-        unless source.is_a?(Hash) && source.keys.sort == source_keys.sort &&
-               source["registration"] == entry.fetch("name") &&
-               source["base_branch"] == (cfg["default_branch"] || Hive::GitOps.new(project_root).default_branch)
-          raise Hive::ConfigError, "refactor patrol job manifest source does not match this registration"
-        end
-        unless source["number"].is_a?(Integer) && source["number"].positive? &&
-               %w[url repository registration base_branch base_sha merge_sha merged_at].all? do |key|
-                 source[key].is_a?(String) && !source[key].empty?
-               end
-          raise Hive::ConfigError, "refactor patrol job manifest source fields are invalid"
-        end
-        Time.iso8601(source.fetch("merged_at"))
-        files = manifest.fetch("files")
-        changed_paths = manifest.fetch("changed_paths")
-        unless files.is_a?(Array) && files.all? { |file| valid_manifest_file?(file) } &&
-               changed_paths == files.map { |file| file.fetch("path") } && changed_paths.uniq == changed_paths
-          raise Hive::ConfigError, "refactor patrol job manifest file scope is invalid"
-        end
-
-        checksum_payload = manifest.reject { |key, _value| key == "manifest_checksum" }
-        expected = ::Digest::SHA256.hexdigest(canonical_json(checksum_payload))
-        unless secure_checksum_equal?(manifest.fetch("manifest_checksum"), expected)
-          raise Hive::ConfigError, "refactor patrol job manifest checksum is invalid"
-        end
-        manifest
-      rescue JSON::ParserError, SystemCallError, IOError, KeyError, ArgumentError => e
-        raise Hive::ConfigError, "cannot read refactor patrol job manifest (#{e.class}: #{e.message})"
-      end
-
-      def valid_manifest_file?(file)
-        return false unless file.is_a?(Hash)
-        return false unless (file.keys - %w[path status previous_path]).empty?
-        return false unless %w[path status].all? { |key| file.key?(key) }
-        return false unless Hive::RefactorPatrol::PrManifestResolver::FILE_STATUSES.include?(file["status"])
-
-        [ file["path"], file["previous_path"] ].compact.all? do |value|
-          parts = value.to_s.split("/", -1)
-          !value.to_s.empty? && !value.to_s.start_with?("/") && !value.to_s.include?("\\") &&
-            !value.to_s.include?("\0") && parts.none? { |part| part.empty? || %w[. ..].include?(part) }
-        end
-      end
-
-      def canonical_json(value)
-        JSON.generate(canonical_json_value(value))
-      end
-
-      def canonical_json_value(value)
-        case value
-        when Hash
-          value.keys.sort.to_h { |key| [ key, canonical_json_value(value.fetch(key)) ] }
-        when Array
-          value.map { |item| canonical_json_value(item) }
-        else
-          value
-        end
-      end
-
-      def secure_checksum_equal?(actual, expected)
-        actual = actual.to_s
-        actual.bytesize == expected.bytesize && actual.bytes.zip(expected.bytes).all? { |left, right| left == right }
+        default_branch = cfg["default_branch"] || Hive::GitOps.new(project_root).default_branch
+        Hive::RefactorPatrol::PrManifest.load!(
+          path,
+          expected_job_id: File.basename(path, ".json"),
+          registration: entry.fetch("name"),
+          default_branch: default_branch
+        )
       end
 
       def scope_to_manifest(features)

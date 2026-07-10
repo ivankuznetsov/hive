@@ -196,14 +196,7 @@ module Hive
           # be in their own process groups already. Be defensive anyway.
           next if entry.nil?
 
-          envelope = parse_envelope(entry[:log_path])
-          completed << ChildExit.new(
-            pid: pid, exit_code: status.exitstatus,
-            project: entry[:project], slug: entry[:slug], stage: entry[:stage],
-            command: entry[:command], state_file_path: entry[:state_file_path],
-            started_at: entry[:started_at], finished_at: now, json_envelope: envelope,
-            request_id: entry[:request_id], dispatch_token: entry[:dispatch_token]
-          )
+          completed << child_exit(pid, status, entry, now)
         end
         completed
       end

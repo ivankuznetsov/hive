@@ -186,7 +186,6 @@ module Hive
           stage: PATROL_STAGE,
           command: "hive patrol #{Shellwords.escape(project)} --json",
           patrol_kind: :ordinary,
-          poll_interval_sec: patrol.fetch("poll_interval_sec", 600).to_i,
           state_file_mtime: nil,
           state_file_path: nil,
           hive_state_path: entry["hive_state_path"]
@@ -194,7 +193,7 @@ module Hive
       end
 
       def public_dispatch(candidate)
-        candidate.reject { |key, _value| %i[patrol_kind poll_interval_sec].include?(key) }
+        candidate.reject { |key, _value| key == :patrol_kind }
       end
     end
   end

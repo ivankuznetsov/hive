@@ -706,6 +706,11 @@ module Hive
       With --changed-since alone, changed features are boosted but full
       discovery still runs; combined with a scope hint, changed files further
       restrict that scoped set. With --json, emits hive-refactor-patrol.v1.
+
+      Use --pr with a merged PR number or URL to analyze only its immutable
+      changed-path manifest from a clean registered default-branch checkout.
+      PR mode requires --json, cannot be combined with legacy scope hints, and
+      emits hive-refactor-patrol.v2 through an enforceable read-only agent.
     DESC
     option :dry_run, type: :boolean, default: false,
                      desc: "preview without persisting refactor-patrol state"
@@ -713,6 +718,7 @@ module Hive
     option :entrypoint, type: :string, desc: "only review the feature owning this entrypoint"
     option :path, type: :string, desc: "only review features with owned files under this path"
     option :changed_since, type: :string, desc: "git ref used for changed-feature ranking/filtering"
+    option :pr, type: :string, desc: "analyze one merged PR number or URL with the v2 read-only contract"
     def refactor_patrol(project)
       require "hive/commands/refactor_patrol"
       Hive::Commands::RefactorPatrol.new(
@@ -722,7 +728,8 @@ module Hive
         feature: options[:feature],
         entrypoint: options[:entrypoint],
         path: options[:path],
-        changed_since: options[:changed_since]
+        changed_since: options[:changed_since],
+        pr: options[:pr]
       ).call
     end
 

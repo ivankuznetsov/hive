@@ -6,8 +6,10 @@ require "hive/git_ops"
 require "hive/patrol/mapper"
 require "hive/refactor_patrol/caps"
 require "hive/refactor_patrol/collisions"
+require "hive/refactor_patrol/checkout_guard"
 require "hive/refactor_patrol/fingerprint"
 require "hive/refactor_patrol/leverage"
+require "hive/refactor_patrol/pr_manifest_resolver"
 require "hive/refactor_patrol/reporter"
 require "hive/refactor_patrol/reviewer"
 require "hive/refactor_patrol/state_store"
@@ -15,9 +17,9 @@ require "hive/refactor_patrol/state_store"
 module Hive
   module Commands
     class RefactorPatrol
-      def initialize(project, json: false, dry_run: false, feature: nil, entrypoint: nil, path: nil, changed_since: nil,
+      def initialize(project, json: false, dry_run: false, feature: nil, entrypoint: nil, path: nil, changed_since: nil, pr: nil,
                      mapper_factory: nil, reviewer_factory: nil, leverage_factory: nil,
-                     caps_factory: nil, collisions_factory: nil)
+                     caps_factory: nil, collisions_factory: nil, manifest_resolver_factory: nil)
         @project = project
         @json = json
         @dry_run = dry_run
@@ -25,11 +27,24 @@ module Hive
         @entrypoint_hint = entrypoint
         @path_hint = path
         @changed_since = changed_since
-        @mapper_factory = mapper_factory || ->(root, cfg, state) { Hive::Patrol::Mapper.new(root, cfg: mapper_cfg(cfg), state: state, dry_run: @dry_run) }
-        @reviewer_factory = reviewer_factory || ->(root, cfg, state) { Hive::RefactorPatrol::Reviewer.new(root, cfg: cfg, state: state, dry_run: @dry_run) }
+        @pr = pr
+        @mapper_factory = mapper_factory || lambda do |root, cfg, state|
+          Hive::Patrol::Mapper.new(root, cfg: mapper_cfg(cfg), state: state, dry_run: ephemeral_discovery?)
+        end
+        @reviewer_factory = reviewer_factory || lambda do |root, cfg, state|
+          Hive::RefactorPatrol::Reviewer.new(
+            root,
+            cfg: cfg,
+            state: state,
+            dry_run: ephemeral_discovery?,
+            source_pr: pr_mode? ? source_pr_context : nil,
+            read_only: pr_mode?
+          )
+        end
         @leverage_factory = leverage_factory || ->(root, cfg) { Hive::RefactorPatrol::Leverage.new(root, cfg: cfg) }
         @caps_factory = caps_factory || ->(cfg) { Hive::RefactorPatrol::Caps.new(cfg) }
         @collisions_factory = collisions_factory || ->(root, state) { Hive::RefactorPatrol::Collisions.new(root, state: state) }
+        @manifest_resolver_factory = manifest_resolver_factory
       end
 
       def call
@@ -48,21 +63,25 @@ module Hive
 
       def run_cycle
         entry, project_root, cfg = resolve_project!
+        validate_mode!
+        @manifest = resolve_manifest(entry, project_root, cfg) if pr_mode?
+        pin_checkout!(project_root, cfg) if pr_mode?
         state = Hive::RefactorPatrol::StateStore.new(project_root)
         # A dry run must not create durable artifacts under
         # .hive-state/refactor_patrol/; all reads tolerate a missing dir.
-        state.ensure! unless @dry_run
+        state.ensure! unless ephemeral_discovery?
 
         features = scoped_features(project_root, cfg, state)
         reviewer = @reviewer_factory.call(project_root, cfg, state)
         theses = reviewer.call(features, leverage_by_feature: score_features(features, project_root, cfg))
+        @checkout_guard.assert_unchanged!(@checkout_snapshot) if pr_mode?
         suppressed = guard_theses(theses, project_root, cfg, state)
 
-        unless @dry_run
+        unless ephemeral_discovery?
           persist(state, theses, suppressed)
           update_scan_state(state, project_root, cfg, reviewer)
         end
-        [ build_payload(entry, project_root, cfg, state, features, theses, suppressed), theses ]
+        [ build_payload(entry, project_root, cfg, state, features, theses, suppressed, reviewer), theses ]
       end
 
       def resolve_project!
@@ -80,6 +99,8 @@ module Hive
 
       def scoped_features(project_root, cfg, state)
         features = @mapper_factory.call(project_root, cfg, state).call
+        return scope_to_manifest(features) if pr_mode?
+
         apply_scope_hints(features, project_root)
       end
 
@@ -87,8 +108,9 @@ module Hive
         changed = changed_files(project_root)
         leverage = @leverage_factory.call(project_root, cfg)
         features.to_h do |feature|
-          boost = @changed_since && !Array(changed).empty? && (Array(feature.owned_files) & Array(changed)).any?
-          [ feature.id, leverage.score(feature, changed_since: @changed_since, changed_boost: boost) ]
+          boost = !Array(changed).empty? && (Array(feature.owned_files) & Array(changed)).any?
+          baseline = pr_mode? ? @manifest.dig("source", "base_sha") : @changed_since
+          [ feature.id, leverage.score(feature, changed_since: baseline, changed_boost: boost) ]
         end
       end
 
@@ -102,9 +124,11 @@ module Hive
         end
       end
 
-      def build_payload(entry, project_root, cfg, state, features, theses, suppressed)
-        scanned_sha = @dry_run ? current_default_sha(project_root, cfg) : state.state["last_scanned_sha"].to_s
+      def build_payload(entry, project_root, cfg, state, features, theses, suppressed, reviewer)
         @reporter = Hive::RefactorPatrol::Reporter.new(cfg)
+        return build_v2_payload(entry, project_root, features, theses, suppressed, reviewer) if pr_mode?
+
+        scanned_sha = @dry_run ? current_default_sha(project_root, cfg) : state.state["last_scanned_sha"].to_s
         @reporter.envelope(
           project: entry.fetch("name"),
           project_root: project_root,
@@ -163,6 +187,7 @@ module Hive
       end
 
       def changed_files(project_root)
+        return @manifest.fetch("changed_paths") if pr_mode?
         return @changed_files if defined?(@changed_files)
 
         @changed_files = compute_changed_files(project_root)
@@ -199,6 +224,82 @@ module Hive
         clone
       end
 
+      def validate_mode!
+        return unless pr_mode?
+
+        unless @json
+          raise Hive::ConfigError, "hive refactor-patrol --pr requires --json"
+        end
+        hints = [ @feature_hint, @entrypoint_hint, @path_hint, @changed_since ]
+        if hints.any? { |value| !value.nil? }
+          raise Hive::ConfigError,
+                "hive refactor-patrol --pr cannot be combined with --feature, --entrypoint, --path, or --changed-since"
+        end
+      end
+
+      def resolve_manifest(entry, project_root, cfg)
+        factory = @manifest_resolver_factory || lambda do |root, registration, project_cfg|
+          Hive::RefactorPatrol::PrManifestResolver.new(
+            project_root: root,
+            registration: registration,
+            default_branch: project_cfg["default_branch"] || Hive::GitOps.new(root).default_branch,
+            cfg: project_cfg,
+            dry_run: @dry_run
+          )
+        end
+        factory.call(project_root, entry.fetch("name"), cfg).resolve(@pr)
+      end
+
+      def scope_to_manifest(features)
+        paths = @manifest.fetch("changed_paths")
+        features.select do |feature|
+          boundary = Array(feature.owned_files) + Array(feature.entrypoints)
+          !(boundary & paths).empty?
+        end
+      end
+
+      def build_v2_payload(entry, project_root, features, theses, suppressed, reviewer)
+        errors = reviewer.respond_to?(:review_errors) ? Array(reviewer.review_errors) : []
+        @reporter.v2_envelope(
+          job_id: @manifest.fetch("job_id"),
+          project: entry.fetch("name"),
+          project_root: project_root,
+          dry_run: @dry_run,
+          source_pr: source_pr_context,
+          analysis_sha: @checkout_snapshot.fetch("analysis_sha"),
+          features: features,
+          theses: theses,
+          suppressed: suppressed,
+          complete: errors.empty?,
+          review_errors: errors,
+          actions: [],
+          attempts: []
+        )
+      end
+
+      def pr_mode?
+        !@pr.nil?
+      end
+
+      def source_pr_context
+        @manifest.fetch("source").merge(
+          "changed_paths" => @manifest.fetch("changed_paths"),
+          "manifest_checksum" => @manifest.fetch("manifest_checksum")
+        )
+      end
+
+      def pin_checkout!(project_root, cfg)
+        branch = cfg["default_branch"] || Hive::GitOps.new(project_root).default_branch
+        @checkout_guard = Hive::RefactorPatrol::CheckoutGuard.new(project_root, default_branch: branch)
+        @checkout_snapshot = @checkout_guard.validate_and_snapshot!(
+          merge_sha: @manifest.dig("source", "merge_sha")
+        )
+      end
+
+      def ephemeral_discovery?
+        @dry_run || pr_mode?
+      end
+
       def emit(payload, theses)
         if @json
           puts JSON.generate(payload)
@@ -214,8 +315,10 @@ module Hive
         puts JSON.generate(
           Hive::RefactorPatrol::Reporter.error_envelope(
             error,
-            version: Hive::RefactorPatrol::Reporter::V1_SCHEMA_VERSION,
-            error_kind: error.is_a?(Hive::ConfigError) ? "config" : "error"
+            version: pr_mode? ? Hive::RefactorPatrol::Reporter::V2_SCHEMA_VERSION : Hive::RefactorPatrol::Reporter::V1_SCHEMA_VERSION,
+            error_kind: error.is_a?(Hive::ConfigError) ? "config" : "error",
+            job_id: @manifest && @manifest["job_id"],
+            source_pr: @manifest && @manifest["source"]
           )
         )
       end

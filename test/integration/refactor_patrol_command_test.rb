@@ -46,6 +46,19 @@ class RefactorPatrolCommandTest < Minitest::Test
     end
   end
 
+  class FakeManifestResolver
+    attr_reader :seen
+
+    def initialize(manifest)
+      @manifest = manifest
+    end
+
+    def resolve(pr)
+      @seen = pr
+      @manifest
+    end
+  end
+
   def test_json_run_ranks_flags_persists_and_rerun_suppresses_seen_theses
     with_refactor_patrol_project do |repo|
       features = [ feature("checkout"), feature("search") ]
@@ -291,6 +304,81 @@ class RefactorPatrolCommandTest < Minitest::Test
     end
   end
 
+  def test_pr_mode_uses_manifest_scope_and_emits_complete_v2
+    with_refactor_patrol_project do |repo|
+      expected_head = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      manifest = pr_manifest(merge_sha: expected_head)
+      resolver = FakeManifestResolver.new(manifest)
+      reviewer = FakeReviewer.new(
+        { "checkout" => [ thesis("checkout", feature_id: "checkout", fingerprint: "fp-checkout") ] }
+      )
+
+      out, err, status = with_captured_exit do
+        command_for(
+          pr: "https://github.com/acme/demo/pull/7",
+          manifest_resolver: resolver,
+          features: [
+            feature("checkout", files: [ "lib/checkout.rb" ]),
+            feature("search", files: [ "lib/search.rb" ])
+          ],
+          reviewer: reviewer,
+          leverage_scores: leverage_scores("checkout" => 0.9)
+        ).call
+      end
+
+      assert_equal Hive::ExitCodes::SUCCESS, status, "#{out}\n#{err}"
+      payload = JSON.parse(out)
+      assert v2_refactor_schemer.valid?(payload), v2_refactor_schemer.validate(payload).map { |e| e["error"] }.inspect
+      assert_equal 2, payload.fetch("schema_version")
+      assert_equal manifest.fetch("job_id"), payload.fetch("job_id")
+      assert_equal [ "checkout" ], reviewer.seen_feature_ids
+      assert_equal [ "checkout" ], payload.fetch("accepted").map { |item| item.fetch("id") }
+      assert payload.fetch("complete")
+      assert_equal expected_head, payload.fetch("analysis_sha")
+      assert_equal "https://github.com/acme/demo/pull/7", resolver.seen
+      refute File.exist?(File.join(repo, ".hive-state", "refactor_patrol", "state.json"))
+    end
+  end
+
+  def test_pr_mode_review_errors_are_partial_and_never_touch_legacy_state
+    with_refactor_patrol_project do |repo|
+      head = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      reviewer = FakeReviewer.new({}, review_errors: [ { "feature_id" => "checkout", "error" => "agent_failed" } ])
+      out, err, status = with_captured_exit do
+        command_for(
+          pr: "7",
+          manifest_resolver: FakeManifestResolver.new(pr_manifest(merge_sha: head)),
+          features: [ feature("checkout") ],
+          reviewer: reviewer,
+          leverage_scores: leverage_scores("checkout" => 0.9)
+        ).call
+      end
+
+      assert_equal Hive::ExitCodes::SUCCESS, status, "#{out}\n#{err}"
+      payload = JSON.parse(out)
+      refute payload.fetch("complete")
+      assert_equal "agent_failed", payload.fetch("review_errors").first.fetch("error")
+      refute File.exist?(File.join(repo, ".hive-state", "refactor_patrol", "state.json"))
+    end
+  end
+
+  def test_pr_mode_rejects_legacy_scope_flags_and_emits_v2_error
+    with_refactor_patrol_project do
+      out, _err, status = with_captured_exit do
+        command_for(
+          pr: "7",
+          feature_hint: "checkout",
+          manifest_resolver: FakeManifestResolver.new(pr_manifest)
+        ).call
+      end
+
+      payload = JSON.parse(out)
+      assert_equal Hive::ExitCodes::CONFIG, status
+      assert_equal 2, payload.fetch("schema_version")
+      assert_equal false, payload.fetch("complete")
+    end
+  end
+
   def test_project_without_refactor_patrol_block_errors_clearly
     with_tmp_global_config do
       with_tmp_git_repo do |repo|
@@ -404,7 +492,7 @@ class RefactorPatrolCommandTest < Minitest::Test
   end
 
   def command_for(project: "demo", json: true, dry_run: false, feature_hint: nil, entrypoint_hint: nil, path_hint: nil, changed_since: nil,
-                  features: [], theses_by_feature: {}, reviewer: nil, leverage_scores: {})
+                  pr: nil, manifest_resolver: nil, features: [], theses_by_feature: {}, reviewer: nil, leverage_scores: {})
     reviewer ||= FakeReviewer.new(theses_by_feature)
     Hive::Commands::RefactorPatrol.new(
       project,
@@ -414,9 +502,11 @@ class RefactorPatrolCommandTest < Minitest::Test
       entrypoint: entrypoint_hint,
       path: path_hint,
       changed_since: changed_since,
+      pr: pr,
       mapper_factory: ->(_root, _cfg, _state) { FakeMapper.new(features) },
       reviewer_factory: ->(_root, _cfg, _state) { reviewer },
-      leverage_factory: ->(_root, _cfg) { FakeLeverage.new(leverage_scores) }
+      leverage_factory: ->(_root, _cfg) { FakeLeverage.new(leverage_scores) },
+      manifest_resolver_factory: manifest_resolver && ->(*) { manifest_resolver }
     )
   end
 
@@ -472,6 +562,33 @@ class RefactorPatrolCommandTest < Minitest::Test
     @refactor_schemer ||= JSONSchemer.schema(
       JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 1)))
     )
+  end
+
+  def v2_refactor_schemer
+    @v2_refactor_schemer ||= JSONSchemer.schema(
+      JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 2)))
+    )
+  end
+
+  def pr_manifest(merge_sha: "7" * 40)
+    {
+      "schema" => "hive-refactor-patrol-pr-manifest",
+      "schema_version" => 2,
+      "job_id" => "pr-7-deadbeef",
+      "source" => {
+        "url" => "https://github.com/acme/demo/pull/7",
+        "number" => 7,
+        "repository" => "acme/demo",
+        "registration" => "demo",
+        "base_branch" => "master",
+        "base_sha" => "6" * 40,
+        "merge_sha" => merge_sha,
+        "merged_at" => "2026-07-10T10:00:00Z"
+      },
+      "files" => [ { "path" => "lib/checkout.rb", "status" => "modified" } ],
+      "changed_paths" => [ "lib/checkout.rb" ],
+      "manifest_checksum" => "checksum"
+    }
   end
 
   def thesis_schemer

@@ -47,10 +47,13 @@ safe-option and host checks):
   gh run list/view/watch; gh repo view; and gh workflow list/view
 
 Every other invocation, including `gh issue view`, is blocked. A blocked
-command emits a `[dry-run] ... skipped` marker to stderr, appends it to
-`<%= worktree_path %>/.babysitter-dry-run-skipped.log`, and returns
-synthetic success (exit status 0). Do not interpret its output as a real
-empty result; check for the marker or inspect the skip log.
+command always emits a `[dry-run] ... skipped` marker to stderr and returns
+synthetic success (exit status 0). It also attempts to append that marker to
+`<%= worktree_path %>/.babysitter-dry-run-skipped.log`; if the audit target is
+unsafe or unavailable, it emits a `[dry-run] failed to write skip log ...`
+warning and continues without a persistent record. Do not interpret blocked
+output as a real empty result; check stderr first, then inspect the skip log
+when it was written successfully.
 
 Write your full plan to:
 

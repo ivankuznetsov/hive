@@ -133,6 +133,8 @@ class BabysitterPrFixerTest < Minitest::Test
       assert_includes seen_prompt, "gh pr checks/diff/list/status/view"
       assert_includes seen_prompt, File.join(worktree_path, ".babysitter-dry-run-skipped.log")
       assert_includes seen_prompt, "[dry-run] ... skipped"
+      assert_includes seen_prompt, "[dry-run] failed to write skip log ..."
+      assert_includes seen_prompt, "continues without a persistent record"
       assert_includes seen_prompt, "synthetic success (exit status 0)"
       assert File.exist?(File.join(worktree_path, ".babysitter-dry-run-plan.md"))
     end

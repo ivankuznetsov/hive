@@ -546,15 +546,7 @@ module Hive
           @output.puts "  Leave disabled for review-only mode: Hive publishes review comments"
           @output.puts "  but does not prepare local fix commits for someone else's PR."
           @output.puts "  Enable only when you want accepted ad-hoc findings to enter the fix loop."
-          loop do
-            @output.print "Enable auto-fix for ad-hoc PR reviews? [y/N]: "
-            @output.flush
-            answer = read_line.downcase
-            return false if answer.empty? || answer == "n" || answer == "no"
-            return true  if answer == "y" || answer == "yes"
-
-            @output.puts "  please answer y or n"
-          end
+          prompt_yes_no("Enable auto-fix for ad-hoc PR reviews?", default: false)
         end
 
         def prompt_refactor_patrol_enabled
@@ -562,11 +554,17 @@ module Hive
           @output.puts "Architecture patrol — review each future merged PR for refactor opportunities."
           @output.puts "  Discovery is read-only. Auto-fixing and GitHub issue filing remain"
           @output.puts "  independently disabled unless you enable their config gates later."
+          prompt_yes_no("Enable architecture patrol discovery for this project?", default: true)
+        end
+
+        def prompt_yes_no(question, default:)
+          suffix = default ? "[Y/n]" : "[y/N]"
           loop do
-            @output.print "Enable architecture patrol discovery for this project? [Y/n]: "
+            @output.print "#{question} #{suffix}: "
             @output.flush
             answer = read_line.downcase
-            return true  if answer.empty? || answer == "y" || answer == "yes"
+            return default if answer.empty?
+            return true if answer == "y" || answer == "yes"
             return false if answer == "n" || answer == "no"
 
             @output.puts "  please answer y or n"

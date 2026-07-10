@@ -6,6 +6,7 @@ require "hive/agent"
 require "hive/agent_profiles"
 require "hive/patrol/runner_task"
 require "hive/permission_scope"
+require "hive/stages/base"
 require "hive/usage_db"
 
 module Hive
@@ -73,11 +74,7 @@ module Hive
           profile: profile,
           stage: STAGE
         )
-        {
-          permission_mode: scope.permission_mode,
-          allowed_tools: scope.allowed_tools,
-          disallowed_tools: scope.disallowed_tools
-        }
+        Hive::Stages::Base.tool_scope_kwargs(scope.to_h)
       end
 
       def materialize_read_only_output(result, output_path)

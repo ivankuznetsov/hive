@@ -1,7 +1,6 @@
 require "json"
-require "fileutils"
-require "securerandom"
 require "time"
+require "hive/atomic_file"
 
 module Hive
   module RefactorPatrol
@@ -76,20 +75,26 @@ module Hive
       end
 
       def jobs
-        return [] unless Dir.exist?(jobs_dir)
+        each_job.to_a
+      end
 
-        Dir.glob(File.join(jobs_dir, "*.json")).sort.map do |path|
-          read_job_path(path, expected_job_id: File.basename(path, ".json"))
+      def each_job
+        return enum_for(__method__) unless block_given?
+        return unless Dir.exist?(jobs_dir)
+
+        Dir.glob(File.join(jobs_dir, "*.json")).sort.each do |path|
+          yield read_job_path(path, expected_job_id: File.basename(path, ".json"))
         end
       end
 
       def rebuild_indexes!
-        terminal_jobs = jobs.select { |aggregate| aggregate.fetch("complete") == true }
         fingerprint_entries = {}
         owner_actions = {}
         action_links = []
 
-        terminal_jobs.each do |aggregate|
+        each_job do |aggregate|
+          next unless aggregate.fetch("complete") == true
+
           job_id = aggregate.fetch("job_id")
           DISPOSITIONS.each do |disposition|
             aggregate.fetch("dispositions").fetch(disposition).each do |item|
@@ -433,18 +438,9 @@ module Hive
 
       def atomic_write(path, data)
         dir = File.dirname(path)
-        FileUtils.mkdir_p(dir)
-        tmp = File.join(dir, ".#{File.basename(path)}.tmp.#{Process.pid}.#{SecureRandom.hex(4)}")
-        File.open(tmp, File::WRONLY | File::CREAT | File::TRUNC, 0o600) do |file|
-          file.write("#{JSON.pretty_generate(data)}\n")
-          file.flush
-          file.fsync
-        end
-        File.rename(tmp, path)
+        Hive::AtomicFile.write(path, "#{JSON.pretty_generate(data)}\n", mode: 0o600)
         fsync_directory(dir)
         path
-      ensure
-        FileUtils.rm_f(tmp) if defined?(tmp) && tmp && File.exist?(tmp)
       end
 
       def fsync_directory(dir)

@@ -159,7 +159,11 @@ module Hive
           "fingerprint" => thesis.fingerprint.to_s,
           "score" => score(thesis),
           "admissible" => thesis.admissible == true,
-          "reasons" => reasons
+          "reasons" => reasons,
+          # The daemon checkpoints this immutable snapshot into the
+          # authoritative job aggregate. Action workers must never have to
+          # re-run discovery or reconstruct a proposal from mutable files.
+          "thesis" => json_copy(thesis.to_h)
         }.tap do |item|
           item["reference"] = reference.to_s unless reference.nil? || reference.to_s.empty?
         end

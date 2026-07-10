@@ -27,7 +27,7 @@
     "Disposition": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "feature_id", "fingerprint", "score", "admissible", "reasons"],
+      "required": ["id", "feature_id", "fingerprint", "score", "admissible", "reasons", "thesis"],
       "properties": {
         "id": { "type": "string", "minLength": 1 },
         "feature_id": { "type": "string", "minLength": 1 },
@@ -35,7 +35,19 @@
         "score": { "type": "number" },
         "admissible": { "type": "boolean" },
         "reasons": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
-        "reference": { "type": "string", "minLength": 1 }
+        "reference": { "type": "string", "minLength": 1 },
+        "family_id": { "type": "string", "minLength": 1 },
+        "thesis": { "$ref": "#/$defs/ThesisSnapshot" }
+      }
+    },
+    "ThesisSnapshot": {
+      "type": "object",
+      "description": "Immutable normalized thesis consumed by later action workers.",
+      "required": ["id", "feature_id", "fingerprint"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "feature_id": { "type": "string", "minLength": 1 },
+        "fingerprint": { "type": "string", "minLength": 1 }
       }
     },
     "ReviewError": {

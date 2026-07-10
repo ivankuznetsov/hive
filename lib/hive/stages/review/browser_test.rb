@@ -25,6 +25,7 @@ module Hive
       # warning in the PR body. Browser flakiness is common; the user
       # decides whether to ship anyway.
       module BrowserTest
+        SKILL = "ce-test-browser".freeze
         Result = Data.define(:status, :attempts, :summary, :details, :error_message)
 
         DEFAULT_MAX_ATTEMPTS = 2
@@ -109,7 +110,7 @@ module Hive
               attempt: attempt,
               pass: ctx.pass,
               result_path: result_path,
-              skill_invocation: profile.format_skill_invocation("ce-test-browser"),
+              skill_invocation: profile.format_skill_invocation(SKILL),
               user_supplied_tag: Hive::Stages::Base.user_supplied_tag
             )
           )

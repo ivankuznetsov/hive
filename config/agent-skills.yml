@@ -1,0 +1,111 @@
+schema_version: 1
+
+# Package identity is separate from capabilities so one native install can
+# satisfy several Hive workflow rows. Adapters interpret the closed `actions`
+# vocabulary; no value in this file is evaluated as a shell command.
+packages:
+  - id: compound-engineering
+    version: "~> 3.0"
+    agents:
+      claude:
+        provider: claude
+        package: compound-engineering@compound-engineering-plugin
+        marketplace: compound-engineering-plugin
+        source: EveryInc/compound-engineering-plugin
+        scope: user
+        config_home: CLAUDE_CONFIG_DIR
+        actions: [marketplace_add, plugin_install, plugin_update]
+      codex:
+        provider: codex
+        package: compound-engineering@compound-engineering-plugin
+        marketplace: compound-engineering-plugin
+        source: https://github.com/EveryInc/compound-engineering-plugin.git
+        scope: user
+        config_home: CODEX_HOME
+        actions: [marketplace_add, plugin_install, plugin_update]
+      pi:
+        provider: pi
+        package: https://github.com/EveryInc/compound-engineering-plugin
+        source: https://github.com/EveryInc/compound-engineering-plugin
+        scope: user
+        config_home: PI_CODING_AGENT_DIR
+        actions: [package_install, package_update]
+
+  - id: pr-review-toolkit
+    version: ">= 0"
+    agents:
+      claude:
+        provider: claude
+        package: pr-review-toolkit@claude-plugins-official
+        marketplace: claude-plugins-official
+        source: anthropics/claude-plugins-official
+        scope: user
+        config_home: CLAUDE_CONFIG_DIR
+        actions: [marketplace_add, plugin_install, plugin_update]
+
+  - id: llm-wiki
+    version: "~> 0.1"
+    agents:
+      claude:
+        provider: claude
+        package: llm-wiki@aikuznetsov-marketplace
+        marketplace: aikuznetsov-marketplace
+        source: ivankuznetsov/agent-plugins
+        scope: user
+        config_home: CLAUDE_CONFIG_DIR
+        actions: [marketplace_add, plugin_install, plugin_update]
+      codex:
+        provider: codex
+        package: llm-wiki@aikuznetsov-marketplace
+        marketplace: aikuznetsov-marketplace
+        source: https://github.com/ivankuznetsov/agent-plugins.git
+        scope: user
+        config_home: CODEX_HOME
+        actions: [marketplace_add, plugin_install, plugin_update]
+      pi:
+        provider: pi
+        package: https://github.com/ivankuznetsov/llm-wiki
+        source: https://github.com/ivankuznetsov/llm-wiki
+        scope: user
+        config_home: PI_CODING_AGENT_DIR
+        actions: [package_install, package_update]
+
+capabilities:
+  - id: ce-brainstorm
+    package: compound-engineering
+    agents:
+      claude: { invocation: /ce-brainstorm, probe: skills/ce-brainstorm/SKILL.md }
+      codex: { invocation: /ce-brainstorm, probe: skills/ce-brainstorm/SKILL.md }
+      pi: { invocation: "/skill:ce-brainstorm", probe: skills/ce-brainstorm/SKILL.md }
+
+  - id: ce-code-review
+    package: compound-engineering
+    agents:
+      claude: { invocation: /ce-code-review, probe: skills/ce-code-review/SKILL.md }
+      codex: { invocation: /ce-code-review, probe: skills/ce-code-review/SKILL.md }
+      pi: { invocation: "/skill:ce-code-review", probe: skills/ce-code-review/SKILL.md }
+
+  - id: ce-test-browser
+    package: compound-engineering
+    agents:
+      claude: { invocation: /ce-test-browser, probe: skills/ce-test-browser/SKILL.md }
+      codex: { invocation: /ce-test-browser, probe: skills/ce-test-browser/SKILL.md }
+      pi: { invocation: "/skill:ce-test-browser", probe: skills/ce-test-browser/SKILL.md }
+
+  - id: pr-review-toolkit:review-pr
+    package: pr-review-toolkit
+    agents:
+      claude: { invocation: "/pr-review-toolkit:review-pr", probe: commands/review-pr.md }
+
+  - id: wiki-plan
+    package: llm-wiki
+    agents:
+      claude:
+        invocation: /plan
+        probe: skills/wiki-plan/SKILL.md
+        alias:
+          path: .claude/commands/plan.md
+          target: /llm-wiki:wiki-plan
+          owner: hive
+      codex: { invocation: "/llm-wiki:wiki-plan", probe: skills/wiki-plan/SKILL.md }
+      pi: { invocation: "/skill:wiki-plan", probe: pi/skills/wiki-plan/SKILL.md }

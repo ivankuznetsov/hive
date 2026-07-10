@@ -83,6 +83,11 @@ For `gh api`, payload-bearing forms are treated as writes unless the command exp
 
 The dry-run guard is best-effort: an agent that invokes absolute binary paths can bypass the PATH overlay. Use throwaway repos for destructive validation until a stronger sandbox exists. If `HIVE_BABYSITTER_REAL_GIT` is unset or points at an invalid binary, the stub exits 127 with a one-line diagnostic instead of guessing a system path.
 
+Existing skip logs must already be private: both the pre-open and post-open
+checks reject any file with group or world permission bits. The blocked command
+still returns synthetic success and emits the stderr marker plus an audit-write
+warning, but the permissive file is left untouched and receives no new argv.
+
 ## Tests
 
 - `test/unit/commands/babysit_test.rb` covers CLI flag validation, lifecycle helpers, foreground `restart`, detached restart re-exec into `start --detach`, stale-runtime status recommendations, stale-runtime reload warnings, refused-stop failures, PID-file cleanup races, and bounded PID-lock behavior.

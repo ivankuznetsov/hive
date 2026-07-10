@@ -3,7 +3,7 @@ title: Hive::Babysitter
 type: module
 source: lib/hive/babysitter/, bin/hive-babysitter-stub-git, bin/hive-babysitter-stub-gh, bin/hive-babysitter-skip-log.rb
 created: 2026-05-26
-updated: 2026-06-19
+updated: 2026-07-10
 tags: [babysitter, module, daemon, github, agents]
 ---
 
@@ -84,6 +84,11 @@ Closed outcome enum: `success`, `failure`, `conflict`, `timeout`, `budget_exhaus
 
 - Skip-log FIFO hardening: both dry-run stubs now preflight existing skip-log targets with `File.lstat`, open with `File::NOFOLLOW | File::NONBLOCK`, keep the post-open regular-file/owner check, and warn while still skipping when a FIFO, symlink, device, or non-owned path is configured.
 - Git dry-run passthrough skips `--submodule=diff` and the split `--submodule diff` form because expanded submodule diffs can enter nested repositories outside the top-level `--no-ext-diff --no-textconv` hardening. The same submodule mode can also be selected by worktree config (`diff.submodule=diff`/`log`) with no `--submodule` token in argv, so passthrough injects `-c diff.submodule=short` to pin the inert commit-hash summary format.
+
+Skip-log permission checks are fail-closed. Existing `0644`, `0666`, or other
+group/world-accessible targets are rejected both before and after the
+no-follow open; the stubs warn and skip the persistent append while continuing
+to block the command.
 
 ## Backlinks
 

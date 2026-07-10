@@ -508,6 +508,29 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_stubs_refuse_group_or_world_accessible_skip_logs
+    with_tmp_dir do |dir|
+      [ 0o644, 0o666 ].each do |mode|
+        [
+          [ "git", [ "commit", "-m", "insecure-log" ] ],
+          [ "gh", [ "pr", "comment", "42", "--body", "insecure-log" ] ]
+        ].each do |binary, args|
+          log = File.join(dir, "#{binary}-#{mode.to_s(8)}.log")
+          File.write(log, "existing\n")
+          File.chmod(mode, log)
+
+          _out, err, status = Open3.capture3({ "HIVE_BABYSITTER_DRY_RUN_LOG" => log }, stub_path(binary), *args)
+
+          assert status.success?, err
+          assert_equal "existing\n", File.read(log)
+          assert_equal mode, File.stat(log).mode & 0o777
+          assert_includes err, "dry-run skip log permissions are not private"
+          assert_includes err, "[dry-run] #{binary} #{args.join(' ')} skipped"
+        end
+      end
+    end
+  end
+
   def test_stubs_refuse_fifo_skip_log_without_blocking
     with_tmp_dir do |dir|
       fifo = File.join(dir, "skipped.fifo")

@@ -112,7 +112,8 @@ module Hive
           features: features,
           theses: theses,
           suppressed: suppressed,
-          last_scanned_sha: scanned_sha
+          last_scanned_sha: scanned_sha,
+          version: Hive::RefactorPatrol::Reporter::V1_SCHEMA_VERSION
         )
       end
 
@@ -211,13 +212,11 @@ module Hive
         return unless @json
 
         puts JSON.generate(
-          "schema" => "hive-refactor-patrol",
-          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-refactor-patrol"),
-          "ok" => false,
-          "error_class" => error.class.name.split("::").last,
-          "error_kind" => error.is_a?(Hive::ConfigError) ? "config" : "error",
-          "exit_code" => error.exit_code,
-          "message" => error.message
+          Hive::RefactorPatrol::Reporter.error_envelope(
+            error,
+            version: Hive::RefactorPatrol::Reporter::V1_SCHEMA_VERSION,
+            error_kind: error.is_a?(Hive::ConfigError) ? "config" : "error"
+          )
         )
       end
     end

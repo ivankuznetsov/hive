@@ -36,7 +36,7 @@ module Hive
       "hive-daemon-queue" => 1,
       "hive-patrol" => 1,
       "hive-patrol-finding" => 1,
-      "hive-refactor-patrol" => 1,
+      "hive-refactor-patrol" => 2,
       "hive-refactor-patrol-thesis" => 1,
       # Scaffold a blank per-project workflow descriptor (`hive workflow new ID
       # --json`). The error arm routes through Hive::Schemas::ErrorEnvelope so

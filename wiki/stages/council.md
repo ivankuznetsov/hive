@@ -3,7 +3,7 @@ title: Council Stage Runner
 type: stage
 source: lib/hive/stages/council.rb, lib/hive/stages/council/*.rb, templates/council_reviewer_prompt.md.erb, templates/council_revise_prompt.md.erb
 created: 2026-07-08
-updated: 2026-07-08
+updated: 2026-07-09
 tags: [stage, council, workflow, review]
 ---
 
@@ -28,9 +28,14 @@ aggregates a triage artifact, and marks the stage `COMPLETE` on quorum or
 5. Run each reviewer (retried up to `max_attempts`, default 1):
    - agent reviewers spawn through `Hive::Stages::Base.spawn_agent` with
      `status_mode: :output_file_exists` and expected output
-     `reviews/<output_basename>-NN.md`;
+     `reviews/<output_basename>-NN.md`; descriptor `budget_usd` / `timeout_sec`
+     defaults reach every reviewer and revise spawn unless the project YAML
+     explicitly overrides that stage key;
    - command reviewers run with `HIVE_COUNCIL_INPUT`,
-     `HIVE_COUNCIL_OUTPUT`, and `HIVE_COUNCIL_ROUND`.
+     `HIVE_COUNCIL_OUTPUT`, and `HIVE_COUNCIL_ROUND`. Reviewer and revise
+     commands share a process-group-aware runner bounded by the effective stage
+     `timeout_sec`; expiry sends TERM, then KILL after a short grace, and reaps
+     the shell.
    - reviewer `name`/`output_basename` must be unique per council (enforced at
      descriptor parse) so two reviewers can't overwrite the same review file.
 6. Deterministic triage parses reviewer verdicts, writes
@@ -58,6 +63,8 @@ naming, output-file validation, triage, and marker ownership patterns.
   kind: council
   state_file: review.md
   input: draft.md
+  budget_usd: 25
+  timeout_sec: 3600
   council:
     quorum: 2
     max_rounds: 3
@@ -76,8 +83,10 @@ naming, output-file validation, triage, and marker ownership patterns.
 
 `test/unit/stages/council_test.rb` covers first-round consensus, human waits,
 multi-round revise loops, max-round waits, missing input errors, command
-reviewers, failed-reviewer `:error` markers, explicit `input:` resolution,
-resume-after-waiting round continuity, and `COMPLETE` short-circuiting.
+reviewers, descriptor resource forwarding to reviewer/revise agents, graceful
+and forced command timeout termination, failed-reviewer `:error` markers,
+explicit `input:` resolution, resume-after-waiting round continuity, and
+`COMPLETE` short-circuiting.
 `test/integration/architecture_workflow_e2e_test.rb` proves the
 reference architecture workflow reaches an agent-terminal `architecture.md`
 deliverable without a dummy final stage.

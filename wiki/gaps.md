@@ -244,6 +244,16 @@ from the v0.3.1 dependency/security-bump claim or still needs a follow-up relock
   baseline in the same wall-clock second still compares newer than the
   agent's fractional post-child mtime.
 
+## Aggregate council resource caps (2026-07-09)
+
+Workflow `budget_usd` and `timeout_sec` values are deliberately applied per
+reviewer/retry/round/revise spawn, not to the council as a whole. A council with
+multiple reviewers or rounds can therefore consume several times its stage
+budget. The current docs make that multiplication explicit, but Hive has no
+aggregate council cost or wall-clock cap yet. Add one only with clear semantics
+for partially completed rounds, command reviewers, and profiles that cannot
+natively enforce dollar budgets.
+
 ## Areas the wiki could be expanded
 
 - `wiki/troubleshooting.md` — currently lives only in README's Troubleshooting section. Could be lifted into a dedicated page once the project sees real-world failures.

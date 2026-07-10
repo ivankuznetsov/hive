@@ -636,6 +636,8 @@ module Hive
     DEPENDENCY_GATE_STAGES = %w[8-finalize 9-done].freeze # coding-scoped: coding dependency-gate stages (last two of Stages::DIRS)
     EXPLICIT_CLAUDE_MODE_KEY = :__hive_explicit_claude_mode
     EXPLICIT_BRAINSTORM_RUNTIME_KEY = :__hive_explicit_brainstorm_runtime
+    EXPLICIT_RESOURCE_LIMITS_KEY = :__hive_explicit_resource_limits
+    RESOURCE_LIMIT_FIELDS = %w[budget_usd timeout_sec].freeze
 
     module_function
 
@@ -702,6 +704,7 @@ module Hive
       merged = merge_defaults(data).merge("project_root" => project_root)
       merged[EXPLICIT_CLAUDE_MODE_KEY] = nested_key?(data, "claude", "mode")
       merged[EXPLICIT_BRAINSTORM_RUNTIME_KEY] = nested_key?(data, "brainstorm", "runtime")
+      merged[EXPLICIT_RESOURCE_LIMITS_KEY] = explicit_resource_limits(data)
       inject_bot_runtime_path_defaults!(merged)
       validate!(merged, candidate)
       merged
@@ -767,6 +770,34 @@ module Hive
         cursor = cursor[key]
       end
       true
+    end
+
+    # Resolve a workflow descriptor's per-stage resource default without
+    # mistaking values injected by merge_defaults for project-authored
+    # overrides. Config.load records the raw key provenance above; synthetic
+    # hashes used by callers/tests retain the historical "present means
+    # explicit" behavior because they carry no provenance marker.
+    def stage_resource_limit(cfg, field, stage_name, descriptor_default:, fallback: nil)
+      provenance = cfg[EXPLICIT_RESOURCE_LIMITS_KEY]
+      explicit =
+        if provenance.is_a?(Hash)
+          Array(provenance[field]).include?(stage_name)
+        else
+          nested_key?(cfg, field, stage_name)
+        end
+      project_value = cfg.dig(field, stage_name)
+      return project_value if explicit && project_value
+      return descriptor_default unless descriptor_default.nil?
+
+      project_value || fallback
+    end
+
+    def explicit_resource_limits(data)
+      RESOURCE_LIMIT_FIELDS.to_h do |field|
+        values = data[field]
+        stage_names = values.is_a?(Hash) ? values.keys.map(&:to_s).freeze : [].freeze
+        [ field, stage_names ]
+      end.freeze
     end
 
     def resolve_patrol_mode!(data)

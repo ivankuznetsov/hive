@@ -1,6 +1,5 @@
-require "open3"
-require "hive/stages/agent"
 require "hive/stages/base"
+require "hive/stages/council/command_runner"
 
 module Hive
   module Stages
@@ -38,8 +37,14 @@ module Hive
             "HIVE_COUNCIL_TRIAGE" => @triage_path,
             "HIVE_COUNCIL_ROUND" => @round.to_s
           }
-          _stdout, stderr, status = Open3.capture3(env, "sh", "-c", @revise.command, chdir: @task.folder)
-          return if status.success? && File.exist?(@target_path) && File.size(@target_path).positive?
+          stderr, status = Hive::Stages::Council::CommandRunner.run(
+            env,
+            @revise.command,
+            chdir: @task.folder,
+            timeout_sec: timeout_sec,
+            label: "council revise"
+          )
+          return if status.success? && File.size?(@target_path)
 
           raise Hive::StageError, "council revise failed: #{stderr.to_s.strip[0, 200]}"
         end
@@ -53,13 +58,13 @@ module Hive
             profile,
             **permission_kwargs
           )
+          resource_limits = Hive::Stages::Base.stage_resource_limits(@cfg, @stage)
           result = Hive::Stages::Base.spawn_agent(
             @task,
             prompt: prompt(profile),
             add_dirs: scope.fetch(:add_dirs),
             cwd: @task.folder,
-            max_budget_usd: @cfg.dig("budget_usd", @stage.name) || @stage.budget_usd,
-            timeout_sec: @cfg.dig("timeout_sec", @stage.name) || @stage.timeout_sec || Hive::Stages::Agent::DEFAULT_TIMEOUT_SEC,
+            **resource_limits,
             log_label: "#{@stage.name}-revise",
             profile: profile,
             model: @revise.model || @stage.model,
@@ -91,6 +96,10 @@ module Hive
               user_supplied_tag: Hive::Stages::Base.user_supplied_tag
             )
           )
+        end
+
+        def timeout_sec
+          Hive::Stages::Base.stage_resource_limits(@cfg, @stage).fetch(:timeout_sec)
         end
 
         def permission_kwargs

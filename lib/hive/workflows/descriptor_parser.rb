@@ -23,6 +23,8 @@ module Hive
         agent
         model
         effort
+        budget_usd
+        timeout_sec
         input
         reviewers
         council
@@ -158,6 +160,8 @@ module Hive
         agent = parse_agent(stage["agent"], label: label)
         model = optional_string(stage["model"], label: "#{label} model")
         effort = optional_string(stage["effort"], label: "#{label} effort")
+        budget_usd = optional_positive_number(stage["budget_usd"], label: "#{label} budget_usd")
+        timeout_sec = optional_positive_integer(stage["timeout_sec"], label: "#{label} timeout_sec")
         permissions = parse_permissions(stage, id: id, stage_name: name, label: label)
         input = optional_string(stage["input"], label: "#{label} input")
         deliverable = parse_deliverable(stage["deliverable"], label: label)
@@ -176,6 +180,8 @@ module Hive
           agent: agent,
           model: model,
           effort: effort,
+          budget_usd: budget_usd,
+          timeout_sec: timeout_sec,
           input: input,
           reviewers: reviewers,
           council: council,
@@ -422,7 +428,8 @@ module Hive
       def reject_agent_only_fields!(stage, kind:, label:)
         return if [ :agent, :council ].include?(kind)
 
-        present = %w[skill instruction agent model effort input reviewers council deliverable permissions].select { |key| stage.key?(key) }
+        present = %w[skill instruction agent model effort budget_usd timeout_sec input reviewers council deliverable permissions]
+                  .select { |key| stage.key?(key) }
         return if present.empty?
 
         raise descriptor_error(
@@ -440,9 +447,9 @@ module Hive
       #     (Stages::Council). The :agent runner ignores them, so a typo'd
       #     `kind: agent` carrying a `council:`/`reviewers:` block would run as a
       #     plain agent with no error.
-      # `agent`/`model`/`effort`/`deliverable`/`permissions` are shared and stay
-      # valid on both. Reject the mismatches here (fail-fast, same contract as
-      # reject_agent_only_fields!).
+      # `agent`/`model`/`effort`/`budget_usd`/`timeout_sec`/`deliverable`/
+      # `permissions` are shared and stay valid on both. Reject the mismatches
+      # here (fail-fast, same contract as reject_agent_only_fields!).
       COUNCIL_ONLY_FIELDS = %w[input reviewers council].freeze
       AGENT_ONLY_FIELDS = %w[skill instruction].freeze
 
@@ -514,6 +521,13 @@ module Hive
         return value if value.is_a?(Integer) && value.positive?
 
         raise descriptor_error("#{label} must be a positive integer")
+      end
+
+      def optional_positive_number(value, label:)
+        return nil if value.nil?
+        return value if value.is_a?(Numeric) && value.finite? && value.positive?
+
+        raise descriptor_error("#{label} must be a positive finite number")
       end
 
       def deep_freeze(value)

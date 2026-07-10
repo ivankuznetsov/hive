@@ -11,7 +11,7 @@ module Hive
       # `timeout_sec` and whose cfg carries no per-stage override. Without it,
       # `Hive::Agent#run` would do `Time.now + nil` and crash at spawn — the
       # budget path is nil-guarded downstream, the timeout path is not.
-      DEFAULT_TIMEOUT_SEC = 1800
+      DEFAULT_TIMEOUT_SEC = Hive::Stages::Base::DEFAULT_GENERIC_STAGE_TIMEOUT_SEC
 
       def run!(task, cfg)
         cfg ||= {}
@@ -37,14 +37,14 @@ module Hive
         scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
           cfg, task.stage_name, task, profile, **permission_kwargs
         )
+        resource_limits = Hive::Stages::Base.stage_resource_limits(cfg, stage)
 
         result = Hive::Stages::Base.spawn_agent(
           task,
           prompt: prompt,
           add_dirs: scope.fetch(:add_dirs),
           cwd: task.folder,
-          max_budget_usd: cfg.dig("budget_usd", task.stage_name) || stage.budget_usd,
-          timeout_sec: cfg.dig("timeout_sec", task.stage_name) || stage.timeout_sec || DEFAULT_TIMEOUT_SEC,
+          **resource_limits,
           log_label: task.stage_name,
           profile: profile,
           model: stage.model,

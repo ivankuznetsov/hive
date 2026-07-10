@@ -3,7 +3,7 @@ title: Hive::Workflows
 type: module
 source: lib/hive/workflows.rb, lib/hive/workflow.rb, lib/hive/workflows/registry.rb, lib/hive/workflows/coding.rb, lib/hive/workflows/descriptor_parser.rb, lib/hive/workflows/loader.rb, lib/hive/workflows/project.rb
 created: 2026-04-26
-updated: 2026-07-08
+updated: 2026-07-09
 tags: [module, workflow, verbs, selection]
 ---
 
@@ -36,7 +36,7 @@ Per-project descriptors live under `<hive_state_path>/workflows/*.yml`, defaulti
 - user-facing `kind: agent` maps to `:agent`; `kind: terminal` maps to `:inert`; `kind: council` maps to the generic document council runner.
 - stage indexes are derived from array order; non-entry stages default their incoming `advance_verb` to the stage name.
 - every user-authored agent stage declares exactly one of `skill:` or `instruction:`.
-- agent/council stages may declare `agent`, `model`, and `effort`; these override project stage config and Claude model/effort defaults for that stage.
+- agent/council stages may declare `agent`, `model`, and `effort`, which override project stage config. They may also declare `budget_usd` and `timeout_sec` resource defaults; explicitly authored non-null project stage keys take precedence, while values introduced only by the merged config defaults do not shadow the descriptor. Budgets accept positive finite numbers, while timeouts require positive integers. Limits are per spawn rather than aggregate across a council; budgets need a profile-native flag, while timeouts also bound command reviewers/revisers.
 - council stages require a `reviewers:` list; each reviewer declares exactly one of `skill`, `instruction`, `prompt`, or `command`, plus optional agent/model/effort/permissions/output basename. The `council:` block carries `quorum`, `max_rounds`, `exit_rule`, `triage_output`, and optional `revise`.
 - `instruction:` paths are resolved relative to the descriptor directory and stored on the stage as absolute paths.
 - `permissions:` values are validated through `Hive::PermissionScope` at load time and later passed to the generic agent runner as the explicit permission spec.

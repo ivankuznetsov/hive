@@ -1061,8 +1061,16 @@ class SchemaFilesTest < Minitest::Test
     assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
     assert_equal "hive-init",
                  doc.dig("$defs", "SuccessPayload", "properties", "schema", "const")
-    assert_equal 1,
+    assert_equal 2,
                  doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+  end
+
+  def test_hive_init_v1_schema_remains_pinned
+    path = Hive::Schemas.schema_path("hive-init", version: 1)
+    doc = JSON.parse(File.read(path))
+
+    assert_equal 1, doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+    refute_includes doc.dig("$defs", "Answers", "required"), "refactor_patrol_enabled"
   end
 
   def test_hive_init_required_keys_match_producer_emission
@@ -1072,10 +1080,10 @@ class SchemaFilesTest < Minitest::Test
     expected = %w[
       adhoc_auto_fix answers babysitter_enabled budgets claude_mode daemon_autostart_requested daemon_enabled
       default_branch development_agent enabled_reviewers hints hive_state_path ok path patrol_mode patrol_reviewers planning_agent
-      project schema schema_version timeouts triage_bias workflow worktree_root
+      project refactor_patrol_enabled schema schema_version timeouts triage_bias workflow worktree_root
     ].sort
     assert_equal expected, schema_required,
-                 "schema/producer required-key drift in hive-init.v1.json"
+                 "schema/producer required-key drift in hive-init.v2.json"
 
     # Sandbox the project root: success_payload now drives load_dir against
     # <hive_state_path>/workflows, so a hardcoded /tmp/demo would read a real,
@@ -1086,7 +1094,7 @@ class SchemaFilesTest < Minitest::Test
       entry = { "name" => "demo", "path" => dir, "hive_state_path" => state_path }
       answers = Hive::Commands::Init::Prompts.new(input: StringIO.new, summary_io: StringIO.new).collect
       assert_equal answers.keys.sort, answers_required,
-                   "schema/prompt answer-key drift in hive-init.v1.json"
+                   "schema/prompt answer-key drift in hive-init.v2.json"
       producer = Hive::Commands::Init.new(dir, json: true).send(
         :success_payload, entry: entry, ops: ops, answers: answers, workflow: :coding
       )

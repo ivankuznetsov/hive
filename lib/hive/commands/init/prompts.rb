@@ -51,6 +51,10 @@ module Hive
         DEFAULT_TRIAGE_BIAS = "courageous".freeze
         TRIAGE_BIASES = %w[courageous safetyist].freeze
         DEFAULT_ADHOC_AUTO_FIX = Hive::Config::DEFAULTS.fetch("review").fetch("adhoc").fetch("fix")
+        # Fresh-project recommendation only. Config::DEFAULTS intentionally
+        # remains false so a legacy project with no refactor_patrol block is
+        # never enrolled by an upgrade.
+        DEFAULT_REFACTOR_PATROL_ENABLED = true
 
         # Reviewer entries shipped in templates/project_config.yml.erb. The
         # multi-select prompt offers these as the toggleable set; rendering
@@ -134,6 +138,7 @@ module Hive
         #     "patrol_mode"       => String,           # ultrapatrol | high | medium | low | off
         #     "triage_bias"       => String,           # courageous | safetyist
         #     "adhoc_auto_fix"    => Boolean           # auto-fix ad-hoc PR reviews
+        #     "refactor_patrol_enabled" => Boolean     # architecture discovery only
         #     "budgets"  => Hash<String, Integer>,     # 10 keys (LIMIT_KEYS)
         #     "timeouts" => Hash<String, Integer>,     # 10 keys (LIMIT_KEYS)
         #     "daemon_enabled"    => Boolean           # auto-advance pipeline (ADR-024)
@@ -156,6 +161,7 @@ module Hive
           patrol_mode = prompt_patrol_mode
           triage_bias = prompt_triage_bias
           adhoc_auto_fix = prompt_adhoc_auto_fix
+          refactor_patrol_enabled = prompt_refactor_patrol_enabled
           budgets, timeouts = prompt_limits
           daemon_enabled = prompt_daemon_enabled
           babysitter_enabled = prompt_babysitter_enabled
@@ -173,6 +179,7 @@ module Hive
             "patrol_mode" => patrol_mode,
             "triage_bias" => triage_bias,
             "adhoc_auto_fix" => adhoc_auto_fix,
+            "refactor_patrol_enabled" => refactor_patrol_enabled,
             "budgets" => budgets,
             "timeouts" => timeouts,
             "daemon_enabled" => daemon_enabled,
@@ -217,6 +224,7 @@ module Hive
             "patrol_mode" => DEFAULT_PATROL_MODE,
             "triage_bias" => DEFAULT_TRIAGE_BIAS,
             "adhoc_auto_fix" => DEFAULT_ADHOC_AUTO_FIX,
+            "refactor_patrol_enabled" => DEFAULT_REFACTOR_PATROL_ENABLED,
             "budgets" => default_budgets,
             "timeouts" => default_timeouts,
             "daemon_enabled" => true,
@@ -237,6 +245,7 @@ module Hive
             "patrol_mode=#{DEFAULT_PATROL_MODE}, " \
             "triage=#{DEFAULT_TRIAGE_BIAS}, " \
             "adhoc_auto_fix=#{DEFAULT_ADHOC_AUTO_FIX ? 'enabled' : 'disabled'}, " \
+            "refactor_patrol=#{DEFAULT_REFACTOR_PATROL_ENABLED ? 'enabled' : 'disabled'}, " \
             "limits=defaults, daemon=enabled, babysitter=enabled, daemon_autostart=disabled"
           )
           answers
@@ -548,6 +557,22 @@ module Hive
           end
         end
 
+        def prompt_refactor_patrol_enabled
+          @output.puts ""
+          @output.puts "Architecture patrol — review each future merged PR for refactor opportunities."
+          @output.puts "  Discovery is read-only. Auto-fixing and GitHub issue filing remain"
+          @output.puts "  independently disabled unless you enable their config gates later."
+          loop do
+            @output.print "Enable architecture patrol discovery for this project? [Y/n]: "
+            @output.flush
+            answer = read_line.downcase
+            return true  if answer.empty? || answer == "y" || answer == "yes"
+            return false if answer == "n" || answer == "no"
+
+            @output.puts "  please answer y or n"
+          end
+        end
+
         def prompt_limits
           @output.puts ""
           @output.puts "Limits for each stage / review role. Format: <budget_usd>,<timeout_sec> (blank = defaults)."
@@ -672,6 +697,7 @@ module Hive
           @output.puts "  patrol_mode       = #{answers['patrol_mode']}"
           @output.puts "  triage_bias       = #{answers['triage_bias']}"
           @output.puts "  adhoc_auto_fix    = #{answers['adhoc_auto_fix'] ? 'enabled' : 'disabled'}"
+          @output.puts "  refactor_patrol   = #{answers['refactor_patrol_enabled'] ? 'enabled' : 'disabled'}"
           @output.puts "  limits            = #{summarize_limits(answers)}"
           @output.puts "  daemon            = #{answers['daemon_enabled'] ? 'enabled' : 'disabled'}"
           @output.puts "  babysitter        = #{answers['babysitter_enabled'] ? 'enabled' : 'disabled'}"

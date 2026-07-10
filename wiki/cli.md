@@ -142,7 +142,7 @@ Codes are stable; bumping a code requires updating `test/unit/exit_codes_test.rb
 
 The CLI itself has no auth. Preconditions checked at runtime by individual stage runners:
 
-- Per-spawn `AgentProfile#check_version!` + `preflight!` (Claude: parses `claude --version` against `Hive::MIN_CLAUDE_VERSION = "2.1.118"`; Codex/Pi: profile-specific). Raises `AgentError` on mismatch. Default profile is `:claude`; `Stages::Base.spawn_agent(profile:)` selects an alternate via `Hive::AgentProfiles.lookup(...)`.
+- Per-spawn `AgentProfile#check_version!` + `preflight!` (Claude: parses `claude --version` against `Hive::MIN_CLAUDE_VERSION = "2.1.118"`; Codex/Pi/Grok: profile-specific). Grok accepts API keys, device-login credentials, `GROK_AUTH_PATH`, and `GROK_HOME`, with the direct auth path taking precedence. Raises `AgentError` on mismatch. Default profile is `:claude`; `Stages::Base.spawn_agent(profile:)` selects an alternate via `Hive::AgentProfiles.lookup(...)`.
 - `Hive::Gh.ensure_authenticated!` (called from both `Stages::OpenPr` and `Stages::Finalize`) runs `gh auth status` and exits 1 with stderr if unauthenticated. `Stages::OpenPr` invokes `Hive::Gh.push_branch!` before spawning the open-pr agent; `Stages::Finalize` invokes `Hive::Gh.push_branch` (non-`!`) so a persistent push failure surfaces as `ERROR reason=unpushed_commits` instead of an uncaught exit. The daemon-only merged-finalize-error archive path uses `Hive::Gh.pr_state` to re-confirm `MERGED` before accepting an internal archive recovery flag.
 - `Init#validate_git_repo!` rejects non-git dirs and rejects targets that are themselves worktrees (must run on the main checkout).
 - `Init#validate_clean_tree!` aborts on dirty working tree unless `--force`.

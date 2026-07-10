@@ -129,12 +129,11 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       )
       store.write_job!(partial)
 
-      acting = partial.merge(
-        "state" => "acting",
-        "actions" => [ action.merge("terminal" => false, "outcome" => "validating", "receipts" => {}) ],
-        "updated_at" => "2026-07-10T10:02:00Z"
+      acting = store.initialize_actions!(
+        "job-1",
+        specifications: [ { "thesis_id" => "accepted", "kind" => "fix" } ],
+        now: Time.iso8601("2026-07-10T10:02:00Z")
       )
-      store.write_job!(acting)
       assert_equal "accepted", store.read_job("job-1").dig("dispositions", "accepted", 0, "id")
 
       reclassified = acting.merge(
@@ -298,7 +297,435 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     end
   end
 
+  def test_initializes_deterministic_actions_without_reclassifying_theses
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      accepted = disposition("accepted", "fp-accepted").merge("thesis" => thesis_snapshot("accepted", "fp-accepted"))
+      flagged = disposition("flagged", "fp-flagged").merge(
+        "reasons" => [ "exceeds_file_cap" ],
+        "thesis" => thesis_snapshot("flagged", "fp-flagged")
+      )
+      classified = classified_job(
+        "policy" => { "discovery" => true, "auto_fix" => true, "issue_filing" => true },
+        "dispositions" => { "accepted" => [ accepted ], "flagged" => [ flagged ], "suppressed" => [] }
+      )
+      store.write_job!(classified)
+
+      initialized = store.initialize_actions!(
+        "job-1",
+        specifications: [
+          { "thesis_id" => "flagged", "kind" => "issue", "family_id" => "af1-#{'f' * 64}" },
+          { "thesis_id" => "accepted", "kind" => "fix" }
+        ],
+        now: T0
+      )
+
+      assert_equal classified.fetch("dispositions"), initialized.fetch("dispositions")
+      assert_equal %w[fix issue], initialized.fetch("actions").map { |item| item.fetch("kind") }.sort
+      assert initialized.fetch("actions").all? { |item| item.fetch("canonical_action_id").match?(Hive::RefactorPatrol::JobStore::ID_PATTERN) }
+      assert initialized.fetch("actions").all? { |item| item.fetch("owner_job_id") == "job-1" }
+      assert_equal "acting", initialized.fetch("state")
+      assert_equal initialized, store.initialize_actions!(
+        "job-1",
+        specifications: [
+          { "thesis_id" => "accepted", "kind" => "fix" },
+          { "thesis_id" => "flagged", "kind" => "issue", "family_id" => "af1-#{'f' * 64}" }
+        ],
+        now: T0 + 1
+      )
+    end
+  end
+
+  def test_disposition_thesis_snapshot_must_be_complete_and_match_identity
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      mismatched = disposition("accepted", "fp-accepted").merge(
+        "thesis" => thesis_snapshot("other", "fp-accepted")
+      )
+      incomplete = disposition("accepted", "fp-accepted").merge(
+        "thesis" => { "id" => "accepted", "feature_id" => "checkout", "fingerprint" => "fp-accepted" }
+      )
+
+      assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        store.write_job!(classified_job(
+          "dispositions" => { "accepted" => [ mismatched ], "flagged" => [], "suppressed" => [] }
+        ))
+      end
+      assert_raises(Hive::RefactorPatrol::JobStore::CorruptRecord) do
+        store.write_job!(classified_job(
+          "dispositions" => { "accepted" => [ incomplete ], "flagged" => [], "suppressed" => [] }
+        ))
+      end
+    end
+  end
+
+  def test_canonical_action_identity_is_repository_kind_and_family_or_fingerprint
+    store = Hive::RefactorPatrol::JobStore.new("/tmp/example")
+    fix = store.canonical_action_id(repository: "Acme/Demo", kind: "fix", identity: "fp/one")
+    same = store.canonical_action_id(repository: "acme/demo", kind: "fix", identity: "fp/one")
+    issue = store.canonical_action_id(repository: "acme/demo", kind: "issue", identity: "af1-#{'a' * 64}")
+    other_repo = store.canonical_action_id(repository: "other/demo", kind: "fix", identity: "fp/one")
+
+    assert_equal fix, same
+    refute_equal fix, issue
+    refute_equal fix, other_repo
+    assert_match Hive::RefactorPatrol::JobStore::ID_PATTERN, fix
+    assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+      store.canonical_action_id(repository: "not-a-repository", kind: "fix", identity: "fp")
+    end
+  end
+
+  def test_action_claims_are_serialized_fenced_and_monotonic
+    with_tmp_dir do |dir|
+      store = initialized_store(dir)
+      first = store.claim_action!("job-1", fix_action_id(store), owner: "runner-a", now: T0, lease_sec: 10)
+      store.attach_action_process!(
+        first, pid: 1234, process_start_time: "boot-1", pgid: 1234, now: T0 + 1
+      )
+
+      assert_nil store.claim_action!("job-1", fix_action_id(store), owner: "runner-b", now: T0 + 2)
+      stale = first.merge(generation: first.fetch(:generation) + 1)
+      assert_raises(Hive::RefactorPatrol::JobStore::StaleClaim) do
+        store.record_action_receipt!(stale, key: "patch", value: { "commit_sha" => "d" * 40 }, now: T0 + 2)
+      end
+
+      assert_nil store.claim_action!(
+        "job-1", fix_action_id(store), owner: "runner-b", now: T0 + 11,
+        claim_resolver: ->(_claim) { :unresolved }
+      )
+      second = store.claim_action!(
+        "job-1", fix_action_id(store), owner: "runner-b", now: T0 + 11,
+        claim_resolver: ->(_claim) { :resolved }
+      )
+      assert_equal first.fetch(:generation) + 1, second.fetch(:generation)
+      assert_raises(Hive::RefactorPatrol::JobStore::StaleClaim) do
+        store.record_action_receipt!(first, key: "patch", value: { "commit_sha" => "d" * 40 }, now: T0 + 12)
+      end
+    end
+  end
+
+  def test_creation_intent_and_receipts_survive_crash_retry_idempotently
+    with_tmp_dir do |dir|
+      store = initialized_store(dir)
+      token = store.claim_action!("job-1", fix_action_id(store), owner: "runner-a", now: T0, lease_sec: 10)
+      intent = { "operation" => "create_pr", "branch" => "hive/refactor/fp-accepted" }
+
+      first = store.record_creation_intent!(token, intent: intent, now: T0 + 1)
+      repeated = store.record_creation_intent!(token, intent: intent, now: T0 + 2)
+      assert_equal first, repeated
+      assert_equal intent, repeated.dig("actions", 0, "receipts", "creation_intent", "payload")
+
+      recovered = store.claim_action!(
+        "job-1", fix_action_id(store), owner: "runner-b", now: T0 + 11,
+        claim_resolver: ->(_claim) { :resolved }
+      )
+      repaired = store.record_action_receipt!(
+        recovered, key: "pr", value: { "url" => "https://github.com/acme/demo/pull/9" }, now: T0 + 12
+      )
+      assert_equal "https://github.com/acme/demo/pull/9", repaired.dig("actions", 0, "receipts", "pr", "url")
+      assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        store.record_creation_intent!(
+          recovered,
+          intent: intent.merge("branch" => "hive/refactor/different"),
+          now: T0 + 13
+        )
+      end
+      completed = store.finish_action!(
+        recovered,
+        outcome: "pr_opened",
+        receipts: {
+          "creation_intent" => true,
+          "pr_url" => "https://github.com/acme/demo/pull/9"
+        },
+        now: T0 + 14
+      )
+      assert completed.fetch("complete")
+      assert_kind_of Hash, completed.dig("actions", 0, "receipts", "creation_intent")
+    end
+  end
+
+  def test_stale_full_aggregate_cannot_erase_an_atomic_receipt
+    with_tmp_dir do |dir|
+      store = initialized_store(dir)
+      stale = store.read_job("job-1")
+      token = store.claim_action!("job-1", fix_action_id(store), owner: "runner", now: T0)
+      store.record_patch_receipt!(token, receipt: { "commit_sha" => "d" * 40 }, now: T0 + 1)
+
+      assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        store.write_job!(stale.merge("updated_at" => (T0 + 2).iso8601))
+      end
+      assert_equal "d" * 40, store.read_job("job-1").dig("actions", 0, "receipts", "patch", "commit_sha")
+    end
+  end
+
+  def test_initialized_action_catalog_and_identity_are_immutable
+    with_tmp_dir do |dir|
+      store = initialized_store(dir)
+      original = store.read_job("job-1")
+      action = original.fetch("actions").first
+      variants = [
+        original.merge("actions" => []),
+        original.merge("actions" => original.fetch("actions") + [
+          action.merge("canonical_action_id" => "fix-another")
+        ]),
+        original.merge("actions" => [ action.merge("owner_job_id" => "other-job") ]),
+        original.merge("actions" => [ action.merge("thesis_id" => "other-thesis") ]),
+        original.merge("actions" => [ action.merge("kind" => "issue") ]),
+        original.merge("actions" => [ action.merge("family_id" => "af1-#{'a' * 64}") ]),
+        original.merge("actions" => [ action.merge("created_at" => (T0 - 1).iso8601) ])
+      ]
+
+      variants.each do |replacement|
+        assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+          store.write_job!(replacement.merge("updated_at" => (T0 + 1).iso8601))
+        end
+      end
+      assert_equal original, store.read_job("job-1")
+    end
+  end
+
+  def test_patch_fix_and_terminal_receipts_complete_parent_only_after_all_actions
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      accepted = disposition("accepted", "fp-accepted")
+      flagged = disposition("flagged", "fp-flagged").merge("reasons" => [ "exceeds_file_cap" ])
+      store.write_job!(classified_job(
+        "policy" => { "discovery" => true, "auto_fix" => true, "issue_filing" => true },
+        "dispositions" => { "accepted" => [ accepted ], "flagged" => [ flagged ], "suppressed" => [] }
+      ))
+      initialized = store.initialize_actions!(
+        "job-1",
+        specifications: [
+          { "thesis_id" => "accepted", "kind" => "fix" },
+          { "thesis_id" => "flagged", "kind" => "issue", "family_id" => "af1-#{'f' * 64}" }
+        ],
+        now: T0
+      )
+      fix_id = initialized.fetch("actions").find { |item| item.fetch("kind") == "fix" }.fetch("canonical_action_id")
+      issue_id = initialized.fetch("actions").find { |item| item.fetch("kind") == "issue" }.fetch("canonical_action_id")
+
+      fix_token = store.claim_action!("job-1", fix_id, owner: "fixer", now: T0 + 1)
+      assert_nil store.claim_action!("job-1", issue_id, owner: "filer", now: T0 + 1)
+      store.record_patch_receipt!(fix_token, receipt: { "commit_sha" => "d" * 40 }, now: T0 + 2)
+      store.record_fix_receipt!(fix_token, receipt: { "validation" => "passed" }, now: T0 + 3)
+      after_fix = store.finish_action!(
+        fix_token, outcome: "pr_opened",
+        receipts: { "pr_url" => "https://github.com/acme/demo/pull/9" }, now: T0 + 4
+      )
+      refute after_fix.fetch("complete")
+      assert_equal "acting", after_fix.fetch("state")
+
+      issue_token = store.claim_action!("job-1", issue_id, owner: "filer", now: T0 + 5)
+      completed = store.finish_action!(
+        issue_token, outcome: "issue_opened",
+        receipts: { "issue_url" => "https://github.com/acme/demo/issues/10" }, now: T0 + 6
+      )
+      assert completed.fetch("complete")
+      assert_equal "complete", completed.fetch("state")
+      assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        store.write_job!(completed.merge("updated_at" => (T0 + 7).iso8601))
+      end
+    end
+  end
+
+  def test_nonterminal_release_blocks_parent_and_honors_backoff
+    with_tmp_dir do |dir|
+      store = initialized_store(dir)
+      token = store.claim_action!("job-1", fix_action_id(store), owner: "runner", now: T0)
+
+      blocked = store.release_action!(
+        token, outcome: "network_failure", receipts: { "error" => "timeout" },
+        now: T0 + 1, backoff_sec: 60
+      )
+      assert_equal "blocked", blocked.fetch("state")
+      assert_nil store.claim_action!("job-1", fix_action_id(store), owner: "runner", now: T0 + 60)
+      reclaimed = store.claim_action!("job-1", fix_action_id(store), owner: "runner", now: T0 + 61)
+      assert_equal token.fetch(:generation) + 1, reclaimed.fetch(:generation)
+    end
+  end
+
+  def test_revocation_blocks_unpublished_work_but_allows_remote_reconciliation
+    with_tmp_dir do |dir|
+      store = initialized_store(dir)
+      action_id = fix_action_id(store)
+
+      assert_nil store.claim_action!("job-1", action_id, owner: "runner", authority: false, now: T0)
+      assert_equal "authority_revoked", store.read_job("job-1").dig("actions", 0, "outcome")
+
+      token = store.claim_action!("job-1", action_id, owner: "runner", authority: true, now: T0 + 1)
+      store.record_creation_intent!(
+        token,
+        intent: { "operation" => "create_pr", "branch" => "hive/refactor/fp-accepted" },
+        now: T0 + 2
+      )
+      store.release_action!(token, outcome: "remote_outcome_unknown", now: T0 + 3, backoff_sec: 0)
+
+      continuation = store.claim_action!(
+        "job-1", action_id, owner: "reconciler", authority: false, now: T0 + 4
+      )
+      assert continuation.fetch(:continuation_only)
+      assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        store.record_creation_intent!(
+          continuation,
+          intent: { "operation" => "create_pr", "branch" => "hive/refactor/new" },
+          now: T0 + 5
+        )
+      end
+    end
+  end
+
+  def test_concurrent_claims_yield_one_action_owner
+    with_tmp_dir do |dir|
+      store = initialized_store(dir)
+      action_id = fix_action_id(store)
+      ready = Queue.new
+      start = Queue.new
+      threads = %w[a b].map do |owner|
+        Thread.new do
+          ready << true
+          start.pop
+          store.claim_action!("job-1", action_id, owner: owner, now: T0)
+        end
+      end
+      2.times { ready.pop }
+      2.times { start << true }
+
+      claims = threads.map(&:value).compact
+      assert_equal 1, claims.size
+      assert_includes %w[a b], claims.first.fetch(:owner)
+    end
+  end
+
+  def test_concurrent_receipt_updates_are_merged_under_the_job_lock
+    with_tmp_dir do |dir|
+      store = initialized_store(dir)
+      token = store.claim_action!("job-1", fix_action_id(store), owner: "runner", now: T0)
+      ready = Queue.new
+      start = Queue.new
+      updates = {
+        "patch" => { "commit_sha" => "d" * 40 },
+        "validation" => { "status" => "passed" }
+      }
+      threads = updates.map do |key, value|
+        Thread.new do
+          ready << true
+          start.pop
+          store.record_action_receipt!(token, key: key, value: value, now: T0 + 1)
+        end
+      end
+      2.times { ready.pop }
+      2.times { start << true }
+      threads.each(&:value)
+
+      receipts = store.read_job("job-1").dig("actions", 0, "receipts")
+      assert_equal updates, receipts
+    end
+  end
+
+  def test_actionable_jobs_are_separate_from_discovery_claims_and_respect_leases
+    with_tmp_dir do |dir|
+      store = initialized_store(dir)
+      action_id = fix_action_id(store)
+
+      assert_equal [ "job-1" ], store.actionable_jobs(now: T0).map { |item| item.fetch("job_id") }
+      assert_empty store.claimable_jobs(now: T0)
+      token = store.claim_action!("job-1", action_id, owner: "runner", now: T0, lease_sec: 10)
+      assert_empty store.actionable_jobs(now: T0 + 1)
+
+      assert_equal [ "job-1" ], store.actionable_jobs(now: T0 + 11).map { |item| item.fetch("job_id") }
+      store.release_action!(token, outcome: "network_failure", now: T0 + 1, backoff_sec: 60)
+      assert_empty store.actionable_jobs(now: T0 + 60)
+      assert_equal [ "job-1" ], store.actionable_jobs(now: T0 + 61).map { |item| item.fetch("job_id") }
+      assert_empty store.claimable_jobs(now: T0 + 61)
+    end
+  end
+
+  def test_newly_classified_job_is_actionable_before_catalog_initialization
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      store.write_job!(classified_job)
+
+      assert_equal [ "job-1" ], store.actionable_jobs(now: T0).map { |item| item.fetch("job_id") }
+      assert_empty store.claimable_jobs(now: T0)
+    end
+  end
+
+  def test_later_occurrence_links_to_canonical_owner_and_reconciles_terminal_proof
+    with_tmp_dir do |dir|
+      store = initialized_store(dir)
+      action_id = fix_action_id(store)
+      second_disposition = disposition("accepted-2", "fp-accepted")
+      store.write_job!(classified_job(
+        "job_id" => "job-2",
+        "source" => source("number" => 8, "merge_sha" => "d" * 40),
+        "dispositions" => { "accepted" => [ second_disposition ], "flagged" => [], "suppressed" => [] },
+        "created_at" => (T0 + 1).iso8601,
+        "updated_at" => (T0 + 1).iso8601
+      ))
+      linked = store.initialize_actions!(
+        "job-2", specifications: [ { "thesis_id" => "accepted-2", "kind" => "fix" } ], now: T0 + 2
+      )
+
+      assert_equal "job-1", linked.dig("actions", 0, "owner_job_id")
+      assert_empty linked.dig("actions", 0, "receipts")
+      refute_includes store.actionable_jobs(now: T0 + 3).map { |item| item.fetch("job_id") }, "job-2"
+
+      token = store.claim_action!("job-1", action_id, owner: "runner", now: T0 + 3)
+      store.finish_action!(token, outcome: "no_diff", now: T0 + 4)
+      assert_includes store.actionable_jobs(now: T0 + 5).map { |item| item.fetch("job_id") }, "job-2"
+      completed_link = store.reconcile_linked_action!("job-2", action_id, now: T0 + 5)
+      assert completed_link.fetch("complete")
+      assert_equal "no_diff", completed_link.dig("actions", 0, "outcome")
+      assert_empty completed_link.dig("actions", 0, "receipts")
+    end
+  end
+
   private
+
+  def classified_job(overrides = {})
+    job(
+      "state" => "classified",
+      "complete" => false,
+      "actions" => [],
+      "attempts" => [ { "number" => 1, "outcome" => "classified" } ]
+    ).merge(overrides)
+  end
+
+  def initialized_store(dir)
+    store = Hive::RefactorPatrol::JobStore.new(dir)
+    store.write_job!(classified_job)
+    store.initialize_actions!(
+      "job-1", specifications: [ { "thesis_id" => "accepted", "kind" => "fix" } ], now: T0
+    )
+    store
+  end
+
+  def fix_action_id(store)
+    store.read_job("job-1").fetch("actions").find { |item| item.fetch("kind") == "fix" }
+         .fetch("canonical_action_id")
+  end
+
+  def thesis_snapshot(id, fingerprint)
+    {
+      "id" => id,
+      "feature_id" => "checkout",
+      "feature" => "Checkout",
+      "fingerprint" => fingerprint,
+      "problem" => "Scattered policy",
+      "cost" => "Repeated edits",
+      "evidence" => [],
+      "proposed_refactor" => "Consolidate policy",
+      "feature_boundary" => { "owned_files" => [ "lib/checkout.rb" ] },
+      "feature_hotspot" => {},
+      "expected_leverage" => { "score" => 0.8 },
+      "confidence" => "high",
+      "risk" => { "flags" => [], "advisories" => [] },
+      "required_validation" => { "commands" => [ "bin/test" ] },
+      "admissible" => true,
+      "admissibility_reason" => "",
+      "follow_up_approval_state" => "pending"
+    }
+  end
 
   def job(overrides = {})
     {

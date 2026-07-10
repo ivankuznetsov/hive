@@ -55,7 +55,11 @@ module Hive
 
       def grok_auth_path(home: nil)
         auth_path = ENV["GROK_AUTH_PATH"]
-        return File.expand_path(auth_path) unless auth_path.to_s.strip.empty?
+        unless auth_path.to_s.strip.empty?
+          raise ArgumentError, "GROK_AUTH_PATH must be absolute" unless File.absolute_path?(auth_path)
+
+          return auth_path
+        end
 
         grok_home = ENV["GROK_HOME"]
         root = grok_home.to_s.strip.empty? ? File.join(home || Dir.home, ".grok") : File.expand_path(grok_home)

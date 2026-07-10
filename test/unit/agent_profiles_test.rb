@@ -165,6 +165,12 @@ class AgentProfilesTest < Minitest::Test
     end
   end
 
+  def test_grok_logged_in_rejects_relative_auth_path
+    with_env("GROK_AUTH_PATH" => "relative/auth.json") do
+      refute Hive::AgentProfiles.logged_in?(:grok)
+    end
+  end
+
   def test_grok_logged_in_explicit_locations_do_not_require_home_resolution
     Dir.mktmpdir do |auth_dir|
       auth_path = File.join(auth_dir, "shared-auth.json")

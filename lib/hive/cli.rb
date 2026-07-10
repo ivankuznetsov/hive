@@ -24,6 +24,45 @@ module Hive
     # editing only that one method.
     WORKFLOW_VOCABULARY = Hive::Workflows::Registry.ids.join(", ").freeze
 
+    # Versioned commands whose schema is `hive-#{command}` derive their usage
+    # contract from SCHEMA_VERSIONS and the schema's ErrorPayload. Keep only
+    # aliases, multi-surface commands, and unversioned envelopes here.
+    STAGE_ACTION_USAGE_COMMANDS = %w[brainstorm plan develop open-pr review artifacts finalize archive].freeze
+    JSON_USAGE_ERROR_OVERRIDES = {
+      "doctor" => { schema: "hive-doctor.v1", error_kind: "usage" },
+      "setup" => { schema: "hive-setup", error_kind: "usage" },
+      "connect" => { error_kind: "error", extras: { "service" => "screenote" } },
+      "disconnect" => { error_kind: "error", extras: { "service" => "screenote" } },
+      "bench" => { schema: "hive-bench-submit", error_kind: "usage" },
+      "rebase-status" => { schema: "hive-rebase-status", schema_version: 1, error_kind: "invalid_task_path" },
+      "accept-finding" => {
+        schema: "hive-findings",
+        error_kind: "invalid_task_path",
+        extras: { "operation" => "accept" }
+      },
+      "reject-finding" => {
+        schema: "hive-findings",
+        error_kind: "invalid_task_path",
+        extras: { "operation" => "reject" }
+      },
+      "markers" => { schema: "hive-markers-clear", error_kind: "invalid_task_path" },
+      "workflow" => { schema: "hive-workflow-new", error_kind: "usage" },
+      "pairing" => { schema: "hive-pairing-approve", error_kind: "usage" },
+      "bot" => { schema: "hive-bot-status", error_kind: "extra_arguments" },
+      "web" => { schema: "hive-web-status", error_kind: "invalid_task_path" },
+      "metrics" => { schema: "hive-metrics-rollback-rate", error_kind: "error", error_class: false },
+      "pr" => {
+        schema: "hive-stage-action",
+        error_kind: "invalid_task_path",
+        extras: { "verb" => "open-pr" }
+      }
+    }.merge(
+      STAGE_ACTION_USAGE_COMMANDS.to_h do |command|
+        [ command, { schema: "hive-stage-action", error_kind: "invalid_task_path",
+                     extras: { "verb" => command } } ]
+      end
+    ).freeze
+
     # The one place the `--workflow` help is composed, shared by `init` and
     # `new` so they stay symmetric.
     def self.workflow_option_desc

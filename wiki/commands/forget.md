@@ -80,6 +80,7 @@ For the bulk-of-stale-entries case, prefer `hive prune`. The TUI grid Shift+X ke
 |---|---|---|
 | `missing_name` | 64 | NAME positional was empty/whitespace |
 | `unknown_project` | 64 | NAME does not match any registry entry and `--if-exists` was not passed |
+| `usage` | 64 | Thor rejected the argv shape before command dispatch |
 | `config` | 78 | malformed `config.yml` or missing `$HIVE_HOME` |
 | `internal` | 70 | uncategorised crash |
 

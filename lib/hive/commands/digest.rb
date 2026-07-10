@@ -34,7 +34,7 @@ module Hive
         result
       rescue Hive::Error => e
         # A bad --date raises Hive::ConfigError, which Thor never sees (it is
-        # not a Thor::Error), so bin/hive's JSON_USAGE_ERROR_CONTRACTS path
+        # not a Thor::Error), so bin/hive's schema-derived usage-error path
         # never fires for it. Emit the in-command JSON error envelope here —
         # mirroring ~10 sibling commands — before re-raising, so an agent
         # parsing --json stdout gets a structured error on the most common

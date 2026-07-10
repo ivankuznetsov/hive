@@ -201,7 +201,7 @@ Usage errors emit the shared `ErrorPayload` (same `hive-digest` schema):
 - a bad `--date` raises `Hive::ConfigError` and the command emits the
   envelope itself (`error_kind: "config"`, exit 78) before re-raising;
 - a malformed invocation caught before dispatch (unknown flag / malformed
-  `--json`) emits via `JSON_USAGE_ERROR_CONTRACTS` (`error_kind: "usage"`,
+  `--json`) emits via the schema-derived usage contract (`error_kind: "usage"`,
   exit 64).
 
 A Telegram send error that occurs mid-delivery still stays on the stderr +

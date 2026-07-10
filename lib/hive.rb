@@ -45,12 +45,12 @@ module Hive
       # Global daily shipped digest (`hive digest --json`). The success
       # envelope carries the delivery outcome (status/date/message); hard
       # failures use stderr + exit code, and the Thor-usage error path
-      # emits the shared error envelope (see JSON_USAGE_ERROR_CONTRACTS).
+      # emits the shared error envelope (see CLI JSON usage-error metadata).
       "hive-digest" => 1,
       # Daily digest of tasks waiting on human input (`hive answer-digest
       # --json`). The success envelope reports the send outcome plus the full
       # waiting set (count/tasks); the Thor-usage error path emits the shared
-      # error envelope via JSON_USAGE_ERROR_CONTRACTS, and a bad --date / status
+      # error envelope via CLI/schema usage-error metadata, and a bad --date / status
       # outage emit the in-command error envelope.
       "hive-answer-digest" => 1,
       # Read-only GitHub merged-pull-request digest source
@@ -304,6 +304,7 @@ module Hive
     module ForgetErrorKind
       MISSING_NAME    = "missing_name".freeze
       UNKNOWN_PROJECT = "unknown_project".freeze
+      USAGE           = "usage".freeze
       CONFIG          = "config".freeze
       INTERNAL        = "internal".freeze
       ALL = constants(false).reject { |c| c == :ALL }.map { |c| const_get(c) }.freeze
@@ -360,9 +361,8 @@ module Hive
     end
 
     # Closed enum of `error_kind` values emitted by `hive prune --json`.
-    # `USAGE` covers `--dry-run` flag-validation (currently unreachable; reserved
-    # for future flag work so v1 can absorb it without a v2 bump). `CONFIG`
-    # covers malformed config.yml + missing $HIVE_HOME via Hive::ConfigError.
+    # `USAGE` covers argv-shape failures caught by Thor before command dispatch.
+    # `CONFIG` covers malformed config.yml + missing $HIVE_HOME via Hive::ConfigError.
     module PruneErrorKind
       USAGE    = "usage".freeze
       CONFIG   = "config".freeze

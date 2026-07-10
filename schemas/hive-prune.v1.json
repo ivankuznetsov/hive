@@ -73,7 +73,7 @@
             "config",
             "internal"
           ],
-          "description": "usage = reserved for future flag-validation (currently unreachable; pre-declared so v1 absorbs it without a v2 bump). config = malformed config.yml or missing $HIVE_HOME (exit 78). internal = uncategorised crash (exit 70)."
+          "description": "usage = Thor rejected the argv shape before command dispatch. config = malformed config.yml or missing $HIVE_HOME (exit 78). internal = uncategorised crash (exit 70)."
         },
         "exit_code": {
           "type": "integer",

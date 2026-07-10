@@ -68,7 +68,7 @@ Malformed rows from a hand-edited `config.yml` (e.g., a non-Hash entry or a row 
 
 | `error_kind` | Exit | Cause |
 |---|---|---|
-| `usage` | 64 | reserved for future flag-validation; pre-declared so v1 absorbs it without a v2 bump |
+| `usage` | 64 | Thor rejected the argv shape before command dispatch |
 | `config` | 78 | malformed `config.yml` or missing `$HIVE_HOME` |
 | `internal` | 70 | uncategorised crash |
 

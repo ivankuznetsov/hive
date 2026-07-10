@@ -14,50 +14,7 @@ end
 JSON_TRUE_OPTIONS = %w[--json --json=true --json=TRUE --json=t --json=T].freeze
 JSON_FALSE_OPTIONS = %w[--no-json --skip-json --json=false --json=FALSE --json=f --json=F].freeze
 JSON_BOOLEAN_OPTIONS = (JSON_TRUE_OPTIONS + JSON_FALSE_OPTIONS).freeze
-STAGE_ACTION_USAGE_COMMANDS = %w[brainstorm plan develop open-pr review artifacts finalize archive].freeze
 NEW_VALUE_OPTIONS = %w[--depends-on --workflow].freeze
-JSON_USAGE_ERROR_CONTRACTS = {
-  "run" => { schema: "hive-run", error_kind: "invalid_task_path" },
-  "rebase-status" => { schema: "hive-rebase-status", schema_version: 1, error_kind: "invalid_task_path" },
-  "approve" => { schema: "hive-approve", error_kind: "invalid_task_path" },
-  "drop" => { schema: "hive-drop", error_kind: "invalid_task_path" },
-  "findings" => { schema: "hive-findings", error_kind: "invalid_task_path" },
-  "patrol" => { schema: "hive-patrol", error_kind: "error" },
-  "accept-finding" => {
-    schema: "hive-findings",
-    error_kind: "invalid_task_path",
-    extras: { "operation" => "accept" }
-  },
-  "reject-finding" => {
-    schema: "hive-findings",
-    error_kind: "invalid_task_path",
-    extras: { "operation" => "reject" }
-  },
-  "markers" => { schema: "hive-markers-clear", error_kind: "invalid_task_path" },
-  "digest" => { schema: "hive-digest", error_kind: "usage" },
-  "pairing" => { schema: "hive-pairing-approve", error_kind: "usage" },
-  "answer-digest" => { schema: "hive-answer-digest", error_kind: "usage" },
-  # Residual workflow argv-shape errors raised by Thor before command dispatch
-  # (for example too many positionals) must ride the same JSON envelope as the
-  # command's own UsageError. Bare `hive workflow` is handled in-command.
-  "workflow" => { schema: "hive-workflow-new", error_kind: "usage" },
-  # `hive bot` takes a single SUBCOMMAND positional and (unlike `daemon`) has no
-  # `*targets` splat, so an extra positional such as `hive bot status extra` is
-  # rejected by Thor before `Hive::Commands::Bot#call` runs — bypassing the
-  # command-level usage-error emitters. Ride the same hive-bot-status envelope
-  # those emitters use so every `hive bot ... --json` usage error still produces
-  # an ok:false document on stdout instead of bare Thor prose on stderr.
-  "bot" => { schema: "hive-bot-status", error_kind: "extra_arguments" },
-  "pr" => {
-    schema: "hive-stage-action",
-    error_kind: "invalid_task_path",
-    extras: { "verb" => "open-pr" }
-  }
-}.merge(
-  STAGE_ACTION_USAGE_COMMANDS.to_h do |command|
-    [ command, { schema: "hive-stage-action", error_kind: "invalid_task_path", extras: { "verb" => command } } ]
-  end
-).freeze
 
 # Thor treats a class option before the subcommand as input to its help path.
 # Keep `hive --json status` equivalent to `hive status --json`.
@@ -245,14 +202,39 @@ def json_usage_error_contract(argv)
     return { schema: "hive-merged-pr-digest", error_kind: "usage" }
   end
 
-  JSON_USAGE_ERROR_CONTRACTS[command]
+  if command == "web"
+    subcommand = argv.drop_while { |arg| arg != command }.drop(1).find { |arg| %w[install status].include?(arg) }
+    return Hive::CLI::JSON_USAGE_ERROR_OVERRIDES.fetch(command).merge(
+      schema: subcommand == "install" ? "hive-web-install" : "hive-web-status"
+    )
+  end
+
+  override = Hive::CLI::JSON_USAGE_ERROR_OVERRIDES[command]
+  return override if override
+
+  schema = "hive-#{command}"
+  return unless Hive::Schemas::SCHEMA_VERSIONS.key?(schema)
+
+  error_kind = schema_usage_error_kind(schema)
+  { schema: schema, error_kind: error_kind } if error_kind
+end
+
+def schema_usage_error_kind(schema)
+  document = JSON.parse(File.read(Hive::Schemas.schema_path(schema)))
+  property = document.dig("$defs", "ErrorPayload", "properties", "error_kind") || {}
+  allowed = Array(property["enum"])
+  allowed << property["const"] if property.key?("const")
+  %w[usage invalid_task_path error internal].find { |kind| allowed.include?(kind) }
+rescue SystemCallError, JSON::ParserError
+  nil
 end
 
 def json_usage_error_payload(contract, error)
-  schema = contract.fetch(:schema)
+  schema = contract[:schema]
   error_kind = contract.fetch(:error_kind)
   extras = contract.fetch(:extras, {})
-  if Hive::Schemas::SCHEMA_VERSIONS.key?(schema)
+  versioned_schema = schema && Hive::Schemas::SCHEMA_VERSIONS.key?(schema)
+  if versioned_schema && contract.fetch(:error_class, true)
     return Hive::Schemas::ErrorEnvelope.build(
       schema: schema,
       error: error,
@@ -261,15 +243,20 @@ def json_usage_error_payload(contract, error)
     )
   end
 
-  {
-    "schema" => schema,
-    "schema_version" => contract.fetch(:schema_version, 1),
+  payload = {
     "ok" => false,
-    "error_class" => error.class.name.split("::").last,
     "error_kind" => error_kind,
     "exit_code" => error.respond_to?(:exit_code) ? error.exit_code : Hive::ExitCodes::GENERIC,
     "message" => error.message
-  }.merge(extras)
+  }
+  payload["error_class"] = error.class.name.split("::").last if contract.fetch(:error_class, true)
+  payload["schema"] = schema if schema
+  if versioned_schema
+    payload["schema_version"] = Hive::Schemas::SCHEMA_VERSIONS.fetch(schema)
+  elsif contract.key?(:schema_version)
+    payload["schema_version"] = contract[:schema_version]
+  end
+  payload.merge(extras)
 end
 
 def emit_json_usage_error(argv, error)

@@ -1245,6 +1245,7 @@ class SchemaFilesTest < Minitest::Test
         Hive::Commands::Forget::UsageError.new("missing", error_kind: Hive::Schemas::ForgetErrorKind::MISSING_NAME),
       Hive::Schemas::ForgetErrorKind::UNKNOWN_PROJECT =>
         Hive::Commands::Forget::UsageError.new("not found", error_kind: Hive::Schemas::ForgetErrorKind::UNKNOWN_PROJECT),
+      Hive::Schemas::ForgetErrorKind::USAGE => Hive::InvalidTaskPath.new("usage"),
       Hive::Schemas::ForgetErrorKind::CONFIG => Hive::ConfigError.new("bad config"),
       Hive::Schemas::ForgetErrorKind::INTERNAL => Hive::InternalError.new("boom")
     }
@@ -1617,10 +1618,10 @@ class SchemaFilesTest < Minitest::Test
   # unknown_subcommand are raised in Hive::Commands::Bot#call; the cli.rb
   # `bot` dispatcher raises wrong_subcommand_flag before the command runs
   # (e.g. `bot status --force`); and extra_arguments rides the bin/hive
-  # JSON_USAGE_ERROR_CONTRACTS `bot` entry when Thor rejects an extra
+  # CLI usage-error override `bot` entry when Thor rejects an extra
   # positional (e.g. `bot status extra`) before dispatch. All ride the
   # hive-bot-status schema because there is no separate bot-usage-error
-  # schema — JSON_USAGE_ERROR_SCHEMA points here.
+  # schema — the command override points here.
   BOT_USAGE_ERROR_KINDS = %w[
     missing_subcommand unknown_subcommand wrong_subcommand_flag extra_arguments
   ].freeze

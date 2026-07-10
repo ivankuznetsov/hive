@@ -56,6 +56,53 @@ class CliUsageErrorJsonTest < Minitest::Test
     end
   end
 
+  def test_json_commands_emit_envelopes_for_pre_dispatch_thor_arity_errors
+    cases = [
+      [ %w[init one two --json], "hive-init", "usage", {}, true ],
+      [ %w[forget one two --json], "hive-forget", "usage", {}, true ],
+      [ %w[prune extra --json], "hive-prune", "usage", {}, true ],
+      [ %w[doctor extra --json], "hive-doctor.v1", "usage", {}, true ],
+      [ %w[setup extra --json], "hive-setup", "usage", {}, true ],
+      [ %w[connect --json], nil, "error", { "service" => "screenote" }, true ],
+      [ %w[disconnect --json], nil, "error", { "service" => "screenote" }, true ],
+      [ %w[bench submit slug extra --json], "hive-bench-submit", "usage", {}, true ],
+      [ %w[status extra --json], "hive-status", "error", {}, true ],
+      [ %w[web status extra --json], "hive-web-status", "invalid_task_path", {}, true ],
+      [ %w[web install extra --json], "hive-web-install", "invalid_task_path", {}, true ],
+      [ %w[metrics rollback-rate extra --json], "hive-metrics-rollback-rate", "error", {}, false ]
+    ]
+
+    with_tmp_global_config do |home|
+      cases.each do |argv, schema, error_kind, extras, error_class|
+        out, _err, status = run_hive(home, *argv)
+
+        refute status.success?, "#{argv.join(' ')} should fail"
+        assert_equal Hive::ExitCodes::USAGE, status.exitstatus
+        payload = JSON.parse(out)
+        assert_equal schema, payload["schema"] if schema
+        if schema && Hive::Schemas::SCHEMA_VERSIONS.key?(schema)
+          assert_equal Hive::Schemas::SCHEMA_VERSIONS.fetch(schema), payload["schema_version"]
+        else
+          refute payload.key?("schema_version")
+        end
+        assert_equal false, payload["ok"]
+        if error_class
+          assert_equal "InvalidTaskPath", payload["error_class"]
+        else
+          refute payload.key?("error_class")
+        end
+        assert_equal error_kind, payload["error_kind"]
+        assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
+        extras.each { |key, value| assert_equal value, payload[key] }
+        next unless schema && Hive::Schemas::SCHEMA_VERSIONS.key?(schema)
+
+        schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path(schema))))
+        assert_empty schemer.validate(payload).map { |e| e["error"] },
+                     "#{argv.join(' ')} payload must validate against #{schema}"
+      end
+    end
+  end
+
   # Bare `hive workflow` (no subcommand) with --json must ride the
   # hive-workflow-new envelope (error_kind "usage"), not Thor's generic arity
   # prose. The sibling `hive workflow new` no-id case raises the command's own
@@ -97,8 +144,8 @@ class CliUsageErrorJsonTest < Minitest::Test
   # "workflow" usage-error contract (error_kind "usage", exit 64,
   # error_class "InvalidTaskPath") — not plain Thor arity prose on stderr.
   # This is the sole reason the "workflow" entry exists in
-  # JSON_USAGE_ERROR_CONTRACTS; without this assertion a regression dropping
-  # the contract entry would silently revert to bare stderr with no failing test.
+  # the CLI usage-error override metadata; without this assertion a regression
+  # dropping the override would silently revert to bare stderr with no failing test.
   def test_too_many_positionals_workflow_json_usage_error_uses_workflow_new_envelope
     with_tmp_global_config do |home|
       out, _err, status = run_hive(home, "workflow", "a", "b", "c", "--json")
@@ -214,7 +261,7 @@ class CliUsageErrorJsonTest < Minitest::Test
   # hive-bot-status envelope via the bin/hive "bot" usage-error contract
   # (error_kind "extra_arguments", error_class "InvalidTaskPath", exit 64), not
   # bare Thor arity prose on stderr. This is the sole reason the "bot" entry
-  # exists in JSON_USAGE_ERROR_CONTRACTS.
+  # exists in the CLI usage-error override metadata.
   def test_bot_extra_positional_json_usage_error_rides_bot_status_envelope
     schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-bot-status"))))
     with_tmp_global_config do |home|

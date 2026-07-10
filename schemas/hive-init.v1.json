@@ -2,16 +2,41 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-init.v1.json",
   "title": "hive init output (v1)",
-  "description": "Stable success contract emitted by `hive init --json`. A fresh init emits SuccessPayload; re-running on an already-initialized project with --workflow or --new-workflow (--workflow re-binds the default; --new-workflow also scaffolds a project descriptor and rebinds) emits the minimal AlreadyInitializedPayload. With --new-workflow, both arms additionally carry the optional descriptor_path and instruction_path fields pointing at the scaffolded descriptor and its instruction file. Init precondition failures keep the legacy stderr + exit-code contract because several checks run before project state exists.",
+  "description": "Stable contract emitted by `hive init --json`. A fresh init emits SuccessPayload; re-running on an already-initialized project with --workflow or --new-workflow (--workflow re-binds the default; --new-workflow also scaffolds a project descriptor and rebinds) emits the minimal AlreadyInitializedPayload. With --new-workflow, both arms additionally carry the optional descriptor_path and instruction_path fields pointing at the scaffolded descriptor and its instruction file. Thor argv-shape failures emit ErrorPayload before project state exists; later init precondition failures keep the legacy stderr + exit-code contract.",
   "oneOf": [
     {
       "$ref": "#/$defs/SuccessPayload"
     },
     {
       "$ref": "#/$defs/AlreadyInitializedPayload"
+    },
+    {
+      "$ref": "#/$defs/ErrorPayload"
     }
   ],
   "$defs": {
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "error_class",
+        "error_kind",
+        "exit_code",
+        "message"
+      ],
+      "properties": {
+        "schema": { "const": "hive-init" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "error_class": { "type": "string" },
+        "error_kind": { "const": "usage" },
+        "exit_code": { "const": 64 },
+        "message": { "type": "string" }
+      }
+    },
     "AlreadyInitializedPayload": {
       "type": "object",
       "additionalProperties": false,

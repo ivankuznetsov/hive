@@ -3,7 +3,7 @@ title: Interaction Surface
 type: commands
 source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/cli.rb, lib/hive/commands/adhoc_review.rb, lib/hive/commands/setup.rb, lib/hive/commands/connect.rb, lib/hive/commands/disconnect.rb, lib/hive/commands/bench_submit.rb, lib/hive/commands/digest.rb, lib/hive/commands/pairing.rb, lib/hive/digest.rb, lib/hive/digest/, lib/hive/web/, public/, hive.gemspec, packaging/docker/, .github/workflows/release.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-14
-updated: 2026-06-30
+updated: 2026-07-09
 tags: [commands, api]
 ---
 
@@ -184,6 +184,9 @@ as an end-user workflow command. It mirrors the main wrapper's entrypoint
 conventions for top-level `--version`, command-local help, and wrapper-level
 JSON boolean grammar, so `bin/hive-e2e run --filter tui --help` prints the
 `run` usage instead of selecting scenarios or running preflight checks, while
+`bin/hive-e2e --json --help run` / `--json -h run` drop the now-irrelevant JSON
+flag and render human `run` help with exit `0`. Non-command help trailers such
+as `--json --help missing` still keep the JSON-envelope contract.
 `bin/hive-e2e --json=true list` dispatches to `list` and unsupported
 `--json=<value>` assignments fail before the default `run` pattern can consume
 the value. Its wrapper-owned usage/preflight/error envelopes also follow the

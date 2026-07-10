@@ -159,6 +159,30 @@ class HivePatrolMapperTest < Minitest::Test
     end
   end
 
+  def test_architecture_capability_adds_components_and_stops_command_sibling_ownership
+    with_tmp_git_repo do |repo|
+      FileUtils.mkdir_p(File.join(repo, "bin"))
+      FileUtils.mkdir_p(File.join(repo, "lib", "acme"))
+      File.write(File.join(repo, "bin", "one"), "#!/usr/bin/env ruby\n")
+      File.write(File.join(repo, "bin", "two"), "#!/usr/bin/env ruby\n")
+      File.write(File.join(repo, "package.json"), JSON.generate("bin" => { "one" => "bin/one" }))
+      File.write(File.join(repo, "lib", "acme", "service.rb"), "module Acme::Service\nend\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "architecture", "--quiet")
+
+      ordinary = Hive::Patrol::Mapper.new(repo, cfg: cfg, dry_run: true).call
+      architecture = Hive::Patrol::Mapper.new(
+        repo, cfg: cfg, dry_run: true, capabilities: [ :architecture ]
+      ).call
+
+      ordinary_one = ordinary.find { |feature| feature.id == "command-bin-one" }
+      architecture_one = architecture.find { |feature| feature.id == "command-bin-one" }
+      assert_includes ordinary_one.owned_files, "bin/two", "ordinary patrol behavior remains compatible"
+      assert_equal [ "bin/one" ], architecture_one.owned_files
+      assert_includes architecture.map(&:id), "architecture-lib-acme-service-rb"
+    end
+  end
+
   private
 
   def write_docs_fixture(repo)

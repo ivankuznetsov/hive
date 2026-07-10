@@ -2,6 +2,7 @@ require "json"
 require "open3"
 require "pathname"
 require "set"
+require "hive/patrol/architecture_mapper"
 require "hive/patrol/feature"
 require "hive/patrol/state_store"
 
@@ -41,6 +42,7 @@ module Hive
         features.concat(command_features(files))
         features.concat(package_features(files))
         features.concat(test_features(files))
+        features.concat(architecture_features(files)) if architecture_capability?
         if documentation_capability? && (features.empty? || documentation_changes_provided?)
           features.concat(documentation_features(files))
         end
@@ -53,6 +55,10 @@ module Hive
 
       def documentation_capability?
         @capabilities.include?(:documentation)
+      end
+
+      def architecture_capability?
+        @capabilities.include?(:architecture)
       end
 
       def documentation_changes_provided?
@@ -165,8 +171,8 @@ module Hive
         package_json = "package.json"
         if files.include?(package_json)
           data = JSON.parse(read(package_json)) rescue {}
-          Array(data["bin"]).each { |entry| features << build_feature("command", entry, files) if files.include?(entry) }
-          data["bin"].each_value { |entry| features << build_feature("command", entry, files) if files.include?(entry) } if data["bin"].is_a?(Hash)
+          Array(data["bin"]).each { |entry| features << build_command_feature(entry, files) if files.include?(entry) }
+          data["bin"].each_value { |entry| features << build_command_feature(entry, files) if files.include?(entry) } if data["bin"].is_a?(Hash)
           data.fetch("scripts", {}).each_key do |name|
             features << build_manifest_feature("command", "package.json", "npm-script-#{name}", files)
           end if data["scripts"].is_a?(Hash)
@@ -184,11 +190,28 @@ module Hive
           end
         end
 
-        files.grep(%r{\A(bin|exe)/[^/]+\z}).each { |path| features << build_feature("command", path, files) }
-        files.grep(%r{\Acmd/[^/]+/main\.go\z}).each { |path| features << build_feature("command", path, files) }
-        features << build_feature("command", "src/main.rs", files) if files.include?("src/main.rs")
-        files.grep(%r{\Asrc/bin/[^/]+\.rs\z}).each { |path| features << build_feature("command", path, files) }
+        files.grep(%r{\A(bin|exe)/[^/]+\z}).each { |path| features << build_command_feature(path, files) }
+        files.grep(%r{\Acmd/[^/]+/main\.go\z}).each { |path| features << build_command_feature(path, files) }
+        features << build_command_feature("src/main.rs", files) if files.include?("src/main.rs")
+        files.grep(%r{\Asrc/bin/[^/]+\.rs\z}).each { |path| features << build_command_feature(path, files) }
         features
+      end
+
+      def build_command_feature(entrypoint, files)
+        return build_feature("command", entrypoint, files) unless architecture_capability?
+
+        Feature.new(
+          id: stable_id("command", entrypoint),
+          kind: "command",
+          entrypoints: [ entrypoint ],
+          owned_files: [ entrypoint ],
+          context_files: capped(context_for(entrypoint, files), max_context_files),
+          tests: capped(associated_tests(entrypoint, files), max_context_files)
+        )
+      end
+
+      def architecture_features(files)
+        ArchitectureMapper.new(@project_root, cfg: @cfg).call(files)
       end
 
       # Parse the `[project.scripts]` table of pyproject.toml (PEP 621

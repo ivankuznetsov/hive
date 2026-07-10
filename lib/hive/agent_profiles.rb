@@ -55,14 +55,16 @@ module Hive
 
       def grok_auth_path(home: nil)
         auth_path = ENV["GROK_AUTH_PATH"]
-        unless auth_path.to_s.strip.empty?
-          raise ArgumentError, "GROK_AUTH_PATH must be absolute" unless File.absolute_path?(auth_path)
-
-          return auth_path
-        end
-
         grok_home = ENV["GROK_HOME"]
-        root = grok_home.to_s.strip.empty? ? File.join(home || Dir.home, ".grok") : File.expand_path(grok_home)
+
+        raise ArgumentError, "GROK_AUTH_PATH must be absolute" if !auth_path.to_s.strip.empty? && !File.absolute_path?(auth_path)
+        raise ArgumentError, "GROK_HOME must be absolute" if !grok_home.to_s.strip.empty? && !File.absolute_path?(grok_home)
+
+        return auth_path unless auth_path.to_s.strip.empty?
+
+        return File.join(grok_home, "auth.json") unless grok_home.to_s.strip.empty?
+
+        root = File.join(home || Dir.home, ".grok")
         File.join(root, "auth.json")
       end
 
@@ -80,9 +82,15 @@ module Hive
         when :pi
           credential_present?(File.join(home || Dir.home, ".pi", "agent", "auth.json"))
         when :grok
-          return true if [ ENV["XAI_API_KEY"], ENV["GROK_CODE_XAI_API_KEY"] ].any? do |value|
+          api_key = [ ENV["XAI_API_KEY"], ENV["GROK_CODE_XAI_API_KEY"] ].any? do |value|
             !value.to_s.strip.empty?
           end
+          explicit_path = [ ENV["GROK_AUTH_PATH"], ENV["GROK_HOME"] ].any? do |value|
+            !value.to_s.strip.empty?
+          end
+
+          grok_auth_path(home:) if api_key && explicit_path
+          return true if api_key
 
           credential_present?(grok_auth_path(home:))
         else

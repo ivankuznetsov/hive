@@ -29,16 +29,19 @@ module Hive
       api_key = [ ENV["XAI_API_KEY"], ENV["GROK_CODE_XAI_API_KEY"] ].find do |value|
         !value.to_s.strip.empty?
       end
-      next nil if api_key
+      explicit_path = [ ENV["GROK_AUTH_PATH"], ENV["GROK_HOME"] ].any? do |value|
+        !value.to_s.strip.empty?
+      end
 
       auth_path =
         begin
-          Hive::AgentProfiles.grok_auth_path
+          Hive::AgentProfiles.grok_auth_path if explicit_path || !api_key
         rescue ArgumentError => e
           raise Hive::AgentError,
                 "grok profile preflight failed: cannot resolve auth path (#{e.message}). " \
                 "Set $HOME/GROK_AUTH_PATH/GROK_HOME, XAI_API_KEY, or run `grok login --device-auth`."
         end
+      next nil if api_key
 
       unless File.exist?(auth_path)
         raise Hive::AgentError,

@@ -3,6 +3,7 @@ require "json"
 require "shellwords"
 require "time"
 require "tmpdir"
+require "hive/lock"
 
 module Hive
   module Daemon
@@ -18,7 +19,7 @@ module Hive
     class ChildSupervisor
       ChildExit = Struct.new(:pid, :exit_code, :project, :slug, :stage, :command,
                              :state_file_path, :started_at, :finished_at, :json_envelope,
-                             :request_id,
+                             :request_id, :dispatch_token,
                              keyword_init: true)
 
       # A child that breached its wall-clock timeout. The dispatcher logs
@@ -61,6 +62,7 @@ module Hive
         # pid → { project, slug, stage, command, started_at, log_path,
         #         timeout_sec, terminating_at, killed }
         @running = {}
+        @forced_completions = []
       end
 
       # Resolve the wall-clock timeout (seconds) for a hive verb. A
@@ -93,7 +95,7 @@ module Hive
       # modes.
       def spawn(command_string:, project:, slug:, stage:,
                 log_state_path: nil, state_file_path: nil, dry_run: nil,
-                request_id: nil)
+                request_id: nil, dispatch_token: nil)
         effective_dry_run = dry_run.nil? ? @dry_run : dry_run
 
         argv = parse_command(command_string)
@@ -114,7 +116,7 @@ module Hive
             project: project, slug: slug, stage: stage,
             command: command_string, state_file_path: state_file_path,
             started_at: Time.now, log_path: nil, dry_run: true,
-            request_id: request_id, timeout_sec: timeout_sec
+            request_id: request_id, dispatch_token: dispatch_token, timeout_sec: timeout_sec
           }
           return @running.keys.last
         end
@@ -136,7 +138,7 @@ module Hive
           project: project, slug: slug, stage: stage,
           command: command_string, state_file_path: state_file_path,
           started_at: Time.now, log_path: log_path, dry_run: false,
-          request_id: request_id, timeout_sec: timeout_sec
+          request_id: request_id, dispatch_token: dispatch_token, timeout_sec: timeout_sec
         }
         pid
       end
@@ -180,7 +182,7 @@ module Hive
       # Array<ChildExit> for the dispatcher to feed into the
       # concurrency controller. Empty array when nothing has completed.
       def reap_all(now: Time.now)
-        completed = []
+        completed = @forced_completions.shift(@forced_completions.length)
         loop do
           # Process.wait with WNOHANG returns nil when nothing is ready.
           pid, status = Process.wait2(-1, Process::WNOHANG)
@@ -200,7 +202,7 @@ module Hive
             project: entry[:project], slug: entry[:slug], stage: entry[:stage],
             command: entry[:command], state_file_path: entry[:state_file_path],
             started_at: entry[:started_at], finished_at: now, json_envelope: envelope,
-            request_id: entry[:request_id]
+            request_id: entry[:request_id], dispatch_token: entry[:dispatch_token]
           )
         end
         completed
@@ -219,7 +221,7 @@ module Hive
             project: entry[:project], slug: entry[:slug], stage: entry[:stage],
             command: entry[:command], state_file_path: entry[:state_file_path],
             started_at: entry[:started_at], finished_at: now, json_envelope: nil,
-            request_id: entry[:request_id]
+            request_id: entry[:request_id], dispatch_token: entry[:dispatch_token]
           )
         end
         completed.each { |c| @running.delete(c.pid) }
@@ -266,7 +268,68 @@ module Hive
         @running.size
       end
 
+      # Terminate and await one exact child process group. Used when a spawn
+      # succeeded but its durable PID/start-time/PGID fence could not be
+      # persisted; releasing the claim before the child is gone would allow a
+      # second generation to overlap it.
+      def terminate_child(pid, grace_sec: 2)
+        entry = @running[pid]
+        return false unless entry && !entry[:dry_run]
+
+        pgid = pgid_for(pid)
+        safe_kill(:TERM, -pgid) if pgid
+        status = wait_for_child(pid, grace_sec)
+        unless status
+          pgid = pgid_for(pid)
+          safe_kill(:KILL, -pgid) if pgid
+          status = wait_for_child(pid, 1)
+        end
+        return false unless status
+
+        @running.delete(pid)
+        @forced_completions << child_exit(pid, status, entry, Time.now)
+        true
+      end
+
+      # Capture the same PID-reuse and process-group fence persisted by the
+      # architecture scheduler immediately after spawn.
+      def process_identity(pid)
+        return nil unless pid.is_a?(Integer) && pid > 1
+
+        start_time = Hive::Lock.process_start_time(pid)
+        pgid = Process.getpgid(pid)
+        return nil if start_time.to_s.empty? || pgid <= 1
+
+        { process_start_time: start_time.to_s, pgid: pgid }
+      rescue Errno::ESRCH, Errno::EPERM
+        nil
+      end
+
       private
+
+      def wait_for_child(pid, seconds)
+        deadline = Time.now + seconds
+        loop do
+          waited_pid, status = Process.wait2(pid, Process::WNOHANG)
+          return status if waited_pid
+          return nil if Time.now >= deadline
+
+          sleep 0.02
+        end
+      rescue Errno::ECHILD
+        nil
+      end
+
+      def child_exit(pid, status, entry, now)
+        ChildExit.new(
+          pid: pid, exit_code: status.exitstatus,
+          project: entry[:project], slug: entry[:slug], stage: entry[:stage],
+          command: entry[:command], state_file_path: entry[:state_file_path],
+          started_at: entry[:started_at], finished_at: now,
+          json_envelope: parse_envelope(entry[:log_path]),
+          request_id: entry[:request_id], dispatch_token: entry[:dispatch_token]
+        )
+      end
 
       def parse_command(command_string)
         Shellwords.split(command_string)

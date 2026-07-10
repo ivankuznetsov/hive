@@ -209,6 +209,12 @@ module Hive
           merge_intake: refactor_patrol_merge_reconciler
         )
         patrol_scheduler = Hive::Daemon::PatrolScheduler.new
+        refactor_patrol_scheduler = Hive::Daemon::RefactorPatrolScheduler.new(dry_run: @dry_run)
+        patrol_arbiter = Hive::Daemon::PatrolArbiter.new(
+          ordinary_scheduler: patrol_scheduler,
+          architecture_scheduler: refactor_patrol_scheduler,
+          dry_run: @dry_run
+        )
         digest_scheduler = Hive::Daemon::DigestScheduler.new(
           enabled: digest_cfg.fetch("enabled", false),
           max_catchup_days: digest_cfg.fetch(
@@ -231,6 +237,8 @@ module Hive
           merge_watcher: merge_watcher,
           refactor_patrol_merge_reconciler: refactor_patrol_merge_reconciler,
           patrol_scheduler: patrol_scheduler,
+          refactor_patrol_scheduler: refactor_patrol_scheduler,
+          patrol_arbiter: patrol_arbiter,
           digest_scheduler: digest_scheduler, answer_digest_scheduler: answer_digest_scheduler,
           dry_run: @dry_run,
           update_state: Hive::UpdateCheck::State.new

@@ -46,22 +46,24 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
   class FakeSupervisor
     attr_reader :spawned, :next_pid
-    attr_accessor :next_exits
+    attr_accessor :next_exits, :identity
     def initialize
       @spawned = []
       @next_pid = 100
       @next_exits = []
+      @identity = { process_start_time: "start", pgid: 100 }
     end
 
     def spawn(command_string:, project:, slug:, stage:,
               log_state_path: nil, state_file_path: nil, dry_run: nil,
-              request_id: nil)
+              request_id: nil, dispatch_token: nil)
       pid = @next_pid
       @next_pid += 1
       @spawned << {
         pid: pid, command: command_string, project: project, slug: slug,
         stage: stage, state_file_path: state_file_path, dry_run: dry_run,
-        request_id: request_id, log_state_path: log_state_path
+        request_id: request_id, log_state_path: log_state_path,
+        dispatch_token: dispatch_token
       }
       pid
     end
@@ -94,6 +96,18 @@ class HiveDaemonDispatcherTest < Minitest::Test
     def in_flight_count
       @spawned.size
     end
+
+    def process_identity(_pid)
+      @identity
+    end
+
+    def terminate_child(pid, grace_sec: 2)
+      @terminated ||= []
+      @terminated << pid
+      true
+    end
+
+    attr_reader :terminated
   end
 
   class FakeMergeWatcher
@@ -143,6 +157,71 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
     def cancel(project:)
       @cancelled << project
+    end
+  end
+
+  class FakeRefactorPatrolScheduler
+    attr_accessor :attach_error
+    attr_reader :reserved, :spawned_calls, :cancelled, :completed
+
+    def initialize
+      @reserved = []
+      @spawned_calls = []
+      @cancelled = []
+      @completed = []
+    end
+
+    def events
+      []
+    end
+
+    def reserve(candidate, now:)
+      @reserved << [ candidate, now ]
+      candidate.merge(
+        command: "hive refactor-patrol p1 --job-manifest /tmp/job.json --json",
+        dispatch_token: { kind: :architecture_patrol, job_id: candidate.fetch(:job_id), owner: "daemon", generation: 1 }
+      )
+    end
+
+    def spawned(dispatch, pid:, process_start_time:, pgid:, now:)
+      raise attach_error if attach_error
+
+      @spawned_calls << { dispatch: dispatch, pid: pid, process_start_time: process_start_time, pgid: pgid, now: now }
+    end
+
+    def cancel(dispatch, reason:, now:)
+      @cancelled << { dispatch: dispatch, reason: reason, now: now }
+    end
+
+    def complete(dispatch_token:, exit_code:, envelope:, now:)
+      @completed << { dispatch_token: dispatch_token, exit_code: exit_code, envelope: envelope, now: now }
+      {
+        status: :closed, job_id: dispatch_token.fetch(:job_id), pr_number: 7,
+        pr_url: "https://github.com/acme/demo/pull/7",
+        accepted_count: 0, flagged_count: 0, suppressed_count: 0
+      }
+    end
+  end
+
+  class FakePatrolArbiter
+    attr_accessor :items, :commit_error, :candidate_error
+    attr_reader :committed
+
+    def initialize(items)
+      @items = items
+      @committed = []
+    end
+
+    def candidates(now:)
+      raise candidate_error if candidate_error
+
+      items
+    end
+
+    def commit(candidate, now:)
+      raise commit_error if commit_error
+
+      @committed << { candidate: candidate, now: now }
     end
   end
 
@@ -217,7 +296,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
                       dispatch_state: nil, status_result: nil,
                       dispatch_request_state_home: nil, dispatch_result_state_home: nil,
                       with_digest_scheduler: false, with_answer_digest_scheduler: false,
-                      refactor_patrol_merge_reconciler: nil)
+                      refactor_patrol_merge_reconciler: nil,
+                      refactor_patrol_scheduler: nil, patrol_arbiter: nil)
     config = {
       "daemon" => {
         "edit_debounce_sec" => 30,
@@ -259,6 +339,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
       merge_watcher: merge_watcher,
       refactor_patrol_merge_reconciler: refactor_patrol_merge_reconciler,
       patrol_scheduler: patrol_scheduler,
+      refactor_patrol_scheduler: refactor_patrol_scheduler,
+      patrol_arbiter: patrol_arbiter,
       digest_scheduler: digest_scheduler,
       answer_digest_scheduler: answer_digest_scheduler,
       dry_run: dry_run,
@@ -272,6 +354,121 @@ class HiveDaemonDispatcherTest < Minitest::Test
       dispatcher, supervisor, controller, logger, merge_watcher, patrol_scheduler,
       digest_scheduler, answer_digest_scheduler
     ]
+  end
+
+
+  def test_architecture_patrol_spawn_attaches_fence_then_commits_arbiter_and_routes_completion
+    architecture = FakeRefactorPatrolScheduler.new
+    candidate = {
+      project: "p1", patrol_kind: :architecture, job_id: "job-7",
+      pr_number: 7, pr_url: "https://github.com/acme/demo/pull/7",
+      slug: "refactor-patrol-job-7", stage: "refactor-patrol",
+      state_file_mtime: nil, state_file_path: nil, hive_state_path: "/tmp/state"
+    }
+    arbiter = FakePatrolArbiter.new([ candidate ])
+    dispatcher, supervisor, _controller, logger = make_dispatcher(
+      refactor_patrol_scheduler: architecture, patrol_arbiter: arbiter
+    )
+
+    dispatcher.tick(now: T0)
+
+    assert_equal 1, architecture.spawned_calls.size
+    assert_equal 1, arbiter.committed.size
+    token = supervisor.spawned.first.fetch(:dispatch_token)
+    assert_equal "job-7", token.fetch(:job_id)
+    assert logger.events.any? { |name, _attrs| name == :architecture_patrol_opened }
+
+    supervisor.next_exits = [
+      ChildExit.new(
+        pid: supervisor.spawned.first.fetch(:pid), exit_code: 0,
+        project: "p1", slug: "refactor-patrol-job-7", stage: "refactor-patrol",
+        command: supervisor.spawned.first.fetch(:command), started_at: T0,
+        finished_at: T0 + 1, json_envelope: { "ok" => true }, dispatch_token: token
+      )
+    ]
+    arbiter.items = []
+    dispatcher.tick(now: T0 + 1)
+
+    assert_equal 1, architecture.completed.size
+    closed = logger.events.find { |name, _attrs| name == :architecture_patrol_closed }
+    assert_equal "job-7", closed.last.fetch(:job_id)
+    assert_equal 7, closed.last.fetch(:pr_number)
+  end
+
+  def test_architecture_identity_failure_terminates_child_before_claim_release
+    architecture = FakeRefactorPatrolScheduler.new
+    candidate = {
+      project: "p1", patrol_kind: :architecture, job_id: "job-7", pr_number: 7,
+      pr_url: "url", slug: "refactor-patrol-job-7", stage: "refactor-patrol",
+      state_file_mtime: nil, state_file_path: nil, hive_state_path: "/tmp/state"
+    }
+    arbiter = FakePatrolArbiter.new([ candidate ])
+    dispatcher, supervisor = make_dispatcher(
+      refactor_patrol_scheduler: architecture, patrol_arbiter: arbiter
+    )
+    supervisor.identity = nil
+
+    dispatcher.tick(now: T0)
+
+    assert_equal [ 100 ], supervisor.terminated
+    assert_equal "unverified_child_identity", architecture.cancelled.first.fetch(:reason)
+    assert_empty arbiter.committed
+  end
+
+  def test_arbiter_commit_error_does_not_cancel_valid_running_architecture_child
+    architecture = FakeRefactorPatrolScheduler.new
+    candidate = {
+      project: "p1", patrol_kind: :architecture, job_id: "job-7", pr_number: 7,
+      pr_url: "url", slug: "refactor-patrol-job-7", stage: "refactor-patrol",
+      state_file_mtime: nil, state_file_path: nil, hive_state_path: "/tmp/state"
+    }
+    arbiter = FakePatrolArbiter.new([ candidate ])
+    arbiter.commit_error = IOError.new("disk full")
+    dispatcher, _supervisor, controller, logger = make_dispatcher(
+      refactor_patrol_scheduler: architecture, patrol_arbiter: arbiter
+    )
+
+    dispatcher.tick(now: T0)
+
+    assert_empty architecture.cancelled
+    assert controller.running_task?(project: "p1", slug: "refactor-patrol-job-7")
+    assert logger.events.any? { |name, attrs| name == :fatal && attrs[:message].include?("arbiter commit") }
+  end
+
+  def test_corrupt_arbiter_state_is_visible_and_does_not_crash_tick
+    architecture = FakeRefactorPatrolScheduler.new
+    arbiter = FakePatrolArbiter.new([])
+    arbiter.candidate_error = Hive::Daemon::PatrolArbiter::StateError.new("newer schema")
+    dispatcher, supervisor, _controller, logger = make_dispatcher(
+      refactor_patrol_scheduler: architecture, patrol_arbiter: arbiter
+    )
+
+    dispatcher.tick(now: T0)
+
+    assert_empty supervisor.spawned
+    assert logger.events.any? do |name, attrs|
+      name == :architecture_patrol_blocked && attrs[:reason] == "arbiter_state_error"
+    end
+  end
+
+  def test_architecture_claim_attach_failure_terminates_child_before_release
+    architecture = FakeRefactorPatrolScheduler.new
+    architecture.attach_error = IOError.new("fsync failed")
+    candidate = {
+      project: "p1", patrol_kind: :architecture, job_id: "job-7", pr_number: 7,
+      pr_url: "url", slug: "refactor-patrol-job-7", stage: "refactor-patrol",
+      state_file_mtime: nil, state_file_path: nil, hive_state_path: "/tmp/state"
+    }
+    arbiter = FakePatrolArbiter.new([ candidate ])
+    dispatcher, supervisor = make_dispatcher(
+      refactor_patrol_scheduler: architecture, patrol_arbiter: arbiter
+    )
+
+    dispatcher.tick(now: T0)
+
+    assert_equal [ 100 ], supervisor.terminated
+    assert_equal "claim_attach_failed", architecture.cancelled.first.fetch(:reason)
+    assert_empty arbiter.committed
   end
 
   def test_refactor_patrol_merge_reconciler_runs_intake_without_dispatching_jobs

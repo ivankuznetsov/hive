@@ -21,6 +21,8 @@ require "hive/daemon/logger"
 require "hive/daemon/digest_scheduler"
 require "hive/daemon/answer_digest_scheduler"
 require "hive/daemon/patrol_scheduler"
+require "hive/daemon/refactor_patrol_scheduler"
+require "hive/daemon/patrol_arbiter"
 require "hive/daemon/pr_merge_watcher"
 require "hive/daemon/refactor_patrol_merge_reconciler"
 require "hive/lock"
@@ -60,7 +62,8 @@ module Hive
       # @param dry_run [Boolean]
       def initialize(config:, controller:, supervisor:, status_consumer:, logger:,
                      merge_watcher: nil, refactor_patrol_merge_reconciler: nil,
-                     patrol_scheduler: nil, digest_scheduler: nil,
+                     patrol_scheduler: nil, refactor_patrol_scheduler: nil,
+                     patrol_arbiter: nil, digest_scheduler: nil,
                      answer_digest_scheduler: nil, dry_run: false,
                      update_state: nil, update_checker: nil, channel_detector: nil,
                      dispatch_request_state_home: nil, dispatch_result_state_home: nil)
@@ -72,6 +75,8 @@ module Hive
         @merge_watcher = merge_watcher
         @refactor_patrol_merge_reconciler = refactor_patrol_merge_reconciler
         @patrol_scheduler = patrol_scheduler
+        @refactor_patrol_scheduler = refactor_patrol_scheduler
+        @patrol_arbiter = patrol_arbiter
         @digest_scheduler = digest_scheduler
         @answer_digest_scheduler = answer_digest_scheduler
         @dry_run = dry_run
@@ -350,7 +355,28 @@ module Hive
         # not go through Policy. They still pass through the same
         # daemon.enabled, legacy-layout, dry-run, and concurrency gates
         # before any subprocess is spawned.
-        @patrol_scheduler&.tick(now: now)&.each do |patrol_dispatch|
+        patrol_candidates = if @patrol_arbiter
+          begin
+            @patrol_arbiter.candidates(now: now)
+          rescue Hive::Daemon::PatrolArbiter::StateError => e
+            @logger.event(
+              :architecture_patrol_blocked,
+              reason: "arbiter_state_error", error: "#{e.class}: #{e.message}"
+            )
+            []
+          end
+        else
+          @patrol_scheduler&.tick(now: now)
+        end
+        architecture_events = if @refactor_patrol_scheduler&.respond_to?(:drain_events)
+          @refactor_patrol_scheduler.drain_events
+        else
+          @refactor_patrol_scheduler&.events
+        end
+        Array(architecture_events).each do |event|
+          @logger.event(:architecture_patrol_blocked, **event.reject { |key, _value| key == :status })
+        end
+        Array(patrol_candidates).each do |patrol_dispatch|
           dispatch_patrol_with_gates(patrol_dispatch, now: now)
         end
 
@@ -631,6 +657,21 @@ module Hive
           end
           if entry.stage == Hive::Daemon::PatrolScheduler::PATROL_STAGE
             @patrol_scheduler&.complete(project: entry.project, exit_code: entry.exit_code, now: now)
+          end
+          if entry.dispatch_token && entry.dispatch_token[:kind] == :architecture_patrol
+            result = @refactor_patrol_scheduler&.complete(
+              dispatch_token: entry.dispatch_token,
+              exit_code: entry.exit_code,
+              envelope: entry.json_envelope,
+              now: now
+            )
+            successful = result && %i[closed classified].include?(result[:status])
+            event = successful ? :architecture_patrol_closed : :architecture_patrol_blocked
+            @logger.event(
+              event,
+              project: entry.project,
+              **(result || { status: :retry })
+            )
           end
           complete_digest_scheduler_for(entry, now: now)
         end
@@ -1159,6 +1200,8 @@ module Hive
       def dispatch_patrol_with_gates(patrol_dispatch, now:)
         project = patrol_dispatch[:project]
         slug = patrol_dispatch[:slug] || Hive::Daemon::PatrolScheduler::PATROL_SLUG
+        architecture = patrol_dispatch[:patrol_kind]&.to_sym == :architecture
+        preserve_architecture_claim = false
 
         # Every gated early-return below MUST release the scheduler's
         # pending marker. The scheduler set `@pending[project]` in `tick`
@@ -1171,7 +1214,7 @@ module Hive
                                   stage: patrol_dispatch[:stage],
                                   action: "patrol",
                                   reason: "project_disabled")
-          @patrol_scheduler&.cancel(project: project)
+          @patrol_scheduler&.cancel(project: project) unless architecture
           return
         end
 
@@ -1180,7 +1223,7 @@ module Hive
                                   stage: patrol_dispatch[:stage],
                                   action: "patrol",
                                   reason: "legacy_layout_detected")
-          @patrol_scheduler&.cancel(project: project)
+          @patrol_scheduler&.cancel(project: project) unless architecture
           return
         end
 
@@ -1193,24 +1236,97 @@ module Hive
                                   stage: patrol_dispatch[:stage],
                                   action: "patrol",
                                   reason: gate.to_s)
-          @patrol_scheduler&.cancel(project: project)
+          @patrol_scheduler&.cancel(project: project) unless architecture
           return
         end
 
-        dispatch_command(
-          patrol_dispatch[:command],
-          project: project, slug: slug, stage: patrol_dispatch[:stage],
-          state_file_mtime: patrol_dispatch[:state_file_mtime],
-          state_file_path: patrol_dispatch[:state_file_path],
+        reserved = if @patrol_arbiter
+          architecture ? @refactor_patrol_scheduler.reserve(patrol_dispatch, now: now) :
+                         @patrol_scheduler.reserve(patrol_dispatch, now: now)
+        else
+          patrol_dispatch
+        end
+        return unless reserved
+        slug = reserved[:slug] || slug
+        pid = dispatch_command(
+          reserved[:command],
+          project: project, slug: slug, stage: reserved[:stage],
+          state_file_mtime: reserved[:state_file_mtime],
+          state_file_path: reserved[:state_file_path],
           now: now,
-          trigger: "patrol",
-          kind: :patrol_scan
+          trigger: architecture ? "architecture_patrol" : "patrol",
+          kind: :patrol_scan,
+          dispatch_token: reserved[:dispatch_token]
+        )
+        if architecture
+          unless @dry_run
+            identity = @supervisor.process_identity(pid)
+            unless identity
+              terminated = @supervisor.terminate_child(pid)
+              unless terminated
+                preserve_architecture_claim = true
+                raise "cannot resolve or terminate architecture patrol child identity"
+              end
+              @refactor_patrol_scheduler.cancel(reserved, reason: "unverified_child_identity", now: now)
+              @logger.event(
+                :architecture_patrol_blocked,
+                project: project, job_id: reserved[:job_id], pr_number: reserved[:pr_number],
+                pr_url: reserved[:pr_url], reason: "unverified_child_identity"
+              )
+              return
+            end
+            begin
+              @refactor_patrol_scheduler.spawned(reserved, pid: pid, now: now, **identity)
+            rescue StandardError => e
+              terminated = @supervisor.terminate_child(pid)
+              unless terminated
+                preserve_architecture_claim = true
+                raise "cannot terminate architecture patrol child after claim attach failure: #{e.message}"
+              end
+              @refactor_patrol_scheduler.cancel(reserved, reason: "claim_attach_failed", now: now)
+              @logger.event(
+                :architecture_patrol_blocked,
+                project: project, job_id: reserved[:job_id], pr_number: reserved[:pr_number],
+                pr_url: reserved[:pr_url], reason: "claim_attach_failed",
+                error: "#{e.class}: #{e.message}"
+              )
+              return
+            end
+          end
+          @logger.event(
+            :architecture_patrol_opened,
+            project: project, job_id: reserved[:job_id], pr_number: reserved[:pr_number],
+            pr_url: reserved[:pr_url], accepted_count: 0, flagged_count: 0, suppressed_count: 0
+          )
+        end
+        begin
+          @patrol_arbiter&.commit(patrol_dispatch, now: now)
+        rescue StandardError => e
+          # The child is already spawned, controller-recorded, and (for
+          # architecture work) fenced. A cursor write failure must not cancel
+          # that valid run; the per-project scan cap prevents overlap.
+          @logger.event(
+            :fatal, message: "patrol arbiter commit error: #{e.class}: #{e.message}",
+            project: project, slug: slug
+          )
+        end
+      rescue Hive::Daemon::RefactorPatrolScheduler::ReservationBlocked => e
+        @logger.event(
+          :architecture_patrol_blocked,
+          project: project, job_id: patrol_dispatch[:job_id], pr_number: patrol_dispatch[:pr_number],
+          pr_url: patrol_dispatch[:pr_url], reason: e.reason, evidence: e.evidence
         )
       rescue StandardError => e
         # A spawn error is a genuine failure: route it through `complete`
         # with a non-zero exit so the project both clears its pending
         # marker AND accrues the failure backoff before being retried.
-        @patrol_scheduler&.complete(project: project, exit_code: 1, now: now)
+        if architecture
+          if defined?(reserved) && reserved && !preserve_architecture_claim
+            @refactor_patrol_scheduler&.cancel(reserved, reason: "dispatch_error", now: now)
+          end
+        else
+          @patrol_scheduler&.complete(project: project, exit_code: 1, now: now)
+        end
         @logger.event(:fatal, message: "patrol dispatch error: #{e.class}: #{e.message}",
                               project: project, slug: slug)
       end
@@ -1729,19 +1845,21 @@ module Hive
 
       def dispatch_command(command, project:, slug:, stage:, state_file_mtime:,
                            state_file_path:, now:, trigger: "advance",
-                           request_id: nil, kind: :task)
+                           request_id: nil, kind: :task, dispatch_token: nil)
         if @dry_run
           @logger.event(:dry_run, project: project, slug: slug, stage: stage,
                                   command: command)
         end
-        pid = @supervisor.spawn(
+        spawn_args = {
           command_string: command,
           project: project, slug: slug, stage: stage,
           log_state_path: Hive::Paths.state_home,
           state_file_path: state_file_path,
           dry_run: @dry_run,
           request_id: request_id
-        )
+        }
+        spawn_args[:dispatch_token] = dispatch_token if dispatch_token
+        pid = @supervisor.spawn(**spawn_args)
         @controller.record_dispatch(
           pid: pid, project: project, slug: slug, stage: stage,
           command: command, started_at: now, state_file_mtime: state_file_mtime,

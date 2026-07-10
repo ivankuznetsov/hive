@@ -6,6 +6,7 @@ schema_version: 1
 packages:
   - id: compound-engineering
     version: "~> 3.0"
+    prerequisites: []
     agents:
       claude:
         provider: claude
@@ -33,6 +34,7 @@ packages:
 
   - id: pr-review-toolkit
     version: ">= 0"
+    prerequisites: []
     agents:
       claude:
         provider: claude
@@ -45,6 +47,7 @@ packages:
 
   - id: llm-wiki
     version: "~> 0.1"
+    prerequisites: [compound-engineering]
     agents:
       claude:
         provider: claude

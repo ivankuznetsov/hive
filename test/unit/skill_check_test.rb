@@ -275,7 +275,7 @@ class HiveSkillCheckCodexTest < Minitest::Test
     with_fake_home do |_home|
       status, msg = Hive::SkillCheck::Codex.verify("/missing-plug:missing-name")
       assert_equal :missing, status
-      assert_match(/codex plugin install/, msg)
+      assert_match(/codex plugin add/, msg)
     end
   end
 

@@ -29,7 +29,7 @@ module Hive
         :agent, :provider, :package, :marketplace, :source, :scope,
         :config_home, :actions
       )
-      Package = Data.define(:id, :version, :requirement, :agents) do
+      Package = Data.define(:id, :version, :requirement, :prerequisites, :agents) do
         def native_for(agent)
           agents.fetch(agent.to_s)
         end
@@ -161,12 +161,16 @@ module Hive
         expect_array(value, "#{@source}.packages").each_with_index.map do |entry, index|
           path = "#{@source}.packages[#{index}]"
           row = expect_hash(entry, path)
-          assert_keys!(row, %w[id version agents], path)
+          assert_keys!(row, %w[id version prerequisites agents], path)
           id = safe_id!(row.fetch("id"), "#{path}.id")
           version = string!(row.fetch("version"), "#{path}.version")
           requirement = Gem::Requirement.new(version)
+          prerequisites = expect_array(row.fetch("prerequisites"), "#{path}.prerequisites").map do |item|
+            safe_id!(item, "#{path}.prerequisites")
+          end
           agents = parse_native_agents(row.fetch("agents"), "#{path}.agents")
-          Package.new(id: id, version: version, requirement: requirement, agents: agents.freeze)
+          Package.new(id: id, version: version, requirement: requirement,
+                      prerequisites: prerequisites.freeze, agents: agents.freeze)
         rescue Gem::Requirement::BadRequirementError => e
           invalid!("#{path}.version", e.message)
         end
@@ -254,6 +258,11 @@ module Hive
       end
 
       def validate_references!
+        @packages.each do |package|
+          package.prerequisites.each do |prerequisite|
+            invalid!("package #{package.id}", "references unknown prerequisite #{prerequisite.inspect}") unless @package_index.key?(prerequisite)
+          end
+        end
         @capabilities.each do |capability|
           package = @package_index[capability.package_id]
           invalid!("capability #{capability.id}", "references unknown package #{capability.package_id.inspect}") unless package

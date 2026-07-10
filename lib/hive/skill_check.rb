@@ -208,7 +208,7 @@ module Hive
         if inv.plugin
           plugin = Hive::SkillCheck.glob_escape(inv.plugin)
           name = Hive::SkillCheck.glob_escape(inv.name)
-          # Cache layout produced by `codex plugin install`:
+          # Cache layout produced by `codex plugin add`:
           # ~/.codex/plugins/cache/<owner>-<marketplace>/<plugin>/<version>/skills/<name>/SKILL.md
           glob = File.join(config_dir, "plugins/cache/*", plugin, "*", "skills", name, "SKILL.md")
           Dir[glob]
@@ -232,7 +232,7 @@ module Hive
         if inv.plugin
           "codex: /#{inv.plugin}:#{inv.name} not found under " \
             "~/.codex/plugins/cache/*/#{inv.plugin}/*/skills/. " \
-            "Install via `codex plugin install <marketplace>` for the marketplace " \
+            "Install via `codex plugin add <plugin>@<marketplace>` for the marketplace " \
             "that ships #{inv.plugin}."
         else
           "codex: /#{inv.name} not found under ~/.codex/skills/, ~/.codex/skills/.system/, " \

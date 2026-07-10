@@ -65,7 +65,7 @@ module Hive
 
     def rules
       @rules ||= PATTERNS.map do |id, regex|
-        Rule.new(id: id, regex: regex, remediation: REMEDIATION).freeze
+        Rule.new(id: id, regex: regex, remediation: REMEDIATION)
       end.freeze
     end
 
@@ -84,7 +84,7 @@ module Hive
             file: file.to_s,
             line: normalized[0...match.begin(0)].count("\n") + 1,
             remediation: rule.remediation
-          ).freeze
+          )
         end
       end.sort_by { |finding| [ finding.file, finding.line, finding.rule_id ] }.freeze
     end

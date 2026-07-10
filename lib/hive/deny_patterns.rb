@@ -21,8 +21,18 @@ module Hive
         capability: "Bash",
         description: "Downloads remote content and pipes it directly to an interpreter.",
         remediation: "Download to a pinned file, verify its digest, and execute it only in an explicitly justified Bash context.",
-        regex: /(?:\bcurl\b|\bwget\b)[^|\n]*\|\s*(?:sh|bash|zsh|fish|python\d?|ruby|node|perl)\b/i
-      ).freeze,
+        # Two shapes: (1) `curl … | [sudo|env|command|flags|VAR=…] interpreter`
+        # so the canonical `curl x.sh | sudo bash` / `wget -qO- x.sh | sudo -E sh`
+        # install idioms are caught, and (2) `interpreter <(curl …)` process
+        # substitution such as `bash <(curl -fsSL x.sh)`.
+        regex: %r{
+          (?:\bcurl\b|\bwget\b)[^|\n]*\|\s*
+            (?:(?:sudo|env|command|-\S+|\S+=\S+)(?:\s|\\\n)+)*
+            (?:sh|bash|zsh|fish|python\d?|ruby|node|perl)\b
+          |
+          \b(?:sh|bash|zsh|fish|python\d?|ruby|node|perl)\b[^\n]*<\(\s*(?:sudo\s+)?(?:curl|wget)\b
+        }ix
+      ),
       Rule.new(
         id: :credential_path_access,
         severity: "high",
@@ -30,7 +40,7 @@ module Hive
         description: "Reads from a local credential directory.",
         remediation: "Remove direct credential-file access and use the runtime's secret or authenticated tool integration.",
         regex: /\b(?:cat|less|more|head|tail|sed|awk|cp|scp|rsync|find|ls)\b[^\n]*(?:~|\$HOME|\$\{HOME\})\/(?:\.ssh|\.aws|\.config\/(?:gh|gcloud))(?:\/|\b)/i
-      ).freeze,
+      ),
       Rule.new(
         id: :outbound_data_transfer,
         severity: "high",
@@ -38,7 +48,7 @@ module Hive
         description: "Uploads a local file or standard input to a network endpoint.",
         remediation: "Remove the upload or use a declared, reviewable integration that constrains the destination and data.",
         regex: /\bcurl\b[^\n]*(?:--data(?:-binary|-raw)?\s+@(?:-|[^\s]+)|--upload-file\s+[^\s]+|-T\s+[^\s]+)/i
-      ).freeze
+      )
     ].freeze
 
     module_function
@@ -66,7 +76,7 @@ module Hive
             severity: descriptor.severity,
             capability: descriptor.capability,
             remediation: descriptor.remediation
-          ).freeze
+          )
         end
       end.sort_by { |finding| [ finding.file, finding.line, finding.rule_id ] }.freeze
     end

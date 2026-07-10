@@ -22,6 +22,7 @@ require "hive/daemon/digest_scheduler"
 require "hive/daemon/answer_digest_scheduler"
 require "hive/daemon/patrol_scheduler"
 require "hive/daemon/pr_merge_watcher"
+require "hive/daemon/refactor_patrol_merge_reconciler"
 require "hive/lock"
 require "hive/paths"
 require "hive/update_check"
@@ -58,7 +59,8 @@ module Hive
       # @param patrol_scheduler [PatrolScheduler, nil]
       # @param dry_run [Boolean]
       def initialize(config:, controller:, supervisor:, status_consumer:, logger:,
-                     merge_watcher: nil, patrol_scheduler: nil, digest_scheduler: nil,
+                     merge_watcher: nil, refactor_patrol_merge_reconciler: nil,
+                     patrol_scheduler: nil, digest_scheduler: nil,
                      answer_digest_scheduler: nil, dry_run: false,
                      update_state: nil, update_checker: nil, channel_detector: nil,
                      dispatch_request_state_home: nil, dispatch_result_state_home: nil)
@@ -68,6 +70,7 @@ module Hive
         @status_consumer = status_consumer
         @logger = logger
         @merge_watcher = merge_watcher
+        @refactor_patrol_merge_reconciler = refactor_patrol_merge_reconciler
         @patrol_scheduler = patrol_scheduler
         @digest_scheduler = digest_scheduler
         @answer_digest_scheduler = answer_digest_scheduler
@@ -309,7 +312,12 @@ module Hive
                         keeping_previous: true)
         end
 
-        # 3. PrMergeWatcher tick (if present): check pending merges
+        # 3. Reconcile architecture-patrol merge intake before processing the
+        # immediate finalize watcher. The collaborator owns its slow cadence,
+        # so a normal ~30s dispatcher tick does not hammer GitHub.
+        run_refactor_patrol_merge_reconciler_tick(now: now)
+
+        # 3a. PrMergeWatcher tick (if present): check pending merges
         # first. Archive dispatches MUST flow through the same enable +
         # cap checks that advance dispatches use, so a project disabled
         # after enqueue can't sneak through and N concurrent merges
@@ -658,6 +666,46 @@ module Hive
         @digest_scheduler_fatal_signatures.delete(label)
       rescue StandardError => e
         log_digest_scheduler_fatal(label, e)
+      end
+
+      def run_refactor_patrol_merge_reconciler_tick(now:)
+        return unless @refactor_patrol_merge_reconciler
+
+        @refactor_patrol_merge_reconciler.tick(now: now).each do |result|
+          case result.fetch(:status)
+          when :blocked
+            @logger.event(
+              :blocked,
+              project: result.fetch(:project),
+              stage: "refactor_patrol",
+              action: "refactor_patrol_intake",
+              reason: result.fetch(:reason)
+            )
+          when :seeded
+            @logger.event(
+              :skipped,
+              project: result.fetch(:project),
+              stage: "refactor_patrol",
+              action: "refactor_patrol_intake",
+              reason: "baseline_seeded"
+            )
+          when :ok
+            enqueued = result.fetch(:enqueued_prs)
+            next if enqueued.empty?
+
+            @logger.event(
+              :merge_watcher_polled,
+              project: result.fetch(:project),
+              source: "catch_up",
+              enqueued_prs: enqueued
+            )
+          end
+        end
+      rescue StandardError => e
+        @logger.event(
+          :fatal,
+          message: "refactor patrol merge reconciliation failed: #{e.class}: #{e.message}"
+        )
       end
 
       # Log a global-digest scheduler tick/complete crash as :fatal, deduped

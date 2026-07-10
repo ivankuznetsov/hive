@@ -10,10 +10,28 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
 
   FAKE_GH = File.expand_path("../../fixtures/fake-gh.rb", __dir__)
 
-  def make(poll_interval_sec: 60)
+  class FakeMergeIntake
+    attr_accessor :error
+    attr_reader :calls
+
+    def initialize(error: nil)
+      @error = error
+      @calls = []
+    end
+
+    def ingest(**kwargs)
+      @calls << kwargs
+      raise error if error
+
+      { "job_id" => "durable" }
+    end
+  end
+
+  def make(poll_interval_sec: 60, merge_intake: nil)
     Hive::Daemon::PrMergeWatcher.new(
       poll_interval_sec: poll_interval_sec,
-      gh_bin: FAKE_GH
+      gh_bin: FAKE_GH,
+      merge_intake: merge_intake
     )
   end
 
@@ -100,6 +118,41 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
         assert_match(/^hive archive s1 --from 8-finalize --project p1/, archive[:command])
         # Entry removed after dispatch
         refute watcher.watching?(project: "p1", slug: "s1")
+      end
+    end
+  end
+
+  def test_merged_archive_waits_for_shared_durable_intake
+    with_pr_md(url: "https://github.com/u/r/pull/42") do |folder|
+      intake = FakeMergeIntake.new
+      watcher = make(poll_interval_sec: 0, merge_intake: intake)
+      watcher.enqueue(project: "p1", slug: "s1", task_folder: folder)
+      now = Time.utc(2026, 7, 10, 12)
+
+      with_env("HIVE_FAKE_GH_STATE" => "MERGED") do
+        archives = watcher.tick(now: now)
+
+        assert_equal 1, archives.size
+        assert_equal [ { project: "p1", pr: "https://github.com/u/r/pull/42", now: now } ], intake.calls
+      end
+    end
+  end
+
+  def test_intake_failure_holds_archive_and_retries_same_watcher_entry
+    with_pr_md(url: "https://github.com/u/r/pull/42") do |folder|
+      intake = FakeMergeIntake.new(error: Hive::GhError.new("manifest unavailable"))
+      watcher = make(poll_interval_sec: 0, merge_intake: intake)
+      watcher.enqueue(project: "p1", slug: "s1", task_folder: folder)
+      now = Time.utc(2026, 7, 10, 12)
+
+      with_env("HIVE_FAKE_GH_STATE" => "MERGED") do
+        assert_empty watcher.tick(now: now)
+        assert watcher.watching?(project: "p1", slug: "s1")
+
+        intake.error = nil
+        archives = watcher.tick(now: now + Hive::Daemon::PrMergeWatcher::GH_BACKOFF_SCHEDULE.first + 1)
+        assert_equal 1, archives.size
+        assert_equal 2, intake.calls.size
       end
     end
   end

@@ -637,6 +637,97 @@ def test_merged_pr_details_rejects_url_from_another_repository_before_file_fetch
   assert_equal 1, calls.size, "repository mismatch must fail before fetching local-repository file pages"
 end
 
+def test_merged_prs_page_exposes_graphql_cursor_and_complete_merge_identity
+  status = Hive::Gh::CommandStatus.new(exitstatus: 0)
+  captured = nil
+  response = {
+    "data" => {
+      "search" => {
+        "issueCount" => 1,
+        "nodes" => [
+          {
+            "number" => 7,
+            "url" => "https://github.com/acme/demo/pull/7",
+            "mergedAt" => "2026-07-10T10:00:00Z",
+            "baseRefName" => "main",
+            "mergeCommit" => { "oid" => "b" * 40 },
+            "repository" => { "nameWithOwner" => "acme/demo" }
+          }
+        ],
+        "pageInfo" => { "hasNextPage" => true, "endCursor" => "cursor-2" }
+      }
+    }
+  }
+
+  with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*cmd, **kwargs|
+    captured = [ cmd, kwargs ]
+    [ JSON.generate(response), "", status ]
+  }) do
+    page = Hive::Gh.merged_prs_page(
+      repository: "acme/demo",
+      default_branch: "main",
+      cursor: "cursor-1",
+      merged_since: Time.utc(2026, 7, 10, 9),
+      per_page: 25,
+      worktree_path: "/tmp/demo",
+      cfg: { "x" => true }
+    )
+
+    assert_equal true, page.fetch("complete")
+    assert_equal "cursor-2", page.fetch("next_cursor")
+    assert_equal "b" * 40, page.dig("items", 0, "merge_sha")
+    assert_equal "acme/demo", page.dig("items", 0, "repository")
+  end
+
+  assert_equal [ "gh", "api", "graphql" ], captured.first.first(3)
+  assert_includes captured.first, "cursor=cursor-1"
+  assert captured.first.any? { |arg| arg.include?("base:main") }
+  assert_equal "/tmp/demo", captured.last.fetch(:chdir)
+end
+
+def test_merged_prs_page_rejects_graphql_errors_or_missing_page_info
+  status = Hive::Gh::CommandStatus.new(exitstatus: 0)
+  responses = [
+    { "errors" => [ { "message" => "rate limited" } ] },
+    { "data" => { "search" => { "nodes" => [] } } }
+  ]
+
+  with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*_, **|
+    [ JSON.generate(responses.shift), "", status ]
+  }) do
+    2.times do
+      assert_raises(Hive::GhError) do
+        Hive::Gh.merged_prs_page(
+          repository: "acme/demo", default_branch: "main", cursor: nil,
+          merged_since: nil, per_page: 100, worktree_path: "/tmp/demo"
+        )
+      end
+    end
+  end
+end
+
+def test_merged_prs_page_fails_closed_above_graphql_search_traversal_cap
+  status = Hive::Gh::CommandStatus.new(exitstatus: 0)
+  response = {
+    "data" => {
+      "search" => {
+        "issueCount" => 1001,
+        "nodes" => [],
+        "pageInfo" => { "hasNextPage" => true, "endCursor" => "cursor-2" }
+      }
+    }
+  }
+  with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_, **) { [ JSON.generate(response), "", status ] }) do
+    error = assert_raises(Hive::GhError) do
+      Hive::Gh.merged_prs_page(
+        repository: "acme/demo", default_branch: "main", cursor: nil,
+        merged_since: nil, per_page: 100, worktree_path: "/tmp/demo"
+      )
+    end
+    assert_match(/1,000-result traversal cap/, error.message)
+  end
+end
+
 def test_list_merged_prs_uses_repo_search_window
   status = Hive::Gh::CommandStatus.new(exitstatus: 0)
   captured = nil

@@ -4,6 +4,8 @@ require "hive/refactor_patrol/job_store"
 class RefactorPatrolJobStoreTest < Minitest::Test
   include HiveTestHelper
 
+  T0 = Time.utc(2026, 7, 10, 12, 0, 0)
+
   def test_writes_and_strictly_reads_authoritative_job_aggregate
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
@@ -147,6 +149,81 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     end
   end
 
+  def test_manifest_intake_creates_one_stable_queued_job
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+
+      created = store.enqueue_manifest!(manifest, policy: intake_policy, now: T0)
+      duplicate = store.enqueue_manifest!(
+        manifest,
+        policy: intake_policy.merge("auto_fix" => true),
+        now: T0 + 60
+      )
+
+      assert_equal "pr-7-stable", created.fetch("job_id")
+      assert_equal "queued", created.fetch("state")
+      assert_nil created.fetch("analysis_sha")
+      assert_equal manifest.fetch("manifest_checksum"), created.dig("source", "manifest_checksum")
+      assert_equal created, duplicate, "duplicate producers must preserve the first policy snapshot and bytes"
+      assert_equal [ "pr-7-stable" ], store.jobs.map { |entry| entry.fetch("job_id") }
+    end
+  end
+
+  def test_manifest_intake_rejects_divergent_source_without_overwrite
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      original = store.enqueue_manifest!(manifest, policy: intake_policy, now: T0)
+      path = File.join(store.root, "jobs", "pr-7-stable.json")
+      bytes = File.binread(path)
+      divergent = manifest.merge(
+        "changed_paths" => [ "lib/other.rb" ],
+        "manifest_checksum" => "f" * 64
+      )
+
+      assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        store.enqueue_manifest!(divergent, policy: intake_policy, now: T0 + 60)
+      end
+      assert_equal original, store.read_job("pr-7-stable")
+      assert_equal bytes, File.binread(path)
+      quarantine = Dir.glob(File.join(store.root, "quarantine", "jobs", "*.json"))
+      assert_equal 1, quarantine.size
+      assert_equal "divergent_job_source", JSON.parse(File.read(quarantine.first)).fetch("reason")
+    end
+  end
+
+  def test_eligible_jobs_filters_backoff_per_job_without_starving_later_work
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      first_manifest = manifest(
+        "source" => manifest.fetch("source").merge("merged_at" => "2026-07-10T13:00:00+01:00")
+      )
+      first = store.enqueue_manifest!(first_manifest, policy: intake_policy, now: T0)
+      second_manifest = manifest(
+        "job_id" => "pr-8-stable",
+        "source" => manifest.fetch("source").merge(
+          "number" => 8,
+          "url" => "https://github.com/acme/demo/pull/8",
+          "merge_sha" => "d" * 40,
+          "merged_at" => "2026-07-10T12:01:00Z"
+        ),
+        "manifest_checksum" => "e" * 64
+      )
+      second = store.enqueue_manifest!(second_manifest, policy: intake_policy, now: T0 + 60)
+      store.write_job!(
+        first.merge(
+          "state" => "blocked",
+          "attempts" => [ { "next_eligible_at" => (T0 + 3600).iso8601 } ],
+          "updated_at" => (T0 + 120).iso8601
+        )
+      )
+
+      assert_equal [ second.fetch("job_id") ],
+                   store.eligible_jobs(now: T0 + 180).map { |entry| entry.fetch("job_id") }
+      assert_equal %w[pr-7-stable pr-8-stable],
+                   store.eligible_jobs(now: T0 + 7200).map { |entry| entry.fetch("job_id") }
+    end
+  end
+
   private
 
   def job(overrides = {})
@@ -209,6 +286,29 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       "outcome" => "pr_opened",
       "terminal" => true,
       "receipts" => { "pr_url" => "https://github.com/acme/demo/pull/9" }
+    }
+  end
+
+  def manifest(overrides = {})
+    {
+      "schema" => "hive-refactor-patrol-pr-manifest",
+      "schema_version" => 2,
+      "job_id" => "pr-7-stable",
+      "source" => source(
+        "merged_at" => "2026-07-10T12:00:00Z"
+      ),
+      "files" => [ { "path" => "lib/checkout.rb", "status" => "modified" } ],
+      "changed_paths" => [ "lib/checkout.rb" ],
+      "manifest_checksum" => "a" * 64
+    }.merge(overrides)
+  end
+
+  def intake_policy
+    {
+      "discovery" => true,
+      "auto_fix" => false,
+      "issue_filing" => false,
+      "captured_at" => T0.iso8601
     }
   end
 end

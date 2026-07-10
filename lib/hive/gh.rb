@@ -1,4 +1,5 @@
 require "json"
+require "time"
 require "timeout"
 require "uri"
 require "yaml"
@@ -200,6 +201,99 @@ module Hive
       }
     rescue JSON::ParserError => e
       raise Hive::GhError, "merged PR metadata for #{pr} was unparseable: #{e.message}"
+    end
+
+    # One cursor-addressed page of merged PR identities for architecture
+    # patrol catch-up. File manifests are deliberately resolved through
+    # #merged_pr_details afterward; this API only discovers stable occurrences.
+    def merged_prs_page(repository:, default_branch:, cursor:, merged_since:,
+                        per_page:, worktree_path:, cfg: nil)
+      repository = repository.to_s
+      branch = default_branch.to_s
+      unless repository.match?(%r{\A[^/\s]+/[^/\s]+\z}) && !branch.empty? && !branch.match?(/\s/)
+        raise Hive::GhError, "merged-PR pagination requires a repository and default branch"
+      end
+      page_size = Integer(per_page)
+      raise Hive::GhError, "merged-PR page size must be between 1 and 100" unless (1..100).cover?(page_size)
+
+      search = "repo:#{repository} is:pr is:merged base:#{branch} sort:updated-asc"
+      if merged_since
+        since = merged_since.is_a?(Time) ? merged_since : Time.iso8601(merged_since.to_s)
+        search = "#{search} merged:>=#{since.utc.iso8601}"
+      end
+      query = <<~GRAPHQL
+        query($searchQuery: String!, $pageSize: Int!, $cursor: String) {
+          search(query: $searchQuery, type: ISSUE, first: $pageSize, after: $cursor) {
+            issueCount
+            nodes {
+              ... on PullRequest {
+                number
+                url
+                mergedAt
+                baseRefName
+                mergeCommit { oid }
+                repository { nameWithOwner }
+              }
+            }
+            pageInfo { hasNextPage endCursor }
+          }
+        }
+      GRAPHQL
+      args = [
+        "gh", "api", "graphql",
+        "-f", "query=#{query}",
+        "-f", "searchQuery=#{search}",
+        "-F", "pageSize=#{page_size}"
+      ]
+      args.concat([ "-f", "cursor=#{cursor}" ]) unless cursor.to_s.empty?
+      out, err, status = capture3(*args, chdir: worktree_path, cfg: cfg)
+      unless status.success?
+        raise Hive::GhError,
+              "`gh api graphql` failed while listing merged PRs for #{repository}: " \
+              "#{err.to_s.strip.empty? ? out : err.strip}"
+      end
+
+      doc = JSON.parse(out)
+      errors = doc.is_a?(Hash) ? doc["errors"] : nil
+      if errors.is_a?(Array) && errors.any?
+        messages = errors.filter_map { |item| item.is_a?(Hash) ? item["message"] : item.to_s }
+        raise Hive::GhError, "GitHub GraphQL merged-PR pagination failed: #{messages.join('; ')}"
+      end
+      search_data = doc.is_a?(Hash) ? doc.dig("data", "search") : nil
+      nodes = search_data.is_a?(Hash) ? search_data["nodes"] : nil
+      page_info = search_data.is_a?(Hash) ? search_data["pageInfo"] : nil
+      issue_count = search_data.is_a?(Hash) ? search_data["issueCount"] : nil
+      unless issue_count.is_a?(Integer) && nodes.is_a?(Array) && nodes.all? { |item| item.is_a?(Hash) } &&
+             page_info.is_a?(Hash) && [ true, false ].include?(page_info["hasNextPage"])
+        raise Hive::GhError, "GitHub GraphQL returned an incomplete merged-PR page for #{repository}"
+      end
+      if issue_count > 1000
+        raise Hive::GhError,
+              "GitHub GraphQL merged-PR search has #{issue_count} results, above the 1,000-result traversal cap"
+      end
+      if page_info.fetch("hasNextPage") && page_info["endCursor"].to_s.empty?
+        raise Hive::GhError, "GitHub GraphQL omitted the next cursor for #{repository}"
+      end
+
+      {
+        "items" => nodes.map do |item|
+          {
+            "number" => item["number"],
+            "url" => item["url"],
+            "repository" => item.dig("repository", "nameWithOwner"),
+            "base_branch" => item["baseRefName"],
+            "merge_sha" => item.dig("mergeCommit", "oid"),
+            "merged_at" => item["mergedAt"]
+          }
+        end,
+        "next_cursor" => page_info["endCursor"],
+        "has_next_page" => page_info.fetch("hasNextPage"),
+        "complete" => true
+      }
+    rescue JSON::ParserError => e
+      raise Hive::GhError, "GitHub GraphQL merged-PR page was unparseable: #{e.message}"
+    rescue ArgumentError => e
+      raise Hive::GhError, "invalid merged-PR pagination input: #{e.message}"
     end
 
     def validate_pr_repository_identity!(url, repository, number)

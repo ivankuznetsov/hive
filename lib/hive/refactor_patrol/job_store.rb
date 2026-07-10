@@ -1,4 +1,6 @@
 require "json"
+require "fileutils"
+require "digest"
 require "time"
 require "hive/atomic_file"
 
@@ -50,6 +52,64 @@ module Hive
       def initialize(project_root)
         @project_root = File.expand_path(project_root)
         @root = File.join(@project_root, ".hive-state", "refactor_patrol", "v2")
+      end
+
+      # Intake is the only bridge from an immutable PR manifest to the
+      # authoritative lifecycle aggregate. The per-job lock makes duplicate
+      # watcher/reconciler producers preserve the first policy snapshot and
+      # timestamp instead of racing two otherwise equivalent queued writes.
+      def enqueue_manifest!(manifest, policy:, now: Time.now, dry_run: false)
+        data = json_copy(manifest)
+        source = source_from_manifest(data)
+        aggregate = queued_aggregate(
+          job_id: data.fetch("job_id"),
+          source: source,
+          policy: json_copy(policy),
+          now: now
+        )
+        validate_job!(aggregate)
+        return aggregate if dry_run
+
+        path = job_path(aggregate.fetch("job_id"))
+        FileUtils.mkdir_p(File.dirname(path))
+        File.open("#{path}.lock", File::RDWR | File::CREAT, 0o600) do |lock|
+          lock.flock(File::LOCK_EX)
+          if File.file?(path)
+            existing = read_job(aggregate.fetch("job_id"))
+            unless existing.fetch("source") == source
+              quarantine_job_source!(
+                aggregate.fetch("job_id"),
+                authoritative: existing.fetch("source"),
+                candidate: source
+              )
+              raise InconsistentRecord.new("refactor patrol intake source is immutable", path: path)
+            end
+            return existing
+          end
+
+          atomic_write(path, aggregate)
+        end
+        aggregate
+      rescue KeyError => e
+        raise CorruptRecord, "refactor patrol manifest is missing #{e.key.inspect}"
+      end
+
+      # Scheduling is owned by U6; this query only exposes independently due
+      # intake jobs so one old backoff-bound occurrence cannot hide later work.
+      def eligible_jobs(now: Time.now)
+        jobs.select do |aggregate|
+          next false if aggregate.fetch("complete")
+          next false unless %w[queued blocked].include?(aggregate.fetch("state"))
+
+          deadline = aggregate.fetch("attempts").reverse_each.filter_map { |attempt| attempt["next_eligible_at"] }.first
+          deadline.nil? || Time.iso8601(deadline) <= now
+        end.sort_by do |aggregate|
+          source = aggregate.fetch("source")
+          merged_at = source["merged_at"] ? Time.iso8601(source.fetch("merged_at")).utc : Time.at(0).utc
+          [ merged_at, source.fetch("number"), source.fetch("merge_sha"), aggregate.fetch("job_id") ]
+        end
+      rescue ArgumentError => e
+        raise InconsistentRecord, "refactor patrol job has invalid scheduling timestamp (#{e.message})"
       end
 
       def write_job!(aggregate, dry_run: false)
@@ -188,6 +248,61 @@ module Hive
       end
 
       private
+
+      def source_from_manifest(manifest)
+        unless manifest.is_a?(Hash) && manifest["schema"] == "hive-refactor-patrol-pr-manifest" &&
+               manifest["schema_version"] == SCHEMA_VERSION
+          raise CorruptRecord, "refactor patrol intake requires a v2 PR manifest"
+        end
+
+        source = manifest.fetch("source")
+        %w[url number repository registration base_branch base_sha merge_sha merged_at].each do |key|
+          source.fetch(key)
+        end
+        source.merge(
+          "changed_paths" => manifest.fetch("changed_paths"),
+          "manifest_checksum" => manifest.fetch("manifest_checksum")
+        )
+      end
+
+      def queued_aggregate(job_id:, source:, policy:, now:)
+        timestamp = now.utc.iso8601
+        {
+          "schema" => SCHEMA,
+          "schema_version" => SCHEMA_VERSION,
+          "job_id" => job_id,
+          "source" => source,
+          "analysis_sha" => nil,
+          "policy" => policy,
+          "state" => "queued",
+          "complete" => false,
+          "dispositions" => DISPOSITIONS.to_h { |name| [ name, [] ] },
+          "feature_results" => [],
+          "review_errors" => [],
+          "zero_reason" => nil,
+          "attempts" => [],
+          "actions" => [],
+          "created_at" => timestamp,
+          "updated_at" => timestamp
+        }
+      end
+
+      def quarantine_job_source!(job_id, authoritative:, candidate:)
+        directory = File.join(root, "quarantine", "jobs")
+        digest = ::Digest::SHA256.hexdigest(JSON.generate(candidate.sort.to_h))
+        path = File.join(directory, "#{job_id}-#{digest}.json")
+        return path if File.file?(path)
+
+        evidence = {
+          "schema" => "hive-refactor-patrol-job-intake-conflict",
+          "schema_version" => 1,
+          "job_id" => job_id,
+          "reason" => "divergent_job_source",
+          "authoritative_source" => authoritative,
+          "candidate_source" => candidate
+        }
+        atomic_write(path, evidence)
+      end
 
       def jobs_dir
         File.join(root, "jobs")

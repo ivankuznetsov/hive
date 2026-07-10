@@ -15,6 +15,9 @@ malformed/wrong-schema/empty/semantically incomplete reports, failed entries on
 a zero child exit, filtered reports that omit the requested scenario, and
 overlapping invocations sharing one requested path.
 
+Private report directories require a non-writable or sticky parent. Cleanup
+failures warn without overriding the child/result exit status.
+
 **Verified:** `bundle exec ruby -Itest test/eval/support/reporter_test.rb` and
 `bundle exec rubocop bin/hive-eval test/eval/support/reporter_test.rb`
 

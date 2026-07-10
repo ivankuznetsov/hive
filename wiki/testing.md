@@ -276,7 +276,8 @@ scenario entries match the reporter contract and all report `status: pass`.
 Rake dry-run spellings in inherited `RAKEOPT` are rejected before execution,
 then `RAKEOPT` is cleared for the child. Only the validated private report is
 atomically published to the requested path, preventing concurrent runs from
-validating each other's output.
+validating each other's output. Group/world-writable report parents require the
+sticky bit, and cleanup warnings cannot replace the intended result status.
 
 ## Lint
 

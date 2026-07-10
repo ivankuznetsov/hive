@@ -379,6 +379,51 @@ class RefactorPatrolCommandTest < Minitest::Test
     end
   end
 
+  def test_pr_mode_maps_only_changed_documentation_slice_and_skips_compiled_logs
+    with_refactor_patrol_project do |repo|
+      FileUtils.mkdir_p(File.join(repo, "docs"))
+      FileUtils.mkdir_p(File.join(repo, "pages"))
+      FileUtils.mkdir_p(File.join(repo, "wiki"))
+      File.write(File.join(repo, "docs", "guide.md"), "guide\n")
+      File.write(File.join(repo, "package.json"), JSON.generate("scripts" => { "test" => "node --test" }))
+      File.write(File.join(repo, "pages", "home.tsx"), "export default function Home() {}\n")
+      File.write(File.join(repo, "wiki", "log.md"), "compiled\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "docs", "--quiet")
+      head = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      reviewer = FakeReviewer.new({})
+
+      out, err, status = with_captured_exit do
+        command_for(
+          pr: "7",
+          manifest_resolver: FakeManifestResolver.new(
+            pr_manifest(merge_sha: head, changed_paths: [ "docs/guide.md" ])
+          ),
+          use_default_mapper: true,
+          reviewer: reviewer,
+          leverage_scores: leverage_scores("documentation-docs-root" => 0.5)
+        ).call
+      end
+      assert_equal Hive::ExitCodes::SUCCESS, status, "#{out}\n#{err}"
+      assert_equal [ "documentation-docs-root" ], reviewer.seen_feature_ids
+
+      skip_out, skip_err, skip_status = with_captured_exit do
+        command_for(
+          pr: "7",
+          manifest_resolver: FakeManifestResolver.new(
+            pr_manifest(merge_sha: head, changed_paths: [ "wiki/log.md" ])
+          ),
+          use_default_mapper: true,
+          reviewer: FakeReviewer.new({})
+        ).call
+      end
+      assert_equal Hive::ExitCodes::SUCCESS, skip_status, "#{skip_out}\n#{skip_err}"
+      skipped = JSON.parse(skip_out)
+      assert_equal "no_mapped_slice", skipped.fetch("zero_reason")
+      assert skipped.fetch("complete")
+    end
+  end
+
   def test_project_without_refactor_patrol_block_errors_clearly
     with_tmp_global_config do
       with_tmp_git_repo do |repo|
@@ -492,7 +537,8 @@ class RefactorPatrolCommandTest < Minitest::Test
   end
 
   def command_for(project: "demo", json: true, dry_run: false, feature_hint: nil, entrypoint_hint: nil, path_hint: nil, changed_since: nil,
-                  pr: nil, manifest_resolver: nil, features: [], theses_by_feature: {}, reviewer: nil, leverage_scores: {})
+                  pr: nil, manifest_resolver: nil, features: [], theses_by_feature: {}, reviewer: nil, leverage_scores: {},
+                  use_default_mapper: false)
     reviewer ||= FakeReviewer.new(theses_by_feature)
     Hive::Commands::RefactorPatrol.new(
       project,
@@ -503,7 +549,7 @@ class RefactorPatrolCommandTest < Minitest::Test
       path: path_hint,
       changed_since: changed_since,
       pr: pr,
-      mapper_factory: ->(_root, _cfg, _state) { FakeMapper.new(features) },
+      mapper_factory: use_default_mapper ? nil : ->(_root, _cfg, _state) { FakeMapper.new(features) },
       reviewer_factory: ->(_root, _cfg, _state) { reviewer },
       leverage_factory: ->(_root, _cfg) { FakeLeverage.new(leverage_scores) },
       manifest_resolver_factory: manifest_resolver && ->(*) { manifest_resolver }
@@ -570,7 +616,7 @@ class RefactorPatrolCommandTest < Minitest::Test
     )
   end
 
-  def pr_manifest(merge_sha: "7" * 40)
+  def pr_manifest(merge_sha: "7" * 40, changed_paths: [ "lib/checkout.rb" ])
     {
       "schema" => "hive-refactor-patrol-pr-manifest",
       "schema_version" => 2,
@@ -585,8 +631,8 @@ class RefactorPatrolCommandTest < Minitest::Test
         "merge_sha" => merge_sha,
         "merged_at" => "2026-07-10T10:00:00Z"
       },
-      "files" => [ { "path" => "lib/checkout.rb", "status" => "modified" } ],
-      "changed_paths" => [ "lib/checkout.rb" ],
+      "files" => changed_paths.map { |path| { "path" => path, "status" => "modified" } },
+      "changed_paths" => changed_paths,
       "manifest_checksum" => "checksum"
     }
   end

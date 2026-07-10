@@ -1,6 +1,7 @@
 require "json"
 require "open3"
 require "pathname"
+require "set"
 require "hive/patrol/feature"
 require "hive/patrol/state_store"
 
@@ -8,12 +9,26 @@ module Hive
   module Patrol
     class Mapper
       DEFAULT_EXCLUDES = [ ".git", ".hive-state" ].freeze
+      DOCUMENTATION_EXTENSIONS = %w[.md .mdx .rst .adoc .asciidoc].freeze
+      DOCUMENTATION_ROOT_NAMES = %w[
+        README CONTRIBUTING ARCHITECTURE DESIGN DECISIONS CONCEPTS SECURITY SUPPORT
+      ].freeze
+      DOCUMENTATION_EXCLUDES = [
+        %r{\Awiki/log\.md\z}i,
+        %r{\Awiki/log\.d/}i,
+        %r{\Araw/notes(?:/|\z)}i,
+        %r{(?:\A|/)(?:\.cache|cache|caches)(?:/|\z)}i,
+        %r{(?:\A|/)\.hive-state(?:/|\z)}i
+      ].freeze
 
-      def initialize(project_root, cfg:, state: StateStore.new(project_root), dry_run: false)
+      def initialize(project_root, cfg:, state: StateStore.new(project_root), dry_run: false,
+                     capabilities: [], documentation_changes: [])
         @project_root = File.expand_path(project_root)
         @cfg = cfg
         @state = state
         @dry_run = dry_run
+        @capabilities = Array(capabilities).map(&:to_sym)
+        @documentation_changes = Array(documentation_changes)
       end
 
       def call
@@ -26,12 +41,80 @@ module Hive
         features.concat(command_features(files))
         features.concat(package_features(files))
         features.concat(test_features(files))
+        if documentation_capability? && (features.empty? || documentation_changes_provided?)
+          features.concat(documentation_features(files))
+        end
         features = dedupe(features)
         features.each { |feature| @state.write_feature(feature) } unless @dry_run
         features
       end
 
       private
+
+      def documentation_capability?
+        @capabilities.include?(:documentation)
+      end
+
+      def documentation_changes_provided?
+        @documentation_changes.any?
+      end
+
+      def documentation_features(files)
+        tracked = files.select { |path| documentation_path?(path) }
+        changed = @documentation_changes.flat_map do |change|
+          next [] unless change.is_a?(Hash)
+
+          [ change["path"], change["previous_path"] ].compact.select { |path| documentation_path?(path) }
+        end
+        changed_set = changed.to_set
+        candidates = documentation_changes_provided? ? changed : tracked
+        candidates.uniq.group_by { |path| documentation_group(path) }.sort.flat_map do |group, paths|
+          ordered = paths.sort
+          owned_slices = documentation_changes_provided? ? ordered.each_slice(max_owned_files).to_a : [ capped(ordered, max_owned_files) ]
+          unchanged_group_docs = tracked.select { |path| documentation_group(path) == group && !changed_set.include?(path) }
+          context = capped((root_document_paths(tracked) + unchanged_group_docs).uniq, max_context_files)
+
+          owned_slices.each_with_index.map do |owned, index|
+            id_group = index.zero? ? group : "#{group}/part-#{index + 1}"
+            Feature.new(
+              id: stable_id("documentation", id_group),
+              kind: "documentation",
+              entrypoints: [ owned.first ],
+              owned_files: owned,
+              context_files: context - owned,
+              tests: []
+            )
+          end
+        end
+      end
+
+      def documentation_path?(path)
+        value = path.to_s.tr("\\", "/")
+        return false if value.empty? || DOCUMENTATION_EXCLUDES.any? { |pattern| value.match?(pattern) }
+        return false unless DOCUMENTATION_EXTENSIONS.include?(File.extname(value).downcase)
+
+        parts = value.split("/")
+        return DOCUMENTATION_ROOT_NAMES.include?(File.basename(value, File.extname(value)).upcase) if parts.one?
+        return true if %w[docs wiki adr adrs decisions].include?(parts.first.downcase)
+
+        parts.first.casecmp?("architecture") && %w[adr adrs decisions].include?(parts[1].to_s.downcase)
+      end
+
+      def documentation_group(path)
+        parts = path.split("/")
+        return "root" if parts.one?
+
+        top = parts.first.downcase
+        return top if %w[adr adrs decisions].include?(top)
+        return "#{top}/#{parts[1].downcase}" if top == "architecture"
+
+        second = parts.length > 2 ? parts[1].downcase : "root"
+        "#{top}/#{second}"
+      end
+
+      def root_document_paths(paths)
+        paths.select { |path| path.split("/").one? }
+      end
 
       def tracked_files
         out, = Open3.capture3("git", "-C", @project_root, "ls-files", "-z")

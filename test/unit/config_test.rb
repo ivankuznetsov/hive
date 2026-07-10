@@ -178,6 +178,7 @@ class ConfigTest < Minitest::Test
       assert_equal 10, cfg.dig("refactor_patrol", "max_theses_per_run")
       assert_includes cfg.dig("refactor_patrol", "exclude"), "node_modules"
       assert_nil cfg.dig("refactor_patrol", "commands", "test")
+      assert_nil cfg.dig("refactor_patrol", "commands", "docs")
       assert_equal 8, cfg.dig("refactor_patrol", "caps", "max_files")
       assert_equal 400, cfg.dig("refactor_patrol", "caps", "max_diff_lines")
       assert_equal true, cfg.dig("refactor_patrol", "caps", "single_feature_only")

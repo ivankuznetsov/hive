@@ -433,6 +433,7 @@ module Hive
         "include" => [],
         "exclude" => [ "node_modules", "dist", "build", "vendor", ".git" ],
         "commands" => {
+          "docs" => nil,
           "format" => nil,
           "lint" => nil,
           "typecheck" => nil,
@@ -2603,7 +2604,7 @@ module Hive
               "got #{commands.inspect} (#{commands.class})"
       end
 
-      %w[format lint typecheck test].each do |key|
+      %w[docs format lint typecheck test].each do |key|
         value = commands[key]
         next if value.nil?
         next if value.is_a?(String) && !value.strip.empty?

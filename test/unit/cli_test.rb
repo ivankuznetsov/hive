@@ -44,6 +44,14 @@ class HiveCliTest < Minitest::Test
     assert_includes out, "--skill"
   end
 
+  def test_doctor_help_advertises_v2_read_only_health_contract
+    out, _err = capture_io { Hive::CLI.start([ "help", "doctor" ]) }
+
+    assert_includes out, "hive-doctor.v2"
+    assert_includes out, "setup-agents"
+    assert_includes out, "never installs"
+  end
+
   CommandDouble = Struct.new(:return_value, :calls) do
     def call
       calls << :call

@@ -44,7 +44,7 @@ module Hive
       def initialize(config:, project_root:, manifest: Manifest.load,
                      resolver: nil, runner: CommandRunner.new, environment: ENV)
         @config = config
-        @project_root = File.expand_path(project_root)
+        @project_root = project_root && File.expand_path(project_root)
         @manifest = manifest
         @resolver = resolver || TargetResolver.new(
           config: config, project_root: @project_root, manifest: manifest
@@ -270,7 +270,7 @@ module Hive
         alias_path = nil
         invocation = contract.invocation
         if contract.alias_spec
-          alias_path = File.join(@project_root, contract.alias_spec.path)
+          alias_path = alias_path_for(contract.alias_spec)
           if File.exist?(alias_path)
             actual = File.read(alias_path)
             unless actual == Manifest.alias_content(contract.alias_spec)
@@ -480,6 +480,14 @@ module Hive
         when "codex" then File.join(home, ".codex")
         when "pi" then File.join(home, ".pi", "agent")
         end
+      end
+
+      def alias_path_for(alias_spec)
+        home = @environment["HOME"] || Dir.home
+        config_root = @environment["CLAUDE_CONFIG_DIR"].to_s
+        config_root = File.join(home, ".claude") if config_root.empty?
+        relative = alias_spec.path.delete_prefix(".claude/")
+        File.join(config_root, relative)
       end
 
       def resolution_hash(resolution)

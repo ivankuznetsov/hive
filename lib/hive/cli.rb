@@ -215,7 +215,7 @@ module Hive
       Hive::Commands::Prune.new(dry_run: options[:dry_run], json: options[:json]).call
     end
 
-    desc "doctor", "Verify each stage's configured skill is installed for its agent"
+    desc "doctor", "Inspect managed agent skill health without changing agent state"
     long_desc <<~DESC
       Walks the brainstorm and plan stage configs and asks the
       configured agent profile (claude / codex / pi / grok) to probe whether
@@ -247,8 +247,18 @@ module Hive
         package_root). Each row's `message` field is the authoritative
         install hint.
 
-      Exit codes: 0 all checks present or N/A; 65 at least one missing
-      skill; 78 config error.
+      Managed rows report healthy, missing, stale, incompatible, conflicting,
+      or unavailable with native inventory and resolver-path evidence. An
+      unavailable CLI is a visible non-blocking warning; other unresolved
+      managed rows include an exact `hive setup-agents --agent ... --skill ...`
+      remediation. Doctor never installs or writes agent state.
+
+      --json emits the versioned hive-doctor.v2 envelope. The v1 schema file
+      remains packaged for consumers pinned to the former resolution-only
+      contract.
+
+      Exit codes: 0 all available managed skills healthy (unavailable-only is
+      non-blocking); 65 actionable skill/dependency failure; 78 config error.
 
       Examples:
 

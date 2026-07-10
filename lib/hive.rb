@@ -16,6 +16,7 @@ module Hive
       "hive-status" => 4,
       "hive-init" => 2,
       "hive-setup-agents" => 1,
+      "hive-doctor" => 2,
       "hive-status-diagnose" => 2,
       "hive-run" => 2,
       "hive-approve" => 2,

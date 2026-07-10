@@ -177,7 +177,7 @@ module Hive
           rows.filter_map do |row|
             contract = @manifest.capability(row.capability_id).agent(agent)
             next unless contract.alias_spec
-            path = File.join(@project_root, contract.alias_spec.path)
+            path = alias_path(contract.alias_spec)
             if File.file?(path)
               next if File.read(path) == Manifest.alias_content(contract.alias_spec)
               next
@@ -210,6 +210,13 @@ module Hive
           return nil if current["exists"] == expected["exists"] && current["digest"] == expected["digest"]
 
           "#{path} changed since preview"
+        end
+
+        def alias_path(alias_spec)
+          home = @environment["HOME"] || Dir.home
+          config_root = @environment["CLAUDE_CONFIG_DIR"].to_s
+          config_root = File.join(home, ".claude") if config_root.empty?
+          File.join(config_root, alias_spec.path.delete_prefix(".claude/"))
         end
 
         def execute_alias(operation)

@@ -67,16 +67,19 @@ module Hive
         targets = []
         STAGES.each { |stage| targets << stage_target(stage) }
         Array(@config.dig("review", "reviewers")).each_with_index do |spec, index|
-          targets << reviewer_target(spec, "review.reviewers[#{index}]")
+          name = spec["name"].to_s
+          targets << reviewer_target(spec, name.empty? ? "review.reviewers[#{index}]" : "6-review/#{name}")
         end
         adhoc = @config.dig("review", "adhoc", "reviewers")
         Array(adhoc).each_with_index do |spec, index|
-          targets << reviewer_target(spec, "review.adhoc.reviewers[#{index}]")
+          name = spec["name"].to_s
+          targets << reviewer_target(spec, name.empty? ? "review.adhoc.reviewers[#{index}]" : "review.adhoc/#{name}")
         end unless adhoc.nil?
         targets << browser_target if @config.dig("review", "browser_test", "enabled")
         if patrol_enabled?
           Array(@config.dig("patrol", "review", "reviewers")).each_with_index do |spec, index|
-            targets << reviewer_target(spec, "patrol.review.reviewers[#{index}]")
+            name = spec["name"].to_s
+            targets << reviewer_target(spec, name.empty? ? "patrol.review.reviewers[#{index}]" : "patrol.review/#{name}")
           end
         end
 

@@ -304,6 +304,7 @@ module Hive
     # other ErrorKind modules so a constant added without a schema-enum
     # update is caught by schema_files_test.
     module ForgetErrorKind
+      USAGE           = "usage".freeze
       MISSING_NAME    = "missing_name".freeze
       UNKNOWN_PROJECT = "unknown_project".freeze
       CONFIG          = "config".freeze

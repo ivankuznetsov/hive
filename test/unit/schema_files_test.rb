@@ -1241,6 +1241,8 @@ class SchemaFilesTest < Minitest::Test
   def test_hive_forget_error_payload_validates_for_every_kind
     schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-forget"))))
     cases = {
+      Hive::Schemas::ForgetErrorKind::USAGE =>
+        Hive::Commands::Forget::UsageError.new("usage", error_kind: Hive::Schemas::ForgetErrorKind::USAGE),
       Hive::Schemas::ForgetErrorKind::MISSING_NAME =>
         Hive::Commands::Forget::UsageError.new("missing", error_kind: Hive::Schemas::ForgetErrorKind::MISSING_NAME),
       Hive::Schemas::ForgetErrorKind::UNKNOWN_PROJECT =>

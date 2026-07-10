@@ -31,6 +31,7 @@ def append_skip_log(path)
     raise IOError, "dry-run skip log is not a regular file" unless stat.file?
     raise IOError, "dry-run skip log is not owned by uid #{Process.uid}" unless stat.uid == Process.uid
     raise IOError, "dry-run skip log link count is not 1" unless stat.nlink == 1
+    file.chmod(0o600)
 
     yield file
   end

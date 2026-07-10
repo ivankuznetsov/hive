@@ -1,4 +1,5 @@
 require "json"
+require "tempfile"
 require "time"
 require "timeout"
 require "uri"
@@ -96,7 +97,8 @@ module Hive
       # `-C` flag), not stylistic. Kept here with a comment so the
       # next reader doesn't "fix" it.
       out, err, status = capture3("gh", "pr", "list", "--head", branch,
-                                  "--state", "all", "--json", "url,number,state,isDraft,headRefName,headRefOid",
+                                  "--state", "all", "--json",
+                                  "url,number,state,isDraft,headRefName,headRefOid,body,baseRefName,headRepository",
                                   chdir: worktree_path, cfg: cfg)
       unless status.success?
         raise Hive::GhError, "`gh pr list` failed for branch #{branch}: #{err.to_s.strip.empty? ? out : err.strip}"
@@ -116,6 +118,75 @@ module Hive
     # silently flow into draft-finalization commands.
     def lookup_existing_pr(worktree_path, branch, cfg: nil)
       lookup_prs_for_branch(worktree_path, branch, cfg: cfg).find { |p| p["state"] == "OPEN" }
+    end
+
+    # The REST /issues endpoint includes pull requests, so fetch every page and
+    # validate every issue-shaped record before filtering. Treating malformed or
+    # partial responses as an empty result would let callers create duplicates.
+    def issues_with_marker(repository:, marker:, cfg: nil)
+      repo = validated_repository_slug(repository)
+      needle = marker.to_s
+      raise Hive::GhError, "issue marker must be a non-empty string" if needle.empty?
+
+      endpoint = "repos/#{repo}/issues?state=all&per_page=100"
+      out, err, status = capture3("gh", "api", endpoint, "--paginate", "--slurp", cfg: cfg)
+      unless status.success?
+        message = err.to_s.strip.empty? ? out : err.strip
+        raise Hive::GhError, "`gh api` failed while listing issues for #{repo}: #{message}"
+      end
+
+      pages = JSON.parse(out)
+      unless pages.is_a?(Array) && pages.all? { |page| page.is_a?(Array) }
+        raise Hive::GhError, "`gh api --paginate --slurp` returned incomplete issue pages for #{repo}"
+      end
+
+      pages.flatten.filter_map do |issue|
+        validate_issue_api_record!(issue, repo)
+        next if issue.key?("pull_request")
+        next unless issue.fetch("body").to_s.lines.any? { |line| line.strip == needle }
+
+        {
+          "number" => issue.fetch("number"),
+          "state" => issue.fetch("state").upcase,
+          "url" => issue.fetch("html_url"),
+          "body" => issue.fetch("body")
+        }
+      end
+    rescue JSON::ParserError => e
+      raise Hive::GhError, "issue pages for #{repository} were unparseable: #{e.message}"
+    end
+
+    # Use a temporary body file so markdown is never interpreted as argv or by
+    # a shell. The caller owns content bounds; this gateway owns transport and
+    # fail-closed command/result handling.
+    def create_issue(repository:, title:, body:, cfg: nil)
+      repo = validated_repository_slug(repository)
+      unless title.is_a?(String) && !title.strip.empty?
+        raise Hive::GhError, "issue title must be a non-empty string"
+      end
+      raise Hive::GhError, "issue body must be a string" unless body.is_a?(String)
+
+      Tempfile.create([ "hive-refactor-issue-", ".md" ]) do |file|
+        file.binmode
+        file.write(body)
+        file.flush
+        out, err, status = capture3(
+          "gh", "issue", "create", "--repo", repo,
+          "--title", title, "--body-file", file.path, cfg: cfg
+        )
+        unless status.success?
+          message = err.to_s.strip.empty? ? out : err.strip
+          raise Hive::GhError, "`gh issue create` failed for #{repo}: #{message}"
+        end
+
+        url = out.lines.map(&:strip).reject(&:empty?).last.to_s
+        raise Hive::GhError, "`gh issue create` returned no issue URL for #{repo}" if url.empty?
+        unless issue_url_matches_repository?(url, repo)
+          raise Hive::GhError, "`gh issue create` returned an unexpected issue URL for #{repo}"
+        end
+
+        url
+      end
     end
 
     # `chdir` scopes `gh pr view` to a specific repo checkout. Ad-hoc review
@@ -307,6 +378,64 @@ module Hive
     rescue URI::InvalidURIError
       raise Hive::GhError, "resolved PR URL #{url.inspect} is invalid"
     end
+
+    def validated_repository_slug(repository)
+      value = repository.to_s.strip
+      segments = value.split("/", -1)
+      valid = segments.size == 2 && segments.all? do |segment|
+        segment.match?(/\A[a-zA-Z0-9_.-]+\z/) && !%w[. ..].include?(segment)
+      end
+      raise Hive::GhError, "repository must be an owner/name slug" unless valid
+
+      value
+    end
+    private_class_method :validated_repository_slug
+
+    def validate_issue_api_record!(issue, repository)
+      unless issue.is_a?(Hash)
+        raise Hive::GhError, "`gh api` returned a non-object issue for #{repository}"
+      end
+
+      missing = %w[number state html_url body].reject { |key| issue.key?(key) }
+      unless missing.empty?
+        raise Hive::GhError, "`gh api` issue for #{repository} is missing #{missing.inspect}"
+      end
+      unless issue["number"].is_a?(Integer) && issue["number"].positive?
+        raise Hive::GhError, "`gh api` issue for #{repository} has an invalid number"
+      end
+      unless %w[open closed].include?(issue["state"].to_s.downcase)
+        raise Hive::GhError, "`gh api` issue #{issue['number']} for #{repository} has an invalid state"
+      end
+      unless issue["html_url"].is_a?(String) && !issue["html_url"].empty?
+        raise Hive::GhError, "`gh api` issue #{issue['number']} for #{repository} has no URL"
+      end
+      unless issue_url_matches_repository?(issue["html_url"], repository, number: issue["number"])
+        raise Hive::GhError, "`gh api` issue #{issue['number']} URL does not belong to #{repository}"
+      end
+      unless issue["body"].nil? || issue["body"].is_a?(String)
+        raise Hive::GhError, "`gh api` issue #{issue['number']} for #{repository} has an invalid body"
+      end
+      if issue.key?("pull_request") && !issue["pull_request"].is_a?(Hash)
+        raise Hive::GhError, "`gh api` issue #{issue['number']} for #{repository} has an invalid pull-request shape"
+      end
+
+      issue
+    end
+    private_class_method :validate_issue_api_record!
+
+    def issue_url_matches_repository?(url, repository, number: nil)
+      uri = URI.parse(url.to_s)
+      match = uri.path.match(%r{\A/([^/]+/[^/]+)/issues/([1-9]\d*)\z})
+      return false unless uri.is_a?(URI::HTTP) && uri.host && match
+      return false unless match[1].casecmp?(repository.to_s)
+      return false if number && match[2].to_i != number.to_i
+      return false unless uri.userinfo.nil? && uri.query.nil? && uri.fragment.nil?
+
+      true
+    rescue URI::InvalidURIError
+      false
+    end
+    private_class_method :issue_url_matches_repository?
 
     def pr_state(pr_url, cfg: nil)
       out, err, status = capture3("gh", "pr", "view", pr_url.to_s, "--json", "state", cfg: cfg)

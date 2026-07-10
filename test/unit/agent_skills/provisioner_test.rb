@@ -144,6 +144,7 @@ class AgentSkillsProvisionerTest < Minitest::Test
     assert_equal [ pi_op.id ], pi.executed
     assert_equal 1, result.exit_code
     assert_equal "residual_failure", result.classification
+    assert_equal "residual_failure", result.to_h.fetch("classification")
   end
 
   def test_unavailable_only_and_already_healthy_plans_are_successful_noops

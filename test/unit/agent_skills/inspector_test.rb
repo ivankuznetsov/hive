@@ -294,4 +294,167 @@ class AgentSkillsInspectorTest < Minitest::Test
       refute runner.calls.any? { |call| call.fetch(:argv).any? { |arg| %w[add install update upgrade].include?(arg) } }
     end
   end
+
+  def test_command_runner_classifies_timeout_and_spawn_errors
+    runner = Hive::AgentSkills::CommandRunner.new
+    with_replaced_singleton_method(Timeout, :timeout, ->(_seconds, &_block) { raise Timeout::Error, "slow" }) do
+      result = runner.call([ "anything" ])
+      assert result.timed_out
+      assert_equal "slow", result.error
+    end
+    with_replaced_singleton_method(Open3, :capture3, ->(*_args) { raise Errno::ENOENT, "missing" }) do
+      result = runner.call([ "anything" ])
+      refute result.timed_out
+      assert_match(/ENOENT/, result.error)
+    end
+  end
+
+  def test_target_resolver_covers_adhoc_patrol_filters_and_serialization
+    cfg = config
+    cfg["review"]["adhoc"] = {
+      "reviewers" => [ { "name" => "", "kind" => "agent", "agent" => "claude", "skill" => "private-review" } ]
+    }
+    cfg["patrol"] = {
+      "mode" => "medium",
+      "review" => {
+        "reviewers" => [ { "name" => "", "kind" => "codex_review", "agent" => "codex", "skill" => "" } ]
+      }
+    }
+    resolver = Hive::AgentSkills::TargetResolver.new(config: cfg, project_root: "/tmp/project")
+
+    targets = resolver.resolve
+    assert targets.any? { |target| target.surfaces == [ "review.adhoc.reviewers[0]" ] }
+    assert targets.any? { |target| target.surfaces == [ "patrol.review.reviewers[0]" ] }
+    assert_equal "brainstorm", resolver.resolve(agents: [ "claude" ], skills: [ "ce-brainstorm" ]).first.to_h.fetch("surfaces").first
+    assert_raises(Hive::ConfigError) { resolver.resolve(agents: [ "ghost" ]) }
+    assert_raises(Hive::ConfigError) { resolver.resolve(skills: [ "ghost-skill" ]) }
+  end
+
+  def test_unmanaged_targets_are_inspected_when_available_or_unavailable
+    with_tmp_dir do |dir|
+      bin = File.join(dir, "bin", "claude")
+      executable(bin)
+      reviewer = { "name" => "private", "kind" => "agent", "agent" => "claude", "skill" => "private-review" }
+      cfg = config(reviewers: [ reviewer ], bin: bin)
+      inspector = Hive::AgentSkills::Inspector.new(
+        config: cfg, project_root: dir, runner: FakeRunner.new,
+        environment: { "HOME" => dir, "PATH" => "", "CLAUDE_CONFIG_DIR" => File.join(dir, ".claude") }
+      )
+      missing = inspector.inspect(skills: [ "private-review" ]).first
+      assert_equal "missing", missing.health
+      write(File.join(dir, ".claude", "skills", "private-review", "SKILL.md"))
+      assert_equal "healthy", inspector.inspect(skills: [ "private-review" ]).first.health
+
+      native_cfg = config(reviewers: [ { "name" => "lint", "kind" => "linter", "agent" => "", "skill" => "rubocop" } ])
+      unavailable = Hive::AgentSkills::Inspector.new(
+        config: native_cfg, project_root: dir, runner: FakeRunner.new,
+        environment: { "HOME" => dir, "PATH" => "" }
+      ).inspect(skills: [ "rubocop" ]).first
+      assert_equal "unavailable", unavailable.health
+    end
+  end
+
+  def test_version_probe_failure_old_cli_disabled_package_and_invalid_package_version
+    with_tmp_dir do |dir|
+      bin = File.join(dir, "bin", "claude")
+      executable(bin)
+      cfg = config(bin: bin)
+      cfg["plan"]["skill"] = "/ce-brainstorm"
+      cache = File.join(dir, "claude", "plugins", "cache", "compound-engineering-plugin", "compound-engineering", "3.19.0")
+      write(File.join(cache, "skills", "ce-brainstorm", "SKILL.md"))
+
+      bad_version = claude_responses(bin: bin, plugins: [], marketplaces: [], version: "not-semver")
+      row = inspect_rows(cfg: cfg, project: dir, runner: FakeRunner.new(bad_version),
+                         environment: { "CLAUDE_CONFIG_DIR" => File.join(dir, "claude") }).first
+      assert_equal "incompatible", row.health
+
+      old_cli = claude_responses(bin: bin, plugins: [], marketplaces: [], version: "1.0.0")
+      row = inspect_rows(cfg: cfg, project: dir, runner: FakeRunner.new(old_cli),
+                         environment: { "CLAUDE_CONFIG_DIR" => File.join(dir, "claude") }).first
+      assert_equal "incompatible", row.health
+
+      %w[disabled invalid].each do |variant|
+        version = variant == "invalid" ? "(" : "3.19.0"
+        enabled = variant != "disabled"
+        responses = claude_responses(
+          bin: bin,
+          plugins: [ { "id" => "compound-engineering@compound-engineering-plugin", "version" => version,
+                       "enabled" => enabled, "installPath" => cache } ],
+          marketplaces: [ { "name" => "compound-engineering-plugin", "repo" => "EveryInc/compound-engineering-plugin" } ]
+        )
+        row = inspect_rows(cfg: cfg, project: dir, runner: FakeRunner.new(responses),
+                           environment: { "CLAUDE_CONFIG_DIR" => File.join(dir, "claude") }).first
+        assert_equal variant == "disabled" ? "missing" : "incompatible", row.health
+      end
+    end
+  end
+
+  def test_inspector_defensive_provider_alias_source_and_path_helpers
+    with_tmp_dir do |dir|
+      bin = File.join(dir, "bin", "claude")
+      executable(bin)
+      cfg = config(bin: bin)
+      runner = FakeRunner.new({ [ bin, "--version" ] => result(stdout: "2.1.179") })
+      inspector = Hive::AgentSkills::Inspector.new(
+        config: cfg, project_root: dir, runner: runner,
+        environment: { "HOME" => dir, "PATH" => "", "CLAUDE_CONFIG_DIR" => File.join(dir, "claude") }
+      )
+      manifest = Hive::AgentSkills::Manifest.load
+      package = manifest.package("compound-engineering")
+      native = package.native_for("claude").with(provider: "future")
+      profile = Hive::AgentProfiles.lookup("claude", cfg: cfg)
+      evidence = inspector.send(:inspect_native, profile: profile, bin: bin, package: package, native_spec: native)
+      assert_match(/unsupported provider/, evidence.fetch("issues").first.last)
+
+      assert_raises(Hive::ConfigError) { inspector.send(:skill_module, "future") }
+      source_issues = inspector.send(
+        :source_issues, package.native_for("claude"),
+        { "marketplace" => { "source" => "EveryInc/compound-engineering-plugin" },
+          "package" => { "source" => "someone/private" } }
+      )
+      assert_match(/installed package source/, source_issues.first.last)
+
+      empty_package = File.join(dir, "empty-package")
+      FileUtils.mkdir_p(empty_package)
+      assert_nil inspector.send(:package_version_from, empty_package)
+      write(File.join(empty_package, "package.json"), "{")
+      assert_nil inspector.send(:package_version_from, empty_package)
+      assert_equal File.join(dir, ".codex"), inspector.send(:config_root_for, manifest.package("compound-engineering").native_for("codex"))
+      assert_equal File.join(dir, ".pi", "agent"), inspector.send(:config_root_for, manifest.package("compound-engineering").native_for("pi"))
+
+      cfg["agents"]["claude"]["bin"] = "missing-bare-name"
+      unavailable = Hive::AgentSkills::Inspector.new(
+        config: cfg, project_root: dir, runner: FakeRunner.new,
+        environment: { "HOME" => dir, "PATH" => "" }
+      ).inspect.first
+      assert_equal "unavailable", unavailable.health
+    end
+  end
+
+  def test_alias_inspection_system_error_is_a_conflict
+    with_tmp_dir do |dir|
+      bin = File.join(dir, "bin", "claude")
+      executable(bin)
+      alias_path = File.join(dir, "claude", "commands", "plan.md")
+      write(alias_path, "private")
+      cfg = config(bin: bin)
+      cfg["brainstorm"]["skill"] = "/plan"
+      inspector = Hive::AgentSkills::Inspector.new(
+        config: cfg, project_root: dir, runner: FakeRunner.new,
+        environment: { "HOME" => dir, "PATH" => "", "CLAUDE_CONFIG_DIR" => File.join(dir, "claude") }
+      )
+      target = Hive::AgentSkills::TargetResolver.new(config: cfg, project_root: dir).resolve.find do |row|
+        row.capability_id == "wiki-plan"
+      end
+      contract = Hive::AgentSkills::Manifest.load.capability("wiki-plan").agent("claude")
+      original = File.method(:read)
+      with_replaced_singleton_method(File, :read, lambda { |path, *args|
+        raise Errno::EACCES, path if path == alias_path
+        original.call(path, *args)
+      }) do
+        resolution = inspector.send(:inspect_resolution, target, contract, { "package" => nil })
+        assert_match(/could not inspect alias/, resolution.fetch("issues").first.last)
+      end
+    end
+  end
 end

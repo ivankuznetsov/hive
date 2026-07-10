@@ -948,4 +948,35 @@ class HiveCommandsDoctorTest < Minitest::Test
     assert_includes out.string, "/repo/.claude/commands/plan.md"
     assert_includes out.string, "Hive will not replace it"
   end
+
+  def test_private_dependency_and_rendering_boundaries
+    with_tmp_dir do |dir|
+      executable = File.join(dir, "qmd")
+      File.write(executable, "#!/bin/sh\n")
+      FileUtils.chmod(0o755, executable)
+      doctor = Hive::Commands::Doctor.new(config: base_config, project_root: dir, output: StringIO.new)
+      with_env("PATH" => dir) do
+        assert_equal executable, doctor.send(:which, "qmd")
+      end
+
+      state = File.join(dir, ".hive-state")
+      FileUtils.mkdir_p(state)
+      File.write(File.join(state, "config.yml"), "brainstorm:\n  runtime: tmux\n")
+      assert doctor.send(:legacy_brainstorm_runtime_present?)
+
+      clean = Hive::Commands::Doctor.new(config: base_config, project_root: dir, output: StringIO.new)
+      refute clean.send(:config_yml_unreadable?)
+
+      widths = { label: 12, agent: 8, skill: 16, status: 16 }
+      %w[stale incompatible unavailable not_applicable].each do |status|
+        rendered = doctor.send(
+          :row_line,
+          { kind: status == "not_applicable" ? "dependency" : "managed_skill",
+            label: "row", agent: "agent", skill: "/skill", status: status },
+          widths
+        )
+        assert_includes rendered, status
+      end
+    end
+  end
 end

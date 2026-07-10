@@ -2,6 +2,8 @@ require "test_helper"
 require "hive/commands/init"
 
 class InitAgentSkillsTest < Minitest::Test
+  include HiveTestHelper
+
   class TtyInput < StringIO
     def tty? = true
   end
@@ -107,5 +109,41 @@ class InitAgentSkillsTest < Minitest::Test
     assert_equal 1, setup.calls
     assert_includes error.string, "project remains initialized"
     assert_includes error.string, "Re-run `hive setup-agents`"
+  end
+
+  def test_default_setup_factory_builds_setup_agents_command
+    command = Hive::Commands::Init.new(Dir.pwd)
+    fake = FakeSetup.new(0)
+    captured = nil
+    replacement = lambda do |**kwargs|
+      captured = kwargs
+      fake
+    end
+    with_replaced_singleton_method(Hive::Commands::SetupAgents, :new, replacement) do
+      built = command.instance_variable_get(:@setup_agents_factory).call(
+        config: Hive::Config::DEFAULTS, project_root: Dir.pwd
+      )
+      assert_same fake, built
+    end
+    assert_equal Dir.pwd, captured.fetch(:project_root)
+  end
+
+  def test_closed_tty_probe_falls_back_to_warnings
+    input = Object.new
+    input.define_singleton_method(:tty?) { raise IOError, "closed" }
+    command, setup, _output, error = init_with(rows: [ inspection ], input: input)
+
+    command.send(:run_init_preflight!)
+
+    assert_equal 0, setup.calls
+    assert_includes error.string, "run `hive setup-agents`"
+  end
+
+  def test_epipe_while_printing_preflight_warnings_is_ignored
+    error = Object.new
+    error.define_singleton_method(:puts) { |_line| raise Errno::EPIPE, "closed" }
+    command, = init_with(rows: [ inspection ], input: StringIO.new, error: error)
+
+    assert_nil command.send(:emit_preflight_warnings, [ inspection ])
   end
 end

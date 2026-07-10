@@ -102,4 +102,55 @@ class AgentSkillsManifestTest < Minitest::Test
       refute_empty error.message
     end
   end
+
+  def test_loader_wraps_missing_files_and_internal_missing_keys
+    missing = File.join(Dir.tmpdir, "hive-agent-skills-#{Process.pid}-missing.yml")
+    error = assert_raises(Hive::AgentSkills::Manifest::ValidationError) do
+      Hive::AgentSkills::Manifest.load(missing)
+    end
+    assert_match(/manifest/, error.message)
+
+    document = YAML.safe_load(File.read(Hive::AgentSkills::Manifest.default_path))
+    document.define_singleton_method(:fetch) do |key|
+      raise KeyError.new("synthetic missing key", key: key) if key == "schema_version"
+      super(key)
+    end
+    error = assert_raises(Hive::AgentSkills::Manifest::ValidationError) do
+      Hive::AgentSkills::Manifest.parse(document, source: "synthetic")
+    end
+    assert_match(/schema_version/, error.message)
+  end
+
+  def test_coverage_rejects_capability_agent_not_supported_by_manifest
+    manifest = Hive::AgentSkills::Manifest.load
+
+    error = assert_raises(Hive::AgentSkills::Manifest::CoverageError) do
+      manifest.validate_default_coverage!([
+        { surface: "review", agent: "codex", capability: "pr-review-toolkit:review-pr" }
+      ])
+    end
+
+    assert_match(/unsupported for codex/, error.message)
+  end
+
+  def test_loader_rejects_alias_outside_claude_commands_and_agent_package_mismatch
+    base = YAML.safe_load(File.read(Hive::AgentSkills::Manifest.default_path))
+    bad_alias = Marshal.load(Marshal.dump(base))
+    bad_alias["capabilities"].find { |row| row["id"] == "wiki-plan" }
+      .dig("agents", "claude", "alias")["path"] = "commands/plan.md"
+    error = assert_raises(Hive::AgentSkills::Manifest::ValidationError) do
+      Hive::AgentSkills::Manifest.parse(bad_alias, source: "bad alias root")
+    end
+    assert_match(/under \.claude\/commands/, error.message)
+
+    mismatch = Marshal.load(Marshal.dump(base))
+    contract = Marshal.load(Marshal.dump(
+      mismatch["capabilities"].find { |row| row["id"] == "ce-brainstorm" }.dig("agents", "codex")
+    ))
+    mismatch["capabilities"].find { |row| row["id"] == "pr-review-toolkit:review-pr" }["agents"]["codex"] = contract
+    error = assert_raises(Hive::AgentSkills::Manifest::ValidationError) do
+      Hive::AgentSkills::Manifest.parse(mismatch, source: "package agent mismatch")
+    end
+    assert_match(/package pr-review-toolkit does not/, error.message)
+  end
 end

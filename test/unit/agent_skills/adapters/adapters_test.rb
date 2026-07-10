@@ -320,4 +320,131 @@ class AgentSkillAdaptersTest < Minitest::Test
       assert_instance_of Hive::AgentSkills::Adapters::Pi, registry.fetch("pi")
     end
   end
+
+  def test_base_defensive_execution_and_helpers
+    with_tmp_dir do |dir|
+      row = inspection(agent: "pi", capability: "ce-brainstorm", package: "compound-engineering",
+                       health: "missing", bin: "/fake/pi")
+      raising = FakeRunner.new { |_argv, _env, _timeout| raise IOError, "runner exploded" }
+      pi = adapter(Hive::AgentSkills::Adapters::Pi, dir: dir, runner: raising)
+      outcome = pi.execute(pi.plan([ row ]).operations.first)
+      assert_equal "failed", outcome.status
+      assert_match(/runner exploded/, outcome.message)
+
+      abstract = Class.new(Hive::AgentSkills::Adapters::Base)
+      abstract.const_set(:AGENT, "claude")
+      abstract_adapter = adapter(abstract, dir: dir)
+      claude_row = inspection(agent: "claude", capability: "ce-brainstorm", package: "compound-engineering",
+                              health: "missing", bin: "/fake/claude")
+      assert_raises(NotImplementedError) { abstract_adapter.plan([ claude_row ]) }
+
+      codex_native = Hive::AgentSkills::Manifest.load.package("compound-engineering").native_for("codex")
+      codex = adapter(Hive::AgentSkills::Adapters::Codex, dir: dir)
+      assert_equal File.join(dir, ".codex"), codex.send(:config_root, codex_native)
+      nested = { "items" => [ { "name" => "frozen" } ] }
+      codex.send(:deep_freeze, nested)
+      assert nested.dig("items", 0).frozen?
+    end
+  end
+
+  def test_existing_alias_variants_are_not_scheduled_and_preview_drift_fails
+    with_tmp_dir do |dir|
+      row = inspection(agent: "claude", capability: "wiki-plan", package: "llm-wiki",
+                       health: "missing", bin: "/fake/claude")
+      claude = adapter(Hive::AgentSkills::Adapters::Claude, dir: dir)
+      path = File.join(dir, ".claude", "commands", "plan.md")
+      spec = Hive::AgentSkills::Manifest.load.capability("wiki-plan").agent("claude").alias_spec
+      FileUtils.mkdir_p(File.dirname(path))
+      [ Hive::AgentSkills::Manifest.alias_content(spec), "private\n" ].each do |content|
+        File.write(path, content)
+        refute claude.plan([ row ]).operations.any? { |operation| operation.kind == "alias_write" }
+      end
+
+      FileUtils.rm_f(path)
+      operation = claude.plan([ row ]).operations.find { |item| item.kind == "alias_write" }
+      File.write(path, "appeared after preview\n")
+      outcome = claude.execute(operation)
+      assert_match(/changed since preview/, outcome.message)
+
+      # Exercise the execute-time ownership guard independently of the
+      # earlier digest precondition (defense in depth).
+      outcome = claude.send(:execute_alias, operation)
+      assert_match(/user-owned alias/, outcome.message)
+    end
+  end
+
+  def test_command_error_object_is_reported
+    with_tmp_dir do |dir|
+      runner = FakeRunner.new do |_argv, _env, _timeout|
+        Hive::AgentSkills::CommandResult.new(
+          stdout: "", stderr: "", exit_status: nil, error: "spawn denied", timed_out: false
+        )
+      end
+      row = inspection(agent: "pi", capability: "ce-brainstorm", package: "compound-engineering",
+                       health: "missing", bin: "/fake/pi")
+      outcome = adapter(Hive::AgentSkills::Adapters::Pi, dir: dir, runner: runner)
+        .then { |instance| instance.execute(instance.plan([ row ]).operations.first) }
+      assert_match(/spawn denied/, outcome.message)
+    end
+  end
+
+  def test_codex_stale_marketplace_upgrade_unrelated_change_and_new_file_rollback
+    with_tmp_dir do |dir|
+      codex_home = File.join(dir, "codex")
+      config_path = File.join(codex_home, "config.toml")
+      FileUtils.mkdir_p(codex_home)
+      row = inspection(
+        agent: "codex", capability: "ce-brainstorm", package: "compound-engineering",
+        health: "stale", bin: "/fake/codex",
+        native_package: { "id" => "compound-engineering@compound-engineering-plugin", "version" => "2.9.0" },
+        marketplace: { "name" => "compound-engineering-plugin",
+                       "source" => "https://github.com/EveryInc/compound-engineering-plugin.git" }
+      )
+      codex = adapter(Hive::AgentSkills::Adapters::Codex, dir: dir,
+                      environment: { "CODEX_HOME" => codex_home })
+      assert codex.plan([ row ]).operations.any? { |operation| operation.kind == "marketplace_upgrade" }
+
+      File.write(config_path, "# original\n")
+      changing_runner = FakeRunner.new do |_argv, _env, _timeout|
+        File.write(config_path, "# changed by codex\n")
+        command_result
+      end
+      fresh = inspection(
+        agent: "codex", capability: "ce-brainstorm", package: "compound-engineering",
+        health: "missing", bin: "/fake/codex",
+        marketplace: row.native.fetch("marketplace")
+      )
+      changing = adapter(Hive::AgentSkills::Adapters::Codex, dir: dir, runner: changing_runner,
+                         environment: { "CODEX_HOME" => codex_home })
+      outcome = changing.execute(changing.plan([ fresh ]).operations.first)
+      assert_match(/changed comments or unrelated/, outcome.message)
+
+      FileUtils.rm_f(config_path)
+      failing_runner = FakeRunner.new do |_argv, _env, _timeout|
+        FileUtils.mkdir_p(File.dirname(config_path))
+        File.write(config_path, <<~TOML)
+          [marketplaces.compound-engineering-plugin]
+          source_type = "git"
+          source = "https://github.com/EveryInc/compound-engineering-plugin.git"
+        TOML
+        command_result(status: 1, stderr: "offline")
+      end
+      missing_marketplace = inspection(agent: "codex", capability: "ce-brainstorm",
+                                       package: "compound-engineering", health: "missing", bin: "/fake/codex")
+      rolling = adapter(Hive::AgentSkills::Adapters::Codex, dir: dir, runner: failing_runner,
+                        environment: { "CODEX_HOME" => codex_home })
+      rolling.execute(rolling.plan([ missing_marketplace ]).operations.first)
+      refute File.exist?(config_path)
+    end
+  end
+
+  def test_registry_rejects_unknown_agent
+    with_tmp_dir do |dir|
+      registry = Hive::AgentSkills::Adapters::Registry.new(
+        config: Hive::Config::DEFAULTS, project_root: dir, environment: { "HOME" => dir }
+      )
+      error = assert_raises(Hive::ConfigError) { registry.fetch("future") }
+      assert_match(/no agent-skills adapter/, error.message)
+    end
+  end
 end

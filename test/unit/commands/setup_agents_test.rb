@@ -57,9 +57,9 @@ class SetupAgentsCommandTest < Minitest::Test
     )
   end
 
-  def plan(operations: [ operation ], fingerprint: "one")
+  def plan(operations: [ operation ], inspections: [], fingerprint: "one")
     Hive::AgentSkills::ProvisioningPlan.new(
-      inspections: [], operations: operations.freeze, conflicts: [],
+      inspections: inspections.freeze, operations: operations.freeze, conflicts: [],
       filters: { "agents" => [], "skills" => [] }, fingerprint: fingerprint
     )
   end
@@ -198,5 +198,46 @@ class SetupAgentsCommandTest < Minitest::Test
     assert_equal "invalid_config", payload.fetch("classification")
     assert_equal 78, payload.fetch("exit_code")
     assert_empty error.string
+  end
+
+  def test_human_rendering_covers_unmanaged_rows_operation_results_and_config_errors
+    target = Hive::AgentSkills::Target.new(
+      surfaces: [ "review" ], kind: "reviewer", agent: "claude",
+      configured_skill: "private-review", invocation: "/private-review",
+      capability_id: nil, package_id: nil, managed: false
+    )
+    inspection = Hive::AgentSkills::Inspection.new(
+      target: target, expected: {}, native: {}, resolution: {}, health: "missing",
+      severity: "error", explanation: "manual skill missing", remediation: "manual"
+    )
+    preview = plan(inspections: [ inspection ])
+    outcome = Hive::AgentSkills::Adapters::Outcome.new(
+      operation_id: operation.id, agent: "claude", package_id: "compound-engineering",
+      status: "succeeded", message: "installed", exit_status: 0, changed_files: []
+    )
+    result = Hive::AgentSkills::ProvisioningResult.new(
+      preview: preview, consent: { "granted" => true }, operation_results: [ outcome ],
+      final_health: [ inspection ], exit_code: 0, classification: "success"
+    )
+    output = StringIO.new
+    fake = FakeProvisioner.new(plan: preview, result: result)
+
+    assert_equal 0, command(provisioner: fake, input: StringIO.new, output: output, yes: true).call
+    assert_includes output.string, "claude/private-review"
+    assert_includes output.string, "succeeded"
+
+    error = StringIO.new
+    assert_equal 78, command(
+      provisioner: InvalidProvisioner.new, input: StringIO.new, error: error, yes: true
+    ).call
+    assert_includes error.string, "broken effective config"
+  end
+
+  def test_tty_probe_ioerror_is_treated_as_noninteractive
+    input = Object.new
+    input.define_singleton_method(:tty?) { raise IOError, "closed" }
+    fake = FakeProvisioner.new(plan: plan)
+
+    assert_equal 64, command(provisioner: fake, input: input).call
   end
 end

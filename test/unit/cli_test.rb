@@ -174,6 +174,33 @@ class HiveCliTest < Minitest::Test
     end
   end
 
+  def test_setup_agents_loads_project_config_forwards_filters_and_exits
+    loaded = []
+    with_replaced_singleton_method(Hive::Config, :load, lambda { |path|
+      loaded << path
+      { "ok" => true }
+    }) do
+      with_command_new_stub(Hive::Commands::SetupAgents, return_value: 1) do |calls|
+        _out, _err, status = with_captured_exit do
+          Hive::CLI.start([
+            "setup-agents", "--yes", "--json",
+            "--agent", "claude", "codex", "--skill", "ce-brainstorm"
+          ])
+        end
+
+        assert_equal 1, status
+        assert_equal [ Dir.pwd ], loaded
+        assert_equal(
+          {
+            config: { "ok" => true }, project_root: Dir.pwd,
+            yes: true, json: true, agents: %w[claude codex], skills: [ "ce-brainstorm" ]
+          },
+          calls.first.fetch(:kwargs)
+        )
+      end
+    end
+  end
+
   def test_setup_wires_options_and_exits_with_command_status
     with_command_new_stub(Hive::Commands::Setup, return_value: 3) do |calls|
       _out, _err, status = with_captured_exit do

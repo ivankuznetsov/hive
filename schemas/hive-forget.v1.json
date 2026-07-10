@@ -121,12 +121,13 @@
         "error_kind": {
           "type": "string",
           "enum": [
+            "usage",
             "missing_name",
             "unknown_project",
             "config",
             "internal"
           ],
-          "description": "missing_name = NAME positional was empty/whitespace. unknown_project = NAME does not match any registry entry without --if-exists. config = malformed config.yml or missing $HIVE_HOME (exit 78). internal = uncategorised crash (exit 70)."
+          "description": "usage = malformed invocation rejected before command dispatch (exit 64). missing_name = NAME positional was empty/whitespace. unknown_project = NAME does not match any registry entry without --if-exists. config = malformed config.yml or missing $HIVE_HOME (exit 78). internal = uncategorised crash (exit 70)."
         },
         "exit_code": {
           "type": "integer",

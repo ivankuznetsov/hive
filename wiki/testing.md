@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/ci.yml, .github/workflows/release.yml, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-07-09
+updated: 2026-07-10
 tags: [test, minitest, fixtures]
 ---
 
@@ -142,6 +142,11 @@ task default: :test
 | `tui_smoke_test.rb`, `tui_smoke_charm_test.rb` | PTY-driven `bin/hive tui` smokes — boot, first useful paint with a seeded project, clean `q` exit, horizontal and vertical resize handling, and the startup regression gate (a generous 5s bound that catches a revert to the starved-poll loading grid without flaking; the 10s read_until is the hard gate). |
 | `skip_worktree_test.rb` | Verifies hive-state commits on master don't leak into feature worktrees. |
 | `bot/pairing_flow_test.rb` | Telegram pairing flow acceptance — empty-allowlist bootstrap with pairing enabled, unauthorized `/start` reply/throttle, owner approval writing global config and approval notice, reaper-delivered approved DM, reload authorization, and unknown/expired code rejection without allowlist mutation. |
+
+Pre-dispatch JSON integration coverage also exercises variant-aware status,
+web, pairing, bot, and digest error envelopes, including option-value collisions,
+invalid encodings, and `--` terminators that keep later flag-looking positionals
+from changing the selected schema.
 
 ## E2E suite (`test/e2e/`)
 

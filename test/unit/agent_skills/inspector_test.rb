@@ -217,6 +217,46 @@ class AgentSkillsInspectorTest < Minitest::Test
     end
   end
 
+  def test_a_second_inspection_refreshes_native_inventory
+    with_tmp_dir do |dir|
+      bin = File.join(dir, "bin", "claude")
+      executable(bin)
+      install = File.join(
+        dir, "claude", "plugins", "cache",
+        "compound-engineering-plugin", "compound-engineering", "3.19.0"
+      )
+      plugins = []
+      responses = claude_responses(
+        bin: bin,
+        plugins: [],
+        marketplaces: [ { "name" => "compound-engineering-plugin", "repo" => "EveryInc/compound-engineering-plugin" } ]
+      )
+      responses[[ bin, "plugin", "list", "--json" ]] = lambda do |_argv, _env, _timeout|
+        result(stdout: JSON.generate(plugins))
+      end
+      runner = FakeRunner.new(responses)
+      inspector = Hive::AgentSkills::Inspector.new(
+        config: config(bin: bin), project_root: dir, runner: runner,
+        environment: { "HOME" => dir, "PATH" => "", "CLAUDE_CONFIG_DIR" => File.join(dir, "claude") }
+      )
+
+      first = inspector.inspect.find { |row| row.capability_id == "ce-brainstorm" }
+      assert_equal "missing", first.health
+
+      write(File.join(install, "skills", "ce-brainstorm", "SKILL.md"))
+      plugins << {
+        "id" => "compound-engineering@compound-engineering-plugin",
+        "version" => "3.19.0",
+        "enabled" => true,
+        "installPath" => install
+      }
+      second = inspector.inspect.find { |row| row.capability_id == "ce-brainstorm" }
+
+      assert_equal "healthy", second.health
+      assert_equal 4, runner.calls.count { |call| call.fetch(:argv) == [ bin, "plugin", "list", "--json" ] }
+    end
+  end
+
   def test_multiple_capabilities_share_package_evidence_but_keep_rows
     with_tmp_dir do |dir|
       bin = File.join(dir, "claude")

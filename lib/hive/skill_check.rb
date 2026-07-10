@@ -411,7 +411,10 @@ module Hive
 
       def global_npm_root
         out, _err, status = Timeout.timeout(NPM_ROOT_TIMEOUT_SEC) do
-          Open3.capture3("npm", "root", "-g")
+          # npm writes a debug log under ~/.npm even for this read-only query.
+          # Point its cache at the platform null device so doctor/setup previews
+          # cannot modify the user's home merely by resolving Pi packages.
+          Open3.capture3({ "npm_config_cache" => File::NULL }, "npm", "root", "-g")
         end
         return nil unless status.success?
 

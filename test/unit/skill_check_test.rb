@@ -540,7 +540,7 @@ class HiveSkillCheckPiTest < Minitest::Test
     }) do
       assert_equal "/tmp/npm-root", Hive::SkillCheck::Pi.global_npm_root
     end
-    assert_equal [ "npm", "root", "-g" ], captured_cmd
+    assert_equal [ { "npm_config_cache" => File::NULL }, "npm", "root", "-g" ], captured_cmd
   end
 
   def test_manifest_skill_candidates_expands_jailed_globs

@@ -55,6 +55,10 @@ module Hive
       end
 
       def inspect(agents: nil, skills: nil)
+        # Inventory is deduplicated only within one inspection pass. Setup's
+        # post-provision verification must observe fresh native state rather
+        # than the pre-execution cache.
+        @native_cache = {}
         @resolver.resolve(agents: agents, skills: skills).map { |target| inspect_target(target) }.freeze
       end
 

@@ -147,7 +147,11 @@ module Hive
         pid
       end
 
-      Hive::Lock.update_task_lock(@task.folder, "claude_pid" => pid)
+      Hive::Lock.update_task_lock(
+        @task.folder,
+        "claude_pid" => pid,
+        "claude_pid_start_time" => Hive::Lock.process_start_time(pid)
+      )
 
       old_int = trap("INT") { kill_group(pgid) }
       old_term = trap("TERM") { kill_group(pgid) }

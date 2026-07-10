@@ -610,6 +610,14 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "gh", "api", "repos/owner/repo/issues/123/comments", "--input", "payload.json"
       assert_stubbed env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "--input", "payload.json"
       assert_stubbed env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-F", "q=@secret"
+      [
+        [ "api", "--method=POST", "repos/owner/repo/dispatches" ],
+        [ "api", "-XPOST", "repos/owner/repo/dispatches" ],
+        [ "api", "-X=POST", "repos/owner/repo/dispatches" ],
+        [ "api", "repos/owner/repo/issues/123/comments", "-fbody=hi" ],
+        [ "api", "repos/owner/repo/issues/123/comments", "--raw-field=body=hi" ],
+        [ "auth", "status", "--show-token=true" ]
+      ].each { |args| assert_stubbed env, "gh", *args }
       assert_stubbed env, "gh", "workflow", "run", "release.yml"
       assert_stubbed env, "gh", "totally-new-write-command", "arg"
       assert_stubbed env, "gh", "repo", "view", "--web"
@@ -704,6 +712,9 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_passes env, "gh", "api", "-ip", "shadow-cat", "repos/owner/repo"
       assert_passes env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-f", "state=open"
       assert_passes env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-F", "state=open"
+      %w[--method=GET -XGET -X=GET].each do |method|
+        assert_passes env, "gh", "api", method, "repos/owner/repo/issues"
+      end
       # The safe positional forms must still reach real gh, so the new positional
       # gate does not over-block: a bare `OWNER/REPO` slug (one slash) on `repo view`,
       # a numeric operand on `pr view`, and a slash-bearing branch ref the pr-URL rule

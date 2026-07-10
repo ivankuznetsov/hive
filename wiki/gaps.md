@@ -178,7 +178,7 @@ evidence closing the following June 16 gaps.
 
 ## Release install follow-ups
 
-Latest refresh (2026-07-10): v0.4.0 release-prep source is synchronized in
+Latest refresh (2026-07-10): v0.4.1 release-prep source is synchronized in
 `lib/hive.rb`, both lockfiles, README/install URLs, the changelog, and the
 release-facing wiki pages. This source commit does not itself prove the public
 tag, signed gem/assets, Homebrew/AUR updates, or multi-architecture hivebox
@@ -187,7 +187,7 @@ Historical commit `54fd3455` still provides commit-message evidence for the
 native arm64 GHCR smoke against `ghcr.io/ivankuznetsov/hivebox:0.3.1`.
 Dependency lock uncertainty is unchanged: the root bundle has
 `concurrent-ruby` 1.3.7 and Brakeman 8.0.5, while `web/Gemfile.lock` resolves
-`concurrent-ruby` 1.3.6 and Brakeman 8.0.4; v0.4.0 synchronizes only the local
+`concurrent-ruby` 1.3.6 and Brakeman 8.0.4; v0.4.1 synchronizes only the local
 `hive-cli` path-gem version in that independently resolved web bundle.
 
 1. **Release tag trust remains the main release-channel hardening gap.** Homebrew and AUR publishing are implemented and public install docs now route macOS users to the tap and Arch users to `yay -S hive-bin` (see ADR-032 in [[decisions]], `docs/RELEASING.md`, `README.md`, and `install.md`). The remaining trust gap is that release automation signs and publishes whatever a `vX.Y.Z` tag points at; a GitHub `v*` tag-protection ruleset and/or signed git-tag verification remains the compensating control to record before considering the release chain fully hardened.

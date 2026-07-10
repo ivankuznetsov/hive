@@ -2,6 +2,25 @@
 
 All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with terse bullets — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
+## 0.4.1
+
+- Fixed Grok auth overrides so explicit `GROK_AUTH_PATH` and `GROK_HOME`
+  values must be absolute, including API-key flows. This prevents preflight and
+  task-worktree processes from resolving different credential locations. (#714)
+- Fixed daemon reloads so updated project/global concurrency limits take effect
+  immediately and atomically; invalid reloads keep the last valid limits. (#716)
+- Fixed pre-dispatch `--json` usage failures to emit the command-specific
+  published schema instead of a generic or mismatched envelope. (#709)
+- Hardened babysitter dry runs: the prompt now treats stderr skip markers as
+  authoritative, and the optional skip log refuses group/world-readable or
+  writable files before appending sensitive command arguments. (#703, #710)
+- Hardened `hive-eval` against inherited Rake dry-run options, incomplete or
+  cross-run scenario reports, unsafe report directories, and non-atomic report
+  publication. (#711)
+- Fixed `hive drop` so verified descendants in nested process groups are
+  terminated with PID-reuse guards; incomplete process discovery fails safely
+  instead of claiming a complete tree cleanup. (#701)
+
 ## 0.4.0
 
 - Added xAI Grok as a built-in agent backend, with headless streaming output,

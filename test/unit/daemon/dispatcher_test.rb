@@ -664,6 +664,52 @@ class HiveDaemonDispatcherTest < Minitest::Test
                  "SIGHUP reload must push the reloaded digest config into the scheduler")
   end
 
+  def test_reload_config_reconfigures_concurrency_limits_in_place
+    dispatcher, _sup, controller, logger, _mw = make_dispatcher
+    controller.record_dispatch(
+      pid: 123,
+      project: "hive-bench",
+      slug: "existing-run",
+      stage: "2-generate",
+      command: "hive run existing-run",
+      started_at: T0,
+      state_file_mtime: T0 - 1
+    )
+    assert_equal :ok,
+                 controller.can_dispatch?(project: "hive-bench", slug: "next-run", now: T0)
+
+    new_cfg = Hive::Config::DEFAULTS.fetch("daemon").merge(
+      "max_concurrent_runs" => 2,
+      "max_concurrent_per_project" => 1,
+      "max_runs_per_day_per_project" => 7,
+      "max_concurrent_patrol_scans" => 2
+    )
+    with_replaced_singleton_method(Hive::Config, :load_global_daemon, -> { new_cfg }) do
+      dispatcher.send(:reload_config!)
+    end
+
+    assert_same controller, dispatcher.controller,
+                "reload must retain the controller's in-flight state"
+    assert_equal 2, controller.max_concurrent_runs
+    assert_equal 1, controller.max_concurrent_per_project
+    assert_equal 7, controller.max_runs_per_day_per_project
+    assert_equal 2, controller.max_concurrent_patrol_scans
+    assert_equal :project_cap,
+                 controller.can_dispatch?(project: "hive-bench", slug: "next-run", now: T0),
+                 "the reloaded per-project cap must apply immediately"
+    reload_event = logger.events.find { |name, _attrs| name == :config_reloaded }
+    assert_equal(
+      {
+        max_concurrent_runs: 2,
+        max_concurrent_per_project: 1,
+        max_runs_per_day_per_project: 7,
+        max_concurrent_patrol_scans: 2
+      },
+      reload_event&.last,
+      "the reload event must expose the effective limits to machine consumers"
+    )
+  end
+
   def test_answer_digest_scheduler_dispatches_global_answer_digest_without_project_gate
     dispatcher, sup, _ctrl, logger, _mw, _patrol, _digest, answer_digest = make_dispatcher(
       rows: [],
@@ -2453,17 +2499,47 @@ def test_project_enabled_returns_false_for_missing_or_invalid_project_config
 end
 
 def test_reload_config_error_logs_and_keeps_previous_config
-  dispatcher, _sup, _ctrl, logger, _mw = make_dispatcher
+  dispatcher, _sup, controller, logger, _mw = make_dispatcher
   original_cfg = dispatcher.instance_variable_get(:@daemon_cfg)
+  original_limits = [
+    controller.max_concurrent_runs,
+    controller.max_concurrent_per_project,
+    controller.max_runs_per_day_per_project,
+    controller.max_concurrent_patrol_scans
+  ]
+  controller.record_dispatch(
+    pid: 123,
+    project: "hive-bench",
+    slug: "existing-run",
+    stage: "2-generate",
+    command: "hive run existing-run",
+    started_at: T0,
+    state_file_mtime: T0 - 1
+  )
 
-  with_replaced_singleton_method(Hive::Config, :load_global_daemon, -> { raise Hive::ConfigError, "broken yaml" }) do
+  with_replaced_singleton_method(Hive::Config, :load_global_daemon, lambda {
+    raise Hive::ConfigError, "daemon.max_concurrent_runs must be an integer; got nil"
+  }) do
     dispatcher.send(:reload_config!)
   end
 
   assert_same original_cfg, dispatcher.instance_variable_get(:@daemon_cfg)
+  assert_same controller, dispatcher.controller,
+              "an invalid reload must retain the live controller object"
+  assert_equal original_limits, [
+    controller.max_concurrent_runs,
+    controller.max_concurrent_per_project,
+    controller.max_runs_per_day_per_project,
+    controller.max_concurrent_patrol_scans
+  ]
+  assert controller.running_task?(project: "hive-bench", slug: "existing-run"),
+         "an invalid reload must retain in-flight accounting"
   fatal = logger.events.find { |(name, attrs)| name == :fatal && attrs[:message].include?("config reload failed") }
   refute_nil fatal
-  assert_includes fatal[1][:message], "broken yaml"
+  assert_equal true, fatal[1][:keeping_previous]
+  assert_includes fatal[1][:message], "max_concurrent_runs"
+  refute logger.events.any? { |name, _attrs| name == :config_reloaded },
+         "an invalid reload must not emit a success event"
 end
 
 def test_interruptible_sleep_stops_after_shutdown_request

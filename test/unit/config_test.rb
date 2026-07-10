@@ -3309,6 +3309,25 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_load_global_daemon_rejects_null_concurrency_limits
+    %w[
+      max_concurrent_runs
+      max_concurrent_per_project
+      max_concurrent_patrol_scans
+      max_runs_per_day_per_project
+    ].each do |key|
+      with_tmp_global_config do |home|
+        File.write(
+          File.join(home, "config.yml"),
+          { "registered_projects" => [], "daemon" => { key => nil } }.to_yaml
+        )
+
+        err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_daemon }
+        assert_match(/daemon\.#{Regexp.escape(key)}.*integer >= 1/, err.message)
+      end
+    end
+  end
+
   def test_load_global_daemon_rejects_non_hash_daemon_block
     with_tmp_global_config do |home|
       File.write(File.join(home, "config.yml"), <<~YAML)

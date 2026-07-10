@@ -28,6 +28,10 @@ module Hive
       File.join(state_home, ".task-counter.lock")
     end
 
+    def honeycomb_cache_path(repository)
+      File.join(cache_home, "honeycomb", repository.to_s.gsub("/", "--"))
+    end
+
     def bin_home
       # bin_home intentionally ignores HIVE_HOME — install.sh places
       # the `hive`/`hv` symlinks under XDG_BIN_HOME (or ~/.local/bin),

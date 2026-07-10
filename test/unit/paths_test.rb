@@ -51,6 +51,19 @@ class PathsTest < Minitest::Test
     end
   end
 
+  def test_honeycomb_cache_path_is_deterministic_under_xdg_cache_home
+    with_tmp_dir do |dir|
+      with_env(
+        "HOME" => File.join(dir, "home"),
+        "HIVE_HOME" => nil,
+        "XDG_CACHE_HOME" => File.join(dir, "cache")
+      ) do
+        assert_equal File.join(dir, "cache", "hive", "honeycomb", "owner--registry"),
+                     Hive::Paths.honeycomb_cache_path("owner/registry")
+      end
+    end
+  end
+
   def test_legacy_registry_migrates_once_to_xdg_config
     with_tmp_dir do |dir|
       home = File.join(dir, "home")

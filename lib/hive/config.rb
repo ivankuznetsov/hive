@@ -17,6 +17,9 @@ module Hive
       "default_workflow" => "coding",
       "dependency_gate_stage" => "8-finalize", # coding-scoped: default dependency gate is the coding finalize stage
       "project_name" => nil,
+      "honeycomb" => {
+        "repository" => "ivankuznetsov/honeycomb"
+      },
       # Project-wide default for per-stage permission scoping. "yolo"
       # preserves today's launch behavior; narrower scopes are opt-in.
       "permissions" => Hive::PermissionScope::YOLO,
@@ -1642,6 +1645,7 @@ module Hive
       validate_permissions!(cfg, source_path)
       validate_dependency_gate_stage!(cfg, source_path)
       validate_brainstorm_runtime!(cfg, source_path)
+      validate_honeycomb!(cfg, source_path)
       validate_review_attempts!(cfg, source_path)
       validate_daemon!(cfg, source_path)
       validate_web_config!(cfg, source_path)
@@ -1684,7 +1688,18 @@ module Hive
       answer_digest
       bot
       rebase
+      honeycomb
     ].freeze
+
+    def validate_honeycomb!(cfg, source_path)
+      repository = cfg.dig("honeycomb", "repository")
+      return if repository.is_a?(String) && repository.match?(/\A[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\z/) &&
+                !repository.end_with?(".git")
+
+      raise ConfigError,
+            "honeycomb.repository in #{describe_source(source_path)} must be an owner/repository slug; " \
+            "got #{repository.inspect}"
+    end
 
     def validate_hash_shaped_keys!(cfg, source_path)
       HASH_SHAPED_KEYS.each do |key|

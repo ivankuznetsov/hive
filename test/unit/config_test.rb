@@ -20,10 +20,37 @@ class ConfigTest < Minitest::Test
       assert_equal 1800, cfg["timeout_sec"]["digest"]
       assert_equal "8-finalize", cfg["dependency_gate_stage"]
       assert_equal "coding", cfg["default_workflow"]
+      assert_equal "ivankuznetsov/honeycomb", cfg.dig("honeycomb", "repository")
       assert_equal true, cfg.dig("daemon", "auto_retry", "enabled")
       assert_nil cfg.dig("review", "adhoc", "reviewers")
       assert_equal false, cfg.dig("review", "adhoc", "fix")
       assert_equal dir, cfg["project_root"]
+    end
+  end
+
+  def test_load_accepts_honeycomb_repository_override
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        honeycomb:
+          repository: example/registry
+      YAML
+
+      assert_equal "example/registry", Hive::Config.load(dir).dig("honeycomb", "repository")
+    end
+  end
+
+  def test_load_rejects_malformed_honeycomb_repository
+    [ "missing-owner", "owner/repo/extra", "https://github.com/owner/repo", "owner/repo.git", 42 ].each do |value|
+      with_tmp_dir do |dir|
+        FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+        File.write(File.join(dir, ".hive-state", "config.yml"), YAML.dump(
+          "honeycomb" => { "repository" => value }
+        ))
+
+        error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+        assert_match(/honeycomb\.repository.*owner\/repository/, error.message)
+      end
     end
   end
 

@@ -100,6 +100,37 @@ module Hive
       :created
     end
 
+    # Create a deterministic branch from one exact, already-present commit.
+    # Unlike create!, this path performs no fetch and has no fallback to a
+    # moving branch name; architecture patrol uses it to preserve the analysis
+    # snapshot while keeping the registered checkout untouched.
+    def create_exact!(branch_name, base_sha:)
+      FileUtils.mkdir_p(File.dirname(path))
+      expected = self.class.run_materialize_git!(
+        @project_root, "rev-parse", "--verify", "#{base_sha}^{commit}"
+      ).strip
+
+      if exists?
+        checked_out = self.class.run_materialize_git!(path, "branch", "--show-current").strip
+        raise WorktreeError, "worktree #{path} is not on branch #{branch_name}" unless checked_out == branch_name
+
+        assert_exact_branch_base!(branch_name, expected)
+        return :existing
+      end
+
+      _, _, branch_exists = Open3.capture3(
+        "git", "-C", @project_root, "show-ref", "--verify", "refs/heads/#{branch_name}"
+      )
+      args = if branch_exists.success?
+               assert_exact_branch_base!(branch_name, expected)
+               [ "worktree", "add", path, branch_name ]
+      else
+               [ "worktree", "add", path, "-b", branch_name, expected ]
+      end
+      self.class.run_materialize_git!(@project_root, *args)
+      :created
+    end
+
     def remove!(path: self.path, force: false)
       args = [ "worktree", "remove" ]
       args << "--force" if force
@@ -340,6 +371,20 @@ module Hive
     end
 
     private
+
+    def assert_exact_branch_base!(branch_name, expected)
+      head = self.class.run_materialize_git!(
+        @project_root, "rev-parse", "refs/heads/#{branch_name}"
+      ).strip
+      unless self.class.run_materialize_git!(
+        @project_root, "merge-base", "--is-ancestor", expected, head
+      ).is_a?(String)
+        raise WorktreeError, "branch #{branch_name} does not descend from pinned commit #{expected}"
+      end
+      head
+    rescue WorktreeError
+      raise WorktreeError, "branch #{branch_name} does not descend from pinned commit #{expected}"
+    end
 
     # Detect a stacked placeholder: a same-named branch a prior dependency
     # run created at the default base but left no real work on. With a stacked

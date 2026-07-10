@@ -159,6 +159,21 @@ class RefactorPatrolThesisNormalizerTest < Minitest::Test
     end
   end
 
+  def test_agent_cannot_override_mapper_owned_feature_boundary
+    raw = valid_raw_thesis.merge(
+      "feature_boundary" => {
+        "owned_files" => [ "lib/checkout.rb", "lib/unrelated.rb" ],
+        "entrypoints" => [ "bin/other" ]
+      }
+    )
+
+    thesis = normalize(raw)
+
+    assert_equal [ "lib/checkout.rb" ], thesis.feature_boundary.fetch("owned_files")
+    assert_equal [ "lib/checkout.rb" ], thesis.feature_boundary.fetch("entrypoints")
+    assert_includes thesis.risk.fetch("flags"), "boundary_override_attempt"
+  end
+
   def test_v2_schema_strictly_rejects_signal_and_value_on_evidence
     thesis = normalize(valid_raw_thesis)
     payload = thesis.to_h

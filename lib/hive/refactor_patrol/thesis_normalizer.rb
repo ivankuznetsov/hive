@@ -50,10 +50,12 @@ module Hive
         risk = raw["risk"].is_a?(Hash) ? raw["risk"] : {}
         required_validation = raw["required_validation"].is_a?(Hash) ? raw["required_validation"] : {}
         raw_feature = raw["feature"].is_a?(Hash) ? raw["feature"]["id"] : raw["feature"]
+        raw_boundary = raw["feature_boundary"].is_a?(Hash) ? raw["feature_boundary"] : {}
         feature_hotspot = normalize_feature_hotspot(leverage)
         drivers, invalid_drivers = normalize_drivers(raw["expected_leverage"])
         normalized_risk = default_risk(risk)
         normalized_risk["flags"] |= [ "invalid_leverage_driver" ] if invalid_drivers
+        normalized_risk["flags"] |= [ "boundary_override_attempt" ] if boundary_override?(boundary, raw_boundary)
 
         {
           "id" => raw["id"].to_s.empty? ? "#{feature.id}-refactor-#{idx + 1}" : raw["id"].to_s,
@@ -63,7 +65,10 @@ module Hive
           "cost" => raw["cost"].to_s,
           "evidence" => normalize_evidence(feature, Array(raw["evidence"])),
           "proposed_refactor" => raw["proposed_refactor"].to_s.empty? ? raw["refactor"].to_s : raw["proposed_refactor"].to_s,
-          "feature_boundary" => boundary.merge(raw["feature_boundary"].is_a?(Hash) ? raw["feature_boundary"] : {}),
+          # Mapper ownership is authoritative. Agent output may describe risk,
+          # but it can never broaden or replace the files that the fixer is
+          # permitted to touch.
+          "feature_boundary" => boundary,
           "feature_hotspot" => feature_hotspot,
           # The model identifies which language-neutral hotspot drivers the
           # proposal relieves and explains the mechanism. Hive ignores any
@@ -93,6 +98,16 @@ module Hive
           "signals" => numeric_signal_hash(source["signals"]),
           "normalized" => numeric_signal_hash(source["normalized"])
         }
+      end
+
+      def boundary_override?(canonical, candidate)
+        return false if candidate.empty?
+
+        normalized = {
+          "owned_files" => Array(candidate["owned_files"]),
+          "entrypoints" => Array(candidate["entrypoints"])
+        }
+        normalized != canonical
       end
 
       def normalize_drivers(expected_leverage)

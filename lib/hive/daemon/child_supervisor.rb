@@ -43,8 +43,8 @@ module Hive
         @dry_run = dry_run
         # Optional injection point: tests pass a lambda taking (project, slug)
         # → an absolute path to write the child's combined stdout/stderr.
-        # Falls back to a tmp-style scheme using the project's hive-state
-        # directory if the dispatcher doesn't supply one.
+        # Falls back to a tmp-style scheme if the dispatcher does not supply
+        # Hive's durable state directory for this spawn.
         @log_dir_for_task = log_dir_for_task
         # R-02 per-verb wall-clock timeout. `default_timeout_sec` applies
         # to every spawned child unless `verb_timeouts[verb]` overrides
@@ -92,7 +92,7 @@ module Hive
       # ConcurrencyController bookkeeping stays consistent across both
       # modes.
       def spawn(command_string:, project:, slug:, stage:,
-                hive_state_path: nil, state_file_path: nil, dry_run: nil,
+                log_state_path: nil, state_file_path: nil, dry_run: nil,
                 request_id: nil)
         effective_dry_run = dry_run.nil? ? @dry_run : dry_run
 
@@ -120,7 +120,7 @@ module Hive
         end
 
         log_path = log_path_for(project: project, slug: slug,
-                                hive_state_path: hive_state_path)
+                                log_state_path: log_state_path)
         FileUtils.mkdir_p(File.dirname(log_path))
         # Open with truncation ("w") so each child run starts a fresh
         # per-task log; logs from prior runs are not preserved here —
@@ -299,15 +299,16 @@ module Hive
         )
       end
 
-      def log_path_for(project:, slug:, hive_state_path:)
+      def log_path_for(project:, slug:, log_state_path:)
         return @log_dir_for_task.call(project, slug) if @log_dir_for_task
 
-        # Fallback: write under <hive_state_path>/logs/<slug>/. The
-        # supervisor doesn't know hive-state paths globally; the
-        # dispatcher passes one when it has it. If nothing's available
-        # we drop into a tmp directory keyed by PID so the file is
-        # discoverable but doesn't pollute project state.
-        base = hive_state_path ? File.join(hive_state_path, "logs", slug) : nil
+        # The dispatcher supplies Hive's durable XDG state directory so
+        # captures neither depend on a quota-limited tmpdir nor dirty the
+        # project's tracked hive-state worktree. Standalone callers without
+        # that context retain the historical tmpdir fallback.
+        base = if log_state_path
+          File.join(log_state_path, "logs", "daemon-children", project.to_s, slug.to_s)
+        end
         base ||= File.join(Dir.tmpdir, "hive-daemon-logs", project.to_s, slug.to_s)
         ts = Time.now.utc.strftime("%Y%m%dT%H%M%SZ")
         File.join(base, "daemon-run-#{ts}-#{Process.pid}.log")

@@ -47,6 +47,31 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
     end
   end
 
+  def test_spawn_with_log_state_writes_log_outside_project_git_state
+    with_tmp_dir do |dir|
+      state_home = File.join(dir, "state-home")
+      with_tmp_git_repo do |project_state|
+        sup = make
+        sup.spawn(
+          command_string: "hive run slug-a --exit-code 0",
+          project: "p1", slug: "slug-a", stage: "6-review",
+          log_state_path: state_home
+        )
+
+        completed = wait_for_completion(sup, max_attempts: 50)
+        assert_equal 1, completed.size
+        assert_equal 0, completed.first.exit_code
+
+        logs = Dir.glob(File.join(state_home, "logs", "daemon-children", "p1", "slug-a", "daemon-run-*.log"))
+        assert_equal 1, logs.size
+        assert_includes File.read(logs.first), "[hive-daemon]"
+
+        status = run!("git", "-C", project_state, "status", "--porcelain")
+        assert_empty status
+      end
+    end
+  end
+
   def test_reap_all_returns_empty_when_nothing_running
     sup = make
     assert_equal [], sup.reap_all

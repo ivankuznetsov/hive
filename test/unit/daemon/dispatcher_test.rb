@@ -54,14 +54,14 @@ class HiveDaemonDispatcherTest < Minitest::Test
     end
 
     def spawn(command_string:, project:, slug:, stage:,
-              hive_state_path: nil, state_file_path: nil, dry_run: nil,
+              log_state_path: nil, state_file_path: nil, dry_run: nil,
               request_id: nil)
       pid = @next_pid
       @next_pid += 1
       @spawned << {
         pid: pid, command: command_string, project: project, slug: slug,
         stage: stage, state_file_path: state_file_path, dry_run: dry_run,
-        request_id: request_id
+        request_id: request_id, log_state_path: log_state_path
       }
       pid
     end
@@ -309,7 +309,12 @@ class HiveDaemonDispatcherTest < Minitest::Test
   def test_advance_action_dispatches_workflow_verb
     rows = [ row(action: "ready_to_plan", command: "hive plan s1 --from 2-brainstorm") ]
     dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(rows: rows)
-    dispatcher.tick(now: T0)
+    with_tmp_dir do |state_home|
+      with_replaced_singleton_method(Hive::Paths, :state_home, -> { state_home }) do
+        dispatcher.tick(now: T0)
+      end
+      assert_equal state_home, sup.spawned.first[:log_state_path]
+    end
     assert_equal 1, sup.spawned.size
     assert_equal "hive plan s1 --from 2-brainstorm", sup.spawned.first[:command]
     assert events_include?(logger, :dispatched)
@@ -2722,6 +2727,7 @@ end
         assert_equal 1, sup.spawned.size
         assert_equal "hive run s1 --json", sup.spawned.first[:command]
         assert_equal "R1", sup.spawned.first[:request_id]
+        assert_equal Hive::Paths.state_home, sup.spawned.first[:log_state_path]
       ensure
         restore_find_project!
       end

@@ -3,7 +3,7 @@ title: Hive::Daemon
 type: module
 source: lib/hive/daemon/
 created: 2026-05-06
-updated: 2026-07-01
+updated: 2026-07-10
 tags: [daemon, module, automation, dispatcher]
 ---
 
@@ -19,7 +19,7 @@ the safety-relevant decisions are unit-testable without forking.
 | Module | File | Purpose |
 |--------|------|---------|
 | `Hive::Daemon::Policy` | `lib/hive/daemon/policy.rb` | Pure switch over `Hive::Schemas::TaskActionKind`, stage/workflow context, mtime debounce, and `answers_pending` → `:dispatch` / `:poll_for_merge` / `:wait_for_debounce` / `:wait_for_answers` / `:record_baseline` / `:skip`. Source of truth for "should this row fire a child?". |
-| `Hive::Daemon::ConcurrencyController` | `lib/hive/daemon/concurrency_controller.rb` | In-memory budget gate: caps (global / per-project / per-day rate), WRONG_STAGE protective backoff, transient backoff schedule, quarantine, dropped projects, last-dispatched mtime tracking. SUCCESS exits do not cool down; the next stage may dispatch immediately. The last-dispatched mtime map is write-through-persisted via an injected `DispatchBaselines` store so it survives restart (see "Persisted dispatch baselines" below); everything else is intentionally in-memory. |
+| `Hive::Daemon::ConcurrencyController` | `lib/hive/daemon/concurrency_controller.rb` | In-memory budget gate: caps (global / per-project / per-day rate plus per-project patrol scans), WRONG_STAGE protective backoff, transient backoff schedule, quarantine, dropped projects, last-dispatched mtime tracking. `Dispatcher#reload_config!` applies reloaded limits through `update_limits` on this same object so SIGHUP changes admission immediately without discarding runtime state. SUCCESS exits do not cool down; the next stage may dispatch immediately. The last-dispatched mtime map is write-through-persisted via an injected `DispatchBaselines` store so it survives restart (see "Persisted dispatch baselines" below); everything else is intentionally in-memory. |
 | `Hive::Daemon::DispatchBaselines` | `lib/hive/daemon/dispatch_baselines.rb` | Crash-safe JSON store for the `[project, slug] → state_file_mtime` baseline map (`daemon_dispatch_baselines.json` under the state home). Atomic write + fail-closed load; mirrors `Hive::UpdateCheck::State`. Stops answered `needs_input` tasks being re-stranded across a daemon restart. |
 | `Hive::Daemon::StatusConsumer` | `lib/hive/daemon/status_consumer.rb` | Wraps `Open3.capture3("hive status --json")`; returns typed `Row` records including `workflow`. Validates the envelope SHAPE (missing/wrong `schema`, `ok=false`) as a hard `Result(ok: false)`, but tolerates schema-VERSION skew (see "Forward-tolerant schema-version skew" below) so a binary/process version mismatch never crashes a tick. Coerces `tasks[].live_task_lock` to strict boolean so daemon consumers can detect a live runner before a Claude PID is attached, and carries marker attrs so recovery code can preserve `REVIEW_WORKING phase/pass` when rewriting markers. |
 | `Hive::Daemon::StatusReport` | `lib/hive/daemon/status_report.rb` | Shared `hive-daemon-status` producer for `hive daemon status --json` and hivebox. Builds the PID/service/binary/update-nudge envelope as a plain hash, exposes `running_state`, `payload`, and web-safe `safe_payload`, bounds `installed_binary --version` probes to 10s, and owns `BINARY_DRIFT_STATES` / `BINARY_DRIFT_ACTIONABLE` so the CLI producer and web repair affordance read the same enum source. |

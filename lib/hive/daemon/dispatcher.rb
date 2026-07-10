@@ -1828,6 +1828,20 @@ module Hive
           "answer_digest" => @answer_digest_cfg
         }
         @update_check_enabled = @update_cfg.fetch("check", true)
+        @controller.update_limits(
+          max_concurrent_runs: @daemon_cfg.fetch(
+            "max_concurrent_runs", @controller.max_concurrent_runs
+          ),
+          max_concurrent_per_project: @daemon_cfg.fetch(
+            "max_concurrent_per_project", @controller.max_concurrent_per_project
+          ),
+          max_runs_per_day_per_project: @daemon_cfg.fetch(
+            "max_runs_per_day_per_project", @controller.max_runs_per_day_per_project
+          ),
+          max_concurrent_patrol_scans: @daemon_cfg.fetch(
+            "max_concurrent_patrol_scans", @controller.max_concurrent_patrol_scans
+          )
+        )
         # Reconfigure the digest scheduler in place so enabling the digest
         # (or retuning max_catchup_days) via config + SIGHUP takes effect
         # within one tick, consistent with the rest of the daemon's reload
@@ -1892,7 +1906,13 @@ module Hive
           dry_run: @dry_run
         )
         @enabled_cache.clear
-        @logger.event(:config_reloaded)
+        @logger.event(
+          :config_reloaded,
+          max_concurrent_runs: @controller.max_concurrent_runs,
+          max_concurrent_per_project: @controller.max_concurrent_per_project,
+          max_runs_per_day_per_project: @controller.max_runs_per_day_per_project,
+          max_concurrent_patrol_scans: @controller.max_concurrent_patrol_scans
+        )
       rescue Hive::ConfigError => e
         # If the operator broke the config mid-run, log and keep
         # running on the old values rather than crashing.

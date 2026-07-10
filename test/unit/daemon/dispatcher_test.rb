@@ -664,6 +664,52 @@ class HiveDaemonDispatcherTest < Minitest::Test
                  "SIGHUP reload must push the reloaded digest config into the scheduler")
   end
 
+  def test_reload_config_reconfigures_concurrency_limits_in_place
+    dispatcher, _sup, controller, logger, _mw = make_dispatcher
+    controller.record_dispatch(
+      pid: 123,
+      project: "hive-bench",
+      slug: "existing-run",
+      stage: "2-generate",
+      command: "hive run existing-run",
+      started_at: T0,
+      state_file_mtime: T0 - 1
+    )
+    assert_equal :ok,
+                 controller.can_dispatch?(project: "hive-bench", slug: "next-run", now: T0)
+
+    new_cfg = Hive::Config::DEFAULTS.fetch("daemon").merge(
+      "max_concurrent_runs" => 2,
+      "max_concurrent_per_project" => 1,
+      "max_runs_per_day_per_project" => 7,
+      "max_concurrent_patrol_scans" => 2
+    )
+    with_replaced_singleton_method(Hive::Config, :load_global_daemon, -> { new_cfg }) do
+      dispatcher.send(:reload_config!)
+    end
+
+    assert_same controller, dispatcher.controller,
+                "reload must retain the controller's in-flight state"
+    assert_equal 2, controller.max_concurrent_runs
+    assert_equal 1, controller.max_concurrent_per_project
+    assert_equal 7, controller.max_runs_per_day_per_project
+    assert_equal 2, controller.max_concurrent_patrol_scans
+    assert_equal :project_cap,
+                 controller.can_dispatch?(project: "hive-bench", slug: "next-run", now: T0),
+                 "the reloaded per-project cap must apply immediately"
+    reload_event = logger.events.find { |name, _attrs| name == :config_reloaded }
+    assert_equal(
+      {
+        max_concurrent_runs: 2,
+        max_concurrent_per_project: 1,
+        max_runs_per_day_per_project: 7,
+        max_concurrent_patrol_scans: 2
+      },
+      reload_event&.last,
+      "the reload event must expose the effective limits to machine consumers"
+    )
+  end
+
   def test_answer_digest_scheduler_dispatches_global_answer_digest_without_project_gate
     dispatcher, sup, _ctrl, logger, _mw, _patrol, _digest, answer_digest = make_dispatcher(
       rows: [],

@@ -269,6 +269,17 @@ documentation. Two boundaries remain intentionally open:
   Grok usage unavailable rather than storing fake zeroes. Add a captured-stream
   fixture and extractor mapping if a future CLI version publishes usage.
 
+## Daemon concurrency-limit reload live verification (2026-07-10)
+
+The pre-fix defect was reproduced live: after changing
+`max_concurrent_per_project` from 3 to 4 and running `hive daemon reload`, the
+daemon logged `config_reloaded` but continued returning `project_cap` at three
+live project runs. Focused tests now pin in-place refresh of all four
+controller-owned limits while preserving controller identity and existing
+in-flight accounting. A live daemon running a release containing the fix has
+not yet repeated the same 3→4 reload and dispatched the fourth task without a
+restart; capture that daemon-log sequence after deployment to close this gap.
+
 ## Areas the wiki could be expanded
 
 - `wiki/troubleshooting.md` — currently lives only in README's Troubleshooting section. Could be lifted into a dedicated page once the project sees real-world failures.

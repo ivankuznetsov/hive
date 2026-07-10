@@ -2322,8 +2322,8 @@ module Hive
 
       DAEMON_NUMERIC_BOUNDS.each do |key, min|
         value = daemon[key]
-        next if value.nil?
-
+        # Validation runs after daemon defaults are merged, so nil here is
+        # an explicit YAML null override rather than an omitted optional key.
         unless value.is_a?(Integer) && value >= min
           raise ConfigError,
                 "daemon.#{key} in #{describe_source(source_path)} must be an integer " \

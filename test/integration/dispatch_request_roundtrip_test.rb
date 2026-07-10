@@ -44,7 +44,7 @@ class HiveDispatchRequestRoundtripTest < Minitest::Test
     end
 
     def spawn(command_string:, project:, slug:, stage:,
-              hive_state_path: nil, state_file_path: nil, dry_run: nil, request_id: nil)
+              log_state_path: nil, state_file_path: nil, dry_run: nil, request_id: nil)
       pid = @next_pid
       @next_pid += 1
       @spawned << {

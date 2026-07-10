@@ -47,13 +47,13 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
     end
   end
 
-  def test_spawn_with_log_state_writes_log_outside_project_git_state
+  def test_spawn_with_log_state_replaces_log_outside_project_git_state
     with_tmp_dir do |dir|
       state_home = File.join(dir, "state-home")
       with_tmp_git_repo do |project_state|
         sup = make
         sup.spawn(
-          command_string: "hive run slug-a --exit-code 0",
+          command_string: "hive run slug-a --exit-code 0 --stdout-text first-run",
           project: "p1", slug: "slug-a", stage: "6-review",
           log_state_path: state_home
         )
@@ -62,9 +62,23 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
         assert_equal 1, completed.size
         assert_equal 0, completed.first.exit_code
 
-        logs = Dir.glob(File.join(state_home, "logs", "daemon-children", "p1", "slug-a", "daemon-run-*.log"))
-        assert_equal 1, logs.size
-        assert_includes File.read(logs.first), "[hive-daemon]"
+        log_path = File.join(state_home, "logs", "daemon-children", "p1", "slug-a", "daemon-run.log")
+        assert File.file?(log_path)
+        assert_includes File.read(log_path), "first-run"
+
+        sup.spawn(
+          command_string: "hive run slug-a --exit-code 0 --stdout-text second-run",
+          project: "p1", slug: "slug-a", stage: "6-review",
+          log_state_path: state_home
+        )
+
+        completed = wait_for_completion(sup, max_attempts: 50)
+        assert_equal 1, completed.size
+        assert_equal 0, completed.first.exit_code
+
+        assert_equal [ log_path ], Dir.glob(File.join(File.dirname(log_path), "*.log"))
+        assert_includes File.read(log_path), "second-run"
+        refute_includes File.read(log_path), "first-run"
 
         status = run!("git", "-C", project_state, "status", "--porcelain")
         assert_empty status

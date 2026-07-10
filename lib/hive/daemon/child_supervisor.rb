@@ -122,10 +122,9 @@ module Hive
         log_path = log_path_for(project: project, slug: slug,
                                 log_state_path: log_state_path)
         FileUtils.mkdir_p(File.dirname(log_path))
-        # Open with truncation ("w") so each child run starts a fresh
-        # per-task log; logs from prior runs are not preserved here —
-        # the daemon's own log file at ~/Dev/hive/logs/daemon.log
-        # carries the cross-run history.
+        # Open with truncation ("w") so the durable per-task capture starts
+        # fresh on every child run. The daemon's own log file at
+        # ~/Dev/hive/logs/daemon.log carries the cross-run history.
         log_io = File.open(log_path, "w")
         log_io.puts("[hive-daemon] #{Time.now.utc.iso8601} spawn argv=#{argv.inspect}")
         log_io.flush
@@ -306,10 +305,12 @@ module Hive
         # captures neither depend on a quota-limited tmpdir nor dirty the
         # project's tracked hive-state worktree. Standalone callers without
         # that context retain the historical tmpdir fallback.
-        base = if log_state_path
-          File.join(log_state_path, "logs", "daemon-children", project.to_s, slug.to_s)
+        if log_state_path
+          base = File.join(log_state_path, "logs", "daemon-children", project.to_s, slug.to_s)
+          return File.join(base, "daemon-run.log")
         end
-        base ||= File.join(Dir.tmpdir, "hive-daemon-logs", project.to_s, slug.to_s)
+
+        base = File.join(Dir.tmpdir, "hive-daemon-logs", project.to_s, slug.to_s)
         ts = Time.now.utc.strftime("%Y%m%dT%H%M%SZ")
         File.join(base, "daemon-run-#{ts}-#{Process.pid}.log")
       end

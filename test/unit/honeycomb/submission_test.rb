@@ -29,8 +29,8 @@ class HoneycombSubmissionTest < Minitest::Test
       @commands = []
     end
 
-    def call(*cmd, chdir: nil, cfg: nil)
-      @commands << { argv: cmd, chdir: chdir, cfg: cfg }
+    def call(*cmd, cfg: nil)
+      @commands << { argv: cmd, cfg: cfg }
       out = ""
       err = ""
       exitstatus = 0
@@ -109,6 +109,35 @@ class HoneycombSubmissionTest < Minitest::Test
     end
   end
 
+  def test_maintain_and_admin_permissions_also_route_direct
+    %w[MAINTAIN ADMIN].each do |permission|
+      with_submission_fixture do |package, cache_path|
+        runner = RecordingRunner.new(cache_path: cache_path, permission: permission)
+        result = submit(package, cache_path, runner)
+
+        assert_equal "direct", result.mode, permission
+        refute_command runner, [ "gh", "repo", "fork", "example/honeycomb", "--clone=false" ]
+      end
+    end
+  end
+
+  def test_ssh_scp_and_git_suffix_cache_origins_are_accepted
+    [
+      "ssh://git@github.com/example/honeycomb",
+      "ssh://git@github.com/example/honeycomb.git",
+      "git@github.com:example/honeycomb",
+      "git@github.com:example/honeycomb.git",
+      "https://github.com/example/honeycomb.git"
+    ].each do |origin|
+      with_submission_fixture(cache_exists: true) do |package, cache_path|
+        runner = RecordingRunner.new(cache_path: cache_path, origin: origin)
+        result = submit(package, cache_path, runner)
+
+        assert_equal "direct", result.mode, origin
+      end
+    end
+  end
+
   def test_read_permission_creates_or_reuses_fork_and_uses_cross_repo_head
     with_submission_fixture do |package, cache_path|
       runner = RecordingRunner.new(cache_path: cache_path, permission: "READ")
@@ -122,6 +151,9 @@ class HoneycombSubmissionTest < Minitest::Test
         "https://github.com/alice/honeycomb.git", result.branch
       ]
       assert_command_includes runner, [ "--head", "alice:#{result.branch}" ]
+      # The fetch/worktree base must be the upstream default branch, never the fork.
+      assert_command_includes runner, [ runner.last_worktree, "origin/main" ]
+      assert_command runner, [ "git", "-C", cache_path, "fetch", "--prune", "origin", "main" ]
     end
 
     with_submission_fixture do |package, cache_path|

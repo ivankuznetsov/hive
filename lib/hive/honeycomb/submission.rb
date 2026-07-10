@@ -53,10 +53,11 @@ module Hive
       private
 
       def authenticate!
-        _out, err, status = capture("gh", "auth", "status")
+        out, err, status = capture("gh", "auth", "status")
         return if status.success?
 
-        raise Error, "gh not authenticated (`gh auth login`): #{err.to_s.strip}"
+        detail = err.to_s.strip.empty? ? out.to_s.strip : err.to_s.strip
+        raise Error, "gh not authenticated (`gh auth login`): #{detail}"
       end
 
       def fetch_repository_info
@@ -122,8 +123,15 @@ module Hive
 
         repository_name = @repository.split("/", 2).last
         fork = "#{login}/#{repository_name}"
-        _out, _err, status = capture("gh", "repo", "view", fork, "--json", "nameWithOwner")
+        _out, err, status = capture("gh", "repo", "view", fork, "--json", "nameWithOwner")
         unless status.success?
+          # Only a genuine "fork does not exist yet" (404) should trigger a fork
+          # attempt. A transient auth/network failure must fail closed rather than
+          # spuriously forking on top of an already-existing fork.
+          unless fork_missing?(err)
+            raise Error, "could not determine fork status for #{fork}: #{err.to_s.strip}"
+          end
+
           run!("gh", "repo", "fork", @repository, "--clone=false", label: "gh repo fork")
         end
         {
@@ -133,6 +141,13 @@ module Hive
           "push_remote" => "https://github.com/#{fork}.git",
           "head_prefix" => login
         }
+      end
+
+      def fork_missing?(stderr)
+        text = stderr.to_s
+        text.include?("Could not resolve to a Repository") ||
+          text.include?("404") ||
+          text.match?(/\bnot found\b/i)
       end
 
       def refuse_branch_collisions!(branch, remote)
@@ -185,7 +200,7 @@ module Hive
             head: head,
             base: repository_info.fetch("default_branch")
           )
-        rescue Error => e
+        rescue StandardError => e
           if pushed
             raise PartialError.new(
               "#{e.message}; pushed branch #{route.fetch('push_repository')}:#{branch} remains available for recovery",
@@ -258,12 +273,24 @@ module Hive
 
       def cleanup_worktree(worktree, branch, added)
         if added
-          capture("git", "-C", @cache_path, "worktree", "remove", "--force", worktree)
-          capture("git", "-C", @cache_path, "branch", "-D", branch)
+          log_cleanup_failure("git worktree remove", worktree,
+                              *capture("git", "-C", @cache_path, "worktree", "remove", "--force", worktree))
+          # A leaked cache branch blocks the next same-version publish with a
+          # confusing collision error, so surface (rather than swallow) a failed
+          # deletion even though cleanup itself is best-effort.
+          log_cleanup_failure("git branch -D #{branch}", worktree,
+                              *capture("git", "-C", @cache_path, "branch", "-D", branch))
         end
         FileUtils.rm_rf(worktree)
-      rescue StandardError
+      rescue StandardError => e
+        warn "hive: honeycomb worktree cleanup failed for #{worktree}: #{e.class}: #{e.message}"
         FileUtils.rm_rf(worktree)
+      end
+
+      def log_cleanup_failure(action, worktree, _out, err, status)
+        return if status.success?
+
+        warn "hive: honeycomb cleanup step `#{action}` failed for #{worktree}: #{err.to_s.strip}"
       end
 
       def capture(*argv)

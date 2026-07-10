@@ -39,9 +39,11 @@ module Hive
       GH_BACKOFF_SCHEDULE = [ 60, 300, 900 ].freeze
       GH_MAX_FAILURES = GH_BACKOFF_SCHEDULE.size + 2
 
-      def initialize(poll_interval_sec: 300, gh_bin: ENV.fetch("HIVE_GH_BIN", "gh"))
+      def initialize(poll_interval_sec: 300, gh_bin: ENV.fetch("HIVE_GH_BIN", "gh"),
+                     merge_intake: nil)
         @poll_interval_sec = poll_interval_sec
         @gh_bin = gh_bin
+        @merge_intake = merge_intake
         @pending = {}
         # Buffer of `{project:, slug:, pr_url:, failure_count:, last_error:}`
         # entries that hit GH_MAX_FAILURES during the most recent #tick.
@@ -108,25 +110,7 @@ module Hive
           entry[:last_polled_at] = now
 
           if error
-            entry[:failure_count] += 1
-            if entry[:failure_count] >= GH_MAX_FAILURES
-              keys_to_drop << key
-              project, slug = key
-              @last_tick_dropped << {
-                project: project, slug: slug,
-                pr_url: entry[:pr_url],
-                failure_count: entry[:failure_count],
-                last_error: error
-              }
-            else
-              # Schedule the next eligible poll using the backoff
-              # schedule (60 → 300 → 900 s). Index is failure_count - 1
-              # so the first failure waits 60s, the second 300s, etc.
-              # Past the schedule's tail we keep the last value until
-              # GH_MAX_FAILURES drops the entry.
-              idx = [ entry[:failure_count] - 1, GH_BACKOFF_SCHEDULE.size - 1 ].min
-              entry[:next_eligible_at] = now + GH_BACKOFF_SCHEDULE[idx]
-            end
+            record_failure(entry, key, error, now, keys_to_drop)
             next
           end
 
@@ -138,6 +122,20 @@ module Hive
           case state
           when "MERGED"
             project, slug = key
+            if @merge_intake
+              begin
+                @merge_intake.ingest(project: project, pr: entry[:pr_url], now: now)
+              rescue StandardError => e
+                record_failure(
+                  entry,
+                  key,
+                  "architecture intake failed (#{e.class}: #{e.message})",
+                  now,
+                  keys_to_drop
+                )
+                next
+              end
+            end
             archives << {
               project: project, slug: slug, stage: entry[:stage],
               command: archive_command(slug: slug, project: project,
@@ -180,6 +178,26 @@ module Hive
       end
 
       private
+
+      def record_failure(entry, key, error, now, keys_to_drop)
+        entry[:failure_count] += 1
+        if entry[:failure_count] >= GH_MAX_FAILURES
+          keys_to_drop << key
+          project, slug = key
+          @last_tick_dropped << {
+            project: project, slug: slug,
+            pr_url: entry[:pr_url],
+            failure_count: entry[:failure_count],
+            last_error: error
+          }
+        else
+          # Schedule the next eligible poll using the backoff schedule
+          # (60 → 300 → 900 s), including durable-intake failures after GH
+          # has already confirmed MERGED.
+          idx = [ entry[:failure_count] - 1, GH_BACKOFF_SCHEDULE.size - 1 ].min
+          entry[:next_eligible_at] = now + GH_BACKOFF_SCHEDULE[idx]
+        end
+      end
 
       # Read `pr_url` from the task's `pr.md` frontmatter. Falls back
       # to nil on any parse failure — the dispatcher logs and skips.

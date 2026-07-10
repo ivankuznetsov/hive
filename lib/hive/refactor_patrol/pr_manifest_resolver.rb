@@ -135,9 +135,24 @@ module Hive
         File.open(lock_path, File::RDWR | File::CREAT, 0o600) do |lock|
           lock.flock(File::LOCK_EX)
           if File.exist?(path)
-            existing = JSON.parse(File.read(path))
+            raw = File.binread(path)
+            existing = begin
+              JSON.parse(raw)
+            rescue JSON::ParserError => e
+              quarantine_conflict!(
+                manifest,
+                authoritative_bytes: raw,
+                reason: "corrupt_authoritative_manifest"
+              )
+              raise Conflict, "refactor patrol manifest is corrupt at #{path}: #{e.message}"
+            end
             return existing if existing == manifest
 
+            quarantine_conflict!(
+              manifest,
+              authoritative_bytes: raw,
+              reason: "divergent_manifest"
+            )
             raise Conflict, "refactor patrol manifest conflict for #{manifest.fetch('job_id')}"
           end
 
@@ -145,8 +160,25 @@ module Hive
           File.open(root, File::RDONLY) { |dir| dir.fsync }
         end
         manifest
-      rescue JSON::ParserError => e
-        raise Conflict, "refactor patrol manifest is corrupt at #{path}: #{e.message}"
+      end
+
+      def quarantine_conflict!(manifest, authoritative_bytes:, reason:)
+        directory = File.join(File.dirname(root), "quarantine", "manifests")
+        checksum = manifest.fetch("manifest_checksum")
+        path = File.join(directory, "#{manifest.fetch('job_id')}-#{checksum}.json")
+        return path if File.file?(path)
+
+        evidence = {
+          "schema" => "hive-refactor-patrol-manifest-conflict",
+          "schema_version" => 1,
+          "job_id" => manifest.fetch("job_id"),
+          "reason" => reason,
+          "authoritative_bytes_sha256" => ::Digest::SHA256.hexdigest(authoritative_bytes),
+          "candidate_manifest" => manifest
+        }
+        Hive::AtomicFile.write(path, "#{JSON.pretty_generate(evidence)}\n", mode: 0o600)
+        File.open(directory, File::RDONLY) { |dir| dir.fsync }
+        path
       end
 
       def canonical_json(value)

@@ -36,6 +36,11 @@ class RefactorPatrolPrManifestResolverTest < Minitest::Test
       )
       assert_raises(Hive::RefactorPatrol::PrManifestResolver::Conflict) { resolver.resolve("7") }
       assert_equal bytes, File.binread(path), "conflicting replay must leave authoritative bytes untouched"
+      quarantines = Dir.glob(File.join(dir, ".hive-state", "refactor_patrol", "v2", "quarantine", "manifests", "*.json"))
+      assert_equal 1, quarantines.size
+      evidence = JSON.parse(File.read(quarantines.first))
+      assert_equal manifest.fetch("job_id"), evidence.fetch("job_id")
+      assert_equal "divergent_manifest", evidence.fetch("reason")
     end
   end
 
@@ -91,6 +96,7 @@ class RefactorPatrolPrManifestResolverTest < Minitest::Test
       assert_equal 1, results.count { |item| item.is_a?(Hive::RefactorPatrol::PrManifestResolver::Conflict) }
       stored = JSON.parse(Dir[File.join(dir, ".hive-state", "refactor_patrol", "v2", "manifests", "*.json")].then { |paths| File.read(paths.one? ? paths.first : "") })
       assert_includes [ left["files"], right["files"] ], stored.fetch("files")
+      assert_equal 1, Dir.glob(File.join(dir, ".hive-state", "refactor_patrol", "v2", "quarantine", "manifests", "*.json")).size
     end
   end
 

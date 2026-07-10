@@ -216,7 +216,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
                       with_patrol_scheduler: false, project_enabled: true,
                       dispatch_state: nil, status_result: nil,
                       dispatch_request_state_home: nil, dispatch_result_state_home: nil,
-                      with_digest_scheduler: false, with_answer_digest_scheduler: false)
+                      with_digest_scheduler: false, with_answer_digest_scheduler: false,
+                      refactor_patrol_merge_reconciler: nil)
     config = {
       "daemon" => {
         "edit_debounce_sec" => 30,
@@ -256,6 +257,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       status_consumer: status,
       logger: logger,
       merge_watcher: merge_watcher,
+      refactor_patrol_merge_reconciler: refactor_patrol_merge_reconciler,
       patrol_scheduler: patrol_scheduler,
       digest_scheduler: digest_scheduler,
       answer_digest_scheduler: answer_digest_scheduler,
@@ -270,6 +272,27 @@ class HiveDaemonDispatcherTest < Minitest::Test
       dispatcher, supervisor, controller, logger, merge_watcher, patrol_scheduler,
       digest_scheduler, answer_digest_scheduler
     ]
+  end
+
+  def test_refactor_patrol_merge_reconciler_runs_intake_without_dispatching_jobs
+    reconciler = Struct.new(:calls) do
+      def tick(now:)
+        calls << now
+        [ { project: "p1", status: :blocked, enqueued_prs: [], reason: "pagination failed" } ]
+      end
+    end.new([])
+    dispatcher, supervisor, _controller, logger = make_dispatcher(
+      rows: [],
+      refactor_patrol_merge_reconciler: reconciler
+    )
+
+    dispatcher.tick(now: T0)
+
+    assert_equal [ T0 ], reconciler.calls
+    assert_empty supervisor.spawned, "U5 intake must not schedule or execute architecture jobs"
+    event = logger.events.find { |name, attrs| name == :blocked && attrs[:action] == "refactor_patrol_intake" }
+    assert event
+    assert_equal "pagination failed", event.last.fetch(:reason)
   end
 
   class StubLogger

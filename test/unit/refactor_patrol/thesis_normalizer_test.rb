@@ -119,6 +119,32 @@ class RefactorPatrolThesisNormalizerTest < Minitest::Test
     assert_includes thesis.required_validation.fetch("notes"), "Name explicit validation commands"
   end
 
+  def test_documentation_thesis_without_docs_validation_is_flagged_report_only
+    raw = valid_raw_thesis.merge(
+      "evidence" => [ { "file" => "docs/guide.md", "signal" => "churn", "value" => 4 } ],
+      "required_validation" => { "commands" => [], "characterization_first" => false, "notes" => "" }
+    )
+    thesis = normalize(raw, feature: documentation_feature, commands: { "test" => "rake test" })
+
+    assert thesis.admissible
+    assert_includes thesis.risk.fetch("flags"), "missing_docs_validation"
+    assert_empty thesis.required_validation.fetch("commands")
+    refute thesis.required_validation.fetch("characterization_first")
+    assert_includes thesis.required_validation.fetch("notes"), "documentation validation"
+  end
+
+  def test_documentation_thesis_uses_configured_docs_validation
+    raw = valid_raw_thesis.merge(
+      "evidence" => [ { "file" => "docs/guide.md", "signal" => "churn", "value" => 4 } ],
+      "required_validation" => { "commands" => [], "characterization_first" => false, "notes" => "" }
+    )
+    thesis = normalize(raw, feature: documentation_feature, commands: { "docs" => "markdownlint docs" })
+
+    assert_equal [ "docs" ], thesis.required_validation.fetch("commands")
+    refute_includes thesis.risk.fetch("flags"), "missing_docs_validation"
+    refute thesis.required_validation.fetch("characterization_first")
+  end
+
   private
 
   def normalize(raw, feature: self.feature(tests: [ "test/checkout_test.rb" ]), leverage: feature_leverage, commands: { "test" => "rake test" })
@@ -126,5 +152,16 @@ class RefactorPatrolThesisNormalizerTest < Minitest::Test
       normalizer = Hive::RefactorPatrol::ThesisNormalizer.new(project_root: dir, commands: commands)
       return normalizer.call(feature: feature, leverage: leverage, raw: raw, index: 0)
     end
+  end
+
+  def documentation_feature
+    Hive::Patrol::Feature.new(
+      id: "documentation-docs-root",
+      kind: "documentation",
+      entrypoints: [ "docs/guide.md" ],
+      owned_files: [ "docs/guide.md" ],
+      context_files: [ "README.md" ],
+      tests: []
+    )
   end
 end

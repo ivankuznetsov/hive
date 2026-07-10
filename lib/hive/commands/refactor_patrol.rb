@@ -30,7 +30,14 @@ module Hive
         @changed_since = changed_since
         @pr = pr
         @mapper_factory = mapper_factory || lambda do |root, cfg, state|
-          Hive::Patrol::Mapper.new(root, cfg: mapper_cfg(cfg), state: state, dry_run: ephemeral_discovery?)
+          Hive::Patrol::Mapper.new(
+            root,
+            cfg: mapper_cfg(cfg),
+            state: state,
+            dry_run: ephemeral_discovery?,
+            capabilities: [ :documentation ],
+            documentation_changes: pr_mode? ? @manifest.fetch("files") : []
+          )
         end
         @reviewer_factory = reviewer_factory || lambda do |root, cfg, state|
           Hive::RefactorPatrol::Reviewer.new(
@@ -265,7 +272,10 @@ module Hive
       end
 
       def manifest_changed_paths
-        @manifest_changed_paths ||= @manifest.fetch("changed_paths").to_set
+        @manifest_changed_paths ||= begin
+          paths = @manifest.fetch("changed_paths") + @manifest.fetch("files").filter_map { |file| file["previous_path"] }
+          paths.to_set
+        end
       end
 
       def build_v2_payload(entry, project_root, features, theses, suppressed, reviewer)

@@ -95,4 +95,85 @@ class HivePatrolMapperTest < Minitest::Test
       assert_equal "", mapper.send(:read, "missing.rb")
     end
   end
+
+  def test_documentation_capability_maps_stable_bounded_slices_without_churn_artifacts
+    with_tmp_git_repo do |repo|
+      write_docs_fixture(repo)
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "docs", "--quiet")
+
+      ordinary = Hive::Patrol::Mapper.new(repo, cfg: cfg, dry_run: true).call
+      first = Hive::Patrol::Mapper.new(
+        repo, cfg: cfg, dry_run: true, capabilities: [ :documentation ]
+      ).call
+      second = Hive::Patrol::Mapper.new(
+        repo, cfg: cfg, dry_run: true, capabilities: [ :documentation ]
+      ).call
+
+      assert_empty ordinary, "ordinary patrol must not map documentation features"
+      assert_equal first.map(&:id), second.map(&:id)
+      assert_includes first.map(&:id), "documentation-root"
+      assert_includes first.map(&:id), "documentation-docs-guides"
+      assert_includes first.map(&:id), "documentation-docs-adr"
+      assert_includes first.map(&:id), "documentation-wiki-root"
+      assert_includes first.map(&:id), "documentation-wiki-decisions"
+      mapped = first.flat_map { |feature| feature.owned_files + feature.context_files }
+      refute_includes mapped, "wiki/log.md"
+      refute_includes mapped, "wiki/log.d/20260710.md"
+      refute_includes mapped, "raw/notes/scratch.md"
+      refute_includes mapped, ".cache/generated.md"
+      assert first.all? { |feature| feature.owned_files.size <= 12 && feature.context_files.size <= 24 }
+    end
+  end
+
+  def test_documentation_changes_keep_removed_and_renamed_paths_in_their_stable_slice
+    with_tmp_git_repo do |repo|
+      FileUtils.mkdir_p(File.join(repo, "docs", "guides"))
+      File.write(File.join(repo, "docs", "old.md"), "old\n")
+      File.write(File.join(repo, "docs", "reference.md"), "reference\n")
+      File.write(File.join(repo, "docs", "guides", "before.md"), "before\n")
+      File.write(File.join(repo, "package.json"), JSON.generate("scripts" => { "test" => "node --test" }))
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "docs", "--quiet")
+      FileUtils.rm_f(File.join(repo, "docs", "old.md"))
+      FileUtils.mv(File.join(repo, "docs", "guides", "before.md"), File.join(repo, "docs", "guides", "after.md"))
+      run!("git", "-C", repo, "add", "-A")
+
+      features = Hive::Patrol::Mapper.new(
+        repo,
+        cfg: cfg,
+        dry_run: true,
+        capabilities: [ :documentation ],
+        documentation_changes: [
+          { "path" => "docs/old.md", "status" => "removed" },
+          { "path" => "docs/guides/after.md", "previous_path" => "docs/guides/before.md", "status" => "renamed" }
+        ]
+      ).call
+
+      root = features.find { |feature| feature.id == "documentation-docs-root" }
+      guides = features.find { |feature| feature.id == "documentation-docs-guides" }
+      assert_equal [ "docs/old.md" ], root.owned_files
+      assert_includes root.context_files, "docs/reference.md"
+      assert_equal [ "docs/guides/after.md", "docs/guides/before.md" ], guides.owned_files
+      assert_includes features.map(&:id), "package-package-json", "manifest docs must map alongside repository code features"
+    end
+  end
+
+  private
+
+  def write_docs_fixture(repo)
+    %w[docs/guides docs/adr wiki/decisions wiki/log.d raw/notes .cache].each do |dir|
+      FileUtils.mkdir_p(File.join(repo, dir))
+    end
+    {
+      "docs/guides/start.md" => "start\n",
+      "docs/adr/0001.md" => "decision\n",
+      "wiki/index.md" => "index\n",
+      "wiki/decisions/one.md" => "decision\n",
+      "wiki/log.md" => "compiled\n",
+      "wiki/log.d/20260710.md" => "fragment\n",
+      "raw/notes/scratch.md" => "raw\n",
+      ".cache/generated.md" => "cache\n"
+    }.each { |path, body| File.write(File.join(repo, path), body) }
+  end
 end

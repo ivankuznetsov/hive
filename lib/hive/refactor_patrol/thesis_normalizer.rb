@@ -144,6 +144,8 @@ module Hive
       end
 
       def enforce_behavior_guidance!(feature, hash)
+        return enforce_documentation_guidance!(hash) if feature.documentation?
+
         validation = hash.fetch("required_validation")
         known_commands = @commands.keys
         validation["commands"] = Array(validation["commands"]).map(&:to_s).select { |key| known_commands.include?(key) }
@@ -167,6 +169,22 @@ module Hive
         end
 
         hash["confidence"] = "medium" if !has_tests && validation["characterization_first"] && hash["confidence"] == "high"
+      end
+
+      def enforce_documentation_guidance!(hash)
+        validation = hash.fetch("required_validation")
+        docs_command = @commands["docs"]
+        if docs_command
+          validation["commands"] = [ "docs" ]
+          validation["characterization_first"] = false
+          validation["notes"] = "Run the configured documentation validation before publishing a fix."
+        else
+          validation["commands"] = []
+          validation["characterization_first"] = false
+          validation["notes"] = "No documentation validation command is configured; this thesis is report-only."
+          hash.fetch("risk").fetch("flags") << "missing_docs_validation"
+          hash.fetch("risk")["flags"].uniq!
+        end
       end
 
       def enforce_admissibility!(hash)

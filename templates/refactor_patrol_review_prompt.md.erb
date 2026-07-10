@@ -93,5 +93,11 @@ Rules:
 - Include required_validation.commands using the available command names. If
   this slice lacks useful tests, set characterization_first true and explain the
   characterization test needed before refactoring.
+<% if feature.documentation? %>
+- This is a documentation slice. Use the configured `docs` validation command
+  when it is available. Characterization tests are not a substitute for docs
+  validation; without `docs`, explain the documentation check needed and expect
+  the thesis to remain report-only rather than auto-fix eligible.
+<% end %>
 - This is reporting only. Do not propose applying code, opening PRs, or
   enqueueing review tasks.

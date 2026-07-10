@@ -18,7 +18,9 @@ a full daemon restart.
 **Tests:** Added a focused SIGHUP regression that changes every controller-owned
 limit, asserts the controller object and in-flight state are retained, and
 proves the new per-project cap affects the next dispatch check. Added config
-coverage for null concurrency limits.
+coverage for null concurrency limits and dispatcher coverage proving a rejected
+reload preserves all four live limits and in-flight accounting without emitting
+a false `config_reloaded` success event.
 
 **Wiki pages updated:** `wiki/commands/daemon.md`, `wiki/modules/daemon.md`, and
 `wiki/gaps.md`.

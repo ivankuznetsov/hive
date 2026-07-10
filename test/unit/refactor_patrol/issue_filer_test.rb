@@ -85,6 +85,27 @@ class RefactorPatrolIssueFilerTest < Minitest::Test
     assert_empty gh.creates
   end
 
+  def test_prior_intent_reconciles_after_current_issue_authority_is_revoked
+    gh = FakeGh.new
+    gh.issues = [
+      {
+        "number" => 4, "state" => "OPEN",
+        "url" => "https://github.com/acme/demo/issues/4"
+      }
+    ]
+
+    result = filer(gh, enabled: false).publish(
+      thesis: thesis(flags: [ "dependency_bump" ]), family_id: family_id,
+      canonical_action_id: action_id, job_id: "job-7", source: source,
+      creation_attempted: true, record_intent: successful_intent
+    )
+
+    assert_equal "issue_linked_open", result.outcome
+    assert result.terminal
+    assert_equal [ [ "acme/demo", marker ] ], gh.lookups
+    assert_empty gh.creates
+  end
+
   def test_malformed_or_wrong_repository_reconciliation_fails_closed
     gh = FakeGh.new
     gh.issues = [

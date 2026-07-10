@@ -46,6 +46,10 @@ module Hive
       class UnsupportedVersion < Error; end
       class InconsistentRecord < Error; end
       class RecordNotFound < Error; end
+      class StaleClaim < Error; end
+
+      DISCOVERY_ATTEMPT_KIND = "discovery_claim".freeze
+      ACTIVE_CLAIM_STATES = %w[claimed running].freeze
 
       attr_reader :project_root, :root
 
@@ -110,6 +114,147 @@ module Hive
         end
       rescue ArgumentError => e
         raise InconsistentRecord, "refactor patrol job has invalid scheduling timestamp (#{e.message})"
+      end
+
+      # Includes an expired analyzing claim so a restarted daemon can prove
+      # the prior process group gone (or terminate it) before fencing a new
+      # generation. The claim CAS remains authoritative.
+      def claimable_jobs(now: Time.now)
+        (eligible_jobs(now: now) + jobs.select do |aggregate|
+          next false unless aggregate.fetch("state") == "analyzing"
+
+          attempt = active_discovery_attempt(aggregate)
+          attempt && Time.iso8601(attempt.fetch("expires_at")) <= now
+        end).uniq { |aggregate| aggregate.fetch("job_id") }
+          .sort_by { |aggregate| scheduling_key(aggregate) }
+      rescue ArgumentError, KeyError => e
+        raise InconsistentRecord, "refactor patrol claim has invalid scheduling evidence (#{e.message})"
+      end
+
+      def claim_discovery!(job_id, owner:, analysis_sha:, now: Time.now, lease_sec: 3600,
+                           claim_resolver: nil, owner_pid: nil, owner_process_start_time: nil)
+        mutate_job(job_id) do |aggregate, path|
+          return nil if aggregate.fetch("complete")
+
+          active = active_discovery_attempt(aggregate)
+          if active
+            return nil if Time.iso8601(active.fetch("expires_at")) > now
+            resolved = begin
+              claim_resolver&.call(json_copy(active))
+            rescue StandardError
+              :unresolved
+            end
+            return nil unless resolved == :resolved
+
+            active["state"] = "superseded"
+            active["finished_at"] = now.utc.iso8601
+            active["outcome"] = "expired_claim_resolved"
+          end
+
+          pinned = aggregate["analysis_sha"]
+          if pinned && pinned != analysis_sha.to_s
+            raise InconsistentRecord.new("refactor patrol analysis checkout changed after pin", path: path)
+          end
+          generation = aggregate.fetch("attempts").filter_map { |attempt| attempt["generation"] }.max.to_i + 1
+          timestamp = now.utc.iso8601
+          attempt = {
+            "kind" => DISCOVERY_ATTEMPT_KIND,
+            "owner" => owner.to_s,
+            "owner_pid" => owner_pid,
+            "owner_process_start_time" => owner_process_start_time,
+            "generation" => generation,
+            "state" => "claimed",
+            "claimed_at" => timestamp,
+            "heartbeat_at" => timestamp,
+            "expires_at" => (now + lease_sec.to_i).utc.iso8601,
+            "pid" => nil,
+            "process_start_time" => nil,
+            "pgid" => nil,
+            "finished_at" => nil,
+            "outcome" => nil,
+            "next_eligible_at" => nil
+          }
+          aggregate["analysis_sha"] ||= analysis_sha.to_s
+          aggregate["state"] = "analyzing"
+          aggregate["complete"] = false
+          aggregate.fetch("attempts") << attempt
+          aggregate["updated_at"] = timestamp
+          [ aggregate, claim_token(aggregate, attempt) ]
+        end
+      end
+
+      def attach_discovery_process!(token, pid:, process_start_time:, pgid:, now: Time.now)
+        mutate_claim(token) do |aggregate, attempt|
+          if pid.to_i <= 1 || pgid.to_i <= 1 || process_start_time.to_s.empty?
+            raise InconsistentRecord, "refactor patrol child identity is incomplete"
+          end
+          attempt["state"] = "running"
+          attempt["pid"] = pid.to_i
+          attempt["process_start_time"] = process_start_time.to_s
+          attempt["pgid"] = pgid.to_i
+          attempt["heartbeat_at"] = now.utc.iso8601
+          aggregate["updated_at"] = now.utc.iso8601
+          aggregate
+        end
+      end
+
+      def release_discovery!(token, reason:, now: Time.now, backoff_sec: 60)
+        mutate_claim(token) do |aggregate, attempt|
+          timestamp = now.utc.iso8601
+          attempt["state"] = "released"
+          attempt["finished_at"] = timestamp
+          attempt["outcome"] = reason.to_s
+          attempt["next_eligible_at"] = (now + backoff_sec.to_i).utc.iso8601
+          aggregate["state"] = "blocked"
+          aggregate["complete"] = false
+          aggregate["review_errors"] = []
+          aggregate["zero_reason"] = nil
+          aggregate["updated_at"] = timestamp
+          aggregate
+        end
+      end
+
+      # Checkout/identity failures before a claim still need durable evidence
+      # and retry throttling; otherwise the daemon would repeat shell/network
+      # probes and identical log lines on every fast tick.
+      def block_discovery!(job_id, reason:, evidence: {}, now: Time.now, backoff_sec: 60)
+        mutate_job(job_id) do |aggregate, _path|
+          next aggregate if aggregate.fetch("complete")
+
+          timestamp = now.utc.iso8601
+          aggregate.fetch("attempts") << {
+            "kind" => "discovery_block",
+            "state" => "blocked",
+            "reason" => reason.to_s,
+            "evidence" => json_copy(evidence),
+            "finished_at" => timestamp,
+            "next_eligible_at" => (now + backoff_sec.to_i).utc.iso8601
+          }
+          aggregate["state"] = "blocked"
+          aggregate["complete"] = false
+          aggregate["updated_at"] = timestamp
+          aggregate
+        end
+      end
+
+      def checkpoint_discovery!(token, envelope:, now: Time.now)
+        payload = json_copy(envelope)
+        mutate_claim(token) do |aggregate, attempt|
+          assert_matching_discovery_payload!(aggregate, payload)
+          aggregate["dispositions"] = DISPOSITIONS.to_h { |name| [ name, payload.fetch(name) ] }
+          aggregate["feature_results"] = []
+          aggregate["review_errors"] = []
+          aggregate["zero_reason"] = payload.fetch("zero_reason")
+          terminal = !action_authorized_for?(aggregate, payload)
+          aggregate["state"] = terminal ? "complete" : "classified"
+          aggregate["complete"] = terminal
+          attempt["state"] = "complete"
+          attempt["finished_at"] = now.utc.iso8601
+          attempt["outcome"] = terminal ? "complete" : "classified"
+          attempt["next_eligible_at"] = nil
+          aggregate["updated_at"] = now.utc.iso8601
+          aggregate
+        end
       end
 
       def write_job!(aggregate, dry_run: false)
@@ -248,6 +393,75 @@ module Hive
       end
 
       private
+
+      def scheduling_key(aggregate)
+        source = aggregate.fetch("source")
+        merged_at = source["merged_at"] ? Time.iso8601(source.fetch("merged_at")).utc : Time.at(0).utc
+        [ merged_at, source.fetch("number"), source.fetch("merge_sha"), aggregate.fetch("job_id") ]
+      end
+
+      def active_discovery_attempt(aggregate)
+        aggregate.fetch("attempts").reverse_each.find do |attempt|
+          attempt["kind"] == DISCOVERY_ATTEMPT_KIND && ACTIVE_CLAIM_STATES.include?(attempt["state"])
+        end
+      end
+
+      def claim_token(aggregate, attempt)
+        {
+          job_id: aggregate.fetch("job_id"), owner: attempt.fetch("owner"),
+          generation: attempt.fetch("generation")
+        }
+      end
+
+      def mutate_claim(token)
+        mutate_job(token.fetch(:job_id)) do |aggregate, path|
+          attempt = active_discovery_attempt(aggregate)
+          unless attempt && attempt["owner"] == token.fetch(:owner).to_s &&
+                 attempt["generation"] == token.fetch(:generation).to_i
+            raise StaleClaim.new("refactor patrol claim fence is stale", path: path)
+          end
+          yield aggregate, attempt
+        end
+      end
+
+      def mutate_job(job_id)
+        path = job_path(validate_id!(job_id))
+        FileUtils.mkdir_p(File.dirname(path))
+        File.open("#{path}.lock", File::RDWR | File::CREAT, 0o600) do |lock|
+          lock.flock(File::LOCK_EX)
+          existing = read_job(job_id)
+          aggregate = json_copy(existing)
+          result = yield aggregate, path
+          replacement, return_value = result.is_a?(Array) ? result : [ result, result ]
+          validate_job!(replacement, path: path)
+          validate_transition!(existing, replacement, path)
+          atomic_write(path, replacement)
+          return return_value
+        end
+      end
+
+      def assert_matching_discovery_payload!(aggregate, payload)
+        unless payload.is_a?(Hash) && payload["schema"] == "hive-refactor-patrol" &&
+               payload["schema_version"] == SCHEMA_VERSION && payload["ok"] == true &&
+               payload["complete"] == true && payload["job_id"] == aggregate.fetch("job_id") &&
+               payload["project"] == aggregate.dig("source", "registration") &&
+               payload["project_root"] == project_root && payload["dry_run"] == false &&
+               payload["analysis_sha"] == aggregate.fetch("analysis_sha") &&
+               payload["source_pr"] == aggregate.fetch("source") &&
+               payload["review_errors"] == [] && payload["attempts"] == [] && payload["actions"] == []
+          raise InconsistentRecord, "refactor patrol completion payload does not match its claimed job"
+        end
+        DISPOSITIONS.each { |name| payload.fetch(name) }
+        payload.fetch("zero_reason")
+      rescue KeyError => e
+        raise InconsistentRecord, "refactor patrol completion payload is missing #{e.key.inspect}"
+      end
+
+      def action_authorized_for?(aggregate, payload)
+        policy = aggregate.fetch("policy")
+        (policy.fetch("auto_fix") && payload.fetch("accepted").any?) ||
+          (policy.fetch("issue_filing") && payload.fetch("flagged").any? { |item| item["admissible"] == true })
+      end
 
       def source_from_manifest(manifest)
         unless manifest.is_a?(Hash) && manifest["schema"] == "hive-refactor-patrol-pr-manifest" &&

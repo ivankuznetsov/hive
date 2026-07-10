@@ -41,6 +41,14 @@ module Hive
       end
 
       def tick(now: Time.now)
+        candidates(now: now).filter_map { |candidate| reserve(candidate, now: now) }
+      end
+
+      # Side-effect-free with respect to dispatch ownership: callers may
+      # compare ordinary and architecture work without consuming a patrol
+      # turn. Due-check throttles are only committed when a due candidate is
+      # actually reserved.
+      def candidates(now: Time.now)
         dispatches = []
         @registry.call.each do |entry|
           project = entry.fetch("name")
@@ -62,16 +70,29 @@ module Hive
           # the throttle and reloads its full config on every ~30s tick
           # just to rediscover patrol.enabled: false. A project that flips
           # to enabled mid-interval is picked up on its next poll window.
-          @next_check_at[project] = now + patrol.fetch("poll_interval_sec", 600).to_i
-          next unless patrol["enabled"] == true
-          next unless due?(entry, cfg, patrol, now)
+          unless patrol["enabled"] == true
+            @next_check_at[project] = now + patrol.fetch("poll_interval_sec", 600).to_i
+            next
+          end
+          unless due?(entry, cfg, patrol, now)
+            @next_check_at[project] = now + patrol.fetch("poll_interval_sec", 600).to_i
+            next
+          end
 
-          @pending[project] = { started_at: now }
-          dispatches << dispatch_for(entry)
+          @next_check_at[project] = now + patrol.fetch("poll_interval_sec", 600).to_i
+          dispatches << dispatch_for(entry, patrol: patrol)
         rescue Hive::ConfigError, Hive::GitError, KeyError
           next
         end
         dispatches
+      end
+
+      def reserve(candidate, now: Time.now)
+        project = candidate.fetch(:project)
+        return nil if pending?(project)
+
+        @pending[project] = { started_at: now }
+        public_dispatch(candidate)
       end
 
       def complete(project:, exit_code:, now: Time.now)
@@ -157,17 +178,23 @@ module Hive
         nil
       end
 
-      def dispatch_for(entry)
+      def dispatch_for(entry, patrol: {})
         project = entry.fetch("name")
         {
           project: project,
           slug: PATROL_SLUG,
           stage: PATROL_STAGE,
           command: "hive patrol #{Shellwords.escape(project)} --json",
+          patrol_kind: :ordinary,
+          poll_interval_sec: patrol.fetch("poll_interval_sec", 600).to_i,
           state_file_mtime: nil,
           state_file_path: nil,
           hive_state_path: entry["hive_state_path"]
         }
+      end
+
+      def public_dispatch(candidate)
+        candidate.reject { |key, _value| %i[patrol_kind poll_interval_sec].include?(key) }
       end
     end
   end

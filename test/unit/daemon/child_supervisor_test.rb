@@ -359,6 +359,24 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
     end
   end
 
+  def test_terminate_child_awaits_exact_group_and_preserves_dispatch_token_for_reap
+    with_tmp_dir do |dir|
+      sup = make(log_dir: dir)
+      token = { kind: :architecture_patrol, job_id: "job-7", owner: "daemon", generation: 1 }
+      pid = sup.spawn(
+        command_string: "hive run a --exit-code 0 --sleep 30",
+        project: "p1", slug: "a", stage: "refactor-patrol", dispatch_token: token
+      )
+
+      assert sup.terminate_child(pid, grace_sec: 1)
+      completed = sup.reap_all
+      assert_equal 1, completed.size
+      assert_equal token, completed.first.dispatch_token
+      assert_nil completed.first.exit_code, "signal termination must not masquerade as exit zero"
+      assert_equal 0, sup.in_flight_count
+    end
+  end
+
   # ── R-02: per-verb wall-clock timeout ─────────────────────────────────
 
   def test_timeout_for_verb_resolves_default_and_override

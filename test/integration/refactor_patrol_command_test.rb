@@ -2,6 +2,7 @@ require "test_helper"
 require "json"
 require "json_schemer"
 require "yaml"
+require "digest"
 require "hive/cli"
 require "hive/commands/refactor_patrol"
 require "hive/config"
@@ -340,6 +341,38 @@ class RefactorPatrolCommandTest < Minitest::Test
     end
   end
 
+  def test_job_manifest_mode_emits_the_same_complete_v2_without_github_resolution
+    with_refactor_patrol_project do |repo|
+      head = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      manifest = with_manifest_checksum(pr_manifest(merge_sha: head))
+      path = publish_job_manifest(repo, manifest)
+      features = [ feature("checkout", files: [ "lib/checkout.rb" ]) ]
+      theses = { "checkout" => [ thesis("checkout", feature_id: "checkout", fingerprint: "fp-checkout") ] }
+
+      pr_resolver = FakeManifestResolver.new(manifest)
+      pr_out, pr_err, pr_status = with_captured_exit do
+        command_for(
+          pr: "7", manifest_resolver: pr_resolver, features: features,
+          theses_by_feature: theses, leverage_scores: leverage_scores("checkout" => 0.9)
+        ).call
+      end
+
+      forbidden_resolver = FakeManifestResolver.new({})
+      scheduled_out, scheduled_err, scheduled_status = with_captured_exit do
+        command_for(
+          job_manifest: path, manifest_resolver: forbidden_resolver, features: features,
+          theses_by_feature: theses, leverage_scores: leverage_scores("checkout" => 0.9)
+        ).call
+      end
+
+      assert_equal Hive::ExitCodes::SUCCESS, pr_status, "#{pr_out}\n#{pr_err}"
+      assert_equal Hive::ExitCodes::SUCCESS, scheduled_status, "#{scheduled_out}\n#{scheduled_err}"
+      assert_equal JSON.parse(pr_out), JSON.parse(scheduled_out)
+      assert_nil forbidden_resolver.seen, "persisted-manifest mode must not resolve mutable GitHub PR metadata"
+      assert v2_refactor_schemer.valid?(JSON.parse(scheduled_out))
+    end
+  end
+
   def test_pr_mode_review_errors_are_partial_and_never_touch_legacy_state
     with_refactor_patrol_project do |repo|
       head = run!("git", "-C", repo, "rev-parse", "HEAD").strip
@@ -537,7 +570,7 @@ class RefactorPatrolCommandTest < Minitest::Test
   end
 
   def command_for(project: "demo", json: true, dry_run: false, feature_hint: nil, entrypoint_hint: nil, path_hint: nil, changed_since: nil,
-                  pr: nil, manifest_resolver: nil, features: [], theses_by_feature: {}, reviewer: nil, leverage_scores: {},
+                  pr: nil, job_manifest: nil, manifest_resolver: nil, features: [], theses_by_feature: {}, reviewer: nil, leverage_scores: {},
                   use_default_mapper: false)
     reviewer ||= FakeReviewer.new(theses_by_feature)
     Hive::Commands::RefactorPatrol.new(
@@ -549,6 +582,7 @@ class RefactorPatrolCommandTest < Minitest::Test
       path: path_hint,
       changed_since: changed_since,
       pr: pr,
+      job_manifest: job_manifest,
       mapper_factory: use_default_mapper ? nil : ->(_root, _cfg, _state) { FakeMapper.new(features) },
       reviewer_factory: ->(_root, _cfg, _state) { reviewer },
       leverage_factory: ->(_root, _cfg) { FakeLeverage.new(leverage_scores) },
@@ -635,6 +669,31 @@ class RefactorPatrolCommandTest < Minitest::Test
       "changed_paths" => changed_paths,
       "manifest_checksum" => "checksum"
     }
+  end
+
+  def with_manifest_checksum(manifest)
+    payload = manifest.reject { |key, _value| key == "manifest_checksum" }
+    manifest.merge("manifest_checksum" => ::Digest::SHA256.hexdigest(canonical_json(payload)))
+  end
+
+  def publish_job_manifest(repo, manifest)
+    root = File.join(repo, ".hive-state", "refactor_patrol", "v2", "manifests")
+    FileUtils.mkdir_p(root)
+    path = File.join(root, "#{manifest.fetch('job_id')}.json")
+    File.write(path, JSON.pretty_generate(manifest))
+    path
+  end
+
+  def canonical_json(value)
+    normalized = case value
+    when Hash
+      value.keys.sort.to_h { |key| [ key, JSON.parse(canonical_json(value.fetch(key))) ] }
+    when Array
+      value.map { |item| JSON.parse(canonical_json(item)) }
+    else
+      value
+    end
+    JSON.generate(normalized)
   end
 
   def thesis_schemer

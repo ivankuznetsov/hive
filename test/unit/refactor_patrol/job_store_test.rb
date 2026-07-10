@@ -224,6 +224,80 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     end
   end
 
+  def test_discovery_claim_is_fenced_and_only_exact_owner_generation_can_checkpoint
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      store.enqueue_manifest!(manifest, policy: intake_policy, now: T0)
+
+      token = store.claim_discovery!(
+        "pr-7-stable", owner: "daemon-a", analysis_sha: "c" * 40,
+        now: T0, lease_sec: 60
+      )
+      store.attach_discovery_process!(
+        token, pid: 1234, process_start_time: "boot-1", pgid: 1234, now: T0 + 1
+      )
+
+      stale = token.merge(generation: token.fetch(:generation) + 1)
+      assert_raises(Hive::RefactorPatrol::JobStore::StaleClaim) do
+        store.checkpoint_discovery!(stale, envelope: complete_zero_envelope(dir), now: T0 + 2)
+      end
+      assert_empty store.read_job("pr-7-stable").dig("dispositions", "accepted")
+
+      completed = store.checkpoint_discovery!(token, envelope: complete_zero_envelope(dir), now: T0 + 3)
+      assert completed.fetch("complete")
+      assert_equal "no_theses", completed.fetch("zero_reason")
+      assert_raises(Hive::RefactorPatrol::JobStore::StaleClaim) do
+        store.checkpoint_discovery!(token, envelope: complete_zero_envelope(dir), now: T0 + 4)
+      end
+    end
+  end
+
+  def test_expired_claim_reclaims_only_after_process_identity_is_resolved
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      store.enqueue_manifest!(manifest, policy: intake_policy, now: T0)
+      first = store.claim_discovery!(
+        "pr-7-stable", owner: "daemon-a", analysis_sha: "c" * 40,
+        now: T0, lease_sec: 10
+      )
+      store.attach_discovery_process!(
+        first, pid: 1234, process_start_time: "boot-1", pgid: 1234, now: T0 + 1
+      )
+
+      unresolved = store.claim_discovery!(
+        "pr-7-stable", owner: "daemon-b", analysis_sha: "c" * 40,
+        now: T0 + 20, lease_sec: 10, claim_resolver: ->(_attempt) { :unresolved }
+      )
+      assert_nil unresolved
+
+      reclaimed = store.claim_discovery!(
+        "pr-7-stable", owner: "daemon-b", analysis_sha: "c" * 40,
+        now: T0 + 20, lease_sec: 10, claim_resolver: ->(_attempt) { :resolved }
+      )
+      assert_equal first.fetch(:generation) + 1, reclaimed.fetch(:generation)
+      assert_equal "daemon-b", reclaimed.fetch(:owner)
+    end
+  end
+
+  def test_release_records_durable_retry_without_disposition_checkpoint
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      store.enqueue_manifest!(manifest, policy: intake_policy, now: T0)
+      token = store.claim_discovery!(
+        "pr-7-stable", owner: "daemon-a", analysis_sha: "c" * 40,
+        now: T0, lease_sec: 60
+      )
+
+      released = store.release_discovery!(token, reason: "malformed_envelope", now: T0 + 1, backoff_sec: 60)
+
+      assert_equal "blocked", released.fetch("state")
+      assert_equal (T0 + 61).iso8601, released.fetch("attempts").last.fetch("next_eligible_at")
+      assert_empty released.dig("dispositions", "accepted")
+      assert_empty store.eligible_jobs(now: T0 + 60)
+      assert_equal [ "pr-7-stable" ], store.eligible_jobs(now: T0 + 61).map { |item| item.fetch("job_id") }
+    end
+  end
+
   private
 
   def job(overrides = {})
@@ -309,6 +383,33 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       "auto_fix" => false,
       "issue_filing" => false,
       "captured_at" => T0.iso8601
+    }
+  end
+
+  def complete_zero_envelope(project_root)
+    {
+      "schema" => "hive-refactor-patrol",
+      "schema_version" => 2,
+      "ok" => true,
+      "job_id" => "pr-7-stable",
+      "project" => "demo",
+      "project_root" => project_root,
+      "dry_run" => false,
+      "source_pr" => source(
+        "merged_at" => "2026-07-10T12:00:00Z",
+        "changed_paths" => [ "lib/checkout.rb" ],
+        "manifest_checksum" => "a" * 64
+      ),
+      "analysis_sha" => "c" * 40,
+      "complete" => true,
+      "features_mapped" => 1,
+      "accepted" => [],
+      "flagged" => [],
+      "suppressed" => [],
+      "review_errors" => [],
+      "zero_reason" => "no_theses",
+      "attempts" => [],
+      "actions" => []
     }
   end
 end

@@ -719,6 +719,8 @@ module Hive
     option :path, type: :string, desc: "only review features with owned files under this path"
     option :changed_since, type: :string, desc: "git ref used for changed-feature ranking/filtering"
     option :pr, type: :string, desc: "analyze one merged PR number or URL with the v2 read-only contract"
+    option :job_manifest, type: :string,
+                          desc: "analyze one immutable merge-intake manifest (daemon/internal)"
     def refactor_patrol(project)
       require "hive/commands/refactor_patrol"
       Hive::Commands::RefactorPatrol.new(
@@ -729,7 +731,8 @@ module Hive
         entrypoint: options[:entrypoint],
         path: options[:path],
         changed_since: options[:changed_since],
-        pr: options[:pr]
+        pr: options[:pr],
+        job_manifest: options[:job_manifest]
       ).call
     end
 

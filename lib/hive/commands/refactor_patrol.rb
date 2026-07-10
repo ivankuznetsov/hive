@@ -1,4 +1,5 @@
 require "json"
+require "digest"
 require "open3"
 require "set"
 require "time"
@@ -19,6 +20,7 @@ module Hive
   module Commands
     class RefactorPatrol
       def initialize(project, json: false, dry_run: false, feature: nil, entrypoint: nil, path: nil, changed_since: nil, pr: nil,
+                     job_manifest: nil,
                      mapper_factory: nil, reviewer_factory: nil, leverage_factory: nil,
                      caps_factory: nil, collisions_factory: nil, manifest_resolver_factory: nil)
         @project = project
@@ -29,6 +31,7 @@ module Hive
         @path_hint = path
         @changed_since = changed_since
         @pr = pr
+        @job_manifest = job_manifest
         @mapper_factory = mapper_factory || lambda do |root, cfg, state|
           Hive::Patrol::Mapper.new(
             root,
@@ -236,7 +239,10 @@ module Hive
         return unless pr_mode?
 
         unless @json
-          raise Hive::ConfigError, "hive refactor-patrol --pr requires --json"
+          raise Hive::ConfigError, "hive refactor-patrol PR-scoped mode requires --json"
+        end
+        if @pr && @job_manifest
+          raise Hive::ConfigError, "hive refactor-patrol accepts only one of --pr or --job-manifest"
         end
         hints = [ @feature_hint, @entrypoint_hint, @path_hint, @changed_since ]
         if hints.any? { |value| !value.nil? }
@@ -246,6 +252,8 @@ module Hive
       end
 
       def resolve_manifest(entry, project_root, cfg)
+        return load_job_manifest!(entry, project_root, cfg) if @job_manifest
+
         factory = @manifest_resolver_factory || lambda do |root, registration, project_cfg|
           Hive::RefactorPatrol::PrManifestResolver.new(
             project_root: root,
@@ -256,6 +264,90 @@ module Hive
           )
         end
         factory.call(project_root, entry.fetch("name"), cfg).resolve(@pr)
+      end
+
+      # Daemon scheduling consumes the immutable artifact already published by
+      # merge intake. It never asks GitHub to reinterpret a PR number/URL.
+      def load_job_manifest!(entry, project_root, cfg)
+        path = File.expand_path(@job_manifest.to_s)
+        root = File.expand_path(File.join(project_root, ".hive-state", "refactor_patrol", "v2", "manifests"))
+        unless File.dirname(path) == root && File.file?(path)
+          raise Hive::ConfigError, "refactor patrol job manifest must be a published file under #{root}"
+        end
+
+        manifest = JSON.parse(File.binread(path))
+        required = %w[schema schema_version job_id source files changed_paths manifest_checksum]
+        unless manifest.is_a?(Hash) && manifest.keys.sort == required.sort &&
+               manifest["schema"] == Hive::RefactorPatrol::PrManifestResolver::SCHEMA &&
+               manifest["schema_version"] == Hive::RefactorPatrol::PrManifestResolver::SCHEMA_VERSION
+          raise Hive::ConfigError, "refactor patrol job manifest schema is invalid"
+        end
+        unless File.basename(path, ".json") == manifest.fetch("job_id").to_s
+          raise Hive::ConfigError, "refactor patrol job manifest id does not match its filename"
+        end
+
+        source = manifest.fetch("source")
+        source_keys = %w[url number repository registration base_branch base_sha merge_sha merged_at]
+        unless source.is_a?(Hash) && source.keys.sort == source_keys.sort &&
+               source["registration"] == entry.fetch("name") &&
+               source["base_branch"] == (cfg["default_branch"] || Hive::GitOps.new(project_root).default_branch)
+          raise Hive::ConfigError, "refactor patrol job manifest source does not match this registration"
+        end
+        unless source["number"].is_a?(Integer) && source["number"].positive? &&
+               %w[url repository registration base_branch base_sha merge_sha merged_at].all? do |key|
+                 source[key].is_a?(String) && !source[key].empty?
+               end
+          raise Hive::ConfigError, "refactor patrol job manifest source fields are invalid"
+        end
+        Time.iso8601(source.fetch("merged_at"))
+        files = manifest.fetch("files")
+        changed_paths = manifest.fetch("changed_paths")
+        unless files.is_a?(Array) && files.all? { |file| valid_manifest_file?(file) } &&
+               changed_paths == files.map { |file| file.fetch("path") } && changed_paths.uniq == changed_paths
+          raise Hive::ConfigError, "refactor patrol job manifest file scope is invalid"
+        end
+
+        checksum_payload = manifest.reject { |key, _value| key == "manifest_checksum" }
+        expected = ::Digest::SHA256.hexdigest(canonical_json(checksum_payload))
+        unless secure_checksum_equal?(manifest.fetch("manifest_checksum"), expected)
+          raise Hive::ConfigError, "refactor patrol job manifest checksum is invalid"
+        end
+        manifest
+      rescue JSON::ParserError, SystemCallError, IOError, KeyError, ArgumentError => e
+        raise Hive::ConfigError, "cannot read refactor patrol job manifest (#{e.class}: #{e.message})"
+      end
+
+      def valid_manifest_file?(file)
+        return false unless file.is_a?(Hash)
+        return false unless (file.keys - %w[path status previous_path]).empty?
+        return false unless %w[path status].all? { |key| file.key?(key) }
+        return false unless Hive::RefactorPatrol::PrManifestResolver::FILE_STATUSES.include?(file["status"])
+
+        [ file["path"], file["previous_path"] ].compact.all? do |value|
+          parts = value.to_s.split("/", -1)
+          !value.to_s.empty? && !value.to_s.start_with?("/") && !value.to_s.include?("\\") &&
+            !value.to_s.include?("\0") && parts.none? { |part| part.empty? || %w[. ..].include?(part) }
+        end
+      end
+
+      def canonical_json(value)
+        JSON.generate(canonical_json_value(value))
+      end
+
+      def canonical_json_value(value)
+        case value
+        when Hash
+          value.keys.sort.to_h { |key| [ key, canonical_json_value(value.fetch(key)) ] }
+        when Array
+          value.map { |item| canonical_json_value(item) }
+        else
+          value
+        end
+      end
+
+      def secure_checksum_equal?(actual, expected)
+        actual = actual.to_s
+        actual.bytesize == expected.bytesize && actual.bytes.zip(expected.bytes).all? { |left, right| left == right }
       end
 
       def scope_to_manifest(features)
@@ -298,7 +390,7 @@ module Hive
       end
 
       def pr_mode?
-        !@pr.nil?
+        !@pr.nil? || !@job_manifest.nil?
       end
 
       def source_pr_context

@@ -116,6 +116,11 @@ task default: :test
 | `tui/clipboard_test.rb` | `Hive::Tui::Clipboard` — Wayland/X11/macOS clipboard-command selection, image-byte/file probes, image signature and size guards, test-only fixture clipboard sequencing, timeout sentinels, and `DefaultShim.capture3` stdout/stderr/timeout behavior. Generic subprocess checks use tiny executable fixture scripts rather than nested `RbConfig.ruby` children so coverage-injected `RUBYOPT` does not dominate unrelated timeout assertions. |
 | `tui/app_test.rb`, `tui/state_source_test.rb` | `Hive::Tui::App` / `StateSource` — charm-only backend selection, synchronous startup snapshot seeding, snapshot-poller dedup/error dispatch, HUP termination hook, WINCH terminal-size seeding/dispatch, unavailable tty-size handling, signal-handler restore failure tolerance, mtime-gated refresh reuse, and liveness-fallback reparsing. |
 
+`babysitter/dry_run_env_test.rb` also pins the private-permission boundary for
+both dry-run stubs: pre-existing `0644` and `0666` audit logs are left unchanged,
+the blocked invocation is not appended, and stderr reports both the permission
+refusal and normal skip marker.
+
 ## Integration suite (`test/integration/`)
 
 | File | Covers |

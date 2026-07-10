@@ -9,6 +9,7 @@ require "hive/lock"
 require "hive/process_kill"
 require "hive/refactor_patrol/checkout_guard"
 require "hive/refactor_patrol/job_store"
+require "hive/refactor_patrol/pr_manifest"
 
 module Hive
   module Daemon
@@ -36,10 +37,11 @@ module Hive
           pid = Integer(attempt.fetch("pid"))
           pgid = Integer(attempt.fetch("pgid"))
           recorded_start = attempt.fetch("process_start_time").to_s
-          return :unresolved if pid <= 1 || pgid <= 1 || recorded_start.empty?
+          return :unresolved unless Hive::ProcessKill.valid_target_pid?(pid)
+          return :unresolved if pgid <= 1 || recorded_start.empty?
           return :resolved unless Hive::ProcessKill.pid_alive?(pid)
 
-          live_start = Hive::Lock.process_start_time(pid)
+          live_start = Hive::ProcessKill.process_start_time(pid)
           return :unresolved if live_start.to_s.empty?
           return :resolved unless live_start.to_s == recorded_start
 
@@ -61,10 +63,11 @@ module Hive
         def resolve_unattached_owner(attempt)
           pid = Integer(attempt.fetch("owner_pid"))
           recorded_start = attempt.fetch("owner_process_start_time").to_s
-          return :unresolved if pid <= 1 || recorded_start.empty?
+          return :unresolved unless Hive::ProcessKill.valid_target_pid?(pid)
+          return :unresolved if recorded_start.empty?
           return :resolved unless Hive::ProcessKill.pid_alive?(pid)
 
-          live_start = Hive::Lock.process_start_time(pid)
+          live_start = Hive::ProcessKill.process_start_time(pid)
           return :unresolved if live_start.to_s.empty?
 
           live_start.to_s == recorded_start ? :unresolved : :resolved
@@ -72,8 +75,6 @@ module Hive
           :unresolved
         end
       end
-
-      attr_reader :events
 
       def initialize(registry: -> { Hive::Config.registered_projects },
                      config_loader: ->(path) { Hive::Config.load(path) },
@@ -106,13 +107,14 @@ module Hive
       def candidates(now: Time.now)
         @events.clear
         enabled = enabled_entries
+        prune_repository_cache(enabled)
         due_by_project = enabled.to_h do |entry|
           store = store_for(entry)
           [ entry.fetch("name"), store.claimable_jobs(now: now) ]
         end
         return [] if due_by_project.values.all?(&:empty?)
 
-        duplicates, unresolved = duplicate_repositories(enabled, due_by_project: due_by_project, now: now)
+        duplicates, unresolved = duplicate_repositories(enabled)
         enabled.flat_map do |entry|
           project = entry.fetch("name")
           jobs = due_by_project.fetch(project)
@@ -180,11 +182,12 @@ module Hive
           state_file_mtime: nil,
           state_file_path: nil,
           hive_state_path: entry["hive_state_path"],
-          dispatch_token: token.merge(kind: :architecture_patrol)
+          dispatch_token: token.merge(kind: :architecture_patrol, registration: entry.fetch("name"))
         )
       rescue ReservationBlocked
         raise
-      rescue Hive::GitError, Hive::RefactorPatrol::JobStore::Error, JSON::ParserError,
+      rescue Hive::GitError, Hive::RefactorPatrol::JobStore::Error, Hive::RefactorPatrol::PrManifest::Invalid,
+             JSON::ParserError,
              SystemCallError, IOError, KeyError => e
         reason = e.is_a?(Hive::GitError) ? "checkout_guard" : "reservation_error"
         block(entry, aggregate || { "job_id" => candidate.fetch(:job_id), "source" => candidate.fetch(:source) },
@@ -260,7 +263,7 @@ module Hive
         end
       end
 
-      def duplicate_repositories(entries, due_by_project:, now:)
+      def duplicate_repositories(entries)
         resolved = {}
         unresolved = []
         entries.each do |entry|
@@ -298,6 +301,11 @@ module Hive
         @job_store_factory.call(entry.fetch("path"))
       end
 
+      def prune_repository_cache(entries)
+        current = entries.to_h { |entry| [ [ entry.fetch("name"), File.expand_path(entry.fetch("path")) ], true ] }
+        @repository_cache.delete_if { |key, _repository| !current.key?(key) }
+      end
+
       def candidate_for(entry, aggregate)
         source = aggregate.fetch("source")
         {
@@ -330,7 +338,12 @@ module Hive
       end
 
       def assert_manifest_matches!(path, aggregate)
-        manifest = JSON.parse(File.binread(path))
+        manifest = Hive::RefactorPatrol::PrManifest.load!(
+          path,
+          expected_job_id: aggregate.fetch("job_id"),
+          registration: aggregate.dig("source", "registration"),
+          default_branch: aggregate.dig("source", "base_branch")
+        )
         source = manifest.fetch("source").merge(
           "changed_paths" => manifest.fetch("changed_paths"),
           "manifest_checksum" => manifest.fetch("manifest_checksum")
@@ -342,15 +355,16 @@ module Hive
       end
 
       def entry_for_token(token)
-        registration = nil
-        Array(@registry.call).find do |entry|
-          store = store_for(entry)
-          aggregate = store.read_job(token.fetch(:job_id))
-          registration = aggregate.dig("source", "registration")
-          entry.fetch("name") == registration
-        rescue Hive::RefactorPatrol::JobStore::RecordNotFound, KeyError
-          false
-        end || raise(Hive::RefactorPatrol::JobStore::RecordNotFound, "claimed refactor patrol job registration not found")
+        registration = token.fetch(:registration)
+        entry = Array(@registry.call).find { |candidate| candidate.fetch("name") == registration }
+        raise Hive::RefactorPatrol::JobStore::RecordNotFound, "claimed refactor patrol job registration not found" unless entry
+
+        aggregate = store_for(entry).read_job(token.fetch(:job_id))
+        unless aggregate.dig("source", "registration") == registration
+          raise Hive::RefactorPatrol::JobStore::InconsistentRecord,
+                "claimed refactor patrol job registration does not match its token"
+        end
+        entry
       end
 
       def completion_failure_reason(exit_code, envelope)

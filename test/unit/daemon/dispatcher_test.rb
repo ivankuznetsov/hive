@@ -171,7 +171,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       @completed = []
     end
 
-    def events
+    def drain_events
       []
     end
 

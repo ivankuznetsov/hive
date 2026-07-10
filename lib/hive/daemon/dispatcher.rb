@@ -368,11 +368,7 @@ module Hive
         else
           @patrol_scheduler&.tick(now: now)
         end
-        architecture_events = if @refactor_patrol_scheduler&.respond_to?(:drain_events)
-          @refactor_patrol_scheduler.drain_events
-        else
-          @refactor_patrol_scheduler&.events
-        end
+        architecture_events = @refactor_patrol_scheduler&.drain_events
         Array(architecture_events).each do |event|
           @logger.event(:architecture_patrol_blocked, **event.reject { |key, _value| key == :status })
         end

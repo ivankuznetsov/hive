@@ -214,7 +214,7 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
   end
 
   def manifest(job_id:, number:, merged_at:, registration:)
-    {
+    payload = {
       "schema" => "hive-refactor-patrol-pr-manifest", "schema_version" => 2,
       "job_id" => job_id,
       "source" => {
@@ -224,8 +224,9 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
         "merged_at" => merged_at.utc.iso8601
       },
       "files" => [ { "path" => "lib/demo.rb", "status" => "modified" } ],
-      "changed_paths" => [ "lib/demo.rb" ], "manifest_checksum" => "a" * 64
+      "changed_paths" => [ "lib/demo.rb" ]
     }
+    payload.merge("manifest_checksum" => Hive::RefactorPatrol::PrManifest.checksum(payload))
   end
 
   def publish_manifest(dir, manifest)

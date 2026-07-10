@@ -68,11 +68,13 @@ module Hive
         end
         changed_set = changed.to_set
         candidates = documentation_changes_provided? ? changed : tracked
+        tracked_by_group = tracked.group_by { |path| documentation_group(path) }
+        root_docs = root_document_paths(tracked)
         candidates.uniq.group_by { |path| documentation_group(path) }.sort.flat_map do |group, paths|
           ordered = paths.sort
           owned_slices = documentation_changes_provided? ? ordered.each_slice(max_owned_files).to_a : [ capped(ordered, max_owned_files) ]
-          unchanged_group_docs = tracked.select { |path| documentation_group(path) == group && !changed_set.include?(path) }
-          context = capped((root_document_paths(tracked) + unchanged_group_docs).uniq, max_context_files)
+          unchanged_group_docs = Array(tracked_by_group[group]).reject { |path| changed_set.include?(path) }
+          context = capped((root_docs + unchanged_group_docs).uniq, max_context_files)
 
           owned_slices.each_with_index.map do |owned, index|
             id_group = index.zero? ? group : "#{group}/part-#{index + 1}"

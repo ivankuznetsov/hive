@@ -100,12 +100,13 @@ module Hive
 
         items = fetch_all(repository, branch, previous, project_root, cfg, now)
         if previous.nil?
+          high_water = maximum_occurrence(items)
           seeded = build_state(
             registration: registration,
             repository: repository,
             default_branch: branch,
-            high_water: maximum_occurrence(items),
-            overlap_occurrences: overlap_occurrences(items, maximum_occurrence(items)),
+            high_water: high_water,
+            overlap_occurrences: overlap_occurrences(items, high_water),
             seeded_at: now,
             updated_at: now
           )
@@ -123,7 +124,7 @@ module Hive
         end
 
         high_water = [ previous.fetch("high_water"), maximum_occurrence(items) ].compact.map do |item|
-          normalized_occurrence(item)
+          occurrence(item)
         end.max_by do |item|
           occurrence_tuple(item)
         end
@@ -418,14 +419,6 @@ module Hive
 
       def normalize_timestamp(value)
         Time.iso8601(value.to_s).utc.iso8601
-      end
-
-      def normalized_occurrence(item)
-        {
-          "merged_at" => normalize_timestamp(item.fetch("merged_at")),
-          "pr_number" => item.fetch("pr_number"),
-          "merge_sha" => item.fetch("merge_sha")
-        }
       end
 
       def normalized_summary(item)

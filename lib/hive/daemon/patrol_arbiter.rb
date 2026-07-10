@@ -1,5 +1,4 @@
 require "json"
-require "fileutils"
 require "time"
 require "hive/atomic_file"
 require "hive/paths"
@@ -98,7 +97,6 @@ module Hive
       end
 
       def persist(state)
-        FileUtils.mkdir_p(File.dirname(@state_path))
         Hive::AtomicFile.write(@state_path, "#{JSON.pretty_generate(state)}\n", mode: 0o600)
         File.open(File.dirname(@state_path), File::RDONLY) { |directory| directory.fsync }
       rescue Errno::EINVAL, Errno::ENOTSUP, Errno::EBADF

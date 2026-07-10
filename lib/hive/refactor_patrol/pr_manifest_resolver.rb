@@ -1,19 +1,19 @@
-require "digest"
 require "fileutils"
 require "json"
 require "time"
 require "uri"
 require "hive/atomic_file"
 require "hive/gh"
+require "hive/refactor_patrol/pr_manifest"
 
 module Hive
   module RefactorPatrol
     # Resolves one merged PR into an immutable, checksummed scope manifest.
     # Manual replay and future daemon intake share this exact boundary.
     class PrManifestResolver
-      SCHEMA = "hive-refactor-patrol-pr-manifest".freeze
-      SCHEMA_VERSION = 2
-      FILE_STATUSES = %w[added removed modified renamed copied changed unchanged].freeze
+      SCHEMA = PrManifest::SCHEMA
+      SCHEMA_VERSION = PrManifest::SCHEMA_VERSION
+      FILE_STATUSES = PrManifest::FILE_STATUSES
 
       class Conflict < Hive::ConfigError; end
 
@@ -97,11 +97,9 @@ module Hive
       end
 
       def validate_relative_path!(path, number)
-        value = path.to_s
-        components = value.split("/", -1)
-        unsafe = value.empty? || value.start_with?("/") || value.include?("\\") || value.include?("\0") ||
-                 components.any? { |part| part.empty? || part == "." || part == ".." }
-        raise Hive::GhError, "PR #{number} contains unsafe repository path #{value.inspect}" if unsafe
+        return if PrManifest.valid_relative_path?(path)
+
+        raise Hive::GhError, "PR #{number} contains unsafe repository path #{path.to_s.inspect}"
       end
 
       def build_manifest(details)
@@ -115,17 +113,8 @@ module Hive
           "merge_sha" => details.fetch("merge_sha"),
           "merged_at" => details.fetch("merged_at")
         }
-        occurrence = [ @registration, source.fetch("repository"), source.fetch("number"), source.fetch("merge_sha") ].join("\0")
         files = details.fetch("files").map(&:compact)
-        payload = {
-          "schema" => SCHEMA,
-          "schema_version" => SCHEMA_VERSION,
-          "job_id" => "pr-#{source.fetch('number')}-#{::Digest::SHA256.hexdigest(occurrence)[0, 16]}",
-          "source" => source,
-          "files" => files,
-          "changed_paths" => files.map { |file| file.fetch("path") }
-        }
-        payload.merge("manifest_checksum" => ::Digest::SHA256.hexdigest(canonical_json(payload)))
+        PrManifest.build(source: source, files: files)
       end
 
       def publish!(manifest)
@@ -179,21 +168,6 @@ module Hive
         Hive::AtomicFile.write(path, "#{JSON.pretty_generate(evidence)}\n", mode: 0o600)
         File.open(directory, File::RDONLY) { |dir| dir.fsync }
         path
-      end
-
-      def canonical_json(value)
-        JSON.generate(canonical_json_value(value))
-      end
-
-      def canonical_json_value(value)
-        case value
-        when Hash
-          value.keys.sort.to_h { |key| [ key, canonical_json_value(value.fetch(key)) ] }
-        when Array
-          value.map { |item| canonical_json_value(item) }
-        else
-          value
-        end
       end
     end
   end

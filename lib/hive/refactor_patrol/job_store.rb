@@ -3,6 +3,7 @@ require "fileutils"
 require "digest"
 require "time"
 require "hive/atomic_file"
+require "hive/refactor_patrol/pr_manifest"
 
 module Hive
   module RefactorPatrol
@@ -98,29 +99,31 @@ module Hive
         raise CorruptRecord, "refactor patrol manifest is missing #{e.key.inspect}"
       end
 
-      # Scheduling is owned by U6; this query only exposes independently due
-      # intake jobs so one old backoff-bound occurrence cannot hide later work.
+      # Expose independently due intake jobs so one old backoff-bound
+      # occurrence cannot hide later work.
       def eligible_jobs(now: Time.now)
-        jobs.select do |aggregate|
+        eligible_from(jobs, now: now).sort_by { |aggregate| scheduling_key(aggregate) }
+      rescue ArgumentError => e
+        raise InconsistentRecord, "refactor patrol job has invalid scheduling timestamp (#{e.message})"
+      end
+
+      def eligible_from(records, now:)
+        records.select do |aggregate|
           next false if aggregate.fetch("complete")
           next false unless %w[queued blocked].include?(aggregate.fetch("state"))
 
           deadline = aggregate.fetch("attempts").reverse_each.filter_map { |attempt| attempt["next_eligible_at"] }.first
           deadline.nil? || Time.iso8601(deadline) <= now
-        end.sort_by do |aggregate|
-          source = aggregate.fetch("source")
-          merged_at = source["merged_at"] ? Time.iso8601(source.fetch("merged_at")).utc : Time.at(0).utc
-          [ merged_at, source.fetch("number"), source.fetch("merge_sha"), aggregate.fetch("job_id") ]
         end
-      rescue ArgumentError => e
-        raise InconsistentRecord, "refactor patrol job has invalid scheduling timestamp (#{e.message})"
       end
+      private :eligible_from
 
       # Includes an expired analyzing claim so a restarted daemon can prove
       # the prior process group gone (or terminate it) before fencing a new
       # generation. The claim CAS remains authoritative.
       def claimable_jobs(now: Time.now)
-        (eligible_jobs(now: now) + jobs.select do |aggregate|
+        records = jobs
+        (eligible_from(records, now: now) + records.select do |aggregate|
           next false unless aggregate.fetch("state") == "analyzing"
 
           attempt = active_discovery_attempt(aggregate)
@@ -464,8 +467,8 @@ module Hive
       end
 
       def source_from_manifest(manifest)
-        unless manifest.is_a?(Hash) && manifest["schema"] == "hive-refactor-patrol-pr-manifest" &&
-               manifest["schema_version"] == SCHEMA_VERSION
+        unless manifest.is_a?(Hash) && manifest["schema"] == PrManifest::SCHEMA &&
+               manifest["schema_version"] == PrManifest::SCHEMA_VERSION
           raise CorruptRecord, "refactor patrol intake requires a v2 PR manifest"
         end
 

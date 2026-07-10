@@ -17,7 +17,7 @@ module Hive
           raise Hive::GitError, "registered checkout does not contain merge commit #{merge_sha}"
         end
 
-        { "analysis_sha" => analysis_sha, "branch" => @default_branch, "status" => "" }.freeze
+        { "analysis_sha" => analysis_sha }.freeze
       end
 
       def assert_unchanged!(snapshot)

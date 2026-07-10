@@ -1,5 +1,6 @@
 require "json"
 require "open3"
+require "set"
 require "time"
 require "hive/config"
 require "hive/git_ops"
@@ -107,9 +108,9 @@ module Hive
       def score_features(features, project_root, cfg)
         changed = changed_files(project_root)
         leverage = @leverage_factory.call(project_root, cfg)
+        baseline = pr_mode? ? @manifest.dig("source", "base_sha") : @changed_since
         features.to_h do |feature|
-          boost = !Array(changed).empty? && (Array(feature.owned_files) & Array(changed)).any?
-          baseline = pr_mode? ? @manifest.dig("source", "base_sha") : @changed_since
+          boost = changed_path?(feature.owned_files, changed)
           [ feature.id, leverage.score(feature, changed_since: baseline, changed_boost: boost) ]
         end
       end
@@ -251,11 +252,20 @@ module Hive
       end
 
       def scope_to_manifest(features)
-        paths = @manifest.fetch("changed_paths")
         features.select do |feature|
           boundary = Array(feature.owned_files) + Array(feature.entrypoints)
-          !(boundary & paths).empty?
+          boundary.any? { |path| manifest_changed_paths.include?(path) }
         end
+      end
+
+      def changed_path?(paths, changed)
+        return Array(paths).any? { |path| manifest_changed_paths.include?(path) } if pr_mode?
+
+        !Array(changed).empty? && (Array(paths) & Array(changed)).any?
+      end
+
+      def manifest_changed_paths
+        @manifest_changed_paths ||= @manifest.fetch("changed_paths").to_set
       end
 
       def build_v2_payload(entry, project_root, features, theses, suppressed, reviewer)

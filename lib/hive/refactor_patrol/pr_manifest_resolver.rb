@@ -1,9 +1,9 @@
 require "digest"
 require "fileutils"
 require "json"
-require "securerandom"
 require "time"
 require "uri"
+require "hive/atomic_file"
 require "hive/gh"
 
 module Hive
@@ -116,13 +116,14 @@ module Hive
           "merged_at" => details.fetch("merged_at")
         }
         occurrence = [ @registration, source.fetch("repository"), source.fetch("number"), source.fetch("merge_sha") ].join("\0")
+        files = details.fetch("files").map(&:compact)
         payload = {
           "schema" => SCHEMA,
           "schema_version" => SCHEMA_VERSION,
           "job_id" => "pr-#{source.fetch('number')}-#{::Digest::SHA256.hexdigest(occurrence)[0, 16]}",
           "source" => source,
-          "files" => details.fetch("files").map { |file| file.compact },
-          "changed_paths" => details.fetch("files").map { |file| file.fetch("path") }
+          "files" => files,
+          "changed_paths" => files.map { |file| file.fetch("path") }
         }
         payload.merge("manifest_checksum" => ::Digest::SHA256.hexdigest(canonical_json(payload)))
       end
@@ -140,20 +141,12 @@ module Hive
             raise Conflict, "refactor patrol manifest conflict for #{manifest.fetch('job_id')}"
           end
 
-          tmp = File.join(root, ".#{File.basename(path)}.tmp.#{Process.pid}.#{SecureRandom.hex(4)}")
-          File.open(tmp, File::WRONLY | File::CREAT | File::EXCL, 0o600) do |file|
-            file.write("#{JSON.pretty_generate(manifest)}\n")
-            file.flush
-            file.fsync
-          end
-          File.rename(tmp, path)
+          Hive::AtomicFile.write(path, "#{JSON.pretty_generate(manifest)}\n", mode: 0o600)
           File.open(root, File::RDONLY) { |dir| dir.fsync }
         end
         manifest
       rescue JSON::ParserError => e
         raise Conflict, "refactor patrol manifest is corrupt at #{path}: #{e.message}"
-      ensure
-        FileUtils.rm_f(tmp) if defined?(tmp) && tmp && File.exist?(tmp)
       end
 
       def canonical_json(value)

@@ -68,17 +68,19 @@ module Hive
       end
 
       def self.error_envelope(error, version:, error_kind:, job_id: nil, source_pr: nil)
-        base = {
-          "schema" => "hive-refactor-patrol",
-          "schema_version" => version,
-          "ok" => false,
-          "error_class" => error.class.name.split("::").last,
-          "error_kind" => error_kind.to_s,
-          "exit_code" => error.respond_to?(:exit_code) ? error.exit_code : Hive::ExitCodes::GENERIC,
-          "message" => error.message
-        }
+        unless [ V1_SCHEMA_VERSION, V2_SCHEMA_VERSION ].include?(version)
+          raise ArgumentError, "unsupported refactor patrol report version #{version}"
+        end
+
+        base = Hive::Schemas::ErrorEnvelope.build(
+          schema: "hive-refactor-patrol",
+          error: error,
+          error_kind: error_kind.to_s
+        ).slice(
+          "schema", "schema_version", "ok", "error_class", "error_kind", "exit_code", "message"
+        )
+        base["schema_version"] = version
         return base if version == V1_SCHEMA_VERSION
-        raise ArgumentError, "unsupported refactor patrol report version #{version}" unless version == V2_SCHEMA_VERSION
 
         base.merge(
           "job_id" => job_id.to_s,

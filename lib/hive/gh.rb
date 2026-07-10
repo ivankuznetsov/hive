@@ -174,14 +174,16 @@ module Hive
       unless pages.is_a?(Array) && pages.all? { |page| page.is_a?(Array) }
         raise Hive::GhError, "`gh api` returned incomplete file pages for PR #{number}"
       end
-      files = pages.flatten.map do |file|
-        raise Hive::GhError, "`gh api` returned a non-object file for PR #{number}" unless file.is_a?(Hash)
+      files = pages.flat_map do |page|
+        page.map do |file|
+          raise Hive::GhError, "`gh api` returned a non-object file for PR #{number}" unless file.is_a?(Hash)
 
-        {
-          "path" => file["filename"].to_s,
-          "status" => file["status"].to_s,
-          "previous_path" => file["previous_filename"].to_s.empty? ? nil : file["previous_filename"].to_s
-        }.compact
+          {
+            "path" => file["filename"].to_s,
+            "status" => file["status"].to_s,
+            "previous_path" => file["previous_filename"].to_s.empty? ? nil : file["previous_filename"].to_s
+          }.compact
+        end
       end
 
       {

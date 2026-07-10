@@ -2,6 +2,14 @@
 <%# stage reads the prior stages' outputs and produces its own. Quoted id for -%>
 <%# the same YAML-coercion reason as the blank template. -%>
 id: "<%= id %>"
+# To publish this workflow, uncomment and complete this block:
+# metadata:
+#   version: 1.0.0
+#   author: Your Name
+#   description: What this workflow does
+#   minimum_hive_version: <%= Hive::VERSION %>
+#   # readme: ./<%= id %>/README.source.md
+#   # assets: [./<%= id %>/assets/example.txt]
 stages:
   - name: inbox
     kind: terminal

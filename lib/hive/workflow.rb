@@ -1,9 +1,9 @@
 module Hive
-  Workflow = Data.define(:id, :stages) do
-    def initialize(id:, stages:)
+  Workflow = Data.define(:id, :stages, :metadata) do
+    def initialize(id:, stages:, metadata: nil)
       # Shallow freeze: the element Stages stay shared with the caller, which is
       # safe only because Stage is itself frozen. This dup does NOT deep-copy.
-      super(id: id, stages: stages.dup.freeze)
+      super(id: id, stages: stages.dup.freeze, metadata: metadata)
       validate_structure!
     end
   end
@@ -25,6 +25,27 @@ module Hive
     # runners (council.rb round-tracking + triage.rb path building) so the value
     # can't drift across those copies.
     DEFAULT_TRIAGE_OUTPUT = "reviews/triage.md"
+
+    Metadata = Data.define(
+      :version,
+      :author,
+      :description,
+      :minimum_hive_version,
+      :readme,
+      :assets
+    ) do
+      def initialize(version: nil, author: nil, description: nil,
+                     minimum_hive_version: nil, readme: nil, assets: [])
+        super(
+          version: version,
+          author: author,
+          description: description,
+          minimum_hive_version: minimum_hive_version,
+          readme: readme,
+          assets: assets.dup.freeze
+        )
+      end
+    end
 
     def each(&) = stages.each(&)
 

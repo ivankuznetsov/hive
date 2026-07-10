@@ -12,7 +12,9 @@ module Hive
     # mid-flight) stay as arguments because they vary within a single parse.
     class DescriptorParser
       SAFE_SLUG = /\A[a-z0-9][a-z0-9-]*\z/
-      TOP_LEVEL_KEYS = %w[id stages].freeze
+      TOP_LEVEL_KEYS = %w[id metadata stages].freeze
+      METADATA_KEYS = %w[version author description minimum_hive_version readme assets].freeze
+      SEMVER = /\A(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?\z/
       STAGE_KEYS = %w[
         name
         kind
@@ -70,11 +72,12 @@ module Hive
         reject_unknown_keys!(descriptor, TOP_LEVEL_KEYS, label: "descriptor")
         id = parse_id(descriptor["id"])
         validate_filename_id!(id)
+        metadata = parse_metadata(descriptor["metadata"])
         stages = parse_stages(descriptor["stages"], id: id)
         validate_terminal_last_stage!(stages)
         validate_deliverable_position!(stages)
 
-        build_workflow(id, stages)
+        build_workflow(id, stages, metadata)
       end
 
       private
@@ -117,8 +120,8 @@ module Hive
       # Wrapping the whole parse body (as before) would mislabel an unrelated
       # wrong-kwarg bug in a future Stage.new/Workflow.new signature change as a
       # descriptor error, hiding a genuine code bug from the maintainer.
-      def build_workflow(id, stages)
-        Hive::Workflow.new(id: id.to_sym, stages: stages)
+      def build_workflow(id, stages, metadata)
+        Hive::Workflow.new(id: id.to_sym, stages: stages, metadata: metadata)
       rescue ArgumentError => e
         raise descriptor_error(e.message)
       end
@@ -128,6 +131,51 @@ module Hive
         return id if SAFE_SLUG.match?(id)
 
         raise descriptor_error("id #{id.inspect} must match #{SAFE_SLUG.source}")
+      end
+
+      def parse_metadata(data)
+        return nil if data.nil?
+
+        metadata = stringify_hash(data, label: "metadata")
+        reject_unknown_keys!(metadata, METADATA_KEYS, label: "metadata")
+        Hive::Workflow::Metadata.new(
+          version: parse_semver(metadata["version"], label: "metadata version"),
+          author: optional_string(metadata["author"], label: "metadata author"),
+          description: optional_string(metadata["description"], label: "metadata description"),
+          minimum_hive_version: parse_semver(
+            metadata["minimum_hive_version"],
+            label: "metadata minimum_hive_version"
+          ),
+          readme: parse_metadata_file(metadata["readme"], label: "metadata readme"),
+          assets: parse_metadata_assets(metadata["assets"])
+        )
+      end
+
+      def parse_semver(value, label:)
+        raw = optional_string(value, label: label)
+        return nil if raw.nil?
+        return raw if SEMVER.match?(raw)
+
+        raise descriptor_error("#{label} #{raw.inspect} must be a strict semantic version")
+      end
+
+      def parse_metadata_assets(value)
+        return [] if value.nil?
+        raise descriptor_error("metadata assets must be an array") unless value.is_a?(Array)
+
+        value.each_with_index.map do |asset, index|
+          parse_metadata_file(asset, label: "metadata assets[#{index}]", required: true)
+        end.freeze
+      end
+
+      def parse_metadata_file(value, label:, required: false)
+        raw = required ? required_string(value, label: label) : optional_string(value, label: label)
+        return nil if raw.nil?
+
+        resolved = File.expand_path(raw, File.dirname(@path))
+        return resolved if File.file?(resolved) && File.readable?(resolved)
+
+        raise descriptor_error("#{label} #{raw.inspect} must reference a readable file (#{resolved})")
       end
 
       def validate_filename_id!(id)

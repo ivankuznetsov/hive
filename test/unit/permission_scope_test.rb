@@ -186,6 +186,38 @@ class PermissionScopeTest < Minitest::Test
     end
   end
 
+  def test_shell_justification_requires_explicit_scoped_bash
+    valid_specs = [
+      {
+        "preset" => "scoped", "bash" => true,
+        "shell_justification" => "Runs a pinned project script"
+      },
+      {
+        "preset" => "scoped", "tools" => %w[Read Bash],
+        "shell_justification" => "Runs the test suite"
+      }
+    ]
+    valid_specs.each do |spec|
+      assert Hive::PermissionScope.validate!(spec, stage: "review")
+      assert Hive::PermissionScope.explicit_bash?(spec)
+      assert_equal spec.fetch("shell_justification"), Hive::PermissionScope.shell_justification(spec)
+    end
+
+    invalid_specs = [
+      [ { "preset" => "scoped", "bash" => true, "shell_justification" => " " }, /non-empty String/ ],
+      [ { "preset" => "scoped", "bash" => false, "shell_justification" => "Not granted" }, /explicitly grant Bash/ ],
+      [ { "preset" => "scoped", "tools" => %w[Read], "shell_justification" => "Not granted" }, /explicitly grant Bash/ ],
+      [ { "preset" => "yolo", "shell_justification" => "Unrestricted" }, /unknown key/ ],
+      [ { "preset" => "read-only", "shell_justification" => "No shell" }, /unknown key/ ]
+    ]
+    invalid_specs.each do |spec, message|
+      error = assert_raises(Hive::ConfigError) do
+        Hive::PermissionScope.validate!(spec, stage: "review")
+      end
+      assert_match message, error.message
+    end
+  end
+
   # validate! pushes the parse-time check TOWARD resolve: an unknown `~user`
   # in `dirs:` can never resolve (resolve_dirs raises ArgumentError), so it must
   # be rejected at LOAD time — when the descriptor parser calls validate! —

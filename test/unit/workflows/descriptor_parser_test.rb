@@ -55,6 +55,143 @@ class WorkflowsDescriptorParserTest < Minitest::Test
     end
   end
 
+  def test_publication_metadata_parses_semver_and_resolves_declared_files
+    with_tmp_dir do |dir|
+      workflow_dir = File.join(dir, "publishable")
+      FileUtils.mkdir_p(File.join(workflow_dir, "assets"))
+      File.write(File.join(workflow_dir, "README.source.md"), "Custom readme\n")
+      File.write(File.join(workflow_dir, "assets", "diagram.txt"), "diagram\n")
+      path = write_descriptor(dir, "publishable", <<~YAML)
+        id: publishable
+        metadata:
+          version: 1.2.3-rc.1+build.7
+          author: Hive Authors
+          description: A deterministic review workflow
+          minimum_hive_version: 0.3.7
+          readme: ./publishable/README.source.md
+          assets:
+            - ./publishable/assets/diagram.txt
+        stages:
+          - name: done
+            kind: terminal
+            state_file: done.md
+      YAML
+
+      metadata = Hive::Workflows::DescriptorParser.parse_file(path).metadata
+
+      assert_equal "1.2.3-rc.1+build.7", metadata.version
+      assert_equal "Hive Authors", metadata.author
+      assert_equal "A deterministic review workflow", metadata.description
+      assert_equal "0.3.7", metadata.minimum_hive_version
+      assert_equal File.join(workflow_dir, "README.source.md"), metadata.readme
+      assert_equal [ File.join(workflow_dir, "assets", "diagram.txt") ], metadata.assets
+      assert metadata.frozen?
+      assert metadata.assets.frozen?
+    end
+  end
+
+  def test_metadata_is_optional_and_may_be_incomplete_until_publish
+    ordinary = Hive::Workflows::DescriptorParser.parse_hash(
+      {
+        "id" => "ordinary",
+        "stages" => [ { "name" => "done", "kind" => "terminal", "state_file" => "done.md" } ]
+      },
+      path: "/tmp/ordinary.yml"
+    )
+    partial = Hive::Workflows::DescriptorParser.parse_hash(
+      {
+        "id" => "partial",
+        "metadata" => { "description" => "Still runnable" },
+        "stages" => [ { "name" => "done", "kind" => "terminal", "state_file" => "done.md" } ]
+      },
+      path: "/tmp/partial.yml"
+    )
+
+    assert_nil ordinary.metadata
+    assert_equal "Still runnable", partial.metadata.description
+    assert_nil partial.metadata.version
+    assert_empty partial.metadata.assets
+  end
+
+  def test_metadata_rejects_unknown_keys_invalid_values_and_unreadable_files
+    base = {
+      "id" => "bad",
+      "stages" => [ { "name" => "done", "kind" => "terminal", "state_file" => "done.md" } ]
+    }
+    cases = [
+      [ { "unknown" => true }, /metadata contains unknown key/ ],
+      [ { "version" => "01.2.3" }, /metadata version.*semantic version/ ],
+      [ { "minimum_hive_version" => "1.2" }, /minimum_hive_version.*semantic version/ ],
+      [ { "author" => " " }, /metadata author must be a non-empty string/ ],
+      [ { "description" => "" }, /metadata description must be a non-empty string/ ],
+      [ { "readme" => "./missing.md" }, /metadata readme.*readable file/ ],
+      [ { "assets" => "./asset.txt" }, /metadata assets must be an array/ ],
+      [ { "assets" => [ 42 ] }, /metadata assets\[0\] must be a non-empty string/ ]
+    ]
+
+    cases.each do |metadata, message|
+      error = assert_config_error(base.merge("metadata" => metadata), path: "/tmp/bad.yml")
+      assert_match message, error.message
+    end
+
+    with_tmp_dir do |dir|
+      workflow_dir = File.join(dir, "bad")
+      FileUtils.mkdir_p(File.join(workflow_dir, "directory"))
+      error = assert_config_error(
+        base.merge("metadata" => { "assets" => [ "./bad/directory" ] }),
+        path: File.join(dir, "bad.yml")
+      )
+      assert_match(/metadata assets\[0\].*readable file/, error.message)
+    end
+  end
+
+  def test_shell_justification_survives_stage_reviewer_and_revise_permissions
+    workflow = Hive::Workflows::DescriptorParser.parse_hash(
+      {
+        "id" => "shell-flow",
+        "stages" => [
+          {
+            "name" => "work", "kind" => "agent", "state_file" => "work.md", "skill" => "/work",
+            "permissions" => {
+              "preset" => "scoped", "bash" => true,
+              "shell_justification" => "Runs the pinned local formatter"
+            }
+          },
+          {
+            "name" => "review", "kind" => "council", "state_file" => "review.md",
+            "reviewers" => [
+              {
+                "name" => "shell-review", "prompt" => "Review.",
+                "permissions" => {
+                  "preset" => "scoped", "tools" => [ "Read", "Bash" ],
+                  "shell_justification" => "Executes the repository test script"
+                }
+              }
+            ],
+            "council" => {
+              "max_rounds" => 2, "exit_rule" => "consensus",
+              "revise" => {
+                "skill" => "/revise",
+                "permissions" => {
+                  "preset" => "scoped", "bash" => true,
+                  "shell_justification" => "Applies generated patches"
+                }
+              }
+            }
+          }
+        ]
+      },
+      path: "/tmp/shell-flow.yml"
+    )
+
+    assert_equal "Runs the pinned local formatter",
+                 workflow.stage_named("work").permissions.fetch("shell_justification")
+    assert_equal "Executes the repository test script",
+                 workflow.stage_named("review").reviewers.first.permissions.fetch("shell_justification")
+    assert_equal "Applies generated patches",
+                 workflow.stage_named("review").council.revise.permissions.fetch("shell_justification")
+  end
+
   def test_skill_backed_agent_stage_is_valid
     workflow = Hive::Workflows::DescriptorParser.parse_hash(
       {

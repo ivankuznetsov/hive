@@ -37,6 +37,10 @@ class WorkflowNewTest < Minitest::Test
       assert_includes stdout.string, "hive new #{File.basename(project_root)} --workflow my-flow"
 
       assert File.file?(descriptor_path)
+      descriptor_text = File.read(descriptor_path)
+      assert_includes descriptor_text, "# metadata:"
+      refute YAML.safe_load(descriptor_text).key?("metadata"),
+             "publication guidance must stay commented until the author fills it in"
       assert_equal "Edit this file to define what the `work` stage should do.\n", File.read(instruction_path)
 
       workflow = Hive::Workflows::DescriptorParser.parse_file(descriptor_path)

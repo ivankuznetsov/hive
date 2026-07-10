@@ -3,6 +3,25 @@ require "hive/workflow"
 require "hive/workflows/registry"
 
 class WorkflowTest < Minitest::Test
+  def test_workflow_metadata_is_optional_and_frozen
+    stage = Hive::Workflow::Stage.new(name: "done", index: 1, state_file: "done.md", kind: :inert)
+    metadata = Hive::Workflow::Metadata.new(
+      version: "1.2.3",
+      author: "Hive Authors",
+      description: "A publishable workflow",
+      minimum_hive_version: "0.3.7",
+      readme: nil,
+      assets: [ "/tmp/example.txt" ]
+    )
+
+    workflow = Hive::Workflow.new(id: :publishable, stages: [ stage ], metadata: metadata)
+
+    assert_same metadata, workflow.metadata
+    assert workflow.metadata.frozen?
+    assert workflow.metadata.assets.frozen?
+    assert_nil Hive::Workflow.new(id: :ordinary, stages: [ stage ]).metadata
+  end
+
   def test_stage_dir_joins_index_and_name
     stage = Hive::Workflow::Stage.new(name: "execute", index: 4, state_file: "task.md")
 

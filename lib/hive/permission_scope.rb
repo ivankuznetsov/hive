@@ -46,7 +46,7 @@ module Hive
     MAP_KEYS = {
       "yolo" => %w[preset],
       "read-only" => %w[preset],
-      "scoped" => %w[preset tools dirs bash]
+      "scoped" => %w[preset tools dirs bash shell_justification]
     }.freeze
 
     # Nullability is asymmetric by design: under `yolo`, `allowed_tools`
@@ -165,6 +165,16 @@ module Hive
       end
     end
 
+    def explicit_bash?(spec)
+      parsed = parse_spec(spec, stage: nil)
+      parsed.fetch("preset") == "scoped" && grants_bash?(parsed)
+    end
+
+    def shell_justification(spec)
+      parsed = parse_spec(spec, stage: nil)
+      parsed["shell_justification"]
+    end
+
     # Build the `--allowedTools` / `--disallowedTools` CSV from a tool list.
     #
     # Param contract — accepts CSV String | Array | nil. Two historical
@@ -272,6 +282,7 @@ module Hive
       validate_tools!(normalized["tools"], stage: stage, original: original) if normalized.key?("tools")
       validate_dirs!(normalized["dirs"], stage: stage, original: original) if normalized.key?("dirs")
       validate_bash!(normalized["bash"], stage: stage, original: original) if normalized.key?("bash")
+      validate_shell_justification!(normalized, stage: stage, original: original)
 
       return if normalized.key?("tools") || normalized.key?("bash")
 
@@ -322,6 +333,26 @@ module Hive
       return if bash == true || bash == false
 
       raise invalid_spec(stage, original, "bash: must be true or false")
+    end
+
+    def validate_shell_justification!(normalized, stage:, original:)
+      return unless normalized.key?("shell_justification")
+
+      justification = normalized["shell_justification"]
+      unless justification.is_a?(String) && !justification.strip.empty?
+        raise invalid_spec(stage, original, "shell_justification: must be a non-empty String")
+      end
+      return if grants_bash?(normalized)
+
+      raise invalid_spec(
+        stage,
+        original,
+        "shell_justification: is valid only when scoped permissions explicitly grant Bash"
+      )
+    end
+
+    def grants_bash?(normalized)
+      normalized["bash"] == true || Array(normalized["tools"]).map(&:to_s).include?("Bash")
     end
 
     def build_scope(preset)

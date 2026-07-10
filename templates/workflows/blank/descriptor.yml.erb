@@ -2,6 +2,14 @@
 <%# (no/yes/on/off/null/...) would otherwise be coerced to a boolean/nil by -%>
 <%# YAML.safe_load and fail DescriptorParser's required-string check. -%>
 id: "<%= id %>"
+# To publish this workflow, uncomment and complete this block:
+# metadata:
+#   version: 1.0.0
+#   author: Your Name
+#   description: What this workflow does
+#   minimum_hive_version: <%= Hive::VERSION %>
+#   # readme: ./<%= id %>/README.source.md
+#   # assets: [./<%= id %>/assets/example.txt]
 stages:
   - name: inbox
     kind: terminal

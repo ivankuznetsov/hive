@@ -71,8 +71,17 @@ Rules:
   `kind: council`. Descriptor values override project stage config; Claude
   stages receive `model` / `effort` as CLI flags.
 - `budget_usd:` and `timeout_sec:` provide optional resource defaults for
-  `kind: agent` and `kind: council`; project stage config takes precedence.
-  `budget_usd` must be a positive number and `timeout_sec` a positive integer.
+  `kind: agent` and `kind: council`; explicitly authored, non-null project stage
+  config takes precedence. Values inherited from Hive's merged config defaults do not
+  shadow descriptor defaults. `budget_usd` must be a positive finite number and
+  `timeout_sec` a positive integer.
+  - Limits apply to each agent spawn, not to the aggregate cost or duration of
+    a multi-reviewer, multi-round council.
+  - `budget_usd` is enforced only when the selected agent profile exposes a
+    native budget flag. Hive writes `config-warnings.log` when a profile cannot
+    enforce it; `timeout_sec` remains enforced for every agent spawn.
+  - Council command reviewers and command revisers also use `timeout_sec`; Hive
+    terminates their process group when the limit expires.
 - `skill:`, `instruction:`, `agent:`, `model:`, `effort:`, `budget_usd:`,
   `timeout_sec:`, `permissions:`, `input:`, `reviewers:`, `council:`, and
   `deliverable:` are rejected on `kind: terminal` stages.

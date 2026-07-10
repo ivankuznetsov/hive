@@ -1,4 +1,5 @@
 require "test_helper"
+require "hive/config"
 require "hive/markers"
 require "hive/stages/agent"
 
@@ -310,6 +311,72 @@ class StagesAgentTest < Minitest::Test
     end
   end
 
+  def test_descriptor_limits_override_merged_defaults_when_project_does_not_set_them
+    with_tmp_dir do |project|
+      descriptor = resource_workflow(name: "plan", budget_usd: 1.5, timeout_sec: 60)
+      task = task_for(project, "plan", descriptor: descriptor)
+      cfg = Hive::Config.load(project)
+
+      with_stubbed_spawn do |captured|
+        Hive::Stages::Agent.run!(task, cfg)
+
+        kwargs = captured.first.fetch(:kwargs)
+        assert_equal 1.5, kwargs.fetch(:max_budget_usd)
+        assert_equal 60, kwargs.fetch(:timeout_sec)
+      end
+    end
+  end
+
+  def test_explicit_project_limits_override_descriptor_limits_after_config_load
+    with_tmp_dir do |project|
+      descriptor = resource_workflow(name: "plan", budget_usd: 1.5, timeout_sec: 60)
+      task = task_for(project, "plan", descriptor: descriptor)
+      File.write(
+        File.join(project, ".hive-state", "config.yml"),
+        <<~YAML
+          budget_usd:
+            plan: 2.5
+          timeout_sec:
+            plan: 90
+        YAML
+      )
+      cfg = Hive::Config.load(project)
+
+      with_stubbed_spawn do |captured|
+        Hive::Stages::Agent.run!(task, cfg)
+
+        kwargs = captured.first.fetch(:kwargs)
+        assert_equal 2.5, kwargs.fetch(:max_budget_usd)
+        assert_equal 90, kwargs.fetch(:timeout_sec)
+      end
+    end
+  end
+
+  def test_null_project_limits_fall_back_to_descriptor_limits_after_config_load
+    with_tmp_dir do |project|
+      descriptor = resource_workflow(name: "plan", budget_usd: 1.5, timeout_sec: 60)
+      task = task_for(project, "plan", descriptor: descriptor)
+      File.write(
+        File.join(project, ".hive-state", "config.yml"),
+        <<~YAML
+          budget_usd:
+            plan:
+          timeout_sec:
+            plan:
+        YAML
+      )
+      cfg = Hive::Config.load(project)
+
+      with_stubbed_spawn do |captured|
+        Hive::Stages::Agent.run!(task, cfg)
+
+        kwargs = captured.first.fetch(:kwargs)
+        assert_equal 1.5, kwargs.fetch(:max_budget_usd)
+        assert_equal 60, kwargs.fetch(:timeout_sec)
+      end
+    end
+  end
+
   def test_descriptor_agent_overrides_project_stage_agent
     with_tmp_dir do |project|
       descriptor = instruction_workflow_with_agent(agent: "codex")
@@ -523,6 +590,24 @@ class StagesAgentTest < Minitest::Test
   end
 
   private
+
+    def resource_workflow(name:, budget_usd:, timeout_sec:)
+      Hive::Workflow.new(
+        id: :resource_limits,
+        stages: [
+          Hive::Workflow::Stage.new(
+            name: name,
+            index: 1,
+            state_file: "#{name}.md",
+            kind: :agent,
+            skill: "/#{name}",
+            status_mode: :state_file_marker,
+            budget_usd: budget_usd,
+            timeout_sec: timeout_sec
+          )
+        ]
+      )
+    end
 
     def instruction_workflow(instruction_path, permissions: nil)
       Hive::Workflow.new(

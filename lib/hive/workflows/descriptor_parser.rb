@@ -527,7 +527,7 @@ module Hive
         return nil if value.nil?
         return value if value.is_a?(Numeric) && value.finite? && value.positive?
 
-        raise descriptor_error("#{label} must be a positive number")
+        raise descriptor_error("#{label} must be a positive finite number")
       end
 
       def deep_freeze(value)

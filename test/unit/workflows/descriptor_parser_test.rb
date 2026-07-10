@@ -173,6 +173,26 @@ class WorkflowsDescriptorParserTest < Minitest::Test
     end
   end
 
+  def test_yaml_infinite_budget_is_rejected
+    with_tmp_dir do |dir|
+      path = write_descriptor(dir, "infinite-budget", <<~YAML)
+        id: infinite-budget
+        stages:
+          - name: work
+            kind: agent
+            state_file: work.md
+            skill: /ship
+            budget_usd: .inf
+      YAML
+
+      error = assert_raises(Hive::ConfigError) do
+        Hive::Workflows::DescriptorParser.parse_file(path)
+      end
+
+      assert_includes error.message, "stage 1 budget_usd must be a positive finite number"
+    end
+  end
+
   def test_terminal_stage_rejects_budget_and_timeout
     error = assert_config_error(
       {

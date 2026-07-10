@@ -40,8 +40,12 @@ deliverable before status reports them archived.
    task folder), `cwd: task.folder`, the descriptor's `status_mode` (falling back
    to `:state_file_marker` only when unset), and the stage profile. Descriptor
    `budget_usd` / `timeout_sec` values provide resource defaults that project
-   stage config can override; timeout falls back to `DEFAULT_TIMEOUT_SEC` when
-   neither source provides one.
+   stage config can override only when a non-null key was explicitly authored
+   in the project YAML; values injected by `Config.merge_defaults` do not shadow a
+   descriptor default. Timeout falls back to `DEFAULT_TIMEOUT_SEC` when neither
+   source provides one. A budget is per spawn and only enforced when the
+   selected profile has a native `budget_flag`; otherwise `spawn_agent` records
+   the dropped cap in `config-warnings.log` while still enforcing timeout.
 8. Re-read `stage.state_file` and map markers: `WAITING` → `round_waiting`,
    `COMPLETE` → `complete`, `ERROR` → `error`, `NONE` → `nil` (an explicit arm —
    a markerless run has nothing to commit, so `commit_after` skips the commit),
@@ -55,7 +59,8 @@ name-first resolver precedence preserves the current coding runtime.
 
 - `test/unit/stages/agent_test.rb` covers prior-artifact selection, nonce
   wrapping, nil-skill fallback, formatted skill invocation, spawn arguments,
-  budget/timeout overrides, and marker-to-action mapping.
+  descriptor-versus-loaded-config resource precedence, explicit budget/timeout
+  overrides, and marker-to-action mapping.
 
 ## Backlinks
 

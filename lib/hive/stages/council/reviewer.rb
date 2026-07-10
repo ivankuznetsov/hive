@@ -1,7 +1,6 @@
 require "fileutils"
-require "open3"
-require "hive/stages/agent"
 require "hive/stages/base"
+require "hive/stages/council/command_runner"
 
 module Hive
   module Stages
@@ -58,8 +57,14 @@ module Hive
             "HIVE_COUNCIL_OUTPUT" => output_path,
             "HIVE_COUNCIL_ROUND" => @round.to_s
           }
-          _stdout, stderr, status = Open3.capture3(env, "sh", "-c", @reviewer.command, chdir: @task.folder)
-          return if status.success? && File.exist?(output_path) && File.size(output_path).positive?
+          stderr, status = Hive::Stages::Council::CommandRunner.run(
+            env,
+            @reviewer.command,
+            chdir: @task.folder,
+            timeout_sec: timeout_sec,
+            label: "council reviewer #{@reviewer.name}"
+          )
+          return if status.success? && File.size?(output_path)
 
           raise Hive::StageError,
                 "council reviewer #{@reviewer.name} failed: #{stderr.to_s.strip[0, 200]}"
@@ -74,13 +79,13 @@ module Hive
             profile,
             **permission_kwargs
           )
+          resource_limits = Hive::Stages::Base.stage_resource_limits(@cfg, @stage)
           result = Hive::Stages::Base.spawn_agent(
             @task,
             prompt: prompt(profile),
             add_dirs: scope.fetch(:add_dirs),
             cwd: @task.folder,
-            max_budget_usd: @cfg.dig("budget_usd", @stage.name) || @stage.budget_usd,
-            timeout_sec: @cfg.dig("timeout_sec", @stage.name) || @stage.timeout_sec || Hive::Stages::Agent::DEFAULT_TIMEOUT_SEC,
+            **resource_limits,
             log_label: "#{@stage.name}-#{@reviewer.name}",
             profile: profile,
             model: @reviewer.model || @stage.model,
@@ -114,6 +119,10 @@ module Hive
               user_supplied_tag: Hive::Stages::Base.user_supplied_tag
             )
           )
+        end
+
+        def timeout_sec
+          Hive::Stages::Base.stage_resource_limits(@cfg, @stage).fetch(:timeout_sec)
         end
 
         # Reviewer verdict files always live in `reviews/<base>-NN.md`, a fixed

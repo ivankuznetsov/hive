@@ -506,7 +506,7 @@ module Hive
                       profile: nil, expected_output: nil, status_mode: nil,
                       cfg: nil, permission_mode: nil, allowed_tools: nil,
                       disallowed_tools: nil, cli_flags: nil,
-                      model: nil, effort: nil)
+                      model: nil, effort: nil, stage: nil)
         profile ||= Hive::AgentProfiles.lookup(:claude)
         # Translate preflight/version-check failures (e.g. Pi missing
         # ~/.pi/agent/auth.json mid-loop) into a typed :error envelope
@@ -537,19 +537,12 @@ module Hive
         # distinct rather than collapsing both to "empty".
         derive_flags_from_cfg = cli_flags.nil?
         cli_flags ||= []
-        if derive_flags_from_cfg && cfg && profile.name == :claude
-          permission_mode ||= Hive::Config.claude_permission_mode(cfg)
-          cli_flags = Hive::Config.claude_cli_flags(cfg, model: model, effort: effort)
-        elsif (model || effort) && profile.name != :claude
-          # model/effort are only translated to CLI flags on the :claude profile
-          # (above). A per-stage/per-reviewer `model:`/`effort:` on a codex/fable/
-          # pi stage is therefore a no-op — plan U2 requires it be a LOGGED no-op,
-          # not a silent drop, so an author who sets it on a non-claude profile
-          # gets a breadcrumb rather than surprising unchanged behavior. Gate on
-          # `profile.name != :claude` so a claude caller that supplied explicit
-          # `cli_flags:` (derive_flags_from_cfg == false) with model/effort does
-          # NOT get the misleading "does not honor per-stage model/effort" note.
-          warn_model_effort_dropped(task, profile, model: model, effort: effort)
+        model_control_flags = []
+        if derive_flags_from_cfg
+          permission_mode ||= Hive::Config.claude_permission_mode(cfg) if cfg && profile.name == :claude
+          model_control_flags = Hive::Config.agent_control_flags(
+            cfg || {}, profile: profile, stage: stage, model: model, effort: effort
+          )
         end
 
         started_at = Time.now.utc.iso8601
@@ -567,7 +560,8 @@ module Hive
           permission_mode: permission_mode,
           allowed_tools: allowed_tools,
           disallowed_tools: disallowed_tools,
-          cli_flags: cli_flags
+          cli_flags: cli_flags,
+          model_control_flags: model_control_flags
         ).run!
         record_usage(task, profile, result, started_at)
         result
@@ -695,14 +689,6 @@ module Hive
         def respond_to_missing?(name, _include_private = false)
           name.match?(/\A\w+\z/) || super
         end
-      end
-
-      def warn_model_effort_dropped(task, profile, model:, effort:)
-        fields = { "model" => model, "effort" => effort }.compact
-        message = "[hive] agent profile #{profile.name.inspect} does not honor per-stage " \
-                  "#{fields.map { |key, value| "#{key}=#{value.inspect}" }.join(', ')}; " \
-                  "these are only applied on the :claude profile and are ignored for this spawn."
-        write_spawn_warning(task, "config-warnings.log", message)
       end
 
       def warn_budget_unenforced(task, profile, max_budget_usd)

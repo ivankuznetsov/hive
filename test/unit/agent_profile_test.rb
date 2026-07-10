@@ -193,4 +193,25 @@ class AgentProfileTest < Minitest::Test
 
     assert_nil profile.extract_usage_event({ "type" => "result" })
   end
+
+  def test_old_constructor_has_no_model_control_capabilities
+    profile = make_profile
+
+    refute profile.supports_model_control?
+    refute profile.supports_effort_control?
+    assert_raises(Hive::ConfigError) { profile.render_model_controls(model: "x") }
+  end
+
+  def test_declared_renderers_validate_and_render_controls
+    profile = make_profile(
+      model_renderer: ->(value) { [ "--choose-model", value ] },
+      effort_renderer: ->(value) { [ "--reasoning", value ] },
+      effort_values: %w[low high]
+    )
+
+    assert_equal [ "--choose-model", "custom", "--reasoning", "high" ],
+                 profile.render_model_controls(model: "custom", effort: "high")
+    assert_raises(Hive::ConfigError) { profile.render_model_controls(effort: "xhigh") }
+    assert_equal "claude", profile.with_overrides({}).bin_default
+  end
 end

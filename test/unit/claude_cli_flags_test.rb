@@ -31,4 +31,27 @@ class ClaudeCliFlagsTest < Minitest::Test
                    "claude config #{claude.inspect} must resolve to #{expected.inspect}"
     end
   end
+
+  def test_stage_resolution_is_field_independent
+    cfg = {
+      "claude" => { "model" => "default", "effort" => "default" },
+      "models" => {
+        "review" => { "model" => "opus", "effort" => "high" },
+        "review_fix" => { "model" => "sonnet" }
+      }
+    }
+
+    assert_equal [ "--model", "sonnet", "--effort", "high" ],
+                 Hive::Config.claude_cli_flags(cfg, stage: :review_fix)
+  end
+
+  def test_no_stage_ignores_models_map
+    cfg = {
+      "claude" => { "model" => "default", "effort" => "low" },
+      "models" => { "plan" => { "model" => "opus", "effort" => "high" } }
+    }
+
+    assert_equal [ "--model", "default", "--effort", "low" ],
+                 Hive::Config.claude_cli_flags(cfg)
+  end
 end

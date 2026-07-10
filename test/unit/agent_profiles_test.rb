@@ -79,6 +79,19 @@ class AgentProfilesTest < Minitest::Test
     assert_kind_of Hive::AgentProfile, Hive::AgentProfiles.lookup(:grok)
   end
 
+  def test_builtin_profiles_render_native_model_controls
+    claude = Hive::AgentProfiles.lookup(:claude)
+    codex = Hive::AgentProfiles.lookup(:codex)
+    pi = Hive::AgentProfiles.lookup(:pi)
+
+    assert_equal [ "--model", "default" ],
+                 claude.render_model_controls(model: "default", effort: "inherit")
+    assert_equal [ "--model", "gpt-5.6-sol", "-c", 'model_reasoning_effort="xhigh"' ],
+                 codex.render_model_controls(model: "gpt-5.6-sol", effort: "xhigh")
+    refute pi.supports_model_control?
+    refute pi.supports_effort_control?
+  end
+
   def test_lookup_accepts_string_or_symbol
     by_sym = Hive::AgentProfiles.lookup(:claude)
     by_str = Hive::AgentProfiles.lookup("claude")

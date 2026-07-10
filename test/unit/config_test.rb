@@ -27,6 +27,102 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_load_accepts_profile_native_stage_model_controls
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        plan:
+          agent: codex
+        models:
+          plan:
+            model: gpt-5.6-sol
+            effort: xhigh
+      YAML
+
+      cfg = Hive::Config.load(dir)
+      profile = Hive::AgentProfiles.lookup(:codex, cfg: cfg)
+      assert_equal [ "--model", "gpt-5.6-sol", "-c", 'model_reasoning_effort="xhigh"' ],
+                   Hive::Config.agent_control_flags(cfg, profile: profile, stage: :plan)
+    end
+  end
+
+  def test_model_control_resolution_uses_exact_coarse_call_and_profile_fallback_per_field
+    cfg = {
+      "models" => {
+        "execute" => { "model" => "opus", "effort" => "high" },
+        "diagnose" => { "effort" => "low" }
+      },
+      "claude" => { "model" => "default", "effort" => "default" }
+    }
+    profile = Hive::AgentProfiles.lookup(:claude)
+
+    assert_equal({ model: "opus", effort: "low" },
+                 Hive::Config.resolve_model_controls(
+                   cfg, profile: profile, stage: :diagnose, model: "sonnet", effort: "medium"
+                 ))
+    assert_equal({ model: "sonnet", effort: "medium" },
+                 Hive::Config.resolve_model_controls(
+                   cfg, profile: profile, model: "sonnet", effort: "medium"
+                 ))
+  end
+
+  def test_load_rejects_invalid_model_entries_and_source_inappropriate_digest
+    cases = {
+      "models:\n  surprise:\n    model: opus\n" => /models\.surprise/,
+      "models:\n  plan: {}\n" => /models\.plan.*non-empty Hash/,
+      "models:\n  plan:\n    typo: opus\n" => /unknown fields.*typo/,
+      "models:\n  plan:\n    model: '  '\n" => /models\.plan\.model.*non-blank/,
+      "models:\n  digest:\n    model: opus\n" => /models\.digest.*project config/
+    }
+
+    cases.each do |yaml, pattern|
+      with_tmp_dir do |dir|
+        FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+        File.write(File.join(dir, ".hive-state", "config.yml"), yaml)
+        assert_match pattern, assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }.message
+      end
+    end
+  end
+
+  def test_load_rejects_control_unsupported_by_selected_profile
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        plan:
+          agent: pi
+        models:
+          plan:
+            model: anything
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_match(/models\.plan\.model.*pi.*does not support/, err.message)
+    end
+  end
+
+  def test_global_digest_config_accepts_only_models_digest
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        digest:
+          agent: codex
+        models:
+          digest:
+            model: gpt-5.6-sol
+            effort: xhigh
+      YAML
+      cfg = Hive::Config.load_global_digest_config
+      assert_equal "gpt-5.6-sol", cfg.dig("models", "digest", "model")
+
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        models:
+          plan:
+            model: opus
+      YAML
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_digest_config }
+      assert_match(/models\.plan.*only models\.digest/, err.message)
+    end
+  end
+
   def test_load_allows_daemon_auto_retry_enabled_override
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))

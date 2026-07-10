@@ -35,7 +35,7 @@ module Hive
                 :headless_flag, :permission_skip_flag, :add_dir_flag,
                 :budget_flag, :output_format_flags, :version_flag,
                 :skill_syntax_format, :headless_supported, :min_version,
-                :status_detection_mode, :usage_extractor
+                :status_detection_mode, :usage_extractor, :effort_values
 
     # Public API — do not break.
     #
@@ -69,6 +69,10 @@ module Hive
     #   prompt_style:          default :stdin for a profile named :codex,
     #                          otherwise :positional (backward compatible
     #                          with pre-profile-style custom registrations)
+    #   model_renderer:        default nil (model control unsupported)
+    #   effort_renderer:       default nil (effort control unsupported)
+    #   effort_values:         default nil (renderer accepts any non-blank
+    #                          effort; normally paired with a closed Array)
     #   status_detection_mode: default :output_file_exists (the most
     #                          common mode across shipped profiles —
     #                          codex and pi both use it; only claude
@@ -92,7 +96,10 @@ module Hive
                    preflight: nil,
                    usage_extractor: nil,
                    skill_verifier: nil,
-                   prompt_style: nil)
+                   prompt_style: nil,
+                   model_renderer: nil,
+                   effort_renderer: nil,
+                   effort_values: nil)
       prompt_style ||= name.to_sym == :codex ? :stdin : :positional
       unless PROMPT_STYLES.include?(prompt_style)
         raise ArgumentError,
@@ -122,6 +129,9 @@ module Hive
       @usage_extractor = usage_extractor || ->(_event) { nil }
       @skill_verifier = skill_verifier
       @prompt_style = prompt_style
+      @model_renderer = model_renderer
+      @effort_renderer = effort_renderer
+      @effort_values = effort_values && Array(effort_values).map(&:to_s).freeze
 
       freeze
     end
@@ -188,6 +198,53 @@ module Hive
       return [ @permission_skip_flag ] if permission_mode == "bypassPermissions"
 
       [ "--permission-mode", permission_mode ]
+    end
+
+    # Model controls belong to the selected CLI profile. Callers resolve an
+    # effective model/effort first, then ask the profile to validate and render
+    # its native argv. A nil renderer deliberately means "unsupported" rather
+    # than "silently ignore" so custom profiles remain safe as Hive grows new
+    # generic controls.
+    def supports_model_control?
+      !@model_renderer.nil?
+    end
+
+    def supports_effort_control?
+      !@effort_renderer.nil?
+    end
+
+    def validate_model_control!(value, path: "model")
+      return if value.nil?
+
+      validate_control_value!(value, path)
+      return if supports_model_control?
+
+      raise Hive::ConfigError,
+            "#{path} requests model control, but agent profile #{@name.inspect} does not support model selection"
+    end
+
+    def validate_effort_control!(value, path: "effort")
+      return if value.nil?
+
+      normalized = validate_control_value!(value, path)
+      unless supports_effort_control?
+        raise Hive::ConfigError,
+              "#{path} requests effort control, but agent profile #{@name.inspect} does not support reasoning effort"
+      end
+      return if @effort_values.nil? || @effort_values.include?(normalized)
+
+      raise Hive::ConfigError,
+            "#{path} for agent profile #{@name.inspect} must be one of #{@effort_values.inspect}; got #{value.inspect}"
+    end
+
+    def render_model_controls(model: nil, effort: nil, path: "model controls")
+      validate_model_control!(model, path: "#{path}.model")
+      validate_effort_control!(effort, path: "#{path}.effort")
+
+      flags = []
+      flags.concat(Array(@model_renderer.call(model.to_s.strip))) if model
+      flags.concat(Array(@effort_renderer.call(effort.to_s.strip))) if effort
+      flags
     end
 
     # Project-config override keys that may appear under
@@ -317,8 +374,23 @@ module Hive
         preflight: @preflight,
         usage_extractor: @usage_extractor,
         skill_verifier: @skill_verifier,
-        prompt_style: @prompt_style
+        prompt_style: @prompt_style,
+        model_renderer: @model_renderer,
+        effort_renderer: @effort_renderer,
+        effort_values: @effort_values&.dup
       }
+    end
+
+    def validate_control_value!(value, path)
+      unless value.is_a?(String) || value.is_a?(Symbol)
+        raise Hive::ConfigError,
+              "#{path} must be a non-blank String; got #{value.inspect} (#{value.class})"
+      end
+
+      normalized = value.to_s.strip
+      raise Hive::ConfigError, "#{path} must be a non-blank String" if normalized.empty?
+
+      normalized
     end
 
     class << self

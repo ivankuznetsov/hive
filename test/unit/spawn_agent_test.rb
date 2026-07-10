@@ -197,6 +197,57 @@ class SpawnAgentTest < Minitest::Test
     end
   end
 
+  def test_codex_profile_receives_native_stage_model_controls
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      argv_log = File.join(dir, "codex-model-argv.log")
+      fake_codex = File.join(dir, "fake-codex-model")
+      File.write(fake_codex, <<~SH)
+        #!/usr/bin/env bash
+        if [ "$1" = "--version" ]; then echo "codex-cli 1.0.0"; exit 0; fi
+        printf '%s\n' "$@" > "#{argv_log}"
+        cat > /dev/null
+        exit 0
+      SH
+      File.chmod(0o755, fake_codex)
+      profile = Hive::AgentProfile.new(
+        name: :codex,
+        bin_default: fake_codex,
+        headless_flag: "exec",
+        version_flag: "--version",
+        skill_syntax_format: "/%{skill}",
+        status_detection_mode: :exit_code_only,
+        model_renderer: ->(value) { [ "--model", value ] },
+        effort_renderer: ->(value) { [ "-c", %(model_reasoning_effort="#{value}") ] },
+        effort_values: %w[xhigh]
+      )
+
+      Hive::Stages::Base.spawn_agent(
+        task,
+        prompt: "x",
+        max_budget_usd: 1,
+        timeout_sec: 5,
+        profile: profile,
+        status_mode: :exit_code_only,
+        stage: :plan,
+        cfg: {
+          "models" => {
+            "plan" => { "model" => "gpt-5.6-sol", "effort" => "xhigh" }
+          }
+        }
+      )
+
+      argv = File.readlines(argv_log, chomp: true)
+      assert_includes argv, "--model"
+      assert_includes argv, "gpt-5.6-sol"
+      assert_includes argv, "-c"
+      assert_includes argv, 'model_reasoning_effort="xhigh"'
+      refute_includes argv, "--effort"
+      refute_includes argv, "--dangerously-skip-permissions"
+    end
+  end
+
   # Commit 01841e12: explicit cli_flags must suppress cfg-derived
   # model/effort. Asserts the short-circuit at the spawn_agent seam — the
   # explicitly-passed flags reach argv and the cfg's flags do not.

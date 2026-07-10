@@ -33,7 +33,10 @@ module Hive
       min_version: "0.125.0",
       status_detection_mode: :output_file_exists,
       usage_extractor: Hive::AgentProfiles::UsageExtractors::CODEX,
-      skill_verifier: Hive::SkillCheck::Codex.method(:verify)
+      skill_verifier: Hive::SkillCheck::Codex.method(:verify),
+      model_renderer: ->(value) { [ "--model", value ] },
+      effort_renderer: ->(value) { [ "-c", %(model_reasoning_effort="#{value}") ] },
+      effort_values: %w[none minimal low medium high xhigh]
     )
 
     register(:codex, CODEX)

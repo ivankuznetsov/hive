@@ -29,7 +29,14 @@ module Hive
       min_version: Hive::MIN_CLAUDE_VERSION,
       status_detection_mode: :state_file_marker,
       usage_extractor: Hive::AgentProfiles::UsageExtractors::CLAUDE,
-      skill_verifier: Hive::SkillCheck::Claude.method(:verify)
+      skill_verifier: Hive::SkillCheck::Claude.method(:verify),
+      model_renderer: lambda { |value|
+        value == "inherit" ? [] : [ "--model", value ]
+      },
+      effort_renderer: lambda { |value|
+        %w[default inherit].include?(value) ? [] : [ "--effort", value ]
+      },
+      effort_values: %w[default inherit low medium high xhigh max]
     )
 
     register(:claude, CLAUDE)

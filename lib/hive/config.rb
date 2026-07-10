@@ -35,6 +35,11 @@ module Hive
         # default tier (high today).
         "effort" => "default"
       },
+      # Optional profile-neutral model/effort routing for Hive's closed set
+      # of built-in runtime identities. Values are intentionally absent by
+      # default so existing projects retain their descriptor/profile/CLI
+      # fallbacks byte-for-byte.
+      "models" => {},
       # Budget and timeout caps are GENEROUS sanity caps for runaway agents,
       # not cost targets. Most tasks finish well within them; a stuck loop
       # still gets cut off. Bumped ~5x from the original conservative values
@@ -602,6 +607,36 @@ module Hive
       %w[review browser_test agent]
     ].freeze
 
+    # Closed vocabulary for top-level `models:` routing. Values name a coarse
+    # parent consulted after the exact identity; nil marks a directly accepted
+    # coarse/root identity. Keep callers and validation anchored to this one
+    # table so a typo cannot silently fall through to a different model.
+    MODEL_STAGE_PARENTS = {
+      "brainstorm" => nil,
+      "plan" => nil,
+      "execute" => nil,
+      "execute_implementation" => "execute",
+      "rebase" => "execute",
+      "diagnose" => "execute",
+      "babysitter" => "execute",
+      "review" => nil,
+      "review_ci" => "review",
+      "review_reviewers" => "review",
+      "review_triage" => "review",
+      "review_fix" => "review",
+      "review_browser" => "review",
+      "patrol" => nil,
+      "patrol_review" => "patrol",
+      "patrol_fix" => "patrol",
+      "open_pr" => nil,
+      "artifacts" => nil,
+      "finalize" => nil,
+      "digest" => nil
+    }.freeze
+    PROJECT_MODEL_STAGES = (MODEL_STAGE_PARENTS.keys - [ "digest" ]).freeze
+    GLOBAL_DIGEST_MODEL_STAGES = [ "digest" ].freeze
+    MODEL_CONTROL_FIELDS = %w[model effort].freeze
+
     # `/plan` was Hive's original wiki-first planning alias. It remains the
     # Claude default because Claude supports user-level slash commands. Codex
     # and Pi receive llm-wiki's canonical skill name unless a project chooses
@@ -748,13 +783,71 @@ module Hive
     # Code's own tier applies); any other tier Claude Code accepts passes
     # through verbatim (low/medium/high/xhigh/max as of CC 2.1.x — the init
     # questionnaire offers the common three, the config key is open).
-    def claude_cli_flags(cfg, model: nil, effort: nil)
-      flags = []
-      model = (model || cfg.dig("claude", "model") || DEFAULTS.dig("claude", "model")).to_s.strip
-      effort = (effort || cfg.dig("claude", "effort") || DEFAULTS.dig("claude", "effort")).to_s.strip
-      flags.concat([ "--model", model ]) unless model.empty? || model == "inherit"
-      flags.concat([ "--effort", effort ]) unless effort.empty? || [ "default", "inherit" ].include?(effort)
-      flags
+    def claude_cli_flags(cfg, model: nil, effort: nil, stage: nil)
+      profile = Hive::AgentProfiles.lookup(:claude, cfg: cfg)
+      agent_control_flags(cfg, profile: profile, stage: stage, model: model, effort: effort)
+    end
+
+    # Resolve each control independently. A field present at an exact or
+    # coarse stage wins even when its value has profile-specific sentinel
+    # semantics (`inherit`, `default`); only field absence continues down the
+    # precedence chain.
+    def resolve_model_controls(cfg, profile:, stage: nil, model: nil, effort: nil)
+      cfg ||= {}
+      stage_name = normalize_model_stage(stage)
+      {
+        model: resolve_model_control_field(cfg, profile, stage_name, "model", model),
+        effort: resolve_model_control_field(cfg, profile, stage_name, "effort", effort)
+      }
+    end
+
+    def agent_control_flags(cfg, profile:, stage: nil, model: nil, effort: nil)
+      controls = resolve_model_controls(
+        cfg, profile: profile, stage: stage, model: model, effort: effort
+      )
+      if profile.name == :claude
+        controls = controls.transform_values do |value|
+          value.is_a?(String) && value.strip.empty? ? "inherit" : value
+        end
+      end
+      profile.render_model_controls(
+        **controls,
+        path: stage ? "models.#{stage}" : "agent model controls"
+      )
+    end
+
+    def known_model_stage?(stage)
+      MODEL_STAGE_PARENTS.key?(stage.to_s)
+    end
+
+    def normalize_model_stage(stage)
+      return nil if stage.nil?
+
+      name = stage.to_s
+      return name if known_model_stage?(name)
+
+      raise ConfigError,
+            "unknown model-routing stage #{stage.inspect}; known stages: #{MODEL_STAGE_PARENTS.keys.inspect}"
+    end
+
+    def resolve_model_control_field(cfg, profile, stage, field, call_value)
+      if stage
+        exact = cfg.dig("models", stage)
+        return exact[field] if exact.is_a?(Hash) && exact.key?(field)
+
+        parent = MODEL_STAGE_PARENTS.fetch(stage)
+        coarse = parent && cfg.dig("models", parent)
+        return coarse[field] if coarse.is_a?(Hash) && coarse.key?(field)
+      end
+      return call_value unless call_value.nil?
+
+      # Claude's project-global block is its established Hive-level default.
+      # Other profiles intentionally omit a Hive default and retain their CLI
+      # default unless a stage/descriptor requests a control.
+      return nil unless profile.name == :claude
+
+      value = cfg.dig("claude", field)
+      value.nil? ? DEFAULTS.dig("claude", field) : value
     end
 
     def claude_permission_mode(cfg)
@@ -1332,7 +1425,7 @@ module Hive
       merged = merge_defaults(data)
       merged["bot"] = deep_merge(global_bot_defaults, data["bot"] || {})
       inject_bot_runtime_path_defaults!(merged)
-      validate!(merged, path)
+      validate!(merged, path, models_source: :global_digest)
       merged
     end
 
@@ -1630,8 +1723,9 @@ module Hive
     # of which field is at fault. Validation runs after merge so a
     # default value cannot be the cause of a failure — only user input
     # ever fails validation.
-    def validate!(cfg, source_path)
+    def validate!(cfg, source_path, models_source: :project)
       validate_hash_shaped_keys!(cfg, source_path)
+      validate_models!(cfg, source_path, source: models_source)
       validate_stage_skill_by_agent!(cfg, source_path)
       validate_reviewers!(cfg, source_path)
       validate_review_adhoc!(cfg, source_path)
@@ -1665,6 +1759,7 @@ module Hive
     HASH_SHAPED_KEYS = %w[
       brainstorm
       claude
+      models
       plan
       execute
       open_pr
@@ -1697,6 +1792,98 @@ module Hive
               "#{key} in #{describe_source(source_path)} must be a Hash; " \
               "got #{value.inspect} (#{value.class}). Either remove the key " \
               "(defaults will apply) or supply `#{key}: { ... }` with the right shape."
+      end
+    end
+
+    def validate_models!(cfg, source_path, source: :project)
+      models = cfg["models"]
+      return if models.nil?
+
+      allowed = source == :global_digest ? GLOBAL_DIGEST_MODEL_STAGES : PROJECT_MODEL_STAGES
+      models.each do |raw_stage, entry|
+        stage = raw_stage.to_s
+        unless allowed.include?(stage)
+          ownership = source == :global_digest ? "global digest config accepts only models.digest" :
+            "project config accepts pipeline/runtime stages but not models.digest"
+          raise ConfigError,
+                "models.#{raw_stage} in #{describe_source(source_path)} is not recognized for this source; #{ownership}"
+        end
+        unless entry.is_a?(Hash) && !entry.empty?
+          raise ConfigError,
+                "models.#{stage} in #{describe_source(source_path)} must be a non-empty Hash containing model and/or effort"
+        end
+
+        unknown = entry.keys.map(&:to_s) - MODEL_CONTROL_FIELDS
+        unless unknown.empty?
+          raise ConfigError,
+                "models.#{stage} in #{describe_source(source_path)} has unknown fields #{unknown.inspect}; " \
+                "known: #{MODEL_CONTROL_FIELDS.inspect}"
+        end
+
+        normalized = {}
+        entry.each do |field, value|
+          field = field.to_s
+          unless value.is_a?(String) || value.is_a?(Symbol)
+            raise ConfigError,
+                  "models.#{stage}.#{field} in #{describe_source(source_path)} must be a non-blank String; " \
+                  "got #{value.inspect} (#{value.class})"
+          end
+          value = value.to_s.strip
+          if value.empty?
+            raise ConfigError,
+                  "models.#{stage}.#{field} in #{describe_source(source_path)} must be a non-blank String"
+          end
+          normalized[field] = value
+        end
+
+        model_profiles_for_stage(cfg, stage).each do |profile|
+          profile.validate_model_control!(normalized["model"], path: "models.#{stage}.model")
+          profile.validate_effort_control!(normalized["effort"], path: "models.#{stage}.effort")
+        end
+      end
+    end
+
+    def model_profiles_for_stage(cfg, stage)
+      names = case stage
+              when "brainstorm" then [ cfg.dig("brainstorm", "agent") ]
+              when "plan" then [ cfg.dig("plan", "agent") ]
+              when "execute", "execute_implementation", "rebase", "diagnose", "babysitter"
+                [ cfg.dig("execute", "agent") ]
+              when "open_pr" then [ cfg.dig("open_pr", "agent") ]
+              when "artifacts" then [ cfg.dig("artifacts", "agent") ]
+              when "finalize" then [ cfg.dig("finalize", "agent") ]
+              when "review_ci" then [ cfg.dig("review", "ci", "agent") ]
+              when "review_triage" then [ cfg.dig("review", "triage", "agent") ]
+              when "review_fix" then [ cfg.dig("review", "fix", "agent") ]
+              when "review_browser" then [ cfg.dig("review", "browser_test", "agent") ]
+              when "review_reviewers" then reviewer_agent_names(cfg)
+              when "review"
+                [
+                  cfg.dig("review", "ci", "agent"),
+                  cfg.dig("review", "triage", "agent"),
+                  cfg.dig("review", "fix", "agent"),
+                  cfg.dig("review", "browser_test", "agent"),
+                  *reviewer_agent_names(cfg)
+                ]
+              when "patrol", "patrol_review", "patrol_fix"
+                [ cfg.dig("patrol", "agent") ]
+              when "digest"
+                [ cfg.dig("digest", "agent") || cfg.dig("patrol", "agent") || "claude" ]
+              else
+                []
+              end
+
+      names.compact.uniq.map { |name| Hive::AgentProfiles.lookup(name, cfg: cfg) }
+    end
+
+    def reviewer_agent_names(cfg)
+      lists = [
+        cfg.dig("review", "reviewers"),
+        cfg.dig("review", "adhoc", "reviewers"),
+        cfg.dig("patrol", "review", "reviewers")
+      ]
+      lists.compact.flatten(1).filter_map do |entry|
+        entry["agent"] if entry.is_a?(Hash) && entry["kind"] != "linter"
       end
     end
 
@@ -2003,7 +2190,18 @@ module Hive
           "#{label}[#{idx}].agent",
           source_path
         )
+        validate_entry_model_controls!(entry, label: "#{label}[#{idx}]", source_path: source_path)
       end
+    end
+
+    def validate_entry_model_controls!(entry, label:, source_path:)
+      model = entry["model"]
+      effort = entry["effort"]
+      return if model.nil? && effort.nil?
+
+      profile = Hive::AgentProfiles.lookup(entry["agent"] || "claude")
+      profile.validate_model_control!(model, path: "#{label}.model in #{describe_source(source_path)}")
+      profile.validate_effort_control!(effort, path: "#{label}.effort in #{describe_source(source_path)}")
     end
 
     def validate_review_fix_auto_commit!(cfg, source_path)

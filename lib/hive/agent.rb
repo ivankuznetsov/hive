@@ -31,7 +31,8 @@ module Hive
                    add_dirs: [], cwd: nil, log_label: nil,
                    profile: nil, expected_output: nil, status_mode: nil,
                    permission_mode: nil, allowed_tools: nil,
-                   disallowed_tools: nil, cli_flags: [])
+                   disallowed_tools: nil, cli_flags: [],
+                   model_control_flags: [])
       @task = task
       @prompt = prompt
       @add_dirs = Array(add_dirs)
@@ -56,6 +57,7 @@ module Hive
       @allowed_tools = allowed_tools
       @disallowed_tools = disallowed_tools
       @cli_flags = Array(cli_flags)
+      @model_control_flags = Array(model_control_flags)
     end
 
     # Effective mode for this spawn — explicit kwarg wins, falls back to
@@ -308,10 +310,11 @@ module Hive
       if @profile.budget_flag && @max_budget_usd
         cmd << @profile.budget_flag << @max_budget_usd.to_s
       end
-      # Per-run CLI extras (claude model/effort pins from config). Guarded:
-      # every valid value today is claude vocabulary, and handing another
-      # profile `--model sonnet` would fail (or worse, mean something else)
-      # silently — the invariant lives here rather than in the call sites.
+      # Profile-rendered generic controls are kept separate from the legacy
+      # raw Claude-only cli_flags channel. This lets Codex receive its native
+      # model/reasoning argv without weakening the guard on historical callers
+      # that pass arbitrary Claude flags.
+      cmd.concat(@model_control_flags)
       if @cli_flags.any? && @profile.name != :claude
         raise ArgumentError, "cli_flags are claude-specific; got #{@cli_flags.inspect} for #{@profile.name}"
       end

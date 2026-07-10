@@ -239,6 +239,24 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_codex_workspace_write_mode_replaces_dangerous_bypass_with_sandbox
+    with_tmp_dir do |dir|
+      profile = Hive::AgentProfiles.lookup(:codex)
+      agent = Hive::Agent.new(
+        task: make_task(dir), prompt: "test", max_budget_usd: nil,
+        timeout_sec: 5, profile: profile,
+        permission_mode: Hive::AgentProfile::WORKSPACE_WRITE_PERMISSION_MODE
+      )
+
+      cmd = agent.send(:build_cmd)
+
+      assert_equal %w[--sandbox workspace-write], cmd.each_cons(2).find { |flag, _| flag == "--sandbox" }
+      assert_includes cmd, "--ignore-user-config"
+      assert_includes cmd, "--ignore-rules"
+      refute_includes cmd, "--dangerously-bypass-approvals-and-sandbox"
+    end
+  end
+
   def test_args_include_dangerous_flag_and_add_dir
     with_tmp_dir do |dir|
       task = make_task(dir)

@@ -471,7 +471,11 @@ module Hive
         # are intentionally independent and default off for fresh and legacy
         # projects alike.
         "auto_fix" => {
-          "enabled" => false
+          "enabled" => false,
+          # Fix agents need a real root-confined write sandbox. Discovery may
+          # use any configured reviewer, but only the Codex profile currently
+          # advertises workspace-write enforcement.
+          "agent" => "codex"
         },
         "issue_filing" => {
           "enabled" => false
@@ -2716,6 +2720,7 @@ module Hive
       end
 
       validate_required_boolean!(gate["enabled"], "refactor_patrol.#{key}.enabled", source_path)
+      validate_agent_name!(gate["agent"], "refactor_patrol.auto_fix.agent", source_path) if key == "auto_fix"
     end
 
     def validate_required_boolean!(value, label, source_path)

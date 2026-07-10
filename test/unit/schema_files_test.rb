@@ -15,6 +15,7 @@ require "hive/commands/stage_action"
 require "hive/commands/status"
 require "hive/patrol/candidate_selector"
 require "hive/patrol/reviewer"
+require "hive/commands/setup_agents"
 require "hive/tui/snapshot"
 require "hive/daemon/dispatch_request_queue"
 require "hive/daemon/dispatch_result_queue"
@@ -27,6 +28,26 @@ require "tmpdir"
 #   3. Pin the same required-key set the producer code emits, so a producer
 #      change without a schema update fails at test time.
 class SchemaFilesTest < Minitest::Test
+  def test_setup_agents_schema_file_accepts_command_payload
+    path = Hive::Schemas.schema_path("hive-setup-agents")
+    assert File.exist?(path), "schema file missing: #{path}"
+    schemer = JSONSchemer.schema(JSON.parse(File.read(path)))
+    plan = Hive::AgentSkills::ProvisioningPlan.new(
+      inspections: [], operations: [], conflicts: [],
+      filters: { "agents" => [], "skills" => [] }, fingerprint: "a" * 64
+    )
+    result = Hive::AgentSkills::ProvisioningResult.new(
+      preview: plan,
+      consent: { "granted" => true, "provenance" => "not_required" },
+      operation_results: [], final_health: [], exit_code: 0, classification: "no_op"
+    )
+    payload = Hive::Commands::SetupAgents.new(
+      config: Hive::Config::DEFAULTS, project_root: Dir.pwd
+    ).send(:payload, result)
+
+    assert_empty schemer.validate(payload).to_a
+  end
+
   def test_hive_approve_v2_schema_file_exists_and_is_valid_json
     path = Hive::Schemas.schema_path("hive-approve")
     assert File.exist?(path), "schema file missing: #{path}"

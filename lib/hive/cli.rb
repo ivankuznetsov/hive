@@ -265,6 +265,38 @@ module Hive
       ).call
     end
 
+    desc "setup-agents", "Provision managed skills for configured Claude, Codex, and Pi agents"
+    long_desc <<~DESC
+      Inspects every enabled, manifest-managed coding workflow capability,
+      prints one aggregate plan of native commands and Hive-owned files, and
+      performs the plan only after explicit consent. The plan is revalidated
+      immediately before execution and each independent agent/package
+      continues if another operation fails.
+
+      Without --yes, stdin must be a TTY and the operator must confirm. JSON
+      mode never prompts, so --json requires --yes whenever mutations are
+      planned. Repeat --agent/--skill values (or pass several values after one
+      flag) to scope setup to effective managed targets.
+
+      Exit codes: 0 healthy/no-op; 1 attempted or residual failure;
+      64 consent required/refused; 78 invalid manifest/config/filter.
+    DESC
+    option :yes, type: :boolean, default: false, desc: "accept the revalidated aggregate plan"
+    option :agent, type: :array, desc: "scope to configured agent name(s)"
+    option :skill, type: :array, desc: "scope to managed capability id(s)"
+    def setup_agents
+      require "hive/commands/setup_agents"
+      cfg = Hive::Config.load(Dir.pwd)
+      exit Hive::Commands::SetupAgents.new(
+        config: cfg,
+        project_root: Dir.pwd,
+        yes: options[:yes],
+        json: options[:json],
+        agents: options[:agent],
+        skills: options[:skill]
+      ).call
+    end
+
     desc "setup", "Provision local Hive web mode, daemon service, and project enrollment"
     option :service, type: :boolean, default: false, desc: "also install the managed web service"
     option :no_bootstrap, type: :boolean, default: false, desc: "diagnose only; do not install qmd or web bundle"

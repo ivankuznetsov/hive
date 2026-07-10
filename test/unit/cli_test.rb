@@ -30,9 +30,19 @@ require "hive/commands/daemon"
 require "hive/commands/bot"
 require "hive/commands/metrics"
 require "hive/commands/setup"
+require "hive/commands/setup_agents"
 
 class HiveCliTest < Minitest::Test
   include HiveTestHelper
+
+  def test_setup_agents_help_exposes_consent_json_and_filters
+    out, _err = capture_io { Hive::CLI.start([ "help", "setup-agents" ]) }
+
+    assert_includes out, "--yes"
+    assert_includes out, "--json"
+    assert_includes out, "--agent"
+    assert_includes out, "--skill"
+  end
 
   CommandDouble = Struct.new(:return_value, :calls) do
     def call

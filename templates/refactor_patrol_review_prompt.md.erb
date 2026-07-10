@@ -10,8 +10,9 @@ Write JSON only to:
 <% end %>
 
 Return this shape — field names are a strict contract, follow the example
-exactly (in particular each evidence item carries a singular `file` string
-plus a numeric `value` for its signal):
+exactly. Evidence records an observed code fact at one repository-relative
+anchor; proposal leverage separately explains which feature hotspot drivers the
+refactor is expected to relieve:
 
 ```json
 {
@@ -22,8 +23,17 @@ plus a numeric `value` for its signal):
       "cost": "every payment change forces edits and re-review of validation code",
       "proposed_refactor": "extract payment orchestration behind a checkout-owned boundary",
       "evidence": [
-        { "file": "lib/checkout.rb", "line": 42, "snippet": "def charge_and_validate", "signal": "churn", "value": 93 },
-        { "file": "lib/checkout.rb", "snippet": "duplicated retry loop also in lib/billing.rb", "signal": "coupling", "value": 49 }
+        {
+          "file": "lib/checkout.rb",
+          "line": 42,
+          "snippet": "def charge_and_validate",
+          "claim": "validation and payment orchestration share one method"
+        },
+        {
+          "file": "lib/billing.rb",
+          "snippet": "retry do ... end",
+          "claim": "the same retry policy is implemented in both boundaries"
+        }
       ],
       "confidence": "medium",
       "risk": {
@@ -32,7 +42,20 @@ plus a numeric `value` for its signal):
         "cross_feature_impact": false
       },
       "required_validation": { "commands": ["test"], "characterization_first": false, "notes": "run checkout tests" },
-      "expected_leverage": { "score": 0.8, "breakdown": { "churn": 0.5, "coupling": 0.3 } }
+      "expected_leverage": {
+        "drivers": [
+          {
+            "signal": "churn",
+            "relief": 0.6,
+            "mechanism": "isolate payment edits from validation code"
+          },
+          {
+            "signal": "coupling",
+            "relief": 0.5,
+            "mechanism": "centralize the duplicated retry policy behind one boundary"
+          }
+        ]
+      }
     }
   ]
 }
@@ -63,7 +86,7 @@ Feature:
 - context_files: <%= Array(feature.context_files).join(", ") %>
 - tests: <%= Array(feature.tests).join(", ") %>
 
-Measured leverage:
+Feature-wide hotspot measurements:
 <%= JSON.pretty_generate(leverage || {}) %>
 </<%= user_supplied_tag %>>
 
@@ -80,16 +103,20 @@ Rules:
   is reported as out-of-contract rather than accepted.
 - Every evidence item must set `file` to one repository-relative path string —
   the key is singular `file`, never a `files` array. A thesis with no
-  file-backed evidence item is inadmissible and will be rejected.
-- Include at least one evidence item whose `signal` is one of churn, fan_in,
-  complexity, coupling, repeated_dependency, bug_density, coverage_gap AND
-  whose `value` carries its measured number (take it from the measured
-  leverage signals above where applicable). A signal without a `value` does
-  not count as measurable.
+  file-backed evidence item is retained but flagged inadmissible.
+- Every admissible thesis needs one coherent evidence item with `file`, a
+  concrete `claim`, and either a positive `line` or non-empty `snippet`.
+- Never copy feature-wide totals into file or line evidence. Evidence items do
+  not accept `signal` or `value`; the measured totals above describe the entire
+  feature, not the cited line.
+- Include `expected_leverage.drivers`. Each driver names one measured signal
+  from churn, fan_in, complexity, coupling, bug_density, or coverage_gap; gives
+  a `relief` fraction from 0 through 1; and explains the proposal-specific
+  `mechanism`. Use each signal at most once. Hive ignores agent-authored scores
+  and deterministically derives score and breakdown from hotspot contribution *
+  bounded relief.
 - Copy the feature boundary from the mapped feature unless you have a concrete
   reason to flag a cross-feature risk.
-- Include expected_leverage.score and expected_leverage.breakdown; do not emit
-  an unexplained score.
 - Include required_validation.commands using the available command names. If
   this slice lacks useful tests, set characterization_first true and explain the
   characterization test needed before refactoring.

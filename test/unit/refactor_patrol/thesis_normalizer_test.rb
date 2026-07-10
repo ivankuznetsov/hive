@@ -12,19 +12,23 @@ class RefactorPatrolThesisNormalizerTest < Minitest::Test
     assert_nil normalize("not a thesis")
   end
 
-  def test_missing_file_or_measurable_signal_marks_inadmissible_but_returns
+  def test_file_and_snippet_without_claim_marks_inadmissible_but_returns
     thesis = normalize(valid_raw_thesis.merge("evidence" => [ { "file" => "lib/checkout.rb", "snippet" => "messy" } ]))
 
     refute thesis.admissible
-    assert_includes thesis.admissibility_reason, "missing measurable signal"
+    assert_includes thesis.admissibility_reason, "missing coherent anchored claim"
     assert_includes thesis.risk.fetch("flags"), "inadmissible"
   end
 
   def test_evidence_without_file_is_flagged_inadmissible_not_dropped
-    thesis = normalize(valid_raw_thesis.merge("evidence" => [ { "signal" => "churn", "value" => 10 } ]))
+    thesis = normalize(
+      valid_raw_thesis.merge(
+        "evidence" => [ { "line" => 12, "snippet" => "messy", "claim" => "mixed responsibilities" } ]
+      )
+    )
 
     refute thesis.admissible
-    assert_includes thesis.admissibility_reason, "missing concrete file path"
+    assert_includes thesis.admissibility_reason, "missing coherent anchored claim"
     assert_includes thesis.risk.fetch("flags"), "inadmissible"
   end
 
@@ -32,7 +36,7 @@ class RefactorPatrolThesisNormalizerTest < Minitest::Test
     thesis = normalize(valid_raw_thesis.merge("evidence" => []))
 
     refute thesis.admissible
-    assert_equal [ { "snippet" => "no evidence supplied; retained as inadmissible" } ], thesis.evidence
+    assert_equal [ { "claim" => "no evidence supplied; retained as inadmissible" } ], thesis.evidence
   end
 
   # The evidence drift shapes the first dogfood run actually produced:
@@ -45,8 +49,20 @@ class RefactorPatrolThesisNormalizerTest < Minitest::Test
       "feature" => { "id" => "checkout", "kind" => "command" },
       "refactor" => "Extract the shared prelude",
       "evidence" => [
-        { "claim" => "byte-identical constants", "files" => [ "lib/checkout.rb", "lib/billing.rb" ], "signal" => "churn" },
-        { "claim" => "dead copy drift", "files" => [ "lib/checkout.rb" ], "signal" => "repeated_dependency" }
+        {
+          "claim" => "byte-identical constants",
+          "snippet" => "RETRY_LIMIT = 3",
+          "files" => [ "lib/checkout.rb", "lib/billing.rb" ],
+          "signal" => "churn",
+          "value" => 10
+        },
+        {
+          "claim" => "dead copy drift",
+          "line" => 27,
+          "files" => [ "lib/checkout.rb" ],
+          "signal" => "repeated_dependency",
+          "value" => 2
+        }
       ],
       "required_validation" => { "commands" => [ "test" ], "characterization_first" => true, "characterization_notes" => "pin behavior first" }
     )
@@ -56,15 +72,24 @@ class RefactorPatrolThesisNormalizerTest < Minitest::Test
     assert_equal "checkout", thesis.feature
     assert_equal "Extract the shared prelude", thesis.proposed_refactor
     assert_equal [ "lib/checkout.rb", "lib/billing.rb", "lib/checkout.rb" ], thesis.evidence.map { |e| e["file"] }
-    assert_equal 10, thesis.evidence.first["value"] # backfilled from measured churn
-    refute thesis.evidence.last.key?("value") # repeated_dependency is not measured here
+    thesis.evidence.each do |entry|
+      refute entry.key?("signal")
+      refute entry.key?("value")
+    end
+    assert_equal 10, thesis.feature_hotspot.dig("signals", "churn")
+    assert_equal "feature", thesis.feature_hotspot.fetch("scope")
     assert_equal "pin behavior first", thesis.required_validation.fetch("notes")
     assert thesis_schemer.valid?(thesis.to_h), thesis_schemer.validate(thesis.to_h).map { |e| e["error"] }.inspect
   end
 
   def test_fileless_evidence_naming_owned_file_in_text_is_anchored
     raw = valid_raw_thesis.merge(
-      "evidence" => [ { "snippet" => "lib/checkout.rb:42 duplicates the retry loop", "signal" => "churn", "value" => 10 } ]
+      "evidence" => [
+        {
+          "snippet" => "lib/checkout.rb:42 duplicates the retry loop",
+          "claim" => "the retry loop is duplicated"
+        }
+      ]
     )
     thesis = normalize(raw)
 
@@ -72,19 +97,76 @@ class RefactorPatrolThesisNormalizerTest < Minitest::Test
     assert_equal "lib/checkout.rb", thesis.evidence.first["file"]
   end
 
-  def test_agent_supplied_score_does_not_override_measured_leverage
-    raw = valid_raw_thesis.merge("expected_leverage" => { "score" => 999.0, "breakdown" => { "bogus" => 999.0 } })
+  def test_agent_supplied_score_is_ignored_and_proposal_score_is_derived_from_drivers
+    raw = valid_raw_thesis
+    raw["expected_leverage"] = raw.fetch("expected_leverage").merge(
+      "score" => 999.0,
+      "breakdown" => { "bogus" => 999.0 }
+    )
     thesis = normalize(raw)
 
-    assert_in_delta 0.8, thesis.expected_leverage.fetch("score"), 0.0001
-    assert_equal({ "churn" => 0.5, "fan_in" => 0.3 }, thesis.expected_leverage.fetch("breakdown"))
+    assert_in_delta 0.4, thesis.expected_leverage.fetch("score"), 0.0001
+    assert_equal({ "churn" => 0.25, "fan_in" => 0.15 }, thesis.expected_leverage.fetch("breakdown"))
+    assert_equal 2, thesis.expected_leverage.fetch("drivers").size
   end
 
-  def test_breakdown_less_thesis_returns_invalid_with_schema_errors
-    result = normalize(valid_raw_thesis, leverage: {})
+  def test_only_valid_unique_drivers_contribute_to_proposal_score
+    raw = valid_raw_thesis
+    raw["expected_leverage"] = {
+      "drivers" => [
+        { "signal" => "churn", "relief" => 0.5, "mechanism" => "first valid driver" },
+        { "signal" => "churn", "relief" => 1.0, "mechanism" => "duplicate" },
+        { "signal" => "fan_in", "relief" => 0.25, "mechanism" => "stable boundary" },
+        { "signal" => "unknown", "relief" => 1.0, "mechanism" => "unknown signal" },
+        { "signal" => "coupling", "relief" => 1.1, "mechanism" => "out of range" },
+        { "signal" => "complexity", "relief" => 0.5, "mechanism" => "" }
+      ]
+    }
+    thesis = normalize(raw)
 
-    assert_instance_of Hive::RefactorPatrol::ThesisNormalizer::Invalid, result
-    refute_empty result.errors
+    assert_equal %w[churn fan_in], thesis.expected_leverage.fetch("drivers").map { |driver| driver.fetch("signal") }
+    assert_equal({ "churn" => 0.25, "fan_in" => 0.075 }, thesis.expected_leverage.fetch("breakdown"))
+    assert_in_delta 0.325, thesis.expected_leverage.fetch("score"), 0.0001
+    refute thesis.admissible
+    assert_includes thesis.risk.fetch("flags"), "invalid_leverage_driver"
+    assert_includes thesis.admissibility_reason, "invalid proposal leverage driver"
+  end
+
+  def test_missing_valid_driver_is_retained_and_flagged_inadmissible
+    raw = valid_raw_thesis.merge("expected_leverage" => { "drivers" => [] })
+    thesis = normalize(raw)
+
+    refute thesis.admissible
+    assert_includes thesis.admissibility_reason, "missing valid proposal leverage driver"
+    assert_empty thesis.expected_leverage.fetch("drivers")
+    assert thesis_schemer.valid?(thesis.to_h), thesis_schemer.validate(thesis.to_h).map { |e| e["error"] }.inspect
+  end
+
+  def test_file_and_metric_in_separate_evidence_items_do_not_form_an_admissible_anchor
+    raw = valid_raw_thesis.merge(
+      "evidence" => [
+        { "file" => "lib/checkout.rb" },
+        { "signal" => "churn", "value" => 10 }
+      ]
+    )
+    thesis = normalize(raw)
+
+    refute thesis.admissible
+    assert_includes thesis.admissibility_reason, "missing coherent anchored claim"
+    thesis.evidence.each do |entry|
+      refute entry.key?("signal")
+      refute entry.key?("value")
+    end
+  end
+
+  def test_v2_schema_strictly_rejects_signal_and_value_on_evidence
+    thesis = normalize(valid_raw_thesis)
+    payload = thesis.to_h
+    payload.fetch("evidence").first["signal"] = "churn"
+    payload.fetch("evidence").first["value"] = 10
+
+    refute thesis_schemer.valid?(payload)
+    assert_equal 2, Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-refactor-patrol-thesis")
   end
 
   def test_slice_without_tests_prescribes_characterization_and_lowers_high_confidence
@@ -121,7 +203,9 @@ class RefactorPatrolThesisNormalizerTest < Minitest::Test
 
   def test_documentation_thesis_without_docs_validation_is_flagged_report_only
     raw = valid_raw_thesis.merge(
-      "evidence" => [ { "file" => "docs/guide.md", "signal" => "churn", "value" => 4 } ],
+      "evidence" => [
+        { "file" => "docs/guide.md", "line" => 3, "snippet" => "Setup", "claim" => "setup guidance is duplicated" }
+      ],
       "required_validation" => { "commands" => [], "characterization_first" => false, "notes" => "" }
     )
     thesis = normalize(raw, feature: documentation_feature, commands: { "test" => "rake test" })
@@ -135,7 +219,9 @@ class RefactorPatrolThesisNormalizerTest < Minitest::Test
 
   def test_documentation_thesis_uses_configured_docs_validation
     raw = valid_raw_thesis.merge(
-      "evidence" => [ { "file" => "docs/guide.md", "signal" => "churn", "value" => 4 } ],
+      "evidence" => [
+        { "file" => "docs/guide.md", "line" => 3, "snippet" => "Setup", "claim" => "setup guidance is duplicated" }
+      ],
       "required_validation" => { "commands" => [], "characterization_first" => false, "notes" => "" }
     )
     thesis = normalize(raw, feature: documentation_feature, commands: { "docs" => "markdownlint docs" })

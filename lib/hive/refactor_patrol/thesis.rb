@@ -2,7 +2,7 @@ module Hive
   module RefactorPatrol
     Thesis = Struct.new(
       :id, :feature_id, :feature, :problem, :cost, :evidence,
-      :proposed_refactor, :feature_boundary, :expected_leverage,
+      :proposed_refactor, :feature_boundary, :feature_hotspot, :expected_leverage,
       :confidence, :risk, :required_validation, :admissible,
       :admissibility_reason, :follow_up_approval_state, :fingerprint,
       :collision,
@@ -18,6 +18,7 @@ module Hive
           "evidence" => Array(evidence),
           "proposed_refactor" => proposed_refactor,
           "feature_boundary" => feature_boundary || {},
+          "feature_hotspot" => feature_hotspot || {},
           "expected_leverage" => expected_leverage || {},
           "confidence" => confidence,
           "risk" => risk || {},
@@ -40,6 +41,7 @@ module Hive
           evidence: Array(hash["evidence"]),
           proposed_refactor: hash.fetch("proposed_refactor"),
           feature_boundary: hash.fetch("feature_boundary"),
+          feature_hotspot: hash.fetch("feature_hotspot", {}),
           expected_leverage: hash.fetch("expected_leverage"),
           confidence: hash.fetch("confidence"),
           risk: hash.fetch("risk"),

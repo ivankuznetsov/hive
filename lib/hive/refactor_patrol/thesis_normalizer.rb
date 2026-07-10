@@ -2,6 +2,7 @@ require "json_schemer"
 require "pathname"
 require "hive"
 require "hive/refactor_patrol/fingerprint"
+require "hive/refactor_patrol/leverage"
 require "hive/refactor_patrol/thesis"
 
 module Hive
@@ -13,15 +14,7 @@ module Hive
     # how do we repair honest drift?) lives and is tested in one place.
     class ThesisNormalizer
       VALID_CONFIDENCE = %w[high medium low].freeze
-      MEASURABLE_SIGNALS = %w[
-        churn
-        fan_in
-        complexity
-        coupling
-        repeated_dependency
-        bug_density
-        coverage_gap
-      ].freeze
+      EVIDENCE_KEYS = %w[file line snippet claim].freeze
 
       # Returned instead of a Thesis when the normalized hash still fails the
       # thesis schema; carries the validation messages for error recording.
@@ -57,6 +50,10 @@ module Hive
         risk = raw["risk"].is_a?(Hash) ? raw["risk"] : {}
         required_validation = raw["required_validation"].is_a?(Hash) ? raw["required_validation"] : {}
         raw_feature = raw["feature"].is_a?(Hash) ? raw["feature"]["id"] : raw["feature"]
+        feature_hotspot = normalize_feature_hotspot(leverage)
+        drivers, invalid_drivers = normalize_drivers(raw["expected_leverage"])
+        normalized_risk = default_risk(risk)
+        normalized_risk["flags"] |= [ "invalid_leverage_driver" ] if invalid_drivers
 
         {
           "id" => raw["id"].to_s.empty? ? "#{feature.id}-refactor-#{idx + 1}" : raw["id"].to_s,
@@ -64,18 +61,17 @@ module Hive
           "feature" => raw_feature.to_s.empty? ? feature.id.to_s : raw_feature.to_s,
           "problem" => raw["problem"].to_s,
           "cost" => raw["cost"].to_s,
-          "evidence" => normalize_evidence(feature, leverage, Array(raw["evidence"])),
+          "evidence" => normalize_evidence(feature, Array(raw["evidence"])),
           "proposed_refactor" => raw["proposed_refactor"].to_s.empty? ? raw["refactor"].to_s : raw["proposed_refactor"].to_s,
           "feature_boundary" => boundary.merge(raw["feature_boundary"].is_a?(Hash) ? raw["feature_boundary"] : {}),
-          # R5: rank by the deterministic measured-signal blend. The agent's
-          # own expected_leverage.score/breakdown is advisory only and is
-          # discarded here so it cannot override the computed ranking.
-          "expected_leverage" => {
-            "score" => (leverage["score"] || 0).to_f,
-            "breakdown" => leverage["breakdown"].is_a?(Hash) ? leverage["breakdown"] : {}
-          },
+          "feature_hotspot" => feature_hotspot,
+          # The model identifies which language-neutral hotspot drivers the
+          # proposal relieves and explains the mechanism. Hive ignores any
+          # model-authored score/breakdown and derives the ranking contribution
+          # from the measured feature hotspot and bounded relief fractions.
+          "expected_leverage" => Leverage.score_proposal(feature_hotspot, drivers),
           "confidence" => VALID_CONFIDENCE.include?(raw["confidence"].to_s) ? raw["confidence"].to_s : "low",
-          "risk" => default_risk(risk),
+          "risk" => normalized_risk,
           "required_validation" => {
             "commands" => Array(required_validation["commands"]),
             "characterization_first" => required_validation["characterization_first"] == true,
@@ -88,17 +84,88 @@ module Hive
         }
       end
 
-      # Dogfooding showed agents drift from the evidence contract in
-      # predictable, recoverable ways: a plural "files" array instead of
-      # "file", a named signal without the measured "value". Repair only what
-      # stays honest — paths the agent itself named and values we measured —
-      # so admissibility judges the substance of the evidence, not its spelling.
-      def normalize_evidence(feature, leverage, items)
-        items.flat_map do |item|
-          next [ item ] unless item.is_a?(Hash)
+      def normalize_feature_hotspot(leverage)
+        source = leverage.is_a?(Hash) ? leverage : {}
+        {
+          "scope" => "feature",
+          "score" => numeric(source["score"]),
+          "breakdown" => numeric_signal_hash(source["breakdown"]),
+          "signals" => numeric_signal_hash(source["signals"]),
+          "normalized" => numeric_signal_hash(source["normalized"])
+        }
+      end
 
-          expand_evidence_files(feature, item).map { |entry| backfill_signal_value(leverage, entry) }
+      def normalize_drivers(expected_leverage)
+        source = expected_leverage.is_a?(Hash) ? expected_leverage : {}
+        seen = {}
+        invalid = false
+        drivers = Array(source["drivers"]).filter_map do |driver|
+          unless driver.is_a?(Hash)
+            invalid = true
+            next
+          end
+
+          signal = driver["signal"].to_s
+          relief = driver["relief"]
+          mechanism = driver["mechanism"].to_s.strip
+          valid = Leverage::SIGNALS.include?(signal) &&
+                  relief.is_a?(Numeric) && relief.to_f.finite? && relief.to_f.between?(0.0, 1.0) &&
+                  !mechanism.empty? && !seen[signal]
+          unless valid
+            invalid = true
+            next
+          end
+
+          seen[signal] = true
+          { "signal" => signal, "relief" => relief.to_f, "mechanism" => mechanism }
         end
+        [ drivers, invalid ]
+      end
+
+      def numeric_signal_hash(value)
+        source = value.is_a?(Hash) ? value : {}
+        source.each_with_object({}) do |(signal, amount), result|
+          next unless Leverage::SIGNALS.include?(signal.to_s) && amount.is_a?(Numeric)
+
+          result[signal.to_s] = amount.to_f
+        end
+      end
+
+      def numeric(value)
+        value.is_a?(Numeric) ? value.to_f : 0.0
+      end
+
+      # Plural path aliases are recoverable, but feature-wide hotspot values are
+      # not line evidence. Canonical evidence retains only language-neutral code
+      # anchors and claims; legacy signal/value keys are deliberately stripped.
+      def normalize_evidence(feature, items)
+        items.flat_map do |item|
+          next [ { "claim" => "non-object evidence supplied; retained as inadmissible" } ] unless item.is_a?(Hash)
+
+          expand_evidence_files(feature, item).map { |entry| canonical_evidence(entry) }
+        end
+      end
+
+      def canonical_evidence(item)
+        item.each_with_object({}) do |(key, value), result|
+          next unless EVIDENCE_KEYS.include?(key)
+
+          case key
+          when "line"
+            line = integer(value)
+            result[key] = line if line&.positive?
+          else
+            text = value.to_s.strip
+            result[key] = text unless text.empty?
+          end
+        end
+      end
+
+      def integer(value)
+        return value if value.is_a?(Integer)
+        return Integer(value, exception: false) if value.is_a?(String)
+
+        nil
       end
 
       def expand_evidence_files(feature, item)
@@ -117,14 +184,6 @@ module Hive
       def anchored_owned_files(feature, item)
         text = "#{item["snippet"]} #{item["claim"]}"
         (Array(feature.owned_files) + Array(feature.entrypoints)).uniq.select { |path| text.include?(path) }
-      end
-
-      def backfill_signal_value(leverage, item)
-        signal = item["signal"].to_s
-        return item if item.key?("value") || !MEASURABLE_SIGNALS.include?(signal)
-
-        measured = leverage.is_a?(Hash) ? leverage.dig("signals", signal) : nil
-        measured.nil? ? item : item.merge("value" => measured)
       end
 
       def default_risk(risk)
@@ -189,20 +248,20 @@ module Hive
 
       def enforce_admissibility!(hash)
         evidence = Array(hash["evidence"])
-        has_file = evidence.any? { |item| item.is_a?(Hash) && !item["file"].to_s.strip.empty? }
-        has_signal = evidence.any? do |item|
-          item.is_a?(Hash) && MEASURABLE_SIGNALS.include?(item["signal"].to_s) && item.key?("value")
-        end
-        if has_file && has_signal
+        has_anchor = evidence.any? { |item| coherent_anchor?(item) }
+        has_driver = Array(hash.dig("expected_leverage", "drivers")).any?
+        invalid_driver = Array(hash.dig("risk", "flags")).include?("invalid_leverage_driver")
+        if has_anchor && has_driver && !invalid_driver
           hash["admissible"] = true
-          hash["admissibility_reason"] = "evidence cites concrete paths and measurable signals"
+          hash["admissibility_reason"] = "evidence cites a coherent anchored claim and proposal names measurable leverage drivers"
           return
         end
 
         hash["admissible"] = false
         reasons = []
-        reasons << "missing concrete file path" unless has_file
-        reasons << "missing measurable signal" unless has_signal
+        reasons << "missing coherent anchored claim" unless has_anchor
+        reasons << "missing valid proposal leverage driver" unless has_driver
+        reasons << "invalid proposal leverage driver" if invalid_driver
         hash["admissibility_reason"] = reasons.join("; ")
         hash["risk"]["flags"] |= [ "inadmissible" ]
 
@@ -211,8 +270,18 @@ module Hive
         # last_scanned_sha and forcing perpetual re-scan). Seed a synthetic
         # marker so it survives to the report as a flagged inadmissible record.
         if evidence.empty?
-          hash["evidence"] = [ { "snippet" => "no evidence supplied; retained as inadmissible" } ]
+          hash["evidence"] = [ { "claim" => "no evidence supplied; retained as inadmissible" } ]
         end
+      end
+
+      def coherent_anchor?(item)
+        return false unless item.is_a?(Hash)
+
+        file = item["file"].to_s.strip
+        claim = item["claim"].to_s.strip
+        line = item["line"]
+        snippet = item["snippet"].to_s.strip
+        !file.empty? && !claim.empty? && ((line.is_a?(Integer) && line.positive?) || !snippet.empty?)
       end
 
       def schema_errors(hash)

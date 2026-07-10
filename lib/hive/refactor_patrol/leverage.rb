@@ -14,6 +14,40 @@ module Hive
         "coverage_gap" => 1.0
       }.freeze
 
+      def self.score_proposal(hotspot, drivers)
+        hotspot_breakdown = hotspot.is_a?(Hash) && hotspot["breakdown"].is_a?(Hash) ? hotspot["breakdown"] : {}
+        seen = {}
+        validated = Array(drivers).map do |driver|
+          raise ArgumentError, "proposal leverage driver must be an object" unless driver.is_a?(Hash)
+
+          signal = driver.fetch("signal")
+          relief = driver.fetch("relief")
+          mechanism = driver.fetch("mechanism").to_s.strip
+          raise ArgumentError, "unknown proposal leverage signal #{signal.inspect}" unless SIGNALS.include?(signal)
+          raise ArgumentError, "duplicate proposal leverage signal #{signal.inspect}" if seen[signal]
+          unless relief.is_a?(Numeric) && relief.to_f.finite? && relief.to_f.between?(0.0, 1.0)
+            raise ArgumentError, "proposal leverage relief must be between 0 and 1"
+          end
+          raise ArgumentError, "proposal leverage mechanism must be non-empty" if mechanism.empty?
+
+          seen[signal] = true
+          { "signal" => signal, "relief" => relief.to_f, "mechanism" => mechanism }
+        rescue KeyError => e
+          raise ArgumentError, "proposal leverage driver is missing #{e.key.inspect}"
+        end
+        breakdown = validated.to_h do |driver|
+          signal = driver.fetch("signal")
+          contribution = hotspot_breakdown.fetch(signal, 0).to_f * driver.fetch("relief").to_f
+          [ signal, contribution.round(4) ]
+        end
+
+        {
+          "score" => breakdown.values.sum.round(4),
+          "breakdown" => breakdown,
+          "drivers" => validated
+        }
+      end
+
       def initialize(project_root, cfg:, command_runner: nil)
         @project_root = File.expand_path(project_root)
         @cfg = cfg
@@ -39,6 +73,7 @@ module Hive
         end
 
         {
+          "scope" => "feature",
           "score" => score.round(4),
           "breakdown" => breakdown,
           "signals" => raw,

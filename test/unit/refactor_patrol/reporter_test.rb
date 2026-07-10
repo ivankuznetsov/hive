@@ -104,6 +104,24 @@ class RefactorPatrolReporterTest < Minitest::Test
     assert_includes error.message, "duplicate thesis id"
   end
 
+  def test_same_feature_proposals_rank_by_proposal_specific_leverage_with_stable_ties
+    low = thesis("z-low", score: 0.2)
+    high_b = thesis("b-high", score: 0.7)
+    high_a = thesis("a-high", score: 0.7)
+
+    payload = reporter.envelope(
+      project: "demo",
+      project_root: "/tmp/demo",
+      dry_run: true,
+      features: [ feature ],
+      theses: [ low, high_b, high_a ],
+      suppressed: [],
+      last_scanned_sha: "abc"
+    )
+
+    assert_equal %w[a-high b-high z-low], payload.fetch("ranked").map { |item| item.fetch("id") }
+  end
+
   private
 
   def reporter
@@ -148,17 +166,32 @@ class RefactorPatrolReporterTest < Minitest::Test
     )
   end
 
-  def thesis(id, confidence: "medium", admissible: true, admissibility_reason: "ok", flags: [], fingerprint: "fp")
+  def thesis(id, score: 0.8, confidence: "medium", admissible: true, admissibility_reason: "ok", flags: [], fingerprint: "fp")
     Hive::RefactorPatrol::Thesis.new(
       id: id,
       feature_id: "checkout",
       feature: "Checkout",
       problem: "Checkout mixes concerns",
       cost: "Changes fan out",
-      evidence: [ { "file" => "lib/checkout.rb", "signal" => "churn", "value" => 7 } ],
+      evidence: [
+        {
+          "file" => "lib/checkout.rb",
+          "line" => 1,
+          "snippet" => "class Checkout",
+          "claim" => "checkout mixes concerns"
+        }
+      ],
       proposed_refactor: "Extract a service",
       feature_boundary: { "owned_files" => [ "lib/checkout.rb" ], "entrypoints" => [ "lib/checkout.rb" ] },
-      expected_leverage: { "score" => 0.8, "breakdown" => { "churn" => 0.8 } },
+      feature_hotspot: {
+        "scope" => "feature", "score" => 1.0,
+        "breakdown" => { "churn" => 1.0 }, "signals" => { "churn" => 7 }, "normalized" => { "churn" => 1.0 }
+      },
+      expected_leverage: {
+        "score" => score,
+        "breakdown" => { "churn" => score },
+        "drivers" => [ { "signal" => "churn", "relief" => score, "mechanism" => "isolate recurring edits" } ]
+      },
       confidence: confidence,
       risk: {
         "caps" => { "est_files" => 2, "est_diff_lines" => 80, "single_feature" => true },

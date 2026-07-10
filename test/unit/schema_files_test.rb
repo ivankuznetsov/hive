@@ -12,6 +12,7 @@ require "hive/commands/prune"
 require "hive/commands/run"
 require "hive/commands/stage_action"
 require "hive/commands/status"
+require "hive/commands/workflow_publish"
 require "hive/tui/snapshot"
 require "hive/daemon/dispatch_request_queue"
 require "hive/daemon/dispatch_result_queue"
@@ -24,6 +25,24 @@ require "tmpdir"
 #   3. Pin the same required-key set the producer code emits, so a producer
 #      change without a schema update fails at test time.
 class SchemaFilesTest < Minitest::Test
+  def test_hive_workflow_publish_schema_matches_producer_contract
+    path = Hive::Schemas.schema_path("hive-workflow-publish")
+    assert File.exist?(path)
+    doc = JSON.parse(File.read(path))
+    assert_equal "https://json-schema.org/draft/2020-12/schema", doc.fetch("$schema")
+    assert_equal "hive-workflow-publish",
+                 doc.dig("$defs", "SuccessPayload", "properties", "schema", "const")
+    assert_equal Hive::Schemas::WorkflowPublishErrorKind::ALL.sort,
+                 doc.dig("$defs", "ErrorPayload", "properties", "error_kind", "enum").sort
+
+    required = %w[
+      schema schema_version ok dry_run id version file_count aggregate_sha256
+      rule_sets dependencies permissions lint_status review_required_count
+      review_required repository submission_mode branch pr_url
+    ].sort
+    assert_equal required, doc.dig("$defs", "SuccessPayload", "required").sort
+  end
+
   def test_hive_approve_v2_schema_file_exists_and_is_valid_json
     path = Hive::Schemas.schema_path("hive-approve")
     assert File.exist?(path), "schema file missing: #{path}"

@@ -81,9 +81,6 @@ module Hive
         metadata = @workflow.metadata
         raise Hive::ConfigError, "workflow #{@workflow.id} requires metadata to publish" unless metadata
 
-        unless Hive::Workflows::DescriptorParser::SEMVER.match?(@selected_version.to_s)
-          raise Hive::ConfigError, "workflow #{@workflow.id} version #{@selected_version.inspect} must be a strict semantic version"
-        end
         missing = REQUIRED_METADATA.reject do |field|
           value = field == "version" ? @selected_version : metadata.public_send(field)
           !value.nil? && !value.to_s.strip.empty?
@@ -91,6 +88,9 @@ module Hive
         unless missing.empty?
           raise Hive::ConfigError,
                 "workflow #{@workflow.id} metadata is incomplete for publication: missing #{missing.join(', ')}"
+        end
+        unless Hive::Workflows::DescriptorParser::SEMVER.match?(@selected_version.to_s)
+          raise Hive::ConfigError, "workflow #{@workflow.id} version #{@selected_version.inspect} must be a strict semantic version"
         end
 
         metadata.with(version: @selected_version)

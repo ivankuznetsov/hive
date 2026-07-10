@@ -307,6 +307,15 @@ def json_usage_error_contract(argv)
     return { schema: schema, error_kind: "usage" }
   end
 
+  if command == "workflow"
+    command_index = argv.index(command)
+    subcommand = argv[(command_index + 1)..].to_a.find { |arg| !arg.start_with?("-") }
+    return {
+      schema: subcommand == "publish" ? "hive-workflow-publish" : "hive-workflow-new",
+      error_kind: "usage"
+    }
+  end
+
   JSON_USAGE_ERROR_CONTRACTS[command]
 end
 

@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-workflow-publish.v1.json",
+  "title": "hive workflow publish output (v1)",
+  "description": "Stable local-package, lint, and submission contract emitted by `hive workflow publish ID --json`.",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
+  ],
+  "$defs": {
+    "Dependency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["skill", "context", "agent", "required"],
+      "properties": {
+        "skill": { "type": "string" },
+        "context": { "type": "string" },
+        "agent": { "type": "string" },
+        "required": { "const": true }
+      }
+    },
+    "ReviewRequired": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rule", "file", "line", "contexts", "justification"],
+      "properties": {
+        "rule": { "type": "string" },
+        "file": { "type": "string" },
+        "line": { "type": "integer", "minimum": 1 },
+        "contexts": { "type": "array", "items": { "type": "string" } },
+        "justification": { "type": "string", "minLength": 1 }
+      }
+    },
+    "Finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "rule", "file", "line", "message", "remediation", "contexts"],
+      "properties": {
+        "kind": { "enum": ["compatibility", "dependency", "secret", "deny"] },
+        "rule": { "type": "string" },
+        "file": { "type": ["string", "null"] },
+        "line": { "type": ["integer", "null"], "minimum": 1 },
+        "message": { "type": "string" },
+        "remediation": { "type": "string" },
+        "contexts": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "schema_version", "ok", "dry_run", "id", "version",
+        "file_count", "aggregate_sha256", "rule_sets", "dependencies",
+        "permissions", "lint_status", "review_required_count", "review_required",
+        "repository", "submission_mode", "branch", "pr_url"
+      ],
+      "properties": {
+        "schema": { "const": "hive-workflow-publish" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": true },
+        "dry_run": { "type": "boolean" },
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+        "version": { "type": "string" },
+        "file_count": { "type": "integer", "minimum": 3 },
+        "aggregate_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "rule_sets": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["secrets", "deny"],
+          "properties": {
+            "secrets": { "type": "integer", "minimum": 1 },
+            "deny": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "dependencies": { "type": "array", "items": { "$ref": "#/$defs/Dependency" } },
+        "permissions": { "type": "object", "additionalProperties": true },
+        "lint_status": { "enum": ["clean", "review_required"] },
+        "review_required_count": { "type": "integer", "minimum": 0 },
+        "review_required": { "type": "array", "items": { "$ref": "#/$defs/ReviewRequired" } },
+        "repository": { "type": "string" },
+        "submission_mode": { "type": ["string", "null"], "enum": ["direct", "fork", null] },
+        "branch": { "type": ["string", "null"] },
+        "pr_url": { "type": ["string", "null"] }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "error_class", "error_kind", "exit_code", "message"],
+      "properties": {
+        "schema": { "const": "hive-workflow-publish" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "error_class": { "type": "string" },
+        "error_kind": {
+          "enum": ["usage", "config", "preflight", "submission", "submission_partial", "concurrent_run", "error"]
+        },
+        "exit_code": { "type": "integer" },
+        "message": { "type": "string" },
+        "dry_run": { "type": "boolean" },
+        "id": { "type": "string" },
+        "findings": { "type": "array", "items": { "$ref": "#/$defs/Finding" } },
+        "repository": { "type": "string" },
+        "branch": { "type": "string" },
+        "holder": { "type": "object", "additionalProperties": true },
+        "lock_path": { "type": "string" }
+      }
+    }
+  }
+}

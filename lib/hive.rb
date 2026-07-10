@@ -44,6 +44,7 @@ module Hive
       # every other agent-callable command's error envelope; the success arm
       # builds its hash directly.
       "hive-workflow-new" => 1,
+      "hive-workflow-publish" => 1,
       # Global daily shipped digest (`hive digest --json`). The success
       # envelope carries the delivery outcome (status/date/message); hard
       # failures use stderr + exit code, and the Thor-usage error path
@@ -384,6 +385,18 @@ module Hive
       GIT            = "git".freeze
       CONCURRENT_RUN = "concurrent_run".freeze
       ERROR          = "error".freeze
+      ALL = constants(false).reject { |c| c == :ALL }.map { |c| const_get(c) }.freeze
+    end
+
+
+    module WorkflowPublishErrorKind
+      USAGE              = "usage".freeze
+      CONFIG             = "config".freeze
+      PREFLIGHT          = "preflight".freeze
+      SUBMISSION         = "submission".freeze
+      SUBMISSION_PARTIAL = "submission_partial".freeze
+      CONCURRENT_RUN     = "concurrent_run".freeze
+      ERROR              = "error".freeze
       ALL = constants(false).reject { |c| c == :ALL }.map { |c| const_get(c) }.freeze
     end
   end

@@ -12,6 +12,14 @@ require "test_helper"
 # reference these constants — a drift between any of those three surfaces
 # fails this test or the schema-drift test in schema_files_test.rb.
 class SchemasTest < Minitest::Test
+  def test_workflow_publish_error_kinds_are_closed_and_frozen
+    expected = %w[
+      usage config preflight submission submission_partial concurrent_run error
+    ].sort
+    assert_equal expected, Hive::Schemas::WorkflowPublishErrorKind::ALL.sort
+    assert(Hive::Schemas::WorkflowPublishErrorKind::ALL.all?(&:frozen?))
+  end
+
   def test_run_error_kind_all_contains_twelve_values
     assert_equal 12, Hive::Schemas::RunErrorKind::ALL.length,
                  "RunErrorKind::ALL count is locked; adding a kind requires bumping this assertion deliberately"

@@ -19,7 +19,7 @@ module Hive
       DEFAULT_TEMPLATE = "blank".freeze
       WORKFLOW_ID_RE = Hive::Workflows::DescriptorParser::SAFE_SLUG
       SCHEMA = "hive-workflow-new".freeze
-      SUBCOMMANDS = %w[new].freeze
+      SUBCOMMANDS = %w[new publish].freeze
 
       class UsageError < Hive::Error
         attr_reader :value, :expected
@@ -269,13 +269,16 @@ module Hive
       end
       private_class_method :warn_failed_scaffold_cleanup
 
-      def initialize(subcommand, id = nil, project_root: Dir.pwd, json: false, stdout: $stdout, template: DEFAULT_TEMPLATE)
+      def initialize(subcommand, id = nil, project_root: Dir.pwd, json: false, stdout: $stdout,
+                     template: DEFAULT_TEMPLATE, version: nil, dry_run: false)
         @subcommand = subcommand
         @id = id
         @project_root = File.expand_path(project_root)
         @json = json
         @stdout = stdout
         @template = template
+        @version = version
+        @dry_run = dry_run
       end
 
       def call
@@ -309,12 +312,32 @@ module Hive
           )
         end
 
-        unless @subcommand == "new"
+        unless SUBCOMMANDS.include?(@subcommand)
           raise UsageError.new(
             "unknown workflow subcommand #{@subcommand.inspect} (expected: #{expected_list})",
             value: @subcommand,
             expected: SUBCOMMANDS
           )
+        end
+
+        if @subcommand == "publish"
+          if @template
+            raise UsageError.new("--template applies only to `workflow new`", value: @template)
+          end
+          require "hive/commands/workflow_publish"
+          return Hive::Commands::WorkflowPublish.new(
+            @id,
+            project_root: @project_root,
+            json: @json,
+            dry_run: @dry_run,
+            version: @version,
+            stdout: @stdout
+          ).call
+        end
+
+        if @version || @dry_run
+          flag = @version ? "--version" : "--dry-run"
+          raise UsageError.new("#{flag} applies only to `workflow publish`", value: flag)
         end
 
         scaffold = self.class.scaffold_files!(@id, project_root: @project_root, template: @template)

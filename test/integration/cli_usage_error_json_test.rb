@@ -168,8 +168,8 @@ class CliUsageErrorJsonTest < Minitest::Test
       assert_equal "UsageError", payload["error_class"]
       assert_equal "usage", payload["error_kind"]
       assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
-      assert_equal "missing SUBCOMMAND (expected: new)", payload["message"]
-      assert_equal [ "new" ], payload["expected"]
+      assert_equal "missing SUBCOMMAND (expected: new, publish)", payload["message"]
+      assert_equal %w[new publish], payload["expected"]
     end
   end
 
@@ -180,7 +180,7 @@ class CliUsageErrorJsonTest < Minitest::Test
       refute status.success?
       assert_equal Hive::ExitCodes::USAGE, status.exitstatus
       assert_empty out
-      assert_equal "hive workflow: missing SUBCOMMAND (expected: new)\n", err
+      assert_equal "hive workflow: missing SUBCOMMAND (expected: new, publish)\n", err
     end
   end
 
@@ -212,6 +212,21 @@ class CliUsageErrorJsonTest < Minitest::Test
       # contract that wraps Thor's arity error.
       refute payload.key?("expected"), "Thor arity errors must not carry `expected`"
       refute payload.key?("value"), "Thor arity errors must not carry `value`"
+    end
+  end
+
+  def test_publish_too_many_positionals_uses_publish_schema
+    with_tmp_global_config do |home|
+      out, _err, status = run_hive(home, "workflow", "publish", "flow", "extra", "--json")
+
+      refute status.success?
+      assert_equal Hive::ExitCodes::USAGE, status.exitstatus
+      payload = JSON.parse(out)
+      assert_equal "hive-workflow-publish", payload.fetch("schema")
+      assert_equal 1, payload.fetch("schema_version")
+      assert_equal "usage", payload.fetch("error_kind")
+      schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-workflow-publish"))))
+      assert_empty schemer.validate(payload).map { |row| row["error"] }
     end
   end
 

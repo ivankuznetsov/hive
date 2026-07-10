@@ -390,6 +390,9 @@ module Hive
         new ID    Scaffold a per-project workflow descriptor under
                   <hive_state_path>/workflows/ID.yml plus its stage
                   instruction(s) under <hive_state_path>/workflows/ID/.
+        publish ID
+                  Validate and package one project workflow as a honeycomb,
+                  then open a PR against the configured registry repository.
 
       By default `new` scaffolds the blank `inbox -> work -> done` stub. Pass
       `--template NAME` to seed from a richer sample workflow instead (e.g.
@@ -398,6 +401,10 @@ module Hive
     DESC
     option :template, type: :string,
                       desc: "for `new`: seed from a named sample workflow (e.g. writing, research) instead of the blank stub"
+    option :version, type: :string,
+                     desc: "for `publish`: override the descriptor's semantic version"
+    option :dry_run, type: :boolean, default: false,
+                     desc: "for `publish`: run all local packaging and lint checks without remote changes"
     def workflow(subcommand = nil, id = nil)
       require "hive/commands/workflow"
       Hive::Commands::Workflow.new(
@@ -405,7 +412,9 @@ module Hive
         id,
         project_root: Dir.pwd,
         json: options[:json],
-        template: options[:template]
+        template: options[:template],
+        version: options[:version],
+        dry_run: options[:dry_run]
       ).call
     end
 

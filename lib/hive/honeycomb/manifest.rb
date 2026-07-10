@@ -55,7 +55,7 @@ module Hive
            .select { |path| File.file?(path) }
            .map do |path|
              relative = path.delete_prefix("#{package_root}/")
-             { "path" => relative, "sha256" => Digest::SHA256.file(path).hexdigest }.freeze
+             { "path" => relative, "sha256" => ::Digest::SHA256.file(path).hexdigest }.freeze
            end
            .reject { |row| row.fetch("path") == "manifest.yml" }
            .sort_by { |row| row.fetch("path") }
@@ -64,7 +64,7 @@ module Hive
 
       def aggregate_digest(files)
         tuples = files.map { |row| "#{row.fetch('path')}\0#{row.fetch('sha256')}\n" }.join
-        Digest::SHA256.hexdigest(tuples)
+        ::Digest::SHA256.hexdigest(tuples)
       end
     end
   end

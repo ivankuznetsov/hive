@@ -247,7 +247,7 @@ class WorkflowNewTest < Minitest::Test
         Hive::Commands::Workflow.new(nil, nil, project_root: project_root, json: true).call
       end
       missing_payload = JSON.parse(missing_out)
-      assert_equal [ "new" ], missing_payload.fetch("expected")
+      assert_equal %w[new publish], missing_payload.fetch("expected")
       missing_errors = schemer.validate(missing_payload).map { |e| e["error"] }
       assert_empty missing_errors,
                    "hive-workflow-new usage ErrorPayload (with `expected`) must validate " \
@@ -258,7 +258,7 @@ class WorkflowNewTest < Minitest::Test
       end
       unknown_payload = JSON.parse(unknown_out)
       assert_equal "bogus", unknown_payload.fetch("value")
-      assert_equal [ "new" ], unknown_payload.fetch("expected")
+      assert_equal %w[new publish], unknown_payload.fetch("expected")
       unknown_errors = schemer.validate(unknown_payload).map { |e| e["error"] }
       assert_empty unknown_errors,
                    "hive-workflow-new usage ErrorPayload (with `value` AND `expected`) must " \
@@ -466,7 +466,25 @@ class WorkflowNewTest < Minitest::Test
 
       assert_equal Hive::ExitCodes::USAGE, status
       assert_empty out
-      assert_equal "hive workflow: unknown workflow subcommand \"save\" (expected: new)\n", err
+      assert_equal "hive workflow: unknown workflow subcommand \"save\" (expected: new, publish)\n", err
+    end
+  end
+
+  def test_new_rejects_publish_only_flags
+    with_tmp_dir do |project_root|
+      version_error = assert_raises(Hive::Commands::Workflow::UsageError) do
+        Hive::Commands::Workflow.new(
+          "new", "my-flow", project_root: project_root, version: "1.0.0"
+        ).call!
+      end
+      assert_match(/--version applies only/, version_error.message)
+
+      dry_run_error = assert_raises(Hive::Commands::Workflow::UsageError) do
+        Hive::Commands::Workflow.new(
+          "new", "my-flow", project_root: project_root, dry_run: true
+        ).call!
+      end
+      assert_match(/--dry-run applies only/, dry_run_error.message)
     end
   end
 
@@ -478,7 +496,7 @@ class WorkflowNewTest < Minitest::Test
 
       assert_equal Hive::ExitCodes::USAGE, status
       assert_empty out
-      assert_equal "hive workflow: missing SUBCOMMAND (expected: new)\n", err
+      assert_equal "hive workflow: missing SUBCOMMAND (expected: new, publish)\n", err
     end
   end
 
@@ -495,8 +513,8 @@ class WorkflowNewTest < Minitest::Test
       assert_equal "UsageError", payload.fetch("error_class")
       assert_equal "usage", payload.fetch("error_kind")
       assert_equal Hive::ExitCodes::USAGE, payload.fetch("exit_code")
-      assert_equal "missing SUBCOMMAND (expected: new)", payload.fetch("message")
-      assert_equal [ "new" ], payload.fetch("expected")
+      assert_equal "missing SUBCOMMAND (expected: new, publish)", payload.fetch("message")
+      assert_equal %w[new publish], payload.fetch("expected")
       refute payload.key?("value")
     end
   end
@@ -514,9 +532,9 @@ class WorkflowNewTest < Minitest::Test
       assert_equal "UsageError", payload.fetch("error_class")
       assert_equal "usage", payload.fetch("error_kind")
       assert_equal Hive::ExitCodes::USAGE, payload.fetch("exit_code")
-      assert_equal "unknown workflow subcommand \"bogus\" (expected: new)", payload.fetch("message")
+      assert_equal "unknown workflow subcommand \"bogus\" (expected: new, publish)", payload.fetch("message")
       assert_equal "bogus", payload.fetch("value")
-      assert_equal [ "new" ], payload.fetch("expected")
+      assert_equal %w[new publish], payload.fetch("expected")
     end
   end
 

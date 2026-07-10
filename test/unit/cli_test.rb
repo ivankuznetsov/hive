@@ -269,7 +269,23 @@ class HiveCliTest < Minitest::Test
       Hive::CLI.start([ "workflow", "new", "my-flow", "--json" ])
 
       assert_equal [ "new", "my-flow" ], calls.first.fetch(:args)
-      assert_equal({ project_root: Dir.pwd, json: true, template: nil }, calls.first.fetch(:kwargs))
+      assert_equal(
+        { project_root: Dir.pwd, json: true, template: nil, version: nil, dry_run: false },
+        calls.first.fetch(:kwargs)
+      )
+      assert_equal :call, calls.last
+    end
+  end
+
+  def test_workflow_publish_dispatches_publish_options
+    with_command_new_stub(Hive::Commands::Workflow) do |calls|
+      Hive::CLI.start([ "workflow", "publish", "my-flow", "--version", "2.0.0", "--dry-run", "--json" ])
+
+      assert_equal [ "publish", "my-flow" ], calls.first.fetch(:args)
+      assert_equal(
+        { project_root: Dir.pwd, json: true, template: nil, version: "2.0.0", dry_run: true },
+        calls.first.fetch(:kwargs)
+      )
       assert_equal :call, calls.last
     end
   end

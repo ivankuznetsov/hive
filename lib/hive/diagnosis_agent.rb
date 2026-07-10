@@ -85,6 +85,11 @@ module Hive
         cfg = Hive::Config.load(@task.project_root)
         profile = Hive::Stages::Base.stage_profile(cfg, "execute")
         ensure_supported_diagnostic_generator!(profile)
+        @model_control_flags = if profile.respond_to?(:render_model_controls)
+                                 Hive::Config.agent_control_flags(cfg, profile: profile, stage: :diagnose)
+        else
+                                 []
+        end
         cwd = diagnose_cwd(cfg)
         unless @injected_spawn
           profile.check_version!
@@ -593,6 +598,7 @@ module Hive
         add_dirs.each { |dir| cmd << profile.add_dir_flag << dir }
       end
       cmd << profile.budget_flag << max_budget_usd.to_s if profile.budget_flag && max_budget_usd
+      cmd.concat(Array(@model_control_flags))
       cmd << (prompt_style == :stdin ? "-" : prompt) unless prompt_style == :headless_flag_value
       cmd
     end

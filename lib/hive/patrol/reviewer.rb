@@ -158,7 +158,9 @@ module Hive
           log_label: "patrol-review",
           profile: profile,
           expected_output: output_path,
-          status_mode: :output_file_exists
+          status_mode: :output_file_exists,
+          model_control_flags: profile.respond_to?(:render_model_controls) ?
+            Hive::Config.agent_control_flags(@cfg, profile: profile, stage: :patrol_review) : []
         ).run!
         record_usage(result, profile, "patrol-review", started_at)
         result

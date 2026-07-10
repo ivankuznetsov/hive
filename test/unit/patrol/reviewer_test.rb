@@ -167,6 +167,32 @@ class HivePatrolReviewerTest < Minitest::Test
     end
   end
 
+  def test_run_agent_wrapper_routes_patrol_review_controls
+    with_tmp_dir do |dir|
+      route_cfg = cfg
+      route_cfg["patrol"]["agent"] = "codex"
+      route_cfg["models"] = {
+        "patrol" => { "effort" => "high" },
+        "patrol_review" => { "model" => "review-model" }
+      }
+      reviewer = Hive::Patrol::Reviewer.new(dir, cfg: route_cfg)
+      captured = nil
+      fake_agent = Object.new
+      def fake_agent.run! = { status: :ok }
+      fake_new = lambda do |**kwargs|
+        captured = kwargs
+        fake_agent
+      end
+
+      with_replaced_singleton_method(Hive::Agent, :new, fake_new) do
+        reviewer.send(:run_agent, prompt: "p", output_path: File.join(dir, "out.json"), run_dir: dir)
+      end
+
+      assert_equal [ "--model", "review-model", "-c", 'model_reasoning_effort="high"' ],
+                   captured[:model_control_flags]
+    end
+  end
+
   def test_run_agent_wrapper_records_patrol_review_usage
     with_tmp_dir do |dir|
       with_usage_db do

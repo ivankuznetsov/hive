@@ -225,7 +225,9 @@ module Hive
             cwd: worktree_path,
             log_label: "babysitter-pr-#{number}",
             profile: profile,
-            status_mode: :exit_code_only
+            status_mode: :exit_code_only,
+            cfg: @cfg,
+            stage: :babysitter
           )
         end
         @dry_run ? Hive::Babysitter::DryRunEnv.with_env(worktree_path, &spawn) : spawn.call

@@ -147,7 +147,9 @@ module Hive
           timeout_sec: @cfg.dig("timeout_sec", "patrol") || 3600,
           log_label: "patrol-fix",
           profile: profile,
-          status_mode: :exit_code_only
+          status_mode: :exit_code_only,
+          model_control_flags: profile.respond_to?(:render_model_controls) ?
+            Hive::Config.agent_control_flags(@cfg, profile: profile, stage: :patrol_fix) : []
         ).run!
         record_usage(result, profile, "patrol-fix", started_at)
         result

@@ -188,6 +188,32 @@ class HivePatrolFixerTest < Minitest::Test
     end
   end
 
+  def test_run_agent_wrapper_routes_patrol_fix_controls
+    with_tmp_git_repo do |repo|
+      route_cfg = cfg(repo)
+      route_cfg["patrol"]["agent"] = "codex"
+      route_cfg["models"] = {
+        "patrol" => { "model" => "parent-model" },
+        "patrol_fix" => { "effort" => "xhigh" }
+      }
+      fixer = Hive::Patrol::Fixer.new(repo, cfg: route_cfg)
+      captured = nil
+      fake_agent = Object.new
+      def fake_agent.run! = { status: :ok }
+      fake_new = lambda do |**kwargs|
+        captured = kwargs
+        fake_agent
+      end
+
+      with_replaced_singleton_method(Hive::Agent, :new, fake_new) do
+        fixer.send(:run_agent, prompt: "p", run_dir: repo, worktree_path: repo)
+      end
+
+      assert_equal [ "--model", "parent-model", "-c", 'model_reasoning_effort="xhigh"' ],
+                   captured[:model_control_flags]
+    end
+  end
+
   def test_run_agent_wrapper_records_patrol_fix_usage
     with_tmp_git_repo do |repo|
       with_usage_db do

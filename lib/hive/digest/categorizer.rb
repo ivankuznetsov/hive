@@ -285,7 +285,9 @@ module Hive
           status_mode: :output_file_exists,
           log_label: "digest",
           permission_mode: profile.name == :claude ? Hive::Config.claude_permission_mode(@cfg) : nil,
-          cli_flags: profile.name == :claude ? Hive::Config.claude_cli_flags(@cfg) : []
+          model_control_flags: Hive::Config.agent_control_flags(
+            @cfg, profile: profile, stage: :digest
+          )
         )
       end
 

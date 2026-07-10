@@ -285,6 +285,31 @@ class HiveDigestCategorizerTest < Minitest::Test
     end
   end
 
+  def test_global_digest_model_controls_reach_direct_agent_constructor
+    with_tmp_dir do |run_root|
+      grouped = { "alpha" => [ item(pr_number: 10, pr_title: "Build digest") ] }
+      rows = [ { "id" => "alpha/10", "category" => "feature", "summary" => "Adds it." } ]
+      cfg = {
+        "digest" => { "agent" => "codex" },
+        "models" => { "digest" => { "model" => "gpt-5.6-sol", "effort" => "xhigh" } }
+      }
+      captured = nil
+      fake_new = lambda do |**kw|
+        captured = kw
+        FakeAgent.new(expected_output: kw.fetch(:expected_output), items: rows)
+      end
+
+      with_replaced_singleton_method(Hive::Agent, :new, fake_new) do
+        Hive::Digest::Categorizer.new(cfg: cfg, run_root: run_root, logger: nil)
+                                 .categorize(grouped, date: "2026-06-15")
+      end
+
+      assert_equal [ "--model", "gpt-5.6-sol", "-c", 'model_reasoning_effort="xhigh"' ],
+                   captured[:model_control_flags]
+      assert_nil captured[:permission_mode]
+    end
+  end
+
   def test_categorize_surfaces_the_model_overall_summary
     with_tmp_dir do |run_root|
       grouped = { "alpha" => [ item(pr_number: 10, pr_title: "Build digest") ] }

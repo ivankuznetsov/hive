@@ -379,6 +379,7 @@ class HiveRebaseTest < Minitest::Test
                  "rebase helper must use the configured development agent"
     assert_equal :exit_code_only, dispatched_with[:status_mode],
                  "rebase helper must judge development-agent success by exit code"
+    assert_equal :rebase, dispatched_with[:stage]
   ensure
     teardown_dirs(worktree, folder)
   end

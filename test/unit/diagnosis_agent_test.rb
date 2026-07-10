@@ -440,6 +440,23 @@ class DiagnosisAgentTest < Minitest::Test
     assert_includes error.message, "[REDACTED:github_token]"
   end
 
+  def test_build_cmd_keeps_plain_output_and_adds_profile_native_controls
+    agent = Hive::DiagnosisAgent.new(task: @task)
+    agent.instance_variable_set(
+      :@model_control_flags,
+      [ "--model", "gpt-5.6-sol", "-c", 'model_reasoning_effort="xhigh"' ]
+    )
+    profile = Hive::AgentProfiles.lookup(:codex)
+
+    cmd = agent.send(:build_cmd, profile, "diagnose", [ @folder ], 5)
+
+    assert_includes cmd, "--model"
+    assert_includes cmd, "gpt-5.6-sol"
+    assert_includes cmd, 'model_reasoning_effort="xhigh"'
+    refute_includes cmd, "--json"
+    assert_equal "-", cmd.last
+  end
+
   def test_run_rejects_worktree_pointer_outside_configured_root
     worktree_root = File.join(@tmp, "worktrees")
     FileUtils.mkdir_p(worktree_root)

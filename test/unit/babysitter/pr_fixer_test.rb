@@ -76,6 +76,33 @@ class BabysitterPrFixerTest < Minitest::Test
     end
   end
 
+  def test_agent_spawn_routes_babysitter_identity_and_config
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      worktree_path = File.join(dir, "wt")
+      FileUtils.mkdir_p(worktree_path)
+      route_cfg = cfg.merge(
+        "models" => { "babysitter" => { "model" => "opus" } }
+      )
+      captured = nil
+
+      stub_non_green_context(project, worktree_path) do
+        replacement = lambda do |_task, **kwargs|
+          captured = kwargs
+          { status: :ok }
+        end
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, replacement) do
+          Hive::Babysitter::PrFixer.run(
+            pr, project, route_cfg, dry_run: false, logger: nil, inflight: Set.new
+          )
+        end
+      end
+
+      assert_equal :babysitter, captured[:stage]
+      assert_same route_cfg, captured[:cfg]
+    end
+  end
+
   def test_agent_failure_labels_comments_and_gives_up
     with_tmp_dir do |dir|
       project = project_entry(dir)

@@ -7,6 +7,13 @@ require "hive/secret_patterns"
 # fix-agent commit, so each pattern must have at least one assertion
 # proving it fires on a realistic input.
 class SecretPatternsTest < Minitest::Test
+  def test_rule_set_has_a_version_and_stable_rule_ids
+    assert_equal 1, Hive::SecretPatterns::RULE_SET_VERSION
+    assert_equal Hive::SecretPatterns::PATTERNS.keys,
+                 Hive::SecretPatterns.rules.map(&:id)
+    assert(Hive::SecretPatterns.rules.all?(&:frozen?))
+  end
+
   def assert_match_name(text, expected_name)
     matches = Hive::SecretPatterns.scan(text)
     assert(matches.any? { |m| m[:name] == expected_name },
@@ -168,6 +175,32 @@ class SecretPatternsTest < Minitest::Test
   def test_scan_returns_empty_for_blank_input
     assert_empty Hive::SecretPatterns.scan("")
     assert_empty Hive::SecretPatterns.scan(nil)
+  end
+
+  def test_safe_scan_reports_location_without_secret_material
+    secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+    findings = Hive::SecretPatterns.safe_scan(
+      "header\ntoken = #{secret}\n",
+      file: "workflow.yml"
+    )
+
+    finding = findings.find { |candidate| candidate.rule_id == "github_token" }
+    refute_nil finding
+    assert_equal "workflow.yml", finding.file
+    assert_equal 2, finding.line
+    assert_includes finding.remediation, "secret"
+    refute_respond_to finding, :snippet
+    refute_includes finding.to_h.inspect, secret
+  end
+
+  def test_safe_scan_handles_binary_input_without_exposing_pem
+    secret = "-----BEGIN PRIVATE KEY-----\nprivate-body\n-----END PRIVATE KEY-----"
+    bytes = "\xff#{secret}".dup.force_encoding(Encoding::ASCII_8BIT)
+
+    findings = Hive::SecretPatterns.safe_scan(bytes, file: "asset.bin")
+
+    assert(findings.any? { |finding| finding.rule_id == "pem_private_key" })
+    refute_includes findings.map(&:to_h).inspect, "private-body"
   end
 
   # ── multi-pattern + truncation pinning ─────────────────────────────────

@@ -1,6 +1,7 @@
 require "test_helper"
 require "hive/stages/review/fix_guardrail"
 require "hive/reviewers"
+require "hive/deny_patterns"
 
 # Direct coverage for the post-fix diff guardrail. Sets up a tmp git
 # repo, makes a second commit with the bad pattern, and asserts
@@ -91,6 +92,12 @@ class FixGuardrailTest < Minitest::Test
   end
 
   # --- shell_pipe_to_interpreter --------------------------------------
+
+  def test_shell_pipe_pattern_reuses_the_canonical_deny_rule
+    assert_same Hive::DenyPatterns.rule(:shell_download_to_interpreter).regex,
+                Hive::Stages::Review::FixGuardrail::Patterns::DEFAULTS
+                  .fetch(:shell_pipe_to_interpreter).fetch(:regex)
+  end
 
   def test_trips_on_curl_pipe_sh
     with_two_commits(file: "scripts/install.sh",

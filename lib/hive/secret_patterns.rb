@@ -6,6 +6,12 @@ module Hive
   # New patterns must come with at least one test in
   # test/unit/secret_patterns_test.rb (or the consumer's tests).
   module SecretPatterns
+    RULE_SET_VERSION = 1
+    REMEDIATION = "Remove the secret from the package and reference it through runtime secret configuration instead.".freeze
+
+    Rule = Data.define(:id, :regex, :remediation)
+    SafeFinding = Data.define(:rule_id, :file, :line, :remediation)
+
     PATTERNS = {
       # AWS access key id (AKIA = long-term, ASIA = temporary session token)
       # and secret access key.
@@ -57,6 +63,32 @@ module Hive
 
     module_function
 
+    def rules
+      @rules ||= PATTERNS.map do |id, regex|
+        Rule.new(id: id, regex: regex, remediation: REMEDIATION).freeze
+      end.freeze
+    end
+
+    # Location-aware scan for diagnostics that must never include matched
+    # credential bytes. Unlike `scan`, this intentionally has no snippet
+    # field and is safe to render in public submission output.
+    def safe_scan(text, file:)
+      normalized = utf8(text)
+      return [] if normalized.empty?
+
+      rules.flat_map do |rule|
+        normalized.to_enum(:scan, rule.regex).map do
+          match = Regexp.last_match
+          SafeFinding.new(
+            rule_id: rule.id.to_s,
+            file: file.to_s,
+            line: normalized[0...match.begin(0)].count("\n") + 1,
+            remediation: rule.remediation
+          ).freeze
+        end
+      end.sort_by { |finding| [ finding.file, finding.line, finding.rule_id ] }.freeze
+    end
+
     # Scan `text` against every pattern. Returns an Array of
     # `{name:, snippet:}` matches. The snippet is truncated to 80
     # chars so callers can include it in error messages without
@@ -83,12 +115,17 @@ module Hive
     def redact(text)
       return "" if text.nil?
 
-      output = text.to_s.dup
-      output = output.encode("UTF-8", invalid: :replace, undef: :replace, replace: "?") unless output.encoding == Encoding::UTF_8
+      output = utf8(text)
       PATTERNS.each do |name, regex|
         output.gsub!(regex, "[REDACTED:#{name}]")
       end
       output
     end
+
+    def utf8(text)
+      output = text.to_s.dup
+      output.encode("UTF-8", invalid: :replace, undef: :replace, replace: "?")
+    end
+    private_class_method :utf8
   end
 end

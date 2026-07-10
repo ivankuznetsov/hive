@@ -1,4 +1,5 @@
 require "hive/secret_patterns"
+require "hive/deny_patterns"
 
 module Hive
   module Stages
@@ -26,7 +27,7 @@ module Hive
           #   :description — single-line explanation surfaced in the finding
           DEFAULTS = {
             shell_pipe_to_interpreter: {
-              regex: /(?:\bcurl\b|\bwget\b)[^|\n]*\|\s*(?:sh|bash|zsh|fish|python\d?|ruby|node|perl)\b/,
+              regex: Hive::DenyPatterns.rule(:shell_download_to_interpreter).regex,
               severity: :high,
               targets: :code,
               description: "shell-pipe-to-interpreter: a curl/wget pipe into sh/bash/python/ruby/node executes attacker-controlled code if the URL ever serves something else."

@@ -14,32 +14,40 @@ module Hive
     #   only (same trade-off as pi, covered by ADR-018).
     # - No native dollar budget cap; hive enforces wall-clock timeout only.
     # - The stream carries NO token usage events (thought/text/tool events,
-    #   then a terminal `end`); session-side signals.json holds only a
-    #   context-size gauge. The usage extractor therefore closes sessions
-    #   with a zero-usage record — grok cost/token telemetry is "not
-    #   reported", never estimated.
+    #   then a terminal `end`); unavailable usage remains nil rather than
+    #   being recorded as a measured zero.
     #
     # Model and reasoning effort ride the CLI defaults unless the invoker
     # pins them (-m / --reasoning-effort); grok's default model is the
     # current flagship (grok-4.5 at profile-authoring time).
     #
-    # Grok requires an interactive `grok login` (or GROK_DEPLOYMENT_KEY)
-    # before headless use; preflight enforces the credential the same way
-    # pi's does.
+    # Grok accepts an interactive device login or XAI_API_KEY. GROK_HOME
+    # relocates the CLI state directory; GROK_CODE_XAI_API_KEY remains a
+    # backward-compatible key for custom-model configurations.
     GROK_PREFLIGHT = -> {
+      api_key = [ ENV["XAI_API_KEY"], ENV["GROK_CODE_XAI_API_KEY"] ].find do |value|
+        !value.to_s.strip.empty?
+      end
+      next nil if api_key
+
       auth_path =
         begin
-          File.expand_path("~/.grok/auth.json")
+          grok_home = ENV["GROK_HOME"]
+          if grok_home.to_s.strip.empty?
+            File.expand_path("~/.grok/auth.json")
+          else
+            File.expand_path("auth.json", grok_home)
+          end
         rescue ArgumentError => e
           raise Hive::AgentError,
                 "grok profile preflight failed: cannot resolve home directory (#{e.message}). " \
-                "Set $HOME or run `grok login` before using grok as a hive agent CLI."
+                "Set $HOME/GROK_HOME, XAI_API_KEY, or run `grok login --device-auth`."
         end
 
       unless File.exist?(auth_path)
         raise Hive::AgentError,
               "grok profile preflight failed: #{auth_path} not found. " \
-              "Run `grok login` (or set GROK_DEPLOYMENT_KEY) before using grok as a hive agent CLI."
+              "Run `grok login --device-auth` or set XAI_API_KEY before using grok as a hive agent CLI."
       end
 
       content =
@@ -58,7 +66,7 @@ module Hive
       if not_logged_in
         raise Hive::AgentError,
               "grok profile preflight failed: no credential in #{auth_path}. " \
-              "Run `grok login` before using grok as a hive agent CLI."
+              "Run `grok login --device-auth` or set XAI_API_KEY."
       end
 
       nil

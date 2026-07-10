@@ -74,6 +74,17 @@ class UsageDbTest < Minitest::Test
     end
   end
 
+  def test_grok_is_present_in_zero_aggregate_and_recorded_totals
+    with_usage_db do
+      now = Time.utc(2026, 5, 24, 12)
+      record(agent: "grok", started_at: now - 60, input: 12, output: 4, cached: 0)
+
+      aggregate = Hive::UsageDb.aggregate(scope: {}, now: now)
+
+      assert_equal({ input: 12, output: 4, cached: 0 }, usage_at(aggregate, :grok, :all))
+    end
+  end
+
   def test_task_scope_excludes_other_tasks
     with_usage_db do
       now = Time.utc(2026, 5, 24, 12)

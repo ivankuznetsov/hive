@@ -3,7 +3,7 @@ title: Token Usage Stats
 type: observability
 source: lib/hive/usage_db.rb, lib/hive/agent_profiles/usage_extractors.rb, lib/hive/tui/views/token_stats.rb, lib/hive/tui/bubble_model.rb
 created: 2026-05-24
-updated: 2026-06-08
+updated: 2026-07-10
 tags: [observability, tui, sqlite, agent]
 ---
 
@@ -29,6 +29,7 @@ That placement deliberately excludes sessions launched outside Hive and avoids s
 | `claude` | `type == "result"`; reads `usage.input_tokens`, `usage.output_tokens`, and sums `usage.cache_read_input_tokens + usage.cache_creation_input_tokens`. |
 | `codex` | accepts known final result / turn-completed JSON shapes and zero-fills when a usage payload is absent. |
 | `pi` | accepts known final result / completion JSON shapes and zero-fills when a usage payload is absent. |
+| `grok` | accepts a real usage object if a future streaming event supplies one; current `end` events contain no counts, so the extractor returns nil rather than fabricating zero usage. |
 
 Codex and Pi payload shapes still need refinement from captured real streams; the zero-fill path keeps one row per Hive spawn without pretending unknown usage is known. The follow-up is tracked in [[gaps]].
 
@@ -47,7 +48,7 @@ Schema:
 | Column | Meaning |
 |--------|---------|
 | `id` | UUID primary key. |
-| `agent` | Profile name, for example `claude`, `codex`, or `pi`. |
+| `agent` | Profile name, for example `claude`, `codex`, `pi`, or `grok`. |
 | `model` | Best-effort model name from the usage event. |
 | `project_slug` | `task.project_name`, intentionally path-independent so multiple checkouts collapse. |
 | `task_slug` | Hive task slug. |
@@ -68,7 +69,7 @@ Indexes cover `started_at`, `(project_slug, started_at)`, and `(task_slug, start
 
 The scope hash accepts `project_slug:` and `task_slug:` filters. `task_slug` is normally paired with `project_slug` by the TUI so same-named tasks in different projects stay distinguishable.
 
-The aggregate also returns `:patrol` buckets by summing rows whose `stage` starts with `patrol`, honoring the same scope and time-window filters. This is a cross-cutting attribution bucket: patrol tokens still belong to their actual agent rows (`claude`, `codex`, or `pi`) and still contribute to `TOTAL`; the patrol bucket is not added into `TOTAL` a second time.
+The aggregate also returns `:patrol` buckets by summing rows whose `stage` starts with `patrol`, honoring the same scope and time-window filters. This is a cross-cutting attribution bucket: patrol tokens still belong to their actual agent rows (`claude`, `codex`, `pi`, or `grok`) and still contribute to `TOTAL`; the patrol bucket is not added into `TOTAL` a second time.
 
 ## TUI Surfaces
 
@@ -84,7 +85,7 @@ The tuple is `input/output/cached`. Units use `k` and `M` with compact one-decim
 - project when the left pane is focused on a project,
 - task when the right pane has a focused row.
 
-Press `T` in grid mode to open the full-screen token matrix. It renders `claude`, `codex`, `pi`, `patrol`, and `TOTAL` rows across `today`, `7d`, `30d`, and `all`. The `patrol` row is the attribution lens described above, not an extra summand. In the stats mode:
+Press `T` in grid mode to open the full-screen token matrix. It renders `claude`, `codex`, `pi`, `grok`, `patrol`, and `TOTAL` rows across `today`, `7d`, `30d`, and `all`. The `patrol` row is the attribution lens described above, not an extra summand. In the stats mode:
 
 - `Left` / `Right` or `h` / `l` drill between all, project, and task scope.
 - `Up` / `Down` or `k` / `j` select the project or task at the current drill level.

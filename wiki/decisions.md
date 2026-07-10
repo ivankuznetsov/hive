@@ -100,9 +100,11 @@ operator-ward device flows: the one-time code is entered at the provider, the
 CLI polls in the background, and the status frame keeps polling until the child
 exits instead of showing a paste-back form. `gh`'s device-flow prompt asks for
 a bare Enter before polling, so the relay auto-answers that prompt.
+Grok follows the same operator-ward shape via `grok login --device-auth` and
+also supports non-interactive `XAI_API_KEY` authentication.
 For Pi, hivebox validates that the submitted token JSON is a non-empty object
 and writes it to `~/.pi/agent/auth.json` with mode `0600`. The container sets
-`HOME=/data/home`, so `~/.claude`, `~/.codex`, `~/.pi`, and `~/.config/gh`
+`HOME=/data/home`, so `~/.claude`, `~/.codex`, `~/.pi`, `~/.grok`, and `~/.config/gh`
 survive image upgrades via the `/data` bind mount.
 
 **Consequences:** Hivebox avoids becoming a login-page reverse proxy and keeps
@@ -314,7 +316,7 @@ Stage-layout rename regressions from this ADR's follow-on work are captured in `
 
 **Status:** Active
 **Context:** Pre-U12 `Hive::Agent` hardcoded `claude -p` invocation. The 6-review reviewer set wanted to spawn codex and pi alongside claude with the same lifecycle (per-spawn nonce, status detection, budget capture). Per-CLI behavior differs: codex emits status to stdout, pi exits non-zero on internal-server errors but cleanly on success, claude's `--dangerously-skip-permissions` flag has no codex equivalent.
-**Decision:** Introduce `AgentProfile` (a frozen value object with `name`, `binary`, `args_format`, `add_dir_flag`, `skill_syntax_format`, `status_detection_mode`, `version_check`, `preflight!`) and a registry (`Hive::AgentProfiles`). `Hive::Agent.run!` takes a `profile:` kwarg per spawn (defaults to the configured `agent_profile` or `claude`). Three profiles ship in v1: `claude`, `codex`, `pi`. `opencode` was scoped out — see [[active-areas]].
+**Decision:** Introduce `AgentProfile` (a frozen value object with `name`, `binary`, `args_format`, `add_dir_flag`, `skill_syntax_format`, `status_detection_mode`, `version_check`, `preflight!`) and a registry (`Hive::AgentProfiles`). `Hive::Agent.run!` takes a `profile:` kwarg per spawn (defaults to the configured `agent_profile` or `claude`). The original v1 profiles were `claude`, `codex`, and `pi`; `grok` joined as a fourth built-in in July 2026. `opencode` remains scoped out — see [[active-areas]].
 **Consequences:** Per-spawn `<user_supplied>` nonce (ADR-019) is profile-independent. CE skills are invoked via `profile.skill_syntax_format` (e.g., `/ce-code-review` for claude/codex, `/run-skill ce-code-review` for pi).
 
 ## ADR-018: Amended trust model when isolation flag varies per CLI; supersedes part of ADR-008
@@ -322,7 +324,7 @@ Stage-layout rename regressions from this ADR's follow-on work are captured in `
 **Status:** Active (supersedes part of ADR-008)
 **Context:** ADR-008 baselined `--dangerously-skip-permissions` as the sole permission gate, secured by the `<user_supplied>` nonce wrapper. Codex has no equivalent flag (its sandbox has different semantics); pi runs with explicit per-tool grants. Treating "no isolation flag" as silently identical to claude's flag would be a security regression.
 **Decision:** Each `AgentProfile` declares `add_dir_flag` (the `--add-dir` equivalent for filesystem isolation). When a profile's `add_dir_flag` is `nil`, the runner emits a one-line warning to `<task>/logs/isolation-warnings.log` ("ADR-008 filesystem-isolation boundary is reduced for this spawn") and proceeds. The CE skill prompt's `Constraints` section is the user-facing safety boundary in this case.
-**Consequences:** A reviewer spawning codex without `--add-dir` is observable in logs. The `<user_supplied>` nonce still bounds prompt-injection-as-command. The trust model is "claude has filesystem isolation + nonce; codex has nonce + prompt-level constraint."
+**Consequences:** A profile such as Pi or Grok without `--add-dir` is observable in logs. The `<user_supplied>` nonce still bounds prompt-injection-as-command. Grok's `--always-approve` path uses a compact report-only reviewer prompt and the same reduced-isolation warning; it has no native budget flag, so wall-clock process-group termination remains the hard resource bound.
 
 ## ADR-019: Per-spawn `<user_supplied>` nonce; supersedes per-process memoization in ADR-008
 

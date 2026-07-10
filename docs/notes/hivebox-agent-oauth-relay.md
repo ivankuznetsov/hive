@@ -21,11 +21,12 @@ The implemented v1 path is B2, a paste-the-code relay:
 Commands:
 
 - Claude: `claude setup-token`
-- Codex: `codex login`
+- Codex: `codex login --device-auth`
 - Pi: web form writes non-empty JSON to `~/.pi/agent/auth.json`
+- Grok: `grok login --device-auth` or `XAI_API_KEY`
 
 Credential survival is a Docker bind-mount property: hivebox sets
-`HOME=/data/home`, so `~/.claude`, `~/.codex`, and `~/.pi` are part of the
+`HOME=/data/home`, so `~/.claude`, `~/.codex`, `~/.pi`, and `~/.grok` are part of the
 operator-provided `/data` mount and survive image upgrades.
 
 B1, callback proxying to a localhost listener, is not implemented because the

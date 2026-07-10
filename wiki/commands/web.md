@@ -193,11 +193,13 @@ origin also prints the Host-header/reverse-proxy warning.
   a bare Enter rather than a paste-back code, which the relay auto-answers.
   Codex uses `codex login --device-auth` rather than the localhost-callback
   `codex login`, because the callback server would bind inside the container
-  and surface an unreachable localhost URL to the host browser. Codex and `gh`
+  and surface an unreachable localhost URL to the host browser. Grok uses
+  `grok login --device-auth`. Codex, Grok, and `gh`
   are operator-ward poll flows: the one-time code is entered at the provider,
   the CLI keeps polling, and the status turbo-frame keeps refreshing until the
   PTY child exits while hiding the paste-back form. Claude remains the
-  paste-back `claude setup-token` flow. Raw PTY bytes are scrubbed to
+  paste-back `claude setup-token` flow. Grok status also recognizes
+  `XAI_API_KEY` and credentials under `GROK_HOME`. Raw PTY bytes are scrubbed to
   render-safe UTF-8 before the `<pre>` output is interpolated, and captured
   URLs are sanitized by replacing ANSI/terminal-control runs with spaces
   before re-extracting the first URL so adjacent URLs are split rather than

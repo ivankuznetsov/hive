@@ -11,7 +11,7 @@ module Hive
   # basename, by design, so multiple checkouts of the same project collapse into
   # the same aggregate bucket.
   module UsageDb
-    AGENTS = %i[claude codex pi].freeze
+    AGENTS = %i[claude codex pi grok].freeze
     BUCKETS = %i[today 7d 30d all].freeze
     SCHEMA_SQL = <<~SQL.freeze
       CREATE TABLE IF NOT EXISTS token_usage (

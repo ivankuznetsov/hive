@@ -9,7 +9,7 @@ module Hive
     #
     # Used by Hive::Reviewers::Agent#render_prompt; the rendered string
     # is passed into TemplateBindings as `plan_context_section` and
-    # interpolated into the three reviewer ERB templates between the
+    # interpolated into the reviewer ERB templates between the
     # "Pass:" header line and the "Behavior:" instruction block.
     #
     # ADR-008 / ADR-019 prompt-injection boundary: plan.md is derived

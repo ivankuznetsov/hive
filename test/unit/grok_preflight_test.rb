@@ -9,13 +9,12 @@ class GrokPreflightTest < Minitest::Test
   def with_fake_grok_home
     Dir.mktmpdir("fake-grok-home") do |home|
       FileUtils.mkdir_p(File.join(home, ".grok"))
-      prev_home = ENV["HOME"]
-      ENV["HOME"] = home
-      begin
-        yield(home)
-      ensure
-        ENV["HOME"] = prev_home
-      end
+      with_env(
+        "HOME" => home,
+        "GROK_HOME" => nil,
+        "XAI_API_KEY" => nil,
+        "GROK_CODE_XAI_API_KEY" => nil
+      ) { yield(home) }
     end
   end
 
@@ -81,10 +80,28 @@ class GrokPreflightTest < Minitest::Test
     end
   end
 
-  def test_usage_extractor_zeroes_on_end_event
-    result = Hive::AgentProfiles::UsageExtractors::GROK.call({ "type" => "end" })
+  def test_passes_with_xai_api_key_without_auth_file
+    with_fake_grok_home do
+      with_env("XAI_API_KEY" => "test-key") do
+        assert_nil Hive::AgentProfiles::GROK_PREFLIGHT.call
+      end
+    end
+  end
 
-    refute_nil result
+  def test_uses_grok_home_for_auth_file
+    with_fake_grok_home do
+      Dir.mktmpdir("custom-grok-home") do |grok_home|
+        File.write(File.join(grok_home, "auth.json"), '{"access_token":"x"}')
+
+        with_env("GROK_HOME" => grok_home) do
+          assert_nil Hive::AgentProfiles::GROK_PREFLIGHT.call
+        end
+      end
+    end
+  end
+
+  def test_usage_extractor_does_not_fabricate_zeroes_on_end_event
+    assert_nil Hive::AgentProfiles::UsageExtractors::GROK.call({ "type" => "end" })
   end
 
   def test_usage_extractor_ignores_non_hash_and_mid_stream_events

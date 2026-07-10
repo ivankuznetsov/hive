@@ -121,6 +121,11 @@ module Hive
           "bin" => "pi",
           "env_override" => "HIVE_PI_BIN",
           "min_version" => "0.70.2"
+        },
+        "grok" => {
+          "bin" => "grok",
+          "env_override" => "HIVE_GROK_BIN",
+          "min_version" => "0.2.90"
         }
       },
       # Configuration for the 6-review stage's autonomous loop. Each role

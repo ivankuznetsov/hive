@@ -71,7 +71,7 @@ Inbox/Done are the two non-working stages: capture-only and archive-only.
 Headless agent spawns are profile-driven. `Hive::Agent#build_cmd`
 starts with the selected `AgentProfile` binary/headless flag, then adds
 profile-specific permission, add-dir, budget, per-run CLI extras, and
-output-format flags. Claude, Codex, and Pi therefore share one subprocess
+output-format flags. Claude, Codex, Pi, and Grok therefore share one subprocess
 wrapper while keeping their CLI-specific argv and status-detection
 contracts in `lib/hive/agent_profiles/`.
 

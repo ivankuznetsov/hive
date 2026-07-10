@@ -254,6 +254,20 @@ aggregate council cost or wall-clock cap yet. Add one only with clear semantics
 for partially completed rounds, command reviewers, and profiles that cannot
 natively enforce dollar budgets.
 
+## Grok live skill and telemetry verification (2026-07-10)
+
+The Grok profile's argv, device/API-key authentication, `GROK_HOME`, and
+streaming text-event contract are verified against the installed CLI and its
+documentation. Two boundaries remain intentionally open:
+
+- Grok has no `Hive::SkillCheck` verifier, so skill-backed planning/review
+  stages cannot prove a configured slash command exists before spawn. The
+  bundled Grok CE reviewer uses a compact self-contained prompt as a stopgap;
+  a real Grok extension invocation still needs a live end-to-end smoke test.
+- Current `streaming-json` terminal events expose no token counts. Hive leaves
+  Grok usage unavailable rather than storing fake zeroes. Add a captured-stream
+  fixture and extractor mapping if a future CLI version publishes usage.
+
 ## Areas the wiki could be expanded
 
 - `wiki/troubleshooting.md` — currently lives only in README's Troubleshooting section. Could be lifted into a dedicated page once the project sees real-world failures.

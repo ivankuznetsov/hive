@@ -210,7 +210,7 @@ module Hive
     desc "doctor", "Verify each stage's configured skill is installed for its agent"
     long_desc <<~DESC
       Walks the brainstorm and plan stage configs and asks the
-      configured agent profile (claude / codex / pi) to probe whether
+      configured agent profile (claude / codex / pi / grok) to probe whether
       its skill (`<stage>.skill` in config.yml) actually resolves to
       an installed slash-command or skill on disk.
 

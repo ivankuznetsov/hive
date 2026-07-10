@@ -67,7 +67,13 @@ module Hive
         when :pi
           credential_present?(File.join(home, ".pi", "agent", "auth.json"))
         when :grok
-          credential_present?(File.join(home, ".grok", "auth.json"))
+          return true if [ ENV["XAI_API_KEY"], ENV["GROK_CODE_XAI_API_KEY"] ].any? do |value|
+            !value.to_s.strip.empty?
+          end
+
+          grok_home = ENV["GROK_HOME"]
+          root = grok_home.to_s.strip.empty? ? File.join(home, ".grok") : File.expand_path(grok_home)
+          credential_present?(File.join(root, "auth.json"))
         else
           false
         end
@@ -90,7 +96,7 @@ module Hive
   end
 end
 
-# Auto-register the three v1 built-in profiles. Each file under
+# Auto-register the built-in profiles. Each file under
 # lib/hive/agent_profiles/ requires this file and calls register at load
 # time, so consumers only need `require "hive/agent_profiles"` to get the
 # full v1 set.

@@ -8,7 +8,7 @@ module Hive
   #
   # Two reviewer kinds ship today:
   #
-  # - "agent" (default): spawns an LLM CLI (claude / codex / pi) with a
+  # - "agent" (default): spawns an LLM CLI (claude / codex / pi / grok) with a
   #   rendered prompt invoking a CE skill on the worktree's diff; the
   #   agent writes the findings file itself (Hive::Reviewers::Agent).
   # - "codex_review": runs codex's native, single-pass `codex review`

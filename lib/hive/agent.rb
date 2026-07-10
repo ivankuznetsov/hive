@@ -128,6 +128,7 @@ module Hive
       log_file = log_path
       final_message = nil
       final_message_source = nil
+      streaming_text = false
       limit_text = nil
       last_usage = nil
       plain_tail = +""
@@ -159,7 +160,14 @@ module Hive
             log.flush
             json = parse_json_line(line)
             if json && (message = Hive::Agent::MessageExtractor.extract(json))
-              final_message = message
+              if Hive::Agent::MessageExtractor.streaming_text_event?(json)
+                final_message = +"" unless streaming_text
+                final_message << message
+                streaming_text = true
+              else
+                final_message = message
+                streaming_text = false
+              end
               final_message_source = :structured
             elsif json.nil?
               plain_tail << line
@@ -305,7 +313,7 @@ module Hive
       end
       cmd.concat(@cli_flags)
       cmd.concat(@profile.output_format_flags)
-      cmd << (prompt_via_stdin? ? "-" : @prompt) unless @profile.prompt_style == :headless_flag_value
+      cmd << (@profile.prompt_style == :stdin ? "-" : @prompt) unless @profile.prompt_style == :headless_flag_value
       cmd
     end
 
@@ -314,7 +322,7 @@ module Hive
     end
 
     def prompt_via_stdin?
-      @profile.name == :codex
+      @profile.prompt_style == :stdin
     end
 
     def prompt_stdin_file

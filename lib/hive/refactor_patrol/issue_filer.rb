@@ -32,13 +32,14 @@ module Hive
         @gh = gh
       end
 
-      def publish(thesis:, family_id:, job_id:, source:, reasons: [],
+      def publish(thesis:, family_id:, canonical_action_id:, job_id:, source:, reasons: [],
                   record_intent:, creation_attempted: false)
         return result("issue_disabled", true) unless issue_enabled?
         return result("quality_gate_failed", true) unless eligible?(thesis, reasons)
         return result("invalid_family", true) unless valid_family_id?(family_id)
+        return result("invalid_action", true) unless valid_action_id?(canonical_action_id)
 
-        action_id = "issue:#{family_id}"
+        action_id = canonical_action_id.to_s
         marker = marker_for(family_id, action_id)
         body = body_for(thesis, family_id, job_id, source, reasons, marker)
         return result("secret_detected", true) if Hive::SecretPatterns.scan(body).any?
@@ -78,7 +79,7 @@ module Hive
         outcome = intent_persisted || creation_attempted ? "remote_outcome_unknown" : "issue_reconcile_failed"
         result(
           outcome, false,
-          receipts: base_receipts(family_id, "issue:#{family_id}").merge("error" => e.message)
+          receipts: base_receipts(family_id, canonical_action_id).merge("error" => e.message)
         )
       rescue KeyError, ArgumentError => e
         result("invalid_issue_input", true, receipts: { "error" => e.message })
@@ -87,7 +88,7 @@ module Hive
         # retryable, but do not turn it into an ambiguous remote outcome.
         result(
           "intent_persist_failed", false,
-          receipts: base_receipts(family_id, "issue:#{family_id}").merge(
+          receipts: base_receipts(family_id, canonical_action_id).merge(
             "error" => "#{e.class}: #{e.message}"
           )
         )
@@ -123,6 +124,10 @@ module Hive
 
       def valid_family_id?(family_id)
         family_id.to_s.match?(/\Aaf1-[a-f0-9]{64}\z/)
+      end
+
+      def valid_action_id?(action_id)
+        action_id.to_s.match?(/\Aissue-[a-f0-9]{64}\z/)
       end
 
       def lookup_existing(repository, marker)

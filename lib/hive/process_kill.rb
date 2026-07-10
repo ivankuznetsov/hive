@@ -98,7 +98,20 @@ module Hive
         return Result.new(pid: pid, killed: false, skipped_reason: "process_tree_unavailable")
       end
 
+      targets = confirm_process_tree_snapshot(pid, targets)
+      unless targets
+        best_effort_terminate_root(pid, recorded_start_time, grace_seconds)
+        return Result.new(pid: pid, killed: false, skipped_reason: "process_tree_unavailable")
+      end
+      if targets.empty?
+        return Result.new(pid: pid, killed: false, skipped_reason: "not_alive") unless pid_alive?(pid)
+
+        return Result.new(pid: pid, killed: false, skipped_reason: "pid_reuse_guard")
+      end
+
       root_target = targets.find { |target| target.fetch(:pid) == pid }
+      return Result.new(pid: pid, killed: false, skipped_reason: "pid_reuse_guard") unless root_target
+
       if !recorded_start_time.to_s.empty? && root_target[:start_time].to_s != recorded_start_time.to_s
         return Result.new(pid: pid, killed: false, skipped_reason: "pid_reuse_guard")
       end
@@ -148,6 +161,23 @@ module Hive
 
         row.merge(pid: target_pid, start_time: process_start_time(target_pid), depth: depths.fetch(target_pid))
       end.sort_by { |target| [ -target.fetch(:depth), target.fetch(:pid) ] }
+    end
+
+    # `process_tree_snapshot` reads ancestry from one ps snapshot and process
+    # identity immediately afterward. A PID can be recycled between those two
+    # reads, producing a row with the old process's parent and the replacement
+    # process's start time. Require a second full snapshot to reproduce the
+    # same ancestry + identity tuple before TERM; mismatched descendants are
+    # omitted and a mismatched root fails closed.
+    def confirm_process_tree_snapshot(pid, targets)
+      confirmation = process_tree_snapshot(pid)
+      return nil unless confirmation
+
+      by_pid = confirmation.to_h { |target| [ target.fetch(:pid), target ] }
+      targets.select do |target|
+        current = by_pid[target.fetch(:pid)]
+        current && %i[ppid pgid start_time].all? { |key| current[key].to_s == target[key].to_s }
+      end
     end
 
     def process_table

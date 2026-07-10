@@ -54,7 +54,7 @@ When a recorded draft PR exists but `gh` is not installed on PATH, draft-PR clos
 
 1. Resolve the task target (`TaskResolver` for paths/ids, Drop's project/stage scan for slugs).
 2. Refuse archived-only tasks in `9-done`.
-3. Kill recorded agent PIDs from `.lock` and `AGENT_WORKING pid=...`, guarded by process start time when available. In particular, `.lock`'s `claude_pid_start_time` verifies the recorded `claude_pid` identity before cleanup. Before signalling that root PID, snapshot its descendants and terminate the verified PIDs present in that snapshot too. If process-tree discovery fails, cleanup falls back to the recorded root PID only and reports `process_tree_unavailable` instead of claiming a complete tree cleanup.
+3. Kill recorded agent PIDs from `.lock` and `AGENT_WORKING pid=...`, guarded by process start time when available. In particular, `.lock`'s `claude_pid_start_time` verifies the recorded `claude_pid` identity before cleanup. Before signalling that root PID, snapshot its descendants, take a second full snapshot, and retain only PIDs whose parent, process group, and start-time identity match across both reads. This prevents PID reuse between process-table and identity reads from combining an old process's ancestry with a replacement process's identity. If either process-tree discovery fails, cleanup falls back to the recorded root PID only and reports `process_tree_unavailable` instead of claiming a complete tree cleanup.
 4. Close `pr_url` from `pr.md` frontmatter with `gh pr close <url> --comment "task dropped"` best-effort.
 5. Remove the task worktree from `worktree.yml` or the derived path, retrying with force when needed, then prune stale git worktree metadata.
 6. Delete the task branch (`branch name == slug`) best-effort.
@@ -73,8 +73,9 @@ was skipped or only received incomplete cleanup. A
 `process_tree_unavailable` reason means the recorded root cleanup was attempted
 but descendant discovery could not be completed.
 
-The descendant set is a one-time snapshot. A process forked after discovery can
-escape that cleanup window; closing that residual race requires durable
+The descendant set is captured and identity-confirmed across two consecutive
+snapshots. A process forked after confirmation can escape that cleanup window;
+closing that residual race requires durable
 OS-level containment (for example, a cgroup or equivalent process-lifetime
 boundary), not another assertion around the snapshot algorithm.
 

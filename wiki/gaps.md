@@ -157,7 +157,7 @@ records; and isolates concurrent report generation before atomic publication.
 The remaining gap is still a real judge-enabled run, not structural report
 integrity.
 
-54. **Drop's descendant cleanup still has a snapshot/concurrent-fork race.** `Hive::ProcessKill` can terminate the agent and every verified descendant PID present in a successful process-table snapshot, and it reports `process_tree_unavailable` when discovery cannot support that claim. A child created after the snapshot can still escape before the captured processes are stopped. Fully closing this race requires durable OS-level containment such as a cgroup (or an equivalent cross-platform process-lifetime boundary); repeated best-effort snapshots can narrow but cannot remove the race.
+54. **Drop's descendant cleanup still has a snapshot/concurrent-fork race.** `Hive::ProcessKill` can terminate the agent and every descendant whose parent, process group, and start-time identity agree across two successful process-tree snapshots, and it reports `process_tree_unavailable` when discovery cannot support that claim. The second snapshot closes the PID-reuse window between ancestry and identity reads, but a child created after confirmation can still escape before the captured processes are stopped. Fully closing this race requires durable OS-level containment such as a cgroup (or an equivalent cross-platform process-lifetime boundary); repeated best-effort snapshots can narrow but cannot remove the race.
 
 ## 2026-06-16/17 refresh uncertainty
 

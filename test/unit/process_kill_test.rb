@@ -296,6 +296,39 @@ class ProcessKillTest < Minitest::Test
     assert_equal [ [ "TERM", 1003 ], [ "TERM", 1002 ], [ "TERM", 1001 ] ], signals
   end
 
+  def test_terminate_process_group_skips_pid_reused_between_ancestry_and_identity_reads
+    first = [
+      { pid: 2002, ppid: 2001, pgid: 2002, start_time: "replacement", depth: 1 },
+      { pid: 2001, ppid: 1, pgid: 2001, start_time: "root", depth: 0 }
+    ]
+    confirmation = [
+      { pid: 2001, ppid: 1, pgid: 2001, start_time: "root", depth: 0 }
+    ]
+    snapshots = [ first, confirmation ]
+    signals = []
+
+    with_replaced_singleton_method(Hive::ProcessKill, :pid_alive?, ->(_pid) { true }) do
+      with_replaced_singleton_method(Hive::ProcessKill, :process_tree_snapshot, ->(_pid) { snapshots.shift }) do
+        with_replaced_singleton_method(Hive::ProcessKill, :process_start_time, ->(_pid) { "root" }) do
+          with_replaced_singleton_method(Hive::ProcessKill, :safe_kill,
+                                         ->(signal, pid) { signals << [ signal, pid ] }) do
+            with_replaced_singleton_method(Hive::ProcessKill, :wait_until_process_tree_dead,
+                                           ->(_pid, _targets, _seconds) { true }) do
+              result = Hive::ProcessKill.terminate_process_group(
+                2001, recorded_start_time: "root", grace_seconds: 0
+              )
+
+              assert result.killed
+            end
+          end
+        end
+      end
+    end
+
+    assert_equal [ [ "TERM", 2001 ] ], signals,
+                 "a replacement PID whose ancestry changed must not receive TERM"
+  end
+
   def test_process_tree_unavailable_on_nonzero_ps_exit_still_attempts_root_cleanup
     status = Object.new
     status.define_singleton_method(:success?) { false }
@@ -304,6 +337,86 @@ class ProcessKillTest < Minitest::Test
 
   def test_process_tree_unavailable_on_ps_system_error_still_attempts_root_cleanup
     assert_process_tree_failure_reports_unavailable(->(*_args) { raise Errno::ENOENT })
+  end
+
+  def test_empty_process_tree_with_live_root_attempts_root_cleanup
+    cleanup = []
+    with_replaced_singleton_method(Hive::ProcessKill, :pid_alive?, ->(_pid) { true }) do
+      with_replaced_singleton_method(Hive::ProcessKill, :process_tree_snapshot, ->(_pid) { [] }) do
+        with_replaced_singleton_method(Hive::ProcessKill, :best_effort_terminate_root,
+                                       ->(*args) { cleanup << args }) do
+          result = Hive::ProcessKill.terminate_process_group(4321, grace_seconds: 0.25)
+
+          refute result.killed
+          assert_equal "process_tree_unavailable", result.skipped_reason
+        end
+      end
+    end
+
+    assert_equal [ [ 4321, nil, 0.25 ] ], cleanup
+  end
+
+  def test_process_tree_confirmation_failure_attempts_root_cleanup
+    target = { pid: 4321, ppid: 1, pgid: 4321, start_time: "root", depth: 0 }
+    snapshots = [ [ target ], nil ]
+    cleanup = []
+    with_replaced_singleton_method(Hive::ProcessKill, :pid_alive?, ->(_pid) { true }) do
+      with_replaced_singleton_method(Hive::ProcessKill, :process_tree_snapshot, ->(_pid) { snapshots.shift }) do
+        with_replaced_singleton_method(Hive::ProcessKill, :best_effort_terminate_root,
+                                       ->(*args) { cleanup << args }) do
+          result = Hive::ProcessKill.terminate_process_group(4321, grace_seconds: 0.25)
+
+          refute result.killed
+          assert_equal "process_tree_unavailable", result.skipped_reason
+        end
+      end
+    end
+
+    assert_equal [ [ 4321, nil, 0.25 ] ], cleanup
+  end
+
+  def test_process_tree_confirmation_refuses_reused_root
+    target = { pid: 4321, ppid: 1, pgid: 4321, start_time: "old", depth: 0 }
+    replacement = target.merge(ppid: 99, start_time: "replacement")
+    snapshots = [ [ target ], [ replacement ] ]
+    with_replaced_singleton_method(Hive::ProcessKill, :pid_alive?, ->(_pid) { true }) do
+      with_replaced_singleton_method(Hive::ProcessKill, :pid_owned_by_recorded_start?, ->(*) { true }) do
+        with_replaced_singleton_method(Hive::ProcessKill, :process_tree_snapshot, ->(_pid) { snapshots.shift }) do
+          result = Hive::ProcessKill.terminate_process_group(4321, grace_seconds: 0)
+
+          refute result.killed
+          assert_equal "pid_reuse_guard", result.skipped_reason
+        end
+      end
+    end
+  end
+
+  def test_process_tree_confirmation_checks_recorded_root_identity_again
+    target = { pid: 4321, ppid: 1, pgid: 4321, start_time: "replacement", depth: 0 }
+    with_replaced_singleton_method(Hive::ProcessKill, :pid_alive?, ->(_pid) { true }) do
+      with_replaced_singleton_method(Hive::ProcessKill, :pid_owned_by_recorded_start?, ->(*) { true }) do
+        with_replaced_singleton_method(Hive::ProcessKill, :process_tree_snapshot, ->(_pid) { [ target ] }) do
+          result = Hive::ProcessKill.terminate_process_group(
+            4321, recorded_start_time: "original", grace_seconds: 0
+          )
+
+          refute result.killed
+          assert_equal "pid_reuse_guard", result.skipped_reason
+        end
+      end
+    end
+  end
+
+  def test_terminate_process_group_treats_disappearing_snapshot_as_not_alive
+    with_replaced_singleton_method(Hive::ProcessKill, :pid_alive?, ->(_pid) { true }) do
+      with_replaced_singleton_method(Hive::ProcessKill, :process_tree_snapshot,
+                                     ->(_pid) { raise Errno::ESRCH }) do
+        result = Hive::ProcessKill.terminate_process_group(4321, grace_seconds: 0)
+
+        refute result.killed
+        assert_equal "not_alive", result.skipped_reason
+      end
+    end
   end
 
   def test_process_table_invokes_an_absolute_trusted_ps_path
@@ -323,6 +436,22 @@ class ProcessKillTest < Minitest::Test
     assert command.first.start_with?("/"), "process discovery must not resolve ps through PATH"
     refute_equal "ps", command.first
     assert_equal [ "-axo", "pid=,ppid=,pgid=" ], command.drop(1)
+  end
+
+  def test_process_table_returns_nil_when_no_trusted_ps_exists
+    with_replaced_singleton_method(File, :file?, ->(_path) { false }) do
+      assert_nil Hive::ProcessKill.process_table
+    end
+  end
+
+  def test_process_table_rejects_nonnumeric_rows
+    status = Object.new
+    status.define_singleton_method(:success?) { true }
+    with_system_ps_available do
+      with_replaced_singleton_method(Open3, :capture3, ->(*_args) { [ "pid 1 1\n", "", status ] }) do
+        assert_nil Hive::ProcessKill.process_table
+      end
+    end
   end
 
   def test_malformed_nonblank_ps_row_makes_the_whole_process_tree_unavailable
@@ -388,6 +517,77 @@ class ProcessKillTest < Minitest::Test
   def test_safe_kill_propagates_permission_denied
     with_replaced_singleton_method(Process, :kill, lambda { |_signal, _target| raise Errno::EPERM }) do
       assert_raises(Errno::EPERM) { Hive::ProcessKill.safe_kill("TERM", 1234) }
+    end
+  end
+
+  def test_best_effort_root_cleanup_refuses_reused_pid_before_term
+    signals = []
+    with_replaced_singleton_method(Hive::ProcessKill, :process_start_time, ->(_pid) { "replacement" }) do
+      with_replaced_singleton_method(Hive::ProcessKill, :safe_kill,
+                                     ->(signal, pid) { signals << [ signal, pid ] }) do
+        Hive::ProcessKill.best_effort_terminate_root(1234, "original", 0)
+      end
+    end
+
+    assert_empty signals
+  end
+
+  def test_best_effort_root_cleanup_terms_and_kills_same_pid
+    signals = []
+    with_replaced_singleton_method(Hive::ProcessKill, :process_start_time, ->(_pid) { "original" }) do
+      with_replaced_singleton_method(Hive::ProcessKill, :pid_alive?, ->(_pid) { true }) do
+        with_replaced_singleton_method(Hive::ProcessKill, :wait_until_dead, ->(_pid, _seconds) { false }) do
+          with_replaced_singleton_method(Hive::ProcessKill, :safe_kill,
+                                         ->(signal, pid) { signals << [ signal, pid ] }) do
+            Hive::ProcessKill.best_effort_terminate_root(1234, "original", 0)
+          end
+        end
+      end
+    end
+
+    assert_equal [ [ "TERM", 1234 ], [ "KILL", 1234 ] ], signals
+  end
+
+  def test_best_effort_root_cleanup_never_kills_without_identity
+    signals = []
+    with_replaced_singleton_method(Hive::ProcessKill, :process_start_time, ->(_pid) { nil }) do
+      with_replaced_singleton_method(Hive::ProcessKill, :pid_alive?, ->(_pid) { true }) do
+        with_replaced_singleton_method(Hive::ProcessKill, :wait_until_dead, ->(_pid, _seconds) { false }) do
+          with_replaced_singleton_method(Hive::ProcessKill, :safe_kill,
+                                         ->(signal, pid) { signals << [ signal, pid ] }) do
+            Hive::ProcessKill.best_effort_terminate_root(1234, nil, 0)
+          end
+        end
+      end
+    end
+
+    assert_equal [ [ "TERM", 1234 ] ], signals
+  end
+
+  def test_best_effort_root_cleanup_handles_permission_denied_during_kill
+    signals = []
+    with_replaced_singleton_method(Hive::ProcessKill, :process_start_time, ->(_pid) { "original" }) do
+      with_replaced_singleton_method(Hive::ProcessKill, :pid_alive?, ->(_pid) { true }) do
+        with_replaced_singleton_method(Hive::ProcessKill, :wait_until_dead, ->(_pid, _seconds) { false }) do
+          with_replaced_singleton_method(Hive::ProcessKill, :safe_kill, lambda { |signal, pid|
+            signals << [ signal, pid ]
+            raise Errno::EPERM if signal == "KILL"
+          }) do
+            assert_nil Hive::ProcessKill.best_effort_terminate_root(1234, "original", 0)
+          end
+        end
+      end
+    end
+
+    assert_equal [ [ "TERM", 1234 ], [ "KILL", 1234 ] ], signals
+  end
+
+  def test_best_effort_root_cleanup_handles_permission_denied_during_term
+    with_replaced_singleton_method(Hive::ProcessKill, :process_start_time, ->(_pid) { "original" }) do
+      with_replaced_singleton_method(Hive::ProcessKill, :safe_kill,
+                                     ->(_signal, _pid) { raise Errno::EPERM }) do
+        assert_nil Hive::ProcessKill.best_effort_terminate_root(1234, "original", 0)
+      end
     end
   end
 

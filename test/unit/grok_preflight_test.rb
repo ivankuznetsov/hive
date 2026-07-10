@@ -11,6 +11,7 @@ class GrokPreflightTest < Minitest::Test
       FileUtils.mkdir_p(File.join(home, ".grok"))
       with_env(
         "HOME" => home,
+        "GROK_AUTH_PATH" => nil,
         "GROK_HOME" => nil,
         "XAI_API_KEY" => nil,
         "GROK_CODE_XAI_API_KEY" => nil
@@ -62,13 +63,15 @@ class GrokPreflightTest < Minitest::Test
   def test_translates_home_resolution_failure_to_agent_error
     original_expand_path = File.method(:expand_path)
     File.define_singleton_method(:expand_path) do |target, *args|
-      raise ArgumentError, "could not find home directory" if target == "~/.grok/auth.json"
+      raise ArgumentError, "could not resolve auth path" if target == "bad-auth-path"
 
       original_expand_path.call(target, *args)
     end
-    err = assert_raises(Hive::AgentError) { Hive::AgentProfiles::GROK_PREFLIGHT.call }
+    err = with_env("GROK_AUTH_PATH" => "bad-auth-path") do
+      assert_raises(Hive::AgentError) { Hive::AgentProfiles::GROK_PREFLIGHT.call }
+    end
 
-    assert_match(/cannot resolve home directory/, err.message)
+    assert_match(/cannot resolve auth path/, err.message)
   ensure
     File.define_singleton_method(:expand_path, original_expand_path) if original_expand_path
   end
@@ -95,6 +98,59 @@ class GrokPreflightTest < Minitest::Test
 
         with_env("GROK_HOME" => grok_home) do
           assert_nil Hive::AgentProfiles::GROK_PREFLIGHT.call
+        end
+      end
+    end
+  end
+
+  def test_grok_auth_path_overrides_grok_home
+    with_fake_grok_home do
+      Dir.mktmpdir("shared-grok-auth") do |auth_dir|
+        auth_path = File.join(auth_dir, "benchmark-auth.json")
+        File.write(auth_path, '{"access_token":"x"}')
+
+        with_env("GROK_AUTH_PATH" => auth_path, "GROK_HOME" => "/missing/grok-home") do
+          assert_nil Hive::AgentProfiles::GROK_PREFLIGHT.call
+        end
+      end
+    end
+  end
+
+  def test_explicit_auth_locations_do_not_require_home_resolution
+    Dir.mktmpdir("shared-grok-auth") do |auth_dir|
+      auth_path = File.join(auth_dir, "benchmark-auth.json")
+      File.write(auth_path, '{"access_token":"x"}')
+      grok_home = File.join(auth_dir, "grok-home")
+      FileUtils.mkdir_p(grok_home)
+      File.write(File.join(grok_home, "auth.json"), '{"access_token":"x"}')
+
+      with_replaced_singleton_method(Dir, :home, -> { raise ArgumentError, "no home" }) do
+        with_env(
+          "GROK_AUTH_PATH" => auth_path,
+          "GROK_HOME" => nil,
+          "XAI_API_KEY" => nil,
+          "GROK_CODE_XAI_API_KEY" => nil
+        ) { assert_nil Hive::AgentProfiles::GROK_PREFLIGHT.call }
+
+        with_env(
+          "GROK_AUTH_PATH" => nil,
+          "GROK_HOME" => grok_home,
+          "XAI_API_KEY" => nil,
+          "GROK_CODE_XAI_API_KEY" => nil
+        ) { assert_nil Hive::AgentProfiles::GROK_PREFLIGHT.call }
+      end
+    end
+  end
+
+  def test_missing_grok_auth_path_does_not_fall_back_to_grok_home
+    with_fake_grok_home do
+      Dir.mktmpdir("custom-grok-home") do |grok_home|
+        File.write(File.join(grok_home, "auth.json"), '{"access_token":"x"}')
+        missing = File.join(grok_home, "missing-auth.json")
+
+        with_env("GROK_AUTH_PATH" => missing, "GROK_HOME" => grok_home) do
+          err = assert_raises(Hive::AgentError) { Hive::AgentProfiles::GROK_PREFLIGHT.call }
+          assert_match(/#{Regexp.escape(missing)} not found/, err.message)
         end
       end
     end

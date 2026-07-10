@@ -256,7 +256,7 @@ natively enforce dollar budgets.
 
 ## Grok live skill and telemetry verification (2026-07-10)
 
-The Grok profile's argv, device/API-key authentication, `GROK_HOME`, and
+The Grok profile's argv, device/API-key authentication, `GROK_AUTH_PATH` / `GROK_HOME`, and
 streaming text-event contract are verified against the installed CLI and its
 documentation. Two boundaries remain intentionally open:
 

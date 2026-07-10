@@ -53,7 +53,16 @@ module Hive
         @mutex.synchronize { @profiles.keys }
       end
 
-      def logged_in?(name, home: Dir.home)
+      def grok_auth_path(home: nil)
+        auth_path = ENV["GROK_AUTH_PATH"]
+        return File.expand_path(auth_path) unless auth_path.to_s.strip.empty?
+
+        grok_home = ENV["GROK_HOME"]
+        root = grok_home.to_s.strip.empty? ? File.join(home || Dir.home, ".grok") : File.expand_path(grok_home)
+        File.join(root, "auth.json")
+      end
+
+      def logged_in?(name, home: nil)
         # Probe the specific credential artifact each CLI writes on a
         # successful login, NOT merely a non-empty config dir: both claude
         # and codex create ~/.claude / ~/.codex (settings, cache, history)
@@ -61,19 +70,17 @@ module Hive
         # reports a green "Logged in" on a box that has no credential.
         case name.to_sym
         when :claude
-          credential_present?(File.join(home, ".claude", ".credentials.json"))
+          credential_present?(File.join(home || Dir.home, ".claude", ".credentials.json"))
         when :codex
-          credential_present?(File.join(home, ".codex", "auth.json"))
+          credential_present?(File.join(home || Dir.home, ".codex", "auth.json"))
         when :pi
-          credential_present?(File.join(home, ".pi", "agent", "auth.json"))
+          credential_present?(File.join(home || Dir.home, ".pi", "agent", "auth.json"))
         when :grok
           return true if [ ENV["XAI_API_KEY"], ENV["GROK_CODE_XAI_API_KEY"] ].any? do |value|
             !value.to_s.strip.empty?
           end
 
-          grok_home = ENV["GROK_HOME"]
-          root = grok_home.to_s.strip.empty? ? File.join(home, ".grok") : File.expand_path(grok_home)
-          credential_present?(File.join(root, "auth.json"))
+          credential_present?(grok_auth_path(home:))
         else
           false
         end

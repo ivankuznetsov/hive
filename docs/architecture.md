@@ -60,7 +60,7 @@ folders.
 
 ## Agents
 
-Hive has built-in agent profiles for `claude`, `codex`, `pi`, and `grok`. A profile defines the binary, version check, prompt-delivery style, add-dir behavior, skill invocation syntax, and status-detection mode. Stage runners look up the configured profile before spawning the subprocess. Grok runs headlessly with `grok -p <prompt> --always-approve --output-format streaming-json`; it accepts `XAI_API_KEY` or device-login credentials and honors `GROK_HOME`.
+Hive has built-in agent profiles for `claude`, `codex`, `pi`, and `grok`. A profile defines the binary, version check, prompt-delivery style, add-dir behavior, skill invocation syntax, and status-detection mode. Stage runners look up the configured profile before spawning the subprocess. Grok runs headlessly with `grok -p <prompt> --always-approve --output-format streaming-json`; it accepts `XAI_API_KEY` or device-login credentials, honors `GROK_HOME`, and lets `GROK_AUTH_PATH` select the credential file directly with higher precedence.
 
 Default new-project setup uses `claude` for planning, `codex` for execute, a normal reviewer set that can include Claude, Codex, and PR review toolkit agents, and a narrower patrol PR reviewer set that defaults to Codex only. The profile details live in [wiki/modules/agent_profile.md](../wiki/modules/agent_profile.md).
 

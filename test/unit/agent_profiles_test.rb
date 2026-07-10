@@ -154,6 +154,37 @@ class AgentProfilesTest < Minitest::Test
     end
   end
 
+  def test_grok_logged_in_uses_auth_path_override
+    Dir.mktmpdir do |home|
+      auth_path = File.join(home, "shared-auth.json")
+      File.write(auth_path, '{"access_token":"x"}')
+
+      with_env("GROK_AUTH_PATH" => auth_path, "GROK_HOME" => "/missing/grok-home") do
+        assert Hive::AgentProfiles.logged_in?(:grok, home: home)
+      end
+    end
+  end
+
+  def test_grok_logged_in_explicit_locations_do_not_require_home_resolution
+    Dir.mktmpdir do |auth_dir|
+      auth_path = File.join(auth_dir, "shared-auth.json")
+      File.write(auth_path, '{"access_token":"x"}')
+      grok_home = File.join(auth_dir, "grok-home")
+      FileUtils.mkdir_p(grok_home)
+      File.write(File.join(grok_home, "auth.json"), '{"access_token":"x"}')
+
+      with_replaced_singleton_method(Dir, :home, -> { raise ArgumentError, "no home" }) do
+        with_env("GROK_AUTH_PATH" => auth_path, "GROK_HOME" => nil) do
+          assert Hive::AgentProfiles.logged_in?(:grok)
+        end
+
+        with_env("GROK_AUTH_PATH" => nil, "GROK_HOME" => grok_home) do
+          assert Hive::AgentProfiles.logged_in?(:grok)
+        end
+      end
+    end
+  end
+
   def test_registered_check
     assert Hive::AgentProfiles.registered?(:claude)
     refute Hive::AgentProfiles.registered?(:nonexistent)

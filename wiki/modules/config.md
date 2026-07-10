@@ -282,13 +282,39 @@ gate even on a loopback bind.
 
 The `hive init` JSON summary envelope (`schemas/hive-init.v1.json`) carries the chosen value as a required `claude_permission_mode` string (same enum as the validator), alongside the existing `claude_mode` field — so an agent reading init output sees both the launch mode and the permission mode. See [[commands/init]].
 
-`claude.model` / `claude.effort` pin hive-launched claude sessions:
+`claude.model` / `claude.effort` remain the final Claude fallback for
+hive-launched sessions:
 `model: default` (the default) uses Claude Code's live alias for ITS
 recommended model — no hardcoded name, no inheriting the operator's
 interactive selection; `inherit` omits the flag; aliases/full names pass
 through. `effort: default` omits `--effort` (Claude Code's own tier);
-low/medium/high pass through. `Hive::Config.claude_cli_flags(cfg)` builds
-the argv fragment used by both the tmux wrapper and headless `Hive::Agent`.
+low/medium/high/xhigh/max pass through. `Hive::Config.claude_cli_flags(cfg,
+stage: nil)` remains callable without stage context and then ignores the new
+map, preserving the legacy argv used by tmux and headless `Hive::Agent`.
+
+## Per-stage `models:` routing
+
+Project config accepts a top-level `models:` map for built-in pipeline/runtime
+identities. Global config accepts only `models.digest`; project
+`models.digest` and global pipeline keys fail as source-inappropriate rather
+than becoming inert settings. Each non-empty entry accepts only non-blank
+`model` and/or `effort` fields.
+
+Resolution is independent per field: exact identity, coarse parent,
+workflow/reviewer value, then profile fallback. A present value stops fallback
+even when the profile interprets it as a sentinel. No-stage calls skip the map.
+
+| Accepted identity | Parent |
+|---|---|
+| `brainstorm`, `plan`, `open_pr`, `artifacts`, `finalize`, `digest` | none |
+| `execute_implementation`, `rebase`, `diagnose`, `babysitter` | `execute` |
+| `review_ci`, `review_reviewers`, `review_triage`, `review_fix`, `review_browser` | `review` |
+| `patrol_review`, `patrol_fix` | `patrol` |
+
+The coarse keys `execute`, `review`, and `patrol` are accepted directly (as
+are the root identities in the first row). Config load resolves every
+statically known selected profile and validates capability/effort vocabulary;
+descriptor-loaded council profiles receive the same validation before fan-out.
 
 `validate_agent_name!` accepts `nil` (field is optional) and otherwise requires the value to resolve via `Hive::AgentProfiles.registered?`. Failure messages include the registered profile names so the agent reading the error learns the valid set.
 

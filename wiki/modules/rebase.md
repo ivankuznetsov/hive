@@ -3,9 +3,13 @@ title: Hive::Rebase
 type: module
 source: lib/hive/rebase.rb
 created: 2026-05-14
-updated: 2026-05-22T13:30:00Z
+updated: 2026-07-10
 tags: [rebase, orchestrator, git, agent-dispatch, fail-soft]
 ---
+
+Conflict resolution selects the execute profile while resolving exact model
+identity `rebase`, then coarse `execute`. The existing conflict loop, timeout,
+budget, dirty-worktree guards, and fail-soft result contract are unchanged.
 
 **TLDR**: Orchestrator-side auto-rebase pre-step for `hive run`. Before dispatching the stage runner, `Hive::Rebase.perform(task, cfg)` detects whether the task's worktree branch is behind `origin/<default_branch>`, fetches with non-interactive env, attempts `git rebase`, and dispatches the project's execute-stage agent (`cfg.execute.agent`, isolated to the worktree via `add_dirs: []`) to resolve any conflicts. Fail-soft: any failure aborts the rebase, cleans agent-created untracked files via `git reset --hard ORIG_HEAD && git clean -fd`, and proceeds with the stale base. Originally added to close the REVIEW_STALE drift loop where long-running tasks accumulated phantom-deletion escalations after main moved forward. Plan: `docs/plans/2026-05-14-001-feat-hive-auto-rebase-stale-worktree-plan.md`.
 

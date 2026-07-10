@@ -57,6 +57,10 @@ All notable changes are documented here, newest first. Hive ships frequent micro
 
 ## 0.3.7
 
+- Added profile-neutral per-stage `models:` routing with independent
+  model/effort inheritance, native Claude and Codex argv, mixed-agent review
+  isolation, and global `models.digest` ownership. Existing configs need no
+  migration and keep their current Claude/profile/descriptor fallbacks.
 - Fixed hive failing to start on Arch Linux with `cannot load such file -- erb`:
   erb is now a declared runtime dependency. Distros ship erb as a separate
   package since ruby unbundled it, so every verb (`tui`, `plan`, the daemon)

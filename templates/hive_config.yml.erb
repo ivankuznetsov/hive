@@ -39,6 +39,13 @@ registered_projects: <%= registered_projects.empty? ? "[]" : "" %>
 #   enabled: false         # only needed to opt OUT; otherwise auto-on with the bot
 #   agent: ~               # defaults to patrol.agent, then claude
 #   max_catchup_days: 7
+#
+# The digest is project-agnostic, so its model route lives in this global file
+# (project config rejects models.digest):
+# models:
+#   digest:
+#     model: gpt-5.6-sol
+#     effort: xhigh
 
 # Daily pending-answer digest. When enabled, the daemon schedules one global
 # `hive answer-digest` subprocess at/after the configured local hour. Empty

@@ -3,11 +3,17 @@ title: Architectural Decisions
 type: decisions
 source: code + author's local planning notes (not committed)
 created: 2026-04-25
-updated: 2026-06-16
+updated: 2026-07-10
 tags: [decisions, adr]
 ---
 
 **TLDR**: ADRs below were authored alongside implementation work. ADR-024 records both the PR-first workflow/stage renumbering and daemon autonomy; ADR-026 covers the Telegram bot mobile surface (subprocess caller for non-state-mutating verbs); ADR-027 records the diagnose-then-act surface for red status rows; ADR-029 records the 7-artifacts stage insertion; ADR-030 records the project-global Claude launch mode plus permission/model/effort follow-ups; **ADR-033 supersedes the subprocess-caller portion of ADR-026 for state-mutating verbs — the bot now writes file-backed dispatch requests that the daemon consumes, making the daemon the sole spawner of `hive run`-class children**; ADR-034 records Hive-owned fallback commits for successful fix-agent edits and pre-fix dirty-worktree snapshots; ADR-035 records hivebox's PTY agent-login relay for paste-back and operator-ward device flows, now also used for `gh auth login`, instead of provider-page proxying; ADR-036 records hivebox's switch to GitHub device-flow sign-in, including ownerless first-login claim (no callback URL, no client secret, no required config edit).
+
+ADR-030's 2026-07-10 amendment separates Claude launch mode from generic
+model routing: a closed `models:` vocabulary resolves field-by-field, while
+`AgentProfile` owns capability validation and native Claude/Codex argv. Digest
+owns its route globally; pipeline and auxiliary identities remain project
+configuration.
 
 ## ADR-037: Hivebox web tier is a vanilla Rails 8 + Turbo app, replacing the Sinatra tier
 

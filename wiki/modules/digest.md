@@ -3,7 +3,7 @@ title: Hive::Digest
 type: module
 source: lib/hive/digest.rb, lib/hive/digest/, templates/digest_prompt.md.erb
 created: 2026-06-14
-updated: 2026-06-30
+updated: 2026-07-10
 tags: [digest, shipped, telegram, module]
 ---
 
@@ -17,6 +17,11 @@ through `Hive::Config.load_global_digest_config`. `Hive::Digest::MergedPr` is a
 parallel, read-only GitHub source for `hive digest --source merged-prs`; it
 shares the date window helper and sender but does not use the shipped-task
 collector, categorizer, stats footer, or `hive-digest` schema.
+
+The categorizer resolves the globally owned `models.digest` entry through its
+selected `digest.agent`. Project config rejects that key. The direct
+`Hive::Agent` lifecycle, expected-output status, and usage ownership are
+unchanged; only profile-rendered model flags are injected.
 
 ## API Map
 

@@ -7,6 +7,10 @@ updated: 2026-07-10
 tags: [module, status, diagnostic, agent, recovery]
 ---
 
+Diagnosis selects the execute profile but resolves model controls with exact
+identity `diagnose`, then coarse `execute`. Its bespoke observation-only
+process lifecycle still omits JSON/stream output, task locks, and marker writes.
+
 **TLDR**: Headless one-shot spawn of the project's configured execute AgentProfile (claude / codex / pi / grok) whose sole purpose is producing a human-readable verdict on a red task's marker state. Writes the result to `<task.folder>/diagnostics/red-status.md`, which `Hive::TaskAction#diagnostic` then prefers over its local bounded extraction. Invoked by `hive status --diagnose <slug> --write` (CLI). The previous TUI `R`-key entry point was removed when the red-status detail screen was simplified to the two-action `[Enter] Recover` / `[o] Open in agent` contract; refreshing a diagnosis is now a shell-only affordance.
 
 ## Public surface

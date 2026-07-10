@@ -3,9 +3,13 @@ title: Hive::Patrol
 type: module
 source: lib/hive/patrol/
 created: 2026-05-28
-updated: 2026-06-10
+updated: 2026-07-10
 tags: [module, patrol, review, worktree, pr, codex]
 ---
+
+`patrol_review` and `patrol_fix` resolve independently, then fall back to
+coarse `patrol`. Both retain the existing direct-agent lifecycle and single
+usage row per spawn; model controls render through the selected patrol profile.
 
 **TLDR**: `Hive::Patrol::*` is the repository-patrol engine behind [[commands/patrol]]. It keeps clawpatch-style work units and audit state as plain JSON under `.hive-state/patrol/`, delegates review/fix reasoning to configured Hive agent profiles, records patrol review/fix token usage in `Hive::UsageDb`, validates fixes in isolated worktrees, opens PRs, and by default hands opened PRs into the normal `6-review` flow through `Hive::Patrol::ReviewHandoff`.
 

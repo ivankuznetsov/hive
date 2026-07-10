@@ -33,6 +33,21 @@ claude:
 <% if claude_effort %>  effort: <%= claude_effort %>
 <% else %>  # effort: medium
 <% end %>
+# Optional built-in-stage routing. Each field resolves independently:
+# exact stage -> coarse parent -> workflow/reviewer value -> profile default.
+# This example runs planning and implementation on Codex SOL at xhigh.
+# `review` is a common override for every review role; use reviewer-entry
+# model/effort fields below when Claude and Codex reviewers should differ.
+# models:
+#   plan:
+#     model: gpt-5.6-sol
+#     effort: xhigh
+#   execute:
+#     model: gpt-5.6-sol
+#     effort: xhigh
+#   review_fix:
+#     effort: high
+
 # Optional per-stage agent tool scopes. Default is yolo, which preserves
 # today's stage behavior. Non-yolo scopes are Claude-only and are tool-level
 # controls, not an OS sandbox; see docs/permissions.md.
@@ -194,6 +209,8 @@ review:
     - name: claude-ce-code-review
       kind: agent
       agent: claude
+      # model: opus
+      # effort: high
       skill: ce-code-review
       output_basename: claude-ce-code-review
       prompt_template: reviewer_claude_ce_code_review.md.erb
@@ -204,6 +221,8 @@ review:
     - name: codex-ce-code-review
       kind: agent
       agent: codex
+      # model: gpt-5.6-sol
+      # effort: xhigh
       skill: ce-code-review
       output_basename: codex-ce-code-review
       prompt_template: reviewer_codex_ce_code_review.md.erb

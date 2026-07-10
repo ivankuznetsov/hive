@@ -3,7 +3,7 @@ title: Hive::Agent
 type: module
 source: lib/hive/agent.rb, lib/hive/agent_limit.rb, lib/hive/claude_launcher.rb, lib/hive/scripts/interactive_claude_wrapper.sh
 created: 2026-04-25
-updated: 2026-07-09
+updated: 2026-07-10
 tags: [agent, claude, subprocess]
 ---
 
@@ -114,16 +114,14 @@ presets through `--allowedTools` / `--disallowedTools`. `read-only` uses
 `permission_mode: "default"` with allowed tools `Read,LS,Grep,Glob` and
 denies mutating/shell tools.
 
-Claude model/effort flags are config-derived rather than profile-derived.
-When `Stages::Base.spawn_agent` receives `cfg:` and the selected profile is
-Claude, it passes `Hive::Config.claude_cli_flags(cfg)` into `cli_flags`.
-That means `claude.model: default` reaches the headless argv as
-`--model default`; `model: inherit` or blank omits `--model`; and
-`claude.effort` reaches argv for any explicit non-default/non-inherit
-value (fresh init offers `low`, `medium`, and `high`).
-`Hive::ClaudeLauncher.wrapper_command` uses the same flag fragment for
-tmux-backed Claude sessions, and the shell wrapper forwards `--model` and
-`--effort` without shell re-parsing.
+Model/effort controls now resolve in `Hive::Config` and render through the
+selected `AgentProfile`. `Stages::Base.spawn_agent(stage:)` carries the native
+result through a separate `model_control_flags` channel; legacy raw
+`cli_flags` remain Claude-only, and explicit `cli_flags: []` still suppresses
+config derivation. Claude headless and tmux use the same resolved fragment.
+Codex receives only `--model` / `-c model_reasoning_effort="…"`, never
+`--effort`; Claude never receives the Codex override. A call without `stage:`
+ignores `models:` and preserves its former profile/global behavior.
 
 ## `spawn_and_wait` (the long part)
 

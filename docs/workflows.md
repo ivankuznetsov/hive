@@ -91,8 +91,11 @@ Rules:
 - `kind: council` runs a document review council over an input artifact.
 - Every agent stage must declare exactly one of `skill:` or `instruction:`.
 - `agent:`, `model:`, and `effort:` are optional on `kind: agent` and
-  `kind: council`. Descriptor values override project stage config; Claude
-  stages receive `model` / `effort` as CLI flags.
+  `kind: council`. Descriptor `model` / `effort` values are lower-precedence
+  fallbacks beneath a recognized top-level `models:` exact/coarse route. They
+  render through the selected profile (Claude or Codex); an unsupported profile
+  fails descriptor loading instead of silently ignoring the control. Arbitrary
+  custom stage names do not extend the closed top-level `models:` namespace.
 - `budget_usd:` and `timeout_sec:` provide optional resource defaults for
   `kind: agent` and `kind: council`; explicitly authored, non-null project stage
   config takes precedence. Values inherited from Hive's merged config defaults do not

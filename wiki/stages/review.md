@@ -3,11 +3,19 @@ title: 6-review stage
 type: stage
 source: lib/hive/stages/review.rb, lib/hive/stages/auto_commit.rb, lib/hive/stages/review/{ci_fix,triage,browser_test,fix_guardrail,suppression}.rb, lib/hive/commands/adhoc_review.rb, templates/{fix,ci_fix,browser_test,triage_*}*.erb
 created: 2026-04-26
-updated: 2026-07-01
+updated: 2026-07-10
 tags: [stage, review, autonomous-loop, ci, triage, fix-guardrail]
 ---
 
 **TLDR**: The autonomous review loop. After 5-open-pr opens a task PR, patrol creates a synthetic `6-review/patrol-.../` task for an opened PR, or `hive review --pr <n>` creates a synthetic `6-review/adhoc-review-pr-<n>/` task for someone else's PR, `Hive::Stages::Review.run!` runs CI on entry, then loops `reviewers → triage → fix` until the branch is clean (or hits a budget cap) and finalises with a browser-test phase. Reviewer and escalation markdown stay authoritative locally and are also mirrored to the GitHub PR as PR-level comments.
+
+Model identities are `review_ci`, `review_reviewers`, `review_triage`,
+`review_fix`, and `review_browser`, each falling back to coarse `review`.
+Reviewer-entry `model`/`effort` remains the lower-precedence way to express a
+heterogeneous Claude/Codex list. Shared Claude tmux sessions group by effective
+model, effort, and permission scope, so reviewers with different launch
+controls never bleed values into one another. Native `codex review`, normal,
+ad-hoc, patrol-handoff, and council reviewers all use `review_reviewers`.
 
 ## Setup
 

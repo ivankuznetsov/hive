@@ -32,6 +32,9 @@ Constructor kwargs (every profile freezes after init):
 | `preflight:` | Optional `Proc` invoked before each spawn (e.g., `pi` checks `~/.pi/agent/auth.json`). |
 | `usage_extractor:` | Optional callable that parses streaming agent events into token/cost usage rows for [[token-usage]]. Missing or unrecognized payloads return nil/zero-fill rather than failing the spawn. |
 | `skill_verifier:` | Optional callable used by `verify_skill` for profile-specific skill/slash-command resolution. |
+| `model_renderer:` | Optional callable rendering one model value; nil means unsupported. |
+| `effort_renderer:` | Optional callable rendering one effort value; nil means unsupported. |
+| `effort_values:` | Optional closed effort vocabulary validated before spawn. |
 
 ### Key methods
 
@@ -42,6 +45,8 @@ Constructor kwargs (every profile freezes after init):
 | `preflight!` | Calls the user-supplied `preflight:` Proc (if any). May raise `Hive::AgentError`. |
 | `verify_skill(invocation, project_root: nil)` | Delegates to the profile's `Hive::SkillCheck::*` verifier. Returns `[:present, path] / [:missing, hint] / [:not_applicable, why]`. |
 | `format_skill_invocation(skill)` | Renders a configured skill name through the profile's `skill_syntax_format`. Accepts slash-prefixed stage form (`/plan`, `/plug:name`), bare reviewer form (`ce-code-review`), and legacy Compound Engineering namespace form (`/compound-engineering:ce-code-review`). Legacy `compound-engineering:ce-*` inputs normalize to the current bare CE skill before profile formatting, so Claude/Codex render `/ce-*` and Pi renders `/skill:ce-*`. Other slash-prefixed inputs round-trip unchanged for profiles whose syntax is the default `"/%{skill}"`; profiles with a non-default syntax strip the leading `/` and any plugin namespace before formatting. Used uniformly by `Stages::Brainstorm`, `Stages::Plan`, `Reviewers::Agent`, `Stages::Review::BrowserTest`, and `Hive::Commands::Doctor` so the slash invocation that reaches the agent CLI matches doctor's verification target. |
+| `supports_model_control?` / `supports_effort_control?` | Capability checks used by configuration and descriptor validation. |
+| `render_model_controls(model:, effort:)` | Validates requested controls and returns provider-native argv. Unsupported controls raise `Hive::ConfigError`. |
 | `logged_in?(name, home: Dir.home)` | Returns whether the profile's CLI-owned credential artifact is present. Setup diagnostics use this alongside API-key env vars so token-authenticated Claude/Codex users are not reported unauthenticated, while an empty config directory such as `CODEX_HOME` alone is not treated as auth. |
 
 `STATUS_DETECTION_MODES` is the closed enum used by `Hive::Agent#handle_exit` to decide success: `state_file_marker` (claude default — agent writes the marker), `exit_code_only` (CI-fix loops — make the command succeed), `output_file_exists` (reviewer/triage spawns — produce the artifact).
@@ -56,10 +61,16 @@ Module-level singleton, mutex-guarded. `register(name, profile)` adds (or replac
 
 Auto-required from `lib/hive/agent_profiles.rb`:
 
+<<<<<<< HEAD
 - `claude` — default skip flag `--dangerously-skip-permissions`, `--add-dir`, `--max-budget-usd`, headless via `-p`, stream-json output with `--verbose`, Claude skill verifier, and Claude usage extraction. Min version `2.1.118`. `:state_file_marker` mode. `AgentProfile#permission_flags(mode)` is the single source of truth for permission argv, shared by the headless `Hive::Agent` path and the tmux `Hive::ClaudeLauncher#wrapper_command` path: `bypassPermissions` (and a nil mode) yields `--dangerously-skip-permissions`, any other Claude mode yields `--permission-mode <mode>`.
 - `codex` — `--dangerously-bypass-approvals-and-sandbox`, `--add-dir`, headless via the `exec` subcommand, `--json` output. No native budget flag (hive enforces wall-clock timeout only). Min version `0.125.0`. `:output_file_exists`.
 - `pi` — no permission flag, no `--add-dir` (triggers `warn_isolation_reduced` when callers pass `add_dirs:` per ADR-018), preflight checks for `~/.pi/agent/auth.json`. Min version `0.70.2`. `:output_file_exists`.
 - `grok` — headless via `-p <prompt>`, `--always-approve`, and `--output-format streaming-json`. Preflight accepts `XAI_API_KEY`, `GROK_CODE_XAI_API_KEY`, an explicit absolute credential file via `GROK_AUTH_PATH`, or `auth.json` under an absolute `GROK_HOME`/the default `~/.grok`; device login is `grok login --device-auth`. The direct path takes precedence over `GROK_HOME`, matching the CLI and allowing one refresh-token/lock domain to be mounted into isolated runners. Hive rejects relative path overrides, even when an API key is present, so its parent preflight and a child spawned in another working directory cannot consume different credential files or state directories. No add-dir or budget flag. Text events are concatenated into `final_message`; unavailable token usage stays nil. Min version `0.2.90`. `:output_file_exists`. Native skill verification is not yet available.
+=======
+- `claude` — model renderer emits `--model`; effort renderer emits `--effort` except for `default`/`inherit`. It otherwise retains the permission, add-dir, budget, stream-json, verifier, usage, version, and `:state_file_marker` behavior described previously.
+- `codex` — model renderer emits `--model`; effort emits the one-run `-c model_reasoning_effort="…"` override. It retains `exec`, JSON output, add-dir, approval bypass, no native budget, min version `0.125.0`, and `:output_file_exists`.
+- `pi` — declares neither model control. A requested control fails validation. It retains no permission/add-dir flags, auth preflight, min version `0.70.2`, and `:output_file_exists`.
+>>>>>>> fa4544c7 (docs(config): U5 document per-stage model routing)
 
 ## Used by
 

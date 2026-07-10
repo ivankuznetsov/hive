@@ -1,4 +1,4 @@
-# ADR-030: Global Claude Launch Mode
+# ADR-030: Global Claude Launch Mode and Profile-Neutral Model Routing
 
 **Status:** Accepted
 **Date:** 2026-05-22
@@ -21,6 +21,24 @@ claude:
 `brainstorm.runtime` is deprecated. It remains readable for one release as a brainstorm-only fallback when `claude.mode` is absent, and `hive doctor` warns operators to migrate.
 
 For 6-review, Claude reviewers run sequentially inside one shared tmux session per pass under `claude.mode: tmux`. Non-Claude reviewers remain headless. Parallel reviewer panes and per-stage Claude-mode overrides are intentionally out of scope.
+
+### 2026-07-10 amendment: per-stage model and effort routing
+
+The launch-mode decision remains Claude-specific, but model selection is now
+profile-neutral. Project config may declare a top-level `models:` map for the
+closed built-in stage vocabulary; the global config owns the project-agnostic
+`models.digest` entry. Model and effort resolve independently: exact identity,
+coarse parent, workflow/reviewer fallback, then the selected profile's existing
+default (`claude.model` / `claude.effort` for Claude; CLI default for Codex).
+Omitting stage context deliberately ignores the map.
+
+`Hive::AgentProfile` validates capability and renders native argv. Claude keeps
+its historical sentinel behavior (`model: default` is passed, `model: inherit`
+is omitted, and `effort: default|inherit` is omitted). Codex renders `--model`
+and `-c 'model_reasoning_effort="…"'`, following the [Codex config
+reference](https://learn.chatgpt.com/docs/config-file/config-reference#configtoml).
+Pi declares no model controls. Shared Claude reviewer sessions are grouped by
+effective model and effort as well as permission scope.
 
 ## Consequences
 

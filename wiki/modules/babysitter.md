@@ -7,6 +7,10 @@ updated: 2026-07-10
 tags: [babysitter, module, daemon, github, agents]
 ---
 
+PR fixes select the execute profile while resolving exact model identity
+`babysitter`, then coarse `execute`. Budgets, timeouts, dry-run environment,
+events, and exit-code-only lifecycle remain unchanged.
+
 **TLDR**: `Hive::Babysitter::*` is an experimental out-of-band PR repair daemon. It does not move task folders through the 1→9 pipeline; it watches GitHub PRs for enrolled projects and delegates repair work to the project's development agent.
 
 ## Module Map

@@ -56,19 +56,18 @@ class ReposTest < ActionDispatch::IntegrationTest
                   "the reviewer multi-select must offer the same set the TTY prompt does"
     assert_select "input[name='settings[adhoc_auto_fix]'][type='checkbox']", 1,
                   "the web setup must expose the same ad-hoc auto-fix choice as hive init"
+    assert_select "input[name='settings[refactor_patrol_enabled]'][type='checkbox'][checked]", 1,
+                  "fresh web setup must recommend architecture patrol discovery"
+    assert_select "input[name='settings[refactor_patrol_auto_fix]']", 0,
+                  "discovery consent must not imply an auto-fix control"
+    assert_select "input[name='settings[refactor_patrol_issue_filing]']", 0,
+                  "discovery consent must not imply an issue-filing control"
     assert_select "input[name='settings[budgets][brainstorm]']", 1
   end
 
   test "chosen settings reach hive init through the prompts seam" do
     sign_in!
-    dir = File.join(ENV["HIVE_TEST_HOME_ROOT"], "repos-root2", "configured-app")
-    FileUtils.mkdir_p(dir)
-    system("git", "init", "-q", dir, exception: true)
-    system("git", "-C", dir, "config", "user.email", "test@example.com", exception: true)
-    system("git", "-C", dir, "config", "user.name", "Hive Test", exception: true)
-    File.write(File.join(dir, "README.md"), "x")
-    system("git", "-C", dir, "add", ".", exception: true)
-    system("git", "-C", dir, "-c", "user.email=t@e.c", "-c", "user.name=T", "commit", "-qm", "i", exception: true)
+    dir = create_uninitialized_repo!("repos-root2", "configured-app")
 
     # Spy on Init.new to prove the web path hands the workflow over as a FLAG —
     # the interactive workflow prompt is bypassed entirely. The on-disk
@@ -88,6 +87,7 @@ class ReposTest < ActionDispatch::IntegrationTest
           workflow: "content",
           claude_mode: "headless", triage_bias: "safetyist", patrol_mode: "off",
           adhoc_auto_fix: "1",
+          refactor_patrol_enabled: "1",
           enabled_reviewers_submitted: "1", enabled_reviewers: [ "claude-ce-code-review" ],
           daemon_enabled: "0", babysitter_enabled: "0",
           budgets: { brainstorm: "3" }
@@ -108,8 +108,90 @@ class ReposTest < ActionDispatch::IntegrationTest
                  "the web path must pass ad-hoc auto-fix through the prompts seam"
     assert_equal true, parsed_config.dig("review", "github_publish", "enabled"),
                  "GitHub publishing must stay enabled by default for PR review comments"
+    assert_equal true, parsed_config.dig("refactor_patrol", "enabled"),
+                 "an omitted web checkbox value must use the fresh-init discovery recommendation"
+    assert_equal false, parsed_config.dig("refactor_patrol", "auto_fix", "enabled"),
+                 "recommended discovery must not imply auto-fix consent"
+    assert_equal false, parsed_config.dig("refactor_patrol", "issue_filing", "enabled"),
+                 "recommended discovery must not imply issue-filing consent"
   ensure
     Hive::Commands::Init.define_singleton_method(:new, original_init_new) if original_init_new
+  end
+
+  test "web and terminal setup expose the same answer keys" do
+    input = StringIO.new
+    input.define_singleton_method(:tty?) { false }
+    terminal_answers = Hive::Commands::Init::Prompts.new(
+      input: input, output: StringIO.new, summary_io: StringIO.new
+    ).collect
+
+    web_answers = InitSetup.new({}).collect
+
+    assert_equal terminal_answers.keys.sort, web_answers.keys.sort
+    assert_equal true, web_answers.fetch("refactor_patrol_enabled"),
+                 "missing web input must use the same fresh-init recommendation as terminal setup"
+  end
+
+  test "fresh setup persists an explicitly unchecked architecture patrol choice" do
+    sign_in!
+    dir = create_uninitialized_repo!("repos-root-architecture-off", "architecture-off-app")
+
+    with_repos_root(File.dirname(dir)) do
+      post "/repos", params: {
+        url: "ivankuznetsov/architecture-off-app",
+        name: "architecture-off-app",
+        settings: { workflow: "coding", refactor_patrol_enabled: "0" }
+      }
+    end
+
+    assert_redirected_to "/repos"
+    config = YAML.safe_load_file(File.join(dir, ".hive-state", "config.yml"))
+    assert_equal false, config.dig("refactor_patrol", "enabled")
+    assert_equal false, config.dig("refactor_patrol", "auto_fix", "enabled")
+    assert_equal false, config.dig("refactor_patrol", "issue_filing", "enabled")
+  end
+
+  test "tampered architecture patrol input is rejected" do
+    sign_in!
+
+    post "/repos", params: {
+      project: @project,
+      settings: { workflow: "coding", refactor_patrol_enabled: "enable-everything" }
+    }
+
+    assert_response :unprocessable_entity
+    assert_match "refactor_patrol_enabled must be a boolean", response.body
+  end
+
+  test "rerun setup preserves the existing architecture patrol policy" do
+    name = create_hive_project!("rerun-architecture-policy-app")
+    sign_in!
+    dir = File.join(ENV["HIVE_TEST_HOME_ROOT"], "repos", name)
+    state_dir = File.join(dir, ".hive-state")
+    config_path = File.join(state_dir, "config.yml")
+    config = YAML.safe_load_file(config_path)
+    config.fetch("refactor_patrol")["enabled"] = false
+    File.write(config_path, config.to_yaml)
+    system("git", "-C", state_dir, "add", "config.yml", exception: true)
+    system("git", "-C", state_dir, "commit", "-qm", "disable architecture patrol", exception: true)
+
+    get "/repos/new", params: { project: name }
+    assert_response :success
+    assert_select "input[name='settings[refactor_patrol_enabled]']", 0,
+                  "rerun setup must not present an ignored policy control"
+    assert_match "Existing architecture patrol policy is preserved", response.body
+
+    post "/repos", params: {
+      project: name,
+      settings: { workflow: "coding", refactor_patrol_enabled: "1" }
+    }
+
+    assert_redirected_to "/repos"
+    persisted = YAML.safe_load_file(config_path)
+    assert_equal false, persisted.dig("refactor_patrol", "enabled"),
+                 "rerunning setup must not replace an existing discovery policy"
+    assert_equal false, persisted.dig("refactor_patrol", "auto_fix", "enabled")
+    assert_equal false, persisted.dig("refactor_patrol", "issue_filing", "enabled")
   end
 
   test "rerun setup rebinds the project default workflow on disk" do
@@ -301,6 +383,18 @@ class ReposTest < ActionDispatch::IntegrationTest
   end
 
   private
+
+  def create_uninitialized_repo!(root_name, name)
+    dir = File.join(ENV["HIVE_TEST_HOME_ROOT"], root_name, name)
+    FileUtils.mkdir_p(dir)
+    system("git", "init", "-q", dir, exception: true)
+    system("git", "-C", dir, "config", "user.email", "test@example.com", exception: true)
+    system("git", "-C", dir, "config", "user.name", "Hive Test", exception: true)
+    File.write(File.join(dir, "README.md"), "x")
+    system("git", "-C", dir, "add", ".", exception: true)
+    system("git", "-C", dir, "commit", "-qm", "initial commit", exception: true)
+    dir
+  end
 
   def with_repos_root(root)
     old = ENV["HIVEBOX_REPOS_DIR"]

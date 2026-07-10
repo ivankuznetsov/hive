@@ -65,6 +65,12 @@ module Hive
         end
 
         data = declaration(permissions)
+        # Intentional fail-closed asymmetry: a command-owned context has its
+        # shell_exposure forced to "command" (never "explicit_bash") while any
+        # declared shell_justification is retained, so a deny hit owned by a
+        # command context always blocks even when justified. This is the safe
+        # direction; it is effectively unreachable today because command
+        # reviewers own no instruction file that could carry a deny match.
         data["shell_exposure"] = "command" if command
         {
           "context" => context,

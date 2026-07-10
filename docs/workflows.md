@@ -209,7 +209,7 @@ non-empty `shell_justification`; accepted exceptions are marked
 The initial secret and deny rule-set versions are both `1`. Registry consumers
 should import Hive's stable rules rather than copy regexes; deny rule ids are
 `shell_download_to_interpreter`, `credential_path_access`, and
-`outbound_data_transfer`. Secret rule ids are the keys exported by
+`outbound_data_transfer`. Secret rule ids are the `id` of each descriptor in
 `Hive::SecretPatterns.rules` and listed in the managed wiki catalogue.
 
 The registry defaults to `ivankuznetsov/honeycomb` and can be changed in

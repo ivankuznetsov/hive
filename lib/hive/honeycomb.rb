@@ -24,7 +24,7 @@ module Hive
       end
 
       def with_manifest(value)
-        self.class.new(**to_h.merge(manifest: value))
+        with(manifest: value)
       end
 
       def cleanup!

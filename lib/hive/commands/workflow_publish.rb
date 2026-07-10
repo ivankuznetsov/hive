@@ -162,6 +162,9 @@ module Hive
         end
         @stderr.puts "hive workflow publish: #{error.message}"
       rescue Errno::EPIPE
+        # Downstream reader (e.g. a closed pipe / `head`) went away mid-write;
+        # swallowing the broken pipe is intentional so error rendering does not
+        # itself raise. This is not an accidental error suppression.
         nil
       end
 

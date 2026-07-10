@@ -115,10 +115,12 @@ class BabysitterPrFixerTest < Minitest::Test
       worktree_path = File.join(dir, "wt")
       FileUtils.mkdir_p(worktree_path)
       seen_path = nil
+      seen_prompt = nil
 
       stub_non_green_context(project, worktree_path) do
-        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, lambda { |_task, **_kwargs|
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, lambda { |_task, **kwargs|
           seen_path = ENV["PATH"]
+          seen_prompt = kwargs.fetch(:prompt)
           File.write(File.join(worktree_path, ".babysitter-dry-run-plan.md"), "would fix\n")
           { status: :ok }
         }) do
@@ -128,6 +130,10 @@ class BabysitterPrFixerTest < Minitest::Test
       end
 
       assert_includes seen_path, ".hive-babysitter-dry-run-bin"
+      assert_includes seen_prompt, "gh pr checks/diff/list/status/view"
+      assert_includes seen_prompt, File.join(worktree_path, ".babysitter-dry-run-skipped.log")
+      assert_includes seen_prompt, "[dry-run] ... skipped"
+      assert_includes seen_prompt, "synthetic success (exit status 0)"
       assert File.exist?(File.join(worktree_path, ".babysitter-dry-run-plan.md"))
     end
   end

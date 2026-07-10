@@ -35,4 +35,28 @@ class HoneycombManifestTest < Minitest::Test
       refute_includes File.read(File.join(dir, "manifest.yml")), dir
     end
   end
+
+  def test_package_cleanup_removes_only_its_package_root
+    with_tmp_dir do |dir|
+      package_root = File.join(dir, "workflows", "test")
+      FileUtils.mkdir_p(package_root)
+      File.write(File.join(package_root, "workflow.yml"), "id: test\n")
+      package = Hive::Honeycomb::Package.new(
+        staging_root: dir,
+        package_root: package_root,
+        id: "test",
+        version: "1.0.0",
+        metadata: {},
+        owners: {},
+        dependencies: [],
+        permission_summary: {},
+        manifest: {}
+      )
+
+      package.cleanup!
+
+      refute File.exist?(package_root)
+      assert File.directory?(dir)
+    end
+  end
 end

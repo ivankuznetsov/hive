@@ -485,6 +485,13 @@ class WorkflowNewTest < Minitest::Test
         ).call!
       end
       assert_match(/--dry-run applies only/, dry_run_error.message)
+
+      template_error = assert_raises(Hive::Commands::Workflow::UsageError) do
+        Hive::Commands::Workflow.new(
+          "publish", "my-flow", project_root: project_root, template: "writing"
+        ).call!
+      end
+      assert_match(/--template applies only/, template_error.message)
     end
   end
 

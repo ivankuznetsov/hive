@@ -56,4 +56,21 @@ class HoneycombPermissionSummaryTest < Minitest::Test
     assert_includes aggregate.fetch("shell_exposures"), "explicit_bash"
     assert_includes aggregate.fetch("shell_exposures"), "unrestricted"
   end
+
+  def test_unknown_future_permission_preset_is_disclosed_as_unknown
+    workflow = Hive::Workflow.new(
+      id: :future,
+      stages: [
+        Hive::Workflow::Stage.new(
+          name: "work", index: 1, state_file: "work.md", kind: :agent,
+          skill: "/work", permissions: { "preset" => "future-preset" }
+        )
+      ]
+    )
+
+    row = Hive::Honeycomb::PermissionSummary.build(workflow).fetch("contexts").first
+
+    assert_equal "future-preset", row.fetch("preset")
+    assert_equal "unknown", row.fetch("shell_exposure")
+  end
 end

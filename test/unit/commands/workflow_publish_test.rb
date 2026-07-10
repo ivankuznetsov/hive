@@ -138,6 +138,81 @@ class WorkflowPublishTest < Minitest::Test
     end
   end
 
+  def test_human_preflight_error_renders_safe_findings_and_handles_closed_stderr
+    secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+    with_publish_project(asset_content: secret) do |project_root, _descriptor_path|
+      stderr = StringIO.new
+      exit_error = assert_raises(SystemExit) do
+        Hive::Commands::WorkflowPublish.new(
+          "safe", project_root: project_root, dry_run: true,
+          stdout: StringIO.new, stderr: stderr
+        ).call
+      end
+
+      assert_equal Hive::ExitCodes::CONFIG, exit_error.status
+      assert_includes stderr.string, "payload.txt:1 github_token"
+      assert_includes stderr.string, "preflight blocked publication"
+      refute_includes stderr.string, secret
+    end
+
+    closed_stderr = Object.new
+    closed_stderr.define_singleton_method(:puts) { |*| raise Errno::EPIPE }
+    with_tmp_dir do |project_root|
+      assert_raises(SystemExit) do
+        Hive::Commands::WorkflowPublish.new(
+          "missing", project_root: project_root,
+          stdout: StringIO.new, stderr: closed_stderr
+        ).call
+      end
+    end
+  end
+
+  def test_partial_submission_error_preserves_recovery_coordinates_in_json
+    with_publish_project do |project_root, _descriptor_path|
+      stdout = StringIO.new
+      failure = Hive::Honeycomb::Submission::PartialError.new(
+        "PR creation failed after push",
+        repository: "alice/honeycomb",
+        branch: "submit-safe-v1.0.0"
+      )
+      command = Hive::Commands::WorkflowPublish.new(
+        "safe", project_root: project_root, json: true, stdout: stdout,
+        submission: ->(**) { raise failure }
+      )
+
+      assert_raises(SystemExit) { command.call }
+      payload = JSON.parse(stdout.string)
+      assert_equal "submission_partial", payload.fetch("error_kind")
+      assert_equal "alice/honeycomb", payload.fetch("repository")
+      assert_equal "submit-safe-v1.0.0", payload.fetch("branch")
+      assert_schema_valid(payload)
+    end
+  end
+
+  def test_error_kind_mapping_covers_every_publish_failure_class
+    command = Hive::Commands::WorkflowPublish.new("safe", stdout: StringIO.new, stderr: StringIO.new)
+    errors = {
+      Hive::Commands::Workflow::UsageError.new("bad") => "usage",
+      Hive::Commands::WorkflowPublish::PreflightError.new(
+        Hive::Honeycomb::Preflight::Result.new(
+          status: :blocked, package: nil, findings: [], dependencies: [], review_required: []
+        )
+      ) => "preflight",
+      Hive::ConcurrentRunError.new("busy", lock_path: "/tmp/honeycomb.lock") => "concurrent_run",
+      Hive::Honeycomb::Submission::PartialError.new(
+        "partial", repository: "alice/honeycomb", branch: "submit-safe"
+      ) => "submission_partial",
+      Hive::Honeycomb::Submission::Error.new("submit") => "submission",
+      Hive::GhError.new("gh") => "submission",
+      Hive::ConfigError.new("config") => "config",
+      IOError.new("io") => "error"
+    }
+
+    errors.each do |error, expected|
+      assert_equal expected, command.send(:error_kind_for, error), error.class.name
+    end
+  end
+
   def test_justified_deny_succeeds_with_review_required_status
     permissions = {
       "preset" => "scoped",

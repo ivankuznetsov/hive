@@ -16,6 +16,7 @@ class HoneycombPreflightTest < Minitest::Test
       end
 
       assert result.success?
+      assert result.clean?
       assert_equal :clean, result.status
       assert_empty result.findings
       refute_includes result.package.manifest.inspect, "secret-local-path"
@@ -55,6 +56,20 @@ class HoneycombPreflightTest < Minitest::Test
         Hive::Honeycomb::Preflight.run(package: package, project_root: project_root)
       end
       assert_equal "unknown_agent", result.findings.find { |row| row.kind == "dependency" }.rule
+    end
+  end
+
+  def test_dependency_verifier_failure_is_reported_without_internal_detail
+    with_package(skill: "/required") do |package, project_root|
+      profile = profile_with { |_invocation, project_root:| raise IOError, "private verifier path" }
+      result = with_profile(profile) do
+        Hive::Honeycomb::Preflight.run(package: package, project_root: project_root)
+      end
+
+      finding = result.findings.find { |row| row.kind == "dependency" }
+      assert_equal "skill_verification_failed", finding.rule
+      assert_equal "IOError: verifier could not check this dependency", finding.remediation
+      refute_includes finding.to_h.inspect, "private verifier path"
     end
   end
 

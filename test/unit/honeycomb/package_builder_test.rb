@@ -198,6 +198,101 @@ class HoneycombPackageBuilderTest < Minitest::Test
     end
   end
 
+  def test_rejects_invalid_direct_version_override
+    with_publishable_fixture do |_source, descriptor_path, workflow|
+      with_tmp_dir do |out|
+        error = assert_raises(Hive::ConfigError) do
+          Hive::Honeycomb::PackageBuilder.build(
+            workflow: workflow,
+            descriptor_path: descriptor_path,
+            output_dir: out,
+            version: "1.2"
+          )
+        end
+        assert_match(/strict semantic version/, error.message)
+      end
+    end
+  end
+
+  def test_rejects_duplicate_non_reserved_assets
+    with_publishable_fixture do |_source, descriptor_path, workflow|
+      asset = workflow.metadata.assets.first
+      workflow = workflow.with(metadata: workflow.metadata.with(assets: [ asset, asset ]))
+
+      with_tmp_dir do |out|
+        error = assert_raises(Hive::ConfigError) do
+          Hive::Honeycomb::PackageBuilder.build(
+            workflow: workflow, descriptor_path: descriptor_path, output_dir: out
+          )
+        end
+        assert_match(/duplicate packaged path "assets\/diagram.txt"/, error.message)
+      end
+    end
+  end
+
+  def test_rejects_non_file_and_disappeared_owned_inputs
+    with_publishable_fixture do |_source, descriptor_path, workflow|
+      owned = File.join(File.dirname(descriptor_path), "sample")
+      workflow_with_directory = workflow.with(
+        metadata: workflow.metadata.with(assets: [ File.join(owned, "assets") ])
+      )
+      with_tmp_dir do |out|
+        error = assert_raises(Hive::ConfigError) do
+          Hive::Honeycomb::PackageBuilder.build(
+            workflow: workflow_with_directory, descriptor_path: descriptor_path, output_dir: out
+          )
+        end
+        assert_match(/readable regular file/, error.message)
+      end
+
+      FileUtils.rm_f(File.join(owned, "shared.md"))
+      with_tmp_dir do |out|
+        error = assert_raises(Hive::ConfigError) do
+          Hive::Honeycomb::PackageBuilder.build(
+            workflow: workflow, descriptor_path: descriptor_path, output_dir: out
+          )
+        end
+        assert_match(/cannot be packaged/, error.message)
+      end
+    end
+  end
+
+  def test_wraps_descriptor_read_errors_after_source_validation
+    with_publishable_fixture do |_source, descriptor_path, workflow|
+      File.write(descriptor_path, "metadata: [\n")
+
+      with_tmp_dir do |out|
+        error = assert_raises(Hive::ConfigError) do
+          Hive::Honeycomb::PackageBuilder.build(
+            workflow: workflow, descriptor_path: descriptor_path, output_dir: out
+          )
+        end
+        assert_match(/descriptor .* could not be packaged/, error.message)
+        refute File.exist?(File.join(out, "workflows", "sample"))
+      end
+    end
+  end
+
+  def test_collects_revise_skill_dependency_with_effective_agent
+    with_publishable_fixture do |_source, descriptor_path, _workflow|
+      text = File.read(descriptor_path).sub(
+        "instruction: ./sample/nested/revise.md",
+        "skill: /revise"
+      )
+      File.write(descriptor_path, text)
+      workflow = Hive::Workflows::DescriptorParser.parse_file(descriptor_path)
+
+      with_tmp_dir do |out|
+        package = Hive::Honeycomb::PackageBuilder.build(
+          workflow: workflow, descriptor_path: descriptor_path, output_dir: out
+        )
+        dependency = package.dependencies.find { |row| row.fetch("skill") == "/revise" }
+        assert_equal "stage:review/revise", dependency.fetch("context")
+        assert_equal "codex", dependency.fetch("agent")
+      end
+    end
+  end
+
   private
 
     def with_publishable_fixture(readme: false)

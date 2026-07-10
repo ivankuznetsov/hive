@@ -27,6 +27,7 @@ class RefactorPatrolReporterTest < Minitest::Test
     all_ids = %w[accepted flagged suppressed].flat_map { |key| payload.fetch(key).map { |item| item.fetch("id") } }
     assert_equal %w[accepted below inadmissible suppressed], all_ids.sort
     assert_equal all_ids.uniq, all_ids
+    assert_equal accepted.to_h, payload.fetch("accepted").first.fetch("thesis")
 
     flagged = payload.fetch("flagged").to_h { |item| [ item.fetch("id"), item ] }
     assert_equal true, flagged.fetch("below").fetch("admissible")

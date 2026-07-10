@@ -35,6 +35,7 @@ class RefactorPatrolLeverageTest < Minitest::Test
       leverage = Hive::RefactorPatrol::Leverage.new(dir, cfg: cfg)
       result = leverage.score(feature("checkout", [ "lib/checkout.rb" ], entrypoints: [ "lib/checkout.rb" ]))
 
+      assert_equal "feature", result.fetch("scope")
       assert_operator result.dig("signals", "fan_in"), :>=, 2
       assert_operator result.dig("signals", "complexity"), :>, 0
       assert_operator result.dig("signals", "coupling"), :>, 0
@@ -149,6 +150,39 @@ class RefactorPatrolLeverageTest < Minitest::Test
 
       refute_includes result.fetch("breakdown"), "bug_density"
       refute_includes result.fetch("breakdown"), "coverage_gap"
+    end
+  end
+
+  def test_proposal_score_multiplies_hotspot_contributions_by_bounded_relief
+    hotspot = { "breakdown" => { "churn" => 0.4, "coupling" => 0.2 } }
+    drivers = [
+      { "signal" => "churn", "relief" => 0.5, "mechanism" => "isolate edits" },
+      { "signal" => "coupling", "relief" => 0.25, "mechanism" => "centralize the boundary" }
+    ]
+
+    result = Hive::RefactorPatrol::Leverage.score_proposal(hotspot, drivers)
+
+    assert_equal({ "churn" => 0.2, "coupling" => 0.05 }, result.fetch("breakdown"))
+    assert_in_delta 0.25, result.fetch("score"), 0.0001
+    assert_equal drivers, result.fetch("drivers")
+  end
+
+  def test_proposal_score_rejects_unknown_duplicate_and_out_of_range_drivers
+    hotspot = { "breakdown" => { "churn" => 0.4 } }
+    invalid_sets = [
+      [ { "signal" => "unknown", "relief" => 0.5, "mechanism" => "no measurement" } ],
+      [
+        { "signal" => "churn", "relief" => 0.5, "mechanism" => "first" },
+        { "signal" => "churn", "relief" => 0.2, "mechanism" => "duplicate" }
+      ],
+      [ { "signal" => "churn", "relief" => 1.1, "mechanism" => "too much" } ],
+      [ { "signal" => "churn", "relief" => 0.5, "mechanism" => "" } ]
+    ]
+
+    invalid_sets.each do |drivers|
+      assert_raises(ArgumentError) do
+        Hive::RefactorPatrol::Leverage.score_proposal(hotspot, drivers)
+      end
     end
   end
 

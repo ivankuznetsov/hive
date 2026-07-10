@@ -197,7 +197,7 @@ module Hive
 
       def ranked_items(theses)
         theses.reject { |thesis| thesis.collision && thesis.collision["kind"].to_s.start_with?("collision_already", "collision_dismissed", "collision_similar") }
-              .sort_by { |thesis| -score(thesis) }
+              .sort_by { |thesis| [ -score(thesis), thesis.feature_id.to_s, thesis.id.to_s ] }
               .map do |thesis|
           {
             "id" => thesis.id,

@@ -60,7 +60,7 @@ yay -S hive-bin
 # glibc Linux fallback / Ubuntu 22.04+ (pin to the release tag, not main)
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
-curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.4.0/install.sh -o "$tmpdir/hive-install.sh"
+curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.4.1/install.sh -o "$tmpdir/hive-install.sh"
 bash "$tmpdir/hive-install.sh"
 ```
 
@@ -190,8 +190,8 @@ the published schemas, and asserts no state leaks outside the prefix.
 Local usage:
 
 ```bash
-packaging/verify-release.sh --version=v0.4.0
-packaging/verify-release.sh --version=v0.4.0 --report=json | jq .ok
+packaging/verify-release.sh --version=v0.4.1
+packaging/verify-release.sh --version=v0.4.1 --report=json | jq .ok
 ```
 
 For unreleased packaging fixes, validate against the locally built gem rather

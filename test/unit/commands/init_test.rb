@@ -43,6 +43,7 @@ class HiveCommandsInitTest < Minitest::Test
       "patrol_mode" => "high",
       "triage_bias" => "safetyist",
       "adhoc_auto_fix" => true,
+      "refactor_patrol_enabled" => false,
       "daemon_enabled" => false
     )
 
@@ -59,6 +60,7 @@ class HiveCommandsInitTest < Minitest::Test
     assert_equal "high", config_binding.patrol_mode
     assert_equal "safetyist", config_binding.triage_bias
     assert_equal true, config_binding.adhoc_auto_fix
+    assert_equal false, config_binding.refactor_patrol_enabled
     assert_equal default_init_limits("budget_usd"), config_binding.budgets
     assert_equal default_init_limits("timeout_sec"), config_binding.timeouts
     refute config_binding.daemon_enabled
@@ -111,6 +113,24 @@ class HiveCommandsInitTest < Minitest::Test
     enabled_answers = project_config_answers.merge("adhoc_auto_fix" => true)
     enabled = render_fresh_config(:coding, answers: enabled_answers)
     assert_match(/adhoc:\n    reviewers: null\n    fix: true/, enabled)
+  end
+
+  def test_project_config_renders_independent_refactor_patrol_consent_gates
+    enabled = render_fresh_config(
+      :coding,
+      answers: project_config_answers.merge("refactor_patrol_enabled" => true)
+    )
+    enabled_raw = YAML.safe_load(enabled).fetch("refactor_patrol")
+
+    assert_equal true, enabled_raw.fetch("enabled")
+    assert_equal false, enabled_raw.dig("auto_fix", "enabled")
+    assert_equal false, enabled_raw.dig("issue_filing", "enabled")
+
+    disabled = render_fresh_config(
+      :coding,
+      answers: project_config_answers.merge("refactor_patrol_enabled" => false)
+    )
+    assert_equal false, YAML.safe_load(disabled).dig("refactor_patrol", "enabled")
   end
 
   def test_run_init_preflight_warns_when_doctor_reports_config_error
@@ -575,6 +595,7 @@ def test_emit_json_summary_swallows_epipe
     "patrol_reviewers" => [ "codex-ce-code-review" ],
     "patrol_mode" => "medium",
     "triage_bias" => "courageous",
+    "refactor_patrol_enabled" => true,
     "budgets" => {},
     "timeouts" => {},
     "daemon_enabled" => true

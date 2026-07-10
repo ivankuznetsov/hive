@@ -466,6 +466,15 @@ module Hive
       # and state independent from patrol so the two commands can diverge.
       "refactor_patrol" => {
         "enabled" => false,
+        # Discovery consent never grants mutation authority. These two gates
+        # are intentionally independent and default off for fresh and legacy
+        # projects alike.
+        "auto_fix" => {
+          "enabled" => false
+        },
+        "issue_filing" => {
+          "enabled" => false
+        },
         "agent" => "claude",
         "min_confidence" => "medium",
         "max_theses_per_feature" => 3,
@@ -2672,8 +2681,10 @@ module Hive
       return if refactor.nil?
 
       REFACTOR_PATROL_BOOLEAN_KEYS.each do |key|
-        validate_boolean!(refactor[key], "refactor_patrol.#{key}", source_path)
+        validate_required_boolean!(refactor[key], "refactor_patrol.#{key}", source_path)
       end
+      validate_refactor_patrol_gate!(refactor, "auto_fix", source_path)
+      validate_refactor_patrol_gate!(refactor, "issue_filing", source_path)
 
       confidence = refactor["min_confidence"]
       unless REFACTOR_PATROL_CONFIDENCE_LEVELS.include?(confidence)
@@ -2693,6 +2704,25 @@ module Hive
       validate_refactor_patrol_caps!(refactor, source_path)
       validate_refactor_patrol_leverage!(refactor, source_path)
       validate_refactor_patrol_review!(refactor, source_path)
+    end
+
+    def validate_refactor_patrol_gate!(refactor, key, source_path)
+      gate = refactor[key]
+      unless gate.is_a?(Hash)
+        raise ConfigError,
+              "refactor_patrol.#{key} in #{describe_source(source_path)} must be a Hash; " \
+              "got #{gate.inspect} (#{gate.class})"
+      end
+
+      validate_required_boolean!(gate["enabled"], "refactor_patrol.#{key}.enabled", source_path)
+    end
+
+    def validate_required_boolean!(value, label, source_path)
+      return if value == true || value == false
+
+      raise ConfigError,
+            "#{label} in #{describe_source(source_path)} must be a boolean " \
+            "(true / false); got #{value.inspect} (#{value.class})"
     end
 
     def validate_refactor_patrol_commands!(refactor, source_path)

@@ -170,6 +170,8 @@ class ConfigTest < Minitest::Test
       cfg = Hive::Config.load(dir)
 
       assert_equal false, cfg.dig("refactor_patrol", "enabled")
+      assert_equal false, cfg.dig("refactor_patrol", "auto_fix", "enabled")
+      assert_equal false, cfg.dig("refactor_patrol", "issue_filing", "enabled")
       assert_equal "claude", cfg.dig("refactor_patrol", "agent")
       assert_equal "medium", cfg.dig("refactor_patrol", "min_confidence")
       assert_equal 3, cfg.dig("refactor_patrol", "max_theses_per_feature")
@@ -195,6 +197,10 @@ class ConfigTest < Minitest::Test
           mode: off
         refactor_patrol:
           enabled: true
+          auto_fix:
+            enabled: true
+          issue_filing:
+            enabled: true
           agent: codex
           min_confidence: high
           max_theses_per_run: 4
@@ -211,6 +217,8 @@ class ConfigTest < Minitest::Test
 
       assert_equal false, cfg.dig("patrol", "enabled")
       assert_equal true, cfg.dig("refactor_patrol", "enabled")
+      assert_equal true, cfg.dig("refactor_patrol", "auto_fix", "enabled")
+      assert_equal true, cfg.dig("refactor_patrol", "issue_filing", "enabled")
       assert_equal "codex", cfg.dig("refactor_patrol", "agent")
       assert_equal "high", cfg.dig("refactor_patrol", "min_confidence")
       assert_equal 4, cfg.dig("refactor_patrol", "max_theses_per_run")
@@ -366,6 +374,33 @@ class ConfigTest < Minitest::Test
       err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
       assert_includes err.message, "refactor_patrol.enabled"
       assert_includes err.message, "must be a boolean"
+    end
+
+    %w[auto_fix issue_filing].each do |gate|
+      with_tmp_dir do |dir|
+        FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+        File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+          refactor_patrol:
+            #{gate}: nope
+        YAML
+
+        err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+        assert_includes err.message, "refactor_patrol.#{gate}"
+        assert_includes err.message, "must be a Hash"
+      end
+
+      with_tmp_dir do |dir|
+        FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+        File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+          refactor_patrol:
+            #{gate}:
+              enabled: maybe
+        YAML
+
+        err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+        assert_includes err.message, "refactor_patrol.#{gate}.enabled"
+        assert_includes err.message, "must be a boolean"
+      end
     end
   end
 

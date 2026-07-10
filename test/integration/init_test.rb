@@ -369,7 +369,7 @@ class InitTest < Minitest::Test
           workflow_input = StringIO.new("#{author_index}\nwriting\n")
           workflow_input.define_singleton_method(:tty?) { true }
           workflow_output = StringIO.new
-          setup_inputs = ([ "codex", "", "", "", "", "", "", "", "", "", "" ] +
+          setup_inputs = ([ "codex", "", "", "", "", "", "", "", "", "", "", "" ] +
                           ([ "" ] * Hive::Commands::Init::Prompts::LIMIT_KEYS.size) +
                           [ "", "", "", "" ]).join("\n") + "\n"
           prompts = make_tty_prompts(setup_inputs)
@@ -1350,7 +1350,7 @@ class InitTest < Minitest::Test
         refute_includes out, "hive: using defaults"
         refute_includes out, "hive: initialized"
         assert_equal "hive-init", payload.fetch("schema")
-        assert_equal 1, payload.fetch("schema_version")
+        assert_equal 2, payload.fetch("schema_version")
         assert_equal true, payload.fetch("ok")
         assert_equal File.basename(dir), payload.fetch("project")
         assert_equal File.expand_path(dir), payload.fetch("path")
@@ -1366,6 +1366,8 @@ class InitTest < Minitest::Test
         assert_equal "claude", payload.fetch("answers").fetch("planning_agent")
         assert_equal "medium", payload.fetch("answers").fetch("patrol_mode")
         assert_equal "medium", payload.fetch("patrol_mode")
+        assert_equal true, payload.fetch("answers").fetch("refactor_patrol_enabled")
+        assert_equal true, payload.fetch("refactor_patrol_enabled")
         assert_equal payload.fetch("answers").fetch("budgets"), payload.fetch("budgets")
         assert_equal false, payload.fetch("daemon_autostart_requested")
 
@@ -1423,6 +1425,14 @@ class InitTest < Minitest::Test
 
     assert_equal false, answers.fetch("adhoc_auto_fix")
     assert_includes summary.string, "adhoc_auto_fix=disabled"
+  end
+
+  def test_non_tty_default_prompt_summary_recommends_refactor_patrol
+    summary = StringIO.new
+    answers = Hive::Commands::Init::Prompts.new(input: StringIO.new, summary_io: summary).collect
+
+    assert_equal true, answers.fetch("refactor_patrol_enabled")
+    assert_includes summary.string, "refactor_patrol=enabled"
   end
 
   def test_non_tty_default_prompt_summary_mentions_enabled_adhoc_auto_fix
@@ -1559,11 +1569,12 @@ class InitTest < Minitest::Test
   def test_init_json_mirrors_non_default_prompt_answers
     # Order: planning, claude_mode, claude_permission_mode, development,
     # reviewers, patrol_reviewers, patrol_mode, triage, ad-hoc auto-fix,
+    # architecture patrol discovery,
     # then limits, daemon-enable, babysitter-enable, daemon-autostart, confirm.
     # Two blank slots after claude_permission_mode accept the model/effort
     # defaults. patrol_reviewers index 3 = claude-ce-code-review
     # (1=codex-native-review, 2=codex-ce-code-review, 3=claude-ce-code-review).
-    inputs = ([ "codex", "2", "", "", "", "pi", "2", "3", "high", "safetyist", "y", "60,120" ] +
+    inputs = ([ "codex", "2", "", "", "", "pi", "2", "3", "high", "safetyist", "y", "", "60,120" ] +
               ([ "" ] * (Hive::Commands::Init::Prompts::LIMIT_KEYS.size - 1)) +
               [ "n", "", "", "" ]).join("\n") + "\n"
 
@@ -1582,6 +1593,7 @@ class InitTest < Minitest::Test
         assert_equal "high", answers.fetch("patrol_mode")
         assert_equal "safetyist", answers.fetch("triage_bias")
         assert_equal true, answers.fetch("adhoc_auto_fix")
+        assert_equal true, answers.fetch("refactor_patrol_enabled")
         assert_equal 60, answers.fetch("budgets").fetch("brainstorm")
         assert_equal 120, answers.fetch("timeouts").fetch("brainstorm")
         assert_equal false, answers.fetch("daemon_enabled")
@@ -1590,7 +1602,7 @@ class InitTest < Minitest::Test
 
         %w[
           planning_agent claude_mode development_agent enabled_reviewers patrol_reviewers
-          patrol_mode triage_bias adhoc_auto_fix budgets timeouts daemon_enabled babysitter_enabled
+          patrol_mode triage_bias adhoc_auto_fix refactor_patrol_enabled budgets timeouts daemon_enabled babysitter_enabled
         ].each do |key|
           assert_equal answers.fetch(key), payload.fetch(key), "top-level #{key} must mirror answers"
         end
@@ -1905,6 +1917,23 @@ class InitTest < Minitest::Test
     end
   end
 
+  def test_init_renders_recommended_refactor_patrol_discovery_with_side_effects_disabled
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        out, _err = capture_io { Hive::Commands::Init.new(dir).call }
+        raw = YAML.safe_load(File.read(File.join(dir, ".hive-state", "config.yml")))
+        resolved = Hive::Config.load(dir)
+
+        assert_equal true, raw.dig("refactor_patrol", "enabled")
+        assert_equal false, raw.dig("refactor_patrol", "auto_fix", "enabled")
+        assert_equal false, raw.dig("refactor_patrol", "issue_filing", "enabled")
+        assert_equal true, resolved.dig("refactor_patrol", "enabled")
+        assert_includes out, "architecture patrol"
+        assert_includes out, "enabled"
+      end
+    end
+  end
+
   def test_rejects_non_git_repo
     with_tmp_global_config do
       with_tmp_dir do |dir|
@@ -2087,7 +2116,7 @@ class InitTest < Minitest::Test
   end
 
   def default_setup_prompt_input
-    (([ "" ] * 11) + ([ "" ] * Hive::Commands::Init::Prompts::LIMIT_KEYS.size) +
+    (([ "" ] * 12) + ([ "" ] * Hive::Commands::Init::Prompts::LIMIT_KEYS.size) +
       [ "", "", "", "" ]).join("\n") + "\n"
   end
 
@@ -2121,7 +2150,7 @@ class InitTest < Minitest::Test
     # budget/timeout, keep ad-hoc PR auto-fix disabled, accept the rest.
     inputs = [
       "codex", "", "", "", "", "2", "1,3", "", "high", "safetyist",
-      "", "", "30,900", "", "", "", "", "", "", "", "",
+      "", "", "", "30,900", "", "", "", "", "", "", "", "",
       "", "", "", ""
     ].join("\n") + "\n"
     with_tmp_global_config do
@@ -2165,9 +2194,10 @@ class InitTest < Minitest::Test
   def test_init_with_headless_claude_mode_writes_matching_config
     # planning=blank(claude), claude_mode="2"(headless), claude_permission_mode=blank,
     # dev=blank, reviewers=blank, patrol_reviewers=blank, patrol_mode=blank,
-    # triage=blank, ad-hoc auto-fix=blank, limit blanks, daemon-enable=blank,
+    # triage=blank, ad-hoc auto-fix=blank, architecture patrol=blank,
+    # limit blanks, daemon-enable=blank,
     # babysitter-enable=blank, daemon-autostart=blank, confirm=blank.
-    inputs = ([ "", "2", "", "", "", "", "", "", "", "", "" ] +
+    inputs = ([ "", "2", "", "", "", "", "", "", "", "", "", "" ] +
               ([ "" ] * Hive::Commands::Init::Prompts::LIMIT_KEYS.size) +
               [ "", "", "", "" ]).join("\n") + "\n"
     with_tmp_global_config do
@@ -2189,9 +2219,10 @@ class InitTest < Minitest::Test
 
   def test_init_with_claude_permission_mode_auto_writes_matching_config
     # planning=blank, claude_mode=blank, claude_permission_mode="2"(auto),
-    # dev/reviewers/patrol_reviewers/patrol_mode/triage/ad-hoc auto-fix=blank, limits blank,
+    # dev/reviewers/patrol_reviewers/patrol_mode/triage/ad-hoc auto-fix/
+    # architecture patrol=blank, limits blank,
     # daemon/babysitter/autostart/confirm blank.
-    inputs = ([ "", "", "2", "", "", "", "", "", "", "", "" ] +
+    inputs = ([ "", "", "2", "", "", "", "", "", "", "", "", "" ] +
               ([ "" ] * Hive::Commands::Init::Prompts::LIMIT_KEYS.size) +
               [ "", "", "", "" ]).join("\n") + "\n"
     with_tmp_global_config do
@@ -2209,9 +2240,10 @@ class InitTest < Minitest::Test
   def test_init_with_daemon_disabled_writes_disabled_config
     # Same shape as above but explicitly answer `n` to the daemon prompt.
     # Blanks: planning (claude), claude mode, Claude permission mode, dev,
-    # reviewers, patrol reviewers, patrol mode, triage bias, ad-hoc auto-fix, limits. Then "n" for daemon-enable and blanks for
+    # reviewers, patrol reviewers, patrol mode, triage bias, ad-hoc auto-fix,
+    # architecture patrol, limits. Then "n" for daemon-enable and blanks for
     # babysitter-enable, daemon-autostart, and confirm.
-    inputs = (([ "" ] * (11 + Hive::Commands::Init::Prompts::LIMIT_KEYS.size)) +
+    inputs = (([ "" ] * (12 + Hive::Commands::Init::Prompts::LIMIT_KEYS.size)) +
               [ "n", "", "", "" ]).join("\n") + "\n"
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -2228,9 +2260,10 @@ class InitTest < Minitest::Test
   def test_init_aborts_with_zero_disk_state_when_user_says_n
     # Blank for everything until confirmation; answer `n` at the end.
     # Blanks: planning (claude), claude mode, Claude permission mode, dev,
-    # reviewers, patrol reviewers, patrol mode, triage bias, ad-hoc auto-fix, limits, daemon-enable, babysitter-enable,
+    # reviewers, patrol reviewers, patrol mode, triage bias, ad-hoc auto-fix,
+    # architecture patrol, limits, daemon-enable, babysitter-enable,
     # daemon-autostart.
-    inputs = (([ "" ] * (14 + Hive::Commands::Init::Prompts::LIMIT_KEYS.size)) +
+    inputs = (([ "" ] * (15 + Hive::Commands::Init::Prompts::LIMIT_KEYS.size)) +
               [ "n" ]).join("\n") + "\n"
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

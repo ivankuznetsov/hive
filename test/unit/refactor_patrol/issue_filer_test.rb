@@ -33,7 +33,7 @@ class RefactorPatrolIssueFilerTest < Minitest::Test
 
     result = filer(gh).publish(
       thesis: thesis(flags: [ "exceeds_max_files" ]), family_id: family_id,
-      job_id: "job-7", source: source,
+      canonical_action_id: action_id, job_id: "job-7", source: source,
       record_intent: -> { intents += 1; true }
     )
 
@@ -60,7 +60,8 @@ class RefactorPatrolIssueFilerTest < Minitest::Test
 
       result = filer(gh).publish(
         thesis: thesis(flags: [ "cross_feature_impact" ]), family_id: family_id,
-        job_id: "job-7", source: source, record_intent: successful_intent
+        canonical_action_id: action_id, job_id: "job-7", source: source,
+        record_intent: successful_intent
       )
 
       assert_equal expected, result.outcome
@@ -74,7 +75,8 @@ class RefactorPatrolIssueFilerTest < Minitest::Test
 
     result = filer(gh).publish(
       thesis: thesis(flags: [ "dependency_bump" ]), family_id: family_id,
-      job_id: "job-7", source: source, creation_attempted: true,
+      canonical_action_id: action_id, job_id: "job-7", source: source,
+      creation_attempted: true,
       record_intent: successful_intent
     )
 
@@ -91,7 +93,8 @@ class RefactorPatrolIssueFilerTest < Minitest::Test
 
     result = filer(gh).publish(
       thesis: thesis(flags: [ "cross_feature_impact" ]), family_id: family_id,
-      job_id: "job-7", source: source, record_intent: successful_intent
+      canonical_action_id: action_id, job_id: "job-7", source: source,
+      record_intent: successful_intent
     )
 
     assert_equal "issue_reconcile_failed", result.outcome
@@ -106,7 +109,7 @@ class RefactorPatrolIssueFilerTest < Minitest::Test
 
     result = filer(gh).publish(
       thesis: thesis(flags: [ "not_single_feature" ]), family_id: family_id,
-      job_id: "job-7", source: source,
+      canonical_action_id: action_id, job_id: "job-7", source: source,
       record_intent: -> { intents += 1; true }
     )
 
@@ -127,7 +130,8 @@ class RefactorPatrolIssueFilerTest < Minitest::Test
     cases.each do |item|
       gh = FakeGh.new
       result = filer(gh).publish(
-        thesis: item, family_id: family_id, job_id: "job-7", source: source,
+        thesis: item, family_id: family_id, canonical_action_id: action_id,
+        job_id: "job-7", source: source,
         record_intent: successful_intent
       )
 
@@ -142,7 +146,8 @@ class RefactorPatrolIssueFilerTest < Minitest::Test
     disabled_gh = FakeGh.new
     disabled = filer(disabled_gh, enabled: false).publish(
       thesis: thesis(flags: [ "exceeds_max_files" ]), family_id: family_id,
-      job_id: "job-7", source: source, record_intent: successful_intent
+      canonical_action_id: action_id, job_id: "job-7", source: source,
+      record_intent: successful_intent
     )
     assert_equal "issue_disabled", disabled.outcome
     assert_empty disabled_gh.lookups
@@ -151,7 +156,8 @@ class RefactorPatrolIssueFilerTest < Minitest::Test
     item = thesis(flags: [ "exceeds_max_files" ])
     item.problem = "credential sk-#{'a' * 48}"
     secret = filer(secret_gh).publish(
-      thesis: item, family_id: family_id, job_id: "job-7", source: source,
+      thesis: item, family_id: family_id, canonical_action_id: action_id,
+      job_id: "job-7", source: source,
       record_intent: successful_intent
     )
     assert_equal "secret_detected", secret.outcome
@@ -163,11 +169,31 @@ class RefactorPatrolIssueFilerTest < Minitest::Test
 
     result = filer(gh).publish(
       thesis: thesis(flags: [ "exceeds_max_files" ]), family_id: family_id,
-      job_id: "job-7", source: source, record_intent: -> { nil }
+      canonical_action_id: action_id, job_id: "job-7", source: source,
+      record_intent: -> { nil }
     )
 
     assert_equal "intent_persist_failed", result.outcome
     refute result.terminal
+    assert_empty gh.creates
+  end
+
+  def test_family_and_canonical_action_identity_must_be_durable_ids
+    gh = FakeGh.new
+    item = thesis(flags: [ "exceeds_max_files" ])
+
+    invalid_family = filer(gh).publish(
+      thesis: item, family_id: "family", canonical_action_id: action_id,
+      job_id: "job-7", source: source, record_intent: successful_intent
+    )
+    invalid_action = filer(gh).publish(
+      thesis: item, family_id: family_id, canonical_action_id: "issue:#{family_id}",
+      job_id: "job-7", source: source, record_intent: successful_intent
+    )
+
+    assert_equal "invalid_family", invalid_family.outcome
+    assert_equal "invalid_action", invalid_action.outcome
+    assert_empty gh.lookups
     assert_empty gh.creates
   end
 
@@ -221,6 +247,7 @@ class RefactorPatrolIssueFilerTest < Minitest::Test
   end
 
   def family_id = "af1-#{'a' * 64}"
-  def marker = "<!-- hive-refactor-patrol family=#{family_id} action=issue:#{family_id} -->"
+  def action_id = "issue-#{'b' * 64}"
+  def marker = "<!-- hive-refactor-patrol family=#{family_id} action=#{action_id} -->"
   def successful_intent = -> { true }
 end

@@ -60,6 +60,21 @@ class HiveSkillCheckClaudeTest < Minitest::Test
     end
   end
 
+  def test_resolve_honors_claude_config_dir_and_exposes_candidates
+    with_fake_home do |home|
+      config_dir = File.join(home, "elsewhere", "claude")
+      write_file("#{config_dir}/commands/plan.md")
+
+      resolution = Hive::SkillCheck::Claude.resolve(
+        "/plan", environment: { "HOME" => home, "CLAUDE_CONFIG_DIR" => config_dir }
+      )
+
+      assert_equal :present, resolution.status
+      assert_equal "#{config_dir}/commands/plan.md", resolution.path
+      assert_includes resolution.candidates, resolution.path
+    end
+  end
+
   def test_present_via_user_skill_directory
     with_fake_home do |home|
       write_file("#{home}/.claude/skills/wiki-researcher/SKILL.md")
@@ -197,6 +212,20 @@ class HiveSkillCheckCodexTest < Minitest::Test
     end
   end
 
+  def test_resolve_honors_codex_home
+    with_fake_home do |home|
+      codex_home = File.join(home, "custom-codex")
+      write_file("#{codex_home}/skills/plan/SKILL.md")
+
+      resolution = Hive::SkillCheck::Codex.resolve(
+        "/plan", environment: { "HOME" => home, "CODEX_HOME" => codex_home }
+      )
+
+      assert_equal :present, resolution.status
+      assert_equal "#{codex_home}/skills/plan/SKILL.md", resolution.path
+    end
+  end
+
   def test_present_via_system_skill
     with_fake_home do |home|
       write_file("#{home}/.codex/skills/.system/imagegen/SKILL.md")
@@ -297,6 +326,20 @@ class HiveSkillCheckPiTest < Minitest::Test
       status, msg = Hive::SkillCheck::Pi.verify("/skill:foo")
       assert_equal :present, status
       assert_equal "#{home}/.pi/agent/skills/foo/SKILL.md", msg
+    end
+  end
+
+  def test_resolve_honors_pi_coding_agent_dir
+    with_fake_home do |home|
+      agent_dir = File.join(home, "custom-pi")
+      write_file("#{agent_dir}/skills/foo/SKILL.md")
+
+      resolution = Hive::SkillCheck::Pi.resolve(
+        "/skill:foo", environment: { "HOME" => home, "PI_CODING_AGENT_DIR" => agent_dir }
+      )
+
+      assert_equal :present, resolution.status
+      assert_equal "#{agent_dir}/skills/foo/SKILL.md", resolution.path
     end
   end
 

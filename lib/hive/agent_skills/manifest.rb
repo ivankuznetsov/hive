@@ -57,6 +57,11 @@ module Hive
         new(document, source: source)
       end
 
+      def self.alias_content(alias_spec)
+        "<!-- hive-managed: agent-skill-alias/v1 -->\n" \
+          "Invoke `#{alias_spec.target}` with all arguments supplied to this command.\n"
+      end
+
       # Declarations come from the runtime defaults themselves. Reviewer
       # names are derived from Init::Prompts::REVIEWER_CAPABILITIES and the
       # browser skill is supplied by BrowserTest::SKILL, avoiding a second

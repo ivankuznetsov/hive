@@ -38,7 +38,7 @@ module Hive
             cfg: mapper_cfg(cfg),
             state: state,
             dry_run: ephemeral_discovery?,
-            capabilities: [ :documentation ],
+            capabilities: %i[architecture documentation],
             documentation_changes: pr_mode? ? @manifest.fetch("files") : []
           )
         end
@@ -286,7 +286,7 @@ module Hive
 
       def scope_to_manifest(features)
         features.select do |feature|
-          boundary = Array(feature.owned_files) + Array(feature.entrypoints)
+          boundary = Array(feature.owned_files) + Array(feature.entrypoints) + Array(feature.tests)
           boundary.any? { |path| manifest_changed_paths.include?(path) }
         end
       end

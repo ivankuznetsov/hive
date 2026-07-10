@@ -457,6 +457,38 @@ class RefactorPatrolCommandTest < Minitest::Test
     end
   end
 
+  def test_pr_mode_maps_architecture_component_for_manifest_only_and_test_only_changes
+    with_refactor_patrol_project do |repo|
+      FileUtils.mkdir_p(File.join(repo, "packages", "web", "src"))
+      FileUtils.mkdir_p(File.join(repo, "packages", "web", "test"))
+      File.write(File.join(repo, "packages", "web", "package.json"), JSON.generate("name" => "@acme/web"))
+      File.write(File.join(repo, "packages", "web", "src", "index.ts"), "export const web = true\n")
+      File.write(File.join(repo, "packages", "web", "test", "index.test.ts"), "import '../src/index'\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "web package", "--quiet")
+      head = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+
+      [ "packages/web/package.json", "packages/web/test/index.test.ts" ].each do |changed_path|
+        reviewer = FakeReviewer.new({})
+        out, err, status = with_captured_exit do
+          command_for(
+            pr: "7",
+            manifest_resolver: FakeManifestResolver.new(
+              pr_manifest(merge_sha: head, changed_paths: [ changed_path ])
+            ),
+            use_default_mapper: true,
+            reviewer: reviewer,
+            leverage_scores: leverage_scores("architecture-packages-web" => 0.5)
+          ).call
+        end
+
+        assert_equal Hive::ExitCodes::SUCCESS, status, "#{changed_path}: #{out}\n#{err}"
+        assert_equal [ "architecture-packages-web" ], reviewer.seen_feature_ids, changed_path
+        assert_equal 1, JSON.parse(out).fetch("features_mapped"), changed_path
+      end
+    end
+  end
+
   def test_project_without_refactor_patrol_block_errors_clearly
     with_tmp_global_config do
       with_tmp_git_repo do |repo|
@@ -603,7 +635,16 @@ class RefactorPatrolCommandTest < Minitest::Test
 
   def leverage_scores(scores)
     scores.to_h do |feature_id, score|
-      [ feature_id, { "score" => score, "breakdown" => { "churn" => score }, "signals" => { "churn" => 10 } } ]
+      [
+        feature_id,
+        {
+          "scope" => "feature",
+          "score" => score,
+          "breakdown" => { "churn" => score },
+          "signals" => { "churn" => 10 },
+          "normalized" => { "churn" => 1.0 }
+        }
+      ]
     end
   end
 
@@ -617,10 +658,28 @@ class RefactorPatrolCommandTest < Minitest::Test
       feature: feature_id.capitalize,
       problem: "#{feature_id} mixes validation and orchestration",
       cost: "Frequent changes fan out across callers",
-      evidence: [ { "file" => boundary_files.first, "signal" => "churn", "value" => 10 } ],
+      evidence: [
+        {
+          "file" => boundary_files.first,
+          "line" => 1,
+          "snippet" => "entrypoint",
+          "claim" => "validation and orchestration share one boundary"
+        }
+      ],
       proposed_refactor: "Extract a #{feature_id} boundary service",
       feature_boundary: { "owned_files" => boundary_files, "entrypoints" => boundary_files },
-      expected_leverage: { "score" => score, "breakdown" => { "churn" => score } },
+      feature_hotspot: {
+        "scope" => "feature",
+        "score" => 1.0,
+        "breakdown" => { "churn" => 1.0 },
+        "signals" => { "churn" => 10 },
+        "normalized" => { "churn" => 1.0 }
+      },
+      expected_leverage: {
+        "score" => score,
+        "breakdown" => { "churn" => score },
+        "drivers" => [ { "signal" => "churn", "relief" => score, "mechanism" => "isolate recurring edits" } ]
+      },
       confidence: "medium",
       risk: {
         "caps" => { "est_files" => est_files, "est_diff_lines" => 120, "single_feature" => true },

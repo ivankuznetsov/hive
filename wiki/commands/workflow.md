@@ -4,10 +4,10 @@ type: command
 source: lib/hive/cli.rb, lib/hive/commands/workflow.rb, templates/workflows/
 created: 2026-06-21
 updated: 2026-07-13
-tags: [command, workflow, authoring]
+tags: [command, workflow, authoring, honeycomb, publishing]
 ---
 
-**TLDR**: `hive workflow new ID` scaffolds a minimal project-authored workflow descriptor at `<hive_state_path>/workflows/ID.yml` plus a placeholder instruction at `<hive_state_path>/workflows/ID/work.md`. The generated `inbox -> work -> done` descriptor validates immediately and is discoverable by `hive new PROJECT --workflow ID`, status, run, approve, and daemon-driven dispatch.
+**TLDR**: `hive workflow new ID` scaffolds a project-authored descriptor. `hive workflow publish ID` validates one explicit descriptor, builds and locally preflights a deterministic `workflows/ID/` honeycomb, then opens a PR against the configured registry; `--dry-run` performs the same local work with no remote side effects.
 
 ## Usage
 
@@ -15,6 +15,8 @@ tags: [command, workflow, authoring]
 hive workflow new my-flow
 hive workflow new my-flow --template writing
 hive workflow new my-flow --json
+hive workflow publish my-flow --dry-run
+hive workflow publish my-flow --version 1.1.0 --json
 ```
 
 For a fresh project that should default to the custom workflow immediately,
@@ -47,17 +49,41 @@ the workflow files on `hive/state`, and prints the next command:
 hive new <project> --workflow my-flow "<your idea>"
 ```
 
-With `--json`, success is a `hive-workflow-new` (schema_version 1) document
+With `--json`, new-workflow success is a `hive-workflow-new` (schema_version 1) document
 containing `ok`, `id`, `descriptor_path`, `instruction_path`, and `next`. Typed
 usage/config/git errors emit a `hive-workflow-new` (schema_version 1) JSON error
 document with `ok: false`, `error_class`, `exit_code`, and `message`.
 
 A bare or unknown workflow subcommand is a USAGE error (exit 64). Human output
-uses the command prefix: `hive workflow: missing SUBCOMMAND (expected: new)` or
-`hive workflow: unknown workflow subcommand "X" (expected: new)`. With
+lists both valid router verbs (`new, publish`). With
 `--json`, those subcommand-shape errors carry a structured `expected` array
-such as `["new"]`; unknown subcommands also carry `value` with the rejected
+such as `["new", "publish"]`; unknown subcommands also carry `value` with the rejected
 token.
+
+## Publishing
+
+Publication requires descriptor metadata `version`, `author`, `description`,
+and `minimum_hive_version`; `readme` and `assets` are optional explicit files.
+All local files must resolve as regular files beneath
+`<hive_state_path>/workflows/<id>/`. The package contains rewritten
+`workflow.yml`, copied/generated `README.md`, rebased instructions/assets, and a
+deterministic `manifest.yml` with SHA-256 file rows and aggregate digest.
+
+Local preflight checks Hive compatibility, every named skill through its
+effective agent profile, versioned secret rules, and versioned high-risk deny
+rules. Secret findings always block without match text. Deny findings block
+unless every owning context declares scoped Bash plus `shell_justification`;
+accepted cases appear as `review_required`.
+
+The target defaults to `ivankuznetsov/honeycomb` and is overridden with
+`honeycomb.repository`. Hive caches a verified upstream checkout under
+`Hive::Paths.cache_home`, pushes directly for `WRITE`/`MAINTAIN`/`ADMIN`, and
+otherwise creates or reuses the authenticated user's fork. Submit branch
+collisions fail closed; no force push exists. Success stops after PR creation.
+
+`--dry-run` returns before authentication/cache/git/fork/push/PR work. JSON is
+the registered `hive-workflow-publish.v1` contract; dry-run leaves submission
+mode, branch, and PR URL null.
 
 ## Generated Descriptor
 

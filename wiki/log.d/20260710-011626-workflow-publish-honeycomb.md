@@ -1,0 +1,5 @@
+## [2026-07-10T01:16:26Z] workflow - publish deterministic honeycombs
+
+**Action:** Added `hive workflow publish ID` as the explicit author-submission path for one project workflow. Publication validates optional descriptor metadata at publish time, collects only workflow-owned files, rebases descriptor references, generates a deterministic README/manifest with content digests and permission/dependency disclosures, runs versioned secret/deny/skill/compatibility preflight, and opens a direct-or-fork PR against the configured honeycomb repository. `--dry-run` performs all local gates without authentication, cache, git, fork, push, or PR side effects.
+
+**Coverage:** Added unit coverage for rule contracts, metadata and shell justification, package construction, manifests, permission summaries, preflight, cached submission, CLI/schema rendering, and a real `bin/hive` dry-run integration. Updated public authoring/CLI/permission docs plus [[commands/workflow]], [[modules/workflows]], [[modules/secret_patterns]], new [[modules/deny_patterns]], [[modules/config]], [[testing]], and [[gaps]]. Did not edit compiled [[log]].

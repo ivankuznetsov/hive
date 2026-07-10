@@ -259,6 +259,11 @@ A descriptor is short enough to read top to bottom — an entry gate, agent stag
 
 ```yaml
 id: "writing"
+metadata:
+  version: 1.0.0
+  author: Your Name
+  description: Research, draft, and edit an essay
+  minimum_hive_version: 0.3.7
 stages:
   - { name: inbox,    kind: terminal, state_file: idea.md }
   - { name: research, kind: agent,    state_file: research.md, instruction: ./writing/research.md }
@@ -267,7 +272,7 @@ stages:
   - { name: done,     kind: terminal, state_file: done.md }
 ```
 
-Three commands cover authoring: `hive workflow new ID` (scaffold a blank starter in an existing project), `hive workflow new ID --template writing|research` (seed from a real multi-stage sample), and `hive init --new-workflow ID` (bootstrap a project and bind the workflow as its default in one go). Custom workflows are discovered from `.hive-state/workflows/*.yml` and run through the same surfaces as the built-ins — `hive new --workflow`, `status`, `run`, `approve`, and the daemon.
+Four commands cover authoring and sharing: `hive workflow new ID` (scaffold a blank starter), `hive workflow new ID --template writing|research` (seed from a sample), `hive init --new-workflow ID` (bootstrap and bind it as the default), and `hive workflow publish ID --dry-run` (build and security-check a deterministic honeycomb without remote changes). Remove `--dry-run` to submit the honeycomb by pull request to the configured registry. Custom workflows are discovered from `.hive-state/workflows/*.yml` and run through the same surfaces as the built-ins — `hive new --workflow`, `status`, `run`, `approve`, and the daemon.
 
 **Full walkthrough** — mental model, descriptor anatomy, writing stage instructions, advanced options (terminal approval gates, `skill:` stages, per-stage permissions), and gotchas: **[hivecli.sh/docs/custom-workflows](https://hivecli.sh/docs/custom-workflows/)** (also in-repo at [docs/workflows.md](docs/workflows.md)).
 
@@ -278,7 +283,7 @@ The TUI is the recommended human interface and an agent-driven CLI is the recomm
 | Group | Verbs | What it's for |
 |---|---|---|
 | Workflow | `hive new`, `hive brainstorm`, `hive plan`, `hive develop`, `hive open-pr`, `hive review`, `hive artifacts`, `hive finalize`, `hive archive`, `hive run`, `hive approve` | Drive a single stage of a single task by hand. `--from <stage>` lets you re-run a stage in place. See [docs/cli.md#day-to-day-workflow](docs/cli.md#day-to-day-workflow). |
-| Workflow authoring | `hive workflow new` | Scaffold a project-local workflow descriptor under `.hive-state/workflows/` (`--template writing\|research` seeds from a sample). See [Custom Workflows](#custom-workflows) and [docs/workflows.md](docs/workflows.md). |
+| Workflow authoring | `hive workflow new`, `hive workflow publish` | Scaffold a project-local descriptor, or package one publishable workflow as a deterministic honeycomb and open a registry PR. `publish --dry-run` performs every local gate with no GitHub side effects. See [Custom Workflows](#custom-workflows) and [docs/workflows.md](docs/workflows.md). |
 | Review findings | `hive findings`, `hive accept-finding`, `hive reject-finding` | Inspect GFM-checkbox findings from the latest review pass and tick which ones should feed the next fix pass. See [docs/cli.md#findings-triage](docs/cli.md#findings-triage). |
 | Patrol | `hive patrol` | Run one opt-in repository patrol cycle: map feature slices, review them, validate fixes, and open PRs for passed fixes only. See [docs/cli.md#patrol](docs/cli.md#patrol). |
 | Daemon | `hive daemon install/enable/start/status/tail/stop/disable` | Manage the global daemon service plus per-project enrollment. The service polls `hive status --json` and dispatches workflow verbs for enrolled projects. Read [wiki/operating.md](wiki/operating.md) before going live. See [docs/cli.md#daemon](docs/cli.md#daemon). |
@@ -296,7 +301,7 @@ Full per-command reference, every flag, every envelope field, and every exit cod
 - **[wiki/commands/tui.md](wiki/commands/tui.md)** — The TUI deep reference: the two-pane layout, red-status detail, log tail, new-idea composer with image paste, the per-mode keybinding map, the terminal-hostility contract (resize, SIGTSTP, SIGHUP, non-tty rejection), and the subprocess-dispatch model. Read this when the TUI does something surprising or you want the full keystroke surface.
 - **[docs/architecture.md](docs/architecture.md)** — The user-facing architecture: the three trees (project checkout, `.hive-state/` orphan branch, feature worktree), the storage layout `hive init` creates, and how stages, agents, configs, and worktrees compose. Read this when you want to know where files live and which process owns what.
 - **[docs/cli.md](docs/cli.md)** — The full command surface exposed by `bin/hive`: every verb, every flag, every `--json` envelope contract, and every exit code. Read this when you're scripting Hive or wiring it into an agent that needs the full CLI map.
-- **[docs/workflows.md](docs/workflows.md)** — How to author a project-local workflow descriptor: `hive workflow new` (with `--template`), `hive init --new-workflow`, `skill:` versus `instruction:`, and per-stage permissions. The full public walkthrough lives at **[hivecli.sh/docs/custom-workflows](https://hivecli.sh/docs/custom-workflows/)**.
+- **[docs/workflows.md](docs/workflows.md)** — How to author and publish a project-local workflow descriptor: metadata, `hive workflow new`, `hive init --new-workflow`, `skill:` versus `instruction:`, per-stage permissions, deterministic honeycombs, local security gates, and direct/fork PR submission.
 - **[wiki/operating.md](wiki/operating.md)** — Day-2 operations: install matrix, XDG paths, autostart (systemd-user on Linux, launchd on macOS), enrolling existing projects, the mandatory `--dry-run` shakedown, bot setup, tuning concurrency, cost-runaway response, troubleshooting. Read this before running the daemon live and any time you operate Hive across more than one project.
 - **[docs/recipes.md](docs/recipes.md)** — Concrete end-to-end workflows, including the xbookmark dogfood replay (linked to the real PR and a committed transcript of the run). Read this when you want to see what a complete idea-to-PR run looks like before trying it yourself.
 - **[docs/faq.md](docs/faq.md)** — Troubleshooting and design-rationale answers: why folders instead of a database, why per-stage subprocesses instead of a long-running orchestrator, why commit `.hive-state/` to an orphan branch, why project-level daemon enrollment, why no built-in web UI. Read this when you hit a surprise or want to know "why is it like this?".

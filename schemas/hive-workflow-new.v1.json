@@ -112,7 +112,7 @@
           "items": {
             "type": "string"
           },
-          "description": "Present only for missing/unknown subcommand usage errors: the valid subcommand verbs (e.g. [\"new\"]), so an agent discovers them without regexing `message`."
+          "description": "Present only for missing/unknown subcommand usage errors: the valid router verbs ([\"new\", \"publish\"]), so an agent discovers them without regexing `message`."
         },
         "holder": {
           "type": "object",

@@ -20,6 +20,10 @@ tags: [gap, todo]
   Sol `ce-code-review` policy, and combined Sol-runner selection are locally
   test-pinned but still need their first paid end-to-end cell.
 
+## Honeycomb publication follow-up
+
+`hive workflow publish` is hermetically covered through deterministic package, preflight, direct-route, fork-route, and real CLI dry-run tests. A live submission against `ivankuznetsov/honeycomb` is not yet evidenced in-tree because the registry, its lint/import contract, and its version-history policy remain external follow-up work. Until that registry exists, Hive records stable secret/deny rule versions and content digests in each manifest, keeps all default-suite GitHub behavior fake-backed, and treats PR creation—not merge or catalog listing—as command success.
+
 ## Source-file coverage (representative map)
 
 | Area / file set | Page |

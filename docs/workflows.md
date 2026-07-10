@@ -64,6 +64,13 @@ hive new <project> --workflow my-flow "<your idea>"
 
 ```yaml
 id: my-flow
+metadata:
+  version: 1.0.0
+  author: Your Name
+  description: A concise description for registry reviewers
+  minimum_hive_version: 0.3.7
+# readme: ./my-flow/README.source.md
+# assets: [./my-flow/assets/diagram.png]
 stages:
   - name: inbox
     kind: terminal
@@ -110,6 +117,9 @@ Rules:
   `deliverable:` are rejected on `kind: terminal` stages.
 - `instruction:` is resolved relative to the descriptor file and must point to a readable file (any extension; `.md` is conventional but not required).
 - `permissions:` is optional and uses the same syntax as [permissions.md](permissions.md).
+- `metadata:` is optional for ordinary execution. Publishing requires `version`,
+  `author`, `description`, and `minimum_hive_version`; both version fields use
+  strict semantic versions. `readme` and `assets` are optional explicit files.
 - The last stage may be `kind: terminal`, `kind: agent`, or `kind: council`.
   A terminal agent/council stage is archived only when it has a terminal
   `COMPLETE` marker and a non-empty deliverable. `deliverable:` defaults to the
@@ -148,6 +158,74 @@ disagreements, and readiness. If quorum is not met, `exit_rule: human` pauses
 with `WAITING reason=needs_revision`; `exit_rule: consensus` runs the optional
 revise agent until quorum or `max_rounds`, then pauses with
 `WAITING reason=max_rounds`.
+
+## Publish A Honeycomb
+
+Publication selects exactly one project descriptor; built-in workflows and
+bulk publishing are intentionally unsupported.
+
+```bash
+# Full local package, dependency, compatibility, secret, and deny preflight.
+# Does not authenticate, clone, fork, branch, push, or create a PR.
+hive workflow publish my-flow --dry-run
+
+# Submit after the same local gates pass.
+hive workflow publish my-flow
+
+# Select a release version without editing the source descriptor.
+hive workflow publish my-flow --version 1.1.0 --dry-run --json
+```
+
+Every publishable instruction, optional README, and asset must be a readable
+regular file beneath `.hive-state/workflows/<id>/`. Escaping symlinks,
+directories/globs, traversal, duplicate normalized targets, and attempts to
+claim `workflow.yml`, `README.md`, or `manifest.yml` are rejected. Referenced
+files retain their relative subdirectories inside this package:
+
+```text
+workflows/<id>/
+  workflow.yml
+  README.md
+  manifest.yml
+  <rebased instructions and assets>
+```
+
+`workflow.yml` contains package-relative references. An author `readme:` is
+copied byte-for-byte; otherwise Hive generates a README with identity,
+compatibility, dependencies, permissions, and shell exposure. `manifest.yml`
+v1 contains metadata, versioned secret/deny rule sets, required skill contexts,
+per-context and aggregate permission summaries, per-file SHA-256 values, and an
+aggregate digest. The manifest excludes itself; recompute the aggregate by
+sorting file rows by path and hashing the concatenation of
+`path + NUL + sha256 + newline` for each row.
+
+All named `skill:` dependencies are required and verified through the effective
+agent profile. Secrets always block and diagnostics include only rule, file,
+line, and remediation—never the matched value. High-risk deny rules block
+unless every context owning that instruction declares scoped Bash and a
+non-empty `shell_justification`; accepted exceptions are marked
+`review_required`, not clean.
+
+The initial secret and deny rule-set versions are both `1`. Registry consumers
+should import Hive's stable rules rather than copy regexes; deny rule ids are
+`shell_download_to_interpreter`, `credential_path_access`, and
+`outbound_data_transfer`. Secret rule ids are the keys exported by
+`Hive::SecretPatterns.rules` and listed in the managed wiki catalogue.
+
+The registry defaults to `ivankuznetsov/honeycomb` and can be changed in
+project config:
+
+```yaml
+honeycomb:
+  repository: your-org/honeycomb
+```
+
+Hive caches the upstream under its XDG cache directory. `WRITE`, `MAINTAIN`, or
+`ADMIN` access pushes a new submit branch directly; otherwise Hive creates or
+reuses the authenticated user's fork and opens a cross-repository PR. Branch
+collisions fail rather than force-push. Success stops at PR creation—it does not
+merge or promise catalog listing. `--json` emits the registered
+`hive-workflow-publish.v1` contract.
 
 Stage indexes and stage directories are derived from array order. The example
 above produces `1-inbox`, `2-work`, and `3-done`. The first stage has no

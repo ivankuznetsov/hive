@@ -61,6 +61,7 @@ The JSON envelope is `hive-patrol.v1` and includes mapped-feature, finding, fix,
 | `hive rebase-status TARGET` | Inspect whether the next run would auto-rebase. |
 | `hive migrate [PROJECT_PATH]` | Rename in-flight task folders from older stage layouts and backfill legacy task metadata. |
 | `hive workflow new ID` | Scaffold a blank project workflow descriptor under `<hive_state_path>/workflows/`. |
+| `hive workflow publish ID [--version VERSION] [--dry-run] [--json]` | Package and lint one project workflow as a honeycomb; dry-run stops before every remote mutation, normal mode opens a registry PR. |
 | `hive tree` | Print the Thor command tree. |
 
 Use these when building scripts, recovering a task, or checking idempotency.
@@ -100,7 +101,7 @@ Read [wiki/operating.md](../wiki/operating.md) before running it live.
 
 ## JSON Output
 
-Workflow verbs (`brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, `archive`, `run`, `approve`), findings triage (`findings`, `accept-finding`, `reject-finding`), patrol (`patrol`), diagnostics (`status`, `doctor`, `rebase-status`, `markers clear`, `metrics rollback-rate`), registry cleanup (`forget`, `prune`), workflow authoring (`workflow new`), `init`, and daemon control support `--json` where documented and emit typed envelopes. `hive init --json` emits a single `hive-init.v1` success payload with resolved answers and project metadata; its precondition failures keep the legacy stderr + exit-code contract. Workflow verbs emit a `hive-stage-action` envelope; `hive workflow new --json` emits an unversioned success/error document. Schema files live under [schemas/](../schemas/), and [wiki/cli.md](../wiki/cli.md) lists the contract details. `hive tui` rejects `--json`; legacy or one-shot utilities (`version`, `tree`, `new`, `migrate`) are still text-only.
+Workflow verbs (`brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, `archive`, `run`, `approve`), findings triage, patrol, diagnostics, registry cleanup, workflow authoring/publication (`workflow new`, `workflow publish`), `init`, and daemon control support `--json` where documented. Workflow verbs emit `hive-stage-action`; honeycomb publication emits the registered `hive-workflow-publish.v1` success/error contract, including package digest, rule versions, portable dependencies, permission summary, lint status, review-required findings, and nullable submission fields for dry-run. Schema files live under [schemas/](../schemas/). `hive tui` rejects `--json`; legacy one-shot utilities remain text-only.
 
 ## Exit Codes
 

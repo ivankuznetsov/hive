@@ -132,6 +132,24 @@ permissions:
 keeps the read-only base set. Do not combine `bash:` with `tools:`; express Bash
 directly in `tools:` when you provide a custom list.
 
+For a workflow instruction that intentionally matches a high-risk honeycomb
+deny rule, add a non-empty justification to an explicitly Bash-capable scoped
+map:
+
+```yaml
+permissions:
+  preset: scoped
+  bash: true
+  shell_justification: Runs a digest-pinned internal installer
+```
+
+`shell_justification` is rejected on `yolo`, `read-only`, scoped permissions
+without Bash, or when blank. It does not weaken runtime permissions. During
+`hive workflow publish`, a deny finding is eligible for registry review only
+when every execution context sharing that instruction has explicit scoped Bash
+and its own justification; inherited and unrestricted `yolo` exposure never
+qualify.
+
 ## Validation
 
 Hive validates permission specs at config load and spawn time. Unknown presets,

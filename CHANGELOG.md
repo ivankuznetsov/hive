@@ -57,6 +57,9 @@ All notable changes are documented here, newest first. Hive ships frequent micro
 
 ## 0.3.7
 
+- Added `hive workflow publish ID`: authors can dry-run a deterministic,
+  digest-bearing honeycomb with local dependency/secret/deny checks, then
+  submit it to the configured registry through a direct or fork pull request.
 - Fixed hive failing to start on Arch Linux with `cannot load such file -- erb`:
   erb is now a declared runtime dependency. Distros ship erb as a separate
   package since ruby unbundled it, so every verb (`tui`, `plan`, the daemon)

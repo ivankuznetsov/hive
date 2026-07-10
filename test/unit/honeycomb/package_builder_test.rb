@@ -293,6 +293,60 @@ class HoneycombPackageBuilderTest < Minitest::Test
     end
   end
 
+  def test_rejects_every_reserved_output_name_for_assets
+    Hive::Honeycomb::RESERVED_PATHS.each do |reserved|
+      with_tmp_dir do |dir|
+        workflows = File.join(dir, "workflows")
+        owned = File.join(workflows, "reserved")
+        FileUtils.mkdir_p(owned)
+        File.write(File.join(owned, reserved), "asset\n")
+        descriptor_path = File.join(workflows, "reserved.yml")
+        File.write(descriptor_path, <<~YAML)
+          id: reserved
+          metadata:
+            version: 1.0.0
+            author: Author
+            description: Reserved target
+            minimum_hive_version: 0.3.7
+            assets: [./reserved/#{reserved}]
+          stages:
+            - name: done
+              kind: terminal
+              state_file: done.md
+        YAML
+        workflow = Hive::Workflows::DescriptorParser.parse_file(descriptor_path)
+
+        with_tmp_dir do |out|
+          error = assert_raises(Hive::ConfigError) do
+            Hive::Honeycomb::PackageBuilder.build(
+              workflow: workflow, descriptor_path: descriptor_path, output_dir: out
+            )
+          end
+          assert_match(/reserved output name #{Regexp.escape(reserved)}/, error.message)
+        end
+      end
+    end
+  end
+
+  def test_rejects_unreadable_owned_input
+    with_publishable_fixture do |_source, descriptor_path, workflow|
+      unreadable = File.join(File.dirname(descriptor_path), "sample", "shared.md")
+      File.chmod(0o000, unreadable)
+      begin
+        with_tmp_dir do |out|
+          error = assert_raises(Hive::ConfigError) do
+            Hive::Honeycomb::PackageBuilder.build(
+              workflow: workflow, descriptor_path: descriptor_path, output_dir: out
+            )
+          end
+          assert_match(/readable regular file|cannot be packaged/, error.message)
+        end
+      ensure
+        File.chmod(0o644, unreadable)
+      end
+    end
+  end
+
   private
 
     def with_publishable_fixture(readme: false)

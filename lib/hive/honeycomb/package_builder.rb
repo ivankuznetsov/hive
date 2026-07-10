@@ -48,7 +48,7 @@ module Hive
         File.binwrite(File.join(@package_root, "workflow.yml"), descriptor_bytes(metadata))
         File.binwrite(
           File.join(@package_root, "README.md"),
-          readme_source ? File.binread(readme_source) : generated_readme(metadata, dependencies, permissions)
+          readme_source ? read_verified_source(readme_source) : generated_readme(metadata, dependencies, permissions)
         )
         metadata_hash = portable_metadata(metadata)
         manifest = Manifest.write(
@@ -176,8 +176,31 @@ module Hive
         @entries.values.sort_by(&:target).each do |entry|
           destination = File.join(@package_root, entry.target)
           FileUtils.mkdir_p(File.dirname(destination))
-          File.binwrite(destination, File.binread(entry.real_source))
+          File.binwrite(destination, read_verified_source(entry.real_source))
         end
+      end
+
+      # Reads a source that was validated earlier, re-checking containment at
+      # read time. `real_source` was captured via realpath during validation,
+      # but the on-disk leaf could be swapped for an outside-pointing symlink
+      # between validation and this read (a local TOCTOU race). Re-resolving and
+      # opening with O_NOFOLLOW closes that window so package contents can only
+      # ever come from inside the owned workflow directory.
+      def read_verified_source(real_source)
+        real_root = File.realpath(File.expand_path(@owned_root))
+        resolved = File.realpath(real_source)
+        unless resolved == real_root || resolved.start_with?("#{real_root}#{File::SEPARATOR}")
+          raise Hive::ConfigError,
+                "packaged source #{real_source.inspect} resolves outside owned workflow directory at read time"
+        end
+        File.open(real_source, File::RDONLY | File::NOFOLLOW) do |io|
+          raise Hive::ConfigError, "packaged source #{real_source.inspect} is no longer a regular file" unless io.stat.file?
+
+          io.binmode
+          io.read
+        end
+      rescue Errno::ENOENT, Errno::EACCES, Errno::ELOOP => e
+        raise Hive::ConfigError, "packaged source #{real_source.inspect} cannot be read for packaging: #{e.message}"
       end
 
       def descriptor_bytes(metadata)
@@ -193,7 +216,7 @@ module Hive
           rewrite_instruction(stage.dig("council", "revise")) if stage.dig("council", "revise")
         end
         YAML.dump(raw)
-      rescue Psych::Exception, SystemCallError, IOError => e
+      rescue Psych::Exception, SystemCallError, IOError, KeyError => e
         raise Hive::ConfigError, "workflow descriptor #{@descriptor_path} could not be packaged: #{e.message}"
       end
 

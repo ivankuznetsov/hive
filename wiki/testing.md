@@ -271,6 +271,14 @@ bin/hive-eval --scenario s1_status --no-judge --report /tmp/hive-eval.json
 
 Successful eval runs write a `hive-eval-report` JSON document with per-scenario assertions/messages/log events, and scenario failures make the wrapper exit non-zero. `ReportStore.write!` neutralizes any symlink or hard link at the report path before writing (unlink, then open with `O_CREAT|O_EXCL|O_NOFOLLOW`) so the report always lands on a fresh regular file and a `--report` path pointing at a link never clobbers the link's target. `--no-judge` is the explicit structural-only mode; otherwise Codex judge/persona calls are real subprocess calls. Scenario `s3_noise` is now a passing daemon-enabled noise regression: ready-to-action rows should not become proactive Telegram alerts when the daemon owns dispatch, and the scenario still asserts no duplicate messages plus the proactive allowlist (`agent_blocked_question`, `fatal_error`). Reporter failure-path coverage no longer relies on a production scenario staying red; `test/eval/support/reporter_test.rb` creates a tmpdir-scoped intentional-failure scenario through `HIVE_EVAL_SCENARIO_ROOT`.
 
+Successful `bin/hive-eval` exits require a per-invocation private report whose
+scenario entries match the reporter contract and all report `status: pass`.
+Rake dry-run spellings in inherited `RAKEOPT` are rejected before execution,
+then `RAKEOPT` is cleared for the child. Only the validated private report is
+atomically published to the requested path, preventing concurrent runs from
+validating each other's output. Group/world-writable report parents require the
+sticky bit, and cleanup warnings cannot replace the intended result status.
+
 ## Lint
 
 `bundle exec rubocop` is the lint command. Config in `.rubocop.yml`:

@@ -13,6 +13,7 @@ module Hive
   # each CLI's flag mapping. Profiles ship in lib/hive/agent_profiles/.
   class AgentProfile
     PROMPT_STYLES = %i[positional headless_flag_value stdin].freeze
+    WORKSPACE_WRITE_PERMISSION_MODE = "workspace-write".freeze
     # Status-detection modes. handle_exit branches on these:
     #
     # - :state_file_marker -- read the marker on task.state_file (today's
@@ -35,7 +36,8 @@ module Hive
                 :headless_flag, :permission_skip_flag, :add_dir_flag,
                 :budget_flag, :output_format_flags, :version_flag,
                 :skill_syntax_format, :headless_supported, :min_version,
-                :status_detection_mode, :usage_extractor
+                :status_detection_mode, :usage_extractor,
+                :workspace_write_flags
 
     # Public API — do not break.
     #
@@ -66,6 +68,8 @@ module Hive
     #   min_version:           default nil (no version gate)
     #   preflight:             default nil (no extra pre-spawn check)
     #   usage_extractor:       default nil (no token-usage extraction)
+    #   workspace_write_flags: default nil (profile cannot guarantee a
+    #                          root-confined writable workspace)
     #   prompt_style:          default :stdin for a profile named :codex,
     #                          otherwise :positional (backward compatible
     #                          with pre-profile-style custom registrations)
@@ -92,6 +96,7 @@ module Hive
                    preflight: nil,
                    usage_extractor: nil,
                    skill_verifier: nil,
+                   workspace_write_flags: nil,
                    prompt_style: nil)
       prompt_style ||= name.to_sym == :codex ? :stdin : :positional
       unless PROMPT_STYLES.include?(prompt_style)
@@ -121,6 +126,7 @@ module Hive
       @preflight = preflight
       @usage_extractor = usage_extractor || ->(_event) { nil }
       @skill_verifier = skill_verifier
+      @workspace_write_flags = Array(workspace_write_flags).freeze
       @prompt_style = prompt_style
 
       freeze
@@ -183,11 +189,22 @@ module Hive
     # mode (or any non-claude profile) falls back to the profile's plain
     # permission_skip_flag, preserving pre-permission_mode behavior.
     def permission_flags(permission_mode = nil)
+      if permission_mode == WORKSPACE_WRITE_PERMISSION_MODE
+        unless workspace_write_supported?
+          raise ArgumentError, "agent profile #{@name.inspect} cannot enforce workspace-write sandboxing"
+        end
+
+        return @workspace_write_flags.dup
+      end
       return [] unless @permission_skip_flag
       return [ @permission_skip_flag ] unless @name == :claude && permission_mode
       return [ @permission_skip_flag ] if permission_mode == "bypassPermissions"
 
       [ "--permission-mode", permission_mode ]
+    end
+
+    def workspace_write_supported?
+      !@workspace_write_flags.empty?
     end
 
     # Project-config override keys that may appear under
@@ -317,6 +334,7 @@ module Hive
         preflight: @preflight,
         usage_extractor: @usage_extractor,
         skill_verifier: @skill_verifier,
+        workspace_write_flags: @workspace_write_flags.dup,
         prompt_style: @prompt_style
       }
     end

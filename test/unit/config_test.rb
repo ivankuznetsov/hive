@@ -171,6 +171,7 @@ class ConfigTest < Minitest::Test
 
       assert_equal false, cfg.dig("refactor_patrol", "enabled")
       assert_equal false, cfg.dig("refactor_patrol", "auto_fix", "enabled")
+      assert_equal "codex", cfg.dig("refactor_patrol", "auto_fix", "agent")
       assert_equal false, cfg.dig("refactor_patrol", "issue_filing", "enabled")
       assert_equal "claude", cfg.dig("refactor_patrol", "agent")
       assert_equal "medium", cfg.dig("refactor_patrol", "min_confidence")
@@ -200,6 +201,7 @@ class ConfigTest < Minitest::Test
           enabled: true
           auto_fix:
             enabled: true
+            agent: codex
           issue_filing:
             enabled: true
           agent: codex
@@ -219,6 +221,7 @@ class ConfigTest < Minitest::Test
       assert_equal false, cfg.dig("patrol", "enabled")
       assert_equal true, cfg.dig("refactor_patrol", "enabled")
       assert_equal true, cfg.dig("refactor_patrol", "auto_fix", "enabled")
+      assert_equal "codex", cfg.dig("refactor_patrol", "auto_fix", "agent")
       assert_equal true, cfg.dig("refactor_patrol", "issue_filing", "enabled")
       assert_equal "codex", cfg.dig("refactor_patrol", "agent")
       assert_equal "high", cfg.dig("refactor_patrol", "min_confidence")

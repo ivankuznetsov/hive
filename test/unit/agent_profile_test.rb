@@ -128,6 +128,29 @@ class AgentProfileTest < Minitest::Test
     assert_nil profile.extract_usage_event("not-json")
   end
 
+  def test_workspace_write_mode_fails_closed_without_profile_capability
+    profile = make_profile(permission_skip_flag: "--dangerous")
+
+    error = assert_raises(ArgumentError) do
+      profile.permission_flags(Hive::AgentProfile::WORKSPACE_WRITE_PERMISSION_MODE)
+    end
+
+    assert_includes error.message, "cannot enforce workspace-write"
+  end
+
+  def test_workspace_write_mode_uses_frozen_profile_flags_without_bypass
+    profile = make_profile(
+      permission_skip_flag: "--dangerous",
+      workspace_write_flags: [ "--sandbox", "workspace-write" ]
+    )
+
+    flags = profile.permission_flags(Hive::AgentProfile::WORKSPACE_WRITE_PERMISSION_MODE)
+
+    assert_equal [ "--sandbox", "workspace-write" ], flags
+    refute_includes flags, "--dangerous"
+    assert profile.workspace_write_supported?
+  end
+
   # --- with_overrides ---------------------------------------------------
 
   def test_with_overrides_returns_self_for_nil_or_empty

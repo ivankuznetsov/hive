@@ -355,6 +355,32 @@ class ReviewersAgentTest < Minitest::Test
       assert_equal %w[Write Edit MultiEdit NotebookEdit Bash], captured[:disallowed_tools]
       assert_empty captured[:allowed_tools] & captured[:disallowed_tools]
       assert_includes captured[:add_dirs], File.join(ctx.task_folder, "notes")
+      assert_equal :review_reviewers, captured[:stage]
+    end
+  end
+
+
+  def test_reviewer_model_and_effort_are_lower_precedence_spawn_fallbacks
+    with_tmp_dir do |dir|
+      reviewer, = with_stubbed_adapter(
+        dir, "model" => "opus", "effort" => "high"
+      )
+      captured = nil
+      original = Hive::Stages::Base.method(:spawn_agent)
+      Hive::Stages::Base.define_singleton_method(:spawn_agent) do |_task, **kwargs|
+        captured = kwargs
+        { status: :ok }
+      end
+      begin
+        reviewer.run!
+      ensure
+        Hive::Stages::Base.singleton_class.send(:remove_method, :spawn_agent)
+        Hive::Stages::Base.define_singleton_method(:spawn_agent, &original)
+      end
+
+      assert_equal :review_reviewers, captured[:stage]
+      assert_equal "opus", captured[:model]
+      assert_equal "high", captured[:effort]
     end
   end
 

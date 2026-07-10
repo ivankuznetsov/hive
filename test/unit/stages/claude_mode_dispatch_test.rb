@@ -62,6 +62,7 @@ class ClaudeModeDispatchTest < Minitest::Test
         Hive::Stages::Plan.spawn_plan_agent(task, cfg, "prompt", claude_profile(cfg))
 
         assert_equal :claude, captured.fetch(0).fetch(:launcher)
+        assert_equal :plan, captured[0][:kwargs][:stage]
         assert_equal "hive-3-plan-dispatch-test", captured[0][:kwargs][:session_name]
         # G3: plan uses the narrow allowed_tools set (no Bash/Glob/Grep) —
         # planning operates on prose, not the worktree.
@@ -113,6 +114,8 @@ class ClaudeModeDispatchTest < Minitest::Test
         Hive::Stages::Plan.spawn_plan_agent(task, cfg, "prompt", codex_profile(cfg))
 
         assert_equal :headless, captured.fetch(0).fetch(:launcher)
+        assert_equal :plan, captured[0][:kwargs][:stage]
+        assert_same cfg, captured[0][:kwargs][:cfg]
       end
     end
   end
@@ -132,6 +135,7 @@ class ClaudeModeDispatchTest < Minitest::Test
         Hive::Stages::Execute.spawn_implementation(task, cfg, worktree_path)
 
         assert_equal :claude, captured.fetch(0).fetch(:launcher)
+        assert_equal :execute_implementation, captured[0][:kwargs][:stage]
         assert_equal "hive-4-execute-dispatch-test", captured[0][:kwargs][:session_name]
         assert_equal "Read,Write,Edit,Bash,LS,Glob,Grep", captured[0][:kwargs][:allowed_tools]
       end
@@ -156,6 +160,7 @@ class ClaudeModeDispatchTest < Minitest::Test
         Hive::Stages::Execute.spawn_implementation(task, cfg, worktree_path)
 
         assert_equal :headless, captured.fetch(0).fetch(:launcher)
+        assert_equal :execute_implementation, captured[0][:kwargs][:stage]
       end
     end
   end

@@ -98,6 +98,31 @@ class WorkflowsDescriptorParserTest < Minitest::Test
     assert_equal "high", work.effort
   end
 
+  def test_agent_stage_rejects_controls_unsupported_by_selected_profile
+    error = assert_config_error(
+      {
+        "id" => "unsupported-controls",
+        "stages" => [
+          { "name" => "inbox", "kind" => "terminal", "state_file" => "idea.md" },
+          {
+            "name" => "work",
+            "kind" => "agent",
+            "state_file" => "work.md",
+            "skill" => "/ship",
+            "agent" => "pi",
+            "model" => "anything"
+          },
+          { "name" => "done", "kind" => "terminal", "state_file" => "done.md" }
+        ]
+      },
+      path: "/tmp/unsupported-controls.yml"
+    )
+
+    assert_includes error.message, "stage 2 model"
+    assert_includes error.message, "pi"
+    assert_includes error.message, "does not support model selection"
+  end
+
   def test_active_stages_accept_per_stage_budget_and_timeout
     workflow = Hive::Workflows::DescriptorParser.parse_hash(
       {

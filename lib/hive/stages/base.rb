@@ -585,7 +585,8 @@ module Hive
                          profile: nil, expected_output: nil, status_mode: nil,
                          permission_mode: nil, allowed_tools: nil,
                          disallowed_tools: nil, mcp_config_path: nil,
-                         strict_mcp_config: false)
+                         strict_mcp_config: false, stage: nil,
+                         model: nil, effort: nil)
         require "hive/claude_launcher"
 
         profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
@@ -611,7 +612,10 @@ module Hive
           allowed_tools: allowed_tools,
           disallowed_tools: disallowed_tools,
           mcp_config_path: mcp_config_path,
-          strict_mcp_config: strict_mcp_config
+          strict_mcp_config: strict_mcp_config,
+          stage: stage,
+          model: model,
+          effort: effort
         )
       end
 

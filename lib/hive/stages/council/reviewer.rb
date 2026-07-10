@@ -90,6 +90,7 @@ module Hive
             profile: profile,
             model: @reviewer.model || @stage.model,
             effort: @reviewer.effort || @stage.effort,
+            stage: :review_reviewers,
             expected_output: output_path,
             status_mode: :output_file_exists,
             cfg: @cfg,

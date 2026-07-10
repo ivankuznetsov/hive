@@ -104,6 +104,7 @@ module Hive
             log_label: "review-triage-pass#{format('%02d', ctx.pass)}",
             profile: profile,
             expected_output: escalations,
+            stage: :review_triage,
             **Hive::Stages::Base.tool_scope_kwargs(scope),
             status_mode: :output_file_exists
           }
@@ -116,7 +117,7 @@ module Hive
                 session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-triage-pass#{ctx.pass}", task)
               )
             else
-              Hive::Stages::Base.spawn_agent(task, **kwargs)
+              Hive::Stages::Base.spawn_agent(task, **kwargs, cfg: cfg)
             end
           after = Hive::ProtectedFiles.snapshot(ctx.task_folder, TRIAGE_PROTECTED_FILES)
 

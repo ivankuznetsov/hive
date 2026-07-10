@@ -52,6 +52,37 @@ class StagesCouncilTest < Minitest::Test
     end
   end
 
+  def test_effective_controls_for_custom_council_profiles_fail_before_fanout
+    with_tmp_dir do |project|
+      base = council_workflow(quorum: 1)
+      review = base.stage_named("review")
+      custom_review = Hive::Workflow::Stage.new(
+        name: review.name,
+        index: review.index,
+        state_file: review.state_file,
+        kind: review.kind,
+        reviewers: [ Hive::Workflow::Reviewer.new(name: "pi-review", agent: "pi", skill: "/review") ],
+        council: Hive::Workflow::Council.new(quorum: 1)
+      )
+      workflow = Hive::Workflow.new(
+        id: :custom_controls,
+        stages: [ base.stages.first, custom_review, base.stages.last ]
+      )
+      task = task_for(project, workflow: workflow)
+      File.write(File.join(task.folder, "draft.md"), "Architecture draft\n")
+      cfg = { "models" => { "review_reviewers" => { "model" => "opus" } } }
+
+      with_stubbed_spawn([]) do |captured|
+        error = assert_raises(Hive::ConfigError) do
+          Hive::Stages::Council.run!(task, cfg)
+        end
+        assert_empty captured
+        assert_includes error.message, "pi"
+        assert_includes error.message, "does not support model selection"
+      end
+    end
+  end
+
   def test_disagreement_with_human_exit_rule_waits_for_revision
     with_tmp_dir do |project|
       workflow = council_workflow(exit_rule: :human, quorum: 2)

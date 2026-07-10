@@ -274,6 +274,7 @@ module Hive
           timeout_sec: cfg.dig("timeout_sec", "execute_implementation"),
           log_label: "execute-impl",
           profile: profile,
+          stage: :execute_implementation,
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :exit_code_only
         }
@@ -285,7 +286,7 @@ module Hive
             session_name: Hive::ClaudeLauncher.tmux_session_name("4-execute", task) # coding-scoped: coding execute stage tmux session
           )
         else
-          Hive::Stages::Base.spawn_agent(task, **kwargs)
+          Hive::Stages::Base.spawn_agent(task, **kwargs, cfg: cfg)
         end
       end
 

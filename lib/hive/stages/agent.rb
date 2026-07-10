@@ -50,6 +50,7 @@ module Hive
           profile: profile,
           model: stage.model,
           effort: stage.effort,
+          stage: nil,
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           # Honor the descriptor's declared status_mode; fall back to the
           # marker-file convention only when the stage leaves it unset.

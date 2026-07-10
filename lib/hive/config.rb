@@ -1887,6 +1887,38 @@ module Hive
       end
     end
 
+    # Project-authored council profiles are unknown during ordinary config
+    # load. Validate their effective controls after descriptor loading but
+    # before the council starts its reviewer fan-out, including any common
+    # models.review_reviewers override.
+    def validate_council_model_controls!(cfg, stage)
+      Array(stage.reviewers).each do |reviewer|
+        next if reviewer.command
+
+        profile = Hive::AgentProfiles.lookup(reviewer.agent || stage.agent || "claude", cfg: cfg)
+        agent_control_flags(
+          cfg,
+          profile: profile,
+          stage: :review_reviewers,
+          model: reviewer.model || stage.model,
+          effort: reviewer.effort || stage.effort
+        )
+      end
+
+      revise = stage.council&.revise
+      return unless revise && !revise.command
+
+      profile = Hive::AgentProfiles.lookup(revise.agent || stage.agent || "claude", cfg: cfg)
+      identity = known_model_stage?(stage.name) ? stage.name : nil
+      agent_control_flags(
+        cfg,
+        profile: profile,
+        stage: identity,
+        model: revise.model || stage.model,
+        effort: revise.effort || stage.effort
+      )
+    end
+
     def validate_stage_skill_by_agent!(cfg, source_path)
       %w[brainstorm plan].each do |stage|
         value = cfg.dig(stage, "skill_by_agent")

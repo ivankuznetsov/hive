@@ -168,6 +168,15 @@ module Hive
         reviewers = parse_reviewers(stage["reviewers"], id: id, label: label) if kind == :council
         council = parse_council(stage["council"], id: id, label: label, reviewer_count: reviewers&.length) if kind == :council
         validate_agent_instruction!(skill: skill, instruction: instruction, label: label) if kind == :agent
+        validate_descriptor_model_controls!(
+          kind: kind,
+          label: label,
+          agent: agent,
+          model: model,
+          effort: effort,
+          reviewers: reviewers,
+          council: council
+        )
 
         Hive::Workflow::Stage.new(
           name: name,
@@ -195,6 +204,46 @@ module Hive
         return name if SAFE_SLUG.match?(name)
 
         raise descriptor_error("#{label} name #{name.inspect} must match #{SAFE_SLUG.source}")
+      end
+
+      # Descriptor-level model/effort values are lower-precedence fallbacks,
+      # but they are still real controls and must never be silently dropped by
+      # a selected profile. Validate once every profile in a council is known,
+      # before the workflow is registered or any reviewer can spawn.
+      def validate_descriptor_model_controls!(kind:, label:, agent:, model:, effort:, reviewers:, council:)
+        if kind == :agent
+          validate_profile_model_controls!(agent || "claude", model, effort, label)
+          return
+        end
+        return unless kind == :council
+
+        Array(reviewers).each do |reviewer|
+          next if reviewer.command
+
+          validate_profile_model_controls!(
+            reviewer.agent || agent || "claude",
+            reviewer.model || model,
+            reviewer.effort || effort,
+            "#{label} reviewer #{reviewer.name.inspect}"
+          )
+        end
+        revise = council&.revise
+        return unless revise && !revise.command
+
+        validate_profile_model_controls!(
+          revise.agent || agent || "claude",
+          revise.model || model,
+          revise.effort || effort,
+          "#{label} council revise"
+        )
+      end
+
+      def validate_profile_model_controls!(agent, model, effort, label)
+        profile = Hive::AgentProfiles.lookup(agent)
+        profile.validate_model_control!(model, path: "#{label} model")
+        profile.validate_effort_control!(effort, path: "#{label} effort")
+      rescue Hive::ConfigError => e
+        raise descriptor_error(e.message)
       end
 
       # `state_file` is joined onto `task.folder` at run time

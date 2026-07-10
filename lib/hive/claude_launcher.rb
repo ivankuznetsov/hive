@@ -152,11 +152,14 @@ module Hive
                 allowed_tools: nil,
                 disallowed_tools: nil,
                 permission_mode: nil, mcp_config_path: nil,
-                strict_mcp_config: false)
+                strict_mcp_config: false, stage: nil,
+                model: nil, effort: nil)
       profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
       ensure_claude_profile!(profile)
       permission_mode ||= Hive::Config.claude_permission_mode(cfg)
-      cli_flags = cfg ? Hive::Config.claude_cli_flags(cfg) : []
+      cli_flags = cfg ? Hive::Config.claude_cli_flags(
+        cfg, stage: stage, model: model, effort: effort
+      ) : []
       launch_mode = Hive::Config.claude_mode(cfg)
 
       if launch_mode == :headless
@@ -213,7 +216,8 @@ module Hive
                             profile: nil, allowed_tools: DEFAULT_ALLOWED_TOOLS,
                             disallowed_tools: nil,
                             permission_mode: nil, mcp_config_path: nil,
-                            strict_mcp_config: false, cli_flags: nil)
+                            strict_mcp_config: false, cli_flags: nil,
+                            stage: nil, model: nil, effort: nil)
       profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
       ensure_claude_profile!(profile)
       permission_mode ||= Hive::Config.claude_permission_mode(cfg)
@@ -247,7 +251,9 @@ module Hive
           allowed_tools: allowed_tools,
           disallowed_tools: disallowed_tools,
           permission_mode: permission_mode,
-          cli_flags: cli_flags || (cfg ? Hive::Config.claude_cli_flags(cfg) : []),
+          cli_flags: cli_flags || (cfg ? Hive::Config.claude_cli_flags(
+            cfg, stage: stage, model: model, effort: effort
+          ) : []),
           mcp_config_path: mcp_config_path,
           strict_mcp_config: strict_mcp_config
         )

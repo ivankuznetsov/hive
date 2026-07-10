@@ -2207,6 +2207,24 @@ class RunReviewersTest < Minitest::Test
     refute_nil read_only_group, "the read-only reviewer must be its own group"
   end
 
+  def test_shared_reviewer_groups_split_differing_effective_model_controls
+    cfg = {
+      "permissions" => "yolo",
+      "claude" => { "model" => "default", "effort" => "default" }
+    }
+    specs = [
+      { "name" => "opus", "model" => "opus", "effort" => "high" },
+      { "name" => "sonnet", "model" => "sonnet", "effort" => "high" },
+      { "name" => "same-opus", "model" => "opus", "effort" => "high" }
+    ]
+
+    groups = Hive::Stages::Review.shared_reviewer_groups(cfg, specs)
+
+    assert_equal 2, groups.length
+    assert_includes groups.map { |group| group.map { |spec| spec["name"] }.sort },
+                    %w[opus same-opus]
+  end
+
   # Only the first group reuses the base session name; each subsequent
   # differing-scope group gets a distinct "-scopeN" suffix so two scopes
   # never collide on one tmux session.

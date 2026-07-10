@@ -146,6 +146,7 @@ module Hive
           timeout_sec: cfg.dig("timeout_sec", "open_pr") || 1800,
           log_label: "open-pr",
           profile: profile,
+          stage: :open_pr,
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :state_file_marker
         }
@@ -157,7 +158,7 @@ module Hive
             session_name: Hive::ClaudeLauncher.tmux_session_name("5-open-pr", task) # coding-scoped: coding open-pr stage tmux session
           )
         else
-          Hive::Stages::Base.spawn_agent(task, **kwargs)
+          Hive::Stages::Base.spawn_agent(task, **kwargs, cfg: cfg)
         end
       end
 

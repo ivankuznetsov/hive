@@ -1495,6 +1495,9 @@ module Hive
               session_name: shared_reviewer_session_name(task, ctx.pass, group_idx),
               cwd: ctx.worktree_path,
               add_dirs: scope.fetch(:add_dirs),
+              stage: :review_reviewers,
+              model: group.first["model"],
+              effort: group.first["effort"],
               **Hive::Stages::Base.tool_scope_kwargs(scope)
             ) do |handle|
               group.each do |spec|
@@ -1608,7 +1611,18 @@ module Hive
       # is sound because every member resolves to the same effective spec.
       def shared_reviewer_groups(cfg, specs)
         default = Hive::Config.permission_spec(cfg || {}, "review.reviewers")
-        specs.group_by { |spec| spec.key?("permissions") ? spec["permissions"] : default }.values
+        profile = Hive::AgentProfiles.lookup(:claude, cfg: cfg)
+        specs.group_by do |spec|
+          permission = spec.key?("permissions") ? spec["permissions"] : default
+          controls = Hive::Config.resolve_model_controls(
+            cfg,
+            profile: profile,
+            stage: :review_reviewers,
+            model: spec["model"],
+            effort: spec["effort"]
+          )
+          [ permission, controls ]
+        end.values
       end
 
       def shared_reviewer_session_name(task, pass, group_idx)
@@ -2069,6 +2083,7 @@ module Hive
           timeout_sec: cfg.dig("timeout_sec", "review_fix") || 2700,
           log_label: "review-fix-pass#{format('%02d', ctx.pass)}",
           profile: profile,
+          stage: :review_fix,
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :exit_code_only
         }
@@ -2080,7 +2095,7 @@ module Hive
             session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-fix-pass#{ctx.pass}", task)
           )
         else
-          Hive::Stages::Base.spawn_agent(task, **kwargs)
+          Hive::Stages::Base.spawn_agent(task, **kwargs, cfg: cfg)
         end
       end
 

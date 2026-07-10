@@ -39,6 +39,9 @@ module Hive
             profile: profile,
             expected_output: output_path,
             cfg: @cfg,
+            stage: :review_reviewers,
+            model: spec["model"],
+            effort: spec["effort"],
             **Hive::Stages::Base.tool_scope_kwargs(scope),
             # Reviewer spawns own a per-pass output file, not the task
             # marker — the orchestrator's REVIEW_WORKING marker must

@@ -158,6 +158,13 @@ module Hive
         end
 
         prompt = render_prompt
+        control_flags = Hive::Config.agent_control_flags(
+          @cfg || {},
+          profile: profile,
+          stage: :review_reviewers,
+          model: spec["model"],
+          effort: spec["effort"]
+        )
         configured_timeout = spec["timeout_sec"] || DEFAULT_TIMEOUT_SEC
         max_attempts = max_attempts_from_spec
 
@@ -174,7 +181,9 @@ module Hive
             return error_result("deadline reached before attempt #{attempts}", attempts, max_attempts)
           end
 
-          run = run_codex_review(profile.bin, prompt, spawn_timeout || configured_timeout)
+          run = run_codex_review(
+            profile.bin, prompt, spawn_timeout || configured_timeout, control_flags
+          )
           break if usable_review?(run)
           break if attempts >= max_attempts
 
@@ -462,8 +471,8 @@ module Hive
       # The codex binary's existence is already proven by `check_version!`
       # (the caller's preflight), so a spawn-time ENOENT is unreachable here
       # — we deliberately do not re-rescue it.
-      def run_codex_review(bin, prompt, timeout_sec)
-        argv = [ bin, "review", "--title", review_title, prompt ]
+      def run_codex_review(bin, prompt, timeout_sec, control_flags = [])
+        argv = [ bin, "review", *control_flags, "--title", review_title, prompt ]
 
         pipe_r, pipe_w = IO.pipe
         pid = Process.spawn(*argv, chdir: ctx.worktree_path, pgroup: true, out: pipe_w, err: pipe_w)

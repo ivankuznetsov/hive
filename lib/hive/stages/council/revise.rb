@@ -69,6 +69,7 @@ module Hive
             profile: profile,
             model: @revise.model || @stage.model,
             effort: @revise.effort || @stage.effort,
+            stage: Hive::Config.known_model_stage?(@stage.name) ? @stage.name : nil,
             expected_output: @target_path,
             status_mode: :output_file_exists,
             cfg: @cfg,

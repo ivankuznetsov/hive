@@ -1,10 +1,10 @@
 ---
 title: Operating Hive
 type: operating
-source: README.md, bin/hv, install.sh, lib/hive/commands/daemon.rb, lib/hive/commands/babysit.rb, lib/hive/commands/bot.rb, examples/systemd/, examples/launchd/, openclaw/skills/hive/SKILL.md, openclaw/README.md
+source: README.md, bin/hv, install.sh, lib/hive/commands/daemon.rb, lib/hive/commands/babysit.rb, lib/hive/commands/bot.rb, lib/hive/commands/setup_agents.rb, examples/systemd/, examples/launchd/, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-07
 updated: 2026-07-14
-tags: [operating, daemon, bot, systemd, launchd, install]
+tags: [operating, daemon, bot, systemd, launchd, install, skills]
 ---
 
 **TLDR**: Day-2 guide for running the hive daemon, experimental PR babysitter, and Telegram bot.
@@ -138,16 +138,19 @@ hive uninstall --force-purge-state
                           # registered project .hive-state directories
 ```
 
-Skills package marketplace commands are documented for the optional companion
-package, but the package is still a separate external publishing follow-up.
-Do not run these commands until `ivankuznetsov/hive-skills` is published; Hive
-core install still succeeds without it:
+Enabled built-in agent skills are diagnosed separately from CLI installation:
 
-| Agent | Command shape |
-|-------|---------------|
-| Claude Code | `claude plugin install ivankuznetsov/hive-skills` |
-| Codex | `codex plugin install ivankuznetsov/hive-skills` |
-| Pi | `pi install ivankuznetsov/hive-skills` |
+```bash
+hive doctor                    # read-only inventory + real resolution evidence
+hive setup-agents              # aggregate preview, one TTY consent prompt
+hive setup-agents --yes --json # pre-authorized unattended provisioning
+```
+
+The packaged manifest points native Claude/Codex/Pi adapters at the upstream
+Compound Engineering, llm-wiki, and Claude PR Review Toolkit packages. Hive
+does not depend on an unpublished companion `hive-skills` package. Setup does
+not install/authenticate agent CLIs or replace user-owned conflicts; rerun it
+after correcting the scoped remediation printed by doctor.
 
 OpenClaw support now lives in-tree under `openclaw/skills/hive/`. It is one
 skill, not a TypeScript plugin and not a multi-listing bundle: the ClawHub slug

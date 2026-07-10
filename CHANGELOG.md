@@ -57,6 +57,14 @@ All notable changes are documented here, newest first. Hive ships frequent micro
 
 ## 0.3.7
 
+- Added manifest-driven diagnosis and consent-safe provisioning for enabled
+  built-in Claude, Codex, and Pi skills. `hive doctor --json` now emits the
+  evidence-rich `hive-doctor.v2` contract; `hive setup-agents` previews,
+  revalidates, provisions through native CLIs, and verifies without clobbering
+  user-owned aliases or Codex sources.
+- Interactive `hive init` can hand unresolved managed skills to the same setup
+  engine after project creation. JSON and non-TTY init remain non-mutating and
+  print standalone remediation instead.
 - Fixed hive failing to start on Arch Linux with `cannot load such file -- erb`:
   erb is now a declared runtime dependency. Distros ship erb as a separate
   package since ruby unbundled it, so every verb (`tui`, `plan`, the daemon)

@@ -1,10 +1,10 @@
 ---
 title: Hive::AgentProfile + Hive::AgentProfiles
 type: module
-source: lib/hive/agent_profile.rb, lib/hive/agent_profiles.rb, lib/hive/agent_profiles/{claude,codex,pi,grok}.rb
+source: lib/hive/agent_profile.rb, lib/hive/agent_profiles.rb, lib/hive/agent_profiles/{claude,codex,pi,grok}.rb, lib/hive/agent_skills/
 created: 2026-04-26
 updated: 2026-07-16
-tags: [agent, profile, registry, architecture]
+tags: [agent, profile, registry, architecture, skills, provisioning]
 ---
 
 **TLDR**: `Hive::AgentProfile` is a frozen value object describing one CLI's invocation contract (binary path, prompt delivery, permissions, root-confined workspace-write support, opt-in verified CLI capabilities, version requirement, status detection, usage extraction, and skill verification). `Hive::AgentProfiles` is the singleton registry — built-in profiles for `claude`, `codex`, `pi`, and `grok` auto-register on `require "hive/agent_profiles"`. Stages look up a profile by name (`AgentProfiles.lookup(:claude)`) and pass it to `Stages::Base.spawn_agent`. Replaces the previous claude-only singleton on `Hive::Agent`. References ADR-017 / ADR-018 / ADR-019.
@@ -75,6 +75,20 @@ Auto-required from `lib/hive/agent_profiles.rb`:
 - `Stages::Base.record_usage` — reads each profile's `usage_extractor` output and stores per-spawn rows in `Hive::UsageDB`.
 - `Hive::Config.validate_role_agent_names!` and `validate_reviewers!` — every `agent:` field in `review.{ci,triage,fix,browser_test}` and `review.reviewers[]` must resolve via `AgentProfiles.lookup`.
 
+## Managed skill inspection and provisioning
+
+`Hive::AgentSkills::Inspector` always calls `AgentProfiles.lookup(name, cfg:
+config)`, so project `agents.<name>.bin` overrides and profile minimum versions
+match actual stage spawns. It then pairs each profile's native inventory with
+`Hive::SkillCheck` resolution under `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, or
+`PI_CODING_AGENT_DIR`.
+
+The profile is the runtime contract; `config/agent-skills.yml` is the package
+contract. Adapters use the profile's binary/version gate plus manifest-declared
+native actions, package source, and compatible version. They do not alter the
+profile registry or make arbitrary custom profiles provisionable. See
+[[commands/doctor]] and [[commands/setup-agents]].
+
 ## Tests
 
 - `test/unit/agent_profile_test.rb` — version/capability caches, env override, preflight, process-group timeout cleanup for version/help probes and stdout-inheriting descendants, workspace-write flags, and headless gate.
@@ -83,9 +97,10 @@ Auto-required from `lib/hive/agent_profiles.rb`:
 - `test/unit/spawn_agent_test.rb` — preflight ordering, isolation-warning trigger, default-profile fallback.
 - `test/unit/pi_preflight_test.rb` — pi's auth.json preflight gate.
 - `test/unit/grok_preflight_test.rb` — Grok environment/file auth and usage semantics.
+- `test/unit/agent_skills/inspector_test.rb` — configured binary/home use and native/runtime evidence correspondence.
 
 ## Backlinks
 
 - [[modules/agent]] · [[modules/config]]
-- [[stages/review]] · [[architecture]]
+- [[stages/review]] · [[architecture]] · [[commands/doctor]] · [[commands/setup-agents]]
 - [[decisions]] (ADR-017 / ADR-018 / ADR-019)

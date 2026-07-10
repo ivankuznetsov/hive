@@ -105,6 +105,12 @@ module Hive
       When used with --new-workflow, the payload also includes
       descriptor_path and instruction_path.
 
+      After project creation, interactive init diagnoses the enabled managed
+      agent skills and offers to invoke the same consent-safe engine as
+      `hive setup-agents`. Declining prints standalone remediation. Non-TTY
+      and --json init never offer or mutate agent state, and optional setup
+      failure never rolls back the initialized project.
+
       To bootstrap a new custom workflow in one pass, use:
 
         hive init --new-workflow writing ~/Dev/writing
@@ -217,16 +223,17 @@ module Hive
 
     desc "doctor", "Inspect managed agent skill health without changing agent state"
     long_desc <<~DESC
-      Walks the brainstorm and plan stage configs and asks the
-      configured agent profile (claude / codex / pi / grok) to probe whether
-      its skill (`<stage>.skill` in config.yml) actually resolves to
-      an installed slash-command or skill on disk.
+      Resolves the effective enabled stages, named reviewers, browser hooks,
+      and their configured agent profiles (claude / codex / pi / grok)
+      against Hive's packaged agent-skills manifest. For each managed
+      capability it combines bounded native CLI inventory with the exact
+      filesystem path that would win at runtime. Custom skills and capabilities
+      unsupported by the manifest remain visible but unmanaged.
 
-      Hive ships expecting both llm-wiki (`/plan`) and
-      compound-engineering (`/compound-engineering:ce-*`) to be
-      installed alongside your agent CLI. `hive doctor` is the
-      preflight that catches a missing install before a stage spawns
-      and the agent reports `skill not found` mid-run.
+      The manifest currently maps Compound Engineering (`/ce-*`), llm-wiki
+      planning (`/plan`, `/llm-wiki:wiki-plan`, or `/skill:wiki-plan`), and
+      Claude's PR Review Toolkit. `hive doctor` catches missing, stale,
+      incompatible, or shadowed installs before a stage spawns.
 
       Per-agent search rules:
       - claude: `~/.claude/{commands/<name>.md, skills/<name>/SKILL.md}`

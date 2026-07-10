@@ -1,97 +1,108 @@
 ---
 title: hive doctor
 type: command
-source: lib/hive/commands/doctor.rb, lib/hive/skill_check.rb
+source: lib/hive/commands/doctor.rb, lib/hive/agent_skills/inspector.rb, lib/hive/skill_check.rb
 created: 2026-05-07
-updated: 2026-06-14
-tags: [command, preflight, skills, tmux]
+updated: 2026-07-10
+tags: [command, preflight, skills, tmux, provisioning]
 ---
 
-**TLDR**: `hive doctor` walks `brainstorm` + `plan` stage configs **and** every entry in `review.reviewers[]`, asking each agent profile to verify its configured skill (e.g. `/plan`, `/llm-wiki:wiki-plan`, `/ce-brainstorm`, `/ce-code-review`, `/skill:wiki-plan`) actually resolves to an installed slash-command or skill on disk. When `claude.mode: tmux`, it also checks `tmux >= 3.0`; initialized projects also get a non-fatal `wiki/qmd` dependency row so missing/broken QMD and native Node ABI mismatches are visible. Legacy configs with `brainstorm.runtime` get an advisory warning. Prints a status table; `--json` emits a `hive-doctor.v1` envelope. Also runs **non-fatally** at the end of `hive init` as a preflight: missing skills surface as stderr warnings, but `init` exit code is unaffected.
+**TLDR**: `hive doctor` is the read-only renderer for Hive's shared managed-skill inspector. It derives effective coding stages, named reviewers, browser hooks, and configured agents; combines native CLI inventory with the real filesystem resolver; and emits one evidence-rich row per agent/capability. `--json` is the versioned `hive-doctor.v2` contract. Legacy tmux, QMD, and deprecated-config checks remain separate rows.
 
 ## Usage
 
-```
-hive doctor [--json]
+```bash
+hive doctor
+hive doctor --json
 ```
 
-Run from a hive-initialized project (loads `<project>/.hive-state/config.yml`).
+Run from a Hive-initialized project. Doctor never invokes adapters, install
+commands, alias writes, or network/model calls.
 
-## Exit codes
+## Managed target and health model
+
+`Hive::AgentSkills::TargetResolver` derives rows from the effective config,
+including `brainstorm`, `plan`, `review.reviewers`, optional browser testing,
+ad-hoc reviewers, and enabled patrol reviewers. Manifest-known built-ins are
+managed. Native reviewers and custom skills remain visible but never become
+setup operations.
+
+`Hive::AgentSkills::Inspector` uses
+`AgentProfiles.lookup(name, cfg: config)`, so project binary overrides match
+real stage execution. It honors `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, and
+`PI_CODING_AGENT_DIR`, then applies `Hive::SkillCheck`'s project-before-home
+resolution rules. A native inventory claim is insufficient when the runtime
+resolver cannot load the declared probe.
+
+Health precedence is:
+
+1. `conflicting` — a user-owned alias/source or higher-priority shadow wins;
+2. `incompatible` — unsupported CLI/package/source or malformed inventory;
+3. `unavailable` — agent binary absent (visible, non-blocking);
+4. `stale` — an older repairable version line;
+5. `missing` — package or runtime probe unresolved;
+6. `healthy` — compatible native identity and expected runtime path both match.
+
+Every unresolved managed row carries a scoped remediation such as
+`hive setup-agents --agent claude --skill ce-brainstorm`. Conflict messages
+name the winning path/owner and state that Hive will not replace it.
+
+## Legacy rows and exit codes
+
+Doctor retains dependency/warning checks for `tmux >= 3.0` when
+`claude.mode: tmux`, managed QMD availability/native ABI failures, exported
+Claude API-key warnings in tmux mode, and legacy `brainstorm.runtime` config.
+These appear under `checks`, not `managed_skills`.
 
 | Code | Meaning |
-|------|---------|
-| 0 | All probed skills `:present` or `:not_applicable` |
-| 65 | At least one row is `:missing` or `:version_too_old` |
-| 78 | `Hive::ConfigError` / `KeyError` / `ArgumentError` while loading config |
+|---:|---|
+| 0 | Every available managed target is healthy; unavailable-only rows are non-blocking. |
+| 65 | An available target is missing, stale, incompatible, or conflicting, or a required legacy dependency failed. |
+| 78 | Effective config or manifest input is invalid. |
 
-## Row kinds
-
-`Doctor#call` builds dependency/warning rows plus two skill row kinds and concatenates them:
-
-- **`kind: "dependency"`** — `claude/tmux` when `Hive::Config.claude_mode(cfg) == :tmux`, plus `wiki/qmd` when the current project has `.llm-wiki/`. Tmux `:missing` / `:version_too_old` rows make doctor exit 65; QMD rows are `:present` or warning-only because Hive can still fall back to plain wiki files.
-- **`kind: "warning"`** — advisory rows that do not fail doctor, including exported Claude API-key env vars under tmux mode, missing/broken QMD, native QMD ABI failures, and legacy `brainstorm.runtime` still present in raw YAML.
-
-- **`kind: "stage"`** — one row per entry in `STAGES = %w[brainstorm plan]`. `label = stage`. Reads `cfg.dig(stage, "agent")` (default `"claude"`) and resolves the skill via `Hive::Config.stage_skill`. Plan defaults are agent-aware: Claude keeps the legacy `/plan` alias, Codex gets `/llm-wiki:wiki-plan`, and Pi gets `/skill:wiki-plan` after profile formatting. A legacy `plan.skill: /plan` config is also mapped to llm-wiki's canonical `wiki-plan` skill for Codex/Pi. The resolved skill is routed through `profile.format_skill_invocation(skill)` before verification.
-- **`kind: "reviewer"`** — one row per entry in `cfg.dig("review", "reviewers")`. `label = "6-review/<name>"`. Reads `agent`, `name`, `kind` (default `"agent"`), and `skill`. The bare config skill is formatted through `profile.format_skill_invocation` to obtain the full invocation before passing to `verify_skill`, so the JSON envelope's `skill` field is uniform across stage and reviewer rows.
-
-Reviewer entries with `kind != "agent"` short-circuit to `:not_applicable` with a "kind '<X>' is not 'agent'; doctor only checks agent-kind reviewers" message. `Hive::Config.validate_reviewers!` now validates `kind` against `agent`, `codex_review`, and `linter`; Doctor still only verifies slash-command/SKILL.md resolution for `agent` reviewers because `codex_review` uses Codex's built-in `review` subcommand and `linter` is intentionally rejected by reviewer dispatch with a pointer to `review.ci.command`.
-
-## Per-agent verifiers (`Hive::SkillCheck::*`)
-
-Encoded as the third return of `AgentProfile.new(skill_verifier:)`:
-
-- **Claude** — for `/<name>`: `<project>/.claude/commands/<name>.md`, `<project>/.claude/skills/<name>/SKILL.md`, `~/.claude/commands/<name>.md`, `~/.claude/skills/<name>/SKILL.md`, plus any installed plugin cache/marketplace skill or command named `<name>`. For `/<plug>:<name>`: cache layout `~/.claude/plugins/cache/<marketplace>/<plug>/<version>/skills/<name>/SKILL.md` AND marketplace source layout `~/.claude/plugins/marketplaces/<marketplace>/plugins/<plug>/skills/<name>/SKILL.md` (plus `commands/`). Glob metacharacters in `<name>` / `<plug>` are escaped via `Hive::SkillCheck.glob_escape` so `/foo*` cannot false-positive against an unrelated `/foobar` plugin cache.
-- **Codex** — for `/<name>`: `<project>/.codex/skills/<name>/SKILL.md`, `~/.codex/skills/<name>/SKILL.md`, `~/.codex/skills/.system/<name>/SKILL.md`, plus any installed plugin cache skill named `<name>`. For `/<plug>:<name>`: `~/.codex/plugins/cache/<marketplace>/<plug>/<version>/skills/<name>/SKILL.md`. Codex has no user-level `commands/` directory; install a SKILL.md instead. Same `glob_escape` rule as claude.
-- **Pi** — `/skill:<name>` only. The verifier walks (in order):
-    1. `~/.pi/agent/skills/` — recursive `**/<name>/SKILL.md` plus root-level `<name>.md`
-    2. `~/.agents/skills/` — recursive `**/<name>/SKILL.md` (no root `.md` — cross-agent dirs use SKILL.md only)
-    3. `<project>/.pi/skills/` — recursive plus root `<name>.md`
-    4. Every ancestor `<dir>/.agents/skills/` walking up from `project_root` until the nearest `.git/` (or filesystem root)
-    5. `~/.pi/agent/settings.json` and `<project>/.pi/settings.json` `skills` / `packages` entries — each entry is **jailed** to settings_dir / `$HOME` / project_root (a `~/` or `/` entry that resolves *exactly* to a jail root is rejected as a DoS-shaped scan request)
-    6. `npm root -g`, `~/.pi/npm/node_modules/*/skills/`, and `<project>/.pi/npm/node_modules/*/skills/` — recursive
-    7. `~/.pi/agent/git/` — bounded prefix scan over 1–4 path levels under the git root (so `<git>/<host>/<user>/<repo>/skills/` is reachable without an unbounded `**` walk)
-    8. Every package whose `package.json#pi.skills` declares a path — each such path is jailed to the package root, so a malicious package cannot point `pi.skills` at `../..` or `/`
-  
-  Anything not in `/skill:<name>` form returns `:not_applicable` with a message explaining the form mismatch. Settings/manifest JSON files that fail to parse are surfaced via the `:missing` install_hint suffix so a stray comment in `settings.json` does not silently disable discovery.
-
-A new agent profile becomes "doctorable" by registering a `Hive::SkillCheck::*` module and passing its `.method(:verify)` into `AgentProfile.new(skill_verifier:)`.
-
-## JSON envelope (`hive-doctor.v1`)
+## JSON envelope (`hive-doctor.v2`)
 
 ```json
 {
-  "schema": "hive-doctor.v1",
-  "checks": [
-    {"kind": "stage", "stage": "brainstorm", "label": "brainstorm", "agent": "claude", "configured_skill": "/ce-brainstorm", "skill": "/ce-brainstorm", "status": "present", "message": "..."},
-    {"kind": "stage", "stage": "plan", "label": "plan", "agent": "pi", "configured_skill": "/llm-wiki:wiki-plan", "skill": "/skill:wiki-plan", "status": "present", "message": "..."},
-    {"kind": "reviewer", "stage": "6-review", "name": "claude-ce-code-review", "label": "6-review/claude-ce-code-review", "agent": "claude", "configured_skill": "ce-code-review", "skill": "/ce-code-review", "status": "missing", "message": "..."}
+  "schema": "hive-doctor.v2",
+  "schema_version": 2,
+  "managed_skills": [
+    {
+      "kind": "managed_skill",
+      "agent": "claude",
+      "capability": "ce-brainstorm",
+      "health": "missing",
+      "expected": {"package": "compound-engineering@compound-engineering-plugin"},
+      "native": {"available": true, "package": null},
+      "resolution": {"path": null},
+      "remediation": "hive setup-agents --agent claude --skill ce-brainstorm"
+    }
   ],
-  "summary": {"missing": 1, "version_too_old": 0, "present": 2, "not_applicable": 0, "warning": 0}
+  "checks": [],
+  "summary": {"managed": {"missing": 1}, "legacy_failures": 0, "warnings": 0}
 }
 ```
 
-Field history (all additive — schema name stays `v1`):
+`schemas/hive-doctor.v1.json` remains packaged for pinned consumers, but the
+command emits v2. The v2 split prevents managed skill evidence from changing
+the meaning of old stage/reviewer check rows.
 
-- 2026-05-07: `kind`, `name`, `label` added on `checks[]`.
-- 2026-05-07: `configured_skill` added on `checks[]`. Carries the raw config-supplied value alongside `skill`, which carries the profile-aware formatted invocation. Pi stage rows are the most affected; consumers that need to round-trip back to the operator's config should read `configured_skill`, not `skill`.
-- 2026-05-14: plan-stage defaults became agent-aware. Codex and Pi now resolve the llm-wiki `wiki-plan` skill directly instead of requiring a local `plan` alias.
-- 2026-05-26: initialized projects gained a non-fatal `wiki/qmd` dependency row. Doctor resolves QMD through `HIVE_QMD_BIN`, PATH, Hive's managed data-prefix install, or an `install-prefix` sidecar, and reports native addon failures with a `npm rebuild better-sqlite3` repair hint.
+## Init integration
 
-## Init preflight (non-fatal)
-
-After `Hive::Commands::Init#call` finishes its summary, it invokes `run_init_preflight!` which constructs a discard-output `Doctor`, calls `#call`, and emits stderr warnings of the form `[<row-label>/<agent>] <verifier message>` for every `:missing` row. **Init's exit code is unaffected** — install gaps surface but never block bootstrap.
-
-Rescue scope is `StandardError` (with a `Errno::EPIPE` micro-rescue around `warn`); `Interrupt` and `SystemExit` propagate. Unexpected verifier raises produce a "this may be a hive bug, please report" hint so silent swallow is mitigated. `Doctor#rows` (an `attr_reader`) lets the preflight read probe results in-process without re-running the renderer.
+After project creation, `hive init` runs this inspector. Interactive init with
+actionable available rows offers to delegate to [[commands/setup-agents]]. A
+decline, non-TTY run, or JSON run only prints remediation. Unavailable-only
+rows do not prompt, and optional setup failure never rolls back the initialized
+project.
 
 ## Tests
 
-- `test/unit/commands/doctor_test.rb` — stage rows, reviewer happy path, mixed agents, empty/nil/absent reviewers, non-agent kinds, pi reviewer rows, QMD managed-binary and broken-binary rows, JSON envelope shape, long-label width, `attr_reader :rows` exposure.
-- `test/unit/skill_check_test.rb` — per-agent verifier paths (including pi recursive walks, settings entries, manifest entries, global npm-root success/timeout handling, and glob-metacharacter rejection).
-- `test/integration/init_doctor_preflight_test.rb` — all-green silence, single-missing stderr warning, multi-missing including a reviewer row, init exit-code unchanged, preflight crash → bug-hint warning, config-load error → bug-hint warning.
+- `test/unit/agent_skills/inspector_test.rb` covers health precedence, source/version evidence, shadowing, configured homes/binaries, malformed inventory, repeated fresh inspection, and read-only behavior.
+- `test/unit/commands/doctor_test.rb` covers human/v2 JSON rendering, legacy rows, remediation, non-blocking unavailable agents, and shared result correspondence.
+- `test/unit/skill_check_test.rb` covers exact Claude/Codex/Pi resolution, escaping, Pi jails, and the write-free global npm-root probe.
+- `test/integration/init_doctor_preflight_test.rb` covers init delegation and non-mutating flows.
 
 ## Backlinks
 
-- [[cli]] · [[commands/init]]
-- [[stages/brainstorm]] · [[stages/plan]] · [[stages/review]]
-- [[modules/agent_profile]] · [[modules/config]]
+- [[cli]] · [[commands/init]] · [[commands/setup-agents]]
+- [[modules/agent_profile]] · [[testing]]

@@ -64,27 +64,44 @@ Hive has built-in agent profiles for `claude`, `codex`, `pi`, and `grok`. A prof
 
 Default new-project setup uses `claude` for planning, `codex` for execute, a normal reviewer set that can include Claude, Codex, and PR review toolkit agents, and a narrower patrol PR reviewer set that defaults to Codex only. The profile details live in [wiki/modules/agent_profile.md](../wiki/modules/agent_profile.md).
 
-## Required Skills Per Stage
+## Managed Agent Skills
 
-Hive's prompts invoke skills inside the chosen agent. `hive doctor` checks the configured rows and reports missing installs.
+[`config/agent-skills.yml`](../config/agent-skills.yml) is the authoritative,
+packaged mapping from stable Hive capabilities to agent-specific package
+sources, compatible versions, invocations, probes, prerequisites, and aliases.
+The initial managed set is:
 
-| Stage | Default invocation | Install for claude | Install for codex |
-|---|---|---|---|
-| `2-brainstorm` | `/ce-brainstorm` | `claude plugin install <every-marketplace>` (or any marketplace shipping `compound-engineering`) | `codex plugin install <compound-engineering-marketplace>` |
-| `3-plan` | `/plan` | a user-level slash command at `~/.claude/commands/plan.md` (e.g. ship via the [llm-wiki plugin](https://github.com/ivankuznetsov/agent-plugins) or write one inline) | a skill at `~/.codex/skills/plan/SKILL.md` (codex has no user-level slash-command directory) |
+| Package | Capabilities | Agents |
+|---|---|---|
+| `compound-engineering@compound-engineering-plugin` | `ce-brainstorm`, `ce-code-review`, `ce-test-browser` | Claude, Codex, Pi |
+| `llm-wiki` | `wiki-plan` | Claude, Codex, Pi |
+| `pr-review-toolkit@claude-plugins-official` | `pr-review-toolkit:review-pr` | Claude |
 
-| Reviewer | Default skill | Agent | Install target |
-|---|---|---|---|
-| `claude-ce-code-review` | `/ce-code-review` | `claude` | `~/.claude/skills/ce-code-review/SKILL.md` or a Claude plugin that ships `ce-code-review`; legacy `skill: compound-engineering:ce-code-review` config is normalized to `/ce-code-review` |
-| `codex-ce-code-review` | `/ce-code-review` | `codex` | `~/.codex/skills/ce-code-review/SKILL.md` (or via `codex plugin install` for `compound-engineering`) |
-| `pr-review-toolkit` | `/pr-review-toolkit:review-pr` | `claude` | `claude plugin install <pr-review-toolkit-marketplace>` |
+`hive doctor` combines bounded native inventory with the same filesystem
+resolution rules stages use. It is read-only and reports `healthy`, `missing`,
+`stale`, `incompatible`, `conflicting`, or `unavailable`. `hive setup-agents`
+turns only missing/stale managed rows into one immutable operation plan,
+obtains consent once, revalidates ownership/state, uses supported native CLIs,
+and then runs the shared inspector again. Package work is deduplicated while
+capability health remains per row.
+
+Hive owns a Claude `/plan` alias only when absent or already Hive-owned. A
+user-authored alias, higher-precedence shadow skill, or mismatched Codex
+marketplace/plugin owner is a conflict: setup leaves it byte-identical and
+prints manual guidance. Custom workflow skills remain unmanaged.
 
 Run:
 
 ```bash
 hive doctor
-hive doctor --json
+hive setup-agents             # one aggregate preview and prompt
+hive setup-agents --yes --json
 ```
+
+To extend a built-in default, add its capability and per-agent contracts to
+the manifest, expose it through the runtime default constants/template, and
+update the manifest-coverage plus live-resolution tests. The coverage test
+fails when a built-in coding default drifts beyond the manifest.
 
 ## Config Schema
 

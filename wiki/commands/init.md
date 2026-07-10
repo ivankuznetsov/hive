@@ -4,10 +4,10 @@ type: command
 source: lib/hive/commands/init.rb
 created: 2026-04-25
 updated: 2026-07-16
-tags: [command, bootstrap, git, prompts, llm-wiki]
+tags: [command, bootstrap, git, prompts, llm-wiki, provisioning]
 ---
 
-**TLDR**: `hive init [PATH]` bootstraps a project for Hive and `--json` emits the resolved bootstrap contract. Alongside workflow, agents, review, patrol cadence, and daemon settings, fresh terminal and web setup recommend post-merge architecture-patrol discovery with an explicit default-yes answer. Headless callers can choose the same value before any write with `--refactor-patrol` or `--no-refactor-patrol`. Auto-fixing and issue filing stay separate default-off config gates, and existing projects without a `refactor_patrol` block remain disabled.
+**TLDR**: `hive init [PATH]` bootstraps a project for Hive and `--json` emits the resolved bootstrap contract. Alongside workflow, agents, review, patrol cadence, and daemon settings, fresh terminal and web setup recommend post-merge architecture-patrol discovery with an explicit default-yes answer. Headless callers can choose the same value before any write with `--refactor-patrol` or `--no-refactor-patrol`; auto-fixing and issue filing remain separate default-off gates. After the project transaction succeeds, interactive init diagnoses enabled manifest-managed agent skills and can delegate an accepted offer to the same setup engine as `hive setup-agents`; decline, non-TTY, and JSON flows only report remediation.
 
 ## Usage
 
@@ -64,7 +64,7 @@ project config when changing an established policy.
 12. **Register globally** via `Hive::Config.register_project(name: basename(path), path: path)`, writing into the XDG global config path (`~/.config/hive/config.yml`, or `HIVE_HOME/config.yml`).
 13. Print a human summary, or with `--json` emit the current `hive-init.v2` payload. The full `answers` object and top-level projection include `refactor_patrol_enabled` alongside the existing workflow, agent, reviewer, patrol, limits, daemon, babysitter, and autostart choices. JSON mode suppresses the non-TTY defaults line so stdout remains one document; retained `hive-init.v1` is a compatibility artifact, not the current producer.
 14. Ensure the global daemon service unit exists via `Hive::Commands::Daemon::ServiceInstaller`, recording `daemon.autostart` from the prompt answer in the global config and enabling/starting the platform service only when requested. This is global infrastructure; it does not override the per-project `daemon.enabled` answer.
-15. Run the non-fatal `hive doctor` skill preflight; missing skills warn on stderr without failing init.
+15. Run the shared managed-skill inspector as a non-transactional post-init aid. If actionable available rows remain and stdin is a TTY, prompt `Provision unresolved agent skills now? [y/N]:`. Acceptance delegates in-process to [[commands/setup-agents]] with recorded consent, so setup still renders/revalidates its exact aggregate plan but does not prompt a second time. Decline prints scoped remediation. Non-TTY and `--json` never offer or mutate; unavailable-only rows do not prompt. Setup failure leaves the initialized project intact, reports the non-zero setup result, and points to an idempotent standalone rerun.
 
 If any step from orphan-state creation through global registration raises, init attempts partial rollback before surfacing the failure: delete `.hive-state/config.yml` if present, `git worktree remove --force <project>/.hive-state`, `git branch -D hive/state`, reset init-created main-checkout commits to the pre-init head, and restore/remove init-owned files such as `.gitignore`, `.llm-wiki/`, wiki scaffolding, runtime hooks, scheduler units, and the global registry file. Non-Hive exceptions are wrapped as `Hive::InternalError` (exit 70) so `bin/hive` does not leak a Ruby stack trace. If rollback itself cannot converge, stderr includes the rollback error plus a one-line recovery command so re-running init is not trapped behind an orphan `hive/state` branch.
 
@@ -136,12 +136,12 @@ This branch is what the orphan worktree is initially based on, and what feature 
 
 ## Tests
 
-- `test/integration/init_test.rb` covers all five preconditions, the `--force` path, `--json` success payload validation including workflow-authoring `hints`, non-default answer mirroring, and legacy precondition failures, partial-init rollback after orphan-state creation and later main-checkout side effects, the idempotent double-init, the rendered template's stage-agent/runtime blocks, Claude model/effort defaults in the answer/template path, normal and patrol reviewer rendering, mode-only patrol scheduling config, daemon and babysitter enrollment defaults, the bumped-generous limits, the dropped `execute_review` key, managed llm-wiki bootstrap/scheduler/hooks, incomplete prompt-answer failure before disk side effects, workflow prompt selection/default/non-TTY/abort behavior, and inline workflow authoring including reserved-id, invalid-format, and scaffold-collision re-prompts.
+- `test/integration/init_test.rb` covers all five preconditions, the `--force` path, `--json` success payload validation including workflow-authoring `hints`, non-default answer mirroring, and legacy precondition failures, partial-init rollback after orphan-state creation and later main-checkout side effects, the idempotent double-init, rendered stage-agent/runtime blocks, managed llm-wiki bootstrap, prompt behavior, workflow authoring, and post-init agent-skill offer/decline/non-TTY delegation boundaries.
 - `test/unit/commands/init_test.rb` covers small init collaborators, including the `ProjectConfigBinding` complete-answer path, top-level and nested missing-key fail-fast contracts, rollback helper behavior, daemon-registration warning paths, and JSON summary EPIPE handling.
 - `test/unit/commands/init/prompts_test.rb` covers prompt defaults and parsing, including the explicit default-yes architecture-patrol discovery answer and the non-TTY summary. `test/integration/init_test.rb` and the hivebox setup tests pin terminal/web parity, explicit pre-write architecture-patrol selection, rejection of fresh-only selectors on every existing-project re-init path, config rendering, default-off auto-fix and issue gates, and legacy missing-block behavior. `test/unit/schema_files_test.rb` pins the current `schemas/hive-init.v2.json` projection, including `refactor_patrol_enabled`; v1 remains a compatibility schema.
 
 ## Backlinks
 
-- [[cli]] · [[commands/run]]
+- [[cli]] · [[commands/run]] · [[commands/doctor]] · [[commands/setup-agents]]
 - [[modules/git_ops]] · [[modules/config]] · [[modules/agent_profile]] · [[modules/babysitter]]
 - [[state-model]] · [[decisions]] (ADR-023)

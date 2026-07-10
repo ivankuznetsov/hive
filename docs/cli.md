@@ -120,28 +120,49 @@ Read [wiki/operating.md](../wiki/operating.md) before running it live.
 
 | Command | Use it for |
 |---|---|
-| `hive doctor` | Verify configured stage and reviewer skills. |
-| `hive doctor --json` | Emit the same checks in a machine-readable envelope. |
+| `hive doctor [--json]` | Read-only native-inventory plus real-resolution diagnosis for every effective managed skill; JSON is `hive-doctor.v2`. |
+| `hive setup-agents [--yes] [--json] [--agent NAME...] [--skill ID...]` | Preview, consent to, execute, and re-verify native provisioning for enabled manifest-managed skills. |
 | `hive version` or `hive --version` | Print the Hive version. |
 | `hive forget NAME [--if-exists]` | Remove one project from the global registry; `--if-exists` makes already-absent entries exit 0. |
 | `hive prune` | Remove registry rows whose project path is gone. |
 | `hive metrics rollback-rate` | Report the fraction of fix-agent commits later reverted. |
 
+Managed skill health has a fixed precedence: `conflicting` (Hive will not
+replace the winning user-owned entry), `incompatible` (unsupported CLI,
+package version, or source), `unavailable` (agent binary absent; non-blocking),
+`stale` (repairable old compatible line), `missing`, then `healthy`.
+Provisioning execution is reported separately as `planned`, `skipped`,
+`succeeded`, or `failed`.
+
+```bash
+hive doctor --json
+hive setup-agents                         # TTY preview + one prompt
+hive setup-agents --agent claude --skill ce-brainstorm
+hive setup-agents --yes --json            # unattended, already authorized
+```
+
+Setup previews the exact argv arrays and Hive-owned paths, never evaluates a
+shell string, revalidates immediately before mutation, continues independent
+operations after a failure, and re-inspects every targeted capability. Matching
+installs are true no-ops. A retry begins from fresh inspection and schedules
+only unresolved work. JSON mode writes only its single document to stdout and
+never prompts; without `--yes`, planned mutation returns 64.
+
 ## JSON Output
 
-Workflow verbs (`brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, `archive`, `run`, `approve`), findings triage (`findings`, `accept-finding`, `reject-finding`), patrol (`patrol`), architecture-patrol job inspection (`refactor-patrol --list` / `--show`), diagnostics (`status`, `doctor`, `rebase-status`, `markers clear`, `metrics rollback-rate`), registry cleanup (`forget`, `prune`), workflow authoring (`workflow new`), `init`, and daemon control support `--json` where documented and emit typed envelopes. `hive init --json` emits a single `hive-init.v2` success payload with resolved answers and project metadata; architecture-patrol list/show emits `hive-refactor-patrol-jobs.v1`. Workflow verbs emit a `hive-stage-action` envelope; `hive workflow new --json` emits an unversioned success/error document. Schema files live under [schemas/](../schemas/), and [wiki/cli.md](../wiki/cli.md) lists the contract details. `hive tui` rejects `--json`; legacy or one-shot utilities (`version`, `tree`, `new`, `migrate`) are still text-only.
+Workflow verbs (`brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, `archive`, `run`, `approve`), findings triage (`findings`, `accept-finding`, `reject-finding`), patrol (`patrol`), architecture-patrol job inspection (`refactor-patrol --list` / `--show`), diagnostics/setup (`status`, `doctor`, `setup-agents`, `rebase-status`, `markers clear`, `metrics rollback-rate`), registry cleanup (`forget`, `prune`), workflow authoring (`workflow new`), `init`, and daemon control support `--json` where documented and emit typed envelopes. `hive doctor --json` emits `hive-doctor.v2`; `hive setup-agents --json --yes` emits `hive-setup-agents.v1`, never prompts, and requires `--yes` whenever mutation is planned. `hive init --json` emits the current `hive-init.v2` success payload with resolved answers and project metadata; architecture-patrol list/show emits `hive-refactor-patrol-jobs.v1`. Workflow verbs emit a `hive-stage-action` envelope; `hive workflow new --json` emits an unversioned success/error document. Schema files live under [schemas/](../schemas/), and [wiki/cli.md](../wiki/cli.md) lists the contract details. `hive tui` rejects `--json`; legacy or one-shot utilities (`version`, `tree`, `new`, `migrate`) are still text-only.
 
 ## Exit Codes
 
 | Code | Meaning |
 |---:|---|
 | 0 | Success. |
-| 1 | Generic failure. |
+| 1 | Generic failure; for `setup-agents`, an attempted operation failed or an actionable residual remains. |
 | 2 | Already initialized. |
 | 3 | Task is in an error marker state. |
 | 4 | Wrong stage. |
-| 64 | Usage error. |
-| 65 | `hive doctor`: at least one configured skill is missing. |
+| 64 | Usage error; for `setup-agents`, consent was declined or mutation was requested without a TTY/`--yes`. |
+| 65 | `hive doctor`: an available managed skill or required dependency is actionable. |
 | 70 | Software, git, worktree, agent, or stage failure. |
 | 75 | Temporary failure, usually lock contention. |
-| 78 | Config error. |
+| 78 | Config error; for `setup-agents`, invalid manifest, effective config, or filter. |

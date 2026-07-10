@@ -84,7 +84,7 @@ Each agent and reviewer prompt accepts **either a name or a 1-based index** (e.g
 ### Stable-iteration-order contract
 
 The prompt's choice list is rendered in a documented stable order:
-- **Agent profiles**: `claude`, `codex`, `pi` — the order in which `lib/hive/agent_profiles.rb` requires them at boot. `Hive::AgentProfiles.registered_names` returns them in this order.
+- **Agent profiles**: `claude`, `codex`, `pi`, `grok` — the order in which `lib/hive/agent_profiles.rb` requires them at boot. `Hive::AgentProfiles.registered_names` returns them in this order. The llm-wiki `context_agents` scaffold remains `claude`/`codex`/`pi` until Grok has a native wiki skill verifier.
 - **Default reviewers**: `claude-ce-code-review`, `codex-ce-code-review`, `pr-review-toolkit` — the order shipped in `templates/project_config.yml.erb` and surfaced via `Hive::Commands::Init::Prompts::DEFAULT_REVIEWER_NAMES`.
 - **Patrol reviewers**: `codex-native-review`, `codex-ce-code-review`, `claude-ce-code-review` — native Codex review is index 1 and the blank/default; the CE reviewers are optional broader patrol reviewers.
 

@@ -41,7 +41,7 @@ class AgentsAuthTest < Minitest::Test
       with_env("HOME" => home) do
         statuses = Hive::Web::AgentsAuth.new.statuses
 
-        assert_equal %w[claude codex gh pi].sort, statuses.keys.sort,
+        assert_equal %w[claude codex gh grok pi].sort, statuses.keys.sort,
                      "statuses must cover every supported agent"
         statuses.each_value do |s|
           assert_includes [ true, false ], s["logged_in"], "each status carries a boolean logged_in"
@@ -57,10 +57,16 @@ class AgentsAuthTest < Minitest::Test
                  "whose container-local server the operator's browser can't reach"
   end
 
+  def test_grok_login_uses_device_auth
+    assert_equal %w[grok login --device-auth],
+                 Hive::Web::AgentsAuth::AGENT_COMMANDS.fetch("grok")
+  end
+
   def test_poll_login_distinguishes_operator_ward_from_paste_back_agents
     auth = Hive::Web::AgentsAuth.new
     assert auth.poll_login?("codex"), "codex --device-auth is operator-ward (code entered at provider, CLI polls)"
     assert auth.poll_login?("gh"), "gh device flow is operator-ward"
+    assert auth.poll_login?("grok"), "grok device auth is operator-ward"
     refute auth.poll_login?("claude"), "claude setup-token is paste-back (code returned to the CLI)"
   end
 

@@ -67,6 +67,11 @@ hardcoded Claude template:
   <prompt>
 ```
 
+Prompt placement is profile data: Claude/Pi use a trailing positional prompt,
+Codex sends the prompt through stdin and places `-` in argv, and Grok places
+the prompt immediately after `-p` because `--single` consumes a value. Grok's
+streaming `text` fragments are concatenated verbatim into `final_message`.
+
 For the built-in Claude profile this is still:
 
 ```

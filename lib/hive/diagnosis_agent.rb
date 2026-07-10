@@ -72,7 +72,7 @@ module Hive
       # An injected spawn callable owns the agent lifecycle (used by
       # unit tests and any future in-process consumers). When injected,
       # we deliberately skip profile.check_version! / profile.preflight!
-      # — those validate the OS-level agent binary (claude / codex / pi)
+      # — those validate the OS-level agent binary (claude / codex / pi / grok)
       # which is irrelevant to the test double AND is missing on stock
       # CI runners. Production callers always go through the default
       # method(:spawn_profile) path and still hit both checks.
@@ -377,7 +377,7 @@ module Hive
     # Hive::Tui::Subprocess#bounded_capture3.
     def spawn_profile(profile:, prompt:, cwd:, add_dirs:, timeout_sec:, max_budget_usd:)
       cmd = build_cmd(profile, prompt, add_dirs, max_budget_usd)
-      stdin_data = profile.name == :codex ? prompt : nil
+      stdin_data = profile.prompt_style == :stdin ? prompt : nil
       run_with_timeout(cmd, cwd, stdin_data, timeout_sec)
     end
 
@@ -583,13 +583,17 @@ module Hive
     # structured-stream context the diagnose flow doesn't need.
     def build_cmd(profile, prompt, add_dirs, max_budget_usd)
       cmd = [ profile.bin ]
-      cmd << profile.headless_flag if profile.headless_flag
+      prompt_style = profile.prompt_style || :positional
+      if profile.headless_flag
+        cmd << profile.headless_flag
+        cmd << prompt if prompt_style == :headless_flag_value
+      end
       cmd << profile.permission_skip_flag if profile.permission_skip_flag
       if profile.add_dir_flag
         add_dirs.each { |dir| cmd << profile.add_dir_flag << dir }
       end
       cmd << profile.budget_flag << max_budget_usd.to_s if profile.budget_flag && max_budget_usd
-      cmd << (profile.name == :codex ? "-" : prompt)
+      cmd << (prompt_style == :stdin ? "-" : prompt) unless prompt_style == :headless_flag_value
       cmd
     end
   end

@@ -80,7 +80,7 @@ module Hive
     # published status schemas. This is deliberately narrower than
     # AgentProfiles.registered_names because custom profiles are a
     # runtime extension point, while generated_by is a wire contract.
-    DIAGNOSTIC_GENERATORS = %w[local claude codex pi].freeze
+    DIAGNOSTIC_GENERATORS = %w[local claude codex pi grok].freeze
 
     # Absolute path to the published JSON Schema files. Use
     # `Hive::Schemas.schema_path(name)` for the current version of a

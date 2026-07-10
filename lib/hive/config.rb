@@ -121,6 +121,11 @@ module Hive
           "bin" => "pi",
           "env_override" => "HIVE_PI_BIN",
           "min_version" => "0.70.2"
+        },
+        "grok" => {
+          "bin" => "grok",
+          "env_override" => "HIVE_GROK_BIN",
+          "min_version" => "0.2.90"
         }
       },
       # Configuration for the 6-review stage's autonomous loop. Each role
@@ -616,7 +621,7 @@ module Hive
     # regardless of the order the operator typed. The names are frozen so
     # callers that receive them back from `normalize_global_agents` cannot
     # mutate the shared constant in place.
-    GLOBAL_AGENT_BACKENDS = %w[claude codex pi].map(&:freeze).freeze
+    GLOBAL_AGENT_BACKENDS = %w[claude codex pi grok].map(&:freeze).freeze
     # Recommended default selection when the operator accepts the prompt
     # default or runs non-interactively — Claude + Codex; Pi is opt-in.
     DEFAULT_GLOBAL_AGENTS = %w[claude codex].map(&:freeze).freeze

@@ -22,4 +22,11 @@ class AgentMessageExtractorTest < Minitest::Test
     line = JSON.generate("type" => "agent_message", "text" => "Line title")
     assert_equal "Line title", Hive::Agent::MessageExtractor.extract(line)
   end
+
+  def test_extracts_grok_text_chunk_without_stripping_significant_space
+    event = { "type" => "text", "data" => " a summary" }
+
+    assert_equal " a summary", Hive::Agent::MessageExtractor.extract(event)
+    assert Hive::Agent::MessageExtractor.streaming_text_event?(event)
+  end
 end

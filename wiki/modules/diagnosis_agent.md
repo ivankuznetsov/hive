@@ -3,11 +3,11 @@ title: Hive::DiagnosisAgent
 type: module
 source: lib/hive/diagnosis_agent.rb
 created: 2026-05-16
-updated: 2026-05-19
+updated: 2026-07-10
 tags: [module, status, diagnostic, agent, recovery]
 ---
 
-**TLDR**: Headless one-shot spawn of the project's configured execute AgentProfile (claude / codex / pi) whose sole purpose is producing a human-readable verdict on a red task's marker state. Writes the result to `<task.folder>/diagnostics/red-status.md`, which `Hive::TaskAction#diagnostic` then prefers over its local bounded extraction. Invoked by `hive status --diagnose <slug> --write` (CLI). The previous TUI `R`-key entry point was removed when the red-status detail screen was simplified to the two-action `[Enter] Recover` / `[o] Open in agent` contract; refreshing a diagnosis is now a shell-only affordance.
+**TLDR**: Headless one-shot spawn of the project's configured execute AgentProfile (claude / codex / pi / grok) whose sole purpose is producing a human-readable verdict on a red task's marker state. Writes the result to `<task.folder>/diagnostics/red-status.md`, which `Hive::TaskAction#diagnostic` then prefers over its local bounded extraction. Invoked by `hive status --diagnose <slug> --write` (CLI). The previous TUI `R`-key entry point was removed when the red-status detail screen was simplified to the two-action `[Enter] Recover` / `[o] Open in agent` contract; refreshing a diagnosis is now a shell-only affordance.
 
 ## Public surface
 
@@ -53,7 +53,7 @@ diagnosed_at: <ISO 8601 UTC timestamp>
 <agent-produced body, secret-redacted and control-byte-sanitised>
 ```
 
-`Hive::TaskAction#diagnostic_generated_by` parses the frontmatter and returns the `generated_by` value as the `Diagnostic.generated_by` field in JSON. The enum is closed in `Hive::Schemas::DIAGNOSTIC_GENERATORS` (`local`, `claude`, `codex`, `pi`); extending it requires updating that constant and the enum in both `schemas/hive-status.v2.json` and `schemas/hive-status-diagnose.v1.json` in the same PR. Registering a custom `AgentProfile` alone is not enough.
+`Hive::TaskAction#diagnostic_generated_by` parses the frontmatter and returns the `generated_by` value as the `Diagnostic.generated_by` field in JSON. The enum is closed in `Hive::Schemas::DIAGNOSTIC_GENERATORS` (`local`, `claude`, `codex`, `pi`, `grok`); extending it requires updating that constant and both current status schemas in the same PR. Registering a custom `AgentProfile` alone is not enough.
 
 ## Consumers
 

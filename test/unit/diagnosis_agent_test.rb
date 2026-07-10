@@ -584,7 +584,8 @@ def test_spawn_profile_builds_codex_command_and_pipes_prompt_to_stdin
     headless_flag: "exec",
     permission_skip_flag: "--dangerously-bypass-approvals-and-sandbox",
     add_dir_flag: "--add-dir",
-    budget_flag: "--budget"
+    budget_flag: "--budget",
+    prompt_style: :stdin
   )
   captured = nil
   agent.define_singleton_method(:run_with_timeout) do |cmd, cwd, stdin_data, timeout_sec|
@@ -612,6 +613,21 @@ def test_build_cmd_omits_optional_flags_for_plain_prompt_profiles
   cmd = agent.send(:build_cmd, profile, "diagnose", [ @folder ], nil)
 
   assert_equal [ "claude", "diagnose" ], cmd
+end
+
+def test_build_cmd_attaches_grok_diagnosis_prompt_to_single_flag
+  agent = Hive::DiagnosisAgent.new(task: @task, spawn: spy_spawn)
+  profile = CommandProfile.new(
+    name: :grok,
+    bin: "grok",
+    headless_flag: "-p",
+    permission_skip_flag: "--always-approve",
+    prompt_style: :headless_flag_value
+  )
+
+  cmd = agent.send(:build_cmd, profile, "diagnose", [ @folder ], nil)
+
+  assert_equal [ "grok", "-p", "diagnose", "--always-approve" ], cmd
 end
 
 def test_run_with_timeout_traps_term_and_kills_pgroup_on_sigterm
@@ -742,6 +758,7 @@ end
 
 CommandProfile = Struct.new(
   :name, :bin, :headless_flag, :permission_skip_flag, :add_dir_flag, :budget_flag,
+  :prompt_style,
   keyword_init: true
 )
 

@@ -186,6 +186,32 @@ These shapes are the input to U12's profile `build_cmd` logic and the integratio
 
 ---
 
+## Grok CLI Addendum (2026-07-10)
+
+Hive now ships a fourth built-in profile for xAI's Grok CLI (minimum
+`0.2.90`). Its verified headless shape is:
+
+```sh
+grok -p '<rendered prompt>' \
+  --always-approve \
+  --output-format streaming-json
+```
+
+`-p` / `--single` consumes the prompt as the flag's value, rather than as a
+trailing positional argument. The stream emits response fragments as
+`{"type":"text","data":"..."}` events followed by `end`; Hive concatenates
+those fragments verbatim so leading spaces survive. The current stream does
+not report token counts, so Hive records usage only if a future event includes
+a real usage object—it does not fabricate a zero-token session.
+
+Authentication supports `XAI_API_KEY`, the backward-compatible
+`GROK_CODE_XAI_API_KEY`, or `grok login --device-auth`. `GROK_HOME` relocates
+the default `~/.grok` state directory. Grok has no `--add-dir` equivalent or
+native dollar-budget flag, so Hive retains its process-group wall-clock limit
+and emits the normal reduced-isolation warning. No Grok skill verifier exists
+yet; the bundled Grok CE reviewer therefore uses a compact, self-contained,
+report-only prompt instead of claiming native skill resolution.
+
 ## Brainstorm Interactive Tmux Addendum
 
 The matrix above describes headless `AgentProfile` spawns. Claude now has

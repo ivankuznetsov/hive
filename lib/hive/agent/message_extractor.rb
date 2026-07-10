@@ -10,6 +10,8 @@ module Hive
         return nil unless data.is_a?(Hash)
 
         case data["type"]
+        when "text"
+          text_chunk(data["data"])
         when "result"
           text_value(data["result"])
         when "item.completed"
@@ -28,6 +30,10 @@ module Hive
         else
           nil
         end
+      end
+
+      def streaming_text_event?(data)
+        data.is_a?(Hash) && data["type"] == "text"
       end
 
       def parse_json_line(line)
@@ -50,6 +56,11 @@ module Hive
 
       def text_value(value)
         text = value.to_s.strip
+        text.empty? ? nil : text
+      end
+
+      def text_chunk(value)
+        text = value.to_s
         text.empty? ? nil : text
       end
     end

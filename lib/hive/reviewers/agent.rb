@@ -5,7 +5,7 @@ require "hive/stages/base"
 
 module Hive
   module Reviewers
-    # Agent-based reviewer: spawns an LLM CLI (claude, codex, pi) with a
+    # Agent-based reviewer: spawns an LLM CLI (claude, codex, pi, grok) with a
     # rendered prompt that invokes a CE skill on the worktree's diff.
     # The agent writes its findings to `reviews/<output_basename>-<pass>.md`;
     # success is detected via the profile's :output_file_exists mode (file

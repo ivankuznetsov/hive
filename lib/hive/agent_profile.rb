@@ -12,6 +12,7 @@ module Hive
   # See docs/notes/headless-agent-cli-matrix.md for the source of truth on
   # each CLI's flag mapping. Profiles ship in lib/hive/agent_profiles/.
   class AgentProfile
+    PROMPT_STYLES = %i[positional headless_flag_value stdin].freeze
     # Status-detection modes. handle_exit branches on these:
     #
     # - :state_file_marker -- read the marker on task.state_file (today's
@@ -29,6 +30,7 @@ module Hive
     # the per-stage timeouts the runner enforces around spawn_and_wait.
     VERSION_CHECK_TIMEOUT_SEC = 10
 
+    attr_reader :prompt_style
     attr_reader :name, :bin_default, :env_bin_override_key,
                 :headless_flag, :permission_skip_flag, :add_dir_flag,
                 :budget_flag, :output_format_flags, :version_flag,
@@ -45,7 +47,7 @@ module Hive
     #
     # Required kwargs (passing one of these is the cost of registering at
     # all — every profile genuinely needs them):
-    #   name:                 Symbol identifier (e.g. :claude, :codex, :pi)
+    #   name:                 Symbol identifier (e.g. :claude, :codex, :pi, :grok)
     #   bin_default:          String path to the binary (env override key
     #                         supplied via env_bin_override_key:)
     #   headless_flag:        flag/word that selects headless mode
@@ -64,6 +66,9 @@ module Hive
     #   min_version:           default nil (no version gate)
     #   preflight:             default nil (no extra pre-spawn check)
     #   usage_extractor:       default nil (no token-usage extraction)
+    #   prompt_style:          default :stdin for a profile named :codex,
+    #                          otherwise :positional (backward compatible
+    #                          with pre-profile-style custom registrations)
     #   status_detection_mode: default :output_file_exists (the most
     #                          common mode across shipped profiles —
     #                          codex and pi both use it; only claude
@@ -86,7 +91,14 @@ module Hive
                    status_detection_mode: :output_file_exists,
                    preflight: nil,
                    usage_extractor: nil,
-                   skill_verifier: nil)
+                   skill_verifier: nil,
+                   prompt_style: nil)
+      prompt_style ||= name.to_sym == :codex ? :stdin : :positional
+      unless PROMPT_STYLES.include?(prompt_style)
+        raise ArgumentError,
+              "unknown prompt_style: #{prompt_style.inspect}; valid: #{PROMPT_STYLES.inspect}"
+      end
+
       unless STATUS_DETECTION_MODES.include?(status_detection_mode)
         raise ArgumentError,
               "unknown status_detection_mode: #{status_detection_mode.inspect}; " \
@@ -109,6 +121,7 @@ module Hive
       @preflight = preflight
       @usage_extractor = usage_extractor || ->(_event) { nil }
       @skill_verifier = skill_verifier
+      @prompt_style = prompt_style
 
       freeze
     end
@@ -303,7 +316,8 @@ module Hive
         status_detection_mode: @status_detection_mode,
         preflight: @preflight,
         usage_extractor: @usage_extractor,
-        skill_verifier: @skill_verifier
+        skill_verifier: @skill_verifier,
+        prompt_style: @prompt_style
       }
     end
 

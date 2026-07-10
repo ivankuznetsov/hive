@@ -157,6 +157,14 @@ class AgentProfileTest < Minitest::Test
     assert_equal "MY_CUSTOM_BIN", overridden.env_bin_override_key
   end
 
+  def test_with_overrides_preserves_prompt_style
+    profile = make_profile(prompt_style: :headless_flag_value)
+
+    overridden = profile.with_overrides("min_version" => "9.9.9")
+
+    assert_equal :headless_flag_value, overridden.prompt_style
+  end
+
   def test_with_overrides_raises_for_non_hash
     profile = make_profile
 

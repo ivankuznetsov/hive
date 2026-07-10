@@ -1,4 +1,6 @@
 require "test_helper"
+require "tmpdir"
+require "fileutils"
 require "json"
 require "hive/agent_profiles"
 
@@ -67,12 +69,14 @@ class AgentProfilesTest < Minitest::Test
     Hive::AgentProfiles.register(:claude, Hive::AgentProfiles::CLAUDE)
     Hive::AgentProfiles.register(:codex, Hive::AgentProfiles::CODEX)
     Hive::AgentProfiles.register(:pi, Hive::AgentProfiles::PI)
+    Hive::AgentProfiles.register(:grok, Hive::AgentProfiles::GROK)
   end
 
   def test_lookup_returns_v1_built_in_profiles
     assert_kind_of Hive::AgentProfile, Hive::AgentProfiles.lookup(:claude)
     assert_kind_of Hive::AgentProfile, Hive::AgentProfiles.lookup(:codex)
     assert_kind_of Hive::AgentProfile, Hive::AgentProfiles.lookup(:pi)
+    assert_kind_of Hive::AgentProfile, Hive::AgentProfiles.lookup(:grok)
   end
 
   def test_lookup_accepts_string_or_symbol
@@ -118,6 +122,36 @@ class AgentProfilesTest < Minitest::Test
     assert_includes names, :claude
     assert_includes names, :codex
     assert_includes names, :pi
+    assert_includes names, :grok
+  end
+
+  def test_grok_prompt_rides_the_headless_flag_value
+    grok = Hive::AgentProfiles.lookup(:grok)
+
+    assert_equal :headless_flag_value, grok.prompt_style
+  end
+
+  def test_grok_profile_shape
+    grok = Hive::AgentProfiles.lookup(:grok)
+
+    assert_equal "grok", grok.bin_default
+    assert_equal "-p", grok.headless_flag
+    assert_equal "--always-approve", grok.permission_skip_flag
+    assert_equal [ "--output-format", "streaming-json" ], grok.output_format_flags
+    assert grok.headless_supported
+  end
+
+  def test_grok_logged_in_probes_auth_json
+    Dir.mktmpdir do |home|
+      refute Hive::AgentProfiles.logged_in?(:grok, home: home), "no dir yet"
+      FileUtils.mkdir_p(File.join(home, ".grok"))
+      File.write(File.join(home, ".grok", "auth.json"), "{}")
+
+      refute Hive::AgentProfiles.logged_in?(:grok, home: home), "empty stub is not a credential"
+      File.write(File.join(home, ".grok", "auth.json"), '{"access_token":"x"}')
+
+      assert Hive::AgentProfiles.logged_in?(:grok, home: home)
+    end
   end
 
   def test_registered_check

@@ -476,13 +476,14 @@
           "maxItems": 20
         },
         "generated_by": {
-          "description": "Origin of the diagnostic body. \"local\" = TaskAction's bounded marker+artifact extraction; agent-profile names (claude / codex / pi) = a headless Hive::DiagnosisAgent run wrote diagnostics/red-status.md. Extending this enum requires registering a new profile in Hive::AgentProfiles AND updating this enum in the same PR (covered by test/unit/schema_files_test.rb).",
+          "description": "Origin of the diagnostic body. \"local\" = TaskAction's bounded marker+artifact extraction; agent-profile names (claude / codex / pi / grok) = a headless Hive::DiagnosisAgent run wrote diagnostics/red-status.md. Extending this enum requires registering a new profile in Hive::AgentProfiles AND updating this enum in the same PR (covered by test/unit/schema_files_test.rb).",
           "type": "string",
           "enum": [
             "local",
             "claude",
             "codex",
-            "pi"
+            "pi",
+            "grok"
           ]
         },
         "marker_signature": {

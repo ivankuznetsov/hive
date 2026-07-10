@@ -2105,6 +2105,15 @@ class SchemaFilesTest < Minitest::Test
     end
   end
 
+  def test_refactor_patrol_retains_v1_while_v2_is_current
+    assert_equal 2, Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-refactor-patrol")
+
+    v1 = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 1)))
+    v2 = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 2)))
+    assert_equal 1, v1.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+    assert_equal 2, v2.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+  end
+
   # ── hive-dispatch-request: claimed-file contract (#247) ─────────────────
 
   # A `<id>.json.claimed` file still self-declares schema=hive-dispatch-request

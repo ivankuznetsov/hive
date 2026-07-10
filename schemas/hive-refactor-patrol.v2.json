@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-refactor-patrol.v2.json",
+  "title": "hive refactor patrol output (v2)",
+  "description": "PR-scoped architecture patrol discovery and lifecycle output.",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
+  ],
+  "$defs": {
+    "SourcePr": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "url": { "type": "string" },
+        "number": { "type": "integer", "minimum": 1 },
+        "repository": { "type": "string" },
+        "registration": { "type": "string" },
+        "base_branch": { "type": "string" },
+        "base_sha": { "type": "string" },
+        "merge_sha": { "type": "string" },
+        "merged_at": { "type": "string" },
+        "changed_paths": { "type": "array", "items": { "type": "string" } },
+        "manifest_checksum": { "type": "string" }
+      }
+    },
+    "Disposition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "feature_id", "fingerprint", "score", "admissible", "reasons"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "feature_id": { "type": "string", "minLength": 1 },
+        "fingerprint": { "type": "string", "minLength": 1 },
+        "score": { "type": "number" },
+        "admissible": { "type": "boolean" },
+        "reasons": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "reference": { "type": "string", "minLength": 1 }
+      }
+    },
+    "ReviewError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["feature_id", "error"],
+      "properties": {
+        "feature_id": { "type": "string" },
+        "error": { "type": "string", "minLength": 1 },
+        "message": { "type": "string" },
+        "details": { "type": "object" }
+      }
+    },
+    "Attempt": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "Action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "canonical_action_id", "thesis_id", "kind", "owner_job_id",
+        "outcome", "terminal", "receipts"
+      ],
+      "properties": {
+        "canonical_action_id": { "type": "string", "minLength": 1 },
+        "thesis_id": { "type": "string", "minLength": 1 },
+        "thesis_fingerprint": { "type": "string", "minLength": 1 },
+        "kind": { "enum": ["fix", "issue"] },
+        "owner_job_id": { "type": "string", "minLength": 1 },
+        "outcome": { "type": "string", "minLength": 1 },
+        "terminal": { "type": "boolean" },
+        "receipts": { "type": "object" }
+      }
+    },
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "schema_version", "ok", "job_id", "project", "project_root",
+        "dry_run", "source_pr", "analysis_sha", "complete", "features_mapped",
+        "accepted", "flagged", "suppressed", "review_errors", "zero_reason",
+        "attempts", "actions"
+      ],
+      "properties": {
+        "schema": { "const": "hive-refactor-patrol" },
+        "schema_version": { "const": 2 },
+        "ok": { "const": true },
+        "job_id": { "type": "string" },
+        "project": { "type": "string" },
+        "project_root": { "type": "string" },
+        "dry_run": { "type": "boolean" },
+        "source_pr": { "$ref": "#/$defs/SourcePr" },
+        "analysis_sha": { "type": "string" },
+        "complete": { "type": "boolean" },
+        "features_mapped": { "type": "integer", "minimum": 0 },
+        "accepted": { "type": "array", "items": { "$ref": "#/$defs/Disposition" } },
+        "flagged": { "type": "array", "items": { "$ref": "#/$defs/Disposition" } },
+        "suppressed": { "type": "array", "items": { "$ref": "#/$defs/Disposition" } },
+        "review_errors": { "type": "array", "items": { "$ref": "#/$defs/ReviewError" } },
+        "zero_reason": { "type": ["string", "null"], "enum": ["no_mapped_slice", "no_theses", "all_suppressed", null] },
+        "attempts": { "type": "array", "items": { "$ref": "#/$defs/Attempt" } },
+        "actions": { "type": "array", "items": { "$ref": "#/$defs/Action" } }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "schema_version", "ok", "job_id", "source_pr", "complete",
+        "error_class", "error_kind", "exit_code", "message"
+      ],
+      "properties": {
+        "schema": { "const": "hive-refactor-patrol" },
+        "schema_version": { "const": 2 },
+        "ok": { "const": false },
+        "job_id": { "type": "string" },
+        "source_pr": { "$ref": "#/$defs/SourcePr" },
+        "complete": { "const": false },
+        "error_class": { "type": "string" },
+        "error_kind": { "enum": ["config", "error"] },
+        "exit_code": { "type": "integer" },
+        "message": { "type": "string" }
+      }
+    }
+  }
+}

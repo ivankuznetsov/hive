@@ -270,6 +270,8 @@ class RefactorPatrolCommandTest < Minitest::Test
 
       payload = JSON.parse(out)
       assert_equal Hive::ExitCodes::SOFTWARE, status
+      assert_equal 1, payload.fetch("schema_version")
+      assert refactor_schemer.valid?(payload), refactor_schemer.validate(payload).map { |e| e["error"] }.inspect
       assert_equal false, payload.fetch("ok")
       assert_equal "InternalError", payload.fetch("error_class")
       assert_equal "error", payload.fetch("error_kind")
@@ -301,6 +303,8 @@ class RefactorPatrolCommandTest < Minitest::Test
 
         assert_equal Hive::ExitCodes::CONFIG, status
         assert_match(/refactor_patrol.enabled/, err)
+        assert_equal 1, payload.fetch("schema_version")
+        assert refactor_schemer.valid?(payload), refactor_schemer.validate(payload).map { |e| e["error"] }.inspect
         assert_equal false, payload.fetch("ok")
         assert_equal "config", payload.fetch("error_kind")
       end
@@ -465,7 +469,9 @@ class RefactorPatrolCommandTest < Minitest::Test
   end
 
   def refactor_schemer
-    @refactor_schemer ||= JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol"))))
+    @refactor_schemer ||= JSONSchemer.schema(
+      JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 1)))
+    )
   end
 
   def thesis_schemer

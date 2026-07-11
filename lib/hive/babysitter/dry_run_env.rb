@@ -1,20 +1,17 @@
 require "fileutils"
 require "rbconfig"
 require "shellwords"
+require "tmpdir"
 
 module Hive
   module Babysitter
     module DryRunEnv
       module_function
 
-      # The overlay-bin shims and skip log live at the worktree root. Both are
-      # transient and gitignored (see the repo `.gitignore`) so a stage-exit
-      # CleanExit never flags them as out-of-scope residue. The overlay dir is
-      # pure tooling — no caller reads it after the block — so we remove it on
-      # exit to keep the worktree pristine even in repos lacking the gitignore
-      # entry. The skip log is deliberately left in place: it is the dry-run's
-      # diagnostic record and callers/tests read it after `with_env` returns.
-      OVERLAY_DIRNAME = ".hive-babysitter-dry-run-bin"
+      # The private overlay-bin is outside the untrusted worktree and removed
+      # on exit. The worktree-local skip log is deliberately left in place: it
+      # is the dry-run's diagnostic record and callers/tests read it afterward.
+      OVERLAY_PREFIX = "hive-babysitter-dry-run-bin-"
       SKIP_LOG_BASENAME = ".babysitter-dry-run-skipped.log"
       RUBY_STARTUP_ENV = %w[
         RUBYOPT RUBYLIB BUNDLE_GEMFILE BUNDLE_BIN_PATH GEM_HOME GEM_PATH
@@ -28,7 +25,6 @@ module Hive
         real_gh = which("gh").to_s
         skip_log = File.join(worktree_path, SKIP_LOG_BASENAME)
         overlay = prepare_overlay(
-          worktree_path,
           real_git: real_git,
           real_gh: real_gh,
           gh_config_dir: gh_config_dir,
@@ -47,12 +43,11 @@ module Hive
         yield
       ensure
         old&.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
-        FileUtils.rm_rf(File.join(worktree_path, OVERLAY_DIRNAME))
+        FileUtils.rm_rf(overlay) if overlay
       end
 
-      def prepare_overlay(worktree_path, real_git:, real_gh:, gh_config_dir: nil, skip_log:)
-        overlay = File.join(worktree_path, OVERLAY_DIRNAME)
-        FileUtils.mkdir_p(overlay)
+      def prepare_overlay(real_git:, real_gh:, gh_config_dir: nil, skip_log:)
+        overlay = Dir.mktmpdir(OVERLAY_PREFIX)
         root = File.expand_path("../../..", __dir__)
         {
           "git" => [
@@ -72,21 +67,24 @@ module Hive
           ]
         }.each do |name, (target, env)|
           link = File.join(overlay, name)
-          FileUtils.rm_f(link)
           env_setup = env.map { |env_name, value| shell_env_assignment(env_name, value) }.join("\n")
           # Start the overlay through /bin/sh, not Ruby: Ruby consumes RUBYOPT/RUBYLIB
           # before script code runs, so a Ruby shim cannot scrub those variables in time.
           # The shell wrapper clears Ruby/Bundler/Gem startup env, pins the handoff env, and
           # then invokes the shared Ruby stub through the running Ruby's absolute path.
-          File.write(link, <<~SH)
-            #!/bin/sh
-            unset #{RUBY_STARTUP_ENV.join(' ')}
-            #{env_setup}
-            exec #{shell_word(RbConfig.ruby)} #{shell_word(target)} "$@"
-          SH
-          FileUtils.chmod("+x", link)
+          File.open(link, File::WRONLY | File::CREAT | File::EXCL | File::NOFOLLOW, 0o700) do |file|
+            file.write(<<~SH)
+              #!/bin/sh
+              unset #{RUBY_STARTUP_ENV.join(' ')}
+              #{env_setup}
+              exec #{shell_word(RbConfig.ruby)} #{shell_word(target)} "$@"
+            SH
+          end
         end
         overlay
+      rescue
+        FileUtils.rm_rf(overlay) if overlay
+        raise
       end
 
       def shell_env_assignment(name, value)

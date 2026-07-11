@@ -127,7 +127,7 @@ class BabysitterPrFixerTest < Minitest::Test
         end
       end
 
-      assert_includes seen_path, ".hive-babysitter-dry-run-bin"
+      assert_includes seen_path, "hive-babysitter-dry-run-bin-"
       assert File.exist?(File.join(worktree_path, ".babysitter-dry-run-plan.md"))
     end
   end

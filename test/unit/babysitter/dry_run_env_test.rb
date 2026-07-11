@@ -26,24 +26,34 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
-  # The shims are pure tooling that nobody reads after the block, so `with_env`
-  # removes the overlay dir on exit. The skip log is left in place on purpose —
-  # the test above reads it after the block returns.
-  def test_with_env_removes_overlay_bin_on_exit
+  def test_with_env_ignores_tracked_overlay_symlink
     with_tmp_dir do |dir|
-      overlay = File.join(dir, ".hive-babysitter-dry-run-bin")
+      worktree = File.join(dir, "worktree")
+      outside = File.join(dir, "outside")
+      overlay_link = File.join(worktree, ".hive-babysitter-dry-run-bin")
+      FileUtils.mkdir_p([ worktree, outside ])
+      File.write(File.join(outside, "git"), "outside git\n")
+      File.write(File.join(outside, "gh"), "outside gh\n")
+      File.symlink(outside, overlay_link)
+      overlay = nil
 
-      Hive::Babysitter::DryRunEnv.with_env(dir) do
+      Hive::Babysitter::DryRunEnv.with_env(worktree) do
+        overlay = ENV.fetch("PATH").split(File::PATH_SEPARATOR).first
+        refute_equal overlay_link, overlay
+        refute overlay.start_with?("#{worktree}#{File::SEPARATOR}")
         assert File.directory?(overlay), "overlay shims must exist inside the block"
+        assert_equal 0o700, File.stat(overlay).mode & 0o777
         assert File.executable?(File.join(overlay, "git"))
         assert File.executable?(File.join(overlay, "gh"))
-        # Exercise a mutating command so the skip log is actually written.
         _out, _err, status = Open3.capture3("git", "push", "origin", "HEAD:feature")
         assert status.success?
       end
 
-      refute File.exist?(overlay), "overlay-bin dir must be cleaned up on exit"
-      assert File.exist?(File.join(dir, ".babysitter-dry-run-skipped.log")),
+      refute_path_exists overlay, "private overlay must be cleaned up on exit"
+      assert File.symlink?(overlay_link), "tracked worktree overlay symlink must remain untouched"
+      assert_equal "outside git\n", File.read(File.join(outside, "git"))
+      assert_equal "outside gh\n", File.read(File.join(outside, "gh"))
+      assert File.exist?(File.join(worktree, ".babysitter-dry-run-skipped.log")),
              "skip log must survive exit — it is the dry-run diagnostic record"
     end
   end
@@ -56,7 +66,6 @@ class BabysitterDryRunEnvTest < Minitest::Test
     %w[
       .babysitter-dry-run-skipped.log
       .babysitter-dry-run-plan.md
-      .hive-babysitter-dry-run-bin/git
     ].each do |path|
       _out, _err, status = Open3.capture3("git", "-C", repo_root, "check-ignore", "-q", path)
       assert status.success?, "#{path} must be gitignored (git check-ignore failed)"
@@ -353,6 +362,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
     with_tmp_dir do |dir|
       worktree = File.join(dir, "worktree")
       outside_log = File.join(dir, "outside.log")
+      FileUtils.mkdir_p(worktree)
       File.write(outside_log, "existing\n")
 
       Hive::Babysitter::DryRunEnv.with_env(worktree) do

@@ -29,21 +29,26 @@ module Hive
       end
 
       def open(thesis:, patch:, job_id:, canonical_action_id:, source:,
-               record_intent:, creation_attempted: false)
+               record_intent:, creation_attempted: false,
+               authorize_push: -> { true })
         intent_persisted = false
         return result("patch_not_publishable", true) unless patch.publishable?
         assert_patch_identity!(patch)
+
+        repository = source.fetch("repository")
+        host = source_github_host!(source, repository)
+        @gh.ensure_authenticated!(@cfg, host: host)
+        existing = @gh.lookup_prs_for_branch(
+          patch.worktree_path, patch.branch,
+          repository: repository, host: host, cfg: @cfg
+        )
+        reconciliation = reconcile_remote_set(
+          existing, thesis, patch, job_id, canonical_action_id, source
+        )
+        return reconciliation if reconciliation
+
         unless current_head == patch.publication_base_sha
           return result("trunk_drift_retry", false, receipts: patch_receipts(patch))
-        end
-
-        @gh.ensure_authenticated!(@cfg)
-        existing = @gh.lookup_prs_for_branch(patch.worktree_path, patch.branch, cfg: @cfg)
-        matched = existing.min_by { |pr| remote_pr_number(pr) }
-        if matched
-          return reconcile_existing(
-            matched, thesis, patch, job_id, canonical_action_id, source
-          )
         end
         if creation_attempted
           return result(
@@ -57,7 +62,16 @@ module Hive
         hits = Hive::SecretPatterns.scan(body) + Hive::SecretPatterns.scan(diff)
         return result("secret_detected", true, receipts: patch_receipts(patch)) if hits.any?
 
-        @gh.push_branch!(patch.worktree_path, patch.branch, cfg: @cfg)
+        remote_oid = @gh.remote_branch_oid(patch.worktree_path, patch.branch, cfg: @cfg)
+        unless authorize_push.call.equal?(true)
+          return result("authority_revoked", false, receipts: patch_receipts(patch))
+        end
+        unless remote_oid == patch.commit_sha
+          @gh.push_branch!(
+            patch.worktree_path, patch.branch, cfg: @cfg,
+            expected_remote_oid: remote_oid
+          )
+        end
         begin
           intent_receipt = record_intent.call
         rescue StandardError => e
@@ -82,18 +96,39 @@ module Hive
 
       private
 
-      def reconcile_existing(pr, thesis, patch, job_id, action_id, source)
-        conflicts = remote_conflicts(pr, thesis, patch, job_id, action_id, source)
-        unless conflicts.empty?
+      def reconcile_remote_set(prs, thesis, patch, job_id, action_id, source)
+        return nil if prs.empty?
+
+        classified = prs.map do |pr|
+          { record: pr, conflicts: remote_conflicts(pr, thesis, patch, job_id, action_id, source) }
+        end
+        matches = classified.select { |candidate| candidate.fetch(:conflicts).empty? }
+        if matches.one?
+          return reconcile_existing(
+            matches.first.fetch(:record), thesis, patch, job_id, action_id, source
+          )
+        end
+        if matches.size > 1
           return result(
             "remote_pr_conflict", false,
             receipts: patch_receipts(patch).merge(
-              "remote_pr_url" => pr.is_a?(Hash) ? pr["url"] : nil,
-              "remote_conflicts" => conflicts
-            ).compact
+              "remote_conflicts" => [ "multiple_identity_matches" ],
+              "matching_pr_numbers" => matches.map { |candidate| remote_pr_number(candidate.fetch(:record)) }.sort,
+              "matching_pr_urls" => matches.filter_map { |candidate| candidate.fetch(:record)["url"] }.sort
+            )
           )
         end
 
+        result(
+          "remote_pr_conflict", false,
+          receipts: patch_receipts(patch).merge(
+            "remote_conflicts" => [ "no_identity_match" ],
+            "remote_pr_candidates" => visible_remote_candidates(classified)
+          )
+        )
+      end
+
+      def reconcile_existing(pr, thesis, patch, job_id, action_id, source)
         url = pr.fetch("url")
         case pr.fetch("state")
         when "OPEN"
@@ -136,11 +171,13 @@ module Hive
       end
 
       def create_pr(patch, source, title, body)
+        repository = source.fetch("repository")
+        host = source_github_host!(source, repository)
         Tempfile.create([ "hive-refactor-pr-", ".md" ]) do |file|
           file.write(body)
           file.flush
           args = [
-            "gh", "pr", "create", "--repo", source.fetch("repository"),
+            "gh", "pr", "create", "--repo", "#{host}/#{repository}",
             "--base", source.fetch("base_branch"), "--head", patch.branch,
             "--title", title, "--body-file", file.path
           ]
@@ -236,6 +273,20 @@ module Hive
         pr.fetch("number")
       end
 
+      def visible_remote_candidates(classified)
+        classified.sort_by do |candidate|
+          number = remote_pr_number(candidate.fetch(:record))
+          number.positive? ? [ 0, number ] : [ 1, 0 ]
+        end.map do |candidate|
+          pr = candidate.fetch(:record)
+          {
+            "number" => remote_pr_number(pr),
+            "url" => pr.is_a?(Hash) ? pr["url"] : nil,
+            "conflicts" => candidate.fetch(:conflicts)
+          }.compact
+        end
+      end
+
       def remote_conflicts(pr, thesis, patch, job_id, action_id, source)
         return [ "invalid_record" ] unless pr.is_a?(Hash)
 
@@ -269,12 +320,25 @@ module Hive
         return false unless uri.is_a?(URI::HTTP) && source_uri.is_a?(URI::HTTP) && match
         return false unless uri.scheme == source_uri.scheme && uri.host&.casecmp?(source_uri.host.to_s)
         return false unless match[1] == source.fetch("repository")
-        return false unless uri.query.nil? && uri.fragment.nil?
+        return false unless uri.userinfo.nil? && uri.query.nil? && uri.fragment.nil?
         return false if expected_number && (!expected_number.is_a?(Integer) || match[2].to_i != expected_number)
 
         true
       rescue KeyError, URI::InvalidURIError
         false
+      end
+
+      def source_github_host!(source, repository)
+        uri = URI.parse(source.fetch("url").to_s)
+        match = uri.path.match(%r{\A/([^/]+/[^/]+)/pull/([1-9]\d*)\z})
+        valid = uri.is_a?(URI::HTTP) && uri.host && match &&
+                match[1].casecmp?(repository.to_s) && uri.userinfo.nil? &&
+                uri.query.nil? && uri.fragment.nil?
+        raise Hive::GhError, "source PR URL does not match its GitHub repository" unless valid
+
+        uri.host
+      rescue KeyError, URI::InvalidURIError
+        raise Hive::GhError, "source PR URL is invalid"
       end
 
       def branch_diff(patch)

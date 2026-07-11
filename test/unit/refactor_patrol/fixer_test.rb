@@ -51,7 +51,7 @@ class RefactorPatrolFixerTest < Minitest::Test
   def test_recovered_commit_is_amended_when_formatter_converges_new_bytes
     with_repo do |repo, analysis_sha|
       first = fixer(repo, agent: lambda do |worktree_path:, **|
-        File.write(File.join(worktree_path, "lib/checkout.rb"), "module Checkout\nend\n")
+        File.write(File.join(worktree_path, "lib/checkout.rb"), "module Checkout\n  def self.call = :old\n  FIXED = true\nend\n")
         { status: :ok }
       end).attempt(thesis: thesis, job_id: "job-7", analysis_sha: analysis_sha)
       assert first.publishable?
@@ -62,7 +62,7 @@ class RefactorPatrolFixerTest < Minitest::Test
           object.define_singleton_method(:validate) do |path, names:|
             validations += 1
             if validations == 1
-              File.write(File.join(path, "lib/checkout.rb"), "module Checkout\n  FORMATTED = true\nend\n")
+              File.write(File.join(path, "lib/checkout.rb"), "module Checkout\n  def self.call = :old\n  FORMATTED = true\nend\n")
             end
             { "passed" => true, "commands" => names.map { |name| { "name" => name, "exit_code" => 0 } } }
           end
@@ -123,6 +123,19 @@ class RefactorPatrolFixerTest < Minitest::Test
     end
   end
 
+  def test_dirty_registered_checkout_fails_before_agent_or_worktree_mutation
+    with_repo do |repo, analysis_sha|
+      File.write(File.join(repo, "README.md"), "uncommitted\n")
+
+      patch = fixer(repo, agent: ->(**) { flunk "dirty checkout must not run the agent" })
+              .attempt(thesis: thesis, job_id: "job-7", analysis_sha: analysis_sha)
+
+      assert_equal "fix_error", patch.outcome
+      refute patch.terminal
+      assert_includes patch.details.fetch("error"), "must be clean"
+    end
+  end
+
   def test_fix_provider_without_workspace_write_capability_fails_closed
     with_repo do |repo, _analysis_sha|
       subject = fixer(
@@ -139,7 +152,7 @@ class RefactorPatrolFixerTest < Minitest::Test
   def test_agent_shared_git_config_mutation_is_a_terminal_safety_violation
     with_repo do |repo, analysis_sha|
       agent = lambda do |worktree_path:, **|
-        File.write(File.join(worktree_path, "lib/checkout.rb"), "module Checkout\nend\n")
+        File.write(File.join(worktree_path, "lib/checkout.rb"), "module Checkout\n  def self.call = :old\n  UPDATED = true\nend\n")
         run!("git", "-C", repo, "config", "patrol.compromised", "yes")
         { status: :ok }
       end
@@ -154,11 +167,29 @@ class RefactorPatrolFixerTest < Minitest::Test
     end
   end
 
-  def test_agent_sibling_ref_mutation_is_a_terminal_safety_violation
+  def test_unrelated_ref_movement_does_not_misclassify_the_agent_patch
     with_repo do |repo, analysis_sha|
       agent = lambda do |worktree_path:, **|
-        File.write(File.join(worktree_path, "lib/checkout.rb"), "module Checkout\nend\n")
+        File.write(File.join(worktree_path, "lib/checkout.rb"), "module Checkout\n  def self.call = :old\n  UPDATED = true\nend\n")
         run!("git", "-C", repo, "update-ref", "refs/heads/agent-owned", analysis_sha)
+        { status: :ok }
+      end
+
+      patch = fixer(repo, agent: agent)
+              .attempt(thesis: thesis, job_id: "job-7", analysis_sha: analysis_sha)
+
+      assert patch.publishable?, patch.to_h.inspect
+    end
+  end
+
+  def test_agent_fix_branch_ref_mutation_is_a_terminal_safety_violation
+    with_repo do |repo, analysis_sha|
+      agent = lambda do |worktree_path:, **|
+        File.write(File.join(worktree_path, "lib/checkout.rb"), "module Checkout\n  def self.call = :old\n  UPDATED = true\nend\n")
+        tree = run!("git", "-C", repo, "rev-parse", "#{analysis_sha}^{tree}").strip
+        unrelated = run!("git", "-C", repo, "commit-tree", tree, "-m", "agent ref rewrite").strip
+        branch = run!("git", "-C", worktree_path, "symbolic-ref", "HEAD").strip
+        run!("git", "-C", repo, "update-ref", branch, unrelated)
         { status: :ok }
       end
 
@@ -167,7 +198,7 @@ class RefactorPatrolFixerTest < Minitest::Test
 
       assert_equal "agent_control_plane_violation", patch.outcome
       assert patch.terminal
-      assert_includes patch.details.fetch("changed"), "shared_git_refs"
+      assert_includes patch.details.fetch("changed"), "fix_branch_ref"
       refute File.directory?(patch.worktree_path)
     end
   end
@@ -214,7 +245,7 @@ class RefactorPatrolFixerTest < Minitest::Test
       item = thesis
       item.required_validation = { "commands" => [ "docs" ] }
       agent = lambda do |worktree_path:, **|
-        File.write(File.join(worktree_path, "lib/checkout.rb"), "module Checkout\nend\n")
+        File.write(File.join(worktree_path, "lib/checkout.rb"), "module Checkout\n  def self.call = :old\n  UPDATED = true\nend\n")
         { status: :ok }
       end
 
@@ -236,7 +267,7 @@ class RefactorPatrolFixerTest < Minitest::Test
             if validations == 1
               File.write(
                 File.join(path, "lib/checkout.rb"),
-                "module Checkout\n  FORMATTED = true\nend\n"
+                "module Checkout\n  def self.call = :old\n  FORMATTED = true\nend\n"
               )
             end
             { "passed" => true, "commands" => names.map { |name| { "name" => name, "exit_code" => 0 } } }
@@ -244,7 +275,7 @@ class RefactorPatrolFixerTest < Minitest::Test
         end
       end
       agent = lambda do |worktree_path:, **|
-        File.write(File.join(worktree_path, "lib/checkout.rb"), "module Checkout;end\n")
+        File.write(File.join(worktree_path, "lib/checkout.rb"), "module Checkout\n  def self.call = :old\n  UPDATED = true\nend\n")
         { status: :ok }
       end
 
@@ -272,7 +303,7 @@ class RefactorPatrolFixerTest < Minitest::Test
         end
       end
       agent = lambda do |worktree_path:, **|
-        File.write(File.join(worktree_path, "lib/checkout.rb"), "module Checkout\nend\n")
+        File.write(File.join(worktree_path, "lib/checkout.rb"), "module Checkout\n  def self.call = :old\n  UPDATED = true\nend\n")
         { status: :ok }
       end
 
@@ -403,7 +434,9 @@ class RefactorPatrolFixerTest < Minitest::Test
   def test_secret_scan_blocks_when_the_shared_guardrail_secret_pattern_is_disabled
     with_repo do |repo, analysis_sha|
       agent = lambda do |worktree_path:, **|
-        File.write(File.join(worktree_path, "lib/checkout.rb"), "TOKEN = 'sk-#{'a' * 48}'\n")
+        File.open(File.join(worktree_path, "lib/checkout.rb"), "a") do |file|
+          file.puts("TOKEN = 'sk-#{'a' * 48}'")
+        end
         { status: :ok }
       end
       overrides = {
@@ -420,22 +453,69 @@ class RefactorPatrolFixerTest < Minitest::Test
     end
   end
 
-  def test_overlapping_trunk_advance_requires_reanalysis_instead_of_rebase
+  def test_overlapping_trunk_advance_reruns_the_fix_from_current_trunk
     with_repo do |repo, analysis_sha|
+      calls = 0
       agent = lambda do |worktree_path:, **|
+        calls += 1
         File.write(File.join(worktree_path, "lib/checkout.rb"), "module Checkout\n  def self.call = :fixed\nend\n")
-        File.write(File.join(repo, "lib/checkout.rb"), "module Checkout\n  def self.call = :trunk\nend\n")
-        run!("git", "-C", repo, "add", ".")
-        run!("git", "-C", repo, "commit", "-m", "advance trunk", "--quiet")
+        if calls == 1
+          File.write(File.join(repo, "lib/checkout.rb"), "module Checkout\n  def self.call = :trunk\nend\n")
+          run!("git", "-C", repo, "add", ".")
+          run!("git", "-C", repo, "commit", "-m", "advance trunk", "--quiet")
+        end
         { status: :ok }
       end
 
       patch = fixer(repo, agent: agent)
               .attempt(thesis: thesis, job_id: "job-7", analysis_sha: analysis_sha)
 
-      assert_equal "trunk_overlap_reanalysis_required", patch.outcome
-      assert patch.terminal
+      assert patch.publishable?, patch.to_h.inspect
+      assert_equal 2, calls
+      assert_equal analysis_sha, patch.analysis_sha
+      assert_equal run!("git", "-C", repo, "rev-parse", "HEAD").strip,
+                   patch.publication_base_sha
+      assert_equal true, patch.details.fetch("reanalyzed_after_trunk_overlap")
       assert_equal [ "lib/checkout.rb" ], patch.details.fetch("overlap")
+    end
+  end
+
+  def test_registered_checkout_branch_switch_during_fix_fails_closed
+    with_repo do |repo, analysis_sha|
+      run!("git", "-C", repo, "branch", "diverted")
+      agent = lambda do |worktree_path:, **|
+        File.write(File.join(worktree_path, "lib/checkout.rb"), "module Checkout\n  def self.call = :old\n  UPDATED = true\nend\n")
+        run!("git", "-C", repo, "switch", "diverted", "--quiet")
+        { status: :ok }
+      end
+
+      patch = fixer(repo, agent: agent)
+              .attempt(thesis: thesis, job_id: "job-7", analysis_sha: analysis_sha)
+
+      assert_equal "fix_error", patch.outcome
+      refute patch.terminal
+      assert_includes patch.details.fetch("error"), "configured default branch"
+      refute File.directory?(patch.worktree_path)
+    end
+  end
+
+  def test_registered_default_branch_rewrite_during_fix_fails_closed
+    with_repo do |repo, analysis_sha|
+      agent = lambda do |worktree_path:, **|
+        File.write(File.join(worktree_path, "lib/checkout.rb"), "module Checkout\n  def self.call = :old\n  UPDATED = true\nend\n")
+        tree = run!("git", "-C", repo, "rev-parse", "HEAD^{tree}").strip
+        unrelated = run!("git", "-C", repo, "commit-tree", tree, "-m", "unrelated root").strip
+        run!("git", "-C", repo, "reset", "--hard", unrelated, "--quiet")
+        { status: :ok }
+      end
+
+      patch = fixer(repo, agent: agent)
+              .attempt(thesis: thesis, job_id: "job-7", analysis_sha: analysis_sha)
+
+      assert_equal "fix_error", patch.outcome
+      refute patch.terminal
+      assert_includes patch.details.fetch("error"), "no longer descends"
+      refute File.directory?(patch.worktree_path)
     end
   end
 
@@ -467,6 +547,28 @@ class RefactorPatrolFixerTest < Minitest::Test
     end
   end
 
+  def test_retry_recovers_a_patch_that_was_already_rebased_onto_disjoint_trunk
+    with_repo do |repo, analysis_sha|
+      first = fixer(repo, agent: lambda do |worktree_path:, **|
+        File.write(File.join(worktree_path, "lib/checkout.rb"), "module Checkout\n  def self.call = :old\n  FIXED = true\nend\n")
+        File.write(File.join(repo, "README.md"), "advanced\n")
+        run!("git", "-C", repo, "add", "README.md")
+        run!("git", "-C", repo, "commit", "-m", "advance docs", "--quiet")
+        { status: :ok }
+      end).attempt(thesis: thesis, job_id: "job-7", analysis_sha: analysis_sha)
+      assert first.publishable?, first.to_h.inspect
+
+      recovered = fixer(
+        repo, agent: ->(**) { flunk "rebased recovery must not rerun the agent" }
+      ).attempt(thesis: thesis, job_id: "job-7", analysis_sha: analysis_sha)
+
+      assert recovered.publishable?, recovered.to_h.inspect
+      assert_equal first.commit_sha, recovered.commit_sha
+      assert_equal first.publication_base_sha, recovered.publication_base_sha
+      assert_equal [ "lib/checkout.rb" ], recovered.changed_paths
+    end
+  end
+
   def test_post_rebase_formatter_mutation_is_reaudited_and_amended
     with_repo do |repo, analysis_sha|
       validations = 0
@@ -477,7 +579,7 @@ class RefactorPatrolFixerTest < Minitest::Test
             if validations == 2
               File.write(
                 File.join(path, "lib/checkout.rb"),
-                "module Checkout\n  FORMATTED_AFTER_REBASE = true\nend\n"
+                "module Checkout\n  def self.call = :old\n  FORMATTED_AFTER_REBASE = true\nend\n"
               )
             end
             { "passed" => true, "commands" => names.map { |name| { "name" => name, "exit_code" => 0 } } }
@@ -485,7 +587,7 @@ class RefactorPatrolFixerTest < Minitest::Test
         end
       end
       agent = lambda do |worktree_path:, **|
-        File.write(File.join(worktree_path, "lib/checkout.rb"), "module Checkout; end\n")
+        File.write(File.join(worktree_path, "lib/checkout.rb"), "module Checkout\n  def self.call = :old\n  UPDATED = true\nend\n")
         File.write(File.join(repo, "README.md"), "advanced\n")
         run!("git", "-C", repo, "add", ".")
         run!("git", "-C", repo, "commit", "-m", "advance docs", "--quiet")

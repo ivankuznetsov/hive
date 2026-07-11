@@ -5,7 +5,7 @@ require "hive/refactor_patrol/thesis"
 
 class RefactorPatrolIssueFilerTest < Minitest::Test
   class FakeGh
-    attr_accessor :issues, :create_error
+    attr_accessor :issues, :create_error, :runtime_error
     attr_reader :lookups, :creates
 
     def initialize
@@ -14,16 +14,17 @@ class RefactorPatrolIssueFilerTest < Minitest::Test
       @creates = []
     end
 
-    def issues_with_marker(repository:, marker:, cfg:)
-      @lookups << [ repository, marker ]
+    def issues_with_marker(repository:, marker:, host:, cfg:)
+      @lookups << [ repository, marker, host ]
       @issues
     end
 
-    def create_issue(repository:, title:, body:, cfg:)
-      @creates << { repository: repository, title: title, body: body }
+    def create_issue(repository:, title:, body:, host:, cfg:)
+      @creates << { repository: repository, title: title, body: body, host: host }
+      raise RuntimeError, @runtime_error if @runtime_error
       raise Hive::GhError, @create_error if @create_error
 
-      "https://github.com/#{repository}/issues/9"
+      "https://#{host}/#{repository}/issues/9"
     end
   end
 
@@ -43,6 +44,7 @@ class RefactorPatrolIssueFilerTest < Minitest::Test
     assert_equal 1, gh.creates.size
     created = gh.creates.first
     assert_equal "acme/demo", created.fetch(:repository)
+    assert_equal "github.com", created.fetch(:host)
     assert_includes created.fetch(:body), "Source PR: https://github.com/acme/demo/pull/7"
     assert_includes created.fetch(:body), "Problem evidence"
     assert_includes created.fetch(:body), "Expected leverage score: 0.4"
@@ -102,7 +104,7 @@ class RefactorPatrolIssueFilerTest < Minitest::Test
 
     assert_equal "issue_linked_open", result.outcome
     assert result.terminal
-    assert_equal [ [ "acme/demo", marker ] ], gh.lookups
+    assert_equal [ [ "acme/demo", marker, "github.com" ] ], gh.lookups
     assert_empty gh.creates
   end
 
@@ -110,6 +112,42 @@ class RefactorPatrolIssueFilerTest < Minitest::Test
     gh = FakeGh.new
     gh.issues = [
       { "number" => 4, "state" => "OPEN", "url" => "https://github.com/other/demo/issues/4" }
+    ]
+
+    result = filer(gh).publish(
+      thesis: thesis(flags: [ "cross_feature_impact" ]), family_id: family_id,
+      canonical_action_id: action_id, job_id: "job-7", source: source,
+      record_intent: successful_intent
+    )
+
+    assert_equal "issue_reconcile_failed", result.outcome
+    refute result.terminal
+    assert_empty gh.creates
+  end
+
+  def test_github_enterprise_host_is_authoritative_for_lookup_and_create
+    gh = FakeGh.new
+    enterprise_source = {
+      "url" => "https://github.corp.example/acme/demo/pull/7",
+      "repository" => "acme/demo"
+    }
+
+    result = filer(gh).publish(
+      thesis: thesis(flags: [ "exceeds_max_files" ]), family_id: family_id,
+      canonical_action_id: action_id, job_id: "job-7", source: enterprise_source,
+      record_intent: successful_intent
+    )
+
+    assert_equal "issue_created", result.outcome
+    assert_equal [ [ "acme/demo", marker, "github.corp.example" ] ], gh.lookups
+    assert_equal "github.corp.example", gh.creates.first.fetch(:host)
+    assert_equal "https://github.corp.example/acme/demo/issues/9", result.issue_url
+  end
+
+  def test_matching_repository_issue_on_wrong_host_fails_reconciliation
+    gh = FakeGh.new
+    gh.issues = [
+      { "number" => 4, "state" => "OPEN", "url" => "https://evil.example/acme/demo/issues/4" }
     ]
 
     result = filer(gh).publish(
@@ -137,6 +175,21 @@ class RefactorPatrolIssueFilerTest < Minitest::Test
     assert_equal 1, intents
     assert_equal "remote_outcome_unknown", result.outcome
     refute result.terminal
+  end
+
+  def test_non_gateway_exception_after_intent_is_also_remote_unknown
+    gh = FakeGh.new
+    gh.runtime_error = "connection parser crashed"
+
+    result = filer(gh).publish(
+      thesis: thesis(flags: [ "not_single_feature" ]), family_id: family_id,
+      canonical_action_id: action_id, job_id: "job-7", source: source,
+      record_intent: successful_intent
+    )
+
+    assert_equal "remote_outcome_unknown", result.outcome
+    refute result.terminal
+    assert_includes result.receipts.fetch("error"), "connection parser crashed"
   end
 
   def test_low_confidence_inadmissible_and_non_strategic_theses_are_report_only

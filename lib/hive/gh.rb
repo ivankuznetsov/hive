@@ -49,8 +49,10 @@ module Hive
 
     module_function
 
-    def ensure_authenticated!(cfg = nil)
-      out, err, status = capture3("gh", "auth", "status", cfg: cfg)
+    def ensure_authenticated!(cfg = nil, host: nil)
+      args = [ "gh", "auth", "status" ]
+      args.push("--hostname", validated_github_host(host)) if host
+      out, err, status = capture3(*args, cfg: cfg)
       return if status.success?
 
       raise Hive::GhError, "gh not authenticated (`gh auth login`):\n#{err.empty? ? out : err}"
@@ -59,11 +61,19 @@ module Hive
     # Push the branch and return a PushResult. Callers that want to
     # exit on failure can do so explicitly; finalize prefers to write
     # a structured marker.
-    def push_branch(worktree_path, branch, cfg: nil, force: false)
+    def push_branch(worktree_path, branch, cfg: nil, force: false, expected_remote_oid: nil)
       args = [ "git", "-C", worktree_path, "push", "-u" ]
       # --force-with-lease (not --force): a concurrent third-party update to
       # the branch aborts the push instead of being clobbered.
-      args << "--force-with-lease" if force
+      if expected_remote_oid
+        oid = expected_remote_oid.to_s
+        unless oid.match?(/\A[0-9a-f]{40,64}\z/i)
+          raise Hive::GhError, "expected remote branch OID is invalid"
+        end
+        args << "--force-with-lease=refs/heads/#{branch}:#{oid.downcase}"
+      elsif force
+        args << "--force-with-lease"
+      end
       args.push("origin", branch)
       out, err, status = capture3(*args, cfg: cfg)
       PushResult.new(success: status.success?, stdout: out, stderr: err)
@@ -72,11 +82,43 @@ module Hive
     end
 
     # Hard-fail wrapper for callers that have no recovery path (open-pr).
-    def push_branch!(worktree_path, branch, cfg: nil)
-      result = push_branch(worktree_path, branch, cfg: cfg)
+    def push_branch!(worktree_path, branch, cfg: nil, expected_remote_oid: nil)
+      result = push_branch(
+        worktree_path, branch, cfg: cfg, expected_remote_oid: expected_remote_oid
+      )
       return if result.success?
 
       raise Hive::GhError, "git push failed: #{result.stderr.strip.empty? ? result.stdout : result.stderr}"
+    end
+
+    def remote_branch_oid(worktree_path, branch, cfg: nil)
+      name = branch.to_s
+      unless name.match?(/\A[a-zA-Z0-9][a-zA-Z0-9._\/-]{0,240}\z/) &&
+             !name.include?("..") && !name.end_with?("/", ".")
+        raise Hive::GhError, "remote branch name is invalid"
+      end
+
+      ref = "refs/heads/#{name}"
+      out, err, status = capture3(
+        "git", "-C", worktree_path, "ls-remote", "--heads", "origin", ref,
+        cfg: cfg
+      )
+      unless status.success?
+        raise Hive::GhError,
+              "git ls-remote failed: #{err.to_s.strip.empty? ? out : err}"
+      end
+      lines = out.lines.map(&:strip).reject(&:empty?)
+      return nil if lines.empty?
+      unless lines.one?
+        raise Hive::GhError, "git ls-remote returned multiple records for #{ref}"
+      end
+
+      oid, returned_ref = lines.first.split(/\s+/, 2)
+      unless returned_ref == ref && oid.to_s.match?(/\A[0-9a-f]{40,64}\z/i)
+        raise Hive::GhError, "git ls-remote returned an invalid record for #{ref}"
+      end
+
+      oid.downcase
     end
 
     # Look up all pull requests for `branch`. Returns the raw array from
@@ -88,7 +130,7 @@ module Hive
     # The returned hashes may omit optional fields on older/future gh JSON
     # shapes. Stage code treats a missing `isDraft` key as draft for
     # forward compatibility; only an explicit false means "already ready".
-    def lookup_prs_for_branch(worktree_path, branch, cfg: nil)
+    def lookup_prs_for_branch(worktree_path, branch, repository: nil, host: nil, cfg: nil)
       # `gh -R` accepts a `owner/repo` slug but not a worktree path;
       # `--repo` likewise. `gh` resolves the remote from cwd's git
       # config, so route through chdir. Earlier passes flagged the
@@ -96,10 +138,18 @@ module Hive
       # in this module; the difference is load-bearing (gh has no
       # `-C` flag), not stylistic. Kept here with a comment so the
       # next reader doesn't "fix" it.
-      out, err, status = capture3("gh", "pr", "list", "--head", branch,
-                                  "--state", "all", "--json",
-                                  "url,number,state,isDraft,headRefName,headRefOid,body,baseRefName,headRepository",
-                                  chdir: worktree_path, cfg: cfg)
+      args = [
+        "gh", "pr", "list", "--head", branch, "--state", "all", "--json",
+        "url,number,state,isDraft,headRefName,headRefOid,body,baseRefName,headRepository"
+      ]
+      if repository || host
+        unless repository && host
+          raise Hive::GhError, "repository and host must be provided together for pull-request lookup"
+        end
+
+        args.push("--repo", github_repository_target(repository, host))
+      end
+      out, err, status = capture3(*args, chdir: worktree_path, cfg: cfg)
       unless status.success?
         raise Hive::GhError, "`gh pr list` failed for branch #{branch}: #{err.to_s.strip.empty? ? out : err.strip}"
       end
@@ -123,13 +173,17 @@ module Hive
     # The REST /issues endpoint includes pull requests, so fetch every page and
     # validate every issue-shaped record before filtering. Treating malformed or
     # partial responses as an empty result would let callers create duplicates.
-    def issues_with_marker(repository:, marker:, cfg: nil)
+    def issues_with_marker(repository:, marker:, host:, cfg: nil)
       repo = validated_repository_slug(repository)
+      github_host = validated_github_host(host)
       needle = marker.to_s
       raise Hive::GhError, "issue marker must be a non-empty string" if needle.empty?
 
       endpoint = "repos/#{repo}/issues?state=all&per_page=100"
-      out, err, status = capture3("gh", "api", endpoint, "--paginate", "--slurp", cfg: cfg)
+      out, err, status = capture3(
+        "gh", "api", "--hostname", github_host, endpoint,
+        "--paginate", "--slurp", cfg: cfg
+      )
       unless status.success?
         message = err.to_s.strip.empty? ? out : err.strip
         raise Hive::GhError, "`gh api` failed while listing issues for #{repo}: #{message}"
@@ -141,7 +195,7 @@ module Hive
       end
 
       pages.flatten.filter_map do |issue|
-        validate_issue_api_record!(issue, repo)
+        validate_issue_api_record!(issue, repo, host: github_host)
         next if issue.key?("pull_request")
         next unless issue.fetch("body").to_s.lines.any? { |line| line.strip == needle }
 
@@ -159,8 +213,9 @@ module Hive
     # Use a temporary body file so markdown is never interpreted as argv or by
     # a shell. The caller owns content bounds; this gateway owns transport and
     # fail-closed command/result handling.
-    def create_issue(repository:, title:, body:, cfg: nil)
+    def create_issue(repository:, title:, body:, host:, cfg: nil)
       repo = validated_repository_slug(repository)
+      github_host = validated_github_host(host)
       unless title.is_a?(String) && !title.strip.empty?
         raise Hive::GhError, "issue title must be a non-empty string"
       end
@@ -171,7 +226,7 @@ module Hive
         file.write(body)
         file.flush
         out, err, status = capture3(
-          "gh", "issue", "create", "--repo", repo,
+          "gh", "issue", "create", "--repo", "#{github_host}/#{repo}",
           "--title", title, "--body-file", file.path, cfg: cfg
         )
         unless status.success?
@@ -181,7 +236,7 @@ module Hive
 
         url = out.lines.map(&:strip).reject(&:empty?).last.to_s
         raise Hive::GhError, "`gh issue create` returned no issue URL for #{repo}" if url.empty?
-        unless issue_url_matches_repository?(url, repo)
+        unless issue_url_matches_repository?(url, repo, host: github_host)
           raise Hive::GhError, "`gh issue create` returned an unexpected issue URL for #{repo}"
         end
 
@@ -391,7 +446,25 @@ module Hive
     end
     private_class_method :validated_repository_slug
 
-    def validate_issue_api_record!(issue, repository)
+    def validated_github_host(host)
+      value = host.to_s.strip
+      uri = URI.parse("https://#{value}")
+      valid = !value.empty? && uri.host == value && uri.path.empty? &&
+              uri.userinfo.nil? && uri.query.nil? && uri.fragment.nil?
+      raise Hive::GhError, "GitHub host must be a hostname without a scheme or path" unless valid
+
+      value
+    rescue URI::InvalidURIError
+      raise Hive::GhError, "GitHub host must be a hostname without a scheme or path"
+    end
+    private_class_method :validated_github_host
+
+    def github_repository_target(repository, host)
+      "#{validated_github_host(host)}/#{validated_repository_slug(repository)}"
+    end
+    private_class_method :github_repository_target
+
+    def validate_issue_api_record!(issue, repository, host:)
       unless issue.is_a?(Hash)
         raise Hive::GhError, "`gh api` returned a non-object issue for #{repository}"
       end
@@ -409,7 +482,9 @@ module Hive
       unless issue["html_url"].is_a?(String) && !issue["html_url"].empty?
         raise Hive::GhError, "`gh api` issue #{issue['number']} for #{repository} has no URL"
       end
-      unless issue_url_matches_repository?(issue["html_url"], repository, number: issue["number"])
+      unless issue_url_matches_repository?(
+        issue["html_url"], repository, host: host, number: issue["number"]
+      )
         raise Hive::GhError, "`gh api` issue #{issue['number']} URL does not belong to #{repository}"
       end
       unless issue["body"].nil? || issue["body"].is_a?(String)
@@ -423,10 +498,11 @@ module Hive
     end
     private_class_method :validate_issue_api_record!
 
-    def issue_url_matches_repository?(url, repository, number: nil)
+    def issue_url_matches_repository?(url, repository, host:, number: nil)
       uri = URI.parse(url.to_s)
       match = uri.path.match(%r{\A/([^/]+/[^/]+)/issues/([1-9]\d*)\z})
       return false unless uri.is_a?(URI::HTTP) && uri.host && match
+      return false unless uri.host.casecmp?(host.to_s)
       return false unless match[1].casecmp?(repository.to_s)
       return false if number && match[2].to_i != number.to_i
       return false unless uri.userinfo.nil? && uri.query.nil? && uri.fragment.nil?

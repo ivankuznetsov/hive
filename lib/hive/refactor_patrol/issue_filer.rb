@@ -40,8 +40,10 @@ module Hive
         return result("invalid_action", true) unless valid_action_id?(canonical_action_id)
 
         action_id = canonical_action_id.to_s
+        repository = source.fetch("repository")
+        host = source_github_host!(source, repository)
         marker = marker_for(family_id, action_id)
-        existing = lookup_existing(source.fetch("repository"), marker)
+        existing = lookup_existing(repository, marker, host)
         return existing if existing.is_a?(Result)
         unless existing.empty?
           canonical = existing.min_by { |issue| issue.fetch("number").to_i }
@@ -66,8 +68,7 @@ module Hive
         end
         intent_persisted = true
         url = @gh.create_issue(
-          repository: source.fetch("repository"), title: title_for(thesis),
-          body: body, cfg: @cfg
+          repository: repository, host: host, title: title_for(thesis), body: body, cfg: @cfg
         )
         result(
           "issue_created", true, issue_url: url,
@@ -84,10 +85,9 @@ module Hive
       rescue KeyError, ArgumentError => e
         result("invalid_issue_input", true, receipts: { "error" => e.message })
       rescue StandardError => e
-        # A local receipt failure must happen before the remote call. Keep it
-        # retryable, but do not turn it into an ambiguous remote outcome.
+        outcome = intent_persisted || creation_attempted ? "remote_outcome_unknown" : "intent_persist_failed"
         result(
-          "intent_persist_failed", false,
+          outcome, false,
           receipts: base_receipts(family_id, canonical_action_id).merge(
             "error" => "#{e.class}: #{e.message}"
           )
@@ -130,9 +130,11 @@ module Hive
         action_id.to_s.match?(/\Aissue-[a-f0-9]{64}\z/)
       end
 
-      def lookup_existing(repository, marker)
-        issues = @gh.issues_with_marker(repository: repository, marker: marker, cfg: @cfg)
-        unless issues.is_a?(Array) && issues.all? { |issue| valid_issue_record?(issue, repository) }
+      def lookup_existing(repository, marker, host)
+        issues = @gh.issues_with_marker(
+          repository: repository, marker: marker, host: host, cfg: @cfg
+        )
+        unless issues.is_a?(Array) && issues.all? { |issue| valid_issue_record?(issue, repository, host) }
           return result("issue_reconcile_failed", false, receipts: { "error" => "malformed issue lookup" })
         end
 
@@ -141,7 +143,7 @@ module Hive
         result("issue_reconcile_failed", false, receipts: { "error" => e.message })
       end
 
-      def valid_issue_record?(issue, repository)
+      def valid_issue_record?(issue, repository, host)
         return false unless issue.is_a?(Hash)
         return false unless issue["number"].is_a?(Integer) && issue["number"].positive?
         return false unless %w[OPEN CLOSED].include?(issue["state"].to_s.upcase)
@@ -149,10 +151,24 @@ module Hive
         uri = URI.parse(issue["url"].to_s)
         match = uri.path.match(%r{\A/([^/]+/[^/]+)/issues/([1-9]\d*)\z})
         uri.is_a?(URI::HTTP) && uri.host && match &&
+          uri.host.casecmp?(host.to_s) &&
           match[1].casecmp?(repository.to_s) && match[2].to_i == issue["number"] &&
           uri.userinfo.nil? && uri.query.nil? && uri.fragment.nil?
       rescue URI::InvalidURIError
         false
+      end
+
+      def source_github_host!(source, repository)
+        uri = URI.parse(source.fetch("url").to_s)
+        match = uri.path.match(%r{\A/([^/]+/[^/]+)/pull/([1-9]\d*)\z})
+        valid = uri.is_a?(URI::HTTP) && uri.host && match &&
+                match[1].casecmp?(repository.to_s) && uri.userinfo.nil? &&
+                uri.query.nil? && uri.fragment.nil?
+        raise ArgumentError, "source PR URL does not match its GitHub repository" unless valid
+
+        uri.host
+      rescue URI::InvalidURIError
+        raise ArgumentError, "source PR URL is invalid"
       end
 
       def reconcile(canonical, issues, family_id, action_id)

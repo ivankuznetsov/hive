@@ -27,7 +27,9 @@ class GhIssueHelpersTest < Minitest::Test
     end
 
     result = with_capture(capture) do
-      Hive::Gh.issues_with_marker(repository: "acme/demo", marker: marker, cfg: cfg)
+      Hive::Gh.issues_with_marker(
+        repository: "acme/demo", marker: marker, host: "github.com", cfg: cfg
+      )
     end
 
     assert_equal [ 1, 4 ], result.map { |item| item.fetch("number") }
@@ -37,7 +39,8 @@ class GhIssueHelpersTest < Minitest::Test
     assert_equal 1, calls.size
     args, kwargs = calls.first
     assert_equal [
-      "gh", "api", "repos/acme/demo/issues?state=all&per_page=100",
+      "gh", "api", "--hostname", "github.com",
+      "repos/acme/demo/issues?state=all&per_page=100",
       "--paginate", "--slurp"
     ], args
     assert_equal({ cfg: cfg }, kwargs)
@@ -53,7 +56,9 @@ class GhIssueHelpersTest < Minitest::Test
     ] ]
 
     result = with_capture(successful(JSON.generate(pages))) do
-      Hive::Gh.issues_with_marker(repository: "acme/demo", marker: marker, cfg: nil)
+      Hive::Gh.issues_with_marker(
+        repository: "acme/demo", marker: marker, host: "github.com", cfg: nil
+      )
     end
 
     assert_equal [ 3 ], result.map { |item| item.fetch("number") }
@@ -79,7 +84,9 @@ class GhIssueHelpersTest < Minitest::Test
     malformed.each do |label, output|
       error = assert_raises(Hive::GhError, label) do
         with_capture(successful(output)) do
-          Hive::Gh.issues_with_marker(repository: "acme/demo", marker: "marker", cfg: nil)
+          Hive::Gh.issues_with_marker(
+            repository: "acme/demo", marker: "marker", host: "github.com", cfg: nil
+          )
         end
       end
       refute_empty error.message, label
@@ -93,7 +100,9 @@ class GhIssueHelpersTest < Minitest::Test
 
     error = assert_raises(Hive::GhError) do
       with_capture(capture) do
-        Hive::Gh.issues_with_marker(repository: "acme/demo", marker: "marker", cfg: nil)
+        Hive::Gh.issues_with_marker(
+          repository: "acme/demo", marker: "marker", host: "github.com", cfg: nil
+        )
       end
     end
 
@@ -111,7 +120,9 @@ class GhIssueHelpersTest < Minitest::Test
     [ "", "acme", "acme/demo/extra", "acme /demo", "acme/demo?state=open" ].each do |repository|
       assert_raises(Hive::GhError) do
         with_capture(capture) do
-          Hive::Gh.issues_with_marker(repository: repository, marker: "marker", cfg: nil)
+          Hive::Gh.issues_with_marker(
+            repository: repository, marker: "marker", host: "github.com", cfg: nil
+          )
         end
       end
     end
@@ -137,7 +148,7 @@ class GhIssueHelpersTest < Minitest::Test
     url = with_capture(capture) do
       Hive::Gh.create_issue(
         repository: "acme/demo", title: "Architecture patrol: isolate policy",
-        body: body, cfg: cfg
+        body: body, host: "github.com", cfg: cfg
       )
     end
 
@@ -147,7 +158,7 @@ class GhIssueHelpersTest < Minitest::Test
     assert_equal "gh", args.first
     assert_equal "issue", args[1]
     assert_equal "create", args[2]
-    assert_equal "acme/demo", args.fetch(args.index("--repo") + 1)
+    assert_equal "github.com/acme/demo", args.fetch(args.index("--repo") + 1)
     assert_equal "Architecture patrol: isolate policy", args.fetch(args.index("--title") + 1)
     assert_equal body.b, transported_body
     assert_equal({ cfg: cfg }, kwargs)
@@ -158,21 +169,27 @@ class GhIssueHelpersTest < Minitest::Test
     remote_error = assert_raises(Hive::GhError) do
       failure = ->(*, **) { [ "", "permission denied", Hive::Gh::CommandStatus.new(exitstatus: 1) ] }
       with_capture(failure) do
-        Hive::Gh.create_issue(repository: "acme/demo", title: "Title", body: "Body", cfg: nil)
+        Hive::Gh.create_issue(
+          repository: "acme/demo", title: "Title", body: "Body", host: "github.com", cfg: nil
+        )
       end
     end
     assert_includes remote_error.message, "permission denied"
 
     empty_url = assert_raises(Hive::GhError) do
       with_capture(successful(" \n")) do
-        Hive::Gh.create_issue(repository: "acme/demo", title: "Title", body: "Body", cfg: nil)
+        Hive::Gh.create_issue(
+          repository: "acme/demo", title: "Title", body: "Body", host: "github.com", cfg: nil
+        )
       end
     end
     assert_includes empty_url.message, "no issue URL"
 
     wrong_repository = assert_raises(Hive::GhError) do
       with_capture(successful("https://github.com/other/demo/issues/9\n")) do
-        Hive::Gh.create_issue(repository: "acme/demo", title: "Title", body: "Body", cfg: nil)
+        Hive::Gh.create_issue(
+          repository: "acme/demo", title: "Title", body: "Body", host: "github.com", cfg: nil
+        )
       end
     end
     assert_includes wrong_repository.message, "unexpected issue URL"
@@ -187,10 +204,38 @@ class GhIssueHelpersTest < Minitest::Test
 
     assert_raises(Hive::GhError) do
       with_capture(capture) do
-        Hive::Gh.create_issue(repository: "../demo", title: "Title", body: "Body", cfg: nil)
+        Hive::Gh.create_issue(
+          repository: "../demo", title: "Title", body: "Body", host: "github.com", cfg: nil
+        )
       end
     end
     refute called
+  end
+
+  def test_issue_helpers_reject_urls_from_a_different_github_host
+    wrong_host_pages = JSON.generate([ [
+      issue(1, state: "open", body: "marker").merge(
+        "html_url" => "https://github.com/acme/demo/issues/1"
+      )
+    ] ])
+    lookup_error = assert_raises(Hive::GhError) do
+      with_capture(successful(wrong_host_pages)) do
+        Hive::Gh.issues_with_marker(
+          repository: "acme/demo", marker: "marker", host: "github.example.test", cfg: nil
+        )
+      end
+    end
+    assert_includes lookup_error.message, "does not belong"
+
+    create_error = assert_raises(Hive::GhError) do
+      with_capture(successful("https://github.com/acme/demo/issues/9\n")) do
+        Hive::Gh.create_issue(
+          repository: "acme/demo", title: "Title", body: "Body",
+          host: "github.example.test", cfg: nil
+        )
+      end
+    end
+    assert_includes create_error.message, "unexpected issue URL"
   end
 
   private

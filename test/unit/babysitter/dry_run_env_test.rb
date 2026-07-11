@@ -4,6 +4,7 @@ require "pty"
 require "rbconfig"
 require "timeout"
 require "hive/babysitter/dry_run_env"
+require_relative "../../../bin/hive-babysitter-skip-log"
 
 class BabysitterDryRunEnvTest < Minitest::Test
   include HiveTestHelper

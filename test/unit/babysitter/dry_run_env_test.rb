@@ -1003,6 +1003,36 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_gh_stub_disables_interactive_selectors_for_identifierless_reads
+    with_tmp_dir do |dir|
+      real_gh = File.join(dir, "real-gh")
+      File.write(real_gh, <<~RUBY)
+        #!#{RbConfig.ruby}
+        if STDIN.tty? && ENV["GH_PROMPT_DISABLED"] != "1"
+          puts "interactive selector"
+          STDOUT.flush
+          sleep 30
+        end
+        warn "identifier required"
+        exit 1
+      RUBY
+      FileUtils.chmod("+x", real_gh)
+      env = {
+        "HIVE_BABYSITTER_REAL_GH" => real_gh,
+        "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "skipped.log"),
+        "GH_PROMPT_DISABLED" => "0"
+      }
+
+      [ %w[workflow view], %w[run view] ].each do |args|
+        out, status = capture_pty_stub(env, "gh", *args)
+
+        assert_equal 1, status.exitstatus, out
+        assert_includes out, "identifier required"
+        refute_includes out, "interactive selector"
+      end
+    end
+  end
+
   def test_gh_stub_scrubs_git_trace_env_before_allowlisted_pr_view_passthrough
     with_tmp_git_repo do |dir|
       trace_path = File.join(dir, "gh-git-trace.log")

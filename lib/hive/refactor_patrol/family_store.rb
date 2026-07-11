@@ -2,6 +2,7 @@ require "json"
 require "fileutils"
 require "time"
 require "hive/atomic_file"
+require "hive/refactor_patrol/job_store"
 require "hive/refactor_patrol/semantic_descriptor"
 require "hive/refactor_patrol/semantic_family"
 
@@ -172,9 +173,9 @@ module Hive
       end
     end
 
-    # Repository-global durable family resolution. One lock protects the full
-    # read/resolve/append transition, while each JSON record is atomically
-    # renamed and directory-fsynced before the lock is released.
+    # Repository-global family resolution. Family records are a rebuildable
+    # projection of authoritative v2 job aggregates; one lock protects repair,
+    # resolution, and append while each JSON record is atomically persisted.
     class FamilyStore
       include FamilyStoreRecords
 
@@ -211,10 +212,11 @@ module Hive
 
       attr_reader :project_root, :root
 
-      def initialize(project_root, clock: -> { Time.now })
+      def initialize(project_root, clock: -> { Time.now }, job_store: nil)
         @project_root = File.expand_path(project_root)
         @root = File.join(@project_root, ".hive-state", "refactor_patrol", "v2", "families")
         @clock = clock
+        @job_store = job_store || JobStore.new(@project_root)
       end
 
       def resolve(thesis:, repository:, job_id:, source:, hinted_family_id: nil, dry_run: false)
@@ -229,10 +231,18 @@ module Hive
         end
       end
 
+      def rebuild!
+        ensure_root!
+        File.open(lock_path, File::RDWR | File::CREAT, 0o600) do |lock|
+          lock.flock(File::LOCK_EX)
+          replace_records!(authoritative_records)
+        end
+      end
+
       private
 
       def resolve_locked(thesis, descriptor, occurrence, hint, dry_run:)
-        current = records
+        current = indexed_records(dry_run: dry_run)
         resolution = resolve_semantic(descriptor, current, occurrence, hint)
         return outcome(resolution, nil, persisted: false, dry_run: dry_run) if resolution.ambiguous?
 
@@ -325,6 +335,124 @@ module Hive
           "thesis_id" => thesis_id.to_s.strip,
           "source" => normalize_source(source, repository)
         }
+      end
+
+      def indexed_records(dry_run:)
+        authoritative = authoritative_records
+        current = begin
+          records
+        rescue CorruptRecord, InconsistentRecord
+          raise if authoritative.empty?
+
+          return dry_run ? authoritative : replace_records!(authoritative)
+        end
+        return current unless stale_against_authority?(current, authoritative)
+
+        repaired = merge_authoritative_records(current, authoritative)
+        dry_run ? repaired : replace_records!(repaired)
+      end
+
+      def authoritative_records
+        authoritative_entries.group_by { |entry| entry.fetch("family_id") }
+                             .sort.map { |_family_id, entries| authoritative_record(entries) }
+                             .each do |record|
+          validate_record!(record, File.join(@root, "#{record.fetch('family_id')}.json"))
+        end
+      end
+
+      def authoritative_entries
+        @job_store.jobs.flat_map do |aggregate|
+          aggregate.fetch("actions").filter_map do |action|
+            next unless action.fetch("kind") == "issue" && action.key?("family_id")
+
+            disposition = aggregate.fetch("dispositions").values.flatten.find do |item|
+              item.fetch("id") == action.fetch("thesis_id")
+            end
+            thesis = disposition && disposition["thesis"]
+            unless thesis.is_a?(Hash)
+              raise InconsistentRecord,
+                    "authoritative issue action #{action.fetch('canonical_action_id').inspect} lacks a thesis snapshot"
+            end
+
+            {
+              "family_id" => action.fetch("family_id"),
+              "owner" => action.fetch("owner_job_id") == aggregate.fetch("job_id"),
+              "descriptor" => SemanticDescriptor.call(thesis: thesis, source: aggregate.fetch("source")),
+              "occurrence" => occurrence_for(
+                thesis, aggregate.dig("source", "repository"), aggregate.fetch("job_id"),
+                aggregate.fetch("source")
+              ),
+              "created_at" => action["created_at"] || aggregate.fetch("created_at"),
+              "updated_at" => action["updated_at"] || aggregate.fetch("updated_at")
+            }
+          end
+        end
+      rescue JobStore::Error => e
+        raise InconsistentRecord.new("cannot rebuild architecture families from jobs (#{e.message})", path: e.path)
+      rescue ArgumentError, KeyError => e
+        raise InconsistentRecord, "cannot rebuild architecture families from jobs (#{e.message})"
+      end
+
+      def authoritative_record(entries)
+        owners = entries.select { |entry| entry.fetch("owner") }
+        unless owners.one?
+          family_id = entries.first.fetch("family_id")
+          raise InconsistentRecord, "architecture family #{family_id.inspect} must have one authoritative owner action"
+        end
+
+        {
+          "schema" => SCHEMA,
+          "schema_version" => SCHEMA_VERSION,
+          "family_id" => entries.first.fetch("family_id"),
+          "descriptor" => owners.first.fetch("descriptor"),
+          "occurrences" => entries.map { |entry| entry.fetch("occurrence") }.uniq.sort_by do |item|
+            [ item["fingerprint"], item["job_id"], item["thesis_id"], JSON.generate(item["source"]) ]
+          end,
+          "created_at" => entries.map { |entry| entry.fetch("created_at") }.min_by { |value| Time.iso8601(value) },
+          "updated_at" => entries.map { |entry| entry.fetch("updated_at") }.max_by { |value| Time.iso8601(value) }
+        }
+      rescue ArgumentError => e
+        raise InconsistentRecord, "architecture family action has an invalid timestamp (#{e.message})"
+      end
+
+      def stale_against_authority?(current, authoritative)
+        current_by_id = current.to_h { |record| [ record.fetch("family_id"), record ] }
+        authoritative.any? do |expected|
+          actual = current_by_id[expected.fetch("family_id")]
+          actual.nil? || actual.fetch("descriptor") != expected.fetch("descriptor") ||
+            (expected.fetch("occurrences") - actual.fetch("occurrences")).any?
+        end
+      end
+
+      def merge_authoritative_records(current, authoritative)
+        merged = current.to_h { |record| [ record.fetch("family_id"), record ] }
+        authoritative.each do |expected|
+          actual = merged[expected.fetch("family_id")]
+          if actual && actual.fetch("descriptor") == expected.fetch("descriptor")
+            expected = expected.merge(
+              "occurrences" => (expected.fetch("occurrences") + actual.fetch("occurrences")).uniq.sort_by do |item|
+                [ item["fingerprint"], item["job_id"], item["thesis_id"], JSON.generate(item["source"]) ]
+              end,
+              "created_at" => [ expected.fetch("created_at"), actual.fetch("created_at") ].min_by { |value| Time.iso8601(value) },
+              "updated_at" => [ expected.fetch("updated_at"), actual.fetch("updated_at") ].max_by { |value| Time.iso8601(value) }
+            )
+          end
+          merged[expected.fetch("family_id")] = expected
+        end
+        merged.sort.map(&:last)
+      end
+
+      def replace_records!(replacement)
+        ensure_root!
+        replacement.each { |record| persist!(record) }
+        expected_paths = replacement.to_h do |record|
+          [ File.join(@root, "#{record.fetch('family_id')}.json"), true ]
+        end
+        Dir.glob(File.join(@root, "*.json")).each do |path|
+          File.delete(path) unless expected_paths.key?(path)
+        end
+        fsync_directory(@root)
+        replacement
       end
 
       def thesis_value(thesis, key)

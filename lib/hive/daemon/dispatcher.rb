@@ -661,8 +661,14 @@ module Hive
               envelope: entry.json_envelope,
               now: now
             )
-            successful = result && %i[closed classified].include?(result[:status])
-            event = successful ? :architecture_patrol_closed : :architecture_patrol_blocked
+            event = case result && result[:status]
+            when :closed
+              :architecture_patrol_closed
+            when :classified, :action_pending
+              :architecture_patrol_progress
+            else
+              :architecture_patrol_blocked
+            end
             @logger.event(
               event,
               project: entry.project,

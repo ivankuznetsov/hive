@@ -38,6 +38,28 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
+  def test_reserves_classified_job_for_action_resume_without_a_discovery_claim
+    with_project do |dir, entry, store|
+      write_action_job(dir, store)
+      scheduler = scheduler(entry, store)
+
+      candidates = scheduler.candidates(now: T0)
+      assert_equal [ :action ], candidates.map { |item| item.fetch(:action_phase) }
+      dispatch = scheduler.reserve(candidates.first, now: T0)
+
+      assert_equal "refactor-patrol-action-job-actions", dispatch.fetch(:slug)
+      assert_includes dispatch.fetch(:command), "--actions"
+      assert_includes dispatch.fetch(:command), "--job-manifest"
+      assert_equal :action, dispatch.dig(:dispatch_token, :phase)
+      assert_equal "classified", store.read_job("action-job").fetch("state")
+      scheduler.spawned(
+        dispatch, pid: 1234, process_start_time: "boot", pgid: 1234, now: T0 + 1
+      )
+      assert_empty store.read_job("action-job").fetch("actions"),
+                   "the child ActionRunner owns the per-action fence"
+    end
+  end
+
   def test_duplicate_enabled_repository_registrations_block_with_both_identities_and_backoff
     with_tmp_dir do |root|
       first_dir = File.join(root, "first")
@@ -245,5 +267,46 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       "accepted" => [], "flagged" => [], "suppressed" => [], "review_errors" => [],
       "zero_reason" => "no_theses", "attempts" => [], "actions" => []
     }
+  end
+
+  def write_action_job(dir, store)
+    data = manifest(job_id: "action-job", number: 9, merged_at: T0, registration: "demo")
+    publish_manifest(dir, data)
+    source = data.fetch("source").merge(
+      "changed_paths" => data.fetch("changed_paths"),
+      "manifest_checksum" => data.fetch("manifest_checksum")
+    )
+    snapshot = {
+      "id" => "accepted", "feature_id" => "checkout", "feature" => "Checkout",
+      "problem" => "Scattered policy", "cost" => "Repeated edits",
+      "evidence" => [ { "file" => "lib/demo.rb", "claim" => "policy repeats" } ],
+      "proposed_refactor" => "Consolidate policy",
+      "feature_boundary" => { "owned_files" => [ "lib/demo.rb" ], "entrypoints" => [] },
+      "feature_hotspot" => {}, "expected_leverage" => { "score" => 0.8 },
+      "confidence" => "high", "risk" => { "flags" => [] },
+      "required_validation" => { "commands" => [ "test" ] },
+      "admissible" => true, "admissibility_reason" => "anchored",
+      "follow_up_approval_state" => "pending", "fingerprint" => "fp-accepted"
+    }
+    store.write_job!(
+      {
+        "schema" => "hive-refactor-patrol-job", "schema_version" => 2,
+        "job_id" => "action-job", "source" => source, "analysis_sha" => "head",
+        "policy" => { "discovery" => true, "auto_fix" => true, "issue_filing" => false },
+        "state" => "classified", "complete" => false,
+        "dispositions" => {
+          "accepted" => [
+            {
+              "id" => "accepted", "feature_id" => "checkout", "fingerprint" => "fp-accepted",
+              "score" => 0.8, "admissible" => true, "reasons" => [], "thesis" => snapshot
+            }
+          ],
+          "flagged" => [], "suppressed" => []
+        },
+        "feature_results" => [], "review_errors" => [], "zero_reason" => nil,
+        "attempts" => [], "actions" => [], "created_at" => T0.iso8601,
+        "updated_at" => T0.iso8601
+      }
+    )
   end
 end

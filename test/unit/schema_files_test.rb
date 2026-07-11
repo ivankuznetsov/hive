@@ -2114,6 +2114,24 @@ class SchemaFilesTest < Minitest::Test
     assert_equal 2, v2.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
   end
 
+  def test_refactor_patrol_v2_requires_a_complete_immutable_thesis_snapshot
+    document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 2)))
+    snapshot_schema = JSONSchemer.schema(
+      { "$ref" => "#/$defs/ThesisSnapshot", "$defs" => document.fetch("$defs") }
+    )
+
+    incomplete = {
+      "id" => "thesis-1", "feature_id" => "checkout", "fingerprint" => "fp-1"
+    }
+    refute snapshot_schema.valid?(incomplete)
+
+    required = document.dig("$defs", "ThesisSnapshot", "required")
+    assert_includes required, "problem"
+    assert_includes required, "expected_leverage"
+    assert_includes required, "required_validation"
+    assert_includes required, "admissible"
+  end
+
   # ── hive-dispatch-request: claimed-file contract (#247) ─────────────────
 
   # A `<id>.json.claimed` file still self-declares schema=hive-dispatch-request

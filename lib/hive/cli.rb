@@ -711,6 +711,9 @@ module Hive
       changed-path manifest from a clean registered default-branch checkout.
       PR mode requires --json, cannot be combined with legacy scope hints, and
       emits hive-refactor-patrol.v2 through an enforceable read-only agent.
+
+      The daemon uses --actions with --job-manifest to resume the immutable
+      per-thesis action ledger after discovery. It emits the same v2 contract.
     DESC
     option :dry_run, type: :boolean, default: false,
                      desc: "preview without persisting refactor-patrol state"
@@ -721,6 +724,8 @@ module Hive
     option :pr, type: :string, desc: "analyze one merged PR number or URL with the v2 read-only contract"
     option :job_manifest, type: :string,
                           desc: "analyze one immutable merge-intake manifest (daemon/internal)"
+    option :actions, type: :boolean, default: false,
+                     desc: "resume actions for --job-manifest (daemon/internal)"
     def refactor_patrol(project)
       require "hive/commands/refactor_patrol"
       Hive::Commands::RefactorPatrol.new(
@@ -732,7 +737,8 @@ module Hive
         path: options[:path],
         changed_since: options[:changed_since],
         pr: options[:pr],
-        job_manifest: options[:job_manifest]
+        job_manifest: options[:job_manifest],
+        actions: options[:actions]
       ).call
     end
 

@@ -43,11 +43,144 @@
     "ThesisSnapshot": {
       "type": "object",
       "description": "Immutable normalized thesis consumed by later action workers.",
-      "required": ["id", "feature_id", "fingerprint"],
+      "additionalProperties": false,
+      "required": [
+        "id", "feature_id", "feature", "problem", "cost", "evidence",
+        "proposed_refactor", "feature_boundary", "feature_hotspot",
+        "expected_leverage", "confidence", "risk", "required_validation",
+        "admissible", "admissibility_reason", "follow_up_approval_state",
+        "fingerprint"
+      ],
       "properties": {
         "id": { "type": "string", "minLength": 1 },
         "feature_id": { "type": "string", "minLength": 1 },
-        "fingerprint": { "type": "string", "minLength": 1 }
+        "feature": { "type": "string", "minLength": 1 },
+        "problem": { "type": "string", "minLength": 1 },
+        "cost": { "type": "string", "minLength": 1 },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/ThesisEvidence" }
+        },
+        "proposed_refactor": { "type": "string", "minLength": 1 },
+        "feature_boundary": { "$ref": "#/$defs/ThesisFeatureBoundary" },
+        "feature_hotspot": { "$ref": "#/$defs/ThesisFeatureHotspot" },
+        "expected_leverage": { "$ref": "#/$defs/ThesisExpectedLeverage" },
+        "confidence": { "enum": ["low", "medium", "high"] },
+        "risk": { "$ref": "#/$defs/ThesisRisk" },
+        "required_validation": { "$ref": "#/$defs/ThesisRequiredValidation" },
+        "admissible": { "type": "boolean" },
+        "admissibility_reason": { "type": "string" },
+        "follow_up_approval_state": {
+          "enum": ["pending", "not_requested", "approved", "rejected"]
+        },
+        "fingerprint": { "type": "string", "minLength": 1 },
+        "collision": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "reference"],
+          "properties": {
+            "kind": { "type": "string" },
+            "reference": { "type": "string" }
+          }
+        }
+      }
+    },
+    "ThesisEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "file": { "type": "string", "minLength": 1 },
+        "line": { "type": "integer", "minimum": 1 },
+        "snippet": { "type": "string", "minLength": 1 },
+        "claim": { "type": "string", "minLength": 1 }
+      }
+    },
+    "ThesisFeatureBoundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["owned_files", "entrypoints"],
+      "properties": {
+        "owned_files": { "type": "array", "items": { "type": "string" } },
+        "entrypoints": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "ThesisSignalValues": {
+      "type": "object",
+      "additionalProperties": { "type": "number", "minimum": 0 }
+    },
+    "ThesisNormalizedSignalValues": {
+      "type": "object",
+      "additionalProperties": { "type": "number", "minimum": 0, "maximum": 1 }
+    },
+    "ThesisFeatureHotspot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "score", "breakdown", "signals", "normalized"],
+      "properties": {
+        "scope": { "const": "feature" },
+        "score": { "type": "number", "minimum": 0, "maximum": 1 },
+        "breakdown": { "$ref": "#/$defs/ThesisNormalizedSignalValues" },
+        "signals": { "$ref": "#/$defs/ThesisSignalValues" },
+        "normalized": { "$ref": "#/$defs/ThesisNormalizedSignalValues" }
+      }
+    },
+    "ThesisExpectedLeverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["score", "breakdown", "drivers"],
+      "properties": {
+        "score": { "type": "number", "minimum": 0, "maximum": 1 },
+        "breakdown": { "$ref": "#/$defs/ThesisNormalizedSignalValues" },
+        "drivers": { "type": "array", "items": { "$ref": "#/$defs/ThesisLeverageDriver" } }
+      }
+    },
+    "ThesisLeverageDriver": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["signal", "relief", "mechanism"],
+      "properties": {
+        "signal": {
+          "enum": ["churn", "fan_in", "complexity", "coupling", "bug_density", "coverage_gap"]
+        },
+        "relief": { "type": "number", "minimum": 0, "maximum": 1 },
+        "mechanism": { "type": "string", "minLength": 1 }
+      }
+    },
+    "ThesisRisk": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "caps", "public_api_impact", "public_api_details",
+        "cross_feature_impact", "cross_feature_details", "flags"
+      ],
+      "properties": {
+        "caps": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["est_files", "est_diff_lines", "single_feature"],
+          "properties": {
+            "est_files": { "type": "integer", "minimum": 0 },
+            "est_diff_lines": { "type": "integer", "minimum": 0 },
+            "single_feature": { "type": "boolean" }
+          }
+        },
+        "public_api_impact": { "type": "boolean" },
+        "public_api_details": { "type": "array", "items": { "type": "string" } },
+        "cross_feature_impact": { "type": "boolean" },
+        "cross_feature_details": { "type": "array", "items": { "type": "string" } },
+        "flags": { "type": "array", "items": { "type": "string" } },
+        "advisories": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "ThesisRequiredValidation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commands", "characterization_first", "notes"],
+      "properties": {
+        "commands": { "type": "array", "items": { "type": "string" } },
+        "characterization_first": { "type": "boolean" },
+        "notes": { "type": "string" }
       }
     },
     "ReviewError": {
@@ -77,6 +210,7 @@
         "thesis_id": { "type": "string", "minLength": 1 },
         "thesis_fingerprint": { "type": "string", "minLength": 1 },
         "kind": { "enum": ["fix", "issue"] },
+        "family_id": { "type": "string", "minLength": 1 },
         "owner_job_id": { "type": "string", "minLength": 1 },
         "outcome": { "type": "string", "minLength": 1 },
         "terminal": { "type": "boolean" },
@@ -110,7 +244,8 @@
         "review_errors": { "type": "array", "items": { "$ref": "#/$defs/ReviewError" } },
         "zero_reason": { "type": ["string", "null"], "enum": ["no_mapped_slice", "no_theses", "all_suppressed", null] },
         "attempts": { "type": "array", "items": { "$ref": "#/$defs/Attempt" } },
-        "actions": { "type": "array", "items": { "$ref": "#/$defs/Action" } }
+        "actions": { "type": "array", "items": { "$ref": "#/$defs/Action" } },
+        "action_status": { "type": "object", "additionalProperties": true }
       }
     },
     "ErrorPayload": {

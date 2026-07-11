@@ -148,7 +148,10 @@ class GhUnitTest < Minitest::Test
     end
 
     with_replaced_singleton_method(Hive::Gh, :capture3, stub) do
-      assert_empty Hive::Gh.lookup_prs_for_branch("/repo", "patrol-fix", cfg: { "x" => true })
+      assert_empty Hive::Gh.lookup_prs_for_branch(
+        "/repo", "patrol-fix", repository: "acme/demo",
+        host: "github.corp.example", cfg: { "x" => true }
+      )
     end
 
     args, kwargs = captured
@@ -156,6 +159,7 @@ class GhUnitTest < Minitest::Test
     assert_includes fields, "body"
     assert_includes fields, "baseRefName"
     assert_includes fields, "headRepository"
+    assert_equal "github.corp.example/acme/demo", args.fetch(args.index("--repo") + 1)
     assert_equal "/repo", kwargs.fetch(:chdir)
   end
 
@@ -440,6 +444,21 @@ def test_push_branch_force_passes_force_with_lease
     refute_includes captured, "--force-with-lease",
                     "a default push must not force"
   end
+end
+
+def test_push_branch_uses_exact_expected_oid_lease
+  captured = nil
+  ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+  with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*cmd, **_kwargs|
+    captured = cmd
+    [ "", "", ok ]
+  }) do
+    Hive::Gh.push_branch(
+      "/tmp/wt", "feature", expected_remote_oid: "a" * 40
+    )
+  end
+
+  assert_includes captured, "--force-with-lease=refs/heads/feature:#{'a' * 40}"
 end
 
 def test_lookup_existing_pr_rejects_unparseable_json

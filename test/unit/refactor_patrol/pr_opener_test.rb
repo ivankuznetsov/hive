@@ -8,25 +8,35 @@ class RefactorPatrolPrOpenerTest < Minitest::Test
   include HiveTestHelper
 
   class FakeGh
-    attr_accessor :prs, :create_failure, :create_output
-    attr_reader :pushed, :created, :bodies
+    attr_accessor :prs, :create_failure, :create_output, :remote_oid
+    attr_reader :pushed, :created, :bodies, :authenticated_hosts, :lookups
 
     def initialize
       @prs = []
       @pushed = []
       @created = []
       @bodies = []
+      @authenticated_hosts = []
+      @lookups = []
       @create_output = "https://github.com/acme/demo/pull/9\n"
     end
 
-    def ensure_authenticated!(_cfg) = true
+    def ensure_authenticated!(_cfg, host:)
+      @authenticated_hosts << host
+      true
+    end
 
-    def lookup_prs_for_branch(_path, _branch, cfg:)
+    def lookup_prs_for_branch(path, branch, repository:, host:, cfg:)
+      @lookups << { path: path, branch: branch, repository: repository, host: host }
       @prs
     end
 
-    def push_branch!(path, branch, cfg:)
-      @pushed << [ path, branch ]
+    def remote_branch_oid(_path, _branch, cfg:)
+      @remote_oid
+    end
+
+    def push_branch!(path, branch, cfg:, expected_remote_oid: nil)
+      @pushed << [ path, branch, expected_remote_oid ]
     end
 
     def capture3(*args, chdir:, cfg:)
@@ -69,9 +79,9 @@ class RefactorPatrolPrOpenerTest < Minitest::Test
       assert_equal "pr_opened", result.outcome
       assert result.terminal
       assert_equal 1, intents
-      assert_equal [ [ repo, "master" ] ], gh.pushed
+      assert_equal [ [ repo, "master", nil ] ], gh.pushed
       assert_includes gh.created.first, "--repo"
-      assert_includes gh.created.first, "acme/demo"
+      assert_includes gh.created.first, "github.com/acme/demo"
       assert_includes gh.bodies.first, "<!-- hive-refactor-patrol action=fix-fp"
       assert_equal true, handoff.calls.first.fetch(:mandatory)
       context = handoff.calls.first.fetch(:context)
@@ -81,6 +91,65 @@ class RefactorPatrolPrOpenerTest < Minitest::Test
       assert_equal "fix-fp", context.fetch("canonical_action_id")
       assert_equal patch(repo).commit_sha, context.dig("patch", "commit_sha")
       assert_equal "/tmp/review-task", result.review_task_path
+    end
+  end
+
+  def test_push_is_fenced_and_rebased_branch_uses_exact_remote_oid_lease
+    with_tmp_git_repo do |repo|
+      gh = FakeGh.new
+      gh.remote_oid = "a" * 40
+      fences = 0
+
+      result = opener(repo, gh, Handoff.new).open(
+        thesis: thesis, patch: patch(repo), job_id: "job-7",
+        canonical_action_id: "fix-fp", source: source,
+        authorize_push: -> { fences += 1; true },
+        record_intent: -> { true }
+      )
+
+      assert_equal "pr_opened", result.outcome
+      assert_equal 1, fences
+      assert_equal [ [ repo, "master", "a" * 40 ] ], gh.pushed
+    end
+  end
+
+  def test_revoked_final_push_fence_leaves_remote_branch_unchanged
+    with_tmp_git_repo do |repo|
+      gh = FakeGh.new
+
+      result = opener(repo, gh, Handoff.new).open(
+        thesis: thesis, patch: patch(repo), job_id: "job-7",
+        canonical_action_id: "fix-fp", source: source,
+        authorize_push: -> { false }, record_intent: -> { flunk "must not persist create intent" }
+      )
+
+      assert_equal "authority_revoked", result.outcome
+      refute result.terminal
+      assert_empty gh.pushed
+      assert_empty gh.created
+    end
+  end
+
+  def test_github_enterprise_host_targets_auth_lookup_and_create
+    with_tmp_git_repo do |repo|
+      gh = FakeGh.new
+      gh.create_output = "https://github.corp.example/acme/demo/pull/9\n"
+      enterprise_source = source.merge(
+        "url" => "https://github.corp.example/acme/demo/pull/7"
+      )
+
+      result = opener(repo, gh, Handoff.new).open(
+        thesis: thesis, patch: patch(repo), job_id: "job-7",
+        canonical_action_id: "fix-fp", source: enterprise_source,
+        record_intent: -> { true }
+      )
+
+      assert_equal "pr_opened", result.outcome
+      assert_equal [ "github.corp.example" ], gh.authenticated_hosts
+      assert_equal "github.corp.example", gh.lookups.first.fetch(:host)
+      assert_equal "acme/demo", gh.lookups.first.fetch(:repository)
+      assert_equal "github.corp.example/acme/demo",
+                   gh.created.first.fetch(gh.created.first.index("--repo") + 1)
     end
   end
 
@@ -170,13 +239,15 @@ class RefactorPatrolPrOpenerTest < Minitest::Test
     end
   end
 
-  def test_earliest_existing_pr_is_canonical_even_when_remote_order_differs
+  def test_single_full_identity_match_wins_over_earlier_nonmatching_branch_pr
     with_tmp_git_repo do |repo|
       gh = FakeGh.new
       local_patch = patch(repo)
+      nonmatching = remote_pr(local_patch, number: 3, state: "CLOSED")
+      nonmatching["body"] = "unrelated PR on a reused branch"
       gh.prs = [
         remote_pr(local_patch, number: 9),
-        remote_pr(local_patch, number: 3, state: "CLOSED")
+        nonmatching
       ]
 
       result = opener(repo, gh, Handoff.new).open(
@@ -185,8 +256,58 @@ class RefactorPatrolPrOpenerTest < Minitest::Test
         record_intent: -> { true }
       )
 
-      assert_equal "closed_without_merge", result.outcome
-      assert_equal "https://github.com/acme/demo/pull/3", result.pr_url
+      assert_equal "pr_opened", result.outcome
+      assert_equal "https://github.com/acme/demo/pull/9", result.pr_url
+      assert_empty gh.created
+    end
+  end
+
+  def test_multiple_full_identity_matches_are_a_visible_nonterminal_conflict
+    with_tmp_git_repo do |repo|
+      gh = FakeGh.new
+      local_patch = patch(repo)
+      gh.prs = [ remote_pr(local_patch, number: 9), remote_pr(local_patch, number: 3) ]
+
+      result = opener(repo, gh, Handoff.new).open(
+        thesis: thesis, patch: local_patch, job_id: "job-7",
+        canonical_action_id: "fix-fp", source: source,
+        record_intent: -> { true }
+      )
+
+      assert_equal "remote_pr_conflict", result.outcome
+      refute result.terminal
+      assert_equal [ "multiple_identity_matches" ], result.receipts.fetch("remote_conflicts")
+      assert_equal [ 3, 9 ], result.receipts.fetch("matching_pr_numbers")
+      refute result.receipts.key?("remote_pr_candidates")
+      assert_empty gh.pushed
+      assert_empty gh.created
+    end
+  end
+
+  def test_no_full_identity_match_surfaces_every_nonmatching_record
+    with_tmp_git_repo do |repo|
+      gh = FakeGh.new
+      local_patch = patch(repo)
+      wrong_marker = remote_pr(local_patch, number: 3)
+      wrong_marker["body"] = "unrelated"
+      wrong_head = remote_pr(local_patch, number: 9)
+      wrong_head["headRefOid"] = "deadbeef"
+      gh.prs = [ wrong_head, wrong_marker ]
+
+      result = opener(repo, gh, Handoff.new).open(
+        thesis: thesis, patch: local_patch, job_id: "job-7",
+        canonical_action_id: "fix-fp", source: source,
+        record_intent: -> { true }
+      )
+
+      assert_equal "remote_pr_conflict", result.outcome
+      refute result.terminal
+      assert_equal [ "no_identity_match" ], result.receipts.fetch("remote_conflicts")
+      candidates = result.receipts.fetch("remote_pr_candidates")
+      assert_equal [ 3, 9 ], candidates.map { |candidate| candidate.fetch("number") }
+      assert_equal [ [ "action_marker" ], [ "head_sha" ] ],
+                   candidates.map { |candidate| candidate.fetch("conflicts") }
+      assert_empty gh.pushed
       assert_empty gh.created
     end
   end
@@ -208,6 +329,33 @@ class RefactorPatrolPrOpenerTest < Minitest::Test
     end
   end
 
+  def test_existing_remote_pr_reconciles_after_registered_trunk_advances
+    with_tmp_git_repo do |repo|
+      gh = FakeGh.new
+      handoff = Handoff.new
+      local_patch = isolated_patch(repo)
+      gh.prs = [ remote_pr(local_patch) ]
+      File.write(File.join(repo, "README.md"), "trunk advanced\n")
+      run!("git", "-C", repo, "add", "README.md")
+      run!("git", "-C", repo, "commit", "-m", "advance trunk", "--quiet")
+
+      result = opener(repo, gh, handoff).open(
+        thesis: thesis, patch: local_patch, job_id: "job-7",
+        canonical_action_id: "fix-fp", source: source,
+        creation_attempted: true, record_intent: -> { true }
+      )
+
+      assert_equal "pr_opened", result.outcome
+      assert result.terminal
+      assert_equal "https://github.com/acme/demo/pull/8", result.pr_url
+      assert_equal 1, handoff.calls.size
+      assert_empty gh.pushed
+      assert_empty gh.created
+    ensure
+      FileUtils.rm_rf(local_patch&.worktree_path)
+    end
+  end
+
   def test_existing_remote_must_match_every_durable_identity
     with_tmp_git_repo do |repo|
       local_patch = patch(repo)
@@ -222,6 +370,9 @@ class RefactorPatrolPrOpenerTest < Minitest::Test
         },
         "wrong URL repository" => lambda { |pr|
           pr["url"] = "https://github.com/other/demo/pull/8"
+        },
+        "wrong URL host" => lambda { |pr|
+          pr["url"] = "https://evil.example/acme/demo/pull/8"
         }
       }
 
@@ -398,6 +549,25 @@ class RefactorPatrolPrOpenerTest < Minitest::Test
         "passed" => true, "commands" => [ { "name" => "test", "exit_code" => 0 } ]
       },
       changed_paths: [ "lib/a.rb" ], diff_lines: 2, details: {}
+    )
+  end
+
+  def isolated_patch(repo)
+    base = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+    path = File.join(File.dirname(repo), "#{File.basename(repo)}-refactor-patch")
+    branch = "hive-refactor/test-patch"
+    run!("git", "-C", repo, "worktree", "add", "-b", branch, path, base, "--quiet")
+    File.write(File.join(path, "refactor.txt"), "validated patch\n")
+    run!("git", "-C", path, "add", "refactor.txt")
+    run!("git", "-C", path, "commit", "-m", "validated patch", "--quiet")
+    commit = run!("git", "-C", path, "rev-parse", "HEAD").strip
+    Hive::RefactorPatrol::Fixer::Result.new(
+      outcome: "validated", terminal: false, branch: branch,
+      worktree_path: path, analysis_sha: base, publication_base_sha: base,
+      commit_sha: commit, validation: {
+        "passed" => true, "commands" => [ { "name" => "test", "exit_code" => 0 } ]
+      },
+      changed_paths: [ "refactor.txt" ], diff_lines: 1, details: {}
     )
   end
 

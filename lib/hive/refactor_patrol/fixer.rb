@@ -48,12 +48,13 @@ module Hive
         @clock = clock
       end
 
-      def attempt(thesis:, job_id:, analysis_sha:)
+      def attempt(thesis:, job_id:, analysis_sha:, reanalysis_depth: 0,
+                  report_analysis_sha: analysis_sha)
         return blocked("not_accepted", thesis: thesis) unless accepted?(thesis)
 
         branch = branch_name(job_id, thesis.fingerprint)
         worktree = @worktree_factory.call(branch: branch)
-        registered_status = git_output!(@project_root, "status", "--porcelain=v1", "-z")
+        registered_checkout = registered_checkout_snapshot!(analysis_sha)
         materialized = worktree.create_exact!(branch, base_sha: analysis_sha)
         if materialized == :existing && !git_output!(worktree.path, "status", "--porcelain=v1", "-z").empty?
           return transient(
@@ -64,8 +65,18 @@ module Hive
 
         existing_head = git_output!(worktree.path, "rev-parse", "HEAD").strip
         recovering_commit = materialized == :existing && existing_head != analysis_sha
+        patch_base =
+          if recovering_commit
+            recovered_patch_base!(
+              worktree.path, analysis_sha, registered_checkout.fetch(:head)
+            )
+          else
+            analysis_sha
+          end
         unless recovering_commit
-          control_plane = control_plane_snapshot(worktree.path, registered_status)
+          control_plane = control_plane_snapshot(
+            worktree.path, registered_checkout.fetch(:status)
+          )
           agent_result = @agent_runner.call(
             thesis: thesis, prompt: render_prompt(thesis, worktree.path), worktree_path: worktree.path,
             run_dir: run_dir(job_id, thesis.fingerprint)
@@ -82,21 +93,43 @@ module Hive
           return transient("fix_agent_failed", branch, worktree, agent_result) if agent_failed?(agent_result)
         end
 
-        audit = audit_and_validate(thesis, worktree.path, analysis_sha)
+        audit = audit_and_validate(thesis, worktree.path, patch_base)
         return finish_audit_failure(audit, branch, worktree, analysis_sha) unless audit.fetch(:passed)
 
         commit_audited_changes!(worktree.path, thesis, amend: recovering_commit)
-        publication_base = reconcile_trunk_drift(thesis, worktree, branch, analysis_sha)
-        return publication_base if publication_base.is_a?(Result)
+        publication_base = reconcile_trunk_drift(
+          thesis, worktree, branch, analysis_sha, patch_base, registered_checkout
+        )
+        if publication_base.is_a?(Result)
+          if publication_base.outcome == "trunk_overlap_reanalysis_required" && reanalysis_depth.zero?
+            git_output!(@project_root, "branch", "-D", branch)
+            retried = attempt(
+              thesis: thesis,
+              job_id: job_id,
+              analysis_sha: publication_base.publication_base_sha,
+              reanalysis_depth: reanalysis_depth + 1,
+              report_analysis_sha: report_analysis_sha
+            )
+            retried.analysis_sha = report_analysis_sha
+            retried.details = (retried.details || {}).merge(
+              "reanalyzed_after_trunk_overlap" => true,
+              "reanalysis_sha" => publication_base.publication_base_sha,
+              "overlap" => publication_base.details.fetch("overlap")
+            )
+            return retried
+          end
+          publication_base.analysis_sha = report_analysis_sha
+          return publication_base
+        end
 
-        if publication_base != analysis_sha
+        if publication_base != patch_base
           audit = audit_and_validate(thesis, worktree.path, publication_base)
           return finish_audit_failure(audit, branch, worktree, analysis_sha) unless audit.fetch(:passed)
 
           commit_audited_changes!(worktree.path, thesis, amend: true)
         end
         assert_clean_worktree!(worktree.path)
-        assert_registered_status!(registered_status)
+        assert_registered_checkout!(registered_checkout)
 
         Result.new(
           outcome: "validated", terminal: false, branch: branch, worktree_path: worktree.path,
@@ -225,9 +258,9 @@ module Hive
         )
       end
 
-      def reconcile_trunk_drift(thesis, worktree, branch, analysis_sha)
-        current = git_output!(@project_root, "rev-parse", "HEAD").strip
-        return analysis_sha if current == analysis_sha
+      def reconcile_trunk_drift(thesis, worktree, branch, analysis_sha, patch_base, registered_checkout)
+        current = assert_registered_checkout!(registered_checkout)
+        return patch_base if current == patch_base
 
         drift_paths = nul_paths(git_output!(@project_root, "diff", "--name-only", "-z", "#{analysis_sha}..#{current}"))
         boundary = Array(thesis.feature_boundary && thesis.feature_boundary["owned_files"]) +
@@ -236,7 +269,7 @@ module Hive
         unless overlap.empty?
           cleanup(worktree)
           return Result.new(
-            outcome: "trunk_overlap_reanalysis_required", terminal: true,
+          outcome: "trunk_overlap_reanalysis_required", terminal: false,
             branch: branch, worktree_path: worktree.path,
             analysis_sha: analysis_sha, publication_base_sha: current,
             details: { "overlap" => overlap }
@@ -286,16 +319,17 @@ module Hive
       end
 
       def public_declaration_changed?(worktree_path, base_sha, changed_path)
-        patch = git_output!(
-          worktree_path, "diff", "--cached", "--unified=0", base_sha,
-          "--", changed_path
-        )
-        patch.each_line.any? do |line|
-          next false if line.start_with?("+++", "---")
-          next false unless line.start_with?("+", "-")
-
-          Caps.public_api_declaration?(changed_path, line[1..])
-        end
+        before = git_output!(worktree_path, "show", "#{base_sha}:#{changed_path}")
+        after = File.file?(File.join(worktree_path, changed_path)) ?
+          File.binread(File.join(worktree_path, changed_path)) : ""
+        Caps.public_declaration_signatures(changed_path, before) !=
+          Caps.public_declaration_signatures(changed_path, after)
+      rescue Hive::GitError
+        # A new file has no base blob; any explicit public declaration in it
+        # is a contract expansion and therefore fails closed.
+        after = File.file?(File.join(worktree_path, changed_path)) ?
+          File.binread(File.join(worktree_path, changed_path)) : ""
+        Caps.public_declaration_signatures(changed_path, after).any?
       end
 
       def configured_commands
@@ -362,11 +396,13 @@ module Hive
       def control_plane_snapshot(worktree_path, registered_status)
         common_dir = git_output!(worktree_path, "rev-parse", "--git-common-dir").strip
         common_dir = File.expand_path(common_dir, worktree_path)
+        fix_branch_ref = git_output!(worktree_path, "symbolic-ref", "HEAD").strip
         {
           git_pointer: file_identity(File.join(worktree_path, ".git")),
           shared_config_path: File.join(common_dir, "config"),
           shared_git_config: file_identity(File.join(common_dir, "config")),
-          shared_git_refs: shared_ref_snapshot,
+          fix_branch_ref: fix_branch_ref,
+          fix_branch_oid: git_output!(worktree_path, "rev-parse", fix_branch_ref).strip,
           registered_checkout: registered_status
         }
       end
@@ -375,13 +411,15 @@ module Hive
         checks = {
           "worktree_git_pointer" => -> { file_identity(File.join(worktree_path, ".git")) },
           "shared_git_config" => -> { file_identity(before.fetch(:shared_config_path)) },
-          "shared_git_refs" => -> { shared_ref_snapshot },
+          "fix_branch_ref" => lambda do
+            git_output!(worktree_path, "rev-parse", before.fetch(:fix_branch_ref)).strip
+          end,
           "registered_checkout" => -> { git_output!(@project_root, "status", "--porcelain=v1", "-z") }
         }
         expected = {
           "worktree_git_pointer" => before.fetch(:git_pointer),
           "shared_git_config" => before.fetch(:shared_git_config),
-          "shared_git_refs" => before.fetch(:shared_git_refs),
+          "fix_branch_ref" => before.fetch(:fix_branch_oid),
           "registered_checkout" => before.fetch(:registered_checkout)
         }
 
@@ -390,17 +428,6 @@ module Hive
           changed << name unless actual == expected.fetch(name)
         rescue StandardError
           changed << name
-        end
-      end
-
-      def shared_ref_snapshot
-        out = git_output!(
-          @project_root, "for-each-ref", "--format=%(refname)%00%(objectname)"
-        )
-        default_ref = "refs/heads/#{@cfg.fetch('default_branch')}"
-        out.lines.each_with_object({}) do |line, refs|
-          ref, oid = line.chomp.split("\0", 2)
-          refs[ref] = oid unless ref == default_ref
         end
       end
 
@@ -430,9 +457,59 @@ module Hive
         nil
       end
 
-      def assert_registered_status!(before)
-        after = git_output!(@project_root, "status", "--porcelain=v1", "-z")
-        raise Hive::GitError, "registered checkout changed during refactor fix" unless before == after
+      def registered_checkout_snapshot!(analysis_sha)
+        branch = git_output!(@project_root, "branch", "--show-current").strip
+        expected = @cfg.fetch("default_branch").to_s
+        unless !branch.empty? && branch == expected
+          raise Hive::GitError,
+                "registered checkout must remain on configured default branch #{expected.inspect}"
+        end
+
+        head = git_output!(@project_root, "rev-parse", "HEAD").strip
+        assert_ancestor!(analysis_sha, head, "registered checkout no longer contains the analysis commit")
+        status = git_output!(@project_root, "status", "--porcelain=v1", "-z")
+        raise Hive::GitError, "registered checkout must be clean before refactor fix" unless status.empty?
+
+        {
+          branch: branch,
+          head: head,
+          status: status
+        }
+      end
+
+      def recovered_patch_base!(worktree_path, analysis_sha, registered_head)
+        ancestry = git_output!(worktree_path, "rev-list", "--parents", "-n", "1", "HEAD").split
+        unless ancestry.size == 2
+          raise Hive::GitError, "recovered refactor patch must contain exactly one non-merge commit"
+        end
+
+        parent = ancestry.fetch(1)
+        assert_ancestor!(analysis_sha, parent, "recovered refactor base no longer descends from analysis")
+        assert_ancestor!(parent, registered_head, "recovered refactor base is not on registered trunk")
+        parent
+      end
+
+      def assert_registered_checkout!(before)
+        branch = git_output!(@project_root, "branch", "--show-current").strip
+        unless branch == before.fetch(:branch)
+          raise Hive::GitError,
+                "registered checkout left configured default branch #{before.fetch(:branch).inspect}"
+        end
+        status = git_output!(@project_root, "status", "--porcelain=v1", "-z")
+        unless status == before.fetch(:status)
+          raise Hive::GitError, "registered checkout changed during refactor fix"
+        end
+
+        head = git_output!(@project_root, "rev-parse", "HEAD").strip
+        assert_ancestor!(before.fetch(:head), head, "registered checkout no longer descends from its validated head")
+        head
+      end
+
+      def assert_ancestor!(ancestor, descendant, message)
+        _out, _err, status = Open3.capture3(
+          "git", "-C", @project_root, "merge-base", "--is-ancestor", ancestor, descendant
+        )
+        raise Hive::GitError, message unless status.success?
       end
 
       def git_output!(directory, *args)

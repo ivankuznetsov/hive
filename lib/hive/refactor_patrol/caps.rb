@@ -33,35 +33,74 @@ module Hive
         vcpkg.json vcpkg-configuration.json conanfile.py conanfile.txt
         Podfile Podfile.lock Cartfile Cartfile.resolved
         pubspec.yaml pubspec.lock deno.json deno.jsonc deno.lock
-        MODULE.bazel WORKSPACE WORKSPACE.bazel rebar.config
+        MODULE.bazel WORKSPACE WORKSPACE.bazel BUILD BUILD.bazel CMakeLists.txt
+        flake.nix flake.lock default.nix shell.nix build.zig build.zig.zon
+        stack.yaml cabal.project cpanfile Makefile.PL Build.PL rebar.config
       ].freeze
       DEPENDENCY_MANIFEST_PATTERNS = [
         %r{(?:\A|/)requirements(?:[-_.][^/]*)?\.txt\z}i,
         %r{(?:\A|/)gradle/libs\.versions\.toml\z}i,
+        /\.(?:bzl|cabal|gemspec)\z/i,
         /\.(?:csproj|fsproj|nuspec|sln|vbproj|vcxproj)\z/i
       ].freeze
       PUBLIC_DECLARATION_PATTERNS = {
+        ".cljs" => [ /^\s*\(defn?\s+(?!-)[A-Za-z*!?+_.-]/ ],
+        ".clj" => [ /^\s*\(defn?\s+(?!-)[A-Za-z*!?+_.-]/ ],
         ".cs" => [
           /^\s*public\s+(?:(?:abstract|new|partial|readonly|ref|sealed|static|unsafe)\s+)*
-            (?:class|delegate|enum|interface|record(?:\s+struct)?|struct)\b/x
+            (?:class|delegate|enum|interface|record(?:\s+struct)?|struct)\b/x,
+          /^\s*public\s+(?:(?:abstract|async|extern|new|override|sealed|static|unsafe|virtual)\s+)*
+            [A-Za-z_][A-Za-z0-9_<>,.?\[\]\s]*\s+[A-Za-z_][A-Za-z0-9_]*\s*\(/x
         ],
         ".go" => [
           /^\s*func\s+(?:\([^\n)]*\)\s*)?[A-Z][A-Za-z0-9_]*\s*\(/,
           /^\s*type\s+[A-Z][A-Za-z0-9_]*\b/,
           /^\s*(?:const|var)\s+[A-Z][A-Za-z0-9_]*\b/
         ],
+        ".ex" => [ /^\s*def(?:delegate|guard|macro)?\s+(?!p\b)[a-zA-Z_][A-Za-z0-9_!?]*/ ],
+        ".exs" => [ /^\s*def(?:delegate|guard|macro)?\s+(?!p\b)[a-zA-Z_][A-Za-z0-9_!?]*/ ],
         ".java" => [
           /^\s*public\s+(?:(?:abstract|final|non-sealed|sealed|static|strictfp)\s+)*
-            (?:@interface|class|enum|interface|record)\b/x
+            (?:@interface|class|enum|interface|record)\b/x,
+          /^\s*public\s+(?:(?:abstract|default|final|native|static|strictfp|synchronized)\s+)*
+            [A-Za-z_$][A-Za-z0-9_$<>,.?\[\]\s]*\s+[A-Za-z_$][A-Za-z0-9_$]*\s*\(/x
         ],
         ".kt" => [
-          /^\s*public\s+(?:(?:abstract|data|enum|open|sealed|value)\s+)*
+          /^\s*(?!private\b|internal\b|protected\b)(?:public\s+)?(?:(?:abstract|data|enum|open|sealed|value)\s+)*
             (?:class|fun|interface|object|typealias|val|var)\b/x
         ],
-        ".py" => [ /^\s*__all__\s*=/ ],
+        ".php" => [
+          /^\s*(?:public\s+)?(?:abstract\s+|final\s+|readonly\s+)?(?:class|enum|interface|trait)\b/i,
+          /^\s*public\s+(?:static\s+)?function\s+[A-Za-z_][A-Za-z0-9_]*/i
+        ],
+        ".py" => [
+          /^\s*__all__\s*=/,
+          /^\s*(?:async\s+)?def\s+(?!_)[A-Za-z][A-Za-z0-9_]*\s*\(/,
+          /^\s*class\s+(?!_)[A-Za-z][A-Za-z0-9_]*\b/
+        ],
+        ".rb" => [
+          /^\s*def\s+(?:self\.)?[A-Za-z_][A-Za-z0-9_!?=]*/,
+          /^\s*(?:class|module)\s+[A-Z][A-Za-z0-9_:]*/
+        ],
+        ".rs" => [
+          /^\s*pub\s+(?!(?:crate|super|self|in)\b)(?:(?:async|const|extern|unsafe)\s+)*
+            (?:const|enum|fn|macro|mod|static|struct|trait|type|union|use)\b/x
+        ],
+        ".scala" => [
+          /^\s*(?!private\b|protected\b)(?:(?:abstract|case|final|implicit|lazy|sealed)\s+)*
+            (?:class|def|enum|given|object|trait|type|val|var)\b/x
+        ],
         ".swift" => [
           /^\s*(?:open|public)\s+(?:(?:actor|class|enum|func|protocol|struct|typealias|var)\b)/
         ],
+        ".ts" => [ /^\s*export\s+(?:default\s+)?(?:(?:abstract|async|declare)\s+)*(?:class|const|enum|function|interface|let|namespace|type|var)\b/ ],
+        ".tsx" => [ /^\s*export\s+(?:default\s+)?(?:(?:abstract|async|declare)\s+)*(?:class|const|enum|function|interface|let|namespace|type|var)\b/ ],
+        ".js" => [
+          /^\s*export\s+(?:default\s+)?(?:async\s+)?(?:class|const|function|let|var)\b/,
+          /^\s*(?:module\.exports|exports\.[A-Za-z_$][\w$]*)\s*=/
+        ],
+        ".jsx" => [ /^\s*export\s+(?:default\s+)?(?:async\s+)?(?:class|const|function|let|var)\b/ ],
+        ".mjs" => [ /^\s*export\s+(?:default\s+)?(?:async\s+)?(?:class|const|function|let|var)\b/ ],
         ".vb" => [ /^\s*Public\s+(?:Class|Delegate|Enum|Interface|Module|Structure)\b/i ]
       }.freeze
 
@@ -80,6 +119,30 @@ module Hive
         patterns = PUBLIC_DECLARATION_PATTERNS.fetch(File.extname(normalized).downcase, [])
         patterns.any? { |pattern| snippet.to_s.match?(pattern) }
       end
+
+      def self.public_declaration_signatures(path, content)
+        content.to_s.each_line.filter_map do |line|
+          next unless public_api_declaration?(path, line)
+
+          normalize_declaration_signature(path, line)
+        end.sort
+      end
+
+      def self.normalize_declaration_signature(path, line)
+        signature = line.to_s.strip
+        case File.extname(normalize_path(path)).downcase
+        when ".rb"
+          signature = signature.sub(/\s+=\s+.*\z/, "") if signature.start_with?("def ")
+        when ".ex", ".exs"
+          signature = signature.sub(/\s+do\b.*\z/, "")
+        when ".py"
+          signature = signature.sub(/:\s*\z/, "")
+        else
+          signature = signature.sub(/\s*(?:\{|=>).*\z/, "")
+        end
+        signature.gsub(/\s+/, " ").strip
+      end
+      private_class_method :normalize_declaration_signature
 
       def self.dependency_manifest?(path)
         normalized = normalize_path(path)

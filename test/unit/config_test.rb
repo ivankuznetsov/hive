@@ -321,6 +321,19 @@ class ConfigTest < Minitest::Test
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))
       File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
         refactor_patrol:
+          commands:
+            docs: " "
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_includes err.message, "refactor_patrol.commands.docs"
+      assert_includes err.message, "non-empty String"
+    end
+
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        refactor_patrol:
           caps: nope
       YAML
 

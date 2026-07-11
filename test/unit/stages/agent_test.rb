@@ -486,6 +486,32 @@ class StagesAgentTest < Minitest::Test
     end
   end
 
+  def test_run_preserves_retryable_limit_marker_written_by_agent
+    with_tmp_dir do |project|
+      task = task_for(project, "plan")
+      Hive::Markers.set(task.state_file, :error, reason: "agent_preflight_failed")
+      retry_after = (Time.now.utc + 3600).iso8601
+
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, lambda { |_task, **_kwargs|
+        Hive::Markers.set(
+          task.state_file,
+          :error,
+          reason: "limits_reached",
+          message: "limits reached for codex: usage limit",
+          retry_after: retry_after
+        )
+        { status: :error, error_message: "limits reached for codex: usage limit" }
+      }) do
+        result = Hive::Stages::Agent.run!(task, {})
+
+        marker = Hive::Markers.current(task.state_file)
+        assert_equal({ commit: "error", status: :error }, result)
+        assert_equal "limits_reached", marker.attrs["reason"]
+        assert_equal retry_after, marker.attrs["retry_after"]
+      end
+    end
+  end
+
   def test_rerun_overwrites_a_stale_complete_marker_when_preflight_fails
     # On a re-run of an already-markered stage, a {status: :error} preflight
     # failure must OVERWRITE the stale :complete rather than leave it in place —

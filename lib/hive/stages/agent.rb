@@ -39,6 +39,7 @@ module Hive
         )
         resource_limits = Hive::Stages::Base.stage_resource_limits(cfg, stage)
 
+        marker_before_spawn = Hive::Markers.current(output_path)
         result = Hive::Stages::Base.spawn_agent(
           task,
           prompt: prompt,
@@ -57,20 +58,15 @@ module Hive
         )
 
         marker = Hive::Markers.current(output_path)
-        # `spawn_agent` returns a `{status: :error}` envelope WITHOUT writing
-        # a marker on a preflight/version failure (base.rb) — unlike the
-        # coding claude path, which routes through
-        # `spawn_claude_with_tmux_marker!` and stamps an attributed marker.
-        # The generic runner uses bare `spawn_agent` for every profile, so we
-        # must consume that envelope here: otherwise the reread yields the
-        # marker from a PRIOR run (`:none` on a first run, but a stale
-        # `:waiting`/`:complete` when the operator edits and re-runs an
-        # already-markered stage), `hive run` exits 0 reporting that status,
-        # and the preflight failure is unobservable (NO-SILENT-CAPS). The
-        # `{status: :error}` envelope means the spawn wrote no marker THIS run,
-        # so overwriting any stale marker with the attributed `:error` is
-        # correct — there is no agent-written marker to clobber.
-        if result.is_a?(Hash) && result[:status] == :error
+        # A preflight/version failure returns `{status: :error}` without writing
+        # a marker, while a spawned state-file agent can return the same envelope
+        # after writing a more specific marker (limits_reached, timeout, etc.).
+        # Synthesize agent_preflight_failed only when the terminal marker is
+        # unchanged from before the spawn. This still replaces stale
+        # waiting/complete markers on genuine preflight failures without
+        # clobbering fresh retry metadata written by Hive::Agent.
+        marker_unchanged = marker.name == marker_before_spawn.name && marker.raw == marker_before_spawn.raw
+        if result.is_a?(Hash) && result[:status] == :error && marker_unchanged
           Hive::Markers.set(
             output_path, :error,
             reason: "agent_preflight_failed",

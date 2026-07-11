@@ -51,6 +51,15 @@ deliverable before status reports them archived.
    a markerless run has nothing to commit, so `commit_after` skips the commit),
    otherwise `marker.name.to_s`.
 
+An error envelope does not by itself prove that the spawn wrote no marker.
+`Hive::Agent` writes specific state-file errors for provider limits, timeouts,
+and nonzero exits, while version/auth preflight failures return the same error
+envelope without changing the file. The runner snapshots the terminal marker
+before spawning and synthesizes `ERROR reason=agent_preflight_failed` only when
+the marker remains unchanged. Fresh agent-written errors therefore retain
+their reason and recovery metadata, including the `limits_reached`
+`retry_after` consumed by the daemon healer.
+
 The coding pipeline's `brainstorm` and `plan` names still use their bespoke
 tmux-capable runners even though their descriptor entries are `kind: :agent`;
 name-first resolver precedence preserves the current coding runtime.
@@ -60,7 +69,8 @@ name-first resolver precedence preserves the current coding runtime.
 - `test/unit/stages/agent_test.rb` covers prior-artifact selection, nonce
   wrapping, nil-skill fallback, formatted skill invocation, spawn arguments,
   descriptor-versus-loaded-config resource precedence, explicit budget/timeout
-  overrides, and marker-to-action mapping.
+  overrides, marker-to-action mapping, preflight marker synthesis, and
+  preservation of fresh retryable agent error markers.
 
 ## Backlinks
 

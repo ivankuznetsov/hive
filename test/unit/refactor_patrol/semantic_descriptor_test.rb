@@ -123,6 +123,59 @@ class RefactorPatrolSemanticDescriptorTest < Minitest::Test
     assert_raises(ArgumentError) { SemanticDescriptor.call(thesis: missing_anchor, source: source) }
   end
 
+  def test_rejects_a_malformed_source_url
+    error = assert_raises(ArgumentError) do
+      SemanticDescriptor.call(
+        thesis: thesis,
+        source: { "repository" => "acme/polyglot", "url" => "https://[" }
+      )
+    end
+
+    assert_equal "source URL must include an exact host", error.message
+  end
+
+  def test_unknown_shapes_fall_back_without_language_or_model_invention
+    item = {
+      "feature_id" => "x",
+      "feature" => "",
+      "problem" => "",
+      "cost" => "",
+      "proposed_refactor" => "",
+      "evidence" => [ Object.new ],
+      "feature_boundary" => {
+        "owned_files" => [ "src/core.unknown" ],
+        "entrypoints" => []
+      },
+      "expected_leverage" => { "drivers" => [ Object.new ] }
+    }
+
+    descriptor = SemanticDescriptor.call(thesis: item, source: source)
+
+    assert_equal "other", descriptor.fetch("problem_kind")
+    assert_equal "other", descriptor.fetch("refactor_kind")
+    assert_equal [ "src/core.unknown" ], descriptor.fetch("anchors")
+    assert_equal [ "unspecified" ], descriptor.fetch("concepts")
+  end
+
+  def test_object_thesis_with_an_absent_optional_field_uses_nil
+    item = Object.new
+    {
+      feature_id: "architecture-core",
+      feature: "Core",
+      problem: "Repeated policy decisions",
+      proposed_refactor: "Consolidate policy decisions",
+      evidence: [ { "file" => "src/core.rb", "claim" => "policy repeats" } ],
+      feature_boundary: { "owned_files" => [ "src/core.rb" ], "entrypoints" => [] },
+      expected_leverage: { "drivers" => [] }
+    }.each do |name, value|
+      item.define_singleton_method(name) { value }
+    end
+
+    descriptor = SemanticDescriptor.call(thesis: item, source: source)
+
+    assert_equal "duplicated_policy", descriptor.fetch("problem_kind")
+  end
+
   private
 
   def source

@@ -1,4 +1,5 @@
 require "hive/refactor_patrol/semantic_family"
+require "uri"
 
 module Hive
   module RefactorPatrol
@@ -44,7 +45,11 @@ module Hive
       module_function
 
       def call(thesis:, source:)
+        uri = URI.parse(source_value(source, "url"))
+        raise ArgumentError, "source URL must include an exact host" unless uri.host
+
         SemanticFamily.descriptor(
+          host: uri.host,
           repository: source_value(source, "repository"),
           component: stable_component(thesis),
           problem_kind: problem_kind(thesis),
@@ -52,6 +57,8 @@ module Hive
           anchors: anchors(thesis),
           concepts: concepts(thesis)
         )
+      rescue URI::InvalidURIError
+        raise ArgumentError, "source URL must include an exact host"
       end
 
       def stable_component(thesis)

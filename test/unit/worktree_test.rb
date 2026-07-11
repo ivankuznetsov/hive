@@ -96,6 +96,22 @@ class WorktreeTest < Minitest::Test
     end
   end
 
+  def test_create_exact_attaches_existing_branch_that_descends_from_pinned_commit
+    with_initialized_project do |dir, root|
+      pinned = run!("git", "-C", dir, "rev-parse", "HEAD").strip
+      File.write(File.join(dir, "later.txt"), "later\n")
+      run!("git", "-C", dir, "add", ".")
+      run!("git", "-C", dir, "commit", "-m", "later", "--quiet")
+      descendant = run!("git", "-C", dir, "rev-parse", "HEAD").strip
+      branch = "hive-refactor/exact-existing"
+      run!("git", "-C", dir, "branch", branch)
+      wt = Hive::Worktree.new(dir, "exact-existing", worktree_root: root)
+
+      assert_equal :created, wt.create_exact!(branch, base_sha: pinned)
+      assert_equal descendant, run!("git", "-C", wt.path, "rev-parse", "HEAD").strip
+    end
+  end
+
   def test_pointer_validation_blocks_path_traversal
     Dir.mktmpdir do |root|
       assert_raises(Hive::WorktreeError) do

@@ -9,7 +9,7 @@ module Hive
     # or narrow work, but can never grant an older job new authority.
     module Policy
       CONFIDENCE = %w[low medium high].freeze
-      COMMANDS = %w[docs format lint typecheck test].freeze
+      COMMANDS = %w[docs format lint public_contract typecheck test].freeze
       CAP_BOOLEANS = %w[
         single_feature_only allow_dependency_bumps allow_public_api_changes
         allow_cross_feature
@@ -41,7 +41,7 @@ module Hive
           "auto_fix" => refactor.dig("auto_fix", "enabled") == true,
           "issue_filing" => refactor.dig("issue_filing", "enabled") == true,
           "action" => action,
-          "epoch" => Digest::SHA256.hexdigest(JSON.generate(action)),
+          "epoch" => ::Digest::SHA256.hexdigest(JSON.generate(action)),
           "captured_at" => now.utc.iso8601
         }
       end

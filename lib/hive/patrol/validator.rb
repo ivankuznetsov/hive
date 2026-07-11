@@ -48,7 +48,7 @@ module Hive
 
       def validate(worktree_path, names: nil)
         selected = names && Array(names).map(&:to_s)
-        active = %w[docs format lint typecheck test].filter_map do |name|
+        active = %w[docs format lint public_contract typecheck test].filter_map do |name|
           next if selected && !selected.include?(name)
 
           command = @commands[name]

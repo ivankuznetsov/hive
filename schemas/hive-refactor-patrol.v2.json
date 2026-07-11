@@ -11,6 +11,11 @@
     "SourcePr": {
       "type": ["object", "null"],
       "additionalProperties": false,
+      "required": [
+        "url", "number", "repository", "registration", "base_branch",
+        "base_sha", "merge_sha", "merged_at", "changed_paths",
+        "manifest_checksum"
+      ],
       "properties": {
         "url": { "type": "string" },
         "number": { "type": "integer", "minimum": 1 },
@@ -113,6 +118,29 @@
       "type": "object",
       "additionalProperties": { "type": "number", "minimum": 0, "maximum": 1 }
     },
+    "ThesisMeasurementDiagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "error_class", "message"],
+      "properties": {
+        "kind": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "error_class": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "message": { "type": "string", "minLength": 1, "maxLength": 500 }
+      }
+    },
+    "ThesisFeatureMeasurement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "diagnostics"],
+      "properties": {
+        "status": { "enum": ["complete", "incomplete"] },
+        "diagnostics": {
+          "type": "array",
+          "maxItems": 8,
+          "items": { "$ref": "#/$defs/ThesisMeasurementDiagnostic" }
+        }
+      }
+    },
     "ThesisFeatureHotspot": {
       "type": "object",
       "additionalProperties": false,
@@ -122,7 +150,8 @@
         "score": { "type": "number", "minimum": 0, "maximum": 1 },
         "breakdown": { "$ref": "#/$defs/ThesisNormalizedSignalValues" },
         "signals": { "$ref": "#/$defs/ThesisSignalValues" },
-        "normalized": { "$ref": "#/$defs/ThesisNormalizedSignalValues" }
+        "normalized": { "$ref": "#/$defs/ThesisNormalizedSignalValues" },
+        "measurement": { "$ref": "#/$defs/ThesisFeatureMeasurement" }
       }
     },
     "ThesisExpectedLeverage": {
@@ -194,6 +223,21 @@
         "details": { "type": "object" }
       }
     },
+    "FeatureResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["feature_id", "complete", "thesis_ids", "errors"],
+      "properties": {
+        "feature_id": { "type": "string", "minLength": 1 },
+        "complete": { "type": "boolean" },
+        "thesis_ids": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
+        "errors": { "type": "array", "items": { "$ref": "#/$defs/ReviewError" } }
+      }
+    },
     "Attempt": {
       "type": "object",
       "additionalProperties": true
@@ -202,7 +246,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "canonical_action_id", "thesis_id", "kind", "owner_job_id",
+        "canonical_action_id", "thesis_id", "thesis_fingerprint", "kind", "owner_job_id",
         "outcome", "terminal", "receipts"
       ],
       "properties": {
@@ -223,7 +267,7 @@
       "required": [
         "schema", "schema_version", "ok", "job_id", "project", "project_root",
         "dry_run", "source_pr", "analysis_sha", "complete", "features_mapped",
-        "accepted", "flagged", "suppressed", "review_errors", "zero_reason",
+        "accepted", "flagged", "suppressed", "review_errors", "feature_results", "zero_reason",
         "attempts", "actions"
       ],
       "properties": {
@@ -242,6 +286,7 @@
         "flagged": { "type": "array", "items": { "$ref": "#/$defs/Disposition" } },
         "suppressed": { "type": "array", "items": { "$ref": "#/$defs/Disposition" } },
         "review_errors": { "type": "array", "items": { "$ref": "#/$defs/ReviewError" } },
+        "feature_results": { "type": "array", "items": { "$ref": "#/$defs/FeatureResult" } },
         "zero_reason": { "type": ["string", "null"], "enum": ["no_mapped_slice", "no_theses", "all_suppressed", null] },
         "attempts": { "type": "array", "items": { "$ref": "#/$defs/Attempt" } },
         "actions": { "type": "array", "items": { "$ref": "#/$defs/Action" } },

@@ -2132,6 +2132,20 @@ class SchemaFilesTest < Minitest::Test
     assert_includes required, "admissible"
   end
 
+  def test_refactor_patrol_v2_pins_complete_source_and_action_identity
+    document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 2)))
+
+    source_required = document.dig("$defs", "SourcePr", "required")
+    assert_includes source_required, "registration"
+    assert_includes source_required, "changed_paths"
+    assert_includes source_required, "manifest_checksum"
+
+    action_required = document.dig("$defs", "Action", "required")
+    assert_includes action_required, "canonical_action_id"
+    assert_includes action_required, "thesis_fingerprint"
+    assert_includes action_required, "owner_job_id"
+  end
+
   # ── hive-dispatch-request: claimed-file contract (#247) ─────────────────
 
   # A `<id>.json.claimed` file still self-declares schema=hive-dispatch-request

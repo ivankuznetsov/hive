@@ -100,6 +100,125 @@ class RefactorPatrolPrManifestResolverTest < Minitest::Test
     end
   end
 
+  def test_pr_reference_rejects_non_positive_and_malformed_values
+    with_tmp_dir do |dir|
+      resolver = resolver_for(dir, FakeGh.new(details))
+
+      [ "0", "-1", "not a PR", "https://github.com/acme/demo/issues/7", "http://[" ].each do |value|
+        assert_raises(Hive::GhError, value) { resolver.resolve(value) }
+      end
+    end
+  end
+
+  def test_metadata_rejects_invalid_time_file_shapes_statuses_and_duplicates
+    with_tmp_dir do |dir|
+      invalid = [
+        details.merge("merged_at" => "yesterday"),
+        details.merge("files" => [ nil ], "changed_files" => 1),
+        details.merge("files" => [ { "path" => "lib/x.rb", "status" => "mystery" } ], "changed_files" => 1),
+        details.merge(
+          "files" => [
+            { "path" => "lib/x.rb", "status" => "modified" },
+            { "path" => "lib/x.rb", "status" => "added" }
+          ],
+          "changed_files" => 2
+        )
+      ]
+
+      invalid.each do |candidate|
+        assert_raises(Hive::GhError) { resolver_for(dir, FakeGh.new(candidate)).resolve("7") }
+      end
+    end
+  end
+
+  def test_corrupt_authoritative_manifest_is_quarantined_without_replacement
+    with_tmp_dir do |dir|
+      resolver = resolver_for(dir, FakeGh.new(details))
+      manifest = resolver.resolve("7")
+      path = resolver.manifest_path(manifest.fetch("job_id"))
+      File.write(path, "{")
+
+      error = assert_raises(Hive::RefactorPatrol::PrManifestResolver::Conflict) do
+        resolver.resolve("7")
+      end
+
+      assert_includes error.message, "manifest is corrupt"
+      assert_equal "{", File.binread(path)
+      evidence = Dir.glob(
+        File.join(dir, ".hive-state", "refactor_patrol", "v2", "quarantine", "manifests", "*.json")
+      )
+      assert_equal 1, evidence.size
+      assert_equal "corrupt_authoritative_manifest", JSON.parse(File.read(evidence.first)).fetch("reason")
+    end
+  end
+
+  def test_manifest_contract_rejects_schema_scope_checksum_and_source_drift
+    manifest = Hive::RefactorPatrol::PrManifest.build(
+      source: details.slice(
+        "url", "number", "repository", "base_branch", "base_sha", "merge_sha", "merged_at"
+      ).merge("registration" => "demo"),
+      files: details.fetch("files")
+    )
+
+    invalid = [
+      manifest.merge("schema" => "legacy"),
+      manifest.merge("job_id" => "other"),
+      manifest.merge("manifest_checksum" => "0" * 64),
+      manifest.merge("source" => manifest.fetch("source").merge("number" => 0))
+    ]
+    invalid.each do |candidate|
+      assert_raises(Hive::RefactorPatrol::PrManifest::Invalid) do
+        Hive::RefactorPatrol::PrManifest.validate!(
+          candidate,
+          expected_job_id: manifest.fetch("job_id"), registration: "demo", default_branch: "main"
+        )
+      end
+    end
+
+    assert_raises(Hive::RefactorPatrol::PrManifest::Invalid) do
+      Hive::RefactorPatrol::PrManifest.validate!(manifest, registration: "other")
+    end
+    assert_raises(Hive::RefactorPatrol::PrManifest::Invalid) do
+      Hive::RefactorPatrol::PrManifest.validate!(manifest, default_branch: "release")
+    end
+
+    assert_same manifest, Hive::RefactorPatrol::PrManifest.validate!(
+      manifest,
+      expected_job_id: manifest.fetch("job_id"), registration: "demo", default_branch: "main"
+    )
+
+    invalid_scope = manifest.merge("changed_paths" => [ "lib/checkout.rb", "lib/checkout.rb" ])
+    assert_raises(Hive::RefactorPatrol::PrManifest::Invalid) do
+      Hive::RefactorPatrol::PrManifest.validate!(invalid_scope)
+    end
+
+    invalid_source = manifest.merge("source" => [])
+    assert_raises(Hive::RefactorPatrol::PrManifest::Invalid) do
+      Hive::RefactorPatrol::PrManifest.validate!(invalid_source)
+    end
+
+    invalid_time = Marshal.load(Marshal.dump(manifest))
+    invalid_time.fetch("source")["merged_at"] = "yesterday"
+    assert_raises(Hive::RefactorPatrol::PrManifest::Invalid) do
+      Hive::RefactorPatrol::PrManifest.validate!(invalid_time)
+    end
+  end
+
+  def test_manifest_load_wraps_missing_and_invalid_json
+    with_tmp_dir do |dir|
+      missing = File.join(dir, "missing.json")
+      invalid = File.join(dir, "invalid.json")
+      File.write(invalid, "{")
+
+      assert_raises(Hive::RefactorPatrol::PrManifest::Invalid) do
+        Hive::RefactorPatrol::PrManifest.load!(missing)
+      end
+      assert_raises(Hive::RefactorPatrol::PrManifest::Invalid) do
+        Hive::RefactorPatrol::PrManifest.load!(invalid)
+      end
+    end
+  end
+
   private
 
   def resolver_for(dir, gh, dry_run: false)

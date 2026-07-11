@@ -153,6 +153,8 @@ class ConfigTest < Minitest::Test
       assert_equal [], cfg.dig("patrol", "include")
       assert_includes cfg.dig("patrol", "exclude"), "node_modules"
       assert_nil cfg.dig("patrol", "commands", "test")
+      refute cfg.dig("patrol", "commands").key?("public_contract"),
+             "architecture-patrol validation must not alter ordinary patrol"
       assert_equal 12, cfg.dig("patrol", "review", "max_owned_files")
       assert_equal 24, cfg.dig("patrol", "review", "max_context_files")
       assert_equal %w[codex-native-review],
@@ -181,6 +183,8 @@ class ConfigTest < Minitest::Test
       assert_includes cfg.dig("refactor_patrol", "exclude"), "node_modules"
       assert_nil cfg.dig("refactor_patrol", "commands", "test")
       assert_nil cfg.dig("refactor_patrol", "commands", "docs")
+      assert cfg.dig("refactor_patrol", "commands").key?("public_contract")
+      assert_nil cfg.dig("refactor_patrol", "commands", "public_contract")
       assert_equal 8, cfg.dig("refactor_patrol", "caps", "max_files")
       assert_equal 400, cfg.dig("refactor_patrol", "caps", "max_diff_lines")
       assert_equal true, cfg.dig("refactor_patrol", "caps", "single_feature_only")
@@ -256,6 +260,18 @@ class ConfigTest < Minitest::Test
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))
       File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
         refactor_patrol:
+          min_leverage_score: 1.1
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_includes err.message, "refactor_patrol.min_leverage_score"
+      assert_includes err.message, "between 0 and 1"
+    end
+
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        refactor_patrol:
           issue_filing:
             min_leverage_score: 1.1
       YAML
@@ -263,6 +279,19 @@ class ConfigTest < Minitest::Test
       err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
       assert_includes err.message, "refactor_patrol.issue_filing.min_leverage_score"
       assert_includes err.message, "between 0 and 1"
+    end
+
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        refactor_patrol:
+          caps:
+            allow_cross_feature: sometimes
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_includes err.message, "refactor_patrol.caps.allow_cross_feature"
+      assert_includes err.message, "must be a boolean"
     end
 
     with_tmp_dir do |dir|
@@ -327,6 +356,19 @@ class ConfigTest < Minitest::Test
 
       err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
       assert_includes err.message, "refactor_patrol.commands.docs"
+      assert_includes err.message, "non-empty String"
+    end
+
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        refactor_patrol:
+          commands:
+            public_contract: " "
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_includes err.message, "refactor_patrol.commands.public_contract"
       assert_includes err.message, "non-empty String"
     end
 

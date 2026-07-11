@@ -36,6 +36,14 @@ class AgentProfileTest < Minitest::Test
     assert profile.frozen?
   end
 
+  def test_rejects_unknown_prompt_style
+    error = assert_raises(ArgumentError) do
+      make_profile(prompt_style: :shell_interpolation)
+    end
+
+    assert_includes error.message, "unknown prompt_style"
+  end
+
   def test_bin_uses_env_override_when_set
     profile = make_profile(bin_default: "/nonexistent/claude", env_bin_override_key: "HIVE_CLAUDE_BIN")
     assert_equal FAKE_BIN, profile.bin

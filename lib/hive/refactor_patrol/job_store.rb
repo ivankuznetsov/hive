@@ -2,6 +2,7 @@ require "json"
 require "fileutils"
 require "digest"
 require "time"
+require "uri"
 require "hive/atomic_file"
 require "hive/refactor_patrol/pr_manifest"
 require "hive/refactor_patrol/thesis"
@@ -33,6 +34,7 @@ module Hive
         issue_min_leverage_score
       ].freeze
       POLICY_COMMAND_KEYS = %w[docs format lint typecheck test].freeze
+      POLICY_OPTIONAL_COMMAND_KEYS = %w[public_contract].freeze
       POLICY_CAP_KEYS = %w[
         single_feature_only allow_dependency_bumps allow_public_api_changes
         max_files max_diff_lines allow_cross_feature
@@ -47,6 +49,15 @@ module Hive
         family_id claims created_at updated_at
       ]).freeze
       ACTION_KINDS = %w[fix issue].freeze
+      TERMINAL_PROOF_KEYS = %w[
+        canonical_action_id outcome owner proof proof_digest
+      ].freeze
+      TERMINAL_PROOF_OWNER_KEYS = %w[
+        registration project_root job_id pr_number merge_sha
+      ].freeze
+      TERMINAL_PROOF_RECEIPT_KEYS = %w[
+        pr_url review_task_path issue_url issue_number duplicate_issue_urls
+      ].freeze
       ACTION_CLAIM_KEYS = %w[
         owner owner_pid owner_process_start_time generation state authority
         claimed_at heartbeat_at expires_at pid process_start_time pgid
@@ -161,7 +172,8 @@ module Hive
         jobs.select do |aggregate|
           next false if aggregate.fetch("complete")
           next false unless %w[classified acting blocked].include?(aggregate.fetch("state"))
-          next true if aggregate.fetch("state") == "classified" && aggregate.fetch("actions").empty?
+          next false if action_phase_backoff_active?(aggregate, now: now)
+          next true if aggregate.fetch("actions").empty? && aggregate.fetch("state") == "classified"
 
           actions = aggregate.fetch("actions")
           active = actions.filter_map { |action| active_action_claim(action) }.first
@@ -180,10 +192,42 @@ module Hive
         raise InconsistentRecord, "refactor patrol action has invalid scheduling evidence (#{e.message})"
       end
 
+      def action_phase_backoff_active?(aggregate, now: Time.now)
+        attempt = aggregate.fetch("attempts").reverse_each.find do |item|
+          item["kind"] == "action_block"
+        end
+        deadline = attempt && attempt["next_eligible_at"]
+        !deadline.nil? && Time.iso8601(deadline) > now
+      rescue ArgumentError, KeyError => e
+        raise InconsistentRecord, "refactor patrol action backoff is invalid (#{e.message})"
+      end
+
+      def block_actions!(job_id, reason:, evidence: {}, now: Time.now, backoff_sec: 60)
+        mutate_job(job_id) do |aggregate, _path|
+          next aggregate if aggregate.fetch("complete")
+
+          timestamp = now.utc.iso8601
+          aggregate.fetch("attempts") << {
+            "kind" => "action_block",
+            "state" => "blocked",
+            "reason" => reason.to_s,
+            "evidence" => json_copy(evidence),
+            "finished_at" => timestamp,
+            "next_eligible_at" => (now + backoff_sec.to_i).utc.iso8601
+          }
+          aggregate["state"] = aggregate.fetch("actions").empty? ? "classified" : "blocked"
+          aggregate["complete"] = false
+          aggregate["updated_at"] = timestamp
+          aggregate
+        end
+      end
+
       def claim_discovery!(job_id, owner:, analysis_sha:, now: Time.now, lease_sec: 3600,
                            claim_resolver: nil, owner_pid: nil, owner_process_start_time: nil)
         mutate_job(job_id) do |aggregate, path|
           return nil if aggregate.fetch("complete")
+          return nil unless %w[queued blocked analyzing].include?(aggregate.fetch("state"))
+          return nil if aggregate.fetch("actions").any?
 
           active = active_discovery_attempt(aggregate)
           if active
@@ -232,8 +276,10 @@ module Hive
         end
       end
 
-      def attach_discovery_process!(token, pid:, process_start_time:, pgid:, now: Time.now)
-        mutate_claim(token) do |aggregate, attempt|
+      def attach_discovery_process!(token, pid:, process_start_time:, pgid:, now: Time.now,
+                                    lease_sec: nil)
+        validate_lease_sec!(lease_sec) unless lease_sec.nil?
+        mutate_claim(token, now: now) do |aggregate, attempt|
           if pid.to_i <= 1 || pgid.to_i <= 1 || process_start_time.to_s.empty?
             raise InconsistentRecord, "refactor patrol child identity is incomplete"
           end
@@ -242,13 +288,30 @@ module Hive
           attempt["process_start_time"] = process_start_time.to_s
           attempt["pgid"] = pgid.to_i
           attempt["heartbeat_at"] = now.utc.iso8601
+          attempt["expires_at"] = (now + lease_sec).utc.iso8601 if lease_sec
           aggregate["updated_at"] = now.utc.iso8601
           aggregate
         end
       end
 
+      # Heartbeats are generation-fenced, refuse expired claims, and require
+      # positive liveness evidence for the recorded PID/start-time tuple. They
+      # extend from the heartbeat time rather than the original claim time so
+      # a legitimate long review cannot be mistaken for abandoned work.
+      def renew_discovery_claim!(token, now: Time.now, lease_sec: 3600, claim_resolver: nil)
+        validate_lease_sec!(lease_sec)
+        mutate_claim(token, now: now) do |aggregate, attempt|
+          assert_claim_live!(attempt, claim_resolver)
+          timestamp = now.utc.iso8601
+          attempt["heartbeat_at"] = timestamp
+          attempt["expires_at"] = (now + lease_sec).utc.iso8601
+          aggregate["updated_at"] = timestamp
+          aggregate
+        end
+      end
+
       def release_discovery!(token, reason:, now: Time.now, backoff_sec: 60)
-        mutate_claim(token) do |aggregate, attempt|
+        mutate_claim(token, now: now) do |aggregate, attempt|
           timestamp = now.utc.iso8601
           attempt["state"] = "released"
           attempt["finished_at"] = timestamp
@@ -286,22 +349,50 @@ module Hive
         end
       end
 
-      def checkpoint_discovery!(token, envelope:, now: Time.now)
+      def checkpoint_discovery!(token, envelope:, now: Time.now, backoff_sec: 60)
         payload = json_copy(envelope)
-        mutate_claim(token) do |aggregate, attempt|
+        mutate_claim(token, now: now) do |aggregate, attempt|
           assert_matching_discovery_payload!(aggregate, payload)
-          aggregate["dispositions"] = DISPOSITIONS.to_h { |name| [ name, payload.fetch(name) ] }
-          aggregate["feature_results"] = []
-          aggregate["review_errors"] = []
-          aggregate["zero_reason"] = payload.fetch("zero_reason")
-          terminal = !action_authorized_for?(aggregate, payload)
-          aggregate["state"] = terminal ? "complete" : "classified"
-          aggregate["complete"] = terminal
-          attempt["state"] = "complete"
-          attempt["finished_at"] = now.utc.iso8601
-          attempt["outcome"] = terminal ? "complete" : "classified"
-          attempt["next_eligible_at"] = nil
-          aggregate["updated_at"] = now.utc.iso8601
+          merge_discovery_progress!(aggregate, payload)
+          timestamp = now.utc.iso8601
+          if payload.fetch("complete")
+            aggregate["review_errors"] = []
+            aggregate["zero_reason"] = payload.fetch("zero_reason")
+            terminal = !action_authorized_for?(aggregate)
+            aggregate["state"] = terminal ? "complete" : "classified"
+            aggregate["complete"] = terminal
+            attempt["state"] = "complete"
+            attempt["outcome"] = terminal ? "complete" : "classified"
+            attempt["next_eligible_at"] = nil
+          else
+            aggregate["review_errors"] = json_copy(payload.fetch("review_errors"))
+            aggregate["zero_reason"] = nil
+            aggregate["state"] = "blocked"
+            aggregate["complete"] = false
+            attempt["state"] = "released"
+            attempt["outcome"] = "partial_review"
+            attempt["next_eligible_at"] = (now + backoff_sec.to_i).utc.iso8601
+          end
+          attempt["finished_at"] = timestamp
+          aggregate["updated_at"] = timestamp
+          aggregate
+        end
+      end
+
+      # A successful feature is committed while the discovery claim remains
+      # active. Only complete feature slices enter the aggregate; an eventual
+      # malformed/partial result is still handled by checkpoint_discovery!,
+      # while a process death can resume after the last committed slice.
+      def checkpoint_discovery_progress!(token, envelope:, now: Time.now, lease_sec: 3600)
+        validate_lease_sec!(lease_sec)
+        payload = json_copy(envelope)
+        mutate_claim(token, now: now) do |aggregate, attempt|
+          assert_matching_discovery_payload!(aggregate, payload, intermediate: true)
+          merge_discovery_progress!(aggregate, payload)
+          timestamp = now.utc.iso8601
+          attempt["heartbeat_at"] = timestamp
+          attempt["expires_at"] = (now + lease_sec).utc.iso8601
+          aggregate["updated_at"] = timestamp
           aggregate
         end
       end
@@ -309,7 +400,13 @@ module Hive
       # Canonical action ids are deliberately opaque: incorporating a digest
       # keeps repository names, family ids, and fingerprints out of filesystem
       # paths while still binding all three identity dimensions.
-      def canonical_action_id(repository:, kind:, identity:)
+      def canonical_action_id(repository:, kind:, identity:, host: "github.com")
+        normalized_host = host.to_s.strip.downcase
+        uri = URI.parse("https://#{normalized_host}")
+        unless !normalized_host.empty? && uri.host == normalized_host && uri.path.empty? &&
+               uri.userinfo.nil? && uri.query.nil? && uri.fragment.nil?
+          raise InconsistentRecord, "canonical action host must be an exact hostname"
+        end
         normalized_repository = repository.to_s.strip.downcase
         unless normalized_repository.match?(%r{\A[a-z0-9][a-z0-9_.-]*/[a-z0-9][a-z0-9_.-]*\z})
           raise InconsistentRecord, "canonical action repository must be an owner/name identity"
@@ -321,14 +418,26 @@ module Hive
         action_identity = identity.to_s.strip
         raise InconsistentRecord, "canonical action identity must be non-empty" if action_identity.empty?
 
-        payload = [ normalized_repository, action_kind, action_identity ]
+        payload = [ normalized_host, normalized_repository, action_kind, action_identity ]
         "#{action_kind}-#{::Digest::SHA256.hexdigest(JSON.generate(payload))}"
+      rescue URI::InvalidURIError
+        raise InconsistentRecord, "canonical action host must be an exact hostname"
       end
 
       # Classification is immutable. This transition snapshots only the action
       # set derived by the caller after semantic-family resolution. Repeating
       # the exact snapshot is idempotent; attempts to add authority later fail.
-      def initialize_actions!(job_id, specifications:, now: Time.now)
+      def plan_actions(job_id, specifications:)
+        specs = json_copy(specifications)
+        unless specs.is_a?(Array) && specs.all? { |item| item.is_a?(Hash) }
+          raise CorruptRecord, "action specifications must be an array of objects"
+        end
+
+        aggregate = read_job(job_id)
+        normalize_action_specifications(aggregate, specs, job_path(aggregate.fetch("job_id")))
+      end
+
+      def initialize_actions!(job_id, specifications:, terminal_proofs: {}, now: Time.now)
         specs = json_copy(specifications)
         unless specs.is_a?(Array) && specs.all? { |item| item.is_a?(Hash) }
           raise CorruptRecord, "action specifications must be an array of objects"
@@ -337,6 +446,7 @@ module Hive
         with_action_catalog_lock do
           mutate_job(job_id) do |aggregate, path|
             normalized = normalize_action_specifications(aggregate, specs, path)
+            proofs = normalize_terminal_proofs(terminal_proofs, normalized, path)
             existing = aggregate.fetch("actions")
             if existing.any?
               unless initialized_action_identity(existing) == initialized_action_identity(normalized)
@@ -355,12 +465,46 @@ module Hive
 
             timestamp = now.utc.iso8601
             aggregate["actions"] = normalized.map do |specification|
-              initialized_action(aggregate, specification, timestamp)
+              initialized_action(
+                aggregate, specification, timestamp,
+                terminal_proof: proofs[specification.fetch("canonical_action_id")]
+              )
             end
             recompute_parent_state!(aggregate)
             aggregate["updated_at"] = timestamp
             aggregate
           end
+        end
+      end
+
+      # Materialize proof that became terminal after the immutable action plan
+      # was initialized but before this occurrence began a remote transition.
+      # Finished claim history is retained; any active claim or receipt makes
+      # the race ambiguous and therefore blocks instead of overwriting state.
+      def materialize_terminal_proof!(job_id, canonical_action_id, proof:, now: Time.now)
+        normalized = validate_terminal_proof!(json_copy(proof), canonical_action_id, job_path(job_id))
+        mutate_job(job_id) do |aggregate, path|
+          action = find_action!(aggregate, canonical_action_id, path)
+          if action.fetch("terminal")
+            existing = action.dig("receipts", "canonical_action_link")
+            unless existing == normalized
+              raise InconsistentRecord.new("terminal canonical action proof conflicts", path: path)
+            end
+            next aggregate
+          end
+          unless action.fetch("owner_job_id") == aggregate.fetch("job_id")
+            raise InconsistentRecord.new("linked action must reconcile through its local owner", path: path)
+          end
+          if active_action_claim(action) || !action.fetch("receipts").empty?
+            raise InconsistentRecord.new(
+              "canonical action already began a local or remote transition", path: path
+            )
+          end
+
+          apply_terminal_proof!(action, normalized, now)
+          recompute_parent_state!(aggregate)
+          aggregate["updated_at"] = now.utc.iso8601
+          aggregate
         end
       end
 
@@ -454,6 +598,42 @@ module Hive
           claim["heartbeat_at"] = now.utc.iso8601
           touch_action!(aggregate, action, now)
         end
+      end
+
+      def renew_action_claim!(token, now: Time.now, lease_sec: 3600, claim_resolver: nil)
+        validate_lease_sec!(lease_sec)
+        mutate_action_claim(token, now: now) do |aggregate, action, claim|
+          assert_claim_live!(claim, claim_resolver)
+          timestamp = now.utc.iso8601
+          claim["heartbeat_at"] = timestamp
+          claim["expires_at"] = (now + lease_sec).utc.iso8601
+          touch_action!(aggregate, action, now)
+        end
+      end
+
+      # The command child does not receive the daemon's opaque dispatch token.
+      # It can discover only an active claim bound to its exact PID and process
+      # start time, then every renewal still performs the normal generation
+      # CAS. Matching owner identity covers manual discovery and action claims;
+      # matching child identity covers daemon-owned discovery claims.
+      def active_claim_tokens_for_process(job_id, pid:, process_start_time:)
+        process_pid = pid.to_i
+        process_start = process_start_time.to_s
+        return [] if process_pid <= 1 || process_start.empty?
+
+        aggregate = read_job(job_id)
+        tokens = []
+        attempt = active_discovery_attempt(aggregate)
+        if attempt && claim_process_identity?(attempt, process_pid, process_start)
+          tokens << claim_token(aggregate, attempt).merge(kind: :discovery)
+        end
+        aggregate.fetch("actions").each do |action|
+          claim = active_action_claim(action)
+          next unless claim && claim_process_identity?(claim, process_pid, process_start)
+
+          tokens << action_claim_token(aggregate, action, claim).merge(kind: :action)
+        end
+        tokens
       end
 
       # Last-moment fence for an external transition. This intentionally
@@ -740,11 +920,10 @@ module Hive
       end
 
       def fingerprint_index
-        read_derived_index(
-          fingerprint_index_path,
-          schema: "hive-refactor-patrol-fingerprint-index",
-          collection: "fingerprints"
-        ) { rebuild_indexes!.fetch("fingerprints") }
+        # Terminal aggregates are authoritative and can change after an index
+        # was last read. Rebuild at the discovery boundary so recursion
+        # suppression never trusts a stale projection.
+        rebuild_indexes!.fetch("fingerprints")
       end
 
       def action_index
@@ -800,6 +979,7 @@ module Hive
           {
             "canonical_action_id" => canonical_action_id(
               repository: aggregate.dig("source", "repository"),
+              host: source_host(aggregate.fetch("source")),
               kind: kind,
               identity: identity
             ),
@@ -843,6 +1023,15 @@ module Hive
         family_id
       end
 
+      def source_host(source)
+        uri = URI.parse(source.fetch("url").to_s)
+        raise InconsistentRecord, "action source URL must include an exact host" unless uri.host
+
+        uri.host
+      rescue URI::InvalidURIError, KeyError
+        raise InconsistentRecord, "action source URL must include an exact host"
+      end
+
       def initialized_action_identity(actions)
         actions.map do |action|
           action.slice(
@@ -851,11 +1040,11 @@ module Hive
         end.sort_by { |action| action.fetch("canonical_action_id") }
       end
 
-      def initialized_action(aggregate, specification, timestamp)
+      def initialized_action(aggregate, specification, timestamp, terminal_proof: nil)
         owner_action = canonical_owner_action(specification.fetch("canonical_action_id"))
         owner_job_id = owner_action ? owner_action.fetch("owner_job_id") : aggregate.fetch("job_id")
         linked = owner_job_id != aggregate.fetch("job_id")
-        {
+        action = {
           "canonical_action_id" => specification.fetch("canonical_action_id"),
           "thesis_id" => specification.fetch("thesis_id"),
           "thesis_fingerprint" => specification.fetch("thesis_fingerprint"),
@@ -867,8 +1056,72 @@ module Hive
           "claims" => [],
           "created_at" => timestamp,
           "updated_at" => timestamp
-        }.tap do |action|
-          action["family_id"] = specification.fetch("family_id") if specification.key?("family_id")
+        }
+        action["family_id"] = specification.fetch("family_id") if specification.key?("family_id")
+        apply_terminal_proof!(action, terminal_proof, Time.iso8601(timestamp)) if terminal_proof && !owner_action
+        action
+      end
+
+      def normalize_terminal_proofs(proofs, specifications, path)
+        value = json_copy(proofs || {})
+        unless value.is_a?(Hash) && value.keys.all? { |key| key.is_a?(String) }
+          raise CorruptRecord.new("terminal action proofs must be an object", path: path)
+        end
+        ids = specifications.map { |item| item.fetch("canonical_action_id") }
+        unknown = value.keys - ids
+        unless unknown.empty?
+          raise InconsistentRecord.new(
+            "terminal action proofs contain unknown actions #{unknown.sort.inspect}", path: path
+          )
+        end
+        value.to_h do |action_id, proof|
+          [ action_id, validate_terminal_proof!(proof, action_id, path) ]
+        end
+      end
+
+      def validate_terminal_proof!(proof, action_id, path)
+        unless proof.is_a?(Hash) &&
+               proof.keys.sort == TERMINAL_PROOF_KEYS.sort
+          raise CorruptRecord.new("terminal canonical action proof has an invalid shape", path: path)
+        end
+        owner = proof.fetch("owner")
+        receipts = proof.fetch("proof")
+        valid_owner = owner.is_a?(Hash) && owner.keys.sort == TERMINAL_PROOF_OWNER_KEYS.sort &&
+                      %w[registration project_root job_id].all? { |key|
+                        owner[key].is_a?(String) && !owner[key].empty?
+                      } && owner["pr_number"].is_a?(Integer) && owner["pr_number"].positive? &&
+                      owner["merge_sha"].to_s.match?(/\A[0-9a-f]{40,64}\z/)
+        valid_receipts = receipts.is_a?(Hash) &&
+                         (receipts.keys - TERMINAL_PROOF_RECEIPT_KEYS).empty?
+        unless proof.fetch("canonical_action_id") == action_id && valid_owner && valid_receipts &&
+               !proof.fetch("outcome").to_s.empty?
+          raise InconsistentRecord.new("terminal canonical action proof identity is invalid", path: path)
+        end
+        payload = proof.reject { |key, _| key == "proof_digest" }
+        digest = ::Digest::SHA256.hexdigest(JSON.generate(deep_sort(payload)))
+        unless proof.fetch("proof_digest").to_s.match?(/\A[a-f0-9]{64}\z/) &&
+               proof.fetch("proof_digest") == digest
+          raise InconsistentRecord.new("terminal canonical action proof digest is invalid", path: path)
+        end
+        proof
+      end
+
+      def apply_terminal_proof!(action, proof, now)
+        action["outcome"] = proof.fetch("outcome")
+        action["terminal"] = true
+        action["receipts"] = json_copy(proof.fetch("proof")).merge(
+          "canonical_action_link" => json_copy(proof)
+        )
+        action["updated_at"] = now.utc.iso8601
+      end
+
+      def deep_sort(value)
+        case value
+        when Hash
+          value.keys.sort.to_h { |key| [ key, deep_sort(value.fetch(key)) ] }
+        when Array
+          value.map { |item| deep_sort(item) }
+        else value
         end
       end
 
@@ -917,6 +1170,7 @@ module Hive
         receipts = action.fetch("receipts")
         receipts.key?("creation_intent") || receipts.key?("pr") || receipts.key?("pr_url") ||
           receipts.key?("issue") || receipts.key?("issue_url") ||
+          receipts.key?("review_task_path") ||
           action.fetch("outcome").match?(/remote_outcome_unknown|pr_opened|handoff|merged/)
       end
 
@@ -936,6 +1190,31 @@ module Hive
           generation: claim.fetch("generation"),
           continuation_only: claim.fetch("authority") == "continuation_only"
         }
+      end
+
+      def claim_process_identity?(claim, pid, process_start_time)
+        owner_matches = claim["owner_pid"].to_i == pid &&
+                        claim["owner_process_start_time"].to_s == process_start_time
+        child_matches = claim["pid"].to_i == pid &&
+                        claim["process_start_time"].to_s == process_start_time
+        owner_matches || child_matches
+      end
+
+      def validate_lease_sec!(lease_sec)
+        unless lease_sec.is_a?(Integer) && lease_sec.positive?
+          raise InconsistentRecord, "claim lease_sec must be a positive integer"
+        end
+      end
+
+      def assert_claim_live!(claim, claim_resolver)
+        resolution = begin
+          claim_resolver&.call(json_copy(claim))
+        rescue StandardError
+          :unresolved_without_proof
+        end
+        return if resolution == :unresolved
+
+        raise StaleClaim, "refactor patrol claim owner is not provably live"
       end
 
       def mutate_action_claim(token, now:)
@@ -1040,15 +1319,20 @@ module Hive
         }
       end
 
-      def mutate_claim(token)
+      def mutate_claim(token, now:)
         mutate_job(token.fetch(:job_id)) do |aggregate, path|
           attempt = active_discovery_attempt(aggregate)
           unless attempt && attempt["owner"] == token.fetch(:owner).to_s &&
                  attempt["generation"] == token.fetch(:generation).to_i
             raise StaleClaim.new("refactor patrol claim fence is stale", path: path)
           end
+          if Time.iso8601(attempt.fetch("expires_at")) <= now
+            raise StaleClaim.new("refactor patrol claim lease expired", path: path)
+          end
           yield aggregate, attempt
         end
+      rescue ArgumentError, KeyError => e
+        raise InconsistentRecord, "refactor patrol claim has invalid evidence (#{e.message})"
       end
 
       def mutate_job(job_id)
@@ -1069,27 +1353,106 @@ module Hive
         end
       end
 
-      def assert_matching_discovery_payload!(aggregate, payload)
+      def assert_matching_discovery_payload!(aggregate, payload, intermediate: false)
         unless payload.is_a?(Hash) && payload["schema"] == "hive-refactor-patrol" &&
                payload["schema_version"] == SCHEMA_VERSION && payload["ok"] == true &&
-               payload["complete"] == true && payload["job_id"] == aggregate.fetch("job_id") &&
+               [ true, false ].include?(payload["complete"]) &&
+               payload["job_id"] == aggregate.fetch("job_id") &&
                payload["project"] == aggregate.dig("source", "registration") &&
                payload["project_root"] == project_root && payload["dry_run"] == false &&
                payload["analysis_sha"] == aggregate.fetch("analysis_sha") &&
                payload["source_pr"] == aggregate.fetch("source") &&
-               payload["review_errors"] == [] && payload["attempts"] == [] && payload["actions"] == []
+               payload["attempts"] == [] && payload["actions"] == []
           raise InconsistentRecord, "refactor patrol completion payload does not match its claimed job"
         end
         DISPOSITIONS.each { |name| payload.fetch(name) }
+        errors = payload.fetch("review_errors")
+        feature_results = payload.fetch("feature_results")
+        unless errors.is_a?(Array) && errors.all? { |item| item.is_a?(Hash) } &&
+               feature_results.is_a?(Array) && feature_results.all? { |item| item.is_a?(Hash) }
+          raise InconsistentRecord, "refactor patrol feature progress is malformed"
+        end
+        ids = feature_results.map { |item| item["feature_id"] }
+        if ids.any? { |id| id.to_s.empty? } || ids.uniq.size != ids.size ||
+           payload.fetch("features_mapped") != feature_results.size
+          raise InconsistentRecord, "refactor patrol feature progress is incomplete"
+        end
+        feature_results.each do |item|
+          unless item.keys.sort == FEATURE_RESULT_KEYS.sort &&
+                 [ true, false ].include?(item["complete"]) &&
+                 item["thesis_ids"].is_a?(Array) && item["thesis_ids"].all? { |id| !id.to_s.empty? } &&
+                 item["errors"].is_a?(Array) && item["errors"].all? { |error| error.is_a?(Hash) }
+            raise InconsistentRecord, "refactor patrol feature result is malformed"
+          end
+          if item.fetch("complete") != item.fetch("errors").empty?
+            raise InconsistentRecord, "refactor patrol feature completion contradicts its errors"
+          end
+        end
+        unless feature_results.flat_map { |item| item.fetch("errors") } == errors
+          raise InconsistentRecord, "refactor patrol review errors do not match feature progress"
+        end
         payload.fetch("zero_reason")
+        if intermediate
+          unless payload.fetch("complete") == false && errors.empty? && feature_results.any? &&
+                 feature_results.all? { |item| item.fetch("complete") } && payload["zero_reason"].nil?
+            raise InconsistentRecord, "intermediate refactor patrol progress must contain only completed features"
+          end
+        elsif payload.fetch("complete")
+          unless errors.empty? && feature_results.all? { |item| item.fetch("complete") }
+            raise InconsistentRecord, "complete refactor patrol payload retains partial feature progress"
+          end
+        elsif errors.empty? || feature_results.all? { |item| item.fetch("complete") } || !payload["zero_reason"].nil?
+          raise InconsistentRecord, "partial refactor patrol payload lacks retryable feature evidence"
+        end
       rescue KeyError => e
         raise InconsistentRecord, "refactor patrol completion payload is missing #{e.key.inspect}"
       end
 
-      def action_authorized_for?(aggregate, payload)
+      def merge_discovery_progress!(aggregate, payload)
+        incoming_results = payload.fetch("feature_results")
+        prior_results = aggregate.fetch("feature_results")
+        prior_by_feature = prior_results.to_h { |item| [ item.fetch("feature_id"), item ] }
+        incoming_by_feature = incoming_results.to_h { |item| [ item.fetch("feature_id"), item ] }
+        prior_by_feature.each do |feature_id, prior|
+          unless incoming_by_feature[feature_id] == prior
+            raise InconsistentRecord, "completed feature #{feature_id.inspect} changed during discovery resume"
+          end
+        end
+
+        complete_results = incoming_results.select { |item| item.fetch("complete") }
+        complete_feature_ids = complete_results.map { |item| item.fetch("feature_id") }
+        incoming_dispositions = DISPOSITIONS.to_h do |name|
+          items = payload.fetch(name).select { |item| complete_feature_ids.include?(item["feature_id"]) }
+          [ name, items ]
+        end
+        thesis_ids_by_feature = DISPOSITIONS.flat_map { |name| incoming_dispositions.fetch(name) }
+                                            .group_by { |item| item.fetch("feature_id") }
+                                            .transform_values { |items| items.map { |item| item.fetch("id") }.sort }
+        complete_results.each do |item|
+          expected = thesis_ids_by_feature.fetch(item.fetch("feature_id"), [])
+          unless item.fetch("thesis_ids").sort == expected
+            raise InconsistentRecord, "feature thesis ids do not match discovery dispositions"
+          end
+        end
+
+        existing_by_id = DISPOSITIONS.flat_map { |name| aggregate.dig("dispositions", name) }
+                                     .to_h { |item| [ item.fetch("id"), item ] }
+        incoming_dispositions.each do |name, items|
+          items.each do |item|
+            existing = existing_by_id[item.fetch("id")]
+            if existing && existing != item
+              raise InconsistentRecord, "completed thesis #{item.fetch('id').inspect} changed during discovery resume"
+            end
+            aggregate.dig("dispositions", name) << item unless existing
+          end
+        end
+        aggregate["feature_results"] = complete_results.sort_by { |item| item.fetch("feature_id") }
+      end
+
+      def action_authorized_for?(aggregate)
         policy = aggregate.fetch("policy")
-        (policy.fetch("auto_fix") && payload.fetch("accepted").any?) ||
-          (policy.fetch("issue_filing") && payload.fetch("flagged").any? { |item| item["admissible"] == true })
+        (policy.fetch("auto_fix") && aggregate.dig("dispositions", "accepted").any?) ||
+          (policy.fetch("issue_filing") && aggregate.dig("dispositions", "flagged").any? { |item| item["admissible"] == true })
       end
 
       def source_from_manifest(manifest)
@@ -1300,7 +1663,7 @@ module Hive
         strict_hash!(
           commands,
           required: POLICY_COMMAND_KEYS,
-          allowed: POLICY_COMMAND_KEYS,
+          allowed: POLICY_COMMAND_KEYS + POLICY_OPTIONAL_COMMAND_KEYS,
           label: "policy action commands",
           path: path
         )
@@ -1378,6 +1741,13 @@ module Hive
           inconsistent!("action kind is invalid", path) unless ACTION_KINDS.include?(action.fetch("kind"))
           inconsistent!("action terminal must be boolean", path) unless [ true, false ].include?(action.fetch("terminal"))
           inconsistent!("action receipts must be an object", path) unless action.fetch("receipts").is_a?(Hash)
+          if (link = action.dig("receipts", "canonical_action_link"))
+            validate_terminal_proof!(link, action.fetch("canonical_action_id"), path)
+            unless action.fetch("terminal") && action.fetch("outcome") == link.fetch("outcome") &&
+                   link.fetch("proof").all? { |key, value| action.fetch("receipts")[key] == value }
+              inconsistent!("materialized canonical action proof conflicts with action state", path)
+            end
+          end
           validate_action_claims!(action, path)
           timestamp!(action.fetch("created_at"), "action created_at", path) if action.key?("created_at")
           timestamp!(action.fetch("updated_at"), "action updated_at", path) if action.key?("updated_at")
@@ -1529,10 +1899,14 @@ module Hive
 
       def validate_active_claim_transition!(old_claim, new_claim, path)
         immutable = %w[
-          owner owner_pid owner_process_start_time generation authority claimed_at expires_at
+          owner owner_pid owner_process_start_time generation authority claimed_at
         ]
         immutable.each do |key|
           inconsistent!("canonical action claim identity is immutable", path) unless old_claim[key] == new_claim[key]
+        end
+        if Time.iso8601(new_claim.fetch("expires_at")) < Time.iso8601(old_claim.fetch("expires_at")) ||
+           Time.iso8601(new_claim.fetch("heartbeat_at")) < Time.iso8601(old_claim.fetch("heartbeat_at"))
+          inconsistent!("canonical action claim heartbeat cannot move backwards", path)
         end
         transitions = {
           "claimed" => %w[claimed running released superseded complete],

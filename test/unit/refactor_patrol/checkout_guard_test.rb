@@ -40,4 +40,24 @@ class RefactorPatrolCheckoutGuardTest < Minitest::Test
       assert_raises(Hive::GitError) { guard.validate_and_snapshot!(merge_sha: "f" * 40) }
     end
   end
+
+  def test_fails_closed_when_merge_commit_exists_but_is_not_on_registered_trunk
+    with_tmp_git_repo do |repo|
+      base = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      run!("git", "-C", repo, "switch", "-c", "unmerged", "--quiet")
+      File.write(File.join(repo, "side.txt"), "side\n")
+      run!("git", "-C", repo, "add", "side.txt")
+      run!("git", "-C", repo, "commit", "-m", "side", "--quiet")
+      merge_sha = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      run!("git", "-C", repo, "switch", "master", "--quiet")
+      assert_equal base, run!("git", "-C", repo, "rev-parse", "HEAD").strip
+
+      error = assert_raises(Hive::GitError) do
+        Hive::RefactorPatrol::CheckoutGuard.new(repo, default_branch: "master")
+                                          .validate_and_snapshot!(merge_sha: merge_sha)
+      end
+
+      assert_includes error.message, "does not contain merge commit"
+    end
+  end
 end

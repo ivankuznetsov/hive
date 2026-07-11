@@ -18,6 +18,12 @@ class RefactorPatrolReviewerTest < Minitest::Test
       refute_empty thesis.fingerprint
       assert thesis.admissible
       assert thesis_schemer.valid?(thesis.to_h), thesis_schemer.validate(thesis.to_h).map { |e| e["error"] }.inspect
+      assert_equal [
+        {
+          "feature_id" => "checkout", "complete" => true,
+          "thesis_ids" => [ thesis.id ], "errors" => []
+        }
+      ], reviewer.feature_results
     end
   end
 
@@ -97,6 +103,89 @@ class RefactorPatrolReviewerTest < Minitest::Test
 
       assert_empty reviewer.call([ feature ], leverage_by_feature: leverage_by_feature)
       assert_equal "malformed_json", reviewer.review_errors.first.fetch("error")
+      assert_equal false, reviewer.feature_results.first.fetch("complete")
+      assert_equal reviewer.review_errors, reviewer.feature_results.first.fetch("errors")
+    end
+  end
+
+  def test_schema_shaped_output_is_required_before_zero_findings_can_complete
+    invalid_documents = [ {}, nil, "theses", { "theses" => nil }, { "theses" => [ nil ] } ]
+    invalid_documents.each do |document|
+      with_tmp_dir do |dir|
+        runner = lambda do |output_path:, **|
+          File.write(output_path, JSON.generate(document))
+          {}
+        end
+        reviewer = Hive::RefactorPatrol::Reviewer.new(
+          dir, cfg: cfg, state: Hive::RefactorPatrol::StateStore.new(dir),
+          agent_runner: runner
+        )
+
+        assert_empty reviewer.call([ feature ], leverage_by_feature: leverage_by_feature), document.inspect
+        assert_equal "schema_invalid", reviewer.review_errors.first.fetch("error"), document.inspect
+        refute reviewer.feature_results.first.fetch("complete"), document.inspect
+      end
+    end
+  end
+
+  def test_records_each_feature_independently_for_partial_resume
+    with_tmp_dir do |dir|
+      runner = lambda do |feature:, output_path:, **|
+        if feature.id == "broken"
+          File.write(output_path, "{")
+        else
+          File.write(output_path, JSON.generate("theses" => [ valid_raw_thesis ]))
+        end
+        {}
+      end
+      reviewer = Hive::RefactorPatrol::Reviewer.new(
+        dir, cfg: cfg, state: Hive::RefactorPatrol::StateStore.new(dir),
+        agent_runner: runner
+      )
+
+      broken = Hive::Patrol::Feature.from_h(feature.to_h.merge("id" => "broken"))
+      theses = reviewer.call(
+        [ feature, broken ],
+        leverage_by_feature: leverage_by_feature.merge("broken" => leverage_by_feature.fetch("checkout"))
+      )
+
+      assert_equal [ "checkout" ], theses.map(&:feature_id)
+      assert_equal [ true, false ], reviewer.feature_results.map { |result| result.fetch("complete") }
+      assert_empty reviewer.feature_results.first.fetch("errors")
+      assert_equal "malformed_json", reviewer.feature_results.last.fetch("errors").first.fetch("error")
+    end
+  end
+
+  def test_yields_each_feature_result_before_starting_the_next_feature
+    with_tmp_dir do |dir|
+      reviewed = []
+      runner = lambda do |feature:, output_path:, **|
+        reviewed << feature.id
+        File.write(output_path, JSON.generate("theses" => [ valid_raw_thesis ]))
+        {}
+      end
+      reviewer = Hive::RefactorPatrol::Reviewer.new(
+        dir, cfg: cfg, state: Hive::RefactorPatrol::StateStore.new(dir),
+        agent_runner: runner
+      )
+      second = Hive::Patrol::Feature.from_h(feature.to_h.merge("id" => "search"))
+      yielded = []
+
+      error = assert_raises(RuntimeError) do
+        reviewer.call(
+          [ feature, second ],
+          leverage_by_feature: leverage_by_feature.merge("search" => leverage_by_feature.fetch("checkout"))
+        ) do |completed_feature, theses, result|
+          yielded << [ completed_feature.id, theses.map(&:id), result ]
+          raise "simulated process death" if completed_feature.id == "checkout"
+        end
+      end
+
+      assert_equal "simulated process death", error.message
+      assert_equal [ "checkout" ], reviewed
+      assert_equal [ "checkout" ], yielded.map(&:first)
+      assert_equal true, yielded.first.last.fetch("complete")
+      assert_equal yielded.first.last, reviewer.feature_results.first
     end
   end
 
@@ -200,10 +289,106 @@ class RefactorPatrolReviewerTest < Minitest::Test
     end
   end
 
+  def test_v2_review_budget_is_global_across_feature_calls
+    with_tmp_dir do |dir|
+      reviewed_limits = []
+      runner = lambda do |feature:, prompt:, output_path:, **|
+        limit = prompt[/Emit at most (\d+) theses/, 1].to_i
+        reviewed_limits << [ feature.id, limit ]
+        items = Array.new(limit) do |index|
+          valid_raw_thesis.merge("id" => "#{feature.id}-#{index}")
+        end
+        File.write(output_path, JSON.generate("theses" => items))
+        {}
+      end
+      limited = cfg
+      limited["refactor_patrol"]["max_theses_per_feature"] = 2
+      limited["refactor_patrol"]["max_theses_per_run"] = 3
+      reviewer = Hive::RefactorPatrol::Reviewer.new(
+        dir, cfg: limited, state: Hive::RefactorPatrol::StateStore.new(dir),
+        agent_runner: runner
+      )
+      second = Hive::Patrol::Feature.from_h(feature.to_h.merge("id" => "search"))
+
+      theses = reviewer.call(
+        [ feature, second ],
+        leverage_by_feature: leverage_by_feature.merge(
+          "search" => leverage_by_feature.fetch("checkout")
+        )
+      )
+
+      assert_equal [ [ "checkout", 2 ], [ "search", 1 ] ], reviewed_limits
+      assert_equal 3, theses.size
+      assert_empty reviewer.review_errors
+    end
+  end
+
+  def test_exhausted_global_budget_leaves_later_features_unreviewed_for_resume
+    with_tmp_dir do |dir|
+      reviewed = []
+      runner = lambda do |feature:, output_path:, **|
+        reviewed << feature.id
+        File.write(output_path, JSON.generate("theses" => [ valid_raw_thesis.merge("id" => feature.id) ]))
+        {}
+      end
+      limited = cfg
+      limited["refactor_patrol"]["max_theses_per_feature"] = 1
+      limited["refactor_patrol"]["max_theses_per_run"] = 2
+      reviewer = Hive::RefactorPatrol::Reviewer.new(
+        dir, cfg: limited, state: Hive::RefactorPatrol::StateStore.new(dir),
+        agent_runner: runner
+      )
+      features = %w[checkout search billing].map do |id|
+        Hive::Patrol::Feature.from_h(feature.to_h.merge("id" => id))
+      end
+      leverage = features.to_h do |candidate|
+        [ candidate.id, leverage_by_feature.fetch("checkout") ]
+      end
+
+      theses = reviewer.call(features, leverage_by_feature: leverage)
+
+      assert_equal %w[checkout search], reviewed
+      assert_equal %w[checkout search], reviewer.feature_results.map { |result| result.fetch("feature_id") }
+      assert_equal 2, theses.size
+      assert_empty reviewer.review_errors
+    end
+  end
+
+  def test_reviewer_output_over_slice_limit_is_partial_instead_of_silently_truncated
+    with_tmp_dir do |dir|
+      limited = cfg
+      limited["refactor_patrol"]["max_theses_per_feature"] = 1
+      reviewer = reviewer_for(
+        dir,
+        [ valid_raw_thesis, valid_raw_thesis.merge("id" => "second") ],
+        cfg: limited
+      )
+
+      assert_empty reviewer.call([ feature ], leverage_by_feature: leverage_by_feature)
+      assert_equal "schema_invalid", reviewer.review_errors.first.fetch("error")
+      refute reviewer.feature_results.first.fetch("complete")
+    end
+  end
+
+  def test_normalizer_schema_failure_is_recorded_for_the_feature
+    with_tmp_dir do |dir|
+      reviewer = reviewer_for(dir, [ valid_raw_thesis ])
+      invalid = Hive::RefactorPatrol::ThesisNormalizer::Invalid.new(
+        errors: [ "expected /risk/caps/est_files to be an integer" ]
+      )
+      reviewer.instance_variable_set(:@normalizer, ->(**) { invalid })
+
+      assert_empty reviewer.call([ feature ], leverage_by_feature: leverage_by_feature)
+      assert_equal "schema_invalid", reviewer.review_errors.first.fetch("error")
+      assert_includes reviewer.review_errors.first.fetch("message"), "est_files"
+    end
+  end
+
   private
 
   def reviewer_for(dir, raw_theses, cfg: self.cfg)
-    runner = lambda do |output_path:, **|
+    runner = lambda do |feature:, output_path:, **|
+      materialize_thesis_evidence(dir, raw_theses: raw_theses, feature: feature)
       FileUtils.mkdir_p(File.dirname(output_path))
       File.write(output_path, JSON.generate("theses" => raw_theses))
       {}
@@ -223,6 +408,7 @@ class RefactorPatrolReviewerTest < Minitest::Test
       "refactor_patrol" => {
         "agent" => "claude",
         "max_theses_per_feature" => 3,
+        "max_theses_per_run" => 10,
         "commands" => { "test" => "ruby -Itest test/foo_test.rb", "lint" => nil }
       }
     }

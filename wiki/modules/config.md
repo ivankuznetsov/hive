@@ -3,11 +3,11 @@ title: Hive::Config
 type: module
 source: lib/hive/config.rb
 created: 2026-04-25
-updated: 2026-07-10
+updated: 2026-07-11
 tags: [config, yaml, validation]
 ---
 
-**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects plus daemon, bot, digest, update, web, and Screenote base-url settings, including voice-transcription defaults; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, default workflow, worktree root, budgets, timeouts, **stage agents**, project/top-level and per-stage `permissions`, project-global `claude.mode`/`claude.permission_mode` plus `claude.model`/`claude.effort` pins, review-stage roles, daemon enrollment, experimental babysitter enrollment, patrol mode/enrollment and PR handoff). `Config.load(project_root)` resolves `patrol.mode` into scheduler knobs, **recursively** deep-merges per-project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays (notably `review.reviewers`, `patrol.review.reviewers`, `bot.transcription.supported_languages`, and `babysitter.labels_ignore`) are replaced wholesale, never per-element merged. The daily shipped digest uses `digest.agent`, `digest.max_catchup_days`, `budget_usd.digest`, `timeout_sec.digest`, and `bot.chat_id_allowlist[0]`; `Hive::Digest.run` defaults through `Config.load_global_digest_config`. Screenote OAuth tokens live outside YAML in `screenote.json`, created by `hive connect screenote`.
+**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects plus daemon, bot, digest, update, web, and Screenote base-url settings, including voice-transcription defaults; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, default workflow, worktree root, budgets, timeouts, **stage agents**, project/top-level and per-stage `permissions`, project-global `claude.mode`/`claude.permission_mode` plus `claude.model`/`claude.effort` pins, review-stage roles, daemon enrollment, experimental babysitter enrollment, ordinary patrol, and scheduled architecture patrol). Architecture-patrol discovery, auto-fixing, and issue filing are independent consent gates. `Config.load(project_root)` resolves `patrol.mode` into scheduler knobs, **recursively** deep-merges per-project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays are replaced wholesale, never per-element merged. Screenote OAuth tokens live outside YAML in `screenote.json`, created by `hive connect screenote`.
 
 ## Defaults (`Config::DEFAULTS`)
 
@@ -143,6 +143,28 @@ tags: [config, yaml, validation]
 
 **Patrol is opt-in.** `resolve_patrol_mode!` runs on the raw YAML before `merge_defaults` and only derives/injects mode knobs when `mode:` is **explicitly present** in the raw config (`return unless nested_key?(data, "patrol", "mode")`). A config with **no patrol section** — or a patrol section that omits `mode:` — injects nothing and falls through to `DEFAULTS["patrol"]["enabled"] = false`, so patrol stays **disabled**. `medium` is the default offered by the `hive init` *prompt* (which writes the chosen mode — `medium` unless overridden — into `templates/project_config.yml.erb`), **never** a config-resolution default — the `DEFAULT_PATROL_MODE` constant (`"medium"`) exists solely for that prompt. `medium`'s steady `timer`/4h cadence is the default because `low`'s `new_commits` trigger fires on **every** commit, which is costlier on a high-velocity repo than a 4h timer; with the cheap native codex-review reviewer the per-cycle review cost is low, so cadence dominates and `medium` wins. The explicit modes are `ultrapatrol` (`trigger: timer`, `poll_interval_sec: 1800`, `enabled: true`), `high` (`timer`, `7200`, `true`), `medium` (`timer`, `14400`, `true`), `low` (`new_commits`, `enabled: true`, leaving the baseline `poll_interval_sec: 600` SHA-check cadence), and `off` (`enabled: false`). The mode never changes `max_findings_per_feature`, `max_prs_per_cycle`, or `min_confidence_to_fix`. Explicit granular knobs (e.g. an explicit `enabled: true` with no `mode:`) always win over a set mode and survive the deep-merge, so legacy configs that carry `enabled`, `trigger`, and `poll_interval_sec` keep those values until the owner replaces them with the single mode key.
 
+**Architecture patrol has three independent consent gates.**
+`Config::DEFAULTS["refactor_patrol"]["enabled"]`, `auto_fix.enabled`, and
+`issue_filing.enabled` are all false, so missing legacy config grants no
+authority. Fresh init recommends discovery and writes that answer explicitly;
+it still renders both external-effect gates false. The block also owns the
+review agent, confidence/run caps, language-neutral include/exclude rules,
+`docs|format|lint|public_contract|typecheck|test` commands, actual patch
+caps, leverage weights, the proposal-wide `min_leverage_score` floor
+(default `0.25`), and the separate issue threshold. `max_theses_per_run` is
+a strict global reviewer-output budget; slices not reached after it is exhausted
+remain incomplete for resume. A configured `commands.public_contract` is an
+authoritative project-owned check for every automatic fix that changes a source
+or known public-surface path, while built-in declaration guards remain in
+force. Architecture mapping reads `refactor_patrol.review.max_owned_files` and
+`max_context_files` ahead of ordinary patrol settings, so patrol defaults cannot
+silently shrink an explicitly widened architecture slice. Merge intake snapshots every action-relevant value. Current config can
+narrow or revoke that snapshot, but cannot broaden an already queued
+occurrence. When the architecture scheduler cannot load a registered project's
+config, it durably blocks due work as
+`project_config_unavailable` during candidate enumeration or reservation
+instead of silently dropping that project. See [[commands/refactor-patrol]].
+
 ## Digest config
 
 `Hive::Digest.run` defaults to `Config.load_global_digest_config`, which
@@ -245,7 +267,8 @@ Runs after merge so a default value can never trigger a failure — only user in
 7. **`validate_permissions!`** — top-level, stage-level, review-role, and reviewer-entry `permissions:` specs are parsed by `Hive::PermissionScope` and must be `yolo`, `read-only`, or a valid `scoped` map. Shape errors, unknown presets/keys, and `bash:` plus `tools:` fail during config load; runner capability is checked later when the stage profile is known.
 8. **`validate_babysitter!`** — `babysitter.enabled` and `babysitter.dry_run` must be booleans; `interval` must be integer seconds or a `\d+[smh]` string; `max_concurrent_prs`, `budget_minutes`, and `budget_usd` must be integers >= 1; `labels_ignore` must be an array of strings.
 9. **`validate_patrol!`** — `patrol.mode` must be one of `ultrapatrol`, `high`, `medium`, `low`, or `off`; `patrol.enabled`, `patrol.draft_prs`, and `patrol.review_prs` must be booleans when present; `trigger` must be one of the patrol trigger enum values; confidence/severity/count/interval/command shape are validated before the scheduler or `hive patrol` command can run. `patrol.review.reviewers` uses the same reviewer-entry validation as `review.reviewers`, but it is a separate list used only by synthetic `Patrol: ...` review tasks.
-10. **`validate_daemon!`** — daemon numeric bounds, booleans, and nested hashes are checked before the daemon starts. The nested `daemon.auto_retry` block must be a hash, and `daemon.auto_retry.enabled` must be boolean when present.
+10. **`validate_refactor_patrol!`** — validates discovery/auto-fix/issue booleans and nested shapes, agent names, confidence/run counts, include/exclude paths, all six commands including `docs` and `public_contract`, patch caps, leverage weights, the proposal-wide leverage floor, and the issue threshold. Invalid side-effect policy fails at config load, not in a background action.
+11. **`validate_daemon!`** — daemon numeric bounds, booleans, and nested hashes are checked before the daemon starts. The nested `daemon.auto_retry` block must be a hash, and `daemon.auto_retry.enabled` must be boolean when present.
 
 Bot attachment capture settings are validated with the other bot numeric
 keys: `bot.idea_attachment_max_bytes` defaults to 20 MiB and may not
@@ -280,7 +303,7 @@ binds `localhost`, `::1`, or `127.0.0.0/8`, the CLI exports
 peer IP is also loopback. Setting it to `false` forces the normal GitHub owner
 gate even on a loopback bind.
 
-The `hive init` JSON summary envelope (`schemas/hive-init.v1.json`) carries the chosen value as a required `claude_permission_mode` string (same enum as the validator), alongside the existing `claude_mode` field — so an agent reading init output sees both the launch mode and the permission mode. See [[commands/init]].
+The current `hive init` JSON summary envelope (`schemas/hive-init.v2.json`) carries the chosen architecture-patrol discovery value as `refactor_patrol_enabled`, alongside the launch and permission-mode choices. The retained v1 schema is a compatibility artifact. See [[commands/init]].
 
 `claude.model` / `claude.effort` pin hive-launched claude sessions:
 `model: default` (the default) uses Claude Code's live alias for ITS
@@ -327,10 +350,10 @@ Tests use `with_tmp_global_config` (`test/test_helper.rb:30`) to point `HIVE_HOM
 
 ## Tests
 
-- `test/unit/config_test.rb` — defaults, recursive deep-merge, register/find round-trip, error on malformed YAML, normal and patrol reviewer/agent-name validation, babysitter/patrol/digest default and validation coverage, global digest config merge, and bot digest-chat validation.
+- `test/unit/config_test.rb` — defaults, recursive deep-merge, register/find round-trip, malformed YAML, reviewer/agent validation, ordinary patrol, architecture-patrol consent/policy validation, babysitter/digest defaults, global digest config merge, and bot digest-chat validation.
 - `test/unit/web/config_test.rb` — global web defaults and invalid web port rejection.
 
 ## Backlinks
 
-- [[commands/init]] · [[commands/new]] · [[commands/run]] · [[commands/status]] · [[commands/babysit]] · [[commands/patrol]] · [[commands/web]] · [[commands/digest]]
+- [[commands/init]] · [[commands/new]] · [[commands/run]] · [[commands/status]] · [[commands/babysit]] · [[commands/patrol]] · [[commands/refactor-patrol]] · [[commands/web]] · [[commands/digest]]
 - [[modules/agent]] · [[modules/digest]] · [[state-model]]

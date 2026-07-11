@@ -14,7 +14,7 @@ class HivePatrolArchitectureMapperTest < Minitest::Test
       ids = features.map(&:id)
 
       %w[
-        architecture-lib-acme-config-rb
+        architecture-lib-acme
         architecture-lib-acme-daemon
         architecture-packages-web
         architecture-services-billing
@@ -31,6 +31,7 @@ class HivePatrolArchitectureMapperTest < Minitest::Test
       assert_empty duplicates, "architecture components must have one authoritative owner"
       assert_includes source_paths, "src/firmware/control.zig",
                       "unsupported languages under source roots use the deterministic fallback"
+      assert Hive::Patrol::ArchitectureMapper.source_candidate_path?("src/firmware/control.zig")
     end
   end
 
@@ -41,8 +42,7 @@ class HivePatrolArchitectureMapperTest < Minitest::Test
 
       features = mapper(repo).call(tracked_files(repo))
       daemon = features.find { |feature| feature.id == "architecture-lib-acme-daemon" }
-      config = features.find { |feature| feature.id == "architecture-lib-acme-config-rb" }
-      ruby_client = features.find { |feature| feature.id == "architecture-lib-acme-client-rb" }
+      ruby_core = features.find { |feature| feature.id == "architecture-lib-acme" }
       web = features.find { |feature| feature.id == "architecture-packages-web" }
       reports = features.find { |feature| feature.id == "architecture-services-reports" }
       gateway = features.find { |feature| feature.id == "architecture-services-gateway" }
@@ -52,10 +52,11 @@ class HivePatrolArchitectureMapperTest < Minitest::Test
       swift_core = features.find { |feature| feature.id == "architecture-sources-core" }
 
       assert_includes daemon.context_files, "lib/acme/config.rb"
-      assert_includes ruby_client.context_files, "lib/acme/config.rb"
       assert_includes daemon.tests, "test/acme/daemon/dispatcher_test.rb"
-      refute_includes config.owned_files, "lib/acme/daemon/dispatcher.rb"
-      refute_includes config.tests, "test/acme/daemon/dispatcher_test.rb"
+      assert_includes ruby_core.owned_files, "lib/acme/config.rb"
+      assert_includes ruby_core.owned_files, "lib/acme/client.rb"
+      refute_includes ruby_core.owned_files, "lib/acme/daemon/dispatcher.rb"
+      refute_includes ruby_core.tests, "test/acme/daemon/dispatcher_test.rb"
       assert_includes web.context_files, "packages/core/src/api.ts"
       assert_includes web.tests, "packages/web/test/checkout.test.ts"
       assert_includes reports.context_files, "services/billing/billing/service.py"
@@ -66,11 +67,11 @@ class HivePatrolArchitectureMapperTest < Minitest::Test
       assert_includes swift_core.tests, "Tests/CoreTests/APITests.swift"
       refute_includes features.flat_map(&:owned_files), "Tests/CoreTests/APITests.swift"
 
-      assert_includes web.entrypoints, "packages/web/package.json"
-      assert_includes reports.entrypoints, "services/reports/pyproject.toml"
-      assert_includes gateway.entrypoints, "services/gateway/go.mod"
-      assert_includes rust_cli.entrypoints, "crates/cli/Cargo.toml"
-      assert_includes swift_app.entrypoints, "Package.swift"
+      assert_includes web.context_files, "packages/web/package.json"
+      assert_includes reports.context_files, "services/reports/pyproject.toml"
+      assert_includes gateway.context_files, "services/gateway/go.mod"
+      assert_includes rust_cli.context_files, "crates/cli/Cargo.toml"
+      assert_includes swift_app.context_files, "Package.swift"
     end
   end
 
@@ -83,6 +84,12 @@ class HivePatrolArchitectureMapperTest < Minitest::Test
       write(repo, "package.json", '{"bin":{"extra":"tools/cli.js"}}')
       write(repo, "tools/cli.js", "export const cli = true\n")
       write(repo, "tools/helper.js", "export const helper = true\n")
+      write(repo, "domain/workflow/engine.flux", "import core.runtime\nrule Engine {}\n")
+      write(repo, "scripts/release", "#!/usr/bin/env custom-runtime\nrelease --safe\n")
+      File.binwrite(
+        File.join(repo, "assets", "opaque.flux").tap { |path| FileUtils.mkdir_p(File.dirname(path)) },
+        "\x00\xFFbinary".b
+      )
       write(repo, "docs/demo.mp4", "not source\n")
       write(repo, "config/brakeman.ignore", "not source\n")
       commit_all(repo)
@@ -95,7 +102,8 @@ class HivePatrolArchitectureMapperTest < Minitest::Test
       assert_equal(
         %w[
           cmd/tool/helper.go cmd/tool/main.go main.cob src/firmware/control.cob
-          tools/cli.js tools/helper.js
+          domain/workflow/engine.flux package.json scripts/release tools/cli.js
+          tools/helper.js
         ].sort,
         (features.flat_map(&:owned_files) + architecture_mapper.reserved_command_files).sort
       )
@@ -105,6 +113,11 @@ class HivePatrolArchitectureMapperTest < Minitest::Test
       refute_includes package_command_component.owned_files, "tools/cli.js"
       refute_includes features.flat_map(&:owned_files), "docs/demo.mp4"
       refute_includes features.flat_map(&:owned_files), "config/brakeman.ignore"
+      refute_includes features.flat_map(&:owned_files), "assets/opaque.flux"
+      assert Hive::Patrol::ArchitectureMapper.source_candidate_path?("main.cob")
+      assert Hive::Patrol::ArchitectureMapper.source_candidate_path?("src/firmware/control.cob")
+      assert Hive::Patrol::ArchitectureMapper.source_candidate_path?("domain/workflow/engine.flux")
+      refute Hive::Patrol::ArchitectureMapper.source_candidate_path?("docs/architecture.md")
     end
   end
 
@@ -150,10 +163,218 @@ class HivePatrolArchitectureMapperTest < Minitest::Test
       second = mapper(repo, overrides).call(tracked_files(repo)).select { |feature| feature.id.start_with?("architecture-services-large") }
 
       assert_equal first.map(&:id), second.map(&:id)
-      assert first.all? { |feature| feature.owned_files.size <= 7 }
-      assert first.all? { |feature| feature.context_files.size <= 9 }
+      assert_equal [ 7, 63 ], first.map { |feature| feature.owned_files.size }.sort
+      assert first.all? { |feature| feature.context_files.size <= 63 }
       assert_equal 70, first.sum { |feature| feature.owned_files.size }
       assert_equal 70, first.flat_map(&:owned_files).uniq.size
+    end
+  end
+
+  def test_maps_common_data_science_infrastructure_schema_database_and_static_projects
+    with_tmp_git_repo do |repo|
+      write(repo, "R/model.R", "fit <- function(data) data\n")
+      write(repo, "modules/vpc/main.tf", "module \"subnet\" { source = \"../subnet\" }\n")
+      write(repo, "modules/subnet/main.tf", "resource \"example_subnet\" \"main\" {}\n")
+      write(repo, "db/migrations/001_create_orders.sql", "create table orders(id bigint);\n")
+      write(repo, "api/orders.proto", "syntax = \"proto3\"; message Order {}\n")
+      write(repo, "deploy/app.yaml", "apiVersion: apps/v1\nkind: Deployment\n")
+      write(repo, "styles/app.css", ".app { display: grid; }\n")
+      commit_all(repo)
+
+      features = mapper(repo).call(tracked_files(repo))
+      owned = features.flat_map(&:owned_files)
+
+      %w[
+        R/model.R modules/vpc/main.tf modules/subnet/main.tf
+        db/migrations/001_create_orders.sql api/orders.proto deploy/app.yaml
+        styles/app.css
+      ].each { |path| assert_includes owned, path }
+      vpc = features.find { |feature| feature.owned_files.include?("modules/vpc/main.tf") }
+      assert_includes vpc.context_files, "modules/subnet/main.tf"
+    end
+  end
+
+  def test_root_manifest_has_one_owned_slice_and_does_not_trigger_every_source_component
+    with_tmp_git_repo do |repo|
+      write(repo, "Gemfile", "source \"https://rubygems.org\"\n")
+      write(repo, "lib/acme/client.rb", "module Acme::Client; end\n")
+      write(repo, "lib/acme/server.rb", "module Acme::Server; end\n")
+      write(repo, "lib/acme/admin/audit.rb", "module Acme::Admin::Audit; end\n")
+      commit_all(repo)
+
+      features = mapper(repo).call(tracked_files(repo))
+      manifest_owners = features.select { |feature| feature.owned_files.include?("Gemfile") }
+
+      assert_equal 1, manifest_owners.size
+      assert_equal "architecture-manifest-project", manifest_owners.first.id
+      assert_empty features.reject { |feature| feature == manifest_owners.first }
+                           .flat_map(&:entrypoints).grep("Gemfile")
+      assert features.select { |feature| feature.context_files.include?("Gemfile") }.any?
+    end
+  end
+
+  def test_test_and_fixture_manifests_never_become_architecture_slices
+    with_tmp_git_repo do |repo|
+      write(repo, "package.json", '{"name":"production"}')
+      write(repo, "test/fixtures/package.json", '{"name":"test-fixture"}')
+      write(repo, "spec/fixtures/Gemfile", "source 'https://example.invalid'\n")
+      write(repo, "fixtures/Cargo.toml", "[package]\nname='fixture'\n")
+      write(repo, "src/app.ts", "export const app = true\n")
+      commit_all(repo)
+
+      features = mapper(repo).call(tracked_files(repo))
+      owned = features.flat_map(&:owned_files)
+
+      assert_includes owned, "package.json"
+      refute_includes owned, "test/fixtures/package.json"
+      refute_includes owned, "spec/fixtures/Gemfile"
+      refute_includes owned, "fixtures/Cargo.toml"
+      assert_equal [ "architecture-manifest-project" ],
+                   features.select { |feature| feature.id.start_with?("architecture-manifest-") }.map(&:id)
+    end
+  end
+
+  def test_generic_module_and_quoted_imports_build_cross_ecosystem_dependency_edges
+    with_tmp_git_repo do |repo|
+      write(repo, "services/catalog/catalog/Catalog.java", "package catalog; public class Catalog {}\n")
+      write(repo, "services/web/web/Web.java", "import catalog.Catalog; public class Web {}\n")
+      write(repo, "services/billing/Billing/Contracts/Invoice.cs", "namespace Billing.Contracts; public class Invoice {}\n")
+      write(repo, "services/api/Api/Handler.cs", "using Billing.Contracts.Invoice; public class Handler {}\n")
+      write(repo, "services/orders/lib/orders/policy.ex", "defmodule Orders.Policy do\nend\n")
+      write(repo, "services/checkout/lib/checkout.ex", "alias Orders.Policy\ndefmodule Checkout do\nend\n")
+      write(repo, "services/core/Core/Policy.hs", "module Core.Policy where\n")
+      write(repo, "services/worker/Worker/Job.hs", "import Core.Policy\n")
+      write(repo, "services/php/App/Domain/Policy.php", "<?php namespace App\\Domain; class Policy {}\n")
+      write(repo, "services/site/App/Controller.php", "<?php\nuse App\\Domain\\Policy;\n")
+      write(repo, "services/common/money.proto", "syntax = \"proto3\"; message Money {}\n")
+      write(repo, "services/consumer/order.proto", "import \"common/money.proto\"; message Order {}\n")
+      commit_all(repo)
+
+      architecture_mapper = mapper(repo)
+      features = architecture_mapper.call(tracked_files(repo))
+      expectations = {
+        "services/web/web/Web.java" => "services/catalog/catalog/Catalog.java",
+        "services/api/Api/Handler.cs" => "services/billing/Billing/Contracts/Invoice.cs",
+        "services/checkout/lib/checkout.ex" => "services/orders/lib/orders/policy.ex",
+        "services/worker/Worker/Job.hs" => "services/core/Core/Policy.hs",
+        "services/site/App/Controller.php" => "services/php/App/Domain/Policy.php",
+        "services/consumer/order.proto" => "services/common/money.proto"
+      }
+
+      expectations.each do |source, dependency|
+        assert_includes architecture_mapper.dependency_edges.fetch(source), dependency, source
+        feature = features.find { |candidate| candidate.owned_files.include?(source) }
+        assert_includes feature.context_files, dependency, source
+      end
+      assert_equal expectations.keys.sort & architecture_mapper.source_files,
+                   expectations.keys.sort
+    end
+  end
+
+  def test_polyglot_import_forms_resolve_package_indexes_and_language_relative_paths
+    with_tmp_git_repo do |repo|
+      write(repo, "packages/ui/package.json", '{"name":"@acme/ui","types":"src/public.ts"}')
+      write(repo, "packages/ui/src/public.ts", "export interface Public {}\n")
+      write(repo, "packages/app/package.json", '{"name":"@acme/app"}')
+      write(repo, "packages/app/src/main.ts", "import type { Public } from '@acme/ui'\n")
+      write(repo, "services/python/pyproject.toml", "[project]\nname='python-service'\n")
+      write(repo, "services/python/src/acme/one.py", "ONE = 1\n")
+      write(repo, "services/python/src/acme/two.py", "TWO = 2\n")
+      write(repo, "services/python/src/acme/main.py", "import acme.one, acme.two as second\n")
+      write(repo, "services/search/go.mod", "module example.com/search\n")
+      write(repo, "services/search/index.go", "package search\n")
+      write(repo, "services/gateway/go.mod", "module example.com/gateway\n")
+      write(repo, "services/gateway/main.go", <<~GO)
+        package gateway
+        import (
+          "example.com/search"
+        )
+      GO
+      write(repo, "include/acme/client.h", "int client(void);\n")
+      write(repo, "src/native/main.c", "#include <acme/client.h>\n")
+      write(repo, "crates/model/Cargo.toml", "[package]\nname='model'\n")
+      write(repo, "crates/model/src/lib.rs", "pub struct Model;\n")
+      write(repo, "crates/model/src/model.rs", "pub struct Model;\n")
+      write(repo, "crates/engine/Cargo.toml", "[package]\nname='engine'\n")
+      write(repo, "crates/engine/src/lib.rs", "mod local;\nmod nested;\nuse crate::local::Local;\n")
+      write(repo, "crates/engine/src/local.rs", "pub struct Local;\n")
+      write(repo, "crates/engine/src/nested/mod.rs", "use self::child::Child;\n")
+      write(repo, "crates/engine/src/nested/child.rs", "pub struct Child;\n")
+      write(repo, "crates/engine/src/child.rs", "pub struct Child;\n")
+      write(repo, "crates/engine/src/nested/deep.rs", "use super::child::Child;\nuse model::model::Model;\n")
+      commit_all(repo)
+
+      architecture_mapper = mapper(repo)
+      architecture_mapper.call(tracked_files(repo))
+      edges = architecture_mapper.dependency_edges
+
+      assert_includes edges.fetch("packages/app/src/main.ts"), "packages/ui/src/public.ts"
+      assert_includes edges.fetch("services/python/src/acme/main.py"), "services/python/src/acme/one.py"
+      assert_includes edges.fetch("services/python/src/acme/main.py"), "services/python/src/acme/two.py"
+      assert_includes edges.fetch("services/gateway/main.go"), "services/search/index.go"
+      assert_includes edges.fetch("src/native/main.c"), "include/acme/client.h"
+      assert_includes edges.fetch("crates/engine/src/lib.rs"), "crates/engine/src/local.rs"
+      assert_includes edges.fetch("crates/engine/src/nested/mod.rs"), "crates/engine/src/nested/child.rs"
+      assert_includes edges.fetch("crates/engine/src/nested/deep.rs"), "crates/engine/src/child.rs"
+      assert_includes edges.fetch("crates/engine/src/nested/deep.rs"), "crates/model/src/model.rs"
+    end
+  end
+
+  def test_manifest_and_language_registries_cover_supported_ecosystems
+    architecture_mapper = mapper(Dir.pwd)
+    manifests = {
+      "acme.gemspec" => :ruby,
+      "composer.json" => :php,
+      "mix.exs" => :elixir,
+      "pom.xml" => :jvm,
+      "DESCRIPTION" => :r,
+      "Project.toml" => :julia,
+      "stack.yaml" => :haskell,
+      "pubspec.yaml" => :dart,
+      "build.zig" => :zig,
+      "CMakeLists.txt" => :native,
+      "rebar.config" => :erlang,
+      "project.clj" => :clojure,
+      "build.sbt" => :scala,
+      "flake.nix" => :nix,
+      "acme.cabal" => :haskell,
+      "Acme.csproj" => :dotnet
+    }
+    languages = {
+      "main.jl" => :julia,
+      "main.hs" => :haskell,
+      "main.dart" => :dart,
+      "main.zig" => :zig,
+      "main.erl" => :erlang,
+      "main.clj" => :clojure,
+      "main.scala" => :scala,
+      "main.cs" => :dotnet,
+      "main.c" => :native,
+      "main.nix" => :nix
+    }
+
+    manifests.each do |path, kind|
+      assert_equal kind, architecture_mapper.send(:manifest_kind, path), path
+    end
+    languages.each do |path, kind|
+      assert_equal kind, architecture_mapper.send(:language_kind, path), path
+    end
+    assert_nil architecture_mapper.send(
+      :toml_section_value, "[dependencies]\njson = '1.0'\n", "package", "name"
+    )
+  end
+
+  def test_unreadable_inputs_and_unknown_import_kinds_fail_closed
+    with_tmp_dir do |repo|
+      write(repo, "package.json", "{")
+      architecture_mapper = mapper(repo)
+      architecture_mapper.call([ "package.json" ])
+
+      refute architecture_mapper.send(:shebang_script?, "missing-script")
+      refute architecture_mapper.send(:text_file?, "missing.flux")
+      assert_equal "", architecture_mapper.send(:read, "missing.flux")
+      assert_empty architecture_mapper.send(:resolve_import, "missing.flux", :unknown, "elsewhere")
+      assert_empty architecture_mapper.send(:resolve_progressively, "src", %w[missing path])
     end
   end
 

@@ -115,6 +115,23 @@ class RefactorPatrolReviewAgentRunnerTest < Minitest::Test
     end
   end
 
+  def test_read_only_output_requires_a_theses_array
+    with_tmp_dir do |dir|
+      runner = Hive::RefactorPatrol::ReviewAgentRunner.new(
+        project_root: dir, cfg: cfg, state: Hive::RefactorPatrol::StateStore.new(dir), read_only: true
+      )
+
+      result = runner.send(
+        :materialize_read_only_output,
+        { status: :ok, final_message: '{"summary":"no findings"}' },
+        File.join(dir, "review.json")
+      )
+
+      assert_equal :error, result.fetch(:status)
+      assert_includes result.fetch(:error_message), "theses array"
+    end
+  end
+
   private
 
   def cfg

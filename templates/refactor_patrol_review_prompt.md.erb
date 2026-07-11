@@ -18,41 +18,42 @@ refactor is expected to relieve:
 {
   "theses": [
     {
-      "id": "extract-payment-orchestration",
-      "problem": "checkout mixes validation and payment orchestration in one class",
-      "cost": "every payment change forces edits and re-review of validation code",
-      "proposed_refactor": "extract payment orchestration behind a checkout-owned boundary",
+      "id": "consolidate-repeated-admission-policy",
+      "problem": "three order-processing boundaries implement the same admission decisions independently",
+      "cost": "policy changes require synchronized edits across services and have already produced divergent behavior",
+      "proposed_refactor": "make one internal admission-policy boundary authoritative and have each caller delegate without changing its external contract",
       "evidence": [
         {
-          "file": "lib/checkout.rb",
+          "file": "services/orders/admission_policy",
           "line": 42,
-          "snippet": "def charge_and_validate",
-          "claim": "validation and payment orchestration share one method"
+          "snippet": "validate_region; validate_limit; validate_account",
+          "claim": "this boundary owns one complete copy of the admission decision sequence"
         },
         {
-          "file": "lib/billing.rb",
-          "snippet": "retry do ... end",
-          "claim": "the same retry policy is implemented in both boundaries"
+          "file": "services/fulfillment/admission_policy",
+          "snippet": "validate_region; validate_limit; validate_account",
+          "claim": "a second boundary repeats the same decisions and can drift independently"
         }
       ],
       "confidence": "medium",
       "risk": {
-        "caps": { "est_files": 3, "est_diff_lines": 120, "single_feature": true },
+        "caps": { "est_files": 5, "est_diff_lines": 180, "single_feature": false },
         "public_api_impact": false,
-        "cross_feature_impact": false
+        "cross_feature_impact": true,
+        "cross_feature_details": ["the duplicated policy is owned by three mapped service boundaries"]
       },
-      "required_validation": { "commands": ["test"], "characterization_first": false, "notes": "run checkout tests" },
+      "required_validation": { "commands": ["test"], "characterization_first": false, "notes": "run the repository's configured behavior checks for all affected boundaries" },
       "expected_leverage": {
         "drivers": [
           {
             "signal": "churn",
             "relief": 0.6,
-            "mechanism": "isolate payment edits from validation code"
+            "mechanism": "one policy edit replaces synchronized changes across three boundaries"
           },
           {
             "signal": "coupling",
             "relief": 0.5,
-            "mechanism": "centralize the duplicated retry policy behind one boundary"
+            "mechanism": "remove duplicated decision ownership while preserving caller contracts"
           }
         ]
       }
@@ -95,10 +96,18 @@ Available validation command names:
 
 Rules:
 - Emit at most <%= max_theses %> theses.
-- Refactoring preserves the public contract by definition: CLI commands and
-  flags, output schemas, exit codes, and routes must behave identically after
-  the refactor. Working *inside* files that host that contract is fine. If a
-  proposal cannot avoid changing the contract, it is not a refactor thesis —
+- Returning zero theses is the correct result when the slice shows no material,
+  recurring architecture cost. Do not manufacture a proposal to fill the
+  allowance.
+- Prefer changes that eliminate duplicated decisions, unstable dependencies,
+  boundary leaks, or repeated cross-component edits. A file split, rename,
+  wrapper, helper extraction, or class extraction is not valuable by itself;
+  omit it unless the evidence shows which meaningful ownership or dependency
+  cost it removes.
+- Refactoring preserves the public contract by definition: APIs, CLI behavior,
+  schemas, protocols, routes, data formats, infrastructure outputs, and exit
+  behavior must remain identical. Working *inside* files that host that
+  contract is fine. If a proposal cannot avoid changing the contract, it is not a refactor thesis —
   either drop it or declare `risk.public_api_impact: true` with details so it
   is reported as out-of-contract rather than accepted.
 - Every evidence item must set `file` to one repository-relative path string —
@@ -117,9 +126,12 @@ Rules:
   bounded relief.
 - Copy the feature boundary from the mapped feature unless you have a concrete
   reason to flag a cross-feature risk.
-- Include required_validation.commands using the available command names. If
-  this slice lacks useful tests, set characterization_first true and explain the
-  characterization test needed before refactoring.
+- Include required_validation.commands using the available command names. An
+  automatic fix requires at least one executable project command. If this
+  slice lacks useful tests, set characterization_first true, explain the test
+  needed before refactoring, and include a broader configured behavior command
+  when one is genuinely applicable. With no applicable command the thesis is
+  report-only, so emit it only when the architecture cost is still material.
 <% if feature.documentation? %>
 - This is a documentation slice. Use the configured `docs` validation command
   when it is available. Characterization tests are not a substitute for docs

@@ -192,6 +192,119 @@ class RefactorPatrolCapsTest < Minitest::Test
                  Hive::RefactorPatrol::Caps.public_declaration_signatures("lib/checkout.rb", changed_contract)
   end
 
+  def test_public_contract_signatures_cover_constructors_fields_and_exported_members
+    cases = {
+      "src/client.py" => [
+        "class Client:\n    def __init__(self, endpoint): pass\n",
+        "class Client:\n    def __init__(self, endpoint, timeout): pass\n"
+      ],
+      "src/client.ts" => [
+        "export class Client {\n  constructor(endpoint: string) {}\n  send(value: string): void {}\n}\n",
+        "export class Client {\n  constructor(endpoint: URL) {}\n  send(value: string, retry: boolean): void {}\n}\n"
+      ],
+      "src/Client.java" => [
+        "public class Client {\n  public Client(String endpoint) {}\n  public final String name;\n}\n",
+        "public class Client {\n  public Client(URI endpoint) {}\n  public final URI name;\n}\n"
+      ],
+      "src/Client.cs" => [
+        "public class Client {\n  public Client(string endpoint) {}\n  public readonly string Name;\n}\n",
+        "public class Client {\n  public Client(Uri endpoint) {}\n  public readonly Uri Name;\n}\n"
+      ]
+    }
+
+    cases.each do |path, (before, after)|
+      refute_equal Hive::RefactorPatrol::Caps.public_declaration_signatures(path, before),
+                   Hive::RefactorPatrol::Caps.public_declaration_signatures(path, after), path
+    end
+  end
+
+  def test_ruby_private_and_protected_methods_are_not_public_contract_signatures
+    before = <<~RUBY
+      class Client
+        def call(value) = value
+        private
+        def cache(value) = value
+        protected
+        def token = :old
+      end
+    RUBY
+    after = before.sub("def cache(value)", "def cache(value, options = {})")
+                  .sub("def token", "def token(value = nil)")
+
+    assert_equal Hive::RefactorPatrol::Caps.public_declaration_signatures("lib/client.rb", before),
+                 Hive::RefactorPatrol::Caps.public_declaration_signatures("lib/client.rb", after)
+  end
+
+  def test_ruby_inline_visibility_declarations_are_not_public_contract_signatures
+    content = <<~RUBY
+      class Client
+        def call(value) = value
+        private def cache(value) = value
+        protected def token = :secret
+      end
+    RUBY
+
+    signatures = Hive::RefactorPatrol::Caps.public_declaration_signatures("lib/client.rb", content)
+
+    assert_equal [ "def call(value)" ], signatures.grep(/\Adef /)
+  end
+
+  def test_elixir_contract_signatures_discard_function_bodies
+    before = "def create_client(opts) do\n  old(opts)\nend\n"
+    after = "def create_client(opts) do\n  newer(opts)\nend\n"
+
+    assert_equal Hive::RefactorPatrol::Caps.public_declaration_signatures("lib/client.ex", before),
+                 Hive::RefactorPatrol::Caps.public_declaration_signatures("lib/client.ex", after)
+  end
+
+  def test_ruby_visibility_is_scoped_to_each_class_and_nested_module
+    content = <<~RUBY
+      class Container
+        private
+        def hidden(value) = value
+        module Nested
+          def exposed(value) = value
+          protected
+          def guarded(value) = value
+        end
+        def still_hidden(value) = value
+      end
+      class Client
+        def call(value) = value
+      end
+    RUBY
+
+    signatures = Hive::RefactorPatrol::Caps.public_declaration_signatures("lib/client.rb", content)
+
+    assert_includes signatures, "def exposed(value)"
+    assert_includes signatures, "def call(value)"
+    refute_includes signatures, "def hidden(value)"
+    refute_includes signatures, "def guarded(value)"
+    refute_includes signatures, "def still_hidden(value)"
+  end
+
+  def test_public_contract_guard_registry_exposes_supported_aliases_and_missing_adapters
+    expected_languages = {
+      "tasks/release.rake" => :ruby,
+      "src/worker.cjs" => :javascript,
+      "src/client.mts" => :typescript,
+      "src/client.cts" => :typescript,
+      "src/acme/contracts.pyi" => :python,
+      "build.gradle.kts" => :kotlin
+    }
+
+    expected_languages.each do |path, language|
+      guard = Hive::RefactorPatrol::Caps.public_contract_guard_for(path)
+
+      assert_equal language, guard&.language, path
+      assert Hive::RefactorPatrol::Caps.public_contract_guard_available?(path), path
+    end
+    %w[src/firmware/control.zig src/legacy/control.cob].each do |path|
+      assert_nil Hive::RefactorPatrol::Caps.public_contract_guard_for(path), path
+      refute Hive::RefactorPatrol::Caps.public_contract_guard_available?(path), path
+    end
+  end
+
   def test_out_of_boundary_evidence_marks_cross_feature_impact
     thesis = sample_thesis(evidence: [ { "file" => "lib/other.rb", "signal" => "fan_in", "value" => 2 } ])
 

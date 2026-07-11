@@ -319,7 +319,7 @@ module Hive
           project: entry[:project], slug: entry[:slug], stage: entry[:stage],
           command: entry[:command], state_file_path: entry[:state_file_path],
           started_at: entry[:started_at], finished_at: now,
-          json_envelope: parse_envelope(entry[:log_path]),
+          json_envelope: completion_envelope(entry),
           request_id: entry[:request_id], dispatch_token: entry[:dispatch_token]
         )
       end
@@ -377,6 +377,25 @@ module Hive
       # for a single JSON document but bounded against a runaway child
       # that wrote gigabytes of prose. PR-40 follow-up review C1.
       ENVELOPE_TAIL_BYTES = 64 * 1024
+
+      def completion_envelope(entry)
+        token = entry[:dispatch_token]
+        result_path = token && (token[:result_path] || token["result_path"])
+        return parse_envelope(entry[:log_path]) unless result_path
+
+        parse_result_file(result_path)
+      ensure
+        FileUtils.rm_f(result_path) if result_path
+      end
+
+      def parse_result_file(path)
+        return nil unless File.file?(path)
+
+        payload = JSON.parse(File.binread(path))
+        payload.is_a?(Hash) ? payload : nil
+      rescue JSON::ParserError, EncodingError, SystemCallError, IOError
+        nil
+      end
 
       def parse_envelope(log_path)
         return nil if log_path.nil? || !File.exist?(log_path)

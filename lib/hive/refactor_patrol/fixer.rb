@@ -3,6 +3,7 @@ require "open3"
 require "fileutils"
 require "hive/agent"
 require "hive/agent_profiles"
+require "hive/patrol/architecture_mapper"
 require "hive/patrol/runner_task"
 require "hive/patrol/validator"
 require "hive/refactor_patrol/caps"
@@ -35,24 +36,26 @@ module Hive
         def binding_for_erb = binding
       end
 
-      VALIDATION_NAMES = %w[docs format lint typecheck test].freeze
+      VALIDATION_NAMES = %w[docs format lint public_contract typecheck test].freeze
       CONFIDENCE_ORDER = { "low" => 0, "medium" => 1, "high" => 2 }.freeze
 
       def initialize(project_root, cfg:, worktree_factory: nil, agent_runner: nil,
-                     validator_factory: nil, clock: -> { Time.now })
+                     validator_factory: nil, public_contract_guard: Caps,
+                     clock: nil)
         @project_root = File.expand_path(project_root)
         @cfg = cfg
         @worktree_factory = worktree_factory || method(:build_worktree)
         @agent_runner = agent_runner || method(:run_agent)
         @validator_factory = validator_factory || ->(commands) { Hive::Patrol::Validator.new(commands) }
-        @clock = clock
+        @public_contract_guard = public_contract_guard
       end
 
-      def attempt(thesis:, job_id:, analysis_sha:, reanalysis_depth: 0,
+      def attempt(thesis:, job_id:, analysis_sha:, canonical_action_id: nil,
+                  reanalysis_depth: 0,
                   report_analysis_sha: analysis_sha)
         return blocked("not_accepted", thesis: thesis) unless accepted?(thesis)
 
-        branch = branch_name(job_id, thesis.fingerprint)
+        branch = branch_name(job_id, thesis.fingerprint, canonical_action_id)
         worktree = @worktree_factory.call(branch: branch)
         registered_checkout = registered_checkout_snapshot!(analysis_sha)
         materialized = worktree.create_exact!(branch, base_sha: analysis_sha)
@@ -106,6 +109,7 @@ module Hive
             retried = attempt(
               thesis: thesis,
               job_id: job_id,
+              canonical_action_id: canonical_action_id,
               analysis_sha: publication_base.publication_base_sha,
               reanalysis_depth: reanalysis_depth + 1,
               report_analysis_sha: report_analysis_sha
@@ -156,7 +160,18 @@ module Hive
           Array(thesis.risk && thesis.risk["flags"]).empty?
       end
 
-      def branch_name(job_id, fingerprint)
+      def branch_name(job_id, fingerprint, canonical_action_id)
+        if canonical_action_id
+          action = canonical_action_id.to_s
+          unless action.match?(/\Afix-[0-9a-f]{64}\z/)
+            raise ArgumentError, "canonical fix action identity is invalid"
+          end
+
+          return "hive-refactor/#{action}"
+        end
+
+        # Backward-compatible direct Fixer callers can still produce a local
+        # patch, but ActionRunner accepts only the repository-global branch.
         job = job_id.to_s.gsub(/[^a-zA-Z0-9_.-]+/, "-")[0, 48]
         token = fingerprint.to_s.gsub(/[^a-zA-Z0-9]+/, "")[0, 16]
         "hive-refactor/#{job}-#{token}"
@@ -190,11 +205,31 @@ module Hive
         end
 
         diff = git_output!(path, "diff", "--cached", "--unified=0", base_sha)
-        if !caps.fetch("allow_public_api_changes", false) &&
-           paths.any? do |changed|
-             Caps.public_api_path?(changed) || public_declaration_changed?(path, base_sha, changed)
-           end
-          return audit_failure("public_contract_change", paths, diff_lines: diff_lines)
+        source_paths = paths.select do |changed|
+          source_change_path?(path, base_sha, changed)
+        end.sort
+        contract_paths = paths.select do |changed|
+          source_paths.include?(changed) || @public_contract_guard.public_api_path?(changed)
+        end
+        configured_contract_guard = !configured_commands["public_contract"].to_s.strip.empty?
+        unless caps.fetch("allow_public_api_changes", false)
+          if !configured_contract_guard && paths.any? { |changed| @public_contract_guard.public_api_path?(changed) }
+            return audit_failure("public_contract_change", paths, diff_lines: diff_lines)
+          end
+
+          unsupported_paths = source_paths.select do |changed|
+            !@public_contract_guard.public_contract_guard_available?(changed)
+          end.sort
+          if unsupported_paths.any? && !configured_contract_guard
+            return audit_failure(
+              "public_contract_safety_unavailable", paths,
+              diff_lines: diff_lines, unsupported_paths: unsupported_paths
+            )
+          end
+
+          if !configured_contract_guard && paths.any? { |changed| public_declaration_changed?(path, base_sha, changed) }
+            return audit_failure("public_contract_change", paths, diff_lines: diff_lines)
+          end
         end
 
         patterns = Hive::Stages::Review::FixGuardrail.resolve_patterns(@cfg)
@@ -204,6 +239,7 @@ module Hive
         return audit_failure("secret_detected", paths, secret_patterns: secret_hits.map { |hit| hit[:name].to_s }.uniq) if secret_hits.any?
 
         names = Array(thesis.required_validation && thesis.required_validation["commands"]).map(&:to_s).uniq
+        names << "public_contract" if configured_contract_guard && contract_paths.any?
         return audit_failure("missing_validation", paths, diff_lines: diff_lines) if names.empty?
         unless (names - VALIDATION_NAMES).empty? && names.all? { |name| configured_commands[name].to_s.strip != "" }
           return audit_failure("missing_validation", paths, diff_lines: diff_lines, required: names)
@@ -322,14 +358,32 @@ module Hive
         before = git_output!(worktree_path, "show", "#{base_sha}:#{changed_path}")
         after = File.file?(File.join(worktree_path, changed_path)) ?
           File.binread(File.join(worktree_path, changed_path)) : ""
-        Caps.public_declaration_signatures(changed_path, before) !=
-          Caps.public_declaration_signatures(changed_path, after)
+        @public_contract_guard.public_declaration_signatures(changed_path, before) !=
+          @public_contract_guard.public_declaration_signatures(changed_path, after)
       rescue Hive::GitError
         # A new file has no base blob; any explicit public declaration in it
         # is a contract expansion and therefore fails closed.
         after = File.file?(File.join(worktree_path, changed_path)) ?
           File.binread(File.join(worktree_path, changed_path)) : ""
-        Caps.public_declaration_signatures(changed_path, after).any?
+        @public_contract_guard.public_declaration_signatures(changed_path, after).any?
+      end
+
+      def source_change_path?(worktree_path, base_sha, changed_path)
+        return true if Hive::Patrol::ArchitectureMapper.source_candidate_path?(changed_path)
+        return false unless File.extname(changed_path).empty?
+
+        current_path = File.join(worktree_path, changed_path)
+        return true if File.file?(current_path) && File.binread(current_path, 2) == "#!"
+
+        out, err, status = Open3.capture3(
+          "git", "-C", worktree_path, "show", "#{base_sha}:#{changed_path}"
+        )
+        return out.start_with?("#!") if status.success?
+        return false if File.file?(current_path)
+
+        raise Hive::GitError,
+              "cannot inspect the base form of extensionless refactor path #{changed_path}: " \
+              "#{err.to_s.strip.empty? ? out : err}"
       end
 
       def configured_commands

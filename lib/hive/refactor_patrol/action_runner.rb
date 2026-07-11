@@ -2,13 +2,18 @@ require "json"
 require "digest"
 require "pathname"
 require "time"
+require "uri"
+require "hive/gh"
 require "hive/lock"
+require "hive/refactor_patrol/canonical_action_catalog"
 require "hive/refactor_patrol/family_store"
 require "hive/refactor_patrol/fixer"
 require "hive/refactor_patrol/issue_filer"
 require "hive/refactor_patrol/job_store"
 require "hive/refactor_patrol/policy"
 require "hive/refactor_patrol/pr_opener"
+require "hive/refactor_patrol/process_group_resolver"
+require "hive/refactor_patrol/repository_ownership"
 require "hive/refactor_patrol/thesis"
 
 module Hive
@@ -35,7 +40,7 @@ module Hive
       end
 
       STRATEGIC_REASONS = IssueFiler::STRATEGIC_REASONS.freeze
-      NO_ISSUE_FIX_OUTCOMES = %w[no_diff].freeze
+      ISSUE_SUPPRESSING_FIX_OUTCOMES = %w[no_diff pr_opened merged].freeze
       REMOTE_UNCERTAIN_OUTCOME = "remote_outcome_unknown".freeze
 
       attr_reader :fixer, :pr_opener, :issue_filer
@@ -43,9 +48,14 @@ module Hive
       def initialize(project_root, cfg:, job_store: nil, family_store: nil,
                      fixer: nil, pr_opener: nil, issue_filer: nil,
                      owner: nil, clock: -> { Time.now }, gate_reader: nil,
-                     claim_resolver: nil, lease_sec: 3600, backoff_sec: 60)
+                     claim_resolver: nil, repository_resolver: nil, config_loader: nil,
+                     repository_ownership: nil,
+                     canonical_action_catalog: nil,
+                     registration: nil,
+                     lease_sec: 3600, backoff_sec: 60)
         @project_root = File.expand_path(project_root)
         @cfg = cfg
+        @registration = registration.to_s.empty? ? cfg["project_name"].to_s : registration.to_s
         @job_store = job_store || JobStore.new(@project_root)
         @family_store = family_store || FamilyStore.new(@project_root, clock: clock)
         @fixer_override = fixer
@@ -58,8 +68,34 @@ module Hive
         @owner_pid = Process.pid
         @owner_process_start_time = Hive::Lock.process_start_time(@owner_pid)
         @clock = clock
-        @gate_reader = gate_reader || method(:configured_gates)
-        @claim_resolver = claim_resolver
+        @gate_reader = gate_reader
+        managed_config = File.file?(File.join(@project_root, ".hive-state", "config.yml"))
+        @config_loader = config_loader
+        @config_loader ||= if managed_config
+          ->(root) { Hive::Config.load(root) }
+        else
+          ->(_root) { @cfg }
+        end
+        @claim_resolver = claim_resolver || ProcessGroupResolver.new
+        @repository_resolver = repository_resolver || lambda do |root, current_cfg|
+          Hive::Gh.repository_identity(root, cfg: current_cfg)
+        end
+        ownership_registry = managed_config ? -> { Hive::Config.registered_projects } : -> { [] }
+        @repository_ownership = repository_ownership || RepositoryOwnership.new(
+          registry: ownership_registry,
+          config_loader: @config_loader,
+          require_registration: managed_config,
+          identity_resolver: lambda do |entry, current_cfg|
+            @repository_resolver.call(entry.fetch("path"), current_cfg)
+          end
+        )
+        @canonical_action_catalog = canonical_action_catalog
+        if @canonical_action_catalog.nil? && managed_config
+          @canonical_action_catalog = CanonicalActionCatalog.new(
+            registry: ownership_registry,
+            job_store_factory: ->(root) { JobStore.new(root) }
+          )
+        end
         @lease_sec = lease_sec
         @backoff_sec = backoff_sec
       end
@@ -67,29 +103,84 @@ module Hive
       def run(job_id:, dry_run: false)
         @events = []
         aggregate = @job_store.read_job(job_id)
+        @source = aggregate.fetch("source")
         return result(aggregate, dry_run: dry_run) if aggregate.fetch("complete")
+        if !dry_run && @owner_process_start_time.to_s.empty?
+          aggregate = block_action_phase(aggregate, "process_identity_unavailable")
+          return result(aggregate, dry_run: false, reason: "process_identity_unavailable")
+        end
+        if !dry_run && @job_store.action_phase_backoff_active?(aggregate, now: now)
+          return result(aggregate, dry_run: false, reason: "action_backoff")
+        end
 
         prepare_policy(aggregate)
         if @policy_result.error &&
            (aggregate.dig("policy", "auto_fix") == true ||
             aggregate.dig("policy", "issue_filing") == true ||
             aggregate.fetch("actions").any?)
+          aggregate = block_action_phase(aggregate, @policy_result.error) unless dry_run
           return result(aggregate, dry_run: dry_run, reason: @policy_result.error)
         end
 
+        if dry_run
+          ownership = current_repository_ownership_decision(
+            aggregate,
+            continuation: continuation_evidence?(aggregate)
+          )
+          if ownership.blocked? && ownership.reason != "architecture_patrol_disabled"
+            return result(aggregate, dry_run: true, reason: ownership.reason)
+          end
+        elsif (blocked = enforce_repository_authority(aggregate))
+          return result(blocked, dry_run: false, reason: @repository_identity_reason)
+        end
+
         if aggregate.fetch("actions").empty?
-          if !dry_run && !current_gate("discovery")
+          unless current_gate("discovery")
+            if dry_run
+              return result(
+                aggregate,
+                actions: [],
+                dry_run: true,
+                reason: "discovery_revoked",
+                would_complete: false
+              )
+            end
+
+            aggregate = block_action_phase(aggregate, "discovery_revoked")
             return result(aggregate, dry_run: false, reason: "discovery_revoked")
           end
 
           specifications, previews, errors = action_snapshot(aggregate, dry_run: dry_run)
           if errors.any?
+            aggregate = block_action_phase(
+              aggregate, errors.first.fetch("outcome"), "events" => errors
+            ) unless dry_run
             return result(
               aggregate,
               actions: errors,
               dry_run: dry_run,
               reason: errors.first.fetch("outcome")
             )
+          end
+          planned = @job_store.plan_actions(
+            aggregate.fetch("job_id"), specifications: specifications
+          )
+          terminal_proofs = terminal_proofs_for(
+            aggregate,
+            planned.map { |item| item.fetch("canonical_action_id") },
+            dry_run: dry_run
+          )
+          previews = previews.map do |preview|
+            proof = terminal_proofs[preview.fetch("canonical_action_id")]
+            if proof
+              preview.merge(
+                "outcome" => "would_link_terminal",
+                "terminal" => true,
+                "linked_outcome" => proof.fetch("outcome")
+              )
+            else
+              preview
+            end
           end
           if dry_run
             return result(
@@ -102,12 +193,14 @@ module Hive
           end
 
           unless current_gate("discovery")
+            aggregate = block_action_phase(aggregate, "discovery_revoked")
             return result(aggregate, dry_run: false, reason: "discovery_revoked")
           end
 
           aggregate = @job_store.initialize_actions!(
             aggregate.fetch("job_id"),
             specifications: specifications,
+            terminal_proofs: terminal_proofs,
             now: now
           )
           @events.concat(previews.select { |item| item.fetch("outcome") == "family_ambiguous" })
@@ -123,11 +216,22 @@ module Hive
         end
 
         process_actions(aggregate.fetch("job_id")) unless aggregate.fetch("complete")
+        refresh_terminal_catalog
         result(@job_store.read_job(aggregate.fetch("job_id")), dry_run: false)
       rescue JobStore::StaleClaim => e
         aggregate = @job_store.read_job(job_id)
         @events << event("stale_claim", error: e.message)
         result(aggregate, dry_run: dry_run, reason: "stale_claim")
+      rescue CanonicalActionCatalog::Error => e
+        aggregate = @job_store.read_job(job_id)
+        @events << event("canonical_action_proof_unresolved", error: e.message)
+        aggregate = block_action_phase(
+          aggregate, "canonical_action_proof_unresolved", "error" => e.message
+        ) unless dry_run
+        result(
+          aggregate, dry_run: dry_run,
+          reason: "canonical_action_proof_unresolved"
+        )
       end
       alias call run
 
@@ -270,6 +374,7 @@ module Hive
           {
             "canonical_action_id" => @job_store.canonical_action_id(
               repository: aggregate.dig("source", "repository"),
+              host: source_identity(aggregate.fetch("source")).fetch("host"),
               kind: specification.fetch("kind"),
               identity: identity
             ),
@@ -300,7 +405,11 @@ module Hive
 
       def process_actions(job_id)
         action_ids = @job_store.read_job(job_id).fetch("actions").sort_by do |action|
-          [ action.fetch("kind") == "fix" ? 0 : 1, action.fetch("canonical_action_id") ]
+          linked = action.fetch("owner_job_id") != job_id
+          continuation = linked || remote_continuation_evidence?(action)
+          continuation_priority = continuation || effect_authorized?(action.fetch("kind")) ? 0 : 1
+          [ continuation_priority, action.fetch("kind") == "fix" ? 0 : 1,
+           action.fetch("canonical_action_id") ]
         end.map { |action| action.fetch("canonical_action_id") }
 
         action_ids.each do |action_id|
@@ -310,22 +419,50 @@ module Hive
           end
           next if action.fetch("terminal")
 
+          if action.fetch("owner_job_id") == aggregate.fetch("job_id") &&
+             materialize_terminal_action(aggregate, action)
+            next
+          end
+
           if action.fetch("owner_job_id") != aggregate.fetch("job_id")
             @job_store.reconcile_linked_action!(job_id, action_id, now: now)
             next
           end
 
           process_owner_action(aggregate, action)
+          break if @job_store.action_phase_backoff_active?(
+            @job_store.read_job(job_id), now: now
+          )
         end
       end
 
       def process_owner_action(aggregate, action)
+        if @repository_identity_drift && !remote_continuation_evidence?(action)
+          @events << event(
+            "repository_identity_drift",
+            canonical_action_id: action.fetch("canonical_action_id"),
+            expected_repository: aggregate.dig("source", "repository"),
+            current_repository: @current_repository
+          )
+          block_action_phase(
+            aggregate, "repository_identity_drift",
+            "canonical_action_id" => action.fetch("canonical_action_id"),
+            "expected_repository" => aggregate.dig("source", "repository"),
+            "current_repository" => @current_repository
+          )
+          return
+        end
+
         entry = disposition_index(aggregate)[action.fetch("thesis_id")]
         unless entry
           @events << event(
             "invalid_thesis_snapshot",
             canonical_action_id: action.fetch("canonical_action_id"),
             thesis_id: action.fetch("thesis_id")
+          )
+          block_action_phase(
+            aggregate, "invalid_thesis_snapshot",
+            "canonical_action_id" => action.fetch("canonical_action_id")
           )
           return
         end
@@ -338,7 +475,19 @@ module Hive
         end
 
         token = claim_action(aggregate, action)
-        return unless token
+        unless token
+          current = @job_store.read_job(aggregate.fetch("job_id"))
+          blocked = current.fetch("actions").find do |candidate|
+            candidate.fetch("canonical_action_id") == action.fetch("canonical_action_id")
+          end
+          if blocked&.fetch("outcome") == "authority_revoked"
+            block_action_phase(
+              current, "authority_revoked",
+              "canonical_action_id" => action.fetch("canonical_action_id")
+            )
+          end
+          return
+        end
 
         # The winning claim is the synchronization point. A prior worker may
         # have appended a receipt and released after our pre-claim read, so all
@@ -368,6 +517,20 @@ module Hive
       end
 
       def claim_action(aggregate, action)
+        ownership = current_repository_ownership_decision(
+          aggregate,
+          continuation: remote_continuation_evidence?(action)
+        )
+        if ownership.blocked? && ownership.reason != "architecture_patrol_disabled"
+          @events << event(
+            ownership.reason,
+            canonical_action_id: action.fetch("canonical_action_id"),
+            evidence: ownership.evidence
+          )
+          block_action_phase(aggregate, ownership.reason, ownership.evidence)
+          return nil
+        end
+
         @job_store.claim_action!(
           aggregate.fetch("job_id"),
           action.fetch("canonical_action_id"),
@@ -377,7 +540,7 @@ module Hive
           claim_resolver: @claim_resolver,
           owner_pid: @owner_pid,
           owner_process_start_time: @owner_process_start_time,
-          authority: effect_authorized?(action.fetch("kind"))
+          authority: !@repository_identity_drift && effect_authorized?(action.fetch("kind"))
         )
       end
 
@@ -388,7 +551,7 @@ module Hive
           return
         end
         unless patch
-          unless effect_authorized?("fix")
+          unless claim_effect_authorized?(token, "fix")
             release(token, "authority_revoked")
             return
           end
@@ -396,6 +559,7 @@ module Hive
           patch = @fixer.attempt(
             thesis: thesis,
             job_id: aggregate.fetch("job_id"),
+            canonical_action_id: action.fetch("canonical_action_id"),
             analysis_sha: aggregate.fetch("analysis_sha")
           )
           unless valid_fixer_result?(patch)
@@ -419,15 +583,14 @@ module Hive
           )
         end
 
-        unless token.fetch(:continuation_only) == true || effect_authorized?("fix")
-          release(token, "authority_revoked")
+        if (denial = transition_denial_reason(token, "fix", aggregate))
+          release(token, denial)
           return
         end
 
         fresh_action = current_action(token)
-        intent = pr_intent(aggregate, action, patch)
-        creation_attempted = creation_intent_state(fresh_action, intent)
-        if creation_attempted == :invalid
+        publication = publication_state(fresh_action, aggregate, action, patch: patch)
+        if publication == :invalid
           release(token, "invalid_creation_intent")
           return
         end
@@ -437,13 +600,13 @@ module Hive
           job_id: aggregate.fetch("job_id"),
           canonical_action_id: action.fetch("canonical_action_id"),
           source: aggregate.fetch("source"),
-          record_intent: creation_intent_callback(
-            token,
-            "fix",
-            intent
-          ),
+          record_intent: publication_intent_callback(token, "fix", aggregate, action, patch),
           authorize_push: external_effect_fence(token, "fix"),
-          creation_attempted: creation_attempted
+          authorize_create: external_effect_fence(token, "fix"),
+          authorize_handoff: continuation_fence(token, aggregate),
+          creation_attempted: publication.any?,
+          publication_state: publication,
+          superseded_patch_commits: superseded_patch_commits(fresh_action)
         )
         if result.is_a?(PrOpener::Result) && result.outcome == "trunk_drift_retry"
           mark_patch_superseded!(token, patch)
@@ -452,15 +615,14 @@ module Hive
       end
 
       def process_issue(token, aggregate, action, thesis, reasons)
-        unless token.fetch(:continuation_only) == true || effect_authorized?("issue")
-          release(token, "authority_revoked")
+        if (denial = transition_denial_reason(token, "issue", aggregate))
+          release(token, denial)
           return
         end
 
         fresh_action = current_action(token)
-        intent = issue_intent(aggregate, action)
-        creation_attempted = creation_intent_state(fresh_action, intent)
-        if creation_attempted == :invalid
+        publication = publication_state(fresh_action, aggregate, action)
+        if publication == :invalid
           release(token, "invalid_creation_intent")
           return
         end
@@ -471,12 +633,10 @@ module Hive
           job_id: aggregate.fetch("job_id"),
           source: aggregate.fetch("source"),
           reasons: reasons,
-          record_intent: creation_intent_callback(
-            token,
-            "issue",
-            intent
-          ),
-          creation_attempted: creation_attempted
+          record_intent: publication_intent_callback(token, "issue", aggregate, action),
+          authorize_create: external_effect_fence(token, "issue"),
+          creation_attempted: publication.any?,
+          publication_state: publication
         )
         settle(token, result, adapter: :issue)
       end
@@ -494,9 +654,7 @@ module Hive
         end
         unless fixes.empty?
           return { outcome: :waiting, reasons: [] } if fixes.any? { |fix| !fix.fetch("terminal") }
-          successful = fixes.any? do |fix|
-            patch_receipt_present?(fix) || NO_ISSUE_FIX_OUTCOMES.include?(fix.fetch("outcome"))
-          end
+          successful = fixes.any? { |fix| ISSUE_SUPPRESSING_FIX_OUTCOMES.include?(fix.fetch("outcome")) }
           if successful
             return { outcome: "issue_not_needed", reasons: [] }
           end
@@ -617,42 +775,96 @@ module Hive
         raise
       end
 
-      def creation_intent_callback(token, kind, payload)
-        lambda do
-          next false unless effect_authorized?(kind)
+      def publication_intent_callback(token, kind, aggregate, action, patch = nil)
+        lambda do |phase: nil, payload: nil|
+          phase ||= kind == "fix" ? PrOpener::PR_CREATE_INTENT : "issue_create_intent"
+          payload ||= expected_publication_payload(
+            kind, phase, aggregate, action, patch, expected_remote_oid: nil
+          )
+          expected_oid = payload.is_a?(Hash) ? payload["expected_remote_oid"] : nil
+          expected = expected_publication_payload(
+            kind, phase, aggregate, action, patch,
+            expected_remote_oid: expected_oid
+          )
+          unless payload == expected
+            raise JobStore::InconsistentRecord, "publication intent payload is invalid"
+          end
+          unless phase == PrOpener::PUSH_COMPLETE
+            next false unless effect_authorized?(kind)
+          end
 
-          @job_store.record_creation_intent!(token, intent: payload, now: now)
+          persist_publication_phase(token, phase, payload)
           true
         end
       end
 
       def external_effect_fence(token, kind)
         lambda do
+          next false if token.fetch(:continuation_only) == true
           next false unless effect_authorized?(kind)
+          next false if terminal_proof_available?(token)
 
           @job_store.assert_action_claim!(token, now: now)
           true
         end
       end
 
-      def pr_intent(aggregate, action, patch)
-        {
-          "operation" => "create_pr",
-          "canonical_action_id" => action.fetch("canonical_action_id"),
-          "repository" => aggregate.dig("source", "repository"),
-          "branch" => patch.branch,
-          "commit_sha" => patch.commit_sha
-        }
+      def continuation_fence(token, aggregate)
+        lambda do
+          ownership = current_repository_ownership_decision(
+            aggregate,
+            continuation: true
+          )
+          next false if ownership.blocked?
+
+          @job_store.assert_action_claim!(token, now: now)
+          true
+        end
       end
 
-      def issue_intent(aggregate, action)
-        {
-          "operation" => "create_issue",
-          "canonical_action_id" => action.fetch("canonical_action_id"),
-          "repository" => aggregate.dig("source", "repository"),
-          "family_id" => action.fetch("family_id"),
-          "thesis_fingerprint" => action.fetch("thesis_fingerprint")
+      def persist_publication_phase(token, phase, payload)
+        case phase
+        when PrOpener::PUSH_INTENT, "issue_create_intent"
+          @job_store.record_creation_intent!(token, intent: payload, now: now)
+        when PrOpener::PUSH_COMPLETE
+          @job_store.record_action_receipt!(token, key: phase, value: payload, now: now)
+        when PrOpener::PR_CREATE_INTENT
+          current = current_action(token)
+          if current.dig("receipts", "creation_intent")
+            @job_store.record_action_receipt!(token, key: phase, value: payload, now: now)
+          else
+            @job_store.record_creation_intent!(token, intent: payload, now: now)
+          end
+        else
+          raise JobStore::InconsistentRecord, "publication intent phase is invalid"
+        end
+      end
+
+      def expected_publication_payload(kind, phase, aggregate, action, patch, expected_remote_oid:)
+        if kind == "issue"
+          return IssueFiler.create_intent_payload(
+            canonical_action_id: action.fetch("canonical_action_id"),
+            repository: aggregate.dig("source", "repository"),
+            family_id: action.fetch("family_id"),
+            thesis_fingerprint: action.fetch("thesis_fingerprint")
+          ) if phase == "issue_create_intent"
+
+          return nil
+        end
+
+        arguments = {
+          canonical_action_id: action.fetch("canonical_action_id"),
+          repository: aggregate.dig("source", "repository"),
+          branch: patch.branch, commit_sha: patch.commit_sha
         }
+        case phase
+        when PrOpener::PUSH_INTENT
+          PrOpener.push_intent_payload(**arguments, expected_remote_oid: expected_remote_oid)
+        when PrOpener::PUSH_COMPLETE
+          PrOpener.push_complete_payload(**arguments)
+        when PrOpener::PR_CREATE_INTENT
+          PrOpener.pr_create_intent_payload(**arguments)
+        end
       end
 
       def patch_from_receipts(action, aggregate, thesis)
@@ -680,7 +892,7 @@ module Hive
 
       def valid_patch?(patch, aggregate, action, thesis)
         return false unless valid_fixer_result?(patch) && patch.publishable?
-        return false unless patch.branch == expected_fix_branch(aggregate.fetch("job_id"), action.fetch("thesis_fingerprint"))
+        return false unless patch.branch == expected_fix_branch(action.fetch("canonical_action_id"))
         return false unless Pathname.new(patch.worktree_path.to_s).absolute?
         return false unless patch.analysis_sha == aggregate.fetch("analysis_sha")
         return false unless valid_oid?(patch.publication_base_sha) && valid_oid?(patch.commit_sha)
@@ -696,30 +908,59 @@ module Hive
         (patch.changed_paths - boundary).empty?
       end
 
-      def expected_fix_branch(job_id, fingerprint)
-        job = job_id.to_s.gsub(/[^a-zA-Z0-9_.-]+/, "-")[0, 48]
-        token = fingerprint.to_s.gsub(/[^a-zA-Z0-9]+/, "")[0, 16]
-        "hive-refactor/#{job}-#{token}"
+      def expected_fix_branch(canonical_action_id)
+        "hive-refactor/#{canonical_action_id}"
       end
 
       def valid_oid?(value)
         value.to_s.match?(/\A[0-9a-f]{40,64}\z/)
       end
 
-      def creation_intent_state(action, expected_payload)
-        receipt = action.dig("receipts", "creation_intent")
-        return false unless receipt
-        return :invalid unless receipt.is_a?(Hash) && receipt.keys.sort == %w[payload recorded_at]
-        return :invalid unless receipt.fetch("payload") == expected_payload
+      def publication_state(current, aggregate, action, patch: nil)
+        receipts = current.fetch("receipts")
+        state = {}
+        base = receipts["creation_intent"]
+        if base
+          return :invalid unless base.is_a?(Hash) && base.keys.sort == %w[payload recorded_at]
 
-        Time.iso8601(receipt.fetch("recorded_at").to_s)
-        true
-      rescue ArgumentError, KeyError
+          Time.iso8601(base.fetch("recorded_at").to_s)
+          payload = base.fetch("payload")
+          return :invalid unless payload.is_a?(Hash)
+          phase = case payload["operation"]
+          when "push_branch" then PrOpener::PUSH_INTENT
+          when "create_pr" then PrOpener::PR_CREATE_INTENT
+          when "create_issue" then "issue_create_intent"
+          end
+          return :invalid unless phase
+
+          expected_oid = payload["expected_remote_oid"]
+          expected = expected_publication_payload(
+            action.fetch("kind"), phase, aggregate, action, patch,
+            expected_remote_oid: expected_oid
+          )
+          return :invalid unless payload == expected
+
+          state[phase] = payload
+        end
+        [ PrOpener::PUSH_COMPLETE, PrOpener::PR_CREATE_INTENT ].each do |phase|
+          next unless receipts.key?(phase)
+
+          payload = receipts.fetch(phase)
+          expected = expected_publication_payload(
+            action.fetch("kind"), phase, aggregate, action, patch,
+            expected_remote_oid: nil
+          )
+          return :invalid unless payload == expected
+
+          state[phase] = payload
+        end
+        state
+      rescue ArgumentError, KeyError, TypeError
         :invalid
       end
 
       def mark_patch_superseded!(token, patch)
-        key = "patch_superseded_#{Digest::SHA256.hexdigest(patch.commit_sha.to_s)}"
+        key = "patch_superseded_#{::Digest::SHA256.hexdigest(patch.commit_sha.to_s)}"
         @job_store.record_action_receipt!(
           token,
           key: key,
@@ -732,8 +973,24 @@ module Hive
         )
       end
 
-      def patch_receipt_present?(action)
-        action.fetch("receipts").keys.any? { |key| key.match?(/\Apatch(?:_\d+)?\z/) }
+      def superseded_patch_commits(action)
+        receipts = action.fetch("receipts")
+        patch_commits = receipts.filter_map do |key, value|
+          next unless key.match?(/\Apatch(?:_\d+)?\z/) && value.is_a?(Hash)
+
+          commit = value["commit_sha"].to_s.downcase
+          commit if valid_oid?(commit)
+        end
+        receipts.filter_map do |key, value|
+          next unless key.start_with?("patch_superseded_") && value.is_a?(Hash)
+          next unless value["reason"] == "trunk_drift_retry"
+
+          commit = value["commit_sha"].to_s.downcase
+          next unless valid_oid?(commit) && patch_commits.include?(commit)
+          next unless key == "patch_superseded_#{::Digest::SHA256.hexdigest(commit)}"
+
+          commit
+        end.uniq.sort
       end
 
       def nonempty?(value)
@@ -772,15 +1029,167 @@ module Hive
       end
 
       def effect_authorized?(kind)
-        return false unless @policy_result&.authorized?(kind)
+        current = current_policy_result
+        return false unless current.authorized?(kind)
+        return false unless action_policy_signature(current.config, kind) == @policy_signatures.fetch(kind.to_s)
 
-        gates = current_gates
-        gates.fetch("discovery") && gates.fetch(kind == "fix" ? "auto_fix" : "issue_filing")
+        gates = current_gates(current.config)
+        gates.fetch("discovery") && gates.fetch(kind == "fix" ? "auto_fix" : "issue_filing") &&
+          repository_effect_authorized?(current.config)
+      end
+
+      def claim_effect_authorized?(token, kind)
+        token.fetch(:continuation_only) != true && effect_authorized?(kind)
+      end
+
+      def enforce_repository_authority(aggregate)
+        decision = current_repository_ownership_decision(
+          aggregate,
+          continuation: continuation_evidence?(aggregate)
+        )
+        @repository_identity_reason = decision.reason
+        @repository_identity_drift = decision.continuation_only? &&
+                                     decision.reason == "repository_identity_drift"
+        @current_repository = decision.evidence["current_repository"]
+        return nil unless decision.blocked?
+        return nil if decision.reason == "architecture_patrol_disabled"
+
+        block_action_phase(aggregate, decision.reason, decision.evidence)
+      rescue StandardError => e
+        @repository_identity_reason = "repository_identity_unresolved"
+        block_action_phase(
+          aggregate,
+          @repository_identity_reason,
+          "error" => "#{e.class}: #{e.message}"
+        )
+      end
+
+      def repository_effect_authorized?(cfg)
+        repository_ownership_decision(aggregate_for_source, cfg: cfg, continuation: false).full?
+      end
+
+      def transition_denial_reason(token, kind, aggregate)
+        continuation = token.fetch(:continuation_only) == true
+        ownership = current_repository_ownership_decision(
+          aggregate,
+          continuation: continuation
+        )
+        if ownership.blocked?
+          return "authority_revoked" if ownership.reason == "architecture_patrol_disabled"
+
+          return ownership.reason
+        end
+        return nil if continuation
+
+        effect_authorized?(kind) ? nil : "authority_revoked"
+      end
+
+      def current_repository_ownership_decision(aggregate, continuation:)
+        repository_ownership_decision(
+          aggregate,
+          cfg: load_current_config,
+          continuation: continuation
+        )
+      rescue StandardError => e
+        RepositoryOwnership::Decision.new(
+          authority: :blocked,
+          reason: "repository_identity_unresolved",
+          evidence: { "error" => "#{e.class}: #{e.message}" }
+        )
+      end
+
+      def repository_ownership_decision(aggregate, cfg:, continuation:)
+        @repository_ownership.call(
+          entry: {
+            "name" => @registration.empty? ? aggregate.dig("source", "registration") : @registration,
+            "path" => @project_root
+          },
+          cfg: cfg,
+          expected_identity: source_identity(aggregate.fetch("source")),
+          continuation: continuation,
+          continuation_owner: RepositoryOwnership.remote_continuation_evidence?(aggregate)
+        )
+      rescue StandardError => e
+        RepositoryOwnership::Decision.new(
+          authority: :blocked,
+          reason: "repository_identity_unresolved",
+          evidence: { "error" => "#{e.class}: #{e.message}" }
+        )
+      end
+
+      def aggregate_for_source
+        { "source" => @source, "actions" => [] }
+      end
+
+      def source_identity(source)
+        RepositoryOwnership.identity_from_source(source)
+      end
+
+      def terminal_proofs_for(aggregate, action_ids, dry_run:)
+        return {} unless @canonical_action_catalog
+
+        @canonical_action_catalog.resolve(
+          action_ids: action_ids,
+          expected_identity: source_identity(aggregate.fetch("source")),
+          dry_run: dry_run
+        )
+      end
+
+      def materialize_terminal_action(aggregate, action)
+        action_id = action.fetch("canonical_action_id")
+        proof = terminal_proofs_for(
+          aggregate, [ action_id ], dry_run: false
+        )[action_id]
+        return false unless proof
+
+        @job_store.materialize_terminal_proof!(
+          aggregate.fetch("job_id"), action_id, proof: proof, now: now
+        )
+        @events << event(
+          "canonical_action_linked",
+          canonical_action_id: action_id,
+          owner: proof.fetch("owner"),
+          linked_outcome: proof.fetch("outcome")
+        )
+        true
+      rescue JobStore::Error => e
+        raise CanonicalActionCatalog::ProofConflict,
+              "cannot materialize canonical action #{action_id.inspect}: #{e.message}"
+      end
+
+      def terminal_proof_available?(token)
+        aggregate = @job_store.read_job(token.fetch(:job_id))
+        terminal_proofs_for(
+          aggregate, [ token.fetch(:canonical_action_id) ], dry_run: false
+        ).key?(token.fetch(:canonical_action_id))
+      rescue CanonicalActionCatalog::Error => e
+        @events << event("canonical_action_proof_unresolved", error: e.message)
+        true
+      end
+
+      def refresh_terminal_catalog
+        @canonical_action_catalog&.rebuild!
+      rescue CanonicalActionCatalog::Error => e
+        @events << event("canonical_action_catalog_refresh_failed", error: e.message)
+      end
+
+      def continuation_evidence?(aggregate)
+        RepositoryOwnership.continuation_evidence?(aggregate)
+      end
+
+      def remote_continuation_evidence?(action)
+        receipts = action.fetch("receipts")
+        receipts["creation_intent"].is_a?(Hash) || nonempty?(receipts["pr_url"]) ||
+          nonempty?(receipts["issue_url"]) || nonempty?(receipts["review_task_path"])
       end
 
       def prepare_policy(aggregate)
-        @policy_result = Policy.intersect(aggregate.fetch("policy"), @cfg)
+        @policy_snapshot = aggregate.fetch("policy")
+        @policy_result = current_policy_result
         effective_cfg = @policy_result.config
+        @policy_signatures = %w[fix issue].to_h do |kind|
+          [ kind, action_policy_signature(effective_cfg, kind) ]
+        end
         @fixer = @fixer_override || Fixer.new(@project_root, cfg: effective_cfg, clock: @clock)
         @pr_opener = @pr_opener_override || PrOpener.new(@project_root, cfg: effective_cfg)
         @issue_filer = @issue_filer_override || IssueFiler.new(@project_root, cfg: effective_cfg)
@@ -790,8 +1199,12 @@ module Hive
         current_gates.fetch(name)
       end
 
-      def current_gates
-        value = @gate_reader.call
+      def current_gates(config = nil)
+        value = if @gate_reader
+          @gate_reader.call
+        else
+          configured_gates(config || load_current_config)
+        end
         {
           "discovery" => value["discovery"] == true || value[:discovery] == true,
           "auto_fix" => value["auto_fix"] == true || value[:auto_fix] == true,
@@ -799,12 +1212,51 @@ module Hive
         }
       end
 
-      def configured_gates
+      def configured_gates(config)
         {
-          "discovery" => @cfg.dig("refactor_patrol", "enabled") == true,
-          "auto_fix" => @cfg.dig("refactor_patrol", "auto_fix", "enabled") == true,
-          "issue_filing" => @cfg.dig("refactor_patrol", "issue_filing", "enabled") == true
+          "discovery" => config.dig("refactor_patrol", "enabled") == true,
+          "auto_fix" => config.dig("refactor_patrol", "auto_fix", "enabled") == true,
+          "issue_filing" => config.dig("refactor_patrol", "issue_filing", "enabled") == true
         }
+      end
+
+      def current_policy_result
+        Policy.intersect(@policy_snapshot, load_current_config)
+      rescue StandardError
+        Policy::Result.new(
+          config: @cfg,
+          authority: { "fix" => false, "issue" => false },
+          reasons: { "fix" => [ "current_policy_unavailable" ],
+                     "issue" => [ "current_policy_unavailable" ] },
+          error: "current_policy_unavailable"
+        )
+      end
+
+      def load_current_config
+        @config_loader.call(@project_root)
+      end
+
+      def action_policy_signature(config, kind)
+        refactor = config.fetch("refactor_patrol")
+        payload = if kind.to_s == "fix"
+          {
+            "default_branch" => config.fetch("default_branch"),
+            "enabled" => refactor.fetch("enabled"),
+            "auto_fix" => refactor.fetch("auto_fix"),
+            "min_confidence" => refactor.fetch("min_confidence"),
+            "commands" => refactor.fetch("commands"),
+            "caps" => refactor.fetch("caps")
+          }
+        else
+          {
+            "enabled" => refactor.fetch("enabled"),
+            "min_confidence" => refactor.fetch("min_confidence"),
+            "issue_filing" => refactor.fetch("issue_filing")
+          }
+        end
+        ::Digest::SHA256.hexdigest(JSON.generate(payload))
+      rescue KeyError, TypeError, JSON::GeneratorError
+        "invalid-policy"
       end
 
       def result(aggregate, actions: nil, dry_run:, reason: nil, would_complete: nil)
@@ -828,6 +1280,13 @@ module Hive
           actions: action_records,
           completeness: completeness,
           dry_run: dry_run
+        )
+      end
+
+      def block_action_phase(aggregate, reason, evidence = {})
+        @job_store.block_actions!(
+          aggregate.fetch("job_id"), reason: reason,
+          evidence: evidence, now: now, backoff_sec: @backoff_sec
         )
       end
 

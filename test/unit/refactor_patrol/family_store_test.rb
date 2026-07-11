@@ -367,10 +367,185 @@ class RefactorPatrolFamilyStoreTest < Minitest::Test
     end
   end
 
+  def test_record_io_failures_are_wrapped_with_the_family_path
+    with_tmp_dir do |dir|
+      store = family_store(dir)
+      FileUtils.mkdir_p(store.root)
+
+      read_error = assert_raises(FamilyStore::CorruptRecord) do
+        store.send(:read_record, store.root)
+      end
+      assert_equal store.root, read_error.path
+      assert_includes read_error.message, "cannot read"
+
+      root = store.root
+      replacement = lambda do |pattern|
+        raise IOError, "directory vanished" if pattern == File.join(root, "*.json")
+
+        []
+      end
+      with_replaced_singleton_method(Dir, :glob, replacement) do
+        enumerate_error = assert_raises(FamilyStore::CorruptRecord) { store.send(:records) }
+        assert_equal root, enumerate_error.path
+        assert_includes enumerate_error.message, "cannot enumerate"
+      end
+    end
+  end
+
+  def test_invalid_descriptor_repository_and_timestamp_are_typed
+    with_tmp_dir do |dir|
+      store = family_store(dir)
+      FileUtils.mkdir_p(store.root)
+
+      invalid_descriptor = record("af1-invalid-descriptor", descriptor).merge("descriptor" => [])
+      descriptor_path = File.join(store.root, "af1-invalid-descriptor.json")
+      File.binwrite(descriptor_path, JSON.generate(invalid_descriptor))
+      error = assert_raises(FamilyStore::CorruptRecord) do
+        store.resolve(thesis: thesis, repository: "acme/polyglot", job_id: "job-new", source: source)
+      end
+      assert_includes error.message, "descriptor is invalid"
+      FileUtils.rm_f(descriptor_path)
+
+      invalid_timestamp = record("af1-invalid-time", descriptor).merge("created_at" => "yesterday")
+      timestamp_path = File.join(store.root, "af1-invalid-time.json")
+      File.binwrite(timestamp_path, JSON.generate(invalid_timestamp))
+      error = assert_raises(FamilyStore::CorruptRecord) do
+        store.resolve(thesis: thesis, repository: "acme/polyglot", job_id: "job-new", source: source)
+      end
+      assert_includes error.message, "ISO-8601"
+
+      error = assert_raises(ArgumentError) do
+        store.resolve(
+          thesis: thesis, repository: "not-a-slug", job_id: "job-new",
+          source: source, dry_run: true
+        )
+      end
+      assert_includes error.message, "owner/name"
+    end
+  end
+
+  def test_rebuild_removes_orphaned_projection_records
+    with_tmp_dir do |dir|
+      store = family_store(dir)
+      FileUtils.mkdir_p(store.root)
+      orphan = record("af1-orphan", descriptor)
+      write_record(store, orphan)
+
+      assert_equal [], store.rebuild!
+      refute File.exist?(File.join(store.root, "af1-orphan.json"))
+      assert File.file?(File.join(store.root, ".lock"))
+    end
+  end
+
+  def test_directory_fsync_tolerates_filesystems_without_directory_sync
+    with_tmp_dir do |dir|
+      store = family_store(dir)
+      replacement = ->(*) { raise Errno::EINVAL, "directory fsync unsupported" }
+
+      with_replaced_singleton_method(File, :open, replacement) do
+        assert_nil store.send(:fsync_directory, dir)
+      end
+    end
+  end
+
+  def test_authoritative_jobs_without_thesis_or_owner_fail_closed
+    with_tmp_dir do |dir|
+      missing_thesis = authoritative_aggregate(
+        thesis_snapshot: nil,
+        owner_job_id: "job-1"
+      )
+      missing_thesis["dispositions"] = {}
+      store = family_store(dir, jobs: [ missing_thesis ])
+      error = assert_raises(FamilyStore::InconsistentRecord) { store.rebuild! }
+      assert_includes error.message, "lacks a thesis snapshot"
+
+      missing_owner = authoritative_aggregate(owner_job_id: "another-job")
+      store = family_store(dir, jobs: [ missing_owner ])
+      error = assert_raises(FamilyStore::InconsistentRecord) { store.rebuild! }
+      assert_includes error.message, "one authoritative owner"
+    end
+  end
+
+  def test_authoritative_job_read_and_shape_errors_are_wrapped
+    with_tmp_dir do |dir|
+      broken_store = Object.new
+      job_error = Hive::RefactorPatrol::JobStore::CorruptRecord.new("broken job", path: "/tmp/job.json")
+      broken_store.define_singleton_method(:jobs) { raise job_error }
+      store = FamilyStore.new(dir, clock: -> { T0 }, job_store: broken_store)
+      error = assert_raises(FamilyStore::InconsistentRecord) { store.rebuild! }
+      assert_equal "/tmp/job.json", error.path
+      assert_includes error.message, "cannot rebuild"
+
+      store = family_store(dir, jobs: [ {} ])
+      error = assert_raises(FamilyStore::InconsistentRecord) { store.rebuild! }
+      assert_includes error.message, "cannot rebuild"
+    end
+  end
+
+  def test_invalid_authoritative_timestamp_fails_closed
+    with_tmp_dir do |dir|
+      aggregate = authoritative_aggregate
+      aggregate["actions"][0]["created_at"] = "invalid"
+      store = family_store(dir, jobs: [ aggregate ])
+
+      error = assert_raises(FamilyStore::InconsistentRecord) { store.rebuild! }
+
+      assert_includes error.message, "invalid timestamp"
+    end
+  end
+
+  def test_stale_projection_merges_authoritative_occurrences_before_append
+    with_tmp_dir do |dir|
+      store = family_store(dir)
+      first = store.resolve(
+        thesis: thesis, repository: "acme/polyglot", job_id: "job-1", source: source
+      )
+      write_authoritative_family_job(dir, thesis, first.family_id)
+      path = File.join(store.root, "#{first.family_id}.json")
+      stale = JSON.parse(File.read(path))
+      stale["occurrences"] = []
+      File.binwrite(path, JSON.generate(stale))
+
+      result = store.resolve(
+        thesis: thesis(id: "checkout-refactor-2", fingerprint: "fp-2"),
+        repository: "acme/polyglot", job_id: "job-2", source: source("number" => 43)
+      )
+
+      assert_equal first.family_id, result.family_id
+      assert_equal %w[job-1 job-2], result.record.fetch("occurrences").map { |item| item.fetch("job_id") }
+    end
+  end
+
   private
 
-  def family_store(dir)
-    FamilyStore.new(dir, clock: -> { T0 })
+  def family_store(dir, jobs: nil)
+    job_store = if jobs
+      Object.new.tap { |fake| fake.define_singleton_method(:jobs) { jobs } }
+    end
+    FamilyStore.new(dir, clock: -> { T0 }, job_store: job_store)
+  end
+
+  def authoritative_aggregate(thesis_snapshot: thesis.to_h, owner_job_id: "job-1")
+    {
+      "job_id" => "job-1",
+      "source" => source,
+      "dispositions" => {
+        "flagged" => [ { "id" => thesis.id, "thesis" => thesis_snapshot } ]
+      },
+      "actions" => [
+        {
+          "kind" => "issue",
+          "family_id" => "af1-authoritative",
+          "thesis_id" => thesis.id,
+          "canonical_action_id" => "issue-authoritative",
+          "owner_job_id" => owner_job_id,
+          "created_at" => T0.iso8601,
+          "updated_at" => T0.iso8601
+        }
+      ],
+      "created_at" => T0.iso8601,
+      "updated_at" => T0.iso8601
+    }
   end
 
   def write_authoritative_family_job(dir, item, family_id)
@@ -467,6 +642,7 @@ class RefactorPatrolFamilyStoreTest < Minitest::Test
 
   def descriptor(overrides = {})
     Hive::RefactorPatrol::SemanticFamily.descriptor(
+      host: "example.test",
       repository: "acme/polyglot",
       component: "architecture-services-checkout",
       problem_kind: "duplicated_policy",

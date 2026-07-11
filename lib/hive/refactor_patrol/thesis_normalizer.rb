@@ -9,9 +9,9 @@ module Hive
   module RefactorPatrol
     # Turns one raw agent-emitted thesis hash into a schema-valid Thesis,
     # enforcing the evidence-admissibility and behavior-preservation policy.
-    # Pure transformation — no I/O and no agent coupling — so the fastest-
-    # evolving part of refactor-patrol (what agent output do we accept, and
-    # how do we repair honest drift?) lives and is tested in one place.
+    # It has no agent coupling, but it deliberately verifies cited repository
+    # bytes: a structurally plausible path/line/snippet is not evidence unless
+    # it exists in the pinned analysis checkout.
     class ThesisNormalizer
       VALID_CONFIDENCE = %w[high medium low].freeze
       EVIDENCE_KEYS = %w[file line snippet claim].freeze
@@ -20,9 +20,10 @@ module Hive
       # thesis schema; carries the validation messages for error recording.
       Invalid = Struct.new(:errors, keyword_init: true)
 
-      def initialize(project_root:, commands:)
+      def initialize(project_root:, commands:, min_leverage_score: 0.0)
         @project_root = project_root
         @commands = commands
+        @min_leverage_score = min_leverage_score.to_f
         @schemer = JSONSchemer.schema(Pathname.new(Hive::Schemas.schema_path("hive-refactor-patrol-thesis")))
       end
 
@@ -96,7 +97,30 @@ module Hive
           "score" => numeric(source["score"]),
           "breakdown" => numeric_signal_hash(source["breakdown"]),
           "signals" => numeric_signal_hash(source["signals"]),
-          "normalized" => numeric_signal_hash(source["normalized"])
+          "normalized" => numeric_signal_hash(source["normalized"]),
+          "measurement" => normalize_feature_measurement(source["measurement"])
+        }
+      end
+
+      def normalize_feature_measurement(value)
+        source = value.is_a?(Hash) ? value : {}
+        diagnostics = Array(source["diagnostics"]).filter_map do |diagnostic|
+          next unless diagnostic.is_a?(Hash)
+
+          kind = diagnostic["kind"].to_s.strip
+          error_class = diagnostic["error_class"].to_s.strip
+          message = diagnostic["message"].to_s.strip
+          next if kind.empty? || error_class.empty? || message.empty?
+
+          {
+            "kind" => kind[0, 80],
+            "error_class" => error_class[0, 120],
+            "message" => message[0, 500]
+          }
+        end.first(8)
+        {
+          "status" => source["status"] == "incomplete" ? "incomplete" : "complete",
+          "diagnostics" => diagnostics
         }
       end
 
@@ -225,10 +249,11 @@ module Hive
         validation["commands"] = Array(validation["commands"]).map(&:to_s).select { |key| known_commands.include?(key) }
         has_tests = Array(feature.tests).any?
 
-        # R8/A3: every admissible thesis must name validation commands OR opt
-        # into characterization-first guidance. When the agent supplies
-        # neither, inject the configured test command for test-rich slices and
-        # fall back to characterization-first when no command is available.
+        # Every automatically actionable thesis needs an executable validation
+        # command. Characterization-first remains useful report guidance, but
+        # it does not pretend an unimplemented future test can validate a fix.
+        # When possible, inject the configured test command for test-rich
+        # slices; otherwise retain the thesis as explicitly report-only.
         if validation["commands"].empty? && !validation["characterization_first"]
           if has_tests && known_commands.include?("test")
             validation["commands"] = [ "test" ]
@@ -240,6 +265,11 @@ module Hive
               "Add characterization tests before refactoring this test-poor slice."
             end
           end
+        end
+
+        if validation["commands"].empty?
+          hash.fetch("risk").fetch("flags") << "missing_behavior_validation"
+          hash.fetch("risk")["flags"].uniq!
         end
 
         hash["confidence"] = "medium" if !has_tests && validation["characterization_first"] && hash["confidence"] == "high"
@@ -262,21 +292,39 @@ module Hive
       end
 
       def enforce_admissibility!(hash)
+        measurement_complete = hash.dig("feature_hotspot", "measurement", "status") == "complete"
+        unless measurement_complete
+          hash.fetch("risk").fetch("flags") << "incomplete_leverage_measurement"
+          hash.fetch("risk")["flags"].uniq!
+        end
+        if hash.dig("expected_leverage", "score").to_f < @min_leverage_score
+          hash.fetch("risk").fetch("flags") << "below_min_leverage"
+          hash.fetch("risk")["flags"].uniq!
+        end
         evidence = Array(hash["evidence"])
-        has_anchor = evidence.any? { |item| coherent_anchor?(item) }
+        verified = evidence.map { |item| coherent_anchor?(item) }
+        has_anchor = verified.any?
+        has_unverified_evidence = verified.any?(false)
+        if has_unverified_evidence
+          hash.fetch("risk").fetch("flags") << "unverified_evidence"
+          hash.fetch("risk")["flags"].uniq!
+        end
         has_driver = Array(hash.dig("expected_leverage", "drivers")).any?
         invalid_driver = Array(hash.dig("risk", "flags")).include?("invalid_leverage_driver")
-        if has_anchor && has_driver && !invalid_driver
+        if has_anchor && !has_unverified_evidence && has_driver && !invalid_driver && measurement_complete
           hash["admissible"] = true
-          hash["admissibility_reason"] = "evidence cites a coherent anchored claim and proposal names measurable leverage drivers"
+          hash["admissibility_reason"] =
+            "evidence is verified against repository bytes and proposal names measurable leverage drivers"
           return
         end
 
         hash["admissible"] = false
         reasons = []
         reasons << "missing coherent anchored claim" unless has_anchor
+        reasons << "unverified evidence anchor" if has_unverified_evidence
         reasons << "missing valid proposal leverage driver" unless has_driver
         reasons << "invalid proposal leverage driver" if invalid_driver
+        reasons << "incomplete feature leverage measurement" unless measurement_complete
         hash["admissibility_reason"] = reasons.join("; ")
         hash["risk"]["flags"] |= [ "inadmissible" ]
 
@@ -296,7 +344,29 @@ module Hive
         claim = item["claim"].to_s.strip
         line = item["line"]
         snippet = item["snippet"].to_s.strip
-        !file.empty? && !claim.empty? && ((line.is_a?(Integer) && line.positive?) || !snippet.empty?)
+        return false if file.empty? || claim.empty?
+
+        content = verified_evidence_content(file)
+        return false unless content
+
+        line_valid = line.nil? || (line.is_a?(Integer) && line.positive? && line <= content.lines.size)
+        location_valid = snippet.empty? ? line.is_a?(Integer) && line_valid : line_valid && content.include?(snippet)
+        location_valid
+      end
+
+      def verified_evidence_content(file)
+        return if file.include?("\\")
+
+        relative = Pathname.new(file)
+        return if relative.absolute? || relative.cleanpath.to_s != file || file == "."
+
+        root = Pathname.new(@project_root).realpath
+        candidate = Pathname.new(File.join(root, file)).realpath
+        return unless candidate.to_s.start_with?("#{root}#{File::SEPARATOR}") && candidate.file?
+
+        candidate.read(encoding: "UTF-8").scrub("")
+      rescue SystemCallError, ArgumentError
+        nil
       end
 
       def schema_errors(hash)

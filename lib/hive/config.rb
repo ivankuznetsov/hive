@@ -486,6 +486,7 @@ module Hive
         },
         "agent" => "claude",
         "min_confidence" => "medium",
+        "min_leverage_score" => 0.25,
         "max_theses_per_feature" => 3,
         "max_theses_per_run" => 10,
         "include" => [],
@@ -494,6 +495,10 @@ module Hive
           "docs" => nil,
           "format" => nil,
           "lint" => nil,
+          # Optional project-owned API/contract compatibility check. When a
+          # language has no built-in declaration adapter, a passing command is
+          # required before architecture patrol may publish an automatic fix.
+          "public_contract" => nil,
           "typecheck" => nil,
           "test" => nil
         },
@@ -2703,6 +2708,13 @@ module Hive
               "#{REFACTOR_PATROL_CONFIDENCE_LEVELS.inspect}; got #{confidence.inspect} (#{confidence.class})"
       end
 
+      leverage_score = refactor["min_leverage_score"]
+      unless leverage_score.is_a?(Numeric) && leverage_score.between?(0, 1)
+        raise ConfigError,
+              "refactor_patrol.min_leverage_score in #{describe_source(source_path)} " \
+              "must be a number between 0 and 1; got #{leverage_score.inspect} (#{leverage_score.class})"
+      end
+
       REFACTOR_PATROL_NUMERIC_BOUNDS.each do |key, min|
         validate_integer_min!(refactor[key], "refactor_patrol.#{key}", min, source_path)
       end
@@ -2752,7 +2764,7 @@ module Hive
               "got #{commands.inspect} (#{commands.class})"
       end
 
-      %w[docs format lint typecheck test].each do |key|
+      %w[docs format lint public_contract typecheck test].each do |key|
         value = commands[key]
         next if value.nil?
         next if value.is_a?(String) && !value.strip.empty?

@@ -637,15 +637,7 @@ module Hive
           @output.puts "  It stops at human-input gates (brainstorm questions, review"
           @output.puts "  escalations, recovery markers). Disable later by setting"
           @output.puts "  daemon.enabled: false in .hive-state/config.yml."
-          loop do
-            @output.print "Enable hive daemon for this project? [Y/n]: "
-            @output.flush
-            answer = read_line.downcase
-            return true  if answer.empty? || answer == "y" || answer == "yes"
-            return false if answer == "n" || answer == "no"
-
-            @output.puts "  please answer y or n"
-          end
+          prompt_yes_no("Enable hive daemon for this project?", default: true)
         end
 
         def prompt_babysitter_enabled
@@ -654,15 +646,7 @@ module Hive
           @output.puts "  When enabled, `hive babysit start` can ask the development"
           @output.puts "  agent to rebase, resolve conflicts, fix red CI, and push"
           @output.puts "  PR branches. Disable later by setting babysitter.enabled: false."
-          loop do
-            @output.print "Enable hive-babysitter for this project? [Y/n]: "
-            @output.flush
-            answer = read_line.downcase
-            return true  if answer.empty? || answer == "y" || answer == "yes"
-            return false if answer == "n" || answer == "no"
-
-            @output.puts "  please answer y or n"
-          end
+          prompt_yes_no("Enable hive-babysitter for this project?", default: true)
         end
 
         def prompt_daemon_autostart
@@ -670,15 +654,7 @@ module Hive
           @output.puts "Hive daemon service — install the per-user service unit now."
           @output.puts "  The unit is written either way. Starting it now also enables"
           @output.puts "  launchd/systemd-user autostart for future logins."
-          loop do
-            @output.print "Enable and start the hive daemon now? [y/N]: "
-            @output.flush
-            answer = read_line.downcase
-            return false if answer.empty? || answer == "n" || answer == "no"
-            return true  if answer == "y" || answer == "yes"
-
-            @output.puts "  please answer y or n"
-          end
+          prompt_yes_no("Enable and start the hive daemon now?", default: false)
         end
 
         def summarize(answers)

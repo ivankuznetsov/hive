@@ -8,8 +8,10 @@ class RefactorPatrolPrOpenerTest < Minitest::Test
   include HiveTestHelper
 
   class FakeGh
-    attr_accessor :prs, :create_failure, :create_output, :remote_oid
-    attr_reader :pushed, :created, :bodies, :authenticated_hosts, :lookups
+    attr_accessor :prs, :create_failure, :create_output, :remote_oid, :repository,
+                  :verification_error
+    attr_reader :pushed, :created, :bodies, :authenticated_hosts, :lookups,
+                :verified
 
     def initialize
       @prs = []
@@ -18,7 +20,9 @@ class RefactorPatrolPrOpenerTest < Minitest::Test
       @bodies = []
       @authenticated_hosts = []
       @lookups = []
+      @verified = []
       @create_output = "https://github.com/acme/demo/pull/9\n"
+      @repository = { "repository" => "acme/demo", "host" => "github.com" }
     end
 
     def ensure_authenticated!(_cfg, host:)
@@ -31,12 +35,31 @@ class RefactorPatrolPrOpenerTest < Minitest::Test
       @prs
     end
 
-    def remote_branch_oid(_path, _branch, cfg:)
+    def origin_push_url(_path, cfg:)
+      "git@github.com:acme/demo.git"
+    end
+
+    def repository_identity_from_remote(_remote_url)
+      @repository
+    end
+
+    def remote_branch_oid(_path, _branch, cfg:, remote:)
       @remote_oid
     end
 
-    def push_branch!(path, branch, cfg:, expected_remote_oid: nil)
-      @pushed << [ path, branch, expected_remote_oid ]
+    def push_branch!(path, branch, cfg:, expected_remote_oid: nil,
+                     expected_remote_absent: false, remote:, set_upstream:)
+      @pushed << [
+        path, branch, expected_remote_oid, expected_remote_absent, remote, set_upstream
+      ]
+      @remote_oid = Open3.capture3("git", "-C", path, "rev-parse", branch).first.strip
+    end
+
+    def verify_pr_identity!(pr_url, **arguments)
+      @verified << arguments.merge(pr_url: pr_url)
+      raise Hive::GhError, @verification_error if @verification_error
+
+      true
     end
 
     def capture3(*args, chdir:, cfg:)
@@ -78,8 +101,11 @@ class RefactorPatrolPrOpenerTest < Minitest::Test
 
       assert_equal "pr_opened", result.outcome
       assert result.terminal
-      assert_equal 1, intents
-      assert_equal [ [ repo, "master", nil ] ], gh.pushed
+      assert_equal 2, intents, "push and PR create require distinct durable intents"
+      assert_equal(
+        [ [ repo, "master", nil, true, "git@github.com:acme/demo.git", false ] ],
+        gh.pushed
+      )
       assert_includes gh.created.first, "--repo"
       assert_includes gh.created.first, "github.com/acme/demo"
       assert_includes gh.bodies.first, "<!-- hive-refactor-patrol action=fix-fp"
@@ -91,6 +117,13 @@ class RefactorPatrolPrOpenerTest < Minitest::Test
       assert_equal "fix-fp", context.fetch("canonical_action_id")
       assert_equal patch(repo).commit_sha, context.dig("patch", "commit_sha")
       assert_equal "/tmp/review-task", result.review_task_path
+      assert_equal(
+        {
+          "pr_url" => "https://github.com/acme/demo/pull/9",
+          "review_task_path" => "/tmp/review-task"
+        },
+        result.receipts
+      )
     end
   end
 
@@ -103,30 +136,229 @@ class RefactorPatrolPrOpenerTest < Minitest::Test
       result = opener(repo, gh, Handoff.new).open(
         thesis: thesis, patch: patch(repo), job_id: "job-7",
         canonical_action_id: "fix-fp", source: source,
+        superseded_patch_commits: [ "a" * 40 ],
         authorize_push: -> { fences += 1; true },
         record_intent: -> { true }
       )
 
       assert_equal "pr_opened", result.outcome
-      assert_equal 1, fences
-      assert_equal [ [ repo, "master", "a" * 40 ] ], gh.pushed
+      assert_equal 2, fences
+      assert_equal(
+        [ [ repo, "master", "a" * 40, false, "git@github.com:acme/demo.git", false ] ],
+        gh.pushed
+      )
     end
   end
 
-  def test_revoked_final_push_fence_leaves_remote_branch_unchanged
+  def test_arbitrary_existing_remote_branch_is_a_retryable_conflict
     with_tmp_git_repo do |repo|
       gh = FakeGh.new
+      gh.remote_oid = "a" * 40
+      fences = 0
 
       result = opener(repo, gh, Handoff.new).open(
         thesis: thesis, patch: patch(repo), job_id: "job-7",
         canonical_action_id: "fix-fp", source: source,
-        authorize_push: -> { false }, record_intent: -> { flunk "must not persist create intent" }
+        authorize_push: -> { fences += 1; true },
+        record_intent: -> { flunk "must not persist create intent" }
+      )
+
+      assert_equal "remote_branch_conflict", result.outcome
+      refute result.terminal
+      assert_equal 0, fences
+      assert_empty result.receipts
+      assert_empty gh.pushed
+      assert_empty gh.created
+    end
+  end
+
+  def test_existing_remote_branch_at_the_exact_patch_commit_needs_no_replacement_proof
+    with_tmp_git_repo do |repo|
+      gh = FakeGh.new
+      local_patch = patch(repo)
+      gh.remote_oid = local_patch.commit_sha
+
+      result = opener(repo, gh, Handoff.new).open(
+        thesis: thesis, patch: local_patch, job_id: "job-7",
+        canonical_action_id: "fix-fp", source: source,
+        record_intent: -> { true }
+      )
+
+      assert_equal "pr_opened", result.outcome
+      assert result.terminal
+      assert_empty gh.pushed
+      assert_equal 1, gh.created.size
+    end
+  end
+
+  def test_trunk_drift_result_does_not_duplicate_versioned_patch_metadata
+    with_tmp_git_repo do |repo|
+      gh = FakeGh.new
+      local_patch = isolated_patch(repo)
+      File.write(File.join(repo, "README.md"), "trunk advanced\n")
+      run!("git", "-C", repo, "add", "README.md")
+      run!("git", "-C", repo, "commit", "-m", "advance trunk", "--quiet")
+
+      result = opener(repo, gh, Handoff.new).open(
+        thesis: thesis, patch: local_patch, job_id: "job-7",
+        canonical_action_id: "fix-fp", source: source,
+        record_intent: -> { flunk "must not persist create intent" }
+      )
+
+      assert_equal "trunk_drift_retry", result.outcome
+      refute result.terminal
+      assert_empty result.receipts
+      assert_empty gh.pushed
+      assert_empty gh.created
+    ensure
+      FileUtils.rm_rf(local_patch&.worktree_path)
+    end
+  end
+
+  def test_existing_creation_intent_reconciles_only_despite_later_trunk_drift
+    with_tmp_git_repo do |repo|
+      gh = FakeGh.new
+      local_patch = isolated_patch(repo)
+      File.write(File.join(repo, "README.md"), "trunk advanced\n")
+      run!("git", "-C", repo, "add", "README.md")
+      run!("git", "-C", repo, "commit", "-m", "advance trunk", "--quiet")
+
+      result = opener(repo, gh, Handoff.new).open(
+        thesis: thesis, patch: local_patch, job_id: "job-7",
+        canonical_action_id: "fix-fp", source: source,
+        creation_attempted: true,
+        record_intent: -> { flunk "existing intent must never be submitted again" }
+      )
+
+      assert_equal "remote_outcome_unknown", result.outcome
+      refute result.terminal
+      assert_empty result.receipts
+      assert_empty gh.pushed
+      assert_empty gh.created
+    ensure
+      FileUtils.rm_rf(local_patch&.worktree_path)
+    end
+  end
+
+  def test_revoked_final_push_fence_records_no_request_intent_and_leaves_remote_unchanged
+    with_tmp_git_repo do |repo|
+      gh = FakeGh.new
+      intents = 0
+
+      result = opener(repo, gh, Handoff.new).open(
+        thesis: thesis, patch: patch(repo), job_id: "job-7",
+        canonical_action_id: "fix-fp", source: source,
+        authorize_push: -> { false }, record_intent: -> { intents += 1; true }
       )
 
       assert_equal "authority_revoked", result.outcome
       refute result.terminal
+      assert_equal 0, intents, "a rejected final fence proves that no request was sent"
+      refute result.receipts.key?("creation_intent")
       assert_empty gh.pushed
       assert_empty gh.created
+    end
+  end
+
+  def test_push_rechecks_authority_after_persisting_intent_and_before_request
+    with_tmp_git_repo do |repo|
+      gh = FakeGh.new
+      fences = [ true, false ]
+      phases = []
+
+      result = opener(repo, gh, Handoff.new).open(
+        thesis: thesis, patch: patch(repo), job_id: "job-7",
+        canonical_action_id: "fix-fp", source: source,
+        authorize_push: -> { fences.shift },
+        record_intent: ->(phase:, payload:) { phases << phase; !payload.empty? }
+      )
+
+      assert_equal "authority_revoked", result.outcome
+      assert_equal [ "push_intent" ], phases
+      assert_empty gh.pushed
+      assert_empty gh.created
+    end
+  end
+
+  def test_persisted_push_can_resume_at_pr_create_without_a_duplicate_push
+    with_tmp_git_repo do |repo|
+      gh = FakeGh.new
+      local_patch = patch(repo)
+      publication = {}
+      persist = lambda do |phase:, payload:|
+        publication[phase] = payload
+        true
+      end
+
+      blocked = opener(repo, gh, Handoff.new).open(
+        thesis: thesis, patch: local_patch, job_id: "job-7",
+        canonical_action_id: "fix-fp", source: source,
+        record_intent: persist,
+        authorize_create: -> { false }
+      )
+
+      assert_equal "authority_revoked", blocked.outcome
+      assert_equal %w[push_complete push_intent], publication.keys.sort
+      assert_equal 1, gh.pushed.size
+      assert_empty gh.created
+
+      gh.remote_oid = local_patch.commit_sha
+      recovered = opener(repo, gh, Handoff.new).open(
+        thesis: thesis, patch: local_patch, job_id: "job-7",
+        canonical_action_id: "fix-fp", source: source,
+        publication_state: {
+          "push_intent" => publication.fetch("push_intent"),
+          "push_complete" => publication.fetch("push_complete")
+        },
+        record_intent: persist
+      )
+
+      assert_equal "pr_opened", recovered.outcome
+      assert_equal 1, gh.pushed.size, "a reconciled push must not be repeated"
+      assert_equal 1, gh.created.size
+      assert publication.key?("pr_create_intent")
+    end
+  end
+
+  def test_landed_push_recovers_when_completion_receipt_persistence_failed
+    with_tmp_git_repo do |repo|
+      gh = FakeGh.new
+      local_patch = patch(repo)
+      publication = {}
+      fail_completion = lambda do |phase:, payload:|
+        next false if phase == "push_complete"
+
+        publication[phase] = payload
+        true
+      end
+
+      interrupted = opener(repo, gh, Handoff.new).open(
+        thesis: thesis, patch: local_patch, job_id: "job-7",
+        canonical_action_id: "fix-fp", source: source,
+        record_intent: fail_completion
+      )
+
+      assert_equal "remote_outcome_unknown", interrupted.outcome
+      assert_equal [ "push_intent" ], publication.keys
+      assert_equal 1, gh.pushed.size
+      assert_empty gh.created
+
+      gh.remote_oid = local_patch.commit_sha
+      persist = lambda do |phase:, payload:|
+        publication[phase] = payload
+        true
+      end
+      recovered = opener(repo, gh, Handoff.new).open(
+        thesis: thesis, patch: local_patch, job_id: "job-7",
+        canonical_action_id: "fix-fp", source: source,
+        publication_state: { "push_intent" => publication.fetch("push_intent") },
+        record_intent: persist
+      )
+
+      assert_equal "pr_opened", recovered.outcome
+      assert_equal 1, gh.pushed.size
+      assert_equal 1, gh.created.size
+      assert_equal %w[pr_create_intent push_complete push_intent], publication.keys.sort
     end
   end
 
@@ -134,6 +366,7 @@ class RefactorPatrolPrOpenerTest < Minitest::Test
     with_tmp_git_repo do |repo|
       gh = FakeGh.new
       gh.create_output = "https://github.corp.example/acme/demo/pull/9\n"
+      gh.repository = { "repository" => "acme/demo", "host" => "github.corp.example" }
       enterprise_source = source.merge(
         "url" => "https://github.corp.example/acme/demo/pull/7"
       )
@@ -150,6 +383,26 @@ class RefactorPatrolPrOpenerTest < Minitest::Test
       assert_equal "acme/demo", gh.lookups.first.fetch(:repository)
       assert_equal "github.corp.example/acme/demo",
                    gh.created.first.fetch(gh.created.first.index("--repo") + 1)
+    end
+  end
+
+
+  def test_repository_identity_drift_blocks_lookup_push_and_create
+    with_tmp_git_repo do |repo|
+      gh = FakeGh.new
+      gh.repository = { "repository" => "other/repo", "host" => "github.com" }
+
+      result = opener(repo, gh, Handoff.new).open(
+        thesis: thesis, patch: patch(repo), job_id: "job-7",
+        canonical_action_id: "fix-fp", source: source,
+        record_intent: -> { flunk "identity drift must not persist intent" }
+      )
+
+      assert_equal "repository_identity_drift", result.outcome
+      refute result.terminal
+      assert_equal 1, gh.lookups.size, "explicit source-repository reconciliation remains read-only"
+      assert_empty gh.pushed
+      assert_empty gh.created
     end
   end
 
@@ -198,8 +451,90 @@ class RefactorPatrolPrOpenerTest < Minitest::Test
 
       assert_equal "intent_persist_failed", result.outcome
       refute result.terminal
-      assert_equal 1, gh.pushed.length
+      assert_empty gh.pushed
       assert_empty gh.created
+      assert_empty handoff.calls
+    end
+  end
+
+
+  def test_final_create_fence_runs_after_intent_and_push
+    with_tmp_git_repo do |repo|
+      gh = FakeGh.new
+      phases = []
+
+      result = opener(repo, gh, Handoff.new).open(
+        thesis: thesis, patch: patch(repo), job_id: "job-7",
+        canonical_action_id: "fix-fp", source: source,
+        record_intent: ->(phase:, payload:) { phases << phase; !payload.empty? },
+        authorize_push: -> { true },
+        authorize_create: -> { false }
+      )
+
+      assert_equal "authority_revoked", result.outcome
+      assert_equal %w[push_intent push_complete], phases
+      assert_equal 1, gh.pushed.size
+      assert_empty gh.created
+    end
+  end
+
+  def test_create_rechecks_authority_after_persisting_intent_and_before_request
+    with_tmp_git_repo do |repo|
+      gh = FakeGh.new
+      create_fences = [ true, false ]
+      phases = []
+
+      result = opener(repo, gh, Handoff.new).open(
+        thesis: thesis, patch: patch(repo), job_id: "job-7",
+        canonical_action_id: "fix-fp", source: source,
+        record_intent: ->(phase:, payload:) { phases << phase; !payload.empty? },
+        authorize_create: -> { create_fences.shift }
+      )
+
+      assert_equal "authority_revoked", result.outcome
+      assert_equal %w[push_intent push_complete pr_create_intent], phases
+      assert_equal 1, gh.pushed.size
+      assert_empty gh.created
+    end
+  end
+
+  def test_create_stops_if_remote_branch_changes_after_create_intent
+    with_tmp_git_repo do |repo|
+      gh = FakeGh.new
+      create_fences = 0
+
+      result = opener(repo, gh, Handoff.new).open(
+        thesis: thesis, patch: patch(repo), job_id: "job-7",
+        canonical_action_id: "fix-fp", source: source,
+        record_intent: ->(**) { true },
+        authorize_create: lambda {
+          create_fences += 1
+          gh.remote_oid = "f" * 40 if create_fences == 2
+          true
+        }
+      )
+
+      assert_equal "remote_outcome_unknown", result.outcome
+      assert_empty gh.created
+      assert_empty gh.verified
+    end
+  end
+
+  def test_created_pr_identity_is_verified_before_review_handoff
+    with_tmp_git_repo do |repo|
+      gh = FakeGh.new
+      gh.verification_error = "head changed"
+      handoff = Handoff.new
+
+      result = opener(repo, gh, handoff).open(
+        thesis: thesis, patch: patch(repo), job_id: "job-7",
+        canonical_action_id: "fix-fp", source: source,
+        record_intent: ->(**) { true }
+      )
+
+      assert_equal "remote_outcome_unknown", result.outcome
+      assert_equal 1, gh.created.size
+      assert_equal 1, gh.verified.size
       assert_empty handoff.calls
     end
   end
@@ -258,6 +593,27 @@ class RefactorPatrolPrOpenerTest < Minitest::Test
 
       assert_equal "pr_opened", result.outcome
       assert_equal "https://github.com/acme/demo/pull/9", result.pr_url
+      assert_empty gh.created
+    end
+  end
+
+  def test_reconciliation_accepts_canonical_repository_casing_from_github
+    with_tmp_git_repo do |repo|
+      gh = FakeGh.new
+      local_patch = patch(repo)
+      candidate = remote_pr(local_patch)
+      candidate["url"] = "https://github.com/Acme/Demo/pull/8"
+      candidate["headRepository"] = { "nameWithOwner" => "Acme/Demo" }
+      gh.prs = [ candidate ]
+
+      result = opener(repo, gh, Handoff.new).open(
+        thesis: thesis, patch: local_patch, job_id: "job-7",
+        canonical_action_id: "fix-fp", source: source,
+        record_intent: -> { true }
+      )
+
+      assert_equal "pr_opened", result.outcome
+      assert result.terminal
       assert_empty gh.created
     end
   end
@@ -326,6 +682,25 @@ class RefactorPatrolPrOpenerTest < Minitest::Test
       assert_equal "review_handoff_pending", result.outcome
       refute result.terminal
       assert_equal "https://github.com/acme/demo/pull/8", result.pr_url
+    end
+  end
+
+  def test_existing_pr_handoff_is_fenced_before_enqueue
+    with_tmp_git_repo do |repo|
+      gh = FakeGh.new
+      local_patch = patch(repo)
+      gh.prs = [ remote_pr(local_patch) ]
+      handoff = Handoff.new
+
+      result = opener(repo, gh, handoff).open(
+        thesis: thesis, patch: local_patch, job_id: "job-7",
+        canonical_action_id: "fix-fp", source: source,
+        authorize_handoff: -> { false }, record_intent: -> { true }
+      )
+
+      assert_equal "review_handoff_pending", result.outcome
+      refute result.terminal
+      assert_empty handoff.calls
     end
   end
 
@@ -482,7 +857,7 @@ class RefactorPatrolPrOpenerTest < Minitest::Test
         record_intent: -> { intents += 1; true }
       )
 
-      assert_equal 1, intents
+      assert_equal 2, intents
       assert_equal "remote_outcome_unknown", result.outcome
       refute result.terminal
     end
@@ -527,6 +902,187 @@ class RefactorPatrolPrOpenerTest < Minitest::Test
       assert_includes error.message, "commit changed before publication"
       assert_empty gh.pushed
       assert_empty gh.created
+    end
+  end
+
+  def test_invalid_publication_state_is_rejected_before_remote_lookup
+    with_tmp_git_repo do |repo|
+      gh = FakeGh.new
+      result = opener(repo, gh, Handoff.new).open(
+        thesis: thesis, patch: patch(repo), job_id: "job-7",
+        canonical_action_id: "fix-fp", source: source,
+        publication_state: { "unexpected" => {} }, record_intent: -> { true }
+      )
+
+      assert_equal "invalid_publication_state", result.outcome
+      assert_empty gh.lookups
+    end
+  end
+
+  def test_persisted_push_intent_conflicts_with_a_third_remote_head
+    with_tmp_git_repo do |repo|
+      gh = FakeGh.new
+      local_patch = patch(repo)
+      expected = "a" * 40
+      gh.remote_oid = "b" * 40
+      state = {
+        "push_intent" => Hive::RefactorPatrol::PrOpener.push_intent_payload(
+          canonical_action_id: "fix-fp", repository: "acme/demo",
+          branch: local_patch.branch, commit_sha: local_patch.commit_sha,
+          expected_remote_oid: expected
+        )
+      }
+
+      result = opener(repo, gh, Handoff.new).open(
+        thesis: thesis, patch: local_patch, job_id: "job-7",
+        canonical_action_id: "fix-fp", source: source,
+        publication_state: state, record_intent: -> { true }
+      )
+
+      assert_equal "remote_branch_conflict", result.outcome
+      assert_empty gh.pushed
+    end
+  end
+
+  def test_remote_head_is_rechecked_before_create_intent
+    with_tmp_git_repo do |repo|
+      gh = FakeGh.new
+      lookups = 0
+      gh.define_singleton_method(:remote_branch_oid) do |*_, **|
+        lookups += 1
+        lookups == 1 ? nil : "f" * 40
+      end
+
+      result = opener(repo, gh, Handoff.new).open(
+        thesis: thesis, patch: patch(repo), job_id: "job-7",
+        canonical_action_id: "fix-fp", source: source,
+        record_intent: ->(**) { true }
+      )
+
+      assert_equal "remote_branch_conflict", result.outcome
+      assert_equal 2, lookups
+      assert_empty gh.created
+    end
+  end
+
+  def test_non_gateway_create_exception_after_intent_is_remote_unknown
+    with_tmp_git_repo do |repo|
+      gh = FakeGh.new
+      gh.define_singleton_method(:capture3) { |*, **| raise RuntimeError, "transport decoder crashed" }
+
+      result = opener(repo, gh, Handoff.new).open(
+        thesis: thesis, patch: patch(repo), job_id: "job-7",
+        canonical_action_id: "fix-fp", source: source,
+        record_intent: ->(**) { true }
+      )
+
+      assert_equal "remote_outcome_unknown", result.outcome
+      assert_includes result.receipts.fetch("error"), "transport decoder crashed"
+    end
+  end
+
+  def test_handoff_exception_is_a_nonterminal_visible_receipt
+    with_tmp_git_repo do |repo|
+      gh = FakeGh.new
+      handoff = Handoff.new
+      handoff.define_singleton_method(:enqueue) { |**| raise IOError, "review state unavailable" }
+
+      result = opener(repo, gh, handoff).open(
+        thesis: thesis, patch: patch(repo), job_id: "job-7",
+        canonical_action_id: "fix-fp", source: source,
+        record_intent: ->(**) { true }
+      )
+
+      assert_equal "review_handoff_pending", result.outcome
+      assert_includes result.receipts.fetch("handoff_error"), "review state unavailable"
+    end
+  end
+
+  def test_create_transport_failure_after_intent_is_remote_unknown
+    with_tmp_git_repo do |repo|
+      gh = FakeGh.new
+      gh.create_failure = "permission denied"
+
+      result = opener(repo, gh, Handoff.new).open(
+        thesis: thesis, patch: patch(repo), job_id: "job-7",
+        canonical_action_id: "fix-fp", source: source,
+        record_intent: ->(**) { true }
+      )
+
+      assert_equal "remote_outcome_unknown", result.outcome
+      assert_includes result.receipts.fetch("error"), "gh pr create failed"
+    end
+  end
+
+  def test_invalid_source_url_is_a_gateway_error
+    with_tmp_git_repo do |repo|
+      result = opener(repo, FakeGh.new, Handoff.new).open(
+        thesis: thesis, patch: patch(repo), job_id: "job-7",
+        canonical_action_id: "fix-fp", source: source.merge("url" => "http://["),
+        record_intent: -> { true }
+      )
+
+      assert_equal "gh_error", result.outcome
+      assert_includes result.receipts.fetch("error"), "source PR URL is invalid"
+    end
+  end
+
+  def test_structured_create_intent_is_validated_without_resubmission
+    with_tmp_git_repo do |repo|
+      gh = FakeGh.new
+      local_patch = patch(repo)
+      state = {
+        "pr_create_intent" => Hive::RefactorPatrol::PrOpener.pr_create_intent_payload(
+          canonical_action_id: "fix-fp", repository: "acme/demo",
+          branch: local_patch.branch, commit_sha: local_patch.commit_sha
+        )
+      }
+
+      result = opener(repo, gh, Handoff.new).open(
+        thesis: thesis, patch: local_patch, job_id: "job-7",
+        canonical_action_id: "fix-fp", source: source,
+        publication_state: state, record_intent: -> { flunk "must not resubmit" }
+      )
+
+      assert_equal "remote_outcome_unknown", result.outcome
+      assert_empty gh.pushed
+      assert_empty gh.created
+    end
+  end
+
+  def test_branch_diff_and_git_helpers_fail_closed_on_unverified_git_state
+    with_tmp_git_repo do |repo|
+      subject = Hive::RefactorPatrol::PrOpener.new(
+        repo, cfg: Hive::Config.deep_dup(Hive::Config::DEFAULTS),
+        gh: FakeGh.new, review_handoff: Handoff.new
+      )
+      local_patch = patch(repo)
+      assert_kind_of String, subject.send(:branch_diff, local_patch)
+
+      invalid = local_patch.dup
+      invalid.publication_base_sha = "f" * 40
+      error = assert_raises(Hive::GitError) { subject.send(:branch_diff, invalid) }
+      assert_includes error.message, "cannot read refactor PR diff"
+
+      error = assert_raises(Hive::GitError) { subject.send(:assert_patch_identity!, invalid) }
+      assert_includes error.message, "does not descend from publication base"
+
+      error = assert_raises(Hive::GitError) { subject.send(:git_output!, repo, "not-a-git-command") }
+      assert_includes error.message, "git not-a-git-command failed"
+    end
+  end
+
+  def test_superseded_patch_commits_must_be_full_object_ids
+    with_tmp_git_repo do |repo|
+      error = assert_raises(Hive::GitError) do
+        opener(repo, FakeGh.new, Handoff.new).open(
+          thesis: thesis, patch: patch(repo), job_id: "job-7",
+          canonical_action_id: "fix-fp", source: source,
+          superseded_patch_commits: [ "short" ], record_intent: -> { true }
+        )
+      end
+
+      assert_includes error.message, "superseded refactor patch commit is invalid"
     end
   end
 

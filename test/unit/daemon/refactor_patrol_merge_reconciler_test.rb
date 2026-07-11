@@ -9,12 +9,13 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
   T0 = Time.utc(2026, 7, 10, 12, 0, 0)
 
   class FakeGh
-    attr_accessor :repository, :pages, :details, :failing_cursor,
+    attr_accessor :repository, :host, :pages, :details, :failing_cursor,
                   :historical_count, :active_result_count
     attr_reader :page_calls
 
     def initialize(repository: "acme/demo")
       @repository = repository
+      @host = "github.com"
       @pages = {}
       @details = {}
       @page_calls = []
@@ -22,8 +23,8 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
       @active_result_count = 0
     end
 
-    def repo_name_with_owner(*)
-      repository
+    def repository_identity(*)
+      { "repository" => repository, "host" => host }
     end
 
     def merged_prs_page(repository:, default_branch:, cursor:, merged_since:, per_page:, **)
@@ -72,6 +73,7 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
       assert_equal 2, state.dig("high_water", "pr_number")
       refute_includes state.fetch("overlap_occurrences").map { |item| item.fetch("pr_number") }, 99
       assert_equal "acme/demo", state.fetch("repository")
+      assert_equal "github.com", state.fetch("host")
       assert_equal "main", state.fetch("default_branch")
       assert_empty job_store(dir).jobs
       assert_empty Dir.glob(File.join(dir, ".hive-state", "refactor_patrol", "v2", "manifests", "*.json"))
@@ -288,6 +290,13 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
       refute_empty quarantine_paths(dir)
 
       gh.repository = "acme/demo"
+      gh.host = "github.corp.example"
+      moved_host = reconciler(dir, gh, cfg: cfg).tick(now: T0 + 90).fetch(0)
+      assert_equal :blocked, moved_host.fetch(:status)
+      assert_match(/repository host changed/, moved_host.fetch(:reason))
+      assert_equal before, File.binread(state_path(dir))
+
+      gh.host = "github.com"
       cfg["default_branch"] = "trunk"
       branch = reconciler(dir, gh, cfg: cfg).tick(now: T0 + 120).fetch(0)
       assert_equal :blocked, branch.fetch(:status)
@@ -327,6 +336,130 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
 
         assert_equal :blocked, result.fetch(:status)
         assert_equal bytes, File.binread(path)
+      end
+    end
+  end
+
+  def test_tick_isolates_registry_config_failures_and_default_loader_is_constructible
+    with_tmp_dir do |dir|
+      entry = { "name" => "demo", "path" => dir }
+      intake = Hive::Daemon::RefactorPatrolMergeReconciler.new(
+        registry: -> { [ entry ] },
+        config_loader: ->(_path) { raise Hive::ConfigError, "broken config" },
+        gh: FakeGh.new,
+        poll_interval_sec: 0
+      )
+
+      result = intake.tick(now: T0).fetch(0)
+
+      assert_equal :blocked, result.fetch(:status)
+      assert_match(/broken config/, result.fetch(:reason))
+      defaulted = Hive::Daemon::RefactorPatrolMergeReconciler.new(
+        registry: -> { [] }, gh: FakeGh.new, poll_interval_sec: 0
+      )
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(
+        File.join(dir, ".hive-state", "config.yml"),
+        enabled_cfg.merge("project_name" => "demo").to_yaml
+      )
+      assert_equal "demo", defaulted.instance_variable_get(:@config_loader).call(dir).fetch("project_name")
+      assert_empty defaulted.tick(now: T0)
+    end
+  end
+
+  def test_merged_pr_page_validation_rejects_incomplete_invalid_and_bad_timestamp_items
+    with_tmp_dir do |dir|
+      intake = reconciler(dir, FakeGh.new)
+      invalid_pages = [
+        { "complete" => false, "items" => [], "has_next_page" => false },
+        page([ summary(1, at: T0).merge("number" => 0) ]),
+        page([ summary(1, at: T0).merge("merged_at" => "not-a-time") ])
+      ]
+
+      invalid_pages.each do |invalid|
+        assert_raises(Hive::Daemon::RefactorPatrolMergeReconciler::Blocked) do
+          intake.send(:validate_page!, invalid, "acme/demo", "github.com", "main")
+        end
+      end
+    end
+  end
+
+  def test_deduplication_and_manifest_summary_conflicts_fail_closed
+    with_tmp_dir do |dir|
+      intake = reconciler(dir, FakeGh.new)
+      first = summary(7, at: T0)
+      divergent = first.merge("url" => "https://github.com/acme/demo/pull/changed")
+
+      error = assert_raises(Hive::Daemon::RefactorPatrolMergeReconciler::Blocked) do
+        intake.send(:dedupe_items, [ first, divergent ])
+      end
+      assert_match(/divergent payloads/, error.message)
+
+      manifest = { "source" => first.merge("number" => 8) }
+      error = assert_raises(Hive::Daemon::RefactorPatrolMergeReconciler::Blocked) do
+        intake.send(:assert_manifest_matches!, manifest, first)
+      end
+      assert_match(/conflicts with immutable manifest/, error.message)
+    end
+  end
+
+  def test_invalid_overlap_and_occurrence_checkpoint_shapes_are_quarantined
+    with_tmp_dir do |dir|
+      intake = reconciler(dir, FakeGh.new)
+      path = state_path(dir)
+      FileUtils.mkdir_p(File.dirname(path))
+      base = intake.send(
+        :build_state,
+        registration: "demo", host: "github.com", repository: "acme/demo",
+        default_branch: "main", high_water: nil, overlap_occurrences: [],
+        seeded_at: T0, updated_at: T0
+      )
+      invalid_states = [
+        base.merge("overlap_occurrences" => {}),
+        base.merge("overlap_occurrences" => [
+          { "merged_at" => T0.iso8601, "pr_number" => 0, "merge_sha" => "sha" }
+        ])
+      ]
+
+      invalid_states.each do |state|
+        File.write(path, JSON.generate(state))
+        assert_raises(Hive::Daemon::RefactorPatrolMergeReconciler::Blocked) do
+          intake.send(:load_state, dir)
+        end
+      end
+      refute_empty quarantine_paths(dir)
+    end
+  end
+
+  def test_registered_identity_errors_are_converted_to_a_stable_block
+    with_tmp_dir do |dir|
+      gh = FakeGh.new
+      gh.define_singleton_method(:repository_identity) { |*| raise Hive::GhError, "no remote" }
+      intake = reconciler(dir, gh)
+
+      error = assert_raises(Hive::Daemon::RefactorPatrolMergeReconciler::Blocked) do
+        intake.send(:registered_identity, dir, enabled_cfg)
+      end
+
+      assert_match(/identity is unavailable/, error.message)
+    end
+  end
+
+  def test_directory_fsync_not_supported_does_not_undo_checkpoint_write
+    with_tmp_dir do |dir|
+      intake = reconciler(dir, FakeGh.new)
+      path = File.join(dir, "state")
+      FileUtils.mkdir_p(path)
+      original_open = File.method(:open)
+
+      with_replaced_singleton_method(File, :open, lambda { |target, *args, **kwargs, &block|
+        if File.expand_path(target) == File.expand_path(path)
+          raise Errno::ENOTSUP, target
+        end
+
+        original_open.call(target, *args, **kwargs, &block)
+      }) do
+        assert_nil intake.send(:fsync_directory, path)
       end
     end
   end

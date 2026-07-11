@@ -32,6 +32,7 @@ tags: [gap, todo]
 | `lib/hive/commands/{connect,disconnect}.rb`, `lib/hive/screenote/**` | ✓ [[commands/screenote]], [[modules/config]], and [[stages/artifacts]] cover Screenote OAuth setup, credential storage, MCP injection, and fail-soft artifact behavior. |
 | `lib/hive/stages/*.rb`, `lib/hive/stages/review/**` | ✓ [[stages/index]] plus per-stage pages; review submodules are covered by [[stages/review]]. |
 | `lib/hive/patrol/*`, `lib/hive/commands/patrol.rb` | ✓ [[modules/patrol]] and [[commands/patrol]] cover the repository-patrol engine, PR opener, fingerprint/dismissal state, and patrol-to-`6-review` handoff. |
+| `lib/hive/refactor_patrol/*`, `lib/hive/commands/refactor_patrol.rb`, daemon architecture-patrol scheduling | ✓ [[commands/refactor-patrol]], [[modules/daemon]], [[modules/config]], [[modules/gh]], [[state-model]], and [[testing]] cover language-neutral merge discovery, durable jobs/actions, scheduling, fencing, publication, and recovery. |
 | `lib/hive/daemon/*` | ✓ [[modules/daemon]] and [[commands/daemon]] cover dispatcher, healer, display-name backfiller, queues, merge watcher, status consumer, logging, and service/queue command surfaces. |
 | `lib/hive/babysitter/**`, `lib/hive/commands/babysit.rb`, `bin/hive-babysitter-stub-git`, `bin/hive-babysitter-stub-gh` | ✓ [[modules/babysitter]] and [[commands/babysit]] cover the experimental PR babysitter process, lifecycle command, GitHub PR repair loop, dry-run wrapper-launcher handoff, and executable `git`/`gh` default-deny stub API boundaries. |
 | `lib/hive/bot/*` | ✓ [[modules/bot]] and [[commands/bot]] |
@@ -298,6 +299,19 @@ controller-owned limits while preserving controller identity and existing
 in-flight accounting. A live daemon running a release containing the fix has
 not yet repeated the same 3→4 reload and dispatched the fourth task without a
 restart; capture that daemon-log sequence after deployment to close this gap.
+
+## Architecture-patrol remote recovery is locally pinned, not live-smoked (2026-07-11)
+
+The v2 architecture-patrol lifecycle has fake-`gh`, unit, and integration
+coverage for immutable merge intake, language-neutral discovery, durable
+feature checkpoints, dead-owner claim recovery, isolated fixes, issue routing,
+creation intents, exact repository/branch reconciliation, mandatory `6-review`
+handoff, and read-only provider enforcement. This refresh did not run a
+disposable live GitHub or GitHub Enterprise repository through branch push, PR
+creation, issue creation, open/closed reconciliation, crash-after-intent
+recovery, and handoff creation. Until that smoke exists, the checked-in tests
+prove Hive's local state machine and command contracts, not the complete hosted
+provider behavior under real network ambiguity.
 
 ## Areas the wiki could be expanded
 

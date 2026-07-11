@@ -99,6 +99,29 @@
         "maximum": 1
       }
     },
+    "MeasurementDiagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "error_class", "message"],
+      "properties": {
+        "kind": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "error_class": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "message": { "type": "string", "minLength": 1, "maxLength": 500 }
+      }
+    },
+    "FeatureMeasurement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "diagnostics"],
+      "properties": {
+        "status": { "enum": ["complete", "incomplete"] },
+        "diagnostics": {
+          "type": "array",
+          "maxItems": 8,
+          "items": { "$ref": "#/$defs/MeasurementDiagnostic" }
+        }
+      }
+    },
     "FeatureHotspot": {
       "type": "object",
       "additionalProperties": false,
@@ -108,7 +131,8 @@
         "score": { "type": "number", "minimum": 0, "maximum": 1 },
         "breakdown": { "$ref": "#/$defs/NormalizedSignalValues" },
         "signals": { "$ref": "#/$defs/SignalValues" },
-        "normalized": { "$ref": "#/$defs/NormalizedSignalValues" }
+        "normalized": { "$ref": "#/$defs/NormalizedSignalValues" },
+        "measurement": { "$ref": "#/$defs/FeatureMeasurement" }
       }
     },
     "ExpectedLeverage": {

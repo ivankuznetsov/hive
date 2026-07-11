@@ -1926,8 +1926,10 @@ class InitTest < Minitest::Test
 
         assert_equal true, raw.dig("refactor_patrol", "enabled")
         assert_equal false, raw.dig("refactor_patrol", "auto_fix", "enabled")
+        assert_nil raw.dig("refactor_patrol", "commands", "public_contract")
         assert_equal false, raw.dig("refactor_patrol", "issue_filing", "enabled")
         assert_equal true, resolved.dig("refactor_patrol", "enabled")
+        assert_nil resolved.dig("refactor_patrol", "commands", "public_contract")
         assert_includes out, "architecture patrol"
         assert_includes out, "enabled"
       end

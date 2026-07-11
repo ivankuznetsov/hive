@@ -726,6 +726,8 @@ module Hive
                           desc: "analyze one immutable merge-intake manifest (daemon/internal)"
     option :actions, type: :boolean, default: false,
                      desc: "resume actions for --job-manifest (daemon/internal)"
+    option :result_file, type: :string,
+                         desc: "write daemon completion envelope to a fenced result file (internal)"
     def refactor_patrol(project)
       require "hive/commands/refactor_patrol"
       Hive::Commands::RefactorPatrol.new(
@@ -738,7 +740,8 @@ module Hive
         changed_since: options[:changed_since],
         pr: options[:pr],
         job_manifest: options[:job_manifest],
-        actions: options[:actions]
+        actions: options[:actions],
+        result_file: options[:result_file]
       ).call
     end
 

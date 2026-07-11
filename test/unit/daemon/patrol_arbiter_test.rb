@@ -95,4 +95,79 @@ class HiveDaemonPatrolArbiterTest < Minitest::Test
       refute File.exist?(path)
     end
   end
+
+  def test_invalid_timestamp_and_project_cursor_fail_closed
+    with_tmp_dir do |dir|
+      path = File.join(dir, "arbiter.json")
+      invalid_cursors = [
+        { "" => { "last_selected" => "architecture", "updated_at" => T0.iso8601 } },
+        { "p1" => { "last_selected" => "unknown", "updated_at" => T0.iso8601 } },
+        { "p1" => { "last_selected" => "architecture", "updated_at" => "not-a-time" } }
+      ]
+
+      invalid_cursors.each do |projects|
+        File.write(
+          path,
+          JSON.generate(
+            "schema" => "hive-patrol-arbiter",
+            "schema_version" => 1,
+            "projects" => projects
+          )
+        )
+        arbiter = Hive::Daemon::PatrolArbiter.new(
+          ordinary_scheduler: CandidateSource.new([]),
+          architecture_scheduler: CandidateSource.new([]),
+          state_path: path
+        )
+
+        assert_raises(Hive::Daemon::PatrolArbiter::StateError) do
+          arbiter.candidates(now: T0)
+        end
+      end
+    end
+  end
+
+  def test_architecture_candidates_with_missing_or_invalid_times_sort_as_oldest
+    with_tmp_dir do |dir|
+      architecture = CandidateSource.new([
+        { project: "p1", patrol_kind: :architecture, job_id: "dated", merged_at: T0.iso8601 },
+        { project: "p1", patrol_kind: :architecture, job_id: "missing", merged_at: nil },
+        { project: "p2", patrol_kind: :architecture, job_id: "invalid", merged_at: "not-a-time" }
+      ])
+      arbiter = Hive::Daemon::PatrolArbiter.new(
+        ordinary_scheduler: nil,
+        architecture_scheduler: architecture,
+        state_path: File.join(dir, "arbiter.json")
+      )
+
+      selected = arbiter.candidates(now: T0)
+
+      assert_equal "missing", selected.find { |item| item[:project] == "p1" }.fetch(:job_id)
+      assert_equal "invalid", selected.find { |item| item[:project] == "p2" }.fetch(:job_id)
+    end
+  end
+
+  def test_persist_tolerates_directory_fsync_not_supported
+    with_tmp_dir do |dir|
+      path = File.join(dir, "arbiter.json")
+      item = { project: "p1", patrol_kind: :architecture, job_id: "job" }
+      arbiter = Hive::Daemon::PatrolArbiter.new(
+        ordinary_scheduler: CandidateSource.new([]),
+        architecture_scheduler: CandidateSource.new([ item ]),
+        state_path: path
+      )
+      original_open = File.method(:open)
+      with_replaced_singleton_method(File, :open, lambda { |target, *args, **kwargs, &block|
+        if File.expand_path(target) == File.expand_path(dir)
+          raise Errno::EINVAL, target
+        end
+
+        original_open.call(target, *args, **kwargs, &block)
+      }) do
+        assert_equal item, arbiter.commit(item, now: T0)
+      end
+
+      assert File.file?(path), "the durable write succeeds even where directory fsync is unsupported"
+    end
+  end
 end

@@ -39,11 +39,12 @@ module Hive
       # thesis.
       def v2_envelope(job_id:, project:, project_root:, dry_run:, source_pr:, analysis_sha:,
                       features:, theses:, suppressed:, complete:, review_errors:, actions:,
-                      attempts:, zero_reason: nil)
+                      attempts:, zero_reason: nil, feature_results: nil)
         dispositions = classify(theses, suppressed)
         errors = json_copy(Array(review_errors))
         actually_complete = complete == true && errors.empty?
         reason = actually_complete ? resolved_zero_reason(zero_reason, features, theses, dispositions) : nil
+        progress = feature_results || inferred_feature_results(features, theses, errors)
 
         {
           "schema" => "hive-refactor-patrol",
@@ -61,6 +62,7 @@ module Hive
           "flagged" => dispositions.fetch("flagged"),
           "suppressed" => dispositions.fetch("suppressed"),
           "review_errors" => errors,
+          "feature_results" => json_copy(Array(progress)),
           "zero_reason" => reason,
           "attempts" => json_copy(Array(attempts)),
           "actions" => json_copy(Array(actions))
@@ -193,6 +195,19 @@ module Hive
         end
 
         requested || inferred
+      end
+
+      def inferred_feature_results(features, theses, errors)
+        Array(features).map do |feature|
+          feature_errors = errors.select { |error| error["feature_id"].to_s == feature.id.to_s }
+          {
+            "feature_id" => feature.id.to_s,
+            "complete" => feature_errors.empty?,
+            "thesis_ids" => Array(theses).select { |thesis| thesis.feature_id.to_s == feature.id.to_s }
+                                          .map { |thesis| thesis.id.to_s },
+            "errors" => feature_errors
+          }
+        end
       end
 
       def json_copy(value)

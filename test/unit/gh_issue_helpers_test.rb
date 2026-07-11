@@ -46,6 +46,27 @@ class GhIssueHelpersTest < Minitest::Test
     assert_equal({ cfg: cfg }, kwargs)
   end
 
+  def test_issues_for_repository_returns_the_exact_validated_non_pr_inventory
+    pages = [ [
+      issue(1, state: "open", body: "legacy finding"),
+      issue(2, state: "closed", body: nil),
+      issue(3, state: "open", body: "pull request").merge(
+        "pull_request" => { "url" => "https://api.github.com/repos/acme/demo/pulls/3" }
+      )
+    ] ]
+
+    result = with_capture(successful(JSON.generate(pages))) do
+      Hive::Gh.issues_for_repository(
+        repository: "acme/demo", host: "github.com", cfg: nil
+      )
+    end
+
+    assert_equal [ 1, 2 ], result.map { |item| item.fetch("number") }
+    assert_equal [ "Issue 1", "Issue 2" ], result.map { |item| item.fetch("title") }
+    assert_equal [ "legacy finding", nil ], result.map { |item| item.fetch("body") }
+    assert_equal %w[OPEN CLOSED], result.map { |item| item.fetch("state") }
+  end
+
   def test_issues_with_marker_requires_the_exact_marker_bytes
     marker = "<!-- hive-refactor-patrol family=af1-exact action=issue:af1-exact -->"
     partial = "<!-- hive-refactor-patrol family=af1-exact -->"
@@ -71,7 +92,9 @@ class GhIssueHelpersTest < Minitest::Test
       "flat non-slurped response" => JSON.generate([ issue(1, state: "open", body: "marker") ]),
       "non-array page" => JSON.generate([ { "items" => [] } ]),
       "non-object issue" => JSON.generate([ [ "issue" ] ]),
+      "missing title key" => JSON.generate([ [ issue(1, state: "open", body: "marker").reject { |key| key == "title" } ] ]),
       "missing body key" => JSON.generate([ [ issue(1, state: "open", body: "marker").reject { |key| key == "body" } ] ]),
+      "invalid issue title" => JSON.generate([ [ issue(1, state: "open", body: "marker").merge("title" => " ") ] ]),
       "invalid issue state" => JSON.generate([ [ issue(1, state: "merged", body: "marker") ] ]),
       "invalid issue number" => JSON.generate([ [ issue(0, state: "open", body: "marker") ] ]),
       "wrong repository URL" => JSON.generate([ [
@@ -212,6 +235,37 @@ class GhIssueHelpersTest < Minitest::Test
     refute called
   end
 
+  def test_create_issue_rejects_blank_title_and_non_string_body
+    assert_raises(Hive::GhError) do
+      Hive::Gh.create_issue(
+        repository: "acme/demo", title: " ", body: "Body", host: "github.com"
+      )
+    end
+    assert_raises(Hive::GhError) do
+      Hive::Gh.create_issue(
+        repository: "acme/demo", title: "Title", body: nil, host: "github.com"
+      )
+    end
+  end
+
+  def test_issue_inventory_rejects_missing_url_invalid_body_and_pull_request_shape
+    invalid = [
+      issue(1, state: "open", body: "marker").merge("html_url" => ""),
+      issue(1, state: "open", body: "marker").merge("body" => []),
+      issue(1, state: "open", body: "marker").merge("pull_request" => "yes")
+    ]
+
+    invalid.each do |record|
+      assert_raises(Hive::GhError) do
+        with_capture(successful(JSON.generate([ [ record ] ]))) do
+          Hive::Gh.issues_for_repository(
+            repository: "acme/demo", host: "github.com", cfg: nil
+          )
+        end
+      end
+    end
+  end
+
   def test_issue_helpers_reject_urls_from_a_different_github_host
     wrong_host_pages = JSON.generate([ [
       issue(1, state: "open", body: "marker").merge(
@@ -245,6 +299,7 @@ class GhIssueHelpersTest < Minitest::Test
       "number" => number,
       "state" => state,
       "html_url" => "https://github.com/acme/demo/issues/#{number}",
+      "title" => "Issue #{number}",
       "body" => body
     }
   end

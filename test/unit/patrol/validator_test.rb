@@ -97,15 +97,62 @@ class HivePatrolValidatorTest < Minitest::Test
 
   def test_command_system_error_is_reported_as_127
     with_tmp_dir do |dir|
-      process_singleton = class << Process; self; end
-      original = Process.method(:spawn)
-      process_singleton.define_method(:spawn) { |*| raise Errno::ENOENT, "bash" }
-      result = Hive::Patrol::Validator.new("test" => "anything").validate(dir)
+      with_replaced_singleton_method(Open3, :popen3, ->(*) { raise Errno::ENOENT, "bash" }) do
+        result = Hive::Patrol::Validator.new("test" => "anything").validate(dir)
 
-      assert_equal false, result["passed"]
-      assert_equal 127, result["commands"].first["exit_code"]
-    ensure
-      process_singleton.define_method(:spawn, original) if original
+        assert_equal false, result["passed"]
+        assert_equal 127, result["commands"].first["exit_code"]
+      end
+    end
+  end
+
+  def test_stuck_output_reader_is_closed_and_killed
+    reader = Class.new do
+      attr_reader :killed
+
+      def join(*) = false
+      def alive? = true
+      def kill = @killed = true
+    end.new
+    io = Class.new do
+      attr_reader :closed
+
+      def closed? = @closed == true
+      def close = @closed = true
+    end.new
+
+    value = Hive::Patrol::Validator.new.send(:reader_value, reader, io)
+
+    assert_equal [ "", true ], value
+    assert reader.killed
+    assert io.closed
+  end
+
+  def test_output_reader_io_error_degrades_to_empty_output
+    reader = Object.new
+    reader.define_singleton_method(:join) { |*| raise IOError, "reader closed" }
+
+    assert_equal [ "", false ], Hive::Patrol::Validator.new.send(:reader_value, reader, StringIO.new)
+  end
+
+  def test_termination_escalates_to_kill_after_grace_period
+    waiter = Struct.new(:pid) do
+      def join(*) = false
+    end.new(12_345)
+    signals = []
+
+    with_replaced_singleton_method(Process, :kill, ->(signal, pid) { signals << [ signal, pid ] }) do
+      Hive::Patrol::Validator.new.send(:terminate, waiter)
+    end
+
+    assert_equal [ [ "TERM", -12_345 ], [ "KILL", -12_345 ] ], signals
+  end
+
+  def test_termination_tolerates_process_disappearing
+    waiter = Struct.new(:pid).new(12_345)
+
+    with_replaced_singleton_method(Process, :kill, ->(*) { raise Errno::ESRCH }) do
+      assert_nil Hive::Patrol::Validator.new.send(:terminate, waiter)
     end
   end
 end

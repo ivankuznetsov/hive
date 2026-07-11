@@ -317,6 +317,49 @@ class RefactorPatrolSemanticFamilyTest < Minitest::Test
 
     assert_equal "new_family", result.status
     refute_equal "af1-acme", result.family_id
+
+    other_host = candidate.merge("host" => "github.corp.example")
+    refute_equal SemanticFamily.id_for(candidate), SemanticFamily.id_for(other_host)
+  end
+
+  def test_duplicate_occurrence_aliases_fail_closed
+    candidate = dry_run_descriptor(692)
+    first = family("af1-first", dry_run_descriptor(672), occurrence_fingerprints: [ "same" ])
+    second = family("af1-second", dry_run_descriptor(708), occurrence_fingerprints: [ "same" ])
+
+    result = SemanticFamily.resolve(
+      descriptor: candidate,
+      families: [ first, second ],
+      occurrence_fingerprint: "same"
+    )
+
+    assert_equal "family_ambiguous", result.status
+    assert_equal "duplicate_occurrence_fingerprint_alias", result.reason
+    assert_equal %w[af1-first af1-second], result.matched_family_ids
+  end
+
+  def test_descriptor_and_family_validation_fail_closed_for_malformed_shapes
+    canonical = descriptor
+    raw_without_host = canonical.reject { |key, _| key == "host" }
+    symbolized = canonical.transform_keys(&:to_sym)
+
+    assert_equal SemanticFamily.id_for(canonical), SemanticFamily.id_for(raw_without_host)
+    assert_equal SemanticFamily.id_for(canonical), SemanticFamily.id_for(symbolized)
+    assert_raises(ArgumentError) { SemanticFamily.id_for("not a descriptor") }
+    assert_raises(ArgumentError) { SemanticFamily.id_for(canonical.merge("unknown" => true)) }
+    assert_raises(ArgumentError) { SemanticFamily.id_for(canonical.reject { |key, _| key == "repository" }) }
+    assert_raises(ArgumentError) { SemanticFamily.id_for(canonical.merge("host" => "[")) }
+    assert_raises(ArgumentError) { SemanticFamily.id_for(canonical.merge("anchors" => [ "../escape" ])) }
+    assert_raises(ArgumentError) do
+      SemanticFamily.resolve(descriptor: canonical, families: [ "bad" ], occurrence_fingerprint: "fp")
+    end
+    assert_raises(ArgumentError) do
+      SemanticFamily.resolve(
+        descriptor: canonical,
+        families: [ { "family_id" => "af1-incomplete" } ],
+        occurrence_fingerprint: "fp"
+      )
+    end
   end
 
   private

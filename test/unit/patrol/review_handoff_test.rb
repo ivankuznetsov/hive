@@ -218,6 +218,19 @@ class HivePatrolReviewHandoffTest < Minitest::Test
     end
   end
 
+  def test_architecture_context_must_be_json_serializable
+    with_tmp_dir do |dir|
+      error = assert_raises(ArgumentError) do
+        handoff(dir).enqueue(
+          finding: finding, patch: patch(dir), pr_url: "https://example.com/pull/7",
+          mandatory: true, context: { "score" => Float::NAN }
+        )
+      end
+
+      assert_includes error.message, "JSON serializable"
+    end
+  end
+
   def test_mandatory_handoff_ignores_optional_patrol_review_toggle
     with_tmp_dir do |dir|
       ordinary = handoff(dir, review_prs: false).enqueue(
@@ -432,6 +445,31 @@ class HivePatrolReviewHandoffTest < Minitest::Test
       end
       assert_equal 1, visible_review_tasks(dir).size
     end
+  end
+
+  def test_mandatory_handoff_rejects_duplicate_complete_tasks
+    with_tmp_dir do |dir|
+      first = handoff(dir).enqueue(
+        finding: finding, patch: patch(dir), pr_url: "https://example.com/pull/7", mandatory: true
+      )
+      duplicate = File.join(dir, ".hive-state", "stages", "9-done", File.basename(first))
+      FileUtils.mkdir_p(File.dirname(duplicate))
+      FileUtils.cp_r(first, duplicate)
+
+      error = assert_raises(Hive::Patrol::ReviewHandoff::Conflict) do
+        handoff(dir).enqueue(
+          finding: finding, patch: patch(dir), pr_url: "https://example.com/pull/7", mandatory: true
+        )
+      end
+
+      assert_includes error.message, "duplicate complete tasks"
+    end
+  end
+
+  def test_directory_fsync_tolerates_filesystems_without_directory_sync
+    skip "requires procfs" unless File.directory?("/proc")
+
+    assert_nil handoff(Dir.pwd).send(:fsync_directory, "/proc")
   end
 
   private

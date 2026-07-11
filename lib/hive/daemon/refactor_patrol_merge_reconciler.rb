@@ -2,6 +2,7 @@ require "json"
 require "digest"
 require "set"
 require "time"
+require "uri"
 require "hive/atomic_file"
 require "hive/config"
 require "hive/gh"
@@ -16,9 +17,9 @@ module Hive
     # and JobStore aggregates remain the authoritative lifecycle records.
     class RefactorPatrolMergeReconciler
       SCHEMA = "hive-refactor-patrol-reconciler".freeze
-      SCHEMA_VERSION = 1
+      SCHEMA_VERSION = 2
       STATE_KEYS = %w[
-        schema schema_version registration repository default_branch high_water
+        schema schema_version registration host repository default_branch high_water
         overlap_occurrences seeded_at updated_at
       ].freeze
       OCCURRENCE_KEYS = %w[merged_at pr_number merge_sha].freeze
@@ -74,10 +75,11 @@ module Hive
         cfg = @config_loader.call(entry.fetch("path"))
         return nil unless intake_enabled?(cfg)
 
-        repository = canonical_repository(@gh.repo_name_with_owner(entry.fetch("path"), cfg: cfg))
+        host, repository = registered_identity(entry.fetch("path"), cfg)
         assert_bound_identity!(
           load_state(entry.fetch("path")),
           entry.fetch("name"),
+          host,
           repository,
           default_branch(cfg),
           project_root: entry.fetch("path")
@@ -95,15 +97,19 @@ module Hive
         project_root = entry.fetch("path")
         registration = entry.fetch("name")
         branch = default_branch(cfg)
-        repository = canonical_repository(@gh.repo_name_with_owner(project_root, cfg: cfg))
+        host, repository = registered_identity(project_root, cfg)
         previous = load_state(project_root)
-        assert_bound_identity!(previous, registration, repository, branch, project_root: project_root)
+        assert_bound_identity!(
+          previous, registration, host, repository, branch,
+          project_root: project_root
+        )
 
-        items = fetch_all(repository, branch, previous, project_root, cfg, now)
+        items = fetch_all(repository, host, branch, previous, project_root, cfg, now)
         if previous.nil?
           high_water = maximum_occurrence(items)
           seeded = build_state(
             registration: registration,
+            host: host,
             repository: repository,
             default_branch: branch,
             high_water: high_water,
@@ -132,6 +138,7 @@ module Hive
         overlap = merge_overlap(previous.fetch("overlap_occurrences"), items, high_water)
         replacement = build_state(
           registration: registration,
+          host: host,
           repository: repository,
           default_branch: branch,
           high_water: high_water,
@@ -168,7 +175,7 @@ module Hive
         )
       end
 
-      def fetch_all(repository, branch, state, project_root, cfg, now)
+      def fetch_all(repository, host, branch, state, project_root, cfg, now)
         cursor = nil
         seen_cursors = Set.new
         items = []
@@ -178,6 +185,7 @@ module Hive
 
           page = @gh.merged_prs_page(
             repository: repository,
+            host: host,
             default_branch: branch,
             cursor: cursor,
             merged_since: since_time,
@@ -185,7 +193,7 @@ module Hive
             worktree_path: project_root,
             cfg: cfg
           )
-          validate_page!(page, repository, branch)
+          validate_page!(page, repository, host, branch)
           items.concat(page.fetch("items").map { |item| normalized_summary(item) })
           break unless page.fetch("has_next_page")
 
@@ -197,7 +205,7 @@ module Hive
         end
       end
 
-      def validate_page!(page, repository, branch)
+      def validate_page!(page, repository, host, branch)
         unless page.is_a?(Hash) && page["complete"] == true && page["items"].is_a?(Array) &&
                [ true, false ].include?(page["has_next_page"])
           raise Blocked, "GitHub merged-PR page is incomplete"
@@ -214,9 +222,11 @@ module Hive
           end
           Time.iso8601(item.fetch("merged_at"))
           raise Blocked, "GitHub merged-PR repository changed within page" unless canonical_repository(item.fetch("repository")) == repository
+          item_host = URI.parse(item.fetch("url")).host.to_s.downcase
+          raise Blocked, "GitHub merged-PR host changed within page" unless item_host == host
           raise Blocked, "GitHub merged-PR base branch changed within page" unless item.fetch("base_branch") == branch
         end
-      rescue ArgumentError => e
+      rescue ArgumentError, URI::InvalidURIError => e
         raise Blocked, "GitHub merged-PR timestamp is invalid (#{e.message})"
       end
 
@@ -276,7 +286,7 @@ module Hive
         raise Blocked, "unexpected reconciler checkpoint schema" unless data["schema"] == SCHEMA
         raise Blocked, "unsupported reconciler checkpoint schema version #{data['schema_version'].inspect}" unless data["schema_version"] == SCHEMA_VERSION
         raise Blocked, "reconciler checkpoint keys are invalid" unless data.keys.sort == STATE_KEYS.sort
-        %w[registration repository default_branch seeded_at updated_at].each do |key|
+        %w[registration host repository default_branch seeded_at updated_at].each do |key|
           raise Blocked, "reconciler checkpoint #{key} is missing" if data[key].to_s.empty?
         end
         Time.iso8601(data.fetch("seeded_at"))
@@ -316,12 +326,13 @@ module Hive
         nil
       end
 
-      def build_state(registration:, repository:, default_branch:, high_water:,
+      def build_state(registration:, host:, repository:, default_branch:, high_water:,
                       overlap_occurrences:, seeded_at:, updated_at:)
         {
           "schema" => SCHEMA,
           "schema_version" => SCHEMA_VERSION,
           "registration" => registration,
+          "host" => host,
           "repository" => repository,
           "default_branch" => default_branch,
           "high_water" => high_water,
@@ -331,11 +342,13 @@ module Hive
         }
       end
 
-      def assert_bound_identity!(state, registration, repository, branch, project_root:)
+      def assert_bound_identity!(state, registration, host, repository, branch, project_root:)
         return unless state
 
         reason = if state.fetch("registration") != registration
           "registration identity changed from #{state.fetch('registration')} to #{registration}"
+        elsif state.fetch("host") != host
+          "repository host changed from #{state.fetch('host')} to #{host}"
         elsif state.fetch("repository") != repository
           "repository identity changed from #{state.fetch('repository')} to #{repository}"
         elsif state.fetch("default_branch") != branch
@@ -349,6 +362,7 @@ module Hive
           reason: reason,
           observed: {
             "registration" => registration,
+            "host" => host,
             "repository" => repository,
             "default_branch" => branch
           }
@@ -410,6 +424,16 @@ module Hive
         raise Blocked, "registered GitHub repository identity is blank" if value.empty?
 
         value
+      end
+
+      def registered_identity(project_root, cfg)
+        identity = @gh.repository_identity(project_root, cfg: cfg)
+        host = identity.fetch("host").to_s.downcase
+        raise Blocked, "registered GitHub host identity is blank" if host.empty?
+
+        [ host, canonical_repository(identity.fetch("repository")) ]
+      rescue Hive::GhError, KeyError => e
+        raise Blocked, "registered GitHub repository identity is unavailable (#{e.message})"
       end
 
       def normalize_timestamp(value)

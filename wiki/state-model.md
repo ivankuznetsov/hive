@@ -1,13 +1,13 @@
 ---
 title: State Model
 type: data-model
-source: lib/hive/task.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/review_handoff.rb, lib/hive/daemon/display_name_backfiller.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
+source: lib/hive/task.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/review_handoff.rb, lib/hive/refactor_patrol/*, lib/hive/daemon/display_name_backfiller.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
 created: 2026-04-25
-updated: 2026-07-09
+updated: 2026-07-11
 tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, web]
 ---
 
-**TLDR**: Hive's workflow state has no application database. Persistent task/project state lives in two filesystem trees per project — `<project>/.hive-state/` (an orphan-branch worktree holding task folders, configs, locks, logs) and `~/Dev/<project>.worktrees/<slug>/` (feature worktrees holding actual code) — plus one global `~/.config/hive/config.yml` (or `HIVE_HOME/config.yml` / a migrated legacy registry). Token-usage metrics are the exception and use the SQLite store described in [[token-usage]]. Hivebox web adds no workflow tables: it reads `hive status` snapshots through `StatusFeed`/`StatusBroadcaster` and writes daemon dispatch requests as JSON files under the global state home. The workflow "data model" is the directory layout, marker grammar, YAML sidecars, and runtime JSON queue files described below.
+**TLDR**: Hive's workflow state has no application database. Persistent task/project state lives in two filesystem trees per project — `<project>/.hive-state/` (an orphan-branch worktree holding task folders, configs, locks, logs, and architecture-patrol ledgers) and `~/Dev/<project>.worktrees/<slug>/` (feature worktrees holding actual code) — plus one global `~/.config/hive/config.yml` (or `HIVE_HOME/config.yml` / a migrated legacy registry). Token-usage metrics are the exception and use the SQLite store described in [[token-usage]]. Hivebox web adds no workflow tables: it reads `hive status` snapshots through `StatusFeed`/`StatusBroadcaster` and writes daemon dispatch requests as JSON files under the global state home. The workflow "data model" is the directory layout, marker grammar, YAML sidecars, and runtime JSON queue files described below.
 
 ## Stage directory layout
 
@@ -178,6 +178,74 @@ publishes a status-channel refresh before rendering and replacing the
 dashboard's `projects` frame, so task pages that do not contain that frame
 still receive a morph signal even if a bad project row makes the grid partial
 raise.
+
+## Architecture-patrol v2 state
+
+Scheduled/manual merged-PR architecture patrol uses a versioned namespace that
+does not reinterpret the legacy reporting state:
+
+```text
+<project>/.hive-state/refactor_patrol/v2/
+├── reconciler.json               # host-bound catch-up checkpoint, schema v2
+├── manifests/<job-id>.json       # checksummed, write-once merge occurrence
+├── jobs/<job-id>.json            # authoritative aggregate
+├── families/<family-id>.json     # rebuildable semantic-family projection
+├── indexes/                      # rebuildable fingerprint/action indexes
+├── results/<dispatch-id>.json    # atomic daemon-child result; removed on reap
+├── runs/
+└── logs/
+```
+
+Canonical terminal effects also have a global proof namespace, separate from
+every registration's project ledger:
+
+```text
+<Hive::Paths.state_home>/refactor_patrol/v2/
+├── terminal-proofs/<canonical-action-id>.json # immutable authority
+├── indexes/canonical-actions.json             # disposable projection
+└── canonical-actions.lock
+```
+
+The manifest fixes registration, repository, PR number/URL (whose host is
+authoritative), base and merge SHAs, merged time, file statuses/renames,
+changed paths, and checksum before a job becomes runnable. `reconciler.json`
+uses `hive-refactor-patrol-reconciler` schema v2 and stores registration, exact
+host, canonical repository, default branch, high water, overlap occurrences,
+and timestamps. Unsupported/corrupt checkpoints or a later registration, host,
+repository, or branch change are quarantined and block intake rather than
+silently replacing the baseline. The job aggregate is the only completion
+authority. It stores the enqueue-time policy snapshot, one pinned `analysis_sha`,
+feature-level completion/errors, immutable accepted/flagged/suppressed thesis
+snapshots, claims and fencing generations, action ownership, attempts,
+creation intents, validation/patch/PR/issue/handoff receipts, and parent
+completeness. Writes use a locked atomic tempfile/fsync/rename transition.
+
+Claims carry PID, process-start-time, process-group, lease/heartbeat, owner, and
+generation. A stale generation cannot checkpoint or begin a remote effect.
+Repository ownership is deliberately not cached in this state: every dispatch
+reservation and external-effect/handoff fence requires the target's exact live
+registration, resolves enabled registrations by exact origin host/repository,
+and scans every registered ledger for nonterminal remote continuation evidence.
+Disabled registrations with a durable intent, PR/issue URL, or review-task path
+therefore still count as owners. Missing registration, duplicate owners, or
+unreadable config/identity/continuation state blocks. Every thesis action has a
+repository-global canonical identity derived from normalized source host,
+repository, action kind, and fix fingerprint or issue family id. Production
+fixes use `hive-refactor/<canonical-action-id>`, while semantic-family
+descriptors and ids also include the source host. A linked job remains
+authoritative about whether that occurrence is complete. Family and
+fingerprint files can be deleted and rebuilt from job aggregates; they must
+never be accepted as independent proof that a PR or issue was created. The
+global canonical catalog is likewise only a rebuildable locator. Its immutable
+per-action archive is created from validated terminal aggregate proof and keeps
+the exact PR/issue/handoff identity available after catalog deletion, owner
+deregistration, or removal of the original project path. A later registration
+with the same canonical action materializes that exact proof as
+`canonical_action_link` in its local aggregate and terminates without invoking
+fix/PR/issue adapters. Archive corruption or conflicting proof fails closed.
+The temporary `results/` file is a transport receipt rather than durable job
+state: its path is bound to one supervisor dispatch token and is unlinked after
+reap. See [[commands/refactor-patrol]] and [[modules/daemon]].
 
 ## Worktree pointer
 
@@ -425,4 +493,4 @@ See [[stages/index]] for one page per stage.
 
 - [[architecture]]
 - [[stages/inbox]] · [[stages/brainstorm]] · [[stages/plan]] · [[stages/execute]] · [[stages/open-pr]] · [[stages/review]] · [[stages/artifacts]] · [[stages/finalize]] · [[stages/done]]
-- [[modules/task]] · [[modules/markers]] · [[modules/lock]] · [[modules/worktree]] · [[modules/config]] · [[modules/patrol]]
+- [[modules/task]] · [[modules/markers]] · [[modules/lock]] · [[modules/worktree]] · [[modules/config]] · [[modules/patrol]] · [[commands/refactor-patrol]]

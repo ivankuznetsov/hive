@@ -17,26 +17,80 @@ module Hive
         .py .pyi .go .rs .swift .java .kt .kts .cs .fs .fsx .php .ex .exs
         .eex .erl .hrl .clj .cljs .scala .c .h .cc .cpp .cxx .hpp .m .mm
         .zig .nim .lua .pl .pm .sh .bash .zsh .fish .sol .dart .vue .svelte
+        .r .jl .hs .lhs .ml .mli .vb .v .vhd .vhdl .asm .s .cob .cbl .sql
+        .graphql .gql .proto .tf .tfvars .hcl .cue .rego .bicep .nix .cmake
+        .mk .groovy .gradle .pas .pp .rkt .scm .ss .lisp .cl .el .tcl .sv
+        .svh .d .cr .ps1 .bat .cmd .f .f90 .f95 .f03 .f08 .adb .ads
+        .html .htm .css .scss .sass .less
       ].freeze
       NON_SOURCE_EXTENSIONS = %w[
         .md .mdx .rst .adoc .asciidoc .txt .json .jsonl .yml .yaml .toml
-        .lock .csv .tsv .xml .html .css .scss .sass .less .svg .png .jpg
+        .lock .csv .tsv .xml .svg .png .jpg
         .jpeg .gif .webp .ico .pdf .zip .gz .tar .tgz .woff .woff2 .ttf
         .mp4 .mov .webm .avi .ignore
       ].freeze
-      SOURCE_ROOTS = %w[app apps cmd crates internal lib packages pkg services Sources src].freeze
+      SOURCE_ROOTS = %w[
+        app apps api ansible charts cmd components crates css database db deploy
+        deployments helm infra infrastructure internal kubernetes k8s lib modules
+        packages pkg playbooks proto R roles schemas scripts services Sources sql src
+        styles templates terraform tools
+      ].freeze
+      SOURCE_FILENAMES = %w[
+        BUILD BUILD.bazel BUCK WORKSPACE WORKSPACE.bazel Dockerfile Containerfile
+        Jenkinsfile Makefile CMakeLists.txt Justfile Rakefile Tiltfile Vagrantfile
+        Procfile meson.build
+      ].freeze
       TEST_SEGMENTS = %w[test tests spec specs __tests__].freeze
       MANIFEST_NAMES = %w[
         package.json pyproject.toml setup.py setup.cfg go.mod Cargo.toml
         Package.swift Gemfile composer.json mix.exs pom.xml build.gradle
-        build.gradle.kts
+        build.gradle.kts DESCRIPTION Project.toml Manifest.toml stack.yaml
+        cabal.project pubspec.yaml rebar.config project.clj deps.edn build.sbt
+        build.zig build.zig.zon CMakeLists.txt Makefile meson.build flake.nix
+        deno.json deno.jsonc go.work
+      ].freeze
+      MANIFEST_EXTENSIONS = %w[
+        .gemspec .cabal .csproj .fsproj .vbproj .sln .vcxproj
       ].freeze
       COMMAND_PATTERNS = [
         %r{\A(?:bin|exe)/[^/]+\z}, %r{\Acmd/[^/]+/main\.go\z},
         %r{\Asrc/main\.rs\z}, %r{\Asrc/bin/[^/]+\.rs\z}
       ].freeze
 
-      attr_reader :reserved_command_files
+      def self.source_candidate_path?(path)
+        normalized = path.to_s.tr("\\", "/")
+        basename = File.basename(normalized)
+        extension = File.extname(normalized).downcase
+        return true if SOURCE_FILENAMES.any? { |name| name.casecmp?(basename) }
+        return true if SOURCE_EXTENSIONS.include?(extension)
+        return true if architecture_config_path?(normalized, extension)
+        return false if extension.empty? || NON_SOURCE_EXTENSIONS.include?(extension)
+
+        true
+      end
+
+      def self.architecture_config_path?(path, extension = File.extname(path).downcase)
+        normalized = path.to_s.tr("\\", "/")
+        segments = normalized.split("/").map(&:downcase)
+        basename = segments.last.to_s
+        return true if %w[docker-compose.yml docker-compose.yaml compose.yml compose.yaml].include?(basename)
+
+        if %w[.yml .yaml].include?(extension)
+          roots = %w[
+            ansible charts deploy deployments helm infra infrastructure kubernetes
+            k8s playbooks roles terraform
+          ]
+          return true unless (segments & roots).empty?
+        end
+        if %w[.json .yaml .yml].include?(extension)
+          roots = %w[api openapi proto schemas]
+          return true unless (segments & roots).empty?
+        end
+
+        false
+      end
+
+      attr_reader :component_roots, :dependency_edges, :reserved_command_files, :source_files
 
       def initialize(project_root, cfg:)
         @project_root = File.expand_path(project_root)
@@ -46,6 +100,11 @@ module Hive
       def call(files)
         reset_scan(files)
         groups = component_groups
+        @component_roots = groups.each_with_object({}) do |(root, paths), result|
+          paths.each { |path| result[path] = root }
+        end
+        @reserved_command_files.each { |path| @component_roots[path] = component_root(path) }
+        @component_roots.freeze
         prepare_collision_safe_slugs(groups.keys)
 
         groups.flat_map do |root, owned|
@@ -60,7 +119,7 @@ module Hive
         @files = Array(files).map { |path| normalize(path) }.uniq.sort
         @content_cache = {}
         @dependency_cache = {}
-        @manifests = @files.select { |path| manifest_path?(path) }
+        @manifests = @files.select { |path| production_manifest_path?(path) }
         @manifests_by_directory = @manifests.group_by { |path| directory(path) }
         @reserved_command_files = (
           @files.select { |path| command_path?(path) } + package_bin_entrypoints
@@ -71,15 +130,28 @@ module Hive
         @resolvable_files = (@source_files + @reserved_command_files).uniq.sort
         @resolvable_set = @resolvable_files.to_set
         @resolvable_by_directory = @resolvable_files.group_by { |path| File.dirname(path) }
+        @resolvable_extensions = (
+          @resolvable_files.map { |path| File.extname(path).downcase } + SOURCE_EXTENSIONS
+        ).reject(&:empty?).uniq.freeze
         @tests = @files.select { |path| test_path?(path) && code_path?(path) }
         build_ecosystem_indexes
         @commands_by_root = @reserved_command_files.group_by { |path| component_root(path) }
         build_inbound_index
         build_test_index
+        @dependency_edges = @resolvable_files.to_h do |path|
+          [ path, dependency_paths(path).dup.freeze ]
+        end.freeze
+        @source_files = @source_files.dup.freeze
       end
 
       def component_groups
-        @source_files.group_by { |path| component_root(path) }.sort.to_h
+        groups = @source_files.group_by { |path| component_root(path) }
+        @manifests.each do |path|
+          root = directory(path)
+          key = "manifest:#{root == '.' ? 'project' : root}"
+          (groups[key] ||= []) << path
+        end
+        groups.sort.to_h
       end
 
       def source_file?(path)
@@ -90,16 +162,18 @@ module Hive
 
       def code_path?(path)
         extension = File.extname(path).downcase
+        return shebang_script?(path) if extension.empty? && !self.class.source_candidate_path?(path)
+
+        return false unless self.class.source_candidate_path?(path)
         return true if SOURCE_EXTENSIONS.include?(extension)
-        return false if extension.empty? || NON_SOURCE_EXTENSIONS.include?(extension)
-        return false unless generic_source_location?(path)
 
         text_file?(path)
       end
 
-      def generic_source_location?(path)
-        parts = path.split("/")
-        parts.one? || SOURCE_ROOTS.include?(parts.first)
+      def shebang_script?(path)
+        File.open(File.join(@project_root, path), "rb") { |file| file.read(2) == "#!" }
+      rescue SystemCallError
+        false
       end
 
       def text_file?(path)
@@ -130,7 +204,15 @@ module Hive
       end
 
       def manifest_path?(path)
-        MANIFEST_NAMES.include?(File.basename(path)) || File.basename(path).end_with?(".gemspec")
+        basename = File.basename(path)
+        MANIFEST_NAMES.include?(basename) || MANIFEST_EXTENSIONS.include?(File.extname(basename).downcase)
+      end
+
+      def production_manifest_path?(path)
+        return false unless manifest_path?(path)
+
+        segments = path.split("/").map(&:downcase)
+        !test_path?(path) && (segments & %w[fixture fixtures]).empty?
       end
 
       def component_root(path)
@@ -143,9 +225,13 @@ module Hive
         when "apps", "packages", "services", "crates", "Sources", "cmd", "internal", "pkg"
           return parts.first(2).join("/") if parts.size >= 3
         when "lib"
-          return path if parts.size <= 3
+          return parts.first(2).join("/") if parts.size <= 3
           return parts.first(3).join("/")
         when "src", "app"
+          return parts.first(2).join("/") if parts.size >= 3
+          return parts.first
+        end
+        if SOURCE_ROOTS.map(&:downcase).include?(parts.first.to_s.downcase)
           return parts.first(2).join("/") if parts.size >= 3
           return parts.first
         end
@@ -156,13 +242,13 @@ module Hive
         entrypoint = entrypoint_for(owned)
         manifests = manifests_for(owned)
         commands = commands_for(root)
-        entrypoints = [ entrypoint, *manifests, *commands ].compact.uniq
+        entrypoints = [ entrypoint, *commands ].compact.uniq
         dependencies = (owned.flat_map { |path| dependency_paths(path) }.uniq - owned).sort
         inbound = (owned.flat_map { |path| @inbound_by_path[path] }.uniq - owned).sort
         peer_entrypoints = chunks.reject { |chunk| chunk.equal?(owned) }.filter_map do |chunk|
           entrypoint_for(chunk)
         end.sort
-        context = ordered_cap(dependencies + inbound + peer_entrypoints, max_context_files)
+        context = ordered_cap(dependencies + inbound + manifests + peer_entrypoints, max_context_files)
 
         Feature.new(
           id: component_id(root, index),
@@ -236,8 +322,24 @@ module Hive
         when ".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".m", ".mm"
           c_imports(content)
         else
-          []
+          generic_relative_imports(content)
         end.uniq
+      end
+
+      def generic_relative_imports(content)
+        tokens = content.scan(
+          /(?:\b(?:import|include|load|require|source)\b|@import)\s*(?:\(\s*)?["']([^"']+)["']/
+        ).flatten
+        tokens.concat(content.scan(/\bsource\s*=\s*["']([^"']+)["']/).flatten)
+        paths = tokens.filter_map do |token|
+          next if token.match?(%r{\A(?:https?:)?//})
+
+          [ token.start_with?(".") ? :generic_relative : :generic_root, token ]
+        end
+        modules = content.scan(
+          %r{^\s*(?:import|using|use|alias|require)\s+(?:(?:static|qualified)\s+)?([A-Za-z_][A-Za-z0-9_.:/\\-]*)}
+        ).flatten.map { |token| [ :generic_module, token ] }
+        paths + modules
       end
 
       def ruby_imports(content)
@@ -322,6 +424,13 @@ module Hive
           resolve_path(File.join(File.dirname(source), token))
         when :c_angle
           resolve_from_roots(token, source, preferred_roots: %w[include src/include])
+        when :generic_relative
+          resolve_path(File.join(File.dirname(source), token))
+        when :generic_root
+          (resolve_from_roots(token, source, preferred_roots: SOURCE_ROOTS) +
+            resolve_generic_module(token)).uniq
+        when :generic_module
+          resolve_generic_module(token)
         else
           []
         end
@@ -413,10 +522,9 @@ module Hive
       end
 
       def import_candidates(candidate)
-        extensions = (@resolvable_files.map { |path| File.extname(path).downcase } + SOURCE_EXTENSIONS).reject(&:empty?).uniq
-        [ candidate ] + extensions.map { |extension| "#{candidate}#{extension}" } +
+        [ candidate ] + @resolvable_extensions.map { |extension| "#{candidate}#{extension}" } +
           %w[index __init__ lib main].flat_map do |stem|
-            extensions.map { |extension| File.join(candidate, "#{stem}#{extension}") }
+            @resolvable_extensions.map { |extension| File.join(candidate, "#{stem}#{extension}") }
           end
       end
 
@@ -426,6 +534,7 @@ module Hive
         @go_modules = {}
         @rust_packages = {}
         @swift_targets = Hash.new { |hash, key| hash[key] = [] }
+        build_generic_module_index
 
         @manifests.each do |manifest|
           case manifest_kind(manifest)
@@ -440,6 +549,48 @@ module Hive
         end
         @python_modules.each_value { |paths| paths.replace(paths.uniq.sort) }
         @swift_targets.each_value { |paths| paths.replace(paths.uniq.sort) }
+      end
+
+      def build_generic_module_index
+        @generic_modules = Hash.new { |hash, key| hash[key] = [] }
+        @resolvable_files.each do |path|
+          stem = path.sub(/\.[^.]+\z/, "")
+          segments = stem.split("/")
+          candidates = [ stem ]
+          segments.each_index do |index|
+            suffix = segments.drop(index)
+            candidates << suffix.join("/")
+          end
+          candidates.map { |candidate| normalize_module_token(candidate) }
+                    .reject(&:empty?).uniq.each do |candidate|
+            @generic_modules[candidate] << path
+          end
+        end
+        @generic_modules.each_value { |paths| paths.replace(paths.uniq.sort) }
+      end
+
+      def resolve_generic_module(token)
+        key = normalize_module_token(token)
+        keys = [ key ]
+        keys << key.split("/").drop(1).join("/") if token.to_s.start_with?("package:")
+        segments = key.split("/")
+        while segments.size > 2
+          segments = segments.first(segments.size - 1)
+          keys << segments.join("/")
+        end
+        keys.flat_map do |candidate|
+          paths = Array(@generic_modules[candidate])
+          candidate.include?("/") || paths.one? ? paths : []
+        end.uniq.sort
+      end
+
+      def normalize_module_token(token)
+        value = token.to_s.strip.sub(/\Apackage:/, "").sub(/[;,*{].*\z/, "")
+        value = value.sub(/\.(?:dart|proto|css|scss|sass|less)\z/i, "") if token.to_s.start_with?("package:")
+        value.gsub("::", "/")
+             .gsub("\\", "/").tr(".", "/")
+             .gsub(%r{/+}, "/").sub(%r{\A/+|/+\z}, "")
+             .downcase
       end
 
       def build_inbound_index
@@ -535,7 +686,7 @@ module Hive
       end
 
       def manifest_kind(path)
-        case File.basename(path)
+        kind = case File.basename(path)
         when "package.json" then :javascript
         when "pyproject.toml", "setup.py", "setup.cfg" then :python
         when "go.mod" then :go
@@ -546,7 +697,20 @@ module Hive
         when "composer.json" then :php
         when "mix.exs" then :elixir
         when "pom.xml", "build.gradle", "build.gradle.kts" then :jvm
+        when "DESCRIPTION" then :r
+        when "Project.toml", "Manifest.toml" then :julia
+        when "stack.yaml", "cabal.project" then :haskell
+        when "pubspec.yaml" then :dart
+        when "build.zig", "build.zig.zon" then :zig
+        when "CMakeLists.txt", "Makefile", "meson.build" then :native
+        when "rebar.config" then :erlang
+        when "project.clj", "deps.edn" then :clojure
+        when "build.sbt" then :scala
+        when "flake.nix" then :nix
         end
+        return kind if kind
+        return :haskell if File.extname(path).casecmp?(".cabal")
+        :dotnet if %w[.csproj .fsproj .vbproj .sln].include?(File.extname(path).downcase)
       end
 
       def language_kind(path)
@@ -560,6 +724,17 @@ module Hive
         when ".php" then :php
         when ".ex", ".exs", ".eex" then :elixir
         when ".java", ".kt", ".kts" then :jvm
+        when ".r" then :r
+        when ".jl" then :julia
+        when ".hs", ".lhs" then :haskell
+        when ".dart" then :dart
+        when ".zig" then :zig
+        when ".erl", ".hrl" then :erlang
+        when ".clj", ".cljs" then :clojure
+        when ".scala" then :scala
+        when ".cs", ".fs", ".fsx", ".vb" then :dotnet
+        when ".c", ".h", ".cc", ".cpp", ".cxx", ".hpp", ".m", ".mm" then :native
+        when ".nix" then :nix
         end
       end
 
@@ -589,13 +764,15 @@ module Hive
       end
 
       def max_component_files
-        configured = @cfg.dig("patrol", "review", "max_owned_files") || MAX_COMPONENT_FILES
+        configured = @cfg.dig("refactor_patrol", "review", "max_owned_files")
+        configured = @cfg.dig("patrol", "review", "max_owned_files") if configured.nil?
+        configured ||= MAX_COMPONENT_FILES
         [ [ configured.to_i, 1 ].max, MAX_COMPONENT_FILES ].min
       end
 
       def max_context_files
-        configured = @cfg.dig("patrol", "review", "max_context_files")
-        configured = @cfg.dig("refactor_patrol", "review", "max_context_files") if configured.nil?
+        configured = @cfg.dig("refactor_patrol", "review", "max_context_files")
+        configured = @cfg.dig("patrol", "review", "max_context_files") if configured.nil?
         [ configured || 24, 0 ].max
       end
 

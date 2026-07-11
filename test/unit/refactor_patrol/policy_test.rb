@@ -102,6 +102,17 @@ class RefactorPatrolPolicyTest < Minitest::Test
     assert_equal "policy_snapshot_missing", result.error
   end
 
+  def test_malformed_action_snapshot_fails_closed
+    snapshot = Hive::RefactorPatrol::Policy.capture(config, now: T0)
+    snapshot.fetch("action")["min_confidence"] = "absolute"
+
+    result = Hive::RefactorPatrol::Policy.intersect(snapshot, config)
+
+    refute result.authorized?("fix")
+    refute result.authorized?("issue")
+    assert_equal "policy_snapshot_invalid", result.error
+  end
+
   private
 
   def config
@@ -113,7 +124,7 @@ class RefactorPatrolPolicyTest < Minitest::Test
         "issue_filing" => { "enabled" => true, "min_leverage_score" => 0.4 },
         "min_confidence" => "medium",
         "commands" => {
-          "docs" => "bin/docs", "format" => nil, "lint" => "bin/lint",
+          "docs" => "bin/docs", "format" => nil, "lint" => "bin/lint", "public_contract" => nil,
           "typecheck" => nil, "test" => "bin/test"
         },
         "caps" => {

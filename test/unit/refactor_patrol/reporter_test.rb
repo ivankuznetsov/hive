@@ -80,6 +80,7 @@ class RefactorPatrolReporterTest < Minitest::Test
     action = {
       "canonical_action_id" => "fix-fp-accepted",
       "thesis_id" => "accepted",
+      "thesis_fingerprint" => "fp-accepted",
       "kind" => "fix",
       "owner_job_id" => "job-1",
       "outcome" => "validation_failed",
@@ -92,6 +93,31 @@ class RefactorPatrolReporterTest < Minitest::Test
     assert_equal [ "accepted" ], payload.fetch("accepted").map { |entry| entry.fetch("id") }
     assert_empty payload.fetch("flagged")
     assert_equal "validation_failed", payload.fetch("actions").first.fetch("outcome")
+    assert v2_schemer.valid?(payload), v2_schemer.validate(payload).map { |error| error["error"] }.inspect
+  end
+
+  def test_v2_retains_incomplete_measurement_diagnostics_on_flagged_theses
+    item = thesis(
+      "partial", admissible: false,
+      admissibility_reason: "incomplete feature leverage measurement",
+      flags: [ "incomplete_leverage_measurement" ]
+    )
+    item.feature_hotspot["measurement"] = {
+      "status" => "incomplete",
+      "diagnostics" => [
+        {
+          "kind" => "architecture_map_failed",
+          "error_class" => "ParserUnavailable",
+          "message" => "dependency graph measurement failed"
+        }
+      ]
+    }
+
+    payload = reporter.v2_envelope(**v2_args(theses: [ item ]))
+    retained = payload.dig("flagged", 0, "thesis", "feature_hotspot", "measurement")
+
+    assert_equal "incomplete", retained.fetch("status")
+    assert_equal "architecture_map_failed", retained.dig("diagnostics", 0, "kind")
     assert v2_schemer.valid?(payload), v2_schemer.validate(payload).map { |error| error["error"] }.inspect
   end
 
@@ -123,6 +149,40 @@ class RefactorPatrolReporterTest < Minitest::Test
     assert_equal %w[a-high b-high z-low], payload.fetch("ranked").map { |item| item.fetch("id") }
   end
 
+  def test_error_envelope_rejects_unknown_schema_version
+    assert_raises(ArgumentError) do
+      Hive::RefactorPatrol::Reporter.error_envelope(
+        RuntimeError.new("boom"), version: 99, error_kind: "internal"
+      )
+    end
+  end
+
+  def test_v2_rejects_duplicate_suppression_ids
+    item = thesis("only")
+    suppressions = [
+      { "id" => "only", "reason" => "already_seen" },
+      { "id" => "only", "reason" => "dismissed" }
+    ]
+
+    error = assert_raises(ArgumentError) do
+      reporter.v2_envelope(**v2_args(theses: [ item ], suppressed: suppressions))
+    end
+
+    assert_includes error.message, "duplicate suppressed thesis id"
+  end
+
+  def test_v2_rejects_unsupported_and_inconsistent_zero_reasons
+    unsupported = assert_raises(ArgumentError) do
+      reporter.v2_envelope(**v2_args(features: [], zero_reason: "nothing_here"))
+    end
+    inconsistent = assert_raises(ArgumentError) do
+      reporter.v2_envelope(**v2_args(features: [], zero_reason: "no_theses"))
+    end
+
+    assert_includes unsupported.message, "unsupported zero reason"
+    assert_includes inconsistent.message, "does not match"
+  end
+
   private
 
   def reporter
@@ -141,9 +201,13 @@ class RefactorPatrolReporterTest < Minitest::Test
         "url" => "https://github.com/acme/demo/pull/7",
         "number" => 7,
         "repository" => "acme/demo",
+        "registration" => "demo",
         "base_branch" => "main",
         "base_sha" => "a" * 40,
-        "merge_sha" => "b" * 40
+        "merge_sha" => "b" * 40,
+        "merged_at" => "2026-07-10T10:00:00Z",
+        "changed_paths" => [ "lib/checkout.rb" ],
+        "manifest_checksum" => "d" * 64
       },
       analysis_sha: "c" * 40,
       features: [ feature ],

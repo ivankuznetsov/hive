@@ -1,4 +1,6 @@
 require "hive/gh"
+require "hive/refactor_patrol/semantic_descriptor"
+require "hive/refactor_patrol/semantic_family"
 require "hive/secret_patterns"
 require "uri"
 
@@ -14,17 +16,64 @@ module Hive
       MAX_TITLE = 200
       MAX_BODY_BYTES = 20_000
       CONFIDENCE_ORDER = { "low" => 0, "medium" => 1, "high" => 2 }.freeze
-      STRATEGIC_REASONS = %w[
+      ANALYSIS_GUARD_REASONS = %w[
         exceeds_max_files
         exceeds_max_diff_lines
         not_single_feature
         public_api_impact
         cross_feature_impact
         dependency_bump
-        caps_exceeded
-        dependency_change
-        public_contract_change
+        missing_docs_validation
       ].freeze
+      DETERMINISTIC_NONFIXABLE_REASONS = %w[
+        agent_control_plane_violation
+        boundary_violation
+        caps_exceeded
+        closed_without_merge
+        dependency_change
+        fix_guardrail
+        missing_validation
+        public_contract_change
+        public_contract_safety_unavailable
+        secret_detected
+        validation_changed_head
+        validation_failed
+        validation_mutated_worktree
+      ].freeze
+      STRATEGIC_REASONS = (ANALYSIS_GUARD_REASONS + DETERMINISTIC_NONFIXABLE_REASONS).freeze
+      LEGACY_TITLE = /\Arefactor(?:[ -])?patrol\s*:/i
+      LEGACY_COMPONENT = /^\s*(?:-\s*)?Feature\s+id:\s*`([^`\r\n]+)`\s*$/i
+      LEGACY_THESIS = /^\s*(?:-\s*)?Thesis\s+id:\s*`([^`\r\n]+)`\s*$/i
+      LEGACY_FINGERPRINT = /^\s*(?:-\s*)?Fingerprint:\s*`([a-f0-9]{64})`\s*$/i
+      LEGACY_SECTIONS = %w[problem cost proposed_refactor evidence].freeze
+      LEGACY_SECTION_NAMES = {
+        "problem" => "problem",
+        "cost" => "cost",
+        "proposed refactor" => "proposed_refactor",
+        "evidence" => "evidence"
+      }.freeze
+      LEGACY_STOP_SECTIONS = %w[
+        advisories flags risk risk/caps validation_guidance
+      ].freeze
+      LEGACY_PROBLEM_BRIDGE = %w[
+        mixed_responsibilities duplicated_policy scattered_contract
+        parallel_implementations other
+      ].freeze
+      LEGACY_REFACTOR_BRIDGE = %w[
+        extract_boundary consolidate_policy consolidate_contract
+        move_responsibility other
+      ].freeze
+
+      def self.create_intent_payload(canonical_action_id:, repository:, family_id:,
+                                     thesis_fingerprint:)
+        {
+          "operation" => "create_issue",
+          "canonical_action_id" => canonical_action_id,
+          "repository" => repository,
+          "family_id" => family_id,
+          "thesis_fingerprint" => thesis_fingerprint
+        }
+      end
 
       def initialize(project_root, cfg:, gh: Hive::Gh)
         @project_root = File.expand_path(project_root)
@@ -33,9 +82,17 @@ module Hive
       end
 
       def publish(thesis:, family_id:, canonical_action_id:, job_id:, source:, reasons: [],
-                  record_intent:, creation_attempted: false)
-        return result("issue_disabled", true) unless issue_enabled? || creation_attempted
-        return result("quality_gate_failed", true) unless creation_attempted || eligible?(thesis, reasons)
+                  record_intent:, creation_attempted: false,
+                  publication_state: nil,
+                  authorize_create: -> { true })
+        request_sent = false
+        publication = normalize_publication_state(publication_state, creation_attempted)
+        return result("invalid_publication_state", false) unless valid_publication_state?(
+          publication, thesis, family_id, canonical_action_id, source
+        )
+        attempted = publication.key?("issue_create_intent")
+        return result("issue_disabled", true) unless issue_enabled? || attempted
+        return result("quality_gate_failed", true) unless attempted || eligible?(thesis, reasons)
         return result("invalid_family", true) unless valid_family_id?(family_id)
         return result("invalid_action", true) unless valid_action_id?(canonical_action_id)
 
@@ -43,13 +100,15 @@ module Hive
         repository = source.fetch("repository")
         host = source_github_host!(source, repository)
         marker = marker_for(family_id, action_id)
-        existing = lookup_existing(repository, marker, host)
-        return existing if existing.is_a?(Result)
+        lookup = lookup_existing(repository, marker, host, thesis: thesis, source: source)
+        return lookup if lookup.is_a?(Result)
+
+        existing, match_kind = lookup
         unless existing.empty?
           canonical = existing.min_by { |issue| issue.fetch("number").to_i }
-          return reconcile(canonical, existing, family_id, action_id)
+          return reconcile(canonical, existing, family_id, action_id, match_kind: match_kind)
         end
-        if creation_attempted
+        if attempted
           return result(
             "remote_outcome_unknown", false,
             receipts: base_receipts(family_id, action_id).merge("creation_intent" => true)
@@ -59,14 +118,28 @@ module Hive
         body = body_for(thesis, family_id, job_id, source, reasons, marker)
         return result("secret_detected", true) if Hive::SecretPatterns.scan(body).any?
 
-        intent_receipt = record_intent.call
-        unless intent_receipt.equal?(true)
+        unless authorize_create.call.equal?(true)
+          return result("authority_revoked", false, receipts: base_receipts(family_id, action_id))
+        end
+
+        intent_payload = self.class.create_intent_payload(
+          canonical_action_id: action_id, repository: repository,
+          family_id: family_id, thesis_fingerprint: thesis.fingerprint
+        )
+        intent_receipt = persist_publication(record_intent, intent_payload)
+        unless intent_receipt == true
+          error = intent_receipt.is_a?(Exception) ? {
+            "error" => "#{intent_receipt.class}: #{intent_receipt.message}"
+          } : { "intent_receipt" => "not_true" }
           return result(
             "intent_persist_failed", false,
-            receipts: base_receipts(family_id, action_id).merge("intent_receipt" => "not_true")
+            receipts: base_receipts(family_id, action_id).merge(error)
           )
         end
-        intent_persisted = true
+        unless authorize_create.call.equal?(true)
+          return result("authority_revoked", false, receipts: base_receipts(family_id, action_id))
+        end
+        request_sent = true
         url = @gh.create_issue(
           repository: repository, host: host, title: title_for(thesis), body: body, cfg: @cfg
         )
@@ -77,7 +150,7 @@ module Hive
           )
         )
       rescue Hive::GhError => e
-        outcome = intent_persisted || creation_attempted ? "remote_outcome_unknown" : "issue_reconcile_failed"
+        outcome = request_sent || attempted ? "remote_outcome_unknown" : "issue_reconcile_failed"
         result(
           outcome, false,
           receipts: base_receipts(family_id, canonical_action_id).merge("error" => e.message)
@@ -85,7 +158,7 @@ module Hive
       rescue KeyError, ArgumentError => e
         result("invalid_issue_input", true, receipts: { "error" => e.message })
       rescue StandardError => e
-        outcome = intent_persisted || creation_attempted ? "remote_outcome_unknown" : "intent_persist_failed"
+        outcome = request_sent || attempted ? "remote_outcome_unknown" : "intent_persist_failed"
         result(
           outcome, false,
           receipts: base_receipts(family_id, canonical_action_id).merge(
@@ -95,6 +168,43 @@ module Hive
       end
 
       private
+
+      def normalize_publication_state(value, creation_attempted)
+        state = value.nil? ? {} : value
+        return nil unless state.is_a?(Hash)
+
+        normalized = state.each_with_object({}) { |(key, payload), result| result[key.to_s] = payload }
+        if normalized.empty? && creation_attempted
+          normalized["issue_create_intent"] = { "legacy" => true }
+        end
+        normalized
+      end
+
+      def valid_publication_state?(state, thesis, family_id, action_id, source)
+        return false unless state.is_a?(Hash) && (state.keys - [ "issue_create_intent" ]).empty?
+
+        intent = state["issue_create_intent"]
+        return true unless intent
+        return true if intent == { "legacy" => true }
+
+        intent == self.class.create_intent_payload(
+          canonical_action_id: action_id.to_s,
+          repository: source.fetch("repository"), family_id: family_id,
+          thesis_fingerprint: thesis.fingerprint
+        )
+      rescue KeyError
+        false
+      end
+
+      def persist_publication(callback, payload)
+        if callback.respond_to?(:parameters) && callback.parameters.empty?
+          callback.call
+        else
+          callback.call(phase: "issue_create_intent", payload: payload)
+        end
+      rescue StandardError => e
+        e
+      end
 
       def issue_enabled?
         @cfg.dig("refactor_patrol", "issue_filing", "enabled") == true
@@ -130,16 +240,24 @@ module Hive
         action_id.to_s.match?(/\Aissue-[a-f0-9]{64}\z/)
       end
 
-      def lookup_existing(repository, marker, host)
-        issues = @gh.issues_with_marker(
-          repository: repository, marker: marker, host: host, cfg: @cfg
+      def lookup_existing(repository, marker, host, thesis:, source:)
+        issues = @gh.issues_for_repository(
+          repository: repository, host: host, cfg: @cfg
         )
         unless issues.is_a?(Array) && issues.all? { |issue| valid_issue_record?(issue, repository, host) }
           return result("issue_reconcile_failed", false, receipts: { "error" => "malformed issue lookup" })
         end
 
-        issues
+        marked = issues.select do |issue|
+          issue.fetch("body").to_s.lines.any? { |line| line.strip == marker }
+        end
+        return [ marked, "v2_marker" ] unless marked.empty?
+
+        legacy = legacy_matches(issues, thesis: thesis, source: source)
+        [ legacy, legacy.empty? ? nil : "legacy_semantic" ]
       rescue Hive::GhError => e
+        result("issue_reconcile_failed", false, receipts: { "error" => e.message })
+      rescue ArgumentError => e
         result("issue_reconcile_failed", false, receipts: { "error" => e.message })
       end
 
@@ -147,6 +265,8 @@ module Hive
         return false unless issue.is_a?(Hash)
         return false unless issue["number"].is_a?(Integer) && issue["number"].positive?
         return false unless %w[OPEN CLOSED].include?(issue["state"].to_s.upcase)
+        return false unless issue["title"].is_a?(String) && !issue["title"].strip.empty?
+        return false unless issue.key?("body") && (issue["body"].nil? || issue["body"].is_a?(String))
 
         uri = URI.parse(issue["url"].to_s)
         match = uri.path.match(%r{\A/([^/]+/[^/]+)/issues/([1-9]\d*)\z})
@@ -156,6 +276,157 @@ module Hive
           uri.userinfo.nil? && uri.query.nil? && uri.fragment.nil?
       rescue URI::InvalidURIError
         false
+      end
+
+      def legacy_matches(issues, thesis:, source:)
+        target = SemanticDescriptor.call(thesis: thesis, source: source)
+        matches = issues.filter_map do |issue|
+          descriptor = legacy_descriptor(issue, target: target, source: source)
+          next unless descriptor && legacy_compatible?(target, descriptor)
+
+          [ issue, descriptor ]
+        end
+        descriptors = matches.map(&:last)
+        pairwise = descriptors.combination(2).all? do |left, right|
+          legacy_compatible?(left, right)
+        end
+        unless pairwise
+          numbers = matches.map { |issue, _descriptor| issue.fetch("number") }.sort
+          raise ArgumentError, "ambiguous legacy issues #{numbers.inspect} match different semantic families"
+        end
+
+        matches.map(&:first)
+      end
+
+      def legacy_descriptor(issue, target:, source:)
+        title = issue.fetch("title")
+        return unless title.match?(LEGACY_TITLE)
+
+        body = issue.fetch("body")
+        if !body.is_a?(String) || !body.valid_encoding? || body.bytesize > MAX_BODY_BYTES
+          return unless title.downcase.include?(target.fetch("component"))
+
+          raise ArgumentError, "legacy issue ##{issue.fetch('number')} has an invalid body"
+        end
+        return if body.include?("<!-- hive-refactor-patrol")
+
+        components = body.scan(LEGACY_COMPONENT).flatten
+        if components.size != 1
+          return unless title.downcase.include?(target.fetch("component"))
+
+          raise ArgumentError, "legacy issue ##{issue.fetch('number')} has ambiguous feature identity"
+        end
+        component = normalized_legacy_component(components.first, target)
+        return unless component == target.fetch("component")
+
+        validate_legacy_identity!(body, issue.fetch("number"))
+        sections = legacy_sections(body, issue.fetch("number"))
+        evidence = legacy_evidence(sections.fetch("evidence"), issue.fetch("number"))
+        SemanticDescriptor.call(
+          thesis: {
+            "feature_id" => components.first,
+            "feature" => components.first,
+            "problem" => sections.fetch("problem"),
+            "cost" => sections.fetch("cost"),
+            "proposed_refactor" => sections.fetch("proposed_refactor"),
+            "evidence" => evidence,
+            "feature_boundary" => {
+              "owned_files" => evidence.map { |entry| entry.fetch("file") },
+              "entrypoints" => []
+            },
+            "expected_leverage" => {}
+          },
+          source: source
+        )
+      end
+
+      def normalized_legacy_component(value, target)
+        SemanticFamily.descriptor(
+          host: target.fetch("host"), repository: target.fetch("repository"),
+          component: value, problem_kind: "other", refactor_kind: "other",
+          anchors: [ "legacy-identity" ], concepts: [ "legacy" ]
+        ).fetch("component")
+      end
+
+      def validate_legacy_identity!(body, number)
+        theses = body.scan(LEGACY_THESIS).flatten
+        fingerprints = body.scan(LEGACY_FINGERPRINT).flatten
+        return if theses.size == 1 && !theses.first.strip.empty? && fingerprints.size == 1
+
+        raise ArgumentError, "legacy issue ##{number} has invalid thesis or fingerprint identity"
+      end
+
+      def legacy_sections(body, number)
+        sections = {}
+        current = nil
+        body.each_line do |line|
+          heading = legacy_heading_name(line)
+          key = LEGACY_SECTION_NAMES[heading]
+          if key
+            raise ArgumentError, "legacy issue ##{number} repeats its #{key} section" if sections.key?(key)
+
+            sections[key] = +""
+            current = key
+          elsif legacy_stop_section?(line, heading)
+            current = nil
+          elsif current
+            sections.fetch(current) << line
+          end
+        end
+        missing = LEGACY_SECTIONS.reject do |key|
+          sections.key?(key) && !sections.fetch(key).strip.empty?
+        end
+        unless missing.empty?
+          raise ArgumentError, "legacy issue ##{number} is missing sections #{missing.inspect}"
+        end
+
+        sections.transform_values(&:strip)
+      end
+
+      def legacy_stop_section?(line, heading)
+        stripped = line.strip
+        return false if stripped.empty?
+
+        LEGACY_STOP_SECTIONS.include?(heading.tr(" ", "_")) || stripped.match?(/\A[#]{1,6}\s+/)
+      end
+
+      def legacy_heading_name(line)
+        line.to_s.strip.sub(/\A[#]{1,6}\s+/, "").delete_suffix(":").strip.downcase
+      end
+
+      def legacy_evidence(text, number)
+        evidence = text.lines.filter_map do |line|
+          match = line.chomp.match(/\A\s*-\s+`([^`\r\n]+):([1-9]\d*)`\s*(.*)\z/)
+          next unless match
+
+          {
+            "file" => match[1].strip,
+            "line" => match[2].to_i,
+            "claim" => match[3].to_s.strip
+          }
+        end
+        return evidence unless evidence.empty?
+
+        raise ArgumentError, "legacy issue ##{number} has no anchored evidence"
+      end
+
+      def legacy_compatible?(left, right)
+        return true if SemanticFamily.compatible?(left, right)
+        return false unless legacy_kind_compatible?(
+          left.fetch("problem_kind"), right.fetch("problem_kind"), LEGACY_PROBLEM_BRIDGE
+        )
+        return false unless legacy_kind_compatible?(
+          left.fetch("refactor_kind"), right.fetch("refactor_kind"), LEGACY_REFACTOR_BRIDGE
+        )
+
+        SemanticFamily.compatible?(
+          left.merge("problem_kind" => "other", "refactor_kind" => "other"),
+          right.merge("problem_kind" => "other", "refactor_kind" => "other")
+        )
+      end
+
+      def legacy_kind_compatible?(left, right, bridge)
+        left == right || (bridge.include?(left) && bridge.include?(right))
       end
 
       def source_github_host!(source, repository)
@@ -171,7 +442,7 @@ module Hive
         raise ArgumentError, "source PR URL is invalid"
       end
 
-      def reconcile(canonical, issues, family_id, action_id)
+      def reconcile(canonical, issues, family_id, action_id, match_kind:)
         url = canonical.fetch("url").to_s
         state = canonical.fetch("state").to_s.upcase
         outcome = state == "OPEN" ? "issue_linked_open" : "issue_closed_suppressed"
@@ -180,6 +451,7 @@ module Hive
           receipts: base_receipts(family_id, action_id).merge(
             "issue_url" => url,
             "issue_number" => canonical.fetch("number").to_i,
+            "match_kind" => match_kind,
             "duplicate_issue_urls" => issues.reject { |issue| issue.equal?(canonical) }
                                              .map { |issue| issue.fetch("url").to_s }.sort
           )

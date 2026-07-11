@@ -3,11 +3,11 @@ title: Hive::Patrol
 type: module
 source: lib/hive/patrol/
 created: 2026-05-28
-updated: 2026-06-10
+updated: 2026-07-11
 tags: [module, patrol, review, worktree, pr, codex]
 ---
 
-**TLDR**: `Hive::Patrol::*` is the repository-patrol engine behind [[commands/patrol]]. It keeps clawpatch-style work units and audit state as plain JSON under `.hive-state/patrol/`, delegates review/fix reasoning to configured Hive agent profiles, records patrol review/fix token usage in `Hive::UsageDb`, validates fixes in isolated worktrees, opens PRs, and by default hands opened PRs into the normal `6-review` flow through `Hive::Patrol::ReviewHandoff`.
+**TLDR**: `Hive::Patrol::*` is the ordinary repository-patrol engine behind [[commands/patrol]]. It keeps clawpatch-style work units and audit state as plain JSON under `.hive-state/patrol/`, delegates review/fix reasoning to configured Hive agent profiles, records patrol review/fix token usage in `Hive::UsageDb`, validates fixes in isolated worktrees, opens PRs, and by default hands opened PRs into the normal `6-review` flow through `Hive::Patrol::ReviewHandoff`. The separately configured, post-merge architecture patrol lives under `Hive::RefactorPatrol::*`; the two schedulers share a scan budget but not state, mapping, policy, or action ledgers.
 
 ## Module map
 
@@ -46,6 +46,24 @@ The managed repository worktree is not edited by fixes. `Fixer` uses [[modules/w
 
 Patrol PRs flow into `6-review` and are reviewed by `patrol.review.reviewers` (a separate set from human PRs' `review.reviewers`) — see [[stages/review]] `run_reviewers` → `patrol_task?` routing. Because patrol opens many PRs per cycle, the **DEFAULT patrol reviewer is the native single-pass `codex review`** adapter (`kind: codex_review`, `name: codex-native-review`), not the multi-persona `ce-code-review` fan-out (6–18 subagents). It runs one tuned, read-only `codex review` and captures stdout into the GFM-checkbox findings file the triage/fix loop already consumes, so the loop is unchanged. See [[modules/reviewers]] `Reviewers::CodexReview` for argv/format details. Operators can override `patrol.review.reviewers` per project to add the ce-code-review fan-out or Claude.
 
+## Ordinary patrol versus architecture patrol
+
+Ordinary patrol scans the current repository into route, command, package, and
+test-suite features, then attempts finding-sized fixes. Architecture patrol
+([[commands/refactor-patrol]]) is triggered by an immutable merged-PR
+occurrence, maps language-neutral feature and documentation slices from that
+merge, and requires every architectural thesis to receive a durable accepted,
+flagged, or suppressed disposition before any separately authorized action.
+
+The two systems deliberately retain separate namespaces:
+`.hive-state/patrol/` for ordinary patrol and
+`.hive-state/refactor_patrol/v2/` for architecture manifests, jobs, semantic
+families, indexes, and result receipts. `Hive::Daemon::PatrolArbiter` is the
+only shared orchestration seam: it alternates ready work under the project's
+`daemon.max_concurrent_patrol_scans` capacity. Enabling architecture discovery
+does not enable ordinary patrol, auto-fixing, or issue filing, and neither
+system can consume the other's state as proof of completion.
+
 ## Daemon triggers
 
 Patrol is **opt-in**. A project with **no patrol section at all** (or a patrol section that omits `mode:`) resolves to `enabled: false` — [[modules/config]] only derives mode knobs when `mode:` is **explicitly present** in the raw config. `medium` is the default offered by the `hive init` *prompt* (which writes an explicit `mode: "medium"` into the rendered template), never a config-resolution default, so legacy projects without a patrol block are never silently enabled.
@@ -67,6 +85,7 @@ Operators normally configure scheduling through `patrol.mode`, which [[modules/c
 ## Backlinks
 
 - [[commands/patrol]]
+- [[commands/refactor-patrol]]
 - [[modules/daemon]]
 - [[modules/config]]
 - [[modules/worktree]]

@@ -126,6 +126,16 @@ class HivePatrolMapperTest < Minitest::Test
     end
   end
 
+  def test_architecture_decision_directories_are_documentation_slices
+    with_tmp_dir do |repo|
+      mapper = Hive::Patrol::Mapper.new(repo, cfg: cfg, dry_run: true)
+
+      assert mapper.send(:documentation_path?, "architecture/adrs/0001-boundaries.md")
+      assert mapper.send(:documentation_path?, "ARCHITECTURE/decisions/0002-storage.md")
+      refute mapper.send(:documentation_path?, "architecture/notes/draft.md")
+    end
+  end
+
   def test_documentation_changes_keep_removed_and_renamed_paths_in_their_stable_slice
     with_tmp_git_repo do |repo|
       FileUtils.mkdir_p(File.join(repo, "docs", "guides"))
@@ -179,7 +189,8 @@ class HivePatrolMapperTest < Minitest::Test
       architecture_one = architecture.find { |feature| feature.id == "command-bin-one" }
       assert_includes ordinary_one.owned_files, "bin/two", "ordinary patrol behavior remains compatible"
       assert_equal [ "bin/one" ], architecture_one.owned_files
-      assert_includes architecture.map(&:id), "architecture-lib-acme-service-rb"
+      assert_includes architecture.map(&:id), "architecture-lib-acme",
+                      "shallow namespace files share one material architecture slice"
     end
   end
 

@@ -326,9 +326,15 @@ patrol:
 # Config::DEFAULTS policy.
 refactor_patrol:
   enabled: <%= refactor_patrol_enabled ? "true" : "false" %>
+  # Low-leverage proposals remain visible but report-only.
+  min_leverage_score: 0.25
   auto_fix:
     enabled: false
     agent: codex
+  commands:
+    # Optional project-owned API/contract check for ecosystems without a
+    # built-in declaration adapter. It is consulted only when auto-fix is on.
+    public_contract: null
   issue_filing:
     enabled: false
     min_leverage_score: 0.25

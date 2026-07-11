@@ -440,7 +440,7 @@ module Hive
       end
 
       def review_root
-        File.join(stages_root, "6-review")
+        File.join(stages_root, "6-review") # coding-scoped: refactor PRs enter normal code review
       end
 
       def quarantine_root

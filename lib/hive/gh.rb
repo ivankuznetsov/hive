@@ -61,20 +61,27 @@ module Hive
     # Push the branch and return a PushResult. Callers that want to
     # exit on failure can do so explicitly; finalize prefers to write
     # a structured marker.
-    def push_branch(worktree_path, branch, cfg: nil, force: false, expected_remote_oid: nil)
-      args = [ "git", "-C", worktree_path, "push", "-u" ]
+    def push_branch(worktree_path, branch, cfg: nil, force: false,
+                    expected_remote_oid: nil, expected_remote_absent: false,
+                    remote: "origin", set_upstream: true)
+      args = [ "git", "-C", worktree_path, "push" ]
+      args << "-u" if set_upstream
       # --force-with-lease (not --force): a concurrent third-party update to
       # the branch aborts the push instead of being clobbered.
-      if expected_remote_oid
+      if expected_remote_oid && expected_remote_absent
+        raise Hive::GhError, "remote branch cannot require both an OID and absence"
+      elsif expected_remote_oid
         oid = expected_remote_oid.to_s
         unless oid.match?(/\A[0-9a-f]{40,64}\z/i)
           raise Hive::GhError, "expected remote branch OID is invalid"
         end
         args << "--force-with-lease=refs/heads/#{branch}:#{oid.downcase}"
+      elsif expected_remote_absent
+        args << "--force-with-lease=refs/heads/#{branch}:"
       elsif force
         args << "--force-with-lease"
       end
-      args.push("origin", branch)
+      args.push(remote.to_s, branch)
       out, err, status = capture3(*args, cfg: cfg)
       PushResult.new(success: status.success?, stdout: out, stderr: err)
     rescue Hive::GhError => e
@@ -82,16 +89,20 @@ module Hive
     end
 
     # Hard-fail wrapper for callers that have no recovery path (open-pr).
-    def push_branch!(worktree_path, branch, cfg: nil, expected_remote_oid: nil)
+    def push_branch!(worktree_path, branch, cfg: nil,
+                     expected_remote_oid: nil, expected_remote_absent: false,
+                     remote: "origin", set_upstream: true)
       result = push_branch(
-        worktree_path, branch, cfg: cfg, expected_remote_oid: expected_remote_oid
+        worktree_path, branch, cfg: cfg, expected_remote_oid: expected_remote_oid,
+        expected_remote_absent: expected_remote_absent, remote: remote,
+        set_upstream: set_upstream
       )
       return if result.success?
 
       raise Hive::GhError, "git push failed: #{result.stderr.strip.empty? ? result.stdout : result.stderr}"
     end
 
-    def remote_branch_oid(worktree_path, branch, cfg: nil)
+    def remote_branch_oid(worktree_path, branch, cfg: nil, remote: "origin")
       name = branch.to_s
       unless name.match?(/\A[a-zA-Z0-9][a-zA-Z0-9._\/-]{0,240}\z/) &&
              !name.include?("..") && !name.end_with?("/", ".")
@@ -100,7 +111,7 @@ module Hive
 
       ref = "refs/heads/#{name}"
       out, err, status = capture3(
-        "git", "-C", worktree_path, "ls-remote", "--heads", "origin", ref,
+        "git", "-C", worktree_path, "ls-remote", "--heads", remote.to_s, ref,
         cfg: cfg
       )
       unless status.success?
@@ -171,13 +182,12 @@ module Hive
     end
 
     # The REST /issues endpoint includes pull requests, so fetch every page and
-    # validate every issue-shaped record before filtering. Treating malformed or
-    # partial responses as an empty result would let callers create duplicates.
-    def issues_with_marker(repository:, marker:, host:, cfg: nil)
+    # validate every issue-shaped record before returning the exact issue
+    # inventory. Treating malformed or partial responses as an empty result
+    # would let publication callers create duplicates.
+    def issues_for_repository(repository:, host:, cfg: nil)
       repo = validated_repository_slug(repository)
       github_host = validated_github_host(host)
-      needle = marker.to_s
-      raise Hive::GhError, "issue marker must be a non-empty string" if needle.empty?
 
       endpoint = "repos/#{repo}/issues?state=all&per_page=100"
       out, err, status = capture3(
@@ -197,17 +207,26 @@ module Hive
       pages.flatten.filter_map do |issue|
         validate_issue_api_record!(issue, repo, host: github_host)
         next if issue.key?("pull_request")
-        next unless issue.fetch("body").to_s.lines.any? { |line| line.strip == needle }
 
         {
           "number" => issue.fetch("number"),
           "state" => issue.fetch("state").upcase,
           "url" => issue.fetch("html_url"),
+          "title" => issue.fetch("title"),
           "body" => issue.fetch("body")
         }
       end
     rescue JSON::ParserError => e
       raise Hive::GhError, "issue pages for #{repository} were unparseable: #{e.message}"
+    end
+
+    def issues_with_marker(repository:, marker:, host:, cfg: nil)
+      needle = marker.to_s
+      raise Hive::GhError, "issue marker must be a non-empty string" if needle.empty?
+
+      issues_for_repository(repository: repository, host: host, cfg: cfg).select do |issue|
+        issue.fetch("body").to_s.lines.any? { |line| line.strip == needle }
+      end
     end
 
     # Use a temporary body file so markdown is never interpreted as argv or by
@@ -270,14 +289,62 @@ module Hive
       raise Hive::GhError, "`gh pr view #{number}` returned unparseable JSON: #{e.message}"
     end
 
+    def verify_pr_identity!(pr_url, repository:, host:, branch:, head_oid:,
+                            base_branch:, cfg: nil)
+      target = github_repository_target(repository, host)
+      fields = "url,number,state,isDraft,headRefName,headRefOid,baseRefName,headRepository"
+      out, err, status = capture3(
+        "gh", "pr", "view", pr_url.to_s, "--repo", target, "--json", fields,
+        cfg: cfg
+      )
+      unless status.success?
+        raise Hive::GhError,
+              "`gh pr view` failed while verifying created PR: " \
+              "#{err.to_s.strip.empty? ? out : err.strip}"
+      end
+      doc = JSON.parse(out)
+      unless doc.is_a?(Hash)
+        raise Hive::GhError, "`gh pr view` returned #{doc.class}; expected Hash"
+      end
+
+      validate_pr_repository_identity!(
+        pr_url, repository, doc["number"], host: host
+      )
+      validate_pr_repository_identity!(
+        doc["url"], repository, doc["number"], host: host
+      )
+
+      uri = URI.parse(doc["url"].to_s)
+      match = uri.path.match(%r{\A/([^/]+/[^/]+)/pull/([1-9]\d*)\z})
+      head_repository = doc["headRepository"]
+      valid = uri.is_a?(URI::HTTP) && uri.host&.casecmp?(host.to_s) && match &&
+              match[1].casecmp?(repository.to_s) && uri.userinfo.nil? &&
+              uri.query.nil? && uri.fragment.nil? &&
+              doc["number"].is_a?(Integer) && doc["number"].positive? &&
+              match[2].to_i == doc["number"] && doc["state"] == "OPEN" &&
+              doc["isDraft"] == false && doc["headRefName"] == branch &&
+              doc["headRefOid"] == head_oid && doc["baseRefName"] == base_branch &&
+              head_repository.is_a?(Hash) &&
+              head_repository["nameWithOwner"].to_s.casecmp?(repository.to_s)
+      raise Hive::GhError, "created pull request identity does not match the validated patch" unless valid
+
+      doc
+    rescue JSON::ParserError, URI::InvalidURIError => e
+      raise Hive::GhError, "created pull request identity is unparseable: #{e.message}"
+    end
+
     # Resolve the complete immutable inputs needed by PR-scoped architecture
     # patrol. `gh pr view` supplies merge identity while the REST files endpoint
     # supplies status/rename metadata and is explicitly paginated.
     def merged_pr_details(pr, worktree_path:, cfg: nil)
-      ensure_authenticated!(cfg)
+      identity = repository_identity(worktree_path, cfg: cfg)
+      repository = identity.fetch("repository")
+      host = identity.fetch("host")
+      ensure_authenticated!(cfg, host: host)
       fields = %w[number url state baseRefName baseRefOid mergeCommit mergedAt changedFiles].join(",")
       out, err, status = capture3(
-        "gh", "pr", "view", pr.to_s, "--json", fields,
+        "gh", "pr", "view", pr.to_s, "--repo", "#{host}/#{repository}",
+        "--json", fields,
         chdir: worktree_path, cfg: cfg
       )
       unless status.success?
@@ -286,12 +353,12 @@ module Hive
       doc = JSON.parse(out)
       raise Hive::GhError, "`gh pr view #{pr}` returned #{doc.class}; expected Hash" unless doc.is_a?(Hash)
 
-      repository = repo_name_with_owner(worktree_path, cfg: cfg)
       number = doc["number"]
-      validate_pr_repository_identity!(doc["url"], repository, number)
+      validate_pr_repository_identity!(doc["url"], repository, number, host: host)
       pages_out, pages_err, pages_status = capture3(
         "gh", "api", "repos/#{repository}/pulls/#{number}/files?per_page=100",
-        "--paginate", "--slurp", chdir: worktree_path, cfg: cfg
+        "--hostname", host, "--paginate", "--slurp",
+        chdir: worktree_path, cfg: cfg
       )
       unless pages_status.success?
         message = pages_err.to_s.strip.empty? ? pages_out : pages_err.strip
@@ -332,9 +399,10 @@ module Hive
     # One cursor-addressed page of merged PR identities for architecture
     # patrol catch-up. File manifests are deliberately resolved through
     # #merged_pr_details afterward; this API only discovers stable occurrences.
-    def merged_prs_page(repository:, default_branch:, cursor:, merged_since:,
+    def merged_prs_page(repository:, host:, default_branch:, cursor:, merged_since:,
                         per_page:, worktree_path:, cfg: nil)
-      repository = repository.to_s
+      repository = validated_repository_slug(repository)
+      host = validated_github_host(host)
       branch = default_branch.to_s
       unless repository.match?(%r{\A[^/\s]+/[^/\s]+\z}) && !branch.empty? && !branch.match?(/\s/)
         raise Hive::GhError, "merged-PR pagination requires a repository and default branch"
@@ -366,7 +434,7 @@ module Hive
         }
       GRAPHQL
       args = [
-        "gh", "api", "graphql",
+        "gh", "api", "graphql", "--hostname", host,
         "-f", "query=#{query}",
         "-f", "searchQuery=#{search}",
         "-F", "pageSize=#{page_size}"
@@ -401,6 +469,13 @@ module Hive
         raise Hive::GhError, "GitHub GraphQL omitted the next cursor for #{repository}"
       end
 
+      nodes.each do |item|
+        validate_pr_repository_identity!(item["url"], repository, item["number"], host: host)
+        unless item.dig("repository", "nameWithOwner").to_s.casecmp?(repository)
+          raise Hive::GhError, "GitHub GraphQL returned a PR from another repository"
+        end
+      end
+
       {
         "items" => nodes.map do |item|
           {
@@ -422,12 +497,15 @@ module Hive
       raise Hive::GhError, "invalid merged-PR pagination input: #{e.message}"
     end
 
-    def validate_pr_repository_identity!(url, repository, number)
+    def validate_pr_repository_identity!(url, repository, number, host:)
       uri = URI.parse(url.to_s)
       match = uri.path.match(%r{\A/([^/]+/[^/]+)/pull/([1-9]\d*)\z})
-      unless uri.host && match && match[1].casecmp?(repository.to_s) && match[2].to_i == number
+      unless uri.is_a?(URI::HTTP) && uri.host&.casecmp?(host.to_s) && match &&
+             match[1].casecmp?(repository.to_s) && number.is_a?(Integer) &&
+             number.positive? && match[2].to_i == number && uri.userinfo.nil? &&
+             uri.query.nil? && uri.fragment.nil?
         raise Hive::GhError,
-              "resolved PR URL #{url.inspect} does not match registered repository #{repository.inspect} and PR #{number.inspect}"
+              "resolved PR URL does not match registered host/repository and PR number"
       end
       true
     rescue URI::InvalidURIError
@@ -469,7 +547,7 @@ module Hive
         raise Hive::GhError, "`gh api` returned a non-object issue for #{repository}"
       end
 
-      missing = %w[number state html_url body].reject { |key| issue.key?(key) }
+      missing = %w[number state html_url title body].reject { |key| issue.key?(key) }
       unless missing.empty?
         raise Hive::GhError, "`gh api` issue for #{repository} is missing #{missing.inspect}"
       end
@@ -481,6 +559,9 @@ module Hive
       end
       unless issue["html_url"].is_a?(String) && !issue["html_url"].empty?
         raise Hive::GhError, "`gh api` issue #{issue['number']} for #{repository} has no URL"
+      end
+      unless issue["title"].is_a?(String) && !issue["title"].strip.empty?
+        raise Hive::GhError, "`gh api` issue #{issue['number']} for #{repository} has an invalid title"
       end
       unless issue_url_matches_repository?(
         issue["html_url"], repository, host: host, number: issue["number"]
@@ -560,22 +641,65 @@ module Hive
     end
 
     def repo_name_with_owner(worktree_path, cfg: nil)
-      out, err, status = capture3("gh", "repo", "view", "--json", "nameWithOwner",
-                                  chdir: worktree_path, cfg: cfg)
+      repository_identity(worktree_path, cfg: cfg).fetch("repository")
+    end
+
+    def repository_identity(worktree_path, cfg: nil)
+      repository_identity_from_remote(origin_push_url(worktree_path, cfg: cfg))
+    end
+
+    def origin_push_url(worktree_path, cfg: nil)
+      out, err, status = capture3(
+        "git", "-C", worktree_path, "remote", "get-url", "--push", "--all", "origin",
+        cfg: cfg
+      )
       unless status.success?
-        raise Hive::GhError, "`gh repo view` failed in #{worktree_path}: #{err.to_s.strip.empty? ? out : err.strip}"
+        raise Hive::GhError,
+              "`git remote get-url --push --all origin` failed in #{worktree_path}: " \
+              "#{err.to_s.strip.empty? ? out : err.strip}"
+      end
+      urls = out.lines.map(&:strip).reject(&:empty?)
+      unless urls.one?
+        raise Hive::GhError, "origin push URL lookup returned #{urls.size} records"
       end
 
-      doc = JSON.parse(out)
-      raise Hive::GhError, "`gh repo view` returned #{doc.class}; expected Hash" unless doc.is_a?(Hash)
-
-      slug = doc["nameWithOwner"].to_s
-      raise Hive::GhError, "`gh repo view` returned blank nameWithOwner in #{worktree_path}" if slug.empty?
-
-      slug
-    rescue JSON::ParserError => e
-      raise Hive::GhError, "`gh repo view` returned unparseable JSON in #{worktree_path}: #{e.message}"
+      urls.first
     end
+
+    def repository_identity_from_remote(remote_url)
+      value = remote_url.to_s.strip
+      scp = value.match(/\A(?:[^@\/]+@)?([^:\/]+):\/?([^\/]+\/[^\/]+?)\z/)
+      if scp && !value.match?(/\A[a-z][a-z0-9+.-]*:\/\//i)
+        return remote_identity(scp[1], scp[2])
+      end
+
+      uri = URI.parse(value)
+      unless %w[http https ssh git].include?(uri.scheme.to_s.downcase) && uri.host
+        raise Hive::GhError, "origin push URL is not a supported GitHub remote"
+      end
+      credentials = uri.userinfo.to_s
+      unsafe_credentials = if %w[http https git].include?(uri.scheme.to_s.downcase)
+        !credentials.empty?
+      else
+        credentials.include?(":")
+      end
+      if unsafe_credentials || uri.query || uri.fragment
+        raise Hive::GhError, "origin push URL contains unsupported credentials or suffixes"
+      end
+
+      remote_identity(uri.host, uri.path.to_s.sub(%r{\A/}, ""))
+    rescue URI::InvalidURIError => e
+      raise Hive::GhError, "origin push URL is invalid: #{e.message}"
+    end
+
+    def remote_identity(host, repository)
+      slug = repository.to_s.sub(/\.git\z/i, "")
+      {
+        "repository" => validated_repository_slug(slug),
+        "host" => validated_github_host(host)
+      }
+    end
+    private_class_method :remote_identity
 
     def list_merged_prs(repo, since:, until_date:, cfg: nil)
       fields = %w[

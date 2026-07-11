@@ -376,11 +376,9 @@ module Hive
       head = self.class.run_materialize_git!(
         @project_root, "rev-parse", "refs/heads/#{branch_name}"
       ).strip
-      unless self.class.run_materialize_git!(
+      self.class.run_materialize_git!(
         @project_root, "merge-base", "--is-ancestor", expected, head
-      ).is_a?(String)
-        raise WorktreeError, "branch #{branch_name} does not descend from pinned commit #{expected}"
-      end
+      )
       head
     rescue WorktreeError
       raise WorktreeError, "branch #{branch_name} does not descend from pinned commit #{expected}"

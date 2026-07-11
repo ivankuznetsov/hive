@@ -1,6 +1,7 @@
 require "digest"
 require "json"
-require "set"
+require "uri"
+require "hive/refactor_patrol/fingerprint"
 
 module Hive
   module RefactorPatrol
@@ -38,7 +39,7 @@ module Hive
       ].freeze
 
       DESCRIPTOR_KEYS = %w[
-        repository component problem_kind refactor_kind anchors concepts
+        host repository component problem_kind refactor_kind anchors concepts
       ].freeze
 
       Result = Struct.new(
@@ -62,8 +63,10 @@ module Hive
 
       module_function
 
-      def descriptor(repository:, component:, problem_kind:, refactor_kind:, anchors:, concepts:)
+      def descriptor(repository:, component:, problem_kind:, refactor_kind:, anchors:, concepts:,
+                     host: "github.com")
         normalize_descriptor(
+          "host" => host,
           "repository" => repository,
           "component" => component,
           "problem_kind" => problem_kind,
@@ -151,6 +154,7 @@ module Hive
       end
 
       def compatible_descriptors?(candidate, existing)
+        return false unless candidate.fetch("host") == existing.fetch("host")
         return false unless candidate.fetch("repository") == existing.fetch("repository")
         return false unless candidate.fetch("component") == existing.fetch("component")
         return false unless candidate.fetch("problem_kind") == existing.fetch("problem_kind")
@@ -162,12 +166,7 @@ module Hive
       private_class_method :compatible_descriptors?
 
       def overlap(left, right)
-        left_set = Array(left).to_set
-        right_set = Array(right).to_set
-        smaller = [ left_set.size, right_set.size ].min
-        return 0.0 if smaller.zero?
-
-        (left_set & right_set).size.to_f / smaller
+        Fingerprint.overlap_coefficient(Array(left), Array(right))
       end
 
       def normalize_descriptor(value)
@@ -194,6 +193,7 @@ module Hive
         raise ArgumentError, "concepts must contain at least one normalized token" if concepts.empty?
 
         deep_freeze(
+          "host" => normalize_host(optional_key(value, "host") || "github.com"),
           "repository" => normalize_repository(fetch_key(value, "repository")),
           "component" => normalize_component(fetch_key(value, "component")),
           "problem_kind" => problem_kind,
@@ -276,6 +276,19 @@ module Hive
         repository
       end
       private_class_method :normalize_repository
+
+      def normalize_host(value)
+        host = value.to_s.strip.downcase
+        uri = URI.parse("https://#{host}")
+        valid = !host.empty? && uri.host == host && uri.path.empty? &&
+                uri.userinfo.nil? && uri.query.nil? && uri.fragment.nil?
+        raise ArgumentError, "host must be an exact hostname" unless valid
+
+        host
+      rescue URI::InvalidURIError
+        raise ArgumentError, "host must be an exact hostname"
+      end
+      private_class_method :normalize_host
 
       def normalize_component(value)
         component = value.to_s.strip.tr("\\", "/").downcase

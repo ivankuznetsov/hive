@@ -20,6 +20,56 @@ class RefactorPatrolThesisNormalizerTest < Minitest::Test
     assert_includes thesis.risk.fetch("flags"), "inadmissible"
   end
 
+  def test_hallucinated_snippet_and_out_of_range_line_are_unverified
+    with_tmp_dir do |dir|
+      path = File.join(dir, "lib", "checkout.rb")
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "def actual_behavior\nend\n")
+      normalizer = Hive::RefactorPatrol::ThesisNormalizer.new(
+        project_root: dir, commands: { "test" => "rake test" }
+      )
+      invalid_items = [
+        { "file" => "lib/checkout.rb", "snippet" => "def invented_behavior", "claim" => "invented" },
+        { "file" => "lib/checkout.rb", "line" => 99, "claim" => "line does not exist" },
+        { "file" => "../outside.rb", "line" => 1, "claim" => "path escapes the repository" }
+      ]
+
+      invalid_items.each do |evidence|
+        thesis = normalizer.call(
+          feature: feature, leverage: feature_leverage,
+          raw: valid_raw_thesis.merge("evidence" => [ evidence ]), index: 0
+        )
+
+        refute thesis.admissible, evidence.inspect
+        assert_includes thesis.risk.fetch("flags"), "unverified_evidence", evidence.inspect
+        assert_includes thesis.admissibility_reason, "unverified evidence anchor", evidence.inspect
+      end
+    end
+  end
+
+  def test_verified_line_or_exact_snippet_is_admissible
+    with_tmp_dir do |dir|
+      path = File.join(dir, "lib", "checkout.rb")
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "first\ndef charge_and_validate\n")
+      normalizer = Hive::RefactorPatrol::ThesisNormalizer.new(
+        project_root: dir, commands: { "test" => "rake test" }
+      )
+
+      [
+        { "file" => "lib/checkout.rb", "line" => 2, "claim" => "the second line is present" },
+        { "file" => "lib/checkout.rb", "snippet" => "def charge_and_validate", "claim" => "method is present" }
+      ].each do |evidence|
+        thesis = normalizer.call(
+          feature: feature, leverage: feature_leverage,
+          raw: valid_raw_thesis.merge("evidence" => [ evidence ]), index: 0
+        )
+        assert thesis.admissible, thesis.admissibility_reason
+        refute_includes thesis.risk.fetch("flags"), "unverified_evidence"
+      end
+    end
+  end
+
   def test_evidence_without_file_is_flagged_inadmissible_not_dropped
     thesis = normalize(
       valid_raw_thesis.merge(
@@ -114,6 +164,7 @@ class RefactorPatrolThesisNormalizerTest < Minitest::Test
     raw = valid_raw_thesis
     raw["expected_leverage"] = {
       "drivers" => [
+        "not a driver",
         { "signal" => "churn", "relief" => 0.5, "mechanism" => "first valid driver" },
         { "signal" => "churn", "relief" => 1.0, "mechanism" => "duplicate" },
         { "signal" => "fan_in", "relief" => 0.25, "mechanism" => "stable boundary" },
@@ -140,6 +191,38 @@ class RefactorPatrolThesisNormalizerTest < Minitest::Test
     assert_includes thesis.admissibility_reason, "missing valid proposal leverage driver"
     assert_empty thesis.expected_leverage.fetch("drivers")
     assert thesis_schemer.valid?(thesis.to_h), thesis_schemer.validate(thesis.to_h).map { |e| e["error"] }.inspect
+  end
+
+  def test_measured_proposal_below_configured_leverage_floor_is_report_only
+    thesis = normalize(valid_raw_thesis, min_leverage_score: 0.5)
+
+    assert thesis.admissible
+    assert_in_delta 0.4, thesis.expected_leverage.fetch("score"), 0.0001
+    assert_includes thesis.risk.fetch("flags"), "below_min_leverage"
+  end
+
+  def test_incomplete_feature_measurement_is_retained_and_forces_report_only
+    partial = feature_leverage.merge(
+      "measurement" => {
+        "status" => "incomplete",
+        "diagnostics" => [
+          {
+            "kind" => "architecture_map_failed",
+            "error_class" => "ParserUnavailable",
+            "message" => "dependency graph measurement failed"
+          }
+        ]
+      }
+    )
+
+    thesis = normalize(valid_raw_thesis, leverage: partial)
+
+    refute thesis.admissible
+    assert_includes thesis.risk.fetch("flags"), "incomplete_leverage_measurement"
+    assert_includes thesis.admissibility_reason, "incomplete feature leverage measurement"
+    assert_equal partial.fetch("measurement"), thesis.feature_hotspot.fetch("measurement")
+    assert thesis_schemer.valid?(thesis.to_h),
+           thesis_schemer.validate(thesis.to_h).map { |error| error["error"] }.inspect
   end
 
   def test_file_and_metric_in_separate_evidence_items_do_not_form_an_admissible_anchor
@@ -174,6 +257,29 @@ class RefactorPatrolThesisNormalizerTest < Minitest::Test
     assert_includes thesis.risk.fetch("flags"), "boundary_override_attempt"
   end
 
+  def test_string_lines_are_normalized_and_other_line_types_are_discarded
+    raw = valid_raw_thesis.merge(
+      "evidence" => [
+        { "file" => "lib/checkout.rb", "line" => "1", "claim" => "string line" },
+        { "file" => "lib/checkout.rb", "line" => 1.5, "snippet" => "messy", "claim" => "float line" }
+      ]
+    )
+
+    thesis = normalize(raw)
+
+    assert_equal 1, thesis.evidence.first.fetch("line")
+    refute thesis.evidence.last.key?("line")
+  end
+
+  def test_schema_invalid_normalization_returns_error_details
+    raw = valid_raw_thesis
+    raw["risk"]["caps"]["est_files"] = -1
+    result = normalize(raw)
+
+    assert_instance_of Hive::RefactorPatrol::ThesisNormalizer::Invalid, result
+    refute_empty result.errors
+  end
+
   def test_v2_schema_strictly_rejects_signal_and_value_on_evidence
     thesis = normalize(valid_raw_thesis)
     payload = thesis.to_h
@@ -193,6 +299,7 @@ class RefactorPatrolThesisNormalizerTest < Minitest::Test
 
     assert_equal true, thesis.required_validation.fetch("characterization_first")
     assert_includes thesis.required_validation.fetch("notes"), "Add characterization tests"
+    assert_includes thesis.risk.fetch("flags"), "missing_behavior_validation"
     assert_equal "medium", thesis.confidence
   end
 
@@ -213,6 +320,7 @@ class RefactorPatrolThesisNormalizerTest < Minitest::Test
     thesis = normalize(raw, commands: {})
 
     assert_equal true, thesis.required_validation.fetch("characterization_first")
+    assert_includes thesis.risk.fetch("flags"), "missing_behavior_validation"
     assert_includes thesis.required_validation.fetch("notes"), "Name explicit validation commands"
   end
 
@@ -248,9 +356,13 @@ class RefactorPatrolThesisNormalizerTest < Minitest::Test
 
   private
 
-  def normalize(raw, feature: self.feature(tests: [ "test/checkout_test.rb" ]), leverage: feature_leverage, commands: { "test" => "rake test" })
+  def normalize(raw, feature: self.feature(tests: [ "test/checkout_test.rb" ]), leverage: feature_leverage,
+                commands: { "test" => "rake test" }, min_leverage_score: 0.0)
     with_tmp_dir do |dir|
-      normalizer = Hive::RefactorPatrol::ThesisNormalizer.new(project_root: dir, commands: commands)
+      materialize_thesis_evidence(dir, raw_theses: [ raw ], feature: feature)
+      normalizer = Hive::RefactorPatrol::ThesisNormalizer.new(
+        project_root: dir, commands: commands, min_leverage_score: min_leverage_score
+      )
       return normalizer.call(feature: feature, leverage: leverage, raw: raw, index: 0)
     end
   end

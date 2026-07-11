@@ -544,6 +544,22 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     end
   end
 
+  def test_revalidated_patch_generations_are_append_only
+    with_tmp_dir do |dir|
+      store = initialized_store(dir)
+      token = store.claim_action!("job-1", fix_action_id(store), owner: "runner", now: T0)
+
+      store.record_patch_receipt!(token, receipt: { "commit_sha" => "a" * 40 }, now: T0 + 1)
+      store.record_patch_receipt!(token, receipt: { "commit_sha" => "b" * 40 }, now: T0 + 2)
+      store.record_patch_receipt!(token, receipt: { "commit_sha" => "b" * 40 }, now: T0 + 3)
+
+      receipts = store.read_job("job-1").fetch("actions").first.fetch("receipts")
+      assert_equal "a" * 40, receipts.dig("patch", "commit_sha")
+      assert_equal "b" * 40, receipts.dig("patch_2", "commit_sha")
+      refute receipts.key?("patch_3"), "idempotent receipt retry must not add a generation"
+    end
+  end
+
   def test_revocation_blocks_unpublished_work_but_allows_remote_reconciliation
     with_tmp_dir do |dir|
       store = initialized_store(dir)

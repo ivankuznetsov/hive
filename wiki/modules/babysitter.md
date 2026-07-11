@@ -80,7 +80,7 @@ Closed outcome enum: `success`, `failure`, `conflict`, `timeout`, `budget_exhaus
 - Current source/test coverage also treats `GIT_EXEC_PATH`, `GIT_ASKPASS`, and `SSH_ASKPASS` as fail-closed git env seams in that same dry-run boundary.
 - The GH browser-flag scanner is command-aware: it still skips real `--web` / short `-w` browser flags, but treats `w` inside value-taking read-option values as data, so reads such as `pr diff -eworkflow.yml`, `pr list -lwip`, `pr view -qweb`, and `pr list --search -wip` pass through.
 
-- Skip-log FIFO hardening: both dry-run stubs now preflight existing skip-log targets with `File.lstat`, open with `File::NOFOLLOW | File::NONBLOCK`, keep the post-open regular-file/owner check, and warn while still skipping when a FIFO, symlink, device, or non-owned path is configured.
+- Skip-log path hardening: both dry-run stubs preflight existing targets with `File.lstat`, open with `File::NOFOLLOW | File::NONBLOCK`, require the descriptor's device/inode to match that preflight, and keep the post-open regular-file/owner/link-count checks. Missing targets use exclusive creation and restart the full preflight on `EEXIST`, so a FIFO, symlink, device, hard link, non-owned path, or concurrent pathname swap warns while the command remains skipped.
 
 ## Backlinks
 

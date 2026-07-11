@@ -4,6 +4,7 @@ require "pty"
 require "rbconfig"
 require "timeout"
 require "hive/babysitter/dry_run_env"
+require_relative "../../../bin/hive-babysitter-skip-log"
 
 class BabysitterDryRunEnvTest < Minitest::Test
   include HiveTestHelper
@@ -419,6 +420,64 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_equal "existing\n", File.read(target)
       assert_includes git_err, "[dry-run] failed to write skip log #{link}: dry-run skip log link count is not 1"
       assert_includes gh_err, "[dry-run] failed to write skip log #{link}: dry-run skip log link count is not 1"
+    end
+  end
+
+  def test_skip_log_refuses_existing_file_swapped_during_open
+    with_tmp_dir do |dir|
+      path = File.join(dir, "skipped.log")
+      target = File.join(dir, "target.log")
+      File.write(path, "existing\n")
+      File.write(target, "target\n")
+      real_open = File.method(:open)
+
+      racing_open = lambda do |opened_path, *args, &block|
+        File.unlink(path)
+        File.link(target, path)
+        real_open.call(opened_path, *args) do |file|
+          File.unlink(target)
+          block.call(file)
+        end
+      end
+
+      error = assert_raises(IOError) do
+        with_replaced_singleton_method(File, :open, racing_open) do
+          append_skip_log(path) { |file| file.puts("blocked") }
+        end
+      end
+
+      assert_equal "dry-run skip log changed during open", error.message
+      assert_equal "target\n", File.read(path)
+    end
+  end
+
+  def test_skip_log_exclusively_creates_after_missing_preflight
+    with_tmp_dir do |dir|
+      path = File.join(dir, "skipped.log")
+      target = File.join(dir, "target.log")
+      File.write(target, "target\n")
+      real_open = File.method(:open)
+      first_open = true
+
+      racing_open = lambda do |opened_path, *args, &block|
+        if first_open
+          first_open = false
+          File.link(target, path)
+        end
+        real_open.call(opened_path, *args) do |file|
+          File.unlink(target)
+          block.call(file)
+        end
+      end
+
+      error = assert_raises(IOError) do
+        with_replaced_singleton_method(File, :open, racing_open) do
+          append_skip_log(path) { |file| file.puts("blocked") }
+        end
+      end
+
+      assert_equal "dry-run skip log link count is not 1", error.message
+      assert_equal "target\n", File.read(target)
     end
   end
 

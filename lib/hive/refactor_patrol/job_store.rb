@@ -27,7 +27,16 @@ module Hive
         url number repository registration base_branch base_sha merge_sha
         merged_at changed_paths manifest_checksum
       ].freeze
-      POLICY_KEYS = %w[discovery auto_fix issue_filing epoch captured_at].freeze
+      POLICY_KEYS = %w[discovery auto_fix issue_filing action epoch captured_at].freeze
+      POLICY_ACTION_KEYS = %w[
+        default_branch auto_fix_agent min_confidence commands caps
+        issue_min_leverage_score
+      ].freeze
+      POLICY_COMMAND_KEYS = %w[docs format lint typecheck test].freeze
+      POLICY_CAP_KEYS = %w[
+        single_feature_only allow_dependency_bumps allow_public_api_changes
+        max_files max_diff_lines allow_cross_feature
+      ].freeze
       DISPOSITION_KEYS = %w[id feature_id fingerprint score admissible reasons reference thesis family_id].freeze
       FEATURE_RESULT_KEYS = %w[feature_id complete thesis_ids errors].freeze
       ACTION_REQUIRED_KEYS = %w[
@@ -447,6 +456,16 @@ module Hive
         end
       end
 
+      # Last-moment fence for an external transition. This intentionally
+      # performs no state mutation; holding the aggregate lock while checking
+      # the active generation proves a superseded worker cannot proceed.
+      def assert_action_claim!(token, now: Time.now)
+        mutate_action_claim(token, now: now) do |aggregate, _action, _claim|
+          aggregate
+        end
+        true
+      end
+
       # The durable creation intent is write-once and must precede the remote
       # request. Retrying the same payload returns the authoritative aggregate;
       # a different payload is a conflicting external transaction.
@@ -505,7 +524,21 @@ module Hive
       end
 
       def record_patch_receipt!(token, receipt:, now: Time.now)
-        record_action_receipt!(token, key: "patch", value: receipt, now: now)
+        payload = json_copy(receipt)
+        mutate_action_claim(token, now: now) do |aggregate, action, _claim|
+          receipts = action.fetch("receipts")
+          patch_keys = receipts.keys.grep(/\Apatch(?:_\d+)?\z/).sort_by do |key|
+            key == "patch" ? 1 : key.delete_prefix("patch_").to_i
+          end
+          next aggregate if patch_keys.any? { |key| receipts.fetch(key) == payload }
+
+          sequence = patch_keys.empty? ? 1 : patch_keys.map do |key|
+            key == "patch" ? 1 : key.delete_prefix("patch_").to_i
+          end.max + 1
+          key = sequence == 1 ? "patch" : "patch_#{sequence}"
+          receipts[key] = payload
+          touch_action!(aggregate, action, now)
+        end
       end
 
       def record_fix_receipt!(token, receipt:, now: Time.now)
@@ -774,7 +807,7 @@ module Hive
             "thesis_fingerprint" => thesis.fetch("fingerprint"),
             "kind" => kind
           }.tap do |item|
-            item["family_id"] = family_id if kind == "issue"
+            item["family_id"] = family_id unless family_id.to_s.empty?
           end
         end
 
@@ -1241,7 +1274,61 @@ module Hive
         %w[discovery auto_fix issue_filing].each do |key|
           inconsistent!("policy #{key} must be boolean", path) unless [ true, false ].include?(policy.fetch(key))
         end
+        validate_action_policy!(policy.fetch("action"), path) if policy.key?("action")
+        if policy.key?("epoch") && !policy.fetch("epoch").to_s.match?(/\A[a-f0-9]{64}\z/)
+          inconsistent!("policy epoch must be a SHA-256 digest", path)
+        end
         timestamp!(policy["captured_at"], "policy captured_at", path) if policy.key?("captured_at")
+      end
+
+      def validate_action_policy!(action, path)
+        strict_hash!(
+          action,
+          required: POLICY_ACTION_KEYS,
+          allowed: POLICY_ACTION_KEYS,
+          label: "policy action",
+          path: path
+        )
+        %w[default_branch auto_fix_agent].each do |key|
+          nonempty_string!(action.fetch(key), "policy action #{key}", path)
+        end
+        unless %w[low medium high].include?(action.fetch("min_confidence"))
+          inconsistent!("policy action min_confidence is invalid", path)
+        end
+
+        commands = action.fetch("commands")
+        strict_hash!(
+          commands,
+          required: POLICY_COMMAND_KEYS,
+          allowed: POLICY_COMMAND_KEYS,
+          label: "policy action commands",
+          path: path
+        )
+        commands.each do |key, value|
+          next if value.nil? || (value.is_a?(String) && !value.strip.empty?)
+
+          inconsistent!("policy action command #{key} must be null or non-empty", path)
+        end
+
+        caps = action.fetch("caps")
+        strict_hash!(
+          caps,
+          required: POLICY_CAP_KEYS,
+          allowed: POLICY_CAP_KEYS,
+          label: "policy action caps",
+          path: path
+        )
+        %w[single_feature_only allow_dependency_bumps allow_public_api_changes allow_cross_feature].each do |key|
+          inconsistent!("policy action cap #{key} must be boolean", path) unless [ true, false ].include?(caps.fetch(key))
+        end
+        %w[max_files max_diff_lines].each do |key|
+          value = caps.fetch(key)
+          inconsistent!("policy action cap #{key} must be positive", path) unless value.is_a?(Integer) && value.positive?
+        end
+        score = action.fetch("issue_min_leverage_score")
+        unless score.is_a?(Numeric) && score.between?(0, 1)
+          inconsistent!("policy action issue_min_leverage_score must be between 0 and 1", path)
+        end
       end
 
       def validate_disposition!(item, name, path)

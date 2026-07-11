@@ -164,6 +164,33 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
     end
   end
 
+  def test_intake_snapshots_the_complete_action_policy
+    with_tmp_dir do |dir|
+      gh = FakeGh.new
+      gh.details = { 2 => details(2, at: T0) }
+      cfg = enabled_cfg
+      cfg["refactor_patrol"]["auto_fix"].merge!("enabled" => true, "agent" => "codex")
+      cfg["refactor_patrol"]["issue_filing"].merge!(
+        "enabled" => true, "min_leverage_score" => 0.7
+      )
+      cfg["refactor_patrol"]["caps"]["max_files"] = 3
+      cfg["refactor_patrol"]["commands"]["test"] = "bin/test"
+
+      reconciler(dir, gh, cfg: cfg).ingest(
+        project: "demo", pr: "https://github.com/acme/demo/pull/2", now: T0
+      )
+      policy = job_store(dir).jobs.fetch(0).fetch("policy")
+
+      assert_equal true, policy.fetch("auto_fix")
+      assert_equal true, policy.fetch("issue_filing")
+      assert_equal "codex", policy.dig("action", "auto_fix_agent")
+      assert_equal 3, policy.dig("action", "caps", "max_files")
+      assert_equal "bin/test", policy.dig("action", "commands", "test")
+      assert_equal 0.7, policy.dig("action", "issue_min_leverage_score")
+      assert_match(/\A[a-f0-9]{64}\z/, policy.fetch("epoch"))
+    end
+  end
+
   def test_pagination_failure_holds_checkpoint_and_publishes_no_new_job
     with_tmp_dir do |dir|
       gh = FakeGh.new

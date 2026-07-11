@@ -6,6 +6,7 @@ require "hive/atomic_file"
 require "hive/config"
 require "hive/gh"
 require "hive/refactor_patrol/job_store"
+require "hive/refactor_patrol/policy"
 require "hive/refactor_patrol/pr_manifest_resolver"
 
 module Hive
@@ -262,13 +263,7 @@ module Hive
       end
 
       def policy_snapshot(cfg, now)
-        refactor = cfg.fetch("refactor_patrol")
-        {
-          "discovery" => true,
-          "auto_fix" => refactor.dig("auto_fix", "enabled") == true,
-          "issue_filing" => refactor.dig("issue_filing", "enabled") == true,
-          "captured_at" => now.utc.iso8601
-        }
+        Hive::RefactorPatrol::Policy.capture(cfg, now: now)
       end
 
       def load_state(project_root)

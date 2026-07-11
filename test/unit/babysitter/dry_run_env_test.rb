@@ -95,7 +95,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes real_invocations,
                       "git -c core.fsmonitor=false -c core.askPass= -c log.showSignature=false " \
                       "-c gpg.program=false -c gpg.openpgp.program=false -c gpg.x509.program=false " \
-                      "-c gpg.ssh.program=false --no-pager status --short"
+                      "-c gpg.ssh.program=false --no-lazy-fetch --no-pager status --short"
       assert_includes real_invocations, "gh repo view owner/repo"
       refute_includes real_invocations, "pwn-git"
       refute_includes real_invocations, "pwn-gh"
@@ -1266,6 +1266,23 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_git_stub_fails_closed_when_git_lacks_no_lazy_fetch_support
+    with_tmp_dir do |dir|
+      marker = File.join(dir, "read-ran")
+      legacy_git = git_without_no_lazy_fetch_binary(dir, marker)
+      env = {
+        "HIVE_BABYSITTER_REAL_GIT" => legacy_git,
+        "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "skipped.log")
+      }
+
+      _out, err, status = Open3.capture3(env, stub_path("git"), "show", "HEAD:payload.txt")
+
+      refute status.success?, "Git without no-lazy-fetch support unexpectedly accepted the read"
+      assert_includes err, "unknown option: --no-lazy-fetch"
+      refute_path_exists marker
+    end
+  end
+
   def test_git_stub_forces_no_pager_for_tty_passthrough
     with_tmp_git_repo do |dir|
       marker = File.join(dir, "pager-ran")
@@ -1579,6 +1596,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       "-c", "gpg.openpgp.program=false",
       "-c", "gpg.x509.program=false",
       "-c", "gpg.ssh.program=false",
+      "--no-lazy-fetch",
       "--no-pager"
     ] + passthrough).join(' ')}"
   end
@@ -1662,6 +1680,20 @@ class BabysitterDryRunEnvTest < Minitest::Test
           file.puts("\#{key}=\#{value}")
         end
       end
+    RUBY
+    FileUtils.chmod("+x", path)
+    path
+  end
+
+  def git_without_no_lazy_fetch_binary(dir, marker)
+    path = File.join(dir, "legacy-git")
+    File.write(path, <<~RUBY)
+      #!#{RbConfig.ruby}
+      if ARGV.include?("--no-lazy-fetch")
+        warn "unknown option: --no-lazy-fetch"
+        exit 129
+      end
+      File.write(#{marker.dump}, ARGV.join(" "))
     RUBY
     FileUtils.chmod("+x", path)
     path

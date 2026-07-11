@@ -330,6 +330,9 @@ def hardened_passthrough_argv(argv, rest)
     "-c", "gpg.openpgp.program=false",
     "-c", "gpg.x509.program=false",
     "-c", "gpg.ssh.program=false",
+    # Git 2.45+ understands this global option; older versions fail closed before dispatching
+    # an object read instead of ignoring the GIT_NO_LAZY_FETCH environment guard below.
+    "--no-lazy-fetch",
     # A read can otherwise auto-spawn a repo/caller-controlled `core.pager` on a TTY; force
     # `--no-pager` so a dry-run read cannot launch a pager (PAGER/GIT_PAGER are also scrubbed below).
     "--no-pager",

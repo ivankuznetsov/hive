@@ -57,6 +57,8 @@ task default: :test
 
 ## Unit suite (`test/unit/`)
 
+Babysitter dry-run compatibility coverage in `babysitter/dry_run_env_test.rb` pins Git 2.45+'s global `--no-lazy-fetch` passthrough and models pre-2.45 Git rejecting that option before an allowlisted object read can execute.
+
 | File | Covers |
 |------|--------|
 | `config_test.rb` | `Hive::Config` — defaults, `default_workflow`, deep-merge, register/find, malformed YAML rejection, normal and patrol reviewer validation, Screenote base URL validation, and the migration error for obsolete `screenote.api_token`. |

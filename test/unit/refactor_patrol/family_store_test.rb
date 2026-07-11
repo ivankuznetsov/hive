@@ -1,6 +1,7 @@
 require "test_helper"
 require "json"
 require "hive/refactor_patrol/family_store"
+require "hive/refactor_patrol/job_store"
 require "hive/refactor_patrol/thesis"
 
 class RefactorPatrolFamilyStoreTest < Minitest::Test
@@ -93,6 +94,43 @@ class RefactorPatrolFamilyStoreTest < Minitest::Test
       assert_equal first.family_id, matched.family_id
       assert_equal before, matched.record.fetch("descriptor")
       assert_equal 2, matched.record.fetch("occurrences").size
+    end
+  end
+
+  def test_rebuilds_a_missing_or_corrupt_family_from_authoritative_jobs_before_matching_reworded_work
+    %i[missing corrupt].each do |damage|
+      with_tmp_dir do |dir|
+        store = family_store(dir)
+        original = thesis
+        first = store.resolve(
+          thesis: original,
+          repository: "acme/polyglot",
+          job_id: "job-1",
+          source: source
+        )
+        write_authoritative_family_job(dir, original, first.family_id)
+        path = File.join(store.root, "#{first.family_id}.json")
+        damage == :missing ? FileUtils.rm_f(path) : File.binwrite(path, "{")
+
+        reworded = thesis(
+          id: "checkout-refactor-2",
+          fingerprint: "fp-reworded",
+          problem: "Payment routing repeats authorization policy in several handlers",
+          proposed_refactor: "Centralize payment authorization policy"
+        )
+        matched = store.resolve(
+          thesis: reworded,
+          repository: "acme/polyglot",
+          job_id: "job-2",
+          source: source("number" => 43, "url" => "https://example.test/acme/polyglot/pull/43")
+        )
+
+        assert_equal first.family_id, matched.family_id, damage
+        assert_equal "structural_match", matched.reason, damage
+        rebuilt = JSON.parse(File.read(path))
+        assert_equal first.descriptor, rebuilt.fetch("descriptor"), damage
+        assert_equal %w[job-1 job-2], rebuilt.fetch("occurrences").map { |item| item.fetch("job_id") }, damage
+      end
     end
   end
 
@@ -333,6 +371,53 @@ class RefactorPatrolFamilyStoreTest < Minitest::Test
 
   def family_store(dir)
     FamilyStore.new(dir, clock: -> { T0 })
+  end
+
+  def write_authoritative_family_job(dir, item, family_id)
+    store = Hive::RefactorPatrol::JobStore.new(dir)
+    store.write_job!(
+      {
+        "schema" => "hive-refactor-patrol-job",
+        "schema_version" => 2,
+        "job_id" => "job-1",
+        "source" => source.merge(
+          "registration" => "polyglot",
+          "base_branch" => "main",
+          "base_sha" => "b" * 40
+        ),
+        "analysis_sha" => "c" * 40,
+        "policy" => { "discovery" => true, "auto_fix" => false, "issue_filing" => true },
+        "state" => "classified",
+        "complete" => false,
+        "dispositions" => {
+          "accepted" => [],
+          "flagged" => [
+            {
+              "id" => item.id,
+              "feature_id" => item.feature_id,
+              "fingerprint" => item.fingerprint,
+              "score" => 0.8,
+              "admissible" => true,
+              "reasons" => [ "cross_feature_impact" ],
+              "thesis" => item.to_h
+            }
+          ],
+          "suppressed" => []
+        },
+        "feature_results" => [],
+        "review_errors" => [],
+        "zero_reason" => nil,
+        "attempts" => [ { "number" => 1, "outcome" => "classified" } ],
+        "actions" => [],
+        "created_at" => T0.iso8601,
+        "updated_at" => T0.iso8601
+      }
+    )
+    store.initialize_actions!(
+      "job-1",
+      specifications: [ { "thesis_id" => item.id, "kind" => "issue", "family_id" => family_id } ],
+      now: T0
+    )
   end
 
   def source(overrides = {})

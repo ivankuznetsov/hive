@@ -19,6 +19,7 @@ module Hive
       RUBY_STARTUP_ENV = %w[
         RUBYOPT RUBYLIB BUNDLE_GEMFILE BUNDLE_BIN_PATH GEM_HOME GEM_PATH
       ].freeze
+      DYNAMIC_LOADER_ENV = /\A(?:LD|DYLD)_/.freeze
 
       def with_env(worktree_path)
         # Resolve real git/gh *before* prepending the overlay onto PATH,
@@ -40,12 +41,14 @@ module Hive
           "HIVE_BABYSITTER_REAL_GIT" => ENV["HIVE_BABYSITTER_REAL_GIT"],
           "HIVE_BABYSITTER_REAL_GH" => ENV["HIVE_BABYSITTER_REAL_GH"]
         }
+        ENV.keys.grep(DYNAMIC_LOADER_ENV).each { |key| old[key] = ENV.delete(key) }
         ENV["PATH"] = [ overlay, ENV["PATH"] ].compact.join(File::PATH_SEPARATOR)
         ENV["HIVE_BABYSITTER_DRY_RUN_LOG"] = skip_log
         ENV["HIVE_BABYSITTER_REAL_GIT"] = real_git
         ENV["HIVE_BABYSITTER_REAL_GH"] = real_gh
         yield
       ensure
+        ENV.keys.grep(DYNAMIC_LOADER_ENV).each { |key| ENV.delete(key) }
         old&.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
         FileUtils.rm_rf(File.join(worktree_path, OVERLAY_DIRNAME))
       end

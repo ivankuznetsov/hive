@@ -252,6 +252,55 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_with_env_scrubs_dynamic_loader_environment_before_overlay_processes_start
+    skip "LD_PRELOAD regression is Linux-specific" unless RUBY_PLATFORM.include?("linux")
+
+    with_tmp_dir do |dir|
+      source = File.join(dir, "preload.c")
+      preload = File.join(dir, "preload.so")
+      marker = File.join(dir, "preload-ran")
+      File.write(source, <<~C)
+        #include <stdio.h>
+        #include <stdlib.h>
+
+        __attribute__((constructor)) static void mark_preload(void) {
+          const char *path = getenv("HIVE_PRELOAD_MARKER");
+          if (path) {
+            FILE *file = fopen(path, "a");
+            if (file) fclose(file);
+          }
+        }
+      C
+      _out, err, status = Open3.capture3("cc", "-shared", "-fPIC", source, "-o", preload)
+      assert status.success?, err
+      recording_binary(dir, "git")
+      recording_binary(dir, "gh")
+
+      loader_env = {
+        "LD_PRELOAD" => preload,
+        "LD_HIVE_TEST" => "ld-value",
+        "DYLD_HIVE_TEST" => "dyld-value",
+        "HIVE_PRELOAD_MARKER" => marker
+      }
+      observed = nil
+      with_env(loader_env.merge("PATH" => [ dir, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR))) do
+        Hive::Babysitter::DryRunEnv.with_env(dir) do
+          observed = ENV.values_at("LD_PRELOAD", "LD_HIVE_TEST", "DYLD_HIVE_TEST")
+          _out, git_err, git_status = Open3.capture3("git", "status", "--short")
+          _out, gh_err, gh_status = Open3.capture3("gh", "repo", "view", "owner/repo")
+          assert git_status.success?, git_err
+          assert gh_status.success?, gh_err
+        end
+
+        assert_equal loader_env.values_at("LD_PRELOAD", "LD_HIVE_TEST", "DYLD_HIVE_TEST"),
+                     ENV.values_at("LD_PRELOAD", "LD_HIVE_TEST", "DYLD_HIVE_TEST")
+      end
+
+      assert_equal [ nil, nil, nil ], observed
+      refute_path_exists marker, "dynamic-loader hook ran before the dry-run overlay could guard the command"
+    end
+  end
+
   def test_stubs_refuse_relative_real_binary_paths
     with_tmp_dir do |dir|
       bin_dir = File.join(dir, "bin")
@@ -925,6 +974,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
         GIT_ASKPASS GIT_EXEC_PATH GIT_EXTERNAL_DIFF GIT_PAGER GIT_PROXY_COMMAND GIT_SSH GIT_SSH_COMMAND
         GIT_SSH_VARIANT SSH_ASKPASS GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
         GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM GIT_TRACE GIT_TRACE_PACKET GIT_TRACE2_EVENT
+        LD_HIVE_TEST DYLD_HIVE_TEST
         HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy
         SSL_CERT_FILE SSL_CERT_DIR ssl_cert_file ssl_cert_dir
       ]
@@ -962,6 +1012,8 @@ class BabysitterDryRunEnvTest < Minitest::Test
         "GIT_TRACE" => File.join(dir, "git-trace.log"),
         "GIT_TRACE_PACKET" => File.join(dir, "git-trace-packet.log"),
         "GIT_TRACE2_EVENT" => File.join(dir, "git-trace2-event.log"),
+        "LD_HIVE_TEST" => "ld-value",
+        "DYLD_HIVE_TEST" => "dyld-value",
         "HTTP_PROXY" => "http://127.0.0.1:8080",
         "HTTPS_PROXY" => "http://127.0.0.1:8443",
         "ALL_PROXY" => "socks5://127.0.0.1:1080",
@@ -1200,18 +1252,25 @@ class BabysitterDryRunEnvTest < Minitest::Test
       # rewrite `.git/index` to refresh stat data; the stub sets GIT_OPTIONAL_LOCKS=0 to keep
       # a dry-run read side-effect-free. Record the env the real binary actually receives so
       # deleting that guard (stub: `ENV["GIT_OPTIONAL_LOCKS"] = "0"`) turns this test red.
-      real_git = recording_env_binary(dir, "real-git", %w[GIT_OPTIONAL_LOCKS GIT_PAGER PAGER])
+      real_git = recording_env_binary(
+        dir,
+        "real-git",
+        %w[GIT_OPTIONAL_LOCKS GIT_PAGER PAGER LD_HIVE_TEST DYLD_HIVE_TEST]
+      )
       env = {
         "HIVE_BABYSITTER_REAL_GIT" => real_git,
         "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "skipped.log"),
         "GIT_PAGER" => "touch git-pager-pwned",
-        "PAGER" => "touch pager-pwned"
+        "PAGER" => "touch pager-pwned",
+        "LD_HIVE_TEST" => "ld-value",
+        "DYLD_HIVE_TEST" => "dyld-value"
       }
 
       _out, err, status = Open3.capture3(env, stub_path("git"), "-C", dir, "status", "--short")
 
       assert status.success?, err
-      assert_equal "GIT_OPTIONAL_LOCKS=0\nGIT_PAGER=<unset>\nPAGER=<unset>\n", File.read(File.join(dir, "env.log"))
+      assert_equal "GIT_OPTIONAL_LOCKS=0\nGIT_PAGER=<unset>\nPAGER=<unset>\n" \
+                   "LD_HIVE_TEST=<unset>\nDYLD_HIVE_TEST=<unset>\n", File.read(File.join(dir, "env.log"))
     end
   end
 

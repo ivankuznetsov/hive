@@ -476,6 +476,7 @@ end
 ENV.keys.grep(/\AGIT_CONFIG/).each { |key| ENV.delete(key) }
 ENV.keys.grep(/\AGIT_SSH/).each { |key| ENV.delete(key) }
 ENV.keys.grep(/\AGIT_TRACE/).each { |key| ENV.delete(key) }
+ENV.keys.grep(/\A(?:LD|DYLD)_/).each { |key| ENV.delete(key) }
 # Unlike git — which treats GIT_CONFIG_GLOBAL=/dev/null (and GIT_CONFIG_NOSYSTEM) as an explicit
 # "no config" sentinel — gh has no such escape hatch. It derives its config dir as
 # GH_CONFIG_DIR -> XDG_CONFIG_HOME/gh -> $HOME/.config/gh and then reads and creates files under

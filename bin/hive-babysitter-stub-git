@@ -362,6 +362,7 @@ end
 %w[GIT_ASKPASS GIT_EXEC_PATH GIT_EXTERNAL_DIFF GIT_PAGER GIT_SSH GIT_SSH_COMMAND PAGER SSH_ASKPASS].each { |key| ENV.delete(key) }
 ENV.keys.grep(/\AGIT_CONFIG/).each { |key| ENV.delete(key) }
 ENV.keys.grep(/\AGIT_TRACE/).each { |key| ENV.delete(key) }
+ENV.keys.grep(/\A(?:LD|DYLD)_/).each { |key| ENV.delete(key) }
 ENV["HOME"] = File::NULL
 ENV["XDG_CONFIG_HOME"] = File::NULL
 ENV["GIT_CONFIG_NOSYSTEM"] = "1"

@@ -416,28 +416,6 @@ def external_launcher_option?(rest)
   false
 end
 
-def make_gh_config_home
-  root = "/tmp"
-
-  128.times do
-    nonce = "%d-%d-%08x" % [
-      Process.pid,
-      Process.clock_gettime(Process::CLOCK_REALTIME, :nanosecond),
-      rand(0x1_0000_0000)
-    ]
-    path = File.join(root, "hive-babysitter-gh-#{nonce}")
-
-    begin
-      Dir.mkdir(path, 0o700)
-      return path
-    rescue Errno::EEXIST
-      next
-    end
-  end
-
-  raise IOError, "failed to create temporary gh config dir under #{root}"
-end
-
 rest = stripped_global_options(argv)
 
 unless read_only?(rest) && !external_launcher_option?(rest) && !host_override?(argv, rest) && !positional_host_override?(rest)
@@ -453,6 +431,11 @@ if real.empty?
 end
 unless File.absolute_path?(real)
   warn "hive-babysitter dry-run: HIVE_BABYSITTER_REAL_GH must be an absolute path; refusing to exec #{real.inspect}"
+  exit 127
+end
+config_home = ENV["HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR"].to_s
+unless File.absolute_path?(config_home) && File.directory?(config_home)
+  warn "hive-babysitter dry-run: HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR must name an absolute directory"
   exit 127
 end
 
@@ -480,11 +463,10 @@ ENV.keys.grep(/\AGIT_TRACE/).each { |key| ENV.delete(key) }
 # "no config" sentinel — gh has no such escape hatch. It derives its config dir as
 # GH_CONFIG_DIR -> XDG_CONFIG_HOME/gh -> $HOME/.config/gh and then reads and creates files under
 # it, so HOME=/dev/null leaves gh resolving /dev/null/.config/gh and failing with ENOTDIR. Point
-# HOME and GH_CONFIG_DIR at a fresh, empty directory instead: gh finds no attacker-controlled
-# config to honor (the user's real ~/.config/gh is out of reach) yet still has a writable home for
-# its own state. The directory is intentionally left in place — passthrough replaces this process,
-# so the stub never regains control to clean it up; it is empty and the OS tmp reaper sweeps it.
-config_home = make_gh_config_home
+# HOME and GH_CONFIG_DIR at the empty directory created for this dry-run instead: gh finds no
+# attacker-controlled config to honor (the user's real ~/.config/gh is out of reach) yet still
+# has a writable home for its own state. DryRunEnv removes the directory when the agent command
+# returns.
 ENV["HOME"] = config_home
 ENV["GH_CONFIG_DIR"] = config_home
 

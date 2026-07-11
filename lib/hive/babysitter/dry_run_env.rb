@@ -1,6 +1,7 @@
 require "fileutils"
 require "rbconfig"
 require "shellwords"
+require "tmpdir"
 
 module Hive
   module Babysitter
@@ -27,11 +28,12 @@ module Hive
         real_git = which("git").to_s
         real_gh = which("gh").to_s
         skip_log = File.join(worktree_path, SKIP_LOG_BASENAME)
+        gh_config_home = Dir.mktmpdir("hive-babysitter-gh-", "/tmp")
         overlay = prepare_overlay(
           worktree_path,
           real_git: real_git,
           real_gh: real_gh,
-          gh_config_dir: gh_config_dir,
+          gh_config_dir: gh_config_home,
           skip_log: skip_log
         )
         old = {
@@ -48,9 +50,10 @@ module Hive
       ensure
         old&.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
         FileUtils.rm_rf(File.join(worktree_path, OVERLAY_DIRNAME))
+        FileUtils.rm_rf(gh_config_home) if gh_config_home
       end
 
-      def prepare_overlay(worktree_path, real_git:, real_gh:, gh_config_dir: nil, skip_log:)
+      def prepare_overlay(worktree_path, real_git:, real_gh:, gh_config_dir:, skip_log:)
         overlay = File.join(worktree_path, OVERLAY_DIRNAME)
         FileUtils.mkdir_p(overlay)
         root = File.expand_path("../../..", __dir__)
@@ -95,19 +98,6 @@ module Hive
 
       def shell_word(value)
         Shellwords.escape(value.to_s)
-      end
-
-      def gh_config_dir
-        gh_config = ENV["GH_CONFIG_DIR"].to_s
-        return gh_config unless gh_config.empty?
-
-        xdg_config = ENV["XDG_CONFIG_HOME"].to_s
-        return File.join(xdg_config, "gh") unless xdg_config.empty?
-
-        home = ENV["HOME"].to_s
-        return if home.empty?
-
-        File.join(home, ".config", "gh")
       end
 
       def which(name)

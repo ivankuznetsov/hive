@@ -192,7 +192,8 @@ class BabysitterDryRunEnvTest < Minitest::Test
 
       env = {
         "RUBYLIB" => poison_dir,
-        "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "skipped.log")
+        "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "skipped.log"),
+        "HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR" => empty_gh_config_home(dir)
       }
 
       _out, err, status = Open3.capture3(env, stub_path("gh"), "pr", "comment", "42", "--body", "hi")
@@ -284,7 +285,8 @@ class BabysitterDryRunEnvTest < Minitest::Test
       missing_gh = File.join(dir, "missing-gh")
       env = {
         "HIVE_BABYSITTER_REAL_GH" => missing_gh,
-        "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "gh-skipped.log")
+        "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "gh-skipped.log"),
+        "HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR" => empty_gh_config_home(dir)
       }
 
       _out, err, status = Open3.capture3(env, stub_path("gh"), "repo", "view", "owner/repo")
@@ -342,10 +344,9 @@ class BabysitterDryRunEnvTest < Minitest::Test
       refute_equal File.join(dir, "evil-gh-config"), config_dir,
                    "command-local GH_CONFIG_DIR must not survive passthrough"
       refute_equal evil_trusted_config, config_dir, "private trusted-config override must not survive passthrough"
-      assert File.directory?(home), "HOME should point at a real directory gh can use"
-      assert File.directory?(config_dir), "GH_CONFIG_DIR should point at a real directory gh can use"
-      assert_empty Dir.children(config_dir),
-                   "gh's config dir should start empty so no caller-controlled config is honored"
+      assert_equal home, config_dir
+      refute_path_exists config_dir,
+                         "with_env must remove its temporary gh config dir after passthrough"
     end
   end
 
@@ -505,7 +506,8 @@ class BabysitterDryRunEnvTest < Minitest::Test
       env = {
         "HIVE_BABYSITTER_REAL_GH" => real_gh,
         "HIVE_BABYSITTER_REAL_GIT" => real_git,
-        "HIVE_BABYSITTER_DRY_RUN_LOG" => log_path
+        "HIVE_BABYSITTER_DRY_RUN_LOG" => log_path,
+        "HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR" => empty_gh_config_home(dir)
       }
 
       assert_stubbed env, "gh", "-R", "owner/repo", "pr", "ready", "42"
@@ -932,6 +934,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       env = {
         "HIVE_BABYSITTER_REAL_GH" => real_gh,
         "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "skipped.log"),
+        "HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR" => empty_gh_config_home(dir),
         "GH_PAGER" => "touch pager-pwned",
         "PAGER" => "touch pager-pwned",
         "GH_BROWSER" => "touch browser-pwned",
@@ -1019,6 +1022,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       env = {
         "HIVE_BABYSITTER_REAL_GH" => real_gh,
         "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "skipped.log"),
+        "HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR" => empty_gh_config_home(dir),
         "GIT_TRACE" => trace_path
       }
 
@@ -1042,6 +1046,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       env = {
         "HIVE_BABYSITTER_REAL_GH" => real_gh,
         "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "skipped.log"),
+        "HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR" => empty_gh_config_home(dir),
         "GH_HOST" => "evil.example.com",
         "GH_REPO" => "evil.example.com/owner/repo",
         "GH_ENTERPRISE_TOKEN" => "enterprise-secret",
@@ -1131,7 +1136,8 @@ class BabysitterDryRunEnvTest < Minitest::Test
       @real_log = File.join(dir, "real.log")
       env = {
         "HIVE_BABYSITTER_REAL_GH" => real_gh,
-        "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "skipped.log")
+        "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "skipped.log"),
+        "HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR" => empty_gh_config_home(dir)
       }
 
       assert_passes env, "gh", "pr", "diff", "42", "-eworkflow.yml"
@@ -1645,6 +1651,10 @@ class BabysitterDryRunEnvTest < Minitest::Test
     RUBY
     FileUtils.chmod("+x", path)
     path
+  end
+
+  def empty_gh_config_home(dir)
+    File.join(dir, "gh-config").tap { |path| FileUtils.mkdir_p(path) }
   end
 
   def stub_path(binary)

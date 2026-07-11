@@ -113,19 +113,44 @@ class RefactorPatrolCapsTest < Minitest::Test
     )
     dotnet = sample_thesis(
       boundary_files: [ "src/Acme/Client.cs" ],
-      evidence: [ code_evidence("src/Acme/Client.cs", "public record Client(string Endpoint);") ]
+      evidence: [ code_evidence("src/Acme/Client.cs", "public Client Create(string endpoint)") ]
     )
     python = sample_thesis(
       boundary_files: [ "src/acme/contracts.py" ],
       evidence: [ code_evidence("src/acme/contracts.py", "__all__ = [\"Client\"]") ]
     )
+    typescript = sample_thesis(
+      boundary_files: [ "src/client.ts" ],
+      evidence: [ code_evidence("src/client.ts", "export function createClient() {}") ]
+    )
+    rust = sample_thesis(
+      boundary_files: [ "src/client.rs" ],
+      evidence: [ code_evidence("src/client.rs", "pub fn create_client() -> Client") ]
+    )
+    ruby = sample_thesis(
+      boundary_files: [ "lib/client.rb" ],
+      evidence: [ code_evidence("lib/client.rb", "def create_client") ]
+    )
+    php = sample_thesis(
+      boundary_files: [ "src/Client.php" ],
+      evidence: [ code_evidence("src/Client.php", "public function createClient(): Client") ]
+    )
+    elixir = sample_thesis(
+      boundary_files: [ "lib/client.ex" ],
+      evidence: [ code_evidence("lib/client.ex", "def create_client(opts) do") ]
+    )
 
-    [ go, java, dotnet, python ].each { |thesis| Hive::RefactorPatrol::Caps.new(cfg).apply(thesis) }
+    declarations = [ go, java, dotnet, python, typescript, rust, ruby, php, elixir ]
+    declarations.each { |thesis| Hive::RefactorPatrol::Caps.new(cfg).apply(thesis) }
 
-    [ go, java, dotnet, python ].each do |thesis|
+    declarations.each do |thesis|
       assert_includes thesis.risk.fetch("advisories"), "touches_public_api_surface"
       assert_equal thesis.feature_boundary.fetch("owned_files"), thesis.risk.fetch("public_api_details")
     end
+
+    assert Hive::RefactorPatrol::Caps.public_api_declaration?(
+      "src/main/java/com/acme/Client.java", "public Client create(String endpoint)"
+    )
 
     assert Hive::RefactorPatrol::Caps.public_api_declaration?(
       "pkg/client/client.go", "func (client *Client) Send(request Request) error"
@@ -138,7 +163,10 @@ class RefactorPatrolCapsTest < Minitest::Test
       "pkg/client/client.go" => "func newClient() *Client",
       "src/main/java/com/acme/Client.java" => "final class Client",
       "src/Acme/Client.cs" => "internal class Client",
-      "src/acme/contracts.py" => "class Client:"
+      "src/acme/contracts.py" => "class _Client:",
+      "src/client.ts" => "function createClient() {}",
+      "src/client.rs" => "pub(crate) fn create_client()",
+      "lib/client.ex" => "defp create_client(opts) do"
     }
 
     cases.each do |path, snippet|
@@ -149,6 +177,19 @@ class RefactorPatrolCapsTest < Minitest::Test
       assert_empty thesis.risk.fetch("advisories"), "did not expect #{snippet.inspect} in #{path} to imply a public contract"
       assert_empty thesis.risk.fetch("public_api_details")
     end
+  end
+
+  def test_public_declaration_signatures_ignore_bodies_but_retain_contract_shape
+    before = "module Checkout\n  def self.call(request) = old(request)\nend\n"
+    body_only = "module Checkout\n  def self.call(request) = new_path(request)\nend\n"
+    changed_contract = "module Checkout\n  def self.call(request, options) = new_path(request)\nend\n"
+
+    signatures = Hive::RefactorPatrol::Caps.public_declaration_signatures("lib/checkout.rb", before)
+
+    assert_equal signatures,
+                 Hive::RefactorPatrol::Caps.public_declaration_signatures("lib/checkout.rb", body_only)
+    refute_equal signatures,
+                 Hive::RefactorPatrol::Caps.public_declaration_signatures("lib/checkout.rb", changed_contract)
   end
 
   def test_out_of_boundary_evidence_marks_cross_feature_impact
@@ -184,7 +225,16 @@ class RefactorPatrolCapsTest < Minitest::Test
       "src/Payments/packages.lock.json",
       "Directory.Build.props",
       "nuget.config",
-      "vcpkg.json"
+      "vcpkg.json",
+      "acme.gemspec",
+      "CMakeLists.txt",
+      "BUILD.bazel",
+      "rules/dependencies.bzl",
+      "flake.lock",
+      "build.zig.zon",
+      "acme.cabal",
+      "stack.yaml",
+      "cpanfile"
     ]
 
     paths.each do |path|

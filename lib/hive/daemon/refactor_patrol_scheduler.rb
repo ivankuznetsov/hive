@@ -106,34 +106,52 @@ module Hive
 
       def candidates(now: Time.now)
         @events.clear
-        enabled = enabled_entries
-        prune_repository_cache(enabled)
-        due_by_project = enabled.to_h do |entry|
+        managed = managed_entries
+        prune_repository_cache(managed)
+        due_by_project = managed.to_h do |entry|
           store = store_for(entry)
-          [ entry.fetch("name"), store.claimable_jobs(now: now) ]
+          discovery = if entry.dig("_refactor_patrol_cfg", "refactor_patrol", "enabled") == true
+            store.claimable_jobs(now: now)
+          else
+            []
+          end
+          work = discovery.map { |job| { aggregate: job, phase: :discovery } } +
+                 store.actionable_jobs(now: now).map { |job| { aggregate: job, phase: :action } }
+          [ entry.fetch("name"), work ]
         end
         return [] if due_by_project.values.all?(&:empty?)
 
-        duplicates, unresolved = duplicate_repositories(enabled)
-        enabled.flat_map do |entry|
+        active = managed.select { |entry| due_by_project.fetch(entry.fetch("name")).any? }
+        identity_entries = managed.select do |entry|
+          entry.dig("_refactor_patrol_cfg", "refactor_patrol", "enabled") == true ||
+            due_by_project.fetch(entry.fetch("name")).any?
+        end
+        duplicates, unresolved = duplicate_repositories(identity_entries)
+        active.flat_map do |entry|
           project = entry.fetch("name")
-          jobs = due_by_project.fetch(project)
+          work = due_by_project.fetch(project)
           if unresolved.any?
             evidence = { "unresolved_registrations" => unresolved }
-            jobs.each do |job|
-              block(entry, job, reason: "repository_identity_unresolved", evidence: evidence, now: now)
+            work.each do |item|
+              block(
+                entry, item.fetch(:aggregate), reason: "repository_identity_unresolved",
+                evidence: evidence, now: now
+              )
             end
             next []
           end
           duplicate = duplicates[project]
           if duplicate
-            jobs.each do |job|
-              block(entry, job, reason: "duplicate_repository_registration", evidence: duplicate, now: now)
+            work.each do |item|
+              block(
+                entry, item.fetch(:aggregate), reason: "duplicate_repository_registration",
+                evidence: duplicate, now: now
+              )
             end
             next []
           end
 
-          jobs.map { |job| candidate_for(entry, job) }
+          work.map { |item| candidate_for(entry, item.fetch(:aggregate), phase: item.fetch(:phase)) }
         end.sort_by { |candidate| [ parse_time(candidate[:merged_at]), candidate[:job_id] ] }
       rescue Hive::ConfigError, Hive::RefactorPatrol::JobStore::Error => e
         @events << { status: :blocked, reason: "scheduler_error", error: "#{e.class}: #{e.message}" }
@@ -149,7 +167,10 @@ module Hive
       def reserve(candidate, now: Time.now)
         entry = candidate.fetch(:entry)
         cfg = @config_loader.call(entry.fetch("path"))
-        unless cfg.dig("daemon", "enabled") == true && cfg.dig("refactor_patrol", "enabled") == true
+        phase = candidate.fetch(:action_phase, :discovery).to_sym
+        enabled = cfg.dig("daemon", "enabled") == true &&
+                  (phase == :action || cfg.dig("refactor_patrol", "enabled") == true)
+        unless enabled
           raise ReservationBlocked.new("architecture_patrol_disabled")
         end
 
@@ -157,6 +178,24 @@ module Hive
         aggregate = store.read_job(candidate.fetch(:job_id))
         manifest_path = candidate.fetch(:manifest_path)
         assert_manifest_matches!(manifest_path, aggregate)
+        if phase == :action
+          token = {
+            kind: :architecture_patrol,
+            phase: :action,
+            job_id: aggregate.fetch("job_id"),
+            registration: entry.fetch("name")
+          }
+          return candidate.merge(
+            slug: "#{PATROL_SLUG_PREFIX}-#{aggregate.fetch('job_id')}-actions",
+            stage: PATROL_STAGE,
+            command: "hive refactor-patrol #{Shellwords.escape(entry.fetch('name'))} " \
+                     "--job-manifest #{Shellwords.escape(manifest_path)} --actions --json",
+            state_file_mtime: nil,
+            state_file_path: nil,
+            hive_state_path: entry["hive_state_path"],
+            dispatch_token: token
+          )
+        end
         branch = cfg["default_branch"].to_s
         raise ReservationBlocked.new("missing_default_branch") if branch.empty?
 
@@ -182,7 +221,10 @@ module Hive
           state_file_mtime: nil,
           state_file_path: nil,
           hive_state_path: entry["hive_state_path"],
-          dispatch_token: token.merge(kind: :architecture_patrol, registration: entry.fetch("name"))
+          dispatch_token: token.merge(
+            kind: :architecture_patrol, phase: :discovery,
+            registration: entry.fetch("name")
+          )
         )
       rescue ReservationBlocked
         raise
@@ -197,6 +239,7 @@ module Hive
 
       def spawned(dispatch, pid:, process_start_time:, pgid:, now: Time.now)
         return dispatch if @dry_run
+        return dispatch if dispatch.dig(:dispatch_token, :phase) == :action
 
         store_for(dispatch.fetch(:entry)).attach_discovery_process!(
           dispatch.fetch(:dispatch_token), pid: pid,
@@ -208,6 +251,7 @@ module Hive
         token = dispatch[:dispatch_token]
         return unless token
         return dispatch if @dry_run || token[:dry_run]
+        return dispatch if token[:phase] == :action
 
         store_for(dispatch.fetch(:entry)).release_discovery!(
           token, reason: reason, now: now, backoff_sec: RETRY_BACKOFF_SEC
@@ -218,6 +262,7 @@ module Hive
 
       def complete(dispatch_token:, exit_code:, envelope:, now: Time.now)
         return completion_result(:dry_run, dispatch_token, envelope) if @dry_run || dispatch_token[:dry_run]
+        return complete_action(dispatch_token, exit_code, envelope) if dispatch_token[:phase] == :action
 
         entry = entry_for_token(dispatch_token)
         store = store_for(entry)
@@ -251,11 +296,10 @@ module Hive
 
       private
 
-      def enabled_entries
+      def managed_entries
         Array(@registry.call).filter_map do |entry|
           cfg = @config_loader.call(entry.fetch("path"))
           next unless cfg.dig("daemon", "enabled") == true
-          next unless cfg.dig("refactor_patrol", "enabled") == true
 
           entry.merge("_refactor_patrol_cfg" => cfg)
         rescue Hive::ConfigError, KeyError
@@ -306,10 +350,11 @@ module Hive
         @repository_cache.delete_if { |key, _repository| !current.key?(key) }
       end
 
-      def candidate_for(entry, aggregate)
+      def candidate_for(entry, aggregate, phase:)
         source = aggregate.fetch("source")
         {
           project: entry.fetch("name"), patrol_kind: :architecture,
+          action_phase: phase,
           job_id: aggregate.fetch("job_id"), pr_number: source.fetch("number"),
           pr_url: source.fetch("url"), merged_at: source["merged_at"],
           source: source, entry: entry,
@@ -374,16 +419,44 @@ module Hive
         "malformed_envelope"
       end
 
+      def complete_action(token, exit_code, envelope)
+        entry = entry_for_token(token)
+        aggregate = store_for(entry).read_job(token.fetch(:job_id))
+        valid = exit_code == 0 && envelope.is_a?(Hash) && @schemer.valid?(envelope) &&
+                envelope["job_id"] == aggregate.fetch("job_id") &&
+                envelope["project"] == entry.fetch("name") &&
+                envelope["project_root"] == entry.fetch("path") &&
+                envelope["source_pr"] == aggregate.fetch("source") &&
+                envelope["analysis_sha"] == aggregate.fetch("analysis_sha") &&
+                envelope["complete"] == aggregate.fetch("complete")
+        status = if valid
+          aggregate.fetch("complete") ? :closed : :action_pending
+        else
+          :retry
+        end
+        completion_result(status, token, envelope, aggregate: aggregate)
+      rescue Hive::RefactorPatrol::JobStore::Error, Hive::ConfigError, KeyError
+        completion_result(:retry, token, envelope, aggregate: aggregate)
+      end
+
       def completion_result(status, token, envelope, aggregate: nil)
         source = aggregate && aggregate["source"]
         dispositions = aggregate && aggregate["dispositions"]
-        use_envelope = %i[closed classified].include?(status) && envelope.is_a?(Hash)
+        actions = Array(aggregate && aggregate["actions"])
+        use_envelope = %i[closed classified action_pending].include?(status) && envelope.is_a?(Hash)
         {
           status: status, job_id: token[:job_id],
           pr_number: source && source["number"], pr_url: source && source["url"],
           accepted_count: use_envelope ? Array(envelope["accepted"]).size : Array(dispositions && dispositions["accepted"]).size,
           flagged_count: use_envelope ? Array(envelope["flagged"]).size : Array(dispositions && dispositions["flagged"]).size,
-          suppressed_count: use_envelope ? Array(envelope["suppressed"]).size : Array(dispositions && dispositions["suppressed"]).size
+          suppressed_count: use_envelope ? Array(envelope["suppressed"]).size : Array(dispositions && dispositions["suppressed"]).size,
+          action_count: actions.size,
+          terminal_action_count: actions.count { |action| action["terminal"] == true },
+          pending_action_ids: actions.reject { |action| action["terminal"] == true }
+                                     .map { |action| action["canonical_action_id"] }.compact,
+          action_outcomes: actions.to_h do |action|
+            [ action["canonical_action_id"], action["outcome"] ]
+          end.compact
         }
       end
 

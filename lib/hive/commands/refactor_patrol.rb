@@ -6,6 +6,7 @@ require "hive/config"
 require "hive/git_ops"
 require "hive/patrol/mapper"
 require "hive/refactor_patrol/caps"
+require "hive/refactor_patrol/action_runner"
 require "hive/refactor_patrol/collisions"
 require "hive/refactor_patrol/checkout_guard"
 require "hive/refactor_patrol/fingerprint"
@@ -20,9 +21,10 @@ module Hive
   module Commands
     class RefactorPatrol
       def initialize(project, json: false, dry_run: false, feature: nil, entrypoint: nil, path: nil, changed_since: nil, pr: nil,
-                     job_manifest: nil,
+                     job_manifest: nil, actions: false,
                      mapper_factory: nil, reviewer_factory: nil, leverage_factory: nil,
-                     caps_factory: nil, collisions_factory: nil, manifest_resolver_factory: nil)
+                     caps_factory: nil, collisions_factory: nil, manifest_resolver_factory: nil,
+                     action_runner_factory: nil)
         @project = project
         @json = json
         @dry_run = dry_run
@@ -32,6 +34,7 @@ module Hive
         @changed_since = changed_since
         @pr = pr
         @job_manifest = job_manifest
+        @actions = actions
         @mapper_factory = mapper_factory || lambda do |root, cfg, state|
           Hive::Patrol::Mapper.new(
             root,
@@ -56,9 +59,14 @@ module Hive
         @caps_factory = caps_factory || ->(cfg) { Hive::RefactorPatrol::Caps.new(cfg) }
         @collisions_factory = collisions_factory || ->(root, state) { Hive::RefactorPatrol::Collisions.new(root, state: state) }
         @manifest_resolver_factory = manifest_resolver_factory
+        @action_runner_factory = action_runner_factory || lambda do |root, cfg|
+          Hive::RefactorPatrol::ActionRunner.new(root, cfg: cfg)
+        end
       end
 
       def call
+        return emit(run_action_cycle, []) if @actions
+
         payload, theses = run_cycle
         emit(payload, theses)
       rescue Hive::Error => e
@@ -71,6 +79,16 @@ module Hive
       end
 
       private
+
+      def run_action_cycle
+        entry, project_root, cfg = resolve_project!
+        validate_mode!
+        @manifest = resolve_manifest(entry, project_root, cfg)
+        result = @action_runner_factory.call(project_root, cfg).run(
+          job_id: @manifest.fetch("job_id"), dry_run: @dry_run
+        )
+        build_action_payload(entry, project_root, result)
+      end
 
       def run_cycle
         entry, project_root, cfg = resolve_project!
@@ -101,7 +119,7 @@ module Hive
 
         project_root = entry.fetch("path")
         cfg = Hive::Config.load(project_root)
-        unless (cfg["refactor_patrol"] || {})["enabled"]
+        unless @actions || (cfg["refactor_patrol"] || {})["enabled"]
           raise Hive::ConfigError, "hive refactor-patrol: project #{entry.fetch('name').inspect} must opt in with refactor_patrol.enabled: true"
         end
 
@@ -236,6 +254,19 @@ module Hive
       end
 
       def validate_mode!
+        if @actions
+          unless @json && @job_manifest && !@pr
+            raise Hive::ConfigError,
+                  "hive refactor-patrol --actions requires --job-manifest and --json"
+          end
+          hints = [ @feature_hint, @entrypoint_hint, @path_hint, @changed_since ]
+          if hints.any? { |value| !value.nil? }
+            raise Hive::ConfigError,
+                  "hive refactor-patrol --actions cannot be combined with discovery scope hints"
+          end
+          return
+        end
+
         return unless pr_mode?
 
         unless @json
@@ -321,6 +352,44 @@ module Hive
           actions: [],
           attempts: []
         )
+      end
+
+      def build_action_payload(entry, project_root, result)
+        aggregate = result.aggregate
+        unless aggregate.fetch("job_id") == @manifest.fetch("job_id") &&
+               aggregate.fetch("source") == source_pr_context
+          raise Hive::ConfigError, "refactor patrol action job does not match its immutable manifest"
+        end
+
+        dispositions = aggregate.fetch("dispositions")
+        {
+          "schema" => "hive-refactor-patrol",
+          "schema_version" => Hive::RefactorPatrol::Reporter::V2_SCHEMA_VERSION,
+          "ok" => true,
+          "job_id" => aggregate.fetch("job_id"),
+          "project" => entry.fetch("name"),
+          "project_root" => project_root,
+          "dry_run" => @dry_run,
+          "source_pr" => aggregate.fetch("source"),
+          "analysis_sha" => aggregate.fetch("analysis_sha"),
+          "complete" => aggregate.fetch("complete"),
+          "features_mapped" => dispositions.values.flatten.map { |item| item["feature_id"] }.compact.uniq.size,
+          "accepted" => dispositions.fetch("accepted"),
+          "flagged" => dispositions.fetch("flagged"),
+          "suppressed" => dispositions.fetch("suppressed"),
+          "review_errors" => aggregate.fetch("review_errors"),
+          "zero_reason" => aggregate.fetch("zero_reason"),
+          "attempts" => aggregate.fetch("attempts"),
+          "actions" => aggregate.fetch("actions").map { |action| action_projection(action) },
+          "action_status" => result.completeness
+        }
+      end
+
+      def action_projection(action)
+        action.slice(
+          "canonical_action_id", "thesis_id", "thesis_fingerprint", "kind",
+          "family_id", "owner_job_id", "outcome", "terminal", "receipts"
+        ).compact
       end
 
       def pr_mode?

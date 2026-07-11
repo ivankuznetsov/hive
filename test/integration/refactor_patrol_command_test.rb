@@ -8,6 +8,8 @@ require "hive/commands/refactor_patrol"
 require "hive/config"
 require "hive/patrol/feature"
 require "hive/refactor_patrol/thesis"
+require "hive/refactor_patrol/job_store"
+require "hive/refactor_patrol/policy"
 
 class RefactorPatrolCommandTest < Minitest::Test
   include HiveTestHelper
@@ -373,6 +375,55 @@ class RefactorPatrolCommandTest < Minitest::Test
     end
   end
 
+  def test_action_mode_resumes_the_authoritative_job_and_emits_a_strict_v2_projection
+    with_refactor_patrol_project do |repo|
+      head = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      manifest = with_manifest_checksum(pr_manifest(merge_sha: head))
+      path = publish_job_manifest(repo, manifest)
+      source = manifest.fetch("source").merge(
+        "changed_paths" => manifest.fetch("changed_paths"),
+        "manifest_checksum" => manifest.fetch("manifest_checksum")
+      )
+      cfg = Hive::Config.load(repo)
+      policy = Hive::RefactorPatrol::Policy.capture(cfg, now: Time.utc(2026, 7, 10)).merge(
+        "auto_fix" => false, "issue_filing" => false
+      )
+      item = thesis("report-only", feature_id: "checkout", fingerprint: "fp-report-only")
+      accepted = {
+        "id" => item.id, "feature_id" => item.feature_id,
+        "fingerprint" => item.fingerprint,
+        "score" => item.expected_leverage.fetch("score"),
+        "admissible" => true, "reasons" => [], "thesis" => item.to_h
+      }
+      Hive::RefactorPatrol::JobStore.new(repo).write_job!(
+        {
+          "schema" => "hive-refactor-patrol-job", "schema_version" => 2,
+          "job_id" => manifest.fetch("job_id"), "source" => source,
+          "analysis_sha" => head, "policy" => policy,
+          "state" => "classified", "complete" => false,
+          "dispositions" => { "accepted" => [ accepted ], "flagged" => [], "suppressed" => [] },
+          "feature_results" => [], "review_errors" => [], "zero_reason" => nil,
+          "attempts" => [ { "number" => 1, "outcome" => "classified" } ],
+          "actions" => [], "created_at" => "2026-07-10T00:00:00Z",
+          "updated_at" => "2026-07-10T00:00:00Z"
+        }
+      )
+
+      out, err, status = with_captured_exit do
+        command_for(job_manifest: path, actions: true).call
+      end
+
+      assert_equal Hive::ExitCodes::SUCCESS, status, "#{out}\n#{err}"
+      payload = JSON.parse(out)
+      assert v2_refactor_schemer.valid?(payload),
+             v2_refactor_schemer.validate(payload).map { |error| error["error"] }.inspect
+      assert payload.fetch("complete")
+      assert_equal "complete", payload.dig("action_status", "state")
+      assert_empty payload.fetch("actions")
+      assert Hive::RefactorPatrol::JobStore.new(repo).read_job(manifest.fetch("job_id")).fetch("complete")
+    end
+  end
+
   def test_pr_mode_review_errors_are_partial_and_never_touch_legacy_state
     with_refactor_patrol_project do |repo|
       head = run!("git", "-C", repo, "rev-parse", "HEAD").strip
@@ -602,7 +653,7 @@ class RefactorPatrolCommandTest < Minitest::Test
   end
 
   def command_for(project: "demo", json: true, dry_run: false, feature_hint: nil, entrypoint_hint: nil, path_hint: nil, changed_since: nil,
-                  pr: nil, job_manifest: nil, manifest_resolver: nil, features: [], theses_by_feature: {}, reviewer: nil, leverage_scores: {},
+                  pr: nil, job_manifest: nil, actions: false, manifest_resolver: nil, features: [], theses_by_feature: {}, reviewer: nil, leverage_scores: {},
                   use_default_mapper: false)
     reviewer ||= FakeReviewer.new(theses_by_feature)
     Hive::Commands::RefactorPatrol.new(
@@ -615,6 +666,7 @@ class RefactorPatrolCommandTest < Minitest::Test
       changed_since: changed_since,
       pr: pr,
       job_manifest: job_manifest,
+      actions: actions,
       mapper_factory: use_default_mapper ? nil : ->(_root, _cfg, _state) { FakeMapper.new(features) },
       reviewer_factory: ->(_root, _cfg, _state) { reviewer },
       leverage_factory: ->(_root, _cfg) { FakeLeverage.new(leverage_scores) },

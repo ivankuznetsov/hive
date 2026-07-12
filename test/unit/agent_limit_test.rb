@@ -3,6 +3,8 @@ require "time"
 require "hive/agent_limit"
 
 class AgentLimitTest < Minitest::Test
+  include HiveTestHelper
+
   def test_detects_claude_usage_limit_menu
     text = <<~TEXT
       What do you want to do?
@@ -173,6 +175,16 @@ class AgentLimitTest < Minitest::Test
                  Hive::AgentLimit.retry_after(text: "Try again at Jul 18th, 2026 0:50 AM.", now: now)
     assert_equal fallback,
                  Hive::AgentLimit.retry_after(text: "Try again at Jul 18th, 2026 13:50 AM.", now: now)
+  end
+
+  def test_retry_after_falls_back_when_local_time_conversion_rejects_the_hint
+    now = Time.utc(2026, 7, 12, 20, 0, 0)
+    message = "You've hit your usage limit. Try again at Jul 18th, 2026 7:50 AM."
+
+    with_replaced_singleton_method(Time, :local, ->(*) { raise ArgumentError, "invalid local time" }) do
+      assert_equal (now + Hive::AgentLimit::RETRY_COOLDOWN_SEC).iso8601,
+                   Hive::AgentLimit.retry_after(text: message, now: now)
+    end
   end
 
   def test_retry_after_for_uses_latest_boundary_regardless_of_order

@@ -63,6 +63,8 @@ module Hive
     def push_branch(worktree_path, branch, cfg: nil, force: false,
                     expected_remote_oid: nil, expected_remote_absent: false,
                     remote: "origin", set_upstream: true)
+      branch = validated_branch_name(branch)
+      remote = validated_remote_target(remote)
       args = [ "git", "-C", worktree_path, "push" ]
       args << "-u" if set_upstream
       # --force-with-lease (not --force): a concurrent third-party update to
@@ -80,7 +82,7 @@ module Hive
       elsif force
         args << "--force-with-lease"
       end
-      args.push(remote.to_s, branch)
+      args.push(remote, branch)
       out, err, status = capture3(*args, cfg: cfg)
       PushResult.new(success: status.success?, stdout: out, stderr: err)
     rescue Hive::GhError => e
@@ -102,15 +104,12 @@ module Hive
     end
 
     def remote_branch_oid(worktree_path, branch, cfg: nil, remote: "origin")
-      name = branch.to_s
-      unless name.match?(/\A[a-zA-Z0-9][a-zA-Z0-9._\/-]{0,240}\z/) &&
-             !name.include?("..") && !name.end_with?("/", ".")
-        raise Hive::GhError, "remote branch name is invalid"
-      end
+      name = validated_branch_name(branch)
+      remote = validated_remote_target(remote)
 
       ref = "refs/heads/#{name}"
       out, err, status = capture3(
-        "git", "-C", worktree_path, "ls-remote", "--heads", remote.to_s, ref,
+        "git", "-C", worktree_path, "ls-remote", "--heads", remote, ref,
         cfg: cfg
       )
       unless status.success?
@@ -217,6 +216,27 @@ module Hive
       value
     end
     private_class_method :validated_repository_slug
+
+    def validated_branch_name(branch)
+      value = branch.to_s
+      unless value.match?(/\A[a-zA-Z0-9][a-zA-Z0-9._\/-]{0,240}\z/) &&
+             !value.include?("..") && !value.end_with?("/", ".")
+        raise Hive::GhError, "remote branch name is invalid"
+      end
+
+      value
+    end
+    private_class_method :validated_branch_name
+
+    def validated_remote_target(remote)
+      value = remote.to_s
+      if value.empty? || value.start_with?("-") || value.match?(/[\0\r\n]/)
+        raise Hive::GhError, "git remote target is invalid"
+      end
+
+      value
+    end
+    private_class_method :validated_remote_target
 
     def validated_github_host(host)
       value = host.to_s.strip

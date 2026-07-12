@@ -48,7 +48,10 @@ module Hive
 
       def load(project_root)
         key = File.expand_path(project_root)
-        return @transient[key] if @dry_run
+        if @dry_run
+          value = @transient[key]
+          return value && JSON.parse(JSON.generate(value))
+        end
 
         progress_path = path(project_root)
         return nil unless File.file?(progress_path)
@@ -69,7 +72,7 @@ module Hive
         validate!(progress)
         key = File.expand_path(project_root)
         if @dry_run
-          @transient[key] = Marshal.load(Marshal.dump(progress))
+          @transient[key] = JSON.parse(JSON.generate(progress))
           return progress
         end
 

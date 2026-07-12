@@ -202,7 +202,8 @@ progress is preserved under `quarantine/reconciler-progress/` and blocks rather
 than being silently trusted. Timestamp/scalar/OID types and cursor state are
 strict: an already-consumed current cursor is quarantined as impossible local
 continuation state, while a cursor loop returned by a live GitHub page follows
-remote failure/backoff. Dry-run uses only an in-memory sidecar.
+remote failure/backoff. Dry-run uses only an in-memory sidecar and JSON-detaches
+both writes and reads so its mutation semantics match disk-backed JSON loads.
 
 `Hive::Daemon::Policy` and `Hive::Daemon::ConcurrencyController` have no
 I/O at all — fully unit-testable without forking. The other modules

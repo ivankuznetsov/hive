@@ -64,6 +64,10 @@
 - Hardened the shared GitHub timeout itself: captures now own a process group
   and include pipe drain in the deadline, so a TERM-resistant helper that
   inherits stdout after `gh` exits is killed instead of hanging the daemon.
+  Push/ref lookup now also rejects unsafe branch and option-shaped remote
+  targets. The progress store uses JSON rather than `Marshal` for detached
+  dry-run state, and narrowly documented argv-form Git calls remain explicit
+  Brakeman false positives rather than security warnings.
 - Expanded focused unit, integration, schema, and command validation, including
   a real-git/bare-remote regression whose forked worker is hard-killed after
   push but before completion persistence, followed by dead-claim recovery,

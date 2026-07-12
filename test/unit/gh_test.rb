@@ -1204,11 +1204,17 @@ def test_push_branch_rejects_conflicting_or_invalid_exact_leases
   malformed = Hive::Gh.push_branch(
     "/tmp/worktree", "feature", expected_remote_oid: "not-an-oid"
   )
+  unsafe_branch = Hive::Gh.push_branch("/tmp/worktree", "--exec=helper")
+  unsafe_remote = Hive::Gh.push_branch("/tmp/worktree", "feature", remote: "--upload-pack=helper")
 
   refute conflicting.success?
   assert_includes conflicting.stderr, "both an OID and absence"
   refute malformed.success?
   assert_includes malformed.stderr, "OID is invalid"
+  refute unsafe_branch.success?
+  assert_includes unsafe_branch.stderr, "branch name is invalid"
+  refute unsafe_remote.success?
+  assert_includes unsafe_remote.stderr, "remote target is invalid"
 end
 
 def test_remote_branch_oid_rejects_unsafe_names_and_malformed_remote_records
@@ -1216,6 +1222,9 @@ def test_remote_branch_oid_rejects_unsafe_names_and_malformed_remote_records
     assert_raises(Hive::GhError, branch) do
       Hive::Gh.remote_branch_oid("/tmp/worktree", branch)
     end
+  end
+  assert_raises(Hive::GhError) do
+    Hive::Gh.remote_branch_oid("/tmp/worktree", "feature", remote: "--upload-pack=helper")
   end
 
   ok = Hive::Gh::CommandStatus.new(exitstatus: 0)

@@ -83,6 +83,26 @@
     {
       "fingerprint": "f74ae0226a7716c15cff765f647a29a11e0ad654a9b838930c9d72e26f4213ae",
       "note": "False positive. The packaged hive-bench Codex judge constructs an argv array and splats it into Open3.capture3; model, effort, and binary values are discrete argv elements and never enter a shell."
+    },
+    {
+      "fingerprint": "1b72cc3bd317334598f29b8c5e98645d02e3436b979e7e12705fae0d6b05005c",
+      "note": "False positive. RefactorPatrol::Fixer uses Open3.capture3 argv form. base_sha is the pinned validated Git OID and changed_path has already passed root-confined changed-path validation; the combined git-show revspec is one execve argv element and never reaches a shell."
+    },
+    {
+      "fingerprint": "45a80fef796e4e34b70db6fc1179d19cb48136f9984495afe3eba36b7440354d",
+      "note": "False positive. RefactorPatrol::PrOpener uses Open3.capture3 argv form after both publication_base_sha and commit_sha pass the lowercase 40-64 hex OID contract. The diff range is one execve argv element and never reaches a shell."
+    },
+    {
+      "fingerprint": "d477ab89b88d0ab84d095f04100e6fbb82265ced4d13e75fc9edcdf7be348972",
+      "note": "False positive. Hive::Gh.capture3 uses Process.spawn argv form. push_branch validates the branch grammar and refuses empty, option-shaped, NUL, or newline-bearing remote targets before building discrete argv elements; no shell interprets the lease, remote, or branch."
+    },
+    {
+      "fingerprint": "7487c4d0cdd78678c023482df25ec60bbb46046c33205efae8efe51288f49dff",
+      "note": "False positive. Worktree#create_exact! uses Open3.capture3 argv form. Architecture patrol derives branch_name from a strict fix-<sha256> canonical action id, and refs/heads/<branch> is passed as one execve argv element rather than through a shell."
+    },
+    {
+      "fingerprint": "00cf972fda785fe09a937e3969b8926d1333fd0f297592595eb42b2543148a21",
+      "note": "False positive. Hive::Gh.capture3 uses Process.spawn argv form. remote_branch_oid validates the branch grammar and refuses empty, option-shaped, NUL, or newline-bearing remote targets; the remote and exact refs/heads/<branch> are discrete execve argv elements."
     }
   ],
   "updated": "2026-07-13 00:00:00 +0000",

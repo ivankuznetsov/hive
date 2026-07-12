@@ -220,6 +220,10 @@ class HiveDaemonRefactorPatrolMergeProgressStoreTest < Minitest::Test
       store.write(dir, progress)
 
       assert_equal progress, store.load(dir)
+      loaded = store.load(dir)
+      loaded["registration"] = "mutated-reader"
+      assert_equal "demo", store.load(dir).fetch("registration"),
+                   "dry-run reads must be detached like JSON disk reads"
       refute File.exist?(store.path(dir))
       store.clear(dir)
       assert_nil store.load(dir)

@@ -197,7 +197,11 @@ stage does not move; the only same-stage workflow enqueue is the
    (terminal path) / `reason=reviewer_limits_reached` (review path) to
    distinguish them from tmux-death retries. The clear matches the observed marker's
    `marker_id` when present, falling back to the legacy `reason` guard only for
-   old markers without ids. Retry accounting is keyed by project, slug, stage,
+   old markers without ids. Once that guard succeeds, healer-managed clears
+   purge shadowed marker history atomically; generic state-file agents append
+   terminal markers after Hive's working marker, so removing only the current
+   error could otherwise reveal a dead marker from an earlier attempt and
+   strand redispatch behind another grace cycle. Retry accounting is keyed by project, slug, stage,
    and marker reason, not by marker id, because retryable terminal failures can
    mint a fresh `marker_id` for the same task. After a successful clear,
    it records the pre-clear state-file mtime in the dispatch baseline map so the

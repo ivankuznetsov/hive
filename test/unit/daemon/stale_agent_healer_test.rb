@@ -288,10 +288,10 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       )
 
       original = Hive::Markers.method(:clear_current)
-      Hive::Markers.define_singleton_method(:clear_current) do |path, *args|
+      Hive::Markers.define_singleton_method(:clear_current) do |path, **kwargs|
         raise Errno::ENOSPC, "no space left" if path == state_file
 
-        original.call(path, *args)
+        original.call(path, **kwargs)
       end
 
       begin
@@ -463,10 +463,10 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       )
 
       original = Hive::Markers.method(:clear_current)
-      Hive::Markers.define_singleton_method(:clear_current) do |path, *args|
+      Hive::Markers.define_singleton_method(:clear_current) do |path, **kwargs|
         raise Errno::ENOSPC, "no space left" if path == state_file
 
-        original.call(path, *args)
+        original.call(path, **kwargs)
       end
 
       begin
@@ -918,6 +918,28 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
         assert Hive::Markers.current(state_file).none?,
                "#{stage} limits_reached must clear so the daemon re-dispatches"
       end
+    end
+  end
+
+  def test_error_cooldown_recovery_purges_shadowed_working_and_error_markers
+    with_marker_file do |state_file|
+      past = (NOW - 60).iso8601
+      File.write(state_file, <<~MD)
+        # task
+
+        <!-- AGENT_WORKING pid=100 started=2026-05-20T10:00:00Z -->
+        <!-- ERROR reason=limits_reached retry_after=2026-05-20T10:30:00Z -->
+        <!-- AGENT_WORKING pid=200 started=2026-05-20T11:00:00Z -->
+        <!-- ERROR reason=limits_reached retry_after=#{past} -->
+      MD
+      row = make_error_limit_row(state_file, retry_after: past, stage: "2-generate")
+
+      heal([ row ])
+
+      assert Hive::Markers.current(state_file).none?,
+             "a successful retry clear must not expose a stale working/error marker"
+      refute_match Hive::Markers::MARKER_RE, File.read(state_file)
+      assert @logger.events.any? { |name, attrs| name == :marker_healed && attrs[:reason] == "limits_reached" }
     end
   end
 
@@ -1852,10 +1874,10 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       )
 
       original = Hive::Markers.method(:clear_current)
-      Hive::Markers.define_singleton_method(:clear_current) do |path, *args|
+      Hive::Markers.define_singleton_method(:clear_current) do |path, **kwargs|
         raise Errno::ENOSPC, "no space left" if path == state_file
 
-        original.call(path, *args)
+        original.call(path, **kwargs)
       end
 
       begin
@@ -1964,10 +1986,10 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       )
 
       original = Hive::Markers.method(:clear_current)
-      Hive::Markers.define_singleton_method(:clear_current) do |path, *args|
+      Hive::Markers.define_singleton_method(:clear_current) do |path, **kwargs|
         raise Errno::ENOSPC, "no space left" if path == state_file
 
-        original.call(path, *args)
+        original.call(path, **kwargs)
       end
 
       begin

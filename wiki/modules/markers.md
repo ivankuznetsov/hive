@@ -35,6 +35,13 @@ Allowlist: see `KNOWN_NAMES` in `lib/hive/markers.rb`.
 
 `ERROR` markers written through `Markers.set` receive a generated `marker_id` attr unless the caller supplies one. This is the high-cardinality recovery discriminator for `hive markers clear --match-attr marker_id=...`; legacy rows without it fall back to observed attrs such as `reason=exit_code,exit_code=143`.
 
+`Markers.clear_current(..., purge_history: true)` is reserved for guarded
+daemon-healer clears. After confirming the current marker name and attributes,
+it removes every recognized marker comment from the state artifact while
+preserving the surrounding prose. This prevents a successful retry clear from
+exposing an older shadowed `AGENT_WORKING`, `REVIEW_WORKING`, or `ERROR` marker.
+Normal/manual `hive markers clear` keeps its single-current-marker behavior.
+
 `KILL_CLASS_EXIT_CODES = %w[130 137 143]` — POSIX signal exit codes (SIGINT/SIGKILL/SIGTERM). Only an `ERROR` marker shaped as `reason=exit_code exit_code=130|137|143` means the task was interrupted rather than broken. Same numeric codes with another reason remain structured recoverable failures. The numeric list is shared by `Hive::Tui::BubbleModel#auto_heal_kill_class_errors` (auto-clears explicit signal-kill markers) and `Hive::Tui::KeyMap.error_message` (routes Enter to OpenLogTail instead of RecoverError so Enter doesn't race the auto-healer for the markers-lock).
 
 Regex: `MARKER_RE` enumerates every name in `KNOWN_NAMES`, requires a marker-name boundary, and captures attrs until the terminating `-->` without crossing another `<!--`. Quoted error details may contain `>` (for example Git stderr `branch -> branch`) and newlines. Adding a marker name requires updating BOTH the list AND the regex alternation (they are two sources of truth).

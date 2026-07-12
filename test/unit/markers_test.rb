@@ -369,6 +369,35 @@ class MarkersTest < Minitest::Test
     end
   end
 
+  def test_guarded_clear_can_purge_shadowed_marker_history_for_daemon_retry
+    with_tmp_dir do |dir|
+      file = File.join(dir, "task.md")
+      File.write(file, <<~MD)
+        # status history
+
+        <!-- AGENT_WORKING pid=100 -->
+        first attempt
+        <!-- ERROR reason=limits_reached marker_id=old -->
+        <!-- AGENT_WORKING pid=200 -->
+        second attempt
+        <!-- ERROR reason=limits_reached marker_id=current -->
+      MD
+
+      cleared = Hive::Markers.clear_current(
+        file,
+        expected_name: :error,
+        match_attrs: { marker_id: "current" },
+        purge_history: true
+      )
+
+      assert cleared
+      assert Hive::Markers.current(file).none?
+      assert_includes File.read(file), "# status history"
+      assert_includes File.read(file), "second attempt"
+      refute_match Hive::Markers::MARKER_RE, File.read(file)
+    end
+  end
+
   # The orchestrator-owns-terminal-marker rule (ADR-005) means a transient
   # REVIEW_WORKING is replaced by the terminal marker when the phase
   # finalizes. Verify the transition from REVIEW_WORKING phase=fix to

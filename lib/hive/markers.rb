@@ -98,7 +98,7 @@ module Hive
       new_marker
     end
 
-    def clear_current(state_file_path, expected_name:, match_attrs: {})
+    def clear_current(state_file_path, expected_name:, match_attrs: {}, purge_history: false)
       with_markers_lock(state_file_path) do
         marker = current(state_file_path)
         return false unless marker.name.to_s == expected_name.to_s.downcase
@@ -106,7 +106,11 @@ module Hive
         expected = match_attrs.to_h.transform_keys(&:to_s)
         return false unless expected.all? { |key, value| marker.attrs[key].to_s == value.to_s }
 
-        remove_marker(state_file_path, marker.raw)
+        if purge_history
+          remove_all_markers(state_file_path)
+        else
+          remove_marker(state_file_path, marker.raw)
+        end
         true
       end
     end
@@ -251,6 +255,19 @@ module Hive
       body = File.read(state_file_path, encoding: "UTF-8")
       cleaned = body.sub(/#{Regexp.escape(raw_marker)}\n?/, "")
       write_atomic(state_file_path, cleaned)
+    end
+
+    # Healer-managed retries need a markerless artifact after a guarded clear.
+    # Generic state-file agents append their terminal marker after Hive's
+    # AGENT_WORKING marker, so repeated runs can leave older working/error
+    # markers shadowed below the current terminal marker. Removing only the
+    # current marker would expose that stale history as live state and strand
+    # redispatch behind another grace/recovery cycle.
+    def remove_all_markers(state_file_path)
+      return unless File.exist?(state_file_path)
+
+      body = File.read(state_file_path, encoding: "UTF-8")
+      write_atomic(state_file_path, body.gsub(MARKER_RE, ""))
     end
   end
 end

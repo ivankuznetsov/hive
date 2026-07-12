@@ -219,7 +219,8 @@ module Hive
         return unless Hive::Markers.clear_current(
           row.state_file,
           expected_name: :error,
-          match_attrs: marker_match_attrs(row, marker_reason)
+          match_attrs: marker_match_attrs(row, marker_reason),
+          purge_history: true
         )
 
         observe_pre_clear_mtime(row)
@@ -395,7 +396,8 @@ module Hive
         return unless Hive::Markers.clear_current(
           row.state_file,
           expected_name: :review_error,
-          match_attrs: marker_attrs
+          match_attrs: marker_attrs,
+          purge_history: true
         )
 
         attempts += 1
@@ -607,7 +609,8 @@ module Hive
         return unless Hive::Markers.clear_current(
           row.state_file,
           expected_name: :review_working,
-          match_attrs: marker_attrs
+          match_attrs: marker_attrs,
+          purge_history: true
         )
 
         terminate_lock_holder(holder)
@@ -651,7 +654,8 @@ module Hive
         return unless Hive::Markers.clear_current(
           row.state_file,
           expected_name: :review_working,
-          match_attrs: marker_attrs
+          match_attrs: marker_attrs,
+          purge_history: true
         )
 
         release_task_lock(row)

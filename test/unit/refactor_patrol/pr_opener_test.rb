@@ -9,7 +9,7 @@ class RefactorPatrolPrOpenerTest < Minitest::Test
 
   class FakeGh
     attr_accessor :prs, :create_failure, :create_output, :remote_oid, :repository,
-                  :verification_error
+                  :verification_error, :before_remote_read
     attr_reader :pushed, :created, :bodies, :authenticated_hosts, :lookups,
                 :verified
 
@@ -44,6 +44,7 @@ class RefactorPatrolPrOpenerTest < Minitest::Test
     end
 
     def remote_branch_oid(_path, _branch, cfg:, remote:)
+      @before_remote_read&.call
       @remote_oid
     end
 
@@ -212,6 +213,99 @@ class RefactorPatrolPrOpenerTest < Minitest::Test
       assert_empty gh.created
     ensure
       FileUtils.rm_rf(local_patch&.worktree_path)
+    end
+  end
+
+  def test_persisted_push_completion_still_revalidates_trunk_before_pr_create
+    with_tmp_git_repo do |repo|
+      gh = FakeGh.new
+      local_patch = isolated_patch(repo)
+      state = {
+        "push_intent" => Hive::RefactorPatrol::PrOpener.push_intent_payload(
+          canonical_action_id: "fix-fp", repository: "acme/demo",
+          branch: local_patch.branch, commit_sha: local_patch.commit_sha,
+          expected_remote_oid: nil
+        ),
+        "push_complete" => Hive::RefactorPatrol::PrOpener.push_complete_payload(
+          canonical_action_id: "fix-fp", repository: "acme/demo",
+          branch: local_patch.branch, commit_sha: local_patch.commit_sha
+        )
+      }
+      gh.remote_oid = local_patch.commit_sha
+      File.write(File.join(repo, "README.md"), "trunk advanced after push\n")
+      run!("git", "-C", repo, "add", "README.md")
+      run!("git", "-C", repo, "commit", "-m", "advance after push", "--quiet")
+      observed = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+
+      result = opener(repo, gh, Handoff.new).open(
+        thesis: thesis, patch: local_patch, job_id: "job-7",
+        canonical_action_id: "fix-fp", source: source,
+        publication_state: state,
+        record_intent: -> { flunk "stale pushed patch must not begin PR creation" }
+      )
+
+      assert_equal "trunk_drift_retry", result.outcome
+      assert_equal observed, result.observed_head_sha
+      assert_empty gh.pushed
+      assert_empty gh.created
+    ensure
+      FileUtils.rm_rf(local_patch&.worktree_path)
+    end
+  end
+
+  def test_landed_push_is_receipted_before_a_drifted_attempt_is_superseded
+    with_tmp_git_repo do |repo|
+      gh = FakeGh.new
+      local_patch = isolated_patch(repo)
+      push_intent = Hive::RefactorPatrol::PrOpener.push_intent_payload(
+        canonical_action_id: "fix-fp", repository: "acme/demo",
+        branch: local_patch.branch, commit_sha: local_patch.commit_sha,
+        expected_remote_oid: nil
+      )
+      gh.remote_oid = local_patch.commit_sha
+      File.write(File.join(repo, "README.md"), "trunk advanced after unreceipted push\n")
+      run!("git", "-C", repo, "add", "README.md")
+      run!("git", "-C", repo, "commit", "-m", "advance after remote push", "--quiet")
+      observed = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      phases = []
+
+      result = opener(repo, gh, Handoff.new).open(
+        thesis: thesis, patch: local_patch, job_id: "job-7",
+        canonical_action_id: "fix-fp", source: source,
+        publication_state: { "push_intent" => push_intent },
+        record_intent: ->(phase:, payload:) { phases << [ phase, payload ]; true }
+      )
+
+      assert_equal "trunk_drift_retry", result.outcome
+      assert_equal observed, result.observed_head_sha
+      assert_equal [ "push_complete" ], phases.map(&:first)
+      assert_equal local_patch.commit_sha, phases.first.last.fetch("remote_oid")
+      assert_empty gh.pushed
+      assert_empty gh.created
+    ensure
+      FileUtils.rm_rf(local_patch&.worktree_path)
+    end
+  end
+
+  def test_completed_attempt_with_a_deleted_remote_is_an_explicit_conflict
+    with_tmp_git_repo do |repo|
+      gh = FakeGh.new
+      local_patch = patch(repo)
+      push_complete = Hive::RefactorPatrol::PrOpener.push_complete_payload(
+        canonical_action_id: "fix-fp", repository: "acme/demo",
+        branch: local_patch.branch, commit_sha: local_patch.commit_sha
+      )
+
+      result = opener(repo, gh, Handoff.new).open(
+        thesis: thesis, patch: local_patch, job_id: "job-7",
+        canonical_action_id: "fix-fp", source: source,
+        publication_state: { "push_complete" => push_complete },
+        record_intent: ->(**) { flunk "completed attempt must not reopen the push phase" }
+      )
+
+      assert_equal "remote_branch_conflict", result.outcome
+      assert_empty gh.pushed
+      assert_empty gh.created
     end
   end
 
@@ -495,6 +589,38 @@ class RefactorPatrolPrOpenerTest < Minitest::Test
       assert_equal %w[push_intent push_complete pr_create_intent], phases
       assert_equal 1, gh.pushed.size
       assert_empty gh.created
+    end
+  end
+
+  def test_create_rechecks_trunk_after_push_and_before_persisting_create_intent
+    with_tmp_git_repo do |repo|
+      gh = FakeGh.new
+      local_patch = isolated_patch(repo)
+      remote_reads = 0
+      gh.before_remote_read = lambda do
+        remote_reads += 1
+        next unless remote_reads == 2
+
+        File.write(File.join(repo, "README.md"), "trunk advanced during publication\n")
+        run!("git", "-C", repo, "add", "README.md")
+        run!("git", "-C", repo, "commit", "-m", "advance before create intent", "--quiet")
+      end
+      phases = []
+
+      result = opener(repo, gh, Handoff.new).open(
+        thesis: thesis, patch: local_patch, job_id: "job-7",
+        canonical_action_id: "fix-fp", source: source,
+        record_intent: ->(phase:, payload:) { phases << phase; !payload.empty? }
+      )
+
+      assert_equal "trunk_drift_retry", result.outcome
+      assert_equal run!("git", "-C", repo, "rev-parse", "HEAD").strip,
+                   result.observed_head_sha
+      assert_equal %w[push_intent push_complete], phases
+      assert_equal 1, gh.pushed.size
+      assert_empty gh.created
+    ensure
+      FileUtils.rm_rf(local_patch&.worktree_path)
     end
   end
 

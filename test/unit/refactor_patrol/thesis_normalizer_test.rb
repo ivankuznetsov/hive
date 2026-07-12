@@ -70,6 +70,71 @@ class RefactorPatrolThesisNormalizerTest < Minitest::Test
     end
   end
 
+  def test_evidence_verification_is_bounded_for_sparse_oversize_sources
+    with_tmp_dir do |dir|
+      relative_path = "lib/oversize.flux"
+      path = File.join(dir, relative_path)
+      FileUtils.mkdir_p(File.dirname(path))
+      cap = Hive::Patrol::SourceReader::MAX_SOURCE_BYTES
+      File.open(path, "wb") do |file|
+        file.write("inside-cap-anchor\n")
+        file.seek(cap + 4096)
+        file.write("beyond-cap-anchor\n")
+      end
+      assert_operator File.size(path), :>, cap
+
+      mapped_feature = Hive::Patrol::Feature.new(
+        id: "checkout", kind: "architecture",
+        entrypoints: [ relative_path ], owned_files: [ relative_path ],
+        context_files: [], tests: [ "test/checkout_test.rb" ]
+      )
+      normalizer = Hive::RefactorPatrol::ThesisNormalizer.new(
+        project_root: dir, commands: { "test" => "rake test" }
+      )
+      raw = valid_raw_thesis
+
+      inside = normalizer.call(
+        feature: mapped_feature, leverage: feature_leverage,
+        raw: raw.merge(
+          "evidence" => [
+            {
+              "file" => relative_path, "snippet" => "inside-cap-anchor",
+              "claim" => "the bounded prefix contains this anchor"
+            }
+          ]
+        ),
+        index: 0
+      )
+      assert inside.admissible, inside.admissibility_reason
+
+      beyond = normalizer.call(
+        feature: mapped_feature, leverage: feature_leverage,
+        raw: raw.merge(
+          "evidence" => [
+            {
+              "file" => relative_path, "snippet" => "beyond-cap-anchor",
+              "claim" => "an anchor beyond the inspection cap must not be trusted"
+            }
+          ]
+        ),
+        index: 0
+      )
+      refute beyond.admissible
+      assert_includes beyond.risk.fetch("flags"), "unverified_evidence"
+      assert_includes beyond.admissibility_reason, "unverified evidence anchor"
+    end
+  end
+
+  def test_evidence_reader_system_failure_is_treated_as_unverified
+    reader = Object.new
+    reader.define_singleton_method(:regular_file?) { |_path| raise Errno::EIO, "failed" }
+    normalizer = Hive::RefactorPatrol::ThesisNormalizer.new(
+      project_root: "/repo", commands: {}, source_reader: reader
+    )
+
+    assert_nil normalizer.send(:verified_evidence_content, "lib/source.rb")
+  end
+
   def test_evidence_without_file_is_flagged_inadmissible_not_dropped
     thesis = normalize(
       valid_raw_thesis.merge(

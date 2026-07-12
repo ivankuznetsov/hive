@@ -294,6 +294,21 @@ class RefactorPatrolRepositoryOwnershipTest < Minitest::Test
     assert Hive::RefactorPatrol::RepositoryOwnership.continuation_evidence?(aggregate)
     refute Hive::RefactorPatrol::RepositoryOwnership.remote_continuation_evidence?(aggregate)
 
+    namespaced = continuation_aggregate(
+      "receipts" => {
+        "publication_attempts" => {
+          "a" * 64 => { "descriptor" => { "attempt_id" => "a" * 64 } }
+        }
+      }
+    )
+    refute Hive::RefactorPatrol::RepositoryOwnership.continuation_evidence?(namespaced)
+    refute Hive::RefactorPatrol::RepositoryOwnership.remote_continuation_evidence?(namespaced)
+    namespaced.dig("actions", 0, "receipts", "publication_attempts", "a" * 64)[
+      "push_intent"
+    ] = { "operation" => "push_branch" }
+    assert Hive::RefactorPatrol::RepositoryOwnership.continuation_evidence?(namespaced)
+    assert Hive::RefactorPatrol::RepositoryOwnership.remote_continuation_evidence?(namespaced)
+
     aggregate.dig("actions", 0, "receipts")["creation_intent"] = { "phase" => "intent" }
     assert Hive::RefactorPatrol::RepositoryOwnership.remote_continuation_evidence?(aggregate)
 

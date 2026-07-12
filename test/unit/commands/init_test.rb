@@ -133,6 +133,12 @@ class HiveCommandsInitTest < Minitest::Test
     assert_equal false, YAML.safe_load(disabled).dig("refactor_patrol", "enabled")
   end
 
+  def test_refactor_patrol_selector_requires_a_boolean_or_nil
+    assert_raises(ArgumentError) do
+      Hive::Commands::Init.new("/tmp/project", refactor_patrol: "yes")
+    end
+  end
+
   def test_run_init_preflight_warns_when_doctor_reports_config_error
     cmd = command
     warnings = []

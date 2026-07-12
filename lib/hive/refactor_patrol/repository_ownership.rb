@@ -1,6 +1,7 @@
 require "hive/config"
 require "hive/gh"
 require "hive/refactor_patrol/job_store"
+require "hive/refactor_patrol/publication_attempt"
 require "uri"
 
 module Hive
@@ -22,7 +23,8 @@ module Hive
           receipts = action.fetch("receipts")
           action.fetch("owner_job_id") != aggregate.fetch("job_id") ||
             receipts.key?("creation_intent") || receipts.key?("pr_url") ||
-            receipts.key?("issue_url") || receipts.key?("review_task_path")
+            receipts.key?("issue_url") || receipts.key?("review_task_path") ||
+            PublicationAttempt.phase_evidence?(receipts)
         end
       end
 
@@ -34,7 +36,8 @@ module Hive
           receipts["creation_intent"].is_a?(Hash) ||
             !receipts["pr_url"].to_s.empty? ||
             !receipts["issue_url"].to_s.empty? ||
-            !receipts["review_task_path"].to_s.empty?
+            !receipts["review_task_path"].to_s.empty? ||
+            PublicationAttempt.phase_evidence?(receipts)
         end
       end
 

@@ -313,9 +313,53 @@ def json_usage_error_contract(argv)
   when "digest"
     schema = digest_merged_pr_argv?(option_argv) ? "hive-merged-pr-digest" : "hive-digest"
     return { schema: schema, error_kind: "usage" }
+  when "refactor-patrol"
+    if (jobs = refactor_patrol_jobs_argv(option_argv))
+      return {
+        schema: "hive-refactor-patrol-jobs", error_kind: "usage",
+        extras: { "action" => jobs.fetch(:action) }
+      }
+    end
   end
 
   JSON_USAGE_ERROR_CONTRACTS[command]
+end
+
+def refactor_patrol_jobs_argv(argv)
+  list = nil
+  full = nil
+  show = false
+  modifier = argv.any? do |arg|
+    arg == "--limit" || arg.start_with?("--limit=") ||
+      arg == "--cursor" || arg.start_with?("--cursor=")
+  end
+  argv.each do |arg|
+    if arg == "--show" || arg.start_with?("--show=")
+      show = true
+    elsif %w[--no-list --skip-list].include?(arg)
+      list = false
+    elsif arg == "--list"
+      list = true
+    elsif arg.start_with?("--list=")
+      value = arg.split("=", 2).last.to_s.downcase
+      list = !%w[false f no n 0].include?(value)
+    elsif %w[--no-full --skip-full].include?(arg)
+      full = false
+    elsif arg == "--full"
+      full = true
+    elsif arg.start_with?("--full=")
+      value = arg.split("=", 2).last.to_s.downcase
+      full = !%w[false f no n 0].include?(value)
+    end
+  end
+  action = if list == true
+    "list"
+  elsif show
+    "show"
+  end
+  return unless action || full == true || modifier
+
+  { action: action }
 end
 
 def refactor_patrol_v2_argv?(argv)

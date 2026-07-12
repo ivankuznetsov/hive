@@ -4,6 +4,7 @@ require "pathname"
 require "set"
 require "hive/patrol/architecture_mapper"
 require "hive/patrol/feature"
+require "hive/patrol/source_reader"
 require "hive/patrol/state_store"
 
 module Hive
@@ -30,6 +31,7 @@ module Hive
         @dry_run = dry_run
         @capabilities = Array(capabilities).map(&:to_sym)
         @documentation_changes = Array(documentation_changes)
+        @source_reader = Hive::Patrol::SourceReader.new(@project_root)
       end
 
       def call
@@ -67,11 +69,8 @@ module Hive
 
       def documentation_features(files)
         tracked = files.select { |path| documentation_path?(path) }
-        changed = @documentation_changes.flat_map do |change|
-          next [] unless change.is_a?(Hash)
-
-          [ change["path"], change["previous_path"] ].compact.select { |path| documentation_path?(path) }
-        end
+        tracked_set = tracked.to_set
+        changed = documentation_change_paths(tracked_set)
         changed_set = changed.to_set
         candidates = documentation_changes_provided? ? changed : tracked
         tracked_by_group = tracked.group_by { |path| documentation_group(path) }
@@ -108,6 +107,45 @@ module Hive
         parts.first.casecmp?("architecture") && %w[adr adrs decisions].include?(parts[1].to_s.downcase)
       end
 
+      def documentation_change_paths(tracked)
+        @documentation_changes.flat_map do |change|
+          next [] unless change.is_a?(Hash)
+
+          paths = []
+          current = change["path"].to_s
+          if safe_documentation_path?(current) &&
+             (tracked.include?(current) || removed_documentation_path?(current, change["status"]))
+            paths << current
+          end
+
+          previous = change["previous_path"].to_s
+          if safe_documentation_path?(previous) &&
+             (tracked.include?(previous) || !path_entry_exists?(previous))
+            paths << previous
+          end
+          paths
+        end
+      end
+
+      def safe_documentation_path?(path)
+        return false if path.empty? || path.include?("\\")
+
+        relative = Pathname.new(path)
+        !relative.absolute? && relative.cleanpath.to_s == path && path != "." &&
+          included?(path) && documentation_path?(path)
+      end
+
+      def removed_documentation_path?(path, status)
+        status.to_s == "removed" && !path_entry_exists?(path)
+      end
+
+      def path_entry_exists?(path)
+        File.lstat(File.join(@project_root, path))
+        true
+      rescue SystemCallError
+        false
+      end
+
       def documentation_group(path)
         parts = path.split("/")
         return "root" if parts.one?
@@ -131,7 +169,9 @@ module Hive
           File.file?(File.join(@project_root, path))
         end if files.empty?
 
-        files.map { |path| path.tr("\\", "/") }.select { |path| included?(path) }.sort
+        files.map { |path| path.tr("\\", "/") }
+             .select { |path| included?(path) && @source_reader.regular_file?(path) }
+             .sort
       end
 
       def included?(path)
@@ -324,9 +364,7 @@ module Hive
       end
 
       def read(path)
-        File.read(File.join(@project_root, path))
-      rescue SystemCallError
-        ""
+        @source_reader.read_utf8(path)
       end
     end
   end

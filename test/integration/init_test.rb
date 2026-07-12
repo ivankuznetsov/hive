@@ -1435,6 +1435,18 @@ class InitTest < Minitest::Test
     assert_includes summary.string, "refactor_patrol=enabled"
   end
 
+  def test_non_tty_prompt_override_disables_refactor_patrol_before_rendering
+    summary = StringIO.new
+    answers = Hive::Commands::Init::Prompts.new(
+      input: StringIO.new,
+      summary_io: summary,
+      refactor_patrol_enabled: false
+    ).collect
+
+    assert_equal false, answers.fetch("refactor_patrol_enabled")
+    assert_includes summary.string, "refactor_patrol=disabled"
+  end
+
   def test_non_tty_default_prompt_summary_mentions_enabled_adhoc_auto_fix
     prompts = Hive::Commands::Init::Prompts
     original = prompts.const_get(:DEFAULT_ADHOC_AUTO_FIX)
@@ -1932,6 +1944,48 @@ class InitTest < Minitest::Test
         assert_nil resolved.dig("refactor_patrol", "commands", "public_contract")
         assert_includes out, "architecture patrol"
         assert_includes out, "enabled"
+      end
+    end
+  end
+
+  def test_init_explicitly_disables_refactor_patrol_before_writing_state
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir, refactor_patrol: false).call }
+        raw = YAML.safe_load(File.read(File.join(dir, ".hive-state", "config.yml")))
+
+        assert_equal false, raw.dig("refactor_patrol", "enabled")
+        assert_equal false, raw.dig("refactor_patrol", "auto_fix", "enabled")
+        assert_equal false, raw.dig("refactor_patrol", "issue_filing", "enabled")
+      end
+    end
+  end
+
+  def test_refactor_patrol_init_selectors_reject_every_existing_project_reinit_path
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        state_root = File.join(dir, ".hive-state")
+        config_path = File.join(state_root, "config.yml")
+        before_config = File.binread(config_path)
+        before_head = run!("git", "-C", state_root, "rev-parse", "HEAD")
+
+        [
+          { refactor_patrol: false },
+          { workflow: "coding", refactor_patrol: false },
+          { new_workflow: "writing", refactor_patrol: true }
+        ].each do |options|
+          error = assert_raises(Hive::ConfigError) do
+            capture_io { Hive::Commands::Init.new(dir, **options).call }
+          end
+          assert_match(/only valid for a fresh project/, error.message)
+          assert_match(/refactor_patrol\.enabled/, error.message)
+        end
+
+        assert_equal before_config, File.binread(config_path)
+        assert_equal before_head, run!("git", "-C", state_root, "rev-parse", "HEAD")
+        refute File.exist?(File.join(state_root, "workflows", "writing.yml")),
+               "a rejected existing-project selector must not scaffold a workflow"
       end
     end
   end

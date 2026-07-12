@@ -1,0 +1,181 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-refactor-patrol-jobs.v1.json",
+  "title": "hive refactor-patrol jobs output (v1)",
+  "description": "Read-only list/show projection of the authoritative architecture-patrol job ledger.",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
+  ],
+  "$defs": {
+    "Counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["features", "accepted", "flagged", "suppressed", "review_errors", "actions", "pending_actions"],
+      "properties": {
+        "features": { "type": "integer", "minimum": 0 },
+        "accepted": { "type": "integer", "minimum": 0 },
+        "flagged": { "type": "integer", "minimum": 0 },
+        "suppressed": { "type": "integer", "minimum": 0 },
+        "review_errors": { "type": "integer", "minimum": 0 },
+        "actions": { "type": "integer", "minimum": 0 },
+        "pending_actions": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "Blocker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scope", "reason"],
+      "properties": {
+        "scope": { "type": "string", "enum": ["discovery", "action"] },
+        "canonical_action_id": { "type": "string" },
+        "reason": { "type": ["string", "null"] },
+        "next_eligible_at": { "type": "string" }
+      }
+    },
+    "Page": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cursor", "limit", "returned", "total", "has_more", "next_cursor"],
+      "allOf": [
+        {
+          "if": { "properties": { "has_more": { "const": true } }, "required": ["has_more"] },
+          "then": { "properties": { "next_cursor": { "type": "string", "minLength": 1 } } },
+          "else": { "properties": { "next_cursor": { "type": "null" } } }
+        }
+      ],
+      "properties": {
+        "cursor": { "type": ["string", "null"], "maxLength": 512 },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "returned": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "total": { "type": "integer", "minimum": 0, "description": "Job count at the first page's immutable sequence high-water." },
+        "has_more": { "type": "boolean" },
+        "next_cursor": { "type": ["string", "null"] }
+      }
+    },
+    "HistorySlice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total", "returned", "truncated"],
+      "properties": {
+        "total": { "type": "integer", "minimum": 0 },
+        "returned": { "type": "integer", "minimum": 0 },
+        "truncated": { "type": "boolean" }
+      }
+    },
+    "ActionHistory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["canonical_action_id", "claims", "publication_attempts"],
+      "properties": {
+        "canonical_action_id": { "type": "string" },
+        "claims": { "$ref": "#/$defs/HistorySlice" },
+        "publication_attempts": { "$ref": "#/$defs/HistorySlice" }
+      }
+    },
+    "History": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["full", "limit", "attempts", "actions"],
+      "allOf": [
+        {
+          "if": { "properties": { "full": { "const": true } }, "required": ["full"] },
+          "then": { "properties": { "limit": { "type": "null" } } },
+          "else": { "properties": { "limit": { "type": "integer", "minimum": 1, "maximum": 100 } } }
+        }
+      ],
+      "properties": {
+        "full": { "type": "boolean" },
+        "limit": { "type": ["integer", "null"], "minimum": 1, "maximum": 100 },
+        "attempts": { "$ref": "#/$defs/HistorySlice" },
+        "actions": { "type": "array", "items": { "$ref": "#/$defs/ActionHistory" } }
+      }
+    },
+    "JobSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["job_id", "state", "complete", "source", "analysis_sha", "counts", "blockers", "created_at", "updated_at"],
+      "properties": {
+        "job_id": { "type": "string" },
+        "state": { "type": "string", "enum": ["queued", "analyzing", "classified", "acting", "blocked", "complete"] },
+        "complete": { "type": "boolean" },
+        "source": { "type": "object" },
+        "analysis_sha": { "type": "string" },
+        "counts": { "$ref": "#/$defs/Counts" },
+        "blockers": { "type": "array", "items": { "$ref": "#/$defs/Blocker" } },
+        "created_at": { "type": "string" },
+        "updated_at": { "type": "string" }
+      }
+    },
+    "JobDetail": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "job_id", "state", "complete", "source", "analysis_sha", "counts", "blockers",
+        "created_at", "updated_at", "policy", "dispositions", "feature_results",
+        "review_errors", "zero_reason", "attempts", "actions", "history"
+      ],
+      "properties": {
+        "job_id": { "type": "string" },
+        "state": { "type": "string", "enum": ["queued", "analyzing", "classified", "acting", "blocked", "complete"] },
+        "complete": { "type": "boolean" },
+        "source": { "type": "object" },
+        "analysis_sha": { "type": "string" },
+        "counts": { "$ref": "#/$defs/Counts" },
+        "blockers": { "type": "array", "items": { "$ref": "#/$defs/Blocker" } },
+        "created_at": { "type": "string" },
+        "updated_at": { "type": "string" },
+        "policy": { "type": "object" },
+        "dispositions": { "type": "object" },
+        "feature_results": { "type": "array" },
+        "review_errors": { "type": "array" },
+        "zero_reason": { "type": ["string", "null"] },
+        "attempts": { "type": "array" },
+        "actions": { "type": "array" },
+        "history": { "$ref": "#/$defs/History" }
+      }
+    },
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "action", "project", "project_root"],
+      "allOf": [
+        {
+          "if": { "properties": { "action": { "const": "list" } } },
+          "then": { "required": ["count", "page", "jobs"], "not": { "required": ["job"] } }
+        },
+        {
+          "if": { "properties": { "action": { "const": "show" } } },
+          "then": { "required": ["job"], "not": { "anyOf": [ { "required": ["count"] }, { "required": ["page"] }, { "required": ["jobs"] } ] } }
+        }
+      ],
+      "properties": {
+        "schema": { "const": "hive-refactor-patrol-jobs" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": true },
+        "action": { "type": "string", "enum": ["list", "show"] },
+        "project": { "type": "string" },
+        "project_root": { "type": "string" },
+        "count": { "type": "integer", "minimum": 0 },
+        "page": { "$ref": "#/$defs/Page" },
+        "jobs": { "type": "array", "maxItems": 100, "items": { "$ref": "#/$defs/JobSummary" } },
+        "job": { "$ref": "#/$defs/JobDetail" }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "action", "error_class", "error_kind", "exit_code", "message"],
+      "properties": {
+        "schema": { "const": "hive-refactor-patrol-jobs" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "action": { "type": ["string", "null"], "enum": ["list", "show", null] },
+        "error_class": { "type": "string" },
+        "error_kind": { "type": "string", "enum": ["usage", "not_found", "config", "error"] },
+        "exit_code": { "type": "integer" },
+        "message": { "type": "string" }
+      }
+    }
+  }
+}

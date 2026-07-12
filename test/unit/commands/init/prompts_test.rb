@@ -18,7 +18,8 @@ class InitPromptsTest < Minitest::Test
   # non-TTY result line (defaults to stdout in production). Both are
   # injected as separate StringIOs so tests can assert against each
   # stream independently.
-  def make_prompts(input_text, tty: true, registered_agents: AGENT_NAMES)
+  def make_prompts(input_text, tty: true, registered_agents: AGENT_NAMES,
+                   refactor_patrol_enabled: nil)
     input = StringIO.new(input_text)
     input.define_singleton_method(:tty?) { true } if tty
     output = StringIO.new
@@ -27,7 +28,8 @@ class InitPromptsTest < Minitest::Test
       input: input,
       output: output,
       summary_io: summary_io,
-      registered_agents: registered_agents
+      registered_agents: registered_agents,
+      refactor_patrol_enabled: refactor_patrol_enabled
     )
     [ prompts, output, summary_io ]
   end
@@ -528,6 +530,27 @@ class InitPromptsTest < Minitest::Test
 
     assert_equal true, prompts.collect["refactor_patrol_enabled"]
     assert_match(/please answer y or n/, output.string)
+  end
+
+  def test_explicit_refactor_patrol_choice_skips_interactive_question
+    lines = interactive_input(confirm: "y").lines
+    lines.delete_at(11)
+    prompts, output = make_prompts(
+      lines.join,
+      refactor_patrol_enabled: false
+    )
+
+    assert_equal false, prompts.collect.fetch("refactor_patrol_enabled")
+    refute_includes output.string, "Enable architecture patrol discovery"
+  end
+
+  def test_refactor_patrol_override_requires_a_boolean_or_nil
+    assert_raises(ArgumentError) do
+      Hive::Commands::Init::Prompts.new(
+        input: StringIO.new, output: StringIO.new, summary_io: StringIO.new,
+        registered_agents: AGENT_NAMES, refactor_patrol_enabled: "yes"
+      )
+    end
   end
 
   # --- limits: blank, full pair, partial, validation -----------------------

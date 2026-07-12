@@ -54,6 +54,69 @@ class BinHiveRefactorPatrolUsageErrorTest < Minitest::Test
     end
   end
 
+  def test_job_query_usage_errors_use_the_read_only_jobs_contract
+    {
+      [ "--list" ] => "list",
+      [ "--list=true" ] => "list",
+      [ "--no-list", "--list" ] => "list",
+      [ "--list", "--limit", "25" ] => "list",
+      [ "--show", "job-7" ] => "show",
+      [ "--show", "job-7", "--full" ] => "show",
+      [ "--show", "job-7", "--list", "--no-list" ] => "show",
+      [ "--show", "job-7", "--list" ] => "list"
+    }.each do |selector, action|
+      payload = run_usage_error(
+        "refactor-patrol", "demo", "extra", *selector, "--json"
+      )
+
+      assert_equal "hive-refactor-patrol-jobs", payload.fetch("schema")
+      assert_equal 1, payload.fetch("schema_version")
+      assert_equal action, payload.fetch("action"), selector.inspect
+      assert job_query_schema.valid?(payload),
+             job_query_schema.validate(payload).map { |error| error.fetch("error") }.inspect
+    end
+  end
+
+  def test_last_negative_list_form_keeps_legacy_usage_error_v1
+    [ [ "--list", "--no-list" ], [ "--list", "--skip-list" ],
+      [ "--list=true", "--list=false" ] ].each do |selector|
+      payload = run_usage_error(
+        "refactor-patrol", "demo", "extra", *selector, "--json"
+      )
+
+      assert_equal "hive-refactor-patrol", payload.fetch("schema"), selector.inspect
+      assert_equal 1, payload.fetch("schema_version"), selector.inspect
+      assert schema(1).valid?(payload), "#{selector.inspect}: #{validation_errors(1, payload)}"
+    end
+  end
+
+
+  def test_malformed_query_limit_uses_the_jobs_usage_contract
+    payload = run_usage_error(
+      "refactor-patrol", "demo", "--list", "--limit", "many", "--json"
+    )
+
+    assert_equal "hive-refactor-patrol-jobs", payload.fetch("schema")
+    assert_equal "usage", payload.fetch("error_kind")
+    assert_equal "list", payload.fetch("action")
+    assert job_query_schema.valid?(payload),
+           job_query_schema.validate(payload).map { |error| error.fetch("error") }.inspect
+  end
+
+  def test_selectorless_query_modifiers_use_the_jobs_usage_contract
+    [ [ "--limit", "1" ], [ "--cursor", "opaque" ], [ "--full" ] ].each do |modifier|
+      payload = run_usage_error(
+        "refactor-patrol", "demo", "extra", *modifier, "--json"
+      )
+
+      assert_equal "hive-refactor-patrol-jobs", payload.fetch("schema"), modifier.inspect
+      assert_equal "usage", payload.fetch("error_kind"), modifier.inspect
+      assert_nil payload.fetch("action"), modifier.inspect
+      assert job_query_schema.valid?(payload),
+             job_query_schema.validate(payload).map { |error| error.fetch("error") }.inspect
+    end
+  end
+
   private
 
   def run_usage_error(*argv)
@@ -64,7 +127,7 @@ class BinHiveRefactorPatrolUsageErrorTest < Minitest::Test
         chdir: ROOT
       )
       assert_equal Hive::ExitCodes::USAGE, status.exitstatus, stderr
-      assert_match(/Usage:/, stderr)
+      assert_match(/Usage:|Expected numeric value/, stderr)
       return JSON.parse(stdout)
     end
   end
@@ -80,5 +143,11 @@ class BinHiveRefactorPatrolUsageErrorTest < Minitest::Test
 
   def validation_errors(version, payload)
     schema(version).validate(payload).map { |error| error.fetch("error") }.inspect
+  end
+
+  def job_query_schema
+    @job_query_schema ||= JSONSchemer.schema(
+      JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol-jobs")))
+    )
   end
 end

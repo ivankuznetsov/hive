@@ -33,8 +33,9 @@ language-neutral [[commands/refactor-patrol]] lifecycle.
 | `Hive::Daemon::RecoverableErrorHealer` | `lib/hive/daemon/recoverable_error_healer.rb` | Runs after `StaleAgentHealer` and before normal dispatch. It auto-clears only the fixed v1 recoverable terminal-error allowlist (`implementer_failed` with a Codex 401 missing bearer/basic-auth signature, and `claude_launch_failed`) after the work area is safe, the dependency health signal changed or the fallback window elapsed, backoff/budget allow it, and health probes pass. Clears are equivalent to manual `hive markers clear`; `3-plan` clears also enqueue `hive plan --from 3-plan`. The global kill-switch is `daemon.auto_retry.enabled: false`. Audit routing is asymmetric: only `auto_retry` and `auto_retry_skipped` are in `Hive::Events::EVENT_TYPES`, so only those two reach the task `events.jsonl` channel; the exhausted path emits its task event as `auto_retry_skipped` (not `auto_retry_exhausted`), and a non-allowlisted/unknown reason is suppressed from the task channel entirely (daemon-log audit only, to avoid a "not retried" line on every unrelated domain failure). All four event names — `auto_retry`, `auto_retry_skipped`, `auto_retry_exhausted`, `auto_retry_failed` — reach the daemon log. |
 | `Hive::Daemon::DisplayNameBackfiller` | `lib/hive/daemon/display_name_backfiller.rb` | Tick-time self-heal for tasks whose one-shot name generation at `hive new` never landed (agent/codex outage). Re-spawns fire-and-forget `hive generate-name <folder>` for any row whose `Hive::TaskMeta` `display_name` is nil/blank, mirroring `Hive::Commands::New#spawn_name_generator` (detached, pgroup, logged to `<state_home>/logs/display-name.log`, fully rescued). Anti-churn: an `@inflight` map stores `{pid, at}` per folder, uses `kill(0)` liveness plus `MAX_INFLIGHT_AGE_SEC = 120` to avoid both double-spawns and reused-pid/EPERM pinning, `max_per_tick` (default 2) bounds spawns, and a set name is a natural fixed point. Unexpected row/reap/spawn errors degrade through `:fatal` logging while preserving the no-raise tick contract. Purely additive — never touches markers or dispatch. Logs `display_name_backfill`. |
 | `Hive::Daemon::TaskIdBackfiller` | `lib/hive/daemon/task_id_backfiller.rb` | Tick-time self-heal for tasks created outside `hive new` (hand-made folder, one `mv`-ed in) whose `meta.yml` has no `id` — `hive new` allocates ids from `Hive::TaskCounter`, so a task that skipped it shows a blank id everywhere (TUI, status, digest, dependency refs). For any row whose `Hive::TaskMeta` `id` is nil it allocates `TaskCounter.next!`, writes it via `TaskMeta.update_id` (every other meta field preserved), and commits the meta on `hive/state` under the per-project commit lock (`Hive::Lock.with_commit_lock`, as every durable committer does) with the per-task `hive_commit(stage_name:, slug:, action: "id-assigned")` call. The `task_id_backfill` event carries `committed:` so a swallowed commit (lock timeout / git error) is visible rather than masquerading as fully durable. Synchronous (no spawn/inflight — assignment is instant), `max_per_tick` (default 5) bounds the per-tick commits, and an assigned id is a natural fixed point. Guards `File.directory?(folder)` first so a row that outlived its folder (e.g. `hive drop` between snapshot and tick) is NOT resurrected by `TaskMeta.write`'s `mkdir_p`. Row/commit errors degrade through `:fatal` / `task_id_backfill_commit_skipped` logging while preserving the no-raise tick contract. Purely additive — never touches markers or dispatch. Logs `task_id_backfill`. |
-| `Hive::Daemon::PrMergeWatcher` | `lib/hive/daemon/pr_merge_watcher.rb` | Polls `gh pr view --json state` for tasks at 8-finalize/`:complete` and for a narrow set of finalize `ERROR` rows whose PR can still be retired after merge (`git_status_failed`, `claude_launch_failed`). On `MERGED` returns an archive dispatch entry the dispatcher fires. Backs off + drops on persistent gh failures. |
-| `Hive::Daemon::RefactorPatrolMergeReconciler` | `lib/hive/daemon/refactor_patrol_merge_reconciler.rb` | Converges finalize observations and exact-host paginated GitHub catch-up into one checksummed, write-once manifest per repository/PR/merge occurrence. First enablement seeds a current high-water baseline instead of importing history; its v2 checkpoint binds registration, host, repository, and default branch. |
+| `Hive::Daemon::PrMergeWatcher` | `lib/hive/daemon/pr_merge_watcher.rb` | Polls `gh pr view --json state` for tasks at 8-finalize/`:complete` and for a narrow set of finalize `ERROR` rows whose PR can still be retired after merge (`git_status_failed`, `claude_launch_failed`). Poll subprocesses use the bounded `Hive::Gh` transport; architecture-enabled projects take that poll timeout from the same absolute reconciler deadline as catch-up and exact-PR hydration. On `MERGED`, durable architecture intake must succeed before it returns an archive dispatch. Deadline deferral leaves the current/later entries for the next tick without burning retry budget; real poll/intake failures retain their consecutive counter until the whole merged-intake step succeeds, then back off and eventually drop visibly. |
+| `Hive::Daemon::RefactorPatrolMergeReconciler` | `lib/hive/daemon/refactor_patrol_merge_reconciler.rb` | Converges finalize observations and incremental exact-host GitHub catch-up into one checksummed, write-once manifest per repository/PR/merge occurrence. Catch-up plus every exact-PR hydration later in the same dispatcher tick share one absolute monotonic budget; bounded call slices and rotating project order keep one slow repository or a batch of merges from blocking the daemon. Persisted GitHub backoff begins at observed failure time (tick wall anchor plus monotonic elapsed), not stale tick start. First enablement still seeds a current high-water baseline instead of importing history; the authoritative checkpoint remains schema v2. |
+| `Hive::Daemon::RefactorPatrolMergeProgressStore` | `lib/hive/daemon/refactor_patrol_merge_progress_store.rb` | Crash-safe `reconciler-progress.json` sidecar for page cursors, accumulated merge identities, intake position, and GitHub retry state. It binds continuation to registration/repository identity plus the base v2 checkpoint fingerprint, writes atomically, fsyncs directory-entry changes, quarantines unsafe shapes/identity drift, and persists bounded exponential backoff with jitter. |
 | `Hive::Daemon::RefactorPatrolScheduler` | `lib/hive/daemon/refactor_patrol_scheduler.rb` | Exposes oldest-first discovery/action candidates, validates exact registration and repository ownership, claims discovery with generation/liveness evidence, emits job-bound result paths, durably surfaces unavailable project config, and checkpoints only matching schema-valid completion envelopes. |
 | `Hive::Daemon::PatrolArbiter` | `lib/hive/daemon/patrol_arbiter.rb` | Shares each project's patrol-scan capacity between ordinary and architecture patrol and persists alternation state so either ready kind eventually runs. |
 | `Hive::Daemon::DigestScheduler` | `lib/hive/daemon/digest_scheduler.rb` | Global daily shipped-digest cadence. Persists `last_digested_date` in `<state_home>/digest_state.json`, applies a first-run no-history guard, computes owed local calendar days after midnight, caps catch-up with `digest.max_catchup_days`, and emits one `hive digest --date D --json` dispatch at a time. |
@@ -55,8 +56,9 @@ hive daemon start
             ├─ Hive::Daemon::ChildSupervisor     (Process.spawn pgroup: true)
             ├─ Hive::Daemon::StatusConsumer      (Open3.capture3 hive status --json)
             ├─ Hive::Daemon::DispatchRequestQueue (<state_home>/dispatch_requests/*.json)
-            ├─ Hive::Daemon::PrMergeWatcher      (Open3.capture3 gh pr view)
-            ├─ Hive::Daemon::RefactorPatrolMergeReconciler (merge manifests/high-water)
+            ├─ Hive::Daemon::PrMergeWatcher      (bounded Hive::Gh gh pr view)
+            ├─ Hive::Daemon::RefactorPatrolMergeReconciler (incremental merge manifests/high-water)
+            ├─ Hive::Daemon::RefactorPatrolMergeProgressStore (restart-safe page/intake cursor)
             ├─ Hive::Daemon::PatrolArbiter       (ordinary/architecture fairness)
             ├─ Hive::Daemon::RefactorPatrolScheduler (durable jobs/actions)
             ├─ Hive::Daemon::DigestScheduler     (<state_home>/digest_state.json)
@@ -151,6 +153,56 @@ exact host, canonical repository, default branch, high water, overlap
 occurrences, and timestamps. Corrupt/unsupported checkpoints and later
 registration, host, repository, or default-branch changes are quarantined and
 block intake instead of creating a new baseline over the old identity.
+
+Catch-up no longer has to traverse every GitHub page and hydrate every manifest
+inside one daemon call. `RefactorPatrolMergeReconciler` applies one monotonic
+tick deadline (15 seconds by default), gives each project a fair slice of the
+remaining time, and caps an individual page or manifest-hydration operation at
+5 seconds by default. Partial projects rotate between rounds, and the registry
+starting position rotates between ticks, so a slow or failing first project
+does not starve later registrations. A partial/deferred result schedules prompt
+continuation rather than waiting for the ordinary poll interval.
+
+For an architecture-enabled project, `PrMergeWatcher` asks the reconciler for
+the remaining deadline before it polls PR state. A spent budget defers before
+starting `gh`; otherwise the poll receives the smaller of the remaining slice
+and its explicit watcher cap. Projects outside architecture intake retain the
+same bounded 60-second fallback. A hung state poll therefore becomes ordinary
+watcher failure/backoff instead of pinning the dispatcher indefinitely.
+
+Incremental state lives in the separate
+`.hive-state/refactor_patrol/v2/reconciler-progress.json` v1 sidecar. The
+sidecar binds registration, host, repository, and default branch to a SHA-256
+fingerprint of the unchanged v2 checkpoint. Its scan section stores the fixed
+overlap start and upper time bound, the first page's frozen result count,
+pagination cursor and seen cursors, accumulated PR identities, then the
+manifest-intake index and already-enqueued PR numbers. GitHub search uses stable
+creation order inside that fixed merge-time window. If GitHub indexing changes
+the count or terminal traversal size between pages, the scan restarts from page
+one while retaining the original upper bound, so first-enable cannot absorb a
+new merge into its baseline. Every completed page and intake step is written
+atomically before the next step. A daemon restart therefore resumes the next
+page or item; if a crash occurred after a write-once job was enqueued but before
+the sidecar advanced, replay converges through idempotent intake.
+
+The project slice begins before origin identity discovery: the local `git`
+remote lookup, authentication, page fetch, and exact-PR metadata/file hydration
+all receive only the remaining portion of the same monotonic deadline. Spending
+the slice during identity discovery defers before a second remote operation.
+
+Remote failures persist `failures`, `not_before`, and a bounded `last_error` in
+the same sidecar. The exponential delay ceiling starts at 5 seconds, is capped
+at 300 seconds, and is jittered; a restarted daemon honors `not_before` without
+calling GitHub. Progress writes and the final v2 checkpoint use atomic
+tempfile/fsync/rename plus directory fsync. Completion writes the checkpoint
+first, then unlinks and directory-fsyncs the sidecar. If a crash leaves that
+old sidecar behind, its base-checkpoint fingerprint no longer matches and the
+next tick removes it instead of replaying stale work. Corrupt or identity-drifted
+progress is preserved under `quarantine/reconciler-progress/` and blocks rather
+than being silently trusted. Timestamp/scalar/OID types and cursor state are
+strict: an already-consumed current cursor is quarantined as impossible local
+continuation state, while a cursor loop returned by a live GitHub page follows
+remote failure/backoff. Dry-run uses only an in-memory sidecar.
 
 `Hive::Daemon::Policy` and `Hive::Daemon::ConcurrencyController` have no
 I/O at all — fully unit-testable without forking. The other modules

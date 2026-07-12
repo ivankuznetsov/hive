@@ -1,7 +1,8 @@
 require "test_helper"
 require "hive/gh"
+require "hive/refactor_patrol/github_gateway"
 
-class GhIssueHelpersTest < Minitest::Test
+class RefactorPatrolGithubGatewayIssueTest < Minitest::Test
   include HiveTestHelper
 
   def test_issues_with_marker_reads_every_slurped_page_and_excludes_pull_requests
@@ -11,6 +12,7 @@ class GhIssueHelpersTest < Minitest::Test
         issue(1, state: "open", body: "before\n#{marker}\nafter"),
         issue(2, state: "open", body: "a different marker"),
         issue(3, state: "open", body: marker).merge(
+          "html_url" => "https://github.com/acme/demo/pull/3",
           "pull_request" => { "url" => "https://api.github.com/repos/acme/demo/pulls/3" }
         )
       ],
@@ -27,7 +29,7 @@ class GhIssueHelpersTest < Minitest::Test
     end
 
     result = with_capture(capture) do
-      Hive::Gh.issues_with_marker(
+      github_gateway.issues_with_marker(
         repository: "acme/demo", marker: marker, host: "github.com", cfg: cfg
       )
     end
@@ -51,12 +53,13 @@ class GhIssueHelpersTest < Minitest::Test
       issue(1, state: "open", body: "legacy finding"),
       issue(2, state: "closed", body: nil),
       issue(3, state: "open", body: "pull request").merge(
+        "html_url" => "https://github.com/acme/demo/pull/3",
         "pull_request" => { "url" => "https://api.github.com/repos/acme/demo/pulls/3" }
       )
     ] ]
 
     result = with_capture(successful(JSON.generate(pages))) do
-      Hive::Gh.issues_for_repository(
+      github_gateway.issues_for_repository(
         repository: "acme/demo", host: "github.com", cfg: nil
       )
     end
@@ -77,7 +80,7 @@ class GhIssueHelpersTest < Minitest::Test
     ] ]
 
     result = with_capture(successful(JSON.generate(pages))) do
-      Hive::Gh.issues_with_marker(
+      github_gateway.issues_with_marker(
         repository: "acme/demo", marker: marker, host: "github.com", cfg: nil
       )
     end
@@ -107,7 +110,7 @@ class GhIssueHelpersTest < Minitest::Test
     malformed.each do |label, output|
       error = assert_raises(Hive::GhError, label) do
         with_capture(successful(output)) do
-          Hive::Gh.issues_with_marker(
+          github_gateway.issues_with_marker(
             repository: "acme/demo", marker: "marker", host: "github.com", cfg: nil
           )
         end
@@ -123,7 +126,7 @@ class GhIssueHelpersTest < Minitest::Test
 
     error = assert_raises(Hive::GhError) do
       with_capture(capture) do
-        Hive::Gh.issues_with_marker(
+        github_gateway.issues_with_marker(
           repository: "acme/demo", marker: "marker", host: "github.com", cfg: nil
         )
       end
@@ -143,7 +146,7 @@ class GhIssueHelpersTest < Minitest::Test
     [ "", "acme", "acme/demo/extra", "acme /demo", "acme/demo?state=open" ].each do |repository|
       assert_raises(Hive::GhError) do
         with_capture(capture) do
-          Hive::Gh.issues_with_marker(
+          github_gateway.issues_with_marker(
             repository: repository, marker: "marker", host: "github.com", cfg: nil
           )
         end
@@ -169,7 +172,7 @@ class GhIssueHelpersTest < Minitest::Test
     end
 
     url = with_capture(capture) do
-      Hive::Gh.create_issue(
+      github_gateway.create_issue(
         repository: "acme/demo", title: "Architecture patrol: isolate policy",
         body: body, host: "github.com", cfg: cfg
       )
@@ -192,7 +195,7 @@ class GhIssueHelpersTest < Minitest::Test
     remote_error = assert_raises(Hive::GhError) do
       failure = ->(*, **) { [ "", "permission denied", Hive::Gh::CommandStatus.new(exitstatus: 1) ] }
       with_capture(failure) do
-        Hive::Gh.create_issue(
+        github_gateway.create_issue(
           repository: "acme/demo", title: "Title", body: "Body", host: "github.com", cfg: nil
         )
       end
@@ -201,7 +204,7 @@ class GhIssueHelpersTest < Minitest::Test
 
     empty_url = assert_raises(Hive::GhError) do
       with_capture(successful(" \n")) do
-        Hive::Gh.create_issue(
+        github_gateway.create_issue(
           repository: "acme/demo", title: "Title", body: "Body", host: "github.com", cfg: nil
         )
       end
@@ -210,7 +213,7 @@ class GhIssueHelpersTest < Minitest::Test
 
     wrong_repository = assert_raises(Hive::GhError) do
       with_capture(successful("https://github.com/other/demo/issues/9\n")) do
-        Hive::Gh.create_issue(
+        github_gateway.create_issue(
           repository: "acme/demo", title: "Title", body: "Body", host: "github.com", cfg: nil
         )
       end
@@ -227,7 +230,7 @@ class GhIssueHelpersTest < Minitest::Test
 
     assert_raises(Hive::GhError) do
       with_capture(capture) do
-        Hive::Gh.create_issue(
+        github_gateway.create_issue(
           repository: "../demo", title: "Title", body: "Body", host: "github.com", cfg: nil
         )
       end
@@ -237,12 +240,12 @@ class GhIssueHelpersTest < Minitest::Test
 
   def test_create_issue_rejects_blank_title_and_non_string_body
     assert_raises(Hive::GhError) do
-      Hive::Gh.create_issue(
+      github_gateway.create_issue(
         repository: "acme/demo", title: " ", body: "Body", host: "github.com"
       )
     end
     assert_raises(Hive::GhError) do
-      Hive::Gh.create_issue(
+      github_gateway.create_issue(
         repository: "acme/demo", title: "Title", body: nil, host: "github.com"
       )
     end
@@ -252,13 +255,21 @@ class GhIssueHelpersTest < Minitest::Test
     invalid = [
       issue(1, state: "open", body: "marker").merge("html_url" => ""),
       issue(1, state: "open", body: "marker").merge("body" => []),
-      issue(1, state: "open", body: "marker").merge("pull_request" => "yes")
+      issue(1, state: "open", body: "marker").merge("pull_request" => "yes"),
+      issue(1, state: "open", body: "marker").merge(
+        "pull_request" => {},
+        "html_url" => "https://github.com/acme/demo/issues/1"
+      ),
+      issue(1, state: "open", body: "marker").merge(
+        "pull_request" => {},
+        "html_url" => "https://github.com/other/demo/pull/1"
+      )
     ]
 
     invalid.each do |record|
       assert_raises(Hive::GhError) do
         with_capture(successful(JSON.generate([ [ record ] ]))) do
-          Hive::Gh.issues_for_repository(
+          github_gateway.issues_for_repository(
             repository: "acme/demo", host: "github.com", cfg: nil
           )
         end
@@ -274,7 +285,7 @@ class GhIssueHelpersTest < Minitest::Test
     ] ])
     lookup_error = assert_raises(Hive::GhError) do
       with_capture(successful(wrong_host_pages)) do
-        Hive::Gh.issues_with_marker(
+        github_gateway.issues_with_marker(
           repository: "acme/demo", marker: "marker", host: "github.example.test", cfg: nil
         )
       end
@@ -283,7 +294,7 @@ class GhIssueHelpersTest < Minitest::Test
 
     create_error = assert_raises(Hive::GhError) do
       with_capture(successful("https://github.com/acme/demo/issues/9\n")) do
-        Hive::Gh.create_issue(
+        github_gateway.create_issue(
           repository: "acme/demo", title: "Title", body: "Body",
           host: "github.example.test", cfg: nil
         )
@@ -293,6 +304,10 @@ class GhIssueHelpersTest < Minitest::Test
   end
 
   private
+
+  def github_gateway
+    @github_gateway ||= Hive::RefactorPatrol::GithubGateway.new
+  end
 
   def issue(number, state:, body:)
     {

@@ -191,6 +191,23 @@ class HiveCommandsDaemonTest < Minitest::Test
     assert_equal [ invoked, invoked ], captured_bins
   end
 
+  def test_start_restores_explicit_hive_bin_after_foreground_run
+    command = daemon("start", dry_run: true)
+    dispatcher = FakeDispatcher.new([])
+
+    with_env("HIVE_BIN" => "/opt/hive/bin/hive") do
+      with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(pid) { "start-#{pid}" }) do
+        with_global_start_config(daemon_config) do
+          with_replaced_singleton_method(Hive::Daemon::Dispatcher, :new, ->(**_kwargs) { dispatcher }) do
+            command.call
+          end
+        end
+      end
+
+      assert_equal "/opt/hive/bin/hive", ENV.fetch("HIVE_BIN")
+    end
+  end
+
   def test_start_daemon_forwards_answer_digest_enabled_and_hour_to_scheduler
     command = daemon("start", dry_run: true)
     dispatcher = FakeDispatcher.new([])

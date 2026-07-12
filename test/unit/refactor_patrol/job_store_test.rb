@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/refactor_patrol/job_store"
+require "hive/refactor_patrol/pr_opener"
 
 class RefactorPatrolJobStoreTest < Minitest::Test
   include HiveTestHelper
@@ -24,6 +25,140 @@ class RefactorPatrolJobStoreTest < Minitest::Test
 
       assert_equal job, store.write_job!(job, dry_run: true)
       refute Dir.exist?(store.root)
+    end
+  end
+
+  def test_job_query_pages_are_bounded_and_snapshot_membership_is_stable
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      store.write_job!(classified_job(
+        "job_id" => "job-1", "created_at" => "2026-07-12T10:00:00Z",
+        "updated_at" => "2026-07-12T10:00:00Z"
+      ))
+      store.write_job!(classified_job(
+        "job_id" => "job-2", "created_at" => "2026-07-12T09:00:00Z",
+        "updated_at" => "2026-07-12T09:00:00Z"
+      ))
+
+      first = store.job_query_page(limit: 1)
+      assert_equal [ "job-1" ], first.fetch("job_ids")
+      assert_equal 2, first.fetch("total")
+      assert first.fetch("has_more")
+      cursor = {
+        "generation" => first.fetch("generation"),
+        "after_sequence" => first.fetch("next_after_sequence"),
+        "through_sequence" => first.fetch("through_sequence")
+      }
+
+      store.write_job!(classified_job(
+        "job_id" => "job-3", "created_at" => "2026-07-11T00:00:00Z",
+        "updated_at" => "2026-07-11T00:00:00Z"
+      ))
+      second = store.job_query_page(limit: 1, cursor: cursor)
+      assert_equal [ "job-2" ], second.fetch("job_ids")
+      assert_equal 2, second.fetch("total")
+      refute second.fetch("has_more")
+      assert_equal 3, store.job_query_page(limit: 100).fetch("total")
+    end
+  end
+
+  def test_job_query_page_reads_only_selected_authoritative_jobs_and_rebuild_invalidates_cursors
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      store.write_job!(classified_job("job_id" => "job-1"))
+      store.write_job!(classified_job("job_id" => "job-2"))
+      first = store.job_query_page(limit: 1)
+      cursor = {
+        "generation" => first.fetch("generation"),
+        "after_sequence" => first.fetch("next_after_sequence"),
+        "through_sequence" => first.fetch("through_sequence")
+      }
+      File.write(File.join(store.root, "jobs", "job-2.json"), "{")
+
+      assert_equal [ "job-1" ], store.job_query_page(limit: 1).fetch("job_ids")
+      assert_raises(Hive::RefactorPatrol::JobStore::CorruptRecord) do
+        store.job_query_page(limit: 1, cursor: cursor)
+      end
+
+      File.write(
+        File.join(store.root, "jobs", "job-2.json"),
+        JSON.pretty_generate(classified_job("job_id" => "job-2"))
+      )
+      store.rebuild_job_query_index!
+      assert_raises(Hive::RefactorPatrol::JobQueryIndex::CursorError) do
+        store.job_query_page(limit: 1, cursor: cursor)
+      end
+    end
+  end
+
+  def test_job_query_index_missing_for_existing_jobs_fails_closed_until_explicit_rebuild
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      jobs_dir = File.join(store.root, "jobs")
+      FileUtils.mkdir_p(jobs_dir)
+      File.write(
+        File.join(jobs_dir, "job-1.json"),
+        JSON.pretty_generate(classified_job("job_id" => "job-1"))
+      )
+
+      assert_raises(Hive::RefactorPatrol::JobStore::CorruptRecord) do
+        store.job_query_page(limit: 1)
+      end
+      store.rebuild_job_query_index!
+      assert_equal [ "job-1" ], store.job_query_page(limit: 1).fetch("job_ids")
+    end
+  end
+
+  def test_existing_job_write_migrates_all_pre_index_jobs_in_created_order
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      jobs_dir = File.join(store.root, "jobs")
+      FileUtils.mkdir_p(jobs_dir)
+      later = classified_job(
+        "job_id" => "job-later", "created_at" => "2026-07-12T11:00:00Z",
+        "updated_at" => "2026-07-12T11:00:00Z"
+      )
+      earlier = classified_job(
+        "job_id" => "job-earlier", "created_at" => "2026-07-12T10:00:00Z",
+        "updated_at" => "2026-07-12T10:00:00Z"
+      )
+      File.write(File.join(jobs_dir, "job-later.json"), JSON.pretty_generate(later))
+      File.write(File.join(jobs_dir, "job-earlier.json"), JSON.pretty_generate(earlier))
+
+      assert_equal later, store.write_job!(later)
+      page = store.job_query_page(limit: 10)
+      assert_equal %w[job-earlier job-later], page.fetch("job_ids")
+      assert_equal 2, page.fetch("total")
+    end
+  end
+
+  def test_existing_lifecycle_mutation_migrates_pre_index_job
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      jobs_dir = File.join(store.root, "jobs")
+      FileUtils.mkdir_p(jobs_dir)
+      aggregate = classified_job("job_id" => "job-legacy")
+      File.write(File.join(jobs_dir, "job-legacy.json"), JSON.pretty_generate(aggregate))
+
+      store.block_actions!("job-legacy", reason: "checkout_changed", now: T0)
+
+      page = store.job_query_page(limit: 10)
+      assert_equal [ "job-legacy" ], page.fetch("job_ids")
+      assert_equal "checkout_changed", page.dig("jobs", 0, "attempts", -1, "reason")
+    end
+  end
+
+  def test_query_index_rebuild_wraps_invalid_authoritative_ordering
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      store.define_singleton_method(:ordered_job_query_ids) do
+        raise ArgumentError, "invalid timestamp"
+      end
+
+      error = assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        store.rebuild_job_query_index!
+      end
+      assert_match(/cannot rebuild.*invalid timestamp/, error.message)
     end
   end
 
@@ -525,6 +660,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       )
 
       assert_equal "classified", blocked.fetch("state")
+      assert_equal({}, blocked.fetch("attempts").last.fetch("action_claim_generations"))
       assert store.action_phase_backoff_active?(blocked, now: T0 + 59)
       assert_empty store.actionable_jobs(now: T0 + 59)
       assert_empty store.claimable_jobs(now: T0 + 59),
@@ -801,6 +937,182 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       assert_equal "a" * 40, receipts.dig("patch", "commit_sha")
       assert_equal "b" * 40, receipts.dig("patch_2", "commit_sha")
       refute receipts.key?("patch_3"), "idempotent receipt retry must not add a generation"
+    end
+  end
+
+  def test_publication_attempt_identity_is_nul_delimited_and_claim_independent
+    expected = ::Digest::SHA256.hexdigest("#{'a' * 40}\0#{'b' * 40}")
+
+    assert_equal expected, Hive::RefactorPatrol::PublicationAttempt.id_for(
+      publication_base_sha: "a" * 40,
+      commit_sha: "b" * 40
+    )
+    refute_equal(
+      Hive::RefactorPatrol::PublicationAttempt.id_for(
+        publication_base_sha: "ab", commit_sha: "c"
+      ),
+      Hive::RefactorPatrol::PublicationAttempt.id_for(
+        publication_base_sha: "a", commit_sha: "bc"
+      )
+    )
+  end
+
+  def test_namespaced_attempts_preserve_proven_legacy_remote_replacement_oids
+    legacy_commit = "a" * 40
+    current_base = "b" * 40
+    current_commit = "c" * 40
+    current_id = Hive::RefactorPatrol::PublicationAttempt.id_for(
+      publication_base_sha: current_base, commit_sha: current_commit
+    )
+    descriptor = Hive::RefactorPatrol::PublicationAttempt.descriptor(
+      patch_receipt_key: "patch_2",
+      publication_base_sha: current_base,
+      commit_sha: current_commit,
+      recorded_at: T0.iso8601
+    )
+    receipts = {
+      "patch" => { "commit_sha" => legacy_commit, "branch" => "hive-refactor/legacy" },
+      "push_complete" => { "commit_sha" => legacy_commit },
+      "patch_superseded_#{::Digest::SHA256.hexdigest(legacy_commit)}" => {
+        "reason" => "trunk_drift_retry",
+        "commit_sha" => legacy_commit
+      },
+      "patch_2" => { "commit_sha" => current_commit },
+      "publication_attempts" => {
+        current_id => Hive::RefactorPatrol::PublicationAttempt.build(
+          descriptor: descriptor
+        )
+      }
+    }
+
+    assert_empty Hive::RefactorPatrol::PublicationAttempt.superseded_remote_commits(receipts)
+
+    receipts["push_complete"] = {
+      "operation" => "push_branch_complete",
+      "canonical_action_id" => "fix-legacy",
+      "repository" => "acme/polyglot",
+      "branch" => "hive-refactor/legacy",
+      "commit_sha" => legacy_commit,
+      "remote_oid" => legacy_commit
+    }
+    assert_equal [ legacy_commit ],
+                 Hive::RefactorPatrol::PublicationAttempt.superseded_remote_commits(receipts)
+  end
+
+  def test_legacy_publication_receipts_migrate_additively_and_allow_a_replacement_attempt
+    with_tmp_dir do |dir|
+      store = initialized_store(dir)
+      action_id = fix_action_id(store)
+      token = store.claim_action!("job-1", action_id, owner: "runner", now: T0)
+      patch = publication_patch(action_id, base: "c" * 40, commit: "d" * 40)
+      push_intent = publication_push_intent(action_id, patch, expected_remote_oid: nil)
+      push_complete = publication_push_complete(action_id, patch)
+      store.record_patch_receipt!(token, receipt: patch, now: T0 + 1)
+      store.record_creation_intent!(token, intent: push_intent, now: T0 + 2)
+      store.record_action_receipt!(
+        token, key: "push_complete", value: push_complete, now: T0 + 3
+      )
+
+      migrated = store.record_patch_publication_attempt!(
+        token, receipt: patch, now: T0 + 4
+      )
+      attempt_id = Hive::RefactorPatrol::PublicationAttempt.id_for(
+        publication_base_sha: patch.fetch("publication_base_sha"),
+        commit_sha: patch.fetch("commit_sha")
+      )
+      receipts = migrated.dig("actions", 0, "receipts")
+      attempt = receipts.dig("publication_attempts", attempt_id)
+      assert_equal push_intent, receipts.dig("creation_intent", "payload")
+      assert_equal push_complete, receipts.fetch("push_complete")
+      assert_equal "patch", attempt.dig("descriptor", "patch_receipt_key")
+      assert_equal push_intent, attempt.fetch("push_intent")
+      assert_equal push_complete, attempt.fetch("push_complete")
+
+      superseded = store.supersede_publication_attempt!(
+        token, attempt_id: attempt_id, observed_head_sha: "e" * 40, now: T0 + 5
+      )
+      assert_equal "e" * 40,
+                   superseded.dig("actions", 0, "receipts", "publication_attempts",
+                                  attempt_id, "superseded", "observed_head_sha")
+      replacement = publication_patch(action_id, base: "e" * 40, commit: "f" * 40)
+      replaced = store.record_patch_publication_attempt!(
+        token, receipt: replacement, now: T0 + 6
+      )
+      assert_equal replacement.fetch("commit_sha"),
+                   replaced.dig("actions", 0, "receipts", "patch_2", "commit_sha")
+      assert_equal 2,
+                   replaced.dig("actions", 0, "receipts", "publication_attempts").size
+
+      assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        store.record_action_receipt!(
+          token, key: "publication_attempts", value: {}, now: T0 + 7
+        )
+      end
+    end
+  end
+
+  def test_publication_validator_enforces_phase_references_and_append_only_supersession
+    with_tmp_dir do |dir|
+      store = initialized_store(dir)
+      action_id = fix_action_id(store)
+      token = store.claim_action!("job-1", action_id, owner: "runner", now: T0)
+      patch = publication_patch(action_id, base: "c" * 40, commit: "d" * 40)
+      store.record_patch_publication_attempt!(token, receipt: patch, now: T0 + 1)
+      attempt_id = Hive::RefactorPatrol::PublicationAttempt.id_for(
+        publication_base_sha: patch.fetch("publication_base_sha"),
+        commit_sha: patch.fetch("commit_sha")
+      )
+      before_phase = store.read_job("job-1")
+      store.record_publication_attempt_phase!(
+        token,
+        attempt_id: attempt_id,
+        phase: "push_intent",
+        payload: publication_push_intent(action_id, patch, expected_remote_oid: nil),
+        now: T0 + 2
+      )
+      after_phase = store.read_job("job-1")
+      assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        store.send(
+          :validate_transition!, after_phase, before_phase, "/tmp/job.json",
+          action_api: true
+        )
+      end
+
+      tampered = JSON.parse(JSON.generate(after_phase))
+      tampered.dig(
+        "actions", 0, "receipts", "publication_attempts", attempt_id, "descriptor"
+      )["commit_sha"] = "f" * 40
+      assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        store.send(:validate_job!, tampered, path: "/tmp/job.json")
+      end
+
+      invalid_create = JSON.parse(JSON.generate(before_phase))
+      invalid_create.dig("actions", 0, "receipts", "publication_attempts", attempt_id)[
+        "pr_create_intent"
+      ] = publication_pr_create_intent(action_id, patch)
+      assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        store.send(:validate_job!, invalid_create, path: "/tmp/job.json")
+      end
+
+      store.record_publication_attempt_phase!(
+        token,
+        attempt_id: attempt_id,
+        phase: "push_complete",
+        payload: publication_push_complete(action_id, patch),
+        now: T0 + 3
+      )
+      store.record_publication_attempt_phase!(
+        token,
+        attempt_id: attempt_id,
+        phase: "pr_create_intent",
+        payload: publication_pr_create_intent(action_id, patch),
+        now: T0 + 4
+      )
+      assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        store.supersede_publication_attempt!(
+          token, attempt_id: attempt_id, observed_head_sha: "e" * 40, now: T0 + 5
+        )
+      end
     end
   end
 
@@ -1319,6 +1631,12 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
         store.finish_action!(
           token, outcome: "done", receipts: { "creation_intent" => true }, now: T0 + 1
+        )
+      end
+      assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        store.record_action_outcome!(
+          token, outcome: "failed", terminal: false,
+          receipts: { "publication_attempts" => {} }, now: T0 + 1
         )
       end
       store.record_action_receipt!(token, key: "validation", value: true, now: T0 + 1)
@@ -1855,6 +2173,42 @@ class RefactorPatrolJobStoreTest < Minitest::Test
   def fix_action_id(store)
     store.read_job("job-1").fetch("actions").find { |item| item.fetch("kind") == "fix" }
          .fetch("canonical_action_id")
+  end
+
+  def publication_patch(action_id, base:, commit:)
+    {
+      "branch" => "hive-refactor/#{action_id}",
+      "publication_base_sha" => base,
+      "commit_sha" => commit
+    }
+  end
+
+  def publication_push_intent(action_id, patch, expected_remote_oid:)
+    Hive::RefactorPatrol::PrOpener.push_intent_payload(
+      canonical_action_id: action_id,
+      repository: "acme/demo",
+      branch: patch.fetch("branch"),
+      commit_sha: patch.fetch("commit_sha"),
+      expected_remote_oid: expected_remote_oid
+    )
+  end
+
+  def publication_push_complete(action_id, patch)
+    Hive::RefactorPatrol::PrOpener.push_complete_payload(
+      canonical_action_id: action_id,
+      repository: "acme/demo",
+      branch: patch.fetch("branch"),
+      commit_sha: patch.fetch("commit_sha")
+    )
+  end
+
+  def publication_pr_create_intent(action_id, patch)
+    Hive::RefactorPatrol::PrOpener.pr_create_intent_payload(
+      canonical_action_id: action_id,
+      repository: "acme/demo",
+      branch: patch.fetch("branch"),
+      commit_sha: patch.fetch("commit_sha")
+    )
   end
 
   def terminal_proof(action_id, project_root:, outcome: "pr_opened",

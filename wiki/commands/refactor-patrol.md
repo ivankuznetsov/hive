@@ -31,12 +31,21 @@ hive refactor-patrol my-project --pr https://github.com/acme/app/pull/123 --json
 hive refactor-patrol my-project --job-manifest PATH --json
 hive refactor-patrol my-project --job-manifest PATH --actions --json
 # The daemon also supplies an internal --result-file under v2/results/.
+
+# Read-only durable job inspection
+hive refactor-patrol my-project --list
+hive refactor-patrol my-project --list --limit 50 --cursor CURSOR
+hive refactor-patrol my-project --show JOB_ID
+hive refactor-patrol my-project --show JOB_ID --json
+hive refactor-patrol my-project --show JOB_ID --full --json
 ```
 
 Fresh terminal and web init recommend discovery (`refactor_patrol.enabled:
 true`) with a default-yes choice. Missing configuration in an existing project
 still resolves to false. The two external-effect gates never inherit discovery
-consent and default off:
+consent and default off. Fresh headless init can resolve the discovery choice
+before any project-state write with `hive init --refactor-patrol` or
+`hive init --no-refactor-patrol`; omitting both keeps the enabled default.
 
 ```yaml
 refactor_patrol:
@@ -92,11 +101,14 @@ and ecosystem-specific import resolution builds a source-only dependency graph
 across slash-, dot-, backslash-, and namespace-style references. Tests, docs,
 assets, generated artifacts, fixture/test manifests, and mapper chunk boundaries
 do not inflate fan-in/coupling scores or consume reviewer slices.
-All mapper and leverage content reads go through one root-confined source
-reader: tracked symlinks may resolve only to regular files beneath the real
+All outer semantic mapping, architecture mapping, and leverage content reads go
+through one root-confined source reader before a path can enter a reviewer
+slice: tracked symlinks may resolve only to regular files beneath the real
 project root, device/FIFO-like targets are skipped, and each UTF-8-scrubbed read
-is capped at 256 KiB. This keeps an unfamiliar or hostile repository from
-escaping the checkout or turning discovery into an unbounded read.
+is capped at 256 KiB. Deleted or renamed-away documentation paths may remain as
+non-readable historical scope, but an existing unsafe documentation symlink is
+never handed to the reviewer. This keeps an unfamiliar or hostile repository
+from escaping the checkout or turning discovery into an unbounded read.
 
 Documentation mapping is a refactor-patrol-only capability. When appropriate,
 it maps bounded root-document, `docs/`, wiki, ADR, and decision slices. Compiled
@@ -107,9 +119,10 @@ one broad documentation feature. Ordinary `hive patrol` mapping is unchanged.
 allowance: once exhausted, later slices stay incomplete for a future resume.
 Malformed envelopes, null/scalar items, and schema-invalid records are review
 errors rather than successful zero-result scans. Evidence is also checked
-against the pinned checkout's real, root-confined bytes: cited files must
-exist, line anchors must be in range, and snippets must occur exactly when
-present. One unverified citation makes the thesis inadmissible. Proposal
+against the pinned checkout's real, root-confined, 256 KiB-bounded bytes: cited
+files must exist, line anchors must be in range within that inspection window,
+and snippets must occur exactly within it when present. One unverified citation
+makes the thesis inadmissible. Proposal
 leverage is derived from measured hotspot signals and model-explained relief;
 the default `min_leverage_score: 0.25` keeps low-value extraction proposals
 visible but prevents automatic action. If architecture mapping fails, leverage
@@ -131,10 +144,42 @@ instead of silently rebaselining. Each manifest records the source URL and
 repository, base and merge SHAs, merged time, complete file statuses/renames,
 changed paths, and checksum before its job is runnable.
 
+Catch-up is incremental and restart-safe without changing that authoritative
+`reconciler.json` v2 checkpoint. A separate identity-fenced
+`reconciler-progress.json` v1 sidecar binds registration, host, repository,
+default branch, and the SHA-256 fingerprint of the base checkpoint. It records
+one fixed overlap window (including its upper bound), the first page's result
+count, the next GitHub page plus accumulated merge identities, then the next
+manifest intake item plus already-enqueued PRs. A count or terminal traversal
+change restarts at page one without moving that upper bound. Each origin
+identity lookup, page, finalize-watcher PR-state poll, or hydration request
+receives the remaining slice of one absolute monotonic tick budget shared with
+exact-PR hydration later in that dispatcher tick. When
+the budget is spent, watcher poll/intake stops the batch and retries next tick
+without counting the deferral as a GitHub failure; a hanging state-poll
+subprocess is terminated and follows ordinary watcher backoff. Partial projects
+and the starting project rotate fairly so one slow repository cannot stall the
+daemon. Real
+GitHub failures persist jittered, capped exponential retry state from the
+observed failure time, and that state survives daemon restart.
+
+Sidecar and checkpoint replacements are atomic and directory-fsynced. A
+completed scan writes the v2 checkpoint before unlinking and fsyncing the
+sidecar. If a crash leaves the old sidecar after that checkpoint write, its base
+fingerprint is stale and the next tick removes it. Earlier crashes resume the
+page/intake cursor; write-once manifest/job intake makes replay idempotent.
+Malformed or identity-drifted progress is quarantined and blocks.
+
 The v2 job lifecycle is `queued → analyzing → classified → acting → complete`.
 Discovery and actions use generation-fenced claims renewed by exact
 PID/process-start heartbeats; workers without verifiable process identity do
-not claim work. `PatrolArbiter` gives
+not claim work. `JobStore` remains the sole aggregate lock/read/write facade,
+but delegates deterministic responsibilities to three collaborators:
+`JobRecordValidator` validates complete records and monotonic transitions,
+`ClaimTransitions` constructs, renews, and finishes in-memory discovery/action
+claims, and `JobIndexes` projects rebuildable fingerprint/action indexes from
+terminal aggregates. None of those collaborators persists independently.
+`PatrolArbiter` gives
 ordinary and architecture scans the same per-project patrol-scan budget and
 alternates kinds across ticks; architecture occurrences are oldest-first.
 Candidate selection takes one immutable, tick-scoped ownership snapshot so
@@ -174,6 +219,63 @@ or issue family id. Semantic-family descriptors and ids also include the source
 host, so identical repository slugs on different GitHub/GHES hosts cannot share
 an action or family identity.
 
+## Read-only job inspection
+
+`--list` and `--show JOB_ID` query the authoritative v2 `JobStore` in the CLI
+process. They do not enqueue, claim, replay, resume, or otherwise mutate a job,
+and they remain available for a registered project even when architecture
+discovery is currently disabled. `--list` returns jobs in their immutable
+durable intake sequence, with source identity, lifecycle state, counts, current
+blockers, and update time. Pages default to 100 records (`--limit` accepts 1
+through 100) and carry `has_more` plus an opaque `next_cursor`; pass that value
+back through `--cursor` to continue. The first page fixes a sequence high-water
+snapshot, so jobs arriving later, equal timestamps, and wall-clock rollback
+cannot skip or enter that pagination run. `count` and `page.total` report that
+snapshot's total while `page.returned` is the current page size.
+
+The sequence projection lives under `v2/indexes/job-query/` as immutable
+per-sequence sidecars plus an O(1) high-water record. Writer paths publish it
+only after the authoritative job exists. A list query reads the high-water
+once, opens at most `limit + 1` membership records, and parses only the selected
+full jobs; it never scans every historical aggregate and never repairs or
+writes the index. Missing, malformed, or mismatched membership fails closed.
+`JobStore#rebuild_job_query_index!` is the explicit writer-side recovery path;
+it changes the index generation so old cursors are rejected rather than
+silently changing membership. The first authoritative write after upgrade also
+migrates pre-index jobs. Newly created index ancestors are directory-fsynced
+before `active.json` can expose the generation.
+
+`--show` adds the stored source and policy snapshots, dispositions, feature
+results, review errors, discovery attempts, and action records. Histories that
+can grow across retries are bounded to their latest 100 entries by default:
+discovery attempts, each action's claim history, and each action's publication
+attempts. `job.history` reports total/returned/truncated counts for every slice.
+For pre-attempt ledgers, flat `patch`, `patch_N`, and supersession receipts are
+also bounded: normal show retains only the active legacy patch and reports the
+full flat patch count as truncated, while `--full` returns the complete legacy
+receipt history.
+
+Use `--limit 1..100` to request a smaller history window or `--full` to
+explicitly opt into the complete, potentially large history. `--full` and
+`--limit` are mutually exclusive.
+
+Text mode prints a compact operator summary. `--json` emits the versioned
+`hive-refactor-patrol-jobs.v1` success/error contract. An unknown job id is a
+`not_found` error with usage exit 64. Query options are mutually exclusive and
+cannot be combined with `--pr`, `--job-manifest`, `--actions`, `--dry-run`,
+legacy scope hints, or the internal result-file option. `--cursor` belongs only
+to `--list`; `--full` belongs only to `--show`. Invalid job ids and query
+modifiers—including `--limit`, `--cursor`, or `--full` without a selector—use
+the jobs-v1 `usage` error arm with exit 64, while a valid but
+missing id uses `not_found`; corruption in an existing valid-id record remains
+a hard error and is never relabeled as missing.
+
+Current action-block summaries use the per-action claim-generation snapshot
+persisted with each new block. Only a strictly newer claim supersedes that
+lifecycle blocker, independent of wall-clock rollback or same-second writes.
+Legacy blocks without the snapshot use a conservative strictly-later timestamp
+fallback, so ambiguous equality keeps the blocker visible.
+
 ## Fix and issue routing
 
 Only accepted, unflagged theses from a job whose enqueue-time policy allowed
@@ -207,17 +309,46 @@ from current clean trunk. Registered trunk is never reset, pulled, edited, or
 committed by patrol.
 
 `PrOpener` reconciles the complete same-branch PR set by exact action marker,
-head SHA, base, repository, and GitHub host. It records distinct push intent,
-push-completion, and PR-create intent phases, with the exact action-generation
-fence before durable intent and again after intent immediately before the
-request. A rejected pre-intent fence is known-not-sent; once PR-create intent
-is durable, an ambiguous result or changed remote head becomes
-reconciliation-only. It requires exactly one origin push URL, captures that
-validated URL once, and uses it for both remote-OID
-lookup and push so a later `origin` rewrite cannot redirect publication. New
-branches use an exact absence lease; replacements use an exact expected-OID
-lease tied to a proven prior patch generation. An arbitrary pre-existing remote
-branch is a conflict, never a force-push target. After `gh pr create`, an
+head SHA, base, repository, and GitHub host. Each validated patch generation
+owns an append-only entry under `receipts.publication_attempts`, keyed by
+`SHA256(publication_base_sha + NUL + commit_sha)` rather than by the ephemeral
+action-claim generation. Its immutable descriptor names the exact patch receipt,
+base SHA, and commit SHA. `push_intent`, `push_complete`, and
+`pr_create_intent` are immutable append-only phases; PR-create intent requires
+durable push completion, and a superseded or post-create attempt cannot advance.
+`JobStore` is the only writer and applies the pure `PublicationAttempt` grammar
+under the live action-claim fence before atomically committing each append.
+Existing flat publication receipts are imported additively on first resume by
+copying their exact matching phase payloads into the attempt. The original
+legacy receipt entries are not rewritten; import only adds generation-scoped
+copies and preserves their payload content byte-for-byte.
+
+The exact action-generation fence still runs before durable intent and again
+after intent immediately before a remote request. A rejected pre-intent fence
+is known-not-sent. On restart Hive first reconciles the exact remote branch: a
+landed push whose completion receipt was interrupted gets durable
+`push_complete` evidence before drift can supersede it. Hive then checks that
+registered trunk still equals the attempt's publication base before push work,
+and checks it again after proving the exact remote head immediately before
+`pr_create_intent`. Drift appends an immutable `superseded` record with the
+observed trunk SHA; the fixer then produces a new patch/base pair and therefore
+a new attempt id. Once
+`pr_create_intent` is durable, supersession is forbidden and an ambiguous result
+or changed remote head remains reconciliation-only.
+
+Publication requires exactly one origin push URL and reuses it for remote-OID
+lookup and push, so a later `origin` rewrite cannot redirect the transaction.
+New branches use an exact absence lease. A replacement is authorized only when
+the remote OID equals the commit of an older attempt that has both durable
+`push_complete` proof and durable supersession; the push then uses that exact
+old OID as its force-with-lease expectation. An arbitrary pre-existing remote
+branch remains a conflict. Publication phases themselves are remote
+continuation evidence, so disabled registrations still participate in unique
+repository ownership. Continuation-only claims may reconcile an existing
+request (or record completion of an already-intended push), but cannot create a
+replacement patch or begin a new push/PR phase.
+
+After `gh pr create`, an
 exact-host/repository `gh pr view` must prove the returned URL/number, OPEN
 non-draft state, head repository/branch/OID, and base branch before handoff.
 Same-branch reconciliation also rejects an OPEN PR unless `isDraft` is
@@ -272,6 +403,7 @@ namespace:
 ```text
 .hive-state/refactor_patrol/v2/
   reconciler.json               # exact-host catch-up checkpoint, schema v2
+  reconciler-progress.json      # identity-bound page/intake cursor, schema v1
   manifests/<job-id>.json       # write-once source occurrence
   jobs/<job-id>.json            # authoritative aggregate + claims/receipts
   families/<family-id>.json     # rebuildable semantic-family projection
@@ -312,6 +444,15 @@ Pre-dispatch `--json` usage errors follow the same mode: legacy argv receives a
 schema-valid v1 error, while `--pr`, `--job-manifest`, or enabled `--actions`
 argv receives a schema-valid v2 error with the required empty job/source and
 `complete: false` projection.
+
+Read-only `--list` and `--show` use a separate
+`hive-refactor-patrol-jobs.v1` schema. List responses contain validated job
+summaries plus bounded, sequence-snapshot continuation metadata; show responses contain one
+validated durable detail projection with bounded-history metadata or an
+explicit `full: true` projection.
+Their query-specific error arm preserves the requested `action` (`list` or
+`show`, or null for a selector-less query modifier) without falling through to
+either discovery reporter.
 
 Daemon children write their v2 document atomically to the job-bound internal
 result file. Stdout remains operator logging, so a valid snapshot larger than

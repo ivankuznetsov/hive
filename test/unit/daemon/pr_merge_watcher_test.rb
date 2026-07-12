@@ -11,27 +11,36 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
   FAKE_GH = File.expand_path("../../fixtures/fake-gh.rb", __dir__)
 
   class FakeMergeIntake
-    attr_accessor :error
-    attr_reader :calls
+    attr_accessor :error, :outcomes, :poll_timeout
+    attr_reader :calls, :budget_calls
 
     def initialize(error: nil)
       @error = error
       @calls = []
+      @outcomes = []
+      @poll_timeout = :default
+      @budget_calls = []
+    end
+
+    def watcher_poll_timeout(**kwargs)
+      @budget_calls << kwargs
+      poll_timeout == :default ? kwargs.fetch(:maximum) : poll_timeout
     end
 
     def ingest(**kwargs)
       @calls << kwargs
       raise error if error
 
-      { "job_id" => "durable" }
+      outcomes.empty? ? { "job_id" => "durable" } : outcomes.shift
     end
   end
 
-  def make(poll_interval_sec: 60, merge_intake: nil)
+  def make(poll_interval_sec: 60, merge_intake: nil, poll_timeout_sec: 60)
     Hive::Daemon::PrMergeWatcher.new(
       poll_interval_sec: poll_interval_sec,
       gh_bin: FAKE_GH,
-      merge_intake: merge_intake
+      merge_intake: merge_intake,
+      poll_timeout_sec: poll_timeout_sec
     )
   end
 
@@ -153,6 +162,90 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
         archives = watcher.tick(now: now + Hive::Daemon::PrMergeWatcher::GH_BACKOFF_SCHEDULE.first + 1)
         assert_equal 1, archives.size
         assert_equal 2, intake.calls.size
+      end
+    end
+  end
+
+  def test_deferred_intake_stops_the_batch_without_burning_failure_budget
+    with_pr_md(url: "https://github.com/u/r/pull/41") do |first_folder|
+      with_pr_md(url: "https://github.com/u/r/pull/42") do |second_folder|
+        intake = FakeMergeIntake.new
+        intake.outcomes = [ :deferred, { "job_id" => "durable" } ]
+        watcher = make(poll_interval_sec: 0, merge_intake: intake)
+        watcher.enqueue(project: "p1", slug: "s1", task_folder: first_folder)
+        watcher.enqueue(project: "p1", slug: "s2", task_folder: second_folder)
+        now = Time.utc(2026, 7, 10, 12)
+
+        with_env("HIVE_FAKE_GH_STATE" => "MERGED") do
+          assert_empty watcher.tick(now: now)
+          assert_equal 1, intake.calls.length,
+                       "a spent shared deadline must not start later immediate hydrations"
+          assert watcher.watching?(project: "p1", slug: "s1")
+          assert watcher.watching?(project: "p1", slug: "s2")
+          deferred = watcher.instance_variable_get(:@pending).fetch([ "p1", "s1" ])
+          assert_equal 0, deferred.fetch(:failure_count)
+          assert_nil deferred.fetch(:next_eligible_at)
+
+          archives = watcher.tick(now: now + 1)
+          assert_equal 2, archives.length
+          assert_equal "s1", archives.fetch(0).fetch(:slug)
+          assert_equal "s2", archives.fetch(1).fetch(:slug)
+          assert_equal 3, intake.calls.length
+          refute watcher.watching?(project: "p1", slug: "s2")
+        end
+      end
+    end
+  end
+
+  def test_spent_shared_budget_defers_before_polling_without_burning_failure_budget
+    with_pr_md(url: "https://github.com/u/r/pull/42") do |folder|
+      intake = FakeMergeIntake.new
+      intake.poll_timeout = nil
+      watcher = make(poll_interval_sec: 0, merge_intake: intake)
+      watcher.enqueue(project: "p1", slug: "s1", task_folder: folder)
+      now = Time.utc(2026, 7, 10, 12)
+
+      with_env("HIVE_FAKE_GH_STATE" => "MERGED") do
+        assert_empty watcher.tick(now: now)
+      end
+
+      assert_empty intake.calls
+      assert_equal [ { project: "p1", now: now, maximum: 60.0 } ], intake.budget_calls
+      pending = watcher.instance_variable_get(:@pending).fetch([ "p1", "s1" ])
+      assert_equal 0, pending.fetch(:failure_count)
+      assert_nil pending.fetch(:last_polled_at)
+    end
+  end
+
+  def test_poll_timeout_validation_and_budget_coordination_fallback
+    [ 0, -1, Float::NAN ].each do |value|
+      assert_raises(ArgumentError) { make(poll_timeout_sec: value) }
+    end
+
+    intake = FakeMergeIntake.new
+    intake.poll_timeout = Object.new
+    watcher = make(merge_intake: intake, poll_timeout_sec: 7)
+    now = Time.utc(2026, 7, 10, 12)
+
+    assert_equal 7.0, watcher.send(:poll_timeout_for, project: "p1", now: now)
+    assert_equal [ { project: "p1", now: now, maximum: 7.0 } ], intake.budget_calls
+  end
+
+  def test_repeated_intake_failures_preserve_the_failure_counter
+    with_pr_md(url: "https://github.com/u/r/pull/42") do |folder|
+      intake = FakeMergeIntake.new(error: Hive::GhError.new("manifest unavailable"))
+      watcher = make(poll_interval_sec: 0, merge_intake: intake)
+      watcher.enqueue(project: "p1", slug: "s1", task_folder: folder)
+      now = Time.utc(2026, 7, 10, 12)
+
+      with_env("HIVE_FAKE_GH_STATE" => "MERGED") do
+        assert_empty watcher.tick(now: now)
+        assert_empty watcher.tick(now: now + 61)
+
+        pending = watcher.instance_variable_get(:@pending).fetch([ "p1", "s1" ])
+        assert_equal 2, pending.fetch(:failure_count)
+        assert_equal now + 61 + Hive::Daemon::PrMergeWatcher::GH_BACKOFF_SCHEDULE.fetch(1),
+                     pending.fetch(:next_eligible_at)
       end
     end
   end
@@ -386,6 +479,30 @@ class HiveDaemonPrMergeWatcherTest < Minitest::Test
         assert_equal [], result
         assert watcher.watching?(project: "p1", slug: "s1"),
                "unexpected gh execution errors are retryable poll failures"
+      end
+    end
+  end
+
+  def test_hanging_gh_poll_is_terminated_within_the_explicit_timeout
+    with_tmp_dir do |dir|
+      hanging_gh = File.join(dir, "hanging-gh")
+      File.write(hanging_gh, "#!/bin/sh\nexec sleep 5\n")
+      FileUtils.chmod(0o755, hanging_gh)
+
+      with_pr_md(url: "x") do |folder|
+        watcher = Hive::Daemon::PrMergeWatcher.new(
+          poll_interval_sec: 0, gh_bin: hanging_gh, poll_timeout_sec: 0.05
+        )
+        watcher.enqueue(project: "p1", slug: "s1", task_folder: folder)
+        started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+
+        assert_empty watcher.tick(now: Time.now)
+
+        elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+        assert_operator elapsed, :<, 2
+        assert watcher.watching?(project: "p1", slug: "s1")
+        pending = watcher.instance_variable_get(:@pending).fetch([ "p1", "s1" ])
+        assert_equal 1, pending.fetch(:failure_count)
       end
     end
   end

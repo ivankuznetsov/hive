@@ -1,4 +1,4 @@
-require "hive/gh"
+require "hive/refactor_patrol/github_gateway"
 require "hive/refactor_patrol/semantic_descriptor"
 require "hive/refactor_patrol/semantic_family"
 require "hive/secret_patterns"
@@ -75,10 +75,14 @@ module Hive
         }
       end
 
-      def initialize(project_root, cfg:, gh: Hive::Gh)
+      def initialize(project_root, cfg:, gh: Hive::Gh, github_gateway: nil)
         @project_root = File.expand_path(project_root)
         @cfg = cfg
-        @gh = gh
+        @github_gateway = GithubGateway.coerce(
+          github_gateway,
+          transport: gh,
+          required: %i[issues_for_repository create_issue]
+        )
       end
 
       def publish(thesis:, family_id:, canonical_action_id:, job_id:, source:, reasons: [],
@@ -140,7 +144,7 @@ module Hive
           return result("authority_revoked", false, receipts: base_receipts(family_id, action_id))
         end
         request_sent = true
-        url = @gh.create_issue(
+        url = @github_gateway.create_issue(
           repository: repository, host: host, title: title_for(thesis), body: body, cfg: @cfg
         )
         result(
@@ -241,7 +245,7 @@ module Hive
       end
 
       def lookup_existing(repository, marker, host, thesis:, source:)
-        issues = @gh.issues_for_repository(
+        issues = @github_gateway.issues_for_repository(
           repository: repository, host: host, cfg: @cfg
         )
         unless issues.is_a?(Array) && issues.all? { |issue| valid_issue_record?(issue, repository, host) }

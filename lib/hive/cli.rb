@@ -120,9 +120,13 @@ module Hive
       already-initialized project scaffolds the workflow and rebinds the
       default in one hive-state commit.
 
-      To set non-default values from automation, run init and then
-      hand-edit `.hive-state/config.yml` (see `wiki/modules/config.md`
-      for the schema). Legacy Compound Engineering skill values such as
+      Headless callers can explicitly select architecture discovery before
+      any state is written with --refactor-patrol or --no-refactor-patrol;
+      omitting both keeps the fresh-project default enabled. Set other
+      non-default values after init in `.hive-state/config.yml` (see
+      `wiki/modules/config.md` for the schema). Existing projects reject both
+      selectors rather than silently ignoring them during a workflow rebind.
+      Legacy Compound Engineering skill values such as
       `/compound-engineering:ce-brainstorm` are normalized to the current
       `/ce-brainstorm` form before prompts are rendered. Piped STDIN is
       intentionally NOT consumed.
@@ -139,6 +143,8 @@ module Hive
     option :workflow, type: :string, desc: workflow_option_desc
     option :new_workflow, type: :string,
                           desc: "scaffold custom workflow ID, bind it as this project's default, and print paths to edit"
+    option :refactor_patrol, type: :boolean, default: nil,
+                             desc: "enable or disable post-merge architecture discovery before init writes state"
     def init(project_path = Dir.pwd)
       require "hive/commands/init"
       Hive::Commands::Init.new(
@@ -146,7 +152,8 @@ module Hive
         force: options[:force],
         json: options[:json],
         workflow: options[:workflow],
-        new_workflow: options[:new_workflow]
+        new_workflow: options[:new_workflow],
+        refactor_patrol: options[:refactor_patrol]
       ).call
     end
 
@@ -715,6 +722,12 @@ module Hive
 
       The daemon uses --actions with --job-manifest to resume the immutable
       per-thesis action ledger after discovery. It emits the same v2 contract.
+
+      Use --list or --show JOB_ID to inspect the authoritative durable job
+      ledger without enqueueing, claiming, replaying, or resuming work. With
+      --json these operations emit hive-refactor-patrol-jobs.v1. List output is
+      paginated with --limit/--cursor. Show output bounds retry/publication
+      histories by --limit unless --full explicitly requests every entry.
     DESC
     option :dry_run, type: :boolean, default: false,
                      desc: "preview without persisting refactor-patrol state"
@@ -729,6 +742,16 @@ module Hive
                      desc: "resume actions for --job-manifest (daemon/internal)"
     option :result_file, type: :string,
                          desc: "write daemon completion envelope to a fenced result file (internal)"
+    option :list, type: :boolean, default: false,
+                  desc: "list durable architecture-patrol jobs without changing state"
+    option :show, type: :string,
+                  desc: "show one durable architecture-patrol job without changing state"
+    option :limit, type: :numeric,
+                   desc: "query page/history limit (1-100; default: 100)"
+    option :cursor, type: :string,
+                    desc: "continue a --list query from an opaque cursor"
+    option :full, type: :boolean, default: false,
+                  desc: "include complete unbounded histories with --show"
     def refactor_patrol(project)
       require "hive/commands/refactor_patrol"
       Hive::Commands::RefactorPatrol.new(
@@ -742,7 +765,12 @@ module Hive
         pr: options[:pr],
         job_manifest: options[:job_manifest],
         actions: options[:actions],
-        result_file: options[:result_file]
+        result_file: options[:result_file],
+        list: options[:list],
+        show: options[:show],
+        limit: options[:limit],
+        cursor: options[:cursor],
+        full: options[:full]
       ).call
     end
 

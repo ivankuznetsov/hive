@@ -5,6 +5,7 @@ require "uri"
 require "hive/gh"
 require "hive/patrol/finding"
 require "hive/patrol/review_handoff"
+require "hive/refactor_patrol/github_gateway"
 require "hive/secret_patterns"
 
 module Hive
@@ -13,7 +14,10 @@ module Hive
     # handoff. A durable caller records creation intent before #open invokes
     # gh; after an ambiguous create result, retries reconcile only.
     class PrOpener
-      Result = Struct.new(:outcome, :terminal, :pr_url, :review_task_path, :receipts, keyword_init: true)
+      Result = Struct.new(
+        :outcome, :terminal, :pr_url, :review_task_path, :observed_head_sha, :receipts,
+        keyword_init: true
+      )
 
       MAX_TITLE = 200
       MAX_BODY = 20_000
@@ -56,10 +60,17 @@ module Hive
         end
       end
 
-      def initialize(project_root, cfg:, gh: Hive::Gh, review_handoff: nil, diff_reader: nil)
+      def initialize(project_root, cfg:, gh: Hive::Gh,
+                     github_gateway: nil,
+                     review_handoff: nil, diff_reader: nil)
         @project_root = File.expand_path(project_root)
         @cfg = cfg
         @gh = gh
+        @github_gateway = GithubGateway.coerce(
+          github_gateway,
+          transport: gh,
+          required: %i[verify_pr_identity!]
+        )
         @review_handoff = review_handoff || Hive::Patrol::ReviewHandoff.new(
           @project_root, cfg: cfg, state: {}
         )
@@ -95,16 +106,6 @@ module Hive
 
         return result("remote_outcome_unknown", false) if publication.key?(PR_CREATE_INTENT)
 
-        new_push = !publication.key?(PUSH_INTENT) && !publication.key?(PUSH_COMPLETE)
-        if new_push && current_head != patch.publication_base_sha
-          return result("trunk_drift_retry", false)
-        end
-
-        body = body_for(thesis, patch, job_id, canonical_action_id, source)
-        diff = @diff_reader.call(patch)
-        hits = Hive::SecretPatterns.scan(body) + Hive::SecretPatterns.scan(diff)
-        return result("secret_detected", true) if hits.any?
-
         remote_url = @gh.origin_push_url(patch.worktree_path, cfg: @cfg)
         identity = @gh.repository_identity_from_remote(remote_url)
         unless identity["repository"].to_s.casecmp?(repository.to_s) &&
@@ -122,20 +123,40 @@ module Hive
         if remote_oid && remote_oid != patch.commit_sha && !replaceable_oids.include?(remote_oid)
           return result("remote_branch_conflict", false)
         end
+        if publication.key?(PUSH_COMPLETE) && remote_oid != patch.commit_sha
+          return result("remote_branch_conflict", false)
+        end
 
         if remote_oid == patch.commit_sha
           unless publication.key?(PUSH_COMPLETE)
+            push_complete = self.class.push_complete_payload(
+              canonical_action_id: canonical_action_id,
+              repository: repository, branch: patch.branch,
+              commit_sha: patch.commit_sha
+            )
             persisted = persist_publication(
-              record_intent, PUSH_COMPLETE,
-              self.class.push_complete_payload(
-                canonical_action_id: canonical_action_id,
-                repository: repository, branch: patch.branch,
-                commit_sha: patch.commit_sha
-              )
+              record_intent, PUSH_COMPLETE, push_complete
             )
             return persistence_failure(persisted, request_sent: publication.key?(PUSH_INTENT)) unless persisted == true
+
+            publication[PUSH_COMPLETE] = push_complete
           end
-        else
+        end
+
+        observed_head_sha = current_head
+        if observed_head_sha != patch.publication_base_sha
+          return result(
+            "trunk_drift_retry", false,
+            observed_head_sha: observed_head_sha
+          )
+        end
+
+        body = body_for(thesis, patch, job_id, canonical_action_id, source)
+        diff = @diff_reader.call(patch)
+        hits = Hive::SecretPatterns.scan(body) + Hive::SecretPatterns.scan(diff)
+        return result("secret_detected", true) if hits.any?
+
+        unless remote_oid == patch.commit_sha
           return result("authority_revoked", false) unless authorize_push.call.equal?(true)
 
           push_intent = self.class.push_intent_payload(
@@ -171,6 +192,13 @@ module Hive
         unless exact_remote_head?(patch, remote_url)
           return result("remote_branch_conflict", false)
         end
+        observed_head_sha = current_head
+        if observed_head_sha != patch.publication_base_sha
+          return result(
+            "trunk_drift_retry", false,
+            observed_head_sha: observed_head_sha
+          )
+        end
 
         create_intent = self.class.pr_create_intent_payload(
           canonical_action_id: canonical_action_id,
@@ -189,7 +217,7 @@ module Hive
 
         request_phase = PR_CREATE_INTENT
         pr_url = create_pr(patch, source, title_for(thesis), body)
-        @gh.verify_pr_identity!(
+        @github_gateway.verify_pr_identity!(
           pr_url,
           repository: repository,
           host: host,
@@ -608,10 +636,13 @@ module Hive
         result(outcome, false, receipts: receipts)
       end
 
-      def result(outcome, terminal, pr_url: nil, review_task_path: nil, receipts: {})
+      def result(outcome, terminal, pr_url: nil, review_task_path: nil,
+                 observed_head_sha: nil, receipts: {})
         Result.new(
           outcome: outcome, terminal: terminal, pr_url: pr_url,
-          review_task_path: review_task_path, receipts: receipts
+          review_task_path: review_task_path,
+          observed_head_sha: observed_head_sha,
+          receipts: receipts
         )
       end
     end

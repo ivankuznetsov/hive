@@ -6,12 +6,15 @@ class RefactorPatrolPrManifestResolverTest < Minitest::Test
 
   class FakeGh
     attr_accessor :details
+    attr_reader :timeout_secs
 
     def initialize(details)
       @details = details
+      @timeout_secs = []
     end
 
-    def merged_pr_details(*)
+    def merged_pr_details(*, timeout_sec: nil, **)
+      timeout_secs << timeout_sec
       Marshal.load(Marshal.dump(details))
     end
   end
@@ -50,6 +53,16 @@ class RefactorPatrolPrManifestResolverTest < Minitest::Test
 
       assert_equal 7, resolver.resolve("7").dig("source", "number")
       refute Dir.exist?(File.join(dir, ".hive-state", "refactor_patrol", "v2"))
+    end
+  end
+
+  def test_forwards_the_reconciler_deadline_slice_to_github_metadata_resolution
+    with_tmp_dir do |dir|
+      gh = FakeGh.new(details)
+
+      resolver_for(dir, gh, dry_run: true).resolve("7", timeout_sec: 1.25)
+
+      assert_equal [ 1.25 ], gh.timeout_secs
     end
   end
 

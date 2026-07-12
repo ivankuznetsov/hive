@@ -3,7 +3,7 @@ require "json"
 require "time"
 require "uri"
 require "hive/atomic_file"
-require "hive/gh"
+require "hive/refactor_patrol/github_gateway"
 require "hive/refactor_patrol/pr_manifest"
 
 module Hive
@@ -19,19 +19,26 @@ module Hive
 
       attr_reader :root
 
-      def initialize(project_root:, registration:, default_branch:, cfg:, gh: Hive::Gh, dry_run: false)
+      def initialize(project_root:, registration:, default_branch:, cfg:,
+                     gh: Hive::Gh, github_gateway: nil, dry_run: false)
         @project_root = File.expand_path(project_root)
         @registration = registration.to_s
         @default_branch = default_branch.to_s
         @cfg = cfg
-        @gh = gh
+        @github_gateway = GithubGateway.coerce(
+          github_gateway,
+          transport: gh,
+          required: %i[merged_pr_details]
+        )
         @dry_run = dry_run
         @root = File.join(@project_root, ".hive-state", "refactor_patrol", "v2", "manifests")
       end
 
-      def resolve(pr)
+      def resolve(pr, timeout_sec: nil)
         validate_pr_reference!(pr)
-        details = @gh.merged_pr_details(pr, worktree_path: @project_root, cfg: @cfg)
+        details = @github_gateway.merged_pr_details(
+          pr, worktree_path: @project_root, cfg: @cfg, timeout_sec: timeout_sec
+        )
         validate_details!(details)
         manifest = build_manifest(details)
         publish!(manifest) unless @dry_run

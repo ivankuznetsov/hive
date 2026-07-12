@@ -1,6 +1,7 @@
 require "json_schemer"
 require "pathname"
 require "hive"
+require "hive/patrol/source_reader"
 require "hive/refactor_patrol/fingerprint"
 require "hive/refactor_patrol/leverage"
 require "hive/refactor_patrol/thesis"
@@ -20,10 +21,11 @@ module Hive
       # thesis schema; carries the validation messages for error recording.
       Invalid = Struct.new(:errors, keyword_init: true)
 
-      def initialize(project_root:, commands:, min_leverage_score: 0.0)
-        @project_root = project_root
+      def initialize(project_root:, commands:, min_leverage_score: 0.0, source_reader: nil)
+        @project_root = File.expand_path(project_root)
         @commands = commands
         @min_leverage_score = min_leverage_score.to_f
+        @source_reader = source_reader || Hive::Patrol::SourceReader.new(@project_root)
         @schemer = JSONSchemer.schema(Pathname.new(Hive::Schemas.schema_path("hive-refactor-patrol-thesis")))
       end
 
@@ -360,11 +362,9 @@ module Hive
         relative = Pathname.new(file)
         return if relative.absolute? || relative.cleanpath.to_s != file || file == "."
 
-        root = Pathname.new(@project_root).realpath
-        candidate = Pathname.new(File.join(root, file)).realpath
-        return unless candidate.to_s.start_with?("#{root}#{File::SEPARATOR}") && candidate.file?
+        return unless @source_reader.regular_file?(file)
 
-        candidate.read(encoding: "UTF-8").scrub("")
+        @source_reader.read_utf8(file)
       rescue SystemCallError, ArgumentError
         nil
       end

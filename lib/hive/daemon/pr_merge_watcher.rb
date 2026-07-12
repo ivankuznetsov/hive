@@ -1,7 +1,7 @@
-require "open3"
 require "json"
 require "yaml"
 require "time"
+require "hive/gh"
 require "hive/workflows"
 
 module Hive
@@ -38,12 +38,17 @@ module Hive
       # manually.
       GH_BACKOFF_SCHEDULE = [ 60, 300, 900 ].freeze
       GH_MAX_FAILURES = GH_BACKOFF_SCHEDULE.size + 2
+      DEFAULT_POLL_TIMEOUT_SEC = Hive::Gh::NETWORK_TIMEOUT_SEC
 
       def initialize(poll_interval_sec: 300, gh_bin: ENV.fetch("HIVE_GH_BIN", "gh"),
-                     merge_intake: nil)
+                     merge_intake: nil, poll_timeout_sec: DEFAULT_POLL_TIMEOUT_SEC)
         @poll_interval_sec = poll_interval_sec
         @gh_bin = gh_bin
         @merge_intake = merge_intake
+        @poll_timeout_sec = Float(poll_timeout_sec)
+        unless @poll_timeout_sec.finite? && @poll_timeout_sec.positive?
+          raise ArgumentError, "PR merge watcher poll timeout must be positive"
+        end
         @pending = {}
         # Buffer of `{project:, slug:, pr_url:, failure_count:, last_error:}`
         # entries that hit GH_MAX_FAILURES during the most recent #tick.
@@ -106,7 +111,10 @@ module Hive
           deadline = entry[:next_eligible_at]
           next if deadline && now < deadline
 
-          state, error = poll_state(entry[:pr_url])
+          timeout_sec = poll_timeout_for(project: key.first, now: now)
+          break unless timeout_sec
+
+          state, error = poll_state(entry[:pr_url], timeout_sec: timeout_sec)
           entry[:last_polled_at] = now
 
           if error
@@ -114,9 +122,6 @@ module Hive
             next
           end
 
-          # Successful poll resets failure counter and any pending backoff.
-          entry[:failure_count] = 0
-          entry[:next_eligible_at] = nil
           entry[:last_state] = state
 
           case state
@@ -124,7 +129,18 @@ module Hive
             project, slug = key
             if @merge_intake
               begin
-                @merge_intake.ingest(project: project, pr: entry[:pr_url], now: now)
+                intake = @merge_intake.ingest(
+                  project: project, pr: entry[:pr_url], now: now
+                )
+                if intake == :deferred
+                  # The catch-up reconciler and every immediate hydration in
+                  # this watcher tick share one absolute monotonic budget.
+                  # Leave this and later entries untouched for the next tick;
+                  # deadline deferral is not a GitHub failure and must not burn
+                  # the durable-intake retry budget.
+                  entry[:last_polled_at] = nil
+                  break
+                end
               rescue StandardError => e
                 record_failure(
                   entry,
@@ -136,6 +152,7 @@ module Hive
                 next
               end
             end
+            reset_failures(entry)
             archives << {
               project: project, slug: slug, stage: entry[:stage],
               command: archive_command(slug: slug, project: project,
@@ -146,10 +163,13 @@ module Hive
             }
             keys_to_drop << key
           when "CLOSED"
+            reset_failures(entry)
             # PR was closed without merge. Operator decides what to do
             # (reopen on GitHub or `hive approve --to <stage> --force`
             # backward); the watcher steps out.
             keys_to_drop << key
+          else
+            reset_failures(entry)
           end
           # OPEN → keep watching
         end
@@ -178,6 +198,11 @@ module Hive
       end
 
       private
+
+      def reset_failures(entry)
+        entry[:failure_count] = 0
+        entry[:next_eligible_at] = nil
+      end
 
       def record_failure(entry, key, error, now, keys_to_drop)
         entry[:failure_count] += 1
@@ -229,10 +254,29 @@ module Hive
         "#{command} --recover-merged-error-reason #{error_reason}"
       end
 
+      def poll_timeout_for(project:, now:)
+        return @poll_timeout_sec unless @merge_intake&.respond_to?(:watcher_poll_timeout)
+
+        timeout = @merge_intake.watcher_poll_timeout(
+          project: project, now: now, maximum: @poll_timeout_sec
+        )
+        return nil if timeout.nil?
+
+        [ Float(timeout), @poll_timeout_sec ].min
+      rescue StandardError
+        # Budget coordination is advisory for projects whose architecture
+        # intake/config cannot be resolved. Keep the legacy archive poll
+        # bounded; the later intake call remains the fail-closed authority.
+        @poll_timeout_sec
+      end
+
       # Returns [state, error]. state is one of "OPEN" / "MERGED" /
       # "CLOSED" / nil; error is non-nil when the gh call failed.
-      def poll_state(pr_url)
-        out, err, status = Open3.capture3(@gh_bin, "pr", "view", pr_url, "--json", "state")
+      def poll_state(pr_url, timeout_sec:)
+        out, err, status = Hive::Gh.capture3(
+          @gh_bin, "pr", "view", pr_url, "--json", "state",
+          timeout_sec: timeout_sec
+        )
         unless status.success?
           return [ nil, "gh pr view exit #{status.exitstatus}: #{err.strip}" ]
         end

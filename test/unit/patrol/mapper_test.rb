@@ -1,5 +1,6 @@
 require "test_helper"
 require "json"
+require "timeout"
 require "hive/config"
 require "hive/patrol/mapper"
 
@@ -93,6 +94,67 @@ class HivePatrolMapperTest < Minitest::Test
 
       assert_includes mapper.call.map(&:id), "route-pages-home-tsx"
       assert_equal "", mapper.send(:read, "missing.rb")
+    end
+  end
+
+  def test_path_entry_probe_distinguishes_existing_and_missing_paths
+    with_tmp_dir do |repo|
+      File.write(File.join(repo, "present.md"), "present\n")
+      mapper = Hive::Patrol::Mapper.new(repo, cfg: cfg, dry_run: true)
+
+      assert mapper.send(:path_entry_exists?, "present.md")
+      refute mapper.send(:path_entry_exists?, "missing.md")
+    end
+  end
+
+  def test_mapping_confines_tracked_symlinks_and_bounds_every_content_read
+    with_tmp_git_repo do |repo|
+      Dir.mktmpdir("patrol-mapper-outside") do |outside|
+        File.write(File.join(outside, "package.json"), JSON.generate("scripts" => { "leak" => "cat ~/.ssh/id_rsa" }))
+        File.write(File.join(outside, "external.py"), "@app.get('/outside')\ndef outside(): pass\n")
+        File.write(File.join(outside, "external.md"), "outside documentation\n")
+
+        FileUtils.mkdir_p(File.join(repo, "api"))
+        FileUtils.mkdir_p(File.join(repo, "docs"))
+        FileUtils.mkdir_p(File.join(repo, "safe"))
+        File.write(File.join(repo, "safe", "route.py"), "@app.get('/inside')\ndef inside(): pass\n")
+        File.write(File.join(repo, "docs", "safe.md"), "safe documentation\n")
+        File.symlink("../safe/route.py", File.join(repo, "api", "internal.py"))
+        File.symlink("safe.md", File.join(repo, "docs", "internal.md"))
+        File.symlink(File.join(outside, "package.json"), File.join(repo, "package.json"))
+        File.symlink(File.join(outside, "external.py"), File.join(repo, "api", "external.py"))
+        File.symlink(File.join(outside, "external.md"), File.join(repo, "docs", "external.md"))
+        File.symlink("/dev/zero", File.join(repo, "api", "device.py")) if File.exist?("/dev/zero")
+
+        cap = Hive::Patrol::SourceReader::MAX_SOURCE_BYTES
+        File.write(File.join(repo, "bounded.flux"), ("a" * cap) + "TAIL")
+        run!("git", "-C", repo, "add", ".")
+        run!("git", "-C", repo, "commit", "-m", "symlink boundaries", "--quiet")
+
+        mapper = Hive::Patrol::Mapper.new(
+          repo,
+          cfg: cfg,
+          dry_run: true,
+          capabilities: %i[architecture documentation],
+          documentation_changes: [
+            { "path" => "docs/internal.md", "status" => "added" },
+            { "path" => "docs/external.md", "status" => "added" }
+          ]
+        )
+        features = Timeout.timeout(2) { mapper.call }
+        mapped = features.flat_map { |feature| feature.entrypoints + feature.owned_files + feature.context_files }
+
+        assert_includes features.map(&:id), "route-api-internal-py",
+                        "tracked symlinks resolving within the checkout remain mappable"
+        assert_includes mapped, "docs/internal.md"
+        %w[package.json api/external.py docs/external.md api/device.py].each do |path|
+          refute_includes mapped, path, "unsafe tracked path must not reach a reviewer feature"
+        end
+
+        bounded = mapper.send(:read, "bounded.flux")
+        assert_equal cap, bounded.bytesize
+        refute_includes bounded, "TAIL"
+      end
     end
   end
 

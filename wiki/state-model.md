@@ -1,7 +1,7 @@
 ---
 title: State Model
 type: data-model
-source: lib/hive/task.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/review_handoff.rb, lib/hive/refactor_patrol/*, lib/hive/daemon/display_name_backfiller.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
+source: lib/hive/task.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/review_handoff.rb, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/daemon/display_name_backfiller.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
 created: 2026-04-25
 updated: 2026-07-12
 tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, web]
@@ -187,14 +187,31 @@ does not reinterpret the legacy reporting state:
 ```text
 <project>/.hive-state/refactor_patrol/v2/
 ├── reconciler.json               # host-bound catch-up checkpoint, schema v2
+├── reconciler-progress.json      # restart-safe page/intake cursor, schema v1
 ├── manifests/<job-id>.json       # checksummed, write-once merge occurrence
 ├── jobs/<job-id>.json            # authoritative aggregate
 ├── families/<family-id>.json     # rebuildable semantic-family projection
 ├── indexes/                      # rebuildable fingerprint/action indexes
+│   └── job-query/                # active generation + immutable memberships
 ├── results/<dispatch-id>.json    # atomic daemon-child result; removed on reap
 ├── runs/
 └── logs/
 ```
+
+Read-only job listing is bounded by the `indexes/job-query/` sequence
+projection rather than a scan of every aggregate. Each authoritative new job
+reserves an immutable monotonic entry/pointer pair before its job write;
+`active.json` publishes only the contiguous prefix whose job files are durable.
+An exact retry can adopt the next fully written membership after a crash, while
+a permanent hole keeps later entries invisible until an explicit authoritative
+rebuild. Rebuild scans while holding the writer lock, prepares a complete new
+generation, and atomically swaps `active.json` last while retaining the prior
+generation for in-flight readers. An opaque cursor binds its after-sequence,
+through-sequence snapshot, and active generation. Queries open only the requested
+page and never mutate the projection; a rebuild makes stale cursors fail closed.
+The next authoritative lifecycle write migrates a pre-index ledger, and every
+new index directory ancestor is fsynced before the active-generation pointer is
+published.
 
 Canonical terminal effects also have a global proof namespace, separate from
 every registration's project ledger:
@@ -213,8 +230,40 @@ uses `hive-refactor-patrol-reconciler` schema v2 and stores registration, exact
 host, canonical repository, default branch, high water, overlap occurrences,
 and timestamps. Unsupported/corrupt checkpoints or a later registration, host,
 repository, or branch change are quarantined and block intake rather than
-silently replacing the baseline. The job aggregate is the only completion
-authority. It stores the enqueue-time policy snapshot, one pinned `analysis_sha`,
+silently replacing the baseline.
+
+The authoritative checkpoint schema remains v2. Incremental catch-up uses a
+separate `hive-refactor-patrol-reconciler-progress` v1 sidecar rather than
+putting transient cursors into `reconciler.json`. The sidecar repeats the exact
+registration/host/repository/default-branch identity and binds itself to the
+SHA-256 fingerprint of the v2 checkpoint it started from. It persists two
+restart-safe phases: paginated scan state (fixed overlap start, next/seen
+cursors, accumulated merged-PR identities, fixed upper time bound, and frozen
+result count), followed by manifest intake state (next item index and
+already-enqueued PR numbers). Search traversal is creation-ordered inside that
+fixed merge window. Count or terminal-size drift restarts page traversal while
+retaining the upper bound. Origin identity discovery and each remote page or
+intake item consume one shared project-step deadline within the reconciler's
+monotonic total tick budget; project order rotates across rounds and ticks so a
+slow project cannot monopolize the daemon.
+
+Progress also owns persisted GitHub retry evidence: failure count,
+jittered/capped exponential `not_before`, and a bounded last error. Restart
+honors that deadline. Sidecar/checkpoint writes are atomic and directory-fsynced;
+successful completion writes the new v2 checkpoint before unlinking and
+directory-fsyncing the sidecar. A crash after checkpoint replacement but before
+unlink is harmless: the leftover sidecar has the old base fingerprint and is
+discarded on the next tick. A crash earlier resumes the recorded cursor/index;
+replaying an already-written manifest/job remains idempotent. Malformed or
+identity-drifted progress is retained as evidence under
+`quarantine/reconciler-progress/` and blocks intake. Dry-run keeps equivalent
+progress only in memory. The sidecar is continuation evidence, never high-water
+or job-completion authority. Its timestamps, protocol scalars, merge OIDs, and
+cursors are strictly typed; a persisted current cursor already present in the
+consumed set is impossible state and is quarantined before any GitHub call.
+
+The job aggregate remains the only completion authority. It stores the
+enqueue-time policy snapshot, one pinned `analysis_sha`,
 feature-level completion/errors, immutable accepted/flagged/suppressed thesis
 snapshots, claims and fencing generations, action ownership, attempts,
 creation intents, validation/patch/PR/issue/handoff receipts, and parent
@@ -222,8 +271,44 @@ completeness. Writes use a locked atomic tempfile/fsync/rename transition and
 the shared `Hive::AtomicFile.fsync_directory` policy to persist directory-entry
 changes where the platform supports directory fsync.
 
+Fix-action receipts scope remote publication to the validated patch generation.
+`publication_attempts` is an append-only object whose key is
+`SHA256(publication_base_sha + "\0" + commit_sha)`. Each value contains an
+immutable descriptor (`attempt_id`, patch receipt key, publication base, commit,
+and timestamp), followed by immutable `push_intent`, `push_complete`, and
+`pr_create_intent` phase payloads when those boundaries are crossed. Phase
+ordering is validated: PR-create intent requires durable push completion;
+existing phases cannot be replaced; superseded attempts cannot advance; and an
+attempt with PR-create intent cannot be superseded.
+
+On the first resume of a pre-attempt aggregate, matching flat legacy
+`creation_intent` / `push_complete` / `pr_create_intent` payloads are copied
+exactly into the new namespace while the original receipt entries remain
+present and unchanged. Migration is therefore additive and preserves the exact
+legacy receipt payload content rather than rewriting it in place.
+
+Before a pushed attempt without PR-create intent can proceed, Hive reconciles
+the exact remote branch and records an observed landed push even when the
+process died before persisting `push_complete`. Registered trunk must still
+equal the descriptor's publication base before publication work and is checked
+again after exact remote-head verification immediately before PR-create intent.
+Trunk drift appends one write-once `superseded` record containing
+`reason: trunk_drift_retry`, the observed head SHA, and time. A replacement
+attempt can then reference a new patch receipt. The old branch OID is
+replaceable only when that superseded attempt also contains exact
+`push_complete` proof for its commit; legacy proof remains eligible after
+namespaced attempts are introduced. The subsequent push uses that old commit
+as its exact expected-OID lease. Missing or changed remote state after durable
+completion is an explicit conflict rather than an attempt to reopen the push
+phase. This makes crash recovery safe without turning arbitrary branch state
+into force-push authority.
+
 Claims carry PID, process-start-time, process-group, lease/heartbeat, owner, and
 generation. A stale generation cannot checkpoint or begin a remote effect.
+New job-level action blocks also snapshot the maximum claim generation for each
+action. Read-only inspection hides a block only after a strictly newer claim;
+legacy blocks use a conservative strictly-later timestamp fallback so clock
+rollback and same-second persistence cannot conceal a live block.
 Repository ownership is deliberately not cached in this state. Candidate
 enumeration may use one immutable in-memory snapshot for all due jobs in a
 single scheduler tick, but every dispatch reservation and external-effect/
@@ -235,6 +320,11 @@ therefore still count as owners. Missing registration, duplicate owners, or
 unreadable config/identity/continuation state blocks. Every thesis action has a
 repository-global canonical identity derived from normalized source host,
 repository, action kind, and fix fingerprint or issue family id. Production
+publication phases count as remote continuation evidence: they retain unique
+repository ownership even after discovery/action consent is revoked. A
+continuation-only claim can reconcile existing evidence and persist completion
+of an already-intended push, but cannot add a replacement patch or begin a new
+push/PR request. Production
 fixes use `hive-refactor/<canonical-action-id>`, while semantic-family
 descriptors and ids also include the source host. A linked job remains
 authoritative about whether that occurrence is complete. Family and

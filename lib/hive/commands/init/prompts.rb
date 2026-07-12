@@ -101,10 +101,14 @@ module Hive
         # Tests inject `output: StringIO.new, summary_io: StringIO.new` to assert
         # both streams independently.
         def initialize(input: $stdin, output: $stderr, summary_io: $stdout,
-                       registered_agents: nil)
+                       registered_agents: nil, refactor_patrol_enabled: nil)
           @input = input
           @output = output
           @summary_io = summary_io
+          unless refactor_patrol_enabled.nil? || [ true, false ].include?(refactor_patrol_enabled)
+            raise ArgumentError, "refactor_patrol_enabled must be true, false, or nil"
+          end
+          @refactor_patrol_enabled = refactor_patrol_enabled
           # registered_agents is a list of strings (agent profile names).
           # When not injected, ask the live registry through Config's
           # symbol→string projection (the one wrapper this PR added to
@@ -161,7 +165,11 @@ module Hive
           patrol_mode = prompt_patrol_mode
           triage_bias = prompt_triage_bias
           adhoc_auto_fix = prompt_adhoc_auto_fix
-          refactor_patrol_enabled = prompt_refactor_patrol_enabled
+          refactor_patrol_enabled = if @refactor_patrol_enabled.nil?
+            prompt_refactor_patrol_enabled
+          else
+            @refactor_patrol_enabled
+          end
           budgets, timeouts = prompt_limits
           daemon_enabled = prompt_daemon_enabled
           babysitter_enabled = prompt_babysitter_enabled
@@ -224,7 +232,7 @@ module Hive
             "patrol_mode" => DEFAULT_PATROL_MODE,
             "triage_bias" => DEFAULT_TRIAGE_BIAS,
             "adhoc_auto_fix" => DEFAULT_ADHOC_AUTO_FIX,
-            "refactor_patrol_enabled" => DEFAULT_REFACTOR_PATROL_ENABLED,
+            "refactor_patrol_enabled" => effective_refactor_patrol_default,
             "budgets" => default_budgets,
             "timeouts" => default_timeouts,
             "daemon_enabled" => true,
@@ -245,7 +253,7 @@ module Hive
             "patrol_mode=#{DEFAULT_PATROL_MODE}, " \
             "triage=#{DEFAULT_TRIAGE_BIAS}, " \
             "adhoc_auto_fix=#{DEFAULT_ADHOC_AUTO_FIX ? 'enabled' : 'disabled'}, " \
-            "refactor_patrol=#{DEFAULT_REFACTOR_PATROL_ENABLED ? 'enabled' : 'disabled'}, " \
+            "refactor_patrol=#{effective_refactor_patrol_default ? 'enabled' : 'disabled'}, " \
             "limits=defaults, daemon=enabled, babysitter=enabled, daemon_autostart=disabled"
           )
           answers
@@ -258,6 +266,10 @@ module Hive
           # (which YAML.safe_load parses to nil and validate_review_attempts!
           # accepts only for the four `review_*` paths it knows about).
           LIMIT_KEYS.each_with_object({}) { |k, h| h[k] = Hive::Config::DEFAULTS["budget_usd"].fetch(k) }
+        end
+
+        def effective_refactor_patrol_default
+          @refactor_patrol_enabled.nil? ? DEFAULT_REFACTOR_PATROL_ENABLED : @refactor_patrol_enabled
         end
 
         def default_timeouts

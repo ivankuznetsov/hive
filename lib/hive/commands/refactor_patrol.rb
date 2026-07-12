@@ -16,6 +16,7 @@ require "hive/refactor_patrol/collisions"
 require "hive/refactor_patrol/checkout_guard"
 require "hive/refactor_patrol/fingerprint"
 require "hive/refactor_patrol/job_store"
+require "hive/refactor_patrol/job_query"
 require "hive/refactor_patrol/leverage"
 require "hive/refactor_patrol/policy"
 require "hive/refactor_patrol/process_group_resolver"
@@ -55,7 +56,8 @@ module Hive
       end
 
       def initialize(project, json: false, dry_run: false, feature: nil, entrypoint: nil, path: nil, changed_since: nil, pr: nil,
-                     job_manifest: nil, actions: false, result_file: nil,
+                     job_manifest: nil, actions: false, result_file: nil, list: false, show: nil,
+                     limit: nil, cursor: nil, full: false,
                      mapper_factory: nil, reviewer_factory: nil, leverage_factory: nil,
                      caps_factory: nil, collisions_factory: nil, manifest_resolver_factory: nil,
                      action_runner_factory: nil, job_store_factory: nil,
@@ -74,6 +76,11 @@ module Hive
         @job_manifest = job_manifest
         @actions = actions
         @result_file = result_file
+        @list_jobs = list == true
+        @show_job = show
+        @query_limit = limit
+        @query_cursor = cursor
+        @query_full = full == true
         @mapper_factory = mapper_factory || lambda do |root, cfg, state|
           Hive::Patrol::Mapper.new(
             root,
@@ -117,6 +124,8 @@ module Hive
       end
 
       def call
+        validate_mode!
+        return run_job_query if query_mode?
         return emit(run_action_cycle, []) if @actions
 
         payload, theses = run_cycle
@@ -136,7 +145,6 @@ module Hive
 
       def run_action_cycle
         entry, project_root, cfg = resolve_project!
-        validate_mode!
         @manifest = resolve_manifest(entry, project_root, cfg)
         validate_result_file!(project_root) if @result_file
         @job_store = @job_store_factory.call(project_root)
@@ -152,7 +160,6 @@ module Hive
 
       def run_cycle
         entry, project_root, cfg = resolve_project!
-        validate_mode!
         assert_repository_ownership!(entry, cfg) if pr_mode?
         @manifest = resolve_manifest(entry, project_root, cfg) if pr_mode?
         validate_result_file!(project_root) if @result_file
@@ -228,7 +235,7 @@ module Hive
 
         project_root = entry.fetch("path")
         cfg = Hive::Config.load(project_root)
-        unless @actions || (cfg["refactor_patrol"] || {})["enabled"]
+        unless query_mode? || @actions || (cfg["refactor_patrol"] || {})["enabled"]
           raise Hive::ConfigError, "hive refactor-patrol: project #{entry.fetch('name').inspect} must opt in with refactor_patrol.enabled: true"
         end
 
@@ -412,6 +419,41 @@ module Hive
       end
 
       def validate_mode!
+        if query_requested? && !query_mode?
+          raise Hive::RefactorPatrol::JobQuery::UsageError,
+                "hive refactor-patrol --limit/--cursor/--full require --list or --show"
+        end
+        if query_mode?
+          if @list_jobs && @show_job
+            raise Hive::RefactorPatrol::JobQuery::UsageError,
+                  "hive refactor-patrol accepts only one of --list or --show"
+          end
+          incompatible = [
+            @pr, @job_manifest, @result_file, @feature_hint, @entrypoint_hint,
+            @path_hint, @changed_since
+          ].any? { |value| !value.nil? } || @actions || @dry_run
+          if incompatible
+            raise Hive::RefactorPatrol::JobQuery::UsageError,
+                  "hive refactor-patrol --list/--show cannot be combined with discovery or action options"
+          end
+          if @query_cursor && !@list_jobs
+            raise Hive::RefactorPatrol::JobQuery::UsageError,
+                  "hive refactor-patrol --cursor requires --list"
+          end
+          if @query_full && !@show_job
+            raise Hive::RefactorPatrol::JobQuery::UsageError,
+                  "hive refactor-patrol --full requires --show"
+          end
+          if @query_full && !@query_limit.nil?
+            raise Hive::RefactorPatrol::JobQuery::UsageError,
+                  "hive refactor-patrol --full cannot be combined with --limit"
+          end
+          Hive::RefactorPatrol::JobQuery.normalize_limit(@query_limit) unless @query_full
+          Hive::RefactorPatrol::JobQuery.decode_cursor(@query_cursor) if @query_cursor
+          Hive::RefactorPatrol::JobQuery.validate_job_id!(@show_job) if @show_job
+          return
+        end
+
         if @result_file && (!@json || !@job_manifest || @pr)
           raise Hive::ConfigError,
                 "hive refactor-patrol --result-file requires --job-manifest and --json"
@@ -919,6 +961,36 @@ module Hive
         !@pr.nil? || !@job_manifest.nil?
       end
 
+      def query_mode?
+        @list_jobs || !@show_job.nil?
+      end
+
+      def query_requested?
+        query_mode? || !@query_limit.nil? || !@query_cursor.nil? || @query_full
+      end
+
+      def run_job_query
+        entry, project_root, = resolve_project!
+        query = Hive::RefactorPatrol::JobQuery.new(@job_store_factory.call(project_root))
+        payload = if @list_jobs
+          query.list_envelope(
+            project: entry.fetch("name"), project_root: project_root,
+            limit: @query_limit, cursor: @query_cursor
+          )
+        else
+          query.show_envelope(
+            project: entry.fetch("name"), project_root: project_root, job_id: @show_job,
+            limit: @query_limit, full: @query_full
+          )
+        end
+        if @json
+          puts JSON.generate(payload)
+        else
+          puts query.text(payload)
+        end
+        payload
+      end
+
       def source_pr_context
         @manifest.fetch("source").merge(
           "changed_paths" => @manifest.fetch("changed_paths"),
@@ -951,13 +1023,20 @@ module Hive
       def emit_error(error)
         return unless @json
 
-        payload = Hive::RefactorPatrol::Reporter.error_envelope(
+        payload = if query_requested?
+          Hive::RefactorPatrol::JobQuery.error_envelope(
+            error,
+            action: @list_jobs ? "list" : (@show_job.nil? ? nil : "show")
+          )
+        else
+          Hive::RefactorPatrol::Reporter.error_envelope(
             error,
             version: pr_mode? ? Hive::RefactorPatrol::Reporter::V2_SCHEMA_VERSION : Hive::RefactorPatrol::Reporter::V1_SCHEMA_VERSION,
             error_kind: error.is_a?(Hive::ConfigError) ? "config" : "error",
             job_id: @manifest && @manifest["job_id"],
             source_pr: @manifest && source_pr_context
           )
+        end
         begin
           write_result_file(payload)
         rescue StandardError

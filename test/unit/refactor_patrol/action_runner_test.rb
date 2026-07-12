@@ -65,7 +65,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
     def open(**arguments)
       @calls << arguments.except(:record_intent)
       unless arguments.fetch(:creation_attempted)
-        raise "intent was not persisted" unless arguments.fetch(:record_intent).call == true
+        persist_publication!(arguments)
 
         @before_create&.call
         raise "injected crash after intent" if @crash_after_intent
@@ -73,6 +73,39 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       raise "missing fake PR result" if @results.empty?
 
       @results.shift
+    end
+
+    private
+
+    def persist_publication!(arguments)
+      action_id = arguments.fetch(:canonical_action_id)
+      repository = arguments.fetch(:source).fetch("repository")
+      patch = arguments.fetch(:patch)
+      callback = arguments.fetch(:record_intent)
+      phases = {
+        "push_intent" => Hive::RefactorPatrol::PrOpener.push_intent_payload(
+          canonical_action_id: action_id,
+          repository: repository,
+          branch: patch.branch,
+          commit_sha: patch.commit_sha,
+          expected_remote_oid: nil
+        ),
+        "push_complete" => Hive::RefactorPatrol::PrOpener.push_complete_payload(
+          canonical_action_id: action_id,
+          repository: repository,
+          branch: patch.branch,
+          commit_sha: patch.commit_sha
+        ),
+        "pr_create_intent" => Hive::RefactorPatrol::PrOpener.pr_create_intent_payload(
+          canonical_action_id: action_id,
+          repository: repository,
+          branch: patch.branch,
+          commit_sha: patch.commit_sha
+        )
+      }
+      phases.each do |phase, payload|
+        raise "#{phase} was not persisted" unless callback.call(phase: phase, payload: payload) == true
+      end
     end
   end
 
@@ -95,6 +128,89 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       raise "missing fake issue result" if @results.empty?
 
       @results.shift
+    end
+  end
+
+  class BareRemoteRecoveryGh
+    attr_reader :pushes, :created
+
+    def initialize(remote_path, crash_after_push: false)
+      @remote_path = remote_path
+      @crash_after_push = crash_after_push
+      @pushes = []
+      @created = []
+    end
+
+    def ensure_authenticated!(_cfg, host:) = host == "github.com"
+
+    def lookup_prs_for_branch(*, **) = []
+
+    def origin_push_url(_path, cfg:) = @remote_path
+
+    def repository_identity_from_remote(_url)
+      { "repository" => "acme/polyglot", "host" => "github.com" }
+    end
+
+    def remote_branch_oid(_path, branch, **)
+      out, _err, status = Open3.capture3(
+        "git", "--git-dir", @remote_path,
+        "rev-parse", "--verify", "refs/heads/#{branch}"
+      )
+      status.success? ? out.strip : nil
+    end
+
+    def push_branch!(path, branch, expected_remote_oid:, expected_remote_absent:, **)
+      @pushes << {
+        expected_remote_oid: expected_remote_oid,
+        expected_remote_absent: expected_remote_absent
+      }
+      expected = expected_remote_absent ? "" : expected_remote_oid
+      raise "missing remote lease expectation" if expected.nil?
+
+      _out, err, status = Open3.capture3(
+        "git", "-C", path, "push",
+        "--force-with-lease=refs/heads/#{branch}:#{expected}",
+        @remote_path, "#{branch}:refs/heads/#{branch}"
+      )
+      raise Hive::GhError, "test push failed: #{err}" unless status.success?
+
+      Process.kill("KILL", Process.pid) if @crash_after_push
+      true
+    end
+
+    def capture3(*args, chdir:, cfg:)
+      @created << { args: args, chdir: chdir, cfg: cfg }
+      [
+        "https://github.com/acme/polyglot/pull/99\n",
+        "",
+        Hive::Gh::CommandStatus.new(exitstatus: 0)
+      ]
+    end
+
+    def remote_head(branch)
+      remote_branch_oid(nil, branch)
+    end
+  end
+
+  class RecoveryGateway
+    attr_reader :verified
+
+    def initialize = @verified = []
+
+    def verify_pr_identity!(url, **identity)
+      @verified << identity.merge(url: url)
+      true
+    end
+  end
+
+  class RecoveryHandoff
+    attr_reader :calls
+
+    def initialize = @calls = []
+
+    def enqueue(**arguments)
+      @calls << arguments
+      "/review/recovered-patch"
     end
   end
 
@@ -192,7 +308,8 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       assert_empty filer.calls
       assert_equal %w[issue_not_needed pr_opened], result.actions.map { |action| action.fetch("outcome") }.sort
       fix = result.actions.find { |action| action.fetch("kind") == "fix" }
-      assert_equal true, fix.dig("receipts", "creation_intent", "payload").is_a?(Hash)
+      attempt = fix.dig("receipts", "publication_attempts").values.first
+      assert_equal "create_pr", attempt.dig("pr_create_intent", "operation")
     end
   end
 
@@ -466,7 +583,8 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       first = runner.run(job_id: "job-1")
       refute first.complete?
       assert_equal "remote_outcome_unknown", first.actions.first.fetch("outcome")
-      assert store.read_job("job-1").dig("actions", 0, "receipts", "creation_intent")
+      attempts = store.read_job("job-1").dig("actions", 0, "receipts", "publication_attempts")
+      assert attempts.values.first["pr_create_intent"]
 
       reconciling = FakePrOpener.new(pr_result)
       recovered = build_runner(
@@ -541,9 +659,10 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       assert second.complete?
       assert_equal 1, runner.fixer.calls.size
       receipts = second.actions.first.fetch("receipts")
-      assert_equal "push_branch", receipts.dig("creation_intent", "payload", "operation")
-      assert_equal "push_branch_complete", receipts.dig("push_complete", "operation")
-      assert_equal "create_pr", receipts.dig("pr_create_intent", "operation")
+      attempt = receipts.fetch("publication_attempts").values.first
+      assert_equal "push_branch", attempt.dig("push_intent", "operation")
+      assert_equal "push_branch_complete", attempt.dig("push_complete", "operation")
+      assert_equal "create_pr", attempt.dig("pr_create_intent", "operation")
     end
   end
 
@@ -560,7 +679,6 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
         terminal: false,
         pr_url: "https://github.com/acme/polyglot/pull/99",
         receipts: {
-          "creation_intent" => true,
           "pr_url" => "https://github.com/acme/polyglot/pull/99"
         }
       )
@@ -599,16 +717,17 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       fixer = FakeFixer.new(first_patch, second_patch)
       calls = []
       final_result = pr_result
+      success_opener = FakePrOpener.new(final_result)
       opener = Object.new
       opener.define_singleton_method(:open) do |**arguments|
         calls << arguments.except(:record_intent, :authorize_push)
         if calls.one?
           Hive::RefactorPatrol::PrOpener::Result.new(
-            outcome: "trunk_drift_retry", terminal: false, receipts: {}
+            outcome: "trunk_drift_retry", terminal: false,
+            observed_head_sha: "d" * 40, receipts: {}
           )
         else
-          raise "intent was not persisted" unless arguments.fetch(:record_intent).call == true
-          final_result
+          success_opener.open(**arguments)
         end
       end
       runner = build_runner(
@@ -624,13 +743,167 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       assert_equal 2, fixer.calls.size
       assert_equal [ first_patch.commit_sha, second_patch.commit_sha ],
                    calls.map { |call| call.fetch(:patch).commit_sha }
-      assert_equal [ [], [ first_patch.commit_sha ] ],
+      assert_equal [ [], [] ],
                    calls.map { |call| call.fetch(:superseded_patch_commits) }
       receipts = second.actions.first.fetch("receipts")
       assert_equal first_patch.commit_sha, receipts.dig("patch", "commit_sha")
       assert_equal second_patch.commit_sha, receipts.dig("patch_2", "commit_sha")
       refute receipts.key?("commit_sha")
       refute receipts.key?("publication_base_sha")
+    end
+  end
+
+  def test_process_crash_after_push_recovers_dead_claim_and_replaces_only_proven_remote_oid
+    with_tmp_dir do |root|
+      repo = File.join(root, "repo")
+      patch_root = File.join(root, "patch")
+      remote = File.join(root, "remote.git")
+      FileUtils.mkdir_p(repo)
+      run!("git", "init", "--bare", "--quiet", remote)
+      run!("git", "-C", repo, "init", "-b", "main", "--quiet")
+      run!("git", "-C", repo, "config", "user.email", "test@example.com")
+      run!("git", "-C", repo, "config", "user.name", "Test")
+      run!("git", "-C", repo, "config", "commit.gpgsign", "false")
+      File.write(File.join(repo, "README.md"), "base\n")
+      run!("git", "-C", repo, "add", "README.md")
+      run!("git", "-C", repo, "commit", "-m", "base", "--quiet")
+      analysis_sha = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+
+      item = thesis(id: "post-push-drift")
+      store = write_classified_job(
+        repo,
+        policy: snapshot_policy("auto_fix" => true),
+        dispositions: dispositions(accepted: [ disposition(item) ]),
+        analysis_sha: analysis_sha
+      )
+      action_id = store.canonical_action_id(
+        repository: "acme/polyglot", host: "github.com",
+        kind: "fix", identity: item.fingerprint
+      )
+      branch = "hive-refactor/#{action_id}"
+      run!("git", "-C", repo, "worktree", "add", "-b", branch, patch_root, analysis_sha, "--quiet")
+      FileUtils.mkdir_p(File.join(patch_root, "src", "checkout"))
+      File.write(File.join(patch_root, "src", "checkout", "service.ts"), "first patch\n")
+      run!("git", "-C", patch_root, "add", "src/checkout/service.ts")
+      run!("git", "-C", patch_root, "commit", "-m", "first patch", "--quiet")
+      first_commit = run!("git", "-C", patch_root, "rev-parse", "HEAD").strip
+      first_patch = recovery_patch(
+        branch: branch, worktree_path: patch_root, analysis_sha: analysis_sha,
+        publication_base_sha: analysis_sha, commit_sha: first_commit
+      )
+
+      fixer_calls = []
+      test_case = self
+      replacement_fixer = Object.new
+      replacement_fixer.define_singleton_method(:calls) { fixer_calls }
+      replacement_fixer.define_singleton_method(:attempt) do |**arguments|
+        fixer_calls << arguments
+        current_base = test_case.send(:run!, "git", "-C", repo, "rev-parse", "HEAD").strip
+        test_case.send(:run!, "git", "-C", patch_root, "reset", "--hard", current_base, "--quiet")
+        FileUtils.mkdir_p(File.join(patch_root, "src", "checkout"))
+        File.write(File.join(patch_root, "src", "checkout", "service.ts"), "replacement patch\n")
+        test_case.send(:run!, "git", "-C", patch_root, "add", "src/checkout/service.ts")
+        test_case.send(:run!, "git", "-C", patch_root, "commit", "-m", "replacement patch", "--quiet")
+        replacement = test_case.send(:run!, "git", "-C", patch_root, "rev-parse", "HEAD").strip
+        test_case.send(
+          :recovery_patch,
+          branch: branch, worktree_path: patch_root, analysis_sha: analysis_sha,
+          publication_base_sha: current_base, commit_sha: replacement
+        )
+      end
+
+      gateway = RecoveryGateway.new
+      handoff = RecoveryHandoff.new
+      build_opener = lambda do |gh|
+        Hive::RefactorPatrol::PrOpener.new(
+          repo, cfg: config, gh: gh, github_gateway: gateway,
+          review_handoff: handoff,
+          diff_reader: ->(_patch) { "diff --git a/src/checkout/service.ts b/src/checkout/service.ts\n+ok\n" }
+        )
+      end
+
+      child_pid = fork do
+        child_gh = BareRemoteRecoveryGh.new(remote, crash_after_push: true)
+        build_runner(
+          repo,
+          store: Hive::RefactorPatrol::JobStore.new(repo),
+          fixer: FakeFixer.new(first_patch),
+          pr_opener: build_opener.call(child_gh),
+          backoff_sec: 0
+        ).run(job_id: "job-1")
+        exit! 91
+      end
+      _waited, child_status = Process.wait2(child_pid)
+      assert child_status.signaled?, "child unexpectedly exited #{child_status.inspect}"
+      assert_equal Signal.list.fetch("KILL"), child_status.termsig
+
+      remote_gh = BareRemoteRecoveryGh.new(remote)
+      assert_equal first_commit, remote_gh.remote_head(branch)
+      interrupted = Hive::RefactorPatrol::JobStore.new(repo).read_job("job-1")
+      interrupted_action = interrupted.fetch("actions").first
+      first_id = Hive::RefactorPatrol::PublicationAttempt.id_for(
+        publication_base_sha: analysis_sha, commit_sha: first_commit
+      )
+      assert_equal "push_branch",
+                   interrupted_action.dig(
+                     "receipts", "publication_attempts", first_id, "push_intent", "operation"
+                   )
+      assert_nil interrupted_action.dig(
+        "receipts", "publication_attempts", first_id, "push_complete"
+      )
+      assert_equal child_pid, interrupted_action.fetch("claims").last.fetch("owner_pid")
+      assert_equal "claimed", interrupted_action.fetch("claims").last.fetch("state")
+
+      File.write(File.join(repo, "README.md"), "trunk advanced\n")
+      run!("git", "-C", repo, "add", "README.md")
+      run!("git", "-C", repo, "commit", "-m", "advance trunk", "--quiet")
+      advanced_head = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+
+      superseded = build_runner(
+        repo,
+        store: Hive::RefactorPatrol::JobStore.new(repo),
+        fixer: replacement_fixer,
+        pr_opener: build_opener.call(remote_gh),
+        backoff_sec: 0,
+        clock: -> { T0 + 61 }
+      ).run(job_id: "job-1")
+      refute superseded.complete?
+      assert_equal "trunk_drift_retry", superseded.actions.first.fetch("outcome")
+      assert_empty fixer_calls
+      recovered_claims = superseded.actions.first.fetch("claims")
+      assert_equal "superseded", recovered_claims.first.fetch("state")
+      assert_equal "expired_claim_resolved", recovered_claims.first.fetch("outcome")
+
+      completed = build_runner(
+        repo,
+        store: Hive::RefactorPatrol::JobStore.new(repo),
+        fixer: replacement_fixer,
+        pr_opener: build_opener.call(remote_gh),
+        backoff_sec: 0,
+        clock: -> { T0 + 62 }
+      ).run(job_id: "job-1")
+      assert completed.complete?, completed.to_h.inspect
+      assert_equal "pr_opened", completed.actions.first.fetch("outcome")
+      assert_equal 1, fixer_calls.size
+      assert_equal 1, remote_gh.pushes.size
+      assert_equal first_commit, remote_gh.pushes.first.fetch(:expected_remote_oid)
+      assert_equal 1, remote_gh.created.size
+      assert_equal 1, gateway.verified.size
+      assert_equal 1, handoff.calls.size
+
+      receipts = completed.actions.first.fetch("receipts")
+      attempts = receipts.fetch("publication_attempts")
+      assert_equal 2, attempts.size
+      replacement_commit = receipts.dig("patch_2", "commit_sha")
+      second_id = Hive::RefactorPatrol::PublicationAttempt.id_for(
+        publication_base_sha: advanced_head, commit_sha: replacement_commit
+      )
+      assert_equal advanced_head, attempts.dig(first_id, "superseded", "observed_head_sha")
+      assert_equal first_commit, attempts.dig(first_id, "push_complete", "remote_oid")
+      assert_nil attempts.dig(second_id, "superseded")
+      assert_equal "create_pr", attempts.dig(second_id, "pr_create_intent", "operation")
+      assert_equal replacement_commit, remote_gh.remote_head(branch)
+      assert_equal "/review/recovered-patch", completed.actions.first.dig("receipts", "review_task_path")
     end
   end
 
@@ -734,8 +1007,26 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       creates = 0
       success = pr_result
       opener = Object.new
-      opener.define_singleton_method(:open) do |record_intent:, authorize_create:, canonical_action_id:, **|
-        raise "intent failed" unless record_intent.call == true
+      opener.define_singleton_method(:open) do |record_intent:, authorize_create:, canonical_action_id:,
+                                               source:, patch:, **|
+        push_intent = Hive::RefactorPatrol::PrOpener.push_intent_payload(
+          canonical_action_id: canonical_action_id,
+          repository: source.fetch("repository"), branch: patch.branch,
+          commit_sha: patch.commit_sha, expected_remote_oid: nil
+        )
+        push_complete = Hive::RefactorPatrol::PrOpener.push_complete_payload(
+          canonical_action_id: canonical_action_id,
+          repository: source.fetch("repository"), branch: patch.branch,
+          commit_sha: patch.commit_sha
+        )
+        create_intent = Hive::RefactorPatrol::PrOpener.pr_create_intent_payload(
+          canonical_action_id: canonical_action_id,
+          repository: source.fetch("repository"), branch: patch.branch,
+          commit_sha: patch.commit_sha
+        )
+        raise "push intent failed" unless record_intent.call(phase: "push_intent", payload: push_intent)
+        raise "push complete failed" unless record_intent.call(phase: "push_complete", payload: push_complete)
+        raise "PR intent failed" unless record_intent.call(phase: "pr_create_intent", payload: create_intent)
         action = store.read_job("job-1").fetch("actions").find do |candidate|
           candidate.fetch("canonical_action_id") == canonical_action_id
         end
@@ -758,7 +1049,8 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
 
       assert_equal "stale_claim", result.completeness.fetch("reason")
       assert_equal 0, creates
-      assert store.read_job("job-1").dig("actions", 0, "receipts", "creation_intent")
+      attempts = store.read_job("job-1").dig("actions", 0, "receipts", "publication_attempts")
+      assert attempts.values.first["pr_create_intent"]
     end
   end
 
@@ -927,6 +1219,16 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       store.record_creation_intent!(
         token,
         intent: Hive::RefactorPatrol::PrOpener.pr_create_intent_payload(
+          canonical_action_id: fix.fetch("canonical_action_id"),
+          repository: source(7).fetch("repository"), branch: patch.branch,
+          commit_sha: patch.commit_sha
+        ),
+        now: T0
+      )
+      store.record_action_receipt!(
+        token,
+        key: "push_complete",
+        value: Hive::RefactorPatrol::PrOpener.push_complete_payload(
           canonical_action_id: fix.fetch("canonical_action_id"),
           repository: source(7).fetch("repository"), branch: patch.branch,
           commit_sha: patch.commit_sha
@@ -1942,6 +2244,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       store.define_singleton_method(:finish_action!) do |_token, outcome:, **|
         finished << outcome
       end
+      store.define_singleton_method(:record_patch_publication_attempt!) { |*, **| true }
       runner = build_runner(dir, store: store, fixer: FakeFixer.new(Object.new))
       token = { job_id: "job-1", canonical_action_id: "fix-action", continuation_only: false }
       aggregate = { "job_id" => "job-1", "analysis_sha" => "c" * 40, "source" => source(7) }
@@ -1971,7 +2274,14 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       runner.send(:process_fix, token, aggregate, action, item)
       assert_includes released, "policy_changed"
 
+      runner.define_singleton_method(:transition_denial_reason) { |*| nil }
+      runner.define_singleton_method(:current_action) { |_token| action }
+      runner.define_singleton_method(:publication_state) { |*| :invalid }
+      runner.send(:process_fix, token, aggregate, action, item)
+      assert_includes released, "invalid_creation_intent"
+
       issue_action = action.merge("kind" => "issue", "family_id" => "af1")
+      runner.define_singleton_method(:transition_denial_reason) { |*| "policy_changed" }
       runner.send(:process_issue, token, aggregate, issue_action, item, [])
       assert_includes released, "policy_changed"
       runner.define_singleton_method(:transition_denial_reason) { |*| nil }
@@ -2035,7 +2345,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
         callback.call(phase: "issue_create_intent", payload: { "bad" => true })
       end
       assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
-        runner.send(:persist_publication_phase, token, "unknown", {})
+        runner.send(:persist_publication_phase, token, "issue", "unknown", {})
       end
       assert_nil runner.send(
         :expected_publication_payload, "issue", "unknown", aggregate, action, nil,
@@ -2100,6 +2410,106 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
     end
   end
 
+  def test_publication_phase_and_legacy_projection_defensive_branches
+    with_tmp_dir do |dir|
+      receipts = []
+      intents = []
+      store = Object.new
+      store.define_singleton_method(:record_action_receipt!) do |_token, key:, value:, **|
+        receipts << [ key, value ]
+      end
+      store.define_singleton_method(:record_creation_intent!) do |_token, intent:, **|
+        intents << intent
+      end
+      runner = build_runner(dir, store: store)
+      token = { job_id: "job-1", canonical_action_id: "issue-action" }
+      aggregate = { "job_id" => "job-1", "source" => source(7) }
+      issue_action = {
+        "canonical_action_id" => "issue-action", "kind" => "issue",
+        "family_id" => "af1", "thesis_fingerprint" => "fp", "receipts" => {}
+      }
+
+      runner.send(
+        :persist_publication_phase, token, "issue", Hive::RefactorPatrol::PrOpener::PUSH_COMPLETE,
+        { "operation" => "push_branch_complete" }
+      )
+      runner.define_singleton_method(:current_action) do |_token|
+        issue_action.merge("receipts" => { "creation_intent" => {} })
+      end
+      runner.send(
+        :persist_publication_phase, token, "issue", Hive::RefactorPatrol::PrOpener::PR_CREATE_INTENT,
+        { "operation" => "create_pr" }
+      )
+      runner.define_singleton_method(:current_action) { |_token| issue_action }
+      runner.send(
+        :persist_publication_phase, token, "issue", Hive::RefactorPatrol::PrOpener::PR_CREATE_INTENT,
+        { "operation" => "create_pr" }
+      )
+      assert_equal 2, receipts.size
+      assert_equal 1, intents.size
+
+      malformed_patch_history = issue_action.merge(
+        "receipts" => { Hive::RefactorPatrol::PublicationAttempt::ATTEMPTS_KEY => [] }
+      )
+      assert_equal :invalid, runner.send(
+        :patch_from_receipts, malformed_patch_history, aggregate, thesis(id: "accepted")
+      )
+
+      %w[push_branch create_pr].each do |operation|
+        candidate = issue_action.merge(
+          "receipts" => {
+            "creation_intent" => {
+              "payload" => { "operation" => operation },
+              "recorded_at" => "2026-07-12T10:00:00Z"
+            }
+          }
+        )
+        assert_equal :invalid, runner.send(
+          :publication_state, candidate, aggregate, issue_action
+        )
+      end
+      [ Hive::RefactorPatrol::PrOpener::PUSH_COMPLETE,
+        Hive::RefactorPatrol::PrOpener::PR_CREATE_INTENT ].each do |phase|
+        candidate = issue_action.merge(
+          "receipts" => { phase => { "operation" => "unexpected" } }
+        )
+        assert_equal :invalid, runner.send(
+          :publication_state, candidate, aggregate, issue_action
+        )
+      end
+      nil_phase = issue_action.merge(
+        "receipts" => { Hive::RefactorPatrol::PrOpener::PUSH_COMPLETE => nil }
+      )
+      assert_equal(
+        { Hive::RefactorPatrol::PrOpener::PUSH_COMPLETE => nil },
+        runner.send(:publication_state, nil_phase, aggregate, issue_action)
+      )
+
+      patch = validated_patch(fingerprint: "fp")
+      fix_action = issue_action.merge(
+        "canonical_action_id" => "fix-action", "kind" => "fix",
+        "thesis_fingerprint" => "fp"
+      )
+      assert_equal :invalid, runner.send(
+        :publication_attempt_state, [], aggregate, fix_action, patch
+      )
+      attempt_id = Hive::RefactorPatrol::PublicationAttempt.id_for(
+        publication_base_sha: patch.publication_base_sha,
+        commit_sha: patch.commit_sha
+      )
+      invalid_descriptor = {
+        "receipts" => {
+          Hive::RefactorPatrol::PublicationAttempt::ATTEMPTS_KEY => {
+            attempt_id => { "descriptor" => { "attempt_id" => "wrong" } }
+          }
+        }
+      }
+      assert_equal :invalid, runner.send(
+        :publication_attempt_state, invalid_descriptor, aggregate, fix_action, patch
+      )
+    end
+  end
+
   private
 
   def build_runner(dir, store:, cfg: config, family_store: FakeFamilyStore.new,
@@ -2109,6 +2519,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
                    gate_reader: nil,
                    repository_ownership: nil,
                    canonical_action_catalog: nil,
+                   clock: -> { T0 },
                    repository_resolver: ->(*) {
                      { "repository" => "acme/polyglot", "host" => "github.com" }
                    })
@@ -2121,7 +2532,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       pr_opener: pr_opener,
       issue_filer: issue_filer,
       owner: "test-runner",
-      clock: -> { T0 },
+      clock: clock,
       repository_resolver: repository_resolver,
       repository_ownership: repository_ownership,
       canonical_action_catalog: canonical_action_catalog,
@@ -2146,7 +2557,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
   end
 
   def write_classified_job(dir, job_id: "job-1", policy:, dispositions:,
-                           registration: "polyglot")
+                           registration: "polyglot", analysis_sha: "c" * 40)
     store = Hive::RefactorPatrol::JobStore.new(dir)
     store.write_job!(
       {
@@ -2154,7 +2565,7 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
         "schema_version" => 2,
         "job_id" => job_id,
         "source" => source(job_id == "job-1" ? 7 : 8, registration: registration),
-        "analysis_sha" => "c" * 40,
+        "analysis_sha" => analysis_sha,
         "policy" => policy,
         "state" => "classified",
         "complete" => false,
@@ -2284,6 +2695,25 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
     )
   end
 
+  def recovery_patch(branch:, worktree_path:, analysis_sha:, publication_base_sha:, commit_sha:)
+    Hive::RefactorPatrol::Fixer::Result.new(
+      outcome: "validated",
+      terminal: false,
+      branch: branch,
+      worktree_path: worktree_path,
+      analysis_sha: analysis_sha,
+      publication_base_sha: publication_base_sha,
+      commit_sha: commit_sha,
+      validation: {
+        "passed" => true,
+        "commands" => [ { "name" => "test", "exit_code" => 0 } ]
+      },
+      changed_paths: [ "src/checkout/service.ts" ],
+      diff_lines: 1,
+      details: {}
+    )
+  end
+
   def fix_result(outcome, terminal:)
     Hive::RefactorPatrol::Fixer::Result.new(
       outcome: outcome,
@@ -2300,7 +2730,6 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
       pr_url: "https://github.com/acme/polyglot/pull/99",
       review_task_path: "/review/task",
       receipts: {
-        "creation_intent" => true,
         "pr_url" => "https://github.com/acme/polyglot/pull/99",
         "review_task_path" => "/review/task"
       }

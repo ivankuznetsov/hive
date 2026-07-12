@@ -13,6 +13,7 @@ require "hive/refactor_patrol/job_store"
 require "hive/refactor_patrol/policy"
 require "hive/refactor_patrol/pr_opener"
 require "hive/refactor_patrol/process_group_resolver"
+require "hive/refactor_patrol/publication_attempt"
 require "hive/refactor_patrol/repository_ownership"
 require "hive/refactor_patrol/thesis"
 
@@ -576,12 +577,19 @@ module Hive
             return
           end
 
-          @job_store.record_patch_receipt!(
+        end
+
+        begin
+          @job_store.record_patch_publication_attempt!(
             token,
             receipt: json_copy(patch.to_h),
             now: now
           )
+        rescue JobStore::InconsistentRecord, JobStore::CorruptRecord
+          release(token, "invalid_creation_intent")
+          return
         end
+        attempt_id = publication_attempt_id(patch)
 
         if (denial = transition_denial_reason(token, "fix", aggregate))
           release(token, denial)
@@ -600,7 +608,9 @@ module Hive
           job_id: aggregate.fetch("job_id"),
           canonical_action_id: action.fetch("canonical_action_id"),
           source: aggregate.fetch("source"),
-          record_intent: publication_intent_callback(token, "fix", aggregate, action, patch),
+          record_intent: publication_intent_callback(
+            token, "fix", aggregate, action, patch, attempt_id: attempt_id
+          ),
           authorize_push: external_effect_fence(token, "fix"),
           authorize_create: external_effect_fence(token, "fix"),
           authorize_handoff: continuation_fence(token, aggregate),
@@ -609,7 +619,12 @@ module Hive
           superseded_patch_commits: superseded_patch_commits(fresh_action)
         )
         if result.is_a?(PrOpener::Result) && result.outcome == "trunk_drift_retry"
-          mark_patch_superseded!(token, patch)
+          @job_store.supersede_publication_attempt!(
+            token,
+            attempt_id: attempt_id,
+            observed_head_sha: result.observed_head_sha,
+            now: now
+          )
         end
         settle(token, result, adapter: :pr)
       end
@@ -775,7 +790,8 @@ module Hive
         raise
       end
 
-      def publication_intent_callback(token, kind, aggregate, action, patch = nil)
+      def publication_intent_callback(token, kind, aggregate, action, patch = nil,
+                                      attempt_id: nil)
         lambda do |phase: nil, payload: nil|
           phase ||= kind == "fix" ? PrOpener::PR_CREATE_INTENT : "issue_create_intent"
           payload ||= expected_publication_payload(
@@ -793,7 +809,7 @@ module Hive
             next false unless effect_authorized?(kind)
           end
 
-          persist_publication_phase(token, phase, payload)
+          persist_publication_phase(token, kind, phase, payload, attempt_id: attempt_id)
           true
         end
       end
@@ -822,7 +838,18 @@ module Hive
         end
       end
 
-      def persist_publication_phase(token, phase, payload)
+      def persist_publication_phase(token, kind, phase, payload, attempt_id: nil)
+        if kind == "fix"
+          @job_store.record_publication_attempt_phase!(
+            token,
+            attempt_id: attempt_id,
+            phase: phase,
+            payload: payload,
+            now: now
+          )
+          return
+        end
+
         case phase
         when PrOpener::PUSH_INTENT, "issue_create_intent"
           @job_store.record_creation_intent!(token, intent: payload, now: now)
@@ -869,19 +896,17 @@ module Hive
 
       def patch_from_receipts(action, aggregate, thesis)
         receipts = action.fetch("receipts")
-        superseded = receipts.filter_map do |key, value|
-          value["commit_sha"] if key.start_with?("patch_superseded_") && value.is_a?(Hash)
-        end
-        keys = receipts.keys.grep(/\Apatch(?:_\d+)?\z/).sort_by do |key|
-          key == "patch" ? 1 : key.delete_prefix("patch_").to_i
-        end.reverse
-        key = keys.find do |candidate|
-          receipt = receipts.fetch(candidate)
-          receipt.is_a?(Hash) && !superseded.include?(receipt["commit_sha"])
-        end
+        key = PublicationAttempt.active_patch_key(receipts)
         return nil unless key
 
-        receipt = receipts.fetch(key)
+        patch_from_receipt(receipts.fetch(key), aggregate, action, thesis)
+      rescue PublicationAttempt::Error, KeyError
+        :invalid
+      end
+
+      def patch_from_receipt(receipt, aggregate, action, thesis)
+        return :invalid unless receipt.is_a?(Hash)
+
         expected_keys = Fixer::Result.members.map(&:to_s).sort
         return :invalid unless receipt.keys.sort == expected_keys
 
@@ -917,6 +942,10 @@ module Hive
       end
 
       def publication_state(current, aggregate, action, patch: nil)
+        if action.fetch("kind") == "fix"
+          return publication_attempt_state(current, aggregate, action, patch)
+        end
+
         receipts = current.fetch("receipts")
         state = {}
         base = receipts["creation_intent"]
@@ -959,38 +988,45 @@ module Hive
         :invalid
       end
 
-      def mark_patch_superseded!(token, patch)
-        key = "patch_superseded_#{::Digest::SHA256.hexdigest(patch.commit_sha.to_s)}"
-        @job_store.record_action_receipt!(
-          token,
-          key: key,
-          value: {
-            "commit_sha" => patch.commit_sha,
-            "publication_base_sha" => patch.publication_base_sha,
-            "reason" => "trunk_drift_retry"
-          },
-          now: now
+      def publication_attempt_state(current, aggregate, action, patch)
+        return :invalid unless patch
+
+        attempt_id = publication_attempt_id(patch)
+        attempt = current.dig("receipts", PublicationAttempt::ATTEMPTS_KEY, attempt_id)
+        return :invalid unless attempt.is_a?(Hash) && PublicationAttempt.active?(attempt)
+
+        descriptor = attempt["descriptor"]
+        return :invalid unless descriptor.is_a?(Hash) &&
+                               descriptor["attempt_id"] == attempt_id &&
+                               descriptor["publication_base_sha"] == patch.publication_base_sha &&
+                               descriptor["commit_sha"] == patch.commit_sha
+
+        PublicationAttempt::PHASES.each_with_object({}) do |phase, state|
+          next unless attempt.key?(phase)
+
+          payload = attempt.fetch(phase)
+          expected_oid = payload.is_a?(Hash) ? payload["expected_remote_oid"] : nil
+          expected = expected_publication_payload(
+            action.fetch("kind"), phase, aggregate, action, patch,
+            expected_remote_oid: expected_oid
+          )
+          return :invalid unless payload == expected
+
+          state[phase] = payload
+        end
+      rescue KeyError, TypeError
+        :invalid
+      end
+
+      def publication_attempt_id(patch)
+        PublicationAttempt.id_for(
+          publication_base_sha: patch.publication_base_sha,
+          commit_sha: patch.commit_sha
         )
       end
 
       def superseded_patch_commits(action)
-        receipts = action.fetch("receipts")
-        patch_commits = receipts.filter_map do |key, value|
-          next unless key.match?(/\Apatch(?:_\d+)?\z/) && value.is_a?(Hash)
-
-          commit = value["commit_sha"].to_s.downcase
-          commit if valid_oid?(commit)
-        end
-        receipts.filter_map do |key, value|
-          next unless key.start_with?("patch_superseded_") && value.is_a?(Hash)
-          next unless value["reason"] == "trunk_drift_retry"
-
-          commit = value["commit_sha"].to_s.downcase
-          next unless valid_oid?(commit) && patch_commits.include?(commit)
-          next unless key == "patch_superseded_#{::Digest::SHA256.hexdigest(commit)}"
-
-          commit
-        end.uniq.sort
+        PublicationAttempt.superseded_remote_commits(action.fetch("receipts"))
       end
 
       def nonempty?(value)
@@ -1010,7 +1046,10 @@ module Hive
         action = @job_store.read_job(job_id).fetch("actions").find do |candidate|
           candidate.fetch("canonical_action_id") == action_id
         end
-        action&.dig("receipts", "creation_intent").is_a?(Hash)
+        receipts = action&.fetch("receipts", nil)
+        receipts.is_a?(Hash) && (
+          receipts["creation_intent"].is_a?(Hash) || publication_phase_evidence?(receipts)
+        )
       end
 
       def disposition_index(aggregate)
@@ -1180,7 +1219,12 @@ module Hive
       def remote_continuation_evidence?(action)
         receipts = action.fetch("receipts")
         receipts["creation_intent"].is_a?(Hash) || nonempty?(receipts["pr_url"]) ||
-          nonempty?(receipts["issue_url"]) || nonempty?(receipts["review_task_path"])
+          nonempty?(receipts["issue_url"]) || nonempty?(receipts["review_task_path"]) ||
+          publication_phase_evidence?(receipts)
+      end
+
+      def publication_phase_evidence?(receipts)
+        PublicationAttempt.phase_evidence?(receipts)
       end
 
       def prepare_policy(aggregate)

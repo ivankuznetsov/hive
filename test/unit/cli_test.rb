@@ -21,6 +21,7 @@ require "hive/commands/approve"
 require "hive/commands/findings"
 require "hive/commands/finding_toggle"
 require "hive/commands/patrol"
+require "hive/commands/refactor_patrol"
 require "hive/commands/digest"
 require "hive/commands/pairing"
 require "hive/commands/answer_digest"
@@ -70,7 +71,10 @@ class HiveCliTest < Minitest::Test
     with_command_new_stub(Hive::Commands::Init) do |calls|
       Hive::CLI.start([ "init", "/tmp/project", "--force", "--json", "--workflow", "content_fixture" ])
       assert_equal [ "/tmp/project" ], calls.first.fetch(:args)
-      assert_equal({ force: true, json: true, workflow: "content_fixture", new_workflow: nil },
+      assert_equal({
+                     force: true, json: true, workflow: "content_fixture",
+                     new_workflow: nil, refactor_patrol: nil
+                   },
                    calls.first.fetch(:kwargs))
       assert_equal :call, calls.last
     end
@@ -78,8 +82,17 @@ class HiveCliTest < Minitest::Test
     with_command_new_stub(Hive::Commands::Init) do |calls|
       Hive::CLI.start([ "init", "/tmp/project", "--new-workflow", "writing" ])
       assert_equal [ "/tmp/project" ], calls.first.fetch(:args)
-      assert_equal({ force: false, json: false, workflow: nil, new_workflow: "writing" },
+      assert_equal({
+                     force: false, json: false, workflow: nil,
+                     new_workflow: "writing", refactor_patrol: nil
+                   },
                    calls.first.fetch(:kwargs))
+      assert_equal :call, calls.last
+    end
+
+    with_command_new_stub(Hive::Commands::Init) do |calls|
+      Hive::CLI.start([ "init", "/tmp/project", "--no-refactor-patrol" ])
+      assert_equal false, calls.first.fetch(:kwargs).fetch(:refactor_patrol)
       assert_equal :call, calls.last
     end
 
@@ -472,6 +485,20 @@ class HiveCliTest < Minitest::Test
       Hive::CLI.start([ "patrol", "proj", "--dry-run", "--json" ])
       assert_equal [ "proj" ], calls.first.fetch(:args)
       assert_equal({ json: true, dry_run: true }, calls.first.fetch(:kwargs))
+    end
+
+    with_command_new_stub(Hive::Commands::RefactorPatrol) do |calls|
+      Hive::CLI.start([
+        "refactor-patrol", "proj", "--list", "--limit", "25",
+        "--cursor", "cursor-1", "--json"
+      ])
+      assert_equal [ "proj" ], calls.first.fetch(:args)
+      assert_equal true, calls.first.fetch(:kwargs).fetch(:list)
+      assert_nil calls.first.fetch(:kwargs).fetch(:show)
+      assert_equal 25, calls.first.fetch(:kwargs).fetch(:limit)
+      assert_equal "cursor-1", calls.first.fetch(:kwargs).fetch(:cursor)
+      assert_equal false, calls.first.fetch(:kwargs).fetch(:full)
+      assert_equal true, calls.first.fetch(:kwargs).fetch(:json)
     end
 
     with_command_new_stub(Hive::Commands::Digest) do |calls|

@@ -1430,6 +1430,156 @@ class RefactorPatrolCommandTest < Minitest::Test
     assert_equal "bad flags", JSON.parse(out).fetch("message")
   end
 
+  def test_job_list_and_show_are_schema_valid_read_only_queries_even_when_patrol_is_disabled
+    with_refactor_patrol_project do |repo|
+      cfg = Hive::Config.load(repo)
+      store = Hive::RefactorPatrol::JobStore.new(repo)
+      manifest = with_manifest_checksum(pr_manifest)
+      store.enqueue_manifest!(
+        manifest,
+        policy: Hive::RefactorPatrol::Policy.capture(cfg, now: Time.utc(2026, 7, 12, 9, 0, 0)),
+        now: Time.utc(2026, 7, 12, 9, 0, 0)
+      )
+      config_path = File.join(repo, ".hive-state", "config.yml")
+      raw = YAML.safe_load(File.read(config_path))
+      raw.fetch("refactor_patrol")["enabled"] = false
+      File.write(config_path, raw.to_yaml)
+      v2_root = File.join(repo, ".hive-state", "refactor_patrol", "v2")
+      before = Dir.glob(File.join(v2_root, "**", "*"), File::FNM_DOTMATCH)
+                  .select { |path| File.file?(path) }
+                  .to_h { |path| [ path, File.binread(path) ] }
+
+      list_out, = capture_io do
+        Hive::Commands::RefactorPatrol.new(
+          "demo", json: true, list: true, limit: 1
+        ).call
+      end
+      list_payload = JSON.parse(list_out)
+      assert_empty job_query_schemer.validate(list_payload).to_a
+      assert_equal [ manifest.fetch("job_id") ], list_payload.fetch("jobs").map { |job| job.fetch("job_id") }
+      assert_equal 1, list_payload.dig("page", "returned")
+      assert_equal false, list_payload.dig("page", "has_more")
+
+      show_out, = capture_io do
+        Hive::Commands::RefactorPatrol.new(
+          "demo", json: true, show: manifest.fetch("job_id"), limit: 1
+        ).call
+      end
+      show_payload = JSON.parse(show_out)
+      assert_empty job_query_schemer.validate(show_payload).to_a
+      assert_equal manifest.fetch("job_id"), show_payload.dig("job", "job_id")
+      assert_equal false, show_payload.dig("job", "history", "full")
+      assert_equal 1, show_payload.dig("job", "history", "limit")
+
+      text_out, = capture_io do
+        Hive::Commands::RefactorPatrol.new("demo", list: true, limit: 1).call
+      end
+      assert_includes text_out, "hive refactor-patrol jobs: demo"
+      assert_includes text_out, manifest.fetch("job_id")
+
+      after = Dir.glob(File.join(v2_root, "**", "*"), File::FNM_DOTMATCH)
+                 .select { |path| File.file?(path) }
+                 .to_h { |path| [ path, File.binread(path) ] }
+      assert_equal before, after,
+                   "list/show must not enqueue, claim, replay, or rewrite durable patrol state"
+
+      invalid_out, = capture_io do
+        error = assert_raises(Hive::RefactorPatrol::JobQuery::UsageError) do
+          Hive::Commands::RefactorPatrol.new(
+            "demo", json: true, show: "../bad"
+          ).call
+        end
+        assert_equal Hive::ExitCodes::USAGE, error.exit_code
+      end
+      invalid_payload = JSON.parse(invalid_out)
+      assert_empty job_query_schemer.validate(invalid_payload).to_a
+      assert_equal "usage", invalid_payload.fetch("error_kind")
+      assert_equal Hive::ExitCodes::USAGE, invalid_payload.fetch("exit_code")
+    end
+  end
+
+  def test_job_query_rejects_mutating_or_ambiguous_modes
+    command = Hive::Commands::RefactorPatrol.new(
+      "demo", json: true, list: true, show: "job-7"
+    )
+    error = assert_raises(Hive::RefactorPatrol::JobQuery::UsageError) do
+      command.send(:validate_mode!)
+    end
+    assert_match(/only one of --list or --show/, error.message)
+
+    command = Hive::Commands::RefactorPatrol.new(
+      "demo", json: true, list: true, actions: true
+    )
+    error = assert_raises(Hive::RefactorPatrol::JobQuery::UsageError) do
+      command.send(:validate_mode!)
+    end
+    assert_match(/cannot be combined/, error.message)
+
+    command = Hive::Commands::RefactorPatrol.new(
+      "demo", json: true, list: true, full: true
+    )
+    error = assert_raises(Hive::RefactorPatrol::JobQuery::UsageError) do
+      command.send(:validate_mode!)
+    end
+    assert_match(/--full requires --show/, error.message)
+
+    command = Hive::Commands::RefactorPatrol.new(
+      "demo", json: true, show: "job-7", cursor: "cursor"
+    )
+    error = assert_raises(Hive::RefactorPatrol::JobQuery::UsageError) do
+      command.send(:validate_mode!)
+    end
+    assert_match(/--cursor requires --list/, error.message)
+
+    command = Hive::Commands::RefactorPatrol.new(
+      "demo", json: true, show: "job-7", full: true, limit: 1
+    )
+    error = assert_raises(Hive::RefactorPatrol::JobQuery::UsageError) do
+      command.send(:validate_mode!)
+    end
+    assert_match(/--full cannot be combined with --limit/, error.message)
+  end
+
+  def test_job_query_usage_is_validated_before_project_resolution
+    invalid_id_out, = capture_io do
+      error = assert_raises(Hive::RefactorPatrol::JobQuery::UsageError) do
+        Hive::Commands::RefactorPatrol.new(
+          "not-registered", json: true, show: "../bad"
+        ).call
+      end
+      assert_equal Hive::ExitCodes::USAGE, error.exit_code
+    end
+    invalid_id = JSON.parse(invalid_id_out)
+    assert_empty job_query_schemer.validate(invalid_id).to_a
+    assert_equal "usage", invalid_id.fetch("error_kind")
+
+    invalid_cursor_out, = capture_io do
+      assert_raises(Hive::RefactorPatrol::JobQuery::UsageError) do
+        Hive::Commands::RefactorPatrol.new(
+          "not-registered", json: true, list: true, cursor: "not-a-cursor"
+        ).call
+      end
+    end
+    invalid_cursor = JSON.parse(invalid_cursor_out)
+    assert_empty job_query_schemer.validate(invalid_cursor).to_a
+    assert_equal "usage", invalid_cursor.fetch("error_kind")
+
+    [ { limit: 1 }, { cursor: "opaque" }, { full: true } ].each do |modifier|
+      out, = capture_io do
+        error = assert_raises(Hive::RefactorPatrol::JobQuery::UsageError) do
+          Hive::Commands::RefactorPatrol.new(
+            "not-registered", json: true, **modifier
+          ).call
+        end
+        assert_equal Hive::ExitCodes::USAGE, error.exit_code
+      end
+      payload = JSON.parse(out)
+      assert_empty job_query_schemer.validate(payload).to_a, modifier.inspect
+      assert_nil payload.fetch("action"), modifier.inspect
+      assert_equal "usage", payload.fetch("error_kind"), modifier.inspect
+    end
+  end
+
   private
 
   def with_refactor_patrol_project
@@ -1567,6 +1717,12 @@ class RefactorPatrolCommandTest < Minitest::Test
   def v2_refactor_schemer
     @v2_refactor_schemer ||= JSONSchemer.schema(
       JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 2)))
+    )
+  end
+
+  def job_query_schemer
+    @job_query_schemer ||= JSONSchemer.schema(
+      JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol-jobs")))
     )
   end
 

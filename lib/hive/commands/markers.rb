@@ -12,9 +12,11 @@ module Hive
     # `hive markers SUBCOMMAND` — agent-callable surface for state-file
     # markers.
     #
-    # v1 ships one subcommand: `clear FOLDER --name <NAME>`. It removes
-    # the named marker line from the task's state file (atomic write)
-    # and records a `hive_commit` so the audit trail stays accurate.
+    # v1 ships one subcommand: `clear FOLDER --name <NAME>`. It validates
+    # the named current marker, removes all marker history from the task's
+    # state file (atomic write), and records a `hive_commit` so the audit
+    # trail stays accurate. Purging shadowed history prevents a completed
+    # run's older working/error marker from becoming current after recovery.
     #
     # Recovery from `REVIEW_STALE` / `REVIEW_CI_STALE` / `REVIEW_ERROR`
     # / `EXECUTE_STALE` / `EXECUTE_ERROR` previously required the user
@@ -114,7 +116,7 @@ module Hive
           end
 
           match_attr_or_raise!(task, marker)
-          Hive::Markers.remove_marker(task.state_file, marker.raw)
+          Hive::Markers.remove_all_markers(task.state_file)
         end
 
         Hive::Lock.with_commit_lock(task.hive_state_path) do

@@ -43,4 +43,16 @@ class HiveAtomicFileTest < Minitest::Test
                    "the ensure block must remove the orphaned tempfile"
     end
   end
+
+  def test_fsync_directory_flushes_and_tolerates_unsupported_platforms
+    with_tmp_dir do |dir|
+      assert_equal 0, Hive::AtomicFile.fsync_directory(dir)
+
+      [ NotImplementedError.new("unsupported"), Errno::EINVAL.new(dir) ].each do |error|
+        with_replaced_singleton_method(File, :open, ->(*) { raise error }) do
+          assert_nil Hive::AtomicFile.fsync_directory(dir)
+        end
+      end
+    end
+  end
 end

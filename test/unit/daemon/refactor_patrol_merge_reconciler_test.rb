@@ -445,25 +445,6 @@ class HiveDaemonRefactorPatrolMergeReconcilerTest < Minitest::Test
     end
   end
 
-  def test_directory_fsync_not_supported_does_not_undo_checkpoint_write
-    with_tmp_dir do |dir|
-      intake = reconciler(dir, FakeGh.new)
-      path = File.join(dir, "state")
-      FileUtils.mkdir_p(path)
-      original_open = File.method(:open)
-
-      with_replaced_singleton_method(File, :open, lambda { |target, *args, **kwargs, &block|
-        if File.expand_path(target) == File.expand_path(path)
-          raise Errno::ENOTSUP, target
-        end
-
-        original_open.call(target, *args, **kwargs, &block)
-      }) do
-        assert_nil intake.send(:fsync_directory, path)
-      end
-    end
-  end
-
   private
 
   def reconciler(dir, gh, cfg: enabled_cfg, name: "demo")

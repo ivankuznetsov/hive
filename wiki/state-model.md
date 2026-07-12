@@ -3,7 +3,7 @@ title: State Model
 type: data-model
 source: lib/hive/task.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/review_handoff.rb, lib/hive/refactor_patrol/*, lib/hive/daemon/display_name_backfiller.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
 created: 2026-04-25
-updated: 2026-07-11
+updated: 2026-07-12
 tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, web]
 ---
 
@@ -218,12 +218,16 @@ authority. It stores the enqueue-time policy snapshot, one pinned `analysis_sha`
 feature-level completion/errors, immutable accepted/flagged/suppressed thesis
 snapshots, claims and fencing generations, action ownership, attempts,
 creation intents, validation/patch/PR/issue/handoff receipts, and parent
-completeness. Writes use a locked atomic tempfile/fsync/rename transition.
+completeness. Writes use a locked atomic tempfile/fsync/rename transition and
+the shared `Hive::AtomicFile.fsync_directory` policy to persist directory-entry
+changes where the platform supports directory fsync.
 
 Claims carry PID, process-start-time, process-group, lease/heartbeat, owner, and
 generation. A stale generation cannot checkpoint or begin a remote effect.
-Repository ownership is deliberately not cached in this state: every dispatch
-reservation and external-effect/handoff fence requires the target's exact live
+Repository ownership is deliberately not cached in this state. Candidate
+enumeration may use one immutable in-memory snapshot for all due jobs in a
+single scheduler tick, but every dispatch reservation and external-effect/
+handoff fence requires the target's exact live
 registration, resolves enabled registrations by exact origin host/repository,
 and scans every registered ledger for nonterminal remote continuation evidence.
 Disabled registrations with a durable intent, PR/issue URL, or review-task path
@@ -242,7 +246,10 @@ the exact PR/issue/handoff identity available after catalog deletion, owner
 deregistration, or removal of the original project path. A later registration
 with the same canonical action materializes that exact proof as
 `canonical_action_link` in its local aggregate and terminates without invoking
-fix/PR/issue adapters. Archive corruption or conflicting proof fails closed.
+fix/PR/issue adapters. A mandatory review-task path remains valid proof as the
+synthetic coding task advances through the exact `6-review`, `7-artifacts`,
+`8-finalize`, and `9-done` stage roots; paths in other roots or nested beneath a
+task folder are rejected. Archive corruption or conflicting proof fails closed.
 The temporary `results/` file is a transport receipt rather than durable job
 state: its path is bound to one supervisor dispatch token and is unlinked after
 reap. See [[commands/refactor-patrol]] and [[modules/daemon]].

@@ -1829,11 +1829,6 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       assert_equal "job-1", store.action_index.dig("actions", "fix-fp-accepted", "owner_job_id")
       File.write(store.action_index_path, "{")
       assert_equal "job-1", store.action_index.dig("actions", "fix-fp-accepted", "owner_job_id")
-
-      replacement = ->(*) { raise Errno::EINVAL, "directory fsync unsupported" }
-      with_replaced_singleton_method(File, :open, replacement) do
-        assert_nil store.send(:fsync_directory, dir)
-      end
     end
   end
 

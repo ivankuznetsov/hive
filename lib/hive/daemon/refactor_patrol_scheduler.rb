@@ -85,13 +85,20 @@ module Hive
         end
         return [] if due_by_project.values.all?(&:empty?)
 
+        ownership_snapshot = if @repository_ownership.respond_to?(:snapshot)
+          @repository_ownership.snapshot
+        else
+          @repository_ownership
+        end
+
         managed.flat_map do |entry|
           project = entry.fetch("name")
           work = due_by_project.fetch(project)
           work.filter_map do |item|
             aggregate = item.fetch(:aggregate)
             ownership = repository_ownership_decision(
-              entry, aggregate, phase: item.fetch(:phase)
+              entry, aggregate, phase: item.fetch(:phase),
+              ownership_resolver: ownership_snapshot
             )
             if ownership.blocked?
               block(
@@ -367,8 +374,9 @@ module Hive
       def repository_ownership_decision(entry, aggregate,
                                         cfg: entry.fetch("_refactor_patrol_cfg"),
                                         phase: :discovery,
-                                        expected_identity: nil)
-        decision = @repository_ownership.call(
+                                        expected_identity: nil,
+                                        ownership_resolver: @repository_ownership)
+        decision = ownership_resolver.call(
           entry: entry,
           cfg: cfg,
           expected_identity: expected_identity,

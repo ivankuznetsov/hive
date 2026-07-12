@@ -127,6 +127,30 @@ class RefactorPatrolRepositoryOwnershipTest < Minitest::Test
     end
   end
 
+  def test_tick_snapshot_caches_identity_failure_and_replays_it_fail_closed
+    with_tmp_dir do |dir|
+      target = entry("demo", dir)
+      identity_calls = 0
+      guard = Hive::RefactorPatrol::RepositoryOwnership.new(
+        registry: -> { [ target ] },
+        identity_resolver: lambda do |_candidate, _cfg|
+          identity_calls += 1
+          raise Hive::GhError, "origin unavailable"
+        end,
+        continuation_resolver: ->(*) { [] }
+      ).snapshot
+
+      2.times do
+        decision = guard.call(entry: target, cfg: config(enabled: true))
+        assert decision.blocked?
+        assert_equal "repository_identity_unresolved", decision.reason
+        assert_includes decision.evidence.dig("unresolved_registrations", 0, "error"),
+                        "origin unavailable"
+      end
+      assert_equal 1, identity_calls
+    end
+  end
+
   def test_drift_grants_only_explicit_continuation_and_duplicates_still_block
     with_tmp_dir do |root|
       one = File.join(root, "one")

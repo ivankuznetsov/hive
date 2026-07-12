@@ -3,7 +3,7 @@ title: Hive::Gh
 type: module
 source: lib/hive/gh.rb
 created: 2026-06-08
-updated: 2026-07-11
+updated: 2026-07-12
 tags: [github, gh, module, pr]
 ---
 
@@ -57,6 +57,8 @@ superseded patch generation, while a new branch uses an exact absence lease.
 The publisher captures one validated origin push URL and reuses it for OID
 lookup and push; multiple URLs or later named-remote rewrites cannot broaden or
 redirect that transaction. An arbitrary existing branch is a conflict.
+Existing same-branch OPEN PRs are reconcilable only when `isDraft` is explicitly false;
+an OPEN draft is conflicting remote state rather than proof of publication.
 After creation, `verify_pr_identity!` independently proves the PR still names
 the validated patch before any `6-review` handoff. Issue reconciliation reads
 the complete open/closed inventory and prefers an exact v2 marker. Only when no

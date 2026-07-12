@@ -127,6 +127,24 @@ class RefactorPatrolLeverageTest < Minitest::Test
     end
   end
 
+  def test_source_content_reads_are_bounded_and_skip_external_devices
+    with_tmp_git_repo do |dir|
+      cap = Hive::Patrol::SourceReader::MAX_SOURCE_BYTES
+      write(dir, "lib/oversized.rb", ("value = 1\n" * (cap / 10)) + "if unseen_tail\nend\n")
+      File.symlink("/dev/zero", File.join(dir, "lib", "device.rb")) if File.exist?("/dev/zero")
+      commit_all(dir, "bounded sources")
+      leverage = Hive::RefactorPatrol::Leverage.new(dir, cfg: cfg)
+
+      content = leverage.send(:read, "lib/oversized.rb")
+      assert_operator content.bytesize, :<=, cap
+      refute_includes content, "unseen_tail"
+      if File.exist?("/dev/zero")
+        assert_equal "", Timeout.timeout(1) { leverage.send(:read, "lib/device.rb") }
+      end
+      assert leverage.score(feature("oversized", [ "lib/oversized.rb" ])).key?("score")
+    end
+  end
+
   def test_excluded_globs_are_skipped_in_content_scans
     with_tmp_git_repo do |dir|
       write(dir, "lib/checkout.rb", "class Checkout\nend\n")

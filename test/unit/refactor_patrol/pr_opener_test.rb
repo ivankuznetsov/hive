@@ -618,6 +618,64 @@ class RefactorPatrolPrOpenerTest < Minitest::Test
     end
   end
 
+  def test_open_reconciliation_requires_explicit_non_draft_state
+    with_tmp_git_repo do |repo|
+      local_patch = patch(repo)
+      {
+        "draft" => ->(candidate) { candidate["isDraft"] = true },
+        "missing isDraft" => ->(candidate) { candidate.delete("isDraft") }
+      }.each do |label, mutate|
+        gh = FakeGh.new
+        handoff = Handoff.new
+        candidate = remote_pr(local_patch)
+        mutate.call(candidate)
+        gh.prs = [ candidate ]
+
+        result = opener(repo, gh, handoff).open(
+          thesis: thesis, patch: local_patch, job_id: "job-7",
+          canonical_action_id: "fix-fp", source: source,
+          record_intent: -> { flunk "#{label} recovery must not persist intent" }
+        )
+
+        assert_equal "remote_pr_conflict", result.outcome, label
+        refute result.terminal, label
+        assert_equal [ "draft_state" ],
+                     result.receipts.dig("remote_pr_candidates", 0, "conflicts"), label
+        assert_empty handoff.calls, label
+        assert_empty gh.pushed, label
+        assert_empty gh.created, label
+      end
+    end
+  end
+
+  def test_non_open_reconciliation_preserves_closed_and_merged_recovery_without_draft_metadata
+    with_tmp_git_repo do |repo|
+      local_patch = patch(repo)
+      cases = [
+        [ "MERGED", true, "merged", true ],
+        [ "CLOSED", :missing, "closed_without_merge", false ]
+      ]
+
+      cases.each do |state, draft, outcome, handoff_expected|
+        gh = FakeGh.new
+        handoff = Handoff.new
+        candidate = remote_pr(local_patch, state: state)
+        draft == :missing ? candidate.delete("isDraft") : candidate["isDraft"] = draft
+        gh.prs = [ candidate ]
+
+        result = opener(repo, gh, handoff).open(
+          thesis: thesis, patch: local_patch, job_id: "job-7",
+          canonical_action_id: "fix-fp", source: source,
+          record_intent: -> { flunk "existing #{state} PR must not persist intent" }
+        )
+
+        assert_equal outcome, result.outcome, state
+        assert result.terminal, state
+        assert_equal handoff_expected ? 1 : 0, handoff.calls.size, state
+      end
+    end
+  end
+
   def test_multiple_full_identity_matches_are_a_visible_nonterminal_conflict
     with_tmp_git_repo do |repo|
       gh = FakeGh.new
@@ -1131,6 +1189,7 @@ class RefactorPatrolPrOpenerTest < Minitest::Test
     {
       "number" => number,
       "state" => state,
+      "isDraft" => false,
       "url" => "https://github.com/acme/demo/pull/#{number}",
       "body" => "Refactor\n\n<!-- hive-refactor-patrol action=fix-fp job=job-7 fingerprint=fp -->\n",
       "headRefOid" => local_patch.commit_sha,

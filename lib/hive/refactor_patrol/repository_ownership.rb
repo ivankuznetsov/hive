@@ -68,6 +68,41 @@ module Hive
         end
       end
 
+      # Candidate selection may evaluate several due jobs from the same set of
+      # registrations. Resolve each registration/config/identity/continuation
+      # input at most once for that pass, including failures, so one slow git
+      # remote or large continuation ledger is not multiplied by job count.
+      # Reservation and effect-time callers deliberately keep using #call on
+      # the live resolver instead of retaining this snapshot.
+      def snapshot
+        registry_cache = {}
+        config_cache = {}
+        identity_cache = {}
+        continuation_cache = {}
+
+        self.class.new(
+          registry: lambda do
+            snapshot_fetch(registry_cache, :registrations) { Array(@registry.call) }
+          end,
+          config_loader: lambda do |path|
+            snapshot_fetch(config_cache, File.expand_path(path)) do
+              @config_loader.call(path)
+            end
+          end,
+          identity_resolver: lambda do |entry, cfg|
+            snapshot_fetch(identity_cache, entry_key(normalized_entry(entry))) do
+              @identity_resolver.call(entry, cfg)
+            end
+          end,
+          continuation_resolver: lambda do |entry, cfg|
+            snapshot_fetch(continuation_cache, entry_key(normalized_entry(entry))) do
+              @continuation_resolver.call(entry, cfg)
+            end
+          end,
+          require_registration: @require_registration
+        )
+      end
+
       def call(entry:, cfg:, expected_identity: nil, continuation: false,
                continuation_owner: false)
         target = normalized_entry(entry)
@@ -126,6 +161,36 @@ module Hive
       end
 
       private
+
+      def snapshot_fetch(cache, key)
+        captured = cache[key]
+        unless captured
+          captured = begin
+            { value: immutable_copy(yield) }.freeze
+          rescue StandardError => e
+            { error: e }.freeze
+          end
+          cache[key] = captured
+        end
+        raise captured.fetch(:error) if captured.key?(:error)
+
+        captured.fetch(:value)
+      end
+
+      def immutable_copy(value)
+        case value
+        when Hash
+          value.each_with_object({}) do |(key, item), copy|
+            copy[immutable_copy(key)] = immutable_copy(item)
+          end.freeze
+        when Array
+          value.map { |item| immutable_copy(item) }.freeze
+        when String
+          value.dup.freeze
+        else
+          value.freeze
+        end
+      end
 
       def enabled_registrations(target, target_cfg)
         unresolved = []

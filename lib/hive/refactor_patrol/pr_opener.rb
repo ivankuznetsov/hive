@@ -433,6 +433,7 @@ module Hive
         conflicts = []
         conflicts << "number" unless pr["number"].is_a?(Integer) && pr["number"].positive?
         conflicts << "state" unless %w[OPEN MERGED CLOSED].include?(pr["state"])
+        conflicts << "draft_state" if pr["state"] == "OPEN" && pr["isDraft"] != false
         conflicts << "action_marker" unless exact_marker?(pr["body"], action_marker(thesis, job_id, action_id))
         remote_head = pr["headRefOid"].to_s
         conflicts << "head_sha" if remote_head.empty? || remote_head != patch.commit_sha

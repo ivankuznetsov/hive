@@ -39,6 +39,7 @@ module Hive
         )
         profile = Hive::AgentProfiles.lookup(configured_agent, cfg: @cfg)
         scope = read_only_scope(profile)
+        cli_flags = @read_only ? profile.require_cli_capability!(:safe_mode) : []
         started_at = Time.now.utc
         result = Hive::Agent.new(
           task: task,
@@ -51,6 +52,7 @@ module Hive
           profile: profile,
           expected_output: @read_only ? nil : output_path,
           status_mode: @read_only ? :exit_code_only : :output_file_exists,
+          cli_flags: cli_flags,
           **scope
         ).run!
         result = materialize_read_only_output(result, output_path) if @read_only

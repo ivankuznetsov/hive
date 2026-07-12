@@ -3,7 +3,7 @@ title: Hive::Agent
 type: module
 source: lib/hive/agent.rb, lib/hive/agent_limit.rb, lib/hive/claude_launcher.rb, lib/hive/scripts/interactive_claude_wrapper.sh
 created: 2026-04-25
-updated: 2026-07-09
+updated: 2026-07-12
 tags: [agent, claude, subprocess]
 ---
 
@@ -23,10 +23,10 @@ Hive::Agent.new(
   profile: nil,         # AgentProfile; defaults to claude profile
   expected_output: nil, # used by :output_file_exists profiles
   status_mode: nil,     # per-spawn override
-  permission_mode: nil, # Claude-only override; nil uses profile default/config caller
+  permission_mode: nil, # profile-owned override; nil uses profile default/config caller
   allowed_tools: nil,   # Claude-only --allowedTools CSV source
   disallowed_tools: nil,# Claude-only --disallowedTools CSV source
-  cli_flags: []         # per-run argv extras, currently Claude model/effort pins
+  cli_flags: []         # per-run Claude argv extras (model/effort or verified capabilities)
 )
 ```
 
@@ -96,7 +96,7 @@ with `"Error: When using --print, --output-format=stream-json requires
 --verbose"`. `--no-session-persistence` ensures every invocation starts
 fresh.
 
-Claude permission flags are configurable per spawn. If no
+Permission flags are profile-owned and configurable per spawn. For Claude, if no
 `permission_mode:` is supplied, the profile's `permission_skip_flag`
 is used (`--dangerously-skip-permissions` for Claude). If
 `permission_mode: "bypassPermissions"` is supplied, Hive keeps using the
@@ -104,6 +104,13 @@ skip flag for backward-compatible headless behavior. Any other Claude
 permission mode is emitted as `--permission-mode <mode>`; current config
 validation accepts `acceptEdits`, `auto`, `bypassPermissions`, `default`,
 `dontAsk`, and `plan`.
+
+`workspace-write` is a special Hive permission mode, not a Claude mode. It asks
+the selected profile for `workspace_write_flags` and raises when that profile
+cannot guarantee a root-confined writable sandbox. The built-in Codex profile
+uses `--sandbox workspace-write`, approval policy `never`, ephemeral execution,
+and ignored user config/rules; architecture-patrol auto-fix runs with that mode
+and the isolated fix worktree as `cwd`.
 
 Claude tool-scope flags are also per spawn. `allowed_tools:` and
 `disallowed_tools:` are emitted only for the Claude profile and only when
@@ -124,6 +131,16 @@ value (fresh init offers `low`, `medium`, and `high`).
 `Hive::ClaudeLauncher.wrapper_command` uses the same flag fragment for
 tmux-backed Claude sessions, and the shell wrapper forwards `--model` and
 `--effort` without shell re-parsing.
+
+Read-only architecture discovery is a separate Claude-only launch contract.
+`Hive::RefactorPatrol::ReviewAgentRunner` resolves the existing read-only tool
+scope and also asks the profile for its verified `safe_mode` capability. Hive
+runs `claude --safe-mode --help` once per binary/version/capability tuple and
+fails closed if the installed or operator-overridden binary does not advertise
+the flag. The resulting argv keeps `--safe-mode` ahead of project-controlled
+customizations; unrelated Claude launches do not receive it. Discovery still
+uses Claude's positional prompt, while Codex's normal and workspace-write
+launches send the prompt through stdin with `-` in argv.
 
 ## `spawn_and_wait` (the long part)
 
@@ -178,7 +195,7 @@ The default Claude permission path still uses `--dangerously-skip-permissions` (
 
 ## Tests
 
-- `test/unit/agent_test.rb` and `test/fixtures/fake-claude` exercise the spawn/wait/timeout logic without a real claude binary, including configurable Claude permission-mode argv and model/effort `cli_flags` reaching the headless command.
+- `test/unit/agent_test.rb` and `test/fixtures/fake-claude` exercise the spawn/wait/timeout logic without a real claude binary, including configurable permission argv, Claude model/effort and safe-mode `cli_flags`, and proof that the capability is absent from unrelated launches.
 - `test/unit/claude_launcher_test.rb` covers the tmux wrapper argv carrying model/effort pins and omitting them when no flags are configured.
 - `test/unit/spawn_agent_test.rb` covers `Stages::Base.spawn_agent` forwarding `claude.permission_mode` from config into headless Claude spawns and the stage permission-scope helper preserving yolo defaults.
 - `test/smoke/permission_scope_headless_smoke_test.rb` is a live Claude smoke proving a read-only headless write attempt completes without timeout and does not create the file, while yolo creates it.

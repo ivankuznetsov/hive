@@ -37,7 +37,7 @@ module Hive
                 :budget_flag, :output_format_flags, :version_flag,
                 :skill_syntax_format, :headless_supported, :min_version,
                 :status_detection_mode, :usage_extractor,
-                :workspace_write_flags
+                :workspace_write_flags, :cli_capabilities
 
     # Public API — do not break.
     #
@@ -70,6 +70,11 @@ module Hive
     #   usage_extractor:       default nil (no token-usage extraction)
     #   workspace_write_flags: default nil (profile cannot guarantee a
     #                          root-confined writable workspace)
+    #   cli_capabilities:      default {}. Maps a named, opt-in capability to
+    #                          the CLI flags that implement it. Capability
+    #                          users must call require_cli_capability!, which
+    #                          verifies the installed binary advertises every
+    #                          flag before returning them.
     #   prompt_style:          default :stdin for a profile named :codex,
     #                          otherwise :positional (backward compatible
     #                          with pre-profile-style custom registrations)
@@ -97,6 +102,7 @@ module Hive
                    usage_extractor: nil,
                    skill_verifier: nil,
                    workspace_write_flags: nil,
+                   cli_capabilities: {},
                    prompt_style: nil)
       prompt_style ||= name.to_sym == :codex ? :stdin : :positional
       unless PROMPT_STYLES.include?(prompt_style)
@@ -127,6 +133,7 @@ module Hive
       @usage_extractor = usage_extractor || ->(_event) { nil }
       @skill_verifier = skill_verifier
       @workspace_write_flags = Array(workspace_write_flags).freeze
+      @cli_capabilities = normalize_cli_capabilities(cli_capabilities)
       @prompt_style = prompt_style
 
       freeze
@@ -205,6 +212,34 @@ module Hive
 
     def workspace_write_supported?
       !@workspace_write_flags.empty?
+    end
+
+    # Return the argv for an explicitly declared CLI capability, but only
+    # after the installed binary proves it supports the flags. This keeps a
+    # caller from silently weakening a security boundary when an operator
+    # overrides the profile binary or pins an older version.
+    def require_cli_capability!(capability)
+      name = capability.to_sym
+      flags = @cli_capabilities[name]
+      unless flags
+        raise Hive::AgentError,
+              "agent profile #{@name.inspect} does not declare CLI capability #{name.inspect}"
+      end
+
+      version = check_version!
+      key = [ bin, version, name, flags ]
+      unless self.class.send(:capability_cache)[key]
+        help = capture_help!(flags)
+        missing = flags.reject { |flag| cli_flag_advertised?(help, flag) }
+        unless missing.empty?
+          raise Hive::AgentError,
+                "#{@name} #{version} does not advertise required #{name} capability " \
+                "(missing #{missing.join(', ')})"
+        end
+        self.class.send(:capability_cache)[key] = true
+      end
+
+      flags.dup
     end
 
     # Project-config override keys that may appear under
@@ -308,6 +343,42 @@ module Hive
 
     private
 
+    def normalize_cli_capabilities(capabilities)
+      unless capabilities.is_a?(Hash)
+        raise ArgumentError, "cli_capabilities must be a Hash; got #{capabilities.class}"
+      end
+
+      capabilities.each_with_object({}) do |(name, raw_flags), normalized|
+        flags = Array(raw_flags).map(&:to_s).reject(&:empty?)
+        if flags.empty?
+          raise ArgumentError, "CLI capability #{name.inspect} must declare at least one flag"
+        end
+        normalized[name.to_sym] = flags.freeze
+      end.freeze
+    end
+
+    def capture_help!(capability_flags)
+      out, err, status = Timeout.timeout(VERSION_CHECK_TIMEOUT_SEC) do
+        Open3.capture3(bin, *capability_flags, "--help")
+      end
+      unless status.success?
+        raise Hive::AgentError,
+              "#{@name} capability check failed: #{([ bin, *capability_flags, '--help' ]).join(' ')}"
+      end
+
+      "#{out}\n#{err}"
+    rescue Errno::ENOENT, Errno::EACCES => e
+      raise Hive::AgentError,
+            "#{@name} capability check could not run #{bin} (#{e.class.name.split('::').last}: #{e.message})"
+    rescue Timeout::Error
+      raise Hive::AgentError,
+            "#{@name} capability check timed out after #{VERSION_CHECK_TIMEOUT_SEC}s: #{bin}"
+    end
+
+    def cli_flag_advertised?(help, flag)
+      help.match?(/(?<![A-Za-z0-9_-])#{Regexp.escape(flag)}(?![A-Za-z0-9_-])/)
+    end
+
     def version_tuple(version_string)
       version_string.split(".").map(&:to_i)
     end
@@ -335,6 +406,7 @@ module Hive
         usage_extractor: @usage_extractor,
         skill_verifier: @skill_verifier,
         workspace_write_flags: @workspace_write_flags.dup,
+        cli_capabilities: @cli_capabilities.transform_values(&:dup),
         prompt_style: @prompt_style
       }
     end
@@ -342,12 +414,17 @@ module Hive
     class << self
       def reset_version_cache!
         @version_cache = nil
+        @capability_cache = nil
       end
 
       private
 
       def version_cache
         @version_cache ||= {}
+      end
+
+      def capability_cache
+        @capability_cache ||= {}
       end
     end
   end

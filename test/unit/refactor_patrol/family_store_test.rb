@@ -437,17 +437,6 @@ class RefactorPatrolFamilyStoreTest < Minitest::Test
     end
   end
 
-  def test_directory_fsync_tolerates_filesystems_without_directory_sync
-    with_tmp_dir do |dir|
-      store = family_store(dir)
-      replacement = ->(*) { raise Errno::EINVAL, "directory fsync unsupported" }
-
-      with_replaced_singleton_method(File, :open, replacement) do
-        assert_nil store.send(:fsync_directory, dir)
-      end
-    end
-  end
-
   def test_authoritative_jobs_without_thesis_or_owner_fail_closed
     with_tmp_dir do |dir|
       missing_thesis = authoritative_aggregate(

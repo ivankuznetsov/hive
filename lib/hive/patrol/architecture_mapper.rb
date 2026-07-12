@@ -3,6 +3,7 @@ require "json"
 require "pathname"
 require "set"
 require "hive/patrol/feature"
+require "hive/patrol/source_reader"
 
 module Hive
   module Patrol
@@ -95,6 +96,7 @@ module Hive
       def initialize(project_root, cfg:)
         @project_root = File.expand_path(project_root)
         @cfg = cfg
+        @source_reader = Hive::Patrol::SourceReader.new(@project_root)
       end
 
       def call(files)
@@ -117,6 +119,7 @@ module Hive
 
       def reset_scan(files)
         @files = Array(files).map { |path| normalize(path) }.uniq.sort
+                             .select { |path| @source_reader.regular_file?(path) }
         @content_cache = {}
         @dependency_cache = {}
         @manifests = @files.select { |path| production_manifest_path?(path) }
@@ -171,16 +174,14 @@ module Hive
       end
 
       def shebang_script?(path)
-        File.open(File.join(@project_root, path), "rb") { |file| file.read(2) == "#!" }
-      rescue SystemCallError
-        false
+        @source_reader.read_bytes(path, limit: 2) == "#!"
       end
 
       def text_file?(path)
-        sample = File.binread(File.join(@project_root, path), 4096)
+        return false unless @source_reader.regular_file?(path)
+
+        sample = @source_reader.read_bytes(path, limit: 4096)
         !sample.include?("\0")
-      rescue SystemCallError
-        false
       end
 
       def test_path?(path)
@@ -794,9 +795,7 @@ module Hive
       end
 
       def read(path)
-        @content_cache[path] ||= File.read(File.join(@project_root, path), encoding: "UTF-8").scrub("")
-      rescue SystemCallError, ArgumentError
-        ""
+        @content_cache[path] ||= @source_reader.read_utf8(path)
       end
 
       def normalize(path)

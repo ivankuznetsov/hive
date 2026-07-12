@@ -3,7 +3,7 @@ title: Hive::Patrol
 type: module
 source: lib/hive/patrol/
 created: 2026-05-28
-updated: 2026-07-11
+updated: 2026-07-12
 tags: [module, patrol, review, worktree, pr, codex]
 ---
 
@@ -14,6 +14,7 @@ tags: [module, patrol, review, worktree, pr, codex]
 | Module | File | Purpose |
 |--------|------|---------|
 | `Hive::Patrol::Mapper` | `lib/hive/patrol/mapper.rb` | Scans tracked files and manifests for route, command, package, and test-suite feature slices. Persists feature JSON. |
+| `Hive::Patrol::SourceReader` | `lib/hive/patrol/source_reader.rb` | Shared root-confined, regular-file-only, 256 KiB bounded reader used by architecture mapping and leverage measurement. It resolves tracked symlinks beneath the canonical project root and skips external/device targets before reading. |
 | `Hive::Patrol::Feature` | `lib/hive/patrol/feature.rb` | Durable feature record: `id`, `kind`, `entrypoints`, `owned_files`, `context_files`, and `tests`. |
 | `Hive::Patrol::Reviewer` | `lib/hive/patrol/reviewer.rb` | Renders `templates/patrol_review_prompt.md.erb`, runs the configured agent, records `patrol-review` usage rows when agent usage is present, validates finding categories/severities/confidences, and persists finding JSON. |
 | `Hive::Patrol::Finding` | `lib/hive/patrol/finding.rb` | Durable finding record linked to a feature and optional fingerprint. |
@@ -21,7 +22,7 @@ tags: [module, patrol, review, worktree, pr, codex]
 | `Hive::Patrol::Fixer` | `lib/hive/patrol/fixer.rb` | Creates a dedicated worktree branch, runs the fix agent, records `patrol-fix` usage rows when agent usage is present, validates, commits passing changes, records patch attempts, and removes failed worktrees. |
 | `Hive::Patrol::Validator` | `lib/hive/patrol/validator.rb` | Runs operator-configured validation commands in the fix worktree. No commands means not validatable, so no PR. |
 | `Hive::Patrol::PrOpener` | `lib/hive/patrol/pr_opener.rb` | Secret-scans, pushes the patrol branch, opens a ready (non-draft) PR by default — `patrol.draft_prs: true` reverts to draft — records fingerprint-to-PR state, invokes `ReviewHandoff` for opened PRs, and records `review_handoff_failed` when a PR opens but the synthetic review task cannot be created. |
-| `Hive::Patrol::ReviewHandoff` | `lib/hive/patrol/review_handoff.rb` | Creates a synthetic `6-review/patrol-.../` task for an opened patrol PR when `patrol.review_prs` is not false, preserving the patrol worktree so the standard review daemon can run reviewers/triage/fix/browser flow. |
+| `Hive::Patrol::ReviewHandoff` | `lib/hive/patrol/review_handoff.rb` | Creates a synthetic `6-review/patrol-.../` task for an opened patrol PR when `patrol.review_prs` is not false, preserving the patrol worktree so the standard review daemon can run reviewers/triage/fix/browser flow. Staging/quarantine renames use the shared best-effort directory-fsync policy. |
 | `Hive::Patrol::Dismissals` | `lib/hive/patrol/dismissals.rb` | Reconciles closed-unmerged patrol PRs into `dismissed.json` so the same finding is not immediately re-filed. |
 | `Hive::Patrol::StateStore` | `lib/hive/patrol/state_store.rb` | Creates and atomically writes the `.hive-state/patrol/` JSON tree. |
 

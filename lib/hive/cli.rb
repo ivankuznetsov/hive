@@ -23,6 +23,7 @@ module Hive
     # project-authored workflows; making the list project-aware later means
     # editing only that one method.
     WORKFLOW_VOCABULARY = Hive::Workflows::Registry.ids.join(", ").freeze
+    INIT_SCHEMA_ID = "hive-init.v#{Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-init")}".freeze
 
     # The one place the `--workflow` help is composed, shared by `init` and
     # `new` so they stay symmetric.
@@ -99,7 +100,7 @@ module Hive
         daemon=enabled, babysitter=enabled, daemon_autostart=disabled
 
       With --json, init suppresses that prose and emits a single
-      hive-init.v1 success payload containing the resolved answers plus
+      #{INIT_SCHEMA_ID} success payload containing the resolved answers plus
       project path, default branch, hive-state path, and worktree root.
       When used with --new-workflow, the payload also includes
       descriptor_path and instruction_path.

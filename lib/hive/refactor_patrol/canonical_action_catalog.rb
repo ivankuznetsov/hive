@@ -38,6 +38,9 @@ module Hive
       REMOTE_ISSUE_OUTCOMES = %w[
         issue_created issue_linked_open issue_closed_suppressed
       ].freeze
+      REVIEW_TASK_STAGE_DIRS = %w[
+        6-review 7-artifacts 8-finalize 9-done
+      ].freeze # coding-scoped: patrol review tasks can advance through remaining coding stages
 
       class Error < StandardError; end
       class CorruptCatalog < Error; end
@@ -94,7 +97,7 @@ module Hive
           catalog = build_snapshot(existing_catalog, archived_entries)
           persist_archive_entries!(catalog.fetch("actions"))
           Hive::AtomicFile.write(@path, "#{JSON.pretty_generate(catalog)}\n", mode: 0o600)
-          fsync_directory(@root)
+          Hive::AtomicFile.fsync_directory(@root)
           catalog
         end
       end
@@ -349,12 +352,14 @@ module Hive
       def validate_review_task_path!(value, owner)
         path = value.to_s
         normalized = File.expand_path(path)
-        review_root = File.join(
-          owner.fetch("project_root"), ".hive-state", "stages",
-          "6-review" # coding-scoped: architecture patrol PRs hand off into coding review
-        )
+        stages_root = File.join(owner.fetch("project_root"), ".hive-state", "stages")
+        task_root = File.dirname(normalized)
+        stage = File.basename(task_root)
+        task_slug = File.basename(normalized)
         valid = !path.empty? && path == normalized &&
-                normalized.start_with?("#{review_root}/")
+                File.dirname(task_root) == stages_root &&
+                REVIEW_TASK_STAGE_DIRS.include?(stage) &&
+                !task_slug.empty? && !%w[. ..].include?(task_slug)
         unless valid
           raise ProofConflict,
                 "published PR terminal proof has an invalid mandatory review handoff"
@@ -484,7 +489,7 @@ module Hive
           raise CorruptArchive,
                 "terminal proof archive entry is unreadable: #{path} (#{e.class}: #{e.message})"
         end
-        fsync_directory(@archive_root) if wrote
+        Hive::AtomicFile.fsync_directory(@archive_root) if wrote
       end
 
       def existing_catalog
@@ -534,12 +539,6 @@ module Hive
 
       def json_copy(value)
         JSON.parse(JSON.generate(value))
-      end
-
-      def fsync_directory(directory)
-        File.open(directory, File::RDONLY) { |file| file.fsync }
-      rescue Errno::EINVAL, Errno::ENOTSUP, Errno::EBADF
-        nil
       end
     end
   end

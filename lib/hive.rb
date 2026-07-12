@@ -34,8 +34,8 @@ module Hive
       # (`hive daemon queue [list|show|prune]`). See AN-1/2/3 and
       # `Hive::Commands::Daemon#queue_command`.
       "hive-daemon-queue" => 1,
-      "hive-patrol" => 1,
-      "hive-patrol-finding" => 1,
+      "hive-patrol" => 2,
+      "hive-patrol-finding" => 2,
       "hive-refactor-patrol" => 2,
       "hive-refactor-patrol-jobs" => 1,
       "hive-refactor-patrol-thesis" => 2,

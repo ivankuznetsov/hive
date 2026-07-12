@@ -6,31 +6,42 @@ module Hive
     module Fingerprint
       CONFIDENCE_ORDER = { "low" => 0, "medium" => 1, "high" => 2 }.freeze
 
-      # The exact fingerprint is agent-volatile: the same underlying issue
-      # is re-filed each scan with a different feature attribution, title
-      # wording, and code snippet, so the SHA never matches a prior PR and
-      # patrol re-opens the same finding forever. The similarity gate is the
-      # real dedup: a new finding in the SAME category whose normalized
-      # title tokens overlap an already-PR'd/dismissed finding by at least
-      # this coefficient (intersection / smaller-set) is treated as the same
-      # issue and skipped. 0.6 catches the observed re-words (e.g. "allows
-      # implicit POST mutations" vs "allows implicit POST requests" vs
-      # "dry-run check misses implicit POST") without collapsing unrelated
-      # findings.
+      # Structured exact fingerprints are stable across mapper attribution,
+      # title, and snippet drift, but intentionally remain sensitive to the
+      # agent's contract/root-cause wording. The fuzzy similarity gate handles
+      # that remaining wording drift: a new finding in the SAME category whose
+      # normalized title or root-cause tokens overlap an already-PR'd/dismissed
+      # finding by at least this coefficient is treated as the same issue.
+      # 0.6 catches observed re-words without collapsing unrelated findings.
       SIMILARITY_THRESHOLD = 0.6
+      LEGACY_GROUPED_FEATURE_PREFIXES = {
+        "command-package-json-scripts" => "command-npm-script-",
+        "command-pyproject-scripts" => "command-python-script-",
+        "command-package-swift-executables" => "command-swift-executable-"
+      }.freeze
+      LEGACY_PACKAGE_MANIFESTS = %w[
+        package.json Gemfile pyproject.toml go.mod Cargo.toml Package.swift
+        composer.json mix.exs
+      ].freeze
 
       module_function
 
       def compute(finding, project_root:)
         evidence = Array(finding.evidence).first || {}
         path = normalized_path(evidence["file"] || evidence[:file])
-        token = anchor_token(finding, evidence, project_root, path)
-        payload = [
-          finding.feature_id.to_s,
-          finding.category.to_s,
-          path,
-          token
-        ].join("\0")
+        contract = normalize_token(finding.respond_to?(:contract) ? finding.contract : nil)
+        root_cause = normalize_token(finding.respond_to?(:root_cause) ? finding.root_cause : nil)
+        payload = if !contract.empty? && !root_cause.empty?
+                    # New structured findings identify the semantic defect,
+                    # not whichever overlapping mapper slice happened to
+                    # report it. Feature attribution, title, and snippet drift
+                    # do not change this SHA; contract/root-cause wording does,
+                    # with similar_known? providing the fuzzy fallback.
+                    [ finding.category.to_s, path, contract, root_cause ].join("\0")
+        else
+          token = anchor_token(finding, evidence, project_root, path)
+          [ finding.feature_id.to_s, finding.category.to_s, path, token ].join("\0")
+        end
         ::Digest::SHA256.hexdigest(payload)
       end
 
@@ -47,6 +58,28 @@ module Hive
         dismissed.key?(fingerprint)
       end
 
+      # Feature ids changed when per-route/per-manifest slices were replaced
+      # by language-neutral components and grouped command manifests. Match a
+      # historical id only to the current finding that owns the same primary
+      # path (or to a known grouped-manifest predecessor); never use a global
+      # "any old patrol PR" gate.
+      def same_feature_history?(historical_feature_id, finding)
+        historical = historical_feature_id.to_s
+        current = finding.feature_id.to_s
+        return false if historical.empty? || current.empty?
+        return true if historical == current
+
+        legacy_prefix = LEGACY_GROUPED_FEATURE_PREFIXES[current]
+        return true if legacy_prefix && historical.start_with?(legacy_prefix)
+        return false unless current.start_with?("architecture-")
+
+        path = primary_evidence_path(finding)
+        return false if path.empty?
+        return true if historical == legacy_stable_id("route", path)
+
+        LEGACY_PACKAGE_MANIFESTS.include?(path) && historical == legacy_stable_id("package", path)
+      end
+
       def record_seen(fingerprints, fingerprint, branch: nil, pr_url: nil, state: "seen",
                       finding: nil, now: Time.now)
         entry = fingerprints[fingerprint] ||= { "first_seen" => now.utc.iso8601 }
@@ -59,7 +92,10 @@ module Hive
         # on a later scan even though its exact fingerprint will differ.
         if finding
           entry["category"] = finding.category.to_s
+          entry["feature_id"] = finding.feature_id.to_s
           entry["title_tokens"] = title_tokens(finding)
+          root_cause = semantic_tokens(finding)
+          entry["root_cause_tokens"] = root_cause unless root_cause.empty?
         end
         fingerprints
       end
@@ -77,20 +113,33 @@ module Hive
       # carry stored content (recorded since this feature shipped) can
       # match; older content-less entries are skipped (their exact
       # fingerprint still guards them via known_active?/dismissed?).
-      def similar_known?(fingerprints, dismissed, finding)
+      def similarity_index(fingerprints, dismissed)
+        active = fingerprints.values.select { |entry| %w[open merged resolved].include?(entry["state"]) }
+        (active + dismissed.values).group_by { |entry| entry["category"].to_s }
+      end
+
+      def similar_known?(fingerprints, dismissed, finding, index: nil)
         tokens = title_tokens(finding)
         return false if tokens.empty?
 
         category = finding.category.to_s
-        active = fingerprints.values.select { |e| %w[open merged resolved].include?(e["state"]) }
-        (active + dismissed.values).any? do |entry|
-          next false unless entry["category"].to_s == category
-
+        root_cause = semantic_tokens(finding)
+        entries = (index || similarity_index(fingerprints, dismissed)).fetch(category, [])
+        entries.any? do |entry|
           other = Array(entry["title_tokens"]).map(&:to_s)
-          next false if other.empty?
+          title_match = !other.empty? && overlap_coefficient(tokens, other) >= SIMILARITY_THRESHOLD
+          other_root = Array(entry["root_cause_tokens"]).map(&:to_s)
+          root_match = !root_cause.empty? && !other_root.empty? &&
+                       overlap_coefficient(root_cause, other_root) >= SIMILARITY_THRESHOLD
 
-          overlap_coefficient(tokens, other) >= SIMILARITY_THRESHOLD
+          title_match || root_match
         end
+      end
+
+      def semantic_tokens(finding)
+        return [] unless finding.respond_to?(:root_cause)
+
+        normalize_token(finding.root_cause).split
       end
 
       # Szymkiewicz–Simpson overlap: |A ∩ B| / min(|A|, |B|). More robust
@@ -107,6 +156,18 @@ module Hive
 
       def normalized_path(path)
         path.to_s.tr("\\", "/").sub(%r{\A\./}, "")
+      end
+
+      def primary_evidence_path(finding)
+        evidence = Array(finding.evidence).first
+        return "" unless evidence.is_a?(Hash)
+
+        normalized_path(evidence["file"] || evidence[:file])
+      end
+
+      def legacy_stable_id(kind, path)
+        slug = path.to_s.downcase.gsub(/[^a-z0-9]+/, "-").gsub(/\A-|-+\z/, "")
+        "#{kind}-#{slug}"[0, 80]
       end
 
       def anchor_token(finding, evidence, project_root, path)

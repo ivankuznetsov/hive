@@ -146,7 +146,11 @@ class ConfigTest < Minitest::Test
       assert_equal 600, cfg.dig("patrol", "poll_interval_sec")
       assert_equal "claude", cfg.dig("patrol", "agent")
       assert_equal "medium", cfg.dig("patrol", "min_confidence_to_fix")
-      assert_equal 10, cfg.dig("patrol", "max_findings_per_feature")
+      assert_equal 3, cfg.dig("patrol", "max_findings_per_feature")
+      assert_equal 12, cfg.dig("patrol", "max_features_per_cycle")
+      assert_equal 70, cfg.dig("patrol", "min_alpha_to_fix")
+      assert_equal 1, cfg.dig("patrol", "max_fixes_per_feature_per_cycle")
+      assert_equal 6, cfg.dig("patrol", "max_fix_attempts_per_cycle")
       assert_equal 3, cfg.dig("patrol", "max_prs_per_cycle")
       assert_equal false, cfg.dig("patrol", "draft_prs")
       assert_equal true, cfg.dig("patrol", "review_prs")
@@ -500,7 +504,11 @@ class ConfigTest < Minitest::Test
       assert_equal "continuous", cfg.dig("patrol", "trigger")
       assert_equal 600, cfg.dig("patrol", "poll_interval_sec")
       assert_equal "codex", cfg.dig("patrol", "agent")
-      assert_equal 10, cfg.dig("patrol", "max_findings_per_feature")
+      assert_equal 3, cfg.dig("patrol", "max_findings_per_feature")
+      assert_equal 12, cfg.dig("patrol", "max_features_per_cycle")
+      assert_equal 70, cfg.dig("patrol", "min_alpha_to_fix")
+      assert_equal 1, cfg.dig("patrol", "max_fixes_per_feature_per_cycle")
+      assert_equal 6, cfg.dig("patrol", "max_fix_attempts_per_cycle")
       assert_equal 3, cfg.dig("patrol", "max_prs_per_cycle")
       assert_equal "medium", cfg.dig("patrol", "min_confidence_to_fix")
     end
@@ -625,10 +633,16 @@ class ConfigTest < Minitest::Test
         assert_equal trigger, cfg.dig("patrol", "trigger")
         assert_equal poll_interval_sec, cfg.dig("patrol", "poll_interval_sec")
         assert_equal enabled, cfg.dig("patrol", "enabled")
-        assert_equal 10, cfg.dig("patrol", "max_findings_per_feature"),
+        assert_equal 3, cfg.dig("patrol", "max_findings_per_feature"),
                      "#{mode} must not change the findings cap"
+        assert_equal 12, cfg.dig("patrol", "max_features_per_cycle"),
+                     "#{mode} must not change the feature review cap"
+        assert_equal 70, cfg.dig("patrol", "min_alpha_to_fix"),
+                     "#{mode} must not change the alpha gate"
         assert_equal 3, cfg.dig("patrol", "max_prs_per_cycle"),
                      "#{mode} must not change the PR cap"
+        assert_equal 6, cfg.dig("patrol", "max_fix_attempts_per_cycle"),
+                     "#{mode} must not change the fix-attempt cap"
         assert_equal "medium", cfg.dig("patrol", "min_confidence_to_fix"),
                      "#{mode} must not change the confidence gate"
       end
@@ -735,6 +749,10 @@ class ConfigTest < Minitest::Test
       "draft_prs: sometimes",
       "review_prs: sometimes",
       "min_confidence_to_fix: certain",
+      "min_alpha_to_fix: 101",
+      "max_features_per_cycle: 0",
+      "max_fixes_per_feature_per_cycle: 0",
+      "max_fix_attempts_per_cycle: 0",
       "poll_interval_sec: 30",
       "commands: []",
       "commands:\n    test: ''",

@@ -31,7 +31,7 @@ class HivePatrolMapperTest < Minitest::Test
 
       assert_includes ids, "route-app-users-page-tsx"
       assert_includes ids, "command-bin-tool"
-      assert_includes ids, "command-npm-script-test"
+      assert_includes ids, "command-package-json-scripts"
       assert_includes ids, "package-package-json"
       assert_includes ids, "test-suite-test-users-test-rb"
       assert File.exist?(File.join(repo, ".hive-state", "patrol", "features", "route-app-users-page-tsx.json"))
@@ -78,8 +78,8 @@ class HivePatrolMapperTest < Minitest::Test
       ids = Hive::Patrol::Mapper.new(repo, cfg: cfg).call.map(&:id)
 
       assert_includes ids, "route-api-app-py"
-      assert_includes ids, "command-python-script-ship"
-      assert_includes ids, "command-swift-executable-swift-tool"
+      assert_includes ids, "command-pyproject-scripts"
+      assert_includes ids, "command-package-swift-executables"
       assert_includes ids, "command-cmd-tool-main-go"
       assert_includes ids, "command-src-main-rs"
       assert_includes ids, "command-src-bin-side-rs"
@@ -163,8 +163,9 @@ class HivePatrolMapperTest < Minitest::Test
         features = Timeout.timeout(2) { mapper.call }
         mapped = features.flat_map { |feature| feature.entrypoints + feature.owned_files + feature.context_files }
 
-        assert_includes features.map(&:id), "route-api-internal-py",
+        assert_includes features.map(&:id), "architecture-api",
                         "tracked symlinks resolving within the checkout remain mappable"
+        assert_includes mapped, "api/internal.py"
         assert_includes mapped, "docs/internal.md"
         %w[package.json api/external.py docs/external.md api/device.py].each do |path|
           refute_includes mapped, path, "unsafe tracked path must not reach a reviewer feature"
@@ -268,10 +269,74 @@ class HivePatrolMapperTest < Minitest::Test
 
       ordinary_one = ordinary.find { |feature| feature.id == "command-bin-one" }
       architecture_one = architecture.find { |feature| feature.id == "command-bin-one" }
+      architecture_component = architecture.find { |feature| feature.id == "architecture-lib-acme" }
       assert_includes ordinary_one.owned_files, "bin/two", "ordinary patrol behavior remains compatible"
       assert_equal [ "bin/one" ], architecture_one.owned_files
-      assert_includes architecture.map(&:id), "architecture-lib-acme",
-                      "shallow namespace files share one material architecture slice"
+      refute_includes architecture_component.entrypoints, "bin/one",
+                      "a dedicated command must not be a second component evidence anchor"
+    end
+  end
+
+  def test_architecture_component_keeps_its_dedicated_command_as_context_only
+    with_tmp_git_repo do |repo|
+      FileUtils.mkdir_p(File.join(repo, "cmd", "tool"))
+      File.write(File.join(repo, "go.mod"), "module example.test/tool\n")
+      File.write(File.join(repo, "cmd", "tool", "main.go"), "package main\nfunc main() {}\n")
+      File.write(File.join(repo, "cmd", "tool", "worker.go"), "package main\nfunc work() {}\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "command component", "--quiet")
+
+      features = Hive::Patrol::Mapper.new(
+        repo, cfg: cfg, dry_run: true, capabilities: [ :architecture ]
+      ).call
+      component = features.find { |feature| feature.id == "architecture-cmd-tool" }
+
+      assert_includes features.map(&:id), "command-cmd-tool-main-go"
+      refute_includes component.entrypoints, "cmd/tool/main.go"
+      assert_includes component.context_files, "cmd/tool/main.go"
+    end
+  end
+
+  def test_architecture_capability_replaces_overlapping_route_manifest_and_test_suite_slices
+    with_tmp_git_repo do |repo|
+      FileUtils.mkdir_p(File.join(repo, "pages"))
+      FileUtils.mkdir_p(File.join(repo, "test"))
+      File.write(File.join(repo, "pages", "home.tsx"), "export default function Home() {}\n")
+      File.write(File.join(repo, "test", "home.test.ts"), "import '../pages/home'\n")
+      File.write(File.join(repo, "package.json"), JSON.generate("scripts" => { "test" => "node --test" }))
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "web component", "--quiet")
+
+      features = Hive::Patrol::Mapper.new(
+        repo, cfg: cfg, dry_run: true, capabilities: [ :architecture ]
+      ).call
+      ids = features.map(&:id)
+
+      assert_includes ids, "architecture-pages"
+      assert_includes ids, "command-package-json-scripts"
+      refute_includes ids, "architecture-manifest-project",
+                      "a grouped command-contract slice owns the manifest exactly once"
+      refute ids.any? { |id| id.start_with?("route-", "package-", "test-suite-") },
+             "component mapping must not review the same behavior again through legacy slices"
+      assert_includes features.find { |feature| feature.id == "architecture-pages" }.tests,
+                      "test/home.test.ts"
+    end
+  end
+
+  def test_architecture_capability_groups_manifest_commands_into_one_review
+    with_tmp_git_repo do |repo|
+      File.write(File.join(repo, "package.json"), JSON.generate(
+        "scripts" => { "test" => "node --test", "lint" => "eslint .", "build" => "vite build" }
+      ))
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "scripts", "--quiet")
+
+      features = Hive::Patrol::Mapper.new(
+        repo, cfg: cfg, dry_run: true, capabilities: [ :architecture ]
+      ).call
+
+      manifest_owners = features.select { |feature| feature.owned_files.include?("package.json") }
+      assert_equal [ "command-package-json-scripts" ], manifest_owners.map(&:id)
     end
   end
 

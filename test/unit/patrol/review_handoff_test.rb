@@ -8,21 +8,30 @@ require "hive/patrol/review_handoff"
 class HivePatrolReviewHandoffTest < Minitest::Test
   include HiveTestHelper
 
-  Patch = Struct.new(:branch, :worktree_path, :head_sha, keyword_init: true)
+  Patch = Struct.new(:branch, :worktree_path, :head_sha, :validation, keyword_init: true)
 
   def finding(**overrides)
     defaults = {
       id: "f1", feature_id: "feature", category: "bug", severity: "high",
       confidence: "medium", title: "Fix bug", description: "bug details",
       recommendation: "fix it",
+      scope: "cross_feature",
+      contract: "Every accepted job must eventually be delivered.",
+      impact: "Accepted jobs disappear without an error.",
+      root_cause: "The handoff clears durable state before acknowledgement.",
+      reproduction: "Interrupt the handoff after dequeue and before acknowledgement.",
+      validation: "Run the interruption regression and delivery suite.",
       evidence: [ { "file" => "app.rb", "line" => 1, "snippet" => "puts" } ],
+      alpha_score: 88,
       fingerprint: "fp1"
     }
     Hive::Patrol::Finding.new(**defaults.merge(overrides))
   end
 
   def patch(dir, **overrides)
-    defaults = { branch: "hive-patrol/feature-fp1", worktree_path: dir, head_sha: "abc123" }
+    defaults = {
+      branch: "hive-patrol/feature-fp1", worktree_path: dir, head_sha: "abc123", validation: {}
+    }
     Patch.new(**defaults.merge(overrides))
   end
 
@@ -87,6 +96,13 @@ class HivePatrolReviewHandoffTest < Minitest::Test
       assert_includes idea, "bug details"
       assert_includes idea, "## Recommendation"
       assert_includes idea, "fix it"
+      assert_includes idea, "## Alpha"
+      assert_includes idea, "Score: `88`; scope: `cross_feature`"
+      assert_includes idea, "## Contract and impact"
+      assert_includes idea, "Every accepted job must eventually be delivered."
+      assert_includes idea, "## Root cause"
+      assert_includes idea, "The handoff clears durable state before acknowledgement."
+      assert_includes idea, "## Reproduction and validation"
       assert_includes idea, "`app.rb:1`: puts"
     end
   end
@@ -109,6 +125,32 @@ class HivePatrolReviewHandoffTest < Minitest::Test
 
         assert_nil Hive::TaskMeta.read(folder)[:id]
       end
+    end
+  end
+
+  def test_enqueue_carries_observed_fix_proof_into_review_task
+    with_tmp_dir do |dir|
+      validation = {
+        "fix_proof" => {
+          "root_cause" => "The queue entry is removed before acknowledgement.",
+          "audited_paths" => [ "lib/queue.rb", "test/queue_test.rb" ],
+          "configured_command" => "bundle exec ruby test/queue_test.rb",
+          "before" => { "exit_code" => 1, "timed_out" => false },
+          "after" => { "exit_code" => 0, "timed_out" => false }
+        }
+      }
+
+      folder = handoff(dir).enqueue(
+        finding: finding, patch: patch(dir, validation: validation), pr_url: "https://example.com/pull/7"
+      )
+      task = File.read(File.join(folder, "task.md"))
+
+      assert_includes task, "## Observed fix proof"
+      assert_includes task, "**Agent-reported root cause:**"
+      assert_includes task, "The queue entry is removed before acknowledgement."
+      assert_includes task, "`bundle exec ruby test/queue_test.rb`"
+      assert_includes task, "**Before:** exit=1 timed_out=false"
+      assert_includes task, "**After:** exit=0 timed_out=false"
     end
   end
 

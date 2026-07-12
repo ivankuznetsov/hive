@@ -9,35 +9,73 @@ require "hive/task"
 class HivePatrolPrOpenerTest < Minitest::Test
   include HiveTestHelper
 
+  BASE_SHA = "a" * 40
+  HEAD_SHA = "b" * 40
+
   FakePatch = Struct.new(:finding, :branch, :worktree_path, :validation,
-                         :passed, :diffstat, :head_sha, keyword_init: true)
+                         :passed, :diffstat, :base_sha, :head_sha, keyword_init: true)
 
   class FakeGh
-    attr_reader :pushed, :created_args
-    attr_accessor :prs, :diff
+    attr_reader :pushed, :push_options, :created_args, :git_commands
+    attr_accessor :prs, :diff, :diff_status, :head_sha, :status_output,
+                  :remote_oid, :base_remote_oid, :created_base_oid, :push_updates_remote
 
     def initialize
       @prs = []
       @diff = "diff --git a/app.rb b/app.rb\n+puts 'ok'\n"
+      @diff_status = 0
+      @head_sha = HivePatrolPrOpenerTest::HEAD_SHA
+      @status_output = ""
+      @remote_oid = nil
+      @base_remote_oid = HivePatrolPrOpenerTest::BASE_SHA
+      @push_updates_remote = true
       @pushed = []
+      @push_options = []
       @created_args = nil
+      @git_commands = []
     end
 
     def lookup_prs_for_branch(_path, _branch, cfg: nil)
-      @prs
+      return @prs unless @created_args
+
+      @prs + [
+        {
+          "state" => "OPEN", "url" => "https://example.com/pr/2",
+          "headRefOid" => @head_sha, "baseRefOid" => (@created_base_oid || @base_remote_oid),
+          "baseRefName" => "master"
+        }
+      ]
     end
 
     def ensure_authenticated!(_cfg = nil)
       true
     end
 
-    def push_branch!(path, branch, cfg: nil)
+    def push_branch!(path, branch, cfg: nil, expected_remote_oid: nil, expected_remote_absent: false)
       @pushed << [ path, branch ]
+      @push_options << {
+        expected_remote_oid: expected_remote_oid,
+        expected_remote_absent: expected_remote_absent
+      }
+      @remote_oid = @head_sha if @push_updates_remote
+    end
+
+    def remote_branch_oid(_path, branch, cfg: nil)
+      branch == "master" ? @base_remote_oid : @remote_oid
     end
 
     def capture3(*cmd, chdir: nil, cfg: nil)
       if cmd[0] == "git"
-        return [ @diff, "", Hive::Gh::CommandStatus.new(exitstatus: 0) ]
+        @git_commands << cmd
+        operation = cmd[3]
+        case operation
+        when "rev-parse"
+          return [ "#{@head_sha}\n", "", Hive::Gh::CommandStatus.new(exitstatus: 0) ]
+        when "status"
+          return [ @status_output, "", Hive::Gh::CommandStatus.new(exitstatus: 0) ]
+        when "diff"
+          return [ @diff, "diff failed", Hive::Gh::CommandStatus.new(exitstatus: @diff_status) ]
+        end
       end
 
       @created_args = cmd
@@ -85,7 +123,14 @@ class HivePatrolPrOpenerTest < Minitest::Test
       title: "Fix bug",
       description: "bug details",
       recommendation: "fix it",
+      scope: "cross_feature",
+      contract: "Every accepted job must eventually be delivered.",
+      impact: "Accepted jobs disappear without an error.",
+      root_cause: "The handoff clears durable state before acknowledgement.",
+      reproduction: "Interrupt the handoff after dequeue and before acknowledgement.",
+      validation: "Run the handoff interruption regression and delivery suite.",
       evidence: [ { "file" => "app.rb", "line" => 1, "snippet" => "puts" } ],
+      alpha_score: 88,
       fingerprint: "fp1"
     )
   end
@@ -98,8 +143,19 @@ class HivePatrolPrOpenerTest < Minitest::Test
       passed: passed,
       validation: { "commands" => [ { "name" => "test", "command" => "rake", "exit_code" => 0 } ] },
       diffstat: " app.rb | 1 +",
-      head_sha: "abc123"
+      base_sha: BASE_SHA,
+      head_sha: HEAD_SHA
     )
+  end
+
+  def matching_pr(state: "OPEN", url: "https://example.com/pr/1")
+    {
+      "state" => state,
+      "url" => url,
+      "headRefOid" => HEAD_SHA,
+      "baseRefOid" => BASE_SHA,
+      "baseRefName" => "master"
+    }
   end
 
   def test_validated_patch_opens_draft_pr_records_mapping_and_enqueues_review_task
@@ -111,10 +167,12 @@ class HivePatrolPrOpenerTest < Minitest::Test
 
       assert result.opened?
       assert_equal [ [ dir, "hive-patrol/feature-fp1" ] ], gh.pushed
+      assert_equal [ { expected_remote_oid: nil, expected_remote_absent: true } ], gh.push_options
       assert_includes gh.created_args, "--draft"
       fingerprints = JSON.parse(File.read(File.join(dir, ".hive-state", "patrol", "fingerprints.json")))
       assert_equal "https://example.com/pr/2", fingerprints["fp1"]["pr_url"]
       assert_equal "open", fingerprints["fp1"]["state"]
+      assert_equal "feature", fingerprints["fp1"]["feature_id"]
 
       refute_nil result.review_task_path
       task = Hive::Task.new(result.review_task_path)
@@ -128,11 +186,79 @@ class HivePatrolPrOpenerTest < Minitest::Test
       pointer = YAML.safe_load(File.read(task.worktree_yml_path))
       assert_equal dir, pointer.fetch("path")
       assert_equal "hive-patrol/feature-fp1", pointer.fetch("branch")
-      assert_equal "abc123", pointer.fetch("execute_base_head")
+      assert_equal HEAD_SHA, pointer.fetch("execute_base_head")
 
       pr_md = File.read(File.join(task.folder, "pr.md"))
       assert_includes pr_md, "pr_url: https://example.com/pr/2"
       assert_includes File.read(task.state_file), "# Patrol: Fix bug"
+    end
+  end
+
+  def test_pr_body_preserves_alpha_and_root_cause_evidence
+    opener = Hive::Patrol::PrOpener.new(Dir.pwd, cfg: cfg, gh: FakeGh.new)
+
+    body = opener.send(:body_for, finding, patch)
+
+    assert_includes body, "Alpha: `88`"
+    assert_includes body, "Scope: `cross_feature`"
+    assert_includes body, "## Contract and impact"
+    assert_includes body, finding.contract
+    assert_includes body, finding.impact
+    assert_includes body, "## Root cause"
+    assert_includes body, finding.root_cause
+    assert_includes body, "## Reproduction"
+    assert_includes body, finding.reproduction
+    assert_includes body, finding.validation
+  end
+
+  def test_pr_body_preserves_machine_observed_fix_proof
+    observed = patch
+    observed.validation["fix_proof"] = {
+      "root_cause" => "Confirmed queue deletion before acknowledgement.",
+      "audited_paths" => %w[app.rb lib/queue.rb],
+      "configured_command" => "bundle exec ruby test/queue_test.rb",
+      "before" => { "exit_code" => 1, "timed_out" => false },
+      "after" => { "exit_code" => 0, "timed_out" => false }
+    }
+
+    body = Hive::Patrol::PrOpener.new(Dir.pwd, cfg: cfg, gh: FakeGh.new).send(:body_for, finding, observed)
+
+    assert_includes body, "## Observed fix proof"
+    assert_includes body, "Agent-reported root cause"
+    assert_includes body, "Confirmed queue deletion"
+    assert_includes body, "exit=1"
+    assert_includes body, "exit=0"
+  end
+
+  def test_secret_in_agent_authored_title_blocks_before_push
+    with_tmp_dir do |dir|
+      gh = FakeGh.new
+      unsafe = finding
+      unsafe.title = "Fix sk-#{'x' * 24}"
+
+      result = Hive::Patrol::PrOpener.new(dir, cfg: cfg, gh: gh).open(
+        unsafe, patch(worktree_path: dir)
+      )
+
+      assert_equal :blocked, result.status
+      assert_equal "secret_detected", result.reason
+      assert_empty gh.pushed
+    end
+  end
+
+  def test_diff_acquisition_failure_blocks_publication
+    with_tmp_dir do |dir|
+      gh = FakeGh.new
+      gh.diff_status = 1
+
+      result = Hive::Patrol::PrOpener.new(dir, cfg: cfg, gh: gh).open(
+        finding, patch(worktree_path: dir)
+      )
+
+      assert_equal :error, result.status
+      assert_equal "gh_error", result.reason
+      assert_match(/secret scan failed/, result.detail)
+      assert_empty gh.pushed
     end
   end
 
@@ -188,7 +314,8 @@ class HivePatrolPrOpenerTest < Minitest::Test
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))
       gh = FakeGh.new
-      gh.prs = [ { "state" => "OPEN", "url" => "https://example.com/pr/1" } ]
+      gh.prs = [ matching_pr ]
+      gh.remote_oid = HEAD_SHA
 
       result = Hive::Patrol::PrOpener.new(dir, cfg: cfg, gh: gh).open(finding, patch(worktree_path: dir))
 
@@ -203,7 +330,8 @@ class HivePatrolPrOpenerTest < Minitest::Test
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))
       gh = FakeGh.new
-      gh.prs = [ { "state" => "OPEN", "url" => "https://example.com/pr/1" } ]
+      gh.prs = [ matching_pr ]
+      gh.remote_oid = HEAD_SHA
 
       result = Hive::Patrol::PrOpener.new(
         dir,
@@ -228,7 +356,7 @@ class HivePatrolPrOpenerTest < Minitest::Test
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))
       gh = FakeGh.new
-      gh.prs = [ { "state" => "MERGED", "url" => "https://example.com/pr/1" } ]
+      gh.prs = [ matching_pr(state: "MERGED") ]
 
       result = Hive::Patrol::PrOpener.new(dir, cfg: cfg, gh: gh).open(finding, patch(worktree_path: dir))
 
@@ -268,20 +396,26 @@ class HivePatrolPrOpenerTest < Minitest::Test
     end
   end
 
-  def test_diff_is_scanned_against_the_branch_base_not_just_last_commit
+  def test_diff_is_scanned_against_the_exact_validated_base_and_head
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))
       gh = FakeGh.new
       captured = nil
       gh.define_singleton_method(:capture3) do |*cmd, chdir: nil, cfg: nil|
-        captured = cmd if cmd[0] == "git"
-        [ @diff, "", Hive::Gh::CommandStatus.new(exitstatus: 0) ]
+        captured = cmd if cmd[0] == "git" && cmd[3] == "diff"
+        operation = cmd[3]
+        output = case operation
+        when "rev-parse" then "#{@head_sha}\n"
+        when "status" then @status_output
+        else @diff
+        end
+        [ output, "", Hive::Gh::CommandStatus.new(exitstatus: 0) ]
       end
 
       Hive::Patrol::PrOpener.new(dir, cfg: cfg, gh: gh).open(finding, patch(worktree_path: dir))
 
-      assert_includes captured, "master...HEAD",
-                      "secret scan must diff the whole branch against its base, not HEAD~1..HEAD"
+      assert_includes captured, "#{BASE_SHA}..#{HEAD_SHA}",
+                      "secret scan must bind to the exact validated patch identity"
     end
   end
 
@@ -289,19 +423,20 @@ class HivePatrolPrOpenerTest < Minitest::Test
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))
       gh = FakeGh.new
-      gh.define_singleton_method(:push_branch!) do |_path, _branch, cfg: nil|
+      gh.define_singleton_method(:push_branch!) do |_path, _branch, cfg: nil, **|
         raise Hive::GhError, "push rejected"
       end
 
       result = Hive::Patrol::PrOpener.new(dir, cfg: cfg, gh: gh).open(finding, patch(worktree_path: dir))
 
       assert_equal :error, result.status
-      assert_match(/gh_error/, result.reason)
+      assert_equal "gh_error", result.reason
+      assert_equal "push rejected", result.detail
       refute result.opened?
     end
   end
 
-  def test_diff_for_gh_error_returns_empty_string
+  def test_diff_for_gh_error_fails_closed
     with_tmp_dir do |dir|
       gh = FakeGh.new
       gh.define_singleton_method(:capture3) do |*|
@@ -309,7 +444,176 @@ class HivePatrolPrOpenerTest < Minitest::Test
       end
 
       opener = Hive::Patrol::PrOpener.new(dir, cfg: cfg, gh: gh)
-      assert_equal "", opener.send(:diff_for, dir)
+      error = assert_raises(Hive::GhError) { opener.send(:diff_for, patch(worktree_path: dir)) }
+      assert_includes error.message, "git diff failed"
+    end
+  end
+
+
+  def test_local_patch_head_and_cleanliness_are_verified_before_remote_calls
+    with_tmp_dir do |dir|
+      gh = FakeGh.new
+      gh.head_sha = "c" * 40
+
+      result = Hive::Patrol::PrOpener.new(dir, cfg: cfg, gh: gh).open(
+        finding, patch(worktree_path: dir)
+      )
+
+      assert_equal :error, result.status
+      assert_equal "gh_error", result.reason
+      assert_match(/validated patch head changed/, result.detail)
+      assert_empty gh.pushed
+    end
+
+    with_tmp_dir do |dir|
+      gh = FakeGh.new
+      gh.status_output = "?? unvalidated.txt\n"
+
+      result = Hive::Patrol::PrOpener.new(dir, cfg: cfg, gh: gh).open(
+        finding, patch(worktree_path: dir)
+      )
+
+      assert_equal :error, result.status
+      assert_equal "gh_error", result.reason
+      assert_match(/worktree is dirty/, result.detail)
+      assert_empty gh.pushed
+    end
+  end
+
+  def test_invalid_patch_identity_and_local_git_failures_fail_closed
+    with_tmp_dir do |dir|
+      gh = FakeGh.new
+      invalid = patch(worktree_path: dir)
+      invalid.head_sha = "short"
+
+      result = Hive::Patrol::PrOpener.new(dir, cfg: cfg, gh: gh).open(finding, invalid)
+
+      assert_equal :error, result.status
+      assert_equal "gh_error", result.reason
+      assert_match(/not a full Git object id/, result.detail)
+    end
+
+    with_tmp_dir do |dir|
+      gh = FakeGh.new
+      original = gh.method(:capture3)
+      gh.define_singleton_method(:capture3) do |*cmd, chdir: nil, cfg: nil|
+        if cmd[0] == "git" && cmd[3] == "rev-parse"
+          [ "", "cannot inspect HEAD", Hive::Gh::CommandStatus.new(exitstatus: 2) ]
+        else
+          original.call(*cmd, chdir: chdir, cfg: cfg)
+        end
+      end
+
+      result = Hive::Patrol::PrOpener.new(dir, cfg: cfg, gh: gh).open(
+        finding, patch(worktree_path: dir)
+      )
+
+      assert_equal :error, result.status
+      assert_equal "gh_error", result.reason
+      assert_match(/cannot inspect HEAD/, result.detail)
+    end
+  end
+
+  def test_existing_pr_requires_the_exact_validated_identity
+    mismatches = {
+      "head" => { "headRefOid" => "c" * 40 },
+      "base name" => { "baseRefName" => "main" }
+    }
+
+    mismatches.each do |label, override|
+      with_tmp_dir do |dir|
+        gh = FakeGh.new
+        gh.prs = [ matching_pr.merge(override) ]
+
+        result = Hive::Patrol::PrOpener.new(dir, cfg: cfg, gh: gh).open(
+          finding, patch(worktree_path: dir)
+        )
+
+        assert_equal :error, result.status, label
+        assert_equal "gh_error", result.reason, label
+        assert_match(/existing PR identity mismatch/, result.detail, label)
+        assert_empty gh.pushed, label
+      end
+    end
+  end
+
+  def test_new_pr_requires_the_remote_base_to_remain_at_the_validated_sha
+    with_tmp_dir do |dir|
+      gh = FakeGh.new
+      gh.base_remote_oid = "d" * 40
+
+      result = Hive::Patrol::PrOpener.new(dir, cfg: cfg, gh: gh).open(
+        finding, patch(worktree_path: dir)
+      )
+
+      assert_equal :error, result.status
+      assert_equal "gh_error", result.reason
+      assert_match(/remote patrol base identity mismatch/, result.detail)
+      assert_empty gh.pushed
+      assert_nil gh.created_args
+    end
+  end
+
+  def test_created_pr_is_reconciled_against_the_validated_base
+    with_tmp_dir do |dir|
+      gh = FakeGh.new
+      gh.created_base_oid = "d" * 40
+
+      result = Hive::Patrol::PrOpener.new(dir, cfg: cfg, gh: gh).open(
+        finding, patch(worktree_path: dir)
+      )
+
+      assert_equal :error, result.status
+      assert_equal "gh_error", result.reason
+      assert_match(/existing PR identity mismatch/, result.detail)
+      refute_nil gh.created_args, "the simulated base race occurs during PR creation"
+    end
+  end
+
+  def test_existing_remote_branch_is_replaced_only_with_an_exact_lease
+    with_tmp_dir do |dir|
+      gh = FakeGh.new
+      previous = "c" * 40
+      gh.remote_oid = previous
+
+      result = Hive::Patrol::PrOpener.new(dir, cfg: cfg, gh: gh).open(
+        finding, patch(worktree_path: dir)
+      )
+
+      assert result.opened?
+      assert_equal [ { expected_remote_oid: previous, expected_remote_absent: false } ], gh.push_options
+    end
+  end
+
+  def test_remote_head_must_match_before_pr_creation_and_handoff
+    with_tmp_dir do |dir|
+      gh = FakeGh.new
+      gh.push_updates_remote = false
+
+      result = Hive::Patrol::PrOpener.new(dir, cfg: cfg, gh: gh).open(
+        finding, patch(worktree_path: dir)
+      )
+
+      assert_equal :error, result.status
+      assert_equal "gh_error", result.reason
+      assert_match(/remote patrol branch identity mismatch/, result.detail)
+      assert_nil gh.created_args
+    end
+  end
+
+  def test_result_status_and_reason_contracts_are_closed
+    assert_equal %i[blocked error opened opened_review_handoff_failed skipped],
+                 Hive::Patrol::PrOpener::RESULT_STATUSES
+    assert_equal [
+      nil, "existing_pr", "gh_error", "review_handoff_failed",
+      "secret_detected", "validation_failed"
+    ], Hive::Patrol::PrOpener::RESULT_REASONS
+
+    assert_raises(ArgumentError) do
+      Hive::Patrol::PrOpener::Result.new(status: :unknown)
+    end
+    assert_raises(ArgumentError) do
+      Hive::Patrol::PrOpener::Result.new(status: :error, reason: "free-form error")
     end
   end
 end

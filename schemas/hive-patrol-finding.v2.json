@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-patrol-finding.v2.json",
+  "title": "hive patrol finding record (v2)",
+  "description": "Durable finding record stored under .hive-state/patrol/findings/.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "feature_id",
+    "category",
+    "severity",
+    "confidence",
+    "evidence"
+  ],
+  "properties": {
+    "id": { "type": "string" },
+    "feature_id": { "type": "string" },
+    "category": {
+      "enum": ["bug", "security", "performance", "documentation", "test-gap", "maintainability"]
+    },
+    "severity": { "enum": ["critical", "high", "medium", "low"] },
+    "confidence": { "enum": ["high", "medium", "low"] },
+    "scope": { "enum": ["local", "feature", "cross_feature", "system"] },
+    "title": { "type": "string" },
+    "description": { "type": "string" },
+    "recommendation": { "type": "string" },
+    "contract": { "type": "string", "minLength": 1 },
+    "impact": { "type": "string", "minLength": 1 },
+    "root_cause": { "type": "string", "minLength": 1 },
+    "reproduction": { "type": "string", "minLength": 1 },
+    "validation": { "type": "string", "minLength": 1 },
+    "alpha_score": { "type": "integer", "minimum": 0, "maximum": 100 },
+    "fingerprint": { "type": "string" },
+    "evidence": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["file"],
+        "properties": {
+          "file": { "type": "string" },
+          "line": { "type": "integer", "minimum": 1 },
+          "snippet": { "type": "string" }
+        }
+      }
+    }
+  }
+}

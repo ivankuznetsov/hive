@@ -40,11 +40,22 @@ module Hive
         @state.ensure! unless @dry_run
         files = tracked_files
         features = []
-        features.concat(route_features(files))
-        features.concat(command_features(files))
-        features.concat(package_features(files))
-        features.concat(test_features(files))
-        features.concat(architecture_features(files)) if architecture_capability?
+        if architecture_capability?
+          # Component mapping owns production source and manifests exactly
+          # once, attaches subsystem tests, and keeps command entrypoints as
+          # their own public-contract slices. Adding the legacy route,
+          # package, and monolithic test-suite slices here recreated the same
+          # behavior under several feature ids — the main source of patrol's
+          # duplicate PR waves.
+          commands = command_features(files)
+          features.concat(commands)
+          features.concat(architecture_features(files, separately_reviewed: commands))
+        else
+          features.concat(route_features(files))
+          features.concat(command_features(files))
+          features.concat(package_features(files))
+          features.concat(test_features(files))
+        end
         if documentation_capability? && (features.empty? || documentation_changes_provided?)
           features.concat(documentation_features(files))
         end
@@ -221,20 +232,20 @@ module Hive
           data = JSON.parse(read(package_json)) rescue {}
           Array(data["bin"]).each { |entry| features << build_command_feature(entry, files) if files.include?(entry) }
           data["bin"].each_value { |entry| features << build_command_feature(entry, files) if files.include?(entry) } if data["bin"].is_a?(Hash)
-          data.fetch("scripts", {}).each_key do |name|
-            features << build_manifest_feature("command", "package.json", "npm-script-#{name}", files)
-          end if data["scripts"].is_a?(Hash)
+          if data["scripts"].is_a?(Hash) && data["scripts"].any?
+            features << build_manifest_feature("command", "package.json", "package-json-scripts", files)
+          end
         end
 
         if files.include?("pyproject.toml")
-          project_scripts(read("pyproject.toml")).each do |name|
-            features << build_manifest_feature("command", "pyproject.toml", "python-script-#{name}", files)
+          if project_scripts(read("pyproject.toml")).any?
+            features << build_manifest_feature("command", "pyproject.toml", "pyproject-scripts", files)
           end
         end
 
         if files.include?("Package.swift")
-          swift_executables(read("Package.swift")).each do |name|
-            features << build_manifest_feature("command", "Package.swift", "swift-executable-#{name}", files)
+          if swift_executables(read("Package.swift")).any?
+            features << build_manifest_feature("command", "Package.swift", "package-swift-executables", files)
           end
         end
 
@@ -258,8 +269,25 @@ module Hive
         )
       end
 
-      def architecture_features(files)
-        ArchitectureMapper.new(@project_root, cfg: @cfg).call(files)
+      def architecture_features(files, separately_reviewed: [])
+        reviewed_paths = separately_reviewed.flat_map(&:owned_files).to_set
+        ArchitectureMapper.new(@project_root, cfg: @cfg).call(files).filter_map do |feature|
+          # Dedicated command-contract slices already own these paths. Keep
+          # command entrypoints as component context, but never as a second
+          # root-cause anchor; omit manifest components whose sole owned file
+          # is already reviewed by a grouped script-contract slice.
+          next if feature.owned_files.any? && feature.owned_files.all? { |path| reviewed_paths.include?(path) }
+
+          reviewed_entrypoints = feature.entrypoints.select { |path| reviewed_paths.include?(path) }
+          Feature.new(
+            id: feature.id,
+            kind: feature.kind,
+            entrypoints: feature.entrypoints - reviewed_entrypoints,
+            owned_files: feature.owned_files,
+            context_files: capped(feature.context_files + reviewed_entrypoints, max_context_files),
+            tests: feature.tests
+          )
+        end
       end
 
       # Parse the `[project.scripts]` table of pyproject.toml (PEP 621

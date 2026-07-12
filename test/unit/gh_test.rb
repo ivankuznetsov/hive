@@ -159,6 +159,7 @@ class GhUnitTest < Minitest::Test
     fields = args.fetch(args.index("--json") + 1).split(",")
     assert_includes fields, "body"
     assert_includes fields, "baseRefName"
+    assert_includes fields, "baseRefOid"
     assert_includes fields, "headRepository"
     assert_equal "github.corp.example/acme/demo", args.fetch(args.index("--repo") + 1)
     assert_equal "/repo", kwargs.fetch(:chdir)

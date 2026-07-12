@@ -13,16 +13,18 @@ tags: [module, patrol, review, worktree, pr, codex]
 
 | Module | File | Purpose |
 |--------|------|---------|
-| `Hive::Patrol::Mapper` | `lib/hive/patrol/mapper.rb` | Scans tracked files and manifests for route, command, package, and test-suite feature slices. Persists feature JSON. |
+| `Hive::Patrol::Mapper` | `lib/hive/patrol/mapper.rb` | Ordinary patrol enables the shared architecture capability: non-overlapping language-neutral source/manifest components with dependency-ranked context and subsystem tests, plus one primary review per command or grouped manifest-script contract. Command paths remain component context, not duplicate evidence anchors. Legacy route/package/monolithic-test slices remain available only to callers that omit that capability. |
 | `Hive::Patrol::SourceReader` | `lib/hive/patrol/source_reader.rb` | Shared root-confined, regular-file-only, 256 KiB bounded reader used by architecture mapping and leverage measurement. It resolves tracked symlinks beneath the canonical project root and skips external/device targets before reading. |
 | `Hive::Patrol::Feature` | `lib/hive/patrol/feature.rb` | Durable feature record: `id`, `kind`, `entrypoints`, `owned_files`, `context_files`, and `tests`. |
-| `Hive::Patrol::Reviewer` | `lib/hive/patrol/reviewer.rb` | Renders `templates/patrol_review_prompt.md.erb`, runs the configured agent, records `patrol-review` usage rows when agent usage is present, validates finding categories/severities/confidences, and persists finding JSON. |
-| `Hive::Patrol::Finding` | `lib/hive/patrol/finding.rb` | Durable finding record linked to a feature and optional fingerprint. |
-| `Hive::Patrol::Fingerprint` | `lib/hive/patrol/fingerprint.rb` | SHA-256 identity for exact dedup PLUS a **similarity gate** (`similar_known?`). The exact SHA is agent-volatile (the same issue is re-filed with a different feature/title/snippet each scan, so it never matches a prior PR), so `record_seen` also stores the finding's `category` + normalized `title_tokens`, and a new finding in the same category whose title-token overlap (Szymkiewicz–Simpson) ≥ `SIMILARITY_THRESHOLD` (0.6) with an open/merged/dismissed finding is skipped as `similar_to_existing` — this is what actually stops patrol re-opening the same PR every cycle. |
-| `Hive::Patrol::Fixer` | `lib/hive/patrol/fixer.rb` | Creates a dedicated worktree branch, runs the fix agent, records `patrol-fix` usage rows when agent usage is present, validates, commits passing changes, records patch attempts, and removes failed worktrees. |
+| `Hive::Patrol::FeatureBatch` | `lib/hive/patrol/feature_batch.rb` | Selects the deterministic SHA-bound rotating component batch and returns the next persistent cursor. `Commands::Patrol` reviews it in an exact detached checkout and finishes an active snapshot even when default advances. |
+| `Hive::Patrol::Reviewer` | `lib/hive/patrol/reviewer.rb` | Requests zero-to-three evidence-backed production defects per feature; bounded output must match the exact JSON envelope and is accepted atomically only when every admitted item has complete contract/impact/root-cause/scope/reproduction/validation fields and its confined evidence line contains the supplied snippet. Finding ids include the unique review-run id so audit records are immutable. |
+| `Hive::Patrol::Finding` | `lib/hive/patrol/finding.rb` | Durable finding record with delivery metadata (`scope`, contract, impact, root cause, reproduction, validation, computed alpha score) while retaining backward-compatible v1 loading. |
+| `Hive::Patrol::Fingerprint` | `lib/hive/patrol/fingerprint.rb` | Structured findings use a feature-independent semantic SHA over category, primary evidence path, contract, and root cause. Historical v1 findings retain the legacy identity fallback. Stored title/root-cause tokens provide cross-wording similarity, while feature metadata supports outcome calibration. |
+| `Hive::Patrol::CandidateSelector` | `lib/hive/patrol/candidate_selector.rb` | Applies production/history/active-feature hard gates, computes deterministic 0–100 alpha from validated proof fields, clusters semantic duplicates even within one feature, maps legacy slice IDs narrowly to current components, enforces per-feature diversity, and returns a globally ranked portfolio. Successful merged history is not treated as negative alpha. |
+| `Hive::Patrol::Fixer` | `lib/hive/patrol/fixer.rb` | Strictly fetches an exact base, applies the changed-path guardrail, and accepts bounded agent-reported audit/regression paths without language conventions. Hive overlays the declared changed regressions onto an isolated base, requires a normal regression-identified failure and patched pass, then broader validation. Agent rejection is an attempt outcome, not durable resolution; failed review handoffs reuse the exact validated patch receipt. |
 | `Hive::Patrol::Validator` | `lib/hive/patrol/validator.rb` | Runs operator-configured validation commands in the fix worktree. No commands means not validatable, so no PR. |
-| `Hive::Patrol::PrOpener` | `lib/hive/patrol/pr_opener.rb` | Secret-scans, pushes the patrol branch, opens a ready (non-draft) PR by default — `patrol.draft_prs: true` reverts to draft — records fingerprint-to-PR state, invokes `ReviewHandoff` for opened PRs, and records `review_handoff_failed` when a PR opens but the synthetic review task cannot be created. |
-| `Hive::Patrol::ReviewHandoff` | `lib/hive/patrol/review_handoff.rb` | Creates a synthetic `6-review/patrol-.../` task for an opened patrol PR when `patrol.review_prs` is not false, preserving the patrol worktree so the standard review daemon can run reviewers/triage/fix/browser flow. Mandatory and optional calls use the same fingerprint-locked exact reconciliation, so a retry after rename/fsync ambiguity reuses the one matching task and rejects PR/head identity conflicts. Staging/quarantine renames use the shared best-effort directory-fsync policy. |
+| `Hive::Patrol::PrOpener` | `lib/hive/patrol/pr_opener.rb` | Fail-closed secret-scans the title, body, and exact validated diff; verifies a clean exact local head, remote base, leased push, remote head, and created/existing PR identity; records fingerprint-to-PR state; and invokes `ReviewHandoff`. Dynamic publication diagnostics are separate from closed reason codes. |
+| `Hive::Patrol::ReviewHandoff` | `lib/hive/patrol/review_handoff.rb` | Creates a synthetic `6-review/patrol-.../` task for an opened patrol PR when `patrol.review_prs` is not false, preserving the patrol worktree and observed proof so the standard review daemon can run reviewers/triage/fix/browser flow. Mandatory and optional calls use the same fingerprint-locked exact reconciliation, so a retry after rename/fsync ambiguity reuses the matching task and rejects PR/head identity conflicts. Staging/quarantine renames use the shared best-effort directory-fsync policy. |
 | `Hive::Patrol::Dismissals` | `lib/hive/patrol/dismissals.rb` | Reconciles closed-unmerged patrol PRs into `dismissed.json` so the same finding is not immediately re-filed. |
 | `Hive::Patrol::StateStore` | `lib/hive/patrol/state_store.rb` | Creates and atomically writes the `.hive-state/patrol/` JSON tree. |
 
@@ -35,7 +37,8 @@ Patrol state is deliberately inspectable and removable:
   features/*.json
   findings/*.json
   patches/*.json
-  runs/*/
+  runs/*/                         # agent transcripts/output
+  runs/selection-*.json           # immutable score/decision audit
   state.json
   fingerprints.json
   dismissed.json
@@ -49,8 +52,10 @@ Patrol PRs flow into `6-review` and are reviewed by `patrol.review.reviewers` (a
 
 ## Ordinary patrol versus architecture patrol
 
-Ordinary patrol scans the current repository into route, command, package, and
-test-suite features, then attempts finding-sized fixes. Architecture patrol
+Ordinary patrol scans the current repository into language-neutral components
+and command-contract features, then attempts globally ranked production-defect
+fixes above the alpha gate. Documentation, test-gap, and maintainability
+observations are excluded from its automatic lane. Architecture patrol
 ([[commands/refactor-patrol]]) is triggered by an immutable merged-PR
 occurrence, maps language-neutral feature and documentation slices from that
 merge, and requires every architectural thesis to receive a durable accepted,
@@ -69,16 +74,16 @@ system can consume the other's state as proof of completion.
 
 Patrol is **opt-in**. A project with **no patrol section at all** (or a patrol section that omits `mode:`) resolves to `enabled: false` — [[modules/config]] only derives mode knobs when `mode:` is **explicitly present** in the raw config. `medium` is the default offered by the `hive init` *prompt* (which writes an explicit `mode: "medium"` into the rendered template), never a config-resolution default, so legacy projects without a patrol block are never silently enabled.
 
-Operators normally configure scheduling through `patrol.mode`, which [[modules/config]] resolves into `enabled`, `trigger`, and `poll_interval_sec` before the daemon sees the project config. An explicit `ultrapatrol`, `high`, or `medium` dispatches on a timer every 30 minutes, 2 hours, and 4 hours respectively (all set `enabled: true`); `low` uses `trigger: new_commits` and keeps the cheap 600-second SHA-check cadence; `off` resolves to `enabled: false`. The mode never changes finding/PR caps or the confidence gate. Explicit granular knobs (e.g. `enabled: true` or `poll_interval_sec:`) always win over a set mode and survive the deep-merge even when no `mode:` is set.
+Operators normally configure scheduling through `patrol.mode`, which [[modules/config]] resolves into `enabled`, `trigger`, and `poll_interval_sec` before the daemon sees the project config. An explicit `ultrapatrol`, `high`, or `medium` dispatches on a timer every 30 minutes, 2 hours, and 4 hours respectively (all set `enabled: true`); `low` uses `trigger: new_commits` and keeps the cheap 600-second SHA-check cadence; `off` resolves to `enabled: false`. The mode never changes finding/PR caps, per-feature diversity, confidence, or alpha gates. Explicit granular knobs (e.g. `enabled: true` or `poll_interval_sec:`) always win over a set mode and survive the deep-merge even when no `mode:` is set.
 
-`Hive::Daemon::PatrolScheduler` still consumes the lower-level `patrol.trigger` modes. `continuous` dispatches when either the default branch SHA changed or `poll_interval_sec` has elapsed, allowing patrol to keep reviewing existing feature slices between infrequent merges while still recording the current `last_scanned_sha` after each successful scan. `new_commits` dispatches only when the default branch SHA changes. `timer` dispatches solely from `last_run_at` age.
+`Hive::Daemon::PatrolScheduler` still consumes the lower-level `patrol.trigger` modes. `continuous` dispatches when either the default branch SHA changed or `poll_interval_sec` has elapsed, allowing patrol to keep reviewing existing feature slices between infrequent merges. Each cycle persists a SHA-bound feature cursor; `last_scanned_sha` advances only after the full mapped sweep succeeds. `new_commits` therefore keeps dispatching successive batches until that sweep completes. `timer` dispatches solely from `last_run_at` age.
 
 ## Safety invariants
 
 - Patrol is opt-in at the scheduler gate AND at config resolution: a missing patrol section, a missing `mode:`, `patrol.mode: off`, or `patrol.enabled: false` all leave patrol disabled and prevent daemon dispatch, and the daemon still requires `daemon.enabled`.
 - Findings surface as PRs, and opened PRs enter `6-review` by default; patrol still never writes `1-inbox/` intake tasks.
-- PR creation is gated on validation passing and on the secret scanner.
-- Each finding fingerprint maps to at most one active or merged PR.
+- PR creation is gated on structured fresh-base reproduction/root-cause proof, configured validation passing, and the secret scanner; a fixer may reject a stale or incorrectly scoped finding without forcing a patch.
+- Each semantic root maps to at most one active or merged PR, an open PR blocks additional variants from the same feature, and one feature normally supplies at most one fix per cycle.
 - A failed patrol-to-review handoff is not treated as an active fingerprint state, so later patrol cycles can retry instead of losing the opened PR from the review queue; an exact existing synthetic task is reconciled instead of duplicated.
 - Closed-unmerged patrol PRs become dismissals and are skipped on future cycles.
 - Agent prompts treat findings and recommendations as data; validation commands come only from project config.

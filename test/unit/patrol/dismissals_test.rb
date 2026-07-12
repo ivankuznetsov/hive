@@ -44,14 +44,18 @@ class HivePatrolDismissalsTest < Minitest::Test
       write_json(File.join(dir, ".hive-state", "patrol", "fingerprints.json"), {
         "fp1" => { "branch" => "hive-patrol/x", "pr_url" => "https://example.com/pr/1",
                    "state" => "open", "category" => "security",
-                   "title_tokens" => %w[implicit post mutations] }
+                   "feature_id" => "command-bin-x",
+                   "title_tokens" => %w[implicit post mutations],
+                   "root_cause_tokens" => %w[payload changes method] }
       })
       gh = FakeGh.new([ { "state" => "CLOSED", "url" => "https://example.com/pr/1" } ])
 
       dismissed = Hive::Patrol::Dismissals.new(dir, gh: gh).reconcile(now: Time.utc(2026, 5, 28, 12))
 
       assert_equal "security", dismissed["fp1"]["category"]
+      assert_equal "command-bin-x", dismissed["fp1"]["feature_id"]
       assert_equal %w[implicit post mutations], dismissed["fp1"]["title_tokens"]
+      assert_equal %w[payload changes method], dismissed["fp1"]["root_cause_tokens"]
     end
   end
 

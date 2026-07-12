@@ -423,7 +423,11 @@ module Hive
         "poll_interval_sec" => 600,
         "agent" => "claude",
         "min_confidence_to_fix" => "medium",
-        "max_findings_per_feature" => 10,
+        "min_alpha_to_fix" => 70,
+        "max_findings_per_feature" => 3,
+        "max_features_per_cycle" => 12,
+        "max_fixes_per_feature_per_cycle" => 1,
+        "max_fix_attempts_per_cycle" => 6,
         "max_prs_per_cycle" => 3,
         # Open ready (non-draft) PRs by default so the babysitter — which
         # skips draft PRs — picks them up. Set `draft_prs: true` per project
@@ -2547,7 +2551,11 @@ module Hive
     PATROL_CONFIDENCE_LEVELS = %w[low medium high].freeze
     PATROL_NUMERIC_BOUNDS = [
       [ "poll_interval_sec", 60 ],
+      [ "min_alpha_to_fix", 0 ],
       [ "max_findings_per_feature", 1 ],
+      [ "max_features_per_cycle", 1 ],
+      [ "max_fixes_per_feature_per_cycle", 1 ],
+      [ "max_fix_attempts_per_cycle", 1 ],
       [ "max_prs_per_cycle", 1 ]
     ].freeze
 
@@ -2606,6 +2614,12 @@ module Hive
                 "patrol.#{key} in #{describe_source(source_path)} must be an integer " \
                 ">= #{min}; got #{value.inspect} (#{value.class})"
         end
+      end
+
+      if patrol["min_alpha_to_fix"].to_i > 100
+        raise ConfigError,
+              "patrol.min_alpha_to_fix in #{describe_source(source_path)} must be <= 100; " \
+              "got #{patrol['min_alpha_to_fix'].inspect}"
       end
 
       validate_agent_name!(patrol["agent"], "patrol.agent", source_path)

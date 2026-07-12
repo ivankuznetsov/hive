@@ -678,10 +678,13 @@ module Hive
 
     desc "patrol PROJECT", "Run one repository patrol scan cycle for a registered project"
     long_desc <<~DESC
-      Maps the registered project's repository into durable feature slices
-      under <project>/.hive-state/patrol/, asks the configured patrol
-      agent to review each slice, attempts isolated fixes above the
-      confidence gate, validates configured commands, and opens ready
+      Maps the registered project's repository into language-neutral
+      component slices under <project>/.hive-state/patrol/, asks the
+      configured patrol agent for bounded, source-verified production defects
+      across a persisted rotating feature batch,
+      globally ranks semantic root causes above the alpha gate, requires
+      an independently observed fail-before/pass-after proof on a fresh base,
+      validates configured commands, and opens ready
       (non-draft) PRs for validated fixes (set patrol.draft_prs: true for
       draft PRs). By default, each opened patrol PR is also handed to the
       standard 6-review flow as a visible "Patrol: ..." task; set
@@ -689,7 +692,7 @@ module Hive
 
       Use --dry-run to map and review without creating fix worktrees,
       pushing branches, or opening PRs. With --json, emits
-      hive-patrol.v1.
+      hive-patrol.v2.
     DESC
     option :dry_run, type: :boolean, default: false,
                      desc: "map and review, but do not fix, push, or open PRs"

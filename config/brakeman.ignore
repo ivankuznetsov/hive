@@ -9,8 +9,8 @@
       "note": "False positive. params[:project] never reaches the filesystem raw: find_project! resolves it against the REGISTERED projects allowlist and returns the registry's own hive_state_path; params[:slug] is route-constrained and additionally File.basename()d. The taint laundering through the registry lookup is invisible to static analysis."
     },
     {
-      "fingerprint": "3a5269f601bcaa4cba48697518aa32a79c4f7ae236c97f07e1af4998ecc61205",
-      "note": "False positive. Open3.capture3 argv form in Patrol::Fixer#commit_changes. The finding title becomes the value for git commit's `-m` argument as a discrete argv element; no shell is invoked."
+      "fingerprint": "39935726f57dbea8879202ad20f3a2a5761516234aa62e2627f2be45e4af8762",
+      "note": "False positive. Open3.capture3 argv form in Patrol::Fixer#prepare_branch_for_retry!: the generated branch is required to start with hive-patrol/ and is interpolated into one refs/heads/<branch> argument. No shell is invoked."
     },
     {
       "fingerprint": "3d163b314ee9716cb24303b7176fe947c1fdd774cce70af90c3dfdc8f951394c",
@@ -37,8 +37,8 @@
       "note": "False positive. Open3.capture3 array form: branch_name is interpolated only into a refs/heads/<name> refspec literal passed as a single argv element to git via execve(2); no shell ever sees it."
     },
     {
-      "fingerprint": "872fe3ac01d8099ac5fc97f31b105f0c7023eb663f5ed4a462d80988ee6e1692",
-      "note": "False positive. Open3.capture3 argv form in Patrol::Fixer#committed_since_base?. default_branch is interpolated into a single git revspec argv element (`branch...HEAD`); no shell is invoked."
+      "fingerprint": "c4afb8380f692138e5e5e0da60fbb7394589208904fa17063567d2eaa9967e79",
+      "note": "False positive. Open3.capture3 argv form in Patrol::Fixer#committed_since_base?. base_sha is an exact git-verified object id for production calls and becomes one <sha>...HEAD argv element; no shell is invoked."
     },
     {
       "fingerprint": "907f70565e5132a49765208c31e28bbf8433b7819fb85fbc46413a8cb7649f81",

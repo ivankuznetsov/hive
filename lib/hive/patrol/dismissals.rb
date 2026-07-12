@@ -31,7 +31,9 @@ module Hive
               # Carry the finding content forward so the similarity gate can
               # recognise a re-worded re-file of a dismissed issue.
               "category" => entry["category"],
-              "title_tokens" => entry["title_tokens"]
+              "feature_id" => entry["feature_id"],
+              "title_tokens" => entry["title_tokens"],
+              "root_cause_tokens" => entry["root_cause_tokens"]
             }.compact
             entry["state"] = "dismissed"
           when "MERGED"

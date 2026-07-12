@@ -149,7 +149,7 @@ module Hive
       # next reader doesn't "fix" it.
       args = [
         "gh", "pr", "list", "--head", branch, "--state", "all", "--json",
-        "url,number,state,isDraft,headRefName,headRefOid,body,baseRefName,headRepository"
+        "url,number,state,isDraft,headRefName,headRefOid,body,baseRefName,baseRefOid,headRepository"
       ]
       if repository || host
         unless repository && host

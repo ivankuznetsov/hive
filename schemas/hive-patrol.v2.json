@@ -1,0 +1,173 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-patrol.v2.json",
+  "title": "hive patrol output (v2)",
+  "description": "Stable contract emitted by `hive patrol PROJECT --json`.",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
+  ],
+  "$defs": {
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "project",
+        "project_root",
+        "dry_run",
+        "features_mapped",
+        "features_review_attempted",
+        "features_reviewed",
+        "review_complete",
+        "review_errors",
+        "findings",
+        "fix_candidates",
+        "fixes_attempted",
+        "fixes_validated",
+        "prs_opened",
+        "pr_urls",
+        "review_handoff_errors",
+        "fix_results",
+        "skipped_findings",
+        "last_scanned_sha"
+      ],
+      "properties": {
+        "schema": { "const": "hive-patrol" },
+        "schema_version": { "const": 2 },
+        "ok": { "const": true },
+        "project": { "type": "string" },
+        "project_root": { "type": "string" },
+        "dry_run": { "type": "boolean" },
+        "features_mapped": { "type": "integer", "minimum": 0 },
+        "features_review_attempted": { "type": "integer", "minimum": 0 },
+        "features_reviewed": { "type": "integer", "minimum": 0 },
+        "review_complete": { "type": "boolean" },
+        "review_errors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["feature_id", "error", "message"],
+            "properties": {
+              "feature_id": { "type": "string" },
+              "error": {
+                "enum": ["agent_failed", "malformed_json", "schema_invalid", "review_error"]
+              },
+              "message": { "type": "string" }
+            }
+          }
+        },
+        "findings": { "type": "integer", "minimum": 0 },
+        "fix_candidates": { "type": "integer", "minimum": 0 },
+        "fixes_attempted": { "type": "integer", "minimum": 0 },
+        "fixes_validated": { "type": "integer", "minimum": 0 },
+        "prs_opened": { "type": "integer", "minimum": 0 },
+        "pr_urls": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "review_handoff_errors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["pr_url", "reason"],
+            "properties": {
+              "pr_url": { "type": "string" },
+              "reason": { "const": "review_handoff_failed" }
+            }
+          }
+        },
+        "fix_results": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "finding_id", "patch_id", "passed", "reason", "detail", "patch_artifact",
+              "publication_status", "publication_reason", "publication_detail", "pr_url"
+            ],
+            "properties": {
+              "finding_id": { "type": "string" },
+              "patch_id": { "type": "string" },
+              "passed": { "type": "boolean" },
+              "reason": {
+                "enum": [
+                  "validated", "validation_failed", "fix_agent_failed", "fix_agent_rejected",
+                  "missing_fix_proof", "no_validation_commands", "invalid_validation_key",
+                  "missing_regression", "regression_not_reproduced", "targeted_validation_failed",
+                  "fix_guardrail", "validation_mutated_worktree", "fix_error"
+                ]
+              },
+              "detail": { "type": ["string", "null"] },
+              "patch_artifact": { "type": "string" },
+              "publication_status": {
+                "enum": ["opened", "opened_review_handoff_failed", "skipped", "blocked", "error", null]
+              },
+              "publication_reason": {
+                "enum": [
+                  "existing_pr", "gh_error", "review_handoff_failed", "secret_detected",
+                  "validation_failed", null
+                ]
+              },
+              "publication_detail": { "type": ["string", "null"] },
+              "pr_url": { "type": ["string", "null"] }
+            }
+          }
+        },
+        "skipped_findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["finding_id", "fingerprint", "reason"],
+            "properties": {
+              "finding_id": { "type": "string" },
+              "fingerprint": { "type": "string" },
+              "reason": {
+                "enum": [
+                  "dismissed",
+                  "existing_pr",
+                  "similar_to_existing",
+                  "low_confidence",
+                  "low_severity",
+                  "non_production",
+                  "low_alpha",
+                  "active_feature",
+                  "duplicate_in_run",
+                  "feature_limit"
+                ]
+              }
+            }
+          }
+        },
+        "last_scanned_sha": { "type": "string" }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "error_class",
+        "error_kind",
+        "exit_code",
+        "message"
+      ],
+      "properties": {
+        "schema": { "const": "hive-patrol" },
+        "schema_version": { "const": 2 },
+        "ok": { "const": false },
+        "error_class": { "type": "string" },
+        "error_kind": { "enum": ["config", "error"] },
+        "exit_code": { "type": "integer" },
+        "message": { "type": "string" }
+      }
+    }
+  }
+}

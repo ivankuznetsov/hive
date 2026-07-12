@@ -276,6 +276,8 @@ module Hive
 
       def write_task_md(task_folder, slug, finding, patch, pr_url, now, context:)
         context_section = context_link(context)
+        validation = patch.respond_to?(:validation) && patch.validation.is_a?(Hash) ? patch.validation : {}
+        proof_section = fix_proof_text(validation["fix_proof"])
         write_frontmatter_md(
           File.join(task_folder, "task.md"),
           {
@@ -302,7 +304,9 @@ module Hive
           ## Patch
 
           Branch: `#{patch.branch}`
-          Fingerprint: `#{finding.fingerprint}`#{context_section}
+          Fingerprint: `#{finding.fingerprint}`
+
+          #{proof_section}#{context_section}
         MD
           :task_md
         )
@@ -428,6 +432,19 @@ module Hive
         parts << "# #{display_name(finding)}"
         parts << "## Finding\n\n#{finding.description}" unless finding.description.to_s.strip.empty?
         parts << "## Recommendation\n\n#{finding.recommendation}" unless finding.recommendation.to_s.strip.empty?
+        alpha = []
+        alpha << "Score: `#{finding.alpha_score}`" unless finding.alpha_score.nil?
+        alpha << "scope: `#{finding.scope}`" unless finding.scope.to_s.strip.empty?
+        parts << "## Alpha\n\n#{alpha.join('; ')}" unless alpha.empty?
+        contract = []
+        contract << "**Contract:** #{finding.contract}" unless finding.contract.to_s.strip.empty?
+        contract << "**Impact:** #{finding.impact}" unless finding.impact.to_s.strip.empty?
+        parts << "## Contract and impact\n\n#{contract.join("\n\n")}" unless contract.empty?
+        parts << "## Root cause\n\n#{finding.root_cause}" unless finding.root_cause.to_s.strip.empty?
+        reproduction = []
+        reproduction << "**Reproduction:** #{finding.reproduction}" unless finding.reproduction.to_s.strip.empty?
+        reproduction << "**Validation:** #{finding.validation}" unless finding.validation.to_s.strip.empty?
+        parts << "## Reproduction and validation\n\n#{reproduction.join("\n\n")}" unless reproduction.empty?
         evidence = Array(finding.evidence)
         parts << "## Evidence\n\n#{evidence_text(evidence)}" unless evidence.empty?
         unless context.nil?
@@ -450,6 +467,32 @@ module Hive
           line = location.empty? ? "- evidence" : "- `#{location}`"
           details.empty? ? line : "#{line}: #{details.join(' — ')}"
         end.join("\n")
+      end
+
+      def fix_proof_text(proof)
+        return "" unless proof.is_a?(Hash)
+
+        audited = Array(proof["audited_paths"]).map { |path| "- `#{path}`" }.join("\n")
+        <<~MD.strip
+          ## Observed fix proof
+
+          **Agent-reported root cause:** #{proof["root_cause"]}
+
+          **Audited paths:**
+          #{audited}
+
+          **Targeted command:** `#{proof["configured_command"]}`
+
+          **Before:** #{proof_result_summary(proof["before"])}
+
+          **After:** #{proof_result_summary(proof["after"])}
+        MD
+      end
+
+      def proof_result_summary(value)
+        return value.to_s unless value.is_a?(Hash)
+
+        "exit=#{value['exit_code']} timed_out=#{value['timed_out'] == true}"
       end
 
       def pr_number(pr_url)

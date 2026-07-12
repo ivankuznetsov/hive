@@ -130,6 +130,17 @@ module Hive
           Process.daemon(true, true)
         end
 
+        # A manually-started daemon must keep using the exact Hive CLI that
+        # launched it. Without an explicit HIVE_BIN, ChildSupervisor,
+        # StatusConsumer, and the display-name backfiller fall back to the
+        # first `hive` on PATH. That can silently mix a checkout daemon with
+        # an older packaged gem for every dispatched child. Service units
+        # already export HIVE_BIN; pin the equivalent value for foreground
+        # and --detach starts while preserving an operator override.
+        runtime_hive_bin_was_set = ENV.key?("HIVE_BIN")
+        original_runtime_hive_bin = ENV["HIVE_BIN"]
+        pin_runtime_hive_bin!
+
         # PR-40 follow-up review C5: refuse to start if we can't capture
         # our own start_time. Without it the PID-reuse defense degrades
         # to "trust everything" silently — and `hive daemon stop` could
@@ -248,6 +259,14 @@ module Hive
         return unless reexec_requested
 
         reexec_with_fresh_code!
+      ensure
+        if defined?(runtime_hive_bin_was_set)
+          if runtime_hive_bin_was_set
+            ENV["HIVE_BIN"] = original_runtime_hive_bin
+          else
+            ENV.delete("HIVE_BIN")
+          end
+        end
       end
 
       # Source-file drift detected (e.g. `git pull` bumped a schema
@@ -628,6 +647,14 @@ module Hive
 
       def current_binary_path
         Hive::InvokedBinary.path
+      end
+
+      def pin_runtime_hive_bin!
+        return ENV["HIVE_BIN"] unless ENV["HIVE_BIN"].to_s.empty?
+
+        invoked = current_binary_path
+        ENV["HIVE_BIN"] = invoked if invoked
+        invoked
       end
 
       def safe_install_platform(installer)

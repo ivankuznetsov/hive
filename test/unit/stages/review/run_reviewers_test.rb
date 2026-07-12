@@ -1036,7 +1036,8 @@ class RunReviewersTest < Minitest::Test
     def run!(deadline: nil)
       Hive::Reviewers::Result.new(
         name: name, output_path: output_path, status: :error,
-        error_message: "limits reached for codex: You've hit your usage limit. Visit .../usage to purchase more credits."
+        error_message: "limits reached for codex: You've hit your usage limit.",
+        limit_text: "You've hit your usage limit. Try again at Jul 18th, 2026 7:50 AM."
       )
     end
   end
@@ -1061,11 +1062,16 @@ class RunReviewersTest < Minitest::Test
         }
       }
       adapters = cfg["review"]["reviewers"].map { |spec| LimitErroringReviewer.new(spec, make_ctx(dir)) }
+      limit_texts = []
 
       with_stubbed_dispatch(adapters) do
-        result = Hive::Stages::Review.run_reviewers(cfg, make_ctx(dir), Task.new(dir, File.join(dir, "task.md")))
+        result = Hive::Stages::Review.run_reviewers(
+          cfg, make_ctx(dir), Task.new(dir, File.join(dir, "task.md")), limit_texts: limit_texts
+        )
         assert_equal :all_failed_limit, result,
                      "all reviewers failing with a usage-limit error must surface :all_failed_limit"
+        assert_equal [ "You've hit your usage limit. Try again at Jul 18th, 2026 7:50 AM." ] * 2,
+                     limit_texts
       end
     end
   end

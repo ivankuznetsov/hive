@@ -2011,24 +2011,25 @@ class RunReviewTest < Minitest::Test
           attempts: 1,
           last_output: "ci failed",
           error_message: "limits reached for claude: Claude Code v2.1.170",
-          limit_text: "You've hit your session limit"
+          limit_text: "You've hit your usage limit. Try again at Jul 18th, 2026 7:50 AM."
         )
 
-        before = Time.now.utc.floor
-        with_replaced_singleton_method(Hive::Stages::Review::CiFix, :run!, ->(**_kwargs) { result }) do
-          _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
-          assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        now = Time.utc(2026, 7, 12, 20, 0, 0)
+        with_env("TZ" => "Europe/London") do
+          with_replaced_singleton_method(Time, :now, -> { now }) do
+            with_replaced_singleton_method(Hive::Stages::Review::CiFix, :run!, ->(**_kwargs) { result }) do
+              _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+              assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+            end
+          end
         end
-        after = Time.now.utc
 
         marker = Hive::Markers.current(File.join(folder, "task.md"))
         assert_equal :review_error, marker.name
         assert_equal "ci", marker.attrs["phase"]
         assert_equal "limits_reached", marker.attrs["reason"]
         assert_equal "ci hit a usage/credit limit", marker.attrs["message"]
-        retry_after = Time.parse(marker.attrs.fetch("retry_after"))
-        assert retry_after >= before + Hive::AgentLimit::RETRY_COOLDOWN_SEC
-        assert retry_after <= after + Hive::AgentLimit::RETRY_COOLDOWN_SEC
+        assert_equal "2026-07-18T06:51:00Z", marker.attrs.fetch("retry_after")
       end
     end
   end
@@ -2120,15 +2121,21 @@ class RunReviewTest < Minitest::Test
       with_tmp_git_repo do |dir|
         folder = setup_review_task(dir)
 
-        # Floor: retry_after is a second-precision iso8601 stamp.
-        before = Time.now.utc.floor
-        with_replaced_singleton_method(Hive::Stages::Review, :run_reviewers, ->(_cfg, _ctx, _task, **_kwargs) {
+        reset = "You've hit your usage limit. Try again at Jul 18th, 2026 7:50 AM."
+        ambiguous = "You've hit your usage limit. Try again later."
+        now = Time.utc(2026, 7, 12, 20, 0, 0)
+        reviewer_stub = lambda do |_cfg, _ctx, _task, limit_texts:, **_kwargs|
+          limit_texts.concat([ ambiguous, reset ])
           :all_failed_limit
-        }) do
-          _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
-          assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
         end
-        after = Time.now.utc
+        with_env("TZ" => "Europe/London") do
+          with_replaced_singleton_method(Time, :now, -> { now }) do
+            with_replaced_singleton_method(Hive::Stages::Review, :run_reviewers, reviewer_stub) do
+              _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+              assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+            end
+          end
+        end
 
         marker = Hive::Markers.current(File.join(folder, "task.md"))
         assert_equal :review_error, marker.name
@@ -2136,12 +2143,7 @@ class RunReviewTest < Minitest::Test
         assert_equal "limits_reached", marker.attrs["reason"]
         assert_equal "1", marker.attrs["pass"]
 
-        retry_after = Time.parse(marker.attrs.fetch("retry_after"))
-        cooldown = Hive::AgentLimit::RETRY_COOLDOWN_SEC
-        assert retry_after >= before + cooldown,
-               "retry_after must be at least a full cooldown ahead of the write"
-        assert retry_after <= after + cooldown,
-               "retry_after must not exceed the write time plus the cooldown"
+        assert_equal "2026-07-18T06:51:00Z", marker.attrs.fetch("retry_after")
       end
     end
   end

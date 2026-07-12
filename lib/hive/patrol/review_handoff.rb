@@ -4,6 +4,7 @@ require "json"
 require "securerandom"
 require "time"
 require "yaml"
+require "hive/atomic_file"
 require "hive/pr"
 require "hive/task_counter"
 require "hive/task_meta"
@@ -191,7 +192,7 @@ module Hive
         final_folder = File.join(review_root, slug)
         staging = File.join(review_root, ".handoff-#{lock_id}-staging-#{Process.pid}-#{SecureRandom.hex(6)}")
         FileUtils.mkdir_p(File.join(staging, "reviews"))
-        fsync_directory(File.join(staging, "reviews"))
+        Hive::AtomicFile.fsync_directory(File.join(staging, "reviews"))
         notify_write(:reviews, File.join(staging, "reviews"))
         write_meta(staging, slug, finding)
         write_idea_md(staging, slug, finding, now, context: expected["context"])
@@ -199,11 +200,11 @@ module Hive
         write_worktree_pointer(staging, patch, now)
         write_pr_md(staging, finding, pr_url, linked_task_path: final_folder)
         write_context(staging, expected.fetch("context")) unless expected["context"].nil?
-        fsync_directory(staging)
+        Hive::AtomicFile.fsync_directory(staging)
         raise Conflict, "patrol review handoff conflict: destination already exists at #{final_folder}" if File.exist?(final_folder)
 
         File.rename(staging, final_folder)
-        fsync_directory(review_root)
+        Hive::AtomicFile.fsync_directory(review_root)
         final_folder
       end
 
@@ -222,9 +223,9 @@ module Hive
         )
         File.rename(path, destination)
         durable_write(File.join(destination, "quarantine.yml"), { "reason" => reason.to_s }.to_yaml, :quarantine)
-        fsync_directory(destination)
-        fsync_directory(quarantine_root)
-        fsync_directory(File.dirname(path))
+        Hive::AtomicFile.fsync_directory(destination)
+        Hive::AtomicFile.fsync_directory(quarantine_root)
+        Hive::AtomicFile.fsync_directory(File.dirname(path))
         destination
       end
 
@@ -353,12 +354,6 @@ module Hive
 
       def fsync_file(path)
         File.open(path, File::RDONLY) { |file| file.fsync }
-      end
-
-      def fsync_directory(path)
-        File.open(path, File::RDONLY) { |directory| directory.fsync }
-      rescue NotImplementedError, Errno::EINVAL, Errno::ENOTSUP, Errno::EBADF
-        nil
       end
 
       def notify_write(artifact, path)

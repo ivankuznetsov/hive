@@ -85,6 +85,32 @@ class RefactorPatrolCommandTest < Minitest::Test
     end
   end
 
+  class MutatingCompleteReviewer
+    attr_reader :review_errors, :seen_feature_ids, :feature_results
+
+    def initialize(path, thesis)
+      @path = path
+      @thesis = thesis
+      @review_errors = []
+      @seen_feature_ids = []
+      @feature_results = []
+    end
+
+    def call(features, leverage_by_feature:)
+      @seen_feature_ids = features.map(&:id)
+      @feature_results = features.map do |feature|
+        {
+          "feature_id" => feature.id.to_s,
+          "complete" => true,
+          "thesis_ids" => [ @thesis.id ],
+          "errors" => []
+        }
+      end
+      File.write(@path, "reviewer mutated tracked source\n")
+      [ @thesis ]
+    end
+  end
+
   class FakeManifestResolver
     attr_reader :seen
 
@@ -384,6 +410,40 @@ class RefactorPatrolCommandTest < Minitest::Test
       assert_equal "discovery_claim", claim.fetch("kind")
       assert_match(/\Amanual-/, claim.fetch("owner"))
       assert_equal "complete", claim.fetch("state")
+    end
+  end
+
+  def test_pr_discovery_releases_claim_without_results_when_reviewer_mutates_checkout
+    with_refactor_patrol_project do |repo|
+      head = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      manifest = pr_manifest(merge_sha: head)
+      item = thesis("checkout", feature_id: "checkout", fingerprint: "fp-checkout")
+      reviewer = MutatingCompleteReviewer.new(File.join(repo, "README.md"), item)
+
+      out, err, status = with_captured_exit do
+        command_for(
+          pr: "7", manifest_resolver: FakeManifestResolver.new(manifest),
+          features: [ feature("checkout", files: [ "lib/checkout.rb" ]) ],
+          reviewer: reviewer,
+          leverage_scores: leverage_scores("checkout" => 0.9)
+        ).call
+      end
+
+      assert_equal Hive::ExitCodes::SOFTWARE, status, "#{out}\n#{err}"
+      payload = JSON.parse(out)
+      assert v2_refactor_schemer.valid?(payload),
+             v2_refactor_schemer.validate(payload).map { |error| error["error"] }.inspect
+      assert_includes payload.fetch("message"), "registered checkout is dirty"
+
+      aggregate = Hive::RefactorPatrol::JobStore.new(repo).read_job(manifest.fetch("job_id"))
+      assert_equal "blocked", aggregate.fetch("state")
+      assert_empty aggregate.fetch("feature_results")
+      Hive::RefactorPatrol::JobStore::DISPOSITIONS.each do |disposition|
+        assert_empty aggregate.dig("dispositions", disposition)
+      end
+      claim = aggregate.fetch("attempts").last
+      assert_equal "released", claim.fetch("state")
+      assert_equal "command_error", claim.fetch("outcome")
     end
   end
 

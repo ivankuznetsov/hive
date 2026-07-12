@@ -466,12 +466,6 @@ class HivePatrolReviewHandoffTest < Minitest::Test
     end
   end
 
-  def test_directory_fsync_tolerates_filesystems_without_directory_sync
-    skip "requires procfs" unless File.directory?("/proc")
-
-    assert_nil handoff(Dir.pwd).send(:fsync_directory, "/proc")
-  end
-
   private
 
   def review_root(dir)

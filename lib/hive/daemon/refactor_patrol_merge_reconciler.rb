@@ -317,13 +317,7 @@ module Hive
       def write_state(project_root, state)
         path = state_path(project_root)
         Hive::AtomicFile.write(path, "#{JSON.pretty_generate(state)}\n", mode: 0o600)
-        fsync_directory(File.dirname(path))
-      end
-
-      def fsync_directory(path)
-        File.open(path, File::RDONLY) { |directory| directory.fsync }
-      rescue Errno::EINVAL, Errno::ENOTSUP, Errno::EBADF
-        nil
+        Hive::AtomicFile.fsync_directory(File.dirname(path))
       end
 
       def build_state(registration:, host:, repository:, default_branch:, high_water:,
@@ -470,7 +464,7 @@ module Hive
           "observed" => observed
         }
         Hive::AtomicFile.write(path, "#{JSON.pretty_generate(evidence)}\n", mode: 0o600)
-        fsync_directory(directory)
+        Hive::AtomicFile.fsync_directory(directory)
         path
       end
 

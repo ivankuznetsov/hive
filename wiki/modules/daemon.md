@@ -3,7 +3,7 @@ title: Hive::Daemon
 type: module
 source: lib/hive/daemon/
 created: 2026-05-06
-updated: 2026-07-11
+updated: 2026-07-12
 tags: [daemon, module, automation, dispatcher]
 ---
 
@@ -111,8 +111,10 @@ generation. Workers do not claim without a verifiable start identity; recovery
 can resolve a definitely dead PID but fails closed for a live process whose
 identity cannot be proven. A replacement generation is allowed only after the
 expired owner is proven gone or its process group is terminated. The scheduler
-resolves repository ownership fresh during candidate selection and again
-during reservation. Full authority requires the target's exact registered
+takes one immutable ownership snapshot per candidate-selection pass, sharing
+registration/config/identity/continuation reads (and failures) across every due
+job in that tick. Reservation deliberately ignores that snapshot and resolves
+the live inputs again. Full authority requires the target's exact registered
 name/path. Live identities from architecture-enabled registrations count even
 when their daemon is disabled, while every registered project ledger is
 scanned for nonterminal remote intents, PR/issue URLs, or review-handoff paths;
@@ -127,6 +129,12 @@ ownership and the current action claim before a PR handoff. Large v2
 documents are written atomically under
 `.hive-state/refactor_patrol/v2/results/`; the supervisor consumes and removes
 the exact path carried in the dispatch token when the child is reaped.
+
+Architecture-patrol state/checkpoint/result writers use the shared
+`Hive::AtomicFile.fsync_directory` policy after rename/unlink boundaries. The
+helper performs a real directory fsync where Ruby/the filesystem supports it
+and consistently treats `NotImplementedError`, `EINVAL`, `ENOTSUP`, and `EBADF`
+as best-effort unsupported-platform cases.
 
 Project config failures are visible lifecycle state rather than an omitted
 candidate. During candidate enumeration the scheduler records

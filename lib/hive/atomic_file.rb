@@ -32,5 +32,14 @@ module Hive
     ensure
       FileUtils.rm_f(tmp) if tmp && File.exist?(tmp)
     end
+
+    # Persist directory-entry changes such as rename and unlink. Directory
+    # fsync is unavailable on some supported filesystems and Ruby platforms,
+    # so durability callers share one best-effort unsupported-platform policy.
+    def fsync_directory(path)
+      File.open(path, File::RDONLY) { |directory| directory.fsync }
+    rescue NotImplementedError, Errno::EINVAL, Errno::ENOTSUP, Errno::EBADF
+      nil
+    end
   end
 end

@@ -121,6 +121,26 @@ class HivePatrolArchitectureMapperTest < Minitest::Test
     end
   end
 
+  def test_tracked_source_symlinks_cannot_escape_the_project_or_read_devices
+    with_tmp_git_repo do |repo|
+      Dir.mktmpdir("architecture-mapper-outside") do |outside|
+        outside_source = File.join(outside, "outside.rb")
+        File.write(outside_source, "class Outside; end\n")
+        FileUtils.mkdir_p(File.join(repo, "lib"))
+        File.symlink(outside_source, File.join(repo, "lib", "external.rb"))
+        File.symlink("/dev/zero", File.join(repo, "lib", "device.rb")) if File.exist?("/dev/zero")
+        write(repo, "lib/local.rb", "class Local; end\n")
+        commit_all(repo)
+
+        owned = Timeout.timeout(1) { mapper(repo).call(tracked_files(repo)).flat_map(&:owned_files) }
+
+        assert_includes owned, "lib/local.rb"
+        refute_includes owned, "lib/external.rb"
+        refute_includes owned, "lib/device.rb" if File.exist?("/dev/zero")
+      end
+    end
+  end
+
   def test_python_relative_import_resolves_across_source_components
     with_tmp_git_repo do |repo|
       write(repo, "src/client/main.py", "from ..common.helpers import value\n")

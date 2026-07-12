@@ -204,6 +204,14 @@ class HiveCliTest < Minitest::Test
     end
   end
 
+  def test_init_help_advertises_the_current_schema_registry_version
+    out, _err = capture_io { Hive::CLI.start([ "help", "init" ]) }
+    current = Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-init")
+
+    assert_includes out, "hive-init.v#{current}",
+                    "init help must derive its JSON contract version from SCHEMA_VERSIONS"
+  end
+
   def test_digest_help_exposes_merged_pr_source
     out, _err = capture_io { Hive::CLI.start([ "help", "digest" ]) }
 

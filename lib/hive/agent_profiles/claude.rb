@@ -29,7 +29,8 @@ module Hive
       min_version: Hive::MIN_CLAUDE_VERSION,
       status_detection_mode: :state_file_marker,
       usage_extractor: Hive::AgentProfiles::UsageExtractors::CLAUDE,
-      skill_verifier: Hive::SkillCheck::Claude.method(:verify)
+      skill_verifier: Hive::SkillCheck::Claude.method(:verify),
+      cli_capabilities: { safe_mode: [ "--safe-mode" ] }
     )
 
     register(:claude, CLAUDE)

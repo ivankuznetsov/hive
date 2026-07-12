@@ -521,8 +521,11 @@ class RefactorPatrolCanonicalActionCatalogTest < Minitest::Test
       invalid_url_root = File.join(root, "invalid-url")
       outside_handoff_root = File.join(root, "outside-handoff")
       null_handoff_root = File.join(root, "null-handoff")
+      wrong_stage_root = File.join(root, "wrong-stage")
+      nested_task_root = File.join(root, "nested-task")
       [ closed_root, no_handoff_root, missing_url_root, invalid_url_root,
-        outside_handoff_root, null_handoff_root ].each do |path|
+        outside_handoff_root, null_handoff_root, wrong_stage_root,
+        nested_task_root ].each do |path|
         FileUtils.mkdir_p(path)
       end
       closed = terminal_store(closed_root, outcome: "closed_without_merge")
@@ -539,8 +542,21 @@ class RefactorPatrolCanonicalActionCatalogTest < Minitest::Test
       terminal_store(invalid_url_root, pr_url: "%")
       terminal_store(outside_handoff_root, review_task_path: "/tmp/review/task")
       terminal_store(null_handoff_root, review_task_path: "\0")
+      terminal_store(
+        wrong_stage_root,
+        review_task_path: File.join(
+          wrong_stage_root, ".hive-state", "stages", "5-open-pr", "review-task"
+        )
+      )
+      terminal_store(
+        nested_task_root,
+        review_task_path: File.join(
+          nested_task_root, ".hive-state", "stages", "6-review", "review-task", "nested"
+        )
+      )
       [ no_handoff_root, missing_url_root, invalid_url_root,
-        outside_handoff_root, null_handoff_root ].each do |project|
+        outside_handoff_root, null_handoff_root, wrong_stage_root,
+        nested_task_root ].each do |project|
         catalog = catalog_for(
           File.join(root, "#{File.basename(project)}-state"),
           [ entry(File.basename(project), project) ]
@@ -548,6 +564,31 @@ class RefactorPatrolCanonicalActionCatalogTest < Minitest::Test
         assert_raises(Hive::RefactorPatrol::CanonicalActionCatalog::ProofConflict) do
           catalog.rebuild!
         end
+      end
+    end
+  end
+
+  def test_catalog_rebuild_recovers_review_handoff_after_task_stage_advancement
+    with_tmp_dir do |root|
+      %w[6-review 7-artifacts 8-finalize 9-done].each do |stage|
+        project = File.join(root, "project-#{stage}")
+        state_home = File.join(root, "state-#{stage}")
+        task_path = File.join(
+          project, ".hive-state", "stages", stage, "patrol-refactor-fingerprint"
+        )
+        FileUtils.mkdir_p(task_path)
+        store = terminal_store(project, review_task_path: task_path)
+        action_id = store.read_job("job-old").dig("actions", 0, "canonical_action_id")
+        catalog = catalog_for(state_home, [ entry(stage, project) ])
+
+        first = catalog.rebuild!
+        FileUtils.rm_f(catalog.path)
+        rebuilt = catalog.rebuild!
+
+        assert_equal task_path,
+                     first.dig("actions", action_id, "proof", "review_task_path"), stage
+        assert_equal task_path,
+                     rebuilt.dig("actions", action_id, "proof", "review_task_path"), stage
       end
     end
   end
@@ -616,12 +657,6 @@ class RefactorPatrolCanonicalActionCatalogTest < Minitest::Test
                      repaired.fetch("schema")
       end
     end
-  end
-
-  def test_directory_fsync_tolerates_unsupported_filesystems
-    catalog = catalog_for("/tmp/catalog-state", [])
-
-    assert_nil catalog.send(:fsync_directory, "/dev/null")
   end
 
   private

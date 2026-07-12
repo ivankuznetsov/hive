@@ -3,7 +3,7 @@ title: hive refactor-patrol
 type: command
 source: lib/hive/commands/refactor_patrol.rb, lib/hive/refactor_patrol/*
 created: 2026-07-02
-updated: 2026-07-11
+updated: 2026-07-12
 tags: [command, refactor-patrol, architecture, json, daemon]
 ---
 
@@ -69,8 +69,13 @@ manifest, and pin a clean attached default-branch `analysis_sha` that contains
 the merge. The daemon consumes only the write-once manifest published by merge
 intake; it never re-fetches mutable PR metadata during discovery.
 
-Discovery uses provider-specific read-only enforcement and snapshots the
-registered checkout before and after review. Every thesis appears exactly once
+Discovery requires Claude's read-only tool scope plus its verified
+`--safe-mode` capability, so project customizations cannot run before the
+read-only boundary is established; an older or overridden Claude binary that
+does not advertise the flag fails closed. Hive snapshots the registered
+checkout before and after review. A reviewer that dirties tracked source makes
+the command fail, releases its discovery claim as `command_error`, and records
+no feature results or dispositions. Every thesis appears exactly once
 as accepted, flagged, or suppressed. Complete zero-result runs use
 `no_mapped_slice`, `no_theses`, or `all_suppressed`; malformed or partial
 reviewer results remain retryable and do not checkpoint completion.
@@ -87,6 +92,11 @@ and ecosystem-specific import resolution builds a source-only dependency graph
 across slash-, dot-, backslash-, and namespace-style references. Tests, docs,
 assets, generated artifacts, fixture/test manifests, and mapper chunk boundaries
 do not inflate fan-in/coupling scores or consume reviewer slices.
+All mapper and leverage content reads go through one root-confined source
+reader: tracked symlinks may resolve only to regular files beneath the real
+project root, device/FIFO-like targets are skipped, and each UTF-8-scrubbed read
+is capped at 256 KiB. This keeps an unfamiliar or hostile repository from
+escaping the checkout or turning discovery into an unbounded read.
 
 Documentation mapping is a refactor-patrol-only capability. When appropriate,
 it maps bounded root-document, `docs/`, wiki, ADR, and decision slices. Compiled
@@ -127,8 +137,11 @@ PID/process-start heartbeats; workers without verifiable process identity do
 not claim work. `PatrolArbiter` gives
 ordinary and architecture scans the same per-project patrol-scan budget and
 alternates kinds across ticks; architecture occurrences are oldest-first.
-Every scheduler selection/reservation, manual PR replay, action resume, and
-external-effect or handoff fence takes a fresh ownership snapshot. Full
+Candidate selection takes one immutable, tick-scoped ownership snapshot so
+registration/config/identity/continuation reads are shared across all due jobs
+in that pass, including cached failures. Reservation never trusts that
+snapshot: it resolves ownership live again, as do manual PR replay, action
+resume, and every external-effect or handoff fence. Full
 authority requires the target's exact registered name and expanded path to
 still exist. Hive resolves live origin host plus `owner/repo` for every enabled
 registration and scans every registered project's action ledger, whether
@@ -207,6 +220,9 @@ lease tied to a proven prior patch generation. An arbitrary pre-existing remote
 branch is a conflict, never a force-push target. After `gh pr create`, an
 exact-host/repository `gh pr view` must prove the returned URL/number, OPEN
 non-draft state, head repository/branch/OID, and base branch before handoff.
+Same-branch reconciliation also rejects an OPEN PR unless `isDraft` is
+explicitly false; CLOSED/MERGED recovery remains available when draft metadata
+is absent because those states cannot be handed off as a live ready PR.
 Failure becomes reconciliation-only `remote_outcome_unknown`. Both new and
 reconciled PRs recheck continuation ownership and the live action claim
 immediately before enqueueing `6-review`. An OPEN or MERGED publication is
@@ -280,6 +296,11 @@ only a locator projection and may be deleted or rebuilt. Immutable archives
 preserve exact PR/issue/handoff proof across catalog corruption, project
 deregistration, or removal of the original project path; an unreadable or
 conflicting archive blocks action instead of reopening the remote effect.
+Mandatory review-handoff paths remain valid after their synthetic coding task
+advances from `6-review` through `7-artifacts`, `8-finalize`, or `9-done`, so a
+later catalog rebuild can recover terminal PR proof instead of mistaking stage
+movement for a missing handoff. Paths outside those exact stage roots, or nested
+below a task folder, still fail closed.
 
 Legacy no-PR JSON remains `hive-refactor-patrol.v1`. PR discovery and action
 resume emit `hive-refactor-patrol.v2`, including source identity,
@@ -287,6 +308,10 @@ resume emit `hive-refactor-patrol.v2`, including source identity,
 accepted/flagged/suppressed dispositions, review errors, attempts, and public
 action receipts. V2 thesis snapshots carry
 the complete normalized thesis rather than only identity fields.
+Pre-dispatch `--json` usage errors follow the same mode: legacy argv receives a
+schema-valid v1 error, while `--pr`, `--job-manifest`, or enabled `--actions`
+argv receives a schema-valid v2 error with the required empty job/source and
+`complete: false` projection.
 
 Daemon children write their v2 document atomically to the job-bound internal
 result file. Stdout remains operator logging, so a valid snapshot larger than

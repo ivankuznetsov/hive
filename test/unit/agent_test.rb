@@ -200,6 +200,17 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_declared_safe_mode_capability_is_not_added_to_unrelated_claude_runs
+    with_tmp_dir do |dir|
+      agent = Hive::Agent.new(
+        task: make_task(dir), prompt: "test", max_budget_usd: 1, timeout_sec: 5,
+        profile: Hive::AgentProfiles.lookup(:claude)
+      )
+
+      refute_includes agent.send(:build_cmd), "--safe-mode"
+    end
+  end
+
   def test_claude_headless_tool_scope_flags_ride_the_argv
     with_tmp_dir do |dir|
       agent = Hive::Agent.new(

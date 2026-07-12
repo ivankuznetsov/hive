@@ -155,13 +155,7 @@ module Hive
         path = File.join(@root, "#{record.fetch("family_id")}.json")
         validate_record!(record, path)
         Hive::AtomicFile.write(path, "#{JSON.pretty_generate(record)}\n", mode: 0o600)
-        fsync_directory(@root)
-      end
-
-      def fsync_directory(path)
-        File.open(path, File::RDONLY) { |directory| directory.fsync }
-      rescue Errno::EINVAL, Errno::ENOTSUP, Errno::EBADF
-        nil
+        Hive::AtomicFile.fsync_directory(@root)
       end
 
       def corrupt!(message, path)
@@ -451,7 +445,7 @@ module Hive
         Dir.glob(File.join(@root, "*.json")).each do |path|
           File.delete(path) unless expected_paths.key?(path)
         end
-        fsync_directory(@root)
+        Hive::AtomicFile.fsync_directory(@root)
         replacement
       end
 
@@ -464,7 +458,7 @@ module Hive
         FileUtils.mkdir_p(@root)
         path = @root
         loop do
-          fsync_directory(path)
+          Hive::AtomicFile.fsync_directory(path)
           break if path == @project_root
 
           parent = File.dirname(path)

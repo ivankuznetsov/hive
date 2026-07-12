@@ -159,6 +159,70 @@ class AgentProfileTest < Minitest::Test
     assert profile.workspace_write_supported?
   end
 
+  def test_cli_capability_must_be_declared
+    error = assert_raises(Hive::AgentError) do
+      make_profile.require_cli_capability!(:safe_mode)
+    end
+
+    assert_includes error.message, "does not declare CLI capability"
+  end
+
+  def test_cli_capabilities_require_a_hash_and_non_empty_flags
+    type_error = assert_raises(ArgumentError) { make_profile(cli_capabilities: [ "--safe-mode" ]) }
+    empty_error = assert_raises(ArgumentError) { make_profile(cli_capabilities: { safe_mode: [] }) }
+
+    assert_includes type_error.message, "must be a Hash"
+    assert_includes empty_error.message, "must declare at least one flag"
+  end
+
+  def test_cli_capability_help_failure_is_explicit
+    with_tmp_dir do |dir|
+      binary = capability_binary(dir, help: "", help_exit: 2)
+      profile = make_profile(
+        bin_default: binary, env_bin_override_key: nil,
+        cli_capabilities: { safe_mode: [ "--safe-mode" ] }
+      )
+
+      error = assert_raises(Hive::AgentError) { profile.require_cli_capability!(:safe_mode) }
+
+      assert_includes error.message, "capability check failed"
+    end
+  end
+
+  def test_cli_capability_help_timeout_is_explicit
+    profile = make_profile(cli_capabilities: { safe_mode: [ "--safe-mode" ] })
+    profile.check_version!
+
+    with_replaced_singleton_method(Timeout, :timeout, ->(_seconds, &_block) { raise Timeout::Error }) do
+      error = assert_raises(Hive::AgentError) { profile.require_cli_capability!(:safe_mode) }
+      assert_includes error.message, "capability check timed out"
+    end
+  end
+
+  def test_cli_capability_binary_disappearing_after_version_check_is_explicit
+    with_tmp_dir do |dir|
+      binary = capability_binary(dir, help: "--safe-mode")
+      profile = make_profile(
+        bin_default: binary, env_bin_override_key: nil,
+        cli_capabilities: { safe_mode: [ "--safe-mode" ] }
+      )
+      profile.check_version!
+      FileUtils.rm_f(binary)
+
+      error = assert_raises(Hive::AgentError) { profile.require_cli_capability!(:safe_mode) }
+
+      assert_includes error.message, "capability check could not run"
+    end
+  end
+
+  def test_with_overrides_preserves_cli_capabilities
+    profile = make_profile(cli_capabilities: { safe_mode: [ "--safe-mode" ] })
+
+    overridden = profile.with_overrides("min_version" => "9.9.9")
+
+    assert_equal({ safe_mode: [ "--safe-mode" ] }, overridden.cli_capabilities)
+  end
+
   # --- with_overrides ---------------------------------------------------
 
   def test_with_overrides_returns_self_for_nil_or_empty
@@ -223,5 +287,24 @@ class AgentProfileTest < Minitest::Test
     profile = make_profile(usage_extractor: ->(_event) { raise "bad usage payload" })
 
     assert_nil profile.extract_usage_event({ "type" => "result" })
+  end
+
+
+  def capability_binary(dir, help:, help_exit: 0)
+    path = File.join(dir, "capable-cli")
+    File.write(path, <<~SH)
+      #!/bin/sh
+      if [ "${1:-}" = "--version" ]; then
+        echo "2.1.179 (Claude Code)"
+        exit 0
+      fi
+      if [ "${1:-}" = "--safe-mode" ] && [ "${2:-}" = "--help" ]; then
+        printf '%s\\n' #{help.inspect}
+        exit #{help_exit}
+      fi
+      exit 0
+    SH
+    File.chmod(0o755, path)
+    path
   end
 end

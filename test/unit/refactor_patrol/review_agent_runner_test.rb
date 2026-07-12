@@ -1,4 +1,5 @@
 require "test_helper"
+require "rbconfig"
 require "hive/refactor_patrol/review_agent_runner"
 require "hive/refactor_patrol/state_store"
 
@@ -67,7 +68,13 @@ class RefactorPatrolReviewAgentRunnerTest < Minitest::Test
       runner = Hive::RefactorPatrol::ReviewAgentRunner.new(
         project_root: dir, cfg: cfg, state: state, read_only: true
       )
-      profile = Struct.new(:name).new(:claude)
+      profile = Struct.new(:name) do
+        def require_cli_capability!(name)
+          raise "unexpected capability #{name.inspect}" unless name == :safe_mode
+
+          [ "--safe-mode" ]
+        end
+      end.new(:claude)
       captured = nil
       output_path = File.join(dir, "out.json")
       fake_agent = Class.new do
@@ -90,9 +97,104 @@ class RefactorPatrolReviewAgentRunnerTest < Minitest::Test
       assert_equal "default", captured.fetch(:permission_mode)
       assert_equal Hive::PermissionScope::READ_ONLY_ALLOWED, captured.fetch(:allowed_tools)
       assert_equal Hive::PermissionScope::READ_ONLY_DISALLOWED, captured.fetch(:disallowed_tools)
+      assert_equal [ "--safe-mode" ], captured.fetch(:cli_flags)
       assert_equal :exit_code_only, captured.fetch(:status_mode)
       assert_nil captured.fetch(:expected_output)
       assert_equal({ "theses" => [] }, JSON.parse(File.read(output_path)))
+    end
+  end
+
+  def test_read_only_launch_uses_safe_mode_before_project_customizations_can_run
+    with_tmp_dir do |dir|
+      state = Hive::RefactorPatrol::StateStore.new(dir)
+      fake = File.join(dir, "fake-claude")
+      argv_path = File.join(dir, "argv.txt")
+      sentinel = File.join(dir, "project-hook-ran")
+      FileUtils.mkdir_p(File.join(dir, ".claude"))
+      File.write(
+        File.join(dir, ".claude", "settings.json"),
+        JSON.generate("hooks" => { "SessionStart" => [ { "command" => "touch #{sentinel}" } ] })
+      )
+      File.write(fake, <<~RUBY)
+        #!#{RbConfig.ruby}
+        require "json"
+        if ARGV == ["--version"]
+          puts "2.1.179 (Claude Code)"
+          exit 0
+        end
+        if ARGV == ["--safe-mode", "--help"]
+          puts "--safe-mode Disable all project and user customizations"
+          exit 0
+        end
+        File.write(ENV.fetch("HIVE_TEST_REVIEW_ARGV"), ARGV.join("\\n"))
+        if File.file?(File.join(Dir.pwd, ".claude", "settings.json")) && !ARGV.include?("--safe-mode")
+          File.write(ENV.fetch("HIVE_TEST_PROJECT_HOOK_SENTINEL"), "selected")
+        end
+        puts JSON.generate("type" => "result", "result" => '{"theses":[]}')
+      RUBY
+      File.chmod(0o755, fake)
+
+      previous_bin = ENV["HIVE_CLAUDE_BIN"]
+      ENV["HIVE_CLAUDE_BIN"] = fake
+      ENV["HIVE_TEST_REVIEW_ARGV"] = argv_path
+      ENV["HIVE_TEST_PROJECT_HOOK_SENTINEL"] = sentinel
+      Hive::AgentProfile.reset_version_cache!
+      begin
+        result = Hive::RefactorPatrol::ReviewAgentRunner.new(
+          project_root: dir, cfg: cfg, state: state, read_only: true
+        ).call(prompt: "inspect architecture", output_path: File.join(dir, "out.json"),
+               run_dir: state.run_dir("review"))
+      ensure
+        ENV["HIVE_CLAUDE_BIN"] = previous_bin
+        ENV.delete("HIVE_TEST_REVIEW_ARGV")
+        ENV.delete("HIVE_TEST_PROJECT_HOOK_SENTINEL")
+        Hive::AgentProfile.reset_version_cache!
+      end
+
+      argv = File.readlines(argv_path, chomp: true)
+      assert_equal :ok, result.fetch(:status)
+      assert_equal 1, argv.count("--safe-mode")
+      assert_equal %w[--permission-mode default], argv.each_cons(2).find { |flag, _| flag == "--permission-mode" }
+      assert_equal %w[--allowedTools Read,LS,Grep,Glob], argv.each_cons(2).find { |flag, _| flag == "--allowedTools" }
+      refute File.exist?(sentinel), "safe-mode launch must not select the project's hook settings"
+    end
+  end
+
+  def test_read_only_launch_fails_closed_when_installed_claude_lacks_safe_mode
+    with_tmp_dir do |dir|
+      fake = File.join(dir, "old-claude")
+      spawned = File.join(dir, "spawned")
+      File.write(fake, <<~RUBY)
+        #!#{RbConfig.ruby}
+        if ARGV == ["--version"]
+          puts "2.1.118 (Claude Code)"
+          exit 0
+        end
+        if ARGV.last == "--help"
+          puts "--print --permission-mode"
+          exit 0
+        end
+        File.write(#{spawned.inspect}, "spawned")
+      RUBY
+      File.chmod(0o755, fake)
+      previous_bin = ENV["HIVE_CLAUDE_BIN"]
+      ENV["HIVE_CLAUDE_BIN"] = fake
+      Hive::AgentProfile.reset_version_cache!
+      begin
+        runner = Hive::RefactorPatrol::ReviewAgentRunner.new(
+          project_root: dir, cfg: cfg, state: Hive::RefactorPatrol::StateStore.new(dir), read_only: true
+        )
+        error = assert_raises(Hive::AgentError) do
+          runner.call(prompt: "inspect", output_path: File.join(dir, "out.json"), run_dir: dir)
+        end
+        assert_includes error.message, "does not advertise required safe_mode capability"
+        assert_includes error.message, "--safe-mode"
+      ensure
+        ENV["HIVE_CLAUDE_BIN"] = previous_bin
+        Hive::AgentProfile.reset_version_cache!
+      end
+
+      refute File.exist?(spawned), "unsupported Claude must fail before the review agent starts"
     end
   end
 

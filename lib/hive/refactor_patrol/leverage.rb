@@ -1,6 +1,7 @@
 require "open3"
 require "set"
 require "hive/patrol/architecture_mapper"
+require "hive/patrol/source_reader"
 
 module Hive
   module RefactorPatrol
@@ -53,6 +54,7 @@ module Hive
         @project_root = File.expand_path(project_root)
         @cfg = cfg
         @command_runner = command_runner || method(:capture3)
+        @source_reader = Hive::Patrol::SourceReader.new(@project_root)
       end
 
       def score(feature, changed_since: nil, changed_boost: false)
@@ -242,12 +244,13 @@ module Hive
         out, _err, status = @command_runner.call("git", "-C", @project_root, "ls-files", "-z")
         files = status.success? ? out.split("\0").reject(&:empty?) : []
         files = Dir.glob("**/*", File::FNM_DOTMATCH, base: @project_root).select do |path|
-          File.file?(File.join(@project_root, path))
+          @source_reader.regular_file?(path)
         end if files.empty?
 
         files.map { |path| path.tr("\\", "/") }
              .reject { |path| path.split("/").include?(".git") }
              .reject { |path| excluded?(path) }
+             .select { |path| @source_reader.regular_file?(path) }
              .sort
       rescue StandardError
         []
@@ -290,12 +293,7 @@ module Hive
       end
 
       def read_uncached(path)
-        # Tracked files may be binary or non-UTF-8; scrub invalid byte
-        # sequences so downcase/match? in the signal passes cannot raise
-        # ArgumentError and abort the whole scan (R5/U4 graceful degradation).
-        File.read(File.join(@project_root, path), encoding: "UTF-8").scrub("")
-      rescue SystemCallError, ArgumentError
-        ""
+        @source_reader.read_utf8(path)
       end
 
       def capture3(*args)

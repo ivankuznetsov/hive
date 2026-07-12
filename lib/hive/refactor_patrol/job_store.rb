@@ -1988,14 +1988,8 @@ module Hive
       def atomic_write(path, data)
         dir = File.dirname(path)
         Hive::AtomicFile.write(path, "#{JSON.pretty_generate(data)}\n", mode: 0o600)
-        fsync_directory(dir)
+        Hive::AtomicFile.fsync_directory(dir)
         path
-      end
-
-      def fsync_directory(dir)
-        File.open(dir, File::RDONLY) { |handle| handle.fsync }
-      rescue Errno::EINVAL, Errno::ENOTSUP, Errno::EBADF
-        nil
       end
 
       def json_copy(value)

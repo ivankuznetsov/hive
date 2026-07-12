@@ -40,6 +40,65 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
+  def test_candidate_pass_snapshots_registration_identity_and_continuation_ledger_once
+    with_project do |_dir, entry, store|
+      enqueue(store, job_id: "first", number: 7, merged_at: T0)
+      enqueue(store, job_id: "second", number: 8, merged_at: T0 + 1)
+      identity_calls = 0
+      ledger_calls = 0
+      ownership = Hive::RefactorPatrol::RepositoryOwnership.new(
+        registry: -> { [ entry ] },
+        config_loader: ->(_path) { enabled_cfg },
+        identity_resolver: lambda do |_candidate, _cfg|
+          identity_calls += 1
+          repository_identity
+        end,
+        continuation_resolver: lambda do |_candidate, _cfg|
+          ledger_calls += 1
+          []
+        end
+      )
+      scheduler = Hive::Daemon::RefactorPatrolScheduler.new(
+        registry: -> { [ entry ] }, config_loader: ->(_path) { enabled_cfg },
+        job_store_factory: ->(_path) { store },
+        repository_ownership: ownership,
+        checkout_guard_factory: ->(*) { Guard.new }, owner: "daemon-a",
+        claim_resolver: ->(_attempt) { :resolved }
+      )
+
+      candidates = scheduler.candidates(now: T0 + 2)
+
+      assert_equal %w[first second], candidates.map { |candidate| candidate.fetch(:job_id) }
+      assert_equal 1, identity_calls
+      assert_equal 1, ledger_calls
+
+      scheduler.reserve(candidates.first, now: T0 + 2)
+      assert_equal 2, identity_calls, "reservation must re-resolve live repository identity"
+      assert_equal 2, ledger_calls, "reservation must re-read live continuation ownership"
+    end
+  end
+
+  def test_candidate_pass_accepts_injected_ownership_resolver_without_snapshot_api
+    with_project do |_dir, entry, store|
+      enqueue(store)
+      calls = 0
+      ownership = lambda do |**|
+        calls += 1
+        Hive::RefactorPatrol::RepositoryOwnership::Decision.new(authority: :full)
+      end
+      scheduler = Hive::Daemon::RefactorPatrolScheduler.new(
+        registry: -> { [ entry ] }, config_loader: ->(_path) { enabled_cfg },
+        job_store_factory: ->(_path) { store },
+        repository_ownership: ownership,
+        checkout_guard_factory: ->(*) { Guard.new }, owner: "daemon-a",
+        claim_resolver: ->(_attempt) { :resolved }
+      )
+
+      assert_equal [ "job-7" ], scheduler.candidates(now: T0).map { |item| item.fetch(:job_id) }
+      assert_equal 1, calls
+    end
+  end
+
   def test_reserves_classified_job_for_action_resume_without_a_discovery_claim
     with_project do |dir, entry, store|
       write_action_job(dir, store)

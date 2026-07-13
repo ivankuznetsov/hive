@@ -65,10 +65,10 @@ before the value can become the default `run` pattern. Wrapper-owned error
 formatting checks the last
 recognized JSON boolean flag rather than any truthy flag, so duplicate flags
 with a final false form, such as `--json --no-json`, emit the human
-`hive-e2e:` stderr path. Invalid-byte `ARGV` entries are rejected before those
-rewrites and before Thor dispatch, and are reported as usage errors (`64`);
-JSON callers receive the normal `hive-e2e-error` envelope with
-`error_kind: "usage"`.
+`hive-e2e:` stderr path. `ARGV` entries that are not valid UTF-8 are rejected
+before those rewrites and before Thor dispatch, regardless of the process
+locale, and are reported as usage errors (`64`); JSON callers receive the
+normal `hive-e2e-error` envelope with `error_kind: "usage"`.
 
 `clean` also validates separate-form `--retain-days` and
 `--retain-failed-days` values before Thor dispatch. A bare retention flag, or

@@ -16,6 +16,9 @@ tags: [gap, todo]
   but they have not yet shipped in a Hive release or completed a live
   paid-provider campaign from a fresh standalone benchmark project. Honeycomb
   is not deployed and is not a dependency of this named-workflow path.
+- The packaged mixed Sol/Terra/Grok profiles, stage-specific Codex shim, sole
+  Sol `ce-code-review` policy, and combined Sol-runner selection are locally
+  test-pinned but still need their first paid end-to-end cell.
 
 ## Source-file coverage (representative map)
 

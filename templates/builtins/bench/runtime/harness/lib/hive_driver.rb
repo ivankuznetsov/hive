@@ -388,16 +388,23 @@ module HiveBench
     end
 
     # OPENROUTER_API_KEY is forwarded (never echoed) when a pi/open-model stage
-    # runs, along with the per-stage pi model patterns the in-container pi shim
-    # injects as `--model` (hive has no pi model config of its own). Grok's
-    # model/effort pins ride the same shim mechanism (hive's grok profile
-    # passes no model flags either).
+    # runs, along with per-stage model pins for the in-container shims. Codex
+    # needs stage pins when one cell uses Sol to plan/review and Terra to execute;
+    # Grok's profile also needs the shim because Hive passes no model flags.
     def env_args(candidate)
       args = []
       if uses?(candidate, "pi")
         args += ENV["OPENROUTER_API_KEY"] ? ["-e", "OPENROUTER_API_KEY"] : []
         (candidate.pi_models || {}).each do |stage, pattern|
           args += ["-e", "HB_PI_MODEL_#{stage.upcase}=#{pattern}"]
+        end
+      end
+      if uses?(candidate, "codex")
+        (candidate.codex_models || {}).each do |stage, model|
+          args += ["-e", "HB_CODEX_MODEL_#{stage.upcase}=#{model}"]
+        end
+        (candidate.codex_efforts || {}).each do |stage, effort|
+          args += ["-e", "HB_CODEX_EFFORT_#{stage.upcase}=#{effort}"]
         end
       end
       if uses?(candidate, "grok")

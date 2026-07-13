@@ -40,6 +40,23 @@ PI
   echo "HB_NOTE pi_models plan=${HB_PI_MODEL_PLAN:-} execute=${HB_PI_MODEL_EXECUTE:-} review=${HB_PI_MODEL_REVIEW:-}"
 fi
 
+# Mixed Codex-model candidates: Hive has one `codex` agent profile, so a shim
+# applies model and effort pins selected per Hive verb below. This lets one cell
+# use Sol for plan/review and Terra for execution without exposing the operator's
+# personal Codex config to the container.
+if [ -n "${HB_CODEX_MODEL_PLAN:-}${HB_CODEX_MODEL_EXECUTE:-}${HB_CODEX_MODEL_REVIEW:-}${HB_CODEX_EFFORT_PLAN:-}${HB_CODEX_EFFORT_EXECUTE:-}${HB_CODEX_EFFORT_REVIEW:-}" ]; then
+  export HB_CODEX_REAL="$(command -v codex)"
+  cat >/work/.hb/bin/codex <<'CODEX'
+#!/usr/bin/env bash
+args=()
+[ -n "${HB_CODEX_MODEL:-}" ] && args+=(-m "$HB_CODEX_MODEL")
+[ -n "${HB_CODEX_EFFORT:-}" ] && args+=(-c "model_reasoning_effort=\"$HB_CODEX_EFFORT\"")
+exec "$HB_CODEX_REAL" "${args[@]}" "$@"
+CODEX
+  chmod +x /work/.hb/bin/codex
+  echo "HB_NOTE codex_models plan=${HB_CODEX_MODEL_PLAN:-}/${HB_CODEX_EFFORT_PLAN:-} execute=${HB_CODEX_MODEL_EXECUTE:-}/${HB_CODEX_EFFORT_EXECUTE:-} review=${HB_CODEX_MODEL_REVIEW:-}/${HB_CODEX_EFFORT_REVIEW:-}"
+fi
+
 # Grok candidates: hive's grok profile passes no model/effort flags, so a shim
 # injects `-m $HB_GROK_MODEL --reasoning-effort $HB_GROK_EFFORT` (same pattern
 # as the pi shim; grok's default model would drift with CLI releases, and the
@@ -220,6 +237,7 @@ if [ "${HB_RESUME_EXECUTE:-0}" = "1" ]; then
   echo "HB_NOTE execute_resumed"
 else
   HB_PI_MODEL="${HB_PI_MODEL_PLAN:-}" \
+  HB_CODEX_MODEL="${HB_CODEX_MODEL_PLAN:-}" HB_CODEX_EFFORT="${HB_CODEX_EFFORT_PLAN:-}" \
     hive plan "/work/.hive-state/stages/2-brainstorm/$SLUG" --json >/work/.hb/plan.json 2>>/work/.hb/stage.err
   stage plan $?
 
@@ -236,6 +254,7 @@ fi
 # 2. EXECUTE — real develop -> worktree off base_commit.
 if [ -n "$PLAN_TASK" ] && [ "$PLAN_TASK" != "." ]; then
   HB_PI_MODEL="${HB_PI_MODEL_EXECUTE:-}" \
+  HB_CODEX_MODEL="${HB_CODEX_MODEL_EXECUTE:-}" HB_CODEX_EFFORT="${HB_CODEX_EFFORT_EXECUTE:-}" \
     hive develop "$PLAN_TASK" --json >/work/.hb/develop.json 2>>/work/.hb/stage.err
   stage develop $?
 fi
@@ -286,9 +305,11 @@ GH
   chmod +x /work/.hb/bin/gh
 
   HB_PI_MODEL="${HB_PI_MODEL_REVIEW:-}" \
+  HB_CODEX_MODEL="${HB_CODEX_MODEL_REVIEW:-}" HB_CODEX_EFFORT="${HB_CODEX_EFFORT_REVIEW:-}" \
     hive open-pr "$(task_dir)" --json >/work/.hb/open_pr.json 2>>/work/.hb/stage.err
   stage open-pr $?
   HB_PI_MODEL="${HB_PI_MODEL_REVIEW:-}" \
+  HB_CODEX_MODEL="${HB_CODEX_MODEL_REVIEW:-}" HB_CODEX_EFFORT="${HB_CODEX_EFFORT_REVIEW:-}" \
     hive review "$(task_dir)" --json >/work/.hb/review.json 2>>/work/.hb/stage.err
   REVIEW_RC=$?
   stage review "$REVIEW_RC"

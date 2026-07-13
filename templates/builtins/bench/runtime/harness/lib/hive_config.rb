@@ -32,7 +32,8 @@ module HiveBench
     #   reviewers (Array), ci_command (String or nil).
     def to_h(candidate, worktree_root: DEFAULT_WORKTREE_ROOT, default_branch: DEFAULT_BRANCH)
       {
-        "claude" => { "mode" => "headless", "model" => candidate.claude_model }.compact,
+        "claude" => { "mode" => "headless", "model" => candidate.claude_model,
+                      "effort" => candidate.claude_effort }.compact,
         "default_branch" => default_branch,
         "worktree_root" => worktree_root,
         "plan" => { "agent" => candidate.plan },

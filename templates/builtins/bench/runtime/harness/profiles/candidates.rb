@@ -4,42 +4,58 @@ module HiveBench
   # v2 slate: a CANDIDATE is a hive model configuration (which agent+model drives
   # each stage), run through REAL hive. Replaces the v1 Profile/Pair slate that fed
   # the reimplemented pipeline. `model_version` is what the leaderboard records;
-  # `claude_model` is the CLI model id for hive's `claude.model` (nil for codex/pi,
-  # which take no model flag in hive). Open models run on pi: hive has no pi model
-  # config, so `pi_models` maps stage -> pi `--model` pattern, injected by the
-  # in-container pi shim via HB_PI_MODEL_<STAGE> (see hive_stages.sh). Review
-  # fields feed the prod-default review config (hive_config.rb).
+  # `claude_model` is the CLI model id for hive's `claude.model`. Open models run
+  # on pi: hive has no pi model config, so `pi_models` maps stage -> pi `--model`
+  # pattern, injected by the in-container pi shim via HB_PI_MODEL_<STAGE> (see
+  # hive_stages.sh). Codex profiles similarly use an external shim for mixed
+  # stage pins because Hive's codex profile takes no model flag itself.
+  # `codex_models` / `codex_efforts` do the same for mixed Codex-model cells.
+  # Review fields feed the prod-default review config (hive_config.rb).
   module Candidates
     module_function
 
-    Candidate = Data.define(:id, :plan, :execute, :review, :claude_model, :pi_models,
-                            :codex_effort, :codex_model, :grok_model, :grok_effort, :model_version,
+    Candidate = Data.define(:id, :plan, :execute, :review, :claude_model, :claude_effort, :pi_models,
+                            :codex_effort, :codex_model, :codex_models, :codex_efforts,
+                            :grok_model, :grok_effort, :model_version,
                             :review_max_passes, :review_wall_clock_sec, :reviewers, :ci_command)
 
     # pi --model patterns verified against the local pi + OpenRouter (2026-07-03).
     GLM = "openrouter/z-ai/glm-5.2"
     KIMI = "openrouter/moonshotai/kimi-k2.7-code"
+    FABLE = "claude-fable-5"
+    SOL = "gpt-5.6-sol"
+    TERRA = "gpt-5.6-terra"
 
     def all
       [all_opus, all_codex, opus_plan_codex_exec,
        all_glm, all_kimi, glm_plan_kimi_exec,
        all_codex_xhigh, opus_plan_codex_exec_xhigh, all_grok,
-       all_codex_sol_xhigh].freeze
+       all_codex_sol_xhigh, sol_plan_terra_exec_sol_review,
+       fable_plan_grok_exec_sol_review, sol_plan_grok_exec_sol_review].freeze
     end
 
     def by_id(id)
       all.find { |c| c.id == id }
     end
 
-    def base(id, plan:, execute:, review:, model_version:, claude_model: nil, pi_models: nil,
-             codex_effort: nil, codex_model: nil, grok_model: nil, grok_effort: nil)
+    def base(id, plan:, execute:, review:, model_version:, claude_model: nil, claude_effort: nil,
+             pi_models: nil, codex_effort: nil, codex_model: nil, codex_models: nil,
+             codex_efforts: nil, grok_model: nil, grok_effort: nil, reviewers: [])
       Candidate.new(id: id, plan: plan, execute: execute, review: review,
-                    claude_model: claude_model, pi_models: pi_models,
+                    claude_model: claude_model, claude_effort: claude_effort, pi_models: pi_models,
                     codex_effort: codex_effort, codex_model: codex_model,
+                    codex_models: codex_models, codex_efforts: codex_efforts,
                     grok_model: grok_model, grok_effort: grok_effort,
                     model_version: model_version,
                     review_max_passes: 2, review_wall_clock_sec: 7200,
-                    reviewers: [], ci_command: nil)
+                    reviewers: reviewers, ci_command: nil)
+    end
+
+    def sole_codex_ce_reviewer
+      [{ "name" => "codex-ce-code-review", "kind" => "agent", "agent" => "codex",
+         "skill" => "ce-code-review", "output_basename" => "codex-ce-code-review",
+         "prompt_template" => "reviewer_codex_ce_code_review.md.erb",
+         "budget_usd" => 50, "timeout_sec" => 7200 }]
     end
 
     def all_opus
@@ -98,7 +114,7 @@ module HiveBench
     # config.toml; needs codex >= 0.144 (hive-bench-runner:sol image).
     def all_codex_sol_xhigh
       base("all-codex-5.6-sol-xhigh", plan: "codex", execute: "codex", review: "codex",
-                                      codex_model: "gpt-5.6-sol", codex_effort: "xhigh",
+                                      codex_model: SOL, codex_effort: "xhigh",
                                       model_version: "gpt-5.6-sol-xhigh")
     end
 
@@ -114,6 +130,38 @@ module HiveBench
       base("all-grok-4.5", plan: "grok", execute: "grok", review: "grok",
                            grok_model: "grok-4.5", grok_effort: "xhigh",
                            model_version: "grok-4.5-xhigh")
+    end
+
+    # Follow-up workflow comparison (maintainer decision 2026-07-13): keep the
+    # candidate review stage controlled with one Sol xhigh /ce-code-review
+    # reviewer while varying planner and executor. The stage-specific Codex
+    # pins are required for the Sol-plan/Terra-execute cell because both stages
+    # use the same `codex` Hive agent profile.
+    def sol_plan_terra_exec_sol_review
+      base("sol-plan->terra-exec-sol-review", plan: "codex", execute: "codex", review: "codex",
+                                                codex_models: { "plan" => SOL, "execute" => TERRA, "review" => SOL },
+                                                codex_efforts: { "plan" => "xhigh", "execute" => "xhigh", "review" => "xhigh" },
+                                                reviewers: sole_codex_ce_reviewer,
+                                                model_version: "sol-xhigh-plan/terra-xhigh-exec/sol-xhigh-review")
+    end
+
+    def fable_plan_grok_exec_sol_review
+      base("fable-plan->grok-exec-sol-review", plan: "claude", execute: "grok", review: "codex",
+                                                claude_model: FABLE, claude_effort: "high",
+                                                codex_models: { "review" => SOL },
+                                                codex_efforts: { "review" => "xhigh" },
+                                                grok_model: "grok-4.5", grok_effort: "xhigh",
+                                                reviewers: sole_codex_ce_reviewer,
+                                                model_version: "fable-5-high-plan/grok-4.5-xhigh-exec/sol-xhigh-review")
+    end
+
+    def sol_plan_grok_exec_sol_review
+      base("sol-plan->grok-exec-sol-review", plan: "codex", execute: "grok", review: "codex",
+                                              codex_models: { "plan" => SOL, "review" => SOL },
+                                              codex_efforts: { "plan" => "xhigh", "review" => "xhigh" },
+                                              grok_model: "grok-4.5", grok_effort: "xhigh",
+                                              reviewers: sole_codex_ce_reviewer,
+                                              model_version: "sol-xhigh-plan/grok-4.5-xhigh-exec/sol-xhigh-review")
     end
   end
 end

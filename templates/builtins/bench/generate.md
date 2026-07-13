@@ -224,7 +224,18 @@ ruby -ryaml -rshellwords -rjson -e '
       # when unset, harness defaults apply, as campaign.yml.example documents.
       env << "HB_HIVE_TIMEOUT=#{hive_timeout}" if hive_timeout
       profile = HiveBench::Candidates.by_id(candidate.to_s)
-      env << "HB_RUNNER_IMAGE=hive-bench-runner:grok" if profile && profile.grok_model
+      if profile
+        codex_models = []
+        codex_models << profile.codex_model if profile.respond_to?(:codex_model)
+        codex_models.concat((profile.codex_models || {}).values) if profile.respond_to?(:codex_models)
+        if codex_models.compact.any? { |model| model.to_s.start_with?("gpt-5.6-") }
+          # The Sol image carries Codex >= 0.144 and the Grok CLI, so it is the
+          # combined runner for Sol/Terra + Grok mixed workflows as well.
+          env << "HB_RUNNER_IMAGE=hive-bench-runner:sol"
+        elsif profile.grok_model
+          env << "HB_RUNNER_IMAGE=hive-bench-runner:grok"
+        end
+      end
       puts Shellwords.join(env + args)
     end
   end

@@ -304,6 +304,23 @@ def reject_unsupported_json_assignments!(argv)
   raise Thor::MalformattedArgumentError, "invalid boolean value for --json: #{arg.split('=', 2).last.inspect}"
 end
 
+RETENTION_VALUE_OPTIONS = %w[--retain-days --retain-failed-days].freeze
+
+def reject_missing_retention_values!(argv)
+  return unless argv.first == "clean"
+
+  argv.each_index do |idx|
+    arg = argv[idx]
+    break if arg == "--"
+    next unless RETENTION_VALUE_OPTIONS.include?(arg)
+
+    value = argv[idx + 1]
+    next if value && !value.empty? && (!value.start_with?("-") || value.match?(/\A-\d+\z/))
+
+    raise Thor::MalformattedArgumentError, "No value provided for option '#{arg}'"
+  end
+end
+
 def normalize_leading_global_options!(argv)
   leading = []
   leading << argv.shift while JSON_BOOLEAN_OPTIONS.include?(argv.first)
@@ -321,6 +338,7 @@ begin
   reject_unsupported_json_assignments!(ARGV)
   normalize_leading_global_options!(ARGV)
   rewrite_help_flag!(ARGV)
+  reject_missing_retention_values!(ARGV)
   # Thor::Base#start rescues Thor::Error internally and exits 1 when
   # exit_on_failure? is true. Passing `debug: true` makes Thor re-raise
   # instead so the rescue below can preserve human/JSON formatting while

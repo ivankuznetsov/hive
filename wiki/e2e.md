@@ -62,6 +62,12 @@ rewrites and before Thor dispatch, and are reported as usage errors (`64`);
 JSON callers receive the normal `hive-e2e-error` envelope with
 `error_kind: "usage"`.
 
+`clean` also validates separate-form `--retain-days` and
+`--retain-failed-days` values before Thor dispatch. A bare retention flag, or
+one followed by another option such as `--json` or `--dry-run`, is a usage
+error (`64`) and never reaches artifact cleanup; Thor cannot silently reuse the
+configured retention default for a malformed destructive invocation.
+
 ## Layout
 
 | Path | Purpose |

@@ -75,6 +75,16 @@ class WorkflowsBenchTest < Minitest::Test
     assert_includes instruction, "HB_RUNNER_IMAGE=hive-bench-runner:sol"
   end
 
+  def test_generate_surfaces_provider_only_pending_cells_as_daemon_retryable_limits
+    instruction = File.read(stages_by_name.fetch("generate").instruction)
+
+    assert_includes instruction, "write_limits_reached()"
+    assert_includes instruction, "exit(quota_only ? 75 : 2)"
+    assert_includes instruction, 'if [ "$outcome_status" -eq 75 ]'
+    assert_includes instruction, "<!-- ERROR reason=limits_reached"
+    assert_includes instruction, 'retry_after="%s"'
+  end
+
   def test_descriptor_carries_transition_verbs_after_inbox
     assert_equal [ nil, "extract", "generate", "judge", "publish", nil ],
                  descriptor.stages.map { |stage| stage.advance_verb&.name }

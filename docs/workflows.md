@@ -32,7 +32,10 @@ packaged stages. The control plane uses Codex and allows up to seven
 days for the serialized generate/judge stages; the candidate and judge models
 inside the campaign remain governed solely by `campaign.yml`. See the
 hive-bench README for the campaign schema, credentials, and public submission
-process.
+process. If every unfinished generation cell is parked only by provider quota,
+the stage writes a cooldown-aware `limits_reached` marker so the daemon retries
+after reset; malformed/missing/non-limit failures remain manual `WAITING`
+states.
 
 ## Create A Blank Workflow
 

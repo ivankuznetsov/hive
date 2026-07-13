@@ -15,3 +15,9 @@ benchmark descriptor now also pins its shell-control stages to Codex
 and gives generate/judge seven-day timeouts (extract/publish retain one hour),
 so a deliberately serialized multi-cell campaign neither consumes the Claude
 account merely to launch scripts nor dies at the generic one-hour ceiling.
+The generate instruction now also classifies an unfinished matrix containing
+only harness `pending` entries (the harness's provider-wall bucket) as
+`ERROR reason=limits_reached retry_after=...`; the normal daemon cooldown
+healer can resume it after reset. Missing/unreadable results, contradictory
+terminal cells, and any `failed` entries still produce manual `WAITING`, so the
+automatic path cannot hide data corruption or non-limit benchmark failures.

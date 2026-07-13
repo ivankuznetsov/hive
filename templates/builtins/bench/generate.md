@@ -9,9 +9,9 @@ consume.
 Execute the `<!-- bench-stage-script -->` bash block below verbatim with
 `bash` (extract it to a file and run it, or pipe it to `bash`). Do not
 reimplement its steps, improvise around failing commands, or hand-write a
-`<!-- WAITING -->`/`<!-- COMPLETE -->` marker yourself — every guard in this
-stage lives in the script, and the script ends every path with exactly one
-marker.
+`<!-- WAITING -->`/`<!-- ERROR -->`/`<!-- COMPLETE -->` marker yourself —
+every guard in this stage lives in the script, and the script ends every path
+with exactly one marker.
 
 <!-- bench-stage-script -->
 ```bash
@@ -30,6 +30,20 @@ write_waiting() {
     printf '%s\n\n' "$1"
     printf 'Retry: fix the condition above, then run `touch %s` after hive daemon debounce has elapsed.\n\n' "$STATE_FILE"
     printf '<!-- WAITING -->\n'
+  } >>"$STATE_FILE"
+}
+
+write_limits_reached() {
+  retry_after="$(ruby -rtime -e '
+    seconds = Integer(ENV.fetch("HIVE_LIMITS_RETRY_COOLDOWN_SEC", "3600"), exception: false)
+    seconds = 3600 unless seconds&.positive?
+    puts (Time.now.utc + seconds).iso8601
+  ')"
+  {
+    printf '\n## Status\n\n'
+    printf '%s\n\n' "$1"
+    printf 'Hive will retry this stage after the provider cooldown at %s.\n\n' "$retry_after"
+    printf '<!-- ERROR reason=limits_reached message="benchmark candidate or judge hit provider quota" retry_after="%s" -->\n' "$retry_after"
   } >>"$STATE_FILE"
 }
 
@@ -289,12 +303,14 @@ if [ "$generate_status" -ne 0 ]; then
   run_note="One or more generation commands exited nonzero; per-cell results below are authoritative. "
 fi
 
+set +e
 ruby -ryaml -rjson -e '
   repo = ARGV.fetch(0)
   data = YAML.safe_load_file("campaign.yml")
   terminal = %w[generated empty_diff].freeze
   exclusions = data.fetch("exclusions", []).map { |item| [item.fetch("task").to_s, item.fetch("candidate").to_s] }
   bad = []
+  quota_only = true
   data.fetch("tasks").each do |task|
     data.fetch("candidates").each do |candidate|
       next if exclusions.include?([task.to_s, candidate.to_s])
@@ -303,9 +319,11 @@ ruby -ryaml -rjson -e '
         result = JSON.parse(File.read(File.join(dir, "results.json")))
       rescue Errno::ENOENT
         bad << "#{candidate}/#{task}: missing"
+        quota_only = false
         next
       rescue JSON::ParserError => e
         bad << "#{candidate}/#{task}: unreadable results.json (#{e.message[0, 80]})"
+        quota_only = false
         next
       end
       cell = (result["cells"] || []).first
@@ -317,6 +335,7 @@ ruby -ryaml -rjson -e '
         # contradictory result must never merge and reach COMPLETE.
         next if pending.empty? && failed.empty?
         bad << "#{candidate}/#{task}: #{status} but per-cell pending=#{pending.size} failed=#{failed.size} are nonempty — contradictory result; inspect #{dir}"
+        quota_only = false
         next
       end
       unless Dir.glob(File.join(dir, "*", "*", "target", "candidate.patch")).empty?
@@ -326,21 +345,30 @@ ruby -ryaml -rjson -e '
       end
       reasons = (pending + failed).filter_map { |entry| entry["reason"] }
       bad << "#{candidate}/#{task}: #{status}#{reasons.empty? ? "" : " — #{reasons.join("; ")}"}"
+      quota_only &&= !pending.empty? && failed.empty?
     end
   end
   unless bad.empty?
     puts "unfinished=#{bad.size}"
     bad.each { |line| puts "UNFINISHED #{line}" }
-    exit 2
+    exit(quota_only ? 75 : 2)
   end
-' "$REPO_ROOT" >.generate-outcome.out 2>.generate-outcome.err || {
+' "$REPO_ROOT" >.generate-outcome.out 2>.generate-outcome.err
+outcome_status=$?
+set -e
+if [ "$outcome_status" -ne 0 ]; then
   err_tail=""
   if [ -s .generate-run.err ]; then
     err_tail="$(printf '\n\nGeneration command stderr tails:\n%s' "$(tail -n 40 .generate-run.err)")"
   fi
-  write_waiting "${run_note}$(cat .generate-outcome.err .generate-outcome.out)${err_tail}"
+  outcome_message="${run_note}$(cat .generate-outcome.err .generate-outcome.out)${err_tail}"
+  if [ "$outcome_status" -eq 75 ]; then
+    write_limits_reached "$outcome_message"
+  else
+    write_waiting "$outcome_message"
+  fi
   exit 0
-}
+fi
 
 # Judge and publish consume ONE campaign-root results.json; hive_run.rb only
 # writes per-cell files, so merging them here is the handoff. An EXISTING

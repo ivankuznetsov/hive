@@ -2,7 +2,9 @@
 
 require "fileutils"
 require "English"
+require "json"
 require "optparse"
+require "time"
 
 root = File.expand_path("..", __dir__)
 SAFE_SCENARIO_BASENAME = /\A[A-Za-z0-9_-]+\z/
@@ -81,6 +83,48 @@ end
 
 def option_value_missing?(value)
   value.to_s.empty? || value.start_with?("-")
+end
+
+def valid_eval_report_entry?(entry)
+  entry.is_a?(Hash) &&
+    entry["scenario_name"].is_a?(String) && !entry["scenario_name"].empty? &&
+    entry["file"].is_a?(String) && !entry["file"].empty? &&
+    %w[pass fail].include?(entry["status"]) &&
+    entry["failures"].is_a?(Array) && entry["failures"].all? { |failure| failure.is_a?(String) } &&
+    %w[assertions captured_messages captured_log_events].all? { |key| entry[key].is_a?(Array) } &&
+    (entry["duration_ms"].nil? || entry["duration_ms"].is_a?(Numeric))
+end
+
+def valid_eval_report?(report)
+  return false unless report.is_a?(Hash) &&
+                      report["schema"] == "hive-eval-report" &&
+                      report["schema_version"] == 1 &&
+                      report["generated_at"].is_a?(String) &&
+                      report["scenarios"].is_a?(Array) &&
+                      report["scenarios"].all? { |entry| valid_eval_report_entry?(entry) }
+
+  Time.iso8601(report.fetch("generated_at"))
+  true
+rescue ArgumentError
+  false
+end
+
+def eval_report_error(report_path, expected_scenario_paths, root)
+  return "report was not created: #{report_path}" unless File.exist?(report_path)
+  return "report is not a regular file: #{report_path}" unless File.lstat(report_path).file?
+
+  report = JSON.parse(File.read(report_path))
+  return "report does not match the hive-eval-report v1 schema" unless valid_eval_report?(report)
+  return "report contains failing scenarios" unless report.fetch("scenarios").all? { |entry| entry.fetch("status") == "pass" }
+
+  reported_paths = report.fetch("scenarios").map { |entry| File.expand_path(entry.fetch("file"), root) }.uniq.sort
+  return "report scenario coverage mismatch" unless reported_paths == expected_scenario_paths.sort
+
+  nil
+rescue JSON::ParserError => e
+  "report contains invalid JSON: #{e.message}"
+rescue SystemCallError, ArgumentError => e
+  "report could not be validated: #{e.message}"
 end
 
 # Snapshot ARGV before parse! mutates it in place. The rescue scan below relies
@@ -174,4 +218,17 @@ end
 
 FileUtils.mkdir_p(File.dirname(env.fetch("HIVE_EVAL_REPORT")))
 ok = system(env, "bundle", "exec", "rake", "test:eval", chdir: root)
-exit($CHILD_STATUS&.exitstatus || (ok ? 0 : 1))
+child_status = $CHILD_STATUS&.exitstatus || (ok ? 0 : 1)
+exit child_status unless child_status.zero?
+
+expected_scenario_paths = if path
+  [ File.expand_path(path, root) ]
+else
+  Dir[File.join(root, "test", "eval", "scenarios", "**", "*_test.rb")].map { |file| File.expand_path(file, root) }
+end
+if (error = eval_report_error(report_path, expected_scenario_paths, root))
+  warn "hive-eval: #{error}"
+  exit 1
+end
+
+exit 0

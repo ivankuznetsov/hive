@@ -36,6 +36,63 @@ class HiveEvalReporterTest < Minitest::Test
     end
   end
 
+  def test_cli_requires_report_when_eval_child_exits_successfully
+    Dir.mktmpdir("hive-eval-report") do |dir|
+      report = File.join(dir, "missing.json")
+
+      with_fake_bundle do |env, _marker|
+        _out, err, status = Open3.capture3(
+          env,
+          "bin/hive-eval", "--scenario", "s1_status", "--no-judge", "--report", report
+        )
+
+        refute status.success?
+        assert_match(/report was not created/, err)
+        refute File.exist?(report)
+      end
+    end
+  end
+
+  def test_cli_rejects_invalid_report_when_eval_child_exits_successfully
+    invalid_reports = {
+      "not json" => /report contains invalid JSON/,
+      JSON.generate({ "schema" => "not-hive-eval-report" }) => /does not match the hive-eval-report v1 schema/
+    }
+
+    invalid_reports.each do |document, expected_error|
+      Dir.mktmpdir("hive-eval-report") do |dir|
+        report = File.join(dir, "invalid.json")
+
+        with_fake_bundle(report: document) do |env, _marker|
+          _out, err, status = Open3.capture3(
+            env,
+            "bin/hive-eval", "--scenario", "s1_status", "--no-judge", "--report", report
+          )
+
+          refute status.success?
+          assert_match(expected_error, err)
+        end
+      end
+    end
+  end
+
+  def test_cli_requires_report_to_cover_requested_scenario
+    Dir.mktmpdir("hive-eval-report") do |dir|
+      report = File.join(dir, "wrong-scenario.json")
+      wrong_file = File.expand_path("../scenarios/s2_agent_question_test.rb", __dir__)
+
+      with_fake_bundle(report: eval_report(file: wrong_file)) do |env, _marker|
+        _out, err, status = Open3.capture3(
+          env,
+          "bin/hive-eval", "--scenario", "s1_status", "--no-judge", "--report", report
+        )
+
+        refute status.success?
+        assert_match(/report scenario coverage mismatch/, err)
+      end
+    end
+  end
+
   def test_cli_ignores_ambient_test_when_running_all_scenarios
     Dir.mktmpdir("hive-eval-report") do |dir|
       report = File.join(dir, "all.json")
@@ -533,7 +590,25 @@ class HiveEvalReporterTest < Minitest::Test
     FileUtils.rm_f(backup)
   end
 
-  def with_fake_bundle
+  def eval_report(file:)
+    JSON.generate({
+      "schema" => "hive-eval-report",
+      "schema_version" => 1,
+      "generated_at" => "2026-01-01T00:00:00Z",
+      "scenarios" => [ {
+        "scenario_name" => "FakeScenario#test_fake",
+        "file" => file,
+        "status" => "pass",
+        "failures" => [],
+        "assertions" => [],
+        "captured_messages" => [],
+        "captured_log_events" => [],
+        "duration_ms" => 1
+      } ]
+    })
+  end
+
+  def with_fake_bundle(report: nil)
     Dir.mktmpdir("hive-eval-fake-bundle") do |dir|
       bin_dir = File.join(dir, "bin")
       marker = File.join(dir, "bundle-called")
@@ -542,11 +617,13 @@ class HiveEvalReporterTest < Minitest::Test
       File.write(bundle, <<~RUBY)
         #!/usr/bin/env ruby
         File.write(ENV.fetch("HIVE_EVAL_FAKE_BUNDLE_MARKER"), ARGV.join("\\n"))
+        File.write(ENV.fetch("HIVE_EVAL_REPORT"), ENV.fetch("HIVE_EVAL_FAKE_REPORT")) if ENV.key?("HIVE_EVAL_FAKE_REPORT")
       RUBY
       FileUtils.chmod("+x", bundle)
 
       env = {
         "HIVE_EVAL_FAKE_BUNDLE_MARKER" => marker,
+        "HIVE_EVAL_FAKE_REPORT" => report,
         "PATH" => [ bin_dir, ENV.fetch("PATH") ].join(File::PATH_SEPARATOR)
       }
       yield env, marker

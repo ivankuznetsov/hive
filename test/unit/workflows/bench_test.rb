@@ -42,6 +42,23 @@ class WorkflowsBenchTest < Minitest::Test
     end
   end
 
+  def test_agent_stages_use_low_cost_codex_control_plane_with_campaign_sized_timeouts
+    expected_timeouts = {
+      "extract" => 3600,
+      "generate" => 604_800,
+      "judge" => 604_800,
+      "publish" => 3600
+    }
+
+    expected_timeouts.each do |name, timeout_sec|
+      stage = stages_by_name.fetch(name)
+
+      assert_equal "codex", stage.agent
+      assert_equal "low", stage.effort
+      assert_equal timeout_sec, stage.timeout_sec
+    end
+  end
+
   def test_packaged_runtime_contains_campaign_driver_and_runner_image
     runtime = Hive::Workflows::Bench::RUNTIME_DIR
 

@@ -55,6 +55,9 @@ module Hive
             advance_verb: Hive::Workflow::AdvanceVerb.new(name: "extract"),
             kind: :agent,
             instruction: instruction("extract"),
+            agent: "codex",
+            effort: "low",
+            timeout_sec: 3600,
             status_mode: :state_file_marker
           ),
           Hive::Workflow::Stage.new(
@@ -64,6 +67,9 @@ module Hive
             advance_verb: Hive::Workflow::AdvanceVerb.new(name: "generate"),
             kind: :agent,
             instruction: instruction("generate"),
+            agent: "codex",
+            effort: "low",
+            timeout_sec: 604_800,
             status_mode: :state_file_marker
           ),
           Hive::Workflow::Stage.new(
@@ -73,6 +79,9 @@ module Hive
             advance_verb: Hive::Workflow::AdvanceVerb.new(name: "judge"),
             kind: :agent,
             instruction: instruction("judge"),
+            agent: "codex",
+            effort: "low",
+            timeout_sec: 604_800,
             status_mode: :state_file_marker
           ),
           Hive::Workflow::Stage.new(
@@ -82,6 +91,9 @@ module Hive
             advance_verb: Hive::Workflow::AdvanceVerb.new(name: "publish"),
             kind: :agent,
             instruction: instruction("publish"),
+            agent: "codex",
+            effort: "low",
+            timeout_sec: 3600,
             status_mode: :state_file_marker
           ),
           Hive::Workflow::Stage.new(

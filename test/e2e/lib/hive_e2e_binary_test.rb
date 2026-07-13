@@ -525,6 +525,34 @@ class E2EBinaryTest < Minitest::Test
     end
   end
 
+  def test_clean_rejects_bare_retention_options_before_cleanup
+    [ "--retain-days", "--retain-failed-days" ].product([ [], [ "--json" ], [ "--dry-run" ] ]).each do |flag, suffix|
+      Dir.mktmpdir("e2e-clean-test") do |tmp_runs_dir|
+        run_dir = File.join(tmp_runs_dir, "2026-04-30T12-00-00Z-1234-abcd")
+        FileUtils.mkdir_p(run_dir)
+        old_time = Time.now - (30 * 86_400)
+        File.utime(old_time, old_time, run_dir)
+
+        out, err, status = Open3.capture3(
+          { "HIVE_E2E_RUNS_DIR" => tmp_runs_dir },
+          hive_e2e, "clean", flag, *suffix
+        )
+
+        assert_equal 64, status.exitstatus, "#{([ flag ] + suffix).inspect}: malformed cleanup must be rejected"
+        assert File.exist?(run_dir), "#{([ flag ] + suffix).inspect}: malformed cleanup must not delete artifacts"
+        if suffix.include?("--json")
+          assert_empty err
+          payload = parse_single_json_document(out)
+          assert_equal "usage", payload["error_kind"]
+          assert_match(/No value provided for option '#{Regexp.escape(flag)}'/, payload["message"])
+        else
+          assert_empty out
+          assert_match(/No value provided for option '#{Regexp.escape(flag)}'/, err)
+        end
+      end
+    end
+  end
+
   def test_clean_json_includes_dry_run_and_audit_arrays
     Dir.mktmpdir("e2e-clean-test") do |tmp_runs_dir|
       out, err, status = Open3.capture3(

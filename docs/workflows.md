@@ -17,21 +17,19 @@ commands.
 ## Run The Built-In Benchmark Workflow
 
 The `bench` workflow drives a reproducible hive-bench campaign through
-`inbox -> extract -> generate -> judge -> publish -> done`. Its descriptor and
-stage instructions ship with Hive, so do not copy workflow files into
-`.hive-state`:
+`inbox -> extract -> generate -> judge -> publish -> done`. Its descriptor,
+stage instructions, campaign example, and runtime harness ship with Hive:
 
 ```bash
-git clone https://github.com/ivankuznetsov/hive-bench.git
-cd hive-bench
-bundle install
-hive init . --workflow bench
-hive new hive-bench "benchmark campaign"
+hive init /path/to/benchmark-project --workflow bench
+hive new benchmark-project "benchmark campaign"
 ```
 
-Add the campaign's tracked `campaign.yml` to the printed task folder. The Hive
-daemon then advances the task through the packaged stages. See the hive-bench
-README for the campaign schema, credentials, and submission process.
+Hive snapshots the runtime under `.hive-state/bench-runtime` on the durable
+state branch. Copy its `campaign.yml.example` into the printed task folder as
+the tracked `campaign.yml`; the daemon then advances the task through the
+packaged stages. See the hive-bench README for the campaign schema,
+credentials, and public submission process.
 
 ## Create A Blank Workflow
 

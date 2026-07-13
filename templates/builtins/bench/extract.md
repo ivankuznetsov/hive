@@ -1,7 +1,7 @@
 # Bench Extract Stage
 
 Run this stage from the task folder. The task folder must contain
-`campaign.yml`; the repository root is four directories above the task folder.
+`campaign.yml`; the project root is four directories above the task folder.
 
 Execute the `<!-- bench-stage-script -->` bash block below verbatim with
 `bash` (extract it to a file and run it, or pipe it to `bash`). Do not
@@ -43,9 +43,10 @@ REPO_ROOT="$(cd ../../../.. && pwd)" || {
   write_waiting "ERROR: could not resolve ../../../.. from $PWD (repo-root anchor failed)."
   exit 0
 }
+BENCH_ROOT="$REPO_ROOT/.hive-state/bench-runtime"
 
-if [ ! -f "$REPO_ROOT/harness/hive_run.rb" ]; then
-  write_waiting "ERROR: ../../../.. did not resolve to the hive-bench repo root; missing harness/hive_run.rb at $REPO_ROOT."
+if [ ! -f "$BENCH_ROOT/harness/hive_run.rb" ]; then
+  write_waiting "ERROR: the packaged bench runtime is missing at $BENCH_ROOT. Re-run hive init --workflow bench to install it."
   exit 0
 fi
 
@@ -69,15 +70,15 @@ ruby -ryaml -e '
   unless missing.empty?
     warn "Missing corpus task(s): #{missing.join(", ")}"
     warn "Run the appropriate extraction command, for example:"
-    warn "  ruby harness/extract.rb --help"
+    warn "  ruby #{File.join(ARGV.fetch(1), "harness/extract.rb")} --help"
     exit 2
   end
-  require File.join(ARGV.fetch(0), "harness/lib/corpus")
+  require File.join(ARGV.fetch(1), "harness/lib/corpus")
   entries = HiveBench::Corpus.load(root: File.join(ARGV.fetch(0), "corpus"), checkout_source: source)
   ids = entries.map { |entry| entry.fetch("task_id") }
   missing_load = tasks.map(&:to_s) - ids
   abort("corpus loader missed task(s): #{missing_load.join(", ")}") unless missing_load.empty?
-' "$REPO_ROOT" >.extract-check.out 2>.extract-check.err || {
+' "$REPO_ROOT" "$BENCH_ROOT" >.extract-check.out 2>.extract-check.err || {
   write_waiting "$(cat .extract-check.err .extract-check.out)"
   exit 0
 }

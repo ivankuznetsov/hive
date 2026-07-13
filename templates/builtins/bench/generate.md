@@ -47,9 +47,10 @@ REPO_ROOT="$(cd ../../../.. && pwd)" || {
   write_waiting "ERROR: could not resolve ../../../.. from $PWD (repo-root anchor failed)."
   exit 0
 }
+BENCH_ROOT="$REPO_ROOT/.hive-state/bench-runtime"
 
-if [ ! -f "$REPO_ROOT/harness/hive_run.rb" ]; then
-  write_waiting "ERROR: ../../../.. did not resolve to the hive-bench repo root; missing harness/hive_run.rb at $REPO_ROOT."
+if [ ! -f "$BENCH_ROOT/harness/hive_run.rb" ]; then
+  write_waiting "ERROR: the packaged bench runtime is missing at $BENCH_ROOT. Re-run hive init --workflow bench to install it."
   exit 0
 fi
 
@@ -75,6 +76,7 @@ fi
 
 ruby -ryaml -rjson -e '
   repo = ARGV.fetch(0)
+  runtime = ARGV.fetch(1)
   data = YAML.safe_load_file("campaign.yml")
   abort("campaign.yml must be a YAML mapping") unless data.is_a?(Hash)
   required = %w[campaign_id source corpus_version tasks candidates effort_pins seeds judges budgets timeouts exclusions aggregation]
@@ -125,27 +127,27 @@ ruby -ryaml -rjson -e '
   abort("timeouts must be a mapping") unless data["timeouts"].is_a?(Hash)
   hive_timeout = data["timeouts"]["hive_seconds"]
   abort("timeouts.hive_seconds must be a positive integer when set") unless hive_timeout.nil? || (hive_timeout.is_a?(Integer) && hive_timeout.positive?)
-  require File.join(repo, "harness/profiles/candidates")
+  require File.join(runtime, "harness/profiles/candidates")
   known = HiveBench::Candidates.all.map(&:id)
   unknown = data["candidates"].map(&:to_s) - known
   abort("unknown candidate id(s): #{unknown.join(", ")}") unless unknown.empty?
   missing_tasks = data["tasks"].map(&:to_s).reject { |slug| File.file?(File.join(repo, "corpus", slug, "manifest.yml")) }
   abort("unknown corpus task(s): #{missing_tasks.join(", ")}") unless missing_tasks.empty?
-' "$REPO_ROOT" >.generate-validate.out 2>.generate-validate.err || {
+' "$REPO_ROOT" "$BENCH_ROOT" >.generate-validate.out 2>.generate-validate.err || {
   write_waiting "$(cat .generate-validate.err .generate-validate.out)"
   exit 0
 }
 
 ruby -ryaml -e '
-  repo = ARGV.fetch(0)
+  runtime = ARGV.fetch(0)
   data = YAML.safe_load_file("campaign.yml")
   puts data.fetch("campaign_id")
   puts data.fetch("corpus_version")
-  require File.join(repo, "harness/profiles/candidates")
+  require File.join(runtime, "harness/profiles/candidates")
   needs_openrouter = data.dig("judges", "openrouter").is_a?(Hash) ||
                       data.fetch("candidates").any? { |id| HiveBench::Candidates.by_id(id.to_s)&.pi_models }
   puts needs_openrouter
-' "$REPO_ROOT" >.generate-campaign.out 2>.generate-campaign.err || {
+' "$BENCH_ROOT" >.generate-campaign.out 2>.generate-campaign.err || {
   write_waiting "$(cat .generate-campaign.err .generate-campaign.out)"
   exit 0
 }
@@ -153,7 +155,8 @@ ruby -ryaml -e '
 
 ruby -ryaml -rshellwords -rjson -e '
   repo = ARGV.fetch(0)
-  require File.join(repo, "harness/profiles/candidates")
+  runtime = ARGV.fetch(1)
+  require File.join(runtime, "harness/profiles/candidates")
   data = YAML.safe_load_file("campaign.yml")
   terminal = %w[generated empty_diff].freeze
   exclusions = data.fetch("exclusions", []).map { |item| [item.fetch("task").to_s, item.fetch("candidate").to_s] }
@@ -191,7 +194,7 @@ ruby -ryaml -rshellwords -rjson -e '
       out = File.join("runs", data.fetch("campaign_id").to_s, "#{candidate}--#{task}")
       next if bought.call(out) # a bought cell is never re-bought
       args = [
-        "ruby", "harness/hive_run.rb",
+        "ruby", File.join(runtime, "harness/hive_run.rb"),
         "--source", data.fetch("source").to_s,
         "--candidate", candidate.to_s,
         "--task", task.to_s,
@@ -225,7 +228,7 @@ ruby -ryaml -rshellwords -rjson -e '
       puts Shellwords.join(env + args)
     end
   end
-' "$REPO_ROOT" >.generate-commands 2>.generate-commands.err || {
+' "$REPO_ROOT" "$BENCH_ROOT" >.generate-commands 2>.generate-commands.err || {
   write_waiting "$(cat .generate-commands.err)"
   exit 0
 }
@@ -339,7 +342,7 @@ merge_inputs=()
 if [ -f "$REPO_ROOT/runs/$CAMPAIGN_ID/results.json" ]; then
   merge_inputs+=("runs/$CAMPAIGN_ID/results.json")
 fi
-(cd "$REPO_ROOT" && ruby harness/merge_results.rb --out "runs/$CAMPAIGN_ID/results.json.next" --corpus-version "$CORPUS_VERSION" "${merge_inputs[@]}" runs/"$CAMPAIGN_ID"/*--*/results.json \
+(cd "$REPO_ROOT" && ruby "$BENCH_ROOT/harness/merge_results.rb" --out "runs/$CAMPAIGN_ID/results.json.next" --corpus-version "$CORPUS_VERSION" "${merge_inputs[@]}" runs/"$CAMPAIGN_ID"/*--*/results.json \
   && mv "runs/$CAMPAIGN_ID/results.json.next" "runs/$CAMPAIGN_ID/results.json") \
   >.generate-merge.out 2>.generate-merge.err || {
   rm -f "$REPO_ROOT/runs/$CAMPAIGN_ID/results.json.next"

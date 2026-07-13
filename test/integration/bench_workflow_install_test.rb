@@ -1,4 +1,5 @@
 require "test_helper"
+require "open3"
 require "yaml"
 require "hive/commands/init"
 require "hive/commands/new"
@@ -21,6 +22,16 @@ class BenchWorkflowInstallTest < Minitest::Test
         assert_equal "bench", config.fetch("default_workflow")
         refute_path_exists File.join(project_root, ".hive-state", "workflows", "bench.yml"),
                            "a built-in workflow must not require a copied project descriptor"
+        runtime_root = File.join(project_root, ".hive-state", "bench-runtime")
+        assert_path_exists File.join(runtime_root, "harness", "hive_run.rb"),
+                           "bench init must install its runtime without a hive-bench checkout"
+        assert_path_exists File.join(runtime_root, "campaign.yml.example")
+        assert_path_exists File.join(runtime_root, "Dockerfile.runner")
+        tracked_runtime, tracked_runtime_err, tracked_runtime_status = Open3.capture3(
+          "git", "-C", File.join(project_root, ".hive-state"), "ls-files", "bench-runtime"
+        )
+        assert tracked_runtime_status.success?, tracked_runtime_err
+        assert_includes tracked_runtime, "bench-runtime/harness/hive_run.rb"
 
         folders = Dir[File.join(project_root, ".hive-state", "stages", "1-inbox", "benchmark-my-task-*")]
         assert_equal 1, folders.size

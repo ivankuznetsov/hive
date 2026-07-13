@@ -126,6 +126,7 @@ refusal and normal skip marker.
 | File | Covers |
 |------|--------|
 | `init_test.rb` | `hive init` — preconditions, force flag, idempotent re-init, `--workflow` project defaults, TTY workflow prompt/default behavior, unknown-workflow fail-fast, in-flight field-less task warnings on default changes, `hive-init.v1` JSON payload, Claude model/effort answer/template defaults, normal reviewer rendering, patrol reviewer rendering, and prompt defaults. |
+| `bench_workflow_install_test.rb` | Fresh `hive init --workflow bench` installs and commits the packaged runtime under `.hive-state/bench-runtime`, creates a bench-pinned task without copying a project descriptor, and resolves the built-in stage/state contract. |
 | `new_test.rb` | `hive new` — slug derivation, reserved rejection, `--workflow` task overrides, non-coding project-default pinning, coding override in non-coding projects, unknown-workflow fail-fast, marker handling for non-coding inert versus agent entries, captured commit, and per-project commit-lock serialization around the `hive/state` write. |
 | `run_brainstorm_test.rb` | `hive run` of `2-brainstorm/`. |
 | `run_plan_test.rb` | `hive run` of `3-plan/`. |

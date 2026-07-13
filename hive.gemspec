@@ -39,6 +39,7 @@ Gem::Specification.new do |spec|
     "lib/**/*.rb",
     "lib/hive/scripts/**/*.sh",
     "templates/**/*",
+    "templates/builtins/bench/runtime/.dockerignore",
     "schemas/**/*.json",
     "examples/systemd/*",
     "examples/launchd/*",

@@ -45,9 +45,10 @@ REPO_ROOT="$(cd ../../../.. && pwd)" || {
   write_waiting "ERROR: could not resolve ../../../.. from $PWD (repo-root anchor failed)."
   exit 0
 }
+BENCH_ROOT="$REPO_ROOT/.hive-state/bench-runtime"
 
-if [ ! -f "$REPO_ROOT/harness/hive_run.rb" ]; then
-  write_waiting "ERROR: ../../../.. did not resolve to the hive-bench repo root; missing harness/hive_run.rb at $REPO_ROOT."
+if [ ! -f "$BENCH_ROOT/harness/hive_run.rb" ]; then
+  write_waiting "ERROR: the packaged bench runtime is missing at $BENCH_ROOT. Re-run hive init --workflow bench to install it."
   exit 0
 fi
 
@@ -84,7 +85,7 @@ fi
 # --out .next + mv: judge backfills exist ONLY in this campaign-root file, so
 # an in-place rewrite of the sole copy could lose paid judge work if it
 # crashed mid-write.
-(cd "$REPO_ROOT" && ruby harness/merge_results.rb --out "$RESULTS.next" --corpus-version "$CORPUS_VERSION" "$RESULTS" \
+(cd "$REPO_ROOT" && ruby "$BENCH_ROOT/harness/merge_results.rb" --out "$RESULTS.next" --corpus-version "$CORPUS_VERSION" "$RESULTS" \
   && mv "$RESULTS.next" "$RESULTS") \
   >.publish-merge.out 2>.publish-merge.err || {
   rm -f "$REPO_ROOT/$RESULTS.next"

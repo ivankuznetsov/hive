@@ -45,9 +45,10 @@ REPO_ROOT="$(cd ../../../.. && pwd)" || {
   write_waiting "ERROR: could not resolve ../../../.. from $PWD (repo-root anchor failed)."
   exit 0
 }
+BENCH_ROOT="$REPO_ROOT/.hive-state/bench-runtime"
 
-if [ ! -f "$REPO_ROOT/harness/hive_run.rb" ]; then
-  write_waiting "ERROR: ../../../.. did not resolve to the hive-bench repo root; missing harness/hive_run.rb at $REPO_ROOT."
+if [ ! -f "$BENCH_ROOT/harness/hive_run.rb" ]; then
+  write_waiting "ERROR: the packaged bench runtime is missing at $BENCH_ROOT. Re-run hive init --workflow bench to install it."
   exit 0
 fi
 
@@ -174,7 +175,7 @@ fi
 # --out .next + mv: backfilled judge scores exist ONLY in the campaign-root
 # results.json (per-cell files never receive them), so an in-place rewrite of
 # that sole copy could lose paid judge work if it crashed mid-write.
-(cd "$REPO_ROOT" && ruby harness/rejudge.rb --source "$SOURCE" --results "$RESULTS" --out "$RESULTS.next" --seeds "$SEEDS" --only-missing --plan-source candidate "${JUDGE_ARGS[@]}" runs/"$CAMPAIGN_ID"/*--* \
+(cd "$REPO_ROOT" && ruby "$BENCH_ROOT/harness/rejudge.rb" --source "$SOURCE" --results "$RESULTS" --out "$RESULTS.next" --seeds "$SEEDS" --only-missing --plan-source candidate "${JUDGE_ARGS[@]}" runs/"$CAMPAIGN_ID"/*--* \
   && mv "$RESULTS.next" "$RESULTS") \
   >.judge-rejudge.out 2>.judge-rejudge.err || {
   rm -f "$REPO_ROOT/$RESULTS.next"
@@ -191,7 +192,7 @@ REJUDGE_ERR_TAIL="$(tail -n 15 .judge-rejudge.err)" || REJUDGE_ERR_TAIL=""
 # itself would destroy prior paid deliberations on a routine wall retry (and a
 # zero-new-cell retry would wipe the file to cells:[]). --skip-done keeps
 # retries from re-buying cells the transcript already covers.
-(cd "$REPO_ROOT" && ruby harness/deliberate.rb --source "$SOURCE" --results "$RESULTS" --out "$DELIB.next" --min-disagreement 0 --plan-source candidate --skip-done "$DELIB" "${JUDGE_ARGS[@]}" runs/"$CAMPAIGN_ID"/*--*) \
+(cd "$REPO_ROOT" && ruby "$BENCH_ROOT/harness/deliberate.rb" --source "$SOURCE" --results "$RESULTS" --out "$DELIB.next" --min-disagreement 0 --plan-source candidate --skip-done "$DELIB" "${JUDGE_ARGS[@]}" runs/"$CAMPAIGN_ID"/*--*) \
   >.judge-deliberate.out 2>.judge-deliberate.err || {
   rm -f "$REPO_ROOT/$DELIB.next"
   write_waiting "$(cat .judge-deliberate.err .judge-deliberate.out)"

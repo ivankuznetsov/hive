@@ -11,11 +11,11 @@ tags: [gap, todo]
 
 ## Current release gap
 
-- The built-in `bench` descriptor, packaged stage instructions, and
-  `hive init . --workflow bench` path are covered locally, but they have not yet
-  shipped in a Hive release or completed a live paid-provider campaign from a
-  clean hive-bench clone. Honeycomb is not deployed and is not a dependency of
-  this named-workflow path.
+- The built-in `bench` descriptor, packaged stage instructions, self-contained
+  runtime snapshot, and `hive init . --workflow bench` path are covered locally,
+  but they have not yet shipped in a Hive release or completed a live
+  paid-provider campaign from a fresh standalone benchmark project. Honeycomb
+  is not deployed and is not a dependency of this named-workflow path.
 
 ## Source-file coverage (representative map)
 

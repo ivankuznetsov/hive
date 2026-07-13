@@ -234,14 +234,11 @@ For commands that emit JSON, the `--json` envelope is stable across versions (sc
 
 ## Custom Workflows
 
-Hive ships three workflows out of the box — `coding` (the nine-stage idea → PR pipeline), `content`, and `bench` — but the engine underneath is generic. The benchmark workflow is selected by name in a [hive-bench](https://github.com/ivankuznetsov/hive-bench) checkout; it does not require copying a descriptor or stage prompts into `.hive-state`:
+Hive ships three workflows out of the box — `coding` (the nine-stage idea → PR pipeline), `content`, and `bench` — but the engine underneath is generic. Selecting `bench` installs a versioned harness snapshot into the project state, so running a campaign does not require a separate [hive-bench](https://github.com/ivankuznetsov/hive-bench) checkout:
 
 ```bash
-git clone https://github.com/ivankuznetsov/hive-bench.git
-cd hive-bench
-bundle install
-hive init . --workflow bench
-hive new hive-bench "benchmark campaign"
+hive init /path/to/benchmark-project --workflow bench
+hive new benchmark-project "benchmark campaign"
 ```
 
 A workflow is just an **ordered list of stages in a YAML descriptor**, so you can author your own per project: writing, research, triage, translation, a weekly-report generator — any task that moves through a sequence of steps where an AI agent does the work at each one. You describe the stages; the daemon runs the pipeline.

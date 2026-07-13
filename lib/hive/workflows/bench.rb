@@ -1,12 +1,42 @@
+require "fileutils"
+require "hive/lock"
 require "hive/workflow"
 
 module Hive
   module Workflows
     module Bench
       INSTRUCTIONS_DIR = File.expand_path("../../../templates/builtins/bench", __dir__).freeze
+      RUNTIME_DIR = File.join(INSTRUCTIONS_DIR, "runtime").freeze
+      RUNTIME_STATE_DIR = "bench-runtime".freeze
 
       def self.instruction(name)
         File.join(INSTRUCTIONS_DIR, "#{name}.md").freeze
+      end
+
+      # A bench task must remain runnable after installation without requiring a
+      # separate hive-bench checkout. Snapshot the packaged harness into the
+      # project's durable hive/state branch so every campaign uses the runtime
+      # version selected when the workflow was initialized.
+      def self.install_runtime!(ops)
+        destination = File.join(ops.hive_state_path, RUNTIME_STATE_DIR)
+        staging = "#{destination}.tmp-#{Process.pid}"
+        FileUtils.rm_rf(staging)
+        FileUtils.mkdir_p(staging)
+        FileUtils.cp_r(File.join(RUNTIME_DIR, "."), staging)
+
+        Hive::Lock.with_commit_lock(ops.hive_state_path) do
+          FileUtils.rm_rf(destination)
+          FileUtils.mv(staging, destination)
+          ops.hive_commit(
+            stage_name: "config",
+            slug: "bench-runtime",
+            action: "install",
+            pathspecs: [ RUNTIME_STATE_DIR ]
+          )
+        end
+        destination
+      ensure
+        FileUtils.rm_rf(staging) if staging
       end
 
       DESCRIPTOR = Hive::Workflow.new(

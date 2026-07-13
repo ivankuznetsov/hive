@@ -34,9 +34,20 @@ class WorkflowsBenchTest < Minitest::Test
 
       assert_equal File.join(Hive::Workflows::Bench::INSTRUCTIONS_DIR, "#{name}.md"), stage.instruction
       assert_path_exists stage.instruction
-      assert_includes File.read(stage.instruction), "<!-- bench-stage-script -->"
+      instruction = File.read(stage.instruction)
+      assert_includes instruction, "<!-- bench-stage-script -->"
+      assert_includes instruction, ".hive-state/bench-runtime"
+      refute_includes instruction, "\$REPO_ROOT/harness/"
       assert_equal :state_file_marker, stage.status_mode
     end
+  end
+
+  def test_packaged_runtime_contains_campaign_driver_and_runner_image
+    runtime = Hive::Workflows::Bench::RUNTIME_DIR
+
+    assert_path_exists File.join(runtime, "harness", "hive_run.rb")
+    assert_path_exists File.join(runtime, "campaign.yml.example")
+    assert_path_exists File.join(runtime, "Dockerfile.runner")
   end
 
   def test_descriptor_carries_transition_verbs_after_inbox

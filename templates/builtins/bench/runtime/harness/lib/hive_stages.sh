@@ -82,7 +82,7 @@ fi
 if [ -d /opt/hb/codex-plugins-cache ]; then
   mkdir -p "$HOME/.codex/plugins"
   [ -e "$HOME/.codex/plugins/cache" ] || ln -s /opt/hb/codex-plugins-cache "$HOME/.codex/plugins/cache"
-  echo "HB_NOTE codex_skills linked: $(ls /opt/hb/codex-plugins-cache | tr '\n' ' ')"
+  echo "HB_NOTE codex_skills linked: $(find /opt/hb/codex-plugins-cache -mindepth 1 -maxdepth 1 -printf '%f ')"
 fi
 if [ -d /opt/hb/pi-ce-skills ]; then
   mkdir -p "$HOME/.pi/agent/skills"
@@ -90,7 +90,7 @@ if [ -d /opt/hb/pi-ce-skills ]; then
     n="$(basename "$s")"
     [ -e "$HOME/.pi/agent/skills/$n" ] || ln -s "${s%/}" "$HOME/.pi/agent/skills/$n"
   done
-  echo "HB_NOTE pi_skills linked: $(ls /opt/hb/pi-ce-skills | wc -l) skills"
+  echo "HB_NOTE pi_skills linked: $(find /opt/hb/pi-ce-skills -mindepth 1 -maxdepth 1 -printf '.' | wc -c) skills"
 fi
 
 # Capture the task worktree's diff vs base into $1: committed + uncommitted +

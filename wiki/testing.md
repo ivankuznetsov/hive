@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/ci.yml, .github/workflows/release.yml, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-07-10
+updated: 2026-07-13
 tags: [test, minitest, fixtures]
 ---
 
@@ -290,7 +290,7 @@ sticky bit, and cleanup warnings cannot replace the intended result status.
 - `Layout/LineLength: max 120`
 - `Metrics/MethodLength: max 30`, `Metrics/AbcSize: max 35`, `Metrics/ClassLength: max 200`
 
-Excludes `vendor/**/*`, `tmp/**/*`, `test/fixtures/**/*` (the shell-script fixtures are not Ruby).
+Excludes `vendor/**/*`, `tmp/**/*`, `test/fixtures/**/*` (the shell-script fixtures are not Ruby), and `templates/builtins/bench/runtime/**/*`. The benchmark runtime is a synchronized snapshot from hive-bench, where its Ruby files are linted with that repository's canonical RuboCop configuration; Hive must not restyle the packaged copy independently.
 
 Per the user's CLAUDE.md rule: never pass non-Ruby files to rubocop.
 
@@ -313,6 +313,14 @@ entries before exposing `hive_state_path`; the route constrains `:slug`, and
 the log path still applies `File.basename(params[:slug])` before joining under
 that registry-derived log root. See [[commands/web]] for the task log-tail
 surface.
+
+Brakeman still scans the packaged benchmark runtime even though RuboCop defers
+its style ownership to hive-bench. Its profile probe, Codex judge, and sqlite
+extractor findings are explicitly ignored because all three call
+`Open3.capture3` with discrete argv elements; no interpolated value is passed
+through a shell. The install-smoke ShellCheck job also scans the packaged shell
+scripts, so shell fixes must be applied to both hive-bench and Hive's runtime
+snapshot.
 
 The hivebox task media route also carries a Brakeman file-access ignore. The
 route constrains `:filename` to a single PNG/JPEG/GIF component, then

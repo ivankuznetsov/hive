@@ -55,6 +55,12 @@ def expanded_report_path(root, value)
   File.expand_path(value, root)
 end
 
+def remove_report!(path)
+  File.unlink(path)
+rescue Errno::ENOENT
+  nil
+end
+
 def selected_report_path(root, argv, default_report)
   report = default_report
   index = 0

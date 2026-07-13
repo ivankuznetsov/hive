@@ -405,10 +405,14 @@ class CliUsageErrorJsonTest < Minitest::Test
 
   def test_invalid_byte_json_arg_uses_command_usage_envelope
     with_tmp_global_config do |home|
-      out, err, status = run_hive(home, "run", "--json", "bad\xFF".b)
+      out, err, status = Open3.capture3(
+        { "HIVE_HOME" => home, "LC_ALL" => "C" },
+        RbConfig.ruby, "-Ilib", HIVE_BIN, "run", "--json", "bad\xFF".b
+      )
 
       refute status.success?
       assert_equal Hive::ExitCodes::USAGE, status.exitstatus
+      refute_empty out, "JSON usage errors must emit an envelope"
       refute_match(%r{/thor/}, err)
       payload = JSON.parse(out)
       assert_equal "hive-run", payload["schema"]

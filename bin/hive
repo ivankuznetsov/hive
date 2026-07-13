@@ -199,7 +199,7 @@ def json_requested?(argv)
 end
 
 def reject_invalid_argv_encoding!(argv)
-  idx = argv.index { |arg| !arg.valid_encoding? }
+  idx = argv.index { |arg| !arg.dup.force_encoding(Encoding::UTF_8).valid_encoding? }
   return unless idx
 
   raise Thor::MalformattedArgumentError, "invalid byte sequence in argument #{idx + 1}"

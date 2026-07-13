@@ -51,6 +51,12 @@ def expanded_report_path(root, value)
   File.expand_path(value, root)
 end
 
+def remove_report!(path)
+  File.unlink(path)
+rescue Errno::ENOENT
+  nil
+end
+
 def selected_report_path(root, argv, default_report)
   report = default_report
   index = 0
@@ -115,7 +121,7 @@ rescue OptionParser::ParseError, ArgumentError => e
   captured_report = default_report if option_value_missing?(captured_report)
   [ expanded_report_path(root, captured_report),
     selected_report_path(root, argv_snapshot, default_report) ].compact.each do |path|
-    FileUtils.rm_f(path)
+    remove_report!(path)
   end
   warn "hive-eval: #{e.message}"
   warn parser
@@ -123,7 +129,7 @@ rescue OptionParser::ParseError, ArgumentError => e
 end
 
 report_path = expanded_report_path(root, options.fetch(:report))
-FileUtils.rm_f(report_path)
+remove_report!(report_path)
 
 unless remaining.empty?
   unexpected = remaining.join(" ")

@@ -363,6 +363,7 @@ begin
     exit 0
   end
   rewrite_help_flag!(ARGV)
+  reject_missing_retention_values!(ARGV)
   # Thor::Base#start rescues Thor::Error internally and exits 1 when
   # exit_on_failure? is true. Passing `debug: true` makes Thor re-raise
   # instead so the rescue below can preserve human/JSON formatting while

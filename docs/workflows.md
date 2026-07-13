@@ -28,7 +28,7 @@ hive new benchmark-project "benchmark campaign"
 Hive snapshots the runtime under `.hive-state/bench-runtime` on the durable
 state branch. Copy its `campaign.yml.example` into the printed task folder as
 the tracked `campaign.yml`; the daemon then advances the task through the
-packaged stages. The control plane uses low-effort Codex and allows up to seven
+packaged stages. The control plane uses Codex and allows up to seven
 days for the serialized generate/judge stages; the candidate and judge models
 inside the campaign remain governed solely by `campaign.yml`. See the
 hive-bench README for the campaign schema, credentials, and public submission

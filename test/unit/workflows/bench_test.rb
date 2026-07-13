@@ -42,7 +42,7 @@ class WorkflowsBenchTest < Minitest::Test
     end
   end
 
-  def test_agent_stages_use_low_cost_codex_control_plane_with_campaign_sized_timeouts
+  def test_agent_stages_use_codex_control_plane_with_campaign_sized_timeouts
     expected_timeouts = {
       "extract" => 3600,
       "generate" => 604_800,
@@ -54,7 +54,7 @@ class WorkflowsBenchTest < Minitest::Test
       stage = stages_by_name.fetch(name)
 
       assert_equal "codex", stage.agent
-      assert_equal "low", stage.effort
+      assert_nil stage.effort
       assert_equal timeout_sec, stage.timeout_sec
     end
   end

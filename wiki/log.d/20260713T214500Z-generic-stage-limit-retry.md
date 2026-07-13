@@ -11,7 +11,7 @@ stamps the selected profile when it owns the marker, and returns the distinct
 `limits_reached` commit action. Genuine version/preflight failures keep their
 existing `agent_preflight_failed` behavior. Added focused regression coverage
 for both the marker-preserving and markerless-envelope paths. The built-in
-benchmark descriptor now also pins its shell-control stages to low-effort Codex
+benchmark descriptor now also pins its shell-control stages to Codex
 and gives generate/judge seven-day timeouts (extract/publish retain one hour),
 so a deliberately serialized multi-cell campaign neither consumes the Claude
 account merely to launch scripts nor dies at the generic one-hour ceiling.

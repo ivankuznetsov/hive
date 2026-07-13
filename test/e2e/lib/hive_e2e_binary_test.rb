@@ -356,8 +356,8 @@ class E2EBinaryTest < Minitest::Test
     assert_match(/run_id must be a safe basename/, payload["message"])
   end
 
-  def test_replay_invalid_byte_name_emits_usage_error_when_json_requested
-    out, err, status = Open3.capture3(hive_e2e, "replay", "--json", "bad\xFF".b, "scenario")
+  def test_run_invalid_byte_pattern_emits_usage_error_in_c_locale
+    out, err, status = Open3.capture3({ "LC_ALL" => "C" }, hive_e2e, "run", "--json", "bad\xFF".b)
     assert_equal 64, status.exitstatus
     assert_empty err
 

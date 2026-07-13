@@ -1,6 +1,6 @@
 # Project Workflows
 
-Hive ships with built-in `coding` and `content` workflows. A project can also
+Hive ships with built-in `coding`, `content`, and `bench` workflows. A project can also
 define owner-authored workflows under its Hive state tree:
 
 ```
@@ -13,6 +13,25 @@ PROJECT --workflow <id> "..."` pins a single task to a workflow. Project
 workflow descriptors are discovered at runtime by `hive new`, `hive init`,
 `hive status`, `hive run`, `hive approve`, and the daemon path that uses those
 commands.
+
+## Run The Built-In Benchmark Workflow
+
+The `bench` workflow drives a reproducible hive-bench campaign through
+`inbox -> extract -> generate -> judge -> publish -> done`. Its descriptor and
+stage instructions ship with Hive, so do not copy workflow files into
+`.hive-state`:
+
+```bash
+git clone https://github.com/ivankuznetsov/hive-bench.git
+cd hive-bench
+bundle install
+hive init . --workflow bench
+hive new hive-bench "benchmark campaign"
+```
+
+Add the campaign's tracked `campaign.yml` to the printed task folder. The Hive
+daemon then advances the task through the packaged stages. See the hive-bench
+README for the campaign schema, credentials, and submission process.
 
 ## Create A Blank Workflow
 

@@ -3,7 +3,7 @@ title: hive init
 type: command
 source: lib/hive/commands/init.rb
 created: 2026-04-25
-updated: 2026-07-02
+updated: 2026-07-13
 tags: [command, bootstrap, git, prompts, llm-wiki]
 ---
 
@@ -18,7 +18,7 @@ hive init --new-workflow ID [PROJECT_PATH]
 
 `PROJECT_PATH` defaults to `Dir.pwd`. `--force` skips the clean-tree check. `--json` emits a single `hive-init.v1` success document on stdout with project metadata and the resolved prompt answers. `--workflow NAME` selects the project default workflow and is validated against `Hive::Workflows::Registry`; unknown names fail before disk writes and list valid names.
 
-`--new-workflow ID` is for custom, project-authored workflows that do not exist yet. It reuses [[commands/workflow]] scaffolding to create `<hive_state_path>/workflows/ID.yml` and `<hive_state_path>/workflows/ID/work.md`, writes `default_workflow: "ID"` (quoted so YAML.safe_load cannot coerce keyword-like ids), and prints both paths plus the next `hive new <project> '<idea>'` hint. The descriptor and the `config.yml` binding are committed together on `hive/state` on **both** the fresh and already-initialized paths, so the bound default survives a hive-state `reset --hard`/`clean` (a plain `hive init` without `--new-workflow` still leaves `config.yml` uncommitted). It is mutually exclusive with `--workflow`; built-in ids such as `coding` and `content` are rejected by the same reserved-id path as `hive workflow new`. On an already-initialized project, the init half is a no-op: Hive attaches the existing `.hive-state` worktree, refuses descriptor collisions before writing, then commits the descriptor and `config.yml` rebind together. A commit failure after staging resets the `.hive-state` index for those pathspecs so a half-rolled-back rebind cannot ride a later unrelated commit.
+`--new-workflow ID` is for custom, project-authored workflows that do not exist yet. It reuses [[commands/workflow]] scaffolding to create `<hive_state_path>/workflows/ID.yml` and `<hive_state_path>/workflows/ID/work.md`, writes `default_workflow: "ID"` (quoted so YAML.safe_load cannot coerce keyword-like ids), and prints both paths plus the next `hive new <project> '<idea>'` hint. The descriptor and the `config.yml` binding are committed together on `hive/state` on **both** the fresh and already-initialized paths, so the bound default survives a hive-state `reset --hard`/`clean` (a plain `hive init` without `--new-workflow` still leaves `config.yml` uncommitted). It is mutually exclusive with `--workflow`; built-in ids such as `coding`, `content`, and `bench` are rejected by the same reserved-id path as `hive workflow new`. On an already-initialized project, the init half is a no-op: Hive attaches the existing `.hive-state` worktree, refuses descriptor collisions before writing, then commits the descriptor and `config.yml` rebind together. A commit failure after staging resets the `.hive-state` index for those pathspecs so a half-rolled-back rebind cannot ride a later unrelated commit.
 
 ## Preconditions
 
@@ -62,7 +62,7 @@ If any step from orphan-state creation through global registration raises, init 
 
 On TTY input streams the prompt walks the operator through the following sections in order:
 
-0. **Workflow** (`default_workflow`): when more than one workflow exists, a `Workflow:` menu lists built-ins first (`coding`, `content`) followed by active project workflows on re-init, plus `author a new workflow`. Bare Enter keeps `coding` on fresh init or the current project default on re-init. Choosing the author entry prompts for an id and reuses the `--new-workflow` scaffolder, then continues into the remaining setup questionnaire. EOF at this step raises `Prompts::Aborted` before any disk side effects.
+0. **Workflow** (`default_workflow`): when more than one workflow exists, a `Workflow:` menu lists built-ins first (`coding`, `content`, `bench`) followed by active project workflows on re-init, plus `author a new workflow`. Bare Enter keeps `coding` on fresh init or the current project default on re-init. Choosing the author entry prompts for an id and reuses the `--new-workflow` scaffolder, then continues into the remaining setup questionnaire. EOF at this step raises `Prompts::Aborted` before any disk side effects.
 1. **Planning agent** (`brainstorm.agent` + `plan.agent`): one combined choice; the answer maps to both keys. Recommended default `claude`.
 2. **Claude launch mode** (`claude.mode`): `tmux` (default) runs every Claude-backed stage in an attachable tmux pane using the logged-in Claude session; `headless` keeps the non-interactive `claude -p` path. The setting is global for Claude only — Codex/Pi stages remain on their normal headless profile path.
 3. **Claude permission mode** (`claude.permission_mode`): applies to every Claude-backed stage, in both tmux and headless mode. Recommended default `bypassPermissions` skips Claude Code permission prompts for dogfood runs (maps to `--dangerously-skip-permissions`); `auto` uses Claude Code auto-mode rules. The same prompt also accepts `default`, `acceptEdits`, `dontAsk`, and `plan`.

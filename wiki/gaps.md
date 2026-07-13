@@ -3,11 +3,19 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-07-09
+updated: 2026-07-13
 tags: [gap, todo]
 ---
 
 **TLDR**: The wiki has broad domain coverage for the current `lib/`, command, stage, TUI, daemon, bot, hivebox web, testing/static-analysis, template/prompt, and release surfaces, but the source-file map below is representative rather than an automatically verified one-file-per-source audit. Remaining gaps are mainly live behavioral verification and a few deeper reference pages.
+
+## Current release gap
+
+- The built-in `bench` descriptor, packaged stage instructions, and
+  `hive init . --workflow bench` path are covered locally, but they have not yet
+  shipped in a Hive release or completed a live paid-provider campaign from a
+  clean hive-bench clone. Honeycomb is not deployed and is not a dependency of
+  this named-workflow path.
 
 ## Source-file coverage (representative map)
 

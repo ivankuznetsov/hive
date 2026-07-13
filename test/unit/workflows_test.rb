@@ -135,17 +135,19 @@ class WorkflowsTest < Minitest::Test
     # Registry.all.flat_map expression the production code uses) so a
     # co-regression in that derivation can't pass this guard — mirrors how
     # test_all_terminal_stage_dirs_defaults_to_registered_terminals hardcodes
-    # its expected terminals. The trailing content-workflow run is the portion
-    # most at risk of silent drift.
+    # its expected terminals. The trailing non-coding workflow runs are the
+    # portion most at risk of silent drift.
     expected_dirs = [
       "1-inbox", "2-brainstorm", "3-plan", "4-execute", "5-open-pr",
       "6-review", "7-artifacts", "8-finalize", "9-done",
-      "2-research", "3-outline", "4-draft", "5-critique", "6-done"
+      "2-research", "3-outline", "4-draft", "5-critique", "6-done",
+      "2-extract", "3-generate", "4-judge", "5-publish"
     ]
     expected_names = [
       "inbox", "brainstorm", "plan", "execute", "open-pr",
       "review", "artifacts", "finalize", "done",
-      "research", "outline", "draft", "critique"
+      "research", "outline", "draft", "critique",
+      "extract", "generate", "judge", "publish"
     ]
 
     assert_equal expected_dirs, Hive::Workflows.all_stage_dirs
@@ -202,8 +204,8 @@ class WorkflowsTest < Minitest::Test
   def test_resolve_stage_ref_across_workflows_rejects_production_done_short_name
     # Unlike the synthetic `:alternate_plan` case above (which only proves the
     # ambiguity *mechanism*), this pins the real registered workflows: `done`
-    # is the terminal short name of BOTH coding (`9-done`) and content
-    # (`6-done`). Pre-`:content` the bare ref resolved cleanly to `9-done`, so
+    # is the terminal short name of coding (`9-done`) and both content and
+    # bench (`6-done`). Pre-`:content` the bare ref resolved cleanly to `9-done`, so
     # a regression flipping the resolver back to `matches.first` would silently
     # misroute `hive drop --from done` / `--stage done` instead of erroring.
     error = assert_raises(Hive::InvalidTaskPath) do

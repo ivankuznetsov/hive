@@ -45,7 +45,8 @@ fi
 # use Sol for plan/review and Terra for execution without exposing the operator's
 # personal Codex config to the container.
 if [ -n "${HB_CODEX_MODEL_PLAN:-}${HB_CODEX_MODEL_EXECUTE:-}${HB_CODEX_MODEL_REVIEW:-}${HB_CODEX_EFFORT_PLAN:-}${HB_CODEX_EFFORT_EXECUTE:-}${HB_CODEX_EFFORT_REVIEW:-}" ]; then
-  export HB_CODEX_REAL="$(command -v codex)"
+  HB_CODEX_REAL="$(command -v codex)"
+  export HB_CODEX_REAL
   cat >/work/.hb/bin/codex <<'CODEX'
 #!/usr/bin/env bash
 args=()

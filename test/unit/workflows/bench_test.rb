@@ -70,9 +70,9 @@ class WorkflowsBenchTest < Minitest::Test
   def test_generate_selects_the_sol_runner_for_stage_specific_5_6_models
     instruction = File.read(stages_by_name.fetch("generate").instruction)
 
-    assert_includes instruction, 'profile.codex_models'
+    assert_includes instruction, "profile.codex_models"
     assert_includes instruction, 'start_with?("gpt-5.6-")'
-    assert_includes instruction, 'HB_RUNNER_IMAGE=hive-bench-runner:sol'
+    assert_includes instruction, "HB_RUNNER_IMAGE=hive-bench-runner:sol"
   end
 
   def test_descriptor_carries_transition_verbs_after_inbox

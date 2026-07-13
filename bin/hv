@@ -29,13 +29,22 @@ xdg_bin_home="${XDG_BIN_HOME:-${HOME:+$HOME/.local/bin}}"
 # always close the probe's stdin (</dev/null) and cap each probe so a
 # slow candidate falls through to the next instead of hanging.
 timeout_bin="$(command -v timeout 2>/dev/null || true)"
+version_probe_max_bytes=64
 
 probe_version() {
+  local output_file pid status output byte_count line_count
+  local LC_ALL=C
+  output_file="$(mktemp "${TMPDIR:-/tmp}/hv-version.XXXXXX")" || return
+
   if [[ -n "$timeout_bin" ]]; then
-    "$timeout_bin" 5 "$1" --version </dev/null 2>/dev/null
+    if "$timeout_bin" 5 "$1" --version </dev/null 2>/dev/null |
+      head -c "$((version_probe_max_bytes + 1))" >"$output_file"; then
+      status=0
+    else
+      status=$?
+    fi
   else
-    local output_file pid status watchdog
-    output_file="$(mktemp "${TMPDIR:-/tmp}/hv-version.XXXXXX")" || return
+    local watchdog
 
     # Launch the probe in its own process group so the watchdog can signal the
     # whole probe tree, not just the direct child. GNU `timeout` group-kills on
@@ -48,7 +57,8 @@ probe_version() {
     # restore `set +m` immediately to suppress job-control chatter; the
     # already-forked job keeps its process group regardless.
     set -m
-    "$1" --version </dev/null >"$output_file" 2>/dev/null &
+    ("$1" --version </dev/null 2>/dev/null |
+      head -c "$((version_probe_max_bytes + 1))" >"$output_file") &
     pid=$!
     set +m
     (
@@ -91,12 +101,26 @@ probe_version() {
     # ourselves. On the fast path the probe (and its group) is already gone, so
     # this KILL matches nothing and is a no-op.
     kill -KILL "-$pid" 2>/dev/null || true
-    if [[ "$status" -eq 0 ]]; then
-      cat "$output_file" || status=$?
-    fi
-    rm -f "$output_file"
-    return "$status"
   fi
+
+  if [[ "$status" -eq 0 ]]; then
+    byte_count="$(wc -c <"$output_file")"
+    line_count="$(wc -l <"$output_file")"
+    IFS= read -r output <"$output_file" || true
+
+    if (( byte_count > version_probe_max_bytes )); then
+      status=1
+    elif (( line_count == 0 && byte_count == ${#output} )); then
+      printf '%s\n' "$output" || status=$?
+    elif (( line_count == 1 && byte_count == ${#output} + 1 )); then
+      printf '%s\n' "$output" || status=$?
+    else
+      status=1
+    fi
+  fi
+
+  rm -f "$output_file"
+  return "$status"
 }
 
 candidates=(

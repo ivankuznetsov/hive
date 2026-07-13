@@ -94,6 +94,14 @@ class HvTest < Minitest::Test
     end
   end
 
+  def test_output_flood_is_bounded_when_timeout_binary_is_available
+    assert_output_flood_is_bounded(timeout_available: true)
+  end
+
+  def test_output_flood_is_bounded_when_timeout_binary_is_absent
+    assert_output_flood_is_bounded(timeout_available: false)
+  end
+
   def test_slow_candidate_is_bounded_when_timeout_binary_is_absent
     with_tmp_dir do |dir|
       slow = File.join(dir, "custom", "hive")
@@ -336,6 +344,67 @@ class HvTest < Minitest::Test
   end
 
   private
+
+  def assert_output_flood_is_bounded(timeout_available:)
+    with_tmp_dir do |dir|
+      completed = File.join(dir, "flood-completed")
+      flood = File.join(dir, "custom", "hive")
+      FileUtils.mkdir_p(File.dirname(flood))
+      File.write(flood, <<~SH)
+        #!/bin/sh
+        set -e
+        if [ "$1" = "--version" ]; then
+          printf '1.2.3\n'
+          i=0
+          while [ "$i" -lt 16384 ]; do
+            printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'
+            i=$((i + 1))
+          done
+          echo complete > "#{completed}"
+          exit 0
+        fi
+        echo flood:$1
+      SH
+      FileUtils.chmod(0o755, flood)
+
+      xdg_bin = File.join(dir, "xdg-bin")
+      FileUtils.mkdir_p(xdg_bin)
+      File.write(File.join(xdg_bin, "hive"), <<~SH)
+        #!/bin/sh
+        if [ "$1" = "--version" ]; then echo "2.3.4"; exit 0; fi
+        echo xdg:$1
+      SH
+      FileUtils.chmod(0o755, File.join(xdg_bin, "hive"))
+
+      env = {
+        "HIVE_BIN_OVERRIDE" => flood,
+        "XDG_BIN_HOME" => xdg_bin,
+        "HOMEBREW_PREFIX" => File.join(dir, "empty-homebrew")
+      }
+      if timeout_available
+        fake_bin = File.join(dir, "fake-bin")
+        FileUtils.mkdir_p(fake_bin)
+        File.write(File.join(fake_bin, "timeout"), "#!/bin/sh\nshift\nexec \"$@\"\n")
+        FileUtils.chmod(0o755, File.join(fake_bin, "timeout"))
+        env["PATH"] = [ fake_bin, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR)
+      else
+        bash_env = File.join(dir, "bash-env")
+        File.write(bash_env, <<~SH)
+          command() {
+            if [ "$1" = "-v" ] && [ "${2:-}" = "timeout" ]; then return 1; fi
+            builtin command "$@"
+          }
+        SH
+        env["BASH_ENV"] = bash_env
+      end
+
+      out, err, status = capture_hv_with_timeout(env, "probe")
+
+      assert status.success?, err
+      assert_equal "xdg:probe\n", out
+      refute_path_exists completed, "the flooding probe must be stopped before emitting all of its output"
+    end
+  end
 
   def assert_recursion_guard_holds(disabled_resolvers:)
     with_tmp_dir do |dir|

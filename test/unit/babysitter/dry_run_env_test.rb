@@ -1290,6 +1290,35 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_gh_stub_disables_prompts_for_identifierless_tty_reads
+    with_tmp_dir do |dir|
+      real_gh = File.join(dir, "real-gh")
+      File.write(real_gh, <<~RUBY)
+        #!#{RbConfig.ruby}
+        abort "expected PTY" unless STDIN.tty?
+        unless ENV["GH_PROMPT_DISABLED"] == "1"
+          warn "interactive selector opened"
+          exit 1
+        end
+        puts "real-gh \#{ARGV.join(" ")}"
+      RUBY
+      FileUtils.chmod("+x", real_gh)
+      env = {
+        "HIVE_BABYSITTER_REAL_GH" => real_gh,
+        "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "skipped.log"),
+        "GH_PROMPT_DISABLED" => "0"
+      }
+
+      [ [ "run", "view" ], [ "workflow", "view" ] ].each do |args|
+        out, status = capture_pty_stub(env, "gh", *args)
+
+        assert status.success?, out
+        assert_includes out, "real-gh #{args.join(" ")}"
+        refute_includes out, "interactive selector opened"
+      end
+    end
+  end
+
   def test_git_stub_skips_exec_path_remote_helpers
     with_tmp_git_repo do |dir|
       helper_dir = File.join(dir, "helpers")

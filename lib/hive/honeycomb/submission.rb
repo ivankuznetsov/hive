@@ -10,6 +10,10 @@ module Hive
   module Honeycomb
     class Submission
       WRITE_PERMISSIONS = %w[WRITE MAINTAIN ADMIN].freeze
+      # GitHub fork creation is asynchronous: a freshly created fork is not
+      # immediately pushable, so poll for readiness before the first push.
+      FORK_READY_ATTEMPTS = 12
+      FORK_READY_INTERVAL_SEC = 2.5
       Result = Data.define(:pr_url, :repository, :push_repository, :branch, :mode, :head, :base)
 
       class Error < Hive::GhError; end
@@ -29,13 +33,14 @@ module Hive
       end
 
       def initialize(package:, repository:, cfg: {}, cache_path: nil,
-                     runner: Hive::Gh.method(:capture3), locker: nil)
+                     runner: Hive::Gh.method(:capture3), locker: nil, sleeper: nil)
         @package = package
         @repository = repository
         @cfg = cfg || {}
         @cache_path = cache_path || Hive::Paths.honeycomb_cache_path(repository)
         @runner = runner
         @locker = locker || ->(path, &block) { Hive::Lock.with_commit_lock(path, &block) }
+        @sleeper = sleeper || ->(seconds) { sleep(seconds) }
       end
 
       def submit
@@ -56,8 +61,7 @@ module Hive
         out, err, status = capture("gh", "auth", "status")
         return if status.success?
 
-        detail = err.to_s.strip.empty? ? out.to_s.strip : err.to_s.strip
-        raise Error, "gh not authenticated (`gh auth login`): #{detail}"
+        raise Error, "gh not authenticated (`gh auth login`): #{command_detail(out, err)}"
       end
 
       def fetch_repository_info
@@ -123,16 +127,22 @@ module Hive
 
         repository_name = @repository.split("/", 2).last
         fork = "#{login}/#{repository_name}"
-        _out, err, status = capture("gh", "repo", "view", fork, "--json", "nameWithOwner")
-        unless status.success?
+        out, err, status = capture("gh", "repo", "view", fork, "--json", "nameWithOwner,isFork,parent")
+        if status.success?
+          # A repository with the fork's name already exists — confirm it is
+          # actually a fork of the configured upstream before pushing a
+          # submission branch into it (an unrelated namesake would swallow the
+          # push and only fail later at cross-repo PR creation).
+          verify_fork_of_upstream!(fork, out)
+        else
           # Only a genuine "fork does not exist yet" (404) should trigger a fork
           # attempt. A transient auth/network failure must fail closed rather than
           # spuriously forking on top of an already-existing fork.
           unless fork_missing?(err)
-            raise Error, "could not determine fork status for #{fork}: #{err.to_s.strip}"
+            raise Error, "could not determine fork status for #{fork}: #{command_detail(out, err)}"
           end
 
-          run!("gh", "repo", "fork", @repository, "--clone=false", label: "gh repo fork")
+          create_fork!(fork)
         end
         {
           "mode" => "fork",
@@ -143,10 +153,45 @@ module Hive
         }
       end
 
+      def verify_fork_of_upstream!(fork, json)
+        data = JSON.parse(json)
+        parent = data.dig("parent", "nameWithOwner").to_s
+        return if data["isFork"] == true && parent == @repository
+
+        raise Error,
+              "existing repository #{fork} is not a fork of #{@repository} " \
+              "(parent: #{parent.empty? ? 'none' : parent}); refusing to push a submission there"
+      rescue JSON::ParserError => e
+        raise Error, "gh repo view returned invalid JSON for #{fork}: #{e.message}"
+      end
+
+      # Creates the fork without reconfiguring any local git remotes
+      # (`--remote=false`) and from a neutral directory outside a checkout, so
+      # the isolated-cache/worktree guarantee holds even when publish runs from
+      # inside an unrelated repository. Then waits for GitHub to finish the
+      # asynchronous fork creation before the caller pushes to it.
+      def create_fork!(fork)
+        run!(
+          "gh", "repo", "fork", @repository, "--clone=false", "--remote=false",
+          label: "gh repo fork", chdir: File.dirname(@cache_path)
+        )
+        await_fork_ready!(fork)
+      end
+
+      def await_fork_ready!(fork)
+        FORK_READY_ATTEMPTS.times do |attempt|
+          _out, _err, status = capture("gh", "repo", "view", fork, "--json", "nameWithOwner")
+          return if status.success?
+
+          @sleeper.call(FORK_READY_INTERVAL_SEC) if attempt < FORK_READY_ATTEMPTS - 1
+        end
+        raise Error, "fork #{fork} was not ready after creation; re-run the publish to retry"
+      end
+
       def fork_missing?(stderr)
         text = stderr.to_s
         text.include?("Could not resolve to a Repository") ||
-          text.include?("404") ||
+          text.match?(/\bHTTP 404\b/) ||
           text.match?(/\bnot found\b/i)
       end
 
@@ -215,12 +260,31 @@ module Hive
       end
 
       def replace_package(worktree)
-        target = File.join(worktree, "workflows", @package.id)
+        workflows_dir = File.join(worktree, "workflows")
+        # The registry tree could track `workflows` as a symlink; following it
+        # would make the rm_rf/cp_r below delete or write `<target>/<id>`
+        # outside the disposable worktree. Refuse anything but a real directory
+        # resolving inside the worktree.
+        ensure_workflows_within_worktree!(worktree, workflows_dir)
+        target = File.join(workflows_dir, @package.id)
         FileUtils.rm_rf(target)
         FileUtils.mkdir_p(File.dirname(target))
         FileUtils.cp_r(@package.package_root, target)
       rescue SystemCallError => e
         raise Error, "failed to materialize honeycomb package: #{e.message}"
+      end
+
+      def ensure_workflows_within_worktree!(worktree, workflows_dir)
+        if File.symlink?(workflows_dir)
+          raise Error, "registry worktree 'workflows' is a symlink; refusing to write through it"
+        end
+        return unless File.exist?(workflows_dir)
+
+        real_worktree = File.realpath(worktree)
+        real_workflows = File.realpath(workflows_dir)
+        return if File.directory?(real_workflows) && real_workflows == File.join(real_worktree, "workflows")
+
+        raise Error, "registry worktree 'workflows' path escapes the disposable worktree"
       end
 
       def commit_package(worktree)
@@ -258,7 +322,7 @@ module Hive
         manifest = @package.manifest
         aggregate = @package.permission_summary.fetch("aggregate")
         review = Array(manifest["review_required"])
-        [
+        lines = [
           "Publishes honeycomb `#{@package.id}` version `#{@package.version}`.",
           "",
           "- Aggregate SHA-256: `#{manifest.fetch('aggregate_sha256')}`",
@@ -268,19 +332,35 @@ module Hive
           "- Shell exposure: #{Array(aggregate['shell_exposures']).join(', ')}",
           "- Review-required findings: #{review.length}",
           "- Push route: #{route.fetch('push_repository')}:#{branch}"
-        ].join("\n")
+        ]
+        # Registry reviewers need each justified high-risk finding spelled out —
+        # rule, location, owning contexts, and justification — not just a count.
+        unless review.empty?
+          lines << "" << "## Review-required findings"
+          review.each do |record|
+            location = [ record["file"], record["line"] ].compact.join(":")
+            lines << "- `#{record['rule']}` at #{location}"
+            lines << "  - contexts: #{Array(record['contexts']).join(', ')}"
+            lines << "  - justification: #{record['justification']}"
+          end
+        end
+        lines.join("\n")
       end
 
       def cleanup_worktree(worktree, branch, added)
         if added
           log_cleanup_failure("git worktree remove", worktree,
                               *capture("git", "-C", @cache_path, "worktree", "remove", "--force", worktree))
-          # A leaked cache branch blocks the next same-version publish with a
-          # confusing collision error, so surface (rather than swallow) a failed
-          # deletion even though cleanup itself is best-effort.
-          log_cleanup_failure("git branch -D #{branch}", worktree,
-                              *capture("git", "-C", @cache_path, "branch", "-D", branch))
         end
+        # Delete the branch UNCONDITIONALLY, independent of `added`: `git worktree
+        # add -b` can create the branch ref before it fails to register the
+        # worktree (ENOSPC / permission / interrupt), leaving `added == false`
+        # while the branch leaked. A leaked cache branch blocks the next
+        # same-version publish with a confusing collision error, so surface
+        # (rather than swallow) a failed deletion even though cleanup is
+        # best-effort. When the ref never existed this is a logged no-op.
+        log_cleanup_failure("git branch -D #{branch}", worktree,
+                            *capture("git", "-C", @cache_path, "branch", "-D", branch))
         FileUtils.rm_rf(worktree)
       rescue StandardError => e
         warn "hive: honeycomb worktree cleanup failed for #{worktree}: #{e.class}: #{e.message}"
@@ -293,18 +373,23 @@ module Hive
         warn "hive: honeycomb cleanup step `#{action}` failed for #{worktree}: #{err.to_s.strip}"
       end
 
-      def capture(*argv)
-        @runner.call(*argv, cfg: @cfg)
+      def capture(*argv, chdir: nil)
+        @runner.call(*argv, chdir: chdir, cfg: @cfg)
       rescue Hive::GhError => e
         raise Error, e.message
       end
 
-      def run!(*argv, label:)
-        out, err, status = capture(*argv)
+      def run!(*argv, label:, chdir: nil)
+        out, err, status = capture(*argv, chdir: chdir)
         return out if status.success?
 
-        detail = err.to_s.strip.empty? ? out.to_s.strip : err.to_s.strip
-        raise Error, "#{label} failed: #{detail[0, 500]}"
+        raise Error, "#{label} failed: #{command_detail(out, err)[0, 500]}"
+      end
+
+      # Prefer stderr for a command's failure detail, falling back to stdout when
+      # stderr is blank. Single definition so authenticate!/run! can't drift.
+      def command_detail(out, err)
+        err.to_s.strip.empty? ? out.to_s.strip : err.to_s.strip
       end
     end
   end

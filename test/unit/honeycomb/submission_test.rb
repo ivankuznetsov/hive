@@ -8,12 +8,14 @@ class HoneycombSubmissionTest < Minitest::Test
   include HiveTestHelper
 
   class RecordingRunner
-    attr_reader :commands, :commit_snapshot, :last_worktree
+    attr_reader :commands, :commit_snapshot, :last_worktree, :last_branch
 
     def initialize(cache_path:, permission: "WRITE", auth_exit: 0, origin: nil,
                    fork_exists: false, pr_exit: 0, local_collision: false,
                    remote_collision: false, fetch_exit: 0, repo_json: nil,
-                   local_exit: nil, remote_exit: nil)
+                   local_exit: nil, remote_exit: nil, fork_is_fork: true,
+                   fork_parent: "example/honeycomb", fork_view_error: nil,
+                   worktree_add_exit: 0, worktree_workflows_symlink: nil)
       @cache_path = cache_path
       @permission = permission
       @auth_exit = auth_exit
@@ -26,11 +28,17 @@ class HoneycombSubmissionTest < Minitest::Test
       @repo_json = repo_json
       @local_exit = local_exit
       @remote_exit = remote_exit
+      @fork_is_fork = fork_is_fork
+      @fork_parent = fork_parent
+      @fork_view_error = fork_view_error
+      @worktree_add_exit = worktree_add_exit
+      @worktree_workflows_symlink = worktree_workflows_symlink
+      @forked = false
       @commands = []
     end
 
-    def call(*cmd, cfg: nil)
-      @commands << { argv: cmd, cfg: cfg }
+    def call(*cmd, chdir: nil, cfg: nil)
+      @commands << { argv: cmd, chdir: chdir, cfg: cfg }
       out = ""
       err = ""
       exitstatus = 0
@@ -44,18 +52,26 @@ class HoneycombSubmissionTest < Minitest::Test
           "defaultBranchRef" => { "name" => "main" },
           "viewerPermission" => @permission
         )
-      elsif cmd == [ "gh", "repo", "view", "alice/honeycomb", "--json", "nameWithOwner" ]
-        if @fork_exists
-          out = JSON.generate("nameWithOwner" => "alice/honeycomb")
+      elsif cmd[0, 4] == [ "gh", "repo", "view", "alice/honeycomb" ]
+        if @fork_exists || @forked
+          out = JSON.generate(
+            "nameWithOwner" => "alice/honeycomb",
+            "isFork" => @fork_is_fork,
+            "parent" => @fork_parent ? { "nameWithOwner" => @fork_parent } : nil
+          )
+        elsif @fork_view_error
+          exitstatus = @fork_view_error.fetch(:exit, 1)
+          err = @fork_view_error.fetch(:err)
         else
           exitstatus = 1
-          err = "not found"
+          err = "HTTP 404: Not Found (https://api.github.com/repos/alice/honeycomb)"
         end
       elsif cmd == [ "gh", "api", "user", "--jq", ".login" ]
         out = "alice\n"
       elsif cmd[0, 4] == [ "gh", "repo", "clone", "example/honeycomb" ]
         FileUtils.mkdir_p(File.join(cmd[4], ".git"))
-      elsif cmd == [ "gh", "repo", "fork", "example/honeycomb", "--clone=false" ]
+      elsif cmd == [ "gh", "repo", "fork", "example/honeycomb", "--clone=false", "--remote=false" ]
+        @forked = true
         out = "https://github.com/alice/honeycomb\n"
       elsif cmd[0, 3] == [ "gh", "pr", "create" ]
         if @pr_exit.zero?
@@ -75,10 +91,23 @@ class HoneycombSubmissionTest < Minitest::Test
         exitstatus = @remote_exit || (@remote_collision ? 0 : 2)
       elsif cmd[0, 8] == [ "git", "-C", @cache_path, "worktree", "add", "-b", cmd[6], cmd[7] ]
         @last_worktree = cmd[7]
-        FileUtils.mkdir_p(File.join(@last_worktree, "workflows", "sample"))
-        FileUtils.mkdir_p(File.join(@last_worktree, "workflows", "other"))
-        File.write(File.join(@last_worktree, "workflows", "sample", "stale.txt"), "stale\n")
-        File.write(File.join(@last_worktree, "workflows", "other", "keep.txt"), "keep\n")
+        @last_branch = cmd[6]
+        if @worktree_add_exit.zero?
+          if @worktree_workflows_symlink
+            FileUtils.mkdir_p(@last_worktree)
+            File.symlink(@worktree_workflows_symlink, File.join(@last_worktree, "workflows"))
+          else
+            FileUtils.mkdir_p(File.join(@last_worktree, "workflows", "sample"))
+            FileUtils.mkdir_p(File.join(@last_worktree, "workflows", "other"))
+            File.write(File.join(@last_worktree, "workflows", "sample", "stale.txt"), "stale\n")
+            File.write(File.join(@last_worktree, "workflows", "other", "keep.txt"), "keep\n")
+          end
+        else
+          # Simulate `git worktree add -b` creating the branch ref but failing
+          # to register the worktree (the leaked-branch scenario).
+          exitstatus = @worktree_add_exit
+          err = "fatal: could not create work tree dir"
+        end
       elsif cmd[0, 10] == [ "git", "-c", "user.name=Hive", "-c", "user.email=hive@localhost",
                             "-c", "commit.gpgsign=false", "-C", cmd[8], "commit" ]
         worktree = cmd[8]
@@ -116,7 +145,7 @@ class HoneycombSubmissionTest < Minitest::Test
         result = submit(package, cache_path, runner)
 
         assert_equal "direct", result.mode, permission
-        refute_command runner, [ "gh", "repo", "fork", "example/honeycomb", "--clone=false" ]
+        refute_command runner, [ "gh", "repo", "fork", "example/honeycomb", "--clone=false", "--remote=false" ]
       end
     end
   end
@@ -145,7 +174,7 @@ class HoneycombSubmissionTest < Minitest::Test
 
       assert_equal "fork", result.mode
       assert_equal "alice/honeycomb", result.push_repository
-      assert_command runner, [ "gh", "repo", "fork", "example/honeycomb", "--clone=false" ]
+      assert_command runner, [ "gh", "repo", "fork", "example/honeycomb", "--clone=false", "--remote=false" ]
       assert_command runner, [
         "git", "-C", runner.last_worktree, "push", "-u",
         "https://github.com/alice/honeycomb.git", result.branch
@@ -159,7 +188,7 @@ class HoneycombSubmissionTest < Minitest::Test
     with_submission_fixture do |package, cache_path|
       runner = RecordingRunner.new(cache_path: cache_path, permission: "TRIAGE", fork_exists: true)
       submit(package, cache_path, runner)
-      refute_command runner, [ "gh", "repo", "fork", "example/honeycomb", "--clone=false" ]
+      refute_command runner, [ "gh", "repo", "fork", "example/honeycomb", "--clone=false", "--remote=false" ]
     end
   end
 
@@ -305,6 +334,149 @@ class HoneycombSubmissionTest < Minitest::Test
     end
   end
 
+  def test_transient_fork_status_failure_fails_closed_without_forking
+    with_submission_fixture do |package, cache_path|
+      runner = RecordingRunner.new(
+        cache_path: cache_path, permission: "READ",
+        fork_view_error: { exit: 1, err: "HTTP 500: Internal Server Error" }
+      )
+      error = assert_raises(Hive::Honeycomb::Submission::Error) do
+        submit(package, cache_path, runner)
+      end
+
+      assert_match(/could not determine fork status/, error.message)
+      refute_command runner, [ "gh", "repo", "fork", "example/honeycomb", "--clone=false", "--remote=false" ]
+    end
+  end
+
+  def test_existing_namesake_that_is_not_a_fork_of_upstream_is_refused
+    with_submission_fixture do |package, cache_path|
+      runner = RecordingRunner.new(
+        cache_path: cache_path, permission: "READ",
+        fork_exists: true, fork_is_fork: false, fork_parent: nil
+      )
+      error = assert_raises(Hive::Honeycomb::Submission::Error) do
+        submit(package, cache_path, runner)
+      end
+
+      assert_match(/is not a fork of example\/honeycomb/, error.message)
+      refute_command runner, [ "git", "-C", runner.last_worktree.to_s, "push", "-u",
+                               "https://github.com/alice/honeycomb.git", "submit-sample-v1.2.3" ]
+    end
+
+    with_submission_fixture do |package, cache_path|
+      runner = RecordingRunner.new(
+        cache_path: cache_path, permission: "READ",
+        fork_exists: true, fork_parent: "someone-else/honeycomb"
+      )
+      error = assert_raises(Hive::Honeycomb::Submission::Error) do
+        submit(package, cache_path, runner)
+      end
+      assert_match(/is not a fork of example\/honeycomb/, error.message)
+    end
+  end
+
+  def test_fork_creation_disables_remote_reconfiguration_and_waits_for_readiness
+    with_submission_fixture do |package, cache_path|
+      runner = RecordingRunner.new(cache_path: cache_path, permission: "READ")
+      result = submit(package, cache_path, runner)
+
+      assert_equal "fork", result.mode
+      fork_call = runner.commands.find { |row| row[:argv][0, 3] == [ "gh", "repo", "fork" ] }
+      assert_equal [ "gh", "repo", "fork", "example/honeycomb", "--clone=false", "--remote=false" ],
+                   fork_call.fetch(:argv)
+      # Runs from a neutral directory (never inside a git checkout) so no local
+      # remotes are reconfigured.
+      assert_equal File.dirname(cache_path), fork_call.fetch(:chdir)
+      # Readiness poll happens after the fork is created, before the push.
+      assert_command runner, [ "gh", "repo", "view", "alice/honeycomb", "--json", "nameWithOwner" ]
+    end
+  end
+
+  def test_cache_miss_clone_pins_blobless_filter_argv
+    with_submission_fixture do |package, cache_path|
+      runner = RecordingRunner.new(cache_path: cache_path)
+      submit(package, cache_path, runner)
+
+      assert_command runner, [
+        "gh", "repo", "clone", "example/honeycomb", cache_path, "--", "--filter=blob:none"
+      ]
+    end
+  end
+
+  def test_no_push_uses_force_on_any_route
+    [ "WRITE", "READ" ].each do |permission|
+      with_submission_fixture do |package, cache_path|
+        runner = RecordingRunner.new(cache_path: cache_path, permission: permission)
+        submit(package, cache_path, runner)
+
+        pushes = runner.commands.map { |row| row.fetch(:argv) }
+                       .select { |argv| argv[0, 2] == [ "git", "-C" ] && argv.include?("push") }
+        refute_empty pushes, permission
+        pushes.each do |argv|
+          refute_includes argv, "--force", "#{permission}: push must not force"
+          refute_includes argv, "--force-with-lease", "#{permission}: push must not force-with-lease"
+          refute_includes argv, "-f", permission
+        end
+      end
+    end
+  end
+
+  def test_leaked_branch_is_deleted_when_worktree_add_fails
+    with_submission_fixture do |package, cache_path|
+      runner = RecordingRunner.new(cache_path: cache_path, worktree_add_exit: 1)
+      assert_raises(Hive::Honeycomb::Submission::Error) do
+        submit(package, cache_path, runner)
+      end
+
+      # `git worktree add -b` failed (branch ref may have leaked), so cleanup
+      # must delete the branch even though the worktree was never registered.
+      assert_command runner, [ "git", "-C", cache_path, "branch", "-D", "submit-sample-v1.2.3" ]
+    end
+  end
+
+  def test_symlinked_workflows_in_registry_worktree_is_refused
+    with_submission_fixture do |package, cache_path|
+      outside = Dir.mktmpdir("outside-")
+      begin
+        runner = RecordingRunner.new(cache_path: cache_path, worktree_workflows_symlink: outside)
+        error = assert_raises(Hive::Honeycomb::Submission::Error) do
+          submit(package, cache_path, runner)
+        end
+
+        assert_match(/symlink/, error.message)
+        assert_empty Dir.children(outside), "must not write the package through a workflows symlink"
+      ensure
+        FileUtils.remove_entry(outside)
+      end
+    end
+  end
+
+  def test_review_required_findings_are_detailed_in_the_pr_body
+    with_submission_fixture do |package, cache_path|
+      package = package.with_manifest(package.manifest.merge(
+        "review_required" => [
+          {
+            "rule" => "shell_download_to_interpreter",
+            "file" => "work.md",
+            "line" => 12,
+            "contexts" => [ "stage:work" ],
+            "justification" => "stage:work: digest-pinned internal installer"
+          }
+        ]
+      ))
+      runner = RecordingRunner.new(cache_path: cache_path)
+      submit(package, cache_path, runner)
+
+      pr_call = runner.commands.find { |row| row[:argv][0, 3] == [ "gh", "pr", "create" ] }
+      body = pr_call.fetch(:argv)[pr_call.fetch(:argv).index("--body") + 1]
+      assert_includes body, "## Review-required findings"
+      assert_includes body, "`shell_download_to_interpreter` at work.md:12"
+      assert_includes body, "contexts: stage:work"
+      assert_includes body, "digest-pinned internal installer"
+    end
+  end
+
   def test_lock_collision_is_retryable_and_does_not_authenticate
     with_submission_fixture do |package, cache_path|
       runner = RecordingRunner.new(cache_path: cache_path)
@@ -363,7 +535,8 @@ class HoneycombSubmissionTest < Minitest::Test
         repository: "example/honeycomb",
         cache_path: cache_path,
         runner: runner.method(:call),
-        locker: ->(_path, &block) { block.call }
+        locker: ->(_path, &block) { block.call },
+        sleeper: ->(_seconds) {}
       )
     end
 

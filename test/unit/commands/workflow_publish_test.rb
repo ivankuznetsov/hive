@@ -75,6 +75,27 @@ class WorkflowPublishTest < Minitest::Test
     end
   end
 
+  def test_dry_run_leaves_no_durable_package_or_staging_directory
+    with_publish_project do |project_root, _descriptor_path|
+      captured = nil
+      real_preflight = Hive::Honeycomb::Preflight.method(:run)
+      preflight = lambda do |package:, project_root:, cfg:|
+        captured = package
+        real_preflight.call(package: package, project_root: project_root, cfg: cfg)
+      end
+      command = Hive::Commands::WorkflowPublish.new(
+        "safe", project_root: project_root, dry_run: true, stdout: StringIO.new,
+        preflight: preflight, submission: ->(**) { flunk "dry-run must not submit" }
+      )
+
+      command.call!
+
+      refute_nil captured
+      refute File.exist?(captured.package_root), "dry-run must leave no package directory"
+      refute File.exist?(captured.staging_root), "dry-run must leave no staging directory"
+    end
+  end
+
   def test_invalid_selection_version_and_metadata_fail_before_submission
     with_publish_project(metadata: { "description" => "Incomplete" }) do |project_root, _descriptor_path|
       submissions = 0

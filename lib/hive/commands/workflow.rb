@@ -321,7 +321,12 @@ module Hive
         end
 
         if @subcommand == "publish"
-          if @template
+          # Guard on a non-default template only: the constructor defaults
+          # `template:` to DEFAULT_TEMPLATE, so `@template` is always truthy and
+          # a bare `if @template` would wrongly reject a direct-API
+          # `Workflow.new("publish", id)`. The CLI forwards Thor's nil-when-unset
+          # option, so `--template` set on the command line still trips this.
+          if @template && @template != DEFAULT_TEMPLATE
             raise UsageError.new("--template applies only to `workflow new`", value: @template)
           end
           require "hive/commands/workflow_publish"
@@ -406,7 +411,7 @@ module Hive
       # (agents branch on those uniformly).
       def error_payload(error)
         Hive::Schemas::ErrorEnvelope.build(
-          schema: SCHEMA,
+          schema: @subcommand == "publish" ? "hive-workflow-publish" : SCHEMA,
           error: error,
           error_kind: error_kind_for(error),
           extras: error_extras(error)

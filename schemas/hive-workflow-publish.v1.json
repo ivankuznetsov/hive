@@ -81,7 +81,37 @@
         "submission_mode": { "type": ["string", "null"], "enum": ["direct", "fork", null] },
         "branch": { "type": ["string", "null"] },
         "pr_url": { "type": ["string", "null"] }
-      }
+      },
+      "allOf": [
+        {
+          "$comment": "A dry run performs no submission, so mode/branch/pr_url are null.",
+          "if": {
+            "required": ["dry_run"],
+            "properties": { "dry_run": { "const": true } }
+          },
+          "then": {
+            "properties": {
+              "submission_mode": { "const": null },
+              "branch": { "const": null },
+              "pr_url": { "const": null }
+            }
+          }
+        },
+        {
+          "$comment": "A real submission always resolves a mode, branch, and PR URL.",
+          "if": {
+            "required": ["dry_run"],
+            "properties": { "dry_run": { "const": false } }
+          },
+          "then": {
+            "properties": {
+              "submission_mode": { "type": "string", "enum": ["direct", "fork"] },
+              "branch": { "type": "string", "minLength": 1 },
+              "pr_url": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      ]
     },
     "ErrorPayload": {
       "type": "object",

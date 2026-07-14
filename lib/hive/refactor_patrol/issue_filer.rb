@@ -36,6 +36,7 @@ module Hive
         public_contract_change
         public_contract_safety_unavailable
         secret_detected
+        symlinked_path
         validation_changed_head
         validation_failed
         validation_mutated_worktree

@@ -24,6 +24,7 @@ class RefactorPatrolFixerTest < Minitest::Test
     )
 
     assert_equal "fix_error", result.outcome
+    assert result.terminal
     assert_includes result.details.fetch("error"), "canonical fix action identity is invalid"
   end
 
@@ -298,6 +299,98 @@ class RefactorPatrolFixerTest < Minitest::Test
       assert_equal "boundary_violation", patch.outcome
       assert patch.terminal
       refute validator_called
+    end
+  end
+
+  def test_staged_rename_cannot_hide_the_vacated_path_from_the_boundary_guard
+    with_repo do |repo, _analysis_sha|
+      analysis_sha = commit_file(
+        repo, "legacy/notes.rb", "# memo one\n# memo two\n# memo three\n# memo four\n"
+      )
+      item = thesis(boundary_file: "lib/renamed_notes.rb")
+      agent = lambda do |worktree_path:, **|
+        run!("git", "-C", worktree_path, "mv", "legacy/notes.rb", "lib/renamed_notes.rb")
+        File.open(File.join(worktree_path, "lib/renamed_notes.rb"), "a") { |file| file.puts("# memo five") }
+        { status: :ok }
+      end
+
+      patch = fixer(repo, agent: agent)
+              .attempt(thesis: item, job_id: "job-7", analysis_sha: analysis_sha)
+
+      assert_equal "boundary_violation", patch.outcome, patch.to_h.inspect
+      assert patch.terminal
+      assert_includes patch.details.fetch("outside"), "legacy/notes.rb"
+    end
+  end
+
+  def test_staged_rename_of_a_public_api_file_trips_the_contract_guard
+    with_repo do |repo, _analysis_sha|
+      analysis_sha = commit_file(repo, "bin/deploy", "#!/bin/sh\necho deploy\n")
+      item = thesis(boundary_files: [ "bin/deploy", "lib/deploy.rb" ])
+      agent = lambda do |worktree_path:, **|
+        run!("git", "-C", worktree_path, "mv", "bin/deploy", "lib/deploy.rb")
+        { status: :ok }
+      end
+
+      patch = fixer(repo, agent: agent)
+              .attempt(thesis: item, job_id: "job-7", analysis_sha: analysis_sha)
+
+      assert_equal "public_contract_change", patch.outcome, patch.to_h.inspect
+      assert patch.terminal
+    end
+  end
+
+  def test_symlinked_changed_path_fails_the_audit_before_any_content_guard
+    with_repo do |repo, analysis_sha|
+      validator = lambda do |_commands|
+        Object.new.tap do |object|
+          object.define_singleton_method(:validate) do |**|
+            flunk "symlinked paths must fail before validation"
+          end
+        end
+      end
+      agent = lambda do |worktree_path:, **|
+        replaced = File.join(worktree_path, "lib/checkout.rb")
+        File.delete(replaced)
+        File.symlink("/outside/secret", replaced)
+        { status: :ok }
+      end
+
+      patch = fixer(repo, agent: agent, validator: validator)
+              .attempt(thesis: thesis, job_id: "job-7", analysis_sha: analysis_sha)
+
+      assert_equal "symlinked_path", patch.outcome, patch.to_h.inspect
+      assert patch.terminal
+      assert_equal [ "lib/checkout.rb" ], patch.details.fetch("symlinked_paths")
+      refute File.directory?(patch.worktree_path)
+    end
+  end
+
+  def test_public_contract_base_read_failure_is_not_treated_as_a_new_file
+    with_repo do |repo, _analysis_sha|
+      subject = fixer(repo, agent: ->(**) { })
+
+      error = assert_raises(Hive::GitError) do
+        subject.send(:public_declaration_changed?, repo, "0" * 40, "lib/checkout.rb")
+      end
+
+      assert_includes error.message, "cannot verify refactor audit base commit"
+    end
+  end
+
+  def test_config_error_during_fix_is_terminal_with_error_details
+    with_repo do |repo, analysis_sha|
+      agent = lambda do |**|
+        raise Hive::ConfigError, "auto-fix provider cannot enforce workspace-write isolation"
+      end
+
+      patch = fixer(repo, agent: agent)
+              .attempt(thesis: thesis, job_id: "job-7", analysis_sha: analysis_sha)
+
+      assert_equal "fix_error", patch.outcome
+      assert patch.terminal
+      assert_includes patch.details.fetch("error"), "Hive::ConfigError"
+      assert_includes patch.details.fetch("error"), "workspace-write isolation"
     end
   end
 
@@ -1100,13 +1193,14 @@ class RefactorPatrolFixerTest < Minitest::Test
     )
   end
 
-  def thesis(boundary_file: "lib/checkout.rb")
+  def thesis(boundary_file: "lib/checkout.rb", boundary_files: nil)
+    files = boundary_files || [ boundary_file ]
     Hive::RefactorPatrol::Thesis.new(
       id: "extract-checkout", feature_id: "checkout", feature: "Checkout",
       problem: "Checkout mixes concerns", cost: "Every change fans out",
-      evidence: [ { "file" => boundary_file, "signal" => "churn", "value" => 10 } ],
+      evidence: [ { "file" => files.first, "signal" => "churn", "value" => 10 } ],
       proposed_refactor: "Extract the internal orchestration",
-      feature_boundary: { "owned_files" => [ boundary_file ], "entrypoints" => [ boundary_file ] },
+      feature_boundary: { "owned_files" => files, "entrypoints" => [ files.first ] },
       expected_leverage: { "score" => 0.8, "breakdown" => { "churn" => 0.8 } },
       confidence: "medium",
       risk: { "flags" => [], "caps" => { "est_files" => 1, "est_diff_lines" => 10 } },

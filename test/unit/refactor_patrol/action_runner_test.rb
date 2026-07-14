@@ -538,6 +538,35 @@ class RefactorPatrolActionRunnerTest < Minitest::Test
     end
   end
 
+  def test_transient_fix_error_details_persist_as_generation_scoped_release_evidence
+    with_tmp_dir do |dir|
+      store = write_classified_job(
+        dir,
+        policy: snapshot_policy("auto_fix" => true),
+        dispositions: dispositions(accepted: [ disposition(thesis(id: "accepted-evidence")) ])
+      )
+      failed = Hive::RefactorPatrol::Fixer::Result.new(
+        outcome: "fix_error", terminal: false, analysis_sha: "c" * 40,
+        details: { "error" => "Hive::GitError: registered checkout must be clean before refactor fix" }
+      )
+      fixer = FakeFixer.new(failed, fix_result("no_diff", terminal: true))
+      runner = build_runner(dir, store: store, fixer: fixer, backoff_sec: 0)
+
+      first = runner.run(job_id: "job-1")
+
+      refute first.complete?
+      action = first.actions.find { |entry| entry.fetch("kind") == "fix" }
+      assert_equal "fix_error", action.fetch("outcome")
+      evidence = action.fetch("receipts").fetch("fix_release_1")
+      assert_equal "fix_error", evidence.fetch("outcome")
+      assert_includes evidence.fetch("details"), "registered checkout must be clean"
+
+      second = runner.run(job_id: "job-1")
+      assert second.complete?
+      assert_equal "no_diff", second.actions.find { |entry| entry.fetch("kind") == "fix" }.fetch("outcome")
+    end
+  end
+
   def test_closed_unmerged_refactor_pr_routes_the_accepted_thesis_to_an_issue
     with_tmp_dir do |dir|
       item = thesis(id: "closed-pr")

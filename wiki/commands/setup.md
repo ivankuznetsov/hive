@@ -3,7 +3,7 @@ title: hive setup
 type: command
 source: lib/hive/commands/setup.rb, lib/hive/setup/diagnostics.rb, lib/hive/web/app_bundle.rb, lib/hive/commands/{daemon,web}/service_installer.rb
 created: 2026-06-30
-updated: 2026-07-02
+updated: 2026-07-14
 tags: [command, setup, install, web, daemon]
 ---
 
@@ -55,6 +55,10 @@ phase with a `"Class: message"` `message` instead of aborting before the JSON
 envelope can be emitted. This covers QMD bootstrap, web-bundle refresh, daemon
 service install, enrollment, and optional web-service install through the same
 failure shape.
+
+Malformed `--json` argv rejected before `Setup` runs emits an unversioned
+`hive-setup` `ok:false` usage document and exits 64 rather than leaving stdout
+empty with Thor prose only.
 
 ## Web Bundle
 

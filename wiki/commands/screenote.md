@@ -3,7 +3,7 @@ title: hive connect/disconnect screenote
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/connect.rb, lib/hive/commands/disconnect.rb, lib/hive/screenote/
 created: 2026-06-22
-updated: 2026-06-22
+updated: 2026-07-14
 tags: [command, screenote, oauth, mcp]
 ---
 
@@ -56,6 +56,11 @@ the browser cannot auto-open — then a success document containing `ok`,
 `service`, `base_url`, `issuer`, `client_id`, `project_id`, and
 `credential_path`. Error handling uses the normal `Hive::Error` /
 `Hive::ConfigError` CLI path.
+
+Thor failures that occur before connect/disconnect dispatch (for example a
+missing `SERVICE`) use the same shared Screenote error payload as command-level
+failures, so stdout still contains one `ok:false`, `service: "screenote"`
+document and the process exits 64.
 
 ## Disconnect Behavior
 

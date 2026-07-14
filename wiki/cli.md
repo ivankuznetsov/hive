@@ -47,16 +47,20 @@ error envelope instead of a Ruby/Thor backtrace.
 
 When a JSON request fails in Thor before the command object runs, `bin/hive`
 uses `JSON_USAGE_ERROR_CONTRACTS` to keep the error shaped like the requested
-surface. Missing-target or missing-project usage errors for `run`,
-`rebase-status`, workflow verbs, `approve`, `drop`, `findings`,
-`accept-finding`, `reject-finding`, `markers`, and `patrol` emit a
-command-specific JSON failure on stdout before the human `hive:` stderr line.
-Schemas registered in `Hive::Schemas::SCHEMA_VERSIONS` use
+surface. The resolver covers every command with a documented JSON failure
+contract and selects mode-specific schemas for `status --diagnose`, pairing,
+daemon queue/enrollment, digest sources, and web install/status. This keeps
+malformed doctor, setup, Screenote, registry, status, metrics, workflow, patrol,
+daemon, bot, pairing, and web invocations on structured stdout instead of
+falling back to Thor-only stderr prose.
+Full envelopes registered in `Hive::Schemas::SCHEMA_VERSIONS` use
 `Hive::Schemas::ErrorEnvelope` and include `schema_version`; the older
-`hive-rebase-status` inspector keeps its unversioned sibling shape. Workflow
-verbs include the `verb` extra (`pr` maps to `open-pr`), finding toggles include
-`operation`, and patrol's pre-dispatch usage failure uses the `hive-patrol`
-schema with `error_kind: "error"`.
+`hive-rebase-status` inspector and setup/doctor/web surfaces keep their
+unversioned sibling shapes. Screenote uses its shared service error builder and
+metrics and daemon queue use their narrower schema-specific ErrorPayload arms.
+Workflow verbs include the `verb` extra (`pr` maps to `open-pr`), finding
+toggles include `operation`, and patrol's pre-dispatch usage failure uses the
+`hive-patrol` schema with `error_kind: "error"`.
 
 `bin/hv` is a bash fallback launcher for Apache Hive name collisions. It deliberately avoids `command -v hive`; instead it probes only `HIVE_BIN_OVERRIDE`, `${XDG_BIN_HOME:-$HOME/.local/bin}/hive`, `${HOMEBREW_PREFIX:-/opt/homebrew}/bin/hive`, and `/usr/local/bin/hive`, skipping a target that resolves back to itself. It does not implicitly exec `/usr/bin/hive` or `/opt/hive/bin/hive`, because those paths may be Apache Hive installs. If no candidate is executable it exits `127` and tells the operator to set `HIVE_BIN_OVERRIDE` or install through the documented channels. `bin/hv` remains in the gem payload for channel installers to copy/read, but it is not listed in `spec.executables`; RubyGems would otherwise generate a Ruby binstub for this bash launcher. See [[operating]] for channel-level `hv` behavior.
 

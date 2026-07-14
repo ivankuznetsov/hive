@@ -18,6 +18,7 @@ STAGE_ACTION_USAGE_COMMANDS = %w[brainstorm plan develop open-pr review artifact
 NEW_VALUE_OPTIONS = %w[--depends-on --workflow].freeze
 JSON_USAGE_ERROR_CONTRACTS = {
   "run" => { schema: "hive-run", error_kind: "invalid_task_path" },
+  "status" => { schema: "hive-status", error_kind: "error" },
   "rebase-status" => { schema: "hive-rebase-status", schema_version: 1, error_kind: "invalid_task_path" },
   "approve" => { schema: "hive-approve", error_kind: "invalid_task_path" },
   "drop" => { schema: "hive-drop", error_kind: "invalid_task_path" },
@@ -34,8 +35,14 @@ JSON_USAGE_ERROR_CONTRACTS = {
     extras: { "operation" => "reject" }
   },
   "markers" => { schema: "hive-markers-clear", error_kind: "invalid_task_path" },
+  "forget" => { schema: "hive-forget", error_kind: "usage" },
+  "prune" => { schema: "hive-prune", error_kind: "usage" },
+  "doctor" => { schema: "hive-doctor.v1", schema_version: false, error_kind: "usage" },
+  "setup" => { schema: "hive-setup", schema_version: false, error_kind: "usage" },
+  "connect" => { format: :screenote },
+  "disconnect" => { format: :screenote },
+  "metrics" => { schema: "hive-metrics-rollback-rate", error_kind: "error", error_class: false },
   "digest" => { schema: "hive-digest", error_kind: "usage" },
-  "pairing" => { schema: "hive-pairing-approve", error_kind: "usage" },
   "answer-digest" => { schema: "hive-answer-digest", error_kind: "usage" },
   # Residual workflow argv-shape errors raised by Thor before command dispatch
   # (for example too many positionals) must ride the same JSON envelope as the
@@ -240,19 +247,70 @@ def digest_merged_pr_argv?(argv)
 end
 
 def json_usage_error_contract(argv)
-  command = argv.find { |arg| !arg.start_with?("-") }
+  command_idx = argv.index { |arg| arg.valid_encoding? && !arg.start_with?("-") }
+  return nil unless command_idx
+
+  command = argv[command_idx]
+  positionals = argv[(command_idx + 1)..].select { |arg| arg.valid_encoding? && !arg.start_with?("-") }
+
   if command == "digest" && digest_merged_pr_argv?(argv)
     return { schema: "hive-merged-pr-digest", error_kind: "usage" }
+  end
+  if command == "status" && argv.any? { |arg| arg.valid_encoding? && (arg == "--diagnose" || arg.start_with?("--diagnose=")) }
+    return { schema: "hive-status-diagnose", error_kind: "error" }
+  end
+  if command == "pairing"
+    require "hive/commands/pairing"
+    subcommand = positionals.find { |arg| Hive::Commands::Pairing::VALID_SUBCOMMANDS.include?(arg) }
+    schema = subcommand == "approve" ? "hive-pairing-approve" : "hive-pairing-list"
+    return { schema: schema, error_kind: "invalid_arguments" }
+  end
+  if command == "daemon"
+    require "hive/commands/daemon"
+    subcommand_idx = positionals.index { |arg| Hive::Commands::Daemon::VALID_SUBCOMMANDS.include?(arg) }
+    subcommand = positionals[subcommand_idx] if subcommand_idx
+    if subcommand == "queue"
+      return {
+        schema: "hive-daemon-queue",
+        format: :daemon_queue,
+        error_kind: "invalid_arguments",
+        extras: { "action" => positionals[subcommand_idx + 1] }
+      }
+    end
+
+    return { schema: "hive-daemon-enroll", error_kind: "wrong_subcommand_flag" }
+  end
+  if command == "web"
+    require "hive/commands/web"
+    subcommand = positionals.find { |arg| Hive::Commands::Web::VALID_SUBCOMMANDS.include?(arg) }
+    return nil unless %w[install status].include?(subcommand)
+
+    return { schema: "hive-web-#{subcommand}", schema_version: false, error_kind: "invalid_task_path" }
   end
 
   JSON_USAGE_ERROR_CONTRACTS[command]
 end
 
 def json_usage_error_payload(contract, error)
+  if contract[:format] == :screenote
+    require "hive/commands/screenote_envelope"
+    return Hive::Commands::ScreenoteEnvelope.error_payload(error)
+  end
+  if contract[:format] == :daemon_queue
+    return {
+      "schema" => contract.fetch(:schema),
+      "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch(contract.fetch(:schema)),
+      "ok" => false,
+      "action" => contract.fetch(:extras).fetch("action"),
+      "error_kind" => contract.fetch(:error_kind),
+      "message" => error.message
+    }
+  end
+
   schema = contract.fetch(:schema)
   error_kind = contract.fetch(:error_kind)
   extras = contract.fetch(:extras, {})
-  if Hive::Schemas::SCHEMA_VERSIONS.key?(schema)
+  if Hive::Schemas::SCHEMA_VERSIONS.key?(schema) && contract.fetch(:error_class, true)
     return Hive::Schemas::ErrorEnvelope.build(
       schema: schema,
       error: error,
@@ -261,15 +319,20 @@ def json_usage_error_payload(contract, error)
     )
   end
 
-  {
+  payload = {
     "schema" => schema,
-    "schema_version" => contract.fetch(:schema_version, 1),
     "ok" => false,
-    "error_class" => error.class.name.split("::").last,
     "error_kind" => error_kind,
     "exit_code" => error.respond_to?(:exit_code) ? error.exit_code : Hive::ExitCodes::GENERIC,
     "message" => error.message
   }.merge(extras)
+  payload["error_class"] = error.class.name.split("::").last if contract.fetch(:error_class, true)
+  if Hive::Schemas::SCHEMA_VERSIONS.key?(schema)
+    payload["schema_version"] = Hive::Schemas::SCHEMA_VERSIONS.fetch(schema)
+  elsif contract[:schema_version] != false
+    payload["schema_version"] = contract.fetch(:schema_version, 1)
+  end
+  payload
 end
 
 def emit_json_usage_error(argv, error)

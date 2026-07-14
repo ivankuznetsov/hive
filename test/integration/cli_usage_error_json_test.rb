@@ -56,6 +56,73 @@ class CliUsageErrorJsonTest < Minitest::Test
     end
   end
 
+  def test_json_usage_errors_use_supported_command_contracts_before_dispatch
+    cases = [
+      [ %w[doctor --json --bogus], { "schema" => "hive-doctor.v1" } ],
+      [ %w[connect --json], { "service" => "screenote" } ],
+      [ %w[disconnect --json], { "service" => "screenote" } ],
+      [ %w[setup --json --bogus], { "schema" => "hive-setup" } ],
+      [ %w[status --json --bogus], versioned_contract("hive-status") ],
+      [ %w[forget demo --json --bogus], versioned_contract("hive-forget") ],
+      [ %w[prune --json --bogus], versioned_contract("hive-prune") ],
+      [ %w[metrics rollback-rate --json --bogus], versioned_contract("hive-metrics-rollback-rate") ],
+      [ %w[web status extra --json], { "schema" => "hive-web-status" } ]
+    ]
+
+    with_tmp_global_config do |home|
+      cases.each do |argv, expected|
+        out, _err, status = run_hive(home, *argv)
+
+        refute status.success?, "#{argv.join(' ')} should fail"
+        assert_equal Hive::ExitCodes::USAGE, status.exitstatus
+        payload = JSON.parse(out)
+        assert_equal false, payload["ok"]
+        assert_equal "InvalidTaskPath", payload["error_class"] unless payload["schema"] == "hive-metrics-rollback-rate"
+        assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
+        expected.each { |key, value| assert_equal value, payload[key] }
+        assert_registered_schema_valid(payload)
+      end
+    end
+  end
+
+  def versioned_contract(schema)
+    { "schema" => schema, "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch(schema) }
+  end
+
+  def assert_registered_schema_valid(payload)
+    schema = payload["schema"]
+    return unless Hive::Schemas::SCHEMA_VERSIONS.key?(schema)
+
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path(schema))))
+    assert_empty schemer.validate(payload).map { |error| error["error"] }, "#{schema} payload must validate"
+  end
+
+  def test_json_usage_contract_resolution_is_subcommand_aware
+    invalid = "bad\xFF".b
+    cases = [
+      [ [ "status", "--diagnose", "task", "--json", invalid ], "hive-status-diagnose" ],
+      [ [ "status", "--diagnose=task", "--json", invalid ], "hive-status-diagnose" ],
+      [ [ "pairing", "list", "--json", invalid ], "hive-pairing-list" ],
+      [ [ "pairing", "approve", "--json", invalid ], "hive-pairing-approve" ],
+      [ [ "daemon", "status", "--json", invalid ], "hive-daemon-enroll" ],
+      [ [ "daemon", "queue", "list", "--json", invalid ], "hive-daemon-queue" ],
+      [ %w[web --port 3000 install extra --json], "hive-web-install" ]
+    ]
+
+    with_tmp_global_config do |home|
+      cases.each do |argv, schema|
+        out, _err, status = run_hive(home, *argv)
+
+        refute status.success?, "#{argv.first(3).join(' ')} should fail"
+        assert_equal Hive::ExitCodes::USAGE, status.exitstatus
+        payload = JSON.parse(out)
+        assert_equal schema, payload["schema"]
+        assert_equal false, payload["ok"]
+        assert_registered_schema_valid(payload)
+      end
+    end
+  end
+
   # Bare `hive workflow` (no subcommand) with --json must ride the
   # hive-workflow-new envelope (error_kind "usage"), not Thor's generic arity
   # prose. The sibling `hive workflow new` no-id case raises the command's own

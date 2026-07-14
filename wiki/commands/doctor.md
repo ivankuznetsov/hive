@@ -3,7 +3,7 @@ title: hive doctor
 type: command
 source: lib/hive/commands/doctor.rb, lib/hive/skill_check.rb
 created: 2026-05-07
-updated: 2026-06-14
+updated: 2026-07-14
 tags: [command, preflight, skills, tmux]
 ---
 
@@ -77,6 +77,10 @@ Field history (all additive — schema name stays `v1`):
 - 2026-05-07: `configured_skill` added on `checks[]`. Carries the raw config-supplied value alongside `skill`, which carries the profile-aware formatted invocation. Pi stage rows are the most affected; consumers that need to round-trip back to the operator's config should read `configured_skill`, not `skill`.
 - 2026-05-14: plan-stage defaults became agent-aware. Codex and Pi now resolve the llm-wiki `wiki-plan` skill directly instead of requiring a local `plan` alias.
 - 2026-05-26: initialized projects gained a non-fatal `wiki/qmd` dependency row. Doctor resolves QMD through `HIVE_QMD_BIN`, PATH, Hive's managed data-prefix install, or an `install-prefix` sidecar, and reports native addon failures with a `npm rebuild better-sqlite3` repair hint.
+
+Malformed `--json` argv rejected by Thor before `Doctor` is instantiated still
+emits a `hive-doctor.v1`-named `ok:false` usage document on stdout, followed by
+the normal stderr diagnostic and exit 64.
 
 ## Init preflight (non-fatal)
 

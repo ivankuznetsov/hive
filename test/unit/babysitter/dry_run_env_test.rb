@@ -295,14 +295,20 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
-  def test_with_env_isolates_gh_config_against_command_local_home
+  def test_with_env_materializes_only_trusted_gh_auth_config
     with_tmp_dir do |dir|
       recording_binary(dir, "git")
       recording_env_binary(dir, "gh", %w[
         GH_CONFIG_DIR XDG_CONFIG_HOME HOME HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR
       ])
       parent_home = File.join(dir, "parent-home")
+      trusted_config = File.join(parent_home, ".config", "gh")
+      FileUtils.mkdir_p(trusted_config)
+      File.write(File.join(trusted_config, "hosts.yml"), "github.com:\n  user: hive-test\n")
+      File.chmod(0o600, File.join(trusted_config, "hosts.yml"))
+      File.write(File.join(trusted_config, "config.yml"), "browser: /tmp/agent-controlled-browser\n")
       evil_trusted_config = File.join(dir, "evil-trusted-gh-config")
+      config_dir = nil
 
       with_env(
         "PATH" => [ dir, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR),
@@ -325,27 +331,51 @@ class BabysitterDryRunEnvTest < Minitest::Test
           )
 
           assert status.success?, err
+
+          recorded = File.read(File.join(dir, "env.log")).lines.map(&:chomp).to_h do |line|
+            line.split("=", 2)
+          end
+          home = recorded.fetch("HOME")
+          config_dir = recorded.fetch("GH_CONFIG_DIR")
+
+          assert_equal "<unset>", recorded.fetch("XDG_CONFIG_HOME")
+          assert_equal "<unset>", recorded.fetch("HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR")
+          refute_equal File::NULL, home, "HOME must not be /dev/null -- gh cannot resolve config there"
+          refute_equal parent_home, home, "parent HOME config must not be reused during gh passthrough"
+          refute_equal File.join(dir, "evil-home"), home, "command-local HOME must not survive passthrough"
+          refute_equal trusted_config, config_dir, "the real gh config directory must not be exposed directly"
+          refute_equal File.join(dir, "evil-gh-config"), config_dir,
+                       "command-local GH_CONFIG_DIR must not survive passthrough"
+          refute_equal evil_trusted_config, config_dir, "private trusted-config override must not survive passthrough"
+          assert_equal config_dir, home
+          assert_equal [ "hosts.yml" ], Dir.children(config_dir)
+          assert_equal "github.com:\n  user: hive-test\n", File.read(File.join(config_dir, "hosts.yml"))
         end
       end
 
-      recorded = File.read(File.join(dir, "env.log")).lines.map(&:chomp).to_h do |line|
-        line.split("=", 2)
-      end
-      home = recorded.fetch("HOME")
-      config_dir = recorded.fetch("GH_CONFIG_DIR")
+      refute_path_exists config_dir, "the run-scoped gh auth view must be removed after dry-run"
+    end
+  end
 
-      assert_equal "<unset>", recorded.fetch("XDG_CONFIG_HOME")
-      assert_equal "<unset>", recorded.fetch("HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR")
-      refute_equal File::NULL, home, "HOME must not be /dev/null -- gh cannot resolve config there"
-      refute_equal parent_home, home, "parent HOME config must not be reused during gh passthrough"
-      refute_equal File.join(dir, "evil-home"), home, "command-local HOME must not survive passthrough"
-      refute_equal File.join(dir, "evil-gh-config"), config_dir,
-                   "command-local GH_CONFIG_DIR must not survive passthrough"
-      refute_equal evil_trusted_config, config_dir, "private trusted-config override must not survive passthrough"
-      assert File.directory?(home), "HOME should point at a real directory gh can use"
-      assert File.directory?(config_dir), "GH_CONFIG_DIR should point at a real directory gh can use"
-      assert_empty Dir.children(config_dir),
-                   "gh's config dir should start empty so no caller-controlled config is honored"
+  def test_materialize_gh_auth_config_rejects_writable_sources
+    with_tmp_dir do |dir|
+      source = File.join(dir, "gh")
+      hosts = File.join(source, "hosts.yml")
+      FileUtils.mkdir_p(source)
+      File.write(hosts, "github.com:\n  user: hive-test\n")
+      File.chmod(0o600, hosts)
+      auth_views = []
+
+      File.chmod(0o777, source)
+      auth_views << Hive::Babysitter::DryRunEnv.materialize_gh_auth_config(source)
+      assert_empty Dir.children(auth_views.last), "writable config directory must not be trusted"
+
+      File.chmod(0o700, source)
+      File.chmod(0o666, hosts)
+      auth_views << Hive::Babysitter::DryRunEnv.materialize_gh_auth_config(source)
+      assert_empty Dir.children(auth_views.last), "writable hosts.yml must not be trusted"
+    ensure
+      Array(auth_views).each { |path| FileUtils.rm_rf(path) }
     end
   end
 

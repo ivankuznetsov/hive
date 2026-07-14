@@ -1,6 +1,7 @@
 require "fileutils"
 require "rbconfig"
 require "shellwords"
+require "tmpdir"
 
 module Hive
   module Babysitter
@@ -27,11 +28,12 @@ module Hive
         real_git = which("git").to_s
         real_gh = which("gh").to_s
         skip_log = File.join(worktree_path, SKIP_LOG_BASENAME)
+        gh_auth_config_dir = materialize_gh_auth_config(gh_config_dir)
         overlay = prepare_overlay(
           worktree_path,
           real_git: real_git,
           real_gh: real_gh,
-          gh_config_dir: gh_config_dir,
+          gh_config_dir: gh_auth_config_dir,
           skip_log: skip_log
         )
         old = {
@@ -48,6 +50,7 @@ module Hive
       ensure
         old&.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }
         FileUtils.rm_rf(File.join(worktree_path, OVERLAY_DIRNAME))
+        FileUtils.rm_rf(gh_auth_config_dir) if gh_auth_config_dir
       end
 
       def prepare_overlay(worktree_path, real_git:, real_gh:, gh_config_dir: nil, skip_log:)
@@ -108,6 +111,32 @@ module Hive
         return if home.empty?
 
         File.join(home, ".config", "gh")
+      end
+
+      def materialize_gh_auth_config(source_dir)
+        auth_dir = Dir.mktmpdir("hive-babysitter-gh-auth")
+        return auth_dir if source_dir.to_s.empty?
+
+        source_root = File.realpath(File.expand_path(source_dir))
+        return auth_dir unless trusted_config_entry?(File.stat(source_root), :directory?)
+
+        source_path = File.realpath(File.join(source_root, "hosts.yml"))
+        File.open(source_path, File::RDONLY | File::NOFOLLOW) do |source|
+          return auth_dir unless trusted_config_entry?(source.stat, :file?)
+
+          destination = File.join(auth_dir, "hosts.yml")
+          File.open(destination, File::WRONLY | File::CREAT | File::EXCL, 0o600) do |target|
+            IO.copy_stream(source, target)
+          end
+        end
+        auth_dir
+      rescue SystemCallError, IOError
+        FileUtils.rm_f(File.join(auth_dir, "hosts.yml")) if auth_dir
+        auth_dir
+      end
+
+      def trusted_config_entry?(stat, type)
+        stat.public_send(type) && stat.uid == Process.uid && (stat.mode & 0o022).zero?
       end
 
       def which(name)

@@ -334,7 +334,7 @@ def read_only?(rest)
   case rest.first.to_s
   when "branch"
     read_only_branch?(rest)
-  when "cat-file", "describe", "diff", "grep", "log", "ls-files", "ls-tree", "merge-base",
+  when "cat-file", "describe", "grep", "log", "ls-files", "ls-tree", "merge-base",
        "rev-list", "rev-parse", "show", "status"
     true
   when "remote"
@@ -352,7 +352,7 @@ def hardened_passthrough_argv(argv, rest)
 
   # These commands can load exec-capable local diff drivers from .git/config. Keep the
   # read passthrough, but force git's internal diff path and disable textconv.
-  if %w[diff log show].include?(rest.first.to_s)
+  if %w[log show].include?(rest.first.to_s)
     passthrough.insert(insert_at, "--no-ext-diff", "--no-textconv")
   end
 

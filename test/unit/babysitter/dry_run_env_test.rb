@@ -930,7 +930,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       # Read-only subcommand `-p` must pass through; it is not the global `--paginate`.
       assert_passes env, "git", "log", "-p"
       assert_passes env, "git", "show", "-p"
-      assert_passes env, "git", "diff", "-p"
+      assert_stubbed env, "git", "diff", "-p"
       assert_passes env, "git", "grep", "-p", "needle"
       # `git grep -o` / `--only-matching` is a read-only match filter, not a file-write; the
       # output-file guard is scoped past grep so it stays allowed.
@@ -945,9 +945,9 @@ class BabysitterDryRunEnvTest < Minitest::Test
       # must not over-block it.
       assert_passes env, "git", "ls-files", "-o"
       assert_passes env, "git", "ls-files", "--others"
-      # On diff/log/show, `-O<orderfile>` is `--output-ordering` (reads an orderfile), not the
-      # grep pager flag — a cross-subcommand read that must pass through (glued and separate).
-      assert_passes env, "git", "diff", "-O/tmp/hive-orderfile"
+      # On log/show, `-O<orderfile>` is `--output-ordering` (reads an orderfile), not the grep
+      # pager flag. Diff remains default-denied because working-tree conversion can run filters.
+      assert_stubbed env, "git", "diff", "-O/tmp/hive-orderfile"
       assert_passes env, "git", "log", "-O", "/tmp/hive-orderfile"
       # After `--`, `-o` is a literal pathspec (a file named `-o`), not the output flag, so
       # the file-write guard must not over-block the read.
@@ -1072,7 +1072,6 @@ class BabysitterDryRunEnvTest < Minitest::Test
       # not be misclassified as the global `--paginate` and skipped.
       assert_includes real_invocations, expected_real_invocation("git", "log", "-p")
       assert_includes real_invocations, expected_real_invocation("git", "show", "-p")
-      assert_includes real_invocations, expected_real_invocation("git", "diff", "-p")
       assert_includes real_invocations, expected_real_invocation("git", "grep", "-p", "needle")
       assert_includes real_invocations, expected_real_invocation("git", "grep", "-o", "needle")
       assert_includes real_invocations, expected_real_invocation("git", "log", "--", "-o")
@@ -1644,13 +1643,14 @@ class BabysitterDryRunEnvTest < Minitest::Test
         out, err, status = Open3.capture3(env, stub_path("git"), "-C", dir, "diff")
 
         assert status.success?, err
-        assert_includes out, "README.md"
-        refute_path_exists pwn_path, "#{source} diff.external executed during dry-run passthrough"
+        assert_empty out
+        assert_includes err, "[dry-run] git -C #{dir} diff skipped"
+        refute_path_exists pwn_path, "#{source} diff.external executed during dry-run diff"
       end
     end
   end
 
-  def test_git_stub_disables_local_exec_config_before_read_only_passthrough
+  def test_git_stub_skips_local_diff_exec_config_and_disables_fsmonitor
     with_tmp_git_repo do |dir|
       pwn_path = File.join(dir, "local-extdiff-ran")
       extdiff = executable_touch_binary(dir, "local-extdiff", pwn_path)
@@ -1660,7 +1660,8 @@ class BabysitterDryRunEnvTest < Minitest::Test
       out, err, status = Open3.capture3(real_git_env(dir), stub_path("git"), "-C", dir, "diff")
 
       assert status.success?, err
-      assert_includes out, "README.md"
+      assert_empty out
+      assert_includes err, "[dry-run] git -C #{dir} diff skipped"
       refute_path_exists pwn_path
     end
 
@@ -1681,7 +1682,8 @@ class BabysitterDryRunEnvTest < Minitest::Test
       out, err, status = Open3.capture3(real_git_env(dir), stub_path("git"), "-C", dir, "diff")
 
       assert status.success?, err
-      assert_includes out, "README.md"
+      assert_empty out
+      assert_includes err, "[dry-run] git -C #{dir} diff skipped"
       refute_path_exists pwn_path
     end
 
@@ -1695,6 +1697,17 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert status.success?, err
       refute_path_exists pwn_path
     end
+  end
+
+  def test_git_stub_skips_worktree_diff_before_running_clean_filter
+    assert_worktree_diff_filter_is_skipped(
+      "filter.hivepwn.clean",
+      after_touch: "STDOUT.write(STDIN.read)"
+    )
+  end
+
+  def test_git_stub_skips_worktree_diff_before_running_process_filter
+    assert_worktree_diff_filter_is_skipped("filter.hivepwn.process")
   end
 
   def test_git_stub_skips_signature_verification_options_without_running_gpg
@@ -1926,7 +1939,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
 
     passthrough = args.dup
     index = git_subcommand_index(passthrough)
-    if %w[diff log show].include?(passthrough[index].to_s)
+    if %w[log show].include?(passthrough[index].to_s)
       passthrough.insert(index + 1, "--no-ext-diff", "--no-textconv")
     end
 

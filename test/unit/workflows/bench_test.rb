@@ -67,6 +67,27 @@ class WorkflowsBenchTest < Minitest::Test
     assert_path_exists File.join(runtime, "Dockerfile.runner")
   end
 
+  def test_failed_rollback_warns_without_masking_the_original_install_error
+    ops = Object.new
+    ops.define_singleton_method(:hive_state_path) { "/unused/hive-state" }
+    ops.define_singleton_method(:run_git!) { |*| raise "index reset failed" }
+
+    _out, err = capture_io do
+      Hive::Workflows::Bench.rollback_failed_install!(
+        ops,
+        destination: "/unused/bench-runtime",
+        backup: "/unused/bench-runtime.previous",
+        migration_pathspecs: [],
+        pathspecs: [ "bench-runtime" ],
+        runtime_backed_up: false,
+        runtime_installed: false
+      )
+    end
+
+    assert_includes err, "failed to fully roll back bench runtime installation"
+    assert_includes err, "RuntimeError: index reset failed"
+  end
+
   def test_generate_selects_the_sol_runner_for_stage_specific_5_6_models
     instruction = File.read(stages_by_name.fetch("generate").instruction)
 

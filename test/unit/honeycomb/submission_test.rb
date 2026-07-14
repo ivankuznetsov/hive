@@ -536,7 +536,7 @@ class HoneycombSubmissionTest < Minitest::Test
         cache_path: cache_path,
         runner: runner.method(:call),
         locker: ->(_path, &block) { block.call },
-        sleeper: ->(_seconds) {}
+        sleeper: ->(_seconds) { }
       )
     end
 

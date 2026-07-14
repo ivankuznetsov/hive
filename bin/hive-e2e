@@ -113,7 +113,7 @@ module Hive
         summary = report.fetch("summary")
         failed = summary.fetch("failed") + summary.fetch("setup_failed", 0)
         exit(failed.zero? ? BinaryExit::SUCCESS : BinaryExit::FAILURE)
-      rescue PreflightError => e
+      rescue PreflightError, ScenarioParser::InvalidScenario, Psych::Exception => e
         exit_with_error(e, error_kind: "preflight", exit_code: BinaryExit::CONFIG)
       rescue StandardError => e
         exit_with_error(e, error_kind: "run_failed", exit_code: BinaryExit::FAILURE)
@@ -141,6 +141,8 @@ module Hive
             puts "#{scenario.name}#{tags}"
           end
         end
+      rescue ScenarioParser::InvalidScenario, Psych::Exception => e
+        exit_with_error(e, error_kind: "preflight", exit_code: BinaryExit::CONFIG)
       end
 
       desc "replay RUN_ID SCENARIO", "Replay a stored scenario repro script"

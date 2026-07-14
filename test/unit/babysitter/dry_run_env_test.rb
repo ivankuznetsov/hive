@@ -1398,6 +1398,29 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_git_stub_skips_verbose_status_without_running_textconv
+    with_tmp_git_repo do |dir|
+      marker_path = File.join(dir, "status-textconv-ran")
+      textconv = executable_touch_binary(dir, "status-textconv", marker_path)
+      File.write(File.join(dir, ".gitattributes"), "README.md diff=hivepwn\n")
+      run!("git", "-C", dir, "config", "diff.hivepwn.textconv", textconv)
+      run!("git", "-C", dir, "add", ".gitattributes")
+      run!("git", "-C", dir, "commit", "-m", "attrs", "--quiet")
+      File.write(File.join(dir, "README.md"), "changed\n")
+      run!("git", "-C", dir, "add", "README.md")
+
+      [ "-v", "-vv", "-sv", "-vs", "-bvv", "--v", "--ve", "--ver", "--verb", "--verbo", "--verbos", "--verbose" ].each do |verbose|
+        FileUtils.rm_f(marker_path)
+
+        _out, err, status = Open3.capture3(real_git_env(dir), stub_path("git"), "-C", dir, "status", verbose)
+
+        assert status.success?, err
+        refute_path_exists marker_path, "git status #{verbose} ran the configured textconv helper"
+        assert_includes err, "[dry-run] git -C #{dir} status #{verbose} skipped"
+      end
+    end
+  end
+
   def test_git_stub_skips_signature_verification_options_without_running_gpg
     with_tmp_signed_git_repo do |dir, marker_path|
       env = real_git_env(dir)

@@ -57,6 +57,47 @@ class HoneycombPermissionSummaryTest < Minitest::Test
     assert_includes aggregate.fetch("shell_exposures"), "unrestricted"
   end
 
+  def test_command_owned_context_forces_command_shell_exposure_while_keeping_justification
+    workflow = Hive::Workflow.new(
+      id: :cmd,
+      stages: [
+        Hive::Workflow::Stage.new(
+          name: "review", index: 1, state_file: "review.md", kind: :council,
+          reviewers: [
+            Hive::Workflow::Reviewer.new(
+              name: "linter", command: "run-check",
+              permissions: {
+                "preset" => "scoped", "bash" => true,
+                "shell_justification" => "Runs the registry linter"
+              }
+            )
+          ],
+          council: Hive::Workflow::Council.new(
+            quorum: 1,
+            revise: Hive::Workflow::Revise.new(
+              command: "apply-fix",
+              permissions: { "preset" => "scoped", "tools" => %w[Read Bash],
+                             "shell_justification" => "Applies the linter fix" }
+            )
+          )
+        )
+      ]
+    )
+
+    contexts = Hive::Honeycomb::PermissionSummary.build(workflow)
+                                                 .fetch("contexts").to_h { |row| [ row.fetch("context"), row ] }
+
+    reviewer = contexts.fetch("stage:review/reviewer:linter")
+    # Fail-closed: a command-owned context never reports explicit_bash even when
+    # scoped Bash is justified, so a deny hit it owns always blocks.
+    assert_equal "command", reviewer.fetch("shell_exposure")
+    assert_equal "Runs the registry linter", reviewer.fetch("shell_justification")
+
+    revise = contexts.fetch("stage:review/revise")
+    assert_equal "command", revise.fetch("shell_exposure")
+    assert_equal "Applies the linter fix", revise.fetch("shell_justification")
+  end
+
   def test_unknown_future_permission_preset_is_disclosed_as_unknown
     workflow = Hive::Workflow.new(
       id: :future,

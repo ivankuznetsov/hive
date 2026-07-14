@@ -71,14 +71,16 @@ module Hive
         # command context always blocks even when justified. This is the safe
         # direction; it is effectively unreachable today because command
         # reviewers own no instruction file that could carry a deny match.
-        data["shell_exposure"] = "command" if command
+        # Computed into a local rather than mutating the declaration hash so
+        # this stays correct if `declaration` is ever memoized or frozen.
+        shell_exposure = command ? "command" : data.fetch("shell_exposure")
         {
           "context" => context,
           "kind" => kind,
           "preset" => data.fetch("preset"),
           "tools" => data.fetch("tools"),
           "dirs" => data.fetch("dirs"),
-          "shell_exposure" => data.fetch("shell_exposure"),
+          "shell_exposure" => shell_exposure,
           "shell_justification" => data["shell_justification"]
         }.freeze
       end
@@ -97,7 +99,9 @@ module Hive
         when Hive::PermissionScope::YOLO then "unrestricted"
         when "read-only" then "disabled"
         when "scoped"
-          spec["bash"] == true || tools.include?("Bash") ? "explicit_bash" : "disabled"
+          # Reuse the one shell-grant predicate PermissionScope resolves against
+          # so this summary can never desync from the scope that actually runs.
+          Hive::PermissionScope.grants_bash?(spec) ? "explicit_bash" : "disabled"
         else "unknown"
         end
         {

@@ -509,6 +509,10 @@ module Hive
         return unless workflow_id.to_s == "bench"
 
         Hive::Workflows::Bench.install_runtime!(ops)
+        # A legacy project descriptor may have been archived by install_runtime!.
+        # Drop the process-local overlay/cache so later same-process task reads
+        # resolve the newly installed built-in instead of the now-absent file.
+        Hive::Workflows::Project.reset!
       end
 
       def rollback_partial_init(ops, side_effect_snapshot: nil)

@@ -3,7 +3,7 @@ title: hive init
 type: command
 source: lib/hive/commands/init.rb
 created: 2026-04-25
-updated: 2026-07-13
+updated: 2026-07-14
 tags: [command, bootstrap, git, prompts, llm-wiki]
 ---
 
@@ -18,6 +18,20 @@ hive init --new-workflow ID [PROJECT_PATH]
 
 `PROJECT_PATH` defaults to `Dir.pwd`. `--force` skips the clean-tree check. `--json` emits a single `hive-init.v1` success document on stdout with project metadata and the resolved prompt answers. `--workflow NAME` selects the project default workflow and is validated against `Hive::Workflows::Registry`; unknown names fail before disk writes and list valid names.
 
+For a project created with the former project-local `bench.yml`, run
+`hive init PROJECT_PATH --workflow bench` after upgrading. Hive recognizes only
+the exact legacy descriptor, archives it as
+.hive-state/workflows/bench.legacy.yml.disabled`, copies its instruction directory
+to `.hive-state/workflows/bench.legacy`, retains the original instruction path for
+other local descriptors that may share it, installs `.hive-state/bench-runtime`, and
+then binds the built-in workflow. The archive preserves any instruction files for
+inspection while its `.disabled` extension keeps it out of descriptor discovery.
+If the hive-state commit is rejected, the legacy descriptor and any previous runtime
+are restored and the attempted migration is unstaged, so the command can be
+retried without repairing the worktree manually.
+Modified/custom descriptors named `bench` remain collisions and must be renamed
+or migrated manually.
+
 `--new-workflow ID` is for custom, project-authored workflows that do not exist yet. It reuses [[commands/workflow]] scaffolding to create `<hive_state_path>/workflows/ID.yml` and `<hive_state_path>/workflows/ID/work.md`, writes `default_workflow: "ID"` (quoted so YAML.safe_load cannot coerce keyword-like ids), and prints both paths plus the next `hive new <project> '<idea>'` hint. The descriptor and the `config.yml` binding are committed together on `hive/state` on **both** the fresh and already-initialized paths, so the bound default survives a hive-state `reset --hard`/`clean` (a plain `hive init` without `--new-workflow` still leaves `config.yml` uncommitted). It is mutually exclusive with `--workflow`; built-in ids such as `coding`, `content`, and `bench` are rejected by the same reserved-id path as `hive workflow new`. On an already-initialized project, the init half is a no-op: Hive attaches the existing `.hive-state` worktree, refuses descriptor collisions before writing, then commits the descriptor and `config.yml` rebind together. A commit failure after staging resets the `.hive-state` index for those pathspecs so a half-rolled-back rebind cannot ride a later unrelated commit.
 
 ## Preconditions
@@ -30,7 +44,7 @@ hive init --new-workflow ID [PROJECT_PATH]
 ## Steps performed
 
 1. **Validate** — `validate_git_repo!` then `validate_clean_tree!` (skipped under `--force`).
-2. **Resolve workflow default** — explicit `--workflow NAME` wins. Without a flag, TTY init prompts with a `Workflow:` step when more than one workflow is registered, using `coding` as the fresh default and the project's current `default_workflow` as the re-init default; non-TTY init silently selects `coding`. The prompt lists raw workflow ids and an extra `author a new workflow` entry. Selecting that entry asks for a new id, re-prompts on invalid/reserved/colliding ids, then routes through the same `--new-workflow` scaffold/bind path before any disk write. The selected default is validated through [[modules/workflows]]. `--new-workflow ID` bypasses registry selection because the descriptor is created later in the same flow; the id is normalized and validated before any disk write. Selecting built-in `bench` also installs and commits its packaged runtime snapshot under `.hive-state/bench-runtime`; explicit bench selection on an existing project repairs or refreshes that managed snapshot before rebinding the default.
+2. **Resolve workflow default** — explicit `--workflow NAME` wins. Without a flag, TTY init prompts with a `Workflow:` step when more than one workflow is registered, using `coding` as the fresh default and the project's current `default_workflow` as the re-init default; non-TTY init silently selects `coding`. The prompt lists raw workflow ids and an extra `author a new workflow` entry. Selecting that entry asks for a new id, re-prompts on invalid/reserved/colliding ids, then routes through the same `--new-workflow` scaffold/bind path before any disk write. The selected default is validated through [[modules/workflows]]. `--new-workflow ID` bypasses registry selection because the descriptor is created later in the same flow; the id is normalized and validated before any disk write. Selecting built-in `bench` also installs and commits its packaged runtime snapshot under `.hive-state/bench-runtime`; explicit bench selection on an existing project repairs or refreshes that managed snapshot before rebinding the default. If the project still carries the exact pre-built-in `bench.yml`, that same explicit selection atomically archives the legacy descriptor/instructions with the runtime snapshot before resetting descriptor discovery.
 3. **Already-initialized handling** — if `hive/state` exists and no workflow was explicitly selected, raise `Hive::AlreadyInitialized` (exit 2). If a workflow was selected, attach/validate the existing state worktree, update `<project>/.hive-state/config.yml`, and warn when changing the default would re-resolve in-flight field-less tasks. If `--new-workflow` was selected, attach the state worktree, scaffold the descriptor, update `default_workflow`, and commit those hive-state changes together.
 4. **Collect prompt answers** — `Hive::Commands::Init::Prompts.new(input: $stdin, output: $stderr, summary_io: $stdout).collect`. Prompt UI (intro / menus / re-prompts / confirmation) goes to **stderr**; the non-TTY one-line summary goes to **stdout** so scripted callers can `summary=$(hive init)` cleanly. On TTY this opens the interactive flow described below; on non-TTY (CI, pipes, test harness) it short-circuits to recommended defaults. Two abort paths exit **64** (`Hive::ExitCodes::USAGE`, distinct from generic crashes at 1) with **zero disk side effects** — no orphan branch, no worktree, no master gitignore commit:
    - Operator answers `n` at the final confirmation prompt.

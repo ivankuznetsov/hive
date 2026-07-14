@@ -3,7 +3,7 @@ title: Hive::Workflows
 type: module
 source: lib/hive/workflows.rb, lib/hive/workflow.rb, lib/hive/workflows/registry.rb, lib/hive/workflows/coding.rb, lib/hive/workflows/content.rb, lib/hive/workflows/bench.rb, lib/hive/workflows/descriptor_parser.rb, lib/hive/workflows/loader.rb, lib/hive/workflows/project.rb
 created: 2026-04-26
-updated: 2026-07-13
+updated: 2026-07-14
 tags: [module, workflow, verbs, selection]
 ---
 
@@ -44,6 +44,25 @@ Per-project descriptors live under `<hive_state_path>/workflows/*.yml`, defaulti
 - the last stage may be inert, agent, or council. Active terminal stages require both `COMPLETE` and a non-empty deliverable before `TaskAction` classifies them as archived.
 
 `Hive::Workflows::Loader` discovers project descriptors, and `Hive::Workflows::Project.load!(project_root)` is the idempotent boundary call. It swaps the active project overlay in `Hive::Workflows::Registry`, rejects collisions with built-in/runtime ids, and resets the memoized cross-workflow stage unions (`all_stage_dirs`, `all_stage_names`, `all_terminal_stage_dirs`). `Task`, `WorkflowSelection`, `init`, `new`, `status`, `drop`, and stage-filtered resolver paths call it before resolving workflow ids or stage refs.
+
+The one compatibility exception is an exact semantic match for the project-local
+`bench.yml` shipped before `bench` became built in. Hive temporarily keeps that
+legacy descriptor active so existing benchmark tasks remain visible and runnable,
+and emits a one-time `hive init PROJECT --workflow bench` migration hint. The
+explicit re-init archives the descriptor as
+`workflows/bench.legacy.yml.disabled`, copies its instruction directory to
+`workflows/bench.legacy` while retaining the original path for any sibling
+descriptors that share those instructions, installs the packaged bench runtime, and resets the
+in-process project overlay so subsequent resolution uses the built-in descriptor.
+If the hive-state commit fails, Hive restores the legacy descriptor and any
+previous runtime and unstages the migration pathspecs before returning the
+original error, making the explicit migration safe to retry.
+Any modified or independently authored descriptor named `bench` still fails the
+normal collision guard rather than being mistaken for the legacy workflow.
+The upgrade path was live-smoked on the existing hive-bench state checkout on
+2026-07-14: the built-in `bench`, sibling `bench-generate`, and explicitly pinned
+`coding` tasks all remained resolvable, with all nine pre-migration status rows
+still visible and the unrelated dirty-state fingerprint unchanged.
 
 `hive workflow new ID` (see [[commands/workflow]]) scaffolds the minimal `inbox -> work -> done` descriptor plus `work.md` instruction and commits those files to `hive/state`. `--template architecture` scaffolds a document-planning workflow with `inbox -> draft -> review(council) -> architecture(agent-terminal)`.
 

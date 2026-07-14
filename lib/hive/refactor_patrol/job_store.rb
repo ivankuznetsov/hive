@@ -68,6 +68,11 @@ module Hive
         claimed_at heartbeat_at expires_at pid process_start_time pgid
         finished_at outcome next_eligible_at
       ].freeze
+      DISCOVERY_ATTEMPT_KEYS = %w[
+        kind owner owner_pid owner_process_start_time generation state
+        claimed_at heartbeat_at expires_at pid process_start_time pgid
+        finished_at outcome next_eligible_at
+      ].freeze
       ACTIVE_ACTION_CLAIM_STATES = %w[claimed running].freeze
 
       class Error < StandardError
@@ -319,10 +324,16 @@ module Hive
         end
       end
 
-      # Heartbeats are generation-fenced, refuse expired claims, and require
-      # positive liveness evidence for the recorded PID/start-time tuple. They
-      # extend from the heartbeat time rather than the original claim time so
-      # a legitimate long review cannot be mistaken for abandoned work.
+      # Heartbeats are generation-fenced and refuse expired claims. The
+      # liveness resolver gates renewal on proof of death, not proof of life:
+      # renewal is refused only when the recorded PID/start-time tuple is
+      # provably gone or replaced (:resolved) — or when no evidence could be
+      # obtained at all — while examined-but-indeterminate evidence
+      # (:unresolved) permits the renewal. The fail-closed side lives in the
+      # takeover paths (claim_discovery!/claim_action!), which require
+      # :resolved before a new generation may supersede an expired claim.
+      # Leases extend from the heartbeat time rather than the original claim
+      # time so a legitimate long review cannot be mistaken for abandoned work.
       def renew_discovery_claim!(token, now: Time.now, lease_sec: 3600, claim_resolver: nil)
         validate_lease_sec!(lease_sec)
         mutate_claim(token, now: now) do |aggregate, attempt|
@@ -627,6 +638,9 @@ module Hive
         end
       end
 
+      # Same renewal semantics as renew_discovery_claim!: refusal requires
+      # proof of death/PID reuse (or no obtainable evidence); the fail-closed
+      # takeover lives in claim_action!.
       def renew_action_claim!(token, now: Time.now, lease_sec: 3600, claim_resolver: nil)
         validate_lease_sec!(lease_sec)
         mutate_action_claim(token, now: now) do |aggregate, action, claim|
@@ -1241,7 +1255,7 @@ module Hive
         end
         return if resolution == :unresolved
 
-        raise StaleClaim, "refactor patrol claim owner is not provably live"
+        raise StaleClaim, "refactor patrol claim owner is provably gone, replaced, or unverifiable"
       end
 
       def mutate_action_claim(token, now:)

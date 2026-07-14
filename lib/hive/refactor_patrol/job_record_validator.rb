@@ -105,7 +105,7 @@ module Hive
           string_array!(item.fetch("thesis_ids"), "feature result thesis_ids", path)
           array_of_hashes!(item.fetch("errors"), "feature result errors", path)
         end
-        array_of_hashes!(data.fetch("attempts"), "attempts", path)
+        validate_discovery_attempts!(data.fetch("attempts"), path)
         actions = data.fetch("actions")
         validate_actions!(
           actions,
@@ -170,6 +170,9 @@ module Hive
             inconsistent!("analysis disposition for thesis #{id.inspect} is immutable", path)
           end
         end
+        validate_discovery_attempt_transition!(
+          existing.fetch("attempts"), replacement.fetch("attempts"), path
+        )
         validate_action_transition!(existing.fetch("actions"), replacement.fetch("actions"), path)
         if existing.fetch("actions") != replacement.fetch("actions") && !action_api
           inconsistent!("action changes require the fenced action transition API", path)
@@ -388,6 +391,50 @@ module Hive
         end
       end
 
+      # Discovery attempts of kind "discovery_claim" feed the same fence as
+      # action claims (`active_discovery_attempt` resurrects the newest
+      # active entry), so they get the same schema discipline: at most one
+      # active attempt, strictly increasing generations, and complete claim
+      # shapes. Non-claim attempts (discovery_block/action_block evidence)
+      # keep their free-form shape.
+      def validate_discovery_attempts!(attempts, path)
+        generations = []
+        active = 0
+        array_of_hashes!(attempts, "attempts", path).each do |attempt|
+          next unless attempt["kind"] == constant(:DISCOVERY_ATTEMPT_KIND)
+
+          strict_hash!(
+            attempt,
+            required: constant(:DISCOVERY_ATTEMPT_KEYS),
+            allowed: constant(:DISCOVERY_ATTEMPT_KEYS),
+            label: "discovery attempt",
+            path: path
+          )
+          nonempty_string!(attempt.fetch("owner"), "discovery attempt owner", path)
+          generation = attempt.fetch("generation")
+          unless generation.is_a?(Integer) && generation.positive?
+            inconsistent!("discovery attempt generation must be a positive integer", path)
+          end
+          generations << generation
+          unless %w[claimed running released superseded complete].include?(attempt.fetch("state"))
+            inconsistent!("discovery attempt state is invalid", path)
+          end
+          %w[claimed_at heartbeat_at expires_at].each do |key|
+            timestamp!(attempt.fetch(key), "discovery attempt #{key}", path)
+          end
+          timestamp!(attempt["finished_at"], "discovery attempt finished_at", path) if attempt["finished_at"]
+          if attempt["next_eligible_at"]
+            timestamp!(attempt["next_eligible_at"], "discovery attempt next_eligible_at", path)
+          end
+          validate_action_process_identity!(attempt, path, label: "discovery attempt")
+          active += 1 if constant(:ACTIVE_ACTION_CLAIM_STATES).include?(attempt.fetch("state"))
+        end
+        unless generations == generations.uniq.sort
+          inconsistent!("discovery attempt generations must be strictly increasing", path)
+        end
+        inconsistent!("job can serialize only one active discovery attempt", path) if active > 1
+      end
+
       def validate_action_claims!(action, path)
         return unless action.key?("claims")
 
@@ -432,14 +479,14 @@ module Hive
         end
       end
 
-      def validate_action_process_identity!(claim, path)
+      def validate_action_process_identity!(claim, path, label: "action claim")
         owner_pid = claim.fetch("owner_pid")
         unless owner_pid.nil? || (owner_pid.is_a?(Integer) && owner_pid.positive?)
-          inconsistent!("action claim owner_pid must be a positive integer or null", path)
+          inconsistent!("#{label} owner_pid must be a positive integer or null", path)
         end
         owner_start = claim.fetch("owner_process_start_time")
         unless owner_start.nil? || (owner_start.is_a?(String) && !owner_start.empty?)
-          inconsistent!("action claim owner_process_start_time must be a string or null", path)
+          inconsistent!("#{label} owner_process_start_time must be a string or null", path)
         end
 
         child = [ claim.fetch("pid"), claim.fetch("process_start_time"), claim.fetch("pgid") ]
@@ -447,7 +494,7 @@ module Hive
           valid = child[0].is_a?(Integer) && child[0] > 1 &&
                   child[1].is_a?(String) && !child[1].empty? &&
                   child[2].is_a?(Integer) && child[2] > 1
-          inconsistent!("action claim child identity is incomplete", path) unless valid
+          inconsistent!("#{label} child identity is incomplete", path) unless valid
         end
       end
 
@@ -479,6 +526,33 @@ module Hive
             inconsistent!("terminal canonical action #{action_id.inspect} is write-once", path)
           end
           validate_claim_transition!(old_action, new_action, path)
+        end
+      end
+
+      # Discovery attempt history obeys the same lifecycle discipline as
+      # action claim history: prior generations may only advance through
+      # legal claim states, and finished attempts are immutable. Matching by
+      # generation keeps the check independent of interleaved block-evidence
+      # attempts that share the same array.
+      def validate_discovery_attempt_transition!(old_attempts, new_attempts, path)
+        old_discovery = old_attempts.select do |attempt|
+          attempt["kind"] == constant(:DISCOVERY_ATTEMPT_KIND)
+        end
+        return if old_discovery.empty?
+
+        new_by_generation = new_attempts.select do |attempt|
+          attempt["kind"] == constant(:DISCOVERY_ATTEMPT_KIND)
+        end.to_h { |attempt| [ attempt["generation"], attempt ] }
+        old_discovery.each do |old_attempt|
+          new_attempt = new_by_generation[old_attempt.fetch("generation")]
+          inconsistent!("discovery attempt history is append-only", path) unless new_attempt.is_a?(Hash)
+          if constant(:ACTIVE_ACTION_CLAIM_STATES).include?(old_attempt.fetch("state"))
+            validate_active_claim_transition!(
+              old_attempt, new_attempt, path, label: "discovery attempt"
+            )
+          elsif old_attempt != new_attempt
+            inconsistent!("finished discovery attempt is immutable", path)
+          end
         end
       end
 
@@ -647,30 +721,30 @@ module Hive
         end
       end
 
-      def validate_active_claim_transition!(old_claim, new_claim, path)
+      def validate_active_claim_transition!(old_claim, new_claim, path, label: "canonical action claim")
         immutable = %w[
           owner owner_pid owner_process_start_time generation authority claimed_at
         ]
         immutable.each do |key|
           unless old_claim[key] == new_claim[key]
-            inconsistent!("canonical action claim identity is immutable", path)
+            inconsistent!("#{label} identity is immutable", path)
           end
         end
         if Time.iso8601(new_claim.fetch("expires_at")) < Time.iso8601(old_claim.fetch("expires_at")) ||
            Time.iso8601(new_claim.fetch("heartbeat_at")) < Time.iso8601(old_claim.fetch("heartbeat_at"))
-          inconsistent!("canonical action claim heartbeat cannot move backwards", path)
+          inconsistent!("#{label} heartbeat cannot move backwards", path)
         end
         transitions = {
           "claimed" => %w[claimed running released superseded complete],
           "running" => %w[running released superseded complete]
         }
         unless transitions.fetch(old_claim.fetch("state")).include?(new_claim.fetch("state"))
-          inconsistent!("canonical action claim state cannot move backwards", path)
+          inconsistent!("#{label} state cannot move backwards", path)
         end
         %w[pid process_start_time pgid finished_at outcome next_eligible_at].each do |key|
           next if old_claim[key].nil? || old_claim[key] == new_claim[key]
 
-          inconsistent!("canonical action claim evidence is immutable once recorded", path)
+          inconsistent!("#{label} evidence is immutable once recorded", path)
         end
       end
 

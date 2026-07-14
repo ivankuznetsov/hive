@@ -1203,14 +1203,20 @@ module Hive
         project = patrol_dispatch[:project]
         slug = patrol_dispatch[:slug] || Hive::Daemon::PatrolScheduler::PATROL_SLUG
         architecture = patrol_dispatch[:patrol_kind]&.to_sym == :architecture
+        # Invariant: when terminate_child fails after a spawn, the rescue at
+        # the bottom must NOT cancel the scheduler claim — a possibly-alive
+        # child has to keep its lease, or a second generation could overlap
+        # its still-running work.
         preserve_architecture_claim = false
 
-        # Every gated early-return below MUST release the scheduler's
-        # pending marker. The scheduler set `@pending[project]` in `tick`
-        # before producing this dispatch, and only `complete` (called on
-        # child reap) clears it. A gated patrol never spawns a child, so
-        # without `cancel` the project would stay pending forever and
-        # never be patrolled again until the daemon restarts.
+        # The `cancel` calls on the gated early-returns below serve the
+        # legacy no-arbiter path, where `tick` reserved (set
+        # `@pending[project]`) before these gates ran; without `cancel` a
+        # gated project would stay pending until daemon restart, because
+        # only `complete` (called on child reap) also clears the marker.
+        # In always-on arbiter mode (commands/daemon.rb) `reserve` runs
+        # below, AFTER these gates, so nothing is pending yet when a gate
+        # fires and the `cancel` calls are harmless no-ops.
         unless project_enabled?(project)
           @logger.event(:skipped, project: project, slug: slug,
                                   stage: patrol_dispatch[:stage],

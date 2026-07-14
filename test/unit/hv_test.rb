@@ -94,6 +94,69 @@ class HvTest < Minitest::Test
     end
   end
 
+  def test_timeout_binary_kills_a_candidate_that_ignores_term
+    with_tmp_dir do |dir|
+      fake_bin = File.join(dir, "fake-bin")
+      FileUtils.mkdir_p(fake_bin)
+      File.write(File.join(fake_bin, "timeout"), <<~SH)
+        #!/bin/sh
+        kill_after=""
+        if [ "${1:-}" = "-k" ]; then
+          kill_after="$2"
+          shift 2
+        fi
+        shift
+        if [ "$1" = "$HV_TEST_GOOD_CANDIDATE" ]; then exec "$@"; fi
+        "$@" &
+        pid=$!
+        sleep 0.1
+        kill -TERM "$pid"
+        if [ -n "$kill_after" ]; then
+          sleep 0.1
+          kill -KILL "$pid" 2>/dev/null
+        fi
+        wait "$pid" 2>/dev/null
+        exit 124
+      SH
+      FileUtils.chmod(0o755, File.join(fake_bin, "timeout"))
+
+      hanging = File.join(dir, "custom", "hive")
+      FileUtils.mkdir_p(File.dirname(hanging))
+      File.write(hanging, <<~SH)
+        #!/bin/sh
+        if [ "$1" = "--version" ]; then
+          exec #{RbConfig.ruby} -e 'Signal.trap("TERM", "IGNORE"); sleep 60'
+        fi
+        echo hanging:$1
+      SH
+      FileUtils.chmod(0o755, hanging)
+
+      xdg_bin = File.join(dir, "xdg-bin")
+      FileUtils.mkdir_p(xdg_bin)
+      File.write(File.join(xdg_bin, "hive"), <<~SH)
+        #!/bin/sh
+        if [ "$1" = "--version" ]; then echo "2.3.4"; exit 0; fi
+        echo xdg:$1
+      SH
+      FileUtils.chmod(0o755, File.join(xdg_bin, "hive"))
+
+      out, err, status = capture_hv_with_timeout(
+        {
+          "HIVE_BIN_OVERRIDE" => hanging,
+          "XDG_BIN_HOME" => xdg_bin,
+          "HOMEBREW_PREFIX" => File.join(dir, "empty-homebrew"),
+          "HV_TEST_GOOD_CANDIDATE" => File.join(xdg_bin, "hive"),
+          "PATH" => [ fake_bin, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR)
+        },
+        "probe",
+        timeout_sec: 2
+      )
+
+      assert status.success?, err
+      assert_equal "xdg:probe\n", out, "hv must kill the hung candidate and continue probing"
+    end
+  end
+
   def test_slow_candidate_is_bounded_when_timeout_binary_is_absent
     with_tmp_dir do |dir|
       slow = File.join(dir, "custom", "hive")
@@ -402,16 +465,16 @@ class HvTest < Minitest::Test
   # Timeout::Error flakes — 30s detects a genuine hang while tolerating load.
   HV_HANG_TIMEOUT_SEC = 30
 
-  def capture_hv_with_timeout(env, *args)
-    Open3.popen3(env, HV_BIN, *args) do |stdin, stdout, stderr, wait_thread|
+  def capture_hv_with_timeout(env, *args, timeout_sec: HV_HANG_TIMEOUT_SEC)
+    Open3.popen3(env, HV_BIN, *args, pgroup: true) do |stdin, stdout, stderr, wait_thread|
       stdin.close
       out_reader = Thread.new { stdout.read }
       err_reader = Thread.new { stderr.read }
-      status = Timeout.timeout(HV_HANG_TIMEOUT_SEC) { wait_thread.value }
+      status = Timeout.timeout(timeout_sec) { wait_thread.value }
       [ out_reader.value, err_reader.value, status ]
     rescue Timeout::Error
-      Process.kill("TERM", wait_thread.pid)
-      Process.wait(wait_thread.pid)
+      Process.kill("KILL", -wait_thread.pid)
+      wait_thread.value
       raise
     rescue Errno::ESRCH, Errno::ECHILD
       raise Timeout::Error, "hv did not exit"

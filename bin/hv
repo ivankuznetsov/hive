@@ -32,7 +32,7 @@ timeout_bin="$(command -v timeout 2>/dev/null || true)"
 
 probe_version() {
   if [[ -n "$timeout_bin" ]]; then
-    "$timeout_bin" 5 "$1" --version </dev/null 2>/dev/null
+    "$timeout_bin" -k 1 5 "$1" --version </dev/null 2>/dev/null
   else
     local output_file pid status watchdog
     output_file="$(mktemp "${TMPDIR:-/tmp}/hv-version.XXXXXX")" || return

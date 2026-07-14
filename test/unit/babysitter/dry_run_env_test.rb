@@ -1517,6 +1517,19 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_git_stub_skips_output_hidden_after_consumed_separator
+    with_tmp_git_repo do |dir|
+      output_path = File.join(dir, "log-output")
+      args = [ "-C", dir, "log", "--decorate-refs", "--", "--output=#{output_path}", "-1", "HEAD" ]
+
+      _out, err, status = Open3.capture3(real_git_env(dir), stub_path("git"), *args)
+
+      assert status.success?, err
+      assert_includes err, "[dry-run] git #{args.join(' ')} skipped"
+      refute_path_exists output_path
+    end
+  end
+
   private
 
   STUB_HANG_TIMEOUT_SEC = 10

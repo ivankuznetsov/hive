@@ -79,7 +79,15 @@ def command_option_scan(subcommand, args)
   index = 0
   while index < args.length
     arg = args[index]
-    break if arg == "--"
+    if arg == "--"
+      # An unmodeled value-taking option may consume this token instead of treating it as the
+      # pathspec separator. Keep scanning fail-closed when an option immediately precedes it;
+      # known consumers (such as grep's `-e`) have already advanced past the token.
+      break unless index.positive? && args[index - 1].start_with?("-")
+
+      index += 1
+      next
+    end
 
     options << [ arg, args[index + 1] ]
     index += command_option_consumes_next?(subcommand, arg) ? 2 : 1

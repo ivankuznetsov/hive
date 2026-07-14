@@ -522,6 +522,9 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "gh", "api", "repos/owner/repo/issues/123/comments", "--raw-field", "body=hi"
       assert_stubbed env, "gh", "api", "repos/owner/repo/issues/123/comments", "--field", "body=hi"
       assert_stubbed env, "gh", "api", "repos/owner/repo/issues/123/comments", "--input", "payload.json"
+      # `-t` consumes `--method=GET` as its template value, so the following field
+      # still makes real gh default to POST; the classifier must not treat it as GET.
+      assert_stubbed env, "gh", "api", "-t", "--method=GET", "-f", "body=hi", "repos/owner/repo/issues"
       assert_stubbed env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "--input", "payload.json"
       assert_stubbed env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-F", "q=@secret"
       assert_stubbed env, "gh", "workflow", "run", "release.yml"
@@ -810,6 +813,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes skipped, "gh api repos/owner/repo/issues/123/comments --raw-field body=hi skipped"
       assert_includes skipped, "gh api repos/owner/repo/issues/123/comments --field body=hi skipped"
       assert_includes skipped, "gh api repos/owner/repo/issues/123/comments --input payload.json skipped"
+      assert_includes skipped, "gh api -t --method=GET -f body=hi repos/owner/repo/issues skipped"
       assert_includes skipped, "gh api --method GET repos/owner/repo/issues --input payload.json skipped"
       assert_includes skipped, "gh api --method GET repos/owner/repo/issues -F q=@secret skipped"
       assert_includes skipped, "gh api --method GET repos/owner/repo/issues -Fq=@secret skipped"

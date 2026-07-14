@@ -278,7 +278,14 @@ def api_read_only?(rest)
       cache = true
       index += 1
     else
-      index += 1
+      if arg.start_with?("--")
+        name = arg.split("=", 2).first
+        index += API_ENDPOINT_VALUE_OPTIONS.include?(name) && !arg.include?("=") ? 2 : 1
+      elsif arg.start_with?("-") && arg != "-"
+        index += api_short_cluster_consumes_next?(arg) ? 2 : 1
+      else
+        index += 1
+      end
     end
   end
 

@@ -43,6 +43,7 @@ module Hive
       STRATEGIC_REASONS = IssueFiler::STRATEGIC_REASONS.freeze
       ISSUE_SUPPRESSING_FIX_OUTCOMES = %w[no_diff pr_opened merged].freeze
       REMOTE_UNCERTAIN_OUTCOME = "remote_outcome_unknown".freeze
+      FIX_RELEASE_EVIDENCE_LIMIT = 2_000
 
       attr_reader :fixer, :pr_opener, :issue_filer
 
@@ -568,7 +569,7 @@ module Hive
             return
           end
           unless patch.publishable?
-            receipts = patch.terminal ? { "fix" => json_copy(patch.to_h) } : {}
+            receipts = patch.terminal ? { "fix" => json_copy(patch.to_h) } : fix_release_evidence(token, patch)
             settle(token, patch, receipts: receipts, adapter: :fix)
             return
           end
@@ -770,6 +771,21 @@ module Hive
           now: now,
           backoff_sec: @backoff_sec
         )
+      end
+
+      # Receipts are write-once, so a retryable fix failure records its error
+      # detail under the claim generation that produced it. Without this the
+      # non-terminal error text is dropped and never persists anywhere.
+      def fix_release_evidence(token, patch)
+        details = patch.details.is_a?(Hash) ? patch.details : {}
+        return {} if details.empty?
+
+        {
+          "fix_release_#{token.fetch(:generation)}" => {
+            "outcome" => patch.outcome,
+            "details" => JSON.generate(details)[0, FIX_RELEASE_EVIDENCE_LIMIT]
+          }
+        }
       end
 
       def settle_unexpected_failure(aggregate, action, token, error)

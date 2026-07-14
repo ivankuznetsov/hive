@@ -142,6 +142,15 @@ module Hive
           validation: audit.fetch(:validation), changed_paths: audit.fetch(:paths),
           diff_lines: audit.fetch(:diff_lines), details: {}
         )
+      rescue Hive::ConfigError, ArgumentError => e
+        # Configuration and identity errors are permanent for this action;
+        # retrying can only reproduce them, so the result is terminal.
+        cleanup(worktree)
+        Result.new(
+          outcome: "fix_error", terminal: true, branch: branch,
+          worktree_path: worktree&.path, analysis_sha: analysis_sha,
+          details: { "error" => "#{e.class}: #{e.message}" }
+        )
       rescue StandardError => e
         cleanup(worktree)
         Result.new(
@@ -184,10 +193,18 @@ module Hive
         Hive::Worktree.new(@project_root, branch.tr("/", "-"), worktree_root: root)
       end
 
+      # Every audit diff disables rename detection: a detected rename reports
+      # only its destination path and a near-zero line count, which would let
+      # the vacated source path slip past the boundary, contract, and cap
+      # guards below. With --no-renames both endpoints surface as a deletion
+      # plus an addition and enter every guard.
       def audit_and_validate(thesis, path, base_sha, validation_pass: 0)
         git_output!(path, "add", "-A")
-        paths = nul_paths(git_output!(path, "diff", "--cached", "--name-only", "-z", base_sha))
+        paths = nul_paths(git_output!(path, "diff", "--cached", "--no-renames", "--name-only", "-z", base_sha))
         return { passed: false, outcome: "no_diff", details: {}, paths: [], diff_lines: 0 } if paths.empty?
+
+        symlinked = paths.select { |changed| symlinked_path?(path, changed) }.sort
+        return audit_failure("symlinked_path", paths, symlinked_paths: symlinked) if symlinked.any?
 
         boundary = Array(thesis.feature_boundary && thesis.feature_boundary["owned_files"]) +
                    Array(thesis.feature_boundary && thesis.feature_boundary["entrypoints"])
@@ -204,7 +221,7 @@ module Hive
           return audit_failure("dependency_change", paths, diff_lines: diff_lines)
         end
 
-        diff = git_output!(path, "diff", "--cached", "--unified=0", base_sha)
+        diff = git_output!(path, "diff", "--cached", "--no-renames", "--unified=0", base_sha)
         source_paths = paths.select do |changed|
           source_change_path?(path, base_sha, changed)
         end.sort
@@ -263,7 +280,7 @@ module Hive
             validation: validation
           )
         end
-        validated_diff = git_output!(path, "diff", "--cached", "--unified=0", base_sha)
+        validated_diff = git_output!(path, "diff", "--cached", "--no-renames", "--unified=0", base_sha)
         if validated_diff != diff
           if validation_pass >= 1
             return audit_failure(
@@ -298,7 +315,9 @@ module Hive
         current = assert_registered_checkout!(registered_checkout)
         return patch_base if current == patch_base
 
-        drift_paths = nul_paths(git_output!(@project_root, "diff", "--name-only", "-z", "#{analysis_sha}..#{current}"))
+        drift_paths = nul_paths(
+          git_output!(@project_root, "diff", "--no-renames", "--name-only", "-z", "#{analysis_sha}..#{current}")
+        )
         boundary = Array(thesis.feature_boundary && thesis.feature_boundary["owned_files"]) +
                    Array(thesis.feature_boundary && thesis.feature_boundary["entrypoints"])
         overlap = drift_paths & boundary
@@ -346,7 +365,7 @@ module Hive
       end
 
       def diff_line_count!(path, base_sha)
-        git_output!(path, "diff", "--cached", "--numstat", base_sha).lines.sum do |line|
+        git_output!(path, "diff", "--cached", "--no-renames", "--numstat", base_sha).lines.sum do |line|
           added, removed, = line.split("\t", 3)
           raise Hive::GitError, "cannot count binary diff safely" if added == "-" || removed == "-"
 
@@ -355,17 +374,56 @@ module Hive
       end
 
       def public_declaration_changed?(worktree_path, base_sha, changed_path)
-        before = git_output!(worktree_path, "show", "#{base_sha}:#{changed_path}")
         after = File.file?(File.join(worktree_path, changed_path)) ?
           File.binread(File.join(worktree_path, changed_path)) : ""
+        before =
+          begin
+            git_output!(worktree_path, "show", "#{base_sha}:#{changed_path}")
+          rescue Hive::GitError
+            # `git show` fails identically for a genuinely new file and for a
+            # broken audit base. Only a verified base commit that lacks the
+            # blob means "new file"; any other git failure re-raises so a
+            # deleted public declaration can never pass unaudited. A new file
+            # has no base signatures, so any explicit public declaration in it
+            # is a contract expansion and therefore fails closed.
+            raise unless new_path_at_base?(worktree_path, base_sha, changed_path)
+
+            return @public_contract_guard.public_declaration_signatures(changed_path, after).any?
+          end
         @public_contract_guard.public_declaration_signatures(changed_path, before) !=
           @public_contract_guard.public_declaration_signatures(changed_path, after)
-      rescue Hive::GitError
-        # A new file has no base blob; any explicit public declaration in it
-        # is a contract expansion and therefore fails closed.
-        after = File.file?(File.join(worktree_path, changed_path)) ?
-          File.binread(File.join(worktree_path, changed_path)) : ""
-        @public_contract_guard.public_declaration_signatures(changed_path, after).any?
+      end
+
+      def new_path_at_base?(worktree_path, base_sha, changed_path)
+        _out, err, commit = Open3.capture3(
+          "git", "-C", worktree_path, "cat-file", "-e", "#{base_sha}^{commit}"
+        )
+        unless commit.success?
+          raise Hive::GitError,
+                "cannot verify refactor audit base commit #{base_sha}: #{err.to_s.strip}"
+        end
+
+        _out, _err, blob = Open3.capture3(
+          "git", "-C", worktree_path, "cat-file", "-e", "#{base_sha}:#{changed_path}"
+        )
+        !blob.success?
+      end
+
+      # Git commits a symlink as a small target blob, but every filesystem
+      # audit here reads through the live path, so audited bytes could diverge
+      # from committed bytes and a committed link can point outside the
+      # repository. Reject any changed path whose final entry or directory
+      # component is a symlink inside the worktree.
+      def symlinked_path?(worktree_path, changed_path)
+        current = File.expand_path(worktree_path)
+        changed_path.split("/").any? do |component|
+          current = File.join(current, component)
+          begin
+            File.lstat(current).symlink?
+          rescue Errno::ENOENT, Errno::ENOTDIR
+            false
+          end
+        end
       end
 
       def source_change_path?(worktree_path, base_sha, changed_path)

@@ -180,6 +180,32 @@ class HoneycombPackageBuilderTest < Minitest::Test
     end
   end
 
+  def test_moving_a_file_flips_the_aggregate_hash_even_with_identical_bytes
+    with_publishable_fixture do |_source, descriptor_path, workflow|
+      with_tmp_dir do |first|
+        baseline = Hive::Honeycomb::PackageBuilder.build(
+          workflow: workflow, descriptor_path: descriptor_path, output_dir: first
+        )
+        owned = File.join(File.dirname(descriptor_path), "sample")
+        FileUtils.mv(File.join(owned, "shared.md"), File.join(owned, "renamed.md"))
+        File.write(descriptor_path, File.read(descriptor_path).gsub("./sample/shared.md", "./sample/renamed.md"))
+        moved_workflow = Hive::Workflows::DescriptorParser.parse_file(descriptor_path)
+
+        with_tmp_dir do |second|
+          moved = Hive::Honeycomb::PackageBuilder.build(
+            workflow: moved_workflow, descriptor_path: descriptor_path, output_dir: second
+          )
+          # The moved file keeps identical bytes; only its packaged path
+          # changes. The path\0sha256 tuple must still flip the aggregate.
+          assert_equal File.binread(File.join(baseline.package_root, "shared.md")),
+                       File.binread(File.join(moved.package_root, "renamed.md"))
+          refute_equal baseline.manifest.fetch("aggregate_sha256"),
+                       moved.manifest.fetch("aggregate_sha256")
+        end
+      end
+    end
+  end
+
   def test_version_override_changes_package_without_editing_source_descriptor
     with_publishable_fixture do |_source, descriptor_path, workflow|
       original = File.binread(descriptor_path)
@@ -343,6 +369,131 @@ class HoneycombPackageBuilderTest < Minitest::Test
         end
       ensure
         File.chmod(0o644, unreadable)
+      end
+    end
+  end
+
+  def test_omits_assets_key_when_source_declares_no_assets
+    with_tmp_dir do |dir|
+      workflows = File.join(dir, "workflows")
+      owned = File.join(workflows, "plain")
+      FileUtils.mkdir_p(owned)
+      File.write(File.join(owned, "work.md"), "instructions\n")
+      descriptor_path = File.join(workflows, "plain.yml")
+      File.write(descriptor_path, <<~YAML)
+        id: plain
+        metadata:
+          version: 1.0.0
+          author: Author
+          description: No assets declared
+          minimum_hive_version: 0.3.7
+        stages:
+          - name: work
+            kind: agent
+            state_file: work.md
+            instruction: ./plain/work.md
+      YAML
+      workflow = Hive::Workflows::DescriptorParser.parse_file(descriptor_path)
+
+      with_tmp_dir do |out|
+        package = Hive::Honeycomb::PackageBuilder.build(
+          workflow: workflow, descriptor_path: descriptor_path, output_dir: out
+        )
+        descriptor = YAML.safe_load(File.read(File.join(package.package_root, "workflow.yml")))
+        refute descriptor.fetch("metadata").key?("assets"),
+               "no-assets source must not gain a spurious assets: [] key"
+      end
+    end
+  end
+
+  def test_literal_parent_traversal_source_is_rejected_by_the_string_guard
+    with_publishable_fixture do |_source, descriptor_path, workflow|
+      with_tmp_dir do |out|
+        builder = Hive::Honeycomb::PackageBuilder.new(
+          workflow: workflow, descriptor_path: descriptor_path, output_dir: out
+        )
+        # The owned root is <workflows>/sample; its parent (<workflows>) makes
+        # `relative` exactly ".." so the string-prefix guard rejects it before
+        # the realpath backstop ("resolves outside") can run.
+        parent = File.dirname(descriptor_path)
+        error = assert_raises(Hive::ConfigError) do
+          builder.send(:validate_owned_file, parent, label: "asset")
+        end
+        assert_match(/is outside owned workflow directory/, error.message)
+      end
+    end
+  end
+
+  def test_rejects_symlinked_owned_workflow_root
+    with_tmp_dir do |dir|
+      workflows = File.join(dir, "workflows")
+      FileUtils.mkdir_p(workflows)
+      outside = File.join(dir, "outside")
+      FileUtils.mkdir_p(outside)
+      File.write(File.join(outside, "work.md"), "escaped instructions\n")
+      File.symlink(outside, File.join(workflows, "linked"))
+      descriptor_path = File.join(workflows, "linked.yml")
+      File.write(descriptor_path, <<~YAML)
+        id: linked
+        metadata:
+          version: 1.0.0
+          author: Author
+          description: Symlinked owned root
+          minimum_hive_version: 0.3.7
+        stages:
+          - name: work
+            kind: agent
+            state_file: work.md
+            instruction: ./linked/work.md
+      YAML
+      workflow = Hive::Workflows::DescriptorParser.parse_file(descriptor_path)
+
+      with_tmp_dir do |out|
+        error = assert_raises(Hive::ConfigError) do
+          Hive::Honeycomb::PackageBuilder.build(
+            workflow: workflow, descriptor_path: descriptor_path, output_dir: out
+          )
+        end
+        assert_match(/resolves outside/, error.message)
+        refute File.exist?(File.join(out, "workflows", "linked"))
+      end
+    end
+  end
+
+  def test_read_time_symlink_swap_is_rejected_and_removes_package_root
+    with_publishable_fixture do |_source, descriptor_path, workflow|
+      owned = File.join(File.dirname(descriptor_path), "sample")
+      outside = File.join(File.dirname(File.dirname(descriptor_path)), "outside.md")
+      File.write(outside, "outside\n")
+
+      with_tmp_dir do |out|
+        package_root = File.join(File.expand_path(out), "workflows", "sample")
+        original = FileUtils.method(:mkdir_p)
+        swapped = false
+        # Swap a validated owned file for an outside-pointing symlink between
+        # validation and read: the mkdir_p of the package root fires once, just
+        # before write_collected_files reads each source.
+        replacement = lambda do |path, *args|
+          result = original.call(path, *args)
+          if !swapped && File.expand_path(path.to_s) == package_root
+            swapped = true
+            shared = File.join(owned, "shared.md")
+            File.delete(shared)
+            File.symlink(outside, shared)
+          end
+          result
+        end
+
+        error = with_replaced_singleton_method(FileUtils, :mkdir_p, replacement) do
+          assert_raises(Hive::ConfigError) do
+            Hive::Honeycomb::PackageBuilder.build(
+              workflow: workflow, descriptor_path: descriptor_path, output_dir: out
+            )
+          end
+        end
+
+        assert_match(/at read time|no longer a regular file/, error.message)
+        refute File.exist?(package_root), "package root must be removed after a read-time rejection"
       end
     end
   end

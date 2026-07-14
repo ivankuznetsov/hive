@@ -1,6 +1,7 @@
 require "digest"
 require "yaml"
 require "hive/deny_patterns"
+require "hive/honeycomb"
 require "hive/secret_patterns"
 
 module Hive
@@ -19,7 +20,7 @@ module Hive
           permission_summary: permission_summary,
           review_required: review_required
         )
-        File.binwrite(File.join(package_root, "manifest.yml"), YAML.dump(manifest))
+        File.binwrite(File.join(package_root, Hive::Honeycomb::MANIFEST_FILENAME), YAML.dump(manifest))
         manifest
       end
 
@@ -40,25 +41,21 @@ module Hive
           }.freeze,
           "files" => files,
           "aggregate_sha256" => aggregate_digest(files),
-          "external_dependencies" => dependencies.sort_by do |row|
-            [ row.fetch("context"), row.fetch("skill"), row.fetch("agent") ]
-          end.freeze,
+          "external_dependencies" => Hive::Honeycomb.sort_dependencies(dependencies).freeze,
           "permissions" => permission_summary,
-          "review_required" => review_required.sort_by do |row|
-            [ row.fetch("file"), row.fetch("line"), row.fetch("rule") ]
-          end.freeze
+          "review_required" => Hive::Honeycomb.sort_review_required(review_required).freeze
         }.freeze
       end
 
       def package_files(package_root)
-        Dir.glob(File.join(package_root, "**", "*"), File::FNM_DOTMATCH)
-           .select { |path| File.file?(path) }
-           .map do |path|
-             relative = path.delete_prefix("#{package_root}/")
-             { "path" => relative, "sha256" => ::Digest::SHA256.file(path).hexdigest }.freeze
+        Hive::Honeycomb.package_relative_files(package_root)
+           .reject { |relative| relative == Hive::Honeycomb::MANIFEST_FILENAME }
+           .map do |relative|
+             {
+               "path" => relative,
+               "sha256" => ::Digest::SHA256.file(File.join(package_root, relative)).hexdigest
+             }.freeze
            end
-           .reject { |row| row.fetch("path") == "manifest.yml" }
-           .sort_by { |row| row.fetch("path") }
            .freeze
       end
 

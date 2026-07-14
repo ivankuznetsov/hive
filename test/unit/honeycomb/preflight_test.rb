@@ -59,6 +59,23 @@ class HoneycombPreflightTest < Minitest::Test
     end
   end
 
+  def test_dependency_finding_redacts_token_shaped_skill_and_verifier_detail
+    skill_token = "ghp_#{'a' * 36}"
+    detail_token = "ghp_#{'b' * 36}"
+    with_package(skill: skill_token) do |package, project_root|
+      profile = profile_with { |_invocation, project_root:| [ :missing, "install #{detail_token}" ] }
+      result = with_profile(profile) do
+        Hive::Honeycomb::Preflight.run(package: package, project_root: project_root)
+      end
+
+      finding = result.findings.find { |row| row.kind == "dependency" }
+      refute_includes finding.to_h.inspect, skill_token
+      refute_includes finding.to_h.inspect, detail_token
+      assert_includes finding.message, "REDACTED:github_token"
+      assert_includes finding.remediation, "REDACTED:github_token"
+    end
+  end
+
   def test_dependency_verifier_failure_is_reported_without_internal_detail
     with_package(skill: "/required") do |package, project_root|
       profile = profile_with { |_invocation, project_root:| raise IOError, "private verifier path" }

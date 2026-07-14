@@ -337,6 +337,7 @@ class HoneycombSubmissionTest < Minitest::Test
         package = Hive::Honeycomb::Package.new(
           staging_root: dir,
           package_root: package_root,
+          owns_staging_root: false,
           id: "sample",
           version: "1.2.3",
           metadata: {

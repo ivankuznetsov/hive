@@ -1,6 +1,7 @@
 require "rubygems/version"
 require "hive/agent_profiles"
 require "hive/deny_patterns"
+require "hive/honeycomb"
 require "hive/honeycomb/manifest"
 require "hive/secret_patterns"
 
@@ -99,14 +100,18 @@ module Hive
       end
 
       def dependency_finding(dependency, rule, detail)
+        # A skill identifier or verifier detail can itself be token-shaped and
+        # trip a secret pattern; redact both before they reach the JSON/human
+        # output so a diagnostic never echoes credential material verbatim.
+        skill = Hive::SecretPatterns.redact(dependency.fetch("skill").to_s)
         Finding.new(
           kind: "dependency",
           rule: rule,
           file: "workflow.yml",
           line: nil,
-          message: "required skill #{dependency.fetch('skill').inspect} for " \
+          message: "required skill #{skill.inspect} for " \
                    "#{dependency.fetch('context')} (#{dependency.fetch('agent')}) is not verifiable",
-          remediation: detail,
+          remediation: Hive::SecretPatterns.redact(detail.to_s),
           contexts: [ dependency.fetch("context") ].freeze
         ).freeze
       end
@@ -118,7 +123,7 @@ module Hive
           [ row.fetch("context"), row ]
         end
 
-        package.files.reject { |path| path == "manifest.yml" }.sort.each do |relative|
+        package.files.reject { |path| path == Hive::Honeycomb::MANIFEST_FILENAME }.sort.each do |relative|
           bytes = read_for_scan(package, relative)
           Hive::SecretPatterns.safe_scan(bytes, file: relative).each do |finding|
             blocked << Finding.new(
@@ -189,9 +194,7 @@ module Hive
       end
 
       def sort_review_required(records)
-        records.sort_by do |record|
-          [ record.fetch("file"), record.fetch("line"), record.fetch("rule") ]
-        end
+        Hive::Honeycomb.sort_review_required(records)
       end
     end
   end

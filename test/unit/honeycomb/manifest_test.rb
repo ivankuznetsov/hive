@@ -44,6 +44,7 @@ class HoneycombManifestTest < Minitest::Test
       package = Hive::Honeycomb::Package.new(
         staging_root: dir,
         package_root: package_root,
+        owns_staging_root: false,
         id: "test",
         version: "1.0.0",
         metadata: {},

@@ -151,6 +151,9 @@ def unsafe_read_option?(subcommand, arg, next_arg = nil)
   # form down to `--t`, not just the spelled-out flag. `--no-textconv` is safe and is not a
   # prefix of `--textconv`, so it stays allowed.
   return true if textconv_abbreviation?(arg)
+  # Verbose status renders a diff and can therefore run a repository-configured textconv
+  # helper. Reject the repeated/clustered short flag and every long abbreviation Git accepts.
+  return true if verbose_status_option?(subcommand, arg)
   # `git cat-file --filters` applies smudge filters, running the repo-local
   # `filter.<driver>.smudge` command — an exec seam the diff/log/show `--no-textconv`
   # hardening never sees, since cat-file stays a plain allowlisted passthrough.
@@ -232,6 +235,13 @@ def textconv_abbreviation?(arg)
   # as the `--textconv` long option. start_with?("--t") pins this to the textconv branch (min
   # length `--t`); start_with?(arg) confirms arg is itself a prefix of `--textconv`.
   arg.start_with?("--t") && "--textconv".start_with?(arg)
+end
+
+def verbose_status_option?(subcommand, arg)
+  return false unless subcommand == "status"
+  return true if arg.start_with?("--v") && "--verbose".start_with?(arg)
+
+  arg.start_with?("-") && !arg.start_with?("--") && arg[1..].include?("v")
 end
 
 def unsafe_env?

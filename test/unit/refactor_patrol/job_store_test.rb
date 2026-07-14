@@ -413,6 +413,65 @@ class RefactorPatrolJobStoreTest < Minitest::Test
     end
   end
 
+  def test_rejects_zombie_records_with_two_active_or_unordered_discovery_attempts
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      zombie = job(
+        "state" => "analyzing", "complete" => false, "actions" => [],
+        "attempts" => [
+          discovery_attempt(generation: 1),
+          discovery_attempt(generation: 2, owner: "daemon-b")
+        ]
+      )
+      error = assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        store.write_job!(zombie)
+      end
+      assert_match(/one active discovery attempt/, error.message)
+      refute Dir.exist?(File.join(store.root, "jobs"))
+
+      unordered = job(
+        "state" => "analyzing", "complete" => false, "actions" => [],
+        "attempts" => [
+          discovery_attempt(generation: 2, state: "released"),
+          discovery_attempt(generation: 1, state: "superseded")
+        ]
+      )
+      error = assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        store.write_job!(unordered)
+      end
+      assert_match(/strictly increasing/, error.message)
+    end
+  end
+
+  def test_stale_prior_generation_token_cannot_renew_or_checkpoint_after_supersede_and_release
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      store.enqueue_manifest!(manifest, policy: intake_policy, now: T0)
+      stale = store.claim_discovery!(
+        "pr-7-stable", owner: "daemon-a", analysis_sha: "c" * 40,
+        now: T0, lease_sec: 10
+      )
+      replacement = store.claim_discovery!(
+        "pr-7-stable", owner: "daemon-b", analysis_sha: "c" * 40,
+        now: T0 + 20, lease_sec: 60, claim_resolver: ->(_attempt) { :resolved }
+      )
+      refute_nil replacement
+      store.release_discovery!(replacement, reason: "partial_review", now: T0 + 21, backoff_sec: 60)
+
+      assert_raises(Hive::RefactorPatrol::JobStore::StaleClaim) do
+        store.renew_discovery_claim!(
+          stale, now: T0 + 22, lease_sec: 60, claim_resolver: ->(_claim) { :unresolved }
+        )
+      end
+      assert_raises(Hive::RefactorPatrol::JobStore::StaleClaim) do
+        store.checkpoint_discovery!(stale, envelope: complete_zero_envelope(dir), now: T0 + 23)
+      end
+      attempts = store.read_job("pr-7-stable").fetch("attempts")
+      assert_equal %w[superseded released], attempts.map { |attempt| attempt.fetch("state") },
+                   "the released generation must not resurrect its superseded predecessor"
+    end
+  end
+
   def test_discovery_heartbeat_renews_only_the_live_exact_generation
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::JobStore.new(dir)
@@ -2314,6 +2373,27 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       "score" => 0.8,
       "admissible" => true,
       "reasons" => []
+    }
+  end
+
+  def discovery_attempt(generation:, state: "claimed", owner: "daemon-a")
+    finished = !%w[claimed running].include?(state)
+    {
+      "kind" => "discovery_claim",
+      "owner" => owner,
+      "owner_pid" => nil,
+      "owner_process_start_time" => nil,
+      "generation" => generation,
+      "state" => state,
+      "claimed_at" => (T0 + generation).iso8601,
+      "heartbeat_at" => (T0 + generation).iso8601,
+      "expires_at" => (T0 + 3600).iso8601,
+      "pid" => nil,
+      "process_start_time" => nil,
+      "pgid" => nil,
+      "finished_at" => finished ? (T0 + generation + 1).iso8601 : nil,
+      "outcome" => finished ? state : nil,
+      "next_eligible_at" => nil
     }
   end
 

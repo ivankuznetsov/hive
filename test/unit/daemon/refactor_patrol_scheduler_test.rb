@@ -413,6 +413,50 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
+  def test_reserve_reclaims_expired_discovery_claim_only_when_owner_is_provably_resolved
+    with_project do |_dir, entry, store|
+      enqueue(store)
+      dead = store.claim_discovery!(
+        "job-7", owner: "daemon-crashed", analysis_sha: "head",
+        now: T0, lease_sec: 60, owner_pid: 4242, owner_process_start_time: "boot-dead"
+      )
+      store.attach_discovery_process!(
+        dead, pid: 4242, process_start_time: "boot-dead", pgid: 4242,
+        now: T0 + 1, lease_sec: 60
+      )
+
+      cautious = scheduler(entry, store, claim_resolver: ->(_claim) { :unresolved })
+      candidates = cautious.candidates(now: T0 + 120)
+      assert_equal [ "job-7" ], candidates.map { |item| item.fetch(:job_id) },
+                   "an analyzing job with an expired claim must surface for recovery"
+      error = assert_raises(Hive::Daemon::RefactorPatrolScheduler::ReservationBlocked) do
+        cautious.reserve(candidates.first, now: T0 + 120)
+      end
+      assert_equal "claim_unavailable", error.reason
+      unresolved = store.read_job("job-7").fetch("attempts").last
+      assert_equal "running", unresolved.fetch("state"),
+                   "an unresolved owner must keep its recorded claim"
+      assert_equal "daemon-crashed", unresolved.fetch("owner")
+
+      resolved_claims = []
+      recovering = scheduler(entry, store, claim_resolver: lambda { |claim|
+        resolved_claims << claim
+        :resolved
+      })
+      dispatch = recovering.reserve(recovering.candidates(now: T0 + 120).first, now: T0 + 120)
+
+      assert_equal "job-7", dispatch.dig(:dispatch_token, :job_id)
+      assert_equal dead.fetch(:generation) + 1, dispatch.dig(:dispatch_token, :generation)
+      assert_equal [ 4242 ], resolved_claims.map { |claim| claim.fetch("pid") },
+                   "the injected resolver must receive the recorded claim evidence"
+      attempts = store.read_job("job-7").fetch("attempts")
+      assert_equal "superseded", attempts[-2].fetch("state")
+      assert_equal "expired_claim_resolved", attempts[-2].fetch("outcome")
+      assert_equal "claimed", attempts[-1].fetch("state")
+      assert_equal "daemon-a", attempts[-1].fetch("owner")
+    end
+  end
+
   def test_spawn_transition_renews_discovery_lease_from_verified_child_start
     with_project do |_dir, entry, store|
       enqueue(store)
@@ -931,13 +975,13 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
-  def scheduler(entry, store)
+  def scheduler(entry, store, claim_resolver: ->(_attempt) { :resolved })
     Hive::Daemon::RefactorPatrolScheduler.new(
       registry: -> { [ entry ] }, config_loader: ->(_path) { enabled_cfg },
       job_store_factory: ->(_path) { store },
       repository_resolver: ->(_entry, _cfg) { repository_identity },
       checkout_guard_factory: ->(*) { Guard.new }, owner: "daemon-a",
-      claim_resolver: ->(_attempt) { :resolved }
+      claim_resolver: claim_resolver
     )
   end
 

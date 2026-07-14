@@ -3,11 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/ci.yml, .github/workflows/release.yml, config/brakeman.ignore
 created: 2026-04-25
-<<<<<<< HEAD
 updated: 2026-07-13
-=======
-updated: 2026-07-10
->>>>>>> fa4544c7 (docs(config): U5 document per-stage model routing)
 tags: [test, minitest, fixtures]
 ---
 

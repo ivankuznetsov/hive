@@ -462,6 +462,36 @@ class E2EBinaryTest < Minitest::Test
     assert_match(/no scenarios match definitely-no-scenario/, payload["message"])
   end
 
+  def test_malformed_scenario_is_preflight_error_in_json_mode
+    name = "malformed_scenario_#{Process.pid}"
+    with_temp_scenario(name, "name: #{name}\nsteps:\n  - kind: [\n") do
+      [ [ "list" ], [ "run", name ] ].each do |args|
+        out, err, status = Open3.capture3(hive_e2e, *args, "--json")
+
+        assert_equal 78, status.exitstatus, "#{args.first}: malformed scenario config must exit 78"
+        assert_empty err
+        payload = JSON.parse(out)
+        assert_equal "hive-e2e-error", payload["schema"]
+        assert_equal "preflight", payload["error_kind"]
+        assert_equal 78, payload["exit_code"]
+        assert_match(/#{name}\.yml/, payload["message"])
+      end
+    end
+  end
+
+  def test_malformed_scenario_is_preflight_error_in_human_mode
+    name = "malformed_scenario_#{Process.pid}"
+    with_temp_scenario(name, "name: #{name}\nsteps:\n  - kind: [\n") do
+      [ [ "list" ], [ "run", name ] ].each do |args|
+        out, err, status = Open3.capture3(hive_e2e, *args)
+
+        assert_equal 78, status.exitstatus, "#{args.first}: malformed scenario config must exit 78"
+        assert_empty out
+        assert_match(/hive-e2e: .*#{name}\.yml/, err)
+      end
+    end
+  end
+
   def test_tui_refute_only_scenario_preflights_missing_tmux
     name = "tui_refute_preflight_#{Process.pid}"
     with_temp_scenario(name, <<~YAML) do

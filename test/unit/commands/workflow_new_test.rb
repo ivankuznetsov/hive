@@ -364,7 +364,7 @@ class WorkflowNewTest < Minitest::Test
   def test_normalize_and_validate_id_reuses_workflow_new_errors
     assert_equal "my-flow", Hive::Commands::Workflow.normalize_and_validate_id!(" my-flow ")
 
-    [ "coding", "content" ].each do |id|
+    [ "coding", "content", "bench" ].each do |id|
       error = assert_raises(Hive::Commands::Workflow::UsageError) do
         Hive::Commands::Workflow.normalize_and_validate_id!(id)
       end

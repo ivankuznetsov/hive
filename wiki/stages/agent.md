@@ -3,7 +3,7 @@ title: Generic Agent Stage Runner
 type: stage
 source: lib/hive/stages/agent.rb, templates/agent_prompt.md.erb
 created: 2026-06-19
-updated: 2026-07-09
+updated: 2026-07-13
 tags: [stage, agent, workflow]
 ---
 
@@ -49,7 +49,14 @@ deliverable before status reports them archived.
 8. Re-read `stage.state_file` and map markers: `WAITING` → `round_waiting`,
    `COMPLETE` → `complete`, `ERROR` → `error`, `NONE` → `nil` (an explicit arm —
    a markerless run has nothing to commit, so `commit_after` skips the commit),
-   otherwise `marker.name.to_s`.
+   otherwise `marker.name.to_s`. A provider-limit error is the exception to the
+   plain `ERROR` action: if `Hive::Agent` already wrote
+   `ERROR reason=limits_reached`, the runner preserves that marker; if a
+   non-state-file spawn only returned quota text in its error envelope, the
+   runner writes the equivalent marker with the selected profile as `provider`.
+   Both paths return `commit=limits_reached` and retain a `retry_after` stamp so
+   the daemon cooldown healer can requeue the generic stage. Non-limit error
+   envelopes still become `ERROR reason=agent_preflight_failed`.
 
 The coding pipeline's `brainstorm` and `plan` names still use their bespoke
 tmux-capable runners even though their descriptor entries are `kind: :agent`;
@@ -60,7 +67,9 @@ name-first resolver precedence preserves the current coding runtime.
 - `test/unit/stages/agent_test.rb` covers prior-artifact selection, nonce
   wrapping, nil-skill fallback, formatted skill invocation, spawn arguments,
   descriptor-versus-loaded-config resource precedence, explicit budget/timeout
-  overrides, and marker-to-action mapping.
+  overrides, marker-to-action mapping, provider-limit envelope classification,
+  preservation of agent-written quota markers, and the distinct non-limit
+  preflight fallback.
 
 ## Backlinks
 

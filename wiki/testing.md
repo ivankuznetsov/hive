@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/ci.yml, .github/workflows/release.yml, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-07-10
+updated: 2026-07-13
 tags: [test, minitest, fixtures]
 ---
 
@@ -83,7 +83,7 @@ task default: :test
 | `digest/categorizer_test.rb`, `digest/renderer_test.rb`, `digest/run_test.rb`, `digest/sender_test.rb` | Digest generation/delivery — model JSON mapping and fallbacks, prompt rendering with PR bodies, Telegram MarkdownV2 escaping/category ordering, empty/success/failed-notice orchestration, dry-run token bypass, chat-id resolution, and Telegram send arguments through an injected client. These are unit seams; no real agent or Telegram Bot API call is exercised. |
 | `daemon/digest_scheduler_test.rb` | `Hive::Daemon::DigestScheduler` — first-run no-history guard, local-midnight due calculation, one-day-at-a-time catch-up, catch-up cap logging, non-zero retry behavior, disabled mode, and DST local-date handling. |
 | `claude_launcher_test.rb` | `Hive::ClaudeLauncher` — headless/tmux delegation, readiness deadlines, prompt submission, pane logging, tmux-session loss before terminal markers and expected-output waits, Claude ready-prompt variants for line-start, line-end, banner-scrolled, Claude Code 2.1.179 separator/caret/footer, NBSP, and narrow NBSP shapes plus false-positive rejection for menus, trust/permission prompts, stale carets, and non-footer `⏵⏵` output, provider-limit menu classification, signal cleanup, and wrapper argv policy including model/effort pins. |
-| `commands/run_test.rb`, `stages/agent_test.rb`, `stages/council_test.rb`, `stages/resolver_test.rb` | Descriptor-backed runner dispatch — `Run#pick_runner` passing `task.workflow`, generic `kind: :agent` prompt rendering, prior-artifact nonce wrapping, per-stage agent/model/effort spawn kwargs, council reviewer fan-out/triage/revise/max-round behavior, marker-to-action mapping, coding-name bespoke runner precedence, generic non-coding fallback, `StageError` fallback, and lazy require behavior. |
+| `commands/run_test.rb`, `stages/agent_test.rb`, `stages/council_test.rb`, `stages/resolver_test.rb` | Descriptor-backed runner dispatch — `Run#pick_runner` passing `task.workflow`, generic `kind: :agent` prompt rendering, prior-artifact nonce wrapping, per-stage agent/model/effort spawn kwargs, provider-limit error envelopes and agent-written quota markers remaining `limits_reached` for daemon cooldown retry while non-limit envelopes remain `agent_preflight_failed`, council reviewer fan-out/triage/revise/max-round behavior, marker-to-action mapping, coding-name bespoke runner precedence, generic non-coding fallback, `StageError` fallback, and lazy require behavior. |
 | `task_action_test.rb`, `task_action_generic_test.rb`, `daemon/policy_test.rb` | Status action classification and daemon decision coverage — coding action/command invariants, coding action golden matrix, descriptor-generic marker classification, council-stage ready/waiting/complete actions, terminal agent/council deliverable gates, generic `hive approve ... --from <stage>` and `hive run` command shape, and `ready_to_advance` policy dispatch/block/skip behavior. |
 | `diagnostic_evidence_test.rb` | `Hive::DiagnosticEvidence` — read-only `hive status --diagnose` evidence fallback for rows whose status JSON diagnostic is nil, including red-status/log/marker tier ordering, source labels, newest-log-by-mtime selection, global log-dir inference, state-file fallback, redaction/truncation, invalid UTF-8 tolerance, symlink/regular-file safety, never-raise degradation, and deep YAML hardening. |
 | `stages/brainstorm_tmux_sentinel_test.rb` | Claude/tmux sentinel and cleanup behavior — readiness/sentinel delegation, pgrep pattern shape, missing/failing pgrep logging, oversized orphan-sweep log rotation, and the v0.2.3 invariant that a task cleanup kills matched Claude PIDs individually while skipping a matched tmux server. |
@@ -126,6 +126,7 @@ refusal and normal skip marker.
 | File | Covers |
 |------|--------|
 | `init_test.rb` | `hive init` — preconditions, force flag, idempotent re-init, `--workflow` project defaults, TTY workflow prompt/default behavior, unknown-workflow fail-fast, in-flight field-less task warnings on default changes, `hive-init.v1` JSON payload, Claude model/effort answer/template defaults, normal reviewer rendering, patrol reviewer rendering, and prompt defaults. |
+| `bench_workflow_install_test.rb` / `workflows/bench_test.rb` | Fresh `hive init --workflow bench` installs and commits the packaged runtime under `.hive-state/bench-runtime`, creates a bench-pinned task without copying a project descriptor, and resolves the built-in stage/state contract. The descriptor test pins Codex as the shell-control agent, campaign-sized one-hour/seven-day stage timeouts, provider-only pending generation as cooldown-aware `limits_reached` rather than manual `WAITING`, and GPT-5.6 stage-profile selection to the combined `hive-bench-runner:sol` image. |
 | `new_test.rb` | `hive new` — slug derivation, reserved rejection, `--workflow` task overrides, non-coding project-default pinning, coding override in non-coding projects, unknown-workflow fail-fast, marker handling for non-coding inert versus agent entries, captured commit, and per-project commit-lock serialization around the `hive/state` write. |
 | `run_brainstorm_test.rb` | `hive run` of `2-brainstorm/`. |
 | `run_plan_test.rb` | `hive run` of `3-plan/`. |
@@ -289,7 +290,7 @@ sticky bit, and cleanup warnings cannot replace the intended result status.
 - `Layout/LineLength: max 120`
 - `Metrics/MethodLength: max 30`, `Metrics/AbcSize: max 35`, `Metrics/ClassLength: max 200`
 
-Excludes `vendor/**/*`, `tmp/**/*`, `test/fixtures/**/*` (the shell-script fixtures are not Ruby).
+Excludes `vendor/**/*`, `tmp/**/*`, `test/fixtures/**/*` (the shell-script fixtures are not Ruby), and `templates/builtins/bench/runtime/**/*`. The benchmark runtime is a synchronized snapshot from hive-bench, where its Ruby files are linted with that repository's canonical RuboCop configuration; Hive must not restyle the packaged copy independently.
 
 Per the user's CLAUDE.md rule: never pass non-Ruby files to rubocop.
 
@@ -312,6 +313,14 @@ entries before exposing `hive_state_path`; the route constrains `:slug`, and
 the log path still applies `File.basename(params[:slug])` before joining under
 that registry-derived log root. See [[commands/web]] for the task log-tail
 surface.
+
+Brakeman still scans the packaged benchmark runtime even though RuboCop defers
+its style ownership to hive-bench. Its profile probe, Codex judge, and sqlite
+extractor findings are explicitly ignored because all three call
+`Open3.capture3` with discrete argv elements; no interpolated value is passed
+through a shell. The install-smoke ShellCheck job also scans the packaged shell
+scripts, so shell fixes must be applied to both hive-bench and Hive's runtime
+snapshot.
 
 The hivebox task media route also carries a Brakeman file-access ignore. The
 route constrains `:filename` to a single PNG/JPEG/GIF component, then

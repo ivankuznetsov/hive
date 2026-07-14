@@ -44,12 +44,12 @@ class ReposTest < ActionDispatch::IntegrationTest
     assert_response :success
     assert_select "select[name='settings[planning_agent]']", 1
     assert_select "select[name='settings[workflow]']", 1
-    # Assert coding-first + content present rather than an exact option count, so
-    # adding a third built-in workflow doesn't break this test with no behavior
-    # regression (plan U7: coding first, content offered, no project-only ids).
+    # Assert the built-ins without pinning an exact option count, so future
+    # built-ins do not break this test with no behavior regression.
     workflow_options = css_select("select[name='settings[workflow]'] option").map { |o| o["value"] }
     assert_equal "coding", workflow_options.first, "fresh setup must list the coding workflow first"
     assert_includes workflow_options, "content", "fresh setup must offer built-in content workflow"
+    assert_includes workflow_options, "bench", "fresh setup must offer built-in benchmark workflow"
     assert_select "select[name='settings[workflow]'] option[value='coding'][selected]",
                   "coding", "fresh setup must preselect the coding workflow"
     assert_select "input[name='settings[enabled_reviewers][]']", { minimum: 2 },

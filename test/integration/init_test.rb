@@ -153,7 +153,7 @@ class InitTest < Minitest::Test
     with_registered_workflow(content_workflow) do
       with_tmp_global_config do
         with_tmp_git_repo do |dir|
-          workflow_input = StringIO.new("3\n")
+          workflow_input = StringIO.new("4\n")
           workflow_input.define_singleton_method(:tty?) { true }
           workflow_output = StringIO.new
           prompts = Hive::Commands::Init::Prompts.new(
@@ -173,7 +173,8 @@ class InitTest < Minitest::Test
 
           assert_includes workflow_output.string, "1) coding"
           assert_includes workflow_output.string, "2) content"
-          assert_includes workflow_output.string, "3) content_fixture"
+          assert_includes workflow_output.string, "3) bench"
+          assert_includes workflow_output.string, "4) content_fixture"
           config = YAML.safe_load(File.read(File.join(dir, ".hive-state", "config.yml")))
           assert_equal "content_fixture", config.fetch("default_workflow")
         end
@@ -184,9 +185,9 @@ class InitTest < Minitest::Test
   def test_init_workflow_prompt_pick_selects_the_named_index
     # Discriminator against a "selection ignored, always writes the one
     # registered non-coding default" regression: with BOTH content (built-in,
-    # index 2) and content_fixture (index 3) on the menu, picking "2" must bind
+    # index 2) and content_fixture (index 4) on the menu, picking "2" must bind
     # content — not whatever single non-coding default a broken loop might emit.
-    # The sibling test above pins "3" → content_fixture, so the two together
+    # The sibling test above pins "4" → content_fixture, so the two together
     # prove the chosen index actually drives the on-disk default.
     with_registered_workflow(content_workflow) do
       with_tmp_global_config do

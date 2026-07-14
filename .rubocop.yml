@@ -13,6 +13,9 @@ AllCops:
     # The Rails web app lints itself (web/bin/rubocop, omakase) — the gem's
     # config must not double-lint its generated schema/bin files.
     - "web/**/*"
+    # Packaged from hive-bench, where the runtime is linted with its canonical
+    # repository's RuboCop configuration.
+    - "templates/builtins/bench/runtime/**/*"
 
 # Project-specific overrides on top of the 37signals omakase base.
 Style/Documentation:

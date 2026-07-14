@@ -1,6 +1,6 @@
 # Project Workflows
 
-Hive ships with built-in `coding` and `content` workflows. A project can also
+Hive ships with built-in `coding`, `content`, and `bench` workflows. A project can also
 define owner-authored workflows under its Hive state tree:
 
 ```
@@ -13,6 +13,29 @@ PROJECT --workflow <id> "..."` pins a single task to a workflow. Project
 workflow descriptors are discovered at runtime by `hive new`, `hive init`,
 `hive status`, `hive run`, `hive approve`, and the daemon path that uses those
 commands.
+
+## Run The Built-In Benchmark Workflow
+
+The `bench` workflow drives a reproducible hive-bench campaign through
+`inbox -> extract -> generate -> judge -> publish -> done`. Its descriptor,
+stage instructions, campaign example, and runtime harness ship with Hive:
+
+```bash
+hive init /path/to/benchmark-project --workflow bench
+hive new benchmark-project "benchmark campaign"
+```
+
+Hive snapshots the runtime under `.hive-state/bench-runtime` on the durable
+state branch. Copy its `campaign.yml.example` into the printed task folder as
+the tracked `campaign.yml`; the daemon then advances the task through the
+packaged stages. The control plane uses Codex and allows up to seven
+days for the serialized generate/judge stages; the candidate and judge models
+inside the campaign remain governed solely by `campaign.yml`. See the
+hive-bench README for the campaign schema, credentials, and public submission
+process. If every unfinished generation cell is parked only by provider quota,
+the stage writes a cooldown-aware `limits_reached` marker so the daemon retries
+after reset; malformed/missing/non-limit failures remain manual `WAITING`
+states.
 
 ## Create A Blank Workflow
 

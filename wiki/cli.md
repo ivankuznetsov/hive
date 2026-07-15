@@ -3,7 +3,7 @@ title: CLI Surface
 type: api
 source: bin/hive, bin/hv, lib/hive/cli.rb
 created: 2026-04-25
-updated: 2026-06-30
+updated: 2026-07-15
 tags: [cli, api]
 ---
 
@@ -40,6 +40,13 @@ unrecognized `--foo`, and quoted strings containing `--workflow` remain task
 text. When the wrapper itself catches a usage error, JSON-vs-prose mode is
 decided from the last recognized JSON boolean flag in argv, so a trailing false
 form such as `--no-json` or `--json=false` overrides an earlier `--json`.
+Wrapper-owned option scans stop at the first explicit `--`: later `--help`,
+JSON booleans, and unsupported `--json=VALUE` tokens remain literal command
+arguments. Usage-error formatting reads an argv snapshot captured before
+wrapper rewrites and Thor dispatch, so parser mutation cannot change which
+pre-delimiter JSON boolean wins. `hive new` retains its earlier task-text
+boundary for help and unsupported-assignment scans while still lifting
+recognized options only until an explicit delimiter.
 Before any wrapper rewrite or Thor dispatch, every `ARGV` entry must have valid
 encoding. Invalid-byte arguments raise through the same usage-error path as
 malformed wrapper options, so JSON callers still receive the command-specific

@@ -25,6 +25,15 @@ class CliVersionTest < Minitest::Test
     refute_includes err, "No value provided for required arguments"
   end
 
+  def test_bin_hive_treats_help_after_delimiter_as_literal_target
+    out, err, status = Open3.capture3(RbConfig.ruby, "-Ilib", "bin/hive", "run", "--", "--help")
+
+    assert_equal 64, status.exitstatus
+    assert_empty out
+    assert_match(/no task folder for slug '--help'/, err)
+    refute_match(/Usage:/, err)
+  end
+
   def test_bin_hive_accepts_json_before_status_command
     with_tmp_global_config do
       leading = JSON.parse(run!(RbConfig.ruby, "-Ilib", "bin/hive", "--json", "status"))
@@ -56,6 +65,19 @@ class CliVersionTest < Minitest::Test
     end
   end
 
+  def test_bin_hive_treats_unsupported_json_assignment_after_delimiter_as_literal_target
+    with_tmp_global_config do
+      out, err, status = Open3.capture3(
+        RbConfig.ruby, "-Ilib", "bin/hive", "run", "--", "--json=bogus"
+      )
+
+      assert_equal 64, status.exitstatus
+      assert_empty out
+      assert_match(/no task folder for slug '--json=bogus'/, err)
+      refute_match(/invalid boolean value for --json/, err)
+    end
+  end
+
   def test_bin_hive_usage_error_respects_last_json_boolean_flag
     with_tmp_global_config do
       [
@@ -68,6 +90,26 @@ class CliVersionTest < Minitest::Test
         assert_empty out, "#{flags.join(" ")}: final false JSON flag must force prose output"
         assert_match(/Usage: "hive run TARGET"/, err)
       end
+    end
+  end
+
+  def test_bin_hive_usage_error_ignores_json_booleans_after_delimiter
+    with_tmp_global_config do
+      out, err, status = Open3.capture3(
+        RbConfig.ruby, "-Ilib", "bin/hive", "run", "--json", "target", "--", "--no-json"
+      )
+
+      assert_equal 64, status.exitstatus
+      assert_equal "hive-run", JSON.parse(out)["schema"]
+      assert_match(/hive:/, err)
+
+      out, err, status = Open3.capture3(
+        RbConfig.ruby, "-Ilib", "bin/hive", "run", "--no-json", "target", "--", "--json"
+      )
+
+      assert_equal 64, status.exitstatus
+      assert_empty out
+      assert_match(/Usage: "hive run TARGET"/, err)
     end
   end
 

@@ -3,7 +3,7 @@ title: Agentic E2E Suite
 type: reference
 source: test/e2e/, bin/hive-e2e, Rakefile
 created: 2026-04-29
-updated: 2026-06-21
+updated: 2026-07-15
 tags: [test, e2e, tui, artifacts]
 ---
 
@@ -57,7 +57,11 @@ as `--json=1` or `--json=yes` are usage errors before the value can become the
 default `run` pattern. Wrapper-owned error formatting checks the last
 recognized JSON boolean flag rather than any truthy flag, so duplicate flags
 with a final false form, such as `--json --no-json`, emit the human
-`hive-e2e:` stderr path. Invalid-byte `ARGV` entries are rejected before those
+`hive-e2e:` stderr path. Every wrapper-level help and JSON scan stops at the
+first explicit `--`, leaving later option-looking tokens as literal patterns or
+arguments. Outer error formatting uses an argv snapshot from before wrapper
+rewrites and Thor dispatch, so a post-delimiter literal cannot override the
+actual pre-delimiter JSON mode. Invalid-byte `ARGV` entries are rejected before those
 rewrites and before Thor dispatch, and are reported as usage errors (`64`);
 JSON callers receive the normal `hive-e2e-error` envelope with
 `error_kind: "usage"`.

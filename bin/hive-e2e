@@ -251,13 +251,18 @@ module Hive
   end
 end
 
+def wrapper_option_argv(argv)
+  argv.take(argv.index("--") || argv.length)
+end
+
 def rewrite_help_flag!(argv)
   return if argv.empty?
 
-  cmd_idx = argv.index { |arg| !arg.start_with?("-") }
+  option_argv = wrapper_option_argv(argv)
+  cmd_idx = option_argv.index { |arg| !arg.start_with?("-") }
   return unless cmd_idx
 
-  help_idx = argv[(cmd_idx + 1)..]&.index { |arg| arg == "--help" || arg == "-h" }
+  help_idx = option_argv[(cmd_idx + 1)..]&.index { |arg| arg == "--help" || arg == "-h" }
   return unless help_idx
 
   cmd = argv[cmd_idx]
@@ -287,7 +292,8 @@ end
 # `--json=<value>` assignments are rejected before Thor can use the value as a
 # command or pattern.
 def json_requested?(argv)
-  JSON_TRUE_OPTIONS.include?(argv.reverse.find { |arg| JSON_BOOLEAN_OPTIONS.include?(arg) })
+  options = wrapper_option_argv(argv)
+  JSON_TRUE_OPTIONS.include?(options.reverse.find { |arg| JSON_BOOLEAN_OPTIONS.include?(arg) })
 end
 
 def reject_invalid_argv_encoding!(argv)
@@ -298,7 +304,9 @@ def reject_invalid_argv_encoding!(argv)
 end
 
 def reject_unsupported_json_assignments!(argv)
-  arg = argv.find { |candidate| candidate.start_with?("--json=") && !JSON_BOOLEAN_OPTIONS.include?(candidate) }
+  arg = wrapper_option_argv(argv).find do |candidate|
+    candidate.start_with?("--json=") && !JSON_BOOLEAN_OPTIONS.include?(candidate)
+  end
   return unless arg
 
   raise Thor::MalformattedArgumentError, "invalid boolean value for --json: #{arg.split('=', 2).last.inspect}"
@@ -310,11 +318,13 @@ def normalize_leading_global_options!(argv)
   return if leading.empty?
 
   commands = Hive::E2E::Binary.all_tasks.keys + [ "run" ]
-  cmd_idx = argv.index { |arg| commands.include?(arg) }
+  cmd_idx = wrapper_option_argv(argv).index { |arg| commands.include?(arg) }
   return argv.unshift(*leading) unless cmd_idx
 
   argv.insert(cmd_idx + 1, *leading)
 end
+
+original_argv = ARGV.dup
 
 begin
   reject_invalid_argv_encoding!(ARGV)
@@ -327,7 +337,7 @@ begin
   # mapping usage failures to BinaryExit::USAGE.
   Hive::E2E::Binary.start(ARGV, debug: true)
 rescue Hive::E2E::PreflightError => e
-  if json_requested?(ARGV)
+  if json_requested?(original_argv)
     puts JSON.pretty_generate(Hive::E2E::JsonError.payload(error_kind: "preflight", message: e.message,
                                                           exit_code: Hive::E2E::BinaryExit::CONFIG))
   else
@@ -335,7 +345,7 @@ rescue Hive::E2E::PreflightError => e
   end
   exit Hive::E2E::BinaryExit::CONFIG
 rescue Thor::Error => e
-  if json_requested?(ARGV)
+  if json_requested?(original_argv)
     puts JSON.pretty_generate(Hive::E2E::JsonError.payload(error_kind: "usage", message: e.message,
                                                           exit_code: Hive::E2E::BinaryExit::USAGE))
   else
@@ -343,7 +353,7 @@ rescue Thor::Error => e
   end
   exit Hive::E2E::BinaryExit::USAGE
 rescue StandardError => e
-  if json_requested?(ARGV)
+  if json_requested?(original_argv)
     puts JSON.pretty_generate(Hive::E2E::JsonError.payload(error_kind: "error", message: e.message,
                                                           exit_code: Hive::E2E::BinaryExit::FAILURE))
   else

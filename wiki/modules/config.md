@@ -3,11 +3,11 @@ title: Hive::Config
 type: module
 source: lib/hive/config.rb
 created: 2026-04-25
-updated: 2026-07-10
+updated: 2026-07-15
 tags: [config, yaml, validation]
 ---
 
-**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects plus daemon, bot, digest, update, web, and Screenote base-url settings, including voice-transcription defaults; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, default workflow, worktree root, budgets, timeouts, **stage agents**, project/top-level and per-stage `permissions`, project-global `claude.mode`/`claude.permission_mode` plus `claude.model`/`claude.effort` pins, review-stage roles, daemon enrollment, experimental babysitter enrollment, patrol mode/enrollment and PR handoff). `Config.load(project_root)` resolves `patrol.mode` into scheduler knobs, **recursively** deep-merges per-project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays (notably `review.reviewers`, `patrol.review.reviewers`, `bot.transcription.supported_languages`, and `babysitter.labels_ignore`) are replaced wholesale, never per-element merged. The daily shipped digest uses `digest.agent`, `digest.max_catchup_days`, `budget_usd.digest`, `timeout_sec.digest`, and `bot.chat_id_allowlist[0]`; `Hive::Digest.run` defaults through `Config.load_global_digest_config`. Screenote OAuth tokens live outside YAML in `screenote.json`, created by `hive connect screenote`.
+**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects plus daemon, bot, digest, update, web, and Screenote base-url settings, including voice-transcription defaults; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, default workflow, worktree root, budgets, timeouts, **stage agents**, project/top-level and per-stage `permissions`, project-global `claude.mode`/`claude.permission_mode` plus `claude.model`/`claude.effort` pins, review-stage roles, daemon enrollment, experimental babysitter enrollment, patrol mode/enrollment and PR handoff). `Config.load(project_root)` resolves `patrol.mode` into scheduler knobs, **recursively** deep-merges per-project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays (notably `review.reviewers`, `patrol.review.reviewers`, `bot.transcription.supported_languages`, and `babysitter.labels_ignore`) are replaced wholesale, never per-element merged. The daily digest uses validated `digest.source` (`merged-prs` by default, `shipped` as an opt-in), `digest.agent`, `digest.max_catchup_days`, `budget_usd.digest`, `timeout_sec.digest`, and `bot.chat_id_allowlist[0]`; `Hive::Digest.run` defaults through `Config.load_global_digest_config`. Screenote OAuth tokens live outside YAML in `screenote.json`, created by `hive connect screenote`.
 
 ## Defaults (`Config::DEFAULTS`)
 
@@ -113,7 +113,12 @@ tags: [config, yaml, validation]
     "auto_retry" => { "enabled" => true },
     ...
   },
-  "digest" => { "enabled" => false, "agent" => nil, "max_catchup_days" => 7 },
+  "digest" => {
+    "enabled" => false,
+    "source" => "merged-prs",
+    "agent" => nil,
+    "max_catchup_days" => 7
+  },
   "screenote" => { "base_url" => "https://screenote.ai" },
   "bot" => {
     "enabled" => false,
@@ -151,6 +156,10 @@ paths, validates the result, and returns the config-shaped hash the digest
 pipeline needs. Direct callers can still pass `cfg:` explicitly. The relevant
 keys are:
 
+- `digest.source` — `merged-prs` or `shipped`; absent, null, and blank values
+  resolve to `merged-prs`. The shared `Digest::Source` resolver lets an
+  explicit `--source` override this value, while `--repo` with no explicit
+  source implies `merged-prs`.
 - `digest.agent`, then `patrol.agent`, then `"claude"` for the categorizer
   agent.
 - `budget_usd.digest` and `timeout_sec.digest` for categorizer limits,
@@ -159,8 +168,12 @@ keys are:
 - `bot.log_file` for the sender's bot logger path.
 
 `load_global_digest_block` returns only the validated `digest` block for
-`Hive::Commands::Daemon`, which wires `DigestScheduler`. Delivery resolves to
-`bot.chat_id_allowlist[0]`. The digest is **opt-out**: when the operator has not
+`Hive::Commands::Daemon`, which wires `DigestScheduler`. Both the block loader
+and the full-config loader reject any source other than `merged-prs` or
+`shipped`. Delivery resolves to `bot.chat_id_allowlist[0]`. The merged source
+uses the existing `registered_projects` registry when no CLI repos are given;
+there is deliberately no digest-specific repo list, and resolving zero repos
+is a configuration error. The digest is **opt-out**: when the operator has not
 set `digest.enabled`, `load_global_digest_block` derives it from the bot config —
 `true` when `bot.enabled == true` and `bot.chat_id_allowlist` has at least one
 integer chat id, else `false` (the predicate is the private
@@ -168,7 +181,7 @@ integer chat id, else `false` (the predicate is the private
 (true or false) is always honored; only the unset case is derived. Both
 scheduler-config callers (`Commands::Daemon#start_daemon` and the dispatcher
 SIGHUP reconfigure) load through `load_global_digest_block`, so the derived
-value applies in both.
+value and resolved source apply at startup and on reload.
 
 ## Screenote config
 
@@ -201,7 +214,7 @@ expiry, client id, issuer, MCP resource URL, base URL, and default
 | `unregister_project(name)` | Index-based delete (not `Array#-`, which would clear duplicate-content rows); `to_s`-symmetric name match so an Integer `name:` in YAML still resolves; rewrites under `config.yml.lock`. |
 | `prune_missing_projects!(dry_run:)` | Drops rows whose `path` is not a directory, whose stored valid `real_path` no longer matches the current target, OR whose shape is invalid (non-Hash, missing `path`); reads and, unless `dry_run`, rewrites under `config.yml.lock`. |
 | `load_global_config(path)` | Reads + `YAML.safe_load`; rewraps `Psych::SyntaxError` AND `Errno::EACCES`/`EISDIR` as `ConfigError` (exit 78) so `chmod 000` on the file surfaces as bad-config, not internal-error. |
-| `load_global_digest_block` | Reads global config, deep-merges the `digest` section over defaults, validates `enabled`, `agent`, and `max_catchup_days`, and returns the scheduler-facing digest block. |
+| `load_global_digest_block` | Reads global config, deep-merges the `digest` section over defaults, validates `enabled`, `source`, `agent`, and `max_catchup_days`, and returns the scheduler-facing digest block. |
 | `load_global_digest_config` | Reads global config, deep-merges full defaults, injects bot runtime paths, validates the result, and returns the config hash used by `Hive::Digest.run`. |
 | `load_global_web` | Reads global config, deep-merges the `web` section onto web defaults, fills `session_secret_file` with `<state_home>/.web.session_secret` when omitted, validates bind/port/origin/GitHub fields, and returns the merged web config for [[commands/web]]. |
 | `global_web_defaults` | Returns a deep copy of `DEFAULTS["web"]` with the state-home session-secret path injected. |

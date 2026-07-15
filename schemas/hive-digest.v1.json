@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-digest.v1.json",
   "title": "hive digest output (v1)",
-  "description": "Stable contract emitted by `hive digest --json`. The success envelope reports the delivery outcome for one local day's shipped digest (status/date/message/chat_id); a model failure still prints a SuccessPayload with ok:false and status=failed_notice. Usage errors emit the ErrorPayload: a bad --date (Hive::ConfigError, error_kind=config) via the in-command envelope, and bad flags (Thor::Error, error_kind=usage) via JSON_USAGE_ERROR_CONTRACTS. A Telegram send error that occurs mid-delivery still surfaces on stderr + a non-zero exit code without an envelope.",
+  "description": "Stable contract emitted when `hive digest --source shipped --json` (or `digest.source: shipped`) resolves the opt-in shipped-task source. The success envelope reports the delivery outcome for one local day's shipped digest (status/date/message/chat_id); a model failure still prints a SuccessPayload with ok:false and status=failed_notice. Usage errors emit the ErrorPayload: a bad --date (Hive::ConfigError, error_kind=config) via the in-command envelope, and bad flags (Thor::Error, error_kind=usage) via JSON_USAGE_ERROR_CONTRACTS. A Telegram send error that occurs mid-delivery still surfaces on stderr + a non-zero exit code without an envelope.",
   "oneOf": [
     { "$ref": "#/$defs/SuccessPayload" },
     { "$ref": "#/$defs/ErrorPayload" }

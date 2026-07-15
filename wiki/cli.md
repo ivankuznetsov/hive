@@ -3,7 +3,7 @@ title: CLI Surface
 type: api
 source: bin/hive, bin/hv, lib/hive/cli.rb
 created: 2026-04-25
-updated: 2026-07-10
+updated: 2026-07-15
 tags: [cli, api]
 ---
 
@@ -63,7 +63,7 @@ pre-dispatch usage failure uses the `hive-patrol` schema with
 
 The pre-dispatch resolver is command/subcommand-aware for JSON surfaces whose
 schema varies by argv. It distinguishes status diagnostics, web install/status,
-pairing list/approve, and shipped/merged-PR digest errors; it also covers Thor
+pairing list/approve, and resolved-source digest errors; it also covers Thor
 arity failures for status, prune, forget, metrics, bot, and the documented web
 commands. Option values cannot impersonate subcommands, and flags after the
 `--` terminator remain positional data rather than switching the status or
@@ -99,7 +99,7 @@ contracts retain their established unversioned or schema-less shapes.
 | `hive connect screenote [--base-url URL] [--json]` | Run Screenote OAuth 2.1 auth-code + PKCE setup, pick a default Screenote project via MCP `list_projects`, and persist `screenote.json` for artifacts-stage MCP injection. | `Hive::Commands::Connect` | [[commands/screenote]] |
 | `hive disconnect screenote [--json]` | Revoke the stored Screenote token when possible and clear `screenote.json`; no-op when already disconnected. | `Hive::Commands::Disconnect` | [[commands/screenote]] |
 | `hive bench submit SLUG [--project NAME] [--json]` | Extract a completed `9-done` task into a hive-bench corpus entry and open a submission PR from the hive-bench checkout. Requires `HIVE_BENCH_PATH` or `~/Dev/hive-bench`, a GitHub `origin` remote for the source project, `worktree.yml`, `pr.md`, and a clean local secret-token preflight. | `Hive::Commands::BenchSubmit` | [[commands/bench-submit]] |
-| `hive digest [--date YYYY-MM-DD] [--dry-run] [--json]` | Build the daily shipped digest for tasks that reached `9-done` on one local calendar date. Dry-run prints the rendered Telegram MarkdownV2 body; real delivery loads global digest/bot config, then sends through `Hive::Digest::Sender` and the bot Telegram client. The daemon can schedule this globally after local midnight when `digest.enabled: true`. | `Hive::Commands::Digest` → `Hive::Digest` | [[commands/digest]] |
+| `hive digest [--source merged-prs\|shipped] [--repo owner/name ...] [--date YYYY-MM-DD] [--dry-run] [--json]` | Build the daily digest for one local date. Explicit source wins; `--repo` implies merged PRs; then `digest.source` applies; absence defaults to `merged-prs`. Automatic merged scope uses registered projects and fails when none resolve. Merged JSON is `hive-merged-pr-digest`; shipped JSON is `hive-digest`. The daemon schedules the resolved source globally after local midnight when enabled. | `Hive::Commands::Digest` → `Hive::Digest::MergedPr` or `Hive::Digest` | [[commands/digest]] |
 | `hive run TARGET [--no-rebase]` | Lower-level dispatcher for a slug or task folder. `--no-rebase` skips the auto-rebase pre-step for one invocation (one-off override of `cfg.rebase.enabled`). | `Hive::Commands::Run` → stage runner | [[commands/run]] |
 | `hive rebase-status TARGET` | Read-only inspector: reports whether the next `hive run` would attempt an auto-rebase, how many commits behind `origin/<default>` the worktree is, and which guard (if any) would short-circuit. Never mutates; never calls `git fetch`. | `Hive::Commands::RebaseStatus` | [[commands/rebase-status]] |
 | `hive approve TARGET [--to STAGE] [--from STAGE]` | Move a task between stages + record a hive/state commit (agent-callable equivalent of shell `mv`; `--from` asserts current stage for retry idempotency) | `Hive::Commands::Approve` | [[commands/approve]] |

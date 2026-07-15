@@ -133,7 +133,7 @@ module Hive
         if @dry_run
           @output.puts result.message
         elsif result.count.zero?
-          # A zero-count digest is still delivered (a "Total: 0 PRs" message is
+          # A zero-count digest is still delivered (a "PRs 0" footer is
           # sent); say so explicitly so the line doesn't read as "sent nothing".
           @output.puts "hive digest: sent empty digest (0 merged PRs) for #{result.date.iso8601}"
         else

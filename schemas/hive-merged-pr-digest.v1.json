@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-merged-pr-digest.v1.json",
   "title": "hive merged-PR digest output (v1)",
-  "description": "Stable contract emitted by `hive digest --source merged-prs --json`. The success envelope reports GitHub pull requests merged on one local calendar day. Per-repo GitHub failures are non-fatal and produce a partial successful digest. Usage/config errors emit the ErrorPayload.",
+  "description": "Stable contract emitted by the default `hive digest --json` merged-prs source (also selectable with `--source merged-prs` or `--repo`). The success envelope reports GitHub pull requests merged on one local calendar day. Per-repo GitHub failures and per-PR stats failures are non-fatal and produce a partial successful digest; zero automatically resolved repositories is a configuration error. Usage/config errors emit the ErrorPayload.",
   "oneOf": [
     { "$ref": "#/$defs/SuccessPayload" },
     { "$ref": "#/$defs/ErrorPayload" }

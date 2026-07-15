@@ -29,14 +29,17 @@ registered_projects: <%= registered_projects.empty? ? "[]" : "" %>
 #   log_max_files: 5
 #   last_seen_state_file: ~/Dev/hive/.bot.last_seen_update_id
 
-# Daily shipped digest. Defaults ON whenever the Telegram bot is enabled with
-# at least one allowlisted chat — the daemon then schedules one global
-# `hive digest` subprocess after local midnight and sends a Telegram MarkdownV2
-# message (chunked when it exceeds Telegram's length limit) to the first
-# allowlisted chat. Set enabled: false to opt out.
+# Daily digest. Merged PRs are the default source; set source: shipped to use
+# the agent-written completed-task digest instead. Defaults ON whenever the
+# Telegram bot is enabled with at least one allowlisted chat — the daemon then
+# schedules one global child after local midnight with the resolved source and
+# sends Telegram MarkdownV2 to the first allowlisted chat. Set enabled: false
+# to opt out. Merged-PR repository scope comes from registered_projects unless
+# a manual invocation supplies --repo; there is no digest-specific repo list.
 #
 # digest:
 #   enabled: false         # only needed to opt OUT; otherwise auto-on with the bot
+#   source: merged-prs     # merged-prs (default) or shipped
 #   agent: ~               # defaults to patrol.agent, then claude
 #   max_catchup_days: 7
 

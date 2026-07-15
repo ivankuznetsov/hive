@@ -155,16 +155,16 @@ That is enough to understand what Hive does: it turns a rough idea into durable 
 
 ## Digest Reports
 
-`hive digest` sends the daily shipped-task digest for the local day that just ended. It scans completed `9-done` tasks, uses the configured digest agent for summaries when there is work to report, and delivers through Telegram.
+`hive digest` sends a mechanical report of pull requests merged during the local day that just ended. It discovers repositories from Hive's registered projects, never mutates Hive state, and does not run an LLM. The footer always reports the PR count and adds best-effort line/commit totals when GitHub supplies them; a zero-merge day is still delivered.
 
-For a read-only GitHub report of pull requests merged on a local day, use:
+Use repeatable `--repo` flags for an explicit scope. Automatic discovery fails closed when no registered repository resolves, so missing configuration cannot masquerade as a quiet day:
 
 ```bash
-hive digest --source merged-prs --dry-run
-hive digest --source merged-prs --date 2026-06-13 --repo owner/name --json
+hive digest --dry-run
+hive digest --date 2026-06-13 --repo owner/name --json
 ```
 
-The merged-PR source never mutates Hive state and does not run an LLM; it groups merged PRs by repo with mechanical MarkdownV2 output. See [wiki/commands/digest.md](wiki/commands/digest.md) for the full contract and JSON schema details.
+The former shipped-task pipeline remains available as an opt-in with `hive digest --source shipped` or global `digest.source: shipped`; it scans completed `9-done` tasks and uses the configured digest agent for summaries. JSON identity follows the resolved source: merged PRs emit `hive-merged-pr-digest` v1, while shipped tasks emit `hive-digest` v1. See [wiki/commands/digest.md](wiki/commands/digest.md) for the full source precedence, footer degradation, and schema contracts.
 
 ## Manage Hive From Telegram in 2 Minutes
 

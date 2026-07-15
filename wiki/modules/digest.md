@@ -3,25 +3,25 @@ title: Hive::Digest
 type: module
 source: lib/hive/digest.rb, lib/hive/digest/, templates/digest_prompt.md.erb
 created: 2026-06-14
-updated: 2026-06-30
-tags: [digest, shipped, telegram, module]
+updated: 2026-07-15
+tags: [digest, merged-pr, shipped, telegram, module]
 ---
 
 **TLDR**: `Hive::Digest` is the library pipeline behind [[commands/digest]].
-It finds tasks that reached `9-done` on a requested local date, turns their PR
-metadata into `ShippedItem` records, optionally asks an agent to classify and
-summarize them, renders Telegram MarkdownV2, and delivers through the existing
-bot Telegram client. The module has injectable seams for collector,
-categorizer, sender, clock, and config. The default runtime config is loaded
-through `Hive::Config.load_global_digest_config`. `Hive::Digest::MergedPr` is a
-parallel, read-only GitHub source for `hive digest --source merged-prs`; it
-shares the date window helper and sender but does not use the shipped-task
-collector, categorizer, stats footer, or `hive-digest` schema.
+`Digest::Source` resolves explicit CLI input, `--repo`, and the validated
+`digest.source` setting, defaulting to the read-only `merged-prs` GitHub
+report. The shipped-task source remains available through `--source shipped`.
+Both sources share the local-date window, best-effort PR stats aggregation,
+Telegram MarkdownV2 footer, and sender, while retaining separate collection
+and JSON contracts (`hive-merged-pr-digest` and `hive-digest`). Runtime config
+is loaded through `Hive::Config.load_global_digest_config`, and orchestration
+seams keep collection, stats, rendering, and delivery independently testable.
 
 ## API Map
 
 | API | Purpose |
 |-----|---------|
+| `Digest::Source.resolve(explicit: nil, repos: [], configured: nil)` | Resolves the source with precedence `--source` → presence of `--repo` → `digest.source` → `merged-prs`; validates the only accepted values (`merged-prs`, `shipped`) and rejects explicit `shipped` plus `--repo`. `schema_for` and the options/argv helpers map the same resolved source to its honest v1 JSON envelope. |
 | `Hive::Digest.run(date: nil, dry_run: false, cfg: nil, clock: -> { Time.now }, collector: nil, categorizer: nil, sender: nil, stats: nil, pairing_store: Hive::Bot::PairingStore.new)` | Orchestrates collection, categorization, stats, rendering, pairing-request reminder appending, and delivery. Defaults `cfg` via `Config.load_global_digest_config` and `stats` to `Stats.new`. For a real send (not `dry_run`) it first calls `Hive::EnvFile.load!` so `~/.config/hive/.env` supplies `HIVE_TELEGRAM_BOT_TOKEN` even when the environment doesn't export it — this is what lets the daemon-dispatched `hive digest` authenticate (its systemd/detached launch env has no token; previously only `hive bot start` loaded the `.env`). An exported env var still wins; a dry-run never loads it. Returns `Result(status:, date:, message:, delivery:)`. |
 | `Digest::Window.local_today`, `previous_local_day`, `on_local_date?`, `parse_date`, `parse_time` | Local-date window helpers. `previous_local_day(now:)` is the shared "yesterday local" default used by both the CLI command and `Digest.run`. Collection compares `shipped_at.getlocal.to_date` to the requested date. |
 | `Digest::ShipTimes#shipped_at(hive_state_path:, slug:)` | Reads git log on `hive/state` (fixed-string `-F` grep) and picks the ship commit by **action preference** — `pr_finalized`, else `archived`, else approval into `9-done` — not whichever commit is chronologically first. |
@@ -31,10 +31,10 @@ collector, categorizer, stats footer, or `hive-digest` schema.
 | `Digest::Stats#for_items(items)` | Sums per-PR `Hive::Gh.pr_stats(pr_url)` (injectable `fetch:`) into `Totals(prs:, commits:, additions:, deletions:, measured_prs:)`; a per-PR `gh` failure is logged and skipped. |
 | `Digest::Renderer.render(by_project, date:, summary:, totals:)`, `.empty`, `.failed`, `.escape_mdv2` | Builds the Telegram MarkdownV2 message: brand header + date, `_Summary_`, per-project sections, and the global stats footer. |
 | `Digest::Sender#deliver(text, dry_run:)` | Returns dry-run text or sends the Telegram MarkdownV2 message (chunked into one `send_message` per chunk above Telegram's 4096-char limit). |
-| `Digest::MergedPr.run(date: nil, dry_run: false, repos: [], cfg: nil, clock: -> { Time.now }, resolver: nil, collector: nil, sender: nil)` | Orchestrates the merged-PR source: resolve repos, collect PRs merged on the local date, render mechanically, and deliver through `Digest::Sender`. Returns `MergedPr::Result`. |
-| `Digest::MergedPr::RepoResolver#resolve(repos:)` | Uses explicit `owner/name` repos when supplied, otherwise resolves registered project paths through `Gh.repo_name_with_owner`. Per-project failures are warned and dropped. |
+| `Digest::MergedPr.run(date: nil, dry_run: false, repos: [], cfg: nil, clock: -> { Time.now }, resolver: nil, collector: nil, sender: nil, stats: nil)` | Orchestrates the merged-PR source: resolve repos, collect PRs merged on the local date, aggregate best-effort stats, render mechanically, and deliver through `Digest::Sender`. Returns `MergedPr::Result`. |
+| `Digest::MergedPr::RepoResolver#resolve(repos:)` | Uses explicit `owner/name` repos when supplied, otherwise resolves registered project paths through `Gh.repo_name_with_owner`. Per-project failures are warned and dropped; automatic discovery raises `ConfigError` when no repository survives. |
 | `Digest::MergedPr::Collector#for_date(date, repos:)` | Calls `Gh.list_merged_prs` per repo, filters by `Window.on_local_date?(mergedAt, date)`, maps author/bot/fork metadata, and best-effort annotates `hive/<slug>` branches. |
-| `Digest::MergedPr::Renderer.render(prs, date:)` | Mechanical Telegram MarkdownV2 renderer grouped by repo with total/per-repo counts and PR links. |
+| `Digest::MergedPr::Renderer.render(prs, date:, totals:)` | Mechanical Telegram MarkdownV2 renderer grouped by repo with per-repo counts, PR links, and the shared divider/footer. The known row count is authoritative for `PRs N`; Lines/Commits appear only when at least one PR was measured. |
 
 `Digest::Result#status` is one of:
 
@@ -146,17 +146,25 @@ The default log path is `cfg.dig("bot", "log_file")` or
 ## Merged-PR Source
 
 `Hive::Digest::MergedPr` exists under its own namespace so the shipped-task
-pipeline remains independent. It reuses only:
+pipeline remains independent. Bare `hive digest` selects this source unless
+`digest.source: shipped` is configured. It reuses:
 
 - `Digest::Window` for the default previous local day and the
   `mergedAt.getlocal.to_date == date` boundary rule.
+- `Digest::Stats` / `Hive::Gh.pr_stats` for non-fatal additions, deletions,
+  and commit totals.
+- `Digest::Renderer.render_footer` for the shared divider and footer format.
 - `Digest::Sender` for dry-run / Telegram delivery.
 - `Hive::Config.load_global_digest_config` for bot config and `.env` loading on
   real sends.
 
-The repo resolver returns an ordered, de-duped `owner/name` list. Explicit
-`repos:` validates slug shape and bypasses discovery; discovered repos come
-from `Hive::Config.registered_projects` and `Gh.repo_name_with_owner(path)`.
+The repo resolver returns an ordered, case-insensitively de-duped `owner/name`
+list. Explicit `repos:` validates slug shape and bypasses discovery;
+discovered repos come from `Hive::Config.registered_projects` and
+`Gh.repo_name_with_owner(path)`. Partial resolution failures remain warnings,
+but an empty registry or an all-failed automatic resolution raises
+`Hive::ConfigError` before collection, sender preflight, or delivery. There is
+no digest-specific repository configuration key.
 
 The collector queries a broad UTC search window (`D-1` through `D+1`) with
 `Gh.list_merged_prs(repo, since:, until_date:)`, then applies the local-date
@@ -171,6 +179,13 @@ recognizes branches shaped `hive/<slug>` and looks for matching directories
 under registered projects' `.hive-state/stages/*/<slug>`. Any matcher error
 leaves the annotation blank.
 
+After collection, `Digest::Stats#for_items` fetches each record's PR URL.
+Individual failures are logged and skipped. The renderer always prints the
+known row count (`PRs N`), including `PRs 0`; it prints
+`Lines +A/-D · PRs N · Commits C` when at least one PR was measured and omits
+Lines/Commits after a total stats blackout. A valid zero-merge day still
+renders and is delivered.
+
 The source emits a separate JSON contract, `hive-merged-pr-digest` v1, so
 consumers do not need to overload `hive-digest`'s shipped-task statuses.
 
@@ -181,7 +196,7 @@ It persists `last_digested_date` in `<state_home>/digest_state.json` and emits
 one global dispatch hash at a time:
 
 ```bash
-hive digest --date YYYY-MM-DD --json
+hive digest --source merged-prs --date YYYY-MM-DD --json
 ```
 
 The due model is local-date based: at any tick, the most recent completed
@@ -200,8 +215,11 @@ is **not** re-dispatched every tick. The dispatcher isolates scheduler
 `keeping_previous: true`, so digest-state I/O faults do not crash the daemon
 poll loop. Dry-run pseudo-child reaping calls the same `complete` hook as real
 child reaping, which prevents dry-run digest dispatches from wedging behind a
-stale pending marker. `digest.enabled` / `max_catchup_days` are re-read on
-SIGHUP (the scheduler is reconfigured in place within one tick).
+stale pending marker. `digest.enabled`, `digest.source`, and
+`max_catchup_days` are re-read on SIGHUP (the scheduler is reconfigured in
+place within one tick). A configured `shipped` source changes the explicit
+child flag to `--source shipped` without replacing the scheduler or its
+pending/backoff state. Completion remains based only on child exit status.
 
 `digest.enabled` is **opt-out**: when the operator has not set it, both
 scheduler-config callers load it through `Config.load_global_digest_block`,
@@ -217,9 +235,10 @@ allowlisted chat) and OFF otherwise — see [[commands/daemon]] and
 - `test/unit/digest/categorizer_test.rb` — model output mapping, bad-category fallback, missing-row fallback, prompt rendering.
 - `test/unit/digest/renderer_test.rb` — category/project ordering, MarkdownV2 escaping, empty/failed messages, no-link rows.
 - `test/unit/digest/run_test.rb` — orchestration status branches and default date.
+- `test/unit/digest/source_test.rb` — source validation, precedence, conflict handling, and schema identity.
 - `test/unit/digest/merged_pr/*_test.rb` — merged-PR repo resolution,
-  local-date filtering, partial GitHub failure tolerance, Hive matching,
-  mechanical rendering, and runner orchestration.
+  zero-scope failure, local-date filtering, partial GitHub/stats failure
+  tolerance, Hive matching, shared-footer rendering, and runner orchestration.
 - `test/unit/digest/sender_test.rb` — chat-id resolution, dry-run bypass, Telegram send args.
 - `test/unit/daemon/digest_scheduler_test.rb` — first-run guard, catch-up,
   cap logging, retry, disabled mode, and DST local-date behavior.

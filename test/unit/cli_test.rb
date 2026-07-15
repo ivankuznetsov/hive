@@ -204,13 +204,18 @@ class HiveCliTest < Minitest::Test
     end
   end
 
-  def test_digest_help_exposes_merged_pr_source
+  def test_digest_help_documents_source_default_and_json_identities
     out, _err = capture_io { Hive::CLI.start([ "help", "digest" ]) }
 
     assert_includes out, "--source"
     assert_includes out, "merged-prs"
+    assert_includes out, "shipped"
     assert_includes out, "--repo"
     assert_includes out, "never mutates Hive state"
+    assert_match(/merged-prs.*default/i, out)
+    assert_match(/shipped.*opt-in/i, out)
+    assert_includes out, "hive-merged-pr-digest"
+    assert_includes out, "hive-digest"
   end
 
   def test_workflow_option_help_does_not_enumerate_project_workflows

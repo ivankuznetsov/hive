@@ -3,27 +3,26 @@ title: hive digest
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/digest.rb, lib/hive/digest.rb, lib/hive/digest/
 created: 2026-06-14
-updated: 2026-06-30
+updated: 2026-07-15
 tags: [command, digest, telegram, json]
 ---
 
-**TLDR**: `hive digest [--date YYYY-MM-DD] [--dry-run] [--json]`
-builds the daily shipped digest for completed `9-done` tasks across
-registered projects. The pipeline collects tasks shipped on one local
-calendar date, asks an agent to classify and summarize them when there is
-work to report, renders Telegram MarkdownV2, and sends through the bot
-Telegram client. `hive digest --source merged-prs` switches to a read-only
-GitHub merged-PR report for the same local date; that source is mechanical
-and does not invoke the digest agent. Runtime config is loaded through
-`Hive::Config.load_global_digest_config`, so real sends can use
-`digest.agent`, `budget_usd.digest`, `timeout_sec.digest`, and
-`bot.chat_id_allowlist`. See [[modules/digest]].
+**TLDR**: Bare `hive digest [--date YYYY-MM-DD] [--dry-run] [--json]`
+defaults to a read-only report of GitHub PRs merged across registered
+projects. `digest.source: shipped` or explicit `--source shipped` selects the
+agent-written digest of completed `9-done` tasks instead. An explicit source
+wins over config, while `--repo` without a source implies `merged-prs`.
+Merged runs fail closed when automatic discovery produces no repositories,
+render best-effort Lines/PRs/Commits totals, and still deliver a valid `PRs 0`
+message on a zero-merge day. The resolved source also determines the JSON
+identity: `hive-merged-pr-digest` for merged PRs and `hive-digest` for shipped
+tasks. See [[modules/digest]].
 
 ## Synopsis
 
 ```bash
 hive digest [--date YYYY-MM-DD] [--dry-run] [--json]
-hive digest --source merged-prs [--date YYYY-MM-DD] [--repo owner/name ...] [--dry-run] [--json]
+hive digest [--source merged-prs|shipped] [--date YYYY-MM-DD] [--repo owner/name ...] [--dry-run] [--json]
 ```
 
 Options:
@@ -33,13 +32,26 @@ Options:
 | `--date YYYY-MM-DD` | Digest this local calendar date. Invalid formats raise `Hive::ConfigError`. |
 | omitted `--date` | Uses the local calendar day that just ended via `Hive::Digest::Window.previous_local_day`. |
 | `--dry-run` | Avoids Telegram auth/chat lookup and prints the composed message. |
-| `--json` | Emits a small versioned JSON delivery document instead of prose. |
-| `--source merged-prs` | Reports GitHub PRs merged on the local date instead of shipped Hive tasks. |
+| `--json` | Emits the v1 JSON document belonging to the resolved source instead of prose. |
+| `--source merged-prs\|shipped` | Explicit source override. `merged-prs` is the absent-config default; `shipped` is the opt-in agent-written digest. |
 | `--repo owner/name` | Restricts the merged-PR source to explicit repositories. Repeatable; implies `--source merged-prs`. |
 
 ## Behavior
 
-Default source:
+Source resolution happens once before runner dispatch:
+
+1. An explicit `--source merged-prs|shipped` wins.
+2. With no explicit source, any `--repo` selects `merged-prs`.
+3. Otherwise, validated global `digest.source` wins.
+4. With no configured source, `merged-prs` is the default.
+
+Only `merged-prs` and `shipped` are accepted. Explicit `--source shipped`
+cannot be combined with `--repo`, because repository scope belongs to the
+merged source.
+
+## Shipped Source
+
+`hive digest --source shipped` runs the agent-written shipped-task pipeline:
 
 1. `Hive::Commands::Digest#parse_date` accepts only `YYYY-MM-DD`; omitted
    dates default to yesterday in the host local timezone.
@@ -87,10 +99,10 @@ a failed-generation notice for the date and returns `status: :failed_notice`.
 
 ## Merged-PR Source
 
-`hive digest --source merged-prs` reports pull requests merged on one local
-calendar date. It is a read-only GitHub reporting source: it calls `gh`, reads
-registered Hive project state for optional task annotation, never mutates Hive
-state, and never runs the paid digest agent.
+Bare `hive digest` (or explicit `--source merged-prs`) reports pull requests
+merged on one local calendar date. It is a read-only GitHub reporting source:
+it calls `gh`, reads registered Hive project state for optional task
+annotation, never mutates Hive state, and never runs the paid digest agent.
 
 Repository selection:
 
@@ -98,8 +110,12 @@ Repository selection:
   each project path with `gh repo view --json nameWithOwner`.
 - A project that cannot be resolved is warned and dropped; other repos still
   report.
+- If the registry is empty or every automatic lookup fails, the command raises
+  `Hive::ConfigError` before collection or Telegram preflight. Register a
+  project or supply at least one `--repo owner/name`.
 - `--repo owner/name` bypasses discovery, validates the slug shape, de-dupes
-  repeats, and can be repeated.
+  repeats case-insensitively, and can be repeated. There is no digest-specific
+  repo-list config key.
 
 Collection:
 
@@ -115,31 +131,41 @@ Collection:
   projects' `.hive-state/stages/*/<slug>` directories to fill optional
   `hive_slug` / `hive_stage`. Match failures are swallowed.
 
-Rendering is mechanical and grouped by repo:
+Each PR's additions, deletions, and commit count are fetched best-effort
+through the shared `Digest::Stats` / `Hive::Gh.pr_stats` path. Individual
+failures are logged but never fail the digest. Rendering is mechanical and
+grouped by repo:
 
 ```text
 Merged PR digest — 2026-06-13
 
-Total: 2 PRs
-
 `owner/repo — 2`
 • #12 Add export — alice
 • #13 Fix docs — Hive task matched
+
+────────────────
+Lines +120/-30 · PRs 2 · Commits 4
 ```
 
+The known PR count always renders, including `PRs 0`. Lines and Commits are
+omitted only if no PR stats could be measured; partial measurements silently
+aggregate the successful fetches without changing the authoritative PR count.
 Dry-run prints the message and sends nothing. A real run sends through the
-same `Digest::Sender` / Telegram MarkdownV2 path as the shipped-task digest.
+same `Digest::Sender` / Telegram MarkdownV2 path as the shipped-task digest,
+including on valid zero-merge days.
 
 ## Output
 
 Human output:
 
 - Dry-run: prints the composed message body.
-- Real send: prints `hive digest: <status> for <date>`.
+- Shipped real send: prints `hive digest: <status> for <date>`.
+- Merged real send: prints either the sent PR count or an explicit sent-empty
+  confirmation for `0 merged PRs`.
 
-For the default shipped-task source, `--json` prints a delivery document for empty/sent/failed_notice: a model
-failure still prints this shape with `ok: false` and `status:
-"failed_notice"`.
+For the opt-in shipped-task source, `--json` prints a delivery document for
+empty/sent/failed_notice. A model failure still prints this shape with
+`ok: false` and `status: "failed_notice"`.
 
 ```json
 {
@@ -160,7 +186,7 @@ it is an optional field, so older consumers that ignore it stay compatible.
 `hive-digest` is registered in `Hive::Schemas::SCHEMA_VERSIONS` (v1) and
 published under `schemas/hive-digest.v1.json`.
 
-The merged-PR source emits `hive-merged-pr-digest` v1:
+The default merged-PR source emits `hive-merged-pr-digest` v1:
 
 ```json
 {
@@ -196,7 +222,10 @@ Real-send JSON sets `message` to `null` and `chat_id` to the resolved
 recipient. Partial repo drops still return `ok: true`; only command-level
 errors use the ErrorPayload arm.
 
-Usage errors emit the shared `ErrorPayload` (same `hive-digest` schema):
+Usage and config errors emit the shared `ErrorPayload` under the schema for
+the source the invocation resolves to. Bare/default/merged invocations use
+`hive-merged-pr-digest`; explicit or configured shipped invocations use
+`hive-digest`:
 
 - a bad `--date` raises `Hive::ConfigError` and the command emits the
   envelope itself (`error_kind: "config"`, exit 78) before re-raising;
@@ -207,8 +236,9 @@ Usage errors emit the shared `ErrorPayload` (same `hive-digest` schema):
 A Telegram send error that occurs mid-delivery still stays on the stderr +
 non-zero exit-code path without an envelope.
 
-Exit codes: `0` empty/sent/failed_notice (a notice was delivered); `78` bad
-`--date` or missing chat config; `64` bad flags / malformed `--json`; `70`
+Exit codes: `0` empty/sent/failed_notice (a digest or notice was delivered);
+`78` bad config, invalid source/date/repo scope, zero automatically resolved
+repos, or missing chat config; `64` bad flags / malformed `--json`; `70`
 unexpected internal error.
 
 ## Config And Auth
@@ -216,6 +246,8 @@ unexpected internal error.
 `Hive::Digest.run` defaults to `Hive::Config.load_global_digest_config` and
 the direct API can still override that with `cfg:`. Supported keys:
 
+- `digest.source` — `merged-prs` (default) or `shipped` (opt-in), shared by
+  manual commands and daemon dispatch.
 - `digest.agent` — preferred summarizer agent.
 - `patrol.agent` — fallback summarizer agent.
 - `budget_usd.digest` — categorizer budget override; default is `50`.
@@ -230,8 +262,8 @@ the direct API can still override that with `cfg:`. Supported keys:
 For a **real** send (not `--dry-run`), `Hive::Digest.run` first calls
 `Hive::EnvFile.load!`, loading `~/.config/hive/.env` so the token is available
 even when the surrounding environment does not export it. This matters most
-for the daemon: the `DigestScheduler` dispatches `hive digest --date <day>
---json` from a systemd/detached process whose environment has **no**
+for the daemon: the `DigestScheduler` dispatches `hive digest --source
+<resolved-source> --date <day> --json` from a systemd/detached process whose environment has **no**
 `HIVE_TELEGRAM_BOT_TOKEN`, and only `hive bot start` used to load the `.env`
 (see [[commands/bot]]). Before this, every daemon-scheduled digest failed
 `Sender#preflight!` with exit 78 and the scheduler hot-looped on its failure
@@ -239,8 +271,12 @@ backoff. An exported env var still wins over the file, and a dry-run never
 loads it (it never sends). See [[modules/digest]] and [[modules/config]].
 
 The daemon schedules the command through `Hive::Daemon::DigestScheduler` when
-`digest.enabled` is on, dispatching `hive digest --date <day> --json` once per
-owed local day. The digest is **opt-out**: when the operator has not set
+`digest.enabled` is on, dispatching the explicitly resolved source once per
+owed local day. Startup and SIGHUP reload share the same source resolver as
+the manual CLI, and reload reconfigures the scheduler in place without losing
+pending or backoff state. Child exit status alone controls cursor advancement,
+so a successfully delivered merged `PRs 0` day advances normally. The digest
+is **opt-out**: when the operator has not set
 `digest.enabled` either way, `Hive::Config.load_global_digest_block` derives it
 from the bot config — it auto-enables (`true`) when the Telegram bot is
 configured with an allowlisted chat (`bot.enabled == true` and
@@ -252,10 +288,13 @@ otherwise. An explicit `digest.enabled: false` is the opt-out (and an explicit
 ## Tests
 
 - `test/unit/cli_test.rb` covers Thor option threading for `hive digest`.
+- `test/unit/digest/source_test.rb` covers source precedence, validation,
+  conflicts, and schema identity.
 - `test/unit/commands/digest_test.rb` covers dry-run output, success JSON, and
-  date validation, plus merged-PR dispatch and envelope validation.
+  date validation, plus source runner exclusivity and envelope validation.
 - `test/unit/digest/merged_pr/*_test.rb` covers repo resolution, collection
-  boundaries, Hive matching, rendering, and runner orchestration.
+  boundaries, zero-scope failure, stats degradation, Hive matching, shared
+  footer rendering, and runner orchestration.
 - `test/unit/digest/run_test.rb` covers empty, successful, failed-notice, and
   default-date pipeline behavior through injected seams.
 - `test/unit/digest/sender_test.rb` covers chat-id resolution, dry-run token

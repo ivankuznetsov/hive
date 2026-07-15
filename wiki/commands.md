@@ -3,7 +3,7 @@ title: Interaction Surface
 type: commands
 source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/cli.rb, lib/hive/commands/adhoc_review.rb, lib/hive/commands/setup.rb, lib/hive/commands/connect.rb, lib/hive/commands/disconnect.rb, lib/hive/commands/bench_submit.rb, lib/hive/commands/digest.rb, lib/hive/commands/pairing.rb, lib/hive/digest.rb, lib/hive/digest/, lib/hive/web/, public/, hive.gemspec, packaging/docker/, .github/workflows/release.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-14
-updated: 2026-07-09
+updated: 2026-07-15
 tags: [commands, api]
 ---
 
@@ -11,7 +11,8 @@ tags: [commands, api]
 `hv` fallback launcher), the opt-in e2e harness, the hivebox web command/routes
 documented in [[commands/web]], `hive connect screenote` as the Screenote OAuth
 setup surface for artifacts MCP uploads, `hive bench submit` as the hive-bench
-corpus producer, `hive digest` as the daily shipped digest producer,
+corpus producer, `hive digest` as the default daily merged-PR digest producer
+(with shipped tasks opt-in),
 `hive pairing` as the Telegram first-contact approval surface, and the
 single ClawHub `hive-cli` OpenClaw skill whose installed slash command is `/hive`.
 The Ruby command/API contract lives in [[cli]] and the
@@ -56,7 +57,7 @@ one ClawHub listing per Hive verb.
 GitHub PR, project workflow authoring via [[commands/workflow]], daemon/bot/babysitter
 lifecycle commands, diagnostics, markers, findings, metrics, update/uninstall,
 registry maintenance, Screenote connect/disconnect, the `hive bench submit`
-corpus-submission producer, the `hive digest` shipped-digest producer,
+corpus-submission producer, the `hive digest` resolved-source digest producer,
 the [[commands/pairing]] Telegram pairing approval surface,
 [[commands/refactor-patrol]] as the reporting-only architecture refactor thesis
 scanner, and
@@ -92,11 +93,13 @@ projects, runs a local secret-token preflight, delegates extraction to
 hive-bench's checkout-local `harness/extract.rb`, then opens a GitHub PR from
 the hive-bench checkout. See [[commands/bench-submit]].
 
-`hive digest` is the CLI bridge to `Hive::Digest`: it builds the daily shipped
-digest for one local calendar date, with dry-run and success JSON output. It
-does not create task-state commits. The daemon can schedule it as a global,
-non-project-scoped child after local midnight when `digest.enabled: true`. See
-[[commands/digest]] and [[modules/digest]].
+`hive digest` resolves `merged-prs` (default) or `shipped` through one shared
+precedence contract, then routes to `Hive::Digest::MergedPr` or `Hive::Digest`.
+The merged path is mechanical, reads registered repositories, adds best-effort
+stats, and fails when automatic scope is empty; the shipped path remains an
+agent-written opt-in. Neither creates task-state commits. The daemon schedules
+the resolved source as a global, non-project-scoped child after local midnight
+when `digest.enabled: true`. See [[commands/digest]] and [[modules/digest]].
 
 `hive setup` is the local workstation provisioning bridge for installs that
 want the same first-run shape as hivebox without Docker: it emits a `hive-setup`

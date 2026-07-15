@@ -726,55 +726,53 @@ module Hive
       ).call
     end
 
-    desc "digest", "Generate and send the daily shipped digest"
+    desc "digest", "Generate and send the daily merged-PR or shipped digest"
     # wrap: false so the Examples / Exit codes blocks keep their line breaks
     # instead of being reflowed into one paragraph.
     long_desc <<~DESC, wrap: false
-      Collects tasks that shipped on the requested local calendar date
-      across all registered projects, asks the configured digest agent to
-      write friendly changelog lines, and sends a Telegram MarkdownV2 message
-      (split into multiple messages when it exceeds Telegram's length limit)
-      to the configured digest chat.
+      Builds a digest for the requested local calendar date and sends a
+      Telegram MarkdownV2 message to the configured digest chat. Without
+      --date, uses the local calendar day that just ended. Use --dry-run to
+      print the composed message instead of sending Telegram.
 
-      Without --date, uses the local calendar day that just ended. Use
-      --dry-run to print the composed message instead of sending Telegram.
+      Source precedence is explicit --source, then --repo (which implies
+      merged-prs), then global digest.source. When none is set, merged-prs is
+      the default. The only valid sources are merged-prs and shipped.
 
-      The run reports one of three outcomes (the `status` field with
-      --json): `empty` — nothing shipped that day, so no agent runs and a
-      short "nothing shipped" notice is sent; `sent` — a normal digest was
-      categorized and delivered; `failed_notice` — the categorizer agent
-      failed, so a short failure notice is sent instead (`ok` is false).
+      The merged-prs source is a read-only GitHub report and never mutates Hive state
+      or invokes the digest agent. Without --repo it discovers repositories
+      from registered_projects; if none resolve, the command fails instead of
+      sending a misleading zero-merge report. The footer always shows PRs N.
+      Best-effort stats add Lines +A/-D and Commits C when at least one PR was
+      measured; individual GitHub stats failures are skipped. Zero-merge days
+      still render and deliver PRs 0.
 
-      With --json, emits the hive-digest (v1) envelope: a SuccessPayload
-      (ok/status/date/dry_run/chat_id/message) for empty/sent/failed_notice,
-      or an ErrorPayload (ok:false/error_kind/exit_code/message) for a bad
-      --date (error_kind=config) or bad flags (error_kind=usage).
+      shipped is an opt-in source selected with --source shipped or
+      digest.source: shipped. It scans completed 9-done tasks, asks the
+      configured digest agent for friendly categorized summaries, and reports
+      empty, sent, or failed_notice.
 
-      The default source is the shipped-task digest described above. Use
-      --source merged-prs to build a read-only GitHub report of pull requests
-      merged on the requested local day. That source never mutates Hive state
-      and uses a mechanical renderer instead of the digest agent. Add --repo
-      owner/name to restrict the merged-PR report to one or more explicit
-      repositories; --repo implies --source merged-prs.
+      With --json, resolved merged-prs runs emit hive-merged-pr-digest v1;
+      resolved shipped runs emit hive-digest v1. Usage and config errors use
+      the same schema identity as the source that would run.
 
       Examples:
-        hive digest                          # yesterday, send to Telegram
-        hive digest --date 2026-06-13        # a specific local day
-        hive digest --dry-run                # print the composed message, send nothing
-        hive digest --date 2026-06-13 --json # machine-readable hive-digest envelope
-        hive digest --source merged-prs --dry-run
+        hive digest --dry-run                # default merged-PR report
+        hive digest --date 2026-06-13 --json # hive-merged-pr-digest envelope
         hive digest --repo owner/name --repo other/repo --json
+        hive digest --source shipped --dry-run
+        hive digest --source shipped --json  # hive-digest envelope
 
       Exit codes:
-        0  empty / sent / failed_notice (a notice was delivered)
-        78 bad --date or missing chat config (Hive::ConfigError)
+        0  digest rendered/delivered, including a zero-merge day
+        78 bad date/source, zero resolved repos, or missing chat config
         64 bad flags / malformed --json (Thor usage error)
         70 unexpected internal error
     DESC
     option :date, type: :string, desc: "local calendar date to digest (YYYY-MM-DD)"
     option :dry_run, type: :boolean, default: false, desc: "print the digest instead of sending Telegram"
     option :source, type: :string,
-                    desc: "digest data source: 'merged-prs' for a GitHub merged-PR report (default: shipped Hive tasks)"
+                    desc: "digest data source: merged-prs (default) or shipped (opt-in)"
     # repeatable: true so a repeated `--repo a/b --repo c/d` accumulates
     # (Thor collects each occurrence into a nested array) instead of the last
     # flag silently overwriting the earlier ones — the space-listed form

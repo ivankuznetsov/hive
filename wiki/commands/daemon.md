@@ -3,7 +3,7 @@ title: hive daemon
 type: command
 source: lib/hive/commands/daemon.rb, lib/hive/daemon/*
 created: 2026-05-06
-updated: 2026-07-10
+updated: 2026-07-15
 tags: [command, daemon, automation, json]
 ---
 
@@ -19,8 +19,9 @@ stops at human-input gates (`_WAITING` markers for Q&A / triage), manual
 recovery markers, and 8-finalize while the PR is still open on GitHub; selected
 retryable terminal `ERROR` markers are cleared by `StaleAgentHealer` before
 normal policy dispatch. When global `digest.enabled: true`, the same daemon
-also schedules one non-project-scoped `hive digest --date <day> --json` child
-after local midnight for the daily shipped digest.
+also schedules one non-project-scoped `hive digest --source <resolved> --date
+<day> --json` child after local midnight. The absent-config source is
+`merged-prs`; `digest.source: shipped` opts into shipped tasks.
 
 ## Subcommands
 
@@ -55,6 +56,7 @@ Daily digest scheduling is global config, not project enrollment:
 ```yaml
 digest:
   enabled: false
+  source: merged-prs
   agent: null
   max_catchup_days: 7
 ```
@@ -65,8 +67,11 @@ wires `Hive::Daemon::DigestScheduler`. The scheduler stores its cursor in
 local day on first run without backfilling history, dispatches missed days
 oldest-first one at a time, retries non-zero exits by leaving the cursor
 behind, and logs `digest_catchup_skipped` when missed history exceeds
-`digest.max_catchup_days`. The child command is always
-`hive digest --date YYYY-MM-DD --json`; see [[commands/digest]].
+`digest.max_catchup_days`. Startup and SIGHUP reload resolve `digest.source`
+through `Hive::Digest::Source`, update the scheduler in place without dropping
+pending/backoff state, and dispatch `hive digest --source merged-prs|shipped
+--date YYYY-MM-DD --json`; see [[commands/digest]]. Completion remains based
+only on child exit code, so a valid zero-merge day advances normally.
 
 ## What the daemon dispatches
 

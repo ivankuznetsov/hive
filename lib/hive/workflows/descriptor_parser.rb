@@ -49,11 +49,12 @@ module Hive
       REVIEWER_INSTRUCTION_KEYS = %w[skill instruction prompt command].freeze
       EXIT_RULES = %w[consensus human].freeze
 
-      def self.parse_file(path) = new(path).parse_file
-      def self.parse_hash(data, path:) = new(path).parse_hash(data)
+      def self.parse_file(path, expected_id: nil) = new(path, expected_id: expected_id).parse_file
+      def self.parse_hash(data, path:, expected_id: nil) = new(path, expected_id: expected_id).parse_hash(data)
 
-      def initialize(path)
+      def initialize(path, expected_id: nil)
         @path = path
+        @expected_id = expected_id&.to_s
       end
 
       def parse_file
@@ -131,6 +132,11 @@ module Hive
       end
 
       def validate_filename_id!(id)
+        if @expected_id
+          return if id == @expected_id
+
+          raise descriptor_error("id #{id.inspect} must match expected package id #{@expected_id.inspect}")
+        end
         expected = File.basename(@path, File.extname(@path))
         return if id == expected
 

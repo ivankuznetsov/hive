@@ -66,7 +66,7 @@ module Hive
       end
 
       def register_descriptor(workflow, workflow_dir)
-        source_path = File.join(workflow_dir, "#{workflow.id}.yml")
+        source_path = descriptor_source_path(workflow.id, workflow_dir)
         Hive::Workflows::Registry.register!(workflow, project: true, source_path: source_path)
       rescue Hive::ConfigError => e
         # A descriptor whose id collides with a built-in (or another already-
@@ -97,14 +97,16 @@ module Hive
         # Registered cleanly as a project overlay → nothing to surface.
         return if Hive::Workflows::Registry.project_registrations.key?(id.to_sym)
 
-        path = File.join(workflow_dir_for(File.expand_path(project_root)), "#{id}.yml")
+        workflow_dir = workflow_dir_for(File.expand_path(project_root))
+        path = descriptor_source_path(id, workflow_dir)
         return unless File.file?(path)
 
         # The file exists but is absent from the project overlay. Re-parse it:
         # a malformed descriptor re-raises its real ConfigError here; a clean
         # parse means register! refused it for colliding with an already-
         # registered (built-in or runtime) workflow — reproduce that error.
-        Hive::Workflows::DescriptorParser.parse_file(path)
+        expected_id = id if File.basename(path) == "workflow.yml"
+        Hive::Workflows::DescriptorParser.parse_file(path, expected_id: expected_id)
         raise Hive::ConfigError,
               "workflow descriptor #{path} collides with registered workflow #{id.to_sym.inspect}"
       end
@@ -116,6 +118,13 @@ module Hive
           warned_skips.clear
           Hive::Workflows::Registry.reset_project_registrations!
         end
+      end
+
+      def descriptor_source_path(id, workflow_dir)
+        authored = File.join(workflow_dir, "#{id}.yml")
+        return authored if File.file?(authored)
+
+        File.join(workflow_dir, id.to_s, "workflow.yml")
       end
 
       # Bounded-K assumption: one parsed-descriptor entry accumulates per

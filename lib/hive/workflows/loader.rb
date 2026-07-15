@@ -21,7 +21,9 @@ module Hive
       def load_dir(workflows_dir)
         return {} unless File.directory?(workflows_dir)
 
-        Dir.glob(File.join(workflows_dir, "*.yml")).sort.each_with_object({}) do |path, workflows|
+        authored = Dir.glob(File.join(workflows_dir, "*.yml")).sort
+        managed = Dir.glob(File.join(workflows_dir, "*", "workflow.yml")).sort
+        (authored + managed).each_with_object({}) do |path, workflows|
           # Per-file isolation (plan U9-2: "good one loads, broken one reported
           # with its path"). One malformed descriptor must NOT abort loading its
           # siblings — that would brick every task in the project, including
@@ -29,7 +31,12 @@ module Hive
           # broken file with its path on stderr (the ConfigError message already
           # embeds the path) and skip it; the good descriptors still load.
           begin
-            workflow = Hive::Workflows::DescriptorParser.parse_file(path)
+            expected_id = File.basename(File.dirname(path)) if File.basename(path) == "workflow.yml"
+            workflow = Hive::Workflows::DescriptorParser.parse_file(path, expected_id: expected_id)
+            if workflows.key?(workflow.id)
+              warn "hive: skipping workflow descriptor #{path}: duplicate workflow id #{workflow.id.inspect}"
+              next
+            end
             workflows[workflow.id] = workflow
           rescue Hive::ConfigError => e
             warn "hive: skipping #{e.message}"

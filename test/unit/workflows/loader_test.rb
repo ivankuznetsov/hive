@@ -129,4 +129,46 @@ class WorkflowsLoaderTest < Minitest::Test
                       "the skip breadcrumb must carry the ConfigError reason (id/filename mismatch)"
     end
   end
+
+  def test_load_dir_discovers_authored_and_managed_descriptors
+    with_tmp_dir do |workflows_dir|
+      FileUtils.mkdir_p(File.join(workflows_dir, "managed"))
+      File.write(File.join(workflows_dir, "managed", "workflow.yml"), <<~YAML)
+        id: managed
+        stages:
+          - name: done
+            kind: terminal
+            state_file: done.md
+      YAML
+      File.write(File.join(workflows_dir, "authored.yml"), <<~YAML)
+        id: authored
+        stages:
+          - name: done
+            kind: terminal
+            state_file: done.md
+      YAML
+
+      assert_equal %i[authored managed], Hive::Workflows::Loader.load_dir(workflows_dir).keys.sort
+    end
+  end
+
+  def test_load_dir_keeps_authored_descriptor_when_managed_id_collides
+    with_tmp_dir do |workflows_dir|
+      FileUtils.mkdir_p(File.join(workflows_dir, "same"))
+      descriptor = <<~YAML
+        id: same
+        stages:
+          - name: done
+            kind: terminal
+            state_file: done.md
+      YAML
+      File.write(File.join(workflows_dir, "same.yml"), descriptor)
+      File.write(File.join(workflows_dir, "same", "workflow.yml"), descriptor)
+
+      loaded = nil
+      _out, err = capture_io { loaded = Hive::Workflows::Loader.load_dir(workflows_dir) }
+      assert_equal [ :same ], loaded.keys
+      assert_includes err, "duplicate workflow id"
+    end
+  end
 end

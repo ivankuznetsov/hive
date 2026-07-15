@@ -277,6 +277,29 @@ class WorkflowsDescriptorParserTest < Minitest::Test
     assert_includes error.message, 'id "actual" must match filename "expected"'
   end
 
+  def test_managed_workflow_filename_accepts_explicit_expected_id
+    with_tmp_dir do |dir|
+      package = File.join(dir, "managed")
+      FileUtils.mkdir_p(package)
+      path = File.join(package, "workflow.yml")
+      File.write(path, <<~YAML)
+        id: managed
+        stages:
+          - name: done
+            kind: terminal
+            state_file: done.md
+      YAML
+
+      workflow = Hive::Workflows::DescriptorParser.parse_file(path, expected_id: "managed")
+      assert_equal :managed, workflow.id
+
+      error = assert_raises(Hive::ConfigError) do
+        Hive::Workflows::DescriptorParser.parse_file(path, expected_id: "other")
+      end
+      assert_includes error.message, 'id "managed" must match expected package id "other"'
+    end
+  end
+
   def test_stages_must_be_an_array
     error = assert_config_error({ "id" => "bad", "stages" => "nope" }, path: "/tmp/bad.yml")
 

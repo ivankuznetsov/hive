@@ -3516,6 +3516,7 @@ class ConfigTest < Minitest::Test
       assert_equal false, cfg.dig("digest", "enabled")
       assert_nil cfg.dig("digest", "agent")
       assert_equal 7, cfg.dig("digest", "max_catchup_days")
+      assert_equal "merged-prs", cfg.dig("digest", "source")
       assert_equal false, cfg.dig("answer_digest", "enabled")
       assert_equal 9, cfg.dig("answer_digest", "hour")
     end
@@ -3584,6 +3585,7 @@ class ConfigTest < Minitest::Test
           enabled: true
           agent: codex
           max_catchup_days: 3
+          source: shipped
       YAML
 
       cfg = Hive::Config.load_global_digest_block
@@ -3591,6 +3593,7 @@ class ConfigTest < Minitest::Test
       assert_equal true, cfg["enabled"]
       assert_equal "codex", cfg["agent"]
       assert_equal 3, cfg["max_catchup_days"]
+      assert_equal "shipped", cfg["source"]
     end
   end
 
@@ -3701,6 +3704,29 @@ class ConfigTest < Minitest::Test
 
       err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_digest_block }
       assert_match(/digest\.max_catchup_days.*>= 0/, err.message)
+
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        digest:
+          source: issues
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_digest_block }
+      assert_match(/digest\.source.*merged-prs.*shipped/, err.message)
+    end
+  end
+
+  def test_load_global_digest_config_validates_source_and_blank_uses_default
+    with_tmp_global_config do |home|
+      File.write(File.join(home, "config.yml"), <<~YAML)
+        registered_projects: []
+        digest:
+          source: ""
+      YAML
+
+      cfg = Hive::Config.load_global_digest_config
+
+      assert_equal "merged-prs", cfg.dig("digest", "source")
     end
   end
 

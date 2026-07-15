@@ -2,15 +2,16 @@ require "date"
 require "json"
 require "hive/digest"
 require "hive/digest/merged_pr"
+require "hive/digest/source"
 
 module Hive
   module Commands
     class Digest
-      MERGED_PRS_SOURCE = "merged-prs".freeze
+      DEFAULT_CONFIG_LOADER = -> { Hive::Config.load_global_digest_block }
 
       def initialize(date: nil, dry_run: false, json: false, runner: Hive::Digest,
                      merged_runner: Hive::Digest::MergedPr, output: $stdout,
-                     source: nil, repos: [])
+                     source: nil, repos: [], config_loader: DEFAULT_CONFIG_LOADER)
         @date = date
         @dry_run = dry_run
         @json = json
@@ -19,15 +20,18 @@ module Hive
         @output = output
         @source = source
         @repos = Array(repos)
+        @config_loader = config_loader
+        @configured_source = nil
+        @resolved_source = nil
       end
 
       def call
+        resolve_source!
         local_date = parse_date
         result =
           if merged_pr_source?
             @merged_runner.run(date: local_date, dry_run: @dry_run, repos: @repos)
           else
-            validate_source!
             @runner.run(date: local_date, dry_run: @dry_run)
           end
         emit(result)
@@ -61,22 +65,18 @@ module Hive
         raise Hive::ConfigError, "hive digest: --date must be YYYY-MM-DD; got #{@date.inspect}"
       end
 
-      def normalized_source
-        source = @source.to_s.strip
-        return MERGED_PRS_SOURCE if source.empty? && @repos.any?
-        return nil if source.empty?
-
-        source
+      def resolve_source!
+        config = @config_loader.call
+        @configured_source = config["source"]
+        @resolved_source = Hive::Digest::Source.resolve(
+          explicit: @source,
+          repos: @repos,
+          configured: @configured_source
+        )
       end
 
       def merged_pr_source?
-        normalized_source == MERGED_PRS_SOURCE
-      end
-
-      def validate_source!
-        return if normalized_source.nil?
-
-        raise Hive::ConfigError, "hive digest: --source must be 'merged-prs'; got #{@source.inspect}"
+        @resolved_source == Hive::Digest::Source::MERGED_PRS
       end
 
       def emit(result)
@@ -119,7 +119,7 @@ module Hive
           "schema" => "hive-merged-pr-digest",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-merged-pr-digest"),
           "date" => result.date.iso8601,
-          "source" => MERGED_PRS_SOURCE,
+          "source" => Hive::Digest::Source::MERGED_PRS,
           "dry_run" => @dry_run,
           "repos" => result.repos,
           "count" => result.count,
@@ -142,7 +142,16 @@ module Hive
       end
 
       def emit_error_envelope(error)
-        schema = merged_pr_source? ? "hive-merged-pr-digest" : "hive-digest"
+        schema =
+          if @resolved_source
+            Hive::Digest::Source.schema_for(@resolved_source)
+          else
+            Hive::Digest::Source.schema_for_options(
+              explicit: @source,
+              repos: @repos,
+              configured: @configured_source
+            )
+          end
         @output.puts JSON.generate(
           "schema" => schema,
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch(schema),

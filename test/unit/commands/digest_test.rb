@@ -3,6 +3,9 @@ require "json_schemer"
 require "hive/commands/digest"
 
 class HiveCommandsDigestTest < Minitest::Test
+  MERGED_CONFIG = -> { { "source" => "merged-prs" } }
+  SHIPPED_CONFIG = -> { { "source" => "shipped" } }
+
   Runner = Struct.new(:calls, :result) do
     def run(date:, dry_run:)
       calls << { date: date, dry_run: dry_run }
@@ -25,6 +28,7 @@ class HiveCommandsDigestTest < Minitest::Test
       date: "2026-06-13",
       dry_run: true,
       runner: runner,
+      config_loader: SHIPPED_CONFIG,
       output: output
     ).call
 
@@ -42,6 +46,7 @@ class HiveCommandsDigestTest < Minitest::Test
       dry_run: true,
       json: true,
       runner: runner,
+      config_loader: SHIPPED_CONFIG,
       output: output
     ).call
 
@@ -61,6 +66,7 @@ class HiveCommandsDigestTest < Minitest::Test
       date: "2026-06-13",
       json: true,
       runner: runner,
+      config_loader: SHIPPED_CONFIG,
       output: output
     ).call
 
@@ -76,14 +82,18 @@ class HiveCommandsDigestTest < Minitest::Test
     output = StringIO.new
     runner = Runner.new([], result(status: :empty, message: "Nothing shipped today 🌙"))
 
-    Hive::Commands::Digest.new(date: nil, dry_run: true, runner: runner, output: output).call
+    Hive::Commands::Digest.new(
+      date: nil, dry_run: true, runner: runner, config_loader: SHIPPED_CONFIG, output: output
+    ).call
 
     assert_nil runner.calls.first.fetch(:date),
                "a blank --date must defer the default to the runner, not be computed in the command"
   end
 
   def test_invalid_date_raises_config_error
-    command = Hive::Commands::Digest.new(date: "13-06-2026", dry_run: true, runner: Runner.new([], nil))
+    command = Hive::Commands::Digest.new(
+      date: "13-06-2026", dry_run: true, runner: Runner.new([], nil), config_loader: MERGED_CONFIG
+    )
 
     error = assert_raises(Hive::ConfigError) { command.call }
     assert_match(/YYYY-MM-DD/, error.message)
@@ -92,14 +102,15 @@ class HiveCommandsDigestTest < Minitest::Test
   def test_json_emits_error_envelope_on_bad_date_then_reraises
     output = StringIO.new
     command = Hive::Commands::Digest.new(
-      date: "13-06-2026", json: true, runner: Runner.new([], nil), output: output
+      date: "13-06-2026", json: true, runner: Runner.new([], nil),
+      config_loader: MERGED_CONFIG, output: output
     )
 
     assert_raises(Hive::ConfigError) { command.call }
 
     payload = JSON.parse(output.string)
     assert_equal false, payload.fetch("ok")
-    assert_equal "hive-digest", payload.fetch("schema")
+    assert_equal "hive-merged-pr-digest", payload.fetch("schema")
     assert_equal "config", payload.fetch("error_kind")
     assert_equal "ConfigError", payload.fetch("error_class")
     assert_equal Hive::ExitCodes::CONFIG, payload.fetch("exit_code")
@@ -108,7 +119,9 @@ class HiveCommandsDigestTest < Minitest::Test
 
   def test_bad_date_without_json_emits_no_envelope
     output = StringIO.new
-    command = Hive::Commands::Digest.new(date: "13-06-2026", runner: Runner.new([], nil), output: output)
+    command = Hive::Commands::Digest.new(
+      date: "13-06-2026", runner: Runner.new([], nil), config_loader: MERGED_CONFIG, output: output
+    )
 
     assert_raises(Hive::ConfigError) { command.call }
     assert_equal "", output.string,
@@ -124,7 +137,9 @@ class HiveCommandsDigestTest < Minitest::Test
       [], Hive::Digest::Result.new(status: :sent, date: Date.new(2026, 6, 13), message: "body", delivery: delivery)
     )
 
-    Hive::Commands::Digest.new(date: "2026-06-13", json: true, runner: runner, output: output).call
+    Hive::Commands::Digest.new(
+      date: "2026-06-13", json: true, runner: runner, config_loader: SHIPPED_CONFIG, output: output
+    ).call
 
     assert_equal 4242, JSON.parse(output.string).fetch("chat_id"),
                  "the --json envelope must surface the resolved chat_id for post-send auditability"
@@ -133,7 +148,9 @@ class HiveCommandsDigestTest < Minitest::Test
   def test_well_formed_but_impossible_date_raises_config_error
     # Passes the YYYY-MM-DD shape check but Window.parse_date raises a
     # Date::Error (an ArgumentError subclass) the command must translate.
-    command = Hive::Commands::Digest.new(date: "2026-13-45", dry_run: true, runner: Runner.new([], nil))
+    command = Hive::Commands::Digest.new(
+      date: "2026-13-45", dry_run: true, runner: Runner.new([], nil), config_loader: MERGED_CONFIG
+    )
 
     error = assert_raises(Hive::ConfigError) { command.call }
     assert_match(/YYYY-MM-DD/, error.message)
@@ -146,6 +163,7 @@ class HiveCommandsDigestTest < Minitest::Test
     Hive::Commands::Digest.new(
       date: "2026-06-13",
       runner: runner,
+      config_loader: SHIPPED_CONFIG,
       output: output
     ).call
 
@@ -153,7 +171,25 @@ class HiveCommandsDigestTest < Minitest::Test
     assert_equal "hive digest: sent for 2026-06-13\n", output.string
   end
 
-  def test_source_omitted_uses_shipped_digest_runner_unchanged
+  def test_source_omitted_defaults_to_merged_pr_runner
+    output = StringIO.new
+    runner = Runner.new([], nil)
+    merged = MergedRunner.new([], merged_result)
+
+    Hive::Commands::Digest.new(
+      date: "2026-06-13",
+      dry_run: true,
+      runner: runner,
+      merged_runner: merged,
+      config_loader: MERGED_CONFIG,
+      output: output
+    ).call
+
+    assert_empty runner.calls
+    assert_equal [ { date: Date.new(2026, 6, 13), dry_run: true, repos: [] } ], merged.calls
+  end
+
+  def test_configured_shipped_dispatches_to_shipped_runner
     output = StringIO.new
     runner = Runner.new([], result(status: :empty, message: "Nothing shipped today 🌙"))
     merged = MergedRunner.new([], nil)
@@ -163,6 +199,7 @@ class HiveCommandsDigestTest < Minitest::Test
       dry_run: true,
       runner: runner,
       merged_runner: merged,
+      config_loader: SHIPPED_CONFIG,
       output: output
     ).call
 
@@ -182,6 +219,7 @@ class HiveCommandsDigestTest < Minitest::Test
       repos: [ "owner/repo" ],
       runner: runner,
       merged_runner: merged,
+      config_loader: SHIPPED_CONFIG,
       output: output
     ).call
 
@@ -198,6 +236,7 @@ class HiveCommandsDigestTest < Minitest::Test
       date: "2026-06-13",
       source: "merged-prs",
       merged_runner: merged,
+      config_loader: MERGED_CONFIG,
       output: output
     ).call
 
@@ -212,6 +251,7 @@ class HiveCommandsDigestTest < Minitest::Test
       date: "2026-06-13",
       source: "merged-prs",
       merged_runner: merged,
+      config_loader: MERGED_CONFIG,
       output: output
     ).call
 
@@ -228,27 +268,68 @@ class HiveCommandsDigestTest < Minitest::Test
       repos: [ "owner/repo" ],
       runner: Runner.new([], nil),
       merged_runner: merged,
+      config_loader: SHIPPED_CONFIG,
       output: output
     ).call
 
     assert_equal [ { date: Date.new(2026, 6, 13), dry_run: true, repos: [ "owner/repo" ] } ], merged.calls
   end
 
-  def test_unknown_source_raises_config_error_and_json_uses_shipped_schema
+  def test_explicit_shipped_overrides_default_merged_source
+    output = StringIO.new
+    runner = Runner.new([], result(status: :sent, message: "digest body"))
+
+    Hive::Commands::Digest.new(
+      date: "2026-06-13",
+      source: "shipped",
+      runner: runner,
+      merged_runner: MergedRunner.new([], nil),
+      config_loader: MERGED_CONFIG,
+      output: output
+    ).call
+
+    assert_equal [ { date: Date.new(2026, 6, 13), dry_run: false } ], runner.calls
+  end
+
+  def test_explicit_shipped_with_repo_raises_before_either_runner
+    output = StringIO.new
+    runner = Runner.new([], nil)
+    merged = MergedRunner.new([], nil)
+    command = Hive::Commands::Digest.new(
+      date: "2026-06-13",
+      source: "shipped",
+      repos: [ "owner/repo" ],
+      json: true,
+      runner: runner,
+      merged_runner: merged,
+      config_loader: MERGED_CONFIG,
+      output: output
+    )
+
+    error = assert_raises(Hive::ConfigError) { command.call }
+
+    assert_match(/cannot be combined/, error.message)
+    assert_empty runner.calls
+    assert_empty merged.calls
+    assert_equal "hive-digest", JSON.parse(output.string).fetch("schema")
+  end
+
+  def test_unknown_source_raises_config_error_and_json_uses_default_schema
     output = StringIO.new
     command = Hive::Commands::Digest.new(
       date: "2026-06-13",
       source: "unknown",
       json: true,
       runner: Runner.new([], nil),
+      config_loader: MERGED_CONFIG,
       output: output
     )
 
     error = assert_raises(Hive::ConfigError) { command.call }
 
-    assert_match(/--source must be 'merged-prs'/, error.message)
+    assert_match(/--source.*merged-prs.*shipped/, error.message)
     payload = JSON.parse(output.string)
-    assert_equal "hive-digest", payload.fetch("schema")
+    assert_equal "hive-merged-pr-digest", payload.fetch("schema")
     assert_equal "config", payload.fetch("error_kind")
   end
 
@@ -264,6 +345,7 @@ class HiveCommandsDigestTest < Minitest::Test
       source: "merged-prs",
       json: true,
       merged_runner: merged,
+      config_loader: MERGED_CONFIG,
       output: output
     ).call
 
@@ -289,6 +371,7 @@ class HiveCommandsDigestTest < Minitest::Test
       source: "merged-prs",
       json: true,
       merged_runner: merged,
+      config_loader: MERGED_CONFIG,
       output: output
     ).call
 

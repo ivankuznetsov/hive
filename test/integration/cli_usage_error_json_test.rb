@@ -131,6 +131,23 @@ class CliUsageErrorJsonTest < Minitest::Test
     end
   end
 
+  def test_digest_json_usage_error_schema_follows_configured_and_explicit_source
+    with_tmp_global_config do |home|
+      assert_pre_dispatch_error(
+        home, %w[digest extra --json], schema: "hive-merged-pr-digest", error_kind: "usage"
+      )
+
+      File.write(File.join(home, "config.yml"), {
+        "registered_projects" => [], "digest" => { "source" => "shipped" }
+      }.to_yaml)
+      assert_pre_dispatch_error(home, %w[digest extra --json], schema: "hive-digest", error_kind: "usage")
+      assert_pre_dispatch_error(
+        home, %w[digest --source merged-prs extra --json],
+        schema: "hive-merged-pr-digest", error_kind: "usage"
+      )
+    end
+  end
+
   def test_setup_extra_positional_json_usage_error_uses_setup_envelope
     with_tmp_global_config do |home|
       out, err, status = run_hive(home, "setup", "extra", "--json")
@@ -356,8 +373,9 @@ class CliUsageErrorJsonTest < Minitest::Test
       [ %w[web status extra --json], "hive-web-status", "invalid_task_path" ],
       [ %w[web install extra --json], "hive-web-install", "invalid_task_path" ],
       [ %w[web --bind install status extra --json], "hive-web-status", "invalid_task_path" ],
-      [ %w[digest extra --json], "hive-digest", "usage" ],
-      [ %w[digest --json -- extra --source merged-prs], "hive-digest", "usage" ],
+      [ %w[digest extra --json], "hive-merged-pr-digest", "usage" ],
+      [ %w[digest --json -- extra --source merged-prs], "hive-merged-pr-digest", "usage" ],
+      [ %w[digest --source shipped extra --json], "hive-digest", "usage" ],
       [ %w[digest --source merged-prs extra --json], "hive-merged-pr-digest", "usage" ]
     ]
 
@@ -379,8 +397,8 @@ class CliUsageErrorJsonTest < Minitest::Test
         "hive-pairing-list", "invalid_arguments" ],
       [ [ "pairing", "approve", "telegram", "CODE", "--json", invalid ],
         "hive-pairing-approve", "invalid_arguments" ],
-      [ [ "digest", "--json", invalid ], "hive-digest", "usage" ],
-      [ [ "digest", "--source", invalid, "--json" ], "hive-digest", "usage" ],
+      [ [ "digest", "--json", invalid ], "hive-merged-pr-digest", "usage" ],
+      [ [ "digest", "--source", invalid, "--json" ], "hive-merged-pr-digest", "usage" ],
       [ [ "digest", "--source", "merged-prs", "--json", invalid ],
         "hive-merged-pr-digest", "usage" ]
     ]

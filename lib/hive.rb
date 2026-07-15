@@ -44,7 +44,7 @@ module Hive
       # every other agent-callable command's error envelope; the success arm
       # builds its hash directly.
       "hive-workflow-new" => 1,
-      # Global daily shipped digest (`hive digest --json`). The success
+      # Opt-in shipped-task digest (`hive digest --source shipped --json`). The success
       # envelope carries the delivery outcome (status/date/message); hard
       # failures use stderr + exit code, and the Thor-usage error path
       # emits the shared error envelope (see JSON_USAGE_ERROR_CONTRACTS).
@@ -55,8 +55,8 @@ module Hive
       # error envelope via JSON_USAGE_ERROR_CONTRACTS, and a bad --date / status
       # outage emit the in-command error envelope.
       "hive-answer-digest" => 1,
-      # Read-only GitHub merged-pull-request digest source
-      # (`hive digest --source merged-prs --json`).
+      # Default read-only GitHub merged-pull-request digest source
+      # (`hive digest --json` or `hive digest --source merged-prs --json`).
       "hive-merged-pr-digest" => 1,
       "hive-bot-status" => 1,
       "hive-bot-stop" => 1,

@@ -501,13 +501,14 @@ module Hive
           "max_owned_files" => 12
         }
       },
-      # Daily shipped digest. The daemon schedules one global `hive digest`
-      # subprocess after each local midnight; the subprocess sends a single
-      # Telegram message across all registered projects.
+      # Daily digest. The daemon schedules one global `hive digest` subprocess
+      # after each local midnight; the source selects merged PRs by default or
+      # the opt-in shipped-task pipeline.
       "digest" => {
         "enabled" => false,
         "agent" => nil,
-        "max_catchup_days" => 7
+        "max_catchup_days" => 7,
+        "source" => "merged-prs"
       },
       # Daily pending-answer digest. The daemon schedules one global
       # `hive answer-digest` subprocess at/after the configured local hour;
@@ -1286,6 +1287,7 @@ module Hive
       end
 
       merged = deep_merge(deep_dup(DEFAULTS[key]), override)
+      normalize_digest_source!({ "digest" => merged }) if key == "digest"
       merged = yield(merged, data, override) if block_given?
       send(validator, { key => merged }, path)
       merged
@@ -1603,8 +1605,18 @@ module Hive
     # single-level Hash#merge that would wipe sibling keys whenever a
     # user override touched a 3+-deep nested path.
     def merge_defaults(data)
-      deep_merge(deep_dup(DEFAULTS), data)
+      deep_merge(deep_dup(DEFAULTS), data).tap { |merged| normalize_digest_source!(merged) }
     end
+
+    def normalize_digest_source!(cfg)
+      digest = cfg["digest"]
+      return cfg unless digest.is_a?(Hash)
+
+      source = digest["source"]
+      digest["source"] = DEFAULTS.dig("digest", "source") if source.nil? || source.to_s.strip.empty?
+      cfg
+    end
+    private :normalize_digest_source!
 
     def deep_merge(base, override)
       return override unless base.is_a?(Hash) && override.is_a?(Hash)
@@ -2810,6 +2822,13 @@ module Hive
       end
 
       validate_agent_name!(digest["agent"], "digest.agent", source_path)
+
+      source = digest["source"]
+      unless %w[merged-prs shipped].include?(source)
+        raise ConfigError,
+              "digest.source in #{describe_source(source_path)} must be one of merged-prs, shipped; " \
+              "got #{source.inspect}"
+      end
 
       max_catchup_days = digest["max_catchup_days"]
       return if max_catchup_days.nil?

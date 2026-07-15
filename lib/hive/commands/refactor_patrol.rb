@@ -23,7 +23,8 @@ module Hive
         @dry_run = dry_run
         @feature_hint = feature
         @entrypoint_hint = entrypoint
-        @path_hint = path
+        @raw_path_hints = Array(path).flatten.compact
+        @path_hints = []
         @changed_since = changed_since
         @mapper_factory = mapper_factory || ->(root, cfg, state) { Hive::Patrol::Mapper.new(root, cfg: mapper_cfg(cfg), state: state, dry_run: @dry_run) }
         @reviewer_factory = reviewer_factory || ->(root, cfg, state) { Hive::RefactorPatrol::Reviewer.new(root, cfg: cfg, state: state, dry_run: @dry_run) }
@@ -48,6 +49,7 @@ module Hive
 
       def run_cycle
         entry, project_root, cfg = resolve_project!
+        @path_hints = normalize_path_hints!(project_root)
         state = Hive::RefactorPatrol::StateStore.new(project_root)
         # A dry run must not create durable artifacts under
         # .hive-state/refactor_patrol/; all reads tolerate a missing dir.
@@ -143,14 +145,17 @@ module Hive
             features.select { |feature| feature.id == @feature_hint }
           elsif @entrypoint_hint
             features.select { |feature| Array(feature.entrypoints).include?(@entrypoint_hint) }
-          elsif @path_hint
-            normalized = @path_hint.tr("\\", "/")
-            features.select { |feature| Array(feature.owned_files).any? { |path| path == normalized || path.start_with?("#{normalized}/") } }
+          elsif @path_hints.any?
+            features.select do |feature|
+              Array(feature.owned_files).any? do |path|
+                @path_hints.any? { |hint| path == hint || path.start_with?("#{hint}/") }
+              end
+            end
           else
             features
           end
 
-        return scoped unless @changed_since && (@feature_hint || @entrypoint_hint || @path_hint)
+        return scoped unless @changed_since && (@feature_hint || @entrypoint_hint || @path_hints.any?)
 
         changed = changed_files(project_root)
         # A git failure yields nil (distinct from an empty "no changes" diff);
@@ -186,6 +191,21 @@ module Hive
         return "" unless status.success?
 
         out.strip
+      end
+
+      def normalize_path_hints!(project_root)
+        root = File.realpath(project_root)
+        @raw_path_hints.map do |raw|
+          value = raw.to_s.tr("\\", "/")
+          parts = value.split("/")
+          valid = value.match?(%r{\A[A-Za-z0-9_.\-/]+\z}) &&
+                  !value.start_with?("/", "-") &&
+                  parts.none? { |part| part.empty? || %w[. ..].include?(part) } &&
+                  File.expand_path(value, root).start_with?("#{root}#{File::SEPARATOR}")
+          raise Hive::ConfigError, "hive refactor-patrol: unsafe --path #{raw.inspect}" unless valid
+
+          value
+        end.uniq
       end
 
       def mapper_cfg(cfg)

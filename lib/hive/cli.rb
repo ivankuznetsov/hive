@@ -711,7 +711,8 @@ module Hive
                      desc: "preview without persisting refactor-patrol state"
     option :feature, type: :string, desc: "only review matching mapped feature id"
     option :entrypoint, type: :string, desc: "only review the feature owning this entrypoint"
-    option :path, type: :string, desc: "only review features with owned files under this path"
+    option :path, type: :array, default: [], repeatable: true,
+                  desc: "only review features with owned files under these paths (repeatable)"
     option :changed_since, type: :string, desc: "git ref used for changed-feature ranking/filtering"
     def refactor_patrol(project)
       require "hive/commands/refactor_patrol"
@@ -721,7 +722,7 @@ module Hive
         dry_run: options[:dry_run],
         feature: options[:feature],
         entrypoint: options[:entrypoint],
-        path: options[:path],
+        path: options[:path].flatten,
         changed_since: options[:changed_since]
       ).call
     end

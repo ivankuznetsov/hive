@@ -218,6 +218,53 @@ class RefactorPatrolCommandTest < Minitest::Test
     end
   end
 
+  def test_multiple_path_hints_filter_by_union
+    with_refactor_patrol_project do
+      reviewer = FakeReviewer.new({
+        "checkout" => [ thesis("checkout", feature_id: "checkout", fingerprint: "fp-checkout") ],
+        "search" => [ thesis("search", feature_id: "search", fingerprint: "fp-search") ]
+      })
+      out, _err, status = with_captured_exit do
+        command_for(
+          path_hint: [ "lib/checkout", "lib/search" ],
+          features: [
+            feature("checkout", files: [ "lib/checkout/flow.rb" ]),
+            feature("search", files: [ "lib/search/index.rb" ]),
+            feature("admin", files: [ "lib/admin/index.rb" ])
+          ],
+          reviewer: reviewer,
+          leverage_scores: leverage_scores("checkout" => 0.9, "search" => 0.8, "admin" => 0.1)
+        ).call
+      end
+
+      assert_equal Hive::ExitCodes::SUCCESS, status
+      assert_equal %w[checkout search], reviewer.seen_feature_ids
+      assert_equal 2, JSON.parse(out).fetch("features_mapped")
+    end
+  end
+
+  def test_cli_accepts_repeated_path_hints
+    with_refactor_patrol_project do
+      out, _err, status = with_captured_exit do
+        Hive::CLI.start(%w[refactor-patrol demo --dry-run --path lib --path test --json])
+      end
+
+      assert_equal Hive::ExitCodes::SUCCESS, status
+      assert_equal true, JSON.parse(out).fetch("dry_run")
+    end
+  end
+
+  def test_unsafe_manual_path_hint_is_rejected
+    with_refactor_patrol_project do
+      out, _err, status = with_captured_exit do
+        command_for(path_hint: "../outside", features: []).call
+      end
+
+      assert_equal Hive::ExitCodes::CONFIG, status
+      assert_equal "config", JSON.parse(out).fetch("error_kind")
+    end
+  end
+
   def test_changed_since_git_failure_keeps_scoped_features
     with_refactor_patrol_project do
       reviewer = FakeReviewer.new({ "checkout" => [ thesis("checkout", feature_id: "checkout", fingerprint: "fp-checkout") ] })

@@ -20,9 +20,9 @@ class HiveDigestMergedPrRepoResolverTest < Minitest::Test
       logger: nil
     )
 
-    result = resolver.resolve(repos: [ "owner/repo", "owner/repo", "other/repo" ])
+    result = resolver.resolve(repos: [ "Owner/Repo", "owner/repo", "other/repo" ])
 
-    assert_equal [ "owner/repo", "other/repo" ], result.repos
+    assert_equal [ "Owner/Repo", "other/repo" ], result.repos
     assert_empty gh.calls
   end
 
@@ -76,10 +76,41 @@ class HiveDigestMergedPrRepoResolverTest < Minitest::Test
       logger: nil
     )
 
-    result = resolver.resolve
+    error = assert_raises(Hive::ConfigError) { resolver.resolve }
 
-    assert_empty result.repos
-    assert_equal 1, result.warnings.size
-    assert_match(/dropping project <malformed>/, result.warnings.first)
+    assert_match(/no repositories resolved/, error.message)
+    assert_match(/register.*project|--repo/, error.message)
+    assert_equal 1, resolver.warnings.size
+    assert_match(/dropping project <malformed>/, resolver.warnings.first)
+  end
+
+  def test_empty_registry_fails_closed_with_scope_guidance
+    resolver = Hive::Digest::MergedPr::RepoResolver.new(registry: -> { [] }, logger: nil)
+
+    error = assert_raises(Hive::ConfigError) { resolver.resolve }
+
+    assert_match(/no repositories resolved/, error.message)
+    assert_match(/register.*project/, error.message)
+    assert_match(/--repo/, error.message)
+  end
+
+  def test_all_failed_registry_lookups_preserve_warnings_then_fail_closed
+    projects = [
+      { "name" => "one", "path" => "/tmp/one" },
+      { "name" => "two", "path" => "/tmp/two" }
+    ]
+    gh = FakeGh.new([], {
+      "/tmp/one" => Hive::GhError.new("no remote"),
+      "/tmp/two" => Hive::GhError.new("not a repository")
+    })
+    resolver = Hive::Digest::MergedPr::RepoResolver.new(
+      registry: -> { projects }, gh: gh, logger: nil
+    )
+
+    assert_raises(Hive::ConfigError) { resolver.resolve }
+
+    assert_equal 2, resolver.warnings.size
+    assert_match(/dropping project one/, resolver.warnings.first)
+    assert_match(/dropping project two/, resolver.warnings.last)
   end
 end

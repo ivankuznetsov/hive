@@ -43,7 +43,14 @@ module Hive
           rescue StandardError => e
             warn("merged-pr digest: dropping project #{entry_name(entry)} during repo resolution: #{e.message}")
           end
-          Resolution.new(repos: dedup(slugs.compact), warnings: warnings)
+          resolved = dedup(slugs.compact)
+          if resolved.empty?
+            raise Hive::ConfigError,
+                  "hive digest: no repositories resolved from registered projects; " \
+                  "register a project with hive init or supply --repo owner/name"
+          end
+
+          Resolution.new(repos: resolved, warnings: warnings)
         end
 
         private

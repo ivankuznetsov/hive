@@ -73,7 +73,7 @@ class HiveDigestMergedPrRunTest < Minitest::Test
   end
 
   def test_default_date_uses_previous_local_day
-    resolver = FakeResolver.new(Hive::Digest::MergedPr::Resolution.new(repos: [], warnings: []), [])
+    resolver = FakeResolver.new(Hive::Digest::MergedPr::Resolution.new(repos: [ "owner/repo" ], warnings: []), [])
     collector = FakeCollector.new([], [], [])
     sender = FakeSender.new([], [], nil)
 
@@ -87,6 +87,32 @@ class HiveDigestMergedPrRunTest < Minitest::Test
     )
 
     assert_equal Date.new(2026, 6, 13), result.date
+  end
+
+  def test_zero_automatic_repo_scope_stops_before_collection_or_delivery
+    resolver = Object.new
+    resolver.define_singleton_method(:resolve) do |repos:|
+      raise Hive::ConfigError,
+            "hive digest: no repositories resolved from registered projects; supply --repo"
+    end
+    collector = FakeCollector.new([], [], [])
+    sender = FakeSender.new([], [], 4242)
+
+    error = assert_raises(Hive::ConfigError) do
+      Hive::Digest::MergedPr.run(
+        date: Date.new(2026, 6, 13),
+        dry_run: true,
+        cfg: {},
+        resolver: resolver,
+        collector: collector,
+        sender: sender
+      )
+    end
+
+    assert_match(/no repositories resolved/, error.message)
+    assert_empty collector.calls
+    assert_empty sender.preflight_calls
+    assert_empty sender.deliveries
   end
 
   private

@@ -518,7 +518,7 @@ module Hive
                       profile: nil, expected_output: nil, status_mode: nil,
                       cfg: nil, permission_mode: nil, allowed_tools: nil,
                       disallowed_tools: nil, cli_flags: nil,
-                      model: nil, effort: nil, identity_arguments: nil)
+                      model: nil, effort: nil, identity_arguments: nil, runtime_policy: nil)
         profile ||= Hive::AgentProfiles.lookup(:claude)
         # Translate preflight/version-check failures (e.g. Pi missing
         # ~/.pi/agent/auth.json mid-loop) into a typed :error envelope
@@ -587,7 +587,8 @@ module Hive
           allowed_tools: allowed_tools,
           disallowed_tools: disallowed_tools,
           cli_flags: cli_flags,
-          identity_arguments: identity_arguments || []
+          identity_arguments: identity_arguments || [],
+          runtime_policy: runtime_policy
         ).run!
         record_usage(task, profile, result, started_at)
         result
@@ -611,7 +612,7 @@ module Hive
                          profile: nil, expected_output: nil, status_mode: nil,
                          permission_mode: nil, allowed_tools: nil,
                          disallowed_tools: nil, mcp_config_path: nil,
-                         strict_mcp_config: false, identity_arguments: nil)
+                         strict_mcp_config: false, identity_arguments: nil, runtime_policy: nil)
         require "hive/claude_launcher"
 
         profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
@@ -638,7 +639,8 @@ module Hive
           disallowed_tools: disallowed_tools,
           mcp_config_path: mcp_config_path,
           strict_mcp_config: strict_mcp_config,
-          identity_arguments: identity_arguments
+          identity_arguments: identity_arguments,
+          runtime_policy: runtime_policy
         )
       end
 

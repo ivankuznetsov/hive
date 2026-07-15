@@ -152,7 +152,7 @@ module Hive
                 allowed_tools: nil,
                 disallowed_tools: nil,
                 permission_mode: nil, mcp_config_path: nil,
-                strict_mcp_config: false, identity_arguments: nil)
+                strict_mcp_config: false, identity_arguments: nil, runtime_policy: nil)
       profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
       ensure_claude_profile!(profile)
       permission_mode ||= Hive::Config.claude_permission_mode(cfg)
@@ -163,7 +163,7 @@ module Hive
         require "hive/stages/base"
         # mcp_flags is only consumed on this headless branch — the tmux path
         # recomputes them inside wrapper_command — so compute it here.
-        headless_flags = cli_flags + mcp_cli_flags(mcp_config_path, strict_mcp_config)
+        headless_flags = cli_flags + (runtime_policy ? [] : mcp_cli_flags(mcp_config_path, strict_mcp_config))
         return Hive::Stages::Base.spawn_agent(
           task,
           prompt: prompt,
@@ -178,7 +178,9 @@ module Hive
           permission_mode: permission_mode,
           allowed_tools: allowed_tools,
           disallowed_tools: disallowed_tools,
-          cli_flags: headless_flags
+          cli_flags: headless_flags,
+          identity_arguments: identity_arguments,
+          runtime_policy: runtime_policy
         )
       end
 
@@ -196,6 +198,7 @@ module Hive
         permission_mode: permission_mode,
         mcp_config_path: mcp_config_path,
         strict_mcp_config: strict_mcp_config,
+        runtime_policy: runtime_policy,
         cli_flags: cli_flags
       ) do |handle|
         result = handle.send_and_wait!(
@@ -213,7 +216,7 @@ module Hive
                             profile: nil, allowed_tools: DEFAULT_ALLOWED_TOOLS,
                             disallowed_tools: nil,
                             permission_mode: nil, mcp_config_path: nil,
-                            strict_mcp_config: false, cli_flags: nil)
+                            strict_mcp_config: false, cli_flags: nil, runtime_policy: nil)
       profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
       ensure_claude_profile!(profile)
       permission_mode ||= Hive::Config.claude_permission_mode(cfg)
@@ -249,7 +252,8 @@ module Hive
           permission_mode: permission_mode,
           cli_flags: cli_flags || (cfg ? Hive::Config.claude_cli_flags(cfg) : []),
           mcp_config_path: mcp_config_path,
-          strict_mcp_config: strict_mcp_config
+          strict_mcp_config: strict_mcp_config,
+          runtime_policy: runtime_policy
         )
         # (Re)establish the shared claude session. Reused as the handle's
         # `reestablish` closure so a reviewer that finds the session dead
@@ -485,7 +489,14 @@ module Hive
     def wrapper_command(cwd:, add_dirs:, profile:, permission_mode:,
                         allowed_tools: DEFAULT_ALLOWED_TOOLS,
                         disallowed_tools: nil, cli_flags: [],
-                        mcp_config_path: nil, strict_mcp_config: false)
+                        mcp_config_path: nil, strict_mcp_config: false,
+                        runtime_policy: nil)
+      if runtime_policy
+        add_dirs = runtime_policy.directories
+        permission_mode = runtime_policy.permission_mode
+        allowed_tools = runtime_policy.allowed_tools
+        disallowed_tools = runtime_policy.disallowed_tools
+      end
       command = [
         "bash",
         File.expand_path("scripts/interactive_claude_wrapper.sh", __dir__),
@@ -497,7 +508,11 @@ module Hive
       # pipeline run inherits the operator's interactive default (often
       # their most expensive model).
       command.concat(Array(cli_flags))
-      command.concat(mcp_cli_flags(mcp_config_path, strict_mcp_config))
+      if runtime_policy
+        command.concat(runtime_policy.cli_flags)
+      else
+        command.concat(mcp_cli_flags(mcp_config_path, strict_mcp_config))
+      end
       allowed = Hive::PermissionScope.tool_csv(allowed_tools)
       disallowed = Hive::PermissionScope.tool_csv(disallowed_tools)
       command.concat([ "--allowedTools", allowed ]) if allowed

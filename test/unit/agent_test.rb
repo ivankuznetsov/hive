@@ -6,6 +6,7 @@ require "hive/config"
 require "hive/task"
 require "hive/agent"
 require "hive/agent_limit"
+require "hive/workflow_package/runtime_policy"
 
 class AgentTest < Minitest::Test
   include HiveTestHelper
@@ -68,6 +69,34 @@ class AgentTest < Minitest::Test
       timeout_sec: 8, status_mode: :output_file_exists,
       expected_output: output
     ).run!
+  end
+
+  def test_managed_runtime_policy_controls_headless_argv_and_child_environment
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      policy = Hive::WorkflowPackage::RuntimePolicy.compile(
+        {
+          "tools" => %w[Read Bash], "deny" => [ "Write" ], "directories" => [],
+          "commands" => [ "git status" ], "domains" => [], "credentials" => []
+        },
+        task_folder: task.folder,
+        profile: Hive::AgentProfiles.lookup(:claude),
+        policy_dir: File.join(dir, "policy")
+      )
+      agent = Hive::Agent.new(
+        task: task, prompt: "test", max_budget_usd: 1, timeout_sec: 5,
+        runtime_policy: policy
+      )
+
+      cmd = agent.send(:build_cmd)
+      assert_equal "dontAsk", cmd[cmd.index("--permission-mode") + 1]
+      assert_equal policy.allowed_tools.join(","), cmd[cmd.index("--allowedTools") + 1]
+      assert_equal policy.settings_path, cmd[cmd.index("--settings") + 1]
+      assert_equal "", cmd[cmd.index("--setting-sources") + 1]
+      assert_equal policy.environment, agent.child_environment.reject { |key, _| key == "HIVE_SCREENOTE_BASE_URL" }
+      assert_nil agent.child_environment.fetch("HIVE_SCREENOTE_BASE_URL")
+      assert_equal policy.directories, agent.add_dirs
+    end
   end
 
   def test_writes_marker_and_log_on_success

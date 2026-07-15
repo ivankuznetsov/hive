@@ -1003,10 +1003,19 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
-  def test_gh_stub_scrubs_git_trace_env_before_allowlisted_pr_view_passthrough
+  def test_gh_stub_scrubs_git_env_and_pins_path_before_allowlisted_pr_view_passthrough
     with_tmp_git_repo do |dir|
       trace_path = File.join(dir, "gh-git-trace.log")
       marker_path = File.join(dir, "real-gh-ran")
+      poison_dir = File.join(dir, "poison-bin")
+      FileUtils.mkdir_p(poison_dir)
+      poison_marker = File.join(dir, "poison-git-ran")
+      executable_touch_binary(
+        poison_dir,
+        "git",
+        poison_marker,
+        "File.write(#{poison_marker.dump}, ENV.fetch(\"GH_TOKEN\", \"<unset>\"))"
+      )
       real_gh = File.join(dir, "real-gh")
       File.write(real_gh, <<~RUBY)
         #!#{RbConfig.ruby}
@@ -1019,7 +1028,9 @@ class BabysitterDryRunEnvTest < Minitest::Test
       env = {
         "HIVE_BABYSITTER_REAL_GH" => real_gh,
         "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "skipped.log"),
-        "GIT_TRACE" => trace_path
+        "GH_TOKEN" => "placeholder-token",
+        "GIT_TRACE" => trace_path,
+        "PATH" => [ poison_dir, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR)
       }
 
       _out, err, status = Open3.capture3(env, stub_path("gh"), "pr", "view", "42")
@@ -1028,6 +1039,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_equal "pr view 42", File.read(marker_path)
       refute_path_exists File.join(dir, "skipped.log")
       refute_path_exists trace_path
+      refute_path_exists poison_marker, "real gh resolved git through the caller-controlled PATH"
     end
   end
 

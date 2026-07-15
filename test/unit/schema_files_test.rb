@@ -2070,6 +2070,55 @@ class SchemaFilesTest < Minitest::Test
            "schema must reject error_kind values outside the closed enum"
   end
 
+  # ── hive-refactor-patrol-post-merge ───────────────────────────────────
+
+  def test_hive_refactor_patrol_post_merge_schema_and_required_keys
+    path = Hive::Schemas.schema_path("hive-refactor-patrol-post-merge")
+    assert File.exist?(path), "schema file missing: #{path}"
+
+    doc = JSON.parse(File.read(path))
+    assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
+    assert_equal "hive-refactor-patrol-post-merge", doc.dig("properties", "schema", "const")
+    assert_equal 1, doc.dig("properties", "schema_version", "const")
+    assert_equal %w[
+      schema schema_version completion_status project project_root pr_number
+      merge_sha base_sha analysis_sha changed_paths scope totals flagged_theses
+      emitted_delta started_at completed_at
+    ].sort, doc.fetch("required").sort
+  end
+
+  def test_hive_refactor_patrol_post_merge_schema_validates_success_blocked_and_failed_reports
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol-post-merge"))))
+    base = {
+      "schema" => "hive-refactor-patrol-post-merge",
+      "schema_version" => 1,
+      "project" => "hive",
+      "project_root" => "/tmp/hive",
+      "pr_number" => 656,
+      "merge_sha" => "merge",
+      "base_sha" => "base",
+      "changed_paths" => [ "lib/hive.rb" ],
+      "totals" => { "accepted" => 0, "flagged" => 0, "suppressed" => 0 },
+      "flagged_theses" => [],
+      "emitted_delta" => [],
+      "started_at" => Time.utc(2026, 7, 15, 12).iso8601,
+      "completed_at" => Time.utc(2026, 7, 15, 12, 1).iso8601
+    }
+
+    success = base.merge(
+      "completion_status" => "success",
+      "analysis_sha" => "merge",
+      "scope" => { "kind" => "path", "values" => [ "lib" ], "fallback" => false }
+    )
+    blocked = base.merge("completion_status" => "blocked", "analysis_sha" => nil, "scope" => nil, "reason" => "checkout_dirty")
+    failed = base.merge("completion_status" => "failed", "analysis_sha" => nil, "scope" => nil, "reason" => "child_failed")
+
+    { "success" => success, "blocked" => blocked, "failed" => failed }.each do |name, payload|
+      errors = schemer.validate(payload).map { |error| error["error"] }
+      assert_empty errors, "#{name} post-merge report must validate: #{errors.inspect}"
+    end
+  end
+
   # ── schema metadata identity ─────────────────────────────────────────────
 
   # Copy-pasting vN.json to vN+1.json and only changing the version const is

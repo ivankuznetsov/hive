@@ -1,0 +1,134 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-refactor-patrol-post-merge.v1.json",
+  "title": "hive refactor patrol post-merge report (v1)",
+  "description": "Canonical per-PR architecture patrol artifact stored below .hive-state/refactor_patrol/post_merge/reports/.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "completion_status",
+    "project",
+    "project_root",
+    "pr_number",
+    "merge_sha",
+    "base_sha",
+    "analysis_sha",
+    "changed_paths",
+    "scope",
+    "totals",
+    "flagged_theses",
+    "emitted_delta",
+    "started_at",
+    "completed_at"
+  ],
+  "properties": {
+    "schema": { "const": "hive-refactor-patrol-post-merge" },
+    "schema_version": { "const": 1 },
+    "completion_status": { "enum": ["success", "blocked", "failed"] },
+    "project": { "type": "string", "minLength": 1 },
+    "project_root": { "type": "string", "minLength": 1 },
+    "pr_number": { "type": "integer", "minimum": 1 },
+    "merge_sha": { "type": "string", "minLength": 1 },
+    "base_sha": { "type": "string", "minLength": 1 },
+    "analysis_sha": {
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        { "type": "null" }
+      ]
+    },
+    "changed_paths": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    },
+    "scope": {
+      "oneOf": [
+        { "$ref": "#/$defs/Scope" },
+        { "type": "null" }
+      ]
+    },
+    "totals": { "$ref": "#/$defs/Totals" },
+    "flagged_theses": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/FlaggedThesis" }
+    },
+    "emitted_delta": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/Emission" }
+    },
+    "reason": { "type": "string" },
+    "evidence": {},
+    "started_at": { "type": "string", "format": "date-time" },
+    "completed_at": { "type": "string", "format": "date-time" }
+  },
+  "$defs": {
+    "Scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "values", "fallback"],
+      "properties": {
+        "kind": { "enum": ["feature", "entrypoint", "path"] },
+        "values": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "fallback": { "type": "boolean" }
+      }
+    },
+    "Totals": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["accepted", "flagged", "suppressed"],
+      "properties": {
+        "accepted": { "type": "integer", "minimum": 0 },
+        "flagged": { "type": "integer", "minimum": 0 },
+        "suppressed": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "Emission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fingerprint", "bucket", "content_digest"],
+      "properties": {
+        "fingerprint": { "type": "string", "minLength": 1 },
+        "bucket": { "enum": ["accepted", "flagged", "suppressed"] },
+        "content_digest": { "type": "string", "minLength": 1 },
+        "thesis_id": { "type": "string", "minLength": 1 }
+      }
+    },
+    "FlaggedThesis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "fingerprint",
+        "content_digest",
+        "problem",
+        "proposed_refactor",
+        "evidence",
+        "feature_boundary",
+        "risk",
+        "admissibility_reason",
+        "expected_leverage",
+        "required_validation"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "fingerprint": { "type": "string", "minLength": 1 },
+        "content_digest": { "type": "string", "minLength": 1 },
+        "problem": { "type": "string" },
+        "proposed_refactor": { "type": "string" },
+        "evidence": { "type": "array", "items": { "type": "object" } },
+        "feature_boundary": { "type": "object" },
+        "risk": { "type": "object" },
+        "admissibility_reason": { "type": "string" },
+        "expected_leverage": { "type": "object" },
+        "required_validation": { "type": "object" }
+      }
+    }
+  }
+}

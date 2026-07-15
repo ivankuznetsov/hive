@@ -99,13 +99,14 @@ module Hive
       # divider. PRs is always known from the collected items; Lines/Commits
       # come from a per-PR `gh` lookup, so they appear only when at least one
       # PR's stats were fetched — the digest never fails for want of them.
-      def render_footer(totals)
-        return nil unless totals
+      def render_footer(totals, pr_count: nil)
+        return nil unless totals || !pr_count.nil?
 
-        measured = totals.measured_prs.to_i.positive?
+        measured = totals && totals.measured_prs.to_i.positive?
         parts = []
         parts << "Lines +#{totals.additions.to_i}/-#{totals.deletions.to_i}" if measured
-        parts << "PRs #{totals.prs.to_i}"
+        known_prs = pr_count.nil? ? totals&.prs : pr_count
+        parts << "PRs #{known_prs.to_i}" unless known_prs.nil?
         parts << "Commits #{totals.commits.to_i}" if measured
         return nil if parts.empty?
 

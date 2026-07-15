@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/digest/merged_pr"
+require "hive/digest/stats"
 
 class HiveDigestMergedPrRunTest < Minitest::Test
   PR = Hive::Digest::MergedPr::PullRequest
@@ -29,10 +30,18 @@ class HiveDigestMergedPrRunTest < Minitest::Test
     end
   end
 
+  FakeStats = Struct.new(:totals, :calls) do
+    def for_items(items)
+      calls << items
+      totals
+    end
+  end
+
   def test_dry_run_resolves_collects_and_returns_message_without_preflight
     resolver = FakeResolver.new(Hive::Digest::MergedPr::Resolution.new(repos: [ "owner/repo" ], warnings: []), [])
     collector = FakeCollector.new([ pr ], [], [])
     sender = FakeSender.new([], [], 4242)
+    stats = FakeStats.new(totals(prs: 1, measured_prs: 1, additions: 7, deletions: 2, commits: 1), [])
 
     result = Hive::Digest::MergedPr.run(
       date: Date.new(2026, 6, 13),
@@ -41,6 +50,7 @@ class HiveDigestMergedPrRunTest < Minitest::Test
       cfg: {},
       resolver: resolver,
       collector: collector,
+      stats: stats,
       sender: sender
     )
 
@@ -49,7 +59,9 @@ class HiveDigestMergedPrRunTest < Minitest::Test
     assert_empty sender.preflight_calls
     assert_equal true, sender.deliveries.first.fetch(:dry_run)
     assert_equal 1, result.count
-    assert_includes result.message, "Total: 1 PR"
+    assert_equal [ [ pr ] ], stats.calls
+    assert_includes result.message, "Lines \\+7/\\-2 · PRs 1 · Commits 1"
+    refute_includes result.message, "Total:"
   end
 
   def test_real_run_preflights_and_sets_chat_id
@@ -70,6 +82,7 @@ class HiveDigestMergedPrRunTest < Minitest::Test
     assert_equal false, sender.deliveries.first.fetch(:dry_run)
     assert_equal 4242, result.delivery.chat_id
     assert_equal 0, result.count
+    assert_includes result.message, "PRs 0"
   end
 
   def test_default_date_uses_previous_local_day
@@ -115,14 +128,100 @@ class HiveDigestMergedPrRunTest < Minitest::Test
     assert_empty sender.deliveries
   end
 
+  def test_one_failed_stats_fetch_aggregates_measured_prs_and_still_delivers
+    prs = 5.times.map { |index| pr(number: index + 1) }
+    stats = Hive::Digest::Stats.new(
+      fetch: lambda { |url|
+        raise Hive::GhError, "gone" if url.end_with?("/3")
+
+        { additions: 10, deletions: 2, commits: 3 }
+      },
+      logger: nil
+    )
+    sender = FakeSender.new([], [], nil)
+
+    result = run_with(prs: prs, stats: stats, sender: sender)
+
+    assert_equal 5, result.count
+    assert_equal prs, result.prs
+    assert_includes result.message, "Lines \\+40/\\-8 · PRs 5 · Commits 12"
+    refute_match(/partial|measured|~/, result.message)
+    assert_equal 1, sender.deliveries.size
+  end
+
+  def test_stats_blackout_logs_once_and_delivers_pr_count_only
+    logger = CapturingLogger.new
+    stats = Hive::Digest::Stats.new(
+      fetch: ->(_url) { raise Hive::GhError, "gh unavailable" }, logger: logger
+    )
+    sender = FakeSender.new([], [], nil)
+
+    result = run_with(prs: [ pr(number: 1), pr(number: 2) ], stats: stats, sender: sender)
+
+    assert_includes result.message, "──────────\nPRs 2"
+    refute_includes result.message, "Lines "
+    refute_includes result.message, "Commits "
+    assert_equal 1, logger.errors.grep(/measured 0\/2 PRs/).size
+    assert_equal 1, sender.deliveries.size
+  end
+
+  def test_empty_day_skips_stats_fetch_and_still_sends_prs_zero
+    stats = Hive::Digest::Stats.new(fetch: ->(_url) { flunk "must not fetch" }, logger: nil)
+    sender = FakeSender.new([], [], 4242)
+
+    result = run_with(prs: [], stats: stats, sender: sender, dry_run: false)
+
+    assert_equal 0, result.count
+    assert_includes result.message, "──────────\nPRs 0"
+    assert_equal [ true ], sender.preflight_calls
+    assert_equal 1, sender.deliveries.size
+  end
+
   private
 
-  def pr
+  class CapturingLogger
+    attr_reader :errors
+
+    def initialize
+      @errors = []
+    end
+
+    def error(message) = @errors << message
+    def warn(_message); end
+  end
+
+  def run_with(prs:, stats:, sender:, dry_run: true)
+    resolver = FakeResolver.new(
+      Hive::Digest::MergedPr::Resolution.new(repos: [ "owner/repo" ], warnings: []), []
+    )
+    collector = FakeCollector.new(prs, [], [])
+    Hive::Digest::MergedPr.run(
+      date: Date.new(2026, 6, 13),
+      dry_run: dry_run,
+      cfg: {},
+      resolver: resolver,
+      collector: collector,
+      stats: stats,
+      sender: sender
+    )
+  end
+
+  def totals(prs:, measured_prs:, additions: 0, deletions: 0, commits: 0)
+    Hive::Digest::Totals.new(
+      prs: prs,
+      measured_prs: measured_prs,
+      additions: additions,
+      deletions: deletions,
+      commits: commits
+    )
+  end
+
+  def pr(number: 1)
     PR.new(
       repo: "owner/repo",
-      number: 1,
+      number: number,
       title: "Title",
-      url: "https://github.com/owner/repo/pull/1",
+      url: "https://github.com/owner/repo/pull/#{number}",
       mergedAt: "2026-06-13T12:00:00Z",
       author: "alice",
       authorIsBot: false,

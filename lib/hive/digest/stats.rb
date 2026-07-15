@@ -37,7 +37,7 @@ module Hive
         @logger = logger
       end
 
-      # Sum stats across every shipped item that has a PR URL. A per-PR fetch
+      # Sum stats across every PR-bearing item that has a PR URL. A per-PR fetch
       # failure is logged and skipped (it still counts toward `prs`, just not
       # toward the measured sums) so one gone/private PR never fails the digest.
       def for_items(items)

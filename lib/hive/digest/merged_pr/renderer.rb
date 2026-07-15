@@ -16,13 +16,11 @@ module Hive
 
         module_function
 
-        def render(prs, date:)
+        def render(prs, date:, totals:)
           rows = Array(prs)
-          blocks = [
-            "Merged PR digest — #{escape(Window.parse_date(date).iso8601)}",
-            "Total: #{rows.size} #{rows.size == 1 ? 'PR' : 'PRs'}"
-          ]
+          blocks = [ "Merged PR digest — #{escape(Window.parse_date(date).iso8601)}" ]
           blocks.concat(grouped_sections(rows))
+          blocks << Hive::Digest::Renderer.render_footer(totals, pr_count: rows.size)
           blocks.join("\n\n")
         end
 

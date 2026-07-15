@@ -1,6 +1,7 @@
 require "test_helper"
 require "hive/digest/stats"
 require "hive/digest/shipped_item"
+require "hive/digest/merged_pr/record"
 
 class HiveDigestStatsTest < Minitest::Test
   def test_sums_lines_and_commits_and_counts_prs
@@ -93,6 +94,30 @@ class HiveDigestStatsTest < Minitest::Test
     assert_equal 0, totals.prs
     assert_equal 0, totals.measured_prs
     assert_equal 0, totals.additions
+  end
+
+  def test_merged_pr_record_exposes_its_url_to_the_shared_stats_contract
+    record = Hive::Digest::MergedPr::PullRequest.new(
+      repo: "owner/repo",
+      number: 1,
+      title: "Title",
+      url: "https://github.com/owner/repo/pull/1",
+      mergedAt: "2026-06-13T12:00:00Z",
+      author: "alice",
+      authorIsBot: false,
+      headRefName: "feature",
+      isCrossRepository: false,
+      hive_slug: nil,
+      hive_stage: nil
+    )
+
+    totals = Hive::Digest::Stats.new(
+      fetch: ->(_url) { { additions: 3, deletions: 1, commits: 2 } }, logger: nil
+    ).for_items([ record ])
+
+    assert_equal 1, totals.prs
+    assert_equal 1, totals.measured_prs
+    assert_equal 3, totals.additions
   end
 
   def test_totals_guard_rejects_measured_exceeding_prs

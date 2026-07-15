@@ -14,6 +14,11 @@ module Hive
         :hive_slug,
         :hive_stage
       ) do
+        # Hive::Digest::Stats consumes any PR-bearing record through pr_url.
+        # Keep the merged JSON field named `url` while satisfying that shared
+        # aggregation contract without a parallel stats implementation.
+        def pr_url = url
+
         def to_h
           {
             "repo" => repo,

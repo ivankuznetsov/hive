@@ -89,6 +89,14 @@ class HiveDigestRendererTest < Minitest::Test
     refute_includes message, "Commits "
   end
 
+  def test_footer_accepts_an_authoritative_pr_count_without_changing_measurements
+    totals = Hive::Digest::Totals.new(prs: 4, commits: 8, additions: 40, deletions: 4, measured_prs: 4)
+
+    footer = Hive::Digest::Renderer.render_footer(totals, pr_count: 5)
+
+    assert_includes footer, "Lines \\+40/\\-4 · PRs 5 · Commits 8"
+  end
+
   def test_empty_input_renders_nothing_shipped_message
     assert_equal "Nothing shipped today 🌙", Hive::Digest::Renderer.render({}, date: DATE)
     assert_equal "Nothing shipped today 🌙", Hive::Digest::Renderer.empty

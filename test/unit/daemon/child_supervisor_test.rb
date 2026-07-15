@@ -118,6 +118,28 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
     end
   end
 
+  def test_spawn_preserves_an_explicit_local_hive_executable
+    with_tmp_dir do |dir|
+      executable = File.join(dir, "hive")
+      File.write(executable, <<~RUBY)
+        #!/usr/bin/env ruby
+        require "json"
+        puts({ source: "registered-trunk" }.to_json)
+      RUBY
+      FileUtils.chmod(0o755, executable)
+      sup = make(log_dir: dir)
+
+      sup.spawn(
+        command_string: "#{Shellwords.escape(executable)} refactor-patrol p1 --json",
+        project: "p1", slug: "architecture", stage: "refactor-patrol-post-merge"
+      )
+      completed = wait_for_completion(sup, max_attempts: 50)
+
+      assert_equal 0, completed.first.exit_code
+      assert_equal({ "source" => "registered-trunk" }, completed.first.json_envelope)
+    end
+  end
+
   def test_spawn_tmpdir_log_fallback_loads_its_own_dependency
     script = <<~RUBY
       require "hive/daemon/child_supervisor"

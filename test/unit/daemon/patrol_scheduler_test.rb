@@ -21,6 +21,47 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
     def rev_parse(_project_root, _ref)
       @sha
     end
+
+    def ancestor?(_project_root, _ancestor, _descendant)
+      true
+    end
+  end
+
+  FakeArchitectureSnapshot = Struct.new(:root_realpath, :branch, :default_branch, :head_sha, :released, keyword_init: true) do
+    def release
+      self.released = true
+    end
+  end
+
+  class FakeArchitectureGuard
+    attr_reader :snapshots
+
+    def initialize(root, head: "head")
+      @root = root
+      @head = head
+      @snapshots = []
+    end
+
+    def acquire!
+      snapshot = FakeArchitectureSnapshot.new(
+        root_realpath: File.realpath(@root), branch: "main", default_branch: "main",
+        head_sha: @head, released: false
+      )
+      @snapshots << snapshot
+      snapshot
+    end
+
+    def assert_unchanged!(_snapshot)
+      true
+    end
+  end
+
+  CapabilityResult = Struct.new(:ok?, :reason, :evidence, :executable)
+  CatalogResult = Struct.new(:merges, :diagnostics)
+  ScopeResult = Struct.new(:runnable?, :reason, :evidence, :kind, :values, :fallback, :arguments) do
+    def to_h
+      { "kind" => kind, "values" => values, "fallback" => fallback }
+    end
   end
 
   class CountingGit < FakeGit
@@ -278,5 +319,151 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
 
       assert_equal 1, sched.tick(now: T0).size
     end
+  end
+
+  def test_due_patrol_seeds_then_drains_one_attributed_architecture_child
+    with_tmp_dir do |dir|
+      entry = project_entry(dir)
+      cfg = enabled_cfg("refactor_patrol" => { "enabled" => true })
+      write_state(dir, "last_scanned_sha" => "base")
+      post_merge = Hive::RefactorPatrol::PostMergeStateStore.new(dir, project: "p1")
+      post_merge.initialize_at!(head_sha: "base", now: T0)
+      guard = FakeArchitectureGuard.new(dir)
+      catalog = CatalogResult.new(
+        [ { "pr_number" => 10, "merge_sha" => "head", "base_sha" => "base",
+            "subject" => "Change (#10)", "changed_paths" => [ "lib/a.rb" ] } ],
+        []
+      )
+      scope = ScopeResult.new(true, nil, {}, "path", [ "lib" ], false,
+                              [ "--changed-since", "base", "--path", "lib" ])
+      sched = architecture_scheduler(entry, cfg, post_merge: post_merge, guard: guard,
+                                                  catalog: catalog, scope: scope)
+
+      first_tick = sched.tick(now: T0)
+      assert_equal [ "hive patrol p1 --json" ], first_tick.map { |item| item.fetch(:command) }
+      assert_equal "head", post_merge.state.fetch("active_batch_head")
+
+      sched.complete(project: "p1", exit_code: 0, stage: "patrol", slug: "patrol", now: T0 + 1)
+      second_tick = sched.tick(now: T0 + 2)
+      assert_equal 1, second_tick.size
+      architecture = second_tick.first
+      assert_equal "refactor-patrol-post-merge", architecture.fetch(:stage)
+      assert_equal "refactor-patrol-pr-10-head", architecture.fetch(:slug)
+      assert_equal "/tmp/hive-local refactor-patrol p1 --json --changed-since base --path lib",
+                   architecture.fetch(:command)
+      assert_equal :architecture, architecture.fetch(:patrol_product)
+    end
+  end
+
+  def test_invalid_architecture_completion_leaves_pr_owed_and_releases_snapshot
+    with_tmp_dir do |dir|
+      entry = project_entry(dir)
+      cfg = enabled_cfg(
+        "patrol" => { "enabled" => true, "trigger" => "new_commits" },
+        "refactor_patrol" => { "enabled" => true }
+      )
+      write_state(dir, "last_scanned_sha" => "head")
+      post_merge = Hive::RefactorPatrol::PostMergeStateStore.new(dir, project: "p1")
+      post_merge.initialize_at!(head_sha: "base", now: T0)
+      post_merge.open_batch!(
+        head_sha: "head",
+        merges: [ { "pr_number" => 10, "merge_sha" => "head", "base_sha" => "base",
+                    "subject" => "Change (#10)", "changed_paths" => [ "lib/a.rb" ] } ],
+        now: T0
+      )
+      guard = FakeArchitectureGuard.new(dir)
+      sched = architecture_scheduler(
+        entry,
+        cfg,
+        post_merge: post_merge,
+        guard: guard,
+        catalog: CatalogResult.new([], []),
+        scope: ScopeResult.new(true, nil, {}, "path", [ "lib" ], true,
+                               [ "--changed-since", "base", "--path", "lib" ])
+      )
+
+      dispatch = sched.tick(now: T0 + 1).fetch(0)
+      sched.complete(
+        project: "p1", exit_code: 0, stage: dispatch.fetch(:stage), slug: dispatch.fetch(:slug),
+        envelope: { "schema" => "wrong", "ok" => true }, now: T0 + 2
+      )
+
+      assert_equal [ post_merge.identity_for(10, "head") ],
+                   post_merge.owed_merges.map { |record| record.fetch("identity") }
+      assert guard.snapshots.last.released
+      assert_equal "invalid_envelope", sched.last_events.last.fetch(:reason)
+    end
+  end
+
+  def test_capability_block_does_not_replace_ordinary_patrol
+    with_tmp_dir do |dir|
+      entry = project_entry(dir)
+      cfg = enabled_cfg("refactor_patrol" => { "enabled" => true })
+      write_state(dir, "last_scanned_sha" => "base")
+      post_merge = Hive::RefactorPatrol::PostMergeStateStore.new(dir, project: "p1")
+      post_merge.initialize_at!(head_sha: "base", now: T0)
+      guard = FakeArchitectureGuard.new(dir)
+      sched = architecture_scheduler(
+        entry,
+        cfg,
+        post_merge: post_merge,
+        guard: guard,
+        catalog: CatalogResult.new([], []),
+        scope: nil,
+        capability: CapabilityResult.new(false, "capability_missing", { "message" => "missing" }, nil)
+      )
+
+      assert_equal [ "hive patrol p1 --json" ], sched.tick(now: T0).map { |item| item.fetch(:command) }
+      assert_equal "capability_missing", sched.last_events.last.fetch(:reason)
+      assert guard.snapshots.last.released
+    end
+  end
+
+  def test_dry_run_records_attributed_command_without_mutating_post_merge_state
+    with_tmp_dir do |dir|
+      entry = project_entry(dir)
+      cfg = enabled_cfg("refactor_patrol" => { "enabled" => true })
+      write_state(dir, "last_scanned_sha" => "base")
+      post_merge = Hive::RefactorPatrol::PostMergeStateStore.new(dir, project: "p1")
+      post_merge.initialize_at!(head_sha: "base", now: T0)
+      before = File.binread(File.join(post_merge.root, "state.json"))
+      guard = FakeArchitectureGuard.new(dir)
+      catalog = CatalogResult.new(
+        [ { "pr_number" => 10, "merge_sha" => "head", "base_sha" => "base",
+            "subject" => "Change (#10)", "changed_paths" => [ "lib/a.rb" ] } ],
+        []
+      )
+      scope = ScopeResult.new(true, nil, {}, "path", [ "lib" ], true,
+                              [ "--changed-since", "base", "--path", "lib" ])
+      sched = architecture_scheduler(entry, cfg, post_merge: post_merge, guard: guard,
+                                                  catalog: catalog, scope: scope, dry_run: true)
+
+      assert_equal "hive patrol p1 --json", sched.tick(now: T0).first.fetch(:command)
+      sched.complete(project: "p1", exit_code: 0, stage: "patrol", now: T0 + 1)
+      architecture = sched.tick(now: T0 + 2).first
+
+      assert_equal "refactor-patrol-post-merge", architecture.fetch(:stage)
+      assert_equal before, File.binread(File.join(post_merge.root, "state.json"))
+      refute File.exist?(File.join(post_merge.root, "emissions.json"))
+      assert_empty Dir.glob(File.join(post_merge.root, "reports", "*.json"))
+    end
+  end
+
+  private
+
+  def architecture_scheduler(entry, cfg, post_merge:, guard:, catalog:, scope:, capability: nil, dry_run: false)
+    capability ||= CapabilityResult.new(true, nil, {}, "/tmp/hive-local")
+    Hive::Daemon::PatrolScheduler.new(
+      registry: -> { [ entry ] },
+      config_loader: ->(_path) { cfg },
+      git: FakeGit.new(sha: "head"),
+      architecture_store_factory: ->(_entry) { post_merge },
+      checkout_guard_factory: ->(_entry, _config) { guard },
+      capability_probe_factory: ->(_entry, _config) { Struct.new(:result) { def call(_root) = result }.new(capability) },
+      merge_catalog_factory: ->(_entry) { Struct.new(:result) { def discover(**) = result }.new(catalog) },
+      scope_factory: ->(_entry, _config) { Struct.new(:result) { def select(**) = result }.new(scope) },
+      fingerprint_loader: ->(_root) { {} },
+      dry_run: dry_run
+    )
   end
 end

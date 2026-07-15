@@ -123,12 +123,16 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
   class FakePatrolScheduler
     attr_accessor :next_dispatches
-    attr_reader :completed, :cancelled
+    attr_reader :completed, :cancelled, :completion_details, :cancel_details
+    attr_accessor :last_events
 
     def initialize
       @next_dispatches = []
       @completed = []
       @cancelled = []
+      @completion_details = []
+      @cancel_details = []
+      @last_events = []
     end
 
     def tick(now:)
@@ -137,12 +141,15 @@ class HiveDaemonDispatcherTest < Minitest::Test
       out
     end
 
-    def complete(project:, exit_code:, now:)
+    def complete(project:, exit_code:, now:, stage: "patrol", slug: nil, envelope: nil)
       @completed << { project: project, exit_code: exit_code, now: now }
+      @completion_details << { project: project, exit_code: exit_code, now: now,
+                               stage: stage, slug: slug, envelope: envelope }
     end
 
-    def cancel(project:)
+    def cancel(project:, stage: nil, slug: nil, reason: nil, now: nil)
       @cancelled << project
+      @cancel_details << { project: project, stage: stage, slug: slug, reason: reason, now: now }
     end
   end
 
@@ -1407,6 +1414,80 @@ class HiveDaemonDispatcherTest < Minitest::Test
     dispatcher.tick(now: T0 + 10)
 
     assert_equal [ { project: "p1", exit_code: 0, now: T0 + 10 } ], patrol.completed
+  end
+
+  def test_architecture_patrol_uses_shared_capacity_and_routes_envelope_completion
+    dispatcher, sup, ctrl, _logger, _mw, patrol = make_dispatcher(
+      rows: [], with_patrol_scheduler: true
+    )
+    dispatch = {
+      project: "p1", slug: "refactor-patrol-pr-10-abc", stage: "refactor-patrol-post-merge",
+      command: "/tmp/hive refactor-patrol p1 --json --changed-since base --path lib",
+      state_file_mtime: nil, state_file_path: nil, hive_state_path: nil,
+      patrol_product: :architecture
+    }
+    patrol.next_dispatches = [ dispatch ]
+
+    dispatcher.tick(now: T0)
+
+    assert_equal 1, sup.spawned.size
+    in_flight = ctrl.instance_variable_get(:@running).values.first
+    assert_equal :patrol_scan, in_flight.fetch(:kind)
+    envelope = { "schema" => "hive-refactor-patrol", "ok" => true, "project" => "p1" }
+    sup.next_exits = [
+      ChildExit.new(
+        pid: sup.spawned.first.fetch(:pid), exit_code: 0, project: "p1",
+        slug: dispatch.fetch(:slug), stage: dispatch.fetch(:stage), command: dispatch.fetch(:command),
+        state_file_path: nil, started_at: T0, finished_at: T0 + 1, json_envelope: envelope
+      )
+    ]
+
+    dispatcher.tick(now: T0 + 2)
+
+    detail = patrol.completion_details.last
+    assert_equal "refactor-patrol-post-merge", detail.fetch(:stage)
+    assert_equal dispatch.fetch(:slug), detail.fetch(:slug)
+    assert_equal envelope, detail.fetch(:envelope)
+  end
+
+  def test_architecture_capacity_block_cancels_only_attributed_reservation
+    dispatcher, sup, ctrl, _logger, _mw, patrol = make_dispatcher(
+      rows: [], with_patrol_scheduler: true
+    )
+    ctrl.record_dispatch(pid: 999, project: "p1", slug: "patrol", stage: "patrol",
+                         command: "hive patrol p1 --json", started_at: T0,
+                         state_file_mtime: nil, kind: :patrol_scan)
+    patrol.next_dispatches = [ {
+      project: "p1", slug: "refactor-patrol-pr-10-abc", stage: "refactor-patrol-post-merge",
+      command: "/tmp/hive refactor-patrol p1 --json --changed-since base --path lib",
+      state_file_mtime: nil, state_file_path: nil, hive_state_path: nil,
+      patrol_product: :architecture
+    } ]
+
+    dispatcher.tick(now: T0)
+
+    assert_empty sup.spawned
+    cancellation = patrol.cancel_details.last
+    assert_equal "refactor-patrol-post-merge", cancellation.fetch(:stage)
+    assert_equal "refactor-patrol-pr-10-abc", cancellation.fetch(:slug)
+    assert_equal "patrol_scan_cap", cancellation.fetch(:reason)
+  end
+
+  def test_patrol_scheduler_structured_block_events_reach_daemon_log
+    dispatcher, _sup, _ctrl, logger, _mw, patrol = make_dispatcher(
+      rows: [], with_patrol_scheduler: true
+    )
+    patrol.last_events = [ {
+      type: :blocked, project: "p1", reason: "capability_missing",
+      evidence: { "message" => "missing" }, identity: "pr-10-abc"
+    } ]
+
+    dispatcher.tick(now: T0)
+
+    event = logger.events.find { |name, attrs| name == :blocked && attrs[:reason] == "capability_missing" }
+    refute_nil event
+    assert_equal "architecture_patrol", event.last.fetch(:action)
+    assert_equal "pr-10-abc", event.last.fetch(:identity)
   end
 
   def test_edit_action_within_debounce_after_baseline_logs_debouncing

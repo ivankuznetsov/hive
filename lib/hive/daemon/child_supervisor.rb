@@ -103,9 +103,10 @@ module Hive
           # An unexpected first token is a dispatcher classifier bug.
           raise ArgumentError, "ChildSupervisor refuses non-hive command: #{command_string.inspect}"
         end
-        # Replace literal "hive" with the configured binary so tests
-        # can swap in a fixture path via HIVE_BIN.
-        argv[0] = @hive_bin
+        # Replace only the PATH-resolved literal. An explicit /path/to/hive is
+        # a capability-bound executable (post-merge architecture patrol) and
+        # must remain exact rather than being silently rewritten to HIVE_BIN.
+        argv[0] = @hive_bin if argv[0] == "hive"
 
         timeout_sec = timeout_for_verb(argv_verb(argv))
 

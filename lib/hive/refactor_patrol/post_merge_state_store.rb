@@ -60,6 +60,14 @@ module Hive
         reconcile!(doc)
       end
 
+      def initialized?
+        File.file?(state_path)
+      end
+
+      def active_batch?
+        initialized? && !state["active_batch_head"].nil?
+      end
+
       def load!(head_sha:, ancestor_check:)
         doc = state
         reachable = ancestor_check.call(doc.fetch("checkpoint_sha"), required_string(head_sha, "head_sha"))
@@ -140,6 +148,54 @@ module Hive
 
       def record_blocked!(identity, reason:, evidence: nil, now: Time.now)
         finish_attempt!(identity, status: "blocked", merge_status: "blocked", reason: reason, evidence: evidence, now: now)
+      end
+
+      def record_skip!(identity, reason:, evidence: nil, now: Time.now)
+        doc = state
+        record = find_merge!(doc, identity)
+        unless %w[owed blocked].include?(record.fetch("status"))
+          raise StateError, "post-merge #{identity} cannot be blocked from #{record.fetch('status')}"
+        end
+
+        record.fetch("attempts") << {
+          "number" => record.fetch("attempts").length + 1,
+          "status" => "blocked",
+          "started_at" => iso8601(now),
+          "finished_at" => iso8601(now),
+          "reason" => bounded_reason(reason),
+          "evidence" => bounded_evidence(evidence)
+        }
+        record["status"] = "blocked"
+        record["updated_at"] = iso8601(now)
+        doc["updated_at"] = iso8601(now)
+        write_json(state_path, doc)
+      end
+
+      def cancel_reservation!(identity, reason:, evidence: nil, now: Time.now)
+        finish_attempt!(identity, status: "failed", merge_status: "owed", reason: reason, evidence: evidence, now: now)
+      end
+
+      def recover_interrupted!(now: Time.now)
+        doc = state
+        changed = false
+        doc.fetch("merges").each do |record|
+          next unless record.fetch("status") == "running"
+
+          attempt = record.fetch("attempts").last
+          next unless attempt && attempt.fetch("status") == "running"
+
+          attempt["status"] = "failed"
+          attempt["finished_at"] = iso8601(now)
+          attempt["reason"] = "daemon_restarted"
+          record["status"] = "owed"
+          record["updated_at"] = iso8601(now)
+          changed = true
+        end
+        if changed
+          doc["updated_at"] = iso8601(now)
+          write_json(state_path, doc)
+        end
+        doc
       end
 
       def persist_artifacts!(identity, report:, emission_digests:)

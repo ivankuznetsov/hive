@@ -345,6 +345,7 @@ module Hive
         @patrol_scheduler&.tick(now: now)&.each do |patrol_dispatch|
           dispatch_patrol_with_gates(patrol_dispatch, now: now)
         end
+        log_patrol_scheduler_events
 
         # 4. Per-row dispatch, later pipeline stages first (see
         # dispatch_priority_order) so work nearest completion drains
@@ -617,12 +618,17 @@ module Hive
           # permanent phantom entry the digest gate never consults. The
           # `!global_digest_stage?` guard covers BOTH pseudo-projects.
           if entry.exit_code == Hive::ExitCodes::CONFIG &&
-             !global_digest_stage?(entry.stage)
+             !global_digest_stage?(entry.stage) &&
+             entry.stage != Hive::Daemon::PatrolScheduler::ARCHITECTURE_STAGE
             @controller.record_project_dropped(project: entry.project)
             @logger.event(:project_dropped, project: entry.project)
           end
-          if entry.stage == Hive::Daemon::PatrolScheduler::PATROL_STAGE
-            @patrol_scheduler&.complete(project: entry.project, exit_code: entry.exit_code, now: now)
+          if [ Hive::Daemon::PatrolScheduler::PATROL_STAGE,
+               Hive::Daemon::PatrolScheduler::ARCHITECTURE_STAGE ].include?(entry.stage)
+            @patrol_scheduler&.complete(
+              project: entry.project, exit_code: entry.exit_code, now: now,
+              stage: entry.stage, slug: entry.slug, envelope: entry.json_envelope
+            )
           end
           complete_digest_scheduler_for(entry, now: now)
         end
@@ -783,6 +789,13 @@ module Hive
           # after dispatching the digest exactly once. Same isolation as the
           # real reap path, via the shared helper.
           complete_digest_scheduler_for(entry, now: now)
+          if [ Hive::Daemon::PatrolScheduler::PATROL_STAGE,
+               Hive::Daemon::PatrolScheduler::ARCHITECTURE_STAGE ].include?(entry.stage)
+            @patrol_scheduler&.complete(
+              project: entry.project, exit_code: entry.exit_code, now: now,
+              stage: entry.stage, slug: entry.slug, envelope: entry.json_envelope
+            )
+          end
           @logger.event(:child_exited,
                         pid: entry.pid, exit_code: entry.exit_code,
                         project: entry.project, slug: entry.slug, stage: entry.stage,
@@ -1111,6 +1124,8 @@ module Hive
       def dispatch_patrol_with_gates(patrol_dispatch, now:)
         project = patrol_dispatch[:project]
         slug = patrol_dispatch[:slug] || Hive::Daemon::PatrolScheduler::PATROL_SLUG
+        architecture = patrol_dispatch[:patrol_product] == :architecture
+        action = architecture ? "architecture_patrol" : "patrol"
 
         # Every gated early-return below MUST release the scheduler's
         # pending marker. The scheduler set `@pending[project]` in `tick`
@@ -1121,18 +1136,20 @@ module Hive
         unless project_enabled?(project)
           @logger.event(:skipped, project: project, slug: slug,
                                   stage: patrol_dispatch[:stage],
-                                  action: "patrol",
+                                  action: action,
                                   reason: "project_disabled")
-          @patrol_scheduler&.cancel(project: project)
+          @patrol_scheduler&.cancel(project: project, stage: patrol_dispatch[:stage], slug: slug,
+                                             reason: "project_disabled", now: now)
           return
         end
 
         if @legacy_layout_projects.key?(project)
           @logger.event(:skipped, project: project, slug: slug,
                                   stage: patrol_dispatch[:stage],
-                                  action: "patrol",
+                                  action: action,
                                   reason: "legacy_layout_detected")
-          @patrol_scheduler&.cancel(project: project)
+          @patrol_scheduler&.cancel(project: project, stage: patrol_dispatch[:stage], slug: slug,
+                                             reason: "legacy_layout_detected", now: now)
           return
         end
 
@@ -1143,9 +1160,10 @@ module Hive
         unless gate == :ok
           @logger.event(:blocked, project: project, slug: slug,
                                   stage: patrol_dispatch[:stage],
-                                  action: "patrol",
+                                  action: action,
                                   reason: gate.to_s)
-          @patrol_scheduler&.cancel(project: project)
+          @patrol_scheduler&.cancel(project: project, stage: patrol_dispatch[:stage], slug: slug,
+                                             reason: gate.to_s, now: now)
           return
         end
 
@@ -1155,16 +1173,43 @@ module Hive
           state_file_mtime: patrol_dispatch[:state_file_mtime],
           state_file_path: patrol_dispatch[:state_file_path],
           now: now,
-          trigger: "patrol",
+          trigger: architecture ? "architecture_patrol" : "patrol",
           kind: :patrol_scan
         )
       rescue StandardError => e
         # A spawn error is a genuine failure: route it through `complete`
         # with a non-zero exit so the project both clears its pending
         # marker AND accrues the failure backoff before being retried.
-        @patrol_scheduler&.complete(project: project, exit_code: 1, now: now)
+        @patrol_scheduler&.complete(
+          project: project, exit_code: 1, now: now,
+          stage: patrol_dispatch[:stage], slug: slug, envelope: nil
+        )
         @logger.event(:fatal, message: "patrol dispatch error: #{e.class}: #{e.message}",
                               project: project, slug: slug)
+      end
+
+      def log_patrol_scheduler_events
+        return unless @patrol_scheduler&.respond_to?(:last_events)
+
+        events =
+          if @patrol_scheduler.respond_to?(:drain_events)
+            @patrol_scheduler.drain_events
+          else
+            @patrol_scheduler.last_events
+          end
+        Array(events).each do |event|
+          type = event.fetch(:type)
+          log_type = %i[blocked failed].include?(type) ? type : :patrol_architecture
+          @logger.event(
+            log_type,
+            project: event[:project],
+            action: "architecture_patrol",
+            reason: event[:reason],
+            evidence: event[:evidence],
+            identity: event[:identity],
+            event: type.to_s
+          )
+        end
       end
 
       def dispatch_digest(digest_dispatch, now:)

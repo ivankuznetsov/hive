@@ -202,7 +202,7 @@ module Hive
         merge_watcher = Hive::Daemon::PrMergeWatcher.new(
           poll_interval_sec: daemon_cfg.fetch("pr_merge_poll_interval_sec")
         )
-        patrol_scheduler = Hive::Daemon::PatrolScheduler.new
+        patrol_scheduler = Hive::Daemon::PatrolScheduler.new(dry_run: @dry_run)
         digest_scheduler = Hive::Daemon::DigestScheduler.new(
           enabled: digest_cfg.fetch("enabled", false),
           max_catchup_days: digest_cfg.fetch(

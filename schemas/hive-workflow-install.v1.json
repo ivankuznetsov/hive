@@ -33,7 +33,7 @@
         "schema_version": { "const": 1 },
         "ok": { "const": false },
         "error_class": { "type": "string" },
-        "error_kind": { "enum": ["usage", "config", "git", "concurrent_run", "error"] },
+        "error_kind": { "enum": ["usage", "config", "git", "concurrent_run", "network", "integrity", "collision", "approval", "partial", "error"] },
         "exit_code": { "type": "integer", "enum": [1, 64, 69, 70, 75, 78] },
         "message": { "type": "string" },
         "value": { "type": "string" },

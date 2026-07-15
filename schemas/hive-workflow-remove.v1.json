@@ -2,12 +2,43 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-workflow-remove.v1.json",
   "title": "hive workflow remove output (v1)",
-  "type": "object",
-  "additionalProperties": true,
-  "required": ["schema", "schema_version", "ok"],
-  "properties": {
-    "schema": { "const": "hive-workflow-remove" },
-    "schema_version": { "const": 1 },
-    "ok": { "type": "boolean" }
+  "oneOf": [
+    { "$ref": "#/$defs/Success" },
+    { "$ref": "#/$defs/Error" }
+  ],
+  "$defs": {
+    "Success": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "changed", "partial", "name", "preview"],
+      "properties": {
+        "schema": { "const": "hive-workflow-remove" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": true },
+        "changed": { "type": "boolean" },
+        "partial": { "const": false },
+        "name": { "type": "string" },
+        "preview": { "type": "object", "additionalProperties": true }
+      }
+    },
+    "Error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "error_class", "error_kind", "exit_code", "message"],
+      "properties": {
+        "schema": { "const": "hive-workflow-remove" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "error_class": { "type": "string" },
+        "error_kind": { "enum": ["usage", "config", "git", "concurrent_run", "network", "integrity", "collision", "approval", "partial", "error"] },
+        "exit_code": { "type": "integer", "enum": [1, 64, 69, 70, 75, 78] },
+        "message": { "type": "string" },
+        "value": { "type": "string" },
+        "expected": { "type": "array", "items": { "type": "string" } },
+        "holder": { "type": "object", "additionalProperties": true },
+        "lock_path": { "type": "string" },
+        "preview": { "type": "object", "additionalProperties": true }
+      }
+    }
   }
 }

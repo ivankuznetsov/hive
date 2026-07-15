@@ -17,6 +17,13 @@ class WorkflowHoneycombTest < Minitest::Test
     end
   end
 
+  PartialTransaction = Struct.new(:calls) do
+    def apply(**kwargs)
+      calls << kwargs
+      Hive::Honeycomb::TransactionResult.new(changed: true, partial: true, names: [ "demo" ], commit: :committed)
+    end
+  end
+
   FakeRegistry = Struct.new(:pin, :catalog_value, :calls) do
     def resolve(reference, refresh:)
       calls << [ :resolve, reference, refresh ]
@@ -33,6 +40,26 @@ class WorkflowHoneycombTest < Minitest::Test
     def verify(pin, staging_parent:)
       calls << [ pin, staging_parent ]
       package
+    end
+  end
+
+  MultiRegistry = Struct.new(:pins, :calls) do
+    def refresh!
+      calls << [ :refresh ]
+      true
+    end
+
+    def resolve(reference, refresh:)
+      name = Hive::Honeycomb::Reference.parse(reference).name
+      calls << [ :resolve, name, refresh ]
+      pins.fetch(name)
+    end
+  end
+
+  MultiVerifier = Struct.new(:packages, :calls) do
+    def verify(pin, staging_parent:)
+      calls << [ pin.name, staging_parent ]
+      packages.fetch(pin.name)
     end
   end
 
@@ -181,6 +208,163 @@ class WorkflowHoneycombTest < Minitest::Test
     end
   end
 
+  def test_update_renders_permission_and_full_instruction_diff_then_applies
+    with_project do |project, workflows|
+      old_package = update_package(workflows, body: "old line\n", sha: "1" * 40, version: "1.0.0", tools: [ "Read" ])
+      install_package_fixture(workflows, old_package)
+      candidate = update_package(workflows, body: "new line\nextra\n", sha: "2" * 40,
+                                 version: "2.0.0", tools: %w[Read Bash])
+      transaction = FakeTransaction.new([])
+      out = StringIO.new
+
+      payload = Hive::Commands::Workflow.new(
+        "update", "demo", project_root: project, stdout: out, yes: true,
+        registry: FakeRegistry.new(candidate.pin, nil, []), package_verifier: FakeVerifier.new(candidate, []),
+        transaction: transaction
+      ).call!
+
+      assert_equal true, payload.fetch("changed")
+      assert_includes out.string, "PERMISSION ESCALATION"
+      assert_includes out.string, "-old line"
+      assert_includes out.string, "+new line"
+      assert_includes out.string, "+extra"
+      assert_equal [ candidate.pin.sha ], transaction.calls.first.fetch(:installs).map { |package| package.pin.sha }
+    end
+  end
+
+  def test_update_noops_for_equal_sha_and_untargeted_sha_pin
+    with_project do |project, workflows|
+      old_package = update_package(workflows, body: "same\n", sha: "1" * 40, version: "1.0.0", tools: [ "Read" ])
+      install_package_fixture(workflows, old_package)
+      transaction = FakeTransaction.new([])
+      registry = FakeRegistry.new(old_package.pin, nil, [])
+
+      equal = Hive::Commands::Workflow.new(
+        "update", "demo", project_root: project, stdout: StringIO.new, yes: true,
+        registry: registry, package_verifier: FakeVerifier.new(nil, []), transaction: transaction
+      ).call!
+      assert_equal false, equal.fetch("changed")
+      assert_equal "up_to_date", equal.fetch("noops").first.fetch("reason")
+      assert_empty transaction.calls
+
+      entry = Hive::Honeycomb::LockEntry.from_verified(old_package).with(selector_kind: "sha", selector_value: old_package.pin.sha)
+      Hive::Honeycomb::Lockfile.new(File.join(workflows, ".honeycomb.lock")).write("demo" => entry)
+      registry.calls.clear
+      pinned = Hive::Commands::Workflow.new(
+        "update", "demo", project_root: project, stdout: StringIO.new,
+        registry: registry, package_verifier: FakeVerifier.new(nil, []), transaction: transaction
+      ).call!
+      assert_equal "pinned", pinned.fetch("noops").first.fetch("reason")
+      assert_empty registry.calls
+    end
+  end
+
+  def test_update_all_verifies_every_candidate_and_transacts_once
+    with_project do |project, workflows|
+      old_demo = update_package(workflows, name: "demo", body: "d1\n", sha: "1" * 40,
+                                version: "1.0.0", tools: [ "Read" ])
+      old_beta = update_package(workflows, name: "beta", body: "b1\n", sha: "3" * 40,
+                                version: "1.0.0", tools: [ "Read" ])
+      install_package_fixture(workflows, old_demo)
+      install_package_fixture(workflows, old_beta)
+      new_demo = update_package(workflows, name: "demo", body: "d2\n", sha: "2" * 40,
+                                version: "2.0.0", tools: [ "Read" ])
+      new_beta = update_package(workflows, name: "beta", body: "b2\n", sha: "4" * 40,
+                                version: "2.0.0", tools: [ "Read" ])
+      registry = MultiRegistry.new({ "demo" => new_demo.pin, "beta" => new_beta.pin }, [])
+      verifier = MultiVerifier.new({ "demo" => new_demo, "beta" => new_beta }, [])
+      transaction = FakeTransaction.new([])
+
+      payload = Hive::Commands::Workflow.new(
+        "update", nil, project_root: project, stdout: StringIO.new, yes: true, all: true,
+        registry: registry, package_verifier: verifier, transaction: transaction
+      ).call!
+
+      assert_equal true, payload.fetch("changed")
+      assert_equal [ [ :refresh ], [ :resolve, "beta", false ], [ :resolve, "demo", false ] ], registry.calls
+      assert_equal %w[beta demo], verifier.calls.map(&:first)
+      assert_equal 1, transaction.calls.length
+      assert_equal %w[beta demo], transaction.calls.first.fetch(:installs).map { |package| package.pin.name }
+    end
+  end
+
+  def test_explicit_downgrade_is_previewed_and_requires_approval
+    with_project do |project, workflows|
+      old_package = update_package(workflows, body: "new\n", sha: "2" * 40, version: "2.0.0", tools: [ "Read" ])
+      install_package_fixture(workflows, old_package)
+      candidate = update_package(workflows, body: "old\n", sha: "1" * 40, version: "1.0.0", tools: [ "Read" ])
+      out = StringIO.new
+
+      error = assert_raises(Hive::Honeycomb::ApprovalError) do
+        Hive::Commands::Workflow.new(
+          "update", "demo@1.0.0", project_root: project, stdout: out, stdin: StringIO.new,
+          registry: FakeRegistry.new(candidate.pin.with(selector_kind: "version", selector_value: "1.0.0"), nil, []),
+          package_verifier: FakeVerifier.new(candidate, []), transaction: FakeTransaction.new([])
+        ).call!
+      end
+      assert_includes error.message, "--yes"
+      assert_includes out.string, "(DOWNGRADE)"
+    end
+  end
+
+  def test_remove_previews_dirty_state_and_partial_cleanup_stays_nonzero
+    with_project do |project, workflows|
+      package = update_package(workflows, body: "managed\n", sha: "1" * 40, version: "1.0.0", tools: [ "Read" ])
+      install_package_fixture(workflows, package)
+      File.write(File.join(workflows, "demo", "instructions", "work.md"), "local edit\n")
+      out = StringIO.new
+
+      assert_raises(Hive::Honeycomb::CollisionError) do
+        Hive::Commands::Workflow.new(
+          "remove", "demo", project_root: project, stdout: out, yes: true, transaction: FakeTransaction.new([])
+        ).call!
+      end
+      assert_includes out.string, "ownership: dirty"
+
+      FileUtils.rm_f(File.join(workflows, ".honeycomb.lock"))
+      partial = PartialTransaction.new([])
+      error = assert_raises(Hive::Honeycomb::PartialRemovalError) do
+        Hive::Commands::Workflow.new(
+          "remove", "demo", project_root: project, stdout: StringIO.new, yes: true, force: true,
+          transaction: partial
+        ).call!
+      end
+      assert_includes error.message, "best-effort"
+      assert_equal true, partial.calls.first.fetch(:allow_unknown_removals)
+    end
+  end
+
+  def test_update_and_remove_json_contracts_validate
+    require "json_schemer"
+    with_project do |project, workflows|
+      package = update_package(workflows, body: "same\n", sha: "1" * 40, version: "1.0.0", tools: [ "Read" ])
+      install_package_fixture(workflows, package)
+      update_out, update_err, update_status = with_captured_exit do
+        Hive::Commands::Workflow.new(
+          "update", "demo", project_root: project, json: true,
+          registry: FakeRegistry.new(package.pin, nil, []), package_verifier: FakeVerifier.new(nil, []),
+          transaction: FakeTransaction.new([])
+        ).call
+      end
+      assert_equal 0, update_status
+      assert_empty update_err
+      update_payload = JSON.parse(update_out)
+      update_schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-workflow-update"))))
+      assert_empty update_schema.validate(update_payload).to_a
+
+      remove_out, remove_err, remove_status = with_captured_exit do
+        Hive::Commands::Workflow.new(
+          "remove", "demo", project_root: project, json: true, yes: true, transaction: FakeTransaction.new([])
+        ).call
+      end
+      assert_equal 0, remove_status
+      assert_empty remove_err
+      remove_payload = JSON.parse(remove_out)
+      remove_schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-workflow-remove"))))
+      assert_empty remove_schema.validate(remove_payload).to_a
+    end
+  end
+
   private
 
   def with_project
@@ -225,5 +409,61 @@ class WorkflowHoneycombTest < Minitest::Test
                   "findings" => [] }
     )
     Hive::Honeycomb::Lockfile.new(File.join(workflows, ".honeycomb.lock")).write("demo" => entry)
+  end
+
+
+  def update_package(workflows, body:, sha:, version:, tools:, name: "demo")
+    stage = Dir.mktmpdir(".honeycomb-#{name}-update-", workflows)
+    FileUtils.mkdir_p(File.join(stage, "instructions"))
+    File.write(File.join(stage, "instructions", "work.md"), body)
+    File.write(File.join(stage, "workflow.yml"), <<~YAML)
+      id: #{name}
+      stages:
+        - name: work
+          kind: agent
+          state_file: work.md
+          instruction: ./instructions/work.md
+          permissions:
+            preset: scoped
+            tools: [#{tools.join(', ')}]
+        - name: done
+          kind: terminal
+          state_file: done.md
+    YAML
+    files = %w[workflow.yml instructions/work.md].to_h do |path|
+      [ path, Digest::SHA256.file(File.join(stage, path)).hexdigest ]
+    end
+    manifest = Hive::Honeycomb::Manifest.load({
+      "version" => 1, "files" => files,
+      "permissions" => { "presets" => [ "scoped" ], "tools" => tools, "dirs" => [],
+                           "bash" => tools.include?("Bash"), "yolo" => false }
+    }.to_yaml)
+    pin = Hive::Honeycomb::ResolvedPin.new(
+      source: Hive::Honeycomb::SOURCE, name: name, sha: sha, version: version,
+      tag: "#{name}/v#{version}", digest: manifest.package_digest, selector_kind: "latest", selector_value: nil
+    )
+    descriptor = Hive::Workflows::DescriptorParser.parse_file(File.join(stage, "workflow.yml"), expected_id: name)
+    report = Hive::Honeycomb::SecurityReport.build(workflow: descriptor, package_root: stage)
+    Hive::Honeycomb::VerifiedPackage.new(
+      pin: pin, manifest: manifest, files: files.keys.to_h { |path| [ path, File.binread(File.join(stage, path)) ] },
+      hashes: files, modes: files.keys.to_h { |path| [ path, "100644" ] }, descriptor: descriptor,
+      security_report: report, staging_dir: stage
+    )
+  end
+
+  def install_package_fixture(workflows, package)
+    root = File.join(workflows, package.pin.name)
+    FileUtils.rm_rf(root)
+    FileUtils.mkdir_p(root)
+    package.files.each do |path, bytes|
+      target = File.join(root, path)
+      FileUtils.mkdir_p(File.dirname(target))
+      File.binwrite(target, bytes)
+    end
+    entry = Hive::Honeycomb::LockEntry.from_verified(package)
+    lockfile = Hive::Honeycomb::Lockfile.new(File.join(workflows, ".honeycomb.lock"))
+    entries = lockfile.read
+    entries = entries.merge(package.pin.name => entry)
+    lockfile.write(entries)
   end
 end

@@ -31,6 +31,8 @@ module Hive
       def exit_code = Hive::ExitCodes::USAGE
     end
 
+    class PartialRemovalError < Hive::Error; end
+
     # Psych accepts duplicate mapping keys by keeping the last value. Registry
     # and lock metadata are authority-bearing, so detect duplicates on the YAML
     # syntax tree before safe loading and reject aliases/classes as usual.

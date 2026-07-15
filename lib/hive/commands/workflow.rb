@@ -12,6 +12,7 @@ require "hive/workflows/loader"
 require "hive/workflows/project"
 require "hive/workflows/registry"
 require "hive/honeycomb/installation"
+require "hive/honeycomb/diff"
 require "hive/honeycomb/package"
 require "hive/honeycomb/registry"
 require "hive/honeycomb/transaction"
@@ -446,11 +447,190 @@ module Hive
       end
 
       def call_update!
-        raise UsageError, "workflow update is unavailable until update planning completes"
+        entries = honeycomb_lockfile.read
+        candidates, noops = resolve_update_candidates(entries)
+        packages = []
+        previews = []
+        candidates.each do |candidate|
+          entry = candidate.fetch(:entry)
+          pin = candidate.fetch(:pin)
+          package = package_verifier.verify(pin, staging_parent: workflows_dir)
+          packages << package
+          inspection = Hive::Honeycomb::Installation.new(workflows_dir).inspect(entry)
+          diff = Hive::Honeycomb::Diff.build(
+            entry: entry, package: package, installed_root: File.join(workflows_dir, entry.name)
+          )
+          preview = update_preview(entry, package, diff, inspection.state, explicit: candidate.fetch(:explicit))
+          previews << preview
+        end
+        @preview_payload = { "operation" => "update", "updates" => previews, "noops" => noops }
+        render_update_preview(@preview_payload) unless @json
+        blocked = previews.find { |preview| preview.fetch("ownership") != "clean" && !@force }
+        if blocked
+          raise Hive::Honeycomb::CollisionError,
+                "managed workflow #{blocked.fetch('name').inspect} is #{blocked.fetch('ownership')}; use --force to update it"
+        end
+        if packages.empty?
+          return emit_success(
+            "schema" => SCHEMAS.fetch("update"), "schema_version" => 1, "ok" => true,
+            "changed" => false, "updates" => [], "noops" => noops, "preview" => @preview_payload
+          )
+        end
+        approval!("Update #{packages.map { |package| package.pin.name }.join(', ')}")
+        result = transaction.apply(installs: packages, force: @force, action: "updated")
+        emit_success(
+          "schema" => SCHEMAS.fetch("update"), "schema_version" => 1, "ok" => true,
+          "changed" => result.changed, "updates" => previews, "noops" => noops, "preview" => @preview_payload
+        )
+      ensure
+        packages&.each do |package|
+          FileUtils.rm_rf(package.staging_dir) if File.exist?(package.staging_dir)
+        end
       end
 
       def call_remove!
-        raise UsageError, "workflow remove is unavailable until removal planning completes"
+        name = normalize_managed_name(@id, allow_selector: false)
+        lock_error = nil
+        entries = begin
+          honeycomb_lockfile.read
+        rescue Hive::Honeycomb::LockfileError => e
+          lock_error = e
+          {}
+        end
+        entry = entries[name]
+        installation = Hive::Honeycomb::Installation.new(workflows_dir)
+        inspection = entry ? installation.inspect(entry) : nil
+        state = lock_error ? "unknown" : (inspection&.state || "unmanaged")
+        @preview_payload = {
+          "operation" => "remove", "name" => name, "ownership" => state,
+          "lock_integrity" => lock_error ? "invalid" : (entry ? "known" : "missing"),
+          "paths" => [ File.join(workflows_dir, name) ]
+        }
+        render_remove_preview(@preview_payload) unless @json
+        if entry && !inspection.clean? && !@force
+          raise Hive::Honeycomb::CollisionError,
+                "managed workflow #{name.inspect} is #{inspection.state}; use --force to remove it"
+        end
+        unless entry
+          unless @force && installation.canonical_managed_root?(name)
+            raise Hive::Honeycomb::CollisionError,
+                  "ownership for workflow #{name.inspect} cannot be proven; use --force for best-effort cleanup"
+          end
+        end
+        approval!("Remove honeycomb/#{name}")
+        result = transaction.apply(
+          removals: [ name ], force: @force, allow_unknown_removals: !entry || !lock_error.nil?, action: "removed"
+        )
+        if result.partial
+          raise Hive::Honeycomb::PartialRemovalError,
+                "best-effort removal of honeycomb/#{name} completed, but lock integrity was missing or stale"
+        end
+        emit_success(
+          "schema" => SCHEMAS.fetch("remove"), "schema_version" => 1, "ok" => true,
+          "changed" => result.changed, "partial" => false, "name" => name, "preview" => @preview_payload
+        )
+      end
+
+      def resolve_update_candidates(entries)
+        requested = if @all
+          registry.refresh!
+          entries.keys.sort
+        else
+          [ normalize_managed_name(@id, allow_selector: true) ]
+        end
+        candidates = []
+        noops = []
+        requested.each do |name|
+          entry = entries[name]
+          raise Hive::Honeycomb::ResolutionError, "workflow #{name.inspect} is not installed" unless entry
+          explicit = !@all && @id.to_s.include?("@")
+          if !explicit && %w[sha digest].include?(entry.selector_kind)
+            noops << { "name" => name, "reason" => "pinned", "sha" => entry.sha }
+            next
+          end
+          raw_reference = if explicit
+            @id.start_with?("honeycomb/") ? @id : "honeycomb/#{@id}"
+          else
+            "honeycomb/#{name}"
+          end
+          pin = registry.resolve(raw_reference, refresh: !@all)
+          if pin.sha == entry.sha
+            noops << { "name" => name, "reason" => "up_to_date", "sha" => entry.sha }
+            next
+          end
+          if comparable_downgrade?(entry, pin) && !explicit
+            raise Hive::Honeycomb::ResolutionError,
+                  "update for #{name.inspect} would downgrade #{entry.version} to #{pin.version}; select it explicitly"
+          end
+          candidates << { entry: entry, pin: pin, explicit: explicit }
+        end
+        [ candidates, noops ]
+      end
+
+      def normalize_managed_name(raw, allow_selector:)
+        value = raw.to_s
+        reference = Hive::Honeycomb::Reference.parse(value.start_with?("honeycomb/") ? value : "honeycomb/#{value}")
+        if reference.selector && !allow_selector
+          raise UsageError.new("workflow #{@subcommand} does not accept a selector", value: raw)
+        end
+        reference.name
+      end
+
+      def comparable_downgrade?(entry, pin)
+        entry.version && pin.version && Gem::Version.new(pin.version) < Gem::Version.new(entry.version)
+      end
+
+      def update_preview(entry, package, diff, ownership, explicit:)
+        {
+          "name" => entry.name,
+          "from_version" => entry.version,
+          "to_version" => package.pin.version,
+          "from_sha" => entry.sha,
+          "to_sha" => package.pin.sha,
+          "explicit" => explicit,
+          "downgrade" => comparable_downgrade?(entry, package.pin),
+          "ownership" => ownership,
+          "permission_changes" => diff.permissions,
+          "permission_escalation" => diff.escalation,
+          "instruction_diffs" => diff.instruction_diffs,
+          "descriptor_changed" => diff.descriptor_changed,
+          "asset_changes" => diff.asset_changes,
+          "metadata_only" => diff.metadata_only
+        }
+      end
+
+      def render_update_preview(preview)
+        preview.fetch("noops").each do |noop|
+          @stdout.puts "#{noop.fetch('name')}: #{noop.fetch('reason')} (#{noop.fetch('sha')})"
+        end
+        preview.fetch("updates").each do |update|
+          @stdout.puts "Update honeycomb/#{update.fetch('name')}"
+          @stdout.puts "version: #{update.fetch('from_version') || 'unknown'} -> " \
+                       "#{update.fetch('to_version') || 'unknown'}#{update.fetch('downgrade') ? ' (DOWNGRADE)' : ''}"
+          @stdout.puts "sha: #{update.fetch('from_sha')} -> #{update.fetch('to_sha')}"
+          @stdout.puts "ownership: #{update.fetch('ownership')}"
+          @stdout.puts "PERMISSION ESCALATION" if update.fetch("permission_escalation")
+          update.fetch("permission_changes").each do |field, change|
+            if change.key?("added")
+              @stdout.puts "permissions #{field}: +#{change.fetch('added').join(',')} " \
+                           "-#{change.fetch('removed').join(',')}"
+            elsif change.fetch("before") != change.fetch("after")
+              @stdout.puts "permissions #{field}: #{change.fetch('before')} -> #{change.fetch('after')}"
+            end
+          end
+          update.fetch("instruction_diffs").sort.each { |_path, text| @stdout.print(text) }
+          @stdout.puts "descriptor changed: #{update.fetch('descriptor_changed')}"
+          assets = update.fetch("asset_changes")
+          @stdout.puts "assets added=#{assets.fetch('added').join(',')} removed=#{assets.fetch('removed').join(',')} " \
+                       "changed=#{assets.fetch('changed').join(',')}"
+        end
+      end
+
+      def render_remove_preview(preview)
+        @stdout.puts "Remove honeycomb/#{preview.fetch('name')}"
+        @stdout.puts "ownership: #{preview.fetch('ownership')}"
+        @stdout.puts "lock integrity: #{preview.fetch('lock_integrity')}"
+        @stdout.puts "paths: #{preview.fetch('paths').join(', ')}"
       end
 
       def validate_subcommand_options!
@@ -668,13 +848,33 @@ module Hive
       end
 
       def error_kind_for(error)
+        return workflow_new_error_kind(error) if @subcommand.nil? || @subcommand == "new" || !SUBCOMMANDS.include?(@subcommand)
+
+        kinds = Hive::Schemas::WorkflowHoneycombErrorKind
+        case error
+        when UsageError                              then kinds::USAGE
+        when Hive::Honeycomb::ApprovalError          then kinds::APPROVAL
+        when Hive::Honeycomb::CollisionError         then kinds::COLLISION
+        when Hive::Honeycomb::PartialRemovalError    then kinds::PARTIAL
+        when Hive::Honeycomb::RegistryError          then kinds::NETWORK
+        when Hive::Honeycomb::IntegrityError,
+             Hive::Honeycomb::ManifestError,
+             Hive::Honeycomb::LockfileError          then kinds::INTEGRITY
+        when Hive::ConcurrentRunError                then kinds::CONCURRENT_RUN
+        when Hive::GitError                          then kinds::GIT
+        when Hive::ConfigError                       then kinds::CONFIG
+        else                                              kinds::ERROR
+        end
+      end
+
+      def workflow_new_error_kind(error)
         kinds = Hive::Schemas::WorkflowNewErrorKind
         case error
-        when UsageError                then kinds::USAGE
-        when Hive::ConcurrentRunError  then kinds::CONCURRENT_RUN
-        when Hive::GitError            then kinds::GIT
-        when Hive::ConfigError         then kinds::CONFIG
-        else                                kinds::ERROR
+        when UsageError               then kinds::USAGE
+        when Hive::ConcurrentRunError then kinds::CONCURRENT_RUN
+        when Hive::GitError           then kinds::GIT
+        when Hive::ConfigError        then kinds::CONFIG
+        else                               kinds::ERROR
         end
       end
     end

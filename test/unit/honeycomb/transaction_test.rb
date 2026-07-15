@@ -140,6 +140,28 @@ class HoneycombTransactionTest < Minitest::Test
     end
   end
 
+  def test_corrupt_lock_best_effort_removal_preserves_lock_and_reports_partial
+    with_state_project do |project, workflows|
+      root = File.join(workflows, "orphan")
+      FileUtils.mkdir_p(root)
+      File.write(File.join(root, "workflow.yml"), "id: orphan\n")
+      corrupt_lock = File.join(workflows, ".honeycomb.lock")
+      File.write(corrupt_lock, "version: 99\ncorrupt: true\n")
+      state = File.join(project, ".hive-state")
+      run!("git", "-C", state, "add", "workflows")
+      run!("git", "-C", state, "commit", "-m", "corrupt managed state", "--quiet")
+
+      result = transaction_for(project).apply(
+        removals: [ "orphan" ], force: true, allow_unknown_removals: true, action: "removed"
+      )
+
+      assert_equal true, result.partial
+      refute File.exist?(root)
+      assert_equal "version: 99\ncorrupt: true\n", File.read(corrupt_lock)
+      assert_empty git_status(project)
+    end
+  end
+
   private
 
   def with_state_project

@@ -38,12 +38,20 @@ module Hive
         result = nil
         Hive::Lock.with_commit_lock(hive_state_path) do
           recover_journal!
-          entries = lockfile.read
-          partial = validate_operation!(packages, removal_names, entries, force, allow_unknown_removals)
+          lock_unreadable = false
+          entries = begin
+            lockfile.read
+          rescue LockfileError
+            raise unless allow_unknown_removals
+            lock_unreadable = true
+            {}
+          end
+          validated_partial = validate_operation!(packages, removal_names, entries, force, allow_unknown_removals)
+          partial = lock_unreadable || validated_partial
           desired = entries.dup
           packages.each { |package| desired[package.pin.name] = LockEntry.from_verified(package) }
           removal_names.each { |name| desired.delete(name) }
-          records = transaction_records(packages, removal_names)
+          records = transaction_records(packages, removal_names, include_lock: !lock_unreadable)
           journal = create_journal(records, names, git_ops.hive_state_head_sha)
           commit = nil
 
@@ -55,7 +63,7 @@ module Hive
             write_journal(journal)
             inject(:after_backup)
             install_packages(packages)
-            lockfile.write(desired)
+            lockfile.write(desired) unless lock_unreadable
             inject(:after_lock)
             journal["phase"] = "swapped"
             write_journal(journal)
@@ -149,7 +157,7 @@ module Hive
         raise IntegrityError, "staged honeycomb package must be on the workflows filesystem"
       end
 
-      def transaction_records(packages, removals)
+      def transaction_records(packages, removals, include_lock: true)
         id = SecureRandom.hex(8)
         targets = []
         (packages.map { |package| package.pin.name } + removals).uniq.sort.each do |name|
@@ -157,7 +165,7 @@ module Hive
           authored = "#{name}.yml"
           targets << record_for(authored, id, targets.length) if packages.any? { |package| package.pin.name == name }
         end
-        targets << record_for(".honeycomb.lock", id, targets.length)
+        targets << record_for(".honeycomb.lock", id, targets.length) if include_lock
         targets
       end
 

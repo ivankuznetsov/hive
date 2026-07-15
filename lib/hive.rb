@@ -390,6 +390,20 @@ module Hive
       ERROR          = "error".freeze
       ALL = constants(false).reject { |c| c == :ALL }.map { |c| const_get(c) }.freeze
     end
+
+    module WorkflowHoneycombErrorKind
+      USAGE          = "usage".freeze
+      CONFIG         = "config".freeze
+      GIT            = "git".freeze
+      CONCURRENT_RUN = "concurrent_run".freeze
+      NETWORK        = "network".freeze
+      INTEGRITY      = "integrity".freeze
+      COLLISION      = "collision".freeze
+      APPROVAL       = "approval".freeze
+      PARTIAL        = "partial".freeze
+      ERROR          = "error".freeze
+      ALL = constants(false).reject { |constant| constant == :ALL }.map { |constant| const_get(constant) }.freeze
+    end
   end
 
   # Process exit-code contract for the `hive` CLI.

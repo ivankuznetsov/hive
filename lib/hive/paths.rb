@@ -28,6 +28,22 @@ module Hive
       File.join(state_home, ".task-counter.lock")
     end
 
+    # The public Honeycomb registry is cached as a bare repository so callers
+    # can inspect object modes and bytes without extracting an untrusted tree.
+    # The validated catalog snapshot is separate: a failed refresh may mutate
+    # fetched objects, but can never replace the last-known-good read model.
+    def honeycomb_cache_dir
+      File.join(cache_home, "honeycomb")
+    end
+
+    def honeycomb_repository_path
+      File.join(honeycomb_cache_dir, "registry.git")
+    end
+
+    def honeycomb_catalog_path
+      File.join(honeycomb_cache_dir, "catalog.yml")
+    end
+
     def bin_home
       # bin_home intentionally ignores HIVE_HOME — install.sh places
       # the `hive`/`hv` symlinks under XDG_BIN_HOME (or ~/.local/bin),

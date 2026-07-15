@@ -29,6 +29,11 @@ class PathsTest < Minitest::Test
         assert_equal File.join(dir, "data", "hive"), Hive::Paths.data_home
         assert_equal File.join(dir, "state", "hive"), Hive::Paths.state_home
         assert_equal File.join(dir, "cache", "hive"), Hive::Paths.cache_home
+        assert_equal File.join(dir, "cache", "hive", "honeycomb"), Hive::Paths.honeycomb_cache_dir
+        assert_equal File.join(dir, "cache", "hive", "honeycomb", "registry.git"),
+                     Hive::Paths.honeycomb_repository_path
+        assert_equal File.join(dir, "cache", "hive", "honeycomb", "catalog.yml"),
+                     Hive::Paths.honeycomb_catalog_path
         assert_equal File.join(dir, "bin"), Hive::Paths.bin_home
       end
     end

@@ -207,7 +207,7 @@ module Hive
 
         ledger = read_emissions!
         ledger.fetch("entries")[identity] = {
-          "report_digest" => Digest::SHA256.hexdigest(JSON.generate(normalized)),
+          "report_digest" => ::Digest::SHA256.hexdigest(JSON.generate(normalized)),
           "digests" => deep_dup(emission_digests || {}),
           "updated_at" => normalized.fetch("completed_at")
         }
@@ -405,7 +405,7 @@ module Hive
         return nil unless report["pr_number"] == record["pr_number"]
         return nil unless report["merge_sha"] == record["merge_sha"]
         return nil unless report["base_sha"] == record["base_sha"]
-        return nil unless entry["report_digest"] == Digest::SHA256.hexdigest(JSON.generate(report))
+        return nil unless entry["report_digest"] == ::Digest::SHA256.hexdigest(JSON.generate(report))
 
         report
       rescue JSON::ParserError, SystemCallError

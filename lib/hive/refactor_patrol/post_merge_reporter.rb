@@ -213,7 +213,7 @@ module Hive
           "admissible" => thesis.admissible,
           "admissibility_reason" => thesis.admissibility_reason
         }
-        Digest::SHA256.hexdigest(JSON.generate(payload))
+        ::Digest::SHA256.hexdigest(JSON.generate(payload))
       end
 
       def bucket_totals(classifications)

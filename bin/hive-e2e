@@ -254,13 +254,18 @@ module Hive
   end
 end
 
+def wrapper_option_argv(argv)
+  argv.take(argv.index("--") || argv.length)
+end
+
 def rewrite_help_flag!(argv)
   return if argv.empty?
 
-  cmd_idx = argv.index { |arg| !arg.start_with?("-") }
+  option_argv = wrapper_option_argv(argv)
+  cmd_idx = option_argv.index { |arg| !arg.start_with?("-") }
   return unless cmd_idx
 
-  help_idx = argv[(cmd_idx + 1)..]&.index { |arg| arg == "--help" || arg == "-h" }
+  help_idx = option_argv[(cmd_idx + 1)..]&.index { |arg| arg == "--help" || arg == "-h" }
   return unless help_idx
 
   cmd = argv[cmd_idx]
@@ -291,7 +296,8 @@ end
 # `--json=<value>` assignments are rejected before Thor can use the value as a
 # command or pattern.
 def json_requested?(argv)
-  JSON_TRUE_OPTIONS.include?(argv.reverse.find { |arg| JSON_BOOLEAN_OPTIONS.include?(arg) })
+  options = wrapper_option_argv(argv)
+  JSON_TRUE_OPTIONS.include?(options.reverse.find { |arg| JSON_BOOLEAN_OPTIONS.include?(arg) })
 end
 
 def reject_invalid_argv_encoding!(argv)
@@ -302,7 +308,9 @@ def reject_invalid_argv_encoding!(argv)
 end
 
 def reject_unsupported_json_assignments!(argv)
-  arg = argv.find { |candidate| candidate.start_with?("--json=") && !JSON_BOOLEAN_OPTIONS.include?(candidate) }
+  arg = wrapper_option_argv(argv).find do |candidate|
+    candidate.start_with?("--json=") && !JSON_BOOLEAN_OPTIONS.include?(candidate)
+  end
   return unless arg
 
   raise Thor::MalformattedArgumentError, "invalid boolean value for --json: #{arg.split('=', 2).last.inspect}"

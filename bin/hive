@@ -62,6 +62,10 @@ JSON_USAGE_ERROR_CONTRACTS = {
   end
 ).freeze
 
+def wrapper_option_argv(argv)
+  argv.take(argv.index("--") || argv.length)
+end
+
 # Thor treats a class option before the subcommand as input to its help path.
 # Keep `hive --json status` equivalent to `hive status --json`.
 def normalize_leading_json_options!(argv)
@@ -69,7 +73,7 @@ def normalize_leading_json_options!(argv)
   leading << argv.shift while JSON_BOOLEAN_OPTIONS.include?(argv.first)
   return if leading.empty?
 
-  cmd_idx = argv.index { |a| !a.start_with?("-") }
+  cmd_idx = wrapper_option_argv(argv).index { |a| !a.start_with?("-") }
   return argv.unshift(*leading) unless cmd_idx
 
   argv.insert(cmd_idx + 1, *leading)
@@ -83,13 +87,14 @@ def new_value_assignment?(arg)
 end
 
 def new_text_start_index(argv)
-  cmd_idx = argv.index { |a| !a.start_with?("-") }
+  option_argv = wrapper_option_argv(argv)
+  cmd_idx = option_argv.index { |a| !a.start_with?("-") }
   return nil unless cmd_idx && argv[cmd_idx] == "new"
 
   idx = cmd_idx + 1
   project_idx = nil
-  while idx < argv.length
-    arg = argv[idx]
+  while idx < option_argv.length
+    arg = option_argv[idx]
     if JSON_BOOLEAN_OPTIONS.include?(arg)
       idx += 1
       next
@@ -129,13 +134,14 @@ end
 def rewrite_help_flag!(argv)
   return if argv.empty?
 
-  cmd_idx = argv.index { |a| !a.start_with?("-") }
+  option_argv = wrapper_option_argv(argv)
+  cmd_idx = option_argv.index { |a| !a.start_with?("-") }
   return unless cmd_idx
 
   text_start_idx = new_text_start_index(argv)
-  help_idx = argv.each_index.find do |idx|
+  scan_limit = [ option_argv.length, text_start_idx ].compact.min
+  help_idx = (cmd_idx + 1...scan_limit).find do |idx|
     next false if idx <= cmd_idx
-    next false if text_start_idx && idx >= text_start_idx
 
     argv[idx] == "--help" || argv[idx] == "-h"
   end
@@ -150,7 +156,7 @@ end
 # `new` — before the project, between the project and the task text, or after the
 # text.
 def lift_new_options!(argv)
-  cmd_idx = argv.index { |a| !a.start_with?("-") }
+  cmd_idx = wrapper_option_argv(argv).index { |a| !a.start_with?("-") }
   return unless cmd_idx && argv[cmd_idx] == "new"
 
   lifted = []
@@ -195,7 +201,8 @@ def lift_new_options!(argv)
 end
 
 def json_requested?(argv)
-  JSON_TRUE_OPTIONS.include?(argv.reverse.find { |arg| JSON_BOOLEAN_OPTIONS.include?(arg) })
+  options = wrapper_option_argv(argv)
+  JSON_TRUE_OPTIONS.include?(options.reverse.find { |arg| JSON_BOOLEAN_OPTIONS.include?(arg) })
 end
 
 def reject_invalid_argv_encoding!(argv)
@@ -207,7 +214,7 @@ end
 
 def reject_unsupported_json_assignments!(argv)
   text_start_idx = new_text_start_index(argv)
-  arg = argv.each_with_index.find do |candidate, idx|
+  arg = wrapper_option_argv(argv).each_with_index.find do |candidate, idx|
     next false if text_start_idx && idx >= text_start_idx
 
     candidate.start_with?("--json=") && !JSON_BOOLEAN_OPTIONS.include?(candidate)
@@ -350,6 +357,8 @@ rescue Errno::EPIPE, JSON::GeneratorError
   true
 end
 
+original_argv = ARGV.dup
+
 begin
   reject_invalid_argv_encoding!(ARGV)
   reject_unsupported_json_assignments!(ARGV)
@@ -359,7 +368,7 @@ begin
   Hive::CLI.start(ARGV, debug: true)
 rescue Thor::Error => e
   error = Hive::InvalidTaskPath.new(e.message)
-  emitted_json = emit_json_usage_error(ARGV, error)
+  emitted_json = emit_json_usage_error(original_argv, error)
   warn(emitted_json ? "hive: #{error.message}" : error.message)
   exit(error.exit_code)
 rescue Hive::Error => e

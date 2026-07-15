@@ -243,6 +243,15 @@ class E2EBinaryTest < Minitest::Test
     refute_includes err, "no scenarios match"
   end
 
+  def test_run_treats_help_after_delimiter_as_literal_pattern
+    out, err, status = Open3.capture3(hive_e2e, "run", "--", "--help")
+
+    assert_equal 64, status.exitstatus
+    assert_empty out
+    assert_match(/no scenarios match --help/, err)
+    refute_match(/Usage:/, err)
+  end
+
   def test_replay_missing_repro_emits_json_error_when_requested
     out, err, status = Open3.capture3(hive_e2e, "replay", "--json", "missing-run", "missing-scenario")
     assert_equal 78, status.exitstatus
@@ -448,6 +457,15 @@ class E2EBinaryTest < Minitest::Test
       assert_match(/invalid boolean value for --json/, err)
       refute_match(/no scenarios match #{Regexp.escape(value)}/, err)
     end
+  end
+
+  def test_run_treats_unsupported_json_assignment_after_delimiter_as_literal_pattern
+    out, err, status = Open3.capture3(hive_e2e, "run", "--", "--json=bogus")
+
+    assert_equal 64, status.exitstatus
+    assert_empty out
+    assert_match(/no scenarios match --json=bogus/, err)
+    refute_match(/invalid boolean value for --json/, err)
   end
 
   def test_run_no_match_emits_json_error_when_requested
@@ -670,6 +688,20 @@ class E2EBinaryTest < Minitest::Test
       assert_empty out, "#{flags.join(" ")}: final false JSON flag must force prose output"
       assert_match(/hive-e2e:/, err)
     end
+  end
+
+  def test_usage_error_ignores_json_booleans_after_delimiter
+    out, err, status = Open3.capture3(hive_e2e, "run", "--json", "pattern", "--", "--no-json")
+
+    assert_equal 64, status.exitstatus
+    assert_equal "hive-e2e-error", JSON.parse(out)["schema"]
+    assert_empty err
+
+    out, err, status = Open3.capture3(hive_e2e, "run", "--no-json", "pattern", "--", "--json")
+
+    assert_equal 64, status.exitstatus
+    assert_empty out
+    assert_match(/hive-e2e:/, err)
   end
 
   def test_missing_required_args_with_json_true_emits_envelope_on_stdout

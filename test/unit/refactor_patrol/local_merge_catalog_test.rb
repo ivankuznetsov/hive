@@ -56,6 +56,36 @@ class HiveRefactorPatrolLocalMergeCatalogTest < Minitest::Test
     end
   end
 
+  def test_unreachable_history_missing_parent_and_git_failures_are_typed
+    fake = Object.new
+    fake.define_singleton_method(:rev_parse) { |ref| ref }
+    fake.define_singleton_method(:ancestor?) { |_checkpoint, _head| false }
+    error = assert_raises(Hive::RefactorPatrol::LocalMergeCatalog::CatalogError) do
+      Hive::RefactorPatrol::LocalMergeCatalog.new("/tmp", git: fake).discover(
+        checkpoint_sha: "base", head_sha: "head"
+      )
+    end
+    assert_equal "checkpoint_unreachable", error.reason
+
+    fake.define_singleton_method(:ancestor?) { |_checkpoint, _head| true }
+    fake.define_singleton_method(:first_parent_commits) do |_checkpoint, _head|
+      [ { "sha" => "root", "subject" => "Root change (#9)", "parents" => [] } ]
+    end
+    result = Hive::RefactorPatrol::LocalMergeCatalog.new("/tmp", git: fake).discover(
+      checkpoint_sha: "base", head_sha: "head"
+    )
+    assert_empty result.merges
+    assert_equal "merge_without_first_parent", result.diagnostics.first.fetch("reason")
+
+    fake.define_singleton_method(:rev_parse) { |_ref| raise Hive::GitError, "unreadable" }
+    error = assert_raises(Hive::RefactorPatrol::LocalMergeCatalog::CatalogError) do
+      Hive::RefactorPatrol::LocalMergeCatalog.new("/tmp", git: fake).discover(
+        checkpoint_sha: "base", head_sha: "head"
+      )
+    end
+    assert_equal "checkpoint_unreachable", error.reason
+  end
+
   private
 
   def with_history_repo

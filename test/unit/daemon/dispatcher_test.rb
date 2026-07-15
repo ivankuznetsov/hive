@@ -151,6 +151,12 @@ class HiveDaemonDispatcherTest < Minitest::Test
       @cancelled << project
       @cancel_details << { project: project, stage: stage, slug: slug, reason: reason, now: now }
     end
+
+    def drain_events
+      events = @last_events
+      @last_events = []
+      events
+    end
   end
 
   class FakeDigestScheduler
@@ -2436,6 +2442,43 @@ def test_dry_run_reaps_pseudo_children_and_logs_completion
 
   assert_equal 0, ctrl.in_flight_count
   event = logger.events.find { |(name, attrs)| name == :child_exited && attrs[:dry_run] == true }
+  refute_nil event
+end
+
+def test_dry_run_reap_routes_architecture_completion_to_patrol_scheduler
+  dispatcher, _sup, ctrl, _logger, _mw, patrol = make_dispatcher(
+    rows: [], dry_run: true, with_patrol_scheduler: true
+  )
+  child = ChildExit.new(
+    pid: -1, exit_code: 0, project: "p1", slug: "refactor-patrol-pr-10-head",
+    stage: Hive::Daemon::PatrolScheduler::ARCHITECTURE_STAGE,
+    command: "hive refactor-patrol p1 --json", state_file_path: nil,
+    started_at: T0, finished_at: T0, json_envelope: { "schema" => "hive-refactor-patrol" }
+  )
+  dispatcher.supervisor.define_singleton_method(:reap_dry_run) { |now:| [ child ] }
+  ctrl.record_dispatch(
+    pid: -1, project: "p1", slug: child.slug, stage: child.stage,
+    command: child.command, started_at: T0, state_file_mtime: T0 - 60, kind: :patrol_scan
+  )
+
+  dispatcher.tick(now: T0)
+
+  completion = patrol.completion_details.fetch(0)
+  assert_equal Hive::Daemon::PatrolScheduler::ARCHITECTURE_STAGE, completion.fetch(:stage)
+  assert_equal child.slug, completion.fetch(:slug)
+  assert_equal child.json_envelope, completion.fetch(:envelope)
+end
+
+def test_patrol_event_logging_supports_scheduler_without_drain_events
+  dispatcher, _sup, _ctrl, logger, _mw = make_dispatcher(rows: [])
+  legacy_scheduler = Struct.new(:last_events).new(
+    [ { type: :blocked, project: "p1", reason: "legacy_event", evidence: {} } ]
+  )
+  dispatcher.instance_variable_set(:@patrol_scheduler, legacy_scheduler)
+
+  dispatcher.send(:log_patrol_scheduler_events)
+
+  event = logger.events.find { |name, attrs| name == :blocked && attrs[:reason] == "legacy_event" }
   refute_nil event
 end
 

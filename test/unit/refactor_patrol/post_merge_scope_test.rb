@@ -15,6 +15,7 @@ class HiveRefactorPatrolPostMergeScopeTest < Minitest::Test
       assert_equal "feature", result.kind
       assert_equal [ "checkout" ], result.values
       assert_equal [ "--changed-since", "base", "--feature", "checkout" ], result.arguments
+      assert_equal({ "kind" => "feature", "values" => [ "checkout" ], "fallback" => false }, result.to_h)
       refute result.fallback
     end
   end
@@ -77,6 +78,50 @@ class HiveRefactorPatrolPostMergeScopeTest < Minitest::Test
         refute result.runnable?, path
         assert_equal "scope_unusable", result.reason
       end
+    end
+  end
+
+  def test_unrunnable_result_invalid_boundary_and_mapper_failures_are_explicit
+    result = Hive::RefactorPatrol::PostMergeScope::Result.new(runnable: false)
+    assert_empty result.arguments
+    assert_nil result.to_h
+
+    with_tmp_dir do |dir|
+      assert_raises(Hive::ConfigError) do
+        selector(dir, []).select(changed_paths: [ "lib/a.rb" ], base_sha: "bad boundary!")
+      end
+
+      config_failure = Hive::RefactorPatrol::PostMergeScope.new(
+        dir, cfg: Hive::Config.deep_dup(Hive::Config::DEFAULTS),
+        mapper_factory: ->(*) { raise Hive::ConfigError, "bad map config" }
+      )
+      assert_raises(Hive::ConfigError) do
+        config_failure.select(changed_paths: [ "lib/a.rb" ], base_sha: "base")
+      end
+
+      runtime_failure = Hive::RefactorPatrol::PostMergeScope.new(
+        dir, cfg: Hive::Config.deep_dup(Hive::Config::DEFAULTS),
+        mapper_factory: ->(*) { raise "mapper crashed" }
+      )
+      failed = runtime_failure.select(changed_paths: [ "lib/a.rb" ], base_sha: "base")
+      assert_equal "scope_selection_failed", failed.evidence.fetch("detail")
+    end
+  end
+
+  def test_default_mapper_configuration_and_empty_root_fallback_are_covered
+    with_tmp_dir do |dir|
+      cfg = Hive::Config.deep_dup(Hive::Config::DEFAULTS)
+      scoped = Hive::RefactorPatrol::PostMergeScope.new(dir, cfg: cfg)
+      mapper = scoped.instance_variable_get(:@mapper_factory).call(dir, cfg)
+      assert_instance_of Hive::Patrol::Mapper, mapper
+
+      empty_roots = Class.new(Hive::RefactorPatrol::PostMergeScope) do
+        private
+
+        def changed_roots(_paths) = []
+      end.new(dir, cfg: cfg, mapper_factory: ->(*) { Struct.new(:call).new([]) })
+      result = empty_roots.select(changed_paths: [ "lib/a.rb" ], base_sha: "base")
+      assert_equal "no_non_root_scope", result.evidence.fetch("detail")
     end
   end
 

@@ -304,8 +304,6 @@ module Hive
         record.fetch("attempts").each do |attempt|
           raise StateError, "invalid post-merge attempt" unless ATTEMPT_STATES.include?(attempt["status"])
         end
-      rescue KeyError => e
-        raise StateError, "post-merge record missing #{e.key}"
       end
 
       def validate_batch!(doc)
@@ -511,7 +509,7 @@ module Hive
       end
 
       def deep_dup(value)
-        Marshal.load(Marshal.dump(value))
+        JSON.parse(JSON.generate(value))
       end
     end
   end

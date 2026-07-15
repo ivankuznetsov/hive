@@ -115,6 +115,71 @@ class HiveRefactorPatrolPostMergeReporterTest < Minitest::Test
     end
   end
 
+  def test_invalid_envelopes_tokens_and_thesis_ids_are_typed
+    assert_equal Hive::ExitCodes::TEMPFAIL,
+                 Hive::RefactorPatrol::PostMergeReporter::ReportError.new("bad", "bad").exit_code
+
+    with_report_context do |ctx|
+      reporter = ctx.fetch(:reporter)
+      missing_root = envelope_for.merge("project_root" => File.join(ctx.fetch(:root), "gone"))
+      error = assert_raises(Hive::RefactorPatrol::PostMergeReporter::ReportError) do
+        reporter.build(token: ctx.fetch(:token), envelope: missing_root,
+                       state_store: ctx.fetch(:post_merge), now: T0 + 10)
+      end
+      assert_equal "invalid_envelope", error.reason
+
+      changed = ctx.fetch(:token).merge("base_sha" => "other")
+      error = assert_raises(Hive::RefactorPatrol::PostMergeReporter::ReportError) do
+        reporter.build(token: changed, envelope: envelope_for,
+                       state_store: ctx.fetch(:post_merge), now: T0 + 11)
+      end
+      assert_equal "identity_mismatch", error.reason
+
+      changed = ctx.fetch(:token).merge("analysis_root" => "/other")
+      error = assert_raises(Hive::RefactorPatrol::PostMergeReporter::ReportError) do
+        reporter.build(token: changed, envelope: envelope_for,
+                       state_store: ctx.fetch(:post_merge), now: T0 + 12)
+      end
+      assert_equal "identity_mismatch", error.reason
+
+      missing_id = envelope_for.merge("ranked" => [ {} ])
+      error = assert_raises(Hive::RefactorPatrol::PostMergeReporter::ReportError) do
+        reporter.build(token: ctx.fetch(:token), envelope: missing_id,
+                       state_store: ctx.fetch(:post_merge), now: T0 + 13)
+      end
+      assert_equal "invalid_envelope", error.reason
+
+      unsafe_id = envelope_for.merge("ranked" => [ { "id" => "../escape" } ])
+      error = assert_raises(Hive::RefactorPatrol::PostMergeReporter::ReportError) do
+        reporter.build(token: ctx.fetch(:token), envelope: unsafe_id,
+                       state_store: ctx.fetch(:post_merge), now: T0 + 14)
+      end
+      assert_equal "invalid_envelope", error.reason
+      assert_raises(Hive::RefactorPatrol::PostMergeReporter::ReportError) do
+        reporter.send(:read_thesis!, "../escape")
+      end
+    end
+  end
+
+  def test_mismatched_and_malformed_thesis_files_are_rejected
+    with_report_context do |ctx|
+      mismatched = thesis("other", "fp-other")
+      thesis_dir = File.join(ctx.fetch(:refactor_state).root, "theses")
+      FileUtils.mkdir_p(thesis_dir)
+      File.write(File.join(thesis_dir, "expected.json"), JSON.generate(mismatched.to_h))
+      error = assert_raises(Hive::RefactorPatrol::PostMergeReporter::ReportError) do
+        ctx.fetch(:reporter).send(:read_thesis!, "expected")
+      end
+      assert_equal "thesis_identity_mismatch", error.reason
+
+      File.write(File.join(thesis_dir, "broken.json"), "[")
+      error = assert_raises(Hive::RefactorPatrol::PostMergeReporter::ReportError) do
+        ctx.fetch(:reporter).send(:read_thesis!, "broken")
+      end
+      assert_equal "thesis_missing", error.reason
+    end
+  end
+
   private
 
   def with_report_context(baseline: {})

@@ -493,21 +493,218 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       architecture = sched.tick(now: T0 + 2).first
 
       assert_equal "refactor-patrol-post-merge", architecture.fetch(:stage)
+      sched.complete(project: "p1", exit_code: 0, stage: architecture.fetch(:stage),
+                     slug: architecture.fetch(:slug), now: T0 + 3)
+      assert_equal :architecture_dry_run_completed, sched.last_events.last.fetch(:type)
       assert_equal before, File.binread(File.join(post_merge.root, "state.json"))
       refute File.exist?(File.join(post_merge.root, "emissions.json"))
       assert_empty Dir.glob(File.join(post_merge.root, "reports", "*.json"))
     end
   end
 
+  def test_default_architecture_factories_git_helper_and_event_drain
+    with_tmp_git_repo do |repo|
+      entry = project_entry(repo)
+      cfg = enabled_cfg("default_branch" => "master")
+      sched = Hive::Daemon::PatrolScheduler.new(registry: -> { [] })
+
+      assert_instance_of Hive::RefactorPatrol::CheckoutGuard,
+                         sched.instance_variable_get(:@checkout_guard_factory).call(entry, cfg)
+      assert_instance_of Hive::RefactorPatrol::LocalMergeCatalog,
+                         sched.instance_variable_get(:@merge_catalog_factory).call(entry)
+      assert_instance_of Hive::RefactorPatrol::PostMergeScope,
+                         sched.instance_variable_get(:@scope_factory).call(entry, cfg)
+      assert_equal({}, sched.instance_variable_get(:@fingerprint_loader).call(repo))
+      head = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      assert Hive::Daemon::PatrolScheduler::GitHelper.new.ancestor?(repo, head, head)
+
+      sched.send(:record_event, :blocked, project: "p1", reason: "test")
+      assert_equal 1, sched.drain_events.size
+      assert_empty sched.drain_events
+
+      unavailable = Hive::Daemon::PatrolScheduler.new(
+        registry: -> { [] }, architecture_store_factory: ->(_entry) { raise Hive::Error, "no state" }
+      )
+      refute unavailable.send(:architecture_batch_active?, entry)
+    end
+  end
+
+  def test_first_due_tick_initializes_baseline_even_when_soft_ancestry_is_unknown
+    with_tmp_dir do |dir|
+      entry = project_entry(dir)
+      cfg = enabled_cfg("refactor_patrol" => { "enabled" => true })
+      write_state(dir, "last_scanned_sha" => "base")
+      post_merge = Hive::RefactorPatrol::PostMergeStateStore.new(dir, project: "p1")
+      git = Class.new(FakeGit) do
+        def ancestor?(*_args)
+          raise Hive::GitError, "soft diagnostic unavailable"
+        end
+      end.new(sha: "head")
+      sched = architecture_scheduler(
+        entry, cfg, post_merge: post_merge, guard: FakeArchitectureGuard.new(dir),
+        catalog: CatalogResult.new([], []), scope: nil, git: git
+      )
+
+      assert_equal [ "hive patrol p1 --json" ], sched.tick(now: T0).map { |item| item.fetch(:command) }
+      assert post_merge.initialized?
+      assert_nil post_merge.state.dig("diagnostics", "capability_merge_ancestor")
+    end
+  end
+
+  def test_active_batch_blocks_capability_movement_scope_and_checkout_without_ordinary_failure
+    with_tmp_dir do |dir|
+      entry, cfg, post_merge = active_architecture_context(dir)
+      sched = architecture_scheduler(
+        entry, cfg, post_merge: post_merge, guard: FakeArchitectureGuard.new(dir),
+        catalog: CatalogResult.new([], []), scope: nil,
+        capability: CapabilityResult.new(false, "capability_missing", {}, nil)
+      )
+      assert_empty sched.tick(now: T0 + 1)
+      assert_equal "capability_missing", sched.last_events.last.fetch(:reason)
+    end
+
+    with_tmp_dir do |dir|
+      entry, cfg, post_merge = active_architecture_context(dir)
+      sched = architecture_scheduler(
+        entry, cfg, post_merge: post_merge, guard: FakeArchitectureGuard.new(dir, head: "other"),
+        catalog: CatalogResult.new([], []), scope: nil
+      )
+      assert_empty sched.tick(now: T0 + 1)
+      assert_equal "checkout_moved", sched.last_events.last.fetch(:reason)
+    end
+
+    with_tmp_dir do |dir|
+      entry, cfg, post_merge = active_architecture_context(dir)
+      unusable = ScopeResult.new(false, "scope_unusable", { "detail" => "empty" }, nil, [], false, [])
+      sched = architecture_scheduler(
+        entry, cfg, post_merge: post_merge, guard: FakeArchitectureGuard.new(dir),
+        catalog: CatalogResult.new([], []), scope: unusable
+      )
+      assert_empty sched.tick(now: T0 + 1)
+      assert_equal "scope_unusable", sched.last_events.last.fetch(:reason)
+    end
+
+    with_tmp_dir do |dir|
+      entry, cfg, post_merge = active_architecture_context(dir)
+      blocked_guard = Object.new
+      blocked_guard.define_singleton_method(:acquire!) do
+        raise Hive::RefactorPatrol::CheckoutGuard::Blocked.new("checkout_dirty", "dirty")
+      end
+      sched = architecture_scheduler(
+        entry, cfg, post_merge: post_merge, guard: blocked_guard,
+        catalog: CatalogResult.new([], []), scope: nil
+      )
+      assert_empty sched.tick(now: T0 + 1)
+      assert_equal "checkout_dirty", sched.last_events.last.fetch(:reason)
+    end
+  end
+
+  def test_seed_guard_and_catalog_errors_are_retryable_and_store_errors_still_emit_events
+    with_tmp_dir do |dir|
+      entry, cfg, post_merge = active_architecture_context(dir, ordinary_sha: "base")
+      blocked_guard = Object.new
+      blocked_guard.define_singleton_method(:acquire!) do
+        raise Hive::RefactorPatrol::CheckoutGuard::Blocked.new("checkout_busy", "busy")
+      end
+      sched = architecture_scheduler(
+        entry, cfg, post_merge: post_merge, guard: blocked_guard,
+        catalog: CatalogResult.new([], []), scope: nil
+      )
+      assert_equal [ "hive patrol p1 --json" ], sched.tick(now: T0 + 1).map { |item| item.fetch(:command) }
+      assert_equal "checkout_busy", sched.last_events.last.fetch(:reason)
+    end
+
+    with_tmp_dir do |dir|
+      entry, cfg, post_merge = active_architecture_context(dir, ordinary_sha: "base")
+      catalog_error = Hive::RefactorPatrol::LocalMergeCatalog::CatalogError.new(
+        "checkpoint_unreachable", "rewritten"
+      )
+      catalog = Object.new
+      catalog.define_singleton_method(:discover) { |**| raise catalog_error }
+      sched = Hive::Daemon::PatrolScheduler.new(
+        registry: -> { [ entry ] }, config_loader: ->(_path) { cfg }, git: FakeGit.new(sha: "head"),
+        architecture_store_factory: ->(_entry) { post_merge },
+        checkout_guard_factory: ->(_entry, _config) { FakeArchitectureGuard.new(dir) },
+        capability_probe_factory: ->(*) { Struct.new(:result) { def call(_root) = result }.new(CapabilityResult.new(true, nil, {}, "/tmp/hive")) },
+        merge_catalog_factory: ->(_entry) { catalog }
+      )
+      assert_equal [ "hive patrol p1 --json" ], sched.tick(now: T0 + 1).map { |item| item.fetch(:command) }
+      assert_equal "checkpoint_unreachable", sched.last_events.last.fetch(:reason)
+    end
+
+    entry = { "name" => "p1", "path" => "/missing" }
+    sched = Hive::Daemon::PatrolScheduler.new(
+      registry: -> { [] }, architecture_store_factory: ->(_entry) { raise Hive::Error, "broken state" }
+    )
+    sched.send(:block_first_owed, entry, reason: "checkout_missing", evidence: {}, now: T0)
+    assert_equal "checkout_missing", sched.last_events.last.fetch(:reason)
+  end
+
+  def test_architecture_nonzero_cancel_reporter_and_reconciliation_paths_remain_owed
+    with_tmp_dir do |dir|
+      entry, cfg, post_merge = active_architecture_context(dir)
+      guard = FakeArchitectureGuard.new(dir)
+      scope = ScopeResult.new(true, nil, {}, "path", [ "lib" ], true,
+                              [ "--changed-since", "base", "--path", "lib" ])
+      completion_error = Hive::RefactorPatrol::PostMergeReporter::ReportError.new("report_failed", "failed")
+      sched = architecture_scheduler(
+        entry, cfg, post_merge: post_merge, guard: guard, catalog: CatalogResult.new([], []), scope: scope,
+        architecture_completion: ->(**) { raise completion_error }
+      )
+
+      dispatch = sched.tick(now: T0 + 1).fetch(0)
+      envelope = { "schema" => "hive-refactor-patrol", "ok" => true, "project" => "p1",
+                   "project_root" => File.realpath(dir) }
+      sched.complete(project: "p1", exit_code: 0, stage: dispatch.fetch(:stage), slug: dispatch.fetch(:slug),
+                     envelope: envelope, now: T0 + 2)
+      assert_equal "report_failed", sched.last_events.last.fetch(:reason)
+
+      dispatch = sched.tick(now: T0 + 3).fetch(0)
+      sched.complete(project: "p1", exit_code: 9, stage: dispatch.fetch(:stage), slug: dispatch.fetch(:slug),
+                     now: T0 + 4)
+      assert_equal "child_exit_nonzero", sched.last_events.last.fetch(:reason)
+
+      dispatch = sched.tick(now: T0 + 5).fetch(0)
+      sched.cancel(project: "p1", stage: dispatch.fetch(:stage), slug: dispatch.fetch(:slug),
+                   reason: "capacity", now: T0 + 6)
+      refute sched.architecture_pending?("p1")
+
+      dispatch = sched.tick(now: T0 + 7).fetch(0)
+      sched.instance_variable_set(:@architecture_completion, nil)
+      sched.complete(project: "p1", exit_code: 0, stage: dispatch.fetch(:stage), slug: dispatch.fetch(:slug),
+                     envelope: envelope, now: T0 + 8)
+      assert_equal "reporter_unavailable", sched.last_events.last.fetch(:reason)
+      assert guard.snapshots.all?(&:released)
+
+      assert_equal File.expand_path(File.join(dir, "gone")), sched.send(:canonical_path, File.join(dir, "gone"))
+    end
+
+    sched = Hive::Daemon::PatrolScheduler.new(registry: -> { [] })
+    sched.send(:reconcile_completion_error, nil, project: "p1", error: Hive::Error.new("no pending"), now: T0)
+    assert_equal "completion_failed", sched.last_events.last.fetch(:reason)
+
+    owed_store = Object.new
+    owed_store.define_singleton_method(:merge_record) { |_identity| { "status" => "owed" } }
+    pending = { store: owed_store, identity: "pr-1-head" }
+    sched.send(:reconcile_completion_error, pending, project: "p1", error: Hive::Error.new("already owed"), now: T0)
+    assert_equal "completion_failed", sched.last_events.last.fetch(:reason)
+
+    broken_store = Object.new
+    broken_store.define_singleton_method(:merge_record) { |_identity| raise Hive::Error, "state broken" }
+    pending = { store: broken_store, identity: "pr-1-head" }
+    sched.send(:reconcile_completion_error, pending, project: "p1", error: Hive::Error.new("completion"), now: T0)
+    assert_equal "state broken", sched.last_events.last.dig(:evidence, "state_error")
+  end
+
   private
 
   def architecture_scheduler(entry, cfg, post_merge:, guard:, catalog:, scope:, capability: nil, dry_run: false,
-                             architecture_completion: nil)
+                             architecture_completion: nil, git: FakeGit.new(sha: "head"))
     capability ||= CapabilityResult.new(true, nil, {}, "/tmp/hive-local")
     Hive::Daemon::PatrolScheduler.new(
       registry: -> { [ entry ] },
       config_loader: ->(_path) { cfg },
-      git: FakeGit.new(sha: "head"),
+      git: git,
       architecture_store_factory: ->(_entry) { post_merge },
       checkout_guard_factory: ->(_entry, _config) { guard },
       capability_probe_factory: ->(_entry, _config) { Struct.new(:result) { def call(_root) = result }.new(capability) },
@@ -517,6 +714,24 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       architecture_completion: architecture_completion,
       dry_run: dry_run
     )
+  end
+
+  def active_architecture_context(dir, ordinary_sha: "head")
+    entry = project_entry(dir)
+    cfg = enabled_cfg(
+      "patrol" => { "enabled" => true, "trigger" => "new_commits" },
+      "refactor_patrol" => { "enabled" => true }
+    )
+    write_state(dir, "last_scanned_sha" => ordinary_sha)
+    post_merge = Hive::RefactorPatrol::PostMergeStateStore.new(dir, project: "p1")
+    post_merge.initialize_at!(head_sha: "base", now: T0)
+    post_merge.open_batch!(
+      head_sha: "head",
+      merges: [ { "pr_number" => 10, "merge_sha" => "head", "base_sha" => "base",
+                  "subject" => "Change (#10)", "changed_paths" => [ "lib/a.rb" ] } ],
+      now: T0
+    )
+    [ entry, cfg, post_merge ]
   end
 
   def successful_report(token, now)

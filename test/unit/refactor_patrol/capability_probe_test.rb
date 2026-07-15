@@ -60,4 +60,20 @@ class HiveRefactorPatrolCapabilityProbeTest < Minitest::Test
       assert Hive::RefactorPatrol::CapabilityProbe.new(executable: executable, timeout_sec: 2).call(dir).ok?
     end
   end
+
+  def test_system_call_failure_is_reported_as_missing
+    with_tmp_dir do |dir|
+      executable = File.join(dir, "hive-local")
+      File.write(executable, "#!/bin/sh\n")
+      FileUtils.chmod(0o755, executable)
+      result = Hive::RefactorPatrol::CapabilityProbe.new(
+        executable: executable,
+        runner: ->(*) { raise Errno::EACCES, executable }
+      ).call(dir)
+
+      refute result.ok?
+      assert_equal "capability_missing", result.reason
+      assert_equal "Errno::EACCES", result.evidence.fetch("error")
+    end
+  end
 end

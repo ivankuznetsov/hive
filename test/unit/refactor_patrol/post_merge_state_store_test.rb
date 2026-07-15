@@ -135,6 +135,133 @@ class HiveRefactorPatrolPostMergeStateStoreTest < Minitest::Test
     end
   end
 
+  def test_retry_lifecycle_helpers_and_bounded_evidence_remain_durable
+    with_tmp_dir do |dir|
+      state = store(dir)
+      state.initialize_at!(head_sha: "base", now: T0)
+      state.open_batch!(head_sha: "merge-1", merges: [ merge(1, "merge-1", "base") ], now: T0 + 1)
+      identity = state.identity_for(1, "merge-1")
+
+      assert_equal Hive::ExitCodes::TEMPFAIL,
+                   Hive::RefactorPatrol::PostMergeStateStore::StateError.new("bad").exit_code
+      assert_raises(Hive::RefactorPatrol::PostMergeStateStore::StateError) do
+        state.record_failure!(identity, reason: "not running", now: T0 + 2)
+      end
+
+      state.record_skip!(identity, reason: "blocked", evidence: { "detail" => "x" * 3_000 }, now: T0 + 3)
+      blocked = state.merge_record(identity)
+      assert_equal "blocked", blocked.fetch("status")
+      assert_operator JSON.generate(blocked.fetch("attempts").last.fetch("evidence")).bytesize, :<=, 2_000
+      state.reserve!(identity, fingerprint_snapshot: {}, now: T0 + 4)
+      assert_raises(Hive::RefactorPatrol::PostMergeStateStore::StateError) do
+        state.reserve!(identity, fingerprint_snapshot: {}, now: T0 + 4)
+      end
+      assert_raises(Hive::RefactorPatrol::PostMergeStateStore::StateError) do
+        state.record_skip!(identity, reason: "blocked while running", now: T0 + 5)
+      end
+
+      state.cancel_reservation!(identity, reason: "capacity", now: T0 + 6)
+      assert_equal "owed", state.merge_record(identity).fetch("status")
+
+      state.reserve!(identity, fingerprint_snapshot: {}, now: T0 + 7)
+      state.recover_interrupted!(now: T0 + 8)
+      recovered = state.merge_record(identity)
+      assert_equal "owed", recovered.fetch("status")
+      assert_equal "daemon_restarted", recovered.fetch("attempts").last.fetch("reason")
+      state.recover_interrupted!(now: T0 + 9)
+    end
+  end
+
+  def test_catalog_identity_and_checkpoint_validation_errors_fail_closed
+    with_tmp_dir do |dir|
+      state = store(dir)
+      state.initialize_at!(head_sha: "base", now: T0)
+
+      assert_raises(Hive::RefactorPatrol::PostMergeStateStore::StateError) { state.identity_for("not-a-number", "sha") }
+      assert_raises(Hive::RefactorPatrol::PostMergeStateStore::StateError) do
+        state.open_batch!(head_sha: "head", merges: [ { "pr_number" => 1 } ], now: T0 + 1)
+      end
+
+      state.open_batch!(head_sha: "head", merges: [ merge(1, "merge-1", "base") ], now: T0 + 2)
+      state.open_batch!(head_sha: "head", merges: [ merge(1, "merge-1", "base") ], now: T0 + 3)
+      assert_raises(Hive::RefactorPatrol::PostMergeStateStore::StateError) do
+        state.open_batch!(head_sha: "head", merges: [ merge(1, "merge-1", "other") ], now: T0 + 4)
+      end
+
+      assert_raises(Hive::RefactorPatrol::PostMergeStateStore::StateError) do
+        state.load!(head_sha: "head", ancestor_check: ->(*) { raise "broken validator" })
+      end
+    end
+
+    with_tmp_dir do |dir|
+      path = File.join(dir, "missing")
+      state = store(path)
+      initialized = state.initialize_at!(head_sha: "base", now: T0)
+      assert_equal File.expand_path(path), initialized.fetch("project_root")
+    end
+  end
+
+  def test_corrupt_records_batches_reports_and_ledgers_are_never_silently_reset
+    with_tmp_dir do |dir|
+      state = store(dir)
+      state.initialize_at!(head_sha: "base", now: T0)
+      path = File.join(state.root, "state.json")
+
+      missing_merge_key = valid_state(dir).merge("merges" => [
+        {
+          "identity" => "pr-1-merge", "pr_number" => 1, "merge_sha" => "merge",
+          "base_sha" => "base", "status" => "owed"
+        }
+      ])
+      File.write(path, JSON.generate(missing_merge_key))
+      assert_raises(Hive::RefactorPatrol::PostMergeStateStore::StateError) { state.state }
+
+      invalid_batch = valid_state(dir).merge("active_batch_head" => "head", "active_batch_start_index" => 1)
+      File.write(path, JSON.generate(invalid_batch))
+      assert_raises(Hive::RefactorPatrol::PostMergeStateStore::StateError) { state.state }
+
+      File.write(path, JSON.generate(valid_state(dir)))
+      emissions = File.join(state.root, "emissions.json")
+      File.write(emissions, JSON.generate("schema_version" => 2, "entries" => {}))
+      assert_raises(Hive::RefactorPatrol::PostMergeStateStore::StateError) { state.emissions }
+      File.write(emissions, "[")
+      assert_raises(Hive::RefactorPatrol::PostMergeStateStore::StateError) { state.emissions }
+    end
+  end
+
+  def test_reconciliation_ignores_corrupt_report_and_complete_detects_missing_artifact
+    with_tmp_dir do |dir|
+      state = store(dir)
+      state.initialize_at!(head_sha: "base", now: T0)
+      state.open_batch!(head_sha: "merge-1", merges: [ merge(1, "merge-1", "base") ], now: T0 + 1)
+      identity = state.identity_for(1, "merge-1")
+      state.reserve!(identity, fingerprint_snapshot: {}, now: T0 + 2)
+      state.persist_artifacts!(identity, report: successful_report(1, "merge-1", "base"), emission_digests: {})
+      File.write(File.join(state.root, "reports", "pr-1-merge-1.json"), "[")
+      assert_equal "running", state.state.fetch("merges").first.fetch("status")
+    end
+
+    with_tmp_dir do |dir|
+      disappearing = Class.new(Hive::RefactorPatrol::PostMergeStateStore) do
+        def persist_artifacts!(identity, **kwargs)
+          result = super
+          merge = identity.match(/\Apr-(\d+)-(.+)\z/)
+          FileUtils.rm_f(File.join(root, "reports", "pr-#{merge[1]}-#{merge[2]}.json"))
+          result
+        end
+      end.new(dir, project: "hive")
+      disappearing.initialize_at!(head_sha: "base", now: T0)
+      disappearing.open_batch!(head_sha: "merge-1", merges: [ merge(1, "merge-1", "base") ], now: T0 + 1)
+      identity = disappearing.identity_for(1, "merge-1")
+      disappearing.reserve!(identity, fingerprint_snapshot: {}, now: T0 + 2)
+
+      assert_raises(Hive::RefactorPatrol::PostMergeStateStore::StateError) do
+        disappearing.complete!(identity, report: successful_report(1, "merge-1", "base"),
+                                emission_digests: {}, now: T0 + 3)
+      end
+    end
+  end
+
   private
 
   def successful_report(pr, merge_sha, base_sha)

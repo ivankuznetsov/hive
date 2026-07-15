@@ -30,7 +30,9 @@ module Hive
         slug: normalize_string(raw["slug"] || raw[:slug]),
         display_name: normalize_string(raw["display_name"] || raw[:display_name]),
         depends_on: normalize_string(raw["depends_on"] || raw[:depends_on]),
-        workflow: normalize_string(raw["workflow"] || raw[:workflow])
+        workflow: normalize_string(raw["workflow"] || raw[:workflow]),
+        workflow_commit: normalize_string(raw["workflow_commit"] || raw[:workflow_commit]),
+        workflow_manifest_digest: normalize_string(raw["workflow_manifest_digest"] || raw[:workflow_manifest_digest])
       }
     rescue Errno::ENOENT
       # No meta.yml (pre-`hive new` / legacy folders) — a normal, expected
@@ -44,7 +46,8 @@ module Hive
       # rescue (matching Worktree.read_pointer) and log so the dropped fields
       # are observable instead of failing the gate open in silence.
       warn "hive: task_meta: failed to read #{path(task_folder)} " \
-           "(#{e.class}: #{e.message}); treating meta as empty (depends_on, workflow dropped)"
+           "(#{e.class}: #{e.message}); treating meta as empty " \
+           "(depends_on, workflow dropped; managed provenance dropped)"
       empty
     end
 
@@ -102,10 +105,16 @@ module Hive
       )
     end
 
-    def write(task_folder, id:, slug:, display_name:, depends_on: nil, workflow: nil)
+    def write(task_folder, id:, slug:, display_name:, depends_on: nil, workflow: nil,
+              workflow_commit: nil, workflow_manifest_digest: nil)
       FileUtils.mkdir_p(task_folder)
       normalized_depends_on = normalize_string(depends_on)
       normalized_workflow = normalize_string(workflow)
+      normalized_commit = normalize_string(workflow_commit)
+      normalized_digest = normalize_string(workflow_manifest_digest)
+      if normalized_commit.nil? != normalized_digest.nil?
+        raise ArgumentError, "workflow_commit and workflow_manifest_digest must be written together"
+      end
       data = {
         "id" => normalize_id(id),
         "slug" => normalize_string(slug),
@@ -113,10 +122,15 @@ module Hive
       }
       data["depends_on"] = normalized_depends_on if normalized_depends_on
       data["workflow"] = normalized_workflow if normalized_workflow
+      data["workflow_commit"] = normalized_commit if normalized_commit
+      data["workflow_manifest_digest"] = normalized_digest if normalized_digest
       tmp = File.join(task_folder, ".#{FILENAME}.tmp.#{Process.pid}.#{SecureRandom.hex(4)}")
       File.write(tmp, data.to_yaml)
       File.rename(tmp, path(task_folder))
-      data.transform_keys(&:to_sym).merge(depends_on: normalized_depends_on, workflow: normalized_workflow)
+      data.transform_keys(&:to_sym).merge(
+        depends_on: normalized_depends_on, workflow: normalized_workflow,
+        workflow_commit: normalized_commit, workflow_manifest_digest: normalized_digest
+      )
     ensure
       File.delete(tmp) if tmp && File.exist?(tmp)
     end
@@ -130,7 +144,9 @@ module Hive
         slug: slug,
         display_name: name,
         depends_on: current[:depends_on],
-        workflow: current[:workflow]
+        workflow: current[:workflow],
+        workflow_commit: current[:workflow_commit],
+        workflow_manifest_digest: current[:workflow_manifest_digest]
       )
     end
 
@@ -149,12 +165,17 @@ module Hive
         # Preserve the workflow selector — without it, the daemon's id
         # backfiller would silently drop a non-coding `workflow:` and revert
         # the task to the project default (mirrors update_display_name).
-        workflow: current[:workflow]
+        workflow: current[:workflow],
+        workflow_commit: current[:workflow_commit],
+        workflow_manifest_digest: current[:workflow_manifest_digest]
       )
     end
 
     def empty
-      { id: nil, slug: nil, display_name: nil, depends_on: nil, workflow: nil }
+      {
+        id: nil, slug: nil, display_name: nil, depends_on: nil, workflow: nil,
+        workflow_commit: nil, workflow_manifest_digest: nil
+      }
     end
 
     def read_for_update!(task_folder)
@@ -170,7 +191,9 @@ module Hive
         slug: normalize_string(fetch(raw, "slug")),
         display_name: normalize_string(fetch(raw, "display_name")),
         depends_on: normalize_string(fetch(raw, "depends_on")),
-        workflow: normalize_string(fetch(raw, "workflow"))
+        workflow: normalize_string(fetch(raw, "workflow")),
+        workflow_commit: normalize_string(fetch(raw, "workflow_commit")),
+        workflow_manifest_digest: normalize_string(fetch(raw, "workflow_manifest_digest"))
       }
     end
 

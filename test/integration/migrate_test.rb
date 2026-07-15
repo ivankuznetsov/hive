@@ -313,11 +313,14 @@ class MigrateTest < Minitest::Test
         out, _err = capture_io { migrate_command(dir).call }
 
         assert_includes out, "backfilled 3 task ids"
-        assert_equal({ id: 1, slug: "early-task-260603-aaaa", display_name: nil, depends_on: nil, workflow: nil },
+        assert_equal({ id: 1, slug: "early-task-260603-aaaa", display_name: nil, depends_on: nil, workflow: nil,
+                       workflow_commit: nil, workflow_manifest_digest: nil },
                      Hive::TaskMeta.read(earlier))
-        assert_equal({ id: 2, slug: "later-task-260603-bbbb", display_name: nil, depends_on: nil, workflow: nil },
+        assert_equal({ id: 2, slug: "later-task-260603-bbbb", display_name: nil, depends_on: nil, workflow: nil,
+                       workflow_commit: nil, workflow_manifest_digest: nil },
                      Hive::TaskMeta.read(later))
-        assert_equal({ id: 3, slug: "no-idea-260603-cccc", display_name: nil, depends_on: nil, workflow: nil },
+        assert_equal({ id: 3, slug: "no-idea-260603-cccc", display_name: nil, depends_on: nil, workflow: nil,
+                       workflow_commit: nil, workflow_manifest_digest: nil },
                      Hive::TaskMeta.read(no_idea))
         assert_equal 4, Hive::TaskCounter.peek
       end

@@ -72,13 +72,29 @@ class TaskMetaTest < Minitest::Test
     end
   end
 
+  def test_managed_workflow_provenance_round_trips_and_survives_updates
+    with_tmp_dir do |dir|
+      Hive::TaskMeta.write(
+        dir, id: 7, slug: "managed-260715-aaaa", display_name: nil, workflow: "demo",
+        workflow_commit: "a" * 40, workflow_manifest_digest: "b" * 64
+      )
+
+      assert_equal "a" * 40, Hive::TaskMeta.read(dir)[:workflow_commit]
+      assert_equal "b" * 64, Hive::TaskMeta.read(dir)[:workflow_manifest_digest]
+      Hive::TaskMeta.update_display_name(dir, "Managed")
+      Hive::TaskMeta.update_id(dir, 8)
+      assert_equal "a" * 40, Hive::TaskMeta.read(dir)[:workflow_commit]
+      assert_equal "b" * 64, Hive::TaskMeta.read(dir)[:workflow_manifest_digest]
+    end
+  end
   include HiveTestHelper
 
   def test_write_and_read_round_trip
     with_tmp_dir do |dir|
       Hive::TaskMeta.write(dir, id: 42, slug: "add-foo", display_name: "Add Foo")
 
-      assert_equal({ id: 42, slug: "add-foo", display_name: "Add Foo", depends_on: nil, workflow: nil },
+      assert_equal({ id: 42, slug: "add-foo", display_name: "Add Foo", depends_on: nil, workflow: nil,
+                     workflow_commit: nil, workflow_manifest_digest: nil },
                    Hive::TaskMeta.read(dir))
       assert File.exist?(File.join(dir, "meta.yml"))
       refute Dir.children(dir).any? { |name| name.include?(".meta.yml.tmp") }
@@ -90,7 +106,8 @@ class TaskMetaTest < Minitest::Test
       Hive::TaskMeta.write(dir, id: 42, slug: "add-foo", display_name: "Add Foo", depends_on: "base-task")
 
       assert_equal(
-        { id: 42, slug: "add-foo", display_name: "Add Foo", depends_on: "base-task", workflow: nil },
+        { id: 42, slug: "add-foo", display_name: "Add Foo", depends_on: "base-task", workflow: nil,
+          workflow_commit: nil, workflow_manifest_digest: nil },
         Hive::TaskMeta.read(dir)
       )
       assert_includes File.read(File.join(dir, "meta.yml")), "depends_on: base-task"
@@ -102,7 +119,8 @@ class TaskMetaTest < Minitest::Test
       Hive::TaskMeta.write(dir, id: 42, slug: "add-foo", display_name: "Add Foo", workflow: "research")
 
       assert_equal(
-        { id: 42, slug: "add-foo", display_name: "Add Foo", depends_on: nil, workflow: "research" },
+        { id: 42, slug: "add-foo", display_name: "Add Foo", depends_on: nil, workflow: "research",
+          workflow_commit: nil, workflow_manifest_digest: nil },
         Hive::TaskMeta.read(dir)
       )
       assert_includes File.read(File.join(dir, "meta.yml")), "workflow: research"
@@ -129,7 +147,7 @@ class TaskMetaTest < Minitest::Test
 
   def test_missing_or_malformed_file_returns_nil_fields
     with_tmp_dir do |dir|
-      assert_equal({ id: nil, slug: nil, display_name: nil, depends_on: nil, workflow: nil }, Hive::TaskMeta.read(dir))
+      assert_equal Hive::TaskMeta.empty, Hive::TaskMeta.read(dir)
 
       File.write(File.join(dir, "meta.yml"), ":\n:not yaml")
       # Malformed YAML hits the warn arm of read; capture so it isn't leaked to
@@ -137,10 +155,10 @@ class TaskMetaTest < Minitest::Test
       # test_malformed_yaml_warns_that_depends_on_and_workflow_were_dropped).
       result = nil
       capture_io { result = Hive::TaskMeta.read(dir) }
-      assert_equal({ id: nil, slug: nil, display_name: nil, depends_on: nil, workflow: nil }, result)
+      assert_equal Hive::TaskMeta.empty, result
 
       File.write(File.join(dir, "meta.yml"), "- not\n- a hash\n")
-      assert_equal({ id: nil, slug: nil, display_name: nil, depends_on: nil, workflow: nil }, Hive::TaskMeta.read(dir))
+      assert_equal Hive::TaskMeta.empty, Hive::TaskMeta.read(dir)
     end
   end
 
@@ -148,12 +166,14 @@ class TaskMetaTest < Minitest::Test
     with_tmp_dir do |dir|
       File.write(File.join(dir, "meta.yml"), "id: '42'\nslug: from-string-id\n")
       # A YAML-quoted numeric string id is coerced to an Integer via Integer().
-      assert_equal({ id: 42, slug: "from-string-id", display_name: nil, depends_on: nil, workflow: nil },
+      assert_equal({ id: 42, slug: "from-string-id", display_name: nil, depends_on: nil, workflow: nil,
+                     workflow_commit: nil, workflow_manifest_digest: nil },
                    Hive::TaskMeta.read(dir))
 
       File.write(File.join(dir, "meta.yml"), "id: not-a-number\nslug: bad-id\n")
       # An unparseable, non-empty id falls back to nil (ArgumentError rescue).
-      assert_equal({ id: nil, slug: "bad-id", display_name: nil, depends_on: nil, workflow: nil },
+      assert_equal({ id: nil, slug: "bad-id", display_name: nil, depends_on: nil, workflow: nil,
+                     workflow_commit: nil, workflow_manifest_digest: nil },
                    Hive::TaskMeta.read(dir))
     end
   end
@@ -172,7 +192,7 @@ class TaskMetaTest < Minitest::Test
       result = nil
       _out, err = capture_io { result = Hive::TaskMeta.read(dir) }
       assert_equal Hive::TaskMeta.empty, result
-      assert_match(/depends_on, workflow dropped/, err,
+      assert_match(/depends_on, workflow dropped; managed provenance dropped/, err,
                    "a YAML parse failure must warn that depends_on (and the " \
                    "workflow selector) were dropped")
     end
@@ -207,7 +227,9 @@ class TaskMetaTest < Minitest::Test
           slug: "keep-slug",
           display_name: "Readable Name",
           depends_on: "base-task",
-          workflow: "research"
+          workflow: "research",
+          workflow_commit: nil,
+          workflow_manifest_digest: nil
         },
         Hive::TaskMeta.read(dir)
       )
@@ -228,7 +250,8 @@ class TaskMetaTest < Minitest::Test
       Hive::TaskMeta.update_id(dir, 42)
 
       assert_equal(
-        { id: 42, slug: "keep-slug", display_name: "Keep Me", depends_on: "base-task", workflow: "research" },
+        { id: 42, slug: "keep-slug", display_name: "Keep Me", depends_on: "base-task", workflow: "research",
+          workflow_commit: nil, workflow_manifest_digest: nil },
         Hive::TaskMeta.read(dir)
       )
     end

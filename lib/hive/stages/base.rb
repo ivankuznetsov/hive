@@ -136,6 +136,24 @@ module Hive
                                  base_add_dirs: [ task.folder ],
                                  default_allowed_tools: nil,
                                  explicit_permission_spec: MISSING_EXPLICIT_PERMISSION_SPEC)
+        if task.respond_to?(:managed_workflow?) && task.managed_workflow?
+          require "hive/workflow_package/managed_store"
+          require "hive/workflow_package/runtime_policy"
+          store = Hive::WorkflowPackage::ManagedStore.new(task.hive_state_path)
+          manifest = store.manifest(task.workflow.id.to_s, task.workflow_commit, task.workflow_manifest_digest)
+          runtime_policy = Hive::WorkflowPackage::RuntimePolicy.compile(
+            manifest.data.fetch("permissions"), task_folder: task.folder, profile: profile,
+            policy_dir: File.join(task.folder, ".hive-policy", stage_name.to_s)
+          )
+          return {
+            add_dirs: runtime_policy.directories,
+            permission_mode: runtime_policy.permission_mode,
+            allowed_tools: runtime_policy.allowed_tools,
+            disallowed_tools: runtime_policy.disallowed_tools,
+            runtime_policy: runtime_policy
+          }
+        end
+
         spec = if explicit_permission_spec.equal?(MISSING_EXPLICIT_PERMISSION_SPEC)
           Hive::Config.permission_spec(cfg || {}, stage_name)
         else
@@ -173,11 +191,13 @@ module Hive
       # across the spawn sites. `scope` is the Hash stage_permission_scope
       # returns, NOT the PermissionScope::Scope struct.
       def tool_scope_kwargs(scope)
-        {
+        kwargs = {
           permission_mode: scope.fetch(:permission_mode),
           allowed_tools: scope.fetch(:allowed_tools),
           disallowed_tools: scope.fetch(:disallowed_tools)
         }
+        kwargs[:runtime_policy] = scope[:runtime_policy] if scope[:runtime_policy]
+        kwargs
       end
 
       # The per-spec explicit-permission passthrough every reviewer

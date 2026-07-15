@@ -10,6 +10,8 @@ require "hive/task_counter"
 require "hive/task_meta"
 require "hive/workflows"
 require "hive/workflow_selection"
+require "hive/workflow_package/managed_store"
+require "hive/workflow_package/mutation_lock"
 require "hive/tui/text"
 require "hive/dependencies"
 
@@ -139,9 +141,8 @@ module Hive
           File.write(idea_path, render_initial_state(slug, @text, body_override: @body_override, workflow: workflow))
           copy_attachments!(task_dir)
           id = allocate_task_id
-          Hive::TaskMeta.write(task_dir, id: id, slug: slug, display_name: nil,
-                               depends_on: depends_on,
-                               workflow: workflow_info.fetch(:pin) ? workflow.id.to_s : nil)
+          write_task_meta(task_dir, id: id, slug: slug, depends_on: depends_on,
+                          workflow: workflow, workflow_info: workflow_info, hive_state: hive_state)
         rescue StandardError
           # An idea.md or attachment write failure leaves an orphan
           # uncommitted task on disk that the snapshot would surface as a
@@ -174,13 +175,42 @@ module Hive
         # With an explicit --workflow the project default is irrelevant (an
         # override always pins), so don't read config.yml at all — an
         # unreadable/corrupt config must not block a fully-specified `hive new`.
-        return { descriptor: Hive::WorkflowSelection.fetch!(override, project_root: project.fetch("path")), pin: true } if override
+        if override
+          descriptor = Hive::WorkflowSelection.fetch!(override, project_root: project.fetch("path"))
+          return workflow_resolution(descriptor, project, pin: true)
+        end
 
         cfg_default = project_default_workflow(project.fetch("path"))
-        {
-          descriptor: fetch_project_default_workflow!(cfg_default, project),
+        workflow_resolution(
+          fetch_project_default_workflow!(cfg_default, project),
+          project,
           pin: !Hive::Workflows.coding_id?(cfg_default)
-        }
+        )
+      end
+
+      def workflow_resolution(descriptor, project, pin:)
+        store = Hive::WorkflowPackage::ManagedStore.new(project.fetch("hive_state_path"))
+        { descriptor: descriptor, pin: pin, managed: store.selected(descriptor.id.to_s) }
+      end
+
+      def write_task_meta(task_dir, id:, slug:, depends_on:, workflow:, workflow_info:, hive_state:)
+        managed = workflow_info.fetch(:managed)
+        store = Hive::WorkflowPackage::ManagedStore.new(hive_state)
+        Hive::WorkflowPackage::MutationLock.with_lock(store.workflows_dir, shared: true) do
+          if managed
+            current = store.selected(workflow.id.to_s)
+            unless current && current.fetch("source_commit") == managed.fetch("source_commit") &&
+                   current.fetch("manifest_digest") == managed.fetch("manifest_digest")
+              raise Hive::ConcurrentRunError.new("managed workflow selection changed while creating the task")
+            end
+          end
+          Hive::TaskMeta.write(
+            task_dir, id: id, slug: slug, display_name: nil, depends_on: depends_on,
+            workflow: workflow_info.fetch(:pin) ? workflow.id.to_s : nil,
+            workflow_commit: managed&.fetch("source_commit"),
+            workflow_manifest_digest: managed&.fetch("manifest_digest")
+          )
+        end
       end
 
       # A typo'd or later-removed PROJECT default_workflow would otherwise raise

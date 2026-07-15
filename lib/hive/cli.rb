@@ -384,12 +384,14 @@ module Hive
       ).call
     end
 
-    desc "workflow SUBCOMMAND [ID]", "Manage per-project workflow descriptors"
+    desc "workflow SUBCOMMAND [REFERENCE]", "Author workflows and manage published honeycombs"
     long_desc <<~DESC
       Subcommands:
-        new ID    Scaffold a per-project workflow descriptor under
-                  <hive_state_path>/workflows/ID.yml plus its stage
-                  instruction(s) under <hive_state_path>/workflows/ID/.
+        new ID                    Scaffold a project-authored workflow.
+        install honeycomb/NAME    Install an immutable published honeycomb.
+        list                      List local installs (--remote/--outdated).
+        update NAME | --all       Update eligible managed honeycombs.
+        remove NAME               Remove a managed honeycomb.
 
       By default `new` scaffolds the blank `inbox -> work -> done` stub. Pass
       `--template NAME` to seed from a richer sample workflow instead (e.g.
@@ -398,14 +400,29 @@ module Hive
     DESC
     option :template, type: :string,
                       desc: "for `new`: seed from a named sample workflow (e.g. writing, research) instead of the blank stub"
-    def workflow(subcommand = nil, id = nil)
+    option :yes, type: :boolean, default: false,
+                 desc: "approve a mutating honeycomb operation (required without a TTY)"
+    option :force, type: :boolean, default: false,
+                   desc: "replace or remove dirty/unmanaged workflow files after preview"
+    option :remote, type: :boolean, default: false,
+                    desc: "for `list`: refresh and show the public registry catalog"
+    option :outdated, type: :boolean, default: false,
+                      desc: "for `list`: refresh and show eligible local updates"
+    option :all, type: :boolean, default: false,
+                 desc: "for `update`: update every eligible managed honeycomb atomically"
+    def workflow(subcommand = nil, reference = nil)
       require "hive/commands/workflow"
       Hive::Commands::Workflow.new(
         subcommand,
-        id,
+        reference,
         project_root: Dir.pwd,
         json: options[:json],
-        template: options[:template]
+        template: options[:template],
+        yes: options[:yes],
+        force: options[:force],
+        remote: options[:remote],
+        outdated: options[:outdated],
+        all: options[:all]
       ).call
     end
 

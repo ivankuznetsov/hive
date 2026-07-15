@@ -39,7 +39,7 @@ module Hive
 
         files = manifest.files.keys.to_h do |path|
           bytes = read_blob(tree.fetch(path).fetch(:oid))
-          actual_hash = Digest::SHA256.hexdigest(bytes)
+          actual_hash = ::Digest::SHA256.hexdigest(bytes)
           expected_hash = manifest.files.fetch(path)
           unless actual_hash == expected_hash
             raise IntegrityError, "package file #{path.inspect} hash mismatch"

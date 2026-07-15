@@ -11,6 +11,10 @@ require "hive/workflows/descriptor_parser"
 require "hive/workflows/loader"
 require "hive/workflows/project"
 require "hive/workflows/registry"
+require "hive/honeycomb/installation"
+require "hive/honeycomb/package"
+require "hive/honeycomb/registry"
+require "hive/honeycomb/transaction"
 
 module Hive
   module Commands
@@ -19,7 +23,14 @@ module Hive
       DEFAULT_TEMPLATE = "blank".freeze
       WORKFLOW_ID_RE = Hive::Workflows::DescriptorParser::SAFE_SLUG
       SCHEMA = "hive-workflow-new".freeze
-      SUBCOMMANDS = %w[new].freeze
+      SCHEMAS = {
+        "new" => SCHEMA,
+        "install" => "hive-workflow-install",
+        "list" => "hive-workflow-list",
+        "update" => "hive-workflow-update",
+        "remove" => "hive-workflow-remove"
+      }.freeze
+      SUBCOMMANDS = SCHEMAS.keys.freeze
 
       class UsageError < Hive::Error
         attr_reader :value, :expected
@@ -269,19 +280,46 @@ module Hive
       end
       private_class_method :warn_failed_scaffold_cleanup
 
-      def initialize(subcommand, id = nil, project_root: Dir.pwd, json: false, stdout: $stdout, template: DEFAULT_TEMPLATE)
+      def initialize(
+        subcommand,
+        id = nil,
+        project_root: Dir.pwd,
+        json: false,
+        stdout: $stdout,
+        stdin: $stdin,
+        template: nil,
+        yes: false,
+        force: false,
+        remote: false,
+        outdated: false,
+        all: false,
+        registry: nil,
+        package_verifier: nil,
+        transaction: nil,
+        catalog_path: Hive::Paths.honeycomb_catalog_path
+      )
         @subcommand = subcommand
         @id = id
         @project_root = File.expand_path(project_root)
         @json = json
         @stdout = stdout
+        @stdin = stdin
         @template = template
+        @yes = yes
+        @force = force
+        @remote = remote
+        @outdated = outdated
+        @all = all
+        @registry = registry
+        @package_verifier = package_verifier
+        @transaction = transaction
+        @catalog_path = catalog_path
+        @preview_payload = nil
       end
 
       def call
         call!
-      rescue UsageError, Hive::ConfigError, Hive::GitError, Hive::ConcurrentRunError,
-             SystemCallError, IOError => e
+      rescue Hive::Error, SystemCallError, IOError => e
         # ConcurrentRunError (commit-lock contention, TEMPFAIL/75) is now caught
         # too: previously it escaped to bin/hive as plain stderr, hiding the
         # retryable-vs-terminal distinction from --json agent callers.
@@ -309,7 +347,7 @@ module Hive
           )
         end
 
-        unless @subcommand == "new"
+        unless SUBCOMMANDS.include?(@subcommand)
           raise UsageError.new(
             "unknown workflow subcommand #{@subcommand.inspect} (expected: #{expected_list})",
             value: @subcommand,
@@ -317,6 +355,19 @@ module Hive
           )
         end
 
+        validate_subcommand_options!
+        case @subcommand
+        when "new" then call_new!
+        when "install" then call_install!
+        when "list" then call_list!
+        when "update" then call_update!
+        when "remove" then call_remove!
+        end
+      end
+
+      private
+
+      def call_new!
         scaffold = self.class.scaffold_files!(@id, project_root: @project_root, template: @template)
         id = scaffold.fetch(:id)
         paths = scaffold.fetch(:paths)
@@ -346,7 +397,217 @@ module Hive
         payload
       end
 
-      private
+      def call_install!
+        pin = registry.resolve(@id, refresh: true)
+        package = package_verifier.verify(pin, staging_parent: workflows_dir)
+        collision = install_collision(package.pin.name)
+        @preview_payload = install_preview(package, collision)
+        render_install_preview(@preview_payload) unless @json
+        if collision.fetch("blocked")
+          raise Hive::Honeycomb::CollisionError, collision.fetch("message")
+        end
+        approval!("Install honeycomb/#{package.pin.name}")
+        result = transaction.apply(installs: [ package ], force: @force, action: "installed")
+        payload = {
+          "schema" => SCHEMAS.fetch("install"), "schema_version" => 1, "ok" => true,
+          "changed" => result.changed, "name" => package.pin.name, "source" => package.pin.source,
+          "version" => package.pin.version, "sha" => package.pin.sha, "files" => package.files.keys.sort,
+          "preview" => @preview_payload
+        }
+        emit_success(payload)
+      ensure
+        FileUtils.rm_rf(package.staging_dir) if package&.staging_dir && File.exist?(package.staging_dir)
+      end
+
+      def call_list!
+        entries = honeycomb_lockfile.read
+        rows = if @remote
+          remote_rows(registry.refresh!)
+        elsif @outdated
+          catalog = registry.refresh!
+          local_rows(entries, catalog: catalog).select { |row| row.fetch("update_available") == true }
+        else
+          local_rows(entries, catalog: cached_catalog)
+        end
+        payload = {
+          "schema" => SCHEMAS.fetch("list"), "schema_version" => 1, "ok" => true,
+          "mode" => @remote ? "remote" : (@outdated ? "outdated" : "local"),
+          "workflows" => rows
+        }
+        unless @json
+          @stdout.puts "NAME\tVERSION\tSHA\tSOURCE\tUPDATE\tINTEGRITY\tPERMISSIONS"
+          rows.each do |row|
+            update = row["update_available"].nil? ? "unknown" : row["update_available"].to_s
+            @stdout.puts [ row["name"], row["version"] || "unknown", row["sha"], row["source"], update,
+                           row["integrity"] || "remote", row["permissions"] || "-" ].join("\t")
+          end
+        end
+        emit_success(payload)
+      end
+
+      def call_update!
+        raise UsageError, "workflow update is unavailable until update planning completes"
+      end
+
+      def call_remove!
+        raise UsageError, "workflow remove is unavailable until removal planning completes"
+      end
+
+      def validate_subcommand_options!
+        case @subcommand
+        when "new"
+          reject_flags!(yes: @yes, force: @force, remote: @remote, outdated: @outdated, all: @all)
+        when "install"
+          require_argument!("honeycomb reference")
+          reject_flags!(template: !@template.nil?, remote: @remote, outdated: @outdated, all: @all)
+        when "list"
+          raise UsageError.new("workflow list does not accept a reference", value: @id) if @id
+          raise UsageError, "workflow list: --remote and --outdated are mutually exclusive" if @remote && @outdated
+          reject_flags!(template: !@template.nil?, yes: @yes, force: @force, all: @all)
+        when "update"
+          reject_flags!(template: !@template.nil?, remote: @remote, outdated: @outdated)
+          if @all == !@id.nil?
+            raise UsageError, "workflow update requires either NAME[@selector] or --all"
+          end
+        when "remove"
+          require_argument!("managed workflow name")
+          reject_flags!(template: !@template.nil?, remote: @remote, outdated: @outdated, all: @all)
+        end
+      end
+
+      def reject_flags!(flags)
+        invalid = flags.select { |_name, active| active }.keys
+        return if invalid.empty?
+        raise UsageError, "workflow #{@subcommand}: invalid option(s) #{invalid.map { |name| "--#{name}" }.join(', ')}"
+      end
+
+      def require_argument!(label)
+        return unless @id.nil? || @id.to_s.strip.empty?
+        raise UsageError, "workflow #{@subcommand}: missing #{label}"
+      end
+
+      def registry
+        @registry ||= Hive::Honeycomb::Registry.new
+      end
+
+      def package_verifier
+        @package_verifier ||= Hive::Honeycomb::Package.new(registry: registry)
+      end
+
+      def transaction
+        @transaction ||= Hive::Honeycomb::Transaction.new(project_root: @project_root)
+      end
+
+      def workflows_dir
+        @workflows_dir ||= Hive::Workflows::Loader.workflow_dir(@project_root)
+      end
+
+      def honeycomb_lockfile
+        @honeycomb_lockfile ||= Hive::Honeycomb::Lockfile.new(File.join(workflows_dir, ".honeycomb.lock"))
+      end
+
+      def install_collision(name)
+        if Hive::Workflows::Registry::WORKFLOWS.key?(name.to_sym)
+          return { "state" => "reserved", "blocked" => true,
+                   "message" => "workflow id #{name.inspect} is reserved by a built-in workflow" }
+        end
+        entries = honeycomb_lockfile.read
+        installation = Hive::Honeycomb::Installation.new(workflows_dir)
+        if (entry = entries[name])
+          state = installation.inspect(entry).state
+          blocked = state != "clean" && !@force
+          { "state" => state, "blocked" => blocked,
+            "message" => "managed workflow #{name.inspect} is #{state}; use --force to replace it" }
+        else
+          paths = installation.unmanaged_collisions(name)
+          blocked = paths.any? && !@force
+          { "state" => paths.empty? ? "none" : "unmanaged", "blocked" => blocked, "paths" => paths,
+            "message" => "unmanaged workflow collision at #{paths.join(', ')}; use --force to replace it" }
+        end
+      end
+
+      def install_preview(package, collision)
+        {
+          "operation" => "install", "name" => package.pin.name, "source" => package.pin.source,
+          "version" => package.pin.version, "sha" => package.pin.sha, "digest" => package.pin.digest,
+          "files" => package.files.keys.sort, "security" => package.security_report.summary,
+          "findings" => package.security_report.findings, "collision" => collision
+        }
+      end
+
+      def render_install_preview(preview)
+        @stdout.puts "Install honeycomb/#{preview.fetch('name')}"
+        @stdout.puts "source: #{preview.fetch('source')}"
+        @stdout.puts "version: #{preview.fetch('version') || 'unknown'}"
+        @stdout.puts "immutable sha: #{preview.fetch('sha')}"
+        @stdout.puts "files: #{preview.fetch('files').join(', ')}"
+        summary = preview.fetch("security")
+        @stdout.puts "permissions: #{summary.fetch('presets').join(', ')}"
+        @stdout.puts "tools: #{summary.fetch('tools').empty? ? 'none' : summary.fetch('tools').join(', ')}"
+        @stdout.puts "dirs: #{summary.fetch('dirs').empty? ? 'none' : summary.fetch('dirs').join(', ')}"
+        @stdout.puts "shell-capable: #{summary.fetch('shell_capable') ? 'yes' : 'no'}"
+        preview.fetch("findings").each do |finding|
+          @stdout.puts "instruction: #{finding.fetch('path')}:#{finding.fetch('line')} " \
+                       "#{finding.fetch('kind')} risks=#{finding.fetch('high_risk').join(',')}"
+        end
+        collision = preview.fetch("collision")
+        @stdout.puts "collision: #{collision.fetch('state')}"
+      end
+
+      def approval!(label)
+        return true if @yes
+        unless @stdin.respond_to?(:tty?) && @stdin.tty?
+          raise Hive::Honeycomb::ApprovalError,
+                "#{label} requires --yes in non-interactive mode; no changes were made"
+        end
+        @stdout.print "Proceed? [y/N] "
+        @stdout.flush
+        answer = @stdin.gets.to_s.strip.downcase
+        return true if %w[y yes].include?(answer)
+        raise Hive::Honeycomb::ApprovalError, "#{label} cancelled; no changes were made"
+      end
+
+      def local_rows(entries, catalog:)
+        installation = Hive::Honeycomb::Installation.new(workflows_dir)
+        entries.keys.sort.map do |name|
+          entry = entries.fetch(name)
+          latest = begin
+            catalog&.latest_for(name)
+          rescue Hive::Honeycomb::ResolutionError
+            nil
+          end
+          update = if entry.selector_kind == "sha"
+            false
+          elsif latest
+            latest.sha != entry.sha
+          end
+          {
+            "name" => name, "version" => entry.version, "sha" => entry.sha, "source" => entry.source,
+            "update_available" => update, "integrity" => installation.inspect(entry).state,
+            "permissions" => entry.permissions_pointer
+          }
+        end
+      end
+
+      def remote_rows(catalog)
+        catalog.workflow_names.sort.map do |name|
+          release = catalog.latest_for(name)
+          { "name" => name, "version" => release.version, "sha" => release.sha, "source" => Hive::Honeycomb::SOURCE,
+            "update_available" => nil, "integrity" => nil, "permissions" => nil }
+        end
+      end
+
+      def cached_catalog
+        return nil unless File.file?(@catalog_path)
+        Hive::Honeycomb::Catalog.load(File.binread(@catalog_path))
+      rescue Hive::Honeycomb::CatalogError, SystemCallError, IOError
+        nil
+      end
+
+      def emit_success(payload)
+        @stdout.puts JSON.generate(payload) if @json
+        payload
+      end
 
       def commit_scaffold!(id, paths)
         ops = Hive::GitOps.new(@project_root)
@@ -383,7 +644,7 @@ module Hive
       # (agents branch on those uniformly).
       def error_payload(error)
         Hive::Schemas::ErrorEnvelope.build(
-          schema: SCHEMA,
+          schema: envelope_schema,
           error: error,
           error_kind: error_kind_for(error),
           extras: error_extras(error)
@@ -397,8 +658,13 @@ module Hive
         extras = {}
         extras["value"] = error.value if error.respond_to?(:value) && !error.value.nil?
         extras["expected"] = error.expected if error.respond_to?(:expected) && !error.expected.nil?
+        extras["preview"] = @preview_payload if @preview_payload
 
         extras
+      end
+
+      def envelope_schema
+        SCHEMAS.fetch(@subcommand, SCHEMA)
       end
 
       def error_kind_for(error)

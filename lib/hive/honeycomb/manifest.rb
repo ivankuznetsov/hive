@@ -18,7 +18,7 @@ module Hive
 
       def self.package_digest(files)
         canonical = files.sort.map { |path, hash| "#{path}\0#{hash}\n" }.join
-        Digest::SHA256.hexdigest(canonical)
+        ::Digest::SHA256.hexdigest(canonical)
       end
 
       def self.normalize_path(path)

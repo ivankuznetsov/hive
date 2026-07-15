@@ -41,7 +41,7 @@ module Hive
             type_changed << path
             next
           end
-          modified << path unless Digest::SHA256.file(target).hexdigest == expected_hash
+          modified << path unless ::Digest::SHA256.file(target).hexdigest == expected_hash
         rescue Errno::ENOENT
           missing << path
         end

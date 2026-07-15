@@ -44,6 +44,10 @@ module Hive
       # every other agent-callable command's error envelope; the success arm
       # builds its hash directly.
       "hive-workflow-new" => 1,
+      "hive-workflow-install" => 1,
+      "hive-workflow-list" => 1,
+      "hive-workflow-update" => 1,
+      "hive-workflow-remove" => 1,
       # Global daily shipped digest (`hive digest --json`). The success
       # envelope carries the delivery outcome (status/date/message); hard
       # failures use stderr + exit code, and the Thor-usage error path

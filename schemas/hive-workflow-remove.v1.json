@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-workflow-remove.v1.json",
+  "title": "hive workflow remove output (v1)",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["schema", "schema_version", "ok"],
+  "properties": {
+    "schema": { "const": "hive-workflow-remove" },
+    "schema_version": { "const": 1 },
+    "ok": { "type": "boolean" }
+  }
+}

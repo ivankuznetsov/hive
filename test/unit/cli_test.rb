@@ -269,8 +269,28 @@ class HiveCliTest < Minitest::Test
       Hive::CLI.start([ "workflow", "new", "my-flow", "--json" ])
 
       assert_equal [ "new", "my-flow" ], calls.first.fetch(:args)
-      assert_equal({ project_root: Dir.pwd, json: true, template: nil }, calls.first.fetch(:kwargs))
+      assert_equal(
+        { project_root: Dir.pwd, json: true, template: nil, yes: false, force: false,
+          remote: false, outdated: false, all: false },
+        calls.first.fetch(:kwargs)
+      )
       assert_equal :call, calls.last
+    end
+  end
+
+  def test_workflow_honeycomb_flags_dispatch_to_command
+    with_command_new_stub(Hive::Commands::Workflow) do |calls|
+      Hive::CLI.start([ "workflow", "install", "honeycomb/demo", "--yes", "--force", "--json" ])
+      assert_equal [ "install", "honeycomb/demo" ], calls.first.fetch(:args)
+      assert_equal true, calls.first.fetch(:kwargs).fetch(:yes)
+      assert_equal true, calls.first.fetch(:kwargs).fetch(:force)
+      assert_equal true, calls.first.fetch(:kwargs).fetch(:json)
+    end
+
+    with_command_new_stub(Hive::Commands::Workflow) do |calls|
+      Hive::CLI.start([ "workflow", "list", "--outdated" ])
+      assert_equal [ "list", nil ], calls.first.fetch(:args)
+      assert_equal true, calls.first.fetch(:kwargs).fetch(:outdated)
     end
   end
 

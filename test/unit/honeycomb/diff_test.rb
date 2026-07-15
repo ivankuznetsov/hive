@@ -44,6 +44,26 @@ class HoneycombDiffTest < Minitest::Test
     end
   end
 
+  def test_private_fallback_and_unified_diff_error_paths
+    with_tmp_dir do |root|
+      File.write(File.join(root, "workflow.yml"), "invalid: true\n")
+      assert_equal [ "fallback.md" ],
+                   Hive::Honeycomb::Diff.instruction_inventory(root, "demo", %w[fallback.md asset.bin])
+      assert_nil Hive::Honeycomb::Diff.read_optional(File.join(root, "missing.md"))
+      assert_equal "", Hive::Honeycomb::Diff.unified("same.md", "same\n", "same\n")
+
+      status = Struct.new(:exitstatus) { def success? = exitstatus.zero? }
+      with_replaced_singleton_method(Open3, :capture3, ->(*_args) { [ "", "bad diff", status.new(2) ] }) do
+        assert_raises(Hive::InternalError) { Hive::Honeycomb::Diff.unified("bad.md", "old", "new") }
+      end
+      with_replaced_singleton_method(Open3, :capture3, ->(*_args) { raise Errno::ENOENT, "diff" }) do
+        fallback = Hive::Honeycomb::Diff.unified("fallback.md", "old\n", "new\n")
+        assert_includes fallback, "-old"
+        assert_includes fallback, "+new"
+      end
+    end
+  end
+
   private
 
   def package_at(root, body:, tools:, sha:, asset: "asset".b, state_file: "work.md")

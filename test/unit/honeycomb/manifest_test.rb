@@ -33,6 +33,8 @@ class HoneycombManifestTest < Minitest::Test
   end
 
   def test_rejects_bad_hash_unknown_keys_and_permission_shapes
+    assert_raises(Hive::Honeycomb::ManifestError) { Hive::Honeycomb::Manifest.load("broken: [\n") }
+
     assert_raises(Hive::Honeycomb::ManifestError) do
       Hive::Honeycomb::Manifest.load(manifest_yaml("workflow.yml" => "nope"))
     end
@@ -44,6 +46,27 @@ class HoneycombManifestTest < Minitest::Test
     data.delete("extra")
     data["permissions"] = { "bash" => "yes" }
     assert_raises(Hive::Honeycomb::ManifestError) { Hive::Honeycomb::Manifest.load(data.to_yaml) }
+
+    data["permissions"] = { "presets" => [ "unknown" ] }
+    assert_raises(Hive::Honeycomb::ManifestError) { Hive::Honeycomb::Manifest.load(data.to_yaml) }
+
+    data["permissions"] = { "tools" => [ nil ] }
+    assert_raises(Hive::Honeycomb::ManifestError) { Hive::Honeycomb::Manifest.load(data.to_yaml) }
+  end
+
+  def test_normalize_path_rejects_unicode_changes_and_normalization_errors
+    decomposed = "instructions/cafe\u0301.md"
+    assert_raises(Hive::Honeycomb::ManifestError) do
+      Hive::Honeycomb::Manifest.normalize_path(decomposed)
+    end
+
+    broken = Class.new(String) do
+      def unicode_normalize(*) = raise(ArgumentError, "bad normalization")
+    end.new("workflow.yml")
+    error = assert_raises(Hive::Honeycomb::ManifestError) do
+      Hive::Honeycomb::Manifest.normalize_path(broken)
+    end
+    assert_includes error.message, "bad normalization"
   end
 
   private

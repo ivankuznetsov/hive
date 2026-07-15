@@ -118,6 +118,12 @@ class AgentProfileTest < Minitest::Test
     assert_match(/unknown status_detection_mode/, err.message)
   end
 
+  def test_invalid_prompt_style_raises_at_construction
+    error = assert_raises(ArgumentError) { make_profile(prompt_style: :telepathy) }
+
+    assert_match(/unknown prompt_style/, error.message)
+  end
+
   def test_preflight_default_is_noop
     profile = make_profile
     assert_nil profile.preflight!

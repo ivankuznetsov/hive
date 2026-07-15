@@ -56,6 +56,50 @@ class HoneycombLockfileTest < Minitest::Test
     end
   end
 
+  def test_rejects_remaining_entry_and_serialization_shapes
+    with_tmp_dir do |dir|
+      path = File.join(dir, ".honeycomb.lock")
+      lockfile = Hive::Honeycomb::Lockfile.new(path)
+
+      invalid_fields = {
+        "version" => "not-semver",
+        "tag" => 12,
+        "sha" => "XYZ",
+        "name" => "Bad Name"
+      }
+      invalid_fields.each do |field, value|
+        lockfile.write("demo" => entry("demo"))
+        data = YAML.safe_load(File.read(path))
+        data["workflows"]["demo"][field] = value
+        File.write(path, data.to_yaml)
+        assert_raises(Hive::Honeycomb::LockfileError, field) { lockfile.read }
+      end
+
+      lockfile.write("demo" => entry("demo"))
+      data = YAML.safe_load(File.read(path))
+      data["workflows"]["demo"]["modes"]["workflow.yml"] = "120000"
+      File.write(path, data.to_yaml)
+      assert_raises(Hive::Honeycomb::LockfileError) { lockfile.read }
+
+      mismatched = entry("other")
+      assert_raises(Hive::Honeycomb::LockfileError) { lockfile.write("demo" => mismatched) }
+      unsupported = entry("demo").with(security: { "object" => Object.new })
+      assert_raises(Hive::Honeycomb::LockfileError) { lockfile.write("demo" => unsupported) }
+    end
+  end
+
+  def test_wraps_lockfile_read_io_errors
+    with_tmp_dir do |dir|
+      path = File.join(dir, ".honeycomb.lock")
+      File.write(path, "present\n")
+      lockfile = Hive::Honeycomb::Lockfile.new(path)
+
+      with_replaced_singleton_method(File, :binread, ->(_path) { raise Errno::EACCES, "denied" }) do
+        assert_raises(Hive::Honeycomb::LockfileError) { lockfile.read }
+      end
+    end
+  end
+
   private
 
   def entry(name, sha: "1" * 40)

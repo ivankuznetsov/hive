@@ -53,6 +53,37 @@ class HoneycombInstallationTest < Minitest::Test
     end
   end
 
+  def test_classifies_special_ancestor_and_extra_special_paths
+    with_tmp_dir do |workflows|
+      root = File.join(workflows, "demo")
+      FileUtils.mkdir_p(root)
+      File.symlink("outside", File.join(root, "link"))
+      entry = Hive::Honeycomb::LockEntry.new(**entry_values("demo", { "link/child.md" => "a" * 64 }))
+
+      inspection = Hive::Honeycomb::Installation.new(workflows).inspect(entry)
+
+      assert_equal "dirty", inspection.state
+      assert_equal [ "link/child.md" ], inspection.type_changed
+    end
+  end
+
+  def test_disk_inventory_tolerates_directory_disappearance
+    with_tmp_dir do |workflows|
+      root = File.join(workflows, "demo")
+      FileUtils.mkdir_p(root)
+      installation = Hive::Honeycomb::Installation.new(workflows)
+      original = Dir.method(:children)
+      Dir.define_singleton_method(:children) do |path|
+        raise Errno::ENOENT, path if path == root
+        original.call(path)
+      end
+
+      assert_equal [ [], [] ], installation.send(:disk_inventory, root)
+    ensure
+      Dir.define_singleton_method(:children, original) if original
+    end
+  end
+
   private
 
   def entry_for(root)

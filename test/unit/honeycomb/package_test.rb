@@ -59,6 +59,67 @@ class HoneycombPackageTest < Minitest::Test
     end
   end
 
+  def test_rejects_digest_mismatch_outside_and_duplicate_tree_paths
+    fixture = package_fixture
+    with_tmp_dir do |parent|
+      wrong_pin = fixture.fetch(:pin).with(digest: "0" * 64)
+      assert_raises(Hive::Honeycomb::IntegrityError) do
+        Hive::Honeycomb::Package.new(registry: fixture.fetch(:registry)).verify(wrong_pin, staging_parent: parent)
+      end
+    end
+
+    fixture = package_fixture
+    outside = fixture.fetch(:registry).entries.sub("workflows/demo/workflow.yml", "workflows/other/workflow.yml")
+    with_tmp_dir do |parent|
+      assert_raises(Hive::Honeycomb::IntegrityError) do
+        Hive::Honeycomb::Package.new(registry: FakeRegistry.new(outside, fixture.fetch(:registry).blobs)).verify(
+          fixture.fetch(:pin), staging_parent: parent
+        )
+      end
+    end
+
+    fixture = package_fixture
+    first = fixture.fetch(:registry).entries.split("\0").first
+    duplicate = "#{fixture.fetch(:registry).entries}#{first}\0"
+    with_tmp_dir do |parent|
+      assert_raises(Hive::Honeycomb::IntegrityError) do
+        Hive::Honeycomb::Package.new(registry: FakeRegistry.new(duplicate, fixture.fetch(:registry).blobs)).verify(
+          fixture.fetch(:pin), staging_parent: parent
+        )
+      end
+    end
+  end
+
+  def test_blob_errors_and_direct_instruction_containment_checks
+    hive_error_registry = Object.new
+    hive_error_registry.define_singleton_method(:git_object!) { |*| raise Hive::GitError, "git failed" }
+    assert_raises(Hive::GitError) do
+      Hive::Honeycomb::Package.new(registry: hive_error_registry).send(:read_blob, "a" * 40)
+    end
+
+    runtime_registry = Object.new
+    runtime_registry.define_singleton_method(:git_object!) { |*| raise "boom" }
+    assert_raises(Hive::Honeycomb::IntegrityError) do
+      Hive::Honeycomb::Package.new(registry: runtime_registry).send(:read_blob, "b" * 40)
+    end
+
+    with_tmp_dir do |root|
+      package = Hive::Honeycomb::Package.new(registry: nil)
+      stage = Struct.new(:instruction, :reviewers, :council).new(File.join(File.dirname(root), "outside.md"), [], nil)
+      workflow = Struct.new(:stages).new([ stage ])
+      assert_raises(Hive::Honeycomb::IntegrityError) do
+        package.send(:validate_instruction_inventory!, workflow, root, {})
+      end
+
+      path = File.join(root, "missing.md")
+      File.write(path, "present but uninventoried\n")
+      stage.instruction = path
+      assert_raises(Hive::Honeycomb::IntegrityError) do
+        package.send(:validate_instruction_inventory!, workflow, root, {})
+      end
+    end
+  end
+
   private
 
   def package_fixture(fault: nil)

@@ -365,6 +365,134 @@ class WorkflowHoneycombTest < Minitest::Test
     end
   end
 
+  def test_update_refuses_dirty_install_and_untargeted_downgrade
+    with_project do |project, workflows|
+      old_package = update_package(
+        workflows, body: "old\n", sha: "2" * 40, version: "2.0.0", tools: [ "Read" ]
+      )
+      install_package_fixture(workflows, old_package)
+      File.write(File.join(workflows, "demo", "instructions", "work.md"), "dirty\n")
+      candidate = update_package(
+        workflows, body: "new\n", sha: "3" * 40, version: "3.0.0", tools: [ "Read" ]
+      )
+      assert_raises(Hive::Honeycomb::CollisionError) do
+        Hive::Commands::Workflow.new(
+          "update", "demo", project_root: project, stdout: StringIO.new, yes: true,
+          registry: FakeRegistry.new(candidate.pin, nil, []),
+          package_verifier: FakeVerifier.new(candidate, []), transaction: FakeTransaction.new([])
+        ).call!
+      end
+
+      File.write(File.join(workflows, "demo", "instructions", "work.md"), "old\n")
+      downgrade = update_package(
+        workflows, body: "older\n", sha: "1" * 40, version: "1.0.0", tools: [ "Read" ]
+      )
+      assert_raises(Hive::Honeycomb::ResolutionError) do
+        Hive::Commands::Workflow.new(
+          "update", "demo", project_root: project, stdout: StringIO.new,
+          registry: FakeRegistry.new(downgrade.pin, nil, []), transaction: FakeTransaction.new([])
+        ).call!
+      end
+    end
+  end
+
+  def test_remove_rejects_selectors_unknown_ownership_and_corrupt_lock_is_partial
+    with_project do |project, workflows|
+      assert_raises(Hive::Commands::Workflow::UsageError) do
+        Hive::Commands::Workflow.new("remove", "demo@1.0.0", project_root: project).call!
+      end
+      assert_raises(Hive::Honeycomb::CollisionError) do
+        Hive::Commands::Workflow.new(
+          "remove", "demo", project_root: project, stdout: StringIO.new, yes: true
+        ).call!
+      end
+
+      root = File.join(workflows, "demo")
+      FileUtils.mkdir_p(root)
+      File.write(File.join(root, "workflow.yml"), "id: demo\n")
+      File.write(File.join(workflows, ".honeycomb.lock"), "version: 99\n")
+      assert_raises(Hive::Honeycomb::PartialRemovalError) do
+        Hive::Commands::Workflow.new(
+          "remove", "demo", project_root: project, stdout: StringIO.new, yes: true, force: true,
+          transaction: PartialTransaction.new([])
+        ).call!
+      end
+    end
+  end
+
+  def test_private_render_list_collision_cache_and_error_classification_paths
+    with_project do |project, workflows|
+      package = update_package(workflows, body: "$ echo safe\n", sha: "1" * 40,
+                               version: "1.0.0", tools: [ "Read" ])
+      install_package_fixture(workflows, package)
+      command = Hive::Commands::Workflow.new("install", "honeycomb/demo", project_root: project, stdout: StringIO.new)
+      collision = command.send(:install_collision, "demo")
+      assert_equal "clean", collision.fetch("state")
+      assert_equal false, collision.fetch("blocked")
+
+      preview = command.send(:install_preview, package, collision)
+      preview["findings"] = [
+        { "path" => "instructions/work.md", "line" => 1, "kind" => "command_line", "high_risk" => [] }
+      ]
+      command.send(:render_install_preview, preview)
+      assert_includes command.instance_variable_get(:@stdout).string, "instruction: instructions/work.md:1"
+
+      tty = TtyInput.new("no\n")
+      cancelling = Hive::Commands::Workflow.new(
+        "remove", "demo", project_root: project, stdout: StringIO.new, stdin: tty
+      )
+      assert_raises(Hive::Honeycomb::ApprovalError) { cancelling.send(:approval!, "Remove") }
+
+      sha_entry = Hive::Honeycomb::LockEntry.from_verified(package).with(selector_kind: "sha")
+      other_catalog = Hive::Honeycomb::Catalog.load({
+        "version" => 1,
+        "workflows" => {
+          "other" => {
+            "latest" => "1.0.0",
+            "releases" => [
+              { "version" => "1.0.0", "tag" => "other/v1.0.0", "sha" => "f" * 40, "digest" => "e" * 64 }
+            ]
+          }
+        }
+      }.to_yaml)
+      rows = command.send(:local_rows, { "demo" => sha_entry }, catalog: other_catalog)
+      assert_equal false, rows.first.fetch("update_available")
+
+      bad_catalog = File.join(project, "bad-catalog.yml")
+      File.write(bad_catalog, "version: 99\n")
+      cached = Hive::Commands::Workflow.new(
+        "list", nil, project_root: project, catalog_path: bad_catalog
+      )
+      assert_nil cached.send(:cached_catalog)
+
+      errors = [
+        Hive::Commands::Workflow::UsageError.new("usage"),
+        Hive::Honeycomb::ApprovalError.new("approval"),
+        Hive::Honeycomb::CollisionError.new("collision"),
+        Hive::Honeycomb::RegistryError.new("network"),
+        Hive::Honeycomb::IntegrityError.new("integrity"),
+        Hive::Honeycomb::LockfileError.new("lock"),
+        Hive::ConcurrentRunError.new("busy"),
+        Hive::GitError.new("git"),
+        Hive::ConfigError.new("config"),
+        Hive::InternalError.new("other")
+      ]
+      kinds = errors.map { |error| command.send(:error_kind_for, error) }
+      assert_equal %w[usage approval collision network integrity integrity concurrent_run git config error], kinds
+    end
+  end
+
+  def test_update_requires_exactly_one_target_form
+    with_project do |project, _workflows|
+      assert_raises(Hive::Commands::Workflow::UsageError) do
+        Hive::Commands::Workflow.new("update", nil, project_root: project).call!
+      end
+      assert_raises(Hive::Commands::Workflow::UsageError) do
+        Hive::Commands::Workflow.new("update", "demo", project_root: project, all: true).call!
+      end
+    end
+  end
+
   private
 
   def with_project

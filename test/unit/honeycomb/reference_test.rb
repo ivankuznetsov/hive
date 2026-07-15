@@ -2,6 +2,11 @@ require "test_helper"
 require "hive/honeycomb/reference"
 
 class HoneycombReferenceTest < Minitest::Test
+  def test_hex_selector_predicate
+    assert Hive::Honeycomb::Reference.parse("honeycomb/demo@abcdef0").hex_selector?
+    refute Hive::Honeycomb::Reference.parse("honeycomb/demo@1.2.3").hex_selector?
+  end
+
   def test_parses_name_and_optional_selector
     plain = Hive::Honeycomb::Reference.parse("honeycomb/release-notes")
     assert_equal "release-notes", plain.name

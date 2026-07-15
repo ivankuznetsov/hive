@@ -162,6 +162,88 @@ class HoneycombTransactionTest < Minitest::Test
     end
   end
 
+  def test_rollback_failure_is_reported_with_both_errors
+    with_state_project do |project, workflows|
+      package = verified_package(workflows)
+      transaction = transaction_for(project, fault: ->(phase) { raise "apply boom" if phase == :after_swap })
+      transaction.define_singleton_method(:rollback_journal) { |_journal| raise "rollback boom" }
+
+      error = assert_raises(Hive::RollbackFailed) do
+        transaction.apply(installs: [ package ], action: "installed")
+      end
+      assert_includes error.message, "apply boom"
+      assert_includes error.message, "rollback boom"
+    end
+  end
+
+  def test_post_commit_cleanup_warning_is_recovered_explicitly
+    with_state_project do |project, workflows|
+      transaction = transaction_for(project)
+      original = transaction.method(:cleanup_journal)
+      calls = 0
+      transaction.define_singleton_method(:cleanup_journal) do |journal|
+        calls += 1
+        raise "cleanup boom" if calls == 1
+        original.call(journal)
+      end
+
+      _out, err = capture_io do
+        result = transaction.apply(installs: [ verified_package(workflows) ], action: "installed")
+        assert_equal true, result.changed
+      end
+      assert_includes err, "cleanup is pending"
+      assert File.file?(transaction.journal_path)
+
+      transaction.recover!
+      refute File.exist?(transaction.journal_path)
+    end
+  end
+
+  def test_private_validation_and_malformed_journal_guards
+    with_state_project do |project, workflows|
+      transaction = transaction_for(project)
+      transaction.recover!
+      reserved = verified_package(workflows, name: "coding")
+      assert_raises(Hive::Honeycomb::CollisionError) do
+        transaction.send(:validate_operation!, [ reserved ], [], {}, false, false)
+      end
+
+      package = verified_package(workflows, name: "recorded")
+      records = transaction.send(:transaction_records, [ package ], [], include_lock: true)
+      assert_equal %w[recorded recorded.yml .honeycomb.lock].sort, records.map { |row| row.fetch("target") }.sort
+
+      assert_raises(Hive::Honeycomb::ResolutionError) do
+        transaction.send(:validate_operation!, [], [ "missing" ], {}, false, false)
+      end
+
+      File.write(transaction.journal_path, { "version" => 1, "phase" => "bad", "head" => "x", "records" => [] }.to_yaml)
+      assert_raises(Hive::Honeycomb::LockfileError) { transaction.send(:read_journal) }
+    end
+  end
+
+  def test_dirty_removal_and_cross_filesystem_staging_are_rejected
+    with_state_project do |project, workflows|
+      transaction = transaction_for(project)
+      transaction.apply(installs: [ verified_package(workflows) ], action: "installed")
+      File.write(File.join(workflows, "demo", "instructions", "work.md"), "dirty\n")
+      entries = lockfile(workflows).read
+      assert_raises(Hive::Honeycomb::CollisionError) do
+        transaction.send(:validate_operation!, [], [ "demo" ], entries, false, false)
+      end
+
+      original = File.method(:stat)
+      staged = File.join(workflows, "staged")
+      File.define_singleton_method(:stat) do |path|
+        Struct.new(:dev).new(path == staged ? 1 : 2)
+      end
+      assert_raises(Hive::Honeycomb::IntegrityError) do
+        transaction.send(:ensure_same_filesystem!, staged)
+      end
+    ensure
+      File.define_singleton_method(:stat, original) if original
+    end
+  end
+
   private
 
   def with_state_project

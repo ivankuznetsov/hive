@@ -16,6 +16,19 @@ class HoneycombCatalogTest < Minitest::Test
     assert_equal SHA2, catalog.resolve(Hive::Honeycomb::Reference.parse("honeycomb/demo@#{SHA2}")).sha
     assert_equal "version", catalog.resolve(Hive::Honeycomb::Reference.parse("honeycomb/demo@1.0.0")).selector_kind
     assert_equal "digest", catalog.resolve(Hive::Honeycomb::Reference.parse("honeycomb/demo@#{DIGEST1}")).selector_kind
+    assert_equal %w[1.0.0 1.1.0], catalog.releases_for("demo").map(&:version)
+    assert_raises(Hive::Honeycomb::ResolutionError) { catalog.releases_for("missing") }
+    assert_equal "f" * 40,
+                 catalog.resolve("honeycomb/demo@#{'f' * 40}", allow_unknown_full_sha: true).sha
+  end
+
+  def test_resolves_one_unambiguous_sha_prefix_and_rejects_unmatched_hex
+    data = catalog_hash
+    data["workflows"]["demo"]["releases"][1]["sha"] = "2" * 40
+    catalog = Hive::Honeycomb::Catalog.load(data.to_yaml)
+
+    assert_equal "2" * 40, catalog.resolve("honeycomb/demo@2222222").sha
+    assert_raises(Hive::Honeycomb::ResolutionError) { catalog.resolve("honeycomb/demo@abcdef0") }
   end
 
   def test_rejects_ambiguous_prefix_unknown_selector_and_workflow
@@ -41,7 +54,10 @@ class HoneycombCatalogTest < Minitest::Test
       catalog_hash.tap { |h| h["workflows"]["demo"]["latest"] = "9.9.9" },
       catalog_hash.tap { |h| h["workflows"]["demo"]["releases"][1]["version"] = "1.0.0" },
       catalog_hash.tap { |h| h["workflows"]["demo"]["releases"][1]["digest"] = DIGEST1 },
-      catalog_hash.tap { |h| h["workflows"]["demo"]["releases"][0]["unknown"] = true }
+      catalog_hash.tap { |h| h["workflows"]["demo"]["releases"][0]["unknown"] = true },
+      catalog_hash.tap { |h| h["workflows"]["demo"]["releases"] = [] },
+      catalog_hash.tap { |h| h["workflows"]["Bad Name"] = h["workflows"].delete("demo") },
+      catalog_hash.tap { |h| h["workflows"]["demo"]["releases"][0]["tag"] = "" }
     ]
 
     invalid.each do |data|

@@ -66,4 +66,36 @@ class HoneycombSecurityReportTest < Minitest::Test
       "presets" => [ "yolo" ], "tools" => [], "dirs" => [], "bash" => true, "yolo" => true
     )
   end
+
+  def test_exposure_covers_read_only_and_scoped_bash_sugar
+    read_only = Hive::Honeycomb::SecurityReport.exposure("read-only", "reviewer")
+    scoped = Hive::Honeycomb::SecurityReport.exposure(
+      { "preset" => "scoped", "bash" => true }, "stage work"
+    )
+    yolo = Hive::Honeycomb::SecurityReport.exposure("yolo", "stage deploy")
+
+    assert_equal Hive::PermissionScope::READ_ONLY_ALLOWED.sort, read_only.fetch("tools")
+    assert_includes scoped.fetch("tools"), "Bash"
+    assert_empty yolo.fetch("tools")
+    assert yolo.fetch("bash")
+  end
+
+  def test_permission_exposures_include_council_reviewers_and_render_empty_values
+    reviewer = Struct.new(:name, :permissions, :instruction).new("one", "read-only", nil)
+    stage = Struct.new(:kind, :name, :permissions, :reviewers, :council, :instruction).new(
+      :council, "review", nil, [ reviewer ], nil, nil
+    )
+    workflow = Struct.new(:stages).new([ stage ])
+
+    exposures = Hive::Honeycomb::SecurityReport.permission_exposures(workflow)
+    assert_equal 2, exposures.length
+
+    report = Hive::Honeycomb::SecurityReport.new(
+      summary: { "presets" => [ "inherited" ], "tools" => [], "dirs" => [], "shell_capable" => false },
+      findings: [ { "path" => "work.md", "line" => 1, "kind" => "command_line", "high_risk" => [] } ]
+    )
+    assert_includes report.render, "tools: none"
+    assert_includes report.render, "dirs: none"
+    assert_includes report.render, "instruction work.md:1 command_line"
+  end
 end

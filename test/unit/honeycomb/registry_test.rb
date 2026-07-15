@@ -61,6 +61,70 @@ class HoneycombRegistryTest < Minitest::Test
     end
   end
 
+  def test_wraps_refresh_catalog_and_process_failures
+    with_tmp_dir do |cache|
+      registry = Hive::Honeycomb::Registry.new(cache_dir: cache)
+      registry.define_singleton_method(:prepare_repository!) { raise "unexpected" }
+      assert_raises(Hive::Honeycomb::RegistryError) { registry.refresh! }
+    end
+
+    with_tmp_dir do |cache|
+      catalog_path = File.join(cache, "catalog.yml")
+      File.write(catalog_path, "present\n")
+      registry = Hive::Honeycomb::Registry.new(cache_dir: cache)
+      with_replaced_singleton_method(File, :binread, ->(_path) { raise Errno::EACCES, "denied" }) do
+        assert_raises(Hive::Honeycomb::RegistryError) { registry.catalog }
+      end
+    end
+
+    failure = Struct.new(:success?).new(false)
+    runner = ->(*_argv) { [ "", "unavailable", failure ] }
+    with_tmp_dir do |cache|
+      registry = Hive::Honeycomb::Registry.new(cache_dir: cache, runner: runner)
+      assert_raises(Hive::Honeycomb::RegistryError) { registry.refresh! }
+      assert_raises(Hive::Honeycomb::RegistryError) { registry.send(:run!, "git", "boom") }
+    end
+
+    raising = ->(*_argv) { raise Errno::ENOENT, "git" }
+    registry = Hive::Honeycomb::Registry.new(runner: raising)
+    assert_raises(Hive::Honeycomb::RegistryError) { registry.send(:capture, "git", "status") }
+  end
+
+  def test_private_git_resolution_and_runner_response_shapes
+    status = Struct.new(:exitstatus) do
+      def success? = exitstatus.zero?
+    end
+    response = Struct.new(:stdout, :stderr, :status)
+    registry = Hive::Honeycomb::Registry.new(
+      runner: ->(*_argv) { response.new("short\n", "", status.new(0)) }
+    )
+    assert_raises(Hive::Honeycomb::ResolutionError) do
+      registry.send(:peel_commit!, "abc", "object abc")
+    end
+    assert_equal [ "short\n", "", status.new(0) ], registry.send(:capture, "git", "status")
+
+    failing = Hive::Honeycomb::Registry.new(
+      runner: ->(*_argv) { [ "", "missing", status.new(1) ] }
+    )
+    assert_raises(Hive::Honeycomb::ResolutionError) do
+      failing.send(:peel_commit!, "abc", "object abc")
+    end
+    assert failing.send(:status_success?, 0)
+  end
+
+  def test_catalog_fetch_reports_all_branch_failures
+    failure = Struct.new(:success?).new(false)
+    registry = Hive::Honeycomb::Registry.new(
+      runner: ->(*argv) { [ "", "#{argv.last} unavailable", failure ] }
+    )
+
+    error = assert_raises(Hive::Honeycomb::RegistryError) do
+      registry.send(:fetch_catalog!)
+    end
+    assert_includes error.message, "refs/heads/main"
+    assert_includes error.message, "refs/heads/master"
+  end
+
   private
 
   def with_registry_fixture

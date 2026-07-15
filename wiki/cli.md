@@ -3,7 +3,7 @@ title: CLI Surface
 type: api
 source: bin/hive, bin/hv, lib/hive/cli.rb
 created: 2026-04-25
-updated: 2026-06-30
+updated: 2026-07-10
 tags: [cli, api]
 ---
 
@@ -60,6 +60,15 @@ sibling shape, `setup` keeps the unversioned `hive-setup` shape, and Screenote
 (`pr` maps to `open-pr`), finding toggles include `operation`, and patrol's
 pre-dispatch usage failure uses the `hive-patrol` schema with
 `error_kind: "error"`.
+
+The pre-dispatch resolver is command/subcommand-aware for JSON surfaces whose
+schema varies by argv. It distinguishes status diagnostics, web install/status,
+pairing list/approve, and shipped/merged-PR digest errors; it also covers Thor
+arity failures for status, prune, forget, metrics, bot, and the documented web
+commands. Option values cannot impersonate subcommands, and flags after the
+`--` terminator remain positional data rather than switching the status or
+digest schema. Existing setup, Screenote connect/disconnect, and other static
+contracts retain their established unversioned or schema-less shapes.
 
 `bin/hv` is a bash fallback launcher for Apache Hive name collisions. It deliberately avoids `command -v hive`; instead it probes only `HIVE_BIN_OVERRIDE`, `${XDG_BIN_HOME:-$HOME/.local/bin}/hive`, `${HOMEBREW_PREFIX:-/opt/homebrew}/bin/hive`, and `/usr/local/bin/hive`, skipping a target that resolves back to itself. Each `--version` probe runs in its own process group with temp-file stdout capture and a watchdog/KILL sweep, so a bad candidate cannot keep `hv` blocked by forking a stdout-inheriting child. When the watchdog's timeout elapses it records a sentinel, and `probe_version` forces a non-zero (124, mirroring GNU `timeout`) status regardless of the probe's own exit code — so a candidate that prints a bare semver and then hangs (trapping the watchdog's TERM to exit 0) is rejected rather than exec'd. It does not implicitly exec `/usr/bin/hive` or `/opt/hive/bin/hive`, because those paths may be Apache Hive installs. If no candidate is executable it exits `127` and tells the operator to set `HIVE_BIN_OVERRIDE` or install through the documented channels. `bin/hv` remains in the gem payload for channel installers to copy/read, but it is not listed in `spec.executables`; RubyGems would otherwise generate a Ruby binstub for this bash launcher. See [[operating]] for channel-level `hv` behavior.
 
@@ -142,7 +151,7 @@ Codes are stable; bumping a code requires updating `test/unit/exit_codes_test.rb
 
 The CLI itself has no auth. Preconditions checked at runtime by individual stage runners:
 
-- Per-spawn `AgentProfile#check_version!` + `preflight!` (Claude: parses `claude --version` against `Hive::MIN_CLAUDE_VERSION = "2.1.118"`; Codex/Pi: profile-specific). Raises `AgentError` on mismatch. Default profile is `:claude`; `Stages::Base.spawn_agent(profile:)` selects an alternate via `Hive::AgentProfiles.lookup(...)`.
+- Per-spawn `AgentProfile#check_version!` + `preflight!` (Claude: parses `claude --version` against `Hive::MIN_CLAUDE_VERSION = "2.1.118"`; Codex/Pi/Grok: profile-specific). Grok accepts API keys, device-login credentials, `GROK_AUTH_PATH`, and `GROK_HOME`, with the direct auth path taking precedence. Raises `AgentError` on mismatch. Default profile is `:claude`; `Stages::Base.spawn_agent(profile:)` selects an alternate via `Hive::AgentProfiles.lookup(...)`.
 - `Hive::Gh.ensure_authenticated!` (called from both `Stages::OpenPr` and `Stages::Finalize`) runs `gh auth status` and exits 1 with stderr if unauthenticated. `Stages::OpenPr` invokes `Hive::Gh.push_branch!` before spawning the open-pr agent; `Stages::Finalize` invokes `Hive::Gh.push_branch` (non-`!`) so a persistent push failure surfaces as `ERROR reason=unpushed_commits` instead of an uncaught exit. The daemon-only merged-finalize-error archive path uses `Hive::Gh.pr_state` to re-confirm `MERGED` before accepting an internal archive recovery flag.
 - `Init#validate_git_repo!` rejects non-git dirs and rejects targets that are themselves worktrees (must run on the main checkout).
 - `Init#validate_clean_tree!` aborts on dirty working tree unless `--force`.

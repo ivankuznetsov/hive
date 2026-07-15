@@ -384,6 +384,55 @@ class SpawnAgentTest < Minitest::Test
     end
   end
 
+  def test_budget_warning_written_when_profile_has_no_native_budget_flag
+    profile = Hive::AgentProfile.new(
+      name: :budgetless,
+      bin_default: FAKE_BIN,
+      env_bin_override_key: "HIVE_CLAUDE_BIN",
+      headless_flag: "-p",
+      add_dir_flag: "--add-dir",
+      budget_flag: nil,
+      output_format_flags: [ "--verbose" ],
+      version_flag: "--version",
+      skill_syntax_format: "/%{skill}",
+      status_detection_mode: :state_file_marker
+    )
+
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      Hive::Stages::Base.spawn_agent(
+        task,
+        prompt: "x", max_budget_usd: 9, timeout_sec: 5,
+        profile: profile
+      )
+
+      log_path = File.join(task.log_dir, "config-warnings.log")
+      assert File.exist?(log_path), "config-warnings.log must be written"
+      content = File.read(log_path)
+      assert_match(/profile :budgetless has no native budget flag/, content)
+      assert_match(/budget_usd=9 is not enforced/, content)
+    end
+  end
+
+  def test_budget_warning_falls_back_to_stderr_when_log_path_is_unwritable
+    with_tmp_dir do |dir|
+      blocked_log_dir = File.join(dir, "blocked-log-dir")
+      File.write(blocked_log_dir, "not a directory\n")
+      task = Object.new
+      task.define_singleton_method(:log_dir) { blocked_log_dir }
+      profile = Object.new
+      profile.define_singleton_method(:name) { :budgetless }
+
+      _out, err = capture_io do
+        Hive::Stages::Base.send(:warn_budget_unenforced, task, profile, 9)
+      end
+
+      assert_match(/profile :budgetless has no native budget flag/, err)
+      assert_match(/budget_usd=9 is not enforced/, err)
+    end
+  end
+
   def test_isolation_warning_rejects_non_array_add_dirs
     no_add_dir_profile = Hive::AgentProfile.new(
       name: :no_isolation,

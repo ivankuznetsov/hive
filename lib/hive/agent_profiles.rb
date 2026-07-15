@@ -53,7 +53,22 @@ module Hive
         @mutex.synchronize { @profiles.keys }
       end
 
-      def logged_in?(name, home: Dir.home)
+      def grok_auth_path(home: nil)
+        auth_path = ENV["GROK_AUTH_PATH"]
+        grok_home = ENV["GROK_HOME"]
+
+        raise ArgumentError, "GROK_AUTH_PATH must be absolute" if !auth_path.to_s.strip.empty? && !File.absolute_path?(auth_path)
+        raise ArgumentError, "GROK_HOME must be absolute" if !grok_home.to_s.strip.empty? && !File.absolute_path?(grok_home)
+
+        return auth_path unless auth_path.to_s.strip.empty?
+
+        return File.join(grok_home, "auth.json") unless grok_home.to_s.strip.empty?
+
+        root = File.join(home || Dir.home, ".grok")
+        File.join(root, "auth.json")
+      end
+
+      def logged_in?(name, home: nil)
         # Probe the specific credential artifact each CLI writes on a
         # successful login, NOT merely a non-empty config dir: both claude
         # and codex create ~/.claude / ~/.codex (settings, cache, history)
@@ -61,11 +76,23 @@ module Hive
         # reports a green "Logged in" on a box that has no credential.
         case name.to_sym
         when :claude
-          credential_present?(File.join(home, ".claude", ".credentials.json"))
+          credential_present?(File.join(home || Dir.home, ".claude", ".credentials.json"))
         when :codex
-          credential_present?(File.join(home, ".codex", "auth.json"))
+          credential_present?(File.join(home || Dir.home, ".codex", "auth.json"))
         when :pi
-          credential_present?(File.join(home, ".pi", "agent", "auth.json"))
+          credential_present?(File.join(home || Dir.home, ".pi", "agent", "auth.json"))
+        when :grok
+          api_key = [ ENV["XAI_API_KEY"], ENV["GROK_CODE_XAI_API_KEY"] ].any? do |value|
+            !value.to_s.strip.empty?
+          end
+          explicit_path = [ ENV["GROK_AUTH_PATH"], ENV["GROK_HOME"] ].any? do |value|
+            !value.to_s.strip.empty?
+          end
+
+          grok_auth_path(home:) if api_key && explicit_path
+          return true if api_key
+
+          credential_present?(grok_auth_path(home:))
         else
           false
         end
@@ -88,10 +115,11 @@ module Hive
   end
 end
 
-# Auto-register the three v1 built-in profiles. Each file under
+# Auto-register the built-in profiles. Each file under
 # lib/hive/agent_profiles/ requires this file and calls register at load
 # time, so consumers only need `require "hive/agent_profiles"` to get the
 # full v1 set.
 require "hive/agent_profiles/claude"
 require "hive/agent_profiles/codex"
 require "hive/agent_profiles/pi"
+require "hive/agent_profiles/grok"

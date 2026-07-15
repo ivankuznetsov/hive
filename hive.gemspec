@@ -11,7 +11,7 @@ Gem::Specification.new do |spec|
     approach, execute writes the code, review hardens it, and finalize ships the
     PR. Every task is a directory of plain markdown artefacts you can edit, and
     the dashboard (`hive tui`) drives stage agents on single keystrokes. The CLI
-    surface is `--json`-clean so coding agents (Claude Code, Codex, Gemini, Pi)
+    surface is `--json`-clean so coding agents (Claude Code, Codex, Grok, Pi)
     can drive it programmatically.
   DESC
   spec.homepage    = "https://github.com/ivankuznetsov/hive"
@@ -39,6 +39,7 @@ Gem::Specification.new do |spec|
     "lib/**/*.rb",
     "lib/hive/scripts/**/*.sh",
     "templates/**/*",
+    "templates/builtins/bench/runtime/.dockerignore",
     "schemas/**/*.json",
     "examples/systemd/*",
     "examples/launchd/*",

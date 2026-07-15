@@ -3,7 +3,7 @@ title: Hive::Agent
 type: module
 source: lib/hive/agent.rb, lib/hive/agent_limit.rb, lib/hive/claude_launcher.rb, lib/hive/scripts/interactive_claude_wrapper.sh
 created: 2026-04-25
-updated: 2026-06-30
+updated: 2026-07-09
 tags: [agent, claude, subprocess]
 ---
 
@@ -67,6 +67,11 @@ hardcoded Claude template:
   <prompt>
 ```
 
+Prompt placement is profile data: Claude/Pi use a trailing positional prompt,
+Codex sends the prompt through stdin and places `-` in argv, and Grok places
+the prompt immediately after `-p` because `--single` consumes a value. Grok's
+streaming `text` fragments are concatenated verbatim into `final_message`.
+
 For the built-in Claude profile this is still:
 
 ```
@@ -126,7 +131,10 @@ tmux-backed Claude sessions, and the shell wrapper forwards `--model` and
 2. `IO.pipe` for child stdout/stderr.
 3. `Process.spawn(*cmd, chdir: cwd, pgroup: true, out: w, err: w)` — `pgroup: true` puts the child in its own process group so we can kill the entire group on signal/timeout.
 4. Capture `pgid` (with `Errno::ESRCH` fallback to pid).
-5. `Hive::Lock.update_task_lock(task.folder, "claude_pid" => pid)` — `hive status` uses this to detect stale agents.
+5. `Hive::Lock.update_task_lock` records both `claude_pid` and
+   `claude_pid_start_time = Hive::Lock.process_start_time(pid)`. `hive status`
+   uses the PID for liveness, and drop cleanup uses the start time to reject a
+   reused PID before signalling the recorded child.
 6. Trap `INT`/`TERM` to forward `kill -TERM -<pgid>`. Old handlers are restored in `ensure`.
 7. Reader thread: `r.each_line` writes timestamped lines to the log, captures the last structured agent final message it recognizes, and captures the first raw stream line whose text matches `Hive::AgentLimit`. Claude-style `result` / `assistant` events and Codex-style `item.completed` assistant messages set `result[:final_message_source] = :structured`; non-JSON output is retained as a bounded plain tail with `:plain` source.
 8. Polling loop: `Process.wait(pid, WNOHANG)` every `[remaining, 0.2].min` seconds until the deadline.
@@ -136,6 +144,11 @@ tmux-backed Claude sessions, and the shell wrapper forwards `--model` and
 12. Return `{pid, pgid, exit_code, timed_out, log_file, final_message, final_message_source, status: nil}`.
 
 `final_message` is for orchestrators that need a human-readable agent answer even when the agent does not edit the state file. 4-execute writes this into `task.md` under `## Execute Output`; only structured final messages satisfy research-mode completion.
+
+Claude/tmux launches record the managed pane PID in the same per-task lock.
+`Hive::ClaudeLauncher#record_claude_pid` waits for `pane_pid`, then writes both
+`claude_pid` and its `claude_pid_start_time`; this gives tmux-backed cleanup the
+same PID-reuse identity guard as headless `Hive::Agent` spawns.
 
 Claude/tmux launches that use `status_mode: :output_file_exists` (reviewers, triage/browser helpers) poll the expected artifact and the managed tmux session together. If the session disappears before the expected file exists and is non-empty, `Hive::ClaudeLauncher` returns `status: :error` with `tmux_session_terminated...` instead of waiting for the full reviewer timeout. If the expected artifact is non-empty and Claude's Stop hook already wrote `.done`, the result is accepted as `:ok`; a non-empty artifact without `.done` is treated as partial and retried rather than being promoted as a successful review. Claude/tmux pane tails are also scanned for provider-limit UI such as Claude's "Stop and wait for limit to reset" / "Add funds to continue with usage credits" menu. When that appears, marker-owned waits stamp `ERROR reason=limits_reached` and expected-output waits return an error message beginning `limits reached for claude:` instead of surfacing generic readiness, timeout, or tmux-session-death errors.
 

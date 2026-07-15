@@ -15,6 +15,8 @@ require "hive/worktree"
 module Hive
   module Stages
     module Base
+      DEFAULT_GENERIC_STAGE_TIMEOUT_SEC = 1800
+
       module_function
 
       # Per-spawn random nonce for the user_supplied wrapper. Defends against
@@ -523,6 +525,9 @@ module Hive
         if !profile.add_dir_flag && Array(add_dirs).any?
           warn_isolation_reduced(task, profile, add_dirs)
         end
+        if max_budget_usd && !profile.budget_flag
+          warn_budget_unenforced(task, profile, max_budget_usd)
+        end
 
         # `cli_flags: nil` means "no explicit flags — derive model/effort
         # (and permission_mode) from cfg". `cli_flags: []` means "explicitly
@@ -566,6 +571,19 @@ module Hive
         ).run!
         record_usage(task, profile, result, started_at)
         result
+      end
+
+      def stage_resource_limits(cfg, stage)
+        {
+          max_budget_usd: Hive::Config.stage_resource_limit(
+            cfg, "budget_usd", stage.name, descriptor_default: stage.budget_usd
+          ),
+          timeout_sec: Hive::Config.stage_resource_limit(
+            cfg, "timeout_sec", stage.name,
+            descriptor_default: stage.timeout_sec,
+            fallback: DEFAULT_GENERIC_STAGE_TIMEOUT_SEC
+          )
+        }
       end
 
       def spawn_claude!(task, cfg, prompt:, max_budget_usd:, timeout_sec:,
@@ -684,16 +702,14 @@ module Hive
         message = "[hive] agent profile #{profile.name.inspect} does not honor per-stage " \
                   "#{fields.map { |key, value| "#{key}=#{value.inspect}" }.join(', ')}; " \
                   "these are only applied on the :claude profile and are ignored for this spawn."
-        # Best-effort log write mirroring warn_isolation_reduced; never blocks spawn.
-        begin
-          FileUtils.mkdir_p(task.log_dir)
-          ts = Time.now.utc.iso8601
-          File.open(File.join(task.log_dir, "config-warnings.log"), "a") do |f|
-            f.puts "#{ts} #{message}"
-          end
-        rescue StandardError
-          warn message
-        end
+        write_spawn_warning(task, "config-warnings.log", message)
+      end
+
+      def warn_budget_unenforced(task, profile, max_budget_usd)
+        message = "[hive] agent profile #{profile.name.inspect} has no native budget flag; " \
+                  "budget_usd=#{max_budget_usd} is not enforced for this spawn. " \
+                  "The stage timeout remains enforced."
+        write_spawn_warning(task, "config-warnings.log", message)
       end
 
       def warn_isolation_reduced(task, profile, add_dirs)
@@ -708,16 +724,18 @@ module Hive
         message = "[hive] agent profile #{profile.name.inspect} has no add_dir_flag; " \
                   "ignoring add_dirs=#{add_dirs.inspect}. " \
                   "ADR-008 filesystem-isolation boundary is reduced for this spawn (see ADR-018)."
-        # Best-effort log write; never blocks spawn.
+        write_spawn_warning(task, "isolation-warnings.log", message)
+      end
+
+      def write_spawn_warning(task, filename, message)
+        # Warnings must never block an otherwise valid spawn.
         begin
           FileUtils.mkdir_p(task.log_dir)
           ts = Time.now.utc.iso8601
-          File.open(File.join(task.log_dir, "isolation-warnings.log"), "a") do |f|
+          File.open(File.join(task.log_dir, filename), "a") do |f|
             f.puts "#{ts} #{message}"
           end
         rescue StandardError
-          # If the log path can't be written, fall back to stderr — but
-          # don't raise, since the warning is informational.
           warn message
         end
       end

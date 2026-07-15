@@ -307,10 +307,13 @@ class BrainstormTmuxSentinelTest < Minitest::Test
     with_tmp_task_folder do |task|
       Hive::Lock.acquire_task_lock(task.folder, "stage" => "2-brainstorm")
 
-      Hive::ClaudeLauncher.record_claude_pid(task, FakePidRunner.new(12_345))
+      with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(pid) { "start-time-#{pid}" }) do
+        Hive::ClaudeLauncher.record_claude_pid(task, FakePidRunner.new(12_345))
+      end
 
       lock = YAML.safe_load(File.read(File.join(task.folder, ".lock")))
       assert_equal 12_345, lock.fetch("claude_pid")
+      assert_equal "start-time-12345", lock.fetch("claude_pid_start_time")
     ensure
       Hive::Lock.release_task_lock(task.folder)
     end

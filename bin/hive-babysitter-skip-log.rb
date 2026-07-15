@@ -31,6 +31,7 @@ def append_skip_log(path)
     raise IOError, "dry-run skip log is not a regular file" unless stat.file?
     raise IOError, "dry-run skip log is not owned by uid #{Process.uid}" unless stat.uid == Process.uid
     raise IOError, "dry-run skip log link count is not 1" unless stat.nlink == 1
+    raise IOError, "dry-run skip log permissions are not private" unless (stat.mode & 0o077).zero?
   rescue Errno::ENOENT
     # Missing logs are created below; the fstat check still verifies the opened target.
   end
@@ -40,6 +41,7 @@ def append_skip_log(path)
     raise IOError, "dry-run skip log is not a regular file" unless stat.file?
     raise IOError, "dry-run skip log is not owned by uid #{Process.uid}" unless stat.uid == Process.uid
     raise IOError, "dry-run skip log link count is not 1" unless stat.nlink == 1
+    raise IOError, "dry-run skip log permissions are not private" unless (stat.mode & 0o077).zero?
 
     yield file
   end

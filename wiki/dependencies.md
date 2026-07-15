@@ -3,19 +3,19 @@ title: Dependencies
 type: dependencies
 source: Gemfile, hive.gemspec, Gemfile.lock, web/Gemfile, web/Gemfile.lock
 created: 2026-04-25
-updated: 2026-06-25
+updated: 2026-07-14
 tags: [dependencies, gems, runtime]
 ---
 
-**TLDR**: The `hive-cli` gem has eight direct runtime gems; root development/test tooling is declared in `Gemfile`; the Rails hivebox app under `web/` carries its own bundle. Sinatra, rack-protection, and puma left the gem runtime with the Rails web rewrite, while the web bundle owns Rails/Turbo/solid-stack dependencies plus Redcarpet for sanitized markdown artifact rendering.
+**TLDR**: The `hive-cli` gem has ten direct runtime gems; root development/test tooling is declared in `Gemfile`; the Rails hivebox app under `web/` carries its own bundle. Sinatra, rack-protection, and puma left the gem runtime with the Rails web rewrite, while the web bundle owns Rails/Turbo/solid-stack dependencies plus Redcarpet for sanitized markdown artifact rendering.
 
 `hive.gemspec` owns runtime gem constraints; `Gemfile` uses `gemspec`
 to pull those constraints into Bundler, then adds development/test-only
-tools. The current checkout is `0.3.1`: `lib/hive.rb`, root
+tools. The v0.4.2 release-prep checkout is `0.4.2`: `lib/hive.rb`, root
 `Gemfile.lock`, and `web/Gemfile.lock` all pin the local path gem as
-`hive-cli (0.3.1)`. Commit `9efbca2a` is the release-prep sync that bumped
-both lockfiles alongside public installer URLs and the changelog. Recent root
-bundle dependency commits also bumped RuboCop from 1.87 to 1.88, Brakeman from
+`hive-cli (0.4.2)`. The release-prep change keeps both lockfiles synchronized
+with public installer URLs and the changelog. Recent root bundle dependency
+commits also bumped RuboCop to 1.88.2, Brakeman from
 8.0.4 to 8.0.5, and `concurrent-ruby` from 1.3.6 to 1.3.7; the separate web
 bundle still resolves its own Brakeman 8.0.4 and `concurrent-ruby` 1.3.6 locks
 as of this refresh.
@@ -136,7 +136,7 @@ These are not gems but the CLI tools the runtime invokes:
 `Gemfile` declares `ruby "~> 3.4"`. `hive.gemspec` requires Ruby
 `>= 3.4.0` for the packaged gem. `.rubocop.yml` pins
 `TargetRubyVersion: 3.4`. `Gemfile.lock` records Ruby 3.4.7, Bundler
-2.7.2, and the current local path gem as `hive-cli (0.3.1)`.
+2.7.2, and the current local path gem as `hive-cli (0.4.2)`.
 
 ## Backlinks
 

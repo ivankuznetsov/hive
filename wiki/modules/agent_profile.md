@@ -1,13 +1,13 @@
 ---
 title: Hive::AgentProfile + Hive::AgentProfiles
 type: module
-source: lib/hive/agent_profile.rb, lib/hive/agent_profiles.rb, lib/hive/agent_profiles/{claude,codex,pi}.rb
+source: lib/hive/agent_profile.rb, lib/hive/agent_profiles.rb, lib/hive/agent_profiles/{claude,codex,pi,grok}.rb
 created: 2026-04-26
-updated: 2026-06-29
+updated: 2026-07-10
 tags: [agent, profile, registry, architecture]
 ---
 
-**TLDR**: `Hive::AgentProfile` is a frozen value object describing one CLI's invocation contract (binary path, headless flag, add-dir flag, version requirement, status-detection mode, usage extraction, and skill verification). `Hive::AgentProfiles` is the singleton registry — built-in profiles for `claude`, `codex`, and `pi` auto-register on `require "hive/agent_profiles"`. Stages look up a profile by name (`AgentProfiles.lookup(:claude)`) and pass it to `Stages::Base.spawn_agent`. Replaces the previous claude-only singleton on `Hive::Agent`. References ADR-017 / ADR-018 / ADR-019.
+**TLDR**: `Hive::AgentProfile` is a frozen value object describing one CLI's invocation contract (binary path, headless flag, prompt-delivery style, add-dir flag, version requirement, status-detection mode, usage extraction, and skill verification). `Hive::AgentProfiles` is the singleton registry — built-in profiles for `claude`, `codex`, `pi`, and `grok` auto-register on `require "hive/agent_profiles"`. Stages look up a profile by name (`AgentProfiles.lookup(:claude)`) and pass it to `Stages::Base.spawn_agent`. Replaces the previous claude-only singleton on `Hive::Agent`. References ADR-017 / ADR-018 / ADR-019.
 
 ## `Hive::AgentProfile` — value object
 
@@ -16,9 +16,10 @@ Constructor kwargs (every profile freezes after init):
 | Kwarg | Purpose |
 |-------|---------|
 | `name:` | Symbol used by the registry. |
-| `bin_default:` | Default binary path (`"claude"`, `"codex"`, `"pi"`). |
+| `bin_default:` | Default binary path (`"claude"`, `"codex"`, `"pi"`, `"grok"`). |
 | `env_bin_override_key:` | Env var name (`"HIVE_CLAUDE_BIN"` etc.) that overrides `bin_default` when set non-empty. |
 | `headless_flag:` | The `-p` / `--prompt` style flag. |
+| `prompt_style:` | `:positional`, `:headless_flag_value`, or `:stdin`; controls where the rendered prompt is delivered. Defaults to `:stdin` for a profile named `codex` (backward compatibility), otherwise `:positional`. |
 | `permission_skip_flag:` | The CLI's "no-prompt" flag (e.g. `--dangerously-skip-permissions` for claude). |
 | `add_dir_flag:` | Optional flag to grant FS access outside cwd; `nil` means the profile cannot extend the sandbox (triggers `warn_isolation_reduced`). |
 | `budget_flag:` | Optional `--budget USD` style flag. |
@@ -58,6 +59,7 @@ Auto-required from `lib/hive/agent_profiles.rb`:
 - `claude` — default skip flag `--dangerously-skip-permissions`, `--add-dir`, `--max-budget-usd`, headless via `-p`, stream-json output with `--verbose`, Claude skill verifier, and Claude usage extraction. Min version `2.1.118`. `:state_file_marker` mode. `AgentProfile#permission_flags(mode)` is the single source of truth for permission argv, shared by the headless `Hive::Agent` path and the tmux `Hive::ClaudeLauncher#wrapper_command` path: `bypassPermissions` (and a nil mode) yields `--dangerously-skip-permissions`, any other Claude mode yields `--permission-mode <mode>`.
 - `codex` — `--dangerously-bypass-approvals-and-sandbox`, `--add-dir`, headless via the `exec` subcommand, `--json` output. No native budget flag (hive enforces wall-clock timeout only). Min version `0.125.0`. `:output_file_exists`.
 - `pi` — no permission flag, no `--add-dir` (triggers `warn_isolation_reduced` when callers pass `add_dirs:` per ADR-018), preflight checks for `~/.pi/agent/auth.json`. Min version `0.70.2`. `:output_file_exists`.
+- `grok` — headless via `-p <prompt>`, `--always-approve`, and `--output-format streaming-json`. Preflight accepts `XAI_API_KEY`, `GROK_CODE_XAI_API_KEY`, an explicit absolute credential file via `GROK_AUTH_PATH`, or `auth.json` under an absolute `GROK_HOME`/the default `~/.grok`; device login is `grok login --device-auth`. The direct path takes precedence over `GROK_HOME`, matching the CLI and allowing one refresh-token/lock domain to be mounted into isolated runners. Hive rejects relative path overrides, even when an API key is present, so its parent preflight and a child spawned in another working directory cannot consume different credential files or state directories. No add-dir or budget flag. Text events are concatenated into `final_message`; unavailable token usage stays nil. Min version `0.2.90`. `:output_file_exists`. Native skill verification is not yet available.
 
 ## Used by
 
@@ -73,6 +75,7 @@ Auto-required from `lib/hive/agent_profiles.rb`:
 - `test/unit/agent_profiles_test.rb` — registry register / lookup / unknown.
 - `test/unit/spawn_agent_test.rb` — preflight ordering, isolation-warning trigger, default-profile fallback.
 - `test/unit/pi_preflight_test.rb` — pi's auth.json preflight gate.
+- `test/unit/grok_preflight_test.rb` — Grok environment/file auth and usage semantics.
 
 ## Backlinks
 

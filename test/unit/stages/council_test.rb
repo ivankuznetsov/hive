@@ -93,6 +93,35 @@ class StagesCouncilTest < Minitest::Test
     end
   end
 
+  def test_descriptor_limits_reach_every_reviewer_and_revise_agent_spawn
+    with_tmp_dir do |project|
+      workflow = council_workflow(
+        exit_rule: :consensus,
+        max_rounds: 2,
+        revise: true,
+        budget_usd: 7.5,
+        timeout_sec: 61
+      )
+      task = task_for(project, workflow: workflow)
+      File.write(File.join(task.folder, "draft.md"), "Architecture draft\n")
+      outputs = [
+        "Verdict: ready\n",
+        "Verdict: changes_requested\n\n## Required edits\n- Expand risks.\n",
+        "Verdict: ready\n",
+        "Verdict: ready\n"
+      ]
+
+      with_stubbed_spawn(outputs) do |captured|
+        result = Hive::Stages::Council.run!(task, {})
+
+        assert_equal({ commit: "complete", status: :complete }, result)
+        assert_equal 5, captured.length
+        assert captured.all? { |kwargs| kwargs.fetch(:max_budget_usd) == 7.5 }
+        assert captured.all? { |kwargs| kwargs.fetch(:timeout_sec) == 61 }
+      end
+    end
+  end
+
   def test_command_revise_runs_before_next_round
     with_tmp_dir do |project|
       revise = Hive::Workflow::Revise.new(
@@ -228,6 +257,70 @@ class StagesCouncilTest < Minitest::Test
       assert_equal({ commit: "error", status: :error }, result)
       assert_equal "council_failed", marker.attrs.fetch("reason")
       assert_includes marker.attrs.fetch("message"), "council reviewer shell failed: boom"
+    end
+  end
+
+  def test_command_reviewer_is_terminated_at_stage_timeout
+    with_tmp_dir do |project|
+      workflow = command_council_workflow(
+        command: "sleep 3; printf 'Verdict: ready\\n' > \"$HIVE_COUNCIL_OUTPUT\"",
+        timeout_sec: 0.1
+      )
+      task = task_for(project, workflow: workflow)
+      File.write(File.join(task.folder, "draft.md"), "Architecture draft\n")
+
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      result = Hive::Stages::Council.run!(task, {})
+      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal({ commit: "error", status: :error }, result)
+      assert_equal "council_failed", marker.attrs.fetch("reason")
+      assert_includes marker.attrs.fetch("message"), "timed out after 0.1s"
+      assert_operator elapsed, :<, 1.0
+    end
+  end
+
+  def test_command_revise_is_terminated_at_stage_timeout
+    with_tmp_dir do |project|
+      revise = Hive::Workflow::Revise.new(command: "sleep 3")
+      workflow = council_workflow(
+        exit_rule: :consensus,
+        max_rounds: 2,
+        revise: revise,
+        timeout_sec: 0.1
+      )
+      task = task_for(project, workflow: workflow)
+      File.write(File.join(task.folder, "draft.md"), "Architecture draft\n")
+
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      result = nil
+      with_stubbed_spawn([ "Verdict: changes_requested\n", "Verdict: changes_requested\n" ]) do
+        result = Hive::Stages::Council.run!(task, {})
+      end
+      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal({ commit: "error", status: :error }, result)
+      assert_equal "council_failed", marker.attrs.fetch("reason")
+      assert_includes marker.attrs.fetch("message"), "timed out after 0.1s"
+      assert_operator elapsed, :<, 1.0
+    end
+  end
+
+  def test_command_timeout_force_kills_a_process_group_that_ignores_term
+    with_tmp_dir do |project|
+      error = assert_raises(Hive::StageError) do
+        Hive::Stages::Council::CommandRunner.run(
+          {},
+          "trap '' TERM; while :; do sleep 1; done",
+          chdir: project,
+          timeout_sec: 0.05,
+          label: "stubborn council command"
+        )
+      end
+
+      assert_equal "stubborn council command timed out after 0.05s", error.message
     end
   end
 
@@ -406,7 +499,7 @@ class StagesCouncilTest < Minitest::Test
     end
 
     def council_workflow(quorum: 2, max_rounds: 1, exit_rule: :human, revise: false, input: nil,
-                         triage_output: nil)
+                         triage_output: nil, budget_usd: nil, timeout_sec: nil)
       revise_config =
         case revise
         when Hive::Workflow::Revise
@@ -425,6 +518,8 @@ class StagesCouncilTest < Minitest::Test
             index: 2,
             state_file: "review.md",
             kind: :council,
+            budget_usd: budget_usd,
+            timeout_sec: timeout_sec,
             input: input,
             reviewers: [
               Hive::Workflow::Reviewer.new(name: "one", skill: "/review"),
@@ -443,7 +538,8 @@ class StagesCouncilTest < Minitest::Test
       )
     end
 
-    def command_council_workflow(command: "printf 'Verdict: ready\\n' > \"$HIVE_COUNCIL_OUTPUT\"")
+    def command_council_workflow(command: "printf 'Verdict: ready\\n' > \"$HIVE_COUNCIL_OUTPUT\"",
+                                 timeout_sec: nil)
       Hive::Workflow.new(
         id: :command_council,
         stages: [
@@ -453,6 +549,7 @@ class StagesCouncilTest < Minitest::Test
             index: 2,
             state_file: "review.md",
             kind: :council,
+            timeout_sec: timeout_sec,
             reviewers: [
               Hive::Workflow::Reviewer.new(
                 name: "shell",

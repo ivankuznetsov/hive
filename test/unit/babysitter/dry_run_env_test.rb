@@ -508,6 +508,29 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_stubs_refuse_group_or_world_accessible_skip_logs
+    with_tmp_dir do |dir|
+      [ 0o644, 0o666 ].each do |mode|
+        [
+          [ "git", [ "commit", "-m", "insecure-log" ] ],
+          [ "gh", [ "pr", "comment", "42", "--body", "insecure-log" ] ]
+        ].each do |binary, args|
+          log = File.join(dir, "#{binary}-#{mode.to_s(8)}.log")
+          File.write(log, "existing\n")
+          File.chmod(mode, log)
+
+          _out, err, status = Open3.capture3({ "HIVE_BABYSITTER_DRY_RUN_LOG" => log }, stub_path(binary), *args)
+
+          assert status.success?, err
+          assert_equal "existing\n", File.read(log)
+          assert_equal mode, File.stat(log).mode & 0o777
+          assert_includes err, "dry-run skip log permissions are not private"
+          assert_includes err, "[dry-run] #{binary} #{args.join(' ')} skipped"
+        end
+      end
+    end
+  end
+
   def test_stubs_refuse_fifo_skip_log_without_blocking
     with_tmp_dir do |dir|
       fifo = File.join(dir, "skipped.fifo")
@@ -610,6 +633,14 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "gh", "api", "repos/owner/repo/issues/123/comments", "--input", "payload.json"
       assert_stubbed env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "--input", "payload.json"
       assert_stubbed env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-F", "q=@secret"
+      [
+        [ "api", "--method=POST", "repos/owner/repo/dispatches" ],
+        [ "api", "-XPOST", "repos/owner/repo/dispatches" ],
+        [ "api", "-X=POST", "repos/owner/repo/dispatches" ],
+        [ "api", "repos/owner/repo/issues/123/comments", "-fbody=hi" ],
+        [ "api", "repos/owner/repo/issues/123/comments", "--raw-field=body=hi" ],
+        [ "auth", "status", "--show-token=true" ]
+      ].each { |args| assert_stubbed env, "gh", *args }
       assert_stubbed env, "gh", "workflow", "run", "release.yml"
       assert_stubbed env, "gh", "totally-new-write-command", "arg"
       assert_stubbed env, "gh", "repo", "view", "--web"
@@ -704,6 +735,9 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_passes env, "gh", "api", "-ip", "shadow-cat", "repos/owner/repo"
       assert_passes env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-f", "state=open"
       assert_passes env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-F", "state=open"
+      %w[--method=GET -XGET -X=GET].each do |method|
+        assert_passes env, "gh", "api", method, "repos/owner/repo/issues"
+      end
       # The safe positional forms must still reach real gh, so the new positional
       # gate does not over-block: a bare `OWNER/REPO` slug (one slash) on `repo view`,
       # a numeric operand on `pr view`, and a slash-bearing branch ref the pr-URL rule

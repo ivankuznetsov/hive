@@ -91,6 +91,38 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_collects_grok_streaming_text_chunks_verbatim
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      bin = File.join(dir, "fake-grok")
+      File.write(bin, <<~SH)
+        #!/bin/sh
+        printf '%s\n' '{"type":"text","data":"Here&apos;s"}'
+        printf '%s\n' '{"type":"text","data":" a summary"}'
+        printf '%s\n' '{"type":"end","stopReason":"end_turn"}'
+      SH
+      File.chmod(0o755, bin)
+      profile = Hive::AgentProfile.new(
+        name: :grok,
+        bin_default: bin,
+        headless_flag: "-p",
+        prompt_style: :headless_flag_value,
+        version_flag: "--version",
+        skill_syntax_format: "/%{skill}",
+        status_detection_mode: :exit_code_only
+      )
+
+      result = Hive::Agent.new(
+        task: task, prompt: "test", max_budget_usd: 1, timeout_sec: 5,
+        profile: profile
+      ).run!
+
+      assert_equal :ok, result[:status]
+      assert_equal "Here&apos;s a summary", result[:final_message]
+      assert_equal :structured, result[:final_message_source]
+    end
+  end
+
   def test_timeout_sigterms_subprocess
     with_tmp_dir do |dir|
       task = make_task(dir)
@@ -586,6 +618,39 @@ class AgentTest < Minitest::Test
 
       assert_equal result[:pid], result[:pgid]
       assert_equal :waiting, result[:status]
+    end
+  end
+
+  def test_spawn_records_agent_pid_and_start_time_in_one_lock_update
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = task.state_file
+      ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "## Round 1\n<!-- WAITING -->\n"
+      updates = []
+      start_time_pids = []
+
+      with_replaced_singleton_method(Hive::Lock, :process_start_time, lambda { |pid|
+        start_time_pids << pid
+        "spawn-start-time"
+      }) do
+        with_replaced_singleton_method(Hive::Lock, :update_task_lock, lambda { |folder, additions|
+          updates << [ folder, additions ]
+        }) do
+          result = Hive::Agent.new(task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5).run!
+
+          assert_equal [ result[:pid] ], start_time_pids
+          assert_equal [
+            [
+              task.folder,
+              {
+                "claude_pid" => result[:pid],
+                "claude_pid_start_time" => "spawn-start-time"
+              }
+            ]
+          ], updates
+        end
+      end
     end
   end
 

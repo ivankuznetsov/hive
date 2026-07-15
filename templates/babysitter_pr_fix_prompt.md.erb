@@ -38,7 +38,22 @@ gh run rerun, or gh pr review. Do not invoke absolute paths such as
 `/usr/bin/git`, `/usr/bin/gh`, `/usr/local/bin/git`, or
 `/opt/homebrew/bin/gh` — the dry-run safety overlay sits on PATH and
 absolute-path invocations bypass it. Use the bare `git` and `gh`
-commands so the overlay can intercept mutating subcommands.
+commands so the overlay can enforce this read allowlist (subject to its
+safe-option and host checks):
+
+- git branch, cat-file, describe, diff, grep, log, ls-files, ls-tree,
+  merge-base, rev-list, rev-parse, show, status, remote, and config reads
+- gh api GET reads; gh auth status; gh pr checks/diff/list/status/view;
+  gh run list/view/watch; gh repo view; and gh workflow list/view
+
+Every other invocation, including `gh issue view`, is blocked. A blocked
+command always emits a `[dry-run] ... skipped` marker to stderr and returns
+synthetic success (exit status 0). It also attempts to append that marker to
+`<%= worktree_path %>/.babysitter-dry-run-skipped.log`; if the audit target is
+unsafe or unavailable, it emits a `[dry-run] failed to write skip log ...`
+warning and continues without a persistent record. Do not interpret blocked
+output as a real empty result; check stderr first, then inspect the skip log
+when it was written successfully.
 
 Write your full plan to:
 

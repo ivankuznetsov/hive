@@ -71,8 +71,20 @@
     {
       "fingerprint": "53a89404d256e9d4c6944d3f732e77dc5710c1731467867f0b8e6e1cdc4d6800",
       "note": "False positive. Hive::Gh.capture3 uses Process.spawn argv form in Gh#list_merged_prs. The search string is one literal gh-search argv element (`merged:<since>..<until_date>`), where the production caller passes Date#iso8601 calendar strings computed by MergedPr::Collector; no shell sees or expands the value."
+    },
+    {
+      "fingerprint": "53a87d6be6def9153c7422776e6ef0411c9a909aa8718a3a6f4de6ac570a52b3",
+      "note": "False positive. The packaged hive-bench Profile probe invokes Open3.capture3 with discrete argv elements (`bin`, `flag`); no shell sees or expands either value."
+    },
+    {
+      "fingerprint": "a98ed9eef5d01e92add813cb7f87d24ba348101d0d758d04e3fa30c7989dd857",
+      "note": "False positive. The packaged hive-bench extractor invokes sqlite3 through Open3.capture3 argv form. The database path and SQL are separate argv elements passed directly to execve(2), not a shell command."
+    },
+    {
+      "fingerprint": "f74ae0226a7716c15cff765f647a29a11e0ad654a9b838930c9d72e26f4213ae",
+      "note": "False positive. The packaged hive-bench Codex judge constructs an argv array and splats it into Open3.capture3; model, effort, and binary values are discrete argv elements and never enter a shell."
     }
   ],
-  "updated": "2026-07-02 00:00:00 +0000",
+  "updated": "2026-07-13 00:00:00 +0000",
   "brakeman_version": "8.0.5"
 }

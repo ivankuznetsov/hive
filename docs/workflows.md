@@ -1,6 +1,6 @@
 # Project Workflows
 
-Hive ships with built-in `coding` and `content` workflows. A project can also
+Hive ships with built-in `coding`, `content`, and `bench` workflows. A project can also
 define owner-authored workflows under its Hive state tree:
 
 ```
@@ -13,6 +13,29 @@ PROJECT --workflow <id> "..."` pins a single task to a workflow. Project
 workflow descriptors are discovered at runtime by `hive new`, `hive init`,
 `hive status`, `hive run`, `hive approve`, and the daemon path that uses those
 commands.
+
+## Run The Built-In Benchmark Workflow
+
+The `bench` workflow drives a reproducible hive-bench campaign through
+`inbox -> extract -> generate -> judge -> publish -> done`. Its descriptor,
+stage instructions, campaign example, and runtime harness ship with Hive:
+
+```bash
+hive init /path/to/benchmark-project --workflow bench
+hive new benchmark-project "benchmark campaign"
+```
+
+Hive snapshots the runtime under `.hive-state/bench-runtime` on the durable
+state branch. Copy its `campaign.yml.example` into the printed task folder as
+the tracked `campaign.yml`; the daemon then advances the task through the
+packaged stages. The control plane uses Codex and allows up to seven
+days for the serialized generate/judge stages; the candidate and judge models
+inside the campaign remain governed solely by `campaign.yml`. See the
+hive-bench README for the campaign schema, credentials, and public submission
+process. If every unfinished generation cell is parked only by provider quota,
+the stage writes a cooldown-aware `limits_reached` marker so the daemon retries
+after reset; malformed/missing/non-limit failures remain manual `WAITING`
+states.
 
 ## Create A Blank Workflow
 
@@ -52,6 +75,8 @@ stages:
     agent: claude
     model: opus
     effort: high
+    budget_usd: 12.50
+    timeout_sec: 7200
     permissions: read-only
   - name: done
     kind: terminal
@@ -68,9 +93,21 @@ Rules:
 - `agent:`, `model:`, and `effort:` are optional on `kind: agent` and
   `kind: council`. Descriptor values override project stage config; Claude
   stages receive `model` / `effort` as CLI flags.
-- `skill:`, `instruction:`, `agent:`, `model:`, `effort:`, `permissions:`,
-  `input:`, `reviewers:`, `council:`, and `deliverable:` are rejected on
-  `kind: terminal` stages.
+- `budget_usd:` and `timeout_sec:` provide optional resource defaults for
+  `kind: agent` and `kind: council`; explicitly authored, non-null project stage
+  config takes precedence. Values inherited from Hive's merged config defaults do not
+  shadow descriptor defaults. `budget_usd` must be a positive finite number and
+  `timeout_sec` a positive integer.
+  - Limits apply to each agent spawn, not to the aggregate cost or duration of
+    a multi-reviewer, multi-round council.
+  - `budget_usd` is enforced only when the selected agent profile exposes a
+    native budget flag. Hive writes `config-warnings.log` when a profile cannot
+    enforce it; `timeout_sec` remains enforced for every agent spawn.
+  - Council command reviewers and command revisers also use `timeout_sec`; Hive
+    terminates their process group when the limit expires.
+- `skill:`, `instruction:`, `agent:`, `model:`, `effort:`, `budget_usd:`,
+  `timeout_sec:`, `permissions:`, `input:`, `reviewers:`, `council:`, and
+  `deliverable:` are rejected on `kind: terminal` stages.
 - `instruction:` is resolved relative to the descriptor file and must point to a readable file (any extension; `.md` is conventional but not required).
 - `permissions:` is optional and uses the same syntax as [permissions.md](permissions.md).
 - The last stage may be `kind: terminal`, `kind: agent`, or `kind: council`.

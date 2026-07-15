@@ -121,6 +121,11 @@ module Hive
           "bin" => "pi",
           "env_override" => "HIVE_PI_BIN",
           "min_version" => "0.70.2"
+        },
+        "grok" => {
+          "bin" => "grok",
+          "env_override" => "HIVE_GROK_BIN",
+          "min_version" => "0.2.90"
         }
       },
       # Configuration for the 6-review stage's autonomous loop. Each role
@@ -616,7 +621,7 @@ module Hive
     # regardless of the order the operator typed. The names are frozen so
     # callers that receive them back from `normalize_global_agents` cannot
     # mutate the shared constant in place.
-    GLOBAL_AGENT_BACKENDS = %w[claude codex pi].map(&:freeze).freeze
+    GLOBAL_AGENT_BACKENDS = %w[claude codex pi grok].map(&:freeze).freeze
     # Recommended default selection when the operator accepts the prompt
     # default or runs non-interactively — Claude + Codex; Pi is opt-in.
     DEFAULT_GLOBAL_AGENTS = %w[claude codex].map(&:freeze).freeze
@@ -636,6 +641,8 @@ module Hive
     DEPENDENCY_GATE_STAGES = %w[8-finalize 9-done].freeze # coding-scoped: coding dependency-gate stages (last two of Stages::DIRS)
     EXPLICIT_CLAUDE_MODE_KEY = :__hive_explicit_claude_mode
     EXPLICIT_BRAINSTORM_RUNTIME_KEY = :__hive_explicit_brainstorm_runtime
+    EXPLICIT_RESOURCE_LIMITS_KEY = :__hive_explicit_resource_limits
+    RESOURCE_LIMIT_FIELDS = %w[budget_usd timeout_sec].freeze
 
     module_function
 
@@ -702,6 +709,7 @@ module Hive
       merged = merge_defaults(data).merge("project_root" => project_root)
       merged[EXPLICIT_CLAUDE_MODE_KEY] = nested_key?(data, "claude", "mode")
       merged[EXPLICIT_BRAINSTORM_RUNTIME_KEY] = nested_key?(data, "brainstorm", "runtime")
+      merged[EXPLICIT_RESOURCE_LIMITS_KEY] = explicit_resource_limits(data)
       inject_bot_runtime_path_defaults!(merged)
       validate!(merged, candidate)
       merged
@@ -767,6 +775,34 @@ module Hive
         cursor = cursor[key]
       end
       true
+    end
+
+    # Resolve a workflow descriptor's per-stage resource default without
+    # mistaking values injected by merge_defaults for project-authored
+    # overrides. Config.load records the raw key provenance above; synthetic
+    # hashes used by callers/tests retain the historical "present means
+    # explicit" behavior because they carry no provenance marker.
+    def stage_resource_limit(cfg, field, stage_name, descriptor_default:, fallback: nil)
+      provenance = cfg[EXPLICIT_RESOURCE_LIMITS_KEY]
+      explicit =
+        if provenance.is_a?(Hash)
+          Array(provenance[field]).include?(stage_name)
+        else
+          nested_key?(cfg, field, stage_name)
+        end
+      project_value = cfg.dig(field, stage_name)
+      return project_value if explicit && project_value
+      return descriptor_default unless descriptor_default.nil?
+
+      project_value || fallback
+    end
+
+    def explicit_resource_limits(data)
+      RESOURCE_LIMIT_FIELDS.to_h do |field|
+        values = data[field]
+        stage_names = values.is_a?(Hash) ? values.keys.map(&:to_s).freeze : [].freeze
+        [ field, stage_names ]
+      end.freeze
     end
 
     def resolve_patrol_mode!(data)
@@ -2286,8 +2322,8 @@ module Hive
 
       DAEMON_NUMERIC_BOUNDS.each do |key, min|
         value = daemon[key]
-        next if value.nil?
-
+        # Validation runs after daemon defaults are merged, so nil here is
+        # an explicit YAML null override rather than an omitted optional key.
         unless value.is_a?(Integer) && value >= min
           raise ConfigError,
                 "daemon.#{key} in #{describe_source(source_path)} must be an integer " \

@@ -59,6 +59,12 @@ These `/hive` commands map to the underlying `hive ...` CLI; the scaffold comman
 - `/hive new . --workflow <id> "draft launch notes"` overrides the workflow for one task when creating it.
 - `hive workflow new <id> [--template <name>]` is the existing scaffold command for creating a project-local workflow descriptor under `<hive_state_path>/workflows/`.
 
+Agent and council stages may declare `budget_usd` and `timeout_sec` defaults.
+Explicit project stage config overrides them. These are per-spawn limits: a
+council can spend the limit once per reviewer, retry, round, and revise spawn.
+Budgets require a selected CLI with a native budget flag (Hive logs a warning
+when unavailable); timeouts also bound council command reviewers and revisers.
+
 ## CLI Detection
 
 Before running a Hive workflow, check whether the Hive CLI is installed:

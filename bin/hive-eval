@@ -4,6 +4,9 @@ require "fileutils"
 require "English"
 require "json"
 require "optparse"
+require "rake"
+require "shellwords"
+require "tmpdir"
 
 root = File.expand_path("..", __dir__)
 SAFE_SCENARIO_BASENAME = /\A[A-Za-z0-9_-]+\z/
@@ -84,6 +87,24 @@ def option_value_missing?(value)
   value.to_s.empty? || value.start_with?("-")
 end
 
+def inherited_rake_dry_run?(value)
+  dry_run = false
+  parser = OptionParser.new
+  Rake::Application.new.standard_rake_options.each do |spec|
+    declarations = spec.reject { |part| part.respond_to?(:call) }
+    parser.on(*declarations) do
+      dry_run = true if declarations.include?("--dry-run")
+    end
+  end
+
+  parser.parse!(Shellwords.shellsplit(value.to_s))
+  dry_run
+rescue OptionParser::ParseError, ArgumentError
+  # Invalid or ambiguously quoted Rake options are rejected instead of being
+  # silently cleared before the child sees them.
+  true
+end
+
 # Snapshot ARGV before parse! mutates it in place. The parser-error cleanup
 # below uses the original tokens to tell when an unusable --report value should
 # fall back to the default report.
@@ -146,15 +167,63 @@ def scenario_path(scenario_root, value)
   File.join(scenario_root, "#{basename}_test.rb")
 end
 
+def validate_report!(report_path, requested_scenario_path, require_passing:)
+  report = JSON.parse(File.read(report_path))
+  scenarios = report["scenarios"] if report.is_a?(Hash)
+  unless report.is_a?(Hash) &&
+      report["schema"] == "hive-eval-report" &&
+      report["schema_version"] == 1 &&
+      scenarios.is_a?(Array)
+    raise ArgumentError, "unexpected hive-eval-report schema"
+  end
+  raise ArgumentError, "hive-eval-report contains no scenarios" if scenarios.empty?
+
+  required_arrays = %w[failures assertions captured_messages captured_log_events]
+  valid_entries = scenarios.all? do |scenario|
+    scenario.is_a?(Hash) &&
+      !scenario["scenario_name"].to_s.empty? &&
+      !scenario["file"].to_s.empty? &&
+      %w[pass fail].include?(scenario["status"]) &&
+      required_arrays.all? { |key| scenario[key].is_a?(Array) }
+  end
+  raise ArgumentError, "hive-eval-report contains an invalid scenario entry" unless valid_entries
+  if require_passing && !scenarios.all? { |scenario| scenario["status"] == "pass" }
+    raise ArgumentError, "hive-eval-report contains a failed scenario after a successful child exit"
+  end
+
+  return unless requested_scenario_path
+
+  requested_scenario_path = File.expand_path(requested_scenario_path)
+  reported = scenarios.any? do |scenario|
+    File.expand_path(scenario.fetch("file")) == requested_scenario_path
+  end
+  raise ArgumentError, "hive-eval-report does not contain the requested scenario" unless reported
+rescue Errno::ENOENT
+  raise ArgumentError, "hive-eval-report was not created"
+rescue JSON::ParserError
+  raise ArgumentError, "hive-eval-report is not valid JSON"
+end
+
+def validate_report_directory!(path)
+  stat = File.stat(path)
+  raise ArgumentError, "hive-eval report parent is not a directory" unless stat.directory?
+
+  unsafe_writes = (stat.mode & 0o022) != 0
+  sticky = (stat.mode & 0o1000) != 0
+  return unless unsafe_writes && !sticky
+
+  raise ArgumentError, "hive-eval report directory is group/world-writable without the sticky bit"
+end
+
 scenario_root = File.expand_path(
   ENV.fetch("HIVE_EVAL_SCENARIO_ROOT", File.join(root, "test", "eval", "scenarios")),
   root
 )
 
 env = {
-  "HIVE_EVAL_REPORT" => report_path,
   "HIVE_EVAL_SCENARIOS_ONLY" => "1",
   "HIVE_EVAL_NO_JUDGE" => (options[:no_judge] ? "1" : nil),
+  "RAKEOPT" => nil,
   "TEST" => nil
 }
 
@@ -175,7 +244,46 @@ if path
   env["TEST"] = path
 end
 
+if inherited_rake_dry_run?(ENV["RAKEOPT"])
+  warn "hive-eval: inherited RAKEOPT may not enable rake dry-run"
+  exit 1
+end
+
+report_dir = File.dirname(report_path)
+FileUtils.mkdir_p(report_dir)
+begin
+  validate_report_directory!(report_dir)
+rescue ArgumentError, SystemCallError => e
+  warn "hive-eval: #{e.message}"
+  exit 1
+end
 FileUtils.rm_f(report_path)
-FileUtils.mkdir_p(File.dirname(env.fetch("HIVE_EVAL_REPORT")))
-ok = system(env, "bundle", "exec", "rake", "test:eval", chdir: root)
-exit($CHILD_STATUS&.exitstatus || (ok ? 0 : 1))
+run_dir = Dir.mktmpdir(".hive-eval-run-", report_dir)
+run_report_path = File.join(run_dir, "report.json")
+env["HIVE_EVAL_REPORT"] = run_report_path
+
+begin
+  ok = system(env, "bundle", "exec", "rake", "test:eval", chdir: root)
+  child_exit = $CHILD_STATUS&.exitstatus || (ok ? 0 : 1)
+  if child_exit.zero?
+    validate_report!(run_report_path, path, require_passing: true)
+    File.rename(run_report_path, report_path)
+  else
+    begin
+      validate_report!(run_report_path, path, require_passing: false)
+      File.rename(run_report_path, report_path)
+    rescue ArgumentError, SystemCallError => e
+      warn "hive-eval: #{e.message}"
+    end
+    exit(child_exit)
+  end
+rescue ArgumentError, SystemCallError => e
+  warn "hive-eval: #{e.message}"
+  exit 1
+ensure
+  begin
+    FileUtils.remove_entry_secure(run_dir) if File.exist?(run_dir)
+  rescue ArgumentError, SystemCallError => e
+    warn "hive-eval: could not remove private report directory: #{e.message}"
+  end
+end

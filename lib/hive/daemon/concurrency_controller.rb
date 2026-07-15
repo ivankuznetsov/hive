@@ -31,7 +31,8 @@ module Hive
       # the schedule, the entry is quarantined.
       TRANSIENT_BACKOFF_SCHEDULE = [ 60, 120, 300 ].freeze
 
-      attr_reader :max_concurrent_runs, :max_concurrent_per_project, :max_runs_per_day_per_project
+      attr_reader :max_concurrent_runs, :max_concurrent_per_project,
+                  :max_runs_per_day_per_project, :max_concurrent_patrol_scans
 
       def initialize(max_concurrent_runs:, max_concurrent_per_project:, max_runs_per_day_per_project:,
                      max_concurrent_patrol_scans: 1, dispatch_state: nil)
@@ -72,6 +73,17 @@ module Hive
         # the persisted store so a restart keeps the baselines the next
         # tick compares against (fail-closed: {} if absent/corrupt).
         @last_dispatched_mtime = @dispatch_state ? @dispatch_state.load : {}
+      end
+
+      # Apply SIGHUP-reloaded budget limits without replacing the controller.
+      # Rebuilding it would discard live child accounting, cooldowns,
+      # quarantine, daily counters, and persisted-baseline state.
+      def update_limits(max_concurrent_runs:, max_concurrent_per_project:,
+                        max_runs_per_day_per_project:, max_concurrent_patrol_scans:)
+        @max_concurrent_runs = max_concurrent_runs
+        @max_concurrent_per_project = max_concurrent_per_project
+        @max_runs_per_day_per_project = max_runs_per_day_per_project
+        @max_concurrent_patrol_scans = max_concurrent_patrol_scans
       end
 
       # Predicate: can the daemon spawn a child for (project, slug) now?

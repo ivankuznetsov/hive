@@ -136,7 +136,11 @@ module Hive
         # so a re-run of `hive init` proceeds normally.
         answers = collect_prompt_answers
         project_config_content = render_project_config(ops, answers: answers, default_workflow: workflow_choice.descriptor.id)
-        entry = initialize_project_state(ops, content: project_config_content)
+        entry = initialize_project_state(
+          ops,
+          content: project_config_content,
+          workflow: workflow_choice.descriptor.id
+        )
 
         if @json
           emit_json_summary(entry: entry, ops: ops, answers: answers, workflow: workflow_choice.descriptor.id)
@@ -269,6 +273,7 @@ module Hive
         # `:implicit` re-init already raised AlreadyInitialized in `call` before
         # reaching here, so this path only sees :flag / :prompt — both express a
         # default-workflow intent and run the (idempotent) rebind.
+        install_builtin_workflow_runtime!(ops, workflow_choice.descriptor.id)
         update_existing_default_workflow!(ops, workflow_choice.descriptor.id)
         Hive::Config.register_project(name: File.basename(@project_path), path: @project_path)
         if @json
@@ -477,7 +482,7 @@ module Hive
         end
       end
 
-      def initialize_project_state(ops, content:, &after_bootstrap)
+      def initialize_project_state(ops, content:, workflow: nil, &after_bootstrap)
         rollback_on_failure = false
         side_effect_snapshot = capture_init_side_effect_snapshot
         begin
@@ -485,6 +490,7 @@ module Hive
           init_result = ops.hive_state_init
           rollback_on_failure = init_result == :created
           write_per_project_config(ops, content: content)
+          install_builtin_workflow_runtime!(ops, workflow)
           ops.add_hive_state_to_master_gitignore!
           Hive::LlmWikiBootstrap.install!(@project_path, post_commit_hook: false, scheduler: false)
           ops.commit_llm_wiki_bootstrap!
@@ -497,6 +503,12 @@ module Hive
           rollback_partial_init(ops, side_effect_snapshot: side_effect_snapshot) if rollback_on_failure
           raise
         end
+      end
+
+      def install_builtin_workflow_runtime!(ops, workflow_id)
+        return unless workflow_id.to_s == "bench"
+
+        Hive::Workflows::Bench.install_runtime!(ops)
       end
 
       def rollback_partial_init(ops, side_effect_snapshot: nil)

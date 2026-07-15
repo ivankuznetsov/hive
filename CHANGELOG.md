@@ -2,6 +2,59 @@
 
 All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with terse bullets — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
+## 0.4.2
+
+- Added `bench` as a third built-in workflow for reproducible coding-agent
+  campaigns. `hive init PATH --workflow bench` installs the self-contained,
+  versioned `extract -> generate -> judge -> publish` harness without requiring
+  a separate hive-bench checkout. (#734)
+- Made long-running benchmark and other generic agent stages quota-aware, so
+  provider-limit failures retain cooldown metadata and can resume after reset
+  while malformed results and non-limit failures still stop for review. (#734)
+- Fixed daemon child logging to write bounded per-task captures under Hive's XDG
+  state directory instead of shared `/tmp`, preventing temporary-directory quota
+  exhaustion from crashing dispatch and keeping logs out of tracked state. (#718)
+
+## 0.4.1
+
+- Fixed Grok auth overrides so explicit `GROK_AUTH_PATH` and `GROK_HOME`
+  values must be absolute, including API-key flows. This prevents preflight and
+  task-worktree processes from resolving different credential locations. (#714)
+- Fixed daemon reloads so updated project/global concurrency limits take effect
+  immediately and atomically; invalid reloads keep the last valid limits. (#716)
+- Fixed pre-dispatch `--json` usage failures to emit the command-specific
+  published schema instead of a generic or mismatched envelope. (#709)
+- Hardened babysitter dry runs: the prompt now treats stderr skip markers as
+  authoritative, and the optional skip log refuses group/world-readable or
+  writable files before appending sensitive command arguments. (#703, #710)
+- Hardened `hive-eval` against inherited Rake dry-run options, incomplete or
+  cross-run scenario reports, unsafe report directories, and non-atomic report
+  publication. (#711)
+- Fixed `hive drop` so verified descendants in nested process groups are
+  terminated with PID-reuse guards; incomplete process discovery fails safely
+  instead of claiming a complete tree cleanup. (#701)
+
+## 0.4.0
+
+- Added xAI Grok as a built-in agent backend, with headless streaming output,
+  stage/config overrides, diagnosis and web-login support, honest unavailable
+  token telemetry, and a compact report-only Compound Engineering reviewer.
+  Authentication follows `GROK_AUTH_PATH`, `GROK_HOME`, API-key, and device-login
+  flows, including passwd-less runners. Requires Grok CLI 0.2.90 or newer.
+  (#695, #713)
+- Added enforceable `timeout_sec` and `budget_usd` resource controls to custom
+  workflow stages. Descriptor values outrank project defaults; agent and council
+  commands share process-group timeout handling, while unsupported native budget
+  caps are reported clearly. (#700)
+- Added `hive refactor-patrol`, a first-class architecture cleanup discovery
+  command that turns bounded findings into the existing patrol workflow. (#656)
+- Hardened Hive's self-review and E2E toolchain around symlinked artifacts,
+  report-path validation, dynamic-loader/PATH injection, descendant cleanup,
+  git diff/merge drivers, and leading JSON help/version parsing. (#655, #661–#688)
+- Fixed relative web-app overrides, rotated TUI marker artifact capture, and
+  merged-PR digest wrapper coverage. (#697–#699)
+- Updated the development lint stack to RuboCop 1.88.2. (#670)
+
 ## 0.3.7
 
 - Fixed hive failing to start on Arch Linux with `cannot load such file -- erb`:

@@ -78,6 +78,7 @@ For the bulk-of-stale-entries case, prefer `hive prune`. The TUI grid Shift+X ke
 
 | `error_kind` | Exit | Cause |
 |---|---|---|
+| `usage` | 64 | malformed argv rejected before command dispatch |
 | `missing_name` | 64 | NAME positional was empty/whitespace |
 | `unknown_project` | 64 | NAME does not match any registry entry and `--if-exists` was not passed |
 | `config` | 78 | malformed `config.yml` or missing `$HIVE_HOME` |

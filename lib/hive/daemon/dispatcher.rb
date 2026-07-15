@@ -999,7 +999,6 @@ module Hive
           project: row.project, slug: row.slug, stage: row.stage,
           state_file_mtime: row.state_file_mtime,
           state_file_path: row.state_file,
-          hive_state_path: nil, # supervisor falls back to tmpdir
           now: now,
           trigger: trigger
         )
@@ -1082,7 +1081,6 @@ module Hive
             project: project, slug: slug, stage: archive_dispatch[:stage],
             state_file_mtime: archive_dispatch[:state_file_mtime],
             state_file_path: nil, # archive doesn't track an mtime baseline
-            hive_state_path: archive_dispatch[:hive_state_path],
             now: now
           )
         else
@@ -1156,7 +1154,6 @@ module Hive
           project: project, slug: slug, stage: patrol_dispatch[:stage],
           state_file_mtime: patrol_dispatch[:state_file_mtime],
           state_file_path: patrol_dispatch[:state_file_path],
-          hive_state_path: patrol_dispatch[:hive_state_path],
           now: now,
           trigger: "patrol",
           kind: :patrol_scan
@@ -1200,7 +1197,6 @@ module Hive
           stage: stage,
           state_file_mtime: digest_dispatch[:state_file_mtime],
           state_file_path: digest_dispatch[:state_file_path],
-          hive_state_path: digest_dispatch[:hive_state_path],
           now: now,
           trigger: action,
           kind: :digest
@@ -1430,7 +1426,6 @@ module Hive
           stage: nil,
           state_file_mtime: state_file_path && File.exist?(state_file_path) ? File.mtime(state_file_path) : nil,
           state_file_path: state_file_path,
-          hive_state_path: nil,
           now: now,
           trigger: req.trigger.to_s.empty? ? "dispatch_request" : req.trigger,
           request_id: req.request_id
@@ -1685,7 +1680,7 @@ module Hive
       end
 
       def dispatch_command(command, project:, slug:, stage:, state_file_mtime:,
-                           state_file_path:, hive_state_path:, now:, trigger: "advance",
+                           state_file_path:, now:, trigger: "advance",
                            request_id: nil, kind: :task)
         if @dry_run
           @logger.event(:dry_run, project: project, slug: slug, stage: stage,
@@ -1694,7 +1689,7 @@ module Hive
         pid = @supervisor.spawn(
           command_string: command,
           project: project, slug: slug, stage: stage,
-          hive_state_path: hive_state_path,
+          log_state_path: Hive::Paths.state_home,
           state_file_path: state_file_path,
           dry_run: @dry_run,
           request_id: request_id
@@ -1828,6 +1823,20 @@ module Hive
           "answer_digest" => @answer_digest_cfg
         }
         @update_check_enabled = @update_cfg.fetch("check", true)
+        @controller.update_limits(
+          max_concurrent_runs: @daemon_cfg.fetch(
+            "max_concurrent_runs", @controller.max_concurrent_runs
+          ),
+          max_concurrent_per_project: @daemon_cfg.fetch(
+            "max_concurrent_per_project", @controller.max_concurrent_per_project
+          ),
+          max_runs_per_day_per_project: @daemon_cfg.fetch(
+            "max_runs_per_day_per_project", @controller.max_runs_per_day_per_project
+          ),
+          max_concurrent_patrol_scans: @daemon_cfg.fetch(
+            "max_concurrent_patrol_scans", @controller.max_concurrent_patrol_scans
+          )
+        )
         # Reconfigure the digest scheduler in place so enabling the digest
         # (or retuning max_catchup_days) via config + SIGHUP takes effect
         # within one tick, consistent with the rest of the daemon's reload
@@ -1892,7 +1901,13 @@ module Hive
           dry_run: @dry_run
         )
         @enabled_cache.clear
-        @logger.event(:config_reloaded)
+        @logger.event(
+          :config_reloaded,
+          max_concurrent_runs: @controller.max_concurrent_runs,
+          max_concurrent_per_project: @controller.max_concurrent_per_project,
+          max_runs_per_day_per_project: @controller.max_runs_per_day_per_project,
+          max_concurrent_patrol_scans: @controller.max_concurrent_patrol_scans
+        )
       rescue Hive::ConfigError => e
         # If the operator broke the config mid-run, log and keep
         # running on the old values rather than crashing.

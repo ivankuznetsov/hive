@@ -3,7 +3,7 @@ title: Hive::Config
 type: module
 source: lib/hive/config.rb
 created: 2026-04-25
-updated: 2026-07-01
+updated: 2026-07-10
 tags: [config, yaml, validation]
 ---
 
@@ -54,7 +54,8 @@ tags: [config, yaml, validation]
   "agents" => {
     "claude" => { "bin" => "claude", "env_override" => "HIVE_CLAUDE_BIN", "min_version" => "2.1.118" },
     "codex"  => { "bin" => "codex",  "env_override" => "HIVE_CODEX_BIN",  "min_version" => "0.125.0" },
-    "pi"     => { "bin" => "pi",     "env_override" => "HIVE_PI_BIN",     "min_version" => "0.70.2" }
+    "pi"     => { "bin" => "pi",     "env_override" => "HIVE_PI_BIN",     "min_version" => "0.70.2" },
+    "grok"   => { "bin" => "grok",   "env_override" => "HIVE_GROK_BIN",   "min_version" => "0.2.90" }
   },
   "review" => {
     "ci"           => { "command" => nil, "max_attempts" => 3, "agent" => "claude",
@@ -207,6 +208,7 @@ expiry, client id, issuer, MCP resource URL, base URL, and default
 | `update_global_config!` | Locks sibling `config.yml.lock`, yields the mutable global config Hash, then writes via tempfile + `fsync` + atomic rename. Use for read-modify-write registry/global-config changes. |
 | `write_global_config!(data)` | Direct locked atomic write for the global config; restores existing mode bits after tempfile creation so umask cannot narrow them, leaves a sticky sibling lock file, and rewraps lock/write filesystem errors as `ConfigError`. |
 | `merge_defaults(data)` | Calls `deep_merge(deep_dup(DEFAULTS), data)` — **recursive** Hash-into-Hash merge. |
+| `stage_resource_limit(cfg, field, stage_name, descriptor_default:, fallback:)` | Resolves an explicitly authored, non-null project limit before the descriptor default, then a merged config/default fallback. `Config.load` stores private raw-key provenance so `DEFAULTS` entries cannot masquerade as project overrides; synthetic config hashes retain present-key precedence. |
 | `claude_mode(cfg)` | Returns `:tmux` or `:headless` after validating `claude.mode`. |
 | `claude_cli_flags(cfg)` | Returns the Claude-only argv fragment for model/effort pins: `["--model", model]` unless `model` is blank/`inherit`; `["--effort", effort]` only for explicit non-default effort values. Shared by headless `Hive::Agent` and tmux `Hive::ClaudeLauncher`. |
 | `claude_permission_mode(cfg)` | Returns the configured Claude Code permission mode, defaulting to `bypassPermissions`. Valid values mirror Claude Code: `acceptEdits`, `auto`, `bypassPermissions`, `default`, `dontAsk`, `plan`. |
@@ -223,6 +225,12 @@ Rules:
 - **Hash + Hash** → recurse, key-by-key.
 - **Array** (any depth) → replace wholesale. Per-element merge has ambiguous semantics for ordered lists (e.g. `review.reviewers` and `patrol.review.reviewers`), so all Array-typed settings replace wholesale. (Earlier wiki/code comments misattributed this to ADR-018, which is actually the per-CLI-isolation trust-model amendment — unrelated.)
 - **Scalar / nil / type mismatch** → override wins.
+
+`budget_usd` / `timeout_sec` need an extra provenance step for project-authored
+workflow stages. A loaded config contains both authored keys and merged Hive
+defaults, so generic agent/council runners call `stage_resource_limit` rather
+than reading `cfg.dig` directly. Resolution order is explicit non-null project
+key → descriptor default → merged Hive default/fallback.
 
 ## Validation (`Config.validate!`)
 

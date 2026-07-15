@@ -3,11 +3,11 @@ title: Architecture
 type: architecture
 source: lib/hive/, bin/hive, templates/
 created: 2026-04-25
-updated: 2026-06-24
+updated: 2026-07-13
 tags: [architecture, overview]
 ---
 
-**TLDR**: Hive is a Ruby 3.4 / Thor agent workflow engine over folder-backed state machines. The flagship `coding` workflow is the nine-stage idea-to-PR pipeline, while the built-in `content` workflow and project-authored descriptors run through the same generic workflow/data layer. The CLI dispatches into per-stage runners; stage agents run through configured AgentProfile CLIs inside per-task and per-project locks. Optional long-running surfaces sit beside the CLI: `hive daemon` advances safe tasks automatically, `hive tui` renders a terminal dashboard, `hive bot` turns human-input gates into Telegram interactions, and `hive web` provides the hivebox browser surface. Workflow state has no application database; durable task/project state is the filesystem plus global YAML config, while token-usage metrics use a small SQLite store.
+**TLDR**: Hive is a Ruby 3.4 / Thor agent workflow engine over folder-backed state machines. The flagship `coding` workflow is the nine-stage idea-to-PR pipeline, while the built-in `content` and `bench` workflows and project-authored descriptors run through the same generic workflow/data layer. The CLI dispatches into per-stage runners; stage agents run through configured AgentProfile CLIs inside per-task and per-project locks. Optional long-running surfaces sit beside the CLI: `hive daemon` advances safe tasks automatically, `hive tui` renders a terminal dashboard, `hive bot` turns human-input gates into Telegram interactions, and `hive web` provides the hivebox browser surface. Workflow state has no application database; durable task/project state is the filesystem plus global YAML config, while token-usage metrics use a small SQLite store.
 
 ## Layer cake
 
@@ -71,7 +71,7 @@ Inbox/Done are the two non-working stages: capture-only and archive-only.
 Headless agent spawns are profile-driven. `Hive::Agent#build_cmd`
 starts with the selected `AgentProfile` binary/headless flag, then adds
 profile-specific permission, add-dir, budget, per-run CLI extras, and
-output-format flags. Claude, Codex, and Pi therefore share one subprocess
+output-format flags. Claude, Codex, Pi, and Grok therefore share one subprocess
 wrapper while keeping their CLI-specific argv and status-detection
 contracts in `lib/hive/agent_profiles/`.
 

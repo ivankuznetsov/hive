@@ -1,5 +1,5 @@
 module Hive
-  VERSION = "0.3.7".freeze
+  VERSION = "0.4.2".freeze
   MIN_CLAUDE_VERSION = "2.1.118".freeze
   # Canonical GitHub org + repo. Referenced by the release probe
   # (UpdateCheck), the brew tap + installer URL (Commands::Update), etc.
@@ -80,7 +80,7 @@ module Hive
     # published status schemas. This is deliberately narrower than
     # AgentProfiles.registered_names because custom profiles are a
     # runtime extension point, while generated_by is a wire contract.
-    DIAGNOSTIC_GENERATORS = %w[local claude codex pi].freeze
+    DIAGNOSTIC_GENERATORS = %w[local claude codex pi grok].freeze
 
     # Absolute path to the published JSON Schema files. Use
     # `Hive::Schemas.schema_path(name)` for the current version of a
@@ -304,6 +304,7 @@ module Hive
     # other ErrorKind modules so a constant added without a schema-enum
     # update is caught by schema_files_test.
     module ForgetErrorKind
+      USAGE           = "usage".freeze
       MISSING_NAME    = "missing_name".freeze
       UNKNOWN_PROJECT = "unknown_project".freeze
       CONFIG          = "config".freeze

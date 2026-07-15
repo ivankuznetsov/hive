@@ -1,3 +1,4 @@
+require "hive/agent_limit"
 require "hive/markers"
 require "hive/stages/base"
 require "hive/workflows/registry"
@@ -11,7 +12,7 @@ module Hive
       # `timeout_sec` and whose cfg carries no per-stage override. Without it,
       # `Hive::Agent#run` would do `Time.now + nil` and crash at spawn — the
       # budget path is nil-guarded downstream, the timeout path is not.
-      DEFAULT_TIMEOUT_SEC = 1800
+      DEFAULT_TIMEOUT_SEC = Hive::Stages::Base::DEFAULT_GENERIC_STAGE_TIMEOUT_SEC
 
       def run!(task, cfg)
         cfg ||= {}
@@ -37,14 +38,14 @@ module Hive
         scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
           cfg, task.stage_name, task, profile, **permission_kwargs
         )
+        resource_limits = Hive::Stages::Base.stage_resource_limits(cfg, stage)
 
         result = Hive::Stages::Base.spawn_agent(
           task,
           prompt: prompt,
           add_dirs: scope.fetch(:add_dirs),
           cwd: task.folder,
-          max_budget_usd: cfg.dig("budget_usd", task.stage_name) || stage.budget_usd,
-          timeout_sec: cfg.dig("timeout_sec", task.stage_name) || stage.timeout_sec || DEFAULT_TIMEOUT_SEC,
+          **resource_limits,
           log_label: task.stage_name,
           profile: profile,
           model: stage.model,
@@ -57,28 +58,36 @@ module Hive
         )
 
         marker = Hive::Markers.current(output_path)
-        # `spawn_agent` returns a `{status: :error}` envelope WITHOUT writing
-        # a marker on a preflight/version failure (base.rb) — unlike the
-        # coding claude path, which routes through
-        # `spawn_claude_with_tmux_marker!` and stamps an attributed marker.
-        # The generic runner uses bare `spawn_agent` for every profile, so we
-        # must consume that envelope here: otherwise the reread yields the
-        # marker from a PRIOR run (`:none` on a first run, but a stale
-        # `:waiting`/`:complete` when the operator edits and re-runs an
-        # already-markered stage), `hive run` exits 0 reporting that status,
-        # and the preflight failure is unobservable (NO-SILENT-CAPS). The
-        # `{status: :error}` envelope means the spawn wrote no marker THIS run,
-        # so overwriting any stale marker with the attributed `:error` is
-        # correct — there is no agent-written marker to clobber.
+        # `spawn_agent` returns `{status: :error}` for both preflight failures
+        # and provider quota walls. In state-file mode Hive::Agent may already
+        # have written the retryable limit marker; other status modes only
+        # carry the wall in the result envelope. Preserve/classify those quota
+        # failures before the generic preflight fallback so the daemon can
+        # honor `retry_after` instead of parking the task permanently.
         if result.is_a?(Hash) && result[:status] == :error
-          Hive::Markers.set(
-            output_path, :error,
-            reason: "agent_preflight_failed",
-            message: result[:error_message].to_s[0, 200]
-          )
+          if Hive::AgentLimit.held?(marker.name, marker.attrs)
+            # The agent already wrote the authoritative quota marker.
+          elsif limit_error_envelope?(result)
+            Hive::Markers.set(
+              output_path, :error,
+              reason: "limits_reached",
+              provider: profile.name,
+              message: result[:error_message].to_s[0, 200],
+              retry_after: Hive::AgentLimit.retry_after
+            )
+          else
+            # A preflight/version failure writes no marker. Overwrite any
+            # stale marker from a prior run so the failure stays observable.
+            Hive::Markers.set(
+              output_path, :error,
+              reason: "agent_preflight_failed",
+              message: result[:error_message].to_s[0, 200]
+            )
+          end
           marker = Hive::Markers.current(output_path)
         end
-        { commit: action_for(marker.name), status: marker.name }
+        commit = Hive::AgentLimit.held?(marker.name, marker.attrs) ? "limits_reached" : action_for(marker.name)
+        { commit: commit, status: marker.name }
       end
 
       def render_prompt(task, _cfg, stage, profile:, instruction_body:)
@@ -129,6 +138,12 @@ module Hive
             "## #{File.basename(path)}\n(unreadable: #{e.class})"
           end
         end.join("\n\n")[0, 8000]
+      end
+
+      def limit_error_envelope?(result)
+        Hive::AgentLimit.limit_reached?(result[:limit_text].to_s) ||
+          Hive::AgentLimit.from_limit?(result[:error_message].to_s) ||
+          Hive::AgentLimit.limit_reached?(result[:error_message].to_s)
       end
 
       def action_for(marker_name)

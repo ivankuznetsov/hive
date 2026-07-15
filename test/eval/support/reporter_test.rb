@@ -2,6 +2,7 @@ require "eval/eval_helper"
 require "fileutils"
 require "json"
 require "open3"
+require "timeout"
 
 class HiveEvalReporterTest < Minitest::Test
   def test_cli_rejects_positional_scenario_argument
@@ -33,6 +34,184 @@ class HiveEvalReporterTest < Minitest::Test
       assert_equal "hive-eval-report", doc.fetch("schema")
       assert_equal 2, doc.fetch("scenarios").length
       assert doc.fetch("scenarios").all? { |entry| entry.fetch("status") == "pass" }
+    end
+  end
+
+  def test_cli_rejects_inherited_rake_dry_run
+    [ "-n", "-nT", "-vn", "--dr", "--dry", "--dry-r", "--dry_run", '"-n"', '"' ].each do |rakeopt|
+      Dir.mktmpdir("hive-eval-report") do |dir|
+        report = File.join(dir, "dry-run.json")
+
+        _out, err, status = Open3.capture3(
+          { "HIVE_EVAL_NO_JUDGE" => "1", "RAKEOPT" => rakeopt },
+          "bin/hive-eval", "--scenario", "s1_status", "--no-judge", "--report", report
+        )
+
+        refute status.success?, "RAKEOPT=#{rakeopt.inspect} must not turn a skipped eval into success"
+        assert_match(/RAKEOPT/, err)
+        refute File.exist?(report)
+      end
+    end
+  end
+
+  def test_cli_clears_inherited_rake_options_from_child
+    [ "--trace", "-Iinclude", "-Wno", "-fn" ].each do |rakeopt|
+      Dir.mktmpdir("hive-eval-report") do |dir|
+        report = File.join(dir, "valid.json")
+
+        with_fake_bundle do |env, marker|
+          env["RAKEOPT"] = rakeopt
+          env["HIVE_EVAL_FAKE_REPORT"] = fake_report(file: "fake-scenario.rb")
+          _out, err, status = Open3.capture3(
+            env,
+            "bin/hive-eval", "--no-judge", "--report", report
+          )
+
+          assert status.success?, "RAKEOPT=#{rakeopt.inspect}: #{err}"
+          assert_equal "nil", File.readlines(marker, chomp: true).first
+        end
+      end
+    end
+  end
+
+  def test_cli_rejects_successful_child_without_report
+    Dir.mktmpdir("hive-eval-report") do |dir|
+      report = File.join(dir, "missing.json")
+
+      with_fake_bundle do |env, marker|
+        _out, err, status = Open3.capture3(
+          env,
+          "bin/hive-eval", "--no-judge", "--report", report
+        )
+
+        assert File.exist?(marker), "fake bundle must exercise the post-rake report check"
+        refute status.success?, "a zero child exit without an eval report must fail"
+        assert_match(/report/, err)
+      end
+    end
+  end
+
+  def test_cli_rejects_malformed_or_incomplete_success_report
+    invalid_reports = {
+      "malformed JSON" => "{",
+      "wrong schema" => JSON.dump({
+        "schema" => "not-hive-eval-report",
+        "schema_version" => 1,
+        "scenarios" => [ { "file" => File.expand_path("test/eval/scenarios/s1_status_test.rb") } ]
+      }),
+      "empty scenarios" => JSON.dump({
+        "schema" => "hive-eval-report",
+        "schema_version" => 1,
+        "scenarios" => []
+      }),
+      "invalid scenario entry" => JSON.dump({
+        "schema" => "hive-eval-report",
+        "schema_version" => 1,
+        "scenarios" => [ {} ]
+      }),
+      "failed scenario on zero exit" => fake_report(file: "fake-scenario.rb", status: "fail"),
+      "wrong scenario" => fake_report(
+        file: File.expand_path("test/eval/scenarios/s2_agent_question_test.rb")
+      )
+    }
+
+    invalid_reports.each do |label, contents|
+      Dir.mktmpdir("hive-eval-report") do |dir|
+        report = File.join(dir, "invalid.json")
+
+        with_fake_bundle do |env, _marker|
+          env["HIVE_EVAL_FAKE_REPORT"] = contents
+          _out, err, status = Open3.capture3(
+            env,
+            "bin/hive-eval", "--scenario", "s1_status", "--no-judge", "--report", report
+          )
+
+          refute status.success?, "#{label} must not be accepted as a successful eval"
+          assert_match(/hive-eval-report/, err)
+        end
+      end
+    end
+  end
+
+  def test_cli_does_not_validate_another_concurrent_runs_report
+    Dir.mktmpdir("hive-eval-report") do |dir|
+      report = File.join(dir, "shared.json")
+      ready = File.join(dir, "first-child-ready")
+      release = File.join(dir, "release-first-child")
+      first_result = nil
+      first_thread = nil
+
+      with_fake_bundle do |base_env, _marker|
+        first_env = base_env.merge(
+          "HIVE_EVAL_FAKE_READY" => ready,
+          "HIVE_EVAL_FAKE_RELEASE" => release
+        )
+        first_thread = Thread.new do
+          first_result = Open3.capture3(first_env, "bin/hive-eval", "--no-judge", "--report", report)
+        end
+
+        Timeout.timeout(5) { sleep 0.01 until File.exist?(ready) }
+
+        second_env = base_env.merge(
+          "HIVE_EVAL_FAKE_REPORT" => fake_report(file: "second-scenario.rb")
+        )
+        _out, second_err, second_status = Open3.capture3(
+          second_env, "bin/hive-eval", "--no-judge", "--report", report
+        )
+        assert second_status.success?, second_err
+
+        File.write(release, "continue\n")
+        first_thread.join
+        _first_out, first_err, first_status = first_result
+
+        refute first_status.success?, "a child that wrote no private report must fail"
+        assert_match(/hive-eval-report was not created/, first_err)
+        assert_equal "second-scenario.rb", JSON.parse(File.read(report)).dig("scenarios", 0, "file")
+      ensure
+        File.write(release, "continue\n") unless File.exist?(release)
+        first_thread&.join(2)
+      end
+    end
+  end
+
+  def test_cli_rejects_insecure_report_directory_before_running_child
+    Dir.mktmpdir("hive-eval-report") do |dir|
+      report_dir = File.join(dir, "shared")
+      FileUtils.mkdir_p(report_dir)
+      File.chmod(0o777, report_dir)
+      report = File.join(report_dir, "report.json")
+      original = "existing report\n"
+      File.write(report, original)
+
+      with_fake_bundle do |env, marker|
+        env["HIVE_EVAL_FAKE_REPORT"] = fake_report(file: "fake-scenario.rb")
+        _out, err, status = Open3.capture3(env, "bin/hive-eval", "--no-judge", "--report", report)
+
+        refute status.success?
+        assert_match(/group\/world-writable without the sticky bit/, err)
+        refute File.exist?(marker), "the child must not run with an insecure report parent"
+        assert_equal original, File.read(report)
+      end
+    end
+  end
+
+  def test_cli_cleanup_warning_does_not_override_success
+    Dir.mktmpdir("hive-eval-report") do |dir|
+      report_dir = File.join(dir, "report-dir")
+      FileUtils.mkdir_p(report_dir)
+      report = File.join(report_dir, "report.json")
+
+      with_fake_bundle do |env, _marker|
+        env["HIVE_EVAL_FAKE_REPORT"] = fake_report(file: "fake-scenario.rb")
+        env["HIVE_EVAL_FAKE_INSECURE_PARENT"] = "1"
+        _out, err, status = Open3.capture3(env, "bin/hive-eval", "--no-judge", "--report", report)
+
+        assert status.success?, err
+        assert_match(/could not remove private report directory/, err)
+        assert_equal "fake-scenario.rb", JSON.parse(File.read(report)).dig("scenarios", 0, "file")
+      end
+    ensure
+      File.chmod(0o700, report_dir) if report_dir && File.exist?(report_dir)
     end
   end
 
@@ -636,6 +815,22 @@ class HiveEvalReporterTest < Minitest::Test
     FileUtils.rm_f(backup)
   end
 
+  def fake_report(file:, status: "pass")
+    JSON.dump({
+      "schema" => "hive-eval-report",
+      "schema_version" => 1,
+      "scenarios" => [ {
+        "scenario_name" => "FakeScenario#test_fake",
+        "file" => file,
+        "status" => status,
+        "failures" => [],
+        "assertions" => [],
+        "captured_messages" => [],
+        "captured_log_events" => []
+      } ]
+    })
+  end
+
   def with_fake_bundle
     Dir.mktmpdir("hive-eval-fake-bundle") do |dir|
       bin_dir = File.join(dir, "bin")
@@ -644,7 +839,18 @@ class HiveEvalReporterTest < Minitest::Test
       FileUtils.mkdir_p(bin_dir)
       File.write(bundle, <<~RUBY)
         #!/usr/bin/env ruby
-        File.write(ENV.fetch("HIVE_EVAL_FAKE_BUNDLE_MARKER"), ARGV.join("\\n"))
+        marker = [ ENV["RAKEOPT"].inspect, *ARGV ].join("\\n")
+        File.write(ENV.fetch("HIVE_EVAL_FAKE_BUNDLE_MARKER"), marker)
+        if ENV["HIVE_EVAL_FAKE_READY"]
+          File.write(ENV.fetch("HIVE_EVAL_FAKE_READY"), "ready\\n")
+          sleep 0.01 until File.exist?(ENV.fetch("HIVE_EVAL_FAKE_RELEASE"))
+        end
+        if ENV["HIVE_EVAL_FAKE_REPORT"]
+          File.write(ENV.fetch("HIVE_EVAL_REPORT"), ENV.fetch("HIVE_EVAL_FAKE_REPORT"))
+        end
+        if ENV["HIVE_EVAL_FAKE_INSECURE_PARENT"]
+          File.chmod(0o777, File.dirname(File.dirname(ENV.fetch("HIVE_EVAL_REPORT"))))
+        end
       RUBY
       FileUtils.chmod("+x", bundle)
 

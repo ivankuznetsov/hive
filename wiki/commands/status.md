@@ -92,7 +92,7 @@ Rows are then classified by `Hive::TaskAction`, which emits an action key, label
 - `detail` — the tail of the best matching artifact, or marker fallback text when no artifact exists.
 - `source` / `source_path` — whether the detail came from an artifact or marker fallback.
 - `artifact_paths` — every relevant artifact discovered for this marker.
-- `generated_by` — `local` for bounded extraction, or one of the schema-listed diagnose generators (`claude`, `codex`, `pi`) that wrote a fresh diagnosis artifact.
+- `generated_by` — `local` for bounded extraction, or one of the schema-listed diagnose generators (`claude`, `codex`, `pi`, `grok`) that wrote a fresh diagnosis artifact.
 - `updated_at` — mtime of the source artifact or marker state file.
 
 Artifact discovery is marker-specific. Review errors prefer `diagnostics/red-status.md` when it matches the current marker, then pass-specific files such as `reviews/errors-NN.md`, `reviews/fix-guardrail-NN.md`, `reviews/escalations-NN.md`, marker `files=...` entries, phase logs, and latest logs. `review_ci_stale` includes `reviews/ci-blocked.md` and CI-fix logs. `review_stale` includes the pass escalations/reviewer files. `execute_stale` includes review files and logs. Generic `ERROR` includes recent logs and the task state file.
@@ -100,7 +100,7 @@ Artifact discovery is marker-specific. Review errors prefer `diagnostics/red-sta
 Fresh agent-written diagnostics live at `<task>/diagnostics/red-status.md`. Normal status trusts that file only when:
 
 - frontmatter parses;
-- `generated_by` is in `Hive::Schemas::DIAGNOSTIC_GENERATORS` (`local`, `claude`, `codex`, `pi`);
+- `generated_by` is in `Hive::Schemas::DIAGNOSTIC_GENERATORS` (`local`, `claude`, `codex`, `pi`, `grok`);
 - `marker_signature` matches the current marker name plus sorted attrs.
 
 That signature check prevents a stale diagnosis from explaining a new failure after the marker changes.

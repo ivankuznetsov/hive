@@ -3,7 +3,7 @@ title: Agentic E2E Suite
 type: reference
 source: test/e2e/, bin/hive-e2e, Rakefile
 created: 2026-04-29
-updated: 2026-07-08
+updated: 2026-07-09
 tags: [test, e2e, tui, artifacts]
 ---
 
@@ -49,6 +49,12 @@ config failures (`78`) and use the `hive-e2e-error` envelope in `--json` mode.
 dispatch and rewrites command-local `--help` / `-h` before scenario selection.
 That keeps help requests non-mutating and preflight-free even when command
 options precede the help flag, e.g. `bin/hive-e2e run --filter tui --help`.
+When a leading JSON class option precedes command help for a recognized command
+(`bin/hive-e2e --json --help run` or `--json -h run`), the JSON flag is dropped
+and Thor renders the same human `run` help as `--help run` with exit `0`.
+If the help flag is followed by a non-command trailer such as `missing` or an
+option-looking token such as `--filter`, the JSON flag is restored so the
+usage/no-scenarios path still emits the `hive-e2e-error` envelope.
 Leading JSON class options are normalized with the same Thor-style boolean
 grammar as `bin/hive`: bare `--json`, exact truthy assignments
 (`--json=true`/`TRUE`/`t`/`T`), bare negative forms, and exact false

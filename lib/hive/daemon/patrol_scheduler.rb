@@ -9,6 +9,7 @@ require "hive/refactor_patrol/capability_probe"
 require "hive/refactor_patrol/checkout_guard"
 require "hive/refactor_patrol/local_merge_catalog"
 require "hive/refactor_patrol/post_merge_scope"
+require "hive/refactor_patrol/post_merge_reporter"
 require "hive/refactor_patrol/post_merge_state_store"
 require "hive/refactor_patrol/state_store"
 
@@ -72,7 +73,12 @@ module Hive
         @fingerprint_loader = fingerprint_loader || lambda do |root|
           Hive::RefactorPatrol::StateStore.new(root).fingerprints
         end
-        @architecture_completion = architecture_completion
+        @architecture_completion = architecture_completion || lambda do |token:, envelope:, state_store:, guard:, snapshot:, now:|
+          Hive::RefactorPatrol::PostMergeReporter.new(token.fetch("analysis_root")).call(
+            token: token, envelope: envelope, state_store: state_store,
+            guard: guard, snapshot: snapshot, now: now
+          )
+        end
         @dry_run = dry_run
         @pending = {}
         @architecture_pending = {}
@@ -429,12 +435,37 @@ module Hive
                                 identity: pending.fetch(:identity))
         end
       rescue Hive::Error, SystemCallError => e
-        pending&.fetch(:store)&.record_failure!(pending.fetch(:identity), reason: "completion_failed",
-                                                                         evidence: { "error" => e.message }, now: now)
-        record_event(:failed, project: project, reason: "completion_failed", evidence: { "error" => e.message })
+        reconcile_completion_error(pending, project: project, error: e, now: now)
       ensure
         pending&.fetch(:snapshot)&.release
         @architecture_pending.delete(project)
+      end
+
+      def reconcile_completion_error(pending, project:, error:, now:)
+        reason = error.respond_to?(:reason) ? error.reason : "completion_failed"
+        evidence = { "error" => error.message }
+        unless pending
+          record_event(:failed, project: project, reason: reason, evidence: evidence)
+          return
+        end
+
+        record = pending.fetch(:store).merge_record(pending.fetch(:identity))
+        if record.fetch("status") == "processed"
+          record_event(:architecture_completed, project: project, reason: "reconciled",
+                                                identity: pending.fetch(:identity))
+        elsif record.fetch("status") == "running"
+          pending.fetch(:store).record_failure!(pending.fetch(:identity), reason: reason,
+                                                                          evidence: evidence, now: now)
+          record_event(:failed, project: project, reason: reason, evidence: evidence,
+                                identity: pending.fetch(:identity))
+        else
+          record_event(:failed, project: project, reason: reason, evidence: evidence,
+                                identity: pending.fetch(:identity))
+        end
+      rescue Hive::Error, SystemCallError => state_error
+        record_event(:failed, project: project, reason: reason,
+                              evidence: evidence.merge("state_error" => state_error.message),
+                              identity: pending&.fetch(:identity, nil))
       end
 
       def cancel_architecture(project, slug:, reason:, now:)
@@ -452,7 +483,15 @@ module Hive
       def valid_architecture_envelope?(pending, envelope)
         envelope.is_a?(Hash) && envelope["schema"] == "hive-refactor-patrol" &&
           envelope["ok"] == true && envelope["project"] == pending.dig(:token, "project") &&
-          File.expand_path(envelope["project_root"].to_s) == pending.dig(:token, "analysis_root")
+          canonical_path(envelope["project_root"]) == pending.dig(:token, "analysis_root")
+      end
+
+      def canonical_path(path)
+        return unless path.is_a?(String) && !path.empty?
+
+        File.realpath(path.to_s)
+      rescue SystemCallError
+        File.expand_path(path.to_s)
       end
 
       def architecture_slug(record)

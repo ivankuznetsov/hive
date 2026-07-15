@@ -395,6 +395,56 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
     end
   end
 
+  def test_completion_error_after_durable_artifacts_reconciles_as_processed
+    with_tmp_dir do |dir|
+      entry = project_entry(dir)
+      cfg = enabled_cfg(
+        "patrol" => { "enabled" => true, "trigger" => "new_commits" },
+        "refactor_patrol" => { "enabled" => true }
+      )
+      write_state(dir, "last_scanned_sha" => "head")
+      post_merge = Hive::RefactorPatrol::PostMergeStateStore.new(dir, project: "p1")
+      post_merge.initialize_at!(head_sha: "base", now: T0)
+      post_merge.open_batch!(
+        head_sha: "head",
+        merges: [ { "pr_number" => 10, "merge_sha" => "head", "base_sha" => "base",
+                    "subject" => "Change (#10)", "changed_paths" => [ "lib/a.rb" ] } ],
+        now: T0
+      )
+      completion = lambda do |token:, state_store:, now:, **|
+        state_store.complete!(
+          token.fetch("identity"),
+          report: successful_report(token, now),
+          emission_digests: {},
+          now: now
+        )
+        raise Hive::Error, "simulated error after the completion write"
+      end
+      sched = architecture_scheduler(
+        entry,
+        cfg,
+        post_merge: post_merge,
+        guard: FakeArchitectureGuard.new(dir),
+        catalog: CatalogResult.new([], []),
+        scope: ScopeResult.new(true, nil, {}, "path", [ "lib" ], true,
+                               [ "--changed-since", "base", "--path", "lib" ]),
+        architecture_completion: completion
+      )
+
+      dispatch = sched.tick(now: T0 + 1).fetch(0)
+      sched.complete(
+        project: "p1", exit_code: 0, stage: dispatch.fetch(:stage), slug: dispatch.fetch(:slug),
+        envelope: { "schema" => "hive-refactor-patrol", "ok" => true, "project" => "p1",
+                    "project_root" => File.realpath(dir) },
+        now: T0 + 2
+      )
+
+      assert_equal "processed", post_merge.merge_record(post_merge.identity_for(10, "head")).fetch("status")
+      assert_equal :architecture_completed, sched.last_events.last.fetch(:type)
+      assert_equal "reconciled", sched.last_events.last.fetch(:reason)
+    end
+  end
+
   def test_capability_block_does_not_replace_ordinary_patrol
     with_tmp_dir do |dir|
       entry = project_entry(dir)
@@ -451,7 +501,8 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
 
   private
 
-  def architecture_scheduler(entry, cfg, post_merge:, guard:, catalog:, scope:, capability: nil, dry_run: false)
+  def architecture_scheduler(entry, cfg, post_merge:, guard:, catalog:, scope:, capability: nil, dry_run: false,
+                             architecture_completion: nil)
     capability ||= CapabilityResult.new(true, nil, {}, "/tmp/hive-local")
     Hive::Daemon::PatrolScheduler.new(
       registry: -> { [ entry ] },
@@ -463,7 +514,22 @@ class HiveDaemonPatrolSchedulerTest < Minitest::Test
       merge_catalog_factory: ->(_entry) { Struct.new(:result) { def discover(**) = result }.new(catalog) },
       scope_factory: ->(_entry, _config) { Struct.new(:result) { def select(**) = result }.new(scope) },
       fingerprint_loader: ->(_root) { {} },
+      architecture_completion: architecture_completion,
       dry_run: dry_run
     )
+  end
+
+  def successful_report(token, now)
+    {
+      "completion_status" => "success",
+      "analysis_sha" => token.fetch("pinned_head"),
+      "changed_paths" => token.fetch("changed_paths"),
+      "scope" => token.fetch("scope"),
+      "totals" => { "accepted" => 0, "flagged" => 0, "suppressed" => 0 },
+      "flagged_theses" => [],
+      "emitted_delta" => [],
+      "started_at" => token.fetch("started_at"),
+      "completed_at" => now.utc.iso8601
+    }
   end
 end

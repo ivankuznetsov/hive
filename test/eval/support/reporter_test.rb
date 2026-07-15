@@ -752,22 +752,23 @@ class HiveEvalReporterTest < Minitest::Test
       File.write(report, JSON.dump({ "schema" => "hive-eval-report", "stale" => true }))
 
       with_fake_bundle do |env, marker|
-        [
-          [ "run", [ "--report", report, "--no-judge" ] ],
-          [ "usage error", [ "--report", report, "--bogus" ] ]
-        ].each do |label, argv|
-          File.chmod(0555, dir)
-          begin
-            _out, err, status = Open3.capture3(env, "bin/hive-eval", *argv)
-          ensure
-            File.chmod(0700, dir)
-          end
-
-          refute status.success?, label
-          assert_match(/Errno::EACCES/, err, label)
-          assert File.exist?(report), "#{label}: failed cleanup must leave the stale report observable"
-          refute File.exist?(marker), "#{label}: hive-eval must stop after report cleanup fails"
+        File.chmod(0555, dir)
+        begin
+          _out, err, status = Open3.capture3(env, "bin/hive-eval", "--report", report, "--no-judge")
+        ensure
+          File.chmod(0700, dir)
         end
+
+        refute status.success?
+        assert_match(/Errno::EACCES/, err)
+        assert File.exist?(report), "failed cleanup must leave the stale report observable"
+        refute File.exist?(marker), "hive-eval must stop after report cleanup fails"
+
+        _out, err, status = Open3.capture3(env, "bin/hive-eval", "--report", report, "--bogus")
+        assert_equal 64, status.exitstatus
+        assert_match(/invalid option: --bogus/, err)
+        assert File.exist?(report), "usage validation must preserve a caller-selected report"
+        refute File.exist?(marker), "usage validation must stop before launching eval"
       end
     end
   end

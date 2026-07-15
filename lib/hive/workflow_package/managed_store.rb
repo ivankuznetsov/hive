@@ -46,12 +46,19 @@ module Hive
         FileUtils.rm_rf(staging) if staging && File.exist?(staging)
       end
 
-      def activate(resolution, commit: nil)
+      def activate(resolution, commit: nil, expected_current: nil)
         validate_resolution!(resolution)
         raise Hive::ConfigError, "managed generation is not installed" unless File.directory?(generation_path(resolution.name, resolution.source_commit))
 
         MutationLock.with_lock(workflows_dir) do
           reconcile!
+          if expected_current
+            current = selected(resolution.name)
+            unless current && current.fetch("source_commit") == expected_current.fetch("source_commit") &&
+                   current.fetch("manifest_digest") == expected_current.fetch("manifest_digest")
+              raise Hive::ConcurrentRunError.new("managed workflow selection changed after validation")
+            end
+          end
           Transaction.activate(
             lock_path: lock_path(resolution.name), workflows_dir: workflows_dir,
             new_lock: lock_data(resolution), commit: commit

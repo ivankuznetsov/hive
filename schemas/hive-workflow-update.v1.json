@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-workflow-update.v1.json",
+  "title": "hive workflow update output v1",
+  "type": "object",
+  "required": ["schema", "schema_version", "ok"],
+  "properties": {
+    "schema": {"const": "hive-workflow-update"},
+    "schema_version": {"const": 1},
+    "ok": {"type": "boolean"},
+    "status": {"enum": ["dry_run", "updated", "cancelled", "already_current"]},
+    "name": {"type": "string"},
+    "from_commit": {"type": "string"},
+    "to_commit": {"type": "string"},
+    "manifest_digest": {"type": "string"},
+    "diff": {"type": ["object", "null"]},
+    "retained_commits": {"type": "array", "items": {"type": "string"}},
+    "error_class": {"type": "string"},
+    "error_kind": {"type": "string"},
+    "exit_code": {"type": "integer"},
+    "message": {"type": "string"}
+  }
+}

@@ -53,8 +53,17 @@ module Hive
       def self.parse_file(path) = new(path).parse_file
       def self.parse_hash(data, path:) = new(path).parse_hash(data)
 
-      def initialize(path)
+      # Registry packages use the stable `workflow.yml` filename, so bind the
+      # descriptor id to the trusted manifest/package name instead of weakening
+      # the legacy `<id>.yml` filename rule used by project-authored workflows.
+      def self.parse_package_file(path, package_name:)
+        new(path, package_name: package_name, package_root: File.dirname(path)).parse_file
+      end
+
+      def initialize(path, package_name: nil, package_root: nil)
         @path = path
+        @package_name = package_name&.to_s
+        @package_root = package_root && File.expand_path(package_root)
       end
 
       def parse_file
@@ -132,6 +141,12 @@ module Hive
       end
 
       def validate_filename_id!(id)
+        if @package_name
+          return if id == @package_name
+
+          raise descriptor_error("id #{id.inspect} must match package name #{@package_name.inspect}")
+        end
+
         expected = File.basename(@path, File.extname(@path))
         return if id == expected
 
@@ -239,9 +254,16 @@ module Hive
         return nil if raw.nil?
 
         resolved = File.expand_path(raw, File.dirname(@path))
+        if @package_root && !path_within?(resolved, @package_root)
+          raise descriptor_error("#{label} instruction must remain inside the package")
+        end
         return resolved if File.file?(resolved) && File.readable?(resolved)
 
         raise descriptor_error("#{label} instruction #{raw.inspect} must reference a readable file (#{resolved})")
+      end
+
+      def path_within?(candidate, root)
+        candidate == root || candidate.start_with?(root + File::SEPARATOR)
       end
 
       def parse_agent(value, label:)

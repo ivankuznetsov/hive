@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/honeycomb-manifest.v1.json",
+  "title": "Honeycomb workflow package manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "name", "version", "summary", "author", "descriptor", "files", "dependencies", "permissions"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "name": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$"},
+    "version": {"type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$"},
+    "summary": {"type": "string", "minLength": 1},
+    "author": {"$ref": "#/$defs/author"},
+    "descriptor": {"const": "workflow.yml"},
+    "files": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {"$ref": "#/$defs/file"}
+    },
+    "dependencies": {"$ref": "#/$defs/dependencies"},
+    "permissions": {"$ref": "#/$defs/permissions"}
+  },
+  "$defs": {
+    "author": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {"name": {"type": "string", "minLength": 1}, "url": {"type": "string", "minLength": 1}}
+    },
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "size"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1, "not": {"const": "manifest.json"}},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "size": {"type": "integer", "minimum": 0, "maximum": 2097152}
+      }
+    },
+    "dependencies": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "hive": {"type": "string", "minLength": 1},
+        "claude": {"type": "string", "minLength": 1},
+        "executables": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "permissions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tools", "deny", "directories", "commands", "domains", "credentials"],
+      "properties": {
+        "tools": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "deny": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "directories": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "commands": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "domains": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "credentials": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "shell_justification": {"type": "string", "minLength": 1},
+        "network_justification": {"type": "string", "minLength": 1},
+        "credential_justification": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}

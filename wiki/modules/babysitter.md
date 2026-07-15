@@ -27,6 +27,10 @@ tags: [babysitter, module, daemon, github, agents]
 
 ## Wiring
 
+Patrol consolidation note (2026-07-15): `gh` passthrough uses a per-invocation, hosts-only auth
+copy with prompting disabled and removes it after the child exits. Git passthrough requires Git
+2.45+, adds `--no-lazy-fetch`, and keeps working-tree `git diff` outside the read allowlist.
+
 ```
 hive babysit start
   -> Hive::Commands::Babysit

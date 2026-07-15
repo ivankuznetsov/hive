@@ -1,6 +1,8 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
+require "fileutils"
+
 require_relative "hive-babysitter-skip-log"
 
 argv = ARGV.map(&:b)
@@ -278,7 +280,14 @@ def api_read_only?(rest)
       cache = true
       index += 1
     else
-      index += 1
+      if arg.start_with?("--")
+        name = arg.split("=", 2).first
+        index += API_ENDPOINT_VALUE_OPTIONS.include?(name) && !arg.include?("=") ? 2 : 1
+      elsif arg.start_with?("-") && arg != "-"
+        index += api_short_cluster_consumes_next?(arg) ? 2 : 1
+      else
+        index += 1
+      end
     end
   end
 
@@ -438,6 +447,34 @@ def make_gh_config_home
   raise IOError, "failed to create temporary gh config dir under #{root}"
 end
 
+def materialize_trusted_gh_config(source_dir)
+  destination_dir = make_gh_config_home
+  return destination_dir if source_dir.to_s.empty?
+
+  source_dir_stat = File.lstat(source_dir)
+  return destination_dir unless File.absolute_path?(source_dir) && source_dir_stat.directory? &&
+    source_dir_stat.uid == Process.uid && (source_dir_stat.mode & 0o022).zero?
+
+  source_path = File.join(source_dir, "hosts.yml")
+  preopen_stat = File.lstat(source_path)
+  return destination_dir unless preopen_stat.file? && preopen_stat.uid == Process.uid &&
+    preopen_stat.nlink == 1 && (preopen_stat.mode & 0o077).zero?
+
+  File.open(source_path, File::RDONLY | File::NOFOLLOW) do |source|
+    opened_stat = source.stat
+    return destination_dir unless opened_stat.dev == preopen_stat.dev && opened_stat.ino == preopen_stat.ino
+
+    destination_path = File.join(destination_dir, "hosts.yml")
+    File.open(destination_path, File::WRONLY | File::CREAT | File::EXCL, 0o600) do |destination|
+      IO.copy_stream(source, destination)
+    end
+  end
+
+  destination_dir
+rescue SystemCallError, IOError
+  destination_dir || make_gh_config_home
+end
+
 rest = stripped_global_options(argv)
 
 unless read_only?(rest) && !external_launcher_option?(rest) && !host_override?(argv, rest) && !positional_host_override?(rest)
@@ -457,15 +494,6 @@ unless File.absolute_path?(real)
 end
 
 trusted_config_home = ENV["HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR"].to_s
-unless trusted_config_home.empty?
-  begin
-    stat = File.stat(trusted_config_home)
-    trusted_config_home = "" unless File.absolute_path?(trusted_config_home) && stat.directory? &&
-      stat.uid == Process.uid && (stat.mode & 0o022).zero?
-  rescue SystemCallError
-    trusted_config_home = ""
-  end
-end
 
 # The argv gate (host_override?) only inspects argv; gh also reads the target host,
 # repo, and enterprise credentials from the environment. GH_HOST / GH_REPO redirect an
@@ -496,17 +524,25 @@ ENV.keys.grep(/\AGIT_CONFIG/).each { |key| ENV.delete(key) }
 ENV.keys.grep(/\AGIT_SSH/).each { |key| ENV.delete(key) }
 ENV.keys.grep(/\AGIT_TRACE/).each { |key| ENV.delete(key) }
 ENV["PATH"] = "/usr/bin:/bin"
-# DryRunEnv pins a run-scoped, owner-controlled config directory containing only a copy of the
-# parent's hosts.yml. That preserves stored account/keyring lookup without exposing config.yml's
-# executable pager/editor/browser/socket settings. Direct stub callers without a valid handoff
-# still receive a fresh empty writable home rather than falling back to caller-controlled config.
-config_home = trusted_config_home.empty? ? make_gh_config_home : trusted_config_home
+ENV["GH_PROMPT_DISABLED"] = "1"
+# Treat DryRunEnv's run-scoped auth view only as a source. The agent can discover and mutate that
+# handoff path, so each passthrough copies only a validated hosts.yml into a new private directory;
+# executable config.yml settings can never reach the authenticated gh process.
+config_home = materialize_trusted_gh_config(trusted_config_home)
 ENV["HOME"] = config_home
 ENV["GH_CONFIG_DIR"] = config_home
 
 begin
-  exec real, *argv
+  pid = Process.spawn(ENV, real, *argv)
+  _pid, status = Process.wait2(pid)
+  exit(status.exitstatus || 128 + status.termsig.to_i)
 rescue SystemCallError => e
   warn "hive-babysitter dry-run: cannot exec real gh at #{real.inspect}: #{e.message}"
   exit 127
+ensure
+  begin
+    FileUtils.remove_entry_secure(config_home) if config_home && File.exist?(config_home)
+  rescue SystemCallError => e
+    warn "hive-babysitter dry-run: failed to remove temporary gh config #{config_home.inspect}: #{e.message}"
+  end
 end

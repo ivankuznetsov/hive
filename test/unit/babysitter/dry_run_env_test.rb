@@ -148,7 +148,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
                       "git -c core.fsmonitor=false -c core.askPass= -c log.showSignature=false " \
                       "-c log.diffMerges=separate " \
                       "-c gpg.program=false -c gpg.openpgp.program=false -c gpg.x509.program=false " \
-                      "-c gpg.ssh.program=false -c diff.submodule=short --no-pager status --short"
+                      "-c gpg.ssh.program=false -c diff.submodule=short --no-lazy-fetch --no-pager status --short"
       assert_includes real_invocations, "gh repo view owner/repo"
       refute_includes real_invocations, "pwn-git"
       refute_includes real_invocations, "pwn-gh"
@@ -386,7 +386,8 @@ class BabysitterDryRunEnvTest < Minitest::Test
     with_tmp_dir do |dir|
       recording_binary(dir, "git")
       recording_env_binary(dir, "gh", %w[
-        GH_CONFIG_DIR XDG_CONFIG_HOME HOME HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR
+        GH_CONFIG_DIR GH_CONFIG_DIR_CHILDREN GH_CONFIG_HOSTS XDG_CONFIG_HOME HOME
+        HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR
       ])
       parent_home = File.join(dir, "parent-home")
       trusted_config = File.join(parent_home, ".config", "gh")
@@ -435,8 +436,8 @@ class BabysitterDryRunEnvTest < Minitest::Test
                        "command-local GH_CONFIG_DIR must not survive passthrough"
           refute_equal evil_trusted_config, config_dir, "private trusted-config override must not survive passthrough"
           assert_equal config_dir, home
-          assert_equal [ "hosts.yml" ], Dir.children(config_dir)
-          assert_equal "github.com:\n  user: hive-test\n", File.read(File.join(config_dir, "hosts.yml"))
+          assert_equal "hosts.yml", recorded.fetch("GH_CONFIG_DIR_CHILDREN")
+          assert_equal "github.com:\\n  user: hive-test\\n", recorded.fetch("GH_CONFIG_HOSTS")
         end
       end
 
@@ -602,6 +603,59 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_skip_log_rejects_existing_file_replacement_during_open
+    with_tmp_dir do |dir|
+      path = File.join(dir, "skipped.log")
+      File.write(path, "before\n")
+      File.chmod(0o600, path)
+      original_open = File.method(:open)
+      replaced = false
+      replacement = lambda do |target, *args, **kwargs, &block|
+        if target == path && !replaced
+          replaced = true
+          File.rename(path, "#{path}.original")
+          File.write(path, "replacement\n")
+          File.chmod(0o600, path)
+        end
+        original_open.call(target, *args, **kwargs, &block)
+      end
+
+      error = assert_raises(IOError) do
+        with_replaced_singleton_method(File, :open, replacement) do
+          append_skip_log(path) { |file| file.puts("unsafe") }
+        end
+      end
+
+      assert_includes error.message, "changed during open"
+      assert_equal "replacement\n", File.read(path)
+    end
+  end
+
+  def test_skip_log_rejects_creation_race
+    with_tmp_dir do |dir|
+      path = File.join(dir, "skipped.log")
+      original_open = File.method(:open)
+      raced = false
+      replacement = lambda do |target, *args, **kwargs, &block|
+        if target == path && !raced
+          raced = true
+          File.write(path, "racer\n")
+          File.chmod(0o600, path)
+        end
+        original_open.call(target, *args, **kwargs, &block)
+      end
+
+      error = assert_raises(IOError) do
+        with_replaced_singleton_method(File, :open, replacement) do
+          append_skip_log(path) { |file| file.puts("unsafe") }
+        end
+      end
+
+      assert_includes error.message, "changed during open"
+      assert_equal "racer\n", File.read(path)
+    end
+  end
+
   def test_git_stub_skips_invalid_utf8_argv_without_crashing
     with_tmp_dir do |dir|
       log_path = File.join(dir, "skipped.log")
@@ -661,6 +715,8 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "gh", "api", "repos/owner/repo/issues/123/comments", "-F", "body=@comment.md"
       assert_stubbed env, "gh", "api", "repos/owner/repo/issues/123/comments", "--raw-field", "body=hi"
       assert_stubbed env, "gh", "api", "repos/owner/repo/issues/123/comments", "--field", "body=hi"
+      assert_stubbed env, "gh", "api", "-t", "--method=GET", "-f", "body=hi",
+                     "repos/owner/repo/issues"
       assert_stubbed env, "gh", "api", "repos/owner/repo/issues/123/comments", "--input", "payload.json"
       assert_stubbed env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "--input", "payload.json"
       assert_stubbed env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-F", "q=@secret"
@@ -931,6 +987,9 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_passes env, "git", "log", "-p"
       assert_passes env, "git", "show", "-p"
       assert_stubbed env, "git", "diff", "-p"
+      assert_stubbed env, "git", "status", "-v"
+      assert_stubbed env, "git", "status", "-vv"
+      assert_stubbed env, "git", "status", "--verbose"
       assert_passes env, "git", "grep", "-p", "needle"
       # `git grep -o` / `--only-matching` is a read-only match filter, not a file-write; the
       # output-file guard is scoped past grep so it stays allowed.
@@ -970,6 +1029,8 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes skipped, "gh api repos/owner/repo/issues/123/comments -F body=@comment.md skipped"
       assert_includes skipped, "gh api repos/owner/repo/issues/123/comments --raw-field body=hi skipped"
       assert_includes skipped, "gh api repos/owner/repo/issues/123/comments --field body=hi skipped"
+      assert_includes skipped,
+                      "gh api -t --method=GET -f body=hi repos/owner/repo/issues skipped"
       assert_includes skipped, "gh api repos/owner/repo/issues/123/comments --input payload.json skipped"
       assert_includes skipped, "gh api --method GET repos/owner/repo/issues --input payload.json skipped"
       assert_includes skipped, "gh api --method GET repos/owner/repo/issues -F q=@secret skipped"
@@ -1016,6 +1077,9 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_includes skipped, "gh pr checks https://evil.example.com/owner/repo/pull/42 skipped"
       assert_includes skipped, "git -C #{dir} push origin HEAD:feature skipped"
       assert_includes skipped, "git commit -m dry run must not commit skipped"
+      assert_includes skipped, "git status -v skipped"
+      assert_includes skipped, "git status -vv skipped"
+      assert_includes skipped, "git status --verbose skipped"
       assert_includes skipped, "git merge feature skipped"
       assert_includes skipped, "git branch --contains HEAD -D feature skipped"
       assert_includes skipped, "git branch -D feature --contains HEAD skipped"
@@ -1175,19 +1239,16 @@ class BabysitterDryRunEnvTest < Minitest::Test
         assert_equal "<unset>", recorded.fetch(key), "#{key} should be scrubbed before gh passthrough"
       end
 
-      # gh has no GIT_CONFIG_GLOBAL=/dev/null-style "no config" sentinel: HOME=/dev/null leaves it
-      # resolving /dev/null/.config/gh (ENOTDIR). The stub instead points HOME and GH_CONFIG_DIR at
-      # a fresh, empty, writable directory so gh reads no attacker config yet can still write state.
+      # gh has no GIT_CONFIG_GLOBAL=/dev/null-style "no config" sentinel. The stub instead gives
+      # each invocation a fresh writable config directory, then removes it after gh exits.
       home = recorded.fetch("HOME")
       config_dir = recorded.fetch("GH_CONFIG_DIR")
       refute_equal File::NULL, home, "HOME must not be /dev/null -- gh cannot resolve a config dir under it"
       refute_equal File.join(dir, "evil-home"), home, "caller-supplied HOME must not survive passthrough"
       refute_equal File.join(dir, "evil-gh-config"), config_dir,
                    "caller-supplied GH_CONFIG_DIR must not survive passthrough"
-      assert File.directory?(home), "HOME should point at a real directory gh can use"
-      assert File.directory?(config_dir), "GH_CONFIG_DIR should point at a real directory gh can use"
-      assert_empty Dir.children(config_dir),
-                   "gh's config dir should start empty so no attacker-controlled config is honored"
+      assert_equal home, config_dir
+      refute_path_exists config_dir, "per-invocation gh config should be removed after passthrough"
     end
   end
 
@@ -1225,7 +1286,30 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
-  def test_gh_stub_pins_path_before_allowlisted_pr_view_passthrough
+  def test_gh_stub_disables_prompts_for_identifierless_tty_reads
+    with_tmp_dir do |dir|
+      real_gh = File.join(dir, "real-gh")
+      File.write(real_gh, <<~RUBY)
+        #!#{RbConfig.ruby}
+        abort "stdin is not a tty" unless STDIN.tty?
+        abort "prompts are enabled" unless ENV["GH_PROMPT_DISABLED"] == "1"
+      RUBY
+      FileUtils.chmod("+x", real_gh)
+      env = {
+        "HIVE_BABYSITTER_REAL_GH" => real_gh,
+        "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "skipped.log"),
+        "GH_PROMPT_DISABLED" => "0"
+      }
+
+      [ [ "run", "view" ], [ "workflow", "view" ] ].each do |args|
+        output, status = capture_pty_stub(env, "gh", *args)
+        assert status.success?, output
+        refute_includes output, "[dry-run]"
+      end
+    end
+  end
+
+  def test_gh_stub_pins_path_before_allowlisted_pr_view_passthrough_with_json
     with_tmp_dir do |dir|
       poison_dir = File.join(dir, "poison-bin")
       FileUtils.mkdir_p(poison_dir)
@@ -1548,6 +1632,29 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_git_stub_reports_legacy_git_before_read_passthrough
+    with_tmp_dir do |dir|
+      marker = File.join(dir, "read-ran")
+      legacy_git = File.join(dir, "legacy-git")
+      File.write(legacy_git, <<~SH)
+        #!/bin/sh
+        if [ "$1" = "--no-lazy-fetch" ]; then exit 129; fi
+        : > #{marker}
+      SH
+      FileUtils.chmod("+x", legacy_git)
+      env = {
+        "HIVE_BABYSITTER_REAL_GIT" => legacy_git,
+        "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "skipped.log")
+      }
+
+      _out, err, status = Open3.capture3(env, stub_path("git"), "status", "--short")
+
+      assert_equal 127, status.exitstatus, err
+      assert_includes err, "Git 2.45 or newer is required"
+      refute_path_exists marker
+    end
+  end
+
   def test_git_stub_forces_no_pager_for_tty_passthrough
     with_tmp_git_repo do |dir|
       marker = File.join(dir, "pager-ran")
@@ -1630,17 +1737,20 @@ class BabysitterDryRunEnvTest < Minitest::Test
         "HIVE_BABYSITTER_REAL_GIT" => real_git_binary,
         "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "skipped.log")
       }
+      # HOME is deliberately redirected below. Prevent the outer `bundle exec` startup
+      # hooks from trying to resolve this test suite's gems beneath that synthetic HOME.
+      Hive::Babysitter::DryRunEnv::RUBY_STARTUP_ENV.each { |key| base_env[key] = nil }
 
       [
         [ "HOME", base_env.merge("HOME" => home, "XDG_CONFIG_HOME" => empty_xdg), home_extdiff, home_pwn ],
         [ "XDG_CONFIG_HOME", base_env.merge("HOME" => File.join(dir, "empty-home"), "XDG_CONFIG_HOME" => xdg), xdg_extdiff, xdg_pwn ]
       ].each do |source, env, configured_extdiff, pwn_path|
-        out, err, status = Open3.capture3(env, stub_path("git"), "-C", dir, "config", "--list")
+        out, err, status = Open3.capture3(env, RbConfig.ruby, stub_path("git"), "-C", dir, "config", "--list")
 
         assert status.success?, err
         refute_includes out, configured_extdiff, "#{source} git config reached real git"
 
-        out, err, status = Open3.capture3(env, stub_path("git"), "-C", dir, "diff")
+        out, err, status = Open3.capture3(env, RbConfig.ruby, stub_path("git"), "-C", dir, "diff")
 
         assert status.success?, err
         assert_empty out
@@ -1953,6 +2063,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
       "-c", "gpg.x509.program=false",
       "-c", "gpg.ssh.program=false",
       "-c", "diff.submodule=short",
+      "--no-lazy-fetch",
       "--no-pager"
     ] + passthrough).join(' ')}"
   end
@@ -1975,6 +2086,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
     path = File.join(dir, name)
     File.write(path, <<~RUBY)
       #!#{RbConfig.ruby}
+      exit 0 if ARGV == ["--no-lazy-fetch", "--version"]
       File.open(#{File.join(dir, "real.log").dump}, "a") do |file|
         file.puts(([File.basename($PROGRAM_NAME)] + ARGV).join(" "))
       end
@@ -2055,10 +2167,18 @@ class BabysitterDryRunEnvTest < Minitest::Test
     path = File.join(dir, name)
     File.write(path, <<~RUBY)
       #!#{RbConfig.ruby}
+      exit 0 if ARGV == ["--no-lazy-fetch", "--version"]
       keys = #{keys.inspect}
       File.open(#{File.join(dir, "env.log").dump}, "a") do |file|
         keys.each do |key|
-          value = ENV.key?(key) ? ENV.fetch(key) : "<unset>"
+          value = case key
+          when "GH_CONFIG_DIR_CHILDREN"
+            Dir.children(ENV.fetch("GH_CONFIG_DIR")).sort.join(",")
+          when "GH_CONFIG_HOSTS"
+            File.read(File.join(ENV.fetch("GH_CONFIG_DIR"), "hosts.yml")).dump[1...-1]
+          else
+            ENV.key?(key) ? ENV.fetch(key) : "<unset>"
+          end
           file.puts("\#{key}=\#{value}")
         end
       end

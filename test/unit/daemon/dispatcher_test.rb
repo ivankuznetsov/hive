@@ -172,9 +172,9 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
     attr_reader :cancelled, :reconfigured
 
-    def reconfigure(enabled:, max_catchup_days:)
+    def reconfigure(enabled:, max_catchup_days:, source:)
       @reconfigured ||= []
-      @reconfigured << { enabled: enabled, max_catchup_days: max_catchup_days }
+      @reconfigured << { enabled: enabled, max_catchup_days: max_catchup_days, source: source }
     end
   end
 
@@ -486,7 +486,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
         project: "digest",
         slug: "2026-06-13",
         stage: "digest",
-        command: "hive digest --date 2026-06-13 --json",
+        command: "hive digest --source merged-prs --date 2026-06-13 --json",
         state_file_mtime: nil,
         state_file_path: nil,
         hive_state_path: nil
@@ -496,7 +496,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
     dispatcher.tick(now: T0)
 
     assert_equal 1, sup.spawned.size
-    assert_equal "hive digest --date 2026-06-13 --json", sup.spawned.first[:command]
+    assert_equal "hive digest --source merged-prs --date 2026-06-13 --json", sup.spawned.first[:command]
     assert_equal "digest", sup.spawned.first[:stage]
     event = logger.events.find { |name, _attrs| name == :dispatched }
     assert_equal "digest", event.last.fetch(:trigger)
@@ -653,7 +653,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
     original = Hive::Config.method(:load_global_digest_block)
     original_answer = Hive::Config.method(:load_global_answer_digest_block)
     Hive::Config.define_singleton_method(:load_global_digest_block) do
-      { "enabled" => true, "max_catchup_days" => 3 }
+      { "enabled" => true, "max_catchup_days" => 3, "source" => "shipped" }
     end
     Hive::Config.define_singleton_method(:load_global_answer_digest_block) do
       { "enabled" => false, "hour" => 9 }
@@ -665,7 +665,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       Hive::Config.define_singleton_method(:load_global_answer_digest_block, &original_answer)
     end
 
-    assert_equal({ enabled: true, max_catchup_days: 3 }, digest.reconfigured&.last,
+    assert_equal({ enabled: true, max_catchup_days: 3, source: "shipped" }, digest.reconfigured&.last,
                  "SIGHUP reload must push the reloaded digest config into the scheduler")
   end
 

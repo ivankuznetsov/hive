@@ -2,6 +2,7 @@ require "date"
 require "fileutils"
 require "json"
 require "shellwords"
+require "hive/digest/source"
 require "hive/digest/window"
 require "hive/paths"
 
@@ -17,11 +18,13 @@ module Hive
       FAILURE_BACKOFF_SCHEDULE = [ 60, 300, 900 ].freeze
 
       def initialize(state_path: nil, clock: -> { Time.now }, enabled: false,
-                     max_catchup_days: DEFAULT_MAX_CATCHUP_DAYS, logger: nil)
+                     max_catchup_days: DEFAULT_MAX_CATCHUP_DAYS,
+                     source: Hive::Digest::Source::DEFAULT, logger: nil)
         @state_path = state_path || File.join(Hive::Paths.state_home, "digest_state.json")
         @clock = clock
         @enabled = enabled == true
         @max_catchup_days = [ max_catchup_days.to_i, 0 ].max
+        @source = Hive::Digest::Source.resolve(configured: source)
         @logger = logger
         @pending = {}
         # Global failure backoff for the daily job (only one date is ever in
@@ -33,9 +36,10 @@ module Hive
       # digest (or retuning the catch-up cap) takes effect within one tick,
       # without dropping the in-memory pending/backoff state a rebuild would
       # lose. Mirrors the daemon's "takes effect within one tick" contract.
-      def reconfigure(enabled:, max_catchup_days:)
+      def reconfigure(enabled:, max_catchup_days:, source:)
         @enabled = enabled == true
         @max_catchup_days = [ max_catchup_days.to_i, 0 ].max
+        @source = Hive::Digest::Source.resolve(configured: source)
       end
 
       def tick(now: @clock.call)
@@ -146,7 +150,8 @@ module Hive
           project: DIGEST_PROJECT,
           slug: iso,
           stage: DIGEST_STAGE,
-          command: "hive digest --date #{Shellwords.escape(iso)} --json",
+          command: "hive digest --source #{Shellwords.escape(@source)} " \
+                   "--date #{Shellwords.escape(iso)} --json",
           state_file_mtime: nil,
           state_file_path: nil,
           hive_state_path: nil

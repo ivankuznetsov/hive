@@ -47,7 +47,8 @@ class HiveDaemonDigestSchedulerTest < Minitest::Test
       assert_equal "digest", dispatches.first.fetch(:project)
       assert_equal "2026-06-13", dispatches.first.fetch(:slug)
       assert_equal "digest", dispatches.first.fetch(:stage)
-      assert_equal "hive digest --date 2026-06-13 --json", dispatches.first.fetch(:command)
+      assert_equal "hive digest --source merged-prs --date 2026-06-13 --json",
+                   dispatches.first.fetch(:command)
       assert scheduler.pending?("2026-06-13")
       assert_empty scheduler.tick(now: T0 + 60), "pending digest must not dispatch twice"
 
@@ -252,7 +253,7 @@ class HiveDaemonDigestSchedulerTest < Minitest::Test
 
       assert_empty scheduler.tick(now: T0), "a disabled scheduler dispatches nothing"
 
-      scheduler.reconfigure(enabled: true, max_catchup_days: 7)
+      scheduler.reconfigure(enabled: true, max_catchup_days: 7, source: "merged-prs")
 
       assert_equal "2026-06-13", scheduler.tick(now: T0).first.fetch(:slug),
                    "reconfigure must enable dispatch within one tick"
@@ -264,9 +265,36 @@ class HiveDaemonDigestSchedulerTest < Minitest::Test
       write_state(dir, "last_digested_date" => "2026-06-12")
       scheduler = scheduler(dir, enabled: true)
 
-      scheduler.reconfigure(enabled: false, max_catchup_days: 7)
+      scheduler.reconfigure(enabled: false, max_catchup_days: 7, source: "merged-prs")
 
       assert_empty scheduler.tick(now: T0), "reconfigure(enabled: false) must stop dispatch"
+    end
+  end
+
+  def test_configured_shipped_source_is_explicit_in_child_command
+    with_tmp_dir do |dir|
+      write_state(dir, "last_digested_date" => "2026-06-12")
+      scheduler = scheduler(dir, enabled: true, source: "shipped")
+
+      command = scheduler.tick(now: T0).first.fetch(:command)
+
+      assert_equal "hive digest --source shipped --date 2026-06-13 --json", command
+    end
+  end
+
+  def test_reconfigure_changes_source_without_losing_failure_backoff
+    with_tmp_dir do |dir|
+      write_state(dir, "last_digested_date" => "2026-06-12")
+      scheduler = scheduler(dir, enabled: true, source: "merged-prs")
+
+      scheduler.tick(now: T0)
+      scheduler.complete(date: "2026-06-13", exit_code: 1, now: T0 + 1)
+      scheduler.reconfigure(enabled: true, max_catchup_days: 7, source: "shipped")
+
+      assert_empty scheduler.tick(now: T0 + 30),
+                   "source reload must retain the existing failure backoff"
+      command = scheduler.tick(now: T0 + 61).first.fetch(:command)
+      assert_equal "hive digest --source shipped --date 2026-06-13 --json", command
     end
   end
 
@@ -347,11 +375,12 @@ class HiveDaemonDigestSchedulerTest < Minitest::Test
 
   private
 
-  def scheduler(dir, enabled:, max_catchup_days: 7, logger: nil)
+  def scheduler(dir, enabled:, max_catchup_days: 7, source: "merged-prs", logger: nil)
     Hive::Daemon::DigestScheduler.new(
       state_path: File.join(dir, "digest_state.json"),
       enabled: enabled,
       max_catchup_days: max_catchup_days,
+      source: source,
       logger: logger
     )
   end

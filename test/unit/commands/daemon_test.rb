@@ -73,7 +73,8 @@ class HiveCommandsDaemonTest < Minitest::Test
     {
       "enabled" => false,
       "agent" => nil,
-      "max_catchup_days" => Hive::Daemon::DigestScheduler::DEFAULT_MAX_CATCHUP_DAYS
+      "max_catchup_days" => Hive::Daemon::DigestScheduler::DEFAULT_MAX_CATCHUP_DAYS,
+      "source" => "merged-prs"
     }
   end
 
@@ -162,6 +163,27 @@ class HiveCommandsDaemonTest < Minitest::Test
                  "answer_digest.enabled must be forwarded into the scheduler, not just instantiated"
     assert_equal 14, scheduler.instance_variable_get(:@hour),
                  "answer_digest.hour must be forwarded into the scheduler"
+  end
+
+  def test_start_daemon_forwards_resolved_digest_source_to_scheduler
+    command = daemon("start", dry_run: true)
+    dispatcher = FakeDispatcher.new([])
+    captured = nil
+    digest_config = default_digest_config.merge("enabled" => true, "source" => "shipped")
+
+    with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(pid) { "start-#{pid}" }) do
+      with_global_start_config(daemon_config, digest_config: digest_config) do
+        with_replaced_singleton_method(Hive::Daemon::Dispatcher, :new, lambda { |**kwargs|
+          captured = kwargs
+          dispatcher
+        }) do
+          command.call
+        end
+      end
+    end
+
+    scheduler = captured.fetch(:digest_scheduler)
+    assert_equal "shipped", scheduler.instance_variable_get(:@source)
   end
 
   def test_start_daemon_invokes_reexec_when_dispatcher_signals_drift

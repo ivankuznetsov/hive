@@ -20,6 +20,7 @@ require "hive/daemon/dispatch_result_queue"
 require "hive/daemon/logger"
 require "hive/daemon/digest_scheduler"
 require "hive/daemon/answer_digest_scheduler"
+require "hive/digest/source"
 require "hive/daemon/patrol_scheduler"
 require "hive/daemon/pr_merge_watcher"
 require "hive/lock"
@@ -1843,6 +1844,7 @@ module Hive
         # contract — without losing the scheduler's in-flight state.
         @digest_scheduler&.reconfigure(
           enabled: @digest_cfg.fetch("enabled", false),
+          source: Hive::Digest::Source.resolve(configured: @digest_cfg["source"]),
           max_catchup_days: @digest_cfg.fetch(
             "max_catchup_days", Hive::Daemon::DigestScheduler::DEFAULT_MAX_CATCHUP_DAYS
           )

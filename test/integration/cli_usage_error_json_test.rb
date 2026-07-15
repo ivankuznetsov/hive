@@ -12,12 +12,12 @@ class CliUsageErrorJsonTest < Minitest::Test
   # Thor's exact two-line arity error for `hive workflow a b c` (too many
   # positionals), rejected before command dispatch. Shared by the --json and
   # human-mode arity tests below so a Thor upgrade or a `desc "workflow
-  # SUBCOMMAND [ID]"` reword updates one literal, not two. Each call site keeps
+  # SUBCOMMAND [REFERENCE]"` reword updates one literal, not two. Each call site keeps
   # its own intentional pin: `.chomp` for the JSON `message` field, the trailing
   # newline as-is for the human stderr stream.
   THOR_WORKFLOW_ARITY_PROSE = <<~MSG.freeze
     ERROR: "hive workflow" was called with arguments ["a", "b", "c"]
-    Usage: "hive workflow SUBCOMMAND [ID]"
+    Usage: "hive workflow SUBCOMMAND [REFERENCE]"
   MSG
 
   def run_hive(home, *args)
@@ -168,8 +168,9 @@ class CliUsageErrorJsonTest < Minitest::Test
       assert_equal "UsageError", payload["error_class"]
       assert_equal "usage", payload["error_kind"]
       assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
-      assert_equal "missing SUBCOMMAND (expected: new)", payload["message"]
-      assert_equal [ "new" ], payload["expected"]
+      expected = %w[new install list update remove]
+      assert_equal "missing SUBCOMMAND (expected: #{expected.join(', ')})", payload["message"]
+      assert_equal expected, payload["expected"]
     end
   end
 
@@ -180,7 +181,7 @@ class CliUsageErrorJsonTest < Minitest::Test
       refute status.success?
       assert_equal Hive::ExitCodes::USAGE, status.exitstatus
       assert_empty out
-      assert_equal "hive workflow: missing SUBCOMMAND (expected: new)\n", err
+      assert_equal "hive workflow: missing SUBCOMMAND (expected: new, install, list, update, remove)\n", err
     end
   end
 

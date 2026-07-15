@@ -1,10 +1,10 @@
 ---
 title: State Model
 type: data-model
-source: lib/hive/task.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/review_handoff.rb, lib/hive/daemon/display_name_backfiller.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
+source: lib/hive/task.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/review_handoff.rb, lib/hive/refactor_patrol/post_merge_state_store.rb, lib/hive/refactor_patrol/post_merge_reporter.rb, lib/hive/daemon/display_name_backfiller.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
 created: 2026-04-25
-updated: 2026-07-09
-tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, web]
+updated: 2026-07-15
+tags: [state, filesystem, model, architecture, post-merge, review, task-id, display-name, archive, web]
 ---
 
 **TLDR**: Hive's workflow state has no application database. Persistent task/project state lives in two filesystem trees per project — `<project>/.hive-state/` (an orphan-branch worktree holding task folders, configs, locks, logs) and `~/Dev/<project>.worktrees/<slug>/` (feature worktrees holding actual code) — plus one global `~/.config/hive/config.yml` (or `HIVE_HOME/config.yml` / a migrated legacy registry). Token-usage metrics are the exception and use the SQLite store described in [[token-usage]]. Hivebox web adds no workflow tables: it reads `hive status` snapshots through `StatusFeed`/`StatusBroadcaster` and writes daemon dispatch requests as JSON files under the global state home. The workflow "data model" is the directory layout, marker grammar, YAML sidecars, and runtime JSON queue files described below.
@@ -348,6 +348,49 @@ The `rebase:` block (added 2026-05-14) drives a pre-dispatch step in `hive run`:
 `Config::ROLE_AGENT_PATHS` (validated by `validate_role_agent_names!`) now also covers the three new stage-agent paths: `%w[brainstorm agent]`, `%w[plan agent]`, `%w[execute agent]` — alongside the existing `review.{ci,triage,fix,browser_test}.agent` paths.
 
 Loaded by `Hive::Config.load`, recursively deep-merged onto `Hive::Config::DEFAULTS` (`lib/hive/config.rb:6`) and validated via `Config.validate!` before return. Templated from `templates/project_config.yml.erb`. The `review.reviewers` Array is replaced wholesale (not per-element merged) — see [[modules/config]].
+
+## Post-merge architecture state
+
+Scheduled refactor-patrol follow-up has its own project-local subtree, separate
+from ordinary `.hive-state/patrol/` state and from the base command's thesis
+and fingerprint files:
+
+```
+<project>/.hive-state/refactor_patrol/post_merge/
+├── architecture.lock
+├── state.json
+├── emissions.json
+└── reports/
+    └── pr-<number>-<merge-sha>.json
+```
+
+`state.json` is versioned and identity-bound to the registered project/root. It
+records `initial_sha`, the contiguous successful `checkpoint_sha`, an optional
+`active_batch_head` and start index, diagnostics for unattributed commits, and
+one record per PR-number/merge-SHA identity. Each record has immutable merge,
+first-parent/base, subject, and changed-path attribution plus lifecycle status
+`owed`, `running`, `blocked`, or `processed`. Attempts retain bounded reasons
+and evidence. The fingerprint map captured by the first logical attempt is
+kept across retries so a child that persisted base refactor fingerprints before
+interruption can still recover the original accepted/flagged category.
+
+First enablement initializes both initial and checkpoint SHA to the current
+healthy trunk head; it does not import prior repository history. An opened
+batch advances the checkpoint only across a contiguous prefix of processed
+records. Later records may complete across an earlier gap and are not rerun,
+but the checkpoint cannot pass the gap. Malformed, newer-version,
+identity-mismatched, or unreachable-checkpoint state fails closed rather than
+resetting this history.
+
+Successful completion is ordered: atomically replace the canonical report,
+atomically replace the emission ledger, mark the PR processed, then advance the
+checkpoint. A restart reconciles matching report+ledger artifacts and finishes
+the state transition without another child or duplicate emission. Reports use
+`hive-refactor-patrol-post-merge.v1`; they carry attribution/scope, separate
+accepted/flagged/suppressed totals, actionable flagged thesis detail, and an
+`emitted_delta` keyed by stable fingerprint plus normalized bucket/content
+digest. Failed or interrupted attempts remain owed. Ordinary patrol's
+`.hive-state/patrol/` files are never read or written by this completion path.
 
 ## Logs
 

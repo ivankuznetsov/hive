@@ -51,6 +51,28 @@ hive patrol my-project --dry-run --json
 
 The JSON envelope is `hive-patrol.v1` and includes mapped-feature, finding, fix, validation, PR, review handoff, skip, and `last_scanned_sha` counts. Durable patrol state is stored under `<project>/.hive-state/patrol/`.
 
+When both `patrol.enabled` and `refactor_patrol.enabled` are true, a normal
+patrol due decision also opens or extends a post-merge architecture batch. The
+daemon discovers explicitly attributed PR commits from the registered
+default-branch checkout's local first-parent history, then runs one bounded
+`hive refactor-patrol` child per PR. First enablement records the current
+healthy trunk SHA as the baseline; it does not replay the repository's full
+history.
+
+This follow-up is reporting-only and offline: Hive does not call GitHub, fetch,
+pull, switch branches, clean the checkout, or fall back to a PR worktree. A
+missing, dirty, detached, stale, busy, or moving trunk remains owed for a later
+normal patrol cadence while the ordinary patrol result proceeds independently.
+Dedicated reports are written to
+`<project>/.hive-state/refactor_patrol/post_merge/reports/`.
+
+Manual refactor-patrol runs can repeat `--path`; the selected feature set is
+the union of those bounded path filters:
+
+```bash
+hive refactor-patrol my-project --changed-since HEAD~1 --path lib/hive --path test/unit
+```
+
 ## Lower-Level Surface
 
 | Command | Use it for |
@@ -68,7 +90,7 @@ Use these when building scripts, recovering a task, or checking idempotency.
 ## Daemon
 
 The daemon process is global user infrastructure; dispatch is per-project. Install-time setup runs `hive daemon install` so the service survives login/reboot, while `hive init` or `hive daemon enable` decides which projects it may touch. It polls `hive status --json`, dispatches workflow verbs for tasks that can advance, stops at human-input gates, and auto-archives finalized tasks after GitHub reports the finalize-stage PR merged.
-When a project also has `patrol.enabled: true`, the daemon's patrol scheduler dispatches `hive patrol <project> --json` on the configured slow cadence through the same project-enabled and concurrency gates as other daemon children.
+When a project also has `patrol.enabled: true`, the daemon's patrol scheduler dispatches `hive patrol <project> --json` on the configured slow cadence through the same project-enabled and concurrency gates as other daemon children. If `refactor_patrol.enabled` is also true, that same due decision may open a post-merge architecture batch; the batch drains through the existing patrol-scan capacity without introducing another timer or service.
 
 ```bash
 hive daemon install

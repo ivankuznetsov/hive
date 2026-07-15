@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-07-14
+updated: 2026-07-15
 tags: [gap, todo]
 ---
 
@@ -19,6 +19,13 @@ tags: [gap, todo]
 - The packaged mixed Sol/Terra/Grok profiles, stage-specific Codex shim, sole
   Sol `ce-code-review` policy, and combined Sol-runner selection are locally
   test-pinned but still need their first paid end-to-end cell.
+- Scheduled post-merge architecture patrol is hermetically covered from local
+  cadence/discovery through separate per-PR reports and checkpoint advancement,
+  but no checked-in artifact yet shows a long-running installed daemon draining
+  a real multi-merge backlog with a live refactor-patrol provider. This is
+  optional dogfood evidence, not a GitHub/network correctness gate; the runtime
+  is intentionally offline and skips an unhealthy registered trunk rather than
+  repairing it.
 
 ## Source-file coverage (representative map)
 
@@ -32,6 +39,7 @@ tags: [gap, todo]
 | `lib/hive/commands/{connect,disconnect}.rb`, `lib/hive/screenote/**` | ✓ [[commands/screenote]], [[modules/config]], and [[stages/artifacts]] cover Screenote OAuth setup, credential storage, MCP injection, and fail-soft artifact behavior. |
 | `lib/hive/stages/*.rb`, `lib/hive/stages/review/**` | ✓ [[stages/index]] plus per-stage pages; review submodules are covered by [[stages/review]]. |
 | `lib/hive/patrol/*`, `lib/hive/commands/patrol.rb` | ✓ [[modules/patrol]] and [[commands/patrol]] cover the repository-patrol engine, PR opener, fingerprint/dismissal state, and patrol-to-`6-review` handoff. |
+| `lib/hive/refactor_patrol/*`, `lib/hive/commands/refactor_patrol.rb`, `schemas/hive-refactor-patrol*` | ✓ [[commands/refactor-patrol]], [[modules/daemon]], [[state-model]], and [[testing]] cover reporting-only analysis, local post-merge discovery/guards/scope, durable per-PR lifecycle, attributed reports, and schema/test contracts. |
 | `lib/hive/daemon/*` | ✓ [[modules/daemon]] and [[commands/daemon]] cover dispatcher, healer, display-name backfiller, queues, merge watcher, status consumer, logging, and service/queue command surfaces. |
 | `lib/hive/babysitter/**`, `lib/hive/commands/babysit.rb`, `bin/hive-babysitter-stub-git`, `bin/hive-babysitter-stub-gh` | ✓ [[modules/babysitter]] and [[commands/babysit]] cover the experimental PR babysitter process, lifecycle command, GitHub PR repair loop, dry-run wrapper-launcher handoff, and executable `git`/`gh` default-deny stub API boundaries. |
 | `lib/hive/bot/*` | ✓ [[modules/bot]] and [[commands/bot]] |

@@ -3,8 +3,8 @@ title: Hive::Daemon
 type: module
 source: lib/hive/daemon/
 created: 2026-05-06
-updated: 2026-07-10
-tags: [daemon, module, automation, dispatcher]
+updated: 2026-07-15
+tags: [daemon, module, automation, dispatcher, patrol, post-merge]
 ---
 
 **TLDR**: Small modules under `Hive::Daemon::*` that together form
@@ -25,6 +25,7 @@ the safety-relevant decisions are unit-testable without forking.
 | `Hive::Daemon::StatusReport` | `lib/hive/daemon/status_report.rb` | Shared `hive-daemon-status` producer for `hive daemon status --json` and hivebox. Builds the PID/service/binary/update-nudge envelope as a plain hash, exposes `running_state`, `payload`, and web-safe `safe_payload`, bounds `installed_binary --version` probes to 10s, and owns `BINARY_DRIFT_STATES` / `BINARY_DRIFT_ACTIONABLE` so the CLI producer and web repair affordance read the same enum source. |
 | `Hive::Daemon::ChildSupervisor` | `lib/hive/daemon/child_supervisor.rb` | Spawns `hive ...` subprocesses with `pgroup: true`; writes the latest daemon-dispatched child output under the durable XDG state directory at `logs/daemon-children/<project>/<slug>/daemon-run.log` (tmpdir is only the standalone-caller fallback), outside the tracked project state worktree; truncating the per-task file on each run bounds persistent storage; reaps via `Process.wait(-1, WNOHANG)`; parses JSON envelopes from child stdout; supports `terminate_all(grace_sec:)` with TERM→KILL escalation. |
 | `Hive::Daemon::Dispatcher` | `lib/hive/daemon/dispatcher.rb` | The poll-classify-dispatch loop. Glues all of the above. Public `tick(now:)` for tests, `run_forever` for production with TERM/INT/HUP signal traps. |
+| `Hive::Daemon::PatrolScheduler` | `lib/hive/daemon/patrol_scheduler.rb` | Sole cadence owner for ordinary patrol and reporting-only post-merge architecture follow-up. A normal due decision may seed a local-history catch-up batch; ordinary patrol retains dispatch priority, while at most one attributed architecture child per project drains through the existing patrol-scan capacity. |
 | `Hive::Daemon::Logger` | `lib/hive/daemon/logger.rb` | One-JSON-line-per-event structured logger. Closed event enum (unknown name raises). Size-rotated. |
 | `Hive::Daemon::PlanApproval` | `lib/hive/daemon/plan_approval.rb` | Safely turns daemon-enabled `3-plan` approval pauses into `hive develop ... --from 3-plan` dispatches by validating command shape and flipping `WAITING` to `COMPLETE`. |
 | `Hive::Daemon::StaleAgentHealer` | `lib/hive/daemon/stale_agent_healer.rb` | Rewrites stale `AGENT_WORKING` markers to `ERROR reason=agent_died` or `ERROR reason=agent_orphaned`, while skipping live controller slots and half-migrated projects. It also repairs wedged `REVIEW_WORKING` rows when the recorded Claude child is dead, the review lock holder is still alive, and child-process inspection proves that holder has no remaining children: it logs `reason=review_agent_died` with the original phase/pass, clears the stale marker, terminates the stuck holder, and removes `.lock` so the daemon can retry review normally. Retryable terminal markers such as `8-finalize` `ERROR reason=unpushed_commits` plus non-review terminal agent-loss `ERROR reason=tmux_session_terminated` / `reason=agent_orphaned` are cleared with a bounded per-process retry budget so interrupted sessions can rerun. A narrower timeout path clears `ERROR reason=timeout` exactly once, only on `5-open-pr` and `7-artifacts`, because those re-entries are side-effect-safe (`open_pr_already_open` / idempotent `artifact.md` recollection). `limits_reached` markers (review `REVIEW_ERROR` from reviewers/triage/fix, or single-agent `ERROR` in any stage) self-heal on a cooldown: the writer stamps `retry_after = now + Hive::AgentLimit::RETRY_COOLDOWN_SEC` (default 1h, env `HIVE_LIMITS_RETRY_COOLDOWN_SEC`) and the healer clears them only once `now >= retry_after`, bounded by the same retry budget; cooldown-wait ticks do not burn budget, and a missing/unparseable stamp stays manual. Non-limit operational failures also auto-retry under the same bounded budget so the daemon advances them instead of parking for a human: `ERROR reason=ensure_clean_on_exit_failed` (any worktree-owning stage — the rerun re-applies the scope-checked auto-commit rather than bypassing it, so genuinely out-of-scope residue still re-fails and parks), `REVIEW_ERROR phase=reviewers reason=all_failed` (every reviewer crashed for a non-limit reason; a total usage-limit instead sets `reason=limits_reached` and takes the cooldown path), `REVIEW_ERROR phase=fix reason=fix_failed message="claude stop hook did not signal completion"` for the legacy Claude stop-hook completion bug, and `REVIEW_ERROR phase=fix` auto-commit failures (`fix_auto_commit_scope_failed` / `fix_auto_commit_sign_policy_failed` / `fix_auto_commit_signing_failed`). The integrity/operator reasons `fix_status_check_failed`, `fix_tampered`, generic `fix_failed`, and `dirty_worktree` stay manual. The operator-facing bot/TUI still routes `ensure_clean_on_exit_failed` through `ERROR_MANUAL_ONLY_REASONS` as the post-exhaustion "inspect manually" backstop — the daemon retries first, a human sees it only after the budget is spent. `3-plan` is the special terminal-error case: after any successful terminal `ERROR` clear there, including terminal agent-loss or elapsed `limits_reached`, it queues `hive plan <slug> --from 3-plan` through `DispatchRequestQueue` and logs `heal_requeued`, because an empty markerless `plan.md` otherwise classifies straight back to `:error`. |
@@ -52,6 +53,7 @@ hive daemon start
             ├─ Hive::Daemon::DispatchRequestQueue (<state_home>/dispatch_requests/*.json)
             ├─ Hive::Daemon::PrMergeWatcher      (Open3.capture3 gh pr view)
             ├─ Hive::Daemon::DigestScheduler     (<state_home>/digest_state.json)
+            ├─ Hive::Daemon::PatrolScheduler     (ordinary + post-merge patrol)
             ├─ Hive::Daemon::StaleAgentHealer    (AGENT_WORKING repair)
             ├─ Hive::Daemon::RecoverableErrorHealer (probe-gated ERROR retry)
             ├─ Hive::Daemon::DisplayNameBackfiller (missing display_name retry)
@@ -113,6 +115,45 @@ dependency block returns `:dispatch`; `blocked: true` returns
 `3-plan` `needs_input` auto-approval shortcut is now gated on
 `workflow == "coding"` (nil workflow remains coding for old test doubles), so a
 generic stage whose dir happens to be `3-plan` uses the normal edit/mtime path.
+
+## Post-merge architecture patrol
+
+`PatrolScheduler` remains the single scheduling authority. It evaluates the
+existing `patrol.mode` / `patrol.trigger` / `patrol.poll_interval_sec` due
+decision and always preserves the ordinary `hive patrol PROJECT --json`
+dispatch. When `refactor_patrol.enabled` is also true, that same due decision
+may seed or expand a durable architecture batch at the registered trunk HEAD.
+An open batch may keep draining between slow cadence checks, but it cannot
+discover newer merges until another ordinary due decision. The dispatcher
+offers ordinary due work first and admits architecture children as
+`kind: :patrol_scan`, so both products share the existing per-project patrol
+budget without sharing outcomes.
+
+The coordinator uses only local, read-only evidence. `CheckoutGuard` locks and
+pins the registered checkout, requires its symbolic default branch, clean
+status, local branch equality, and cached `origin/<default_branch>` equality
+when that remote exists. `CapabilityProbe` runs the exact checkout-local Hive
+executable's help path. `LocalMergeCatalog` walks checkpoint-to-head
+first-parent history, recognizes explicit PR-number subject forms, assigns each
+merge its first parent as the analysis boundary, and computes changed paths
+from that boundary. None of these paths call GitHub, fetch, or repair the
+checkout.
+
+`PostMergeScope` chooses a single mapped feature, then one owning entrypoint,
+then bounded changed-root paths; unsafe, empty, or repository-root scope is
+blocked rather than widened. Each accepted record reserves a durable attempt
+before spawn and receives a unique `refactor-patrol-pr-<number>-<sha>` slug.
+The completion token binds project, PR, merge/base SHAs, changed paths, scope,
+real analysis root, and pinned HEAD. The child must return a matching successful
+`hive-refactor-patrol.v1` envelope and the guard must still observe the same
+checkout before `PostMergeReporter` persists its dedicated report.
+
+Architecture blockage and failure are retryable scheduler events; they neither
+fail the ordinary patrol child nor alter its counts/state. Nonzero exits,
+invalid envelopes, missing thesis records, report-write failures, checkout
+drift, and capacity cancellation leave the PR owed. A durable report and
+emission ledger are reconciled before the per-PR success/checkpoint state, so a
+daemon restart can finish a split completion without rerunning the child.
 
 ## Trust boundary
 

@@ -391,6 +391,9 @@ def hardened_passthrough_argv(argv, rest)
     # never enters the submodule repo); this `-c` override outranks the worktree config, exactly
     # as the gpg/core overrides above do.
     "-c", "diff.submodule=short",
+    # Git 2.45+ understands this global option; older versions fail closed before dispatching
+    # an object read instead of ignoring the GIT_NO_LAZY_FETCH environment guard below.
+    "--no-lazy-fetch",
     # A read can otherwise auto-spawn a repo/caller-controlled `core.pager` on a TTY; force
     # `--no-pager` so a dry-run read cannot launch a pager (PAGER/GIT_PAGER are also scrubbed below).
     "--no-pager",
@@ -444,6 +447,14 @@ ENV["GIT_OPTIONAL_LOCKS"] = "0"
 # purpose: it is user-writable under Homebrew, which would reopen the same poisoning vector.
 #
 ENV["PATH"] = "/usr/bin:/bin"
+
+# `GIT_NO_LAZY_FETCH` was advisory before Git 2.45. Probe the matching global option
+# before handing an allowlisted read to Git so older clients fail closed with an
+# actionable diagnostic instead of silently fetching attacker-selected objects.
+unless system(real, "--no-lazy-fetch", "--version", out: File::NULL, err: File::NULL)
+  warn "hive-babysitter dry-run: Git 2.45 or newer is required for safe read passthrough (--no-lazy-fetch unavailable)"
+  exit 127
+end
 
 begin
   # Array-form exec (no shell) hands argv straight to the real git binary.

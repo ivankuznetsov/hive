@@ -303,6 +303,61 @@ module Hive
       nil
     end
 
+    # Read-only primitives used by the daemon's post-merge architecture
+    # coordinator. They intentionally do not fetch, switch, or repair refs.
+    def rev_parse(ref)
+      run_git!("-C", @project_root, "rev-parse", "--verify", ref).strip
+    end
+
+    def remotes
+      run_git!("-C", @project_root, "remote").lines.map(&:strip).reject(&:empty?)
+    end
+
+    def git_path(name)
+      raw = run_git!("-C", @project_root, "rev-parse", "--git-path", name).strip
+      File.expand_path(raw, @project_root)
+    end
+
+    def status_short_excluding_hive_state
+      out, err, status = Open3.capture3(
+        "git", "-C", @project_root, "status", "--short", "--untracked-files=all",
+        "--", ".", ":(exclude).hive-state", ":(exclude).hive-state/**"
+      )
+      raise GitError, "git -C #{@project_root} status failed: #{err.strip.empty? ? out : err}" unless status.success?
+
+      out
+    end
+
+    def first_parent_commits(checkpoint_sha, head_sha)
+      format = "%H%x00%P%x00%s"
+      out = run_git!("-C", @project_root, "log", "--first-parent", "--reverse",
+                     "--format=#{format}", "#{checkpoint_sha}..#{head_sha}")
+      out.lines.filter_map do |line|
+        sha, parents, subject = line.chomp.split("\0", 3)
+        next if sha.to_s.empty?
+
+        { "sha" => sha, "parents" => parents.to_s.split, "subject" => subject.to_s }
+      end
+    end
+
+    def changed_paths(base_sha, head_sha)
+      out = run_git!("-C", @project_root, "diff", "--name-status", "-z", "--find-renames",
+                     base_sha, head_sha, "--")
+      fields = out.split("\0")
+      paths = []
+      until fields.empty?
+        status = fields.shift.to_s
+        break if status.empty?
+
+        if status.start_with?("R", "C")
+          paths << fields.shift.to_s << fields.shift.to_s
+        else
+          paths << fields.shift.to_s
+        end
+      end
+      paths.reject(&:empty?).map { |path| path.tr("\\", "/") }.uniq.sort
+    end
+
     def run_git!(*args)
       out, err, status = Open3.capture3("git", *args)
       raise GitError, "git #{args.join(' ')} failed: #{err.strip.empty? ? out : err}" unless status.success?

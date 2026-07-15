@@ -87,14 +87,24 @@ class TaskMetaTest < Minitest::Test
       assert_equal "b" * 64, Hive::TaskMeta.read(dir)[:workflow_manifest_digest]
     end
   end
+
+  def test_managed_workflow_provenance_must_be_written_as_a_pair
+    with_tmp_dir do |dir|
+      assert_raises(ArgumentError) do
+        Hive::TaskMeta.write(
+          dir, id: 7, slug: "managed-260715-aaaa", display_name: nil,
+          workflow_commit: "a" * 40
+        )
+      end
+    end
+  end
   include HiveTestHelper
 
   def test_write_and_read_round_trip
     with_tmp_dir do |dir|
       Hive::TaskMeta.write(dir, id: 42, slug: "add-foo", display_name: "Add Foo")
 
-      assert_equal({ id: 42, slug: "add-foo", display_name: "Add Foo", depends_on: nil, workflow: nil,
-                     workflow_commit: nil, workflow_manifest_digest: nil },
+      assert_equal({ id: 42, slug: "add-foo", display_name: "Add Foo", depends_on: nil, workflow: nil },
                    Hive::TaskMeta.read(dir))
       assert File.exist?(File.join(dir, "meta.yml"))
       refute Dir.children(dir).any? { |name| name.include?(".meta.yml.tmp") }
@@ -106,8 +116,7 @@ class TaskMetaTest < Minitest::Test
       Hive::TaskMeta.write(dir, id: 42, slug: "add-foo", display_name: "Add Foo", depends_on: "base-task")
 
       assert_equal(
-        { id: 42, slug: "add-foo", display_name: "Add Foo", depends_on: "base-task", workflow: nil,
-          workflow_commit: nil, workflow_manifest_digest: nil },
+        { id: 42, slug: "add-foo", display_name: "Add Foo", depends_on: "base-task", workflow: nil },
         Hive::TaskMeta.read(dir)
       )
       assert_includes File.read(File.join(dir, "meta.yml")), "depends_on: base-task"
@@ -119,8 +128,7 @@ class TaskMetaTest < Minitest::Test
       Hive::TaskMeta.write(dir, id: 42, slug: "add-foo", display_name: "Add Foo", workflow: "research")
 
       assert_equal(
-        { id: 42, slug: "add-foo", display_name: "Add Foo", depends_on: nil, workflow: "research",
-          workflow_commit: nil, workflow_manifest_digest: nil },
+        { id: 42, slug: "add-foo", display_name: "Add Foo", depends_on: nil, workflow: "research" },
         Hive::TaskMeta.read(dir)
       )
       assert_includes File.read(File.join(dir, "meta.yml")), "workflow: research"
@@ -166,14 +174,12 @@ class TaskMetaTest < Minitest::Test
     with_tmp_dir do |dir|
       File.write(File.join(dir, "meta.yml"), "id: '42'\nslug: from-string-id\n")
       # A YAML-quoted numeric string id is coerced to an Integer via Integer().
-      assert_equal({ id: 42, slug: "from-string-id", display_name: nil, depends_on: nil, workflow: nil,
-                     workflow_commit: nil, workflow_manifest_digest: nil },
+      assert_equal({ id: 42, slug: "from-string-id", display_name: nil, depends_on: nil, workflow: nil },
                    Hive::TaskMeta.read(dir))
 
       File.write(File.join(dir, "meta.yml"), "id: not-a-number\nslug: bad-id\n")
       # An unparseable, non-empty id falls back to nil (ArgumentError rescue).
-      assert_equal({ id: nil, slug: "bad-id", display_name: nil, depends_on: nil, workflow: nil,
-                     workflow_commit: nil, workflow_manifest_digest: nil },
+      assert_equal({ id: nil, slug: "bad-id", display_name: nil, depends_on: nil, workflow: nil },
                    Hive::TaskMeta.read(dir))
     end
   end
@@ -227,9 +233,7 @@ class TaskMetaTest < Minitest::Test
           slug: "keep-slug",
           display_name: "Readable Name",
           depends_on: "base-task",
-          workflow: "research",
-          workflow_commit: nil,
-          workflow_manifest_digest: nil
+          workflow: "research"
         },
         Hive::TaskMeta.read(dir)
       )
@@ -250,8 +254,7 @@ class TaskMetaTest < Minitest::Test
       Hive::TaskMeta.update_id(dir, 42)
 
       assert_equal(
-        { id: 42, slug: "keep-slug", display_name: "Keep Me", depends_on: "base-task", workflow: "research",
-          workflow_commit: nil, workflow_manifest_digest: nil },
+        { id: 42, slug: "keep-slug", display_name: "Keep Me", depends_on: "base-task", workflow: "research" },
         Hive::TaskMeta.read(dir)
       )
     end

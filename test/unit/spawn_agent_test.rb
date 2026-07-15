@@ -617,6 +617,38 @@ class SpawnAgentTest < Minitest::Test
     end
   end
 
+  def test_stage_permission_scope_compiles_task_pinned_managed_policy
+    with_tmp_dir do |dir|
+      task_folder = File.join(dir, "task")
+      FileUtils.mkdir_p(task_folder)
+      workflow = Struct.new(:id).new(:demo)
+      task = Object.new
+      task.define_singleton_method(:managed_workflow?) { true }
+      task.define_singleton_method(:hive_state_path) { File.join(dir, ".hive-state") }
+      task.define_singleton_method(:workflow) { workflow }
+      task.define_singleton_method(:workflow_commit) { "a" * 40 }
+      task.define_singleton_method(:workflow_manifest_digest) { "b" * 64 }
+      task.define_singleton_method(:folder) { task_folder }
+      manifest = Struct.new(:data).new({
+        "permissions" => {
+          "tools" => [ "Read" ], "deny" => [ "Bash" ], "directories" => [],
+          "commands" => [], "domains" => [], "credentials" => []
+        }
+      })
+      store = Object.new
+      store.define_singleton_method(:manifest) { |*| manifest }
+      with_replaced_singleton_method(Hive::WorkflowPackage::ManagedStore, :new, ->(*) { store }) do
+        scope = Hive::Stages::Base.stage_permission_scope(
+          {}, "work", task, Hive::AgentProfiles.lookup(:claude)
+        )
+        assert_equal "dontAsk", scope.fetch(:permission_mode)
+        assert_equal [ "Read" ], scope.fetch(:allowed_tools)
+        assert_equal task_folder, scope.fetch(:add_dirs).first
+        assert_instance_of Hive::WorkflowPackage::RuntimePolicy::Policy, scope.fetch(:runtime_policy)
+      end
+    end
+  end
+
   def test_stage_permission_scope_yolo_preserves_tmux_builtin_allowlist
     with_tmp_dir do |dir|
       task = make_task(dir, "3-plan")

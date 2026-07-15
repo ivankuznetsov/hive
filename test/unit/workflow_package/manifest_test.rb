@@ -39,7 +39,49 @@ class WorkflowPackageManifestTest < Minitest::Test
     end
   end
 
+  def test_load_rejects_noncanonical_invalid_and_missing_manifests
+    with_package do |root|
+      manifest = Hive::WorkflowPackage::Manifest.build(root, metadata: metadata)
+      path = File.join(root, "manifest.json")
+      File.write(path, JSON.pretty_generate(manifest.data))
+      assert_rule("manifest.non_canonical") { Hive::WorkflowPackage::Manifest.load(path) }
+
+      File.write(path, "{not-json")
+      assert_rule("manifest.invalid_json") { Hive::WorkflowPackage::Manifest.load(path) }
+      FileUtils.rm_f(path)
+      assert_rule("manifest.unreadable") { Hive::WorkflowPackage::Manifest.load(path) }
+    end
+  end
+
+  def test_shape_helpers_reject_invalid_names_paths_values_and_duplicates
+    assert_rule("manifest.invalid_name") { Hive::WorkflowPackage::Manifest.validate_name!("Bad Name") }
+    assert_rule("package.invalid_path") { Hive::WorkflowPackage::Manifest.validate_relative_path!(nil) }
+    assert_rule("package.path_escape") { Hive::WorkflowPackage::Manifest.validate_relative_path!("../outside") }
+    assert_rule("manifest.invalid_value") { Hive::WorkflowPackage::Manifest.required_string!("", "summary") }
+    assert_rule("manifest.invalid_value") { Hive::WorkflowPackage::Manifest.string_array!([ "" ], "tools") }
+    assert_rule("manifest.duplicate_value") do
+      Hive::WorkflowPackage::Manifest.string_array!(%w[Read Read], "tools")
+    end
+  end
+
+  def test_inventory_rejects_special_files_and_unreadable_roots
+    with_package do |root|
+      fifo = File.join(root, "pipe")
+      File.mkfifo(fifo)
+      assert_rule("package.special_file") { Hive::WorkflowPackage::Manifest.inventory(root) }
+    end
+    assert_rule("package.unreadable") do
+      Hive::WorkflowPackage::Manifest.inventory(File.join(Dir.tmpdir, "missing-hive-package-#{Process.pid}"))
+    end
+  end
+
   private
+
+  def assert_rule(rule)
+    error = assert_raises(Hive::WorkflowPackage::PackageError) { yield }
+    assert_equal rule, error.diagnostic.rule_id
+    error
+  end
 
   def metadata
     {

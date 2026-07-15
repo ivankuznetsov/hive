@@ -90,6 +90,11 @@ returns every flat patch and supersession receipt.
 | `hive refactor-patrol PROJECT --list\|--show JOB_ID [--limit N]` | Inspect durable architecture-patrol jobs without mutation; list pages use `--cursor`, while show accepts explicit `--full` history. |
 | `hive migrate [PROJECT_PATH]` | Rename in-flight task folders from older stage layouts and backfill legacy task metadata. |
 | `hive workflow new ID` | Scaffold a blank project workflow descriptor under `<hive_state_path>/workflows/`. |
+| `hive workflow install honeycomb/NAME[@REF]` | Verify and atomically select a reviewed package. |
+| `hive workflow list` | Show built-in, authored, selected, and retained workflows with integrity/provenance. |
+| `hive workflow update NAME [--dry-run]` | Report a semantic/security diff and atomically advance after consent. |
+| `hive workflow remove NAME` | Disable a managed selection while retaining task-pinned generations. |
+| `hive workflow publish ID --version X.Y.Z` | Package an authored workflow and submit a fork PR as pending review. |
 | `hive tree` | Print the Thor command tree. |
 
 Use these when building scripts, recovering a task, or checking idempotency.
@@ -129,7 +134,7 @@ Read [wiki/operating.md](../wiki/operating.md) before running it live.
 
 ## JSON Output
 
-Workflow verbs (`brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, `archive`, `run`, `approve`), findings triage (`findings`, `accept-finding`, `reject-finding`), patrol (`patrol`), architecture-patrol job inspection (`refactor-patrol --list` / `--show`), diagnostics (`status`, `doctor`, `rebase-status`, `markers clear`, `metrics rollback-rate`), registry cleanup (`forget`, `prune`), workflow authoring (`workflow new`), `init`, and daemon control support `--json` where documented and emit typed envelopes. `hive init --json` emits a single `hive-init.v2` success payload with resolved answers and project metadata; architecture-patrol list/show emits `hive-refactor-patrol-jobs.v1`. Workflow verbs emit a `hive-stage-action` envelope; `hive workflow new --json` emits an unversioned success/error document. Schema files live under [schemas/](../schemas/), and [wiki/cli.md](../wiki/cli.md) lists the contract details. `hive tui` rejects `--json`; legacy or one-shot utilities (`version`, `tree`, `new`, `migrate`) are still text-only.
+Workflow verbs (`brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, `archive`, `run`, `approve`), findings triage (`findings`, `accept-finding`, `reject-finding`), patrol (`patrol`), architecture-patrol job inspection (`refactor-patrol --list` / `--show`), diagnostics (`status`, `doctor`, `rebase-status`, `markers clear`, `metrics rollback-rate`), registry cleanup (`forget`, `prune`), workflow lifecycle (`workflow new/install/list/update/remove/publish`), `init`, and daemon control support `--json` where documented and emit typed envelopes. `hive init --json` emits a single `hive-init.v2` success payload with resolved answers and project metadata; architecture-patrol list/show emits `hive-refactor-patrol-jobs.v1`. Workflow verbs emit a `hive-stage-action` envelope; Honeycomb lifecycle schemas are `hive-workflow-{install,list,update,remove,publish}.v1`. Non-TTY/JSON mutations require `--yes`, and an escalating update separately requires `--allow-escalation`. Schema files live under [schemas/](../schemas/), and [wiki/cli.md](../wiki/cli.md) lists the contract details. `hive tui` rejects `--json`; legacy or one-shot utilities (`version`, `tree`, `new`, `migrate`) are still text-only.
 
 ## Exit Codes
 

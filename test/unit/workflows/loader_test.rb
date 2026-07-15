@@ -129,4 +129,56 @@ class WorkflowsLoaderTest < Minitest::Test
                       "the skip breadcrumb must carry the ConfigError reason (id/filename mismatch)"
     end
   end
+
+  def test_authored_descriptor_wins_a_managed_id_collision
+    with_tmp_dir do |workflows_dir|
+      File.write(File.join(workflows_dir, "owned.yml"), <<~YAML)
+        id: owned
+        stages:
+          - name: done
+            kind: terminal
+            state_file: done.md
+      YAML
+      managed = Struct.new(:id).new(:owned)
+      with_replaced_singleton_method(
+        Hive::Workflows::Loader, :load_managed, ->(_dir) { { owned: managed } }
+      ) do
+        workflows = nil
+        _out, err = capture_io { workflows = Hive::Workflows::Loader.load_dir(workflows_dir) }
+        refute_same managed, workflows.fetch(:owned)
+        assert_includes err, "owner-authored descriptor has priority"
+      end
+    end
+  end
+
+  def test_load_managed_skips_an_invalid_generation
+    lock = { "name" => "demo", "source_commit" => "a" * 40, "manifest_digest" => "b" * 64 }
+    store = Object.new
+    store.define_singleton_method(:selections) { [ lock ] }
+    store.define_singleton_method(:workflow) { |*| raise Hive::ConfigError, "tampered" }
+    with_replaced_singleton_method(Hive::WorkflowPackage::ManagedStore, :new, ->(*) { store }) do
+      loaded = nil
+      _out, err = capture_io { loaded = Hive::Workflows::Loader.load_managed("/tmp/workflows") }
+      assert_empty loaded
+      assert_includes err, "tampered"
+    end
+  end
+
+  def test_fingerprint_tolerates_a_file_disappearing_during_stat
+    with_tmp_dir do |workflows_dir|
+      path = File.join(workflows_dir, "demo.yml")
+      File.write(path, "content")
+      original = File.method(:stat)
+      File.define_singleton_method(:stat) do |candidate|
+        raise Errno::ENOENT if candidate == path
+
+        original.call(candidate)
+      end
+      begin
+        assert_equal [ [ path, nil, nil ] ], Hive::Workflows::Loader.fingerprint(workflows_dir)
+      ensure
+        File.define_singleton_method(:stat, original)
+      end
+    end
+  end
 end

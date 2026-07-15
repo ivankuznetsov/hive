@@ -25,15 +25,22 @@ module Hive
       raw = YAML.safe_load(File.read(path(task_folder))) || {}
       return empty unless raw.is_a?(Hash)
 
-      {
+      data = {
         id: normalize_id(raw["id"] || raw[:id]),
         slug: normalize_string(raw["slug"] || raw[:slug]),
         display_name: normalize_string(raw["display_name"] || raw[:display_name]),
         depends_on: normalize_string(raw["depends_on"] || raw[:depends_on]),
-        workflow: normalize_string(raw["workflow"] || raw[:workflow]),
-        workflow_commit: normalize_string(raw["workflow_commit"] || raw[:workflow_commit]),
-        workflow_manifest_digest: normalize_string(raw["workflow_manifest_digest"] || raw[:workflow_manifest_digest])
+        workflow: normalize_string(raw["workflow"] || raw[:workflow])
       }
+      if raw.key?("workflow_commit") || raw.key?(:workflow_commit)
+        data[:workflow_commit] = normalize_string(raw["workflow_commit"] || raw[:workflow_commit])
+      end
+      if raw.key?("workflow_manifest_digest") || raw.key?(:workflow_manifest_digest)
+        data[:workflow_manifest_digest] = normalize_string(
+          raw["workflow_manifest_digest"] || raw[:workflow_manifest_digest]
+        )
+      end
+      data
     rescue Errno::ENOENT
       # No meta.yml (pre-`hive new` / legacy folders) — a normal, expected
       # absence, not corruption. Return empty silently.
@@ -127,10 +134,14 @@ module Hive
       tmp = File.join(task_folder, ".#{FILENAME}.tmp.#{Process.pid}.#{SecureRandom.hex(4)}")
       File.write(tmp, data.to_yaml)
       File.rename(tmp, path(task_folder))
-      data.transform_keys(&:to_sym).merge(
-        depends_on: normalized_depends_on, workflow: normalized_workflow,
-        workflow_commit: normalized_commit, workflow_manifest_digest: normalized_digest
+      result = data.transform_keys(&:to_sym).merge(
+        depends_on: normalized_depends_on, workflow: normalized_workflow
       )
+      if normalized_commit
+        result[:workflow_commit] = normalized_commit
+        result[:workflow_manifest_digest] = normalized_digest
+      end
+      result
     ensure
       File.delete(tmp) if tmp && File.exist?(tmp)
     end
@@ -172,10 +183,7 @@ module Hive
     end
 
     def empty
-      {
-        id: nil, slug: nil, display_name: nil, depends_on: nil, workflow: nil,
-        workflow_commit: nil, workflow_manifest_digest: nil
-      }
+      { id: nil, slug: nil, display_name: nil, depends_on: nil, workflow: nil }
     end
 
     def read_for_update!(task_folder)

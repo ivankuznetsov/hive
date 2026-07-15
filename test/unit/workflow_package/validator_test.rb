@@ -60,6 +60,70 @@ class WorkflowPackageValidatorTest < Minitest::Test
     end
   end
 
+  def test_reports_trusted_digest_name_and_missing_file_mismatches
+    with_package do |root|
+      write_manifest(root)
+      FileUtils.rm_f(File.join(root, "README.md"))
+
+      result = Hive::WorkflowPackage::Validator.validate(
+        root, expected_name: "other", expected_manifest_digest: "0" * 64
+      )
+      rules = result.errors.map(&:rule_id)
+      assert_includes rules, "manifest.digest_mismatch"
+      assert_includes rules, "manifest.name_mismatch"
+      assert_includes rules, "manifest.missing_file"
+    end
+  end
+
+  def test_invalid_descriptor_is_returned_as_a_safe_diagnostic
+    with_package do |root|
+      write_manifest(root)
+      File.write(File.join(root, "workflow.yml"), "id: Demo\nstages: []\n")
+
+      result = Hive::WorkflowPackage::Validator.validate(root, expected_name: "demo")
+      diagnostic = result.errors.find { |item| item.rule_id == "descriptor.invalid" }
+      assert_equal "package workflow descriptor is invalid", diagnostic.message
+    end
+  end
+
+  def test_unexpected_descriptor_config_errors_are_redacted
+    validator = Hive::WorkflowPackage::Validator.new(
+      Dir.pwd, expected_name: nil, expected_manifest_digest: nil, managed: true
+    )
+    original = Hive::WorkflowPackage::Manifest.method(:load)
+    Hive::WorkflowPackage::Manifest.define_singleton_method(:load) do |_path|
+      raise Hive::ConfigError, "sensitive descriptor detail"
+    end
+    begin
+      result = validator.validate
+      assert_equal "descriptor.invalid", result.errors.first.rule_id
+      refute_includes result.errors.first.message, "sensitive"
+    ensure
+      Hive::WorkflowPackage::Manifest.define_singleton_method(:load, original)
+    end
+  end
+
+  def test_managed_stage_and_council_bypass_constructs_are_rejected
+    reviewer = Struct.new(:command, :skill).new("raw command", "external-skill")
+    revise = Struct.new(:command, :skill).new("raw revise", "external-revise")
+    council = Struct.new(:revise).new(revise)
+    agent_stage = Struct.new(:kind, :permissions, :skill, :reviewers, :council)
+                        .new(:agent, nil, "external-stage", [], nil)
+    council_stage = Struct.new(:kind, :permissions, :skill, :reviewers, :council)
+                          .new(:council, "read-only", nil, [ reviewer ], council)
+    workflow = Struct.new(:stages).new([ agent_stage, council_stage ])
+    diagnostics = []
+    validator = Hive::WorkflowPackage::Validator.new(
+      Dir.pwd, expected_name: nil, expected_manifest_digest: nil, managed: true
+    )
+
+    validator.send(:validate_managed_workflow, workflow, diagnostics)
+
+    assert_includes diagnostics.map(&:rule_id), "policy.missing_or_yolo"
+    assert_equal 3, diagnostics.count { |item| item.rule_id == "policy.external_skill" }
+    assert_equal 2, diagnostics.count { |item| item.rule_id == "policy.raw_council_command" }
+  end
+
   private
 
   def metadata

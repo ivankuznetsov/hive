@@ -16,6 +16,7 @@ module Hive
       def scan_files(root, paths:, permissions: {})
         paths.flat_map do |relative|
           next [] unless relative.end_with?(".md", ".yml", ".yaml", ".json")
+          next [] unless File.file?(File.join(root, relative))
 
           scan_text(File.read(File.join(root, relative)), path: relative, permissions: permissions)
         end

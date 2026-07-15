@@ -6,6 +6,10 @@ require "hive/workflow_package/manifest"
 class WorkflowUpdateCommandTest < Minitest::Test
   include HiveTestHelper
 
+  class TTYInput < StringIO
+    def tty? = true
+  end
+
   def test_dry_run_reports_complete_diff_without_changing_selection_or_generations
     with_update_fixture do |project, store, old, candidate_root, candidate|
       before = Dir.glob(File.join(store.workflows_dir, "**", "*"), File::FNM_DOTMATCH).sort
@@ -52,18 +56,61 @@ class WorkflowUpdateCommandTest < Minitest::Test
     end
   end
 
+  def test_already_current_is_a_typed_noop
+    with_update_fixture do |project, store, old, _candidate_root, _candidate|
+      package = store.generation_path("demo", old.source_commit)
+      payload = command(project, package, old, yes: true).call!
+
+      assert_equal "already_current", payload.fetch("status")
+      assert_nil payload.fetch("diff")
+    end
+  end
+
+  def test_interactive_ordinary_and_escalation_declines_are_cancelled
+    with_update_fixture do |project, store, old, candidate_root, candidate|
+      cancelled = command(
+        project, candidate_root, candidate, json: false,
+        stdin: TTYInput.new("no\n")
+      ).call!
+      assert_equal "cancelled", cancelled.fetch("status")
+      assert_equal old.source_commit, store.selected("demo").fetch("source_commit")
+    end
+
+    with_update_fixture(escalation: true) do |project, store, old, candidate_root, candidate|
+      cancelled = command(
+        project, candidate_root, candidate, json: false,
+        stdin: TTYInput.new("yes\nno\n")
+      ).call!
+      assert_equal "cancelled", cancelled.fetch("status")
+      assert_equal old.source_commit, store.selected("demo").fetch("source_commit")
+    end
+  end
+
+  def test_activation_failure_removes_candidate_and_preserves_previous_selection
+    with_update_fixture do |project, store, old, candidate_root, candidate|
+      failing = ->(*) { raise Hive::GitError, "commit failed" }
+
+      assert_raises(Hive::GitError) do
+        command(project, candidate_root, candidate, yes: true, committer: failing).call!
+      end
+      assert_equal old.source_commit, store.selected("demo").fetch("source_commit")
+      refute File.exist?(store.generation_path("demo", candidate.source_commit))
+    end
+  end
+
   private
 
-  def command(project, package, resolution, yes: false, allow_escalation: false, dry_run: false)
+  def command(project, package, resolution, yes: false, allow_escalation: false, dry_run: false,
+              json: true, stdin: $stdin, committer: ->(*) { })
     client = Object.new
     client.define_singleton_method(:fetch) do |_source, destination:|
       FileUtils.cp_r(Dir.glob(File.join(package, "*")), destination)
       resolution
     end
     Hive::Commands::Workflow::Update.new(
-      "demo", project_root: project, json: true, yes: yes,
+      "demo", project_root: project, json: json, yes: yes,
       allow_escalation: allow_escalation, dry_run: dry_run,
-      stdout: StringIO.new, registry_client: client, committer: ->(*) { }
+      stdin: stdin, stdout: StringIO.new, registry_client: client, committer: committer
     )
   end
 

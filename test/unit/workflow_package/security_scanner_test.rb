@@ -41,4 +41,19 @@ class WorkflowPackageSecurityScannerTest < Minitest::Test
 
     refute findings.any? { |finding| finding.rule_id == "security.undeclared_shell" }
   end
+
+  def test_credential_and_shell_behavior_require_declarations
+    rejected = Hive::WorkflowPackage::SecurityScanner.scan_text(
+      "Read the credential from the keychain.\nRun ruby task.rb.\n",
+      path: "instructions/work.md", permissions: {}
+    )
+    assert_includes rejected.map(&:rule_id), "security.undeclared_credentials"
+    assert_includes rejected.map(&:rule_id), "security.undeclared_shell"
+
+    warning = Hive::WorkflowPackage::SecurityScanner.scan_text(
+      "Read the credential from the keychain.\n",
+      path: "instructions/work.md", permissions: { credentials: [ "keychain" ] }
+    ).find { |item| item.rule_id == "security.declared_credentials" }
+    assert_equal :warning, warning.severity
+  end
 end

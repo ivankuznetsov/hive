@@ -9,6 +9,10 @@ require "hive/workflow_package/registry_client"
 class WorkflowLifecycleCommandsTest < Minitest::Test
   include HiveTestHelper
 
+  class TTYInput < StringIO
+    def tty? = true
+  end
+
   def test_install_list_and_remove_preserve_typed_provenance
     with_project_and_package do |project, package, resolution|
       client = stub_client(package, resolution)
@@ -82,6 +86,111 @@ class WorkflowLifecycleCommandsTest < Minitest::Test
       ).call!
       assert_equal [ resolution.source_commit ], payload.fetch("retained_commits")
       assert File.directory?(Hive::WorkflowPackage::ManagedStore.new(hive_state).generation_path("demo", resolution.source_commit))
+    end
+  end
+
+  def test_reinstall_is_a_typed_noop_and_interactive_decline_is_cancelled
+    with_project_and_package do |project, package, resolution|
+      client = stub_client(package, resolution)
+      command = lambda do |**options|
+        Hive::Commands::Workflow::Install.new(
+          "honeycomb/demo", project_root: project, stdout: StringIO.new,
+          registry_client: client, committer: ->(*) { }, **options
+        ).call!
+      end
+      cancelled = command.call(json: false, yes: false, stdin: TTYInput.new("no\n"))
+      assert_equal "cancelled", cancelled.fetch("status")
+
+      command.call(json: true, yes: true)
+      assert_equal "already_installed", command.call(json: true, yes: true).fetch("status")
+    end
+  end
+
+  def test_install_commit_failure_cleans_the_unselected_generation
+    with_project_and_package do |project, package, resolution|
+      command = Hive::Commands::Workflow::Install.new(
+        "honeycomb/demo", project_root: project, json: true, yes: true,
+        stdout: StringIO.new, registry_client: stub_client(package, resolution),
+        committer: ->(*) { raise Hive::GitError, "commit failed" }
+      )
+
+      assert_raises(Hive::GitError) { command.call! }
+      store = Hive::WorkflowPackage::ManagedStore.new(File.join(project, ".hive-state"))
+      assert_nil store.selected("demo")
+      refute File.exist?(store.generation_path("demo", resolution.source_commit))
+    end
+  end
+
+  def test_list_surfaces_authored_and_malformed_entries
+    with_project_and_package do |project, package, resolution|
+      workflows = File.join(project, ".hive-state", "workflows")
+      FileUtils.mkdir_p(workflows)
+      File.write(File.join(workflows, "authored.yml"), <<~YAML)
+        id: authored
+        stages:
+          - name: inbox
+            kind: terminal
+            state_file: idea.md
+          - name: done
+            kind: terminal
+            state_file: done.md
+      YAML
+      File.write(File.join(workflows, "broken.yml"), "not: [valid")
+      rows = Hive::Commands::Workflow::List.new(
+        project_root: project, json: true, stdout: StringIO.new
+      ).call!.fetch("workflows")
+      assert_equal "authored", rows.find { |row| row["name"] == "authored" }.fetch("origin")
+      assert_equal "malformed", rows.find { |row| row["name"] == "broken" }.fetch("integrity")
+
+      lock = File.join(workflows, "demo", Hive::WorkflowPackage::ManagedStore::LOCK_FILE)
+      FileUtils.mkdir_p(File.dirname(lock))
+      File.write(lock, "{not-json")
+      row = Hive::Commands::Workflow::List.new(
+        project_root: project, json: true, stdout: StringIO.new
+      ).call!.fetch("workflows").find { |entry| entry["name"] == "demo" }
+      assert_equal "malformed", row.fetch("integrity")
+    end
+  end
+
+  def test_remove_rejects_owned_and_missing_workflows_and_project_default
+    with_project_and_package do |project, package, resolution|
+      assert_raises(Hive::Commands::Workflow::OwnershipError) do
+        Hive::Commands::Workflow::Remove.new(
+          "coding", project_root: project, json: true, yes: true, stdout: StringIO.new
+        ).call!
+      end
+      assert_raises(Hive::Commands::Workflow::OwnershipError) do
+        Hive::Commands::Workflow::Remove.new(
+          "missing", project_root: project, json: true, yes: true, stdout: StringIO.new
+        ).call!
+      end
+
+      Hive::Commands::Workflow::Install.new(
+        "honeycomb/demo", project_root: project, json: true, yes: true,
+        stdout: StringIO.new, registry_client: stub_client(package, resolution), committer: ->(*) { }
+      ).call!
+      config = Hive::Config::DEFAULTS.merge("hive_state_path" => ".hive-state", "default_workflow" => "demo")
+      File.write(File.join(project, ".hive-state", "config.yml"), config.to_yaml)
+      assert_raises(Hive::Commands::Workflow::OwnershipError) do
+        Hive::Commands::Workflow::Remove.new(
+          "demo", project_root: project, json: true, yes: true, stdout: StringIO.new
+        ).call!
+      end
+    end
+  end
+
+  def test_remove_interactive_decline_is_a_noop
+    with_project_and_package do |project, package, resolution|
+      Hive::Commands::Workflow::Install.new(
+        "honeycomb/demo", project_root: project, json: true, yes: true,
+        stdout: StringIO.new, registry_client: stub_client(package, resolution), committer: ->(*) { }
+      ).call!
+      payload = Hive::Commands::Workflow::Remove.new(
+        "demo", project_root: project, json: false, yes: false,
+        stdin: TTYInput.new("no\n"), stdout: StringIO.new, committer: ->(*) { }
+      ).call!
+
+      assert_equal "cancelled", payload.fetch("status")
     end
   end
 

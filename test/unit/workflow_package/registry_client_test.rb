@@ -40,6 +40,92 @@ class WorkflowPackageRegistryClientTest < Minitest::Test
     end
   end
 
+  def test_rejects_noncanonical_invalid_and_malformed_catalogs
+    client = Hive::WorkflowPackage::RegistryClient.new
+    valid = { "schema_version" => 1, "registry" => "honeycomb", "workflows" => {} }
+    assert_raises(Hive::WorkflowPackage::RegistryError) do
+      client.send(:parse_catalog, JSON.generate(valid))
+    end
+    assert_raises(Hive::WorkflowPackage::RegistryError) do
+      client.send(:parse_catalog, Hive::WorkflowPackage::CanonicalJSON.generate(valid.merge("registry" => "other")))
+    end
+    assert_raises(Hive::WorkflowPackage::RegistryError) { client.send(:parse_catalog, "{not-json") }
+  end
+
+  def test_rejects_missing_and_malformed_catalog_entries
+    client = Hive::WorkflowPackage::RegistryClient.new
+    empty = { "workflows" => {} }
+    assert_raises(Hive::WorkflowPackage::RegistryError) do
+      client.send(:resolve_catalog, empty, "demo", nil, "b" * 40)
+    end
+    malformed = { "workflows" => { "demo" => [] } }
+    assert_raises(Hive::WorkflowPackage::RegistryError) do
+      client.send(:resolve_catalog, malformed, "demo", nil, "b" * 40)
+    end
+    missing_version = { "workflows" => { "demo" => { "latest" => "1.0.0", "versions" => {} } } }
+    assert_raises(Hive::WorkflowPackage::RegistryError) do
+      client.send(:resolve_catalog, missing_version, "demo", nil, "b" * 40)
+    end
+
+    assert_raises(Hive::WorkflowPackage::RegistryError) { client.send(:validate_version_entry!, {}) }
+    entry = {
+      "source_commit" => "a" * 40, "manifest_digest" => "bad",
+      "summary" => "Demo", "permissions" => permissions
+    }
+    assert_raises(Hive::WorkflowPackage::RegistryError) { client.send(:validate_version_entry!, entry) }
+    assert_raises(Hive::WorkflowPackage::RegistryError) do
+      client.send(:validate_version_entry!, entry.merge("manifest_digest" => "d" * 64, "permissions" => "bad"))
+    end
+  end
+
+  def test_fetch_fails_when_catalog_source_is_not_ancestral
+    with_registry do |repository, _source_commit, _catalog_commit|
+      client = Hive::WorkflowPackage::RegistryClient.new(repository: repository)
+      client.define_singleton_method(:git_success?) { |*| false }
+
+      with_tmp_dir do |destination|
+        assert_raises(Hive::WorkflowPackage::RegistryError) do
+          client.fetch("honeycomb/demo", destination: destination)
+        end
+      end
+    end
+  end
+
+  def test_materialization_rejects_incomplete_trees_and_link_records
+    with_tmp_dir do |package|
+      write_package(package)
+      manifest_bytes = File.binread(File.join(package, "manifest.json"))
+      client = Hive::WorkflowPackage::RegistryClient.new
+      client.define_singleton_method(:git!) do |*args, binary: false|
+        args.include?("ls-tree") ? "".b : manifest_bytes
+      end
+      resolution = Hive::WorkflowPackage::RegistryClient::Resolution.new(
+        name: "demo", version: "1.0.0", source_commit: "a" * 40, catalog_commit: "b" * 40,
+        manifest_digest: Hive::WorkflowPackage::Manifest.load(File.join(package, "manifest.json")).digest,
+        summary: "Demo", permissions: permissions
+      )
+      assert_raises(Hive::WorkflowPackage::RegistryError) do
+        client.send(:materialize, "checkout", resolution, File.join(package, "destination"))
+      end
+      record = "120000 blob #{'c' * 40}\tworkflows/demo/link\0"
+      assert_raises(Hive::WorkflowPackage::RegistryError) do
+        client.send(:parse_tree, record, "workflows/demo/")
+      end
+    end
+  end
+
+  def test_git_failures_are_bounded_and_typed
+    client = Hive::WorkflowPackage::RegistryClient.new
+    with_env("PATH" => "") do
+      assert_raises(Hive::WorkflowPackage::RegistryError) { client.send(:git!, "status") }
+      refute client.send(:git_success?, "status")
+    end
+
+    with_replaced_singleton_method(Timeout, :timeout, ->(_seconds, &) { raise Timeout::Error }) do
+      assert_raises(Hive::WorkflowPackage::RegistryError) { client.send(:git!, "status") }
+    end
+  end
+
   private
 
   def with_registry

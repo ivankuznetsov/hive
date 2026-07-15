@@ -14,7 +14,8 @@ module Hive
         end
 
         def call!
-          rows = built_in_rows + authored_rows + managed_rows + retained_rows
+          managed = managed_rows
+          rows = built_in_rows + authored_rows + managed + retained_rows(managed)
           rows.sort_by! { |row| [ row.fetch("name"), row.fetch("origin"), row["source_commit"].to_s ] }
           payload = {
             "schema" => SCHEMA,
@@ -62,10 +63,12 @@ module Hive
           end
         end
 
-        def retained_rows
-          active = managed_rows.filter_map { |entry| entry["source_commit"] }.to_h { |commit| [ commit, true ] }
+        def retained_rows(managed)
+          active = managed.filter_map do |entry|
+            [ entry["name"], entry["source_commit"] ] if entry["source_commit"]
+          end.to_h { |key| [ key, true ] }
           store.task_references.filter_map do |reference|
-            next if active[reference.fetch(:commit)]
+            next if active[[ reference.fetch(:name), reference.fetch(:commit) ]]
 
             result = store.verify_generation(reference.fetch(:name), reference.fetch(:commit), reference.fetch(:digest))
             row(reference.fetch(:name), "managed", selection: "retained",

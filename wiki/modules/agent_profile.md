@@ -4,7 +4,7 @@ type: module
 source: lib/hive/agent_profile.rb, lib/hive/agent_profiles.rb, lib/hive/agent_profiles/{claude,codex,pi,grok}.rb
 created: 2026-04-26
 updated: 2026-07-17
-tags: [agent, profile, registry, architecture]
+tags: [agent, profile, registry, architecture, permissions, honeycomb]
 ---
 
 **TLDR**: `Hive::AgentProfile` is a frozen value object describing one CLI's invocation contract (binary path, prompt delivery, permissions, normalized model/effort translation, concrete default-model discovery, root-confined workspace-write support, opt-in verified CLI capabilities, initial-context admission reserve, version requirement, status detection, usage extraction, and skill verification). `Hive::AgentProfiles` is the singleton registry — built-in profiles for `claude`, `codex`, `pi`, and `grok` auto-register on `require "hive/agent_profiles"`. Stages look up a profile by name (`AgentProfiles.lookup(:claude)`) and pass it to `Stages::Base.spawn_agent`. Replaces the previous claude-only singleton on `Hive::Agent`. References ADR-017 / ADR-018 / ADR-019.
@@ -39,6 +39,7 @@ Constructor kwargs (every profile freezes after init):
 | `model_argument_builder:` | Optional callable translating a normalized model to discrete native argv. |
 | `effort_argument_builder:` | Optional callable translating a normalized effort to discrete native argv; absence means unsupported. |
 | `launcher_identity:` | Stable profile/launcher version label stored in implementation identity events. |
+| `policy_capabilities:` | Optional symbols proving which managed-package controls the runner can enforce. Empty preserves custom-profile construction but makes managed admission fail closed. |
 
 ### Key methods
 
@@ -84,6 +85,14 @@ For implementation identity, Claude translates normalized values to `--model <mo
 - `Hive::RefactorPatrol::Fixer` — accepts only a profile with `workspace_write_supported?` and invokes it through the special `workspace-write` permission mode.
 - `Stages::Base.record_usage` — reads each profile's `usage_extractor` output and stores per-spawn rows in `Hive::UsageDB`.
 - `Hive::Config.validate_role_agent_names!` and `validate_reviewers!` — every `agent:` field in `review.{ci,triage,fix,browser_test}` and `review.reviewers[]` must resolve via `AgentProfiles.lookup`.
+- `Hive::WorkflowPackage::RuntimePolicy` — requires tools, directories,
+  commands, domains, settings isolation, MCP isolation, and environment
+  isolation for every managed actor. Claude declares the full set; other
+  shipped/custom profiles currently fail managed admission. The generated
+  `dontAsk` settings, strict empty MCP config, pre-tool hook, sanitized PATH,
+  child environment, and (for Bash) fail-if-unavailable OS sandbox with a
+  domain allowlist/no unsandboxed escape are shared by headless and tmux spawn
+  paths and are recompiled from task-pinned provenance before spawn.
 
 ## Tests
 
@@ -91,6 +100,8 @@ For implementation identity, Claude translates normalized values to `--model <mo
 - `test/unit/agent_profile_modes_test.rb` — `:state_file_marker` / `:exit_code_only` / `:output_file_exists` branching in `Hive::Agent#handle_exit`.
 - `test/unit/agent_profiles_test.rb` — registry register / lookup / unknown.
 - `test/unit/spawn_agent_test.rb` — preflight ordering, isolation-warning trigger, default-profile fallback.
+- `test/unit/workflow_package/runtime_policy_test.rb` — exact policy files,
+  deny/command/domain enforcement, and multi-actor admission failure.
 - `test/unit/pi_preflight_test.rb` — pi's auth.json preflight gate.
 - `test/unit/grok_preflight_test.rb` — Grok environment/file auth and usage semantics.
 

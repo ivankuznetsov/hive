@@ -3,11 +3,11 @@ title: hive workflow
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/workflow.rb, templates/workflows/
 created: 2026-06-21
-updated: 2026-07-13
-tags: [command, workflow, authoring]
+updated: 2026-07-15
+tags: [command, workflow, authoring, honeycomb, registry]
 ---
 
-**TLDR**: `hive workflow new ID` scaffolds a minimal project-authored workflow descriptor at `<hive_state_path>/workflows/ID.yml` plus a placeholder instruction at `<hive_state_path>/workflows/ID/work.md`. The generated `inbox -> work -> done` descriptor validates immediately and is discoverable by `hive new PROJECT --workflow ID`, status, run, approve, and daemon-driven dispatch.
+**TLDR**: `hive workflow` manages two ownership domains: `new` scaffolds trusted project-authored descriptors, while `install`, `list`, `update`, and `remove` manage immutable reviewed Honeycomb generations; `publish` validates an authored descriptor and opens a registry PR whose status is only `pending_review`.
 
 ## Usage
 
@@ -15,7 +15,44 @@ tags: [command, workflow, authoring]
 hive workflow new my-flow
 hive workflow new my-flow --template writing
 hive workflow new my-flow --json
+hive workflow install honeycomb/repo-brief --yes
+hive workflow list --json
+hive workflow update repo-brief --dry-run --json
+hive workflow update repo-brief --yes --allow-escalation
+hive workflow remove repo-brief --yes
+hive workflow publish my-flow --version 1.0.0
 ```
+
+## Honeycomb Lifecycle
+
+The official-source grammar is closed: `honeycomb/NAME`, a listed semantic
+version, or its listed full source SHA. Mutable refs, abbreviated/unlisted
+commits, arbitrary namespaces, and arbitrary repositories fail resolution.
+Install validates the pinned catalog and source ancestry, canonical manifest,
+complete payload inventory, static diagnostics, and every descriptor-selected
+runner before it places and atomically selects a generation.
+
+Managed storage is
+`workflows/NAME/versions/SOURCE_SHA/` plus
+`workflows/NAME/honeycomb.lock.json`. New tasks copy the selected source commit
+and manifest digest into `meta.yml`; update/remove retain any referenced
+generation. Loader fingerprints include managed locks and selected generations,
+while a pinned task loads its exact descriptor directly from the managed store.
+
+Consent is deliberately non-composable. JSON and non-TTY install/remove/update
+require `--yes`. An update that adds tools/directories/commands/domains,
+credentials, dependencies, removes deny rules, or changes an incomparable
+dependency additionally requires `--allow-escalation`. Dry-run validates and
+reports content, dependency, security, and file categories without a project
+write. Interactive refusal is a successful `cancelled` no-op; missing
+non-interactive consent is `consent_required`/USAGE.
+
+`list` emits orthogonal `origin`, `selection`, `integrity`, and
+`catalog_visibility` fields, including tampered/malformed and retained entries.
+Its offline visibility is `unknown_offline`. Publish copies only referenced
+instructions, README, and `honeycomb.yml`, generates the canonical manifest,
+runs preflight before GitHub calls, and uses a deterministic fork branch/body
+file. A returned PR remains `pending_review` and `listed: false`.
 
 For a fresh project that should default to the custom workflow immediately,
 prefer `hive init --new-workflow my-flow [PROJECT_PATH]`; it performs init,
@@ -33,6 +70,8 @@ writes:
 ```text
 <hive_state_path>/workflows/my-flow.yml
 <hive_state_path>/workflows/my-flow/work.md
+<hive_state_path>/workflows/my-flow/README.md
+<hive_state_path>/workflows/my-flow/honeycomb.yml
 ```
 
 It refuses to overwrite an existing descriptor, instruction directory, or
@@ -53,8 +92,7 @@ usage/config/git errors emit a `hive-workflow-new` (schema_version 1) JSON error
 document with `ok: false`, `error_class`, `exit_code`, and `message`.
 
 A bare or unknown workflow subcommand is a USAGE error (exit 64). Human output
-uses the command prefix: `hive workflow: missing SUBCOMMAND (expected: new)` or
-`hive workflow: unknown workflow subcommand "X" (expected: new)`. With
+lists the closed `new, install, list, update, remove, publish` verb set. With
 `--json`, those subcommand-shape errors carry a structured `expected` array
 such as `["new"]`; unknown subcommands also carry `value` with the rejected
 token.
@@ -71,6 +109,7 @@ stages:
     kind: agent
     state_file: work.md
     instruction: ./my-flow/work.md
+    permissions: read-only
   - name: done
     kind: terminal
     state_file: done.md
@@ -94,6 +133,11 @@ templates are the directories under `templates/workflows/` that carry a
 - `blank` (default) — `inbox -> work -> done`, one placeholder instruction.
 - `writing` — `inbox -> research -> draft -> edit -> done`.
 - `research` — `inbox -> gather -> synthesize -> report -> done`.
+- `architecture` — `inbox -> draft -> review(council) -> architecture`.
+
+Every scaffold also renders `README.md` and `honeycomb.yml` with explicit
+publish placeholders. Those assets do not alter local execution and the
+existing `hive-workflow-new` JSON response remains unchanged.
 
 A multi-stage template prints `edit: <id>/ (N stage instructions to fill in)`
 pointing at the directory of instructions to define (the single-stage blank

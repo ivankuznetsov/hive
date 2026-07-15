@@ -27,6 +27,33 @@ accidental over-reach, but it does not contain a determined or mis-prompted
 agent. For real isolation, run hive under a sandboxed user or container, such as
 hivebox.
 
+## Managed Honeycomb Policy
+
+Reviewed Honeycomb packages do not inherit the owner-authored default above.
+Their canonical manifest declares a normalized tool allowlist and deny list,
+task-relative directories, exact shell commands, network domains, credential
+needs, and justifications. Hive rejects blank/overlapping declarations,
+unsupported tools, unrestricted Bash, undeclared WebFetch domains, credential
+injection, path escapes, and any selected runner that cannot represent every
+required capability.
+
+For an admitted Claude package, Hive generates a private settings file, empty
+strict MCP config, `dontAsk` permission mode, sanitized environment/PATH, and a
+Hive-owned pre-tool hook. The hook rechecks Bash subcommands and WebFetch
+domains; repository-local executable shims and inherited user/project settings,
+hooks, plugins, MCP servers, or permission rules cannot expand the package.
+When Bash is declared, the generated settings also enable Claude's OS sandbox,
+fail when it is unavailable, disable unsandboxed-command escape, and pass the
+declared write directories and network domain allowlist. Headless and tmux
+launches consume the same compiled policy.
+
+Admission runs before installation/update/publish, then the policy is compiled
+again from the task-pinned manifest immediately before spawn. Codex, Pi, Grok,
+custom profiles without the full `policy_capabilities` set, and explicit
+managed actors selecting them fail closed. These controls reduce agent/tool
+capability but do not change the process's OS user or claim universal network
+isolation beyond controls the runner can enforce.
+
 ## Presets
 
 | Preset | Effect |

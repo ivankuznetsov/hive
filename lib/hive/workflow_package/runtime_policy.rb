@@ -90,8 +90,11 @@ module Hive
           "domains" => domains,
           "executables" => executables
         })
-        hook_command = Shellwords.join([ RbConfig.ruby, File.expand_path("../scripts/workflow_policy_hook.rb", __dir__), policy_path ])
-        write_json(settings_path, {
+        hook_file = File.expand_path("../scripts/workflow_policy_hook.rb", __dir__)
+        hook_command = Shellwords.join(
+          [ RbConfig.ruby, "-r#{hook_file}", "-e", "Hive::Scripts::WorkflowPolicyHook.run(ARGV.fetch(0))", policy_path ]
+        )
+        settings = {
           "permissions" => {
             "defaultMode" => "dontAsk",
             "allow" => tools,
@@ -101,7 +104,19 @@ module Hive
           "hooks" => {
             "PreToolUse" => [ { "hooks" => [ { "type" => "command", "command" => hook_command } ] } ]
           }
-        })
+        }
+        if tools.include?("Bash")
+          settings["sandbox"] = {
+            "enabled" => true,
+            "failIfUnavailable" => true,
+            "autoAllowBashIfSandboxed" => true,
+            "excludedCommands" => [],
+            "allowUnsandboxedCommands" => false,
+            "filesystem" => { "allowWrite" => directories },
+            "network" => { "allowedDomains" => domains, "deniedDomains" => [] }
+          }
+        end
+        write_json(settings_path, settings)
         write_json(mcp_path, {})
 
         Policy.new(
@@ -185,10 +200,15 @@ module Hive
             raise Hive::ConfigError, "managed directory declarations must be relative task paths"
           end
           resolved = File.expand_path(entry, @task_folder)
-          unless resolved == @task_folder || resolved.start_with?(@task_folder + File::SEPARATOR)
+          effective = begin
+            File.realpath(resolved)
+          rescue Errno::ENOENT, Errno::EACCES
+            resolved
+          end
+          unless effective == @task_folder || effective.start_with?(@task_folder + File::SEPARATOR)
             raise Hive::ConfigError, "managed directory declaration escapes the task folder"
           end
-          resolved
+          effective
         end.uniq
       end
 

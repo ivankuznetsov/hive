@@ -1,10 +1,10 @@
 ---
 title: Hive::Workflows
 type: module
-source: lib/hive/workflows.rb, lib/hive/workflow.rb, lib/hive/workflows/registry.rb, lib/hive/workflows/coding.rb, lib/hive/workflows/content.rb, lib/hive/workflows/bench.rb, lib/hive/workflows/descriptor_parser.rb, lib/hive/workflows/loader.rb, lib/hive/workflows/project.rb
+source: lib/hive/workflows.rb, lib/hive/workflow.rb, lib/hive/workflows/registry.rb, lib/hive/workflows/coding.rb, lib/hive/workflows/content.rb, lib/hive/workflows/bench.rb, lib/hive/workflows/descriptor_parser.rb, lib/hive/workflows/loader.rb, lib/hive/workflows/project.rb, lib/hive/workflow_package/
 created: 2026-04-26
 updated: 2026-07-17
-tags: [module, workflow, verbs, selection]
+tags: [module, workflow, verbs, selection, honeycomb, registry]
 ---
 
 **TLDR**: The coding, content, bench, and project-authored workflows are described as ordered `Hive::Workflow` value objects whose stages carry directory names, state files, incoming advance verbs, runner metadata, optional instruction files, optional permission specs, per-stage agent/model/effort overrides, council reviewer configs, and terminal deliverables. `Hive::Workflows::Registry.default` still returns the coding descriptor, and the legacy public constants (`Hive::Stages::DIRS`, `Hive::Task::STAGE_NAMES` / `STATE_FILES`, `Hive::Workflows::VERBS`) are derived from it at load time. `Hive::Task` resolves a per-task descriptor from `meta.yml workflow:` or project `default_workflow`, `Hive::WorkflowSelection` centralizes CLI validation and valid-name listing, `Hive::Workflows::Registry.all` exposes the live descriptor set for built-in, runtime/test, and active-project registrations, and `Hive::Stages::Resolver` consumes `kind: :agent` / `kind: :council` as fallbacks for non-coding stage names while coding's bespoke runners remain name-authoritative only for `:coding`. Coding's descriptor now uses runtime primitive kinds (`:execute`, `:review_council`, `:finalize`) for the worktree-coupled stages; the old `:marker` descriptor kind is retired.
@@ -84,6 +84,37 @@ The upgrade path was live-smoked on the existing hive-bench state checkout on
 still visible and the unrelated dirty-state fingerprint unchanged.
 
 `hive workflow new ID` (see [[commands/workflow]]) scaffolds the minimal `inbox -> work -> done` descriptor plus `work.md` instruction and commits those files to `hive/state`. `--template architecture` scaffolds a document-planning workflow with `inbox -> draft -> review(council) -> architecture(agent-terminal)`.
+
+## Managed Honeycomb overlay
+
+`Hive::WorkflowPackage` defines a second, stricter trust boundary without
+weakening owner-authored descriptor compatibility:
+
+- `Manifest`, `CanonicalJSON`, `Validator`, and `SecurityScanner` enforce
+  canonical metadata, full path/hash coverage, safe package filesystem shapes,
+  package-name descriptor binding, redacted diagnostics, and objective
+  warning/error rules.
+- `RegistryClient` accepts only official catalog-listed versions/full SHAs,
+  proves source ancestry from one catalog snapshot, and materializes listed git
+  blobs into temporary storage.
+- `ManagedStore` places immutable generations and selects one through an atomic
+  lock. `TransactionJournal` plus the workflow mutation lock reconcile an
+  interrupted activation/removal before Loader or lifecycle access.
+- `Loader` registers selected managed workflows beside built-ins and authored
+  descriptors while rejecting id collisions and reloading when its managed
+  fingerprint changes. Task-pinned generations bypass the single-id overlay and
+  validate/load directly from `ManagedStore` by id, source commit, and manifest
+  digest.
+- `SemanticDiff` reports prompt/descriptor changes by hash (never prompt text),
+  dependency and policy set changes, file inventory changes, and semantic
+  escalation reasons.
+- `Publisher` rewrites referenced authored instructions into the registry
+  layout, packages deterministically, runs the shared validator/runtime
+  admission, then delegates to a fork-aware PR client.
+
+Managed locks/generations are Hive-owned. Lifecycle commands cannot overwrite a
+built-in or `<id>.yml` authored descriptor, and task metadata rewrites preserve
+both managed provenance fields.
 
 ## Constants
 

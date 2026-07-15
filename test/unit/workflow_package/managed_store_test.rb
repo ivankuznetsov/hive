@@ -70,6 +70,74 @@ class WorkflowPackageManagedStoreTest < Minitest::Test
     end
   end
 
+  def test_activation_rechecks_the_selected_baseline
+    with_tmp_dir do |dir|
+      store = Hive::WorkflowPackage::ManagedStore.new(File.join(dir, ".hive-state"))
+      old = write_package(File.join(dir, "old"), "a" * 40)
+      candidate = write_package(File.join(dir, "candidate"), "c" * 40)
+      store.place_generation(File.join(dir, "old"), old)
+      store.place_generation(File.join(dir, "candidate"), candidate)
+      store.activate(old)
+      stale = store.selected("demo").merge("manifest_digest" => "0" * 64)
+
+      assert_raises(Hive::ConcurrentRunError) do
+        store.activate(candidate, expected_current: stale)
+      end
+    end
+  end
+
+  def test_malformed_locks_are_visible_directly_and_ignored_by_selection_enumeration
+    with_tmp_dir do |dir|
+      store = Hive::WorkflowPackage::ManagedStore.new(File.join(dir, ".hive-state"))
+      path = store.lock_path("demo")
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "{not-json")
+
+      assert_raises(Hive::ConfigError) { store.selected("demo") }
+      assert_empty store.selections
+
+      malformed = { "schema_version" => 1, "name" => "demo" }
+      File.write(path, JSON.generate(malformed))
+      assert_raises(Hive::ConfigError) { store.selected("demo") }
+
+      valid_shape = {
+        "schema_version" => 1, "name" => "demo", "version" => "1.0.0",
+        "catalog_commit" => "b" * 40, "source_commit" => "a" * 40,
+        "manifest_digest" => "bad", "summary" => "Demo", "permissions" => {}
+      }
+      File.write(path, JSON.generate(valid_shape))
+      assert_raises(Hive::ConfigError) { store.selected("demo") }
+    end
+  end
+
+  def test_store_reconciles_a_pending_pointer_journal
+    with_tmp_dir do |dir|
+      store = Hive::WorkflowPackage::ManagedStore.new(File.join(dir, ".hive-state"))
+      lock = store.lock_path("demo")
+      FileUtils.mkdir_p(File.dirname(lock))
+      File.write(lock, "{\"new\":true}\n")
+      Hive::WorkflowPackage::TransactionJournal.new(store.workflows_dir).write(
+        "schema_version" => 1, "phase" => "pointer_written", "lock_path" => lock,
+        "old_lock" => "{\"old\":true}\n", "new_lock" => "{\"new\":true}\n"
+      )
+
+      assert store.reconcile!
+      assert_equal "{\"old\":true}\n", File.read(lock)
+    end
+  end
+
+  def test_store_rejects_invalid_names_commits_and_resolution_provenance
+    with_tmp_dir do |dir|
+      store = Hive::WorkflowPackage::ManagedStore.new(File.join(dir, ".hive-state"))
+      assert_raises(Hive::ConfigError) { store.lock_path("Bad Name") }
+      assert_raises(Hive::ConfigError) { store.generation_path("demo", "short") }
+
+      package = File.join(dir, "package")
+      resolution = write_package(package, "a" * 40).with(catalog_commit: "short")
+      assert_raises(Hive::ConfigError) { store.place_generation(package, resolution) }
+    end
+  end
+
   private
 
   def write_package(root, commit)

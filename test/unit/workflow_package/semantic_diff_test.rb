@@ -37,6 +37,22 @@ class WorkflowPackageSemanticDiffTest < Minitest::Test
     assert_equal [ "instructions/work.md" ], result.content.dig("instructions", "modified")
   end
 
+  def test_justification_and_scalar_dependency_changes_are_reported_as_escalation
+    old_manifest = manifest(
+      "permissions" => policy("shell_justification" => "old"),
+      "dependencies" => { "hive" => ">= 0.4.2" }
+    )
+    new_manifest = manifest(
+      "permissions" => policy("shell_justification" => "new"),
+      "dependencies" => { "hive" => ">= 0.5.0" }
+    )
+
+    result = Hive::WorkflowPackage::SemanticDiff.compare(old_manifest, new_manifest)
+    assert_equal({ "from" => "old", "to" => "new" }, result.security.fetch("shell_justification"))
+    assert_equal({ "from" => ">= 0.4.2", "to" => ">= 0.5.0" }, result.dependencies.fetch("hive"))
+    assert_includes result.escalation_reasons, "dependencies.hive.changed"
+  end
+
   private
 
   def manifest(overrides = {})

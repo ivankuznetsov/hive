@@ -3,11 +3,11 @@ title: Hive::Workflows
 type: module
 source: lib/hive/workflows.rb, lib/hive/workflow.rb, lib/hive/workflows/registry.rb, lib/hive/workflows/coding.rb, lib/hive/workflows/content.rb, lib/hive/workflows/bench.rb, lib/hive/workflows/descriptor_parser.rb, lib/hive/workflows/loader.rb, lib/hive/workflows/project.rb
 created: 2026-04-26
-updated: 2026-07-13
-tags: [module, workflow, verbs, selection]
+updated: 2026-07-15
+tags: [module, workflow, verbs, selection, honeycomb]
 ---
 
-**TLDR**: The coding, content, bench, and project-authored workflows are described as ordered `Hive::Workflow` value objects whose stages carry directory names, state files, incoming advance verbs, runner metadata, optional instruction files, optional permission specs, per-stage agent/model/effort overrides, council reviewer configs, and terminal deliverables. `Hive::Workflows::Registry.default` still returns the coding descriptor, and the legacy public constants (`Hive::Stages::DIRS`, `Hive::Task::STAGE_NAMES` / `STATE_FILES`, `Hive::Workflows::VERBS`) are derived from it at load time. `Hive::Task` resolves a per-task descriptor from `meta.yml workflow:` or project `default_workflow`, `Hive::WorkflowSelection` centralizes CLI validation and valid-name listing, `Hive::Workflows::Registry.all` exposes the live descriptor set for built-in, runtime/test, and active-project registrations, and `Hive::Stages::Resolver` consumes `kind: :agent` / `kind: :council` as fallbacks for non-coding stage names while coding's bespoke runners remain name-authoritative only for `:coding`. Coding's descriptor now uses runtime primitive kinds (`:execute`, `:review_council`, `:finalize`) for the worktree-coupled stages; the old `:marker` descriptor kind is retired.
+**TLDR**: The coding, content, bench, project-authored, and managed honeycomb workflows are described as ordered `Hive::Workflow` values. Authored descriptors remain root `<id>.yml` files; verified honeycombs preserve their package-native `<id>/workflow.yml` form and join the same runtime overlay without shadowing built-ins or authored duplicates. The descriptor carries stage directories/state, runner metadata, instructions, permissions, resource/profile overrides, council configuration, and terminal deliverables, while selection and generic dispatch continue through the existing project registry.
 
 ## Descriptor and registry
 
@@ -31,9 +31,15 @@ tags: [module, workflow, verbs, selection]
 
 ## Project-authored descriptors
 
-Per-project descriptors live under `<hive_state_path>/workflows/*.yml`, defaulting to `.hive-state/workflows/*.yml`. `Hive::Workflows::DescriptorParser` validates YAML into `Hive::Workflow` objects:
+Per-project authored descriptors live under `<hive_state_path>/workflows/*.yml`,
+while managed honeycombs live under
+`<hive_state_path>/workflows/*/workflow.yml`. `Hive::Workflows::Loader` discovers
+both forms. `Hive::Workflows::DescriptorParser` validates YAML into
+`Hive::Workflow` objects:
 
-- `id` is required, must match the filename stem, and must match `/\A[a-z0-9][a-z0-9-]*\z/`.
+- `id` is required and must match `/\A[a-z0-9][a-z0-9-]*\z/`. Authored files
+  match their filename stem; canonical managed `workflow.yml` files match the
+  enclosing package directory supplied as the expected ID.
 - user-facing `kind: agent` maps to `:agent`; `kind: terminal` maps to `:inert`; `kind: council` maps to the generic document council runner.
 - stage indexes are derived from array order; non-entry stages default their incoming `advance_verb` to the stage name.
 - every user-authored agent stage declares exactly one of `skill:` or `instruction:`.
@@ -43,9 +49,20 @@ Per-project descriptors live under `<hive_state_path>/workflows/*.yml`, defaulti
 - `permissions:` values are validated through `Hive::PermissionScope` at load time and later passed to the generic agent runner as the explicit permission spec.
 - the last stage may be inert, agent, or council. Active terminal stages require both `COMPLETE` and a non-empty deliverable before `TaskAction` classifies them as archived.
 
-`Hive::Workflows::Loader` discovers project descriptors, and `Hive::Workflows::Project.load!(project_root)` is the idempotent boundary call. It swaps the active project overlay in `Hive::Workflows::Registry`, rejects collisions with built-in/runtime ids, and resets the memoized cross-workflow stage unions (`all_stage_dirs`, `all_stage_names`, `all_terminal_stage_dirs`). `Task`, `WorkflowSelection`, `init`, `new`, `status`, `drop`, and stage-filtered resolver paths call it before resolving workflow ids or stage refs.
+`Hive::Workflows::Loader` isolates malformed authored or managed siblings and
+rejects duplicate IDs. `Hive::Workflows::Project.load!(project_root)` remains the
+idempotent boundary call: it swaps the active project overlay in
+`Hive::Workflows::Registry`, rejects collisions with built-in/runtime IDs, and
+resets memoized cross-workflow stage unions. Successful honeycomb transactions
+reset that overlay so a newly installed/updated/removed nested descriptor is
+visible on the next selection.
 
 `hive workflow new ID` (see [[commands/workflow]]) scaffolds the minimal `inbox -> work -> done` descriptor plus `work.md` instruction and commits those files to `hive/state`. `--template architecture` scaffolds a document-planning workflow with `inbox -> draft -> review(council) -> architecture(agent-terminal)`.
+
+`hive workflow install|list|update|remove` is documented in
+[[commands/workflow]] and implemented by [[modules/honeycomb]]. It preserves the
+authored descriptor path and semantics rather than projecting a package into an
+undeclared root YAML file.
 
 ## Constants
 

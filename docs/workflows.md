@@ -14,6 +14,55 @@ workflow descriptors are discovered at runtime by `hive new`, `hive init`,
 `hive status`, `hive run`, `hive approve`, and the daemon path that uses those
 commands.
 
+Published honeycombs are a second, explicitly managed form:
+
+```
+.hive-state/workflows/<id>/workflow.yml
+.hive-state/workflows/<id>/<package files>
+.hive-state/workflows/.honeycomb.lock
+```
+
+The nested descriptor keeps publisher-relative instruction paths intact and is
+distinguished from the project-authored root `<id>.yml` form. Both forms load
+through the same descriptor parser; built-in IDs remain reserved.
+
+## Install A Published Honeycomb
+
+```bash
+hive workflow install honeycomb/<name>
+hive workflow install honeycomb/<name>@1.2.3
+hive workflow list
+hive workflow update <name>
+hive workflow remove <name>
+```
+
+V1 has one source: `github.com/ivankuznetsov/honeycomb`. The unselected form
+uses the catalog's latest immutable release. A selector can be an exact SemVer,
+a full or unambiguous catalog Git SHA, or a complete recorded package digest.
+Mutable aliases and partial versions are rejected.
+
+Before writing the project, Hive fetches the immutable Git commit, accepts only
+regular blobs below `workflows/<id>/`, validates `manifest.yml` as an exact
+SHA-256 inventory, checks the package digest, parses `workflow.yml`, and derives
+its security preview. The manifest itself is not installed. Managed source,
+selector intent, immutable SHA/digest, file hashes/modes, and the security
+report are recorded in `.honeycomb.lock` for offline ownership checks.
+
+`hive workflow list` reads only local state and an existing catalog snapshot;
+it never refreshes the network. Use `--remote` to inspect a freshly fetched
+catalog or `--outdated` to refresh and select eligible updates. SHA- and
+digest-selected installs are pinned until an explicit selector repins them.
+Updates show semantic permission changes, permission escalation, complete
+instruction diffs, and descriptor/asset summaries. All selected `--all`
+updates are approved and committed as one transaction.
+
+Install, update, and remove prompt by default. Non-TTY callers must pass
+`--yes`; missing approval changes neither package files, the lock, nor
+`hive/state`. `--force` is only an ownership override for dirty/unmanaged
+collisions. It does not approve the preview. A missing or invalid lock permits
+only forced best-effort cleanup of a canonical managed root and remains a
+non-zero partial result.
+
 ## Run The Built-In Benchmark Workflow
 
 The `bench` workflow drives a reproducible hive-bench campaign through
@@ -171,8 +220,11 @@ hive workflow new architecture --template architecture
 
 ## Trust Boundary
 
-Project workflow descriptors are trusted project-owner configuration. An
-`instruction:` file is injected into the agent prompt as the stage instruction,
-not treated as untrusted task data. Permission scopes are tool-level controls,
-not an OS sandbox; run Hive in a sandboxed user/container when isolation from a
+Project workflow descriptors and installed honeycomb descriptors are executable
+workflow configuration. An `instruction:` file is injected into the agent
+prompt as the stage instruction, not treated as untrusted task data. Honeycomb
+installation previews derived permissions, shell-capable stages, shell-shaped
+instruction excerpts, and stable high-risk categories; that scanner is an
+approval aid, not a shell parser or sandbox. Permission scopes remain tool-level
+controls, so run Hive in a sandboxed user/container when isolation from a
 descriptor author matters.

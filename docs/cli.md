@@ -61,9 +61,41 @@ The JSON envelope is `hive-patrol.v1` and includes mapped-feature, finding, fix,
 | `hive rebase-status TARGET` | Inspect whether the next run would auto-rebase. |
 | `hive migrate [PROJECT_PATH]` | Rename in-flight task folders from older stage layouts and backfill legacy task metadata. |
 | `hive workflow new ID` | Scaffold a blank project workflow descriptor under `<hive_state_path>/workflows/`. |
+| `hive workflow install honeycomb/NAME[@SELECTOR]` | Preview and install an immutable workflow package from the public honeycomb registry. |
+| `hive workflow list [--remote\|--outdated]` | List managed packages locally, or explicitly refresh the public catalog. |
+| `hive workflow update NAME[@SELECTOR]\|--all` | Preview package, permission, and instruction changes before one transaction. |
+| `hive workflow remove NAME` | Remove a managed package after ownership and integrity checks. |
 | `hive tree` | Print the Thor command tree. |
 
 Use these when building scripts, recovering a task, or checking idempotency.
+
+### Honeycomb package management
+
+Honeycomb references use `honeycomb/<name>`, optionally followed by an exact
+SemVer, full/unique catalog SHA, or complete package digest. Hive resolves the
+selection through the single public `github.com/ivankuznetsov/honeycomb`
+registry and records the immutable commit, digest, selector intent, inventory,
+and derived security report in `.hive-state/workflows/.honeycomb.lock`.
+
+```bash
+hive workflow install honeycomb/release-notes
+hive workflow install honeycomb/release-notes@1.2.0 --yes
+hive workflow list
+hive workflow list --remote
+hive workflow list --outdated
+hive workflow update release-notes
+hive workflow update --all --yes
+hive workflow remove release-notes
+```
+
+Plain `list` is network-free and reports update availability as `unknown` when
+there is no cached catalog. `--remote` and `--outdated` explicitly refresh the
+catalog and are mutually exclusive. Mutating commands show their complete
+preview before confirmation. In non-interactive use they require `--yes`;
+`--force` permits a dirty managed install or an unmanaged local collision but
+never supplies approval. SHA/digest-origin installs remain pinned during an
+untargeted update. Update previews identify permission escalation and include
+the full unified diff of every changed instruction file.
 
 ## Daemon
 
@@ -100,7 +132,7 @@ Read [wiki/operating.md](../wiki/operating.md) before running it live.
 
 ## JSON Output
 
-Workflow verbs (`brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, `archive`, `run`, `approve`), findings triage (`findings`, `accept-finding`, `reject-finding`), patrol (`patrol`), diagnostics (`status`, `doctor`, `rebase-status`, `markers clear`, `metrics rollback-rate`), registry cleanup (`forget`, `prune`), workflow authoring (`workflow new`), `init`, and daemon control support `--json` where documented and emit typed envelopes. `hive init --json` emits a single `hive-init.v1` success payload with resolved answers and project metadata; its precondition failures keep the legacy stderr + exit-code contract. Workflow verbs emit a `hive-stage-action` envelope; `hive workflow new --json` emits an unversioned success/error document. Schema files live under [schemas/](../schemas/), and [wiki/cli.md](../wiki/cli.md) lists the contract details. `hive tui` rejects `--json`; legacy or one-shot utilities (`version`, `tree`, `new`, `migrate`) are still text-only.
+Workflow verbs (`brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, `archive`, `run`, `approve`), findings triage (`findings`, `accept-finding`, `reject-finding`), patrol (`patrol`), diagnostics (`status`, `doctor`, `rebase-status`, `markers clear`, `metrics rollback-rate`), registry cleanup (`forget`, `prune`), workflow authoring/package management (`workflow new|install|list|update|remove`), `init`, and daemon control support `--json` where documented and emit typed envelopes. Honeycomb operations emit the versioned `hive-workflow-{install,list,update,remove}.v1` contracts. `hive init --json` emits a single `hive-init.v1` success payload with resolved answers and project metadata; its precondition failures keep the legacy stderr + exit-code contract. Workflow verbs emit a `hive-stage-action` envelope; `hive workflow new --json` emits an unversioned success/error document. Schema files live under [schemas/](../schemas/), and [wiki/cli.md](../wiki/cli.md) lists the contract details. `hive tui` rejects `--json`; legacy or one-shot utilities (`version`, `tree`, `new`, `migrate`) are still text-only.
 
 ## Exit Codes
 

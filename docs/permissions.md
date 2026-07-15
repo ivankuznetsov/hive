@@ -89,6 +89,16 @@ stage in `.hive-state/workflows/<id>.yml`. That descriptor value is validated
 with the same rules and overrides the config-keyed stage lookup for that
 descriptor stage.
 
+Published honeycombs use the same descriptor permission syntax in
+`.hive-state/workflows/<id>/workflow.yml`. During install Hive derives the
+effective preset/tool/directory/Bash exposure from the descriptor and refuses a
+manifest summary that understates it. The preview also identifies shell-capable
+stages, shell-shaped instruction content, and high-risk command categories.
+During update, added or broadened exposure is labeled `PERMISSION ESCALATION`
+and is never suppressed by `--force`, `--all`, or non-interactive mode. These
+reports support an informed approval; they do not change the runtime caveat
+above or make instruction content safe to execute outside a sandbox.
+
 Review substages use their dotted stage names in config:
 
 ```yaml

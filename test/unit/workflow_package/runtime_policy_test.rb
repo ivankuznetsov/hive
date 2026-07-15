@@ -85,6 +85,24 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
     end
   end
 
+  def test_admission_rejects_an_explicit_actor_whose_runner_cannot_enforce_policy
+    workflow = Hive::Workflow.new(
+      id: :demo,
+      stages: [
+        Hive::Workflow::Stage.new(name: "work", index: 1, state_file: "work.md", kind: :agent, agent: :codex)
+      ]
+    )
+    with_tmp_dir do |dir|
+      task = File.join(dir, "task")
+      FileUtils.mkdir_p(task)
+      assert_raises(Hive::ConfigError) do
+        Hive::WorkflowPackage::RuntimePolicy.admit_workflow!(
+          workflow, permissions, task_folder: task, policy_dir: File.join(dir, "policy")
+        )
+      end
+    end
+  end
+
   private
 
   def permissions

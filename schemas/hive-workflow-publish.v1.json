@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-workflow-publish.v1.json",
+  "title": "hive workflow publish output v1",
+  "type": "object",
+  "required": ["schema", "schema_version", "ok"],
+  "properties": {
+    "schema": {"const": "hive-workflow-publish"},
+    "schema_version": {"const": 1},
+    "ok": {"type": "boolean"},
+    "status": {"const": "pending_review"},
+    "name": {"type": "string"},
+    "version": {"type": "string"},
+    "manifest_digest": {"type": "string"},
+    "warnings": {"type": "array", "items": {"type": "object"}},
+    "pr_url": {"type": "string"},
+    "listed": {"const": false},
+    "error_class": {"type": "string"},
+    "error_kind": {"type": "string"},
+    "exit_code": {"type": "integer"},
+    "message": {"type": "string"}
+  }
+}

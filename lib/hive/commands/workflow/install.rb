@@ -3,6 +3,7 @@ require "hive/agent_profiles"
 require "hive/commands/workflow/base"
 require "hive/workflow_package/registry_client"
 require "hive/workflow_package/runtime_policy"
+require "hive/workflow_package/validator"
 require "hive/workflows/project"
 
 module Hive
@@ -56,10 +57,13 @@ module Hive
           Dir.mktmpdir("hive-workflow-admission-") do |admission_root|
             task_folder = File.join(admission_root, "task")
             FileUtils.mkdir_p(task_folder)
-            Hive::WorkflowPackage::RuntimePolicy.compile(
-              resolution.permissions,
+            validated = Hive::WorkflowPackage::Validator.validate!(
+              package_root, expected_name: resolution.name,
+              expected_manifest_digest: resolution.manifest_digest
+            )
+            Hive::WorkflowPackage::RuntimePolicy.admit_workflow!(
+              validated.workflow, resolution.permissions,
               task_folder: task_folder,
-              profile: Hive::AgentProfiles.lookup(:claude),
               policy_dir: File.join(admission_root, "policy")
             )
           end

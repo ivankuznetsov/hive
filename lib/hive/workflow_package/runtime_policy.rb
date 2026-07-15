@@ -3,6 +3,7 @@ require "json"
 require "rbconfig"
 require "shellwords"
 require "hive/atomic_file"
+require "hive/agent_profiles"
 require "hive/workflow_package/canonical_json"
 
 module Hive
@@ -27,6 +28,31 @@ module Hive
 
       def self.compile(permissions, task_folder:, profile:, policy_dir:)
         new(permissions, task_folder: task_folder, profile: profile, policy_dir: policy_dir).compile
+      end
+
+      # Admission mirrors every descriptor-selected runner, not just the
+      # default stage profile. This catches a council reviewer or revise actor
+      # that selects a runner unable to enforce the package policy before the
+      # generation is activated (and the same compile runs again at spawn).
+      def self.admit_workflow!(workflow, permissions, task_folder:, policy_dir:)
+        actor_names = workflow.stages.flat_map do |stage|
+          next [] unless [ :agent, :council ].include?(stage.kind)
+
+          names = [ stage.agent || :claude ]
+          if stage.kind == :council
+            names.concat(stage.reviewers.map { |reviewer| reviewer.agent || :claude })
+            names << (stage.council.revise.agent || :claude) if stage.council&.revise
+          end
+          names
+        end
+        actor_names.map(&:to_sym).uniq.each_with_index do |name, index|
+          compile(
+            permissions, task_folder: task_folder,
+            profile: Hive::AgentProfiles.lookup(name),
+            policy_dir: File.join(policy_dir, "actor-#{index}-#{name}")
+          )
+        end
+        true
       end
 
       def initialize(permissions, task_folder:, profile:, policy_dir:)

@@ -46,7 +46,9 @@ module Hive
         end
 
         commands = Array(fetch_permission(permissions, "commands"))
-        if SHELL_RE.match?(text) && commands.empty?
+        # honeycomb.yml is the declaration document itself: a deny entry such
+        # as `- Bash` is policy data, not an instruction to run a shell.
+        if SHELL_RE.match?(text) && commands.empty? && File.basename(path) != "honeycomb.yml"
           findings << behavior_diagnostic("security.undeclared_shell", text, path, SHELL_RE, :error,
                                           "shell behavior must be declared with exact commands")
         end

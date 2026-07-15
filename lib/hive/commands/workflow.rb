@@ -234,8 +234,19 @@ module Hive
         template_instruction_files(template_dir).each do |file|
           File.write(File.join(paths.fetch(:instruction_dir), file), File.read(File.join(template_dir, file)))
         end
+        write_optional_template_asset(id, template_dir, "README.md.erb", File.join(paths.fetch(:instruction_dir), "README.md"))
+        write_optional_template_asset(id, template_dir, "honeycomb.yml.erb", File.join(paths.fetch(:instruction_dir), "honeycomb.yml"))
       end
       private_class_method :write_scaffold!
+
+      def self.write_optional_template_asset(id, template_dir, template_name, destination)
+        source = File.join(template_dir, template_name)
+        return unless File.file?(source)
+
+        rendered = ERB.new(File.read(source), trim_mode: "-").result_with_hash(id: id)
+        File.write(destination, rendered)
+      end
+      private_class_method :write_optional_template_asset
 
       def self.render_descriptor(id, template_dir)
         template = File.read(File.join(template_dir, "descriptor.yml.erb"))

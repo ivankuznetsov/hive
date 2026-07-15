@@ -31,4 +31,14 @@ class WorkflowPackageSecurityScannerTest < Minitest::Test
     refute_includes diagnostic.to_s, secret
     refute_includes diagnostic.to_h.values.compact.join, secret
   end
+
+  def test_manifest_policy_tool_names_are_not_mistaken_for_shell_instructions
+    findings = Hive::WorkflowPackage::SecurityScanner.scan_text(
+      "permissions:\n  deny:\n    - Bash\n",
+      path: "honeycomb.yml",
+      permissions: { "commands" => [] }
+    )
+
+    refute findings.any? { |finding| finding.rule_id == "security.undeclared_shell" }
+  end
 end

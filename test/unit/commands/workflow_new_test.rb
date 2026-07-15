@@ -38,6 +38,9 @@ class WorkflowNewTest < Minitest::Test
 
       assert File.file?(descriptor_path)
       assert_equal "Edit this file to define what the `work` stage should do.\n", File.read(instruction_path)
+      assert File.file?(File.join(File.dirname(instruction_path), "README.md"))
+      assert File.file?(File.join(File.dirname(instruction_path), "honeycomb.yml"))
+      assert_includes File.read(File.join(File.dirname(instruction_path), "README.md")), "# my-flow"
 
       workflow = Hive::Workflows::DescriptorParser.parse_file(descriptor_path)
       assert_equal :"my-flow", workflow.id

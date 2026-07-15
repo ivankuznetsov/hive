@@ -4,6 +4,7 @@ require "hive/commands/workflow/base"
 require "hive/workflow_package/registry_client"
 require "hive/workflow_package/runtime_policy"
 require "hive/workflow_package/semantic_diff"
+require "hive/workflow_package/validator"
 require "hive/workflows/project"
 
 module Hive
@@ -33,7 +34,7 @@ module Hive
             old_manifest = store.manifest(@name, current.fetch("source_commit"), current.fetch("manifest_digest"))
             new_manifest = Hive::WorkflowPackage::Manifest.load(File.join(candidate_root, "manifest.json"))
             diff = Hive::WorkflowPackage::SemanticDiff.compare(old_manifest, new_manifest)
-            admit_runtime!(candidate)
+            admit_runtime!(candidate, candidate_root)
             report = payload("dry_run", current, candidate, diff)
             return emit(report, human_lines: human_diff(report)) if @dry_run
 
@@ -79,13 +80,16 @@ module Hive
           %w[y yes].include?(@stdin.gets.to_s.strip.downcase)
         end
 
-        def admit_runtime!(candidate)
+        def admit_runtime!(candidate, candidate_root)
           Dir.mktmpdir("hive-workflow-update-admission-") do |dir|
             task = File.join(dir, "task")
             FileUtils.mkdir_p(task)
-            Hive::WorkflowPackage::RuntimePolicy.compile(
-              candidate.permissions, task_folder: task,
-              profile: Hive::AgentProfiles.lookup(:claude),
+            validated = Hive::WorkflowPackage::Validator.validate!(
+              candidate_root, expected_name: candidate.name,
+              expected_manifest_digest: candidate.manifest_digest
+            )
+            Hive::WorkflowPackage::RuntimePolicy.admit_workflow!(
+              validated.workflow, candidate.permissions, task_folder: task,
               policy_dir: File.join(dir, "policy")
             )
           end

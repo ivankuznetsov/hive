@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-workflow-list.v1.json",
+  "title": "hive workflow list output v1",
+  "type": "object",
+  "required": ["schema", "schema_version", "ok"],
+  "properties": {
+    "schema": {"const": "hive-workflow-list"},
+    "schema_version": {"const": 1},
+    "ok": {"type": "boolean"},
+    "workflows": {"type": "array", "items": {"type": "object"}},
+    "error_class": {"type": "string"},
+    "error_kind": {"type": "string"},
+    "exit_code": {"type": "integer"},
+    "message": {"type": "string"}
+  }
+}

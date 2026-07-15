@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-workflow-install.v1.json",
+  "title": "hive workflow install output v1",
+  "type": "object",
+  "required": ["schema", "schema_version", "ok"],
+  "properties": {
+    "schema": {"const": "hive-workflow-install"},
+    "schema_version": {"const": 1},
+    "ok": {"type": "boolean"},
+    "status": {"enum": ["installed", "already_installed", "cancelled"]},
+    "name": {"type": "string"},
+    "version": {"type": "string"},
+    "catalog_commit": {"type": "string"},
+    "source_commit": {"type": "string"},
+    "manifest_digest": {"type": "string"},
+    "permissions": {"type": "object"},
+    "error_class": {"type": "string"},
+    "error_kind": {"type": "string"},
+    "exit_code": {"type": "integer"},
+    "message": {"type": "string"}
+  }
+}

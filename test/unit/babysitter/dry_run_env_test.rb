@@ -2084,6 +2084,25 @@ class BabysitterDryRunEnvTest < Minitest::Test
     Hive::Babysitter::DryRunEnv.which("git") || raise("git binary not found on PATH")
   end
 
+  def assert_worktree_diff_filter_is_skipped(config_key, after_touch: "")
+    with_tmp_git_repo do |dir|
+      filter_kind = config_key.split(".").last
+      marker_path = File.join(dir, "#{filter_kind}-filter-ran")
+      filter = executable_touch_binary(dir, "#{filter_kind}-filter", marker_path, after_touch)
+      File.write(File.join(dir, ".gitattributes"), "README.md filter=hivepwn\n")
+      run!("git", "-C", dir, "add", ".gitattributes")
+      run!("git", "-C", dir, "commit", "-m", "add filter attributes", "--quiet")
+      run!("git", "-C", dir, "config", config_key, filter)
+      File.write(File.join(dir, "README.md"), "changed\n")
+
+      _out, err, status = Open3.capture3(real_git_env(dir), stub_path("git"), "-C", dir, "diff")
+
+      refute_path_exists marker_path, "#{filter_kind} filter executed during dry-run diff"
+      assert status.success?, err
+      assert_includes err, "[dry-run] git -C #{dir} diff skipped"
+    end
+  end
+
   def with_tmp_remerge_driver_repo(log_diff_merges: nil)
     with_tmp_dir do |dir|
       marker_path = File.join(dir, "merge-driver-ran")

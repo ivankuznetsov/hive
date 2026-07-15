@@ -143,7 +143,7 @@ rescue OptionParser::ParseError, ArgumentError => e
   captured_report = default_report if option_value_missing?(captured_report)
   [ expanded_report_path(root, captured_report),
     selected_report_path(root, argv_snapshot, default_report) ].compact.each do |path|
-    FileUtils.rm_f(path) if path == default_report
+    remove_report!(path) if path == default_report
   end
   warn "hive-eval: #{e.message}"
   warn parser
@@ -155,7 +155,7 @@ report_path = expanded_report_path(root, options.fetch(:report))
 unless remaining.empty?
   unexpected = remaining.join(" ")
   label = remaining.length == 1 ? "argument" : "arguments"
-  FileUtils.rm_f(report_path) if report_path == default_report
+  remove_report!(report_path) if report_path == default_report
   warn "hive-eval: unexpected #{label}: #{unexpected}"
   warn parser
   exit 64
@@ -236,14 +236,14 @@ env = {
 begin
   path = scenario_path(scenario_root, options[:scenario])
 rescue ArgumentError => e
-  FileUtils.rm_f(report_path) if report_path == default_report
+  remove_report!(report_path) if report_path == default_report
   warn "hive-eval: #{e.message}"
   exit 64
 end
 
 if path
   unless File.exist?(path)
-    FileUtils.rm_f(report_path) if report_path == default_report
+    remove_report!(report_path) if report_path == default_report
     warn "hive-eval: scenario not found: #{path}"
     exit 64
   end
@@ -263,7 +263,7 @@ rescue ArgumentError, SystemCallError => e
   warn "hive-eval: #{e.message}"
   exit 1
 end
-FileUtils.rm_f(report_path)
+remove_report!(report_path)
 run_dir = Dir.mktmpdir(".hive-eval-run-", report_dir)
 run_report_path = File.join(run_dir, "report.json")
 env["HIVE_EVAL_REPORT"] = run_report_path

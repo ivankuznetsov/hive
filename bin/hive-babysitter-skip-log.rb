@@ -26,22 +26,18 @@ def append_skip_log(path)
   raise IOError, "File::NOFOLLOW unavailable" unless File.const_defined?(:NOFOLLOW)
   raise IOError, "File::NONBLOCK unavailable" unless File.const_defined?(:NONBLOCK)
 
-  begin
-    stat = File.lstat(path)
-    raise IOError, "dry-run skip log is not a regular file" unless stat.file?
-    raise IOError, "dry-run skip log is not owned by uid #{Process.uid}" unless stat.uid == Process.uid
-    raise IOError, "dry-run skip log link count is not 1" unless stat.nlink == 1
-    raise IOError, "dry-run skip log permissions are not private" unless (stat.mode & 0o077).zero?
-  rescue Errno::ENOENT
-    # Missing logs are created below; the fstat check still verifies the opened target.
-  end
+  loop do
+    preopen_stat = begin
+      stat = File.lstat(path)
+      raise IOError, "dry-run skip log is not a regular file" unless stat.file?
+      raise IOError, "dry-run skip log is not owned by uid #{Process.uid}" unless stat.uid == Process.uid
+      raise IOError, "dry-run skip log link count is not 1" unless stat.nlink == 1
+      raise IOError, "dry-run skip log permissions are not private" unless (stat.mode & 0o077).zero?
 
-  File.open(path, File::WRONLY | File::APPEND | File::CREAT | File::NOFOLLOW | File::NONBLOCK, 0o600) do |file|
-    stat = file.stat
-    raise IOError, "dry-run skip log is not a regular file" unless stat.file?
-    raise IOError, "dry-run skip log is not owned by uid #{Process.uid}" unless stat.uid == Process.uid
-    raise IOError, "dry-run skip log link count is not 1" unless stat.nlink == 1
-    raise IOError, "dry-run skip log permissions are not private" unless (stat.mode & 0o077).zero?
+      stat
+    rescue Errno::ENOENT
+      nil
+    end
 
     flags = File::WRONLY | File::APPEND | File::NOFOLLOW | File::NONBLOCK
     flags |= File::CREAT | File::EXCL unless preopen_stat
@@ -54,6 +50,7 @@ def append_skip_log(path)
         raise IOError, "dry-run skip log is not a regular file" unless stat.file?
         raise IOError, "dry-run skip log is not owned by uid #{Process.uid}" unless stat.uid == Process.uid
         raise IOError, "dry-run skip log link count is not 1" unless stat.nlink == 1
+        raise IOError, "dry-run skip log permissions are not private" unless (stat.mode & 0o077).zero?
         if preopen_stat && (stat.dev != preopen_stat.dev || stat.ino != preopen_stat.ino)
           raise IOError, "dry-run skip log changed during open"
         end

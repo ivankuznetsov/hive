@@ -184,14 +184,24 @@ module Hive
     # and supports already-deleted entries (pathspec scope is honoured
     # by `ls-files` so untracked siblings cannot leak in).
     def hive_commit(stage_name:, slug:, action:, body: nil, pathspecs: nil, allow_empty: false)
-      message = "hive: #{stage_name}/#{slug} #{action}"
       task_path = File.join("stages", stage_name, slug)
       if pathspecs
-        Array(pathspecs).each { |pathspec| stage_hive_state_pathspec(pathspec) }
+        stage_hive_state_pathspecs(pathspecs)
       else
         run_git!("-C", hive_state_path, "add", task_path) if File.directory?(File.join(hive_state_path, task_path))
         run_git!("-C", hive_state_path, "add", "logs") if File.directory?(File.join(hive_state_path, "logs"))
       end
+      commit_hive_state_index(
+        stage_name: stage_name, slug: slug, action: action, body: body, allow_empty: allow_empty
+      )
+    end
+
+    def stage_hive_state_pathspecs(pathspecs)
+      Array(pathspecs).each { |pathspec| stage_hive_state_pathspec(pathspec) }
+    end
+
+    def commit_hive_state_index(stage_name:, slug:, action:, body: nil, allow_empty: false)
+      message = "hive: #{stage_name}/#{slug} #{action}"
       _, _, status = Open3.capture3("git", "-C", hive_state_path, "diff", "--cached", "--quiet")
       if status.success? && !allow_empty
         :nothing_to_commit
@@ -202,6 +212,19 @@ module Hive
         run_git!(*args)
         :committed
       end
+    end
+
+    # Reconcile only paths owned by a failed journaled transaction. Unrelated
+    # staged work in the shared hive/state worktree is intentionally untouched.
+    def reset_hive_state_paths(pathspecs)
+      paths = Array(pathspecs).map(&:to_s).reject(&:empty?)
+      return if paths.empty?
+
+      run_git!("-C", hive_state_path, "reset", "--quiet", "HEAD", "--", *paths)
+    end
+
+    def hive_state_head_sha
+      run_git!("-C", hive_state_path, "rev-parse", "HEAD").strip
     end
 
     def delete_branch!(name)

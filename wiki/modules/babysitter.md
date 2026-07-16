@@ -3,7 +3,7 @@ title: Hive::Babysitter
 type: module
 source: lib/hive/babysitter/, bin/hive-babysitter-stub-git, bin/hive-babysitter-stub-gh, bin/hive-babysitter-skip-log.rb
 created: 2026-05-26
-updated: 2026-07-10
+updated: 2026-07-16
 tags: [babysitter, module, daemon, github, agents]
 ---
 
@@ -85,6 +85,7 @@ Closed outcome enum: `success`, `failure`, `conflict`, `timeout`, `budget_exhaus
 - Current source/test coverage also treats `GIT_EXEC_PATH`, `GIT_ASKPASS`, and `SSH_ASKPASS` as fail-closed git env seams in that same dry-run boundary.
 - Current source/test coverage also scrubs inherited dynamic-loader env (`LD_*` / `DYLD_*`) before generated overlay wrappers hand off to Ruby, and removes the same env family before both dry-run stubs exec real `git` or `gh`.
 - The GH browser-flag scanner is command-aware: it still skips real `--web` / short `-w` browser flags, but treats `w` inside value-taking read-option values as data, so reads such as `pr diff -eworkflow.yml`, `pr list -lwip`, `pr view -qweb`, and `pr list --search -wip` pass through.
+- The `gh api` read/write scanner consumes header, jq, preview, and template values before method detection; an option value equal to `-XGET` cannot spoof an explicit GET for a following payload-bearing request.
 
 - Skip-log FIFO hardening: both dry-run stubs now preflight existing skip-log targets with `File.lstat`, open with `File::NOFOLLOW | File::NONBLOCK`, keep the post-open regular-file/owner check, and warn while still skipping when a FIFO, symlink, device, or non-owned path is configured.
 - Skip-log growth is bounded in the shared helper: escaped argv is limited to 4 KiB, and an exclusive lock serializes the append and 64 KiB size check across concurrent stub processes. When another complete record would exceed the cap, the helper preserves the existing audit history and warns through the best-effort log path. Lock acquisition has a short monotonic deadline so a stalled holder cannot hang a denied command.

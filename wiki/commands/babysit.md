@@ -3,7 +3,7 @@ title: hive babysit
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/babysit.rb, bin/hive-babysitter-stub-git, bin/hive-babysitter-stub-gh
 created: 2026-05-26
-updated: 2026-07-10
+updated: 2026-07-16
 tags: [command, babysitter, daemon, github]
 ---
 
@@ -88,6 +88,8 @@ Pager note (2026-06-19): allowlisted `git` passthrough now also deletes `PAGER` 
 Current source/test coverage also includes `GIT_EXEC_PATH`, `GIT_ASKPASS`, and `SSH_ASKPASS` in the fail-closed git env guard; they are part of the dry-run boundary, not optional hardening. The dry-run overlay and both stubs now scrub dynamic-loader env (`LD_PRELOAD`, `LD_LIBRARY_PATH`, `LD_AUDIT`, `LD_DEBUG_OUTPUT`, `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH`, `DYLD_FRAMEWORK_PATH`, `DYLD_FALLBACK_LIBRARY_PATH`) before the Ruby stub handoff and before real `git` / `gh` passthrough.
 
 For `gh api`, payload-bearing forms are treated as writes unless the command explicitly sets GET. Dry-run skips implicit-POST calls such as `gh api repos/owner/repo/issues/123/comments -f body=hi`, `-F body=@comment.md`, `--raw-field body=hi`, `--field body=hi`, and `--input payload.json`, while still passing explicit GET reads such as `gh api --method GET repos/owner/repo/issues -f state=open`. Explicit GET file/input payloads and cache writes (`-F q=@secret`, glued `-Fq=@secret` / `-F=q=@secret`, `--field=q=@secret`, `--input=payload.json`, `--cache`, and `--cache=<ttl>`) still skip. Browser-launch flags (`--web` and short `-w` parsed as an option flag on read-only PR/repo/run/workflow commands) also skip. The short-option scanner is command-aware and honors value-taking options, so `w` inside values like `gh pr diff 42 -eworkflow.yml`, `gh pr list -lwip`, `gh pr view 42 -qweb`, or `gh pr list --search -wip` passes through instead of being mistaken for a browser launch. For `gh auth status`, `--show-token`, `--show-token=...`, bare `-t`, clustered boolean shorthand forms containing `t` before a value-taking `h` (for example `-at`, `-ta`, and `-ath`), and every host selector (`-h github.com`, `-hgithub.com`, `-ah github.com`, `--hostname`, and `--hostname=...`) skip, while host-default non-token reads such as plain `gh auth status` and `-a` pass through. Before any allowed `gh` read execs the real binary, pager/browser/editor/TTY env is scrubbed, command-local `GH_CONFIG_DIR` / `XDG_CONFIG_HOME` / `HOME` is neutralized, `GH_HOST` / `GH_REPO` / enterprise-token env is deleted, and both `HOME` and `GH_CONFIG_DIR` are pointed at the run-scoped hosts-only auth view. If the trusted handoff is absent or invalid, the stub falls back to a fresh empty writable temp directory rather than caller-controlled config.
+
+The API classifier consumes every known value-taking option before deriving the method and payload state. In particular, a separate `-XGET` value belonging to `--header`/`-H`, `--jq`/`-q`, `--preview`/`-p`, or `--template`/`-t` is data rather than an explicit method, so a following scalar field remains an implicit POST and is skipped.
 
 The dry-run guard is best-effort: an agent that invokes absolute binary paths can bypass the PATH overlay. Use throwaway repos for destructive validation until a stronger sandbox exists. If `HIVE_BABYSITTER_REAL_GIT` is unset or points at an invalid binary, the stub exits 127 with a one-line diagnostic instead of guessing a system path.
 

@@ -240,6 +240,59 @@ class AgentProfileTest < Minitest::Test
     end
   end
 
+  def test_bounded_capture_tolerates_pipe_close_races
+    profile = make_profile
+    stdin_closed = false
+    stdin = Object.new
+    stdin.define_singleton_method(:close) { stdin_closed = true }
+    stdin.define_singleton_method(:closed?) { stdin_closed }
+    pipe = lambda do
+      Object.new.tap do |io|
+        io.define_singleton_method(:read) { "" }
+        io.define_singleton_method(:closed?) { false }
+        io.define_singleton_method(:close) { raise IOError, "already closed" }
+      end
+    end
+    waiter = Object.new
+    waiter.define_singleton_method(:alive?) { false }
+    waiter.define_singleton_method(:value) { :status }
+    replacement = lambda do |*_argv, **_options|
+      [ stdin, pipe.call, pipe.call, waiter ]
+    end
+
+    result = with_replaced_singleton_method(Open3, :popen3, replacement) do
+      profile.send(:bounded_capture3, "fake", timeout_sec: 0.1)
+    end
+
+    assert_equal [ "", "", :status ], result
+  end
+
+  def test_capture_cleanup_tolerates_concurrent_pipe_closure
+    profile = make_profile
+    unreadable = Object.new
+    unreadable.define_singleton_method(:read) { raise IOError, "closed" }
+    assert_equal "", profile.send(:capture_reader, unreadable).value
+
+    closing = Object.new
+    closing.define_singleton_method(:closed?) { false }
+    closing.define_singleton_method(:close) { raise IOError, "closed" }
+    assert_empty profile.send(:stop_capture_readers, [], closing)
+  end
+
+  def test_process_group_probes_handle_exit_and_permission_races
+    profile = make_profile
+    missing = lambda { |_signal, _pid| raise Errno::ESRCH }
+    with_replaced_singleton_method(Process, :kill, missing) do
+      assert_nil profile.send(:signal_capture_process_group, "TERM", 123)
+      refute profile.send(:capture_process_group_alive?, 123)
+    end
+
+    denied = lambda { |_signal, _pid| raise Errno::EPERM }
+    with_replaced_singleton_method(Process, :kill, denied) do
+      assert profile.send(:capture_process_group_alive?, 123)
+    end
+  end
+
   def test_cli_capability_binary_disappearing_after_version_check_is_explicit
     with_tmp_dir do |dir|
       binary = capability_binary(dir, help: "--safe-mode")

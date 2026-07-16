@@ -17,8 +17,17 @@ class RefactorPatrolReviewAgentRunnerTest < Minitest::Test
         project_root: dir, cfg: cfg, state: Hive::RefactorPatrol::StateStore.new(dir),
         token_budget: budget
       )
+      profile = Struct.new(:name, :initial_context_tokens) do
+        def require_cli_capability!(name)
+          raise "unexpected capability #{name.inspect}" unless name == :patrol_review_context
 
-      result = runner.call(prompt: "p", output_path: File.join(dir, "out.json"), run_dir: dir)
+          [ "--safe-mode", "--disable-slash-commands" ]
+        end
+      end.new(:claude, 20_000)
+
+      result = with_replaced_singleton_method(Hive::AgentProfiles, :lookup, ->(*) { profile }) do
+        runner.call(prompt: "p", output_path: File.join(dir, "out.json"), run_dir: dir)
+      end
 
       assert_equal :error, result.fetch(:status)
       assert_equal "architecture cycle exhausted", result.fetch(:error_message)

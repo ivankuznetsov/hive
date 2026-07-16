@@ -492,10 +492,19 @@ class HivePatrolReviewerTest < Minitest::Test
       end
       budget.define_singleton_method(:exhaustion_message) { "cycle exhausted" }
       reviewer = Hive::Patrol::Reviewer.new(dir, cfg: cfg, token_budget: budget)
+      profile = Struct.new(:name, :initial_context_tokens) do
+        def require_cli_capability!(name)
+          raise "unexpected capability #{name.inspect}" unless name == :patrol_review_context
 
-      result = reviewer.send(
-        :run_agent, prompt: "p", output_path: File.join(dir, "out.json"), run_dir: dir
-      )
+          [ "--safe-mode", "--disable-slash-commands" ]
+        end
+      end.new(:claude, 20_000)
+
+      result = with_replaced_singleton_method(Hive::AgentProfiles, :lookup, ->(*) { profile }) do
+        reviewer.send(
+          :run_agent, prompt: "p", output_path: File.join(dir, "out.json"), run_dir: dir
+        )
+      end
 
       assert_equal :error, result.fetch(:status)
       assert_equal "cycle exhausted", result.fetch(:error_message)

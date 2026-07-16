@@ -53,6 +53,9 @@ if [[ -n "${HIVE_FAKE_GH_PR_EXISTS_FILE:-}" ]]; then
 fi
 
 if [[ -n "${HIVE_FAKE_CLAUDE_HANG:-}" ]]; then
+  if [[ "${HIVE_FAKE_CLAUDE_IGNORE_TERM:-}" == "1" ]]; then
+    trap '' TERM
+  fi
   sleep "${HIVE_FAKE_CLAUDE_HANG}"
 fi
 

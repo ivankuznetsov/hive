@@ -1156,6 +1156,7 @@ class RefactorPatrolFixerTest < Minitest::Test
       assert_equal Hive::AgentProfile::WORKSPACE_WRITE_PERMISSION_MODE,
                    captured.fetch(:permission_mode)
       assert_equal dir, captured.fetch(:cwd)
+      assert_equal 100_000, captured.fetch(:max_tokens)
       assert File.directory?(File.join(dir, "runs", "fix"))
     end
   end

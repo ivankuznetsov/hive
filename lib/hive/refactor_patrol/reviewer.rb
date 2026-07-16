@@ -18,6 +18,7 @@ module Hive
       TemplateBindings = Struct.new(
         :project_root, :feature, :leverage, :commands, :output_path,
         :max_theses, :source_pr, :output_mode, :user_supplied_tag,
+        :min_leverage_score,
         keyword_init: true
       ) do
         def binding_for_erb = binding
@@ -59,6 +60,15 @@ module Hive
         features.each do |feature|
           break unless remaining.positive?
 
+          leverage = leverage_by_feature.fetch(feature.id, {})
+          unless potentially_actionable?(leverage)
+            feature_theses = []
+            result = feature_result(feature, feature_theses, [])
+            @feature_results << result
+            yield feature, feature_theses, result if block_given?
+            next
+          end
+
           remaining_seconds = deadline - monotonic_now
           unless remaining_seconds.positive?
             feature_theses = record_feature_error(
@@ -74,7 +84,7 @@ module Hive
           error_offset = @review_errors.length
           limit = [ max_theses, remaining ].min
           feature_theses = review_feature(
-            feature, leverage_by_feature.fetch(feature.id, {}),
+            feature, leverage,
             max_theses: limit, timeout_sec: remaining_seconds
           )
           remaining -= feature_theses.size
@@ -99,7 +109,11 @@ module Hive
           feature: feature, prompt: prompt, output_path: output_path,
           run_dir: run_dir, timeout_sec: timeout_sec
         )
-        return record_feature_error(feature, "agent_failed", agent_error_message(result)) if agent_failed?(result)
+        if agent_failed?(result)
+          return record_feature_error(
+            feature, "agent_failed", agent_error_message(result), agent_error_details(result)
+          )
+        end
 
         parse_theses(feature, leverage, output_path, max_theses: max_theses)
       rescue JSON::ParserError => e
@@ -122,7 +136,8 @@ module Hive
             max_theses: max_theses,
             source_pr: @source_pr,
             output_mode: @read_only ? "final_message" : "output_file",
-            user_supplied_tag: Hive::Stages::Base.user_supplied_tag
+            user_supplied_tag: Hive::Stages::Base.user_supplied_tag,
+            min_leverage_score: min_leverage_score
           )
         )
       end
@@ -164,14 +179,26 @@ module Hive
         result.is_a?(Hash) ? result[:error_message].to_s : ""
       end
 
-      def record_feature_error(feature, kind, message)
-        @review_errors << { "feature_id" => feature.id, "error" => kind, "message" => message }
+      def agent_error_details(result)
+        exhaustion = result.is_a?(Hash) ? result[:resource_exhaustion] : nil
+        return {} unless exhaustion.is_a?(Hash)
+
+        {
+          "details" => {
+            "resource_exhaustion" => {
+              "reason" => exhaustion[:reason].to_s,
+              "limit" => exhaustion[:limit].to_i,
+              "observed" => exhaustion[:observed].to_i
+            }
+          }
+        }
+      end
+
+      def record_feature_error(feature, kind, message, details = {})
+        error = { "feature_id" => feature.id, "error" => kind, "message" => message }.merge(details)
+        @review_errors << error
         unless @dry_run
-          @state.write_run_log("review-error-#{SecureRandom.hex(4)}", {
-            "feature_id" => feature.id,
-            "error" => kind,
-            "message" => message
-          })
+          @state.write_run_log("review-error-#{SecureRandom.hex(4)}", error)
         end
         []
       end
@@ -194,7 +221,7 @@ module Hive
       end
 
       def max_theses
-        @cfg.dig("refactor_patrol", "max_theses_per_feature") || 3
+        @cfg.dig("refactor_patrol", "max_theses_per_feature") || 1
       end
 
       def max_theses_per_run
@@ -203,6 +230,26 @@ module Hive
 
       def max_review_seconds_per_run
         @cfg.dig("refactor_patrol", "max_review_seconds_per_run") || 3600
+      end
+
+      def min_leverage_score
+        (@cfg.dig("refactor_patrol", "min_leverage_score") || 0.25).to_f
+      end
+
+      # Proposal relief is bounded at 1.0, so it cannot score higher than the
+      # complete measured feature hotspot.
+      def potentially_actionable?(leverage)
+        return true if leverage.dig("measurement", "status") == "incomplete"
+
+        breakdown = leverage["breakdown"]
+        return true unless breakdown.is_a?(Hash) && breakdown.values.all? { |value| value.is_a?(Numeric) }
+
+        drivers = Leverage::SIGNALS.filter_map do |signal|
+          next unless breakdown.key?(signal)
+
+          { "signal" => signal, "relief" => 1.0, "mechanism" => "maximum possible relief" }
+        end
+        Leverage.score_proposal(leverage, drivers).fetch("score") >= min_leverage_score
       end
     end
   end

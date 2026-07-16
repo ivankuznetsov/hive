@@ -56,7 +56,8 @@
               "error": {
                 "enum": ["agent_failed", "malformed_json", "schema_invalid", "review_error"]
               },
-              "message": { "type": "string" }
+              "message": { "type": "string" },
+              "details": { "type": "object" }
             }
           }
         },

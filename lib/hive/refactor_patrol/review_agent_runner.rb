@@ -40,11 +40,11 @@ module Hive
           slug: STAGE
         )
         profile = Hive::AgentProfiles.lookup(configured_agent, cfg: @cfg)
+        scope = read_only_scope(profile)
+        cli_flags = @read_only ? profile.require_cli_capability!(:safe_mode) : []
         unless @token_budget.acquire(stage: STAGE)
           return { status: :error, error_message: @token_budget.exhaustion_message }
         end
-        scope = read_only_scope(profile)
-        cli_flags = @read_only ? profile.require_cli_capability!(:safe_mode) : []
         started_at = Time.now.utc
         result = nil
         begin
@@ -56,6 +56,7 @@ module Hive
             max_budget_usd: @token_budget.max_budget_usd(
               @cfg.dig("budget_usd", "patrol") || 100, stage: STAGE
             ),
+            max_tokens: @token_budget.max_tokens(stage: STAGE),
             timeout_sec: effective_timeout(timeout_sec),
             log_label: STAGE,
             profile: profile,

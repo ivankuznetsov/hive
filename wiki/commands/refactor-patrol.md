@@ -3,7 +3,7 @@ title: hive refactor-patrol
 type: command
 source: lib/hive/commands/refactor_patrol.rb, lib/hive/refactor_patrol/*
 created: 2026-07-02
-updated: 2026-07-12
+updated: 2026-07-16
 tags: [command, refactor-patrol, architecture, json, daemon]
 ---
 
@@ -50,8 +50,10 @@ before any project-state write with `hive init --refactor-patrol` or
 ```yaml
 refactor_patrol:
   enabled: true
-  # Proposal-specific leverage below this floor remains visible but report-only.
+  # Proposal-specific leverage below this floor is retained as an audited
+  # suppression, not ranked or acted on.
   min_leverage_score: 0.25
+  max_theses_per_feature: 1
   auto_fix:
     enabled: false
     agent: codex
@@ -116,7 +118,10 @@ wiki logs, raw notes, caches, generated content, and `.hive-state` do not become
 one broad documentation feature. Ordinary `hive patrol` mapping is unchanged.
 
 `max_theses_per_run` is a strict run-wide reviewer-output budget, not a
-per-feature allowance. `max_review_seconds_per_run` (default 3600) is the
+per-feature allowance. The per-feature default is one thesis, explicitly a
+ceiling rather than a quota. A slice whose complete measured hotspot cannot
+possibly reach `min_leverage_score`, even with 100% relief, completes without
+launching an agent. `max_review_seconds_per_run` (default 3600) is the
 matching absolute monotonic wall-clock budget: each feature spawn receives only
 the smaller of its configured patrol timeout and the whole-run time remaining.
 Once either budget is exhausted, later slices stay incomplete for a future
@@ -124,8 +129,9 @@ resume instead of multiplying one agent timeout by every mapped feature.
 Before each architecture review or fix spawn, the shared project patrol budget
 also checks the selected `patrol.mode` token and launch ceilings. Architecture
 stages default to 2x the mode's per-cycle token/launch limits and per-agent
-budget-equivalent guard so broad boundary analysis is not constrained like a
-single ordinary slice; the project/day token and launch ceilings stay shared.
+streamed-token limit so broad boundary analysis is not constrained like a
+single ordinary slice; the native budget-equivalent guard and project/day token
+and launch ceilings stay shared.
 Usage is attributed to the TUI patrol row; absent provider counts are retained
 as unmetered launches and still consume quota. Budget exhaustion is an ordinary
 retryable incomplete result, so discovery checkpoints completed slices and
@@ -136,9 +142,13 @@ against the pinned checkout's real, root-confined, 256 KiB-bounded bytes: cited
 files must exist, line anchors must be in range within that inspection window,
 and snippets must occur exactly within it when present. One unverified citation
 makes the thesis inadmissible. Proposal
-leverage is derived from measured hotspot signals and model-explained relief;
-the default `min_leverage_score: 0.25` keeps low-value extraction proposals
-visible but prevents automatic action. If architecture mapping fails, leverage
+leverage is derived from measured hotspot signals and model-explained relief.
+The reviewer requires evidence of a current consequence rather than hypothetical
+drift and rejects extra helpers/taxonomies that do not delete an ownership
+decision or dependency direction. The default `min_leverage_score: 0.25`
+classifies any residual low-value proposal as a persisted suppression: it stays
+auditable but is absent from ranked/flagged findings and cannot trigger action.
+If architecture mapping fails, leverage
 retains a bounded `measurement.status: incomplete` diagnostic instead of
 presenting its graceful zeroes as real measurements; affected theses remain
 visible but are inadmissible for automatic action.
@@ -448,7 +458,11 @@ later catalog rebuild can recover terminal PR proof instead of mistaking stage
 movement for a missing handoff. Paths outside those exact stage roots, or nested
 below a task folder, still fail closed.
 
-Legacy no-PR JSON remains `hive-refactor-patrol.v1`. PR discovery and action
+Legacy no-PR JSON remains `hive-refactor-patrol.v1`; its success payload now
+includes `review_complete`, `review_errors`, and per-feature progress so a
+token-limited or failed review cannot look like a clean zero-thesis result.
+Structured cap evidence is retained under
+`review_errors[].details.resource_exhaustion`. PR discovery and action
 resume emit `hive-refactor-patrol.v2`, including source identity,
 `analysis_sha`, completeness, per-feature progress,
 accepted/flagged/suppressed dispositions, review errors, attempts, and public

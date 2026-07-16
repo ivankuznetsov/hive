@@ -56,6 +56,7 @@ module Hive
           event["usage"],
           event["token_usage"],
           event.dig("event", "usage"),
+          event.dig("event", "message", "usage"),
           event.dig("info", "usage"),
           event.dig("info", "total_token_usage"),
           event.dig("response", "usage"),

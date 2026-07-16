@@ -3,11 +3,11 @@ title: Hive::Agent
 type: module
 source: lib/hive/agent.rb, lib/hive/agent_limit.rb, lib/hive/claude_launcher.rb, lib/hive/scripts/interactive_claude_wrapper.sh
 created: 2026-04-25
-updated: 2026-07-12
+updated: 2026-07-16
 tags: [agent, claude, subprocess]
 ---
 
-**TLDR**: Agent subprocess wrapper. Sets `AGENT_WORKING` pre-spawn for marker-owned spawns, streams stdout/stderr to the per-stage log, captures a bounded final-message summary, enforces budget + timeout, kills on signal or timeout, classifies provider account/rate/quota limits before generic failures, and translates the exit into a status/marker according to the selected `AgentProfile` status mode. The state file is mutated atomically by `Markers.set` (tempfile + rename); `Markers.current` always reads a complete file.
+**TLDR**: Agent subprocess wrapper. Sets `AGENT_WORKING` pre-spawn for marker-owned spawns, streams stdout/stderr to the per-stage log, captures a bounded final-message summary, enforces native budget-equivalent, streamed token, and wall-clock limits, kills the process group on exhaustion, classifies provider account/rate/quota limits before generic failures, and translates the exit into a status/marker according to the selected `AgentProfile` status mode. The state file is mutated atomically by `Markers.set` (tempfile + rename); `Markers.current` always reads a complete file.
 
 ## Class shape
 
@@ -16,6 +16,7 @@ Hive::Agent.new(
   task:,                # Hive::Task
   prompt:,              # rendered ERB string
   max_budget_usd:,      # required, no default
+  max_tokens: nil,      # optional positive in-flight token ceiling
   timeout_sec:,         # required, no default
   add_dirs: [],         # extra --add-dir paths
   cwd: nil,             # defaults to task.folder
@@ -33,6 +34,7 @@ Hive::Agent.new(
 ## Constants
 
 - `FINAL_MESSAGE_TAIL_BYTES = 64 * 1024` caps the plain stdout/stderr tail retained in `result[:final_message]` when no structured final agent message was parsed.
+- `TOKEN_LIMIT_TERM_GRACE_SECONDS = 3` bounds graceful shutdown after a streamed token ceiling before Hive escalates the process group to KILL.
 
 ## Provider-limit classification
 
@@ -153,12 +155,12 @@ launches send the prompt through stdin with `-` in argv.
    uses the PID for liveness, and drop cleanup uses the start time to reject a
    reused PID before signalling the recorded child.
 6. Trap `INT`/`TERM` to forward `kill -TERM -<pgid>`. Old handlers are restored in `ensure`.
-7. Reader thread: `r.each_line` writes timestamped lines to the log, captures the last structured agent final message it recognizes, and captures the first raw stream line whose text matches `Hive::AgentLimit`. Claude-style `result` / `assistant` events and Codex-style `item.completed` assistant messages set `result[:final_message_source] = :structured`; non-JSON output is retained as a bounded plain tail with `:plain` source.
-8. Polling loop: `Process.wait(pid, WNOHANG)` every `[remaining, 0.2].min` seconds until the deadline.
+7. Reader thread: `r.each_line` writes timestamped lines to the log, captures the last structured agent final message it recognizes, and captures the first raw stream line whose text matches `Hive::AgentLimit`. Claude-style `result` / `assistant` events and Codex-style `item.completed` assistant messages set `result[:final_message_source] = :structured`; non-JSON output is retained as a bounded plain tail with `:plain` source. When `max_tokens` is set, `StreamTokenMeter` also converts usage events into one monotonic count. Claude message-start/delta events sum completed turns while maxing cumulative current-turn fields; terminal run totals replace the aggregate only when they are not smaller than already observed usage.
+8. Polling loop: `Process.wait(pid, WNOHANG)` every `[remaining, 0.2].min` seconds until the deadline. Reaching `max_tokens` on a non-terminal event sends TERM immediately; a process group still alive after the token grace receives KILL independently of the longer wall-clock timeout.
 9. On timeout: `kill_group(pgid)` (TERM), then `sleep_grace_then_kill` (3s grace, then KILL).
 10. Reap with `Process.wait(pid)` (rescuing `Errno::ECHILD`).
 11. Join the reader thread (kill if still alive after 2s).
-12. Return `{pid, pgid, exit_code, timed_out, log_file, final_message, final_message_source, status: nil}`.
+12. Return `{pid, pgid, exit_code, timed_out, log_file, final_message, final_message_source, usage, resource_exhaustion, status: nil}`. Token exhaustion carries `reason: "token_limit"`, the configured limit, and observed usage.
 
 `final_message` is for orchestrators that need a human-readable agent answer even when the agent does not edit the state file. 4-execute writes this into `task.md` under `## Execute Output`; only structured final messages satisfy research-mode completion.
 
@@ -177,6 +179,7 @@ Claude/tmux teardown is deliberately narrower than a shell-pattern kill. `with_s
 
 | Condition | Marker set |
 |-----------|------------|
+| `result[:resource_exhaustion].reason == "token_limit"` | `<!-- ERROR reason=token_limit observed_tokens=N max_tokens=N marker_id=<hex16> -->` for `:state_file_marker`; other modes return the same error status without clobbering orchestrator-owned markers |
 | provider-limit text in a failed/timeout result's raw stream `limit_text` or `final_message` | `<!-- ERROR reason=limits_reached message="limits reached for <agent>: ..." marker_id=<hex16> -->` for `:state_file_marker`; other status modes return `result[:error_message] = "limits reached for <agent>: ..."` without clobbering orchestrator-owned markers |
 | `result[:timed_out]` | `<!-- ERROR reason=timeout timeout_sec=N marker_id=<hex16> -->` |
 | `exit_code` non-zero | `<!-- ERROR reason=exit_code exit_code=N marker_id=<hex16> -->` |
@@ -191,7 +194,7 @@ The default Claude permission path still uses `--dangerously-skip-permissions` (
 
 1. **`--add-dir` discipline**: the agent only sees `cwd` and explicit `--add-dir` paths. Other projects on disk are unreachable.
 2. **Status-mode ownership**: marker-owning stages use `:state_file_marker`; reviewer-style spawns can use `:output_file_exists` so the orchestrator, not the reviewer, owns terminal markers.
-3. **Timeout + budget**: hard cap on runaway loops. Even an infinite loop costs at most $50–$100 (per-stage `max_budget_usd`) and ~45 minutes (`timeout_sec`).
+3. **Timeout + resource ceilings**: patrol passes a tier-specific `max_tokens` ceiling and clamps it to remaining cycle/day allowance; every spawn retains a wall-clock timeout. A profile-native USD-named flag is a budget-equivalent guard on subscription-backed providers, not evidence of an extra payment.
 
 ## Tests
 

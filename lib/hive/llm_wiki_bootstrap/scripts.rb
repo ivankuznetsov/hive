@@ -145,10 +145,12 @@ module Hive
         BASH
       end
 
-      # The worktree-safe post-commit refresh and the shared log compiler are
+      # The transactional post-commit refresh and the shared log compiler are
       # maintained as real, tested files under templates/llm-wiki/ (shared
       # verbatim with the llm-wiki plugin and with Hive::WikiLog) rather than
-      # embedded heredocs. Bootstrap copies them into the project's .llm-wiki/.
+      # embedded heredocs. The refresh template queues source commits and writes
+      # only in a disposable llm-wiki/refresh worktree; bootstrap copies both
+      # scripts into the project's .llm-wiki/.
       def post_commit_refresh
         File.read(template_path("post-commit-refresh.sh"))
       end

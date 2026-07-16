@@ -1,4 +1,5 @@
 require "test_helper"
+require "hive/digest"
 require "hive/patrol/token_budget"
 
 class PatrolTokenBudgetTest < Minitest::Test
@@ -19,6 +20,7 @@ class PatrolTokenBudgetTest < Minitest::Test
       "patrol" => {
         "max_tokens_per_cycle" => 100,
         "max_tokens_per_day" => 200,
+        "max_tokens_per_agent" => 60,
         "max_agent_spawns_per_cycle" => 2,
         "max_agent_spawns_per_day" => 3,
         "max_budget_usd_per_agent" => 10,
@@ -85,6 +87,25 @@ class PatrolTokenBudgetTest < Minitest::Test
     end
   end
 
+  def test_only_one_patrol_agent_can_hold_project_budget_headroom_in_flight
+    with_budget do |budget, dir, now|
+      concurrent = Hive::Patrol::TokenBudget.new(
+        dir, cfg: config, clock: -> { now }
+      )
+
+      assert budget.acquire(stage: "patrol-review")
+      refute concurrent.acquire(stage: "refactor-patrol-review")
+      assert_equal "agent_in_flight", concurrent.last_exhaustion.fetch(:reason)
+
+      record(budget, now, { input: 40, output: 0, cached: 0 })
+      assert concurrent.acquire(stage: "refactor-patrol-review")
+      record(
+        concurrent, now, { input: 10, output: 0, cached: 0 },
+        stage: "refactor-patrol-review"
+      )
+    end
+  end
+
   def test_per_agent_budget_equivalent_cap_takes_the_lower_value
     with_budget do |budget|
       assert_equal 10.0, budget.max_budget_usd(100)
@@ -92,7 +113,32 @@ class PatrolTokenBudgetTest < Minitest::Test
     end
   end
 
-  def test_architecture_gets_doubled_cycle_and_per_agent_limits
+  def test_per_agent_token_limit_is_explicit_and_architecture_gets_a_larger_allowance
+    with_budget do |budget|
+      assert_equal 60, budget.max_tokens(stage: "patrol-review")
+      assert_equal 120, budget.max_tokens(stage: "refactor-patrol-review")
+    end
+  end
+
+  def test_per_agent_token_limit_is_clamped_to_remaining_cycle_and_daily_budgets
+    with_budget(config(max_tokens_per_cycle: 100, max_tokens_per_day: 150)) do |budget, _dir, now|
+      assert budget.acquire(stage: "patrol-review")
+      record(budget, now, { input: 55, output: 0, cached: 0 })
+
+      assert_equal 45, budget.max_tokens(stage: "patrol-fix")
+      assert_equal 95, budget.max_tokens(stage: "refactor-patrol-review")
+    end
+
+    with_budget(config(max_tokens_per_cycle: 200, max_tokens_per_day: 100)) do |budget, _dir, now|
+      assert budget.acquire(stage: "patrol-review")
+      record(budget, now, { input: 70, output: 0, cached: 0 })
+
+      assert_equal 30, budget.max_tokens(stage: "patrol-fix")
+      assert_equal 30, budget.max_tokens(stage: "refactor-patrol-review")
+    end
+  end
+
+  def test_architecture_gets_doubled_cycle_and_spawn_limits_but_not_a_looser_native_budget_guard
     with_budget(config(max_tokens_per_day: 300, max_agent_spawns_per_cycle: 4)) do |budget, _dir, now|
       assert budget.acquire(stage: "patrol-review")
       record(budget, now, { input: 70, output: 20, cached: 10 })
@@ -106,9 +152,9 @@ class PatrolTokenBudgetTest < Minitest::Test
       refute budget.acquire(stage: "refactor-patrol-fix")
       assert_equal "cycle_token_limit", budget.last_exhaustion.fetch(:reason)
       assert_match(/cycle=200\/200 tokens/, budget.exhaustion_message)
-      assert_equal 20.0, budget.max_budget_usd(100, stage: "refactor-patrol-review")
-      assert_equal 15.0, budget.max_budget_usd(15, stage: "refactor-patrol-review")
-      assert_equal 20, budget.max_budget_usd("invalid", stage: "refactor-patrol-review")
+      assert_equal 10.0, budget.max_budget_usd(100, stage: "refactor-patrol-review")
+      assert_equal 10.0, budget.max_budget_usd(15, stage: "refactor-patrol-review")
+      assert_equal 10, budget.max_budget_usd("invalid", stage: "refactor-patrol-review")
     end
   end
 

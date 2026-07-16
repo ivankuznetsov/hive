@@ -13,10 +13,13 @@ module Hive
       end
 
       def envelope(project:, project_root:, dry_run:, features:, theses:, suppressed:, last_scanned_sha:,
-                   version: V1_SCHEMA_VERSION)
+                   version: V1_SCHEMA_VERSION, complete: true, review_errors: [], feature_results: nil)
         raise ArgumentError, "unsupported refactor patrol report version #{version}" unless version == V1_SCHEMA_VERSION
 
-        ranked = ranked_items(theses)
+        suppressed_ids = suppression_index(suppressed)
+        ranked = ranked_items(theses, suppressed_ids)
+        errors = json_copy(Array(review_errors))
+        progress = feature_results || inferred_feature_results(features, theses, errors)
         {
           "schema" => "hive-refactor-patrol",
           "schema_version" => V1_SCHEMA_VERSION,
@@ -24,10 +27,13 @@ module Hive
           "project" => project,
           "project_root" => project_root,
           "dry_run" => dry_run,
+          "review_complete" => complete == true && errors.empty? && Array(progress).all? { |item| item["complete"] == true },
+          "review_errors" => errors,
+          "feature_results" => json_copy(Array(progress)),
           "features_mapped" => features.size,
           "theses" => accepted_count(theses),
           "ranked" => ranked.first(max_theses_per_run),
-          "flagged_theses" => flagged_items(theses),
+          "flagged_theses" => flagged_items(theses, suppressed_ids),
           "suppressed" => suppressed,
           "last_scanned_sha" => last_scanned_sha.to_s
         }
@@ -93,7 +99,8 @@ module Hive
 
       def text(payload, theses)
         lines = [
-          "hive refactor-patrol: #{payload.fetch('project')} mapped=#{payload.fetch('features_mapped')} theses=#{payload.fetch('theses')}"
+          "hive refactor-patrol: #{payload.fetch('project')} mapped=#{payload.fetch('features_mapped')} " \
+          "theses=#{payload.fetch('theses')} review=#{payload.fetch('review_complete') ? 'complete' : 'partial'}"
         ]
         payload.fetch("ranked").each_with_index do |item, idx|
           thesis = theses.find { |candidate| candidate.id == item.fetch("id") }
@@ -109,6 +116,7 @@ module Hive
           lines << "   boundary: #{Array(thesis.feature_boundary['owned_files']).join(', ')}"
         end
         lines << "flagged=#{payload.fetch('flagged_theses').size} suppressed=#{payload.fetch('suppressed').size}"
+        lines << "review_errors=#{payload.fetch('review_errors').size}" unless payload.fetch("review_complete")
         lines.join("\n")
       end
 
@@ -214,8 +222,9 @@ module Hive
         JSON.parse(JSON.generate(value))
       end
 
-      def ranked_items(theses)
-        theses.reject { |thesis| thesis.collision && thesis.collision["kind"].to_s.start_with?("collision_already", "collision_dismissed", "collision_similar") }
+      def ranked_items(theses, suppressed_ids)
+        theses.reject { |thesis| suppressed_ids[thesis.id.to_s] }
+              .reject { |thesis| thesis.collision && thesis.collision["kind"].to_s.start_with?("collision_already", "collision_dismissed", "collision_similar") }
               .sort_by { |thesis| [ -score(thesis), thesis.feature_id.to_s, thesis.id.to_s ] }
               .map do |thesis|
           {
@@ -230,8 +239,10 @@ module Hive
         end
       end
 
-      def flagged_items(theses)
+      def flagged_items(theses, suppressed_ids)
         theses.filter_map do |thesis|
+          next if suppressed_ids[thesis.id.to_s]
+
           reasons = []
           reasons.concat(Array(thesis.risk["flags"]))
           reasons << thesis.admissibility_reason unless thesis.admissible
@@ -239,6 +250,10 @@ module Hive
 
           { "id" => thesis.id, "reason" => reasons.uniq.join(",") }
         end
+      end
+
+      def suppression_index(suppressed)
+        Array(suppressed).to_h { |item| [ item.fetch("id").to_s, true ] }
       end
 
       def accepted_count(theses)

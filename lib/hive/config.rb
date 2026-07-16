@@ -435,6 +435,7 @@ module Hive
         # ceilings because they still consume provider capacity.
         "max_tokens_per_cycle" => 200_000,
         "max_tokens_per_day" => 600_000,
+        "max_tokens_per_agent" => 50_000,
         "max_agent_spawns_per_cycle" => 3,
         "max_agent_spawns_per_day" => 8,
         "max_budget_usd_per_agent" => 25,
@@ -503,7 +504,7 @@ module Hive
         "agent" => "claude",
         "min_confidence" => "medium",
         "min_leverage_score" => 0.25,
-        "max_theses_per_feature" => 3,
+        "max_theses_per_feature" => 1,
         "max_theses_per_run" => 10,
         # One architecture-discovery child must never multiply the per-agent
         # timeout by every mapped feature. The reviewer passes the remaining
@@ -2542,6 +2543,7 @@ module Hive
         "poll_interval_sec" => 1800,
         "max_tokens_per_cycle" => 800_000,
         "max_tokens_per_day" => 2_400_000,
+        "max_tokens_per_agent" => 100_000,
         "max_agent_spawns_per_cycle" => 10,
         "max_agent_spawns_per_day" => 36,
         "max_budget_usd_per_agent" => 100,
@@ -2552,6 +2554,7 @@ module Hive
         "poll_interval_sec" => 7200,
         "max_tokens_per_cycle" => 400_000,
         "max_tokens_per_day" => 1_200_000,
+        "max_tokens_per_agent" => 75_000,
         "max_agent_spawns_per_cycle" => 6,
         "max_agent_spawns_per_day" => 18,
         "max_budget_usd_per_agent" => 50,
@@ -2562,6 +2565,7 @@ module Hive
         "poll_interval_sec" => 14_400,
         "max_tokens_per_cycle" => 200_000,
         "max_tokens_per_day" => 600_000,
+        "max_tokens_per_agent" => 50_000,
         "max_agent_spawns_per_cycle" => 3,
         "max_agent_spawns_per_day" => 8,
         "max_budget_usd_per_agent" => 25,
@@ -2571,6 +2575,7 @@ module Hive
         "trigger" => "new_commits",
         "max_tokens_per_cycle" => 100_000,
         "max_tokens_per_day" => 200_000,
+        "max_tokens_per_agent" => 40_000,
         "max_agent_spawns_per_cycle" => 1,
         "max_agent_spawns_per_day" => 2,
         "max_budget_usd_per_agent" => 10,
@@ -2591,6 +2596,7 @@ module Hive
       [ "max_prs_per_cycle", 1 ],
       [ "max_tokens_per_cycle", 1 ],
       [ "max_tokens_per_day", 1 ],
+      [ "max_tokens_per_agent", 1 ],
       [ "max_agent_spawns_per_cycle", 1 ],
       [ "max_agent_spawns_per_day", 1 ],
       [ "architecture_budget_multiplier", 1 ]

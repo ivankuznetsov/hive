@@ -1,4 +1,6 @@
 require "time"
+require "digest"
+require "fileutils"
 require "hive/usage_db"
 
 module Hive
@@ -13,6 +15,7 @@ module Hive
       DEFAULT_LIMITS = {
         "max_tokens_per_cycle" => 200_000,
         "max_tokens_per_day" => 600_000,
+        "max_tokens_per_agent" => 50_000,
         "max_agent_spawns_per_cycle" => 3,
         "max_agent_spawns_per_day" => 8,
         "max_budget_usd_per_agent" => 25,
@@ -36,10 +39,18 @@ module Hive
       end
 
       def acquire(stage: "patrol")
+        unless acquire_launch_lock
+          activity = today_activity
+          reason = @launch_lock_error ? "budget_lock_unavailable" : "agent_in_flight"
+          @last_exhaustion = exhaustion(reason, activity, stage)
+          return false
+        end
+
         activity = today_activity
         reason = exhaustion_reason(activity, stage)
         if reason
           @last_exhaustion = exhaustion(reason, activity, stage)
+          release_launch_lock
           return false
         end
 
@@ -60,9 +71,20 @@ module Hive
       # Agent CLIs call this limit USD, but on subscription-backed providers it
       # is a budget-equivalent runaway guard rather than an additional charge.
       def max_budget_usd(configured, stage: "patrol")
-        [ Float(configured), Float(effective_limit("max_budget_usd_per_agent", stage)) ].min
+        [ Float(configured), Float(@limits.fetch("max_budget_usd_per_agent")) ].min
       rescue ArgumentError, TypeError
-        effective_limit("max_budget_usd_per_agent", stage)
+        @limits.fetch("max_budget_usd_per_agent")
+      end
+
+      # Unlike cycle/day accounting, this limit is handed to the running agent
+      # process and enforced from streamed usage events. Architecture receives
+      # a larger token allowance, but not a looser native dollar-equivalent cap.
+      def max_tokens(stage: "patrol")
+        activity = today_activity
+        per_agent = effective_limit("max_tokens_per_agent", stage)
+        cycle_remaining = effective_limit("max_tokens_per_cycle", stage) - @cycle_tokens
+        daily_remaining = @limits.fetch("max_tokens_per_day") - activity.fetch(:tokens)
+        [ per_agent, cycle_remaining, daily_remaining ].min
       end
 
       def record!(result:, profile:, stage:, started_at:)
@@ -95,6 +117,8 @@ module Hive
       rescue StandardError => e
         warn "[hive] patrol usage record failed: #{e.message}"
         false
+      ensure
+        release_launch_lock
       end
 
       def snapshot
@@ -111,6 +135,45 @@ module Hive
       end
 
       private
+
+      # Hold one advisory lock for the full lifetime of a patrol agent. This is
+      # stronger than a best-effort token reservation: every worker recomputes
+      # durable daily headroom only after the prior worker has recorded usage.
+      # The kernel releases the lock automatically if a worker crashes.
+      def acquire_launch_lock
+        return false if @launch_lock
+
+        FileUtils.mkdir_p(File.dirname(launch_lock_path))
+        handle = File.open(launch_lock_path, File::RDWR | File::CREAT, 0o600)
+        unless handle.flock(File::LOCK_EX | File::LOCK_NB)
+          handle.close
+          return false
+        end
+
+        @launch_lock = handle
+        @launch_lock_error = nil
+        true
+      rescue StandardError => e
+        @launch_lock_error = e
+        false
+      end
+
+      def release_launch_lock
+        handle = @launch_lock
+        @launch_lock = nil
+        return unless handle
+
+        handle.flock(File::LOCK_UN)
+      rescue StandardError
+        nil
+      ensure
+        handle&.close
+      end
+
+      def launch_lock_path
+        digest = ::Digest::SHA256.hexdigest(File.basename(@project_root))[0, 16]
+        "#{@usage_db.path}.patrol-#{digest}.lock"
+      end
 
       def today_activity
         @usage_db.patrol_activity(

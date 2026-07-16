@@ -1234,15 +1234,17 @@ class HivePatrolFixerTest < Minitest::Test
       fixer = Hive::Patrol::Fixer.new(repo, cfg: cfg(repo))
       fake_agent = Object.new
       def fake_agent.run! = { status: :ok }
+      captured = nil
 
       profiles_singleton = class << Hive::AgentProfiles; self; end
       agent_singleton = class << Hive::Agent; self; end
       profiles_lookup = Hive::AgentProfiles.method(:lookup)
       agent_new = Hive::Agent.method(:new)
       profiles_singleton.define_method(:lookup) { |*| :profile }
-      agent_singleton.define_method(:new) { |*| fake_agent }
+      agent_singleton.define_method(:new) { |**kwargs| captured = kwargs; fake_agent }
       assert_equal({ status: :ok },
                    fixer.send(:run_agent, prompt: "p", run_dir: repo, worktree_path: repo))
+      assert_equal 50_000, captured.fetch(:max_tokens)
     ensure
       profiles_singleton.define_method(:lookup, profiles_lookup) if profiles_lookup
       agent_singleton.define_method(:new, agent_new) if agent_new

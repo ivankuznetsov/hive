@@ -26,6 +26,7 @@ require "hive/commands/digest"
 require "hive/commands/pairing"
 require "hive/commands/answer_digest"
 require "hive/commands/markers"
+require "hive/commands/circuits"
 require "hive/commands/daemon"
 require "hive/commands/bot"
 require "hive/commands/metrics"
@@ -65,6 +66,19 @@ class HiveCliTest < Minitest::Test
 
     out, _err = capture_io { Hive::CLI.start([ "version" ]) }
     assert_equal "#{Hive::VERSION}\n", out
+  end
+
+  def test_circuits_passes_inspection_and_clear_options
+    with_command_new_stub(Hive::Commands::Circuits) do |calls|
+      Hive::CLI.start(
+        [ "circuits", "clear", "claude-main", "--model", "opus",
+          "--reason", "access restored", "--json" ]
+      )
+      constructor = calls.grep(Hash).first
+      assert_equal [ "clear", "claude-main" ], constructor.fetch(:args)
+      assert_equal({ model: "opus", reason: "access restored", json: true }, constructor.fetch(:kwargs))
+      assert_equal :call, calls.last
+    end
   end
 
   def test_init_forget_prune_update_uninstall_and_migrate_pass_options

@@ -383,3 +383,13 @@ leg lives in `test/e2e/tg` (real Bot API, secret-gated) and now asserts the
 - [[modules/agent]]
 - [[e2e]]
 - [[gaps]]
+
+## Provider routing and recovery coverage
+
+`test/unit/provider_routing/` pins configuration, circuit, store, and router
+state matrices with fake clocks and cross-process claims. Adapter fixtures live
+under `test/unit/agent_profiles/error_normalizers_test.rb`. Attempt leases and
+daemon workflow recovery have restart/dedup coverage; the resumable integration
+test races two coordinators while asserting complete artifact bytes remain
+unchanged. `commands/circuits_test.rb` validates human/JSON state, concurrency,
+manual clear, corruption behavior, and the public schema.

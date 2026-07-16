@@ -799,4 +799,14 @@ defect.
 - [[modules/task_action]]
 - [[decisions]] (ADR-024)
 - [[architecture]]
+
+## Provider-aware workflow recovery
+
+`WorkflowRecovery` resolves only a workflow's declared/registered resumable
+adapter, reads its normalized child snapshot, and offers eligible children to
+the same provider router used by direct stage dispatch. A durable
+`workflow_id/checkpoint_generation` lease permits one idempotent outer resume;
+completed/terminal children and their artifacts remain inputs, never rerun
+targets. The dispatcher composes this with its existing project/task caps.
+Provider recovery is an eligibility trigger rather than a retry pin.
 - [[cli]]

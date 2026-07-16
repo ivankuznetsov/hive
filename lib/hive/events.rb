@@ -17,6 +17,9 @@ module Hive
       claude_completion_fallback
       auto_retry
       auto_retry_skipped
+      routing_decision
+      circuit_transition
+      probe_outcome
     ].freeze
 
     STATUS_TAIL_LINES = 20
@@ -100,6 +103,7 @@ module Hive
 
     def render_status_body(last_record, events, walk_events = events)
       current_agent = current_agent(walk_events)
+      routing_reason = latest_routing_reason(walk_events)
       last_message = last_record["message"].to_s.empty? ? EM_DASH : last_record["message"].to_s
       lines = [
         "# Status: #{last_record.fetch('slug')}",
@@ -107,6 +111,7 @@ module Hive
         "Updated:       #{last_record.fetch('ts')}",
         "Last event:    #{last_record.fetch('event_type')} #{EM_DASH} #{last_message}",
         "Current agent: #{current_agent || EM_DASH}",
+        "Routing reason: #{routing_reason || EM_DASH}",
         "",
         "## Recent events (last #{STATUS_TAIL_LINES})"
       ]
@@ -137,6 +142,16 @@ module Hive
         end
       end
       open_agents.last
+    end
+
+    def latest_routing_reason(events)
+      events.reverse_each do |event|
+        next unless event["event_type"] == "routing_decision"
+
+        message = event["message"].to_s
+        return message unless message.empty?
+      end
+      nil
     end
 
     # Read up to `limit` trailing events without materializing the whole

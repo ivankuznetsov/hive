@@ -637,7 +637,7 @@ module Hive
         )
       rescue StandardError => e
         record_routing_exception(
-          routing_decision, provider_router, profile, model, provider_key, e,
+          task, routing_decision, provider_router, profile, model, provider_key, e,
           checkpoint: routing_checkpoint || default_routing_checkpoint(task, routing_label)
         )
         raise
@@ -749,7 +749,7 @@ module Hive
         )
       rescue StandardError => e
         record_routing_exception(
-          routing_decision, provider_router, profile, nil, routing_decision&.provider, e,
+          task, routing_decision, provider_router, profile, nil, routing_decision&.provider, e,
           checkpoint: routing_checkpoint || default_routing_checkpoint(task, routing_label)
         )
         raise
@@ -786,14 +786,23 @@ module Hive
           checkpoint: checkpoint,
           exclusions: routing_exclusions(task, checkpoint),
           provenance: {
-            "task" => task.respond_to?(:slug) ? task.slug : File.basename(task.folder.to_s),
+            "task" => usage_task_slug(task),
             "stage" => label,
             "task_folder" => task.folder
           },
           agent_config: cfg,
           profiles: { profile.name.to_s => profile }
         )
-        router.select(request)
+        decision = router.select(request)
+        Hive::Events.emit(
+          task_folder: task.folder,
+          slug: usage_task_slug(task),
+          stage: label,
+          agent: decision.selected? ? decision.candidate.agent : nil,
+          event_type: :routing_decision,
+          message: routing_event_message(decision)
+        )
+        decision
       end
 
       def routing_wait_result(task, decision, status_mode:, profile:)
@@ -834,6 +843,7 @@ module Hive
           signal: signal,
           checkpoint: checkpoint
         )
+        emit_routing_outcome_events(task, decision, outcome)
         result[:routing_decision] = decision
         result[:routing_reason] = decision.reason
         result[:provider] = decision.provider
@@ -858,7 +868,7 @@ module Hive
         result
       end
 
-      def record_routing_exception(decision, router, profile, model, provider, error, checkpoint:)
+      def record_routing_exception(task, decision, router, profile, model, provider, error, checkpoint:)
         return unless decision&.selected? && router
 
         if error.is_a?(Hive::ConfigError) ||
@@ -876,14 +886,44 @@ module Hive
           evidence_ref: "spawn_exception:#{error.class}",
           success: false
         ) if profile&.respond_to?(:normalize_error)
-        router.record_outcome(
+        outcome = router.record_outcome(
           decision: decision,
           success: false,
           signal: signal,
           checkpoint: checkpoint
         )
+        emit_routing_outcome_events(task, decision, outcome)
       rescue Hive::Error
         nil
+      end
+
+      def routing_event_message(decision)
+        if decision.selected?
+          "selected provider=#{decision.provider} model=#{decision.model || 'default'} " \
+            "reason=#{decision.reason} probe=#{decision.probe?}"
+        else
+          "waiting reason=#{decision.wait_reason} blocker=#{decision.reason}"
+        end
+      end
+
+      def emit_routing_outcome_events(task, decision, outcome)
+        if outcome.transition
+          transition = outcome.transition
+          Hive::Events.emit(
+            task_folder: task.folder, slug: usage_task_slug(task), stage: usage_stage_label(task),
+            agent: decision.candidate.agent, event_type: :circuit_transition,
+            message: "provider=#{transition.provider} model=#{transition.model || 'default'} " \
+              "#{transition.from}->#{transition.to} reason=#{transition.reason}"
+          )
+        end
+        return unless decision.probe?
+
+        Hive::Events.emit(
+          task_folder: task.folder, slug: usage_task_slug(task), stage: usage_stage_label(task),
+          agent: decision.candidate.agent, event_type: :probe_outcome,
+          message: "provider=#{decision.provider} model=#{decision.model || 'default'} " \
+            "outcome=#{outcome.transition&.to || 'unchanged'}"
+        )
       end
 
       def default_routing_checkpoint(task, label)

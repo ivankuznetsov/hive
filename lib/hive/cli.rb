@@ -953,6 +953,31 @@ module Hive
       ).call
     end
 
+    desc "circuits [SUBCOMMAND] [PROVIDER]", "Inspect or clear provider circuits"
+    long_desc <<~DESC
+      With no subcommand (or `list`), shows global provider/model circuit state,
+      retry/probe information, and observed/configured provider concurrency.
+
+      `clear PROVIDER --reason TEXT` closes a provider circuit. Add `--model MODEL`
+      to clear only that model overlay. A manual clear affects future dispatches;
+      it never preempts fallback work already running.
+
+      Examples:
+        hive circuits
+        hive circuits --json
+        hive circuits clear claude --reason "credentials refreshed"
+        hive circuits clear claude --model opus --reason "model access restored"
+    DESC
+    option :model, type: :string, desc: "target one model overlay"
+    option :reason, type: :string, desc: "required administrative clear reason"
+    def circuits(subcommand = nil, provider = nil)
+      require "hive/commands/circuits"
+      Hive::Commands::Circuits.new(
+        subcommand, provider,
+        model: options[:model], reason: options[:reason], json: options[:json]
+      ).call
+    end
+
     desc "approve TARGET", "Move a task to the next stage (or --to <stage>); agent-callable equivalent of `mv`"
     long_desc <<~DESC
       TARGET is either a task folder path or a bare slug. A bare slug is

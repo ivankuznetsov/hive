@@ -47,7 +47,7 @@ module Hive
       def record(signal, account:, now: @clock.call)
         return nil unless signal.circuit_worthy?
 
-        mutate do |snap|
+        result = mutate do |snap|
           model = signal.scope == "model" ? signal.model : nil
           before = circuit_at(snap, signal.provider, model) || Circuit.closed
           generation = next_generation!(snap)
@@ -58,12 +58,14 @@ module Hive
           set_circuit!(snap, signal.provider, model, after)
           [ transition(signal.provider, model, signal.scope, before, after, now), true ]
         end
+        append_transition(result)
+        result
       end
 
       def claim_probe(provider:, model:, attempt_id:, owner:, now: @clock.call)
         provider = provider.to_s
         model = model&.to_s
-        mutate do |snap|
+        result = mutate do |snap|
           scope, target_model, before = probe_target(snap, provider, model, now)
           unless before
             availability = availability_from_snapshot(snap, provider, model, now)
@@ -84,6 +86,17 @@ module Hive
             reason: before["reason"], attempt_id: attempt_id.to_s
           ), true ]
         end
+        append_global_event(
+          "event" => "probe_claim",
+          "provider" => result.provider,
+          "model" => result.model,
+          "scope" => result.scope,
+          "reason" => result.reason,
+          "attempt_id" => result.attempt_id,
+          "claimed" => result.claimed,
+          "at" => now.utc.iso8601
+        ) if result.claimed
+        result
       end
 
       def probe_succeeded(provider:, model:, attempt_id:, now: @clock.call)
@@ -129,7 +142,7 @@ module Hive
       def clear(provider:, model: nil, reason:, actor: nil, now: @clock.call)
         provider = provider.to_s
         model = model&.to_s
-        mutate do |snap|
+        result = mutate do |snap|
           before = circuit_at(snap, provider, model)
           next [ nil, false ] unless before
 
@@ -140,6 +153,8 @@ module Hive
           set_circuit!(snap, provider, model, after)
           [ transition(provider, model, model ? "model" : "provider", before, after, now), true ]
         end
+        append_transition(result, event: "manual_clear", actor: actor, summary: reason)
+        result
       end
 
       private
@@ -147,13 +162,46 @@ module Hive
       def complete_probe(provider:, model:, attempt_id:, now:)
         provider = provider.to_s
         model = model&.to_s
-        mutate do |snap|
+        result = mutate do |snap|
           located = locate_probe(snap, provider, model, attempt_id)
           next [ nil, false ] unless located
 
           scope, target_model, before = located
           yield snap, scope, target_model, before
         end
+        append_transition(result)
+        result
+      end
+
+      def append_transition(value, event: "circuit_transition", actor: nil, summary: nil)
+        return unless value.is_a?(Transition)
+
+        append_global_event(
+          "event" => event,
+          "provider" => value.provider,
+          "model" => value.model,
+          "scope" => value.scope,
+          "from" => value.from,
+          "to" => value.to,
+          "reason" => value.reason,
+          "generation" => value.generation,
+          "actor" => actor&.to_s,
+          "summary" => summary&.to_s&.slice(0, 160),
+          "at" => value.at.utc.iso8601
+        )
+      end
+
+      def append_global_event(record)
+        path = Hive::Paths.provider_circuit_events_path
+        FileUtils.mkdir_p(File.dirname(path))
+        line = "#{JSON.generate(record.compact)}\n"
+        File.open(path, File::WRONLY | File::APPEND | File::CREAT, 0o600) do |file|
+          file.chmod(0o600)
+          file.syswrite(line)
+        end
+      rescue SystemCallError, IOError => e
+        warn "[hive.routing] failed to append circuit event: #{e.class}: #{e.message}"
+        nil
       end
 
       def locate_probe(snap, provider, model, attempt_id)

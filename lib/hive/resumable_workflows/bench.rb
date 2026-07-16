@@ -47,7 +47,7 @@ module Hive
           end
         end
         fingerprint = checkpoint_fingerprint(campaign_path, result_paths)
-        generation = fingerprint.delete_prefix("sha256:")[0, 15].to_i(16)
+        generation = checkpoint_generation(campaign_path, result_paths)
         Hive::ResumableWorkflow::Snapshot.new(
           workflow_id: "#{row.project}/bench/#{row.slug}",
           kind: "bench",
@@ -181,6 +181,15 @@ module Hive
           digest << (File.file?(path) ? File.binread(path) : "missing") << "\0"
         end
         "sha256:#{digest.hexdigest}"
+      end
+
+      # The packaged harness atomically rewrites results.json on each outer
+      # resume. Microsecond mtime is therefore a monotonic generation in normal
+      # operation, while the independent content fingerprint detects a writer
+      # that changes bytes without advancing the checkpoint timestamp.
+      def checkpoint_generation(campaign_path, result_paths)
+        paths = [ campaign_path ] + result_paths.select { |path| File.file?(path) }
+        paths.map { |path| (File.mtime(path).to_r * 1_000_000).to_i }.max
       end
 
       def unique_segments(values, label)

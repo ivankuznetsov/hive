@@ -105,6 +105,16 @@ Hermetic coverage lives in `test/unit/workflows/content_test.rb`,
 `test/integration/content_workflow_stage_test.rb`, and
 `test/integration/content_workflow_e2e_test.rb`.
 
+## Resumable workflow contract
+
+`Workflow#resumable` is optional. Descriptor metadata either selects a
+registered adapter or an exact task-relative `hive-resumable-workflow.v1` JSON
+snapshot with `resume: run`. The normalized contract exposes stable workflow
+identity, checkpoint generation/fingerprint, and child status/provenance. The
+built-in bench adapter is the only component that understands campaign/result
+paths; it maps valid paid artifacts to complete, quota-pending cells to
+provider-retryable, semantic failures to terminal, and absent cells to pending.
+
 ## Backlinks
 
 - [[commands/run]] — workflow verb dispatch via `Hive::Commands::StageAction`

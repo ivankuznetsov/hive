@@ -373,3 +373,14 @@ Tests use `with_tmp_global_config` (`test/test_helper.rb:30`) to point `HIVE_HOM
 
 - [[commands/init]] · [[commands/new]] · [[commands/run]] · [[commands/status]] · [[commands/babysit]] · [[commands/patrol]] · [[commands/refactor-patrol]] · [[commands/web]] · [[commands/digest]]
 - [[modules/agent]] · [[modules/digest]] · [[state-model]]
+
+## Provider accounts and routing pools
+
+Global `providers:` entries give shared credential/quota accounts stable keys,
+an execution adapter, optional `max_concurrent`, failure-class cooldowns, and a
+backoff cap. `Config.load_global_provider_accounts` supplies one compatible
+built-in account per shipped adapter when the block is absent. Stage
+`routing.pool` lists candidates in strict order; `routing.required` applies the
+closed context/quality vocabularies and tool/permission set requirements, while
+`routing.pin` is a hard provider/model pin. Without a pool, the resolved legacy
+agent/model/effort becomes a pool of one.

@@ -78,6 +78,32 @@ class EventsTest < Minitest::Test
     end
   end
 
+  def test_routing_events_are_allowed_and_status_shows_latest_routing_reason
+    with_tmp_dir do |dir|
+      Hive::Events.emit(
+        task_folder: dir, slug: "route-test", stage: "4-execute",
+        event_type: :routing_decision,
+        message: "selected provider=codex-main model=gpt-5 reason=first_eligible probe=false"
+      )
+      Hive::Events.emit(
+        task_folder: dir, slug: "route-test", stage: "4-execute",
+        event_type: :circuit_transition,
+        message: "provider=claude-main closed->open reason=session_limit"
+      )
+      Hive::Events.emit(
+        task_folder: dir, slug: "route-test", stage: "4-execute",
+        event_type: :probe_outcome,
+        message: "provider=claude-main outcome=closed"
+      )
+
+      status = File.read(File.join(dir, "status.md"))
+      assert_includes status,
+                      "Routing reason: selected provider=codex-main model=gpt-5 reason=first_eligible probe=false"
+      assert_equal %w[routing_decision circuit_transition probe_outcome],
+                   File.readlines(File.join(dir, "events.jsonl")).map { |line| JSON.parse(line).fetch("event_type") }
+    end
+  end
+
   def test_status_md_rerenders_latest_event_and_recent_tail
     with_tmp_dir do |dir|
       Hive::Events.emit(task_folder: dir, slug: "event-test-260522-aaaa", stage: "6-review",

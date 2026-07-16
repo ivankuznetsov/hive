@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-circuits.v1.json",
+  "title": "Hive provider circuits output (v1)",
+  "oneOf": [
+    { "$ref": "#/$defs/List" },
+    { "$ref": "#/$defs/Clear" },
+    { "$ref": "#/$defs/Error" }
+  ],
+  "$defs": {
+    "Base": {
+      "type": "object",
+      "properties": {
+        "schema": { "const": "hive-circuits" },
+        "schema_version": { "const": 1 },
+        "ok": { "type": "boolean" }
+      },
+      "required": ["schema", "schema_version", "ok"]
+    },
+    "Circuit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "model", "adapter", "state", "reason", "retry_at", "indefinite", "probe", "observed_concurrency", "max_concurrent", "generation", "last_transition_at"],
+      "properties": {
+        "provider": { "type": "string", "minLength": 1 },
+        "model": { "type": ["string", "null"] },
+        "adapter": { "type": ["string", "null"] },
+        "state": { "enum": ["closed", "open", "half_open"] },
+        "reason": { "type": ["string", "null"] },
+        "retry_at": { "type": ["string", "null"] },
+        "indefinite": { "type": "boolean" },
+        "probe": { "type": ["object", "null"] },
+        "observed_concurrency": { "type": "integer", "minimum": 0 },
+        "max_concurrent": { "type": ["integer", "null"], "minimum": 1 },
+        "generation": { "type": "integer", "minimum": 0 },
+        "last_transition_at": { "type": ["string", "null"] }
+      }
+    },
+    "Transition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "model", "from", "to", "reason", "generation", "at"],
+      "properties": {
+        "provider": { "type": "string" },
+        "model": { "type": ["string", "null"] },
+        "from": { "type": "string" },
+        "to": { "type": "string" },
+        "reason": { "type": ["string", "null"] },
+        "generation": { "type": "integer" },
+        "at": { "type": "string" }
+      }
+    },
+    "List": {
+      "allOf": [
+        { "$ref": "#/$defs/Base" },
+        { "type": "object", "additionalProperties": false, "required": ["schema", "schema_version", "ok", "circuits"], "properties": { "schema": { "const": "hive-circuits" }, "schema_version": { "const": 1 }, "ok": { "const": true }, "circuits": { "type": "array", "items": { "$ref": "#/$defs/Circuit" } } } }
+      ]
+    },
+    "Clear": {
+      "allOf": [
+        { "$ref": "#/$defs/Base" },
+        { "type": "object", "additionalProperties": false, "required": ["schema", "schema_version", "ok", "cleared"], "properties": { "schema": { "const": "hive-circuits" }, "schema_version": { "const": 1 }, "ok": { "const": true }, "cleared": { "$ref": "#/$defs/Transition" } } }
+      ]
+    },
+    "Error": {
+      "allOf": [
+        { "$ref": "#/$defs/Base" },
+        { "type": "object", "additionalProperties": false, "required": ["schema", "schema_version", "ok", "error_class", "message"], "properties": { "schema": { "const": "hive-circuits" }, "schema_version": { "const": 1 }, "ok": { "const": false }, "error_class": { "type": "string" }, "message": { "type": "string" } } }
+      ]
+    }
+  }
+}

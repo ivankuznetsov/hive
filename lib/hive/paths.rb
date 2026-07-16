@@ -36,6 +36,10 @@ module Hive
       File.join(provider_routing_state_home, ".provider-circuits.lock")
     end
 
+    def provider_circuit_events_path
+      File.join(provider_routing_state_home, "provider-circuit-events.jsonl")
+    end
+
     def attempt_leases_path
       File.join(provider_routing_state_home, "attempt-leases.v1.json")
     end

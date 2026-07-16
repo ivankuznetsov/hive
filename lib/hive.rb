@@ -75,7 +75,8 @@ module Hive
       # non-zero, bot-originated dispatch back to the originating Telegram
       # chat. See `Hive::Daemon::DispatchResultQueue` (ADV-1).
       "hive-dispatch-result" => 1,
-      "hive-resumable-workflow" => 1
+      "hive-resumable-workflow" => 1,
+      "hive-circuits" => 1
     }.freeze
 
     # Closed enum of Diagnostic.generated_by values accepted by the

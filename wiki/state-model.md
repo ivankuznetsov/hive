@@ -591,3 +591,13 @@ See [[stages/index]] for one page per stage.
 - [[architecture]]
 - [[stages/inbox]] · [[stages/brainstorm]] · [[stages/plan]] · [[stages/execute]] · [[stages/open-pr]] · [[stages/review]] · [[stages/artifacts]] · [[stages/finalize]] · [[stages/done]]
 - [[modules/task]] · [[modules/markers]] · [[modules/lock]] · [[modules/worktree]] · [[modules/config]] · [[modules/patrol]] · [[commands/refactor-patrol]]
+
+## Global provider routing state
+
+Provider health and attempt ownership live outside project/task trees under the
+user state home: `provider-circuits.v1.json` (locked atomic snapshot),
+`attempt-leases.v1.json` (provider/recovery leases), and
+`provider-circuit-events.jsonl` (sanitized append-only audit). Provider circuits
+may contain model overlays. Missing snapshots mean first-run closed state;
+corrupt or unsupported snapshots are preserved and fail routing closed. Task
+folders retain only routing provenance/events and task-local context exclusions.

@@ -51,6 +51,7 @@ Stage:         <stage>
 Updated:       <ts of last event>
 Last event:    <event_type> — <message>
 Current agent: <topmost open agent>
+Routing reason: <latest routing decision>
 
 ## Recent events (last 20)
 - 2026-05-23T08:12:44Z  agent_start  claude execute  cwd=…
@@ -58,6 +59,13 @@ Current agent: <topmost open agent>
 ```
 
 - **Tail window**: last `STATUS_TAIL_LINES = 20` parseable records.
+- **Routing visibility**: `routing_decision`, `circuit_transition`, and
+  `probe_outcome` are closed event types. The latest routing decision is kept
+  on the dedicated `Routing reason:` status line even when a later lifecycle
+  event becomes `Last event`.
+- **Global circuit audit**: sanitized state transitions, probe claims, and
+  manual clears append with one `syswrite` to
+  `<state_home>/provider-circuit-events.jsonl`; raw CLI evidence is never copied.
 - **Current-agent recovery**: walks `CURRENT_AGENT_WALK_LINES = 200` trailing records (a wider window than the 20-event tail) and replays `agent_start` / `agent_end` as a stack so a long-running agent whose start scrolled past the recent-events tail still renders honestly as `Current agent: …` rather than em-dash.
 - **Read budget**: only the last `STATUS_TAIL_BYTES = 16 KiB` of `events.jsonl` is read on each emit. Records average ~140 bytes, so the 16 KiB window fits ≥100 records — comfortably more than the 200-line walk window. Keeps emit sub-millisecond on long-lived tasks.
 - **Atomic write**: writes a uniquely-named `.status.md.tmp.<pid>.<tid>.<hex>` sibling, `fsync` (best-effort — `EINVAL` / `ENOSYS` / `IOError` are swallowed because some filesystems don't support fsync on regular files), then `File.rename` over the target. Concurrent emitters never observe a half-written file. The temp filename includes `Process.pid`, `Thread.current.object_id`, and 4 random hex bytes so two emit paths running in the same process from different threads don't collide on the temp name.

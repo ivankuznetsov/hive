@@ -398,3 +398,14 @@ genuine clean verdict could fail to match and `:error`/retry (worst case
 emit the strict `## High/Medium/Nit` + `No findings.` format so the prose path
 is never exercised; until then, watch `reviews/errors-NN.md` tails for
 clean-but-rejected verdicts and extend `CLEAN_VERDICT` as new phrasings appear.
+
+## Bench checkpoint generation relies on filesystem timestamps (2026-07-16)
+
+The built-in resumable bench adapter derives checkpoint generation from the
+newest campaign/result mtime at microsecond precision and separately hashes all
+bytes as the fingerprint. Normal harness rewrites advance both. A restore tool
+that changes result bytes while preserving or regressing mtimes is rejected as
+a non-advancing/regressing checkpoint instead of recovered automatically. If
+such restores become a supported workflow, the harness should persist an
+explicit monotonically-incremented generation in results rather than relying on
+filesystem timestamps.

@@ -163,6 +163,27 @@ only to satisfy the old parser can drop it and mark the producing agent/council
 stage as the final stage, optionally adding `deliverable:` when the output file
 differs from `state_file`.
 
+## Resumable workflows
+
+A workflow with durable child checkpoints can opt into daemon recovery without
+teaching the daemon its result-file format. A descriptor either names a
+registered adapter (`resumable: {adapter: bench}`) or declares an exact
+task-relative JSON snapshot and the idempotent `run` resume entry point:
+
+```yaml
+resumable:
+  snapshot: recovery/snapshot.json
+  resume: run
+```
+
+The `hive-resumable-workflow.v1` snapshot contains a stable workflow ID,
+checkpoint generation/fingerprint, and children whose status is one of
+`complete`, `pending`, `provider_retryable`, or `terminal`. Complete children
+must name their immutable artifact; provider-retryable children must name the
+failed provider. The daemon routes only pending/provider-retryable children and
+claims one durable workflow-ID/generation lease before invoking one outer
+resume. It never scans undeclared result files or transfers an agent transcript.
+
 For a ready-to-copy example:
 
 ```bash

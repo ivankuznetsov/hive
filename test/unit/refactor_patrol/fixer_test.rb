@@ -1164,7 +1164,9 @@ class RefactorPatrolFixerTest < Minitest::Test
   def test_default_agent_runner_refuses_an_exhausted_architecture_budget
     with_tmp_dir do |dir|
       budget = Object.new
-      budget.define_singleton_method(:acquire) { |stage:| stage != "refactor-patrol-fix" }
+      budget.define_singleton_method(:acquire) do |stage:, minimum_tokens:|
+        minimum_tokens >= 0 && stage != "refactor-patrol-fix"
+      end
       budget.define_singleton_method(:exhaustion_message) { "architecture cycle exhausted" }
       subject = Hive::RefactorPatrol::Fixer.new(dir, cfg: cfg(dir), token_budget: budget)
 

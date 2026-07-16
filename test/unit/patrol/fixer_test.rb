@@ -1254,7 +1254,9 @@ class HivePatrolFixerTest < Minitest::Test
   def test_run_agent_wrapper_refuses_an_exhausted_patrol_budget
     with_tmp_git_repo do |repo|
       budget = Object.new
-      budget.define_singleton_method(:acquire) { |stage:| stage != "patrol-fix" }
+      budget.define_singleton_method(:acquire) do |stage:, minimum_tokens:|
+        minimum_tokens >= 0 && stage != "patrol-fix"
+      end
       budget.define_singleton_method(:exhaustion_message) { "cycle exhausted" }
       fixer = Hive::Patrol::Fixer.new(repo, cfg: cfg(repo), token_budget: budget)
 

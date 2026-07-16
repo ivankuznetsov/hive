@@ -31,6 +31,18 @@ bug, security, performance, documentation, test-gap, maintainability.
 Severity must be critical, high, medium, or low. Confidence must be high,
 medium, or low.
 
+Use at most two bounded inspection rounds before producing the JSON. Read the
+listed slice first, in parallel where possible. Only when that establishes a
+concrete defect hypothesis, use one follow-up round for its direct caller,
+guard, or test. Never run a repository-wide search or return a broad file list;
+if the listed evidence does not establish a production defect, immediately
+write an empty `findings` array.
+
+Response contract: your first response may read the listed paths; your second
+may perform the one bounded follow-up; your third response MUST call `Write`
+for the JSON output and MUST NOT call Read, Grep, or Glob. The output response
+still counts when the correct result is an empty array.
+
 Before reporting a finding:
 - Verify it against the current checkout and try to disprove it by reading
   guards, callers, tests, configuration, and platform/library semantics.

@@ -25,7 +25,8 @@ tags: [module, patrol, review, worktree, pr, codex]
 | `Hive::Patrol::Validator` | `lib/hive/patrol/validator.rb` | Runs operator-configured validation commands in the fix worktree. No commands means not validatable, so no PR. |
 | `Hive::Patrol::PrOpener` | `lib/hive/patrol/pr_opener.rb` | Fail-closed secret-scans the title, body, and exact validated diff; verifies a clean exact local head, remote base, leased push, remote head, and created/existing PR identity; records fingerprint-to-PR state; and invokes `ReviewHandoff`. After `gh pr create`, `reconciliation_pending` stores the exact URL and patch/base/head/worktree receipt while retaining the validated worktree. Retries reconcile only that URL/base/head and mark the ledger `open` only after review handoff settles, so lookup lag cannot orphan a PR or suppress/rerun the finding. Dynamic publication diagnostics are separate from closed reason codes. |
 | `Hive::Patrol::ReviewHandoff` | `lib/hive/patrol/review_handoff.rb` | Creates a synthetic `6-review/patrol-.../` task for an opened patrol PR when `patrol.review_prs` is not false, preserving the patrol worktree and observed proof so the standard review daemon can run reviewers/triage/fix/browser flow. Mandatory and optional calls use the same fingerprint-locked exact reconciliation, so a retry after rename/fsync ambiguity reuses the matching task and rejects PR/head identity conflicts. Staging/quarantine renames use the shared best-effort directory-fsync policy. |
-| `Hive::Patrol::TokenBudget` | `lib/hive/patrol/token_budget.rb` | Shares measured-token and agent-launch ceilings across ordinary review/fix and architecture discovery/action phases and supplies an actual per-launch streamed-token cap to `Hive::Agent`. A project-keyed advisory lock serializes full agent lifetimes so daily headroom cannot be double-spent by concurrent workers. Architecture defaults to a 2x cycle/per-agent-token envelope, while the native budget guard and durable current-day project ceiling remain shared. Missing usage is recorded as an unmetered launch. |
+| `Hive::Patrol::AgentLaunch` | `lib/hive/patrol/agent_launch.rb` | Builds the provider-specific patrol launch envelope. Claude reserves 20,000 tokens for provider-owned initial context plus one conservative token per prompt byte, uses a verified minimal review/fix tool set, and caps reviews at three completed turns. |
+| `Hive::Patrol::TokenBudget` | `lib/hive/patrol/token_budget.rb` | Shares measured-token and agent-launch ceilings across ordinary review/fix and architecture discovery/action phases and supplies an actual per-launch streamed-token cap to `Hive::Agent`. A launch is refused before spawn when the remaining per-agent/cycle/day allowance cannot cover `AgentLaunch`'s initial reserve. A project-keyed advisory lock serializes full agent lifetimes so daily headroom cannot be double-spent by concurrent workers. Architecture defaults to a 2x cycle/per-agent-token envelope, while the native budget guard and durable current-day project ceiling remain shared. Missing usage is recorded as an unmetered launch. |
 | `Hive::Patrol::Dismissals` | `lib/hive/patrol/dismissals.rb` | Reconciles closed-unmerged patrol PRs into `dismissed.json` so the same finding is not immediately re-filed. Retryable publication entries match only their exact receipted PR URL and remain retryable while that PR is open. |
 | `Hive::Patrol::StateStore` | `lib/hive/patrol/state_store.rb` | Creates and atomically writes the `.hive-state/patrol/` JSON tree. |
 
@@ -62,6 +63,19 @@ occurrence, maps language-neutral feature and documentation slices from that
 merge, and requires every architectural thesis to receive a durable accepted,
 flagged, or suppressed disposition before any separately authorized action.
 
+The two reviewers now use deliberately different breadth. Ordinary mapping
+defaults to four owned plus four context files. Architecture keeps six plus six
+for deterministic hotspot/leverage measurement, but presents at most four
+owned files selected with a 32 KiB source budget in the initial agent view; an
+oversized first entrypoint is retained. Both prompts permit
+only one evidence-driven follow-up round and explicitly prefer an empty result
+to speculation. A Claude review receives only `Read`, `Grep`, `Glob`, and
+`Write`, with slash commands disabled; a fix additionally receives `Bash` and
+`Edit`. The third completed review turn is terminal after an already-generated
+`Write` and its final usage delta settle in either provider event order. When a
+non-empty output artifact has been written, Hive terminates the child and lets
+the existing schema/evidence parser decide whether the result is admissible.
+
 The two systems deliberately retain separate namespaces:
 `.hive-state/patrol/` for ordinary patrol and
 `.hive-state/refactor_patrol/v2/` for architecture manifests, jobs, semantic
@@ -77,6 +91,13 @@ Patrol is **opt-in**. A project with **no patrol section at all** (or a patrol s
 
 Operators normally configure scheduling through `patrol.mode`, which [[modules/config]] resolves into cadence plus token, launch, native budget-equivalent, and per-launch token ceilings before the daemon sees the project config. `ultrapatrol`, `high`, `medium`, and `low` deliberately receive progressively smaller envelopes as cadence falls; `off` resolves to `enabled: false`. Measured input, output, and cached tokens from both ordinary and architecture stages share the same project/day total. Architecture stages apply `architecture_budget_multiplier` (default `2`) to cycle token/launch limits and the streamed per-agent token cap, not the native budget-equivalent guard. Unmetered children still consume launch quota, so a provider that cannot report token totals cannot bypass the tier. Explicit granular knobs always win over a set mode and survive the deep-merge even when no `mode:` is set.
 
+Each patrol launch also needs enough remaining allowance for its profile's
+provider-owned initial context reserve plus the rendered prompt bytes. If not,
+`TokenBudget#acquire` returns `insufficient_launch_headroom` without spawning
+or consuming another subscription-backed request. This admission check covers
+ordinary and architecture review/fix launches; architecture's 2x multiplier
+still cannot bypass the shared daily project cap.
+
 `Hive::Daemon::PatrolScheduler` still consumes the lower-level `patrol.trigger` modes. `continuous` dispatches when either the default branch SHA changed or `poll_interval_sec` has elapsed, allowing patrol to keep reviewing existing feature slices between infrequent merges. Each cycle persists a SHA-bound feature cursor; `last_scanned_sha` advances only after the full mapped sweep succeeds. `new_commits` therefore keeps dispatching successive batches until that sweep completes. `timer` dispatches solely from `last_run_at` age.
 
 ## Safety invariants
@@ -88,6 +109,10 @@ Operators normally configure scheduling through `patrol.mode`, which [[modules/c
 - A failed patrol-to-review handoff is not treated as an active fingerprint state, so later patrol cycles can retry instead of losing the opened PR from the review queue; an exact existing synthetic task is reconciled instead of duplicated.
 - Closed-unmerged patrol PRs become dismissals and are skipped on future cycles.
 - Agent prompts treat findings and recommendations as data; validation commands come only from project config.
+- Review launches are admitted only with conservative initial-context headroom,
+  use a bounded provider tool context, and stop after the completed artifact or
+  three Claude turns; the structured parser still fails closed on malformed or
+  incomplete output.
 
 ## Backlinks
 

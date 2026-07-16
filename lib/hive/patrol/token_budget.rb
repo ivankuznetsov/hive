@@ -38,7 +38,7 @@ module Hive
         @cycle_unmetered_spawns = 0
       end
 
-      def acquire(stage: "patrol")
+      def acquire(stage: "patrol", minimum_tokens: 0)
         unless acquire_launch_lock
           activity = today_activity
           reason = @launch_lock_error ? "budget_lock_unavailable" : "agent_in_flight"
@@ -54,6 +54,15 @@ module Hive
           return false
         end
 
+        available_tokens = available_tokens(activity, stage)
+        if minimum_tokens > available_tokens
+          @last_exhaustion = exhaustion(
+            "insufficient_launch_headroom", activity, stage
+          ).merge(required_tokens: minimum_tokens, available_tokens: available_tokens)
+          release_launch_lock
+          return false
+        end
+
         @cycle_spawns += 1
         @last_exhaustion = nil
         true
@@ -61,7 +70,12 @@ module Hive
 
       def exhaustion_message
         detail = @last_exhaustion || exhaustion("unknown", today_activity, "patrol")
-        "patrol agent budget exhausted (#{detail.fetch(:reason)}; " \
+        headroom = ""
+        if detail[:required_tokens]
+          headroom = "required=#{detail.fetch(:required_tokens)} tokens, " \
+                     "available=#{detail.fetch(:available_tokens)}; "
+        end
+        "patrol agent budget exhausted (#{detail.fetch(:reason)}; #{headroom}" \
           "cycle=#{detail.fetch(:cycle_tokens)}/#{detail.fetch(:max_tokens_per_cycle)} tokens, " \
           "today=#{detail.fetch(:today_tokens)}/#{detail.fetch(:max_tokens_per_day)} tokens, " \
           "spawns=#{detail.fetch(:cycle_spawns)}/#{detail.fetch(:max_agent_spawns_per_cycle)} cycle, " \
@@ -81,10 +95,7 @@ module Hive
       # a larger token allowance, but not a looser native dollar-equivalent cap.
       def max_tokens(stage: "patrol")
         activity = today_activity
-        per_agent = effective_limit("max_tokens_per_agent", stage)
-        cycle_remaining = effective_limit("max_tokens_per_cycle", stage) - @cycle_tokens
-        daily_remaining = @limits.fetch("max_tokens_per_day") - activity.fetch(:tokens)
-        [ per_agent, cycle_remaining, daily_remaining ].min
+        available_tokens(activity, stage)
       end
 
       def record!(result:, profile:, stage:, started_at:)
@@ -195,6 +206,13 @@ module Hive
         end
 
         nil
+      end
+
+      def available_tokens(activity, stage)
+        per_agent = effective_limit("max_tokens_per_agent", stage)
+        cycle_remaining = effective_limit("max_tokens_per_cycle", stage) - @cycle_tokens
+        daily_remaining = @limits.fetch("max_tokens_per_day") - activity.fetch(:tokens)
+        [ per_agent, cycle_remaining, daily_remaining ].min
       end
 
       def exhaustion(reason, activity, stage)

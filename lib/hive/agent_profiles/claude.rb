@@ -30,7 +30,18 @@ module Hive
       status_detection_mode: :state_file_marker,
       usage_extractor: Hive::AgentProfiles::UsageExtractors::CLAUDE,
       skill_verifier: Hive::SkillCheck::Claude.method(:verify),
-      cli_capabilities: { safe_mode: [ "--safe-mode" ] }
+      cli_capabilities: {
+        safe_mode: [ "--safe-mode" ],
+        patrol_review_context: [
+          "--safe-mode", "--disable-slash-commands",
+          "--tools", "Read,Grep,Glob,Write"
+        ],
+        patrol_fix_context: [
+          "--safe-mode", "--disable-slash-commands",
+          "--tools", "Read,Grep,Glob,Bash,Edit,Write"
+        ]
+      },
+      initial_context_tokens: 20_000
     )
 
     register(:claude, CLAUDE)

@@ -457,8 +457,10 @@ module Hive
           "test" => nil
         },
         "review" => {
-          "max_context_files" => 24,
-          "max_owned_files" => 12,
+          # Keep one ordinary review slice small enough for the low 40k tier.
+          # Architecture patrol has its own wider slice below.
+          "max_context_files" => 4,
+          "max_owned_files" => 4,
           # Patrol PRs flow into 6-review the same as human PRs, but patrol
           # opens many PRs per cycle — running the multi-persona
           # ce-code-review fan-out (6–18 subagents) on each is expensive.
@@ -543,8 +545,8 @@ module Hive
           }
         },
         "review" => {
-          "max_context_files" => 24,
-          "max_owned_files" => 12
+          "max_context_files" => 6,
+          "max_owned_files" => 6
         }
       },
       # Daily shipped digest. The daemon schedules one global `hive digest`

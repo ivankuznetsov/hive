@@ -467,6 +467,25 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_materialize_gh_auth_config_removes_partial_copy_after_io_error
+    with_tmp_dir do |dir|
+      source = File.join(dir, "gh")
+      hosts = File.join(source, "hosts.yml")
+      FileUtils.mkdir_p(source)
+      File.write(hosts, "github.com:\n  user: hive-test\n")
+      File.chmod(0o600, hosts)
+      auth_dir = nil
+
+      with_replaced_singleton_method(IO, :copy_stream, ->(*) { raise IOError, "copy failed" }) do
+        auth_dir = Hive::Babysitter::DryRunEnv.materialize_gh_auth_config(source)
+      end
+
+      assert_empty Dir.children(auth_dir), "a failed auth copy must not leave partial credentials"
+    ensure
+      FileUtils.rm_rf(auth_dir) if auth_dir
+    end
+  end
+
   def test_with_env_pins_skip_log_against_command_local_overrides
     with_tmp_dir do |dir|
       worktree = File.join(dir, "worktree")

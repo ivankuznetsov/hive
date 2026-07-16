@@ -6,6 +6,7 @@ require "hive"
 require "hive/refactor_patrol/review_agent_runner"
 require "hive/refactor_patrol/state_store"
 require "hive/refactor_patrol/thesis_normalizer"
+require "hive/patrol/source_reader"
 require "hive/stages/base"
 
 module Hive
@@ -15,6 +16,8 @@ module Hive
     # thesis is ThesisNormalizer's job; how the agent is spawned is
     # ReviewAgentRunner's.
     class Reviewer
+      MAX_PROMPT_OWNED_FILES = 4
+      MAX_PROMPT_SOURCE_BYTES = 32 * 1024
       TemplateBindings = Struct.new(
         :project_root, :feature, :leverage, :commands, :output_path,
         :max_theses, :source_pr, :output_mode, :user_supplied_tag,
@@ -44,6 +47,7 @@ module Hive
                         )
         @review_errors = []
         @feature_results = []
+        @prompt_source_reader = Hive::Patrol::SourceReader.new(@project_root)
         @normalizer = ThesisNormalizer.new(
           project_root: @project_root,
           commands: configured_commands,
@@ -129,7 +133,7 @@ module Hive
           "refactor_patrol_review_prompt.md.erb",
           TemplateBindings.new(
             project_root: @project_root,
-            feature: feature,
+            feature: bounded_prompt_feature(feature),
             leverage: leverage,
             commands: configured_commands,
             output_path: output_path,
@@ -169,6 +173,34 @@ module Hive
             result
           end
         end
+      end
+
+      # Hotspot measurement and evidence validation use the complete mapped
+      # component. The model gets a smaller initial view so a high-leverage
+      # component does not spend its architecture allowance reading every file
+      # before it can form a hypothesis; its bounded follow-up can request a
+      # direct dependency when the initial evidence warrants one.
+      def bounded_prompt_feature(feature)
+        feature.dup.tap do |bounded|
+          bounded.owned_files = bounded_owned_files(feature.owned_files)
+          bounded.context_files = []
+          bounded.tests = []
+        end
+      end
+
+      def bounded_owned_files(paths)
+        remaining = MAX_PROMPT_SOURCE_BYTES
+        selected = []
+        Array(paths).each do |path|
+          break if selected.size >= MAX_PROMPT_OWNED_FILES
+
+          bytes = @prompt_source_reader.read_bytes(path, limit: remaining + 1).bytesize
+          if selected.empty? || bytes <= remaining
+            selected << path
+            remaining = [ remaining - bytes, 0 ].max
+          end
+        end
+        selected
       end
 
       def agent_failed?(result)

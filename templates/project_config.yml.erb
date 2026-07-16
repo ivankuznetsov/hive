@@ -300,8 +300,8 @@ patrol:
   # single-pass adapter; optionally add the ce-code-review fan-out or
   # Claude during init when you want broader patrol review coverage.
   review:
-    max_context_files: 24
-    max_owned_files: 12
+    max_context_files: 4
+    max_owned_files: 4
     reviewers:
 <% if patrol_reviewers.include?("codex-native-review") -%>
       # Native `codex review` — one cheap, tuned, read-only pass whose

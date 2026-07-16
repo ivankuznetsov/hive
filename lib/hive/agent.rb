@@ -13,7 +13,8 @@ require "hive/permission_scope"
 module Hive
   class Agent
     FINAL_MESSAGE_TAIL_BYTES = 64 * 1024
-    TOKEN_LIMIT_TERM_GRACE_SECONDS = 3
+    TERMINATION_GRACE_SECONDS = 3
+    COMPLETION_EVENT_GRACE_SECONDS = 3
 
     # Converts provider JSONL usage events into one monotonic in-flight count.
     # Claude reports input/cache at message_start and cumulative output for the
@@ -127,20 +128,22 @@ module Hive
       "HIVE_SCREENOTE_BASE_URL" => nil
     }.freeze
 
-    attr_reader :task, :prompt, :add_dirs, :cwd, :max_budget_usd, :max_tokens, :timeout_sec,
+    attr_reader :task, :prompt, :add_dirs, :cwd, :max_budget_usd, :max_tokens, :max_turns, :timeout_sec,
                 :profile, :expected_output, :status_mode, :permission_mode
 
     def initialize(task:, prompt:, max_budget_usd:, timeout_sec:,
                    add_dirs: [], cwd: nil, log_label: nil,
                    profile: nil, expected_output: nil, status_mode: nil,
                    permission_mode: nil, allowed_tools: nil,
-                   disallowed_tools: nil, cli_flags: [], max_tokens: nil)
+                   disallowed_tools: nil, cli_flags: [], max_tokens: nil,
+                   max_turns: nil)
       @task = task
       @prompt = prompt
       @add_dirs = Array(add_dirs)
       @cwd = cwd || task.folder
       @max_budget_usd = max_budget_usd
       @max_tokens = normalize_max_tokens(max_tokens)
+      @max_turns = normalize_max_turns(max_turns)
       @timeout_sec = timeout_sec
       @log_label = log_label || task.stage_name
       @profile = profile || Hive::AgentProfiles.lookup(:claude)
@@ -237,7 +240,12 @@ module Hive
       last_usage = nil
       token_meter = StreamTokenMeter.new(@profile.name)
       resource_exhaustion = nil
-      resource_exhaustion_deadline = nil
+      termination_deadline = nil
+      completion_event_deadline = nil
+      completed_turns = 0
+      output_completed = false
+      write_tool_in_current_turn = false
+      write_turn_completed = false
       plain_tail = +""
       stdin_file = prompt_stdin_file
       File.open(log_file, "a") do |log|
@@ -294,6 +302,17 @@ module Hive
               detail = json && (json["message"] || (json["error"].is_a?(Hash) ? json["error"]["message"] : nil))
               limit_text = (detail || line).to_s.strip
             end
+            turn_started = claude_turn_started?(json)
+            if turn_started
+              if completion_event_deadline && termination_deadline.nil?
+                termination_deadline = begin_termination(pgid)
+                completion_event_deadline = nil
+              end
+              write_tool_in_current_turn = false
+              write_turn_completed = false
+            end
+            write_tool_in_current_turn = true if claude_write_tool_event?(json)
+
             usage = json && @profile.extract_usage_event(json)
             if usage
               last_usage = usage
@@ -304,10 +323,38 @@ module Hive
                   limit: @max_tokens,
                   observed: observed_tokens
                 }
-                unless token_meter.terminal?(json)
-                  resource_exhaustion_deadline = Time.now + TOKEN_LIMIT_TERM_GRACE_SECONDS
-                  kill_group(pgid)
-                end
+              end
+            end
+            turn_completed = claude_turn_completed?(json)
+            if turn_completed
+              completed_turns += 1
+              write_turn_completed = true if write_tool_in_current_turn
+              if @max_turns && completed_turns >= @max_turns && resource_exhaustion.nil?
+                resource_exhaustion = {
+                  reason: "turn_limit",
+                  limit: @max_turns,
+                  observed: completed_turns
+                }
+              end
+            end
+
+            output_completed ||= output_completed_event?(json)
+            terminal_usage = json && token_meter.terminal?(json)
+            if output_completed && (write_turn_completed || terminal_usage)
+              unless terminal_usage
+                termination_deadline ||= begin_termination(pgid)
+              end
+              completion_event_deadline = nil
+            elsif output_completed
+              completion_event_deadline ||= Time.now + COMPLETION_EVENT_GRACE_SECONDS
+            elsif resource_exhaustion && termination_deadline.nil?
+              if write_turn_completed
+                # Claude can report the turn delta either before or after it
+                # executes the Write tool. Let that already-generated local
+                # tool call finish, but never permit another model turn.
+                completion_event_deadline ||= Time.now + COMPLETION_EVENT_GRACE_SECONDS
+              elsif !terminal_usage
+                termination_deadline = begin_termination(pgid)
               end
             end
           end
@@ -323,7 +370,7 @@ module Hive
       timed_out = false
       deadline = Time.now + @timeout_sec
       status = nil
-      token_limit_killed = false
+      termination_force_killed = false
       begin
         loop do
           remaining = deadline - Time.now
@@ -332,9 +379,13 @@ module Hive
             kill_group(pgid)
             break
           end
-          if resource_exhaustion_deadline && !token_limit_killed && Time.now >= resource_exhaustion_deadline
+          if completion_event_deadline && termination_deadline.nil? && Time.now >= completion_event_deadline
+            termination_deadline = begin_termination(pgid)
+            completion_event_deadline = nil
+          end
+          if termination_deadline && !termination_force_killed && Time.now >= termination_deadline
             force_kill_group(pgid)
-            token_limit_killed = true
+            termination_force_killed = true
           end
           # Capture status atomically into a local; avoids races on $? / $CHILD_STATUS
           # being clobbered by other Process.wait calls (e.g. from the reader thread).
@@ -373,7 +424,7 @@ module Hive
       message = final_message || plain_message
       message_source = final_message ? final_message_source : (plain_message.empty? ? nil : :plain)
 
-      reported_usage = resource_exhaustion ? token_meter.usage : last_usage
+      reported_usage = resource_exhaustion || output_completed ? token_meter.usage : last_usage
       {
         pid: pid,
         pgid: pgid,
@@ -386,6 +437,7 @@ module Hive
         usage: reported_usage,
         model: reported_usage&.dig(:model),
         resource_exhaustion: resource_exhaustion,
+        output_completed: output_completed,
         status: nil
       }
     ensure
@@ -478,6 +530,11 @@ module Hive
       nil
     end
 
+    def begin_termination(pgid)
+      kill_group(pgid)
+      Time.now + TERMINATION_GRACE_SECONDS
+    end
+
     def sleep_grace_then_kill(pgid, pid)
       grace_deadline = Time.now + 3
       until Time.now >= grace_deadline
@@ -500,6 +557,11 @@ module Hive
     #   = :ok. Used by reviewer/triage spawns where a structured artifact
     #   is the success criterion.
     def handle_exit(result)
+      if result[:output_completed] && completed_output_file?
+        result[:status] = :ok
+        return
+      end
+
       if result[:resource_exhaustion]
         handle_resource_exhaustion(result)
         return
@@ -555,21 +617,87 @@ module Hive
       raise ArgumentError, "max_tokens must be a positive integer"
     end
 
+    def normalize_max_turns(value)
+      return nil if value.nil?
+
+      amount = Integer(value)
+      raise ArgumentError, "max_turns must be a positive integer" unless amount.positive?
+
+      amount
+    rescue ArgumentError, TypeError
+      raise ArgumentError, "max_turns must be a positive integer"
+    end
+
+    def claude_turn_completed?(event)
+      @profile.name == :claude &&
+        event.is_a?(Hash) &&
+        event["type"] == "stream_event" &&
+        event.dig("event", "type") == "message_delta"
+    end
+
+    def claude_turn_started?(event)
+      @profile.name == :claude &&
+        event.is_a?(Hash) &&
+        event["type"] == "stream_event" &&
+        event.dig("event", "type") == "message_start"
+    end
+
+    def claude_write_tool_event?(event)
+      return false unless @profile.name == :claude && event.is_a?(Hash)
+
+      block = event.dig("event", "content_block")
+      return true if block.is_a?(Hash) && block["type"] == "tool_use" && block["name"] == "Write"
+
+      message = event["message"]
+      content = message.is_a?(Hash) ? message["content"] : nil
+      Array(content).any? do |item|
+        item.is_a?(Hash) && item["type"] == "tool_use" && item["name"] == "Write"
+      end
+    end
+
+    def output_completed_event?(event)
+      (@max_turns || @max_tokens) &&
+        @profile.name == :claude && event.is_a?(Hash) && completed_output_file?
+    end
+
     def handle_resource_exhaustion(result)
       detail = result.fetch(:resource_exhaustion)
-      message = "agent reached in-flight token limit " \
+      if completed_output_file?
+        result[:status] = :ok
+        return
+      end
+
+      resource = detail.fetch(:reason) == "turn_limit" ? "turn" : "token"
+      message = "agent reached in-flight #{resource} limit " \
                 "(observed #{detail.fetch(:observed)}, limit #{detail.fetch(:limit)})"
       if effective_status_mode == :state_file_marker
-        Hive::Markers.set(
-          @task.state_file,
-          :error,
-          reason: "token_limit",
-          observed_tokens: detail.fetch(:observed),
-          max_tokens: detail.fetch(:limit)
-        )
+        Hive::Markers.set(@task.state_file, :error, **resource_exhaustion_marker_attrs(detail))
       end
       result[:status] = :error
       result[:error_message] = message
+    end
+
+    def resource_exhaustion_marker_attrs(detail)
+      if detail.fetch(:reason) == "token_limit"
+        {
+          reason: "token_limit",
+          observed_tokens: detail.fetch(:observed),
+          max_tokens: detail.fetch(:limit)
+        }
+      else
+        {
+          reason: "turn_limit",
+          observed_turns: detail.fetch(:observed),
+          max_turns: detail.fetch(:limit)
+        }
+      end
+    end
+
+    def completed_output_file?
+      effective_status_mode == :output_file_exists &&
+        !@expected_output.to_s.empty? &&
+        File.exist?(@expected_output) &&
+        File.size(@expected_output).positive?
     end
 
     def limit_error_message(result)
@@ -704,7 +832,8 @@ module Hive
       # Full @cwd path per the plan U3 contract: basename collapses the
       # worktree-vs-task-folder distinction (e.g. worktree-feat-x vs
       # feat-x-260424-aaaa) and loses that signal in the event log.
-      "cwd=#{@cwd} timeout_sec=#{@timeout_sec} max_budget_usd=#{@max_budget_usd} max_tokens=#{@max_tokens}"
+      "cwd=#{@cwd} timeout_sec=#{@timeout_sec} max_budget_usd=#{@max_budget_usd} " \
+        "max_tokens=#{@max_tokens} max_turns=#{@max_turns}"
     end
 
     def agent_end_message(result, exception)

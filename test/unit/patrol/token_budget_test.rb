@@ -138,6 +138,19 @@ class PatrolTokenBudgetTest < Minitest::Test
     end
   end
 
+  def test_launch_is_refused_when_remaining_tokens_cannot_cover_initial_context
+    with_budget(config(max_tokens_per_cycle: 100, max_tokens_per_day: 100)) do |budget, _dir, now|
+      assert budget.acquire(stage: "patrol-review")
+      record(budget, now, { input: 70, output: 0, cached: 0 })
+
+      refute budget.acquire(stage: "patrol-review", minimum_tokens: 40)
+      assert_equal "insufficient_launch_headroom", budget.last_exhaustion.fetch(:reason)
+      assert_equal 40, budget.last_exhaustion.fetch(:required_tokens)
+      assert_equal 30, budget.last_exhaustion.fetch(:available_tokens)
+      assert_match(/required=40 tokens, available=30/, budget.exhaustion_message)
+    end
+  end
+
   def test_architecture_gets_doubled_cycle_and_spawn_limits_but_not_a_looser_native_budget_guard
     with_budget(config(max_tokens_per_day: 300, max_agent_spawns_per_cycle: 4)) do |budget, _dir, now|
       assert budget.acquire(stage: "patrol-review")

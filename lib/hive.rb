@@ -13,7 +13,7 @@ module Hive
     # removed; adding new keys is non-breaking and does NOT require a bump.
     # Single source of truth so the two emit sites can't drift.
     SCHEMA_VERSIONS = {
-      "hive-status" => 4,
+      "hive-status" => 5,
       "hive-init" => 2,
       "hive-status-diagnose" => 2,
       "hive-run" => 2,
@@ -183,6 +183,7 @@ module Hive
       ARCHIVED            = "archived".freeze
       MANUAL_STEERING     = "manual_steering".freeze
       ERROR               = "error".freeze
+      ADMISSION_ERROR     = "admission_error".freeze
       ALL = constants(false).reject { |c| c == :ALL }.map { |c| const_get(c) }.freeze
     end
 

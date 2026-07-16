@@ -5,6 +5,44 @@ require "hive/task_action"
 class CommandsStatusTest < Minitest::Test
   include HiveTestHelper
 
+  def test_corrupt_metadata_in_dispatchable_stage_emits_structured_admission_error
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      folder = write_status_task(hive_state, "4-execute", "corrupt-task-260716-abcd",
+                                 state_file: "task.md", marker: "EXECUTE_COMPLETE")
+      File.write(File.join(folder, "meta.yml"), "depends_on: [unterminated\n")
+
+      row = Hive::Commands::Status.new.json_payload([
+        status_project(project_root, hive_state)
+      ]).fetch("projects").first.fetch("tasks").first
+
+      assert_equal true, row.fetch("blocked")
+      assert_nil row.fetch("blocked_by")
+      assert_nil row.fetch("dependency_stage")
+      assert_equal "admission_error", row.fetch("action")
+      assert_nil row.fetch("suggested_command")
+      assert_equal "dependency_metadata_unreadable", row.fetch("admission_error").fetch("reason_code")
+    end
+  end
+
+  def test_plan_only_dependency_is_held_even_after_raw_stage_move
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      folder = write_status_task(hive_state, "5-open-pr", "plan-drift-task-260716-abcd",
+                                 state_file: "pr.md", marker: "EXECUTE_COMPLETE")
+      Hive::TaskMeta.write(folder, id: 1, slug: File.basename(folder), display_name: nil)
+      File.write(File.join(folder, "plan.md"), "---\ndepends_on: prerequisite-task\n---\n# Plan\n")
+
+      row = Hive::Commands::Status.new.json_payload([
+        status_project(project_root, hive_state)
+      ]).fetch("projects").first.fetch("tasks").first
+
+      assert_equal true, row.fetch("blocked")
+      assert_equal "admission_error", row.fetch("action")
+      assert_equal "plan_dependency_missing", row.fetch("admission_error").fetch("reason_code")
+    end
+  end
+
   def test_json_payload_ignores_archived_manual_stage_sibling
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")
@@ -167,7 +205,8 @@ class CommandsStatusTest < Minitest::Test
       row = tasks.find { |candidate| candidate.fetch("slug") == slug }
 
       refute_nil row, "an unloadable task must surface as an Error row, not vanish from status"
-      assert_equal "error", row.fetch("action")
+      assert_equal "admission_error", row.fetch("action")
+      assert_equal "dependency_validation_failed", row.fetch("admission_error").fetch("reason_code")
       assert_equal "error", row.fetch("marker")
       assert_equal "invalid_task", row.fetch("attrs").fetch("reason")
       assert_includes row.fetch("attrs").fetch("message"), "ghost-workflow"
@@ -391,13 +430,14 @@ class CommandsStatusTest < Minitest::Test
       ]).fetch("projects").first.fetch("tasks")
       row = tasks.find { |task| task.fetch("slug") == File.basename(dependent) }
 
-      assert_equal File.basename(base), row.fetch("blocked_by")
-      assert_equal "8-finalize", row.fetch("dependency_stage")
+      assert_nil row.fetch("blocked_by")
+      assert_nil row.fetch("dependency_stage")
       assert_equal false, row.fetch("blocked")
+      assert_nil row.fetch("admission_error")
     end
   end
 
-  def test_active_only_payload_resolves_dependency_from_extra_dependency_tasks
+  def test_active_only_payload_does_not_trust_consumer_supplied_dependency_tasks
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")
       dependent = write_status_task(hive_state, "4-execute", "dependent-task-260626-bbbb",
@@ -431,12 +471,11 @@ class CommandsStatusTest < Minitest::Test
       assert_equal true, unresolved.fetch("blocked")
       assert_nil unresolved.fetch("blocked_by"),
                  "without archived identities, active-only dependency resolution is unresolved"
-      assert_equal true, blocked.fetch("blocked")
-      assert_equal "archived-task-260626-aaaa", blocked.fetch("blocked_by")
-      assert_equal "7-artifacts", blocked.fetch("dependency_stage")
-      assert_equal false, unblocked.fetch("blocked")
-      assert_equal "archived-task-260626-aaaa", unblocked.fetch("blocked_by")
-      assert_equal "9-done", unblocked.fetch("dependency_stage")
+      [ blocked, unblocked ].each do |row|
+        assert_equal true, row.fetch("blocked")
+        assert_nil row.fetch("blocked_by")
+        assert_equal "dependency_task_missing", row.fetch("admission_error").fetch("reason_code")
+      end
     end
   end
 
@@ -456,11 +495,14 @@ class CommandsStatusTest < Minitest::Test
       assert_nil row.fetch("blocked_by")
       assert_nil row.fetch("dependency_stage")
       assert_equal true, row.fetch("blocked")
+      assert_equal "dependency_task_missing", row.fetch("admission_error").fetch("reason_code")
+      assert_equal "admission_error", row.fetch("action")
+      assert_nil row.fetch("suggested_command")
 
       out, = capture_io do
         Hive::Commands::Status.new.send(:render_project, project, project_count: 1)
       end
-      assert_includes out, "⏸ blocked by missing-task (unresolved)"
+      assert_includes out, "admission dependency_task_missing"
     end
   end
 
@@ -558,12 +600,7 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
-  # The per-row fail-open rescue in apply_dependency_result is a finer-grained
-  # net than the project-level degrade: one row whose resolve raises must
-  # serialize blocked:false with a breadcrumb while sibling rows keep their
-  # resolved dependency state. Without this test, removing the per-row rescue
-  # (collapsing back to whole-project degradation) passes every other test.
-  def test_one_raising_dependency_row_fails_open_without_blanking_siblings
+  def test_one_raising_admission_row_fails_closed_without_blanking_siblings
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")
       base = write_status_task(hive_state, "7-artifacts", "base-task-260618-aaaa",
@@ -578,17 +615,19 @@ class CommandsStatusTest < Minitest::Test
       Hive::TaskMeta.write(bad, id: 3, slug: File.basename(bad),
                                 display_name: nil, depends_on: File.basename(base))
 
-      original = Hive::Dependencies.method(:resolve)
-      raising = lambda do |depends_on:, tasks:, threshold_stage:, task: nil|
-        raise "boom" if task && task[:slug] == File.basename(bad)
+      original_context = Hive::DependencySnapshot.admission_context([
+        { "name" => "demo", "path" => project_root, "hive_state_path" => hive_state }
+      ])
+      raising_context = Object.new
+      raising_context.define_singleton_method(:verdict) do |project:, slug:|
+        raise "boom" if slug == File.basename(bad)
 
-        original.call(depends_on: depends_on, tasks: tasks,
-                      threshold_stage: threshold_stage, task: task)
+        original_context.verdict(project: project, slug: slug)
       end
 
       payload = nil
       _out, err = capture_io do
-        with_replaced_singleton_method(Hive::Dependencies, :resolve, raising) do
+        with_replaced_singleton_method(Hive::DependencySnapshot, :admission_context, ->(_projects) { raising_context }) do
           payload = Hive::Commands::Status.new.json_payload([
             { "name" => "demo", "path" => project_root, "hive_state_path" => hive_state }
           ])
@@ -599,14 +638,16 @@ class CommandsStatusTest < Minitest::Test
       bad_row = tasks.find { |t| t.fetch("slug") == File.basename(bad) }
       good_row = tasks.find { |t| t.fetch("slug") == File.basename(good) }
 
-      assert_equal false, bad_row.fetch("blocked"),
-                   "a row whose resolve raises must fail open to blocked:false"
+      assert_equal true, bad_row.fetch("blocked"),
+                   "a row whose validator raises must fail closed"
       assert_nil bad_row.fetch("blocked_by")
+      assert_equal "dependency_validation_failed", bad_row.fetch("admission_error").fetch("reason_code")
+      assert_equal "admission_error", bad_row.fetch("action")
       assert_equal true, good_row.fetch("blocked"),
                    "a sibling row must keep its resolved dependency state, not be blanked by the raising row"
       assert_equal File.basename(base), good_row.fetch("blocked_by")
-      assert_match(/dependency resolve failed for/, err,
-                   "the per-row fail-open must leave a stderr breadcrumb")
+      assert_match(/dependency admission failed for/, err,
+                   "the per-row fail-closed backstop must leave a stderr breadcrumb")
     end
   end
 
@@ -673,8 +714,13 @@ class CommandsStatusTest < Minitest::Test
         FileUtils.mkdir_p(bad_state)
         # 5-open-pr is below the allowed gate stages, so Config.load raises.
         File.write(File.join(bad_state, "config.yml"), "dependency_gate_stage: 5-open-pr\n")
-        write_status_task(bad_state, "4-execute", "bad-proj-task-260618-aaaa",
-                          state_file: "task.md", marker: "EXECUTE_COMPLETE")
+        bad_base = write_status_task(bad_state, "4-execute", "bad-base-task-260618-aaaa",
+                                     state_file: "task.md", marker: "EXECUTE_COMPLETE")
+        bad_dependent = write_status_task(bad_state, "4-execute", "bad-proj-task-260618-aaaa",
+                                          state_file: "task.md", marker: "EXECUTE_COMPLETE")
+        Hive::TaskMeta.write(bad_base, id: 1, slug: File.basename(bad_base), display_name: nil)
+        Hive::TaskMeta.write(bad_dependent, id: 2, slug: File.basename(bad_dependent), display_name: nil,
+                                            depends_on: File.basename(bad_base))
         write_status_task(good_state, "4-execute", "good-proj-task-260618-bbbb",
                           state_file: "task.md", marker: "EXECUTE_COMPLETE")
 
@@ -696,8 +742,9 @@ class CommandsStatusTest < Minitest::Test
                         "the bad-config project still reports tasks (gate falls back to default)"
         assert_includes good_slugs, "good-proj-task-260618-bbbb",
                         "a healthy project must still report its tasks"
-        assert_match(/unusable dependency_gate_stage/, err,
-                     "the degraded gate must leave a stderr breadcrumb")
+        held = bad.fetch("tasks").find { |task| task["slug"] == File.basename(bad_dependent) }
+        assert_equal "dependency_gate_unknown", held.fetch("admission_error").fetch("reason_code")
+        assert_match(/dependency_gate_stage/, err)
       end
     end
   end
@@ -1143,10 +1190,13 @@ class CommandsStatusTest < Minitest::Test
       review = tasks.find { |task| task.fetch("stage") == "6-review" }
 
       assert_equal [ "4-execute", "6-review" ], tasks.map { |task| task.fetch("stage") }.sort
-      assert_equal "hive findings #{slug} --stage 4-execute", execute.fetch("suggested_command")
+      assert_equal "admission_error", execute.fetch("action")
+      assert_equal "dependency_validation_failed", execute.fetch("admission_error").fetch("reason_code")
+      assert_nil execute.fetch("suggested_command")
       # Symmetric guard on the higher-stage survivor: :review_complete routes to
       # the `artifacts` workflow verb, which carries --from for idempotency.
-      assert_equal "hive artifacts #{slug} --from 6-review", review.fetch("suggested_command")
+      assert_equal "admission_error", review.fetch("action")
+      assert_nil review.fetch("suggested_command")
     end
   end
 

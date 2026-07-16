@@ -41,4 +41,21 @@ class AttemptsOutputReferenceTest < Minitest::Test
       FileUtils.rm_f(outside) if outside
     end
   end
+
+  def test_rejects_missing_files_invalid_integrity_and_unverifiable_references
+    with_tmp_dir do |root|
+      assert_raises(Hive::Attempts::InvalidOutputReference) do
+        Hive::Attempts::OutputReference.build(File.join(root, "missing"), root: root)
+      end
+
+      base = { "path" => "result", "size" => 1, "sha256" => "0" * 64 }
+      assert_raises(Hive::Attempts::InvalidOutputReference) do
+        Hive::Attempts::OutputReference.validate_shape!(base.merge("size" => -1))
+      end
+      assert_raises(Hive::Attempts::InvalidOutputReference) do
+        Hive::Attempts::OutputReference.validate_shape!(base.merge("sha256" => "BAD"))
+      end
+      refute Hive::Attempts::OutputReference.verify(base.merge("path" => "../escape"), root: root)
+    end
+  end
 end

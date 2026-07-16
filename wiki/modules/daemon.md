@@ -3,7 +3,7 @@ title: Hive::Daemon
 type: module
 source: lib/hive/daemon/
 created: 2026-05-06
-updated: 2026-07-12
+updated: 2026-07-16
 tags: [daemon, module, automation, dispatcher]
 ---
 
@@ -12,8 +12,10 @@ the auto-advancing dispatcher (ADR-024). Pure logic (`Policy`,
 `ConcurrencyController`) is separated from I/O (`StatusConsumer`,
 `ChildSupervisor`, `Logger`, `PrMergeWatcher`, `DigestScheduler`,
 `StaleAgentHealer`, `RecoverableErrorHealer`, `DisplayNameBackfiller`) so
-the safety-relevant decisions are unit-testable without forking. The daemon
-also owns merge intake, fair scheduling, and fenced completion for the
+the safety-relevant decisions are unit-testable without forking. Task-stage
+agents are detached durable attempts observed by the daemon;
+`ChildSupervisor` owns ancillary work only. The daemon also owns merge intake,
+fair scheduling, and fenced completion for the
 language-neutral [[commands/refactor-patrol]] lifecycle.
 
 ## Module map
@@ -25,7 +27,7 @@ language-neutral [[commands/refactor-patrol]] lifecycle.
 | `Hive::Daemon::DispatchBaselines` | `lib/hive/daemon/dispatch_baselines.rb` | Crash-safe JSON store for the `[project, slug] → state_file_mtime` baseline map (`daemon_dispatch_baselines.json` under the state home). Atomic write + fail-closed load; mirrors `Hive::UpdateCheck::State`. Stops answered `needs_input` tasks being re-stranded across a daemon restart. |
 | `Hive::Daemon::StatusConsumer` | `lib/hive/daemon/status_consumer.rb` | Wraps `Open3.capture3("hive status --json")`; returns typed `Row` records including `workflow`. Validates the envelope SHAPE (missing/wrong `schema`, `ok=false`) as a hard `Result(ok: false)`, but tolerates schema-VERSION skew (see "Forward-tolerant schema-version skew" below) so a binary/process version mismatch never crashes a tick. Coerces `tasks[].live_task_lock` to strict boolean so daemon consumers can detect a live runner before a Claude PID is attached, and carries marker attrs so recovery code can preserve `REVIEW_WORKING phase/pass` when rewriting markers. |
 | `Hive::Daemon::StatusReport` | `lib/hive/daemon/status_report.rb` | Shared `hive-daemon-status` producer for `hive daemon status --json` and hivebox. Builds the PID/service/binary/update-nudge envelope as a plain hash, exposes `running_state`, `payload`, and web-safe `safe_payload`, bounds `installed_binary --version` probes to 10s, and owns `BINARY_DRIFT_STATES` / `BINARY_DRIFT_ACTIONABLE` so the CLI producer and web repair affordance read the same enum source. |
-| `Hive::Daemon::ChildSupervisor` | `lib/hive/daemon/child_supervisor.rb` | Spawns `hive ...` subprocesses with `pgroup: true`; writes the latest daemon-dispatched child output under durable XDG state at `logs/daemon-children/<project>/<slug>/daemon-run.log` (tmpdir is only the standalone-caller fallback), outside the tracked project state worktree, and truncates each per-task file to bound storage; reaps via `Process.wait(-1, WNOHANG)`; parses ordinary JSON envelopes from child stdout and architecture-patrol envelopes from an atomic job-bound result file so the 64 KiB log tail is not a data channel; supports `terminate_all(grace_sec:)` with TERM→KILL escalation. |
+| `Hive::Daemon::ChildSupervisor` | `lib/hive/daemon/child_supervisor.rb` | Owns non-task ancillary children such as digest and patrol jobs. Task-stage agents use [[modules/attempts]] and are never adopted with `wait2` or terminated on daemon shutdown. |
 | `Hive::Daemon::Dispatcher` | `lib/hive/daemon/dispatcher.rb` | The poll-classify-dispatch loop. Glues all of the above. Public `tick(now:)` for tests, `run_forever` for production with TERM/INT/HUP signal traps. |
 | `Hive::Daemon::Logger` | `lib/hive/daemon/logger.rb` | One-JSON-line-per-event structured logger. Closed event enum (unknown name raises). Size-rotated. |
 | `Hive::Daemon::PlanApproval` | `lib/hive/daemon/plan_approval.rb` | Safely turns daemon-enabled `3-plan` approval pauses into `hive develop ... --from 3-plan` dispatches by validating command shape and flipping `WAITING` to `COMPLETE`. |
@@ -39,7 +41,7 @@ language-neutral [[commands/refactor-patrol]] lifecycle.
 | `Hive::Daemon::RefactorPatrolScheduler` | `lib/hive/daemon/refactor_patrol_scheduler.rb` | Exposes oldest-first discovery/action candidates, validates exact registration and repository ownership, claims discovery with generation/liveness evidence, emits job-bound result paths, durably surfaces unavailable project config, and checkpoints only matching schema-valid completion envelopes. |
 | `Hive::Daemon::PatrolArbiter` | `lib/hive/daemon/patrol_arbiter.rb` | Shares each project's patrol-scan capacity between ordinary and architecture patrol and persists alternation state so either ready kind eventually runs. |
 | `Hive::Daemon::DigestScheduler` | `lib/hive/daemon/digest_scheduler.rb` | Global daily shipped-digest cadence. Persists `last_digested_date` in `<state_home>/digest_state.json`, applies a first-run no-history guard, computes owed local calendar days after midnight, caps catch-up with `digest.max_catchup_days`, and emits one `hive digest --date D --json` dispatch at a time. |
-| `Hive::Daemon::DispatchRequestQueue` | `lib/hive/daemon/dispatch_request_queue.rb` | File-backed queue (`<state_home>/dispatch_requests/*.json`) of dispatch requests written by producer paths (Telegram bot via `Hive::Bot::DispatchRequestWriter`, hivebox stage-run dispatches and daemon-repair requests, and the 3-plan healer requeue) and consumed by the dispatcher's tick loop. Current wire schema is `hive-dispatch-request.v2`: `requestor` is the closed enum `bot|healer`, and any other `schema_version` is rejected as `unknown_schema_version`. Allowlists state-mutating verbs (`run develop brainstorm plan review open-pr artifacts finalize archive markers daemon`), but `daemon` is further constrained to `GLOBAL_MAINTENANCE_ARGVS` (`hive daemon install --force`) under the `__global__` sentinel so project-scoped requests cannot execute host-global daemon lifecycle commands. Everything else is rejected with `:dispatch_request_rejected`. The single-dispatcher invariant lives here: producers write, the daemon dispatches. See [[architecture]] §"Single-dispatcher contract". |
+| `Hive::Daemon::DispatchRequestQueue` | `lib/hive/daemon/dispatch_request_queue.rb` | Delivery queue for bot/web/healer requests. v3 carries generation/predecessor/output intent while pending v2 remains readable; claims point to the resolved attempt and follow successors. |
 | `Hive::Daemon::QueueDirectory` | `lib/hive/daemon/queue_directory.rb` | Shared `directory_for(dirname:, state_home:)` helper used by both dispatch queues so the owner-only (0700) per-queue directory invariant — the de-facto auth boundary for the dispatch channel — lives in one place (#253). |
 | `Hive::Commands::Daemon` | `lib/hive/commands/daemon.rb` | Thor subcommand surface (`start` / `stop` / `status` / `reload` / `tail` / `install` / `enable` / `disable` / `queue`). Owns PID/signal lifecycle, service installation, per-project enrollment, and read-only dispatch-request queue inspection. `queue` delegates to `Hive::Commands::Daemon::QueueCommand`. |
 | `Hive::Commands::Daemon::QueueCommand` | `lib/hive/commands/daemon/queue_command.rb` | Extracted read-only queue-inspection surface (`hive daemon queue list/show/prune`) — touches only `queue_args`/`json`/`hive_home`, orthogonal to the daemon lifecycle, mirroring the `ServiceInstaller` extraction (#254). Internal IO/parse failures are wrapped in `Hive::InternalError` (exit 70). |
@@ -52,8 +54,10 @@ hive daemon start
        ├─ writes ~/Dev/hive/.daemon.pid
        └─ Hive::Daemon::Dispatcher.run_forever
             ├─ Hive::Daemon::Logger              (~/Dev/hive/logs/daemon.log, JSON-line)
+            ├─ Hive::Attempts::Reconciler        (adopt/suspect/lost before admission)
+            ├─ Hive::Attempts::Dispatcher        (shared task-generation admission)
             ├─ Hive::Daemon::ConcurrencyController
-            ├─ Hive::Daemon::ChildSupervisor     (Process.spawn pgroup: true)
+            ├─ Hive::Daemon::ChildSupervisor     (ancillary jobs only)
             ├─ Hive::Daemon::StatusConsumer      (Open3.capture3 hive status --json)
             ├─ Hive::Daemon::DispatchRequestQueue (<state_home>/dispatch_requests/*.json)
             ├─ Hive::Daemon::PrMergeWatcher      (bounded Hive::Gh gh pr view)
@@ -69,6 +73,12 @@ hive daemon start
             └─ Hive::Daemon::Policy              (pure decisions)
 ```
 
+Lease-backed `attempt_lost` outcomes bypass legacy stale-marker discovery and
+`RecoverableErrorHealer`. `StaleAgentHealer#heal_attempt_losses` alone applies
+the persisted generation retry budget, after verified orphan cleanup and dirty
+capture, and dispatches a same-generation successor through the shared attempt
+dispatcher.
+
 `run_forever` wakes at `daemon.fast_poll_sec` (default 1s) for a cheap
 probe: non-blocking child reap plus mtime stats of state files and stage
 directories seen on the last full status scan. A child exit or mtime
@@ -76,7 +86,8 @@ change triggers a full `tick` immediately; otherwise
 `daemon.poll_interval_sec` (default 30s) remains the backstop full-scan
 cadence for changes the cheap probe cannot see.
 
-Each full tick runs in order: reap completed children -> enforce child
+Each full tick begins by reconciling durable attempts, processing normalized
+loss, and publishing lease-first capacity. It then runs: reap ancillary children -> enforce child
 timeouts -> prune dispatch-result notices -> **tick the digest scheduler** ->
 fetch status -> heal stale agent markers -> heal recoverable terminal errors -> backfill missing display names ->
 backfill missing meta ids -> tick the PR-merge watcher -> **process dispatch requests** -> patrol dispatches
@@ -489,6 +500,14 @@ normally up, so the window is tiny; the operator can re-save / `touch`.
 
 ## Single-dispatcher: producers write requests, daemon dispatches
 
+The original queue-only single-dispatcher design below explains why producers
+stopped spawning competing task children. Current task execution goes one step
+further: queue consumption, CLI calls, auto-advance, and recovery all resolve
+through `Attempts::Dispatcher`. The claim records the attempt ID/generation;
+the detached wrapper receipt completes delivery. The daemon never registers
+that task wrapper in `ChildSupervisor`. Current writers emit request v3 and
+readers accept pending v2/v3. See [[modules/attempts]].
+
 Before plan 2026-05-28-002, both the daemon AND the Telegram bot
 could spawn `hive run`-class verbs. The daemon tracked an in-memory
 `last_dispatched_mtime` baseline per `(project, slug)` and refreshed
@@ -506,19 +525,14 @@ producer-only for state-mutating stage runs: they write JSON request files via
 `Hive::Bot::DispatchRequestWriter.write!` into
 `<state_home>/dispatch_requests/`. The same queue is also reused internally by
 `StaleAgentHealer` for the `3-plan` terminal-error rerun described above.
-The daemon's tick loop consumes the queue via
-`Hive::Daemon::DispatchRequestQueue.pending`,
-validates the argv against an allowlist
-(`run develop brainstorm plan review open-pr artifacts finalize
-archive markers`), threads the `request_id` through `spawn → reap`
-so `reap_completed` can unlink the file and log the lifecycle:
+The daemon tick consumes `DispatchRequestQueue.pending`, validates the argv
+allowlist, and resolves task verbs through durable admission. Request IDs stay
+on the delivery while attempt IDs own execution; receipt reconciliation
+unlinks the claim and logs completion.
 
-The current strict schema is `hive-dispatch-request.v2`. v2's shape change is
-small but breaking by design: `requestor` now accepts `healer` in addition to
-`bot`, because the stale-agent healer writes plan rerun requests into the same
-queue. The parser is strict-version-matched rather than tolerant here; a
-producer that emits a new queue shape requires a coordinated daemon update and
-a new schema file before live requests are written.
+Current request schema is v3, adding generation intent, predecessor attempt,
+and inherited output references. Pending v2 deliveries remain readable and
+their generation is inferred under the same ownership lock.
 
 ```
 :dispatch_request_observed   request_id=… project=… slug=…
@@ -540,14 +554,13 @@ Lifecycle gates inside `process_dispatch_requests`:
    blocked, file stays for the next tick.
 5. `controller.can_dispatch?` gate (caps / cooldown / quarantine) —
    blocked → file stays for the next tick.
-6. Otherwise → spawn via `dispatch_command`, threading `request_id`
-   into `ChildSupervisor#spawn` and `ChildExit#request_id`.
+6. Otherwise → resolve through durable attempt admission. Capacity deferral
+   returns the claim to pending; accepted/live/receipt outcomes retain an
+   attempt reference until terminal delivery.
 
-`reap_completed` always refreshes the controller's
-`last_dispatched_mtime` baseline (no longer just for daemon-spawned
-children — the bot doesn't spawn them anymore). The bug dissolves:
-the same code that observes the mtime is the only producer of the
-spawn.
+Lease reconciliation refreshes capacity and completion before another
+admission. A different request ID for the same live task generation resolves
+to the existing owner rather than another spawn.
 
 See [[architecture]] §"Dispatch flow" for the cross-layer picture.
 
@@ -557,15 +570,15 @@ A pending request file used to stay as `<id>.json` from spawn until
 reap. A daemon crash in that window re-dispatched the request on
 restart — re-running work that may already have completed. The fix
 (`DispatchRequestQueue.claim`) renames the file to
-`<id>.json.claimed` before the daemon spawns the child. The claimed JSON
+`<id>.json.claimed` before the daemon admits work. The claimed JSON
 stays schema-valid for the dispatch-request version the producer wrote
-(current writers emit `hive-dispatch-request.v2`); mutable claim metadata
-(`pid`, `process_start_time`, `claimed_at`) lives in a sibling
+(current writers emit `hive-dispatch-request.v3`); mutable claim metadata
+(`pid`, `process_start_time`, `claimed_at`, `attempt_id`, `task_generation`) lives in a sibling
 `<id>.json.claimed.claim` sidecar that is updated after spawn. Claimed
 files are invisible to `pending` (the glob matches `*.json`, not
 `*.json.claimed`), so a later tick never re-observes them — **each
 queued request is dispatched at most once, ever**. The claimed file,
-claim sidecar, and any sequence sidecar are unlinked on reap.
+claim sidecar, and any sequence sidecar are unlinked after receipt delivery.
 
 `claim` uses a single rename of `<id>.json` to `<id>.json.claimed`, but
 a crash or filesystem race can still leave a stale original beside a

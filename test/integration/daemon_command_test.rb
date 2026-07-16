@@ -3,6 +3,7 @@ require "json"
 require "open3"
 require "tmpdir"
 require "rbconfig"
+require "hive/daemon/dispatch_request_queue"
 
 # Integration test for `hive daemon` subcommands. Uses real bin/hive
 # subprocesses against a temporary HIVE_HOME so PID file / log file
@@ -1408,7 +1409,10 @@ class HiveDaemonCommandTest < Minitest::Test
       "requestor" => "bot",
       "chat_id" => 42,
       "update_id" => 7,
-      "trigger" => "autofix"
+      "trigger" => "autofix",
+      "task_generation" => nil,
+      "predecessor_attempt_id" => nil,
+      "inherited_outputs" => []
     }
     File.write(File.join(dir, "#{created_at.tr(':', '')}-#{request_id}.json"),
                JSON.generate(payload))

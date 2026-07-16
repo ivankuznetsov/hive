@@ -34,6 +34,41 @@ class AttemptsClientTest < Minitest::Test
     end
   end
 
+  def test_lost_unknown_and_interrupted_attachments_are_typed
+    lost = Struct.new(:state).new("lost")
+    lost_store = Struct.new(:logs_root) do
+      define_method(:fetch) { |_id| lost }
+    end.new(Dir.tmpdir)
+    result = Hive::Attempts::Client.new(store: lost_store).attach("lost")
+    assert_equal :lost, result.status
+    assert_equal Hive::ExitCodes::TEMPFAIL, result.exit_status
+
+    missing_store = Struct.new(:logs_root) do
+      define_method(:fetch) { |_id| nil }
+    end.new(Dir.tmpdir)
+    assert_raises(Hive::Attempts::StoreError) do
+      Hive::Attempts::Client.new(store: missing_store).attach("missing")
+    end
+
+    interrupted_store = Struct.new(:logs_root) do
+      define_method(:fetch) { |_id| raise Interrupt }
+    end.new(Dir.tmpdir)
+    detached = Hive::Attempts::Client.new(store: interrupted_store).attach("running")
+    assert_equal :detached, detached.status
+  end
+
+  def test_running_attachment_polls_before_terminal
+    terminal = Struct.new(:state, :receipt).new(
+      "terminal", { "exit_status" => 0, "outcome" => "succeeded" }
+    )
+    records = [ Struct.new(:state).new("running"), terminal ]
+    store = Struct.new(:logs_root) do
+      define_method(:fetch) { |_id| records.shift }
+    end.new(Dir.tmpdir)
+    result = Hive::Attempts::Client.new(store: store, poll_interval: 0).attach("attempt")
+    assert_equal :terminal, result.status
+  end
+
   private
 
   def with_terminal_attempt

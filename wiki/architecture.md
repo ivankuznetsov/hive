@@ -3,11 +3,11 @@ title: Architecture
 type: architecture
 source: lib/hive/, bin/hive, templates/
 created: 2026-04-25
-updated: 2026-07-13
+updated: 2026-07-16
 tags: [architecture, overview]
 ---
 
-**TLDR**: Hive is a Ruby 3.4 / Thor agent workflow engine over folder-backed state machines. The flagship `coding` workflow is the nine-stage idea-to-PR pipeline, while the built-in `content` and `bench` workflows and project-authored descriptors run through the same generic workflow/data layer. The CLI dispatches into per-stage runners; stage agents run through configured AgentProfile CLIs inside per-task and per-project locks. Optional long-running surfaces sit beside the CLI: `hive daemon` advances safe tasks and can run language-neutral architecture patrol after merges, `hive tui` renders a terminal dashboard, `hive bot` turns human-input gates into Telegram interactions, and `hive web` provides the hivebox browser surface. Workflow state has no application database; durable task/project state is the filesystem plus global YAML config, while token-usage metrics use a small SQLite store.
+**TLDR**: Hive is a Ruby 3.4 / Thor agent workflow engine over folder-backed state machines. Built-in and project-authored workflows share one workflow/data layer. Accepted task-stage agents run as durable attempts under detached supervisor wrappers; CLI, bot, web, and daemon surfaces attach or observe instead of owning agent lifetime. Workflow and attempt state are filesystem records plus global YAML config, while token-usage metrics use a small SQLite store.
 
 ## Layer cake
 
@@ -33,20 +33,24 @@ Master is never modified by Hive (apart from one initial `chore: ignore .hive-st
 
 ## Process model
 
-`hive run` is synchronous, single-process, single-task:
+Public task commands admit through `Hive::Attempts::Dispatcher`. Admission
+creates one `launching` lease for the task generation, then a short launcher
+creates a detached POSIX session. Its supervisor claims the lease, wins first
+heartbeat, and only then starts the existing Hive command in a worker group.
+That internal command still takes the task lock, runs auto-rebase/stage/provider
+logic, commits state under the project lock, and writes normal markers.
 
-1. Parent acquires per-task lock (`<task>/.lock`, EXCL with stale-PID detection).
-2. Marker-owned spawns write `AGENT_WORKING`; reviewer-style sub-spawns leave the orchestrator's marker in place.
-3. Parent spawns the resolved `AgentProfile` command via `Process.spawn(..., pgroup: true, out:/err: pipe)`.
-4. Parent traps SIGINT/SIGTERM to forward `kill -TERM -<pgid>` to the child group.
-5. Parent's reader thread streams stdout/stderr into `<.hive-state>/logs/<slug>/<label>-<ts>.log` and keeps a bounded `final_message` tail.
-6. Parent polls `Process.wait(pid, WNOHANG)` until completion or timeout. On timeout, sends TERM, waits 3s grace, escalates to KILL.
-7. Exit handling first checks `Hive::AgentLimit` for provider account/rate/quota exhaustion in failed or timed-out output; marker-owned spawns become `ERROR reason=limits_reached` before generic timeout/exit-code markers.
-8. The selected status-detection mode derives the result from the state-file marker, exit code, or expected-output file; runner returns `{commit:, status:}`.
-9. Parent acquires per-project commit lock (`<.hive-state>/.commit-lock` flock) and runs `git add . && git commit` in the hive-state worktree.
-10. Parent prints the marker + a `next:` hint and releases the task lock.
+The wrapper owns heartbeat, checkpoints, ordered output frames, timeout,
+worker identity, exit capture, and terminal receipt. The foreground CLI is a
+read-only client: Ctrl-C/caller death detaches without signalling the attempt.
+Bot, web, daemon auto-advance, and recovery share generation admission. The
+daemon adopts wrappers by PID/start fingerprint without `wait2`;
+`ChildSupervisor` remains for non-task ancillary work. See
+[[modules/attempts]].
 
-Concurrency: any number of `hive run` processes on **different** tasks can proceed in parallel; the per-project commit lock serialises only the brief `git commit` window.
+Concurrency is reconstructed from live/reserved leases after restart. The
+project commit lock still serialises brief state commits, and a generation
+lock prevents duplicate task-stage ownership.
 
 ## Scheduled architecture-patrol boundary
 
@@ -323,51 +327,33 @@ push credentials without docker-exec setup. The container supervisor (tini →
 signal-killed children with backoff, survives malformed config, and
 SIGHUP-reloads the bot set. Details: [[commands/web]].
 
-## Dispatch flow (single-dispatcher contract, plan 2026-05-28-002)
+## Dispatch flow (durable generation ownership)
 
-For state-mutating workflow verbs (`run`, `develop`, `brainstorm`,
-`plan`, `review`, `open-pr`, `artifacts`, `finalize`, `archive`,
-`markers clear`) there is exactly ONE subprocess dispatcher: the daemon.
-The Telegram bot and hivebox web write file-backed JSON requests; the daemon's
-own healer also uses the same queue for the `3-plan` terminal-error rerun.
-The daemon's tick loop is the only thing that calls `Process.spawn` on those
-verbs.
+Every task-stage producer resolves through one semantic admission protocol.
+CLI calls admit locally and attach. Bot/web requests remain file-backed
+deliveries, consumed by the daemon when present. Daemon auto-advance and loss
+healing call the same dispatcher. A daemon is optional after acceptance.
 
-```
-operator → /done in Telegram
-   └─ Hive::Bot::Supervisor#execute_dispatch
-        └─ Hive::Bot::DispatchRequestWriter.write!
-             └─ <state_home>/dispatch_requests/<ts>-<id>.json
-                  ↑ atomic tmp + File.rename — partial reads impossible
-   ┄ wait for next daemon tick ┄
-   └─ Hive::Daemon::Dispatcher#tick
-        └─ Hive::Daemon::DispatchRequestQueue.pending
-             └─ allowlist + expiry + per-slug in-flight gate
-                  └─ Hive::Daemon::ChildSupervisor#spawn (with request_id)
-                       └─ hive run ... (the real subprocess)
-                            └─ reap_completed
-                                 ├─ controller.observe_state_file_mtime (refresh baseline)
-                                 ├─ DispatchRequestQueue.remove(request_id)
-                                 └─ :dispatch_request_completed event
+```text
+CLI ───────────────────────────────┐
+bot/web → request queue → daemon ──┼→ Attempts::Dispatcher
+daemon auto-advance / recovery ────┘          │
+                                      generation lock + lease
+                                               │
+                                      detached supervisor
+                                               │
+                                      internal Hive worker
+                                               │
+                                      provider agent group
 ```
 
-Read-only verbs (`hive status`, `hive status --diagnose`,
-`hive doctor`, `gh pr view`) and verbs outside the allowlist
-(`hive new`, `hive approve`, `hive accept-finding`,
-`hive reject-finding`) still spawn directly from the bot via
-`Hive::Bot::ChildSupervisor`. They don't bump task state-file
-mtimes and don't cause the dual-writer race the queue exists to
-prevent.
-
-Why the file-backed queue beats an event bus or sockets: every
-hive-state-mutating operation already touches the filesystem
-under one well-known root (`Hive::Paths.state_home`), the
-atomic-rename idiom is already standard in this codebase
-(`Hive::Markers.write_atomic`, `DispatchBaselines#persist!`),
-and the daemon's tick was already a single-threaded sequential
-loop. The queue is the smallest possible addition that satisfies
-the single-dispatcher invariant. See [[modules/daemon]]
-§"Single-dispatcher" for the per-step gates and telemetry events.
+Queue claims are delivery metadata and store the resolved attempt reference.
+The daemon reconciles leases before healing or admission, reconstructs
+capacity, and completes a delivery from the wrapper receipt. It never reaps an
+adopted wrapper. Read-only/ancillary bot commands may still use the bot child
+supervisor, but task ownership never does. Filesystem locks, atomic rename,
+and fsync keep the protocol host-local without adding an event bus. See
+[[modules/attempts]] and [[modules/daemon]].
 
 ## Code conventions
 

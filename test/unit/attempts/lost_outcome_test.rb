@@ -68,6 +68,92 @@ class AttemptsLostOutcomeTest < Minitest::Test
         assert_empty outcome.fetch("capture_references")
         assert_equal 1, identity.calls.size
         assert Hive::Markers.current(task.state_file).none?
+        assert_equal outcome, processor.process(lost, now: NOW + 4)
+      end
+    end
+  end
+
+  def test_outcome_store_rejects_corruption_identity_changes_and_write_failures
+    with_tmp_dir do |root|
+      store = Hive::Attempts::Store.new(root: root)
+      lost = lost_without_worker(store)
+      outcomes = Hive::Attempts::LostOutcomeStore.new(store: store)
+      outcome = outcomes.ensure_for(lost, now: NOW)
+      path = outcomes.send(:path, lost.attempt_id)
+
+      File.write(path, "{")
+      assert_raises(Hive::Attempts::StoreError) { outcomes.fetch(lost.attempt_id) }
+      changed = outcome.merge("idempotency_key" => "wrong")
+      File.write(path, JSON.generate(changed))
+      assert_raises(Hive::Attempts::StoreError) { outcomes.update(lost, status: "ready") }
+
+      FileUtils.rm_f(path)
+      with_replaced_singleton_method(Hive::AtomicFile, :write, ->(*_args, **_kwargs) { raise Errno::ENOSPC }) do
+        assert_raises(Hive::Attempts::StoreError) { outcomes.ensure_for(lost, now: NOW) }
+      end
+    end
+  end
+
+  def test_workerless_loss_without_a_worktree_becomes_ready
+    with_tmp_dir do |root|
+      store = Hive::Attempts::Store.new(root: root)
+      lost = lost_without_worker(store)
+      outcomes = Hive::Attempts::LostOutcomeStore.new(store: store)
+      processor = Hive::Attempts::LostOutcomeProcessor.new(
+        store: store, outcome_store: outcomes,
+        process_identity: FakeIdentity.new(:absent, []), task_resolver: ->(_attempt) { nil }
+      )
+
+      outcome = processor.process(lost, now: NOW + 1)
+      assert_equal "ready", outcome.fetch("status")
+      assert_equal "no_worker", outcome.fetch("cleanup")
+      assert_empty outcome.fetch("capture_references")
+    end
+  end
+
+  def test_competing_annotation_and_marker_projection_failures_are_idempotent
+    with_tmp_dir do |root|
+      store = Hive::Attempts::Store.new(root: root)
+      lost = lost_without_worker(store)
+      outcomes = Hive::Attempts::LostOutcomeStore.new(store: store)
+      processor = Hive::Attempts::LostOutcomeProcessor.new(
+        store: store, outcome_store: outcomes,
+        process_identity: FakeIdentity.new(:absent, []), task_resolver: ->(_attempt) { nil }
+      )
+      store.define_singleton_method(:annotate_lost) do |*_args, **_kwargs|
+        raise Hive::Attempts::CompareAndSwapFailed
+      end
+      pending = processor.process(lost, now: NOW + 1)
+      assert_equal "pending", pending.fetch("status")
+
+      task = Struct.new(:state_file).new("/unwritable/task.md")
+      with_replaced_singleton_method(Hive::Markers, :set, ->(*_args, **_kwargs) { raise Errno::EACCES }) do
+        assert_nil processor.send(:project_marker, task, lost)
+      end
+    end
+  end
+
+  def test_default_task_resolution_uses_id_and_contains_lookup_errors
+    with_tmp_dir do |root|
+      store = Hive::Attempts::Store.new(root: root)
+      lost = lost_without_worker(store)
+      outcomes = Hive::Attempts::LostOutcomeStore.new(store: store)
+      processor = Hive::Attempts::LostOutcomeProcessor.new(
+        store: store, outcome_store: outcomes, process_identity: FakeIdentity.new(:absent, [])
+      )
+      resolved = Object.new
+      resolver = Struct.new(:result) { def resolve = result }.new(resolved)
+      captured = nil
+      with_replaced_singleton_method(Hive::TaskResolver, :new, lambda { |target, **kwargs|
+        captured = [ target, kwargs ]
+        resolver
+      }) do
+        assert_equal resolved, processor.send(:resolve_task, lost)
+      end
+      assert_equal [ "42", { project_filter: "demo" } ], captured
+
+      with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*_args, **_kwargs) { raise Hive::InvalidTaskPath }) do
+        assert_nil processor.send(:resolve_task, lost)
       end
     end
   end
@@ -105,5 +191,16 @@ class AttemptsLostOutcomeTest < Minitest::Test
       )
     )
     store.mark_lost(with_worker, reason: "owner_gone", now: NOW + 3)
+  end
+
+  def lost_without_worker(store)
+    launching = store.create_launching(
+      attempt_id: "lost-no-worker", request_id: "request-no-worker", predecessor_attempt_id: nil,
+      task_id: "42", project: "demo", task_slug: "durable-task",
+      intended_stage: "4-execute", task_generation: "generation-no-worker",
+      progress_token: "progress", provider: "codex", starting_revision: nil,
+      retry_charge: 0, inherited_outputs: [], launch_timeout_sec: 30, now: NOW
+    )
+    store.mark_lost(launching, reason: "launch_timeout", now: NOW + 31)
   end
 end

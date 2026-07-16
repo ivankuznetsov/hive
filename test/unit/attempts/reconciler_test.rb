@@ -16,6 +16,13 @@ class AttemptsReconcilerTest < Minitest::Test
     def status(_owner) = owner_status
   end
 
+  class FakeLogger
+    attr_reader :events
+
+    def initialize = @events = []
+    def event(name, **fields) = @events << [ name, fields ]
+  end
+
   def test_unclaimed_and_claimed_launch_deadlines_transition_once_to_lost
     with_store do |store|
       unclaimed = create(store, attempt_id: "unclaimed", timeout: 1)
@@ -149,6 +156,139 @@ class AttemptsReconcilerTest < Minitest::Test
       end
     ensure
       Hive::Config.define_singleton_method(:find_project, original) if original
+    end
+  end
+
+  def test_unexpired_launches_are_reserved_or_adopted_without_spawning
+    with_store do |store|
+      unclaimed = create(store, attempt_id: "unclaimed", timeout: 30)
+      claimed = create(store, attempt_id: "claimed", timeout: 30)
+      store.claim(claimed, owner: OWNER, first_heartbeat_timeout_sec: 30, now: NOW)
+
+      matching = reconciler(store, :matching)
+      snapshot = matching.reconcile(now: NOW + 1)
+      classes = snapshot.attempts.to_h { |status| [ status.attempt.attempt_id, status.classification ] }
+      assert_equal :reserved, classes.fetch(unclaimed.attempt_id)
+      assert_equal :adopted, classes.fetch(claimed.attempt_id)
+      assert_equal store.fetch(claimed.attempt_id).attempt_id, matching.fetch(claimed.attempt_id).attempt_id
+    end
+
+    with_store do |store|
+      claimed = create(store, attempt_id: "claimed", timeout: 30)
+      store.claim(claimed, owner: OWNER, first_heartbeat_timeout_sec: 30, now: NOW)
+      assert_equal :suspect, reconciler(store, :missing).reconcile(now: NOW + 1).attempts.first.classification
+    end
+  end
+
+  def test_compatibility_owners_are_adopted_suspect_or_lost
+    { matching: :legacy_adopted, unverifiable: :legacy_suspect, missing: :lost }.each do |owner, classification|
+      with_store do |store|
+        store.create_compatibility_running(
+          attempt_id: "compat-#{owner}", task_id: "42", project: "demo",
+          task_slug: "durable-task", intended_stage: "4-execute",
+          task_generation: "generation-#{owner}", progress_token: "progress",
+          owner: OWNER, provider: "legacy", starting_revision: nil, now: NOW
+        )
+        status = reconciler(store, owner).reconcile(now: NOW + 1).attempts.first
+        assert_equal classification, status.classification
+        if owner == :missing
+          assert_equal "legacy_owner_gone", status.attempt["loss"]["reason"]
+        end
+      end
+    end
+  end
+
+  def test_competing_reconciler_cas_loss_is_ignored_until_next_scan
+    with_store do |store|
+      running_attempt(store, stale_sec: 30)
+      store.define_singleton_method(:mark_lost) do |*_args, **_kwargs|
+        raise Hive::Attempts::CompareAndSwapFailed
+      end
+      snapshot = reconciler(store, :missing).reconcile(now: NOW + 2)
+      assert_empty snapshot.attempts
+      assert_empty snapshot.newly_lost_attempts
+      assert_equal 1, snapshot.capacity.global_count
+    end
+  end
+
+  def test_task_and_git_inventory_errors_remain_non_success_evidence
+    with_tmp_dir do |root|
+      task_folder = File.join(root, ".hive-state", "stages", "4-execute", "durable-task")
+      FileUtils.mkdir_p(task_folder)
+      File.write(File.join(task_folder, "task.md"), "# malformed task\n")
+      project = { "name" => "demo", "hive_state_path" => File.join(root, ".hive-state") }
+      with_replaced_singleton_method(Hive::Config, :find_project, ->(_name) { project }) do
+        with_store do |store|
+          record = create(store)
+          with_replaced_singleton_method(Hive::Task, :new, ->(_folder) { raise Hive::InvalidTaskPath }) do
+            assert_nil reconciler(store, :missing).send(:locate_task, record)
+          end
+        end
+      end
+
+      fake_task = Struct.new(:worktree_path).new(root)
+      with_replaced_singleton_method(Open3, :capture2, ->(*_args) { raise Errno::EACCES }) do
+        inventory = reconciler(Object.new, :missing).send(:git_inventory, fake_task)
+        assert_equal true, inventory.fetch("unreadable")
+        assert_equal false, inventory.fetch("success_inferred")
+      end
+    end
+  end
+
+  def test_lifecycle_and_invalid_record_logging_is_correlated_and_deduplicated
+    with_store do |store|
+      launching = create(store, attempt_id: "launching")
+      claimed_base = create(store, attempt_id: "claimed")
+      claimed = store.claim(claimed_base, owner: OWNER, first_heartbeat_timeout_sec: 30, now: NOW)
+      running = running_attempt(store, stale_sec: 30)
+      terminal = store.terminalize(
+        running, outcome: "succeeded", exit_status: 0,
+        final_checkpoint: running.checkpoint, output_references: [],
+        log_reference: { "path" => "logs/a", "size" => 0, "sha256" => "0" * 64 },
+        now: NOW + 2
+      )
+      lost_base = create(store, attempt_id: "lost")
+      lost = store.mark_lost(lost_base, reason: "timeout", now: NOW + 31)
+      logger = FakeLogger.new
+      observer = Hive::Attempts::Reconciler.new(
+        store: store, process_identity: FakeIdentity.new(:matching), logger: logger
+      )
+      statuses = [
+        Hive::Attempts::ReconciledAttempt.new(
+          attempt: launching, classification: :reserved, owner_status: :not_claimed, evidence: {}
+        ),
+        Hive::Attempts::ReconciledAttempt.new(
+          attempt: claimed, classification: :adopted, owner_status: :matching, evidence: {}
+        ),
+        Hive::Attempts::ReconciledAttempt.new(
+          attempt: running, classification: :adopted, owner_status: :matching, evidence: {}
+        ),
+        Hive::Attempts::ReconciledAttempt.new(
+          attempt: running, classification: :suspect, owner_status: :unverifiable, evidence: {}
+        ),
+        Hive::Attempts::ReconciledAttempt.new(
+          attempt: terminal, classification: :terminal, owner_status: :not_applicable, evidence: {}
+        ),
+        Hive::Attempts::ReconciledAttempt.new(
+          attempt: lost, classification: :lost, owner_status: :missing, evidence: {}
+        )
+      ]
+      statuses.each { |status| observer.send(:log_reconciliation, status) }
+      statuses.each { |status| observer.send(:log_reconciliation, status) }
+      assert_equal %i[
+        attempt_accepted attempt_claimed attempt_running attempt_adopted
+        attempt_suspect attempt_terminal attempt_lost
+      ], logger.events.map(&:first)
+
+      invalid = Hive::Attempts::InvalidStoredRecord.new(path: "/broken", error: "bad json")
+      observer.send(:log_invalid_records, [ invalid ])
+      observer.send(:log_invalid_records, [ invalid ])
+      assert_equal 1, logger.events.count { |name, _fields| name == :fatal }
+
+      unknown = Hive::Attempts::ReconciledAttempt.new(
+        attempt: running, classification: :unchanged, owner_status: :matching, evidence: {}
+      )
+      assert_equal [], observer.send(:log_reconciliation, unknown)
     end
   end
 

@@ -2,6 +2,8 @@ require "test_helper"
 require "hive/attempts/entrypoint"
 
 class AttemptsEntrypointTest < Minitest::Test
+  include HiveTestHelper
+
   FakeTask = Struct.new(:slug, :project_root, :project_name, keyword_init: true)
 
   def test_dispatch_attaches_to_resolved_attempt
@@ -69,5 +71,28 @@ class AttemptsEntrypointTest < Minitest::Test
       entrypoint.dispatch(task: task, intended_stage: "4-execute", argv: [ "hive", "run", "task" ])
     end
     assert_equal Hive::ExitCodes::TEMPFAIL, error.exit_code
+  end
+
+  def test_default_dispatcher_uses_attempt_timers_and_daemon_limits
+    config = Hive::Config.merge_defaults({})
+    launcher = Object.new
+    launcher_options = nil
+    captured = nil
+    dispatcher = Object.new
+    with_replaced_singleton_method(Hive::Attempts::DetachedLauncher, :new, lambda { |**kwargs|
+      launcher_options = kwargs
+      launcher
+    }) do
+      with_replaced_singleton_method(Hive::Attempts::Dispatcher, :new, lambda { |**kwargs|
+        captured = kwargs
+        dispatcher
+      }) do
+        entrypoint = Hive::Attempts::Entrypoint.new
+        assert_same dispatcher, entrypoint.send(:build_dispatcher, Object.new, config)
+      end
+    end
+    assert_equal config.fetch("attempt_heartbeat_sec"), launcher_options.fetch(:heartbeat_sec)
+    assert_same launcher, captured.fetch(:launcher)
+    assert_equal config.dig("daemon", "max_concurrent_runs"), captured.dig(:limits, :max_global)
   end
 end

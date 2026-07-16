@@ -11,6 +11,12 @@ tags: [gap, todo]
 
 ## Current release gap
 
+- Durable task attempts are race/unit/integration-pinned and the local Linux
+  1849 subprocess replay proves caller-loss survival without a daemon. There
+  is not yet a checked-in macOS/BSD detachment run or a paid-provider,
+  multi-hour daemon-restart artifact; unsupported platforms reject before
+  acceptance rather than weakening ownership guarantees.
+
 - The built-in `bench` descriptor, packaged stage instructions, self-contained
   runtime snapshot, and `hive init . --workflow bench` path are covered locally,
   but they have not yet shipped in a Hive release or completed a live

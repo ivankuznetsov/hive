@@ -103,6 +103,78 @@ class DaemonAttemptLossHealerTest < Minitest::Test
     end
   end
 
+  def test_existing_successor_is_replayed_into_outcome_without_redispatch
+    with_task do |task|
+      with_tmp_dir do |root|
+        store = Hive::Attempts::Store.new(root: root)
+        lost = lost_attempt(store, retry_charge: 1)
+        successor = store.create_launching(
+          attempt_id: "successor-existing", request_id: "successor-request",
+          predecessor_attempt_id: lost.attempt_id, task_id: "42", project: "demo",
+          task_slug: "durable-task", intended_stage: "4-execute",
+          task_generation: lost.task_generation, progress_token: lost["progress_token"],
+          provider: "codex", starting_revision: "abc", retry_charge: 2,
+          inherited_outputs: [], launch_timeout_sec: 30, now: NOW + 2
+        )
+        outcomes = Hive::Attempts::LostOutcomeStore.new(store: store)
+        dispatcher = FakeDispatcher.new
+        processor = FakeProcessor.new(outcomes, task.folder)
+
+        healer(store, outcomes, processor, dispatcher, FakeLogger.new)
+          .heal_attempt_losses([ lost ], now: NOW + 3)
+
+        assert_empty dispatcher.calls
+        outcome = outcomes.fetch(lost.attempt_id)
+        assert_equal "successor_dispatched", outcome.fetch("status")
+        assert_equal successor.attempt_id, outcome.fetch("successor_attempt_id")
+      end
+    end
+  end
+
+  def test_unlocatable_task_becomes_manual_and_processor_errors_are_logged
+    with_tmp_dir do |root|
+      store = Hive::Attempts::Store.new(root: root)
+      lost = lost_attempt(store, retry_charge: 0)
+      outcomes = Hive::Attempts::LostOutcomeStore.new(store: store)
+      dispatcher = FakeDispatcher.new
+      logger = FakeLogger.new
+      processor = FakeProcessor.new(outcomes, nil)
+
+      with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*_args, **_kwargs) { raise Hive::InvalidTaskPath }) do
+        healer(store, outcomes, processor, dispatcher, logger)
+          .heal_attempt_losses([ lost ], now: NOW + 2)
+      end
+      assert_equal "manual", outcomes.fetch(lost.attempt_id).fetch("status")
+
+      broken_processor = Object.new
+      broken_processor.define_singleton_method(:process) { |*_args, **_kwargs| raise "capture failed" }
+      healer(store, outcomes, broken_processor, dispatcher, logger)
+        .heal_attempt_losses([ lost ], now: NOW + 3)
+      assert logger.events.any? { |name, attrs| name == :marker_heal_failed && attrs[:error].include?("capture failed") }
+    end
+  end
+
+  def test_task_fallback_resolves_by_stable_id
+    with_tmp_dir do |root|
+      store = Hive::Attempts::Store.new(root: root)
+      lost = lost_attempt(store, retry_charge: 0)
+      outcomes = Hive::Attempts::LostOutcomeStore.new(store: store)
+      service = healer(
+        store, outcomes, FakeProcessor.new(outcomes, nil), FakeDispatcher.new, FakeLogger.new
+      )
+      task = Object.new
+      resolver = Struct.new(:task) { def resolve = task }.new(task)
+      captured = nil
+      with_replaced_singleton_method(Hive::TaskResolver, :new, lambda { |target, **kwargs|
+        captured = [ target, kwargs ]
+        resolver
+      }) do
+        assert_same task, service.send(:task_for_attempt, lost, {})
+      end
+      assert_equal [ "42", { project_filter: "demo" } ], captured
+    end
+  end
+
   private
 
   def healer(store, outcomes, processor, dispatcher, logger)

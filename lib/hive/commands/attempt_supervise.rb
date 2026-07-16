@@ -13,12 +13,12 @@ module Hive
         until args.empty? || args.first == "--"
           key = args.shift
           value = args.shift
-          raise Hive::UsageError, "missing value for #{key}" if value.nil?
+          raise Hive::InvalidTaskPath, "missing value for #{key}" if value.nil?
 
           options[key] = value
         end
         args.shift if args.first == "--"
-        raise Hive::UsageError, "attempt supervisor requires a worker command" if args.empty?
+        raise Hive::InvalidTaskPath, "attempt supervisor requires a worker command" if args.empty?
 
         new(
           attempt_id: attempt_id,
@@ -31,7 +31,7 @@ module Hive
           kill_grace_sec: Float(options.fetch("--kill-grace-sec", 1))
         )
       rescue KeyError, ArgumentError => e
-        raise Hive::UsageError, "invalid attempt supervisor invocation: #{e.message}"
+        raise Hive::InvalidTaskPath, "invalid attempt supervisor invocation: #{e.message}"
       end
 
       def initialize(attempt_id:, store_root:, worker_argv:, heartbeat_sec:,

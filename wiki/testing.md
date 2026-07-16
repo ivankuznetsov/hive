@@ -51,7 +51,7 @@ task default: :test
 
 | Path | Purpose |
 |------|---------|
-| `test/fixtures/fake-claude` | Shell script that takes Claude/Codex headless argv, optionally writes captured args to a log, optionally echoes a scenario-controlled response, optionally writes a file, and can commit a scenario-controlled file in cwd. Pointed at via `HIVE_CLAUDE_BIN` and e2e `HIVE_CODEX_BIN`. |
+| `test/fixtures/fake-claude` | Shell fixture for Claude/Codex headless argv. It can log/output/write, make one commit, or create a deterministic multi-commit sequence with progress/release sentinels for durable caller-loss scenarios. |
 | `test/fixtures/fake-gh` | Shell script that handles `gh pr create` / `gh auth status` / `gh pr list`, returns a dummy URL. |
 | `test/fixtures/voice/voice-idea.oga` | Checked-in Ogg/Opus speech sample saying "voice idea" for the Telegram voice-note E2E path. `run_idea_e2e.sh` uses it by default when `TG_IDEA_MODE=voice`; explicit voice mode hard-fails when `HIVE_WHISPER_API_KEY` is unset. Voice mode uses the same fixture for both new audio idea capture and audio brainstorm answers. |
 
@@ -64,6 +64,7 @@ task default: :test
 | `task_test.rb` | `Hive::Task` — path regex, descriptor-driven stage/index validation, workflow selector/default fallback, derived paths, slug edge cases. |
 | `markers_test.rb` | `Hive::Markers` — set/get round-trip, attribute quoting, last-marker semantics. |
 | `atomic_file_test.rb` | `Hive::AtomicFile` — atomic file replacement plus the shared directory-fsync helper's real flush and unsupported-platform (`NotImplementedError` / `EINVAL` / `ENOTSUP` / `EBADF`) behavior. |
+| `attempts/*_test.rb`, `daemon/attempt_loss_healer_test.rb` | Durable task attempts — record/schema/CAS edges, competing claim/expiry, generation duplicates/successors, capacity, detached session lifecycle, framed log/client replay, PID-reuse-safe adoption and orphan cleanup, marker/git evidence precedence, legacy backfill, mutation-free dirty capture, and restart-persistent bounded loss healing. |
 | `lock_test.rb` | `Hive::Lock` — acquire/release, stale-PID detection, commit lock parallelism. |
 | `worktree_test.rb` | `Hive::Worktree` — create attach-vs-new, dependency override stacking (incl. narrow-refspec and origin-ahead-of-local **and** local-ahead-of-origin placeholders), empty placeholder re-pointing, fail-closed preservation when the emptiness check errors, local-only prerequisite fallback, real-commit preservation, PR-head materialization/retry/failure handling, delete-failure errors, `local_branch_ref_exists?` blank-name guard, remove, exists?, pointer round-trip, prefix validation. |
 | `git_ops_test.rb` | `Hive::GitOps` — default-branch detection, orphan worktree bootstrap, idempotent gitignore, empty-diff commit skip. |
@@ -173,6 +174,14 @@ bin/hive-e2e run
 ```
 
 The current scenarios copy `test/e2e/sample-project/` into a per-run sandbox, set `HIVE_HOME` to a run-local directory, and call the real `bin/hive` as a subprocess. `SandboxEnv` routes both Claude and Codex profile binaries to `test/fixtures/fake-claude`; scenarios that exercise `4-execute` with the default Codex profile must ask the fixture to create a real worktree commit, or execute will correctly stop at `EXECUTE_WAITING reason=no_worktree_changes`. TUI scenarios use private tmux sockets (`hive-e2e-<run-id>`) so they never touch the operator's daily tmux server.
+
+`durable_attempt_1849_replay.yml` is the ownership acceptance replay. It starts
+a foreground develop attachment, makes three provider commits, kills the
+temporary caller group, asserts the execute lease remains running without a
+daemon, releases the provider, and validates exactly one successful terminal
+receipt. Focused attempt unit suites cover claim/expiry races, PID reuse,
+framed logs, restart adoption, legacy backfill, dirty capture, and bounded
+successor healing.
 `test/e2e/lib/hive_e2e_binary_test.rb` pins the harness binary contract:
 scenario inventory JSON, cleanup JSON, the single-document stdout invariant for
 successful `list --json` / `clean --json` calls, unknown-command JSON errors,

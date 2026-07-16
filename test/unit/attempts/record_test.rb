@@ -68,6 +68,69 @@ class AttemptsRecordTest < Minitest::Test
     end
   end
 
+  def test_receipt_validation_rejects_each_required_type
+    cases = [
+      [ nil, "object" ],
+      [ receipt.merge("task_generation" => "other"), "generation" ],
+      [ receipt.merge("outcome" => "unknown"), "outcome" ],
+      [ receipt.merge("exit_status" => "0"), "exit_status" ],
+      [ receipt.merge("final_checkpoint" => {}), "checkpoint" ],
+      [ receipt.merge("output_references" => {}), "output_references" ]
+    ]
+    cases.each do |candidate, message|
+      error = assert_raises(Hive::Attempts::InvalidReceipt) do
+        Hive::Attempts::Record.validate_receipt!(
+          candidate, attempt_id: "attempt-1", task_generation: "generation-1"
+        )
+      end
+      assert_includes error.message, message
+    end
+  end
+
+  def test_live_transition_matrix_and_record_field_validation
+    launching = Hive::Attempts::Record.launching(**identity, now: NOW, launch_timeout_sec: 30)
+    assert launching.transition_allowed?("launching")
+    assert launching.transition_allowed?("running")
+    assert launching.transition_allowed?("lost")
+    refute launching.transition_allowed?("terminal")
+
+    running_data = launching.to_h.merge(
+      "state" => "running", "claim_deadline" => nil,
+      "heartbeat_deadline" => (NOW + 30).iso8601(6),
+      "wrapper" => { "pid" => 1 }
+    )
+    running = Hive::Attempts::Record.new(running_data)
+    assert running.transition_allowed?("running")
+    assert running.transition_allowed?("terminal")
+    assert running.transition_allowed?("lost")
+    refute running.transition_allowed?("launching")
+
+    invalid_changes = [
+      { "lease_version" => -1 },
+      { "retry_charge" => -1 },
+      { "current_outputs" => {} },
+      { "current_outputs" => [ { "path" => "bad" } ] },
+      { "created_at" => "invalid" },
+      { "state" => "lost", "claim_deadline" => nil, "loss" => {} },
+      { "loss" => { "reason" => "wrong-state", "at" => NOW.iso8601(6) } }
+    ]
+    invalid_changes.each do |changes|
+      assert_raises(Hive::Attempts::InvalidRecord) do
+        Hive::Attempts::Record.new(launching.to_h.merge(changes))
+      end
+    end
+
+    assert_raises(Hive::Attempts::InvalidRecord) do
+      Hive::Attempts::Record.new(running_data.merge("heartbeat_deadline" => nil))
+    end
+  end
+
+  def test_unknown_internal_state_has_no_legal_transition
+    record = Hive::Attempts::Record.allocate
+    record.instance_variable_set(:@data, { "state" => "unknown" })
+    refute record.transition_allowed?("running")
+  end
+
   private
 
   def identity

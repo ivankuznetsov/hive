@@ -5,7 +5,15 @@ class AttemptsDispatcherTest < Minitest::Test
   include HiveTestHelper
 
   NOW = Time.utc(2026, 7, 16, 12, 0, 0)
-  FakeTask = Struct.new(:id, :slug, :state_file, :stage_index, :stage_name, keyword_init: true)
+  FakeTask = Struct.new(
+    :id, :slug, :state_file, :stage_index, :stage_name, :project_root, :worktree_path,
+    keyword_init: true
+  )
+  FakeRequest = Struct.new(
+    :slug, :project, :argv, :request_id, :task_generation,
+    :predecessor_attempt_id, :inherited_outputs,
+    keyword_init: true
+  )
 
   class FakeLauncher
     attr_reader :launched
@@ -124,6 +132,115 @@ class AttemptsDispatcherTest < Minitest::Test
       assert_equal second.attempt.attempt_id, third.attempt["predecessor_attempt_id"]
       assert_equal 3, launcher.launched.size
     end
+  end
+
+  def test_dispatch_request_routes_normal_and_lost_predecessor_deliveries
+    with_dispatcher do |dispatcher, launcher, task, store|
+      dispatcher.instance_variable_set(:@task_resolver, ->(_request) { task })
+      dispatcher.define_singleton_method(:provider_for) { |_task| "codex" }
+      request = FakeRequest.new(
+        slug: task.slug, project: "demo", argv: [ "hive", "run", task.slug ],
+        request_id: "request-one", inherited_outputs: []
+      )
+      first = dispatcher.dispatch_request(request, now: NOW)
+      lost = store.mark_lost(first.attempt, reason: "owner_gone", now: NOW + 1)
+      successor_request = request.dup
+      successor_request.request_id = "request-two"
+      successor_request.task_generation = lost.task_generation
+      successor_request.predecessor_attempt_id = lost.attempt_id
+
+      successor = dispatcher.dispatch_request(successor_request, interactive: true, now: NOW + 2)
+
+      assert_equal :accepted, successor.status
+      assert_equal lost.attempt_id, successor.attempt["predecessor_attempt_id"]
+      assert_equal 2, launcher.launched.size
+    end
+  end
+
+  def test_lost_generation_and_invalid_successor_are_deferred
+    with_dispatcher do |dispatcher, _launcher, task, store|
+      first = dispatch(dispatcher, task, request_id: "request-one")
+      lost = store.mark_lost(first.attempt, reason: "owner_gone", now: NOW + 1)
+
+      ordinary = dispatch(dispatcher, task, request_id: "request-two")
+      assert_equal "attempt_lost", ordinary.reason
+      assert_equal lost.attempt_id, ordinary.attempt.attempt_id
+    end
+
+    with_dispatcher do |dispatcher, _launcher, task|
+      with_tmp_dir do |other_root|
+        other_store = Hive::Attempts::Store.new(root: other_root)
+        generation = Hive::Attempts::Generation.resolve(
+          task: task, project: "demo", intended_stage: "4-execute"
+        )
+        external = other_store.create_launching(
+          attempt_id: "external", request_id: "external", predecessor_attempt_id: nil,
+          task_id: task.id.to_s, project: "demo", task_slug: task.slug,
+          intended_stage: "4-execute",
+          task_generation: generation.task_generation,
+          progress_token: generation.progress_token,
+          provider: "codex", starting_revision: nil, retry_charge: 0,
+          inherited_outputs: [], launch_timeout_sec: 30, now: NOW
+        )
+        external = other_store.mark_lost(external, reason: "owner_gone", now: NOW + 1)
+        result = dispatcher.dispatch_successor(
+          predecessor: external, task: task, project: "demo",
+          argv: [ "hive", "run", task.slug ], request_id: "successor",
+          provider: "codex", now: NOW + 2
+        )
+        assert_equal "invalid_predecessor", result.reason
+      end
+    end
+  end
+
+  def test_legacy_locator_semantic_duplicates_and_resolution_helpers
+    with_dispatcher do |dispatcher, launcher, task|
+      task.id = nil
+      first = dispatch(dispatcher, task, request_id: "request-one")
+      duplicate = dispatch(dispatcher, task, request_id: "request-two")
+      assert_equal :accepted, first.status
+      assert_equal :existing_live, duplicate.status
+      assert_equal 1, launcher.launched.size
+
+      request = Struct.new(:slug, :project).new(task.slug, "demo")
+      resolver = Struct.new(:task) { def resolve = task }.new(task)
+      with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*_args, **_kwargs) { resolver }) do
+        assert_equal task, dispatcher.send(:resolve_request_task, request)
+      end
+
+      with_replaced_singleton_method(Hive::Config, :load, ->(_root) { { "execute" => { "agent" => "pi" } } }) do
+        task.project_root = "/project"
+        assert_equal "pi", dispatcher.send(:provider_for, task)
+      end
+      assert_equal "4-execute", dispatcher.send(:intended_stage_for, [ "hive", "run" ], task)
+      assert_equal "4-execute", dispatcher.send(:intended_stage_for, [ "hive", "unknown" ], task)
+    end
+  end
+
+  def test_starting_revision_reads_git_and_tolerates_process_errors
+    with_dispatcher do |dispatcher, _launcher, task|
+      with_tmp_git_repo do |worktree|
+        task.worktree_path = worktree
+        assert_match(/\A[0-9a-f]{40}\z/, dispatcher.send(:starting_revision, task))
+      end
+
+      with_tmp_dir do |not_git|
+        task.worktree_path = not_git
+        assert_nil dispatcher.send(:starting_revision, task)
+      end
+
+      task.worktree_path = "/existing"
+      with_replaced_singleton_method(File, :directory?, ->(_path) { true }) do
+        with_replaced_singleton_method(IO, :popen, ->(*_args, **_kwargs) { raise Errno::EACCES }) do
+          assert_nil dispatcher.send(:starting_revision, task)
+        end
+      end
+    end
+  end
+
+  def test_default_attempt_id_generator_produces_a_uuid
+    dispatcher = Hive::Attempts::Dispatcher.new(store: Object.new, launcher: Object.new)
+    assert_match(/\A[0-9a-f-]{36}\z/, dispatcher.instance_variable_get(:@id_generator).call)
   end
 
   private

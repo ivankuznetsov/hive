@@ -345,6 +345,26 @@ class RefactorPatrolThesisNormalizerTest < Minitest::Test
     refute_empty result.errors
   end
 
+  # The thesis schema requires minLength 1 on the narrative fields, matching
+  # the report envelope's ThesisSnapshot. A thesis missing `problem` must die
+  # here as a recorded schema_invalid slice error, never reach disposition_item
+  # as an empty string, and never poison the discovery envelope.
+  def test_missing_or_empty_narrative_fields_are_rejected_at_the_normalizer
+    %w[problem cost proposed_refactor].each do |field|
+      [ nil, "" ].each do |value|
+        raw = valid_raw_thesis
+        value.nil? ? raw.delete(field) : raw[field] = value
+
+        result = normalize(raw)
+
+        assert_instance_of Hive::RefactorPatrol::ThesisNormalizer::Invalid, result,
+                           "#{field}=#{value.inspect} must not normalize into an empty snapshot"
+        assert result.errors.any? { |message| message.include?(field) },
+               "#{field}: #{result.errors.inspect}"
+      end
+    end
+  end
+
   def test_v2_schema_strictly_rejects_signal_and_value_on_evidence
     thesis = normalize(valid_raw_thesis)
     payload = thesis.to_h

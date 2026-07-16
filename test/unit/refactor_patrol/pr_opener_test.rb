@@ -1178,7 +1178,37 @@ class RefactorPatrolPrOpenerTest < Minitest::Test
       )
 
       assert_equal "review_handoff_pending", result.outcome
+      refute result.terminal
       assert_includes result.receipts.fetch("handoff_error"), "review state unavailable"
+    end
+  end
+
+  # ReviewHandoff raises ArgumentError for metadata that can never
+  # materialize on a retry and Conflict for duplicate/conflicting task state
+  # needing a human. Both used to surface as an eternally retried
+  # review_handoff_pending; they must settle terminally with the evidence.
+  def test_handoff_conflict_and_invalid_metadata_settle_terminally
+    {
+      Hive::Patrol::ReviewHandoff::Conflict => "duplicate complete tasks for fp",
+      ArgumentError => "patrol review handoff requires head_sha"
+    }.each do |error_class, message|
+      with_tmp_git_repo do |repo|
+        gh = FakeGh.new
+        handoff = Handoff.new
+        handoff.define_singleton_method(:enqueue) { |**| raise error_class, message }
+
+        result = opener(repo, gh, handoff).open(
+          thesis: thesis, patch: patch(repo), job_id: "job-7",
+          canonical_action_id: "fix-fp", source: source,
+          record_intent: ->(**) { true }
+        )
+
+        assert_equal "review_handoff_failed", result.outcome, error_class.name
+        assert result.terminal, "#{error_class.name} retries can only re-fail"
+        assert_equal result.pr_url, result.receipts.fetch("pr_url"), error_class.name
+        assert_includes result.receipts.fetch("handoff_error"), error_class.name
+        assert_includes result.receipts.fetch("handoff_error"), message, error_class.name
+      end
     end
   end
 

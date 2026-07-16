@@ -107,6 +107,25 @@ class HivePatrolMapperTest < Minitest::Test
     end
   end
 
+  # git ls-files emits raw filename bytes; a Latin-1 name used to raise
+  # ArgumentError from split/tr once the invalid byte hit UTF-8 string ops.
+  def test_latin1_filename_bytes_from_git_are_tolerated_without_raising
+    with_tmp_git_repo do |repo|
+      FileUtils.mkdir_p(File.join(repo, "pages"))
+      File.write(File.join(repo, "pages/index.tsx"), "export default function Page() {}\n")
+      File.binwrite(File.join(repo.b, "caf\xE9.rb".b), "class Cafe\nend\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "latin1", "--quiet")
+
+      features = Hive::Patrol::Mapper.new(repo, cfg: cfg).call
+
+      assert_includes features.map(&:id), "route-pages-index-tsx"
+      owned = features.flat_map(&:owned_files)
+      refute owned.any? { |path| path.include?("�") },
+             "a scrubbed non-UTF-8 name must be dropped, not claimed as owned"
+    end
+  end
+
   def test_mapping_confines_tracked_symlinks_and_bounds_every_content_read
     with_tmp_git_repo do |repo|
       Dir.mktmpdir("patrol-mapper-outside") do |outside|

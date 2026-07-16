@@ -153,6 +153,26 @@ class HivePatrolArchitectureMapperTest < Minitest::Test
     end
   end
 
+  # ArchitectureMapper#call receives raw git-output filename bytes; a Latin-1
+  # name used to raise ArgumentError from tr/downcase/split inside normalize
+  # and the classifiers instead of simply not being mapped.
+  def test_latin1_filename_bytes_are_scrubbed_at_the_boundary_without_raising
+    with_tmp_git_repo do |repo|
+      write(repo, "services/billing/invoice.rb", "module Billing\nend\n")
+      write(repo, "services/billing/ledger.rb", "module Ledger\nend\n")
+      File.binwrite(File.join(repo.b, "services/billing/caf\xE9.rb".b), "class Cafe\nend\n")
+      commit_all(repo)
+      files = run!("git", "-C", repo, "ls-files", "-z").b.split("\0").reject(&:empty?)
+
+      features = mapper(repo).call(files)
+
+      owned = features.flat_map(&:owned_files)
+      assert_includes owned, "services/billing/invoice.rb"
+      refute owned.any? { |path| path.include?("\uFFFD") },
+             "a scrubbed non-UTF-8 name must be dropped, not claimed as owned"
+    end
+  end
+
   def test_collision_safe_ids_are_stable_for_distinct_case_sensitive_roots
     with_tmp_git_repo do |repo|
       write(repo, "src/foo-bar/one.zig", "pub const one = 1;\n")

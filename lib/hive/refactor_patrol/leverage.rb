@@ -190,7 +190,7 @@ module Hive
           args << "#{changed_since}..HEAD" if changed_since
           args << "--"
           out, _err, status = @command_runner.call(*args)
-          status.success? ? out.lines.map(&:strip).reject(&:empty?).tally : {}
+          status.success? ? utf8(out).lines.map(&:strip).reject(&:empty?).tally : {}
         rescue StandardError
           {}
         end
@@ -242,18 +242,24 @@ module Hive
 
       def compute_tracked_files
         out, _err, status = @command_runner.call("git", "-C", @project_root, "ls-files", "-z")
-        files = status.success? ? out.split("\0").reject(&:empty?) : []
+        files = status.success? ? utf8(out).split("\0").reject(&:empty?) : []
         files = Dir.glob("**/*", File::FNM_DOTMATCH, base: @project_root).select do |path|
           @source_reader.regular_file?(path)
         end if files.empty?
 
-        files.map { |path| path.tr("\\", "/") }
+        files.map { |path| utf8(path).tr("\\", "/") }
              .reject { |path| path.split("/").include?(".git") }
              .reject { |path| excluded?(path) }
              .select { |path| @source_reader.regular_file?(path) }
              .sort
       rescue StandardError
         []
+      end
+
+      # git emits raw filename bytes; one non-UTF-8 name must not raise from
+      # split/tr and silently zero every leverage signal via the rescue above.
+      def utf8(value)
+        value.to_s.b.force_encoding(Encoding::UTF_8).scrub
       end
 
       def excluded?(path)

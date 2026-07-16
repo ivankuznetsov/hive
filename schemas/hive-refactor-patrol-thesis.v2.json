@@ -28,14 +28,14 @@
     "id": { "type": "string" },
     "feature_id": { "type": "string" },
     "feature": { "type": "string" },
-    "problem": { "type": "string" },
-    "cost": { "type": "string" },
+    "problem": { "type": "string", "minLength": 1 },
+    "cost": { "type": "string", "minLength": 1 },
     "evidence": {
       "type": "array",
       "minItems": 1,
       "items": { "$ref": "#/$defs/Evidence" }
     },
-    "proposed_refactor": { "type": "string" },
+    "proposed_refactor": { "type": "string", "minLength": 1 },
     "feature_boundary": { "$ref": "#/$defs/FeatureBoundary" },
     "feature_hotspot": { "$ref": "#/$defs/FeatureHotspot" },
     "expected_leverage": { "$ref": "#/$defs/ExpectedLeverage" },

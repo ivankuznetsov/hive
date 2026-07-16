@@ -1,5 +1,6 @@
 require "json"
 require "fileutils"
+require "securerandom"
 require "time"
 require "hive/atomic_file"
 require "hive/refactor_patrol/job_store"
@@ -19,12 +20,57 @@ module Hive
 
       private
 
-      def records
+      # One unreadable or inconsistent record must not discard its valid
+      # siblings: pre-authoritative families and occurrence aliases exist only
+      # as these files, and rebuilding solely from job aggregates would change
+      # later SemanticFamily.resolve outcomes (minting duplicate issues).
+      # Quarantine the damaged file, keep everything valid, and only let a
+      # newer schema version (which we must not destroy or reinterpret)
+      # propagate. A dry run skips quarantine so it stays non-mutating.
+      def salvaged_records(quarantine:)
+        record_paths.filter_map do |path|
+          read_record(path)
+        rescue FamilyStore::CorruptRecord, FamilyStore::InconsistentRecord => e
+          quarantine_record!(path, e) if quarantine
+          nil
+        end
+      end
+
+      def record_paths
         return [] unless Dir.exist?(@root)
 
-        Dir.glob(File.join(@root, "*.json")).sort.map { |path| read_record(path) }
+        Dir.glob(File.join(@root, "*.json")).sort
       rescue SystemCallError, IOError => e
         raise FamilyStore::CorruptRecord.new("cannot enumerate architecture family records (#{e.message})", path: @root)
+      end
+
+      # Mirrors JobStore#quarantine_job_source!: preserve the original bytes
+      # under quarantine/families with typed evidence, then warn. If the move
+      # itself fails the original error propagates so the damaged file is
+      # never left where replace_records! could delete it.
+      def quarantine_record!(path, error)
+        directory = File.join(File.dirname(@root), "quarantine", "families")
+        FileUtils.mkdir_p(directory)
+        destination = File.join(
+          directory,
+          "#{File.basename(path, '.json')}-#{@clock.call.utc.strftime('%Y%m%d%H%M%S%6N')}-#{SecureRandom.hex(4)}.json"
+        )
+        File.rename(path, destination)
+        evidence = {
+          "schema" => "hive-refactor-patrol-family-quarantine",
+          "schema_version" => 1,
+          "family_record" => File.basename(path),
+          "reason" => error.class.name.split("::").last,
+          "error" => error.message,
+          "quarantined_at" => @clock.call.utc.iso8601
+        }
+        Hive::AtomicFile.write("#{destination}.evidence.json", "#{JSON.pretty_generate(evidence)}\n", mode: 0o600)
+        Hive::AtomicFile.fsync_directory(directory)
+        Hive::AtomicFile.fsync_directory(@root)
+        warn "hive: quarantined architecture family record #{path} -> #{destination} (#{error.message})"
+        destination
+      rescue SystemCallError, IOError
+        raise error
       end
 
       def read_record(path)
@@ -333,13 +379,7 @@ module Hive
 
       def indexed_records(dry_run:)
         authoritative = authoritative_records
-        current = begin
-          records
-        rescue CorruptRecord, InconsistentRecord
-          raise if authoritative.empty?
-
-          return dry_run ? authoritative : replace_records!(authoritative)
-        end
+        current = salvaged_records(quarantine: !dry_run)
         return current unless stale_against_authority?(current, authoritative)
 
         repaired = merge_authoritative_records(current, authoritative)

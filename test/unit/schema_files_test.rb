@@ -2132,6 +2132,23 @@ class SchemaFilesTest < Minitest::Test
     assert_includes required, "admissible"
   end
 
+  # The standalone thesis schema is the normalizer gate; the report envelope
+  # embeds the same shape as ThesisSnapshot. Their non-empty narrative-field
+  # contracts must stay in lockstep or an agent thesis with an empty `problem`
+  # would pass the normalizer and then poison the whole discovery envelope.
+  def test_refactor_patrol_thesis_narrative_min_lengths_match_the_envelope_snapshot
+    thesis = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol-thesis", version: 2)))
+    envelope = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 2)))
+
+    %w[problem cost proposed_refactor].each do |field|
+      assert_equal 1, thesis.dig("properties", field, "minLength"),
+                   "#{field}: the thesis schema must reject empty strings at the normalizer gate"
+      assert_equal thesis.dig("properties", field, "minLength"),
+                   envelope.dig("$defs", "ThesisSnapshot", "properties", field, "minLength"),
+                   "#{field}: thesis schema and envelope ThesisSnapshot must agree"
+    end
+  end
+
   def test_refactor_patrol_v2_pins_complete_source_and_action_identity
     document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 2)))
 

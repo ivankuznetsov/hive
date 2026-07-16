@@ -668,6 +668,10 @@ module Hive
         require "hive/claude_launcher"
 
         profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
+        unless profile.name == :claude
+          raise Hive::AgentError,
+                "spawn_claude! only supports the claude profile; got #{profile.name.inspect}"
+        end
         provider_router ||= self.provider_router
         routing_decision ||= route_attempt(
           task,
@@ -871,7 +875,7 @@ module Hive
           provider: provider,
           evidence_ref: "spawn_exception:#{error.class}",
           success: false
-        )
+        ) if profile&.respond_to?(:normalize_error)
         router.record_outcome(
           decision: decision,
           success: false,

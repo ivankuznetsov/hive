@@ -38,7 +38,7 @@ module Hive
             scope: scope,
             reset_at: reset_hint(text),
             safe_summary: summary(failure_class),
-            fingerprint: "sha256:#{Digest::SHA256.hexdigest(text)}",
+            fingerprint: "sha256:#{::Digest::SHA256.hexdigest(text)}",
             evidence_ref: evidence_ref
           )
         rescue StandardError
@@ -124,7 +124,7 @@ module Hive
             scope: "none",
             reset_at: nil,
             safe_summary: "#{@adapter} unknown provider failure",
-            fingerprint: "sha256:#{Digest::SHA256.hexdigest(text)}",
+            fingerprint: "sha256:#{::Digest::SHA256.hexdigest(text)}",
             evidence_ref: evidence_ref
           )
         end

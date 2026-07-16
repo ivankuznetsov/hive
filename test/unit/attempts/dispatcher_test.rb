@@ -102,6 +102,30 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
+  def test_successor_chain_is_not_blocked_by_an_older_lost_ancestor
+    with_dispatcher do |dispatcher, launcher, task, store|
+      first = dispatch(dispatcher, task, request_id: "request-one")
+      first_lost = store.mark_lost(first.attempt, reason: "owner_gone", now: NOW + 1)
+      second = dispatcher.dispatch_successor(
+        predecessor: first_lost, task: task, project: "demo",
+        argv: [ "hive", "run", task.slug ], request_id: "request-two",
+        provider: "codex", retry_charge: 1, now: NOW + 2
+      )
+      second_lost = store.mark_lost(second.attempt, reason: "owner_gone", now: NOW + 3)
+
+      third = dispatcher.dispatch_successor(
+        predecessor: second_lost, task: task, project: "demo",
+        argv: [ "hive", "run", task.slug ], request_id: "request-three",
+        provider: "codex", retry_charge: 2, now: NOW + 4
+      )
+
+      assert_equal :accepted, third.status
+      assert_equal "attempt-three", third.attempt.attempt_id
+      assert_equal second.attempt.attempt_id, third.attempt["predecessor_attempt_id"]
+      assert_equal 3, launcher.launched.size
+    end
+  end
+
   private
 
   def with_dispatcher(limits: { max_global: 3, max_per_project: 2, max_daily: 50 })

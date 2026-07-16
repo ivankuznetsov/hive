@@ -21,11 +21,15 @@ module Hive
       def initialize(start_reader: Hive::Lock.method(:process_start_time),
                      signaler: Process.method(:kill),
                      session_reader: Process.method(:getsid),
-                     group_reader: Process.method(:getpgid))
+                     group_reader: Process.method(:getpgid),
+                     sleeper: ->(seconds) { sleep(seconds) },
+                     monotonic: -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) })
         @start_reader = start_reader
         @signaler = signaler
         @session_reader = session_reader
         @group_reader = group_reader
+        @sleeper = sleeper
+        @monotonic = monotonic
       end
 
       def capture(pid)
@@ -84,6 +88,60 @@ module Hive
 
         worker_session = worker["session_id"] || worker[:session_id]
         worker_session == wrapper_session
+      end
+
+      # Cleanup for the one supported orphan case: the authoritative wrapper
+      # is gone but its recorded worker group is still alive in that wrapper's
+      # session. Identity is rechecked before TERM and again before KILL.
+      def terminate_orphan_group(wrapper:, worker:, grace_sec: 2)
+        state = orphan_group_status(wrapper: wrapper, worker: worker)
+        return :absent if state == :absent
+        return :identity_mismatch unless state == :matching
+
+        pgid = worker["process_group_id"] || worker[:process_group_id]
+        @signaler.call("TERM", -Integer(pgid))
+        deadline = @monotonic.call + grace_sec
+        loop do
+          state = orphan_group_status(wrapper: wrapper, worker: worker)
+          return :terminated if state == :absent
+          return :identity_changed unless state == :matching
+          break if @monotonic.call >= deadline
+
+          @sleeper.call([ 0.05, deadline - @monotonic.call ].min)
+        end
+
+        return :identity_changed unless orphan_group_status(wrapper: wrapper, worker: worker) == :matching
+
+        @signaler.call("KILL", -Integer(pgid))
+        20.times do
+          state = orphan_group_status(wrapper: wrapper, worker: worker)
+          return :terminated if state == :absent
+          return :identity_changed unless state == :matching
+
+          @sleeper.call(0.01)
+        end
+        :still_alive
+      rescue Errno::ESRCH
+        :terminated
+      rescue Errno::EPERM, ArgumentError, TypeError
+        :identity_mismatch
+      end
+
+      def orphan_group_status(wrapper:, worker:)
+        worker_status = status(worker)
+        return :absent if worker_status == :missing
+        return worker_status unless worker_status == :matching
+        return :mismatched unless wrapper.is_a?(Hash)
+
+        wrapper_session = wrapper["session_id"] || wrapper[:session_id]
+        wrapper_group = wrapper["process_group_id"] || wrapper[:process_group_id]
+        worker_session = worker["session_id"] || worker[:session_id]
+        worker_group = worker["process_group_id"] || worker[:process_group_id]
+        return :mismatched unless wrapper_session && wrapper_group && wrapper_session == wrapper_group
+        return :mismatched unless worker_session == wrapper_session
+        return :mismatched unless worker_group.is_a?(Integer) && worker_group.positive?
+
+        :matching
       end
 
       private

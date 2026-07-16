@@ -53,6 +53,7 @@ task default: :test
 |------|---------|
 | `test/fixtures/fake-claude` | Shell script that takes Claude/Codex headless argv, optionally writes captured args to a log, optionally echoes a scenario-controlled response, optionally writes a file, and can commit a scenario-controlled file in cwd. Pointed at via `HIVE_CLAUDE_BIN` and e2e `HIVE_CODEX_BIN`. |
 | `test/fixtures/fake-gh` | Shell script that handles `gh pr create` / `gh auth status` / `gh pr list`, returns a dummy URL. |
+| `test/e2e/fixtures/gh` | E2E-only fail-closed GitHub shim. It consumes exact ordered interactions from the run-local `gh-stub/` ledger and never falls through to the host `gh`. |
 | `test/fixtures/voice/voice-idea.oga` | Checked-in Ogg/Opus speech sample saying "voice idea" for the Telegram voice-note E2E path. `run_idea_e2e.sh` uses it by default when `TG_IDEA_MODE=voice`; explicit voice mode hard-fails when `HIVE_WHISPER_API_KEY` is unset. Voice mode uses the same fixture for both new audio idea capture and audio brainstorm answers. |
 
 ## Unit suite (`test/unit/`)
@@ -172,7 +173,15 @@ bin/hive-e2e list
 bin/hive-e2e run
 ```
 
-The current scenarios copy `test/e2e/sample-project/` into a per-run sandbox, set `HIVE_HOME` to a run-local directory, and call the real `bin/hive` as a subprocess. `SandboxEnv` routes both Claude and Codex profile binaries to `test/fixtures/fake-claude`; scenarios that exercise `4-execute` with the default Codex profile must ask the fixture to create a real worktree commit, or execute will correctly stop at `EXECUTE_WAITING reason=no_worktree_changes`. TUI scenarios use private tmux sockets (`hive-e2e-<run-id>`) so they never touch the operator's daily tmux server.
+The current scenarios copy `test/e2e/sample-project/` into a per-run sandbox, set `HIVE_HOME` to a run-local directory, and call the real `bin/hive` as a subprocess. `SandboxEnv` routes both Claude and Codex profile binaries to `test/fixtures/fake-claude` and pins `test/e2e/fixtures/gh` ahead of every scenario-supplied `PATH` for blocking CLI, background, and tmux Hive children. The run-local `script_gh` ledger provides ordered exact-argv responses; rejected or unconsumed interactions fail scenario verification, and failure bundles retain the script/state/audit evidence. Scenarios that exercise `4-execute` with the default Codex profile must ask the Claude fixture to create a real worktree commit, or execute will correctly stop at `EXECUTE_WAITING reason=no_worktree_changes`. TUI scenarios use private tmux sockets (`hive-e2e-<run-id>`) so they never touch the operator's daily tmux server.
+
+Focused harness tests pin the GitHub boundary: `gh_stub_test.rb` covers ordered
+JSON/literal responses, cwd/repository checks, invalid definitions, and
+missing/mismatched/exhausted fail-closed behavior; `sandbox_env_test.rb` proves
+a poisoned host `gh` cannot run; `step_executor_test.rb` proves blocking and
+background `bin/hive` subprocesses share one serialized script; and the parser,
+artifact-capture, and repro-writer tests cover DSL validation, copied
+`gh/` evidence, expanded interaction emission, and valid repro shell syntax.
 `test/e2e/lib/hive_e2e_binary_test.rb` pins the harness binary contract:
 scenario inventory JSON, cleanup JSON, the single-document stdout invariant for
 successful `list --json` / `clean --json` calls, unknown-command JSON errors,

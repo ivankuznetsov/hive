@@ -3,11 +3,11 @@ title: Agentic E2E Suite
 type: reference
 source: test/e2e/, bin/hive-e2e, Rakefile
 created: 2026-04-29
-updated: 2026-07-09
+updated: 2026-07-16
 tags: [test, e2e, tui, artifacts]
 ---
 
-**TLDR**: `test/e2e/` is the outer test layer. It drives the real `bin/hive` binary in a copied Ruby sample project, uses tmux for TUI scenarios, validates JSON output against published schemas, and writes versioned run artifacts for later debugging. The `bin/hive-e2e` Thor executable is also a small public harness surface with pinned exit codes and JSON error envelopes for wrapper/CI callers.
+**TLDR**: `test/e2e/` is the outer test layer. It drives the real `bin/hive` binary in a copied Ruby sample project, uses tmux for TUI scenarios, validates JSON output against published schemas, keeps GitHub-facing subprocesses behind a fail-closed scripted `gh` shim, and writes versioned run artifacts for later debugging. The `bin/hive-e2e` Thor executable is also a small public harness surface with pinned exit codes and JSON error envelopes for wrapper/CI callers.
 
 ## Commands
 
@@ -81,6 +81,7 @@ configured retention default for a malformed destructive invocation.
 | Path | Purpose |
 |------|---------|
 | `test/e2e/lib/` | Harness library: sandbox bootstrap, CLI driver, tmux driver, parser, executor, artifact capture, report writer. |
+| `test/e2e/fixtures/gh` | Executable default-deny `gh` shim driven by run-local ordered interactions. |
 | `test/e2e/scenarios/*.yml` | Agent-authorable scenarios using the locked YAML vocabulary. |
 | `test/e2e/sample-project/` | Tiny Ruby fixture copied into each scenario sandbox. Vendored gems keep bootstrap offline. |
 | `test/e2e/runs/` | Gitignored run artifacts. Each run has `report.json` and per-scenario artifact directories. |
@@ -94,10 +95,42 @@ Supported step kinds:
 - `json_assert`: run a CLI command, parse stdout, validate it against a `schemas/hive-*.json` file, then optionally assert a `pick` path.
 - `state_assert`: assert file existence, absence, marker state, substring, or regex match; supports a short timeout for async TUI updates.
 - `seed_state`, `write_file`, `register_project`, `ruby_block`: fixture setup escape hatches.
+- `script_gh`: install an ordered run-local script for exact `gh` interactions.
 - `tui_expect`, `tui_keys`, `wait_subprocess`: tmux-backed TUI interaction.
 - `editor_action`, `log_assert`: narrower fixture helpers for editor/log flows.
 
 Template variables include `{sandbox}`, `{run_home}`, `{project}`, `{slug}`, `{run_id}`, and `{task_dir:<stage>}`.
+
+### Scripted GitHub boundary
+
+`SandboxEnv` puts `test/e2e/fixtures/` first on `PATH` for CLI, background,
+and tmux-launched Hive processes, and sets `HIVE_E2E_GH_STUB_DIR` to the
+run-local `<run_home>/gh-stub` directory. Scenario `env:` overrides may replace
+the rest of `PATH`, but `SandboxEnv.merge` restores the shim as its first entry
+and restores the original stub directory, so a scenario cannot fall through to
+the operator's real `gh` or redirect the interaction ledger. Generated repros
+apply the same merge to `cli`, `json_assert`, and `spawn_background` commands.
+
+`script_gh.interactions` is an ordered array. Every item requires exact string
+`args` and may constrain `cwd` and `repository`; the latter is derived from
+`--repo`/`-R` forms or `GH_REPO`. A match can return either JSON from
+`response` or literal `stdout`, plus optional `stderr` and an `exit_status`
+from 0 through 255. Defining both `response` and `stdout`, using unknown keys,
+or supplying a malformed field is rejected before the script is installed.
+Installation atomically writes `script.json` with schema
+`hive-e2e-gh-script` version 1 plus `state.json` with `next_index: 0`, and
+clears the prior audit.
+
+The executable shim serializes concurrent calls with a run-local flock,
+consumes matched interactions in order, and appends every attempt to
+`audit.jsonl` with argv, cwd, repository, expected interaction, and rejection
+reason. A missing script, argv/cwd/repository mismatch, exhausted script, or
+non-regular, symlinked, or malformed script/state file fails closed with exit
+86; an empty or symlinked stub root is denied at startup, and there is no
+real-`gh` fallback. After all scenario steps, `StepExecutor` fails the scenario if any
+audited call was rejected or any scripted interaction remains unconsumed.
+`repro.sh` re-installs expanded `script_gh` interactions before replaying later
+steps.
 
 ### Trust boundary
 
@@ -131,6 +164,7 @@ On failure, the harness writes a scenario bundle containing:
 - `sandbox-git-status.txt`
 - `sandbox-tree.txt`
 - copied `.hive-state/stages/` and per-`.log` copies under `logs/<slug>/<basename>.log` plus a sibling `<basename>.tail` (last 200 lines) for fast agent reads
+- copied GitHub shim evidence under `gh/` (`script.json`, `state.json`, and `audit.jsonl` when present)
 - `repro.sh`
 - `manifest.json` with size and SHA-256 per artifact
 - TUI failures also include keystroke captures, run-scoped TUI subprocess marker/capture logs under `tui-subprocess/` (including the current shared marker log and its single `.log.1` rotation), plus `pane-before.txt` (snapshot taken just before the most recent `tui_keys`) and `pane-after.txt`. Cast recording is implemented by `AsciinemaDriver`, but depends on local `asciinema >= 2.4`.
@@ -154,7 +188,7 @@ On failure, the harness writes a scenario bundle containing:
 
 ## Operational Notes
 
-The harness prepends repo `bin/` to the tmux environment PATH because TUI rows dispatch commands like `hive plan ...`. `tui_keys` with `text:` sends literal text one character at a time by default for deterministic slow typing; `paste: true` sends the full `text:` value as one literal tmux chunk to exercise the TUI paste-aware runner.
+The harness puts its fixture directory first on the tmux environment `PATH` for the fail-closed `gh` shim, then includes the active Ruby bin directory and repo `bin/` so TUI rows dispatch the checkout's commands such as `hive plan ...`. `tui_keys` with `text:` sends literal text one character at a time by default for deterministic slow typing; `paste: true` sends the full `text:` value as one literal tmux chunk to exercise the TUI paste-aware runner.
 `CliDriver` starts CLI subprocesses in their own process group and applies the step timeout to both the direct child and stdout/stderr reader threads, so descendants that inherit the capture pipes cannot hold an e2e step open after their parent exits.
 
 `tmux` is required for TUI scenarios. `asciinema` is test-time optional until a TUI failure needs a cast, but missing/corrupt casts are recorded in artifacts instead of crashing unrelated CLI scenarios. If `asciinema` is installed outside PATH, set `HIVE_ASCIINEMA_BIN=/absolute/path/to/asciinema`.

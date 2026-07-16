@@ -370,7 +370,7 @@ module Hive
         scope: "none",
         reset_at: nil,
         safe_summary: "#{@name} unknown provider failure",
-        fingerprint: "sha256:#{Digest::SHA256.hexdigest(text)}",
+        fingerprint: "sha256:#{::Digest::SHA256.hexdigest(text)}",
         evidence_ref: evidence_ref
       )
     rescue StandardError

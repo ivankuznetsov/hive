@@ -29,6 +29,7 @@ module Hive
         reviewers
         council
         deliverable
+        conditions
         permissions
       ].freeze
       REVIEWER_KEYS = %w[
@@ -165,6 +166,7 @@ module Hive
         permissions = parse_permissions(stage, id: id, stage_name: name, label: label)
         input = optional_string(stage["input"], label: "#{label} input")
         deliverable = parse_deliverable(stage["deliverable"], label: label)
+        condition_policy = parse_condition_policy(stage["conditions"], label: label)
         reviewers = parse_reviewers(stage["reviewers"], id: id, label: label) if kind == :council
         council = parse_council(stage["council"], id: id, label: label, reviewer_count: reviewers&.length) if kind == :council
         validate_agent_instruction!(skill: skill, instruction: instruction, label: label) if kind == :agent
@@ -186,6 +188,7 @@ module Hive
           reviewers: reviewers,
           council: council,
           deliverable: deliverable,
+          condition_policy: condition_policy,
           permissions: permissions
         )
       end
@@ -256,6 +259,14 @@ module Hive
         return nil if value.nil?
 
         parse_state_file(value, label: "#{label} deliverable")
+      end
+
+      def parse_condition_policy(value, label:)
+        return nil if value.nil?
+
+        Hive::Conditions::Policy.rule_from_descriptor(value)
+      rescue Hive::Conditions::InvalidPolicy => e
+        raise descriptor_error("#{label} #{e.message}")
       end
 
       def parse_permissions(stage, id:, stage_name:, label:)

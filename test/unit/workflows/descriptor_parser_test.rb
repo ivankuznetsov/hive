@@ -71,6 +71,45 @@ class WorkflowsDescriptorParserTest < Minitest::Test
     assert_equal "/ship", workflow.stage_named("work").skill
   end
 
+  def test_stage_conditions_select_registered_semantics_only
+    workflow = Hive::Workflows::DescriptorParser.parse_hash(
+      {
+        "id" => "condition-flow",
+        "stages" => [
+          {
+            "name" => "work", "kind" => "agent", "state_file" => "work.md", "skill" => "/ship",
+            "conditions" => {
+              "version" => 1,
+              "transition" => "work_complete",
+              "required" => [ "ChangesPresent" ],
+              "inhibitors" => [ "AwaitingHuman" ],
+              "options" => { "no_commit_success" => true }
+            }
+          },
+          { "name" => "done", "kind" => "terminal", "state_file" => "done.md" }
+        ]
+      },
+      path: "/tmp/condition-flow.yml"
+    )
+    rule = workflow.stage_named("work").condition_policy
+    assert_equal "work_complete", rule.transition
+    assert rule.options.fetch("no_commit_success")
+
+    error = assert_raises(Hive::ConfigError) do
+      Hive::Workflows::DescriptorParser.parse_hash(
+        {
+          "id" => "bad-conditions",
+          "stages" => [
+            { "name" => "done", "kind" => "terminal", "state_file" => "done.md",
+              "conditions" => { "transition" => "done", "required" => [ "MadeUp" ] } }
+          ]
+        },
+        path: "/tmp/bad-conditions.yml"
+      )
+    end
+    assert_includes error.message, "unknown condition"
+  end
+
   def test_agent_stage_accepts_per_stage_agent_model_and_effort
     workflow = Hive::Workflows::DescriptorParser.parse_hash(
       {

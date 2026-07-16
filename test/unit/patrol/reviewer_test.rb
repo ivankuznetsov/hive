@@ -415,6 +415,31 @@ class HivePatrolReviewerTest < Minitest::Test
     end
   end
 
+  # Agent#run! reports a timed-out reviewer via status :timeout (not
+  # :error). The truncated run may still have written a plausible findings
+  # file; it must be recorded as an agent failure, never parsed as success.
+  def test_timed_out_review_agent_is_recorded_and_its_output_is_not_trusted
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, "app.rb"), "user.name\n")
+      runner = lambda do |output_path:, **|
+        File.write(output_path, JSON.generate(
+          "findings" => [ qualified_finding(file: "app.rb") ]
+        ))
+        { status: :timeout }
+      end
+      reviewer = Hive::Patrol::Reviewer.new(dir, cfg: cfg, agent_runner: runner)
+
+      findings = reviewer.call([ feature ])
+
+      assert_empty findings, "output written by a timed-out reviewer must not be parsed as success"
+      assert_equal 1, reviewer.review_errors.size
+      assert_equal "agent_failed", reviewer.review_errors.first["error"]
+      assert_includes reviewer.review_errors.first["message"], "timed out"
+      assert_empty Dir[File.join(dir, ".hive-state", "patrol", "findings", "*.json")]
+    end
+  end
+
   def test_unexpected_review_error_is_recorded
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))

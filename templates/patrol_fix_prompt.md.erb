@@ -40,8 +40,11 @@ the operator-configured patrol commands. Do not supply command text or
 self-attested before/after results. Hive will run that operator-configured command
 on an isolated base checkout with the changed regular files you declare in
 `regression_paths` overlaid, require a normal nonzero failure there, and run the
-same command on your fixed worktree before broader validation. The regression
-files may use any language or project-specific directory. If a declared file
+same command on your fixed worktree before broader validation. That base failure
+must be a plain nonzero exit of the command itself — not a timeout, a
+termination signal, or exit 127 — and its output must name at least one
+declared regression file (by path or basename), or Hive rejects the proof. The
+regression files may use any language or project-specific directory. If a declared file
 also contains the fix, overlaying it will make the base command pass and Hive
 will reject the proof. A cohesive multi-file repair is preferable to a special
 case that leaves the same root cause reachable elsewhere.

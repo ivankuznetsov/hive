@@ -56,7 +56,8 @@ module Hive
       private
 
       # One feature's failure must never abort the whole scan: a flaky or
-      # non-zero agent (Agent#run! sets status :error rather than raising)
+      # non-zero agent (Agent#run! sets status :error, or :timeout for a
+      # timed-out run, rather than raising)
       # would otherwise leave no output file and the previous
       # `File.read(output_path)` raised an uncaught Errno::ENOENT through
       # `flat_map`, discarding every other feature's findings. We record
@@ -80,11 +81,14 @@ module Hive
       end
 
       def agent_failed?(result)
-        result.is_a?(Hash) && result[:status] == :error
+        result.is_a?(Hash) && %i[error timeout].include?(result[:status])
       end
 
       def agent_error_message(result)
-        result.is_a?(Hash) ? result[:error_message].to_s : ""
+        message = result.is_a?(Hash) ? result[:error_message].to_s : ""
+        return "review agent timed out" if message.empty? && result.is_a?(Hash) && result[:status] == :timeout
+
+        message
       end
 
       def record_feature_error(feature, kind, message)

@@ -123,15 +123,21 @@ module Hive
         assert_remote_patch_identity!(patch)
         assert_remote_base_identity!(patch)
         pr_url = create_pr(patch, body)
+        # The PR now exists on the remote, so persist the fingerprint-to-PR
+        # mapping BEFORE the post-creation reconciliation asserts. A
+        # `lookup_prs_for_branch` read-after-write lag or an identity
+        # mismatch raises into the GhError rescue below; without this write
+        # the worktree is cleaned and the ledger never learns about a real
+        # open PR — every later cycle would re-fix and error against it.
+        record_mapping(finding, patch, pr_url, "open", now)
         assert_local_patch_identity!(patch)
         assert_remote_patch_identity!(patch)
         created_pr = @gh.lookup_prs_for_branch(patch.worktree_path, patch.branch).find do |pr|
           pr["url"] == pr_url
         end
-        raise Hive::GhError, "created patrol PR could not be reconciled" unless created_pr
+        raise Hive::GhError, "created patrol PR #{pr_url} could not be reconciled" unless created_pr
 
         assert_existing_pr_identity!(created_pr, patch, require_base_oid: true)
-        record_mapping(finding, patch, pr_url, "open", now)
         review_task_path = enqueue_review_task(finding, patch, pr_url, now)
         if !review_task_path && review_prs_enabled?
           # Preserve the exact validated worktree and patch receipt so the
@@ -216,7 +222,8 @@ module Hive
         end
         return if mismatches.empty?
 
-        raise Hive::GhError, "existing PR identity mismatch: #{mismatches.join('; ')}"
+        label = pr["url"].to_s.empty? ? "" : " (#{pr['url']})"
+        raise Hive::GhError, "existing PR identity mismatch#{label}: #{mismatches.join('; ')}"
       end
 
       def assert_remote_patch_identity!(patch)

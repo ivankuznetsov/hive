@@ -225,8 +225,17 @@ module Hive
         raise Hive::GitError, "patrol reviewer modified its detached scan checkout"
       end
 
+      # Cleanup failure must never mask the scan outcome: raising here would
+      # replace an in-flight reviewer exception (losing its cause) or — worse —
+      # discard a SUCCESSFULLY completed review cycle as an internal error.
+      # A leaked checkout is recoverable (each cycle creates a fresh
+      # Dir.mktmpdir path, so stale worktree metadata cannot collide with or
+      # corrupt the next scan and `git worktree prune` reclaims it); a
+      # discarded clean review cycle is not. Warn and continue.
       def remove_scan_checkout!(project_root, scan_root)
         git_output!(project_root, "worktree", "remove", "--force", scan_root)
+      rescue Hive::GitError => e
+        warn "hive patrol: failed to remove detached scan checkout #{scan_root}: #{e.message}"
       end
 
       def git_output!(root, *args)

@@ -16,6 +16,11 @@ module Hive
       # predict whether a finding delivered. Treat them as admission gates and
       # tiny tie-breakers; most alpha comes from satisfying the complete defect
       # contract, verified evidence breadth, category, novelty, and scope.
+      #
+      # Maximum attainable alpha is 87 (3 severity + 2 confidence + 8 category
+      # + 6 scope + 60 structured proof + 8 evidence breadth, with no history
+      # penalty), so min_alpha_to_fix values of 88-100 disable fixing entirely
+      # even though config validation accepts up to 100.
       STRUCTURED_PROOF_POINTS = 60
       MAX_HISTORY_PENALTY = 24
       REQUIRED_PROOF_FIELDS = %i[contract impact root_cause reproduction validation].freeze

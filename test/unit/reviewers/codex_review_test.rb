@@ -1017,4 +1017,68 @@ class ReviewersCodexReviewTest < Minitest::Test
       assert result.ok?, "explicit yolo must pass the A8 gate and run normally"
     end
   end
+
+  def test_provider_failure_reselects_native_review_on_fallback_account
+    with_tmp_dir do |dir|
+      accounts = Hive::ProviderRouting::Configuration.normalize_accounts(
+        {
+          "codex-main" => { "adapter" => "codex" },
+          "codex-backup" => { "adapter" => "codex" }
+        },
+        source: "codex reviewer test"
+      )
+      routing = {
+        "pool" => [
+          { "provider" => "codex-main", "agent" => "codex" },
+          { "provider" => "codex-backup", "agent" => "codex" }
+        ]
+      }
+      cfg = Hive::Config.merge_defaults({})
+      cfg[Hive::ProviderRouting::PROVIDER_ACCOUNTS_KEY] = accounts
+      counter = File.join(dir, "codex-review-count")
+      codex_bin = File.join(dir, "routed-codex")
+      File.write(codex_bin, <<~SH)
+        #!/bin/sh
+        if [ "$1" = "--version" ]; then printf 'codex-cli 0.139.0\n'; exit 0; fi
+        if [ ! -f #{counter} ]; then
+          : > #{counter}
+          printf '%s\n' "You've hit your usage limit. Try again later."
+          exit 1
+        fi
+        printf '## High\nNo findings.\n'
+      SH
+      File.chmod(0o755, codex_bin)
+      cfg.fetch("agents").fetch("codex")["bin"] = codex_bin
+      circuits = Hive::ProviderRouting::Store.new(path: File.join(dir, "circuits.json"))
+      router = Hive::ProviderRouting::Router.new(
+        circuit_store: circuits,
+        lease_store: Hive::AttemptLeaseStore.new(path: File.join(dir, "leases.json"))
+      )
+      ctx = make_ctx(dir)
+      FileUtils.mkdir_p(ctx.task_folder)
+      build = lambda do
+        Hive::Reviewers::CodexReview.new(
+          make_spec("routing" => routing, "max_attempts" => 1),
+          ctx,
+          cfg: cfg
+        )
+      end
+
+      with_env("HIVE_CODEX_BIN" => codex_bin) do
+        with_replaced_singleton_method(Hive::Stages::Base, :provider_router, -> { router }) do
+          first = build.call.run!
+
+          assert first.error?
+          assert_equal "codex-main", first.provider
+          assert first.provider_signal.circuit_worthy?
+          assert_equal "open", circuits.state("codex-main").fetch("state")
+
+          second = build.call.run!
+
+          assert second.ok?
+          assert_equal "codex-backup", second.provider
+        end
+      end
+    end
+  end
 end

@@ -23,8 +23,10 @@ module Hive
     # non-empty limit_text as a wall (mirroring triage/ci_fix's Result),
     # because a native producer's quota text never carries Hive's
     # `limits reached for …` wire prefix that AgentLimit.from_limit? needs.
-    Result = Data.define(:name, :output_path, :status, :error_message, :limit_text) do
-      def initialize(name:, output_path:, status:, error_message:, limit_text: nil)
+    Result = Data.define(:name, :output_path, :status, :error_message, :limit_text,
+                         :provider, :model, :routing_reason, :provider_signal) do
+      def initialize(name:, output_path:, status:, error_message:, limit_text: nil,
+                     provider: nil, model: nil, routing_reason: nil, provider_signal: nil)
         super
       end
 

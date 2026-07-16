@@ -7,6 +7,7 @@ require "hive/markers"
 require "hive/workflows"
 require "hive/daemon/dispatch_request_queue"
 require "hive/daemon/healer_support"
+require "hive/provider_routing/recovery_gate"
 
 module Hive
   module Daemon
@@ -118,7 +119,8 @@ module Hive
       def initialize(controller:, logger:, grace_sec: 300,
                      review_error_auto_recovery_limit: REVIEW_ERROR_AUTO_RECOVERY_LIMIT,
                      error_auto_recovery_limit: ERROR_AUTO_RECOVERY_LIMIT,
-                     request_queue: Hive::Daemon::DispatchRequestQueue)
+                     request_queue: Hive::Daemon::DispatchRequestQueue,
+                     provider_recovery: Hive::ProviderRouting::RecoveryGate.new)
         @controller = controller
         @logger = logger
         @request_queue = request_queue
@@ -129,6 +131,7 @@ module Hive
         @error_auto_recoveries = Hash.new(0)
         @review_error_recovery_exhausted = {}
         @error_recovery_exhausted = {}
+        @provider_recovery = provider_recovery
       end
 
       # Walk the row set, heal stale agent_working markers in place.
@@ -274,7 +277,7 @@ module Hive
         # the marker manual (legacy markers predate the stamp). Returning false
         # here — before the budget increment in the caller — means waiting
         # ticks do NOT consume the retry budget.
-        return cooldown_elapsed?(row, now: now) if reason == "limits_reached"
+        return provider_retry_dispatchable?(row, now: now) if reason == "limits_reached"
 
         # A `reason=timeout` on the two side-effect-safe stages recovers EXACTLY
         # ONCE (TIMEOUT_RECOVERY_LIMIT). The agent did the real work but returned
@@ -498,6 +501,37 @@ module Hive
         false
       end
 
+      def provider_retry_dispatchable?(row, now:)
+        attrs = marker_attrs_for(row)
+        # Markers written before provider routing carried only retry_after.
+        # Preserve their bounded legacy behavior because there is no account
+        # provenance from which to construct a safe routing decision.
+        return cooldown_elapsed?(row, now: now) if attrs["provider"].to_s.empty?
+
+        result = @provider_recovery.call(row, now: now)
+        unless result.dispatchable
+          @logger.event(
+            :provider_retry_parked,
+            project: row.project,
+            slug: row.slug,
+            stage: row.stage,
+            provider: attrs["provider"],
+            reason: result.explanation
+          )
+        end
+        result.dispatchable
+      rescue StandardError => e
+        @logger.event(
+          :provider_retry_parked,
+          project: row.project,
+          slug: row.slug,
+          stage: row.stage,
+          provider: attrs && attrs["provider"],
+          reason: "#{e.class}: #{e.message}"
+        )
+        false
+      end
+
       def review_error_auto_recovery_key(row, reason:)
         attrs = marker_attrs_for(row)
         [
@@ -532,7 +566,7 @@ module Hive
         # carve-out — every branch below it is a non-limit failure that retries
         # immediately (bounded), since a credit limit set reason=limits_reached
         # (the `all_failed_limit` arm in Stages::Review), never the reasons here.
-        return cooldown_elapsed?(row, now: now) if attrs["reason"].to_s == "limits_reached"
+        return provider_retry_dispatchable?(row, now: now) if attrs["reason"].to_s == "limits_reached"
 
         # All reviewers crashed for a non-limit reason (e.g. a native reviewer
         # exited non-zero, a tool/infra fault): bounded rerun. A persistent

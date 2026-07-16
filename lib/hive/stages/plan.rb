@@ -41,6 +41,7 @@ module Hive
           timeout_sec: cfg.dig("timeout_sec", "plan"),
           log_label: "plan",
           profile: profile,
+          routing_label: "plan",
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :state_file_marker
         }
@@ -52,7 +53,7 @@ module Hive
             session_name: Hive::ClaudeLauncher.tmux_session_name("3-plan", task) # coding-scoped: coding plan stage tmux session
           )
         else
-          Hive::Stages::Base.spawn_agent(task, **kwargs)
+          Hive::Stages::Base.spawn_agent(task, **kwargs, cfg: cfg)
         end
       end
 

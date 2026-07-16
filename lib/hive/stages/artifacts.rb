@@ -42,6 +42,7 @@ module Hive
           timeout_sec: cfg.dig("timeout_sec", "artifacts") || Hive::Config::DEFAULTS.dig("timeout_sec", "artifacts"),
           log_label: "artifacts",
           profile: profile,
+          routing_label: "artifacts",
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :state_file_marker
         }
@@ -72,7 +73,7 @@ module Hive
             strict_mcp_config: !mcp_config_path.nil?
           )
         else
-          Hive::Stages::Base.spawn_agent(task, **kwargs)
+          Hive::Stages::Base.spawn_agent(task, **kwargs, cfg: cfg)
         end
       ensure
         if mcp_config_path

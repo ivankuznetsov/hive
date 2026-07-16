@@ -900,6 +900,82 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
+  def test_provider_limit_marker_requeues_immediately_when_router_finds_fallback
+    gate_result = Struct.new(:dispatchable, :explanation).new(true, "selected codex-main")
+    gate = Object.new
+    gate.define_singleton_method(:call) { |_row, now:| gate_result }
+    @healer = Hive::Daemon::StaleAgentHealer.new(
+      controller: @controller,
+      logger: @logger,
+      grace_sec: 300,
+      request_queue: @request_queue,
+      provider_recovery: gate
+    )
+
+    with_marker_file do |state_file|
+      File.write(
+        state_file,
+        "# task\n\n<!-- ERROR reason=limits_reached provider=claude-main marker_id=route-1 -->\n"
+      )
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "4-execute",
+        marker: "error",
+        marker_attrs: {
+          "reason" => "limits_reached",
+          "provider" => "claude-main",
+          "marker_id" => "route-1"
+        },
+        live_task_lock: false
+      )
+
+      heal([ row ])
+
+      assert Hive::Markers.current(state_file).none?
+      assert @logger.events.any? { |name, _attrs| name == :marker_healed }
+    end
+  end
+
+  def test_provider_limit_marker_stays_parked_when_router_has_no_eligible_route
+    gate_result = Struct.new(:dispatchable, :explanation).new(false, "hard pin is open")
+    gate = Object.new
+    gate.define_singleton_method(:call) { |_row, now:| gate_result }
+    @healer = Hive::Daemon::StaleAgentHealer.new(
+      controller: @controller,
+      logger: @logger,
+      grace_sec: 300,
+      request_queue: @request_queue,
+      provider_recovery: gate
+    )
+
+    with_marker_file do |state_file|
+      File.write(
+        state_file,
+        "# task\n\n<!-- ERROR reason=limits_reached provider=claude-main marker_id=route-2 -->\n"
+      )
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "4-execute",
+        marker: "error",
+        marker_attrs: {
+          "reason" => "limits_reached",
+          "provider" => "claude-main",
+          "marker_id" => "route-2"
+        },
+        live_task_lock: false
+      )
+
+      heal([ row ])
+
+      assert_equal :error, Hive::Markers.current(state_file).name
+      parked = @logger.events.find { |name, _attrs| name == :provider_retry_parked }
+      assert parked
+      assert_equal "hard pin is open", parked.last.fetch(:reason)
+    end
+  end
+
   def test_auto_recovers_error_limits_reached_once_cooldown_has_elapsed_any_stage
     %w[1-brainstorm 4-execute 8-finalize].each do |stage|
       with_marker_file do |state_file|

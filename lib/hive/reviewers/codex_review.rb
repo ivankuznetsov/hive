@@ -140,23 +140,13 @@ module Hive
       def run!(deadline: nil)
         ensure_reviews_dir!
 
-        profile = Hive::AgentProfiles.lookup(spec.fetch("agent"), cfg: @cfg)
-        # A8 fail-closed gate. This adapter always runs codex's built-in
-        # `<bin> review` subcommand — a read-only pass that takes no tool-list
-        # args — regardless of which `agent` profile the entry names (a
-        # `kind: codex_review, agent: claude` entry still runs `<bin> review`,
-        # NOT claude's tool scoping). So a reviewer that declares a non-yolo
-        # `permissions:` (which load-validation accepts as a valid reviewer
-        # entry) can never be honored. enforce_permission_scope_gate! raises
-        # the same Hive::ConfigError the agent adapter triggers instead of
-        # silently running `codex review` with the declared scope discarded.
-        enforce_permission_scope_gate!(profile)
-        begin
-          profile.check_version!
-        rescue Hive::AgentError => e
-          return error_result("preflight failed: #{e.message}")
-        end
-
+        requested_profile = Hive::AgentProfiles.lookup(spec.fetch("agent"), cfg: @cfg)
+        # Validate the authored scope even when routing would later reject the
+        # adapter. This preserves the configuration-time fail-closed contract
+        # for a `kind: codex_review, agent: claude` declaration.
+        enforce_permission_scope_gate!(requested_profile)
+        router = Hive::Stages::Base.provider_router
+        task = synthetic_task
         prompt = render_prompt
         configured_timeout = spec["timeout_sec"] || DEFAULT_TIMEOUT_SEC
         max_attempts = max_attempts_from_spec
@@ -174,8 +164,79 @@ module Hive
             return error_result("deadline reached before attempt #{attempts}", attempts, max_attempts)
           end
 
-          run = run_codex_review(profile.bin, prompt, spawn_timeout || configured_timeout)
-          break if usable_review?(run)
+          decision = Hive::Stages::Base.route_attempt(
+            task,
+            cfg: @cfg,
+            routing: spec["routing"],
+            routing_label: "review.reviewers",
+            routing_checkpoint: routing_checkpoint,
+            profile: requested_profile,
+            model: spec["model"],
+            effort: spec["effort"],
+            provider_key: spec["provider"],
+            router: router
+          )
+          return routing_wait_result(decision) if decision.wait?
+
+          profile = decision.profile
+          unless profile.name == :codex
+            router.cancel(decision)
+            return error_result(
+              "routed adapter #{profile.name.inspect} cannot run the native `codex review` command",
+              attempts,
+              max_attempts,
+              decision: decision
+            )
+          end
+
+          preflight = codex_preflight(profile, decision, router)
+          return preflight if preflight
+
+          check = router.dispatch_valid?(decision)
+          unless check.valid
+            router.cancel(decision)
+            return error_result(
+              "provider route invalid before codex review spawn: #{check.reason}",
+              attempts,
+              max_attempts,
+              decision: decision
+            )
+          end
+
+          begin
+            run = router.lease_store.with_heartbeat(decision.lease) do
+              run_codex_review(profile.bin, prompt, spawn_timeout || configured_timeout)
+            end
+          rescue StandardError => e
+            signal = profile.normalize_error(
+              evidence: e.message,
+              exit_code: 1,
+              timed_out: false,
+              model: decision.model,
+              provider: decision.provider,
+              evidence_ref: "reviewer:#{name}:#{e.class}",
+              success: false
+            )
+            router.record_outcome(
+              decision: decision,
+              success: false,
+              signal: signal,
+              checkpoint: routing_checkpoint
+            )
+            raise
+          end
+          signal = normalize_run(profile, decision, run)
+          usable = usable_review?(run)
+          router.record_outcome(
+            decision: decision,
+            success: usable,
+            signal: signal,
+            checkpoint: routing_checkpoint
+          )
+          @last_routing_decision = decision
+          @last_provider_signal = signal
+          break if usable
+          break if signal&.circuit_worthy?
           break if attempts >= max_attempts
 
           sleep_seconds = backoff_seconds_for(attempts)
@@ -192,6 +253,70 @@ module Hive
       end
 
       private
+
+      def routing_checkpoint
+        "review.reviewers:#{ctx.pass}:#{name}"
+      end
+
+      def routing_wait_result(decision)
+        rejection = decision.rejections.first
+        error_result(
+          decision.explanation,
+          decision: decision,
+          provider: rejection&.provider,
+          model: rejection&.model,
+          routing_reason: decision.reason,
+          limit_text: decision.wait_reason == "limits_reached" ? "provider routing limits_reached" : nil
+        )
+      end
+
+      def codex_preflight(profile, decision, router)
+        # A8 fail-closed gate. This adapter always runs codex's built-in
+        # `<bin> review` subcommand — a read-only pass that takes no tool-list
+        # args. Resolve permissions only after routing so the selected adapter
+        # is the one whose scope is validated.
+        enforce_permission_scope_gate!(profile)
+        profile.check_version!
+        profile.preflight!
+        nil
+      rescue Hive::AgentError => e
+        signal = profile.normalize_error(
+          evidence: e.message,
+          exit_code: 1,
+          timed_out: false,
+          model: decision.model,
+          provider: decision.provider,
+          evidence_ref: "preflight:codex_review",
+          success: false
+        )
+        router.record_outcome(
+          decision: decision,
+          success: false,
+          signal: signal,
+          checkpoint: routing_checkpoint
+        )
+        error_result(
+          "preflight failed: #{e.message}",
+          decision: decision,
+          signal: signal,
+          limit_text: signal&.circuit_worthy? ? "provider routing limits_reached" : nil
+        )
+      rescue StandardError
+        router.cancel(decision)
+        raise
+      end
+
+      def normalize_run(profile, decision, run)
+        profile.normalize_error(
+          evidence: run&.stdout.to_s,
+          exit_code: run&.exit_code,
+          timed_out: run&.error.to_s.include?("timed out"),
+          model: decision.model,
+          provider: decision.provider,
+          evidence_ref: "reviewer:#{name}:pass:#{ctx.pass}",
+          success: usable_review?(run)
+        )
+      end
 
       # Fail closed when this reviewer's effective permission scope is
       # anything other than yolo, since `codex review` can't enforce tool
@@ -236,15 +361,21 @@ module Hive
         case review_status(run)
         when :findings
           File.write(output_path, format_body(findings_markdown(review_body(run.stdout))))
-          Result.new(name: name, output_path: output_path, status: :ok, error_message: nil)
+          result_with_routing(status: :ok, error_message: nil)
         when :clean
           File.write(output_path, clean_findings(review_body(run.stdout)))
-          Result.new(name: name, output_path: output_path, status: :ok, error_message: nil)
+          result_with_routing(status: :ok, error_message: nil)
         else
           # Failure: leave no malformed findings file behind — triage would
           # otherwise treat it as real reviewer output.
           delete_output!
-          error_result(base_reason(run), attempts, max_attempts, detail: captured_tail(run))
+          error_result(
+            base_reason(run),
+            attempts,
+            max_attempts,
+            detail: captured_tail(run),
+            limit_text: @last_provider_signal&.circuit_worthy? ? "provider routing limits_reached" : nil
+          )
         end
       end
 
@@ -316,7 +447,10 @@ module Hive
         "\n  ── codex output (last #{shown} bytes) ──\n#{tail.gsub(/^/, '    ')}"
       end
 
-      def error_result(base_msg, attempts = nil, max_attempts = nil, detail: nil)
+      def error_result(base_msg, attempts = nil, max_attempts = nil, detail: nil,
+                       decision: @last_routing_decision, signal: @last_provider_signal,
+                       provider: decision&.provider, model: decision&.model,
+                       routing_reason: decision&.reason, limit_text: nil)
         msg =
           if attempts && max_attempts && max_attempts > 1
             "#{base_msg} after #{attempts} attempt(s)"
@@ -324,7 +458,33 @@ module Hive
             base_msg
           end
         msg = "#{msg}#{detail}" if detail && !detail.empty?
-        Result.new(name: name, output_path: output_path, status: :error, error_message: msg)
+        result_with_routing(
+          status: :error,
+          error_message: msg,
+          decision: decision,
+          signal: signal,
+          provider: provider,
+          model: model,
+          routing_reason: routing_reason,
+          limit_text: limit_text
+        )
+      end
+
+      def result_with_routing(status:, error_message:, decision: @last_routing_decision,
+                              signal: @last_provider_signal, provider: decision&.provider,
+                              model: decision&.model, routing_reason: decision&.reason,
+                              limit_text: nil)
+        Result.new(
+          name: name,
+          output_path: output_path,
+          status: status,
+          error_message: error_message,
+          limit_text: limit_text,
+          provider: provider,
+          model: model,
+          routing_reason: routing_reason,
+          provider_signal: signal
+        )
       end
 
       def valid_findings?(stdout)

@@ -30,7 +30,13 @@ module Hive
       # ecosystem-agnostic while letting projects pick their own
       # tooling.
       module CiFix
-        Result = Data.define(:status, :attempts, :last_output, :error_message, :limit_text)
+        Result = Data.define(:status, :attempts, :last_output, :error_message, :limit_text,
+                             :provider, :model, :routing_reason) do
+          def initialize(status:, attempts:, last_output:, error_message:, limit_text:,
+                         provider: nil, model: nil, routing_reason: nil)
+            super
+          end
+        end
 
         # ANSI escape sequence regex — matches CSI sequences (ESC [ ... letter)
         # which cover colors, cursor movement, text styling. Some CI
@@ -141,7 +147,10 @@ module Hive
                 attempts: attempts,
                 last_output: output,
                 error_message: spawn_result[:error_message] || "fix agent failed (#{spawn_result[:status]})",
-                limit_text: spawn_result[:limit_text]
+                limit_text: spawn_result[:limit_text],
+                provider: spawn_result[:provider],
+                model: spawn_result[:model],
+                routing_reason: spawn_result[:routing_reason]
               )
             end
 
@@ -367,6 +376,8 @@ module Hive
             timeout_sec: cfg.dig("timeout_sec", "review_ci") || 600,
             log_label: "review-ci-fix-attempt#{format('%02d', attempt)}",
             profile: profile,
+            routing_label: "review.ci",
+            routing: cfg.dig("review", "ci", "routing"),
             **Hive::Stages::Base.tool_scope_kwargs(scope),
             status_mode: :exit_code_only
           }
@@ -378,7 +389,7 @@ module Hive
               session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-ci-fix-attempt#{attempt}", task)
             )
           else
-            Hive::Stages::Base.spawn_agent(task, **kwargs)
+            Hive::Stages::Base.spawn_agent(task, **kwargs, cfg: cfg)
           end
         end
 

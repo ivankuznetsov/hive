@@ -32,7 +32,13 @@ module Hive
       # :triage_tampered error result; the U9 runner converts that to a
       # REVIEW_ERROR marker.
       module Triage
-        Result = Data.define(:status, :escalations_path, :error_message, :tampered_files, :limit_text)
+        Result = Data.define(:status, :escalations_path, :error_message, :tampered_files, :limit_text,
+                             :provider, :model, :routing_reason) do
+          def initialize(status:, escalations_path:, error_message:, tampered_files:, limit_text:,
+                         provider: nil, model: nil, routing_reason: nil)
+            super
+          end
+        end
 
         # Files the triage agent must NOT modify. The reviewer files
         # are deliberately NOT in this list — triage's job is to edit
@@ -104,6 +110,8 @@ module Hive
             log_label: "review-triage-pass#{format('%02d', ctx.pass)}",
             profile: profile,
             expected_output: escalations,
+            routing_label: "review.triage",
+            routing: cfg.dig("review", "triage", "routing"),
             **Hive::Stages::Base.tool_scope_kwargs(scope),
             status_mode: :output_file_exists
           }
@@ -116,7 +124,7 @@ module Hive
                 session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-triage-pass#{ctx.pass}", task)
               )
             else
-              Hive::Stages::Base.spawn_agent(task, **kwargs)
+              Hive::Stages::Base.spawn_agent(task, **kwargs, cfg: cfg)
             end
           after = Hive::ProtectedFiles.snapshot(ctx.task_folder, TRIAGE_PROTECTED_FILES)
 
@@ -150,7 +158,10 @@ module Hive
               escalations_path: escalations,
               error_message: spawn_result[:error_message] || "triage agent failed (#{spawn_result[:status]})",
               tampered_files: [],
-              limit_text: spawn_result[:limit_text]
+              limit_text: spawn_result[:limit_text],
+              provider: spawn_result[:provider],
+              model: spawn_result[:model],
+              routing_reason: spawn_result[:routing_reason]
             )
           end
         end

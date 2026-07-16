@@ -42,6 +42,22 @@ module Hive
 
       def generate_name
         profile = Hive::Stages::Base.stage_profile(@cfg, "execute")
+        @provider_router = Hive::Stages::Base.provider_router
+        @routing_decision = Hive::Stages::Base.route_attempt(
+          @task,
+          cfg: @cfg,
+          routing: nil,
+          routing_label: "execute",
+          routing_checkpoint: "display-name",
+          profile: profile,
+          model: nil,
+          effort: nil,
+          provider_key: nil,
+          router: @provider_router
+        )
+        return nil if @routing_decision.wait?
+
+        profile = @routing_decision.profile
         result = run_agent(profile)
         return nil unless result[:exit_code]&.zero?
 
@@ -58,6 +74,12 @@ module Hive
         stdin_file = prompt_stdin_file(profile, prompt)
         spawn_opts = { chdir: @task.project_root, pgroup: true, out: w, err: w }
         spawn_opts[:in] = stdin_file if stdin_file
+        if @routing_decision
+          check = @provider_router.dispatch_valid?(@routing_decision)
+          unless check.valid
+            raise Hive::UnavailableError, "provider route invalid before display-name spawn: #{check.reason}"
+          end
+        end
         pid = Process.spawn(*cmd, **spawn_opts)
         w.close
         pgid = process_group(pid)
@@ -81,14 +103,57 @@ module Hive
         end
         reader.report_on_exception = false
 
-        status = wait_with_timeout(pid, pgid)
+        status = if @routing_decision
+          @provider_router.lease_store.with_heartbeat(@routing_decision.lease) do
+            wait_with_timeout(pid, pgid)
+          end
+        else
+          wait_with_timeout(pid, pgid)
+        end
         reader.join(2)
         reader.kill if reader.alive?
 
-        {
+        result = {
           exit_code: exit_code(status),
           final_message: final_message || plain_tail.strip
         }
+        signal = profile.normalize_error(
+          evidence: result[:final_message],
+          exit_code: result[:exit_code],
+          timed_out: false,
+          model: @routing_decision&.model,
+          provider: @routing_decision&.provider || profile.name,
+          evidence_ref: "#{log_path}#tail",
+          success: result[:exit_code]&.zero?
+        )
+        @provider_router&.record_outcome(
+          decision: @routing_decision,
+          success: result[:exit_code]&.zero?,
+          signal: signal,
+          checkpoint: "display-name"
+        )
+        result
+      rescue StandardError => e
+        if e.is_a?(Hive::UnavailableError) && e.message.include?("provider route invalid before")
+          @provider_router&.cancel(@routing_decision)
+          raise
+        end
+        signal = profile&.normalize_error(
+          evidence: e.message,
+          exit_code: 1,
+          timed_out: false,
+          model: @routing_decision&.model,
+          provider: @routing_decision&.provider || profile&.name,
+          evidence_ref: "display-name:#{e.class}",
+          success: false
+        )
+        @provider_router&.record_outcome(
+          decision: @routing_decision,
+          success: false,
+          signal: signal,
+          checkpoint: "display-name"
+        )
+        raise
       ensure
         stdin_file&.close
         stdin_file&.unlink

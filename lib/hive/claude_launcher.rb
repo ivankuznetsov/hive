@@ -154,7 +154,8 @@ module Hive
                 disallowed_tools: nil,
                 permission_mode: nil, mcp_config_path: nil,
                 strict_mcp_config: false,
-                attempt_lease: nil, attempt_lease_store: nil)
+                attempt_lease: nil, attempt_lease_store: nil,
+                routing_decision: nil, provider_router: nil)
       profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
       ensure_claude_profile!(profile)
       permission_mode ||= Hive::Config.claude_permission_mode(cfg)
@@ -182,12 +183,20 @@ module Hive
           disallowed_tools: disallowed_tools,
           cli_flags: headless_flags,
           attempt_lease: attempt_lease,
-          attempt_lease_store: attempt_lease_store
+          attempt_lease_store: attempt_lease_store,
+          routing_decision: routing_decision,
+          provider_router: provider_router
         )
       end
 
       allowed_tools ||= DEFAULT_ALLOWED_TOOLS
       result = nil
+      if routing_decision && provider_router
+        check = provider_router.dispatch_valid?(routing_decision)
+        unless check.valid
+          raise Hive::UnavailableError, "provider route invalid before tmux spawn: #{check.reason}"
+        end
+      end
       with_attempt_lease(attempt_lease, attempt_lease_store) do
         with_shared_session(
           task: task,

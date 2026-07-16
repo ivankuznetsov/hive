@@ -8,6 +8,9 @@ module Hive
   module ProviderRouting
     class Router
       Outcome = Data.define(:transition, :exclusion)
+      DispatchCheck = Data.define(:valid, :reason)
+
+      attr_reader :circuit_store, :lease_store
 
       def initialize(circuit_store: Store.new, lease_store: Hive::AttemptLeaseStore.new,
                      clock: -> { Time.now.utc }, adapter_available: nil)
@@ -78,7 +81,8 @@ module Hive
             next
           end
 
-          profile = Hive::AgentProfiles.lookup(candidate.agent, cfg: request.agent_config)
+          profile = request.profile_for(candidate.agent) ||
+            Hive::AgentProfiles.lookup(candidate.agent, cfg: request.agent_config)
           return Decision.new(
             status: :selected,
             candidate: candidate,
@@ -150,6 +154,29 @@ module Hive
         @lease_store.release(decision.lease, now: now)
       end
 
+      def dispatch_valid?(decision, now: @clock.call)
+        return DispatchCheck.new(valid: false, reason: "no_selected_decision") unless decision&.selected?
+        unless @lease_store.active?(decision.lease, now: now)
+          return DispatchCheck.new(valid: false, reason: "attempt_lease_inactive")
+        end
+
+        availability = @circuit_store.availability(
+          provider: decision.provider,
+          model: decision.model,
+          now: now
+        )
+        if decision.probe?
+          matches = availability.status == "half_open" &&
+            availability.probe&.fetch("attempt_id", nil) == decision.attempt_id
+          return DispatchCheck.new(valid: matches, reason: matches ? "probe_claim_valid" : "probe_claim_lost")
+        end
+
+        valid = availability.status == "closed"
+        DispatchCheck.new(valid: valid, reason: valid ? "closed" : "circuit_no_longer_closed")
+      rescue StoreError, Hive::AttemptLeaseStoreError => e
+        DispatchCheck.new(valid: false, reason: "routing_state_unavailable: #{e.message}")
+      end
+
       private
 
       def pinned_candidates(configuration)
@@ -162,7 +189,9 @@ module Hive
       end
 
       def static_rejection(request, candidate)
-        return rejection(candidate, "adapter_unavailable", candidate.agent) unless @adapter_available.call(candidate.agent)
+        unless request.profile_for(candidate.agent) || @adapter_available.call(candidate.agent)
+          return rejection(candidate, "adapter_unavailable", candidate.agent)
+        end
         return rejection(candidate, "context_excluded", request.checkpoint) if request.excluded?(candidate)
 
         requirements = request.configuration.required

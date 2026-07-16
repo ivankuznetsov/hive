@@ -114,6 +114,7 @@ module Hive
           timeout_sec: finalize_timeout(cfg),
           log_label: "finalize",
           profile: profile,
+          routing_label: "finalize",
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :state_file_marker
         }
@@ -125,7 +126,7 @@ module Hive
             session_name: Hive::ClaudeLauncher.tmux_session_name("8-finalize", task) # coding-scoped: coding finalize stage tmux session
           )
         else
-          Hive::Stages::Base.spawn_agent(task, **kwargs)
+          Hive::Stages::Base.spawn_agent(task, **kwargs, cfg: cfg)
         end
       end
 

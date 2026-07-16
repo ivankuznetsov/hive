@@ -368,6 +368,10 @@ class StagesArtifactsTest < Minitest::Test
   private
 
   def make_artifacts_task(dir)
+    # Config.load now resolves the global provider-account registry. Tests
+    # that collapse XDG homes through HIVE_HOME must provide that directory,
+    # matching Config's long-standing fail-closed HIVE_HOME contract.
+    FileUtils.mkdir_p(File.join(dir, "home"))
     folder = File.join(dir, ".hive-state", "stages", "7-artifacts", "demo-260522-aaaa")
     FileUtils.mkdir_p(folder)
     Hive::Task.new(folder)

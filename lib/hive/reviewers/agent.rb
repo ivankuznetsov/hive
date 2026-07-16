@@ -22,12 +22,41 @@ module Hive
       end
 
       def run!(deadline: nil)
-        run_with_spawn(deadline: deadline) do |profile, prompt, configured_timeout, spawn_timeout, attempts|
-          scope = Hive::Stages::Base.stage_permission_scope(
-            @cfg || {}, "review.reviewers", synthetic_task, profile,
-            base_add_dirs: [ ctx.task_folder ],
-            **Hive::Stages::Base.explicit_permission_kwargs(spec)
+        run_with_spawn(deadline: deadline) do |profile, _prompt, configured_timeout, spawn_timeout, attempts|
+          router = Hive::Stages::Base.provider_router
+          decision = Hive::Stages::Base.route_attempt(
+            synthetic_task,
+            cfg: @cfg,
+            routing: spec["routing"],
+            routing_label: "review.reviewers",
+            routing_checkpoint: "review.reviewers:#{ctx.pass}:#{name}",
+            profile: profile,
+            model: spec["model"],
+            effort: spec["effort"],
+            provider_key: spec["provider"],
+            router: router
           )
+          if decision.wait?
+            next Hive::Stages::Base.routing_wait_result(
+              synthetic_task,
+              decision,
+              status_mode: :output_file_exists,
+              profile: profile
+            )
+          end
+
+          begin
+            profile = decision.profile
+            prompt = render_prompt(profile, spec.fetch("skill"))
+            scope = Hive::Stages::Base.stage_permission_scope(
+              @cfg || {}, "review.reviewers", synthetic_task, profile,
+              base_add_dirs: [ ctx.task_folder ],
+              **Hive::Stages::Base.explicit_permission_kwargs(spec)
+            )
+          rescue StandardError
+            router.cancel(decision)
+            raise
+          end
           Hive::Stages::Base.spawn_agent(
             synthetic_task,
             prompt: prompt,
@@ -39,6 +68,11 @@ module Hive
             profile: profile,
             expected_output: output_path,
             cfg: @cfg,
+            routing: spec["routing"],
+            routing_label: "review.reviewers",
+            routing_checkpoint: "review.reviewers:#{ctx.pass}:#{name}",
+            routing_decision: decision,
+            provider_router: router,
             **Hive::Stages::Base.tool_scope_kwargs(scope),
             # Reviewer spawns own a per-pass output file, not the task
             # marker — the orchestrator's REVIEW_WORKING marker must
@@ -117,6 +151,7 @@ module Hive
 
           result = yield(profile, prompt, configured_timeout, spawn_timeout, attempts)
           break if result[:status] == :ok
+          break if result[:provider_signal]&.circuit_worthy?
           break if attempts >= max_attempts
 
           sleep_seconds = backoff_seconds_for(attempts)
@@ -225,7 +260,12 @@ module Hive
             name: name,
             output_path: output_path,
             status: :error,
-            error_message: msg
+            error_message: msg,
+            limit_text: spawn_result[:limit_text],
+            provider: spawn_result[:provider],
+            model: spawn_result[:model],
+            routing_reason: spawn_result[:routing_reason],
+            provider_signal: spawn_result[:provider_signal]
           )
         end
       end

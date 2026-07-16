@@ -320,7 +320,8 @@ module Hive
         log_label: "rebase_conflict",
         profile: profile,
         status_mode: :exit_code_only,
-        cfg: cfg
+        cfg: cfg,
+        routing_label: "execute"
       )
     end
 

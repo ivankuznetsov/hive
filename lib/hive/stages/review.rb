@@ -221,6 +221,9 @@ module Hive
               Hive::Markers.set(task.state_file, :review_error,
                                 phase: :ci, reason: "limits_reached",
                                 message: "ci hit a usage/credit limit",
+                                provider: ci_result.provider,
+                                model: ci_result.model,
+                                routing_reason: ci_result.routing_reason,
                                 retry_after: Hive::AgentLimit.retry_after)
               return { commit: "ci_limits_reached", status: :review_error }
             end
@@ -403,6 +406,9 @@ module Hive
               attrs = { phase: :reviewers, reason: reason, pass: pass }
               if limit
                 attrs[:message] = "all reviewers hit a usage/credit limit"
+                attrs[:provider] = @last_reviewer_provider
+                attrs[:model] = @last_reviewer_model
+                attrs[:routing_reason] = @last_reviewer_routing_reason
                 # Stamp the cooldown so the daemon healer can self-heal once
                 # the usage window has plausibly reset (see AgentLimit). Only
                 # the limit marker gets a retry_after — `all_failed` stays manual.
@@ -450,7 +456,10 @@ module Hive
                 limited = mark_review_phase_failure(
                   task, phase: :triage, pass: pass,
                   error_message: triage_result.error_message,
-                  limit_text: triage_result.limit_text
+                  limit_text: triage_result.limit_text,
+                  provider: triage_result.provider,
+                  model: triage_result.model,
+                  routing_reason: triage_result.routing_reason
                 )
                 label = limited ? "triage_limits_reached" : "triage_error"
                 return { commit: "#{label}_pass_#{format('%02d', pass)}",
@@ -614,7 +623,10 @@ module Hive
             limited = mark_review_phase_failure(
               task, phase: :fix, pass: pass,
               error_message: fix_result && fix_result[:error_message],
-              limit_text: fix_result && fix_result[:limit_text]
+              limit_text: fix_result && fix_result[:limit_text],
+              provider: fix_result && fix_result[:provider],
+              model: fix_result && fix_result[:model],
+              routing_reason: fix_result && fix_result[:routing_reason]
             )
             label = limited ? "fix_limits_reached" : "fix_error"
             return { commit: "#{label}_pass_#{format('%02d', pass)}",
@@ -1123,11 +1135,15 @@ module Hive
       # A timeout (no limit text) stays terminal — only an actual limit
       # earns the self-healing retry stamp. Returns whether the limit path
       # was taken so the caller can label its commit.
-      def mark_review_phase_failure(task, phase:, pass:, error_message:, limit_text: nil)
+      def mark_review_phase_failure(task, phase:, pass:, error_message:, limit_text: nil,
+                                    provider: nil, model: nil, routing_reason: nil)
         if limit_failure?(limit_text: limit_text, error_message: error_message)
           Hive::Markers.set(task.state_file, :review_error,
                             phase: phase, reason: "limits_reached", pass: pass,
                             message: "#{phase} hit a usage/credit limit",
+                            provider: provider,
+                            model: model,
+                            routing_reason: routing_reason,
                             retry_after: Hive::AgentLimit.retry_after)
           true
         else
@@ -1460,6 +1476,7 @@ module Hive
         # classified (e.g. every reviewer hit a usage/credit limit) instead of
         # being flattened to a generic "all_failed".
         error_messages = []
+        provider_failures = []
         # Partition into claude-tmux specs vs everything else so the
         # shared tmux session covers ONLY the group that needs it: a
         # mixed reviewer list keeps non-claude reviewers running in
@@ -1480,6 +1497,7 @@ module Hive
 
             statuses << result.status
             error_messages << result.error_message if result.error?
+            provider_failures << result if result.error? && result.limit_text
             handle_reviewer_result(task, cfg, ctx, spec, result)
             remaining_specs -= 1
           end
@@ -1488,31 +1506,20 @@ module Hive
                                          wall_clock_exceeded?(started_at, max_wall_clock_sec)
 
           shared_reviewer_groups(cfg, claude_specs).each_with_index do |group, group_idx|
-            scope = shared_reviewer_permission_scope(cfg, ctx, task, group.first)
-            Hive::ClaudeLauncher.with_shared_session(
-              task: task,
-              cfg: cfg,
-              session_name: shared_reviewer_session_name(task, ctx.pass, group_idx),
-              cwd: ctx.worktree_path,
-              add_dirs: scope.fetch(:add_dirs),
-              **Hive::Stages::Base.tool_scope_kwargs(scope)
-            ) do |handle|
-              group.each do |spec|
-                result = run_reviewer_spec(
-                  cfg, ctx, spec,
-                  reviewer_deadline(started_at, max_wall_clock_sec, specs_remaining: remaining_specs),
-                  started_at: started_at,
-                  max_wall_clock_sec: max_wall_clock_sec,
-                  handle: handle
-                )
-                return :wall_clock_exceeded if result == :wall_clock_exceeded
+            results = run_routed_shared_reviewer_group(
+              cfg, ctx, task, group, group_idx,
+              remaining_specs: remaining_specs,
+              started_at: started_at,
+              max_wall_clock_sec: max_wall_clock_sec
+            )
+            return :wall_clock_exceeded if results == :wall_clock_exceeded
 
-                statuses << result.status
-                error_messages << result.error_message if result.error?
-                handle_reviewer_result(task, cfg, ctx, spec, result)
-                remaining_specs -= 1
-              end
+            results.each do |result|
+              statuses << result.status
+              error_messages << result.error_message if result.error?
+              provider_failures << result if result.error? && result.limit_text
             end
+            remaining_specs -= results.length
           end
         else
           specs.each do |spec|
@@ -1526,6 +1533,7 @@ module Hive
 
             statuses << result.status
             error_messages << result.error_message if result.error?
+            provider_failures << result if result.error? && result.limit_text
             handle_reviewer_result(task, cfg, ctx, spec, result)
             remaining_specs -= 1
           end
@@ -1539,7 +1547,11 @@ module Hive
           # errors (e.g. codex "you've hit your usage limit"), surface that
           # distinctly so the run is marked limits_reached rather than a
           # generic all_failed.
-          if error_messages.any? { |m| Hive::AgentLimit.from_limit?(m.to_s) }
+          if provider_failures.any? || error_messages.any? { |m| Hive::AgentLimit.from_limit?(m.to_s) }
+            failure = provider_failures.first
+            @last_reviewer_provider = failure&.provider
+            @last_reviewer_model = failure&.model
+            @last_reviewer_routing_reason = failure&.routing_reason
             :all_failed_limit
           else
             :all_failed
@@ -1547,6 +1559,154 @@ module Hive
         else
           :ok
         end
+      end
+
+      def run_routed_shared_reviewer_group(cfg, ctx, task, group, group_idx,
+                                           remaining_specs:, started_at:, max_wall_clock_sec:)
+        first = group.first
+        profile = Hive::AgentProfiles.lookup(first.fetch("agent"), cfg: cfg)
+        router = Hive::Stages::Base.provider_router
+        checkpoint = "review:#{ctx.pass}:shared:#{group_idx}"
+        decision = Hive::Stages::Base.route_attempt(
+          task,
+          cfg: cfg,
+          routing: first["routing"],
+          routing_label: "review.reviewers",
+          routing_checkpoint: checkpoint,
+          profile: profile,
+          model: first["model"],
+          effort: first["effort"],
+          provider_key: nil,
+          router: router
+        )
+
+        unless decision.selected? && decision.profile.name == :claude
+          router.cancel(decision) if decision.selected?
+          return run_reviewer_group_headless(
+            cfg, ctx, task, group,
+            remaining_specs: remaining_specs,
+            started_at: started_at,
+            max_wall_clock_sec: max_wall_clock_sec
+          )
+        end
+
+        results = []
+        provider_failure = nil
+        processed = 0
+        wall_clock_expired = false
+        scope = shared_reviewer_permission_scope(cfg, ctx, task, first)
+        begin
+          check = router.dispatch_valid?(decision)
+          unless check.valid
+            raise Hive::UnavailableError,
+                  "provider route invalid before shared reviewer spawn: #{check.reason}"
+          end
+          router.lease_store.with_heartbeat(decision.lease) do
+            Hive::ClaudeLauncher.with_shared_session(
+              task: task,
+              cfg: cfg,
+              session_name: shared_reviewer_session_name(task, ctx.pass, group_idx),
+              cwd: ctx.worktree_path,
+              add_dirs: scope.fetch(:add_dirs),
+              **Hive::Stages::Base.tool_scope_kwargs(scope)
+            ) do |handle|
+              group.each do |spec|
+                result = run_reviewer_spec(
+                  cfg, ctx, spec,
+                  reviewer_deadline(
+                    started_at,
+                    max_wall_clock_sec,
+                    specs_remaining: remaining_specs - processed
+                  ),
+                  started_at: started_at,
+                  max_wall_clock_sec: max_wall_clock_sec,
+                  handle: handle
+                )
+                if result == :wall_clock_exceeded
+                  wall_clock_expired = true
+                  break
+                end
+
+                results << result
+                processed += 1
+                handle_reviewer_result(task, cfg, ctx, spec, result)
+                next unless result.provider_signal&.circuit_worthy?
+
+                provider_failure = result.provider_signal.with(
+                  provider: decision.provider,
+                  model: result.provider_signal.scope == "model" ? decision.model : nil
+                )
+                break
+              end
+            end
+          end
+          if wall_clock_expired
+            router.cancel(decision)
+            return :wall_clock_exceeded
+          end
+          router.record_outcome(
+            decision: decision,
+            success: provider_failure.nil? && results.any?(&:ok?),
+            signal: provider_failure,
+            checkpoint: checkpoint
+          )
+        rescue StandardError => e
+          if e.is_a?(Hive::UnavailableError) && e.message.include?("provider route invalid before")
+            router.cancel(decision)
+            raise
+          end
+          signal = decision.profile.normalize_error(
+            evidence: e.message,
+            exit_code: 1,
+            timed_out: false,
+            model: decision.model,
+            provider: decision.provider,
+            evidence_ref: "review-shared-session:#{e.class}",
+            success: false
+          )
+          router.record_outcome(
+            decision: decision,
+            success: false,
+            signal: signal,
+            checkpoint: checkpoint
+          )
+          raise
+        end
+
+        remaining = group.drop(processed)
+        return results if remaining.empty?
+
+        tail = run_reviewer_group_headless(
+          cfg, ctx, task, remaining,
+          remaining_specs: remaining_specs - processed,
+          started_at: started_at,
+          max_wall_clock_sec: max_wall_clock_sec
+        )
+        return :wall_clock_exceeded if tail == :wall_clock_exceeded
+
+        results + tail
+      end
+
+      def run_reviewer_group_headless(cfg, ctx, task, specs, remaining_specs:,
+                                      started_at:, max_wall_clock_sec:)
+        results = []
+        specs.each do |spec|
+          result = run_reviewer_spec(
+            cfg, ctx, spec,
+            reviewer_deadline(
+              started_at,
+              max_wall_clock_sec,
+              specs_remaining: remaining_specs - results.length
+            ),
+            started_at: started_at,
+            max_wall_clock_sec: max_wall_clock_sec
+          )
+          return :wall_clock_exceeded if result == :wall_clock_exceeded
+
+          results << result
+          handle_reviewer_result(task, cfg, ctx, spec, result)
+        end
+        results
       end
 
       def reviewer_specs_for(cfg, task)
@@ -2069,6 +2229,8 @@ module Hive
           timeout_sec: cfg.dig("timeout_sec", "review_fix") || 2700,
           log_label: "review-fix-pass#{format('%02d', ctx.pass)}",
           profile: profile,
+          routing_label: "review.fix",
+          routing: cfg.dig("review", "fix", "routing"),
           **Hive::Stages::Base.tool_scope_kwargs(scope),
           status_mode: :exit_code_only
         }
@@ -2080,7 +2242,7 @@ module Hive
             session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-fix-pass#{ctx.pass}", task)
           )
         else
-          Hive::Stages::Base.spawn_agent(task, **kwargs)
+          Hive::Stages::Base.spawn_agent(task, **kwargs, cfg: cfg)
         end
       end
 

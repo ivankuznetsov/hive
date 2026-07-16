@@ -277,6 +277,31 @@ class ProviderRoutingRouterTest < Minitest::Test
     end
   end
 
+  def test_final_dispatch_gate_rechecks_circuit_and_lease_immediately_before_spawn
+    with_router do |router, circuits, leases|
+      config = configuration(pool: [ candidate("claude-main", "claude") ])
+      decision = router.select(request(config, "final-gate"))
+      assert router.dispatch_valid?(decision).valid
+
+      circuits.record(
+        signal("session_limit", provider: "claude-main"),
+        account: config.accounts.fetch("claude-main"),
+        now: @now
+      )
+      check = router.dispatch_valid?(decision)
+      refute check.valid
+      assert_equal "circuit_no_longer_closed", check.reason
+      router.cancel(decision)
+
+      fresh_config = configuration(pool: [ candidate("codex-main", "codex") ])
+      released = router.select(request(fresh_config, "released-gate"))
+      leases.release(released.lease, now: @now)
+      check = router.dispatch_valid?(released)
+      refute check.valid
+      assert_equal "attempt_lease_inactive", check.reason
+    end
+  end
+
   private
 
   def with_router

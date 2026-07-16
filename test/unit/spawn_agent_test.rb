@@ -7,6 +7,7 @@ require "hive/agent"
 require "hive/agent_profiles"
 require "hive/claude_launcher"
 require "hive/stages/base"
+require "hive/provider_routing/router"
 
 # Direct coverage for Hive::Stages::Base.spawn_agent: profile check_version! /
 # preflight! ordering, the warn_isolation_reduced trigger when the configured
@@ -102,6 +103,110 @@ class SpawnAgentTest < Minitest::Test
     end
   end
 
+  def test_provider_failure_opens_circuit_and_next_spawn_uses_fallback
+    with_tmp_dir do |dir|
+      task = make_task(dir, "4-execute")
+      File.write(task.state_file, "")
+      codex_log = File.join(dir, "codex-spawns.log")
+      claude_log = File.join(dir, "claude-spawns.log")
+      claude_bin = File.join(dir, "session-limited-claude")
+      File.write(claude_bin, <<~SH)
+        #!/bin/sh
+        if [ "$1" = "--version" ]; then printf '2.1.118 (Claude Code)\n'; exit 0; fi
+        printf 'spawn\n' >> #{claude_log}
+        printf '%s\n' "You've hit your session limit; stop and wait for limit to reset"
+        exit 1
+      SH
+      File.chmod(0o755, claude_bin)
+      codex_bin = File.join(dir, "fake-codex")
+      File.write(codex_bin, <<~SH)
+        #!/bin/sh
+        if [ "$1" = "--version" ]; then printf 'codex 1.2.3\n'; exit 0; fi
+        printf 'spawn\n' >> #{codex_log}
+        cat >/dev/null
+        exit 0
+      SH
+      File.chmod(0o755, codex_bin)
+      circuits = Hive::ProviderRouting::Store.new(path: File.join(dir, "circuits.json"))
+      leases = Hive::AttemptLeaseStore.new(path: File.join(dir, "leases.json"))
+      router = Hive::ProviderRouting::Router.new(circuit_store: circuits, lease_store: leases)
+      cfg = routing_config
+      cfg.fetch("agents").fetch("claude")["bin"] = claude_bin
+
+      with_env(
+        "HIVE_CLAUDE_BIN" => claude_bin,
+        "HIVE_CODEX_BIN" => codex_bin,
+        "HIVE_FAKE_CLAUDE_LOG_DIR" => dir
+      ) do
+        first = Hive::Stages::Base.spawn_agent(
+          task,
+          prompt: "first",
+          max_budget_usd: 1,
+          timeout_sec: 5,
+          status_mode: :exit_code_only,
+          cfg: cfg,
+          routing_label: "execute",
+          provider_router: router
+        )
+        assert_equal "session_limit", first.fetch(:provider_signal).failure_class
+        assert_equal "open", circuits.state("claude-main").fetch("state")
+
+        second = Hive::Stages::Base.spawn_agent(
+          task,
+          prompt: "second",
+          max_budget_usd: 1,
+          timeout_sec: 5,
+          status_mode: :exit_code_only,
+          cfg: cfg,
+          routing_label: "execute",
+          provider_router: router
+        )
+
+        assert_equal :ok, second.fetch(:status)
+        assert_equal "codex-main", second.fetch(:provider)
+        assert_equal [ "spawn" ], File.readlines(codex_log, chomp: true)
+        assert_equal [ "spawn" ], File.readlines(claude_log, chomp: true)
+      end
+    end
+  end
+
+  def test_open_hard_pin_returns_limits_wait_without_spawning
+    with_tmp_dir do |dir|
+      task = make_task(dir, "3-plan")
+      File.write(task.state_file, "")
+      circuits = Hive::ProviderRouting::Store.new(path: File.join(dir, "circuits.json"))
+      leases = Hive::AttemptLeaseStore.new(path: File.join(dir, "leases.json"))
+      router = Hive::ProviderRouting::Router.new(circuit_store: circuits, lease_store: leases)
+      cfg = routing_config(pin: { "provider" => "claude-main" })
+      account = cfg.fetch(Hive::ProviderRouting::PROVIDER_ACCOUNTS_KEY).fetch("claude-main")
+      circuits.record(
+        Hive::ProviderRouting::Signal.new(
+          provider: "claude-main", model: nil, failure_class: "session_limit",
+          scope: "provider", reset_at: nil, safe_summary: "session limit",
+          fingerprint: "fp", evidence_ref: "test"
+        ),
+        account: account
+      )
+
+      result = Hive::Stages::Base.spawn_agent(
+        task,
+        prompt: "must not spawn",
+        max_budget_usd: 1,
+        timeout_sec: 5,
+        status_mode: :state_file_marker,
+        cfg: cfg,
+        routing_label: "execute",
+        provider_router: router
+      )
+
+      assert_equal :error, result.fetch(:status)
+      assert_equal "limits_reached", result.fetch(:routing_wait_reason)
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal "limits_reached", marker.attrs.fetch("reason")
+      refute File.exist?(File.join(dir, "fake-claude-argv.log"))
+    end
+  end
+
   def test_claude_permission_mode_from_cfg_reaches_headless_spawn
     with_tmp_dir do |dir|
       task = make_task(dir)
@@ -122,6 +227,37 @@ class SpawnAgentTest < Minitest::Test
     ensure
       FileUtils.rm_rf(log_dir) if log_dir
     end
+  end
+
+  def routing_config(pin: nil)
+    cfg = Hive::Config.merge_defaults(
+      "execute" => {
+        "routing" => {
+          "pool" => [
+            {
+              "provider" => "claude-main",
+              "agent" => "claude",
+              "capabilities" => Hive::ProviderRouting::DEFAULT_CAPABILITIES
+            },
+            {
+              "provider" => "codex-main",
+              "agent" => "codex",
+              "capabilities" => Hive::ProviderRouting::DEFAULT_CAPABILITIES
+            }
+          ],
+          "pin" => pin
+        }.compact
+      }
+    )
+    cfg[Hive::ProviderRouting::PROVIDER_ACCOUNTS_KEY] =
+      Hive::ProviderRouting::Configuration.normalize_accounts(
+        {
+          "claude-main" => { "adapter" => "claude" },
+          "codex-main" => { "adapter" => "codex" }
+        },
+        source: "spawn routing test"
+      )
+    cfg
   end
 
   def test_tool_scope_kwargs_reach_headless_claude_spawn

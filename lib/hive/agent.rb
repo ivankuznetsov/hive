@@ -35,7 +35,8 @@ module Hive
                    permission_mode: nil, allowed_tools: nil,
                    disallowed_tools: nil, cli_flags: [],
                    provider_key: nil, model: nil,
-                   attempt_lease: nil, attempt_lease_store: nil)
+                   attempt_lease: nil, attempt_lease_store: nil,
+                   routing_decision: nil, provider_router: nil)
       @task = task
       @prompt = prompt
       @add_dirs = Array(add_dirs)
@@ -65,6 +66,8 @@ module Hive
       @attempt_lease = attempt_lease
       @attempt_lease_store = attempt_lease_store
       @last_lease_heartbeat = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      @routing_decision = routing_decision
+      @provider_router = provider_router
     end
 
     # Effective mode for this spawn — explicit kwarg wins, falls back to
@@ -150,6 +153,7 @@ module Hive
       r, w = IO.pipe
       spawn_opts = { chdir: @cwd, pgroup: true, out: w, err: w }
       spawn_opts[:in] = stdin_file if stdin_file
+      assert_route_still_dispatchable!
       pid = Process.spawn(SCRUBBED_CHILD_ENV, *cmd, **spawn_opts)
       w.close
       pgid = begin
@@ -364,6 +368,15 @@ module Hive
 
       @attempt_lease_store.heartbeat(@attempt_lease)
       @last_lease_heartbeat = now
+    end
+
+    def assert_route_still_dispatchable!
+      return unless @routing_decision && @provider_router
+
+      check = @provider_router.dispatch_valid?(@routing_decision)
+      return if check.valid
+
+      raise Hive::UnavailableError, "provider route invalid before spawn: #{check.reason}"
     end
 
     def prompt_via_stdin?

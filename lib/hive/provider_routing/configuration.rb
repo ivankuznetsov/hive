@@ -4,6 +4,8 @@ require "hive/agent_profiles"
 module Hive
   module ProviderRouting
     class Configuration
+      Resolved = Data.define(:accounts, :pool, :required, :pin)
+
       attr_reader :accounts, :pool, :required, :pin
 
       class << self
@@ -32,6 +34,37 @@ module Hive
               "effort" => default_effort_to_nil(legacy_effort)
             },
             source: source
+          )
+        end
+
+        # Direct AgentProfile extension points pre-date named provider config
+        # and may pass an unregistered profile object. Preserve that public
+        # contract through the same router as a validated pool of one; authored
+        # YAML still goes through #from and therefore still rejects unknown
+        # adapters.
+        def single(provider:, agent:, model: nil, effort: nil, capabilities: DEFAULT_CAPABILITIES)
+          provider = provider.to_s
+          agent = agent.to_s
+          account = Account.new(
+            key: provider,
+            adapter: agent,
+            max_concurrent: nil,
+            cooldown_sec: DEFAULT_COOLDOWNS,
+            backoff_cap_sec: DEFAULT_BACKOFF_CAP_SEC
+          )
+          candidate = Candidate.new(
+            provider: provider,
+            agent: agent,
+            model: model&.to_s,
+            effort: effort&.to_s,
+            capabilities: capabilities,
+            order: 0
+          )
+          Resolved.new(
+            accounts: { provider => account }.freeze,
+            pool: [ candidate ].freeze,
+            required: Requirements.new(context: nil, quality: nil, tools: [].freeze, permissions: [].freeze),
+            pin: nil
           )
         end
 

@@ -157,6 +157,13 @@ module Hive
       end
     end
 
+    def active?(lease, now: @clock.call)
+      mutate(now: now) do |snapshot|
+        current = find_lease(snapshot, namespace: lease.namespace, lease_id: lease.id)
+        [ owned_active?(current, lease), false ]
+      end
+    end
+
     def leases(namespace: nil, now: @clock.call)
       mutate(now: now) do |snapshot|
         values = snapshot.fetch("leases").values.map { |value| AttemptLease.from_h(value) }
@@ -167,6 +174,22 @@ module Hive
 
     def snapshot(now: @clock.call)
       mutate(now: now) { |value| [ deep_dup(value), false ] }
+    end
+
+    def with_heartbeat(lease, interval_sec: 30)
+      return yield unless lease
+
+      heartbeat_thread = Thread.new do
+        loop do
+          sleep interval_sec
+          break unless heartbeat(lease)
+        end
+      end
+      yield
+    ensure
+      heartbeat_thread&.kill
+      heartbeat_thread&.join
+      release(lease) if lease
     end
 
     private

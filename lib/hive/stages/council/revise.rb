@@ -69,6 +69,8 @@ module Hive
             profile: profile,
             model: @revise.model || @stage.model,
             effort: @revise.effort || @stage.effort,
+            routing: @revise.routing || @stage.routing,
+            routing_label: @stage.name,
             expected_output: @target_path,
             status_mode: :output_file_exists,
             cfg: @cfg,

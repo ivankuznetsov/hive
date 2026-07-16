@@ -7,7 +7,7 @@ module Hive
       Exclusion = Data.define(:provider, :model, :checkpoint, :reason)
 
       attr_reader :configuration, :checkpoint, :exclusions, :provenance,
-                  :attempt_id, :agent_config
+                  :attempt_id, :agent_config, :profile_overrides
 
       def initialize(configuration:, checkpoint:, exclusions: [], provenance: {},
                      attempt_id: SecureRandom.uuid, agent_config: nil)
@@ -17,7 +17,28 @@ module Hive
         @provenance = provenance.to_h.freeze
         @attempt_id = attempt_id.to_s
         @agent_config = agent_config
+        @profile_overrides = {}
         freeze
+      end
+
+      def self.with_profiles(configuration:, checkpoint:, exclusions: [], provenance: {},
+                             attempt_id: SecureRandom.uuid, agent_config: nil, profiles: {})
+        request = allocate
+        request.send(
+          :initialize_with_profiles,
+          configuration: configuration,
+          checkpoint: checkpoint,
+          exclusions: exclusions,
+          provenance: provenance,
+          attempt_id: attempt_id,
+          agent_config: agent_config,
+          profiles: profiles
+        )
+        request
+      end
+
+      def profile_for(agent)
+        profile_overrides[agent.to_s]
       end
 
       def excluded?(candidate)
@@ -28,7 +49,7 @@ module Hive
       end
 
       def with_exclusion(provider:, model:, reason: "context_length")
-        self.class.new(
+        self.class.with_profiles(
           configuration: configuration,
           checkpoint: checkpoint,
           exclusions: exclusions + [
@@ -37,11 +58,24 @@ module Hive
           ],
           provenance: provenance,
           attempt_id: SecureRandom.uuid,
-          agent_config: agent_config
+          agent_config: agent_config,
+          profiles: profile_overrides
         )
       end
 
       private
+
+      def initialize_with_profiles(configuration:, checkpoint:, exclusions:, provenance:,
+                                   attempt_id:, agent_config:, profiles:)
+        @configuration = configuration
+        @checkpoint = checkpoint.to_s
+        @exclusions = exclusions.map { |entry| normalize_exclusion(entry) }.freeze
+        @provenance = provenance.to_h.freeze
+        @attempt_id = attempt_id.to_s
+        @agent_config = agent_config
+        @profile_overrides = profiles.transform_keys(&:to_s).freeze
+        freeze
+      end
 
       def normalize_exclusion(entry)
         return entry if entry.is_a?(Exclusion)

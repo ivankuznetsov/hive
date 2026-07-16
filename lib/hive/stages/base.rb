@@ -8,6 +8,7 @@ require "hive/config"
 require "hive/events"
 require "hive/markers"
 require "hive/permission_scope"
+require "hive/provider_routing/router"
 require "hive/stages/clean_exit"
 require "hive/usage_db"
 require "hive/worktree"
@@ -507,8 +508,44 @@ module Hive
                       cfg: nil, permission_mode: nil, allowed_tools: nil,
                       disallowed_tools: nil, cli_flags: nil,
                       model: nil, effort: nil, provider_key: nil,
-                      attempt_lease: nil, attempt_lease_store: nil)
+                      attempt_lease: nil, attempt_lease_store: nil,
+                      routing: nil, routing_label: nil, routing_checkpoint: nil,
+                      routing_decision: nil, provider_router: nil)
         profile ||= Hive::AgentProfiles.lookup(:claude)
+        requested_profile = profile
+        provider_router ||= self.provider_router
+        unless routing_decision
+          routing_decision = route_attempt(
+            task,
+            cfg: cfg,
+            routing: routing,
+            routing_label: routing_label,
+            routing_checkpoint: routing_checkpoint,
+            profile: profile,
+            model: model,
+            effort: effort,
+            provider_key: provider_key,
+            router: provider_router
+          )
+        end
+        return routing_wait_result(task, routing_decision, status_mode: status_mode, profile: profile) if routing_decision.wait?
+
+        profile = routing_decision.profile
+        model = routing_decision.model
+        effort = routing_decision.effort
+        provider_key = routing_decision.provider
+        attempt_lease = routing_decision.lease
+        attempt_lease_store = provider_router.lease_store
+        if profile.name != requested_profile.name
+          scope = stage_permission_scope(
+            cfg || {}, routing_label || task.stage_name, task, profile,
+            base_add_dirs: Array(add_dirs)
+          )
+          add_dirs = scope.fetch(:add_dirs)
+          permission_mode = scope[:permission_mode]
+          allowed_tools = scope[:allowed_tools]
+          disallowed_tools = scope[:disallowed_tools]
+        end
         # Translate preflight/version-check failures (e.g. Pi missing
         # ~/.pi/agent/auth.json mid-loop) into a typed :error envelope
         # so callers (Review.run!'s spawn_fix_agent etc.) write a
@@ -519,8 +556,24 @@ module Hive
           profile.check_version!
           profile.preflight!
         rescue Hive::AgentError => e
-          return { status: :error,
-                   error_message: "preflight failed: #{e.message}" }
+          result = {
+            status: :error,
+            error_message: "preflight failed: #{e.message}",
+            provider_signal: profile.normalize_error(
+              evidence: e.message,
+              exit_code: 1,
+              timed_out: false,
+              model: model,
+              provider: provider_key,
+              evidence_ref: "preflight:#{profile.name}",
+              success: false
+            )
+          }
+          return finish_routed_attempt(
+            task, result, routing_decision, provider_router,
+            checkpoint: routing_checkpoint || default_routing_checkpoint(task, routing_label),
+            status_mode: status_mode
+          )
         end
 
         if !profile.add_dir_flag && Array(add_dirs).any?
@@ -572,10 +625,22 @@ module Hive
           provider_key: provider_key,
           model: model,
           attempt_lease: attempt_lease,
-          attempt_lease_store: attempt_lease_store
+          attempt_lease_store: attempt_lease_store,
+          routing_decision: routing_decision,
+          provider_router: provider_router
         ).run!
         record_usage(task, profile, result, started_at)
-        result
+        finish_routed_attempt(
+          task, result, routing_decision, provider_router,
+          checkpoint: routing_checkpoint || default_routing_checkpoint(task, routing_label),
+          status_mode: status_mode
+        )
+      rescue StandardError => e
+        record_routing_exception(
+          routing_decision, provider_router, profile, model, provider_key, e,
+          checkpoint: routing_checkpoint || default_routing_checkpoint(task, routing_label)
+        )
+        raise
       end
 
       def stage_resource_limits(cfg, stage)
@@ -597,16 +662,58 @@ module Hive
                          permission_mode: nil, allowed_tools: nil,
                          disallowed_tools: nil, mcp_config_path: nil,
                          strict_mcp_config: false,
-                         attempt_lease: nil, attempt_lease_store: nil)
+                         attempt_lease: nil, attempt_lease_store: nil,
+                         routing: nil, routing_label: nil, routing_checkpoint: nil,
+                         routing_decision: nil, provider_router: nil)
         require "hive/claude_launcher"
 
         profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
-        unless profile.name == :claude
-          raise Hive::AgentError,
-                "spawn_claude! only supports the claude profile; got #{profile.name.inspect}"
+        provider_router ||= self.provider_router
+        routing_decision ||= route_attempt(
+          task,
+          cfg: cfg,
+          routing: routing,
+          routing_label: routing_label,
+          routing_checkpoint: routing_checkpoint,
+          profile: profile,
+          model: nil,
+          effort: nil,
+          provider_key: nil,
+          router: provider_router
+        )
+        if routing_decision.wait?
+          return routing_wait_result(task, routing_decision, status_mode: status_mode, profile: profile)
         end
 
-        Hive::ClaudeLauncher.launch!(
+        if routing_decision.profile.name != :claude
+          scope = stage_permission_scope(
+            cfg || {}, routing_label || task.stage_name, task,
+            routing_decision.profile,
+            base_add_dirs: Array(add_dirs)
+          )
+          return spawn_agent(
+            task,
+            prompt: prompt,
+            max_budget_usd: max_budget_usd,
+            timeout_sec: timeout_sec,
+            add_dirs: scope.fetch(:add_dirs),
+            cwd: cwd,
+            log_label: log_label,
+            profile: routing_decision.profile,
+            expected_output: expected_output,
+            status_mode: status_mode,
+            cfg: cfg,
+            **tool_scope_kwargs(scope),
+            model: routing_decision.model,
+            effort: routing_decision.effort,
+            provider_key: routing_decision.provider,
+            routing_checkpoint: routing_checkpoint,
+            routing_decision: routing_decision,
+            provider_router: provider_router
+          )
+        end
+
+        result = Hive::ClaudeLauncher.launch!(
           task: task,
           cfg: cfg,
           prompt: prompt,
@@ -618,15 +725,186 @@ module Hive
           session_name: session_name,
           status_mode: status_mode,
           expected_output: expected_output,
-          profile: profile,
+          profile: routing_decision.profile,
           permission_mode: permission_mode,
           allowed_tools: allowed_tools,
           disallowed_tools: disallowed_tools,
           mcp_config_path: mcp_config_path,
           strict_mcp_config: strict_mcp_config,
-          attempt_lease: attempt_lease,
-          attempt_lease_store: attempt_lease_store
+          attempt_lease: routing_decision.lease,
+          attempt_lease_store: provider_router.lease_store,
+          routing_decision: routing_decision,
+          provider_router: provider_router
         )
+        return result if result[:routing_outcome_recorded]
+
+        finish_routed_attempt(
+          task, result, routing_decision, provider_router,
+          checkpoint: routing_checkpoint || default_routing_checkpoint(task, routing_label),
+          status_mode: status_mode
+        )
+      rescue StandardError => e
+        record_routing_exception(
+          routing_decision, provider_router, profile, nil, routing_decision&.provider, e,
+          checkpoint: routing_checkpoint || default_routing_checkpoint(task, routing_label)
+        )
+        raise
+      end
+
+      def provider_router
+        Hive::ProviderRouting::Router.new
+      end
+
+      def route_attempt(task, cfg:, routing:, routing_label:, routing_checkpoint:,
+                        profile:, model:, effort:, provider_key:, router:)
+        label = routing_label || task.stage_name
+        configuration = if routing.nil? && !Hive::AgentProfiles.registered?(profile.name)
+          Hive::ProviderRouting::Configuration.single(
+            provider: provider_key || profile.name,
+            agent: profile.name,
+            model: model,
+            effort: effort
+          )
+        else
+          Hive::ProviderRouting::Configuration.from(
+            cfg: cfg || {},
+            stage_name: label,
+            routing: routing,
+            agent: profile.name,
+            model: model,
+            effort: effort,
+            source: "#{label}.routing at dispatch"
+          )
+        end
+        checkpoint = routing_checkpoint || default_routing_checkpoint(task, label)
+        request = Hive::ProviderRouting::Request.with_profiles(
+          configuration: configuration,
+          checkpoint: checkpoint,
+          exclusions: routing_exclusions(task, checkpoint),
+          provenance: {
+            "task" => task.respond_to?(:slug) ? task.slug : File.basename(task.folder.to_s),
+            "stage" => label,
+            "task_folder" => task.folder
+          },
+          agent_config: cfg,
+          profiles: { profile.name.to_s => profile }
+        )
+        router.select(request)
+      end
+
+      def routing_wait_result(task, decision, status_mode:, profile:)
+        result = {
+          status: :error,
+          error_message: decision.explanation,
+          routing_decision: decision,
+          routing_reason: decision.reason,
+          routing_wait_reason: decision.wait_reason,
+          limit_text: decision.wait_reason == "limits_reached" ? "provider routing limits_reached" : nil,
+          provider: decision.rejections.first&.provider,
+          model: decision.rejections.first&.model
+        }
+        effective_mode = status_mode || profile.status_detection_mode
+        if effective_mode == :state_file_marker
+          Hive::Markers.set(
+            task.state_file,
+            :error,
+            reason: decision.wait_reason,
+            routing_reason: decision.reason,
+            provider: result[:provider],
+            model: result[:model],
+            routing_attempt_id: decision.attempt_id,
+            message: decision.explanation
+          )
+        end
+        result
+      end
+
+      def finish_routed_attempt(task, result, decision, router, checkpoint:, status_mode: nil)
+        return result unless decision&.selected?
+
+        signal = result[:provider_signal]
+        success = !%i[error timeout].include?(result[:status]) && !signal&.circuit_worthy?
+        outcome = router.record_outcome(
+          decision: decision,
+          success: success,
+          signal: signal,
+          checkpoint: checkpoint
+        )
+        result[:routing_decision] = decision
+        result[:routing_reason] = decision.reason
+        result[:provider] = decision.provider
+        result[:model] ||= decision.model
+        result[:routing_outcome_recorded] = true
+        if outcome.exclusion
+          result[:routing_exclusion] = outcome.exclusion.with(checkpoint: checkpoint)
+          if (result[:status] == :error || result[:status] == :timeout) &&
+              ((status_mode || decision.profile.status_detection_mode) == :state_file_marker)
+            Hive::Markers.set(
+              task.state_file,
+              :error,
+              reason: "routing_context_mismatch",
+              provider: decision.provider,
+              model: decision.model,
+              routing_checkpoint: checkpoint,
+              routing_excluded_provider: decision.provider,
+              routing_excluded_model: decision.model
+            )
+          end
+        end
+        result
+      end
+
+      def record_routing_exception(decision, router, profile, model, provider, error, checkpoint:)
+        return unless decision&.selected? && router
+
+        if error.is_a?(Hive::ConfigError) ||
+            (error.is_a?(Hive::UnavailableError) && error.message.include?("provider route invalid before"))
+          router.cancel(decision)
+          return
+        end
+
+        signal = profile&.normalize_error(
+          evidence: error.message,
+          exit_code: 1,
+          timed_out: false,
+          model: model,
+          provider: provider,
+          evidence_ref: "spawn_exception:#{error.class}",
+          success: false
+        )
+        router.record_outcome(
+          decision: decision,
+          success: false,
+          signal: signal,
+          checkpoint: checkpoint
+        )
+      rescue Hive::Error
+        nil
+      end
+
+      def default_routing_checkpoint(task, label)
+        stage_name = task.respond_to?(:stage_name) ? task.stage_name : nil
+        stage_index = task.respond_to?(:stage_index) ? task.stage_index : nil
+        prefix = stage_index || stage_name || label || "auxiliary"
+        "#{prefix}-#{label || stage_name || 'auxiliary'}"
+      end
+
+      def routing_exclusions(task, checkpoint)
+        marker = Hive::Markers.current(task.state_file)
+        attrs = marker.attrs
+        return [] unless attrs["routing_checkpoint"] == checkpoint
+        return [] if attrs["routing_excluded_provider"].to_s.empty?
+
+        [
+          {
+            provider: attrs["routing_excluded_provider"],
+            model: attrs["routing_excluded_model"],
+            checkpoint: checkpoint,
+            reason: "context_length"
+          }
+        ]
+      rescue SystemCallError
+        []
       end
 
       # Wrap a spawn_claude! call so that AgentErrors land on the

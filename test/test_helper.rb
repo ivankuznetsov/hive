@@ -21,8 +21,12 @@ require_relative "support/workflow_helpers"
 # the `hive-test-wtbase*` name lives under Dir.tmpdir so `rake test:clean_tmp`
 # also sweeps it. Cleaned on suite exit.
 ENV["HIVE_WORKTREE_BASE"] ||= Dir.mktmpdir("hive-test-wtbase")
+ENV["HIVE_PROVIDER_ROUTING_STATE_HOME"] ||= Dir.mktmpdir("hive-test-routing-state")
 Minitest.after_run do
   FileUtils.rm_rf(ENV["HIVE_WORKTREE_BASE"]) if ENV["HIVE_WORKTREE_BASE"]&.include?("hive-test-wtbase")
+  if ENV["HIVE_PROVIDER_ROUTING_STATE_HOME"]&.include?("hive-test-routing-state")
+    FileUtils.rm_rf(ENV["HIVE_PROVIDER_ROUTING_STATE_HOME"])
+  end
 end
 
 if ENV["HIVE_COVERAGE"]
@@ -40,6 +44,10 @@ module HiveTestStdinIsolation
     @hive_original_skip_llm_wiki_post_commit = ENV["HIVE_SKIP_LLM_WIKI_POST_COMMIT"]
     ENV["HIVE_SKIP_LLM_WIKI_SCHEDULER"] = "1"
     ENV["HIVE_SKIP_LLM_WIKI_POST_COMMIT"] = "1"
+    routing_home = ENV["HIVE_PROVIDER_ROUTING_STATE_HOME"]
+    if routing_home&.include?("hive-test-routing-state")
+      FileUtils.rm_f(Dir[File.join(routing_home, "{,.}*")])
+    end
     $stdin = StringIO.new
     super
   end

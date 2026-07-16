@@ -128,6 +128,8 @@ module Hive
             log_label: "review-browser-pass#{format('%02d', ctx.pass)}-attempt#{format('%02d', attempt)}",
             profile: profile,
             expected_output: result_path,
+            routing_label: "review.browser_test",
+            routing: cfg.dig("review", "browser_test", "routing"),
             **Hive::Stages::Base.tool_scope_kwargs(scope),
             status_mode: :output_file_exists
           }
@@ -140,7 +142,7 @@ module Hive
                 session_name: Hive::ClaudeLauncher.tmux_session_name("6-review-browser-pass#{ctx.pass}-attempt#{attempt}", task)
               )
             else
-              Hive::Stages::Base.spawn_agent(task, **kwargs)
+              Hive::Stages::Base.spawn_agent(task, **kwargs, cfg: cfg)
             end
 
           if spawn_result[:status] != :ok

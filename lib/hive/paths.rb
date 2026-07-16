@@ -29,19 +29,26 @@ module Hive
     end
 
     def provider_circuits_path
-      File.join(state_home, "provider-circuits.v1.json")
+      File.join(provider_routing_state_home, "provider-circuits.v1.json")
     end
 
     def provider_circuits_lock_path
-      File.join(state_home, ".provider-circuits.lock")
+      File.join(provider_routing_state_home, ".provider-circuits.lock")
     end
 
     def attempt_leases_path
-      File.join(state_home, "attempt-leases.v1.json")
+      File.join(provider_routing_state_home, "attempt-leases.v1.json")
     end
 
     def attempt_leases_lock_path
-      File.join(state_home, ".attempt-leases.lock")
+      File.join(provider_routing_state_home, ".attempt-leases.lock")
+    end
+
+    # Primarily useful for hermetic tests that exercise real cross-process
+    # routing state. Production defaults to the global Hive state home.
+    def provider_routing_state_home
+      value = env_or_blank("HIVE_PROVIDER_ROUTING_STATE_HOME")
+      value ? File.expand_path(value) : state_home
     end
 
     def bin_home

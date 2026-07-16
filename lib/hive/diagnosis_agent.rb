@@ -84,6 +84,26 @@ module Hive
       with_diagnose_lock do
         cfg = Hive::Config.load(@task.project_root)
         profile = Hive::Stages::Base.stage_profile(cfg, "execute")
+        unless @injected_spawn
+          @provider_router = Hive::Stages::Base.provider_router
+          @routing_decision = Hive::Stages::Base.route_attempt(
+            @task,
+            cfg: cfg,
+            routing: nil,
+            routing_label: "execute",
+            routing_checkpoint: "diagnose:#{marker_signature(Hive::Markers.current(@task.state_file))}",
+            profile: profile,
+            model: nil,
+            effort: nil,
+            provider_key: nil,
+            router: @provider_router
+          )
+          if @routing_decision.wait?
+            raise Hive::UnavailableError,
+                  "diagnosis provider route unavailable: #{@routing_decision.explanation}"
+          end
+          profile = @routing_decision.profile
+        end
         ensure_supported_diagnostic_generator!(profile)
         cwd = diagnose_cwd(cfg)
         unless @injected_spawn
@@ -107,14 +127,42 @@ module Hive
         signature_at_dispatch = marker_signature(marker)
         nonce = Hive::Stages::Base.user_supplied_tag
 
-        output = @spawn.call(
-          profile: profile,
-          prompt: prompt_for(marker, nonce: nonce, worktree_path: cwd),
-          cwd: cwd,
-          add_dirs: [ @task.folder ],
-          timeout_sec: cfg.dig("timeout_sec", "diagnose") || DEFAULT_TIMEOUT_SECONDS,
-          max_budget_usd: cfg.dig("budget_usd", "diagnose") || DEFAULT_BUDGET_USD
-        )
+        begin
+          output = @spawn.call(
+            profile: profile,
+            prompt: prompt_for(marker, nonce: nonce, worktree_path: cwd),
+            cwd: cwd,
+            add_dirs: [ @task.folder ],
+            timeout_sec: cfg.dig("timeout_sec", "diagnose") || DEFAULT_TIMEOUT_SECONDS,
+            max_budget_usd: cfg.dig("budget_usd", "diagnose") || DEFAULT_BUDGET_USD
+          )
+          @provider_router&.record_outcome(
+            decision: @routing_decision,
+            success: true,
+            checkpoint: "diagnose:#{signature_at_dispatch}"
+          )
+        rescue StandardError => e
+          if e.is_a?(Hive::UnavailableError) && e.message.include?("provider route invalid before")
+            @provider_router&.cancel(@routing_decision)
+            raise
+          end
+          signal = profile.normalize_error(
+            evidence: e.message,
+            exit_code: 1,
+            timed_out: e.message.include?("timed out"),
+            model: @routing_decision&.model,
+            provider: @routing_decision&.provider || profile.name,
+            evidence_ref: "diagnosis:#{e.class}",
+            success: false
+          )
+          @provider_router&.record_outcome(
+            decision: @routing_decision,
+            success: false,
+            signal: signal,
+            checkpoint: "diagnose:#{signature_at_dispatch}"
+          )
+          raise
+        end
 
         # Write-time freshness gate: re-read the marker after the agent
         # finishes and confirm BOTH that the (name + sorted attrs)
@@ -378,7 +426,15 @@ module Hive
     def spawn_profile(profile:, prompt:, cwd:, add_dirs:, timeout_sec:, max_budget_usd:)
       cmd = build_cmd(profile, prompt, add_dirs, max_budget_usd)
       stdin_data = profile.prompt_style == :stdin ? prompt : nil
-      run_with_timeout(cmd, cwd, stdin_data, timeout_sec)
+      return run_with_timeout(cmd, cwd, stdin_data, timeout_sec) unless @routing_decision
+
+      check = @provider_router.dispatch_valid?(@routing_decision)
+      unless check.valid
+        raise Hive::UnavailableError, "provider route invalid before diagnosis spawn: #{check.reason}"
+      end
+      @provider_router.lease_store.with_heartbeat(@routing_decision.lease) do
+        run_with_timeout(cmd, cwd, stdin_data, timeout_sec)
+      end
     end
 
     def run_with_timeout(cmd, cwd, stdin_data, timeout_sec)

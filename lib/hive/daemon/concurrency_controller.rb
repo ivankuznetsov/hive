@@ -1,5 +1,6 @@
 require "set"
 require "date"
+require "hive/attempt_lease_store"
 
 module Hive
   module Daemon
@@ -35,7 +36,7 @@ module Hive
                   :max_runs_per_day_per_project, :max_concurrent_patrol_scans
 
       def initialize(max_concurrent_runs:, max_concurrent_per_project:, max_runs_per_day_per_project:,
-                     max_concurrent_patrol_scans: 1, dispatch_state: nil)
+                     max_concurrent_patrol_scans: 1, dispatch_state: nil, attempt_leases: nil)
         @max_concurrent_runs = max_concurrent_runs
         @max_concurrent_per_project = max_concurrent_per_project
         @max_runs_per_day_per_project = max_runs_per_day_per_project
@@ -52,6 +53,7 @@ module Hive
         # (`:daemon_dispatch_baselines_*`) for both expected I/O errors and the
         # defense-in-depth broad-StandardError rescue.
         @dispatch_state = dispatch_state
+        @attempt_leases = attempt_leases || Hive::AttemptLeaseStore.new
 
         # pid → { project, slug, stage, command, started_at, state_file_mtime_at_dispatch }
         @running = {}
@@ -73,6 +75,24 @@ module Hive
         # the persisted store so a restart keeps the baselines the next
         # tick compares against (fail-closed: {} if absent/corrupt).
         @last_dispatched_mtime = @dispatch_state ? @dispatch_state.load : {}
+      end
+
+      # Provider attempts use a process-shared lease store rather than the
+      # daemon-local @running map. This composes with the task/project caps:
+      # callers must pass both gates, and neither gate replaces the other.
+      def provider_concurrency(provider:, configured_max: nil, now: Time.now.utc)
+        observed = @attempt_leases.active_count(group: provider.to_s, now: now)
+        {
+          observed: observed,
+          configured_max: configured_max,
+          available: configured_max.nil? || observed < configured_max
+        }
+      end
+
+      def can_dispatch_provider?(provider:, configured_max: nil, now: Time.now.utc)
+        provider_concurrency(
+          provider: provider, configured_max: configured_max, now: now
+        ).fetch(:available) ? :ok : :provider_cap
       end
 
       # Apply SIGHUP-reloaded budget limits without replacing the controller.

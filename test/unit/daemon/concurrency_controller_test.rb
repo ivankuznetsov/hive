@@ -2,6 +2,7 @@ require "test_helper"
 require "tmpdir"
 require "hive/daemon/concurrency_controller"
 require "hive/daemon/dispatch_baselines"
+require "hive/attempt_lease_store"
 
 # Pin the concurrency controller's caps + backoff + quarantine + daily-
 # rate semantics. Pure unit — no I/O, no Process.spawn. The controller
@@ -40,6 +41,36 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
     dispatch(c, 102, "p2", "s2")
     # Now both TASK slots are full (scan excluded) → global_cap.
     assert_equal :global_cap, c.can_dispatch?(project: "p3", slug: "s3", now: T0)
+  end
+
+  def test_provider_concurrency_composes_with_existing_daemon_caps
+    Dir.mktmpdir do |dir|
+      leases = Hive::AttemptLeaseStore.new(
+        path: File.join(dir, "leases.json"), clock: -> { T0 },
+        owner_alive: ->(_pid, _start) { true }
+      )
+      leases.claim_provider(
+        provider: "claude-main", model: nil, attempt_id: "one", ttl_sec: 3600
+      )
+      controller = Hive::Daemon::ConcurrencyController.new(
+        max_concurrent_runs: 3, max_concurrent_per_project: 1,
+        max_runs_per_day_per_project: 50, attempt_leases: leases
+      )
+
+      assert_equal :provider_cap,
+                   controller.can_dispatch_provider?(
+                     provider: "claude-main", configured_max: 1, now: T0
+                   )
+      assert_equal :ok,
+                   controller.can_dispatch_provider?(
+                     provider: "claude-main", configured_max: nil, now: T0
+                   )
+      assert_equal({ observed: 1, configured_max: 1, available: false },
+                   controller.provider_concurrency(
+                     provider: "claude-main", configured_max: 1, now: T0
+                   ))
+      assert_equal :ok, controller.can_dispatch?(project: "p", slug: "s", now: T0)
+    end
   end
 
   def test_patrol_scan_excluded_from_per_project_cap

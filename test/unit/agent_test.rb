@@ -6,6 +6,7 @@ require "hive/config"
 require "hive/task"
 require "hive/agent"
 require "hive/agent_limit"
+require "hive/attempt_lease_store"
 
 class AgentTest < Minitest::Test
   include HiveTestHelper
@@ -44,6 +45,52 @@ class AgentTest < Minitest::Test
       assert_equal :waiting, result[:status]
       assert_equal :waiting, Hive::Markers.current(task.state_file).name
       assert File.exist?(result[:log_file])
+    end
+  end
+
+  def test_provider_lease_is_released_after_normal_completion
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "")
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = task.state_file
+      ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "<!-- WAITING -->\n"
+      store = Hive::AttemptLeaseStore.new(path: File.join(dir, "leases.json"))
+      claim = store.claim_provider(
+        provider: "claude-main", model: nil, attempt_id: "normal", ttl_sec: 3600
+      )
+
+      Hive::Agent.new(
+        task: task, prompt: "test", max_budget_usd: 1, timeout_sec: 5,
+        provider_key: "claude-main", attempt_lease: claim.lease,
+        attempt_lease_store: store
+      ).run!
+
+      assert_equal 0, store.active_count(group: "claude-main")
+    end
+  end
+
+  def test_provider_lease_is_released_when_spawn_raises
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "")
+      store = Hive::AttemptLeaseStore.new(path: File.join(dir, "leases.json"))
+      claim = store.claim_provider(
+        provider: "missing-main", model: nil, attempt_id: "raises", ttl_sec: 3600
+      )
+      profile = Hive::AgentProfile.new(
+        name: :missing, bin_default: File.join(dir, "does-not-exist"),
+        headless_flag: nil, prompt_style: :positional, version_flag: "--version",
+        skill_syntax_format: "/%{skill}", status_detection_mode: :exit_code_only
+      )
+
+      assert_raises(Errno::ENOENT) do
+        Hive::Agent.new(
+          task: task, prompt: "test", max_budget_usd: 1, timeout_sec: 5,
+          profile: profile, provider_key: "missing-main", attempt_lease: claim.lease,
+          attempt_lease_store: store
+        ).run!
+      end
+      assert_equal 0, store.active_count(group: "missing-main")
     end
   end
 

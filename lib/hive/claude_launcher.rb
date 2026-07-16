@@ -102,6 +102,7 @@ module Hive
     PLANNER_ALLOWED_TOOLS = "Read,Write,Edit,LS".freeze
     IMPLEMENTER_ALLOWED_TOOLS = "Read,Write,Edit,Bash,LS,Glob,Grep".freeze
     DEFAULT_ALLOWED_TOOLS = PLANNER_ALLOWED_TOOLS
+    ATTEMPT_LEASE_HEARTBEAT_SEC = 30
 
     ORPHAN_SWEEP_LOG_MAX_BYTES = 64 * 1024
     # Patterns that mark tmux itself as unavailable (binary missing, too
@@ -152,7 +153,8 @@ module Hive
                 allowed_tools: nil,
                 disallowed_tools: nil,
                 permission_mode: nil, mcp_config_path: nil,
-                strict_mcp_config: false)
+                strict_mcp_config: false,
+                attempt_lease: nil, attempt_lease_store: nil)
       profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
       ensure_claude_profile!(profile)
       permission_mode ||= Hive::Config.claude_permission_mode(cfg)
@@ -178,35 +180,55 @@ module Hive
           permission_mode: permission_mode,
           allowed_tools: allowed_tools,
           disallowed_tools: disallowed_tools,
-          cli_flags: headless_flags
+          cli_flags: headless_flags,
+          attempt_lease: attempt_lease,
+          attempt_lease_store: attempt_lease_store
         )
       end
 
       allowed_tools ||= DEFAULT_ALLOWED_TOOLS
       result = nil
-      with_shared_session(
-        task: task,
-        cfg: cfg,
-        session_name: session_name,
-        cwd: cwd,
-        add_dirs: add_dirs,
-        profile: profile,
-        allowed_tools: allowed_tools,
-        disallowed_tools: disallowed_tools,
-        permission_mode: permission_mode,
-        mcp_config_path: mcp_config_path,
-        strict_mcp_config: strict_mcp_config,
-        cli_flags: cli_flags
-      ) do |handle|
-        result = handle.send_and_wait!(
-          prompt: prompt,
-          expected_output: expected_output,
-          timeout_sec: timeout_sec,
-          status_mode: status_mode || profile.status_detection_mode,
-          log_label: log_label
-        )
+      with_attempt_lease(attempt_lease, attempt_lease_store) do
+        with_shared_session(
+          task: task,
+          cfg: cfg,
+          session_name: session_name,
+          cwd: cwd,
+          add_dirs: add_dirs,
+          profile: profile,
+          allowed_tools: allowed_tools,
+          disallowed_tools: disallowed_tools,
+          permission_mode: permission_mode,
+          mcp_config_path: mcp_config_path,
+          strict_mcp_config: strict_mcp_config,
+          cli_flags: cli_flags
+        ) do |handle|
+          result = handle.send_and_wait!(
+            prompt: prompt,
+            expected_output: expected_output,
+            timeout_sec: timeout_sec,
+            status_mode: status_mode || profile.status_detection_mode,
+            log_label: log_label
+          )
+        end
       end
       result
+    end
+
+    def with_attempt_lease(lease, store)
+      return yield unless lease && store
+
+      heartbeat = Thread.new do
+        loop do
+          sleep ATTEMPT_LEASE_HEARTBEAT_SEC
+          break unless store.heartbeat(lease)
+        end
+      end
+      yield
+    ensure
+      heartbeat&.kill
+      heartbeat&.join
+      store&.release(lease) if lease
     end
 
     def with_shared_session(task:, cfg:, session_name:, cwd:, add_dirs:,

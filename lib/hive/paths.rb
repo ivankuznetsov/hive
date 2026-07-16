@@ -36,6 +36,14 @@ module Hive
       File.join(state_home, ".provider-circuits.lock")
     end
 
+    def attempt_leases_path
+      File.join(state_home, "attempt-leases.v1.json")
+    end
+
+    def attempt_leases_lock_path
+      File.join(state_home, ".attempt-leases.lock")
+    end
+
     def bin_home
       # bin_home intentionally ignores HIVE_HOME — install.sh places
       # the `hive`/`hv` symlinks under XDG_BIN_HOME (or ~/.local/bin),

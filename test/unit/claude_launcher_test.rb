@@ -377,6 +377,19 @@ class ClaudeLauncherTest < Minitest::Test
     end
   end
 
+  def test_attempt_lease_is_released_when_tmux_launch_raises
+    lease = Struct.new(:id).new("lease-1")
+    released = []
+    store = Object.new
+    store.define_singleton_method(:heartbeat) { |_lease| true }
+    store.define_singleton_method(:release) { |value| released << value }
+
+    assert_raises(RuntimeError) do
+      Hive::ClaudeLauncher.with_attempt_lease(lease, store) { raise "tmux failed" }
+    end
+    assert_equal [ lease ], released
+  end
+
   def test_send_prompt_and_wait_returns_timeout_when_readiness_consumes_deadline
     with_tmp_task do |task|
       runner = Object.new

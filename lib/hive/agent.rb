@@ -14,6 +14,7 @@ module Hive
   class Agent
     FINAL_MESSAGE_TAIL_BYTES = 64 * 1024
     DIAGNOSTIC_TAIL_BYTES = 64 * 1024
+    ATTEMPT_LEASE_HEARTBEAT_SEC = 30
 
     # Screenote's base URL reaches the agent as prompt/MCP-config context,
     # not as a child-environment input. nil unsets the var for the child so
@@ -33,7 +34,8 @@ module Hive
                    profile: nil, expected_output: nil, status_mode: nil,
                    permission_mode: nil, allowed_tools: nil,
                    disallowed_tools: nil, cli_flags: [],
-                   provider_key: nil, model: nil)
+                   provider_key: nil, model: nil,
+                   attempt_lease: nil, attempt_lease_store: nil)
       @task = task
       @prompt = prompt
       @add_dirs = Array(add_dirs)
@@ -60,6 +62,9 @@ module Hive
       @cli_flags = Array(cli_flags)
       @provider_key = (provider_key || @profile.name).to_s
       @model = model
+      @attempt_lease = attempt_lease
+      @attempt_lease_store = attempt_lease_store
+      @last_lease_heartbeat = Process.clock_gettime(Process::CLOCK_MONOTONIC)
     end
 
     # Effective mode for this spawn — explicit kwarg wins, falls back to
@@ -125,6 +130,7 @@ module Hive
       result
     ensure
       emit_agent_event(:agent_end, message: agent_end_message(result, $!))
+      @attempt_lease_store&.release(@attempt_lease) if @attempt_lease
     end
 
     def spawn_and_wait
@@ -229,6 +235,7 @@ module Hive
             status = captured.last
             break
           end
+          renew_attempt_lease_if_due
           sleep [ remaining, 0.2 ].min
         end
       ensure
@@ -347,6 +354,16 @@ module Hive
 
     def permission_flags
       @profile.permission_flags(@permission_mode)
+    end
+
+    def renew_attempt_lease_if_due
+      return unless @attempt_lease && @attempt_lease_store
+
+      now = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      return if now - @last_lease_heartbeat < ATTEMPT_LEASE_HEARTBEAT_SEC
+
+      @attempt_lease_store.heartbeat(@attempt_lease)
+      @last_lease_heartbeat = now
     end
 
     def prompt_via_stdin?

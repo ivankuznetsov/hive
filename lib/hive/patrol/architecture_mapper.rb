@@ -798,8 +798,11 @@ module Hive
         @content_cache[path] ||= @source_reader.read_utf8(path)
       end
 
+      # File lists may still carry raw non-UTF-8 filename bytes (git output);
+      # scrub at this boundary so tr/downcase/regex never raise downstream.
       def normalize(path)
-        Pathname.new(path.to_s.tr("\\", "/")).cleanpath.to_s.sub(%r{\A\./}, "")
+        utf8 = path.to_s.b.force_encoding(Encoding::UTF_8).scrub
+        Pathname.new(utf8.tr("\\", "/")).cleanpath.to_s.sub(%r{\A\./}, "")
       end
     end
   end

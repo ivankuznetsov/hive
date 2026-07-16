@@ -114,7 +114,7 @@ module Hive
         end
 
         actual = read_existing_metadata(folder, include_context: !expected["context"].nil?)
-        return [ :incomplete, "unreadable metadata" ] unless actual
+        return [ :incomplete, "missing or malformed metadata" ] unless actual
 
         comparisons = {
           "task fingerprint" => [ actual.dig("task", "patrol_fingerprint"), expected["fingerprint"] ],
@@ -151,11 +151,18 @@ module Hive
           "worktree" => read_yaml_hash(File.join(folder, "worktree.yml")),
           "pr" => read_frontmatter(File.join(folder, "pr.md"))
         }
-        data["context"] = JSON.parse(File.read(File.join(folder, CONTEXT_FILE))) if include_context
+        data["context"] = read_context(File.join(folder, CONTEXT_FILE)) if include_context
         return nil if data.values.any?(&:nil?)
 
         data
-      rescue JSON::ParserError, Psych::Exception, SystemCallError, IOError
+      end
+
+      def read_context(path)
+        content = read_if_present(path)
+        return nil if content.nil?
+
+        JSON.parse(content)
+      rescue JSON::ParserError
         nil
       end
 
@@ -172,19 +179,38 @@ module Hive
       end
 
       def read_yaml_hash(path)
-        value = YAML.safe_load(File.read(path))
+        content = read_if_present(path)
+        return nil if content.nil?
+
+        value = YAML.safe_load(content)
         value if value.is_a?(Hash)
+      rescue Psych::Exception
+        nil
       end
 
       def read_frontmatter(path)
-        content = File.read(path)
+        content = read_if_present(path)
+        return nil if content.nil?
+
         match = content.match(/\A---\s*\n(.*?)\n---/m)
         return nil unless match
 
         value = YAML.safe_load(match[1])
         value if value.is_a?(Hash)
-      rescue Psych::Exception, SystemCallError, IOError
+      rescue Psych::Exception
         nil
+      end
+
+      # An absent file is deterministic task state (incomplete → quarantine
+      # and rebuild), but a transient read failure is not: coercing EACCES or
+      # EIO to nil either published a duplicate review task for the same
+      # fingerprint or renamed a possibly-live task out of 6-review. Let
+      # SystemCallError/IOError propagate — the handoff attempt is retryable
+      # and callers convert the failure into a pending outcome.
+      def read_if_present(path)
+        return nil unless File.file?(path)
+
+        File.read(path)
       end
 
       def publish_task(finding, patch, pr_url, now, expected, lock_id)

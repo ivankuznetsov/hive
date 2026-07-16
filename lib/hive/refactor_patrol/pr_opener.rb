@@ -325,6 +325,15 @@ module Hive
           success_outcome, true, pr_url: pr_url, review_task_path: task_path,
           receipts: { "pr_url" => pr_url, "review_task_path" => task_path }
         )
+      rescue Hive::Patrol::ReviewHandoff::Conflict, ArgumentError => e
+        # Permanent failures: ReviewHandoff raises ArgumentError for
+        # metadata that will never materialize on retry and Conflict for
+        # states needing a human. Retrying forever only re-fails, so settle
+        # terminally with the evidence in receipts.
+        result(
+          "review_handoff_failed", true, pr_url: pr_url,
+          receipts: { "pr_url" => pr_url, "handoff_error" => "#{e.class}: #{e.message}" }
+        )
       rescue StandardError => e
         result(
           failure_outcome, false, pr_url: pr_url,

@@ -447,6 +447,67 @@ class HivePatrolReviewHandoffTest < Minitest::Test
     end
   end
 
+  # A transient read failure is not evidence that a task is incomplete:
+  # coercing it to nil used to quarantine the live task and publish a
+  # duplicate review task for the same fingerprint. The error must surface
+  # so the caller retries the handoff instead.
+  def test_metadata_read_failure_propagates_without_quarantine_or_duplicate
+    with_tmp_dir do |dir|
+      first = nil
+      with_task_counter do
+        first = handoff(dir).enqueue(
+          finding: finding, patch: patch(dir), pr_url: "https://example.com/pull/7",
+          mandatory: true
+        )
+      end
+
+      original = File.method(:read)
+      replacement = lambda do |path, *args, **kwargs|
+        raise Errno::EIO, path.to_s if File.basename(path.to_s) == "task.md"
+
+        original.call(path, *args, **kwargs)
+      end
+      with_replaced_singleton_method(File, :read, replacement) do
+        assert_raises(Errno::EIO) do
+          handoff(dir).enqueue(
+            finding: finding, patch: patch(dir), pr_url: "https://example.com/pull/7",
+            mandatory: true
+          )
+        end
+      end
+
+      assert_equal [ first ], visible_review_tasks(dir), "an unreadable task must not be duplicated"
+      assert_empty quarantined_tasks(dir), "an unreadable task must not be quarantined"
+      assert File.file?(File.join(first, "task.md")), "the live task must stay in place"
+    end
+  end
+
+  def test_malformed_metadata_is_still_quarantined_and_rebuilt
+    with_tmp_dir do |dir|
+      first = nil
+      with_task_counter do
+        first = handoff(dir).enqueue(
+          finding: finding, patch: patch(dir), pr_url: "https://example.com/pull/7",
+          mandatory: true
+        )
+      end
+      File.write(File.join(first, "task.md"), "---\n{invalid yaml\n---\n\nbody\n")
+
+      rebuilt = nil
+      with_task_counter do
+        rebuilt = handoff(dir).enqueue(
+          finding: finding, patch: patch(dir), pr_url: "https://example.com/pull/7",
+          mandatory: true
+        )
+      end
+
+      assert_equal first, rebuilt
+      assert_complete(rebuilt)
+      assert_equal 1, visible_review_tasks(dir).size
+      assert_equal 1, quarantined_tasks(dir).size, "deterministically malformed state is quarantined evidence"
+    end
+  end
+
   def test_mandatory_handoff_rejects_duplicate_complete_tasks
     with_tmp_dir do |dir|
       first = handoff(dir).enqueue(

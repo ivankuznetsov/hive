@@ -127,6 +127,25 @@ class RefactorPatrolLeverageTest < Minitest::Test
     end
   end
 
+  # git ls-files emits raw filename bytes; a single Latin-1 name used to
+  # raise inside compute_tracked_files, and the blanket rescue silently
+  # zeroed fan-in/coupling for every feature in the repository.
+  def test_latin1_tracked_filename_does_not_zero_leverage_signals
+    with_tmp_git_repo do |dir|
+      write(dir, "lib/checkout.rb", "class Checkout\n  def call\n    if true\n      Payment.new\n    end\n  end\nend\n")
+      write(dir, "app/order.rb", "require 'lib/checkout'\nCheckout.new\n")
+      File.binwrite(File.join(dir.b, "caf\xE9.rb".b), "class Cafe\nend\n")
+      commit_all(dir, "latin1")
+
+      result = Hive::RefactorPatrol::Leverage.new(dir, cfg: cfg)
+                                             .score(feature("checkout", [ "lib/checkout.rb" ], entrypoints: [ "lib/checkout.rb" ]))
+
+      assert_operator result.dig("signals", "fan_in"), :>=, 1,
+                      "one non-UTF-8 filename must not blank the tracked-file list"
+      assert_operator result.dig("signals", "complexity"), :>, 0
+    end
+  end
+
   def test_source_content_reads_are_bounded_and_skip_external_devices
     with_tmp_git_repo do |dir|
       cap = Hive::Patrol::SourceReader::MAX_SOURCE_BYTES

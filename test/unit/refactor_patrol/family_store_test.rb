@@ -118,12 +118,15 @@ class RefactorPatrolFamilyStoreTest < Minitest::Test
           problem: "Payment routing repeats authorization policy in several handlers",
           proposed_refactor: "Centralize payment authorization policy"
         )
-        matched = store.resolve(
-          thesis: reworded,
-          repository: "acme/polyglot",
-          job_id: "job-2",
-          source: source("number" => 43, "url" => "https://example.test/acme/polyglot/pull/43")
-        )
+        matched = nil
+        capture_io do
+          matched = store.resolve(
+            thesis: reworded,
+            repository: "acme/polyglot",
+            job_id: "job-2",
+            source: source("number" => 43, "url" => "https://example.test/acme/polyglot/pull/43")
+          )
+        end
 
         assert_equal first.family_id, matched.family_id, damage
         assert_equal "structural_match", matched.reason, damage
@@ -244,28 +247,114 @@ class RefactorPatrolFamilyStoreTest < Minitest::Test
     end
   end
 
-  def test_corrupt_newer_and_conflicting_records_fail_closed_without_rewrite
+  def test_unsupported_newer_schema_version_fails_closed_without_rewrite_or_quarantine
     with_tmp_dir do |dir|
       store = family_store(dir)
       FileUtils.mkdir_p(store.root)
-
-      corrupt_path = File.join(store.root, "af1-corrupt.json")
-      File.binwrite(corrupt_path, "{")
-      assert_fail_closed(store, corrupt_path, FamilyStore::CorruptRecord)
-      FileUtils.rm_f(corrupt_path)
-
       newer_path = File.join(store.root, "af1-newer.json")
       File.binwrite(newer_path, JSON.generate(record("af1-newer", descriptor).merge("schema_version" => 99)))
-      assert_fail_closed(store, newer_path, FamilyStore::UnsupportedVersion)
-      FileUtils.rm_f(newer_path)
 
-      conflict_path = File.join(store.root, "af1-filename.json")
-      File.binwrite(conflict_path, JSON.generate(record("af1-payload", descriptor)))
-      assert_fail_closed(store, conflict_path, FamilyStore::InconsistentRecord)
+      assert_fail_closed(store, newer_path, FamilyStore::UnsupportedVersion)
+      assert_empty quarantined_family_records(dir)
     end
   end
 
-  def test_malformed_occurrence_source_is_a_typed_corrupt_record
+  def test_corrupt_and_inconsistent_records_are_quarantined_with_bytes_preserved
+    {
+      "af1-corrupt" => "{",
+      "af1-filename" => JSON.generate(record("af1-payload", descriptor))
+    }.each do |family_id, bytes|
+      with_tmp_dir do |dir|
+        store = family_store(dir)
+        FileUtils.mkdir_p(store.root)
+        path = File.join(store.root, "#{family_id}.json")
+        File.binwrite(path, bytes)
+
+        outcome = nil
+        capture_io do
+          outcome = store.resolve(thesis: thesis, repository: "acme/polyglot", job_id: "job-new", source: source)
+        end
+
+        assert_equal "new_family", outcome.status, family_id
+        refute File.exist?(path), family_id
+        quarantined = quarantined_family_records(dir, family_id)
+        assert_equal 1, quarantined.size, family_id
+        assert_equal bytes, File.binread(quarantined.first), family_id
+        evidence = JSON.parse(File.read("#{quarantined.first}.evidence.json"))
+        assert_equal "#{family_id}.json", evidence.fetch("family_record"), family_id
+        refute_empty evidence.fetch("error"), family_id
+      end
+    end
+  end
+
+  # Regression for the bulk-delete on one corrupt record: the old recovery
+  # rebuilt solely from authoritative job aggregates and deleted every file
+  # outside that set, destroying pre-authoritative families and changing
+  # later SemanticFamily.resolve outcomes (duplicate GitHub issues).
+  def test_one_corrupt_record_never_discards_valid_or_pre_authoritative_families
+    with_tmp_dir do |dir|
+      store = family_store(dir)
+      authoritative = store.resolve(thesis: thesis, repository: "acme/polyglot", job_id: "job-1", source: source)
+      write_authoritative_family_job(dir, thesis, authoritative.family_id)
+      pre_authoritative = store.resolve(
+        thesis: thesis(
+          id: "events-refactor-1",
+          fingerprint: "fp-events",
+          feature_id: "architecture-events",
+          evidence: [ { "file" => "src/events/core.ts", "line" => 1, "claim" => "Events form a dependency cycle" } ],
+          problem: "Events form a dependency cycle",
+          proposed_refactor: "Invert event dependency ownership"
+        ),
+        repository: "acme/polyglot",
+        job_id: "job-2",
+        source: source("number" => 43, "url" => "https://example.test/acme/polyglot/pull/43")
+      )
+      corrupt_path = File.join(store.root, "af1-corrupt.json")
+      File.binwrite(corrupt_path, "{")
+
+      retried = nil
+      capture_io do
+        retried = store.resolve(
+          thesis: thesis(id: "checkout-refactor-3", fingerprint: "fp-3"),
+          repository: "acme/polyglot",
+          job_id: "job-3",
+          source: source("number" => 44, "url" => "https://example.test/acme/polyglot/pull/44")
+        )
+      end
+
+      assert_equal authoritative.family_id, retried.family_id
+      assert File.file?(File.join(store.root, "#{pre_authoritative.family_id}.json")),
+             "pre-authoritative family must survive corrupt-record recovery"
+      refute File.exist?(corrupt_path)
+      quarantined = quarantined_family_records(dir, "af1-corrupt")
+      assert_equal 1, quarantined.size
+      assert_equal "{", File.binread(quarantined.first)
+    end
+  end
+
+  def test_dry_run_skips_quarantine_and_still_resolves_from_valid_records
+    with_tmp_dir do |dir|
+      store = family_store(dir)
+      created = store.resolve(thesis: thesis, repository: "acme/polyglot", job_id: "job-1", source: source)
+      corrupt_path = File.join(store.root, "af1-corrupt.json")
+      File.binwrite(corrupt_path, "{")
+
+      outcome = store.resolve(
+        thesis: thesis(fingerprint: "fp-2"),
+        repository: "acme/polyglot",
+        job_id: "job-2",
+        source: source("number" => 43),
+        dry_run: true
+      )
+
+      assert_equal created.family_id, outcome.family_id
+      refute outcome.persisted
+      assert File.file?(corrupt_path), "a dry run must not quarantine or mutate state"
+      assert_empty quarantined_family_records(dir)
+    end
+  end
+
+  def test_malformed_occurrence_source_is_a_typed_corrupt_record_and_quarantines
     with_tmp_dir do |dir|
       store = family_store(dir)
       FileUtils.mkdir_p(store.root)
@@ -277,11 +366,15 @@ class RefactorPatrolFamilyStoreTest < Minitest::Test
       path = File.join(store.root, "af1-malformed-source.json")
       File.binwrite(path, JSON.generate(malformed))
 
-      assert_fail_closed(store, path, FamilyStore::CorruptRecord)
+      error = assert_raises(FamilyStore::CorruptRecord) { store.send(:read_record, path) }
+      assert_equal path, error.path
+
+      capture_io { store.resolve(thesis: thesis, repository: "acme/polyglot", job_id: "job-new", source: source) }
+      assert_equal 1, quarantined_family_records(dir, "af1-malformed-source").size
     end
   end
 
-  def test_deterministic_id_detects_descriptor_tampering
+  def test_deterministic_id_detects_descriptor_tampering_and_quarantines_the_record
     with_tmp_dir do |dir|
       store = family_store(dir)
       created = store.resolve(thesis: thesis, repository: "acme/polyglot", job_id: "job-1", source: source)
@@ -289,8 +382,14 @@ class RefactorPatrolFamilyStoreTest < Minitest::Test
       tampered = JSON.parse(File.read(path))
       tampered["descriptor"]["concepts"] = %w[different semantic subject]
       File.binwrite(path, JSON.generate(tampered))
+      tampered_bytes = File.binread(path)
 
-      assert_fail_closed(store, path, FamilyStore::InconsistentRecord)
+      assert_raises(FamilyStore::InconsistentRecord) { store.send(:read_record, path) }
+
+      capture_io { store.resolve(thesis: thesis, repository: "acme/polyglot", job_id: "job-new", source: source) }
+      quarantined = quarantined_family_records(dir, created.family_id)
+      assert_equal 1, quarantined.size
+      assert_equal tampered_bytes, File.binread(quarantined.first)
     end
   end
 
@@ -385,7 +484,7 @@ class RefactorPatrolFamilyStoreTest < Minitest::Test
         []
       end
       with_replaced_singleton_method(Dir, :glob, replacement) do
-        enumerate_error = assert_raises(FamilyStore::CorruptRecord) { store.send(:records) }
+        enumerate_error = assert_raises(FamilyStore::CorruptRecord) { store.send(:record_paths) }
         assert_equal root, enumerate_error.path
         assert_includes enumerate_error.message, "cannot enumerate"
       end
@@ -400,19 +499,16 @@ class RefactorPatrolFamilyStoreTest < Minitest::Test
       invalid_descriptor = record("af1-invalid-descriptor", descriptor).merge("descriptor" => [])
       descriptor_path = File.join(store.root, "af1-invalid-descriptor.json")
       File.binwrite(descriptor_path, JSON.generate(invalid_descriptor))
-      error = assert_raises(FamilyStore::CorruptRecord) do
-        store.resolve(thesis: thesis, repository: "acme/polyglot", job_id: "job-new", source: source)
-      end
+      error = assert_raises(FamilyStore::CorruptRecord) { store.send(:read_record, descriptor_path) }
       assert_includes error.message, "descriptor is invalid"
       FileUtils.rm_f(descriptor_path)
 
       invalid_timestamp = record("af1-invalid-time", descriptor).merge("created_at" => "yesterday")
       timestamp_path = File.join(store.root, "af1-invalid-time.json")
       File.binwrite(timestamp_path, JSON.generate(invalid_timestamp))
-      error = assert_raises(FamilyStore::CorruptRecord) do
-        store.resolve(thesis: thesis, repository: "acme/polyglot", job_id: "job-new", source: source)
-      end
+      error = assert_raises(FamilyStore::CorruptRecord) { store.send(:read_record, timestamp_path) }
       assert_includes error.message, "ISO-8601"
+      FileUtils.rm_f(timestamp_path)
 
       error = assert_raises(ArgumentError) do
         store.resolve(
@@ -668,6 +764,15 @@ class RefactorPatrolFamilyStoreTest < Minitest::Test
 
   def family_bytes(store)
     Dir.glob(File.join(store.root, "*.json")).sort.to_h { |path| [ path, File.binread(path) ] }
+  end
+
+  # Quarantined family records live beside (not under) the families root so
+  # record enumeration never re-reads them; evidence sidecars are excluded.
+  def quarantined_family_records(dir, family_id = nil)
+    pattern = "#{family_id ? "#{family_id}-" : ''}*.json"
+    Dir.glob(File.join(dir, ".hive-state", "refactor_patrol", "v2", "quarantine", "families", pattern))
+       .reject { |path| path.end_with?(".evidence.json") }
+       .sort
   end
 
   def assert_fail_closed(store, path, error)

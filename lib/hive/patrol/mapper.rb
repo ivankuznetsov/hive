@@ -164,14 +164,22 @@ module Hive
 
       def tracked_files
         out, = Open3.capture3("git", "-C", @project_root, "ls-files", "-z")
-        files = out.split("\0").reject(&:empty?)
+        files = utf8(out).split("\0").reject(&:empty?)
         files = Dir.glob("**/*", File::FNM_DOTMATCH, base: @project_root).select do |path|
           File.file?(File.join(@project_root, path))
         end if files.empty?
 
-        files.map { |path| path.tr("\\", "/") }
+        files.map { |path| utf8(path).tr("\\", "/") }
              .select { |path| included?(path) && @source_reader.regular_file?(path) }
              .sort
+      end
+
+      # git emits raw filename bytes; a non-UTF-8 name (for example Latin-1)
+      # would raise ArgumentError from split/tr/downcase/regex downstream, so
+      # sanitize once at the boundary where the file list enters. A scrubbed
+      # name no longer resolves to a real file and is simply not mapped.
+      def utf8(value)
+        value.to_s.b.force_encoding(Encoding::UTF_8).scrub
       end
 
       def included?(path)

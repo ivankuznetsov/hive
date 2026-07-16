@@ -114,13 +114,14 @@ class HiveDaemonDispatcherTest < Minitest::Test
   end
 
   class FakeMergeWatcher
-    attr_reader :enqueued
+    attr_reader :enqueued, :dropped
     attr_accessor :next_archives, :next_dropped
     def initialize
       @enqueued = []
       @next_archives = []
       @last_tick_dropped = []
       @next_dropped = []
+      @dropped = []
     end
 
     def enqueue(project:, slug:, task_folder:, error_reason: nil)
@@ -133,6 +134,11 @@ class HiveDaemonDispatcherTest < Minitest::Test
       @last_tick_dropped = @next_dropped
       @next_dropped = []
       out
+    end
+
+    def drop(project:, slug:)
+      @dropped << { project: project, slug: slug }
+      @next_archives.reject! { |entry| entry[:project] == project && entry[:slug] == slug }
     end
 
     attr_reader :last_tick_dropped
@@ -709,7 +715,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
           mtime: T0 - 600, claude_pid_alive: nil, live_task_lock: nil,
           state_file: nil, folder: nil, marker_attrs: {},
           depends_on: nil, blocked_by: nil, dependency_stage: nil,
-          blocked: false, workflow: nil)
+          blocked: false, workflow: nil, admission_error: nil)
     folder ||= make_existing_row_folder(project: project, stage: stage, slug: slug)
     Row.new(
       project: project, slug: slug, stage: stage, workflow: workflow, marker: marker,
@@ -719,7 +725,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
       suggested_command: command, claude_pid_alive: claude_pid_alive,
       live_task_lock: live_task_lock, marker_attrs: marker_attrs,
       depends_on: depends_on, blocked_by: blocked_by,
-      dependency_stage: dependency_stage, blocked: blocked
+      dependency_stage: dependency_stage, blocked: blocked,
+      admission_error: admission_error
     )
   end
 
@@ -1519,6 +1526,31 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal 0, sup.spawned.size, "archive must NOT spawn directly"
     assert_equal 1, mw.enqueued.size
     assert_equal "s1", mw.enqueued.first[:slug]
+  end
+
+  def test_admission_error_drops_merge_watch_and_never_spawns
+    error = Hive::DependencyAdmission::AdmissionError.new(
+      reason_code: "dependency_repository_mismatch",
+      offending_ref: "data:base",
+      safe_correction: "Re-enroll the intended repository."
+    )
+    rows = [ row(stage: "8-finalize", action: "admission_error", command: nil,
+                 blocked: true, admission_error: error) ]
+    dispatcher, sup, _ctrl, logger, mw = make_dispatcher(rows: rows, with_merge_watcher: true)
+    mw.next_archives = [ {
+      project: "p1", slug: "s1", stage: "8-finalize",
+      command: "hive archive s1 --from 8-finalize --project p1 --json",
+      state_file_mtime: nil, hive_state_path: nil
+    } ]
+
+    dispatcher.tick(now: T0)
+
+    assert_empty sup.spawned
+    assert_includes mw.dropped, { project: "p1", slug: "s1" }
+    event = logger.events.find { |name, attrs| name == :blocked && attrs[:reason] == "admission_error" }
+    refute_nil event
+    assert_equal "dependency_repository_mismatch", event[1][:reason_code]
+    assert_equal "data:base", event[1][:offending_ref]
   end
 
   def test_finalize_recoverable_error_routes_to_merge_watcher

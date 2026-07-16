@@ -437,7 +437,7 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
-  def test_active_only_payload_does_not_trust_consumer_supplied_dependency_tasks
+  def test_active_only_payload_uses_prevalidated_cached_dependency_tasks
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")
       dependent = write_status_task(hive_state, "4-execute", "dependent-task-260626-bbbb",
@@ -447,11 +447,14 @@ class CommandsStatusTest < Minitest::Test
       active_stages = Hive::Workflows.all_stage_dirs - [ Hive::ArchiveFilter::ARCHIVE_STAGE_DIR ]
       project = status_project(project_root, hive_state)
 
-      unresolved = Hive::Commands::Status.new.json_payload([ project ], stages: active_stages)
+      unresolved = Hive::Commands::Status.new.json_payload(
+        [ project ], stages: active_stages, exclude_archived: true
+      )
                       .fetch("projects").first.fetch("tasks").first
       blocked = Hive::Commands::Status.new.json_payload(
         [ project ],
         stages: active_stages,
+        exclude_archived: true,
         extra_dependency_tasks: {
           project.fetch("path") => [
             { slug: "archived-task-260626-aaaa", id: 1, stage: "7-artifacts", stage_index: 7 }
@@ -461,6 +464,7 @@ class CommandsStatusTest < Minitest::Test
       unblocked = Hive::Commands::Status.new.json_payload(
         [ project ],
         stages: active_stages,
+        exclude_archived: true,
         extra_dependency_tasks: {
           project.fetch("path") => [
             { "slug" => "archived-task-260626-aaaa", "id" => 1, "stage" => "9-done" }
@@ -471,11 +475,15 @@ class CommandsStatusTest < Minitest::Test
       assert_equal true, unresolved.fetch("blocked")
       assert_nil unresolved.fetch("blocked_by"),
                  "without archived identities, active-only dependency resolution is unresolved"
-      [ blocked, unblocked ].each do |row|
-        assert_equal true, row.fetch("blocked")
-        assert_nil row.fetch("blocked_by")
-        assert_equal "dependency_task_missing", row.fetch("admission_error").fetch("reason_code")
-      end
+      assert_equal true, blocked.fetch("blocked")
+      assert_equal "archived-task-260626-aaaa", blocked.fetch("blocked_by")
+      assert_equal "7-artifacts", blocked.fetch("dependency_stage")
+      assert_nil blocked.fetch("admission_error")
+
+      assert_equal false, unblocked.fetch("blocked")
+      assert_nil unblocked.fetch("blocked_by")
+      assert_nil unblocked.fetch("dependency_stage")
+      assert_nil unblocked.fetch("admission_error")
     end
   end
 
@@ -627,7 +635,11 @@ class CommandsStatusTest < Minitest::Test
 
       payload = nil
       _out, err = capture_io do
-        with_replaced_singleton_method(Hive::DependencySnapshot, :admission_context, ->(_projects) { raising_context }) do
+        with_replaced_singleton_method(
+          Hive::DependencySnapshot,
+          :admission_context,
+          ->(_projects, **_kwargs) { raising_context }
+        ) do
           payload = Hive::Commands::Status.new.json_payload([
             { "name" => "demo", "path" => project_root, "hive_state_path" => hive_state }
           ])

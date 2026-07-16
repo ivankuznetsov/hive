@@ -82,6 +82,11 @@ auto-repair repository identity.
 Each admission invocation snapshots every enrolled project, its tasks, and
 its own workflow descriptors. Qualified `[project, slug]` identities and
 same-project numeric ids are indexed without using the global task resolver.
+The TUI's one-second active-only refresh is the bounded exception: it builds a
+new immutable context from current active tasks plus immutable terminal-task
+snapshots produced by the last full/archive status pass. Cached terminal
+admission errors retain their exact structured fields, and the periodic
+archive refresh replaces the cache wholesale.
 Duplicate or ambiguous identities fail closed. Full-chain walking follows
 only explicit project edges, detects missing tasks, self-reference, corrupt
 upstream nodes, and cycles, and reports a cycle as an ordered qualified path

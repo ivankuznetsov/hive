@@ -135,7 +135,11 @@ module Hive
       end
 
       def validate_node(task)
-        return validation_failure(task.validation_error, qualify(task)) if task.validation_error
+        if task.validation_error
+          return cached_admission_error(task.validation_error) if task.validation_error.is_a?(AdmissionError)
+
+          return validation_failure(task.validation_error, qualify(task))
+        end
 
         case task.metadata_status
         when :unreadable
@@ -337,6 +341,15 @@ module Hive
             offending_ref: offending_ref.to_s,
             safe_correction: safe_correction
           )
+        )
+      end
+
+      def cached_admission_error(error)
+        Verdict.new(
+          state: :error,
+          blocked_by: nil,
+          dependency_stage: nil,
+          admission_error: error
         )
       end
     end

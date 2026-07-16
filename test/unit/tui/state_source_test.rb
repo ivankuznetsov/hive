@@ -694,7 +694,10 @@ class TuiStateSourceTest < Minitest::Test
     second = source.send(:archived_identities_from_cache, cache)
 
     assert_same first, second, "identities are memoized while the cache object is unchanged"
-    assert_equal([ { "slug" => "a-260626-abcd", "id" => 1, "stage" => "9-done" } ], first.fetch("/p"))
+    assert_equal(
+      [ { "slug" => "a-260626-abcd", "id" => 1, "stage" => "9-done", "admission_error" => nil } ],
+      first.fetch("/p")
+    )
   end
 
   # Codex regression: the steady-state active reparse must compute the

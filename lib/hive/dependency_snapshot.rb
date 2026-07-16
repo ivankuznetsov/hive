@@ -1,4 +1,5 @@
 require "hive/stages"
+require "hive/archive_filter"
 require "hive/task_meta"
 require "hive/dependencies"
 require "hive/config"
@@ -88,8 +89,12 @@ module Hive
       nil
     end
 
-    def admission_context(registry_entries = Hive::Config.registered_projects)
-      projects = registry_entries.map { |entry| admission_project(entry) }
+    def admission_context(registry_entries = Hive::Config.registered_projects,
+                          exclude_archived: false, extra_dependency_tasks: nil)
+      projects = registry_entries.map do |entry|
+        extras = extra_dependency_tasks && extra_dependency_tasks[entry["path"]] if exclude_archived
+        admission_project(entry, exclude_archived: exclude_archived, extra_tasks: extras)
+      end
       Hive::DependencyAdmission::Context.new(projects: projects)
     end
 
@@ -143,10 +148,20 @@ module Hive
       )
     end
 
-    def admission_project(entry)
+    def admission_project(entry, exclude_archived: false, extra_tasks: nil)
       root = File.expand_path(entry.fetch("path"))
       config, config_error = admission_project_config(root)
-      tasks = config_error ? [] : admission_tasks(root, config, project_name: entry.fetch("name"))
+      tasks = if config_error
+        []
+      else
+        admission_tasks(
+          root,
+          config,
+          project_name: entry.fetch("name"),
+          exclude_archived: exclude_archived,
+          extra_tasks: extra_tasks
+        )
+      end
       Hive::DependencyAdmission::ProjectSnapshot.new(
         name: entry.fetch("name"),
         path: root,
@@ -180,17 +195,79 @@ module Hive
       [ {}, "could not read #{path}: #{e.class}: #{e.message}" ]
     end
 
-    def admission_tasks(root, config, project_name: File.basename(root))
+    def admission_tasks(root, config, project_name: File.basename(root), exclude_archived: false, extra_tasks: nil)
       folders = Dir.glob(File.join(root, ".hive-state", "stages", "*-*", "*"))
         .select { |folder| File.directory?(folder) }
         .sort
+      if exclude_archived
+        folders.reject! { |folder| File.basename(File.dirname(folder)) == Hive::ArchiveFilter::ARCHIVE_STAGE_DIR }
+      end
 
       Hive::Workflows::Project.synchronize do
         Hive::Workflows::Project.load!(root)
-        folders.map do |folder|
+        live_tasks = folders.map do |folder|
           admission_task(root, folder, config, project_name: project_name)
         end
+        live_slugs = live_tasks.to_h { |task| [ task.slug, true ] }
+        cached_tasks = Array(extra_tasks).filter_map do |task|
+          cached_admission_task(task, project_name: project_name) unless live_slugs[field(task, :slug).to_s]
+        end
+        live_tasks + cached_tasks
       end
+    end
+
+    # TUI active-only emissions reuse immutable archived rows produced by the
+    # last full/archive status pass. Those rows have already crossed strict
+    # metadata, plan, workflow, and graph admission; carrying their terminal
+    # identity (or exact admission error) avoids rescanning an unbounded
+    # archive on every one-second refresh.
+    def cached_admission_task(task, project_name:)
+      slug = field(task, :slug).to_s
+      return nil if slug.empty?
+
+      stage = field(task, :stage).to_s
+      cached_error = cached_admission_error(field(task, :admission_error))
+      Hive::DependencyAdmission::TaskSnapshot.new(
+        project: project_name,
+        slug: slug,
+        id: field(task, :id),
+        stage: stage,
+        workflow_stages: (Hive::Stages::DIRS + [ stage ]).uniq,
+        depends_on: nil,
+        metadata_status: :ok,
+        metadata_error: nil,
+        plan_status: :absent,
+        plan_dependency: nil,
+        plan_error: nil,
+        folder: nil,
+        validation_error: cached_error
+      )
+    end
+
+    def cached_admission_error(value)
+      return nil if value.nil?
+      return "cached dependency admission error is malformed" unless value.respond_to?(:key?)
+
+      reason_code = field(value, :reason_code).to_s
+      offending_ref = field(value, :offending_ref).to_s
+      safe_correction = field(value, :safe_correction).to_s
+      unless Hive::DependencyAdmission::REASON_CODES.include?(reason_code) &&
+             !offending_ref.empty? && !safe_correction.empty?
+        return "cached dependency admission error is malformed"
+      end
+
+      Hive::DependencyAdmission::AdmissionError.new(
+        reason_code: reason_code,
+        offending_ref: offending_ref,
+        safe_correction: safe_correction
+      )
+    end
+
+    def field(value, key)
+      return value[key] if value.respond_to?(:key?) && value.key?(key)
+      return value[key.to_s] if value.respond_to?(:key?) && value.key?(key.to_s)
+
+      nil
     end
 
     def admission_task(root, folder, config, project_name: File.basename(root))

@@ -460,7 +460,8 @@ module Hive
         {
           "slug" => task["slug"],
           "id" => task["id"],
-          "stage" => task["stage"]
+          "stage" => task["stage"],
+          "admission_error" => task["admission_error"]
         }
       end
 

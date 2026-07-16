@@ -106,9 +106,9 @@ process_identity() {
 }
 
 lock_owner_stale() {
-  local owner_oid="$1" owner pid started identity nonce current_identity
+  local owner_oid="$1" owner pid identity current_identity
   owner="$(git cat-file -p "$owner_oid" 2>/dev/null || true)"
-  IFS='|' read -r pid started identity nonce <<<"$owner"
+  IFS='|' read -r pid _ identity _ <<<"$owner"
   if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
     current_identity="$(process_identity "$pid")"
     if [ -z "$identity" ] || [ -z "$current_identity" ] || [ "$identity" = "$current_identity" ]; then
@@ -157,6 +157,8 @@ cleanup_refresh_worktree() {
   fi
 }
 
+# Invoked indirectly by the EXIT trap below.
+# shellcheck disable=SC2329
 cleanup() {
   cleanup_refresh_worktree
   [ -n "$lock_owner_oid" ] && git update-ref -d "$lock_ref" "$lock_owner_oid" 2>/dev/null || true
@@ -275,7 +277,7 @@ prune_receipted_queue_files() {
 }
 
 process_queue_batch() {
-  local sources="" file header queued_sha queued_branch paths prompt short_source
+  local sources="" file queued_sha queued_branch paths prompt short_source
   local commit_args=()
   prune_receipted_queue_files
   [ "${#QUEUE_FILES[@]}" -gt 0 ] || return 0

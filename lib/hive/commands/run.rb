@@ -10,6 +10,8 @@ require "hive/stages/resolver"
 require "hive/execute_waiting_action"
 require "hive/task_action"
 require "hive/task_resolver"
+require "hive/attempts/context"
+require "hive/attempts/entrypoint"
 
 module Hive
   module Commands
@@ -29,17 +31,22 @@ module Hive
       # schemas/hive-run.v1.json $defs.SuccessPayload.properties.
       OPTIONAL_PAYLOAD_KEYS = %w[cleanup_instructions].freeze
 
-      def initialize(target, project: nil, stage: nil, json: false, quiet: false, no_rebase: false)
+      def initialize(target, project: nil, stage: nil, json: false, quiet: false, no_rebase: false,
+                     durable: false, attempt_entrypoint: nil)
         @target = target
         @project_filter = project
         @stage_filter = stage
         @json = json
         @quiet = quiet
         @no_rebase = no_rebase
+        @durable = durable
+        @attempt_entrypoint = attempt_entrypoint
       end
 
       def call
         @stdout_written = false
+        return dispatch_durable if @durable && !Hive::Attempts::Context.active?
+
         do_call
       rescue Hive::Error => e
         emit_error_envelope(e) if @json && !@stdout_written
@@ -51,11 +58,7 @@ module Hive
       end
 
       def do_call
-        task = Hive::TaskResolver.new(
-          @target,
-          project_filter: @project_filter,
-          stage_filter: @stage_filter
-        ).resolve
+        task = resolve_task
         cfg = Hive::Config.load(task.project_root)
 
         Hive::Lock.with_task_lock(task.folder, slug: task.slug, stage: task.stage_name) do
@@ -72,6 +75,34 @@ module Hive
           commit_after(task, result)
           report(task, result)
         end
+      end
+
+      def resolve_task
+        Hive::TaskResolver.new(
+          @target,
+          project_filter: @project_filter,
+          stage_filter: @stage_filter
+        ).resolve
+      end
+
+      def dispatch_durable
+        task = resolve_task
+        result = (@attempt_entrypoint || Hive::Attempts::Entrypoint.new).dispatch(
+          task: task,
+          intended_stage: "#{task.stage_index}-#{task.stage_name}",
+          argv: durable_worker_argv(task),
+          interactive: true
+        )
+        exit(result.exit_status) unless result.exit_status.zero?
+
+        result
+      end
+
+      def durable_worker_argv(task)
+        argv = [ "hive", "run", task.folder ]
+        argv << "--json" if @json
+        argv << "--no-rebase" if @no_rebase
+        argv
       end
 
       # Auto-rebase pre-step. Fail-soft: any failure aborts the rebase

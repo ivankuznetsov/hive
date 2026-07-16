@@ -58,6 +58,25 @@ class MarkersTest < Minitest::Test
     end
   end
 
+  def test_marker_projects_attempt_identity_but_hides_it_from_display_attrs
+    with_tmp_dir do |dir|
+      file = File.join(dir, "x.md")
+      Hive::Attempts::Context.with(attempt_id: "attempt-1", task_generation: "generation-1") do
+        Hive::Markers.set(
+          file, :waiting,
+          attempt_id: "caller-cannot-override",
+          task_generation: "caller-cannot-override",
+          reason: "question"
+        )
+      end
+
+      attrs = Hive::Markers.current(file).attrs
+      assert_equal "attempt-1", attrs["attempt_id"]
+      assert_equal "generation-1", attrs["task_generation"]
+      assert_equal({ "reason" => "question" }, Hive::Markers.display_attrs(attrs))
+    end
+  end
+
   def test_rejects_marker_names_that_only_prefix_known_names
     with_tmp_dir do |dir|
       file = File.join(dir, "x.md")

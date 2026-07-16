@@ -31,6 +31,7 @@ require "hive/update_check"
 require "hive/update_check/state"
 require "hive/install_channel"
 require "hive/commands/update"
+require "hive/attempts/dispatcher"
 
 module Hive
   module Daemon
@@ -66,7 +67,8 @@ module Hive
                      patrol_arbiter: nil, digest_scheduler: nil,
                      answer_digest_scheduler: nil, dry_run: false,
                      update_state: nil, update_checker: nil, channel_detector: nil,
-                     dispatch_request_state_home: nil, dispatch_result_state_home: nil)
+                     dispatch_request_state_home: nil, dispatch_result_state_home: nil,
+                     attempt_dispatcher: nil)
         @config = config
         @controller = controller
         @supervisor = supervisor
@@ -80,6 +82,7 @@ module Hive
         @digest_scheduler = digest_scheduler
         @answer_digest_scheduler = answer_digest_scheduler
         @dry_run = dry_run
+        @attempt_dispatcher = attempt_dispatcher
 
         # Update-flow collaborators (plan 2026-05-27-002). The check runs
         # only when a state store is injected (the daemon does so); existing
@@ -1589,6 +1592,33 @@ module Hive
         command = Shellwords.join(req.argv)
         state_file_path = resolve_request_state_file_path(req)
         preclaim_dispatch_request(req, now: now)
+        if @attempt_dispatcher && durable_task_request?(req)
+          result = Hive::Daemon::DispatchRequestQueue.dispatch(
+            req, dispatcher: @attempt_dispatcher, interactive: false, now: now
+          )
+          if result.status == :deferred
+            Hive::Daemon::DispatchRequestQueue.release_claim(
+              req.request_id, state_home: dispatch_request_state_home
+            )
+            @logger.event(:dispatch_request_blocked,
+                          request_id: req.request_id, project: req.project,
+                          slug: req.slug, reason: result.reason)
+            return result
+          end
+
+          update_dispatch_request_attempt_claim(req, result: result, now: now)
+          @logger.event(
+            :dispatch_request_dispatched,
+            request_id: req.request_id, attempt_id: result.attempt.attempt_id,
+            task_generation: result.attempt.task_generation,
+            attempt_state: result.attempt.state,
+            project: req.project, slug: req.slug,
+            command: command, trigger: req.trigger,
+            chat_id: req.chat_id, update_id: req.update_id
+          )
+          return result
+        end
+
         pid = dispatch_command(
           command,
           project: req.project, slug: req.slug,
@@ -1615,6 +1645,11 @@ module Hive
         raise
       end
 
+      def durable_task_request?(req)
+        req.project != Hive::Daemon::DispatchRequestQueue::GLOBAL_MAINTENANCE_PROJECT &&
+          !%w[markers daemon].include?(Array(req.argv)[1].to_s)
+      end
+
       def preclaim_dispatch_request(req, now:)
         claimed = Hive::Daemon::DispatchRequestQueue.claim(
           req.request_id, pid: nil, process_start_time: nil,
@@ -1634,6 +1669,22 @@ module Hive
       rescue StandardError => e
         @logger.event(:fatal,
                       message: "update_dispatch_request_claim raised: #{e.class}: #{e.message}",
+                      keeping_previous: true)
+      end
+
+      def update_dispatch_request_attempt_claim(req, result:, now:)
+        Hive::Daemon::DispatchRequestQueue.update_claim(
+          req.request_id,
+          pid: nil,
+          process_start_time: nil,
+          attempt_id: result.attempt.attempt_id,
+          task_generation: result.attempt.task_generation,
+          now: now,
+          state_home: dispatch_request_state_home
+        )
+      rescue StandardError => e
+        @logger.event(:fatal,
+                      message: "update_dispatch_request_attempt_claim raised: #{e.class}: #{e.message}",
                       keeping_previous: true)
       end
 
@@ -1854,6 +1905,13 @@ module Hive
       def dispatch_command(command, project:, slug:, stage:, state_file_mtime:,
                            state_file_path:, now:, trigger: "advance",
                            request_id: nil, kind: :task, dispatch_token: nil)
+        if kind == :task && @attempt_dispatcher && !@dry_run
+          return dispatch_durable_command(
+            command, project: project, slug: slug, stage: stage,
+            now: now, trigger: trigger, request_id: request_id
+          )
+        end
+
         if @dry_run
           @logger.event(:dry_run, project: project, slug: slug, stage: stage,
                                   command: command)
@@ -1878,6 +1936,38 @@ module Hive
                                    dry_run: @dry_run)
         @dispatched_today += 1
         pid
+      end
+
+      def dispatch_durable_command(command, project:, slug:, stage:, now:, trigger:, request_id:)
+        argv = Shellwords.split(command)
+        request = Hive::Daemon::DispatchRequestQueue::Request.new(
+          request_id: request_id || Hive::Daemon::DispatchRequestQueue.generate_request_id,
+          created_at: now.utc,
+          project: project,
+          slug: slug,
+          argv: argv,
+          requestor: "daemon",
+          chat_id: nil,
+          update_id: nil,
+          trigger: trigger,
+          task_generation: nil,
+          predecessor_attempt_id: nil,
+          inherited_outputs: [],
+          schema_version: Hive::Daemon::DispatchRequestQueue::SCHEMA_VERSION,
+          path: nil
+        )
+        result = @attempt_dispatcher.dispatch_request(request, interactive: false, now: now)
+        @logger.event(
+          result.status == :deferred ? :blocked : :dispatched,
+          attempt_id: result.attempt&.attempt_id,
+          task_generation: result.attempt&.task_generation,
+          attempt_state: result.attempt&.state,
+          project: project, slug: slug, stage: stage,
+          command: command, trigger: trigger,
+          reason: result.reason, dry_run: false
+        )
+        @dispatched_today += 1 unless result.status == :deferred
+        result
       end
 
       def enqueue_merge_watch(row, error_reason: nil)

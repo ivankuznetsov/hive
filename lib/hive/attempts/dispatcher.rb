@@ -2,6 +2,7 @@ require "securerandom"
 require "hive/attempts/capacity_snapshot"
 require "hive/attempts/generation"
 require "hive/task_resolver"
+require "hive/workflows"
 
 module Hive
   module Attempts
@@ -68,7 +69,7 @@ module Hive
 
       def dispatch_request(request, interactive: false, now: @clock.call)
         task = @task_resolver.call(request)
-        intended_stage = "#{task.stage_index}-#{task.stage_name}"
+        intended_stage = intended_stage_for(request.argv, task)
         generation = Generation.resolve(
           task: task, project: request.project, intended_stage: intended_stage,
           task_generation: request.respond_to?(:task_generation) ? request.task_generation : nil
@@ -169,10 +170,10 @@ module Hive
       def find_semantic_owner(records, generation)
         candidates = records.select do |record|
           same_task = if generation.task_id.nil?
-                        record["project"] == generation.project && record["task_slug"] == generation.task_slug
-                      else
-                        record["task_id"].to_s == generation.task_id.to_s
-                      end
+            record["project"] == generation.project && record["task_slug"] == generation.task_slug
+          else
+            record["task_id"].to_s == generation.task_id.to_s
+          end
           same_task && record["intended_stage"] == generation.intended_stage && record.live?
         end
         candidates.max_by { |record| [ record["accepted_at"], record.lease_version ] }
@@ -217,6 +218,15 @@ module Hive
       def provider_for(task)
         stage = task.stage_name.to_s.tr("-", "_")
         Hive::Config.load(task.project_root).dig(stage, "agent") || "claude"
+      end
+
+      def intended_stage_for(argv, task)
+        verb = Array(argv)[1].to_s
+        return "#{task.stage_index}-#{task.stage_name}" if verb == "run"
+
+        Hive::Workflows.for_verb(verb).fetch(:target)
+      rescue KeyError, Hive::Error
+        "#{task.stage_index}-#{task.stage_name}"
       end
     end
   end

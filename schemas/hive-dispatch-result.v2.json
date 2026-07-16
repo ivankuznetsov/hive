@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-dispatch-result.v2.json",
+  "title": "hive dispatch result notice (v2)",
+  "description": "Completion delivery record with optional durable attempt correlation and receipt-derived metadata.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "schema_version", "result_id", "created_at", "chat_id",
+    "project", "slug", "request_id", "exit_code", "command",
+    "attempt_id", "attempt_state", "receipt"
+  ],
+  "properties": {
+    "schema": { "const": "hive-dispatch-result" },
+    "schema_version": { "const": 2 },
+    "result_id": { "type": "string", "pattern": "^[a-f0-9]{8,32}$" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "chat_id": { "type": "integer", "not": { "const": 0 } },
+    "update_id": { "type": ["integer", "null"] },
+    "project": { "type": "string" },
+    "slug": { "type": "string" },
+    "request_id": { "type": "string" },
+    "exit_code": { "type": ["integer", "null"] },
+    "command": { "type": "string" },
+    "attempt_id": { "type": ["string", "null"] },
+    "attempt_state": {
+      "type": ["string", "null"],
+      "enum": ["launching", "running", "terminal", "lost", null]
+    },
+    "receipt": { "type": ["object", "null"] }
+  }
+}

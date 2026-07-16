@@ -312,7 +312,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
                       dispatch_request_state_home: nil, dispatch_result_state_home: nil,
                       with_digest_scheduler: false, with_answer_digest_scheduler: false,
                       refactor_patrol_merge_reconciler: nil,
-                      refactor_patrol_scheduler: nil, patrol_arbiter: nil)
+                      refactor_patrol_scheduler: nil, patrol_arbiter: nil,
+                      attempt_dispatcher: nil)
     config = {
       "daemon" => {
         "edit_debounce_sec" => 30,
@@ -360,7 +361,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
       answer_digest_scheduler: answer_digest_scheduler,
       dry_run: dry_run,
       dispatch_request_state_home: dispatch_request_state_home,
-      dispatch_result_state_home: dispatch_result_state_home
+      dispatch_result_state_home: dispatch_result_state_home,
+      attempt_dispatcher: attempt_dispatcher
     )
     # Bypass the Hive::Config.find_project / Config.load lookup chain
     # for unit tests — stub the predicate directly.
@@ -3099,6 +3101,41 @@ end
 
   Q = Hive::Daemon::DispatchRequestQueue
 
+  def test_queue_delivery_delegates_task_ownership_to_attempt_dispatcher
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      attempt = Struct.new(:attempt_id, :task_generation, :state)
+                      .new("attempt-1", "generation-1", "launching")
+      result = Hive::Attempts::DispatchResult.new(
+        status: :accepted, attempt: attempt, receipt: nil,
+        attach_descriptor: nil, reason: nil
+      )
+      calls = []
+      attempt_dispatcher = Object.new
+      attempt_dispatcher.define_singleton_method(:dispatch_request) do |request, **options|
+        calls << [ request, options ]
+        result
+      end
+      dispatcher, supervisor, = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home,
+        attempt_dispatcher: attempt_dispatcher
+      )
+      Q.write_request!(
+        project: "p1", slug: "demo-task", argv: %w[hive run demo-task],
+        request_id: "request-1", state_home: state_home, now: T0
+      )
+      request = Q.pending(state_home: state_home).first
+
+      dispatcher.send(:dispatch_request!, request, now: T0)
+
+      assert_equal 1, calls.length
+      assert_empty supervisor.spawned
+      claim_path = Dir.glob(File.join(state_home, "dispatch_requests", "*.claim")).first
+      claim = JSON.parse(File.read(claim_path))
+      assert_equal "attempt-1", claim["attempt_id"]
+      assert_equal "generation-1", claim["task_generation"]
+    end
+  end
+
   def write_request_file(dir, slug:, request_id:, created_at: T0, argv: nil, project: "p1",
                          trigger: "answer_complete")
     argv ||= [ "hive", "run", slug, "--json" ]
@@ -3114,7 +3151,10 @@ end
       "requestor" => "bot",
       "chat_id" => 42,
       "update_id" => 99,
-      "trigger" => trigger
+      "trigger" => trigger,
+      "task_generation" => nil,
+      "predecessor_attempt_id" => nil,
+      "inherited_outputs" => []
     }
     File.write(path, JSON.generate(payload))
     path

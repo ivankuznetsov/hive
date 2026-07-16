@@ -345,4 +345,37 @@ class CommandsRunTest < Minitest::Test
   ensure
     JSON.define_singleton_method(:generate, original) if original
   end
+
+  def test_durable_call_dispatches_worker_without_running_body_in_caller
+    result = Hive::Attempts::ClientResult.new(
+      status: :terminal, exit_status: 0, outcome: "succeeded",
+      receipt: {}, attempt_id: "attempt-1"
+    )
+    entrypoint = Object.new
+    calls = []
+    entrypoint.define_singleton_method(:dispatch) { |**kwargs| calls << kwargs; result }
+    run = command(durable: true, json: true, no_rebase: true, attempt_entrypoint: entrypoint)
+    resolved = task(folder: "/tmp/task-folder", stage_name: "execute", stage_index: 4)
+    run.define_singleton_method(:resolve_task) { resolved }
+    run.define_singleton_method(:do_call) { flunk "durable caller executed worker body" }
+
+    assert_same result, run.call
+    assert_equal 1, calls.length
+    assert_equal "4-execute", calls.first.fetch(:intended_stage)
+    assert_equal [ "hive", "run", "/tmp/task-folder", "--json", "--no-rebase" ],
+                 calls.first.fetch(:argv)
+  end
+
+  def test_attempt_context_executes_existing_body_without_redispatch
+    run = command(durable: true)
+    calls = []
+    run.define_singleton_method(:do_call) { calls << :worker; :done }
+
+    value = Hive::Attempts::Context.with(attempt_id: "attempt-1", task_generation: "generation-1") do
+      run.call
+    end
+
+    assert_equal :done, value
+    assert_equal [ :worker ], calls
+  end
 end

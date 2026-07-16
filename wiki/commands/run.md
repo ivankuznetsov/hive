@@ -3,11 +3,11 @@ title: hive run
 type: command
 source: lib/hive/commands/run.rb
 created: 2026-04-25
-updated: 2026-05-22T13:30:00Z
-tags: [command, dispatcher, stages, json, rebase]
+updated: 2026-07-16
+tags: [command, dispatcher, stages, json, rebase, dependencies, admission]
 ---
 
-**TLDR**: `hive run TARGET` is the lower-level dispatcher for a slug or task folder. It resolves `TARGET` into a `Hive::Task`, takes the per-task lock, attempts an auto-rebase pre-step against the project's default branch (fail-soft), picks the matching stage runner, executes it, commits any `.hive-state` changes via the per-project commit lock, and reports the resulting marker plus a workflow-oriented `next:` hint. Most humans should start with `hive status` and use `hive brainstorm|plan|develop|open-pr|review|finalize|archive <slug>`.
+**TLDR**: `hive run TARGET` is the lower-level dispatcher for a slug or task folder. It resolves the task, takes its lock, revalidates dependency admission from disk, then loads config, rebases, and invokes the stage runner only when admission is clear.
 
 ## Usage
 
@@ -22,14 +22,25 @@ hive run <project>/.hive-state/stages/<N>-<stage>/<slug> [--json] [--no-rebase]
 
 ## Steps performed (`Commands::Run#call`)
 
-1. Resolve `TARGET` via `Hive::TaskResolver` and load merged config via `Hive::Config.load(task.project_root)`.
-2. Acquire the per-task lock via `Hive::Lock.with_task_lock` with payload `{slug:, stage:}`. Concurrent run → `ConcurrentRunError` (exit 75, `TEMPFAIL`, stderr `hive: another hive run is active`).
-3. If the current marker is `MANUAL_STEERING`, skip before auto-rebase or runner dispatch and report `marker=manual_steering` with `next_action.kind=no_op`. JSON sets `rebase.reason="manual_steering"`.
-4. **Auto-rebase pre-step** (`Hive::Rebase.perform`): see "Auto-rebase pre-step" below.
-5. `pick_runner(task)` delegates to `Hive::Stages::Resolver.resolve(task, descriptor: task.workflow)`. The resolver first checks the bespoke coding runner table, then falls back to the selected descriptor's `kind: :agent` stages via `Hive::Stages::Agent`. Unknown stage → `StageError`.
-6. Call the runner inside `Hive::Stages::Base.with_stage_events(task) { runner.call(task, cfg) }`. The wrapper emits a `stage_enter` event before the call, a `stage_exit` event after it, plus marker-driven `round_waiting` / `round_complete` (brainstorm, plan) or `error` (any error-class marker) events between them. Any raise emits a paired `error` + `stage_exit` so `events.jsonl` brackets stay balanced. See [[modules/events]].
-7. `commit_after`: if `result[:commit]`, take the per-project commit lock and run `GitOps#hive_commit(stage_name: "<N>-<stage>", slug:, action: result[:commit])`.
-8. `report`: print the current marker, the state file path, and a stage-aware next step.
+1. Resolve `TARGET` via `Hive::TaskResolver`.
+2. Acquire the per-task lock via `Hive::Lock.with_task_lock`. Concurrent run raises `ConcurrentRunError` (exit 75).
+3. Build a fresh all-project snapshot and call `DependencySnapshot.enforce_admission!` while the task lock is held. A valid below-gate prerequisite raises retryable `DependencyWaitError` (exit 75); invalid evidence raises non-retryable `DependencyAdmissionError` (exit 78). Neither path loads run config, rebases, creates/uses a worktree, or invokes a runner. `--no-rebase` does not bypass this gate.
+4. Load merged config via `Hive::Config.load(task.project_root)`.
+5. If the current marker is `MANUAL_STEERING`, report a no-op. Admission was still checked first.
+6. **Auto-rebase pre-step** (`Hive::Rebase.perform`): see below.
+7. Resolve and call the stage runner inside `Hive::Stages::Base.with_stage_events`.
+8. If the result requests a commit, take the per-project commit lock and run `GitOps#hive_commit`.
+9. Report the current marker and stage-aware next step.
+
+## Dependency admission errors
+
+`hive-run` schema v2 error envelopes add `error_kind: "dependency_wait"` or
+`"admission_error"`. Both include `reason_code`, `offending_ref`, and
+`safe_correction`; waits use reason `dependency_wait`, while admission errors
+use the closed codes documented in [[modules/task_dependencies]]. The envelope
+is emitted before the typed exception propagates, so automation receives both
+machine-readable context and the exit code. `--force` is not a run option and
+workflow-verb composition cannot bypass this check.
 
 ## Auto-rebase pre-step (`Hive::Rebase.perform`)
 
@@ -86,7 +97,7 @@ Protected-file basename guard (originally present pre-merge) was **removed** dur
 }
 ```
 
-`reason` is `null` on success and a snake-case string (closed enum, validated by `schemas/hive-run.v1.json`) otherwise. The full set:
+`reason` is `null` on success and a snake-case string (closed enum, validated by `schemas/hive-run.v2.json`) otherwise. The full set:
 
 | Reason | Meaning |
 |--------|---------|
@@ -171,6 +182,7 @@ Per-stage integration tests exercise the dispatcher end-to-end:
 - `test/integration/run_finalize_test.rb`
 - `test/integration/run_done_test.rb`
 - `test/integration/full_flow_test.rb` (chains all stages)
+- `test/integration/dependency_admission_test.rb` (lock-boundary plan drift and repository mismatch; no rebase/runner side effects)
 
 ## Backlinks
 

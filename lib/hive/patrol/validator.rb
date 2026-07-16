@@ -32,11 +32,12 @@ module Hive
         @commands = commands || {}
       end
 
+      def configured?
+        active_commands.any?
+      end
+
       def validate(worktree_path)
-        active = %w[format lint typecheck test].filter_map do |name|
-          command = @commands[name]
-          [ name, command ] if command.is_a?(String) && !command.strip.empty?
-        end
+        active = active_commands
         return { "passed" => false, "reason" => "no_validation_commands", "commands" => [] } if active.empty?
 
         results = active.map { |name, command| run_command(name, command, worktree_path) }
@@ -47,6 +48,13 @@ module Hive
       end
 
       private
+
+      def active_commands
+        %w[format lint typecheck test].filter_map do |name|
+          command = @commands[name]
+          [ name, command ] if command.is_a?(String) && !command.strip.empty?
+        end
+      end
 
       def run_command(name, command, worktree_path)
         out, err, status = Open3.capture3("bash", "-lc", command, chdir: worktree_path)

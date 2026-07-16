@@ -3,7 +3,7 @@ title: hive patrol
 type: command
 source: lib/hive/commands/patrol.rb, lib/hive/patrol/*
 created: 2026-05-28
-updated: 2026-06-18
+updated: 2026-07-16
 tags: [command, patrol, review, pr, json]
 ---
 
@@ -48,17 +48,18 @@ patrol:
 
 ## Steps
 
-1. Reconcile dismissal memory for existing patrol branches and PRs.
-2. Map tracked repository files into durable feature records under `.hive-state/patrol/features/`.
-3. Ask the configured agent to emit schema-shaped findings for each feature.
-4. Skip dismissed, already-PR'd, similar-known, low-confidence, and low-severity findings.
-5. For each remaining finding (in order), create a dedicated `hive-patrol/...` worktree branch and run the fix agent. `max_prs_per_cycle` caps the number of PRs **opened** per scan, not the number of fix candidates: the loop keeps attempting candidates until that many PRs have actually opened, so a failed validation does not waste the budget on an otherwise-fixable later finding.
-6. Run configured validation commands in the fix worktree.
-7. Open a PR only when validation passed and the diff is not blocked by the secret scanner.
-8. Unless `patrol.review_prs: false`, keep the patrol worktree and create a synthetic `.hive-state/stages/6-review/patrol-.../` task with display name `Patrol: <finding title>`, `task.md`, `worktree.yml`, `pr.md`, and `reviews/`, so the normal daemon/TUI review flow picks it up. Patrol tasks use `patrol.review.reviewers` instead of the normal `review.reviewers`; fresh projects default that list to `codex-native-review` (`kind: codex_review`), with Codex/Claude CE `ce-code-review` entries as init-time opt-ins.
-9. Update `.hive-state/patrol/state.json` with `last_run_at` and `last_scanned_sha`.
+1. For a normal run, require at least one configured `format`, `lint`, `typecheck`, or `test` command. Missing validation fails as a configuration error before patrol state, repository mapping, or any reviewer/fixer agent is created.
+2. Reconcile dismissal memory for existing patrol branches and PRs.
+3. Map tracked repository files into durable feature records under `.hive-state/patrol/features/`.
+4. Ask the configured agent to emit schema-shaped findings for each feature.
+5. Skip dismissed, already-PR'd, similar-known, low-confidence, and low-severity findings.
+6. For each remaining finding (in order), create a dedicated `hive-patrol/...` worktree branch, record its pre-agent HEAD as `base_sha`, and run the fix agent. `max_prs_per_cycle` caps the number of PRs **opened** per scan, not the number of fix candidates: the loop keeps attempting candidates until that many PRs have actually opened, so a failed validation does not waste the budget on an otherwise-fixable later finding.
+7. Run configured validation commands in the fix worktree. Patch change detection and diffstats compare the completed worktree with its captured `base_sha`, not a mutable local default-branch ref.
+8. Open a PR only when validation passed and the diff is not blocked by the secret scanner.
+9. Unless `patrol.review_prs: false`, keep the patrol worktree and create a synthetic `.hive-state/stages/6-review/patrol-.../` task with display name `Patrol: <finding title>`, `task.md`, `worktree.yml`, `pr.md`, and `reviews/`, so the normal daemon/TUI review flow picks it up. Patrol tasks use `patrol.review.reviewers` instead of the normal `review.reviewers`; fresh projects default that list to `codex-native-review` (`kind: codex_review`), with Codex/Claude CE `ce-code-review` entries as init-time opt-ins.
+10. Update `.hive-state/patrol/state.json` with `last_run_at` and `last_scanned_sha`.
 
-`--dry-run` stops after map + review + candidate selection. It updates scan state but does not create fix worktrees, push branches, or open PRs.
+`--dry-run` bypasses the validation-command preflight because it cannot ship code, then stops after map + review + candidate selection. It updates scan state but does not create fix worktrees, push branches, or open PRs.
 
 ## JSON
 

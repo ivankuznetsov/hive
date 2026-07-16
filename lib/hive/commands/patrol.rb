@@ -10,6 +10,7 @@ require "hive/patrol/mapper"
 require "hive/patrol/pr_opener"
 require "hive/patrol/reviewer"
 require "hive/patrol/state_store"
+require "hive/patrol/validator"
 
 module Hive
   module Commands
@@ -50,6 +51,7 @@ module Hive
 
         project_root = entry.fetch("path")
         cfg = Hive::Config.load(project_root)
+        ensure_validation_configured!(cfg) unless @dry_run
         state = Hive::Patrol::StateStore.new(project_root)
         state.ensure!
         dismissed = @dismissals_factory.call(project_root, state).reconcile
@@ -108,6 +110,14 @@ module Hive
 
       def reviewer_errored?(reviewer)
         reviewer.respond_to?(:review_errors) && Array(reviewer.review_errors).any?
+      end
+
+      def ensure_validation_configured!(cfg)
+        commands = cfg.dig("patrol", "commands")
+        return if Hive::Patrol::Validator.new(commands).configured?
+
+        raise Hive::ConfigError,
+              "patrol.commands must configure at least one of format, lint, typecheck, or test before fixes can run"
       end
 
       def stamp_fingerprints(findings, project_root)

@@ -3,7 +3,7 @@ title: Hive::Config
 type: module
 source: lib/hive/config.rb
 created: 2026-04-25
-updated: 2026-07-10
+updated: 2026-07-16
 tags: [config, yaml, validation]
 ---
 
@@ -194,13 +194,13 @@ expiry, client id, issuer, MCP resource URL, base URL, and default
 | `hive_home` | `ENV["HIVE_HOME"] || Hive::Paths.config_home` (XDG default `~/.config/hive`; legacy `~/Dev/hive/config.yml` is migrated) |
 | `global_config_path` | `<hive_home>/config.yml` |
 | `hive_state_dir(project_root, name = ".hive-state")` | `<project_root>/<name>` |
-| `load(project_root)` | Reads `<project_root>/.hive-state/config.yml`, recursively deep-merges onto DEFAULTS, validates, returns Hash with `"project_root"` injected. Returns DEFAULTS-only hash if config absent. |
+| `load(project_root)` | Reads `<project_root>/.hive-state/config.yml`, rewraps every `Psych::Exception` and configuration-read errors as a path-bearing `ConfigError`, recursively deep-merges onto DEFAULTS, validates, and returns a Hash with `"project_root"` injected. Returns a DEFAULTS-only hash if config is absent. |
 | `registered_projects` | Reads global config; returns `[{name, path, hive_state_path}, …]` (paths `expand_path`-ed). |
 | `find_project(name)` | First entry from `registered_projects` matching `name` (or `nil`). |
 | `register_project(name:, path:)` | Adds or replaces an entry in the global config under `config.yml.lock`; stores private absolute-string `real_path` when the path can be resolved so prune can detect relinked symlinks; ensures `hive_home` exists; writes via `update_global_config!`. |
 | `unregister_project(name)` | Index-based delete (not `Array#-`, which would clear duplicate-content rows); `to_s`-symmetric name match so an Integer `name:` in YAML still resolves; rewrites under `config.yml.lock`. |
 | `prune_missing_projects!(dry_run:)` | Drops rows whose `path` is not a directory, whose stored valid `real_path` no longer matches the current target, OR whose shape is invalid (non-Hash, missing `path`); reads and, unless `dry_run`, rewrites under `config.yml.lock`. |
-| `load_global_config(path)` | Reads + `YAML.safe_load`; rewraps `Psych::SyntaxError` AND `Errno::EACCES`/`EISDIR` as `ConfigError` (exit 78) so `chmod 000` on the file surfaces as bad-config, not internal-error. |
+| `load_global_config(path)` | Reads + `YAML.safe_load`; rewraps every `Psych::Exception` and configuration-read errors as `ConfigError` (exit 78) so malformed or unreadable YAML surfaces as bad-config, not internal-error. |
 | `load_global_digest_block` | Reads global config, deep-merges the `digest` section over defaults, validates `enabled`, `agent`, and `max_catchup_days`, and returns the scheduler-facing digest block. |
 | `load_global_digest_config` | Reads global config, deep-merges full defaults, injects bot runtime paths, validates the result, and returns the config hash used by `Hive::Digest.run`. |
 | `load_global_web` | Reads global config, deep-merges the `web` section onto web defaults, fills `session_secret_file` with `<state_home>/.web.session_secret` when omitted, validates bind/port/origin/GitHub fields, and returns the merged web config for [[commands/web]]. |

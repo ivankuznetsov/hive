@@ -698,7 +698,13 @@ module Hive
       project_root = File.expand_path(project_root)
       candidate = File.join(project_root, ".hive-state", "config.yml")
       data = if File.exist?(candidate)
-               parsed = YAML.safe_load(File.read(candidate)) || {}
+               parsed = begin
+                 YAML.safe_load(File.read(candidate)) || {}
+               rescue Psych::Exception => e
+                 raise ConfigError, "config.yml at #{candidate} is not valid YAML: #{e.message}"
+               rescue Errno::EACCES, Errno::EISDIR, Errno::ENOENT => e
+                 raise ConfigError, "config.yml at #{candidate} is not readable: #{e.message}"
+               end
                raise ConfigError, "config.yml at #{candidate} must be a hash" unless parsed.is_a?(Hash)
 
                parsed

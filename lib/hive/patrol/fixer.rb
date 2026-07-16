@@ -15,7 +15,7 @@ module Hive
   module Patrol
     class Fixer
       PatchAttempt = Struct.new(:id, :finding, :branch, :worktree_path, :validation,
-                                :passed, :diffstat, :head_sha, keyword_init: true) do
+                                :passed, :diffstat, :base_sha, :head_sha, keyword_init: true) do
         def to_h
           {
             "id" => id,
@@ -26,6 +26,7 @@ module Hive
             "validation" => validation,
             "passed" => passed,
             "diffstat" => diffstat,
+            "base_sha" => base_sha,
             "head_sha" => head_sha
           }
         end
@@ -50,8 +51,10 @@ module Hive
 
       def attempt(finding)
         branch = branch_name(finding)
+        base_sha = nil
         worktree = @worktree_factory.call(finding: finding, branch: branch)
         worktree.create!(branch, default_branch: default_branch)
+        base_sha = git_revision!(worktree.path, "HEAD")
         run_dir = @state.run_dir("fix")
         output_path = File.join(run_dir, "fix.json")
         result = @agent_runner.call(finding: finding, prompt: render_prompt(finding, output_path),
@@ -62,18 +65,18 @@ module Hive
         # than raising; ignoring it let a half-finished or aborted run leave
         # changes that could still pass validation, commit, and reach a PR
         # (U6 never-ship-unvalidated). Treat an errored run as a failed patch.
-        return agent_failed_patch(finding, branch, worktree, result) if agent_failed?(result)
+        return agent_failed_patch(finding, branch, worktree, base_sha, result) if agent_failed?(result)
 
         validation = @validator.validate(worktree.path)
         changed = diff_present?(worktree.path)
         commit_changes(worktree.path, finding) if validation["passed"] && changed
-        passed = validation["passed"] && (changed || committed_since_base?(worktree.path))
-        patch = build_patch(finding, branch, worktree.path, validation, passed)
+        passed = validation["passed"] && (changed || committed_since_base?(worktree.path, base_sha))
+        patch = build_patch(finding, branch, worktree.path, base_sha, validation, passed)
         @state.write_patch(patch.id, patch.to_h)
         worktree.remove!(path: worktree.path, force: true) unless passed
         patch
       rescue StandardError => e
-        patch = failed_patch(finding, branch, worktree&.path, e)
+        patch = failed_patch(finding, branch, worktree&.path, base_sha, e)
         @state.write_patch(patch.id, patch.to_h)
         begin
           worktree&.remove!(path: worktree.path, force: true)
@@ -89,7 +92,7 @@ module Hive
         result.is_a?(Hash) && result[:status] == :error
       end
 
-      def agent_failed_patch(finding, branch, worktree, result)
+      def agent_failed_patch(finding, branch, worktree, base_sha, result)
         message = result.is_a?(Hash) ? result[:error_message].to_s : ""
         patch = PatchAttempt.new(
           id: "patch-#{finding.fingerprint.to_s[0, 12]}-#{SecureRandom.hex(3)}",
@@ -99,6 +102,7 @@ module Hive
           validation: { "passed" => false, "reason" => "fix_agent_failed", "error" => message },
           passed: false,
           diffstat: "",
+          base_sha: base_sha,
           head_sha: nil
         )
         @state.write_patch(patch.id, patch.to_h)
@@ -198,9 +202,9 @@ module Hive
         !status.success?
       end
 
-      def committed_since_base?(worktree_path)
+      def committed_since_base?(worktree_path, base_sha)
         _out, _err, status = Open3.capture3(
-          "git", "-C", worktree_path, "diff", "--quiet", "#{default_branch}...HEAD"
+          "git", "-C", worktree_path, "diff", "--quiet", "#{base_sha}...HEAD"
         )
         !status.success?
       end
@@ -215,7 +219,7 @@ module Hive
         raise Hive::GitError, "git commit failed: #{err.strip.empty? ? out : err}" unless commit_status.success?
       end
 
-      def build_patch(finding, branch, worktree_path, validation, passed)
+      def build_patch(finding, branch, worktree_path, base_sha, validation, passed)
         PatchAttempt.new(
           id: "patch-#{finding.fingerprint.to_s[0, 12]}-#{SecureRandom.hex(3)}",
           finding: finding,
@@ -223,12 +227,13 @@ module Hive
           worktree_path: worktree_path,
           validation: validation,
           passed: passed,
-          diffstat: git_output(worktree_path, "diff", "--stat", "#{default_branch}...HEAD"),
-          head_sha: git_output(worktree_path, "rev-parse", "HEAD").strip
+          diffstat: git_output(worktree_path, "diff", "--stat", "#{base_sha}...HEAD"),
+          base_sha: base_sha,
+          head_sha: git_revision!(worktree_path, "HEAD")
         )
       end
 
-      def failed_patch(finding, branch, worktree_path, error)
+      def failed_patch(finding, branch, worktree_path, base_sha, error)
         PatchAttempt.new(
           id: "patch-#{finding.fingerprint.to_s[0, 12]}-#{SecureRandom.hex(3)}",
           finding: finding,
@@ -237,8 +242,16 @@ module Hive
           validation: { "passed" => false, "reason" => "fix_error", "error" => "#{error.class}: #{error.message}" },
           passed: false,
           diffstat: "",
+          base_sha: base_sha,
           head_sha: nil
         )
+      end
+
+      def git_revision!(worktree_path, revision)
+        out, err, status = Open3.capture3("git", "-C", worktree_path, "rev-parse", revision)
+        raise Hive::GitError, "git rev-parse #{revision} failed: #{err.strip.empty? ? out : err}" unless status.success?
+
+        out.strip
       end
 
       def git_output(worktree_path, *args)

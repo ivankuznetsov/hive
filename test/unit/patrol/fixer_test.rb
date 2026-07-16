@@ -60,6 +60,7 @@ class HivePatrolFixerTest < Minitest::Test
       File.write(File.join(repo, "app.rb"), "puts 'old'\n")
       run!("git", "-C", repo, "add", ".")
       run!("git", "-C", repo, "commit", "-m", "app", "--quiet")
+      base_sha = run!("git", "-C", repo, "rev-parse", "HEAD").strip
       agent = lambda do |worktree_path:, **|
         File.write(File.join(worktree_path, "app.rb"), "puts 'fixed'\n")
       end
@@ -67,9 +68,13 @@ class HivePatrolFixerTest < Minitest::Test
       patch = Hive::Patrol::Fixer.new(repo, cfg: cfg(repo), agent_runner: agent).attempt(finding)
 
       assert_equal true, patch.passed
+      assert_equal base_sha, patch.base_sha
+      refute_equal patch.base_sha, patch.head_sha
       assert_match(/app\.rb/, patch.diffstat)
       assert File.directory?(patch.worktree_path), "passed fix worktree remains for PR creation"
       assert File.exist?(Dir[File.join(repo, ".hive-state", "patrol", "patches", "*.json")].first)
+      record = JSON.parse(File.read(Dir[File.join(repo, ".hive-state", "patrol", "patches", "*.json")].first))
+      assert_equal base_sha, record.fetch("base_sha")
       assert_equal "puts 'old'\n", File.read(File.join(repo, "app.rb")),
                    "managed repo worktree must stay untouched"
     end
@@ -107,6 +112,7 @@ class HivePatrolFixerTest < Minitest::Test
 
       assert_equal false, patch.passed, "a failed fix agent must never produce a validated patch"
       assert_equal "fix_agent_failed", patch.validation["reason"]
+      refute_nil patch.base_sha, "a created worktree must retain its captured base on agent failure"
       refute File.directory?(patch.worktree_path), "failed-agent worktree should be removed"
     end
   end
@@ -143,6 +149,7 @@ class HivePatrolFixerTest < Minitest::Test
 
       assert_equal false, patch.passed
       assert_equal "fix_error", patch.validation["reason"]
+      assert_nil patch.base_sha
     end
   end
 
@@ -165,6 +172,7 @@ class HivePatrolFixerTest < Minitest::Test
 
       assert_equal false, patch.passed
       assert_equal "fix_agent_failed", patch.validation["reason"]
+      assert_equal run!("git", "-C", repo, "rev-parse", "HEAD").strip, patch.base_sha
     end
   end
 
@@ -296,15 +304,72 @@ class HivePatrolFixerTest < Minitest::Test
   def test_committed_since_base_detects_branch_delta
     with_tmp_git_repo do |repo|
       fixer = Hive::Patrol::Fixer.new(repo, cfg: cfg(repo))
+      base_sha = run!("git", "-C", repo, "rev-parse", "HEAD").strip
 
-      assert_equal false, fixer.send(:committed_since_base?, repo)
+      assert_equal false, fixer.send(:committed_since_base?, repo, base_sha)
 
       run!("git", "-C", repo, "checkout", "-b", "feature", "--quiet")
       File.write(File.join(repo, "feature.txt"), "changed\n")
       run!("git", "-C", repo, "add", "feature.txt")
       run!("git", "-C", repo, "commit", "-m", "feature", "--quiet")
 
-      assert_equal true, fixer.send(:committed_since_base?, repo)
+      assert_equal true, fixer.send(:committed_since_base?, repo, base_sha)
+    end
+  end
+
+  def test_patch_diffstat_uses_actual_worktree_base_when_local_default_is_stale
+    with_stale_local_default do |repo, upstream_sha|
+      agent = ->(worktree_path:, **) { File.write(File.join(worktree_path, "app.rb"), "puts 'fixed'\n") }
+
+      patch = Hive::Patrol::Fixer.new(repo, cfg: cfg(repo), agent_runner: agent).attempt(finding)
+
+      assert_equal true, patch.passed
+      assert_equal upstream_sha, patch.base_sha
+      assert_match(/app\.rb/, patch.diffstat)
+      refute_match(/upstream\.txt/, patch.diffstat)
+    end
+  end
+
+  def test_no_change_does_not_pass_only_because_local_default_is_stale
+    with_stale_local_default do |repo, upstream_sha|
+      patch = Hive::Patrol::Fixer.new(
+        repo,
+        cfg: cfg(repo),
+        agent_runner: ->(**) { { status: :ok } }
+      ).attempt(finding)
+
+      assert_equal upstream_sha, patch.base_sha
+      assert_equal false, patch.passed
+    end
+  end
+
+  private
+
+  def with_stale_local_default
+    with_tmp_git_repo do |repo|
+      File.write(File.join(repo, "app.rb"), "puts 'old'\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "app", "--quiet")
+
+      with_tmp_dir do |remote|
+        run!("git", "-C", remote, "init", "--bare", "--quiet")
+        run!("git", "-C", repo, "remote", "add", "origin", remote)
+        run!("git", "-C", repo, "push", "-u", "origin", "master", "--quiet")
+
+        with_tmp_dir do |upstream|
+          run!("git", "clone", "--quiet", remote, upstream)
+          run!("git", "-C", upstream, "config", "user.email", "test@example.com")
+          run!("git", "-C", upstream, "config", "user.name", "Test")
+          run!("git", "-C", upstream, "config", "commit.gpgsign", "false")
+          File.write(File.join(upstream, "upstream.txt"), "new upstream file\n")
+          run!("git", "-C", upstream, "add", "upstream.txt")
+          run!("git", "-C", upstream, "commit", "-m", "upstream", "--quiet")
+          upstream_sha = run!("git", "-C", upstream, "rev-parse", "HEAD").strip
+          run!("git", "-C", upstream, "push", "origin", "master", "--quiet")
+
+          yield repo, upstream_sha
+        end
+      end
     end
   end
 end

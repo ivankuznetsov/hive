@@ -2503,6 +2503,43 @@ def test_project_enabled_returns_false_for_missing_or_invalid_project_config
   end
 end
 
+def test_project_enabled_contains_malformed_on_disk_project_config
+  dispatcher, _sup, _ctrl, _logger, _mw = make_dispatcher
+  dispatcher.singleton_class.send(:remove_method, :project_enabled?)
+
+  with_tmp_dir do |project_root|
+    config_path = File.join(project_root, ".hive-state", "config.yml")
+    FileUtils.mkdir_p(File.dirname(config_path))
+    File.write(config_path, "daemon: [\n")
+
+    with_replaced_singleton_method(
+      Hive::Config,
+      :find_project,
+      ->(_project) { { "path" => project_root } }
+    ) do
+      assert_equal false, dispatcher.send(:project_enabled?, "malformed")
+    end
+  end
+end
+
+def test_project_enabled_contains_unreadable_on_disk_project_config
+  dispatcher, _sup, _ctrl, _logger, _mw = make_dispatcher
+  dispatcher.singleton_class.send(:remove_method, :project_enabled?)
+
+  with_tmp_dir do |project_root|
+    config_path = File.join(project_root, ".hive-state", "config.yml")
+    FileUtils.mkdir_p(config_path)
+
+    with_replaced_singleton_method(
+      Hive::Config,
+      :find_project,
+      ->(_project) { { "path" => project_root } }
+    ) do
+      assert_equal false, dispatcher.send(:project_enabled?, "unreadable")
+    end
+  end
+end
+
 def test_reload_config_error_logs_and_keeps_previous_config
   dispatcher, _sup, controller, logger, _mw = make_dispatcher
   original_cfg = dispatcher.instance_variable_get(:@daemon_cfg)

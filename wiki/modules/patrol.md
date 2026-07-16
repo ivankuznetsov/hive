@@ -3,7 +3,7 @@ title: Hive::Patrol
 type: module
 source: lib/hive/patrol/
 created: 2026-05-28
-updated: 2026-06-10
+updated: 2026-07-16
 tags: [module, patrol, review, worktree, pr, codex]
 ---
 
@@ -18,8 +18,8 @@ tags: [module, patrol, review, worktree, pr, codex]
 | `Hive::Patrol::Reviewer` | `lib/hive/patrol/reviewer.rb` | Renders `templates/patrol_review_prompt.md.erb`, runs the configured agent, records `patrol-review` usage rows when agent usage is present, validates finding categories/severities/confidences, and persists finding JSON. |
 | `Hive::Patrol::Finding` | `lib/hive/patrol/finding.rb` | Durable finding record linked to a feature and optional fingerprint. |
 | `Hive::Patrol::Fingerprint` | `lib/hive/patrol/fingerprint.rb` | SHA-256 identity for exact dedup PLUS a **similarity gate** (`similar_known?`). The exact SHA is agent-volatile (the same issue is re-filed with a different feature/title/snippet each scan, so it never matches a prior PR), so `record_seen` also stores the finding's `category` + normalized `title_tokens`, and a new finding in the same category whose title-token overlap (Szymkiewicz–Simpson) ≥ `SIMILARITY_THRESHOLD` (0.6) with an open/merged/dismissed finding is skipped as `similar_to_existing` — this is what actually stops patrol re-opening the same PR every cycle. |
-| `Hive::Patrol::Fixer` | `lib/hive/patrol/fixer.rb` | Creates a dedicated worktree branch, runs the fix agent, records `patrol-fix` usage rows when agent usage is present, validates, commits passing changes, records patch attempts, and removes failed worktrees. |
-| `Hive::Patrol::Validator` | `lib/hive/patrol/validator.rb` | Runs operator-configured validation commands in the fix worktree. No commands means not validatable, so no PR. |
+| `Hive::Patrol::Fixer` | `lib/hive/patrol/fixer.rb` | Creates a dedicated worktree branch, captures its immutable pre-agent `base_sha`, runs the fix agent, records `patrol-fix` usage rows when agent usage is present, validates, commits passing changes, records attempt-scoped patches and diffstats, and removes failed worktrees. |
+| `Hive::Patrol::Validator` | `lib/hive/patrol/validator.rb` | Identifies and runs operator-configured validation commands in the fix worktree. A normal patrol command rejects an empty command set before agent work; direct fixer callers still fail closed. |
 | `Hive::Patrol::PrOpener` | `lib/hive/patrol/pr_opener.rb` | Secret-scans, pushes the patrol branch, opens a ready (non-draft) PR by default — `patrol.draft_prs: true` reverts to draft — records fingerprint-to-PR state, invokes `ReviewHandoff` for opened PRs, and records `review_handoff_failed` when a PR opens but the synthetic review task cannot be created. |
 | `Hive::Patrol::ReviewHandoff` | `lib/hive/patrol/review_handoff.rb` | Creates a synthetic `6-review/patrol-.../` task for an opened patrol PR when `patrol.review_prs` is not false, preserving the patrol worktree so the standard review daemon can run reviewers/triage/fix/browser flow. |
 | `Hive::Patrol::Dismissals` | `lib/hive/patrol/dismissals.rb` | Reconciles closed-unmerged patrol PRs into `dismissed.json` so the same finding is not immediately re-filed. |
@@ -42,6 +42,8 @@ Patrol state is deliberately inspectable and removable:
 
 The managed repository worktree is not edited by fixes. `Fixer` uses [[modules/worktree]] to create a branch named `hive-patrol/<feature-id>-<fingerprint8>` under the project's worktree root. When `patrol.review_prs` is enabled (default), that worktree is kept after PR creation and referenced by a synthetic `6-review` task with display name `Patrol: <finding title>`. When disabled, the successful local worktree is removed after the branch is pushed and the PR opens.
 
+Each patch record carries both `base_sha` (the isolated worktree HEAD immediately before the fix agent) and `head_sha` (the final committed HEAD). Change detection and `diffstat` use `base_sha...HEAD`, so a stale local default-branch ref cannot inflate the attempt or turn a no-op agent into a passing patch. PR creation still compares the completed patrol branch with the configured default target, because that is the branch-wide change GitHub will merge.
+
 ## Patrol PR reviewer (cheap by default)
 
 Patrol PRs flow into `6-review` and are reviewed by `patrol.review.reviewers` (a separate set from human PRs' `review.reviewers`) — see [[stages/review]] `run_reviewers` → `patrol_task?` routing. Because patrol opens many PRs per cycle, the **DEFAULT patrol reviewer is the native single-pass `codex review`** adapter (`kind: codex_review`, `name: codex-native-review`), not the multi-persona `ce-code-review` fan-out (6–18 subagents). It runs one tuned, read-only `codex review` and captures stdout into the GFM-checkbox findings file the triage/fix loop already consumes, so the loop is unchanged. See [[modules/reviewers]] `Reviewers::CodexReview` for argv/format details. Operators can override `patrol.review.reviewers` per project to add the ce-code-review fan-out or Claude.
@@ -59,6 +61,7 @@ Operators normally configure scheduling through `patrol.mode`, which [[modules/c
 - Patrol is opt-in at the scheduler gate AND at config resolution: a missing patrol section, a missing `mode:`, `patrol.mode: off`, or `patrol.enabled: false` all leave patrol disabled and prevent daemon dispatch, and the daemon still requires `daemon.enabled`.
 - Findings surface as PRs, and opened PRs enter `6-review` by default; patrol still never writes `1-inbox/` intake tasks.
 - PR creation is gated on validation passing and on the secret scanner.
+- A non-dry-run cycle requires at least one configured `format`, `lint`, `typecheck`, or `test` command before mapping, review, or state mutation. `--dry-run` remains review-only and does not require validation configuration.
 - Each finding fingerprint maps to at most one active or merged PR.
 - A failed patrol-to-review handoff is not treated as an active fingerprint state, so later patrol cycles can retry instead of losing the opened PR from the review queue.
 - Closed-unmerged patrol PRs become dismissals and are skipped on future cycles.

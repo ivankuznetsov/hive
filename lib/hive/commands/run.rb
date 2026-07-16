@@ -10,6 +10,7 @@ require "hive/stages/resolver"
 require "hive/execute_waiting_action"
 require "hive/task_action"
 require "hive/task_resolver"
+require "hive/dependency_snapshot"
 
 module Hive
   module Commands
@@ -56,9 +57,9 @@ module Hive
           project_filter: @project_filter,
           stage_filter: @stage_filter
         ).resolve
-        cfg = Hive::Config.load(task.project_root)
-
         Hive::Lock.with_task_lock(task.folder, slug: task.slug, stage: task.stage_name) do
+          Hive::DependencySnapshot.enforce_admission!(task)
+          cfg = Hive::Config.load(task.project_root)
           marker = Hive::Markers.current(task.state_file)
           if marker.name == :manual_steering
             @rebase_result = manual_steering_rebase_result
@@ -527,6 +528,8 @@ module Hive
         when Hive::ConcurrentRunError then Hive::Schemas::RunErrorKind::CONCURRENT_RUN
         when Hive::TaskInErrorState   then Hive::Schemas::RunErrorKind::TASK_IN_ERROR
         when Hive::StageError         then Hive::Schemas::RunErrorKind::STAGE
+        when Hive::DependencyWaitError then Hive::Schemas::RunErrorKind::DEPENDENCY_WAIT
+        when Hive::DependencyAdmissionError then Hive::Schemas::RunErrorKind::ADMISSION_ERROR
         when Hive::ConfigError        then Hive::Schemas::RunErrorKind::CONFIG
         when Hive::AgentError         then Hive::Schemas::RunErrorKind::AGENT
         when Hive::GitError           then Hive::Schemas::RunErrorKind::GIT

@@ -121,7 +121,8 @@ class SchemaFilesTest < Minitest::Test
 
     producer_kinds = %w[
       ambiguous_slug destination_collision final_stage
-      wrong_stage rollback_failed invalid_task_path error
+      wrong_stage rollback_failed invalid_task_path dependency_wait
+      admission_error error
     ].sort
 
     assert_equal producer_kinds, schema_kinds,
@@ -828,6 +829,13 @@ class SchemaFilesTest < Minitest::Test
         candidates: [ { project: "alpha", stage: "2-brainstorm", folder: "/tmp/probe" } ]
       ),
       Hive::Schemas::RunErrorKind::INVALID_TASK_PATH => Hive::InvalidTaskPath.new("no such slug"),
+      Hive::Schemas::RunErrorKind::DEPENDENCY_WAIT => Hive::DependencyWaitError.new(
+        "waiting", offending_ref: "base", safe_correction: "Wait for base."
+      ),
+      Hive::Schemas::RunErrorKind::ADMISSION_ERROR => Hive::DependencyAdmissionError.new(
+        "invalid", reason_code: "dependency_cycle", offending_ref: "p:a -> p:a",
+        safe_correction: "Break the cycle."
+      ),
       Hive::Schemas::RunErrorKind::INTERNAL          => Hive::InternalError.new("internal bug"),
       Hive::Schemas::RunErrorKind::ERROR             => Hive::Error.new("plain")
     }

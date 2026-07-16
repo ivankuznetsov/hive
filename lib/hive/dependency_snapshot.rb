@@ -93,6 +93,56 @@ module Hive
       Hive::DependencyAdmission::Context.new(projects: projects)
     end
 
+    # Recompute dependency admission from disk and raise the typed manual
+    # boundary error. Callers invoke this while holding the depending task's
+    # lock immediately before forward side effects.
+    def enforce_admission!(task, registry_entries: Hive::Config.registered_projects)
+      project = registry_entries.select do |entry|
+        File.expand_path(entry.fetch("path")) == File.expand_path(task.project_root)
+      end
+      unless project.one?
+        raise Hive::DependencyAdmissionError.new(
+          "dependency admission failed: task project enrollment is missing or ambiguous",
+          reason_code: "dependency_validation_failed",
+          offending_ref: "#{task.project_name}:#{task.slug}",
+          safe_correction: "Inspect project enrollment and re-enroll the intended project before dispatching."
+        )
+      end
+
+      verdict = admission_context(registry_entries).verdict(
+        project: project.first.fetch("name"),
+        slug: task.slug
+      )
+      return verdict if verdict.clear?
+
+      if verdict.wait?
+        ref = verdict.blocked_by.to_s
+        correction = "Wait for #{ref} to reach the configured dependency gate; it is currently at #{verdict.dependency_stage}."
+        raise Hive::DependencyWaitError.new(
+          "dependency wait: #{task.slug} is blocked by #{ref} at #{verdict.dependency_stage}",
+          offending_ref: ref,
+          safe_correction: correction
+        )
+      end
+
+      error = verdict.admission_error
+      raise Hive::DependencyAdmissionError.new(
+        "dependency admission error (#{error.reason_code}): #{error.offending_ref}; #{error.safe_correction}",
+        reason_code: error.reason_code,
+        offending_ref: error.offending_ref,
+        safe_correction: error.safe_correction
+      )
+    rescue Hive::DependencyWaitError, Hive::DependencyAdmissionError
+      raise
+    rescue StandardError => e
+      raise Hive::DependencyAdmissionError.new(
+        "dependency admission failed: #{e.class}: #{e.message}",
+        reason_code: "dependency_validation_failed",
+        offending_ref: "#{task.project_name}:#{task.slug}",
+        safe_correction: "Inspect dependency metadata and project enrollment before dispatching."
+      )
+    end
+
     def admission_project(entry)
       root = File.expand_path(entry.fetch("path"))
       config, config_error = admission_project_config(root)

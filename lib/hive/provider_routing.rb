@@ -33,7 +33,12 @@ module Hive
     Requirements = Data.define(:context, :quality, :tools, :permissions)
     Pin = Data.define(:provider, :model)
 
+    class StoreError < Hive::Error; end
+
     autoload :Configuration, File.expand_path("provider_routing/configuration.rb", __dir__)
+    autoload :Signal, File.expand_path("provider_routing/signal.rb", __dir__)
+    autoload :Circuit, File.expand_path("provider_routing/circuit.rb", __dir__)
+    autoload :Store, File.expand_path("provider_routing/store.rb", __dir__)
 
     module_function
 

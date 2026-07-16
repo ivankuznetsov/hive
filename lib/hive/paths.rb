@@ -28,6 +28,14 @@ module Hive
       File.join(state_home, ".task-counter.lock")
     end
 
+    def provider_circuits_path
+      File.join(state_home, "provider-circuits.v1.json")
+    end
+
+    def provider_circuits_lock_path
+      File.join(state_home, ".provider-circuits.lock")
+    end
+
     def bin_home
       # bin_home intentionally ignores HIVE_HOME — install.sh places
       # the `hive`/`hv` symlinks under XDG_BIN_HOME (or ~/.local/bin),

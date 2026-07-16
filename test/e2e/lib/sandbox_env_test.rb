@@ -7,8 +7,12 @@ class E2ESandboxEnvTest < Minitest::Test
     Dir.mktmpdir("sandbox") do |sandbox|
       Dir.mktmpdir("home") do |home|
         File.write(File.join(sandbox, "Gemfile"), "source \"https://rubygems.org\"\n")
+        previous_hive_bin = ENV["HIVE_BIN"]
+        previous_invoked_bin = ENV["HIVE_INVOKED_BIN"]
         ENV["BUNDLE_PATH"] = "/tmp/leak"
         ENV["RUBYOPT"] = "-I/tmp/leak"
+        ENV["HIVE_BIN"] = "/host/hive"
+        ENV["HIVE_INVOKED_BIN"] = "/host/hive-wrapper"
 
         yielded = nil
         Hive::E2E::SandboxEnv.with(sandbox, home) { |env| yielded = env }
@@ -16,12 +20,30 @@ class E2ESandboxEnvTest < Minitest::Test
         assert_equal File.join(sandbox, "Gemfile"), yielded["BUNDLE_GEMFILE"]
         assert_equal home, yielded["HIVE_HOME"]
         assert_equal yielded["HIVE_CLAUDE_BIN"], yielded["HIVE_CODEX_BIN"]
+        assert_equal Hive::E2E::Paths.hive_bin, yielded["HIVE_BIN"]
+        assert_equal Hive::E2E::Paths.hive_bin, yielded["HIVE_INVOKED_BIN"]
         assert_equal "xterm-256color", yielded["TERM"]
         refute_includes yielded.keys, "BUNDLE_PATH"
         refute_includes yielded.keys, "RUBYOPT"
       ensure
         ENV.delete("BUNDLE_PATH")
         ENV.delete("RUBYOPT")
+        ENV["HIVE_BIN"] = previous_hive_bin
+        ENV["HIVE_INVOKED_BIN"] = previous_invoked_bin
+      end
+    end
+  end
+
+  def test_scenario_overrides_cannot_replace_the_checkout_hive_binary
+    Dir.mktmpdir("sandbox") do |sandbox|
+      Dir.mktmpdir("home") do |home|
+        merged = Hive::E2E::SandboxEnv.merge(
+          Hive::E2E::SandboxEnv.repro_env(sandbox, home),
+          "HIVE_BIN" => "/poison/hive", "HIVE_INVOKED_BIN" => "/poison/wrapper"
+        )
+
+        assert_equal Hive::E2E::Paths.hive_bin, merged["HIVE_BIN"]
+        assert_equal Hive::E2E::Paths.hive_bin, merged["HIVE_INVOKED_BIN"]
       end
     end
   end

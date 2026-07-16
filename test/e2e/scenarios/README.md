@@ -74,6 +74,10 @@ cross-process ordering, set `HIVE_FAKE_CLAUDE_READY_FILE` and
 `HIVE_FAKE_CLAUDE_RELEASE_FILE`: the fixture atomically writes its PID to the
 ready file and waits until the harness creates the release file. Assertions
 poll those observable conditions; elapsed-time sleeps are not synchronization.
+The sandbox pins fake Claude to headless mode while the user-facing TUI itself
+still runs in tmux. It also pins `HIVE_BIN` and `HIVE_INVOKED_BIN` to this
+checkout, so an operator's installed Hive wrapper cannot service nested test
+work.
 
 CI runs the harness in a separate job, retains its run directory, and enforces
 the incident budget from the generated report:

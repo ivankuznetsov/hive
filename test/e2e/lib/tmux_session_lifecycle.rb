@@ -31,12 +31,14 @@ module Hive
         return @tmux if @tmux
         raise "tmux is required for TUI e2e scenarios" unless TmuxDriver.available?
 
-        env = session_env
-        command = Shellwords.join([ RbConfig.ruby, "-I#{Paths.lib_dir}", Paths.hive_bin, "tui" ])
-        @tmux = TmuxDriver.new(run_id: @run_id, session_name: "scenario-#{@scenario.name}",
-                               command: command, env: env,
-                               subprocess_log_path: File.join(@tui_log_dir, "hive-tui-subprocess.log"))
-        @tmux.start
+        SandboxEnv.with(@sandbox_dir, @run_home) do |base_env|
+          env = session_env(base_env)
+          command = Shellwords.join([ RbConfig.ruby, "-I#{Paths.lib_dir}", Paths.hive_bin, "tui" ])
+          @tmux = TmuxDriver.new(run_id: @run_id, session_name: "scenario-#{@scenario.name}",
+                                 command: command, env: env,
+                                 subprocess_log_path: File.join(@tui_log_dir, "hive-tui-subprocess.log"))
+          @tmux.start
+        end
         start_asciinema_if_available
         @tmux
       end
@@ -81,7 +83,7 @@ module Hive
       # sets HIVE_TUI_LOG_DIR is rejected with a clear error.
       RESERVED_TUI_ENV_KEYS = %w[HIVE_TUI_LOG_DIR].freeze
 
-      def session_env
+      def session_env(base_env = SandboxEnv.repro_env(@sandbox_dir, @run_home))
         scenario_env = StringExpander.expand(@scenario.setup["tui_env"] || {}, expander_context)
         clobbered = scenario_env.keys.map(&:to_s) & RESERVED_TUI_ENV_KEYS
         unless clobbered.empty?
@@ -90,7 +92,7 @@ module Hive
                 "(these are owned by the driver — see tmux_session_lifecycle.rb)"
         end
 
-        env = SandboxEnv.merge(SandboxEnv.repro_env(@sandbox_dir, @run_home), scenario_env)
+        env = SandboxEnv.merge(base_env, scenario_env)
         env["HIVE_TUI_LOG_DIR"] = @tui_log_dir
         env
       end

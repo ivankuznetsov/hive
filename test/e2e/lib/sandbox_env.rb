@@ -38,7 +38,8 @@ module Hive
         env.each_with_object({}) { |(key, value), out| out[key.to_s] = value.nil? ? nil : value.to_s }
       end
 
-      # Merge scenario overrides while preserving the two hermetic-gh keys.
+      # Merge scenario overrides while preserving the hermetic executable and
+      # GitHub-shim keys.
       # A caller may still replace PATH for a fixture, but the default-deny
       # shim remains its first entry and the run-local script root cannot be
       # redirected to a host-controlled location.
@@ -46,6 +47,8 @@ module Hive
         merged = base.merge(stringify_env(overrides))
         merged["PATH"] = prepend_gh_shim(merged["PATH"])
         merged["HIVE_E2E_GH_STUB_DIR"] = base.fetch("HIVE_E2E_GH_STUB_DIR")
+        merged["HIVE_BIN"] = base.fetch("HIVE_BIN")
+        merged["HIVE_INVOKED_BIN"] = base.fetch("HIVE_INVOKED_BIN")
         merged
       end
 
@@ -72,6 +75,8 @@ module Hive
           "HIVE_HOME" => run_home,
           "HIVE_CLAUDE_BIN" => File.expand_path(fake_claude_path),
           "HIVE_CODEX_BIN" => File.expand_path(fake_claude_path),
+          "HIVE_BIN" => Paths.hive_bin,
+          "HIVE_INVOKED_BIN" => Paths.hive_bin,
           "HIVE_E2E_GH_STUB_DIR" => File.join(run_home, "gh-stub"),
           "TERM" => "xterm-256color",
           "PATH" => path_parts.reject(&:empty?).join(":")

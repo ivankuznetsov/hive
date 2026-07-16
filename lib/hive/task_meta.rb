@@ -11,7 +11,7 @@ module Hive
 
     class InvalidMetadata < StandardError; end
 
-    AdmissionRead = Data.define(:status, :data, :error) do
+    AdmissionRead = Data.define(:status, :data, :error, :reason) do
       def ok?
         %i[ok absent].include?(status)
       end
@@ -54,7 +54,8 @@ module Hive
         return AdmissionRead.new(
           status: :invalid,
           data: empty,
-          error: "#{path(task_folder)} must contain a mapping"
+          error: "#{path(task_folder)} must contain a mapping",
+          reason: :metadata_invalid
         )
       end
 
@@ -67,25 +68,28 @@ module Hive
           return AdmissionRead.new(
             status: :invalid,
             data: data,
-            error: "#{path(task_folder)} depends_on is invalid: #{e.message}"
+            error: "#{path(task_folder)} depends_on is invalid: #{e.message}",
+            reason: :reference_invalid
           )
         end
       end
 
-      AdmissionRead.new(status: :ok, data: data, error: nil)
+      AdmissionRead.new(status: :ok, data: data, error: nil, reason: nil)
     rescue Errno::ENOENT
-      AdmissionRead.new(status: :absent, data: empty, error: nil)
+      AdmissionRead.new(status: :absent, data: empty, error: nil, reason: nil)
     rescue Psych::Exception => e
       AdmissionRead.new(
         status: :unreadable,
         data: empty,
-        error: "could not parse #{path(task_folder)}: #{e.class}: #{e.message}"
+        error: "could not parse #{path(task_folder)}: #{e.class}: #{e.message}",
+        reason: :metadata_unreadable
       )
     rescue SystemCallError, IOError => e
       AdmissionRead.new(
         status: :unreadable,
         data: empty,
-        error: "could not read #{path(task_folder)}: #{e.class}: #{e.message}"
+        error: "could not read #{path(task_folder)}: #{e.class}: #{e.message}",
+        reason: :metadata_unreadable
       )
     end
 

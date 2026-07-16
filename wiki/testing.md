@@ -166,15 +166,27 @@ from changing the selected schema.
 
 ## E2E suite (`test/e2e/`)
 
-The e2e layer is documented in [[e2e]]. It is opt-in:
+The e2e layer is documented in [[e2e]]. It remains separate from the default
+`rake test` task and can be run directly with:
 
 ```bash
 bundle exec rake e2e:lib_test
 bin/hive-e2e list
 bin/hive-e2e run
+bin/hive-e2e run --filter incident-regression --json
 ```
 
-The current scenarios copy `test/e2e/sample-project/` into a per-run sandbox, set `HIVE_HOME` to a run-local directory, and call the real `bin/hive` as a subprocess. `SandboxEnv` routes both Claude and Codex profile binaries to `test/fixtures/fake-claude`; scenarios that exercise `4-execute` with the default Codex profile must ask the fixture to create a real worktree commit, or execute will correctly stop at `EXECUTE_WAITING reason=no_worktree_changes`. TUI scenarios use private tmux sockets (`hive-e2e-<run-id>`) so they never touch the operator's daily tmux server.
+The current scenarios copy `test/e2e/sample-project/` into a per-run sandbox, set `HIVE_HOME` to a run-local directory, and call the real `bin/hive` as a subprocess. `SandboxEnv` routes both Claude and Codex profile binaries to `test/fixtures/fake-claude` and places the checked-in default-deny `gh` shim first on `PATH` for every CLI, background, tmux, and replay process. No scenario can fall through to a host `gh` or make a real GitHub request. Scenarios that exercise `4-execute` with the default Codex profile must ask the fixture to create a real worktree commit, or execute will correctly stop at `EXECUTE_WAITING reason=no_worktree_changes`. TUI scenarios use private tmux sockets (`hive-e2e-<run-id>`) so they never touch the operator's daily tmux server.
+
+Incident scenarios add stable incident and sibling metadata. Sibling-gated YAML
+remains visible in `report.json#scenario_metadata` with `pending: true`, while
+its steps and ordinary result row remain absent. CI runs
+`bundle exec rake e2e:lib_test` and `bundle exec rake e2e` in a dedicated
+pull-request job, uploads the configured `HIVE_E2E_RUNS_DIR` on success or
+failure, and uses `test/e2e/check_incident_budget.rb` to enforce below five
+seconds per enabled incident and below thirty seconds for the group. The
+incident index and activation rules live in
+`test/e2e/scenarios/README.md`.
 `test/e2e/lib/hive_e2e_binary_test.rb` pins the harness binary contract:
 scenario inventory JSON, cleanup JSON, the single-document stdout invariant for
 successful `list --json` / `clean --json` calls, unknown-command JSON errors,

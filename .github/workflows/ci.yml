@@ -33,6 +33,37 @@ jobs:
           HIVE_COVERAGE_MIN_LINE: "100"
         run: bundle exec rake coverage
 
+  e2e:
+    name: real CLI scenario harness
+    runs-on: ubuntu-latest
+    env:
+      HIVE_E2E_RUNS_DIR: ${{ runner.temp }}/hive-e2e-runs
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.4"
+          bundler-cache: true
+      - name: Install tmux for TUI scenarios
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes tmux
+      - name: Run harness library tests
+        run: bundle exec rake e2e:lib_test
+      - name: Run real-subprocess scenarios
+        run: bundle exec rake e2e
+      - name: Enforce incident duration budgets
+        run: bundle exec ruby test/e2e/check_incident_budget.rb "$HIVE_E2E_RUNS_DIR"
+      - name: Retain e2e reports and failure evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: hive-e2e-report
+          path: ${{ runner.temp }}/hive-e2e-runs
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 14
+
   web:
     name: hivebox web (Rails tests + system)
     runs-on: ubuntu-latest

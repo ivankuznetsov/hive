@@ -5,6 +5,7 @@ module Hive
   module Patrol
     module Fingerprint
       CONFIDENCE_ORDER = { "low" => 0, "medium" => 1, "high" => 2 }.freeze
+      RETRYABLE_PUBLICATION_STATES = %w[reconciliation_pending review_handoff_failed].freeze
 
       # Structured exact fingerprints are independent of feature_id (and of
       # title/snippet wording), but they DO pin the first evidence path — and

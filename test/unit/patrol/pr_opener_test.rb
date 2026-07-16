@@ -12,7 +12,7 @@ class HivePatrolPrOpenerTest < Minitest::Test
   BASE_SHA = "a" * 40
   HEAD_SHA = "b" * 40
 
-  FakePatch = Struct.new(:finding, :branch, :worktree_path, :validation,
+  FakePatch = Struct.new(:id, :finding, :branch, :worktree_path, :validation,
                          :passed, :diffstat, :base_sha, :head_sha, keyword_init: true)
 
   class FakeGh
@@ -89,6 +89,19 @@ class HivePatrolPrOpenerTest < Minitest::Test
     end
   end
 
+  class RecordingReviewHandoff
+    attr_reader :calls
+
+    def initialize
+      @calls = []
+    end
+
+    def enqueue(**attributes)
+      @calls << attributes
+      "/tmp/review-task"
+    end
+  end
+
   def before_setup
     super
     original = Hive::TaskCounter.method(:next!)
@@ -137,6 +150,7 @@ class HivePatrolPrOpenerTest < Minitest::Test
 
   def patch(worktree_path: Dir.pwd, passed: true)
     FakePatch.new(
+      id: "patch-fp1-000001",
       finding: finding,
       branch: "hive-patrol/feature-fp1",
       worktree_path: worktree_path,
@@ -570,29 +584,74 @@ class HivePatrolPrOpenerTest < Minitest::Test
     end
   end
 
-  # After `gh pr create` succeeded, a reconciliation miss (read-after-write
-  # lag) or identity mismatch must surface as an error WITHOUT losing the
-  # fingerprint ledger entry: a real open PR with no mapping would be
-  # re-fixed and errored against on every later cycle.
-  def test_reconciliation_miss_after_pr_creation_keeps_the_ledger_mapping
+  # A read-after-write miss after `gh pr create` must leave an explicit,
+  # retryable receipt. The next cycle reconciles that exact PR and hands its
+  # exact validated patch to review without creating or fixing anything again.
+  def test_reconciliation_miss_recovers_the_exact_pr_and_review_handoff_next_cycle
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))
       gh = FakeGh.new
-      gh.define_singleton_method(:lookup_prs_for_branch) { |*_args, **| [] }
-
-      result = Hive::Patrol::PrOpener.new(dir, cfg: cfg, gh: gh).open(
-        finding, patch(worktree_path: dir)
+      lookup_count = 0
+      gh.define_singleton_method(:lookup_prs_for_branch) do |*_args, **|
+        lookup_count += 1
+        if lookup_count <= 2
+          []
+        else
+          [
+            {
+              "state" => "OPEN", "url" => "https://example.com/pr/2",
+              "headRefOid" => @head_sha, "baseRefOid" => @base_remote_oid,
+              "baseRefName" => "master"
+            }
+          ]
+        end
+      end
+      review_handoff = RecordingReviewHandoff.new
+      opener = Hive::Patrol::PrOpener.new(
+        dir, cfg: cfg, gh: gh, review_handoff: review_handoff
       )
+      cleanup_count = 0
+      opener.define_singleton_method(:cleanup_worktree) do |_patch|
+        cleanup_count += 1
+      end
+      validated_patch = patch(worktree_path: dir)
 
-      assert_equal :error, result.status
-      assert_equal "gh_error", result.reason
-      assert_includes result.detail, "could not be reconciled"
-      assert_includes result.detail, "https://example.com/pr/2",
+      first = opener.open(finding, validated_patch)
+
+      assert_equal :error, first.status
+      assert_equal "gh_error", first.reason
+      assert_includes first.detail, "could not be reconciled"
+      assert_includes first.detail, "https://example.com/pr/2",
                       "the error must name the created PR so an operator can find it"
       fingerprints = JSON.parse(File.read(File.join(dir, ".hive-state", "patrol", "fingerprints.json")))
-      assert_equal "https://example.com/pr/2", fingerprints.fetch("fp1").fetch("pr_url")
-      assert_equal "open", fingerprints.fetch("fp1").fetch("state"),
-                   "the created PR must stay in the ledger despite the reconciliation miss"
+      pending = fingerprints.fetch("fp1")
+      assert_equal "https://example.com/pr/2", pending.fetch("pr_url")
+      assert_equal "reconciliation_pending", pending.fetch("state")
+      assert_equal(
+        {
+          "patch_id" => validated_patch.id,
+          "worktree_path" => dir,
+          "base_sha" => BASE_SHA,
+          "head_sha" => HEAD_SHA
+        },
+        pending.fetch("publication_receipt")
+      )
+      assert_equal 0, cleanup_count, "pending reconciliation must retain the exact worktree"
+      assert_empty review_handoff.calls
+
+      second = opener.open(finding, validated_patch)
+
+      assert_equal :skipped, second.status
+      assert_equal "existing_pr", second.reason
+      assert_equal "https://example.com/pr/2", second.pr_url
+      assert_equal "/tmp/review-task", second.review_task_path
+      assert_equal 1, review_handoff.calls.size
+      assert_equal validated_patch, review_handoff.calls.first.fetch(:patch)
+      assert_equal 0, cleanup_count
+      assert_equal 1, gh.pushed.size, "retry must not push the branch again"
+      assert_equal "open", JSON.parse(
+        File.read(File.join(dir, ".hive-state", "patrol", "fingerprints.json"))
+      ).fetch("fp1").fetch("state")
     end
   end
 
@@ -613,8 +672,43 @@ class HivePatrolPrOpenerTest < Minitest::Test
                       "the error must name the created PR so an operator can find it"
       fingerprints = JSON.parse(File.read(File.join(dir, ".hive-state", "patrol", "fingerprints.json")))
       assert_equal "https://example.com/pr/2", fingerprints.fetch("fp1").fetch("pr_url")
-      assert_equal "open", fingerprints.fetch("fp1").fetch("state"),
-                   "the created PR must stay in the ledger despite the identity mismatch"
+      assert_equal "reconciliation_pending", fingerprints.fetch("fp1").fetch("state"),
+                   "an unverified PR must remain retryable, not become an active suppression"
+    end
+  end
+
+  def test_pending_reconciliation_keeps_the_worktree_when_auth_is_temporarily_unavailable
+    with_tmp_dir do |dir|
+      state = Hive::Patrol::StateStore.new(dir)
+      validated_patch = patch(worktree_path: dir)
+      state.write_fingerprints(
+        "fp1" => {
+          "state" => "reconciliation_pending",
+          "branch" => validated_patch.branch,
+          "pr_url" => "https://example.com/pr/2",
+          "publication_receipt" => {
+            "patch_id" => validated_patch.id,
+            "worktree_path" => dir,
+            "base_sha" => BASE_SHA,
+            "head_sha" => HEAD_SHA
+          }
+        }
+      )
+      gh = FakeGh.new
+      gh.define_singleton_method(:ensure_authenticated!) do |_cfg|
+        raise Hive::GhError, "authentication temporarily unavailable"
+      end
+      opener = Hive::Patrol::PrOpener.new(dir, cfg: cfg, state: state, gh: gh)
+      cleaned = false
+      opener.define_singleton_method(:cleanup_worktree) { |_patch| cleaned = true }
+
+      result = opener.open(finding, validated_patch)
+
+      assert_equal :error, result.status
+      assert_equal "gh_error", result.reason
+      assert_match(/authentication temporarily unavailable/, result.detail)
+      refute cleaned, "a transient pre-reconciliation error must retain the receipted worktree"
+      assert_equal "reconciliation_pending", state.fingerprints.fetch("fp1").fetch("state")
     end
   end
 

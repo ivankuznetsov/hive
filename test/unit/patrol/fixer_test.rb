@@ -351,6 +351,52 @@ class HivePatrolFixerTest < Minitest::Test
     end
   end
 
+  def test_fix_proof_loader_does_not_follow_a_symlinked_output
+    skip "File::NOFOLLOW is unavailable" unless File.const_defined?(:NOFOLLOW)
+
+    with_tmp_dir do |dir|
+      fixer = Hive::Patrol::Fixer.new(dir, cfg: cfg(dir))
+      target = File.join(dir, "agent-controlled.json")
+      output_path = File.join(dir, "fix.json")
+      write_fix_proof(target)
+      File.symlink(target, output_path)
+
+      proof, error = fixer.send(:load_fix_proof, output_path)
+
+      assert_nil proof
+      assert_equal "missing_fix_proof", error.fetch("reason")
+      assert_match(/invalid fix proof/, error.fetch("error"))
+    end
+  end
+
+  def test_fix_proof_loader_rejects_a_fifo_without_blocking
+    skip "File::NONBLOCK is unavailable" unless File.const_defined?(:NONBLOCK)
+
+    with_tmp_dir do |dir|
+      fixer = Hive::Patrol::Fixer.new(dir, cfg: cfg(dir))
+      output_path = File.join(dir, "fix.json")
+      File.mkfifo(output_path, 0o600)
+
+      proof, error = fixer.send(:load_fix_proof, output_path)
+
+      assert_nil proof
+      assert_equal "missing_fix_proof", error.fetch("reason")
+      assert_match(/not a regular file/, error.fetch("error"))
+    end
+  end
+
+  def test_fix_proof_loader_rejects_a_non_regular_output
+    with_tmp_dir do |dir|
+      fixer = Hive::Patrol::Fixer.new(dir, cfg: cfg(dir))
+
+      proof, error = fixer.send(:load_fix_proof, dir)
+
+      assert_nil proof
+      assert_equal "missing_fix_proof", error.fetch("reason")
+      assert_match(/not a regular file/, error.fetch("error"))
+    end
+  end
+
   def test_rejected_fix_proof_defaults_an_empty_reason
     with_tmp_dir do |dir|
       fixer = Hive::Patrol::Fixer.new(dir, cfg: cfg(dir))
@@ -536,6 +582,50 @@ class HivePatrolFixerTest < Minitest::Test
     end
   end
 
+  def test_reconciliation_retry_reuses_the_receipted_validated_patch
+    with_tmp_git_repo do |repo|
+      File.write(File.join(repo, "app.rb"), "if\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "broken app", "--quiet")
+      attempts = 0
+      agent = lambda do |worktree_path:, output_path:, **|
+        attempts += 1
+        raise "fix agent must not rerun for a reconciliation-only retry" if attempts > 1
+
+        File.write(File.join(worktree_path, "app.rb"), "puts 'fixed'\n")
+        write_regression(worktree_path)
+        write_fix_proof(output_path)
+      end
+      state = Hive::Patrol::StateStore.new(repo)
+      fixer = Hive::Patrol::Fixer.new(repo, cfg: cfg(repo), state: state, agent_runner: agent)
+
+      first = fixer.attempt(finding)
+      ledger = state.fingerprints
+      Hive::Patrol::Fingerprint.record_seen(
+        ledger, finding.fingerprint, branch: first.branch,
+        pr_url: "https://example.com/pr/2",
+        state: "reconciliation_pending", finding: finding
+      )
+      ledger.fetch(finding.fingerprint)["publication_receipt"] = {
+        "patch_id" => first.id,
+        "worktree_path" => first.worktree_path,
+        "base_sha" => first.base_sha,
+        "head_sha" => first.head_sha
+      }
+      state.write_fingerprints(ledger)
+
+      second = fixer.attempt(finding)
+
+      assert first.passed
+      assert second.passed
+      assert_equal first.id, second.id
+      assert_equal first.worktree_path, second.worktree_path
+      assert_equal first.base_sha, second.base_sha
+      assert_equal first.head_sha, second.head_sha
+      assert_equal 1, attempts
+    end
+  end
+
   def test_review_handoff_retry_ignores_missing_and_unreadable_patch_receipts
     with_tmp_git_repo do |repo|
       state = Hive::Patrol::StateStore.new(repo)
@@ -549,9 +639,9 @@ class HivePatrolFixerTest < Minitest::Test
       fixer = Hive::Patrol::Fixer.new(repo, cfg: cfg(repo), state: state)
       worktree = Struct.new(:path).new(repo)
 
-      assert_nil fixer.send(:reusable_review_handoff_patch, finding, branch, worktree)
+      assert_nil fixer.send(:reusable_publication_patch, finding, branch, worktree)
       with_replaced_singleton_method(Dir, :glob, ->(*) { raise Errno::EACCES, "denied" }) do
-        assert_nil fixer.send(:reusable_review_handoff_patch, finding, branch, worktree)
+        assert_nil fixer.send(:reusable_publication_patch, finding, branch, worktree)
       end
     end
   end

@@ -461,6 +461,75 @@ class PatrolCommandTest < Minitest::Test
     end
   end
 
+  def test_first_batch_review_error_retries_the_pinned_snapshot_after_default_advances
+    with_patrol_project do |repo|
+      cfg_path = File.join(repo, ".hive-state", "config.yml")
+      cfg = YAML.safe_load_file(cfg_path, aliases: true)
+      cfg["patrol"]["max_features_per_cycle"] = 2
+      File.write(cfg_path, cfg.to_yaml)
+      features = (1..2).map do |index|
+        Hive::Patrol::Feature.new(
+          id: "feature-#{index}", kind: "architecture", entrypoints: [],
+          owned_files: [], context_files: [], tests: []
+        )
+      end
+      first_sweep_sha = run!("git", "-C", repo, "rev-parse", "master").strip
+      first_scan_sha = nil
+      first_reviewer = FakeReviewer.new(
+        [],
+        review_errors: [
+          { "feature_id" => "feature-1", "error" => "agent_failed", "message" => "provider failed" }
+        ]
+      )
+
+      first_out, _first_err, first_status = with_captured_exit do
+        command_for(
+          dry_run: true,
+          mapper_factory: lambda do |root, _cfg, _state|
+            first_scan_sha = run!("git", "-C", root, "rev-parse", "HEAD").strip
+            FakeMapper.new(features)
+          end,
+          reviewer: first_reviewer
+        ).call
+      end
+      state_path = File.join(repo, ".hive-state", "patrol", "state.json")
+      first_state = JSON.parse(File.read(state_path))
+      File.write(File.join(repo, "after-review-error.txt"), "advance default branch\n")
+      run!("git", "-C", repo, "add", "after-review-error.txt")
+      run!("git", "-C", repo, "commit", "-m", "advance default after review error", "--quiet")
+      advanced_sha = run!("git", "-C", repo, "rev-parse", "master").strip
+      second_scan_sha = nil
+      second_reviewer = FakeReviewer.new([])
+
+      second_out, _second_err, second_status = with_captured_exit do
+        command_for(
+          dry_run: true,
+          mapper_factory: lambda do |root, _cfg, _state|
+            second_scan_sha = run!("git", "-C", root, "rev-parse", "HEAD").strip
+            FakeMapper.new(features)
+          end,
+          reviewer: second_reviewer
+        ).call
+      end
+      second_state = JSON.parse(File.read(state_path))
+
+      assert_equal Hive::ExitCodes::SUCCESS, first_status
+      assert_equal Hive::ExitCodes::SUCCESS, second_status
+      assert_equal first_sweep_sha, first_scan_sha
+      assert_equal true, first_state.fetch("feature_review_active")
+      assert_equal first_sweep_sha, first_state.fetch("feature_review_sha")
+      assert_equal 0, first_state.fetch("feature_review_cursor")
+      refute_equal first_sweep_sha, advanced_sha
+      assert_equal first_sweep_sha, second_scan_sha,
+                   "a failed first batch must retry its pinned SHA even though its cursor is zero"
+      assert_equal %w[feature-1 feature-2], second_reviewer.features.map(&:id)
+      assert_equal false, JSON.parse(first_out).fetch("review_complete")
+      assert_equal true, JSON.parse(second_out).fetch("review_complete")
+      assert_equal false, second_state.fetch("feature_review_active"),
+                   "a completed retry must release the pinned snapshot"
+    end
+  end
+
   # max_prs_per_cycle caps PRs *opened*, not fix candidates: a failed
   # validation must not consume the budget, and a fixable later candidate
   # must still be attempted. With the default cap of 3 and four eligible

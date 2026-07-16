@@ -125,13 +125,25 @@ module Hive
         # partial scan as a clean pass and never looking again (U5).
         now_iso = Time.now.utc.iso8601
         if review.fetch("review_errors").any?
-          state.update_state("last_run_at" => now_iso)
+          snapshot = state.state
+          retry_cursor = if snapshot["feature_review_sha"].to_s == target_sha.to_s
+            snapshot["feature_review_cursor"].to_i
+          else
+            0
+          end
+          state.update_state(
+            "last_run_at" => now_iso,
+            "feature_review_active" => true,
+            "feature_review_sha" => target_sha,
+            "feature_review_cursor" => retry_cursor
+          )
           scanned_sha = state.state["last_scanned_sha"].to_s
         elsif feature_batch.complete
           scanned_sha = target_sha
           state.update_state(
             "last_run_at" => now_iso,
             "last_scanned_sha" => scanned_sha,
+            "feature_review_active" => false,
             "feature_review_sha" => target_sha,
             "feature_review_cursor" => 0
           )
@@ -139,6 +151,7 @@ module Hive
           scanned_sha = state.state["last_scanned_sha"].to_s
           state.update_state(
             "last_run_at" => now_iso,
+            "feature_review_active" => true,
             "feature_review_sha" => target_sha,
             "feature_review_cursor" => feature_batch.next_cursor
           )
@@ -188,7 +201,9 @@ module Hive
         snapshot = state.state
         cursor = snapshot["feature_review_cursor"].to_i
         active_sha = snapshot["feature_review_sha"].to_s
-        return active_sha if cursor.positive? && !active_sha.empty?
+        active = snapshot["feature_review_active"] == true
+        legacy_active = !snapshot.key?("feature_review_active") && cursor.positive?
+        return active_sha if (active || legacy_active) && !active_sha.empty?
 
         current_default_sha(project_root, cfg)
       end

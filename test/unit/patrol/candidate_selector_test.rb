@@ -199,6 +199,22 @@ class HivePatrolCandidateSelectorTest < Minitest::Test
     assert_equal "active_feature", skipped_reason(skipped, "new")
   end
 
+  def test_keeps_reconciliation_pending_fingerprint_retryable
+    candidate = finding(id: "pending", feature_id: "route-users")
+    fingerprints = {
+      candidate.fingerprint => {
+        "state" => "reconciliation_pending",
+        "feature_id" => candidate.feature_id,
+        "branch" => "hive-patrol/route-users-deadbeef"
+      }
+    }
+
+    candidates, skipped = selector(fingerprints: fingerprints).call([ candidate ])
+
+    assert_equal [ candidate ], candidates
+    assert_empty skipped
+  end
+
   def test_blocks_grouped_manifest_for_an_open_legacy_script_slice
     fingerprints = {
       "old-fp" => {

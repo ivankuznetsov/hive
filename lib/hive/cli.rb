@@ -448,8 +448,8 @@ module Hive
       --depends-on stacks this task on a prerequisite: the daemon holds
       auto-advance until the prerequisite reaches the project's dependency
       gate stage (8-finalize by default, configurable via
-      `dependency_gate_stage`). The value is a prerequisite task id (a
-      positive integer) or slug (lowercase, starts with a letter).
+      `dependency_gate_stage`). Use a prerequisite task id or slug for the
+      same project, or project:slug for an explicit cross-project dependency.
 
       Examples:
 
@@ -458,9 +458,11 @@ module Hive
         hive new myproj --depends-on 42 "add export button"
 
         hive new myproj --depends-on add-export-endpoint-260618-ab12 "wire up export API"
+
+        hive new myproj --depends-on api:add-export-endpoint-260618-ab12 "wire up export UI"
     DESC
     option :depends_on, type: :string,
-                        desc: "stack on a prerequisite task id or slug; hold daemon " \
+                        desc: "depend on a same-project id/slug or explicit project:slug; hold daemon " \
                               "auto-advance until it reaches the dependency gate stage " \
                               "(8-finalize by default)"
     option :workflow, type: :string, desc: workflow_option_desc

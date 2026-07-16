@@ -24,6 +24,9 @@ require "hive/update_check/state"
 require "hive/attempts/store"
 require "hive/attempts/detached_launcher"
 require "hive/attempts/dispatcher"
+require "hive/attempts/process_identity"
+require "hive/attempts/legacy_backfiller"
+require "hive/attempts/reconciler"
 
 module Hive
   module Commands
@@ -245,6 +248,18 @@ module Hive
             max_daily: daemon_cfg.fetch("max_runs_per_day_per_project")
           }
         )
+        attempt_process_identity = Hive::Attempts::ProcessIdentity.new
+        attempt_backfiller = Hive::Attempts::LegacyBackfiller.new(
+          store: attempt_store,
+          process_identity: attempt_process_identity,
+          logger: logger
+        )
+        attempt_reconciler = Hive::Attempts::Reconciler.new(
+          store: attempt_store,
+          process_identity: attempt_process_identity,
+          legacy_backfiller: attempt_backfiller,
+          logger: logger
+        )
 
         dispatcher = Hive::Daemon::Dispatcher.new(
           config: config, controller: controller, supervisor: supervisor,
@@ -257,7 +272,8 @@ module Hive
           digest_scheduler: digest_scheduler, answer_digest_scheduler: answer_digest_scheduler,
           dry_run: @dry_run,
           update_state: Hive::UpdateCheck::State.new,
-          attempt_dispatcher: attempt_dispatcher
+          attempt_dispatcher: attempt_dispatcher,
+          attempt_reconciler: attempt_reconciler
         )
 
         reexec_requested = false

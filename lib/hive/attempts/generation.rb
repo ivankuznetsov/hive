@@ -15,7 +15,7 @@ module Hive
         slug = task.slug.to_s
         locator = task_id.nil? ? "project:#{project}/slug:#{slug}" : "id:#{task_id}"
         progress = progress_token || artifact_token(task)
-        generation = task_generation || Digest::SHA256.hexdigest(
+        generation = task_generation || ::Digest::SHA256.hexdigest(
           [ "hive-task-generation-v1", locator, intended_stage.to_s, progress ].join("\0")
         )
         new(
@@ -30,7 +30,7 @@ module Hive
       end
 
       def self.artifact_token(task)
-        digest = Digest::SHA256.new
+        digest = ::Digest::SHA256.new
         digest << "hive-progress-v1\0"
         digest << task.state_file.to_s
         if File.file?(task.state_file)
@@ -42,7 +42,7 @@ module Hive
         end
         digest.hexdigest
       rescue SystemCallError, IOError => e
-        Digest::SHA256.hexdigest("hive-progress-v1\0unreadable\0#{e.class}\0#{task.state_file}")
+        ::Digest::SHA256.hexdigest("hive-progress-v1\0unreadable\0#{e.class}\0#{task.state_file}")
       end
     end
   end

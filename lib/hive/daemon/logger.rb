@@ -76,6 +76,16 @@ module Hive
         dispatch_request_expired
         dispatch_request_recovered
         dispatch_result_written
+        attempt_accepted
+        attempt_claimed
+        attempt_running
+        attempt_adopted
+        attempt_suspect
+        attempt_terminal
+        attempt_lost
+        attempt_duplicate
+        attempt_capacity_deferred
+        attempt_legacy_backfilled
         digest_catchup_skipped
         digest_failure_backoff
         digest_state_unreadable

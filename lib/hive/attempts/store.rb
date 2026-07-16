@@ -41,6 +41,17 @@ module Hive
         record
       end
 
+      def create_compatibility_running(**attributes)
+        record = Record.compatibility_running(**attributes)
+        path = record_path(record.attempt_id)
+        with_record_lock(record.attempt_id) do
+          raise StoreError, "attempt #{record.attempt_id} already exists" if File.exist?(path)
+
+          persist(record)
+        end
+        record
+      end
+
       def fetch(attempt_id)
         Record.new(JSON.parse(File.binread(record_path(attempt_id))))
       rescue Errno::ENOENT
@@ -189,7 +200,7 @@ module Hive
       end
 
       def generation_lock_path(task_generation)
-        digest = Digest::SHA256.hexdigest(task_generation.to_s)
+        digest = ::Digest::SHA256.hexdigest(task_generation.to_s)
         File.join(generation_locks_root, "#{digest}.lock")
       end
 
@@ -238,7 +249,7 @@ module Hive
       end
 
       def with_record_lock(attempt_id)
-        path = File.join(generation_locks_root, "record-#{Digest::SHA256.hexdigest(attempt_id.to_s)}.lock")
+        path = File.join(generation_locks_root, "record-#{::Digest::SHA256.hexdigest(attempt_id.to_s)}.lock")
         File.open(path, File::RDWR | File::CREAT, 0o600) do |lock|
           lock.chmod(0o600)
           lock.flock(File::LOCK_EX)

@@ -68,7 +68,7 @@ module Hive
                      answer_digest_scheduler: nil, dry_run: false,
                      update_state: nil, update_checker: nil, channel_detector: nil,
                      dispatch_request_state_home: nil, dispatch_result_state_home: nil,
-                     attempt_dispatcher: nil)
+                     attempt_dispatcher: nil, attempt_reconciler: nil)
         @config = config
         @controller = controller
         @supervisor = supervisor
@@ -83,6 +83,8 @@ module Hive
         @answer_digest_scheduler = answer_digest_scheduler
         @dry_run = dry_run
         @attempt_dispatcher = attempt_dispatcher
+        @attempt_reconciler = attempt_reconciler
+        @attempt_snapshot = nil
 
         # Update-flow collaborators (plan 2026-05-27-002). The check runs
         # only when a state store is injected (the daemon does so); existing
@@ -212,6 +214,16 @@ module Hive
         # 0. Throttled release check (independent of task status). Sets the
         # TUI-footer nudge state when behind; resilient — never crashes a tick.
         maybe_check_for_update(now: now)
+
+        # Durable task ownership is reconciled before status-derived capacity,
+        # healers, queue admission, or auto-advance. If reconciliation itself
+        # fails, fail closed for this tick rather than admitting against an
+        # unknown ownership view.
+        unless reconcile_attempts(now: now)
+          @logger.event(:tick_end, now: Time.now.utc.iso8601,
+                                   action: "attempt_reconciliation_failed")
+          return
+        end
 
         # 1. Reap completed children, update controller, log decisions
         reap_completed(now: now)
@@ -1125,10 +1137,26 @@ module Hive
         rows.each do |row|
           next unless externally_running?(row)
           next if @controller.running_task?(project: row.project, slug: row.slug)
+          next if durable_row?(row)
 
           per_project[row.project] += 1
         end
-        @controller.set_external_running_counts(per_project: per_project)
+        if @attempt_snapshot
+          @controller.set_capacity_snapshot(
+            @attempt_snapshot.capacity,
+            legacy_per_project: per_project
+          )
+        else
+          @controller.set_external_running_counts(per_project: per_project)
+        end
+      end
+
+      def durable_row?(row)
+        return true if row.respond_to?(:attempt_id) && !row.attempt_id.to_s.empty?
+
+        @attempt_snapshot&.capacity&.task_reserved?(
+          project: row.project, task_slug: row.slug
+        ) == true
       end
 
       # PR-40 review P2 #4: archive dispatches must respect both
@@ -1596,6 +1624,7 @@ module Hive
           result = Hive::Daemon::DispatchRequestQueue.dispatch(
             req, dispatcher: @attempt_dispatcher, interactive: false, now: now
           )
+          log_attempt_admission(result)
           if result.status == :deferred
             Hive::Daemon::DispatchRequestQueue.release_claim(
               req.request_id, state_home: dispatch_request_state_home
@@ -1759,6 +1788,12 @@ module Hive
 
         Hive::Daemon::DispatchRequestQueue.recover_claims(
           state_home: dispatch_request_state_home, now: now, alive: alive,
+          attempt_alive: lambda { |attempt_id, task_generation|
+            next false unless @attempt_reconciler
+
+            attempt = @attempt_reconciler.fetch(attempt_id)
+            attempt && attempt.task_generation == task_generation
+          },
           expiry_sec: claim_expiry_sec,
           handler: ->(request_id:, reason:, path:) {
             @logger.event(:dispatch_request_recovered,
@@ -1769,6 +1804,95 @@ module Hive
         @logger.event(:fatal,
                       message: "recover_dispatch_claims raised: #{e.class}: #{e.message}",
                       keeping_previous: true)
+      end
+
+      def reconcile_attempts(now:)
+        return true unless @attempt_reconciler
+
+        @attempt_snapshot = @attempt_reconciler.reconcile(now: now.utc)
+        @controller.set_capacity_snapshot(@attempt_snapshot.capacity)
+        reconcile_attempt_deliveries(now: now)
+        true
+      rescue StandardError => e
+        @logger.event(
+          :fatal,
+          message: "attempt reconciliation raised: #{e.class}: #{e.message}",
+          keeping_previous: true
+        )
+        false
+      end
+
+      def reconcile_attempt_deliveries(now:)
+        Hive::Daemon::DispatchRequestQueue.claimed(
+          state_home: dispatch_request_state_home
+        ).each do |delivery|
+          attempt_id = delivery.claim["attempt_id"].to_s
+          next if attempt_id.empty?
+
+          attempt = @attempt_reconciler.fetch(attempt_id)
+          next unless attempt&.state == "terminal"
+
+          request = delivery.request
+          receipt = attempt.receipt
+          continuation = if receipt["exit_status"].zero?
+            Hive::Daemon::DispatchRequestQueue.promote_sequence(
+              request.request_id,
+              project: request.project,
+              slug: request.slug,
+              requestor: request.requestor,
+              chat_id: request.chat_id,
+              update_id: request.update_id,
+              state_home: dispatch_request_state_home,
+              now: now
+            )
+          else
+            Hive::Daemon::DispatchRequestQueue.discard_sequence(
+              request.request_id, state_home: dispatch_request_state_home
+            )
+            nil
+          end
+          write_attempt_dispatch_result(request, attempt, receipt, now: now) unless continuation
+          Hive::Daemon::DispatchRequestQueue.remove(
+            request.request_id, state_home: dispatch_request_state_home
+          )
+          @logger.event(
+            :dispatch_request_completed,
+            request_id: request.request_id,
+            attempt_id: attempt.attempt_id,
+            project: request.project,
+            slug: request.slug,
+            exit_code: receipt["exit_status"],
+            outcome: receipt["outcome"]
+          )
+        end
+      end
+
+      def write_attempt_dispatch_result(request, attempt, receipt, now:)
+        return if request.chat_id.nil?
+
+        Hive::Daemon::DispatchResultQueue.write!(
+          chat_id: request.chat_id,
+          update_id: request.update_id,
+          project: request.project,
+          slug: request.slug,
+          request_id: request.request_id,
+          exit_code: receipt["exit_status"],
+          command: Shellwords.join(request.argv),
+          attempt_id: attempt.attempt_id,
+          attempt_state: attempt.state,
+          receipt: receipt,
+          state_home: dispatch_result_state_home,
+          now: now
+        )
+        @logger.event(
+          :dispatch_result_written,
+          request_id: request.request_id,
+          attempt_id: attempt.attempt_id,
+          project: request.project,
+          slug: request.slug,
+          exit_code: receipt["exit_status"],
+          chat_id: request.chat_id
+        )
       end
 
       def process_alive?(pid)
@@ -1957,6 +2081,7 @@ module Hive
           path: nil
         )
         result = @attempt_dispatcher.dispatch_request(request, interactive: false, now: now)
+        log_attempt_admission(result)
         @logger.event(
           result.status == :deferred ? :blocked : :dispatched,
           attempt_id: result.attempt&.attempt_id,
@@ -1968,6 +2093,24 @@ module Hive
         )
         @dispatched_today += 1 unless result.status == :deferred
         result
+      end
+
+      def log_attempt_admission(result)
+        event =
+          case result.status
+          when :accepted then :attempt_accepted
+          when :existing_live, :terminal_replay then :attempt_duplicate
+          when :deferred then :attempt_capacity_deferred
+          else return
+          end
+        @logger.event(
+          event,
+          attempt_id: result.attempt&.attempt_id,
+          task_generation: result.attempt&.task_generation,
+          state: result.attempt&.state,
+          admission_status: result.status.to_s,
+          reason: result.reason
+        )
       end
 
       def enqueue_merge_watch(row, error_reason: nil)

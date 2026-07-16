@@ -419,6 +419,50 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
     end
   end
 
+  def test_claimed_delivery_exposes_attempt_correlation
+    Dir.mktmpdir("hive-queue") do |dir|
+      at = Time.utc(2026, 7, 16, 12, 0, 0)
+      request_id = Q.write_request!(
+        project: "demo", slug: "demo-task", argv: %w[hive run demo-task],
+        request_id: "request-1", state_home: dir, now: at
+      )
+      Q.claim(
+        request_id, pid: nil, attempt_id: "attempt-1",
+        task_generation: "generation-1", state_home: dir, now: at
+      )
+
+      delivery = Q.claimed(state_home: dir).first
+      assert_equal "request-1", delivery.request.request_id
+      assert_equal "attempt-1", delivery.claim["attempt_id"]
+      assert_equal "generation-1", delivery.claim["task_generation"]
+    end
+  end
+
+  def test_recover_claims_follows_live_attempt_instead_of_nil_claim_pid
+    Dir.mktmpdir("hive-queue") do |dir|
+      at = Time.utc(2026, 7, 16, 12, 0, 0)
+      request_id = Q.write_request!(
+        project: "demo", slug: "demo-task", argv: %w[hive run demo-task],
+        request_id: "request-1", state_home: dir, now: at
+      )
+      Q.claim(
+        request_id, pid: nil, attempt_id: "attempt-1",
+        task_generation: "generation-1", state_home: dir, now: at
+      )
+
+      removed = Q.recover_claims(
+        state_home: dir, now: at + 99_999,
+        alive: ->(_pid, _start) { false },
+        attempt_alive: ->(attempt_id, generation) {
+          attempt_id == "attempt-1" && generation == "generation-1"
+        }
+      )
+
+      assert_equal 0, removed
+      assert_equal 1, Q.claimed(state_home: dir).length
+    end
+  end
+
   def test_recover_claims_expires_aged_claim_even_when_owner_alive
     Dir.mktmpdir("hive-dispatch-queue") do |dir|
       write_request(dir, request_id: "aged0001", created_at: Time.utc(2026, 5, 28, 18, 0, 0))

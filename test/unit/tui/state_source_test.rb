@@ -559,8 +559,9 @@ class TuiStateSourceTest < Minitest::Test
       row = source.current.rows.find { |candidate| candidate.slug == "dependent-task-260626-abcd" }
 
       assert_equal false, row.blocked
-      assert_equal base_slug, row.blocked_by
-      assert_equal "9-done", row.dependency_stage
+      assert_nil row.blocked_by
+      assert_nil row.dependency_stage
+      assert_nil row.admission_error
     end
   end
 

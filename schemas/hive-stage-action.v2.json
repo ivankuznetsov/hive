@@ -255,7 +255,8 @@
             "agent_running",
             "archived",
             "manual_steering",
-            "error"
+            "error",
+            "admission_error"
           ]
         },
         "label": {

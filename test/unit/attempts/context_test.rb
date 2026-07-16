@@ -5,10 +5,15 @@ class AttemptsContextTest < Minitest::Test
   include HiveTestHelper
 
   def test_explicit_context_projects_attempt_identity
-    Hive::Attempts::Context.with(attempt_id: "attempt-1", task_generation: "generation-1") do
+    Hive::Attempts::Context.with(
+      attempt_id: "attempt-1", task_generation: 7, ownership_generation: "generation-1"
+    ) do
       assert Hive::Attempts::Context.active?
       assert_equal(
-        { "attempt_id" => "attempt-1", "task_generation" => "generation-1" },
+        {
+          "attempt_id" => "attempt-1", "task_generation" => 7,
+          "ownership_generation" => "generation-1"
+        },
         Hive::Attempts::Context.projection
       )
     end
@@ -22,7 +27,8 @@ class AttemptsContextTest < Minitest::Test
       store.create_launching(
         attempt_id: "attempt-env", request_id: "request-1", predecessor_attempt_id: nil,
         task_id: "42", project: "demo", task_slug: "task", intended_stage: "4-execute",
-        task_generation: "generation-env", progress_token: "progress", provider: "codex",
+        task_generation: "generation-env", task_input_epoch: 5,
+        progress_token: "progress", provider: "codex",
         starting_revision: nil, retry_charge: 0, inherited_outputs: [],
         launch_timeout_sec: 30, now: Time.now.utc
       )
@@ -32,7 +38,8 @@ class AttemptsContextTest < Minitest::Test
         "HIVE_ATTEMPT_ID" => "attempt-env",
         "HIVE_ATTEMPT_STORE_ROOT" => root
       ) do
-        assert_equal "generation-env", Hive::Attempts::Context.current.task_generation
+        assert_equal 5, Hive::Attempts::Context.current.task_generation
+        assert_equal "generation-env", Hive::Attempts::Context.current.ownership_generation
       end
     end
   end
@@ -59,6 +66,15 @@ class AttemptsContextTest < Minitest::Test
       ) do
         assert_nil Hive::Attempts::Context.current
       end
+    end
+  end
+
+  def test_context_rejects_non_numeric_or_negative_epochs
+    assert_raises(ArgumentError) do
+      Hive::Attempts::Context.new(attempt_id: "attempt", task_generation: "opaque")
+    end
+    assert_raises(ArgumentError) do
+      Hive::Attempts::Context.new(attempt_id: "attempt", task_generation: -1)
     end
   end
 end

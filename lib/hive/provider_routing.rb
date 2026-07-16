@@ -37,6 +37,9 @@ module Hive
     autoload :Signal, File.expand_path("provider_routing/signal.rb", __dir__)
     autoload :Circuit, File.expand_path("provider_routing/circuit.rb", __dir__)
     autoload :Store, File.expand_path("provider_routing/store.rb", __dir__)
+    autoload :Request, File.expand_path("provider_routing/request.rb", __dir__)
+    autoload :Decision, File.expand_path("provider_routing/decision.rb", __dir__)
+    autoload :Router, File.expand_path("provider_routing/router.rb", __dir__)
 
     module_function
 

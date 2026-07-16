@@ -107,6 +107,25 @@ module Hive
         end
       end
 
+      # Roll back a probe reservation that never reached process spawn (for
+      # example because the provider capacity lease lost a race). The circuit
+      # remains open with its original retry evidence and can be claimed by a
+      # later real attempt; the generation still advances for stale-writer
+      # detection and observability.
+      def abandon_probe(provider:, model:, attempt_id:, now: @clock.call)
+        complete_probe(provider: provider, model: model, attempt_id: attempt_id, now: now) do |snap, scope, target_model, before|
+          generation = next_generation!(snap)
+          after = before.merge(
+            "state" => "open",
+            "generation" => generation,
+            "last_transition_at" => now.utc.iso8601,
+            "probe" => nil
+          )
+          set_circuit!(snap, provider.to_s, target_model, after)
+          [ transition(provider.to_s, target_model, scope, before, after, now), true ]
+        end
+      end
+
       def clear(provider:, model: nil, reason:, actor: nil, now: @clock.call)
         provider = provider.to_s
         model = model&.to_s

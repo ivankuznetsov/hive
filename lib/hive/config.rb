@@ -438,6 +438,9 @@ module Hive
         "max_agent_spawns_per_cycle" => 3,
         "max_agent_spawns_per_day" => 8,
         "max_budget_usd_per_agent" => 25,
+        # Architecture discovery/fixing may use a wider per-cycle and
+        # per-agent envelope, but still shares the mode's daily ceilings.
+        "architecture_budget_multiplier" => 2,
         # Open ready (non-draft) PRs by default so the babysitter — which
         # skips draft PRs — picks them up. Set `draft_prs: true` per project
         # to revert to draft PRs that need a manual "ready" toggle first.
@@ -2589,7 +2592,8 @@ module Hive
       [ "max_tokens_per_cycle", 1 ],
       [ "max_tokens_per_day", 1 ],
       [ "max_agent_spawns_per_cycle", 1 ],
-      [ "max_agent_spawns_per_day", 1 ]
+      [ "max_agent_spawns_per_day", 1 ],
+      [ "architecture_budget_multiplier", 1 ]
     ].freeze
 
     def validate_patrol!(cfg, source_path)

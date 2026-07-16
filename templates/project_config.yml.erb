@@ -273,6 +273,9 @@ patrol:
   # Bound expensive fix-agent work even when findings are stale or fail validation.
   max_fix_attempts_per_cycle: 6
   max_prs_per_cycle: 3
+  # Architecture patrol gets 2x the mode's per-cycle token/launch and
+  # per-agent runaway allowance, while the UTC-day ceilings remain shared.
+  # architecture_budget_multiplier: 2
   # Open ready (non-draft) PRs by default so the babysitter — which skips
   # draft PRs — picks them up. Set true to open draft PRs instead.
   draft_prs: false

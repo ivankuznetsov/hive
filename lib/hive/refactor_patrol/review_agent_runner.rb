@@ -40,7 +40,7 @@ module Hive
           slug: STAGE
         )
         profile = Hive::AgentProfiles.lookup(configured_agent, cfg: @cfg)
-        unless @token_budget.acquire
+        unless @token_budget.acquire(stage: STAGE)
           return { status: :error, error_message: @token_budget.exhaustion_message }
         end
         scope = read_only_scope(profile)
@@ -53,7 +53,9 @@ module Hive
             prompt: prompt,
             add_dirs: [ @project_root ],
             cwd: @project_root,
-            max_budget_usd: @token_budget.max_budget_usd(@cfg.dig("budget_usd", "patrol") || 100),
+            max_budget_usd: @token_budget.max_budget_usd(
+              @cfg.dig("budget_usd", "patrol") || 100, stage: STAGE
+            ),
             timeout_sec: effective_timeout(timeout_sec),
             log_label: STAGE,
             profile: profile,

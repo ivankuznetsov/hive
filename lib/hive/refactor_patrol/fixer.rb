@@ -19,6 +19,7 @@ module Hive
     # returns publication evidence. It never pushes or mutates registered
     # trunk; PrOpener owns the external transition after these guards pass.
     class Fixer
+      STAGE = "refactor-patrol-fix".freeze
       Result = Struct.new(
         :outcome, :terminal, :branch, :worktree_path, :analysis_sha,
         :publication_base_sha, :commit_sha, :validation, :changed_paths,
@@ -466,10 +467,10 @@ module Hive
           folder: run_dir, project_root: @project_root,
           state_file: File.join(run_dir, "fix.md"),
           log_dir: File.join(@project_root, ".hive-state", "refactor_patrol", "v2", "logs"),
-          slug: "refactor-patrol-fix"
+          slug: STAGE
         )
         profile = fix_profile
-        unless @token_budget.acquire
+        unless @token_budget.acquire(stage: STAGE)
           return { status: :error, error_message: @token_budget.exhaustion_message }
         end
         started_at = Time.now.utc
@@ -477,14 +478,16 @@ module Hive
         begin
           result = Hive::Agent.new(
             task: task, prompt: prompt, add_dirs: [], cwd: worktree_path,
-            max_budget_usd: @token_budget.max_budget_usd(@cfg.dig("budget_usd", "patrol") || 100),
+            max_budget_usd: @token_budget.max_budget_usd(
+              @cfg.dig("budget_usd", "patrol") || 100, stage: STAGE
+            ),
             timeout_sec: @cfg.dig("timeout_sec", "patrol") || 3600,
-            log_label: "refactor-patrol-fix", profile: profile, status_mode: :exit_code_only,
+            log_label: STAGE, profile: profile, status_mode: :exit_code_only,
             permission_mode: Hive::AgentProfile::WORKSPACE_WRITE_PERMISSION_MODE
           ).run!
         ensure
           @token_budget.record!(
-            result: result, profile: profile, stage: "refactor-patrol-fix", started_at: started_at
+            result: result, profile: profile, stage: STAGE, started_at: started_at
           )
         end
         result

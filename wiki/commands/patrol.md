@@ -51,7 +51,7 @@ patrol:
 - `new_commits` runs only when the default branch SHA differs from `last_scanned_sha`.
 - `timer` runs whenever `last_run_at` is older than `poll_interval_sec`.
 
-The higher-level `patrol.mode` also resolves bounded resource envelopes. Low, medium, high, and ultrapatrol allow respectively 1/3/6/10 agent launches and 100k/200k/400k/800k measured tokens per cycle, with separate 2/8/18/36 launch and 200k/600k/1.2m/2.4m token ceilings per UTC day. The same project budget includes architecture patrol. Missing provider usage is recorded as an unmetered launch and still counts against the launch ceilings; the tier also caps each native dollar budget at $10/$25/$50/$100.
+The higher-level `patrol.mode` also resolves bounded resource envelopes. Low, medium, high, and ultrapatrol allow respectively 1/3/6/10 agent launches and 100k/200k/400k/800k measured tokens per ordinary cycle, with separate 2/8/18/36 launch and 200k/600k/1.2m/2.4m token ceilings per UTC day. Architecture stages receive 2x the per-cycle launch/token envelope and 2x the per-agent budget-equivalent runaway guard by default, but keep the same shared project/day ceilings. Missing provider usage is recorded as an unmetered launch and still counts against the launch ceilings. The CLI field is named `max_budget_usd_per_agent`, but for subscription-backed agents it is a kill switch expressed in budget-equivalent units, not an additional payment.
 
 ## Steps
 

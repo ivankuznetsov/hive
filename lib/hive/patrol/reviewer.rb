@@ -14,6 +14,7 @@ require "hive/stages/base"
 module Hive
   module Patrol
     class Reviewer
+      STAGE = "patrol-review".freeze
       MAX_OUTPUT_BYTES = 64 * 1024
       VALID_CATEGORIES = %w[bug security performance documentation test-gap maintainability].freeze
       VALID_SEVERITIES = %w[critical high medium low].freeze
@@ -264,10 +265,10 @@ module Hive
           project_root: @project_root,
           state_file: File.join(run_dir, "review.md"),
           log_dir: File.join(@state.root, "logs"),
-          slug: "patrol-review"
+          slug: STAGE
         )
         profile = Hive::AgentProfiles.lookup(@cfg.dig("patrol", "agent") || "claude", cfg: @cfg)
-        unless @token_budget.acquire
+        unless @token_budget.acquire(stage: STAGE)
           return { status: :error, error_message: @token_budget.exhaustion_message }
         end
         started_at = Time.now.utc
@@ -278,16 +279,18 @@ module Hive
             prompt: prompt,
             add_dirs: [ @project_root ],
             cwd: @project_root,
-            max_budget_usd: @token_budget.max_budget_usd(@cfg.dig("budget_usd", "patrol") || 100),
+            max_budget_usd: @token_budget.max_budget_usd(
+              @cfg.dig("budget_usd", "patrol") || 100, stage: STAGE
+            ),
             timeout_sec: @cfg.dig("timeout_sec", "patrol") || 3600,
-            log_label: "patrol-review",
+            log_label: STAGE,
             profile: profile,
             expected_output: output_path,
             status_mode: :output_file_exists
           ).run!
         ensure
           @token_budget.record!(
-            result: result, profile: profile, stage: "patrol-review", started_at: started_at
+            result: result, profile: profile, stage: STAGE, started_at: started_at
           )
         end
         result

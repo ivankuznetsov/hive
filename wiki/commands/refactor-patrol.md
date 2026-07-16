@@ -123,7 +123,10 @@ Once either budget is exhausted, later slices stay incomplete for a future
 resume instead of multiplying one agent timeout by every mapped feature.
 Before each architecture review or fix spawn, the shared project patrol budget
 also checks the selected `patrol.mode` token and launch ceilings. Architecture
-usage is attributed to the TUI patrol row; absent provider counts are retained
+stages default to 2x the mode's per-cycle token/launch limits and per-agent
+budget-equivalent guard so broad boundary analysis is not constrained like a
+single ordinary slice; the project/day token and launch ceilings stay shared.
+Usage is attributed to the TUI patrol row; absent provider counts are retained
 as unmetered launches and still consume quota. Budget exhaustion is an ordinary
 retryable incomplete result, so discovery checkpoints completed slices and
 actions retain their exact durable receipts rather than starting new work.

@@ -1,0 +1,27 @@
+name: incident_repository_routing
+description: Proves repository identity routes or rejects work without attributing operations to another project.
+tags: [incident-regression]
+incident_id: repository-routing
+sibling_task_id: "#9771"
+pending: true
+
+# Activation contract (#9771): register two synthetic projects, add the
+# sibling-owned repository identities, and install exact script_gh head-SHA /
+# headRepository evidence. Drive the corrected dispatcher or babysitter path,
+# then replace the guard with #9771's route-or-reject state/reason plus proof
+# that the non-target project and gh cwd/repository audit remain untouched.
+steps:
+  - kind: register_project
+    name: synthetic-project-b
+
+  - kind: seed_state
+    stage: 6-review
+    slug: synthetic-routing-task
+    project: synthetic-project-b
+    state_file: task.md
+    content: "# Repository-routing incident task awaiting #9771 identity metadata\n"
+
+  - kind: state_assert
+    description: Activation guard; replace with #9771 routing assertions before enabling.
+    path: "{run_home}/pending-contracts/9771-routing-enabled"
+    contains: "repository routing contract and reason assertions installed"

@@ -440,6 +440,39 @@ class RefactorPatrolJobStoreTest < Minitest::Test
         store.write_job!(unordered)
       end
       assert_match(/strictly increasing/, error.message)
+
+      invalid_generation = job(
+        "job_id" => "invalid-generation", "state" => "analyzing", "complete" => false,
+        "actions" => [], "attempts" => [ discovery_attempt(generation: 0) ]
+      )
+      error = assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        store.write_job!(invalid_generation)
+      end
+      assert_match(/generation must be a positive integer/, error.message)
+
+      invalid_state = job(
+        "job_id" => "invalid-state", "state" => "analyzing", "complete" => false,
+        "actions" => [], "attempts" => [ discovery_attempt(generation: 1, state: "zombie") ]
+      )
+      error = assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        store.write_job!(invalid_state)
+      end
+      assert_match(/discovery attempt state is invalid/, error.message)
+    end
+  end
+
+  def test_finished_discovery_attempt_is_immutable
+    with_tmp_dir do |dir|
+      store = Hive::RefactorPatrol::JobStore.new(dir)
+      original = job("attempts" => [ discovery_attempt(generation: 1, state: "released") ])
+      store.write_job!(original)
+      replacement = JSON.parse(JSON.generate(original))
+      replacement.fetch("attempts").first["outcome"] = "superseded"
+
+      error = assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
+        store.write_job!(replacement)
+      end
+      assert_match(/finished discovery attempt is immutable/, error.message)
     end
   end
 

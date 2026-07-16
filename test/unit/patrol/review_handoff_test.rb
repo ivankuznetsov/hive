@@ -576,6 +576,38 @@ class HivePatrolReviewHandoffTest < Minitest::Test
     end
   end
 
+  def test_malformed_yaml_and_architecture_context_are_quarantined_and_rebuilt
+    {
+      "meta.yml" => "---\n[unterminated\n",
+      "architecture-thesis.json" => "{"
+    }.each do |filename, malformed_content|
+      with_tmp_dir do |dir|
+        context = { "job_id" => "job-7", "thesis" => { "id" => "thesis-1" } }
+        first = nil
+        with_task_counter do
+          first = handoff(dir).enqueue(
+            finding: finding, patch: patch(dir), pr_url: "https://example.com/pull/7",
+            mandatory: true, context: context
+          )
+        end
+        File.write(File.join(first, filename), malformed_content)
+
+        rebuilt = nil
+        with_task_counter do
+          rebuilt = handoff(dir).enqueue(
+            finding: finding, patch: patch(dir), pr_url: "https://example.com/pull/7",
+            mandatory: true, context: context
+          )
+        end
+
+        assert_equal first, rebuilt, filename
+        assert_complete(rebuilt)
+        assert_equal context, JSON.parse(File.read(File.join(rebuilt, "architecture-thesis.json"))), filename
+        assert_equal 1, quarantined_tasks(dir).size, filename
+      end
+    end
+  end
+
   def test_mandatory_handoff_rejects_duplicate_complete_tasks
     with_tmp_dir do |dir|
       first = handoff(dir).enqueue(

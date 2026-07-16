@@ -287,6 +287,23 @@ class RefactorPatrolFamilyStoreTest < Minitest::Test
     end
   end
 
+  def test_quarantine_failure_preserves_the_original_corrupt_record_error
+    with_tmp_dir do |dir|
+      store = family_store(dir)
+      path = File.join(store.root, "af1-corrupt.json")
+      error = FamilyStore::CorruptRecord.new("invalid JSON", path: path)
+      replacement = lambda { |_source, _destination| raise Errno::EACCES, path }
+
+      raised = with_replaced_singleton_method(File, :rename, replacement) do
+        assert_raises(FamilyStore::CorruptRecord) do
+          store.send(:quarantine_record!, path, error)
+        end
+      end
+
+      assert_same error, raised
+    end
+  end
+
   # Regression for the bulk-delete on one corrupt record: the old recovery
   # rebuilt solely from authoritative job aggregates and deleted every file
   # outside that set, destroying pre-authoritative families and changing

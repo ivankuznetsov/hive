@@ -1,6 +1,19 @@
 ---
 registered_projects: []
 
+# Optional global provider-account identities and operational policy. Ordered
+# routing pools in project/stage config reference these stable keys.
+# providers:
+#   claude-main:
+#     adapter: claude
+#     max_concurrent: 2
+#     cooldown_sec:
+#       quota: 3600
+#       rate_limit: 300
+#       session_limit: 3600
+#       credit: 3600
+#     backoff_cap_sec: 86400
+
 # Global daemon defaults. Project enrollment still lives in each
 # project's .hive-state/config.yml; this kill-switch disables daemon
 # auto-clearing of allowlisted recoverable terminal error markers.

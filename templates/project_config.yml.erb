@@ -70,6 +70,37 @@ brainstorm:
   # the project-global claude.mode setting above.
 plan:
   agent: <%= planning_agent %>
+  # `routing.pool` is authoritative when present. Candidates are considered
+  # strictly in declaration order and may refer to provider accounts from the
+  # user-level Hive config. Without a pool, this stage remains the legacy
+  # pool-of-one described by `agent` (plus any descriptor model/effort).
+  # routing:
+  #   pool:
+  #     - provider: claude-main
+  #       agent: claude
+  #       model: default
+  #       effort: high
+  #       capabilities:
+  #         context: large
+  #         quality: high
+  #         tools: [shell, filesystem]
+  #         permissions: [read, write]
+  #     - provider: codex-main
+  #       agent: codex
+  #       model: gpt-5
+  #       capabilities:
+  #         context: large
+  #         quality: high
+  #         tools: [shell, filesystem]
+  #         permissions: [read, write]
+  #   required:
+  #     context: large
+  #     quality: high
+  #     tools: [shell]
+  #     permissions: [read, write]
+  #   pin:
+  #     provider: claude-main
+  #     model: default
   # skill: /plan
   # Plan must WRITE plan.md (its marker), so a read-only scope would block it
   # from completing — grant Write/Edit via a scoped block instead. Non-yolo

@@ -65,12 +65,12 @@ module Hive
     Stage = Data.define(
       :name, :index, :state_file, :advance_verb, :kind, :skill, :instruction,
       :permissions, :status_mode, :budget_usd, :timeout_sec, :capability,
-      :agent, :model, :effort, :input, :reviewers, :council, :deliverable
+      :agent, :model, :effort, :routing, :input, :reviewers, :council, :deliverable
     ) do
       def initialize(name:, index:, state_file:, advance_verb: nil, kind: nil,
                      skill: nil, instruction: nil, permissions: nil,
                      status_mode: nil, budget_usd: nil, timeout_sec: nil,
-                     capability: nil, agent: nil, model: nil, effort: nil,
+                     capability: nil, agent: nil, model: nil, effort: nil, routing: nil,
                      input: nil, reviewers: nil, council: nil, deliverable: nil)
         super
       end
@@ -86,18 +86,18 @@ module Hive
     end
 
     Reviewer = Data.define(
-      :name, :agent, :model, :effort, :skill, :instruction, :prompt,
+      :name, :agent, :model, :effort, :routing, :skill, :instruction, :prompt,
       :command, :output_basename, :permissions, :max_attempts
     ) do
-      def initialize(name:, agent: nil, model: nil, effort: nil, skill: nil,
+      def initialize(name:, agent: nil, model: nil, effort: nil, routing: nil, skill: nil,
                      instruction: nil, prompt: nil, command: nil,
                      output_basename: nil, permissions: nil, max_attempts: nil)
         super
       end
     end
 
-    Revise = Data.define(:agent, :model, :effort, :skill, :instruction, :prompt, :command, :permissions) do
-      def initialize(agent: nil, model: nil, effort: nil, skill: nil,
+    Revise = Data.define(:agent, :model, :effort, :routing, :skill, :instruction, :prompt, :command, :permissions) do
+      def initialize(agent: nil, model: nil, effort: nil, routing: nil, skill: nil,
                      instruction: nil, prompt: nil, command: nil, permissions: nil)
         super
       end

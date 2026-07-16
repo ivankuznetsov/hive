@@ -6,6 +6,21 @@ registered_projects: <%= registered_projects.empty? ? "[]" : "" %>
     hive_state_path: <%= p["hive_state_path"] %>
 <% end %>
 
+# Optional provider-account policy shared by every project. Account keys are
+# stable routing identities; `adapter` is the CLI used when a pool entry omits
+# its own `agent`. Omit this block to get one unlimited built-in account per
+# shipped adapter (claude, codex, pi, grok).
+# providers:
+#   claude-main:
+#     adapter: claude
+#     max_concurrent: 2
+#     cooldown_sec:
+#       quota: 3600
+#       rate_limit: 300
+#       session_limit: 3600
+#       credit: 3600
+#     backoff_cap_sec: 86400
+
 # Telegram bot global surface. The token is intentionally not stored here:
 # set HIVE_TELEGRAM_BOT_TOKEN in the environment before `hive bot start`.
 # Uncomment and fill chat_id_allowlist to opt in.

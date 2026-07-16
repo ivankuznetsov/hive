@@ -98,6 +98,44 @@ class WorkflowsDescriptorParserTest < Minitest::Test
     assert_equal "high", work.effort
   end
 
+  def test_agent_stage_preserves_routing_pool_and_constraints
+    workflow = Hive::Workflows::DescriptorParser.parse_hash(
+      {
+        "id" => "routed-agent",
+        "stages" => [
+          {
+            "name" => "work",
+            "kind" => "agent",
+            "state_file" => "work.md",
+            "skill" => "/ship",
+            "routing" => {
+              "pool" => [
+                {
+                  "provider" => "claude-main",
+                  "agent" => "claude",
+                  "capabilities" => {
+                    "context" => "large",
+                    "quality" => "high",
+                    "tools" => [ "shell" ],
+                    "permissions" => [ "write" ]
+                  }
+                }
+              ],
+              "pin" => { "provider" => "claude-main" }
+            }
+          }
+        ]
+      },
+      path: "/tmp/routed-agent.yml"
+    )
+
+    routing = workflow.stage_named("work").routing
+    assert_equal "claude-main", routing.dig("pool", 0, "provider")
+    assert_equal "claude-main", routing.dig("pin", "provider")
+    assert routing.frozen?
+    assert routing.fetch("pool").frozen?
+  end
+
   def test_active_stages_accept_per_stage_budget_and_timeout
     workflow = Hive::Workflows::DescriptorParser.parse_hash(
       {

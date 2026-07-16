@@ -1,6 +1,7 @@
 require "yaml"
 require "hive/agent_profiles"
 require "hive/permission_scope"
+require "hive/provider_routing"
 require "hive/workflow"
 
 module Hive
@@ -23,6 +24,7 @@ module Hive
         agent
         model
         effort
+        routing
         budget_usd
         timeout_sec
         input
@@ -36,6 +38,7 @@ module Hive
         agent
         model
         effort
+        routing
         skill
         instruction
         prompt
@@ -45,7 +48,7 @@ module Hive
         max_attempts
       ].freeze
       COUNCIL_KEYS = %w[quorum max_rounds exit_rule triage_output revise].freeze
-      REVISE_KEYS = %w[agent model effort skill instruction prompt command permissions].freeze
+      REVISE_KEYS = %w[agent model effort routing skill instruction prompt command permissions].freeze
       REVIEWER_INSTRUCTION_KEYS = %w[skill instruction prompt command].freeze
       EXIT_RULES = %w[consensus human].freeze
 
@@ -160,6 +163,7 @@ module Hive
         agent = parse_agent(stage["agent"], label: label)
         model = optional_string(stage["model"], label: "#{label} model")
         effort = optional_string(stage["effort"], label: "#{label} effort")
+        routing = parse_routing(stage["routing"], label: "#{label} routing")
         budget_usd = optional_positive_number(stage["budget_usd"], label: "#{label} budget_usd")
         timeout_sec = optional_positive_integer(stage["timeout_sec"], label: "#{label} timeout_sec")
         permissions = parse_permissions(stage, id: id, stage_name: name, label: label)
@@ -180,6 +184,7 @@ module Hive
           agent: agent,
           model: model,
           effort: effort,
+          routing: routing,
           budget_usd: budget_usd,
           timeout_sec: timeout_sec,
           input: input,
@@ -258,6 +263,12 @@ module Hive
         parse_state_file(value, label: "#{label} deliverable")
       end
 
+      def parse_routing(value, label:)
+        Hive::ProviderRouting::Configuration.validate_routing_shape!(value, source: label)
+      rescue Hive::ConfigError => e
+        raise descriptor_error(e.message)
+      end
+
       def parse_permissions(stage, id:, stage_name:, label:)
         return nil unless stage.key?("permissions")
 
@@ -315,6 +326,7 @@ module Hive
           agent: parse_agent(reviewer["agent"], label: label),
           model: optional_string(reviewer["model"], label: "#{label} model"),
           effort: optional_string(reviewer["effort"], label: "#{label} effort"),
+          routing: parse_routing(reviewer["routing"], label: "#{label} routing"),
           skill: optional_string(reviewer["skill"], label: "#{label} skill"),
           instruction: parse_instruction(reviewer["instruction"], label: label),
           prompt: optional_string(reviewer["prompt"], label: "#{label} prompt"),
@@ -379,6 +391,7 @@ module Hive
           agent: parse_agent(revise["agent"], label: label),
           model: optional_string(revise["model"], label: "#{label} model"),
           effort: optional_string(revise["effort"], label: "#{label} effort"),
+          routing: parse_routing(revise["routing"], label: "#{label} routing"),
           skill: optional_string(revise["skill"], label: "#{label} skill"),
           instruction: parse_instruction(revise["instruction"], label: label),
           prompt: optional_string(revise["prompt"], label: "#{label} prompt"),
@@ -428,7 +441,7 @@ module Hive
       def reject_agent_only_fields!(stage, kind:, label:)
         return if [ :agent, :council ].include?(kind)
 
-        present = %w[skill instruction agent model effort budget_usd timeout_sec input reviewers council deliverable permissions]
+        present = %w[skill instruction agent model effort routing budget_usd timeout_sec input reviewers council deliverable permissions]
                   .select { |key| stage.key?(key) }
         return if present.empty?
 

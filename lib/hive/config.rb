@@ -6,6 +6,7 @@ require "hive/agent_profiles"
 require "hive/babysitter/interval"
 require "hive/permission_scope"
 require "hive/paths"
+require "hive/provider_routing"
 require "hive/screenote/oauth_client"
 
 module Hive
@@ -755,6 +756,7 @@ module Hive
       merged[EXPLICIT_CLAUDE_MODE_KEY] = nested_key?(data, "claude", "mode")
       merged[EXPLICIT_BRAINSTORM_RUNTIME_KEY] = nested_key?(data, "brainstorm", "runtime")
       merged[EXPLICIT_RESOURCE_LIMITS_KEY] = explicit_resource_limits(data)
+      merged[Hive::ProviderRouting::PROVIDER_ACCOUNTS_KEY] = load_global_provider_accounts
       inject_bot_runtime_path_defaults!(merged)
       validate!(merged, candidate)
       merged
@@ -1002,6 +1004,22 @@ module Hive
       return default_global_agents if selected.nil?
 
       normalize_global_agents(selected, source: describe_source(path))
+    end
+
+    # Provider accounts are global because credentials, quotas, and configured
+    # concurrency are shared by every registered project. An absent block keeps
+    # legacy behavior through one built-in account per shipped adapter.
+    def load_global_provider_accounts
+      Hive::Paths.ensure_migrated!
+      validate_hive_home!
+      path = global_config_path
+      data = File.exist?(path) ? load_global_config(path) : {}
+      raise ConfigError, "global config at #{path} must be a hash" unless data.is_a?(Hash)
+
+      raw = data["providers"]
+      return Hive::ProviderRouting.default_accounts if raw.nil?
+
+      Hive::ProviderRouting::Configuration.normalize_accounts(raw, source: describe_source(path))
     end
 
     # Persist a backend selection, writing the normalized (validated,
@@ -1682,6 +1700,7 @@ module Hive
       validate_review_adhoc!(cfg, source_path)
       validate_review_fix_auto_commit!(cfg, source_path)
       validate_role_agent_names!(cfg, source_path)
+      validate_provider_routing!(cfg, source_path)
       validate_claude_mode!(cfg, source_path)
       validate_claude_permission_mode!(cfg, source_path)
       validate_permissions!(cfg, source_path)
@@ -1698,6 +1717,37 @@ module Hive
       validate_answer_digest!(cfg, source_path)
       validate_bot_config!(cfg, source_path)
       validate_rebase!(cfg, source_path)
+    end
+
+    def validate_provider_routing!(cfg, source_path)
+      accounts = cfg[Hive::ProviderRouting::PROVIDER_ACCOUNTS_KEY] || Hive::ProviderRouting.default_accounts
+      routed = %w[brainstorm plan execute open_pr artifacts finalize].filter_map do |stage|
+        value = cfg[stage]
+        [ stage, value ] if value.is_a?(Hash) && value.key?("routing")
+      end
+      review = cfg["review"]
+      if review.is_a?(Hash)
+        %w[ci triage fix browser_test].each do |role|
+          value = review[role]
+          routed << [ "review.#{role}", value ] if value.is_a?(Hash) && value.key?("routing")
+        end
+        Array(review["reviewers"]).each_with_index do |value, index|
+          routed << [ "review.reviewers[#{index}]", value ] if value.is_a?(Hash) && value.key?("routing")
+        end
+      end
+
+      routed.each do |label, value|
+        local_cfg = cfg.merge(Hive::ProviderRouting::PROVIDER_ACCOUNTS_KEY => accounts)
+        Hive::ProviderRouting::Configuration.from(
+          cfg: local_cfg,
+          stage_name: label,
+          routing: value["routing"],
+          agent: value["agent"],
+          model: value["model"],
+          effort: value["effort"],
+          source: "#{label}.routing in #{describe_source(source_path)}"
+        )
+      end
     end
 
     # Top-level keys that MUST be Hashes when present. A scalar override

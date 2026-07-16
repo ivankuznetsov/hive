@@ -11,6 +11,14 @@ tags: [gap, todo]
 
 ## Current release gap
 
+- Cross-project dependency admission is covered with local-path remotes and
+  anonymized multi-project integration fixtures, including stored/live remote
+  mismatch. It has not yet been dogfooded end-to-end against two separately
+  hosted repositories through daemon dispatch and merge/archive. The current
+  implementation intentionally performs no network identity lookup; it trusts
+  only normalized enrolled/live `origin` strings and fails closed on missing
+  or ambiguous evidence.
+
 - The built-in `bench` descriptor, packaged stage instructions, self-contained
   runtime snapshot, and `hive init . --workflow bench` path are covered locally,
   but they have not yet shipped in a Hive release or completed a live

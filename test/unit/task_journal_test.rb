@@ -63,6 +63,11 @@ class TaskJournalTest < Minitest::Test
       refute File.exist?(File.join(dir, "events.jsonl"))
 
       assert_raises(Hive::TaskJournal::InvalidRecord) { writer.append_batch([]) }
+
+      malformed_condition = event("condition_observed", payload: {
+                                    "condition" => "ChangesPresent", "state" => "superseded"
+                                  })
+      assert_raises(Hive::TaskJournal::InvalidRecord) { writer.append(malformed_condition) }
     end
   end
 
@@ -131,9 +136,9 @@ class TaskJournalTest < Minitest::Test
       ownership_generation: "ownership-1",
       commit_generation: 0,
       reason: "observed",
-      evidence: [],
+      evidence: [ { "type" => "commit", "sha" => "a" * 40, "branch" => "feature" } ],
       provenance: { "source" => "test" },
-      payload: {}
+      payload: { "condition" => "ChangesPresent", "state" => "satisfied" }
     }.merge(overrides)
   end
 end

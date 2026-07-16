@@ -87,6 +87,15 @@ execute:
   #   preset: scoped
   #   tools: [Read, Write, Edit]
   #   dirs: [./drafts]
+
+# Generation-scoped conditions roll out explicitly. `markers` preserves the
+# compatibility state machine; set only `4-execute: shadow` to gather parity
+# evidence, then `4-execute: conditions` after the operator readiness checks.
+conditions:
+  authority: markers
+  stages: {}
+  # stages:
+  #   4-execute: shadow
 open_pr:
   agent: claude
 artifacts:

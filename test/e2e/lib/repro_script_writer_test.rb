@@ -65,6 +65,35 @@ class E2EReproScriptWriterTest < Minitest::Test
     end
   end
 
+  def test_script_gh_repro_installs_the_expanded_interactions
+    Dir.mktmpdir("scenario") do |scenario_dir|
+      Dir.mktmpdir("sandbox") do |sandbox|
+        Dir.mktmpdir("home") do |run_home|
+          step = make_step(
+            "script_gh",
+            args: {
+              "interactions" => [
+                { "args" => [ "pr", "view", "7" ], "cwd" => "{sandbox}",
+                  "response" => { "state" => "OPEN" } }
+              ]
+            }
+          )
+          path = Hive::E2E::ReproScriptWriter.new(
+            scenario_dir: scenario_dir, sandbox_dir: sandbox, run_home: run_home,
+            steps: [ step ], failed_index: 1
+          ).write
+
+          body = File.read(path)
+          assert_includes body, "GhStub"
+          assert_includes body, sandbox
+          assert_includes body, "pr"
+          out = `bash -n #{Shellwords.escape(path)} 2>&1`
+          assert $CHILD_STATUS.success?, "script_gh repro must be valid bash: #{out}"
+        end
+      end
+    end
+  end
+
   # The generated repro for the update-flow pipeline must be syntactically
   # valid bash. Catches accidental quoting / heredoc / line-continuation
   # regressions in the new stateful-kind emissions without needing a real

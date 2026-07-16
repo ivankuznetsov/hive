@@ -46,6 +46,14 @@ module Hive
       def editor_shim
         File.join(e2e_root, "fixtures", "editor-shim")
       end
+
+      def fixtures_dir
+        File.join(e2e_root, "fixtures")
+      end
+
+      def gh_shim
+        File.join(fixtures_dir, "gh")
+      end
     end
   end
 end

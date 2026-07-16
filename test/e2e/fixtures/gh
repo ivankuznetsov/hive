@@ -1,0 +1,123 @@
+#!/usr/bin/env ruby
+
+require "fileutils"
+require "json"
+
+DENY_EXIT = 86
+
+def repository_from(argv)
+  argv.each_with_index do |arg, index|
+    return argv[index + 1] if %w[--repo -R].include?(arg)
+    return arg.split("=", 2).last if arg.start_with?("--repo=")
+    return arg.delete_prefix("-R") if arg.start_with?("-R") && arg.length > 2
+  end
+  ENV["GH_REPO"]
+end
+
+def regular_json(path, label)
+  stat = File.lstat(path)
+  raise "#{label} must be a regular file" unless stat.file? && !stat.symlink?
+
+  JSON.parse(File.read(path))
+rescue Errno::ENOENT
+  raise "#{label} is missing"
+end
+
+def write_json(path, value)
+  tmp = "#{path}.tmp.#{Process.pid}"
+  File.open(tmp, File::WRONLY | File::CREAT | File::TRUNC, 0o600) do |file|
+    file.write(JSON.generate(value))
+    file.write("\n")
+  end
+  File.rename(tmp, path)
+ensure
+  FileUtils.rm_f(tmp) if tmp
+end
+
+root = ENV["HIVE_E2E_GH_STUB_DIR"].to_s
+if root.empty? || File.symlink?(root)
+  warn "hive-e2e gh shim: HIVE_E2E_GH_STUB_DIR is missing or unsafe"
+  exit DENY_EXIT
+end
+
+FileUtils.mkdir_p(root)
+script_path = File.join(root, "script.json")
+state_path = File.join(root, "state.json")
+audit_path = File.join(root, "audit.jsonl")
+lock_path = File.join(root, ".lock")
+argv = ARGV.map(&:to_s)
+cwd = File.expand_path(Dir.pwd)
+repository = repository_from(argv)
+interaction = nil
+exit_status = DENY_EXIT
+reason = nil
+
+File.open(lock_path, File::RDWR | File::CREAT, 0o600) do |lock|
+  lock.flock(File::LOCK_EX)
+  expected_index = nil
+  expected_argv = nil
+  begin
+    raise "no scripted interactions are installed" unless File.exist?(script_path)
+
+    script = regular_json(script_path, "gh script")
+    interactions = script.fetch("interactions")
+    raise "gh script interactions must be an array" unless interactions.is_a?(Array)
+
+    state = regular_json(state_path, "gh state")
+    expected_index = Integer(state.fetch("next_index"))
+    raise "script exhausted at interaction #{expected_index + 1}" if expected_index >= interactions.length
+
+    candidate = interactions.fetch(expected_index)
+    expected_argv = candidate.fetch("args")
+    raise "argv mismatch: expected #{expected_argv.inspect}, got #{argv.inspect}" unless argv == expected_argv
+
+    if candidate.key?("cwd") && File.expand_path(candidate.fetch("cwd")) != cwd
+      raise "cwd mismatch: expected #{candidate.fetch('cwd').inspect}, got #{cwd.inspect}"
+    end
+    if candidate.key?("repository") && candidate.fetch("repository") != repository
+      raise "repository mismatch: expected #{candidate.fetch('repository').inspect}, got #{repository.inspect}"
+    end
+
+    interaction = candidate
+    state["next_index"] = expected_index + 1
+    write_json(state_path, state)
+    exit_status = Integer(candidate.fetch("exit_status", 0))
+  rescue StandardError => e
+    reason = e.message
+  ensure
+    sequence = if File.file?(audit_path) && !File.symlink?(audit_path)
+      File.foreach(audit_path).count
+    else
+      0
+    end
+    record = {
+      "sequence" => sequence + 1,
+      "argv" => argv,
+      "cwd" => cwd,
+      "repository" => repository,
+      "expected_index" => expected_index,
+      "expected_argv" => expected_argv,
+      "matched" => reason.nil?,
+      "reason" => reason
+    }
+    File.open(audit_path, File::WRONLY | File::CREAT | File::APPEND, 0o600) do |audit|
+      audit.puts(JSON.generate(record))
+    end
+  end
+ensure
+  lock.flock(File::LOCK_UN)
+end
+
+if reason
+  warn "hive-e2e gh shim: #{reason}"
+  exit DENY_EXIT
+end
+
+if interaction.key?("response")
+  $stdout.write(JSON.generate(interaction["response"]))
+  $stdout.write("\n")
+else
+  $stdout.write(interaction.fetch("stdout", ""))
+end
+$stderr.write(interaction.fetch("stderr", ""))
+exit exit_status

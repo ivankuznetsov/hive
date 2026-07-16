@@ -20,6 +20,7 @@ module Hive
         cli tui_keys tui_expect tui_refute state_assert json_assert seed_state write_file
         register_project wait_subprocess editor_action log_assert ruby_block
         start_releases_stub spawn_background stop_process
+        script_gh
       ].freeze
 
       REQUIRED_KEYS = {
@@ -36,7 +37,8 @@ module Hive
         "ruby_block" => %w[block],
         "start_releases_stub" => %w[tag],
         "spawn_background" => %w[id args],
-        "stop_process" => %w[id]
+        "stop_process" => %w[id],
+        "script_gh" => %w[interactions]
       }.freeze
 
       INCIDENT_TAG = "incident-regression"
@@ -132,6 +134,8 @@ module Hive
         when "tui_keys"
           key_count = %w[keys text].count { |key| step.key?(key) }
           invalid!("tui_keys step needs exactly one of keys or text", line_for(kind)) unless key_count == 1
+        when "script_gh"
+          invalid!("script_gh.interactions must be an array", line_for(kind)) unless step["interactions"].is_a?(Array)
         end
       end
 

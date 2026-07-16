@@ -90,8 +90,7 @@ module Hive
                 "(these are owned by the driver — see tmux_session_lifecycle.rb)"
         end
 
-        env = SandboxEnv.repro_env(@sandbox_dir, @run_home)
-        env.merge!(scenario_env)
+        env = SandboxEnv.merge(SandboxEnv.repro_env(@sandbox_dir, @run_home), scenario_env)
         env["HIVE_TUI_LOG_DIR"] = @tui_log_dir
         env
       end

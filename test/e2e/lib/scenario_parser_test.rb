@@ -167,4 +167,21 @@ class E2EScenarioParserTest < Minitest::Test
       end
     end
   end
+
+  def test_script_gh_requires_an_interactions_array
+    Dir.mktmpdir("scenario") do |dir|
+      path = File.join(dir, "gh.yml")
+      File.write(path, <<~YAML)
+        name: gh_script
+        steps:
+          - kind: script_gh
+            interactions: nope
+      YAML
+
+      error = assert_raises(Hive::E2E::ScenarioParser::InvalidScenario) do
+        Hive::E2E::ScenarioParser.parse(path)
+      end
+      assert_includes error.message, "script_gh.interactions must be an array"
+    end
+  end
 end

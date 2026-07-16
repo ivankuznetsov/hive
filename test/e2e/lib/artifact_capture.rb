@@ -5,6 +5,7 @@ require "open3"
 require "rbconfig"
 require "time"
 require "tmpdir"
+require_relative "gh_stub"
 require_relative "paths"
 require_relative "schemas"
 
@@ -48,7 +49,10 @@ module Hive
           guard("pane-after.txt") { write("pane-after.txt", safe_pane_capture(tmux_driver)) }
           guard("pane-before.txt") { write("pane-before.txt", pane_before) } if pane_before
         end
-        guard("state") { copy_tree(File.join(@sandbox_dir, ".hive-state", "stages"), File.join(@scenario_dir, "state")) }
+        guard("state") do
+          copy_tree(File.join(@sandbox_dir, ".hive-state", "stages"), File.join(@scenario_dir, "state"), label: "state")
+        end
+        guard("gh") { copy_tree(GhStub.root_for(@run_home), File.join(@scenario_dir, "gh"), label: "gh") }
         guard("logs") { copy_logs_with_tails }
         guard("tui-subprocess") { copy_tui_subprocess_diagnostics }
         guard("tui-subprocess-live") { remove_live_tui_subprocess_diagnostics }
@@ -212,25 +216,25 @@ module Hive
         end
       end
 
-      def copy_tree(source, dest)
-        return unless regular_artifact_directory?(source, "state")
+      def copy_tree(source, dest, label:)
+        return unless regular_artifact_directory?(source, label)
 
         FileUtils.rm_rf(dest)
         FileUtils.mkdir_p(dest)
-        copy_tree_entries(source, dest, source)
+        copy_tree_entries(source, dest, source, label)
       end
 
-      def copy_tree_entries(source, dest, root)
+      def copy_tree_entries(source, dest, root, root_label)
         Dir.children(source).sort.each do |entry|
           source_path = File.join(source, entry)
           dest_path = File.join(dest, entry)
           relative = source_path.sub("#{root}/", "")
-          label = "state:#{relative}"
+          label = "#{root_label}:#{relative}"
           stat = File.lstat(source_path)
 
           if stat.directory? && !stat.symlink?
             FileUtils.mkdir_p(dest_path)
-            copy_tree_entries(source_path, dest_path, root)
+            copy_tree_entries(source_path, dest_path, root, root_label)
           elsif stat.file? && !stat.symlink?
             FileUtils.mkdir_p(File.dirname(dest_path))
             FileUtils.cp(source_path, dest_path)
@@ -238,7 +242,7 @@ module Hive
             record_non_regular_artifact(label, stat)
           end
         rescue SystemCallError => e
-          @capture_errors << { "label" => label || "state", "error" => "#{e.class}: #{e.message}" }
+          @capture_errors << { "label" => label || root_label, "error" => "#{e.class}: #{e.message}" }
         end
       end
 

@@ -18,6 +18,7 @@ class AttemptsDirtyStateCaptureTest < Minitest::Test
       File.write(File.join(worktree, "README.md"), "unstaged\n")
       File.binwrite(File.join(worktree, "binary.bin"), "\x00\xFFpartial".b)
       File.write(File.join(worktree, "untracked.txt"), "untracked\n")
+      File.symlink("untracked.txt", File.join(worktree, "untracked-link"))
 
       before_revision = run!("git", "-C", worktree, "rev-parse", "HEAD")
       before_status = run!("git", "-C", worktree, "status", "--porcelain=v2", "--untracked-files=all")
@@ -38,8 +39,18 @@ class AttemptsDirtyStateCaptureTest < Minitest::Test
           Base64.strict_decode64(entry.fetch("path_base64")) == "binary.bin"
         end
         assert_equal untracked_hash, binary.fetch("sha256")
+        symlink = manifest.fetch("untracked").find do |entry|
+          Base64.strict_decode64(entry.fetch("path_base64")) == "untracked-link"
+        end
+        assert_equal "untracked.txt", Base64.strict_decode64(symlink.fetch("target_base64"))
         assert_operator File.size(File.join(capture.directory, "staged.patch")), :>, 0
         assert_operator File.size(File.join(capture.directory, "unstaged.patch")), :>, 0
+
+        capture_service = Hive::Attempts::DirtyStateCapture.new(store: store)
+        with_replaced_singleton_method(File, :lstat, ->(_path) { raise Errno::EACCES }) do
+          unreadable = capture_service.send(:untracked_metadata, worktree, "vanished")
+          assert_equal "Errno::EACCES", unreadable.fetch("unreadable")
+        end
       end
     end
   end

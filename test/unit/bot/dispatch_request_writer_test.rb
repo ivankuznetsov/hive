@@ -63,6 +63,11 @@ class HiveBotDispatchRequestWriterTest < Minitest::Test
     end
   end
 
+  def test_non_run_stage_action_resolves_workflow_target
+    task = Struct.new(:stage_index, :stage_name).new(2, "brainstorm")
+    assert_equal "3-plan", W.intended_stage_for([ "hive", "plan", "task" ], task)
+  end
+
   def test_write_uses_chronologically_sortable_filename
     Dir.mktmpdir("hive-writer") do |dir|
       W.write!(project: "p", slug: "first", argv: [ "hive", "run", "first" ],

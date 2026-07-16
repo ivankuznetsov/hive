@@ -39,4 +39,19 @@ class AttemptsGenerationTest < Minitest::Test
       refute_equal one.task_generation, two.task_generation
     end
   end
+
+  def test_missing_and_unreadable_artifacts_have_stable_tokens
+    with_tmp_dir do |dir|
+      task = FakeTask.new(id: 1, slug: "missing", state_file: File.join(dir, "missing"))
+      missing = Hive::Attempts::Generation.artifact_token(task)
+      assert_match(/\A[0-9a-f]{64}\z/, missing)
+
+      File.write(task.state_file, "body")
+      with_replaced_singleton_method(File, :open, ->(*_args) { raise Errno::EACCES }) do
+        unreadable = Hive::Attempts::Generation.artifact_token(task)
+        assert_match(/\A[0-9a-f]{64}\z/, unreadable)
+        refute_equal missing, unreadable
+      end
+    end
+  end
 end

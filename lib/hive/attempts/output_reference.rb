@@ -1,5 +1,6 @@
 require "digest"
 require "fileutils"
+require "hive"
 require "pathname"
 
 module Hive

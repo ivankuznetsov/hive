@@ -486,6 +486,17 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_materialize_gh_auth_config_contains_source_read_errors
+    auth_dir = nil
+    with_replaced_singleton_method(File, :realpath, ->(_path) { raise Errno::EACCES }) do
+      auth_dir = Hive::Babysitter::DryRunEnv.materialize_gh_auth_config("/unreadable")
+    end
+    assert File.directory?(auth_dir)
+    assert_empty Dir.children(auth_dir)
+  ensure
+    FileUtils.rm_rf(auth_dir) if auth_dir
+  end
+
   def test_with_env_pins_skip_log_against_command_local_overrides
     with_tmp_dir do |dir|
       worktree = File.join(dir, "worktree")

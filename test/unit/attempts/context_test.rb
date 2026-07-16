@@ -47,4 +47,18 @@ class AttemptsContextTest < Minitest::Test
       assert_empty Hive::Attempts::Context.projection
     end
   end
+
+  def test_store_errors_fail_closed
+    broken_store = Object.new
+    broken_store.define_singleton_method(:fetch) { |_id| raise Hive::Error, "broken" }
+    with_replaced_singleton_method(Hive::Attempts::Store, :new, ->(**_kwargs) { broken_store }) do
+      with_env(
+        "HIVE_ATTEMPT_INTERNAL" => "1",
+        "HIVE_ATTEMPT_ID" => "attempt",
+        "HIVE_ATTEMPT_STORE_ROOT" => "/tmp/attempts"
+      ) do
+        assert_nil Hive::Attempts::Context.current
+      end
+    end
+  end
 end

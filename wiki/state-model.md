@@ -1,13 +1,13 @@
 ---
 title: State Model
 type: data-model
-source: lib/hive/task.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/review_handoff.rb, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/daemon/display_name_backfiller.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
+source: lib/hive/task.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/review_handoff.rb, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/daemon/display_name_backfiller.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
 created: 2026-04-25
-updated: 2026-07-12
+updated: 2026-07-16
 tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, web]
 ---
 
-**TLDR**: Hive's workflow state has no application database. Persistent task/project state lives in two filesystem trees per project — `<project>/.hive-state/` (an orphan-branch worktree holding task folders, configs, locks, logs, and architecture-patrol ledgers) and `~/Dev/<project>.worktrees/<slug>/` (feature worktrees holding actual code) — plus one global `~/.config/hive/config.yml` (or `HIVE_HOME/config.yml` / a migrated legacy registry). Token-usage metrics are the exception and use the SQLite store described in [[token-usage]]. Hivebox web adds no workflow tables: it reads `hive status` snapshots through `StatusFeed`/`StatusBroadcaster` and writes daemon dispatch requests as JSON files under the global state home. The workflow "data model" is the directory layout, marker grammar, YAML sidecars, and runtime JSON queue files described below.
+**TLDR**: Hive's workflow state has no application database. Task/project state lives in `.hive-state` and feature worktrees; durable task execution ownership lives in versioned attempt records under the global state home. Global config/queues remain filesystem records. Token metrics alone use SQLite. Hivebox reads status snapshots and writes delivery requests; leases, not web/daemon process lifetime, own accepted agents.
 
 ## Stage directory layout
 
@@ -116,7 +116,14 @@ Recovery from a stale or error marker is agent-callable via `hive markers clear 
 
 ## Concurrency files
 
-- **Per-task lock**: `<task folder>/.lock` — YAML payload `{pid, started_at, process_start_time, claude_pid?, claude_pid_start_time?, slug?, stage?}`. Acquired EXCL by `Hive::Lock.acquire_task_lock` (`lib/hive/lock.rb:18`). Stale check uses `Process.kill(0, pid)` plus `/proc/<pid>/stat` field-22 cross-check to defeat runner PID reuse. After spawning, both headless `Hive::Agent` and tmux-backed `Hive::ClaudeLauncher` write the child `claude_pid` and its `claude_pid_start_time`; cleanup compares that identity metadata with the live process before signalling so PID reuse cannot target an unrelated child.
+Durable leases under `$HIVE_HOME/attempts/v1/records/` are the authoritative
+execution owner. Records are `launching`, `running`, `terminal`, or `lost`;
+wrapper/worker PID start fingerprints and session/group IDs make adoption and
+cleanup PID-reuse safe. Per-generation flocks plus guarded lease
+version/deadline comparisons serialize claim, heartbeat, terminal, and loss
+transitions. See [[modules/attempts]].
+
+- **Per-task lock**: `<task folder>/.lock` — compatibility/work-area exclusion projection. New workers include optional `attempt_id` and `task_generation`; old readers tolerate their absence. It is not the restart-safe owner.
 - **Per-project commit lock**: `<project>/.hive-state/.commit-lock` — short flock around the `git add && git commit` in the hive-state worktree to serialize concurrent writers. See [[modules/lock]].
 
 ## Runtime dispatch queue and web snapshots
@@ -132,7 +139,7 @@ Each pending request is one JSON file:
 
 ```yaml
 schema: hive-dispatch-request
-schema_version: 2
+schema_version: 3
 request_id: <hex16>
 created_at: <UTC-ISO8601>
 project: <registered project name>
@@ -142,15 +149,17 @@ requestor: bot|healer
 chat_id:
 update_id:
 trigger:
+task_generation:
+predecessor_attempt_id:
+inherited_outputs: []
 ```
 
-The current strict wire contract is `hive-dispatch-request.v2`: v2 adds the
-closed `requestor: healer` producer used by `StaleAgentHealer` while preserving
-`bot` for Telegram and hivebox web (web still writes through
-`Hive::Bot::DispatchRequestWriter`). The daemon rejects any file whose
-`schema_version` does not equal `DispatchRequestQueue::SCHEMA_VERSION` with
-`unknown_schema_version`; older schema files remain in `schemas/` for pinned
-validators, not for mixed-version live queue operation.
+Current producers write `hive-dispatch-request.v3`, adding generation intent,
+predecessor, and inherited outputs. Consumers continue accepting pending v2
+files and infer their generation under the same admission lock. Queue and
+claim sidecars remain delivery records: after admission the claim stores the
+attempt ID/generation, follows a loss successor, and completes from its
+terminal receipt.
 
 `Hive::Daemon::DispatchRequestQueue.valid_argv?` requires `argv[0] == "hive"`
 and allowlists only workflow-mutating verbs (`run`, `develop`, `brainstorm`,
@@ -158,9 +167,10 @@ and allowlists only workflow-mutating verbs (`run`, `develop`, `brainstorm`,
 Pending requests expire after `EXPIRY_SEC = 600`. On dispatch, the daemon
 renames the file to `<id>.json.claimed` and writes
 `<id>.json.claimed.claim` with `pid`, `process_start_time`, and `claimed_at`;
-those claim files are the at-most-once dispatch record. Multi-step recoveries
+after task admission it also carries `attempt_id` and `task_generation`.
+Those claims are at-most-once delivery records, not execution owners. Multi-step recoveries
 store later argv arrays in `<request_id>.sequence` and promote the next request
-only after the previous child exits 0; non-zero/nil exits discard the sequence.
+only after the previous attempt receipt exits 0; non-zero/lost outcomes discard the sequence.
 Hivebox `recover` writes the sequence sidecar first, then the guarded
 `hive markers clear ... --json` request, and discards the sidecar if the
 request write fails so no orphaned continuation remains.

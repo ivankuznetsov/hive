@@ -39,6 +39,21 @@ class AttemptsCapacitySnapshotTest < Minitest::Test
     end
   end
 
+  def test_invalid_future_timestamp_is_ignored_by_daily_accounting
+    record = Object.new
+    record.define_singleton_method(:live?) { false }
+    record.define_singleton_method(:receipt) { nil }
+    record.define_singleton_method(:[]) do |key|
+      { "accepted_at" => "not-a-time", "project" => "demo" }.fetch(key)
+    end
+    scan = Hive::Attempts::Scan.new(records: [ record ], invalid_records: [])
+    store = Object.new
+    store.define_singleton_method(:scan) { scan }
+
+    snapshot = Hive::Attempts::CapacitySnapshot.build(store: store, now: NOW)
+    assert_equal 0, snapshot.daily_count("demo", NOW.to_date)
+  end
+
   private
 
   def create(store, attempt_id:, project:, task_slug:, generation: "g1")

@@ -36,4 +36,16 @@ class AttemptsStreamLogTest < Minitest::Test
       assert Hive::Attempts::OutputReference.verify(reference, root: root)
     end
   end
+
+  def test_reader_ignores_malformed_frames_and_read_errors
+    with_tmp_dir do |root|
+      path = File.join(root, "bad.frames")
+      File.write(path, "not-json\n")
+      assert_empty Hive::Attempts::StreamLog.read(path)
+
+      with_replaced_singleton_method(File, :binread, ->(_path) { raise Errno::EACCES }) do
+        assert_empty Hive::Attempts::StreamLog.read(path)
+      end
+    end
+  end
 end

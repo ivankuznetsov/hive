@@ -40,6 +40,81 @@ class AttemptsDetachedLauncherTest < Minitest::Test
     assert_includes error.message, "detached"
   end
 
+  def test_launch_timeout_leaves_an_expirable_launching_reservation
+    launcher = Hive::Attempts::DetachedLauncher.new(
+      store: Struct.new(:root).new("/attempts"), ready_timeout_sec: 0
+    )
+    record = Struct.new(:attempt_id).new("attempt-timeout")
+    launcher.define_singleton_method(:fork) { 321 }
+
+    with_replaced_singleton_method(Process, :wait, ->(_pid) { }) do
+      with_replaced_singleton_method(IO, :select, ->(*_args) { nil }) do
+        result = launcher.launch(record, argv: [ "/bin/true" ])
+        assert_equal false, result.fetch("claimed")
+        assert_equal "launching", result.fetch("state")
+      end
+    end
+  end
+
+  def test_launcher_reports_setsid_failure_before_wrapper_fork
+    launcher = Hive::Attempts::DetachedLauncher.new(store: Struct.new(:root).new("/attempts"))
+    record = Struct.new(:attempt_id).new("attempt-failed")
+    launcher.define_singleton_method(:fork) { |&block| block.call }
+    launcher.define_singleton_method(:exit!) { |_status| throw :launcher_exited, :launcher_exited }
+
+    with_replaced_singleton_method(Process, :setsid, -> { raise Errno::EPERM }) do
+      with_replaced_singleton_method(IO, :pipe, -> { [ StringIO.new, StringIO.new ] }) do
+        assert_equal :launcher_exited, catch(:launcher_exited) {
+          launcher.launch(record, argv: [ "/bin/true" ])
+          flunk "launcher did not exit"
+        }
+      end
+    end
+  end
+
+  def test_launcher_invokes_wrapper_after_session_creation
+    launcher = Hive::Attempts::DetachedLauncher.new(store: Struct.new(:root).new("/attempts"))
+    record = Struct.new(:attempt_id).new("attempt-child")
+    invoked = nil
+    launcher.define_singleton_method(:fork) { |&block| block.call }
+    launcher.define_singleton_method(:fork_wrapper) do |seen_record, argv, _writer|
+      invoked = [ seen_record, argv ]
+    end
+    launcher.define_singleton_method(:exit!) { |_status| throw :launcher_exited }
+
+    with_replaced_singleton_method(Process, :setsid, -> { 123 }) do
+      with_replaced_singleton_method(IO, :pipe, -> { [ StringIO.new, StringIO.new ] }) do
+        catch(:launcher_exited) { launcher.launch(record, argv: [ "/bin/true" ]) }
+      end
+    end
+    assert_equal [ record, [ "/bin/true" ] ], invoked
+  end
+
+  def test_wrapper_exec_contains_timers_timeout_and_worker_command
+    launcher = Hive::Attempts::DetachedLauncher.new(
+      store: Struct.new(:root).new("/attempts"), timeout_sec: 12
+    )
+    record = Struct.new(:attempt_id).new("attempt-command")
+    executed = nil
+    launcher.define_singleton_method(:fork) do |&block|
+      block.call
+      999
+    end
+    launcher.define_singleton_method(:exec) { |*args, **kwargs| executed = [ args, kwargs ] }
+    reader, writer = IO.pipe
+
+    assert_equal 999, launcher.send(:fork_wrapper, record, [ "/bin/echo", "ok" ], writer)
+    args, kwargs = executed
+    assert_equal "attempt-command", args[4]
+    assert_includes args, "--timeout-sec"
+    assert_equal "12", args[args.index("--timeout-sec") + 1]
+    assert_equal [ "/bin/echo", "ok" ], args.last(2)
+    assert_equal true, kwargs.fetch(:close_others)
+  ensure
+    reader&.close unless reader&.closed?
+    writer&.close unless writer&.closed?
+  end
+
   private
 
   def wait_for_terminal(store, attempt_id)

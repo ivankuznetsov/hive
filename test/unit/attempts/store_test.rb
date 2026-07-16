@@ -114,6 +114,45 @@ class AttemptsStoreTest < Minitest::Test
     end
   end
 
+  def test_store_surfaces_unreadable_records_and_filesystem_failures
+    with_store do |store|
+      File.write(store.record_path("broken"), "{")
+      assert_raises(Hive::Attempts::StoreError) { store.fetch("broken") }
+
+      with_replaced_singleton_method(File, :open, ->(*_args) { raise Errno::EACCES }) do
+        assert_raises(Hive::Attempts::StoreError) { store.with_generation_lock("generation") { } }
+      end
+
+      with_replaced_singleton_method(Hive::AtomicFile, :write, ->(*_args, **_kwargs) { raise Errno::ENOSPC }) do
+        assert_raises(Hive::Attempts::StoreError) do
+          store.create_launching(**identity.merge(attempt_id: "persist-failure"), launch_timeout_sec: 30, now: NOW)
+        end
+      end
+    end
+
+    with_replaced_singleton_method(FileUtils, :mkdir_p, ->(*_args, **_kwargs) { raise Errno::EACCES }) do
+      assert_raises(Hive::Attempts::StoreError) { Hive::Attempts::Store.new(root: "/unavailable") }
+    end
+  end
+
+  def test_invalid_mutation_immutable_identity_and_unsafe_ids_fail_closed
+    with_store do |store|
+      launching = store.create_launching(**identity, launch_timeout_sec: 30, now: NOW)
+      claimed = store.claim(launching, owner: owner, first_heartbeat_timeout_sec: 30, now: NOW + 1)
+      running = store.first_heartbeat(claimed, stale_sec: 30, now: NOW + 2)
+      assert_raises(Hive::Attempts::StoreError) do
+        store.checkpoint(
+          running, checkpoint: checkpoint, now: NOW + 3,
+          output_references: [ { "path" => "../escape", "size" => 1, "sha256" => "0" * 64 } ]
+        )
+      end
+
+      changed = launching.with("request_id" => "different")
+      assert_raises(Hive::Attempts::StoreError) { store.send(:verify_immutable!, launching, changed) }
+      assert_raises(Hive::Attempts::StoreError) { store.record_path("../unsafe") }
+    end
+  end
+
   private
 
   def with_store

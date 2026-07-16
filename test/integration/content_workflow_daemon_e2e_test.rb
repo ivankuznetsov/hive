@@ -2,6 +2,7 @@ require "test_helper"
 require "json"
 require "shellwords"
 require "hive/cli"
+require "hive/attempts/context"
 require "hive/commands/init"
 require "hive/commands/new"
 require "hive/daemon/child_supervisor"
@@ -25,42 +26,47 @@ class ContentWorkflowDaemonE2ETest < Minitest::Test
           slug = File.basename(Dir[File.join(project_root, ".hive-state", "stages", "1-inbox", "draft-launch-post-*")].first)
           ran = []
           with_deterministic_content_agent(record: ran) do
-            supervisor = InlineSupervisor.new(
-              run: ->(command) { capture_io { Hive::CLI.start(Shellwords.split(command).drop(1)) }; 0 }
-            )
-            dispatcher = Hive::Daemon::Dispatcher.new(
-              config: { "daemon" => { "edit_debounce_sec" => 0, "poll_interval_sec" => 30 } },
-              controller: Hive::Daemon::ConcurrencyController.new(
-                max_concurrent_runs: 5,
-                max_concurrent_per_project: 5,
-                max_runs_per_day_per_project: 100
-              ),
-              supervisor: supervisor,
-              status_consumer: LiveStatusConsumer.new(
-                fetch: lambda do
-                  out, = capture_io { Hive::CLI.start([ "status", "--json" ]) }
-                  doc = JSON.parse(out)
-                  mapper = Hive::Daemon::StatusConsumer.new
-                  Hive::Daemon::StatusConsumer::Result.new(
-                    ok: true,
-                    rows: mapper.send(:extract_rows, doc),
-                    projects: mapper.send(:extract_projects, doc),
-                    error: nil
-                  )
-                end
-              ),
-              logger: CollectingLogger.new
-            )
+            Hive::Attempts::Context.with(
+              attempt_id: "content-fixture-test-attempt",
+              task_generation: "content-fixture-test-generation"
+            ) do
+              supervisor = InlineSupervisor.new(
+                run: ->(command) { capture_io { Hive::CLI.start(Shellwords.split(command).drop(1)) }; 0 }
+              )
+              dispatcher = Hive::Daemon::Dispatcher.new(
+                config: { "daemon" => { "edit_debounce_sec" => 0, "poll_interval_sec" => 30 } },
+                controller: Hive::Daemon::ConcurrencyController.new(
+                  max_concurrent_runs: 5,
+                  max_concurrent_per_project: 5,
+                  max_runs_per_day_per_project: 100
+                ),
+                supervisor: supervisor,
+                status_consumer: LiveStatusConsumer.new(
+                  fetch: lambda do
+                    out, = capture_io { Hive::CLI.start([ "status", "--json" ]) }
+                    doc = JSON.parse(out)
+                    mapper = Hive::Daemon::StatusConsumer.new
+                    Hive::Daemon::StatusConsumer::Result.new(
+                      ok: true,
+                      rows: mapper.send(:extract_rows, doc),
+                      projects: mapper.send(:extract_projects, doc),
+                      error: nil
+                    )
+                  end
+                ),
+                logger: CollectingLogger.new
+              )
 
-            24.times do
-              break if File.file?(File.join(task_folder(project_root, "4-done", slug), "done.md"))
+              24.times do
+                break if File.file?(File.join(task_folder(project_root, "4-done", slug), "done.md"))
 
-              now = Time.now
-              supervisor.now = now
-              dispatcher.tick(now: now)
+                now = Time.now
+                supervisor.now = now
+                dispatcher.tick(now: now)
+              end
+
+              @spawned_commands = supervisor.spawned.map { |s| s[:command] }
             end
-
-            @spawned_commands = supervisor.spawned.map { |s| s[:command] }
           end
 
           final = task_folder(project_root, "4-done", slug)

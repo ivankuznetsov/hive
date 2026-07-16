@@ -752,6 +752,60 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
     end
   end
 
+  def test_v3_rejects_invalid_output_references_at_write_and_read_boundaries
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      bad_reference = { "path" => "../escape", "size" => 1, "sha256" => "0" * 64 }
+      error = assert_raises(ArgumentError) do
+        Q.write_request!(
+          project: "hive", slug: "task", argv: [ "hive", "run", "task" ],
+          inherited_outputs: [ bad_reference ], state_home: dir
+        )
+      end
+      assert_includes error.message, "path"
+
+      path = write_request(
+        dir, request_id: "invalidref", created_at: Time.utc(2026, 7, 16, 12, 0, 0)
+      )
+      payload = JSON.parse(File.read(path))
+      payload["inherited_outputs"] = [ bad_reference ]
+      File.write(path, JSON.generate(payload))
+      bads = []
+      assert_empty Q.pending(
+        state_home: dir,
+        bad_handler: ->(path:, reason:) { bads << [ path, reason ] }
+      )
+      assert_equal "invalid_inherited_outputs", bads.first.last
+    end
+  end
+
+  def test_claimed_reports_malformed_requests_and_missing_sidecars
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      directory = Q.directory(state_home: dir)
+      malformed = File.join(directory, "malformed.json#{Q::CLAIMED_SUFFIX}")
+      missing_sidecar = File.join(directory, "missing.json#{Q::CLAIMED_SUFFIX}")
+      File.write(malformed, "{")
+      source = write_request(
+        dir, request_id: "missing01", created_at: Time.utc(2026, 7, 16, 12, 0, 0)
+      )
+      File.rename(source, missing_sidecar)
+      bads = []
+
+      assert_empty Q.claimed(
+        state_home: dir,
+        bad_handler: ->(path:, reason:) { bads << [ path, reason ] }
+      )
+      assert_equal %w[malformed_json missing_claim_metadata], bads.map(&:last).sort
+    end
+  end
+
+  def test_claimed_treats_a_disappearing_directory_as_empty
+    with_tmp_dir do |state_home|
+      with_replaced_singleton_method(Dir, :glob, ->(_pattern) { raise Errno::ENOENT }) do
+        assert_equal [], Q.claimed(state_home: state_home)
+      end
+    end
+  end
+
   def test_claim_sidecar_records_resolved_attempt_reference
     Dir.mktmpdir("hive-dispatch-queue") do |dir|
       Q.write_request!(project: "hive", slug: "task", argv: [ "hive", "run", "task" ],

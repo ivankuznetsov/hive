@@ -3250,7 +3250,9 @@ class HiveTuiBubbleModelTest < Minitest::Test
         folder: folder, marker: "error", attrs: { "reason" => "exit_code" }, suggested_command: nil
       )
 
-      @model.update(Hive::Tui::Messages::OpenRedStatusDetail.new(row: row))
+      with_env("HIVE_CODEX_BIN" => nil) do
+        @model.update(Hive::Tui::Messages::OpenRedStatusDetail.new(row: row))
+      end
 
       assert_equal :red_status_detail, @model.hive_model.mode
       assert_equal "codex", @model.hive_model.red_status_detail_state.agent_label

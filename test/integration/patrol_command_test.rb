@@ -312,6 +312,48 @@ class PatrolCommandTest < Minitest::Test
            "a mismatched detached checkout must still be removed"
   end
 
+  # Cleanup failure must not mask the scan outcome: a reviewer crash keeps
+  # its own exception, and a completed scan keeps its result — a leaked
+  # detached checkout (fresh mktmpdir path each cycle) is recoverable, a
+  # discarded clean review cycle is not.
+  def test_scan_checkout_removal_failure_does_not_mask_a_reviewer_crash
+    command = command_for(dry_run: true)
+    command.define_singleton_method(:git_output!) do |_root, *args|
+      raise Hive::GitError, "removal blocked" if args.first(3) == [ "worktree", "remove", "--force" ]
+
+      args == [ "rev-parse", "HEAD" ] ? "expected-sha\n" : ""
+    end
+
+    error = nil
+    _out, err = capture_io do
+      error = assert_raises(RuntimeError) do
+        command.send(:with_scan_checkout, "/project", "expected-sha") { raise "reviewer crashed" }
+      end
+    end
+
+    assert_equal "reviewer crashed", error.message,
+                 "the checkout-removal failure must not replace the reviewer's exception"
+    assert_match(/removal blocked/, err)
+  end
+
+  def test_scan_checkout_removal_failure_after_success_preserves_the_result
+    command = command_for(dry_run: true)
+    command.define_singleton_method(:git_output!) do |_root, *args|
+      raise Hive::GitError, "removal blocked" if args.first(3) == [ "worktree", "remove", "--force" ]
+
+      args == [ "rev-parse", "HEAD" ] ? "expected-sha\n" : ""
+    end
+
+    result = nil
+    _out, err = capture_io do
+      result = command.send(:with_scan_checkout, "/project", "expected-sha") { :scan_result }
+    end
+
+    assert_equal :scan_result, result,
+                 "a completed clean scan must not be discarded because only cleanup failed"
+    assert_match(/removal blocked/, err)
+  end
+
   def test_git_output_reports_the_command_failure
     Dir.mktmpdir do |root|
       error = assert_raises(Hive::GitError) do

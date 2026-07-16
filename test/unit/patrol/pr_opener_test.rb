@@ -570,6 +570,54 @@ class HivePatrolPrOpenerTest < Minitest::Test
     end
   end
 
+  # After `gh pr create` succeeded, a reconciliation miss (read-after-write
+  # lag) or identity mismatch must surface as an error WITHOUT losing the
+  # fingerprint ledger entry: a real open PR with no mapping would be
+  # re-fixed and errored against on every later cycle.
+  def test_reconciliation_miss_after_pr_creation_keeps_the_ledger_mapping
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      gh = FakeGh.new
+      gh.define_singleton_method(:lookup_prs_for_branch) { |*_args, **| [] }
+
+      result = Hive::Patrol::PrOpener.new(dir, cfg: cfg, gh: gh).open(
+        finding, patch(worktree_path: dir)
+      )
+
+      assert_equal :error, result.status
+      assert_equal "gh_error", result.reason
+      assert_includes result.detail, "could not be reconciled"
+      assert_includes result.detail, "https://example.com/pr/2",
+                      "the error must name the created PR so an operator can find it"
+      fingerprints = JSON.parse(File.read(File.join(dir, ".hive-state", "patrol", "fingerprints.json")))
+      assert_equal "https://example.com/pr/2", fingerprints.fetch("fp1").fetch("pr_url")
+      assert_equal "open", fingerprints.fetch("fp1").fetch("state"),
+                   "the created PR must stay in the ledger despite the reconciliation miss"
+    end
+  end
+
+  def test_identity_mismatch_after_pr_creation_keeps_the_ledger_mapping
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      gh = FakeGh.new
+      gh.created_base_oid = "d" * 40
+
+      result = Hive::Patrol::PrOpener.new(dir, cfg: cfg, gh: gh).open(
+        finding, patch(worktree_path: dir)
+      )
+
+      assert_equal :error, result.status
+      assert_equal "gh_error", result.reason
+      assert_match(/existing PR identity mismatch/, result.detail)
+      assert_includes result.detail, "https://example.com/pr/2",
+                      "the error must name the created PR so an operator can find it"
+      fingerprints = JSON.parse(File.read(File.join(dir, ".hive-state", "patrol", "fingerprints.json")))
+      assert_equal "https://example.com/pr/2", fingerprints.fetch("fp1").fetch("pr_url")
+      assert_equal "open", fingerprints.fetch("fp1").fetch("state"),
+                   "the created PR must stay in the ledger despite the identity mismatch"
+    end
+  end
+
   def test_existing_remote_branch_is_replaced_only_with_an_exact_lease
     with_tmp_dir do |dir|
       gh = FakeGh.new

@@ -101,6 +101,41 @@ class HivePatrolFingerprintTest < Minitest::Test
     end
   end
 
+  # ── compatibility pins ─────────────────────────────────────────────────
+  # These exact digests were computed once by running the current
+  # implementation and are hard-coded on purpose: the fingerprint ledger
+  # (.hive-state/patrol/fingerprints.json) is durable, so ANY accidental
+  # change to the payload composition, join order, or normalize_token in
+  # Fingerprint.compute silently orphans every existing dedup/dismissal/PR
+  # entry. If one of these fails, you are changing the on-disk identity
+  # contract — migrate the ledger deliberately or revert.
+
+  def test_pinned_structured_v2_fingerprint_digest
+    with_tmp_dir do |dir|
+      structured = Hive::Patrol::Finding.new(
+        id: "f1", feature_id: "route-users", category: "bug", severity: "high",
+        confidence: "medium", title: "Queue handoff loses accepted jobs",
+        description: "The queue drops accepted jobs during handoff.",
+        recommendation: "Acknowledge before clearing durable state.",
+        contract: "Accepted jobs must be delivered exactly once.",
+        root_cause: "The handoff clears durable state before acknowledgement.",
+        evidence: [ { "file" => "lib/queue.rb", "line" => 10, "snippet" => "state.delete(id)" } ]
+      )
+
+      assert_equal "29ea35b6d720bf18bedcf34a427468e635dd0d5af438e4cbeeee1cf11b07b998",
+                   Hive::Patrol::Fingerprint.compute(structured, project_root: dir)
+    end
+  end
+
+  def test_pinned_legacy_v1_fallback_fingerprint_digest
+    with_tmp_dir do |dir|
+      # `finding` carries no contract/root_cause, so compute takes the
+      # legacy feature_id + category + path + snippet-token branch.
+      assert_equal "41aca36f53d5d255b54b567d6191411559133a351e3b6d0c5eb51d269c6d5134",
+                   Hive::Patrol::Fingerprint.compute(finding, project_root: dir)
+    end
+  end
+
   def test_feature_history_matches_grouped_and_component_legacy_aliases
     scripts = finding
     scripts.feature_id = "command-package-json-scripts"

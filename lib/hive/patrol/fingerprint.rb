@@ -6,13 +6,16 @@ module Hive
     module Fingerprint
       CONFIDENCE_ORDER = { "low" => 0, "medium" => 1, "high" => 2 }.freeze
 
-      # Structured exact fingerprints are stable across mapper attribution,
-      # title, and snippet drift, but intentionally remain sensitive to the
-      # agent's contract/root-cause wording. The fuzzy similarity gate handles
-      # that remaining wording drift: a new finding in the SAME category whose
-      # normalized title or root-cause tokens overlap an already-PR'd/dismissed
-      # finding by at least this coefficient is treated as the same issue.
-      # 0.6 catches observed re-words without collapsing unrelated findings.
+      # Structured exact fingerprints are independent of feature_id (and of
+      # title/snippet wording), but they DO pin the first evidence path — and
+      # Reviewer#prioritize_slice_evidence reorders evidence before compute,
+      # so re-attribution that changes the leading path changes the SHA. They
+      # also remain sensitive to contract/root-cause wording. similar_known?
+      # is the fuzzy fallback for both kinds of drift: a new finding in the
+      # SAME category whose normalized title or root-cause tokens overlap an
+      # already-PR'd/dismissed finding by at least this coefficient is treated
+      # as the same issue. 0.6 catches observed re-words without collapsing
+      # unrelated findings.
       SIMILARITY_THRESHOLD = 0.6
       LEGACY_GROUPED_FEATURE_PREFIXES = {
         "command-package-json-scripts" => "command-npm-script-",
@@ -32,11 +35,13 @@ module Hive
         contract = normalize_token(finding.respond_to?(:contract) ? finding.contract : nil)
         root_cause = normalize_token(finding.respond_to?(:root_cause) ? finding.root_cause : nil)
         payload = if !contract.empty? && !root_cause.empty?
-                    # New structured findings identify the semantic defect,
-                    # not whichever overlapping mapper slice happened to
-                    # report it. Feature attribution, title, and snippet drift
-                    # do not change this SHA; contract/root-cause wording does,
-                    # with similar_known? providing the fuzzy fallback.
+                    # New structured findings exclude feature_id, so only
+                    # feature attribution independence is guaranteed. The
+                    # payload still pins the FIRST evidence path (which
+                    # Reviewer#prioritize_slice_evidence reorders before
+                    # compute), so re-attribution that changes the leading
+                    # path changes this SHA, as does contract/root-cause
+                    # wording; similar_known? is the fuzzy fallback for both.
                     [ finding.category.to_s, path, contract, root_cause ].join("\0")
         else
           token = anchor_token(finding, evidence, project_root, path)
@@ -107,17 +112,20 @@ module Hive
         normalize_token(finding.title).split
       end
 
-      # True when `finding` is the same issue as one already PR'd
-      # (open/merged) or dismissed — judged by same category + title-token
-      # overlap coefficient >= SIMILARITY_THRESHOLD. Only entries that
-      # carry stored content (recorded since this feature shipped) can
-      # match; older content-less entries are skipped (their exact
-      # fingerprint still guards them via known_active?/dismissed?).
+      # Groups the active (open/merged/resolved) and dismissed ledger entries
+      # by category for similar_known? lookups.
       def similarity_index(fingerprints, dismissed)
         active = fingerprints.values.select { |entry| %w[open merged resolved].include?(entry["state"]) }
         (active + dismissed.values).group_by { |entry| entry["category"].to_s }
       end
 
+      # True when `finding` is the same issue as one already PR'd
+      # (open/merged/resolved) or dismissed — judged by same category plus an
+      # overlap coefficient >= SIMILARITY_THRESHOLD on EITHER the normalized
+      # title tokens OR the normalized root-cause tokens. Only entries that
+      # carry stored content (recorded since this feature shipped) can
+      # match; older content-less entries are skipped (their exact
+      # fingerprint still guards them via known_active?/dismissed?).
       def similar_known?(fingerprints, dismissed, finding, index: nil)
         tokens = title_tokens(finding)
         return false if tokens.empty?

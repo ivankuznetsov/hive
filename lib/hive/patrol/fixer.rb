@@ -109,10 +109,11 @@ module Hive
                                     output_path: output_path, run_dir: run_dir,
                                     worktree_path: worktree.path)
         # Never validate or ship the output of a failed fix agent. Agent#run!
-        # reports a non-zero exit or timeout via result[:status]=:error rather
-        # than raising; ignoring it let a half-finished or aborted run leave
-        # changes that could still pass validation, commit, and reach a PR
-        # (U6 never-ship-unvalidated). Treat an errored run as a failed patch.
+        # reports a non-zero exit via result[:status]=:error and a timed-out
+        # run via result[:status]=:timeout rather than raising; ignoring
+        # either let a half-finished or aborted run leave changes that could
+        # still pass validation, commit, and reach a PR
+        # (U6 never-ship-unvalidated). Treat both as a failed patch.
         return agent_failed_patch(finding, branch, worktree, base_sha, result) if agent_failed?(result)
 
         proof, proof_error = load_fix_proof(output_path)
@@ -188,11 +189,14 @@ module Hive
       end
 
       def agent_failed?(result)
-        result.is_a?(Hash) && result[:status] == :error
+        result.is_a?(Hash) && %i[error timeout].include?(result[:status])
       end
 
       def agent_failed_patch(finding, branch, worktree, base_sha, result)
         message = result.is_a?(Hash) ? result[:error_message].to_s : ""
+        if message.empty? && result.is_a?(Hash) && result[:status] == :timeout
+          message = "fix agent timed out"
+        end
         failed_attempt_patch(
           finding, branch, worktree,
           { "passed" => false, "reason" => "fix_agent_failed", "error" => message },
@@ -526,17 +530,27 @@ module Hive
         created = true
         yield control_path
       ensure
+        cleanup_error = nil
         if created
           out, err, status = Open3.capture3(
             "git", "-C", @project_root, "worktree", "remove", "--force", control_path
           )
-          FileUtils.rm_rf(control_path)
           unless status.success?
             detail = err.to_s.strip.empty? ? out.to_s.strip : err.to_s.strip
-            raise Hive::GitError, "cannot remove patrol control worktree #{control_path}: #{detail}"
+            cleanup_error = "cannot remove patrol control worktree #{control_path}: #{detail}"
           end
-        elsif control_path
-          FileUtils.rm_rf(control_path)
+        end
+        FileUtils.rm_rf(control_path) if control_path
+        if cleanup_error
+          if $!
+            # The block's exception is already in flight. Raising here would
+            # REPLACE it (ensure raises carry no cause chain), hiding the
+            # actual proof failure behind a cleanup detail. Report the
+            # cleanup problem and let the original propagate.
+            warn "[hive] #{cleanup_error} (while handling #{$!.class}: #{$!.message})"
+          else
+            raise Hive::GitError, cleanup_error
+          end
         end
       end
 

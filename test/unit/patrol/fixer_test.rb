@@ -165,6 +165,35 @@ class HivePatrolFixerTest < Minitest::Test
     end
   end
 
+  def test_timed_out_fix_agent_run_is_not_validated_or_shipped
+    with_tmp_git_repo do |repo|
+      File.write(File.join(repo, "app.rb"), "puts 'old'\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "app", "--quiet")
+      validator = Object.new
+      validator.define_singleton_method(:validate) do |*_args, **_kwargs|
+        raise "a timed-out fix agent's changes must never be validated"
+      end
+      # Agent#run! reports a timeout via status :timeout (not :error), yet
+      # still leaves a half-finished (would-be valid) change behind.
+      agent = lambda do |worktree_path:, **|
+        File.write(File.join(worktree_path, "app.rb"), "puts 'fixed'\n")
+        { status: :timeout }
+      end
+
+      patch = Hive::Patrol::Fixer.new(
+        repo, cfg: cfg(repo), validator: validator, agent_runner: agent
+      ).attempt(finding)
+
+      assert_equal false, patch.passed, "a timed-out fix agent must never produce a validated patch"
+      assert_equal "fix_agent_failed", patch.validation["reason"]
+      assert_includes patch.validation["error"], "timed out"
+      refute_empty Dir[File.join(repo, ".hive-state", "patrol", "patches", "*.json")],
+                   "the timed-out attempt must still be recorded as an agent failure"
+      refute File.directory?(patch.worktree_path), "timed-out-agent worktree should be removed"
+    end
+  end
+
   def test_missing_validation_commands_fails_closed
     with_tmp_git_repo do |repo|
       empty_cfg = cfg(repo)
@@ -992,6 +1021,76 @@ class HivePatrolFixerTest < Minitest::Test
         assert_match(/cannot remove patrol control worktree/, error.message)
       end
       run!("git", "-C", repo, "worktree", "prune")
+    end
+  end
+
+  def test_control_worktree_cleanup_failure_does_not_mask_the_block_error
+    with_tmp_git_repo do |repo|
+      fixer = Hive::Patrol::Fixer.new(repo, cfg: cfg(repo))
+      base = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      status = Struct.new(:exitstatus) { def success? = exitstatus.zero? }
+      original = Open3.method(:capture3)
+      replacement = lambda do |*args, **kwargs|
+        if args.include?("worktree") && args.include?("remove")
+          [ "", "simulated cleanup failure", status.new(1) ]
+        else
+          original.call(*args, **kwargs)
+        end
+      end
+
+      error = nil
+      _out, err = capture_io do
+        with_replaced_singleton_method(Open3, :capture3, replacement) do
+          error = assert_raises(RuntimeError) do
+            fixer.send(:with_control_worktree, base, repo) { raise "machine proof crashed" }
+          end
+        end
+      end
+
+      assert_equal "machine proof crashed", error.message,
+                   "the ensure-block cleanup failure must not replace the in-flight exception"
+      assert_match(/cannot remove patrol control worktree/, err)
+      assert_match(/machine proof crashed/, err)
+      run!("git", "-C", repo, "worktree", "prune")
+    end
+  end
+
+  def test_machine_proof_before_run_executes_the_overlaid_regression_against_the_defect
+    with_tmp_git_repo do |repo|
+      # The base is VALID ruby and green on its own; only the behavioral
+      # defect (the app prints 'old') distinguishes it from the fix, and the
+      # configured validation runs ONLY the regression test. The "before"
+      # receipt can therefore fail only if overlay_regression_paths! copied
+      # the regression into the control checkout and it executed against the
+      # defect itself.
+      File.write(File.join(repo, "app.rb"), "puts 'old'\n")
+      run!("git", "-C", repo, "add", ".")
+      run!("git", "-C", repo, "commit", "-m", "valid but defective app", "--quiet")
+      regression_cfg = cfg(repo)
+      regression_cfg["patrol"]["commands"]["test"] = "ruby test/patrol_regression_test.rb"
+      marker = "PATROL-REGRESSION-DEFECT: app.rb still carries the defect"
+      agent = lambda do |worktree_path:, output_path:, **|
+        File.write(File.join(worktree_path, "app.rb"), "puts 'fixed'\n")
+        path = File.join(worktree_path, "test", "patrol_regression_test.rb")
+        FileUtils.mkdir_p(File.dirname(path))
+        File.write(path, <<~RUBY)
+          expected = "puts 'fixed'\\n"
+          actual = File.read(File.expand_path("../app.rb", __dir__))
+          abort #{marker.dump} unless actual == expected
+        RUBY
+        write_fix_proof(output_path)
+      end
+
+      patch = Hive::Patrol::Fixer.new(repo, cfg: regression_cfg, agent_runner: agent).attempt(finding)
+
+      assert patch.passed, patch.validation.inspect
+      before = patch.validation.dig("fix_proof", "before")
+      refute_equal 0, before.fetch("exit_code")
+      observed = [ before["stdout"], before["stderr"] ].join("\n")
+      assert_includes observed, marker,
+                      "the base 'before' run must fail with the overlaid regression's own message, " \
+                      "proving the declared regression file was copied to the control checkout and executed"
+      assert_equal 0, patch.validation.dig("fix_proof", "after", "exit_code")
     end
   end
 

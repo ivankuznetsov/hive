@@ -390,6 +390,46 @@ class ClaudeLauncherTest < Minitest::Test
     assert_equal [ lease ], released
   end
 
+  def test_attempt_lease_heartbeat_stops_when_store_rejects_renewal
+    lease = Struct.new(:id).new("lease-2")
+    heartbeats = []
+    released = []
+    store = Object.new
+    store.define_singleton_method(:heartbeat) { |value| heartbeats << value; false }
+    store.define_singleton_method(:release) { |value| released << value }
+    fake_thread = Object.new
+    fake_thread.define_singleton_method(:kill) { }
+    fake_thread.define_singleton_method(:join) { }
+
+    with_replaced_singleton_method(Hive::ClaudeLauncher, :sleep, ->(_seconds) { }) do
+      with_replaced_singleton_method(Thread, :new, ->(&block) { block.call; fake_thread }) do
+        assert_equal :done, Hive::ClaudeLauncher.with_attempt_lease(lease, store) { :done }
+      end
+    end
+
+    assert_equal [ lease ], heartbeats
+    assert_equal [ lease ], released
+  end
+
+  def test_tmux_launch_rejects_a_stale_route_before_session_creation
+    with_tmp_task do |task|
+      check = Struct.new(:valid, :reason).new(false, "circuit opened")
+      router = Object.new
+      router.define_singleton_method(:dispatch_valid?) { |_decision| check }
+      error = assert_raises(Hive::UnavailableError) do
+        Hive::ClaudeLauncher.launch!(
+          task: task,
+          cfg: Hive::Config.merge_defaults("claude" => { "mode" => "tmux" }),
+          prompt: "test", add_dirs: [], cwd: task.folder,
+          max_budget_usd: 1, timeout_sec: 1, log_label: "test",
+          session_name: "test-session", routing_decision: Object.new,
+          provider_router: router
+        )
+      end
+      assert_includes error.message, "circuit opened"
+    end
+  end
+
   def test_send_prompt_and_wait_returns_timeout_when_readiness_consumes_deadline
     with_tmp_task do |task|
       runner = Object.new
@@ -1090,6 +1130,24 @@ class ClaudeLauncherTest < Minitest::Test
       assert_raises(ArgumentError) do
         Hive::ClaudeLauncher.wait_for_status(task, runner, 0, :mystery, missing_output, "x")
       end
+    end
+  end
+
+  def test_state_marker_limit_attaches_a_provider_signal
+    with_tmp_task do |task|
+      Hive::Markers.set(
+        task.state_file, :error,
+        reason: "limits_reached", message: "You've hit your session limit"
+      )
+      File.write(Hive::ClaudeLauncher.done_path(task), "done")
+      runner = Object.new
+
+      result = Hive::ClaudeLauncher.wait_for_status(
+        task, runner, 0, :state_file_marker, nil, "execute"
+      )
+
+      assert_equal :error, result.fetch(:status)
+      assert_equal "session_limit", result.fetch(:provider_signal).failure_class
     end
   end
 

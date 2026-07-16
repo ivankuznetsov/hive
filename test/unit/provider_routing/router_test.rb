@@ -302,6 +302,74 @@ class ProviderRoutingRouterTest < Minitest::Test
     end
   end
 
+  def test_probe_dispatch_gate_validates_the_durable_claim
+    with_router do |router, circuits, _leases|
+      config = configuration(pool: [ candidate("claude-main", "claude") ])
+      circuits.record(signal("rate_limit", provider: "claude-main"),
+                      account: config.accounts.fetch("claude-main"), now: @now)
+      @now += 300
+      probe = router.select(request(config, "dispatch-probe"))
+
+      check = router.dispatch_valid?(probe)
+      assert check.valid
+      assert_equal "probe_claim_valid", check.reason
+
+      circuits.abandon_probe(
+        provider: probe.provider, model: probe.model,
+        attempt_id: probe.attempt_id, now: @now
+      )
+      lost = router.dispatch_valid?(probe)
+      refute lost.valid
+      assert_equal "probe_claim_lost", lost.reason
+      router.cancel(probe)
+    end
+  end
+
+  def test_router_rejects_unavailable_custom_adapter
+    config = Hive::ProviderRouting::Configuration.single(provider: "custom", agent: "custom")
+    router = Hive::ProviderRouting::Router.new(adapter_available: ->(_name) { false })
+
+    decision = router.select(request(config, "missing-adapter"))
+
+    assert decision.wait?
+    assert_equal "adapter_unavailable", decision.reason
+  end
+
+  def test_probe_claim_lost_and_dispatch_store_errors_fail_closed
+    availability = Hive::ProviderRouting::Store::Availability.new(
+      status: "probe_available", scope: "provider", reason: "rate_limit",
+      retry_at: @now, probe: nil
+    )
+    failed_probe = Hive::ProviderRouting::Store::ProbeClaim.new(
+      claimed: false, provider: "custom", model: nil, scope: "provider",
+      reason: "already claimed", attempt_id: "lost"
+    )
+    circuit_store = Object.new
+    circuit_store.define_singleton_method(:availability) { |**_kwargs| availability }
+    circuit_store.define_singleton_method(:claim_probe) { |**_kwargs| failed_probe }
+    lease_store = Object.new
+    router = Hive::ProviderRouting::Router.new(
+      circuit_store: circuit_store, lease_store: lease_store,
+      adapter_available: ->(_name) { true }, clock: -> { @now }
+    )
+    config = Hive::ProviderRouting::Configuration.single(provider: "custom", agent: "custom")
+    decision = router.select(request(config, "lost"))
+    assert decision.wait?
+    assert_equal "probe_claimed", decision.reason
+
+    selected = Hive::ProviderRouting::Decision.new(
+      status: :selected, attempt_id: "a1", reason: "first_eligible", wait_reason: nil,
+      rejections: [], explanation: "selected", candidate: config.pool.first,
+      account: config.accounts.fetch("custom"), lease: Object.new
+    )
+    lease_store.define_singleton_method(:active?) do |*_args, **_kwargs|
+      raise Hive::AttemptLeaseStoreError, "unavailable"
+    end
+    check = router.dispatch_valid?(selected)
+    refute check.valid
+    assert_includes check.reason, "routing_state_unavailable"
+  end
+
   private
 
   def with_router

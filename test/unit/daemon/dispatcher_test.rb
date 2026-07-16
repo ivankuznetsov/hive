@@ -304,6 +304,25 @@ class HiveDaemonDispatcherTest < Minitest::Test
     end
   end
 
+  class FakeWorkflowRecovery
+    attr_accessor :next_candidates
+    attr_reader :finished
+
+    def initialize
+      @next_candidates = []
+      @finished = []
+    end
+
+    def candidates(_rows, now:)
+      _ = now
+      next_candidates
+    end
+
+    def finish(resume, dispatched:, now:)
+      @finished << { resume: resume, dispatched: dispatched, now: now }
+    end
+  end
+
   # ── construction helpers ───────────────────────────────────────────────
 
   def make_dispatcher(rows: [], dry_run: false, with_merge_watcher: false,
@@ -4302,7 +4321,84 @@ end
     assert_includes fatal[1][:message], "id backfiller boom"
   end
 
+  def test_tick_offers_workflow_recovery_candidates_to_the_common_gate
+    r = row(action: "error", workflow: "campaign")
+    resume = Struct.new(:row).new(r)
+    recovery = FakeWorkflowRecovery.new
+    recovery.next_candidates = [ resume ]
+    dispatcher, = make_dispatcher(rows: [ r ])
+    dispatcher.instance_variable_set(:@workflow_recovery, recovery)
+    offered = []
+    dispatcher.define_singleton_method(:dispatch_workflow_recovery_with_gates) do |value, now:|
+      offered << [ value, now ]
+    end
+
+    dispatcher.tick(now: T0)
+
+    assert_equal [ [ resume, T0 ] ], offered
+  end
+
+  def test_workflow_recovery_gate_blocks_disabled_legacy_inflight_and_capacity_rows
+    r = row(action: "error", workflow: "campaign")
+    resume = recovery_resume(r)
+
+    disabled, = make_dispatcher(project_enabled: false)
+    recovery = FakeWorkflowRecovery.new
+    disabled.instance_variable_set(:@workflow_recovery, recovery)
+    disabled.send(:dispatch_workflow_recovery_with_gates, resume, now: T0)
+    refute recovery.finished.last.fetch(:dispatched)
+
+    legacy, = make_dispatcher
+    recovery = FakeWorkflowRecovery.new
+    legacy.instance_variable_set(:@workflow_recovery, recovery)
+    legacy.instance_variable_set(:@legacy_layout_projects, { r.project => true })
+    legacy.send(:dispatch_workflow_recovery_with_gates, resume, now: T0)
+    refute recovery.finished.last.fetch(:dispatched)
+
+    inflight, _supervisor, controller = make_dispatcher
+    recovery = FakeWorkflowRecovery.new
+    inflight.instance_variable_set(:@workflow_recovery, recovery)
+    controller.define_singleton_method(:running_task?) { |**_kwargs| true }
+    inflight.send(:dispatch_workflow_recovery_with_gates, resume, now: T0)
+    refute recovery.finished.last.fetch(:dispatched)
+
+    capped, _supervisor, controller = make_dispatcher
+    recovery = FakeWorkflowRecovery.new
+    capped.instance_variable_set(:@workflow_recovery, recovery)
+    controller.define_singleton_method(:running_task?) { |**_kwargs| false }
+    controller.define_singleton_method(:can_dispatch?) { |**_kwargs| :global_cap }
+    capped.send(:dispatch_workflow_recovery_with_gates, resume, now: T0)
+    refute recovery.finished.last.fetch(:dispatched)
+  end
+
+  def test_workflow_recovery_dispatches_and_reports_defensive_failures
+    r = row(action: "error", workflow: "campaign", stage: "2-run", command: "hive run s1")
+    resume = recovery_resume(r)
+    dispatcher, supervisor, _controller, logger = make_dispatcher
+    recovery = FakeWorkflowRecovery.new
+    dispatcher.instance_variable_set(:@workflow_recovery, recovery)
+
+    dispatcher.send(:dispatch_workflow_recovery_with_gates, resume, now: T0)
+
+    assert_equal "hive run s1", supervisor.spawned.last.fetch(:command)
+    assert recovery.finished.last.fetch(:dispatched)
+    assert events_include?(logger, :workflow_recovery_dispatched)
+
+    exploding, = make_dispatcher
+    failed_recovery = FakeWorkflowRecovery.new
+    exploding.instance_variable_set(:@workflow_recovery, failed_recovery)
+    exploding.define_singleton_method(:dispatch_command) { |*_args, **_kwargs| raise "spawn boom" }
+    exploding.send(:dispatch_workflow_recovery_with_gates, resume, now: T0)
+    refute failed_recovery.finished.last.fetch(:dispatched)
+    assert events_include?(exploding.logger, :fatal)
+  end
+
   private
+
+  def recovery_resume(r)
+    snapshot = Struct.new(:checkpoint_generation).new(3)
+    Struct.new(:row, :command, :snapshot).new(r, r.suggested_command, snapshot)
+  end
 
   def events_include?(logger, name)
     logger.events.any? { |(n, _)| n == name }

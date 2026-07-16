@@ -141,6 +141,14 @@ class AgentProfileTest < Minitest::Test
     assert_match(/unknown status_detection_mode/, err.message)
   end
 
+  def test_invalid_prompt_style_raises_at_construction
+    err = assert_raises(ArgumentError) do
+      make_profile(prompt_style: :telepathy)
+    end
+
+    assert_match(/unknown prompt_style/, err.message)
+  end
+
   def test_preflight_default_is_noop
     profile = make_profile
     assert_nil profile.preflight!
@@ -328,6 +336,17 @@ class AgentProfileTest < Minitest::Test
     assert_equal "unknown", signal.failure_class
     assert_equal "none", signal.scope
     refute signal.circuit_worthy?
+  end
+
+  def test_error_normalizer_default_fails_safely_when_evidence_cannot_be_rendered
+    evidence = Object.new
+    evidence.define_singleton_method(:to_s) { raise "broken evidence" }
+
+    assert_nil make_profile.normalize_error(
+      evidence: evidence, exit_code: 1, timed_out: false,
+      model: nil, provider: "custom-main", evidence_ref: "logs/custom.log",
+      success: false
+    )
   end
 
   # --- with_overrides ---------------------------------------------------

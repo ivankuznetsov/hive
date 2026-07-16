@@ -44,6 +44,25 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_load_validates_authored_stage_routing_against_provider_accounts
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(
+        File.join(dir, ".hive-state", "config.yml"),
+        {
+          "execute" => {
+            "routing" => {
+              "pool" => [ { "provider" => "codex", "agent" => "codex" } ]
+            }
+          }
+        }.to_yaml
+      )
+
+      cfg = Hive::Config.load(dir)
+      assert_equal "codex", cfg.dig("execute", "routing", "pool", 0, "provider")
+    end
+  end
+
   def test_load_rejects_non_hash_daemon_auto_retry
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))

@@ -23,13 +23,16 @@ class PathsTest < Minitest::Test
         "XDG_DATA_HOME" => File.join(dir, "data"),
         "XDG_STATE_HOME" => File.join(dir, "state"),
         "XDG_CACHE_HOME" => File.join(dir, "cache"),
-        "XDG_BIN_HOME" => File.join(dir, "bin")
+        "XDG_BIN_HOME" => File.join(dir, "bin"),
+        "HIVE_PROVIDER_ROUTING_STATE_HOME" => nil
       ) do
         assert_equal File.join(dir, "config", "hive"), Hive::Paths.config_home
         assert_equal File.join(dir, "data", "hive"), Hive::Paths.data_home
         assert_equal File.join(dir, "state", "hive"), Hive::Paths.state_home
         assert_equal File.join(dir, "cache", "hive"), Hive::Paths.cache_home
         assert_equal File.join(dir, "bin"), Hive::Paths.bin_home
+        assert_equal File.join(dir, "state", "hive", ".provider-circuits.lock"),
+                     Hive::Paths.provider_circuits_lock_path
       end
     end
   end

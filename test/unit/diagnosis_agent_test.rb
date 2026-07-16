@@ -606,6 +606,83 @@ def test_spawn_profile_builds_codex_command_and_pipes_prompt_to_stdin
   assert_equal 12, captured[:timeout_sec]
 end
 
+def test_routed_run_waits_without_spawning_when_no_provider_is_available
+  profile = CommandProfile.new(name: :codex, bin: "codex", prompt_style: :stdin)
+  decision = Struct.new(:explanation) do
+    def wait? = true
+  end.new("provider is open")
+  router = Object.new
+  agent = Hive::DiagnosisAgent.new(task: @task)
+
+  error = with_replaced_singleton_method(Hive::Config, :load, ->(_root) { {} }) do
+    with_replaced_singleton_method(Hive::Stages::Base, :stage_profile, ->(*_args) { profile }) do
+      with_replaced_singleton_method(Hive::Stages::Base, :provider_router, -> { router }) do
+        with_replaced_singleton_method(Hive::Stages::Base, :route_attempt, ->(*_args, **_kwargs) { decision }) do
+          assert_raises(Hive::UnavailableError) { agent.run! }
+        end
+      end
+    end
+  end
+
+  assert_match(/provider is open/, error.message)
+end
+
+def test_routed_run_cancels_a_dispatch_that_becomes_invalid_before_spawn
+  profile = CommandProfile.new(name: :codex, bin: "codex", prompt_style: :stdin)
+  decision = Struct.new(:profile, :model, :provider, :lease) do
+    def wait? = false
+  end.new(profile, "gpt-test", "codex-main", "lease-1")
+  cancelled = []
+  router = Object.new
+  router.define_singleton_method(:dispatch_valid?) do |_decision|
+    Struct.new(:valid, :reason).new(false, "circuit opened")
+  end
+  router.define_singleton_method(:cancel) { |value| cancelled << value }
+  agent = Hive::DiagnosisAgent.new(task: @task)
+
+  error = with_replaced_singleton_method(Hive::Config, :load, ->(_root) { {} }) do
+    with_replaced_singleton_method(Hive::Stages::Base, :stage_profile, ->(*_args) { profile }) do
+      with_replaced_singleton_method(Hive::Stages::Base, :provider_router, -> { router }) do
+        with_replaced_singleton_method(Hive::Stages::Base, :route_attempt, ->(*_args, **_kwargs) { decision }) do
+          assert_raises(Hive::UnavailableError) { agent.run! }
+        end
+      end
+    end
+  end
+
+  assert_match(/provider route invalid before diagnosis spawn/, error.message)
+  assert_equal [ decision ], cancelled
+end
+
+def test_spawn_profile_heartbeats_a_valid_routed_attempt
+  agent = Hive::DiagnosisAgent.new(task: @task, spawn: spy_spawn)
+  profile = CommandProfile.new(name: :codex, bin: "codex", prompt_style: :stdin)
+  decision = Struct.new(:lease).new("lease-1")
+  heartbeats = []
+  lease_store = Object.new
+  lease_store.define_singleton_method(:with_heartbeat) do |lease, &block|
+    heartbeats << lease
+    block.call
+  end
+  router = Object.new
+  router.define_singleton_method(:dispatch_valid?) do |_value|
+    Struct.new(:valid, :reason).new(true, nil)
+  end
+  router.define_singleton_method(:lease_store) { lease_store }
+  agent.instance_variable_set(:@routing_decision, decision)
+  agent.instance_variable_set(:@provider_router, router)
+  agent.define_singleton_method(:run_with_timeout) { |_cmd, _cwd, _stdin, _timeout| "ok" }
+
+  result = agent.send(
+    :spawn_profile,
+    profile: profile, prompt: "diagnose", cwd: @project_root,
+    add_dirs: [ @folder ], timeout_sec: 12, max_budget_usd: 3
+  )
+
+  assert_equal "ok", result
+  assert_equal [ "lease-1" ], heartbeats
+end
+
 def test_build_cmd_omits_optional_flags_for_plain_prompt_profiles
   agent = Hive::DiagnosisAgent.new(task: @task, spawn: spy_spawn)
   profile = CommandProfile.new(name: :claude, bin: "claude")
@@ -760,7 +837,10 @@ CommandProfile = Struct.new(
   :name, :bin, :headless_flag, :permission_skip_flag, :add_dir_flag, :budget_flag,
   :prompt_style,
   keyword_init: true
-)
+) do
+  def check_version! = true
+  def preflight! = true
+end
 
 class FakeLockFile
   attr_reader :closed

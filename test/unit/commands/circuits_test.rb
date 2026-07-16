@@ -91,6 +91,28 @@ class CommandsCircuitsTest < Minitest::Test
     end
   end
 
+  def test_human_listing_renders_retry_and_unlimited_concurrency
+    with_fixture do |store, leases, accounts|
+      store.record(signal("claude-main", "auth"), account: accounts.fetch("claude-main"), now: NOW)
+
+      out, = capture_io do
+        Hive::Commands::Circuits.new(
+          nil, nil, store: store, lease_store: leases, accounts: accounts
+        ).call
+      end
+
+      assert_includes out, "PROVIDER/MODEL\tADAPTER\tSTATE"
+      assert_includes out, "claude-main\tclaude\topen\tauth\tmanual\t0/2"
+      assert_includes out, "codex-main\tcodex\tclosed\t-\t-\t0/unlimited"
+    end
+  end
+
+  def test_unknown_subcommand_is_rejected
+    assert_raises(Hive::ConfigError) do
+      Hive::Commands::Circuits.new("explode").call
+    end
+  end
+
   private
 
   def with_fixture

@@ -94,6 +94,32 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_attempt_lease_heartbeat_and_final_route_assertion
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      lease = Object.new
+      heartbeats = []
+      store = Object.new
+      store.define_singleton_method(:heartbeat) { |value| heartbeats << value }
+      valid = Struct.new(:valid, :reason)
+      router = Object.new
+      router.define_singleton_method(:dispatch_valid?) { |_decision| valid.new(false, "circuit opened") }
+      agent = Hive::Agent.new(
+        task: task, prompt: "test", max_budget_usd: 1, timeout_sec: 5,
+        attempt_lease: lease, attempt_lease_store: store,
+        routing_decision: Object.new, provider_router: router
+      )
+      agent.instance_variable_set(:@last_lease_heartbeat, 0)
+
+      agent.send(:renew_attempt_lease_if_due)
+      assert_equal [ lease ], heartbeats
+      error = assert_raises(Hive::UnavailableError) do
+        agent.send(:assert_route_still_dispatchable!)
+      end
+      assert_includes error.message, "circuit opened"
+    end
+  end
+
   def test_run_emits_agent_start_and_end_events
     with_tmp_dir do |dir|
       task = make_task(dir)

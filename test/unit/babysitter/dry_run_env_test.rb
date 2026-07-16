@@ -467,6 +467,16 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_materialize_gh_auth_config_returns_an_empty_view_when_source_disappears
+    with_tmp_dir do |dir|
+      auth_view = Hive::Babysitter::DryRunEnv.materialize_gh_auth_config(File.join(dir, "missing"))
+
+      assert_empty Dir.children(auth_view)
+    ensure
+      FileUtils.rm_rf(auth_view) if auth_view
+    end
+  end
+
   def test_with_env_pins_skip_log_against_command_local_overrides
     with_tmp_dir do |dir|
       worktree = File.join(dir, "worktree")

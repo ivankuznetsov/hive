@@ -166,6 +166,62 @@ class DisplayNameGeneratorTest < Minitest::Test
     end
   end
 
+  def test_run_agent_supports_the_legacy_unrouted_path
+    script = "#!/bin/sh\nprintf 'Legacy route name\\n'\n"
+    with_generator(script: script, commit: false) do |gen|
+      cfg = gen.instance_variable_get(:@cfg)
+      profile = Hive::Stages::Base.stage_profile(cfg, "execute")
+
+      result = gen.send(:run_agent, profile)
+
+      assert_equal 0, result.fetch(:exit_code)
+      assert_equal "Legacy route name", result.fetch(:final_message)
+    end
+  end
+
+  def test_run_agent_cancels_a_route_that_becomes_invalid_before_spawn
+    with_generator(commit: false) do |gen|
+      profile = Hive::Stages::Base.stage_profile(gen.instance_variable_get(:@cfg), "execute")
+      decision = Struct.new(:model, :provider).new(nil, "claude-main")
+      cancelled = []
+      router = Object.new
+      router.define_singleton_method(:dispatch_valid?) do |_value|
+        Struct.new(:valid, :reason).new(false, "circuit opened")
+      end
+      router.define_singleton_method(:cancel) { |value| cancelled << value }
+      gen.instance_variable_set(:@routing_decision, decision)
+      gen.instance_variable_set(:@provider_router, router)
+
+      error = assert_raises(Hive::UnavailableError) { gen.send(:run_agent, profile) }
+
+      assert_match(/provider route invalid before display-name spawn/, error.message)
+      assert_equal [ decision ], cancelled
+    end
+  end
+
+  def test_run_agent_records_an_unexpected_spawn_failure
+    with_generator(commit: false) do |gen|
+      profile = Hive::Stages::Base.stage_profile(gen.instance_variable_get(:@cfg), "execute")
+      decision = Struct.new(:model, :provider).new(nil, "claude-main")
+      outcomes = []
+      router = Object.new
+      router.define_singleton_method(:dispatch_valid?) do |_value|
+        Struct.new(:valid, :reason).new(true, nil)
+      end
+      router.define_singleton_method(:record_outcome) { |**kwargs| outcomes << kwargs }
+      gen.instance_variable_set(:@routing_decision, decision)
+      gen.instance_variable_set(:@provider_router, router)
+
+      with_replaced_singleton_method(Process, :spawn, ->(*_args, **_kwargs) { raise Errno::ENOENT, "gone" }) do
+        assert_raises(Errno::ENOENT) { gen.send(:run_agent, profile) }
+      end
+
+      assert_equal 1, outcomes.length
+      refute outcomes.first.fetch(:success)
+      assert_equal decision, outcomes.first.fetch(:decision)
+    end
+  end
+
   private
 
   # Builds a real task folder (valid PATH_RE) plus a config that points the

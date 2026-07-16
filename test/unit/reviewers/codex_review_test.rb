@@ -7,6 +7,31 @@ class ReviewersCodexReviewTest < Minitest::Test
 
   FAKE_BIN = File.expand_path("../../fixtures/fake-codex", __dir__)
 
+  FakeDecision = Struct.new(
+    :profile, :provider, :model, :lease, :rejections,
+    :explanation, :reason, :wait_reason, :waiting,
+    keyword_init: true
+  ) do
+    def wait? = waiting == true
+  end
+
+  class FakeRouter
+    attr_accessor :check
+    attr_reader :cancelled, :outcomes, :lease_store
+
+    def initialize
+      @check = Struct.new(:valid, :reason).new(true, "closed")
+      @cancelled = []
+      @outcomes = []
+      @lease_store = Object.new
+      @lease_store.define_singleton_method(:with_heartbeat) { |_lease, &block| block.call }
+    end
+
+    def dispatch_valid?(_decision) = check
+    def cancel(decision) = cancelled << decision
+    def record_outcome(**kwargs) = outcomes << kwargs
+  end
+
   def setup
     @prev_bin = ENV["HIVE_CODEX_BIN"]
     ENV["HIVE_CODEX_BIN"] = FAKE_BIN
@@ -1078,6 +1103,90 @@ class ReviewersCodexReviewTest < Minitest::Test
           assert second.ok?
           assert_equal "codex-backup", second.provider
         end
+      end
+    end
+  end
+
+  def test_routing_wait_and_non_codex_fallback_return_errors_without_native_spawn
+    with_tmp_dir do |dir|
+      router = FakeRouter.new
+      codex = Hive::AgentProfiles.lookup(:codex)
+      waiting = FakeDecision.new(
+        profile: codex, provider: "codex", rejections: [],
+        explanation: "provider open", reason: "circuit_open",
+        wait_reason: "limits_reached", waiting: true
+      )
+      reviewer = build_reviewer(dir)
+      result = run_with_routing(reviewer, router, waiting)
+      assert result.error?
+      assert_includes result.error_message, "provider open"
+
+      claude = Hive::AgentProfiles.lookup(:claude)
+      fallback = FakeDecision.new(
+        profile: claude, provider: "claude", rejections: [], waiting: false
+      )
+      result = run_with_routing(build_reviewer(dir), router, fallback)
+      assert result.error?
+      assert_includes result.error_message, "cannot run the native `codex review`"
+      assert_includes router.cancelled, fallback
+    end
+  end
+
+  def test_invalid_final_route_and_native_spawn_exception_are_recorded
+    with_tmp_dir do |dir|
+      profile = Hive::AgentProfiles.lookup(:codex)
+      decision = FakeDecision.new(
+        profile: profile, provider: "codex", model: nil,
+        lease: Object.new, rejections: [], waiting: false
+      )
+      router = FakeRouter.new
+      router.check = Struct.new(:valid, :reason).new(false, "probe lost")
+      result = run_with_routing(build_reviewer(dir), router, decision)
+      assert result.error?
+      assert_includes result.error_message, "probe lost"
+      assert_includes router.cancelled, decision
+
+      router = FakeRouter.new
+      reviewer = build_reviewer(dir)
+      reviewer.define_singleton_method(:run_codex_review) do |*_args|
+        raise "native spawn failed"
+      end
+      error = assert_raises(RuntimeError) do
+        run_with_routing(reviewer, router, decision)
+      end
+      assert_includes error.message, "native spawn failed"
+      assert_equal false, router.outcomes.last.fetch(:success)
+    end
+  end
+
+  def test_unexpected_preflight_failure_cancels_the_route
+    with_tmp_dir do |dir|
+      reviewer = build_reviewer(dir)
+      profile = Hive::AgentProfiles.lookup(:codex)
+      reviewer.define_singleton_method(:enforce_permission_scope_gate!) do |_profile|
+        raise "preflight exploded"
+      end
+      decision = FakeDecision.new(
+        profile: profile, provider: "codex", lease: Object.new,
+        rejections: [], waiting: false
+      )
+      router = FakeRouter.new
+
+      assert_raises(RuntimeError) do
+        reviewer.send(:codex_preflight, profile, decision, router)
+      end
+      assert_includes router.cancelled, decision
+    end
+  end
+
+  private
+
+  def run_with_routing(reviewer, router, decision)
+    with_replaced_singleton_method(Hive::Stages::Base, :provider_router, -> { router }) do
+      with_replaced_singleton_method(
+        Hive::Stages::Base, :route_attempt, ->(*_args, **_kwargs) { decision }
+      ) do
+        return reviewer.run!
       end
     end
   end

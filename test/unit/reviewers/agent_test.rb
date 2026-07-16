@@ -89,6 +89,36 @@ class ReviewersAgentTest < Minitest::Test
     end
   end
 
+  def test_routing_wait_returns_the_common_wait_envelope_without_spawning
+    with_tmp_dir do |dir|
+      ctx = make_ctx(dir)
+      FileUtils.mkdir_p(ctx.task_folder)
+      reviewer = Hive::Reviewers::Agent.new(make_spec, ctx)
+      decision = Struct.new(:explanation) do
+        def wait? = true
+      end.new("provider is open")
+      expected = {
+        status: :error,
+        error_message: "provider is open",
+        routing_reason: "provider is open"
+      }
+
+      with_replaced_singleton_method(Hive::Stages::Base, :provider_router, -> { Object.new }) do
+        with_replaced_singleton_method(Hive::Stages::Base, :route_attempt, ->(*_args, **_kwargs) { decision }) do
+          with_replaced_singleton_method(
+            Hive::Stages::Base, :routing_wait_result,
+            ->(*_args, **_kwargs) { expected }
+          ) do
+            result = reviewer.run!
+            assert result.error?
+            assert_equal "provider is open after 2 attempt(s)", result.error_message
+            assert_equal "provider is open", result.routing_reason
+          end
+        end
+      end
+    end
+  end
+
   # A8 fail-closed, REAL adapter path: a non-yolo permissions scope on a
   # reviewer whose runner can't enforce tool scoping (codex) must raise
   # Hive::ConfigError from the ACTUAL Reviewers::Agent#run! →

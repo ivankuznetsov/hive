@@ -142,6 +142,108 @@ class AttemptLeaseStoreTest < Minitest::Test
     end
   end
 
+  def test_foreign_owner_cannot_reuse_an_active_lease_id
+    with_store do |store, _path|
+      first = store.claim(
+        namespace: "custom", key: "one", group: "group", lease_id: "shared",
+        owner_pid: 10, owner_start_time: "first", ttl_sec: 3600
+      )
+      second = store.claim(
+        namespace: "custom", key: "two", group: "group", lease_id: "shared",
+        owner_pid: 11, owner_start_time: "second", ttl_sec: 3600
+      )
+
+      assert first.claimed
+      refute second.claimed
+      assert_equal "lease_in_use", second.reason
+    end
+  end
+
+  def test_snapshot_is_deep_copied_and_completed_lease_is_terminal
+    with_store do |store, _path|
+      claim = store.claim_provider(
+        provider: "claude-main", model: nil, attempt_id: "nested",
+        provenance: { detail: { "values" => [ 1 ] } }, ttl_sec: 3600
+      )
+      snapshot = store.snapshot
+      snapshot.fetch("leases").values.first.fetch("provenance").fetch("detail").fetch("values") << 2
+      assert_equal [ 1 ], store.snapshot.fetch("leases").values.first.dig("provenance", "detail", "values")
+
+      assert store.complete(claim.lease)
+      assert store.leases.first.terminal?
+    end
+  end
+
+  def test_invalid_limit_and_default_process_identity_paths
+    with_store do |store, _path|
+      assert_raises(ArgumentError) do
+        store.claim_provider(provider: "claude", model: nil, attempt_id: "bad", max_concurrent: 0)
+      end
+
+      assert store.send(:process_identity_alive?, Process.pid, Hive::Lock.process_start_time(Process.pid))
+      refute store.send(:process_identity_alive?, 999_999_999, nil)
+      process_kill = Process.method(:kill)
+      with_replaced_singleton_method(
+        Process, :kill,
+        ->(*_args) { raise Errno::EPERM }
+      ) do
+        assert store.send(:process_identity_alive?, Process.pid, nil)
+      end
+      assert process_kill
+    end
+  end
+
+  def test_with_heartbeat_stops_when_lease_is_released
+    with_store do |store, _path|
+      claim = store.claim_provider(
+        provider: "claude", model: nil, attempt_id: "heartbeat", ttl_sec: 3600
+      )
+
+      result = store.with_heartbeat(claim.lease, interval_sec: 0.001) do
+        store.release(claim.lease)
+        sleep 0.01
+        :done
+      end
+
+      assert_equal :done, result
+      refute store.active?(claim.lease)
+    end
+  end
+
+  def test_store_surfaces_schema_read_lock_and_write_failures
+    with_store do |store, path|
+      File.write(path, JSON.generate("schema_version" => 99, "leases" => {}))
+      assert_raises(Hive::AttemptLeaseStoreError) { store.snapshot }
+
+      file_read = File.method(:read)
+      with_replaced_singleton_method(
+        File, :read,
+        ->(target, *args) { target == path ? (raise Errno::EACCES, target) : file_read.call(target, *args) }
+      ) do
+        assert_raises(Hive::AttemptLeaseStoreError) { store.snapshot }
+      end
+
+      FileUtils.rm_f(path)
+      atomic_write = Hive::AtomicFile.method(:write)
+      with_replaced_singleton_method(
+        Hive::AtomicFile, :write,
+        ->(target, *args, **kwargs) { target == path ? (raise Errno::ENOSPC, target) : atomic_write.call(target, *args, **kwargs) }
+      ) do
+        assert_raises(Hive::AttemptLeaseStoreError) do
+          store.claim_provider(provider: "claude", model: nil, attempt_id: "write")
+        end
+      end
+
+      blocked = File.join(File.dirname(path), "blocked")
+      File.write(blocked, "not a directory")
+      unavailable = Hive::AttemptLeaseStore.new(
+        path: path, lock_path: File.join(blocked, "lock")
+      )
+      assert_raises(Hive::AttemptLeaseStoreError) { unavailable.snapshot }
+      assert_equal Hive::ExitCodes::UNAVAILABLE, Hive::AttemptLeaseStoreError.new("x").exit_code
+    end
+  end
+
   private
 
   def with_store(owner_alive: ->(_pid, _start) { true })

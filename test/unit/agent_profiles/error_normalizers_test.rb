@@ -69,6 +69,31 @@ class AgentProfilesErrorNormalizersTest < Minitest::Test
     assert_in_delta Time.now.utc.to_f + 120, signal.reset_at.to_f, 3
   end
 
+  def test_reset_hint_accepts_text_seconds_and_future_iso8601
+    seconds = normalize(:codex, "rate limited; retry-after: 45 seconds")
+    future = (Time.now.utc + 600).iso8601
+    timestamp = normalize(:codex, %({"error":"rate_limit","reset_at":"#{future}"}))
+
+    assert_in_delta Time.now.utc.to_f + 45, seconds.reset_at.to_f, 3
+    assert_equal future, timestamp.reset_at.iso8601
+  end
+
+  def test_malformed_reset_timestamp_is_ignored
+    signal = normalize(:codex, '{"error":"rate_limit","reset_time":"not-a-time"}')
+
+    assert_nil signal.reset_at
+  end
+
+  def test_normalizer_rescue_returns_a_safe_unknown_signal
+    model = Object.new
+    model.define_singleton_method(:to_s) { raise "bad model" }
+    signal = normalizer(:codex).call(**context("quota exceeded; model-specific", model: model).merge(provider: ""))
+
+    assert_equal "unknown", signal.failure_class
+    assert_equal "codex", signal.provider
+    assert_equal "none", signal.scope
+  end
+
   def test_success_output_and_false_positive_prose_do_not_open_circuits
     success = normalizer(:claude).call(**context("usage limit reached", success: true))
     prose = normalize(:claude, "Implemented a scroll limit reached indicator")

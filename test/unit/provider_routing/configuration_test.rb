@@ -144,6 +144,52 @@ class ProviderRoutingConfigurationTest < Minitest::Test
     assert_includes error.message, "providers.bad.max_concurrent"
   end
 
+  def test_global_provider_registry_validates_shape_adapter_and_full_policy
+    assert_raises(Hive::ConfigError) do
+      Hive::ProviderRouting::Configuration.normalize_accounts([], source: "global providers")
+    end
+    assert_raises(Hive::ConfigError) do
+      Hive::ProviderRouting::Configuration.normalize_accounts(
+        { "bad" => { "adapter" => "ghost" } }, source: "global providers"
+      )
+    end
+
+    accounts = Hive::ProviderRouting::Configuration.normalize_accounts(
+      {
+        claude_main: {
+          adapter: :claude,
+          backoff_cap_sec: 7200,
+          cooldown_sec: { rate_limit: 12 }
+        }
+      },
+      source: "global providers"
+    )
+    account = accounts.fetch("claude_main")
+    assert_equal "claude", account.adapter
+    assert_equal 7200, account.backoff_cap_sec
+    assert_equal 12, account.cooldown_sec.fetch("rate_limit")
+  end
+
+  def test_empty_account_adapter_and_unmapped_legacy_adapter_are_rejected
+    assert_raises(Hive::ConfigError) do
+      Hive::ProviderRouting::Configuration.normalize_accounts(
+        { "empty" => { "adapter" => "" } }, source: "global providers"
+      )
+    end
+
+    accounts = Hive::ProviderRouting::Configuration.normalize_accounts(
+      { "claude-main" => { "adapter" => "claude" } }, source: "global providers"
+    )
+    assert_raises(Hive::ConfigError) do
+      Hive::ProviderRouting::Configuration.new(
+        accounts: accounts,
+        routing: nil,
+        legacy: { "agent" => "codex", "model" => nil, "effort" => nil },
+        source: "test.routing"
+      )
+    end
+  end
+
   private
 
   def candidate(provider, agent:, model: nil, context: "large")

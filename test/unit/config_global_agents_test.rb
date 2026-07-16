@@ -10,6 +10,28 @@ class ConfigGlobalAgentsTest < Minitest::Test
     end
   end
 
+  def test_load_global_provider_accounts_normalizes_authored_policy
+    with_tmp_global_config do |home|
+      File.write(
+        File.join(home, "config.yml"),
+        {
+          "registered_projects" => [],
+          "providers" => {
+            "claude-main" => {
+              "adapter" => "claude", "max_concurrent" => 2,
+              "cooldown_sec" => { "rate_limit" => 45 }
+            }
+          }
+        }.to_yaml
+      )
+
+      account = Hive::Config.load_global_provider_accounts.fetch("claude-main")
+      assert_equal "claude", account.adapter
+      assert_equal 2, account.max_concurrent
+      assert_equal 45, account.cooldown_sec.fetch("rate_limit")
+    end
+  end
+
   def test_write_and_load_global_agents_round_trips_in_backend_order
     with_tmp_global_config do |home|
       written = Hive::Config.write_global_agents!(%w[pi claude pi])

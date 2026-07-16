@@ -15,6 +15,9 @@ class RunReviewersTest < Minitest::Test
   # Minimal task stand-in. Stages::Review.run_reviewers only reads
   # task.folder via the adapter's output_path; nothing else.
   Task = Struct.new(:folder, :state_file)
+  SHARED_SCOPE = {
+    add_dirs: [], permission_mode: nil, allowed_tools: nil, disallowed_tools: nil
+  }.freeze
 
   def make_ctx(dir)
     Hive::Reviewers::Context.new(
@@ -732,6 +735,313 @@ class RunReviewersTest < Minitest::Test
       yield sessions
     ensure
       Hive::ClaudeLauncher.define_singleton_method(:with_shared_session, orig)
+    end
+  end
+
+  def with_method_stubs(target, stubs, &block)
+    return yield if stubs.empty?
+
+    (name, implementation), *remaining = stubs.to_a
+    with_replaced_singleton_method(target, name, implementation) do
+      with_method_stubs(target, remaining.to_h, &block)
+    end
+  end
+
+  def selected_reviewer_route(profile, provider: "claude-main", model: nil)
+    candidate = Hive::ProviderRouting::Candidate.new(
+      provider: provider, agent: profile.name.to_s, model: model, effort: nil,
+      capabilities: Hive::ProviderRouting::DEFAULT_CAPABILITIES, order: 0
+    )
+    Hive::ProviderRouting::Decision.new(
+      status: :selected, candidate: candidate, account: nil, profile: profile,
+      lease: Object.new, probe: nil, attempt_id: "review-attempt",
+      reason: "first_eligible", wait_reason: nil, rejections: [], explanation: "selected"
+    )
+  end
+
+  def routed_reviewer_router(valid: true, heartbeat_error: nil)
+    captures = { cancelled: [], outcomes: [] }
+    lease_store = Object.new
+    lease_store.define_singleton_method(:with_heartbeat) do |_lease, &block|
+      raise heartbeat_error if heartbeat_error
+
+      block.call
+    end
+    router = Object.new
+    router.define_singleton_method(:lease_store) { lease_store }
+    router.define_singleton_method(:dispatch_valid?) do |_decision|
+      Hive::ProviderRouting::Router::DispatchCheck.new(
+        valid: valid, reason: valid ? nil : "circuit opened"
+      )
+    end
+    router.define_singleton_method(:cancel) { |decision| captures[:cancelled] << decision }
+    router.define_singleton_method(:record_outcome) do |**kwargs|
+      captures[:outcomes] << kwargs
+      Hive::ProviderRouting::Router::Outcome.new(transition: nil, exclusion: nil)
+    end
+    [ router, captures ]
+  end
+
+  def test_routed_shared_group_falls_back_headless_for_non_claude_selection
+    with_tmp_dir do |dir|
+      cfg = {}
+      ctx = make_ctx(dir)
+      task = Task.new(dir, File.join(dir, "task.md"))
+      group = [ { "name" => "reviewer", "agent" => "codex" } ]
+      decision = selected_reviewer_route(Hive::AgentProfiles.lookup(:codex), provider: "codex-main")
+      router, captures = routed_reviewer_router
+      expected = [ :headless ]
+
+      result = with_method_stubs(
+        Hive::Stages::Base,
+        provider_router: -> { router },
+        route_attempt: ->(*_args, **_kwargs) { decision }
+      ) do
+        with_method_stubs(
+          Hive::Stages::Review,
+          run_reviewer_group_headless: ->(*_args, **_kwargs) { expected }
+        ) do
+          Hive::Stages::Review.run_routed_shared_reviewer_group(
+            cfg, ctx, task, group, 0,
+            remaining_specs: 1, started_at: nil, max_wall_clock_sec: nil
+          )
+        end
+      end
+
+      assert_same expected, result
+      assert_equal [ decision ], captures.fetch(:cancelled)
+    end
+  end
+
+  def test_routed_shared_group_cancels_a_route_invalidated_before_session_spawn
+    with_tmp_dir do |dir|
+      cfg = {}
+      ctx = make_ctx(dir)
+      task = Task.new(dir, File.join(dir, "task.md"))
+      group = [ { "name" => "reviewer", "agent" => "claude" } ]
+      decision = selected_reviewer_route(Hive::AgentProfiles.lookup(:claude))
+      router, captures = routed_reviewer_router(valid: false)
+
+      error = with_method_stubs(
+        Hive::Stages::Base,
+        provider_router: -> { router },
+        route_attempt: ->(*_args, **_kwargs) { decision }
+      ) do
+        with_method_stubs(
+          Hive::Stages::Review,
+          shared_reviewer_permission_scope: ->(*_args) { SHARED_SCOPE }
+        ) do
+          assert_raises(Hive::UnavailableError) do
+            Hive::Stages::Review.run_routed_shared_reviewer_group(
+              cfg, ctx, task, group, 0,
+              remaining_specs: 1, started_at: nil, max_wall_clock_sec: nil
+            )
+          end
+        end
+      end
+
+      assert_match(/provider route invalid before shared reviewer spawn/, error.message)
+      assert_equal [ decision ], captures.fetch(:cancelled)
+    end
+  end
+
+  def test_routed_shared_group_cancels_when_wall_clock_expires_inside_session
+    with_tmp_dir do |dir|
+      cfg = {}
+      ctx = make_ctx(dir)
+      task = Task.new(dir, File.join(dir, "task.md"))
+      group = [ { "name" => "reviewer", "agent" => "claude" } ]
+      decision = selected_reviewer_route(Hive::AgentProfiles.lookup(:claude))
+      router, captures = routed_reviewer_router
+
+      result = with_method_stubs(
+        Hive::Stages::Base,
+        provider_router: -> { router },
+        route_attempt: ->(*_args, **_kwargs) { decision }
+      ) do
+        with_method_stubs(
+          Hive::Stages::Review,
+          shared_reviewer_permission_scope: ->(*_args) { SHARED_SCOPE },
+          run_reviewer_spec: ->(*_args, **_kwargs) { :wall_clock_exceeded }
+        ) do
+          with_stubbed_claude_session do
+            Hive::Stages::Review.run_routed_shared_reviewer_group(
+              cfg, ctx, task, group, 0,
+              remaining_specs: 1, started_at: nil, max_wall_clock_sec: nil
+            )
+          end
+        end
+      end
+
+      assert_equal :wall_clock_exceeded, result
+      assert_equal [ decision ], captures.fetch(:cancelled)
+    end
+  end
+
+  def test_routed_shared_group_reroutes_tail_after_model_scoped_provider_failure
+    with_tmp_dir do |dir|
+      cfg = {}
+      ctx = make_ctx(dir)
+      task = Task.new(dir, File.join(dir, "task.md"))
+      group = [
+        { "name" => "first", "agent" => "claude" },
+        { "name" => "second", "agent" => "claude" }
+      ]
+      decision = selected_reviewer_route(Hive::AgentProfiles.lookup(:claude), model: "opus")
+      router, captures = routed_reviewer_router
+      signal = Hive::ProviderRouting::Signal.new(
+        provider: "claude", model: "reported", failure_class: "quota", scope: "model",
+        reset_at: nil, safe_summary: "quota", fingerprint: "fp", evidence_ref: "test"
+      )
+      failure = Hive::Reviewers::Result.new(
+        name: "first", output_path: nil, status: :error, error_message: "quota",
+        provider_signal: signal
+      )
+      tail_result = Hive::Reviewers::Result.new(
+        name: "second", output_path: nil, status: :ok, error_message: nil
+      )
+
+      result = with_method_stubs(
+        Hive::Stages::Base,
+        provider_router: -> { router },
+        route_attempt: ->(*_args, **_kwargs) { decision }
+      ) do
+        with_method_stubs(
+          Hive::Stages::Review,
+          shared_reviewer_permission_scope: ->(*_args) { SHARED_SCOPE },
+          run_reviewer_spec: ->(*_args, **_kwargs) { failure },
+          handle_reviewer_result: ->(*_args) { },
+          run_reviewer_group_headless: ->(*_args, **_kwargs) { [ tail_result ] }
+        ) do
+          with_stubbed_claude_session do
+            Hive::Stages::Review.run_routed_shared_reviewer_group(
+              cfg, ctx, task, group, 0,
+              remaining_specs: 2, started_at: nil, max_wall_clock_sec: nil
+            )
+          end
+        end
+      end
+
+      assert_equal [ failure, tail_result ], result
+      recorded_signal = captures.fetch(:outcomes).first.fetch(:signal)
+      assert_equal "claude-main", recorded_signal.provider
+      assert_equal "opus", recorded_signal.model
+    end
+  end
+
+  def test_routed_shared_group_propagates_wall_clock_from_rerouted_tail
+    with_tmp_dir do |dir|
+      cfg = {}
+      ctx = make_ctx(dir)
+      task = Task.new(dir, File.join(dir, "task.md"))
+      group = [
+        { "name" => "first", "agent" => "claude" },
+        { "name" => "second", "agent" => "claude" }
+      ]
+      decision = selected_reviewer_route(Hive::AgentProfiles.lookup(:claude))
+      router, = routed_reviewer_router
+      signal = Hive::ProviderRouting::Signal.new(
+        provider: "claude", model: nil, failure_class: "quota", scope: "provider",
+        reset_at: nil, safe_summary: "quota", fingerprint: "fp", evidence_ref: "test"
+      )
+      failure = Hive::Reviewers::Result.new(
+        name: "first", output_path: nil, status: :error, error_message: "quota",
+        provider_signal: signal
+      )
+
+      result = with_method_stubs(
+        Hive::Stages::Base,
+        provider_router: -> { router },
+        route_attempt: ->(*_args, **_kwargs) { decision }
+      ) do
+        with_method_stubs(
+          Hive::Stages::Review,
+          shared_reviewer_permission_scope: ->(*_args) { SHARED_SCOPE },
+          run_reviewer_spec: ->(*_args, **_kwargs) { failure },
+          handle_reviewer_result: ->(*_args) { },
+          run_reviewer_group_headless: ->(*_args, **_kwargs) { :wall_clock_exceeded }
+        ) do
+          with_stubbed_claude_session do
+            Hive::Stages::Review.run_routed_shared_reviewer_group(
+              cfg, ctx, task, group, 0,
+              remaining_specs: 2, started_at: nil, max_wall_clock_sec: nil
+            )
+          end
+        end
+      end
+
+      assert_equal :wall_clock_exceeded, result
+    end
+  end
+
+  def test_routed_shared_group_records_unexpected_session_failure
+    with_tmp_dir do |dir|
+      cfg = {}
+      ctx = make_ctx(dir)
+      task = Task.new(dir, File.join(dir, "task.md"))
+      group = [ { "name" => "reviewer", "agent" => "claude" } ]
+      decision = selected_reviewer_route(Hive::AgentProfiles.lookup(:claude))
+      router, captures = routed_reviewer_router(heartbeat_error: RuntimeError.new("heartbeat failed"))
+
+      error = with_method_stubs(
+        Hive::Stages::Base,
+        provider_router: -> { router },
+        route_attempt: ->(*_args, **_kwargs) { decision }
+      ) do
+        with_method_stubs(
+          Hive::Stages::Review,
+          shared_reviewer_permission_scope: ->(*_args) { SHARED_SCOPE }
+        ) do
+          assert_raises(RuntimeError) do
+            Hive::Stages::Review.run_routed_shared_reviewer_group(
+              cfg, ctx, task, group, 0,
+              remaining_specs: 1, started_at: nil, max_wall_clock_sec: nil
+            )
+          end
+        end
+      end
+
+      assert_equal "heartbeat failed", error.message
+      outcome = captures.fetch(:outcomes).first
+      refute outcome.fetch(:success)
+      assert_equal "unknown", outcome.fetch(:signal).failure_class
+    end
+  end
+
+  def test_headless_reviewer_group_returns_results_and_stops_at_wall_clock
+    with_tmp_dir do |dir|
+      cfg = {}
+      ctx = make_ctx(dir)
+      task = Task.new(dir, File.join(dir, "task.md"))
+      specs = [ { "name" => "one" }, { "name" => "two" } ]
+      success = Hive::Reviewers::Result.new(
+        name: "one", output_path: nil, status: :ok, error_message: nil
+      )
+      handled = []
+
+      results = with_method_stubs(
+        Hive::Stages::Review,
+        run_reviewer_spec: ->(*_args, **_kwargs) { success },
+        handle_reviewer_result: ->(*args) { handled << args }
+      ) do
+        Hive::Stages::Review.run_reviewer_group_headless(
+          cfg, ctx, task, specs,
+          remaining_specs: 2, started_at: nil, max_wall_clock_sec: nil
+        )
+      end
+      assert_equal [ success, success ], results
+      assert_equal 2, handled.length
+
+      stopped = with_method_stubs(
+        Hive::Stages::Review,
+        run_reviewer_spec: ->(*_args, **_kwargs) { :wall_clock_exceeded }
+      ) do
+        Hive::Stages::Review.run_reviewer_group_headless(
+          cfg, ctx, task, specs,
+          remaining_specs: 2, started_at: nil, max_wall_clock_sec: nil
+        )
+      end
+      assert_equal :wall_clock_exceeded, stopped
     end
   end
 

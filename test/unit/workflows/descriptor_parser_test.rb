@@ -1020,6 +1020,56 @@ class WorkflowsDescriptorParserTest < Minitest::Test
     assert_includes escaping.message, "task-relative"
   end
 
+  def test_rejects_invalid_resumable_adapter_pair_and_resume_entrypoint
+    invalid_adapter = assert_config_error(
+      {
+        "id" => "bad",
+        "resumable" => { "adapter" => "Not Safe" },
+        "stages" => [ { "name" => "run", "kind" => "terminal", "state_file" => "run.md" } ]
+      },
+      path: "/tmp/bad.yml"
+    )
+    assert_includes invalid_adapter.message, "resumable adapter"
+
+    missing_pair = assert_config_error(
+      {
+        "id" => "bad",
+        "resumable" => { "snapshot" => "snapshot.json" },
+        "stages" => [ { "name" => "run", "kind" => "terminal", "state_file" => "run.md" } ]
+      },
+      path: "/tmp/bad.yml"
+    )
+    assert_includes missing_pair.message, "both snapshot and resume"
+
+    invalid_resume = assert_config_error(
+      {
+        "id" => "bad",
+        "resumable" => { "snapshot" => "snapshot.json", "resume" => "restart" },
+        "stages" => [ { "name" => "run", "kind" => "terminal", "state_file" => "run.md" } ]
+      },
+      path: "/tmp/bad.yml"
+    )
+    assert_includes invalid_resume.message, 'resumable resume must be "run"'
+  end
+
+  def test_wraps_invalid_stage_routing_with_descriptor_path
+    error = assert_config_error(
+      {
+        "id" => "bad",
+        "stages" => [
+          {
+            "name" => "work", "kind" => "agent", "state_file" => "work.md",
+            "skill" => "/ship", "routing" => { "pool" => [] }
+          }
+        ]
+      },
+      path: "/tmp/bad.yml"
+    )
+
+    assert_includes error.message, "/tmp/bad.yml"
+    assert_includes error.message, "pool must be a non-empty Array"
+  end
+
   private
 
     def assert_config_error(data, path:)

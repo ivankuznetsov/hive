@@ -87,6 +87,42 @@ class DaemonWorkflowRecoveryTest < Minitest::Test
     end
   end
 
+  def test_rejects_regressing_checkpoint_generation
+    events = []
+    logger = Object.new
+    logger.define_singleton_method(:event) { |kind, **payload| events << [ kind, payload ] }
+    with_tmp_dir do |dir|
+      leases = Hive::AttemptLeaseStore.new(path: File.join(dir, "leases.json"), clock: -> { NOW })
+      router = Hive::ProviderRouting::Router.new(
+        circuit_store: Hive::ProviderRouting::Store.new(path: File.join(dir, "circuits.json"), clock: -> { NOW }),
+        lease_store: leases, clock: -> { NOW }
+      )
+      adapter = FakeAdapter.new(snapshot_value: snapshot(4), configuration: configuration)
+      recovery = coordinator(router, leases, adapter, logger: logger)
+      first = recovery.candidates([ row ], now: NOW).first
+      recovery.finish(first, dispatched: false, now: NOW)
+      adapter.snapshot_value = snapshot(3)
+
+      assert_empty recovery.candidates([ row ], now: NOW)
+      assert_includes events.last.last.fetch(:message), "checkpoint generation regressed"
+    end
+  end
+
+  def test_default_config_loader_is_available
+    recovery = Hive::Daemon::WorkflowRecovery.new(
+      router: Object.new,
+      lease_store: Object.new,
+      project_resolver: ->(_name) { nil },
+      workflow_resolver: ->(_name, _root) { nil },
+      registry: FakeRegistry.new(nil)
+    )
+
+    with_replaced_singleton_method(Hive::Config, :load, ->(root) { { "root" => root } }) do
+      assert_equal({ "root" => "/project" }, recovery.instance_variable_get(:@config_loader).call("/project"))
+    end
+    assert_nil recovery.candidate_for(row, now: NOW)
+  end
+
   private
 
   def coordinator(router, leases, adapter, logger: nil)

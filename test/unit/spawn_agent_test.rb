@@ -44,6 +44,18 @@ class SpawnAgentTest < Minitest::Test
     Hive::Task.new(folder)
   end
 
+  def selected_route(profile, provider: "claude-main", model: nil, probe: nil)
+    candidate = Hive::ProviderRouting::Candidate.new(
+      provider: provider, agent: profile.name.to_s, model: model, effort: nil,
+      capabilities: Hive::ProviderRouting::DEFAULT_CAPABILITIES, order: 0
+    )
+    Hive::ProviderRouting::Decision.new(
+      status: :selected, candidate: candidate, account: nil, profile: profile,
+      lease: Object.new, probe: probe, attempt_id: "attempt-1",
+      reason: "first_eligible", wait_reason: nil, rejections: [], explanation: "selected"
+    )
+  end
+
   # --- resolve_template_path ----------------------------------------------
 
   def test_resolve_template_path_rejects_missing_builtin
@@ -1101,6 +1113,176 @@ class SpawnAgentTest < Minitest::Test
         assert_equal :error, marker.name, "#{runner} must leave an attributed :error marker"
         assert_equal "permission_config_error", marker.attrs["reason"]
         assert_match(/claude only/, marker.attrs["message"].to_s)
+      end
+    end
+  end
+
+  def test_spawn_agent_cancels_selected_route_when_configuration_fails_before_spawn
+    with_tmp_dir do |dir|
+      task = make_task(dir, "4-execute")
+      profile = Struct.new(:name, :add_dir_flag, :budget_flag, :status_detection_mode) do
+        def check_version! = raise(Hive::ConfigError, "invalid route config")
+        def preflight! = true
+      end.new(:claude, nil, nil, :state_file_marker)
+      decision = selected_route(profile)
+      cancelled = []
+      router = Object.new
+      router.define_singleton_method(:lease_store) { Object.new }
+      router.define_singleton_method(:cancel) { |value| cancelled << value }
+
+      error = assert_raises(Hive::ConfigError) do
+        Hive::Stages::Base.spawn_agent(
+          task, prompt: "prompt", max_budget_usd: 1, timeout_sec: 5,
+          profile: profile, routing_decision: decision, provider_router: router
+        )
+      end
+
+      assert_equal "invalid route config", error.message
+      assert_equal [ decision ], cancelled
+    end
+  end
+
+  def test_spawn_claude_returns_router_wait_result
+    with_tmp_dir do |dir|
+      task = make_task(dir, "3-plan")
+      profile = Hive::AgentProfiles.lookup(:claude)
+      decision = Hive::ProviderRouting::Decision.new(
+        status: :wait, attempt_id: "attempt-1", reason: "circuit_open",
+        wait_reason: "limits_reached", rejections: [], explanation: "provider is open"
+      )
+      expected = { status: :error, error_message: "waited" }
+
+      result = with_replaced_singleton_method(
+        Hive::Stages::Base, :routing_wait_result,
+        ->(*_args, **_kwargs) { expected }
+      ) do
+        Hive::Stages::Base.spawn_claude!(
+          task, {}, prompt: "prompt", max_budget_usd: 1, timeout_sec: 5,
+          session_name: "wait-test", profile: profile,
+          routing_decision: decision, provider_router: Object.new
+        )
+      end
+
+      assert_same expected, result
+    end
+  end
+
+  def test_spawn_claude_delegates_a_non_claude_fallback_to_spawn_agent
+    with_tmp_dir do |dir|
+      task = make_task(dir, "3-plan")
+      claude = Hive::AgentProfiles.lookup(:claude)
+      codex = Hive::AgentProfiles.lookup(:codex)
+      decision = selected_route(codex, provider: "codex-main", model: "gpt-test")
+      captured = nil
+      expected = { status: :ok }
+
+      result = with_replaced_singleton_method(
+        Hive::Stages::Base, :spawn_agent,
+        lambda do |received_task, **kwargs|
+          captured = [ received_task, kwargs ]
+          expected
+        end
+      ) do
+        Hive::Stages::Base.spawn_claude!(
+          task, { "permissions" => "yolo" }, prompt: "prompt",
+          max_budget_usd: 1, timeout_sec: 5, session_name: "fallback-test",
+          profile: claude, routing_label: "plan", routing_decision: decision,
+          provider_router: Object.new
+        )
+      end
+
+      assert_same expected, result
+      assert_same task, captured.first
+      assert_same codex, captured.last.fetch(:profile)
+      assert_equal "codex-main", captured.last.fetch(:provider_key)
+      assert_equal "gpt-test", captured.last.fetch(:model)
+    end
+  end
+
+  def test_finish_routed_attempt_persists_context_exclusion_on_state_marker
+    with_tmp_dir do |dir|
+      task = make_task(dir, "4-execute")
+      profile = Hive::AgentProfiles.lookup(:claude)
+      decision = selected_route(profile, model: "large")
+      exclusion = Hive::ProviderRouting::Request::Exclusion.new(
+        provider: "claude-main", model: "large", checkpoint: "old", reason: "context_length"
+      )
+      outcome = Hive::ProviderRouting::Router::Outcome.new(transition: nil, exclusion: exclusion)
+      router = Object.new
+      router.define_singleton_method(:record_outcome) { |**_kwargs| outcome }
+      result = { status: :error }
+
+      returned = Hive::Stages::Base.finish_routed_attempt(
+        task, result, decision, router, checkpoint: "execute:1", status_mode: :state_file_marker
+      )
+
+      assert_same result, returned
+      assert_equal "execute:1", result.fetch(:routing_exclusion).checkpoint
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal "routing_context_mismatch", marker.attrs.fetch("reason")
+      assert_equal "claude-main", marker.attrs.fetch("routing_excluded_provider")
+    end
+  end
+
+  def test_record_routing_exception_swallows_a_secondary_router_error
+    with_tmp_dir do |dir|
+      task = make_task(dir, "4-execute")
+      profile = Hive::AgentProfiles.lookup(:claude)
+      decision = selected_route(profile)
+      router = Object.new
+      router.define_singleton_method(:record_outcome) do |**_kwargs|
+        raise Hive::Error, "store unavailable"
+      end
+
+      result = Hive::Stages::Base.record_routing_exception(
+        task, decision, router, profile, nil, "claude-main", RuntimeError.new("spawn failed"),
+        checkpoint: "execute:1"
+      )
+
+      assert_nil result
+    end
+  end
+
+  def test_emit_routing_outcome_events_records_probe_without_transition
+    with_tmp_dir do |dir|
+      task = make_task(dir, "4-execute")
+      profile = Hive::AgentProfiles.lookup(:claude)
+      probe = Hive::ProviderRouting::Store::ProbeClaim.new(
+        claimed: true, provider: "claude-main", model: nil, scope: "provider",
+        reason: "probe_claimed", attempt_id: "attempt-1"
+      )
+      decision = selected_route(profile, probe: probe)
+      outcome = Hive::ProviderRouting::Router::Outcome.new(transition: nil, exclusion: nil)
+      events = []
+
+      with_replaced_singleton_method(Hive::Events, :emit, ->(**kwargs) { events << kwargs }) do
+        Hive::Stages::Base.emit_routing_outcome_events(task, decision, outcome)
+      end
+
+      assert_equal [ :probe_outcome ], events.map { |event| event.fetch(:event_type) }
+      assert_match(/outcome=unchanged/, events.first.fetch(:message))
+    end
+  end
+
+  def test_routing_exclusions_handles_blank_present_and_unreadable_markers
+    with_tmp_dir do |dir|
+      task = make_task(dir, "4-execute")
+      Hive::Markers.set(
+        task.state_file, :error, routing_checkpoint: "execute:1", routing_excluded_provider: ""
+      )
+      assert_empty Hive::Stages::Base.routing_exclusions(task, "execute:1")
+
+      Hive::Markers.set(
+        task.state_file, :error, routing_checkpoint: "execute:1",
+        routing_excluded_provider: "claude-main", routing_excluded_model: "large"
+      )
+      assert_equal(
+        [ { provider: "claude-main", model: "large", checkpoint: "execute:1", reason: "context_length" } ],
+        Hive::Stages::Base.routing_exclusions(task, "execute:1")
+      )
+
+      with_replaced_singleton_method(Hive::Markers, :current, ->(_path) { raise Errno::ENOENT }) do
+        assert_empty Hive::Stages::Base.routing_exclusions(task, "execute:1")
       end
     end
   end

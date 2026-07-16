@@ -65,6 +65,48 @@ class ResumableWorkflowTest < Minitest::Test
     refute schemer.valid?(valid.merge("children" => [ { "child_id" => "done", "status" => "complete" } ]))
   end
 
+  def test_snapshot_rejects_invalid_top_level_contract
+    assert_raises(Hive::ResumableWorkflow::SnapshotError) do
+      Hive::ResumableWorkflow::Snapshot.new(
+        workflow_id: "project/campaign", kind: "campaign",
+        checkpoint_generation: -1, children: []
+      )
+    end
+    assert_raises(Hive::ResumableWorkflow::SnapshotError) do
+      Hive::ResumableWorkflow::Snapshot.new(
+        workflow_id: "project/campaign", kind: "campaign",
+        checkpoint_generation: "not-an-integer", children: []
+      )
+    end
+    assert_raises(Hive::ResumableWorkflow::SnapshotError) do
+      Hive::ResumableWorkflow::Snapshot.from_h([])
+    end
+    assert_raises(Hive::ResumableWorkflow::SnapshotError) do
+      Hive::ResumableWorkflow::Snapshot.from_h(
+        { "schema" => "other", "workflow_id" => "x", "kind" => "x",
+          "checkpoint_generation" => 1, "children" => [] }
+      )
+    end
+    assert_raises(Hive::ResumableWorkflow::SnapshotError) do
+      Hive::ResumableWorkflow::Snapshot.from_h(
+        { "schema_version" => 2, "workflow_id" => "x", "kind" => "x",
+          "checkpoint_generation" => 1, "children" => [] }
+      )
+    end
+    assert_raises(Hive::ResumableWorkflow::SnapshotError) do
+      Hive::ResumableWorkflow::Snapshot.from_h({ "workflow_id" => "x" })
+    end
+  end
+
+  def test_snapshot_rejects_non_object_and_incomplete_children
+    assert_raises(Hive::ResumableWorkflow::SnapshotError) do
+      snapshot(children: [ "pending" ])
+    end
+    assert_raises(Hive::ResumableWorkflow::SnapshotError) do
+      snapshot(children: [ { "status" => "pending" } ])
+    end
+  end
+
   private
 
   def snapshot(children:)

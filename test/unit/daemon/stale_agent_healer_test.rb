@@ -976,6 +976,28 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
+  def test_provider_recovery_errors_leave_the_task_parked
+    gate = Object.new
+    gate.define_singleton_method(:call) { |*_args, **_kwargs| raise "routing store unavailable" }
+    healer = Hive::Daemon::StaleAgentHealer.new(
+      controller: @controller, logger: @logger, grace_sec: 300,
+      request_queue: @request_queue, provider_recovery: gate
+    )
+
+    with_marker_file do |state_file|
+      File.write(state_file, "<!-- ERROR reason=limits_reached provider=claude-main -->\n")
+      row = make_row(
+        state_file, pid_alive: false, marker: "error",
+        marker_attrs: { "reason" => "limits_reached", "provider" => "claude-main" }
+      )
+
+      refute healer.send(:provider_retry_dispatchable?, row, now: NOW)
+      parked = @logger.events.last
+      assert_equal :provider_retry_parked, parked.first
+      assert_includes parked.last.fetch(:reason), "routing store unavailable"
+    end
+  end
+
   def test_auto_recovers_error_limits_reached_once_cooldown_has_elapsed_any_stage
     %w[1-brainstorm 4-execute 8-finalize].each do |stage|
       with_marker_file do |state_file|

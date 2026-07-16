@@ -2284,7 +2284,7 @@ class SchemaFilesTest < Minitest::Test
     doc = JSON.parse(File.read(path))
     assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
     assert_equal "hive-dispatch-result", doc.dig("properties", "schema", "const")
-    assert_equal 1, doc.dig("properties", "schema_version", "const")
+    assert_equal 2, doc.dig("properties", "schema_version", "const")
   end
 
   def test_hive_dispatch_result_required_keys_match_producer
@@ -2294,7 +2294,7 @@ class SchemaFilesTest < Minitest::Test
     # except the optional/nullable update_id is required.
     producer_required = %w[
       schema schema_version result_id created_at chat_id project slug
-      request_id exit_code command
+      request_id exit_code command attempt_id attempt_state receipt
     ].sort
     assert_equal producer_required, schema_required,
                  "schema/producer required-key drift in hive-dispatch-result.v1.json"
@@ -2322,10 +2322,11 @@ class SchemaFilesTest < Minitest::Test
   def test_hive_dispatch_result_chat_id_must_be_non_zero
     schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-dispatch-result"))))
     base = {
-      "schema" => "hive-dispatch-result", "schema_version" => 1,
+      "schema" => "hive-dispatch-result", "schema_version" => 2,
       "result_id" => "abc12345", "created_at" => "2026-06-03T12:00:00Z",
       "project" => "hive", "slug" => "my-task", "request_id" => "req00001",
-      "exit_code" => 1, "command" => "hive review my-task"
+      "exit_code" => 1, "command" => "hive review my-task",
+      "attempt_id" => nil, "attempt_state" => nil, "receipt" => nil
     }
     assert schemer.valid?(base.merge("chat_id" => 12_345)), "positive private chat id validates"
     assert schemer.valid?(base.merge("chat_id" => -1_001_234_567_890)), "negative group chat id validates"

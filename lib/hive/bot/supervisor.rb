@@ -1113,7 +1113,9 @@ module Hive
       # request_id so the continuation sidecar can point at the first request
       # before that request is visible to the daemon.
       def enqueue_dispatch_request(result, update, request_id: nil)
-        request_id = @dispatch_request_writer.write!(
+        writer_method = request_id.nil? && @dispatch_request_writer.respond_to?(:dispatch!) ? :dispatch! : :write!
+        written = @dispatch_request_writer.public_send(
+          writer_method,
           project: result.project,
           slug: result.slug,
           argv: Array(result.command_argv),
@@ -1122,13 +1124,18 @@ module Hive
           trigger: trigger_for_result(result),
           request_id: request_id
         )
+        reference = written if written.respond_to?(:request_id)
+        request_id = reference ? reference.request_id : written
         @logger.event(:dispatched_command,
                       project: result.project,
                       slug: result.slug,
                       command: Array(result.command_argv).join(" "),
                       update_id: update.update_id,
                       via: "queue",
-                      request_id: request_id)
+                      request_id: request_id,
+                      attempt_id: reference&.attempt_id,
+                      attempt_state: reference&.state,
+                      dispatch_status: reference&.status)
         request_id
       rescue StandardError => e
         # A producer-side failure (read-only state dir, ENOSPC, an

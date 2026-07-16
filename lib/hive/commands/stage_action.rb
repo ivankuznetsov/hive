@@ -7,6 +7,8 @@ require "hive/stages"
 require "hive/task_resolver"
 require "hive/workflows"
 require "hive/task_action"
+require "hive/attempts/context"
+require "hive/attempts/entrypoint"
 
 module Hive
   module Commands
@@ -28,16 +30,21 @@ module Hive
     # `hive-stage-action` envelope is emitted at the end.
     class StageAction
       def initialize(verb, target, project: nil, from: nil, json: false,
-                     recover_merged_error_reason: nil)
+                     recover_merged_error_reason: nil, durable: false,
+                     attempt_entrypoint: nil)
         @verb = verb
         @target = target
         @project_filter = project
         @from = from
         @json = json
         @recover_merged_error_reason = recover_merged_error_reason
+        @durable = durable
+        @attempt_entrypoint = attempt_entrypoint
       end
 
       def call
+        return dispatch_durable if @durable && !Hive::Attempts::Context.active?
+
         do_call
       rescue Hive::Error => e
         emit_error_envelope(e) if @json
@@ -49,6 +56,30 @@ module Hive
       end
 
       private
+
+      def dispatch_durable
+        task = resolve_task
+        intended_stage = Hive::Workflows.for_verb(@verb).fetch(:target)
+        result = (@attempt_entrypoint || Hive::Attempts::Entrypoint.new).dispatch(
+          task: task,
+          intended_stage: intended_stage,
+          argv: durable_worker_argv(task),
+          interactive: true
+        )
+        exit(result.exit_status) unless result.exit_status.zero?
+
+        result
+      end
+
+      def durable_worker_argv(task)
+        argv = [ "hive", @verb, task.folder ]
+        argv.concat([ "--from", @from ]) if @from
+        argv << "--json" if @json
+        if @recover_merged_error_reason
+          argv.concat([ "--recover-merged-error-reason", @recover_merged_error_reason ])
+        end
+        argv
+      end
 
       def do_call
         config = Hive::Workflows.for_verb(@verb)

@@ -21,6 +21,9 @@ require "hive/daemon/dispatch_request_queue"
 require "hive/daemon/status_report"
 require "hive/invoked_binary"
 require "hive/update_check/state"
+require "hive/attempts/store"
+require "hive/attempts/detached_launcher"
+require "hive/attempts/dispatcher"
 
 module Hive
   module Commands
@@ -231,6 +234,18 @@ module Hive
           logger: logger
         )
 
+        attempt_store = Hive::Attempts::Store.new
+        attempt_launcher = Hive::Attempts::DetachedLauncher.new(store: attempt_store)
+        attempt_dispatcher = Hive::Attempts::Dispatcher.new(
+          store: attempt_store,
+          launcher: attempt_launcher,
+          limits: {
+            max_global: daemon_cfg.fetch("max_concurrent_runs"),
+            max_per_project: daemon_cfg.fetch("max_concurrent_per_project"),
+            max_daily: daemon_cfg.fetch("max_runs_per_day_per_project")
+          }
+        )
+
         dispatcher = Hive::Daemon::Dispatcher.new(
           config: config, controller: controller, supervisor: supervisor,
           status_consumer: status_consumer, logger: logger,
@@ -241,7 +256,8 @@ module Hive
           patrol_arbiter: patrol_arbiter,
           digest_scheduler: digest_scheduler, answer_digest_scheduler: answer_digest_scheduler,
           dry_run: @dry_run,
-          update_state: Hive::UpdateCheck::State.new
+          update_state: Hive::UpdateCheck::State.new,
+          attempt_dispatcher: attempt_dispatcher
         )
 
         reexec_requested = false

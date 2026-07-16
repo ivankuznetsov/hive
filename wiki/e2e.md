@@ -147,6 +147,10 @@ consumed atomically. An absent or exhausted script, unexpected argv, cwd
 mismatch, or repository mismatch exits non-zero and records the rejected call;
 the shim never resolves or executes the machine's real `gh`. Thus e2e GitHub
 reads and mutations are synthetic and no real network access is possible.
+`HIVE_BIN` and `HIVE_INVOKED_BIN` are also pinned to the checkout's real
+`bin/hive` and cannot be replaced by scenario or operator environment
+overrides, so nested daemon/display-name work cannot escape to an installed
+Hive binary.
 
 Claude and Codex profiles continue to resolve to
 `test/fixtures/fake-claude`. Its `HIVE_FAKE_CLAUDE_READY_FILE` /
@@ -154,6 +158,12 @@ Claude and Codex profiles continue to resolve to
 waits on a condition file, allowing cross-process races without fixed sleeps.
 `spawn_background` owns a process group, and both explicit `stop_process` and
 scenario teardown terminate and reap registered groups.
+The copied project pins `claude.mode: headless`; this keeps fake Claude on its
+subprocess contract instead of sending it through production interactive-tmux
+readiness detection. TUI scenarios still run the real long-lived `hive tui`
+inside tmux. The harness creates that tmux server inside
+`Bundler.with_unbundled_env`, preventing the parent root bundle's `RUBYOPT` or
+`BUNDLE_PATH` from being combined with the sample project's Gemfile.
 
 ## Artifacts
 

@@ -181,6 +181,8 @@ module Hive
         cfg_path = File.join(path, ".hive-state", "config.yml")
         cfg = YAML.safe_load(File.read(cfg_path)) || {}
         cfg["worktree_root"] = File.join(@run_dir, "worktrees")
+        cfg["claude"] ||= {}
+        cfg["claude"]["mode"] = "headless"
         cfg["review"] ||= {}
         cfg["review"]["ci"] ||= {}
         cfg["review"]["ci"]["command"] = nil

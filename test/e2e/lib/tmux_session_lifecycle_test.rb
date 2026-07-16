@@ -7,6 +7,53 @@ require_relative "tmux_session_lifecycle"
 class E2ETmuxSessionLifecycleTest < Minitest::Test
   SandboxDouble = Data.define(:sandbox_dir)
 
+  def test_start_strips_parent_bundler_environment_before_tmux_server_inherits_it
+    Dir.mktmpdir("sandbox") do |sandbox_dir|
+      Dir.mktmpdir("home") do |run_home|
+        Dir.mktmpdir("scenario") do |scenario_dir|
+          context = Hive::E2E::ScenarioContext.new(
+            sandbox: SandboxDouble.new(sandbox_dir: sandbox_dir),
+            run_home: run_home,
+            run_id: "run-123"
+          )
+          scenario = Hive::E2E::Scenario.new(
+            name: "tui_env_test", description: "", tags: [], setup: {}, steps: [], path: "inline"
+          )
+          lifecycle = Hive::E2E::TmuxSessionLifecycle.new(
+            scenario: scenario, sandbox_dir: sandbox_dir, run_home: run_home,
+            run_id: "run-123", scenario_dir: scenario_dir, context: context
+          )
+
+          observed = {}
+          fake_tmux = Object.new
+          fake_tmux.define_singleton_method(:start) do
+            observed["RUBYOPT"] = ENV["RUBYOPT"]
+            observed["BUNDLE_PATH"] = ENV["BUNDLE_PATH"]
+          end
+          original_available = Hive::E2E::TmuxDriver.method(:available?)
+          original_new = Hive::E2E::TmuxDriver.method(:new)
+          Hive::E2E::TmuxDriver.singleton_class.define_method(:available?) { true }
+          Hive::E2E::TmuxDriver.singleton_class.define_method(:new) { |**_args| fake_tmux }
+          lifecycle.define_singleton_method(:start_asciinema_if_available) { }
+          previous_rubyopt = ENV["RUBYOPT"]
+          previous_bundle_path = ENV["BUNDLE_PATH"]
+          ENV["RUBYOPT"] = "-rbundler/setup"
+          ENV["BUNDLE_PATH"] = "/outer/bundle"
+
+          lifecycle.start_session
+
+          assert_nil observed["RUBYOPT"]
+          assert_nil observed["BUNDLE_PATH"]
+        ensure
+          ENV["RUBYOPT"] = previous_rubyopt
+          ENV["BUNDLE_PATH"] = previous_bundle_path
+          Hive::E2E::TmuxDriver.singleton_class.define_method(:available?, original_available)
+          Hive::E2E::TmuxDriver.singleton_class.define_method(:new, original_new)
+        end
+      end
+    end
+  end
+
   def test_session_env_expands_tui_setup_placeholders_and_scopes_logs
     Dir.mktmpdir("sandbox") do |sandbox_dir|
       Dir.mktmpdir("home") do |run_home|

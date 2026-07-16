@@ -94,6 +94,36 @@ class DependencySnapshotTest < Minitest::Test
     end
   end
 
+  def test_stacked_base_does_not_treat_cross_project_dependency_as_branch_base
+    with_tmp_dir do |root|
+      task = FakeTask.new(slug: "dependent", id: 2, depends_on: "other:base-task",
+                          folder: execute_folder(root, "dependent"), project_root: root)
+
+      result = nil
+      _out, err = capture_io { result = Hive::DependencySnapshot.stacked_base(task, "main") }
+
+      assert_nil result
+      assert_match(/scheduling-only/, err)
+    end
+  end
+
+  def test_admission_context_preserves_corrupt_metadata_as_an_error
+    with_tmp_dir do |root|
+      slug = "corrupt-task"
+      folder = File.join(root, ".hive-state", "stages", "4-execute", slug)
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(folder, "meta.yml"), "depends_on: [unterminated\n")
+
+      context = Hive::DependencySnapshot.admission_context([
+        { "name" => File.basename(root), "path" => root, "repository_identity" => nil }
+      ])
+      verdict = context.verdict(project: File.basename(root), slug: slug)
+
+      assert verdict.error?
+      assert_equal "dependency_metadata_unreadable", verdict.admission_error.reason_code
+    end
+  end
+
   private
 
   def write_task_meta(root, stage, slug, id:)

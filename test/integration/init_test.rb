@@ -1666,16 +1666,17 @@ class InitTest < Minitest::Test
           assert File.executable?(refresh_script)
           assert File.executable?(post_commit_script)
           assert_includes File.read(refresh_script), 'codex exec --add-dir "$LLM_WIKI_QMD_CACHE_DIR" -C "$project_root"'
-          # The worktree-safe post-commit script reads the just-committed code in
-          # the committing tree (-C "$committing_tree") and assembles its --add-dir
-          # list (qmd cache always, plus the main checkout when run from a linked
-          # worktree) into an array rather than the static refresh-wiki.sh form.
+          # Post-commit refreshes run only in a disposable managed worktree on
+          # llm-wiki/refresh. The source commit is queued before lock acquisition.
           assert_includes File.read(post_commit_script), 'add_dir_args=( --add-dir "$LLM_WIKI_QMD_CACHE_DIR" )'
-          assert_includes File.read(post_commit_script), 'codex exec "${add_dir_args[@]}" -C "$committing_tree"'
+          assert_includes File.read(post_commit_script), 'codex exec "${add_dir_args[@]}" -C "$refresh_root"'
+          assert_includes File.read(post_commit_script), 'refresh_branch="${LLM_WIKI_REFRESH_BRANCH:-llm-wiki/refresh}"'
+          assert_includes File.read(post_commit_script), 'mv -f "$queue_tmp" "$pending_dir/$sha"'
+          refute_includes File.read(post_commit_script), 'wiki_root="$main_checkout"'
           assert_includes File.read(refresh_script), "LLM_WIKI_QMD_CACHE_DIR"
           assert_includes File.read(post_commit_script), "LLM_WIKI_QMD_CACHE_DIR"
           assert_includes File.read(refresh_script), ".llm-wiki/qmd-cache"
-          assert_includes File.read(post_commit_script), ".llm-wiki/qmd-cache"
+          assert_includes File.read(post_commit_script), 'export XDG_CACHE_HOME="$state_dir/cache"'
           assert_includes File.read(refresh_script), "LLM_WIKI_CODEX_TIMEOUT"
           assert_includes File.read(refresh_script), "LLM_WIKI_QMD_TIMEOUT"
           assert_includes File.read(refresh_script), "qmd embed --max-docs-per-batch 64 --max-batch-mb 64"
@@ -1696,9 +1697,9 @@ class InitTest < Minitest::Test
             end
           end
           assert_includes File.read(post_commit_script), "qmd embed --max-docs-per-batch 64 --max-batch-mb 64"
-          assert_includes File.read(post_commit_script), "Do not run qmd update or qmd embed yourself"
+          assert_includes File.read(post_commit_script), "Do not run\nqmd; the wrapper handles bounded index maintenance"
           assert_includes File.read(post_commit_script), "wiki/log.d/<timestamp>-<slug>.md"
-          assert_includes File.read(post_commit_script), "without editing compiled wiki/log.md"
+          assert_includes File.read(post_commit_script), "without\nediting compiled wiki/log.md"
           refute_includes File.read(refresh_script), "QMD_LLAMA_GPU"
           refute_includes File.read(post_commit_script), "QMD_LLAMA_GPU"
           refute_includes File.read(refresh_script), "claude -p"
@@ -1861,11 +1862,15 @@ class InitTest < Minitest::Test
         end
 
         log = File.read(log_path)
+        git_common_dir = run!("git", "-C", dir, "rev-parse", "--git-common-dir").strip
+        git_common_dir = File.expand_path(git_common_dir, dir)
+        refresh_log_path = File.join(git_common_dir, "llm-wiki", "post-commit-refresh.log")
+        refresh_log = File.exist?(refresh_log_path) ? File.read(refresh_log_path) : "(missing)"
         env_var_names.each do |name|
           assert_includes log, "codex:#{name}=\n",
-                          "codex must observe scrubbed #{name}"
+                          "codex must observe scrubbed #{name}; refresh log:\n#{refresh_log}"
           assert_includes log, "qmd:#{name}=\n",
-                          "qmd must observe scrubbed #{name}"
+                          "qmd must observe scrubbed #{name}; refresh log:\n#{refresh_log}"
         end
         refute_includes log, "foreign.index"
         refute_includes log, dir

@@ -96,14 +96,28 @@ Available validation command names:
 
 Rules:
 - Emit at most <%= max_theses %> theses.
+- The allowance is a hard ceiling, not a target. The deterministic proposal
+  leverage floor is <%= format("%.4f", min_leverage_score) %>. Before emitting,
+  estimate the candidate score from the measured breakdown multiplied by each
+  bounded relief fraction; return zero theses when it cannot meet the floor.
 - Returning zero theses is the correct result when the slice shows no material,
   recurring architecture cost. Do not manufacture a proposal to fill the
   allowance.
+- A current architecture cost needs current consequence evidence: confirmed
+  behavioral divergence, three or more independently owned copies of the same
+  decision, repeated co-change visible in history, caller branching caused by
+  a boundary leak, or a measured defect/coverage consequence. “Can drift,”
+  naming inconsistency, or duplicated mechanics without an observed consequence
+  is not sufficient.
 - Prefer changes that eliminate duplicated decisions, unstable dependencies,
   boundary leaks, or repeated cross-component edits. A file split, rename,
   wrapper, helper extraction, or class extraction is not valuable by itself;
   omit it unless the evidence shows which meaningful ownership or dependency
   cost it removes.
+- For a consolidation or extraction, identify the ownership decision or
+  dependency direction the proposal deletes. Moving mechanics into a new
+  helper, collaborator, registry, or taxonomy without deleting such a decision
+  is added indirection, not leverage; omit it.
 - Refactoring preserves the public contract by definition: APIs, CLI behavior,
   schemas, protocols, routes, data formats, infrastructure outputs, and exit
   behavior must remain identical. Working *inside* files that host that

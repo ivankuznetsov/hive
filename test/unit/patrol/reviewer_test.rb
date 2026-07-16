@@ -397,7 +397,11 @@ class HivePatrolReviewerTest < Minitest::Test
       File.write(File.join(dir, "admin.rb"), "user.name\n")
       runner = lambda do |feature:, output_path:, **|
         if feature.id == "route-users"
-          { status: :error, error_message: "exit_code=1" }
+          {
+            status: :error,
+            error_message: "token cap reached",
+            resource_exhaustion: { reason: "token_limit", limit: 50, observed: 53 }
+          }
         else
           File.write(output_path, JSON.generate(
             "findings" => [ qualified_finding(file: "admin.rb") ]
@@ -412,6 +416,8 @@ class HivePatrolReviewerTest < Minitest::Test
       assert_match(/\Aroute-admin-\d{8}T\d{6}Z-[0-9a-f]{8}-1\z/, findings.first.id)
       assert_equal 1, reviewer.review_errors.size
       assert_equal "agent_failed", reviewer.review_errors.first["error"]
+      assert_equal({ "reason" => "token_limit", "limit" => 50, "observed" => 53 },
+                   reviewer.review_errors.first.dig("details", "resource_exhaustion"))
     end
   end
 
@@ -459,17 +465,19 @@ class HivePatrolReviewerTest < Minitest::Test
       reviewer = Hive::Patrol::Reviewer.new(dir, cfg: cfg)
       fake_agent = Object.new
       def fake_agent.run! = { status: :ok }
+      captured = nil
 
       profiles_singleton = class << Hive::AgentProfiles; self; end
       agent_singleton = class << Hive::Agent; self; end
       profiles_lookup = Hive::AgentProfiles.method(:lookup)
       agent_new = Hive::Agent.method(:new)
       profiles_singleton.define_method(:lookup) { |*| :profile }
-      agent_singleton.define_method(:new) { |*| fake_agent }
+      agent_singleton.define_method(:new) { |**kwargs| captured = kwargs; fake_agent }
       assert_equal({ status: :ok },
                    reviewer.send(:run_agent, prompt: "p",
                                              output_path: File.join(dir, "out.json"),
                                              run_dir: dir))
+      assert_equal 50_000, captured.fetch(:max_tokens)
     ensure
       profiles_singleton.define_method(:lookup, profiles_lookup) if profiles_lookup
       agent_singleton.define_method(:new, agent_new) if agent_new

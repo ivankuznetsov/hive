@@ -106,6 +106,7 @@ class RefactorPatrolReviewAgentRunnerTest < Minitest::Test
       end
 
       assert_equal 12.5, captured.fetch(:timeout_sec)
+      assert_equal 100_000, captured.fetch(:max_tokens)
     end
   end
 
@@ -242,6 +243,7 @@ class RefactorPatrolReviewAgentRunnerTest < Minitest::Test
       end
 
       refute File.exist?(spawned), "unsupported Claude must fail before the review agent starts"
+      assert_budget_lock_available(dir)
     end
   end
 
@@ -261,6 +263,7 @@ class RefactorPatrolReviewAgentRunnerTest < Minitest::Test
         end
         assert_includes error.message, "cannot enforce read-only"
       end
+      assert_budget_lock_available(dir)
     end
   end
 
@@ -282,6 +285,14 @@ class RefactorPatrolReviewAgentRunnerTest < Minitest::Test
   end
 
   private
+
+  def assert_budget_lock_available(project_root)
+    budget = Hive::Patrol::TokenBudget.new(project_root, cfg: cfg)
+    assert budget.acquire(stage: "refactor-patrol-review"),
+           "pre-launch validation must not strand the project patrol lock"
+  ensure
+    budget&.send(:release_launch_lock)
+  end
 
   def cfg
     {

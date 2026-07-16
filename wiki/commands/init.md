@@ -3,7 +3,7 @@ title: hive init
 type: command
 source: lib/hive/commands/init.rb
 created: 2026-04-25
-updated: 2026-07-13
+updated: 2026-07-16
 tags: [command, bootstrap, git, prompts, llm-wiki]
 ---
 
@@ -56,7 +56,7 @@ project config when changing an established policy.
 8. **Ignore `.hive-state/` on master** via `GitOps#add_hive_state_to_master_gitignore!`: appends `/.hive-state/` to `.gitignore` (idempotent), then commits `chore: ignore .hive-state worktree` on master.
 9. **Bootstrap managed llm-wiki files** via `Hive::LlmWikiBootstrap.install!(post_commit_hook: false, scheduler: false)`:
    - `.llm-wiki/config.json` with `headless_agent: "codex"`, `context_agents: ["claude", "codex", "pi"]`, `created_by: "hive"`, and a detected `main_wiki_path` when one exists.
-   - `.llm-wiki/refresh-wiki.sh` and `.llm-wiki/post-commit-refresh.sh`, both Codex-owned and run with `codex exec --add-dir <qmd-cache> -C <project>`. Both scripts keep qmd's normal GPU auto-detection, fall back to `.llm-wiki/qmd-cache` when the normal qmd cache is not writable, and discover QMD through `HIVE_QMD_BIN`, PATH, or Hive's managed `${XDG_DATA_HOME:-~/.local/share}/hive/qmd/bin/qmd` install path (including `install-prefix` installs). Nested Codex and QMD calls run with Git hook-local environment variables unset so `GIT_INDEX_FILE`, `GIT_DIR`, and `GIT_WORK_TREE` cannot leak into plugin marketplace or indexing checkouts.
+   - `.llm-wiki/refresh-wiki.sh` and `.llm-wiki/post-commit-refresh.sh`, both Codex-owned. The scheduled refresh runs in the project checkout. The post-commit path instead queues relevant SHAs under the shared Git directory, coalesces them on the local `llm-wiki/refresh` branch, and gives Codex a disposable managed worktree; committing and primary checkouts remain read-only. Successful batches atomically update `refs/llm-wiki/receipts/<sha>` before queue deletion, so crash-replayed changed or no-op entries are acknowledged without another model run. Worker serialization uses the compare-and-swap Git ref `refs/llm-wiki/refresh-lock`, whose blob carries PID and process identity; stale replacement is single-winner and cleanup can release only its own lock. Post-commit logs, queue entries, and fallback QMD cache also live under the shared Git directory, while the scheduled script retains its project-local fallback. Nested Codex and QMD calls run with Git hook-local environment variables unset so `GIT_INDEX_FILE`, `GIT_DIR`, and `GIT_WORK_TREE` cannot leak into plugin marketplace or indexing checkouts.
    - `wiki/index.md`, `wiki/log.md`, `wiki/gaps.md`, `wiki/architecture.md`, `wiki/decisions.md`, `wiki/dependencies.md`, and `raw/notes/.gitkeep`.
    - Managed LLM WIKI blocks in `AGENTS.md` and `CLAUDE.md`, plus `.claude/settings.json` with a managed `SessionStart` hook that prints `wiki/index.md` and recent `wiki/log.md`.
 10. **Commit llm-wiki bootstrap files** via `GitOps#commit_llm_wiki_bootstrap!`, committing tracked project context as `chore: initialize llm-wiki` so future Hive worktrees inherit wiki context.

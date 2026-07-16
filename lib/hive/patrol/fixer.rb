@@ -727,6 +727,7 @@ module Hive
             max_budget_usd: @token_budget.max_budget_usd(
               @cfg.dig("budget_usd", "patrol") || 100, stage: STAGE
             ),
+            max_tokens: @token_budget.max_tokens(stage: STAGE),
             timeout_sec: @cfg.dig("timeout_sec", "patrol") || 3600,
             log_label: STAGE,
             profile: profile,

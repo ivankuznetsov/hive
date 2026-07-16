@@ -206,12 +206,20 @@ class RefactorPatrolReviewerTest < Minitest::Test
 
   def test_runner_error_records_agent_failure_message
     with_tmp_dir do |dir|
-      runner = ->(**) { { status: :error, error_message: "agent stopped" } }
+      runner = lambda do |**|
+        {
+          status: :error,
+          error_message: "agent stopped",
+          resource_exhaustion: { reason: "token_limit", limit: 100, observed: 104 }
+        }
+      end
       reviewer = Hive::RefactorPatrol::Reviewer.new(dir, cfg: cfg, state: Hive::RefactorPatrol::StateStore.new(dir), agent_runner: runner)
 
       assert_empty reviewer.call([ feature ], leverage_by_feature: leverage_by_feature)
       assert_equal "agent_failed", reviewer.review_errors.first.fetch("error")
       assert_equal "agent stopped", reviewer.review_errors.first.fetch("message")
+      assert_equal({ "reason" => "token_limit", "limit" => 100, "observed" => 104 },
+                   reviewer.review_errors.first.dig("details", "resource_exhaustion"))
     end
   end
 
@@ -286,6 +294,52 @@ class RefactorPatrolReviewerTest < Minitest::Test
       assert_includes captured, '"claim"'
       assert_includes captured, '"drivers"'
       assert_includes captured, "Never copy feature-wide totals into file or line evidence"
+      assert_includes captured, "leverage floor is 0.2500"
+      assert_includes captured, "current consequence evidence"
+      assert_includes captured, "added indirection, not leverage"
+    end
+  end
+
+  def test_feature_below_maximum_possible_leverage_is_completed_without_an_agent_launch
+    with_tmp_dir do |dir|
+      runner = ->(**) { flunk "unactionable feature must not launch an agent" }
+      reviewer = Hive::RefactorPatrol::Reviewer.new(
+        dir, cfg: cfg, state: Hive::RefactorPatrol::StateStore.new(dir),
+        agent_runner: runner
+      )
+      leverage = feature_leverage.merge(
+        "score" => 0.2,
+        "breakdown" => { "churn" => 0.12, "fan_in" => 0.08 }
+      )
+
+      assert_empty reviewer.call([ feature ], leverage_by_feature: { "checkout" => leverage })
+      assert_empty reviewer.review_errors
+      assert_equal [
+        { "feature_id" => "checkout", "complete" => true, "thesis_ids" => [], "errors" => [] }
+      ], reviewer.feature_results
+    end
+  end
+
+  def test_feature_score_rounding_cannot_hide_a_proposal_at_the_leverage_floor
+    with_tmp_dir do |dir|
+      calls = 0
+      runner = lambda do |output_path:, **|
+        calls += 1
+        File.write(output_path, JSON.generate("theses" => []))
+        {}
+      end
+      reviewer = Hive::RefactorPatrol::Reviewer.new(
+        dir, cfg: cfg, state: Hive::RefactorPatrol::StateStore.new(dir),
+        agent_runner: runner
+      )
+      leverage = feature_leverage.merge(
+        "score" => 0.2499,
+        "breakdown" => { "churn" => 0.12, "fan_in" => 0.13 }
+      )
+
+      reviewer.call([ feature ], leverage_by_feature: { "checkout" => leverage })
+
+      assert_equal 1, calls
     end
   end
 

@@ -147,6 +147,28 @@ class RefactorPatrolReporterTest < Minitest::Test
     )
 
     assert_equal %w[a-high b-high z-low], payload.fetch("ranked").map { |item| item.fetch("id") }
+    assert payload.fetch("review_complete")
+    assert_empty payload.fetch("review_errors")
+  end
+
+  def test_v1_review_errors_are_explicit_partial_results
+    error = {
+      "feature_id" => "checkout",
+      "error" => "agent_failed",
+      "message" => "token cap reached",
+      "details" => {
+        "resource_exhaustion" => { "reason" => "token_limit", "limit" => 100, "observed" => 105 }
+      }
+    }
+    payload = reporter.envelope(
+      project: "demo", project_root: "/tmp/demo", dry_run: true,
+      features: [ feature ], theses: [], suppressed: [], last_scanned_sha: "abc",
+      complete: false, review_errors: [ error ]
+    )
+
+    refute payload.fetch("review_complete")
+    assert_equal [ error ], payload.fetch("review_errors")
+    refute payload.fetch("feature_results").first.fetch("complete")
   end
 
   def test_error_envelope_rejects_unknown_schema_version

@@ -271,6 +271,10 @@ module Hive
         collisions = build_collisions(project_root, state)
         theses.filter_map do |thesis|
           caps.apply(thesis)
+          if Array(thesis.risk && thesis.risk["flags"]).include?("below_min_leverage")
+            next({ "id" => thesis.id, "reason" => "below_min_leverage" })
+          end
+
           collision = collisions.check(thesis)
           { "id" => thesis.id, "reason" => collision.reason, "reference" => collision.reference } if collision.suppressed
         end
@@ -320,6 +324,9 @@ module Hive
           theses: theses,
           suppressed: suppressed,
           last_scanned_sha: scanned_sha,
+          complete: Array(reviewer.review_errors).empty?,
+          review_errors: reviewer.review_errors,
+          feature_results: feature_results,
           version: Hive::RefactorPatrol::Reporter::V1_SCHEMA_VERSION
         )
       end

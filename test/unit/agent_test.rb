@@ -21,7 +21,7 @@ class AgentTest < Minitest::Test
     ENV["HIVE_CLAUDE_BIN"] = @prev_bin
     %w[HIVE_FAKE_CLAUDE_OUTPUT HIVE_FAKE_CLAUDE_EXIT
        HIVE_FAKE_CLAUDE_WRITE_FILE HIVE_FAKE_CLAUDE_WRITE_CONTENT
-       HIVE_FAKE_CLAUDE_HANG HIVE_FAKE_CLAUDE_LOG_DIR
+       HIVE_FAKE_CLAUDE_HANG HIVE_FAKE_CLAUDE_IGNORE_TERM HIVE_FAKE_CLAUDE_LOG_DIR
        HIVE_SCREENOTE_BASE_URL].each { |k| ENV.delete(k) }
   end
 
@@ -454,6 +454,123 @@ class AgentTest < Minitest::Test
       assert_equal "claude-opus-4-7", result[:model]
       assert_equal :waiting, result[:status]
     end
+  end
+
+  def test_terminates_running_agent_when_streamed_tokens_reach_per_launch_limit
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "")
+      ENV["HIVE_FAKE_CLAUDE_OUTPUT"] = [
+        JSON.generate(
+          "type" => "stream_event",
+          "event" => {
+            "type" => "message_start",
+            "message" => {
+              "id" => "msg-1",
+              "usage" => {
+                "input_tokens" => 40,
+                "output_tokens" => 1,
+                "cache_read_input_tokens" => 30
+              }
+            }
+          }
+        ),
+        JSON.generate(
+          "type" => "stream_event",
+          "event" => {
+            "type" => "message_delta",
+            "usage" => { "output_tokens" => 20 }
+          }
+        )
+      ].join("\n")
+      ENV["HIVE_FAKE_CLAUDE_HANG"] = "10"
+
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      result = Hive::Agent.new(
+        task: task,
+        prompt: "x",
+        max_budget_usd: 1,
+        max_tokens: 80,
+        timeout_sec: 8,
+        status_mode: :exit_code_only
+      ).run!
+      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+
+      assert_operator elapsed, :<, 5, "streamed token guard must stop the process before timeout"
+      assert_equal :error, result[:status]
+      assert_equal "token_limit", result.dig(:resource_exhaustion, :reason)
+      assert_equal 80, result.dig(:resource_exhaustion, :limit)
+      assert_operator result.dig(:resource_exhaustion, :observed), :>=, 80
+      assert_match(/in-flight token limit/, result[:error_message])
+      refute result[:timed_out]
+    end
+  end
+
+  def test_force_kills_term_resistant_agent_after_streamed_token_limit
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "")
+      ENV["HIVE_FAKE_CLAUDE_OUTPUT"] = JSON.generate(
+        "type" => "stream_event",
+        "event" => {
+          "type" => "message_start",
+          "message" => { "usage" => { "input_tokens" => 80 } }
+        }
+      )
+      ENV["HIVE_FAKE_CLAUDE_IGNORE_TERM"] = "1"
+      ENV["HIVE_FAKE_CLAUDE_HANG"] = "20"
+
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      result = Hive::Agent.new(
+        task: task, prompt: "x", max_budget_usd: 1, max_tokens: 80,
+        timeout_sec: 15, status_mode: :exit_code_only
+      ).run!
+      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+
+      assert_operator elapsed, :<, 8, "token guard must escalate TERM before the wall-clock timeout"
+      assert_equal :error, result[:status]
+      assert_equal "token_limit", result.dig(:resource_exhaustion, :reason)
+      refute result[:timed_out]
+    end
+  end
+
+  def test_stream_token_meter_sums_claude_turns_without_double_counting_deltas
+    meter = Hive::Agent::StreamTokenMeter.new(:claude)
+    first_start = {
+      "type" => "stream_event",
+      "event" => { "type" => "message_start" }
+    }
+    delta = {
+      "type" => "stream_event",
+      "event" => { "type" => "message_delta" }
+    }
+
+    assert_equal 71, meter.observe(
+      first_start, { input: 40, output: 1, cached: 30, model: "claude-test" }
+    )
+    assert_equal 90, meter.observe(delta, { input: 0, output: 20, cached: 0 })
+    assert_equal 90, meter.observe(delta, { input: 0, output: 19, cached: 0 })
+    assert_equal 105, meter.observe(
+      first_start, { input: 10, output: 0, cached: 5, model: "claude-test" }
+    )
+    assert_equal({ input: 50, output: 20, cached: 35, model: "claude-test" }, meter.usage)
+  end
+
+  def test_stream_token_meter_keeps_observed_usage_when_terminal_total_regresses
+    meter = Hive::Agent::StreamTokenMeter.new(:claude)
+    stream = {
+      "type" => "stream_event",
+      "event" => { "type" => "message_start" }
+    }
+
+    meter.observe(stream, { input: 80, output: 20, cached: 0, model: "claude-test" })
+    assert_equal 100, meter.observe(
+      { "type" => "result" }, { input: 70, output: 20, cached: 0, model: "claude-test" }
+    )
+    assert_equal 130, meter.observe(
+      { "type" => "result" }, { input: 90, output: 30, cached: 10, model: "claude-test" }
+    )
+    assert_equal({ input: 90, output: 30, cached: 10, model: "claude-test" }, meter.usage)
   end
 
   def test_profile_without_usage_extractor_returns_no_usage

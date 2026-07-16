@@ -138,11 +138,15 @@ class RefactorPatrolCommandTest < Minitest::Test
         admissibility_reason: "missing measurable signal",
         flags: [ "inadmissible" ]
       )
+      below_floor = thesis(
+        "below-floor", feature_id: "search", score: 0.1,
+        fingerprint: "fp-below-floor", flags: [ "below_min_leverage" ]
+      )
 
       out, _err, status = with_captured_exit do
         command_for(
           features: features,
-          theses_by_feature: { "checkout" => [ clean, cap ], "search" => [ inadmissible ] },
+          theses_by_feature: { "checkout" => [ clean, cap ], "search" => [ inadmissible, below_floor ] },
           leverage_scores: leverage_scores("checkout" => 0.9, "search" => 0.7)
         ).call
       end
@@ -154,11 +158,13 @@ class RefactorPatrolCommandTest < Minitest::Test
       assert_equal 1, payload.fetch("theses"), "only clean admissible unflagged theses count as accepted"
       assert_includes payload.fetch("flagged_theses").map { |item| item.fetch("id") }, "cap"
       assert_includes payload.fetch("flagged_theses").map { |item| item.fetch("id") }, "inadmissible"
-      assert_empty payload.fetch("suppressed")
+      refute_includes payload.fetch("ranked").map { |item| item.fetch("id") }, "below-floor"
+      refute_includes payload.fetch("flagged_theses").map { |item| item.fetch("id") }, "below-floor"
+      assert_includes payload.fetch("suppressed"), { "id" => "below-floor", "reason" => "below_min_leverage" }
       payload.fetch("ranked").each do |item|
         refute_empty item.fetch("breakdown")
       end
-      [ clean, cap, inadmissible ].each do |item|
+      [ clean, cap, inadmissible, below_floor ].each do |item|
         assert thesis_schemer.valid?(item.to_h), thesis_schemer.validate(item.to_h).map { |e| e["error"] }.inspect
       end
 
@@ -1004,7 +1010,11 @@ class RefactorPatrolCommandTest < Minitest::Test
       end
 
       assert_equal Hive::ExitCodes::SUCCESS, status
-      assert_equal "PRIOR", JSON.parse(out).fetch("last_scanned_sha")
+      payload = JSON.parse(out)
+      assert_equal "PRIOR", payload.fetch("last_scanned_sha")
+      refute payload.fetch("review_complete")
+      assert_equal "agent_failed", payload.fetch("review_errors").first.fetch("error")
+      refute payload.fetch("feature_results").first.fetch("complete")
       assert_equal "PRIOR", JSON.parse(File.read(File.join(state_dir, "state.json"))).fetch("last_scanned_sha")
     end
   end

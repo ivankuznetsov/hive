@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-07-14
+updated: 2026-07-16
 tags: [gap, todo]
 ---
 
@@ -315,6 +315,18 @@ creation, issue creation, open/closed reconciliation, crash-after-intent
 recovery, and handoff creation. Until that smoke exists, the checked-in tests
 prove Hive's local state machine and command contracts, not the complete hosted
 provider behavior under real network ambiguity.
+
+## Non-Claude patrol in-flight token enforcement needs live stream fixtures (2026-07-16)
+
+Claude 2.1.179 patrol logs and focused process-group tests prove that nested
+`message_start` usage plus cumulative `message_delta` output can stop a running
+agent at `max_tokens_per_agent`. Codex and Pi terminal totals are parsed, while
+current Grok streaming JSON exposes no counts, but representative live interim
+usage streams for those three profiles have not been captured. Until they are,
+Hive can mark a terminal-total run over-limit but cannot promise an early token
+interrupt for that provider; launch ceilings and wall-clock timeouts remain the
+provider-independent bounds. Capture real streams before adding profile-specific
+interim accounting so cumulative events are not accidentally double-counted.
 
 ## Areas the wiki could be expanded
 

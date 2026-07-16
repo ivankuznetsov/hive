@@ -73,7 +73,9 @@ module Hive
         result = @agent_runner.call(feature: feature, prompt: prompt,
                                     output_path: output_path, run_dir: run_dir)
         if agent_failed?(result)
-          return record_feature_error(feature, "agent_failed", agent_error_message(result))
+          return record_feature_error(
+            feature, "agent_failed", agent_error_message(result), agent_error_details(result)
+          )
         end
 
         parse_findings(feature, output_path, run_id: File.basename(run_dir).delete_prefix("review-"))
@@ -94,13 +96,25 @@ module Hive
         message
       end
 
-      def record_feature_error(feature, kind, message)
-        @review_errors << { "feature_id" => feature.id, "error" => kind, "message" => message }
-        @state.write_run_log("review-error-#{SecureRandom.hex(4)}", {
-          "feature_id" => feature.id,
-          "error" => kind,
-          "message" => message
-        })
+      def agent_error_details(result)
+        exhaustion = result.is_a?(Hash) ? result[:resource_exhaustion] : nil
+        return {} unless exhaustion.is_a?(Hash)
+
+        {
+          "details" => {
+            "resource_exhaustion" => {
+              "reason" => exhaustion[:reason].to_s,
+              "limit" => exhaustion[:limit].to_i,
+              "observed" => exhaustion[:observed].to_i
+            }
+          }
+        }
+      end
+
+      def record_feature_error(feature, kind, message, details = {})
+        error = { "feature_id" => feature.id, "error" => kind, "message" => message }.merge(details)
+        @review_errors << error
+        @state.write_run_log("review-error-#{SecureRandom.hex(4)}", error)
         []
       end
 
@@ -282,6 +296,7 @@ module Hive
             max_budget_usd: @token_budget.max_budget_usd(
               @cfg.dig("budget_usd", "patrol") || 100, stage: STAGE
             ),
+            max_tokens: @token_budget.max_tokens(stage: STAGE),
             timeout_sec: @cfg.dig("timeout_sec", "patrol") || 3600,
             log_label: STAGE,
             profile: profile,

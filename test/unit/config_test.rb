@@ -182,7 +182,7 @@ class ConfigTest < Minitest::Test
       assert_equal 0.25, cfg.dig("refactor_patrol", "issue_filing", "min_leverage_score")
       assert_equal "claude", cfg.dig("refactor_patrol", "agent")
       assert_equal "medium", cfg.dig("refactor_patrol", "min_confidence")
-      assert_equal 3, cfg.dig("refactor_patrol", "max_theses_per_feature")
+      assert_equal 1, cfg.dig("refactor_patrol", "max_theses_per_feature")
       assert_equal 10, cfg.dig("refactor_patrol", "max_theses_per_run")
       assert_equal 3600, cfg.dig("refactor_patrol", "max_review_seconds_per_run")
       assert_includes cfg.dig("refactor_patrol", "exclude"), "node_modules"
@@ -612,14 +612,14 @@ class ConfigTest < Minitest::Test
 
   def test_load_resolves_patrol_frequency_modes
     cases = {
-      "ultrapatrol" => [ "timer", 1800, true, 800_000, 2_400_000, 10, 36, 100 ],
-      "high" => [ "timer", 7200, true, 400_000, 1_200_000, 6, 18, 50 ],
-      "medium" => [ "timer", 14_400, true, 200_000, 600_000, 3, 8, 25 ],
-      "low" => [ "new_commits", 600, true, 100_000, 200_000, 1, 2, 10 ],
-      "off" => [ "continuous", 600, false, 200_000, 600_000, 3, 8, 25 ]
+      "ultrapatrol" => [ "timer", 1800, true, 800_000, 2_400_000, 100_000, 10, 36, 100 ],
+      "high" => [ "timer", 7200, true, 400_000, 1_200_000, 75_000, 6, 18, 50 ],
+      "medium" => [ "timer", 14_400, true, 200_000, 600_000, 50_000, 3, 8, 25 ],
+      "low" => [ "new_commits", 600, true, 100_000, 200_000, 40_000, 1, 2, 10 ],
+      "off" => [ "continuous", 600, false, 200_000, 600_000, 50_000, 3, 8, 25 ]
     }
 
-    cases.each do |mode, (trigger, poll_interval_sec, enabled, cycle_tokens, daily_tokens,
+    cases.each do |mode, (trigger, poll_interval_sec, enabled, cycle_tokens, daily_tokens, agent_tokens,
                           cycle_spawns, daily_spawns, agent_budget)|
       with_tmp_dir do |dir|
         FileUtils.mkdir_p(File.join(dir, ".hive-state"))
@@ -646,6 +646,7 @@ class ConfigTest < Minitest::Test
                      "#{mode} must not change the fix-attempt cap"
         assert_equal cycle_tokens, cfg.dig("patrol", "max_tokens_per_cycle")
         assert_equal daily_tokens, cfg.dig("patrol", "max_tokens_per_day")
+        assert_equal agent_tokens, cfg.dig("patrol", "max_tokens_per_agent")
         assert_equal cycle_spawns, cfg.dig("patrol", "max_agent_spawns_per_cycle")
         assert_equal daily_spawns, cfg.dig("patrol", "max_agent_spawns_per_day")
         assert_equal agent_budget, cfg.dig("patrol", "max_budget_usd_per_agent")
@@ -762,6 +763,7 @@ class ConfigTest < Minitest::Test
       "max_fix_attempts_per_cycle: 0",
       "max_tokens_per_cycle: 0",
       "max_tokens_per_day: nope",
+      "max_tokens_per_agent: 0",
       "max_agent_spawns_per_cycle: 0",
       "max_agent_spawns_per_day: 1.5",
       "architecture_budget_multiplier: 0",

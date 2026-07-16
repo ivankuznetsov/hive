@@ -712,6 +712,67 @@ class HivePatrolPrOpenerTest < Minitest::Test
     end
   end
 
+  def test_pending_reconciliation_requires_the_exact_durable_receipt
+    cases = {
+      "missing its publication receipt" => lambda { |entry, _receipt|
+        entry.delete("publication_receipt")
+      },
+      "publication receipt mismatch" => lambda { |entry, receipt|
+        entry["publication_receipt"] = receipt.merge("head_sha" => "d" * 40)
+      },
+      "missing its exact branch or URL identity" => lambda { |entry, receipt|
+        entry["publication_receipt"] = receipt
+        entry["pr_url"] = ""
+      }
+    }
+
+    cases.each do |message, mutate|
+      with_tmp_dir do |dir|
+        state = Hive::Patrol::StateStore.new(dir)
+        validated_patch = patch(worktree_path: dir)
+        opener = Hive::Patrol::PrOpener.new(dir, cfg: cfg, state: state, gh: FakeGh.new)
+        receipt = opener.send(:publication_receipt_for, validated_patch)
+        entry = {
+          "state" => "reconciliation_pending",
+          "branch" => validated_patch.branch,
+          "pr_url" => "https://example.com/pr/2",
+          "publication_receipt" => receipt
+        }
+        mutate.call(entry, receipt)
+        state.write_fingerprints("fp1" => entry)
+
+        error = assert_raises(Hive::GhError, message) do
+          opener.send(:reconciliation_pending_entry, finding, validated_patch)
+        end
+        assert_includes error.message, message
+      end
+    end
+  end
+
+  def test_pending_reconciliation_fails_closed_when_the_receipted_pr_is_still_missing
+    with_tmp_dir do |dir|
+      state = Hive::Patrol::StateStore.new(dir)
+      validated_patch = patch(worktree_path: dir)
+      opener = Hive::Patrol::PrOpener.new(dir, cfg: cfg, state: state, gh: FakeGh.new)
+      state.write_fingerprints(
+        "fp1" => {
+          "state" => "reconciliation_pending",
+          "branch" => validated_patch.branch,
+          "pr_url" => "https://example.com/pr/2",
+          "publication_receipt" => opener.send(:publication_receipt_for, validated_patch)
+        }
+      )
+      opener.instance_variable_get(:@gh).define_singleton_method(:lookup_prs_for_branch) { |*| [] }
+
+      result = opener.open(finding, validated_patch)
+
+      assert_equal :error, result.status
+      assert_equal "gh_error", result.reason
+      assert_includes result.detail, "created patrol PR https://example.com/pr/2 could not be reconciled"
+      assert_equal "reconciliation_pending", state.fingerprints.fetch("fp1").fetch("state")
+    end
+  end
+
   def test_existing_remote_branch_is_replaced_only_with_an_exact_lease
     with_tmp_dir do |dir|
       gh = FakeGh.new

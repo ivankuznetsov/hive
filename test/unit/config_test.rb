@@ -649,6 +649,7 @@ class ConfigTest < Minitest::Test
         assert_equal cycle_spawns, cfg.dig("patrol", "max_agent_spawns_per_cycle")
         assert_equal daily_spawns, cfg.dig("patrol", "max_agent_spawns_per_day")
         assert_equal agent_budget, cfg.dig("patrol", "max_budget_usd_per_agent")
+        assert_equal 2, cfg.dig("patrol", "architecture_budget_multiplier")
         assert_equal "medium", cfg.dig("patrol", "min_confidence_to_fix"),
                      "#{mode} must not change the confidence gate"
       end
@@ -763,6 +764,7 @@ class ConfigTest < Minitest::Test
       "max_tokens_per_day: nope",
       "max_agent_spawns_per_cycle: 0",
       "max_agent_spawns_per_day: 1.5",
+      "architecture_budget_multiplier: 0",
       "max_budget_usd_per_agent: 0",
       "poll_interval_sec: 30",
       "commands: []",

@@ -6,6 +6,23 @@ require "hive/refactor_patrol/state_store"
 class RefactorPatrolReviewAgentRunnerTest < Minitest::Test
   include HiveTestHelper
 
+  def test_call_refuses_an_exhausted_architecture_budget
+    with_tmp_dir do |dir|
+      budget = Object.new
+      budget.define_singleton_method(:acquire) { |stage:| stage != "refactor-patrol-review" }
+      budget.define_singleton_method(:exhaustion_message) { "architecture cycle exhausted" }
+      runner = Hive::RefactorPatrol::ReviewAgentRunner.new(
+        project_root: dir, cfg: cfg, state: Hive::RefactorPatrol::StateStore.new(dir),
+        token_budget: budget
+      )
+
+      result = runner.call(prompt: "p", output_path: File.join(dir, "out.json"), run_dir: dir)
+
+      assert_equal :error, result.fetch(:status)
+      assert_equal "architecture cycle exhausted", result.fetch(:error_message)
+    end
+  end
+
   def test_call_records_usage_and_profile_fallback
     with_tmp_dir do |dir|
       state = Hive::RefactorPatrol::StateStore.new(dir)

@@ -17,6 +17,7 @@ require "hive/worktree"
 module Hive
   module Patrol
     class Fixer
+      STAGE = "patrol-fix".freeze
       MAX_FIX_PROOF_BYTES = 64 * 1024
       MAX_AUDITED_PATHS = 24
       MAX_REGRESSION_PATHS = 12
@@ -709,10 +710,10 @@ module Hive
           project_root: @project_root,
           state_file: File.join(run_dir, "fix.md"),
           log_dir: File.join(@state.root, "logs"),
-          slug: "patrol-fix"
+          slug: STAGE
         )
         profile = Hive::AgentProfiles.lookup(@cfg.dig("patrol", "agent") || "claude", cfg: @cfg)
-        unless @token_budget.acquire
+        unless @token_budget.acquire(stage: STAGE)
           return { status: :error, error_message: @token_budget.exhaustion_message }
         end
         started_at = Time.now.utc
@@ -723,15 +724,17 @@ module Hive
             prompt: prompt,
             add_dirs: [ run_dir ],
             cwd: worktree_path,
-            max_budget_usd: @token_budget.max_budget_usd(@cfg.dig("budget_usd", "patrol") || 100),
+            max_budget_usd: @token_budget.max_budget_usd(
+              @cfg.dig("budget_usd", "patrol") || 100, stage: STAGE
+            ),
             timeout_sec: @cfg.dig("timeout_sec", "patrol") || 3600,
-            log_label: "patrol-fix",
+            log_label: STAGE,
             profile: profile,
             status_mode: :exit_code_only
           ).run!
         ensure
           @token_budget.record!(
-            result: result, profile: profile, stage: "patrol-fix", started_at: started_at
+            result: result, profile: profile, stage: STAGE, started_at: started_at
           )
         end
         result

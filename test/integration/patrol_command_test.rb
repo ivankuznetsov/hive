@@ -530,6 +530,61 @@ class PatrolCommandTest < Minitest::Test
     end
   end
 
+  def test_review_error_preserves_the_nonzero_cursor_for_the_same_pinned_snapshot
+    with_patrol_project do |repo|
+      target_sha = run!("git", "-C", repo, "rev-parse", "master").strip
+      state_dir = File.join(repo, ".hive-state", "patrol")
+      FileUtils.mkdir_p(state_dir)
+      File.write(
+        File.join(state_dir, "state.json"),
+        JSON.generate(
+          "last_scanned_sha" => "PRIOR",
+          "feature_review_active" => true,
+          "feature_review_sha" => target_sha,
+          "feature_review_cursor" => 1
+        )
+      )
+      features = (1..2).map do |index|
+        Hive::Patrol::Feature.new(
+          id: "feature-#{index}", kind: "architecture", entrypoints: [],
+          owned_files: [], context_files: [], tests: []
+        )
+      end
+      reviewer = FakeReviewer.new(
+        [], review_errors: [
+          { "feature_id" => "feature-2", "error" => "agent_failed", "message" => "provider failed" }
+        ]
+      )
+
+      _out, _err, status = with_captured_exit do
+        command_for(mapper: FakeMapper.new(features), reviewer: reviewer, dry_run: true).call
+      end
+
+      assert_equal Hive::ExitCodes::SUCCESS, status
+      state = JSON.parse(File.read(File.join(state_dir, "state.json")))
+      assert_equal target_sha, state.fetch("feature_review_sha")
+      assert_equal 1, state.fetch("feature_review_cursor")
+      assert_equal [ "feature-2" ], reviewer.features.map(&:id)
+    end
+  end
+
+  def test_default_reviewer_and_fixer_builders_receive_the_shared_budget
+    with_patrol_project do |repo|
+      cfg = Hive::Config.load(repo)
+      state = Hive::Patrol::StateStore.new(repo)
+      budget = Object.new
+      command = Hive::Commands::Patrol.new("demo")
+
+      reviewer = command.send(:build_reviewer, repo, cfg, state, budget)
+      fixer = command.send(:build_fixer, repo, cfg, state, budget)
+
+      assert_instance_of Hive::Patrol::Reviewer, reviewer
+      assert_instance_of Hive::Patrol::Fixer, fixer
+      assert_same budget, reviewer.instance_variable_get(:@token_budget)
+      assert_same budget, fixer.instance_variable_get(:@token_budget)
+    end
+  end
+
   # max_prs_per_cycle caps PRs *opened*, not fix candidates: a failed
   # validation must not consume the budget, and a fixable later candidate
   # must still be attempted. With the default cap of 3 and four eligible

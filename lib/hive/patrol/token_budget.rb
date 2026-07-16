@@ -6,13 +6,17 @@ module Hive
     # Project-wide patrol resource gate. Measured tokens and provider-agnostic
     # launch counts are both bounded so a backend that omits usage accounting
     # cannot turn a frequent patrol tier into an unlimited subscription drain.
+    # Architecture work gets a larger cycle envelope without receiving a
+    # separate daily pool, so it can inspect broad boundaries without evading
+    # the project's shared subscription ceiling.
     class TokenBudget
       DEFAULT_LIMITS = {
         "max_tokens_per_cycle" => 200_000,
         "max_tokens_per_day" => 600_000,
         "max_agent_spawns_per_cycle" => 3,
         "max_agent_spawns_per_day" => 8,
-        "max_budget_usd_per_agent" => 25
+        "max_budget_usd_per_agent" => 25,
+        "architecture_budget_multiplier" => 2
       }.freeze
 
       attr_reader :last_exhaustion
@@ -31,11 +35,11 @@ module Hive
         @cycle_unmetered_spawns = 0
       end
 
-      def acquire
+      def acquire(stage: "patrol")
         activity = today_activity
-        reason = exhaustion_reason(activity)
+        reason = exhaustion_reason(activity, stage)
         if reason
-          @last_exhaustion = exhaustion(reason, activity)
+          @last_exhaustion = exhaustion(reason, activity, stage)
           return false
         end
 
@@ -45,7 +49,7 @@ module Hive
       end
 
       def exhaustion_message
-        detail = @last_exhaustion || exhaustion("unknown", today_activity)
+        detail = @last_exhaustion || exhaustion("unknown", today_activity, "patrol")
         "patrol agent budget exhausted (#{detail.fetch(:reason)}; " \
           "cycle=#{detail.fetch(:cycle_tokens)}/#{detail.fetch(:max_tokens_per_cycle)} tokens, " \
           "today=#{detail.fetch(:today_tokens)}/#{detail.fetch(:max_tokens_per_day)} tokens, " \
@@ -53,10 +57,12 @@ module Hive
           "#{detail.fetch(:today_spawns)}/#{detail.fetch(:max_agent_spawns_per_day)} today)"
       end
 
-      def max_budget_usd(configured)
-        [ Float(configured), Float(@limits.fetch("max_budget_usd_per_agent")) ].min
+      # Agent CLIs call this limit USD, but on subscription-backed providers it
+      # is a budget-equivalent runaway guard rather than an additional charge.
+      def max_budget_usd(configured, stage: "patrol")
+        [ Float(configured), Float(effective_limit("max_budget_usd_per_agent", stage)) ].min
       rescue ArgumentError, TypeError
-        @limits.fetch("max_budget_usd_per_agent")
+        effective_limit("max_budget_usd_per_agent", stage)
       end
 
       def record!(result:, profile:, stage:, started_at:)
@@ -112,30 +118,46 @@ module Hive
         )
       end
 
-      def exhaustion_reason(activity)
+      def exhaustion_reason(activity, stage)
         return "usage_store_unavailable" if @usage_store_failed || activity.fetch(:available) == false
         return "daily_token_limit" if activity.fetch(:tokens) >= @limits.fetch("max_tokens_per_day")
-        return "cycle_token_limit" if @cycle_tokens >= @limits.fetch("max_tokens_per_cycle")
+        if @cycle_tokens >= effective_limit("max_tokens_per_cycle", stage)
+          return "cycle_token_limit"
+        end
         if activity.fetch(:agent_spawns) >= @limits.fetch("max_agent_spawns_per_day")
           return "daily_agent_spawn_limit"
         end
-        return "cycle_agent_spawn_limit" if @cycle_spawns >= @limits.fetch("max_agent_spawns_per_cycle")
+        if @cycle_spawns >= effective_limit("max_agent_spawns_per_cycle", stage)
+          return "cycle_agent_spawn_limit"
+        end
 
         nil
       end
 
-      def exhaustion(reason, activity)
+      def exhaustion(reason, activity, stage)
         {
           reason: reason,
+          stage: stage,
           cycle_tokens: @cycle_tokens,
           today_tokens: activity.fetch(:tokens),
           cycle_spawns: @cycle_spawns,
           today_spawns: activity.fetch(:agent_spawns),
-          max_tokens_per_cycle: @limits.fetch("max_tokens_per_cycle"),
+          max_tokens_per_cycle: effective_limit("max_tokens_per_cycle", stage),
           max_tokens_per_day: @limits.fetch("max_tokens_per_day"),
-          max_agent_spawns_per_cycle: @limits.fetch("max_agent_spawns_per_cycle"),
+          max_agent_spawns_per_cycle: effective_limit("max_agent_spawns_per_cycle", stage),
           max_agent_spawns_per_day: @limits.fetch("max_agent_spawns_per_day")
         }
+      end
+
+      def effective_limit(key, stage)
+        value = @limits.fetch(key)
+        return value unless architecture_stage?(stage)
+
+        value * @limits.fetch("architecture_budget_multiplier")
+      end
+
+      def architecture_stage?(stage)
+        stage.to_s.start_with?("refactor-patrol")
       end
 
       def now

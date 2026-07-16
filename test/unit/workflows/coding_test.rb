@@ -32,6 +32,8 @@ class WorkflowsCodingTest < Minitest::Test
     assert_equal :exit_code_only, stages_by_name.fetch("execute").status_mode
     assert_equal 500, stages_by_name.fetch("execute").budget_usd
     assert_equal 14400, stages_by_name.fetch("execute").timeout_sec
+    assert_equal "execute_to_open_pr", stages_by_name.fetch("execute").condition_policy.transition
+    assert stages_by_name.fetch("execute").condition_policy.authoritative_capable
     assert_equal :agent, stages_by_name.fetch("open-pr").kind
     assert_equal :review_council, stages_by_name.fetch("review").kind
     assert_nil stages_by_name.fetch("review").status_mode

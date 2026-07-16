@@ -8,6 +8,7 @@ require "hive/permission_scope"
 require "hive/paths"
 require "hive/repository_identity"
 require "hive/screenote/oauth_client"
+require "hive/conditions/migration"
 
 module Hive
   module Config
@@ -106,6 +107,10 @@ module Hive
         }
       },
       "execute" => { "agent" => "claude" },
+      "conditions" => {
+        "authority" => "markers",
+        "stages" => {}
+      },
       "open_pr" => { "agent" => "claude" },
       "artifacts" => { "agent" => "claude" },
       "finalize" => { "agent" => "claude" },
@@ -1716,6 +1721,7 @@ module Hive
       validate_brainstorm_runtime!(cfg, source_path)
       validate_review_attempts!(cfg, source_path)
       validate_attempt_timers!(cfg, source_path)
+      validate_conditions!(cfg, source_path)
       validate_daemon!(cfg, source_path)
       validate_web_config!(cfg, source_path)
       validate_screenote!(cfg, source_path)
@@ -1740,6 +1746,7 @@ module Hive
       claude
       plan
       execute
+      conditions
       open_pr
       artifacts
       finalize
@@ -1770,6 +1777,35 @@ module Hive
               "#{key} in #{describe_source(source_path)} must be a Hash; " \
               "got #{value.inspect} (#{value.class}). Either remove the key " \
               "(defaults will apply) or supply `#{key}: { ... }` with the right shape."
+      end
+    end
+
+    def validate_conditions!(cfg, source_path)
+      settings = cfg.fetch("conditions", {})
+      allowed = %w[authority stages]
+      unknown = settings.keys - allowed
+      unless unknown.empty?
+        raise ConfigError,
+              "conditions in #{describe_source(source_path)} has unknown keys: #{unknown.join(', ')}"
+      end
+      authority = settings.fetch("authority", "markers").to_s
+      unless Hive::Conditions::Migration::MODES.include?(authority)
+        raise ConfigError,
+              "conditions.authority in #{describe_source(source_path)} must be markers, shadow, or conditions"
+      end
+      stages = settings.fetch("stages", {})
+      unless stages.is_a?(Hash)
+        raise ConfigError, "conditions.stages in #{describe_source(source_path)} must be a Hash"
+      end
+      stages.each do |stage, mode|
+        unless Hive::Stages::DIRS.include?(stage.to_s)
+          raise ConfigError, "conditions.stages has unknown stage #{stage.inspect}"
+        end
+        begin
+          Hive::Conditions::Migration.validate_mode!(mode.to_s, stage.to_s)
+        rescue Hive::Conditions::InvalidMigrationMode => e
+          raise ConfigError, "conditions.stages.#{stage} in #{describe_source(source_path)}: #{e.message}"
+        end
       end
     end
 

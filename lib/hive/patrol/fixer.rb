@@ -21,6 +21,7 @@ module Hive
       MAX_AUDITED_PATHS = 24
       MAX_REGRESSION_PATHS = 12
       VALIDATION_NAMES = %w[docs format lint public_contract typecheck test].freeze
+      FixProofReadError = Class.new(StandardError)
       FAILURE_REASONS = %w[
         fix_agent_failed fix_agent_rejected missing_fix_proof no_validation_commands
         invalid_validation_key missing_regression regression_not_reproduced
@@ -92,7 +93,7 @@ module Hive
       def attempt(finding)
         branch = branch_name(finding)
         worktree = @worktree_factory.call(finding: finding, branch: branch)
-        reusable = reusable_review_handoff_patch(finding, branch, worktree)
+        reusable = reusable_publication_patch(finding, branch, worktree)
         return reusable if reusable
 
         base_sha = fresh_default_sha!
@@ -149,16 +150,22 @@ module Hive
 
       private
 
-      def reusable_review_handoff_patch(finding, branch, worktree)
+      def reusable_publication_patch(finding, branch, worktree)
         entry = @state.fingerprints[finding.fingerprint]
         return unless entry.is_a?(Hash)
-        return unless entry["state"] == "review_handoff_failed" && entry["branch"] == branch
+        return unless Fingerprint::RETRYABLE_PUBLICATION_STATES.include?(entry["state"])
+        return unless entry["branch"] == branch
+
+        receipt = entry["publication_receipt"]
+        return if entry["state"] == "reconciliation_pending" && !receipt.is_a?(Hash)
 
         Dir.glob(File.join(@state.root, "patches", "*.json"))
           .sort_by { |path| -File.mtime(path).to_f }
           .each do |path|
           record = @state.read_json(path)
+          next if receipt.is_a?(Hash) && record["id"] != receipt["patch_id"]
           next unless reusable_patch_record?(record, finding, branch, worktree.path)
+          next if receipt.is_a?(Hash) && !publication_receipt_matches?(receipt, record)
 
           return PatchAttempt.new(
             id: record.fetch("id"), finding: finding, branch: branch,
@@ -170,6 +177,14 @@ module Hive
         nil
       rescue SystemCallError
         nil
+      end
+
+      def publication_receipt_matches?(receipt, record)
+        {
+          "worktree_path" => record["worktree_path"],
+          "base_sha" => record["base_sha"],
+          "head_sha" => record["head_sha"]
+        }.all? { |field, value| receipt[field] == value }
       end
 
       def reusable_patch_record?(record, finding, branch, expected_path)
@@ -205,12 +220,7 @@ module Hive
       end
 
       def load_fix_proof(output_path)
-        content = File.open(output_path, "rb") { |file| file.read(MAX_FIX_PROOF_BYTES + 1) }
-        if content.bytesize > MAX_FIX_PROOF_BYTES
-          return [ nil, proof_error("missing_fix_proof", "fix proof exceeds #{MAX_FIX_PROOF_BYTES} bytes") ]
-        end
-
-        proof = JSON.parse(content)
+        proof = JSON.parse(read_fix_proof(output_path))
         return [ nil, proof_error("missing_fix_proof", "fix proof must be a JSON object") ] unless proof.is_a?(Hash)
 
         if proof["status"] == "rejected"
@@ -238,8 +248,25 @@ module Hive
         [ proof.merge("audited_paths" => audited, "regression_paths" => regressions), nil ]
       rescue Errno::ENOENT
         [ nil, proof_error("missing_fix_proof", "fix agent did not write #{output_path}") ]
-      rescue JSON::ParserError, SystemCallError => e
+      rescue JSON::ParserError, SystemCallError, FixProofReadError => e
         [ nil, proof_error("missing_fix_proof", "invalid fix proof: #{e.class}: #{e.message}") ]
+      end
+
+      def read_fix_proof(output_path)
+        flags = File::RDONLY | File::BINARY
+        flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+        flags |= File::NONBLOCK if File.const_defined?(:NONBLOCK)
+
+        File.open(output_path, flags) do |file|
+          raise FixProofReadError, "fix proof is not a regular file" unless file.stat.file?
+
+          bytes = file.read(MAX_FIX_PROOF_BYTES + 1) || "".b
+          if bytes.bytesize > MAX_FIX_PROOF_BYTES
+            raise FixProofReadError, "fix proof exceeds #{MAX_FIX_PROOF_BYTES} bytes"
+          end
+
+          bytes
+        end
       end
 
       def present_proof_text?(value)

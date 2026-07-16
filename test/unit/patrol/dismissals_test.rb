@@ -94,4 +94,44 @@ class HivePatrolDismissalsTest < Minitest::Test
       refute fingerprints["fp-error"].key?("state")
     end
   end
+
+  def test_open_pr_does_not_erase_publication_retry_states
+    %w[reconciliation_pending review_handoff_failed].each do |retry_state|
+      with_tmp_dir do |dir|
+        state = Hive::Patrol::StateStore.new(dir)
+        state.write_fingerprints(
+          "fp1" => {
+            "branch" => "hive-patrol/x",
+            "pr_url" => "https://example.com/pr/1",
+            "state" => retry_state
+          }
+        )
+        gh = FakeGh.new([ { "state" => "OPEN", "url" => "https://example.com/pr/1" } ])
+
+        Hive::Patrol::Dismissals.new(dir, state: state, gh: gh).reconcile
+
+        assert_equal retry_state, state.fingerprints.fetch("fp1").fetch("state"),
+                     "dismissal reconciliation must not suppress #{retry_state} recovery"
+      end
+    end
+  end
+
+  def test_publication_retry_does_not_reconcile_a_different_pr_on_the_branch
+    with_tmp_dir do |dir|
+      state = Hive::Patrol::StateStore.new(dir)
+      state.write_fingerprints(
+        "fp1" => {
+          "branch" => "hive-patrol/x",
+          "pr_url" => "https://example.com/pr/expected",
+          "state" => "reconciliation_pending"
+        }
+      )
+      gh = FakeGh.new([ { "state" => "CLOSED", "url" => "https://example.com/pr/other" } ])
+
+      dismissed = Hive::Patrol::Dismissals.new(dir, state: state, gh: gh).reconcile
+
+      assert_empty dismissed
+      assert_equal "reconciliation_pending", state.fingerprints.fetch("fp1").fetch("state")
+    end
+  end
 end

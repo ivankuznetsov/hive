@@ -46,9 +46,12 @@ module Hive
       end
 
       def open(finding, patch, now: Time.now)
+        preserve_worktree = false
         return Result.new(status: :skipped, reason: "validation_failed") unless patch.passed
 
         assert_local_patch_identity!(patch)
+        pending = reconciliation_pending_entry(finding, patch)
+        preserve_worktree = !pending.nil?
 
         # Authenticate first: `lookup_prs_for_branch` shells out to `gh`
         # and raises GhError on an unauthenticated host, which surfaces a
@@ -57,11 +60,17 @@ module Hive
         # was already validated and its worktree created.
         @gh.ensure_authenticated!(@cfg)
 
-        existing = @gh.lookup_prs_for_branch(patch.worktree_path, patch.branch).find do |pr|
-          %w[OPEN MERGED].include?(pr["state"])
+        branch_prs = @gh.lookup_prs_for_branch(patch.worktree_path, patch.branch)
+        existing = branch_prs.find do |pr|
+          %w[OPEN MERGED].include?(pr["state"]) &&
+            (!pending || pr["url"].to_s == pending["pr_url"].to_s)
+        end
+        if pending && !existing
+          raise Hive::GhError,
+                "created patrol PR #{pending['pr_url']} could not be reconciled"
         end
         if existing
-          assert_existing_pr_identity!(existing, patch)
+          assert_existing_pr_identity!(existing, patch, require_base_oid: !pending.nil?)
           if review_prs_enabled? && existing["state"] == "OPEN"
             assert_local_patch_identity!(patch)
             assert_remote_patch_identity!(patch)
@@ -123,13 +132,11 @@ module Hive
         assert_remote_patch_identity!(patch)
         assert_remote_base_identity!(patch)
         pr_url = create_pr(patch, body)
-        # The PR now exists on the remote, so persist the fingerprint-to-PR
-        # mapping BEFORE the post-creation reconciliation asserts. A
-        # `lookup_prs_for_branch` read-after-write lag or an identity
-        # mismatch raises into the GhError rescue below; without this write
-        # the worktree is cleaned and the ledger never learns about a real
-        # open PR — every later cycle would re-fix and error against it.
-        record_mapping(finding, patch, pr_url, "open", now)
+        # The PR now exists on the remote, but it is not active until exact
+        # identity reconciliation and mandatory review handoff settle. Keep
+        # the validated patch receipt retryable across read-after-write lag.
+        record_mapping(finding, patch, pr_url, "reconciliation_pending", now)
+        preserve_worktree = true
         assert_local_patch_identity!(patch)
         assert_remote_patch_identity!(patch)
         created_pr = @gh.lookup_prs_for_branch(patch.worktree_path, patch.branch).find do |pr|
@@ -150,6 +157,8 @@ module Hive
             reason: "review_handoff_failed"
           )
         end
+        record_mapping(finding, patch, pr_url, "open", now)
+        preserve_worktree = false
         if !review_task_path && !review_prs_enabled?
           # The branch is pushed; the local worktree is no longer needed
           # only when patrol is not handing the PR to 6-review.
@@ -162,7 +171,7 @@ module Hive
         # validation-failure path removes it). Clean it up and surface a
         # structured error so one bad `gh` call doesn't accumulate
         # `.patrol` worktrees or sink the rest of the scan.
-        cleanup_worktree(patch)
+        cleanup_worktree(patch) unless preserve_worktree
         Result.new(status: :error, reason: "gh_error", detail: e.message)
       end
 
@@ -393,7 +402,47 @@ module Hive
           finding: finding,
           now: now
         )
+        entry = fingerprints.fetch(finding.fingerprint)
+        if state == "reconciliation_pending"
+          entry["publication_receipt"] = {
+            "patch_id" => patch.id,
+            "worktree_path" => patch.worktree_path,
+            "base_sha" => validated_oid!(patch.base_sha, "validated patch base"),
+            "head_sha" => validated_oid!(patch.head_sha, "validated patch head")
+          }
+        else
+          entry.delete("publication_receipt")
+        end
         @state.write_fingerprints(fingerprints)
+      end
+
+      def reconciliation_pending_entry(finding, patch)
+        entry = @state.fingerprints[finding.fingerprint]
+        return unless entry.is_a?(Hash) && entry["state"] == "reconciliation_pending"
+
+        receipt = entry["publication_receipt"]
+        unless receipt.is_a?(Hash)
+          raise Hive::GhError, "pending patrol PR is missing its publication receipt"
+        end
+
+        expected = {
+          "patch_id" => patch.id,
+          "worktree_path" => patch.worktree_path,
+          "base_sha" => validated_oid!(patch.base_sha, "validated patch base"),
+          "head_sha" => validated_oid!(patch.head_sha, "validated patch head")
+        }
+        mismatches = expected.filter_map do |field, value|
+          "#{field}=#{receipt[field].inspect}, expected #{value.inspect}" unless receipt[field] == value
+        end
+        unless mismatches.empty?
+          raise Hive::GhError,
+                "pending patrol PR publication receipt mismatch: #{mismatches.join('; ')}"
+        end
+        if entry["branch"] != patch.branch || entry["pr_url"].to_s.empty?
+          raise Hive::GhError, "pending patrol PR is missing its exact branch or URL identity"
+        end
+
+        entry
       end
     end
   end

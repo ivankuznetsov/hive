@@ -141,7 +141,11 @@ module Hive
       # version. `tasks[].marker` is the lowercased symbol name as a string;
       # `tasks[].attrs` is the marker's attribute map.
       def json_payload(projects, stages: nil, exclude_archived: false, extra_dependency_tasks: nil)
-        admission_context = build_admission_context(projects)
+        admission_context = build_admission_context(
+          projects,
+          exclude_archived: exclude_archived,
+          extra_dependency_tasks: extra_dependency_tasks
+        )
         {
           "schema" => "hive-status",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
@@ -774,11 +778,6 @@ module Hive
       end
 
       def annotate_dependencies(rows, project, extra_dependency_tasks: nil, admission_context: nil)
-        # `extra_dependency_tasks` is retained in the signature for callers
-        # pinned to the v4 producer API. The v5 admission context scans the
-        # complete on-disk stage set once, so filtered/TUI emissions no longer
-        # need a consumer-provided dependency supplement.
-        _extra_dependency_tasks = extra_dependency_tasks
         context = admission_context || build_admission_context([ project ])
         rows.each { |row| apply_dependency_verdict(row, context, project) }
         rows
@@ -793,8 +792,12 @@ module Hive
         extra_dependency_tasks[project["path"]]
       end
 
-      def build_admission_context(projects)
-        Hive::DependencySnapshot.admission_context(projects)
+      def build_admission_context(projects, exclude_archived: false, extra_dependency_tasks: nil)
+        Hive::DependencySnapshot.admission_context(
+          projects,
+          exclude_archived: exclude_archived,
+          extra_dependency_tasks: extra_dependency_tasks
+        )
       rescue StandardError => e
         warn "hive: status: dependency admission snapshot failed " \
              "(#{e.class}: #{e.message}); holding every affected row"

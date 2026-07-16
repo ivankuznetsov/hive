@@ -18,6 +18,10 @@ for held rows; manual commands revalidate under task/commit locks, and
 `--force` cannot bypass the gate. Backward recovery and same-stage no-ops
 remain available.
 
+The TUI's active-only poll reuses immutable prevalidated terminal snapshots,
+so admission remains fail-closed without making hot refresh time grow with the
+archive.
+
 **Contract:** `hive-status` is now v5 with required nullable
 `admission_error`. Command error envelopes distinguish retryable
 `dependency_wait` (exit 75) from non-retryable `admission_error` (exit 78) and

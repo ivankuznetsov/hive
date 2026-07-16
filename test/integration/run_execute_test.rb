@@ -249,7 +249,7 @@ class RunExecuteTest < Minitest::Test
     end
   end
 
-  def test_non_hash_research_frontmatter_fails_closed
+  def test_non_hash_research_frontmatter_is_rejected_before_execute_side_effects
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         folder, _slug = setup_execute_task(dir, plan_header: <<~YAML)
@@ -265,13 +265,18 @@ class RunExecuteTest < Minitest::Test
           "result" => "Research-looking output"
         )
 
-        capture_io { Hive::Commands::Run.new(folder).call }
+        error = assert_raises(Hive::DependencyAdmissionError) do
+          Hive::Commands::Run.new(folder).call
+        end
 
-        marker = Hive::Markers.current(File.join(folder, "task.md"))
-        assert_equal :execute_waiting, marker.name
-        assert_equal "no_worktree_changes", marker.attrs["reason"]
+        assert_equal "plan_dependency_invalid", error.reason_code
+        refute File.exist?(File.join(folder, "worktree.yml")),
+               "malformed plan frontmatter must fail admission before creating a worktree"
+        refute File.exist?(File.join(folder, "task.md")),
+               "malformed plan frontmatter must fail admission before initializing execute state"
       ensure
-        wt_path = YAML.safe_load(File.read(File.join(folder, "worktree.yml")))["path"] if defined?(folder)
+        worktree_yml = File.join(folder, "worktree.yml") if defined?(folder)
+        wt_path = YAML.safe_load_file(worktree_yml)["path"] if worktree_yml && File.exist?(worktree_yml)
         FileUtils.rm_rf(wt_path) if wt_path
       end
     end

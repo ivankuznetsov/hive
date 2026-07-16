@@ -9,6 +9,12 @@ tags: [command, status, observability, json, diagnostics, legacy-dirs, task-id, 
 
 **TLDR**: `hive status` walks every enrolled project, builds one immutable multi-project dependency-admission context, and prints tasks grouped by their next useful action. It distinguishes clear tasks, valid below-gate waits, and fail-closed admission errors, including invalid state produced by raw filesystem moves. Normal text status hides `9-done` tasks older than 3 days; JSON remains complete for daemon/bot consumers.
 
+Full text/JSON status and daemon snapshots read the complete on-disk graph.
+The TUI's steady-state active-only refresh combines freshly parsed active
+tasks with immutable, prevalidated terminal identities from its last
+full/archive status pass; this keeps refresh cost independent of archive size
+without turning a cached terminal admission error into a clear dependency.
+
 ## Output shape
 
 ```

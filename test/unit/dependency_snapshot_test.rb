@@ -124,6 +124,45 @@ class DependencySnapshotTest < Minitest::Test
     end
   end
 
+  def test_active_admission_context_preserves_cached_archived_error
+    with_tmp_dir do |root|
+      dependent = write_task_meta(root, "4-execute", "dependent-task", id: 2)
+      Hive::TaskMeta.write(
+        dependent,
+        id: 2,
+        slug: "dependent-task",
+        display_name: nil,
+        depends_on: "archived-task"
+      )
+      project = { "name" => File.basename(root), "path" => root, "repository_identity" => nil }
+      cached_error = {
+        "reason_code" => "dependency_metadata_invalid",
+        "offending_ref" => "#{File.basename(root)}:archived-task",
+        "safe_correction" => "Repair the archived task metadata."
+      }
+
+      context = Hive::DependencySnapshot.admission_context(
+        [ project ],
+        exclude_archived: true,
+        extra_dependency_tasks: {
+          root => [
+            {
+              "slug" => "archived-task",
+              "id" => 1,
+              "stage" => "9-done",
+              "admission_error" => cached_error
+            }
+          ]
+        }
+      )
+      verdict = context.verdict(project: File.basename(root), slug: "dependent-task")
+
+      assert verdict.error?
+      assert_equal "dependency_metadata_invalid", verdict.admission_error.reason_code
+      assert_equal "Repair the archived task metadata.", verdict.admission_error.safe_correction
+    end
+  end
+
   private
 
   def write_task_meta(root, stage, slug, id:)

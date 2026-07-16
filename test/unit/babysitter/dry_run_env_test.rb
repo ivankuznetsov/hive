@@ -1517,6 +1517,21 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_gh_api_option_values_cannot_spoof_an_explicit_get
+    with_tmp_dir do |dir|
+      @real_log = File.join(dir, "real.log")
+      env = {
+        "HIVE_BABYSITTER_REAL_GH" => recording_binary(dir, "real-gh"),
+        "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "skipped.log")
+      }
+      mutation = "query=mutation { deleteProjectV2(input: {}) { clientMutationId } }"
+
+      %w[--header -H --jq -q --preview -p --template -t].each do |option|
+        assert_stubbed env, "gh", "api", option, "-XGET", "graphql", "-f", mutation
+      end
+    end
+  end
+
   def test_gh_stub_skips_browser_launch_flags
     with_tmp_dir do |dir|
       real_gh = recording_binary(dir, "real-gh")

@@ -2,6 +2,28 @@ require "hive/stages"
 
 module Hive
   module Dependencies
+    TASK_SLUG_RE = /\A[a-z](?:[a-z0-9-]{0,62}[a-z0-9])?\z/
+    PROJECT_NAME_RE = /\A[A-Za-z0-9][A-Za-z0-9._-]*\z/
+
+    class InvalidReference < ArgumentError
+      attr_reader :value
+
+      def initialize(value, message = nil)
+        @value = value
+        super(message || "invalid dependency reference #{value.inspect}")
+      end
+    end
+
+    Reference = Data.define(:project, :task, :explicit_project) do
+      def to_s
+        explicit_project ? "#{project}:#{task}" : task
+      end
+
+      def qualified(current_project)
+        "#{explicit_project ? project : current_project}:#{task}"
+      end
+    end
+
     # `unresolved` is NOT a stored field: it is derived so the three-field
     # tuple can never contradict itself. A blocked row with no identified
     # prerequisite (missing dependency or self-reference) is unresolved; a
@@ -15,6 +37,39 @@ module Hive
     end
 
     module_function
+
+    def parse_reference(value)
+      unless value.is_a?(String) || value.is_a?(Integer)
+        raise InvalidReference.new(value, "depends_on must be one scalar task reference")
+      end
+
+      string = value.to_s.strip
+      raise InvalidReference.new(value, "depends_on must not be blank") if string.empty?
+
+      parts = string.split(":", -1)
+      case parts.length
+      when 1
+        task = parts.first
+        unless numeric?(task) || TASK_SLUG_RE.match?(task)
+          raise InvalidReference.new(value, "depends_on must be a task slug, numeric id, or project:slug")
+        end
+        Reference.new(project: nil, task: task, explicit_project: false)
+      when 2
+        project, task = parts
+        unless PROJECT_NAME_RE.match?(project) && TASK_SLUG_RE.match?(task) && !numeric?(task)
+          raise InvalidReference.new(value, "cross-project depends_on must use project:slug")
+        end
+        Reference.new(project: project, task: task, explicit_project: true)
+      else
+        raise InvalidReference.new(value, "depends_on contains too many ':' separators")
+      end
+    end
+
+    def parse_optional_reference(value)
+      return nil if value.nil?
+
+      parse_reference(value)
+    end
 
     def resolve(depends_on:, tasks:, threshold_stage:, task: nil)
       dependency = normalize_depends_on(depends_on)
@@ -70,8 +125,9 @@ module Hive
     end
 
     def normalize_depends_on(value)
-      string = value.to_s.strip
-      string.empty? ? nil : string
+      return nil if value.nil?
+
+      parse_reference(value).to_s
     end
 
     def numeric?(value)

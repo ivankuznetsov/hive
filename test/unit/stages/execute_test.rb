@@ -285,6 +285,15 @@ class HiveStagesExecuteTest < Minitest::Test
     end
   end
 
+  def test_research_execution_uses_shared_plan_frontmatter_parser
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task, "---\nexecution_mode: research\ndepends_on: base-task\n---\nbody\n")
+
+      assert_equal true, Hive::Stages::Execute.research_execution?(task)
+    end
+  end
+
   # End-to-end through the real 4-execute spawn helper: a non-yolo scope on
   # a non-claude runner (the A8 gate) must replace the stale AGENT_WORKING
   # marker with an attributed :error before the ConfigError propagates,

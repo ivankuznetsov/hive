@@ -27,6 +27,10 @@ Behavior:
 Constraints:
 - Do not modify any file other than plan.md.
 - Do not run code in the project worktree — execution happens in the next stage.
+- If this task has a known prerequisite, declare exactly one scalar
+  `depends_on: <slug-or-id>` or `depends_on: <project>:<slug>` in plan.md YAML
+  frontmatter. Keep the same exact normalized value in meta.yml; meta.yml is
+  authoritative, and prose dependency statements are not scheduling input.
 - The trailing marker must be exactly one of `<!-- WAITING -->` or
   `<!-- COMPLETE -->`.
 

@@ -631,7 +631,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
-  def test_skip_log_rejects_creation_race
+  def test_skip_log_revalidates_safe_creation_race
     with_tmp_dir do |dir|
       path = File.join(dir, "skipped.log")
       original_open = File.method(:open)
@@ -645,14 +645,55 @@ class BabysitterDryRunEnvTest < Minitest::Test
         original_open.call(target, *args, **kwargs, &block)
       end
 
-      error = assert_raises(IOError) do
-        with_replaced_singleton_method(File, :open, replacement) do
-          append_skip_log(path) { |file| file.puts("unsafe") }
+      with_replaced_singleton_method(File, :open, replacement) do
+        append_skip_log(path) { |file| file.puts("safe") }
+      end
+
+      assert_equal "racer\nsafe\n", File.read(path)
+    end
+  end
+
+  def test_concurrent_large_skip_log_records_remain_intact
+    with_tmp_dir do |dir|
+      log_path = File.join(dir, "skipped.log")
+      helper_path = File.expand_path("../../../bin/hive-babysitter-skip-log.rb", __dir__)
+      payload = "x" * 16_384
+      process_count = 8
+      ready_reader, ready_writer = IO.pipe
+      start_reader, start_writer = IO.pipe
+
+      pids = process_count.times.map do |index|
+        fork do
+          ready_reader.close
+          start_writer.close
+          ENV["HIVE_BABYSITTER_DRY_RUN_LOG"] = log_path
+          require helper_path
+          ready_writer.write(".")
+          ready_writer.close
+          start_reader.read(1)
+          start_reader.close
+          log_skip("git", [ "record-#{index}", payload ])
+          exit! 0
         end
       end
 
-      assert_includes error.message, "changed during open"
-      assert_equal "racer\n", File.read(path)
+      ready_writer.close
+      start_reader.close
+      ready_reader.read(process_count)
+      ready_reader.close
+      start_writer.write("." * process_count)
+      start_writer.close
+      statuses = pids.map { |pid| Process.wait2(pid).last }
+      assert statuses.all?(&:success?), "skip-log writers must exit successfully"
+
+      lines = File.binread(log_path).lines
+      assert_equal process_count, lines.length
+      record_ids = lines.map do |line|
+        match = /\A\[dry-run\] git record-(\d+) x{16384} skipped\n\z/.match(line)
+        assert match, "corrupt skip-log record: #{line.bytesize} bytes"
+        match[1].to_i
+      end
+      assert_equal (0...process_count).to_a, record_ids.sort
     end
   end
 

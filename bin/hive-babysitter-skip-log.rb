@@ -11,8 +11,8 @@ end
 
 def log_skip(command, argv)
   path = ENV.fetch("HIVE_BABYSITTER_DRY_RUN_LOG", ".babysitter-dry-run-skipped.log")
-  message = "[dry-run] #{command} #{escaped_argv(argv)} skipped"
-  append_skip_log(path) { |file| file.puts(message) }
+  message = "[dry-run] #{command} #{escaped_argv(argv)} skipped\n"
+  append_skip_log(path) { |file| file.write(message) }
 rescue SystemCallError, IOError => e
   # The command is still skipped (stderr below preserves the human-visible signal), but the
   # persistent audit log just developed an invisible gap; surface the cause instead of
@@ -22,7 +22,7 @@ rescue SystemCallError, IOError => e
   warn "[dry-run] failed to write skip log #{path}: #{e.message}"
 end
 
-def append_skip_log(path)
+def append_skip_log(path, creation_retry: true, &block)
   raise IOError, "File::NOFOLLOW unavailable" unless File.const_defined?(:NOFOLLOW)
   raise IOError, "File::NONBLOCK unavailable" unless File.const_defined?(:NONBLOCK)
 
@@ -51,9 +51,23 @@ def append_skip_log(path)
       raise IOError, "dry-run skip log changed during open"
     end
 
-    yield file
+    lock_timeout_sec = 1
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + lock_timeout_sec
+    until file.flock(File::LOCK_EX | File::LOCK_NB)
+      raise IOError, "dry-run skip log lock held longer than #{lock_timeout_sec}s" if
+        Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+
+      sleep 0.01
+    end
+
+    block.call(file)
+    file.flush
   end
-rescue Errno::EEXIST, Errno::ENOENT => e
+rescue Errno::EEXIST => e
+  return append_skip_log(path, creation_retry: false, &block) if creation_retry
+
+  raise IOError, "dry-run skip log changed during open: #{e.message}"
+rescue Errno::ENOENT => e
   raise IOError, "dry-run skip log changed during open: #{e.message}"
 end
 

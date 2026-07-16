@@ -42,6 +42,24 @@ class HiveBotDispatchRequestWriterTest < Minitest::Test
       assert_equal 123_456_789, payload["chat_id"]
       assert_equal 926_850_952, payload["update_id"]
       assert_equal "answer_complete", payload["trigger"]
+      assert payload.key?("task_generation")
+      assert payload.key?("predecessor_attempt_id")
+      assert_equal [], payload["inherited_outputs"]
+    end
+  end
+
+  def test_write_accepts_generation_intent_for_durable_delivery
+    Dir.mktmpdir("hive-writer") do |dir|
+      W.write!(project: "hive", slug: "task-260528-aaaa",
+               argv: [ "hive", "run", "task-260528-aaaa" ],
+               task_generation: "generation-one", predecessor_attempt_id: "attempt-zero",
+               inherited_outputs: [ { "path" => "outputs/old", "size" => 1, "sha256" => "0" * 64 } ],
+               state_home: dir)
+      request = Q.pending(state_home: dir).first
+
+      assert_equal "generation-one", request.task_generation
+      assert_equal "attempt-zero", request.predecessor_attempt_id
+      assert_equal 1, request.inherited_outputs.size
     end
   end
 

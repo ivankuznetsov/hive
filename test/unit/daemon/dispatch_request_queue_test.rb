@@ -28,7 +28,10 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
       "requestor" => requestor,
       "chat_id" => chat_id,
       "update_id" => update_id,
-      "trigger" => trigger
+      "trigger" => trigger,
+      "task_generation" => nil,
+      "predecessor_attempt_id" => nil,
+      "inherited_outputs" => []
     }
     File.write(path, JSON.generate(payload))
     path
@@ -681,5 +684,51 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
       refute File.exist?(claimed)
       refute File.exist?("#{claimed}#{Q::CLAIM_META_SUFFIX}")
     end
+  end
+
+  def test_v3_round_trips_generation_and_v2_remains_readable
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      Q.write_request!(
+        project: "hive", slug: "task", argv: [ "hive", "run", "task" ],
+        request_id: "v3request", task_generation: "generation-1",
+        predecessor_attempt_id: "attempt-zero",
+        inherited_outputs: [ { "path" => "outputs/old.json", "size" => 2, "sha256" => "0" * 64 } ],
+        state_home: dir, now: Time.utc(2026, 7, 16, 12, 0, 0)
+      )
+      write_request(dir, request_id: "v2request", created_at: Time.utc(2026, 7, 16, 11, 0, 0),
+                    schema_version: 2)
+
+      v2, v3 = Q.pending(state_home: dir)
+      assert_nil v2.task_generation
+      assert_equal 2, v2.schema_version
+      assert_equal "generation-1", v3.task_generation
+      assert_equal "attempt-zero", v3.predecessor_attempt_id
+      assert_equal 3, v3.schema_version
+      assert_equal 1, v3.inherited_outputs.size
+    end
+  end
+
+  def test_claim_sidecar_records_resolved_attempt_reference
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      Q.write_request!(project: "hive", slug: "task", argv: [ "hive", "run", "task" ],
+                       request_id: "claimed01", state_home: dir)
+      claimed = Q.claim("claimed01", pid: nil, attempt_id: "attempt-one",
+                        task_generation: "generation-one", state_home: dir)
+      metadata = Q.send(:read_claim_metadata, claimed)
+
+      assert_equal "attempt-one", metadata["attempt_id"]
+      assert_equal "generation-one", metadata["task_generation"]
+    end
+  end
+
+  def test_dispatch_delegates_delivery_to_shared_attempt_dispatcher
+    request = Q::Request.new(request_id: "r1", project: "hive", slug: "task",
+                             argv: [ "hive", "run", "task" ])
+    fake = Object.new
+    fake.define_singleton_method(:dispatch_request) { |value, **kwargs| [ value, kwargs ] }
+
+    value, kwargs = Q.dispatch(request, dispatcher: fake, interactive: false)
+    assert_same request, value
+    assert_equal false, kwargs[:interactive]
   end
 end

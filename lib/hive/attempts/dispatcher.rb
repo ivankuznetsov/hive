@@ -1,0 +1,223 @@
+require "securerandom"
+require "hive/attempts/capacity_snapshot"
+require "hive/attempts/generation"
+require "hive/task_resolver"
+
+module Hive
+  module Attempts
+    # Result of semantic admission. Live duplicates are ordinary successful
+    # resolutions, not errors; only a fresh :accepted result invokes launcher.
+    DispatchResult = Data.define(:status, :attempt, :receipt, :attach_descriptor, :reason) do
+      def accepted? = status == :accepted
+      def live? = %i[accepted existing_live].include?(status)
+    end
+
+    class Dispatcher
+      DEFAULT_LIMITS = { max_global: 3, max_per_project: 3, max_daily: 50 }.freeze
+
+      def initialize(store:, launcher:, limits: DEFAULT_LIMITS, clock: -> { Time.now.utc },
+                     id_generator: -> { SecureRandom.uuid }, task_resolver: nil,
+                     launch_timeout_sec: 30)
+        @store = store
+        @launcher = launcher
+        @limits = DEFAULT_LIMITS.merge(limits)
+        @clock = clock
+        @id_generator = id_generator
+        @task_resolver = task_resolver || method(:resolve_request_task)
+        @launch_timeout_sec = launch_timeout_sec
+      end
+
+      def dispatch(task:, project:, intended_stage:, argv:, request_id:, provider:,
+                   interactive: false, generation: nil, predecessor_attempt_id: nil,
+                   inherited_outputs: [], retry_charge: 0, now: @clock.call)
+        @launcher.preflight!
+        generation = normalize_generation(
+          generation, task: task, project: project, intended_stage: intended_stage
+        )
+        admit(
+          task: task, generation: generation, argv: argv, request_id: request_id,
+          provider: provider, interactive: interactive,
+          predecessor_attempt_id: predecessor_attempt_id,
+          inherited_outputs: inherited_outputs, retry_charge: retry_charge,
+          successor_of: nil, now: now
+        )
+      end
+
+      def dispatch_successor(predecessor:, task:, project:, argv:, request_id:, provider:,
+                             inherited_outputs: nil, retry_charge: nil, interactive: false,
+                             now: @clock.call)
+        @launcher.preflight!
+        generation = Generation.resolve(
+          task: task,
+          project: project,
+          intended_stage: predecessor["intended_stage"],
+          progress_token: predecessor["progress_token"],
+          task_generation: predecessor.task_generation
+        )
+        inherited = inherited_outputs ||
+                    (predecessor["inherited_outputs"] + predecessor["current_outputs"]).uniq
+        admit(
+          task: task, generation: generation, argv: argv, request_id: request_id,
+          provider: provider, interactive: interactive,
+          predecessor_attempt_id: predecessor.attempt_id,
+          inherited_outputs: inherited,
+          retry_charge: retry_charge.nil? ? predecessor["retry_charge"] : retry_charge,
+          successor_of: predecessor.attempt_id, now: now
+        )
+      end
+
+      def dispatch_request(request, interactive: false, now: @clock.call)
+        task = @task_resolver.call(request)
+        intended_stage = "#{task.stage_index}-#{task.stage_name}"
+        generation = Generation.resolve(
+          task: task, project: request.project, intended_stage: intended_stage,
+          task_generation: request.respond_to?(:task_generation) ? request.task_generation : nil
+        )
+        predecessor_id = request.respond_to?(:predecessor_attempt_id) ? request.predecessor_attempt_id : nil
+        predecessor = predecessor_id && @store.fetch(predecessor_id)
+        return dispatch_successor(
+          predecessor: predecessor, task: task, project: request.project, argv: request.argv,
+          request_id: request.request_id, provider: provider_for(task),
+          inherited_outputs: request.inherited_outputs, interactive: interactive, now: now
+        ) if predecessor&.state == "lost"
+
+        dispatch(
+          task: task, project: request.project, intended_stage: intended_stage,
+          argv: request.argv, request_id: request.request_id, provider: provider_for(task),
+          interactive: interactive, generation: generation,
+          inherited_outputs: request.respond_to?(:inherited_outputs) ? request.inherited_outputs : [],
+          now: now
+        )
+      end
+
+      private
+
+      def admit(task:, generation:, argv:, request_id:, provider:, interactive:,
+                predecessor_attempt_id:, inherited_outputs:, retry_charge:, successor_of:, now:)
+        result = nil
+        created = nil
+        @store.with_generation_lock(generation.task_generation) do
+          records = @store.scan.records
+          semantic_owner = find_semantic_owner(records, generation)
+          if semantic_owner&.live?
+            result = live_result(semantic_owner, interactive: interactive)
+            next
+          end
+
+          exact = records.select { |record| record.task_generation == generation.task_generation }
+          terminal = exact.reverse.find { |record| record.state == "terminal" }
+          if terminal
+            result = DispatchResult.new(
+              status: :terminal_replay, attempt: terminal, receipt: terminal.receipt,
+              attach_descriptor: nil, reason: nil
+            )
+            next
+          end
+
+          lost = exact.reverse.find { |record| record.state == "lost" }
+          if lost && lost.attempt_id != successor_of
+            result = DispatchResult.new(
+              status: :deferred, attempt: lost, receipt: nil,
+              attach_descriptor: nil, reason: "attempt_lost"
+            )
+            next
+          end
+
+          snapshot = CapacitySnapshot.build(store: @store, now: now)
+          if snapshot.at_limit?(
+            project: generation.project, task_slug: generation.task_slug, date: now.to_date,
+            max_global: @limits.fetch(:max_global),
+            max_per_project: @limits.fetch(:max_per_project),
+            max_daily: @limits.fetch(:max_daily)
+          )
+            result = DispatchResult.new(
+              status: :deferred, attempt: nil, receipt: nil,
+              attach_descriptor: nil, reason: "capacity"
+            )
+            next
+          end
+
+          created = @store.create_launching(
+            attempt_id: @id_generator.call,
+            request_id: request_id,
+            predecessor_attempt_id: predecessor_attempt_id,
+            task_id: generation.task_id&.to_s,
+            project: generation.project,
+            task_slug: generation.task_slug,
+            intended_stage: generation.intended_stage,
+            task_generation: generation.task_generation,
+            progress_token: generation.progress_token,
+            provider: provider.to_s,
+            starting_revision: starting_revision(task),
+            retry_charge: retry_charge,
+            inherited_outputs: inherited_outputs || [],
+            launch_timeout_sec: @launch_timeout_sec,
+            now: now
+          )
+        end
+
+        return result if result
+
+        @launcher.launch(created, argv: argv)
+        DispatchResult.new(
+          status: :accepted, attempt: created, receipt: nil,
+          attach_descriptor: interactive ? attach_descriptor(created) : nil,
+          reason: nil
+        )
+      end
+
+      def find_semantic_owner(records, generation)
+        candidates = records.select do |record|
+          same_task = if generation.task_id.nil?
+                        record["project"] == generation.project && record["task_slug"] == generation.task_slug
+                      else
+                        record["task_id"].to_s == generation.task_id.to_s
+                      end
+          same_task && record["intended_stage"] == generation.intended_stage && record.live?
+        end
+        candidates.max_by { |record| [ record["accepted_at"], record.lease_version ] }
+      end
+
+      def live_result(record, interactive:)
+        DispatchResult.new(
+          status: :existing_live, attempt: record, receipt: nil,
+          attach_descriptor: interactive ? attach_descriptor(record) : nil,
+          reason: nil
+        )
+      end
+
+      def attach_descriptor(record)
+        { "attempt_id" => record.attempt_id }
+      end
+
+      def normalize_generation(generation, task:, project:, intended_stage:)
+        return generation if generation.is_a?(Generation)
+
+        Generation.resolve(
+          task: task, project: project, intended_stage: intended_stage,
+          task_generation: generation
+        )
+      end
+
+      def starting_revision(task)
+        worktree = task.respond_to?(:worktree_path) ? task.worktree_path : nil
+        return nil unless worktree && File.directory?(worktree)
+
+        IO.popen([ "git", "-C", worktree, "rev-parse", "HEAD" ], err: File::NULL, &:read).strip.then do |value|
+          value.empty? ? nil : value
+        end
+      rescue SystemCallError
+        nil
+      end
+
+      def resolve_request_task(request)
+        Hive::TaskResolver.new(request.slug, project_filter: request.project).resolve
+      end
+
+      def provider_for(task)
+        stage = task.stage_name.to_s.tr("-", "_")
+        Hive::Config.load(task.project_root).dig(stage, "agent") || "claude"
+      end
+    end
+  end
+end

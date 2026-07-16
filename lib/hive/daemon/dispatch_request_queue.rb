@@ -3,6 +3,7 @@ require "fileutils"
 require "securerandom"
 require "time"
 require "hive/paths"
+require "hive/attempts/output_reference"
 require "hive/daemon/queue_directory"
 
 module Hive
@@ -13,7 +14,8 @@ module Hive
       module_function
 
       SCHEMA = "hive-dispatch-request".freeze
-      SCHEMA_VERSION = 2
+      SCHEMA_VERSION = 3
+      SUPPORTED_SCHEMA_VERSIONS = [ 2, 3 ].freeze
 
       ALLOWED_VERBS = %w[
         run develop brainstorm plan review open-pr artifacts finalize
@@ -41,7 +43,8 @@ module Hive
 
       Request = Struct.new(
         :request_id, :created_at, :project, :slug, :argv, :requestor,
-        :chat_id, :update_id, :trigger, :path,
+        :chat_id, :update_id, :trigger, :task_generation,
+        :predecessor_attempt_id, :inherited_outputs, :schema_version, :path,
         keyword_init: true
       )
 
@@ -61,12 +64,19 @@ module Hive
 
       def write_request!(project:, slug:, argv:, requestor: "bot", chat_id: nil,
                          update_id: nil, trigger: nil, request_id: generate_request_id,
+                         task_generation: nil, predecessor_attempt_id: nil,
+                         inherited_outputs: [],
                          state_home: Hive::Paths.state_home, now: Time.now)
         unless valid_argv?(argv)
           raise ArgumentError, "argv #{argv.inspect} is not allowlisted for dispatch requests"
         end
         raise ArgumentError, "project is required for dispatch requests" if project.to_s.empty?
         raise ArgumentError, "slug is required for dispatch requests" if slug.to_s.empty?
+        Array(inherited_outputs).each do |reference|
+          Hive::Attempts::OutputReference.validate_shape!(reference)
+        rescue Hive::Attempts::InvalidOutputReference => e
+          raise ArgumentError, e.message
+        end
 
         created_at = now.utc
         payload = {
@@ -80,14 +90,17 @@ module Hive
           "requestor" => requestor.to_s,
           "chat_id" => chat_id,
           "update_id" => update_id,
-          "trigger" => trigger.to_s
+          "trigger" => trigger.to_s,
+          "task_generation" => task_generation,
+          "predecessor_attempt_id" => predecessor_attempt_id,
+          "inherited_outputs" => inherited_outputs || []
         }
 
         dir = directory(state_home: state_home)
         filename = filename_for(created_at: created_at, request_id: request_id)
         final_path = File.join(dir, filename)
         tmp_path = File.join(dir, ".#{filename}.tmp.#{Process.pid}.#{Thread.current.object_id}")
-        File.open(tmp_path, File::WRONLY | File::CREAT | File::TRUNC, 0o644) do |f|
+        File.open(tmp_path, File::WRONLY | File::CREAT | File::TRUNC, 0o600) do |f|
           f.write(JSON.generate(payload))
           f.flush
           f.fsync
@@ -168,6 +181,7 @@ module Hive
       # schema-valid hive-dispatch-request; pid/start metadata lives in a
       # `.claim` sidecar and can be updated after spawn.
       def claim(request_id, pid:, process_start_time: nil, now: Time.now,
+                attempt_id: nil, task_generation: nil,
                 state_home: Hive::Paths.state_home)
         return nil if request_id.to_s.empty?
 
@@ -180,7 +194,10 @@ module Hive
 
           claimed_path = "#{path}#{CLAIMED_SUFFIX}"
           File.rename(path, claimed_path)
-          write_claim_metadata(claimed_path, pid: pid, process_start_time: process_start_time, now: now)
+          write_claim_metadata(
+            claimed_path, pid: pid, process_start_time: process_start_time, now: now,
+            attempt_id: attempt_id, task_generation: task_generation
+          )
           # The `.claimed` rename is the at-most-once commit point. fsync the
           # directory so both that rename and the sidecar's rename survive an
           # unclean shutdown — otherwise a power loss could leave the claim
@@ -194,6 +211,7 @@ module Hive
       end
 
       def update_claim(request_id, pid:, process_start_time: nil, now: Time.now,
+                       attempt_id: nil, task_generation: nil,
                        state_home: Hive::Paths.state_home)
         return nil if request_id.to_s.empty?
 
@@ -204,7 +222,10 @@ module Hive
           data = parse_json_hash(path)
           next unless data && data["request_id"] == request_id.to_s
 
-          write_claim_metadata(path, pid: pid, process_start_time: process_start_time, now: now)
+          write_claim_metadata(
+            path, pid: pid, process_start_time: process_start_time, now: now,
+            attempt_id: attempt_id, task_generation: task_generation
+          )
           return path
         end
         nil
@@ -283,7 +304,8 @@ module Hive
           return {
             chat_id: data["chat_id"], update_id: data["update_id"],
             project: data["project"], slug: data["slug"],
-            requestor: data["requestor"]
+            requestor: data["requestor"], task_generation: data["task_generation"],
+            predecessor_attempt_id: data["predecessor_attempt_id"]
           }
         end
         nil
@@ -346,8 +368,16 @@ module Hive
         Request.new(
           request_id: next_request_id, created_at: now.utc, project: project.to_s,
           slug: slug.to_s, argv: next_argv, requestor: requestor.to_s,
-          chat_id: chat_id, update_id: update_id, trigger: trigger.to_s, path: nil
+          chat_id: chat_id, update_id: update_id, trigger: trigger.to_s,
+          task_generation: nil, predecessor_attempt_id: nil, inherited_outputs: [],
+          schema_version: SCHEMA_VERSION, path: nil
         )
+      end
+
+      # Queue files remain delivery records. Ownership resolution is delegated
+      # to the same dispatcher used by foreground callers.
+      def dispatch(request, dispatcher:, **options)
+        dispatcher.dispatch_request(request, **options)
       end
 
       def valid_argv?(argv)
@@ -451,14 +481,17 @@ module Hive
         "#{claimed_path}#{CLAIM_META_SUFFIX}"
       end
 
-      def write_claim_metadata(claimed_path, pid:, process_start_time:, now:)
+      def write_claim_metadata(claimed_path, pid:, process_start_time:, now:,
+                               attempt_id: nil, task_generation: nil)
         path = claim_metadata_path(claimed_path)
         tmp_path = "#{path}.tmp.#{Process.pid}.#{Thread.current.object_id}"
         File.open(tmp_path, File::WRONLY | File::CREAT | File::TRUNC, 0o600) do |f|
           f.write(JSON.generate(
             "pid" => pid,
             "process_start_time" => process_start_time,
-            "claimed_at" => now.utc.iso8601(6)
+            "claimed_at" => now.utc.iso8601(6),
+            "attempt_id" => attempt_id,
+            "task_generation" => task_generation
           ))
           f.flush
           f.fsync
@@ -496,7 +529,8 @@ module Hive
         def parse_data(data, path:)
           return :not_a_hash unless data.is_a?(Hash)
           return :wrong_schema unless data["schema"] == SCHEMA
-          return :unknown_schema_version unless data["schema_version"] == SCHEMA_VERSION
+          schema_version = data["schema_version"]
+          return :unknown_schema_version unless SUPPORTED_SCHEMA_VERSIONS.include?(schema_version)
 
           request_id = data["request_id"].to_s
           return :missing_request_id if request_id.empty?
@@ -518,6 +552,19 @@ module Hive
           created_at = parse_time(data["created_at"])
           return :invalid_created_at if created_at.nil?
 
+          if schema_version == 3
+            required_v3 = %w[task_generation predecessor_attempt_id inherited_outputs]
+            return :missing_v3_fields unless required_v3.all? { |key| data.key?(key) }
+            return :invalid_inherited_outputs unless data["inherited_outputs"].is_a?(Array)
+            begin
+              data["inherited_outputs"].each do |reference|
+                Hive::Attempts::OutputReference.validate_shape!(reference)
+              end
+            rescue Hive::Attempts::InvalidOutputReference
+              return :invalid_inherited_outputs
+            end
+          end
+
           Request.new(
             request_id: request_id,
             created_at: created_at,
@@ -528,6 +575,10 @@ module Hive
             chat_id: data["chat_id"],
             update_id: data["update_id"],
             trigger: data["trigger"].to_s,
+            task_generation: data["task_generation"],
+            predecessor_attempt_id: data["predecessor_attempt_id"],
+            inherited_outputs: data["inherited_outputs"].is_a?(Array) ? data["inherited_outputs"] : [],
+            schema_version: schema_version,
             path: path
           )
         end

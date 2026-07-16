@@ -70,7 +70,7 @@ module Hive
       # `dispatch_requests/` directory. See
       # `Hive::Daemon::DispatchRequestQueue` and
       # `Hive::Bot::DispatchRequestWriter`.
-      "hive-dispatch-request" => 2,
+      "hive-dispatch-request" => 3,
       # Reverse-direction notice the daemon writes for the bot to relay a
       # non-zero, bot-originated dispatch back to the originating Telegram
       # chat. See `Hive::Daemon::DispatchResultQueue` (ADV-1).

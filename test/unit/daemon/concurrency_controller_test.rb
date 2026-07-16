@@ -159,6 +159,26 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
     assert_equal :ok, c.can_dispatch?(project: "p2", slug: "s2", now: T0)
   end
 
+  def test_durable_snapshot_rebuilds_capacity_and_daily_counts
+    snapshot = Struct.new(:global_count, :per_project, :daily_counts).new(
+      2, { "p1" => 1, "p2" => 1 }, { [ "p1", T0.to_date ] => 3 }
+    )
+    c = make(global: 3, per_project: 2, daily: 3)
+    c.set_capacity_snapshot(snapshot, legacy_per_project: { "legacy" => 1 })
+
+    assert_equal 3, c.in_flight_count
+    assert_equal :global_cap, c.can_dispatch?(project: "p3", slug: "s3", now: T0)
+
+    c.set_capacity_snapshot(snapshot, legacy_per_project: {})
+    assert_equal :daily_cap, c.can_dispatch?(project: "p1", slug: "s2", now: T0,
+                                             external_project_count: 0)
+
+    project_limited = make(global: 4, per_project: 1, daily: 10)
+    project_limited.set_capacity_snapshot(snapshot, legacy_per_project: {})
+    assert_equal :project_cap,
+                 project_limited.can_dispatch?(project: "p1", slug: "s2", now: T0)
+  end
+
   def test_daily_cap_blocks_after_n_dispatches
     c = make(daily: 2)
     dispatch(c, 100, "p1", "s1")

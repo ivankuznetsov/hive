@@ -53,10 +53,11 @@ module Hive
                      claim_resolver: nil, repository_resolver: nil, config_loader: nil,
                      repository_ownership: nil,
                      canonical_action_catalog: nil,
-                     registration: nil,
+                     registration: nil, token_budget: nil,
                      lease_sec: 3600, backoff_sec: 60)
         @project_root = File.expand_path(project_root)
         @cfg = cfg
+        @token_budget = token_budget
         @registration = registration.to_s.empty? ? cfg["project_name"].to_s : registration.to_s
         @job_store = job_store || JobStore.new(@project_root)
         @family_store = family_store || FamilyStore.new(@project_root, clock: clock)
@@ -1250,7 +1251,9 @@ module Hive
         @policy_signatures = %w[fix issue].to_h do |kind|
           [ kind, action_policy_signature(effective_cfg, kind) ]
         end
-        @fixer = @fixer_override || Fixer.new(@project_root, cfg: effective_cfg, clock: @clock)
+        @fixer = @fixer_override || Fixer.new(
+          @project_root, cfg: effective_cfg, clock: @clock, token_budget: @token_budget
+        )
         @pr_opener = @pr_opener_override || PrOpener.new(@project_root, cfg: effective_cfg)
         @issue_filer = @issue_filer_override || IssueFiler.new(@project_root, cfg: effective_cfg)
       end

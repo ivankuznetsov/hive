@@ -2,6 +2,7 @@ require "digest"
 require "json"
 require "time"
 require "hive/refactor_patrol/publication_attempt"
+require "hive/refactor_patrol/pr_manifest"
 require "hive/refactor_patrol/thesis"
 
 module Hive
@@ -144,7 +145,7 @@ module Hive
           raise @inconsistent_record.new("terminal canonical action proof identity is invalid", path: path)
         end
         payload = proof.reject { |key, _| key == "proof_digest" }
-        digest = ::Digest::SHA256.hexdigest(JSON.generate(deep_sort(payload)))
+        digest = ::Digest::SHA256.hexdigest(PrManifest.canonical_json(payload))
         unless proof.fetch("proof_digest").to_s.match?(/\A[a-f0-9]{64}\z/) &&
                proof.fetch("proof_digest") == digest
           raise @inconsistent_record.new("terminal canonical action proof digest is invalid", path: path)

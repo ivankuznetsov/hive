@@ -10,6 +10,7 @@ require "hive/git_ops"
 require "hive/lock"
 require "hive/process_kill"
 require "hive/patrol/mapper"
+require "hive/patrol/token_budget"
 require "hive/refactor_patrol/caps"
 require "hive/refactor_patrol/action_runner"
 require "hive/refactor_patrol/collisions"
@@ -91,16 +92,7 @@ module Hive
             documentation_changes: pr_mode? ? @manifest.fetch("files") : []
           )
         end
-        @reviewer_factory = reviewer_factory || lambda do |root, cfg, state|
-          Hive::RefactorPatrol::Reviewer.new(
-            root,
-            cfg: cfg,
-            state: state,
-            dry_run: ephemeral_discovery?,
-            source_pr: pr_mode? ? source_pr_context : nil,
-            read_only: pr_mode?
-          )
-        end
+        @reviewer_factory = reviewer_factory
         @leverage_factory = leverage_factory || ->(root, cfg) { Hive::RefactorPatrol::Leverage.new(root, cfg: cfg) }
         @caps_factory = caps_factory || ->(cfg) { Hive::RefactorPatrol::Caps.new(cfg) }
         @collisions_factory = collisions_factory || lambda do |root, state, v2_fingerprints|
@@ -110,12 +102,7 @@ module Hive
         end
         @manifest_resolver_factory = manifest_resolver_factory
         @repository_ownership = repository_ownership || Hive::RefactorPatrol::RepositoryOwnership.new
-        @action_runner_factory = action_runner_factory || lambda do |root, cfg|
-          Hive::RefactorPatrol::ActionRunner.new(
-            root, cfg: cfg, registration: @project,
-            repository_ownership: @repository_ownership
-          )
-        end
+        @action_runner_factory = action_runner_factory
         @job_store_factory = job_store_factory || ->(root) { Hive::RefactorPatrol::JobStore.new(root) }
         @heartbeat_interval_sec = heartbeat_interval_sec.to_f
         @heartbeat_lease_sec = heartbeat_lease_sec.to_i
@@ -151,7 +138,8 @@ module Hive
         assert_repository_ownership!(
           entry, cfg, aggregate: @job_store.read_job(@manifest.fetch("job_id"))
         )
-        runner = @action_runner_factory.call(project_root, cfg)
+        token_budget = Hive::Patrol::TokenBudget.new(project_root, cfg: cfg)
+        runner = build_action_runner(project_root, cfg, token_budget)
         result = with_claim_heartbeat(@manifest.fetch("job_id")) do
           runner.run(job_id: @manifest.fetch("job_id"), dry_run: @dry_run)
         end
@@ -178,7 +166,8 @@ module Hive
         existing_theses = prior_theses
         existing_suppressions = prior_suppressions
         pending_features = features.reject { |feature| completed.key?(feature.id.to_s) }
-        reviewer = @reviewer_factory.call(project_root, cfg, state)
+        token_budget = Hive::Patrol::TokenBudget.new(project_root, cfg: cfg)
+        reviewer = build_reviewer(project_root, cfg, state, token_budget)
         yielded_thesis_ids = {}
         incrementally_suppressed = []
         completed_new_theses = []
@@ -332,6 +321,30 @@ module Hive
           suppressed: suppressed,
           last_scanned_sha: scanned_sha,
           version: Hive::RefactorPatrol::Reporter::V1_SCHEMA_VERSION
+        )
+      end
+
+      def build_reviewer(root, cfg, state, token_budget)
+        return @reviewer_factory.call(root, cfg, state) if @reviewer_factory
+
+        Hive::RefactorPatrol::Reviewer.new(
+          root,
+          cfg: cfg,
+          state: state,
+          dry_run: ephemeral_discovery?,
+          source_pr: pr_mode? ? source_pr_context : nil,
+          read_only: pr_mode?,
+          token_budget: token_budget
+        )
+      end
+
+      def build_action_runner(root, cfg, token_budget)
+        return @action_runner_factory.call(root, cfg) if @action_runner_factory
+
+        Hive::RefactorPatrol::ActionRunner.new(
+          root, cfg: cfg, registration: @project,
+          repository_ownership: @repository_ownership,
+          token_budget: token_budget
         )
       end
 

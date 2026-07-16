@@ -7,6 +7,7 @@ require "hive/atomic_file"
 require "hive/config"
 require "hive/paths"
 require "hive/refactor_patrol/job_store"
+require "hive/refactor_patrol/pr_manifest"
 
 module Hive
   module RefactorPatrol
@@ -524,17 +525,7 @@ module Hive
       end
 
       def proof_digest(payload)
-        ::Digest::SHA256.hexdigest(JSON.generate(deep_sort(payload)))
-      end
-
-      def deep_sort(value)
-        case value
-        when Hash
-          value.keys.sort.to_h { |key| [ key, deep_sort(value.fetch(key)) ] }
-        when Array
-          value.map { |item| deep_sort(item) }
-        else value
-        end
+        ::Digest::SHA256.hexdigest(PrManifest.canonical_json(payload))
       end
 
       def json_copy(value)

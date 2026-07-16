@@ -519,7 +519,7 @@ class HivePatrolReviewerTest < Minitest::Test
     end
   end
 
-  def test_run_agent_wrapper_without_usage_writes_no_usage_row
+  def test_run_agent_wrapper_without_usage_records_an_unmetered_launch
     with_tmp_dir do |dir|
       with_usage_db do
         reviewer = Hive::Patrol::Reviewer.new(dir, cfg: cfg)
@@ -535,7 +535,12 @@ class HivePatrolReviewerTest < Minitest::Test
 
         reviewer.send(:run_agent, prompt: "p", output_path: File.join(dir, "out.json"), run_dir: dir)
 
-        refute File.exist?(Hive::UsageDb.path)
+        rows = usage_rows
+        assert_equal 1, rows.size
+        assert_equal "patrol-review-unmetered", rows.first.fetch("stage")
+        assert_equal 0, rows.first.fetch("input")
+        assert_equal 0, rows.first.fetch("output")
+        assert_equal 0, rows.first.fetch("cached")
       ensure
         profiles_singleton.define_method(:lookup, profiles_lookup) if profiles_singleton && profiles_lookup
         agent_singleton.define_method(:new, agent_new) if agent_singleton && agent_new

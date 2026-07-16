@@ -614,7 +614,10 @@ class HivePatrolFixerTest < Minitest::Test
       }
       state.write_fingerprints(ledger)
 
-      second = fixer.attempt(finding)
+      second = nil
+      with_replaced_singleton_method(Dir, :glob, ->(*) { raise "exact receipt must not scan patch history" }) do
+        second = fixer.attempt(finding)
+      end
 
       assert first.passed
       assert second.passed

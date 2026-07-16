@@ -14,6 +14,7 @@ require "hive/patrol/mapper"
 require "hive/patrol/pr_opener"
 require "hive/patrol/reviewer"
 require "hive/patrol/state_store"
+require "hive/patrol/token_budget"
 
 module Hive
   module Commands
@@ -32,8 +33,8 @@ module Hive
         @mapper_factory = mapper_factory || lambda do |root, cfg, state|
           Hive::Patrol::Mapper.new(root, cfg: cfg, state: state, capabilities: [ :architecture ])
         end
-        @reviewer_factory = reviewer_factory || ->(root, cfg, state) { Hive::Patrol::Reviewer.new(root, cfg: cfg, state: state) }
-        @fixer_factory = fixer_factory || ->(root, cfg, state) { Hive::Patrol::Fixer.new(root, cfg: cfg, state: state) }
+        @reviewer_factory = reviewer_factory
+        @fixer_factory = fixer_factory
         @pr_opener_factory = pr_opener_factory || ->(root, cfg, state) { Hive::Patrol::PrOpener.new(root, cfg: cfg, state: state) }
         @dismissals_factory = dismissals_factory || ->(root, state) { Hive::Patrol::Dismissals.new(root, state: state) }
       end
@@ -60,6 +61,7 @@ module Hive
         cfg = Hive::Config.load(project_root)
         state = Hive::Patrol::StateStore.new(project_root)
         state.ensure!
+        token_budget = Hive::Patrol::TokenBudget.new(project_root, cfg: cfg)
         dismissed = @dismissals_factory.call(project_root, state).reconcile
         target_sha = sweep_target_sha(project_root, cfg, state)
         features, feature_batch, reviewer, findings = with_scan_checkout(project_root, target_sha) do |scan_root|
@@ -67,7 +69,7 @@ module Hive
           batch = Hive::Patrol::FeatureBatch.new(cfg: cfg, state: state).call(
             mapped, target_sha: target_sha
           )
-          scan_reviewer = @reviewer_factory.call(scan_root, cfg, state)
+          scan_reviewer = build_reviewer(scan_root, cfg, state, token_budget)
           reviewed = stamp_fingerprints(scan_reviewer.call(batch.features), scan_root)
           [ mapped, batch, scan_reviewer, reviewed ]
         end
@@ -96,7 +98,7 @@ module Hive
         pr_results = []
         fix_results = []
         unless @dry_run
-          fixer = @fixer_factory.call(project_root, cfg, state)
+          fixer = build_fixer(project_root, cfg, state, token_budget)
           pr_opener = @pr_opener_factory.call(project_root, cfg, state)
           prs_opened = 0
           candidates.each do |finding|
@@ -181,6 +183,18 @@ module Hive
           "review_complete" => errors.empty? && feature_batch.complete,
           "review_errors" => errors
         }
+      end
+
+      def build_reviewer(root, cfg, state, token_budget)
+        return @reviewer_factory.call(root, cfg, state) if @reviewer_factory
+
+        Hive::Patrol::Reviewer.new(root, cfg: cfg, state: state, token_budget: token_budget)
+      end
+
+      def build_fixer(root, cfg, state, token_budget)
+        return @fixer_factory.call(root, cfg, state) if @fixer_factory
+
+        Hive::Patrol::Fixer.new(root, cfg: cfg, state: state, token_budget: token_budget)
       end
 
       def stamp_fingerprints(findings, project_root)

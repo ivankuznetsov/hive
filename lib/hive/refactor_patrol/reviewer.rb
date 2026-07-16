@@ -26,7 +26,8 @@ module Hive
       attr_reader :review_errors, :feature_results
 
       def initialize(project_root, cfg:, state: StateStore.new(project_root), agent_runner: nil, dry_run: false,
-                     source_pr: nil, read_only: false, monotonic_clock: nil)
+                     source_pr: nil, read_only: false, monotonic_clock: nil,
+                     token_budget: nil)
         @project_root = File.expand_path(project_root)
         @cfg = cfg
         @state = state
@@ -37,7 +38,8 @@ module Hive
         @agent_runner = agent_runner ||
                         ReviewAgentRunner.new(
                           project_root: @project_root, cfg: cfg, state: state,
-                          dry_run: dry_run, read_only: read_only
+                          dry_run: dry_run, read_only: read_only,
+                          token_budget: token_budget
                         )
         @review_errors = []
         @feature_results = []

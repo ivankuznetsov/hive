@@ -5,9 +5,9 @@ require "hive"
 require "hive/agent"
 require "hive/agent_profiles"
 require "hive/patrol/runner_task"
+require "hive/patrol/token_budget"
 require "hive/permission_scope"
 require "hive/stages/base"
-require "hive/usage_db"
 
 module Hive
   module RefactorPatrol
@@ -18,12 +18,14 @@ module Hive
     class ReviewAgentRunner
       STAGE = "refactor-patrol-review".freeze
 
-      def initialize(project_root:, cfg:, state:, dry_run: false, read_only: false)
+      def initialize(project_root:, cfg:, state:, dry_run: false, read_only: false,
+                     token_budget: nil)
         @project_root = project_root
         @cfg = cfg
         @state = state
         @dry_run = dry_run
         @read_only = read_only
+        @token_budget = token_budget || Hive::Patrol::TokenBudget.new(@project_root, cfg: cfg)
       end
 
       def call(prompt:, output_path:, run_dir:, timeout_sec: nil, **)
@@ -38,25 +40,34 @@ module Hive
           slug: STAGE
         )
         profile = Hive::AgentProfiles.lookup(configured_agent, cfg: @cfg)
+        unless @token_budget.acquire
+          return { status: :error, error_message: @token_budget.exhaustion_message }
+        end
         scope = read_only_scope(profile)
         cli_flags = @read_only ? profile.require_cli_capability!(:safe_mode) : []
         started_at = Time.now.utc
-        result = Hive::Agent.new(
-          task: task,
-          prompt: prompt,
-          add_dirs: [ @project_root ],
-          cwd: @project_root,
-          max_budget_usd: @cfg.dig("budget_usd", "patrol") || 100,
-          timeout_sec: effective_timeout(timeout_sec),
-          log_label: STAGE,
-          profile: profile,
-          expected_output: @read_only ? nil : output_path,
-          status_mode: @read_only ? :exit_code_only : :output_file_exists,
-          cli_flags: cli_flags,
-          **scope
-        ).run!
-        result = materialize_read_only_output(result, output_path) if @read_only
-        record_usage(result, profile, started_at)
+        result = nil
+        begin
+          result = Hive::Agent.new(
+            task: task,
+            prompt: prompt,
+            add_dirs: [ @project_root ],
+            cwd: @project_root,
+            max_budget_usd: @token_budget.max_budget_usd(@cfg.dig("budget_usd", "patrol") || 100),
+            timeout_sec: effective_timeout(timeout_sec),
+            log_label: STAGE,
+            profile: profile,
+            expected_output: @read_only ? nil : output_path,
+            status_mode: @read_only ? :exit_code_only : :output_file_exists,
+            cli_flags: cli_flags,
+            **scope
+          ).run!
+          result = materialize_read_only_output(result, output_path) if @read_only
+        ensure
+          @token_budget.record!(
+            result: result, profile: profile, stage: STAGE, started_at: started_at
+          )
+        end
         result
       end
 
@@ -100,30 +111,12 @@ module Hive
         result.merge(status: :error, error_message: "invalid read-only review output: #{e.message}")
       end
 
+      # Kept as the runner's narrow recording seam for tests and adapters;
+      # TokenBudget owns the shared accounting semantics.
       def record_usage(result, profile, started_at)
-        usage = result && result[:usage]
-        return unless usage
-
-        Hive::UsageDb.record!(
-          agent: profile_name(profile),
-          model: usage[:model] || result[:model],
-          project_slug: File.basename(@project_root.to_s),
-          task_slug: STAGE,
-          stage: STAGE,
-          started_at: started_at,
-          ended_at: Time.now.utc.iso8601,
-          input: usage[:input] || 0,
-          output: usage[:output] || 0,
-          cached: usage[:cached] || 0
+        @token_budget.record!(
+          result: result, profile: profile, stage: STAGE, started_at: started_at
         )
-      rescue StandardError => e
-        warn "[hive] usage record failed: #{e.message}"
-      end
-
-      def profile_name(profile)
-        return profile.name.to_s if profile.respond_to?(:name)
-
-        configured_agent
       end
 
       def configured_agent

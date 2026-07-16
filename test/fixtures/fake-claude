@@ -68,6 +68,23 @@ if [[ -n "${HIVE_FAKE_GH_PR_EXISTS_FILE:-}" ]]; then
   : > "${HIVE_FAKE_GH_PR_EXISTS_FILE}"
 fi
 
+# Condition-driven barrier for cross-process e2e races. Publish readiness
+# atomically, then remain live until the release file exists. The harness
+# owns the timeout and process-group teardown, so this fixture needs no fixed
+# duration and cannot leak after a failed assertion.
+if [[ -n "${HIVE_FAKE_CLAUDE_READY_FILE:-}" ]]; then
+  mkdir -p "$(dirname "${HIVE_FAKE_CLAUDE_READY_FILE}")"
+  ready_tmp="${HIVE_FAKE_CLAUDE_READY_FILE}.tmp.$$"
+  printf '%s\n' "$$" > "$ready_tmp"
+  mv -f -- "$ready_tmp" "${HIVE_FAKE_CLAUDE_READY_FILE}"
+fi
+
+if [[ -n "${HIVE_FAKE_CLAUDE_RELEASE_FILE:-}" ]]; then
+  while [[ ! -e "${HIVE_FAKE_CLAUDE_RELEASE_FILE}" ]]; do
+    sleep 0.02
+  done
+fi
+
 if [[ -n "${HIVE_FAKE_CLAUDE_HANG:-}" ]]; then
   if [[ "${HIVE_FAKE_CLAUDE_IGNORE_TERM:-}" == "1" ]]; then
     trap '' TERM

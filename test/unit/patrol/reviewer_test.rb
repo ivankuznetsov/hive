@@ -487,7 +487,9 @@ class HivePatrolReviewerTest < Minitest::Test
   def test_run_agent_wrapper_refuses_an_exhausted_patrol_budget
     with_tmp_dir do |dir|
       budget = Object.new
-      budget.define_singleton_method(:acquire) { |stage:| stage != "patrol-review" }
+      budget.define_singleton_method(:acquire) do |stage:, minimum_tokens:|
+        minimum_tokens >= 0 && stage != "patrol-review"
+      end
       budget.define_singleton_method(:exhaustion_message) { "cycle exhausted" }
       reviewer = Hive::Patrol::Reviewer.new(dir, cfg: cfg, token_budget: budget)
 

@@ -93,6 +93,38 @@ class RefactorPatrolReviewerTest < Minitest::Test
     end
   end
 
+  def test_prompt_view_bounds_files_without_changing_measured_feature
+    with_tmp_dir do |dir|
+      complete = Hive::Patrol::Feature.new(
+        id: "wide", kind: "architecture", entrypoints: [ "lib/one.rb" ],
+        owned_files: 6.times.map { |index| "lib/#{index}.rb" },
+        context_files: [ "lib/context.rb" ], tests: [ "test/wide_test.rb" ]
+      )
+      reviewer = Hive::RefactorPatrol::Reviewer.new(
+        dir, cfg: cfg, state: Hive::RefactorPatrol::StateStore.new(dir),
+        agent_runner: ->(**) { raise "not called" }
+      )
+
+      bounded = reviewer.send(:bounded_prompt_feature, complete)
+
+      assert_equal complete.owned_files.first(4), bounded.owned_files
+      assert_empty bounded.context_files
+      assert_empty bounded.tests
+      assert_equal 6, complete.owned_files.size
+      assert_equal [ "lib/context.rb" ], complete.context_files
+
+      FileUtils.mkdir_p(File.join(dir, "lib"))
+      File.write(File.join(dir, "lib", "large-a.rb"), "a" * 20_000)
+      File.write(File.join(dir, "lib", "large-b.rb"), "b" * 20_000)
+      File.write(File.join(dir, "lib", "small.rb"), "c" * 1_000)
+      byte_bounded = reviewer.send(
+        :bounded_owned_files,
+        [ "lib/large-a.rb", "lib/large-b.rb", "lib/small.rb" ]
+      )
+      assert_equal [ "lib/large-a.rb", "lib/small.rb" ], byte_bounded
+    end
+  end
+
   def test_malformed_json_records_review_error_and_continues
     with_tmp_dir do |dir|
       runner = lambda do |output_path:, **|

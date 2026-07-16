@@ -6,6 +6,7 @@ require "hive/agent_profiles"
 require "hive/patrol/finding"
 require "hive/patrol/fingerprint"
 require "hive/patrol/runner_task"
+require "hive/patrol/agent_launch"
 require "hive/patrol/source_reader"
 require "hive/patrol/state_store"
 require "hive/patrol/token_budget"
@@ -282,7 +283,8 @@ module Hive
           slug: STAGE
         )
         profile = Hive::AgentProfiles.lookup(@cfg.dig("patrol", "agent") || "claude", cfg: @cfg)
-        unless @token_budget.acquire(stage: STAGE)
+        launch = Hive::Patrol::AgentLaunch.prepare(profile: profile, prompt: prompt, role: :review)
+        unless @token_budget.acquire(stage: STAGE, minimum_tokens: launch.fetch(:minimum_tokens))
           return { status: :error, error_message: @token_budget.exhaustion_message }
         end
         started_at = Time.now.utc
@@ -297,11 +299,13 @@ module Hive
               @cfg.dig("budget_usd", "patrol") || 100, stage: STAGE
             ),
             max_tokens: @token_budget.max_tokens(stage: STAGE),
+            max_turns: launch.fetch(:max_turns),
             timeout_sec: @cfg.dig("timeout_sec", "patrol") || 3600,
             log_label: STAGE,
             profile: profile,
             expected_output: output_path,
-            status_mode: :output_file_exists
+            status_mode: :output_file_exists,
+            cli_flags: launch.fetch(:cli_flags)
           ).run!
         ensure
           @token_budget.record!(

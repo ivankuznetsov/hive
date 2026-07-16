@@ -44,6 +44,15 @@ class AgentProfileTest < Minitest::Test
     assert_includes error.message, "unknown prompt_style"
   end
 
+  def test_initial_context_reserve_defaults_to_zero_and_must_be_non_negative
+    assert_equal 0, make_profile.initial_context_tokens
+
+    error = assert_raises(ArgumentError) do
+      make_profile(initial_context_tokens: -1)
+    end
+    assert_includes error.message, "non-negative Integer"
+  end
+
   def test_bin_uses_env_override_when_set
     profile = make_profile(bin_default: "/nonexistent/claude", env_bin_override_key: "HIVE_CLAUDE_BIN")
     assert_equal FAKE_BIN, profile.bin
@@ -204,6 +213,30 @@ class AgentProfileTest < Minitest::Test
     end
   end
 
+  def test_cli_capability_verifies_options_without_treating_values_as_flags
+    with_tmp_dir do |dir|
+      binary = File.join(dir, "valued-capability-cli")
+      File.write(binary, <<~SH)
+        #!/bin/sh
+        if [ "${1:-}" = "--version" ]; then
+          echo "2.1.179 (Claude Code)"
+          exit 0
+        fi
+        printf '%s\n' '--safe-mode --tools <tools...>'
+      SH
+      File.chmod(0o755, binary)
+      profile = make_profile(
+        bin_default: binary, env_bin_override_key: nil,
+        cli_capabilities: {
+          patrol: [ "--safe-mode", "--tools", "Read,Grep,Glob" ]
+        }
+      )
+
+      assert_equal [ "--safe-mode", "--tools", "Read,Grep,Glob" ],
+                   profile.require_cli_capability!(:patrol)
+    end
+  end
+
   def test_cli_capability_help_timeout_terminates_and_reaps_hung_process
     with_tmp_dir do |dir|
       pid_path = File.join(dir, "capability-help.pid")
@@ -315,6 +348,14 @@ class AgentProfileTest < Minitest::Test
     overridden = profile.with_overrides("min_version" => "9.9.9")
 
     assert_equal({ safe_mode: [ "--safe-mode" ] }, overridden.cli_capabilities)
+  end
+
+  def test_with_overrides_preserves_initial_context_reserve
+    profile = make_profile(initial_context_tokens: 12_345)
+
+    overridden = profile.with_overrides("min_version" => "9.9.9")
+
+    assert_equal 12_345, overridden.initial_context_tokens
   end
 
   # --- with_overrides ---------------------------------------------------

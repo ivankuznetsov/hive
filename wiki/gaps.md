@@ -328,6 +328,21 @@ interrupt for that provider; launch ceilings and wall-clock timeouts remain the
 provider-independent bounds. Capture real streams before adding profile-specific
 interim accounting so cumulative events are not accidentally double-counted.
 
+## Patrol provider-event ceilings remain event-granular (2026-07-16)
+
+Live Claude patrol sampling showed that provider-owned startup context can be
+charged before Hive receives its first measurable usage event. Hive now refuses
+a patrol launch unless the remaining allowance covers Claude's conservative
+20,000-token initial-context reserve plus one token per prompt byte, and a
+three-turn/output-complete boundary prevents an unnecessary follow-up after the
+artifact is written. This closes the previously observed unbounded pre-event
+launch and extra-response paths, but it cannot make provider telemetry
+continuous: a single usage event can still cross the configured token ceiling
+before Hive can send TERM. The exact provider context/tokenization is not a
+stable local API, so the reserve is deliberately conservative rather than an
+exact forecast. Recalibrate from captured streams if Claude materially changes
+its headless context or event cadence.
+
 ## Areas the wiki could be expanded
 
 - `wiki/troubleshooting.md` — currently lives only in README's Troubleshooting section. Could be lifted into a dedicated page once the project sees real-world failures.

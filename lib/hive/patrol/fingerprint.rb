@@ -198,7 +198,7 @@ module Hive
 
         lines = File.readlines(full, chomp: true)
         start = [ line - 2, 0 ].max
-        lines[start, 3].join(" ")
+        Array(lines[start, 3]).join(" ")
       rescue SystemCallError, ArgumentError
         ""
       end

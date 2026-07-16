@@ -113,8 +113,8 @@ tags: [config, yaml, validation]
     "exclude" => [ "node_modules", "dist", "build", "vendor", ".git" ],
     "commands" => { "format" => nil, "lint" => nil, "typecheck" => nil, "test" => nil },
     "review" => {
-      "max_context_files" => 24,
-      "max_owned_files" => 12,
+      "max_context_files" => 4,
+      "max_owned_files" => 4,
       "reviewers" => [ { "name" => "codex-native-review", "kind" => "codex_review", "agent" => "codex", ... } ]
     }
   },
@@ -156,7 +156,11 @@ tags: [config, yaml, validation]
 
 `patrol.max_features_per_cycle` defaults to 12, is validated as an integer at
 least one, bounds each ordinary-patrol reviewer batch, and is likewise not
-changed by `patrol.mode`.
+changed by `patrol.mode`. Ordinary component mapping defaults to four owned
+and four context files. Architecture mapping retains its wider six-owned and
+six-context logical component for deterministic leverage measurement, then
+selects at most four owned files with a 32 KiB source budget for the agent's
+initial view. The first entrypoint is retained even when it alone is larger.
 
 **Architecture patrol has three independent consent gates.**
 `Config::DEFAULTS["refactor_patrol"]["enabled"]`, `auto_fix.enabled`, and
@@ -178,7 +182,9 @@ authoritative project-owned check for every automatic fix that changes a source
 or known public-surface path, while built-in declaration guards remain in
 force. Architecture mapping reads `refactor_patrol.review.max_owned_files` and
 `max_context_files` ahead of ordinary patrol settings, so patrol defaults cannot
-silently shrink an explicitly widened architecture slice. Merge intake snapshots every action-relevant value. Current config can
+silently shrink an explicitly widened architecture slice. Ordinary patrol
+explicitly selects its own review scope and therefore does not inherit these
+architecture values. Merge intake snapshots every action-relevant value. Current config can
 narrow or revoke that snapshot, but cannot broaden an already queued
 occurrence. When the architecture scheduler cannot load a registered project's
 config, it durably blocks due work as

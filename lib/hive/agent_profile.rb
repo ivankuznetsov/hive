@@ -40,7 +40,8 @@ module Hive
                 :budget_flag, :output_format_flags, :version_flag,
                 :skill_syntax_format, :headless_supported, :min_version,
                 :status_detection_mode, :usage_extractor,
-                :workspace_write_flags, :cli_capabilities
+                :workspace_write_flags, :cli_capabilities,
+                :initial_context_tokens
 
     # Public API — do not break.
     #
@@ -78,6 +79,9 @@ module Hive
     #                          users must call require_cli_capability!, which
     #                          verifies the installed binary advertises every
     #                          flag before returning them.
+    #   initial_context_tokens: default 0. Conservative admission reserve for
+    #                           provider-owned context sent before the first
+    #                           streamed usage event.
     #   prompt_style:          default :stdin for a profile named :codex,
     #                          otherwise :positional (backward compatible
     #                          with pre-profile-style custom registrations)
@@ -106,6 +110,7 @@ module Hive
                    skill_verifier: nil,
                    workspace_write_flags: nil,
                    cli_capabilities: {},
+                   initial_context_tokens: 0,
                    prompt_style: nil)
       prompt_style ||= name.to_sym == :codex ? :stdin : :positional
       unless PROMPT_STYLES.include?(prompt_style)
@@ -117,6 +122,10 @@ module Hive
         raise ArgumentError,
               "unknown status_detection_mode: #{status_detection_mode.inspect}; " \
               "valid: #{STATUS_DETECTION_MODES.inspect}"
+      end
+
+      unless initial_context_tokens.is_a?(Integer) && initial_context_tokens >= 0
+        raise ArgumentError, "initial_context_tokens must be a non-negative Integer"
       end
 
       @name = name
@@ -137,6 +146,7 @@ module Hive
       @skill_verifier = skill_verifier
       @workspace_write_flags = Array(workspace_write_flags).freeze
       @cli_capabilities = normalize_cli_capabilities(cli_capabilities)
+      @initial_context_tokens = initial_context_tokens
       @prompt_style = prompt_style
 
       freeze
@@ -233,7 +243,8 @@ module Hive
       key = [ bin, version, name, flags ]
       unless self.class.send(:capability_cache)[key]
         help = capture_help!(flags)
-        missing = flags.reject { |flag| cli_flag_advertised?(help, flag) }
+        option_flags = flags.select { |argument| argument.start_with?("-") }
+        missing = option_flags.reject { |flag| cli_flag_advertised?(help, flag) }
         unless missing.empty?
           raise Hive::AgentError,
                 "#{@name} #{version} does not advertise required #{name} capability " \
@@ -493,6 +504,7 @@ module Hive
         skill_verifier: @skill_verifier,
         workspace_write_flags: @workspace_write_flags.dup,
         cli_capabilities: @cli_capabilities.transform_values(&:dup),
+        initial_context_tokens: @initial_context_tokens,
         prompt_style: @prompt_style
       }
     end

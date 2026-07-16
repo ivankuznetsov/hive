@@ -159,8 +159,8 @@ class ConfigTest < Minitest::Test
       assert_nil cfg.dig("patrol", "commands", "test")
       refute cfg.dig("patrol", "commands").key?("public_contract"),
              "architecture-patrol validation must not alter ordinary patrol"
-      assert_equal 12, cfg.dig("patrol", "review", "max_owned_files")
-      assert_equal 24, cfg.dig("patrol", "review", "max_context_files")
+      assert_equal 4, cfg.dig("patrol", "review", "max_owned_files")
+      assert_equal 4, cfg.dig("patrol", "review", "max_context_files")
       assert_equal %w[codex-native-review],
                    cfg.dig("patrol", "review", "reviewers").map { |entry| entry.fetch("name") }
       native = cfg.dig("patrol", "review", "reviewers").first
@@ -196,8 +196,8 @@ class ConfigTest < Minitest::Test
       assert_equal false, cfg.dig("refactor_patrol", "caps", "allow_cross_feature")
       assert_equal 0.3, cfg.dig("refactor_patrol", "leverage", "weights", "churn")
       assert_equal 0.0, cfg.dig("refactor_patrol", "leverage", "weights", "coverage_gap")
-      assert_equal 12, cfg.dig("refactor_patrol", "review", "max_owned_files")
-      assert_equal 24, cfg.dig("refactor_patrol", "review", "max_context_files")
+      assert_equal 6, cfg.dig("refactor_patrol", "review", "max_owned_files")
+      assert_equal 6, cfg.dig("refactor_patrol", "review", "max_context_files")
     end
   end
 

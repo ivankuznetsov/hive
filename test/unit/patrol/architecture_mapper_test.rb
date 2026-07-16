@@ -207,6 +207,17 @@ class HivePatrolArchitectureMapperTest < Minitest::Test
       assert first.all? { |feature| feature.context_files.size <= 63 }
       assert_equal 70, first.sum { |feature| feature.owned_files.size }
       assert_equal 70, first.flat_map(&:owned_files).uniq.size
+
+      ordinary = Hive::Patrol::ArchitectureMapper.new(
+        repo,
+        cfg: Hive::Config.deep_merge(Hive::Config.deep_dup(Hive::Config::DEFAULTS), overrides),
+        review_scope: :patrol
+      ).call(tracked_files(repo)).select { |feature| feature.id.start_with?("architecture-services-large") }
+
+      assert_equal 10, ordinary.size
+      assert ordinary.all? { |feature| feature.owned_files.size == 7 }
+      assert ordinary.all? { |feature| feature.context_files.size <= 9 }
+      assert_equal 70, ordinary.flat_map(&:owned_files).uniq.size
     end
   end
 

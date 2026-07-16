@@ -30,8 +30,24 @@ if [[ -n "${HIVE_FAKE_CLAUDE_OUTPUT:-}" ]]; then
   printf '%s\n' "${HIVE_FAKE_CLAUDE_OUTPUT}"
 fi
 
+if [[ -n "${HIVE_FAKE_CLAUDE_DELAY_BEFORE_WRITE:-}" ]]; then
+  sleep "${HIVE_FAKE_CLAUDE_DELAY_BEFORE_WRITE}"
+fi
+
 if [[ -n "${HIVE_FAKE_CLAUDE_WRITE_FILE:-}" && -n "${HIVE_FAKE_CLAUDE_WRITE_CONTENT:-}" ]]; then
   printf '%s' "${HIVE_FAKE_CLAUDE_WRITE_CONTENT}" > "${HIVE_FAKE_CLAUDE_WRITE_FILE}"
+fi
+
+if [[ -n "${HIVE_FAKE_CLAUDE_OUTPUT_AFTER_WRITE:-}" ]]; then
+  printf '%s\n' "${HIVE_FAKE_CLAUDE_OUTPUT_AFTER_WRITE}"
+fi
+
+if [[ -n "${HIVE_FAKE_CLAUDE_DELAY_AFTER_WRITE_OUTPUT:-}" ]]; then
+  sleep "${HIVE_FAKE_CLAUDE_DELAY_AFTER_WRITE_OUTPUT}"
+fi
+
+if [[ -n "${HIVE_FAKE_CLAUDE_FINAL_OUTPUT:-}" ]]; then
+  printf '%s\n' "${HIVE_FAKE_CLAUDE_FINAL_OUTPUT}"
 fi
 
 if [[ -n "${HIVE_FAKE_CLAUDE_COMMIT_FILE:-}" ]]; then

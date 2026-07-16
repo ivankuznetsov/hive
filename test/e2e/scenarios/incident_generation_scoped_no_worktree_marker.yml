@@ -1,0 +1,26 @@
+name: incident_generation_scoped_no_worktree_marker
+description: Proves an older no-worktree-changes marker cannot override a newer committed attempt generation.
+tags: [incident-regression]
+incident_id: generation-scoped-no-worktree-marker
+sibling_task_id: "#9768"
+pending: true
+
+# Activation contract (#9768): retain the older marker below, then create a
+# real newer fake-agent commit and invoke the sibling-owned reconciliation
+# path. Replace the guard with assertions over #9768's generation identifier,
+# terminal state, and exact reason. Do not model generation storage here until
+# that contract exists.
+steps:
+  - kind: seed_state
+    stage: 4-execute
+    slug: synthetic-generation-task
+    state_file: task.md
+    content: "# Older generation\n\n<!-- EXECUTE_WAITING reason=no_worktree_changes -->\n"
+    files:
+      - path: synthetic-causal-order.md
+        content: "older no-change result precedes newer committed attempt\n"
+
+  - kind: state_assert
+    description: Activation guard; replace with #9768 generation assertions before enabling.
+    path: "{run_home}/pending-contracts/9768-enabled"
+    contains: "generation contract and reason assertions installed"

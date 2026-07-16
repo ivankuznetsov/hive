@@ -182,6 +182,22 @@ module Hive
         end
       end
 
+      # Enrich an already-lost record after orphan cleanup / dirty capture.
+      # The irreversible state and immutable identity remain unchanged.
+      def annotate_lost(observed, output_references:, diagnostics:, now:)
+        mutate(observed, allowed_states: [ "lost" ]) do |data|
+          outputs = (data.fetch("current_outputs") + Record.deep_copy(output_references)).uniq
+          outputs.each { |reference| OutputReference.validate_shape!(reference) }
+          data.merge(
+            "lease_version" => data.fetch("lease_version") + 1,
+            "current_outputs" => outputs,
+            "diagnostics" => data.fetch("diagnostics").merge(
+              Record.deep_copy(diagnostics).merge("loss_processed_at" => Record.iso8601(now))
+            )
+          )
+        end
+      end
+
       def with_generation_lock(task_generation)
         path = generation_lock_path(task_generation)
         File.open(path, File::RDWR | File::CREAT, 0o600) do |lock|

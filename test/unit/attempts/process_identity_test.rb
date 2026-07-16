@@ -42,4 +42,43 @@ class AttemptsProcessIdentityTest < Minitest::Test
       worker: identity.merge("pid" => 456, "session_id" => 99)
     )
   end
+
+  def test_orphan_cleanup_rechecks_identity_and_signals_only_verified_group
+    alive = true
+    signals = []
+    signaler = lambda do |signal, pid|
+      raise Errno::ESRCH if signal == 0 && !alive
+
+      signals << [ signal, pid ] unless signal == 0
+      alive = false if signal == "TERM"
+    end
+    verifier = Hive::Attempts::ProcessIdentity.new(
+      start_reader: ->(_pid) { "worker-start" }, signaler: signaler,
+      session_reader: ->(_pid) { 10 }, group_reader: ->(_pid) { 456 },
+      sleeper: ->(_seconds) { }, monotonic: -> { 0.0 }
+    )
+    wrapper = identity(start: "wrapper-start", session: 10, group: 10)
+    worker = identity(start: "worker-start", session: 10, group: 456).merge("pid" => 456)
+
+    assert_equal :terminated,
+                 verifier.terminate_orphan_group(wrapper: wrapper, worker: worker, grace_sec: 0)
+    assert_equal [ [ "TERM", -456 ] ], signals
+  end
+
+  def test_orphan_cleanup_never_signals_mismatched_session
+    signals = []
+    signaler = lambda do |signal, pid|
+      signals << [ signal, pid ] unless signal == 0
+    end
+    verifier = Hive::Attempts::ProcessIdentity.new(
+      start_reader: ->(_pid) { "worker-start" }, signaler: signaler,
+      session_reader: ->(_pid) { 99 }, group_reader: ->(_pid) { 456 }
+    )
+    wrapper = identity(start: "wrapper-start", session: 10, group: 10)
+    worker = identity(start: "worker-start", session: 10, group: 456).merge("pid" => 456)
+
+    assert_equal :identity_mismatch,
+                 verifier.terminate_orphan_group(wrapper: wrapper, worker: worker)
+    assert_empty signals
+  end
 end

@@ -3122,12 +3122,16 @@ end
     end
     dispatcher.instance_variable_get(:@stale_agent_healer)
               .define_singleton_method(:heal) { |*_args, **_kwargs| order << :stale_healer }
+    dispatcher.instance_variable_get(:@stale_agent_healer)
+              .define_singleton_method(:heal_attempt_losses) { |*_args, **_kwargs| order << :attempt_loss_healer }
     dispatcher.instance_variable_get(:@recoverable_error_healer)
               .define_singleton_method(:heal) { |*_args, **_kwargs| order << :recoverable_healer }
 
     dispatcher.tick(now: T0)
 
     assert_equal :reconcile, order.first
+    assert_operator order.index(:reconcile), :<, order.index(:attempt_loss_healer)
+    assert_operator order.index(:attempt_loss_healer), :<, order.index(:status)
     assert_operator order.index(:reconcile), :<, order.index(:status)
     assert_operator order.index(:reconcile), :<, order.index(:stale_healer)
     assert_operator order.index(:reconcile), :<, order.index(:recoverable_healer)
@@ -3210,6 +3214,40 @@ end
       assert_equal "attempt-1", notice.attempt_id
       assert_equal "terminal", notice.attempt_state
       assert_equal "succeeded", notice.receipt["outcome"]
+    end
+  end
+
+  def test_lost_delivery_claim_follows_its_budgeted_successor
+    Dir.mktmpdir("hive-attempt-successor-delivery") do |state_home|
+      request_id = Q.write_request!(
+        project: "p1", slug: "demo-task", argv: %w[hive run demo-task],
+        chat_id: 42, request_id: "request-1", state_home: state_home, now: T0
+      )
+      Q.claim(
+        request_id, pid: nil, attempt_id: "lost-1",
+        task_generation: "generation-1", state_home: state_home, now: T0
+      )
+      outcomes = Object.new
+      outcomes.define_singleton_method(:fetch) do |attempt_id|
+        next unless attempt_id == "lost-1"
+
+        {
+          "attempt_id" => "lost-1", "task_generation" => "generation-1",
+          "status" => "successor_dispatched", "successor_attempt_id" => "successor-1"
+        }
+      end
+      dispatcher, = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home,
+        dispatch_result_state_home: state_home
+      )
+      dispatcher.instance_variable_set(:@lost_outcome_store, outcomes)
+
+      dispatcher.send(:reconcile_lost_attempt_deliveries, now: T0 + 1)
+
+      claim = Q.claimed(state_home: state_home).first.claim
+      assert_equal "successor-1", claim.fetch("attempt_id")
+      assert_equal "generation-1", claim.fetch("task_generation")
+      assert_empty Hive::Daemon::DispatchResultQueue.pending(state_home: state_home)
     end
   end
 

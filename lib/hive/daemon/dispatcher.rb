@@ -68,7 +68,8 @@ module Hive
                      answer_digest_scheduler: nil, dry_run: false,
                      update_state: nil, update_checker: nil, channel_detector: nil,
                      dispatch_request_state_home: nil, dispatch_result_state_home: nil,
-                     attempt_dispatcher: nil, attempt_reconciler: nil)
+                     attempt_dispatcher: nil, attempt_reconciler: nil,
+                     lost_outcome_store: nil, lost_outcome_processor: nil)
         @config = config
         @controller = controller
         @supervisor = supervisor
@@ -84,6 +85,8 @@ module Hive
         @dry_run = dry_run
         @attempt_dispatcher = attempt_dispatcher
         @attempt_reconciler = attempt_reconciler
+        @lost_outcome_store = lost_outcome_store
+        @lost_outcome_processor = lost_outcome_processor
         @attempt_snapshot = nil
 
         # Update-flow collaborators (plan 2026-05-27-002). The check runs
@@ -117,7 +120,11 @@ module Hive
         @stale_agent_healer = StaleAgentHealer.new(
           controller: @controller,
           logger: @logger,
-          grace_sec: agent_marker_grace_sec
+          grace_sec: agent_marker_grace_sec,
+          attempt_store: @attempt_reconciler&.respond_to?(:store) ? @attempt_reconciler.store : nil,
+          attempt_dispatcher: @attempt_dispatcher,
+          lost_outcome_store: @lost_outcome_store,
+          lost_outcome_processor: @lost_outcome_processor
         )
         @recoverable_error_healer = RecoverableErrorHealer.new(
           controller: @controller,
@@ -223,6 +230,15 @@ module Hive
           @logger.event(:tick_end, now: Time.now.utc.iso8601,
                                    action: "attempt_reconciliation_failed")
           return
+        end
+
+        begin
+          @stale_agent_healer.heal_attempt_losses(@attempt_snapshot&.lost_attempts || [], now: now)
+          reconcile_lost_attempt_deliveries(now: now)
+        rescue StandardError => e
+          @logger.event(:fatal,
+                        message: "attempt loss healer raised: #{e.class}: #{e.message}",
+                        keeping_previous: true)
         end
 
         # 1. Reap completed children, update controller, log decisions
@@ -1867,6 +1883,74 @@ module Hive
         end
       end
 
+      def reconcile_lost_attempt_deliveries(now:)
+        return unless @lost_outcome_store
+
+        Hive::Daemon::DispatchRequestQueue.claimed(
+          state_home: dispatch_request_state_home
+        ).each do |delivery|
+          attempt_id = delivery.claim["attempt_id"].to_s
+          next if attempt_id.empty?
+
+          outcome = @lost_outcome_store.fetch(attempt_id)
+          next unless outcome
+
+          case outcome["status"]
+          when "successor_dispatched"
+            successor_id = outcome["successor_attempt_id"].to_s
+            next if successor_id.empty? || successor_id == attempt_id
+
+            Hive::Daemon::DispatchRequestQueue.update_claim(
+              delivery.request.request_id,
+              pid: delivery.claim["pid"],
+              process_start_time: delivery.claim["process_start_time"],
+              attempt_id: successor_id,
+              task_generation: outcome["task_generation"],
+              state_home: dispatch_request_state_home,
+              now: now
+            )
+          when "manual", "exhausted"
+            complete_lost_delivery(delivery, outcome, now: now)
+          end
+        end
+      end
+
+      def complete_lost_delivery(delivery, outcome, now:)
+        request = delivery.request
+        Hive::Daemon::DispatchRequestQueue.discard_sequence(
+          request.request_id, state_home: dispatch_request_state_home
+        )
+        if request.chat_id
+          Hive::Daemon::DispatchResultQueue.write!(
+            chat_id: request.chat_id,
+            update_id: request.update_id,
+            project: request.project,
+            slug: request.slug,
+            request_id: request.request_id,
+            exit_code: Hive::ExitCodes::TEMPFAIL,
+            command: Shellwords.join(request.argv),
+            attempt_id: outcome["attempt_id"],
+            attempt_state: "lost",
+            receipt: nil,
+            state_home: dispatch_result_state_home,
+            now: now
+          )
+        end
+        Hive::Daemon::DispatchRequestQueue.remove(
+          request.request_id, state_home: dispatch_request_state_home
+        )
+        @logger.event(
+          :dispatch_request_completed,
+          request_id: request.request_id,
+          attempt_id: outcome["attempt_id"],
+          project: request.project,
+          slug: request.slug,
+          exit_code: Hive::ExitCodes::TEMPFAIL,
+          outcome: "attempt_lost",
+          recovery_status: outcome["status"]
+        )
+      end
+
       def write_attempt_dispatch_result(request, attempt, receipt, now:)
         return if request.chat_id.nil?
 
@@ -2289,7 +2373,11 @@ module Hive
           grace_sec: @daemon_cfg.fetch(
             "agent_marker_grace_sec",
             Hive::TaskAction::DEFAULT_AGENT_MARKER_GRACE_SEC
-          )
+          ),
+          attempt_store: @attempt_reconciler&.respond_to?(:store) ? @attempt_reconciler.store : nil,
+          attempt_dispatcher: @attempt_dispatcher,
+          lost_outcome_store: @lost_outcome_store,
+          lost_outcome_processor: @lost_outcome_processor
         )
         @recoverable_error_healer = RecoverableErrorHealer.new(
           controller: @controller,

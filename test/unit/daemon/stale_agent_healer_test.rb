@@ -2498,4 +2498,19 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       assert_equal 1, @logger.events.count { |name, _| name == :marker_heal_exhausted }
     end
   end
+
+  def test_legacy_marker_healing_does_not_rediscover_lease_backed_attempt_loss
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- ERROR reason=attempt_lost -->\n")
+      row = make_row(
+        state_file, pid_alive: nil, marker: "error",
+        marker_attrs: { "reason" => "attempt_lost" }, live_task_lock: false
+      )
+
+      heal([ row ])
+
+      assert_equal :error, Hive::Markers.current(state_file).name
+      refute @logger.events.any? { |name, _attrs| name == :marker_healed }
+    end
+  end
 end

@@ -115,10 +115,18 @@ module Hive
             next
           end
 
-          lost = exact.reverse.find { |record| record.state == "lost" }
-          if lost && lost.attempt_id != successor_of
+          lost = exact.select { |record| record.state == "lost" }
+          predecessor = successor_of && exact.find { |record| record.attempt_id == successor_of }
+          if successor_of && (!predecessor || predecessor.state != "lost")
             result = DispatchResult.new(
-              status: :deferred, attempt: lost, receipt: nil,
+              status: :deferred, attempt: predecessor, receipt: nil,
+              attach_descriptor: nil, reason: "invalid_predecessor"
+            )
+            next
+          end
+          if successor_of.nil? && lost.any?
+            result = DispatchResult.new(
+              status: :deferred, attempt: lost.last, receipt: nil,
               attach_descriptor: nil, reason: "attempt_lost"
             )
             next

@@ -74,6 +74,38 @@ module Hive
         )
       end
 
+      def self.compatibility_running(attempt_id:, task_id:, project:, task_slug:,
+                                     intended_stage:, task_generation:, progress_token:,
+                                     owner:, provider:, starting_revision:, now:)
+        record = launching(
+          attempt_id: attempt_id,
+          request_id: "legacy-backfill:#{attempt_id}",
+          predecessor_attempt_id: nil,
+          task_id: task_id,
+          project: project,
+          task_slug: task_slug,
+          intended_stage: intended_stage,
+          task_generation: task_generation,
+          progress_token: progress_token,
+          provider: provider,
+          starting_revision: starting_revision,
+          retry_charge: 0,
+          inherited_outputs: [],
+          now: now,
+          launch_timeout_sec: 1,
+          compatibility: true
+        ).to_h
+        timestamp = iso8601(now)
+        new(record.merge(
+          "state" => "running",
+          "lease_version" => 1,
+          "claim_deadline" => nil,
+          "wrapper" => deep_copy(owner),
+          "started_at" => timestamp,
+          "diagnostics" => { "legacy_backfilled_at" => timestamp }
+        ))
+      end
+
       def self.validate_receipt!(receipt, attempt_id:, task_generation:)
         unless receipt.is_a?(Hash)
           raise InvalidReceipt, "terminal receipt must be an object"
@@ -225,7 +257,9 @@ module Hive
         end
         if state == "running"
           raise InvalidRecord, "running attempt requires wrapper identity" unless @data["wrapper"].is_a?(Hash)
-          raise InvalidRecord, "running attempt requires heartbeat deadline" if @data["heartbeat_deadline"].nil?
+          if @data["heartbeat_deadline"].nil? && !compatibility?
+            raise InvalidRecord, "running attempt requires heartbeat deadline"
+          end
         end
       end
 

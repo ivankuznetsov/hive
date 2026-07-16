@@ -1,4 +1,5 @@
 require "test_helper"
+require "hive/attempts/reconciler"
 require "fileutils"
 require "tmpdir"
 require "hive/markers"
@@ -313,7 +314,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
                       with_digest_scheduler: false, with_answer_digest_scheduler: false,
                       refactor_patrol_merge_reconciler: nil,
                       refactor_patrol_scheduler: nil, patrol_arbiter: nil,
-                      attempt_dispatcher: nil)
+                      attempt_dispatcher: nil, attempt_reconciler: nil)
     config = {
       "daemon" => {
         "edit_debounce_sec" => 30,
@@ -362,7 +363,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
       dry_run: dry_run,
       dispatch_request_state_home: dispatch_request_state_home,
       dispatch_result_state_home: dispatch_result_state_home,
-      attempt_dispatcher: attempt_dispatcher
+      attempt_dispatcher: attempt_dispatcher,
+      attempt_reconciler: attempt_reconciler
     )
     # Bypass the Hive::Config.find_project / Config.load lookup chain
     # for unit tests — stub the predicate directly.
@@ -711,7 +713,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
           mtime: T0 - 600, claude_pid_alive: nil, live_task_lock: nil,
           state_file: nil, folder: nil, marker_attrs: {},
           depends_on: nil, blocked_by: nil, dependency_stage: nil,
-          blocked: false, workflow: nil)
+          blocked: false, workflow: nil, attempt_id: nil, task_generation: nil)
     folder ||= make_existing_row_folder(project: project, stage: stage, slug: slug)
     Row.new(
       project: project, slug: slug, stage: stage, workflow: workflow, marker: marker,
@@ -721,7 +723,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
       suggested_command: command, claude_pid_alive: claude_pid_alive,
       live_task_lock: live_task_lock, marker_attrs: marker_attrs,
       depends_on: depends_on, blocked_by: blocked_by,
-      dependency_stage: dependency_stage, blocked: blocked
+      dependency_stage: dependency_stage, blocked: blocked,
+      attempt_id: attempt_id, task_generation: task_generation
     )
   end
 
@@ -3100,6 +3103,115 @@ end
   # ── dispatch-request queue integration ───────────────────────────────
 
   Q = Hive::Daemon::DispatchRequestQueue
+
+  def test_attempt_reconciliation_precedes_status_healers_and_admission
+    order = []
+    capacity = Struct.new(:per_project, :global_count, :daily_counts) do
+      def task_reserved?(project:, task_slug:) = false
+    end.new({}, 0, {})
+    snapshot = Hive::Attempts::ReconciliationSnapshot.new(
+      capacity: capacity, attempts: [], lost_attempts: [],
+      newly_lost_attempts: [], terminal_attempts: [], invalid_records: []
+    )
+    reconciler = Object.new
+    reconciler.define_singleton_method(:reconcile) { |now:| order << :reconcile; snapshot }
+    dispatcher, = make_dispatcher(rows: [], attempt_reconciler: reconciler)
+    dispatcher.instance_variable_get(:@status_consumer).define_singleton_method(:fetch) do
+      order << :status
+      Hive::Daemon::StatusConsumer::Result.new(ok: true, rows: [], projects: [], error: nil)
+    end
+    dispatcher.instance_variable_get(:@stale_agent_healer)
+              .define_singleton_method(:heal) { |*_args, **_kwargs| order << :stale_healer }
+    dispatcher.instance_variable_get(:@recoverable_error_healer)
+              .define_singleton_method(:heal) { |*_args, **_kwargs| order << :recoverable_healer }
+
+    dispatcher.tick(now: T0)
+
+    assert_equal :reconcile, order.first
+    assert_operator order.index(:reconcile), :<, order.index(:status)
+    assert_operator order.index(:reconcile), :<, order.index(:stale_healer)
+    assert_operator order.index(:reconcile), :<, order.index(:recoverable_healer)
+  end
+
+  def test_lease_backed_status_row_is_not_double_counted_as_legacy_capacity
+    capacity = Hive::Attempts::CapacitySnapshot.new(
+      global_count: 1,
+      per_project: { "p1" => 1 },
+      per_task: { [ "p1", "demo-task" ] => 1 },
+      daily_counts: {},
+      reserved_attempt_ids: [ "attempt-1" ],
+      invalid_count: 0
+    )
+    snapshot = Hive::Attempts::ReconciliationSnapshot.new(
+      capacity: capacity, attempts: [], lost_attempts: [],
+      newly_lost_attempts: [], terminal_attempts: [], invalid_records: []
+    )
+    reconciler = Object.new
+    reconciler.define_singleton_method(:reconcile) { |now:| snapshot }
+    task_row = row(
+      project: "p1", slug: "demo-task", stage: "4-execute",
+      marker: "agent_working", action: Hive::Schemas::TaskActionKind::AGENT_RUNNING,
+      live_task_lock: true, attempt_id: "attempt-1", task_generation: "generation-1"
+    )
+    dispatcher, _supervisor, controller, = make_dispatcher(
+      rows: [ task_row ], attempt_reconciler: reconciler
+    )
+
+    dispatcher.tick(now: T0)
+
+    assert_equal 1, controller.in_flight_count
+  end
+
+  def test_terminal_attempt_receipt_completes_claimed_delivery_without_wait2
+    Dir.mktmpdir("hive-attempt-delivery") do |state_home|
+      store = Hive::Attempts::Store.new(root: File.join(state_home, "attempts"))
+      launching = store.create_launching(
+        attempt_id: "attempt-1", request_id: "request-1", predecessor_attempt_id: nil,
+        task_id: "42", project: "p1", task_slug: "demo-task",
+        intended_stage: "4-execute", task_generation: "generation-1",
+        progress_token: "progress", provider: "codex", starting_revision: nil,
+        retry_charge: 0, inherited_outputs: [], launch_timeout_sec: 30, now: T0
+      )
+      owner = {
+        "pid" => 123, "start_fingerprint" => "start",
+        "session_id" => 123, "process_group_id" => 123
+      }
+      claimed = store.claim(
+        launching, owner: owner, first_heartbeat_timeout_sec: 30, now: T0
+      )
+      running = store.first_heartbeat(claimed, stale_sec: 30, now: T0 + 1)
+      store.terminalize(
+        running, outcome: "succeeded", exit_status: 0,
+        final_checkpoint: running.checkpoint, output_references: [],
+        log_reference: { "path" => "logs/a.frames", "size" => 0, "sha256" => "0" * 64 },
+        now: T0 + 2
+      )
+      request_id = Q.write_request!(
+        project: "p1", slug: "demo-task", argv: %w[hive run demo-task],
+        chat_id: 42, request_id: "request-1", state_home: state_home, now: T0
+      )
+      Q.claim(
+        request_id, pid: nil, attempt_id: "attempt-1",
+        task_generation: "generation-1", state_home: state_home, now: T0
+      )
+      identity = Struct.new(:unused) { def status(_owner) = :missing }.new
+      reconciler = Hive::Attempts::Reconciler.new(store: store, process_identity: identity)
+      dispatcher, supervisor, = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home,
+        dispatch_result_state_home: state_home,
+        attempt_reconciler: reconciler
+      )
+
+      dispatcher.tick(now: T0 + 3)
+
+      assert_empty supervisor.spawned
+      assert_empty Q.claimed(state_home: state_home)
+      notice = Hive::Daemon::DispatchResultQueue.pending(state_home: state_home).first
+      assert_equal "attempt-1", notice.attempt_id
+      assert_equal "terminal", notice.attempt_state
+      assert_equal "succeeded", notice.receipt["outcome"]
+    end
+  end
 
   def test_queue_delivery_delegates_task_ownership_to_attempt_dispatcher
     Dir.mktmpdir("hive-dispatch-queue") do |state_home|

@@ -19,7 +19,7 @@ module Hive
       Row = Struct.new(:project, :slug, :stage, :workflow, :marker, :marker_attrs, :folder, :state_file,
                        :state_file_mtime, :action, :suggested_command, :claude_pid_alive,
                        :live_task_lock, :diagnostic, :depends_on, :blocked_by,
-                       :dependency_stage, :blocked,
+                       :dependency_stage, :blocked, :attempt_id, :task_generation,
                        keyword_init: true)
       # Aggregated per-project legacy-layout signal lifted out of each
       # project payload's `legacy_stage_dirs` array. The dispatcher uses
@@ -192,6 +192,8 @@ module Hive
               suggested_command: task["suggested_command"],
               claude_pid_alive: task["claude_pid_alive"],
               live_task_lock: task["live_task_lock"] == true,
+              attempt_id: task["attempt_id"],
+              task_generation: task["task_generation"],
               diagnostic: task["diagnostic"],
               depends_on: task["depends_on"],
               blocked_by: task["blocked_by"],

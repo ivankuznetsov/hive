@@ -24,7 +24,7 @@ module Hive
         {
           "path" => relative,
           "size" => File.size(file_path),
-          "sha256" => Digest::SHA256.file(file_path).hexdigest
+          "sha256" => ::Digest::SHA256.file(file_path).hexdigest
         }.freeze
       rescue Errno::ENOENT, ArgumentError => e
         raise InvalidOutputReference, "invalid attempt output path: #{e.message}"
@@ -58,7 +58,7 @@ module Hive
         return false unless File.file?(candidate)
         return false unless File.size(candidate) == reference.fetch("size")
 
-        Digest::SHA256.file(candidate).hexdigest == reference.fetch("sha256")
+        ::Digest::SHA256.file(candidate).hexdigest == reference.fetch("sha256")
       rescue InvalidOutputReference, Errno::ENOENT, Errno::EACCES
         false
       end

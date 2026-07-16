@@ -47,6 +47,7 @@ module Hive
         :predecessor_attempt_id, :inherited_outputs, :schema_version, :path,
         keyword_init: true
       )
+      ClaimedDelivery = Data.define(:request, :claim, :path)
 
       EXPIRY_SEC = 600
       CLAIM_EXPIRY_SEC = 14_400
@@ -126,6 +127,26 @@ module Hive
           entries << parsed
         end
         entries.sort_by { |req| [ req.created_at, req.request_id.to_s ] }
+      end
+
+      def claimed(state_home: Hive::Paths.state_home, bad_handler: nil)
+        directory_path = directory(state_home: state_home)
+        Dir.glob(File.join(directory_path, "*.json#{CLAIMED_SUFFIX}")).sort.filter_map do |path|
+          request = parse_file(path)
+          if request.is_a?(Symbol)
+            bad_handler&.call(path: path, reason: request.to_s)
+            next
+          end
+          claim = read_claim_metadata(path)
+          unless claim.is_a?(Hash)
+            bad_handler&.call(path: path, reason: "missing_claim_metadata")
+            next
+          end
+
+          ClaimedDelivery.new(request: request, claim: claim, path: path)
+        end
+      rescue Errno::ENOENT
+        []
       end
 
       def remove(request_id, state_home: Hive::Paths.state_home)
@@ -258,7 +279,7 @@ module Hive
       # `alive` would short-circuit `alive && alive.call(...)` to false and
       # silently reap every non-aged-out claim, including live orphans (#250).
       def recover_claims(state_home: Hive::Paths.state_home, now: Time.now,
-                         alive:, expiry_sec: CLAIM_EXPIRY_SEC, handler: nil)
+                         alive:, attempt_alive: nil, expiry_sec: CLAIM_EXPIRY_SEC, handler: nil)
         dir = directory(state_home: state_home)
         removed = 0
         Dir.glob(File.join(dir, "*.json#{CLAIMED_SUFFIX}")).each do |path|
@@ -273,6 +294,10 @@ module Hive
 
           request_id = data["request_id"]
           claim = read_claim_metadata(path)
+          attempt_id = claim && claim["attempt_id"]
+          if !attempt_id.to_s.empty? && attempt_alive
+            next if attempt_alive.call(attempt_id, claim["task_generation"])
+          end
           aged_out = claim_aged_out?(claim, now: now, expiry_sec: expiry_sec)
           owner_alive = !aged_out && alive &&
                         alive.call(claim && claim["pid"], claim && claim["process_start_time"])

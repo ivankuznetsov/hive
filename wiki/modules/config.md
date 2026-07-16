@@ -3,7 +3,7 @@ title: Hive::Config
 type: module
 source: lib/hive/config.rb
 created: 2026-04-25
-updated: 2026-07-11
+updated: 2026-07-16
 tags: [config, yaml, validation]
 ---
 
@@ -153,7 +153,9 @@ review agent, confidence/run caps, language-neutral include/exclude rules,
 caps, leverage weights, the proposal-wide `min_leverage_score` floor
 (default `0.25`), and the separate issue threshold. `max_theses_per_run` is
 a strict global reviewer-output budget; slices not reached after it is exhausted
-remain incomplete for resume. A configured `commands.public_contract` is an
+remain incomplete for resume. `max_review_seconds_per_run` defaults to 3600,
+must be numeric and at least 1, and caps the whole discovery review pass rather
+than resetting for every mapped feature. A configured `commands.public_contract` is an
 authoritative project-owned check for every automatic fix that changes a source
 or known public-surface path, while built-in declaration guards remain in
 force. Architecture mapping reads `refactor_patrol.review.max_owned_files` and
@@ -267,7 +269,7 @@ Runs after merge so a default value can never trigger a failure — only user in
 7. **`validate_permissions!`** — top-level, stage-level, review-role, and reviewer-entry `permissions:` specs are parsed by `Hive::PermissionScope` and must be `yolo`, `read-only`, or a valid `scoped` map. Shape errors, unknown presets/keys, and `bash:` plus `tools:` fail during config load; runner capability is checked later when the stage profile is known.
 8. **`validate_babysitter!`** — `babysitter.enabled` and `babysitter.dry_run` must be booleans; `interval` must be integer seconds or a `\d+[smh]` string; `max_concurrent_prs`, `budget_minutes`, and `budget_usd` must be integers >= 1; `labels_ignore` must be an array of strings.
 9. **`validate_patrol!`** — `patrol.mode` must be one of `ultrapatrol`, `high`, `medium`, `low`, or `off`; `patrol.enabled`, `patrol.draft_prs`, and `patrol.review_prs` must be booleans when present; `trigger` must be one of the patrol trigger enum values; confidence/severity/count/interval/command shape are validated before the scheduler or `hive patrol` command can run. `patrol.review.reviewers` uses the same reviewer-entry validation as `review.reviewers`, but it is a separate list used only by synthetic `Patrol: ...` review tasks.
-10. **`validate_refactor_patrol!`** — validates discovery/auto-fix/issue booleans and nested shapes, agent names, confidence/run counts, include/exclude paths, all six commands including `docs` and `public_contract`, patch caps, leverage weights, the proposal-wide leverage floor, and the issue threshold. Invalid side-effect policy fails at config load, not in a background action.
+10. **`validate_refactor_patrol!`** — validates discovery/auto-fix/issue booleans and nested shapes, agent names, confidence/run counts, the whole-run review deadline, include/exclude paths, all six commands including `docs` and `public_contract`, patch caps, leverage weights, the proposal-wide leverage floor, and the issue threshold. Invalid side-effect policy fails at config load, not in a background action.
 11. **`validate_daemon!`** — daemon numeric bounds, booleans, and nested hashes are checked before the daemon starts. The nested `daemon.auto_retry` block must be a hash, and `daemon.auto_retry.enabled` must be boolean when present.
 
 Bot attachment capture settings are validated with the other bot numeric

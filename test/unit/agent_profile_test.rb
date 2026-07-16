@@ -93,11 +93,26 @@ class AgentProfileTest < Minitest::Test
   end
 
   def test_check_version_raises_when_version_check_times_out
-    profile = make_profile(min_version: "1.0.0")
+    with_tmp_dir do |dir|
+      binary = File.join(dir, "hung-version-cli")
+      File.write(binary, <<~SH)
+        #!/usr/bin/env bash
+        trap '' TERM
+        deadline=$((SECONDS + 2))
+        while [ "$SECONDS" -lt "$deadline" ]; do :; done
+      SH
+      File.chmod(0o755, binary)
+      profile = make_profile(
+        bin_default: binary, env_bin_override_key: nil, min_version: "1.0.0"
+      )
+      started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 
-    with_replaced_singleton_method(Timeout, :timeout, ->(_seconds, &_block) { raise Timeout::Error }) do
-      err = assert_raises(Hive::AgentError) { profile.check_version! }
-      assert_match(/version check timed out/, err.message)
+      with_version_check_timeout(0.1) do
+        err = assert_raises(Hive::AgentError) { profile.check_version! }
+        assert_match(/version check timed out/, err.message)
+      end
+      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at
+      assert_operator elapsed, :<, 1.0
     end
   end
 
@@ -189,13 +204,39 @@ class AgentProfileTest < Minitest::Test
     end
   end
 
-  def test_cli_capability_help_timeout_is_explicit
-    profile = make_profile(cli_capabilities: { safe_mode: [ "--safe-mode" ] })
-    profile.check_version!
+  def test_cli_capability_help_timeout_terminates_and_reaps_hung_process
+    with_tmp_dir do |dir|
+      pid_path = File.join(dir, "capability-help.pid")
+      binary = File.join(dir, "hung-capability-cli")
+      File.write(binary, <<~SH)
+        #!/usr/bin/env bash
+        if [ "${1:-}" = "--version" ]; then
+          echo "2.1.179 (Claude Code)"
+          exit 0
+        fi
+        if [ "${1:-}" = "--safe-mode" ] && [ "${2:-}" = "--help" ]; then
+          printf '%s\n' "$$" > #{pid_path.inspect}
+          trap '' TERM
+          deadline=$((SECONDS + 2))
+          while [ "$SECONDS" -lt "$deadline" ]; do :; done
+        fi
+      SH
+      File.chmod(0o755, binary)
+      profile = make_profile(
+        bin_default: binary, env_bin_override_key: nil,
+        cli_capabilities: { safe_mode: [ "--safe-mode" ] }
+      )
 
-    with_replaced_singleton_method(Timeout, :timeout, ->(_seconds, &_block) { raise Timeout::Error }) do
-      error = assert_raises(Hive::AgentError) { profile.require_cli_capability!(:safe_mode) }
+      started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      error = with_version_check_timeout(0.1) do
+        assert_raises(Hive::AgentError) { profile.require_cli_capability!(:safe_mode) }
+      end
+      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at
+
       assert_includes error.message, "capability check timed out"
+      assert_operator elapsed, :<, 1.0
+      pid = Integer(File.read(pid_path), 10)
+      assert_raises(Errno::ESRCH) { Process.kill(0, pid) }
     end
   end
 
@@ -306,5 +347,15 @@ class AgentProfileTest < Minitest::Test
     SH
     File.chmod(0o755, path)
     path
+  end
+
+  def with_version_check_timeout(seconds)
+    original = Hive::AgentProfile::VERSION_CHECK_TIMEOUT_SEC
+    Hive::AgentProfile.send(:remove_const, :VERSION_CHECK_TIMEOUT_SEC)
+    Hive::AgentProfile.const_set(:VERSION_CHECK_TIMEOUT_SEC, seconds)
+    yield
+  ensure
+    Hive::AgentProfile.send(:remove_const, :VERSION_CHECK_TIMEOUT_SEC)
+    Hive::AgentProfile.const_set(:VERSION_CHECK_TIMEOUT_SEC, original)
   end
 end

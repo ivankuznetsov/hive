@@ -3,7 +3,7 @@ title: Hive::AgentProfile + Hive::AgentProfiles
 type: module
 source: lib/hive/agent_profile.rb, lib/hive/agent_profiles.rb, lib/hive/agent_profiles/{claude,codex,pi,grok}.rb
 created: 2026-04-26
-updated: 2026-07-12
+updated: 2026-07-16
 tags: [agent, profile, registry, architecture]
 ---
 
@@ -40,14 +40,14 @@ Constructor kwargs (every profile freezes after init):
 | Method | Behavior |
 |--------|----------|
 | `bin` | Resolved binary path; env override > `bin_default`. |
-| `check_version!` | Runs `bin --version`, parses semver, compares against `min_version`. Cached per `(bin, min_version)` pair. Raises `Hive::AgentError` on missing/un-runnable binary, parse failure, or version below minimum. |
+| `check_version!` | Runs `bin --version` under a bounded process-group probe, parses semver, compares against `min_version`, and caches per `(bin, min_version)` pair. Raises `Hive::AgentError` on missing/un-runnable binary, parse failure, timeout, or version below minimum. Timeout escalates TERM to KILL and reaps the child/readers, so a descendant that inherits stdout cannot strand preflight. |
 | `preflight!` | Calls the user-supplied `preflight:` Proc (if any). May raise `Hive::AgentError`. |
 | `verify_skill(invocation, project_root: nil)` | Delegates to the profile's `Hive::SkillCheck::*` verifier. Returns `[:present, path] / [:missing, hint] / [:not_applicable, why]`. |
 | `format_skill_invocation(skill)` | Renders a configured skill name through the profile's `skill_syntax_format`. Accepts slash-prefixed stage form (`/plan`, `/plug:name`), bare reviewer form (`ce-code-review`), and legacy Compound Engineering namespace form (`/compound-engineering:ce-code-review`). Legacy `compound-engineering:ce-*` inputs normalize to the current bare CE skill before profile formatting, so Claude/Codex render `/ce-*` and Pi renders `/skill:ce-*`. Other slash-prefixed inputs round-trip unchanged for profiles whose syntax is the default `"/%{skill}"`; profiles with a non-default syntax strip the leading `/` and any plugin namespace before formatting. Used uniformly by `Stages::Brainstorm`, `Stages::Plan`, `Reviewers::Agent`, `Stages::Review::BrowserTest`, and `Hive::Commands::Doctor` so the slash invocation that reaches the agent CLI matches doctor's verification target. |
 | `logged_in?(name, home: Dir.home)` | Returns whether the profile's CLI-owned credential artifact is present. Setup diagnostics use this alongside API-key env vars so token-authenticated Claude/Codex users are not reported unauthenticated, while an empty config directory such as `CODEX_HOME` alone is not treated as auth. |
 | `permission_flags(mode = nil)` | Returns profile-owned permission argv. Ordinary modes preserve the existing Claude behavior. The special cross-profile mode `workspace-write` returns only `workspace_write_flags` and raises if the profile cannot enforce the sandbox. |
 | `workspace_write_supported?` | True only when the profile declares non-empty root-confined workspace-write argv. Architecture patrol uses this as a fail-closed auto-fix provider gate. |
-| `require_cli_capability!(name)` | Version-checks the resolved binary, probes `<bin> <capability-flags> --help`, verifies every flag token, caches the result by binary/version/capability/flags, and returns a copy of the argv. Missing declarations, flags, binaries, failed help, and timeouts raise `Hive::AgentError`. |
+| `require_cli_capability!(name)` | Version-checks the resolved binary, probes `<bin> <capability-flags> --help` under the same bounded process-group deadline as version discovery, verifies every flag token, caches the result by binary/version/capability/flags, and returns a copy of the argv. Missing declarations, flags, binaries, failed help, and timeouts raise `Hive::AgentError`. |
 
 `STATUS_DETECTION_MODES` is the closed enum used by `Hive::Agent#handle_exit` to decide success: `state_file_marker` (claude default — agent writes the marker), `exit_code_only` (CI-fix loops — make the command succeed), `output_file_exists` (reviewer/triage spawns — produce the artifact).
 
@@ -77,7 +77,7 @@ Auto-required from `lib/hive/agent_profiles.rb`:
 
 ## Tests
 
-- `test/unit/agent_profile_test.rb` — version/capability caches, env override, preflight, capability help failures/timeouts, workspace-write flags, and headless gate.
+- `test/unit/agent_profile_test.rb` — version/capability caches, env override, preflight, process-group timeout cleanup for version/help probes and stdout-inheriting descendants, workspace-write flags, and headless gate.
 - `test/unit/agent_profile_modes_test.rb` — `:state_file_marker` / `:exit_code_only` / `:output_file_exists` branching in `Hive::Agent#handle_exit`.
 - `test/unit/agent_profiles_test.rb` — registry register / lookup / unknown.
 - `test/unit/spawn_agent_test.rb` — preflight ordering, isolation-warning trigger, default-profile fallback.

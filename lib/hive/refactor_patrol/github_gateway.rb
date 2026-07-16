@@ -108,9 +108,9 @@ module Hive
       end
 
       def verify_pr_identity!(pr_url, repository:, host:, branch:, head_oid:,
-                              base_branch:, cfg: nil)
+                              base_branch:, base_oid:, cfg: nil)
         target = github_repository_target(repository, host)
-        fields = "url,number,state,isDraft,headRefName,headRefOid,baseRefName,headRepository"
+        fields = "url,number,state,isDraft,headRefName,headRefOid,baseRefName,baseRefOid,headRepository"
         out, err, status = @transport.capture3(
           "gh", "pr", "view", pr_url.to_s, "--repo", target, "--json", fields,
           cfg: cfg
@@ -142,6 +142,7 @@ module Hive
                 match[2].to_i == doc["number"] && doc["state"] == "OPEN" &&
                 doc["isDraft"] == false && doc["headRefName"] == branch &&
                 doc["headRefOid"] == head_oid && doc["baseRefName"] == base_branch &&
+                doc["baseRefOid"] == base_oid &&
                 head_repository.is_a?(Hash) &&
                 head_repository["nameWithOwner"].to_s.casecmp?(repository.to_s)
         raise Hive::GhError, "created pull request identity does not match the validated patch" unless valid

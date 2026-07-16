@@ -62,6 +62,36 @@ class RefactorPatrolReviewAgentRunnerTest < Minitest::Test
     end
   end
 
+  def test_call_caps_agent_timeout_to_remaining_run_budget
+    with_tmp_dir do |dir|
+      state = Hive::RefactorPatrol::StateStore.new(dir)
+      runner = Hive::RefactorPatrol::ReviewAgentRunner.new(project_root: dir, cfg: cfg, state: state)
+      fake_profile = Struct.new(:name).new(:claude)
+      captured = nil
+      fake_agent = Class.new do
+        define_method(:initialize) { |**kwargs| captured = kwargs }
+        define_method(:run!) { {} }
+      end
+
+      with_replaced_singleton_method(Hive::AgentProfiles, :lookup, ->(*) { fake_profile }) do
+        original_agent = Hive.const_get(:Agent)
+        begin
+          Hive.send(:remove_const, :Agent)
+          Hive.const_set(:Agent, fake_agent)
+          runner.call(
+            prompt: "p", output_path: File.join(dir, "out.json"),
+            run_dir: state.run_dir("review"), timeout_sec: 12.5
+          )
+        ensure
+          Hive.send(:remove_const, :Agent)
+          Hive.const_set(:Agent, original_agent)
+        end
+      end
+
+      assert_equal 12.5, captured.fetch(:timeout_sec)
+    end
+  end
+
   def test_read_only_call_uses_claude_tool_confinement
     with_tmp_dir do |dir|
       state = Hive::RefactorPatrol::StateStore.new(dir)

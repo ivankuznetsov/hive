@@ -270,6 +270,74 @@ class HivePatrolReviewHandoffTest < Minitest::Test
     end
   end
 
+  def test_optional_handoff_retry_reuses_task_after_post_rename_fsync_failure
+    with_tmp_dir do |dir|
+      original_fsync = Hive::AtomicFile.method(:fsync_directory)
+      target_review_root = review_root(dir)
+      failed_after_publish = false
+      replacement = lambda do |path|
+        if path == target_review_root && !failed_after_publish
+          failed_after_publish = true
+          raise IOError, "simulated post-rename fsync failure"
+        end
+
+        original_fsync.call(path)
+      end
+
+      with_task_counter do
+        with_replaced_singleton_method(Hive::AtomicFile, :fsync_directory, replacement) do
+          assert_raises(IOError) do
+            handoff(dir).enqueue(
+              finding: finding, patch: patch(dir), pr_url: "https://example.com/pull/7"
+            )
+          end
+        end
+      end
+
+      published = visible_review_tasks(dir).fetch(0)
+      retried = nil
+      with_task_counter do
+        retried = handoff(dir).enqueue(
+          finding: finding, patch: patch(dir), pr_url: "https://example.com/pull/7"
+        )
+      end
+
+      assert_equal published, retried
+      assert_equal [ published ], visible_review_tasks(dir)
+      assert_complete(retried)
+    end
+  end
+
+  def test_optional_handoff_retry_fails_closed_when_pr_or_head_conflicts
+    conflict_cases = {
+      "PR URL" => [ "https://example.com/pull/8", nil ],
+      "head" => [ "https://example.com/pull/7", "def456" ]
+    }
+
+    conflict_cases.each do |label, (retry_url, retry_head)|
+      with_tmp_dir do |dir|
+        with_task_counter do
+          handoff(dir).enqueue(
+            finding: finding, patch: patch(dir), pr_url: "https://example.com/pull/7"
+          )
+        end
+
+        retry_patch = retry_head ? patch(dir, head_sha: retry_head) : patch(dir)
+        error = nil
+        with_task_counter do
+          error = assert_raises(Hive::Patrol::ReviewHandoff::Conflict, label) do
+            handoff(dir).enqueue(
+              finding: finding, patch: retry_patch, pr_url: retry_url
+            )
+          end
+        end
+
+        assert_includes error.message, "conflict", label
+        assert_equal 1, visible_review_tasks(dir).size, label
+      end
+    end
+  end
+
   def test_mandatory_handoff_publishes_once_when_two_writers_race
     with_tmp_dir do |dir|
       folders = Queue.new

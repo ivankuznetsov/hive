@@ -30,6 +30,9 @@ module Hive
     # 10s as a balance: well above any sane CLI's startup time, well below
     # the per-stage timeouts the runner enforces around spawn_and_wait.
     VERSION_CHECK_TIMEOUT_SEC = 10
+    CAPTURE_POLL_INTERVAL_SEC = 0.01
+    CAPTURE_TERM_GRACE_SEC = 0.2
+    CAPTURE_REAP_GRACE_SEC = 0.2
 
     attr_reader :prompt_style
     attr_reader :name, :bin_default, :env_bin_override_key,
@@ -300,9 +303,9 @@ module Hive
       # credentials or hang on first run. Without this, spawn_agent's
       # preflight could block indefinitely outside the per-stage timeout.
       begin
-        out, _err, status = Timeout.timeout(VERSION_CHECK_TIMEOUT_SEC) do
-          Open3.capture3(bin, @version_flag)
-        end
+        out, _err, status = bounded_capture3(
+          bin, @version_flag, timeout_sec: VERSION_CHECK_TIMEOUT_SEC
+        )
       rescue Errno::ENOENT, Errno::EACCES => e
         raise Hive::AgentError, "#{@name} binary not runnable: #{bin} (#{e.class.name.split('::').last}: #{e.message})"
       rescue Timeout::Error
@@ -358,9 +361,9 @@ module Hive
     end
 
     def capture_help!(capability_flags)
-      out, err, status = Timeout.timeout(VERSION_CHECK_TIMEOUT_SEC) do
-        Open3.capture3(bin, *capability_flags, "--help")
-      end
+      out, err, status = bounded_capture3(
+        bin, *capability_flags, "--help", timeout_sec: VERSION_CHECK_TIMEOUT_SEC
+      )
       unless status.success?
         raise Hive::AgentError,
               "#{@name} capability check failed: #{([ bin, *capability_flags, '--help' ]).join(' ')}"
@@ -373,6 +376,89 @@ module Hive
     rescue Timeout::Error
       raise Hive::AgentError,
             "#{@name} capability check timed out after #{VERSION_CHECK_TIMEOUT_SEC}s: #{bin}"
+    end
+
+    # Capture one short-lived CLI probe under a real process-group deadline.
+    # `Timeout.timeout { Open3.capture3(...) }` interrupts only the Ruby caller;
+    # Open3's pipe readers can still wait forever for a hung child or descendant.
+    # Owning the pipes and waiter gives timeout a bounded TERM/KILL escalation
+    # and reap window before control returns to version/capability callers.
+    def bounded_capture3(*argv, timeout_sec:)
+      stdin, stdout, stderr, waiter = Open3.popen3(*argv, pgroup: true)
+      stdin.close
+      readers = [ capture_reader(stdout), capture_reader(stderr) ]
+      deadline = monotonic_now + timeout_sec
+
+      loop do
+        unless waiter.alive?
+          status = waiter.value
+          return [ readers[0].value, readers[1].value, status ] if readers.none?(&:alive?)
+        end
+
+        remaining = deadline - monotonic_now
+        raise Timeout::Error if remaining <= 0
+
+        sleep [ CAPTURE_POLL_INTERVAL_SEC, remaining ].min
+      end
+    rescue Timeout::Error
+      terminate_capture_process_group(waiter) if waiter
+      stop_capture_readers(readers, stdout, stderr)
+      raise
+    ensure
+      [ stdin, stdout, stderr ].each do |io|
+        io.close if io && !io.closed?
+      rescue IOError
+        nil
+      end
+    end
+
+    def capture_reader(io)
+      Thread.new do
+        Thread.current.report_on_exception = false
+        io.read
+      rescue IOError
+        ""
+      end
+    end
+
+    def terminate_capture_process_group(waiter)
+      pid = waiter.pid
+      signal_capture_process_group("TERM", pid)
+      deadline = monotonic_now + CAPTURE_TERM_GRACE_SEC
+      while capture_process_group_alive?(pid) && monotonic_now < deadline
+        sleep CAPTURE_POLL_INTERVAL_SEC
+      end
+      signal_capture_process_group("KILL", pid) if capture_process_group_alive?(pid)
+      waiter.join(CAPTURE_REAP_GRACE_SEC)
+    end
+
+    def stop_capture_readers(readers, *streams)
+      Array(readers).each { |reader| reader.join(CAPTURE_REAP_GRACE_SEC) }
+      streams.each do |stream|
+        stream.close if stream && !stream.closed?
+      rescue IOError
+        nil
+      end
+      Array(readers).each { |reader| reader.kill if reader.alive? }
+    end
+
+    def signal_capture_process_group(signal, pid)
+      Process.kill(signal, -Integer(pid))
+    rescue Errno::ESRCH, Errno::ECHILD
+      nil
+    end
+
+    def capture_process_group_alive?(pid)
+      Process.kill(0, -Integer(pid))
+      true
+    rescue Errno::ESRCH, Errno::ECHILD
+      false
+    rescue Errno::EPERM
+      true
+    end
+
+    def monotonic_now
+      Process.clock_gettime(Process::CLOCK_MONOTONIC)
     end
 
     def cli_flag_advertised?(help, flag)

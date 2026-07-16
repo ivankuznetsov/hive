@@ -354,6 +354,42 @@ class RefactorPatrolReviewerTest < Minitest::Test
     end
   end
 
+  def test_whole_run_deadline_bounds_feature_calls_and_marks_resume_point
+    with_tmp_dir do |dir|
+      reviewed = []
+      delegated_timeouts = []
+      runner = lambda do |feature:, output_path:, timeout_sec:, **|
+        reviewed << feature.id
+        delegated_timeouts << timeout_sec
+        File.write(output_path, JSON.generate("theses" => []))
+        {}
+      end
+      limited = cfg
+      limited["refactor_patrol"]["max_review_seconds_per_run"] = 10
+      clock_values = [ 100.0, 101.0, 110.0 ]
+      reviewer = Hive::RefactorPatrol::Reviewer.new(
+        dir, cfg: limited, state: Hive::RefactorPatrol::StateStore.new(dir),
+        agent_runner: runner, monotonic_clock: -> { clock_values.shift || 110.0 }
+      )
+      features = %w[checkout search].map do |id|
+        Hive::Patrol::Feature.from_h(feature.to_h.merge("id" => id))
+      end
+      leverage = features.to_h do |candidate|
+        [ candidate.id, leverage_by_feature.fetch("checkout") ]
+      end
+
+      assert_empty reviewer.call(features, leverage_by_feature: leverage)
+
+      assert_equal [ "checkout" ], reviewed
+      assert_in_delta 9.0, delegated_timeouts.fetch(0), 0.001
+      assert_equal %w[checkout search], reviewer.feature_results.map { |item| item.fetch("feature_id") }
+      assert reviewer.feature_results.first.fetch("complete")
+      refute reviewer.feature_results.last.fetch("complete")
+      assert_equal "run_deadline_exceeded", reviewer.review_errors.last.fetch("error")
+      assert_equal "search", reviewer.review_errors.last.fetch("feature_id")
+    end
+  end
+
   def test_reviewer_output_over_slice_limit_is_partial_instead_of_silently_truncated
     with_tmp_dir do |dir|
       limited = cfg

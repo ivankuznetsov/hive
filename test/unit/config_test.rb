@@ -180,6 +180,7 @@ class ConfigTest < Minitest::Test
       assert_equal "medium", cfg.dig("refactor_patrol", "min_confidence")
       assert_equal 3, cfg.dig("refactor_patrol", "max_theses_per_feature")
       assert_equal 10, cfg.dig("refactor_patrol", "max_theses_per_run")
+      assert_equal 3600, cfg.dig("refactor_patrol", "max_review_seconds_per_run")
       assert_includes cfg.dig("refactor_patrol", "exclude"), "node_modules"
       assert_nil cfg.dig("refactor_patrol", "commands", "test")
       assert_nil cfg.dig("refactor_patrol", "commands", "docs")
@@ -213,6 +214,7 @@ class ConfigTest < Minitest::Test
           agent: codex
           min_confidence: high
           max_theses_per_run: 4
+          max_review_seconds_per_run: 600
           commands:
             test: bundle exec rake test
           caps:
@@ -233,6 +235,7 @@ class ConfigTest < Minitest::Test
       assert_equal "codex", cfg.dig("refactor_patrol", "agent")
       assert_equal "high", cfg.dig("refactor_patrol", "min_confidence")
       assert_equal 4, cfg.dig("refactor_patrol", "max_theses_per_run")
+      assert_equal 600, cfg.dig("refactor_patrol", "max_review_seconds_per_run")
       assert_equal "bundle exec rake test", cfg.dig("refactor_patrol", "commands", "test")
       assert_equal 4, cfg.dig("refactor_patrol", "caps", "max_files")
       assert_equal 400, cfg.dig("refactor_patrol", "caps", "max_diff_lines")

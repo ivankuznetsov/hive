@@ -18,11 +18,12 @@ module Hive
       attr_reader :store
 
       def initialize(store:, process_identity: ProcessIdentity.new, logger: nil,
-                     legacy_backfiller: nil)
+                     legacy_backfiller: nil, condition_observer: nil)
         @store = store
         @process_identity = process_identity
         @logger = logger
         @legacy_backfiller = legacy_backfiller
+        @condition_observer = condition_observer
         @logged = {}
       end
 
@@ -48,6 +49,7 @@ module Hive
 
         scan.records.each do |record|
           reconciled = reconcile_record(record, now: now)
+          @condition_observer&.call(reconciled, now: now)
           statuses << reconciled
           newly_lost << reconciled.attempt if reconciled.classification == :lost
           all_lost << reconciled.attempt if reconciled.attempt.state == "lost"
@@ -146,8 +148,12 @@ module Hive
 
         marker = Hive::Markers.current(task.state_file)
         attrs = marker.attrs.to_h
+        generation_matches = attrs["task_generation"].to_s == record.task_input_epoch.to_s ||
+                             attrs["task_generation"] == record.task_generation
+        ownership_matches = attrs["ownership_generation"].nil? ||
+                            attrs["ownership_generation"] == record.ownership_generation
         marker_matches = attrs["attempt_id"] == record.attempt_id &&
-                         attrs["task_generation"] == record.task_generation
+                         generation_matches && ownership_matches
         marker_evidence = if marker_matches
           {
             "name" => marker.name.to_s,

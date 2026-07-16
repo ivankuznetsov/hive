@@ -314,6 +314,21 @@ class AttemptsReconcilerTest < Minitest::Test
     end
   end
 
+  def test_condition_observer_receives_each_reconciled_attempt_before_snapshot_return
+    with_store do |store|
+      create(store)
+      observed = []
+      observer = lambda { |status, now:| observed << [ status.classification, now ] }
+      snapshot = Hive::Attempts::Reconciler.new(
+        store: store, process_identity: FakeIdentity.new(:matching),
+        condition_observer: observer
+      ).reconcile(now: NOW + 1)
+
+      assert_equal 1, snapshot.attempts.size
+      assert_equal [ [ :reserved, NOW + 1 ] ], observed
+    end
+  end
+
   private
 
   def with_store

@@ -216,7 +216,7 @@ module Hive
       end
 
       def tui_scenario?(scenario)
-        scenario.steps.any? { |step| %w[tui_keys tui_expect tui_refute wait_subprocess].include?(step.kind) }
+        !scenario.pending && scenario.steps.any? { |step| %w[tui_keys tui_expect tui_refute wait_subprocess].include?(step.kind) }
       end
 
       def artifact_path_without_symlinks?(*paths)

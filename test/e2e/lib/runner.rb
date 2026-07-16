@@ -18,6 +18,7 @@ module Hive
         @scenarios_dir = scenarios_dir
         @runs_dir = runs_dir
         @results = []
+        @scenario_metadata = []
       end
 
       def run_all(pattern: nil, tag: nil, keep_artifacts: false)
@@ -26,8 +27,11 @@ module Hive
         FileUtils.mkdir_p(File.join(@run_dir, "scenarios"))
         @started_at = Time.now.utc
         @harness_errors = []
-        scenarios = select_scenarios(pattern: pattern, tag: tag)
-        raise "no scenarios match #{pattern || tag || 'all'}" if scenarios.empty?
+        selected_scenarios = select_scenarios(pattern: pattern, tag: tag)
+        raise "no scenarios match #{pattern || tag || 'all'}" if selected_scenarios.empty?
+
+        @scenario_metadata = selected_scenarios.map { |scenario| scenario_metadata(scenario) }
+        scenarios = selected_scenarios.reject(&:pending)
 
         # Capture total once so signal handlers and the rescue branch can write
         # a coherent report regardless of how many scenarios actually ran.
@@ -90,6 +94,17 @@ module Hive
 
       def generate_run_id
         "#{Time.now.utc.strftime('%Y-%m-%dT%H-%M-%SZ')}-#{Process.pid}-#{SecureRandom.hex(2)}"
+      end
+
+      def scenario_metadata(scenario)
+        {
+          "name" => scenario.name,
+          "description" => scenario.description,
+          "tags" => scenario.tags,
+          "incident_id" => scenario.incident_id,
+          "sibling_task_id" => scenario.sibling_task_id,
+          "pending" => scenario.pending
+        }
       end
 
       def direct_child_path(root, child, label)
@@ -159,6 +174,7 @@ module Hive
             "setup_failed" => setup_failed
           },
           "scenarios" => @results.map(&:to_h),
+          "scenario_metadata" => @scenario_metadata || [],
           "harness_errors" => @harness_errors || []
         }
       end

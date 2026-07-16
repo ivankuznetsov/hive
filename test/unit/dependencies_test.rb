@@ -2,6 +2,41 @@ require "test_helper"
 require "hive/dependencies"
 
 class DependenciesTest < Minitest::Test
+  def test_parse_reference_accepts_same_project_slug_and_numeric_id
+    slug = Hive::Dependencies.parse_reference("base-task")
+    numeric = Hive::Dependencies.parse_reference(42)
+
+    assert_equal [ nil, "base-task", false ], [ slug.project, slug.task, slug.explicit_project ]
+    assert_equal [ nil, "42", false ], [ numeric.project, numeric.task, numeric.explicit_project ]
+  end
+
+  def test_parse_reference_accepts_explicit_cross_project_slug
+    reference = Hive::Dependencies.parse_reference("analytics:base-task")
+
+    assert_equal "analytics", reference.project
+    assert_equal "base-task", reference.task
+    assert reference.explicit_project
+    assert_equal "analytics:base-task", reference.to_s
+  end
+
+  def test_parse_reference_rejects_invalid_shapes
+    invalid = [ nil, "", " ", [], {}, true, "a:b:c", ":task", "project:",
+                "project:42", "UPPER", "project:UPPER", "two tasks" ]
+
+    invalid.each do |value|
+      assert_raises(Hive::Dependencies::InvalidReference, "expected #{value.inspect} to be rejected") do
+        Hive::Dependencies.parse_reference(value)
+      end
+    end
+  end
+
+  def test_parse_optional_reference_allows_only_absence
+    assert_nil Hive::Dependencies.parse_optional_reference(nil)
+    assert_raises(Hive::Dependencies::InvalidReference) do
+      Hive::Dependencies.parse_optional_reference(" ")
+    end
+  end
+
   Task = Struct.new(:slug, :id, :stage_index, :stage, keyword_init: true)
 
   def test_resolve_blocks_when_prerequisite_is_before_threshold

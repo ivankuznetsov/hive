@@ -10,6 +10,7 @@ require_relative "background_process"
 require_relative "cli_driver"
 require_relative "releases_stub_server"
 require_relative "diff_walker"
+require_relative "gh_stub"
 require_relative "json_validator"
 require_relative "paths"
 require_relative "path_safety"
@@ -61,6 +62,7 @@ module Hive
                                                    scenario_dir: scenario_dir, context: @ctx)
         @step_results = []
         @preserve_cast = false
+        @gh_stub = GhStub.new(@ctx.run_home)
       end
 
       # Scenario `setup:` is intentionally minimal in v1. Multi-stage dispatch
@@ -71,6 +73,7 @@ module Hive
       def execute
         started = monotonic_time
         @scenario.steps.each { |step| dispatch(step) }
+        @gh_stub.verify!
         @tmux_lifecycle.stop_asciinema(delete: true)
         ScenarioResult.new(name: @scenario.name, status: "passed",
                            duration_seconds: (monotonic_time - started).round(3),
@@ -288,6 +291,10 @@ module Hive
         tag = expand_string(step.args.fetch("tag"))
         @ctx.harness_state[:releases_stub]&.stop
         @ctx.harness_state[:releases_stub] = ReleasesStubServer.new(tag: tag)
+      end
+
+      def step_script_gh(step)
+        @gh_stub.install(expand(step.args.fetch("interactions")))
       end
 
       def step_spawn_background(step)

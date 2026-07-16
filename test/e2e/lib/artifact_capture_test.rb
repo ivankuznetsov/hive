@@ -385,4 +385,20 @@ class E2EArtifactCaptureTest < Minitest::Test
       Digest::SHA256.define_singleton_method(:file, original_digest_file) if original_digest_file
     end
   end
+
+  def test_gh_script_state_and_audit_are_copied_into_failure_bundle
+    with_dirs do |scenario_dir, sandbox, run_home|
+      gh_root = File.join(run_home, "gh-stub")
+      FileUtils.mkdir_p(gh_root)
+      File.write(File.join(gh_root, "script.json"), "{}\n")
+      File.write(File.join(gh_root, "state.json"), "{\"next_index\":0}\n")
+      File.write(File.join(gh_root, "audit.jsonl"), "{\"matched\":false}\n")
+
+      collect(scenario_dir, sandbox, run_home)
+
+      assert_equal "{\"matched\":false}\n", File.read(File.join(scenario_dir, "gh", "audit.jsonl"))
+      manifest = JSON.parse(File.read(File.join(scenario_dir, "manifest.json")))
+      assert_includes manifest.fetch("files").map { |entry| entry.fetch("path") }, "gh/script.json"
+    end
+  end
 end

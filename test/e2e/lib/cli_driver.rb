@@ -46,7 +46,7 @@ module Hive
         started = monotonic_time
         result = nil
         SandboxEnv.with(@sandbox_dir, @run_home, @fake_claude_path) do |env|
-          result = spawn_and_capture(env.merge(SandboxEnv.stringify_env(env_overrides)), args, cwd, timeout)
+          result = spawn_and_capture(SandboxEnv.merge(env, env_overrides), args, cwd, timeout)
         end
         duration = monotonic_time - started
         result = Result.new(stdout: result.stdout, stderr: result.stderr, exit_code: result.exit_code,

@@ -224,4 +224,34 @@ class E2EStepExecutorTest < Minitest::Test
       assert_equal 1, report_for(runs_dir)["summary"]["passed"]
     end
   end
+
+  def test_scripted_gh_is_inherited_by_blocking_and_background_hive_processes
+    with_runner do |scenarios_dir, runs_dir|
+      write_scenario(scenarios_dir, "gh_inheritance", <<~YAML)
+        name: gh_inheritance
+        steps:
+          - kind: script_gh
+            interactions:
+              - args: [auth, status]
+              - args: [auth, status]
+          - kind: cli
+            args: [setup, --no-bootstrap, --no-init, --json]
+            expect_exit:
+          - kind: spawn_background
+            id: setup
+            args: [setup, --no-bootstrap, --no-init, --json]
+          - kind: state_assert
+            path: "{run_home}/gh-stub/state.json"
+            contains: '"next_index":2'
+            timeout: 10
+          - kind: stop_process
+            id: setup
+      YAML
+
+      Hive::E2E::Runner.new(scenarios_dir: scenarios_dir, runs_dir: runs_dir).run_all
+
+      report = report_for(runs_dir)
+      assert_equal 1, report["summary"]["passed"], report["scenarios"].inspect
+    end
+  end
 end

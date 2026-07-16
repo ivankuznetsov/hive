@@ -24,6 +24,7 @@ class AgentTest < Minitest::Test
        HIVE_FAKE_CLAUDE_OUTPUT_AFTER_WRITE HIVE_FAKE_CLAUDE_FINAL_OUTPUT
        HIVE_FAKE_CLAUDE_DELAY_BEFORE_WRITE HIVE_FAKE_CLAUDE_DELAY_AFTER_WRITE_OUTPUT
        HIVE_FAKE_CLAUDE_HANG HIVE_FAKE_CLAUDE_IGNORE_TERM HIVE_FAKE_CLAUDE_LOG_DIR
+       HIVE_FAKE_CLAUDE_READY_FILE HIVE_FAKE_CLAUDE_RELEASE_FILE
        HIVE_SCREENOTE_BASE_URL].each { |k| ENV.delete(k) }
   end
 
@@ -191,6 +192,37 @@ class AgentTest < Minitest::Test
       events = File.readlines(File.join(task.folder, "events.jsonl"), chomp: true).map { |line| JSON.parse(line) }
       end_event = events.reverse.find { |event| event.fetch("event_type") == "agent_end" }
       assert_includes end_event.fetch("message"), "status=timeout"
+    end
+  end
+
+  def test_fake_agent_condition_barrier_announces_readiness_and_waits_for_release
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "")
+      ready = File.join(dir, "barrier", "ready")
+      release = File.join(dir, "barrier", "release")
+      ENV["HIVE_FAKE_CLAUDE_READY_FILE"] = ready
+      ENV["HIVE_FAKE_CLAUDE_RELEASE_FILE"] = release
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = task.state_file
+      ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "## Round 1\n<!-- WAITING -->\n"
+
+      worker = Thread.new do
+        Hive::Agent.new(task: task, prompt: "test", max_budget_usd: 1, timeout_sec: 5).run!
+      end
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 3
+      sleep 0.01 until File.exist?(ready) || Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+
+      assert File.exist?(ready), "fake agent must publish its readiness condition"
+      assert worker.alive?, "fake agent must remain live until the release condition exists"
+
+      FileUtils.mkdir_p(File.dirname(release))
+      File.write(release, "go\n")
+      result = worker.value
+
+      assert_equal :waiting, result[:status]
+      assert_equal :waiting, Hive::Markers.current(task.state_file).name
+    ensure
+      worker&.kill if worker&.alive?
     end
   end
 

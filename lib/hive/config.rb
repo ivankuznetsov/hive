@@ -16,6 +16,12 @@ module Hive
       "default_branch" => nil,
       "default_workflow" => "coding",
       "dependency_gate_stage" => "8-finalize", # coding-scoped: default dependency gate is the coding finalize stage
+      # Durable task-attempt timers are top-level because a detached wrapper
+      # enforces them even when no daemon exists. Tests may shorten all four.
+      "attempt_heartbeat_sec" => 5,
+      "attempt_stale_sec" => 30,
+      "attempt_launch_timeout_sec" => 30,
+      "attempt_first_heartbeat_timeout_sec" => 30,
       "project_name" => nil,
       # Project-wide default for per-stage permission scoping. "yolo"
       # preserves today's launch behavior; narrower scopes are opt-in.
@@ -1691,6 +1697,7 @@ module Hive
       validate_dependency_gate_stage!(cfg, source_path)
       validate_brainstorm_runtime!(cfg, source_path)
       validate_review_attempts!(cfg, source_path)
+      validate_attempt_timers!(cfg, source_path)
       validate_daemon!(cfg, source_path)
       validate_web_config!(cfg, source_path)
       validate_screenote!(cfg, source_path)
@@ -2336,6 +2343,30 @@ module Hive
       [ "log_max_bytes", 1024 ],
       [ "log_max_files", 1 ]
     ].freeze
+
+    ATTEMPT_TIMER_KEYS = %w[
+      attempt_heartbeat_sec
+      attempt_stale_sec
+      attempt_launch_timeout_sec
+      attempt_first_heartbeat_timeout_sec
+    ].freeze
+
+    def validate_attempt_timers!(cfg, source_path)
+      ATTEMPT_TIMER_KEYS.each do |key|
+        value = cfg[key]
+        next if value.is_a?(Integer) && value.positive?
+
+        raise ConfigError,
+              "#{key} in #{describe_source(source_path)} must be a positive integer; " \
+              "got #{value.inspect} (#{value.class})"
+      end
+
+      return if cfg["attempt_stale_sec"] >= cfg["attempt_heartbeat_sec"]
+
+      raise ConfigError,
+            "attempt_stale_sec in #{describe_source(source_path)} must be greater than or equal to " \
+            "attempt_heartbeat_sec"
+    end
 
     def validate_daemon!(cfg, source_path)
       daemon = cfg["daemon"]

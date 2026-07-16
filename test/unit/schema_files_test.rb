@@ -2182,6 +2182,18 @@ class SchemaFilesTest < Minitest::Test
     end
   end
 
+  def test_internal_attempt_schema_pins_state_and_receipt_contract
+    path = Hive::Schemas.schema_path("hive-attempt")
+    doc = JSON.parse(File.read(path))
+
+    assert_equal 1, doc.fetch("properties").dig("schema_version", "const")
+    assert_equal %w[launching running terminal lost], doc.fetch("properties").dig("state", "enum")
+    receipt_required = doc.dig("$defs", "Receipt", "required")
+    %w[attempt_id task_generation outcome exit_status started_at ended_at final_checkpoint output_references log_reference].each do |key|
+      assert_includes receipt_required, key
+    end
+  end
+
   def test_refactor_patrol_retains_v1_while_v2_is_current
     assert_equal 2, Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-refactor-patrol")
 

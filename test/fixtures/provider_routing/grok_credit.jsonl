@@ -1,0 +1,9 @@
+{"type":"meta","accounts":{"grok-main":{"adapter":"grok"},"codex-main":{"adapter":"codex"}},"pool":[{"provider":"grok-main"},{"provider":"codex-main"}]}
+{"at":0,"action":"dispatch","id":"initial","expect_provider":"grok-main"}
+{"at":1,"action":"failure","id":"initial","evidence":"Synthetic provider response: HTTP 402, insufficient credits."}
+{"at":2,"action":"dispatch","id":"fallback","expect_provider":"codex-main"}
+{"at":3,"action":"success","id":"fallback"}
+{"at":3601,"action":"dispatch","id":"probe","expect_provider":"grok-main","expect_probe":true}
+{"at":3602,"action":"success","id":"probe"}
+{"at":3603,"action":"dispatch","id":"restored","expect_provider":"grok-main"}
+{"at":3604,"action":"success","id":"restored"}

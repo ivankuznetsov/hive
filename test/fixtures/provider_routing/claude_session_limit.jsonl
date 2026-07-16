@@ -1,0 +1,10 @@
+{"type":"meta","accounts":{"claude-main":{"adapter":"claude","max_concurrent":2},"codex-main":{"adapter":"codex"}},"pool":[{"provider":"claude-main"},{"provider":"codex-main"}]}
+{"at":0,"action":"dispatch","id":"initial","expect_provider":"claude-main"}
+{"at":1,"action":"failure","id":"initial","evidence":"Synthetic fixture: reached your session limit."}
+{"at":2,"action":"dispatch","id":"fallback-complete","expect_provider":"codex-main"}
+{"at":3,"action":"success","id":"fallback-complete"}
+{"at":4,"action":"dispatch","id":"fallback-active","expect_provider":"codex-main","hold":true}
+{"at":3601,"action":"dispatch","id":"probe","expect_provider":"claude-main","expect_probe":true}
+{"at":3602,"action":"success","id":"probe"}
+{"at":3603,"action":"dispatch","id":"preferred-restored","expect_provider":"claude-main"}
+{"at":3604,"action":"success","id":"preferred-restored"}

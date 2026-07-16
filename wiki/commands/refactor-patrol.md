@@ -121,6 +121,12 @@ matching absolute monotonic wall-clock budget: each feature spawn receives only
 the smaller of its configured patrol timeout and the whole-run time remaining.
 Once either budget is exhausted, later slices stay incomplete for a future
 resume instead of multiplying one agent timeout by every mapped feature.
+Before each architecture review or fix spawn, the shared project patrol budget
+also checks the selected `patrol.mode` token and launch ceilings. Architecture
+usage is attributed to the TUI patrol row; absent provider counts are retained
+as unmetered launches and still consume quota. Budget exhaustion is an ordinary
+retryable incomplete result, so discovery checkpoints completed slices and
+actions retain their exact durable receipts rather than starting new work.
 Malformed envelopes, null/scalar items, and schema-invalid records are review
 errors rather than successful zero-result scans. Evidence is also checked
 against the pinned checkout's real, root-confined, 256 KiB-bounded bytes: cited

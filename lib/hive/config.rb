@@ -429,6 +429,15 @@ module Hive
         "max_fixes_per_feature_per_cycle" => 1,
         "max_fix_attempts_per_cycle" => 6,
         "max_prs_per_cycle" => 3,
+        # Patrol tiers bound both measured tokens and agent launches. The
+        # launch ceilings are the provider-independent fail-safe when a CLI
+        # omits usable token accounting. Cached tokens count toward the token
+        # ceilings because they still consume provider capacity.
+        "max_tokens_per_cycle" => 200_000,
+        "max_tokens_per_day" => 600_000,
+        "max_agent_spawns_per_cycle" => 3,
+        "max_agent_spawns_per_day" => 8,
+        "max_budget_usd_per_agent" => 25,
         # Open ready (non-draft) PRs by default so the babysitter — which
         # skips draft PRs — picks them up. Set `draft_prs: true` per project
         # to revert to draft PRs that need a manual "ready" toggle first.
@@ -2528,20 +2537,40 @@ module Hive
       "ultrapatrol" => {
         "trigger" => "timer",
         "poll_interval_sec" => 1800,
+        "max_tokens_per_cycle" => 800_000,
+        "max_tokens_per_day" => 2_400_000,
+        "max_agent_spawns_per_cycle" => 10,
+        "max_agent_spawns_per_day" => 36,
+        "max_budget_usd_per_agent" => 100,
         "enabled" => true
       },
       "high" => {
         "trigger" => "timer",
         "poll_interval_sec" => 7200,
+        "max_tokens_per_cycle" => 400_000,
+        "max_tokens_per_day" => 1_200_000,
+        "max_agent_spawns_per_cycle" => 6,
+        "max_agent_spawns_per_day" => 18,
+        "max_budget_usd_per_agent" => 50,
         "enabled" => true
       },
       "medium" => {
         "trigger" => "timer",
         "poll_interval_sec" => 14_400,
+        "max_tokens_per_cycle" => 200_000,
+        "max_tokens_per_day" => 600_000,
+        "max_agent_spawns_per_cycle" => 3,
+        "max_agent_spawns_per_day" => 8,
+        "max_budget_usd_per_agent" => 25,
         "enabled" => true
       },
       "low" => {
         "trigger" => "new_commits",
+        "max_tokens_per_cycle" => 100_000,
+        "max_tokens_per_day" => 200_000,
+        "max_agent_spawns_per_cycle" => 1,
+        "max_agent_spawns_per_day" => 2,
+        "max_budget_usd_per_agent" => 10,
         "enabled" => true
       },
       "off" => {
@@ -2556,7 +2585,11 @@ module Hive
       [ "max_features_per_cycle", 1 ],
       [ "max_fixes_per_feature_per_cycle", 1 ],
       [ "max_fix_attempts_per_cycle", 1 ],
-      [ "max_prs_per_cycle", 1 ]
+      [ "max_prs_per_cycle", 1 ],
+      [ "max_tokens_per_cycle", 1 ],
+      [ "max_tokens_per_day", 1 ],
+      [ "max_agent_spawns_per_cycle", 1 ],
+      [ "max_agent_spawns_per_day", 1 ]
     ].freeze
 
     def validate_patrol!(cfg, source_path)
@@ -2620,6 +2653,13 @@ module Hive
         raise ConfigError,
               "patrol.min_alpha_to_fix in #{describe_source(source_path)} must be <= 100; " \
               "got #{patrol['min_alpha_to_fix'].inspect}"
+      end
+
+      per_agent_budget = patrol["max_budget_usd_per_agent"]
+      unless per_agent_budget.is_a?(Numeric) && per_agent_budget.positive?
+        raise ConfigError,
+              "patrol.max_budget_usd_per_agent in #{describe_source(source_path)} must be a positive number; " \
+              "got #{per_agent_budget.inspect} (#{per_agent_budget.class})"
       end
 
       validate_agent_name!(patrol["agent"], "patrol.agent", source_path)

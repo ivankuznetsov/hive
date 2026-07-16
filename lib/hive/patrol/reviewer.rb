@@ -8,8 +8,8 @@ require "hive/patrol/fingerprint"
 require "hive/patrol/runner_task"
 require "hive/patrol/source_reader"
 require "hive/patrol/state_store"
+require "hive/patrol/token_budget"
 require "hive/stages/base"
-require "hive/usage_db"
 
 module Hive
   module Patrol
@@ -40,11 +40,13 @@ module Hive
       # if the commit reviewed cleanly (U5 fail-loud).
       attr_reader :review_errors
 
-      def initialize(project_root, cfg:, state: StateStore.new(project_root), agent_runner: nil)
+      def initialize(project_root, cfg:, state: StateStore.new(project_root), agent_runner: nil,
+                     token_budget: nil)
         @project_root = File.expand_path(project_root)
         @cfg = cfg
         @state = state
         @agent_runner = agent_runner || method(:run_agent)
+        @token_budget = token_budget || TokenBudget.new(@project_root, cfg: cfg)
         @review_errors = []
         @source_reader = Hive::Patrol::SourceReader.new(@project_root)
       end
@@ -265,47 +267,30 @@ module Hive
           slug: "patrol-review"
         )
         profile = Hive::AgentProfiles.lookup(@cfg.dig("patrol", "agent") || "claude", cfg: @cfg)
+        unless @token_budget.acquire
+          return { status: :error, error_message: @token_budget.exhaustion_message }
+        end
         started_at = Time.now.utc
-        result = Hive::Agent.new(
-          task: task,
-          prompt: prompt,
-          add_dirs: [ @project_root ],
-          cwd: @project_root,
-          max_budget_usd: @cfg.dig("budget_usd", "patrol") || 100,
-          timeout_sec: @cfg.dig("timeout_sec", "patrol") || 3600,
-          log_label: "patrol-review",
-          profile: profile,
-          expected_output: output_path,
-          status_mode: :output_file_exists
-        ).run!
-        record_usage(result, profile, "patrol-review", started_at)
+        result = nil
+        begin
+          result = Hive::Agent.new(
+            task: task,
+            prompt: prompt,
+            add_dirs: [ @project_root ],
+            cwd: @project_root,
+            max_budget_usd: @token_budget.max_budget_usd(@cfg.dig("budget_usd", "patrol") || 100),
+            timeout_sec: @cfg.dig("timeout_sec", "patrol") || 3600,
+            log_label: "patrol-review",
+            profile: profile,
+            expected_output: output_path,
+            status_mode: :output_file_exists
+          ).run!
+        ensure
+          @token_budget.record!(
+            result: result, profile: profile, stage: "patrol-review", started_at: started_at
+          )
+        end
         result
-      end
-
-      def record_usage(result, profile, stage, started_at)
-        usage = result && result[:usage]
-        return unless usage
-
-        Hive::UsageDb.record!(
-          agent: profile_name(profile),
-          model: usage[:model] || result[:model],
-          project_slug: File.basename(@project_root.to_s),
-          task_slug: stage,
-          stage: stage,
-          started_at: started_at,
-          ended_at: Time.now.utc.iso8601,
-          input: usage[:input] || 0,
-          output: usage[:output] || 0,
-          cached: usage[:cached] || 0
-        )
-      rescue StandardError => e
-        warn "[hive] usage record failed: #{e.message}"
-      end
-
-      def profile_name(profile)
-        return profile.name.to_s if profile.respond_to?(:name)
-
-        (@cfg.dig("patrol", "agent") || "claude").to_s
       end
 
       def max_findings

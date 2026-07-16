@@ -51,6 +51,8 @@ patrol:
 - `new_commits` runs only when the default branch SHA differs from `last_scanned_sha`.
 - `timer` runs whenever `last_run_at` is older than `poll_interval_sec`.
 
+The higher-level `patrol.mode` also resolves bounded resource envelopes. Low, medium, high, and ultrapatrol allow respectively 1/3/6/10 agent launches and 100k/200k/400k/800k measured tokens per cycle, with separate 2/8/18/36 launch and 200k/600k/1.2m/2.4m token ceilings per UTC day. The same project budget includes architecture patrol. Missing provider usage is recorded as an unmetered launch and still counts against the launch ceilings; the tier also caps each native dollar budget at $10/$25/$50/$100.
+
 ## Steps
 
 1. Reconcile dismissal memory for existing patrol branches and PRs.

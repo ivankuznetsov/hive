@@ -8,10 +8,10 @@ require "hive/git_ops"
 require "hive/patrol/fingerprint"
 require "hive/patrol/runner_task"
 require "hive/patrol/state_store"
+require "hive/patrol/token_budget"
 require "hive/patrol/validator"
 require "hive/stages/base"
 require "hive/stages/review/fix_guardrail"
-require "hive/usage_db"
 require "hive/worktree"
 
 module Hive
@@ -81,13 +81,15 @@ module Hive
       end
 
       def initialize(project_root, cfg:, state: StateStore.new(project_root),
-                     validator: nil, worktree_factory: nil, agent_runner: nil)
+                     validator: nil, worktree_factory: nil, agent_runner: nil,
+                     token_budget: nil)
         @project_root = File.expand_path(project_root)
         @cfg = cfg
         @state = state
         @validator = validator || Validator.new(cfg.dig("patrol", "commands"))
         @worktree_factory = worktree_factory || method(:build_worktree)
         @agent_runner = agent_runner || method(:run_agent)
+        @token_budget = token_budget || TokenBudget.new(@project_root, cfg: cfg)
       end
 
       def attempt(finding)
@@ -159,11 +161,10 @@ module Hive
         receipt = entry["publication_receipt"]
         return if entry["state"] == "reconciliation_pending" && !receipt.is_a?(Hash)
 
-        Dir.glob(File.join(@state.root, "patches", "*.json"))
+        patch_paths(receipt)
           .sort_by { |path| -File.mtime(path).to_f }
           .each do |path|
           record = @state.read_json(path)
-          next if receipt.is_a?(Hash) && record["id"] != receipt["patch_id"]
           next unless reusable_patch_record?(record, finding, branch, worktree.path)
           next if receipt.is_a?(Hash) && !publication_receipt_matches?(receipt, record)
 
@@ -179,8 +180,18 @@ module Hive
         nil
       end
 
+      def patch_paths(receipt)
+        return Dir.glob(File.join(@state.root, "patches", "*.json")) unless receipt.is_a?(Hash)
+
+        patch_id = receipt["patch_id"].to_s
+        return [] unless patch_id.match?(/\Apatch-[a-zA-Z0-9_-]+\z/)
+
+        [ File.join(@state.root, "patches", "#{patch_id}.json") ]
+      end
+
       def publication_receipt_matches?(receipt, record)
         {
+          "patch_id" => record["id"],
           "worktree_path" => record["worktree_path"],
           "base_sha" => record["base_sha"],
           "head_sha" => record["head_sha"]
@@ -701,46 +712,29 @@ module Hive
           slug: "patrol-fix"
         )
         profile = Hive::AgentProfiles.lookup(@cfg.dig("patrol", "agent") || "claude", cfg: @cfg)
+        unless @token_budget.acquire
+          return { status: :error, error_message: @token_budget.exhaustion_message }
+        end
         started_at = Time.now.utc
-        result = Hive::Agent.new(
-          task: task,
-          prompt: prompt,
-          add_dirs: [ run_dir ],
-          cwd: worktree_path,
-          max_budget_usd: @cfg.dig("budget_usd", "patrol") || 100,
-          timeout_sec: @cfg.dig("timeout_sec", "patrol") || 3600,
-          log_label: "patrol-fix",
-          profile: profile,
-          status_mode: :exit_code_only
-        ).run!
-        record_usage(result, profile, "patrol-fix", started_at)
+        result = nil
+        begin
+          result = Hive::Agent.new(
+            task: task,
+            prompt: prompt,
+            add_dirs: [ run_dir ],
+            cwd: worktree_path,
+            max_budget_usd: @token_budget.max_budget_usd(@cfg.dig("budget_usd", "patrol") || 100),
+            timeout_sec: @cfg.dig("timeout_sec", "patrol") || 3600,
+            log_label: "patrol-fix",
+            profile: profile,
+            status_mode: :exit_code_only
+          ).run!
+        ensure
+          @token_budget.record!(
+            result: result, profile: profile, stage: "patrol-fix", started_at: started_at
+          )
+        end
         result
-      end
-
-      def record_usage(result, profile, stage, started_at)
-        usage = result && result[:usage]
-        return unless usage
-
-        Hive::UsageDb.record!(
-          agent: profile_name(profile),
-          model: usage[:model] || result[:model],
-          project_slug: File.basename(@project_root.to_s),
-          task_slug: stage,
-          stage: stage,
-          started_at: started_at,
-          ended_at: Time.now.utc.iso8601,
-          input: usage[:input] || 0,
-          output: usage[:output] || 0,
-          cached: usage[:cached] || 0
-        )
-      rescue StandardError => e
-        warn "[hive] usage record failed: #{e.message}"
-      end
-
-      def profile_name(profile)
-        return profile.name.to_s if profile.respond_to?(:name)
-
-        (@cfg.dig("patrol", "agent") || "claude").to_s
       end
 
       def branch_name(finding)

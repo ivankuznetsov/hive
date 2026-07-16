@@ -5,6 +5,7 @@ require "hive/agent"
 require "hive/agent_profiles"
 require "hive/patrol/architecture_mapper"
 require "hive/patrol/runner_task"
+require "hive/patrol/token_budget"
 require "hive/patrol/validator"
 require "hive/refactor_patrol/caps"
 require "hive/secret_patterns"
@@ -41,13 +42,14 @@ module Hive
 
       def initialize(project_root, cfg:, worktree_factory: nil, agent_runner: nil,
                      validator_factory: nil, public_contract_guard: Caps,
-                     clock: nil)
+                     clock: nil, token_budget: nil)
         @project_root = File.expand_path(project_root)
         @cfg = cfg
         @worktree_factory = worktree_factory || method(:build_worktree)
         @agent_runner = agent_runner || method(:run_agent)
         @validator_factory = validator_factory || ->(commands) { Hive::Patrol::Validator.new(commands) }
         @public_contract_guard = public_contract_guard
+        @token_budget = token_budget || Hive::Patrol::TokenBudget.new(@project_root, cfg: cfg)
       end
 
       def attempt(thesis:, job_id:, analysis_sha:, canonical_action_id: nil,
@@ -467,13 +469,25 @@ module Hive
           slug: "refactor-patrol-fix"
         )
         profile = fix_profile
-        Hive::Agent.new(
-          task: task, prompt: prompt, add_dirs: [], cwd: worktree_path,
-          max_budget_usd: @cfg.dig("budget_usd", "patrol") || 100,
-          timeout_sec: @cfg.dig("timeout_sec", "patrol") || 3600,
-          log_label: "refactor-patrol-fix", profile: profile, status_mode: :exit_code_only,
-          permission_mode: Hive::AgentProfile::WORKSPACE_WRITE_PERMISSION_MODE
-        ).run!
+        unless @token_budget.acquire
+          return { status: :error, error_message: @token_budget.exhaustion_message }
+        end
+        started_at = Time.now.utc
+        result = nil
+        begin
+          result = Hive::Agent.new(
+            task: task, prompt: prompt, add_dirs: [], cwd: worktree_path,
+            max_budget_usd: @token_budget.max_budget_usd(@cfg.dig("budget_usd", "patrol") || 100),
+            timeout_sec: @cfg.dig("timeout_sec", "patrol") || 3600,
+            log_label: "refactor-patrol-fix", profile: profile, status_mode: :exit_code_only,
+            permission_mode: Hive::AgentProfile::WORKSPACE_WRITE_PERMISSION_MODE
+          ).run!
+        ensure
+          @token_budget.record!(
+            result: result, profile: profile, stage: "refactor-patrol-fix", started_at: started_at
+          )
+        end
+        result
       end
 
       def fix_profile

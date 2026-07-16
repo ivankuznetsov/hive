@@ -612,14 +612,15 @@ class ConfigTest < Minitest::Test
 
   def test_load_resolves_patrol_frequency_modes
     cases = {
-      "ultrapatrol" => [ "timer", 1800, true ],
-      "high" => [ "timer", 7200, true ],
-      "medium" => [ "timer", 14_400, true ],
-      "low" => [ "new_commits", 600, true ],
-      "off" => [ "continuous", 600, false ]
+      "ultrapatrol" => [ "timer", 1800, true, 800_000, 2_400_000, 10, 36, 100 ],
+      "high" => [ "timer", 7200, true, 400_000, 1_200_000, 6, 18, 50 ],
+      "medium" => [ "timer", 14_400, true, 200_000, 600_000, 3, 8, 25 ],
+      "low" => [ "new_commits", 600, true, 100_000, 200_000, 1, 2, 10 ],
+      "off" => [ "continuous", 600, false, 200_000, 600_000, 3, 8, 25 ]
     }
 
-    cases.each do |mode, (trigger, poll_interval_sec, enabled)|
+    cases.each do |mode, (trigger, poll_interval_sec, enabled, cycle_tokens, daily_tokens,
+                          cycle_spawns, daily_spawns, agent_budget)|
       with_tmp_dir do |dir|
         FileUtils.mkdir_p(File.join(dir, ".hive-state"))
         File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
@@ -643,6 +644,11 @@ class ConfigTest < Minitest::Test
                      "#{mode} must not change the PR cap"
         assert_equal 6, cfg.dig("patrol", "max_fix_attempts_per_cycle"),
                      "#{mode} must not change the fix-attempt cap"
+        assert_equal cycle_tokens, cfg.dig("patrol", "max_tokens_per_cycle")
+        assert_equal daily_tokens, cfg.dig("patrol", "max_tokens_per_day")
+        assert_equal cycle_spawns, cfg.dig("patrol", "max_agent_spawns_per_cycle")
+        assert_equal daily_spawns, cfg.dig("patrol", "max_agent_spawns_per_day")
+        assert_equal agent_budget, cfg.dig("patrol", "max_budget_usd_per_agent")
         assert_equal "medium", cfg.dig("patrol", "min_confidence_to_fix"),
                      "#{mode} must not change the confidence gate"
       end
@@ -753,6 +759,11 @@ class ConfigTest < Minitest::Test
       "max_features_per_cycle: 0",
       "max_fixes_per_feature_per_cycle: 0",
       "max_fix_attempts_per_cycle: 0",
+      "max_tokens_per_cycle: 0",
+      "max_tokens_per_day: nope",
+      "max_agent_spawns_per_cycle: 0",
+      "max_agent_spawns_per_day: 1.5",
+      "max_budget_usd_per_agent: 0",
       "poll_interval_sec: 30",
       "commands: []",
       "commands:\n    test: ''",

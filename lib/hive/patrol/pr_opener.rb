@@ -404,12 +404,7 @@ module Hive
         )
         entry = fingerprints.fetch(finding.fingerprint)
         if state == "reconciliation_pending"
-          entry["publication_receipt"] = {
-            "patch_id" => patch.id,
-            "worktree_path" => patch.worktree_path,
-            "base_sha" => validated_oid!(patch.base_sha, "validated patch base"),
-            "head_sha" => validated_oid!(patch.head_sha, "validated patch head")
-          }
+          entry["publication_receipt"] = publication_receipt_for(patch)
         else
           entry.delete("publication_receipt")
         end
@@ -425,12 +420,7 @@ module Hive
           raise Hive::GhError, "pending patrol PR is missing its publication receipt"
         end
 
-        expected = {
-          "patch_id" => patch.id,
-          "worktree_path" => patch.worktree_path,
-          "base_sha" => validated_oid!(patch.base_sha, "validated patch base"),
-          "head_sha" => validated_oid!(patch.head_sha, "validated patch head")
-        }
+        expected = publication_receipt_for(patch)
         mismatches = expected.filter_map do |field, value|
           "#{field}=#{receipt[field].inspect}, expected #{value.inspect}" unless receipt[field] == value
         end
@@ -443,6 +433,15 @@ module Hive
         end
 
         entry
+      end
+
+      def publication_receipt_for(patch)
+        {
+          "patch_id" => patch.id,
+          "worktree_path" => patch.worktree_path,
+          "base_sha" => validated_oid!(patch.base_sha, "validated patch base"),
+          "head_sha" => validated_oid!(patch.head_sha, "validated patch head")
+        }
       end
     end
   end

@@ -86,6 +86,8 @@ module Hive
       # the caller can count it against max_per_tick). A single bad row
       # or meta is swallowed here so the rest of the row set still runs.
       def consider_row(row, now)
+        return false if admission_error?(row)
+
         folder = row_folder(row)
         return false if folder.nil? || folder.empty?
         return false if @inflight.key?(folder)
@@ -96,6 +98,12 @@ module Hive
         @logger.event(:fatal,
                       message: "display_name_backfiller row raised: #{e.class}: #{e.message}",
                       keeping_previous: true)
+        false
+      end
+
+      def admission_error?(row)
+        !row.public_send(:admission_error).nil?
+      rescue NoMethodError
         false
       end
 
@@ -144,7 +152,10 @@ module Hive
       end
 
       def display_name_missing?(folder)
-        name = Hive::TaskMeta.read(folder)[:display_name]
+        result = Hive::TaskMeta.read_for_admission(folder)
+        return false unless result.ok?
+
+        name = result.data[:display_name]
         name.nil? || name.to_s.strip.empty?
       rescue StandardError
         # If we can't read the meta we can't tell — treat as "not

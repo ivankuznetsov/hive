@@ -322,6 +322,12 @@ module Hive
         # so a normal ~30s dispatcher tick does not hammer GitHub.
         run_refactor_patrol_merge_reconciler_tick(now: now)
 
+        # A merge watch may have been enqueued on a previous clear snapshot.
+        # Remove every newly-held row before the watcher polls or archives it;
+        # both admission errors and ordinary below-gate waits suppress all
+        # forward daemon work.
+        drop_held_merge_watches(result.rows)
+
         # 3a. PrMergeWatcher tick (if present): check pending merges
         # first. Archive dispatches MUST flow through the same enable +
         # cap checks that advance dispatches use, so a project disabled
@@ -884,6 +890,10 @@ module Hive
       def handle_row(row, now:)
         return unless project_enabled?(row.project)
         return if @legacy_layout_projects.key?(row.project)
+        if row.admission_error
+          log_admission_error(row)
+          return
+        end
         if merged_pr_recoverable_finalize_error?(row)
           enqueue_merge_watch(row, error_reason: row.marker_attrs.to_h["reason"].to_s)
           return
@@ -900,10 +910,13 @@ module Hive
           now: now,
           edit_debounce_sec: @edit_debounce_sec,
           answers_pending: brainstorm_answers_pending?(row),
-          blocked: row.blocked == true
+          blocked: row.blocked == true,
+          admission_error: !row.admission_error.nil?
         )
 
         case decision
+        when :admission_error
+          log_admission_error(row)
         when :dispatch
           # Pass through the reason the dispatch fired so the
           # `:dispatched` logger event can distinguish plan-approval
@@ -964,6 +977,32 @@ module Hive
           @logger.event(:skipped, project: row.project, slug: row.slug,
                                   stage: row.stage, action: row.action)
         end
+      end
+
+      def drop_held_merge_watches(rows)
+        return unless @merge_watcher
+
+        rows.each do |row|
+          next unless row.blocked == true || row.admission_error
+
+          @merge_watcher.drop(project: row.project, slug: row.slug)
+        end
+      end
+
+      def log_admission_error(row)
+        error = row.admission_error
+        @logger.event(
+          :blocked,
+          project: row.project,
+          slug: row.slug,
+          stage: row.stage,
+          action: row.action,
+          reason: "admission_error",
+          reason_code: error&.reason_code || "dependency_validation_failed",
+          offending_ref: error&.offending_ref || row.depends_on || row.slug,
+          safe_correction: error&.safe_correction ||
+            "Inspect dependency admission state before dispatching."
+        )
       end
 
       # True when `row` is a brainstorm `needs_input` row whose

@@ -243,6 +243,16 @@ class AttemptsDispatcherTest < Minitest::Test
     assert_match(/\A[0-9a-f-]{36}\z/, dispatcher.instance_variable_get(:@id_generator).call)
   end
 
+  def test_execute_dispatch_bridges_numeric_input_epoch_without_replacing_ownership_generation
+    with_dispatcher do |dispatcher, _launcher, task|
+      result = dispatch(dispatcher, task, request_id: "request-one")
+
+      assert_equal 1, result.attempt.task_input_epoch
+      assert_equal result.attempt.task_generation, result.attempt.ownership_generation
+      assert_match(/\A[0-9a-f]{64}\z/, result.attempt.ownership_generation)
+    end
+  end
+
   private
 
   def with_dispatcher(limits: { max_global: 3, max_per_project: 2, max_daily: 50 })

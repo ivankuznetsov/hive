@@ -1,0 +1,29 @@
+name: incident_finalize_pr_lifecycle_gate
+description: Proves finalize cannot become archive-ready before the staged pull-request lifecycle is terminal.
+tags: [incident-regression]
+incident_id: finalize-pr-lifecycle-gate
+sibling_task_id: "#9769"
+pending: true
+
+# Activation contract (#9769): install an exact script_gh sequence for the
+# sibling-consumed open/draft -> ready/unmerged -> merged reads, then drive the
+# real finalize/archive reconciliation path. Replace the guard with assertions
+# for #9769's held reason and terminal state. The synthetic URL below is not a
+# live repository and must never escape the default-deny gh shim.
+steps:
+  - kind: seed_state
+    stage: 8-finalize
+    slug: synthetic-finalize-task
+    state_file: pr.md
+    content: |
+      ---
+      pr_url: https://github.example/acme/widgets/pull/42
+      ---
+      # Synthetic finalize output
+
+      <!-- COMPLETE pr_url=https://github.example/acme/widgets/pull/42 is_draft=true -->
+
+  - kind: state_assert
+    description: Activation guard; replace with #9769 lifecycle assertions before enabling.
+    path: "{run_home}/pending-contracts/9769-enabled"
+    contains: "finalize lifecycle contract and reason assertions installed"

@@ -41,6 +41,22 @@
         }
       }
     },
+    "scenario_metadata": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "description", "tags", "incident_id", "sibling_task_id", "pending"],
+        "properties": {
+          "name": { "type": "string" },
+          "description": { "type": "string" },
+          "tags": { "type": "array", "items": { "type": "string" } },
+          "incident_id": { "type": ["string", "null"] },
+          "sibling_task_id": { "type": ["string", "null"] },
+          "pending": { "type": "boolean" }
+        }
+      }
+    },
     "harness_errors": { "type": "array" }
   }
 }

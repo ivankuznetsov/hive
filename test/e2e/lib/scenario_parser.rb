@@ -39,6 +39,10 @@ module Hive
         "stop_process" => %w[id]
       }.freeze
 
+      INCIDENT_TAG = "incident-regression"
+      INCIDENT_ID = /\A[a-z0-9]+(?:-[a-z0-9]+)*\z/
+      SIBLING_TASK_ID = /\A#\d+\z/
+
       def self.parse(path)
         new(path).parse
       end
@@ -52,20 +56,57 @@ module Hive
         invalid!("scenario root must be a map", 1) unless data.is_a?(Hash)
 
         name = safe_scenario_name(required_string(data, "name"))
+        description = data["description"].to_s
+        tags = Array(data["tags"]).map(&:to_s)
+        incident_id, sibling_task_id, pending = parse_incident_metadata(data, description, tags)
         steps = parse_steps(data["steps"])
         Scenario.new(
           name: name,
-          description: data["description"].to_s,
-          tags: Array(data["tags"]).map(&:to_s),
+          description: description,
+          tags: tags,
           setup: data["setup"].is_a?(Hash) ? data["setup"] : {},
           steps: steps.freeze,
-          path: @path
+          path: @path,
+          incident_id: incident_id,
+          sibling_task_id: sibling_task_id,
+          pending: pending
         ).freeze
       rescue Psych::SyntaxError => e
         invalid!(e.message, e.line)
       end
 
       private
+
+      def parse_incident_metadata(data, description, tags)
+        incident = tags.include?(INCIDENT_TAG) || %w[incident_id sibling_task_id pending].any? { |key| data.key?(key) }
+        return [ nil, nil, false ] unless incident
+
+        invalid!("incident description must be non-empty", metadata_line(data)) if description.strip.empty?
+
+        incident_id = data["incident_id"].to_s
+        unless INCIDENT_ID.match?(incident_id)
+          invalid!("incident_id must be a lowercase kebab-case identifier", line_for("incident_id"))
+        end
+
+        sibling_task_id = data["sibling_task_id"].to_s
+        unless SIBLING_TASK_ID.match?(sibling_task_id)
+          invalid!("sibling_task_id must match #<digits>", line_for("sibling_task_id"))
+        end
+
+        pending = data.fetch("pending", false)
+        unless pending == true || pending == false
+          invalid!("pending must be true or false", line_for("pending"))
+        end
+
+        [ incident_id, sibling_task_id, pending ]
+      end
+
+      def metadata_line(data)
+        %w[incident_id sibling_task_id pending tags name].each do |key|
+          return line_for(key) if data.key?(key)
+        end
+        1
+      end
 
       def parse_steps(raw)
         invalid!("scenario must have at least one step", line_for("steps")) unless raw.is_a?(Array) && raw.any?

@@ -351,6 +351,23 @@ stable local API, so the reserve is deliberately conservative rather than an
 exact forecast. Recalibrate from captured streams if Claude materially changes
 its headless context or event cadence.
 
+## Incident e2e activation remains sibling-gated (2026-07-16)
+
+All six production-incident sequences are now synthetic, parseable, and
+visible as pending entries in the e2e report, but none is represented as an
+executed pass. The current tree does not expose the exact sibling-owned
+contracts needed to activate them: #9767's durable attempt lease and adoption
+reason, #9768's generation identity and reconciliation reason, #9769's
+finalize lifecycle terminal reason, #9770's retry-owner evidence and bounded
+terminal reason, or #9771's dependency/repository identity and route-or-reject
+reasons. The harness deliberately does not infer those formats or strings.
+
+Close this gap one fixture at a time after the corresponding sibling lands:
+replace its activation guard with real CLI reconciliation and exact
+state/reason assertions, remove `pending: true`, and keep the report-measured
+runtime below five seconds. Full incident coverage is not complete until the
+incident report contains six ordinary green results and zero pending entries.
+
 ## Areas the wiki could be expanded
 
 - `wiki/troubleshooting.md` — currently lives only in README's Troubleshooting section. Could be lifted into a dedicated page once the project sees real-world failures.

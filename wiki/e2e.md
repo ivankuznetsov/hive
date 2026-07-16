@@ -3,8 +3,8 @@ title: Agentic E2E Suite
 type: reference
 source: test/e2e/, bin/hive-e2e, Rakefile
 created: 2026-04-29
-updated: 2026-07-09
-tags: [test, e2e, tui, artifacts]
+updated: 2026-07-16
+tags: [test, e2e, tui, incidents, artifacts]
 ---
 
 **TLDR**: `test/e2e/` is the outer test layer. It drives the real `bin/hive` binary in a copied Ruby sample project, uses tmux for TUI scenarios, validates JSON output against published schemas, and writes versioned run artifacts for later debugging. The `bin/hive-e2e` Thor executable is also a small public harness surface with pinned exit codes and JSON error envelopes for wrapper/CI callers.
@@ -16,6 +16,8 @@ bundle exec rake e2e:lib_test   # harness library tests
 bin/hive-e2e list               # scenario inventory
 bin/hive-e2e run                # all scenarios
 bin/hive-e2e run --filter tui   # tag filter
+bin/hive-e2e run --filter incident-regression --json
+test/e2e/check_incident_budget.rb test/e2e/runs
 bin/hive-e2e clean              # old run cleanup
 ```
 
@@ -82,8 +84,11 @@ configured retention default for a malformed destructive invocation.
 |------|---------|
 | `test/e2e/lib/` | Harness library: sandbox bootstrap, CLI driver, tmux driver, parser, executor, artifact capture, report writer. |
 | `test/e2e/scenarios/*.yml` | Agent-authorable scenarios using the locked YAML vocabulary. |
+| `test/e2e/scenarios/README.md` | Incident metadata, activation lifecycle, sibling index, GitHub scripting, and process-isolation contract. |
+| `test/e2e/fixtures/gh` | Run-global, default-deny GitHub CLI shim with no host-binary fallback. |
 | `test/e2e/sample-project/` | Tiny Ruby fixture copied into each scenario sandbox. Vendored gems keep bootstrap offline. |
 | `test/e2e/runs/` | Gitignored run artifacts. Each run has `report.json` and per-scenario artifact directories. |
+| `test/e2e/check_incident_budget.rb` | Report-driven below-5s-per-incident and below-30s-aggregate CI gate. |
 | `bin/hive-e2e` | Thor shell for run/list/replay/clean. |
 
 ## Scenario DSL
@@ -96,6 +101,8 @@ Supported step kinds:
 - `seed_state`, `write_file`, `register_project`, `ruby_block`: fixture setup escape hatches.
 - `tui_expect`, `tui_keys`, `wait_subprocess`: tmux-backed TUI interaction.
 - `editor_action`, `log_assert`: narrower fixture helpers for editor/log flows.
+- `script_gh`: install an ordered sequence of exact GitHub argv, optional cwd/repository expectations, response JSON/stdout, stderr, and exit status.
+- `start_releases_stub`, `spawn_background`, `stop_process`: start controlled release responses and attached, harness-owned process groups for daemon-style scenarios.
 
 Template variables include `{sandbox}`, `{run_home}`, `{project}`, `{slug}`, `{run_id}`, and `{task_dir:<stage>}`.
 
@@ -115,6 +122,39 @@ Each entry in `report.json#scenarios[]` carries a `status`:
 - `failed` — at least one step raised; failure artifacts are written under `scenarios/<name>/`.
 - `setup_failed` — `Sandbox.bootstrap` raised before any step ran. `failed_step_index` is `null`, `artifacts_dir` is `null`. The aggregate run-level status (`complete` / `partial` / `crashed`) is unaffected.
 
+### Incident metadata and pending fixtures
+
+Scenarios tagged `incident-regression` require a non-empty `description`, a
+lowercase-kebab `incident_id`, and a `sibling_task_id` shaped like `#9767`.
+`pending: true` is a temporary sibling gate, not a scenario result status. A
+selected pending fixture is parsed and included in the additive top-level
+`scenario_metadata` array, but its steps do not execute, it contributes no
+`scenarios[]` row, and it does not change existing summary counts. A
+pending-only run is therefore complete and green with `summary.total: 0`, but
+does not claim that any incident passed. Legacy v1 reports without
+`scenario_metadata` remain schema-valid.
+
+Activation consumes the sibling task's exact persisted state, terminal state,
+and reason code before removing `pending`. Harness fixtures must not infer
+those contracts. The scenario README is the canonical six-incident index and
+activation checklist.
+
+### Hermetic GitHub and agents
+
+`SandboxEnv` puts `test/e2e/fixtures/gh` first on `PATH` for blocking,
+background, tmux, and replay subprocesses. `script_gh` interactions are
+consumed atomically. An absent or exhausted script, unexpected argv, cwd
+mismatch, or repository mismatch exits non-zero and records the rejected call;
+the shim never resolves or executes the machine's real `gh`. Thus e2e GitHub
+reads and mutations are synthetic and no real network access is possible.
+
+Claude and Codex profiles continue to resolve to
+`test/fixtures/fake-claude`. Its `HIVE_FAKE_CLAUDE_READY_FILE` /
+`HIVE_FAKE_CLAUDE_RELEASE_FILE` barrier publishes a real PID atomically and
+waits on a condition file, allowing cross-process races without fixed sleeps.
+`spawn_background` owns a process group, and both explicit `stop_process` and
+scenario teardown terminate and reap registered groups.
+
 ## Artifacts
 
 Every run writes `report.json`:
@@ -132,6 +172,7 @@ On failure, the harness writes a scenario bundle containing:
 - `sandbox-tree.txt`
 - copied `.hive-state/stages/` and per-`.log` copies under `logs/<slug>/<basename>.log` plus a sibling `<basename>.tail` (last 200 lines) for fast agent reads
 - `repro.sh`
+- `gh/script.json`, `gh/state.json`, and `gh/audit.jsonl` when GitHub scripting was installed or rejected
 - `manifest.json` with size and SHA-256 per artifact
 - TUI failures also include keystroke captures, run-scoped TUI subprocess marker/capture logs under `tui-subprocess/` (including the current shared marker log and its single `.log.1` rotation), plus `pane-before.txt` (snapshot taken just before the most recent `tui_keys`) and `pane-after.txt`. Cast recording is implemented by `AsciinemaDriver`, but depends on local `asciinema >= 2.4`.
 
@@ -152,10 +193,21 @@ On failure, the harness writes a scenario bundle containing:
 | `update_flow_tui_no_nudge` | TUI no-update-nudge path when update state should not be shown. |
 | `update_flow_up_to_date` | Daemon update-check path when the installed version is already current. |
 
+The six incident-regression fixtures and their current pending/green states
+are indexed in `test/e2e/scenarios/README.md`. Pending fixtures for #9767,
+#9768, #9769, #9770, and #9771 remain report-visible until their sibling-owned
+persistence and reason contracts are available.
+
 ## Operational Notes
 
 The harness prepends repo `bin/` to the tmux environment PATH because TUI rows dispatch commands like `hive plan ...`. `tui_keys` with `text:` sends literal text one character at a time by default for deterministic slow typing; `paste: true` sends the full `text:` value as one literal tmux chunk to exercise the TUI paste-aware runner.
 `CliDriver` starts CLI subprocesses in their own process group and applies the step timeout to both the direct child and stdout/stderr reader threads, so descendants that inherit the capture pipes cannot hold an e2e step open after their parent exits.
+
+Routine pull-request CI runs `e2e:lib_test` and `rake e2e` in a separate job,
+retains the run directory even after failure, and then reads enabled incident
+durations from `report.json`. Each enabled incident must be below five seconds
+and the group below thirty seconds. This job does not fold e2e into the default
+`rake test` task.
 
 `tmux` is required for TUI scenarios. `asciinema` is test-time optional until a TUI failure needs a cast, but missing/corrupt casts are recorded in artifacts instead of crashing unrelated CLI scenarios. If `asciinema` is installed outside PATH, set `HIVE_ASCIINEMA_BIN=/absolute/path/to/asciinema`.
 

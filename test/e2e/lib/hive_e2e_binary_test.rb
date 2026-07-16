@@ -41,6 +41,26 @@ class E2EBinaryTest < Minitest::Test
     end
   end
 
+  def test_pending_incident_inventory_is_reported_without_executed_results
+    Dir.mktmpdir("e2e-incident-report") do |runs_dir|
+      out, err, status = Open3.capture3(
+        { "HIVE_E2E_RUNS_DIR" => runs_dir },
+        hive_e2e, "run", "--filter", "incident-regression", "--json"
+      )
+
+      assert status.success?, "pending incident inventory should exit 0, stderr was: #{err}"
+      report = parse_single_json_document(out)
+      metadata = report.fetch("scenario_metadata")
+
+      assert_equal 6, metadata.size
+      assert metadata.all? { |entry| entry["pending"] == true }
+      assert_equal 6, metadata.map { |entry| entry["incident_id"] }.uniq.size
+      assert_equal 0, report.dig("summary", "total")
+      assert_empty report.fetch("scenarios")
+      assert_equal "complete", report.fetch("status")
+    end
+  end
+
   def test_leading_json_list_dispatches_to_list
     out, err, status = Open3.capture3(hive_e2e, "--json", "list")
     assert status.success?, "bin/hive-e2e --json list should exit 0, stderr was: #{err}"

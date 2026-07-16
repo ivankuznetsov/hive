@@ -41,6 +41,7 @@ module Hive
 
       DESCRIPTOR = Hive::Workflow.new(
         id: :bench,
+        resumable: { "adapter" => "bench" },
         stages: [
           Hive::Workflow::Stage.new(
             name: "inbox",

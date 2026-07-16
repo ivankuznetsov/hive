@@ -1,9 +1,10 @@
 module Hive
-  Workflow = Data.define(:id, :stages) do
-    def initialize(id:, stages:)
+  Workflow = Data.define(:id, :stages, :resumable) do
+    def initialize(id:, stages:, resumable: nil)
       # Shallow freeze: the element Stages stay shared with the caller, which is
       # safe only because Stage is itself frozen. This dup does NOT deep-copy.
-      super(id: id, stages: stages.dup.freeze)
+      resumable = resumable&.dup&.freeze
+      super(id: id, stages: stages.dup.freeze, resumable: resumable)
       validate_structure!
     end
   end

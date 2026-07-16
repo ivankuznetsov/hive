@@ -25,6 +25,7 @@ require "hive/daemon/refactor_patrol_scheduler"
 require "hive/daemon/patrol_arbiter"
 require "hive/daemon/pr_merge_watcher"
 require "hive/daemon/refactor_patrol_merge_reconciler"
+require "hive/daemon/workflow_recovery"
 require "hive/lock"
 require "hive/paths"
 require "hive/update_check"
@@ -66,7 +67,8 @@ module Hive
                      patrol_arbiter: nil, digest_scheduler: nil,
                      answer_digest_scheduler: nil, dry_run: false,
                      update_state: nil, update_checker: nil, channel_detector: nil,
-                     dispatch_request_state_home: nil, dispatch_result_state_home: nil)
+                     dispatch_request_state_home: nil, dispatch_result_state_home: nil,
+                     workflow_recovery: nil)
         @config = config
         @controller = controller
         @supervisor = supervisor
@@ -181,6 +183,7 @@ module Hive
         # resolves the result home independently) never reads them (#251).
         @dispatch_request_state_home = dispatch_request_state_home
         @dispatch_result_state_home = dispatch_result_state_home
+        @workflow_recovery = workflow_recovery || WorkflowRecovery.new(logger: @logger)
         # `[project, slug] → last-logged error signature` for the
         # brainstorm-gate parse-error log dedup (see
         # `brainstorm_answers_pending?`).
@@ -350,6 +353,14 @@ module Hive
         # from double-dispatching. Single-writer invariant: only the
         # daemon spawns `hive run`-class verbs.
         process_dispatch_requests(now: now)
+
+        # Provider recovery is a trigger for the same idempotent outer resume
+        # command, never a direct child rerun. The coordinator owns snapshot
+        # interpretation and workflow/generation deduplication; this dispatcher
+        # composes it with the existing task/project concurrency gates.
+        @workflow_recovery.candidates(result.rows, now: now).each do |resume|
+          dispatch_workflow_recovery_with_gates(resume, now: now)
+        end
 
         # 3c. Project-level patrol scans are not task rows, so they do
         # not go through Policy. They still pass through the same
@@ -1197,6 +1208,59 @@ module Hive
         # which can throw on edge cases. Don't let it crash the tick.
         @logger.event(:fatal, message: "archive dispatch error: #{e.class}: #{e.message}",
                               project: project, slug: slug)
+      end
+
+      def dispatch_workflow_recovery_with_gates(resume, now:)
+        row = resume.row
+        unless project_enabled?(row.project)
+          @workflow_recovery.finish(resume, dispatched: false, now: now)
+          @logger.event(:workflow_recovery_blocked, project: row.project, slug: row.slug,
+                                                    reason: "project_disabled")
+          return
+        end
+        if @legacy_layout_projects.key?(row.project)
+          @workflow_recovery.finish(resume, dispatched: false, now: now)
+          @logger.event(:workflow_recovery_blocked, project: row.project, slug: row.slug,
+                                                    reason: "legacy_layout_detected")
+          return
+        end
+        if @controller.running_task?(project: row.project, slug: row.slug)
+          @workflow_recovery.finish(resume, dispatched: false, now: now)
+          @logger.event(:workflow_recovery_blocked, project: row.project, slug: row.slug,
+                                                    reason: "in_flight")
+          return
+        end
+
+        gate = @controller.can_dispatch?(
+          project: row.project, slug: row.slug, now: now,
+          external_global_count: @external_active_agent_total,
+          external_project_count: external_active_agent_count_for(row.project)
+        )
+        unless gate == :ok
+          @workflow_recovery.finish(resume, dispatched: false, now: now)
+          @logger.event(:workflow_recovery_blocked, project: row.project, slug: row.slug,
+                                                    reason: gate.to_s)
+          return
+        end
+
+        dispatch_command(
+          resume.command,
+          project: row.project, slug: row.slug, stage: row.stage,
+          state_file_mtime: row.state_file_mtime,
+          state_file_path: row.state_file,
+          now: now,
+          trigger: "workflow_recovery"
+        )
+        @workflow_recovery.finish(resume, dispatched: true, now: now)
+        @logger.event(:workflow_recovery_dispatched,
+                      project: row.project, slug: row.slug,
+                      workflow: row.workflow,
+                      checkpoint_generation: resume.snapshot.checkpoint_generation)
+      rescue StandardError => e
+        @workflow_recovery.finish(resume, dispatched: false, now: now) if resume
+        @logger.event(:fatal,
+                      message: "workflow recovery dispatch error: #{e.class}: #{e.message}",
+                      project: resume&.row&.project, slug: resume&.row&.slug)
       end
 
       def dispatch_patrol_with_gates(patrol_dispatch, now:)

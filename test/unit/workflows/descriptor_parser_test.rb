@@ -976,6 +976,50 @@ class WorkflowsDescriptorParserTest < Minitest::Test
     assert_includes error.message, "duplicate stage names"
   end
 
+  def test_parses_registered_and_declarative_resumable_metadata
+    registered = Hive::Workflows::DescriptorParser.parse_hash(
+      {
+        "id" => "campaign",
+        "resumable" => { "adapter" => "campaign" },
+        "stages" => [ { "name" => "run", "kind" => "terminal", "state_file" => "run.md" } ]
+      },
+      path: "/tmp/campaign.yml"
+    )
+    assert_equal({ "adapter" => "campaign" }, registered.resumable)
+
+    declarative = Hive::Workflows::DescriptorParser.parse_hash(
+      {
+        "id" => "matrix",
+        "resumable" => { "snapshot" => "recovery/snapshot.json", "resume" => "run" },
+        "stages" => [ { "name" => "run", "kind" => "terminal", "state_file" => "run.md" } ]
+      },
+      path: "/tmp/matrix.yml"
+    )
+    assert_equal({ "snapshot" => "recovery/snapshot.json", "resume" => "run" }, declarative.resumable)
+  end
+
+  def test_rejects_ambiguous_or_escaping_resumable_metadata
+    ambiguous = assert_config_error(
+      {
+        "id" => "bad",
+        "resumable" => { "adapter" => "bench", "snapshot" => "snapshot.json", "resume" => "run" },
+        "stages" => [ { "name" => "run", "kind" => "terminal", "state_file" => "run.md" } ]
+      },
+      path: "/tmp/bad.yml"
+    )
+    assert_includes ambiguous.message, "adapter or snapshot/resume"
+
+    escaping = assert_config_error(
+      {
+        "id" => "bad",
+        "resumable" => { "snapshot" => "../snapshot.json", "resume" => "run" },
+        "stages" => [ { "name" => "run", "kind" => "terminal", "state_file" => "run.md" } ]
+      },
+      path: "/tmp/bad.yml"
+    )
+    assert_includes escaping.message, "task-relative"
+  end
+
   private
 
     def assert_config_error(data, path:)

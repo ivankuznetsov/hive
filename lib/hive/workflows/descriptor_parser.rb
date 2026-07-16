@@ -1,4 +1,5 @@
 require "yaml"
+require "pathname"
 require "hive/agent_profiles"
 require "hive/permission_scope"
 require "hive/provider_routing"
@@ -13,7 +14,8 @@ module Hive
     # mid-flight) stay as arguments because they vary within a single parse.
     class DescriptorParser
       SAFE_SLUG = /\A[a-z0-9][a-z0-9-]*\z/
-      TOP_LEVEL_KEYS = %w[id stages].freeze
+      TOP_LEVEL_KEYS = %w[id stages resumable].freeze
+      RESUMABLE_KEYS = %w[adapter snapshot resume].freeze
       STAGE_KEYS = %w[
         name
         kind
@@ -74,10 +76,11 @@ module Hive
         id = parse_id(descriptor["id"])
         validate_filename_id!(id)
         stages = parse_stages(descriptor["stages"], id: id)
+        resumable = parse_resumable(descriptor["resumable"])
         validate_terminal_last_stage!(stages)
         validate_deliverable_position!(stages)
 
-        build_workflow(id, stages)
+        build_workflow(id, stages, resumable)
       end
 
       private
@@ -120,8 +123,8 @@ module Hive
       # Wrapping the whole parse body (as before) would mislabel an unrelated
       # wrong-kwarg bug in a future Stage.new/Workflow.new signature change as a
       # descriptor error, hiding a genuine code bug from the maintainer.
-      def build_workflow(id, stages)
-        Hive::Workflow.new(id: id.to_sym, stages: stages)
+      def build_workflow(id, stages, resumable)
+        Hive::Workflow.new(id: id.to_sym, stages: stages, resumable: resumable)
       rescue ArgumentError => e
         raise descriptor_error(e.message)
       end
@@ -131,6 +134,36 @@ module Hive
         return id if SAFE_SLUG.match?(id)
 
         raise descriptor_error("id #{id.inspect} must match #{SAFE_SLUG.source}")
+      end
+
+      def parse_resumable(raw)
+        return nil if raw.nil?
+
+        value = stringify_hash(raw, label: "resumable")
+        reject_unknown_keys!(value, RESUMABLE_KEYS, label: "resumable")
+        adapter = optional_string(value["adapter"], label: "resumable adapter")
+        snapshot = optional_string(value["snapshot"], label: "resumable snapshot")
+        resume = optional_string(value["resume"], label: "resumable resume")
+        if adapter && (snapshot || resume)
+          raise descriptor_error("resumable must declare adapter or snapshot/resume, not both")
+        end
+        if adapter
+          unless SAFE_SLUG.match?(adapter)
+            raise descriptor_error("resumable adapter #{adapter.inspect} must match #{SAFE_SLUG.source}")
+          end
+          return { "adapter" => adapter }.freeze
+        end
+        unless snapshot && resume
+          raise descriptor_error("resumable must declare both snapshot and resume")
+        end
+        if Pathname.new(snapshot).absolute? || snapshot.split(File::SEPARATOR).include?("..")
+          raise descriptor_error("resumable snapshot must be a task-relative path")
+        end
+        unless resume == "run"
+          raise descriptor_error("resumable resume must be \"run\"")
+        end
+
+        { "snapshot" => snapshot, "resume" => resume }.freeze
       end
 
       def validate_filename_id!(id)

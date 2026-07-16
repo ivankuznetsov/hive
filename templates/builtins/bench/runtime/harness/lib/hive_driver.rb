@@ -465,7 +465,7 @@ module HiveBench
         tel["answer_key_access_suspect"] = hit
         warn "hive-bench: ANSWER-KEY ACCESS SUSPECT — #{entry["task_id"]}: #{hit}"
       end
-      status, reason = classify(stdout, work, diff)
+      status, reason = classify(stdout, work, diff, candidate)
       cell(entry, candidate, status, status == "generated" ? diff_path : nil, tel, reason)
     end
 
@@ -491,7 +491,7 @@ module HiveBench
 
     # run_status from the stage markers + the captured diff. limit_hit (a provider
     # wall) parks the cell; an empty/failed plan or execute is surfaced honestly.
-    def classify(stdout, work, diff)
+    def classify(stdout, work, diff, candidate)
       err = File.file?(f = File.join(work, ".hb", "stage.err")) ? File.read(f) : ""
       limit_hit = AgentLimit.limit_hit?("#{stdout}\n#{err}")
       # timeout(1) kills the whole stage script — a slow candidate, not one that
@@ -504,7 +504,9 @@ module HiveBench
       # therefore defers review lift/Fable judging, not the already trustworthy
       # candidate generation. Limits before plan/develop completion still park.
       if limit_hit && (!stage_ok?(stdout, "plan") || !stage_ok?(stdout, "develop"))
-        return ["limit_hit", "provider limit during a hive stage"]
+        failed_stage = stage_ok?(stdout, "plan") ? "execute" : "plan"
+        provider = candidate.public_send(failed_stage)
+        return ["limit_hit", "provider limit during #{failed_stage} provider=#{provider}"]
       end
       return ["execute_failed", "hive stage runner exited #{exit_rc} before trustworthy capture"] if exit_rc && !exit_rc.zero?
       return ["plan_failed", "hive plan produced no plan.md"] unless stage_ok?(stdout, "plan")

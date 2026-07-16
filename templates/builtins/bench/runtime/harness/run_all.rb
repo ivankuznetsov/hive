@@ -87,7 +87,12 @@ module HiveBench
       cell = @runner.call(entry: entry, profile: profile, out_dir: out_dir)
 
       if cell.status == "limit_hit"
-        pending << park(entry, profile, cell.reason)
+        pending << park(
+          entry,
+          profile,
+          cell.reason,
+          failed_provider: cell.reason.to_s[/\bprovider=([a-z0-9_-]+)/i, 1]
+        )
         return
       end
 
@@ -100,8 +105,13 @@ module HiveBench
       failed << park(entry, profile, reason)
     end
 
-    def park(entry, profile, reason)
-      { "task_id" => entry["task_id"], "agent_id" => profile.id, "reason" => redact(reason) }
+    def park(entry, profile, reason, failed_provider: nil)
+      {
+        "task_id" => entry["task_id"],
+        "agent_id" => profile.id,
+        "reason" => redact(reason),
+        "failed_provider" => failed_provider
+      }.compact
     end
 
     # The diff generated fine but no judge could score it. A provider limit

@@ -16,6 +16,7 @@ class WorkflowsBenchTest < Minitest::Test
     assert_same Hive::Workflows::Bench::DESCRIPTOR, descriptor
     assert_includes Hive::Workflows::Registry.ids, :bench
     assert_includes Hive::WorkflowSelection.valid_names, "bench"
+    assert_equal({ "adapter" => "bench" }, descriptor.resumable)
   end
 
   def test_descriptor_matches_the_native_benchmark_pipeline
@@ -83,6 +84,11 @@ class WorkflowsBenchTest < Minitest::Test
     assert_includes instruction, 'if [ "$outcome_status" -eq 75 ]'
     assert_includes instruction, "<!-- ERROR reason=limits_reached"
     assert_includes instruction, 'retry_after="%s"'
+
+    driver = File.read(File.join(Hive::Workflows::Bench::RUNTIME_DIR, "harness", "lib", "hive_driver.rb"))
+    harness = File.read(File.join(Hive::Workflows::Bench::RUNTIME_DIR, "harness", "run_all.rb"))
+    assert_includes driver, 'provider=#{provider}'
+    assert_includes harness, '"failed_provider" => failed_provider'
   end
 
   def test_descriptor_carries_transition_verbs_after_inbox

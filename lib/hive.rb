@@ -74,7 +74,8 @@ module Hive
       # Reverse-direction notice the daemon writes for the bot to relay a
       # non-zero, bot-originated dispatch back to the originating Telegram
       # chat. See `Hive::Daemon::DispatchResultQueue` (ADV-1).
-      "hive-dispatch-result" => 1
+      "hive-dispatch-result" => 1,
+      "hive-resumable-workflow" => 1
     }.freeze
 
     # Closed enum of Diagnostic.generated_by values accepted by the

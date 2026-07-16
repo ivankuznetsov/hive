@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-resumable-workflow.v1.json",
+  "title": "Hive resumable workflow checkpoint (v1)",
+  "description": "Normalized durable child snapshot consumed by generic daemon recovery.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "schema_version",
+    "workflow_id",
+    "kind",
+    "checkpoint_generation",
+    "children"
+  ],
+  "properties": {
+    "schema": { "const": "hive-resumable-workflow" },
+    "schema_version": { "const": 1 },
+    "workflow_id": { "type": "string", "minLength": 1 },
+    "kind": { "type": "string", "minLength": 1 },
+    "checkpoint_generation": { "type": "integer", "minimum": 0 },
+    "checkpoint_fingerprint": { "type": "string", "minLength": 1 },
+    "children": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/Child" }
+    }
+  },
+  "$defs": {
+    "Child": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["child_id", "status"],
+      "properties": {
+        "child_id": { "type": "string", "minLength": 1 },
+        "status": {
+          "enum": ["complete", "pending", "provider_retryable", "terminal"]
+        },
+        "failed_provider": { "type": "string", "minLength": 1 },
+        "artifact_ref": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$"
+        },
+        "routing": { "type": "object" },
+        "reason": { "type": "string", "minLength": 1 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "provider_retryable" } }, "required": ["status"] },
+          "then": { "required": ["failed_provider"] }
+        },
+        {
+          "if": { "properties": { "status": { "const": "complete" } }, "required": ["status"] },
+          "then": { "required": ["artifact_ref"] }
+        }
+      ]
+    }
+  }
+}

@@ -1,4 +1,5 @@
 require "digest"
+require "hive/conditions/generation_tracker"
 
 module Hive
   module Attempts
@@ -10,7 +11,7 @@ module Hive
       :progress_token, :task_generation, :ownership_generation, :task_input_epoch
     ) do
       def self.resolve(task:, project:, intended_stage:, progress_token: nil,
-                       task_generation: nil, ownership_generation: nil, task_input_epoch: 0)
+                       task_generation: nil, ownership_generation: nil, task_input_epoch: nil)
         task_id = task.respond_to?(:id) ? task.id : nil
         slug = task.slug.to_s
         locator = task_id.nil? ? "project:#{project}/slug:#{slug}" : "id:#{task_id}"
@@ -18,6 +19,12 @@ module Hive
         generation = ownership_generation || task_generation || ::Digest::SHA256.hexdigest(
           [ "hive-task-generation-v1", locator, intended_stage.to_s, progress ].join("\0")
         )
+        input_epoch = if task_input_epoch.nil?
+          intended_stage.to_s == "4-execute" ?
+            Hive::Conditions::GenerationTracker.new.resolve(task: task).task_generation : 0
+        else
+          Integer(task_input_epoch)
+        end
         new(
           task_id: task_id,
           project: project.to_s,
@@ -27,7 +34,7 @@ module Hive
           progress_token: progress,
           task_generation: generation,
           ownership_generation: generation,
-          task_input_epoch: Integer(task_input_epoch)
+          task_input_epoch: input_epoch
         )
       end
 

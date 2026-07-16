@@ -1,0 +1,27 @@
+name: incident_plan_only_dependency_gate
+description: Proves a plan-only prerequisite blocks dependent dispatch until the sibling-defined threshold.
+tags: [incident-regression]
+incident_id: plan-only-dependency-gate
+sibling_task_id: "#9771"
+pending: true
+
+# Activation contract (#9771): add the sibling-defined dependency metadata to
+# the synthetic dependent below, tick the real daemon repeatedly, and replace
+# the guard with zero-dispatch plus exact blocked-reason assertions. If #9771
+# defines a release transition, advance the prerequisite and assert exactly one
+# eligible dispatch after stopping the daemon.
+steps:
+  - kind: seed_state
+    stage: 3-plan
+    slug: synthetic-plan-prerequisite
+    state_file: plan.md
+    content: "# Plan-only prerequisite below dispatch gate\n\n<!-- WAITING -->\n"
+
+  - kind: write_file
+    path: "{sandbox}/.hive-state/stages/4-execute/synthetic-dependent-task/task.md"
+    content: "# Dependent awaiting #9771 dependency metadata\n"
+
+  - kind: state_assert
+    description: Activation guard; replace with #9771 dependency assertions before enabling.
+    path: "{run_home}/pending-contracts/9771-dependency-enabled"
+    contains: "dependency contract and reason assertions installed"

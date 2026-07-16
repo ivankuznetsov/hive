@@ -392,6 +392,7 @@ class GhUnitTest < Minitest::Test
       "headRefName" => "hive-refactor/fix-abc",
       "headRefOid" => "a" * 40,
       "baseRefName" => "main",
+      "baseRefOid" => "b" * 40,
       "headRepository" => { "nameWithOwner" => "Acme/Demo" }
     }
     captured = nil
@@ -402,7 +403,7 @@ class GhUnitTest < Minitest::Test
       verified = refactor_patrol_github.verify_pr_identity!(
         record.fetch("url"), repository: "acme/demo", host: "github.com",
         branch: "hive-refactor/fix-abc", head_oid: "a" * 40,
-        base_branch: "main"
+        base_branch: "main", base_oid: "b" * 40
       )
       assert_equal record, verified
     end
@@ -410,6 +411,7 @@ class GhUnitTest < Minitest::Test
     assert_equal [ "github.com/acme/demo" ], captured.first.each_cons(2)
                                                          .select { |left, _| left == "--repo" }
                                                          .map(&:last)
+    assert_includes captured.first.fetch(captured.first.index("--json") + 1), "baseRefOid"
   end
 
   def test_verify_pr_identity_rejects_changed_head
@@ -418,7 +420,7 @@ class GhUnitTest < Minitest::Test
       "url" => "https://github.com/acme/demo/pull/9", "number" => 9,
       "state" => "OPEN", "isDraft" => false,
       "headRefName" => "hive-refactor/fix-abc", "headRefOid" => "b" * 40,
-      "baseRefName" => "main",
+      "baseRefName" => "main", "baseRefOid" => "c" * 40,
       "headRepository" => { "nameWithOwner" => "acme/demo" }
     }
     with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*_cmd, **_kwargs|
@@ -428,9 +430,32 @@ class GhUnitTest < Minitest::Test
         refactor_patrol_github.verify_pr_identity!(
           record.fetch("url"), repository: "acme/demo", host: "github.com",
           branch: "hive-refactor/fix-abc", head_oid: "a" * 40,
-          base_branch: "main"
+          base_branch: "main", base_oid: "c" * 40
         )
       end
+    end
+  end
+
+  def test_verify_pr_identity_rejects_remote_base_advance
+    ok = Hive::Gh::CommandStatus.new(exitstatus: 0)
+    record = {
+      "url" => "https://github.com/acme/demo/pull/9", "number" => 9,
+      "state" => "OPEN", "isDraft" => false,
+      "headRefName" => "hive-refactor/fix-abc", "headRefOid" => "a" * 40,
+      "baseRefName" => "main", "baseRefOid" => "c" * 40,
+      "headRepository" => { "nameWithOwner" => "acme/demo" }
+    }
+    with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*_cmd, **_kwargs|
+      [ JSON.generate(record), "", ok ]
+    }) do
+      error = assert_raises(Hive::GhError) do
+        refactor_patrol_github.verify_pr_identity!(
+          record.fetch("url"), repository: "acme/demo", host: "github.com",
+          branch: "hive-refactor/fix-abc", head_oid: "a" * 40,
+          base_branch: "main", base_oid: "b" * 40
+        )
+      end
+      assert_includes error.message, "validated patch"
     end
   end
 
@@ -440,7 +465,7 @@ class GhUnitTest < Minitest::Test
       "url" => "https://github.com/acme/demo/pull/10", "number" => 10,
       "state" => "OPEN", "isDraft" => false,
       "headRefName" => "hive-refactor/fix-abc", "headRefOid" => "a" * 40,
-      "baseRefName" => "main",
+      "baseRefName" => "main", "baseRefOid" => "b" * 40,
       "headRepository" => { "nameWithOwner" => "acme/demo" }
     }
     with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*_cmd, **_kwargs|
@@ -451,7 +476,7 @@ class GhUnitTest < Minitest::Test
           "https://github.com/acme/demo/pull/9",
           repository: "acme/demo", host: "github.com",
           branch: "hive-refactor/fix-abc", head_oid: "a" * 40,
-          base_branch: "main"
+          base_branch: "main", base_oid: "b" * 40
         )
       end
     end
@@ -1266,7 +1291,7 @@ def test_verify_pr_identity_wraps_transport_shape_and_parse_failures
         refactor_patrol_github.verify_pr_identity!(
           "https://github.com/acme/demo/pull/9",
           repository: "acme/demo", host: "github.com", branch: "feature",
-          head_oid: "a" * 40, base_branch: "main"
+          head_oid: "a" * 40, base_branch: "main", base_oid: "b" * 40
         )
       end
     end

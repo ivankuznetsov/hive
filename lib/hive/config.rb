@@ -489,6 +489,11 @@ module Hive
         "min_leverage_score" => 0.25,
         "max_theses_per_feature" => 3,
         "max_theses_per_run" => 10,
+        # One architecture-discovery child must never multiply the per-agent
+        # timeout by every mapped feature. The reviewer passes the remaining
+        # whole-run budget into each spawn and checkpoints unfinished features
+        # for a later daemon child.
+        "max_review_seconds_per_run" => 3600,
         "include" => [],
         "exclude" => [ "node_modules", "dist", "build", "vendor", ".git" ],
         "commands" => {
@@ -2676,7 +2681,8 @@ module Hive
     ].freeze
     REFACTOR_PATROL_NUMERIC_BOUNDS = {
       "max_theses_per_feature" => 1,
-      "max_theses_per_run" => 1
+      "max_theses_per_run" => 1,
+      "max_review_seconds_per_run" => 1
     }.freeze
     REFACTOR_PATROL_CAP_BOUNDS = {
       "max_files" => 1,

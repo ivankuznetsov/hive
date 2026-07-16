@@ -26,7 +26,7 @@ module Hive
         @read_only = read_only
       end
 
-      def call(prompt:, output_path:, run_dir:, **)
+      def call(prompt:, output_path:, run_dir:, timeout_sec: nil, **)
         task = Hive::Patrol::RunnerTask.new(
           folder: run_dir,
           project_root: @project_root,
@@ -47,7 +47,7 @@ module Hive
           add_dirs: [ @project_root ],
           cwd: @project_root,
           max_budget_usd: @cfg.dig("budget_usd", "patrol") || 100,
-          timeout_sec: @cfg.dig("timeout_sec", "patrol") || 3600,
+          timeout_sec: effective_timeout(timeout_sec),
           log_label: STAGE,
           profile: profile,
           expected_output: @read_only ? nil : output_path,
@@ -61,6 +61,13 @@ module Hive
       end
 
       private
+
+      def effective_timeout(remaining_run_seconds)
+        configured = @cfg.dig("timeout_sec", "patrol") || 3600
+        return configured if remaining_run_seconds.nil?
+
+        [ configured, Float(remaining_run_seconds) ].min
+      end
 
       def read_only_scope(profile)
         return {} unless @read_only

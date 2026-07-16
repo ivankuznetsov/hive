@@ -224,6 +224,7 @@ module Hive
           branch: patch.branch,
           head_oid: patch.commit_sha,
           base_branch: source.fetch("base_branch"),
+          base_oid: patch.publication_base_sha,
           cfg: @cfg
         )
         handoff(

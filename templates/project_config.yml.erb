@@ -328,6 +328,9 @@ refactor_patrol:
   enabled: <%= refactor_patrol_enabled ? "true" : "false" %>
   # Low-leverage proposals remain visible but report-only.
   min_leverage_score: 0.25
+  # Absolute wall-clock budget shared by every feature review in one child.
+  # Unfinished features remain durable and resume in a later patrol run.
+  max_review_seconds_per_run: 3600
   auto_fix:
     enabled: false
     agent: codex

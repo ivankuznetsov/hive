@@ -26,13 +26,14 @@ module Hive
       attr_reader :review_errors, :feature_results
 
       def initialize(project_root, cfg:, state: StateStore.new(project_root), agent_runner: nil, dry_run: false,
-                     source_pr: nil, read_only: false)
+                     source_pr: nil, read_only: false, monotonic_clock: nil)
         @project_root = File.expand_path(project_root)
         @cfg = cfg
         @state = state
         @dry_run = dry_run
         @source_pr = source_pr
         @read_only = read_only
+        @monotonic_clock = monotonic_clock || -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) }
         @agent_runner = agent_runner ||
                         ReviewAgentRunner.new(
                           project_root: @project_root, cfg: cfg, state: state,
@@ -51,23 +52,32 @@ module Hive
         @review_errors = []
         @feature_results = []
         remaining = max_theses_per_run
+        deadline = monotonic_now + max_review_seconds_per_run
         theses = []
         features.each do |feature|
           break unless remaining.positive?
 
+          remaining_seconds = deadline - monotonic_now
+          unless remaining_seconds.positive?
+            feature_theses = record_feature_error(
+              feature, "run_deadline_exceeded",
+              "refactor patrol review exceeded its #{max_review_seconds_per_run}s whole-run deadline"
+            )
+            result = feature_result(feature, feature_theses, @review_errors.last(1))
+            @feature_results << result
+            yield feature, feature_theses, result if block_given?
+            break
+          end
+
           error_offset = @review_errors.length
           limit = [ max_theses, remaining ].min
           feature_theses = review_feature(
-            feature, leverage_by_feature.fetch(feature.id, {}), max_theses: limit
+            feature, leverage_by_feature.fetch(feature.id, {}),
+            max_theses: limit, timeout_sec: remaining_seconds
           )
           remaining -= feature_theses.size
           errors = @review_errors.drop(error_offset)
-          result = {
-            "feature_id" => feature.id.to_s,
-            "complete" => errors.empty?,
-            "thesis_ids" => feature_theses.map { |thesis| thesis.id.to_s },
-            "errors" => JSON.parse(JSON.generate(errors))
-          }
+          result = feature_result(feature, feature_theses, errors)
           @feature_results << result
           yield feature, feature_theses, result if block_given?
           theses.concat(feature_theses)
@@ -77,13 +87,16 @@ module Hive
 
       private
 
-      def review_feature(feature, leverage, max_theses:)
+      def review_feature(feature, leverage, max_theses:, timeout_sec:)
         # In dry-run mode we must not create durable artifacts under
         # .hive-state/refactor_patrol/; scratch the agent output in a temp dir.
         run_dir = @dry_run ? Dir.mktmpdir("refactor-patrol-review") : @state.run_dir("review")
         output_path = File.join(run_dir, "theses.json")
         prompt = render_prompt(feature, leverage, output_path, max_theses: max_theses)
-        result = @agent_runner.call(feature: feature, prompt: prompt, output_path: output_path, run_dir: run_dir)
+        result = @agent_runner.call(
+          feature: feature, prompt: prompt, output_path: output_path,
+          run_dir: run_dir, timeout_sec: timeout_sec
+        )
         return record_feature_error(feature, "agent_failed", agent_error_message(result)) if agent_failed?(result)
 
         parse_theses(feature, leverage, output_path, max_theses: max_theses)
@@ -161,6 +174,19 @@ module Hive
         []
       end
 
+      def feature_result(feature, theses, errors)
+        {
+          "feature_id" => feature.id.to_s,
+          "complete" => errors.empty?,
+          "thesis_ids" => theses.map { |thesis| thesis.id.to_s },
+          "errors" => JSON.parse(JSON.generate(errors))
+        }
+      end
+
+      def monotonic_now
+        Float(@monotonic_clock.call)
+      end
+
       def configured_commands
         (@cfg.dig("refactor_patrol", "commands") || {}).select { |_name, command| command }
       end
@@ -171,6 +197,10 @@ module Hive
 
       def max_theses_per_run
         @cfg.dig("refactor_patrol", "max_theses_per_run") || 10
+      end
+
+      def max_review_seconds_per_run
+        @cfg.dig("refactor_patrol", "max_review_seconds_per_run") || 3600
       end
     end
   end

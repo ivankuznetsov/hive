@@ -3,7 +3,7 @@ title: Hive::Patrol
 type: module
 source: lib/hive/patrol/
 created: 2026-05-28
-updated: 2026-07-12
+updated: 2026-07-16
 tags: [module, patrol, review, worktree, pr, codex]
 ---
 
@@ -22,7 +22,7 @@ tags: [module, patrol, review, worktree, pr, codex]
 | `Hive::Patrol::Fixer` | `lib/hive/patrol/fixer.rb` | Creates a dedicated worktree branch, runs the fix agent, records `patrol-fix` usage rows when agent usage is present, validates, commits passing changes, records patch attempts, and removes failed worktrees. |
 | `Hive::Patrol::Validator` | `lib/hive/patrol/validator.rb` | Runs operator-configured validation commands in the fix worktree. No commands means not validatable, so no PR. |
 | `Hive::Patrol::PrOpener` | `lib/hive/patrol/pr_opener.rb` | Secret-scans, pushes the patrol branch, opens a ready (non-draft) PR by default — `patrol.draft_prs: true` reverts to draft — records fingerprint-to-PR state, invokes `ReviewHandoff` for opened PRs, and records `review_handoff_failed` when a PR opens but the synthetic review task cannot be created. |
-| `Hive::Patrol::ReviewHandoff` | `lib/hive/patrol/review_handoff.rb` | Creates a synthetic `6-review/patrol-.../` task for an opened patrol PR when `patrol.review_prs` is not false, preserving the patrol worktree so the standard review daemon can run reviewers/triage/fix/browser flow. Staging/quarantine renames use the shared best-effort directory-fsync policy. |
+| `Hive::Patrol::ReviewHandoff` | `lib/hive/patrol/review_handoff.rb` | Creates a synthetic `6-review/patrol-.../` task for an opened patrol PR when `patrol.review_prs` is not false, preserving the patrol worktree so the standard review daemon can run reviewers/triage/fix/browser flow. Mandatory and optional calls use the same fingerprint-locked exact reconciliation, so a retry after rename/fsync ambiguity reuses the one matching task and rejects PR/head identity conflicts. Staging/quarantine renames use the shared best-effort directory-fsync policy. |
 | `Hive::Patrol::Dismissals` | `lib/hive/patrol/dismissals.rb` | Reconciles closed-unmerged patrol PRs into `dismissed.json` so the same finding is not immediately re-filed. |
 | `Hive::Patrol::StateStore` | `lib/hive/patrol/state_store.rb` | Creates and atomically writes the `.hive-state/patrol/` JSON tree. |
 
@@ -79,7 +79,7 @@ Operators normally configure scheduling through `patrol.mode`, which [[modules/c
 - Findings surface as PRs, and opened PRs enter `6-review` by default; patrol still never writes `1-inbox/` intake tasks.
 - PR creation is gated on validation passing and on the secret scanner.
 - Each finding fingerprint maps to at most one active or merged PR.
-- A failed patrol-to-review handoff is not treated as an active fingerprint state, so later patrol cycles can retry instead of losing the opened PR from the review queue.
+- A failed patrol-to-review handoff is not treated as an active fingerprint state, so later patrol cycles can retry instead of losing the opened PR from the review queue; an exact existing synthetic task is reconciled instead of duplicated.
 - Closed-unmerged patrol PRs become dismissals and are skipped on future cycles.
 - Agent prompts treat findings and recommendations as data; validation commands come only from project config.
 

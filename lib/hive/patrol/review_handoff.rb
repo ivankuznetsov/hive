@@ -34,7 +34,7 @@ module Hive
         expected = expected_metadata(finding, patch, pr_url, context, mandatory: mandatory)
         with_fingerprint_lock(expected.fetch("fingerprint")) do |lock_id|
           quarantine_interrupted_staging(lock_id)
-          if mandatory && (existing = reconcile_existing!(expected))
+          if (existing = reconcile_existing!(expected))
             return existing
           end
 

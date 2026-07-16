@@ -115,8 +115,12 @@ it maps bounded root-document, `docs/`, wiki, ADR, and decision slices. Compiled
 wiki logs, raw notes, caches, generated content, and `.hive-state` do not become
 one broad documentation feature. Ordinary `hive patrol` mapping is unchanged.
 
-`max_theses_per_run` is a strict run-wide reviewer budget, not a per-feature
-allowance: once exhausted, later slices stay incomplete for a future resume.
+`max_theses_per_run` is a strict run-wide reviewer-output budget, not a
+per-feature allowance. `max_review_seconds_per_run` (default 3600) is the
+matching absolute monotonic wall-clock budget: each feature spawn receives only
+the smaller of its configured patrol timeout and the whole-run time remaining.
+Once either budget is exhausted, later slices stay incomplete for a future
+resume instead of multiplying one agent timeout by every mapped feature.
 Malformed envelopes, null/scalar items, and schema-invalid records are review
 errors rather than successful zero-result scans. Evidence is also checked
 against the pinned checkout's real, root-confined, 256 KiB-bounded bytes: cited
@@ -350,7 +354,8 @@ replacement patch or begin a new push/PR phase.
 
 After `gh pr create`, an
 exact-host/repository `gh pr view` must prove the returned URL/number, OPEN
-non-draft state, head repository/branch/OID, and base branch before handoff.
+non-draft state, head repository/branch/OID, and the exact base branch/OID from
+the validated patch before handoff.
 Same-branch reconciliation also rejects an OPEN PR unless `isDraft` is
 explicitly false; CLOSED/MERGED recovery remains available when draft metadata
 is absent because those states cannot be handed off as a live ready PR.

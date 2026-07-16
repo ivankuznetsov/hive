@@ -651,9 +651,10 @@ class RefactorPatrolPrOpenerTest < Minitest::Test
       gh = FakeGh.new
       gh.verification_error = "head changed"
       handoff = Handoff.new
+      local_patch = patch(repo)
 
       result = opener(repo, gh, handoff).open(
-        thesis: thesis, patch: patch(repo), job_id: "job-7",
+        thesis: thesis, patch: local_patch, job_id: "job-7",
         canonical_action_id: "fix-fp", source: source,
         record_intent: ->(**) { true }
       )
@@ -661,6 +662,7 @@ class RefactorPatrolPrOpenerTest < Minitest::Test
       assert_equal "remote_outcome_unknown", result.outcome
       assert_equal 1, gh.created.size
       assert_equal 1, gh.verified.size
+      assert_equal local_patch.publication_base_sha, gh.verified.first.fetch(:base_oid)
       assert_empty handoff.calls
     end
   end

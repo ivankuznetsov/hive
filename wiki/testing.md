@@ -173,12 +173,16 @@ bin/hive-e2e list
 bin/hive-e2e run
 ```
 
-The current scenarios copy `test/e2e/sample-project/` into a per-run sandbox, set `HIVE_HOME` to a run-local directory, and call the real `bin/hive` as a subprocess. `SandboxEnv` routes both Claude and Codex profile binaries to `test/fixtures/fake-claude` and pins `test/e2e/fixtures/gh` ahead of every scenario-supplied `PATH` for blocking CLI, background, and tmux Hive children. The run-local `script_gh` ledger provides ordered exact-argv responses; rejected or unconsumed interactions fail scenario verification, and failure bundles retain the script/state/audit evidence. Scenarios that exercise `4-execute` with the default Codex profile must ask the Claude fixture to create a real worktree commit, or execute will correctly stop at `EXECUTE_WAITING reason=no_worktree_changes`. TUI scenarios use private tmux sockets (`hive-e2e-<run-id>`) so they never touch the operator's daily tmux server.
+The current scenarios copy `test/e2e/sample-project/` into a per-run sandbox, set `HIVE_HOME` to a run-local directory, and call the checkout's real `bin/hive` as a subprocess. `SandboxEnv` routes both Claude and Codex profile binaries to `test/fixtures/fake-claude`, pins `HIVE_BIN` / `HIVE_INVOKED_BIN` to the checkout after scenario overrides are merged, and pins `test/e2e/fixtures/gh` ahead of every scenario-supplied `PATH` for blocking CLI, background, and tmux Hive children. The copied project forces `claude.mode: headless`, while the user-facing TUI still runs in a private tmux socket (`hive-e2e-<run-id>`). The harness starts that tmux server inside `Bundler.with_unbundled_env`, so root-bundle `RUBYOPT`, `BUNDLE_PATH`, Ruby-manager, and gem-path state is stripped before the sandbox Gemfile is selected. The run-local `script_gh` ledger provides ordered exact-argv responses; rejected or unconsumed interactions fail scenario verification, and failure bundles retain the script/state/audit evidence. Scenarios that exercise `4-execute` with the default Codex profile must ask the Claude fixture to create a real worktree commit, or execute will correctly stop at `EXECUTE_WAITING reason=no_worktree_changes`.
 
-Focused harness tests pin the GitHub boundary: `gh_stub_test.rb` covers ordered
+Focused harness tests pin the runtime and GitHub boundaries:
+`sandbox_test.rb` proves sandboxed fake Claude is headless;
+`sandbox_env_test.rb` proves inherited/scenario executable overrides cannot
+replace the checkout Hive binary and that a poisoned host `gh` cannot run;
+`tmux_session_lifecycle_test.rb` proves the tmux server starts without inherited
+`RUBYOPT` / `BUNDLE_PATH`; `gh_stub_test.rb` covers ordered
 JSON/literal responses, cwd/repository checks, invalid definitions, and
-missing/mismatched/exhausted fail-closed behavior; `sandbox_env_test.rb` proves
-a poisoned host `gh` cannot run; `step_executor_test.rb` proves blocking and
+missing/mismatched/exhausted fail-closed behavior; `step_executor_test.rb` proves blocking and
 background `bin/hive` subprocesses share one serialized script; and the parser,
 artifact-capture, and repro-writer tests cover DSL validation, copied
 `gh/` evidence, expanded interaction emission, and valid repro shell syntax.

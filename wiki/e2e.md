@@ -4,10 +4,10 @@ type: reference
 source: test/e2e/, bin/hive-e2e, Rakefile
 created: 2026-04-29
 updated: 2026-07-16
-tags: [test, e2e, tui, artifacts]
+tags: [test, e2e, tui, incidents, artifacts]
 ---
 
-**TLDR**: `test/e2e/` is the outer test layer. It drives the real `bin/hive` binary in a copied Ruby sample project, uses tmux for TUI scenarios, validates JSON output against published schemas, keeps GitHub-facing subprocesses behind a fail-closed scripted `gh` shim, and writes versioned run artifacts for later debugging. The `bin/hive-e2e` Thor executable is also a small public harness surface with pinned exit codes and JSON error envelopes for wrapper/CI callers.
+**TLDR**: `test/e2e/` is the outer test layer. It drives the checkout's real `bin/hive` in a copied Ruby sample project, uses tmux for TUI scenarios, validates JSON output against published schemas, keeps GitHub-facing subprocesses behind a fail-closed scripted `gh` shim, and writes versioned run artifacts for later debugging. Pending incident fixtures preserve sibling-owned activation contracts without counting as passing regression proof. The `bin/hive-e2e` Thor executable is also a small public harness surface with pinned exit codes and JSON error envelopes for wrapper/CI callers.
 
 ## Commands
 
@@ -16,6 +16,7 @@ bundle exec rake e2e:lib_test   # harness library tests
 bin/hive-e2e list               # scenario inventory
 bin/hive-e2e run                # all scenarios
 bin/hive-e2e run --filter tui   # tag filter
+bin/hive-e2e run --filter incident-regression --json
 bin/hive-e2e clean              # old run cleanup
 ```
 
@@ -132,6 +133,24 @@ audited call was rejected or any scripted interaction remains unconsumed.
 `repro.sh` re-installs expanded `script_gh` interactions before replaying later
 steps.
 
+### Hermetic runtime boundary
+
+`SandboxEnv` pins both `HIVE_BIN` and `HIVE_INVOKED_BIN` to the checkout's
+`bin/hive`, after merging scenario overrides. Neither an operator's inherited
+environment nor scenario `env:` / `tui_env:` values can redirect nested
+daemon, display-name, blocking, background, or TUI-dispatched work to an
+installed Hive wrapper. The existing fail-closed `gh` shim directory and
+run-local script root remain protected by the same merge boundary.
+
+Sandbox bootstrap writes `claude.mode: headless` into each copied project's
+config. Claude and Codex still resolve to `test/fixtures/fake-claude`, so fake
+agent stages use the subprocess protocol rather than production Claude/tmux
+readiness detection. TUI scenarios remain real tmux sessions: their tmux
+server is created inside `Bundler.with_unbundled_env`, with inherited Bundler,
+Ruby-manager, and gem-path variables removed before the sample-project
+`Gemfile` is applied. This prevents a root `bundle exec` invocation from
+combining its `RUBYOPT` or `BUNDLE_PATH` with the sandbox bundle.
+
 ### Trust boundary
 
 `ruby_block` runs the literal `block:` string through Kernel-level code evaluation against the executor's binding with full process privileges. That string can mutate the outer hive checkout, exec arbitrary commands, and read or rewrite any private state of `StepExecutor`. The trust contract is: anyone who can commit to `test/e2e/scenarios/` can execute arbitrary code at test-runtime. **`ruby_block` changes warrant extra reviewer attention.** Prefer a purpose-built step kind for any pattern used more than once.
@@ -147,6 +166,31 @@ Each entry in `report.json#scenarios[]` carries a `status`:
 - `passed` — every step ran and asserted cleanly.
 - `failed` — at least one step raised; failure artifacts are written under `scenarios/<name>/`.
 - `setup_failed` — `Sandbox.bootstrap` raised before any step ran. `failed_step_index` is `null`, `artifacts_dir` is `null`. The aggregate run-level status (`complete` / `partial` / `crashed`) is unaffected.
+
+### Pending incident fixtures
+
+Incident scenarios declare `tags: [incident-regression]`, a stable
+`incident_id`, a sibling task id, and `pending: true`. Pending fixtures are
+activation scaffolds: their final `state_assert` deliberately points at a
+nonexistent `pending-contracts/...` guard, and their comments prohibit
+inventing persistence fields or reason codes before the sibling implementation
+defines them. The source-branch scenario README states that pending scenarios
+remain visible as metadata but their steps do not execute or contribute a
+passing scenario row.
+
+This queued batch actually adds five such fixtures:
+
+| Incident | Sibling | Activation contract |
+|----------|---------|---------------------|
+| `accepted-attempt-caller-loss` | `#9767` | Preserve accepted attempt → caller death → single daemon adoption ordering, then assert exact attempt ownership and no duplicate claim. |
+| `finalize-pr-lifecycle-gate` | `#9769` | Script the synthetic draft/open → ready/unmerged → merged GitHub reads, then assert finalize is held until the terminal PR state. |
+| `plan-only-dependency-gate` | `#9771` | Add the sibling-defined dependency metadata, prove repeated daemon ticks dispatch nothing below the threshold, then prove one eligible dispatch after release. |
+| `repository-routing` | `#9771` | Add repository identities and scripted head evidence, then prove route-or-reject behavior without touching the non-target project. |
+| `provider-limit-retry` | `#9770` | Hold an ineligible `limits_reached` row across repeated ticks, release it through the supported cooldown seam, and assert bounded retry ownership/counts. |
+
+The branch tree also contains `generation-scoped-no-worktree-marker` for
+`#9768`, but none of the actual queued commit diffs adds that file; the queue
+provenance mismatch is tracked in [[gaps]].
 
 ## Artifacts
 
@@ -173,14 +217,14 @@ On failure, the harness writes a scenario bundle containing:
 
 | Scenario | Coverage |
 |----------|----------|
-| `full_pipeline_happy_path` | Real subprocess choreography from new task to done, avoiding network PR creation. |
+| `full_pipeline_happy_path` | Real subprocess choreography from new task to done, avoiding network PR creation; the artifacts stage now asks fake Claude to write the asserted `artifact.md` completion marker. |
 | `review_with_findings_then_develop` | `findings --json`, `accept-finding`, schema validation, review file toggles. |
 | `run_error_envelope` | `hive run --json` against a stale-locked task emits a parseable `hive-run` error payload. |
 | `stale_lock_recovery` | TEMPFAIL lock path, marker clear, rerun recovery. |
 | `tui_status_navigate_dispatch_plan` | TUI verb-key dispatch end-to-end: `p` on a ready-to-plan row spawns `bin/hive plan`, waits for the subprocess to exit, and asserts plan.md/COMPLETE landed. |
 | `tui_new_idea_editing` | TUI new-idea prompt paste delivery plus cursor navigation/insertion before submit. |
-| `tui_two_pane_navigate` | TUI v2 navigation between task list and detail panes, including focus changes and row movement. |
-| `two_projects_fuzzy_filter` | tmux TUI filter input and project scope across two registered projects. |
+| `tui_two_pane_navigate` | TUI v2 navigation between task list and detail panes, including focus changes and row movement; scope assertions use the rendered `Tasks · <project>` heading. |
+| `two_projects_fuzzy_filter` | tmux TUI filter input and project scope across two registered projects, asserted through the rendered project heading. |
 | `update_flow_pipeline` | Daemon update-check pipeline against a releases stub. |
 | `update_flow_tui_footer` | TUI update footer rendering after the update check records a newer release. |
 | `update_flow_tui_no_nudge` | TUI no-update-nudge path when update state should not be shown. |

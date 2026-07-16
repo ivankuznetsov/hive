@@ -7,6 +7,19 @@ require "hive/cli"
 require "hive/refactor_patrol/reporter"
 require "json"
 
+# Private detached-wrapper route. It is deliberately handled before Thor so
+# it never appears as a public workflow verb and cannot recurse through normal
+# admission. DetachedLauncher is the only producer.
+if ARGV.first == "__attempt-supervise"
+  require "hive/commands/attempt_supervise"
+  begin
+    exit Hive::Commands::AttemptSupervise.from_argv(ARGV.drop(1)).call
+  rescue Hive::Error => e
+    warn "hive: #{e.message}"
+    exit e.exit_code
+  end
+end
+
 if ARGV == [ "--version" ] || ARGV == [ "-v" ]
   puts Hive::VERSION
   exit 0

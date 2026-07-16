@@ -25,7 +25,9 @@ class LockTest < Minitest::Test
   def test_task_lock_projects_durable_attempt_identity
     with_tmp_dir do |dir|
       data = nil
-      with_attempt_context(attempt_id: "attempt-1", task_generation: "generation-1") do
+      with_attempt_context(
+        attempt_id: "attempt-1", task_generation: 1, ownership_generation: "generation-1"
+      ) do
         data = Hive::Lock.acquire_task_lock(
           dir,
           "attempt_id" => "caller-cannot-override",
@@ -33,7 +35,8 @@ class LockTest < Minitest::Test
         )
 
         assert_equal "attempt-1", data["attempt_id"]
-        assert_equal "generation-1", data["task_generation"]
+        assert_equal 1, data["task_generation"]
+        assert_equal "generation-1", data["ownership_generation"]
         assert_equal data, YAML.safe_load(File.read(File.join(dir, ".lock")))
       end
     ensure

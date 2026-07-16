@@ -8,15 +8,15 @@ module Hive
     # count and never by itself proof that the stage succeeded.
     Generation = Data.define(
       :task_id, :project, :task_slug, :intended_stage, :task_locator,
-      :progress_token, :task_generation
+      :progress_token, :task_generation, :ownership_generation, :task_input_epoch
     ) do
       def self.resolve(task:, project:, intended_stage:, progress_token: nil,
-                       task_generation: nil)
+                       task_generation: nil, ownership_generation: nil, task_input_epoch: 0)
         task_id = task.respond_to?(:id) ? task.id : nil
         slug = task.slug.to_s
         locator = task_id.nil? ? "project:#{project}/slug:#{slug}" : "id:#{task_id}"
         progress = progress_token || artifact_token(task)
-        generation = task_generation || ::Digest::SHA256.hexdigest(
+        generation = ownership_generation || task_generation || ::Digest::SHA256.hexdigest(
           [ "hive-task-generation-v1", locator, intended_stage.to_s, progress ].join("\0")
         )
         new(
@@ -26,7 +26,9 @@ module Hive
           intended_stage: intended_stage.to_s,
           task_locator: locator,
           progress_token: progress,
-          task_generation: generation
+          task_generation: generation,
+          ownership_generation: generation,
+          task_input_epoch: Integer(task_input_epoch)
         )
       end
 

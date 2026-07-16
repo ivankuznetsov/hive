@@ -371,7 +371,9 @@ class CommandsRunTest < Minitest::Test
     calls = []
     run.define_singleton_method(:do_call) { calls << :worker; :done }
 
-    value = with_attempt_context(attempt_id: "attempt-1", task_generation: "generation-1") do
+    value = with_attempt_context(
+      attempt_id: "attempt-1", task_generation: 1, ownership_generation: "generation-1"
+    ) do
       run.call
     end
 

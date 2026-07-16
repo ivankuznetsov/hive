@@ -14,6 +14,8 @@ class AttemptsRecordTest < Minitest::Test
     assert_equal 0, record.lease_version
     assert_equal "attempt-1", record.attempt_id
     assert_equal "generation-1", record.task_generation
+    assert_equal "generation-1", record.ownership_generation
+    assert_equal 0, record.task_input_epoch
   end
 
   def test_validate_rejects_unknown_state_and_terminal_fields_on_live_record
@@ -143,6 +145,18 @@ class AttemptsRecordTest < Minitest::Test
     assert_raises(Hive::Attempts::InvalidRecord) do
       Hive::Attempts::Record.new(valid.merge("worker_argv" => []))
     end
+  end
+
+  def test_legacy_v1_record_gains_generation_bridge_only_in_memory
+    legacy = Hive::Attempts::Record.launching(**identity, now: NOW, launch_timeout_sec: 30).to_h
+    legacy.delete("ownership_generation")
+    legacy.delete("task_input_epoch")
+
+    record = Hive::Attempts::Record.new(legacy)
+
+    assert_equal "generation-1", record.ownership_generation
+    assert_equal 0, record.task_input_epoch
+    refute legacy.key?("ownership_generation")
   end
 
   private

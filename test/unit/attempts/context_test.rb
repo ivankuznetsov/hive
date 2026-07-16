@@ -24,10 +24,15 @@ class AttemptsContextTest < Minitest::Test
       Hive::Attempts::Context.new(attempt_id: "forged", task_generation: "forged")
     end
 
-    with_attempt_context(attempt_id: "attempt-1", task_generation: "generation-1") do
+    with_attempt_context(
+      attempt_id: "attempt-1", task_generation: 7, ownership_generation: "generation-1"
+    ) do
       assert Hive::Attempts::Context.active?
       assert_equal(
-        { "attempt_id" => "attempt-1", "task_generation" => "generation-1" },
+        {
+          "attempt_id" => "attempt-1", "task_generation" => 7,
+          "ownership_generation" => "generation-1"
+        },
         Hive::Attempts::Context.projection
       )
     end
@@ -48,7 +53,8 @@ class AttemptsContextTest < Minitest::Test
         with_context_environment(store, capability: CLAIM_CAPABILITY) do
           context = Hive::Attempts::Context.install_from_env!(argv: WORKER_ARGV)
 
-          assert_equal "generation-env", context.task_generation
+          assert_equal 5, context.task_generation
+          assert_equal "generation-env", context.ownership_generation
           assert_equal "demo", context.project
           assert_equal "task", context.task_slug
           assert_equal "4-execute", context.intended_stage
@@ -177,7 +183,8 @@ class AttemptsContextTest < Minitest::Test
       record = store.create_launching(
         attempt_id: "attempt-env", request_id: "request-1", predecessor_attempt_id: nil,
         task_id: "42", project: "demo", task_slug: "task", intended_stage: "4-execute",
-        task_generation: "generation-env", progress_token: "progress", provider: "codex",
+        task_generation: "generation-env", task_input_epoch: 5,
+        progress_token: "progress", provider: "codex",
         worker_argv: WORKER_ARGV,
         claim_capability_digest: Hive::Attempts::Capability.digest(CLAIM_CAPABILITY),
         starting_revision: nil, retry_charge: 0, inherited_outputs: [],

@@ -3,6 +3,7 @@ require "fileutils"
 require "json"
 require "time"
 require "hive/task_journal/envelope"
+require "hive/conditions/value"
 
 module Hive
   module TaskJournal
@@ -108,6 +109,13 @@ module Hive
         end
         unless record["evidence"].is_a?(Array) && record["provenance"].is_a?(Hash) && record["payload"].is_a?(Hash)
           raise InvalidRecord, "authoritative journal evidence/provenance/payload have invalid shapes"
+        end
+        if record["event_type"] == "condition_observed"
+          begin
+            Hive::Conditions::Value.validate_observation!(record)
+          rescue Hive::Conditions::InvalidCondition => e
+            raise InvalidRecord, e.message
+          end
         end
         validate_attempt!(record)
         true

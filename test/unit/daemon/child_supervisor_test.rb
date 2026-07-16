@@ -596,15 +596,15 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
       sup = make
 
       state_path = sup.send(
-        :log_path_for, project: "demo", slug: "architecture", hive_state_path: dir
+        :log_path_for, project: "demo", slug: "architecture", log_state_path: dir
       )
       tmp_path = sup.send(
-        :log_path_for, project: "demo", slug: "architecture", hive_state_path: nil
+        :log_path_for, project: "demo", slug: "architecture", log_state_path: nil
       )
 
-      assert state_path.start_with?(File.join(dir, "logs", "architecture"))
+      assert state_path.start_with?(File.join(dir, "logs", "daemon-children", "demo", "architecture"))
       assert tmp_path.start_with?(File.join(Dir.tmpdir, "hive-daemon-logs", "demo", "architecture"))
-      assert_match(/daemon-run-\d{8}T\d{6}Z-#{Process.pid}\.log\z/, state_path)
+      assert_equal "daemon-run.log", File.basename(state_path)
     end
   end
 

@@ -622,6 +622,87 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_escaped_argv_caps_exactly_after_four_kibibytes
+    exact = "x" * MAX_ESCAPED_ARGV_BYTES
+    overflow = "x" * (MAX_ESCAPED_ARGV_BYTES + 1)
+
+    assert_equal exact, escaped_argv([ exact ])
+
+    escaped_overflow = escaped_argv([ overflow ])
+    assert_equal MAX_ESCAPED_ARGV_BYTES, escaped_overflow.bytesize
+    assert escaped_overflow.end_with?(TRUNCATED_ARGV_SUFFIX)
+  end
+
+  def test_skip_log_serializes_concurrent_large_records_without_loss
+    with_tmp_dir do |dir|
+      log_path = File.join(dir, "skipped.log")
+      env = { "HIVE_BABYSITTER_DRY_RUN_LOG" => log_path }
+
+      results = Array.new(12) do |index|
+        marker = "record-#{index}-"
+        argument = marker + ("x" * (8 * 1024))
+        Thread.new do
+          [ marker, Open3.capture3(env, stub_path("git"), "commit", "-m", argument) ]
+        end
+      end.map(&:value)
+
+      results.each do |marker, (_out, err, status)|
+        assert status.success?, err
+        refute_includes err, "failed to write skip log"
+        assert_includes err, TRUNCATED_ARGV_SUFFIX
+        assert_includes File.binread(log_path), marker
+      end
+
+      skipped = File.binread(log_path)
+      assert_equal 12, skipped.lines.size
+      assert_operator skipped.bytesize, :<=, MAX_SKIP_LOG_BYTES
+      assert skipped.lines.all? { |line| line.end_with?("#{TRUNCATED_ARGV_SUFFIX} skipped\n") }
+    end
+  end
+
+  def test_skip_log_accepts_exact_cap_and_preserves_history_on_overflow
+    with_tmp_dir do |dir|
+      log_path = File.join(dir, "skipped.log")
+      exact_message = "x" * (MAX_SKIP_LOG_BYTES - 1)
+
+      append_skip_log(log_path, exact_message)
+      before = File.binread(log_path)
+
+      assert_equal MAX_SKIP_LOG_BYTES, before.bytesize
+      error = assert_raises(IOError) { append_skip_log(log_path, "overflow") }
+      assert_includes error.message, "size limit reached"
+      assert_equal before, File.binread(log_path)
+    end
+  end
+
+  def test_stubs_do_not_block_on_locked_skip_log
+    with_tmp_dir do |dir|
+      log_path = File.join(dir, "skipped.log")
+      File.write(log_path, "existing\n")
+      File.chmod(0o600, log_path)
+      env = { "HIVE_BABYSITTER_DRY_RUN_LOG" => log_path }
+
+      File.open(log_path, File::WRONLY) do |locked_log|
+        locked_log.flock(File::LOCK_EX)
+
+        [
+          [ "git", [ "commit", "-m", "blocked" ] ],
+          [ "gh", [ "pr", "comment", "42", "--body", "blocked" ] ]
+        ].each do |binary, args|
+          started_at = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+          _out, err, status = capture_stub_with_timeout(env, binary, *args)
+          elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started_at
+
+          assert status.success?, err
+          assert_operator elapsed, :<, 2.0
+          assert_includes err, "timed out acquiring dry-run skip log lock"
+          assert_includes err, "[dry-run] #{binary} #{args.join(' ')} skipped"
+          assert_equal "existing\n", File.read(log_path)
+        end
+      end
+    end
+  end
+
   def test_skip_log_rejects_existing_file_replacement_during_open
     with_tmp_dir do |dir|
       path = File.join(dir, "skipped.log")
@@ -641,7 +722,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
 
       error = assert_raises(IOError) do
         with_replaced_singleton_method(File, :open, replacement) do
-          append_skip_log(path) { |file| file.puts("unsafe") }
+          append_skip_log(path, "unsafe")
         end
       end
 
@@ -666,7 +747,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
 
       error = assert_raises(IOError) do
         with_replaced_singleton_method(File, :open, replacement) do
-          append_skip_log(path) { |file| file.puts("unsafe") }
+          append_skip_log(path, "unsafe")
         end
       end
 

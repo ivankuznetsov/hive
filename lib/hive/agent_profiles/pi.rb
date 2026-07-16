@@ -1,6 +1,7 @@
 require "hive/agent_profile"
 require "hive/skill_check"
 require "hive/agent_profiles/usage_extractors"
+require "hive/agent_profiles/error_normalizers"
 
 module Hive
   module AgentProfiles
@@ -90,6 +91,7 @@ module Hive
       status_detection_mode: :output_file_exists,
       preflight: PI_PREFLIGHT,
       usage_extractor: Hive::AgentProfiles::UsageExtractors::PI,
+      error_normalizer: Hive::AgentProfiles::ErrorNormalizers::PI,
       skill_verifier: Hive::SkillCheck::Pi.method(:verify)
     )
 

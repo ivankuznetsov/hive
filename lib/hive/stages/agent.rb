@@ -68,11 +68,16 @@ module Hive
           if Hive::AgentLimit.held?(marker.name, marker.attrs)
             # The agent already wrote the authoritative quota marker.
           elsif limit_error_envelope?(result)
+            signal = result[:provider_signal]
             Hive::Markers.set(
               output_path, :error,
               reason: "limits_reached",
-              provider: profile.name,
-              message: result[:error_message].to_s[0, 200],
+              provider: signal&.provider || profile.name,
+              model: signal&.model,
+              provider_failure_class: signal&.failure_class,
+              provider_scope: signal&.scope,
+              evidence_ref: signal&.evidence_ref,
+              message: (signal&.safe_summary || result[:error_message]).to_s[0, 200],
               retry_after: Hive::AgentLimit.retry_after
             )
           else
@@ -141,6 +146,9 @@ module Hive
       end
 
       def limit_error_envelope?(result)
+        signal = result[:provider_signal]
+        return true if signal && Hive::ProviderRouting::TIMED_FAILURE_CLASSES.include?(signal.failure_class)
+
         Hive::AgentLimit.limit_reached?(result[:limit_text].to_s) ||
           Hive::AgentLimit.from_limit?(result[:error_message].to_s) ||
           Hive::AgentLimit.limit_reached?(result[:error_message].to_s)

@@ -784,7 +784,9 @@ class AgentTest < Minitest::Test
       assert_match(/\Alimits reached for claude:/, result[:error_message])
       assert_equal :error, marker.name
       assert_equal "limits_reached", marker.attrs["reason"]
-      assert_match(/quota exceeded/, marker.attrs["message"])
+      assert_match(/quota exhausted/, marker.attrs["message"])
+      assert_equal "quota", result.fetch(:provider_signal).failure_class
+      assert_equal "quota", marker.attrs["provider_failure_class"]
 
       retry_after = Time.parse(marker.attrs.fetch("retry_after"))
       cooldown = Hive::AgentLimit::RETRY_COOLDOWN_SEC
@@ -814,6 +816,7 @@ class AgentTest < Minitest::Test
 
       assert_equal :error, result[:status]
       assert_match(/\Alimits reached for claude:/, result[:error_message])
+      assert_equal "quota", result.fetch(:provider_signal).failure_class
       assert_equal "limits_reached", Hive::Markers.current(task.state_file).attrs["reason"]
     end
   end
@@ -839,6 +842,7 @@ class AgentTest < Minitest::Test
       assert_match(/\Alimits reached for claude:/, result[:error_message].to_s,
                    "must classify as limits-reached, not a generic exit_code failure")
       assert_equal "limits_reached", Hive::Markers.current(task.state_file).attrs["reason"]
+      assert_equal "quota", result.fetch(:provider_signal).failure_class
     end
   end
 

@@ -312,6 +312,11 @@ module Hive
       # downstream Claude-driven stages can find per-invocation output.
       capture_pane_log(task, runner, log_label)
       augment_result_with_final_message!(result, runner)
+      attach_provider_signal!(
+        result,
+        evidence: result[:limit_text] || result[:final_message],
+        evidence_ref: "#{task.log_dir}/#{log_label || 'claude'}-tmux.log#tail"
+      )
       result
     end
 
@@ -369,7 +374,15 @@ module Hive
       case status_mode || :state_file_marker
       when :state_file_marker
         marker = wait_for_terminal_marker(task, runner, timeout)
-        { status: marker.name, log_label: log_label }
+        result = { status: marker.name, log_label: log_label }
+        if Hive::AgentLimit.held?(marker.name, marker.attrs)
+          attach_provider_signal!(
+            result,
+            evidence: marker.attrs["message"],
+            evidence_ref: "#{task.state_file}#marker"
+          )
+        end
+        result
       when :output_file_exists
         wait_for_expected_output(task, runner, timeout, expected_output, log_label)
       when :exit_code_only
@@ -742,9 +755,14 @@ module Hive
       limit_line = Hive::AgentLimit.live_limit_line(pane)
       return nil unless limit_line
 
+      signal = normalize_provider_error(limit_line, evidence_ref: "#{task.state_file}#tmux-pane")
       Hive::Markers.set(task.state_file, :error,
                         reason: "limits_reached",
                         message: Hive::AgentLimit.error_message(limit_line, agent: "claude"),
+                        provider: signal.provider,
+                        provider_failure_class: signal.failure_class,
+                        provider_scope: signal.scope,
+                        evidence_ref: signal.evidence_ref,
                         retry_after: Hive::AgentLimit.retry_after)
       Hive::Markers.current(task.state_file)
     end
@@ -776,11 +794,7 @@ module Hive
         output_available = expected_output_available?(expected_output)
         pane_tail = capture_limit_tail(runner)
         if (limit_line = Hive::AgentLimit.live_limit_line(pane_tail))
-          return {
-            status: :error,
-            limit_text: limit_line,
-            error_message: Hive::AgentLimit.error_message(limit_line, agent: "claude")
-          }
+          return provider_limit_result(limit_line, evidence_ref: "tmux-pane:expected-output")
         end
 
         unless expected_output_session_alive?(runner)
@@ -846,6 +860,45 @@ module Hive
       ""
     end
 
+    def provider_limit_result(limit_line, evidence_ref:)
+      signal = normalize_provider_error(limit_line, evidence_ref: evidence_ref)
+      {
+        status: :error,
+        limit_text: limit_line,
+        error_message: Hive::AgentLimit.error_message(limit_line, agent: "claude"),
+        provider_signal: signal
+      }
+    end
+
+    def attach_provider_signal!(result, evidence:, evidence_ref:)
+      return result unless result.is_a?(Hash)
+      return result if result.key?(:provider_signal)
+
+      success = !%i[error timeout].include?(result[:status])
+      result[:provider_signal] = Hive::AgentProfiles.lookup(:claude).normalize_error(
+        evidence: evidence,
+        exit_code: success ? 0 : 1,
+        timed_out: result[:status] == :timeout,
+        model: nil,
+        provider: "claude",
+        evidence_ref: evidence_ref,
+        success: success
+      )
+      result
+    end
+
+    def normalize_provider_error(evidence, evidence_ref:)
+      Hive::AgentProfiles.lookup(:claude).normalize_error(
+        evidence: evidence,
+        exit_code: 1,
+        timed_out: false,
+        model: nil,
+        provider: "claude",
+        evidence_ref: evidence_ref,
+        success: false
+      )
+    end
+
     def wait_for_done_signal(task, runner, timeout, log_label)
       deadline = Time.now + timeout
       work_started = false
@@ -862,11 +915,7 @@ module Hive
         # healer can hold/retry. `capture_limit_tail` is nil-runner safe.
         pane_tail = capture_limit_tail(runner)
         if (limit_line = Hive::AgentLimit.live_limit_line(pane_tail))
-          return {
-            status: :error,
-            limit_text: limit_line,
-            error_message: Hive::AgentLimit.error_message(limit_line, agent: "claude")
-          }
+          return provider_limit_result(limit_line, evidence_ref: "tmux-pane:done-signal")
         end
 
         if File.exist?(done_path(task))

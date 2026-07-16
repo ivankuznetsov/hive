@@ -1,5 +1,6 @@
 require "hive/agent_profile"
 require "hive/agent_profiles/usage_extractors"
+require "hive/agent_profiles/error_normalizers"
 
 module Hive
   module AgentProfiles
@@ -92,6 +93,7 @@ module Hive
       status_detection_mode: :output_file_exists,
       preflight: GROK_PREFLIGHT,
       usage_extractor: Hive::AgentProfiles::UsageExtractors::GROK,
+      error_normalizer: Hive::AgentProfiles::ErrorNormalizers::GROK,
       skill_verifier: nil
     )
 

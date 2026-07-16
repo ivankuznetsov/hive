@@ -1,5 +1,3 @@
-require "hive/agent_profiles"
-
 module Hive
   # Capability-aware provider-account routing. A provider is an operator-owned
   # account identity; +agent+ remains the CLI adapter used to execute work.
@@ -43,6 +41,7 @@ module Hive
     module_function
 
     def default_accounts
+      require "hive/agent_profiles"
       @default_accounts ||= Configuration.normalize_accounts(
         Hive::AgentProfiles.registered_names.to_h do |name|
           [ name.to_s, { "adapter" => name.to_s } ]

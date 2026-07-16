@@ -1,6 +1,7 @@
 require "hive/agent_profile"
 require "hive/skill_check"
 require "hive/agent_profiles/usage_extractors"
+require "hive/agent_profiles/error_normalizers"
 
 module Hive
   module AgentProfiles
@@ -29,6 +30,7 @@ module Hive
       min_version: Hive::MIN_CLAUDE_VERSION,
       status_detection_mode: :state_file_marker,
       usage_extractor: Hive::AgentProfiles::UsageExtractors::CLAUDE,
+      error_normalizer: Hive::AgentProfiles::ErrorNormalizers::CLAUDE,
       skill_verifier: Hive::SkillCheck::Claude.method(:verify),
       cli_capabilities: { safe_mode: [ "--safe-mode" ] }
     )

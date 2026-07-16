@@ -40,7 +40,7 @@ module Hive
                 :budget_flag, :output_format_flags, :version_flag,
                 :skill_syntax_format, :headless_supported, :min_version,
                 :status_detection_mode, :usage_extractor,
-                :workspace_write_flags, :cli_capabilities
+                :error_normalizer, :workspace_write_flags, :cli_capabilities
 
     # Public API — do not break.
     #
@@ -103,6 +103,7 @@ module Hive
                    status_detection_mode: :output_file_exists,
                    preflight: nil,
                    usage_extractor: nil,
+                   error_normalizer: nil,
                    skill_verifier: nil,
                    workspace_write_flags: nil,
                    cli_capabilities: {},
@@ -134,6 +135,7 @@ module Hive
       @status_detection_mode = status_detection_mode
       @preflight = preflight
       @usage_extractor = usage_extractor || ->(_event) { nil }
+      @error_normalizer = error_normalizer
       @skill_verifier = skill_verifier
       @workspace_write_flags = Array(workspace_write_flags).freeze
       @cli_capabilities = normalize_cli_capabilities(cli_capabilities)
@@ -344,6 +346,37 @@ module Hive
       nil
     end
 
+    def normalize_error(evidence:, exit_code:, timed_out:, model:, provider:, evidence_ref:, success:)
+      return @error_normalizer.call(
+        evidence: evidence,
+        exit_code: exit_code,
+        timed_out: timed_out,
+        model: model,
+        provider: provider,
+        evidence_ref: evidence_ref,
+        success: success
+      ) if @error_normalizer
+      return nil if success
+
+      require "digest"
+      require "hive/provider_routing/signal"
+      text = evidence.to_s
+      text = text.byteslice(text.bytesize - 64 * 1024, 64 * 1024) if text.bytesize > 64 * 1024
+      text = text.to_s.scrub
+      Hive::ProviderRouting::Signal.new(
+        provider: provider,
+        model: nil,
+        failure_class: timed_out ? "timeout" : "unknown",
+        scope: "none",
+        reset_at: nil,
+        safe_summary: "#{@name} unknown provider failure",
+        fingerprint: "sha256:#{Digest::SHA256.hexdigest(text)}",
+        evidence_ref: evidence_ref
+      )
+    rescue StandardError
+      nil
+    end
+
     private
 
     def normalize_cli_capabilities(capabilities)
@@ -490,6 +523,7 @@ module Hive
         status_detection_mode: @status_detection_mode,
         preflight: @preflight,
         usage_extractor: @usage_extractor,
+        error_normalizer: @error_normalizer,
         skill_verifier: @skill_verifier,
         workspace_write_flags: @workspace_write_flags.dup,
         cli_capabilities: @cli_capabilities.transform_values(&:dup),

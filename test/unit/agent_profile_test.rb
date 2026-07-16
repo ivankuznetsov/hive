@@ -317,6 +317,19 @@ class AgentProfileTest < Minitest::Test
     assert_equal({ safe_mode: [ "--safe-mode" ] }, overridden.cli_capabilities)
   end
 
+  def test_error_normalizer_default_is_unknown_and_non_circuit
+    profile = make_profile
+    signal = profile.normalize_error(
+      evidence: "custom limit wording", exit_code: 1, timed_out: false,
+      model: nil, provider: "custom-main", evidence_ref: "logs/custom.log",
+      success: false
+    )
+
+    assert_equal "unknown", signal.failure_class
+    assert_equal "none", signal.scope
+    refute signal.circuit_worthy?
+  end
+
   # --- with_overrides ---------------------------------------------------
 
   def test_with_overrides_returns_self_for_nil_or_empty

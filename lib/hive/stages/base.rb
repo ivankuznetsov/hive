@@ -506,7 +506,7 @@ module Hive
                       profile: nil, expected_output: nil, status_mode: nil,
                       cfg: nil, permission_mode: nil, allowed_tools: nil,
                       disallowed_tools: nil, cli_flags: nil,
-                      model: nil, effort: nil)
+                      model: nil, effort: nil, provider_key: nil)
         profile ||= Hive::AgentProfiles.lookup(:claude)
         # Translate preflight/version-check failures (e.g. Pi missing
         # ~/.pi/agent/auth.json mid-loop) into a typed :error envelope
@@ -567,7 +567,9 @@ module Hive
           permission_mode: permission_mode,
           allowed_tools: allowed_tools,
           disallowed_tools: disallowed_tools,
-          cli_flags: cli_flags
+          cli_flags: cli_flags,
+          provider_key: provider_key,
+          model: model
         ).run!
         record_usage(task, profile, result, started_at)
         result

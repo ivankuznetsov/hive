@@ -1,4 +1,5 @@
 require "hive/provider_routing"
+require "hive/agent_profiles"
 
 module Hive
   module ProviderRouting

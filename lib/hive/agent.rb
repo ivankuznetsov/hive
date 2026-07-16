@@ -13,6 +13,7 @@ require "hive/permission_scope"
 module Hive
   class Agent
     FINAL_MESSAGE_TAIL_BYTES = 64 * 1024
+    DIAGNOSTIC_TAIL_BYTES = 64 * 1024
 
     # Screenote's base URL reaches the agent as prompt/MCP-config context,
     # not as a child-environment input. nil unsets the var for the child so
@@ -31,7 +32,8 @@ module Hive
                    add_dirs: [], cwd: nil, log_label: nil,
                    profile: nil, expected_output: nil, status_mode: nil,
                    permission_mode: nil, allowed_tools: nil,
-                   disallowed_tools: nil, cli_flags: [])
+                   disallowed_tools: nil, cli_flags: [],
+                   provider_key: nil, model: nil)
       @task = task
       @prompt = prompt
       @add_dirs = Array(add_dirs)
@@ -56,6 +58,8 @@ module Hive
       @allowed_tools = allowed_tools
       @disallowed_tools = disallowed_tools
       @cli_flags = Array(cli_flags)
+      @provider_key = (provider_key || @profile.name).to_s
+      @model = model
     end
 
     # Effective mode for this spawn — explicit kwarg wins, falls back to
@@ -132,6 +136,7 @@ module Hive
       limit_text = nil
       last_usage = nil
       plain_tail = +""
+      diagnostic_tail = +""
       stdin_file = prompt_stdin_file
       File.open(log_file, "a") do |log|
         log.puts "[hive] #{Time.now.utc.iso8601} spawn cwd=#{@cwd} cmd=#{cmd.inspect}"
@@ -159,6 +164,13 @@ module Hive
       reader = Thread.new do
         File.open(log_file, "a") do |log|
           r.each_line do |line|
+            diagnostic_tail << line
+            if diagnostic_tail.bytesize > DIAGNOSTIC_TAIL_BYTES
+              diagnostic_tail = diagnostic_tail.byteslice(
+                diagnostic_tail.bytesize - DIAGNOSTIC_TAIL_BYTES,
+                DIAGNOSTIC_TAIL_BYTES
+              ).to_s.scrub
+            end
             log.write("[stream] #{Time.now.utc.iso8601} #{line}")
             log.write("\n") unless line.end_with?("\n")
             log.flush
@@ -247,6 +259,17 @@ module Hive
       message = final_message || plain_message
       message_source = final_message ? final_message_source : (plain_message.empty? ? nil : :plain)
 
+      success = exit_code == 0 && !timed_out
+      provider_signal = @profile.normalize_error(
+        evidence: diagnostic_tail,
+        exit_code: exit_code,
+        timed_out: timed_out,
+        model: @model || (last_usage && last_usage[:model]),
+        provider: @provider_key,
+        evidence_ref: "#{log_file}#tail",
+        success: success
+      )
+
       {
         pid: pid,
         pgid: pgid,
@@ -258,6 +281,7 @@ module Hive
         limit_text: limit_text,
         usage: last_usage,
         model: last_usage && last_usage[:model],
+        provider_signal: provider_signal,
         status: nil
       }
     ensure
@@ -370,11 +394,17 @@ module Hive
     #   = :ok. Used by reviewer/triage spawns where a structured artifact
     #   is the success criterion.
     def handle_exit(result)
+      ensure_provider_signal!(result)
       if (limit_message = limit_error_message(result))
         if effective_status_mode == :state_file_marker
           Hive::Markers.set(@task.state_file, :error,
                             reason: "limits_reached",
                             message: limit_message,
+                            provider: @provider_key,
+                            provider_failure_class: result[:provider_signal]&.failure_class,
+                            provider_scope: result[:provider_signal]&.scope,
+                            model: result[:provider_signal]&.model,
+                            evidence_ref: result[:provider_signal]&.evidence_ref,
                             retry_after: Hive::AgentLimit.retry_after)
         end
         result[:status] = :error
@@ -412,15 +442,26 @@ module Hive
     def limit_error_message(result)
       return nil if result[:exit_code] == 0 && !result[:timed_out]
 
-      # Prefer the limit text captured directly from the raw stream
-      # (result[:limit_text]); it catches CLIs like codex that emit the
-      # limit notice as a structured event the final-message extractor
-      # drops. Fall back to scanning final_message for older paths.
-      limit = result[:limit_text].to_s
-      limit = result[:final_message].to_s unless Hive::AgentLimit.limit_reached?(limit)
-      return nil unless Hive::AgentLimit.limit_reached?(limit)
+      signal = result[:provider_signal]
+      return nil unless signal && Hive::ProviderRouting::TIMED_FAILURE_CLASSES.include?(signal.failure_class)
 
-      Hive::AgentLimit.error_message(limit, agent: @profile.name)
+      Hive::AgentLimit.error_message(signal.safe_summary, agent: @profile.name)
+    end
+
+    def ensure_provider_signal!(result)
+      return if result.key?(:provider_signal)
+
+      evidence = [ result[:limit_text], result[:final_message], result[:error_message] ].compact.join("\n")
+      success = result[:exit_code] == 0 && !result[:timed_out]
+      result[:provider_signal] = @profile.normalize_error(
+        evidence: evidence,
+        exit_code: result[:exit_code],
+        timed_out: result[:timed_out],
+        model: @model || result[:model],
+        provider: @provider_key,
+        evidence_ref: result[:log_file] ? "#{result[:log_file]}#tail" : "result-envelope",
+        success: success
+      )
     end
 
     def handle_exit_state_file_marker(result)

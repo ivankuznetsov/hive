@@ -1144,6 +1144,7 @@ class ClaudeLauncherTest < Minitest::Test
       assert_equal "❯ 1. Stop and wait for limit to reset", result.fetch(:limit_text)
       assert_equal "limits reached for claude: ❯ 1. Stop and wait for limit to reset",
                    result.fetch(:error_message)
+      assert_equal "session_limit", result.fetch(:provider_signal).failure_class
       refute_match(/tmux_session_terminated/, result.fetch(:error_message))
     end
   end
@@ -1378,6 +1379,7 @@ class ClaudeLauncherTest < Minitest::Test
       assert_equal "❯ 1. Stop and wait for limit to reset", result.fetch(:limit_text)
       assert_equal "limits reached for claude: ❯ 1. Stop and wait for limit to reset",
                    result.fetch(:error_message)
+      assert_equal "session_limit", result.fetch(:provider_signal).failure_class
       refute_match(/stop hook did not signal/, result.fetch(:error_message))
     end
   end

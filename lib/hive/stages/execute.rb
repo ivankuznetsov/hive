@@ -205,10 +205,15 @@ module Hive
 
       def mark_implementer_failure(task, cfg, impl_result)
         if implementer_hit_limit?(impl_result)
+          signal = impl_result[:provider_signal]
           Hive::Markers.set(task.state_file, :error,
                             reason: "limits_reached",
-                            provider: execute_agent_name(cfg),
-                            message: "implementer hit a usage/credit limit",
+                            provider: signal&.provider || execute_agent_name(cfg),
+                            model: signal&.model,
+                            provider_failure_class: signal&.failure_class,
+                            provider_scope: signal&.scope,
+                            evidence_ref: signal&.evidence_ref,
+                            message: signal&.safe_summary || "implementer hit a usage/credit limit",
                             retry_after: Hive::AgentLimit.retry_after)
           return { commit: "limits_reached", status: :error }
         end
@@ -223,6 +228,9 @@ module Hive
 
       def implementer_hit_limit?(impl_result)
         return false unless impl_result
+
+        signal = impl_result[:provider_signal]
+        return true if signal && Hive::ProviderRouting::TIMED_FAILURE_CLASSES.include?(signal.failure_class)
 
         Hive::AgentLimit.limit_reached?(impl_result[:limit_text].to_s) ||
           Hive::AgentLimit.limit_reached?(impl_result[:error_message].to_s)

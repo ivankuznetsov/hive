@@ -30,6 +30,12 @@ class PathsTest < Minitest::Test
         assert_equal File.join(dir, "state", "hive"), Hive::Paths.state_home
         assert_equal File.join(dir, "cache", "hive"), Hive::Paths.cache_home
         assert_equal File.join(dir, "bin"), Hive::Paths.bin_home
+        attempts = File.join(dir, "state", "hive", "attempts", "v1")
+        assert_equal attempts, Hive::Paths.attempts_root
+        assert_equal File.join(attempts, "records"), Hive::Paths.attempt_records_root
+        assert_equal File.join(attempts, "logs"), Hive::Paths.attempt_logs_root
+        assert_equal File.join(attempts, "outputs"), Hive::Paths.attempt_outputs_root
+        assert_equal File.join(attempts, "generation-locks"), Hive::Paths.attempt_generation_locks_root
       end
     end
   end

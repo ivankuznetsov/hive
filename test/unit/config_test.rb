@@ -21,9 +21,44 @@ class ConfigTest < Minitest::Test
       assert_equal "8-finalize", cfg["dependency_gate_stage"]
       assert_equal "coding", cfg["default_workflow"]
       assert_equal true, cfg.dig("daemon", "auto_retry", "enabled")
+      assert_equal 5, cfg["attempt_heartbeat_sec"]
+      assert_equal 30, cfg["attempt_stale_sec"]
+      assert_equal 30, cfg["attempt_launch_timeout_sec"]
+      assert_equal 30, cfg["attempt_first_heartbeat_timeout_sec"]
       assert_nil cfg.dig("review", "adhoc", "reviewers")
       assert_equal false, cfg.dig("review", "adhoc", "fix")
       assert_equal dir, cfg["project_root"]
+    end
+  end
+
+  def test_load_validates_attempt_timer_relationships
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        attempt_heartbeat_sec: 10
+        attempt_stale_sec: 9
+      YAML
+
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_includes error.message, "attempt_stale_sec"
+      assert_includes error.message, "attempt_heartbeat_sec"
+    end
+  end
+
+  def test_load_rejects_non_positive_attempt_timers
+    %w[
+      attempt_heartbeat_sec
+      attempt_stale_sec
+      attempt_launch_timeout_sec
+      attempt_first_heartbeat_timeout_sec
+    ].each do |key|
+      with_tmp_dir do |dir|
+        FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+        File.write(File.join(dir, ".hive-state", "config.yml"), "#{key}: 0\n")
+        error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+        assert_includes error.message, key
+        assert_includes error.message, "positive integer"
+      end
     end
   end
 

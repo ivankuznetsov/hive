@@ -295,20 +295,25 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
-  def test_with_env_isolates_gh_config_against_command_local_home
+  def test_with_env_preserves_parent_gh_auth_config_against_command_local_home
     with_tmp_dir do |dir|
       recording_binary(dir, "git")
       recording_env_binary(dir, "gh", %w[
-        GH_CONFIG_DIR XDG_CONFIG_HOME HOME HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR
+        GH_CONFIG_DIR XDG_CONFIG_HOME HOME HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR GH_TOKEN GITHUB_TOKEN
       ])
       parent_home = File.join(dir, "parent-home")
+      trusted_config = File.join(parent_home, ".config", "gh")
+      FileUtils.mkdir_p(trusted_config)
+      File.write(File.join(trusted_config, "hosts.yml"), "github.com:\n  oauth_token: parent-token\n")
       evil_trusted_config = File.join(dir, "evil-trusted-gh-config")
 
       with_env(
         "PATH" => [ dir, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR),
         "GH_CONFIG_DIR" => nil,
         "XDG_CONFIG_HOME" => nil,
-        "HOME" => parent_home
+        "HOME" => parent_home,
+        "GH_TOKEN" => nil,
+        "GITHUB_TOKEN" => nil
       ) do
         Hive::Babysitter::DryRunEnv.with_env(dir) do
           _out, err, status = Open3.capture3(
@@ -336,16 +341,19 @@ class BabysitterDryRunEnvTest < Minitest::Test
 
       assert_equal "<unset>", recorded.fetch("XDG_CONFIG_HOME")
       assert_equal "<unset>", recorded.fetch("HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR")
+      assert_equal "<unset>", recorded.fetch("GH_TOKEN")
+      assert_equal "<unset>", recorded.fetch("GITHUB_TOKEN")
       refute_equal File::NULL, home, "HOME must not be /dev/null -- gh cannot resolve config there"
       refute_equal parent_home, home, "parent HOME config must not be reused during gh passthrough"
       refute_equal File.join(dir, "evil-home"), home, "command-local HOME must not survive passthrough"
       refute_equal File.join(dir, "evil-gh-config"), config_dir,
                    "command-local GH_CONFIG_DIR must not survive passthrough"
       refute_equal evil_trusted_config, config_dir, "private trusted-config override must not survive passthrough"
+      assert_equal trusted_config, config_dir, "captured parent auth config must reach real gh"
       assert File.directory?(home), "HOME should point at a real directory gh can use"
       assert File.directory?(config_dir), "GH_CONFIG_DIR should point at a real directory gh can use"
-      assert_empty Dir.children(config_dir),
-                   "gh's config dir should start empty so no caller-controlled config is honored"
+      assert_path_exists File.join(config_dir, "hosts.yml"),
+                         "hosts.yml must remain available when it is the only gh authentication source"
     end
   end
 

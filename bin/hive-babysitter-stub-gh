@@ -456,6 +456,8 @@ unless File.absolute_path?(real)
   exit 127
 end
 
+trusted_config_dir = ENV["HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR"].to_s
+
 # The argv gate (host_override?) only inspects argv; gh also reads the target host,
 # repo, and enterprise credentials from the environment. GH_HOST / GH_REPO redirect an
 # allowlisted read at an agent-chosen host (GH_REPO carries an optional `[HOST/]`), and
@@ -480,13 +482,13 @@ ENV.keys.grep(/\AGIT_TRACE/).each { |key| ENV.delete(key) }
 # "no config" sentinel — gh has no such escape hatch. It derives its config dir as
 # GH_CONFIG_DIR -> XDG_CONFIG_HOME/gh -> $HOME/.config/gh and then reads and creates files under
 # it, so HOME=/dev/null leaves gh resolving /dev/null/.config/gh and failing with ENOTDIR. Point
-# HOME and GH_CONFIG_DIR at a fresh, empty directory instead: gh finds no attacker-controlled
-# config to honor (the user's real ~/.config/gh is out of reach) yet still has a writable home for
-# its own state. The directory is intentionally left in place — passthrough replaces this process,
-# so the stub never regains control to clean it up; it is empty and the OS tmp reaper sweeps it.
+# HOME at a fresh, empty directory instead, and use the parent-pinned GH_CONFIG_DIR when available
+# so allowlisted reads retain the operator's authentication without honoring command-local config.
+# The directory is intentionally left in place — passthrough replaces this process, so the stub
+# never regains control to clean it up; it is empty and the OS tmp reaper sweeps it.
 config_home = make_gh_config_home
 ENV["HOME"] = config_home
-ENV["GH_CONFIG_DIR"] = config_home
+ENV["GH_CONFIG_DIR"] = trusted_config_dir.empty? ? config_home : trusted_config_dir
 
 begin
   exec real, *argv

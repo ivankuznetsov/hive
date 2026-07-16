@@ -581,22 +581,30 @@ class AgentTest < Minitest::Test
 
       # Build a fake-claude that writes via temp+rename (changes inode).
       atomic_bin = File.join(dir, "atomic-fake-claude")
-      File.write(atomic_bin, <<~SH)
-        #!/usr/bin/env bash
-        target="#{task.state_file}"
-        tmp="$(mktemp)"
-        printf '## Round 1\n<!-- WAITING -->\n' > "$tmp"
-        mv "$tmp" "$target"
+      inode_log = File.join(dir, "atomic-inodes")
+      File.write(atomic_bin, <<~RUBY)
+        #!#{RbConfig.ruby}
+        target = #{task.state_file.dump}
+        inode_log = #{inode_log.dump}
+        previous_inode = File.stat(target).ino
+        tmp = "#{task.state_file}.atomic-\#{Process.pid}"
+        File.write(tmp, "## Round 1\n<!-- WAITING -->\n")
+        replacement_inode = File.stat(tmp).ino
+        File.write(inode_log, [ previous_inode, replacement_inode ].join("\n"))
+        File.rename(tmp, target)
         exit 0
-      SH
+      RUBY
       File.chmod(0o755, atomic_bin)
       ENV["HIVE_CLAUDE_BIN"] = atomic_bin
 
-      pre_inode = File.stat(task.state_file).ino
       result = Hive::Agent.new(task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5).run!
       post_inode = File.stat(task.state_file).ino
+      previous_inode, replacement_inode = File.readlines(inode_log, chomp: true).map { |line| Integer(line) }
 
-      refute_equal pre_inode, post_inode, "fake must rotate the inode for this test to be meaningful"
+      refute_equal previous_inode, replacement_inode,
+                   "fake must create the replacement before releasing the previous inode"
+      assert_equal replacement_inode, post_inode,
+                   "the replacement inode must become the final task state file"
       assert_equal :waiting, result[:status],
                    "atomic-rename writes must not be misclassified as concurrent edits"
       assert_equal :waiting, Hive::Markers.current(task.state_file).name

@@ -8,7 +8,7 @@ module Hive
     class Context
       THREAD_KEY = :hive_attempt_context
 
-      attr_reader :attempt_id, :task_generation
+      attr_reader :attempt_id, :task_generation, :ownership_generation
 
       def self.current
         explicit = Thread.current[THREAD_KEY]
@@ -22,7 +22,11 @@ module Hive
         record = Store.new(root: root).fetch(attempt_id)
         return nil unless record && record.attempt_id == attempt_id
 
-        new(attempt_id: record.attempt_id, task_generation: record.task_generation)
+        new(
+          attempt_id: record.attempt_id,
+          task_generation: record.task_input_epoch,
+          ownership_generation: record.ownership_generation
+        )
       rescue Hive::Error, SystemCallError
         nil
       end
@@ -37,26 +41,31 @@ module Hive
 
         {
           "attempt_id" => context.attempt_id,
-          "task_generation" => context.task_generation
+          "task_generation" => context.task_generation,
+          "ownership_generation" => context.ownership_generation
         }
       end
 
-      def self.with(attempt_id:, task_generation:)
+      def self.with(attempt_id:, task_generation:, ownership_generation: nil)
         previous = Thread.current[THREAD_KEY]
         Thread.current[THREAD_KEY] = new(
           attempt_id: attempt_id,
-          task_generation: task_generation
+          task_generation: task_generation,
+          ownership_generation: ownership_generation
         )
         yield
       ensure
         Thread.current[THREAD_KEY] = previous
       end
 
-      def initialize(attempt_id:, task_generation:)
+      def initialize(attempt_id:, task_generation:, ownership_generation: nil)
         @attempt_id = attempt_id.to_s
-        @task_generation = task_generation.to_s
+        @task_generation = Integer(task_generation)
+        @ownership_generation = ownership_generation&.to_s
         raise ArgumentError, "attempt context requires an attempt ID" if @attempt_id.empty?
-        raise ArgumentError, "attempt context requires a task generation" if @task_generation.empty?
+        raise ArgumentError, "attempt context task generation must be non-negative" if @task_generation.negative?
+      rescue ArgumentError, TypeError
+        raise ArgumentError, "attempt context requires a numeric task generation"
       end
     end
   end

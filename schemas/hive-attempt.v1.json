@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-attempt.v1.json",
   "title": "hive durable attempt (v1)",
-  "description": "Owner-private mutable lease and terminal receipt for one accepted task-stage attempt.",
+  "description": "Owner-private mutable lease and terminal receipt for one accepted task-stage attempt. ownership_generation retains the opaque v1 admission token; task_input_epoch is the numeric condition-generation bridge.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -25,6 +25,8 @@
     "task_slug": { "type": "string", "minLength": 1 },
     "intended_stage": { "type": "string", "minLength": 1 },
     "task_generation": { "type": "string", "minLength": 1 },
+    "ownership_generation": { "type": "string", "minLength": 1 },
+    "task_input_epoch": { "type": "integer", "minimum": 0 },
     "progress_token": { "type": "string", "minLength": 1 },
     "provider": { "type": "string", "minLength": 1 },
     "starting_revision": { "type": ["string", "null"] },
@@ -87,6 +89,8 @@
       "properties": {
         "attempt_id": { "type": "string", "minLength": 1 },
         "task_generation": { "type": "string", "minLength": 1 },
+        "ownership_generation": { "type": "string", "minLength": 1 },
+        "task_input_epoch": { "type": "integer", "minimum": 0 },
         "outcome": { "enum": ["succeeded", "failed", "cancelled"] },
         "exit_status": { "type": "integer" },
         "started_at": { "type": "string", "format": "date-time" },

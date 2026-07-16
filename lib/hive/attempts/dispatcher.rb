@@ -53,7 +53,8 @@ module Hive
           project: project,
           intended_stage: predecessor["intended_stage"],
           progress_token: predecessor["progress_token"],
-          task_generation: predecessor.task_generation
+          ownership_generation: predecessor.ownership_generation,
+          task_input_epoch: predecessor.task_input_epoch
         )
         inherited = inherited_outputs ||
                     (predecessor["inherited_outputs"] + predecessor["current_outputs"]).uniq
@@ -155,6 +156,8 @@ module Hive
             task_slug: generation.task_slug,
             intended_stage: generation.intended_stage,
             task_generation: generation.task_generation,
+            ownership_generation: generation.ownership_generation,
+            task_input_epoch: generation.task_input_epoch,
             progress_token: generation.progress_token,
             provider: provider.to_s,
             starting_revision: starting_revision(task),

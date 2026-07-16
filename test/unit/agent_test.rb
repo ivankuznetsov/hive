@@ -573,6 +573,57 @@ class AgentTest < Minitest::Test
     assert_equal({ input: 90, output: 30, cached: 10, model: "claude-test" }, meter.usage)
   end
 
+  def test_stream_token_meter_accumulates_non_claude_usage_events
+    meter = Hive::Agent::StreamTokenMeter.new(:codex)
+
+    assert_equal 0, meter.observe({ "type" => "item.completed" }, nil)
+    assert_equal 6, meter.observe(
+      { "type" => "item.completed" },
+      { input: 1, output: 2, cached: 3, model: "codex-test" }
+    )
+    assert_equal 9, meter.observe(
+      { "type" => "item.completed" },
+      { input: 0, output: 3, cached: 0 }
+    )
+    assert_equal({ input: 1, output: 5, cached: 3, model: "codex-test" }, meter.usage)
+  end
+
+  def test_rejects_invalid_in_flight_token_limit
+    with_tmp_dir do |dir|
+      error = assert_raises(ArgumentError) do
+        Hive::Agent.new(
+          task: make_task(dir), prompt: "x", max_budget_usd: 1,
+          max_tokens: 0, timeout_sec: 5
+        )
+      end
+
+      assert_equal "max_tokens must be a positive integer", error.message
+    end
+  end
+
+  def test_token_limit_sets_structured_error_marker_for_state_file_agents
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "")
+      agent = Hive::Agent.new(
+        task: task, prompt: "x", max_budget_usd: 1,
+        max_tokens: 80, timeout_sec: 5
+      )
+      result = {
+        resource_exhaustion: { reason: "token_limit", observed: 90, limit: 80 }
+      }
+
+      agent.handle_exit(result)
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, result[:status]
+      assert_equal :error, marker.name
+      assert_equal "token_limit", marker.attrs["reason"]
+      assert_equal "90", marker.attrs["observed_tokens"]
+      assert_equal "80", marker.attrs["max_tokens"]
+    end
+  end
+
   def test_profile_without_usage_extractor_returns_no_usage
     with_tmp_dir do |dir|
       task = make_task(dir)

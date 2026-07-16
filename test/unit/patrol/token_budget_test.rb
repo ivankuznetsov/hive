@@ -217,4 +217,28 @@ class PatrolTokenBudgetTest < Minitest::Test
       assert_equal "usage_store_unavailable", budget.last_exhaustion.fetch(:reason)
     end
   end
+
+  def test_launch_lock_open_failure_fails_closed_before_spawn
+    with_budget do |budget|
+      with_replaced_singleton_method(File, :open, ->(*) { raise Errno::EACCES }) do
+        _out, _err = capture_io { refute budget.acquire }
+      end
+
+      assert_equal "budget_lock_unavailable", budget.last_exhaustion.fetch(:reason)
+    end
+  end
+
+  def test_launch_lock_release_closes_handle_when_unlock_fails
+    with_budget do |budget|
+      closed = false
+      handle = Object.new
+      handle.define_singleton_method(:flock) { |_| raise IOError, "unlock failed" }
+      handle.define_singleton_method(:close) { closed = true }
+      budget.instance_variable_set(:@launch_lock, handle)
+
+      assert_nil budget.send(:release_launch_lock)
+      assert closed
+      assert_nil budget.instance_variable_get(:@launch_lock)
+    end
+  end
 end

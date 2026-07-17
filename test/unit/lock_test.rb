@@ -24,7 +24,7 @@ class LockTest < Minitest::Test
 
   def test_task_lock_projects_durable_attempt_identity
     with_tmp_dir do |dir|
-      Hive::Attempts::Context.with(attempt_id: "attempt-1", task_generation: "generation-1") do
+      with_attempt_context(attempt_id: "attempt-1", task_generation: "generation-1") do
         data = Hive::Lock.acquire_task_lock(
           dir,
           "attempt_id" => "caller-cannot-override",

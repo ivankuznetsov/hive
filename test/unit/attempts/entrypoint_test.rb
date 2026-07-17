@@ -17,7 +17,12 @@ class AttemptsEntrypointTest < Minitest::Test
     calls = []
     dispatcher.define_singleton_method(:dispatch) { |**kwargs| calls << kwargs; result }
     client = Object.new
-    client.define_singleton_method(:attach) { |id| [ :attached, id ] }
+    client.define_singleton_method(:attach) do |id|
+      Hive::Attempts::ClientResult.new(
+        status: :terminal, exit_status: 0, outcome: "succeeded",
+        receipt: {}, attempt_id: id
+      )
+    end
     config = Hive::Config.merge_defaults({})
 
     value = Hive::Attempts::Entrypoint.new(
@@ -28,7 +33,8 @@ class AttemptsEntrypointTest < Minitest::Test
       request_id: "request-1"
     )
 
-    assert_equal [ :attached, "attempt-1" ], value
+    assert_equal :terminal, value.status
+    assert_equal "attempt-1", value.attempt_id
     assert_equal 1, calls.length
     assert_equal "demo", calls.first.fetch(:project)
     assert_equal "4-execute", calls.first.fetch(:intended_stage)
@@ -70,6 +76,35 @@ class AttemptsEntrypointTest < Minitest::Test
     error = assert_raises(Hive::ConcurrentRunError) do
       entrypoint.dispatch(task: task, intended_stage: "4-execute", argv: [ "hive", "run", "task" ])
     end
+    assert_equal Hive::ExitCodes::TEMPFAIL, error.exit_code
+  end
+
+  def test_lost_attachment_is_a_retryable_error_instead_of_a_bare_result
+    task = FakeTask.new(slug: "task", project_root: "/tmp/project", project_name: "demo")
+    attempt = Struct.new(:attempt_id).new("attempt-1")
+    dispatch_result = Hive::Attempts::DispatchResult.new(
+      status: :accepted, attempt: attempt, receipt: nil,
+      attach_descriptor: { "attempt_id" => "attempt-1" }, reason: nil
+    )
+    dispatcher = Object.new
+    dispatcher.define_singleton_method(:dispatch) { |**_kwargs| dispatch_result }
+    client = Object.new
+    client.define_singleton_method(:attach) do |id|
+      Hive::Attempts::ClientResult.new(
+        status: :lost, exit_status: Hive::ExitCodes::TEMPFAIL,
+        outcome: "lost", receipt: nil, attempt_id: id
+      )
+    end
+    entrypoint = Hive::Attempts::Entrypoint.new(
+      store: Object.new, dispatcher: dispatcher, client: client,
+      config_loader: ->(_root) { Hive::Config.merge_defaults({}) }
+    )
+
+    error = assert_raises(Hive::ConcurrentRunError) do
+      entrypoint.dispatch(task: task, intended_stage: "4-execute", argv: [ "hive", "run", "task" ])
+    end
+
+    assert_includes error.message, "attempt-1"
     assert_equal Hive::ExitCodes::TEMPFAIL, error.exit_code
   end
 

@@ -5,11 +5,15 @@ class AttemptsStoreTest < Minitest::Test
   include HiveTestHelper
 
   NOW = Time.utc(2026, 7, 16, 12, 0, 0)
+  CLAIM_CAPABILITY = "c" * 64
 
   def test_legal_lifecycle_increments_version_and_persists_terminal_receipt
     with_store do |store|
       launching = store.create_launching(**identity, launch_timeout_sec: 30, now: NOW)
-      claimed = store.claim(launching, owner: owner, first_heartbeat_timeout_sec: 30, now: NOW + 1)
+      claimed = store.claim(
+        launching, owner: owner, claim_capability: CLAIM_CAPABILITY,
+        first_heartbeat_timeout_sec: 30, now: NOW + 1
+      )
       first_heartbeat = store.first_heartbeat(claimed, stale_sec: 30, now: NOW + 2)
       heartbeat = store.heartbeat(first_heartbeat, stale_sec: 30, now: NOW + 3)
       checkpointed = store.checkpoint(heartbeat, checkpoint: checkpoint, now: NOW + 4)
@@ -43,7 +47,10 @@ class AttemptsStoreTest < Minitest::Test
 
       [ stale_version, wrong_generation, wrong_deadline ].each do |observed|
         assert_raises(Hive::Attempts::CompareAndSwapFailed) do
-          store.claim(observed, owner: owner, first_heartbeat_timeout_sec: 30, now: NOW + 1)
+          store.claim(
+            observed, owner: owner, claim_capability: CLAIM_CAPABILITY,
+            first_heartbeat_timeout_sec: 30, now: NOW + 1
+          )
         end
       end
 
@@ -58,11 +65,50 @@ class AttemptsStoreTest < Minitest::Test
 
       assert_equal "lost", lost.state
       assert_raises(Hive::Attempts::CompareAndSwapFailed) do
-        store.claim(launching, owner: owner, first_heartbeat_timeout_sec: 30, now: NOW + 2)
+        store.claim(
+          launching, owner: owner, claim_capability: CLAIM_CAPABILITY,
+          first_heartbeat_timeout_sec: 30, now: NOW + 2
+        )
       end
       assert_raises(Hive::Attempts::CompareAndSwapFailed) do
         store.first_heartbeat(lost, stale_sec: 30, now: NOW + 3)
       end
+    end
+  end
+
+  def test_claim_requires_the_one_time_capability
+    with_store do |store|
+      launching = store.create_launching(**identity, launch_timeout_sec: 30, now: NOW)
+
+      assert_raises(Hive::Attempts::CompareAndSwapFailed) do
+        store.claim(
+          launching, owner: owner, claim_capability: "f" * 64,
+          first_heartbeat_timeout_sec: 30, now: NOW + 1
+        )
+      end
+      assert_equal launching.to_h, store.fetch(launching.attempt_id).to_h
+
+      forged_observation = launching.with(
+        "claim_capability_digest" => Hive::Attempts::Capability.digest("f" * 64)
+      )
+      assert_raises(Hive::Attempts::CompareAndSwapFailed) do
+        store.claim(
+          forged_observation, owner: owner, claim_capability: "f" * 64,
+          first_heartbeat_timeout_sec: 30, now: NOW + 1
+        )
+      end
+
+      claimed = store.claim(
+        launching, owner: owner, claim_capability: CLAIM_CAPABILITY,
+        first_heartbeat_timeout_sec: 30, now: NOW + 1
+      )
+      assert_raises(Hive::Attempts::CompareAndSwapFailed) do
+        store.claim(
+          launching, owner: owner, claim_capability: CLAIM_CAPABILITY,
+          first_heartbeat_timeout_sec: 30, now: NOW + 1
+        )
+      end
+      assert claimed.claimed?
     end
   end
 
@@ -138,7 +184,10 @@ class AttemptsStoreTest < Minitest::Test
   def test_invalid_mutation_immutable_identity_and_unsafe_ids_fail_closed
     with_store do |store|
       launching = store.create_launching(**identity, launch_timeout_sec: 30, now: NOW)
-      claimed = store.claim(launching, owner: owner, first_heartbeat_timeout_sec: 30, now: NOW + 1)
+      claimed = store.claim(
+        launching, owner: owner, claim_capability: CLAIM_CAPABILITY,
+        first_heartbeat_timeout_sec: 30, now: NOW + 1
+      )
       running = store.first_heartbeat(claimed, stale_sec: 30, now: NOW + 2)
       assert_raises(Hive::Attempts::StoreError) do
         store.checkpoint(
@@ -148,6 +197,8 @@ class AttemptsStoreTest < Minitest::Test
       end
 
       changed = launching.with("request_id" => "different")
+      assert_raises(Hive::Attempts::StoreError) { store.send(:verify_immutable!, launching, changed) }
+      changed = launching.with("worker_argv" => [ "hive", "run", "other-task" ])
       assert_raises(Hive::Attempts::StoreError) { store.send(:verify_immutable!, launching, changed) }
       assert_raises(Hive::Attempts::StoreError) { store.record_path("../unsafe") }
     end
@@ -171,6 +222,8 @@ class AttemptsStoreTest < Minitest::Test
       task_generation: "generation-1",
       progress_token: "progress-1",
       provider: "codex",
+      worker_argv: [ "hive", "run", "durable-task" ],
+      claim_capability_digest: Hive::Attempts::Capability.digest(CLAIM_CAPABILITY),
       starting_revision: "a" * 40,
       retry_charge: 0,
       inherited_outputs: []

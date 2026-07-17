@@ -24,6 +24,7 @@ require "hive/update_check/state"
 require "hive/attempts/store"
 require "hive/attempts/detached_launcher"
 require "hive/attempts/dispatcher"
+require "hive/attempts/configured_dispatcher"
 require "hive/attempts/process_identity"
 require "hive/attempts/legacy_backfiller"
 require "hive/attempts/reconciler"
@@ -239,10 +240,8 @@ module Hive
         )
 
         attempt_store = Hive::Attempts::Store.new
-        attempt_launcher = Hive::Attempts::DetachedLauncher.new(store: attempt_store)
-        attempt_dispatcher = Hive::Attempts::Dispatcher.new(
+        attempt_dispatcher = Hive::Attempts::ConfiguredDispatcher.new(
           store: attempt_store,
-          launcher: attempt_launcher,
           limits: {
             max_global: daemon_cfg.fetch("max_concurrent_runs"),
             max_per_project: daemon_cfg.fetch("max_concurrent_per_project"),

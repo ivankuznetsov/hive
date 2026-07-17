@@ -145,6 +145,8 @@ class AttemptsRecordTest < Minitest::Test
       task_generation: "generation-1",
       progress_token: "progress-1",
       provider: "codex",
+      worker_argv: [ "hive", "run", "durable-task" ],
+      claim_capability_digest: Hive::Attempts::Capability.digest("c" * 64),
       starting_revision: "a" * 40,
       retry_charge: 0,
       inherited_outputs: []

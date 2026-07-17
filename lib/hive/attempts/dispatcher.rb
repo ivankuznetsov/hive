@@ -1,4 +1,5 @@
 require "securerandom"
+require "hive/attempts/capability"
 require "hive/attempts/capacity_snapshot"
 require "hive/attempts/generation"
 require "hive/task_resolver"
@@ -18,12 +19,14 @@ module Hive
 
       def initialize(store:, launcher:, limits: DEFAULT_LIMITS, clock: -> { Time.now.utc },
                      id_generator: -> { SecureRandom.uuid }, task_resolver: nil,
+                     capability_generator: Capability.method(:generate),
                      launch_timeout_sec: 30)
         @store = store
         @launcher = launcher
         @limits = DEFAULT_LIMITS.merge(limits)
         @clock = clock
         @id_generator = id_generator
+        @capability_generator = capability_generator
         @task_resolver = task_resolver || method(:resolve_request_task)
         @launch_timeout_sec = launch_timeout_sec
       end
@@ -97,6 +100,7 @@ module Hive
                 predecessor_attempt_id:, inherited_outputs:, retry_charge:, successor_of:, now:)
         result = nil
         created = nil
+        claim_capability = nil
         @store.with_generation_lock(generation.task_generation) do
           records = @store.scan.records
           semantic_owner = find_semantic_owner(records, generation)
@@ -146,6 +150,7 @@ module Hive
             next
           end
 
+          claim_capability = @capability_generator.call
           created = @store.create_launching(
             attempt_id: @id_generator.call,
             request_id: request_id,
@@ -157,6 +162,8 @@ module Hive
             task_generation: generation.task_generation,
             progress_token: generation.progress_token,
             provider: provider.to_s,
+            worker_argv: argv,
+            claim_capability_digest: Capability.digest(claim_capability),
             starting_revision: starting_revision(task),
             retry_charge: retry_charge,
             inherited_outputs: inherited_outputs || [],
@@ -167,12 +174,16 @@ module Hive
 
         return result if result
 
-        @launcher.launch(created, argv: argv)
-        DispatchResult.new(
-          status: :accepted, attempt: created, receipt: nil,
-          attach_descriptor: interactive ? attach_descriptor(created) : nil,
-          reason: nil
+        handoff = @launcher.launch(created, claim_capability: claim_capability)
+        return accepted_result(created, interactive: interactive) if handoff.is_a?(Hash) && handoff["claimed"] == true
+
+        resolve_failed_handoff(
+          created, interactive: interactive, error: handoff.is_a?(Hash) ? handoff["error"] : nil
         )
+      rescue StandardError => e
+        raise unless created
+
+        resolve_failed_handoff(created, interactive: interactive, error: "#{e.class}: #{e.message}")
       end
 
       def find_semantic_owner(records, generation)
@@ -192,6 +203,55 @@ module Hive
           status: :existing_live, attempt: record, receipt: nil,
           attach_descriptor: interactive ? attach_descriptor(record) : nil,
           reason: nil
+        )
+      end
+
+      def accepted_result(record, interactive:)
+        DispatchResult.new(
+          status: :accepted, attempt: record, receipt: nil,
+          attach_descriptor: interactive ? attach_descriptor(record) : nil,
+          reason: nil
+        )
+      end
+
+      def resolve_failed_handoff(created, interactive:, error: nil)
+        current = @store.fetch(created.attempt_id)
+        adopted = result_for_adopted_handoff(current, interactive: interactive)
+        return adopted if adopted
+        return deferred_handoff_result(current) if current&.state == "lost"
+
+        diagnostics = {}
+        diagnostics["launch_handoff_error"] = error.to_s[0, 1_000] unless error.to_s.empty?
+        lost = @store.mark_lost(
+          current || created,
+          reason: "launch_handoff_failed",
+          diagnostics: diagnostics,
+          now: @clock.call
+        )
+        deferred_handoff_result(lost)
+      rescue CompareAndSwapFailed
+        current = @store.fetch(created.attempt_id)
+        result_for_adopted_handoff(current, interactive: interactive) || deferred_handoff_result(current)
+      end
+
+      def result_for_adopted_handoff(record, interactive:)
+        return nil unless record
+        return accepted_result(record, interactive: interactive) if record.state == "running" || record.claimed?
+        if record.state == "terminal"
+          return DispatchResult.new(
+            status: :terminal_replay, attempt: record, receipt: record.receipt,
+            attach_descriptor: interactive ? attach_descriptor(record) : nil,
+            reason: nil
+          )
+        end
+
+        nil
+      end
+
+      def deferred_handoff_result(record)
+        DispatchResult.new(
+          status: :deferred, attempt: record, receipt: nil,
+          attach_descriptor: nil, reason: "launch_handoff_failed"
         )
       end
 

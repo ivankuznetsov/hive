@@ -279,7 +279,8 @@ module Hive
       # `alive` would short-circuit `alive && alive.call(...)` to false and
       # silently reap every non-aged-out claim, including live orphans (#250).
       def recover_claims(state_home: Hive::Paths.state_home, now: Time.now,
-                         alive:, attempt_alive: nil, expiry_sec: CLAIM_EXPIRY_SEC, handler: nil)
+                         alive:, attempt_alive: nil, attempt_for_request: nil,
+                         expiry_sec: CLAIM_EXPIRY_SEC, handler: nil)
         dir = directory(state_home: state_home)
         removed = 0
         Dir.glob(File.join(dir, "*.json#{CLAIMED_SUFFIX}")).each do |path|
@@ -295,8 +296,21 @@ module Hive
           request_id = data["request_id"]
           claim = read_claim_metadata(path)
           attempt_id = claim && claim["attempt_id"]
+          task_generation = claim && claim["task_generation"]
+          if attempt_id.to_s.empty? && attempt_for_request
+            correlation = attempt_for_request.call(request_id)
+            if correlation
+              attempt_id = correlation.fetch(:attempt_id)
+              task_generation = correlation.fetch(:task_generation)
+              write_claim_metadata(
+                path, pid: claim && claim["pid"],
+                process_start_time: claim && claim["process_start_time"],
+                now: now, attempt_id: attempt_id, task_generation: task_generation
+              )
+            end
+          end
           if !attempt_id.to_s.empty? && attempt_alive
-            next if attempt_alive.call(attempt_id, claim["task_generation"])
+            next if attempt_alive.call(attempt_id, task_generation)
           end
           aged_out = claim_aged_out?(claim, now: now, expiry_sec: expiry_sec)
           owner_alive = !aged_out && alive &&

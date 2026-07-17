@@ -5,12 +5,16 @@ class AttemptsCapacitySnapshotTest < Minitest::Test
   include HiveTestHelper
 
   NOW = Time.utc(2026, 7, 16, 12, 0, 0)
+  CLAIM_CAPABILITY = "c" * 64
 
   def test_live_reservations_are_authoritative_and_terminal_lost_are_excluded
     with_tmp_dir do |root|
       store = Hive::Attempts::Store.new(root: root)
       live = create(store, attempt_id: "live", project: "p1", task_slug: "s1")
-      claimed = store.claim(live, owner: owner, first_heartbeat_timeout_sec: 30, now: NOW + 1)
+      claimed = store.claim(
+        live, owner: owner, claim_capability: CLAIM_CAPABILITY,
+        first_heartbeat_timeout_sec: 30, now: NOW + 1
+      )
       store.first_heartbeat(claimed, stale_sec: 30, now: NOW + 2)
 
       lost = create(store, attempt_id: "lost", project: "p1", task_slug: "s2", generation: "g2")
@@ -61,6 +65,8 @@ class AttemptsCapacitySnapshotTest < Minitest::Test
       attempt_id: attempt_id, request_id: "r-#{attempt_id}", predecessor_attempt_id: nil,
       task_id: "42", project: project, task_slug: task_slug, intended_stage: "4-execute",
       task_generation: generation, progress_token: "progress", provider: "codex",
+      worker_argv: [ "hive", "run", task_slug ],
+      claim_capability_digest: Hive::Attempts::Capability.digest(CLAIM_CAPABILITY),
       starting_revision: "a" * 40, retry_charge: 0, inherited_outputs: [],
       launch_timeout_sec: 30, now: NOW
     )

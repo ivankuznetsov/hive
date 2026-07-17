@@ -327,7 +327,7 @@ class GenericWorkflowDaemonE2ETest < Minitest::Test
       File.write(task.state_file, "# #{task.stage_name}\n<!-- COMPLETE -->\n")
       { status: :complete }
     end
-    Hive::Attempts::Context.with(
+    with_attempt_context(
       attempt_id: "generic-workflow-test-attempt",
       task_generation: "generic-workflow-test-generation"
     ) { yield }

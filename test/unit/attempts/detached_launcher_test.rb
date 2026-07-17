@@ -4,6 +4,8 @@ require "hive/attempts/detached_launcher"
 class AttemptsDetachedLauncherTest < Minitest::Test
   include HiveTestHelper
 
+  CLAIM_CAPABILITY = "c" * 64
+
   def test_detached_wrapper_claims_in_new_session_and_finishes_without_daemon
     skip "POSIX fork/setsid unavailable" unless Hive::Attempts::DetachedLauncher.supported?
 
@@ -13,6 +15,8 @@ class AttemptsDetachedLauncherTest < Minitest::Test
         attempt_id: "attempt-detached", request_id: "request-1", predecessor_attempt_id: nil,
         task_id: "42", project: "demo", task_slug: "task", intended_stage: "4-execute",
         task_generation: "generation-1", progress_token: "progress", provider: "codex",
+        worker_argv: [ "/bin/sh", "-c", "printf detached" ],
+        claim_capability_digest: Hive::Attempts::Capability.digest(CLAIM_CAPABILITY),
         starting_revision: nil, retry_charge: 0, inherited_outputs: [],
         launch_timeout_sec: 5, now: Time.now.utc
       )
@@ -22,7 +26,7 @@ class AttemptsDetachedLauncherTest < Minitest::Test
         first_heartbeat_timeout_sec: 1, ready_timeout_sec: 2
       )
 
-      handoff = launcher.launch(attempt, argv: [ "/bin/sh", "-c", "printf detached" ])
+      handoff = launcher.launch(attempt, claim_capability: CLAIM_CAPABILITY)
       assert_equal true, handoff.fetch("claimed")
 
       terminal = wait_for_terminal(store, attempt.attempt_id)
@@ -49,7 +53,7 @@ class AttemptsDetachedLauncherTest < Minitest::Test
 
     with_replaced_singleton_method(Process, :wait, ->(_pid) { }) do
       with_replaced_singleton_method(IO, :select, ->(*_args) { nil }) do
-        result = launcher.launch(record, argv: [ "/bin/true" ])
+        result = launcher.launch(record, claim_capability: CLAIM_CAPABILITY)
         assert_equal false, result.fetch("claimed")
         assert_equal "launching", result.fetch("state")
       end
@@ -65,7 +69,7 @@ class AttemptsDetachedLauncherTest < Minitest::Test
     with_replaced_singleton_method(Process, :setsid, -> { raise Errno::EPERM }) do
       with_replaced_singleton_method(IO, :pipe, -> { [ StringIO.new, StringIO.new ] }) do
         assert_equal :launcher_exited, catch(:launcher_exited) {
-          launcher.launch(record, argv: [ "/bin/true" ])
+          launcher.launch(record, claim_capability: CLAIM_CAPABILITY)
           flunk "launcher did not exit"
         }
       end
@@ -77,17 +81,17 @@ class AttemptsDetachedLauncherTest < Minitest::Test
     record = Struct.new(:attempt_id).new("attempt-child")
     invoked = nil
     launcher.define_singleton_method(:fork) { |&block| block.call }
-    launcher.define_singleton_method(:fork_wrapper) do |seen_record, argv, _writer|
-      invoked = [ seen_record, argv ]
+    launcher.define_singleton_method(:fork_wrapper) do |seen_record, capability, _writer|
+      invoked = [ seen_record, capability ]
     end
     launcher.define_singleton_method(:exit!) { |_status| throw :launcher_exited }
 
     with_replaced_singleton_method(Process, :setsid, -> { 123 }) do
       with_replaced_singleton_method(IO, :pipe, -> { [ StringIO.new, StringIO.new ] }) do
-        catch(:launcher_exited) { launcher.launch(record, argv: [ "/bin/true" ]) }
+        catch(:launcher_exited) { launcher.launch(record, claim_capability: CLAIM_CAPABILITY) }
       end
     end
-    assert_equal [ record, [ "/bin/true" ] ], invoked
+    assert_equal [ record, CLAIM_CAPABILITY ], invoked
   end
 
   def test_wrapper_exec_contains_timers_timeout_and_worker_command
@@ -103,12 +107,15 @@ class AttemptsDetachedLauncherTest < Minitest::Test
     launcher.define_singleton_method(:exec) { |*args, **kwargs| executed = [ args, kwargs ] }
     reader, writer = IO.pipe
 
-    assert_equal 999, launcher.send(:fork_wrapper, record, [ "/bin/echo", "ok" ], writer)
+    assert_equal 999, launcher.send(:fork_wrapper, record, CLAIM_CAPABILITY, writer)
     args, kwargs = executed
     assert_equal "attempt-command", args[4]
     assert_includes args, "--timeout-sec"
     assert_equal "12", args[args.index("--timeout-sec") + 1]
-    assert_equal [ "/bin/echo", "ok" ], args.last(2)
+    refute_includes args, "/bin/echo"
+    refute_includes args, "ok"
+    claim_fd = args.first.fetch("HIVE_ATTEMPT_CLAIM_FD")
+    assert Integer(claim_fd).positive?
     assert_equal true, kwargs.fetch(:close_others)
   ensure
     reader&.close unless reader&.closed?

@@ -120,4 +120,45 @@ class CommandsStageActionTest < Minitest::Test
       "--recover-merged-error-reason", "ci_failed"
     ], command.send(:durable_worker_argv, task)
   end
+
+  def test_lost_durable_attempt_emits_versioned_json_error_envelope
+    task = Struct.new(:folder, :slug, :project_root, :project_name).new(
+      "/tmp/task-folder", "some-slug", "/tmp/project", "demo"
+    )
+    attempt = Struct.new(:attempt_id).new("attempt-lost")
+    dispatch_result = Hive::Attempts::DispatchResult.new(
+      status: :accepted, attempt: attempt, receipt: nil,
+      attach_descriptor: { "attempt_id" => attempt.attempt_id }, reason: nil
+    )
+    dispatcher = Object.new
+    dispatcher.define_singleton_method(:dispatch) { |**_kwargs| dispatch_result }
+    client = Object.new
+    client.define_singleton_method(:attach) do |id|
+      Hive::Attempts::ClientResult.new(
+        status: :lost, exit_status: Hive::ExitCodes::TEMPFAIL,
+        outcome: "lost", receipt: nil, attempt_id: id
+      )
+    end
+    entrypoint = Hive::Attempts::Entrypoint.new(
+      store: Object.new, dispatcher: dispatcher, client: client,
+      config_loader: ->(_root) { Hive::Config.merge_defaults({}) }
+    )
+    command = Hive::Commands::StageAction.new(
+      "plan", "some-slug", json: true, durable: true,
+      attempt_entrypoint: entrypoint
+    )
+    command.define_singleton_method(:resolve_task) { task }
+
+    out, = capture_io do
+      @lost_error = assert_raises(Hive::ConcurrentRunError) { command.call }
+    end
+
+    payload = JSON.parse(out)
+    assert_equal "hive-stage-action", payload.fetch("schema")
+    assert_equal Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-stage-action"), payload.fetch("schema_version")
+    assert_equal "plan", payload.fetch("verb")
+    assert_equal "error", payload.fetch("error_kind")
+    assert_equal Hive::ExitCodes::TEMPFAIL, payload.fetch("exit_code")
+    assert_includes payload.fetch("message"), "attempt-lost"
+  end
 end

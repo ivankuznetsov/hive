@@ -6,6 +6,7 @@ class AttemptsLostOutcomeTest < Minitest::Test
   include HiveTestHelper
 
   NOW = Time.utc(2026, 7, 16, 12, 0, 0)
+  CLAIM_CAPABILITY = "c" * 64
   OWNER = {
     "pid" => 123, "start_fingerprint" => "wrapper-start",
     "session_id" => 123, "process_group_id" => 123
@@ -176,11 +177,14 @@ class AttemptsLostOutcomeTest < Minitest::Test
       attempt_id: "lost-1", request_id: "request-1", predecessor_attempt_id: nil,
       task_id: "42", project: "demo", task_slug: "durable-task",
       intended_stage: "4-execute", task_generation: "generation-1",
-      progress_token: "progress", provider: "codex", starting_revision: nil,
+      progress_token: "progress", provider: "codex",
+      worker_argv: [ "hive", "run", "durable-task" ],
+      claim_capability_digest: Hive::Attempts::Capability.digest(CLAIM_CAPABILITY), starting_revision: nil,
       retry_charge: 0, inherited_outputs: [], launch_timeout_sec: 30, now: NOW
     )
     claimed = store.claim(
-      launching, owner: OWNER, first_heartbeat_timeout_sec: 30, now: NOW + 1
+      launching, owner: OWNER, claim_capability: CLAIM_CAPABILITY,
+      first_heartbeat_timeout_sec: 30, now: NOW + 1
     )
     running = store.first_heartbeat(claimed, stale_sec: 30, now: NOW + 2)
     with_worker = store.checkpoint(
@@ -198,7 +202,9 @@ class AttemptsLostOutcomeTest < Minitest::Test
       attempt_id: "lost-no-worker", request_id: "request-no-worker", predecessor_attempt_id: nil,
       task_id: "42", project: "demo", task_slug: "durable-task",
       intended_stage: "4-execute", task_generation: "generation-no-worker",
-      progress_token: "progress", provider: "codex", starting_revision: nil,
+      progress_token: "progress", provider: "codex",
+      worker_argv: [ "hive", "run", "durable-task" ],
+      claim_capability_digest: Hive::Attempts::Capability.digest(CLAIM_CAPABILITY), starting_revision: nil,
       retry_charge: 0, inherited_outputs: [], launch_timeout_sec: 30, now: NOW
     )
     store.mark_lost(launching, reason: "launch_timeout", now: NOW + 31)

@@ -2,6 +2,7 @@ require "digest"
 require "json"
 require "fileutils"
 require "hive/atomic_file"
+require "hive/attempts/capability"
 require "hive/attempts/record"
 require "hive/paths"
 
@@ -77,9 +78,12 @@ module Hive
         scan.records.select { |record| record.task_generation == task_generation }
       end
 
-      def claim(observed, owner:, first_heartbeat_timeout_sec:, now:)
+      def claim(observed, owner:, claim_capability:, first_heartbeat_timeout_sec:, now:)
         raise CompareAndSwapFailed, "launch claim deadline expired" if observed.active_deadline && now > observed.active_deadline
         mutate(observed, allowed_states: [ "launching" ]) do |data|
+          unless Capability.matches?(data["claim_capability_digest"], claim_capability)
+            raise CompareAndSwapFailed, "attempt claim capability is invalid"
+          end
           raise CompareAndSwapFailed, "attempt is already claimed" if data["wrapper"]
 
           data.merge(

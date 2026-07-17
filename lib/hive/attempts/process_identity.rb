@@ -128,23 +128,46 @@ module Hive
       end
 
       def orphan_group_status(wrapper:, worker:)
-        worker_status = status(worker)
-        return :absent if worker_status == :missing
-        return worker_status unless worker_status == :matching
-        return :mismatched unless wrapper.is_a?(Hash)
+        return :mismatched unless orphan_group_metadata_matches?(wrapper: wrapper, worker: worker)
 
-        wrapper_session = wrapper["session_id"] || wrapper[:session_id]
-        wrapper_group = wrapper["process_group_id"] || wrapper[:process_group_id]
-        worker_session = worker["session_id"] || worker[:session_id]
-        worker_group = worker["process_group_id"] || worker[:process_group_id]
-        return :mismatched unless wrapper_session && wrapper_group && wrapper_session == wrapper_group
-        return :mismatched unless worker_session == wrapper_session
-        return :mismatched unless worker_group.is_a?(Integer) && worker_group.positive?
+        worker_status = status(worker)
+        if worker_status == :missing
+          worker_group = worker["process_group_id"] || worker[:process_group_id]
+          return :absent if process_group_presence(worker_group) == :missing
+
+          # A process group can outlive its leader. Without the leader's start
+          # identity there is no safe way to prove that the remaining group is
+          # still ours, but its existence must continue to fence successors.
+          return :unverifiable
+        end
+        return worker_status unless worker_status == :matching
 
         :matching
       end
 
       private
+
+      def orphan_group_metadata_matches?(wrapper:, worker:)
+        return false unless wrapper.is_a?(Hash) && worker.is_a?(Hash)
+
+        wrapper_session = wrapper["session_id"] || wrapper[:session_id]
+        wrapper_group = wrapper["process_group_id"] || wrapper[:process_group_id]
+        worker_session = worker["session_id"] || worker[:session_id]
+        worker_group = worker["process_group_id"] || worker[:process_group_id]
+        wrapper_session && wrapper_group && wrapper_session == wrapper_group &&
+          worker_session == wrapper_session && worker_group.is_a?(Integer) && worker_group.positive?
+      end
+
+      def process_group_presence(pgid)
+        @signaler.call(0, -Integer(pgid))
+        :alive
+      rescue Errno::ESRCH
+        :missing
+      rescue Errno::EPERM
+        :alive
+      rescue ArgumentError, TypeError, SystemCallError
+        :unverifiable
+      end
 
       def alive?(pid)
         @signaler.call(0, pid)

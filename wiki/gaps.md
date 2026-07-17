@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-07-16
+updated: 2026-07-17
 tags: [gap, todo]
 ---
 
@@ -23,6 +23,13 @@ tags: [gap, todo]
   is not yet a checked-in macOS/BSD detachment run or a paid-provider,
   multi-hour daemon-restart artifact; unsupported platforms reject before
   acceptance rather than weakening ownership guarantees.
+- Durable attempt capabilities prevent ordinary worker-environment inheritance,
+  attacker-selected store paths, public context construction, cross-task argv
+  reuse, and PID/session/group substitution. They do not provide privilege
+  separation from hostile same-UID Ruby code with arbitrary access to Hive's
+  global attempt store or process internals. Closing that stronger boundary
+  requires a broker under a separate OS identity (or equivalent protected
+  signing/storage authority), not another in-process Ruby guard.
 
 - The built-in `bench` descriptor, packaged stage instructions, self-contained
   runtime snapshot, and `hive init . --workflow bench` path are covered locally,

@@ -3290,7 +3290,9 @@ end
         attempt_id: "attempt-1", request_id: "request-1", predecessor_attempt_id: nil,
         task_id: "42", project: "p1", task_slug: "demo-task",
         intended_stage: "4-execute", task_generation: "generation-1",
-        progress_token: "progress", provider: "codex", starting_revision: nil,
+        progress_token: "progress", provider: "codex",
+        worker_argv: [ "hive", "run", "demo-task" ],
+        claim_capability_digest: Hive::Attempts::Capability.digest("c" * 64), starting_revision: nil,
         retry_charge: 0, inherited_outputs: [], launch_timeout_sec: 30, now: T0
       )
       owner = {
@@ -3298,7 +3300,8 @@ end
         "session_id" => 123, "process_group_id" => 123
       }
       claimed = store.claim(
-        launching, owner: owner, first_heartbeat_timeout_sec: 30, now: T0
+        launching, owner: owner, claim_capability: "c" * 64,
+        first_heartbeat_timeout_sec: 30, now: T0
       )
       running = store.first_heartbeat(claimed, stale_sec: 30, now: T0 + 1)
       store.terminalize(
@@ -3453,17 +3456,42 @@ end
     end
   end
 
-  def test_attempt_claim_update_failure_is_logged_without_losing_delivery
+  def test_attempt_claim_update_failure_is_raised_for_retry_and_repair
     attempt = Struct.new(:attempt_id, :task_generation).new("attempt-1", "generation-1")
     result = Struct.new(:attempt).new(attempt)
     request = Struct.new(:request_id).new("request-1")
     dispatcher, _supervisor, _controller, logger = make_dispatcher(rows: [])
     with_replaced_singleton_method(Q, :update_claim, ->(*_args, **_kwargs) { raise Errno::EACCES }) do
-      dispatcher.send(:update_dispatch_request_attempt_claim, request, result: result, now: T0)
+      assert_raises(Errno::EACCES) do
+        dispatcher.send(:update_dispatch_request_attempt_claim, request, result: result, now: T0)
+      end
     end
-    assert logger.events.any? { |name, attrs|
-      name == :fatal && attrs[:message].include?("update_dispatch_request_attempt_claim")
-    }
+    refute logger.events.any? { |name, _attrs| name == :fatal }
+  end
+
+  def test_restart_claim_recovery_repairs_nil_preclaim_from_attempt_request_id
+    Dir.mktmpdir("hive-dispatch-repair-claim") do |state_home|
+      request_id = Q.write_request!(
+        project: "p1", slug: "demo-task", argv: %w[hive run demo-task],
+        request_id: "request-repair", state_home: state_home, now: T0
+      )
+      Q.claim(request_id, pid: nil, state_home: state_home, now: T0)
+      attempt = Struct.new(:attempt_id, :task_generation)
+                      .new("attempt-1", "generation-1")
+      reconciler = Object.new
+      reconciler.define_singleton_method(:find_by_request_id) { |_id| attempt }
+      reconciler.define_singleton_method(:fetch) { |_id| attempt }
+      dispatcher, = make_dispatcher(
+        rows: [], dispatch_request_state_home: state_home,
+        attempt_reconciler: reconciler
+      )
+
+      dispatcher.send(:recover_dispatch_claims, now: T0 + 10)
+
+      delivery = Q.claimed(state_home: state_home).fetch(0)
+      assert_equal "attempt-1", delivery.claim.fetch("attempt_id")
+      assert_equal "generation-1", delivery.claim.fetch("task_generation")
+    end
   end
 
   def test_restart_claim_recovery_adopts_matching_attempt_reference

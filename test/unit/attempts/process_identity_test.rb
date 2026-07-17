@@ -82,6 +82,41 @@ class AttemptsProcessIdentityTest < Minitest::Test
     assert_empty signals
   end
 
+  def test_missing_worker_leader_does_not_hide_a_live_process_group
+    probes = []
+    signaler = lambda do |signal, pid|
+      probes << [ signal, pid ]
+      raise Errno::ESRCH if signal == 0 && pid == 456
+    end
+    verifier = Hive::Attempts::ProcessIdentity.new(
+      start_reader: ->(_pid) { "worker-start" }, signaler: signaler,
+      session_reader: ->(_pid) { 10 }, group_reader: ->(_pid) { 456 }
+    )
+    wrapper = identity(start: "wrapper-start", session: 10, group: 10)
+    worker = identity(start: "worker-start", session: 10, group: 456).merge("pid" => 456)
+
+    assert_equal :unverifiable, verifier.orphan_group_status(wrapper: wrapper, worker: worker)
+    assert_equal :identity_mismatch,
+                 verifier.terminate_orphan_group(wrapper: wrapper, worker: worker)
+    assert_includes probes, [ 0, -456 ]
+    refute probes.any? { |signal, _pid| %w[TERM KILL].include?(signal) }
+  end
+
+  def test_missing_worker_leader_is_absent_only_when_its_group_is_gone
+    signaler = lambda do |signal, pid|
+      raise Errno::ESRCH if signal == 0 && [ 456, -456 ].include?(pid)
+    end
+    verifier = Hive::Attempts::ProcessIdentity.new(
+      start_reader: ->(_pid) { "worker-start" }, signaler: signaler,
+      session_reader: ->(_pid) { 10 }, group_reader: ->(_pid) { 456 }
+    )
+    wrapper = identity(start: "wrapper-start", session: 10, group: 10)
+    worker = identity(start: "worker-start", session: 10, group: 456).merge("pid" => 456)
+
+    assert_equal :absent, verifier.orphan_group_status(wrapper: wrapper, worker: worker)
+    assert_equal :absent, verifier.terminate_orphan_group(wrapper: wrapper, worker: worker)
+  end
+
   def test_capture_and_snapshot_hash_cover_live_missing_and_invalid_pids
     snapshot = Hive::Attempts::ProcessIdentity.new.capture(Process.pid)
     assert_equal Process.pid, snapshot.pid

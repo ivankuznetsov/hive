@@ -5,13 +5,15 @@ class AttemptsSupervisorTest < Minitest::Test
   include HiveTestHelper
 
   NOW = Time.utc(2026, 7, 16, 12, 0, 0)
+  CLAIM_CAPABILITY = "c" * 64
 
   def test_claims_before_worker_and_writes_failed_receipt_with_ordered_output
-    with_attempt do |store, attempt|
+    worker_argv = [ "/bin/sh", "-c", "printf out; printf err >&2; exit 7" ]
+    with_attempt(worker_argv: worker_argv) do |store, attempt|
       ready_r, ready_w = IO.pipe
       supervisor = Hive::Attempts::Supervisor.new(
         store: store, attempt_id: attempt.attempt_id,
-        worker_argv: [ "/bin/sh", "-c", "printf out; printf err >&2; exit 7" ],
+        claim_io: StringIO.new(CLAIM_CAPABILITY),
         ready_io: ready_w, heartbeat_sec: 0.01, stale_sec: 1,
         first_heartbeat_timeout_sec: 1
       )
@@ -35,10 +37,11 @@ class AttemptsSupervisorTest < Minitest::Test
   end
 
   def test_timeout_is_terminal_cancelled_and_kills_worker_group
-    with_attempt do |store, attempt|
+    worker_argv = [ "/bin/sh", "-c", "sleep 10" ]
+    with_attempt(worker_argv: worker_argv) do |store, attempt|
       supervisor = Hive::Attempts::Supervisor.new(
         store: store, attempt_id: attempt.attempt_id,
-        worker_argv: [ "/bin/sh", "-c", "sleep 10" ],
+        claim_io: StringIO.new(CLAIM_CAPABILITY),
         heartbeat_sec: 0.01, stale_sec: 1, first_heartbeat_timeout_sec: 1,
         timeout_sec: 0.05, kill_grace_sec: 0.01
       )
@@ -51,12 +54,12 @@ class AttemptsSupervisorTest < Minitest::Test
   end
 
   def test_lost_claim_exits_without_starting_worker
-    with_attempt do |store, attempt|
+    with_attempt(worker_argv: [ "/bin/true" ]) do |store, attempt|
       store.mark_lost(attempt, reason: "launch_timeout", now: NOW + 2)
       sentinel = File.join(store.root, "worker-started")
       supervisor = Hive::Attempts::Supervisor.new(
         store: store, attempt_id: attempt.attempt_id,
-        worker_argv: [ "/bin/sh", "-c", "touch #{sentinel}" ],
+        claim_io: StringIO.new(CLAIM_CAPABILITY),
         first_heartbeat_timeout_sec: 1
       )
 
@@ -67,12 +70,12 @@ class AttemptsSupervisorTest < Minitest::Test
   end
 
   def test_compare_and_swap_failure_reports_temporary_failure
-    with_attempt do |store, attempt|
+    with_attempt(worker_argv: [ "/bin/true" ]) do |store, attempt|
       ready = StringIO.new
       store.define_singleton_method(:claim) { |*_args, **_kwargs| raise Hive::Attempts::CompareAndSwapFailed, "lost" }
       supervisor = Hive::Attempts::Supervisor.new(
         store: store, attempt_id: attempt.attempt_id,
-        worker_argv: [ "/bin/true" ], ready_io: ready
+        claim_io: StringIO.new(CLAIM_CAPABILITY), ready_io: ready
       )
 
       assert_equal Hive::ExitCodes::TEMPFAIL, supervisor.run
@@ -80,12 +83,28 @@ class AttemptsSupervisorTest < Minitest::Test
     end
   end
 
+  def test_invalid_capability_cannot_claim_or_start_the_recorded_worker
+    with_tmp_dir do |root|
+      sentinel = File.join(root, "worker-started")
+      with_attempt(worker_argv: [ "/bin/sh", "-c", "touch #{sentinel}" ]) do |store, attempt|
+        supervisor = Hive::Attempts::Supervisor.new(
+          store: store, attempt_id: attempt.attempt_id,
+          claim_io: StringIO.new("f" * 64)
+        )
+
+        assert_equal Hive::ExitCodes::TEMPFAIL, supervisor.run
+        refute File.exist?(sentinel)
+        refute store.fetch(attempt.attempt_id).claimed?
+      end
+    end
+  end
+
   def test_unexpected_running_failure_writes_a_failed_receipt
-    with_attempt do |store, attempt|
+    with_attempt(worker_argv: [ "/bin/true" ]) do |store, attempt|
       ready = StringIO.new
       supervisor = Hive::Attempts::Supervisor.new(
         store: store, attempt_id: attempt.attempt_id,
-        worker_argv: [ "/bin/true" ], ready_io: ready
+        claim_io: StringIO.new(CLAIM_CAPABILITY), ready_io: ready
       )
       supervisor.define_singleton_method(:run_worker) { |_record, _log| raise "boom" }
 
@@ -98,7 +117,7 @@ class AttemptsSupervisorTest < Minitest::Test
   end
 
   def test_secondary_failure_during_unexpected_error_is_contained
-    with_attempt do |store, attempt|
+    with_attempt(worker_argv: [ "/bin/true" ]) do |store, attempt|
       original_fetch = store.method(:fetch)
       fetches = 0
       store.define_singleton_method(:fetch) do |attempt_id|
@@ -109,7 +128,7 @@ class AttemptsSupervisorTest < Minitest::Test
       end
       supervisor = Hive::Attempts::Supervisor.new(
         store: store, attempt_id: attempt.attempt_id,
-        worker_argv: [ "/bin/true" ]
+        claim_io: StringIO.new(CLAIM_CAPABILITY)
       )
       supervisor.define_singleton_method(:run_worker) { |_record, _log| raise "boom" }
 
@@ -119,7 +138,7 @@ class AttemptsSupervisorTest < Minitest::Test
 
   def test_private_process_and_stream_helpers_cover_race_paths
     supervisor = Hive::Attempts::Supervisor.new(
-      store: Object.new, attempt_id: "attempt", worker_argv: [ "hive", "run", "task" ],
+      store: Object.new, attempt_id: "attempt", claim_io: StringIO.new(CLAIM_CAPABILITY),
       kill_grace_sec: 0, monotonic: -> { 1.0 }
     )
 
@@ -142,7 +161,8 @@ class AttemptsSupervisorTest < Minitest::Test
     status = Struct.new(:exited?, :termsig).new(false, 9)
     assert_equal 137, supervisor.send(:status_exit, status)
     assert_equal Hive::ExitCodes::SOFTWARE, supervisor.send(:status_exit, nil)
-    assert_equal RbConfig.ruby, supervisor.send(:resolved_worker_argv).first
+    record = { "worker_argv" => [ "hive", "run", "task" ] }
+    assert_equal RbConfig.ruby, supervisor.send(:resolved_worker_argv, record).first
 
     with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(_pid) { raise Errno::ESRCH }) do
       assert_raises(Hive::Attempts::StoreError) { supervisor.send(:process_identity, 99) }
@@ -151,7 +171,7 @@ class AttemptsSupervisorTest < Minitest::Test
 
   def test_worker_termination_escalation_and_signal_setup_are_defensive
     supervisor = Hive::Attempts::Supervisor.new(
-      store: Object.new, attempt_id: "attempt", worker_argv: [ "/bin/true" ],
+      store: Object.new, attempt_id: "attempt", claim_io: StringIO.new(CLAIM_CAPABILITY),
       kill_grace_sec: 0, monotonic: -> { 1.0 }
     )
     supervisor.instance_variable_set(:@worker_pid, 456)
@@ -184,14 +204,15 @@ class AttemptsSupervisorTest < Minitest::Test
 
   private
 
-  def with_attempt
+  def with_attempt(worker_argv:)
     with_tmp_dir do |root|
       store = Hive::Attempts::Store.new(root: root)
       attempt = store.create_launching(
         attempt_id: "attempt-1", request_id: "request-1", predecessor_attempt_id: nil,
         task_id: "42", project: "demo", task_slug: "durable-task",
         intended_stage: "4-execute", task_generation: "generation-1",
-        progress_token: "progress-1", provider: "codex", starting_revision: nil,
+        progress_token: "progress-1", provider: "codex", worker_argv: worker_argv,
+        claim_capability_digest: Hive::Attempts::Capability.digest(CLAIM_CAPABILITY), starting_revision: nil,
         retry_charge: 0, inherited_outputs: [], launch_timeout_sec: 30, now: Time.now.utc
       )
       yield store, attempt

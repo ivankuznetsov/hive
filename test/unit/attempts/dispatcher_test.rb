@@ -5,6 +5,7 @@ class AttemptsDispatcherTest < Minitest::Test
   include HiveTestHelper
 
   NOW = Time.utc(2026, 7, 16, 12, 0, 0)
+  CLAIM_CAPABILITY = "c" * 64
   FakeTask = Struct.new(
     :id, :slug, :state_file, :stage_index, :stage_name, :project_root, :worktree_path,
     keyword_init: true
@@ -18,15 +19,19 @@ class AttemptsDispatcherTest < Minitest::Test
   class FakeLauncher
     attr_reader :launched
 
-    def initialize
+    def initialize(result: { "claimed" => true }, error: nil)
       @launched = []
+      @result = result
+      @error = error
     end
 
     def preflight! = true
 
-    def launch(record, argv:)
-      @launched << [ record, argv ]
-      { "claimed" => false }
+    def launch(record, claim_capability:)
+      @launched << [ record, claim_capability ]
+      raise @error if @error
+
+      @result
     end
   end
 
@@ -44,6 +49,10 @@ class AttemptsDispatcherTest < Minitest::Test
       assert_equal({ "attempt_id" => first.attempt.attempt_id }, same.attach_descriptor)
       assert_nil different.attach_descriptor
       assert_equal 1, launcher.launched.size
+      assert_equal [ "hive", "run", task.slug ], first.attempt["worker_argv"]
+      capability = launcher.launched.first.last
+      assert Hive::Attempts::Capability.matches?(first.attempt["claim_capability_digest"], capability)
+      refute_includes first.attempt.to_h.values, capability
     end
   end
 
@@ -52,7 +61,11 @@ class AttemptsDispatcherTest < Minitest::Test
       first = dispatch(dispatcher, task, request_id: "request-one")
       owner = { "pid" => Process.pid, "start_fingerprint" => "start",
                 "session_id" => Process.getsid(0), "process_group_id" => Process.getpgrp }
-      claimed = store.claim(first.attempt, owner: owner, first_heartbeat_timeout_sec: 30, now: NOW + 1)
+      capability = launcher.launched.first.last
+      claimed = store.claim(
+        first.attempt, owner: owner, claim_capability: capability,
+        first_heartbeat_timeout_sec: 30, now: NOW + 1
+      )
       running = store.first_heartbeat(claimed, stale_sec: 30, now: NOW + 2)
       terminal = store.terminalize(
         running, outcome: "succeeded", exit_status: 0,
@@ -79,6 +92,58 @@ class AttemptsDispatcherTest < Minitest::Test
       assert_equal "capacity", result.reason
       assert_empty launcher.launched
       assert_empty store.scan.records
+    end
+  end
+
+  def test_failed_launcher_handoff_marks_reservation_lost_and_defers
+    with_dispatcher do |dispatcher, launcher, task, store|
+      launcher.instance_variable_set(:@result, { "claimed" => false, "error" => "wrapper unavailable" })
+
+      result = dispatch(dispatcher, task, request_id: "request-one", interactive: true)
+
+      assert_equal :deferred, result.status
+      assert_equal "launch_handoff_failed", result.reason
+      assert_nil result.attach_descriptor
+      lost = store.fetch(result.attempt.attempt_id)
+      assert_equal "lost", lost.state
+      assert_equal "launch_handoff_failed", lost["loss"].fetch("reason")
+      assert_equal "wrapper unavailable", lost["diagnostics"].fetch("launch_handoff_error")
+    end
+  end
+
+  def test_launcher_exception_marks_reservation_lost_and_defers
+    with_dispatcher do |dispatcher, launcher, task, store|
+      launcher.instance_variable_set(:@error, Errno::EIO.new("handoff pipe failed"))
+
+      result = dispatch(dispatcher, task, request_id: "request-one")
+
+      assert_equal :deferred, result.status
+      lost = store.fetch(result.attempt.attempt_id)
+      assert_equal "lost", lost.state
+      assert_includes lost["diagnostics"].fetch("launch_handoff_error"), "handoff pipe failed"
+    end
+  end
+
+  def test_false_handoff_adopts_a_wrapper_that_claimed_before_cleanup
+    with_dispatcher do |dispatcher, launcher, task, store|
+      launcher.define_singleton_method(:launch) do |record, claim_capability:|
+        @launched << [ record, claim_capability ]
+        owner = {
+          "pid" => Process.pid, "start_fingerprint" => "wrapper-start",
+          "session_id" => Process.getsid(0), "process_group_id" => Process.getpgrp
+        }
+        store.claim(
+          record, owner: owner, claim_capability: claim_capability,
+          first_heartbeat_timeout_sec: 30, now: NOW + 1
+        )
+        { "claimed" => false }
+      end
+
+      result = dispatch(dispatcher, task, request_id: "request-one", interactive: true)
+
+      assert_equal :accepted, result.status
+      assert result.attempt.claimed?
+      assert_equal({ "attempt_id" => result.attempt.attempt_id }, result.attach_descriptor)
     end
   end
 
@@ -179,7 +244,9 @@ class AttemptsDispatcherTest < Minitest::Test
           intended_stage: "4-execute",
           task_generation: generation.task_generation,
           progress_token: generation.progress_token,
-          provider: "codex", starting_revision: nil, retry_charge: 0,
+          provider: "codex", worker_argv: [ "hive", "run", task.slug ],
+          claim_capability_digest: Hive::Attempts::Capability.digest(CLAIM_CAPABILITY),
+          starting_revision: nil, retry_charge: 0,
           inherited_outputs: [], launch_timeout_sec: 30, now: NOW
         )
         external = other_store.mark_lost(external, reason: "owner_gone", now: NOW + 1)
@@ -256,7 +323,7 @@ class AttemptsDispatcherTest < Minitest::Test
       ids = %w[attempt-one attempt-two attempt-three].each
       dispatcher = Hive::Attempts::Dispatcher.new(
         store: store, launcher: launcher, limits: limits, clock: -> { NOW },
-        id_generator: -> { ids.next }
+        id_generator: -> { ids.next }, capability_generator: -> { CLAIM_CAPABILITY }
       )
       yield dispatcher, launcher, task, store
     end

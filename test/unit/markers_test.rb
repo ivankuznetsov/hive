@@ -61,7 +61,7 @@ class MarkersTest < Minitest::Test
   def test_marker_projects_attempt_identity_but_hides_it_from_display_attrs
     with_tmp_dir do |dir|
       file = File.join(dir, "x.md")
-      Hive::Attempts::Context.with(attempt_id: "attempt-1", task_generation: "generation-1") do
+      with_attempt_context(attempt_id: "attempt-1", task_generation: "generation-1") do
         Hive::Markers.set(
           file, :waiting,
           attempt_id: "caller-cannot-override",

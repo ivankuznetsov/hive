@@ -3,7 +3,7 @@ title: State Model
 type: data-model
 source: lib/hive/task.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/review_handoff.rb, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/daemon/display_name_backfiller.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
 created: 2026-04-25
-updated: 2026-07-16
+updated: 2026-07-17
 tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, dependencies, admission, web]
 ---
 
@@ -126,9 +126,14 @@ Recovery from a stale or error marker is agent-callable via `hive markers clear 
 Durable leases under `$HIVE_HOME/attempts/v1/records/` are the authoritative
 execution owner. Records are `launching`, `running`, `terminal`, or `lost`;
 wrapper/worker PID start fingerprints and session/group IDs make adoption and
-cleanup PID-reuse safe. Per-generation flocks plus guarded lease
-version/deadline comparisons serialize claim, heartbeat, terminal, and loss
-transitions. See [[modules/attempts]].
+cleanup PID-reuse safe. Each non-compatibility record also immutably stores the
+exact admitted worker argv and only the digest of a random claim capability.
+The secret crosses exec through inherited descriptors, claims once, and gates
+worker context installation until the exact worker identity is durable.
+The worker cannot select an alternate record-store path, and no production
+thread-local/public constructor can synthesize the authenticated context.
+Per-generation flocks plus guarded lease version/deadline comparisons serialize
+claim, heartbeat, terminal, and loss transitions. See [[modules/attempts]].
 
 - **Per-task lock**: `<task folder>/.lock` — compatibility/work-area exclusion projection. New workers include optional `attempt_id` and `task_generation`; old readers tolerate their absence. It is not the restart-safe owner.
 - **Per-project commit lock**: `<project>/.hive-state/.commit-lock` — short flock around the `git add && git commit` in the hive-state worktree to serialize concurrent writers. See [[modules/lock]].
@@ -175,6 +180,8 @@ Pending requests expire after `EXPIRY_SEC = 600`. On dispatch, the daemon
 renames the file to `<id>.json.claimed` and writes
 `<id>.json.claimed.claim` with `pid`, `process_start_time`, and `claimed_at`;
 after task admission it also carries `attempt_id` and `task_generation`.
+If the daemon dies after admission but before writing those fields, startup
+recovers them from the attempt record's immutable `request_id` correlation.
 Those claims are at-most-once delivery records, not execution owners. Multi-step recoveries
 store later argv arrays in `<request_id>.sequence` and promote the next request
 only after the previous attempt receipt exits 0; non-zero/lost outcomes discard the sequence.

@@ -1793,7 +1793,7 @@ module Hive
       end
 
       def update_dispatch_request_attempt_claim(req, result:, now:)
-        Hive::Daemon::DispatchRequestQueue.update_claim(
+        updated = Hive::Daemon::DispatchRequestQueue.update_claim(
           req.request_id,
           pid: nil,
           process_start_time: nil,
@@ -1802,10 +1802,9 @@ module Hive
           now: now,
           state_home: dispatch_request_state_home
         )
-      rescue StandardError => e
-        @logger.event(:fatal,
-                      message: "update_dispatch_request_attempt_claim raised: #{e.class}: #{e.message}",
-                      keeping_previous: true)
+        raise "dispatch request attempt claim disappeared for #{req.request_id}" unless updated
+
+        updated
       end
 
       def promote_dispatch_sequence(entry, meta, now:)
@@ -1884,6 +1883,14 @@ module Hive
 
             attempt = @attempt_reconciler.fetch(attempt_id)
             attempt && attempt.task_generation == task_generation
+          },
+          attempt_for_request: lambda { |request_id|
+            next unless @attempt_reconciler
+
+            attempt = @attempt_reconciler.find_by_request_id(request_id)
+            next unless attempt
+
+            { attempt_id: attempt.attempt_id, task_generation: attempt.task_generation }
           },
           expiry_sec: claim_expiry_sec,
           handler: ->(request_id:, reason:, path:) {

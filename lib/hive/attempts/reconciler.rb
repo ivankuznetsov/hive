@@ -30,6 +30,14 @@ module Hive
         @store.fetch(attempt_id)
       end
 
+      # Recover dispatch-request correlation when the daemon crashed after
+      # durable admission but before it could stamp the request claim sidecar.
+      def find_by_request_id(request_id)
+        @store.scan.records
+              .select { |record| record["request_id"] == request_id.to_s }
+              .max_by { |record| [ record["accepted_at"], record.lease_version ] }
+      end
+
       def reconcile(now: Time.now.utc)
         @legacy_backfiller&.backfill(now: now)
         scan = @store.scan

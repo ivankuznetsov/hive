@@ -62,7 +62,10 @@ class AttemptsDirtyStateCaptureTest < Minitest::Test
       attempt_id: "lost-1", request_id: "request-1", predecessor_attempt_id: nil,
       task_id: "42", project: "demo", task_slug: "durable-task",
       intended_stage: "4-execute", task_generation: "generation-1",
-      progress_token: "progress", provider: "codex", starting_revision: nil,
+      progress_token: "progress", provider: "codex",
+      worker_argv: [ "hive", "run", "durable-task" ],
+      claim_capability_digest: Hive::Attempts::Capability.digest("c" * 64),
+      starting_revision: nil,
       retry_charge: 0, inherited_outputs: [], launch_timeout_sec: 30, now: NOW
     )
     store.mark_lost(attempt, reason: "launch_timeout", now: NOW + 31)

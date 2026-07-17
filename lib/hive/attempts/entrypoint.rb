@@ -37,7 +37,13 @@ module Hive
         end
         return result unless interactive
 
-        (@client || Client.new(store: store)).attach(result.attempt.attempt_id)
+        attached = (@client || Client.new(store: store)).attach(result.attempt.attempt_id)
+        if attached.status == :lost
+          raise Hive::ConcurrentRunError,
+                "durable attempt lost before producing a receipt for #{task.slug}: #{attached.attempt_id}"
+        end
+
+        attached
       end
 
       private

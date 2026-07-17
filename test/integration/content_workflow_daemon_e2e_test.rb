@@ -26,7 +26,7 @@ class ContentWorkflowDaemonE2ETest < Minitest::Test
           slug = File.basename(Dir[File.join(project_root, ".hive-state", "stages", "1-inbox", "draft-launch-post-*")].first)
           ran = []
           with_deterministic_content_agent(record: ran) do
-            Hive::Attempts::Context.with(
+            with_attempt_context(
               attempt_id: "content-fixture-test-attempt",
               task_generation: "content-fixture-test-generation"
             ) do

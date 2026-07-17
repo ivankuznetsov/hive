@@ -8,7 +8,8 @@
   "required": [
     "schema", "schema_version", "attempt_id", "request_id", "predecessor_attempt_id",
     "task_id", "project", "task_slug", "intended_stage", "task_generation",
-    "progress_token", "provider", "starting_revision", "retry_charge", "compatibility",
+    "progress_token", "provider", "worker_argv", "claim_capability_digest",
+    "starting_revision", "retry_charge", "compatibility",
     "created_at", "accepted_at", "state", "outcome", "lease_version", "claim_deadline",
     "first_heartbeat_deadline", "heartbeat_deadline", "wrapper", "worker", "heartbeat_at",
     "started_at", "ended_at", "latest_revision", "checkpoint", "log_reference",
@@ -27,6 +28,14 @@
     "task_generation": { "type": "string", "minLength": 1 },
     "progress_token": { "type": "string", "minLength": 1 },
     "provider": { "type": "string", "minLength": 1 },
+    "worker_argv": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "claim_capability_digest": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{64}$"
+    },
     "starting_revision": { "type": ["string", "null"] },
     "retry_charge": { "type": "integer", "minimum": 0 },
     "compatibility": { "type": "boolean" },
@@ -98,6 +107,21 @@
     }
   },
   "allOf": [
+    {
+      "if": { "properties": { "compatibility": { "const": false } } },
+      "then": {
+        "properties": {
+          "worker_argv": { "minItems": 1 },
+          "claim_capability_digest": { "type": "string" }
+        }
+      },
+      "else": {
+        "properties": {
+          "worker_argv": { "maxItems": 0 },
+          "claim_capability_digest": { "type": "null" }
+        }
+      }
+    },
     {
       "if": { "properties": { "state": { "const": "terminal" } } },
       "then": { "required": ["receipt"], "properties": { "receipt": { "$ref": "#/$defs/Receipt" } } }

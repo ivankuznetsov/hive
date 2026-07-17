@@ -78,12 +78,14 @@ class AttemptsClientTest < Minitest::Test
         attempt_id: "attempt-1", request_id: "request-1", predecessor_attempt_id: nil,
         task_id: "42", project: "demo", task_slug: "task", intended_stage: "4-execute",
         task_generation: "generation-1", progress_token: "progress", provider: "codex",
+        worker_argv: [ "/bin/sh", "-c", "printf stdout; printf stderr >&2" ],
+        claim_capability_digest: Hive::Attempts::Capability.digest("c" * 64),
         starting_revision: nil, retry_charge: 0, inherited_outputs: [],
         launch_timeout_sec: 30, now: Time.now.utc
       )
       Hive::Attempts::Supervisor.new(
         store: store, attempt_id: attempt.attempt_id,
-        worker_argv: [ "/bin/sh", "-c", "printf stdout; printf stderr >&2" ],
+        claim_io: StringIO.new("c" * 64),
         heartbeat_sec: 0.01, stale_sec: 1, first_heartbeat_timeout_sec: 1
       ).run
       yield store, store.fetch(attempt.attempt_id)

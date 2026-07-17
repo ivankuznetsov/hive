@@ -5,6 +5,7 @@ class AttemptsReconcilerTest < Minitest::Test
   include HiveTestHelper
 
   NOW = Time.utc(2026, 7, 16, 12, 0, 0)
+  CLAIM_CAPABILITY = "c" * 64
   OWNER = {
     "pid" => 123,
     "start_fingerprint" => "start-1",
@@ -28,7 +29,8 @@ class AttemptsReconcilerTest < Minitest::Test
       unclaimed = create(store, attempt_id: "unclaimed", timeout: 1)
       claimed_base = create(store, attempt_id: "claimed", timeout: 30)
       claimed = store.claim(
-        claimed_base, owner: OWNER, first_heartbeat_timeout_sec: 1, now: NOW
+        claimed_base, owner: OWNER, claim_capability: CLAIM_CAPABILITY,
+        first_heartbeat_timeout_sec: 1, now: NOW
       )
       reconciler = reconciler(store, :missing)
 
@@ -163,7 +165,10 @@ class AttemptsReconcilerTest < Minitest::Test
     with_store do |store|
       unclaimed = create(store, attempt_id: "unclaimed", timeout: 30)
       claimed = create(store, attempt_id: "claimed", timeout: 30)
-      store.claim(claimed, owner: OWNER, first_heartbeat_timeout_sec: 30, now: NOW)
+      store.claim(
+        claimed, owner: OWNER, claim_capability: CLAIM_CAPABILITY,
+        first_heartbeat_timeout_sec: 30, now: NOW
+      )
 
       matching = reconciler(store, :matching)
       snapshot = matching.reconcile(now: NOW + 1)
@@ -175,7 +180,10 @@ class AttemptsReconcilerTest < Minitest::Test
 
     with_store do |store|
       claimed = create(store, attempt_id: "claimed", timeout: 30)
-      store.claim(claimed, owner: OWNER, first_heartbeat_timeout_sec: 30, now: NOW)
+      store.claim(
+        claimed, owner: OWNER, claim_capability: CLAIM_CAPABILITY,
+        first_heartbeat_timeout_sec: 30, now: NOW
+      )
       assert_equal :suspect, reconciler(store, :missing).reconcile(now: NOW + 1).attempts.first.classification
     end
   end
@@ -239,7 +247,10 @@ class AttemptsReconcilerTest < Minitest::Test
     with_store do |store|
       launching = create(store, attempt_id: "launching")
       claimed_base = create(store, attempt_id: "claimed")
-      claimed = store.claim(claimed_base, owner: OWNER, first_heartbeat_timeout_sec: 30, now: NOW)
+      claimed = store.claim(
+        claimed_base, owner: OWNER, claim_capability: CLAIM_CAPABILITY,
+        first_heartbeat_timeout_sec: 30, now: NOW
+      )
       running = running_attempt(store, stale_sec: 30)
       terminal = store.terminalize(
         running, outcome: "succeeded", exit_status: 0,
@@ -292,6 +303,17 @@ class AttemptsReconcilerTest < Minitest::Test
     end
   end
 
+  def test_find_by_request_id_recovers_durable_admission_correlation
+    with_store do |store|
+      attempt = create(store, attempt_id: "correlated")
+      service = reconciler(store, :matching)
+
+      assert_equal attempt.attempt_id,
+                   service.find_by_request_id("request-correlated").attempt_id
+      assert_nil service.find_by_request_id("missing-request")
+    end
+  end
+
   private
 
   def with_store
@@ -310,7 +332,9 @@ class AttemptsReconcilerTest < Minitest::Test
       attempt_id: attempt_id, request_id: "request-#{attempt_id}", predecessor_attempt_id: nil,
       task_id: "42", project: "demo", task_slug: "durable-task",
       intended_stage: "4-execute", task_generation: "generation-#{attempt_id}",
-      progress_token: "progress", provider: "codex", starting_revision: nil,
+      progress_token: "progress", provider: "codex",
+      worker_argv: [ "hive", "run", "durable-task" ],
+      claim_capability_digest: Hive::Attempts::Capability.digest(CLAIM_CAPABILITY), starting_revision: nil,
       retry_charge: 0, inherited_outputs: [], launch_timeout_sec: timeout, now: NOW
     )
   end
@@ -318,7 +342,8 @@ class AttemptsReconcilerTest < Minitest::Test
   def running_attempt(store, stale_sec:)
     launching = create(store)
     claimed = store.claim(
-      launching, owner: OWNER, first_heartbeat_timeout_sec: 30, now: NOW
+      launching, owner: OWNER, claim_capability: CLAIM_CAPABILITY,
+      first_heartbeat_timeout_sec: 30, now: NOW
     )
     store.first_heartbeat(claimed, stale_sec: stale_sec, now: NOW + 1)
   end

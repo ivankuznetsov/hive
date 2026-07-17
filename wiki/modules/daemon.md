@@ -104,6 +104,18 @@ dispatched this tick is already in-flight in the controller and the row
 scan's per-slug in-flight gate (`controller.running_task?`) keeps the same
 tick from double-spawning.
 
+Durable task admissions use `Attempts::ConfiguredDispatcher`: it resolves the
+task and reloads that project's attempt heartbeat, stale, launch, and
+first-heartbeat timers for every initial or loss-successor dispatch. A daemon
+crash between queue preclaim and attempt-ID stamping is repaired on restart by
+looking up the immutable attempt `request_id`; the repaired claim is persisted
+before normal live/terminal/lost delivery reconciliation continues.
+
+On Linux the shipped systemd-user unit uses `KillMode=process`. Service
+restart therefore replaces only the daemon process; detached durable-attempt
+wrappers and workers remain alive for the first reconciliation pass to adopt,
+rather than being killed as cgroup children and replayed.
+
 Digest dispatches happen before status fetch because they are global, not
 project-row driven. The dispatcher tracks them with synthetic project/stage
 `digest/digest`; when the child is reaped, the scheduler advances its cursor

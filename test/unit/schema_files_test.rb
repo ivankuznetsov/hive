@@ -2221,6 +2221,9 @@ class SchemaFilesTest < Minitest::Test
 
     assert_equal 1, doc.fetch("properties").dig("schema_version", "const")
     assert_equal %w[launching running terminal lost], doc.fetch("properties").dig("state", "enum")
+    assert_includes doc.fetch("required"), "worker_argv"
+    assert_includes doc.fetch("required"), "claim_capability_digest"
+    assert_equal "^[0-9a-f]{64}$", doc.fetch("properties").dig("claim_capability_digest", "pattern")
     receipt_required = doc.dig("$defs", "Receipt", "required")
     %w[attempt_id task_generation outcome exit_status started_at ended_at final_checkpoint output_references log_reference].each do |key|
       assert_includes receipt_required, key

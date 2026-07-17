@@ -1,4 +1,5 @@
 require "time"
+require "hive/attempts/capability"
 require "hive/attempts/output_reference"
 
 module Hive
@@ -18,7 +19,8 @@ module Hive
       IMMUTABLE_KEYS = %w[
         schema schema_version attempt_id request_id predecessor_attempt_id
         task_id project task_slug intended_stage task_generation progress_token
-        provider starting_revision retry_charge compatibility created_at accepted_at
+        provider worker_argv claim_capability_digest starting_revision retry_charge
+        compatibility created_at accepted_at
       ].freeze
       REQUIRED_KEYS = (IMMUTABLE_KEYS + %w[
         state outcome lease_version claim_deadline first_heartbeat_deadline
@@ -31,7 +33,8 @@ module Hive
 
       def self.launching(attempt_id:, request_id:, predecessor_attempt_id:, task_id:, project:,
                          task_slug:, intended_stage:, task_generation:, progress_token:, provider:,
-                         starting_revision:, retry_charge:, inherited_outputs:, now:,
+                         worker_argv:, claim_capability_digest:, starting_revision:, retry_charge:,
+                         inherited_outputs:, now:,
                          launch_timeout_sec:, compatibility: false)
         timestamp = iso8601(now)
         new(
@@ -47,6 +50,8 @@ module Hive
           "task_generation" => task_generation,
           "progress_token" => progress_token,
           "provider" => provider,
+          "worker_argv" => deep_copy(worker_argv),
+          "claim_capability_digest" => claim_capability_digest,
           "starting_revision" => starting_revision,
           "retry_charge" => retry_charge,
           "compatibility" => compatibility,
@@ -88,6 +93,8 @@ module Hive
           task_generation: task_generation,
           progress_token: progress_token,
           provider: provider,
+          worker_argv: [],
+          claim_capability_digest: nil,
           starting_revision: starting_revision,
           retry_charge: 0,
           inherited_outputs: [],
@@ -216,6 +223,17 @@ module Hive
         end
         unless @data["retry_charge"].is_a?(Integer) && @data["retry_charge"] >= 0
           raise InvalidRecord, "attempt record retry_charge must be non-negative"
+        end
+        worker_argv = @data["worker_argv"]
+        unless worker_argv.is_a?(Array) && worker_argv.all? { |value| value.is_a?(String) && !value.empty? }
+          raise InvalidRecord, "attempt record worker_argv must contain only non-empty strings"
+        end
+        if compatibility?
+          unless worker_argv.empty? && @data["claim_capability_digest"].nil?
+            raise InvalidRecord, "compatibility attempt cannot carry launch authority"
+          end
+        elsif worker_argv.empty? || !Capability.valid_digest?(@data["claim_capability_digest"])
+          raise InvalidRecord, "durable attempt requires worker argv and a capability digest"
         end
         unless @data["inherited_outputs"].is_a?(Array) && @data["current_outputs"].is_a?(Array)
           raise InvalidRecord, "attempt output references must be arrays"

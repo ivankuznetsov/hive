@@ -24,7 +24,7 @@ class ContentWorkflowE2ETest < Minitest::Test
         slug = content_slug(project_root)
         ran = []
         with_deterministic_content_agent(record: ran) do
-          Hive::Attempts::Context.with(
+          with_attempt_context(
             attempt_id: "content-workflow-test-attempt",
             task_generation: "content-workflow-test-generation"
           ) do

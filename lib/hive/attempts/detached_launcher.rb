@@ -38,14 +38,14 @@ module Hive
         true
       end
 
-      def launch(record, argv:)
+      def launch(record, claim_capability:)
         preflight!
         reader, writer = IO.pipe
         launcher_pid = fork do
           reader.close
           begin
             Process.setsid
-            fork_wrapper(record, argv, writer)
+            fork_wrapper(record, claim_capability, writer)
           rescue StandardError => e
             writer.write(JSON.generate(
               "claimed" => false, "attempt_id" => record.attempt_id,
@@ -71,9 +71,13 @@ module Hive
 
       private
 
-      def fork_wrapper(record, argv, writer)
+      def fork_wrapper(record, claim_capability, writer)
+        claim_reader, claim_writer = IO.pipe
+        claim_writer.write(claim_capability)
+        claim_writer.close
         wrapper_pid = fork do
           writer.close_on_exec = false
+          claim_reader.close_on_exec = false
           command = [
             RbConfig.ruby, @hive_executable, "__attempt-supervise", record.attempt_id,
             "--store-root", @store.root,
@@ -83,16 +87,22 @@ module Hive
             "--kill-grace-sec", @kill_grace_sec.to_s
           ]
           command.concat([ "--timeout-sec", @timeout_sec.to_s ]) if @timeout_sec
-          command.concat([ "--", *argv ])
-          env = { "HIVE_ATTEMPT_READY_FD" => writer.fileno.to_s }
+          env = ENV.keys.grep(/\AHIVE_ATTEMPT_/).to_h { |key| [ key, nil ] }.merge(
+            "HIVE_ATTEMPT_READY_FD" => writer.fileno.to_s,
+            "HIVE_ATTEMPT_CLAIM_FD" => claim_reader.fileno.to_s
+          )
           exec(
             env, *command,
             writer.fileno => writer.fileno,
+            claim_reader.fileno => claim_reader.fileno,
             in: File::NULL, out: File::NULL, err: File::NULL,
             close_others: true
           )
         end
+        claim_reader.close unless claim_reader.closed?
         wrapper_pid
+      ensure
+        claim_writer&.close unless claim_writer&.closed?
       end
     end
   end

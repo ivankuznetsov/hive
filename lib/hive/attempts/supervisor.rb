@@ -1,5 +1,6 @@
 require "json"
 require "rbconfig"
+require "hive/attempts/capability"
 require "hive/attempts/store"
 require "hive/attempts/stream_log"
 require "hive/lock"
@@ -13,7 +14,7 @@ module Hive
     class Supervisor
       READ_CHUNK = 16 * 1024
 
-      def initialize(store:, attempt_id:, worker_argv:, ready_io: nil,
+      def initialize(store:, attempt_id:, claim_io:, ready_io: nil,
                      heartbeat_sec: 5, stale_sec: 30,
                      first_heartbeat_timeout_sec: 30, timeout_sec: nil,
                      kill_grace_sec: 1, clock: -> { Time.now.utc },
@@ -21,7 +22,7 @@ module Hive
                      install_signal_handlers: false)
         @store = store
         @attempt_id = attempt_id
-        @worker_argv = worker_argv
+        @claim_io = claim_io
         @ready_io = ready_io
         @heartbeat_sec = heartbeat_sec
         @stale_sec = stale_sec
@@ -37,6 +38,9 @@ module Hive
       end
 
       def run
+        @claim_capability = read_claim_capability
+        return fail_before_start("invalid_claim_capability") unless @claim_capability
+
         record = @store.fetch(@attempt_id)
         return fail_before_start("attempt_not_launching") unless record&.state == "launching"
 
@@ -44,6 +48,7 @@ module Hive
         now = @clock.call
         record = @store.claim(
           record, owner: process_identity(Process.pid),
+          claim_capability: @claim_capability,
           first_heartbeat_timeout_sec: @first_heartbeat_timeout_sec, now: now
         )
         record = @store.first_heartbeat(record, stale_sec: @stale_sec, now: @clock.call)
@@ -86,6 +91,7 @@ module Hive
       ensure
         signal_ready("claimed" => false, "attempt_id" => @attempt_id, "error" => "wrapper_exited")
         @ready_io&.close unless @ready_io&.closed?
+        @claim_io&.close unless @claim_io&.closed?
         log&.close unless log&.closed?
       end
 
@@ -94,21 +100,42 @@ module Hive
       def run_worker(record, log)
         stdout_r, stdout_w = IO.pipe
         stderr_r, stderr_w = IO.pipe
-        env = {
-          "HIVE_ATTEMPT_INTERNAL" => "1",
-          "HIVE_ATTEMPT_ID" => record.attempt_id,
-          "HIVE_ATTEMPT_STORE_ROOT" => @store.root
+        env = scrubbed_attempt_environment
+        spawn_options = {
+          in: File::NULL, out: stdout_w, err: stderr_w, pgroup: true,
+          close_others: true
         }
+        if hive_worker?(record)
+          gate_r, gate_w = IO.pipe
+          context_r, context_w = IO.pipe
+          context_w.write(@claim_capability)
+          context_w.close
+          gate_r.close_on_exec = false
+          context_r.close_on_exec = false
+          env.merge!(
+            "HIVE_ATTEMPT_INTERNAL" => "1",
+            "HIVE_ATTEMPT_ID" => record.attempt_id,
+            "HIVE_ATTEMPT_GATE_FD" => gate_r.fileno.to_s,
+            "HIVE_ATTEMPT_CONTEXT_FD" => context_r.fileno.to_s
+          )
+          spawn_options[gate_r.fileno] = gate_r.fileno
+          spawn_options[context_r.fileno] = context_r.fileno
+        end
         @worker_pid = Process.spawn(
-          env, *resolved_worker_argv,
-          in: File::NULL, out: stdout_w, err: stderr_w, pgroup: true
+          env, *resolved_worker_argv(record), spawn_options
         )
+        gate_r&.close unless gate_r&.closed?
+        context_r&.close unless context_r&.closed?
         stdout_w.close
         stderr_w.close
         record = @store.checkpoint(
           record, checkpoint: record.checkpoint,
           worker: process_identity(@worker_pid), now: @clock.call
         )
+        if gate_w
+          gate_w.write("1")
+          gate_w.close
+        end
 
         readers = { stdout_r => :stdout, stderr_r => :stderr }
         next_heartbeat = @monotonic.call + @heartbeat_sec
@@ -148,7 +175,7 @@ module Hive
         outcome = @cancel_reason ? "cancelled" : (exit_status.zero? ? "succeeded" : "failed")
         [ exit_status, outcome, record ]
       ensure
-        [ stdout_r, stdout_w, stderr_r, stderr_w ].compact.each do |io|
+        [ stdout_r, stdout_w, stderr_r, stderr_w, gate_r, gate_w, context_r, context_w ].compact.each do |io|
           io.close unless io.closed?
         end
       end
@@ -214,10 +241,28 @@ module Hive
         raise StoreError, "process #{pid} disappeared before identity capture"
       end
 
-      def resolved_worker_argv
-        return @worker_argv unless @worker_argv.first == "hive"
+      def resolved_worker_argv(record)
+        worker_argv = record["worker_argv"]
+        return worker_argv unless worker_argv.first == "hive"
 
-        [ RbConfig.ruby, File.expand_path("../../../bin/hive", __dir__), *@worker_argv.drop(1) ]
+        [ RbConfig.ruby, File.expand_path("../../../bin/hive", __dir__), *worker_argv.drop(1) ]
+      end
+
+      def hive_worker?(record)
+        record["worker_argv"].first == "hive"
+      end
+
+      def scrubbed_attempt_environment
+        ENV.keys.grep(/\AHIVE_ATTEMPT_/).to_h { |key| [ key, nil ] }
+      end
+
+      def read_claim_capability
+        return nil unless @claim_io
+
+        value = @claim_io.read((Capability::SECRET_BYTES * 2) + 1)
+        Capability.valid_secret?(value) ? value : nil
+      rescue IOError, SystemCallError
+        nil
       end
 
       def log_path(attempt_id)

@@ -7,6 +7,7 @@ class DaemonAttemptLossHealerTest < Minitest::Test
   include HiveTestHelper
 
   NOW = Time.utc(2026, 7, 16, 12, 0, 0)
+  CLAIM_CAPABILITY = "c" * 64
 
   class FakeController
     def running_task?(**) = false
@@ -58,7 +59,7 @@ class DaemonAttemptLossHealerTest < Minitest::Test
     with_task do |task|
       with_tmp_dir do |root|
         store = Hive::Attempts::Store.new(root: root)
-        lost = lost_attempt(store, retry_charge: 1)
+        lost = lost_attempt(store, retry_charge: 1, task_folder: task.folder)
         outcomes = Hive::Attempts::LostOutcomeStore.new(store: store)
         dispatcher = FakeDispatcher.new
         logger = FakeLogger.new
@@ -87,7 +88,7 @@ class DaemonAttemptLossHealerTest < Minitest::Test
     with_task do |task|
       with_tmp_dir do |root|
         store = Hive::Attempts::Store.new(root: root)
-        lost = lost_attempt(store, retry_charge: 3)
+        lost = lost_attempt(store, retry_charge: 3, task_folder: task.folder)
         outcomes = Hive::Attempts::LostOutcomeStore.new(store: store)
         dispatcher = FakeDispatcher.new
         logger = FakeLogger.new
@@ -103,17 +104,68 @@ class DaemonAttemptLossHealerTest < Minitest::Test
     end
   end
 
+  def test_successor_preserves_workflow_argv_before_source_stage_promotion
+    with_task(stage: "1-inbox") do |task|
+      with_tmp_dir do |root|
+        store = Hive::Attempts::Store.new(root: root)
+        worker_argv = [ "hive", "brainstorm", task.folder, "--from", "1-inbox", "--json" ]
+        lost = lost_attempt(
+          store, retry_charge: 0, task_folder: task.folder,
+          intended_stage: "2-brainstorm", worker_argv: worker_argv
+        )
+        outcomes = Hive::Attempts::LostOutcomeStore.new(store: store)
+        dispatcher = FakeDispatcher.new
+
+        healer(
+          store, outcomes, FakeProcessor.new(outcomes, task.folder), dispatcher, FakeLogger.new
+        ).heal_attempt_losses([ lost ], now: NOW + 2)
+
+        assert_equal worker_argv, dispatcher.calls.first.fetch(:argv)
+      end
+    end
+  end
+
+  def test_successor_retargets_moved_task_and_drops_satisfied_source_assertion
+    with_task(stage: "2-brainstorm") do |task|
+      with_tmp_dir do |root|
+        old_folder = task.folder.sub("2-brainstorm", "1-inbox")
+        worker_argv = [
+          "hive", "brainstorm", old_folder, "--from", "1-inbox", "--json",
+          "--recover-merged-error-reason", "ci_failed"
+        ]
+        store = Hive::Attempts::Store.new(root: root)
+        lost = lost_attempt(
+          store, retry_charge: 0, task_folder: old_folder,
+          intended_stage: "2-brainstorm", worker_argv: worker_argv
+        )
+        outcomes = Hive::Attempts::LostOutcomeStore.new(store: store)
+        dispatcher = FakeDispatcher.new
+
+        healer(
+          store, outcomes, FakeProcessor.new(outcomes, task.folder), dispatcher, FakeLogger.new
+        ).heal_attempt_losses([ lost ], now: NOW + 2)
+
+        assert_equal [
+          "hive", "brainstorm", task.folder, "--json",
+          "--recover-merged-error-reason", "ci_failed"
+        ], dispatcher.calls.first.fetch(:argv)
+      end
+    end
+  end
+
   def test_existing_successor_is_replayed_into_outcome_without_redispatch
     with_task do |task|
       with_tmp_dir do |root|
         store = Hive::Attempts::Store.new(root: root)
-        lost = lost_attempt(store, retry_charge: 1)
+        lost = lost_attempt(store, retry_charge: 1, task_folder: task.folder)
         successor = store.create_launching(
           attempt_id: "successor-existing", request_id: "successor-request",
           predecessor_attempt_id: lost.attempt_id, task_id: "42", project: "demo",
           task_slug: "durable-task", intended_stage: "4-execute",
           task_generation: lost.task_generation, progress_token: lost["progress_token"],
-          provider: "codex", starting_revision: "abc", retry_charge: 2,
+          provider: "codex", worker_argv: lost["worker_argv"],
+          claim_capability_digest: Hive::Attempts::Capability.digest(CLAIM_CAPABILITY),
+          starting_revision: "abc", retry_charge: 2,
           inherited_outputs: [], launch_timeout_sec: 30, now: NOW + 2
         )
         outcomes = Hive::Attempts::LostOutcomeStore.new(store: store)
@@ -134,7 +186,7 @@ class DaemonAttemptLossHealerTest < Minitest::Test
   def test_unlocatable_task_becomes_manual_and_processor_errors_are_logged
     with_tmp_dir do |root|
       store = Hive::Attempts::Store.new(root: root)
-      lost = lost_attempt(store, retry_charge: 0)
+      lost = lost_attempt(store, retry_charge: 0, task_folder: "durable-task")
       outcomes = Hive::Attempts::LostOutcomeStore.new(store: store)
       dispatcher = FakeDispatcher.new
       logger = FakeLogger.new
@@ -157,7 +209,7 @@ class DaemonAttemptLossHealerTest < Minitest::Test
   def test_task_fallback_resolves_by_stable_id
     with_tmp_dir do |root|
       store = Hive::Attempts::Store.new(root: root)
-      lost = lost_attempt(store, retry_charge: 0)
+      lost = lost_attempt(store, retry_charge: 0, task_folder: "durable-task")
       outcomes = Hive::Attempts::LostOutcomeStore.new(store: store)
       service = healer(
         store, outcomes, FakeProcessor.new(outcomes, nil), FakeDispatcher.new, FakeLogger.new
@@ -188,21 +240,24 @@ class DaemonAttemptLossHealerTest < Minitest::Test
     )
   end
 
-  def lost_attempt(store, retry_charge:)
+  def lost_attempt(store, retry_charge:, task_folder:, intended_stage: "4-execute", worker_argv: nil)
+    worker_argv ||= [ "hive", "run", task_folder ]
     attempt = store.create_launching(
       attempt_id: "lost-#{retry_charge}", request_id: "request-#{retry_charge}",
       predecessor_attempt_id: nil, task_id: "42", project: "demo",
-      task_slug: "durable-task", intended_stage: "4-execute",
+      task_slug: "durable-task", intended_stage: intended_stage,
       task_generation: "generation-#{retry_charge}", progress_token: "progress",
-      provider: "codex", starting_revision: "abc", retry_charge: retry_charge,
+      provider: "codex", worker_argv: worker_argv,
+      claim_capability_digest: Hive::Attempts::Capability.digest(CLAIM_CAPABILITY),
+      starting_revision: "abc", retry_charge: retry_charge,
       inherited_outputs: [], launch_timeout_sec: 1, now: NOW
     )
     store.mark_lost(attempt, reason: "launch_timeout", now: NOW + 1)
   end
 
-  def with_task
+  def with_task(stage: "4-execute")
     with_tmp_dir do |project_root|
-      folder = File.join(project_root, ".hive-state", "stages", "4-execute", "durable-task")
+      folder = File.join(project_root, ".hive-state", "stages", stage, "durable-task")
       FileUtils.mkdir_p(folder)
       File.write(File.join(folder, "meta.yml"), { "id" => 42 }.to_yaml)
       File.write(File.join(folder, "worktree.yml"), { "path" => project_root }.to_yaml)

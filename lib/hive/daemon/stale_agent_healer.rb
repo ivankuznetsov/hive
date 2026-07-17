@@ -192,7 +192,7 @@ module Hive
             predecessor: attempt,
             task: task,
             project: attempt["project"],
-            argv: [ "hive", "run", task.folder ],
+            argv: successor_argv(attempt, task),
             request_id: "attempt-loss-#{outcome.fetch('idempotency_key')[0, 24]}",
             provider: attempt["provider"],
             inherited_outputs: (attempt["inherited_outputs"] + attempt["current_outputs"]).uniq,
@@ -283,6 +283,25 @@ module Hive
         Hive::TaskResolver.new(target, project_filter: attempt["project"]).resolve
       rescue Hive::Error, SystemCallError
         nil
+      end
+
+      def successor_argv(attempt, task)
+        argv = Array(attempt["worker_argv"]).dup
+        return argv unless argv.first == "hive" && argv.length >= 3
+
+        # The durable command is replayed byte-for-byte except for its task
+        # locator, which must follow an atomic stage move performed before the
+        # owner was lost. Once a workflow action has reached its admitted
+        # target, its source assertion is no longer valid and is removed; all
+        # other recovery/JSON flags remain intact.
+        argv[2] = task.folder
+        if "#{task.stage_index}-#{task.stage_name}" == attempt["intended_stage"]
+          while (index = argv.index("--from"))
+            argv.slice!(index, 2)
+          end
+          argv.reject! { |value| value.start_with?("--from=") }
+        end
+        argv
       end
 
       def heal_error_if_auto_recoverable(row, now:)

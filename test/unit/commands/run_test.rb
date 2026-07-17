@@ -371,11 +371,46 @@ class CommandsRunTest < Minitest::Test
     calls = []
     run.define_singleton_method(:do_call) { calls << :worker; :done }
 
-    value = Hive::Attempts::Context.with(attempt_id: "attempt-1", task_generation: "generation-1") do
+    value = with_attempt_context(attempt_id: "attempt-1", task_generation: "generation-1") do
       run.call
     end
 
     assert_equal :done, value
     assert_equal [ :worker ], calls
+  end
+
+  def test_lost_durable_attempt_emits_versioned_json_error_envelope
+    resolved = task(folder: "/tmp/task-folder", stage_name: "execute", stage_index: 4)
+    attempt = Struct.new(:attempt_id).new("attempt-lost")
+    dispatch_result = Hive::Attempts::DispatchResult.new(
+      status: :accepted, attempt: attempt, receipt: nil,
+      attach_descriptor: { "attempt_id" => attempt.attempt_id }, reason: nil
+    )
+    dispatcher = Object.new
+    dispatcher.define_singleton_method(:dispatch) { |**_kwargs| dispatch_result }
+    client = Object.new
+    client.define_singleton_method(:attach) do |id|
+      Hive::Attempts::ClientResult.new(
+        status: :lost, exit_status: Hive::ExitCodes::TEMPFAIL,
+        outcome: "lost", receipt: nil, attempt_id: id
+      )
+    end
+    entrypoint = Hive::Attempts::Entrypoint.new(
+      store: Object.new, dispatcher: dispatcher, client: client,
+      config_loader: ->(_root) { Hive::Config.merge_defaults({}) }
+    )
+    run = command(durable: true, json: true, attempt_entrypoint: entrypoint)
+    run.define_singleton_method(:resolve_task) { resolved }
+
+    out, = capture_io do
+      @lost_error = assert_raises(Hive::ConcurrentRunError) { run.call }
+    end
+
+    payload = JSON.parse(out)
+    assert_equal "hive-run", payload.fetch("schema")
+    assert_equal Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-run"), payload.fetch("schema_version")
+    assert_equal "concurrent_run", payload.fetch("error_kind")
+    assert_equal Hive::ExitCodes::TEMPFAIL, payload.fetch("exit_code")
+    assert_includes payload.fetch("message"), "attempt-lost"
   end
 end

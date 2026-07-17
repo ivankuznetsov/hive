@@ -463,6 +463,34 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
     end
   end
 
+  def test_recover_claims_repairs_admitted_attempt_after_preclaim_crash
+    Dir.mktmpdir("hive-queue") do |dir|
+      at = Time.utc(2026, 7, 16, 12, 0, 0)
+      request_id = Q.write_request!(
+        project: "demo", slug: "demo-task", argv: %w[hive run demo-task],
+        request_id: "request-crash", state_home: dir, now: at
+      )
+      Q.claim(request_id, pid: nil, state_home: dir, now: at)
+
+      removed = Q.recover_claims(
+        state_home: dir, now: at + 10,
+        alive: ->(_pid, _start) { false },
+        attempt_for_request: ->(seen_request_id) {
+          assert_equal request_id, seen_request_id
+          { attempt_id: "attempt-1", task_generation: "generation-1" }
+        },
+        attempt_alive: ->(attempt_id, generation) {
+          attempt_id == "attempt-1" && generation == "generation-1"
+        }
+      )
+
+      assert_equal 0, removed
+      delivery = Q.claimed(state_home: dir).fetch(0)
+      assert_equal "attempt-1", delivery.claim.fetch("attempt_id")
+      assert_equal "generation-1", delivery.claim.fetch("task_generation")
+    end
+  end
+
   def test_recover_claims_expires_aged_claim_even_when_owner_alive
     Dir.mktmpdir("hive-dispatch-queue") do |dir|
       write_request(dir, request_id: "aged0001", created_at: Time.utc(2026, 5, 28, 18, 0, 0))

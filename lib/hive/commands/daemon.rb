@@ -21,6 +21,14 @@ require "hive/daemon/dispatch_request_queue"
 require "hive/daemon/status_report"
 require "hive/invoked_binary"
 require "hive/update_check/state"
+require "hive/attempts/store"
+require "hive/attempts/detached_launcher"
+require "hive/attempts/dispatcher"
+require "hive/attempts/configured_dispatcher"
+require "hive/attempts/process_identity"
+require "hive/attempts/legacy_backfiller"
+require "hive/attempts/reconciler"
+require "hive/attempts/lost_outcome"
 
 module Hive
   module Commands
@@ -242,6 +250,29 @@ module Hive
           logger: logger
         )
 
+        attempt_store = Hive::Attempts::Store.new
+        attempt_dispatcher = Hive::Attempts::ConfiguredDispatcher.new(
+          store: attempt_store
+        )
+        attempt_process_identity = Hive::Attempts::ProcessIdentity.new
+        attempt_backfiller = Hive::Attempts::LegacyBackfiller.new(
+          store: attempt_store,
+          process_identity: attempt_process_identity,
+          logger: logger
+        )
+        attempt_reconciler = Hive::Attempts::Reconciler.new(
+          store: attempt_store,
+          process_identity: attempt_process_identity,
+          legacy_backfiller: attempt_backfiller,
+          logger: logger
+        )
+        lost_outcome_store = Hive::Attempts::LostOutcomeStore.new(store: attempt_store)
+        lost_outcome_processor = Hive::Attempts::LostOutcomeProcessor.new(
+          store: attempt_store,
+          outcome_store: lost_outcome_store,
+          process_identity: attempt_process_identity
+        )
+
         dispatcher = Hive::Daemon::Dispatcher.new(
           config: config, controller: controller, supervisor: supervisor,
           status_consumer: status_consumer, logger: logger,
@@ -252,7 +283,11 @@ module Hive
           patrol_arbiter: patrol_arbiter,
           digest_scheduler: digest_scheduler, answer_digest_scheduler: answer_digest_scheduler,
           dry_run: @dry_run,
-          update_state: Hive::UpdateCheck::State.new
+          update_state: Hive::UpdateCheck::State.new,
+          attempt_dispatcher: attempt_dispatcher,
+          attempt_reconciler: attempt_reconciler,
+          lost_outcome_store: lost_outcome_store,
+          lost_outcome_processor: lost_outcome_processor
         )
 
         reexec_requested = false

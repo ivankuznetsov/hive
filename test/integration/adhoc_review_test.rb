@@ -1,6 +1,7 @@
 require "test_helper"
 require "json"
 require "hive/cli"
+require "hive/attempts/context"
 require "hive/commands/adhoc_review"
 require "hive/gh"
 require "hive/markers"
@@ -66,7 +67,10 @@ class AdhocReviewIntegrationTest < Minitest::Test
                             pass: 1)
           { commit: nil, status: :review_waiting }
         }) do
-          yield materialized
+          with_attempt_context(
+            attempt_id: "adhoc-review-test-attempt",
+            task_generation: "adhoc-review-test-generation"
+          ) { yield materialized }
         end
       end
     end

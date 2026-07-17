@@ -1,3 +1,5 @@
+require "digest"
+require "json"
 require "hive/stages"
 require "hive/archive_filter"
 require "hive/task_meta"
@@ -153,6 +155,35 @@ module Hive
         reason_code: "dependency_validation_failed",
         offending_ref: "#{task.project_name}:#{task.slug}",
         safe_correction: "Inspect dependency metadata and project enrollment before dispatching."
+      )
+    end
+
+    # Stable input to durable-attempt generation identity. A terminal
+    # dependency wait must remain replayable while the same admission verdict
+    # holds, but it must not mask a later wait->clear (or validation) change.
+    # Hash only the verdict for this task so unrelated fleet movement does not
+    # create a fresh generation.
+    def admission_fingerprint(task, registry_entries: Hive::Config.registered_projects)
+      root = File.expand_path(task.project_root)
+      matches = registry_entries.select do |entry|
+        File.expand_path(entry.fetch("path")) == root
+      end
+      payload = if matches.one?
+        project = matches.first.fetch("name")
+        verdict = admission_context(registry_entries).verdict(project: project, slug: task.slug)
+        error = verdict.admission_error
+        [
+          "hive-dependency-admission-v1", project, task.slug.to_s,
+          verdict.state.to_s, verdict.blocked_by.to_s, verdict.dependency_stage.to_s,
+          error&.reason_code.to_s, error&.offending_ref.to_s, error&.safe_correction.to_s
+        ]
+      else
+        [ "hive-dependency-admission-v1", "project_enrollment", matches.length, root, task.slug.to_s ]
+      end
+      ::Digest::SHA256.hexdigest(JSON.generate(payload))
+    rescue StandardError => e
+      ::Digest::SHA256.hexdigest(
+        JSON.generate([ "hive-dependency-admission-v1", "unreadable", e.class.name, e.message.to_s ])
       )
     end
 

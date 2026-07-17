@@ -51,7 +51,7 @@ task default: :test
 
 | Path | Purpose |
 |------|---------|
-| `test/fixtures/fake-claude` | Shell script that takes built-in provider headless argv, optionally writes captured args to a log, optionally echoes a scenario-controlled response, optionally writes a file, and can commit a scenario-controlled file in cwd. E2E points `HIVE_CLAUDE_BIN`, `HIVE_CODEX_BIN`, `HIVE_PI_BIN`, and `HIVE_GROK_BIN` at it. |
+| `test/fixtures/fake-claude` | Shell fixture for built-in provider headless argv. It can log/output/write, make one commit, or create a deterministic multi-commit sequence with progress/release sentinels for durable caller-loss scenarios. E2E points `HIVE_CLAUDE_BIN`, `HIVE_CODEX_BIN`, `HIVE_PI_BIN`, and `HIVE_GROK_BIN` at it. |
 | `test/fixtures/fake-gh` | Shell script that handles `gh pr create` / `gh auth status` / `gh pr list`, returns a dummy URL. |
 | `test/fixtures/voice/voice-idea.oga` | Checked-in Ogg/Opus speech sample saying "voice idea" for the Telegram voice-note E2E path. `run_idea_e2e.sh` uses it by default when `TG_IDEA_MODE=voice`; explicit voice mode hard-fails when `HIVE_WHISPER_API_KEY` is unset. Voice mode uses the same fixture for both new audio idea capture and audio brainstorm answers. |
 
@@ -64,6 +64,7 @@ task default: :test
 | `task_test.rb` | `Hive::Task` — path regex, descriptor-driven stage/index validation, workflow selector/default fallback, derived paths, slug edge cases. |
 | `markers_test.rb` | `Hive::Markers` — set/get round-trip, attribute quoting, last-marker semantics. |
 | `atomic_file_test.rb` | `Hive::AtomicFile` — atomic file replacement plus the shared directory-fsync helper's real flush and unsupported-platform (`NotImplementedError` / `EINVAL` / `ENOTSUP` / `EBADF`) behavior. |
+| `attempts/*_test.rb`, `daemon/attempt_loss_healer_test.rb` | Durable task attempts — record/schema/CAS edges, competing claim/expiry, artifact-plus-dependency-verdict generation duplicates/successors, capacity, detached session lifecycle, framed log/client replay, PID-reuse-safe adoption and orphan cleanup, marker/git evidence precedence, legacy backfill, mutation-free dirty capture, and restart-persistent bounded loss healing. |
 | `lock_test.rb` | `Hive::Lock` — acquire/release, stale-PID detection, commit lock parallelism. |
 | `worktree_test.rb` | `Hive::Worktree` — create attach-vs-new, dependency override stacking (incl. narrow-refspec and origin-ahead-of-local **and** local-ahead-of-origin placeholders), empty placeholder re-pointing, fail-closed preservation when the emptiness check errors, local-only prerequisite fallback, real-commit preservation, PR-head materialization/retry/failure handling, delete-failure errors, `local_branch_ref_exists?` blank-name guard, remove, exists?, pointer round-trip, prefix validation. |
 | `dependencies_test.rb`, `task_meta_test.rb`, `plan_frontmatter_test.rb`, `repository_identity_test.rb`, `dependency_admission_test.rb`, `dependency_snapshot_test.rb` | Fail-closed dependency admission — exhaustive scalar grammar and duplicate-key rejection; tolerant-vs-strict metadata reads and corrupt-mutation refusal; bounded optional exact plan assertion; SSH/HTTPS/local remote normalization plus bounded TERM/KILL lookup; indexed same/cross-project and archived-fallback resolution; full cycle paths; concurrent folder-move fencing; workflow/gate validation; clear/wait/error verdicts; and unexpected-error backstop. |
@@ -189,6 +190,15 @@ seconds for the group. The #9771 dependency-gate and repository-routing
 incidents are enabled; four sibling-gated fixtures remain pending. The
 incident index and activation rules live in
 `test/e2e/scenarios/README.md`.
+
+`durable_attempt_1849_replay.yml` is the ownership acceptance replay. It starts
+a foreground develop attachment, makes three provider commits, kills the
+temporary caller group, asserts the execute lease remains running without a
+daemon, releases the provider, and validates exactly one successful terminal
+receipt. Focused attempt unit suites cover claim/expiry races, PID reuse,
+framed logs, restart adoption, legacy backfill, dirty capture, and bounded
+successor healing.
+
 `test/e2e/lib/hive_e2e_binary_test.rb` pins the harness binary contract:
 scenario inventory JSON, cleanup JSON, the single-document stdout invariant for
 successful `list --json` / `clean --json` calls, unknown-command JSON errors,
@@ -387,7 +397,10 @@ page directly, avoiding a saved `.task-row` element that Turbo may detach while
 the daemon broadcasts grid replacements. Before submitting the brainstorm
 answer, it waits for the daemon's `needs_input` classification and for the
 current `brainstorm.md` mtime second to pass, avoiding equality with the
-daemon's edit-resume baseline on coarse CI filesystems. `status_test.rb` pins
+daemon's edit-resume baseline on coarse CI filesystems. The ordering gate
+accepts either the legacy `child_exited` event or durable ownership's
+`attempt_terminal` event before the classification, so both launch paths prove
+the same answer window. `status_test.rb` pins
 the matching production contract: JSON task `mtime` and `folder_mtime` keep
 subsecond precision for the daemon's mtime-to-mtime comparison. The Telegram
 leg lives in `test/e2e/tg` (real Bot API, secret-gated) and now asserts the

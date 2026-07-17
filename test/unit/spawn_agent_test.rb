@@ -544,9 +544,11 @@ class SpawnAgentTest < Minitest::Test
       "execute" => { "agent" => "codex" },
       "agents"  => { "codex" => { "bin" => "/custom/codex/path" } }
     }
-    profile = Hive::Stages::Base.stage_profile(cfg, "execute")
-    assert_equal :codex, profile.name
-    assert_equal "/custom/codex/path", profile.bin
+    with_env("HIVE_CODEX_BIN" => nil) do
+      profile = Hive::Stages::Base.stage_profile(cfg, "execute")
+      assert_equal :codex, profile.name
+      assert_equal "/custom/codex/path", profile.bin
+    end
   end
 
   def test_stage_profile_raises_on_unknown_agent_name

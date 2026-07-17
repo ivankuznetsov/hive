@@ -25,6 +25,39 @@ class HiveDaemonDispatchResultQueueTest < Minitest::Test
       assert_equal "my-task", notice.slug
       assert_equal 4, notice.exit_code
       assert_equal "req12345", notice.request_id
+      assert_equal 2, notice.schema_version
+      assert_nil notice.attempt_id
+    end
+  end
+
+  def test_attempt_reference_and_receipt_roundtrip
+    Dir.mktmpdir("hive-dispatch-result") do |dir|
+      receipt = { "attempt_id" => "attempt-1", "outcome" => "succeeded" }
+      Q.write!(chat_id: 42, project: "hive", slug: "my-task",
+               request_id: "req12345", exit_code: 0, command: "hive run my-task",
+               attempt_id: "attempt-1", attempt_state: "terminal", receipt: receipt,
+               state_home: dir)
+
+      notice = Q.pending(state_home: dir).first
+      assert_equal "attempt-1", notice.attempt_id
+      assert_equal "terminal", notice.attempt_state
+      assert_equal receipt, notice.receipt
+    end
+  end
+
+  def test_pending_continues_to_read_version_one_notices
+    Dir.mktmpdir("hive-dispatch-result") do |dir|
+      payload = {
+        "schema" => "hive-dispatch-result", "schema_version" => 1,
+        "result_id" => "abcd1234", "created_at" => Time.now.utc.iso8601,
+        "chat_id" => 1, "project" => "p", "slug" => "task",
+        "request_id" => "request-1", "exit_code" => 0, "command" => "hive run task"
+      }
+      File.write(File.join(Q.directory(state_home: dir), "legacy.json"), JSON.generate(payload))
+
+      notice = Q.pending(state_home: dir).first
+      assert_equal 1, notice.schema_version
+      assert_nil notice.attempt_id
     end
   end
 

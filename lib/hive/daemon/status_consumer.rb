@@ -22,6 +22,7 @@ module Hive
                        :live_task_lock, :task_lock_pid, :task_lock_process_start_time,
                        :task_lock_id, :diagnostic, :depends_on, :blocked_by,
                        :dependency_stage, :blocked, :admission_error,
+                       :attempt_id, :task_generation,
                        keyword_init: true)
       # Aggregated per-project legacy-layout signal lifted out of each
       # project payload's `legacy_stage_dirs` array. The dispatcher uses
@@ -195,6 +196,8 @@ module Hive
               suggested_command: admission_error ? nil : task["suggested_command"],
               claude_pid_alive: task["claude_pid_alive"],
               live_task_lock: task["live_task_lock"] == true,
+              attempt_id: task["attempt_id"],
+              task_generation: task["task_generation"],
               task_lock_pid: task["task_lock_pid"],
               task_lock_process_start_time: task["task_lock_process_start_time"],
               task_lock_id: task["task_lock_id"],

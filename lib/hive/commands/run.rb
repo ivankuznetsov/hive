@@ -11,6 +11,8 @@ require "hive/execute_waiting_action"
 require "hive/task_action"
 require "hive/task_resolver"
 require "hive/dependency_snapshot"
+require "hive/attempts/context"
+require "hive/attempts/entrypoint"
 
 module Hive
   module Commands
@@ -30,17 +32,22 @@ module Hive
       # schemas/hive-run.v1.json $defs.SuccessPayload.properties.
       OPTIONAL_PAYLOAD_KEYS = %w[cleanup_instructions].freeze
 
-      def initialize(target, project: nil, stage: nil, json: false, quiet: false, no_rebase: false)
+      def initialize(target, project: nil, stage: nil, json: false, quiet: false, no_rebase: false,
+                     durable: false, attempt_entrypoint: nil)
         @target = target
         @project_filter = project
         @stage_filter = stage
         @json = json
         @quiet = quiet
         @no_rebase = no_rebase
+        @durable = durable
+        @attempt_entrypoint = attempt_entrypoint
       end
 
       def call
         @stdout_written = false
+        return dispatch_durable if @durable && !Hive::Attempts::Context.active?
+
         do_call
       rescue Hive::Error => e
         emit_error_envelope(e) if @json && !@stdout_written
@@ -52,13 +59,10 @@ module Hive
       end
 
       def do_call
-        task = Hive::TaskResolver.new(
-          @target,
-          project_filter: @project_filter,
-          stage_filter: @stage_filter
-        ).resolve
+        task = resolve_task
         Hive::Lock.with_task_lock(task.folder, slug: task.slug, stage: task.stage_name) do
           Hive::DependencySnapshot.enforce_admission!(task)
+          Hive::Attempts::Context.current&.validate_generation!(task)
           cfg = Hive::Config.load(task.project_root)
           marker = Hive::Markers.current(task.state_file)
           if marker.name == :manual_steering
@@ -73,6 +77,55 @@ module Hive
           commit_after(task, result)
           report(task, result)
         end
+      end
+
+      def resolve_task
+        Hive::TaskResolver.new(
+          @target,
+          project_filter: @project_filter,
+          stage_filter: @stage_filter
+        ).resolve
+      end
+
+      def dispatch_durable
+        task = resolve_task
+        result = (@attempt_entrypoint || Hive::Attempts::Entrypoint.new).dispatch(
+          task: task,
+          intended_stage: "#{task.stage_index}-#{task.stage_name}",
+          argv: durable_worker_argv(task),
+          interactive: true
+        )
+        handle_durable_failure!(result) unless result.exit_status.zero?
+
+        result
+      end
+
+      def handle_durable_failure!(result)
+        if result.status == :lost
+          exit(result.exit_status) if @json && result.stdout_emitted?
+
+          raise Hive::ConcurrentRunError,
+                "durable attempt lost before producing a receipt for #{@target}: #{result.attempt_id}"
+        end
+
+        if @json && !result.stdout_emitted?
+          raise Hive::AttemptExecutionError.new(
+            "durable attempt #{result.attempt_id} finished with #{result.outcome || 'an error'} " \
+            "(exit #{result.exit_status}) before emitting JSON",
+            exit_code: result.exit_status,
+            attempt_id: result.attempt_id,
+            outcome: result.outcome
+          )
+        end
+
+        exit(result.exit_status)
+      end
+
+      def durable_worker_argv(task)
+        argv = [ "hive", "run", task.folder ]
+        argv << "--json" if @json
+        argv << "--no-rebase" if @no_rebase
+        argv
       end
 
       # Auto-rebase pre-step. Fail-soft: any failure aborts the rebase
@@ -536,7 +589,8 @@ module Hive
         when Hive::WorktreeError      then Hive::Schemas::RunErrorKind::WORKTREE
         when Hive::AmbiguousSlug      then Hive::Schemas::RunErrorKind::AMBIGUOUS_SLUG
         when Hive::InvalidTaskPath    then Hive::Schemas::RunErrorKind::INVALID_TASK_PATH
-        when Hive::InternalError      then Hive::Schemas::RunErrorKind::INTERNAL
+        when Hive::InternalError, Hive::AttemptExecutionError
+          Hive::Schemas::RunErrorKind::INTERNAL
         else                               Hive::Schemas::RunErrorKind::ERROR
         end
       end

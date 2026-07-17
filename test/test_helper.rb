@@ -90,6 +90,20 @@ module HiveTestHelper
     receiver.define_singleton_method(name, original) if original
   end
 
+  # Production deliberately exposes no Context.with/new escape hatch: a
+  # caller-controlled context would bypass durable admission. Tests that need
+  # to exercise already-admitted worker code replace only the observer seam
+  # and mark the synthetic context as already generation-validated. Dedicated
+  # Context/Run tests cover the real pre-side-effect validation boundary.
+  def with_attempt_context(attempt_id:, task_generation:)
+    require "hive/attempts/context"
+    context = Hive::Attempts::Context.send(
+      :new, attempt_id: attempt_id, task_generation: task_generation
+    )
+    context.instance_variable_set(:@generation_validated, true)
+    with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) { yield }
+  end
+
   def with_env(overrides)
     old = overrides.keys.to_h { |key| [ key, ENV.key?(key) ? ENV[key] : UNSET_ENV ] }
     overrides.each { |key, value| value.nil? ? ENV.delete(key) : ENV[key] = value }

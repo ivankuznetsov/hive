@@ -3,7 +3,7 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-07-16
+updated: 2026-07-17
 tags: [gap, todo]
 ---
 
@@ -18,6 +18,21 @@ tags: [gap, todo]
   implementation intentionally performs no network identity lookup; it trusts
   only normalized enrolled/live `origin` strings and fails closed on missing
   or ambiguous evidence.
+- Durable task attempts are race/unit/integration-pinned and the local Linux
+  1849 subprocess replay proves caller-loss survival without a daemon. There
+  is not yet a checked-in macOS/BSD detachment run or a paid-provider,
+  multi-hour daemon-restart artifact; unsupported platforms reject before
+  acceptance rather than weakening ownership guarantees.
+- Durable attempt capabilities prevent ordinary worker-environment inheritance,
+  a dedicated attempt-context store override, public context construction,
+  cross-task argv reuse, and PID/session/group substitution. The process-level
+  `HIVE_HOME`, `XDG_STATE_HOME`, and `HOME` inputs still select Hive's global
+  state root and are part of the trusted launch configuration. These guards do
+  not provide privilege separation from hostile same-UID Ruby code with
+  arbitrary environment, store, or process-internal access. Closing that
+  stronger boundary requires a broker under a separate OS identity (or
+  equivalent protected signing/storage authority), not another in-process
+  Ruby guard.
 
 - The built-in `bench` descriptor, packaged stage instructions, self-contained
   runtime snapshot, and `hive init . --workflow bench` path are covered locally,
@@ -261,8 +276,9 @@ Dependency lock uncertainty is unchanged: the root bundle has
 - **Brainstorm answers written within one daemon tick of round-end are
   swallowed** — found by the hivebox golden-path E2E. The resume watcher
   only sees state-file edits NEWER than its baseline, and the baseline is
-  seeded by the first classification tick after the round's child is
-  reaped. An operator answering inside that window (the push-updating web
+  seeded by the first classification tick after the round's active owner is
+  observed complete (legacy child exit or durable attempt terminalization).
+  An operator answering inside that window (the push-updating web
   UI shows questions the moment the agent writes them, before the child
   even exits) strands the task at `needs_input` until some later edit. The
   E2E syncs on the daemon's own event log to avoid the window

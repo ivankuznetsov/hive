@@ -57,6 +57,7 @@ module Hive
         @running = {}
         @external_running_by_project = Hash.new(0)
         @external_running_global = 0
+        @durable_daily_counts = {}
         # [project, Date] → Integer
         @daily_counts = Hash.new(0)
         # [project, slug] → Time (cooldown expiry)
@@ -166,6 +167,18 @@ module Hive
           @external_running_by_project[project] = count.to_i if count.to_i.positive?
         end
         @external_running_global = @external_running_by_project.values.sum
+      end
+
+      # Publish the reconciled durable view before admission. Legacy status
+      # counts passed here must already be deduplicated against lease-backed
+      # tasks; they are a compatibility fallback only.
+      def set_capacity_snapshot(snapshot, legacy_per_project: {})
+        combined = Hash.new(0)
+        snapshot.per_project.each { |project, count| combined[project] += count.to_i }
+        legacy_per_project.each { |project, count| combined[project] += count.to_i }
+        @external_running_by_project = combined
+        @external_running_global = snapshot.global_count.to_i + legacy_per_project.values.sum(&:to_i)
+        @durable_daily_counts = snapshot.daily_counts
       end
 
       # Returns the mtime LAST observed on (project, slug)'s state file —
@@ -340,7 +353,8 @@ module Hive
       end
 
       def daily_count_for(project, now = Time.now)
-        @daily_counts[[ project, now.to_date ]]
+        [ @daily_counts[[ project, now.to_date ]],
+          @durable_daily_counts.fetch([ project, now.to_date ], 0) ].max
       end
 
       private

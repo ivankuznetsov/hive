@@ -58,6 +58,40 @@ if [[ -n "${HIVE_FAKE_CLAUDE_COMMIT_FILE:-}" ]]; then
   fi
 fi
 
+# Durable-attempt acceptance fixture. Create a deterministic sequence of
+# commits, publish a readiness sentinel, then wait on a release sentinel.
+# This lets the e2e harness terminate the temporary CLI attachment after
+# useful work exists while proving the detached wrapper continues ownership.
+if [[ -n "${HIVE_FAKE_CLAUDE_MULTI_COMMIT_COUNT:-}" ]]; then
+  count="${HIVE_FAKE_CLAUDE_MULTI_COMMIT_COUNT}"
+  prefix="${HIVE_FAKE_CLAUDE_MULTI_COMMIT_PREFIX:-durable-attempt-progress}"
+  if [[ -n "${HIVE_FAKE_CLAUDE_BASE_REVISION_FILE:-}" ]]; then
+    mkdir -p "$(dirname "${HIVE_FAKE_CLAUDE_BASE_REVISION_FILE}")"
+    git rev-parse HEAD > "${HIVE_FAKE_CLAUDE_BASE_REVISION_FILE}"
+  fi
+  for ((i = 1; i <= count; i++)); do
+    file="${prefix}-${i}.txt"
+    printf 'durable attempt progress %s\n' "$i" > "$file"
+    git add -- "$file"
+    git commit -m "test: durable attempt progress ${i}" --quiet
+  done
+  if [[ -n "${HIVE_FAKE_CLAUDE_PROGRESS_FILE:-}" ]]; then
+    mkdir -p "$(dirname "${HIVE_FAKE_CLAUDE_PROGRESS_FILE}")"
+    : > "${HIVE_FAKE_CLAUDE_PROGRESS_FILE}"
+  fi
+  if [[ -n "${HIVE_FAKE_CLAUDE_RELEASE_FILE:-}" ]]; then
+    deadline=$((SECONDS + ${HIVE_FAKE_CLAUDE_RELEASE_TIMEOUT_SEC:-60}))
+    until [[ -e "${HIVE_FAKE_CLAUDE_RELEASE_FILE}" ]]; do
+      if ((SECONDS >= deadline)); then
+        printf 'fake-claude: timed out waiting for release sentinel %s\n' \
+          "${HIVE_FAKE_CLAUDE_RELEASE_FILE}" >&2
+        exit 124
+      fi
+      sleep 0.05
+    done
+  fi
+fi
+
 # Simulate the side-effect of `gh pr create` on a subsequent `gh pr
 # list`: when HIVE_FAKE_GH_PR_EXISTS_FILE is set, mark the file so
 # fake-gh's `pr list` claims the PR exists. Tests for the open-pr

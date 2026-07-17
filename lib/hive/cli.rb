@@ -507,7 +507,8 @@ module Hive
         project: options[:project],
         stage: options[:stage],
         json: options[:json],
-        no_rebase: options[:no_rebase]
+        no_rebase: options[:no_rebase],
+        durable: true
       ).call
     end
     map "run" => :run_task
@@ -591,7 +592,8 @@ module Hive
           "review",
           result.fetch(:slug),
           project: result.fetch(:project),
-          json: options[:json]
+          json: options[:json],
+          durable: true
         ).call
       end
 
@@ -1637,7 +1639,8 @@ module Hive
         Hive::Commands::StageAction.new(
           verb,
           target,
-          **kwargs
+          **kwargs,
+          durable: true
         ).call
       end
     end

@@ -345,4 +345,161 @@ class CommandsRunTest < Minitest::Test
   ensure
     JSON.define_singleton_method(:generate, original) if original
   end
+
+  def test_durable_call_dispatches_worker_without_running_body_in_caller
+    result = Hive::Attempts::ClientResult.new(
+      status: :terminal, exit_status: 0, outcome: "succeeded",
+      receipt: {}, attempt_id: "attempt-1"
+    )
+    entrypoint = Object.new
+    calls = []
+    entrypoint.define_singleton_method(:dispatch) { |**kwargs| calls << kwargs; result }
+    run = command(durable: true, json: true, no_rebase: true, attempt_entrypoint: entrypoint)
+    resolved = task(folder: "/tmp/task-folder", stage_name: "execute", stage_index: 4)
+    run.define_singleton_method(:resolve_task) { resolved }
+    run.define_singleton_method(:do_call) { flunk "durable caller executed worker body" }
+
+    assert_same result, run.call
+    assert_equal 1, calls.length
+    assert_equal "4-execute", calls.first.fetch(:intended_stage)
+    assert_equal [ "hive", "run", "/tmp/task-folder", "--json", "--no-rebase" ],
+                 calls.first.fetch(:argv)
+  end
+
+  def test_attempt_context_executes_existing_body_without_redispatch
+    run = command(durable: true)
+    calls = []
+    run.define_singleton_method(:do_call) { calls << :worker; :done }
+
+    value = with_attempt_context(attempt_id: "attempt-1", task_generation: "generation-1") do
+      run.call
+    end
+
+    assert_equal :done, value
+    assert_equal [ :worker ], calls
+  end
+
+  def test_admitted_worker_revalidates_generation_inside_task_lock_before_config
+    run = command(durable: true)
+    resolved = task(folder: "/tmp/task-folder", stage_name: "execute", stage_index: 4)
+    run.define_singleton_method(:resolve_task) { resolved }
+    inside_lock = false
+    context = Object.new
+    context.define_singleton_method(:validate_generation!) do |_task|
+      raise "generation validation escaped task lock" unless inside_lock
+
+      raise Hive::ConcurrentRunError, "stale durable generation"
+    end
+    lock = lambda do |*_args, **_kwargs, &block|
+      inside_lock = true
+      block.call
+    ensure
+      inside_lock = false
+    end
+
+    with_replaced_singleton_method(Hive::Attempts::Context, :current, -> { context }) do
+      with_replaced_singleton_method(Hive::Lock, :with_task_lock, lock) do
+        with_replaced_singleton_method(Hive::DependencySnapshot, :enforce_admission!, ->(_task) { true }) do
+          with_replaced_singleton_method(Hive::Config, :load, ->(*) { raise "config loaded before generation gate" }) do
+            assert_raises(Hive::ConcurrentRunError) { run.call }
+          end
+        end
+      end
+    end
+  end
+
+  def test_failed_durable_json_attempt_without_stdout_emits_one_error_document
+    result = Hive::Attempts::ClientResult.new(
+      status: :terminal, exit_status: Hive::ExitCodes::SOFTWARE, outcome: "failed",
+      receipt: {}, attempt_id: "attempt-empty", stdout_bytes: 0
+    )
+    entrypoint = Object.new
+    entrypoint.define_singleton_method(:dispatch) { |**_kwargs| result }
+    run = command(durable: true, json: true, attempt_entrypoint: entrypoint)
+    resolved = task(folder: "/tmp/task-folder", stage_name: "execute", stage_index: 4)
+    run.define_singleton_method(:resolve_task) { resolved }
+
+    out, = capture_io do
+      error = assert_raises(Hive::AttemptExecutionError) { run.call }
+      assert_equal Hive::ExitCodes::SOFTWARE, error.exit_code
+    end
+
+    assert_equal 1, out.lines.length
+    payload = JSON.parse(out)
+    assert_equal "hive-run", payload.fetch("schema")
+    assert_equal "internal", payload.fetch("error_kind")
+    assert_equal Hive::ExitCodes::SOFTWARE, payload.fetch("exit_code")
+    assert_includes payload.fetch("message"), "attempt-empty"
+  end
+
+  def test_failed_durable_json_attempt_with_worker_stdout_does_not_duplicate_it
+    result = Hive::Attempts::ClientResult.new(
+      status: :terminal, exit_status: Hive::ExitCodes::SOFTWARE, outcome: "failed",
+      receipt: {}, attempt_id: "attempt-output", stdout_bytes: 12
+    )
+    entrypoint = Object.new
+    entrypoint.define_singleton_method(:dispatch) { |**_kwargs| result }
+    run = command(durable: true, json: true, attempt_entrypoint: entrypoint)
+    resolved = task(folder: "/tmp/task-folder", stage_name: "execute", stage_index: 4)
+    run.define_singleton_method(:resolve_task) { resolved }
+
+    out, = capture_io do
+      exit_error = assert_raises(SystemExit) { run.call }
+      assert_equal Hive::ExitCodes::SOFTWARE, exit_error.status
+    end
+    assert_empty out
+  end
+
+  def test_lost_durable_json_attempt_with_worker_stdout_does_not_duplicate_it
+    result = Hive::Attempts::ClientResult.new(
+      status: :lost, exit_status: Hive::ExitCodes::TEMPFAIL, outcome: "lost",
+      receipt: nil, attempt_id: "attempt-lost-output", stdout_bytes: 12
+    )
+    entrypoint = Object.new
+    entrypoint.define_singleton_method(:dispatch) { |**_kwargs| result }
+    run = command(durable: true, json: true, attempt_entrypoint: entrypoint)
+    resolved = task(folder: "/tmp/task-folder", stage_name: "execute", stage_index: 4)
+    run.define_singleton_method(:resolve_task) { resolved }
+
+    out, = capture_io do
+      exit_error = assert_raises(SystemExit) { run.call }
+      assert_equal Hive::ExitCodes::TEMPFAIL, exit_error.status
+    end
+    assert_empty out
+  end
+
+  def test_lost_durable_attempt_emits_versioned_json_error_envelope
+    resolved = task(folder: "/tmp/task-folder", stage_name: "execute", stage_index: 4)
+    attempt = Struct.new(:attempt_id).new("attempt-lost")
+    dispatch_result = Hive::Attempts::DispatchResult.new(
+      status: :accepted, attempt: attempt, receipt: nil,
+      attach_descriptor: { "attempt_id" => attempt.attempt_id }, reason: nil
+    )
+    dispatcher = Object.new
+    dispatcher.define_singleton_method(:dispatch) { |**_kwargs| dispatch_result }
+    client = Object.new
+    client.define_singleton_method(:attach) do |id|
+      Hive::Attempts::ClientResult.new(
+        status: :lost, exit_status: Hive::ExitCodes::TEMPFAIL,
+        outcome: "lost", receipt: nil, attempt_id: id
+      )
+    end
+    entrypoint = Hive::Attempts::Entrypoint.new(
+      store: Object.new, dispatcher: dispatcher, client: client,
+      config_loader: ->(_root) { Hive::Config.merge_defaults({}) }
+    )
+    run = command(durable: true, json: true, attempt_entrypoint: entrypoint)
+    run.define_singleton_method(:resolve_task) { resolved }
+
+    out, = capture_io do
+      @lost_error = assert_raises(Hive::ConcurrentRunError) { run.call }
+    end
+
+    payload = JSON.parse(out)
+    assert_equal "hive-run", payload.fetch("schema")
+    assert_equal Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-run"), payload.fetch("schema_version")
+    assert_equal "concurrent_run", payload.fetch("error_kind")
+    assert_equal Hive::ExitCodes::TEMPFAIL, payload.fetch("exit_code")
+    assert_includes payload.fetch("message"), "attempt-lost"
+  end
 end

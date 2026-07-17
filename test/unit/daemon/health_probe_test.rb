@@ -4,6 +4,18 @@ require "hive/daemon/health_probe"
 class HiveDaemonHealthProbeTest < Minitest::Test
   include HiveTestHelper
 
+  def setup
+    @original_codex_bin = ENV.delete("HIVE_CODEX_BIN")
+  end
+
+  def teardown
+    if @original_codex_bin
+      ENV["HIVE_CODEX_BIN"] = @original_codex_bin
+    else
+      ENV.delete("HIVE_CODEX_BIN")
+    end
+  end
+
   Status = Struct.new(:success_value, :exitstatus, keyword_init: true) do
     def success?
       success_value

@@ -56,6 +56,8 @@ module Hive
         :state_file,
         :worktree_path,
         :pr_url,
+        :attempt_id,
+        :task_generation,
         :marker,
         :attrs,
         # Carried verbatim from the JSON `held` object for payload↔Row
@@ -95,7 +97,8 @@ module Hive
         # that predate issue #270 keep working; production payloads always
         # emit the integer explicitly.
         def initialize(id: nil, display_name: nil, workflow: nil, worktree_path: nil,
-                       pr_url: nil, folder_mtime: nil, live_task_lock: false,
+                       pr_url: nil, attempt_id: nil, task_generation: nil,
+                       folder_mtime: nil, live_task_lock: false,
                        task_lock_pid: nil, task_lock_process_start_time: nil, task_lock_id: nil,
                        unanswered_questions: 0, depends_on: nil,
                        blocked_by: nil, dependency_stage: nil,
@@ -109,6 +112,8 @@ module Hive
                 admission_error: admission_error,
                 worktree_path: worktree_path,
                 pr_url: pr_url,
+                attempt_id: attempt_id,
+                task_generation: task_generation,
                 held: held,
                 folder_mtime: folder_mtime,
                 live_task_lock: live_task_lock,
@@ -182,6 +187,8 @@ module Hive
           state_file: payload["state_file"],
           worktree_path: payload["worktree_path"],
           pr_url: payload["pr_url"],
+          attempt_id: payload["attempt_id"],
+          task_generation: payload["task_generation"],
           marker: payload["marker"],
           attrs: payload["attrs"],
           held: payload["held"],

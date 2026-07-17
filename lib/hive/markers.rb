@@ -1,4 +1,5 @@
 require "securerandom"
+require "hive/attempts/context"
 
 module Hive
   module Markers
@@ -45,7 +46,7 @@ module Hive
     # code here updates both consumers; previously each module had its
     # own private copy and would drift on edit.
     KILL_CLASS_EXIT_CODES = %w[130 137 143].freeze
-    INTERNAL_ATTR_KEYS = %w[marker_id].freeze
+    INTERNAL_ATTR_KEYS = %w[marker_id attempt_id task_generation].freeze
 
     State = Struct.new(:name, :attrs, :raw, keyword_init: true) do
       def none?
@@ -82,6 +83,8 @@ module Hive
       raise ArgumentError, "unknown marker #{marker_name}" unless KNOWN_NAMES.include?(marker_name)
 
       attrs = attrs_with_recovery_marker_id(marker_name, attrs)
+              .to_h
+              .merge(Hive::Attempts::Context.projection)
       new_marker = build_marker(marker_name, attrs)
       ensure_dir(state_file_path)
       with_markers_lock(state_file_path) do

@@ -2505,8 +2505,10 @@ class InitTest < Minitest::Test
       FileUtils.chmod(0755, hive)
       old_program_name = $PROGRAM_NAME
       begin
-        $PROGRAM_NAME = hive
-        assert_equal hive, Hive::Commands::Init.new(dir).send(:current_binary_path)
+        with_env("HIVE_INVOKED_BIN" => nil) do
+          $PROGRAM_NAME = hive
+          assert_equal hive, Hive::Commands::Init.new(dir).send(:current_binary_path)
+        end
       ensure
         $PROGRAM_NAME = old_program_name
       end

@@ -1,0 +1,73 @@
+name: durable_attempt_1849_replay
+description: A CLI-originated three-commit agent survives attachment termination and completes from its wrapper receipt.
+tags: [durable-attempt, cli-only, acceptance]
+steps:
+  - kind: cli
+    args: [new, "{project}", "durable attempt replay"]
+  - kind: ruby_block
+    block: |
+      path = File.join(sandbox, ".hive-state", "config.yml")
+      config = YAML.safe_load(File.read(path))
+      config.fetch("claude")["mode"] = "headless"
+      File.write(path, config.to_yaml)
+  - kind: cli
+    args: [brainstorm, "{slug}", --from, 1-inbox]
+    env:
+      HIVE_FAKE_CLAUDE_WRITE_FILE: "{task_dir:2-brainstorm}/brainstorm.md"
+      HIVE_FAKE_CLAUDE_WRITE_CONTENT: "# Brainstorm\n\n<!-- COMPLETE -->\n"
+  - kind: cli
+    args: [plan, "{slug}", --from, 2-brainstorm]
+    env:
+      HIVE_FAKE_CLAUDE_WRITE_FILE: "{task_dir:3-plan}/plan.md"
+      HIVE_FAKE_CLAUDE_WRITE_CONTENT: "# Plan\n\nImplement the durable replay.\n\n<!-- COMPLETE -->\n"
+  - kind: spawn_background
+    id: temporary-caller
+    args: [develop, "{slug}", --from, 3-plan]
+    env:
+      HIVE_FAKE_CLAUDE_MULTI_COMMIT_COUNT: "3"
+      HIVE_FAKE_CLAUDE_BASE_REVISION_FILE: "{run_home}/1849-base-revision"
+      HIVE_FAKE_CLAUDE_PROGRESS_FILE: "{run_home}/1849-three-commits.ready"
+      HIVE_FAKE_CLAUDE_RELEASE_FILE: "{run_home}/1849-release"
+  - kind: state_assert
+    path: "{run_home}/1849-three-commits.ready"
+    timeout: 30
+  - kind: stop_process
+    id: temporary-caller
+  - kind: ruby_block
+    block: |
+      records = Dir[File.join(run_home, "attempts", "v1", "records", "*.json")].filter_map do |path|
+        candidate = JSON.parse(File.binread(path))
+        candidate if candidate["intended_stage"] == "4-execute"
+      end
+      raise "expected one execute attempt, got #{records.size}" unless records.size == 1
+      record = records.first
+      raise "attempt was not still running after caller termination: #{record['state']}" unless record["state"] == "running"
+      task_folder = File.join(sandbox, ".hive-state", "stages", "4-execute", slug)
+      pointer = YAML.safe_load(File.read(File.join(task_folder, "worktree.yml")))
+      worktree = pointer.fetch("path")
+      baseline = File.read(File.join(run_home, "1849-base-revision")).strip
+      count = Integer(`git -C #{Shellwords.escape(worktree)} rev-list --count #{Shellwords.escape(baseline)}..HEAD`.strip)
+      raise "expected exactly three partial commits, got #{count}" unless count == 3
+      File.write(File.join(run_home, "1849-release"), "release\n")
+  - kind: state_assert
+    path: "{task_dir:4-execute}/task.md"
+    marker: { current: EXECUTE_COMPLETE }
+    timeout: 30
+  - kind: ruby_block
+    block: |
+      deadline = Time.now + 10
+      record = nil
+      loop do
+        records = Dir[File.join(run_home, "attempts", "v1", "records", "*.json")].filter_map do |path|
+          candidate = JSON.parse(File.binread(path))
+          candidate if candidate["intended_stage"] == "4-execute"
+        end
+        raise "duplicate execute attempt appeared: #{records.size}" unless records.size == 1
+        record = records.first
+        break if record["state"] == "terminal"
+        raise "attempt did not terminalize" if Time.now >= deadline
+        sleep 0.05
+      end
+      receipt = record.fetch("receipt")
+      raise "wrapper receipt did not succeed" unless receipt["outcome"] == "succeeded" && receipt["exit_status"] == 0
+      raise "receipt identity mismatch" unless receipt["attempt_id"] == record["attempt_id"] && receipt["task_generation"] == record["task_generation"]

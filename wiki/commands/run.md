@@ -7,7 +7,12 @@ updated: 2026-07-16
 tags: [command, dispatcher, stages, json, rebase, dependencies, admission]
 ---
 
-**TLDR**: `hive run TARGET` is the lower-level dispatcher for a slug or task folder. It resolves the task, takes its lock, revalidates dependency admission from disk, then loads config, rebases, and invokes the stage runner only when admission is clear.
+**TLDR**: `hive run TARGET` resolves a task generation into a durable attempt,
+launches or attaches to its detached supervisor (or replays its receipt),
+streams output read-only, and returns the receipt's exit status. Inside the
+wrapper, the worker takes the task lock and revalidates dependency admission
+from disk before loading config, rebasing, or invoking the stage runner.
+Caller or daemon exit does not cancel accepted work.
 
 ## Usage
 
@@ -22,15 +27,32 @@ hive run <project>/.hive-state/stages/<N>-<stage>/<slug> [--json] [--no-rebase]
 
 ## Steps performed (`Commands::Run#call`)
 
-1. Resolve `TARGET` via `Hive::TaskResolver`.
-2. Acquire the per-task lock via `Hive::Lock.with_task_lock`. Concurrent run raises `ConcurrentRunError` (exit 75).
-3. Build a fresh all-project snapshot and call `DependencySnapshot.enforce_admission!` while the task lock is held. A valid below-gate prerequisite raises retryable `DependencyWaitError` (exit 75); invalid evidence raises non-retryable `DependencyAdmissionError` (exit 78). Neither path loads run config, rebases, creates/uses a worktree, or invokes a runner. `--no-rebase` does not bypass this gate.
-4. Load merged config via `Hive::Config.load(task.project_root)`.
-5. If the current marker is `MANUAL_STEERING`, report a no-op. Admission was still checked first.
-6. **Auto-rebase pre-step** (`Hive::Rebase.perform`): see below.
-7. Resolve and call the stage runner inside `Hive::Stages::Base.with_stage_events`.
-8. If the result requests a commit, take the per-project commit lock and run `GitOps#hive_commit`.
-9. Report the current marker and stage-aware next step.
+1. The public route resolves `TARGET`, derives stage/progress identity, and
+   calls `Attempts::Entrypoint`.
+2. Under the generation lock, admission replays a receipt, attaches to a live
+   duplicate, defers a lost owner to healer policy, or creates one `launching`
+   record after capacity checks.
+3. A detached wrapper claims and heartbeats before it starts
+   `hive run <exact-folder>` in internal attempt context. Client interruption
+   detaches only.
+4. The internal worker acquires the task lock. Concurrent legacy work raises
+   `ConcurrentRunError` (75/TEMPFAIL).
+5. While holding that lock, it builds a fresh all-project snapshot and calls
+   `DependencySnapshot.enforce_admission!`. A valid below-gate prerequisite
+   raises retryable `DependencyWaitError` (75); invalid evidence raises
+   non-retryable `DependencyAdmissionError` (78). Neither path reaches the
+   internal worker's config load, rebase/worktree operations, or runner, and
+   `--no-rebase` does not bypass the gate.
+6. It loads merged config, handles `MANUAL_STEERING`, performs fail-soft
+   auto-rebase, resolves and runs the stage/provider, and emits stage events.
+7. If `result[:commit]`, it takes the project commit lock and commits state.
+   New locks/markers contain optional attempt/generation projections.
+8. The wrapper captures exit and atomically writes a
+   succeeded/failed/cancelled receipt. The client returns that exit status
+   while preserving text/JSON output.
+
+See [[modules/attempts]] for lease states, timers, duplicates, and loss
+recovery.
 
 ## Dependency admission errors
 

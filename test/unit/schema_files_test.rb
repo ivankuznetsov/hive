@@ -2215,6 +2215,21 @@ class SchemaFilesTest < Minitest::Test
     end
   end
 
+  def test_internal_attempt_schema_pins_state_and_receipt_contract
+    path = Hive::Schemas.schema_path("hive-attempt")
+    doc = JSON.parse(File.read(path))
+
+    assert_equal 1, doc.fetch("properties").dig("schema_version", "const")
+    assert_equal %w[launching running terminal lost], doc.fetch("properties").dig("state", "enum")
+    assert_includes doc.fetch("required"), "worker_argv"
+    assert_includes doc.fetch("required"), "claim_capability_digest"
+    assert_equal "^[0-9a-f]{64}$", doc.fetch("properties").dig("claim_capability_digest", "pattern")
+    receipt_required = doc.dig("$defs", "Receipt", "required")
+    %w[attempt_id task_generation outcome exit_status started_at ended_at final_checkpoint output_references log_reference].each do |key|
+      assert_includes receipt_required, key
+    end
+  end
+
   def test_refactor_patrol_retains_v1_while_v2_is_current
     assert_equal 2, Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-refactor-patrol")
 
@@ -2305,7 +2320,7 @@ class SchemaFilesTest < Minitest::Test
     doc = JSON.parse(File.read(path))
     assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
     assert_equal "hive-dispatch-result", doc.dig("properties", "schema", "const")
-    assert_equal 1, doc.dig("properties", "schema_version", "const")
+    assert_equal 2, doc.dig("properties", "schema_version", "const")
   end
 
   def test_hive_dispatch_result_required_keys_match_producer
@@ -2315,7 +2330,7 @@ class SchemaFilesTest < Minitest::Test
     # except the optional/nullable update_id is required.
     producer_required = %w[
       schema schema_version result_id created_at chat_id project slug
-      request_id exit_code command
+      request_id exit_code command attempt_id attempt_state receipt
     ].sort
     assert_equal producer_required, schema_required,
                  "schema/producer required-key drift in hive-dispatch-result.v1.json"
@@ -2343,10 +2358,11 @@ class SchemaFilesTest < Minitest::Test
   def test_hive_dispatch_result_chat_id_must_be_non_zero
     schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-dispatch-result"))))
     base = {
-      "schema" => "hive-dispatch-result", "schema_version" => 1,
+      "schema" => "hive-dispatch-result", "schema_version" => 2,
       "result_id" => "abc12345", "created_at" => "2026-06-03T12:00:00Z",
       "project" => "hive", "slug" => "my-task", "request_id" => "req00001",
-      "exit_code" => 1, "command" => "hive review my-task"
+      "exit_code" => 1, "command" => "hive review my-task",
+      "attempt_id" => nil, "attempt_state" => nil, "receipt" => nil
     }
     assert schemer.valid?(base.merge("chat_id" => 12_345)), "positive private chat id validates"
     assert schemer.valid?(base.merge("chat_id" => -1_001_234_567_890)), "negative group chat id validates"

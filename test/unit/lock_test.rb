@@ -22,6 +22,25 @@ class LockTest < Minitest::Test
     end
   end
 
+  def test_task_lock_projects_durable_attempt_identity
+    with_tmp_dir do |dir|
+      data = nil
+      with_attempt_context(attempt_id: "attempt-1", task_generation: "generation-1") do
+        data = Hive::Lock.acquire_task_lock(
+          dir,
+          "attempt_id" => "caller-cannot-override",
+          "task_generation" => "caller-cannot-override"
+        )
+
+        assert_equal "attempt-1", data["attempt_id"]
+        assert_equal "generation-1", data["task_generation"]
+        assert_equal data, YAML.safe_load(File.read(File.join(dir, ".lock")))
+      end
+    ensure
+      Hive::Lock.release_task_lock(dir, lock_id: data && data["lock_id"]) if dir
+    end
+  end
+
   def test_concurrent_run_with_live_pid_raises
     with_tmp_dir do |dir|
       # Fork a child that holds the PID alive.

@@ -2,6 +2,7 @@ require "test_helper"
 require "json"
 require "shellwords"
 require "hive/cli"
+require "hive/attempts/context"
 require "hive/commands/init"
 require "hive/commands/new"
 require "hive/daemon/policy"
@@ -326,7 +327,10 @@ class GenericWorkflowDaemonE2ETest < Minitest::Test
       File.write(task.state_file, "# #{task.stage_name}\n<!-- COMPLETE -->\n")
       { status: :complete }
     end
-    yield
+    with_attempt_context(
+      attempt_id: "generic-workflow-test-attempt",
+      task_generation: "generic-workflow-test-generation"
+    ) { yield }
   ensure
     Hive::Stages::Base.define_singleton_method(:spawn_agent, original) if original
   end

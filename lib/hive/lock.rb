@@ -2,6 +2,7 @@ require "yaml"
 require "fileutils"
 require "time"
 require "securerandom"
+require "hive/attempts/context"
 
 module Hive
   module Lock
@@ -19,9 +20,10 @@ module Hive
     def acquire_task_lock(task_folder, payload = {})
       lock_path = File.join(task_folder, ".lock")
       FileUtils.mkdir_p(task_folder)
-      data = base_payload.merge(payload.transform_keys(&:to_s)).merge(
-        "lock_id" => SecureRandom.hex(16)
-      )
+      data = base_payload
+             .merge(payload.transform_keys(&:to_s))
+             .merge(Hive::Attempts::Context.projection)
+             .merge("lock_id" => SecureRandom.hex(16))
 
       with_task_lock_guard(lock_path) do
         attempts = 0

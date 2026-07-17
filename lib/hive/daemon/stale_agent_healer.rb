@@ -7,6 +7,7 @@ require "hive/markers"
 require "hive/workflows"
 require "hive/daemon/dispatch_request_queue"
 require "hive/daemon/healer_support"
+require "hive/attempts/lost_outcome"
 
 module Hive
   module Daemon
@@ -95,6 +96,7 @@ module Hive
 
       REVIEW_ERROR_AUTO_RECOVERY_LIMIT = 3
       ERROR_AUTO_RECOVERY_LIMIT = 3
+      ATTEMPT_LOSS_RECOVERY_LIMIT = 3
       # `reason=timeout` recovers EXACTLY ONCE, and only on the two stages whose
       # re-entry is provably idempotent — far lower than the agent-loss budget
       # because a timeout means "I ran and didn't finish", not "I was interrupted".
@@ -118,7 +120,10 @@ module Hive
       def initialize(controller:, logger:, grace_sec: 300,
                      review_error_auto_recovery_limit: REVIEW_ERROR_AUTO_RECOVERY_LIMIT,
                      error_auto_recovery_limit: ERROR_AUTO_RECOVERY_LIMIT,
-                     request_queue: Hive::Daemon::DispatchRequestQueue)
+                     request_queue: Hive::Daemon::DispatchRequestQueue,
+                     attempt_store: nil, attempt_dispatcher: nil,
+                     lost_outcome_store: nil, lost_outcome_processor: nil,
+                     attempt_loss_recovery_limit: ATTEMPT_LOSS_RECOVERY_LIMIT)
         @controller = controller
         @logger = logger
         @request_queue = request_queue
@@ -129,6 +134,95 @@ module Hive
         @error_auto_recoveries = Hash.new(0)
         @review_error_recovery_exhausted = {}
         @error_recovery_exhausted = {}
+        @attempt_store = attempt_store
+        @attempt_dispatcher = attempt_dispatcher
+        @lost_outcome_store = lost_outcome_store
+        @lost_outcome_processor = lost_outcome_processor
+        @attempt_loss_recovery_limit = attempt_loss_recovery_limit
+      end
+
+      # Lease-backed loss is processed independently of legacy marker rows.
+      # The durable retry charge and predecessor link survive daemon restart,
+      # while the outcome sidecar makes repeated ticks idempotent.
+      def heal_attempt_losses(attempts, now: Time.now.utc)
+        return unless @attempt_store && @attempt_dispatcher &&
+                      @lost_outcome_store && @lost_outcome_processor
+
+        Array(attempts).each do |attempt|
+          next if attempt.compatibility?
+
+          outcome = @lost_outcome_processor.process(attempt, now: now)
+          next unless outcome["status"] == "ready"
+
+          existing = @attempt_store.scan.records.find do |candidate|
+            candidate["predecessor_attempt_id"] == attempt.attempt_id
+          end
+          if existing
+            @lost_outcome_store.update(
+              attempt, now: now, status: "successor_dispatched",
+              successor_attempt_id: existing.attempt_id
+            )
+            next
+          end
+
+          if attempt["retry_charge"] >= @attempt_loss_recovery_limit
+            @lost_outcome_store.update(
+              attempt, now: now, status: "exhausted",
+              diagnostic: "attempt loss retry budget exhausted"
+            )
+            @logger.event(
+              :marker_heal_exhausted,
+              project: attempt["project"], slug: attempt["task_slug"],
+              stage: attempt["intended_stage"], reason: "attempt_lost",
+              attempts: attempt["retry_charge"], max_attempts: @attempt_loss_recovery_limit
+            )
+            next
+          end
+
+          task = task_for_attempt(attempt, outcome)
+          unless task
+            @lost_outcome_store.update(
+              attempt, now: now, status: "manual",
+              diagnostic: "task could not be located for successor"
+            )
+            next
+          end
+
+          result = @attempt_dispatcher.dispatch_successor(
+            predecessor: attempt,
+            task: task,
+            project: attempt["project"],
+            argv: successor_argv(attempt, task),
+            request_id: "attempt-loss-#{outcome.fetch('idempotency_key')[0, 24]}",
+            provider: attempt["provider"],
+            inherited_outputs: (attempt["inherited_outputs"] + attempt["current_outputs"]).uniq,
+            retry_charge: attempt["retry_charge"] + 1,
+            interactive: false,
+            now: now
+          )
+          next if result.status == :deferred
+
+          @lost_outcome_store.update(
+            attempt, now: now, status: "successor_dispatched",
+            successor_attempt_id: result.attempt&.attempt_id
+          )
+          @logger.event(
+            :marker_healed,
+            project: attempt["project"], slug: attempt["task_slug"],
+            stage: attempt["intended_stage"], reason: "attempt_lost",
+            attempt_id: attempt.attempt_id,
+            successor_attempt_id: result.attempt&.attempt_id,
+            attempts: attempt["retry_charge"] + 1,
+            max_attempts: @attempt_loss_recovery_limit
+          )
+        rescue StandardError => e
+          @logger.event(
+            :marker_heal_failed,
+            project: attempt["project"], slug: attempt["task_slug"],
+            stage: attempt["intended_stage"], reason: "attempt_lost",
+            error: "#{e.class}: #{e.message}"
+          )
+        end
       end
 
       # Walk the row set, heal stale agent_working markers in place.
@@ -181,7 +275,37 @@ module Hive
 
       private
 
+      def task_for_attempt(attempt, outcome)
+        folder = outcome["task_folder"]
+        return Hive::Task.new(folder) if folder && File.directory?(folder)
+
+        target = attempt["task_id"].to_s.empty? ? attempt["task_slug"] : attempt["task_id"]
+        Hive::TaskResolver.new(target, project_filter: attempt["project"]).resolve
+      rescue Hive::Error, SystemCallError
+        nil
+      end
+
+      def successor_argv(attempt, task)
+        argv = Array(attempt["worker_argv"]).dup
+        return argv unless argv.first == "hive" && argv.length >= 3
+
+        # The durable command is replayed byte-for-byte except for its task
+        # locator, which must follow an atomic stage move performed before the
+        # owner was lost. Once a workflow action has reached its admitted
+        # target, its source assertion is no longer valid and is removed; all
+        # other recovery/JSON flags remain intact.
+        argv[2] = task.folder
+        if "#{task.stage_index}-#{task.stage_name}" == attempt["intended_stage"]
+          while (index = argv.index("--from"))
+            argv.slice!(index, 2)
+          end
+          argv.reject! { |value| value.start_with?("--from=") }
+        end
+        argv
+      end
+
       def heal_error_if_auto_recoverable(row, now:)
+        return if marker_reason(row) == "attempt_lost"
         return if row.live_task_lock == true
         return unless auto_recoverable_error?(row, now: now)
         # The clear makes a markerless terminal-error row take the

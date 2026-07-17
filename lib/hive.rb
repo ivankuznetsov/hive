@@ -70,11 +70,13 @@ module Hive
       # `dispatch_requests/` directory. See
       # `Hive::Daemon::DispatchRequestQueue` and
       # `Hive::Bot::DispatchRequestWriter`.
-      "hive-dispatch-request" => 2,
+      "hive-dispatch-request" => 3,
       # Reverse-direction notice the daemon writes for the bot to relay a
       # non-zero, bot-originated dispatch back to the originating Telegram
       # chat. See `Hive::Daemon::DispatchResultQueue` (ADV-1).
-      "hive-dispatch-result" => 1
+      "hive-dispatch-result" => 2,
+      # Internal source-of-truth record for durable task-stage ownership.
+      "hive-attempt" => 1
     }.freeze
 
     # Closed enum of Diagnostic.generated_by values accepted by the
@@ -545,6 +547,24 @@ module Hive
   class InternalError < Error
     def exit_code
       ExitCodes::SOFTWARE
+    end
+  end
+
+  # A detached durable worker reached a non-zero terminal outcome without
+  # emitting the JSON document its caller requested. Carry the worker's exact
+  # exit status through the ordinary command envelope/rescue path.
+  class AttemptExecutionError < Error
+    attr_reader :attempt_id, :outcome
+
+    def initialize(message, exit_code:, attempt_id:, outcome:)
+      super(message)
+      @attempt_exit_code = Integer(exit_code)
+      @attempt_id = attempt_id.to_s
+      @outcome = outcome.to_s
+    end
+
+    def exit_code
+      @attempt_exit_code
     end
   end
 

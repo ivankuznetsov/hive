@@ -104,4 +104,34 @@ class AttemptsGenerationTest < Minitest::Test
       end
     end
   end
+
+  def test_downstream_attempt_uses_current_journal_task_generation
+    with_tmp_dir do |dir|
+      folder = File.join(dir, "task")
+      FileUtils.mkdir_p(folder)
+      state_file = File.join(folder, "pr.md")
+      File.write(state_file, "body")
+      record = Hive::TaskJournal::Envelope.authoritative(
+        {
+          event_type: "implementation_identity_captured",
+          task: { "id" => "42", "slug" => "task-one" }, workflow: "coding",
+          stage: "4-execute", attempt_id: "attempt-1", task_generation: 7,
+          ownership_generation: "owner-7", commit_generation: 0,
+          reason: "execute_identity_captured", evidence: [], provenance: {}, payload: {}
+        }
+      )
+      File.write(
+        File.join(folder, Hive::TaskJournal::JOURNAL_BASENAME),
+        "#{JSON.generate(record)}\n"
+      )
+      task = FakeTask.new(id: 42, slug: "task-one", state_file: state_file,
+                          stage_index: 5, stage_name: "open-pr")
+
+      generation = Hive::Attempts::Generation.resolve(
+        task: task, project: "demo", intended_stage: "5-open-pr"
+      )
+
+      assert_equal 7, generation.task_input_epoch
+    end
+  end
 end

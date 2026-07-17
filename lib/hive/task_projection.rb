@@ -172,6 +172,7 @@ module Hive
           "legacy_event_count" => @records.size - authoritative.size
         },
         "compatibility" => legacy_compatibility(authoritative),
+        "implementation_identity" => implementation_identity_projection(authoritative, generation),
         "shadow_audit" => Hive::Conditions::ShadowAudit.summary(records: authoritative)
       )
       rule = Hive::Conditions::Policy.default.rule_for("execute_to_open_pr")
@@ -442,6 +443,51 @@ module Hive
     def legacy_compatibility(authoritative)
       baseline = authoritative.any? { |record| record["event_type"] == "legacy_baseline" }
       compatibility_for(baseline: baseline, marker: @marker)
+    end
+
+    def implementation_identity_projection(authoritative, generation)
+      identity_events = authoritative.select do |record|
+        %w[implementation_identity_captured implementation_identity_backfilled
+           implementation_stage_resolved].include?(record["event_type"])
+      end
+      execute_history = identity_events.filter_map do |record|
+        next unless %w[implementation_identity_captured implementation_identity_backfilled]
+                    .include?(record["event_type"])
+
+        projected_identity(record)
+      end
+      execute = execute_history.reverse.find { |identity| identity["generation"] == generation }
+      stages = identity_events.filter_map do |record|
+        next unless record["event_type"] == "implementation_stage_resolved"
+
+        identity = projected_identity(record)
+        identity if identity["generation"] == generation
+      end.group_by { |identity| identity.fetch("stage") }
+       .transform_values(&:last)
+      warnings = authoritative.filter_map do |record|
+        next unless record["event_type"] == "implementation_identity_fallback"
+
+        {
+          "event_id" => record["event_id"],
+          "generation" => record["task_generation"],
+          "reason" => record["reason"]
+        }
+      end
+
+      {
+        "generation" => generation,
+        "execute" => execute,
+        "stages" => stages,
+        "history" => execute_history,
+        "fallback_warnings" => warnings
+      }
+    end
+
+    def projected_identity(record)
+      deep_copy(record.dig("payload", "identity") || {}).merge(
+        "event_id" => record["event_id"],
+        "resolved_attempt" => record["attempt_id"]
+      )
     end
 
     def compatibility_for(baseline:, marker:)

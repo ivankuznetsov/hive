@@ -7,6 +7,7 @@ require "hive/dependency_snapshot"
 require "hive/protected_files"
 require "hive/stages/base"
 require "hive/worktree"
+require "hive/implementation_identity/store"
 require "hive/git_ops"
 require "hive/markers"
 require "hive/plan_frontmatter"
@@ -306,7 +307,14 @@ module Hive
             user_supplied_tag: Hive::Stages::Base.user_supplied_tag
           )
         )
-        profile = Hive::Stages::Base.stage_profile(cfg, "execute")
+        identity = if Hive::Attempts::Context.current
+          Hive::ImplementationIdentity::Store.new(task: task, cfg: cfg).capture_execute!
+        end
+        profile = if identity
+          Hive::AgentProfiles.lookup(identity.provider, cfg: cfg)
+        else
+          Hive::Stages::Base.stage_profile(cfg, "execute")
+        end
         scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
           cfg, "execute", task, profile,
           default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
@@ -335,7 +343,8 @@ module Hive
           log_label: "execute-impl",
           profile: profile,
           **Hive::Stages::Base.tool_scope_kwargs(scope),
-          status_mode: :exit_code_only
+          status_mode: :exit_code_only,
+          identity_arguments: identity&.native_arguments
         }
         if profile.name == :claude
           Hive::Stages::Base.spawn_claude_with_tmux_marker!(

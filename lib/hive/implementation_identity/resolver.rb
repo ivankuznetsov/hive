@@ -84,6 +84,17 @@ module Hive
         )
       end
 
+      def resolve_legacy(provider:, model:, effort:, generation:, attempt_id:)
+        profile = Hive::AgentProfiles.lookup(provider, cfg: @cfg)
+        build_selection(
+          stage: "execute", profile: profile,
+          model: Hive::ImplementationIdentity.normalize_model(model, concrete: true),
+          effort: Hive::ImplementationIdentity.normalize_effort(effort),
+          pin_model: true, source: "legacy_backfill", generation: generation,
+          originating_attempt: attempt_id
+        )
+      end
+
       private
 
       def downstream_model(stage, fields:, profile:, provider_changed:, execute_identity:)

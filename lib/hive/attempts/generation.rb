@@ -1,6 +1,7 @@
 require "digest"
 require "hive/dependency_snapshot"
 require "hive/conditions/generation_tracker"
+require "hive/task_projection"
 
 module Hive
   module Attempts
@@ -31,7 +32,7 @@ module Hive
               task: task, workflow_policy: workflow_policy
             ).task_generation
           else
-            0
+            current_task_input_epoch(task)
           end
         else
           Integer(task_input_epoch)
@@ -67,6 +68,20 @@ module Hive
         digest.hexdigest
       rescue SystemCallError, IOError => e
         ::Digest::SHA256.hexdigest("hive-progress-v2\0unreadable\0#{e.class}\0#{task.state_file}")
+      end
+
+      def self.current_task_input_epoch(task)
+        folder = if task.respond_to?(:folder) && task.folder
+          task.folder
+        else
+          File.dirname(task.state_file)
+        end
+        Hive::TaskProjection.read_journal(File.join(folder, Hive::TaskJournal::JOURNAL_BASENAME))
+                            .filter_map { |record| record["task_generation"] }
+                            .select { |value| value.is_a?(Integer) }
+                            .max || 0
+      rescue Hive::Error, SystemCallError
+        0
       end
     end
   end

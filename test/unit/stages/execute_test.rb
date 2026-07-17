@@ -380,6 +380,40 @@ class HiveStagesExecuteTest < Minitest::Test
     end
   end
 
+  def test_spawn_implementation_never_reaches_launcher_when_identity_capture_fails
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      fake_store = Object.new
+      fake_store.define_singleton_method(:capture_execute!) do
+        raise Hive::TaskJournal::Error, "synthetic append failure"
+      end
+      spawned = false
+
+      with_replaced_singleton_method(Hive::ImplementationIdentity::Store, :new, ->(**) { fake_store }) do
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, lambda { |*_, **_kwargs|
+          spawned = true
+        }) do
+          with_attempt_context(
+            attempt_id: "attempt", task_generation: 1, ownership_generation: "owner"
+          ) do
+            assert_raises(Hive::TaskJournal::Error) do
+              Hive::Stages::Execute.spawn_implementation(
+                task, execute_cfg("codex").merge(
+                  "budget_usd" => { "execute_implementation" => 1 },
+                  "timeout_sec" => { "execute_implementation" => 5 }
+                ),
+                File.join(dir, "worktree")
+              )
+            end
+          end
+        end
+      end
+
+      refute spawned
+    end
+  end
+
   def build_task(project_root, depends_on: nil)
     folder = File.join(project_root, ".hive-state", "stages", "4-execute", "demo-260522-aaaa")
     FileUtils.mkdir_p(folder)

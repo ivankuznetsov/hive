@@ -171,6 +171,32 @@ class TaskProjectionTest < Minitest::Test
     refute projection.send(:attempt_descends_from?, "attempt-a", "attempt-c")
   end
 
+  def test_implementation_identity_projection_retains_generations_and_latest_stage_launches
+    execute_one = event(
+      event_type: "implementation_identity_captured", event_id: "identity-1",
+      task_generation: 1, commit_generation: 0,
+      payload: { "identity" => identity_payload("execute", "codex", "gpt-5.6-sol", 1) }
+    )
+    open_pr_one = event(
+      event_type: "implementation_stage_resolved", event_id: "open-pr-1",
+      task_generation: 1, commit_generation: 0,
+      payload: { "identity" => identity_payload("open_pr", "codex", "gpt-5.6-terra", 1) }
+    )
+    execute_two = event(
+      event_type: "implementation_identity_captured", event_id: "identity-2",
+      task_generation: 2, commit_generation: 0,
+      payload: { "identity" => identity_payload("execute", "claude", "claude-fable-5", 2) }
+    )
+
+    projection = Hive::TaskProjection.project(records: [ execute_one, open_pr_one, execute_two ])
+    identity = projection["implementation_identity"]
+
+    assert_equal 2, identity.fetch("generation")
+    assert_equal "claude", identity.dig("execute", "provider")
+    assert_equal %w[codex claude], identity.fetch("history").map { |entry| entry["provider"] }
+    assert_equal({}, identity.fetch("stages"))
+  end
+
   private
 
   def condition_event(name, state: "satisfied", event_id:, attempt_id: "attempt-a",
@@ -217,6 +243,17 @@ class TaskProjectionTest < Minitest::Test
       "provenance" => { "source" => "test" },
       "payload" => {}
     }.merge(overrides.transform_keys(&:to_s))
+  end
+
+  def identity_payload(stage, provider, model, generation)
+    {
+      "stage" => stage, "provider" => provider, "model" => model,
+      "profile_name" => provider, "launcher_identity" => "#{provider}/v1",
+      "source" => "persisted_execute", "generation" => generation,
+      "originating_attempt" => "attempt-a", "requested_effort" => "high",
+      "effective_effort" => "high", "effort_supported" => true,
+      "model_pinned" => true
+    }
   end
 
   def attempt_evidence(index)

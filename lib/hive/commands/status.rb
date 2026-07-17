@@ -964,6 +964,7 @@ module Hive
         # than falling below "Error" as an unknown label.
         "Ad-hoc review complete (parked)",
         "Ready to finalize",
+        "Watching pull request",
         "Ready to archive",
         "Archived",
         "Manually steered",

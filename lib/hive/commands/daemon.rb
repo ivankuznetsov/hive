@@ -211,10 +211,6 @@ module Hive
           poll_interval_sec: daemon_cfg.fetch("pr_merge_poll_interval_sec"),
           dry_run: @dry_run
         )
-        merge_watcher = Hive::Daemon::PrMergeWatcher.new(
-          poll_interval_sec: daemon_cfg.fetch("pr_merge_poll_interval_sec"),
-          merge_intake: refactor_patrol_merge_reconciler
-        )
         patrol_scheduler = Hive::Daemon::PatrolScheduler.new
         refactor_patrol_scheduler = Hive::Daemon::RefactorPatrolScheduler.new(dry_run: @dry_run)
         patrol_arbiter = Hive::Daemon::PatrolArbiter.new(
@@ -271,7 +267,6 @@ module Hive
         dispatcher = Hive::Daemon::Dispatcher.new(
           config: config, controller: controller, supervisor: supervisor,
           status_consumer: status_consumer, logger: logger,
-          merge_watcher: merge_watcher,
           refactor_patrol_merge_reconciler: refactor_patrol_merge_reconciler,
           patrol_scheduler: patrol_scheduler,
           refactor_patrol_scheduler: refactor_patrol_scheduler,

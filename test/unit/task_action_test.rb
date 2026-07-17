@@ -337,11 +337,26 @@ class TaskActionTest < Minitest::Test
         <!-- COMPLETE pr_url=https://example.com/pr/9 is_draft=false -->
       MD
 
-      assert_equal "ready_to_archive",
-                   Hive::TaskAction.for(
-                     task,
-                     marker(:complete, "pr_url" => "https://example.com/pr/9", "is_draft" => "false")
-                   ).key
+      current = Hive::TaskAction.for(
+        task,
+        marker(:complete, "pr_url" => "https://example.com/pr/9", "is_draft" => "false"),
+        projection: { "finalization" => { "state" => "archive_ready" } }
+      )
+      assert_equal "ready_to_archive", current.key
+
+      legacy = Hive::TaskAction.for(
+        task, marker(:complete, "pr_url" => "https://example.com/pr/9", "is_draft" => "false")
+      )
+      assert_equal "ready_to_finalize", legacy.key
+      assert_includes legacy.command, "hive finalize"
+
+      watching = Hive::TaskAction.for(
+        task,
+        marker(:complete, "pr_url" => "https://example.com/pr/9", "is_draft" => "false"),
+        projection: { "finalization" => { "state" => "merged" } }
+      )
+      assert_equal "watching", watching.key
+      assert_nil watching.command
     end
   end
 
@@ -1285,7 +1300,7 @@ class TaskActionTest < Minitest::Test
     "finalize" => {
       none: "error",
       waiting: "needs_input",
-      terminal: "ready_to_archive"
+      terminal: "ready_to_finalize"
     },
     "done" => {
       none: "archived",

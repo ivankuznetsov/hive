@@ -23,8 +23,8 @@ require "hive/daemon/answer_digest_scheduler"
 require "hive/daemon/patrol_scheduler"
 require "hive/daemon/refactor_patrol_scheduler"
 require "hive/daemon/patrol_arbiter"
-require "hive/daemon/pr_merge_watcher"
 require "hive/daemon/refactor_patrol_merge_reconciler"
+require "hive/finalization/reconciler"
 require "hive/lock"
 require "hive/paths"
 require "hive/update_check"
@@ -37,7 +37,7 @@ module Hive
   module Daemon
     # The poll-classify-dispatch loop. Glues the pure pieces (Policy,
     # ConcurrencyController) to the I/O pieces (StatusConsumer,
-    # ChildSupervisor, Logger) and a PrMergeWatcher (if injected).
+    # ChildSupervisor and Logger.
     #
     # Each `tick` is one full round: reap completed children, fetch status,
     # decide per row, dispatch where allowed. The poller also wakes at
@@ -58,7 +58,6 @@ module Hive
       # @param supervisor [ChildSupervisor]
       # @param status_consumer [StatusConsumer]
       # @param logger [Hive::Daemon::Logger]
-      # @param merge_watcher [PrMergeWatcher, nil]
       # @param patrol_scheduler [PatrolScheduler, nil]
       # @param dry_run [Boolean]
       def initialize(config:, controller:, supervisor:, status_consumer:, logger:,
@@ -69,13 +68,16 @@ module Hive
                      update_state: nil, update_checker: nil, channel_detector: nil,
                      dispatch_request_state_home: nil, dispatch_result_state_home: nil,
                      attempt_dispatcher: nil, attempt_reconciler: nil,
-                     lost_outcome_store: nil, lost_outcome_processor: nil)
+                     lost_outcome_store: nil, lost_outcome_processor: nil,
+                     finalization_reconciler: Hive::Finalization::Reconciler)
         @config = config
         @controller = controller
         @supervisor = supervisor
         @status_consumer = status_consumer
         @logger = logger
-        @merge_watcher = merge_watcher
+        # `merge_watcher` is accepted for constructor compatibility only.
+        # Pipeline task archival no longer consumes that collaborator.
+        @finalization_reconciler = finalization_reconciler
         @refactor_patrol_merge_reconciler = refactor_patrol_merge_reconciler
         @patrol_scheduler = patrol_scheduler
         @refactor_patrol_scheduler = refactor_patrol_scheduler
@@ -286,6 +288,10 @@ module Hive
         # dependency-gate degradation finds it here instead of being misled by
         # a schema-version event name. Tick proceeds on the additive payload.
         @logger.event(:status_warning, message: result.warning) if result.warning
+        if reconcile_finalization_rows(result.rows).positive?
+          refreshed = @status_consumer.fetch
+          result = refreshed if refreshed.ok
+        end
         # Rebuild the per-tick set of half-migrated projects from the
         # status snapshot. Stays empty when the daemon talks to an old
         # status binary that didn't ship the field (Result#projects
@@ -352,33 +358,6 @@ module Hive
         # immediate finalize watcher. The collaborator owns its slow cadence,
         # so a normal ~30s dispatcher tick does not hammer GitHub.
         run_refactor_patrol_merge_reconciler_tick(now: now)
-
-        # A merge watch may have been enqueued on a previous clear snapshot.
-        # Remove every newly-held row before the watcher polls or archives it;
-        # both admission errors and ordinary below-gate waits suppress all
-        # forward daemon work.
-        drop_held_merge_watches(result.rows)
-
-        # 3a. PrMergeWatcher tick (if present): check pending merges
-        # first. Archive dispatches MUST flow through the same enable +
-        # cap checks that advance dispatches use, so a project disabled
-        # after enqueue can't sneak through and N concurrent merges
-        # can't blow past the global / per-project caps.
-        # PR-40 review P2 #4.
-        @merge_watcher&.tick(now: now)&.each do |archive_dispatch|
-          dispatch_archive_with_gates(archive_dispatch, now: now)
-        end
-        # Surface entries the watcher dropped after exhausting
-        # GH_MAX_FAILURES so the operator sees the give-up signal in
-        # daemon.log instead of the task silently sitting at
-        # ready_to_archive forever (ce-code-review P1 #9).
-        @merge_watcher&.last_tick_dropped&.each do |drop|
-          @logger.event(:merge_watcher_dropped,
-                        project: drop[:project], slug: drop[:slug],
-                        pr_url: drop[:pr_url],
-                        failure_count: drop[:failure_count],
-                        last_error: drop[:last_error])
-        end
 
         # 3b. Dispatch-request queue (plan 2026-05-28-002). Process
         # bot-written request files BEFORE the per-row scan so a slug
@@ -789,6 +768,31 @@ module Hive
         )
       end
 
+      def reconcile_finalization_rows(rows)
+        Array(rows).count do |row|
+          next false unless row.stage.to_s == "8-finalize"
+          next false unless row.folder && File.directory?(row.folder)
+
+          result = @finalization_reconciler.new(task_folder: row.folder).reconcile
+          if result.status == :archive_ready
+            @logger.event(
+              :finalization_reconciled, project: row.project, slug: row.slug,
+              stage: row.stage, archive_ready_event_id: result.event_id
+            )
+            true
+          else
+            false
+          end
+        rescue Hive::Error, SystemCallError => e
+          @logger.event(
+            :blocked, project: row.project, slug: row.slug, stage: row.stage,
+            action: "finalization_reconcile", reason: "invalid_terminal_evidence",
+            message: e.message.to_s.gsub(/\s+/, " ")[0, 300]
+          )
+          false
+        end
+      end
+
       # Log a global-digest scheduler tick/complete crash as :fatal, deduped
       # per op-label on the error signature (mirrors `log_brainstorm_parse_error`).
       def log_digest_scheduler_fatal(label, error)
@@ -922,10 +926,6 @@ module Hive
       def handle_row(row, now:)
         return unless project_enabled?(row.project)
         return if @legacy_layout_projects.key?(row.project)
-        if merged_pr_recoverable_finalize_error?(row)
-          enqueue_merge_watch(row, error_reason: row.marker_attrs.to_h["reason"].to_s)
-          return
-        end
 
         decision = Policy.decide(
           action: row.action,
@@ -990,8 +990,6 @@ module Hive
                                   depends_on: row.depends_on,
                                   blocked_by: row.blocked_by,
                                   dependency_stage: row.dependency_stage)
-        when :poll_for_merge
-          enqueue_merge_watch(row)
         when :markerless_stalled
           # A generic :agent stage exited 0 without writing a WAITING/COMPLETE
           # marker and its state file shows no progress, so it re-classifies to
@@ -1004,16 +1002,6 @@ module Hive
         when :skip
           @logger.event(:skipped, project: row.project, slug: row.slug,
                                   stage: row.stage, action: row.action)
-        end
-      end
-
-      def drop_held_merge_watches(rows)
-        return unless @merge_watcher
-
-        rows.each do |row|
-          next unless row.blocked == true || row.admission_error
-
-          @merge_watcher.drop(project: row.project, slug: row.slug)
         end
       end
 
@@ -1209,77 +1197,6 @@ module Hive
         @attempt_snapshot&.capacity&.task_reserved?(
           project: row.project, task_slug: row.slug
         ) == true
-      end
-
-      # PR-40 review P2 #4: archive dispatches must respect both
-      # `daemon.enabled` (the project may have been disabled after the
-      # PR-merge enqueue) and the concurrency caps (multiple PRs
-      # merging at once would otherwise spawn N archives ignoring the
-      # global / per-project ceiling).
-      def dispatch_archive_with_gates(archive_dispatch, now:)
-        project = archive_dispatch[:project]
-        slug = archive_dispatch[:slug]
-
-        unless project_enabled?(project)
-          @logger.event(:skipped, project: project, slug: slug,
-                                  stage: archive_dispatch[:stage],
-                                  action: "archive",
-                                  reason: "project_disabled_after_enqueue")
-          return
-        end
-
-        # Mirror handle_row's @legacy_layout_projects guard: if the
-        # project is mid-migration, the archive command's --from stage
-        # may not match the current on-disk layout (the watcher's
-        # ARCHIVE_VERB_TEMPLATE is frozen at class load). Skip the
-        # dispatch and let handle_row re-enqueue once the half-migrated
-        # state clears on a future tick. ce-code-review P1 #10.
-        if @legacy_layout_projects.key?(project)
-          @logger.event(:skipped, project: project, slug: slug,
-                                  stage: archive_dispatch[:stage],
-                                  action: "archive",
-                                  reason: "legacy_layout_detected",
-                                  note: "skipping archive while project layout is half-migrated; " \
-                                        "next tick will re-enqueue once migration completes")
-          return
-        end
-
-        gate = @controller.can_dispatch?(
-          project: project, slug: slug, now: now,
-          external_global_count: @external_active_agent_total,
-          external_project_count: external_active_agent_count_for(project)
-        )
-        if gate == :ok
-          dispatch_command(
-            archive_dispatch[:command],
-            project: project, slug: slug, stage: archive_dispatch[:stage],
-            state_file_mtime: archive_dispatch[:state_file_mtime],
-            state_file_path: nil, # archive doesn't track an mtime baseline
-            now: now
-          )
-        else
-          # Archive will retry on the next tick if the gate clears.
-          # The watcher already cleared this entry from its pending
-          # set when it returned MERGED, so we need to re-enqueue so
-          # the next tick attempts the dispatch again.
-          @merge_watcher&.enqueue(
-            project: project, slug: slug,
-            task_folder: File.join(
-              Hive::Config.find_project(project)["hive_state_path"],
-              "stages", archive_dispatch[:stage], slug
-            ),
-            error_reason: archive_dispatch[:error_reason]
-          ) if Hive::Config.find_project(project)
-          @logger.event(:blocked, project: project, slug: slug,
-                                  stage: archive_dispatch[:stage],
-                                  action: "archive",
-                                  reason: gate.to_s)
-        end
-      rescue StandardError => e
-        # Defensive: re-enqueue path uses File.join + Config lookup
-        # which can throw on edge cases. Don't let it crash the tick.
-        @logger.event(:fatal, message: "archive dispatch error: #{e.class}: #{e.message}",
-                              project: project, slug: slug)
       end
 
       def dispatch_patrol_with_gates(patrol_dispatch, now:)
@@ -2262,26 +2179,6 @@ module Hive
           admission_status: result.status.to_s,
           reason: result.reason
         )
-      end
-
-      def enqueue_merge_watch(row, error_reason: nil)
-        return unless @merge_watcher
-
-        @merge_watcher.enqueue(project: row.project, slug: row.slug,
-                               task_folder: row.folder,
-                               error_reason: error_reason)
-        @logger.event(:merge_watcher_enqueued, project: row.project, slug: row.slug,
-                                               folder: row.folder,
-                                               error_reason: error_reason)
-      end
-
-      def merged_pr_recoverable_finalize_error?(row)
-        return false unless row.stage.to_s == Hive::Daemon::PrMergeWatcher::ARCHIVE_FROM_STAGE
-        return false unless row.marker.to_s == "error"
-        return false unless row.action.to_s == "error"
-
-        reason = row.marker_attrs.to_h["reason"].to_s
-        Hive::Daemon::PrMergeWatcher::MERGED_PR_RECOVERABLE_ERROR_REASONS.include?(reason)
       end
 
       def reset_active_agent_snapshot

@@ -46,6 +46,11 @@ class HiveDaemonPolicyTest < Minitest::Test
                                    command: "hive finalize slug-a --from 7-artifacts")
   end
 
+  def test_archive_ready_dispatches_directly
+    assert_equal :dispatch, decide(action: "ready_to_archive",
+                                   command: "hive archive slug-a --from 8-finalize")
+  end
+
   def test_ready_to_advance_dispatches
     assert_equal :dispatch, decide(action: "ready_to_advance",
                                    command: "hive approve slug-a --from 2-gather")
@@ -137,8 +142,8 @@ class HiveDaemonPolicyTest < Minitest::Test
                 last_dispatched_state_file_mtime: T0 - 600 }
       },
       {
-        name: "merge wait",
-        expected: :poll_for_merge,
+        name: "archive ready",
+        expected: :dispatch,
         args: { action: "ready_to_archive", stage: "8-finalize",
                 command: "hive archive slug-a --from 8-finalize" }
       }
@@ -147,16 +152,6 @@ class HiveDaemonPolicyTest < Minitest::Test
     cases.each do |example|
       assert_equal example.fetch(:expected), decide(**example.fetch(:args)), example.fetch(:name)
     end
-  end
-
-  # ── merge wait: hand off to PrMergeWatcher ─────────────────────────────
-
-  def test_ready_to_archive_polls_for_merge
-    # Even though the suggested_command is `hive archive ...`, the
-    # daemon does NOT dispatch it directly — it routes to U10
-    # PrMergeWatcher which gates on `gh pr view --json state == MERGED`.
-    assert_equal :poll_for_merge, decide(action: "ready_to_archive",
-                                         command: "hive archive slug-a --from 8-finalize")
   end
 
   # ── dependency gate ───────────────────────────────────────────────────

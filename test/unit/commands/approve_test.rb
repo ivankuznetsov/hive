@@ -3,6 +3,8 @@ require "hive/commands/approve"
 require "fileutils"
 
 class HiveCommandsApproveTest < Minitest::Test
+  include HiveTestHelper
+
   FakeTask = Struct.new(:slug, :stage_index, :stage_name, :folder, :hive_state_path, :project_root, :workflow)
 
   def command(**kwargs)
@@ -24,6 +26,27 @@ class HiveCommandsApproveTest < Minitest::Test
     status = Object.new
     status.define_singleton_method(:success?) { true }
     status
+  end
+
+  def test_force_cannot_bypass_finalize_archive_ready_guard
+    with_tmp_dir do |dir|
+      state_file = File.join(dir, "pr.md")
+      File.write(state_file, "---\npr_url: https://github.com/acme/demo/pull/12\n---\n<!-- COMPLETE -->\n")
+      guarded_task = Data.define(
+        :slug, :stage_index, :stage_name, :folder, :hive_state_path,
+        :project_root, :workflow, :state_file
+      ).new(
+        slug: "durable-task", stage_index: 8, stage_name: "finalize", folder: dir,
+        hive_state_path: dir, project_root: dir, workflow: Hive::Workflows::Registry.default,
+        state_file: state_file
+      )
+      cmd = command(force: true)
+
+      error = assert_raises(Hive::WrongStage) do
+        cmd.send(:validate_move!, guarded_task, "9-done", Hive::Markers.current(state_file))
+      end
+      assert_includes error.message, "archive_ready"
+    end
   end
 
   def test_call_wraps_internal_errors_with_json_envelope

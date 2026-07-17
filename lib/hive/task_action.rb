@@ -144,6 +144,11 @@ module Hive
         label: "Ready to archive",
         command: "archive"
       },
+      finalize_watching: {
+        key: Hive::Schemas::TaskActionKind::WATCHING,
+        label: "Watching pull request",
+        command: nil
+      },
       ready_to_advance: {
         key: Hive::Schemas::TaskActionKind::READY_TO_ADVANCE,
         label: "Ready to advance",
@@ -559,7 +564,15 @@ module Hive
 
     def finalize_action
       return ACTIONS.fetch(:error) if finalize_missing_pr_md?
-      return finalize_complete_action if marker.name == :complete
+      finalization_state = projection.to_h.dig("finalization", "state").to_s
+      return finalize_complete_action if finalization_state == "archive_ready"
+      return ACTIONS.fetch(:finalize_watching) unless finalization_state.empty? || finalization_state == "unfinalized"
+      if marker.name == :complete
+        return ACTIONS.fetch(:error) if finalize_missing_pr_url?
+        return ACTIONS.fetch(:error) if finalize_pr_url_mismatch?
+
+        return ACTIONS.fetch(:artifacts_complete)
+      end
       # Markerless (:none) = nothing ran at this stage yet → runnable, not an
       # input gate; a real pause carries a `:waiting` marker (U6).
       return ACTIONS.fetch(:generic_ready_to_run) if marker.name == :none
@@ -570,15 +583,7 @@ module Hive
     def finalize_complete_action
       return ACTIONS.fetch(:error) if finalize_missing_pr_url?
       return ACTIONS.fetch(:error) if finalize_pr_url_mismatch?
-      return ACTIONS.fetch(:finalize_complete) if marker.attrs["is_draft"].to_s == "false"
-
-      # Draft PR fallback: re-run finalize. After the artifacts-stage
-      # renumber, :review_complete now routes to "hive artifacts" (the
-      # 6-review → 7-artifacts verb), so we can't reuse it here. The
-      # :artifacts_complete action carries the "Ready to finalize"
-      # semantics this fallback wants TODAY — see the doc comment on
-      # the ACTIONS entry above before changing either side.
-      ACTIONS.fetch(:artifacts_complete)
+      ACTIONS.fetch(:finalize_complete)
     end
 
     # Markerless 7-artifacts rows still need their stage runner to write

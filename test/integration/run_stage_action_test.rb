@@ -51,6 +51,32 @@ class RunStageActionTest < Minitest::Test
     end
   end
 
+  def write_merged_finalization(folder, slug)
+    coordinates = {
+      "job_id" => "job-1", "repository" => "github.com/example/repo", "pr_number" => 42,
+      "pr_url" => "https://github.com/example/repo/pull/42", "head_sha" => "a" * 40,
+      "head_generation" => 1, "finalize_attempt_id" => "attempt-1"
+    }
+    base = {
+      occurred_at: "2026-07-17T17:00:00.000000Z", observed_at: "2026-07-17T17:00:00.000000Z",
+      task: { "id" => "42", "slug" => slug }, workflow: "coding", stage: "8-finalize",
+      attempt_id: "attempt-1", task_generation: 1, ownership_generation: "owner-1",
+      evidence: [], provenance: { "source" => "test" }
+    }
+    events = [
+      Hive::TaskJournal::Envelope.authoritative(base.merge(
+        event_type: "finalized", event_id: "finalized", reason: "handoff",
+        producer: { "kind" => "finalize_attempt", "attempt_id" => "attempt-1" }, payload: coordinates
+      )),
+      Hive::TaskJournal::Envelope.authoritative(base.merge(
+        event_type: "merged", event_id: "merged", reason: "merged",
+        producer: { "kind" => "babysitter_job", "job_id" => "job-1", "claim_fence" => 1 },
+        payload: coordinates.merge("merged_at" => "2026-07-17T17:00:00Z")
+      ))
+    ]
+    File.write(File.join(folder, "events.jsonl"), events.map { |event| JSON.generate(event) }.join("\n") + "\n")
+  end
+
   def test_brainstorm_moves_inbox_to_brainstorm_and_runs
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -204,7 +230,7 @@ class RunStageActionTest < Minitest::Test
     end
   end
 
-  def test_archive_accepts_matching_merged_error_recovery_reason
+  def test_archive_rejects_live_github_merged_error_recovery_shortcut
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         inbox, slug = seed_inbox(dir)
@@ -219,19 +245,15 @@ class RunStageActionTest < Minitest::Test
           <!-- ERROR reason=git_status_failed -->
         MD
 
-        with_fake_gh_state("MERGED") do
-          capture_io do
-            Hive::Commands::StageAction.new(
-              "archive",
-              slug,
-              recover_merged_error_reason: "git_status_failed"
-            ).call
+        _out, err, status = with_fake_gh_state("MERGED") do
+          with_captured_exit do
+            Hive::Commands::StageAction.new("archive", slug).call
           end
         end
 
-        done = File.join(dir, ".hive-state", "stages", "9-done", slug)
-        assert File.directory?(done)
-        assert_equal :complete, Hive::Markers.current(File.join(done, "task.md")).name
+        assert_equal Hive::ExitCodes::WRONG_STAGE, status
+        assert_includes err, "archive_ready"
+        assert File.directory?(finalize)
       end
     end
   end
@@ -252,15 +274,11 @@ class RunStageActionTest < Minitest::Test
         MD
 
         _out, err, status = with_captured_exit do
-          Hive::Commands::StageAction.new(
-            "archive",
-            slug,
-            recover_merged_error_reason: "claude_launch_failed"
-          ).call
+          Hive::Commands::StageAction.new("archive", slug).call
         end
 
         assert_equal Hive::ExitCodes::WRONG_STAGE, status
-        assert_includes err, "archive cannot advance"
+        assert_includes err, "archive_ready"
         assert File.directory?(finalize)
       end
     end
@@ -285,18 +303,40 @@ class RunStageActionTest < Minitest::Test
         status = nil
         with_fake_gh_state("OPEN") do
           out, err, status = with_captured_exit do
-            Hive::Commands::StageAction.new(
-              "archive",
-              slug,
-              recover_merged_error_reason: "git_status_failed"
-            ).call
+            Hive::Commands::StageAction.new("archive", slug).call
           end
         end
 
         assert_equal Hive::ExitCodes::WRONG_STAGE, status
         assert_empty out
-        assert_includes err, "archive cannot advance"
+        assert_includes err, "archive_ready"
         assert File.directory?(finalize)
+      end
+    end
+  end
+
+  def test_archive_reconciles_current_merged_journal_evidence_without_github
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        inbox, slug = seed_inbox(dir)
+        finalize = File.join(dir, ".hive-state", "stages", "8-finalize", slug)
+        FileUtils.mkdir_p(File.dirname(finalize))
+        FileUtils.mv(inbox, finalize)
+        File.write(File.join(finalize, "pr.md"), <<~MD)
+          ---
+          pr_url: https://github.com/example/repo/pull/42
+          ---
+
+          <!-- COMPLETE pr_url=https://github.com/example/repo/pull/42 is_draft=false -->
+        MD
+        write_merged_finalization(finalize, slug)
+
+        capture_io { Hive::Commands::StageAction.new("archive", slug).call }
+
+        done = File.join(dir, ".hive-state", "stages", "9-done", slug)
+        assert File.directory?(done)
+        records = Hive::TaskProjection.read_journal(File.join(done, "events.jsonl"))
+        assert_equal 1, records.count { |record| record["event_type"] == "archive_ready" }
       end
     end
   end

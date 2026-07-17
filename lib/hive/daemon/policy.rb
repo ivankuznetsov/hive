@@ -12,7 +12,6 @@ module Hive
     #   :blocked_on_dependency — hold: an unmet/unresolved task dependency
     #                            (the `blocked` gate; takes precedence over
     #                            the Q&A hold)
-    #   :poll_for_merge        — hand off to PrMergeWatcher (finalize → done)
     #   :wait_for_debounce     — user is mid-edit; let mtime settle
     #   :wait_for_answers      — brainstorm Q&A still has unanswered
     #                            questions; hold the resume until every
@@ -69,6 +68,7 @@ module Hive
         ready_for_review
         ready_to_artifacts
         ready_to_finalize
+        ready_to_archive
         ready_to_advance
       ].freeze
 
@@ -85,12 +85,6 @@ module Hive
       # mtime advances past the last dispatch (genuine new input), mirroring
       # the edit-resume brake.
       RUN_ACTION = "ready_to_run".freeze
-
-      # Action that means "task is at the finalize stage, waiting for the human
-      # to merge the PR on GitHub". Daemon hands off to PrMergeWatcher (U10)
-      # which polls `gh pr view --json state` and dispatches `hive archive`
-      # on `MERGED`.
-      MERGE_WAIT_ACTION = "ready_to_archive".freeze
 
       # Actions that mean "the task is in a stage and ready to RE-RUN with
       # fresh user input from the state file". Detection is mtime-debounced
@@ -130,7 +124,7 @@ module Hive
       # @param admission_error [Boolean] true when the row carries a
       #   structured fail-closed dependency admission error.
       # @return [Symbol] one of :dispatch, :admission_error, :blocked_on_dependency,
-      #   :poll_for_merge, :wait_for_debounce, :wait_for_answers,
+      #   :wait_for_debounce, :wait_for_answers,
       #   :record_baseline, :skip
       #
       # `:record_baseline` is the first-sight `kind: edit` outcome:
@@ -158,8 +152,6 @@ module Hive
 
         if advance?(action) || plan_approval?(action, stage, workflow)
           blocked ? :blocked_on_dependency : :dispatch
-        elsif action == MERGE_WAIT_ACTION
-          blocked ? :blocked_on_dependency : :poll_for_merge
         elsif run?(action)
           # Debounced generic-run dispatch (see RUN_ACTION). First sight
           # dispatches; a markerless re-classification (mtime unchanged

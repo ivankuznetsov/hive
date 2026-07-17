@@ -275,6 +275,7 @@
             "ready_to_artifacts",
             "ready_to_finalize",
             "ready_to_archive",
+            "watching",
             "ready_to_advance",
             "ready_to_run",
             "review_parked",

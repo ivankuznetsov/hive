@@ -3,7 +3,7 @@ title: Hive::TaskAction
 type: module
 source: lib/hive/task_action.rb
 created: 2026-04-26
-updated: 2026-06-23
+updated: 2026-07-17
 tags: [module, status, action, classifier, diagnostic]
 ---
 
@@ -145,6 +145,13 @@ projects, and `--stage` for run rows only when a stage collision was reported).
 The slug is `Shellwords.shelljoin`-escaped so a slug containing shell metacharacters can't break the suggested command.
 
 `EXECUTE_WAITING` rows with no pending findings delegate their structured `next_action` to `Hive::ExecuteWaitingAction`. That keeps `hive status --json`, `hive run --json`, and TUI Enter behavior aligned for `dirty_worktree`, `branch_mismatch`, `head_not_descendant`, `no_worktree_changes`, and `missing_research_output`.
+
+For execute, `TaskAction` now receives the canonical task projection plus the
+migration selection. Marker and shadow modes retain the legacy action (shadow
+adds an operator warning on unexplained divergence). Conditions mode uses the
+shared gate evaluator, so a superseded compatibility wait cannot override the
+current attempt/HEAD. The projection subsystem is also the sole legacy marker
+adapter before a baseline; downstream consumers do not invent condition state.
 
 ## Consumers
 

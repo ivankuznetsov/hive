@@ -456,3 +456,13 @@ genuine clean verdict could fail to match and `:error`/retry (worst case
 emit the strict `## High/Medium/Nit` + `No findings.` format so the prose path
 is never exercised; until then, watch `reviews/errors-NN.md` tails for
 clean-but-rejected verdicts and extend `CLEAN_VERDICT` as new phrasings appear.
+
+## Execute condition shadow rollout lacks live parity volume (2026-07-17)
+
+Generation-scoped execute conditions, deterministic replay, marker/shadow/
+conditions modes, and the sanitized task-1849 golden fixture are covered in
+source and tests. No production project has yet supplied the promotion bar of
+at least 100 categorized live transitions across commit success, research
+success, no-change, agent-loss, and operator-repair with zero unexplained
+mismatches and an empty allow-list. Projects must remain on marker or shadow
+authority until operators collect that evidence; Hive never auto-promotes.

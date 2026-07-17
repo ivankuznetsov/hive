@@ -35,6 +35,16 @@ Rows also include `workflow`, the descriptor id that resolved the task (`"coding
 
 Rows also include `pr_url`: once a coding task reaches `5-open-pr` or later, status reads `<task>/pr.md` frontmatter through `Hive::Gh.pr_frontmatter` and emits a stripped non-empty `pr_url`; before a PR exists, or when `pr.md` is missing, blank, or malformed, the field is `null`. This is a sibling task-payload field, not copied out of marker attrs, so consumers do not need to scrape `<!-- COMPLETE pr_url=... -->`.
 
+Condition-aware rows add `condition_task_generation`, `commit_generation`,
+`current_attempt`, `conditions`, `condition_history`, `evidence`,
+`condition_gate`, `condition_migration`, `condition_provenance`,
+`shadow_audit`, and `condition_warning`. Existing marker/action/attrs fields
+stay stable. Status reads the one canonical [[modules/conditions]] projection;
+daemon, TUI, bot, and web pass through that payload instead of deriving their
+own condition semantics. Snapshot validation or journal replay is read-only:
+status never observes git/GitHub, creates a baseline/audit, or publishes a
+repaired snapshot.
+
 JSON rows also include `next_action`; it is usually `null`, but `EXECUTE_WAITING reason=...` rows carry the same structured recovery target that `hive run --json` emits. Every JSON row also includes `diagnostic`; it is `null` for ordinary rows and a bounded red-row payload for `recover_execute`, `recover_review`, and `error` rows. JSON rows carry `unanswered_questions` (issue #270): the count of still-unanswered `### Q{n}.` slots for a `2-brainstorm` `needs_input` row, and `0` otherwise.
 
 Every task row has `depends_on`, `blocked_by`, `dependency_stage`, `blocked`, and required nullable `admission_error`. The correlations are closed:

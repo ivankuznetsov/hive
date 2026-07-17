@@ -18,6 +18,13 @@ agents are detached durable attempts observed by the daemon;
 fair scheduling, and fenced completion for the
 language-neutral [[commands/refactor-patrol]] lifecycle.
 
+`StatusConsumer` now passes through the additive condition projection fields
+from `hive status --json`. Dispatch still consumes the canonical `action` and
+diagnostic calculated by `TaskAction`; the daemon defines no condition family,
+supersession, or gate rule of its own. Valid snapshots keep polling cheap, and
+status polling never triggers reconciliation, git/GitHub probes, or journal
+writes. See [[modules/conditions]].
+
 ## Module map
 
 | Module | File | Purpose |

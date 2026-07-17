@@ -111,6 +111,9 @@ plan:
   agent: claude
 execute:
   agent: codex
+conditions:
+  authority: markers
+  stages: {}
 open_pr:
   agent: claude
 finalize:
@@ -195,6 +198,12 @@ rebase:
   enabled: true
   conflict_resolution_timeout_sec: 2700
 ```
+
+Generation-scoped condition authority is intentionally staged. Existing
+projects stay on `markers`; operators may set only `stages.4-execute` to
+`shadow`, then to `conditions` after the parity bar is met. See the
+[condition rollout runbook](condition-rollout.md). Other stages remain
+marker-authoritative in this increment.
 
 `hive init` writes the full per-project YAML from `templates/project_config.yml.erb`, including the recommended `review.reviewers` set and the narrower `patrol.review.reviewers` set. Workflow verbs `hive archive` and `hive migrate` do not take config blocks; they read project state and operate on stage folders.
 

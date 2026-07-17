@@ -120,6 +120,37 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
     end
   end
 
+  def test_passes_through_canonical_condition_projection_fields
+    condition = { "condition" => "ChangesPresent", "state" => "satisfied" }
+    task = task_row(slug: "conditioned").merge(
+      "condition_task_generation" => 3,
+      "commit_generation" => 2,
+      "current_attempt" => "attempt-b",
+      "conditions" => [ condition ],
+      "condition_history" => [ condition.merge("state" => "superseded") ],
+      "evidence" => [ { "type" => "commit", "sha" => "b" * 40 } ],
+      "condition_gate" => { "status" => "eligible" },
+      "condition_migration" => { "effective" => "conditions" },
+      "condition_provenance" => { "projector" => "TaskProjection/v1" },
+      "shadow_audit" => { "ready" => false },
+      "condition_warning" => nil
+    )
+    payload = make_envelope(projects: [ {
+      "name" => "p", "path" => "/tmp/p", "hive_state_path" => "/tmp/p/.h",
+      "tasks" => [ task ]
+    } ])
+
+    with_fake_status(JSON.generate(payload)) do |bin|
+      row = Hive::Daemon::StatusConsumer.new(hive_bin: bin).fetch.rows.fetch(0)
+      assert_equal 3, row.condition_task_generation
+      assert_equal 2, row.commit_generation
+      assert_equal "attempt-b", row.current_attempt
+      assert_equal [ condition ], row.conditions
+      assert_equal "eligible", row.condition_gate.fetch("status")
+      assert_equal "conditions", row.condition_migration.fetch("effective")
+    end
+  end
+
   def test_parses_dependency_fields_and_coerces_blocked_to_boolean
     task_blocked = task_row(slug: "dependent").merge(
       "depends_on" => "base",

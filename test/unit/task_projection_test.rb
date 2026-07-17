@@ -11,7 +11,8 @@ class TaskProjectionTest < Minitest::Test
 
     assert_equal 7, projection["conditions"].fetch("current").size
     assert projection["conditions"].fetch("current").all? { |fact| fact["state"] == "pending" }
-    assert_empty projection["gates"]
+    assert_equal "reconcile_required",
+                 projection["gates"].dig("execute_to_open_pr", "status")
     assert_equal 0, projection["identity"].fetch("task_generation")
   end
 

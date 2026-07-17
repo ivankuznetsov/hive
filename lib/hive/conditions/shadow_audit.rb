@@ -1,5 +1,3 @@
-require "hive/task_projection"
-
 module Hive
   module Conditions
     module ShadowAudit

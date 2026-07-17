@@ -76,6 +76,11 @@ class HiveBotStatusWatcherTest < Minitest::Test
   def test_fetch_parses_status_rows
     status_task = task(slug: "s1")
     status_task["pr_url"] = "https://github.com/example/repo/pull/561"
+    status_task["condition_task_generation"] = 4
+    status_task["commit_generation"] = 2
+    status_task["current_attempt"] = "attempt-b"
+    status_task["conditions"] = [ { "condition" => "ChangesPresent", "state" => "satisfied" } ]
+    status_task["condition_migration"] = { "effective" => "conditions" }
 
     with_fake_status(JSON.generate(envelope([ status_task ]))) do |bin|
       result = Hive::Bot::StatusWatcher.new(hive_bin: bin).fetch
@@ -91,6 +96,10 @@ class HiveBotStatusWatcherTest < Minitest::Test
       assert_equal "waiting", row.marker
       assert_equal "needs_input", row.action
       assert_nil row.diagnostic
+      assert_equal 4, row.condition_task_generation
+      assert_equal 2, row.commit_generation
+      assert_equal "attempt-b", row.current_attempt
+      assert_equal "conditions", row.condition_migration.fetch("effective")
     end
   end
 

@@ -473,6 +473,18 @@ class E2EBinaryTest < Minitest::Test
     end
   end
 
+  def test_usage_error_ignores_json_flags_after_option_terminator
+    out, err, status = Open3.capture3(hive_e2e, "replay", "--json", "--", "--no-json")
+    assert_equal 64, status.exitstatus
+    assert_empty err
+    assert_equal "hive-e2e-error", JSON.parse(out)["schema"]
+
+    out, err, status = Open3.capture3(hive_e2e, "replay", "--", "--json")
+    assert_equal 64, status.exitstatus
+    assert_empty out
+    assert_match(/hive-e2e:/, err)
+  end
+
   def test_missing_required_args_with_json_true_emits_envelope_on_stdout
     out, err, status = Open3.capture3(hive_e2e, "replay", "--json=true")
     refute_equal 0, status.exitstatus

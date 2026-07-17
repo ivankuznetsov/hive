@@ -55,9 +55,11 @@ grammar as `bin/hive`: bare `--json`, exact truthy assignments
 assignments are moved behind a recognized command. Unsupported assignments such
 as `--json=1` or `--json=yes` are usage errors before the value can become the
 default `run` pattern. Wrapper-owned error formatting checks the last
-recognized JSON boolean flag rather than any truthy flag, so duplicate flags
-with a final false form, such as `--json --no-json`, emit the human
-`hive-e2e:` stderr path. Invalid-byte `ARGV` entries are rejected before those
+recognized JSON boolean flag before the first `--` option terminator rather
+than any truthy flag anywhere in argv, so duplicate option flags with a final
+false form, such as `--json --no-json`, emit the human `hive-e2e:` stderr path,
+while JSON-looking positional literals after `--` do not change output mode.
+Invalid-byte `ARGV` entries are rejected before those
 rewrites and before Thor dispatch, and are reported as usage errors (`64`);
 JSON callers receive the normal `hive-e2e-error` envelope with
 `error_kind: "usage"`.

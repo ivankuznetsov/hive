@@ -72,8 +72,9 @@ command argument or task target. `hive new` is the wrapper-level text-tail
 exception: after `hive new PROJECT`, later `--help`, `-h`, or malformed
 `--json=...` tokens are treated as literal task text, with `bin/hive` inserting
 `--` before the tail so Thor leaves the idea text alone. Wrapper-owned usage
-errors use the last recognized JSON boolean flag, so `--json --no-json` and
-`--json --json=false` choose human prose instead of an error envelope.
+errors use the last recognized JSON boolean flag before the first `--` option
+terminator, so `--json --no-json` and `--json --json=false` choose human prose,
+while JSON-looking positional literals after `--` do not affect output mode.
 
 `bin/hv` is the Apache Hive collision fallback entrypoint. It probes only the
 owned Hive CLI locations and `HIVE_BIN_OVERRIDE`; it intentionally does not

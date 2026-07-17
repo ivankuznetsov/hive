@@ -38,8 +38,10 @@ forms, and JSON booleans lifted only in their exact accepted forms (`--json`,
 as `--help`, unsupported-looking `--json=...` assignments after `PROJECT`,
 unrecognized `--foo`, and quoted strings containing `--workflow` remain task
 text. When the wrapper itself catches a usage error, JSON-vs-prose mode is
-decided from the last recognized JSON boolean flag in argv, so a trailing false
-form such as `--no-json` or `--json=false` overrides an earlier `--json`.
+decided from the last recognized JSON boolean flag before the first `--` option
+terminator, so a trailing false form such as `--no-json` or `--json=false`
+overrides an earlier `--json` only while it remains in the option-parsed region.
+JSON-looking positional literals after `--` never change the output mode.
 Before any wrapper rewrite or Thor dispatch, every `ARGV` entry must have valid
 encoding. Invalid-byte arguments raise through the same usage-error path as
 malformed wrapper options, so JSON callers still receive the command-specific

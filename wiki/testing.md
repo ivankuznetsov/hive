@@ -159,6 +159,8 @@ successful `list --json` / `clean --json` calls, unknown-command JSON errors,
 missing argument errors, top-level version output, command-local help after
 command options (`run --filter tui --help`), leading JSON option normalization,
 malformed JSON assignment rejection, last-JSON-boolean-wins usage-error mode,
+JSON-looking literals after the `--` option terminator being ignored for mode
+selection,
 replay path safety, missing, non-executable, and symlinked replay artifact
 validation, cleanup retention validation, and the single-dispatch invariant for
 successful JSON commands.

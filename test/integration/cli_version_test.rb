@@ -71,6 +71,21 @@ class CliVersionTest < Minitest::Test
     end
   end
 
+  def test_bin_hive_usage_error_ignores_json_flags_after_option_terminator
+    with_tmp_global_config do
+      out, _err, status = Open3.capture3(
+        RbConfig.ruby, "-Ilib", "bin/hive", "run", "--json", "--", "--no-json", "extra"
+      )
+      assert_equal 64, status.exitstatus
+      assert_equal "hive-run", JSON.parse(out)["schema"]
+
+      out, err, status = Open3.capture3(RbConfig.ruby, "-Ilib", "bin/hive", "run", "--", "--json", "extra")
+      assert_equal 64, status.exitstatus
+      assert_empty out
+      assert_match(/Usage: "hive run TARGET"/, err)
+    end
+  end
+
   def test_bin_hive_new_treats_help_flag_as_task_text_after_project
     with_cli_project do |dir, project|
       out, err, status = run_bin_hive("new", project, "add", "--help", "docs")

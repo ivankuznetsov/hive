@@ -192,7 +192,8 @@ def lift_new_options!(argv)
 end
 
 def json_requested?(argv)
-  JSON_TRUE_OPTIONS.include?(argv.reverse.find { |arg| JSON_BOOLEAN_OPTIONS.include?(arg) })
+  option_argv = argv.take_while { |arg| arg != "--" }
+  JSON_TRUE_OPTIONS.include?(option_argv.reverse.find { |arg| JSON_BOOLEAN_OPTIONS.include?(arg) })
 end
 
 def reject_invalid_argv_encoding!(argv)

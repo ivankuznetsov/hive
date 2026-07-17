@@ -168,6 +168,20 @@ class LockTest < Minitest::Test
     end
   end
 
+  def test_release_does_not_recreate_a_moved_or_removed_task_folder
+    with_tmp_dir do |root|
+      task_folder = File.join(root, "task")
+      lock_data = Hive::Lock.acquire_task_lock(task_folder)
+      moved_folder = File.join(root, "moved-task")
+      File.rename(task_folder, moved_folder)
+
+      refute Hive::Lock.release_task_lock(task_folder, lock_id: lock_data.fetch("lock_id"))
+      refute File.exist?(task_folder), "release must not recreate the vanished source folder"
+      assert File.exist?(File.join(moved_folder, ".lock"))
+      assert File.exist?(File.join(moved_folder, ".lock.tmp.guard"))
+    end
+  end
+
   def test_update_task_lock_removes_tempfile_when_rename_fails
     with_tmp_dir do |dir|
       lock_path = File.join(dir, ".lock")

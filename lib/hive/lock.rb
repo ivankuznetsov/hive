@@ -46,6 +46,8 @@ module Hive
 
     def release_task_lock(task_folder, lock_id:)
       lock_path = File.join(task_folder, ".lock")
+      return false unless File.directory?(task_folder)
+
       with_task_lock_guard(lock_path) do
         return false unless File.exist?(lock_path)
 
@@ -55,6 +57,11 @@ module Hive
         File.delete(lock_path)
         true
       end
+    rescue Errno::ENOENT
+      # Stage transitions may atomically move the locked task folder. Never
+      # recreate the vanished source merely to release a lock that moved with
+      # it; the transition owner removes that orphan at the destination.
+      false
     end
 
     # Atomic read-modify-write to prevent torn reads during stale-lock checks
@@ -79,7 +86,9 @@ module Hive
     # ownership-checked release on a stable sidecar inode. The guard is held
     # only for these short filesystem operations, never for the task run.
     def with_task_lock_guard(lock_path)
-      guard_path = "#{lock_path}.guard"
+      # `.lock.tmp.*` is already ignored by every existing hive-state repo.
+      # Keep the stable guard in that namespace so it never enters commits.
+      guard_path = "#{lock_path}.tmp.guard"
       File.open(guard_path, File::RDWR | File::CREAT, 0o644) do |guard|
         guard.flock(File::LOCK_EX)
         yield

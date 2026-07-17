@@ -14,9 +14,9 @@ tags: [lock, concurrency, flock, commit-lock]
 `with_task_lock(task_folder, payload = {})` wraps a block:
 
 1. `acquire_task_lock` writes and fsyncs a complete YAML payload to a sibling tempfile, then hard-links it to `<task_folder>/.lock` with no-replace semantics. Readers therefore see either no lock or a complete payload, never an empty/partial newly created lock.
-2. Publication, stale replacement, updates, and release are serialized on the stable `<task_folder>/.lock.guard` flock. On `Errno::EEXIST`, acquisition calls `stale_lock?`; if stale, it deletes and retries up to 3 times, otherwise it raises `Hive::ConcurrentRunError`.
+2. Publication, stale replacement, updates, and release are serialized on the stable `<task_folder>/.lock.tmp.guard` flock. That name is covered by the existing hive-state ignore rule. On `Errno::EEXIST`, acquisition calls `stale_lock?`; if stale, it deletes and retries up to 3 times, otherwise it raises `Hive::ConcurrentRunError`.
 3. The block runs with the lock held.
-4. `release_task_lock` deletes the lock file in `ensure` only when its generated `lock_id` still matches. An old owner cannot delete a replacement generation.
+4. `release_task_lock` deletes the lock file in `ensure` only when its generated `lock_id` still matches. An old owner cannot delete a replacement generation. If a stage transition moved the task folder while locked, release does not recreate the vanished source; the transition removes the moved lock before commit.
 
 `base_payload`:
 ```ruby

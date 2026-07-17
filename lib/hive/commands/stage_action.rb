@@ -9,6 +9,7 @@ require "hive/workflows"
 require "hive/task_action"
 require "hive/attempts/context"
 require "hive/attempts/entrypoint"
+require "hive/conditions/transition_guard"
 
 module Hive
   module Commands
@@ -168,6 +169,7 @@ module Hive
         return if config[:force_source]
 
         marker = Hive::Markers.current(task.state_file)
+        Hive::Conditions::TransitionGuard.validate!(task, force: config[:force_source])
         return if terminal_marker?(marker)
         return if archive_merged_error_recovery_marker?(task, marker, config)
 

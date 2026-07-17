@@ -25,7 +25,7 @@ module Hive
                        :condition_task_generation, :commit_generation, :current_attempt,
                        :conditions, :condition_history, :evidence, :condition_gate,
                        :condition_migration, :condition_provenance, :shadow_audit,
-                       :condition_warning,
+                       :condition_warning, :id, :project_path,
                        keyword_init: true)
       # Aggregated per-project legacy-layout signal lifted out of each
       # project payload's `legacy_stage_dirs` array. The dispatcher uses
@@ -187,7 +187,9 @@ module Hive
             admission_error = extract_admission_error(task)
             rows << Row.new(
               project: project,
+              project_path: project_doc["path"],
               slug: task["slug"],
+              id: task["id"],
               stage: task["stage"],
               workflow: task["workflow"],
               marker: task["marker"],

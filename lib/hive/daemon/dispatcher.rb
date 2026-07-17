@@ -1,5 +1,6 @@
 require "digest"
 require "fileutils"
+require "json"
 require "shellwords"
 require "hive/config"
 require "hive/stages"
@@ -32,6 +33,8 @@ require "hive/update_check/state"
 require "hive/install_channel"
 require "hive/commands/update"
 require "hive/attempts/dispatcher"
+require "hive/scheduling_proof/candidate_observation"
+require "hive/scheduling_proof/tick_observation"
 
 module Hive
   module Daemon
@@ -69,7 +72,9 @@ module Hive
                      update_state: nil, update_checker: nil, channel_detector: nil,
                      dispatch_request_state_home: nil, dispatch_result_state_home: nil,
                      attempt_dispatcher: nil, attempt_reconciler: nil,
-                     lost_outcome_store: nil, lost_outcome_processor: nil)
+                     lost_outcome_store: nil, lost_outcome_processor: nil,
+                     scheduler_snapshot_store: nil, scheduling_observation_recorder: nil,
+                     daemon_instance_id: nil)
         @config = config
         @controller = controller
         @supervisor = supervisor
@@ -88,6 +93,10 @@ module Hive
         @lost_outcome_store = lost_outcome_store
         @lost_outcome_processor = lost_outcome_processor
         @attempt_snapshot = nil
+        @scheduler_snapshot_store = scheduler_snapshot_store
+        @scheduling_observation_recorder = scheduling_observation_recorder
+        @daemon_instance_id = daemon_instance_id || "#{Process.pid}:unknown-start"
+        reset_scheduler_tick_observation
 
         # Update-flow collaborators (plan 2026-05-27-002). The check runs
         # only when a state store is injected (the daemon does so); existing
@@ -209,6 +218,7 @@ module Hive
       # deterministically.
       def tick(now: Time.now)
         @last_tick_at = now
+        reset_scheduler_tick_observation
         # PR-40 follow-up #2: clear the per-tick enable cache so a
         # `daemon.enabled` flip in `<project>/.hive-state/config.yml`
         # takes effect within one poll interval. Without this, the
@@ -227,6 +237,7 @@ module Hive
         # fails, fail closed for this tick rather than admitting against an
         # unknown ownership view.
         unless reconcile_attempts(now: now)
+          @scheduler_tick_unavailable_claims |= %w[attempt_ownership capacity]
           @logger.event(:tick_end, now: Time.now.utc.iso8601,
                                    action: "attempt_reconciliation_failed")
           return
@@ -271,10 +282,13 @@ module Hive
         # 2. Fetch status
         result = @status_consumer.fetch
         unless result.ok
+          @scheduler_tick_unavailable_claims |= %w[scheduler_decision queue_position]
           @logger.event(:status_failure, error: result.error)
           @logger.event(:tick_end, now: Time.now.utc.iso8601, action: "status_failure")
           return
         end
+        @scheduler_tick_health = "ok"
+        @scheduler_tick_rows = result.rows
         # Non-fatal status advisory (logged once per tick). `result.warning`
         # combines TWO sources: a tolerated forward schema-version skew (an
         # updated `hive` binary emitted a newer hive-status envelope than this
@@ -416,7 +430,10 @@ module Hive
         # 4. Per-row dispatch, later pipeline stages first (see
         # dispatch_priority_order) so work nearest completion drains
         # ahead of newer earlier-stage work when slots are scarce.
-        dispatch_priority_order(result.rows).each { |row| handle_row(row, now: now) }
+        dispatch_priority_order(result.rows).each_with_index do |row, index|
+          @scheduler_queue_positions[[ row.project, row.slug, row.stage ]] = index + 1
+          handle_row(row, now: now)
+        end
 
         # 5. Bound the persisted dispatch-baseline file to the live task set.
         # Only reached on a SUCCESSFUL status fetch (the `unless result.ok`
@@ -436,6 +453,8 @@ module Hive
 
         @logger.event(:tick_end, now: Time.now.utc.iso8601,
                                  in_flight: @controller.in_flight_count)
+      ensure
+        publish_scheduler_tick(now: now) if @scheduler_snapshot_store
       end
 
       # Run forever: install signal traps, loop tick + interruptible
@@ -491,6 +510,7 @@ module Hive
         @supervisor.terminate_all(grace_sec: @shutdown_grace_sec)
         # One final reap to catch any last completions
         reap_completed(now: Time.now)
+        publish_scheduler_shutdown(now: Time.now) if @scheduler_snapshot_store
         @logger.close
       end
 
@@ -921,8 +941,12 @@ module Hive
 
       def handle_row(row, now:)
         return unless project_enabled?(row.project)
-        return if @legacy_layout_projects.key?(row.project)
+        if @legacy_layout_projects.key?(row.project)
+          record_scheduler_candidate(row, reason: "admission_error", now: now)
+          return
+        end
         if merged_pr_recoverable_finalize_error?(row)
+          record_scheduler_candidate(row, reason: "merge_wait", now: now)
           enqueue_merge_watch(row, error_reason: row.marker_attrs.to_h["reason"].to_s)
           return
         end
@@ -941,6 +965,14 @@ module Hive
           blocked: row.blocked == true,
           admission_error: !row.admission_error.nil?
         )
+        unless %w[agent_running archived].include?(row.action.to_s)
+          record_scheduler_candidate(
+            row,
+            reason: Policy.reason_for(decision, action: row.action),
+            now: now,
+            eligible: decision == :dispatch
+          )
+        end
 
         case decision
         when :admission_error
@@ -1093,12 +1125,16 @@ module Hive
         # so we surface a distinct reason instead of collapsing both
         # into the same log line.
         if row.folder.nil? || row.folder.to_s.empty?
+          record_scheduler_candidate(row, reason: "dispatch_failed", now: now, eligible: true,
+                                     evidence: { "error" => { "code" => "folder_missing_nil" } })
           @logger.event(:skipped, project: row.project, slug: row.slug,
                                   stage: row.stage, action: row.action,
                                   reason: "folder_missing_nil")
           return
         end
         unless File.directory?(row.folder.to_s)
+          record_scheduler_candidate(row, reason: "dispatch_failed", now: now, eligible: true,
+                                     evidence: { "error" => { "code" => "folder_missing" } })
           @logger.event(:skipped, project: row.project, slug: row.slug,
                                   stage: row.stage, action: row.action,
                                   reason: "folder_missing")
@@ -1115,6 +1151,7 @@ module Hive
         # reflects `record_dispatch` calls, so the gate is naturally
         # correct across tick-internal ordering.
         if @controller.running_task?(project: row.project, slug: row.slug)
+          record_scheduler_candidate(row, reason: "already_in_flight", now: now)
           @logger.event(:blocked, project: row.project, slug: row.slug,
                                   stage: row.stage, reason: "in_flight")
           return
@@ -1126,6 +1163,10 @@ module Hive
           external_project_count: external_active_agent_count_for(row.project)
         )
         unless gate == :ok
+          record_scheduler_candidate(
+            row, reason: gate, now: now,
+            evidence: controller_scheduling_evidence(row, now: now)
+          )
           @logger.event(:blocked, project: row.project, slug: row.slug,
                                   stage: row.stage, reason: gate.to_s)
           return
@@ -1145,6 +1186,10 @@ module Hive
           begin
             command = PlanApproval.prepare(row.suggested_command, row.state_file)
           rescue PlanApproval::NotApprovable, ArgumentError => e
+            record_scheduler_candidate(
+              row, reason: "dispatch_failed", now: now, eligible: true,
+              evidence: { "error" => { "code" => "plan_approval_invalid", "summary" => e.message } }
+            )
             @logger.event(:skipped, project: row.project, slug: row.slug,
                                     stage: row.stage, action: row.action,
                                     reason: "plan_approval_invalid: #{e.message}")
@@ -1152,7 +1197,7 @@ module Hive
           end
         end
 
-        dispatch_command(
+        result = dispatch_command(
           command,
           project: row.project, slug: row.slug, stage: row.stage,
           state_file_mtime: row.state_file_mtime,
@@ -1160,6 +1205,21 @@ module Hive
           now: now,
           trigger: trigger
         )
+        attempt = result.respond_to?(:attempt) ? result.attempt : nil
+        @scheduler_new_attempts << attempt if attempt&.live?
+        if result.respond_to?(:status) && result.status == :deferred
+          record_scheduler_candidate(
+            row, reason: result.reason || "global_capacity", now: now,
+            evidence: controller_scheduling_evidence(row, now: now)
+          )
+        end
+        result
+      rescue StandardError => e
+        record_scheduler_candidate(
+          row, reason: "dispatch_failed", now: now, eligible: true,
+          evidence: { "error" => { "code" => "dispatch_exception", "summary" => e.message } }
+        )
+        raise
       end
 
       # Order rows so tasks closer to the end of the pipeline dispatch
@@ -2282,6 +2342,171 @@ module Hive
 
         reason = row.marker_attrs.to_h["reason"].to_s
         Hive::Daemon::PrMergeWatcher::MERGED_PR_RECOVERABLE_ERROR_REASONS.include?(reason)
+      end
+
+      def reset_scheduler_tick_observation
+        @scheduler_tick_health = "degraded"
+        @scheduler_tick_unavailable_claims = []
+        @scheduler_tick_rows = []
+        @scheduler_candidates = {}
+        @scheduler_queue_positions = {}
+        @scheduler_new_attempts = []
+      end
+
+      def record_scheduler_candidate(row, reason:, now:, eligible: false, evidence: {})
+        key = [ row.project, row.slug, row.stage ]
+        combined = scheduler_row_evidence(row).merge(evidence)
+        @scheduler_candidates[key] = Hive::SchedulingProof::CandidateObservation.build(
+          row: row,
+          reason: reason,
+          observed_at: now,
+          eligible: eligible,
+          queue_position: @scheduler_queue_positions[key],
+          evidence: combined
+        )
+      rescue StandardError => e
+        @scheduler_tick_health = "degraded"
+        @scheduler_tick_unavailable_claims << "scheduler_decision"
+        @logger.event(
+          :scheduling_observation_failed,
+          project: row.project, slug: row.slug, error: "#{e.class}: #{e.message}"
+        )
+      end
+
+      def scheduler_row_evidence(row)
+        evidence = {}
+        if row.blocked == true || row.admission_error
+          evidence["dependency"] = {
+            "blocked_by" => row.blocked_by,
+            "dependency_stage" => row.dependency_stage,
+            "admission_error" => row.admission_error&.to_h
+          }
+        end
+        if row.diagnostic.is_a?(Hash)
+          evidence["error"] = {
+            "code" => row.marker_attrs.to_h["reason"] || "task_error",
+            "summary" => row.diagnostic["summary"],
+            "environment_provenance" => "daemon_runtime"
+          }
+        end
+        evidence
+      end
+
+      def controller_scheduling_evidence(row, now:)
+        state = @controller.scheduling_state(project: row.project, slug: row.slug, now: now)
+        {
+          "capacity" => {
+            "configured_slots" => state.dig("limits", "global"),
+            "used_slots" => state["global_in_use"],
+            "project_used" => state["project_in_use"],
+            "project_limit" => state.dig("limits", "project"),
+            "daily_used" => state["daily_count"],
+            "daily_limit" => state.dig("limits", "daily")
+          },
+          "retry" => {
+            "state" => state["gate"],
+            "failures" => state["transient_failures"],
+            "retry_after" => state["cooldown_until"]
+          }
+        }
+      end
+
+      def publish_scheduler_tick(now:)
+        candidates = @scheduler_candidates.values
+        record_scheduler_observations(candidates)
+        previous = @scheduler_snapshot_store.read
+        if @scheduler_tick_health == "degraded" && candidates.empty? && previous.status == :ok
+          prior = previous.snapshot
+          candidates = Array(prior.dig("fleet", "candidates"))
+          owners = Array(prior.dig("fleet", "owners"))
+        else
+          owners = scheduler_owner_rows
+        end
+        observation = Hive::SchedulingProof::TickObservation.new(
+          daemon_instance_id: @daemon_instance_id,
+          daemon_state: "running",
+          heartbeat_at: now,
+          poll_interval_sec: @poll_interval_sec,
+          configuration_fingerprint: scheduler_configuration_fingerprint,
+          tick_health: @scheduler_tick_health,
+          unavailable_live_claims: @scheduler_tick_unavailable_claims,
+          configured_slots: @controller.max_concurrent_runs,
+          owners: owners,
+          candidates: candidates
+        )
+        @scheduler_snapshot_store.write(observation.to_h)
+        @logger.event(
+          :scheduler_snapshot_published,
+          heartbeat_at: now.utc.iso8601(6), tick_health: @scheduler_tick_health,
+          owner_count: owners.length, candidate_count: candidates.length
+        )
+      rescue StandardError => e
+        @logger.event(:scheduler_snapshot_failed, error: "#{e.class}: #{e.message}")
+      end
+
+      def record_scheduler_observations(candidates)
+        return unless @scheduling_observation_recorder
+
+        candidates.each do |candidate|
+          next unless candidate["task_folder"] && File.directory?(candidate["task_folder"])
+
+          recorded = @scheduling_observation_recorder.record(candidate)
+          if recorded
+            @logger.event(
+              :scheduling_observation_recorded,
+              project: candidate["project"], slug: candidate["task_slug"],
+              reason: candidate["reason"], task_generation: candidate["task_generation"]
+            )
+          end
+        rescue StandardError => e
+          @scheduler_tick_health = "degraded"
+          @scheduler_tick_unavailable_claims << "scheduling_observation"
+          @logger.event(
+            :scheduling_observation_failed,
+            project: candidate["project"], slug: candidate["task_slug"],
+            error: "#{e.class}: #{e.message}"
+          )
+        end
+      end
+
+      def scheduler_owner_rows
+        attempts = Array(@attempt_snapshot&.attempts).map(&:attempt) + @scheduler_new_attempts
+        attempts.select(&:live?).uniq(&:attempt_id).map do |attempt|
+          {
+            "project" => attempt["project"],
+            "task_slug" => attempt["task_slug"],
+            "stage" => attempt["intended_stage"],
+            "task_generation" => attempt.task_input_epoch,
+            "attempt_id" => attempt.attempt_id,
+            "attempt_state" => attempt.state
+          }
+        end
+      end
+
+      def scheduler_configuration_fingerprint
+        ::Digest::SHA256.hexdigest(
+          JSON.generate(
+            "max_concurrent_runs" => @controller.max_concurrent_runs,
+            "max_concurrent_per_project" => @controller.max_concurrent_per_project,
+            "max_runs_per_day_per_project" => @controller.max_runs_per_day_per_project,
+            "poll_interval_sec" => @poll_interval_sec
+          )
+        )
+      end
+
+      def publish_scheduler_shutdown(now:)
+        result = @scheduler_snapshot_store.read
+        return unless result.status == :ok
+
+        snapshot = result.snapshot.merge(
+          "daemon_state" => "stopped",
+          "heartbeat_at" => now.utc.iso8601(6),
+          "tick_health" => "degraded",
+          "unavailable_live_claims" => %w[queue_position capacity provider_route scheduler_decision]
+        )
+        @scheduler_snapshot_store.write(snapshot)
+      rescue StandardError => e
+        @logger.event(:scheduler_snapshot_failed, error: "#{e.class}: #{e.message}")
       end
 
       def reset_active_agent_snapshot

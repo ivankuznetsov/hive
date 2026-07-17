@@ -28,6 +28,8 @@ require "hive/attempts/process_identity"
 require "hive/attempts/legacy_backfiller"
 require "hive/attempts/reconciler"
 require "hive/attempts/lost_outcome"
+require "hive/scheduling_proof/observation_recorder"
+require "hive/scheduling_proof/snapshot_store"
 
 module Hive
   module Commands
@@ -282,7 +284,14 @@ module Hive
           attempt_dispatcher: attempt_dispatcher,
           attempt_reconciler: attempt_reconciler,
           lost_outcome_store: lost_outcome_store,
-          lost_outcome_processor: lost_outcome_processor
+          lost_outcome_processor: lost_outcome_processor,
+          scheduler_snapshot_store: Hive::SchedulingProof::SnapshotStore.new(
+            path: File.join(@hive_home, "scheduler", "snapshot.v1.json")
+          ),
+          scheduling_observation_recorder: Hive::SchedulingProof::ObservationRecorder.new(
+            attempt_store: attempt_store
+          ),
+          daemon_instance_id: "#{Process.pid}:#{own_start_time}"
         )
 
         reexec_requested = false

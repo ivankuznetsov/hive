@@ -19,6 +19,7 @@ module Hive
         "blocked_on_dependency" => "dependency_wait",
         "dependency_unmet" => "dependency_wait",
         "global_cap" => "global_capacity",
+        "capacity" => "global_capacity",
         "project_cap" => "project_capacity",
         "daily_cap" => "daily_capacity",
         "cooldown" => "cooldown",

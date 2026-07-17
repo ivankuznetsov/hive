@@ -1,5 +1,6 @@
 require "set"
 require "date"
+require "time"
 
 module Hive
   module Daemon
@@ -351,6 +352,28 @@ module Hive
 
       def dropped_projects
         @dropped_projects.to_a
+      end
+
+      # Read-only scheduling evidence for status proofs. This exposes the
+      # existing controller state; it does not add another retry or capacity
+      # authority and performs no I/O.
+      def scheduling_state(project:, slug:, now: Time.now)
+        key = [ project, slug ]
+        {
+          "gate" => can_dispatch?(project: project, slug: slug, now: now).to_s,
+          "cooldown_until" => @cooldown_until[key]&.utc&.iso8601(6),
+          "transient_failures" => @transient_failures[key].to_i,
+          "quarantined" => @quarantine.include?(key),
+          "project_dropped" => @dropped_projects.include?(project),
+          "global_in_use" => task_running_count + @external_running_global,
+          "project_in_use" => task_running_count(project: project) + @external_running_by_project[project].to_i,
+          "daily_count" => daily_count_for(project, now),
+          "limits" => {
+            "global" => @max_concurrent_runs,
+            "project" => @max_concurrent_per_project,
+            "daily" => @max_runs_per_day_per_project
+          }
+        }
       end
 
       def daily_count_for(project, now = Time.now)

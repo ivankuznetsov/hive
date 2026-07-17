@@ -58,6 +58,25 @@ module Hive
     module Policy
       module_function
 
+      REASON_CODES = {
+        admission_error: "admission_error",
+        dispatch: "dispatch_pending",
+        wait_for_debounce: "edit_debounce",
+        wait_for_answers: "needs_input",
+        record_baseline: "needs_input",
+        blocked_on_dependency: "dependency_wait",
+        poll_for_merge: "merge_wait",
+        markerless_stalled: "markerless_stalled",
+        skip: "eligible_not_dispatched"
+      }.freeze
+
+      def reason_for(decision, action: nil)
+        return "terminal_error" if decision == :skip && %w[error recover_execute recover_review].include?(action.to_s)
+        return "abandoned" if decision == :skip && action.to_s == "manual_steering"
+
+        REASON_CODES.fetch(decision.to_sym, "live_evidence_unavailable")
+      end
+
       # Actions that mean "the task is ready to advance to the next stage".
       # The daemon dispatches `row.suggested_command` (which is the
       # promote-or-run workflow verb produced by `Hive::TaskAction`).

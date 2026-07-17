@@ -1,4 +1,6 @@
 require "hive/scheduling_proof/action_projector"
+require "hive/scheduling_proof/candidate_observation"
+require "hive/scheduling_proof/fleet_projector"
 require "hive/scheduling_proof/freshness"
 require "hive/scheduling_proof/observation_recorder"
 require "hive/scheduling_proof/projector"

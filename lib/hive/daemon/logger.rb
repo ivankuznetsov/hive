@@ -86,6 +86,11 @@ module Hive
         attempt_duplicate
         attempt_capacity_deferred
         attempt_legacy_backfilled
+        scheduler_snapshot_published
+        scheduler_snapshot_failed
+        scheduling_observation_recorded
+        scheduling_observation_failed
+        scheduler_accounting_inconsistent
         digest_catchup_skipped
         digest_failure_backoff
         digest_state_unreadable

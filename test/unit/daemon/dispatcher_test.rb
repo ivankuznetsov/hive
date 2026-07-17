@@ -8,6 +8,7 @@ require "hive/daemon/dispatcher"
 require "hive/daemon/concurrency_controller"
 require "hive/daemon/dispatch_baselines"
 require "hive/daemon/logger"
+require "hive/scheduling_proof/snapshot_store"
 
 # Pin Dispatcher#tick logic with mocked collaborators. The point of
 # these tests is the routing decisions: which Policy outcome maps to
@@ -320,7 +321,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
                       with_digest_scheduler: false, with_answer_digest_scheduler: false,
                       refactor_patrol_merge_reconciler: nil,
                       refactor_patrol_scheduler: nil, patrol_arbiter: nil,
-                      attempt_dispatcher: nil, attempt_reconciler: nil)
+                      attempt_dispatcher: nil, attempt_reconciler: nil,
+                      scheduler_snapshot_store: nil, scheduling_observation_recorder: nil)
     config = {
       "daemon" => {
         "edit_debounce_sec" => 30,
@@ -370,7 +372,10 @@ class HiveDaemonDispatcherTest < Minitest::Test
       dispatch_request_state_home: dispatch_request_state_home,
       dispatch_result_state_home: dispatch_result_state_home,
       attempt_dispatcher: attempt_dispatcher,
-      attempt_reconciler: attempt_reconciler
+      attempt_reconciler: attempt_reconciler,
+      scheduler_snapshot_store: scheduler_snapshot_store,
+      scheduling_observation_recorder: scheduling_observation_recorder,
+      daemon_instance_id: "test-daemon"
     )
     # Bypass the Hive::Config.find_project / Config.load lookup chain
     # for unit tests — stub the predicate directly.
@@ -720,7 +725,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
           state_file: nil, folder: nil, marker_attrs: {},
           depends_on: nil, blocked_by: nil, dependency_stage: nil,
           blocked: false, workflow: nil, admission_error: nil,
-          attempt_id: nil, task_generation: nil)
+          attempt_id: nil, task_generation: nil, condition_task_generation: 0,
+          id: 1, project_path: "/tmp/project")
     folder ||= make_existing_row_folder(project: project, stage: stage, slug: slug)
     Row.new(
       project: project, slug: slug, stage: stage, workflow: workflow, marker: marker,
@@ -732,7 +738,9 @@ class HiveDaemonDispatcherTest < Minitest::Test
       depends_on: depends_on, blocked_by: blocked_by,
       dependency_stage: dependency_stage, blocked: blocked,
       admission_error: admission_error,
-      attempt_id: attempt_id, task_generation: task_generation
+      attempt_id: attempt_id, task_generation: task_generation,
+      condition_task_generation: condition_task_generation,
+      id: id, project_path: project_path
     )
   end
 
@@ -743,6 +751,53 @@ class HiveDaemonDispatcherTest < Minitest::Test
   end
 
   # ── core dispatch flow ────────────────────────────────────────────────
+
+  def test_tick_publishes_actual_dependency_gate_and_complete_fleet_input
+    with_tmp_dir do |dir|
+      store = Hive::SchedulingProof::SnapshotStore.new(path: File.join(dir, "scheduler.json"))
+      blocked = row(
+        action: "ready_to_plan", command: "hive plan s1 --from 2-brainstorm",
+        blocked: true, blocked_by: "p1/prerequisite", dependency_stage: "1-inbox",
+        condition_task_generation: 7
+      )
+      dispatcher, = make_dispatcher(rows: [ blocked ], scheduler_snapshot_store: store)
+
+      dispatcher.tick(now: T0)
+
+      snapshot = store.read.snapshot
+      candidate = snapshot.dig("fleet", "candidates", 0)
+      assert_equal "dependency_wait", candidate.fetch("reason")
+      assert_equal 7, candidate.fetch("task_generation")
+      assert_equal "p1/prerequisite", candidate.dig("dependency", "blocked_by")
+      assert_equal 5, snapshot.dig("fleet", "configured_slots")
+      assert_equal "ok", snapshot.fetch("tick_health")
+      assert_equal "2026-05-06T12:00:00.000000Z", snapshot.fetch("heartbeat_at")
+    end
+  end
+
+  def test_failed_status_tick_advances_heartbeat_but_retains_prior_facts
+    with_tmp_dir do |dir|
+      store = Hive::SchedulingProof::SnapshotStore.new(path: File.join(dir, "scheduler.json"))
+      dispatcher, = make_dispatcher(
+        rows: [ row(action: "needs_input", condition_task_generation: 2) ],
+        scheduler_snapshot_store: store
+      )
+      dispatcher.tick(now: T0)
+      prior = store.read.snapshot.dig("fleet", "candidates")
+      status = dispatcher.instance_variable_get(:@status_consumer)
+      status.next_result = Hive::Daemon::StatusConsumer::Result.new(
+        ok: false, rows: [], projects: [], error: "status unavailable"
+      )
+
+      dispatcher.tick(now: T0 + 60)
+
+      snapshot = store.read.snapshot
+      assert_equal prior, snapshot.dig("fleet", "candidates")
+      assert_equal "degraded", snapshot.fetch("tick_health")
+      assert_includes snapshot.fetch("unavailable_live_claims"), "scheduler_decision"
+      assert_equal "2026-05-06T12:01:00.000000Z", snapshot.fetch("heartbeat_at")
+    end
+  end
 
   def test_advance_action_dispatches_workflow_verb
     rows = [ row(action: "ready_to_plan", command: "hive plan s1 --from 2-brainstorm") ]

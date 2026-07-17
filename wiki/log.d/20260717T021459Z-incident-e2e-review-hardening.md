@@ -10,3 +10,4 @@ tags: [e2e, incidents, dependencies, hermetic, review]
 - Moved nested `script_gh` validation to scenario preflight, rejected untagged incident metadata and duplicate scenario names, exposed lifecycle fields in inventory output, and included sandbox bootstrap in incident duration budgets.
 - Kept generated repros hermetic, headless for secondary projects, and fail-closed on unconsumed GitHub interactions after replay producers stop.
 - Kept the incident run directory in the runner temp area while scoping the `runner.temp` expression to workflow steps, where GitHub Actions permits that context, so the required CI workflow parses and starts.
+- Preserved Bundler's exact resolved require paths as a protected subprocess `RUBYLIB`, allowing hermetic `bin/hive` launches to resolve locked dependencies when CI installs gems only under `vendor/bundle`.

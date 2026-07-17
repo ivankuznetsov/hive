@@ -147,7 +147,9 @@ it cannot bypass runtime budgets.
 
 ### Hermetic GitHub and agents
 
-`SandboxEnv` puts `test/e2e/fixtures/gh` first on `PATH` and pins
+`SandboxEnv` puts `test/e2e/fixtures/gh` first on `PATH`, pins the exact require
+paths from Bundler's resolved specs as `RUBYLIB` so subprocesses retain the
+locked dependency set without inheriting Bundler setup, and pins
 `HIVE_GH_BIN` to the same shim for blocking, background, tmux, and replay
 subprocesses. `script_gh` interactions are
 consumed atomically. An absent or exhausted script, unexpected argv, cwd

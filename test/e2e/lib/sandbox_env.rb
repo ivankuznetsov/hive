@@ -44,6 +44,7 @@ module Hive
         HIVE_INVOKED_BIN
         HIVE_GH_BIN
         HIVE_E2E_GH_STUB_DIR
+        RUBYLIB
       ].freeze
 
       module_function
@@ -67,13 +68,15 @@ module Hive
       end
 
       def with(sandbox_dir, run_home, fake_claude_path = Paths.fake_claude)
+        ruby_lib = bundle_require_path
         Bundler.with_unbundled_env do
           LEAKY_KEYS.each { |key| ENV.delete(key) }
-          yield repro_env(sandbox_dir, run_home, fake_claude_path)
+          yield repro_env(sandbox_dir, run_home, fake_claude_path, ruby_lib: ruby_lib)
         end
       end
 
-      def repro_env(sandbox_dir, run_home, fake_claude_path = Paths.fake_claude)
+      def repro_env(sandbox_dir, run_home, fake_claude_path = Paths.fake_claude,
+                    ruby_lib: bundle_require_path)
         # Prepend the directory containing the parent's actual Ruby so that even if
         # rbenv/asdf/chruby/mise shims are still on PATH, the bare `ruby` (and gem
         # shims like `bundle`) resolve to the same interpreter the harness is using.
@@ -95,9 +98,14 @@ module Hive
           "HIVE_INVOKED_BIN" => Paths.hive_bin,
           "HIVE_GH_BIN" => Paths.gh_shim,
           "HIVE_E2E_GH_STUB_DIR" => File.join(run_home, "gh-stub"),
+          "RUBYLIB" => ruby_lib,
           "TERM" => "xterm-256color",
           "PATH" => path_parts.reject(&:empty?).join(":")
         }
+      end
+
+      def bundle_require_path
+        Bundler.load.specs.flat_map(&:full_require_paths).uniq.join(File::PATH_SEPARATOR)
       end
 
       def prepend_gh_shim(path)

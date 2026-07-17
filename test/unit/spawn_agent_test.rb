@@ -637,6 +637,7 @@ class SpawnAgentTest < Minitest::Test
 
       assert_equal [ task.folder, File.join(task.folder, "drafts"), absolute ], scope.fetch(:add_dirs)
       assert_equal %w[Read Write Edit], scope.fetch(:allowed_tools)
+      assert_equal "dontAsk", scope.fetch(:permission_mode)
     end
   end
 

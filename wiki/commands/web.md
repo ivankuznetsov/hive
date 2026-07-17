@@ -340,5 +340,9 @@ legacy icon), `/icon.svg`, and `/icon.png` (apple-touch). The layout links all
 three so browsers no longer emit a root favicon 404, and the icon mark is the
 terracotta honeycomb hive glyph rather than the old placeholder.
 
+## Scheduler explanations
+
+The grid renders one fleet banner and each task's canonical proof summary. Task state shows freshness, blocker, retry/probe time, and advisory safe action. `StatusBroadcaster` replaces scheduler and project rows from the same payload/local set. Proofs add no buttons: Retry, Approve, Run, and archive behavior continue through existing server-side policies and generation/stage guards.
+
 Backlinks: [[architecture]], [[modules/config]], [[modules/daemon]],
 [[modules/bot]], [[decisions]].

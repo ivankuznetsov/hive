@@ -159,6 +159,16 @@ Normal `status` and `status --diagnose` without `--write` do not mutate filesyst
 - `test/unit/diagnostic_evidence_test.rb` — evidence-tier ordering, source labels, newest-log selection, global log-dir inference, marker-tier fallback, redaction/truncation, invalid UTF-8 handling, symlink/regular-file safety, never-raise degradation, and deep YAML hardening.
 - `test/unit/task_action_test.rb` — diagnostic extraction, redaction, artifact selection, marker fallback, non-red nil.
 
+## Canonical scheduler explanations
+
+Current `hive-status` v5 success payloads add one root `scheduler` object and a required-nullable `scheduling_proof` on every task row. The version was already v5 when this additive contract landed; historical v1-v4 schemas remain unchanged. An enrolled, non-archived task has an `idle` or `execution` proof. `9-done` rows and projects with `daemon.enabled: false` emit `scheduling_proof: null`.
+
+The proof carries current project/task/stage/numeric task generation identity, compatible attempt identity, the daemon-recorded first admission outcome, bounded provider/dependency/retry/babysitter/error evidence, freshness, and exactly one advisory action with stage/generation/attempt preconditions. It never authorizes dispatch, recovery, merge, or archive. Commands are limited to existing guarded `hive` verbs; stopped/stale/unknown or inconsistent evidence yields `no_safe_action` where intervention cannot be justified.
+
+The fleet object accounts only task capacity: `used_slots + unused_slots == configured_slots`, owners are live current-generation durable attempts, and causal-bucket units sum to unused slots. Patrol/digest budgets are excluded. Duplicate/over-capacity/unreadable ownership degrades to `health=accounting_inconsistent`, preserves evidence, leaves `unused_slots` unknown, and suppresses fleet advice rather than clamping.
+
+One request captures one `generated_at`/proof `as_of`. Text mode renders that object: the fleet summary appears once, followed by proof summary, stale state, blocker/retry time, and safe action. A stopped daemon produces `daemon_not_running`, retains the last durable reason under `prior`, and names unavailable live claims. Heartbeats are stale after `max(2 * poll_interval_sec, 90s)`.
+
 ## Backlinks
 
 - [[cli]] · [[commands/run]] · [[commands/approve]]

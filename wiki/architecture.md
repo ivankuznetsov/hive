@@ -355,6 +355,20 @@ supervisor, but task ownership never does. Filesystem locks, atomic rename,
 and fsync keep the protocol host-local without adding an event bus. See
 [[modules/attempts]] and [[modules/daemon]].
 
+## Scheduling explanation projection
+
+```text
+durable attempts ─┐
+task projection ──┼─> SchedulingProof projector ─> status v5 ─> CLI/TUI/web/bot
+daemon gate facts ┤                 │
+optional adapters ┘                 ├─> atomic scheduler snapshot
+                                    └─> semantic task-journal observation
+```
+
+The projector is pure and generation-fenced. PID probes, filesystem reads, attempt scans, and task projections happen once at status/daemon boundaries and enter as JSON-compatible inputs. Renderers never choose a reason. The daemon's first real gate supplies precedence; the current-generation journal observation is the durable fallback. Outputs never feed admission, recovery, merge, or archive decisions.
+
+Fleet capacity uses interchangeable units. Owners are live current-generation durable task attempts; ordered non-running candidates explain at most one unused unit each, and `no_candidate` fills the remainder. Stale evidence substitutes `daemon_not_running` or `live_evidence_unavailable` for current unused units while retaining prior buckets historically.
+
 ## Code conventions
 
 - Ruby 3.4, frozen-string-literal **disabled** (per `.rubocop.yml`).

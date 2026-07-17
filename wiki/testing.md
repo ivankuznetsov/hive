@@ -407,6 +407,12 @@ subsecond precision for the daemon's mtime-to-mtime comparison. The Telegram
 leg lives in `test/e2e/tg` (real Bot API, secret-gated) and now asserts the
 /start welcome ahead of the idea flow.
 
+## Scheduler-proof coverage
+
+`test/unit/scheduling_proof/` covers the closed reason vocabulary, bounded/redacted evidence, advisory action safety, heartbeat boundaries, semantic journal dedup, atomic snapshot recovery, candidate allocation, and fail-closed accounting. Dispatcher tests pin actual dependency/capacity gate capture and degraded-tick retention. `test/integration/scheduling_proof_status_test.rb` validates one canonical status/schema/text projection; `scheduling_proof_incidents_test.rb` replays sanitized Honeycomb auth, legacy architecture exhaustion, provider-circuit, and merge-wait evidence without logs or external services.
+
+TUI, web, and bot tests assert proof summary, stale state, blocker/retry time, and action wording are preserved. The existing #9770 provider-limit and #9769 finalize-lifecycle e2e scenarios remain pending until those sibling-owned durable contracts land; deterministic read-model fixtures cover the adapter shape without inventing authority.
+
 ## Backlinks
 
 - [[architecture]]

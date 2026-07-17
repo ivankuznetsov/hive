@@ -273,6 +273,10 @@ a full bot restart.
 
 `test/eval/` exercises this module through the same supervisor entrypoints production uses, with only Telegram and child-process I/O replaced by in-process fakes. The harness classifies outbound messages into the eval contract reasons (`agent_blocked_question`, `status_response`, `task_finished`, `fatal_error`) from observable status rows, handler intents, and child exits. That mapping stays test-only; production bot payloads are unchanged. The live Telegram wrapper `test/e2e/tg/run_idea_e2e.sh` remains opt-in; in `TG_IDEA_MODE=voice` it now exercises both a new audio idea and a seeded audio `/answer` path with the checked-in voice fixture when Telegram/OpenAI credentials are present.
 
+## Scheduler explanations
+
+`StatusWatcher::Result` carries root scheduler data and every `Row` carries its proof. `/status` and `/queue` prefix the escaped fleet summary; Details renders summary, fresh/stale state, blocker, retry/probe time, and safe-action text within Telegram's existing length cap. These fields are display-only and create no callback button. `RowActions`, `WaitingRows`, recovery policy, and current live-row lookup remain authoritative.
+
 ## Backlinks
 
 - [[commands/bot]]

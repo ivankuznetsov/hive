@@ -620,6 +620,14 @@ Since 2026-05-22, `Hive::Stages::DIRS` has all nine slots filled in order; `Stag
 
 See [[stages/index]] for one page per stage.
 
+## Scheduler explanation snapshot
+
+`$HIVE_HOME/scheduler/snapshot.json` is replaceable live evidence, not durable scheduling authority. It is schema `hive-scheduler-snapshot` v1, mode `0600` under a private directory, and generation-keyed by project/task/stage/numeric task generation. Status ignores entries that do not match current `TaskProjection`. Snapshot heartbeat staleness cannot invalidate durable journal facts or a still-live durable attempt.
+
+Semantic scheduling history lives in each task's existing `events.jsonl` as `scheduling_observed`; `TaskProjection` exposes the matching generation as `scheduling.current` and older observations as superseded history. Idle observations may have no attempt ID. They do not mint attempt, generation, retry, provider, dependency, or babysitter authority. Legacy `limits_reached`/healer facts may remain evidence, but only current-generation projections supply the current reason or action.
+
+`hive status` joins the snapshot with durable attempts and task projections at one `as_of`. Durable live attempts remain execution proofs and capacity owners if the daemon stops. Queue/capacity/router claims become unavailable when the verified PID is stopped or the heartbeat exceeds `max(2 × poll_interval, 90s)`.
+
 ## Backlinks
 
 - [[architecture]]

@@ -3,11 +3,17 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-07-16
+updated: 2026-07-17
 tags: [gap, todo]
 ---
 
 **TLDR**: The wiki has broad domain coverage for the current `lib/`, command, stage, TUI, daemon, bot, hivebox web, testing/static-analysis, template/prompt, and release surfaces, but the source-file map below is representative rather than an automatically verified one-file-per-source audit. Remaining gaps are mainly live behavioral verification and a few deeper reference pages.
+
+## Scheduler proof optional adapters
+
+- #9770 provider-routing circuit/store types are absent on this branch. Scheduler observations and proof schema accept bounded provider/model/circuit evidence, and deterministic replay covers the shape, but the daemon does not parse provider failures or create a parallel circuit store. Activate `incident_provider_limit_retry.yml` only after the sibling supplies its read model.
+- #9769's journal-derived per-PR babysitter projection is absent. Merge-wait evidence is supported and replayed, but this change does not emulate job/head-generation/archive authority. `incident_finalize_pr_lifecycle_gate.yml` remains pending until that contract lands.
+- No landed retry-coordinator projection was available. Current gates plus historical healer/`limits_reached` facts are evidence only; no second retry ledger or counter was added.
 
 ## Current release gap
 

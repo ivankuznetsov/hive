@@ -826,6 +826,14 @@ defect.
 `hive-status-diagnose` envelope but only checks `schema == ...` and never
 `schema_version`, so it did NOT share this brittleness and was left as-is.
 
+## Scheduler proof publication
+
+After every full dispatcher tick, including degraded status-fetch ticks, the daemon publishes `Hive::SchedulingProof::TickObservation` to `$HIVE_HOME/scheduler/snapshot.json`. The owner-private v1 document contains daemon instance identity, heartbeat, poll interval, configuration fingerprint, tick health, unavailable live claims, ordered current-generation candidate outcomes, and durable-attempt owners. `SnapshotStore` uses atomic replacement plus file/directory fsync. Missing/corrupt/newer snapshots degrade reads; a corrupt or newer file is never overwritten.
+
+The dispatcher records the actual first policy/capacity gate it evaluated. It never schedules from `scheduler` or `scheduling_proof`. `ObservationRecorder` appends `scheduling_observed` through the authoritative task journal only when a semantic signature changes. Identity, reason, blocker/circuit/retry/error evidence, and action preconditions are semantic; heartbeat age, `as_of`, and queue position are not. Polling therefore replaces volatile facts without journal noise or task-markdown/status-file churn.
+
+Landed bindings are `Attempts::Store#scan` and live `Attempts::Record` identity/capacity from #9767; `TaskProjection#scheduling` and `TaskProjection::Store` from #9768; and `DependencyAdmission` verdicts from #9771. Provider-routing (#9770) and journal-derived PR babysitter (#9769) types were absent, so observations accept their bounded read-only evidence when supplied but create no substitute circuit or job registry.
+
 ## Backlinks
 
 - [[commands/daemon]]

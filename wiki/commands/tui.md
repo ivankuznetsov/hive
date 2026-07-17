@@ -260,6 +260,10 @@ Note that `REVIEW_STALE reason=wall_clock` deliberately retries even when no rev
 
 No render-layer snapshot tests beyond layout pinning; mainstream Ruby tooling does not provide cell-perfect terminal-snapshot diffing.
 
+## Scheduler explanations
+
+`Tui::Snapshot` preserves root `scheduler` and each row's `scheduling_proof` verbatim through scope, filter, and archive projections. The projects pane shows the fleet summary. The task status column prefers the proof summary while retaining the action icon. Red detail adds proof freshness, blocker, retry/probe time, and safe-action text. No proof-driven keybinding or control exists; established row/action guards still own interaction.
+
 ## Backlinks
 
 - [[cli]] · [[commands/status]] · [[commands/drop]] · [[commands/findings]] · [[commands/stage_action]]

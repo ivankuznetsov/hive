@@ -163,8 +163,9 @@ module Hive
         return if current.fetch("state") == "unfinalized"
         return if record["task_generation"].is_a?(Integer) &&
                   record["task_generation"] > current.fetch("task_generation")
+        replacement_state = payload.dig("replacement_proof", "state")
         return if payload["supersedes_job_id"] == current["job_id"] &&
-                  current.fetch("state") == "blocked" && payload["job_id"] != current["job_id"]
+                  %w[CLOSED INVALID].include?(replacement_state) && payload["job_id"] != current["job_id"]
 
         raise StaleEvidence, "current finalization must be adopted or explicitly superseded"
       end

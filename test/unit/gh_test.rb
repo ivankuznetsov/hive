@@ -29,7 +29,30 @@ class GhUnitTest < Minitest::Test
         HIVE_FAKE_GH_PR_BODY
         HIVE_FAKE_GH_VIEW_EXIT
         HIVE_FAKE_GH_LIST_JSON
+        HIVE_FAKE_GH_URL
+        HIVE_FAKE_GH_NUMBER
+        HIVE_FAKE_GH_HEAD_REF_OID
+        HIVE_FAKE_GH_HEAD_REF_NAME
+        HIVE_FAKE_GH_BASE_REF_NAME
+        HIVE_FAKE_GH_MERGED_AT
       ].each { |k| ENV.delete(k) }
+  end
+
+
+  def test_exact_pr_snapshot_returns_canonical_identity_and_head
+    ENV["HIVE_FAKE_GH_URL"] = "https://github.com/Acme/Demo/pull/12"
+    ENV["HIVE_FAKE_GH_NUMBER"] = "12"
+    ENV["HIVE_FAKE_GH_HEAD_REF_OID"] = "a" * 40
+    ENV["HIVE_FAKE_GH_HEAD_REF_NAME"] = "feature"
+    ENV["HIVE_FAKE_GH_BASE_REF_NAME"] = "main"
+
+    snapshot = Hive::Gh.exact_pr_snapshot(ENV.fetch("HIVE_FAKE_GH_URL"), observed_at: Time.utc(2026, 7, 17, 15))
+
+    assert_equal "github.com/acme/demo", snapshot.repository
+    assert_equal 12, snapshot.number
+    assert_equal "a" * 40, snapshot.head_sha
+    assert_equal "OPEN", snapshot.state
+    assert_equal "2026-07-17T15:00:00.000000Z", snapshot.observed_at
   end
 
   # --- with_network_timeout --------------------------------------------

@@ -117,7 +117,20 @@ case "${1:-}" in
             printf '{"comments":[]}\n'
           fi
         else
-          printf '{"state":"%s","body":"%s"}\n' "${HIVE_FAKE_GH_STATE:-OPEN}" "${HIVE_FAKE_GH_PR_BODY:-}"
+          state="${HIVE_FAKE_GH_STATE:-OPEN}"
+          url="${HIVE_FAKE_GH_URL:-https://example.com/pr/9}"
+          number="${HIVE_FAKE_GH_NUMBER:-9}"
+          head_oid="${HIVE_FAKE_GH_HEAD_REF_OID:-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}"
+          head_name="${HIVE_FAKE_GH_HEAD_REF_NAME:-feature}"
+          base_name="${HIVE_FAKE_GH_BASE_REF_NAME:-main}"
+          merged_at="${HIVE_FAKE_GH_MERGED_AT:-}"
+          if [[ -n "$merged_at" ]]; then
+            merged_json="\"$merged_at\""
+          else
+            merged_json="null"
+          fi
+          printf '{"state":"%s","body":"%s","url":"%s","number":%s,"headRefOid":"%s","headRefName":"%s","baseRefName":"%s","mergedAt":%s,"headRepository":{"nameWithOwner":"acme/demo"}}\n' \
+            "$state" "${HIVE_FAKE_GH_PR_BODY:-}" "$url" "$number" "$head_oid" "$head_name" "$base_name" "$merged_json"
         fi
         exit "${HIVE_FAKE_GH_VIEW_EXIT:-0}"
         ;;

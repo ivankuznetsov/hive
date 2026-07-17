@@ -4,6 +4,7 @@ require "timeout"
 require "uri"
 require "yaml"
 require "hive/secret_patterns"
+require "hive/pr"
 
 module Hive
   module Gh
@@ -35,6 +36,10 @@ module Hive
     # single validated constructor and the result is tamper-proof downstream.
     # Keyword construction + field readers are unchanged for consumers.
     PrMetadata = Data.define(:number, :url, :base_ref_name, :head_ref_oid, :is_cross_repository, :state)
+    PrSnapshot = Data.define(
+      :repository, :number, :url, :state, :head_sha, :head_branch,
+      :base_branch, :merged_at, :observed_at
+    )
 
     # Returned by scan_pr_for_secrets so a remote-fetch failure is
     # distinguishable from a clean scan. A blanket rescue that
@@ -269,6 +274,75 @@ module Hive
     rescue JSON::ParserError => e
       raise Hive::GhError, "`gh pr view #{pr_url}` returned unparseable JSON: #{e.message}"
     end
+
+    def exact_pr_snapshot(pr_url, cfg: nil, observed_at: Time.now.utc)
+      fields = %w[number url state headRefOid headRefName baseRefName mergedAt headRepository].join(",")
+      out, err, status = capture3("gh", "pr", "view", pr_url.to_s, "--json", fields, cfg: cfg)
+      unless status.success?
+        raise Hive::GhError, "`gh pr view #{pr_url}` failed: #{err.to_s.strip.empty? ? out : err.strip}"
+      end
+      doc = JSON.parse(out)
+      raise Hive::GhError, "`gh pr view #{pr_url}` returned #{doc.class}; expected Hash" unless doc.is_a?(Hash)
+
+      identity = exact_pr_identity(doc, requested_url: pr_url)
+      state = doc["state"].to_s.upcase
+      raise Hive::GhError, "exact PR snapshot has unknown state #{state.inspect}" unless %w[OPEN CLOSED MERGED].include?(state)
+      head_sha = doc["headRefOid"].to_s.downcase
+      unless head_sha.match?(/\A[0-9a-f]{40,64}\z/)
+        raise Hive::GhError, "exact PR snapshot headRefOid is invalid"
+      end
+      merged_at = doc["mergedAt"]
+      if state == "MERGED" && merged_at.to_s.empty?
+        raise Hive::GhError, "exact merged PR snapshot lacks mergedAt"
+      end
+      Time.iso8601(merged_at) if merged_at
+
+      PrSnapshot.new(
+        repository: identity.fetch("repository"),
+        number: identity.fetch("number"),
+        url: identity.fetch("url"),
+        state: state,
+        head_sha: head_sha,
+        head_branch: doc["headRefName"].to_s,
+        base_branch: doc["baseRefName"].to_s,
+        merged_at: merged_at,
+        observed_at: observed_at.utc.iso8601(6)
+      )
+    rescue JSON::ParserError, ArgumentError => e
+      raise Hive::GhError, "`gh pr view #{pr_url}` returned invalid exact snapshot: #{e.message}"
+    end
+
+    def exact_pr_identity(doc, requested_url:)
+      returned = Hive::Pr.canonical_identity(doc.fetch("url"))
+      requested = Hive::Pr.canonical_identity(requested_url)
+      unless returned.values_at("repository", "number") == requested.values_at("repository", "number") &&
+             doc["number"] == returned["number"]
+        raise Hive::GhError, "exact PR snapshot identity does not match requested PR"
+      end
+      returned
+    rescue ArgumentError, KeyError
+      legacy_pr_identity(doc, requested_url)
+    end
+    private_class_method :exact_pr_identity
+
+    def legacy_pr_identity(doc, requested_url)
+      uri = URI.parse(doc.fetch("url").to_s)
+      requested = URI.parse(requested_url.to_s)
+      number = Integer(doc.fetch("number"))
+      name_with_owner = doc.dig("headRepository", "nameWithOwner").to_s
+      unless uri.is_a?(URI::HTTP) && uri.host == requested.host && number.positive? &&
+             name_with_owner.match?(%r{\A[^/]+/[^/]+\z})
+        raise Hive::GhError, "exact PR snapshot lacks canonical repository identity"
+      end
+      {
+        "repository" => "#{uri.host.downcase}/#{name_with_owner.downcase}",
+        "number" => number,
+        "url" => uri.to_s
+      }
+    rescue URI::InvalidURIError, ArgumentError, KeyError
+      raise Hive::GhError, "exact PR snapshot lacks canonical repository identity"
+    end
+    private_class_method :legacy_pr_identity
 
     def list_open_prs(worktree_path, cfg: nil)
       fields = %w[

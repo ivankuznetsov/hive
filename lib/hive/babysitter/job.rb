@@ -146,11 +146,14 @@ module Hive
         repository = identity.fetch("repository")
         host, owner, name = repository.split("/", 3)
         expected_path = "/#{owner}/#{name}/pull/#{identity.fetch('pr_number')}"
-        unless uri.scheme == "https" && uri.host&.downcase == host && uri.path.sub(%r{/+\z}, "") == expected_path &&
+        legacy_path = "/pr/#{identity.fetch('pr_number')}"
+        normalized_path = uri.path.sub(%r{/+\z}, "")
+        unless uri.scheme == "https" && uri.host&.downcase == host &&
+               [ expected_path, legacy_path ].include?(normalized_path) &&
                uri.userinfo.nil? && uri.query.nil? && uri.fragment.nil?
           raise Invalid, "babysitter PR URL does not match canonical identity"
         end
-        "https://#{host}#{expected_path}"
+        "https://#{host}#{normalized_path}"
       rescue URI::InvalidURIError, KeyError
         raise Invalid, "babysitter PR URL is invalid"
       end

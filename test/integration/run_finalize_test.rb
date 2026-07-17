@@ -3,6 +3,10 @@ require "hive/commands/init"
 require "hive/commands/run"
 require "hive/stages/finalize"
 require "hive/task"
+require "hive/attempts/context"
+require "hive/attempts/store"
+require "hive/task_projection/store"
+require "hive/babysitter/job_store"
 
 class RunFinalizeTest < Minitest::Test
   include HiveTestHelper
@@ -29,7 +33,11 @@ class RunFinalizeTest < Minitest::Test
       HIVE_FAKE_GH_LOG_DIR HIVE_FAKE_GH_PR_BODY HIVE_FAKE_GH_READY_EXIT
       HIVE_FAKE_GH_READY_STDERR HIVE_FAKE_GH_EDIT_EXIT HIVE_FAKE_GH_EDIT_STDERR
       HIVE_FAKE_GH_VIEW_EXIT HIVE_FAKE_GH_AUTH_EXIT
+      HIVE_FAKE_GH_STATE HIVE_FAKE_GH_URL HIVE_FAKE_GH_NUMBER
+      HIVE_FAKE_GH_HEAD_REF_OID HIVE_FAKE_GH_HEAD_REF_NAME HIVE_FAKE_GH_BASE_REF_NAME
+      HIVE_FAKE_GH_MERGED_AT
     ].each { |k| ENV.delete(k) }
+    Thread.current[Hive::Attempts::Context::THREAD_KEY] = nil
   end
 
   def gh_argv_log
@@ -85,7 +93,29 @@ class RunFinalizeTest < Minitest::Test
 
       <!-- COMPLETE pr_url=https://example.com/pr/9 is_draft=true -->
     MD
+    ENV["HIVE_FAKE_GH_URL"] = "https://example.com/pr/9"
+    ENV["HIVE_FAKE_GH_NUMBER"] = "9"
+    ENV["HIVE_FAKE_GH_HEAD_REF_OID"] = run!("git", "-C", worktree_path, "rev-parse", "HEAD").strip
+    ENV["HIVE_FAKE_GH_HEAD_REF_NAME"] = slug
+    ENV["HIVE_FAKE_GH_BASE_REF_NAME"] = "master"
+    create_finalize_attempt(task_dir, "finalize-attempt-1")
     [ task_dir, worktree_path, pr_md ]
+  end
+
+  def create_finalize_attempt(task_dir, attempt_id)
+    task = Hive::Task.new(task_dir)
+    store = Hive::Attempts::Store.new
+    store.create_launching(
+      attempt_id: attempt_id, request_id: "request-#{attempt_id}", predecessor_attempt_id: nil,
+      task_id: task.id, project: File.basename(task.project_root), task_slug: task.slug,
+      intended_stage: "8-finalize", task_generation: "owner-#{attempt_id}",
+      ownership_generation: "owner-#{attempt_id}", task_input_epoch: 1,
+      progress_token: "progress", provider: "codex", starting_revision: nil,
+      retry_charge: 0, inherited_outputs: [], launch_timeout_sec: 30, now: Time.now.utc
+    )
+    Thread.current[Hive::Attempts::Context::THREAD_KEY] = Hive::Attempts::Context.new(
+      attempt_id: attempt_id, task_generation: 1, ownership_generation: "owner-#{attempt_id}"
+    )
   end
 
   # Advance the bare remote's branch through a scratch clone — optionally
@@ -137,6 +167,13 @@ class RunFinalizeTest < Minitest::Test
                      "finalize must require is_draft=false marker, not the open-pr is_draft=true"
         assert File.exist?(File.join(task_dir, "summary.md"))
         assert_includes File.read(File.join(task_dir, "summary.md")), "https://example.com/pr/9"
+
+        projection = Hive::TaskProjection::Store.new(task_folder: task_dir).read
+        assert_equal "finalized", projection["finalization"].fetch("state")
+        job = Hive::Babysitter::JobStore.new(project_root: dir).read(
+          projection["finalization"].fetch("job_id")
+        )
+        assert_equal "active", job.fetch("state")
 
         # AC4: runner OWNS `gh pr ready`. Argv log must show it was
         # invoked with the PR URL. A regression that drops this call
@@ -459,9 +496,9 @@ class RunFinalizeTest < Minitest::Test
     end
   end
 
-  # plan U6 idempotency: a second `hive run` on a task whose summary.md
-  # already exists must short-circuit (no agent spawn, no `gh pr ready`).
-  def test_finalize_already_complete_short_circuits
+  # A summary is presentation only: retry must repair the handoff while
+  # avoiding branch/PR mutation.
+  def test_finalize_already_complete_repairs_handoff_without_mutation
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         task_dir, _worktree_path, pr_md = setup_finalize_task(dir)
@@ -475,6 +512,58 @@ class RunFinalizeTest < Minitest::Test
         # may not exist at all if no gh call was issued.
         refute_match(/arg=ready\n/, gh_argv_log,
                      "idempotent already-complete path must NOT invoke gh pr ready")
+        projection = Hive::TaskProjection::Store.new(task_folder: task_dir).read
+        assert_equal "finalized", projection["finalization"].fetch("state")
+        refute_nil projection["finalization"].fetch("job_id")
+      end
+    end
+  end
+
+  def test_finalize_retry_adopts_fresh_attempt_without_duplicate_job
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        task_dir, _worktree_path, pr_md = setup_finalize_task(dir)
+        ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = pr_md
+        ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = <<~MD
+          ---
+          pr_url: https://example.com/pr/9
+          pr_number: 9
+          ---
+
+          ## Summary
+          final
+
+          <!-- COMPLETE pr_url=https://example.com/pr/9 is_draft=false -->
+        MD
+        capture_io { Hive::Commands::Run.new(task_dir).call }
+        first = Hive::TaskProjection::Store.new(task_folder: task_dir).read["finalization"]
+
+        create_finalize_attempt(task_dir, "finalize-attempt-2")
+        capture_io { Hive::Commands::Run.new(task_dir).call }
+        retried = Hive::TaskProjection::Store.new(task_folder: task_dir).read["finalization"]
+
+        assert_equal first.fetch("job_id"), retried.fetch("job_id")
+        assert_equal "finalize-attempt-2", retried.fetch("finalize_attempt_id")
+        assert_equal 1, Hive::Babysitter::JobStore.new(project_root: dir).jobs.size
+      end
+    end
+  end
+
+  def test_finalize_handoff_failure_is_visible_and_never_reports_success
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        task_dir, _worktree_path, pr_md = setup_finalize_task(dir)
+        File.write(File.join(task_dir, "summary.md"), "presentation only\n")
+        Hive::Markers.set(pr_md, :complete, pr_url: "https://example.com/pr/9", is_draft: "false")
+        Thread.current[Hive::Attempts::Context::THREAD_KEY] = nil
+
+        _out, _err, status = with_captured_exit { Hive::Commands::Run.new(task_dir).call }
+
+        assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        marker = Hive::Markers.current(pr_md)
+        assert_equal :error, marker.name
+        assert_equal "finalize_handoff_failed", marker.attrs.fetch("reason")
+        assert_empty Hive::Babysitter::JobStore.new(project_root: dir).jobs
       end
     end
   end
@@ -596,7 +685,17 @@ class RunFinalizeTest < Minitest::Test
         MD
         ENV["HIVE_FAKE_GH_VIEW_EXIT"] = "1"
 
-        _out, _err, status = with_captured_exit { Hive::Commands::Run.new(task_dir).call }
+        snapshot = Hive::Gh::PrSnapshot.new(
+          repository: "example.com/acme/demo", number: 9, url: "https://example.com/pr/9",
+          state: "OPEN", head_sha: ENV.fetch("HIVE_FAKE_GH_HEAD_REF_OID"),
+          head_branch: "fix-bug-260424-aaaa", base_branch: "master", merged_at: nil,
+          observed_at: Time.now.utc.iso8601(6)
+        )
+        _out, _err, status = with_stubbed_singleton_method(
+          Hive::Gh, :exact_pr_snapshot, ->(*_args, **_kwargs) { snapshot }
+        ) do
+          with_captured_exit { Hive::Commands::Run.new(task_dir).call }
+        end
 
         assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
         marker = Hive::Markers.current(pr_md)
@@ -781,40 +880,27 @@ class RunFinalizeTest < Minitest::Test
     end
   end
 
-  # A PR merged out-of-band (squash-merged while the task was still
-  # mid-pipeline) must finalize-complete via the short-circuit, NOT run the
-  # body-refresh agent or trip the unpushed-commits guard — the recurring
-  # "merged PR stranded in 8-finalize" failure.
-  def test_finalize_short_circuits_when_pr_already_merged
+  # An already-merged PR still receives a durable handoff. Finalize does not
+  # claim merged authority; the babysitter must journal the explicit snapshot.
+  def test_finalize_hands_off_when_pr_already_merged
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         task_dir, _worktree_path, pr_md = setup_finalize_task(dir)
 
-        with_stubbed_singleton_method(Hive::Gh, :pr_state, ->(*_a, **_k) { "MERGED" }) do
-          capture_io { Hive::Commands::Run.new(task_dir).call }
-        end
+        ENV["HIVE_FAKE_GH_STATE"] = "MERGED"
+        ENV["HIVE_FAKE_GH_MERGED_AT"] = "2026-07-17T14:55:00Z"
+        capture_io { Hive::Commands::Run.new(task_dir).call }
 
         marker = Hive::Markers.current(pr_md)
-        assert_equal :complete, marker.name, "a merged PR must finalize-complete via the short-circuit"
+        assert_equal :complete, marker.name
         assert_equal "true", marker.attrs["merged"]
         assert_equal "false", marker.attrs["is_draft"]
-        refute_match(/arg=ready/, gh_argv_log, "merged short-circuit must not run `gh pr ready`")
-        refute File.exist?(File.join(task_dir, "summary.md")),
-               "merged short-circuit skips the body-refresh agent, so no summary.md"
+        refute_match(/arg=ready/, gh_argv_log, "merged handoff must not run `gh pr ready`")
+        assert File.exist?(File.join(task_dir, "summary.md"))
+        projection = Hive::TaskProjection::Store.new(task_folder: task_dir).read
+        assert_equal "finalized", projection["finalization"].fetch("state")
+        assert_nil projection["finalization"].dig("evidence", "terminal_event_id")
       end
-    end
-  end
-
-  def test_pr_already_merged_classifies_state_and_falls_through_on_error
-    with_stubbed_singleton_method(Hive::Gh, :pr_state, ->(*_a, **_k) { "MERGED" }) do
-      assert Hive::Stages::Finalize.pr_already_merged?("https://example.com/pr/9", {})
-    end
-    with_stubbed_singleton_method(Hive::Gh, :pr_state, ->(*_a, **_k) { "OPEN" }) do
-      refute Hive::Stages::Finalize.pr_already_merged?("https://example.com/pr/9", {})
-    end
-    with_stubbed_singleton_method(Hive::Gh, :pr_state, ->(*_a, **_k) { raise Hive::GhError, "boom" }) do
-      refute Hive::Stages::Finalize.pr_already_merged?("https://example.com/pr/9", {}),
-             "a GhError on the state lookup must fall through to the normal finalize path"
     end
   end
 end

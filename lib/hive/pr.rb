@@ -76,5 +76,26 @@ module Hive
     rescue URI::InvalidURIError
       false
     end
+
+    def canonical_identity(url)
+      uri = URI.parse(url.to_s.strip)
+      match = uri.path.match(%r{\A/([^/]+)/([^/]+)/pull/(\d+)/?\z})
+      unless uri.is_a?(URI::HTTP) && !uri.host.to_s.empty? && match &&
+             uri.userinfo.nil? && uri.query.nil? && uri.fragment.nil? && match[3].to_i.positive?
+        raise ArgumentError, "invalid canonical pull request URL"
+      end
+
+      host = uri.host.downcase
+      owner = match[1]
+      repository_name = match[2].sub(/\.git\z/i, "")
+      number = match[3].to_i
+      {
+        "repository" => "#{host}/#{owner.downcase}/#{repository_name.downcase}",
+        "number" => number,
+        "url" => "https://#{host}/#{owner.downcase}/#{repository_name.downcase}/pull/#{number}"
+      }
+    rescue URI::InvalidURIError
+      raise ArgumentError, "invalid canonical pull request URL"
+    end
   end
 end

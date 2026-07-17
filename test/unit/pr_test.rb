@@ -71,4 +71,18 @@ class PrTest < Minitest::Test
     refute Hive::Pr.valid_http_url?(12_345)
     refute Hive::Pr.valid_http_url?("")
   end
+
+  def test_canonical_identity_extracts_repository_pr_and_normalized_url
+    identity = Hive::Pr.canonical_identity("https://GitHub.com/Acme/Demo/pull/12/")
+
+    assert_equal "github.com/acme/demo", identity.fetch("repository")
+    assert_equal 12, identity.fetch("number")
+    assert_equal "https://github.com/acme/demo/pull/12", identity.fetch("url")
+  end
+
+  def test_canonical_identity_rejects_non_pull_request_paths
+    assert_raises(ArgumentError) do
+      Hive::Pr.canonical_identity("https://github.com/acme/demo/issues/12")
+    end
+  end
 end

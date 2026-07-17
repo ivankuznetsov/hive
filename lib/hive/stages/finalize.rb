@@ -1,6 +1,7 @@
 require "fileutils"
 require "open3"
 require "time"
+require "digest"
 require "hive/gh"
 require "hive/git_ops"
 require "hive/markers"
@@ -11,40 +12,51 @@ require "hive/stages"
 require "hive/stages/base"
 require "hive/stages/clean_exit"
 require "hive/worktree"
+require "hive/attempts/context"
+require "hive/attempts/store"
+require "hive/babysitter/job_store"
+require "hive/task_journal"
+require "hive/task_projection/store"
 
 module Hive
   module Stages
     module Finalize
+      HandoffResult = Data.define(:job, :event, :projection)
+
       module_function
 
       def run!(task, cfg)
-        # Idempotency: summary.md is the terminal artifact. Using it
-        # as the gate (rather than `is_draft=false` in the marker)
-        # makes a partial completion that ran `gh pr ready` but
-        # crashed before write_summary recoverable via `hive run`.
-        if File.exist?(File.join(task.folder, "summary.md"))
-          marker = Hive::Markers.current(task.state_file)
-          warn "hive: already complete (#{marker.attrs['pr_url'] || '(no url)'}); " \
-               "mv this folder to #{Hive::Stages::DIRS.last}/ to continue"
-          return { commit: nil, status: :complete }
-        end
-
         pointer = worktree_pointer_or_exit(task)
         worktree_path = pointer.fetch("path")
         branch = pointer["branch"] || task.slug
         pr_url, pr_error = pr_url_or_error(task)
         return pr_error if pr_error
+        snapshot, snapshot_error = exact_snapshot_or_error(task, pr_url, cfg)
+        return snapshot_error if snapshot_error
 
-        # If the PR already merged out-of-band (e.g. squash-merged while the
-        # task was still mid-pipeline), finalization is moot — the merged PR is
-        # final. Short-circuit to complete instead of running the body-refresh
-        # agent or tripping verify_state!'s unpushed-commits guard on a now-
-        # stale branch. Mirrors open_pr's open_pr_already_merged recovery; fixes
-        # the recurring "merged PR stranded in 8-finalize" failure.
-        if pr_already_merged?(pr_url, cfg)
+        # summary.md is presentation, not authority. A retry repairs or adopts
+        # the durable handoff and deliberately performs no branch/PR mutation.
+        existing_finalization = Hive::TaskProjection::Store.new(task_folder: task.folder).read["finalization"]
+        if File.exist?(File.join(task.folder, "summary.md")) ||
+           existing_finalization.fetch("state") != "unfinalized"
+          _handoff, handoff_error = establish_handoff_or_error(task, cfg, snapshot, branch)
+          return handoff_error if handoff_error
+          write_summary(task, worktree_path, branch, pr_url, cfg) unless File.exist?(File.join(task.folder, "summary.md"))
+          marker = Hive::Markers.current(task.state_file)
+          warn "hive: already complete (#{marker.attrs['pr_url'] || '(no url)'}); " \
+               "babysitter watching is active"
+          return { commit: nil, status: :complete }
+        end
+
+        # Already merged is still a handoff. Finalize records no merge event;
+        # the claimed babysitter job will observe the exact MERGED snapshot.
+        if snapshot.state == "MERGED"
+          _handoff, handoff_error = establish_handoff_or_error(task, cfg, snapshot, branch)
+          return handoff_error if handoff_error
           Hive::Markers.set(task.state_file, :complete,
                             pr_url: pr_url, is_draft: "false", merged: "true")
-          return { commit: "finalize_already_merged", status: :complete }
+          write_summary(task, worktree_path, branch, pr_url, cfg)
+          return { commit: "finalize_handed_off_merged", status: :complete }
         end
 
         # Authenticate first so an auth-related push failure surfaces
@@ -97,6 +109,10 @@ module Hive
         ready_result = mark_pr_ready(task, pr_url, cfg)
         return ready_result if ready_result
 
+        snapshot, snapshot_error = exact_snapshot_or_error(task, pr_url, cfg)
+        return snapshot_error if snapshot_error
+        _handoff, handoff_error = establish_handoff_or_error(task, cfg, snapshot, branch)
+        return handoff_error if handoff_error
         write_summary(task, worktree_path, branch, pr_url, cfg)
         { commit: "pr_finalized", status: :complete }
       end
@@ -142,13 +158,187 @@ module Hive
         pointer
       end
 
-      # True when the PR already merged out-of-band. A GhError (gh not yet
-      # authenticated, or a transient lookup failure) returns false so finalize
-      # falls through to its normal path rather than skipping it on a flaky read.
-      def pr_already_merged?(pr_url, cfg)
-        Hive::Gh.pr_state(pr_url, cfg: cfg) == "MERGED"
-      rescue Hive::GhError
-        false
+      def exact_snapshot_or_error(task, pr_url, cfg)
+        [ Hive::Gh.exact_pr_snapshot(pr_url, cfg: cfg), nil ]
+      rescue Hive::GhError => e
+        Hive::Markers.set(task.state_file, :error,
+                          reason: "github_unavailable", detail: e.message.to_s[0, 200])
+        [ nil, { commit: "finalize_github_unavailable", status: :error } ]
+      end
+
+      def establish_handoff_or_error(task, cfg, snapshot, branch)
+        [ establish_handoff!(task, cfg, snapshot, branch), nil ]
+      rescue StandardError => e
+        Hive::Markers.set(task.state_file, :error,
+                          reason: "finalize_handoff_failed", detail: "#{e.class}: #{e.message}"[0, 200])
+        [ nil, { commit: "finalize_handoff_failed", status: :error } ]
+      end
+
+      def establish_handoff!(task, cfg, snapshot, branch, now: Time.now.utc)
+        context = Hive::Attempts::Context.current
+        raise Hive::StageError, "finalize handoff requires a durable attempt context" unless context
+
+        store = Hive::Babysitter::JobStore.new(project_root: task.project_root)
+        projection_store = Hive::TaskProjection::Store.new(task_folder: task.folder)
+        finalization = projection_store.read["finalization"]
+        current_job = if finalization.fetch("state") == "unfinalized"
+          nil
+        else
+          store.read(finalization.fetch("job_id"))
+        end
+
+        if current_job && same_pr?(current_job, snapshot)
+          event = adopt_or_repair_handoff!(
+            task, store, projection_store, current_job, context, snapshot, now: now
+          )
+          return verified_handoff(store, projection_store, current_job.fetch("job_id"), event)
+        end
+
+        job = if current_job
+          old_snapshot = Hive::Gh.exact_pr_snapshot(finalization.fetch("pr_url"), cfg: cfg)
+          store.reserve_replacement!(
+            old_job_id: current_job.fetch("job_id"), remote_state: old_snapshot.state,
+            remote_observed_at: old_snapshot.observed_at,
+            **reservation_attributes(task, cfg, context, snapshot, branch, now)
+          )
+        else
+          store.reserve!(**reservation_attributes(task, cfg, context, snapshot, branch, now))
+        end
+        event = append_finalize_event!(
+          task, context, snapshot, job,
+          type: "finalized", now: now,
+          extra_payload: current_job ? {
+            "supersedes_job_id" => current_job.fetch("job_id"),
+            "replacement_proof" => job.fetch("replacement_proof")
+          } : {}
+        )
+        store.activate!(
+          job.fetch("job_id"), handoff_event_id: event.fetch("event_id"),
+          finalize_attempt_id: context.attempt_id, now: now
+        )
+        verified_handoff(store, projection_store, job.fetch("job_id"), event)
+      end
+
+      def adopt_or_repair_handoff!(task, store, projection_store, job, context, snapshot, now:)
+        projection = projection_store.read["finalization"]
+        if projection.fetch("finalize_attempt_id") == context.attempt_id
+          event_id = projection.dig("evidence", "finalized_event_id")
+          event = Hive::TaskProjection.read_journal(
+            File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME)
+          ).find { |record| record["event_id"] == event_id }
+          store.activate!(
+            job.fetch("job_id"), handoff_event_id: event_id,
+            finalize_attempt_id: context.attempt_id, now: now
+          ) if job.fetch("state") == "inactive"
+          return event
+        end
+
+        event = append_finalize_event!(
+          task, context, snapshot, job,
+          type: "finalize_attempt_adopted", now: now
+        )
+        store.adopt_attempt!(
+          job.fetch("job_id"), handoff_event_id: event.fetch("event_id"),
+          finalize_attempt_id: context.attempt_id, now: now
+        )
+        event
+      end
+
+      def append_finalize_event!(task, context, snapshot, job, type:, now:, extra_payload: {})
+        event_id = deterministic_handoff_event_id(type, job.fetch("job_id"), context.attempt_id)
+        payload = handoff_coordinates(job, context, snapshot).merge(extra_payload)
+        producer = { "kind" => "finalize_attempt", "attempt_id" => context.attempt_id }
+        existing = Hive::TaskProjection.read_journal(
+          File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME)
+        ).find { |record| record["event_id"] == event_id }
+        if existing
+          unless existing["event_type"] == type && existing["producer"] == producer && existing["payload"] == payload
+            raise Hive::TaskJournal::EventIdCollision, "handoff event identity has divergent content"
+          end
+          return existing
+        end
+
+        attributes = {
+          event_id: event_id,
+          event_type: type,
+          occurred_at: now.utc.iso8601(6),
+          observed_at: snapshot.observed_at,
+          task: { "id" => task.id, "slug" => task.slug },
+          workflow: task.workflow.id,
+          stage: "8-finalize",
+          attempt_id: context.attempt_id,
+          task_generation: context.task_generation,
+          ownership_generation: context.ownership_generation,
+          commit_generation: nil,
+          reason: type == "finalized" ? "finalize_handoff" : "finalize_attempt_adoption",
+          evidence: [ {
+            "type" => "pull_request", "url" => snapshot.url, "number" => snapshot.number,
+            "observed_head_sha" => snapshot.head_sha, "state" => snapshot.state,
+            "observed_at" => snapshot.observed_at
+          } ],
+          provenance: { "source" => "finalize", "snapshot" => "exact_pr" },
+          producer: producer,
+          payload: payload
+        }
+        writer = Hive::TaskJournal::Writer.new(
+          task_folder: task.folder, attempt_store: finalize_attempt_store
+        )
+        writer.append_once(attributes).records.fetch(0)
+      end
+
+      def finalize_attempt_store
+        root = ENV["HIVE_ATTEMPT_STORE_ROOT"].to_s
+        root.empty? ? Hive::Attempts::Store.new : Hive::Attempts::Store.new(root: root)
+      end
+
+      def reservation_attributes(task, cfg, context, snapshot, branch, now)
+        {
+          project: cfg["project_name"] || File.basename(task.project_root),
+          task_id: task.id || task.slug,
+          task_slug: task.slug,
+          task_generation: context.task_generation,
+          repository: snapshot.repository,
+          pr_number: snapshot.number,
+          pr_url: snapshot.url,
+          branch: branch,
+          head_sha: snapshot.head_sha,
+          head_generation: 1,
+          finalize_attempt_id: context.attempt_id,
+          task_folder: task.folder,
+          now: now
+        }
+      end
+
+      def handoff_coordinates(job, context, snapshot)
+        {
+          "job_id" => job.fetch("job_id"),
+          "repository" => snapshot.repository,
+          "pr_number" => snapshot.number,
+          "pr_url" => snapshot.url,
+          "head_sha" => snapshot.head_sha,
+          "head_generation" => job.fetch("head_generation"),
+          "finalize_attempt_id" => context.attempt_id
+        }
+      end
+
+      def deterministic_handoff_event_id(type, job_id, attempt_id)
+        digest = Digest::SHA256.hexdigest([ type, job_id, attempt_id ].join("\0"))[0, 32]
+        "finalization-#{type}-#{digest}"
+      end
+
+      def same_pr?(job, snapshot)
+        identity = job.fetch("identity")
+        identity.fetch("repository") == snapshot.repository && identity.fetch("pr_number") == snapshot.number
+      end
+
+      def verified_handoff(store, projection_store, job_id, event)
+        job = store.read(job_id)
+        projection = projection_store.rebuild!["finalization"]
+        unless job.fetch("state") == "active" && projection.fetch("job_id") == job_id &&
+               projection.fetch("finalize_attempt_id") == job.fetch("finalize_attempt_id")
+          raise Hive::StageError, "finalize handoff did not converge"
+        end
+        HandoffResult.new(job: job, event: event, projection: projection)
       end
 
       def pr_url_or_error(task)

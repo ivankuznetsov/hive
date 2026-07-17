@@ -199,10 +199,10 @@ module Hive
         "ownership_generation" => record["ownership_generation"],
         "commit_generation" => nil,
         "evidence" => if name == "ArchiveReady"
-          [ { "type" => "journal_event", "event_id" => record.fetch("event_id") } ]
-        else
-          deep_copy(record.fetch("evidence", []))
-        end,
+                        [ { "type" => "journal_event", "event_id" => record.fetch("event_id") } ]
+                      else
+                        deep_copy(record.fetch("evidence", []))
+                      end,
         "provenance" => deep_copy(record.fetch("provenance", {})),
         "payload" => deep_copy(record.fetch("payload", {})),
         "event_id" => record.fetch("event_id"),

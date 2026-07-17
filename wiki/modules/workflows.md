@@ -3,7 +3,7 @@ title: Hive::Workflows
 type: module
 source: lib/hive/workflows.rb, lib/hive/workflow.rb, lib/hive/workflows/registry.rb, lib/hive/workflows/coding.rb, lib/hive/workflows/content.rb, lib/hive/workflows/bench.rb, lib/hive/workflows/descriptor_parser.rb, lib/hive/workflows/loader.rb, lib/hive/workflows/project.rb
 created: 2026-04-26
-updated: 2026-07-14
+updated: 2026-07-17
 tags: [module, workflow, verbs, selection]
 ---
 
@@ -52,11 +52,30 @@ and emits a one-time `hive init PROJECT --workflow bench` migration hint. The
 explicit re-init archives the descriptor as
 `workflows/bench.legacy.yml.disabled`, copies its instruction directory to
 `workflows/bench.legacy` while retaining the original path for any sibling
-descriptors that share those instructions, installs the packaged bench runtime, and resets the
-in-process project overlay so subsequent resolution uses the built-in descriptor.
-If the hive-state commit fails, Hive restores the legacy descriptor and any
-previous runtime and unstages the migration pathspecs before returning the
-original error, making the explicit migration safe to retry.
+descriptors that share those instructions, installs the packaged bench runtime,
+and binds `default_workflow: bench` in the same lock-scoped commit. It then resets
+the in-process project overlay so subsequent resolution uses the built-in
+descriptor without a manual cache reset. Migration rejects symlinked workflow,
+descriptor, and instruction roots and verifies that each resolves beneath the
+hive-state worktree before copying. Instructions are copied into a private
+staging directory and atomically published so a raced archive-target symlink is
+refused without traversal. Descriptor parsing and archival are bound to one
+captured inode/content snapshot, while all workflow archive operations and
+rollback use a validated pinned directory handle; atomically replacing
+`bench.yml` or the `workflows/` parent therefore fails closed rather than
+reclassifying or traversing the replacement. The descriptor entry is atomically
+quarantined and revalidated before archive publication; a replacement that
+reappears at the public name is preserved while the verified legacy archive is
+retained for recovery. A post-staging hook then verifies both the pinned
+worktree name and staged index deletion immediately before commit. The migration also requires a clean hive-state index,
+preventing a scoped runtime commit from absorbing unrelated staged entries. If
+the commit fails or Ctrl-C interrupts before it is durable, Hive unstages the
+migration first, restores the config, descriptor, and previous runtime, and
+returns the original error. Interrupt bookkeeping is masked around each move and
+the commit result; once the commit lands, Hive preserves that coherent durable
+state rather than rolling back only the working tree. A runtime that cannot be
+removed during rollback is left in place while the previous runtime is retained
+at a reported backup path, avoiding destructive backup nesting.
 Any modified or independently authored descriptor named `bench` still fails the
 normal collision guard rather than being mistaken for the legacy workflow.
 The upgrade path was live-smoked on the existing hive-bench state checkout on

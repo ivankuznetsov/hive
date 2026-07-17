@@ -4,6 +4,8 @@ require "hive/workflows/bench"
 require "hive/workflows/registry"
 
 class WorkflowsBenchTest < Minitest::Test
+  include HiveTestHelper
+
   def descriptor
     Hive::Workflows::Registry.fetch(:bench)
   end
@@ -86,6 +88,49 @@ class WorkflowsBenchTest < Minitest::Test
 
     assert_includes err, "failed to fully roll back bench runtime installation"
     assert_includes err, "RuntimeError: index reset failed"
+  end
+
+  def test_failed_runtime_removal_retains_backup_instead_of_nesting_it
+    Dir.mktmpdir("hive-bench-rollback") do |hive_state|
+      destination = File.join(hive_state, "bench-runtime")
+      backup = File.join(hive_state, "bench-runtime.previous")
+      FileUtils.mkdir_p(destination)
+      FileUtils.mkdir_p(backup)
+      File.write(File.join(destination, "new.txt"), "new runtime\n")
+      File.write(File.join(backup, "old.txt"), "old runtime\n")
+      events = []
+      ops = Object.new
+      ops.define_singleton_method(:hive_state_path) { hive_state }
+      ops.define_singleton_method(:run_git!) { |*| events << :reset }
+      original_rm_r = FileUtils.method(:rm_r)
+      failing_rm_r = lambda do |path, *args, **kwargs|
+        events << :remove
+        raise Errno::EACCES, path if path == destination
+
+        original_rm_r.call(path, *args, **kwargs)
+      end
+
+      _out, err = capture_io do
+        with_replaced_singleton_method(FileUtils, :rm_r, failing_rm_r) do
+          Hive::Workflows::Bench.rollback_failed_install!(
+            ops,
+            destination: destination,
+            backup: backup,
+            migration_pathspecs: [],
+            pathspecs: [ "bench-runtime" ],
+            runtime_backed_up: true,
+            runtime_installed: true
+          )
+        end
+      end
+
+      assert_equal :reset, events.first
+      assert_equal "new runtime\n", File.read(File.join(destination, "new.txt"))
+      assert_equal "old runtime\n", File.read(File.join(backup, "old.txt"))
+      refute_path_exists File.join(destination, File.basename(backup))
+      assert_includes err, "previous bench runtime retained at #{backup}"
+      assert_includes err, "Errno::EACCES"
+    end
   end
 
   def test_generate_selects_the_sol_runner_for_stage_specific_5_6_models

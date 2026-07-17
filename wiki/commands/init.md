@@ -3,7 +3,7 @@ title: hive init
 type: command
 source: lib/hive/commands/init.rb
 created: 2026-04-25
-updated: 2026-07-16
+updated: 2026-07-17
 tags: [command, bootstrap, git, prompts, llm-wiki]
 ---
 
@@ -34,11 +34,28 @@ the exact legacy descriptor, archives it as
 .hive-state/workflows/bench.legacy.yml.disabled`, copies its instruction directory
 to `.hive-state/workflows/bench.legacy`, retains the original instruction path for
 other local descriptors that may share it, installs `.hive-state/bench-runtime`, and
-then binds the built-in workflow. The archive preserves any instruction files for
+then binds the built-in workflow. The archive, runtime, and `config.yml` binding
+are staged and committed together under the hive-state commit lock. The archive preserves any instruction files for
 inspection while its `.disabled` extension keeps it out of descriptor discovery.
-If the hive-state commit is rejected, the legacy descriptor and any previous runtime
-are restored and the attempted migration is unstaged, so the command can be
-retried without repairing the worktree manually.
+Hive refuses symlinked legacy workflow roots, descriptors, or instruction roots
+instead of following them while creating the archive; the instruction archive
+is built privately and atomically published, so a raced symlink target is also
+refused without writing outside hive state. Classification is bound to the
+captured descriptor inode and content, and archive work uses a pinned workflows
+directory handle, so replacing either the descriptor or its parent during the
+migration fails closed. Descriptor removal is an atomic quarantine-and-verify
+step; if the public path reappears, Hive preserves it and retains the verified
+legacy archive as a recovery copy. The same absence invariant is checked again
+after scoped Git staging, including the index entry, before the commit can run.
+A pre-existing staged hive-state
+change blocks the operation before mutation. If the commit is rejected or
+Ctrl-C arrives before it becomes durable, Hive first unstages the attempted
+migration, then restores the config, legacy descriptor, and previous runtime, so
+the command can be retried without repairing the worktree manually. An interrupt
+after the commit preserves the committed migration instead of restoring only the
+working tree. If a new runtime cannot be removed during rollback, Hive retains
+the previous runtime at the reported backup path rather than nesting or
+overwriting it.
 Modified/custom descriptors named `bench` remain collisions and must be renamed
 or migrated manually.
 
@@ -54,7 +71,7 @@ or migrated manually.
 ## Steps performed
 
 1. **Validate** — `validate_git_repo!` then `validate_clean_tree!` (skipped under `--force`).
-2. **Resolve workflow default** — explicit `--workflow NAME` wins. Without a flag, TTY init prompts with a `Workflow:` step when more than one workflow is registered, using `coding` as the fresh default and the project's current `default_workflow` as the re-init default; non-TTY init silently selects `coding`. The prompt lists raw workflow ids and an extra `author a new workflow` entry. Selecting that entry asks for a new id, re-prompts on invalid/reserved/colliding ids, then routes through the same `--new-workflow` scaffold/bind path before any disk write. The selected default is validated through [[modules/workflows]]. `--new-workflow ID` bypasses registry selection because the descriptor is created later in the same flow; the id is normalized and validated before any disk write. Selecting built-in `bench` also installs and commits its packaged runtime snapshot under `.hive-state/bench-runtime`; explicit bench selection on an existing project repairs or refreshes that managed snapshot before rebinding the default. If the project still carries the exact pre-built-in `bench.yml`, that same explicit selection atomically archives the legacy descriptor/instructions with the runtime snapshot before resetting descriptor discovery.
+2. **Resolve workflow default** — explicit `--workflow NAME` wins. Without a flag, TTY init prompts with a `Workflow:` step when more than one workflow is registered, using `coding` as the fresh default and the project's current `default_workflow` as the re-init default; non-TTY init silently selects `coding`. The prompt lists raw workflow ids and an extra `author a new workflow` entry. Selecting that entry asks for a new id, re-prompts on invalid/reserved/colliding ids, then routes through the same `--new-workflow` scaffold/bind path before any disk write. The selected default is validated through [[modules/workflows]]. `--new-workflow ID` bypasses registry selection because the descriptor is created later in the same flow; the id is normalized and validated before any disk write. Selecting built-in `bench` also installs and commits its packaged runtime snapshot under `.hive-state/bench-runtime`; explicit bench selection on an existing project repairs or refreshes that managed snapshot before rebinding the default. If the project still carries the exact pre-built-in `bench.yml`, that same explicit selection commits the legacy archive, runtime snapshot, and default-workflow binding as one transaction before resetting descriptor discovery.
 3. **Already-initialized handling** — if `hive/state` exists and no workflow was explicitly selected, raise `Hive::AlreadyInitialized` (exit 2). If a workflow was selected, attach/validate the existing state worktree, update `<project>/.hive-state/config.yml`, and warn when changing the default would re-resolve in-flight field-less tasks. If `--new-workflow` was selected, attach the state worktree, scaffold the descriptor, update `default_workflow`, and commit those hive-state changes together.
 4. **Collect prompt answers** — `Hive::Commands::Init::Prompts.new(input: $stdin, output: $stderr, summary_io: $stdout).collect`. Prompt UI (intro / menus / re-prompts / confirmation) goes to **stderr**; the non-TTY one-line summary goes to **stdout** so scripted callers can `summary=$(hive init)` cleanly. On TTY this opens the interactive flow described below; on non-TTY (CI, pipes, test harness) it short-circuits to recommended defaults. An explicit architecture-patrol boolean is injected into this collection step, so it is reflected in the summary/config without first writing and then editing state. Two abort paths exit **64** (`Hive::ExitCodes::USAGE`, distinct from generic crashes at 1) with **zero disk side effects** — no orphan branch, no worktree, no master gitignore commit:
    - Operator answers `n` at the final confirmation prompt.

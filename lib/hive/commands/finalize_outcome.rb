@@ -101,6 +101,9 @@ module Hive
             record["event_id"] == finalization.dig("evidence", "terminal_event_id")
           end
           if terminal&.dig("payload", "outcome") == normalized_outcome
+            context.fetch(:store).retire_after_no_pr_approval!(
+              finalization.fetch("job_id"), approval_event_id: terminal.fetch("event_id"), now: @clock.call
+            )
             return existing_result(terminal, task, "approval")
           end
         end
@@ -116,7 +119,7 @@ module Hive
         predecessor = context.fetch(:records).reverse_each.find do |record|
           Hive::Finalization::Event.finalization?(record)
         end&.fetch("event_id", nil)
-        evidence_digest = Digest::SHA256.hexdigest(
+        evidence_digest = ::Digest::SHA256.hexdigest(
           canonical_json("predecessor_event_id" => predecessor, "evidence" => evidence)
         )[0, 20]
         event_id = "#{finalization.fetch('job_id')}:no-pr:#{normalized_outcome}:#{evidence_digest}"
@@ -140,6 +143,9 @@ module Hive
             "operator_actor" => actor
           }
         )
+        context.fetch(:store).retire_after_no_pr_approval!(
+          finalization.fetch("job_id"), approval_event_id: event_id, now: @clock.call
+        )
         projection = Hive::TaskProjection::Store.new(task_folder: task.folder).rebuild!
         @output.puts "Approved #{normalized_outcome} for #{task.slug}; archive awaits reconciliation."
         Result.new(status: :approved, event_id: event_id,
@@ -148,13 +154,25 @@ module Hive
 
       def rearm(task, context)
         finalization = context.fetch(:finalization)
+        if finalization.fetch("state") == "babysitter_active"
+          existing = context.fetch(:records).reverse_each.find do |record|
+            record["event_type"] == "finalization_rearmed" &&
+              record.dig("payload", "job_id") == finalization.fetch("job_id")
+          end
+          if existing
+            context.fetch(:store).rearm_after_approval!(
+              finalization.fetch("job_id"), rearm_event_id: existing.fetch("event_id"), now: @clock.call
+            )
+            return existing_result(existing, task, "re-arm")
+          end
+        end
         unless finalization.fetch("state") == "approved_no_pr"
           raise Hive::Finalization::OutcomeValidator::NotEligible,
                 "rearm requires an unconsumed approved no-PR outcome"
         end
-        unless context.fetch(:job).fetch("state") == "active"
+        unless %w[terminal active].include?(context.fetch(:job).fetch("state"))
           raise Hive::Finalization::OutcomeValidator::NotEligible,
-                "rearm requires a current active journal-backed babysitter job"
+                "rearm requires the current retired or active journal-backed babysitter job"
         end
 
         terminal_id = finalization.dig("evidence", "terminal_event_id")
@@ -180,6 +198,9 @@ module Hive
             "operator_reason" => @reason,
             "operator_actor" => actor
           }
+        )
+        context.fetch(:store).rearm_after_approval!(
+          finalization.fetch("job_id"), rearm_event_id: event_id, now: @clock.call
         )
         projection = Hive::TaskProjection::Store.new(task_folder: task.folder).rebuild!
         @output.puts "Re-armed babysitter watching for #{task.slug}."

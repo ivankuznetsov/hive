@@ -109,7 +109,7 @@
           }
         },
         "cleanup_instructions": {
-          "description": "Human-readable cleanup guidance returned by the terminal `done` stage. Optional: only present when the run finalised a task and the stage emitted instructions (worktree removal, branch deletion, or an 'archived; nothing to clean up' notice). Backwards-compatible additive field; consumers may ignore it.",
+          "description": "Human-readable archive cleanup result returned by the terminal `done` stage. Optional: only present when the run finalised a task and includes the durable cleanup receipt plus the validated local resources removed. Backwards-compatible additive field; consumers may ignore it.",
           "type": "array",
           "items": {
             "type": "string"
@@ -163,6 +163,7 @@
                 "disabled",
                 "cli_override",
                 "manual_steering",
+                "terminal_stage",
                 "no_worktree",
                 "pre_existing_rebase",
                 "dirty_worktree",

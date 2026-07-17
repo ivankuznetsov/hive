@@ -116,7 +116,9 @@ module Hive
         # `--no-rebase` flag: one-off override of `cfg.rebase.enabled`.
         # Use the same shape as the cfg-disabled path so JSON consumers
         # see the disabled result; distinguish by reason for ops debugging.
-        if @no_rebase
+        if "#{task.stage_index}-#{task.stage_name}" == task.workflow.stages.last.dir
+          result = Hive::Rebase::Result.skipped(:terminal_stage)
+        elsif @no_rebase
           result = Hive::Rebase::Result.skipped(:cli_override)
         else
           result = Hive::Rebase.perform(task, cfg)

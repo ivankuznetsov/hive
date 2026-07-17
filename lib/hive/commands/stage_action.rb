@@ -136,7 +136,12 @@ module Hive
         return false unless @verb == "archive"
         return false unless current_stage == Hive::Stages::DIRS.last
 
-        Hive::Markers.current(task.state_file).name == :complete
+        return false unless Hive::Markers.current(task.state_file).name == :complete
+
+        finalization = Hive::TaskProjection::Store.new(task_folder: task.folder).read["finalization"]
+        return true if finalization.fetch("state") == "unfinalized" # legacy archived history
+
+        !finalization.dig("evidence", "cleanup_event_id").to_s.empty?
       end
 
       def validate_marker!(task, config)

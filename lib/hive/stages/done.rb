@@ -1,36 +1,31 @@
 require "hive/worktree"
 require "hive/markers"
+require "hive/finalization/archive_cleanup"
 
 module Hive
   module Stages
     module Done
       module_function
 
-      # Returns a result hash whose `cleanup_instructions:` carries the
-      # human-readable cleanup lines as data. The caller (Hive::Commands::Run)
-      # decides whether to render them on stdout (human path) or embed them in
-      # the JSON envelope (--json path). Writing them directly to stdout here
-      # would pollute the --json contract by emitting non-JSON bytes before
-      # report_json runs.
-      def run!(task, _cfg)
+      def run!(task, _cfg, cleanup: nil)
         FileUtils.touch(task.state_file) unless File.exist?(task.state_file)
-        pointer = Hive::Worktree.read_pointer(task.folder)
-        instructions = build_cleanup_instructions(task, pointer)
+        cleanup ||= Hive::Finalization::ArchiveCleanup.new(task: task)
+        cleanup_result = cleanup.call
         Hive::Markers.set(task.state_file, :complete)
-        { commit: "archived", status: :complete, cleanup_instructions: instructions }
+        { commit: "archived", status: :complete,
+          cleanup_instructions: cleanup_instructions(task, cleanup_result) }
       end
 
-      def build_cleanup_instructions(task, pointer)
-        if pointer && pointer["path"]
-          [
-            "Task #{task.slug} marked done. To clean up:",
-            "  cd #{task.project_root}",
-            "  git worktree remove #{pointer['path']}",
-            "  git branch -d #{pointer['branch'] || task.slug}",
-            "(Use -D / --force if the branch was squash-merged.)"
-          ]
+      def cleanup_instructions(task, cleanup)
+        if cleanup.status == :already_completed
+          [ "Task #{task.slug} archive cleanup already completed (receipt #{cleanup.event_id})." ]
         else
-          [ "Task #{task.slug} archived. No worktree pointer; nothing to clean up." ]
+          [
+            "Task #{task.slug} archived and local recovery state was removed.",
+            "  worktree: #{cleanup.worktree}",
+            "  local branch: #{cleanup.branch}",
+            "  cleanup receipt: #{cleanup.event_id}"
+          ]
         end
       end
     end

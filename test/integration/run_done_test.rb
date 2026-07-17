@@ -7,112 +7,77 @@ require "hive/commands/run"
 class RunDoneTest < Minitest::Test
   include HiveTestHelper
 
-  def test_done_prints_cleanup_with_pointer
-    with_tmp_global_config do
-      with_tmp_git_repo do |dir|
-        capture_io { Hive::Commands::Init.new(dir).call }
-        slug = "feat-x-260424-aaaa"
-        done_dir = File.join(dir, ".hive-state", "stages", "9-done", slug)
-        FileUtils.mkdir_p(done_dir)
-        File.write(File.join(done_dir, "task.md"), "## work\n<!-- EXECUTE_COMPLETE -->\n")
-        File.write(File.join(done_dir, "worktree.yml"),
-                   { "path" => "/tmp/wt-feat-x", "branch" => slug }.to_yaml)
-        out, _err = capture_io { Hive::Commands::Run.new(done_dir).call }
-        assert_includes out, "git worktree remove /tmp/wt-feat-x"
-        assert_includes out, "git branch -d #{slug}"
-        assert_equal :complete, Hive::Markers.current(File.join(done_dir, "task.md")).name
-      end
+  def test_done_removes_registered_worktree_and_local_branch_then_records_receipt
+    with_ready_done_task(create_worktree: true) do |dir, task|
+      path = Hive::Worktree.read_pointer(task.folder).fetch("path")
+
+      out, _err = capture_io { Hive::Commands::Run.new(task.folder).call }
+
+      refute File.exist?(path)
+      refute Hive::GitOps.new(dir).ref_exists?("refs/heads/#{task.slug}")
+      assert_includes out, "local recovery state was removed"
+      assert_equal :complete, Hive::Markers.current(task.state_file).name
+      records = Hive::TaskProjection.read_journal(File.join(task.folder, "events.jsonl"))
+      assert_equal 1, records.count { |record| record["event_type"] == "cleanup_completed" }
+      receipt = records.find { |record| record["event_type"] == "cleanup_completed" }
+      assert_equal false, receipt.dig("payload", "remote_branch_deleted")
     end
   end
 
-  def test_done_without_pointer_archives
-    with_tmp_global_config do
-      with_tmp_git_repo do |dir|
-        capture_io { Hive::Commands::Init.new(dir).call }
-        slug = "feat-y-260424-aaaa"
-        done_dir = File.join(dir, ".hive-state", "stages", "9-done", slug)
-        FileUtils.mkdir_p(done_dir)
-        out, _err = capture_io { Hive::Commands::Run.new(done_dir).call }
-        assert_includes out, "archived"
-      end
+  def test_done_resumes_when_resources_were_already_removed
+    with_ready_done_task do |_dir, task|
+      out, _err = capture_io { Hive::Commands::Run.new(task.folder).call }
+
+      assert_includes out, "cleanup receipt"
+      assert_equal :complete, Hive::Markers.current(task.state_file).name
     end
   end
 
-  # --json contract: stdout must be a SINGLE parseable JSON document. Before
-  # the Done.run! refactor, the stage puts'd cleanup instructions to stdout
-  # before report_json wrote the SuccessPayload, breaking JSON.parse(stdout).
-  # cleanup_instructions now travels in the envelope under its own key.
-  def test_done_json_stdout_is_single_parseable_document_with_pointer
-    with_tmp_global_config do
-      with_tmp_git_repo do |dir|
-        capture_io { Hive::Commands::Init.new(dir).call }
-        slug = "feat-json-260424-aaaa"
-        done_dir = File.join(dir, ".hive-state", "stages", "9-done", slug)
-        FileUtils.mkdir_p(done_dir)
-        File.write(File.join(done_dir, "task.md"), "## work\n<!-- EXECUTE_COMPLETE -->\n")
-        File.write(File.join(done_dir, "worktree.yml"),
-                   { "path" => "/tmp/wt-feat-json", "branch" => slug }.to_yaml)
+  def test_done_json_is_one_schema_valid_document_with_receipt
+    with_ready_done_task do |_dir, task|
+      out, _err = capture_io { Hive::Commands::Run.new(task.folder, json: true).call }
 
-        out, _err = capture_io { Hive::Commands::Run.new(done_dir, json: true).call }
-
-        nonblank = out.lines.reject { |l| l.strip.empty? }
-        assert_equal 1, nonblank.length,
-                     "--json must emit EXACTLY ONE JSON document on stdout, got: #{out.inspect}"
-
-        payload = JSON.parse(out)
-        assert_equal "hive-run", payload["schema"]
-        assert_equal "complete", payload["marker"]
-        assert_kind_of Array, payload["cleanup_instructions"],
-                       "cleanup_instructions must be present as an array under --json"
-        assert_includes payload["cleanup_instructions"].join("\n"),
-                        "git worktree remove /tmp/wt-feat-json"
-        assert_includes payload["cleanup_instructions"].join("\n"),
-                        "git branch -d #{slug}"
-
-        schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-run"))))
-        assert schemer.valid?(payload),
-               "Done --json envelope must validate (errors: #{schemer.validate(payload).map { |e| e['error'] }.inspect})"
-      end
+      assert_equal 1, out.lines.reject { |line| line.strip.empty? }.length
+      payload = JSON.parse(out)
+      assert_equal "hive-run", payload["schema"]
+      assert_equal "complete", payload["marker"]
+      assert_includes payload.fetch("cleanup_instructions").join("\n"), "cleanup receipt"
+      schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-run"))))
+      assert schemer.valid?(payload), schemer.validate(payload).map { |error| error["error"] }.inspect
+      assert_equal "terminal_stage", payload.dig("rebase", "reason")
     end
   end
 
-  def test_done_json_stdout_is_single_parseable_document_without_pointer
-    with_tmp_global_config do
-      with_tmp_git_repo do |dir|
-        capture_io { Hive::Commands::Init.new(dir).call }
-        slug = "feat-json-archived-260424-aaaa"
-        done_dir = File.join(dir, ".hive-state", "stages", "9-done", slug)
-        FileUtils.mkdir_p(done_dir)
+  def test_done_rejects_a_missing_pointer_without_marking_complete
+    with_ready_done_task do |_dir, task|
+      FileUtils.rm_f(File.join(task.folder, "worktree.yml"))
 
-        out, _err = capture_io { Hive::Commands::Run.new(done_dir, json: true).call }
-
-        nonblank = out.lines.reject { |l| l.strip.empty? }
-        assert_equal 1, nonblank.length,
-                     "--json must emit EXACTLY ONE JSON document on stdout, got: #{out.inspect}"
-
-        payload = JSON.parse(out)
-        assert_equal 1, payload["cleanup_instructions"].length
-        assert_includes payload["cleanup_instructions"].first, "archived"
+      error = assert_raises(Hive::WorktreeError) do
+        Hive::Commands::Run.new(task.folder).call
       end
+
+      assert_includes error.message, "retained worktree pointer"
+      refute_equal :complete, Hive::Markers.current(task.state_file).name
+      records = Hive::TaskProjection.read_journal(File.join(task.folder, "events.jsonl"))
+      refute records.any? { |record| record["event_type"] == "cleanup_completed" }
     end
   end
 
-  # R3 regression: human path still renders cleanup instructions on stdout.
-  def test_done_human_path_still_prints_cleanup_lines
+  private
+
+  def with_ready_done_task(create_worktree: false)
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         capture_io { Hive::Commands::Init.new(dir).call }
-        slug = "feat-human-260424-aaaa"
-        done_dir = File.join(dir, ".hive-state", "stages", "9-done", slug)
-        FileUtils.mkdir_p(done_dir)
-        File.write(File.join(done_dir, "task.md"), "## work\n<!-- EXECUTE_COMPLETE -->\n")
-        File.write(File.join(done_dir, "worktree.yml"),
-                   { "path" => "/tmp/wt-feat-human", "branch" => slug }.to_yaml)
-        out, _err = capture_io { Hive::Commands::Run.new(done_dir).call }
-        assert_includes out, "Task #{slug} marked done. To clean up:"
-        assert_includes out, "git worktree remove /tmp/wt-feat-human"
-        assert_includes out, "git branch -d #{slug}"
-        assert_includes out, "(Use -D / --force if the branch was squash-merged.)"
+        slug = "durable-done-260717-aaaa"
+        folder = File.join(dir, ".hive-state", "stages", "9-done", slug)
+        FileUtils.mkdir_p(folder)
+        File.write(File.join(folder, "task.md"), "## archived\n")
+        if create_worktree
+          Hive::Worktree.new(dir, slug).create!(slug, default_branch: "master")
+        end
+        prepare_archive_ready(project_root: dir, task_folder: folder, slug: slug)
+        yield dir, Hive::Task.new(folder)
       end
     end
   end

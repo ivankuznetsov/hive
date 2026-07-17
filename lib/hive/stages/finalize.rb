@@ -322,7 +322,7 @@ module Hive
       end
 
       def deterministic_handoff_event_id(type, job_id, attempt_id)
-        digest = Digest::SHA256.hexdigest([ type, job_id, attempt_id ].join("\0"))[0, 32]
+        digest = ::Digest::SHA256.hexdigest([ type, job_id, attempt_id ].join("\0"))[0, 32]
         "finalization-#{type}-#{digest}"
       end
 

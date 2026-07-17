@@ -14,6 +14,7 @@ require "shellwords"
 require "English"
 require "hive"
 require_relative "support/workflow_helpers"
+require_relative "support/finalization_helpers"
 
 # Route the default worktree base (`<base>/<project>.worktrees`) into a
 # tmp sandbox so tests that exercise worktree creation never seed the
@@ -67,6 +68,7 @@ end
 
 Minitest::Test.include(HiveTestStdinIsolation)
 Minitest::Test.include(HiveWorkflowTestHelper)
+Minitest::Test.include(HiveFinalizationTestHelper)
 
 # Shared fixture paths for tests. Constants here so a future move of
 # test/fixtures lands in one place instead of every test that needs

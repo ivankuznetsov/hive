@@ -251,6 +251,13 @@ module Hive
       :prune_skipped
     end
 
+    # Archive cleanup cannot treat a prune failure as success: its durable
+    # receipt certifies that no registered checkout still owns the branch.
+    def prune_worktrees_strict!
+      run_git!("-C", @project_root, "worktree", "prune")
+      :pruned
+    end
+
     def stage_hive_state_pathspec(pathspec)
       rel = pathspec.to_s
       return if rel.empty?

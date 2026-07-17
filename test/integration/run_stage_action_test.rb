@@ -52,29 +52,8 @@ class RunStageActionTest < Minitest::Test
   end
 
   def write_merged_finalization(folder, slug)
-    coordinates = {
-      "job_id" => "job-1", "repository" => "github.com/example/repo", "pr_number" => 42,
-      "pr_url" => "https://github.com/example/repo/pull/42", "head_sha" => "a" * 40,
-      "head_generation" => 1, "finalize_attempt_id" => "attempt-1"
-    }
-    base = {
-      occurred_at: "2026-07-17T17:00:00.000000Z", observed_at: "2026-07-17T17:00:00.000000Z",
-      task: { "id" => "42", "slug" => slug }, workflow: "coding", stage: "8-finalize",
-      attempt_id: "attempt-1", task_generation: 1, ownership_generation: "owner-1",
-      evidence: [], provenance: { "source" => "test" }
-    }
-    events = [
-      Hive::TaskJournal::Envelope.authoritative(base.merge(
-        event_type: "finalized", event_id: "finalized", reason: "handoff",
-        producer: { "kind" => "finalize_attempt", "attempt_id" => "attempt-1" }, payload: coordinates
-      )),
-      Hive::TaskJournal::Envelope.authoritative(base.merge(
-        event_type: "merged", event_id: "merged", reason: "merged",
-        producer: { "kind" => "babysitter_job", "job_id" => "job-1", "claim_fence" => 1 },
-        payload: coordinates.merge("merged_at" => "2026-07-17T17:00:00Z")
-      ))
-    ]
-    File.write(File.join(folder, "events.jsonl"), events.map { |event| JSON.generate(event) }.join("\n") + "\n")
+    project_root = folder.sub(%r{/\.hive-state/stages/.*\z}, "")
+    prepare_archive_ready(project_root: project_root, task_folder: folder, slug: slug)
   end
 
   def test_brainstorm_moves_inbox_to_brainstorm_and_runs
@@ -337,6 +316,26 @@ class RunStageActionTest < Minitest::Test
         assert File.directory?(done)
         records = Hive::TaskProjection.read_journal(File.join(done, "events.jsonl"))
         assert_equal 1, records.count { |record| record["event_type"] == "archive_ready" }
+        assert_equal 1, records.count { |record| record["event_type"] == "cleanup_completed" }
+      end
+    end
+  end
+
+  def test_archive_at_done_repairs_missing_cleanup_receipt_before_noop
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        inbox, slug = seed_inbox(dir)
+        done = File.join(dir, ".hive-state", "stages", "9-done", slug)
+        FileUtils.mkdir_p(File.dirname(done))
+        FileUtils.mv(inbox, done)
+        prepare_archive_ready(project_root: dir, task_folder: done, slug: slug)
+        File.write(File.join(done, "task.md"), "## archived\n<!-- COMPLETE -->\n")
+
+        out, _err = capture_io { Hive::Commands::StageAction.new("archive", slug).call }
+
+        refute_includes out, "noop"
+        records = Hive::TaskProjection.read_journal(File.join(done, "events.jsonl"))
+        assert_equal 1, records.count { |record| record["event_type"] == "cleanup_completed" }
       end
     end
   end

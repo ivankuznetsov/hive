@@ -50,7 +50,7 @@ module Hive
           value = identity.fetch(key)
           "#{key.bytesize}:#{key}=#{value.to_s.bytesize}:#{value}"
         end.join("\0")
-        "bsj-v1-#{Digest::SHA256.hexdigest(canonical)[0, 32]}"
+        "bsj-v1-#{::Digest::SHA256.hexdigest(canonical)[0, 32]}"
       rescue KeyError => e
         raise Invalid, "babysitter identity missing #{e.key}"
       end

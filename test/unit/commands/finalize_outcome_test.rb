@@ -45,6 +45,7 @@ class CommandsFinalizeOutcomeTest < Minitest::Test
       assert_equal "retiring duplicate work", record.dig("payload", "operator_reason")
       assert_equal "CLOSED", record.dig("evidence", 0, "value", "current_pr", "state")
       assert_includes output.string, "consequence: archive reconciliation may remove"
+      assert_equal "terminal", ctx.fetch(:store).read(ctx.dig(:job, "job_id")).fetch("state")
 
       retry_result = command(ctx, input: tty_input(""), output: output).call
       assert_equal :already_recorded, retry_result.status
@@ -83,6 +84,7 @@ class CommandsFinalizeOutcomeTest < Minitest::Test
       assert_equal "babysitter_active", result.state
       assert_equal %w[finalized no_pr_approved finalization_rearmed], records.map { |event| event["event_type"] }
       assert_equal records[1].fetch("event_id"), records[2].dig("payload", "approval_event_id")
+      assert_equal "active", ctx.fetch(:store).read(ctx.dig(:job, "job_id")).fetch("state")
       assert_equal :not_eligible,
                    Hive::Finalization::Reconciler.new(task_folder: ctx.fetch(:task_folder)).reconcile.status
     end

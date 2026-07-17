@@ -290,6 +290,56 @@ module Hive
         end
       end
 
+      # Retire an operational job after an operator-authored no-PR approval.
+      # The journal event is authoritative; this method only prevents a future
+      # daemon tick from claiming a branch whose task is now archive-eligible.
+      # It is repair-safe when the approval append succeeded before this write.
+      def retire_after_no_pr_approval!(job_id, approval_event_id:, now: @clock.call)
+        mutate(job_id) do |record|
+          ensure_current!(record)
+          verify_operator_event!(record, approval_event_id, "no_pr_approved")
+          if (claim = active_claim(record))
+            if Time.iso8601(claim.fetch("expires_at")) > now
+              raise StaleClaim, "live babysitter claim prevents no-PR retirement"
+            end
+            claim["state"] = "superseded"
+            claim["finished_at"] = now.utc.iso8601(6)
+            claim["outcome"] = "operator_terminal_approval"
+          end
+          record["state"] = "terminal"
+          record["updated_at"] = now.utc.iso8601(6)
+          record
+        end
+      rescue ArgumentError, KeyError => e
+        raise InconsistentRecord, "no-PR retirement evidence is invalid: #{e.message}"
+      end
+
+      # Re-enable a retired job only after the append-only re-arm event exists.
+      # A retry after journal-then-registry process death safely repairs the
+      # operational state without creating a new job or claim owner.
+      def rearm_after_approval!(job_id, rearm_event_id:, now: @clock.call)
+        mutate(job_id) do |record|
+          ensure_current!(record)
+          verify_operator_event!(record, rearm_event_id, "finalization_rearmed")
+          unless %w[terminal active].include?(record.fetch("state"))
+            raise InconsistentRecord, "only a retired babysitter job can be re-armed"
+          end
+          if (claim = active_claim(record))
+            raise StaleClaim, "active babysitter claim prevents operator re-arm" if
+              Time.iso8601(claim.fetch("expires_at")) > now
+
+            claim["state"] = "superseded"
+            claim["finished_at"] = now.utc.iso8601(6)
+            claim["outcome"] = "operator_rearm_repair"
+          end
+          record["state"] = "active"
+          record["updated_at"] = now.utc.iso8601(6)
+          record
+        end
+      rescue ArgumentError, KeyError => e
+        raise InconsistentRecord, "operator re-arm evidence is invalid: #{e.message}"
+      end
+
       def current_job(task_slug:, task_generation:)
         identity = jobs.map { |record| record.fetch("identity") }.find do |candidate|
           candidate["task_slug"] == task_slug.to_s && candidate["task_generation"] == task_generation
@@ -374,6 +424,19 @@ module Hive
         end
       end
 
+      def verify_operator_event!(record, event_id, event_type)
+        records = Hive::TaskProjection.read_journal(
+          File.join(record.fetch("task_folder"), Hive::TaskJournal::JOURNAL_BASENAME)
+        )
+        event = records.find { |candidate| candidate["event_id"] == event_id }
+        unless event && event["event_type"] == event_type &&
+               event.dig("producer", "kind") == "operator" &&
+               event.dig("payload", "job_id") == record.fetch("job_id") &&
+               event["task_generation"] == record.dig("identity", "task_generation")
+          raise InconsistentRecord, "babysitter operational transition lacks matching operator event"
+        end
+      end
+
       def validate_token!(record, token, now:, allow_expired: false, owner_optional: false)
         claim = active_claim(record)
         unless claim && claim["claim_fence"] == token["claim_fence"] &&
@@ -425,7 +488,7 @@ module Hive
 
       def current_key(identity)
         fields = %w[project task_id task_slug task_generation].map { |key| "#{key}=#{identity.fetch(key)}" }
-        Digest::SHA256.hexdigest(fields.join("\0"))
+        ::Digest::SHA256.hexdigest(fields.join("\0"))
       end
 
       def current_path(identity)

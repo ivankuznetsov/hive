@@ -139,21 +139,32 @@ and reason code before removing `pending`. Harness fixtures must not infer
 those contracts. The scenario README is the canonical six-incident index and
 activation checklist.
 
+`list --json` exposes `incident_id`, `sibling_task_id`, and `pending` on every
+inventory row (nullable IDs on ordinary scenarios); human list/run output marks
+pending fixtures and reports selected, executed, pending, passed, and failed
+counts. Incident metadata without the `incident-regression` tag is rejected so
+it cannot bypass runtime budgets.
+
 ### Hermetic GitHub and agents
 
-`SandboxEnv` puts `test/e2e/fixtures/gh` first on `PATH` for blocking,
-background, tmux, and replay subprocesses. `script_gh` interactions are
+`SandboxEnv` puts `test/e2e/fixtures/gh` first on `PATH` and pins
+`HIVE_GH_BIN` to the same shim for blocking, background, tmux, and replay
+subprocesses. `script_gh` interactions are
 consumed atomically. An absent or exhausted script, unexpected argv, cwd
 mismatch, or repository mismatch exits non-zero and records the rejected call;
 the shim never resolves or executes the machine's real `gh`. Thus e2e GitHub
 reads and mutations are synthetic and no real network access is possible.
-`HIVE_BIN` and `HIVE_INVOKED_BIN` are also pinned to the checkout's real
-`bin/hive` and cannot be replaced by scenario or operator environment
-overrides, so nested daemon/display-name work cannot escape to an installed
-Hive binary.
+Git commands without `--repo`/`GH_REPO` derive a normalized identity from the
+checkout origin and record that provenance. One ordered script is allowed per
+scenario, the audit is append-only, and background plus tmux/TUI producers
+(including detached TUI workflow process groups recorded in the run-scoped
+lifecycle log) stop before the locked final verification or failure evidence snapshot.
+Harness-owned `BUNDLE_GEMFILE`, `HIVE_HOME`, built-in agent fixture binaries,
+`HIVE_BIN`, and `HIVE_INVOKED_BIN` cannot be replaced by scenario or operator
+overrides.
 
-Claude and Codex profiles continue to resolve to
-`test/fixtures/fake-claude`. Its `HIVE_FAKE_CLAUDE_READY_FILE` /
+Claude, Codex, Pi, and Grok profiles resolve to `test/fixtures/fake-claude`.
+Its `HIVE_FAKE_CLAUDE_READY_FILE` /
 `HIVE_FAKE_CLAUDE_RELEASE_FILE` barrier publishes a real PID atomically and
 waits on a condition file, allowing cross-process races without fixed sleeps.
 `spawn_background` owns a process group, and both explicit `stop_process` and
@@ -202,11 +213,13 @@ On failure, the harness writes a scenario bundle containing:
 | `update_flow_tui_footer` | TUI update footer rendering after the update check records a newer release. |
 | `update_flow_tui_no_nudge` | TUI no-update-nudge path when update state should not be shown. |
 | `update_flow_up_to_date` | Daemon update-check path when the installed version is already current. |
+| `incident_plan_only_dependency_gate` | Rejects a plan-only assertion, holds exact metadata below the gate, then proves one real dispatch after the prerequisite reaches `8-finalize`. |
+| `incident_repository_routing` | Rejects a cross-project dependency whose registered repository identity disagrees with its live origin and preserves the non-target task. |
 
 The six incident-regression fixtures and their current pending/green states
-are indexed in `test/e2e/scenarios/README.md`. Pending fixtures for #9767,
-#9768, #9769, #9770, and #9771 remain report-visible until their sibling-owned
-persistence and reason contracts are available.
+are indexed in `test/e2e/scenarios/README.md`. The two #9771 fixtures are green;
+pending fixtures for #9767, #9768, #9769, and #9770 remain report-visible until
+their sibling-owned persistence and reason contracts are available.
 
 ## Operational Notes
 
@@ -215,8 +228,8 @@ The harness prepends repo `bin/` to the tmux environment PATH because TUI rows d
 
 Routine pull-request CI runs `e2e:lib_test` and `rake e2e` in a separate job,
 retains the run directory even after failure, and then reads enabled incident
-durations from `report.json`. Each enabled incident must be below five seconds
-and the group below thirty seconds. This job does not fold e2e into the default
+durations from `report.json`. Durations include sandbox bootstrap; each enabled
+incident must be below five seconds and the group below thirty seconds. This job does not fold e2e into the default
 `rake test` task.
 
 `tmux` is required for TUI scenarios. `asciinema` is test-time optional until a TUI failure needs a cast, but missing/corrupt casts are recorded in artifacts instead of crashing unrelated CLI scenarios. If `asciinema` is installed outside PATH, set `HIVE_ASCIINEMA_BIN=/absolute/path/to/asciinema`.

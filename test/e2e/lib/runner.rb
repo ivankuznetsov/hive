@@ -60,6 +60,14 @@ module Hive
         scenarios = files.map { |path| ScenarioParser.parse(path) }
         scenarios = scenarios.select { |scenario| scenario.name.include?(pattern.to_s) || File.basename(scenario.path).include?(pattern.to_s) } if pattern && !pattern.empty?
         scenarios = scenarios.select { |scenario| scenario.tags.include?(tag.to_s) } if tag && !tag.empty?
+        duplicate = scenarios.group_by(&:name).find { |_name, matches| matches.size > 1 }
+        if duplicate
+          name, matches = duplicate
+          raise ScenarioParser::InvalidScenario.new(
+            path: matches.fetch(1).path, line: 1,
+            reason: "duplicate scenario name #{name.inspect}; already declared in #{matches.first.path}"
+          )
+        end
         scenarios
       end
 
@@ -70,12 +78,13 @@ module Hive
       # partial / crashed) is unaffected — agents still see one row per
       # scenario, just with no artifacts_dir / failed_step_index.
       def run_one(scenario, keep_artifacts:)
+        started = monotonic_time
         name = PathSafety.safe_basename!(scenario.name, "scenario name")
         scenario_run_dir = direct_child_path(@run_dir, name, "scenario run dir")
         sandbox = Sandbox.bootstrap(scenario_run_dir)
       rescue StandardError => e
         @results << StepExecutor::ScenarioResult.new(
-          name: scenario.name, status: "setup_failed", duration_seconds: 0.0,
+          name: scenario.name, status: "setup_failed", duration_seconds: elapsed_seconds(started),
           failed_step_index: nil, failed_step_kind: nil,
           error_summary: "#{e.class}: #{e.message}",
           artifacts_dir: nil, repro: nil
@@ -88,12 +97,21 @@ module Hive
           @harness_errors << { "kind" => "sample_project_mutated", "message" => mutation_error.message }
           result = failed_harness_result(result, mutation_error)
         end
+        result = result.with(duration_seconds: elapsed_seconds(started))
         @results << result
         sandbox.cleanup unless keep_artifacts || result.status == "failed"
       end
 
       def generate_run_id
         "#{Time.now.utc.strftime('%Y-%m-%dT%H-%M-%SZ')}-#{Process.pid}-#{SecureRandom.hex(2)}"
+      end
+
+      def elapsed_seconds(started)
+        (monotonic_time - started).round(3)
+      end
+
+      def monotonic_time
+        Process.clock_gettime(Process::CLOCK_MONOTONIC)
       end
 
       def scenario_metadata(scenario)

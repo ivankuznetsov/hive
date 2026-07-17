@@ -351,16 +351,16 @@ stable local API, so the reserve is deliberately conservative rather than an
 exact forecast. Recalibrate from captured streams if Claude materially changes
 its headless context or event cadence.
 
-## Incident e2e activation remains sibling-gated (2026-07-16)
+## Four incident e2e fixtures remain sibling-gated (2026-07-17)
 
-All six production-incident sequences are now synthetic, parseable, and
-visible as pending entries in the e2e report, but none is represented as an
-executed pass. The current tree does not expose the exact sibling-owned
+All six production-incident sequences are synthetic and parseable. The #9771
+plan-only dependency and repository-routing fixtures now execute as ordinary
+green results against the merged fail-closed contracts. Four remain visible as
+pending entries rather than claimed passes because the current tree does not expose the exact sibling-owned
 contracts needed to activate them: #9767's durable attempt lease and adoption
 reason, #9768's generation identity and reconciliation reason, #9769's
-finalize lifecycle terminal reason, #9770's retry-owner evidence and bounded
-terminal reason, or #9771's dependency/repository identity and route-or-reject
-reasons. The harness deliberately does not infer those formats or strings.
+finalize lifecycle terminal reason, and #9770's retry-owner evidence and bounded
+terminal reason. The harness deliberately does not infer those formats or strings.
 
 Close this gap one fixture at a time after the corresponding sibling lands:
 replace its activation guard with real CLI reconciliation and exact

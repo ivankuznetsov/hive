@@ -1,4 +1,6 @@
 require_relative "../../test_helper"
+require "open3"
+require_relative "gh_stub"
 require_relative "repro_script_writer"
 require_relative "scenario"
 
@@ -69,6 +71,10 @@ class E2EReproScriptWriterTest < Minitest::Test
     Dir.mktmpdir("scenario") do |scenario_dir|
       Dir.mktmpdir("sandbox") do |sandbox|
         Dir.mktmpdir("home") do |run_home|
+          # A failure run already has transcript state. Replay must start a
+          # fresh transcript instead of failing on the single-install guard;
+          # the original evidence was copied into the scenario artifact dir.
+          Hive::E2E::GhStub.new(run_home).install([])
           step = make_step(
             "script_gh",
             args: {
@@ -87,8 +93,37 @@ class E2EReproScriptWriterTest < Minitest::Test
           assert_includes body, "GhStub"
           assert_includes body, sandbox
           assert_includes body, "pr"
+          assert_includes body, "rm_rf"
+          assert_includes body, "complete default-deny GitHub transcript"
+          cleanup_index = body.rindex("_hive_repro_cleanup")
+          verification_index = body.index("# verify the complete default-deny GitHub transcript")
+          assert_operator cleanup_index, :<, verification_index,
+                          "background producers must stop before GitHub transcript verification"
           out = `bash -n #{Shellwords.escape(path)} 2>&1`
           assert $CHILD_STATUS.success?, "script_gh repro must be valid bash: #{out}"
+        end
+      end
+    end
+  end
+
+  def test_script_gh_repro_fails_when_expected_interactions_are_unconsumed
+    Dir.mktmpdir("scenario") do |scenario_dir|
+      Dir.mktmpdir("sandbox") do |sandbox|
+        Dir.mktmpdir("home") do |run_home|
+          Hive::E2E::GhStub.new(run_home).install([])
+          step = make_step(
+            "script_gh",
+            args: { "interactions" => [ { "args" => [ "pr", "view", "7" ] } ] }
+          )
+          path = Hive::E2E::ReproScriptWriter.new(
+            scenario_dir: scenario_dir, sandbox_dir: sandbox, run_home: run_home,
+            steps: [ step ], failed_index: 1
+          ).write
+
+          _out, err, status = Open3.capture3("bash", path)
+
+          refute status.success?
+          assert_match(/consumed 0 of 1/, err)
         end
       end
     end
@@ -246,6 +281,8 @@ class E2EReproScriptWriterTest < Minitest::Test
                        "register_project replay must not use relative -Ilib bin/hive from the copied project")
           assert_includes body, Hive::E2E::Paths.hive_bin,
                           "register_project replay must use the absolute hive binary"
+          assert_includes body, Shellwords.escape("cfg['claude']['mode'] = 'headless'"),
+                          "secondary-project replay must not enter interactive agent mode"
           assert_includes body, "ruby_block runs with sandbox, run_home, and slug locals restored",
                           "ruby_block must include the restored binding-context note"
           # Live-tmux steps are explicitly skipped with the new comment.

@@ -11,6 +11,8 @@ class E2ESandboxEnvTest < Minitest::Test
         previous_invoked_bin = ENV["HIVE_INVOKED_BIN"]
         ENV["BUNDLE_PATH"] = "/tmp/leak"
         ENV["RUBYOPT"] = "-I/tmp/leak"
+        ENV["GH_HOST"] = "github.attacker.example"
+        ENV["GH_REPO"] = "attacker/spoofed"
         ENV["HIVE_BIN"] = "/host/hive"
         ENV["HIVE_INVOKED_BIN"] = "/host/hive-wrapper"
 
@@ -20,30 +22,39 @@ class E2ESandboxEnvTest < Minitest::Test
         assert_equal File.join(sandbox, "Gemfile"), yielded["BUNDLE_GEMFILE"]
         assert_equal home, yielded["HIVE_HOME"]
         assert_equal yielded["HIVE_CLAUDE_BIN"], yielded["HIVE_CODEX_BIN"]
+        assert_equal yielded["HIVE_CLAUDE_BIN"], yielded["HIVE_GROK_BIN"]
+        assert_equal yielded["HIVE_CLAUDE_BIN"], yielded["HIVE_PI_BIN"]
         assert_equal Hive::E2E::Paths.hive_bin, yielded["HIVE_BIN"]
         assert_equal Hive::E2E::Paths.hive_bin, yielded["HIVE_INVOKED_BIN"]
+        assert_equal Hive::E2E::Paths.gh_shim, yielded["HIVE_GH_BIN"]
         assert_equal "xterm-256color", yielded["TERM"]
         refute_includes yielded.keys, "BUNDLE_PATH"
         refute_includes yielded.keys, "RUBYOPT"
+        refute_includes yielded.keys, "GH_HOST"
+        refute_includes yielded.keys, "GH_REPO"
       ensure
         ENV.delete("BUNDLE_PATH")
         ENV.delete("RUBYOPT")
+        ENV.delete("GH_HOST")
+        ENV.delete("GH_REPO")
         ENV["HIVE_BIN"] = previous_hive_bin
         ENV["HIVE_INVOKED_BIN"] = previous_invoked_bin
       end
     end
   end
 
-  def test_scenario_overrides_cannot_replace_the_checkout_hive_binary
+  def test_scenario_overrides_cannot_replace_harness_owned_isolation_or_binaries
     Dir.mktmpdir("sandbox") do |sandbox|
       Dir.mktmpdir("home") do |home|
-        merged = Hive::E2E::SandboxEnv.merge(
-          Hive::E2E::SandboxEnv.repro_env(sandbox, home),
-          "HIVE_BIN" => "/poison/hive", "HIVE_INVOKED_BIN" => "/poison/wrapper"
-        )
+        base = Hive::E2E::SandboxEnv.repro_env(sandbox, home)
+        poisoned = Hive::E2E::SandboxEnv::PROTECTED_ENV_KEYS.to_h do |key|
+          [ key, "/poison/#{key.downcase}" ]
+        end
+        merged = Hive::E2E::SandboxEnv.merge(base, poisoned)
 
-        assert_equal Hive::E2E::Paths.hive_bin, merged["HIVE_BIN"]
-        assert_equal Hive::E2E::Paths.hive_bin, merged["HIVE_INVOKED_BIN"]
+        Hive::E2E::SandboxEnv::PROTECTED_ENV_KEYS.each do |key|
+          assert_equal base.fetch(key), merged.fetch(key), "#{key} must remain harness-owned"
+        end
       end
     end
   end

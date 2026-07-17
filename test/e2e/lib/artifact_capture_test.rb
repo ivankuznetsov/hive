@@ -28,6 +28,8 @@ class E2EArtifactCaptureTest < Minitest::Test
       .collect(error: error, failed_step: failed_step,
                step_results: overrides[:step_results] || [],
                tmux_driver: overrides[:tmux_driver],
+               tmux_keystrokes: overrides[:tmux_keystrokes],
+               pane_after: overrides[:pane_after],
                schema_diff: overrides[:schema_diff],
                pane_before: overrides[:pane_before])
   end
@@ -140,6 +142,18 @@ class E2EArtifactCaptureTest < Minitest::Test
 
       assert_equal "BEFORE_PANE_TEXT\n", pane_before
       assert_equal "AFTER_PANE_TEXT\n", pane_after
+    end
+  end
+
+  def test_pre_captured_tmux_evidence_survives_server_cleanup
+    with_dirs do |scenario_dir, sandbox, run_home|
+      collect(scenario_dir, sandbox, run_home,
+              tmux_keystrokes: [ { "keys" => [ "enter" ] } ],
+              pane_after: "FINAL_PANE_BEFORE_SHUTDOWN\n")
+
+      assert_equal "FINAL_PANE_BEFORE_SHUTDOWN\n", File.read(File.join(scenario_dir, "pane-after.txt"))
+      assert_equal [ { "keys" => [ "enter" ] } ],
+                   JSON.parse(File.read(File.join(scenario_dir, "keystrokes.log")))
     end
   end
 

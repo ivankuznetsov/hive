@@ -109,6 +109,12 @@ module Hive
         report = runner.run_all(pattern: pattern, tag: options[:filter], keep_artifacts: options[:keep_artifacts])
         if options[:json]
           puts JSON.pretty_generate(report)
+        else
+          pending = report.fetch("scenario_metadata").count { |entry| entry.fetch("pending") }
+          summary = report.fetch("summary")
+          puts "selected #{report.fetch('scenario_metadata').size}, executed #{summary.fetch('total')}, " \
+               "pending #{pending}, passed #{summary.fetch('passed')}, " \
+               "failed #{summary.fetch('failed') + summary.fetch('setup_failed', 0)}"
         end
         summary = report.fetch("summary")
         failed = summary.fetch("failed") + summary.fetch("setup_failed", 0)
@@ -138,7 +144,8 @@ module Hive
         else
           scenarios.each do |scenario|
             tags = scenario.tags.empty? ? "" : " [#{scenario.tags.join(', ')}]"
-            puts "#{scenario.name}#{tags}"
+            pending = scenario.pending ? " (pending: #{scenario.sibling_task_id})" : ""
+            puts "#{scenario.name}#{tags}#{pending}"
           end
         end
       rescue ScenarioParser::InvalidScenario, Psych::Exception => e
@@ -211,7 +218,10 @@ module Hive
           "tags" => scenario.tags,
           "description" => scenario.description,
           "path" => scenario.path,
-          "steps_count" => scenario.steps.size
+          "steps_count" => scenario.steps.size,
+          "incident_id" => scenario.incident_id,
+          "sibling_task_id" => scenario.sibling_task_id,
+          "pending" => scenario.pending
         }
       end
 

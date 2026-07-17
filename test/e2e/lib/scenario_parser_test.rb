@@ -184,4 +184,63 @@ class E2EScenarioParserTest < Minitest::Test
       assert_includes error.message, "script_gh.interactions must be an array"
     end
   end
+
+
+  def test_script_gh_rejects_malformed_nested_interactions_during_preflight
+    Dir.mktmpdir("scenario") do |dir|
+      path = File.join(dir, "gh.yml")
+      File.write(path, <<~YAML)
+        name: gh_script
+        steps:
+          - kind: script_gh
+            interactions:
+              - args: auth-status
+      YAML
+
+      error = assert_raises(Hive::E2E::ScenarioParser::InvalidScenario) do
+        Hive::E2E::ScenarioParser.parse(path)
+      end
+      assert_includes error.message, "args must be an array of strings"
+    end
+  end
+
+  def test_incident_metadata_requires_the_budgeted_incident_tag
+    Dir.mktmpdir("scenario") do |dir|
+      path = File.join(dir, "untagged.yml")
+      File.write(path, <<~YAML)
+        name: untagged_incident
+        description: Must not bypass the incident budget.
+        incident_id: untagged-incident
+        sibling_task_id: "#9767"
+        pending: false
+        steps:
+          - kind: cli
+            args: [version]
+      YAML
+
+      error = assert_raises(Hive::E2E::ScenarioParser::InvalidScenario) do
+        Hive::E2E::ScenarioParser.parse(path)
+      end
+      assert_includes error.message, "requires the incident-regression tag"
+    end
+  end
+
+  def test_multiple_script_gh_steps_fail_preflight
+    Dir.mktmpdir("scenario") do |dir|
+      path = File.join(dir, "gh.yml")
+      File.write(path, <<~YAML)
+        name: duplicate_gh_script
+        steps:
+          - kind: script_gh
+            interactions: []
+          - kind: script_gh
+            interactions: []
+      YAML
+
+      error = assert_raises(Hive::E2E::ScenarioParser::InvalidScenario) do
+        Hive::E2E::ScenarioParser.parse(path)
+      end
+      assert_includes error.message, "only one ordered script_gh"
+    end
+  end
 end

@@ -32,8 +32,8 @@ seconds; their combined duration must remain below thirty seconds.
 | `accepted-attempt-caller-loss` | [incident_attempt_adoption_after_caller_loss.yml](incident_attempt_adoption_after_caller_loss.yml) | `#9767` | durable attempt ownership and daemon adoption | Pending |
 | `generation-scoped-no-worktree-marker` | [incident_generation_scoped_no_worktree_marker.yml](incident_generation_scoped_no_worktree_marker.yml) | `#9768` | generation-scoped marker reconciliation | Pending |
 | `finalize-pr-lifecycle-gate` | [incident_finalize_pr_lifecycle_gate.yml](incident_finalize_pr_lifecycle_gate.yml) | `#9769` | finalize and PR merge watcher | Pending |
-| `plan-only-dependency-gate` | [incident_plan_only_dependency_gate.yml](incident_plan_only_dependency_gate.yml) | `#9771` | dependency resolver and daemon dispatch | Pending |
-| `repository-routing` | [incident_repository_routing.yml](incident_repository_routing.yml) | `#9771` | project/repository dispatcher or babysitter | Pending |
+| `plan-only-dependency-gate` | [incident_plan_only_dependency_gate.yml](incident_plan_only_dependency_gate.yml) | `#9771` | strict plan assertion, dependency gate, and real execute dispatch | Green |
+| `repository-routing` | [incident_repository_routing.yml](incident_repository_routing.yml) | `#9771` | cross-project repository admission and non-target preservation | Green |
 | `provider-limit-retry` | [incident_provider_limit_retry.yml](incident_provider_limit_retry.yml) | `#9770` | provider-limit healer and retry owner | Pending |
 
 ## Hermetic GitHub scripting
@@ -57,10 +57,13 @@ Install an ordered interaction sequence with `script_gh`:
 ```
 
 Interactions are consumed atomically so repeated identical reads can model a
-staged lifecycle. The run home records `gh-stub/script.json`, `state.json`, and
-`audit.jsonl`; failure capture copies that evidence and the generated repro
-script. The executor also fails if a scenario finishes with expected
-interactions unconsumed.
+staged lifecycle. Install one ordered script per scenario; a second install is
+rejected instead of replacing evidence. The append-only audit also retains
+default-deny calls made before installation. The run home records
+`gh-stub/script.json`, `state.json`, and `audit.jsonl`; failure capture copies
+that evidence and the generated repro script. Background producers are stopped
+before final verification, and the executor fails on any rejected or
+unconsumed interaction.
 
 ## Process and fake-agent isolation
 
@@ -69,15 +72,20 @@ reaps it. Scenario teardown independently stops every registered background
 group on success, assertion failure, or timeout. Do not detach a daemon or add
 a fixed sleep to keep a fixture alive.
 
-All Claude and Codex launches resolve to `test/fixtures/fake-claude`. For
+TUI-dispatched workflow children are detached by production design. Under the
+run-scoped `HIVE_TUI_LOG_DIR`, their PID/PGID lifecycle is recorded so e2e
+teardown terminates any unfinished group before GitHub transcript verification.
+
+All built-in Claude, Codex, Pi, and Grok launches resolve to
+`test/fixtures/fake-claude`. For
 cross-process ordering, set `HIVE_FAKE_CLAUDE_READY_FILE` and
 `HIVE_FAKE_CLAUDE_RELEASE_FILE`: the fixture atomically writes its PID to the
 ready file and waits until the harness creates the release file. Assertions
 poll those observable conditions; elapsed-time sleeps are not synchronization.
 The sandbox pins fake Claude to headless mode while the user-facing TUI itself
-still runs in tmux. It also pins `HIVE_BIN` and `HIVE_INVOKED_BIN` to this
-checkout, so an operator's installed Hive wrapper cannot service nested test
-work.
+still runs in tmux. Harness-owned `BUNDLE_GEMFILE`, `HIVE_HOME`, built-in
+agent binaries, checkout Hive binaries, and both PATH/direct GitHub shim routes
+cannot be replaced by scenario overrides.
 
 CI runs the harness in a separate job, retains its run directory, and enforces
 the incident budget from the generated report:

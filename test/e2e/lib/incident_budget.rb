@@ -24,17 +24,22 @@ module Hive
       end
 
       def check
-        results_by_name = Array(@report["scenarios"]).to_h { |result| [ result["name"], result ] }
+        metadata = enabled_incidents
+        results = Array(@report["scenarios"])
+        results_by_name = results.group_by { |result| result["name"] }
         durations = {}
-        violations = []
+        violations = duplicate_violations(metadata, results)
 
-        enabled_incidents.each do |metadata|
-          name = metadata["name"]
-          result = results_by_name[name]
-          unless result
+        metadata.each do |entry|
+          name = entry["name"]
+          matches = results_by_name[name]
+          if matches.nil? || matches.empty?
             violations << "enabled incident #{name.inspect} has no scenario result"
             next
           end
+          next unless matches.one?
+
+          result = matches.first
 
           duration = Float(result["duration_seconds"])
           durations[name] = duration
@@ -65,6 +70,21 @@ module Hive
         Array(@report["scenario_metadata"]).select do |metadata|
           Array(metadata["tags"]).include?(INCIDENT_TAG) && metadata["pending"] == false
         end
+      end
+
+      def duplicate_violations(metadata, results)
+        duplicates = []
+        duplicate_names(metadata).each do |name|
+          duplicates << "enabled incident metadata contains duplicate name #{name.inspect}"
+        end
+        duplicate_names(results).each do |name|
+          duplicates << "scenario results contain duplicate name #{name.inspect}"
+        end
+        duplicates
+      end
+
+      def duplicate_names(rows)
+        rows.group_by { |row| row["name"] }.filter_map { |name, matches| name if matches.size > 1 }
       end
     end
   end

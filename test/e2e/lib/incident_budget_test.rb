@@ -54,4 +54,17 @@ class E2EIncidentBudgetTest < Minitest::Test
     refute checked.ok?
     assert_equal [ "enabled incident \"missing\" has no scenario result" ], checked.violations
   end
+
+  def test_duplicate_incident_names_fail_instead_of_undercounting_the_group
+    checked = Hive::E2E::IncidentBudget.check(
+      report(
+        metadata: [ metadata("duplicate"), metadata("duplicate") ],
+        scenarios: [ result("duplicate", 20.0), result("duplicate", 20.0) ]
+      )
+    )
+
+    refute checked.ok?
+    assert_includes checked.violations, 'enabled incident metadata contains duplicate name "duplicate"'
+    assert_includes checked.violations, 'scenario results contain duplicate name "duplicate"'
+  end
 end

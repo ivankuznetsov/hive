@@ -19,62 +19,7 @@ module Hive
         File.join(run_home, ROOT_NAME)
       end
 
-      def initialize(run_home)
-        @root = self.class.root_for(run_home)
-      end
-
-      def script_path
-        File.join(@root, SCRIPT_NAME)
-      end
-
-      def state_path
-        File.join(@root, STATE_NAME)
-      end
-
-      def audit_path
-        File.join(@root, AUDIT_NAME)
-      end
-
-      def install(interactions)
-        normalized = validate_interactions(interactions)
-        FileUtils.mkdir_p(@root)
-        with_lock do
-          write_json(script_path, "schema" => "hive-e2e-gh-script", "schema_version" => 1,
-                                  "interactions" => normalized)
-          write_json(state_path, "next_index" => 0)
-          FileUtils.rm_f(audit_path)
-        end
-        self
-      end
-
-      def audit
-        return [] unless File.file?(audit_path) && !File.symlink?(audit_path)
-
-        File.readlines(audit_path, chomp: true).reject(&:empty?).map { |line| JSON.parse(line) }
-      end
-
-      def verify!
-        rejected = audit.reject { |entry| entry["matched"] == true }
-        unless rejected.empty?
-          reasons = rejected.map { |entry| entry["reason"].to_s }.uniq.join("; ")
-          raise VerificationError, "gh shim rejected #{rejected.size} invocation(s): #{reasons}"
-        end
-        return true unless File.exist?(script_path)
-
-        script = read_json_file(script_path, "gh script")
-        state = read_json_file(state_path, "gh state")
-        expected = Array(script["interactions"]).size
-        consumed = Integer(state.fetch("next_index"))
-        return true if consumed == expected
-
-        raise VerificationError, "gh script consumed #{consumed} of #{expected} interaction(s)"
-      rescue JSON::ParserError, KeyError, ArgumentError => e
-        raise VerificationError, "gh shim evidence is invalid: #{e.message}"
-      end
-
-      private
-
-      def validate_interactions(interactions)
+      def self.validate_interactions(interactions)
         raise ArgumentError, "script_gh.interactions must be an array" unless interactions.is_a?(Array)
 
         interactions.map.with_index(1) do |interaction, index|
@@ -105,6 +50,64 @@ module Hive
         end
       end
 
+      def initialize(run_home)
+        @root = self.class.root_for(run_home)
+      end
+
+      def script_path
+        File.join(@root, SCRIPT_NAME)
+      end
+
+      def state_path
+        File.join(@root, STATE_NAME)
+      end
+
+      def audit_path
+        File.join(@root, AUDIT_NAME)
+      end
+
+      def install(interactions)
+        normalized = self.class.validate_interactions(interactions)
+        FileUtils.mkdir_p(@root)
+        with_lock do
+          if path_entry?(script_path) || path_entry?(state_path)
+            raise ArgumentError,
+                  "a gh script is already installed; put every expected call in one ordered interaction sequence"
+          end
+          write_json(script_path, "schema" => "hive-e2e-gh-script", "schema_version" => 1,
+                                  "interactions" => normalized)
+          write_json(state_path, "next_index" => 0)
+        end
+        self
+      end
+
+      def audit
+        with_lock { read_audit }
+      end
+
+      def verify!
+        with_lock do
+          rejected = read_audit.reject { |entry| entry["matched"] == true }
+          unless rejected.empty?
+            reasons = rejected.map { |entry| entry["reason"].to_s }.uniq.join("; ")
+            raise VerificationError, "gh shim rejected #{rejected.size} invocation(s): #{reasons}"
+          end
+          next true unless path_entry?(script_path)
+
+          script = read_json_file(script_path, "gh script")
+          state = read_json_file(state_path, "gh state")
+          expected = Array(script["interactions"]).size
+          consumed = Integer(state.fetch("next_index"))
+          next true if consumed == expected
+
+          raise VerificationError, "gh script consumed #{consumed} of #{expected} interaction(s)"
+        end
+      rescue JSON::ParserError, KeyError, ArgumentError => e
+        raise VerificationError, "gh shim evidence is invalid: #{e.message}"
+      end
+
+      private
+
       def with_lock
         FileUtils.mkdir_p(@root)
         File.open(File.join(@root, LOCK_NAME), File::RDWR | File::CREAT, 0o600) do |lock|
@@ -133,6 +136,21 @@ module Hive
         JSON.parse(File.read(path))
       rescue Errno::ENOENT
         raise VerificationError, "#{label} is missing"
+      end
+
+      def read_audit
+        return [] unless path_entry?(audit_path)
+
+        stat = File.lstat(audit_path)
+        unless stat.file? && !stat.symlink?
+          raise VerificationError, "gh audit must be a regular file"
+        end
+
+        File.readlines(audit_path, chomp: true).reject(&:empty?).map { |line| JSON.parse(line) }
+      end
+
+      def path_entry?(path)
+        File.exist?(path) || File.symlink?(path)
       end
     end
   end

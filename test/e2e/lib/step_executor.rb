@@ -72,20 +72,30 @@ module Hive
       # is post-v1; see wiki/gaps.md for the open question.
       def execute
         started = monotonic_time
+        tmux_evidence = nil
         @scenario.steps.each { |step| dispatch(step) }
+        # Quiesce every producer before validating the transcript. Otherwise a
+        # daemon or TUI child can issue a late gh call after verify! succeeds.
+        # Capture live-only pane evidence first in case verification itself
+        # fails, then synchronously terminate tmux before reading the audit.
+        tmux_evidence = @tmux_lifecycle.failure_evidence
+        quiesce_harness(preserve_cast: true)
         @gh_stub.verify!
-        @tmux_lifecycle.stop_asciinema(delete: true)
+        @tmux_lifecycle.discard_preserved_cast
         ScenarioResult.new(name: @scenario.name, status: "passed",
                            duration_seconds: (monotonic_time - started).round(3),
                            failed_step_index: nil, failed_step_kind: nil, error_summary: nil,
                            artifacts_dir: File.directory?(@scenario_dir) ? relative_scenario_dir : nil,
                            repro: nil)
       rescue StandardError => e
-        on_failure(e, started)
+        # Freeze logs and GitHub evidence before building the failure bundle.
+        @preserve_cast = true
+        tmux_evidence ||= @tmux_lifecycle.failure_evidence
+        quiesce_harness(preserve_cast: true, raise_errors: false)
+        on_failure(e, started, tmux_evidence: tmux_evidence)
       ensure
-        teardown_harness_processes
-        @tmux_lifecycle.stop_asciinema(delete: !@preserve_cast)
-        @tmux_lifecycle.cleanup
+        quiesce_harness(preserve_cast: @preserve_cast, raise_errors: false)
+        @tmux_lifecycle.discard_preserved_cast unless @preserve_cast
       end
 
       private
@@ -96,6 +106,24 @@ module Hive
       def teardown_harness_processes
         (@ctx.harness_state[:background] || {}).each_value { |proc| safe_stop(proc) }
         safe_stop(@ctx.harness_state[:releases_stub])
+      end
+
+      def quiesce_harness(preserve_cast:, raise_errors: true)
+        errors = []
+        begin
+          @tmux_lifecycle.stop_asciinema(delete: !preserve_cast)
+        rescue StandardError => e
+          errors << e
+        end
+        begin
+          @tmux_lifecycle.cleanup
+        rescue StandardError => e
+          errors << e
+        end
+        teardown_harness_processes
+        raise errors.first if raise_errors && errors.any?
+
+        errors
       end
 
       def safe_stop(stoppable)
@@ -129,9 +157,7 @@ module Hive
         end
       end
 
-      def on_failure(error, started)
-        @preserve_cast = true
-        @tmux_lifecycle.stop_asciinema(delete: false)
+      def on_failure(error, started, tmux_evidence:)
         failed_step = error.respond_to?(:step) ? error.step : nil
         repro = ReproScriptWriter.new(scenario_dir: @scenario_dir, sandbox_dir: @ctx.sandbox_dir,
                                       run_home: @ctx.run_home, steps: @scenario.steps,
@@ -141,7 +167,8 @@ module Hive
         ArtifactCapture.new(scenario_dir: @scenario_dir, sandbox_dir: @ctx.sandbox_dir, run_home: @ctx.run_home,
                             tui_log_dir: @tmux_lifecycle.tui_log_dir)
           .collect(error: error, failed_step: failed_step, step_results: @step_results,
-                   tmux_driver: @tmux_lifecycle.tmux,
+                   tmux_keystrokes: tmux_evidence[:tmux_keystrokes],
+                   pane_after: tmux_evidence[:pane_after],
                    schema_diff: error.respond_to?(:schema_diff) ? error.schema_diff : nil,
                    pane_before: @ctx.pre_keystroke_pane)
         ScenarioResult.new(name: @scenario.name, status: "failed",

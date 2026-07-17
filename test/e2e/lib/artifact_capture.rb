@@ -27,7 +27,8 @@ module Hive
       # writer is recorded in @capture_errors and surfaced through manifest.json
       # but does NOT propagate, so the original step failure remains the
       # canonical scenario error.
-      def collect(error:, failed_step:, step_results:, tmux_driver: nil, schema_diff: nil, pane_before: nil)
+      def collect(error:, failed_step:, step_results:, tmux_driver: nil, tmux_keystrokes: nil,
+                  pane_after: nil, schema_diff: nil, pane_before: nil)
         FileUtils.mkdir_p(@scenario_dir)
         guard("exception.txt") { write("exception.txt", exception_text(error, failed_step)) }
         guard("env-snapshot.json") { write("env-snapshot.json", JSON.pretty_generate(env_snapshot)) }
@@ -44,9 +45,15 @@ module Hive
         if error.respond_to?(:stderr) && !error.stderr.to_s.empty?
           guard("cmd-stderr.txt") { write("cmd-stderr.txt", error.stderr) }
         end
-        if tmux_driver
-          guard("keystrokes.log") { write("keystrokes.log", JSON.pretty_generate(tmux_driver.keystrokes)) }
-          guard("pane-after.txt") { write("pane-after.txt", safe_pane_capture(tmux_driver)) }
+        if tmux_driver || tmux_keystrokes || pane_after
+          guard("keystrokes.log") do
+            keystrokes = tmux_keystrokes || tmux_driver.keystrokes
+            write("keystrokes.log", JSON.pretty_generate(keystrokes))
+          end
+          guard("pane-after.txt") do
+            final_pane = pane_after || safe_pane_capture(tmux_driver)
+            write("pane-after.txt", final_pane)
+          end
           guard("pane-before.txt") { write("pane-before.txt", pane_before) } if pane_before
         end
         guard("state") do
@@ -131,7 +138,7 @@ module Hive
         return unless @tui_log_dir && regular_artifact_directory?(@tui_log_dir, "tui-subprocess-live")
 
         sources = Dir.glob(File.join(@tui_log_dir, "hive-tui-spawn-*.log"))
-        %w[hive-tui-subprocess.log hive-tui-subprocess.log.1].each do |name|
+        %w[hive-tui-subprocess.log hive-tui-subprocess.log.1 hive-tui-subprocess-pids.jsonl].each do |name|
           marker_log = File.join(@tui_log_dir, name)
           sources << marker_log if artifact_path_present?(marker_log)
         end

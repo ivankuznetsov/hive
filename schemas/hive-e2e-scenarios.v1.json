@@ -13,13 +13,19 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["name", "tags", "description", "path", "steps_count"],
+        "required": [
+          "name", "tags", "description", "path", "steps_count",
+          "incident_id", "sibling_task_id", "pending"
+        ],
         "properties": {
           "name": { "type": "string" },
           "tags": { "type": "array", "items": { "type": "string" } },
           "description": { "type": "string" },
           "path": { "type": "string" },
-          "steps_count": { "type": "integer", "minimum": 0 }
+          "steps_count": { "type": "integer", "minimum": 0 },
+          "incident_id": { "type": ["string", "null"] },
+          "sibling_task_id": { "type": ["string", "null"] },
+          "pending": { "type": "boolean" }
         }
       }
     }

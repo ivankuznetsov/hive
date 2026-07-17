@@ -11,6 +11,7 @@ module Hive
         BUNDLE_PATH
         BUNDLE_APP_CONFIG
         BUNDLER_VERSION
+        BUNDLER_SETUP
         RUBYOPT
         RUBYLIB
         RBENV_VERSION
@@ -28,6 +29,21 @@ module Hive
         GEM_HOME
         GEM_PATH
         GEM_ROOT
+        GH_HOST
+        GH_REPO
+      ].freeze
+
+      PROTECTED_ENV_KEYS = %w[
+        BUNDLE_GEMFILE
+        HIVE_HOME
+        HIVE_CLAUDE_BIN
+        HIVE_CODEX_BIN
+        HIVE_GROK_BIN
+        HIVE_PI_BIN
+        HIVE_BIN
+        HIVE_INVOKED_BIN
+        HIVE_GH_BIN
+        HIVE_E2E_GH_STUB_DIR
       ].freeze
 
       module_function
@@ -38,17 +54,15 @@ module Hive
         env.each_with_object({}) { |(key, value), out| out[key.to_s] = value.nil? ? nil : value.to_s }
       end
 
-      # Merge scenario overrides while preserving the hermetic executable and
-      # GitHub-shim keys.
+      # Merge scenario overrides while preserving the harness-owned isolation,
+      # executable, agent-fixture, and GitHub-shim keys.
       # A caller may still replace PATH for a fixture, but the default-deny
       # shim remains its first entry and the run-local script root cannot be
       # redirected to a host-controlled location.
       def merge(base, overrides)
         merged = base.merge(stringify_env(overrides))
         merged["PATH"] = prepend_gh_shim(merged["PATH"])
-        merged["HIVE_E2E_GH_STUB_DIR"] = base.fetch("HIVE_E2E_GH_STUB_DIR")
-        merged["HIVE_BIN"] = base.fetch("HIVE_BIN")
-        merged["HIVE_INVOKED_BIN"] = base.fetch("HIVE_INVOKED_BIN")
+        PROTECTED_ENV_KEYS.each { |key| merged[key] = base.fetch(key) }
         merged
       end
 
@@ -75,8 +89,11 @@ module Hive
           "HIVE_HOME" => run_home,
           "HIVE_CLAUDE_BIN" => File.expand_path(fake_claude_path),
           "HIVE_CODEX_BIN" => File.expand_path(fake_claude_path),
+          "HIVE_GROK_BIN" => File.expand_path(fake_claude_path),
+          "HIVE_PI_BIN" => File.expand_path(fake_claude_path),
           "HIVE_BIN" => Paths.hive_bin,
           "HIVE_INVOKED_BIN" => Paths.hive_bin,
+          "HIVE_GH_BIN" => Paths.gh_shim,
           "HIVE_E2E_GH_STUB_DIR" => File.join(run_home, "gh-stub"),
           "TERM" => "xterm-256color",
           "PATH" => path_parts.reject(&:empty?).join(":")

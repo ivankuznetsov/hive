@@ -1,10 +1,64 @@
 require_relative "../../test_helper"
+require "fileutils"
 require "json"
 require "tmpdir"
 require_relative "runner"
 require_relative "step_executor"
 
 class E2EStepExecutorTest < Minitest::Test
+  def test_tmux_is_quiesced_before_final_github_verification
+    Dir.mktmpdir("e2e-executor") do |root|
+      sandbox_dir = File.join(root, "sandbox")
+      run_home = File.join(root, "home")
+      scenario_dir = File.join(root, "run", "scenarios", "quiescence")
+      FileUtils.mkdir_p([ sandbox_dir, run_home, scenario_dir ])
+      sandbox = Struct.new(:sandbox_dir, :run_home).new(sandbox_dir, run_home)
+      scenario = Hive::E2E::Scenario.new(
+        name: "quiescence", description: "", tags: [], setup: {}, steps: [], path: "inline"
+      )
+      events = []
+      lifecycle = Object.new
+      lifecycle.define_singleton_method(:failure_evidence) { events << :snapshot; {} }
+      lifecycle.define_singleton_method(:stop_asciinema) { |delete:| events << [ :stop_asciinema, delete ] }
+      lifecycle.define_singleton_method(:cleanup) { events << :tmux_cleanup }
+      lifecycle.define_singleton_method(:discard_preserved_cast) { events << :discard_cast }
+      lifecycle.define_singleton_method(:tui_log_dir) { nil }
+      gh_stub = Object.new
+      gh_stub.define_singleton_method(:verify!) { events << :gh_verify }
+      executor = Hive::E2E::StepExecutor.new(
+        scenario: scenario, sandbox: sandbox, scenario_dir: scenario_dir, run_id: "quiescence"
+      )
+      executor.instance_variable_set(:@tmux_lifecycle, lifecycle)
+      executor.instance_variable_set(:@gh_stub, gh_stub)
+
+      result = executor.execute
+
+      assert_equal "passed", result.status
+      assert_operator events.index(:snapshot), :<, events.index(:tmux_cleanup)
+      assert_operator events.index(:tmux_cleanup), :<, events.index(:gh_verify)
+    end
+  end
+
+  def test_quiescence_attempts_registered_background_cleanup_when_tmux_cleanup_fails
+    events = []
+    lifecycle = Object.new
+    lifecycle.define_singleton_method(:stop_asciinema) { |delete:| events << [ :asciinema, delete ] }
+    lifecycle.define_singleton_method(:cleanup) { raise "tmux cleanup failed" }
+    background = Object.new
+    background.define_singleton_method(:stop) { events << :background_stop }
+    context = Struct.new(:harness_state).new({ background: { "worker" => background } })
+    executor = Hive::E2E::StepExecutor.allocate
+    executor.instance_variable_set(:@tmux_lifecycle, lifecycle)
+    executor.instance_variable_set(:@ctx, context)
+
+    error = assert_raises(RuntimeError) do
+      executor.send(:quiesce_harness, preserve_cast: false)
+    end
+
+    assert_equal "tmux cleanup failed", error.message
+    assert_includes events, :background_stop
+  end
+
   def with_runner
     Dir.mktmpdir("e2e-scenarios") do |scenarios_dir|
       Dir.mktmpdir("e2e-runs") do |runs_dir|

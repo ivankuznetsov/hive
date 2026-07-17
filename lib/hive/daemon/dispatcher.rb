@@ -677,14 +677,13 @@ module Hive
                           envelope_ok: entry.json_envelope&.dig("ok"))
             notify_dispatch_result(entry, meta, now: now) unless continuation
           end
-          # The global digests are pseudo-projects ("digest" and "answer_digest"),
-          # not real registry entries. A digest ConfigError (exit 78) is handled
-          # by the scheduler's own backoff (below); dropping a phantom digest
-          # project would emit a misleading :project_dropped event and leave a
-          # permanent phantom entry the digest gate never consults. The
-          # `!global_digest_stage?` guard covers BOTH pseudo-projects.
+          # Global digests are pseudo-projects, and patrol validation config is
+          # job-scoped rather than proof that the whole project is unusable.
+          # Their schedulers handle exit 78 with ordinary failure backoff;
+          # dropping the project here would strand unrelated task work.
           if entry.exit_code == Hive::ExitCodes::CONFIG &&
              !global_digest_stage?(entry.stage) &&
+             !patrol_stage?(entry.stage) &&
              entry.json_envelope&.dig("error_kind") != "admission_error"
             @controller.record_project_dropped(project: entry.project)
             @logger.event(:project_dropped, project: entry.project)
@@ -1487,6 +1486,15 @@ module Hive
 
       def global_digest_stage?(stage)
         GLOBAL_DIGEST_ACTIONS.key?(stage)
+      end
+
+      PATROL_STAGES = [
+        Hive::Daemon::PatrolScheduler::PATROL_STAGE,
+        Hive::Daemon::RefactorPatrolScheduler::PATROL_STAGE
+      ].freeze
+
+      def patrol_stage?(stage)
+        PATROL_STAGES.include?(stage)
       end
 
       def global_digest_scheduler(stage)

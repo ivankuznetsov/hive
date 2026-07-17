@@ -15,6 +15,7 @@ require "hive/patrol/pr_opener"
 require "hive/patrol/reviewer"
 require "hive/patrol/state_store"
 require "hive/patrol/token_budget"
+require "hive/patrol/validator"
 
 module Hive
   module Commands
@@ -59,6 +60,7 @@ module Hive
 
         project_root = entry.fetch("path")
         cfg = Hive::Config.load(project_root)
+        ensure_validation_configured!(cfg) unless @dry_run
         state = Hive::Patrol::StateStore.new(project_root)
         state.ensure!
         token_budget = Hive::Patrol::TokenBudget.new(project_root, cfg: cfg)
@@ -195,6 +197,14 @@ module Hive
         return @fixer_factory.call(root, cfg, state) if @fixer_factory
 
         Hive::Patrol::Fixer.new(root, cfg: cfg, state: state, token_budget: token_budget)
+      end
+
+      def ensure_validation_configured!(cfg)
+        commands = cfg.dig("patrol", "commands")
+        return if Hive::Patrol::Validator.new(commands).configured?
+
+        raise Hive::ConfigError,
+              "patrol.commands must configure at least one of docs, format, lint, public_contract, typecheck, or test before fixes can run"
       end
 
       def stamp_fingerprints(findings, project_root)

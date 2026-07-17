@@ -55,6 +55,11 @@ The higher-level `patrol.mode` also resolves bounded resource envelopes. Low, me
 
 ## Steps
 
+Before a normal run, Hive requires at least one configured `docs`, `format`,
+`lint`, `public_contract`, `typecheck`, or `test` command. Missing validation
+fails as a configuration error before patrol state, repository mapping, or any
+reviewer/fixer agent is created.
+
 1. Reconcile dismissal memory for existing patrol branches and PRs.
 2. Materialize the selected default-branch commit as a clean detached scan checkout, then map its tracked source into non-overlapping language-neutral component/manifest features, subsystem tests, and separate command-contract slices. The registered checkout's current branch, dirty files, and concurrent edits cannot contaminate the scan. Each command path is a primary evidence anchor only in its command slice and remains supporting context in its component; all scripts in one manifest share one contract review, and that manifest is not reviewed again as a generic component. Generic text source under common code roots remains mappable without a language adapter; the old overlapping route/package/monolithic-test slices are not emitted in this mode.
 3. Select a deterministic batch of at most `max_features_per_cycle` features. An explicit active marker, cursor, and exact snapshot SHA persist across daemon cycles, including a failed first batch whose cursor is still zero. If default advances during an incomplete or errored sweep, Hive finishes the stored snapshot before starting the newer one, bounding reviewer cost without permanently restarting at the first component.
@@ -66,7 +71,9 @@ The higher-level `patrol.mode` also resolves bounded resource envelopes. Low, me
 9. Unless `patrol.review_prs: false`, keep the patrol worktree and create a synthetic `.hive-state/stages/6-review/patrol-.../` task with display name `Patrol: <finding title>`, `task.md`, `worktree.yml`, `pr.md`, and `reviews/`, so the normal daemon/TUI review flow picks it up. The PR body and `task.md` carry the observed before/after result and label root-cause text as agent-reported. A failed handoff preserves and reuses the exact validated patch rather than rebuilding a different commit. Patrol tasks use `patrol.review.reviewers` instead of the normal `review.reviewers`; fresh projects default that list to `codex-native-review` (`kind: codex_review`), with Codex/Claude CE `ce-code-review` entries as init-time opt-ins.
 10. Persist `last_run_at`, the active-snapshot marker, batch cursor, exact reviewer errors, and closed per-attempt outcomes. `last_scanned_sha` advances only after every feature in the SHA-bound sweep has been reviewed; reviewer contract failures remain visible, pin the attempted SHA even at cursor zero, and leave the batch eligible for retry.
 
-`--dry-run` stops after map + review + scored candidate selection. It updates scan/audit state but does not create fix worktrees, push branches, or open PRs.
+`--dry-run` bypasses the validation-command preflight because it cannot ship
+code, then stops after map + review + scored candidate selection. It updates
+scan/audit state but does not create fix worktrees, push branches, or open PRs.
 
 ## Alpha calibration
 

@@ -77,6 +77,77 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_load_rewraps_malformed_project_yaml_as_config_error
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, "daemon: [\n")
+
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+      assert_includes error.message, config_path
+      assert_includes error.message, "not valid YAML"
+    end
+  end
+
+  def test_load_rewraps_disallowed_project_yaml_class_as_config_error
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, "daemon: !ruby/object:Object {}\n")
+
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+      assert_includes error.message, config_path
+      assert_includes error.message, "not valid YAML"
+    end
+  end
+
+  def test_load_rewraps_unreadable_project_config_as_config_error
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(config_path)
+
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+      assert_includes error.message, config_path
+      assert_includes error.message, "not readable"
+    end
+  end
+
+  def test_load_rewraps_inaccessible_project_config_parent_as_config_error
+    skip "permission bits are not enforced for root" if Process.uid.zero?
+
+    with_tmp_dir do |dir|
+      state_dir = File.join(dir, ".hive-state")
+      config_path = File.join(state_dir, "config.yml")
+      FileUtils.mkdir_p(state_dir)
+      File.write(config_path, "daemon:\n  enabled: true\n")
+      File.chmod(0o000, state_dir)
+
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+      assert_includes error.message, config_path
+      assert_includes error.message, "not readable"
+    ensure
+      File.chmod(0o700, state_dir) if state_dir && File.exist?(state_dir)
+    end
+  end
+
+  def test_load_rewraps_project_config_symlink_loop_as_config_error
+    with_tmp_dir do |dir|
+      state_dir = File.join(dir, ".hive-state")
+      config_path = File.join(state_dir, "config.yml")
+      FileUtils.mkdir_p(state_dir)
+      File.symlink("config.yml", config_path)
+
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+      assert_includes error.message, config_path
+      assert_includes error.message, "not readable"
+    end
+  end
+
   def test_load_allows_daemon_auto_retry_enabled_override
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))

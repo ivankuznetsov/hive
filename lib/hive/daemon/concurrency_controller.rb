@@ -224,12 +224,13 @@ module Hive
           state_file_mtime_at_dispatch: state_file_mtime,
           kind: kind
         }
-        # The digest runs on its own gate (can_dispatch_digest?), which reads
-        # NO daily counts, and record_completion early-returns for :digest
-        # before the TEMPFAIL refund (dec_daily). A counted digest dispatch
-        # would therefore leak one never-read [project, date] entry per
-        # calendar day, so skip the increment for symmetry with that refund.
-        @daily_counts[[ project, started_at.to_date ]] += 1 unless kind == :digest
+        # Digest and patrol scans run on their own gates, which read NO daily
+        # task counts, and record_completion returns before the TEMPFAIL refund
+        # for both kinds. Counting either dispatch would therefore consume an
+        # ordinary task slot that can never be refunded, so exempt both.
+        unless %i[digest patrol_scan].include?(kind)
+          @daily_counts[[ project, started_at.to_date ]] += 1
+        end
         if state_file_mtime
           @last_dispatched_mtime[[ project, slug ]] = state_file_mtime
           persist_dispatch_baselines!
@@ -278,14 +279,12 @@ module Hive
         entry = @running.delete(pid)
         return unless entry
 
-        # The global digest runs on its own scheduler-level backoff and is
-        # gated by `can_dispatch_digest?`, which consults NONE of the
-        # per-(project, slug) maps below. Recording cooldown/transient/
-        # quarantine/dropped state for it would leak one never-read entry per
-        # unique ISO-date slug (unbounded, failure-only growth) and falsely
-        # tag a phantom "digest" project as dropped. Freeing the slot above
-        # is the only bookkeeping the digest needs here.
-        return if entry[:kind] == :digest
+        # Global digests and patrol scans run on scheduler-level backoff and
+        # their gates consult none of the per-task maps below. Recording
+        # cooldown/quarantine/dropped state here would either leak never-read
+        # entries or, for a patrol-only CONFIG error, strand unrelated project
+        # tasks. Freeing the matching capacity slot above is all they need.
+        return if %i[digest patrol_scan].include?(entry[:kind])
 
         key = [ entry[:project], entry[:slug] ]
 

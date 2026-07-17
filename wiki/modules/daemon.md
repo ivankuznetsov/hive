@@ -576,6 +576,19 @@ envelope with CONFIG exit 78 represents task-local validation state; delivery
 or reap does not mark the whole project dropped, so unrelated rows remain
 schedulable.
 
+Patrol and refactor-patrol CONFIG exits are likewise job-local. Missing patrol
+validation commands enter scheduler backoff without marking the registered
+project dropped, so ordinary task stages continue to dispatch. The concurrency
+controller frees patrol capacity without applying per-task CONFIG/drop state;
+the patrol scheduler is the sole owner of scan backoff. Patrol scans also run
+outside the ordinary per-project daily task quota.
+
+`reap_completed` always refreshes the controller's
+`last_dispatched_mtime` baseline (no longer just for daemon-spawned
+children — the bot doesn't spawn them anymore). The bug dissolves:
+the same code that observes the mtime is the only producer of the
+spawn.
+
 See [[architecture]] §"Dispatch flow" for the cross-layer picture.
 
 ### At-most-once dispatch via atomic claim (C3)

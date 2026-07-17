@@ -3,6 +3,51 @@ require "hive/workflows/registry"
 require "hive/stages/base"
 
 module HiveWorkflowTestHelper
+  LEGACY_BENCH_STAGES = %w[extract generate judge publish].freeze
+
+  def write_legacy_bench_workflow(project_root)
+    workflows_dir = File.join(project_root, ".hive-state", "workflows")
+    instruction_dir = File.join(workflows_dir, "bench")
+    FileUtils.mkdir_p(instruction_dir)
+    LEGACY_BENCH_STAGES.each do |stage|
+      File.write(File.join(instruction_dir, "#{stage}.md"), "Legacy local #{stage} instructions.\n")
+    end
+
+    descriptor = File.join(workflows_dir, "bench.yml")
+    File.write(descriptor, <<~YAML)
+      id: bench
+      stages:
+        - name: inbox
+          kind: terminal
+          state_file: task.md
+        - name: extract
+          kind: agent
+          state_file: extract.md
+          instruction: ./bench/extract.md
+          advance_verb: extract
+        - name: generate
+          kind: agent
+          state_file: generate.md
+          instruction: ./bench/generate.md
+          advance_verb: generate
+        - name: judge
+          kind: agent
+          state_file: judge.md
+          instruction: ./bench/judge.md
+          advance_verb: judge
+        - name: publish
+          kind: agent
+          state_file: publish.md
+          instruction: ./bench/publish.md
+          advance_verb: publish
+        - name: done
+          kind: terminal
+          state_file: task.md
+    YAML
+
+    { descriptor: descriptor, instruction_dir: instruction_dir }
+  end
+
   # Resolution-only fixture: stages carry just name/index/state_file/kind so
   # tests can exercise descriptor resolution and stage-state lookup. Dispatch-time
   # fields (advance_verb, status_mode, budget_usd, timeout_sec) are intentionally

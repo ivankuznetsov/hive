@@ -29,7 +29,7 @@ module Hive
           policy.add(
             transition: "execute_to_open_pr",
             required: %w[AgentHealthy ChangesPresent], inhibitors: [ "AwaitingHuman" ],
-            options: { "no_commit_success" => false }, authoritative_capable: true
+            options: { "no_commit_success" => true }, authoritative_capable: true
           )
           policy.add(transition: "open_pr_to_review", required: [ "BranchPushed" ])
           policy.add(transition: "review_active", required: [ "BabysitterActive" ])

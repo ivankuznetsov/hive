@@ -20,8 +20,18 @@ module Hive
           [ "hive-task-generation-v1", locator, intended_stage.to_s, progress ].join("\0")
         )
         input_epoch = if task_input_epoch.nil?
-          intended_stage.to_s == "4-execute" ?
-            Hive::Conditions::GenerationTracker.new.resolve(task: task).task_generation : 0
+          if intended_stage.to_s == "4-execute"
+            workflow_policy = if task.respond_to?(:workflow)
+              task.workflow&.stage_named("execute")&.condition_policy&.to_h || {}
+            else
+              {}
+            end
+            Hive::Conditions::GenerationTracker.new.resolve(
+              task: task, workflow_policy: workflow_policy
+            ).task_generation
+          else
+            0
+          end
         else
           Integer(task_input_epoch)
         end

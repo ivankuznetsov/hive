@@ -11,6 +11,7 @@ require "hive/execute_waiting_action"
 require "hive/task_action"
 require "hive/task_resolver"
 require "hive/attempts/context"
+require "hive/conditions/transition_guard"
 require "hive/attempts/entrypoint"
 
 module Hive
@@ -182,6 +183,11 @@ module Hive
 
       def report(task, result)
         marker = Hive::Markers.current(task.state_file)
+        if marker.name == :execute_complete
+          Hive::Conditions::TransitionGuard.validate!(
+            task, config: Hive::Config.load(task.project_root)
+          )
+        end
         if @quiet
           # Quiet mode: skip stdout/stderr but preserve the dual-signal
           # raise on :error AND :review_error markers so composing callers

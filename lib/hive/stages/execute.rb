@@ -11,6 +11,7 @@ require "hive/stages/base"
 require "hive/worktree"
 require "hive/git_ops"
 require "hive/markers"
+require "hive/conditions/execute_boundary"
 
 module Hive
   module Stages
@@ -126,7 +127,7 @@ module Hive
       def run_pass(task, cfg, worktree_path)
         worktree_git = Hive::GitOps.new(worktree_path)
         baseline_head = execute_baseline_head(task, worktree_git)
-        return worktree_git_failed(task) unless baseline_head
+        return worktree_git_failed(task, cfg, worktree_path) unless baseline_head
 
         before_impl = Hive::ProtectedFiles.snapshot(task.folder, PROTECTED_FILES)
         impl_result = spawn_implementation(task, cfg, worktree_path)
@@ -138,11 +139,11 @@ module Hive
         end
 
         if agent_failed?(impl_result)
-          return mark_implementer_failure(task, cfg, impl_result)
+          return mark_implementer_failure(task, cfg, impl_result, worktree_path, baseline_head)
         end
 
         worktree_state = inspect_worktree_state(task, worktree_git)
-        return worktree_git_failed(task) unless worktree_state
+        return worktree_git_failed(task, cfg, worktree_path, baseline_head) unless worktree_state
 
         head_after = worktree_state.fetch(:head)
         current_branch = worktree_state.fetch(:branch)
@@ -160,41 +161,84 @@ module Hive
                                 !impl_result[:final_message].to_s.strip.empty?
 
         unless current_branch == expected_branch
-          Hive::Markers.set(task.state_file, :execute_waiting, reason: "branch_mismatch")
-          return { commit: "execute_waiting_branch_mismatch", status: :execute_waiting }
+          return apply_execute_outcome(
+            task, cfg, worktree_path, baseline_head,
+            marker_name: :execute_waiting, attrs: { reason: "branch_mismatch" },
+            commit: "execute_waiting_branch_mismatch", status: :execute_waiting,
+            waiting_reason: "branch_mismatch"
+          )
         end
 
         ancestor_ok = begin
           !new_commit || worktree_git.ancestor?(baseline_head, head_after)
         rescue Hive::GitError
-          return worktree_git_failed(task)
+          return worktree_git_failed(task, cfg, worktree_path, baseline_head)
         end
 
         if new_commit && !ancestor_ok
-          Hive::Markers.set(task.state_file, :execute_waiting, reason: "head_not_descendant")
-          return { commit: "execute_waiting_head_not_descendant", status: :execute_waiting }
+          return apply_execute_outcome(
+            task, cfg, worktree_path, baseline_head,
+            marker_name: :execute_waiting, attrs: { reason: "head_not_descendant" },
+            commit: "execute_waiting_head_not_descendant", status: :execute_waiting,
+            waiting_reason: "head_not_descendant"
+          )
         end
 
         if dirty_worktree
-          Hive::Markers.set(task.state_file, :execute_waiting, reason: "dirty_worktree")
-          return { commit: "execute_waiting_dirty_worktree", status: :execute_waiting }
+          return apply_execute_outcome(
+            task, cfg, worktree_path, baseline_head,
+            marker_name: :execute_waiting, attrs: { reason: "dirty_worktree" },
+            commit: "execute_waiting_dirty_worktree", status: :execute_waiting,
+            waiting_reason: "dirty_worktree"
+          )
         end
 
         research_mode = research_execution?(task)
 
         if research_mode && !new_commit && !final_message_present
-          Hive::Markers.set(task.state_file, :execute_waiting, reason: "missing_research_output")
-          return { commit: "execute_waiting_missing_research_output", status: :execute_waiting }
+          return apply_execute_outcome(
+            task, cfg, worktree_path, baseline_head,
+            marker_name: :execute_waiting, attrs: { reason: "missing_research_output" },
+            commit: "execute_waiting_missing_research_output", status: :execute_waiting,
+            waiting_reason: "missing_research_output", research: true
+          )
         end
 
         unless new_commit || research_mode
-          Hive::Markers.set(task.state_file, :execute_waiting, reason: "no_worktree_changes")
-          return { commit: "execute_waiting_no_worktree_changes", status: :execute_waiting }
+          return apply_execute_outcome(
+            task, cfg, worktree_path, baseline_head,
+            marker_name: :execute_waiting, attrs: { reason: "no_worktree_changes" },
+            commit: "execute_waiting_no_worktree_changes", status: :execute_waiting,
+            waiting_reason: "no_worktree_changes"
+          )
         end
 
         attrs = research_mode ? { mode: "research" } : {}
-        Hive::Markers.set(task.state_file, :execute_complete, attrs)
-        { commit: "execute_complete", status: :execute_complete }
+        apply_execute_outcome(
+          task, cfg, worktree_path, baseline_head,
+          marker_name: :execute_complete, attrs: attrs,
+          commit: "execute_complete", status: :execute_complete,
+          research: research_mode, research_evidence: final_message_present
+        )
+      end
+
+      def apply_execute_outcome(task, cfg, worktree_path, baseline_head,
+                                marker_name:, attrs:, commit:, status:, waiting_reason: nil,
+                                research: false, research_evidence: false)
+        outcome = Hive::Conditions::ExecuteBoundary.new(
+          task: task, config: cfg, worktree_path: worktree_path
+        ).evaluate(
+          legacy_marker_name: marker_name,
+          legacy_attrs: attrs,
+          legacy_commit: commit,
+          legacy_status: status,
+          baseline_head: baseline_head,
+          waiting_reason: waiting_reason,
+          research: research,
+          research_evidence: research_evidence
+        )
+        Hive::Markers.set(task.state_file, outcome.marker_name, outcome.marker_attrs)
+        { commit: outcome.commit, status: outcome.status }
       end
 
       def agent_failed?(result)
@@ -203,22 +247,34 @@ module Hive
         %i[error timeout].include?(result[:status])
       end
 
-      def mark_implementer_failure(task, cfg, impl_result)
+      def mark_implementer_failure(task, cfg, impl_result, worktree_path, baseline_head)
         if implementer_hit_limit?(impl_result)
-          Hive::Markers.set(task.state_file, :error,
-                            reason: "limits_reached",
-                            provider: execute_agent_name(cfg),
-                            message: "implementer hit a usage/credit limit",
-                            retry_after: Hive::AgentLimit.retry_after)
-          return { commit: "limits_reached", status: :error }
+          return apply_execute_outcome(
+            task, cfg, worktree_path, baseline_head,
+            marker_name: :error,
+            attrs: {
+              reason: "limits_reached",
+              provider: execute_agent_name(cfg),
+              message: "implementer hit a usage/credit limit",
+              retry_after: Hive::AgentLimit.retry_after
+            },
+            commit: "limits_reached", status: :error,
+            waiting_reason: "agent_limit"
+          )
         end
 
-        Hive::Markers.set(task.state_file, :error,
-                          reason: "implementer_failed",
-                          provider: execute_agent_name(cfg),
-                          status: impl_result&.fetch(:status, nil),
-                          message: impl_result&.fetch(:error_message, nil))
-        { commit: "implementer_failed", status: :error }
+        apply_execute_outcome(
+          task, cfg, worktree_path, baseline_head,
+          marker_name: :error,
+          attrs: {
+            reason: "implementer_failed",
+            provider: execute_agent_name(cfg),
+            status: impl_result&.fetch(:status, nil),
+            message: impl_result&.fetch(:error_message, nil)
+          },
+          commit: "implementer_failed", status: :error,
+          waiting_reason: "agent_failure"
+        )
       end
 
       def implementer_hit_limit?(impl_result)
@@ -336,9 +392,13 @@ module Hive
         nil
       end
 
-      def worktree_git_failed(task)
-        Hive::Markers.set(task.state_file, :error, reason: "worktree_git_failed")
-        { commit: "execute_worktree_git_failed", status: :error }
+      def worktree_git_failed(task, cfg, worktree_path, baseline_head = nil)
+        apply_execute_outcome(
+          task, cfg, worktree_path, baseline_head,
+          marker_name: :error, attrs: { reason: "worktree_git_failed" },
+          commit: "execute_worktree_git_failed", status: :error,
+          waiting_reason: "worktree_git_failed"
+        )
       end
 
       def append_implementation_output(task, result)

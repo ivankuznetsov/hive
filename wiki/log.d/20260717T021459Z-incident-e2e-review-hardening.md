@@ -9,3 +9,4 @@ tags: [e2e, incidents, dependencies, hermetic, review]
 - Protected run-local home/bundle, all built-in fake-agent binaries, and checkout binaries from scenario overrides so routine e2e cannot reach operator state or consume a real agent subscription.
 - Moved nested `script_gh` validation to scenario preflight, rejected untagged incident metadata and duplicate scenario names, exposed lifecycle fields in inventory output, and included sandbox bootstrap in incident duration budgets.
 - Kept generated repros hermetic, headless for secondary projects, and fail-closed on unconsumed GitHub interactions after replay producers stop.
+- Kept the incident run directory in the runner temp area while scoping the `runner.temp` expression to workflow steps, where GitHub Actions permits that context, so the required CI workflow parses and starts.

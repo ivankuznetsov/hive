@@ -36,8 +36,6 @@ jobs:
   e2e:
     name: real CLI scenario harness
     runs-on: ubuntu-latest
-    env:
-      HIVE_E2E_RUNS_DIR: ${{ runner.temp }}/hive-e2e-runs
     steps:
       - uses: actions/checkout@v7
       - uses: ruby/setup-ruby@v1
@@ -51,8 +49,12 @@ jobs:
       - name: Run harness library tests
         run: bundle exec rake e2e:lib_test
       - name: Run real-subprocess scenarios
+        env:
+          HIVE_E2E_RUNS_DIR: ${{ runner.temp }}/hive-e2e-runs
         run: bundle exec rake e2e
       - name: Enforce incident duration budgets
+        env:
+          HIVE_E2E_RUNS_DIR: ${{ runner.temp }}/hive-e2e-runs
         run: bundle exec ruby test/e2e/check_incident_budget.rb "$HIVE_E2E_RUNS_DIR"
       - name: Retain e2e reports and failure evidence
         if: always()

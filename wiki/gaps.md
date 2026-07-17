@@ -261,8 +261,9 @@ Dependency lock uncertainty is unchanged: the root bundle has
 - **Brainstorm answers written within one daemon tick of round-end are
   swallowed** — found by the hivebox golden-path E2E. The resume watcher
   only sees state-file edits NEWER than its baseline, and the baseline is
-  seeded by the first classification tick after the round's child is
-  reaped. An operator answering inside that window (the push-updating web
+  seeded by the first classification tick after the round's active owner is
+  observed complete (legacy child exit or durable attempt terminalization).
+  An operator answering inside that window (the push-updating web
   UI shows questions the moment the agent writes them, before the child
   even exits) strands the task at `needs_input` until some later edit. The
   E2E syncs on the daemon's own event log to avoid the window

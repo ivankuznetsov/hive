@@ -380,7 +380,10 @@ page directly, avoiding a saved `.task-row` element that Turbo may detach while
 the daemon broadcasts grid replacements. Before submitting the brainstorm
 answer, it waits for the daemon's `needs_input` classification and for the
 current `brainstorm.md` mtime second to pass, avoiding equality with the
-daemon's edit-resume baseline on coarse CI filesystems. `status_test.rb` pins
+daemon's edit-resume baseline on coarse CI filesystems. The ordering gate
+accepts either the legacy `child_exited` event or durable ownership's
+`attempt_terminal` event before the classification, so both launch paths prove
+the same answer window. `status_test.rb` pins
 the matching production contract: JSON task `mtime` and `folder_mtime` keep
 subsecond precision for the daemon's mtime-to-mtime comparison. The Telegram
 leg lives in `test/e2e/tg` (real Bot API, secret-gated) and now asserts the

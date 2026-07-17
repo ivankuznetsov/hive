@@ -12,3 +12,6 @@ tags: [attempts, daemon, recovery, e2e]
   `attempt_lost` outcome, and bounded same-generation successors.
 - Added the YAML 1849 replay proving three commits survive temporary caller
   termination and finish from one wrapper receipt without a daemon.
+- Updated the hivebox golden-path ordering gate to treat `attempt_terminal` as
+  the durable equivalent of legacy `child_exited` before it accepts the
+  brainstorm edit-resume baseline.

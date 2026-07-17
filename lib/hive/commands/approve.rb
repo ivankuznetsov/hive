@@ -12,6 +12,7 @@ require "hive/stages"
 require "hive/workflows"
 require "hive/commit_or_rollback"
 require "hive/dependency_snapshot"
+require "hive/attempts/context"
 
 module Hive
   module Commands
@@ -242,6 +243,7 @@ module Hive
             raise_destination_collision(destination_folder(task, dest_stage)) if
               destination_exists?(destination_folder(task, dest_stage))
             Hive::DependencySnapshot.enforce_admission!(task) if enforce_admission
+            Hive::Attempts::Context.current&.validate_generation!(task)
             new_folder = move_task!(task, dest_stage)
           end
           cleanup_orphan_task_lock(new_folder)

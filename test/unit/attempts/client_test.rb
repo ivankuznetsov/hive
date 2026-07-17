@@ -17,6 +17,8 @@ class AttemptsClientTest < Minitest::Test
       assert_equal "stderr", stderr.string
       assert_equal 0, result.exit_status
       assert_equal "succeeded", result.outcome
+      assert_equal "stdout".bytesize, result.stdout_bytes
+      assert result.stdout_emitted?
     end
   end
 
@@ -67,6 +69,8 @@ class AttemptsClientTest < Minitest::Test
     end.new(Dir.tmpdir)
     result = Hive::Attempts::Client.new(store: store, poll_interval: 0).attach("attempt")
     assert_equal :terminal, result.status
+    assert_equal 0, result.stdout_bytes
+    refute result.stdout_emitted?
   end
 
   private

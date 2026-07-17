@@ -1,4 +1,5 @@
 require "test_helper"
+require "timeout"
 require "hive/attempts/supervisor"
 
 class AttemptsSupervisorTest < Minitest::Test
@@ -37,19 +38,79 @@ class AttemptsSupervisorTest < Minitest::Test
   end
 
   def test_timeout_is_terminal_cancelled_and_kills_worker_group
-    worker_argv = [ "/bin/sh", "-c", "sleep 10" ]
+    worker_argv = [ "/bin/sh", "-c", "trap '' TERM; while :; do sleep 1; done" ]
     with_attempt(worker_argv: worker_argv) do |store, attempt|
+      heartbeat_count = 0
+      heartbeat = store.method(:heartbeat)
+      store.define_singleton_method(:heartbeat) do |*args, **kwargs|
+        heartbeat_count += 1
+        heartbeat.call(*args, **kwargs)
+      end
       supervisor = Hive::Attempts::Supervisor.new(
         store: store, attempt_id: attempt.attempt_id,
         claim_io: StringIO.new(CLAIM_CAPABILITY),
         heartbeat_sec: 0.01, stale_sec: 1, first_heartbeat_timeout_sec: 1,
-        timeout_sec: 0.05, kill_grace_sec: 0.01
+        timeout_sec: 0.2, kill_grace_sec: 0.15
       )
+      term_heartbeat_count = nil
+      signal_worker_group = supervisor.method(:signal_worker_group)
+      supervisor.define_singleton_method(:signal_worker_group) do |signal|
+        term_heartbeat_count = heartbeat_count if signal == "TERM"
+        signal_worker_group.call(signal)
+      end
 
       assert_equal 124, supervisor.run
       terminal = store.fetch(attempt.attempt_id)
       assert_equal "cancelled", terminal.outcome
       assert_equal 124, terminal.receipt.fetch("exit_status")
+      refute_nil term_heartbeat_count
+      assert_operator heartbeat_count, :>, term_heartbeat_count,
+                      "heartbeat must continue throughout TERM-to-KILL grace"
+    end
+  end
+
+  def test_clean_leader_exit_terminates_a_lingering_descendant_group
+    worker_argv = [ "/bin/sh", "-c", "(sleep 10) & exit 0" ]
+    with_attempt(worker_argv: worker_argv) do |store, attempt|
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY),
+        heartbeat_sec: 0.01, stale_sec: 1, first_heartbeat_timeout_sec: 1,
+        kill_grace_sec: 0.2
+      )
+
+      assert_equal 0, Timeout.timeout(2) { supervisor.run }
+      assert_equal "succeeded", store.fetch(attempt.attempt_id).outcome
+    end
+  end
+
+  def test_timeout_and_heartbeat_continue_while_descendant_holds_output_pipe
+    worker_argv = [
+      "/bin/sh", "-c",
+      "(trap '' TERM; exec sleep 10) & printf 'leader-exited\\n'; exit 0"
+    ]
+    with_attempt(worker_argv: worker_argv) do |store, attempt|
+      heartbeat_count = 0
+      heartbeat = store.method(:heartbeat)
+      store.define_singleton_method(:heartbeat) do |*args, **kwargs|
+        heartbeat_count += 1
+        heartbeat.call(*args, **kwargs)
+      end
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY),
+        heartbeat_sec: 0.01, stale_sec: 1, first_heartbeat_timeout_sec: 1,
+        timeout_sec: 0.05, kill_grace_sec: 0.1
+      )
+
+      assert_equal 124, Timeout.timeout(2) { supervisor.run }
+      terminal = store.fetch(attempt.attempt_id)
+      assert_equal "cancelled", terminal.outcome
+      assert_operator heartbeat_count, :>, 0
+      frames = Hive::Attempts::StreamLog.read(
+        File.join(store.root, terminal.receipt.dig("log_reference", "path"))
+      )
+      assert_includes frames.map(&:bytes).join, "leader-exited"
     end
   end
 
@@ -170,19 +231,23 @@ class AttemptsSupervisorTest < Minitest::Test
   end
 
   def test_worker_termination_escalation_and_signal_setup_are_defensive
+    ticks = [ 0.0, 0.0, 0.0, 0.01 ]
     supervisor = Hive::Attempts::Supervisor.new(
       store: Object.new, attempt_id: "attempt", claim_io: StringIO.new(CLAIM_CAPABILITY),
-      kill_grace_sec: 0, monotonic: -> { 1.0 }
+      kill_grace_sec: 0.01, monotonic: -> { ticks.shift || 0.01 }
     )
     supervisor.instance_variable_set(:@worker_pid, 456)
     signals = []
+    sleeps = []
     supervisor.define_singleton_method(:signal_worker_group) { |signal| signals << signal }
+    supervisor.define_singleton_method(:sleep) { |seconds| sleeps << seconds }
     status = Struct.new(:last).new(:killed)
-    waits = [ nil, status ]
+    waits = [ nil, nil, status ]
     with_replaced_singleton_method(Process, :wait2, ->(*_args) { waits.shift }) do
       assert_equal :killed, supervisor.send(:terminate_worker_group)
     end
     assert_equal %w[TERM KILL], signals
+    refute_empty sleeps
 
     with_replaced_singleton_method(Process, :wait2, ->(*_args) { raise Errno::ECHILD }) do
       assert_nil supervisor.send(:terminate_worker_group)
@@ -200,6 +265,26 @@ class AttemptsSupervisorTest < Minitest::Test
     supervisor.instance_variable_set(:@ready_io, ready)
     supervisor.send(:signal_ready, "claimed" => true)
     assert_equal true, supervisor.instance_variable_get(:@ready_sent)
+
+    supervisor.singleton_class.send(:remove_method, :signal_worker_group)
+    supervisor.instance_variable_set(:@worker_pgid, 456)
+    with_replaced_singleton_method(Process, :getpgid, ->(_pid) { 999 }) do
+      assert_raises(Hive::Attempts::StoreError) { supervisor.send(:signal_worker_group, "TERM") }
+    end
+    with_replaced_singleton_method(Process, :kill, ->(_signal, _pid) { raise Errno::ESRCH }) do
+      refute supervisor.send(:signal_recorded_worker_group, "TERM")
+    end
+    with_replaced_singleton_method(Process, :kill, ->(_signal, _pid) { raise Errno::EPERM }) do
+      assert_raises(Hive::Attempts::StoreError) do
+        supervisor.send(:signal_recorded_worker_group, "TERM")
+      end
+      assert supervisor.send(:recorded_worker_group_alive?)
+    end
+
+    unreadable = Object.new
+    unreadable.define_singleton_method(:read) { |_limit| raise IOError }
+    supervisor.instance_variable_set(:@claim_io, unreadable)
+    assert_nil supervisor.send(:read_claim_capability)
   end
 
   private

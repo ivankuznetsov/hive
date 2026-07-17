@@ -162,11 +162,13 @@ class AttemptsStoreTest < Minitest::Test
 
   def test_store_surfaces_unreadable_records_and_filesystem_failures
     with_store do |store|
+      assert_nil store.fetch("missing")
       File.write(store.record_path("broken"), "{")
       assert_raises(Hive::Attempts::StoreError) { store.fetch("broken") }
 
       with_replaced_singleton_method(File, :open, ->(*_args) { raise Errno::EACCES }) do
         assert_raises(Hive::Attempts::StoreError) { store.with_generation_lock("generation") { } }
+        assert_raises(Hive::Attempts::StoreError) { store.with_admission_lock { } }
       end
 
       with_replaced_singleton_method(Hive::AtomicFile, :write, ->(*_args, **_kwargs) { raise Errno::ENOSPC }) do

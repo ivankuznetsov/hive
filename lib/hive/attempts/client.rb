@@ -3,7 +3,15 @@ require "hive/attempts/stream_log"
 
 module Hive
   module Attempts
-    ClientResult = Data.define(:status, :exit_status, :outcome, :receipt, :attempt_id)
+    ClientResult = Data.define(
+      :status, :exit_status, :outcome, :receipt, :attempt_id, :stdout_bytes
+    ) do
+      def initialize(status:, exit_status:, outcome:, receipt:, attempt_id:, stdout_bytes: 0)
+        super
+      end
+
+      def stdout_emitted? = stdout_bytes.to_i.positive?
+    end
 
     # Read-only attachment to a durable attempt. Closing or interrupting this
     # reader never sends a signal to the wrapper or worker group.
@@ -15,11 +23,13 @@ module Hive
 
       def attach(attempt_id, stdout: $stdout, stderr: $stderr)
         sequence = 0
+        stdout_bytes = 0
         loop do
           StreamLog.read(log_path(attempt_id), after_sequence: sequence).each do |frame|
             target = frame.channel == "stdout" ? stdout : stderr
             target.write(frame.bytes)
             target.flush if target.respond_to?(:flush)
+            stdout_bytes += frame.bytes.bytesize if frame.channel == "stdout"
             sequence = frame.sequence
           end
 
@@ -29,13 +39,15 @@ module Hive
             receipt = record.receipt
             return ClientResult.new(
               status: :terminal, exit_status: receipt.fetch("exit_status"),
-              outcome: receipt.fetch("outcome"), receipt: receipt, attempt_id: attempt_id
+              outcome: receipt.fetch("outcome"), receipt: receipt, attempt_id: attempt_id,
+              stdout_bytes: stdout_bytes
             )
           end
           if record.state == "lost"
             return ClientResult.new(
               status: :lost, exit_status: Hive::ExitCodes::TEMPFAIL,
-              outcome: "lost", receipt: nil, attempt_id: attempt_id
+              outcome: "lost", receipt: nil, attempt_id: attempt_id,
+              stdout_bytes: stdout_bytes
             )
           end
           sleep @poll_interval
@@ -43,7 +55,7 @@ module Hive
       rescue Interrupt
         ClientResult.new(
           status: :detached, exit_status: 130, outcome: nil,
-          receipt: nil, attempt_id: attempt_id
+          receipt: nil, attempt_id: attempt_id, stdout_bytes: stdout_bytes
         )
       end
 

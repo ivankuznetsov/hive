@@ -3,14 +3,14 @@ require "hive/attempts/store"
 
 module Hive
   module Attempts
-    # Authenticated, process-local identity installed by the durable worker.
+    # Application-scoped, process-local identity installed by the durable worker.
     # Compatibility projections can only observe it after the admitted worker
     # has matched its immutable lease, task/stage binding, and live process
     # fingerprint. Transport environment is scrubbed immediately afterwards.
     class Context
       ENV_PREFIX = "HIVE_ATTEMPT_"
 
-      attr_reader :attempt_id, :task_generation, :task_slug, :intended_stage
+      attr_reader :attempt_id, :task_generation, :project, :task_slug, :intended_stage
 
       class << self
         def current
@@ -45,15 +45,16 @@ module Hive
           attempt_id = values["HIVE_ATTEMPT_ID"].to_s
           raise StoreError, "durable attempt context is incomplete" if attempt_id.empty?
 
-          # The record store is the process-configured Hive authority. A path
-          # supplied by the worker environment would let an untrusted task
-          # manufacture a self-consistent record and capability in its
-          # worktree, then skip public admission for another task.
+          # The record store is selected by trusted Hive process configuration,
+          # not by a dedicated attempt-context override. This prevents supported
+          # launch/inheritance paths from redirecting context installation; it
+          # is not privilege separation from hostile same-UID process state.
           record = Store.new.fetch(attempt_id)
           validate_record!(record, attempt_id: attempt_id, argv: argv, claim_capability: claim_capability)
           @installed = new(
             attempt_id: record.attempt_id,
             task_generation: record.task_generation,
+            project: record["project"],
             task_slug: record["task_slug"],
             intended_stage: record["intended_stage"]
           )
@@ -134,13 +135,33 @@ module Hive
         end
       end
 
-      def initialize(attempt_id:, task_generation:, task_slug: nil, intended_stage: nil)
+      def initialize(attempt_id:, task_generation:, project: nil, task_slug: nil, intended_stage: nil)
         @attempt_id = attempt_id.to_s
         @task_generation = task_generation.to_s
+        @project = project&.to_s
         @task_slug = task_slug&.to_s
         @intended_stage = intended_stage&.to_s
         raise ArgumentError, "attempt context requires an attempt ID" if @attempt_id.empty?
         raise ArgumentError, "attempt context requires a task generation" if @task_generation.empty?
+      end
+
+      # Revalidate the admitted generation at the command's locked mutation
+      # boundary. A dependency or task artifact may change after dispatch but
+      # before the detached worker starts; that stale worker must not perform
+      # side effects and then cause the refreshed generation to run them again.
+      def validate_generation!(task)
+        return true if @generation_validated
+
+        require "hive/attempts/generation"
+        current = Generation.resolve(
+          task: task, project: project, intended_stage: intended_stage
+        )
+        unless current.task_generation == task_generation
+          raise Hive::ConcurrentRunError,
+                "durable attempt #{attempt_id} generation is stale; redispatch the current task state"
+        end
+
+        @generation_validated = true
       end
 
       private_class_method :new

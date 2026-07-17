@@ -6,6 +6,29 @@ class AttemptsStreamLogTest < Minitest::Test
 
   NOW = Time.utc(2026, 7, 16, 12, 0, 0)
 
+  class ShortWriter
+    attr_reader :bytes, :writes
+
+    def initialize(limit:)
+      @limit = limit
+      @bytes = +"".b
+      @writes = 0
+      @closed = false
+    end
+
+    def syswrite(chunk)
+      written = [ @limit, chunk.bytesize ].min
+      @bytes << chunk.byteslice(0, written)
+      @writes += 1
+      written
+    end
+
+    def flush = true
+    def fsync = true
+    def close = @closed = true
+    def closed? = @closed
+  end
+
   def test_frames_preserve_sequence_channel_and_binary_bytes
     with_tmp_dir do |root|
       path = File.join(root, "logs", "attempt.frames")
@@ -34,6 +57,24 @@ class AttemptsStreamLogTest < Minitest::Test
       assert_equal [ "complete" ], Hive::Attempts::StreamLog.read(path).map(&:bytes)
       reference = Hive::Attempts::OutputReference.build(path, root: root)
       assert Hive::Attempts::OutputReference.verify(reference, root: root)
+    end
+  end
+
+  def test_append_retries_short_writes_until_the_frame_is_complete
+    with_tmp_dir do |root|
+      path = File.join(root, "logs", "attempt.frames")
+      log = Hive::Attempts::StreamLog.new(path, clock: -> { NOW })
+      log.instance_variable_get(:@io).close
+      writer = ShortWriter.new(limit: 7)
+      log.instance_variable_set(:@io, writer)
+
+      assert_equal 1, log.append(:stdout, "complete-json-document")
+      assert_operator writer.writes, :>, 1
+      assert writer.bytes.end_with?("\n")
+      File.binwrite(path, writer.bytes)
+      assert_equal [ "complete-json-document" ], Hive::Attempts::StreamLog.read(path).map(&:bytes)
+    ensure
+      log&.close
     end
   end
 

@@ -6,9 +6,9 @@ require "hive/attempts/output_reference"
 
 module Hive
   module Attempts
-    # Internal append-only output stream. Each frame is one atomic append so
-    # stdout/stderr ordering can be replayed without making this storage format
-    # part of the public CLI contract.
+    # Internal single-writer append-only output stream. Each frame is written
+    # completely before its sequence is published so stdout/stderr ordering can
+    # be replayed without making this storage format part of the public CLI contract.
     class StreamLog
       Frame = Data.define(:sequence, :timestamp, :channel, :bytes)
       CHANNELS = %w[stdout stderr supervisor].freeze
@@ -64,7 +64,13 @@ module Hive
           "channel" => channel,
           "data" => Base64.strict_encode64(bytes.to_s.b)
         ) + "\n"
-        @io.syswrite(frame)
+        offset = 0
+        while offset < frame.bytesize
+          written = @io.syswrite(frame.byteslice(offset, frame.bytesize - offset))
+          raise IOError, "attempt log write made no progress" unless written&.positive?
+
+          offset += written
+        end
         @io.flush
         @sequence
       end

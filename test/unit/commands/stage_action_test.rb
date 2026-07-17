@@ -161,4 +161,71 @@ class CommandsStageActionTest < Minitest::Test
     assert_equal Hive::ExitCodes::TEMPFAIL, payload.fetch("exit_code")
     assert_includes payload.fetch("message"), "attempt-lost"
   end
+
+
+  def test_failed_durable_json_attempt_without_stdout_emits_one_error_document
+    task = Struct.new(:folder).new("/tmp/task-folder")
+    result = Hive::Attempts::ClientResult.new(
+      status: :terminal, exit_status: Hive::ExitCodes::SOFTWARE, outcome: "failed",
+      receipt: {}, attempt_id: "attempt-empty", stdout_bytes: 0
+    )
+    entrypoint = Object.new
+    entrypoint.define_singleton_method(:dispatch) { |**_kwargs| result }
+    command = Hive::Commands::StageAction.new(
+      "plan", "some-slug", json: true, durable: true, attempt_entrypoint: entrypoint
+    )
+    command.define_singleton_method(:resolve_task) { task }
+
+    out, = capture_io do
+      error = assert_raises(Hive::AttemptExecutionError) { command.call }
+      assert_equal Hive::ExitCodes::SOFTWARE, error.exit_code
+    end
+
+    assert_equal 1, out.lines.length
+    payload = JSON.parse(out)
+    assert_equal "hive-stage-action", payload.fetch("schema")
+    assert_equal "error", payload.fetch("error_kind")
+    assert_equal Hive::ExitCodes::SOFTWARE, payload.fetch("exit_code")
+    assert_includes payload.fetch("message"), "attempt-empty"
+  end
+
+  def test_lost_durable_json_attempt_with_worker_stdout_does_not_duplicate_it
+    task = Struct.new(:folder).new("/tmp/task-folder")
+    result = Hive::Attempts::ClientResult.new(
+      status: :lost, exit_status: Hive::ExitCodes::TEMPFAIL, outcome: "lost",
+      receipt: nil, attempt_id: "attempt-lost-output", stdout_bytes: 12
+    )
+    entrypoint = Object.new
+    entrypoint.define_singleton_method(:dispatch) { |**_kwargs| result }
+    command = Hive::Commands::StageAction.new(
+      "plan", "some-slug", json: true, durable: true, attempt_entrypoint: entrypoint
+    )
+    command.define_singleton_method(:resolve_task) { task }
+
+    out, = capture_io do
+      exit_error = assert_raises(SystemExit) { command.call }
+      assert_equal Hive::ExitCodes::TEMPFAIL, exit_error.status
+    end
+    assert_empty out
+  end
+
+  def test_failed_durable_json_attempt_with_worker_stdout_exits_without_duplicate_output
+    task = Struct.new(:folder).new("/tmp/task-folder")
+    result = Hive::Attempts::ClientResult.new(
+      status: :terminal, exit_status: 7, outcome: "failed",
+      receipt: {}, attempt_id: "attempt-failed-output", stdout_bytes: 12
+    )
+    entrypoint = Object.new
+    entrypoint.define_singleton_method(:dispatch) { |**_kwargs| result }
+    command = Hive::Commands::StageAction.new(
+      "plan", "some-slug", json: true, durable: true, attempt_entrypoint: entrypoint
+    )
+    command.define_singleton_method(:resolve_task) { task }
+
+    out, = capture_io do
+      exit_error = assert_raises(SystemExit) { command.call }
+      assert_equal 7, exit_error.status
+    end
+    assert_empty out
+  end
 end

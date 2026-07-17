@@ -16,6 +16,13 @@ class AttemptsCommandSuperviseTest < Minitest::Test
     end
     assert_includes error.message, "unknown attempt supervisor option"
 
+    error = assert_raises(Hive::InvalidTaskPath) do
+      Hive::Commands::AttemptSupervise.from_argv(
+        [ "attempt", "--store-root", "/tmp", "--heartbeat-sec", "not-a-number" ]
+      )
+    end
+    assert_includes error.message, "invalid attempt supervisor invocation"
+
     command = Hive::Commands::AttemptSupervise.from_argv(
       [ "attempt", "--store-root", "/tmp", "--heartbeat-sec", "1" ]
     )

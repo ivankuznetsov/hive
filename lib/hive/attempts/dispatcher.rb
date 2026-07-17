@@ -101,75 +101,80 @@ module Hive
         result = nil
         created = nil
         claim_capability = nil
-        @store.with_generation_lock(generation.task_generation) do
-          records = @store.scan.records
-          semantic_owner = find_semantic_owner(records, generation)
-          if semantic_owner&.live?
-            result = live_result(semantic_owner, interactive: interactive)
-            next
-          end
+        # Fixed lock order: global admission, then task generation. The outer
+        # lock makes the capacity snapshot and reservation one host-wide
+        # transaction even when concurrent requests have different generations.
+        @store.with_admission_lock do
+          @store.with_generation_lock(generation.task_generation) do
+            records = @store.scan.records
+            semantic_owner = find_semantic_owner(records, generation)
+            if semantic_owner&.live?
+              result = live_result(semantic_owner, interactive: interactive)
+              next
+            end
 
-          exact = records.select { |record| record.task_generation == generation.task_generation }
-          terminal = exact.reverse.find { |record| record.state == "terminal" }
-          if terminal
-            result = DispatchResult.new(
-              status: :terminal_replay, attempt: terminal, receipt: terminal.receipt,
-              attach_descriptor: nil, reason: nil
-            )
-            next
-          end
+            exact = records.select { |record| record.task_generation == generation.task_generation }
+            terminal = exact.reverse.find { |record| record.state == "terminal" }
+            if terminal
+              result = DispatchResult.new(
+                status: :terminal_replay, attempt: terminal, receipt: terminal.receipt,
+                attach_descriptor: nil, reason: nil
+              )
+              next
+            end
 
-          lost = exact.select { |record| record.state == "lost" }
-          predecessor = successor_of && exact.find { |record| record.attempt_id == successor_of }
-          if successor_of && (!predecessor || predecessor.state != "lost")
-            result = DispatchResult.new(
-              status: :deferred, attempt: predecessor, receipt: nil,
-              attach_descriptor: nil, reason: "invalid_predecessor"
-            )
-            next
-          end
-          if successor_of.nil? && lost.any?
-            result = DispatchResult.new(
-              status: :deferred, attempt: lost.last, receipt: nil,
-              attach_descriptor: nil, reason: "attempt_lost"
-            )
-            next
-          end
+            lost = exact.select { |record| record.state == "lost" }
+            predecessor = successor_of && exact.find { |record| record.attempt_id == successor_of }
+            if successor_of && (!predecessor || predecessor.state != "lost")
+              result = DispatchResult.new(
+                status: :deferred, attempt: predecessor, receipt: nil,
+                attach_descriptor: nil, reason: "invalid_predecessor"
+              )
+              next
+            end
+            if successor_of.nil? && lost.any?
+              result = DispatchResult.new(
+                status: :deferred, attempt: lost.last, receipt: nil,
+                attach_descriptor: nil, reason: "attempt_lost"
+              )
+              next
+            end
 
-          snapshot = CapacitySnapshot.build(store: @store, now: now)
-          if snapshot.at_limit?(
-            project: generation.project, task_slug: generation.task_slug, date: now.to_date,
-            max_global: @limits.fetch(:max_global),
-            max_per_project: @limits.fetch(:max_per_project),
-            max_daily: @limits.fetch(:max_daily)
-          )
-            result = DispatchResult.new(
-              status: :deferred, attempt: nil, receipt: nil,
-              attach_descriptor: nil, reason: "capacity"
+            snapshot = CapacitySnapshot.build(store: @store, now: now)
+            if snapshot.at_limit?(
+              project: generation.project, task_slug: generation.task_slug, date: now.to_date,
+              max_global: @limits.fetch(:max_global),
+              max_per_project: @limits.fetch(:max_per_project),
+              max_daily: @limits.fetch(:max_daily)
             )
-            next
-          end
+              result = DispatchResult.new(
+                status: :deferred, attempt: nil, receipt: nil,
+                attach_descriptor: nil, reason: "capacity"
+              )
+              next
+            end
 
-          claim_capability = @capability_generator.call
-          created = @store.create_launching(
-            attempt_id: @id_generator.call,
-            request_id: request_id,
-            predecessor_attempt_id: predecessor_attempt_id,
-            task_id: generation.task_id&.to_s,
-            project: generation.project,
-            task_slug: generation.task_slug,
-            intended_stage: generation.intended_stage,
-            task_generation: generation.task_generation,
-            progress_token: generation.progress_token,
-            provider: provider.to_s,
-            worker_argv: argv,
-            claim_capability_digest: Capability.digest(claim_capability),
-            starting_revision: starting_revision(task),
-            retry_charge: retry_charge,
-            inherited_outputs: inherited_outputs || [],
-            launch_timeout_sec: @launch_timeout_sec,
-            now: now
-          )
+            claim_capability = @capability_generator.call
+            created = @store.create_launching(
+              attempt_id: @id_generator.call,
+              request_id: request_id,
+              predecessor_attempt_id: predecessor_attempt_id,
+              task_id: generation.task_id&.to_s,
+              project: generation.project,
+              task_slug: generation.task_slug,
+              intended_stage: generation.intended_stage,
+              task_generation: generation.task_generation,
+              progress_token: generation.progress_token,
+              provider: provider.to_s,
+              worker_argv: argv,
+              claim_capability_digest: Capability.digest(claim_capability),
+              starting_revision: starting_revision(task),
+              retry_charge: retry_charge,
+              inherited_outputs: inherited_outputs || [],
+              launch_timeout_sec: @launch_timeout_sec,
+              now: now
+            )
+          end
         end
 
         return result if result

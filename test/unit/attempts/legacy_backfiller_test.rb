@@ -1,6 +1,7 @@
 require "test_helper"
 require "hive/attempts/legacy_backfiller"
 require "hive/attempts/capacity_snapshot"
+require "json_schemer"
 
 class AttemptsLegacyBackfillerTest < Minitest::Test
   include HiveTestHelper
@@ -38,6 +39,10 @@ class AttemptsLegacyBackfillerTest < Minitest::Test
       assert_empty second
       assert first.first.compatibility?
       assert_equal "running", first.first.state
+      assert_nil first.first.wrapper.fetch("session_id")
+      assert_nil first.first.wrapper.fetch("process_group_id")
+      schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-attempt"))))
+      assert schema.valid?(first.first.to_h)
       assert_equal 1, Hive::Attempts::CapacitySnapshot.build(store: store).global_count
       assert_equal [ :attempt_legacy_backfilled ], logger.events.map(&:first)
     end

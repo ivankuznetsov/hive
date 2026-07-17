@@ -43,6 +43,46 @@ class AttemptsCapacitySnapshotTest < Minitest::Test
     end
   end
 
+  def test_lost_worker_reserves_capacity_until_safe_absence_is_recorded
+    with_tmp_dir do |root|
+      store = Hive::Attempts::Store.new(root: root)
+      launching = create(store, attempt_id: "lost-worker", project: "p1", task_slug: "s1")
+      claimed = store.claim(
+        launching, owner: owner, claim_capability: CLAIM_CAPABILITY,
+        first_heartbeat_timeout_sec: 30, now: NOW + 1
+      )
+      running = store.first_heartbeat(claimed, stale_sec: 30, now: NOW + 2)
+      running = store.checkpoint(
+        running, checkpoint: running.checkpoint, worker: owner, now: NOW + 3
+      )
+      lost = store.mark_lost(running, reason: "owner_gone", now: NOW + 4)
+
+      pending = Hive::Attempts::CapacitySnapshot.build(store: store, now: NOW + 5)
+      assert pending.task_reserved?(project: "p1", task_slug: "s1")
+
+      outcome_dir = File.join(store.outputs_root, lost.attempt_id)
+      FileUtils.mkdir_p(outcome_dir)
+      corrupt_outcome = File.join(outcome_dir, "lost-outcome.json")
+      File.write(corrupt_outcome, "{")
+      corrupt = Hive::Attempts::CapacitySnapshot.build(store: store, now: NOW + 5)
+      assert corrupt.task_reserved?(project: "p1", task_slug: "s1"),
+             "an unreadable cleanup outcome must reserve capacity fail-closed"
+      File.unlink(corrupt_outcome)
+
+      outcomes = Hive::Attempts::LostOutcomeStore.new(store: store)
+      outcomes.ensure_for(lost, now: NOW + 5)
+      outcomes.update(lost, now: NOW + 6, status: "manual", cleanup: "still_alive")
+      unsafe = Hive::Attempts::CapacitySnapshot.build(store: store, now: NOW + 6)
+      assert unsafe.task_reserved?(project: "p1", task_slug: "s1")
+      assert_includes unsafe.reserved_attempt_ids, lost.attempt_id
+
+      outcomes.update(lost, now: NOW + 7, status: "ready", cleanup: "absent")
+      safe = Hive::Attempts::CapacitySnapshot.build(store: store, now: NOW + 7)
+      refute safe.task_reserved?(project: "p1", task_slug: "s1")
+      refute_includes safe.reserved_attempt_ids, lost.attempt_id
+    end
+  end
+
   def test_invalid_future_timestamp_is_ignored_by_daily_accounting
     record = Object.new
     record.define_singleton_method(:live?) { false }

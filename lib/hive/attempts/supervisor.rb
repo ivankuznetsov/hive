@@ -35,6 +35,7 @@ module Hive
         @ready_sent = false
         @cancel_reason = nil
         @worker_pid = nil
+        @worker_pgid = nil
       end
 
       def run
@@ -128,9 +129,11 @@ module Hive
         context_r&.close unless context_r&.closed?
         stdout_w.close
         stderr_w.close
+        worker_identity = process_identity(@worker_pid)
+        @worker_pgid = worker_identity.fetch("process_group_id")
         record = @store.checkpoint(
           record, checkpoint: record.checkpoint,
-          worker: process_identity(@worker_pid), now: @clock.call
+          worker: worker_identity, now: @clock.call
         )
         if gate_w
           gate_w.write("1")
@@ -142,24 +145,50 @@ module Hive
         timeout_at = @timeout_sec && (@monotonic.call + @timeout_sec)
         status = nil
         forced_exit = nil
+        post_exit_started = false
+        post_exit_deadline = nil
+        lingering_group = false
+        termination_deadline = nil
+        termination_kill_sent = false
 
-        until status && readers.empty?
+        until status && readers.empty? && !lingering_group
           now_mono = @monotonic.call
-          if @cancel_reason && status.nil?
+          if @cancel_reason && forced_exit.nil?
             forced_exit = @cancel_reason == :timeout ? 124 : 143
-            status = terminate_worker_group
-          elsif timeout_at && now_mono >= timeout_at && status.nil?
+            if status.nil?
+              signal_worker_group("TERM")
+              termination_deadline = now_mono + @kill_grace_sec
+            end
+          elsif timeout_at && now_mono >= timeout_at && @cancel_reason.nil?
             @cancel_reason = :timeout
             next
           end
 
-          if status.nil? && now_mono >= next_heartbeat
+          if termination_deadline && now_mono >= termination_deadline &&
+             status.nil? && !termination_kill_sent
+            signal_worker_group("KILL")
+            termination_kill_sent = true
+          end
+
+          if now_mono >= next_heartbeat
             record = @store.heartbeat(record, stale_sec: @stale_sec, now: @clock.call)
             next_heartbeat = now_mono + @heartbeat_sec
           end
 
+          if post_exit_started && post_exit_deadline && now_mono >= post_exit_deadline
+            signal_recorded_worker_group("KILL") if recorded_worker_group_alive?
+            readers.keys.each { |io| drain_reader(io, readers, log) }
+            close_readers(readers)
+            lingering_group = false
+            next
+          end
+
           wait_for = [ next_heartbeat - now_mono, 0.05 ].min
-          wait_for = [ wait_for, timeout_at - now_mono ].min if timeout_at && status.nil?
+          wait_for = [ wait_for, timeout_at - now_mono ].min if timeout_at && @cancel_reason.nil?
+          if termination_deadline && status.nil?
+            wait_for = [ wait_for, termination_deadline - now_mono ].min
+          end
+          wait_for = [ wait_for, post_exit_deadline - now_mono ].min if post_exit_deadline
           wait_for = 0 if wait_for.negative?
           ready = readers.empty? ? nil : IO.select(readers.keys, nil, nil, wait_for)
           Array(ready&.first).each { |io| drain_reader(io, readers, log) }
@@ -167,6 +196,17 @@ module Hive
           if status.nil?
             waited = Process.wait2(@worker_pid, Process::WNOHANG)
             status = waited&.last
+          end
+
+          if status && !post_exit_started
+            post_exit_started = true
+            lingering_group = recorded_worker_group_alive?
+            if lingering_group || readers.any?
+              signal_recorded_worker_group("TERM") if lingering_group && termination_deadline.nil?
+              post_exit_deadline = termination_deadline || (@monotonic.call + @kill_grace_sec)
+            end
+          elsif lingering_group && !recorded_worker_group_alive?
+            lingering_group = false
           end
           readers.keys.each { |io| drain_reader(io, readers, log) } if status
         end
@@ -198,6 +238,11 @@ module Hive
         readers.delete(io)
       end
 
+      def close_readers(readers)
+        readers.each_key { |io| io.close unless io.closed? }
+        readers.clear
+      end
+
       def terminate_worker_group
         return nil unless @worker_pid
 
@@ -218,9 +263,34 @@ module Hive
 
       def signal_worker_group(signal)
         pgid = Process.getpgid(@worker_pid)
-        raise StoreError, "worker process group identity changed" unless pgid == @worker_pid
+        expected_pgid = @worker_pgid || @worker_pid
+        unless pgid == @worker_pid && pgid == expected_pgid
+          raise StoreError, "worker process group identity changed"
+        end
 
         Process.kill(signal, -pgid)
+      end
+
+      def signal_recorded_worker_group(signal)
+        return false unless @worker_pid && @worker_pgid == @worker_pid
+
+        Process.kill(signal, -@worker_pgid)
+        true
+      rescue Errno::ESRCH
+        false
+      rescue Errno::EPERM
+        raise StoreError, "worker process group cannot be signalled"
+      end
+
+      def recorded_worker_group_alive?
+        return false unless @worker_pid && @worker_pgid == @worker_pid
+
+        Process.kill(0, -@worker_pgid)
+        true
+      rescue Errno::ESRCH
+        false
+      rescue Errno::EPERM
+        true
       end
 
       def status_exit(status)

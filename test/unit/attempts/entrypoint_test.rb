@@ -79,7 +79,7 @@ class AttemptsEntrypointTest < Minitest::Test
     assert_equal Hive::ExitCodes::TEMPFAIL, error.exit_code
   end
 
-  def test_lost_attachment_is_a_retryable_error_instead_of_a_bare_result
+  def test_lost_attachment_preserves_output_metadata_for_the_command_boundary
     task = FakeTask.new(slug: "task", project_root: "/tmp/project", project_name: "demo")
     attempt = Struct.new(:attempt_id).new("attempt-1")
     dispatch_result = Hive::Attempts::DispatchResult.new(
@@ -100,16 +100,22 @@ class AttemptsEntrypointTest < Minitest::Test
       config_loader: ->(_root) { Hive::Config.merge_defaults({}) }
     )
 
-    error = assert_raises(Hive::ConcurrentRunError) do
-      entrypoint.dispatch(task: task, intended_stage: "4-execute", argv: [ "hive", "run", "task" ])
-    end
+    result = entrypoint.dispatch(
+      task: task, intended_stage: "4-execute", argv: [ "hive", "run", "task" ]
+    )
 
-    assert_includes error.message, "attempt-1"
-    assert_equal Hive::ExitCodes::TEMPFAIL, error.exit_code
+    assert_equal :lost, result.status
+    assert_equal "attempt-1", result.attempt_id
+    assert_equal Hive::ExitCodes::TEMPFAIL, result.exit_status
   end
 
   def test_default_dispatcher_uses_attempt_timers_and_daemon_limits
     config = Hive::Config.merge_defaults({})
+    daemon = Hive::Config::DEFAULTS.fetch("daemon").merge(
+      "child_timeout_sec" => 90,
+      "child_verb_timeouts" => { "review" => 720 },
+      "child_kill_grace_sec" => 12
+    )
     launcher = Object.new
     launcher_options = nil
     captured = nil
@@ -123,11 +129,16 @@ class AttemptsEntrypointTest < Minitest::Test
         dispatcher
       }) do
         entrypoint = Hive::Attempts::Entrypoint.new
-        assert_same dispatcher, entrypoint.send(:build_dispatcher, Object.new, config)
+        assert_same dispatcher,
+                    entrypoint.send(
+                      :build_dispatcher, Object.new, config, daemon, %w[hive review task]
+                    )
       end
     end
     assert_equal config.fetch("attempt_heartbeat_sec"), launcher_options.fetch(:heartbeat_sec)
+    assert_equal 720, launcher_options.fetch(:timeout_sec)
+    assert_equal 12, launcher_options.fetch(:kill_grace_sec)
     assert_same launcher, captured.fetch(:launcher)
-    assert_equal config.dig("daemon", "max_concurrent_runs"), captured.dig(:limits, :max_global)
+    assert_equal daemon.fetch("max_concurrent_runs"), captured.dig(:limits, :max_global)
   end
 end

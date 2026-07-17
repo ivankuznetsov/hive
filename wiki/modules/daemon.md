@@ -688,8 +688,8 @@ on a long-running host.
 
 ### Per-child wall-clock timeout (R-02)
 
-`ChildSupervisor` enforces a per-child timeout so a wedged `hive run`
-can't hold a concurrency slot until daemon shutdown. The timeout is
+`ChildSupervisor` enforces a per-child timeout for ancillary work so a wedged
+command can't hold a concurrency slot until daemon shutdown. The timeout is
 resolved AT SPAWN from the verb (`daemon.child_verb_timeouts[verb]`
 falling back to `daemon.child_timeout_sec`, default `0` (disabled)) and
 frozen on the running entry so a mid-run reload never
@@ -703,13 +703,33 @@ The killed child surfaces as a normal `ChildExit` on a later reap. See
 "child_timeout_sec")` rather than a hardcoded literal, so an un-merged
 daemon block can never silently drift from the canonical default (#255).
 
+Task-stage commands now resolve the same verb timeout and
+`child_kill_grace_sec` when their detached durable wrapper is created. The
+long-lived `ConfiguredDispatcher` reloads the task project for lease timers and
+the global daemon block for verb timeout, kill grace, and global, per-project,
+and daily admission caps on every initial attempt and loss successor. A global
+config change therefore affects the next admission without replacing the
+daemon, while each already-running wrapper keeps its frozen launch policy.
+After a worker leader exits, its supervisor
+continues heartbeats and the monotonic timeout while draining inherited output
+pipes. Heartbeats also continue during the TERM-to-KILL grace; the supervisor
+TERM/KILLs the recorded group and closes a pipe that outlives that grace instead
+of waiting forever for EOF.
+
+A lost record whose worker group has not been proven absent or terminated
+continues to reserve global, project, and task capacity. Missing/corrupt cleanup
+evidence and manual `still_alive`/identity-unsafe outcomes fail closed; capacity
+is released only after the durable cleanup outcome records `absent`,
+`terminated`, or `no_worker`.
+
 `child_kill_grace_sec` is a **minimum, not a precise timer** (#266):
 `enforce_timeouts` runs once per `poll_interval_sec` tick (default 30s),
 so the actual SIGKILL can arrive up to one poll interval after the grace
 window nominally elapses, and `child_kill_grace_sec: 0` does NOT mean
 immediate KILL — it means "KILL on the next tick after the TERM".
 Operators tuning the grace for a hard real-time bound should account for
-the poll interval.
+the poll interval. Detached attempt supervisors use their own monotonic loop,
+so their escalation does not add the daemon poll interval.
 
 ### Queue sequence continuations
 

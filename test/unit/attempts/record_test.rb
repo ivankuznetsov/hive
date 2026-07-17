@@ -131,6 +131,20 @@ class AttemptsRecordTest < Minitest::Test
     refute record.transition_allowed?("running")
   end
 
+  def test_launch_authority_shape_distinguishes_durable_and_compatibility_records
+    valid = Hive::Attempts::Record.launching(**identity, now: NOW, launch_timeout_sec: 30).to_h
+
+    assert_raises(Hive::Attempts::InvalidRecord) do
+      Hive::Attempts::Record.new(valid.merge("worker_argv" => [ "" ]))
+    end
+    assert_raises(Hive::Attempts::InvalidRecord) do
+      Hive::Attempts::Record.new(valid.merge("compatibility" => true))
+    end
+    assert_raises(Hive::Attempts::InvalidRecord) do
+      Hive::Attempts::Record.new(valid.merge("worker_argv" => []))
+    end
+  end
+
   private
 
   def identity

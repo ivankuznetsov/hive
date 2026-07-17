@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/attempts/context"
+require "hive/attempts/generation"
 require "hive/lock"
 require "hive/task_resolver"
 
@@ -48,6 +49,7 @@ class AttemptsContextTest < Minitest::Test
           context = Hive::Attempts::Context.install_from_env!(argv: WORKER_ARGV)
 
           assert_equal "generation-env", context.task_generation
+          assert_equal "demo", context.project
           assert_equal "task", context.task_slug
           assert_equal "4-execute", context.intended_stage
           assert_empty ENV.keys.grep(/\AHIVE_ATTEMPT_/)
@@ -112,6 +114,58 @@ class AttemptsContextTest < Minitest::Test
         end
         assert_includes error.message, "process identity"
       end
+    end
+  end
+
+  def test_generation_is_revalidated_once_before_worker_side_effects
+    task = FakeTask.new(id: 42, slug: "task", stage_index: 4, stage_name: "execute")
+    current = Struct.new(:task_generation).new("generation-current")
+    calls = 0
+    test_case = self
+    resolver = lambda do |task:, project:, intended_stage:|
+      calls += 1
+      test_case.assert_equal "demo", project
+      test_case.assert_equal "4-execute", intended_stage
+      current
+    end
+    context = Hive::Attempts::Context.send(
+      :new, attempt_id: "attempt-1", task_generation: "generation-current",
+      project: "demo", intended_stage: "4-execute"
+    )
+
+    with_replaced_singleton_method(Hive::Attempts::Generation, :resolve, resolver) do
+      assert context.validate_generation!(task)
+      assert context.validate_generation!(task)
+    end
+    assert_equal 1, calls
+
+    stale = Hive::Attempts::Context.send(
+      :new, attempt_id: "attempt-stale", task_generation: "generation-old",
+      project: "demo", intended_stage: "4-execute"
+    )
+    with_replaced_singleton_method(Hive::Attempts::Generation, :resolve, resolver) do
+      error = assert_raises(Hive::ConcurrentRunError) { stale.validate_generation!(task) }
+      assert_includes error.message, "generation is stale"
+      assert_equal Hive::ExitCodes::TEMPFAIL, error.exit_code
+    end
+  end
+
+  def test_workflow_task_binding_and_invalid_inherited_descriptor_are_checked
+    task = FakeTask.new(id: 42, slug: "task", stage_index: 2, stage_name: "brainstorm")
+    resolver = Struct.new(:task) { def resolve = task }.new(task)
+    record = {
+      "project" => "demo", "task_id" => "42", "task_slug" => "task",
+      "intended_stage" => "3-plan"
+    }
+
+    with_replaced_singleton_method(Hive::TaskResolver, :new, ->(*_args, **_kwargs) { resolver }) do
+      assert_nil Hive::Attempts::Context.send(
+        :validate_task_binding!, record, [ "hive", "plan", "task" ]
+      )
+    end
+
+    assert_raises(Hive::Attempts::StoreError) do
+      Hive::Attempts::Context.send(:read_inherited, "not-an-fd", limit: 1)
     end
   end
 

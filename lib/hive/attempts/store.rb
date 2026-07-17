@@ -215,6 +215,23 @@ module Hive
         raise StoreError, "attempt generation lock is unavailable: #{e.message}"
       end
 
+      # Serializes the global capacity snapshot/create decision across every
+      # generation. Callers that also need a generation lock must always take
+      # this admission lock first so distinct task generations cannot each
+      # observe the same final capacity slot.
+      def with_admission_lock
+        path = File.join(generation_locks_root, "admission.lock")
+        File.open(path, File::RDWR | File::CREAT, 0o600) do |lock|
+          lock.chmod(0o600)
+          lock.flock(File::LOCK_EX)
+          yield
+        ensure
+          lock&.flock(File::LOCK_UN)
+        end
+      rescue SystemCallError, IOError => e
+        raise StoreError, "attempt admission lock is unavailable: #{e.message}"
+      end
+
       def record_path(attempt_id)
         File.join(records_root, "#{safe_id(attempt_id)}.json")
       end

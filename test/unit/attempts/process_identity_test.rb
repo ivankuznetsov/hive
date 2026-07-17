@@ -214,4 +214,16 @@ class AttemptsProcessIdentityTest < Minitest::Test
     )
     assert_equal :identity_mismatch, denied.terminate_orphan_group(wrapper: wrapper, worker: worker)
   end
+
+  def test_process_group_presence_handles_permission_and_probe_errors
+    denied = Hive::Attempts::ProcessIdentity.new(
+      signaler: ->(_signal, _pid) { raise Errno::EPERM }
+    )
+    assert_equal :alive, denied.send(:process_group_presence, 456)
+
+    invalid = Hive::Attempts::ProcessIdentity.new(
+      signaler: ->(_signal, _pid) { raise Errno::EINVAL }
+    )
+    assert_equal :unverifiable, invalid.send(:process_group_presence, 456)
+  end
 end

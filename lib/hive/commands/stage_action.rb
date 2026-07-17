@@ -66,9 +66,30 @@ module Hive
           argv: durable_worker_argv(task),
           interactive: true
         )
-        exit(result.exit_status) unless result.exit_status.zero?
+        handle_durable_failure!(result) unless result.exit_status.zero?
 
         result
+      end
+
+      def handle_durable_failure!(result)
+        if result.status == :lost
+          exit(result.exit_status) if @json && result.stdout_emitted?
+
+          raise Hive::ConcurrentRunError,
+                "durable attempt lost before producing a receipt for #{@target}: #{result.attempt_id}"
+        end
+
+        if @json && !result.stdout_emitted?
+          raise Hive::AttemptExecutionError.new(
+            "durable attempt #{result.attempt_id} finished with #{result.outcome || 'an error'} " \
+            "(exit #{result.exit_status}) before emitting JSON",
+            exit_code: result.exit_status,
+            attempt_id: result.attempt_id,
+            outcome: result.outcome
+          )
+        end
+
+        exit(result.exit_status)
       end
 
       def durable_worker_argv(task)

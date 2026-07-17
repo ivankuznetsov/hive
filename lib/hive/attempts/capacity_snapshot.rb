@@ -1,4 +1,5 @@
 require "date"
+require "hive/attempts/lost_outcome"
 require "hive/attempts/store"
 
 module Hive
@@ -10,12 +11,17 @@ module Hive
       :global_count, :per_project, :per_task, :daily_counts,
       :reserved_attempt_ids, :invalid_count
     ) do
+      SAFE_LOST_CLEANUPS = %w[absent terminated no_worker].freeze
+
       def self.build(store:, now: Time.now)
         scan = store.scan
-        live = scan.records.select(&:live?)
+        outcome_store = LostOutcomeStore.new(store: store)
+        reserved = scan.records.select do |record|
+          record.live? || lost_worker_reserves_capacity?(record, outcome_store)
+        end
         per_project = Hash.new(0)
         per_task = Hash.new(0)
-        live.each do |record|
+        reserved.each do |record|
           per_project[record["project"]] += 1
           per_task[[ record["project"], record["task_slug"] ]] += 1
         end
@@ -35,14 +41,24 @@ module Hive
 
         invalid_count = scan.invalid_records.size
         new(
-          global_count: live.size + invalid_count,
+          global_count: reserved.size + invalid_count,
           per_project: per_project.to_h.freeze,
           per_task: per_task.to_h.freeze,
           daily_counts: daily.to_h.freeze,
-          reserved_attempt_ids: live.map(&:attempt_id).freeze,
+          reserved_attempt_ids: reserved.map(&:attempt_id).freeze,
           invalid_count: invalid_count
         )
       end
+
+      def self.lost_worker_reserves_capacity?(record, outcome_store)
+        return false unless record.respond_to?(:state) && record.state == "lost" && record.worker
+
+        outcome = outcome_store.fetch(record.attempt_id)
+        !SAFE_LOST_CLEANUPS.include?(outcome&.fetch("cleanup", nil))
+      rescue StoreError
+        true
+      end
+      private_class_method :lost_worker_reserves_capacity?
 
       def project_count(project) = per_project.fetch(project, 0)
       def task_count(project:, task_slug:) = per_task.fetch([ project, task_slug ], 0)

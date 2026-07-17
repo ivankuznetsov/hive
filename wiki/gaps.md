@@ -24,12 +24,15 @@ tags: [gap, todo]
   multi-hour daemon-restart artifact; unsupported platforms reject before
   acceptance rather than weakening ownership guarantees.
 - Durable attempt capabilities prevent ordinary worker-environment inheritance,
-  attacker-selected store paths, public context construction, cross-task argv
-  reuse, and PID/session/group substitution. They do not provide privilege
-  separation from hostile same-UID Ruby code with arbitrary access to Hive's
-  global attempt store or process internals. Closing that stronger boundary
-  requires a broker under a separate OS identity (or equivalent protected
-  signing/storage authority), not another in-process Ruby guard.
+  a dedicated attempt-context store override, public context construction,
+  cross-task argv reuse, and PID/session/group substitution. The process-level
+  `HIVE_HOME`, `XDG_STATE_HOME`, and `HOME` inputs still select Hive's global
+  state root and are part of the trusted launch configuration. These guards do
+  not provide privilege separation from hostile same-UID Ruby code with
+  arbitrary environment, store, or process-internal access. Closing that
+  stronger boundary requires a broker under a separate OS identity (or
+  equivalent protected signing/storage authority), not another in-process
+  Ruby guard.
 
 - The built-in `bench` descriptor, packaged stage instructions, self-contained
   runtime snapshot, and `hive init . --workflow bench` path are covered locally,

@@ -252,12 +252,7 @@ module Hive
 
         attempt_store = Hive::Attempts::Store.new
         attempt_dispatcher = Hive::Attempts::ConfiguredDispatcher.new(
-          store: attempt_store,
-          limits: {
-            max_global: daemon_cfg.fetch("max_concurrent_runs"),
-            max_per_project: daemon_cfg.fetch("max_concurrent_per_project"),
-            max_daily: daemon_cfg.fetch("max_runs_per_day_per_project")
-          }
+          store: attempt_store
         )
         attempt_process_identity = Hive::Attempts::ProcessIdentity.new
         attempt_backfiller = Hive::Attempts::LegacyBackfiller.new(

@@ -41,7 +41,7 @@ module Hive
           "start_fingerprint" => lock["process_start_time"],
           "session_id" => lock["session_id"],
           "process_group_id" => lock["process_group_id"]
-        }.compact
+        }
         return nil unless @process_identity.status(expected) == :matching
 
         task = Hive::Task.new(File.dirname(lock_path))
@@ -50,25 +50,27 @@ module Hive
           task: task, project: project.fetch("name"), intended_stage: intended_stage
         )
         created = nil
-        @store.with_generation_lock(generation.task_generation) do
-          existing = @store.scan.records.any? do |attempt|
-            attempt.task_generation == generation.task_generation
-          end
-          next if existing
+        @store.with_admission_lock do
+          @store.with_generation_lock(generation.task_generation) do
+            existing = @store.scan.records.any? do |attempt|
+              attempt.task_generation == generation.task_generation
+            end
+            next if existing
 
-          created = @store.create_compatibility_running(
-            attempt_id: compatibility_id(generation, expected),
-            task_id: generation.task_id&.to_s,
-            project: generation.project,
-            task_slug: generation.task_slug,
-            intended_stage: generation.intended_stage,
-            task_generation: generation.task_generation,
-            progress_token: generation.progress_token,
-            owner: expected,
-            provider: "legacy",
-            starting_revision: starting_revision(task),
-            now: now
-          )
+            created = @store.create_compatibility_running(
+              attempt_id: compatibility_id(generation, expected),
+              task_id: generation.task_id&.to_s,
+              project: generation.project,
+              task_slug: generation.task_slug,
+              intended_stage: generation.intended_stage,
+              task_generation: generation.task_generation,
+              progress_token: generation.progress_token,
+              owner: expected,
+              provider: "legacy",
+              starting_revision: starting_revision(task),
+              now: now
+            )
+          end
         end
         if created && @logger
           @logger.event(

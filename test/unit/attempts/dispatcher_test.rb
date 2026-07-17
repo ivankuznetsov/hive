@@ -95,6 +95,96 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
+  def test_distinct_generations_share_one_multiprocess_capacity_transaction
+    skip "fork is unavailable" unless Process.respond_to?(:fork)
+
+    with_tmp_dir do |root|
+      attempt_root = File.join(root, "attempts")
+      tasks = 2.times.map do |index|
+        state_file = File.join(root, "task-#{index}.md")
+        File.write(state_file, "task #{index}\n<!-- WAITING -->\n")
+        FakeTask.new(
+          id: 100 + index, slug: "durable-task-#{index}", state_file: state_file,
+          stage_index: 4, stage_name: "execute"
+        )
+      end
+      children = []
+
+      spawn_dispatch = lambda do |task, index|
+        entered_r, entered_w = IO.pipe
+        release_r, release_w = IO.pipe
+        result_r, result_w = IO.pipe
+        pid = fork do
+          entered_r.close
+          release_w.close
+          result_r.close
+          store = Hive::Attempts::Store.new(root: attempt_root)
+          original_generation_lock = store.method(:with_generation_lock)
+          store.define_singleton_method(:with_generation_lock) do |generation, &block|
+            original_generation_lock.call(generation) do
+              entered_w.write("1")
+              entered_w.close
+              release_r.read(1)
+              block.call
+            end
+          end
+          dispatcher = Hive::Attempts::Dispatcher.new(
+            store: store, launcher: FakeLauncher.new,
+            limits: { max_global: 1, max_per_project: 1, max_daily: 50 },
+            clock: -> { NOW }, id_generator: -> { "attempt-#{index}" },
+            capability_generator: -> { CLAIM_CAPABILITY }
+          )
+          result = dispatch(dispatcher, task, request_id: "request-#{index}")
+          Marshal.dump([ result.status, result.reason ], result_w)
+        rescue StandardError => e
+          Marshal.dump([ :error, e.class.name, e.message, e.backtrace ], result_w)
+        ensure
+          [ entered_w, release_r, result_w ].each do |io|
+            io.close unless io.closed?
+          rescue IOError
+            nil
+          end
+          exit! 0
+        end
+        entered_w.close
+        release_r.close
+        result_w.close
+        child = { pid: pid, entered: entered_r, release: release_w, result: result_r }
+        children << child
+        child
+      end
+
+      first = spawn_dispatch.call(tasks.fetch(0), 0)
+      assert_equal "1", first.fetch(:entered).read(1)
+      second = spawn_dispatch.call(tasks.fetch(1), 1)
+      assert_nil IO.select([ second.fetch(:entered) ], nil, nil, 0.2),
+                 "second generation entered while the first held admission"
+
+      first.fetch(:release).write("1")
+      first.fetch(:release).close
+      first_result = Marshal.load(first.fetch(:result))
+      Process.wait(first.fetch(:pid))
+
+      assert_equal "1", second.fetch(:entered).read(1)
+      second.fetch(:release).write("1")
+      second.fetch(:release).close
+      second_result = Marshal.load(second.fetch(:result))
+      Process.wait(second.fetch(:pid))
+
+      assert_equal [ :accepted, nil ], first_result
+      assert_equal [ :deferred, "capacity" ], second_result
+      assert_equal 1, Hive::Attempts::Store.new(root: attempt_root).scan.records.length
+      children.clear
+    ensure
+      children.each do |child|
+        Process.kill("TERM", child.fetch(:pid))
+        Process.wait(child.fetch(:pid))
+      rescue Errno::ESRCH, Errno::ECHILD
+        nil
+      end
+    end
+  end
+
   def test_failed_launcher_handoff_marks_reservation_lost_and_defers
     with_dispatcher do |dispatcher, launcher, task, store|
       launcher.instance_variable_set(:@result, { "claimed" => false, "error" => "wrapper unavailable" })
@@ -144,6 +234,40 @@ class AttemptsDispatcherTest < Minitest::Test
       assert_equal :accepted, result.status
       assert result.attempt.claimed?
       assert_equal({ "attempt_id" => result.attempt.attempt_id }, result.attach_descriptor)
+    end
+  end
+
+  def test_failed_handoff_cas_race_adopts_a_terminal_attempt
+    with_dispatcher do |dispatcher, launcher, task, store|
+      created = dispatch(dispatcher, task, request_id: "request-one").attempt
+      owner = {
+        "pid" => Process.pid, "start_fingerprint" => "start",
+        "session_id" => Process.getsid(0), "process_group_id" => Process.getpgrp
+      }
+      claimed = store.claim(
+        created, owner: owner, claim_capability: launcher.launched.first.last,
+        first_heartbeat_timeout_sec: 30, now: NOW + 1
+      )
+      running = store.first_heartbeat(claimed, stale_sec: 30, now: NOW + 2)
+      terminal = store.terminalize(
+        running, outcome: "failed", exit_status: 7,
+        final_checkpoint: running.checkpoint, output_references: [],
+        log_reference: { "path" => "logs/log.frames", "size" => 0, "sha256" => "0" * 64 },
+        now: NOW + 3
+      )
+      fetches = [ created, terminal ]
+      racing_store = Object.new
+      racing_store.define_singleton_method(:fetch) { |_attempt_id| fetches.shift }
+      racing_store.define_singleton_method(:mark_lost) do |*_args, **_kwargs|
+        raise Hive::Attempts::CompareAndSwapFailed, "terminalized"
+      end
+      dispatcher.instance_variable_set(:@store, racing_store)
+
+      result = dispatcher.send(:resolve_failed_handoff, created, interactive: true)
+
+      assert_equal :terminal_replay, result.status
+      assert_equal terminal.receipt, result.receipt
+      assert_equal({ "attempt_id" => terminal.attempt_id }, result.attach_descriptor)
     end
   end
 

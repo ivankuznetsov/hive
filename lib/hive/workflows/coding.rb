@@ -75,7 +75,8 @@ module Hive
             kind: :execute,
             status_mode: :exit_code_only,
             budget_usd: 500,
-            timeout_sec: 14400
+            timeout_sec: 14400,
+            condition_policy: Hive::Conditions::Policy.default.rule_for("execute_to_open_pr")
           ),
           Hive::Workflow::Stage.new(
             name: "open-pr",

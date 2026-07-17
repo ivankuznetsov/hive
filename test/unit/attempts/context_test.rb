@@ -24,10 +24,15 @@ class AttemptsContextTest < Minitest::Test
       Hive::Attempts::Context.new(attempt_id: "forged", task_generation: "forged")
     end
 
-    with_attempt_context(attempt_id: "attempt-1", task_generation: "generation-1") do
+    with_attempt_context(
+      attempt_id: "attempt-1", task_generation: 7, ownership_generation: "generation-1"
+    ) do
       assert Hive::Attempts::Context.active?
       assert_equal(
-        { "attempt_id" => "attempt-1", "task_generation" => "generation-1" },
+        {
+          "attempt_id" => "attempt-1", "task_generation" => "generation-1",
+          "ownership_generation" => "generation-1", "task_input_epoch" => 7
+        },
         Hive::Attempts::Context.projection
       )
     end
@@ -48,7 +53,8 @@ class AttemptsContextTest < Minitest::Test
         with_context_environment(store, capability: CLAIM_CAPABILITY) do
           context = Hive::Attempts::Context.install_from_env!(argv: WORKER_ARGV)
 
-          assert_equal "generation-env", context.task_generation
+          assert_equal 5, context.task_generation
+          assert_equal "generation-env", context.ownership_generation
           assert_equal "demo", context.project
           assert_equal "task", context.task_slug
           assert_equal "4-execute", context.intended_stage
@@ -119,7 +125,9 @@ class AttemptsContextTest < Minitest::Test
 
   def test_generation_is_revalidated_once_before_worker_side_effects
     task = FakeTask.new(id: 42, slug: "task", stage_index: 4, stage_name: "execute")
-    current = Struct.new(:task_generation).new("generation-current")
+    current = Struct.new(:task_generation, :ownership_generation, :task_input_epoch).new(
+      "generation-current", "generation-current", 0
+    )
     calls = 0
     test_case = self
     resolver = lambda do |task:, project:, intended_stage:|
@@ -148,6 +156,17 @@ class AttemptsContextTest < Minitest::Test
       assert_includes error.message, "generation is stale"
       assert_equal Hive::ExitCodes::TEMPFAIL, error.exit_code
     end
+
+    epoch_stale = Hive::Attempts::Context.send(
+      :new, attempt_id: "attempt-epoch-stale", task_generation: 1,
+      ownership_generation: "generation-current", project: "demo", intended_stage: "4-execute"
+    )
+    current_epoch = Struct.new(:ownership_generation, :task_input_epoch).new(
+      "generation-current", 2
+    )
+    with_replaced_singleton_method(Hive::Attempts::Generation, :resolve, ->(**) { current_epoch }) do
+      assert_raises(Hive::ConcurrentRunError) { epoch_stale.validate_generation!(task) }
+    end
   end
 
   def test_workflow_task_binding_and_invalid_inherited_descriptor_are_checked
@@ -169,6 +188,25 @@ class AttemptsContextTest < Minitest::Test
     end
   end
 
+  def test_legacy_opaque_generation_is_bridged_without_becoming_an_epoch
+    context = Hive::Attempts::Context.send(
+      :new, attempt_id: "attempt", task_generation: "opaque"
+    )
+
+    assert_equal 0, context.task_generation
+    assert_equal "opaque", context.ownership_generation
+    assert_raises(ArgumentError) do
+      Hive::Attempts::Context.send(:new, attempt_id: "attempt", task_generation: -1)
+    end
+
+    unreadable = Object.new
+    unreadable.define_singleton_method(:to_s) { raise TypeError, "not stringable" }
+    error = assert_raises(ArgumentError) do
+      Hive::Attempts::Context.send(:new, attempt_id: "attempt", task_generation: unreadable)
+    end
+    assert_includes error.message, "numeric task generation"
+  end
+
   private
 
   def with_running_attempt
@@ -177,7 +215,8 @@ class AttemptsContextTest < Minitest::Test
       record = store.create_launching(
         attempt_id: "attempt-env", request_id: "request-1", predecessor_attempt_id: nil,
         task_id: "42", project: "demo", task_slug: "task", intended_stage: "4-execute",
-        task_generation: "generation-env", progress_token: "progress", provider: "codex",
+        task_generation: "generation-env", task_input_epoch: 5,
+        progress_token: "progress", provider: "codex",
         worker_argv: WORKER_ARGV,
         claim_capability_digest: Hive::Attempts::Capability.digest(CLAIM_CAPABILITY),
         starting_revision: nil, retry_charge: 0, inherited_outputs: [],

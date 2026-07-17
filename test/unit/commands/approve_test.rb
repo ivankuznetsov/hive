@@ -3,6 +3,8 @@ require "hive/commands/approve"
 require "fileutils"
 
 class HiveCommandsApproveTest < Minitest::Test
+  include HiveTestHelper
+
   FakeTask = Struct.new(:slug, :stage_index, :stage_name, :folder, :hive_state_path, :project_root, :workflow)
 
   def command(**kwargs)
@@ -108,6 +110,27 @@ class HiveCommandsApproveTest < Minitest::Test
     assert_includes error.message, "1-intake, 2-gather, 3-report"
   end
 
+  def test_forward_approve_runs_execute_condition_guard_before_marker_acceptance
+    current = task(
+      stage_index: 4, stage_name: "execute",
+      workflow: Hive::Workflows::Coding::DESCRIPTOR
+    )
+    marker = Hive::Markers::State.new(name: :execute_complete, attrs: {}, raw: nil)
+    calls = []
+    guard = lambda do |observed, force:, source:|
+      calls << [ observed, force, source ]
+      raise Hive::WrongStage, "condition gate blocked"
+    end
+
+    with_replaced_singleton_method(Hive::Conditions::TransitionGuard, :validate!, guard) do
+      error = assert_raises(Hive::WrongStage) do
+        command.send(:validate_move!, current, "5-open-pr", marker)
+      end
+      assert_includes error.message, "condition gate blocked"
+    end
+    assert_equal [ [ current, false, "approve" ] ], calls
+  end
+
   def test_move_task_uses_cross_device_fallback_on_exdev
     Dir.mktmpdir("hive-approve-unit") do |root|
       state = File.join(root, ".hive-state")
@@ -132,6 +155,31 @@ class HiveCommandsApproveTest < Minitest::Test
     ensure
       File.singleton_class.define_method(:rename, original) if original
     end
+  end
+
+  def test_condition_gate_error_envelope_preserves_gate_and_recovery_action
+    error = Hive::ConditionGateBlocked.new(
+      "blocked",
+      current_stage: "4-execute", target_stage: "5-open-pr",
+      condition_gate: {
+        "status" => "blocked", "transition" => "execute_to_open_pr",
+        "diagnostics" => [ { "condition" => "ChangesPresent", "state" => "unsatisfied" } ],
+        "waivers" => []
+      },
+      next_action: {
+        "kind" => Hive::Schemas::NextActionKind::EDIT,
+        "reason" => "no_worktree_changes"
+      }
+    )
+
+    out, = capture_io { command.send(:emit_error_envelope, error) }
+    payload = JSON.parse(out)
+    assert_equal "blocked", payload.dig("condition_gate", "status")
+    assert_equal "ChangesPresent",
+                 payload.dig("condition_gate", "diagnostics", 0, "condition")
+    assert_equal Hive::Schemas::NextActionKind::EDIT, payload.dig("next_action", "kind")
+    assert_equal "4-execute", payload.fetch("current_stage")
+    assert_equal "5-open-pr", payload.fetch("target_stage")
   end
 
   def test_move_task_reports_destination_collision_when_rename_loses_race

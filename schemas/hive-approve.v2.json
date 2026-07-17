@@ -173,6 +173,13 @@
         },
         "safe_correction": {
           "type": "string"
+        },
+        "condition_gate": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "next_action": {
+          "$ref": "#/$defs/NextAction"
         }
       }
     },

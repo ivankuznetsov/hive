@@ -464,3 +464,28 @@ genuine clean verdict could fail to match and `:error`/retry (worst case
 emit the strict `## High/Medium/Nit` + `No findings.` format so the prose path
 is never exercised; until then, watch `reviews/errors-NN.md` tails for
 clean-but-rejected verdicts and extend `CLEAN_VERDICT` as new phrasings appear.
+
+## Execute condition shadow rollout lacks live parity volume (2026-07-17)
+
+Generation-scoped execute conditions, deterministic replay, marker/shadow/
+conditions modes, and the sanitized task-1849 golden fixture are covered in
+source and tests. Authenticated replay, future-schema rejection, short-write
+completion, partial-append rollback, journal/telemetry separation, and cached
+snapshot attempt revalidation are fault-injection/unit pinned, but have not
+been exercised against a live task
+journal under real disk pressure. No production project has yet supplied the promotion bar of
+at least 100 categorized live transitions across commit success, research
+success, no-change, agent-loss, and operator-repair with zero unexplained
+mismatches and an empty allow-list. Projects must remain on marker or shadow
+authority until operators collect that evidence; Hive never auto-promotes.
+The daemon's terminal/lost `AttemptObserver` path is likewise unit-pinned but
+has not been live-smoked with a real detached execute worker failing after its
+last boundary observation and then surfacing the updated gate through status.
+Missing/empty post-handoff journals, failed-first-append retry fsync, causal
+predecessor ordering under clock regression, terminal-state snapshot
+invalidation, structured condition recovery actions, and durable forced-
+override visibility are also unit/fault-injection pinned only. The rollout
+still has no project-scoped promotion/rollback CLI or public snapshot-rebuild
+command; those are operator-ergonomics follow-ups rather than authority gaps,
+because marker mode remains default, status replays snapshots read-only, and
+promotion is deliberately explicit/manual.

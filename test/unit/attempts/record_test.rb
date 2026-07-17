@@ -14,6 +14,8 @@ class AttemptsRecordTest < Minitest::Test
     assert_equal 0, record.lease_version
     assert_equal "attempt-1", record.attempt_id
     assert_equal "generation-1", record.task_generation
+    assert_equal "generation-1", record.ownership_generation
+    assert_equal 0, record.task_input_epoch
   end
 
   def test_validate_rejects_unknown_state_and_terminal_fields_on_live_record
@@ -47,6 +49,21 @@ class AttemptsRecordTest < Minitest::Test
     assert_raises(Hive::Attempts::InvalidReceipt) do
       Hive::Attempts::Record.validate_receipt!(broken,
                                                attempt_id: "attempt-1", task_generation: "generation-1")
+    end
+
+
+    assert_raises(Hive::Attempts::InvalidReceipt) do
+      Hive::Attempts::Record.validate_receipt!(
+        valid.merge("task_input_epoch" => 2),
+        attempt_id: "attempt-1", task_generation: "generation-1", task_input_epoch: 1
+      )
+    end
+    assert_raises(Hive::Attempts::InvalidReceipt) do
+      Hive::Attempts::Record.validate_receipt!(
+        valid.merge("ownership_generation" => "owner-2"),
+        attempt_id: "attempt-1", task_generation: "generation-1",
+        ownership_generation: "owner-1"
+      )
     end
   end
 
@@ -107,6 +124,8 @@ class AttemptsRecordTest < Minitest::Test
 
     invalid_changes = [
       { "lease_version" => -1 },
+      { "ownership_generation" => "" },
+      { "task_input_epoch" => -1 },
       { "retry_charge" => -1 },
       { "current_outputs" => {} },
       { "current_outputs" => [ { "path" => "bad" } ] },
@@ -145,6 +164,52 @@ class AttemptsRecordTest < Minitest::Test
     end
   end
 
+  def test_legacy_v1_record_gains_generation_bridge_only_in_memory
+    legacy = Hive::Attempts::Record.launching(**identity, now: NOW, launch_timeout_sec: 30).to_h
+    legacy["schema_version"] = 1
+    legacy.delete("ownership_generation")
+    legacy.delete("task_input_epoch")
+
+    record = Hive::Attempts::Record.new(legacy)
+
+    assert_equal "generation-1", record.ownership_generation
+    assert_equal 0, record.task_input_epoch
+    assert_equal 2, record["schema_version"]
+    refute legacy.key?("ownership_generation")
+  end
+
+  def test_unknown_current_schema_version_is_rejected
+    invalid = Hive::Attempts::Record.launching(
+      **identity, now: NOW, launch_timeout_sec: 30
+    ).to_h.merge("schema_version" => 99)
+
+    error = assert_raises(Hive::Attempts::InvalidRecord) do
+      Hive::Attempts::Record.new(invalid)
+    end
+    assert_includes error.message, "unsupported schema_version"
+  end
+
+  def test_legacy_terminal_receipt_gains_generation_bridge_in_memory
+    legacy = Hive::Attempts::Record.launching(
+      **identity, now: NOW, launch_timeout_sec: 30
+    ).to_h.merge(
+      "schema_version" => 1,
+      "state" => "terminal",
+      "outcome" => "succeeded",
+      "ended_at" => (NOW + 5).iso8601(6),
+      "receipt" => receipt
+    )
+    legacy.delete("ownership_generation")
+    legacy.delete("task_input_epoch")
+    legacy.fetch("receipt").delete("ownership_generation")
+    legacy.fetch("receipt").delete("task_input_epoch")
+
+    record = Hive::Attempts::Record.new(legacy)
+
+    assert_equal "generation-1", record["receipt"].fetch("ownership_generation")
+    assert_equal 0, record["receipt"].fetch("task_input_epoch")
+  end
+
   private
 
   def identity
@@ -171,6 +236,8 @@ class AttemptsRecordTest < Minitest::Test
     {
       "attempt_id" => "attempt-1",
       "task_generation" => "generation-1",
+      "ownership_generation" => "generation-1",
+      "task_input_epoch" => 0,
       "outcome" => "succeeded",
       "exit_status" => 0,
       "started_at" => NOW.iso8601(6),

@@ -22,13 +22,13 @@ module Hive
     class Store
       attr_reader :root, :records_root, :logs_root, :outputs_root, :generation_locks_root
 
-      def initialize(root: Hive::Paths.attempts_root)
+      def initialize(root: Hive::Paths.attempts_root, create_directories: true)
         @root = File.expand_path(root)
         @records_root = File.join(@root, "records")
         @logs_root = File.join(@root, "logs")
         @outputs_root = File.join(@root, "outputs")
         @generation_locks_root = File.join(@root, "generation-locks")
-        ensure_private_directories!
+        ensure_private_directories! if create_directories
       end
 
       def create_launching(**attributes)
@@ -145,6 +145,8 @@ module Hive
         receipt = {
           "attempt_id" => observed.attempt_id,
           "task_generation" => observed.task_generation,
+          "ownership_generation" => observed.ownership_generation,
+          "task_input_epoch" => observed.task_input_epoch,
           "outcome" => outcome,
           "exit_status" => exit_status,
           "started_at" => observed["started_at"],
@@ -153,8 +155,12 @@ module Hive
           "output_references" => Record.deep_copy(output_references),
           "log_reference" => Record.deep_copy(log_reference)
         }
-        Record.validate_receipt!(receipt, attempt_id: observed.attempt_id,
-                                 task_generation: observed.task_generation)
+        Record.validate_receipt!(
+          receipt, attempt_id: observed.attempt_id,
+          task_generation: observed.task_generation,
+          ownership_generation: observed.ownership_generation,
+          task_input_epoch: observed.task_input_epoch
+        )
         mutate(observed, allowed_states: [ "running" ]) do |data|
           data.merge(
             "state" => "terminal",

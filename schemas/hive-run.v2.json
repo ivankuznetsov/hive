@@ -242,6 +242,15 @@
         "message": {
           "type": "string"
         },
+        "condition_gate": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "next_action": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["kind"]
+        },
         "slug": {
           "type": [
             "string",

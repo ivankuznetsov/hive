@@ -88,6 +88,7 @@ class HiveBotScenarioBrainstormTest < Minitest::Test
       status_watcher: FakeStatusWatcher.new,
       notification_dispatcher: FakeNotificationDispatcher.new,
       child_supervisor: @child,
+      dispatch_request_writer: QueueOnlyDispatchRequestWriter,
       dry_run: false
     )
   end
@@ -136,6 +137,21 @@ class HiveBotScenarioBrainstormTest < Minitest::Test
   class FakeNotificationDispatcher
     def process_rows(_rows); end
     def record_dispatch(project:, slug:); end
+  end
+
+  # This scenario asserts the request-file contract. Durable foreground
+  # admission has dedicated DispatchRequestWriter coverage; delegating only to
+  # write! here prevents an actual detached worker racing the scenario teardown.
+  module QueueOnlyDispatchRequestWriter
+    module_function
+
+    def write!(**kwargs)
+      Hive::Bot::DispatchRequestWriter.write!(**kwargs)
+    end
+
+    def generate_request_id
+      Hive::Bot::DispatchRequestWriter.generate_request_id
+    end
   end
 
   class FakeChildSupervisor

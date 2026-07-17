@@ -12,13 +12,15 @@ module Hive
     # generation lock; callers can only observe snapshots.
     class Record
       SCHEMA = "hive-attempt"
-      SCHEMA_VERSION = 1
+      SCHEMA_VERSION = 2
+      SUPPORTED_SCHEMA_VERSIONS = [ 1, SCHEMA_VERSION ].freeze
       STATES = %w[launching running terminal lost].freeze
       TERMINAL_OUTCOMES = %w[succeeded failed cancelled].freeze
       FINAL_STATES = %w[terminal lost].freeze
       IMMUTABLE_KEYS = %w[
         schema schema_version attempt_id request_id predecessor_attempt_id
         task_id project task_slug intended_stage task_generation progress_token
+        ownership_generation task_input_epoch
         provider worker_argv claim_capability_digest starting_revision retry_charge
         compatibility created_at accepted_at
       ].freeze
@@ -35,7 +37,8 @@ module Hive
                          task_slug:, intended_stage:, task_generation:, progress_token:, provider:,
                          worker_argv:, claim_capability_digest:, starting_revision:, retry_charge:,
                          inherited_outputs:, now:,
-                         launch_timeout_sec:, compatibility: false)
+                         launch_timeout_sec:, compatibility: false, ownership_generation: nil,
+                         task_input_epoch: 0)
         timestamp = iso8601(now)
         new(
           "schema" => SCHEMA,
@@ -48,6 +51,8 @@ module Hive
           "task_slug" => task_slug,
           "intended_stage" => intended_stage,
           "task_generation" => task_generation,
+          "ownership_generation" => ownership_generation || task_generation,
+          "task_input_epoch" => task_input_epoch,
           "progress_token" => progress_token,
           "provider" => provider,
           "worker_argv" => deep_copy(worker_argv),
@@ -81,7 +86,8 @@ module Hive
 
       def self.compatibility_running(attempt_id:, task_id:, project:, task_slug:,
                                      intended_stage:, task_generation:, progress_token:,
-                                     owner:, provider:, starting_revision:, now:)
+                                     owner:, provider:, starting_revision:, now:,
+                                     ownership_generation: nil, task_input_epoch: 0)
         record = launching(
           attempt_id: attempt_id,
           request_id: "legacy-backfill:#{attempt_id}",
@@ -91,6 +97,8 @@ module Hive
           task_slug: task_slug,
           intended_stage: intended_stage,
           task_generation: task_generation,
+          ownership_generation: ownership_generation,
+          task_input_epoch: task_input_epoch,
           progress_token: progress_token,
           provider: provider,
           worker_argv: [],
@@ -113,7 +121,8 @@ module Hive
         ))
       end
 
-      def self.validate_receipt!(receipt, attempt_id:, task_generation:)
+      def self.validate_receipt!(receipt, attempt_id:, task_generation:, task_input_epoch: nil,
+                                 ownership_generation: nil)
         unless receipt.is_a?(Hash)
           raise InvalidReceipt, "terminal receipt must be an object"
         end
@@ -126,6 +135,12 @@ module Hive
         raise InvalidReceipt, "terminal receipt attempt mismatch" unless receipt["attempt_id"] == attempt_id
         unless receipt["task_generation"] == task_generation
           raise InvalidReceipt, "terminal receipt task generation mismatch"
+        end
+        if task_input_epoch && receipt["task_input_epoch"] != task_input_epoch
+          raise InvalidReceipt, "terminal receipt task input epoch mismatch"
+        end
+        if ownership_generation && receipt["ownership_generation"] != ownership_generation
+          raise InvalidReceipt, "terminal receipt ownership generation mismatch"
         end
         unless TERMINAL_OUTCOMES.include?(receipt["outcome"])
           raise InvalidReceipt, "terminal receipt has invalid outcome"
@@ -155,6 +170,8 @@ module Hive
 
       def initialize(data)
         @data = self.class.deep_copy(data)
+        validate_source_schema!
+        normalize_generation_bridge!
         validate!
         @data.freeze
       end
@@ -171,6 +188,8 @@ module Hive
       def outcome = @data["outcome"]
       def attempt_id = @data.fetch("attempt_id")
       def task_generation = @data.fetch("task_generation")
+      def ownership_generation = @data.fetch("ownership_generation")
+      def task_input_epoch = @data.fetch("task_input_epoch")
       def lease_version = @data.fetch("lease_version")
       def receipt = self.class.deep_copy(@data["receipt"])
       def wrapper = self.class.deep_copy(@data["wrapper"])
@@ -210,9 +229,6 @@ module Hive
         missing = REQUIRED_KEYS - @data.keys
         raise InvalidRecord, "attempt record missing #{missing.join(', ')}" unless missing.empty?
         raise InvalidRecord, "attempt record has invalid schema" unless @data["schema"] == SCHEMA
-        unless @data["schema_version"] == SCHEMA_VERSION
-          raise InvalidRecord, "attempt record has unsupported schema_version #{@data['schema_version'].inspect}"
-        end
         raise InvalidRecord, "attempt record has invalid state" unless STATES.include?(state)
         unless @data["lease_version"].is_a?(Integer) && @data["lease_version"] >= 0
           raise InvalidRecord, "attempt record lease_version must be non-negative"
@@ -220,6 +236,12 @@ module Hive
         %w[attempt_id project task_slug intended_stage task_generation progress_token provider].each do |key|
           value = @data[key]
           raise InvalidRecord, "attempt record #{key} must be non-empty" unless value.is_a?(String) && !value.empty?
+        end
+        unless @data["ownership_generation"].is_a?(String) && !@data["ownership_generation"].empty?
+          raise InvalidRecord, "attempt record ownership_generation must be non-empty"
+        end
+        unless @data["task_input_epoch"].is_a?(Integer) && @data["task_input_epoch"] >= 0
+          raise InvalidRecord, "attempt record task_input_epoch must be non-negative"
         end
         unless @data["retry_charge"].is_a?(Integer) && @data["retry_charge"] >= 0
           raise InvalidRecord, "attempt record retry_charge must be non-negative"
@@ -251,10 +273,21 @@ module Hive
         raise InvalidRecord, e.message
       end
 
+      def validate_source_schema!
+        raise InvalidRecord, "attempt record has invalid schema" unless @data["schema"] == SCHEMA
+        return if SUPPORTED_SCHEMA_VERSIONS.include?(@data["schema_version"])
+
+        raise InvalidRecord,
+              "attempt record has unsupported schema_version #{@data['schema_version'].inspect}"
+      end
+
       def validate_state_fields!
         if state == "terminal"
           raise InvalidRecord, "terminal attempt requires an outcome" unless TERMINAL_OUTCOMES.include?(outcome)
-          self.class.validate_receipt!(@data["receipt"], attempt_id: attempt_id, task_generation: task_generation)
+          self.class.validate_receipt!(
+            @data["receipt"], attempt_id: attempt_id, task_generation: task_generation,
+            task_input_epoch: task_input_epoch, ownership_generation: ownership_generation
+          )
           raise InvalidRecord, "terminal outcome and receipt disagree" unless @data["receipt"]["outcome"] == outcome
         elsif !outcome.nil? || !@data["receipt"].nil?
           raise InvalidRecord, "non-terminal attempt cannot have terminal fields"
@@ -279,6 +312,19 @@ module Hive
             raise InvalidRecord, "running attempt requires heartbeat deadline"
           end
         end
+      end
+
+      def normalize_generation_bridge!
+        return unless @data["schema_version"] == 1
+
+        @data["ownership_generation"] ||= @data["task_generation"]
+        @data["task_input_epoch"] = 0 unless @data.key?("task_input_epoch")
+        receipt = @data["receipt"]
+        if receipt.is_a?(Hash)
+          receipt["ownership_generation"] ||= @data["ownership_generation"]
+          receipt["task_input_epoch"] = @data["task_input_epoch"] unless receipt.key?("task_input_epoch")
+        end
+        @data["schema_version"] = SCHEMA_VERSION
       end
 
       class << self

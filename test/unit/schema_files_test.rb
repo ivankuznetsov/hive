@@ -147,8 +147,14 @@ class SchemaFilesTest < Minitest::Test
     assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
     assert_equal "hive-status",
                  doc.dig("$defs", "SuccessPayload", "properties", "schema", "const")
-    assert_equal 5,
+    assert_equal Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
                  doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+  end
+
+  def test_hive_status_v5_schema_remains_for_back_compat
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status", version: 5)))
+    assert_equal 5, doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+    refute_includes doc.dig("$defs", "Task", "properties").keys, "conditions"
   end
 
   def test_hive_status_v4_schema_remains_for_back_compat
@@ -2219,15 +2225,27 @@ class SchemaFilesTest < Minitest::Test
     path = Hive::Schemas.schema_path("hive-attempt")
     doc = JSON.parse(File.read(path))
 
-    assert_equal 1, doc.fetch("properties").dig("schema_version", "const")
+    assert_equal Hive::Attempts::Record::SCHEMA_VERSION,
+                 doc.fetch("properties").dig("schema_version", "const")
     assert_equal %w[launching running terminal lost], doc.fetch("properties").dig("state", "enum")
     assert_includes doc.fetch("required"), "worker_argv"
     assert_includes doc.fetch("required"), "claim_capability_digest"
+    assert_includes doc.fetch("required"), "ownership_generation"
+    assert_includes doc.fetch("required"), "task_input_epoch"
     assert_equal "^[0-9a-f]{64}$", doc.fetch("properties").dig("claim_capability_digest", "pattern")
     receipt_required = doc.dig("$defs", "Receipt", "required")
-    %w[attempt_id task_generation outcome exit_status started_at ended_at final_checkpoint output_references log_reference].each do |key|
+    %w[attempt_id task_generation ownership_generation task_input_epoch outcome exit_status started_at ended_at final_checkpoint output_references log_reference].each do |key|
       assert_includes receipt_required, key
     end
+  end
+
+
+  def test_internal_attempt_v1_schema_remains_for_back_compat
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-attempt", version: 1)))
+
+    assert_equal 1, doc.fetch("properties").dig("schema_version", "const")
+    refute_includes doc.fetch("properties").keys, "task_input_epoch"
+    refute_includes doc.fetch("properties").keys, "ownership_generation"
   end
 
   def test_refactor_patrol_retains_v1_while_v2_is_current

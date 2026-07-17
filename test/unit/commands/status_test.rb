@@ -1,4 +1,5 @@
 require "test_helper"
+require "json_schemer"
 require "hive/commands/status"
 require "hive/task_action"
 
@@ -101,6 +102,34 @@ class CommandsStatusTest < Minitest::Test
       assert_nil idle.fetch("task_lock_pid")
       assert_nil idle.fetch("task_lock_process_start_time")
       assert_nil idle.fetch("task_lock_id")
+    end
+  end
+
+  def test_live_durable_lock_preserves_opaque_generation_and_validates_current_status_schema
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      folder = write_status_task(
+        hive_state, "4-execute", "durable-task-260717-abcd",
+        state_file: "task.md", marker: "EXECUTE_WAITING"
+      )
+      payload = nil
+
+      with_attempt_context(
+        attempt_id: "attempt-1", task_generation: 7,
+        ownership_generation: "opaque-owner-token"
+      ) do
+        Hive::Lock.with_task_lock(folder, slug: File.basename(folder), stage: "execute") do
+          payload = Hive::Commands::Status.new.json_payload([
+            status_project(project_root, hive_state)
+          ])
+        end
+      end
+
+      row = payload.fetch("projects").first.fetch("tasks").first
+      assert_equal "opaque-owner-token", row.fetch("task_generation")
+      assert_instance_of String, row.fetch("task_generation")
+      schema = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-status"))))
+      assert_empty schema.validate(payload).to_a
     end
   end
 
@@ -816,6 +845,7 @@ class CommandsStatusTest < Minitest::Test
       exploded = payload.fetch("projects").find { |p| p["name"] == "explodes" }
       healthy = payload.fetch("projects").find { |p| p["name"] == "healthy" }
       assert_equal [], exploded.fetch("tasks"), "the exploding project degrades to no tasks"
+      assert_equal "project_load_failed", exploded.fetch("error")
       refute_empty healthy.fetch("tasks"), "the healthy project is unaffected"
       assert_match(/payload failed/, err)
     end
@@ -942,6 +972,66 @@ class CommandsStatusTest < Minitest::Test
 
       liveness = Hive::Commands::Status.new.send(:liveness_kwargs_for, Hive::Task.new(live_folder))
       assert_equal true, liveness.fetch(:pid_alive)
+    end
+  end
+
+  def test_invalid_condition_journal_degrades_only_its_task_to_error
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      corrupt = write_status_task(
+        hive_state, "4-execute", "corrupt-journal-260717-abcd",
+        state_file: "task.md", marker: "EXECUTE_COMPLETE"
+      )
+      write_status_task(
+        hive_state, "4-execute", "healthy-journal-260717-bcde",
+        state_file: "task.md", marker: "EXECUTE_COMPLETE"
+      )
+      File.write(File.join(corrupt, "task-journal.jsonl"), "not-json\n")
+
+      payload = nil
+      _out, err = capture_io do
+        payload = Hive::Commands::Status.new.json_payload([
+          status_project(project_root, hive_state)
+        ])
+      end
+
+      project = payload.fetch("projects").first
+      assert_nil project["error"]
+      assert_equal 2, project.fetch("tasks").size
+      corrupt_row = project.fetch("tasks").find { |row| row["slug"] == "corrupt-journal-260717-abcd" }
+      healthy_row = project.fetch("tasks").find { |row| row["slug"] == "healthy-journal-260717-bcde" }
+      assert_equal "error", corrupt_row.fetch("action")
+      assert_equal "condition_projection_invalid", corrupt_row.fetch("attrs").fetch("reason")
+      assert_equal "ready_to_open_pr", healthy_row.fetch("action")
+      assert_match(/condition projection failed/, err)
+    end
+  end
+
+  def test_condition_projection_filesystem_failure_degrades_to_error_marker
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      folder = write_status_task(
+        hive_state, "4-execute", "unreadable-journal-260717-abcd",
+        state_file: "task.md", marker: "EXECUTE_COMPLETE"
+      )
+      task = Hive::Task.new(folder)
+      marker = Hive::Markers.current(task.state_file)
+      broken_store = Object.new
+      broken_store.define_singleton_method(:read) { |**| raise Errno::EACCES, "blocked" }
+
+      _out, err = capture_io do
+        with_replaced_singleton_method(
+          Hive::TaskProjection::Store, :new, ->(**) { broken_store }
+        ) do
+          projected_marker, projection = Hive::Commands::Status.new.send(
+            :status_projection, task, marker
+          )
+          assert_equal :error, projected_marker.name
+          assert_equal "condition_projection_invalid", projected_marker.attrs.fetch("reason")
+          assert_equal 0, projection["identity"].fetch("task_generation")
+        end
+      end
+      assert_match(/condition projection failed/, err)
     end
   end
 
@@ -1887,6 +1977,24 @@ class CommandsStatusTest < Minitest::Test
     assert_equal :error, row.fetch(:marker_name)
     assert_equal "invalid_task", row.fetch(:marker_attrs).fetch("reason")
     assert_kind_of Time, row.fetch(:folder_mtime)
+  end
+
+  def test_condition_state_label_surfaces_first_gate_diagnostic
+    selection = Struct.new(:effective).new("conditions")
+    gate = Struct.new(:diagnostics)
+    action_type = Struct.new(:condition_warning, :migration_selection, :condition_gate)
+    command = Hive::Commands::Status.new
+    row = { state_label: "waiting" }
+
+    without_diagnostic = action_type.new(nil, selection, gate.new([]))
+    assert_equal "waiting", command.send(:condition_state_label, row, without_diagnostic)
+
+    with_diagnostic = action_type.new(
+      nil, selection,
+      gate.new([ { "condition" => "ChangesPresent", "state" => "unverifiable" } ])
+    )
+    assert_equal "ChangesPresent=unverifiable",
+                 command.send(:condition_state_label, row, with_diagnostic)
   end
 
   private

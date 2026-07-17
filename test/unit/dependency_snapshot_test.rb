@@ -125,6 +125,29 @@ class DependencySnapshotTest < Minitest::Test
     end
   end
 
+  def test_admission_fingerprint_hashes_the_current_task_verdict
+    with_tmp_dir do |root|
+      slug = "independent-task"
+      write_task_meta(root, "4-execute", slug, id: 1)
+      project = File.basename(root)
+      task = FakeTask.new(slug: slug, id: 1, folder: execute_folder(root, slug),
+                          project_root: root, project_name: project)
+      registry_entries = [
+        { "name" => project, "path" => root, "repository_identity" => nil }
+      ]
+
+      fingerprint = Hive::DependencySnapshot.admission_fingerprint(
+        task, registry_entries: registry_entries
+      )
+      expected_payload = [
+        "hive-dependency-admission-v1", project, slug,
+        "clear", "", "", "", "", ""
+      ]
+
+      assert_equal Digest::SHA256.hexdigest(JSON.generate(expected_payload)), fingerprint
+    end
+  end
+
   def test_admission_context_preserves_corrupt_metadata_as_an_error
     with_tmp_dir do |root|
       slug = "corrupt-task"

@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-attempt.v2.json",
+  "title": "hive durable attempt (v2)",
+  "description": "Owner-private mutable lease and terminal receipt for one accepted task-stage attempt. ownership_generation retains the opaque admission token; task_input_epoch is the numeric condition-generation bridge.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "schema_version", "attempt_id", "request_id", "predecessor_attempt_id",
+    "task_id", "project", "task_slug", "intended_stage", "task_generation",
+    "ownership_generation", "task_input_epoch",
+    "progress_token", "provider", "worker_argv", "claim_capability_digest",
+    "starting_revision", "retry_charge", "compatibility",
+    "created_at", "accepted_at", "state", "outcome", "lease_version", "claim_deadline",
+    "first_heartbeat_deadline", "heartbeat_deadline", "wrapper", "worker", "heartbeat_at",
+    "started_at", "ended_at", "latest_revision", "checkpoint", "log_reference",
+    "inherited_outputs", "current_outputs", "receipt", "loss", "diagnostics"
+  ],
+  "properties": {
+    "schema": { "const": "hive-attempt" },
+    "schema_version": { "const": 2 },
+    "attempt_id": { "type": "string", "minLength": 1 },
+    "request_id": { "type": ["string", "null"] },
+    "predecessor_attempt_id": { "type": ["string", "null"] },
+    "task_id": { "type": ["string", "integer", "null"] },
+    "project": { "type": "string", "minLength": 1 },
+    "task_slug": { "type": "string", "minLength": 1 },
+    "intended_stage": { "type": "string", "minLength": 1 },
+    "task_generation": { "type": "string", "minLength": 1 },
+    "ownership_generation": { "type": "string", "minLength": 1 },
+    "task_input_epoch": { "type": "integer", "minimum": 0 },
+    "progress_token": { "type": "string", "minLength": 1 },
+    "provider": { "type": "string", "minLength": 1 },
+    "worker_argv": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "claim_capability_digest": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "starting_revision": { "type": ["string", "null"] },
+    "retry_charge": { "type": "integer", "minimum": 0 },
+    "compatibility": { "type": "boolean" },
+    "created_at": { "type": "string", "format": "date-time" },
+    "accepted_at": { "type": "string", "format": "date-time" },
+    "state": { "enum": ["launching", "running", "terminal", "lost"] },
+    "outcome": { "type": ["string", "null"], "enum": ["succeeded", "failed", "cancelled", null] },
+    "lease_version": { "type": "integer", "minimum": 0 },
+    "claim_deadline": { "$ref": "#/$defs/NullableTimestamp" },
+    "first_heartbeat_deadline": { "$ref": "#/$defs/NullableTimestamp" },
+    "heartbeat_deadline": { "$ref": "#/$defs/NullableTimestamp" },
+    "wrapper": { "anyOf": [{ "$ref": "#/$defs/ProcessIdentity" }, { "type": "null" }] },
+    "worker": { "anyOf": [{ "$ref": "#/$defs/ProcessIdentity" }, { "type": "null" }] },
+    "heartbeat_at": { "$ref": "#/$defs/NullableTimestamp" },
+    "started_at": { "$ref": "#/$defs/NullableTimestamp" },
+    "ended_at": { "$ref": "#/$defs/NullableTimestamp" },
+    "latest_revision": { "type": ["string", "null"] },
+    "checkpoint": { "type": "object" },
+    "log_reference": { "anyOf": [{ "$ref": "#/$defs/OutputReference" }, { "type": "null" }] },
+    "inherited_outputs": { "type": "array", "items": { "$ref": "#/$defs/OutputReference" } },
+    "current_outputs": { "type": "array", "items": { "$ref": "#/$defs/OutputReference" } },
+    "receipt": { "anyOf": [{ "$ref": "#/$defs/Receipt" }, { "type": "null" }] },
+    "loss": { "type": ["object", "null"] },
+    "diagnostics": { "type": "object" }
+  },
+  "$defs": {
+    "NullableTimestamp": {
+      "type": ["string", "null"],
+      "format": "date-time"
+    },
+    "ProcessIdentity": {
+      "type": "object",
+      "required": ["pid", "start_fingerprint", "session_id", "process_group_id"],
+      "properties": {
+        "pid": { "type": "integer", "minimum": 1 },
+        "start_fingerprint": { "type": ["string", "null"] },
+        "session_id": { "type": ["integer", "null"] },
+        "process_group_id": { "type": ["integer", "null"] }
+      }
+    },
+    "OutputReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "size", "sha256"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "size": { "type": "integer", "minimum": 0 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "Receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attempt_id", "task_generation", "ownership_generation", "task_input_epoch",
+        "outcome", "exit_status", "started_at", "ended_at",
+        "final_checkpoint", "output_references", "log_reference"
+      ],
+      "properties": {
+        "attempt_id": { "type": "string", "minLength": 1 },
+        "task_generation": { "type": "string", "minLength": 1 },
+        "ownership_generation": { "type": "string", "minLength": 1 },
+        "task_input_epoch": { "type": "integer", "minimum": 0 },
+        "outcome": { "enum": ["succeeded", "failed", "cancelled"] },
+        "exit_status": { "type": "integer" },
+        "started_at": { "type": "string", "format": "date-time" },
+        "ended_at": { "type": "string", "format": "date-time" },
+        "final_checkpoint": { "type": "object", "minProperties": 1 },
+        "output_references": { "type": "array", "items": { "$ref": "#/$defs/OutputReference" } },
+        "log_reference": { "$ref": "#/$defs/OutputReference" }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "compatibility": { "const": false } } },
+      "then": {
+        "properties": {
+          "worker_argv": { "minItems": 1 },
+          "claim_capability_digest": { "type": "string" }
+        }
+      },
+      "else": {
+        "properties": {
+          "worker_argv": { "maxItems": 0 },
+          "claim_capability_digest": { "type": "null" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "state": { "const": "terminal" } } },
+      "then": { "required": ["receipt"], "properties": { "receipt": { "$ref": "#/$defs/Receipt" } } }
+    },
+    {
+      "if": { "properties": { "state": { "const": "lost" } } },
+      "then": { "required": ["loss"], "properties": { "loss": { "type": "object" } } }
+    }
+  ]
+}

@@ -17,7 +17,7 @@ reconciles and applies policy; it does not own or reap task agents.
 
 | Module | Responsibility |
 |--------|----------------|
-| `Record`, `Store` | Validate v1 records and perform locked guarded transitions with atomic write/fsync/rename persistence. |
+| `Record`, `Store` | Write v2 records, ingest v1/v2, and perform locked guarded transitions with atomic write/fsync/rename persistence. |
 | `Capability`, `Context` | Generate one-time launch authority, authenticate the exact worker process/task/stage, revalidate generation at the mutation boundary, and expose process-local compatibility projections after transport variables are scrubbed. |
 | `Generation` | Bind stable task identity, intended stage, and a workflow progress token into the semantic ownership key. |
 | `Dispatcher` | Resolve receipt replay, live duplicate attachment, loss deferral, capacity, fresh admission, and explicit successors. |
@@ -53,6 +53,14 @@ unchanged completed generation replays its receipt, while a dependency wait
 that later becomes clear advances generation instead of replaying the stale
 exit-75 receipt. A loss successor has a new attempt ID but inherits generation,
 predecessor, outputs, worktree/branch, and an incremented retry charge.
+
+Condition projection adds an explicit numeric `task_input_epoch` to attempt
+records/context while retaining the prerequisite's opaque ownership generation
+as `ownership_generation`. That wire shape is `hive-attempt` v2; the original
+v1 schema remains unchanged. Old v1 records remain readable and bridge to
+epoch 0 in memory; they are not rewritten. Every non-legacy condition event must
+name a durable attempt whose task/stage ownership matches the record. Retry and
+adoption reuse the numeric epoch when accepted inputs are unchanged.
 
 ## State protocol
 
@@ -113,8 +121,9 @@ Treating provider agents as hostile at that OS boundary requires a separate
 broker identity and protected signing/storage authority (tracked in
 [[gaps]]).
 
-Legacy task locks and markers gain optional `attempt_id` and
-`task_generation` projections inside the worker. They remain readable
+Legacy task locks and markers gain optional `attempt_id`, opaque
+`task_generation`/`ownership_generation`, and numeric `task_input_epoch`
+projections inside the worker. They remain readable
 compatibility/evidence records, not ownership truth. The internal log is
 append-only sequenced JSON frames with timestamp, channel, and base64 bytes;
 the CLI still presents ordinary stdout/stderr and the receipt exit status.

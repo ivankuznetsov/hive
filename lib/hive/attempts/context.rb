@@ -10,7 +10,8 @@ module Hive
     class Context
       ENV_PREFIX = "HIVE_ATTEMPT_"
 
-      attr_reader :attempt_id, :task_generation, :project, :task_slug, :intended_stage
+      attr_reader :attempt_id, :task_generation, :ownership_generation,
+                  :project, :task_slug, :intended_stage
 
       class << self
         def current
@@ -27,7 +28,12 @@ module Hive
 
           {
             "attempt_id" => context.attempt_id,
-            "task_generation" => context.task_generation
+            # Compatibility consumers have always treated task_generation as
+            # the opaque durable owner token. Keep that wire meaning stable;
+            # the numeric condition epoch is additive and explicitly named.
+            "task_generation" => context.ownership_generation,
+            "ownership_generation" => context.ownership_generation,
+            "task_input_epoch" => context.task_generation
           }
         end
 
@@ -53,7 +59,8 @@ module Hive
           validate_record!(record, attempt_id: attempt_id, argv: argv, claim_capability: claim_capability)
           @installed = new(
             attempt_id: record.attempt_id,
-            task_generation: record.task_generation,
+            task_generation: record.task_input_epoch,
+            ownership_generation: record.ownership_generation,
             project: record["project"],
             task_slug: record["task_slug"],
             intended_stage: record["intended_stage"]
@@ -135,14 +142,19 @@ module Hive
         end
       end
 
-      def initialize(attempt_id:, task_generation:, project: nil, task_slug: nil, intended_stage: nil)
+      def initialize(attempt_id:, task_generation:, ownership_generation: nil,
+                     project: nil, task_slug: nil, intended_stage: nil)
         @attempt_id = attempt_id.to_s
-        @task_generation = task_generation.to_s
+        @task_generation, bridged_ownership = numeric_generation_or_legacy(task_generation)
+        @legacy_opaque_generation = !bridged_ownership.nil? && ownership_generation.nil?
+        @ownership_generation = ownership_generation&.to_s || bridged_ownership
         @project = project&.to_s
         @task_slug = task_slug&.to_s
         @intended_stage = intended_stage&.to_s
         raise ArgumentError, "attempt context requires an attempt ID" if @attempt_id.empty?
-        raise ArgumentError, "attempt context requires a task generation" if @task_generation.empty?
+        raise ArgumentError, "attempt context task generation must be non-negative" if @task_generation.negative?
+      rescue TypeError
+        raise ArgumentError, "attempt context requires a numeric task generation"
       end
 
       # Revalidate the admitted generation at the command's locked mutation
@@ -156,12 +168,25 @@ module Hive
         current = Generation.resolve(
           task: task, project: project, intended_stage: intended_stage
         )
-        unless current.task_generation == task_generation
+        ownership_matches = current.ownership_generation == ownership_generation
+        epoch_matches = @legacy_opaque_generation || current.task_input_epoch == task_generation
+        unless ownership_matches && epoch_matches
           raise Hive::ConcurrentRunError,
                 "durable attempt #{attempt_id} generation is stale; redispatch the current task state"
         end
 
         @generation_validated = true
+      end
+
+      private
+
+      def numeric_generation_or_legacy(value)
+        return [ Integer(value), nil ] if value.is_a?(Integer) || value.to_s.match?(/\A\d+\z/)
+
+        token = value.to_s
+        raise ArgumentError, "attempt context requires a task generation" if token.empty?
+
+        [ 0, token ]
       end
 
       private_class_method :new

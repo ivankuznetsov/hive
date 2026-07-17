@@ -2,6 +2,8 @@ require "test_helper"
 require "hive/commands/stage_action"
 
 class CommandsStageActionTest < Minitest::Test
+  include HiveTestHelper
+
   def test_call_wraps_unexpected_errors_and_emits_json_error_envelope
     command = Hive::Commands::StageAction.new("plan", "some-slug", json: true)
     command.define_singleton_method(:do_call) do
@@ -46,6 +48,45 @@ class CommandsStageActionTest < Minitest::Test
     assert_match(/plan expects 2-brainstorm or 3-plan/, err.message)
     assert_equal "4-execute", err.current_stage
     assert_equal "3-plan", err.target_stage
+  end
+
+  def test_execute_condition_guard_runs_before_stage_action_accepts_complete_marker
+    with_tmp_dir do |dir|
+      state_file = File.join(dir, "task.md")
+      File.write(state_file, "<!-- EXECUTE_COMPLETE -->\n")
+      task = Struct.new(:state_file).new(state_file)
+      command = Hive::Commands::StageAction.new("open-pr", "some-slug")
+      calls = []
+      guard = lambda do |observed, force:|
+        calls << [ observed, force ]
+        raise Hive::WrongStage, "condition gate blocked"
+      end
+
+      with_replaced_singleton_method(Hive::Conditions::TransitionGuard, :validate!, guard) do
+        error = assert_raises(Hive::WrongStage) do
+          command.send(
+            :validate_marker!, task,
+            { force_source: false, target: "5-open-pr" }
+          )
+        end
+        assert_includes error.message, "condition gate blocked"
+      end
+      assert_equal [ [ task, false ] ], calls
+    end
+  end
+
+  def test_force_source_bypasses_execute_condition_guard_explicitly
+    command = Hive::Commands::StageAction.new("open-pr", "some-slug")
+    called = false
+    guard = ->(*) { called = true }
+
+    with_replaced_singleton_method(Hive::Conditions::TransitionGuard, :validate!, guard) do
+      command.send(
+        :validate_marker!, Struct.new(:state_file).new("/does/not/matter"),
+        { force_source: true, target: "5-open-pr" }
+      )
+    end
+    refute called
   end
 
   def test_resolve_task_reraises_invalid_path_without_from_filter
@@ -160,6 +201,32 @@ class CommandsStageActionTest < Minitest::Test
     assert_equal "error", payload.fetch("error_kind")
     assert_equal Hive::ExitCodes::TEMPFAIL, payload.fetch("exit_code")
     assert_includes payload.fetch("message"), "attempt-lost"
+  end
+
+  def test_condition_gate_error_envelope_preserves_gate_and_recovery_action
+    error = Hive::ConditionGateBlocked.new(
+      "blocked",
+      current_stage: "4-execute", target_stage: "5-open-pr",
+      condition_gate: {
+        "status" => "blocked", "transition" => "execute_to_open_pr",
+        "diagnostics" => [ { "condition" => "AgentHealthy", "state" => "unsatisfied" } ],
+        "waivers" => []
+      },
+      next_action: {
+        "kind" => Hive::Schemas::NextActionKind::RUN,
+        "reason" => "attempt_lost"
+      }
+    )
+    command = Hive::Commands::StageAction.new("open-pr", "task", json: true)
+
+    out, = capture_io { command.send(:emit_error_envelope, error) }
+    payload = JSON.parse(out)
+    assert_equal "blocked", payload.dig("condition_gate", "status")
+    assert_equal "AgentHealthy",
+                 payload.dig("condition_gate", "diagnostics", 0, "condition")
+    assert_equal Hive::Schemas::NextActionKind::RUN, payload.dig("next_action", "kind")
+    assert_equal "4-execute", payload.fetch("current_stage")
+    assert_equal "5-open-pr", payload.fetch("target_stage")
   end
 
 

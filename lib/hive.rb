@@ -13,7 +13,7 @@ module Hive
     # removed; adding new keys is non-breaking and does NOT require a bump.
     # Single source of truth so the two emit sites can't drift.
     SCHEMA_VERSIONS = {
-      "hive-status" => 5,
+      "hive-status" => 6,
       "hive-init" => 2,
       "hive-status-diagnose" => 2,
       "hive-run" => 2,
@@ -76,7 +76,7 @@ module Hive
       # chat. See `Hive::Daemon::DispatchResultQueue` (ADV-1).
       "hive-dispatch-result" => 2,
       # Internal source-of-truth record for durable task-stage ownership.
-      "hive-attempt" => 1
+      "hive-attempt" => 2
     }.freeze
 
     # Closed enum of Diagnostic.generated_by values accepted by the
@@ -125,6 +125,10 @@ module Hive
         if error.is_a?(Hive::WrongStage)
           payload["current_stage"] = error.current_stage if error.current_stage
           payload["target_stage"] = error.target_stage if error.target_stage
+        end
+        if error.is_a?(Hive::ConditionGateBlocked)
+          payload["condition_gate"] = error.condition_gate
+          payload["next_action"] = error.next_action
         end
         if error.is_a?(Hive::ConcurrentRunError)
           payload["holder"] = error.holder if error.holder
@@ -628,6 +632,19 @@ module Hive
 
     def exit_code
       ExitCodes::WRONG_STAGE
+    end
+  end
+
+  # A forward transition rejected by condition authority. Carries the exact
+  # gate and recovery action so JSON callers never need to parse WrongStage
+  # prose or issue a second status request to decide what to do next.
+  class ConditionGateBlocked < WrongStage
+    attr_reader :condition_gate, :next_action
+
+    def initialize(message, condition_gate:, next_action:, **stage_context)
+      super(message, **stage_context)
+      @condition_gate = condition_gate
+      @next_action = next_action
     end
   end
 

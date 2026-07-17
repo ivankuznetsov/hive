@@ -18,6 +18,13 @@ agents are detached durable attempts observed by the daemon;
 fair scheduling, and fenced completion for the
 language-neutral [[commands/refactor-patrol]] lifecycle.
 
+`StatusConsumer` now passes through the additive condition projection fields
+from `hive status --json`. Dispatch still consumes the canonical `action` and
+diagnostic calculated by `TaskAction`; the daemon defines no condition family,
+supersession, or gate rule of its own. Valid snapshots keep polling cheap, and
+status polling never triggers reconciliation, git/GitHub probes, or journal
+writes. See [[modules/conditions]].
+
 ## Module map
 
 | Module | File | Purpose |
@@ -28,6 +35,7 @@ language-neutral [[commands/refactor-patrol]] lifecycle.
 | `Hive::Daemon::StatusConsumer` | `lib/hive/daemon/status_consumer.rb` | Wraps `Open3.capture3("hive status --json")`; returns typed rows including `workflow` and structured `admission_error`. Missing or malformed admission state is converted to `dependency_validation_failed`, `blocked: true`, action `admission_error`, and no command. Envelope shape is hard-validated while forward schema versions remain best-effort. |
 | `Hive::Daemon::StatusReport` | `lib/hive/daemon/status_report.rb` | Shared `hive-daemon-status` producer for `hive daemon status --json` and hivebox. Builds the PID/service/binary/update-nudge envelope as a plain hash, exposes `running_state`, `payload`, and web-safe `safe_payload`, bounds `installed_binary --version` probes to 10s, and owns `BINARY_DRIFT_STATES` / `BINARY_DRIFT_ACTIONABLE` so the CLI producer and web repair affordance read the same enum source. |
 | `Hive::Daemon::ChildSupervisor` | `lib/hive/daemon/child_supervisor.rb` | Owns non-task ancillary children such as digest and patrol jobs. Task-stage agents use [[modules/attempts]] and are never adopted with `wait2` or terminated on daemon shutdown. |
+| `Hive::Conditions::AttemptObserver` | `lib/hive/conditions/attempt_observer.rb` | Observes reconciled terminal/lost durable attempts. For coding execute attempts it idempotently journals the current `AgentHealthy` fact and rebuilds the projection: only a terminal `succeeded` receipt is satisfied; failed/cancelled/lost outcomes fail closed. Confirmed deliveries are memoized in-process before task lookup/journal parsing; restart rechecks the durable journal once. |
 | `Hive::Daemon::Dispatcher` | `lib/hive/daemon/dispatcher.rb` | The poll-classify-dispatch loop. Glues all of the above. Public `tick(now:)` for tests, `run_forever` for production with TERM/INT/HUP signal traps. |
 | `Hive::Daemon::Logger` | `lib/hive/daemon/logger.rb` | One-JSON-line-per-event structured logger. Closed event enum (unknown name raises). Size-rotated. |
 | `Hive::Daemon::PlanApproval` | `lib/hive/daemon/plan_approval.rb` | Safely turns daemon-enabled `3-plan` approval pauses into `hive develop ... --from 3-plan` dispatches by validating command shape and flipping `WAITING` to `COMPLETE`. |
@@ -55,6 +63,7 @@ hive daemon start
        └─ Hive::Daemon::Dispatcher.run_forever
             ├─ Hive::Daemon::Logger              (~/Dev/hive/logs/daemon.log, JSON-line)
             ├─ Hive::Attempts::Reconciler        (adopt/suspect/lost before admission)
+            │    └─ Hive::Conditions::AttemptObserver (terminal/lost health journal)
             ├─ Hive::Attempts::Dispatcher        (shared task-generation admission)
             ├─ Hive::Daemon::ConcurrencyController
             ├─ Hive::Daemon::ChildSupervisor     (ancillary jobs only)

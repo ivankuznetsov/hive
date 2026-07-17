@@ -13,6 +13,7 @@ require "hive/workflows"
 require "hive/commit_or_rollback"
 require "hive/dependency_snapshot"
 require "hive/attempts/context"
+require "hive/conditions/transition_guard"
 
 module Hive
   module Commands
@@ -180,7 +181,9 @@ module Hive
 
       def validate_move!(task, dest_stage, marker)
         dest = stage_for_dest!(task, dest_stage)
-        return if dest.index <= task.stage_index || @force
+        return if dest.index <= task.stage_index
+        Hive::Conditions::TransitionGuard.validate!(task, force: @force, source: "approve")
+        return if @force
         return if VALID_TERMINAL_MARKERS.include?(marker.name)
 
         valid = VALID_TERMINAL_MARKERS.map { |m| ":#{m}" }.join(", ")

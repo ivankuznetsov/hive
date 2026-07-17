@@ -23,10 +23,25 @@ class AttemptsGenerationTest < Minitest::Test
       next_stage = Hive::Attempts::Generation.resolve(task: task, project: "demo", intended_stage: "4-execute")
 
       assert_equal first.task_generation, second.task_generation
+      assert_equal first.task_generation, first.ownership_generation
+      assert_equal 0, first.task_input_epoch
       refute_equal first.task_generation, next_stage.task_generation
       assert_equal "id:42", first.task_locator
       assert_match(/\A[0-9a-f]{64}\z/, first.progress_token)
     end
+  end
+
+
+  def test_explicit_input_epoch_is_numeric_and_does_not_replace_ownership_generation
+    task = FakeTask.new(id: 42, slug: "task-one", state_file: "/missing")
+    generation = Hive::Attempts::Generation.resolve(
+      task: task, project: "demo", intended_stage: "4-execute",
+      ownership_generation: "opaque-owner", task_input_epoch: 9
+    )
+
+    assert_equal "opaque-owner", generation.task_generation
+    assert_equal "opaque-owner", generation.ownership_generation
+    assert_equal 9, generation.task_input_epoch
   end
 
   def test_legacy_locator_and_progress_change_are_deterministic

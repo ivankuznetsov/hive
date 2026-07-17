@@ -406,9 +406,12 @@ class RunApproveTest < Minitest::Test
         assert_includes err, "ambiguous"
         assert_includes err, "multiple stages"
 
-        # Folder-path target disambiguates and works.
-        capture_io { Hive::Commands::Approve.new(inbox, force: true).call }
-        assert File.directory?(File.join(dir, ".hive-state", "stages", "2-brainstorm", slug))
+        # A folder path disambiguates task resolution, but dependency admission
+        # still rejects the duplicate qualified task identity before mutation.
+        _, err, status = with_captured_exit { Hive::Commands::Approve.new(inbox, force: true).call }
+        assert_equal Hive::ExitCodes::CONFIG, status
+        assert_includes err, "dependency_validation_failed"
+        assert File.directory?(inbox)
       end
     end
   end

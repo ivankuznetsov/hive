@@ -45,6 +45,7 @@ module Hive
         ICONS = {
           "agent_running"   => "🤖",
           "error"           => "⚠ ",
+          "admission_error" => "⚠ ",
           "recover_execute" => "⚠ ",
           "recover_review"  => "⚠ ",
           "needs_input"     => "⏸ ",
@@ -220,6 +221,7 @@ module Hive
 
         def status_label(row)
           base = action_state_label(row)
+          return base if row.admission_error
           return base unless row.blocked
 
           # Append the dependency block rather than replace the action-state
@@ -235,10 +237,18 @@ module Hive
         # dependency block. Shared by status_label so the blocked and
         # unblocked paths compute the same base label.
         def action_state_label(row)
+          return admission_error_status(row) if row.action_key.to_s == "admission_error"
           return review_recovery_status(row) if row.action_key.to_s == "recover_review"
           return error_status(row) if row.action_key.to_s == "error"
 
           row.action_label.to_s
+        end
+
+        def admission_error_status(row)
+          error = row.admission_error || {}
+          code = Hive::Tui::Text.sanitize(error["reason_code"])
+          correction = Hive::Tui::Text.sanitize(error["safe_correction"])
+          [ "ADMISSION #{code}", correction ].reject(&:empty?).join(": ")
         end
 
         def dependency_status(row)

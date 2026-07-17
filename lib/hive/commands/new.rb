@@ -11,6 +11,7 @@ require "hive/task_meta"
 require "hive/workflows"
 require "hive/workflow_selection"
 require "hive/tui/text"
+require "hive/dependencies"
 
 module Hive
   module Commands
@@ -117,7 +118,7 @@ module Hive
         slug = @slug_override || derive_slug(@text)
         validate_slug!(slug)
         depends_on = normalize_dependency(@depends_on)
-        validate_dependency!(depends_on) if depends_on
+        depends_on = validate_dependency!(depends_on) if depends_on
         workflow_info = resolve_workflow(project)
         workflow = workflow_info.fetch(:descriptor)
         entry_stage = workflow.stages.first
@@ -258,16 +259,16 @@ module Hive
       end
 
       def validate_dependency!(value)
-        return if value.match?(/\A\d+\z/) || SLUG_RE.match?(value)
+        Hive::Dependencies.parse_reference(value).to_s
+      rescue Hive::Dependencies::InvalidReference
 
         # Describe the accepted shape in plain English for humans and
         # agents; the raw offending value stays in the structured `value:`
         # field for machine consumers (the regex source is an
         # implementation detail, not an operator-facing format).
         raise InvalidDependencyError.new(
-          "invalid dependency '#{value}' — expected a prerequisite task id " \
-          "(a positive integer) or a slug (lowercase, starting with a letter, " \
-          "e.g. add-export-endpoint-260618-ab12)",
+          "invalid dependency '#{value}' — expected one prerequisite task id, " \
+          "slug, or explicit project:slug reference",
           value: value
         )
       end

@@ -2,6 +2,76 @@ require "test_helper"
 require "hive/task_meta"
 
 class TaskMetaTest < Minitest::Test
+  def test_read_for_admission_distinguishes_absent_metadata
+    Dir.mktmpdir do |dir|
+      result = Hive::TaskMeta.read_for_admission(dir)
+
+      assert_equal :absent, result.status
+      assert_nil result.error
+      assert_equal Hive::TaskMeta.empty, result.data
+    end
+  end
+
+  def test_read_for_admission_rejects_unreadable_yaml
+    Dir.mktmpdir do |dir|
+      File.write(File.join(dir, "meta.yml"), "depends_on: [unterminated\n")
+
+      result = Hive::TaskMeta.read_for_admission(dir)
+
+      assert_equal :unreadable, result.status
+      assert_match(/could not parse/, result.error)
+    end
+  end
+
+  def test_read_for_admission_rejects_non_mapping_yaml
+    Dir.mktmpdir do |dir|
+      File.write(File.join(dir, "meta.yml"), "- depends_on: base-task\n")
+
+      result = Hive::TaskMeta.read_for_admission(dir)
+
+      assert_equal :invalid, result.status
+      assert_match(/must contain a mapping/, result.error)
+    end
+  end
+
+  def test_read_for_admission_rejects_invalid_dependency_shape
+    Dir.mktmpdir do |dir|
+      File.write(File.join(dir, "meta.yml"), { "depends_on" => [ "base-task" ] }.to_yaml)
+
+      result = Hive::TaskMeta.read_for_admission(dir)
+
+      assert_equal :invalid, result.status
+      assert_match(/depends_on/, result.error)
+    end
+  end
+
+  def test_read_for_admission_rejects_duplicate_dependency_keys
+    Dir.mktmpdir do |dir|
+      File.write(
+        File.join(dir, "meta.yml"),
+        "depends_on: blocked-task\ndepends_on: completed-task\n"
+      )
+
+      result = Hive::TaskMeta.read_for_admission(dir)
+
+      assert_equal :invalid, result.status
+      assert_match(/duplicate depends_on/, result.error)
+      assert_equal :metadata_invalid, result.reason
+    end
+  end
+
+  def test_read_for_admission_reports_non_yaml_read_errors
+    Dir.mktmpdir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "meta.yml"))
+
+      result = Hive::TaskMeta.read_for_admission(dir)
+
+      assert_equal :unreadable, result.status
+      assert_match(/could not read/, result.error)
+      assert_equal :metadata_unreadable, result.reason
+    end
+  end
+
   include HiveTestHelper
 
   def test_write_and_read_round_trip
@@ -193,6 +263,22 @@ class TaskMetaTest < Minitest::Test
       assert_equal 5, meta[:id]
       assert_equal "derived-slug-folder", meta[:slug],
                    "a missing slug must fall back to the folder basename"
+    end
+  end
+
+  def test_update_helpers_refuse_to_rewrite_corrupt_metadata
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, "meta.yml")
+      original = "depends_on: [unterminated\n"
+      File.write(path, original)
+
+      assert_raises(Hive::TaskMeta::InvalidMetadata) do
+        Hive::TaskMeta.update_display_name(dir, "Do Not Rewrite")
+      end
+      assert_raises(Hive::TaskMeta::InvalidMetadata) do
+        Hive::TaskMeta.update_id(dir, 42)
+      end
+      assert_equal original, File.binread(path)
     end
   end
 end

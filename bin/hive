@@ -4,6 +4,7 @@ $LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
 
 require "hive"
 require "hive/cli"
+require "hive/refactor_patrol/reporter"
 require "json"
 
 if ARGV == [ "--version" ] || ARGV == [ "-v" ]
@@ -23,7 +24,7 @@ JSON_USAGE_ERROR_CONTRACTS = {
   "drop" => { schema: "hive-drop", error_kind: "invalid_task_path" },
   "findings" => { schema: "hive-findings", error_kind: "invalid_task_path" },
   "patrol" => { schema: "hive-patrol", error_kind: "error" },
-  "refactor-patrol" => { schema: "hive-refactor-patrol", error_kind: "error" },
+  "refactor-patrol" => { reporter: :refactor_patrol, error_kind: "error" },
   "setup" => { schema: "hive-setup", schema_version: false, error_kind: "usage" },
   "connect" => { error_kind: "usage", extras: { "service" => "screenote" } },
   "disconnect" => { error_kind: "usage", extras: { "service" => "screenote" } },
@@ -312,12 +313,89 @@ def json_usage_error_contract(argv)
   when "digest"
     schema = digest_merged_pr_argv?(option_argv) ? "hive-merged-pr-digest" : "hive-digest"
     return { schema: schema, error_kind: "usage" }
+  when "refactor-patrol"
+    if (jobs = refactor_patrol_jobs_argv(option_argv))
+      return {
+        schema: "hive-refactor-patrol-jobs", error_kind: "usage",
+        extras: { "action" => jobs.fetch(:action) }
+      }
+    end
   end
 
   JSON_USAGE_ERROR_CONTRACTS[command]
 end
 
-def json_usage_error_payload(contract, error)
+def refactor_patrol_jobs_argv(argv)
+  list = nil
+  full = nil
+  show = false
+  modifier = argv.any? do |arg|
+    arg == "--limit" || arg.start_with?("--limit=") ||
+      arg == "--cursor" || arg.start_with?("--cursor=")
+  end
+  argv.each do |arg|
+    if arg == "--show" || arg.start_with?("--show=")
+      show = true
+    elsif %w[--no-list --skip-list].include?(arg)
+      list = false
+    elsif arg == "--list"
+      list = true
+    elsif arg.start_with?("--list=")
+      value = arg.split("=", 2).last.to_s.downcase
+      list = !%w[false f no n 0].include?(value)
+    elsif %w[--no-full --skip-full].include?(arg)
+      full = false
+    elsif arg == "--full"
+      full = true
+    elsif arg.start_with?("--full=")
+      value = arg.split("=", 2).last.to_s.downcase
+      full = !%w[false f no n 0].include?(value)
+    end
+  end
+  action = if list == true
+    "list"
+  elsif show
+    "show"
+  end
+  return unless action || full == true || modifier
+
+  { action: action }
+end
+
+def refactor_patrol_v2_argv?(argv)
+  return true if argv.any? do |arg|
+    arg == "--pr" || arg.start_with?("--pr=") ||
+      arg == "--job-manifest" || arg.start_with?("--job-manifest=")
+  end
+
+  actions = nil
+  argv.each do |arg|
+    if %w[--no-actions --skip-actions].include?(arg)
+      actions = false
+    elsif arg == "--actions"
+      actions = true
+    elsif arg.start_with?("--actions=")
+      value = arg.split("=", 2).last.to_s.downcase
+      actions = !%w[false f no n 0].include?(value)
+    end
+  end
+  actions == true
+end
+
+def json_usage_error_payload(contract, error, argv: [])
+  if contract[:reporter] == :refactor_patrol
+    version = if refactor_patrol_v2_argv?(argv)
+      Hive::RefactorPatrol::Reporter::V2_SCHEMA_VERSION
+    else
+      Hive::RefactorPatrol::Reporter::V1_SCHEMA_VERSION
+    end
+    return Hive::RefactorPatrol::Reporter.error_envelope(
+      error,
+      version: version,
+      error_kind: contract.fetch(:error_kind)
+    )
+  end
+
   schema = contract[:schema]
   error_kind = contract.fetch(:error_kind)
   extras = contract.fetch(:extras, {})
@@ -351,7 +429,7 @@ def emit_json_usage_error(argv, error)
   contract = json_usage_error_contract(argv)
   return false unless contract && json_requested?(argv)
 
-  puts JSON.generate(json_usage_error_payload(contract, error))
+  puts JSON.generate(json_usage_error_payload(contract, error, argv: argv))
   true
 rescue Errno::EPIPE, JSON::GeneratorError
   true

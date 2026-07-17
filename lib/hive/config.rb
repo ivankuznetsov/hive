@@ -6,6 +6,7 @@ require "hive/agent_profiles"
 require "hive/babysitter/interval"
 require "hive/permission_scope"
 require "hive/paths"
+require "hive/repository_identity"
 require "hive/screenote/oauth_client"
 
 module Hive
@@ -423,8 +424,25 @@ module Hive
         "poll_interval_sec" => 600,
         "agent" => "claude",
         "min_confidence_to_fix" => "medium",
-        "max_findings_per_feature" => 10,
+        "min_alpha_to_fix" => 70,
+        "max_findings_per_feature" => 3,
+        "max_features_per_cycle" => 12,
+        "max_fixes_per_feature_per_cycle" => 1,
+        "max_fix_attempts_per_cycle" => 6,
         "max_prs_per_cycle" => 3,
+        # Patrol tiers bound both measured tokens and agent launches. The
+        # launch ceilings are the provider-independent fail-safe when a CLI
+        # omits usable token accounting. Cached tokens count toward the token
+        # ceilings because they still consume provider capacity.
+        "max_tokens_per_cycle" => 200_000,
+        "max_tokens_per_day" => 600_000,
+        "max_tokens_per_agent" => 50_000,
+        "max_agent_spawns_per_cycle" => 3,
+        "max_agent_spawns_per_day" => 8,
+        "max_budget_usd_per_agent" => 25,
+        # Architecture discovery/fixing may use a wider per-cycle and
+        # per-agent envelope, but still shares the mode's daily ceilings.
+        "architecture_budget_multiplier" => 2,
         # Open ready (non-draft) PRs by default so the babysitter — which
         # skips draft PRs — picks them up. Set `draft_prs: true` per project
         # to revert to draft PRs that need a manual "ready" toggle first.
@@ -433,14 +451,17 @@ module Hive
         "include" => [],
         "exclude" => [ "node_modules", "dist", "build", "vendor", ".git" ],
         "commands" => {
+          "docs" => nil,
           "format" => nil,
           "lint" => nil,
           "typecheck" => nil,
           "test" => nil
         },
         "review" => {
-          "max_context_files" => 24,
-          "max_owned_files" => 12,
+          # Keep one ordinary review slice small enough for the low 40k tier.
+          # Architecture patrol has its own wider slice below.
+          "max_context_files" => 4,
+          "max_owned_files" => 4,
           # Patrol PRs flow into 6-review the same as human PRs, but patrol
           # opens many PRs per cycle — running the multi-persona
           # ce-code-review fan-out (6–18 subagents) on each is expensive.
@@ -466,15 +487,43 @@ module Hive
       # and state independent from patrol so the two commands can diverge.
       "refactor_patrol" => {
         "enabled" => false,
+        # Discovery consent never grants mutation authority. These two gates
+        # are intentionally independent and default off for fresh and legacy
+        # projects alike.
+        "auto_fix" => {
+          "enabled" => false,
+          # Fix agents need a real root-confined write sandbox. Discovery may
+          # use any configured reviewer, but only the Codex profile currently
+          # advertises workspace-write enforcement.
+          "agent" => "codex"
+        },
+        "issue_filing" => {
+          "enabled" => false,
+          # Avoid turning every cap warning into tracker noise. Issue filing
+          # is reserved for proposals with material, proposal-specific
+          # leverage in addition to a strategic routing reason.
+          "min_leverage_score" => 0.25
+        },
         "agent" => "claude",
         "min_confidence" => "medium",
-        "max_theses_per_feature" => 3,
+        "min_leverage_score" => 0.25,
+        "max_theses_per_feature" => 1,
         "max_theses_per_run" => 10,
+        # One architecture-discovery child must never multiply the per-agent
+        # timeout by every mapped feature. The reviewer passes the remaining
+        # whole-run budget into each spawn and checkpoints unfinished features
+        # for a later daemon child.
+        "max_review_seconds_per_run" => 3600,
         "include" => [],
         "exclude" => [ "node_modules", "dist", "build", "vendor", ".git" ],
         "commands" => {
+          "docs" => nil,
           "format" => nil,
           "lint" => nil,
+          # Optional project-owned API/contract compatibility check. When a
+          # language has no built-in declaration adapter, a passing command is
+          # required before architecture patrol may publish an automatic fix.
+          "public_contract" => nil,
           "typecheck" => nil,
           "test" => nil
         },
@@ -497,8 +546,8 @@ module Hive
           }
         },
         "review" => {
-          "max_context_files" => 24,
-          "max_owned_files" => 12
+          "max_context_files" => 6,
+          "max_owned_files" => 6
         }
       },
       # Daily shipped digest. The daemon schedules one global `hive digest`
@@ -929,7 +978,8 @@ module Hive
         out << {
           "name" => entry["name"],
           "path" => abs_path,
-          "hive_state_path" => entry["hive_state_path"] || File.join(abs_path, ".hive-state")
+          "hive_state_path" => entry["hive_state_path"] || File.join(abs_path, ".hive-state"),
+          "repository_identity" => entry["repository_identity"]
         }
       end
     end
@@ -1449,13 +1499,15 @@ module Hive
       defaults
     end
 
-    def register_project(name:, path:)
+    def register_project(name:, path:, repository_identity: :detect)
       entry = nil
       update_global_config! do |data|
         data["registered_projects"] = Array(data["registered_projects"])
         abs_path = File.expand_path(path)
         hive_state_path = File.join(abs_path, ".hive-state")
         entry = { "name" => name, "path" => abs_path, "hive_state_path" => hive_state_path }
+        identity = repository_identity == :detect ? Hive::RepositoryIdentity.current(abs_path) : repository_identity
+        entry["repository_identity"] = identity if identity
         real_path = realpath_or_nil(abs_path)
         entry["real_path"] = real_path if real_path
         existing = data["registered_projects"].find { |p| p.is_a?(Hash) && p["name"] == name }
@@ -2501,20 +2553,44 @@ module Hive
       "ultrapatrol" => {
         "trigger" => "timer",
         "poll_interval_sec" => 1800,
+        "max_tokens_per_cycle" => 800_000,
+        "max_tokens_per_day" => 2_400_000,
+        "max_tokens_per_agent" => 100_000,
+        "max_agent_spawns_per_cycle" => 10,
+        "max_agent_spawns_per_day" => 36,
+        "max_budget_usd_per_agent" => 100,
         "enabled" => true
       },
       "high" => {
         "trigger" => "timer",
         "poll_interval_sec" => 7200,
+        "max_tokens_per_cycle" => 400_000,
+        "max_tokens_per_day" => 1_200_000,
+        "max_tokens_per_agent" => 75_000,
+        "max_agent_spawns_per_cycle" => 6,
+        "max_agent_spawns_per_day" => 18,
+        "max_budget_usd_per_agent" => 50,
         "enabled" => true
       },
       "medium" => {
         "trigger" => "timer",
         "poll_interval_sec" => 14_400,
+        "max_tokens_per_cycle" => 200_000,
+        "max_tokens_per_day" => 600_000,
+        "max_tokens_per_agent" => 50_000,
+        "max_agent_spawns_per_cycle" => 3,
+        "max_agent_spawns_per_day" => 8,
+        "max_budget_usd_per_agent" => 25,
         "enabled" => true
       },
       "low" => {
         "trigger" => "new_commits",
+        "max_tokens_per_cycle" => 100_000,
+        "max_tokens_per_day" => 200_000,
+        "max_tokens_per_agent" => 40_000,
+        "max_agent_spawns_per_cycle" => 1,
+        "max_agent_spawns_per_day" => 2,
+        "max_budget_usd_per_agent" => 10,
         "enabled" => true
       },
       "off" => {
@@ -2524,8 +2600,18 @@ module Hive
     PATROL_CONFIDENCE_LEVELS = %w[low medium high].freeze
     PATROL_NUMERIC_BOUNDS = [
       [ "poll_interval_sec", 60 ],
+      [ "min_alpha_to_fix", 0 ],
       [ "max_findings_per_feature", 1 ],
-      [ "max_prs_per_cycle", 1 ]
+      [ "max_features_per_cycle", 1 ],
+      [ "max_fixes_per_feature_per_cycle", 1 ],
+      [ "max_fix_attempts_per_cycle", 1 ],
+      [ "max_prs_per_cycle", 1 ],
+      [ "max_tokens_per_cycle", 1 ],
+      [ "max_tokens_per_day", 1 ],
+      [ "max_tokens_per_agent", 1 ],
+      [ "max_agent_spawns_per_cycle", 1 ],
+      [ "max_agent_spawns_per_day", 1 ],
+      [ "architecture_budget_multiplier", 1 ]
     ].freeze
 
     def validate_patrol!(cfg, source_path)
@@ -2585,6 +2671,19 @@ module Hive
         end
       end
 
+      if patrol["min_alpha_to_fix"].to_i > 100
+        raise ConfigError,
+              "patrol.min_alpha_to_fix in #{describe_source(source_path)} must be <= 100; " \
+              "got #{patrol['min_alpha_to_fix'].inspect}"
+      end
+
+      per_agent_budget = patrol["max_budget_usd_per_agent"]
+      unless per_agent_budget.is_a?(Numeric) && per_agent_budget.positive?
+        raise ConfigError,
+              "patrol.max_budget_usd_per_agent in #{describe_source(source_path)} must be a positive number; " \
+              "got #{per_agent_budget.inspect} (#{per_agent_budget.class})"
+      end
+
       validate_agent_name!(patrol["agent"], "patrol.agent", source_path)
       validate_path_glob_list!(patrol["include"], "patrol.include", source_path)
       validate_path_glob_list!(patrol["exclude"], "patrol.exclude", source_path)
@@ -2600,7 +2699,7 @@ module Hive
               "got #{commands.inspect} (#{commands.class})"
       end
 
-      %w[format lint typecheck test].each do |key|
+      %w[docs format lint typecheck test].each do |key|
         value = commands[key]
         next if value.nil?
         next if value.is_a?(String) && !value.strip.empty?
@@ -2658,7 +2757,8 @@ module Hive
     ].freeze
     REFACTOR_PATROL_NUMERIC_BOUNDS = {
       "max_theses_per_feature" => 1,
-      "max_theses_per_run" => 1
+      "max_theses_per_run" => 1,
+      "max_review_seconds_per_run" => 1
     }.freeze
     REFACTOR_PATROL_CAP_BOUNDS = {
       "max_files" => 1,
@@ -2678,14 +2778,23 @@ module Hive
       return if refactor.nil?
 
       REFACTOR_PATROL_BOOLEAN_KEYS.each do |key|
-        validate_boolean!(refactor[key], "refactor_patrol.#{key}", source_path)
+        validate_required_boolean!(refactor[key], "refactor_patrol.#{key}", source_path)
       end
+      validate_refactor_patrol_gate!(refactor, "auto_fix", source_path)
+      validate_refactor_patrol_gate!(refactor, "issue_filing", source_path)
 
       confidence = refactor["min_confidence"]
       unless REFACTOR_PATROL_CONFIDENCE_LEVELS.include?(confidence)
         raise ConfigError,
               "refactor_patrol.min_confidence in #{describe_source(source_path)} must be one of " \
               "#{REFACTOR_PATROL_CONFIDENCE_LEVELS.inspect}; got #{confidence.inspect} (#{confidence.class})"
+      end
+
+      leverage_score = refactor["min_leverage_score"]
+      unless leverage_score.is_a?(Numeric) && leverage_score.between?(0, 1)
+        raise ConfigError,
+              "refactor_patrol.min_leverage_score in #{describe_source(source_path)} " \
+              "must be a number between 0 and 1; got #{leverage_score.inspect} (#{leverage_score.class})"
       end
 
       REFACTOR_PATROL_NUMERIC_BOUNDS.each do |key, min|
@@ -2701,6 +2810,34 @@ module Hive
       validate_refactor_patrol_review!(refactor, source_path)
     end
 
+    def validate_refactor_patrol_gate!(refactor, key, source_path)
+      gate = refactor[key]
+      unless gate.is_a?(Hash)
+        raise ConfigError,
+              "refactor_patrol.#{key} in #{describe_source(source_path)} must be a Hash; " \
+              "got #{gate.inspect} (#{gate.class})"
+      end
+
+      validate_required_boolean!(gate["enabled"], "refactor_patrol.#{key}.enabled", source_path)
+      validate_agent_name!(gate["agent"], "refactor_patrol.auto_fix.agent", source_path) if key == "auto_fix"
+      if key == "issue_filing"
+        score = gate["min_leverage_score"]
+        unless score.is_a?(Numeric) && score.between?(0, 1)
+          raise ConfigError,
+                "refactor_patrol.issue_filing.min_leverage_score in #{describe_source(source_path)} " \
+                "must be a number between 0 and 1; got #{score.inspect} (#{score.class})"
+        end
+      end
+    end
+
+    def validate_required_boolean!(value, label, source_path)
+      return if value == true || value == false
+
+      raise ConfigError,
+            "#{label} in #{describe_source(source_path)} must be a boolean " \
+            "(true / false); got #{value.inspect} (#{value.class})"
+    end
+
     def validate_refactor_patrol_commands!(refactor, source_path)
       commands = refactor["commands"]
       unless commands.is_a?(Hash)
@@ -2709,7 +2846,7 @@ module Hive
               "got #{commands.inspect} (#{commands.class})"
       end
 
-      %w[format lint typecheck test].each do |key|
+      %w[docs format lint public_contract typecheck test].each do |key|
         value = commands[key]
         next if value.nil?
         next if value.is_a?(String) && !value.strip.empty?

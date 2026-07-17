@@ -3,11 +3,11 @@ title: Hive::Agent
 type: module
 source: lib/hive/agent.rb, lib/hive/agent_limit.rb, lib/hive/claude_launcher.rb, lib/hive/scripts/interactive_claude_wrapper.sh
 created: 2026-04-25
-updated: 2026-07-09
+updated: 2026-07-16
 tags: [agent, claude, subprocess]
 ---
 
-**TLDR**: Agent subprocess wrapper. Sets `AGENT_WORKING` pre-spawn for marker-owned spawns, streams stdout/stderr to the per-stage log, captures a bounded final-message summary, enforces budget + timeout, kills on signal or timeout, classifies provider account/rate/quota limits before generic failures, and translates the exit into a status/marker according to the selected `AgentProfile` status mode. The state file is mutated atomically by `Markers.set` (tempfile + rename); `Markers.current` always reads a complete file.
+**TLDR**: Agent subprocess wrapper. Sets `AGENT_WORKING` pre-spawn for marker-owned spawns, streams stdout/stderr to the per-stage log, captures a bounded final-message summary, enforces native budget-equivalent, streamed token, optional completed-turn, and wall-clock limits, kills the process group on exhaustion or completed output, classifies provider account/rate/quota limits before generic failures, and translates the exit into a status/marker according to the selected `AgentProfile` status mode. The state file is mutated atomically by `Markers.set` (tempfile + rename); `Markers.current` always reads a complete file.
 
 ## Class shape
 
@@ -16,6 +16,8 @@ Hive::Agent.new(
   task:,                # Hive::Task
   prompt:,              # rendered ERB string
   max_budget_usd:,      # required, no default
+  max_tokens: nil,      # optional positive in-flight token ceiling
+  max_turns: nil,       # optional positive Claude completed-turn ceiling
   timeout_sec:,         # required, no default
   add_dirs: [],         # extra --add-dir paths
   cwd: nil,             # defaults to task.folder
@@ -23,16 +25,21 @@ Hive::Agent.new(
   profile: nil,         # AgentProfile; defaults to claude profile
   expected_output: nil, # used by :output_file_exists profiles
   status_mode: nil,     # per-spawn override
-  permission_mode: nil, # Claude-only override; nil uses profile default/config caller
+  permission_mode: nil, # profile-owned override; nil uses profile default/config caller
   allowed_tools: nil,   # Claude-only --allowedTools CSV source
   disallowed_tools: nil,# Claude-only --disallowedTools CSV source
-  cli_flags: []         # per-run argv extras, currently Claude model/effort pins
+  cli_flags: []         # per-run Claude argv extras (model/effort or verified capabilities)
 )
 ```
 
 ## Constants
 
 - `FINAL_MESSAGE_TAIL_BYTES = 64 * 1024` caps the plain stdout/stderr tail retained in `result[:final_message]` when no structured final agent message was parsed.
+- `TERMINATION_GRACE_SECONDS = 3` bounds graceful shutdown after a streamed token ceiling, completed-turn ceiling, or completed expected output before Hive escalates the process group to KILL.
+- `COMPLETION_EVENT_GRACE_SECONDS = 3` lets an already-generated Claude `Write`
+  and its usage-bearing turn delta settle in either event order; expiry or a
+  next-turn start sends TERM, so the protocol allowance cannot become another
+  reasoning turn.
 
 ## Provider-limit classification
 
@@ -96,7 +103,7 @@ with `"Error: When using --print, --output-format=stream-json requires
 --verbose"`. `--no-session-persistence` ensures every invocation starts
 fresh.
 
-Claude permission flags are configurable per spawn. If no
+Permission flags are profile-owned and configurable per spawn. For Claude, if no
 `permission_mode:` is supplied, the profile's `permission_skip_flag`
 is used (`--dangerously-skip-permissions` for Claude). If
 `permission_mode: "bypassPermissions"` is supplied, Hive keeps using the
@@ -104,6 +111,13 @@ skip flag for backward-compatible headless behavior. Any other Claude
 permission mode is emitted as `--permission-mode <mode>`; current config
 validation accepts `acceptEdits`, `auto`, `bypassPermissions`, `default`,
 `dontAsk`, and `plan`.
+
+`workspace-write` is a special Hive permission mode, not a Claude mode. It asks
+the selected profile for `workspace_write_flags` and raises when that profile
+cannot guarantee a root-confined writable sandbox. The built-in Codex profile
+uses `--sandbox workspace-write`, approval policy `never`, ephemeral execution,
+and ignored user config/rules; architecture-patrol auto-fix runs with that mode
+and the isolated fix worktree as `cwd`.
 
 Claude tool-scope flags are also per spawn. `allowed_tools:` and
 `disallowed_tools:` are emitted only for the Claude profile and only when
@@ -125,6 +139,16 @@ value (fresh init offers `low`, `medium`, and `high`).
 tmux-backed Claude sessions, and the shell wrapper forwards `--model` and
 `--effort` without shell re-parsing.
 
+Read-only architecture discovery is a separate Claude-only launch contract.
+`Hive::RefactorPatrol::ReviewAgentRunner` resolves the existing read-only tool
+scope and also asks the profile for its verified `safe_mode` capability. Hive
+runs `claude --safe-mode --help` once per binary/version/capability tuple and
+fails closed if the installed or operator-overridden binary does not advertise
+the flag. The resulting argv keeps `--safe-mode` ahead of project-controlled
+customizations; unrelated Claude launches do not receive it. Discovery still
+uses Claude's positional prompt, while Codex's normal and workspace-write
+launches send the prompt through stdin with `-` in argv.
+
 ## `spawn_and_wait` (the long part)
 
 1. Open a logfile (`<task.log_dir>/<label>-<UTC-ts>.log`), append a `[hive] <ts> spawn cwd=… cmd=…` line.
@@ -136,12 +160,12 @@ tmux-backed Claude sessions, and the shell wrapper forwards `--model` and
    uses the PID for liveness, and drop cleanup uses the start time to reject a
    reused PID before signalling the recorded child.
 6. Trap `INT`/`TERM` to forward `kill -TERM -<pgid>`. Old handlers are restored in `ensure`.
-7. Reader thread: `r.each_line` writes timestamped lines to the log, captures the last structured agent final message it recognizes, and captures the first raw stream line whose text matches `Hive::AgentLimit`. Claude-style `result` / `assistant` events and Codex-style `item.completed` assistant messages set `result[:final_message_source] = :structured`; non-JSON output is retained as a bounded plain tail with `:plain` source.
-8. Polling loop: `Process.wait(pid, WNOHANG)` every `[remaining, 0.2].min` seconds until the deadline.
+7. Reader thread: `r.each_line` writes timestamped lines to the log, captures the last structured agent final message it recognizes, and captures the first raw stream line whose text matches `Hive::AgentLimit`. Claude-style `result` / `assistant` events and Codex-style `item.completed` assistant messages set `result[:final_message_source] = :structured`; non-JSON output is retained as a bounded plain tail with `:plain` source. When `max_tokens` is set, `StreamTokenMeter` also converts usage events into one monotonic count. Claude message-start/delta events sum completed turns while maxing cumulative current-turn fields; terminal run totals replace the aggregate only when they are not smaller than already observed usage.
+8. Polling loop: `Process.wait(pid, WNOHANG)` every `[remaining, 0.2].min` seconds until the deadline. Reaching `max_tokens`, reaching the Claude `max_turns` ceiling, or observing a non-empty expected output begins termination. Claude can emit its local `Write` result before or after the same turn's usage-bearing `message_delta`, so Hive waits at most the completion-event grace for the missing half, captures the delta when available, and sends TERM before a next model turn. A process group still alive after the termination grace receives KILL independently of the longer wall-clock timeout.
 9. On timeout: `kill_group(pgid)` (TERM), then `sleep_grace_then_kill` (3s grace, then KILL).
 10. Reap with `Process.wait(pid)` (rescuing `Errno::ECHILD`).
 11. Join the reader thread (kill if still alive after 2s).
-12. Return `{pid, pgid, exit_code, timed_out, log_file, final_message, final_message_source, status: nil}`.
+12. Return `{pid, pgid, exit_code, timed_out, log_file, final_message, final_message_source, usage, resource_exhaustion, output_completed, status: nil}`. Resource exhaustion carries `reason: "token_limit"` or `"turn_limit"`, the configured limit, and the observed count. A completed output is accepted only in `:output_file_exists` mode and remains subject to the caller's structured parser.
 
 `final_message` is for orchestrators that need a human-readable agent answer even when the agent does not edit the state file. 4-execute writes this into `task.md` under `## Execute Output`; only structured final messages satisfy research-mode completion.
 
@@ -160,6 +184,8 @@ Claude/tmux teardown is deliberately narrower than a shell-pattern kill. `with_s
 
 | Condition | Marker set |
 |-----------|------------|
+| `result[:resource_exhaustion].reason == "token_limit"` | `<!-- ERROR reason=token_limit observed_tokens=N max_tokens=N marker_id=<hex16> -->` for `:state_file_marker`; other modes return the same error status without clobbering orchestrator-owned markers |
+| `result[:resource_exhaustion].reason == "turn_limit"` | `<!-- ERROR reason=turn_limit observed_turns=N max_turns=N marker_id=<hex16> -->` for `:state_file_marker`; a completed output-file artifact is retained for downstream parsing |
 | provider-limit text in a failed/timeout result's raw stream `limit_text` or `final_message` | `<!-- ERROR reason=limits_reached message="limits reached for <agent>: ..." marker_id=<hex16> -->` for `:state_file_marker`; other status modes return `result[:error_message] = "limits reached for <agent>: ..."` without clobbering orchestrator-owned markers |
 | `result[:timed_out]` | `<!-- ERROR reason=timeout timeout_sec=N marker_id=<hex16> -->` |
 | `exit_code` non-zero | `<!-- ERROR reason=exit_code exit_code=N marker_id=<hex16> -->` |
@@ -174,11 +200,11 @@ The default Claude permission path still uses `--dangerously-skip-permissions` (
 
 1. **`--add-dir` discipline**: the agent only sees `cwd` and explicit `--add-dir` paths. Other projects on disk are unreachable.
 2. **Status-mode ownership**: marker-owning stages use `:state_file_marker`; reviewer-style spawns can use `:output_file_exists` so the orchestrator, not the reviewer, owns terminal markers.
-3. **Timeout + budget**: hard cap on runaway loops. Even an infinite loop costs at most $50–$100 (per-stage `max_budget_usd`) and ~45 minutes (`timeout_sec`).
+3. **Timeout + resource ceilings**: patrol passes a tier-specific `max_tokens` ceiling and clamps it to remaining cycle/day allowance; every spawn retains a wall-clock timeout. A profile-native USD-named flag is a budget-equivalent guard on subscription-backed providers, not evidence of an extra payment.
 
 ## Tests
 
-- `test/unit/agent_test.rb` and `test/fixtures/fake-claude` exercise the spawn/wait/timeout logic without a real claude binary, including configurable Claude permission-mode argv and model/effort `cli_flags` reaching the headless command.
+- `test/unit/agent_test.rb` and `test/fixtures/fake-claude` exercise the spawn/wait/timeout logic without a real claude binary, including configurable permission argv, Claude model/effort and safe-mode `cli_flags`, and proof that the capability is absent from unrelated launches.
 - `test/unit/claude_launcher_test.rb` covers the tmux wrapper argv carrying model/effort pins and omitting them when no flags are configured.
 - `test/unit/spawn_agent_test.rb` covers `Stages::Base.spawn_agent` forwarding `claude.permission_mode` from config into headless Claude spawns and the stage permission-scope helper preserving yolo defaults.
 - `test/smoke/permission_scope_headless_smoke_test.rb` is a live Claude smoke proving a read-only headless write attempt completes without timeout and does not create the file, while yolo creates it.

@@ -68,6 +68,8 @@ module Hive
       # can count it against max_per_tick). A single bad row or meta is
       # swallowed here so the rest of the row set still runs.
       def consider_row(row)
+        return false if admission_error?(row)
+
         folder = row_folder(row)
         return false if folder.empty?
         return false unless id_missing?(folder)
@@ -80,6 +82,12 @@ module Hive
         false
       end
 
+      def admission_error?(row)
+        !row.public_send(:admission_error).nil?
+      rescue NoMethodError
+        false
+      end
+
       def id_missing?(folder)
         # The folder must still exist on disk. A row can outlive its folder
         # (e.g. `hive drop` between the status snapshot and this tick); since
@@ -87,7 +95,8 @@ module Hive
         # vanished folder would RESURRECT a dropped task. Skip it.
         return false unless File.directory?(folder)
 
-        Hive::TaskMeta.read(folder)[:id].nil?
+        result = Hive::TaskMeta.read_for_admission(folder)
+        result.ok? && result.data[:id].nil?
       rescue StandardError
         # If we can't read the meta we can't tell — treat as "not missing"
         # so a flaky read never triggers a write/commit storm.

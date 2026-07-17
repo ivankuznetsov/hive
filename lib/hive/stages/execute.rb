@@ -1,7 +1,5 @@
 require "digest"
 require "fileutils"
-require "date"
-require "yaml"
 require "hive/agent_limit"
 require "hive/claude_launcher"
 require "hive/dependencies"
@@ -11,6 +9,7 @@ require "hive/stages/base"
 require "hive/worktree"
 require "hive/git_ops"
 require "hive/markers"
+require "hive/plan_frontmatter"
 
 module Hive
   module Stages
@@ -361,16 +360,8 @@ module Hive
 
       def research_execution?(task)
         plan_path = File.join(task.folder, "plan.md")
-        text = File.read(plan_path)
-        match = text.match(/\A---\s*\n(.*?)\n---\s*\n/m)
-        return false unless match
-
-        data = YAML.safe_load(match[1], permitted_classes: [ Time, Date ], aliases: false) || {}
-        return false unless data.is_a?(Hash)
-
-        data["execution_mode"].to_s == "research"
-      rescue Psych::Exception
-        false
+        result = Hive::PlanFrontmatter.read(plan_path)
+        result.valid? && result.data["execution_mode"].to_s == "research"
       end
     end
   end

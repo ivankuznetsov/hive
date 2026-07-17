@@ -1,37 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Worktree-safe LLM-wiki post-commit refresh.
+# Transactional LLM-wiki post-commit refresh.
 #
-# A commit in ANY git worktree triggers a wiki refresh, but the wiki is global
-# state that lives on the MAIN checkout. So this script reads the just-committed
-# code in the committing tree, but reads/writes/commits the wiki ONLY on the main
-# checkout. The refresh agent is INSTRUCTED (via the WORKTREE REDIRECT directive
-# below) to write the wiki only on the main checkout, so a compliant agent leaves
-# the committing worktree's wiki/ untouched and its `git status` clean. All wiki
-# commits are serialized (one writer) via a lock in the shared git dir, scoped to
-# wiki/, guarded against re-triggering the hook, and never pushed.
+# Every relevant commit is queued in the shared Git directory. One worker
+# drains that queue into a dedicated llm-wiki/refresh branch checked out in a
+# disposable managed worktree. User checkouts are read-only inputs: neither the
+# committing checkout nor the primary checkout is used as an agent workspace,
+# staging area, log destination, or QMD cache.
 
 committing_tree="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$committing_tree"
 
-configure_qmd_environment() {
-  local cache_home="${XDG_CACHE_HOME:-$HOME/.cache}"
-  if ! mkdir -p "$cache_home/qmd" 2>/dev/null || ! touch "$cache_home/qmd/.write-test" 2>/dev/null; then
-    export XDG_CACHE_HOME="$committing_tree/.llm-wiki/qmd-cache"
-    mkdir -p "$XDG_CACHE_HOME/qmd"
-    export LLM_WIKI_QMD_CACHE_DIR="$XDG_CACHE_HOME/qmd"
-  else
-    rm -f "$cache_home/qmd/.write-test"
-    export LLM_WIKI_QMD_CACHE_DIR="$cache_home/qmd"
-  fi
-}
-
 configure_git_tool_environment() {
   GIT_ENV_UNSET_ARGS=()
+  GIT_ENV_NAMES=()
   local name
   while IFS= read -r name; do
-    [ -n "$name" ] && GIT_ENV_UNSET_ARGS+=("-u" "$name")
+    if [ -n "$name" ]; then
+      GIT_ENV_UNSET_ARGS+=("-u" "$name")
+      GIT_ENV_NAMES+=("$name")
+    fi
   done < <(git rev-parse --local-env-vars 2>/dev/null || true)
 }
 
@@ -39,8 +28,41 @@ run_without_git_env() {
   env "${GIT_ENV_UNSET_ARGS[@]+"${GIT_ENV_UNSET_ARGS[@]}"}" "$@"
 }
 
-configure_qmd_environment
+clear_git_tool_environment() {
+  local name
+  for name in "${GIT_ENV_NAMES[@]}"; do
+    unset "$name"
+  done
+}
+
 configure_git_tool_environment
+
+common_dir="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+[ -n "$common_dir" ] || exit 0
+state_dir="$common_dir/llm-wiki"
+pending_dir="$state_dir/pending"
+lock_ref="${LLM_WIKI_LOCK_REF:-refs/llm-wiki/refresh-lock}"
+refresh_root="$state_dir/refresh-worktree"
+log_file="$state_dir/post-commit-refresh.log"
+refresh_branch="${LLM_WIKI_REFRESH_BRANCH:-llm-wiki/refresh}"
+lock_owner_oid=""
+mkdir -p "$pending_dir"
+
+log_line() {
+  printf '[llm-wiki][%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" >>"$log_file" 2>/dev/null || true
+}
+
+configure_qmd_environment() {
+  local cache_home="${XDG_CACHE_HOME:-$HOME/.cache}"
+  if ! mkdir -p "$cache_home/qmd" 2>/dev/null || ! touch "$cache_home/qmd/.write-test" 2>/dev/null; then
+    export XDG_CACHE_HOME="$state_dir/cache"
+    mkdir -p "$XDG_CACHE_HOME/qmd"
+    export LLM_WIKI_QMD_CACHE_DIR="$XDG_CACHE_HOME/qmd"
+  else
+    rm -f "$cache_home/qmd/.write-test"
+    export LLM_WIKI_QMD_CACHE_DIR="$cache_home/qmd"
+  fi
+}
 
 run_qmd() {
   command -v qmd >/dev/null 2>&1 || return 0
@@ -52,219 +74,304 @@ run_qmd() {
   fi
 }
 
-# --- Resolve the wiki home (main checkout) and whether we're a linked worktree.
-git_dir="$(git rev-parse --git-dir 2>/dev/null || true)"
-common_dir="$(git rev-parse --git-common-dir 2>/dev/null || true)"
-main_checkout="$(git worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2; exit}')"
-[ -n "$main_checkout" ] || main_checkout="$committing_tree"
-wiki_root="$main_checkout"
-
-linked=0
-if [ -n "$git_dir" ] && [ -n "$common_dir" ] && [ "$git_dir" != "$common_dir" ]; then
-  linked=1
-fi
-
-log_file="$wiki_root/.llm-wiki/post-commit-refresh.log"
-mkdir -p "$(dirname "$log_file")" 2>/dev/null || true
-
-log_line() {
-  printf '[llm-wiki][%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" >>"$log_file" 2>/dev/null || true
-}
-
-# --- Serialize ALL refreshes/commits across every worktree on one lock in the
-#     shared git dir, so N concurrent worktree commits never race the main index.
-#     The lock records its owner PID + start time so a crash/SIGKILL/reboot that
-#     skips the EXIT trap can be reclaimed instead of wedging refreshes forever.
-lock_dir="$common_dir/llm-wiki/refresh.lock"
-mkdir -p "$(dirname "$lock_dir")" 2>/dev/null || true
-
-acquire_lock() {
-  if mkdir "$lock_dir" 2>/dev/null; then
-    printf '%s %s\n' "$$" "$(date +%s 2>/dev/null || echo 0)" >"$lock_dir/owner" 2>/dev/null || true
-    return 0
-  fi
-
-  # Lock held — reclaim only if the owner is gone or the lock outlived its TTL
-  # (default 2x the agent timeout). Otherwise a peer refresh is genuinely active.
-  local owner pid started now ttl
-  owner="$(cat "$lock_dir/owner" 2>/dev/null || true)"
-  pid="${owner%% *}"
-  started="${owner##* }"
-  now="$(date +%s 2>/dev/null || echo 0)"
-  ttl="${LLM_WIKI_LOCK_TTL:-3600}"
-
-  if { [ -n "$pid" ] && ! kill -0 "$pid" 2>/dev/null; } ||
-     { [ "$now" -gt 0 ] && [ -n "$started" ] && [ "$started" -gt 0 ] && [ "$((now - started))" -gt "$ttl" ]; }; then
-    log_line "reclaiming stale refresh lock (owner pid=${pid:-?}, age=$((now - ${started:-now}))s)"
-    rm -rf "$lock_dir" 2>/dev/null || true
-    if mkdir "$lock_dir" 2>/dev/null; then
-      printf '%s %s\n' "$$" "$now" >"$lock_dir/owner" 2>/dev/null || true
-      return 0
-    fi
-  fi
-  return 1
-}
-
-if ! acquire_lock; then
-  # A peer refresh holds the lock; it reads HEAD fresh, so our update is covered.
-  exit 0
-fi
-trap 'rm -rf "$lock_dir" 2>/dev/null || true' EXIT
-
 changed_files="$(git diff-tree --no-commit-id --name-only -r HEAD 2>/dev/null || true)"
 [ -n "$changed_files" ] || exit 0
 
-sha="$(git rev-parse HEAD 2>/dev/null || echo HEAD)"
-short_sha="$(git rev-parse --short HEAD 2>/dev/null || echo HEAD)"
+if ! printf '%s\n' "$changed_files" | grep -Eq \
+  '(^|/)(schema\.rb|structure\.sql|db/migrate/|migrations/|models/|entities/|prisma/schema\.prisma|routes|controllers|handlers|resolvers|app/|src/|lib/|test/|tests/|spec/|templates/|config/|bin/|README\.md|Gemfile|Gemfile\.lock|package\.json|package-lock\.json|go\.mod|go\.sum|Cargo\.toml|Cargo\.lock|requirements\.txt|pyproject\.toml|poetry\.lock|composer\.json|composer\.lock|docs/|wiki/|raw/notes/|plans/|todos/|CHANGELOG\.md|AGENTS\.md|CLAUDE\.md)'; then
+  exit 0
+fi
+
+sha="$(git rev-parse HEAD 2>/dev/null || true)"
+[ -n "$sha" ] || exit 0
 branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)"
-ran_refresh=0
+queue_tmp="$pending_dir/.${sha}.$$"
+{
+  printf '%s\t%s\n' "$sha" "$branch"
+  printf '%s\n' "$changed_files"
+} >"$queue_tmp"
+mv -f "$queue_tmp" "$pending_dir/$sha"
 
-matches() {
-  printf '%s\n' "$changed_files" | grep -Eq "$1"
+# From this point onward every Git command is nested maintenance work against
+# the managed refresh worktree, not inspection of the triggering hook context.
+clear_git_tool_environment
+
+process_identity() {
+  local pid="$1"
+  if [ -r "/proc/$pid/stat" ]; then
+    awk '{print $22}' "/proc/$pid/stat" 2>/dev/null || true
+  else
+    ps -o lstart= -p "$pid" 2>/dev/null | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'
+  fi
 }
 
-# Directive prepended when refreshing from a linked worktree: read the feature
-# code here, but read/write the wiki on the main checkout.
-redirect_directive() {
-  [ "$linked" -eq 1 ] || return 0
-  cat <<DIRECTIVE
-WORKTREE REDIRECT (read carefully): You are running from a linked git worktree,
-but the project wiki is global state that lives on the MAIN checkout at
-${wiki_root}. Read and edit wiki pages, index.md, gaps.md, and the changelog ONLY
-under ${wiki_root}/wiki/ — do NOT create or edit any file under the current
-working directory (${committing_tree}). The change to document is commit ${sha}
-on branch ${branch}; inspect it with 'git show ${sha}' and 'git show ${sha}:<path>'.
-Reference the change by its branch/slug name "${branch}", never by the raw commit
-SHA (it may be rebased or squashed before it reaches the main branch).
-
-DIRECTIVE
+lock_owner_stale() {
+  local owner_oid="$1" owner pid identity current_identity
+  owner="$(git cat-file -p "$owner_oid" 2>/dev/null || true)"
+  IFS='|' read -r pid _ identity _ <<<"$owner"
+  if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+    current_identity="$(process_identity "$pid")"
+    if [ -z "$identity" ] || [ -z "$current_identity" ] || [ "$identity" = "$current_identity" ]; then
+      return 1
+    fi
+  fi
+  return 0
 }
 
-run_refresh() {
+acquire_lock() {
+  local wait_seconds deadline now owner current_oid expected_oid zero_oid
+  wait_seconds="${LLM_WIKI_LOCK_WAIT_SECONDS:-60}"
+  now="$(date +%s 2>/dev/null || echo 0)"
+  deadline="$((now + wait_seconds))"
+  owner="$$|$now|$(process_identity "$$")|${RANDOM:-0}"
+  lock_owner_oid="$(printf '%s\n' "$owner" | git hash-object -w --stdin)"
+  zero_oid="${lock_owner_oid//?/0}"
+
+  while true; do
+    current_oid="$(git rev-parse --verify --quiet "$lock_ref" 2>/dev/null || true)"
+    if [ -z "$current_oid" ] || lock_owner_stale "$current_oid"; then
+      expected_oid="${current_oid:-$zero_oid}"
+      if git update-ref "$lock_ref" "$lock_owner_oid" "$expected_oid" 2>/dev/null; then
+        [ -n "$current_oid" ] && log_line "reclaimed stale refresh lock"
+        return 0
+      fi
+      continue
+    fi
+
+    now="$(date +%s 2>/dev/null || echo 0)"
+    [ "$now" -ge "$deadline" ] && return 1
+    sleep 1
+  done
+}
+
+if ! acquire_lock; then
+  log_line "refresh remains queued; worker lock was busy"
+  exit 0
+fi
+
+cleanup_refresh_worktree() {
+  if git worktree list --porcelain 2>/dev/null | grep -Fqx "worktree $refresh_root"; then
+    git worktree remove --force "$refresh_root" >>"$log_file" 2>&1 || true
+  elif [ -e "$refresh_root" ]; then
+    rm -rf "$refresh_root" 2>/dev/null || true
+  fi
+}
+
+# Invoked indirectly by the EXIT trap below.
+# shellcheck disable=SC2329
+cleanup() {
+  cleanup_refresh_worktree
+  [ -n "$lock_owner_oid" ] && git update-ref -d "$lock_ref" "$lock_owner_oid" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+default_base_ref() {
+  local candidate
+  candidate="$(git symbolic-ref -q refs/remotes/origin/HEAD 2>/dev/null || true)"
+  for candidate in "$candidate" refs/remotes/origin/main refs/remotes/origin/master refs/heads/main refs/heads/master; do
+    [ -n "$candidate" ] || continue
+    if git rev-parse --verify --quiet "${candidate}^{commit}" >/dev/null; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  printf '%s\n' "$sha"
+}
+
+prepare_refresh_worktree() {
+  local base_ref
+  base_ref="$(default_base_ref)"
+  cleanup_refresh_worktree
+  mkdir -p "$state_dir"
+
+  if git show-ref --verify --quiet "refs/heads/$refresh_branch"; then
+    git worktree add "$refresh_root" "$refresh_branch" >>"$log_file" 2>&1 || return 1
+    if ! HIVE_SKIP_LLM_WIKI_POST_COMMIT=1 \
+         git -C "$refresh_root" -c core.hooksPath=/dev/null rebase "$base_ref" >>"$log_file" 2>&1; then
+      HIVE_SKIP_LLM_WIKI_POST_COMMIT=1 \
+        git -C "$refresh_root" -c core.hooksPath=/dev/null rebase --abort >>"$log_file" 2>&1 || true
+      log_line "ERROR: could not rebase $refresh_branch onto $base_ref; queue retained"
+      return 1
+    fi
+  else
+    git worktree add -b "$refresh_branch" "$refresh_root" "$base_ref" >>"$log_file" 2>&1 || return 1
+  fi
+}
+
+wiki_only_changes() {
+  local path
+  while IFS= read -r path; do
+    [ -z "$path" ] && continue
+    case "$path" in
+      wiki/*) ;;
+      *) log_line "ERROR: refresh attempted non-wiki change: $path"; return 1 ;;
+    esac
+  done < <(
+    {
+      git -C "$refresh_root" diff --name-only
+      git -C "$refresh_root" diff --cached --name-only
+      git -C "$refresh_root" ls-files --others --exclude-standard
+    } | sort -u
+  )
+}
+
+run_refresh_agent() {
   local prompt="$1"
-  local full_prompt
-  full_prompt="$(redirect_directive)${prompt}"
-  ran_refresh=1
-
-  # Test/override seam: when LLM_WIKI_REFRESH_CMD is set, invoke it with
-  # (wiki_root, prompt) instead of the real agent. Lets tests exercise the
-  # worktree-redirect/lock/commit plumbing without a live model run.
   if [ -n "${LLM_WIKI_REFRESH_CMD:-}" ]; then
-    run_without_git_env "$LLM_WIKI_REFRESH_CMD" "$wiki_root" "$full_prompt" >>"$log_file" 2>&1 || true
-    return 0
+    run_without_git_env "$LLM_WIKI_REFRESH_CMD" "$refresh_root" "$prompt" >>"$log_file" 2>&1
+    return $?
   fi
 
   local add_dir_args=( --add-dir "$LLM_WIKI_QMD_CACHE_DIR" )
-  [ "$linked" -eq 1 ] && add_dir_args+=( --add-dir "$wiki_root" )
-
   if command -v timeout >/dev/null 2>&1; then
-    run_without_git_env timeout "${LLM_WIKI_CODEX_TIMEOUT:-1800}" codex exec "${add_dir_args[@]}" -C "$committing_tree" "$full_prompt" >>"$log_file" 2>&1 \
-      || log_line "WARN: refresh agent exited non-zero (code $?)"
+    run_without_git_env timeout "${LLM_WIKI_CODEX_TIMEOUT:-1800}" codex exec "${add_dir_args[@]}" -C "$refresh_root" "$prompt" >>"$log_file" 2>&1
   else
-    run_without_git_env codex exec "${add_dir_args[@]}" -C "$committing_tree" "$full_prompt" >>"$log_file" 2>&1 \
-      || log_line "WARN: refresh agent exited non-zero (code $?)"
+    run_without_git_env codex exec "${add_dir_args[@]}" -C "$refresh_root" "$prompt" >>"$log_file" 2>&1
   fi
 }
 
-if matches '(^|/)(schema\.rb|structure\.sql|db/migrate/|migrations/|models/|entities/|prisma/schema\.prisma)'; then
-  run_refresh "$(cat <<'PROMPT'
-Refresh this project's LLM wiki data-model coverage after a commit touched schema,
-migration, model, or entity files. Read AGENTS.md, wiki/index.md,
-wiki/architecture.md, wiki/dependencies.md, wiki/gaps.md, and recent wiki/log.md
-entries first. Inspect the committed diff and relevant source files. Update affected
-wiki pages, update wiki/index.md if page coverage changes, add a new
-wiki/log.d/<timestamp>-<slug>.md fragment without editing compiled wiki/log.md, and
-record uncertainty in wiki/gaps.md. Do not run qmd update or qmd embed yourself; the
-post-commit wrapper runs bounded qmd maintenance after refreshes finish. Do not
-invent facts.
-PROMPT
-)"
-fi
+snapshot_queue() {
+  QUEUE_FILES=()
+  local path
+  shopt -s nullglob
+  for path in "$pending_dir"/*; do
+    [ -f "$path" ] && QUEUE_FILES+=("$path")
+  done
+  shopt -u nullglob
+  [ "${#QUEUE_FILES[@]}" -gt 0 ]
+}
 
-if matches '(^|/)(routes|controllers|handlers|resolvers|src/commands/|lib/.*commands|bin/|README\.md)'; then
-  run_refresh "$(cat <<'PROMPT'
-Refresh this project's LLM wiki command and API surface coverage after a commit
-touched routes, handlers, commands, executable entrypoints, or README content. Read
-AGENTS.md, wiki/index.md, wiki/architecture.md, wiki/decisions.md, wiki/gaps.md,
-and recent wiki/log.md entries first. Inspect the committed diff and relevant source
-files. Update affected wiki pages, update wiki/index.md if page coverage changes,
-add a new wiki/log.d/<timestamp>-<slug>.md fragment without editing compiled wiki/log.md,
-and record uncertainty in wiki/gaps.md. Do not run qmd update or
-qmd embed yourself; the post-commit wrapper runs bounded qmd maintenance after
-refreshes finish. Do not invent facts.
-PROMPT
-)"
-fi
+source_receipted() {
+  local queued_sha="$1"
+  git show-ref --verify --quiet "refs/llm-wiki/receipts/$queued_sha" && return 0
+  git -C "$refresh_root" log --format=%B 2>/dev/null | \
+    grep -Fqx "LLM-Wiki-Source: $queued_sha"
+}
 
-if matches '(^|/)(Gemfile|Gemfile\.lock|package\.json|package-lock\.json|go\.mod|go\.sum|Cargo\.toml|Cargo\.lock|requirements\.txt|pyproject\.toml|poetry\.lock|composer\.json|composer\.lock)$'; then
-  run_refresh "$(cat <<'PROMPT'
-Refresh this project's LLM wiki dependency coverage after a commit touched dependency
-files. Read AGENTS.md, wiki/index.md, wiki/dependencies.md, wiki/gaps.md, and recent
-wiki/log.md entries first. Inspect the committed diff and dependency files. Update
-wiki/dependencies.md and related pages if facts changed, update wiki/index.md if page
-coverage changes, add a new wiki/log.d/<timestamp>-<slug>.md fragment without editing
-compiled wiki/log.md, and record uncertainty in wiki/gaps.md. Do not
-run qmd update or qmd embed yourself; the post-commit wrapper runs bounded qmd
-maintenance after refreshes finish. Do not
-invent facts.
-PROMPT
-)"
-fi
+write_source_receipts() {
+  local refresh_head file queued_sha queued_branch
+  refresh_head="$(git -C "$refresh_root" rev-parse HEAD)"
+  {
+    printf 'start\n'
+    for file in "${QUEUE_FILES[@]}"; do
+      IFS=$'\t' read -r queued_sha queued_branch <"$file"
+      printf 'update refs/llm-wiki/receipts/%s %s\n' "$queued_sha" "$refresh_head"
+    done
+    printf 'commit\n'
+  } | git update-ref --stdin >>"$log_file" 2>&1
+}
 
-if matches '(^|/)(docs/|wiki/|raw/notes/|plans/|todos/)|(^|/)(CHANGELOG\.md|AGENTS\.md|CLAUDE\.md)$'; then
-  run_refresh "$(cat <<'PROMPT'
-Refresh this project's LLM wiki planning and documentation coverage after a commit
-touched docs, plans, notes, context files, or the wiki itself. Read AGENTS.md,
-wiki/index.md, wiki/decisions.md, wiki/gaps.md, and recent wiki/log.md entries first.
-Inspect the committed diff and relevant source files. Update stale pages, update
-wiki/index.md if page coverage changes, add a new wiki/log.d/<timestamp>-<slug>.md
-fragment without editing compiled wiki/log.md, and record uncertainty in
-wiki/gaps.md. Do not run qmd update or qmd embed yourself; the post-commit wrapper
-runs bounded qmd maintenance after refreshes finish. Do not invent facts.
-PROMPT
-)"
-fi
-
-if [ "$ran_refresh" -eq 1 ]; then
-  # Recompile wiki/log.md from the wiki/log.d/*.md fragments the refresh agent
-  # wrote (single shared compiler). Fragments are append-only and conflict-free
-  # across worktrees; the compiled log.md is a derived artifact regenerated here
-  # on the main checkout so it never has to be hand-edited or merged.
-  if [ -x "$wiki_root/.llm-wiki/compile-log.sh" ]; then
-    bash "$wiki_root/.llm-wiki/compile-log.sh" "$wiki_root" >>"$log_file" 2>&1 \
-      || log_line "ERROR: compile-log.sh failed for $wiki_root; wiki/log.md may be stale"
-  else
-    log_line "WARN: $wiki_root/.llm-wiki/compile-log.sh missing or not executable; skipped log.md compile"
-  fi
-
-  if command -v qmd >/dev/null 2>&1; then
-    ( cd "$wiki_root" && run_qmd update ) >>"$log_file" 2>&1 || true
-    ( cd "$wiki_root" && run_qmd embed --max-docs-per-batch 64 --max-batch-mb 64 ) >>"$log_file" 2>&1 || true
-  fi
-
-  # Commit the refreshed wiki on the MAIN checkout — scoped to wiki/, with the
-  # post-commit hook disabled so this commit can't re-trigger us (the hook also
-  # honors HIVE_SKIP_LLM_WIKI_POST_COMMIT), and never pushed (so an in-progress
-  # branch is never diverged from its remote). Leaving the worktree untouched
-  # keeps its `git status` clean. A failed commit is logged loudly because it
-  # would otherwise strand the agent's edits as uncommitted dirt on the main
-  # checkout with no signal.
-  if [ -n "$(git -C "$wiki_root" status --porcelain -- wiki 2>/dev/null)" ]; then
-    if ! git -C "$wiki_root" add -- wiki >>"$log_file" 2>&1; then
-      log_line "ERROR: git add -- wiki failed on $wiki_root; wiki edits left UNCOMMITTED"
-    fi
-    if ! HIVE_SKIP_LLM_WIKI_POST_COMMIT=1 \
-         git -C "$wiki_root" -c core.hooksPath=/dev/null \
-         commit --only -m "docs(wiki): post-commit refresh for ${branch}@${short_sha}" \
-         -- wiki >>"$log_file" 2>&1; then
-      log_line "ERROR: wiki refresh commit FAILED on $wiki_root (${branch}@${short_sha}); edits remain staged/dirty on the main checkout"
-    fi
-  fi
-
-  for sync_dir in "$HOME/wikis/.sync-needed" "$(dirname "$wiki_root")/wikis/.sync-needed"; do
-    if [ -d "$(dirname "$sync_dir")" ]; then
-      mkdir -p "$sync_dir"
-      touch "$sync_dir/$(basename "$wiki_root")"
+prune_receipted_queue_files() {
+  local file queued_sha queued_branch
+  local retained=()
+  for file in "${QUEUE_FILES[@]}"; do
+    IFS=$'\t' read -r queued_sha queued_branch <"$file"
+    if source_receipted "$queued_sha"; then
+      rm -f -- "$file"
+      log_line "acknowledged previously committed source $queued_sha"
+    else
+      retained+=("$file")
     fi
   done
+  QUEUE_FILES=("${retained[@]}")
+}
+
+process_queue_batch() {
+  local sources="" file queued_sha queued_branch paths prompt short_source
+  local commit_args=()
+  prune_receipted_queue_files
+  [ "${#QUEUE_FILES[@]}" -gt 0 ] || return 0
+  for file in "${QUEUE_FILES[@]}"; do
+    IFS=$'\t' read -r queued_sha queued_branch <"$file"
+    commit_args+=( -m "LLM-Wiki-Source: $queued_sha" )
+    paths="$(sed -n '2,$p' "$file")"
+    sources+="- commit ${queued_sha} on branch ${queued_branch}; changed paths:\n"
+    while IFS= read -r path; do
+      [ -n "$path" ] && sources+="  - ${path}\n"
+    done <<<"$paths"
+  done
+
+  prompt="$(cat <<PROMPT
+Refresh this project's LLM wiki for the queued committed changes below.
+
+You are running in the dedicated managed wiki-refresh worktree at ${refresh_root}.
+This worktree is based on the current default branch. Inspect each source commit
+with 'git show <sha>' and 'git show <sha>:<path>'; a source commit may belong to
+another branch and need not be checked out here.
+
+Queued sources:
+$(printf '%b' "$sources")
+
+Read .llm-wiki/config.json, AGENTS.md, CLAUDE.md, wiki/index.md, wiki/gaps.md,
+and recent wiki/log.md entries first. Search main_wiki_path when configured.
+Update only files under wiki/. Update affected architecture, command/API,
+dependency, data-model, planning, or documentation pages as warranted by the
+actual diffs. Update wiki/index.md only when coverage changes. Add one
+wiki/log.d/<timestamp>-<slug>.md fragment for this coalesced batch without
+editing compiled wiki/log.md. Record uncertainty in wiki/gaps.md. Do not run
+qmd; the wrapper handles bounded index maintenance. Do not invent facts.
+PROMPT
+)"
+
+  if ! run_refresh_agent "$prompt"; then
+    log_line "ERROR: refresh agent failed; generated work discarded and queue retained"
+    return 1
+  fi
+  wiki_only_changes || return 1
+
+  if [ -x "$refresh_root/.llm-wiki/compile-log.sh" ]; then
+    bash "$refresh_root/.llm-wiki/compile-log.sh" "$refresh_root" >>"$log_file" 2>&1 || {
+      log_line "ERROR: changelog compilation failed; queue retained"
+      return 1
+    }
+  else
+    log_line "WARN: compile-log.sh missing; leaving wiki/log.md unchanged"
+  fi
+  wiki_only_changes || return 1
+
+  if [ -e "$refresh_root/wiki" ] || [ -n "$(git -C "$refresh_root" ls-files -- wiki)" ]; then
+    git -C "$refresh_root" add -A -- wiki >>"$log_file" 2>&1 || return 1
+  fi
+  wiki_only_changes || return 1
+  if ! git -C "$refresh_root" diff --cached --quiet; then
+    short_source="$(basename "${QUEUE_FILES[0]}")"
+    if ! HIVE_SKIP_LLM_WIKI_POST_COMMIT=1 \
+         git -C "$refresh_root" -c core.hooksPath=/dev/null \
+         commit --only -m "docs(wiki): queued refresh for ${#QUEUE_FILES[@]} commit(s) at ${short_source:0:12}" \
+         "${commit_args[@]}" \
+         -- wiki >>"$log_file" 2>&1; then
+      log_line "ERROR: refresh commit failed; queue retained"
+      return 1
+    fi
+  fi
+
+  if ! write_source_receipts; then
+    log_line "ERROR: could not write source receipts; queue retained"
+    return 1
+  fi
+  rm -f -- "${QUEUE_FILES[@]}"
+  ( cd "$refresh_root" && run_qmd update ) >>"$log_file" 2>&1 || true
+  ( cd "$refresh_root" && run_qmd embed --max-docs-per-batch 64 --max-batch-mb 64 ) >>"$log_file" 2>&1 || true
+  return 0
+}
+
+configure_qmd_environment
+if ! prepare_refresh_worktree; then
+  log_line "ERROR: could not prepare managed refresh worktree; queue retained"
+  exit 0
 fi
+
+while snapshot_queue; do
+  process_queue_batch || exit 0
+done
+
+main_checkout="$(git worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2; exit}')"
+project_name="$(basename "${main_checkout:-$committing_tree}")"
+for sync_dir in "$HOME/wikis/.sync-needed" "$(dirname "${main_checkout:-$committing_tree}")/wikis/.sync-needed"; do
+  if [ -d "$(dirname "$sync_dir")" ]; then
+    mkdir -p "$sync_dir"
+    touch "$sync_dir/$project_name"
+  fi
+done
+
+exit 0

@@ -1,5 +1,6 @@
 require "time"
 require "hive/gh"
+require "hive/patrol/fingerprint"
 require "hive/patrol/state_store"
 
 module Hive
@@ -19,7 +20,12 @@ module Hive
           next if branch.to_s.empty?
 
           prs = @gh.lookup_prs_for_branch(@project_root, branch)
-          pr = prs.find { |candidate| candidate["url"].to_s == entry["pr_url"].to_s } || prs.first
+          exact_pr = prs.find { |candidate| candidate["url"].to_s == entry["pr_url"].to_s }
+          pr = if Fingerprint::RETRYABLE_PUBLICATION_STATES.include?(entry["state"])
+                 exact_pr
+          else
+            exact_pr || prs.first
+          end
           next unless pr
 
           case pr["state"]
@@ -31,13 +37,17 @@ module Hive
               # Carry the finding content forward so the similarity gate can
               # recognise a re-worded re-file of a dismissed issue.
               "category" => entry["category"],
-              "title_tokens" => entry["title_tokens"]
+              "feature_id" => entry["feature_id"],
+              "title_tokens" => entry["title_tokens"],
+              "root_cause_tokens" => entry["root_cause_tokens"]
             }.compact
             entry["state"] = "dismissed"
           when "MERGED"
             entry["state"] = "merged"
           when "OPEN"
-            entry["state"] = "open"
+            unless Fingerprint::RETRYABLE_PUBLICATION_STATES.include?(entry["state"])
+              entry["state"] = "open"
+            end
           end
         rescue Hive::GhError
           next

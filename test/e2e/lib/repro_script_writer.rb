@@ -1,4 +1,5 @@
 require "fileutils"
+require "json"
 require "rbconfig"
 require "shellwords"
 require_relative "paths"
@@ -44,6 +45,7 @@ module Hive
           "set -euo pipefail",
           "cd #{Shellwords.escape(Paths.repo_root)}"
         ]
+        SandboxEnv::LEAKY_KEYS.each { |key| lines << "unset #{key}" }
         env.each { |key, value| lines << "export #{key}=#{Shellwords.escape(value.to_s)}" }
         # Setup-step replay (seed_state / write_file / register_project)
         # references the sandbox by an explicit env var so the heredoc bodies
@@ -56,8 +58,13 @@ module Hive
         # listening on the sandbox lock or a stub holding an ephemeral port.
         lines.concat(harness_teardown_prelude)
         lines << "echo 'Replaying setup and failed CLI-visible steps for #{@failed_index}'"
-        @steps.first(@failed_index.to_i).each do |step|
+        replayed_steps = @steps.first(@failed_index.to_i)
+        replayed_steps.each do |step|
           lines.concat(emit_step(step))
+        end
+        if replayed_steps.any? { |step| step.kind == "script_gh" }
+          lines << "_hive_repro_cleanup"
+          lines.concat(emit_gh_verification)
         end
         lines.join("\n") + "\n"
       end
@@ -114,6 +121,8 @@ module Hive
           [ "# step #{step.position} skipped: requires live tmux (kind=#{step.kind})" ]
         when "start_releases_stub"
           emit_start_releases_stub(step)
+        when "script_gh"
+          emit_script_gh(step)
         when "spawn_background"
           emit_spawn_background(step)
         when "stop_process"
@@ -131,7 +140,10 @@ module Hive
 
       def emit_cli(step, env_overrides: {})
         args = expand(step.args.fetch("args")).map(&:to_s)
-        env = expand(step.args["env"] || {}).merge(env_overrides)
+        env = SandboxEnv.merge(
+          SandboxEnv.repro_env(@sandbox_dir, @run_home),
+          expand(step.args["env"] || {}).merge(env_overrides)
+        )
         cwd = expand_path(step.args["cwd"] || "{sandbox}")
         expected = step.args.key?("expect_exit") ? step.args["expect_exit"] : 0
         # Use absolute paths for ruby's -I and bin/hive so they resolve from
@@ -270,6 +282,33 @@ module Hive
         ]
       end
 
+      def emit_script_gh(step)
+        interactions = expand(step.args.fetch("interactions"))
+        ruby = [
+          "require 'json'",
+          "require 'gh_stub'",
+          "stub = Hive::E2E::GhStub.new(ARGV.fetch(1))",
+          "FileUtils.rm_rf(stub.root)",
+          "stub.install(JSON.parse(ARGV.fetch(0)))"
+        ].join("\n")
+        [
+          "# step #{step.position} script_gh: #{interactions.size} interaction(s)",
+          Shellwords.join([ RbConfig.ruby, "-I#{File.join(Paths.e2e_root, 'lib')}", "-e", ruby,
+                            JSON.generate(interactions), @run_home ])
+        ]
+      end
+
+      def emit_gh_verification
+        ruby = [
+          "require 'gh_stub'",
+          "Hive::E2E::GhStub.new(ARGV.fetch(0)).verify!"
+        ].join("\n")
+        [
+          "# verify the complete default-deny GitHub transcript",
+          Shellwords.join([ RbConfig.ruby, "-I#{File.join(Paths.e2e_root, 'lib')}", "-e", ruby, @run_home ])
+        ]
+      end
+
       # Bash for `hive <args> &` matching BackgroundProcess: own pgroup
       # (`setsid`), captured logs under run_home/background/<id>.log, the
       # caller's env merged onto SandboxEnv, and HIVE_RELEASES_API_URL
@@ -279,7 +318,10 @@ module Hive
         id_raw = expand_string(step.args.fetch("id").to_s)
         id = PathSafety.safe_basename!(id_raw, "spawn_background id")
         args = expand(step.args.fetch("args")).map(&:to_s)
-        env = expand(step.args["env"] || {})
+        env = SandboxEnv.merge(
+          SandboxEnv.repro_env(@sandbox_dir, @run_home),
+          expand(step.args["env"] || {})
+        )
         log_path = File.join(@run_home, "background", "#{id}.log")
         var = bg_pid_var(id)
         env_assignments = env.map { |key, value| "#{key}=#{value}" }
@@ -362,7 +404,10 @@ module Hive
 
       def emit_json_assert(step)
         args = expand(step.args.fetch("args")).map(&:to_s)
-        env = expand(step.args["env"] || {})
+        env = SandboxEnv.merge(
+          SandboxEnv.repro_env(@sandbox_dir, @run_home),
+          expand(step.args["env"] || {})
+        )
         cwd = PathSafety.contained_path!(@sandbox_dir, expand_string(step.args["cwd"] || "{sandbox}"), "json_assert cwd")
         expected = step.args.key?("expect_exit") ? step.args["expect_exit"] : 0
         schema_name = normalize_schema_name(step.args.fetch("schema"))
@@ -495,6 +540,8 @@ module Hive
           "cfg_path = File.join(project, '.hive-state', 'config.yml')",
           "cfg = YAML.safe_load(File.read(cfg_path)) || {}",
           "cfg['worktree_root'] = File.join(run_dir, 'worktrees')",
+          "cfg['claude'] ||= {}",
+          "cfg['claude']['mode'] = 'headless'",
           "cfg['review'] ||= {}",
           "cfg['review']['ci'] ||= {}",
           "cfg['review']['ci']['command'] = nil",

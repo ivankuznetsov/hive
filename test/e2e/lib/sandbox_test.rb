@@ -28,6 +28,9 @@ class E2ESandboxTest < Minitest::Test
       assert File.directory?(File.join(sandbox.sandbox_dir, ".hive-state"))
       config = YAML.safe_load(File.read(File.join(sandbox.run_home, "config.yml")))
       assert_equal [ "sandbox" ], config.fetch("registered_projects").map { |project| project.fetch("name") }
+      project_config = YAML.safe_load(File.read(File.join(sandbox.sandbox_dir, ".hive-state", "config.yml")))
+      assert_equal "headless", project_config.dig("claude", "mode"),
+                   "fake Claude must not enter the production interactive tmux readiness loop"
     end
   end
 

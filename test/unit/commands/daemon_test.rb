@@ -137,6 +137,11 @@ class HiveCommandsDaemonTest < Minitest::Test
     assert_equal true, captured.fetch(:dry_run)
     assert_instance_of Hive::Daemon::DigestScheduler, captured.fetch(:digest_scheduler)
     assert_instance_of Hive::Daemon::AnswerDigestScheduler, captured.fetch(:answer_digest_scheduler)
+    reconciler = captured.fetch(:refactor_patrol_merge_reconciler)
+    assert_instance_of Hive::Daemon::RefactorPatrolMergeReconciler, reconciler
+    assert_same reconciler, captured.fetch(:merge_watcher).instance_variable_get(:@merge_intake),
+                "immediate watcher and catch-up must share one intake boundary"
+    assert_equal true, reconciler.instance_variable_get(:@dry_run)
     refute File.exist?(command.pid_file), "clean shutdown must remove the YAML PID file it wrote"
   end
 

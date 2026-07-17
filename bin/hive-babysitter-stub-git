@@ -128,8 +128,8 @@ def grep_short_cluster_has_pager?(arg)
 end
 
 def unsafe_read_option?(subcommand, arg, next_arg = nil)
-  # `--ext-diff` runs external diff drivers — an exec seam on any subcommand that honors it.
-  return true if arg == "--ext-diff"
+  # `--ext-diff` and its Git-accepted prefixes from `--ext` onward run external diff drivers.
+  return true if arg.start_with?("--ext") && "--ext-diff".start_with?(arg)
   # `--textconv` runs the repo-local `diff.<driver>.textconv` command. Git accepts any
   # unambiguous prefix of a long option, so `--text`, `--textc`, `--textco`, ... all reach
   # `--textconv` (e.g. `git cat-file --text`, `git grep --textc`). Default-deny every prefix

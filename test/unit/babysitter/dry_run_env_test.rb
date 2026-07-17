@@ -698,7 +698,12 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_stubbed env, "git", "rev-list", "--format", "--output=/tmp/hive-revlist-format-output-pwn", "HEAD"
       assert_stubbed env, "git", "diff", "-o", "/tmp/hive-output-short-pwn"
       assert_stubbed env, "git", "diff", "-o/tmp/hive-output-glued-pwn"
-      assert_stubbed env, "git", "diff", "--ext-diff"
+      # Git versions that accept unambiguous long-option abbreviations treat each of these as
+      # `--ext-diff`, so they must all skip before a later positive option can override the
+      # stub-injected `--no-ext-diff`.
+      %w[--ext --ext- --ext-d --ext-di --ext-dif --ext-diff].each do |option|
+        assert_stubbed env, "git", "diff", option
+      end
       # `--textconv` runs the repo-local `diff.<driver>.textconv` command — an exec seam. The
       # spelled-out flag must skip, and so must every prefix git accepts as the long option
       # (`--text`, `--textc`, ...), e.g. `git cat-file --text` / `git grep --textc`.
@@ -1395,6 +1400,35 @@ class BabysitterDryRunEnvTest < Minitest::Test
 
       assert status.success?, err
       refute_path_exists pwn_path
+    end
+  end
+
+  def test_git_stub_skips_real_git_ext_diff_abbreviations
+    with_tmp_git_repo do |dir|
+      marker_path = File.join(dir, "ext-diff-ran")
+      extdiff = executable_touch_binary(dir, "ext-diff", marker_path)
+      run!("git", "-C", dir, "config", "diff.external", extdiff)
+      File.write(File.join(dir, "README.md"), "changed\n")
+
+      accepted_options = %w[--ext --ext- --ext-d --ext-di --ext-dif --ext-diff].select do |option|
+        FileUtils.rm_f(marker_path)
+        _out, _err, status = Open3.capture3(real_git_binary, "-C", dir, "diff", option)
+        status.success? && File.exist?(marker_path)
+      end
+
+      assert_includes accepted_options, "--ext-diff"
+      accepted_options.each do |option|
+        FileUtils.rm_f(marker_path)
+        _out, err, status = Open3.capture3(
+          real_git_env(dir),
+          stub_path("git"),
+          "-C", dir, "diff", option
+        )
+
+        assert status.success?, err
+        assert_includes err, "[dry-run] git -C #{dir} diff #{option} skipped"
+        refute_path_exists marker_path, "#{option} executed diff.external during dry-run passthrough"
+      end
     end
   end
 

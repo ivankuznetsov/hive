@@ -5,10 +5,22 @@ class HivePatrolValidatorTest < Minitest::Test
   include HiveTestHelper
 
   def test_no_commands_is_not_validatable
-    result = Hive::Patrol::Validator.new({}).validate(Dir.pwd)
+    validator = Hive::Patrol::Validator.new({})
+    result = validator.validate(Dir.pwd)
 
+    assert_equal false, validator.configured?
     assert_equal false, result["passed"]
     assert_equal "no_validation_commands", result["reason"]
+  end
+
+  def test_configured_ignores_blank_and_unsupported_commands
+    validator = Hive::Patrol::Validator.new(
+      "format" => "  ",
+      "lint" => nil,
+      "deploy" => "true"
+    )
+
+    assert_equal false, validator.configured?
   end
 
   def test_all_commands_must_pass
@@ -27,8 +39,10 @@ class HivePatrolValidatorTest < Minitest::Test
 
   def test_passing_commands_pass
     with_tmp_dir do |dir|
-      result = Hive::Patrol::Validator.new("test" => "pwd >/dev/null").validate(dir)
+      validator = Hive::Patrol::Validator.new("test" => "pwd >/dev/null")
+      result = validator.validate(dir)
 
+      assert_equal true, validator.configured?
       assert_equal true, result["passed"]
     end
   end

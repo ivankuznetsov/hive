@@ -3,11 +3,26 @@ title: Hive::Config
 type: module
 source: lib/hive/config.rb
 created: 2026-04-25
-updated: 2026-07-16
+updated: 2026-07-17
 tags: [config, yaml, validation]
 ---
 
 **TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects plus daemon, bot, digest, update, web, and Screenote base-url settings, including voice-transcription defaults; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, default workflow, worktree root, budgets, timeouts, **stage agents**, project/top-level and per-stage `permissions`, project-global `claude.mode`/`claude.permission_mode` plus `claude.model`/`claude.effort` pins, review-stage roles, daemon enrollment, experimental babysitter enrollment, ordinary patrol, and scheduled architecture patrol). Architecture-patrol discovery, auto-fixing, and issue filing are independent consent gates. `Config.load(project_root)` resolves `patrol.mode` into scheduler knobs, **recursively** deep-merges per-project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays are replaced wholesale, never per-element merged. Screenote OAuth tokens live outside YAML in `screenote.json`, created by `hive connect screenote`.
+
+## Condition authority
+
+```yaml
+conditions:
+  authority: markers
+  stages:
+    4-execute: shadow
+```
+
+The top-level authority is the default, with per-stage overrides. Increment 1
+permits explicit `conditions` authority only for `4-execute`; trying it on any
+other stage is a config error. Hive never promotes this field automatically.
+See [[modules/conditions]] and the
+[rollout runbook](../../docs/condition-rollout.md).
 
 ## Defaults (`Config::DEFAULTS`)
 

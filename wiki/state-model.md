@@ -152,6 +152,23 @@ admission wait is unchanged but cannot mask a later prerequisite advance.
 - **Per-task lock**: `<task folder>/.lock` — compatibility/work-area exclusion projection, not the restart-safe owner. Its YAML payload is `{pid, started_at, process_start_time, lock_id, attempt_id?, task_generation?, claude_pid?, claude_pid_start_time?, slug?, stage?}`; old readers tolerate the optional attempt fields. `Hive::Lock.acquire_task_lock` writes and fsyncs a sibling tempfile, then atomically hard-links the complete payload into place under an already-ignored `.lock.tmp.guard` flock. Stale check uses `Process.kill(0, pid)` plus `/proc/<pid>/stat` field-22 cross-check to defeat runner PID reuse; release compares `lock_id` so an old owner cannot remove a replacement generation and does not recreate a source folder moved by a stage transition. After spawning, both headless `Hive::Agent` and tmux-backed `Hive::ClaudeLauncher` write the child `claude_pid` and its `claude_pid_start_time`; cleanup compares that identity metadata with the live process before signalling so PID reuse cannot target an unrelated child.
 - **Per-project commit lock**: `<project>/.hive-state/.commit-lock` — short flock around the `git add && git commit` in the hive-state worktree to serialize concurrent writers. See [[modules/lock]].
 
+## Task condition journal and projection
+
+The existing task-local `events.jsonl` now carries two durability contracts.
+Legacy telemetry remains fail-soft. Versioned condition/generation/evidence/
+audit records are appended synchronously through `Hive::TaskJournal::Writer`
+with a task-local journal flock, complete JSON-line batch, flush, and fsync.
+Those records reuse the durable attempt ID from [[modules/attempts]] and add a
+numeric task input epoch plus exact-HEAD commit generation.
+
+`<task>/task-projection.json` is an atomic, disposable materialized view bound
+to the journal cursor, last event ID, and SHA-256. It contains projected
+identity, current and superseded conditions, evidence, gate diagnostics,
+compatibility state, provenance, and shadow audit. Missing/corrupt/stale views
+replay from the journal without git/GitHub calls. Status replay is read-only;
+the next mutating execute boundary republishes the view. See
+[[modules/conditions]].
+
 ## Runtime dispatch queue and web snapshots
 
 The daemon's producer queue lives under `$HIVE_HOME/dispatch_requests/`

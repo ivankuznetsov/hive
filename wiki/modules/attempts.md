@@ -54,6 +54,13 @@ that later becomes clear advances generation instead of replaying the stale
 exit-75 receipt. A loss successor has a new attempt ID but inherits generation,
 predecessor, outputs, worktree/branch, and an incremented retry charge.
 
+Condition projection adds an explicit numeric `task_input_epoch` to attempt
+records/context while retaining the prerequisite's opaque ownership generation
+as `ownership_generation`. Old v1 records remain readable and bridge to epoch
+0 in memory; they are not rewritten. Every non-legacy condition event must
+name a durable attempt whose task/stage ownership matches the record. Retry and
+adoption reuse the numeric epoch when accepted inputs are unchanged.
+
 ## State protocol
 
 ```text

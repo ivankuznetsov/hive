@@ -6,6 +6,8 @@ require "hive/stages"
 require "hive/workflows"
 require "hive/worktree"
 require "hive/babysitter/events"
+require "hive/babysitter/job_runner"
+require "hive/babysitter/job_store"
 require "hive/babysitter/status_writer"
 require "hive/babysitter/pr_fixer"
 
@@ -25,6 +27,22 @@ module Hive
           return { total: 0, fixed: 0, untouched: 0, needs_human: 0 }
         end
 
+        job_store ||= Hive::Babysitter::JobStore.new(project_root: project_entry.fetch("path"))
+        registered_jobs = job_store.jobs
+        active_jobs = registered_jobs.select { |job| job.fetch("state") == "active" }
+        job_outcomes = active_jobs.map do |job|
+          begin
+            Hive::Babysitter::JobRunner.run(
+              job: job, store: job_store, project: project_entry, cfg: cfg,
+              dry_run: dry_run, logger: logger, inflight: inflight
+            )
+          rescue StandardError => e
+            logger.event(:fatal, project: project_entry["name"], job_id: job["job_id"],
+                         message: "JobRunner raised: #{e.class}: #{e.message}")
+            :failure
+          end
+        end
+
         prs = Hive::Gh.list_open_prs(project_entry.fetch("path"), cfg: cfg)
         Hive::Babysitter::Events.emit(
           project: project_entry,
@@ -34,9 +52,12 @@ module Hive
           count: prs.size
         )
 
+        registered_numbers = registered_jobs.map { |job| job.dig("identity", "pr_number") }.to_set
+        discovery_prs = prs.reject { |pr| registered_numbers.include?(pr["number"].to_i) }
         owned_branches = pipeline_owned_branches(project_entry)
-        selected = select_prs(prs, project_entry, cfg, inflight, owned_branches)
-        summary = { total: selected.size, fixed: 0, untouched: 0, needs_human: 0 }
+        selected = select_prs(discovery_prs, project_entry, cfg, inflight, owned_branches)
+        summary = tally_job_outcomes(job_outcomes)
+        summary[:total] += selected.size
         selected.each do |pr|
           outcome =
             begin
@@ -88,6 +109,13 @@ module Hive
         )
         logger.event(:fatal, project: project_entry["name"], message: "gh pr list failed: #{e.message}")
         { total: 0, fixed: 0, untouched: 0, needs_human: 0 }
+      rescue Hive::Babysitter::JobStore::Error => e
+        Hive::Babysitter::Events.emit(
+          project: project_entry, action: "blocked", outcome: "unavailable",
+          duration_ms: duration_ms(started), message: e.message.to_s.gsub(/\s+/, " ")[0, 300]
+        )
+        logger.event(:fatal, project: project_entry["name"], message: "babysitter job registry unavailable: #{e.message}")
+        { total: 0, fixed: 0, untouched: 0, needs_human: 1 }
       end
 
       def select_prs(prs, project_entry, cfg, inflight, owned_branches = Set.new)
@@ -183,6 +211,18 @@ module Hive
         else
           2
         end
+      end
+
+      def tally_job_outcomes(outcomes)
+        summary = { total: outcomes.size, fixed: 0, untouched: 0, needs_human: 0 }
+        outcomes.each do |outcome|
+          case outcome
+          when :head_changed then summary[:fixed] += 1
+          when :needs_human, :failure then summary[:needs_human] += 1
+          else summary[:untouched] += 1
+          end
+        end
+        summary
       end
 
       def inflight_key(project_entry, pr_number)

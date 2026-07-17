@@ -17,13 +17,14 @@ module Hive
         new(...).run
       end
 
-      def initialize(pr, project, cfg, dry_run:, logger:, inflight:)
+      def initialize(pr, project, cfg, dry_run:, logger:, inflight:, push_authorizer: nil)
         @pr = pr
         @project = project
         @cfg = cfg
         @dry_run = dry_run
         @logger = logger
         @inflight = inflight
+        @push_authorizer = push_authorizer
       end
 
       def run
@@ -56,6 +57,7 @@ module Hive
         )
         result = spawn_agent(worktree.path, context)
         outcome = outcome_for(result, worktree.path)
+        outcome = push_agent_result(worktree.path, status) if outcome == :success && @push_authorizer
         emit_agent_event(outcome, started)
         return outcome if %i[success dry_run].include?(outcome)
 
@@ -177,7 +179,8 @@ module Hive
           @pr.fetch("headRefName"),
           cfg: @cfg,
           dry_run: @dry_run,
-          expected_oid: status["headRefOid"] || @pr["headRefOid"]
+          expected_oid: status["headRefOid"] || @pr["headRefOid"],
+          authorize: @push_authorizer
         )
         Hive::Babysitter::Events.emit(
           project: @project,
@@ -262,7 +265,8 @@ module Hive
           base_sha: context.base_sha,
           merge_base: context.merge_base,
           ahead: context.ahead,
-          behind: context.behind
+          behind: context.behind,
+          runner_managed_push: !@push_authorizer.nil?
         )
         Hive::Stages::Base.render("babysitter_pr_fix_prompt.md.erb", bindings)
       end
@@ -278,6 +282,18 @@ module Hive
         return :success if result[:status] == :ok
 
         :failure
+      end
+
+      def push_agent_result(worktree_path, status)
+        push = Hive::Babysitter::GhOps.force_push_with_lease(
+          worktree_path,
+          @pr.fetch("headRefName"),
+          cfg: @cfg,
+          dry_run: @dry_run,
+          expected_oid: status["headRefOid"] || @pr["headRefOid"],
+          authorize: @push_authorizer
+        )
+        push.success? ? :success : :failure
       end
 
       def budget_exhausted?(result)

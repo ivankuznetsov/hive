@@ -57,6 +57,28 @@ class BabysitterGhOpsTest < Minitest::Test
     refute called
   end
 
+  def test_force_push_revalidates_authority_immediately_before_git
+    order = []
+    captured = []
+    status = Hive::Gh::CommandStatus.new(exitstatus: 0)
+    capture = lambda do |*args, **_kwargs|
+      order << :git
+      captured << args
+      [ "", "", status ]
+    end
+
+    with_replaced_singleton_method(Hive::Gh, :capture3, capture) do
+      result = Hive::Babysitter::GhOps.force_push_with_lease(
+        "/tmp/wt", "feature", cfg: {}, dry_run: false, expected_oid: "abc123",
+        authorize: -> { order << :authorize }
+      )
+      assert result.success?
+    end
+
+    assert_equal %i[authorize git], order
+    assert_equal %w[git push --force-with-lease=feature:abc123 origin HEAD:feature], captured.first
+  end
+
   def test_add_label_noops_when_label_already_present
     status = Hive::Gh::CommandStatus.new(exitstatus: 0)
     calls = []

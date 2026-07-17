@@ -689,7 +689,8 @@ class RunFinalizeTest < Minitest::Test
           repository: "example.com/acme/demo", number: 9, url: "https://example.com/pr/9",
           state: "OPEN", head_sha: ENV.fetch("HIVE_FAKE_GH_HEAD_REF_OID"),
           head_branch: "fix-bug-260424-aaaa", base_branch: "master", merged_at: nil,
-          observed_at: Time.now.utc.iso8601(6)
+          observed_at: Time.now.utc.iso8601(6), mergeable: nil, merge_state_status: nil,
+          review_decision: nil, status_check_rollup: nil
         )
         _out, _err, status = with_stubbed_singleton_method(
           Hive::Gh, :exact_pr_snapshot, ->(*_args, **_kwargs) { snapshot }

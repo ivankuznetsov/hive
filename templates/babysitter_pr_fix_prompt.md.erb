@@ -10,9 +10,16 @@ Branch divergence: <%= ahead %> ahead, <%= behind %> behind origin/<%= base_ref 
 Mergeable state: <%= mergeable_state %>
 Budget: <%= budget_minutes %> minutes, $<%= budget_usd %>
 
-Operate only inside the worktree above. Decide whether to rebase, merge,
-or leave the PR alone. Resolve conflicts, fix red CI, and when you push,
-use:
+Operate only inside the worktree above. Resolve conflicts and fix red CI.
+Never merge the pull request.
+
+<% if runner_managed_push -%>
+Do not run `git push`, `gh pr merge`, or any equivalent mutation. Commit the
+repair locally and exit. The fenced babysitter runner exclusively performs
+the sanctioned force-with-lease push after it revalidates the job claim and
+the exact remote head.
+<% else -%>
+When you push, use:
 
 ```sh
 git fetch origin <%= head_ref %>
@@ -31,6 +38,7 @@ Abort instead of pushing if the `git rev-parse origin/<%= head_ref %>`
 SHA from your second fetch differs from the one captured immediately
 after the first fetch — that comparison is the authoritative
 remote-changed check; do not rely on judgement alone.
+<% end -%>
 
 <% if dry_run -%>
 Dry-run mode is active. Do not run git push, gh pr comment, gh pr edit,

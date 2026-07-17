@@ -241,8 +241,13 @@ module Hive
           mismatches << "job_id" unless payload["job_id"] == job["job_id"]
           mismatches << "repository" unless payload["repository"] == identity["repository"]
           mismatches << "pr_number" unless payload["pr_number"] == identity["pr_number"]
-          mismatches << "head_sha" unless payload["head_sha"] == job["head_sha"]
-          mismatches << "head_generation" unless payload["head_generation"] == job["head_generation"]
+          if record["event_type"] == "head_superseded"
+            mismatches << "head_sha" unless payload["head_sha"] != job["head_sha"]
+            mismatches << "head_generation" unless payload["head_generation"] == job["head_generation"] + 1
+          else
+            mismatches << "head_sha" unless payload["head_sha"] == job["head_sha"]
+            mismatches << "head_generation" unless payload["head_generation"] == job["head_generation"]
+          end
           mismatches << "finalize_attempt_id" unless payload["finalize_attempt_id"] == job["finalize_attempt_id"]
           raise StaleClaim, "babysitter event authority mismatch: #{mismatches.join(', ')}" unless mismatches.empty?
           true
@@ -275,8 +280,10 @@ module Hive
         end
       end
 
-      def mark_terminal!(job_id, now: @clock.call)
-        mutate(job_id) do |record|
+      def mark_terminal!(token, now: @clock.call)
+        mutate(token.fetch("job_id")) do |record|
+          validate_token!(record, token, now: now)
+          ensure_current!(record)
           record["state"] = "terminal"
           record["updated_at"] = now.utc.iso8601(6)
           record

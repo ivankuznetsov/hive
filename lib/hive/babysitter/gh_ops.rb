@@ -28,9 +28,10 @@ module Hive
       # a concurrent push WITHOUT needing a local remote-tracking ref for the
       # branch (the bare `--force-with-lease` form fails with "stale info"
       # when no such ref exists). When absent, fall back to the bare form.
-      def force_push_with_lease(worktree, branch, cfg:, dry_run:, expected_oid: nil)
+      def force_push_with_lease(worktree, branch, cfg:, dry_run:, expected_oid: nil, authorize: nil)
         return result(true, "[dry-run] git push skipped", "") if dry_run
 
+        authorize&.call
         lease = expected_oid.to_s.empty? ? "--force-with-lease" : "--force-with-lease=#{branch}:#{expected_oid}"
         out, err, status = Hive::Gh.capture3(
           "git", "push", lease, "origin", "HEAD:#{branch}",

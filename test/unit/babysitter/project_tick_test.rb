@@ -177,6 +177,48 @@ class BabysitterProjectTickTest < Minitest::Test
     end
   end
 
+  def test_claimed_registered_job_bypasses_pipeline_skip_and_is_excluded_from_discovery
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      write_config(dir, babysitter: { "enabled" => true, "labels_ignore" => [], "max_concurrent_prs" => 5 })
+      write_task_pointer(dir, "8-finalize", "durable-task", "feature/owned")
+      prs = [
+        { "number" => 20, "headRefName" => "feature/owned", "isDraft" => false,
+          "labels" => [], "updatedAt" => "2026-07-17T10:00:00Z" },
+        { "number" => 21, "headRefName" => "feature/legacy", "isDraft" => false,
+          "labels" => [], "updatedAt" => "2026-07-17T11:00:00Z" }
+      ]
+      job = { "job_id" => "bsj-v1-#{'a' * 32}", "state" => "active",
+              "identity" => { "pr_number" => 20 } }
+      store = Struct.new(:jobs).new([ job ])
+      explicit = []
+      discovered = []
+      logger = make_logger(dir)
+
+      with_replaced_singleton_method(Hive::Gh, :list_open_prs, ->(*_args, **_kwargs) { prs }) do
+        with_replaced_singleton_method(Hive::Babysitter::JobRunner, :run, lambda { |**kwargs|
+          explicit << kwargs.fetch(:job).dig("identity", "pr_number")
+          :active
+        }) do
+          with_replaced_singleton_method(Hive::Babysitter::PrFixer, :run, lambda { |pr, *_args, **_kwargs|
+            discovered << pr.fetch("number")
+            :success
+          }) do
+            summary = Hive::Babysitter::ProjectTick.run(
+              project, dry_run: false, logger: logger, inflight: Set.new, job_store: store
+            )
+            assert_equal({ total: 2, fixed: 1, untouched: 1, needs_human: 0 }, summary)
+          end
+        end
+      end
+
+      assert_equal [ 20 ], explicit
+      assert_equal [ 21 ], discovered
+    ensure
+      logger&.close
+    end
+  end
+
   # A task in the terminal done stage no longer owns its branch — its PR is
   # finished with the pipeline, so the babysitter may manage it again.
   def test_done_stage_task_does_not_protect_its_branch

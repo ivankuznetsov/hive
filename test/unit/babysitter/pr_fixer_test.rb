@@ -76,6 +76,43 @@ class BabysitterPrFixerTest < Minitest::Test
     end
   end
 
+  def test_claimed_job_agent_cannot_push_and_runner_performs_authorized_push
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      worktree_path = File.join(dir, "wt")
+      FileUtils.mkdir_p(worktree_path)
+      prompt = nil
+      commands = []
+      authorizations = 0
+      command_status = Hive::Gh::CommandStatus.new(exitstatus: 0)
+
+      stub_non_green_context(project, worktree_path) do
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, lambda { |_task, **kwargs|
+          prompt = kwargs.fetch(:prompt)
+          { status: :ok }
+        }) do
+          with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*args, **_kwargs|
+            commands << args
+            [ "", "", command_status ]
+          }) do
+            outcome = Hive::Babysitter::PrFixer.run(
+              pr, project, cfg, dry_run: false, logger: nil, inflight: Set.new,
+              push_authorizer: -> { authorizations += 1 }
+            )
+            assert_equal :success, outcome
+          end
+        end
+      end
+
+      assert_equal 1, authorizations
+      assert_equal %w[git push --force-with-lease=feature-branch:prfallbackoid origin HEAD:feature-branch],
+                   commands.last
+      assert_includes prompt, "Do not run `git push`"
+      refute_includes prompt, "git push --force-with-lease origin"
+      assert_includes prompt, "Never merge the pull request"
+    end
+  end
+
   def test_agent_failure_labels_comments_and_gives_up
     with_tmp_dir do |dir|
       project = project_entry(dir)

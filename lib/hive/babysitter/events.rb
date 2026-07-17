@@ -43,6 +43,7 @@ module Hive
         closed_unmerged
         unavailable
         stale_claim
+        needs_human
       ].freeze
 
       module_function

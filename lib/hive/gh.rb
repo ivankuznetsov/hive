@@ -38,7 +38,8 @@ module Hive
     PrMetadata = Data.define(:number, :url, :base_ref_name, :head_ref_oid, :is_cross_repository, :state)
     PrSnapshot = Data.define(
       :repository, :number, :url, :state, :head_sha, :head_branch,
-      :base_branch, :merged_at, :observed_at
+      :base_branch, :merged_at, :observed_at, :mergeable, :merge_state_status,
+      :review_decision, :status_check_rollup
     )
 
     # Returned by scan_pr_for_secrets so a remote-fetch failure is
@@ -276,7 +277,10 @@ module Hive
     end
 
     def exact_pr_snapshot(pr_url, cfg: nil, observed_at: Time.now.utc)
-      fields = %w[number url state headRefOid headRefName baseRefName mergedAt headRepository].join(",")
+      fields = %w[
+        number url state headRefOid headRefName baseRefName mergedAt headRepository
+        mergeable mergeStateStatus reviewDecision statusCheckRollup
+      ].join(",")
       out, err, status = capture3("gh", "pr", "view", pr_url.to_s, "--json", fields, cfg: cfg)
       unless status.success?
         raise Hive::GhError, "`gh pr view #{pr_url}` failed: #{err.to_s.strip.empty? ? out : err.strip}"
@@ -306,7 +310,11 @@ module Hive
         head_branch: doc["headRefName"].to_s,
         base_branch: doc["baseRefName"].to_s,
         merged_at: merged_at,
-        observed_at: observed_at.utc.iso8601(6)
+        observed_at: observed_at.utc.iso8601(6),
+        mergeable: doc["mergeable"],
+        merge_state_status: doc["mergeStateStatus"],
+        review_decision: doc["reviewDecision"],
+        status_check_rollup: doc["statusCheckRollup"]
       )
     rescue JSON::ParserError, ArgumentError => e
       raise Hive::GhError, "`gh pr view #{pr_url}` returned invalid exact snapshot: #{e.message}"
@@ -470,7 +478,7 @@ module Hive
 
     def pr_status_rollup(worktree_path, number, cfg: nil)
       out, err, status = capture3("gh", "pr", "view", number.to_s,
-                                  "--json", "mergeable,mergeStateStatus,statusCheckRollup,headRefOid,url",
+                                  "--json", "mergeable,mergeStateStatus,reviewDecision,statusCheckRollup,headRefOid,url",
                                   chdir: worktree_path,
                                   cfg: cfg)
       unless status.success?

@@ -34,5 +34,26 @@ class ConditionsEvidenceTest < Minitest::Test
     assert_raises(Hive::Conditions::InvalidEvidence) do
       Hive::Conditions::Evidence.validate!({ type: "file", path: "x", digest: "nope" })
     end
+    assert_raises(Hive::Conditions::InvalidEvidence) do
+      Hive::Conditions::Evidence.validate!(
+        { type: "attempt_lease", attempt_id: "attempt", lease_version: -1, state: "running" }
+      )
+    end
+    assert_raises(Hive::Conditions::InvalidEvidence) do
+      Hive::Conditions::Evidence.validate!(
+        { type: "pull_request", url: "https://example.test/pull/1", number: 0,
+          observed_head_sha: "a" * 40, state: "OPEN" }
+      )
+    end
+  end
+
+  def test_nested_evidence_is_stringified_and_deeply_frozen
+    result = Hive::Conditions::Evidence.validate!({
+      type: "journal_event", event_id: "event-1", detail: [ { source: "reconciler" } ]
+    })
+
+    assert_equal "reconciler", result.dig("detail", 0, "source")
+    assert result.fetch("detail").frozen?
+    assert result.dig("detail", 0).frozen?
   end
 end

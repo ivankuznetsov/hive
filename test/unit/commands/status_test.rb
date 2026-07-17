@@ -1882,6 +1882,24 @@ class CommandsStatusTest < Minitest::Test
     assert_kind_of Time, row.fetch(:folder_mtime)
   end
 
+  def test_condition_state_label_surfaces_first_gate_diagnostic
+    selection = Struct.new(:effective).new("conditions")
+    gate = Struct.new(:diagnostics)
+    action_type = Struct.new(:condition_warning, :migration_selection, :condition_gate)
+    command = Hive::Commands::Status.new
+    row = { state_label: "waiting" }
+
+    without_diagnostic = action_type.new(nil, selection, gate.new([]))
+    assert_equal "waiting", command.send(:condition_state_label, row, without_diagnostic)
+
+    with_diagnostic = action_type.new(
+      nil, selection,
+      gate.new([ { "condition" => "ChangesPresent", "state" => "unverifiable" } ])
+    )
+    assert_equal "ChangesPresent=unverifiable",
+                 command.send(:condition_state_label, row, with_diagnostic)
+  end
+
   private
 
   def status_project(project_root, hive_state)

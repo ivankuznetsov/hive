@@ -91,6 +91,34 @@ class ConditionsReconcilersExecuteTest < Minitest::Test
     end
   end
 
+  def test_terminal_attempt_health_is_journaled_as_informational
+    %w[succeeded failed].each do |outcome|
+      with_fixture do |task, store, attempt, baseline|
+        terminal = terminalize(store, attempt, outcome: outcome)
+        result = build_reconciler(task, store, terminal).reconcile(baseline_head: baseline)
+        health = result.projection.current_condition("AgentHealthy")
+
+        assert_equal(outcome == "succeeded" ? "satisfied" : "unsatisfied", health.fetch("state"))
+        assert_equal "attempt_terminal_#{outcome}", health.fetch("reason")
+        assert_equal true, health.dig("payload", "informational_after_terminal")
+      end
+    end
+  end
+
+  def test_unrecognized_but_durable_attempt_state_is_unverifiable
+    with_fixture do |task, store, attempt, baseline|
+      unusual = attempt.dup
+      unusual.define_singleton_method(:state) { "future_state" }
+      unusual.define_singleton_method(:live?) { false }
+      unusual.define_singleton_method(:final?) { false }
+
+      result = build_reconciler(task, store, unusual).reconcile(baseline_head: baseline)
+      health = result.projection.current_condition("AgentHealthy")
+      assert_equal "unverifiable", health.fetch("state")
+      assert_equal "attempt_state_unverifiable", health.fetch("reason")
+    end
+  end
+
   private
 
   def with_fixture(task_input_epoch: 1)
@@ -123,6 +151,21 @@ class ConditionsReconcilersExecuteTest < Minitest::Test
   def build_reconciler(task, store, attempt, git_ops: nil)
     Hive::Conditions::Reconcilers::Execute.new(
       task: task, attempt: attempt, attempt_store: store, git_ops: git_ops
+    )
+  end
+
+  def terminalize(store, attempt, outcome:)
+    now = Time.now.utc
+    claimed = store.claim(
+      attempt, owner: { "pid" => 1 }, first_heartbeat_timeout_sec: 30, now: now
+    )
+    running = store.first_heartbeat(claimed, stale_sec: 30, now: now)
+    store.terminalize(
+      running, outcome: outcome, exit_status: outcome == "succeeded" ? 0 : 1,
+      final_checkpoint: { "revision" => running["latest_revision"], "progress_token" => "progress" },
+      output_references: [],
+      log_reference: { "path" => "logs/attempt.frames", "size" => 1, "sha256" => "a" * 64 },
+      now: now + 1
     )
   end
 end

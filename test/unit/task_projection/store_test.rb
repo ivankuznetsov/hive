@@ -73,6 +73,19 @@ class TaskProjectionStoreTest < Minitest::Test
     end
   end
 
+  def test_journal_binding_ignores_malformed_legacy_tail_when_locating_event_id
+    with_tmp_dir do |dir|
+      record = condition_event("event-1")
+      File.write(File.join(dir, "events.jsonl"), "#{JSON.generate(record)}\nnot-json\n")
+      store = Hive::TaskProjection::Store.new(task_folder: dir)
+
+      binding = store.send(:journal_binding)
+
+      assert_equal "event-1", binding.fetch("event_id")
+      assert_equal File.size(store.journal_path), binding.fetch("cursor")
+    end
+  end
+
   private
 
   def write_journal(dir, records)

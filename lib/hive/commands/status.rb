@@ -209,7 +209,7 @@ module Hive
             # JSON path: pay the diagnostic-extraction cost because
             # external consumers (TUI, daemon, bots) read `diagnostic` off
             # every row. Schema mandates the field.
-            config = Hive::Config.load(path)
+            config = action_config_for_status(path)
             rows = annotate_actions(
               collect_rows(hive_state, stages: stages, exclude_archived: exclude_archived),
               project, project_count, config: config, with_diagnostic: true
@@ -839,6 +839,18 @@ module Hive
              "default #{default} — a stricter configured gate is ignored, so a dependent " \
              "may dispatch one stage early until the config loads cleanly"
         default
+      end
+
+      # TaskAction needs the migration-mode block, but a malformed dependency
+      # gate has always degraded independently inside annotate_dependencies.
+      # Do not let eagerly loading the additive condition config turn that
+      # one bad key into an empty project payload.
+      def action_config_for_status(path)
+        Hive::Config.load(path)
+      rescue Hive::ConfigError => e
+        raise unless e.message.include?("dependency_gate_stage")
+
+        Hive::Config::DEFAULTS
       end
 
       # Resolve and stamp dependency state onto one row, failing OPEN on any

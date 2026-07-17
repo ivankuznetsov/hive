@@ -60,12 +60,28 @@ module Hive
 
       def initialize(attempt_id:, task_generation:, ownership_generation: nil)
         @attempt_id = attempt_id.to_s
-        @task_generation = Integer(task_generation)
-        @ownership_generation = ownership_generation&.to_s
         raise ArgumentError, "attempt context requires an attempt ID" if @attempt_id.empty?
+
+        # Before condition epochs existed, Context#task_generation carried
+        # the supervisor's opaque ownership token. Keep those callers
+        # readable without pretending that token is a numeric input epoch:
+        # legacy contexts enter epoch zero and retain the token explicitly.
+        @task_generation, bridged_ownership = numeric_generation_or_legacy(task_generation)
+        @ownership_generation = ownership_generation&.to_s || bridged_ownership
         raise ArgumentError, "attempt context task generation must be non-negative" if @task_generation.negative?
-      rescue ArgumentError, TypeError
+      rescue TypeError
         raise ArgumentError, "attempt context requires a numeric task generation"
+      end
+
+      private
+
+      def numeric_generation_or_legacy(value)
+        return [ Integer(value), nil ] if value.is_a?(Integer) || value.to_s.match?(/\A\d+\z/)
+
+        token = value.to_s
+        raise ArgumentError, "attempt context requires a task generation" if token.empty?
+
+        [ 0, token ]
       end
     end
   end

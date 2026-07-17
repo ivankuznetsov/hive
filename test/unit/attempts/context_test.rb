@@ -69,10 +69,12 @@ class AttemptsContextTest < Minitest::Test
     end
   end
 
-  def test_context_rejects_non_numeric_or_negative_epochs
-    assert_raises(ArgumentError) do
-      Hive::Attempts::Context.new(attempt_id: "attempt", task_generation: "opaque")
-    end
+  def test_context_bridges_legacy_opaque_generation_without_treating_it_as_an_epoch
+    context = Hive::Attempts::Context.new(attempt_id: "attempt", task_generation: "opaque")
+
+    assert_equal 0, context.task_generation
+    assert_equal "opaque", context.ownership_generation
+
     assert_raises(ArgumentError) do
       Hive::Attempts::Context.new(attempt_id: "attempt", task_generation: -1)
     end

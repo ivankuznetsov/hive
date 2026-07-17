@@ -989,6 +989,39 @@ module Hive
       ).call
     end
 
+    desc "finalize-outcome TARGET ACTION", "Confirm or re-arm an exceptional no-PR finalize outcome"
+    long_desc <<~DESC
+      ACTION is `approve` or `rearm`. Approval is restricted to the typed
+      outcomes abandonment, superseded, and direct_landing. It verifies the
+      exact current PR/job/head state, displays the archival consequence, and
+      requires an exact local-TTY confirmation; there is no --yes bypass.
+
+      `superseded` takes the landed PR URL in --evidence. `direct_landing`
+      takes the recorded work commit SHA and proves it is contained in the
+      current remote target. `abandonment` derives evidence from the exact
+      current closed-unmerged PR and does not accept --evidence.
+
+      `rearm` appends an audited reversal before archive reconciliation and
+      resumes the current journal-backed babysitter job. Archived tasks need a
+      new task generation instead.
+    DESC
+    option :outcome, type: :string, desc: "abandonment, superseded, or direct_landing"
+    option :reason, type: :string, desc: "required operator reason"
+    option :evidence, type: :string, desc: "landed PR URL or recorded work commit SHA"
+    option :project, type: :string, desc: "scope slug lookup to one registered project"
+    def finalize_outcome(target, action)
+      require "hive/commands/finalize_outcome"
+      Hive::Commands::FinalizeOutcome.new(
+        target,
+        action,
+        outcome: options[:outcome],
+        reason: options[:reason],
+        evidence: options[:evidence],
+        project: options[:project]
+      ).call
+    end
+    map "finalize-outcome" => :finalize_outcome
+
     desc "findings TARGET", "List findings in the latest reviews/ce-review-NN.md (or --pass N)"
     long_desc <<~DESC
       TARGET is either a 4-execute task folder path or a bare slug. Findings

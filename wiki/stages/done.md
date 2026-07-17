@@ -1,42 +1,44 @@
 ---
 title: 9-done stage
 type: stage
-source: lib/hive/stages/done.rb
+source: lib/hive/stages/done.rb, lib/hive/finalization/archive_cleanup.rb
 created: 2026-04-25
-updated: 2026-04-25
-tags: [stage, done, archive]
+updated: 2026-07-17
+tags: [stage, done, archive, cleanup, journal]
 ---
 
-**TLDR**: Archive stage. `hive run` here does not spawn an agent; it prints the manual cleanup commands (`git worktree remove`, `git branch -d`) and stamps `<!-- COMPLETE -->` on the state file.
+**TLDR**: The terminal stage performs validated local cleanup and records a
+durable receipt. It runs only after current `archive_ready` evidence; it never
+deletes a remote branch.
 
-## State file
+## Guard and cleanup
 
-Reuses `task.md` from `4-execute/`. Falls back to creating an empty `task.md` if missing (e.g. task somehow skipped execute).
+`Hive::Finalization::ArchiveCleanup` rebuilds and validates finalization
+history before any destructive action. It requires:
 
-## Behaviour of `hive run`
+- the current projection to be `archive_ready`;
+- the same current task generation, job, repository/PR, finalize attempt,
+  head SHA, and head generation in the journal and registry;
+- a terminal babysitter job with no live claim and no newer task generation;
+- `worktree.yml` to name the exact canonical `<worktree-root>/<slug>` path and
+  the branch stored on the current job.
 
-`Stages::Done.run!` (`lib/hive/stages/done.rb:8`):
+It removes only a Git-registered task worktree, strictly prunes worktree
+metadata, deletes only the exact local branch, and then appends one
+`cleanup_completed` journal event referencing the current `archive_ready`
+event. An unregistered existing path, mismatched pointer, branch checked out
+elsewhere, corrupt registry, or filesystem/Git failure remains a retryable
+`9-done` error.
 
-1. `FileUtils.touch(task.state_file)` if absent.
-2. Read `worktree.yml` if present.
-3. If pointer present, print:
-   ```
-   Task <slug> marked done. To clean up:
-     cd <project_root>
-     git worktree remove <worktree-path>
-     git branch -d <branch>
-   (Use -D / --force if the branch was squash-merged.)
-   ```
-   Otherwise print `"Task <slug> archived. No worktree pointer; nothing to clean up."`
-4. Set `<!-- COMPLETE -->` marker.
-5. Return `{commit: "archived", status: :complete}`.
+Missing resources are treated as already completed steps, so crashes after
+the stage move, worktree removal, or branch deletion converge on retry. The
+`<!-- COMPLETE -->` marker is written only after the cleanup receipt is
+durable. `hive archive` at an already-moved task repairs a missing receipt
+before becoming the terminal no-op.
 
-## Why cleanup is manual
-
-The MVP intentionally does not run `git worktree remove` automatically because squash-merged branches require `-D`/`--force` and the user might still have unpushed local commits in the feature branch. Auto-cleanup is deferred to Phase 3 (per the plan's "Deferred to Follow-Up Work").
+The retained remote branch is intentionally outside cleanup scope.
 
 ## Backlinks
 
 - [[stages/finalize]] · [[stages/execute]]
-- [[modules/worktree]] · [[modules/markers]]
-- [[state-model]]
+- [[modules/worktree]] · [[modules/markers]] · [[state-model]]

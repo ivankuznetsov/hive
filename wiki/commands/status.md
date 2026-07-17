@@ -45,6 +45,18 @@ own condition semantics. Snapshot validation or journal replay is read-only:
 status never observes git/GitHub, creates a baseline/audit, or publishes a
 repaired snapshot.
 
+Status v6 adds one bounded `finalization` object to every task row. It is null
+before handoff; otherwise it carries `state`, `task_generation`,
+`finalize_attempt_id`, `job_id`, canonical `repository`/`pr_number`/`pr_url`,
+`head_sha`, `head_generation`, `updated_at`, an optional stable-code `blocker`,
+an evidence summary, and exactly one allowlisted `safe_action`. The lifecycle is
+folded from the task journal, never from `summary.md`, marker state, the
+babysitter telemetry files, or a live GitHub read. GitHub-authored text may
+appear only as escaped, length-bounded detail; it cannot choose an action code
+or command. Text status renders finalized tasks in `8-finalize` as watching,
+ready, blocked, merged, or archive-ready with the same PR/job/generation
+coordinates used by TUI, web, and bot.
+
 JSON rows also include `next_action`; it is usually `null`, but `EXECUTE_WAITING reason=...` rows carry the same structured recovery target that `hive run --json` emits. Every JSON row also includes `diagnostic`; it is `null` for ordinary rows and a bounded red-row payload for `recover_execute`, `recover_review`, and `error` rows. JSON rows carry `unanswered_questions` (issue #270): the count of still-unanswered `### Q{n}.` slots for a `2-brainstorm` `needs_input` row, and `0` otherwise.
 
 Every task row has `depends_on`, `blocked_by`, `dependency_stage`, `blocked`, and required nullable `admission_error`. The correlations are closed:
@@ -61,7 +73,7 @@ Text/TUI render a benign wait as `⏸ blocked by <task> (<stage>)`. Admission er
 
 The filter applies only to human daily surfaces: default `hive status` text and the TUI grid. Default `hive status --json` stays unfiltered so bots, daemons, and agents continue to see every task row. Text status prints `… and N archived >3d ago (hive archive to view)` when rows were hidden.
 
-`hive archive` with no target reuses Status in archive mode (`Hive::Commands::Status.new(archive: true)`): it lists only `9-done` tasks, with no age cutoff and no hidden-count summary. Empty archive projects print `no archived tasks`. Text rows are sorted newest-first by `mtime` and use the same id/PR/display-name identity column as daily status. `hive archive --json` emits a focused `hive-status` payload whose project task arrays contain only `9-done` rows. `hive archive <slug>` still runs the workflow verb that advances a completed finalize task into done.
+`hive archive` with no target reuses Status in archive mode (`Hive::Commands::Status.new(archive: true)`): it lists only `9-done` tasks, with no age cutoff and no hidden-count summary. Empty archive projects print `no archived tasks`. Text rows are sorted newest-first by `mtime` and use the same id/PR/display-name identity column as daily status. `hive archive --json` emits a focused `hive-status` payload whose project task arrays contain only `9-done` rows. `hive archive <slug>` advances a finalized task only when its current projection contains reconciler-authored `archive_ready`; `--force`, a final marker, readiness, or closed-unmerged PR state cannot bypass that guard.
 
 ## Legacy stage directories (`legacy_stage_dirs`)
 
@@ -77,7 +89,7 @@ When the field is non-empty, the text output prints a warning under the project 
 
 The warning is singular for one hidden task (`1 task hidden`) and plural otherwise. The TUI projects pane mirrors the warning by prefixing the affected project's name with `⚠` and the short hint `legacy dirs — run hive migrate`. The Telegram bot also sends a proactive project-level notification on the clean-to-legacy transition, deduped by the bot alert store while the project remains legacy-dirty, even if the hidden task count changes. Bot messages include a project-path-scoped `hive migrate <project_path>` command because the bot is global. Running `hive migrate` moves the slugs into the canonical stage directory listed in `Hive::Commands::Migrate::STAGE_RENAMES`, and after the next status poll the warning disappears.
 
-The `legacy_stage_dirs` field was an additive extension of status v2. Task `id` / `display_name` fields produced v3; dependency waits produced v4. Fail-closed admission is `hive-status` v5, with required nullable `admission_error` and closed reason/action enums; `schemas/hive-status.v4.json` remains available for historical consumers. An older daemon safely ignores a v5 error row because it is both `blocked: true` and carries the unknown inert `admission_error` action with no command.
+The `legacy_stage_dirs` field was an additive extension of status v2. Task `id` / `display_name` fields produced v3; dependency waits produced v4. Fail-closed admission is `hive-status` v5. Durable finalization is `hive-status` v6, with required nullable `finalization` and closed lifecycle/blocker/action enums; v4/v5 schemas remain available for historical consumers. Older consumers ignore the additive object while the ordinary row stays visibly in `8-finalize` and non-archivable.
 
 ## Icon legend (`Status::ICON`, `lib/hive/commands/status.rb:11`)
 

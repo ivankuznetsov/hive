@@ -3,7 +3,7 @@ title: hive bot
 type: command
 source: lib/hive/commands/bot.rb, lib/hive/bot/*
 created: 2026-05-14
-updated: 2026-06-30
+updated: 2026-07-17
 tags: [command, bot, telegram, mobile, json]
 ---
 
@@ -115,6 +115,17 @@ The reply stays text-only when no row is actionable. The `/answer`,
 `/approve`, `/autofix`, `/details` slash commands remain typeable
 (and appear in the quick-actions menu as `<id|slug>`) for operators who
 prefer typing or scripting.
+
+Finalized tasks are change-driven notifications over the status v6
+`finalization` object. `/status`, `/queue`, and push notifications use the same
+canonical PR, lifecycle, job/task/finalize/head generations, SHA, bounded
+blocker/needs-human reason, update time, and one allowlisted safe action as the
+CLI, TUI, and hivebox. Fingerprints exclude polling-only noise, so an unchanged
+watching row does not spam chat; a new head, blocker, readiness, merge, or
+archive-ready transition does notify. GitHub-authored detail is HTML-escaped
+and length-bounded and can never become callback data or an action code. The
+watcher performs no GitHub call, registry repair, reconciliation, or journal
+write while parsing/rendering status.
 
 ### Dispatch acknowledgment on success
 

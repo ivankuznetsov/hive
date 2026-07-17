@@ -3,7 +3,7 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-07-13
+updated: 2026-07-17
 tags: [command, web, hivebox, rails, turbo]
 ---
 
@@ -111,6 +111,11 @@ origin also prints the Host-header/reverse-proxy warning.
   `Hive::Commands::Daemon` CLI object; the view also reads
   `StatusReport::BINARY_DRIFT_ACTIONABLE` for the Repair affordance, so CLI
   JSON and web drift handling share the same producer constants.
+  Finalized rows consume the status v6 `finalization` object directly and show
+  the same lifecycle, canonical PR, job/head/task/finalize generations, bounded
+  blocker/needs-human reason, update time, and single allowlisted safe action
+  as every other surface. A watching task stays in `8-finalize`; the view never
+  calls GitHub, repairs a job, reconciles evidence, or appends the journal.
 - **Task page** — state-driven actions (Retry stage for red
   `recover_review` / `recover_execute` / `error` rows; Approve only when the
   marker makes a forward move possible; Run <verb> only when the project daemon
@@ -162,6 +167,8 @@ origin also prints the Host-header/reverse-proxy warning.
   Red diagnostic rows also render a danger banner from
   `tasks[].diagnostic.summary` so the page says why the row is stuck before
   offering Retry.
+  Finalization blocker detail is escaped and bounded before rendering, and
+  external text cannot supply HTML, an action code, or executable content.
 - **Repos** — registered projects, clone-by-URL (same allowlist as before:
   github.com https/ssh or `owner/repo`, leading-dash guard), and the
   operator's GitHub repository list (device-flow token; degrades to an inline

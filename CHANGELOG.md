@@ -4,6 +4,11 @@ All notable changes are documented here, newest first. Hive ships frequent micro
 
 ## 0.4.3
 
+- Made finalize a durable transfer to one generation-fenced babysitter job.
+  Exact PR/head watching now records explicit merge evidence, reconciliation
+  alone authorizes archive, status v6 exposes the shared lifecycle across CLI,
+  TUI, web, and bot, exceptional no-PR outcomes are audited, and Done performs
+  crash-resumable exact local worktree/branch cleanup.
 - Added path-qualified `Read(...)` and `Edit(...)` workflow permissions, with
   exact task/repository scope projection and fail-closed portable-path
   validation. This enables repository-wide reads with writes constrained to

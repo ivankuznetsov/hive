@@ -1,0 +1,80 @@
+{
+  "ready_head_a": {
+    "repository": "github.com/sanitized/topgreendeals",
+    "number": 295,
+    "url": "https://github.com/sanitized/topgreendeals/pull/295",
+    "state": "OPEN",
+    "head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "head_branch": "sanitized/pr-295-finalization",
+    "base_branch": "main",
+    "merged_at": null,
+    "observed_at": "2026-07-16T22:58:00Z",
+    "mergeable": "MERGEABLE",
+    "merge_state_status": "CLEAN",
+    "review_decision": "APPROVED",
+    "status_check_rollup": [{ "conclusion": "SUCCESS" }]
+  },
+  "new_head_b": {
+    "repository": "github.com/sanitized/topgreendeals",
+    "number": 295,
+    "url": "https://github.com/sanitized/topgreendeals/pull/295",
+    "state": "OPEN",
+    "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "head_branch": "sanitized/pr-295-finalization",
+    "base_branch": "main",
+    "merged_at": null,
+    "observed_at": "2026-07-16T23:01:00Z",
+    "mergeable": "MERGEABLE",
+    "merge_state_status": "CLEAN",
+    "review_decision": "APPROVED",
+    "status_check_rollup": [{ "conclusion": "SUCCESS" }]
+  },
+  "missing_from_open_list": {
+    "open_prs": [],
+    "exact_pr": {
+      "repository": "github.com/sanitized/topgreendeals",
+      "number": 295,
+      "url": "https://github.com/sanitized/topgreendeals/pull/295",
+      "state": "OPEN",
+      "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "head_branch": "sanitized/pr-295-finalization",
+      "base_branch": "main",
+      "merged_at": null,
+      "observed_at": "2026-07-16T23:03:00Z",
+      "mergeable": "MERGEABLE",
+      "merge_state_status": "CLEAN",
+      "review_decision": "APPROVED",
+      "status_check_rollup": [{ "conclusion": "SUCCESS" }]
+    }
+  },
+  "merged_head_b": {
+    "repository": "github.com/sanitized/topgreendeals",
+    "number": 295,
+    "url": "https://github.com/sanitized/topgreendeals/pull/295",
+    "state": "MERGED",
+    "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "head_branch": "sanitized/pr-295-finalization",
+    "base_branch": "main",
+    "merged_at": "2026-07-16T23:05:50Z",
+    "observed_at": "2026-07-16T23:05:50Z",
+    "mergeable": null,
+    "merge_state_status": null,
+    "review_decision": null,
+    "status_check_rollup": null
+  },
+  "closed_head_b": {
+    "repository": "github.com/sanitized/topgreendeals",
+    "number": 295,
+    "url": "https://github.com/sanitized/topgreendeals/pull/295",
+    "state": "CLOSED",
+    "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "head_branch": "sanitized/pr-295-finalization",
+    "base_branch": "main",
+    "merged_at": null,
+    "observed_at": "2026-07-16T23:05:50Z",
+    "mergeable": null,
+    "merge_state_status": null,
+    "review_decision": null,
+    "status_check_rollup": null
+  }
+}

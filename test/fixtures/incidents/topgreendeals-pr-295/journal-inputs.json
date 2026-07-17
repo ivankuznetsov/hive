@@ -1,0 +1,24 @@
+{
+  "schema": "sanitized-finalization-replay-journal-inputs",
+  "schema_version": 1,
+  "authoritative_sequence": [
+    "finalized",
+    "babysitter_active",
+    "merge_ready",
+    "head_superseded",
+    "merge_ready",
+    "merged",
+    "archive_ready",
+    "cleanup_completed"
+  ],
+  "signals_that_must_not_archive": [
+    "finalize_success",
+    "green_checks",
+    "merge_ready",
+    "missing_from_open_list"
+  ],
+  "terminal_observation": {
+    "state": "MERGED",
+    "merged_at": "2026-07-16T23:05:50Z"
+  }
+}

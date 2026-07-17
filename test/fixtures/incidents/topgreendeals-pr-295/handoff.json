@@ -1,0 +1,14 @@
+{
+  "project": "topgreendeals-sanitized",
+  "task_id": "295",
+  "task_slug": "sanitized-pr-295-finalization",
+  "task_generation": 1,
+  "finalize_attempt_id": "finalize-attempt-sanitized-1",
+  "repository": "github.com/sanitized/topgreendeals",
+  "pr_number": 295,
+  "pr_url": "https://github.com/sanitized/topgreendeals/pull/295",
+  "branch": "sanitized/pr-295-finalization",
+  "initial_head_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "replacement_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "finalized_at": "2026-07-16T22:55:00Z"
+}

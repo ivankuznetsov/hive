@@ -3,7 +3,7 @@ title: hive daemon
 type: command
 source: lib/hive/commands/daemon.rb, lib/hive/daemon/*
 created: 2026-05-06
-updated: 2026-07-12
+updated: 2026-07-17
 tags: [command, daemon, automation, json]
 ---
 
@@ -13,10 +13,11 @@ every 1s for cheap child-exit/state-mtime probes, runs a full
 `hive status --json` scan on change or every 30s as a backstop, dispatches
 workflow verbs (`hive plan` / `develop` / `open-pr` / `review` /
 `artifacts` / `finalize`) on tasks ready to advance, and
-auto-archives 8-finalize → 9-done after `gh pr view` reports `MERGED` for
-complete finalize rows or for two whitelisted stale finalize errors. It
+reconciles current task-journal terminal evidence to `archive_ready` before
+auto-archiving 8-finalize → 9-done. It never queries GitHub to infer a
+pipeline-task merge. It
 stops at human-input gates (`_WAITING` markers for Q&A / triage), manual
-recovery markers, and 8-finalize while the PR is still open on GitHub; selected
+recovery markers, and nonterminal 8-finalize lifecycle states; selected
 retryable terminal `ERROR` markers are cleared by `StaleAgentHealer` before
 normal policy dispatch. Separately, it ingests merged PRs and fairly schedules
 ordinary patrol alongside language-neutral architecture discovery/action
@@ -107,14 +108,14 @@ stage.
 | `ready_for_review`    | Dispatch `hive review <slug> --from 5-open-pr` (5→6) |
 | `ready_to_artifacts`  | Dispatch `hive artifacts <slug> --from 6-review` (6→7) |
 | `ready_to_finalize`   | Dispatch `hive finalize <slug> --from 7-artifacts` (7→8) |
-| `ready_to_archive`    | **Hand off to PrMergeWatcher**: poll `gh pr view` until `MERGED`, then dispatch `hive archive <slug> --from 8-finalize` (8→9) |
-| `error` at `8-finalize` with `reason=git_status_failed` or `reason=claude_launch_failed` | **Hand off to PrMergeWatcher before normal policy.** If the PR later reports `MERGED`, dispatch `hive archive <slug> --from 8-finalize --recover-merged-error-reason <reason>`; the archive command re-checks marker reason and PR state before moving the task. |
+| `watching` / finalized blocker | Reconcile the read-only journal projection, expose the same status v6 blocker/action, and skip dispatch until current terminal evidence exists. |
+| `ready_to_archive`    | Dispatch `hive archive <slug> --from 8-finalize` only after `Finalization::Reconciler` append-once records `archive_ready` from current explicit merge or approved no-PR evidence. |
 | `needs_input` at `3-plan` | **Auto-dispatch immediately.** Plan-stage `:waiting` is an approval pause, not a Q&A wait — `daemon.enabled: true` is the durable consent. `Hive::Daemon::PlanApproval.prepare` rewrites the row's `hive plan ...` command to `hive develop ...` and flips the `:waiting` marker to `:complete` before dispatch so the workflow verb's terminal-marker gate (`VALID_TERMINAL_MARKERS`) accepts the advance. Logged as `:dispatched` with `trigger: "plan_approval"`. |
 | `needs_input` (any other stage) | Dispatch only if state-file mtime moved AND `daemon.edit_debounce_sec` elapsed since last edit. The debounce guards mid-save partial drafts. Brainstorm/execute/review WAITING represent actual user-authored answers; auto-dispatch without an edit would either spam the agent or skip real user input. The `[project, slug] → mtime` baseline this compares against is **persisted** (`daemon_dispatch_baselines.json` under the state home, beside `.daemon.pid`), so a daemon restart no longer re-strands a task answered while it was down — see [[modules/daemon]] "Persisted dispatch baselines". **Brainstorm Q&A gate:** mtime-debounce alone can't tell "answered 1 of 3, still going" from "done" — each Telegram answer bumps the file mtime — so a `2-brainstorm` `needs_input` row whose `brainstorm.md` still has unanswered `### Q{n}.` slots is **held** (`Policy :wait_for_answers`, logged `:skipped reason=answers_pending`) until every question is answered, whether they arrive one-at-a-time via the bot or in one editor save. See [[modules/daemon]] "Brainstorm answers-pending gate". |
 | `recover_execute`, `recover_review` | Skip — recovery markers are explicit human-input gates. |
 | `agent_running`       | Skip — task is in flight; per-task `.lock` would block double-spawn anyway. |
 | `archived`            | Skip — terminal. |
-| `error`               | Skip ordinary/manual error rows. Retryable terminal-error rows listed above are healer-cleared before policy sees the post-clear row; the merged-finalize-error exception is handled by `PrMergeWatcher` before this policy table. |
+| `error`               | Skip ordinary/manual error rows. Retryable terminal-error rows listed above are healer-cleared before policy sees the post-clear row; no error-marker or live-GitHub exception can authorize archive. |
 
 `agent_running` rows also feed daemon capacity accounting when status
 has positive liveness evidence. The dispatcher counts both rows with a
@@ -129,8 +130,8 @@ value falls through to `:skip` until the daemon is taught about it.
 ## Architecture-patrol dispatch
 
 Architecture patrol does not enter through `hive status` task rows.
-`RefactorPatrolMergeReconciler` combines Hive finalize observations with
-exact-host, paginated GitHub catch-up, creates one checksummed v2 manifest per
+`RefactorPatrolMergeReconciler` performs exact-host, paginated GitHub catch-up
+for the separate architecture-patrol intake, creates one checksummed v2 manifest per
 repository/PR/merge occurrence, and seeds a current high-water baseline on
 first enablement instead of importing old history. `PatrolArbiter` then shares
 each project's `daemon.max_concurrent_patrol_scans` capacity between ordinary
@@ -184,7 +185,7 @@ All under `daemon:` in `~/Dev/hive/config.yml`:
 | `fast_poll_sec` | 1 | Cheap wake cadence for child reaps and state-file/stage-dir mtime probes between full scans. Min 1. |
 | `auto_retry.enabled` | `true` | Global kill switch for the recoverable terminal-error healer. `false` keeps otherwise-recoverable dependency-outage markers parked for manual `hive markers clear`. |
 | `edit_debounce_sec` | 30 | Settle window for `kind: edit` resumes. 0 disables debounce. |
-| `pr_merge_poll_interval_sec` | 300 | PrMergeWatcher cadence (per-task). Min 60 to respect GitHub rate limits. |
+| `pr_merge_poll_interval_sec` | 300 | Architecture-patrol merged-PR catch-up cadence. Pipeline finalization jobs use the babysitter's exact-PR cadence instead. Min 60. |
 | `max_concurrent_runs` | 3 | Global cap. Raise carefully — multiplies cost ceiling. |
 | `max_concurrent_per_project` | 3 | Per-project burst cap; set below the global cap only when you want cross-project sharing. |
 | `max_runs_per_day_per_project` | 50 | Circuit breaker for runaway loops. |

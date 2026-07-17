@@ -57,6 +57,7 @@ Entries are keyed by an internal symbol resolved by routing on the descriptor st
 | `artifacts_complete` | `READY_TO_FINALIZE` | "Ready to finalize" | finalize |
 | `review_stale` | `RECOVER_REVIEW` | "Needs recovery" | nil |
 | `finalize_waiting` | `NEEDS_INPUT` | "Needs your input" | finalize |
+| `finalize_watching` | `WATCHING` | "Watching PR" | nil |
 | `finalize_complete` | `READY_TO_ARCHIVE` | "Ready to archive" | archive |
 | `ready_to_advance` | `READY_TO_ADVANCE` | "Ready to advance" | approve |
 | `generic_ready_to_run` | `READY_TO_RUN` | "Ready to run" | run |
@@ -125,6 +126,11 @@ with `:none` now emit `READY_TO_RUN`; `8-finalize` with `:none` emits
 `:complete` marker at execute-stage is treated like `:execute_complete` and
 surfaces `READY_TO_OPEN_PR`; other unexpected terminal markers at execute-stage
 become `ERROR` rather than phantom `NEEDS_INPUT`.
+
+Once an `8-finalize` projection has a durable handoff, every nonterminal
+finalization state maps to inert `WATCHING` regardless of a compatibility
+`COMPLETE` marker. Only `archive_ready` maps to `READY_TO_ARCHIVE`; a legacy
+summary without handoff remains rerunnable so finalize can repair it.
 
 Markerless `6-review` tasks map to `READY_FOR_REVIEW`, not `NEEDS_INPUT`. This matters after a recovery marker is cleared: the next useful action is to run the review stage, while only an explicit `REVIEW_WAITING` marker should open the input-editor path.
 

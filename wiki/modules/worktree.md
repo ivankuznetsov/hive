@@ -3,7 +3,7 @@ title: Hive::Worktree
 type: module
 source: lib/hive/worktree.rb
 created: 2026-04-25
-updated: 2026-06-29
+updated: 2026-07-17
 tags: [worktree, git, pointer, dependencies]
 ---
 
@@ -125,7 +125,11 @@ This prevents an agent (with Write access to `worktree.yml`) from setting `path:
 - `Stages::Execute#run_iteration_pass` — re-reads the pointer, re-validates.
 - `Stages::OpenPr#run!` — reads pointer for the worktree path; `git push` runs there.
 - `Stages::Finalize#run!` — reads pointer to verify the final branch state before wrapping up the PR.
-- `Stages::Done#run!` — reads pointer to print cleanup instructions.
+- `Finalization::ArchiveCleanup` / `Stages::Done#run!` — require
+  `archive_ready`, validate the pointer against the registered root and current
+  job/generation, idempotently remove that exact worktree plus exact local task
+  branch, and append a cleanup receipt only after every step succeeds. The
+  remote branch is never deleted.
 - `Hive::Commands::AdhocReview` — materializes a PR head at the normal worktree root before creating a synthetic `6-review` task.
 - `Hive::Babysitter::Worktree` — delegates PR-head materialization here while keeping babysitter-specific cleanup and fork policy around it.
 

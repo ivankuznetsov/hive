@@ -3,11 +3,14 @@ title: Hive::Babysitter
 type: module
 source: lib/hive/babysitter/, bin/hive-babysitter-stub-git, bin/hive-babysitter-stub-gh, bin/hive-babysitter-skip-log.rb
 created: 2026-05-26
-updated: 2026-07-16
+updated: 2026-07-17
 tags: [babysitter, module, daemon, github, agents]
 ---
 
-**TLDR**: `Hive::Babysitter::*` is an experimental out-of-band PR repair daemon. It does not move task folders through the 1→9 pipeline; it watches GitHub PRs for enrolled projects and delegates repair work to the project's development agent.
+**TLDR**: `Hive::Babysitter::*` is the durable owner of PR watching and
+remediation after finalize handoff. Explicit generation-fenced jobs are
+processed before legacy open-PR discovery; the babysitter records exact head,
+readiness, blocker, and `MERGED` observations but never presses merge.
 
 ## Module Map
 
@@ -17,6 +20,8 @@ tags: [babysitter, module, daemon, github, agents]
 | `Hive::Babysitter::Logger` | `lib/hive/babysitter/logger.rb` | Rotated JSON-line process log at `$HIVE_HOME/logs/babysitter.log`. |
 | `Hive::Babysitter::Interval` | `lib/hive/babysitter/interval.rb` | Parses integer seconds or `\d+[smh]` duration strings. |
 | `Hive::Babysitter::ProjectTick` | `lib/hive/babysitter/project_tick.rb` | One-project tick: reload config, list PRs, filter labels, enforce `max_concurrent_prs`, call `PrFixer`. |
+| `Hive::Babysitter::Job` / `JobStore` | `lib/hive/babysitter/job.rb`, `job_store.rb` | Versioned deterministic job identity, inactive reservation/activation, current-job index, leases, monotonic claim fences, replacement, and restart repair. Operational state only; lifecycle truth remains in the task journal. |
+| `Hive::Babysitter::JobRunner` | `lib/hive/babysitter/job_runner.rb` | Claims one handed-off job, polls its exact PR, invalidates stale-head readiness, fences remediation/push, and journals blockers, readiness, or explicit merge evidence. |
 | `Hive::Babysitter::PrFixer` | `lib/hive/babysitter/pr_fixer.rb` | Per-PR precheck, green-but-`BEHIND` auto-rebase, worktree setup, context gathering, prompt render, agent spawn, give-up handling. |
 | `Hive::Babysitter::ContextBuilder` | `lib/hive/babysitter/context_builder.rb` | Builds prompt-ready status rollup, failing-job logs, and diff stat. |
 | `Hive::Babysitter::Worktree` | `lib/hive/babysitter/worktree.rb` | Recreates `.hive-state/babysitter/worktrees/<pr>/` from a force-refreshed internal PR-head ref, so rebased or force-pushed PRs do not wedge the babysitter cache. |
@@ -26,6 +31,27 @@ tags: [babysitter, module, daemon, github, agents]
 | `Hive::Babysitter::StatusWriter` | `lib/hive/babysitter/status_writer.rb` | Human-readable loop summary appended to `.hive-state/babysitter/status.md`. |
 
 ## Wiring
+
+Explicit jobs take priority:
+
+```
+Finalize -> JobStore.reserve(inactive) -> journal finalized -> activate
+ProjectTick -> JobRunner.claim(fence) -> exact PR snapshot -> task journal
+                                      -> legacy discovery (excluding registered PRs)
+```
+
+The job ID is a versioned digest of canonical project, stable task,
+`task_generation`, canonical repository, and PR number. Retry attempts attach
+to the same job. Claims have an expiry and strictly increasing fence; every
+journal write and sanctioned push revalidates current job, attempt, PR, head,
+and fence. Expired-owner takeover preserves history and rejects late writers.
+
+`JobRunner` polls the exact handed-off PR even when it is absent from
+`list_open_prs`. Any head SHA change increments `head_generation`, appends
+`head_superseded`, and returns the projection to `babysitter_active` before a
+new readiness decision. Only exact `state=MERGED` with `merged_at` appends
+`merged`. `CLOSED` without merge, GitHub outage, stale rollup, failed checks,
+or missing review becomes a bounded blocker.
 
 Patrol consolidation note (2026-07-15): `gh` passthrough uses a per-invocation, hosts-only auth
 copy with prompting disabled and removes it after the child exits. Git passthrough requires Git
@@ -60,9 +86,13 @@ Each action appends one JSON object:
 {"ts":"2026-05-26T11:40:00Z","stage":"babysitter","project":"demo","pr":42,"action":"agent-fix","outcome":"success","duration_ms":612000}
 ```
 
-Closed action enum: `list-prs`, `noop`, `skipped`, `agent-fix`, `rebase`, `force-push`, `pr-comment`, `label-apply`, `give-up`, `dry_run`.
+Closed action enum additionally includes explicit-job telemetry: `job-claim`,
+`exact-pr`, `head-change`, `readiness`, `merged`, and `blocked`; telemetry is
+never read as lifecycle authority.
 
-Closed outcome enum: `success`, `failure`, `conflict`, `timeout`, `budget_exhausted`, `gh-error`, `already-green`, `label_ignored`, `draft_pr`, `pipeline_owned`, `fork_pr`, `dry_run`.
+The corresponding explicit-job outcomes include `active`, `ready`, `merged`,
+`closed_unmerged`, `unavailable`, `stale_claim`, and `needs_human` alongside
+the legacy discovery outcomes.
 
 `emit` raises `ArgumentError` on any action/outcome outside these allowlists.
 
@@ -74,7 +104,12 @@ Closed outcome enum: `success`, `failure`, `conflict`, `timeout`, `budget_exhaus
 - `hive babysit reload` is config/log-setting only. The detached process keeps Ruby code loaded from its original start; after checkout updates or release upgrades, use `hive babysit restart --detach`. `hive babysit status` compares the PID-file `started_at` to the current source mtime and prints a restart recommendation when the running process predates the checkout. This prevents stale validators from silently skipping projects after config enum changes such as `patrol.trigger: continuous`.
 - `ProjectTick` asks `gh pr list` for `mergeStateStatus` and sorts selected candidates by actionability before applying `babysitter.max_concurrent_prs`: `DIRTY` / `BLOCKED` / `UNSTABLE` first, then `BEHIND` / `UNKNOWN`, then clean or missing states. Updated time remains the tie-breaker. This prevents a large old backlog of neutral PRs from starving conflicted/red PRs such as patrol output that needs immediate repair.
 - Draft PRs are skipped before worktree materialization; `labels_ignore: [draft]` is not relied on because draft status is not a GitHub label.
-- **Pipeline-owned PRs are skipped (`outcome: pipeline_owned`), ahead of the draft check.** `ProjectTick#pipeline_owned_branches` reads hive-state (the `hive/state` branch) — the source of truth for ownership — collecting the `worktree.yml` `branch` of every task in a non-terminal stage (`Hive::Stages::DIRS` filtered by `Hive::Workflows.verb_advancing_from`, so the terminal done stage is excluded and no stage literal is hardcoded). A PR whose `headRefName` an active task still drives is left alone. This closes the babysitter-vs-pipeline rebase race: finalize must flip a patrol PR from draft to ready before it can merge (the merge is external; `PrMergeWatcher` only watches for `MERGED`), and without this guard the now-ready PR became fair game — the babysitter would rebase + force-push its branch onto an advanced `main` while the task's worktree stayed pinned to its own base, stranding it so the finalize push gate looped on `:error reason=unpushed_commits` (see [[stages/finalize]]). A missing/malformed `worktree.yml` is skipped so one bad task never aborts the scan.
+- **Pipeline-owned PRs remain skipped for legacy discovery.** The one exception
+  is a current claimed job whose project/repository/PR/branch exactly matches
+  the handoff. That exact job owns remediation in its isolated worktree;
+  registered PR numbers are excluded from discovery so they cannot be
+  double-dispatched. A missing/malformed task `worktree.yml` is ignored during
+  the legacy ownership scan rather than aborting the tick.
 - **Auto-rebase of green-but-`BEHIND` PRs** (default on; `babysitter.auto_rebase: false` to disable): strict branch protection on the base requires a PR head to be up-to-date with the base before it can merge, so a conflict-free, green PR that goes `mergeStateStatus=BEHIND` when the base advances is `mergeable=MERGEABLE` + green and would `noop` forever, staying un-mergeable. `PrFixer#handle_green` detects `BEHIND` (from the status rollup, falling back to the PR object's `mergeStateStatus`) and, when enabled, materializes the worktree, `GhOps.rebase_onto_base` (fetch the base ref then `git rebase FETCH_HEAD`), then `GhOps.force_push_with_lease` to the PR's **real head branch** (`@pr["headRefName"]`, not the internal `hive-babysitter/pr-<n>` worktree branch) with an explicit lease (`expected_oid` = the rollup's `headRefOid`, falling back to `@pr["headRefOid"]`; `nil` → bare lease) so the PR becomes `CLEAN`/mergeable (`:rebased`, counted as `fixed`). A rebase that hits conflicts is aborted and left for a human — no force-push, no fix agent, no label (`:rebase_conflict`, counted as `needs_human`); it is re-evaluated cheaply next tick. Dry-run emits a `rebase`/`dry_run` event and touches no git. A green PR that is not `BEHIND` is the usual `noop`/`already-green`.
 - **Headless base fetch over the push URL** (PR #424): `GhOps.rebase_onto_base` resolves the remote's effective push URL via `git remote get-url --push origin` and fetches the base from that URL (`git fetch <push-url> <base>`), not the bare `origin` remote, before `git rebase FETCH_HEAD`. Rationale: `Hive::Gh.capture3` forces `GIT_SSH_COMMAND="ssh -o BatchMode=yes"`, and in the babysitter's systemd `--user` service there is no SSH agent (`SSH_AUTH_SOCK` unset). When origin's **fetch** URL is SSH (`git@github.com:…`), the fetch dies with `Permission denied (publickey)`, so `rebase_onto_base` returned `:failure` every tick and BEHIND PRs never rebased. The **push** URL is HTTPS (resolved through gh's credential helper) and the force-push already works over it, so fetching the base over the same transport works headless too. Empirically: plain `git fetch origin main` works interactively; `GIT_SSH_COMMAND="ssh -o BatchMode=yes" git fetch origin main` fails (publickey denied); `git fetch <https-push-url> main` works. If `git remote get-url --push origin` fails or returns empty, it falls back to the literal `"origin"` so non-github / unusual remotes behave as before. `Hive::Gh.capture3`'s BatchMode is intentional for other callers and is unchanged; `force_push_with_lease` is unchanged (push already works).
 - No Telegram or install/service integration in v1.

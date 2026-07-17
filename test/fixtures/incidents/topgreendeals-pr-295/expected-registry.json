@@ -1,0 +1,10 @@
+{
+  "schema": "sanitized-finalization-replay-registry",
+  "schema_version": 1,
+  "stable_job_count": 1,
+  "final_state": "terminal",
+  "final_head_generation": 2,
+  "final_head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "claim_fences": [1, 2, 3, 4, 5],
+  "claim_outcomes": ["merge_ready", "expired_owner_resolved", "head_changed", "merge_ready", "merged"]
+}

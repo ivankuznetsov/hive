@@ -16,7 +16,7 @@ module Hive
     module ProjectTick
       module_function
 
-      def run(project_entry, dry_run:, logger:, inflight:, job_store: nil)
+      def run(project_entry, dry_run:, logger:, inflight:, job_store: nil, now: Time.now.utc)
         started = Time.now
         # Re-read config here (rather than accepting the dispatcher's cached
         # cfg) so a per-tick edit to babysitter.* takes effect on the next
@@ -34,7 +34,7 @@ module Hive
           begin
             Hive::Babysitter::JobRunner.run(
               job: job, store: job_store, project: project_entry, cfg: cfg,
-              dry_run: dry_run, logger: logger, inflight: inflight
+              dry_run: dry_run, logger: logger, inflight: inflight, now: now
             )
           rescue StandardError => e
             logger.event(:fatal, project: project_entry["name"], job_id: job["job_id"],

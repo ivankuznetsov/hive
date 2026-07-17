@@ -3,11 +3,11 @@ title: hive babysit
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/babysit.rb, bin/hive-babysitter-stub-git, bin/hive-babysitter-stub-gh
 created: 2026-05-26
-updated: 2026-07-16
+updated: 2026-07-17
 tags: [command, babysitter, daemon, github]
 ---
 
-**TLDR**: `hive babysit` manages the experimental PR babysitter. It is a separate process from `hive daemon`: it polls open PRs for projects with `babysitter.enabled: true`, skips ignored labels, and asks the configured development agent to repair conflicts or red CI in an isolated PR worktree.
+**TLDR**: `hive babysit` manages the durable PR babysitter. It is a separate process from `hive daemon`: it claims journal-backed finalize jobs first, watches each exact PR/head through explicit GitHub `MERGED`, and performs fenced remediation in an isolated job worktree. Legacy open-PR discovery remains for unowned PRs but is not the finalize handoff mechanism.
 
 ## Usage
 
@@ -56,14 +56,28 @@ babysitter:
 
 For each enabled project, the babysitter:
 
-1. Runs `gh pr list --state open` through `Hive::Gh.list_open_prs`.
-2. Skips draft PRs before worktree materialization.
-3. Skips PRs whose labels intersect `labels_ignore` case-insensitively.
-4. Skips PRs already in the in-process in-flight set.
-5. Sorts by actionability (`DIRTY`/`BLOCKED`/`UNSTABLE`, then `BEHIND`/`UNKNOWN`, then neutral) with `updatedAt` as the tie-breaker, and truncates to `max_concurrent_prs`.
-6. Runs `Hive::Babysitter::PrFixer` on each selected PR.
+1. Recovers active registry jobs and claims each with an expiring lease and
+   monotonic fence. An orphan inactive reservation is never claimable without
+   its matching journal handoff.
+2. Polls each claimed exact PR, even when it no longer appears in the open
+   list. A new SHA advances `head_generation` and invalidates old readiness;
+   `CLOSED` without `mergedAt` and GitHub failure remain visible blockers.
+3. Records `merge_ready` only after a fresh exact-head assessment and `merged`
+   only from explicit `MERGED` plus `mergedAt`. The babysitter never presses
+   merge.
+4. Runs legacy `gh pr list --state open` discovery for identities not already
+   registered. Draft/ignored/in-flight/pipeline-owned rows keep the historical
+   filters; only the exact current claimed job may bypass the broad
+   pipeline-owned branch skip.
+5. Sorts discovery work by actionability and sends selected work through
+   `PrFixer`.
 
-`PrFixer` first checks `gh pr view --json mergeable,mergeStateStatus,statusCheckRollup`. If the PR is mergeable and checks are successful or queued (green), it normally records a `noop`/`already-green` event and does not spawn an agent. The exception: a green PR whose `mergeStateStatus` is `BEHIND` cannot merge under strict "branch must be up-to-date" protection. When `auto_rebase` is enabled (default), `PrFixer#handle_green` materializes the PR worktree, runs `GhOps.rebase_onto_base` (resolve `git remote get-url --push origin`, fetch `<base>` from that source with fallback to `origin`, then `git rebase FETCH_HEAD`), and on a clean rebase force-pushes the rebased HEAD to the PR's **real head branch** (`headRefName`, not the internal `hive-babysitter/pr-<n>` worktree branch) with an explicit `--force-with-lease=<headRefName>:<headRefOid>` so the PR becomes `CLEAN`/mergeable (emits `rebase`/`success`, counted as `fixed`). A rebase that conflicts is aborted and left for a human: no force-push, no fix agent, no label (emits `rebase`/`conflict`, counted as `needs_human`); it is re-evaluated cheaply on the next tick. With `auto_rebase: false` a green-but-`BEHIND` PR just `noop`s. If the PR is not green, `PrFixer` materializes the worktree, gathers failing-job logs plus diff stats, renders `templates/babysitter_pr_fix_prompt.md.erb`, and spawns the configured `execute.agent` through `Hive::Stages::Base.spawn_agent` with `status_mode: :exit_code_only`.
+`PrFixer` checks exact merge/check/review state. A handed-off job holds its fence
+through the agent lifetime; the prompt cannot push or merge. The runner performs
+any sanctioned push only after revalidating task/job/attempt/PR/head/fence and
+remote expected SHA, using exact force-with-lease, then observes the resulting
+new head. Legacy discovered PRs retain the established green/BEHIND rebase and
+repair behavior, but never become lifecycle/archive authority.
 
 On success, the babysitter is silent on the PR. On failure, timeout, or budget exhaustion it applies `babysitter/needs-human` and posts one give-up comment per PR per UTC hour.
 

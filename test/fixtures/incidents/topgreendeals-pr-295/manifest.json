@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "incident": "topgreendeals-pr-295",
+  "source": "sanitized retained Hive, babysitter, and exact-PR observations",
+  "sanitization": "Owner, repository URL, task, branch, attempt, SHAs, and non-merge timestamps are stand-ins.",
+  "handoff": "handoff.json",
+  "github_responses": "github-responses.json",
+  "journal_inputs": "journal-inputs.json",
+  "expected_registry": "expected-registry.json",
+  "provenance": "provenance.md",
+  "merge_timestamp": "2026-07-16T23:05:50Z",
+  "files": {
+    "handoff.json": "d1ab709af192484b534d0cabf4de36f3ffd070b4debfc1d1d92c0d6175a2b7b5",
+    "github-responses.json": "1ebbb642bef1ee2597bdb5148043e66f75ff788d5eac4646b82bc5781e6e55f9",
+    "journal-inputs.json": "e2dfaca2868151153270797a1784f120efdef4884f4c9af99821e8c1a15b28c7",
+    "expected-registry.json": "0131f57af6468f115629d7a4b71c11d12487b0c48e1c54e4bd2cb46b62581d12",
+    "provenance.md": "55ee1b7be1d5f84e1cbabc2b8be170d1718823384b5e25c83cb840ba121f9fa4"
+  }
+}

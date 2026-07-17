@@ -3,7 +3,7 @@ title: Hive::Gh
 type: module
 source: lib/hive/gh.rb
 created: 2026-06-08
-updated: 2026-07-12
+updated: 2026-07-17
 tags: [github, gh, module, pr]
 ---
 
@@ -21,7 +21,8 @@ tags: [github, gh, module, pr]
 | `lookup_prs_for_branch(worktree_path, branch, repository: nil, host: nil, cfg: nil)` | Runs `gh pr list --head <branch> --state all --json ...` from the worktree cwd, optionally pinned to an explicit GitHub/GHES repository. Fail-loud on CLI or JSON shape errors. |
 | `lookup_existing_pr(...)` | Returns only `OPEN` PRs from `lookup_prs_for_branch`; closed/merged PRs are excluded from the normal open-pr path. |
 | `lookup_merged_pr(..., head_oid: nil)` | Returns a `MERGED` PR, optionally requiring `headRefOid` to match the current local `HEAD`. [[stages/open-pr]] uses this for already-merged branch recovery. |
-| `pr_state(pr_url, cfg: nil)` | Runs `gh pr view <url> --json state` and returns the state string. `Hive::Commands::StageAction` uses it to re-confirm a daemon-only merged-finalize-error archive recovery before moving the task to `9-done`. |
+| `pr_state(pr_url, cfg: nil)` | Runs `gh pr view <url> --json state` and returns the state string for compatibility callers; it is not a pipeline archive authority. |
+| `exact_pr_snapshot(pr_url, cfg: nil, observed_at:)` | Returns a validated canonical repository/PR identity, exact state/head/base, `mergedAt`, merge/review/check data, and observation timestamp. Finalize establishes the handoff from it; the claimed babysitter job keeps polling it even after the PR disappears from open-list discovery. |
 | `pr_metadata(number, cfg: nil, chdir: nil)` | Runs `gh pr view <n> --json number,url,baseRefName,headRefOid,isCrossRepository,state` and returns `PrMetadata`. `Hive::Commands::AdhocReview` uses it to confirm the PR exists, record declared base/head state, and cross-check the materialized worktree HEAD. The load-bearing `chdir:` kwarg runs the `gh` call in the resolved project root because `gh` has no `-C`; this makes `hive review --pr N --project NAME` query the selected repository instead of the caller's cwd. |
 | `list_open_prs(worktree_path, cfg: nil)` | Runs `gh pr list --state open --limit 1000` and includes `mergeStateStatus`; [[modules/babysitter]] uses that field to prioritize dirty/conflicted PRs before age. |
 | `repo_name_with_owner(worktree_path, cfg: nil)` / `repository_identity(worktree_path, cfg: nil, timeout_sec: nil)` | Parse the actual origin push URL into canonical `owner/repo` plus host. They do not trust ambient `GH_REPO` or `gh repo view`, so GitHub Enterprise, duplicate registration, and repository drift gates bind to the Git target. The optional timeout is threaded through the underlying origin lookup. |
@@ -62,7 +63,15 @@ positives rather than masking an unvalidated shell boundary.
 
 ## Recovery Boundaries
 
-Normal workflow commands do not treat a PR URL as sufficient proof that a task can advance. `lookup_existing_pr` intentionally ignores closed and merged PRs; `scan_pr_for_secrets` fails loud when the remote PR body cannot be fetched; and `pr_state` re-checks GitHub state immediately before the internal `hive archive --recover-merged-error-reason` path accepts an `8-finalize` `ERROR` marker. That recovery path also requires the current marker's `reason=` to exactly match the daemon-provided flag, so a stale merge-watch entry cannot advance a newer error. Ad-hoc review is similarly explicit: `pr_metadata` is number-based and repository-context-driven by `gh`; the project still comes from the current registered checkout or `--project`, not from parsing the PR URL host/path.
+Normal workflow commands do not treat a PR URL as sufficient proof that a task
+can advance. `lookup_existing_pr` intentionally ignores closed and merged PRs;
+`scan_pr_for_secrets` fails loud when the remote PR body cannot be fetched; and
+only a claimed current babysitter job may translate a validated
+`exact_pr_snapshot` with explicit `MERGED` plus `mergedAt` into journal evidence.
+StageAction and finalization reconciliation perform no live GitHub lookup.
+Ad-hoc review is similarly explicit: `pr_metadata` is number-based and
+repository-context-driven by `gh`; the project still comes from the current
+registered checkout or `--project`, not from parsing the PR URL host/path.
 
 Architecture patrol strengthens that boundary for external transactions through
 `Hive::RefactorPatrol::GithubGateway`. The

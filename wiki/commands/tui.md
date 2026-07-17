@@ -3,7 +3,7 @@ title: hive tui
 type: command
 source: lib/hive/tui.rb, lib/hive/tui/**
 created: 2026-04-27
-updated: 2026-06-15
+updated: 2026-07-17
 tags: [command, tui, observability, interactive, diagnostics, task-id, archive, pr]
 ---
 
@@ -166,7 +166,15 @@ JRuby/TruffleRuby would need a `Mutex`/`AtomicReference` upgrade — a
 `SnapshotArrived` message only when `state_source.current` differs from
 the last dispatched snapshot. Identical snapshots do not redraw.
 
-`Hive::Tui::Snapshot::Row` carries `slug`, `id`, `display_name`, `pr_url`, `mtime`, and `folder_mtime` from status JSON. The task list hides the slug in favor of the id/name columns, using the slug as the name fallback when display generation has not succeeded or a legacy task has not been backfilled. Detail views keep the slug visible beside `#id display_name`. Filtering still matches the slug and now also matches display name and stringified id.
+`Hive::Tui::Snapshot::Row` carries `slug`, `id`, `display_name`, `pr_url`, `mtime`, `folder_mtime`, and the status v6 `finalization` object. The task list hides the slug in favor of the id/name columns, using the slug as the name fallback when display generation has not succeeded or a legacy task has not been backfilled. Detail views keep the slug visible beside `#id display_name`. Filtering still matches the slug and now also matches display name and stringified id.
+
+Finalized rows remain in `8-finalize` while the exact PR is watched. The task
+pane renders the projected lifecycle state and PR link plus the current job,
+task/finalize/head generations, SHA, bounded blocker/needs-human detail, update
+time, and one allowlisted safe action. A head reset immediately returns the row
+to active watching. The TUI does not poll GitHub, repair the registry, append a
+journal event, or reinterpret telemetry while creating the frame; it displays
+the same immutable object as text status, hivebox, and Telegram.
 
 The task grid has a fixed PR column between id and display name. Rows with no parseable pull-request URL render `—`; rows whose `pr_url` ends in `/pull/<number>` render `#<number>` via [[modules/pr]]. When stdout is a TTY, the number is wrapped in an OSC 8 hyperlink by `Hive::Tui::Views::Hyperlink`; invalid or non-http URLs fall back to the plain label. The PR column does not drop under narrow-width layout branches, so very small terminals first hide stage and status before sacrificing the PR signal.
 

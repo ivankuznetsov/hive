@@ -3,11 +3,11 @@ title: State Model
 type: data-model
 source: lib/hive/task.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/review_handoff.rb, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/daemon/display_name_backfiller.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
 created: 2026-04-25
-updated: 2026-07-16
+updated: 2026-07-17
 tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, dependencies, admission, web]
 ---
 
-**TLDR**: Hive's workflow state has no application database. Task/project state lives in `.hive-state` and feature worktrees; durable task execution ownership lives in versioned attempt records under the global state home. Global config/queues remain filesystem records. Token metrics alone use SQLite. Hivebox reads status snapshots and writes delivery requests; leases, not web/daemon process lifetime, own accepted agents.
+**TLDR**: Hive's workflow state has no application database. Task/project state lives in `.hive-state` and feature worktrees; durable task execution ownership lives in versioned attempt records under the global state home. Finalization lifecycle truth is append-only journal evidence, while the babysitter registry stores fenced operational ownership. Global config/queues remain filesystem records. Token metrics alone use SQLite. Hivebox reads status snapshots and writes delivery requests; leases, not web/daemon process lifetime, own accepted agents.
 
 ## Stage directory layout
 
@@ -51,7 +51,7 @@ Each stage has exactly one "state file" the runner writes the marker into. This 
 | `5-open-pr` | `pr.md` | `Stages::OpenPr` writes frontmatter `pr_url` / `pr_number` |
 | `6-review` | `task.md` | reused from `4-execute`, or created by `Hive::Patrol::ReviewHandoff` for patrol-opened PRs; markers driven by `Stages::Review` orchestrator |
 | `7-artifacts` | `artifact.md` | `Stages::Artifacts` asks the configured artifact agent to write the artifact summary and stamp `COMPLETE` |
-| `8-finalize` | `pr.md` | reused from `5-open-pr`; `Stages::Finalize` appends the final `COMPLETE` marker and writes `summary.md` |
+| `8-finalize` | `pr.md` | reused from `5-open-pr`; `Stages::Finalize` writes `summary.md` and transfers the exact PR to one journal-backed babysitter job; the task remains here while watching |
 | `9-done` | `task.md` | reused from `4-execute` |
 
 For coding tasks, mapping is encoded in `Hive::Task::STATE_FILES` (`lib/hive/task.rb:15`), derived from `Hive::Workflows::Registry.default`. `Hive::Task#state_file` uses the task's selected workflow descriptor (`workflow.state_file_for(stage_name)`) so non-coding workflows can carry their own stage-state filenames while field-less coding tasks keep the historical paths.
@@ -113,7 +113,7 @@ Markers are HTML comments at end-of-file in the state file. Exactly one is "curr
 | `<!-- REVIEW_COMPLETE pass=NN browser=passed\|warned\|skipped -->` | review loop done — ready to run `hive artifacts` into 7-artifacts (`browser=warned` = soft-warn surfaced in PR body) | `Stages::Review` orchestrator |
 | `<!-- REVIEW_ERROR phase=... reason=... message="..." -->` | agent-level error or protected-file tampering (mirrors ADR-013's `:error` shape for `EXECUTE_*`). Most review errors remain human-recoverable, but the daemon auto-clears no-live-lock `reason=review_agent_died`, `phase=reviewers reason=reviewer_partial_failure` when `reviews/errors-NN.md` contains only Claude/tmux `tmux_session_terminated before writing expected output file` failures, `phase=fix reason=fix_failed message="claude stop hook did not signal completion"` for the legacy Claude stop-hook completion bug, and `reason=limits_reached` once its `retry_after` cooldown elapses. The review runner can suppress the known Claude/tmux fix Stop-hook failure before this marker is written only when launcher evidence and review facts prove a completed pass: artifacts exist, no unresolved escalations remain, the worktree is readable, and commit/dirty-worktree/whole-pass `RESOLVED/NO-FIX` evidence exists. Review limit markers can come from CI-fix, all reviewers failing on limits, or triage/fix spawn failures whose captured error text matches `Hive::AgentLimit`; this limit gate runs before any terminal classifier so rate-limit/429 text keeps the cooldown path. Residual non-limit triage/fix phase-agent failures use `Hive::ReviewErrorReason`'s closed enum (`merge_conflict`, `network_timeout`, `tool_permission_denied`, `agent_crashed`, `unknown`) and carry a whitespace-collapsed, 300-char-capped `message=` attr from the captured error so `status.md`, `hive status --json`, and the web diagnostic card show the real cause even when `reason=unknown` (in practice the triage/fix plumbing forwards a condensed wrapper string rather than raw agent output, so the named buckets rarely fire and this normally lands on `unknown` — see [[stages/review]]) (non-limit CI errors write `reason=ci_unrunnable` directly and carry no `message=`). Auto-clear is bounded per daemon process by failure signature (default 3); repeated identical failures stay red after the budget is exhausted. | `Stages::Review` orchestrator |
 
-`5-open-pr`, `7-artifacts`, and `8-finalize` reuse the generic `COMPLETE` / `ERROR` marker names with stage-specific attrs such as `pr_url=...`, `is_draft=true|false`, `idempotent=true`, and `reason=...`. Most `ERROR` markers remain manual recovery states, but the daemon auto-clears a narrow no-live-lock subset with marker-id guards and bounded per-process budgets: `8-finalize` `reason=unpushed_commits`, plus non-review terminal agent-loss `reason=tmux_session_terminated` / `reason=agent_orphaned` in `2-brainstorm`, `3-plan`, `4-execute`, `7-artifacts`, and `8-finalize`. `reason=limits_reached` (any stage, including review `REVIEW_ERROR` markers from reviewers/triage/fix) also self-heals, gated on its `retry_after` cooldown stamp rather than on stage. A second recoverable terminal-error healer handles dependency outages: Codex-auth `ERROR reason=implementer_failed provider=codex message=...401...` and `ERROR reason=claude_launch_failed` can be cleared only after fail-closed work-area safety checks, changed health signal/backoff gates, and successful dependency probes; `daemon.auto_retry.enabled: false` disables that path. `hive status`, `hive status --json`, and the TUI render quota holds through `Hive::AgentLimit`: human/TUI text says `held: agent quota (...) — retry after ... UTC; top up or switch execute agent`, while JSON adds `"held": {"reason":"quota","provider":...,"retry_after":...}` without overloading dependency `blocked_by`. The `3-plan` terminal-error path writes a `DispatchRequestQueue` request for `hive plan <slug> --project <project> --from 3-plan` after any successful terminal `ERROR` clear there, including terminal agent-loss, elapsed `limits_reached`, and recoverable dependency-outage clears, because clearing the marker can leave an empty markerless `plan.md` that otherwise classifies straight back to `:error`. See [[daemon]]. Separately, an `8-finalize` `ERROR reason=git_status_failed` or `reason=claude_launch_failed` stays red while the PR is open unless the recoverable-error healer clears it; `PrMergeWatcher` can also retire it after the PR is merged by dispatching the internal archive recovery path, and `StageAction` re-confirms the marker reason and GitHub `MERGED` state before moving the folder to `9-done`.
+`5-open-pr`, `7-artifacts`, and `8-finalize` reuse the generic `COMPLETE` / `ERROR` marker names with stage-specific attrs such as `pr_url=...`, `is_draft=true|false`, `idempotent=true`, and `reason=...`. Most `ERROR` markers remain manual recovery states, but the daemon auto-clears a narrow no-live-lock subset with marker-id guards and bounded per-process budgets: `8-finalize` `reason=unpushed_commits`, plus non-review terminal agent-loss `reason=tmux_session_terminated` / `reason=agent_orphaned` in `2-brainstorm`, `3-plan`, `4-execute`, `7-artifacts`, and `8-finalize`. `reason=limits_reached` (any stage, including review `REVIEW_ERROR` markers from reviewers/triage/fix) also self-heals, gated on its `retry_after` cooldown stamp rather than on stage. A second recoverable terminal-error healer handles dependency outages: Codex-auth `ERROR reason=implementer_failed provider=codex message=...401...` and `ERROR reason=claude_launch_failed` can be cleared only after fail-closed work-area safety checks, changed health signal/backoff gates, and successful dependency probes; `daemon.auto_retry.enabled: false` disables that path. `hive status`, `hive status --json`, and the TUI render quota holds through `Hive::AgentLimit`: human/TUI text says `held: agent quota (...) — retry after ... UTC; top up or switch execute agent`, while JSON adds `"held": {"reason":"quota","provider":...,"retry_after":...}` without overloading dependency `blocked_by`. The `3-plan` terminal-error path writes a `DispatchRequestQueue` request for `hive plan <slug> --project <project> --from 3-plan` after any successful terminal `ERROR` clear there, including terminal agent-loss, elapsed `limits_reached`, and recoverable dependency-outage clears, because clearing the marker can leave an empty markerless `plan.md` that otherwise classifies straight back to `:error`. See [[daemon]]. Finalize markers and `summary.md` remain presentation/compatibility artifacts: neither can authorize archive. Only current-generation journal evidence reconciled to `archive_ready` can move an `8-finalize` task to `9-done`.
 
 Marker name allowlist: `Hive::Markers::KNOWN_NAMES`. Regex: `Hive::Markers::MARKER_RE`. Adding a marker requires updating BOTH (two sources of truth). Attributes are `key=value` (or `key="quoted value"`). New `ERROR` markers get a generated `marker_id` attr; human labels hide it, but recovery surfaces use it as the preferred `hive markers clear --match-attr marker_id=...` guard. Legacy `ERROR` rows without `marker_id` fall back to observed attrs such as `reason=exit_code,exit_code=143`. U9 dropped `EXECUTE_STALE` from the live grammar (review iteration moved out of 4-execute); the name remains in `KNOWN_NAMES` for back-compat parsing of historical state files but is never written by current code. `EXECUTE_WAITING` remains live for implementation-output pauses, not review iteration.
 
@@ -140,15 +140,24 @@ Legacy telemetry remains fail-soft. Versioned condition/generation/evidence/
 audit records are appended synchronously through `Hive::TaskJournal::Writer`
 with a task-local journal flock, complete JSON-line batch, flush, and fsync.
 Those records reuse the durable attempt ID from [[modules/attempts]] and add a
-numeric task input epoch plus exact-HEAD commit generation.
+numeric task input epoch plus exact-HEAD commit generation. Finalization adds
+typed `finalize_attempt`, `babysitter_job`, `reconciler`, and `operator`
+producers. Deterministic `append_once` IDs make retry replay idempotent and
+reject an ID/body collision as corruption.
 
 `<task>/task-projection.json` is an atomic, disposable materialized view bound
 to the journal cursor, last event ID, and SHA-256. It contains projected
 identity, current and superseded conditions, evidence, gate diagnostics,
 compatibility state, provenance, and shadow audit. Missing/corrupt/stale views
 replay from the journal without git/GitHub calls. Status replay is read-only;
-the next mutating execute boundary republishes the view. See
-[[modules/conditions]].
+the next mutating execute boundary republishes the view. Its `finalization`
+object folds the current task/finalize/head generations, job/PR identity,
+blocker, evidence, and allowlisted safe action through `finalized` →
+`babysitter_active` → `merge_ready` → `merged` → `archive_ready`. A new head,
+replacement PR, or re-arm fences earlier advancing evidence. Reconciliation is
+the only writer of `archive_ready`, based on explicit current-head `MERGED`
+evidence or a guarded operator-approved no-PR outcome. See
+[[modules/conditions]] and [[stages/finalize]].
 
 ## Runtime dispatch queue and web snapshots
 
@@ -579,14 +588,16 @@ Per-project opt-in PR-repair daemon (see [[modules/babysitter]]). Lives outside 
 
 ```
 <project>/.hive-state/babysitter/
-├── events.jsonl                 # append-only JSONL action log
-├── status.md                    # human-readable loop summary
-└── worktrees/<pr>/              # ephemeral worktree per PR head branch
+├── jobs/<job-id>.json           # durable fenced operational aggregate
+├── current/*.json               # rebuildable task-generation job index
+├── events.jsonl                 # best-effort JSONL operational telemetry
+├── status.md                    # human-readable operational summary
+└── worktrees/<job-id>/          # isolated remediation worktree
 $HIVE_HOME/.babysitter.pid        # single-instance PID lock
 $HIVE_HOME/logs/babysitter.log    # rotated JSON-line process log
 ```
 
-No marker grammar, no stage `mv`, no `worktree.yml` — `Hive::Babysitter::Worktree.materialize` recreates the per-PR worktree from the PR head each tick (it checks out `hive-babysitter/pr-<n>` built from `pull/<n>/head`, so context diffs/divergence run against local `HEAD`, never `headRefName`). `remove_existing!` runs `worktree remove --force` + `worktree prune` unconditionally each tick so orphan `.git/worktrees/<pr>/` metadata from a crashed run can't wedge the next `worktree add`. Events use the closed action/outcome enums documented in [[modules/babysitter]].
+Job identity is a versioned digest of canonical project, stable task, task generation, repository, and PR number. Inactive reservation precedes the authoritative handoff; activation requires the matching journal event. Claims carry expiring leases and strictly increasing fences, so restart takeover rejects late observations and branch mutations. The registry never authorizes lifecycle or archive: journal evidence does. Legacy discovery remains available for unowned PRs, while an exact claimed job is the only pipeline-owned branch allowed into remediation. See [[modules/babysitter]].
 
 State invariants added in pass 02 (commit `7b07adc9`):
 
@@ -612,8 +623,9 @@ stateDiagram-v2
     S6_review --> S6_review: hive run (next review pass — ci/reviewers/triage/fix/browser)
     S6_review --> S7_artifacts: user mv or hive artifacts (REVIEW_COMPLETE)
     S7_artifacts --> S8_finalize: user mv (COMPLETE)
-    S8_finalize --> S9_done: user mv (after merge)
-    S9_done --> [*]
+    S8_finalize --> S8_finalize: babysitter watches exact PR/head
+    S8_finalize --> S9_done: reconciled archive_ready
+    S9_done --> [*]: validated local cleanup receipt
 ```
 
 Since 2026-05-22, `Hive::Stages::DIRS` has all nine slots filled in order; `Stages.next_dir(4)` returns `"5-open-pr"`, `Stages.next_dir(6)` returns `"7-artifacts"`, and `Stages.next_dir(8)` returns `"9-done"`. See [[stages/review]] for the autonomous-loop semantics.

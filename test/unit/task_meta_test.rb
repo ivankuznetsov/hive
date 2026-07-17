@@ -45,6 +45,33 @@ class TaskMetaTest < Minitest::Test
     end
   end
 
+  def test_read_for_admission_rejects_duplicate_dependency_keys
+    Dir.mktmpdir do |dir|
+      File.write(
+        File.join(dir, "meta.yml"),
+        "depends_on: blocked-task\ndepends_on: completed-task\n"
+      )
+
+      result = Hive::TaskMeta.read_for_admission(dir)
+
+      assert_equal :invalid, result.status
+      assert_match(/duplicate depends_on/, result.error)
+      assert_equal :metadata_invalid, result.reason
+    end
+  end
+
+  def test_read_for_admission_reports_non_yaml_read_errors
+    Dir.mktmpdir do |dir|
+      FileUtils.mkdir_p(File.join(dir, "meta.yml"))
+
+      result = Hive::TaskMeta.read_for_admission(dir)
+
+      assert_equal :unreadable, result.status
+      assert_match(/could not read/, result.error)
+      assert_equal :metadata_unreadable, result.reason
+    end
+  end
+
   include HiveTestHelper
 
   def test_write_and_read_round_trip

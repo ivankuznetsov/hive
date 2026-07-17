@@ -3,7 +3,7 @@ title: Hive::Daemon
 type: module
 source: lib/hive/daemon/
 created: 2026-05-06
-updated: 2026-07-16
+updated: 2026-07-17
 tags: [daemon, module, automation, dispatcher]
 ---
 
@@ -39,7 +39,7 @@ language-neutral [[commands/refactor-patrol]] lifecycle.
 | `Hive::Daemon::RefactorPatrolScheduler` | `lib/hive/daemon/refactor_patrol_scheduler.rb` | Exposes oldest-first discovery/action candidates, validates exact registration and repository ownership, claims discovery with generation/liveness evidence, emits job-bound result paths, durably surfaces unavailable project config, and checkpoints only matching schema-valid completion envelopes. |
 | `Hive::Daemon::PatrolArbiter` | `lib/hive/daemon/patrol_arbiter.rb` | Shares each project's patrol-scan capacity between ordinary and architecture patrol and persists alternation state so either ready kind eventually runs. |
 | `Hive::Daemon::DigestScheduler` | `lib/hive/daemon/digest_scheduler.rb` | Global daily shipped-digest cadence. Persists `last_digested_date` in `<state_home>/digest_state.json`, applies a first-run no-history guard, computes owed local calendar days after midnight, caps catch-up with `digest.max_catchup_days`, and emits one `hive digest --date D --json` dispatch at a time. |
-| `Hive::Daemon::DispatchRequestQueue` | `lib/hive/daemon/dispatch_request_queue.rb` | File-backed queue (`<state_home>/dispatch_requests/*.json`) of dispatch requests written by producer paths (Telegram bot via `Hive::Bot::DispatchRequestWriter`, hivebox stage-run dispatches and daemon-repair requests, and the 3-plan healer requeue) and consumed by the dispatcher's tick loop. Current wire schema is `hive-dispatch-request.v2`: `requestor` is the closed enum `bot|healer`, and any other `schema_version` is rejected as `unknown_schema_version`. Allowlists state-mutating verbs (`run develop brainstorm plan review open-pr artifacts finalize archive markers daemon`), but `daemon` is further constrained to `GLOBAL_MAINTENANCE_ARGVS` (`hive daemon install --force`) under the `__global__` sentinel so project-scoped requests cannot execute host-global daemon lifecycle commands. Everything else is rejected with `:dispatch_request_rejected`. The single-dispatcher invariant lives here: producers write, the daemon dispatches. See [[architecture]] §"Single-dispatcher contract". |
+| `Hive::Daemon::DispatchRequestQueue` | `lib/hive/daemon/dispatch_request_queue.rb` | File-backed queue (`<state_home>/dispatch_requests/*.json`) of dispatch requests written by producer paths (Telegram bot via `Hive::Bot::DispatchRequestWriter`, hivebox stage-run dispatches and daemon-repair requests, and the 3-plan healer requeue) and consumed by the dispatcher's tick loop. Current wire schema is `hive-dispatch-request.v2`: `requestor` is the closed enum `bot|healer`, and any other `schema_version` is rejected as `unknown_schema_version`. Allowlists state-mutating verbs (`run develop brainstorm plan review open-pr artifacts finalize archive markers daemon`), but `daemon` is further constrained to `GLOBAL_MAINTENANCE_ARGVS` (`hive daemon install --force`) under the `__global__` sentinel so project-scoped requests cannot execute host-global daemon lifecycle commands. Run/advance/archive requests also honor the current status row's dependency wait or admission error before spawn; marker repair stays exempt. Everything else is rejected with `:dispatch_request_rejected`. The single-dispatcher invariant lives here: producers write, the daemon dispatches. See [[architecture]] §"Single-dispatcher contract". |
 | `Hive::Daemon::QueueDirectory` | `lib/hive/daemon/queue_directory.rb` | Shared `directory_for(dirname:, state_home:)` helper used by both dispatch queues so the owner-only (0700) per-queue directory invariant — the de-facto auth boundary for the dispatch channel — lives in one place (#253). |
 | `Hive::Commands::Daemon` | `lib/hive/commands/daemon.rb` | Thor subcommand surface (`start` / `stop` / `status` / `reload` / `tail` / `install` / `enable` / `disable` / `queue`). Owns PID/signal lifecycle, service installation, per-project enrollment, and read-only dispatch-request queue inspection. `queue` delegates to `Hive::Commands::Daemon::QueueCommand`. |
 | `Hive::Commands::Daemon::QueueCommand` | `lib/hive/commands/daemon/queue_command.rb` | Extracted read-only queue-inspection surface (`hive daemon queue list/show/prune`) — touches only `queue_args`/`json`/`hive_home`, orthogonal to the daemon lifecycle, mirroring the `ServiceInstaller` extraction (#254). Internal IO/parse failures are wrapped in `Hive::InternalError` (exit 70). |
@@ -528,7 +528,7 @@ a new schema file before live requests are written.
 ```
 :dispatch_request_observed   request_id=… project=… slug=…
 :dispatch_request_dispatched pid=… command=…   (only when dispatched)
-:dispatch_request_blocked    reason=in_flight|cooldown|…
+:dispatch_request_blocked    reason=admission_error|dependency_unmet|in_flight|cooldown|…
 :dispatch_request_completed  pid=… exit_code=… elapsed_sec=…
 :dispatch_request_rejected   reason=invalid_argv|unknown_project|…
 :dispatch_request_expired    created_at=…
@@ -541,12 +541,18 @@ Lifecycle gates inside `process_dispatch_requests`:
 1. Allowlist (`valid_argv?`) — invalid → reject + remove.
 2. Expiry (`DispatchRequestQueue::EXPIRY_SEC` = 600s) — old → expire + remove.
 3. `find_project` lookup — unknown → reject + remove.
-4. `controller.running_task?` — already in flight for this slug →
+4. For every project-scoped verb except `markers`, locate the same tick's
+   status row; `admission_error` or `blocked: true` → blocked, file stays.
+5. `controller.running_task?` — already in flight for this slug →
    blocked, file stays for the next tick.
-5. `controller.can_dispatch?` gate (caps / cooldown / quarantine) —
+6. `controller.can_dispatch?` gate (caps / cooldown / quarantine) —
    blocked → file stays for the next tick.
-6. Otherwise → spawn via `dispatch_command`, threading `request_id`
+7. Otherwise → spawn via `dispatch_command`, threading `request_id`
    into `ChildSupervisor#spawn` and `ChildExit#request_id`.
+
+A child JSON envelope with `error_kind: admission_error` and CONFIG exit 78 is
+task-local validation state. Reaping it does not mark the whole project
+dropped; unrelated rows remain schedulable.
 
 `reap_completed` always refreshes the controller's
 `last_dispatched_mtime` baseline (no longer just for daemon-spawned

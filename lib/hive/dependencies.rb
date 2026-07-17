@@ -1,4 +1,5 @@
 require "hive/stages"
+require "psych"
 
 module Hive
   module Dependencies
@@ -17,10 +18,6 @@ module Hive
     Reference = Data.define(:project, :task, :explicit_project) do
       def to_s
         explicit_project ? "#{project}:#{task}" : task
-      end
-
-      def qualified(current_project)
-        "#{explicit_project ? project : current_project}:#{task}"
       end
     end
 
@@ -69,6 +66,23 @@ module Hive
       return nil if value.nil?
 
       parse_reference(value)
+    end
+
+    # Psych accepts duplicate mapping keys and silently keeps the last value.
+    # Dependency declarations are policy evidence, so two top-level copies are
+    # ambiguous and must fail closed instead of depending on parser ordering.
+    def duplicate_top_level_key?(yaml, key)
+      mapping = Psych.parse(yaml)&.root
+      return false unless mapping.is_a?(Psych::Nodes::Mapping)
+
+      seen = false
+      mapping.children.each_slice(2) do |key_node, _value_node|
+        next unless key_node.is_a?(Psych::Nodes::Scalar) && key_node.value == key
+        return true if seen
+
+        seen = true
+      end
+      false
     end
 
     def resolve(depends_on:, tasks:, threshold_stage:, task: nil)
@@ -204,15 +218,13 @@ module Hive
     # callers pass a SYMBOL-keyed Hash: Status#apply_dependency_result and
     # DependencySnapshot#stacked_base both project their rows/tasks into
     # symbol-keyed Hashes before calling in (the snapshot deliberately does
-    # not duck-type other inputs). The STRING-key arm is ALSO a live
-    # production contract: the TUI's StateSource caches archived rows and
-    # feeds their string-keyed dependency identities (`{"slug"=>, "id"=>,
-    # "stage"=>}`, via Status#json_payload's `extra_dependency_tasks` →
-    # annotate_dependencies' snapshot) into the resolver, so deleting it
-    # would silently re-block dependents whose prerequisite has moved into
-    # `9-done`. The reader arm (e.g. a `Hive::Task`) is test-ergonomics /
-    # forward-compat only — no production path passes a reader-exposing
-    # object today. Returns nil only when the key is genuinely absent from a
+    # not duck-type other inputs). The string-key arm remains part of the
+    # public resolver contract for JSON-shaped callers and compatibility
+    # with older integrations. The TUI admission cache itself now carries
+    # immutable TaskSnapshots rather than reduced row hashes. The reader arm
+    # (e.g. a `Hive::Task`) is test ergonomics / forward compatibility — no
+    # production path passes a reader-exposing object today. Returns nil only
+    # when the key is genuinely absent from a
     # recognized shape; warns (and returns nil) when `task` is neither
     # hash-like nor a reader-exposing object, so a wrong-shaped caller leaves
     # a breadcrumb instead of silently resolving every field to "missing".

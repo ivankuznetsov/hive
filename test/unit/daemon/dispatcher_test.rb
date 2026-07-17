@@ -2277,6 +2277,26 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert events_include?(logger, :project_dropped)
   end
 
+  def test_admission_error_config_exit_does_not_drop_unrelated_project_work
+    dispatcher, _sup, controller, logger, _mw = make_dispatcher(rows: [])
+    exit_entry = ChildExit.new(
+      pid: 999, exit_code: Hive::ExitCodes::CONFIG, project: "p1", slug: "held",
+      stage: "4-execute", command: "hive run held --json", started_at: T0 - 1,
+      finished_at: T0, json_envelope: { "ok" => false, "error_kind" => "admission_error" }
+    )
+    dispatcher.supervisor.define_singleton_method(:reap_all) do |now:|
+      next [] if @admission_reaped
+
+      @admission_reaped = true
+      [ exit_entry ]
+    end
+
+    dispatcher.tick(now: T0)
+
+    refute controller.project_dropped?("p1")
+    refute logger.events.any? { |name, attrs| name == :project_dropped && attrs[:project] == "p1" }
+  end
+
   # ── stale-agent healer integration ────────────────────────────────────
 
   def test_dispatcher_tick_heals_dead_pid_agent_working_marker_on_disk
@@ -3185,6 +3205,69 @@ end
         assert_equal "hive run s1 --json", sup.spawned.first[:command]
         assert_equal "R1", sup.spawned.first[:request_id]
         assert_equal Hive::Paths.state_home, sup.spawned.first[:log_state_path]
+      ensure
+        restore_find_project!
+      end
+    end
+  end
+
+  def test_dispatch_request_honors_dependency_wait_without_consuming_request
+    held = row(
+      project: "p1", slug: "held", stage: "4-execute", action: "ready_to_run",
+      command: "hive run held --json", depends_on: "base", blocked_by: "base",
+      dependency_stage: "7-artifacts", blocked: true
+    )
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      dispatcher, supervisor, _controller, logger, _watcher = make_dispatcher(
+        rows: [ held ], dispatch_request_state_home: state_home
+      )
+      write_request_file(state_home, slug: "held", request_id: "DEPWAIT")
+      stub_find_project!(dispatcher, "p1")
+      begin
+        dispatcher.tick(now: T0)
+
+        blocked = logger.events.find do |name, attrs|
+          name == :dispatch_request_blocked && attrs[:request_id] == "DEPWAIT"
+        end
+        assert_equal "dependency_unmet", blocked[1][:reason]
+        assert_equal "base", blocked[1][:blocked_by]
+        assert_empty supervisor.spawned
+        assert_equal 1, Q.pending(state_home: state_home).size
+      ensure
+        restore_find_project!
+      end
+    end
+  end
+
+  def test_dispatch_request_honors_admission_error_but_allows_marker_repair
+    error = Hive::DependencyAdmission::AdmissionError.new(
+      reason_code: "dependency_cycle", offending_ref: "p1:held -> p1:held",
+      safe_correction: "Break the cycle."
+    )
+    held = row(
+      project: "p1", slug: "held", stage: "4-execute", action: "admission_error",
+      command: nil, blocked: true, admission_error: error
+    )
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      dispatcher, supervisor, _controller, logger, _watcher = make_dispatcher(
+        rows: [ held ], dispatch_request_state_home: state_home
+      )
+      write_request_file(state_home, slug: "held", request_id: "ADMISSION")
+      write_request_file(
+        state_home, slug: "held", request_id: "REPAIR",
+        argv: [ "hive", "markers", "clear", "held", "--json" ]
+      )
+      stub_find_project!(dispatcher, "p1")
+      begin
+        dispatcher.tick(now: T0)
+
+        blocked = logger.events.find do |name, attrs|
+          name == :dispatch_request_blocked && attrs[:request_id] == "ADMISSION"
+        end
+        assert_equal "admission_error", blocked[1][:reason]
+        assert_equal "dependency_cycle", blocked[1][:reason_code]
+        assert_equal [ "hive markers clear held --json" ], supervisor.spawned.map { |item| item[:command] }
+        assert_equal [ "ADMISSION" ], Q.pending(state_home: state_home).map(&:request_id)
       ensure
         restore_find_project!
       end

@@ -89,7 +89,12 @@ No-target `hive archive` is a CLI overlay in `Hive::CLI#archive`: when `target.n
 }
 ```
 
-`error_kind` enum: `ambiguous_slug`, `destination_collision`, `final_stage`, `wrong_stage`, `rollback_failed`, `invalid_task_path`, `error`.
+`error_kind` enum: `ambiguous_slug`, `destination_collision`, `final_stage`, `wrong_stage`, `rollback_failed`, `invalid_task_path`, `dependency_wait`, `admission_error`, `error`.
+
+Dependency errors also carry `reason_code`, `offending_ref`, and
+`safe_correction`. `dependency_wait` is retryable after the prerequisite
+reaches its gate; `admission_error` requires repairing the named metadata,
+plan, workflow, enrollment, or repository-identity evidence.
 
 In JSON mode, the inner Approve and Run are quieted so the envelope is a single parseable document. In text mode, Approve and Run emit their normal prose since that output is intended for humans.
 
@@ -121,7 +126,9 @@ The archive command still refuses the advance when any guard differs from the ob
 | Wrong stage / `--from` mismatch / non-terminal marker | 4 (`WRONG_STAGE`) | `Hive::WrongStage` |
 | Slug ambiguous / unknown / `--project` mismatch | 64 (`USAGE`) | `Hive::InvalidTaskPath` / `AmbiguousSlug` |
 | Destination collision | 1 (`GENERIC`) | `Hive::DestinationCollision` |
+| Dependency below its gate | 75 (`TEMPFAIL`) | `Hive::DependencyWaitError` |
 | Lock contention | 75 (`TEMPFAIL`) | `Hive::ConcurrentRunError` |
+| Invalid dependency admission | 78 (`CONFIG`) | `Hive::DependencyAdmissionError` |
 | Internal error | 70 (`SOFTWARE`) | `Hive::InternalError` |
 
 ## Backlinks

@@ -49,7 +49,16 @@ module Hive
     end
 
     def read_for_admission(task_folder)
-      raw = YAML.safe_load(File.read(path(task_folder)))
+      source = File.read(path(task_folder))
+      if Hive::Dependencies.duplicate_top_level_key?(source, "depends_on")
+        return AdmissionRead.new(
+          status: :invalid,
+          data: empty,
+          error: "#{path(task_folder)} contains duplicate depends_on declarations",
+          reason: :metadata_invalid
+        )
+      end
+      raw = YAML.safe_load(source)
       unless raw.nil? || raw.is_a?(Hash)
         return AdmissionRead.new(
           status: :invalid,

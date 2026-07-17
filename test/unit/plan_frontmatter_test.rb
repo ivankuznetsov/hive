@@ -32,12 +32,39 @@ class PlanFrontmatterTest < Minitest::Test
     assert_equal "analytics:base-task", result.depends_on.to_s
   end
 
+  def test_duplicate_dependency_assertions_are_invalid
+    result = read_plan(<<~MARKDOWN)
+      ---
+      depends_on: blocked-task
+      depends_on: completed-task
+      ---
+      # Plan
+    MARKDOWN
+
+    assert_equal :invalid, result.status
+    assert_match(/duplicate depends_on/, result.error)
+  end
+
+  def test_frontmatter_read_is_bounded_independently_of_plan_body
+    body = "x" * (Hive::PlanFrontmatter::MAX_FRONTMATTER_BYTES * 2)
+    result = read_plan("---\ndepends_on: base-task\n---\n#{body}")
+
+    assert_equal :ok, result.status
+    assert_equal "base-task", result.depends_on.to_s
+
+    oversized = read_plan("---\nnotes: #{'x' * Hive::PlanFrontmatter::MAX_FRONTMATTER_BYTES}\n---\n")
+    assert_equal :invalid, oversized.status
+    assert_match(/malformed YAML frontmatter/, oversized.error)
+  end
+
   def test_invalid_frontmatter_and_dependency_are_preserved_as_errors
     malformed = read_plan("---\ndepends_on: [unterminated\n---\n")
+    unterminated = read_plan("---\ndepends_on: base-task\n")
     non_mapping = read_plan("---\n- depends_on: base-task\n---\n")
     invalid_dependency = read_plan("---\ndepends_on:\n  - one\n  - two\n---\n")
 
     assert_equal :invalid, malformed.status
+    assert_equal :invalid, unterminated.status
     assert_equal :invalid, non_mapping.status
     assert_equal :invalid, invalid_dependency.status
     assert_match(/frontmatter/, malformed.error)

@@ -259,7 +259,7 @@ module Hive
       end
 
       def validate_dependency!(value)
-        return Hive::Dependencies.parse_reference(value).to_s
+        Hive::Dependencies.parse_reference(value).to_s
       rescue Hive::Dependencies::InvalidReference
 
         # Describe the accepted shape in plain English for humans and

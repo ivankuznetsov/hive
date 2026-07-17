@@ -3,7 +3,7 @@ title: Task dependencies
 type: module
 source: lib/hive/dependencies.rb, lib/hive/dependency_admission.rb, lib/hive/dependency_snapshot.rb, lib/hive/repository_identity.rb, lib/hive/plan_frontmatter.rb
 created: 2026-06-18
-updated: 2026-07-16
+updated: 2026-07-17
 tags: [task, dependencies, admission, status, daemon, repository]
 ---
 
@@ -43,7 +43,9 @@ partially interpreted.
 absent legacy sidecar from unreadable YAML, a non-mapping document, and an
 invalid `depends_on`. General display code may still use the tolerant reader,
 but admission never does. Metadata mutators refuse to rewrite corrupt input,
-so id/display-name backfill cannot erase damaged dependency evidence.
+so id/display-name backfill cannot erase damaged dependency evidence. The
+strict reader rejects duplicate top-level `depends_on` keys before YAML's
+last-key-wins behavior can hide one of two declarations.
 
 `plan.md` may repeat the assertion in top-level YAML frontmatter:
 
@@ -56,7 +58,10 @@ depends_on: api:api-task-260716-abcd
 No frontmatter, or frontmatter without `depends_on`, is valid. When present,
 the plan value must parse with the same scalar grammar and normalize to exactly
 the metadata value. A plan-only assertion, mismatch, or malformed frontmatter
-is an admission error. Hive never scans plan prose for prerequisites.
+is an admission error. Duplicate top-level `depends_on` keys are invalid here
+too. Frontmatter scanning stops at its closing delimiter and is capped at
+64 KiB, so admission never reads an unbounded plan body. Hive never scans plan
+prose for prerequisites.
 
 This cross-check closes the ordering failure observed in the Honeycomb work:
 the plan named a prerequisite that scheduling metadata did not carry. The
@@ -77,7 +82,9 @@ before trusting its task snapshot. A missing identity, unknown project, or
 stored/live mismatch is held. Repositories without an origin may remain
 enrolled and use same-project dependencies; identity is required only when
 they participate as an explicit cross-project target. Hive does not guess or
-auto-repair repository identity.
+auto-repair repository identity. Live Git lookups run only for projects named
+by explicit cross-project edges, with a two-second process-group deadline and
+TERM-to-KILL cleanup; same-project-only snapshots spawn no Git lookups.
 
 Each admission invocation snapshots every enrolled project, its tasks, and
 its own workflow descriptors. Qualified `[project, slug]` identities and
@@ -85,12 +92,21 @@ same-project numeric ids are indexed without using the global task resolver.
 The TUI's one-second active-only refresh is the bounded exception: it builds a
 new immutable context from current active tasks plus immutable terminal-task
 snapshots produced by the last full/archive status pass. Cached terminal
-admission errors retain their exact structured fields, and the periodic
-archive refresh replaces the cache wholesale.
+snapshots preserve their exact workflow, dependency edge, validation error,
+and project repository identity. Active tasks shadow an archived snapshot with
+the same slug; otherwise O(1) slug/id indexes consult the archived context as a
+fallback, including for transitive chains. The periodic archive refresh
+replaces successful project snapshots while retaining the last lossless
+snapshot for a project whose archive read degraded transiently.
 Duplicate or ambiguous identities fail closed. Full-chain walking follows
 only explicit project edges, detects missing tasks, self-reference, corrupt
 upstream nodes, and cycles, and reports a cycle as an ordered qualified path
-including the repeated closing node.
+including the repeated closing node. Cycle bookkeeping and immutable-context
+verdicts are indexed and memoized, so full status evaluates shared dependency
+tails once instead of rewalking them for every row. Each task folder's
+device/inode identity is checked before and after strict reads; a concurrent
+stage move invalidates that snapshot instead of retaining the enumerated old
+stage after an `ENOENT` race.
 
 ## Gate and three verdicts
 
@@ -133,7 +149,12 @@ The daemon gives admission errors precedence over stage/action policy, logs
 the structured fields, drops any stale merge watch, and spawns nothing.
 Ordinary waits also suppress merge polling, including a configured `9-done`
 gate. Id/display-name backfill skips admission-error rows and uses strict
-metadata reads.
+metadata reads. File-backed dispatch requests for run/advance/archive verbs
+are checked against the same tick's status row before spawn and remain queued
+on a dependency wait or admission error. `hive markers ...` repair requests
+are deliberately exempt so an operator can repair stale/corrupt marker state.
+A task-local admission error exits 78 without dropping the entire enrolled
+project from daemon scheduling.
 
 `hive run` re-snapshots under the task lock before config, rebase, worktree, or
 runner side effects. Forward `hive approve` re-snapshots inside the commit and

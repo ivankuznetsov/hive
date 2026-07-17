@@ -1343,6 +1343,51 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_limit_marker_uses_dated_reset_from_captured_limit_text
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "")
+      agent = Hive::Agent.new(task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5)
+      result = {
+        timed_out: false,
+        exit_code: 1,
+        final_message: "",
+        limit_text: "You've hit your usage limit.\nTry again at Jul 18th, 2026 7:50 AM."
+      }
+
+      now = Time.utc(2026, 7, 12, 20, 0, 0)
+      with_env("TZ" => "Europe/London") do
+        with_replaced_singleton_method(Time, :now, -> { now }) do
+          agent.handle_exit(result)
+        end
+      end
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal "2026-07-18T06:51:00Z", marker.attrs.fetch("retry_after")
+    end
+  end
+
+  def test_exit_code_mode_preserves_multiline_fallback_limit_text
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      agent = Hive::Agent.new(
+        task: task,
+        prompt: "x",
+        max_budget_usd: 1,
+        timeout_sec: 5,
+        status_mode: :exit_code_only
+      )
+      final_message = "You've hit your usage limit.\nTry again at Jul 18th, 2026 7:50 AM."
+      result = { timed_out: false, exit_code: 1, final_message: final_message, limit_text: nil }
+
+      agent.handle_exit(result)
+
+      assert_equal :error, result.fetch(:status)
+      assert_equal final_message, result.fetch(:limit_text)
+      assert_equal "limits reached for claude: You've hit your usage limit.", result.fetch(:error_message)
+    end
+  end
+
   def test_captures_usage_limit_from_structured_error_stream_event
     # End-to-end: a codex-style {"type":"error","message":"...usage limit..."}
     # JSON event (which MessageExtractor does not surface as a final message)

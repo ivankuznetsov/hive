@@ -850,8 +850,12 @@ class RunApproveTest < Minitest::Test
         files_in_commit = `git -C #{File.join(dir, ".hive-state")} show --pretty= --name-only HEAD`.lines.map(&:strip)
         refute_includes files_in_commit, "stages/3-plan/#{slug}/.lock",
                         "the per-process .lock file must not be committed"
+        refute_includes files_in_commit, "stages/3-plan/#{slug}/.lock.tmp.guard",
+                        "the stable task-lock guard must remain ignored"
         refute File.exist?(File.join(plan, ".lock")),
                "orphan .lock from with_task_lock must be cleaned at destination"
+        assert File.exist?(File.join(plan, ".lock.tmp.guard")),
+               "the regression must exercise the persistent guard artifact"
       end
     end
   end

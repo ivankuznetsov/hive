@@ -40,6 +40,7 @@ module Hive
         )
         resource_limits = Hive::Stages::Base.stage_resource_limits(cfg, stage)
 
+        marker_before_spawn = Hive::Markers.current(output_path)
         result = Hive::Stages::Base.spawn_agent(
           task,
           prompt: prompt,
@@ -58,26 +59,31 @@ module Hive
         )
 
         marker = Hive::Markers.current(output_path)
+        marker_unchanged = marker.name == marker_before_spawn.name && marker.raw == marker_before_spawn.raw
         # `spawn_agent` returns `{status: :error}` for both preflight failures
-        # and provider quota walls. In state-file mode Hive::Agent may already
-        # have written the retryable limit marker; other status modes only
-        # carry the wall in the result envelope. Preserve/classify those quota
-        # failures before the generic preflight fallback so the daemon can
-        # honor `retry_after` instead of parking the task permanently.
+        # and spawned failures. A changed marker is authoritative agent output;
+        # preserve it rather than relabeling it as a preflight failure. If the
+        # marker is unchanged, classify a provider quota envelope before the
+        # generic preflight fallback so the daemon can honor `retry_after`.
         if result.is_a?(Hash) && result[:status] == :error
           if Hive::AgentLimit.held?(marker.name, marker.attrs)
             # The agent already wrote the authoritative quota marker.
+          elsif !marker_unchanged
+            # The agent wrote another specific terminal marker (for example a
+            # timeout or exit-code error); its recovery metadata wins.
           elsif limit_error_envelope?(result)
             Hive::Markers.set(
               output_path, :error,
               reason: "limits_reached",
               provider: profile.name,
               message: result[:error_message].to_s[0, 200],
-              retry_after: Hive::AgentLimit.retry_after
+              retry_after: Hive::AgentLimit.retry_after(
+                text: result[:limit_text] || result[:error_message]
+              )
             )
           else
-            # A preflight/version failure writes no marker. Overwrite any
-            # stale marker from a prior run so the failure stays observable.
+            # A preflight/version failure writes no marker. Replace any stale
+            # marker from a prior run so the new failure stays observable.
             Hive::Markers.set(
               output_path, :error,
               reason: "agent_preflight_failed",

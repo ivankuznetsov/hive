@@ -567,12 +567,17 @@ module Hive
         return
       end
 
-      if (limit_message = limit_error_message(result))
+      if (limit_text = detected_limit_text(result))
+        # Preserve the raw multiline signal even when classification fell back
+        # to final_message. Outer execute/review stages use it to retain an
+        # adjacent provider reset date instead of the formatted one-line error.
+        result[:limit_text] = limit_text
+        limit_message = Hive::AgentLimit.error_message(limit_text, agent: @profile.name)
         if effective_status_mode == :state_file_marker
           Hive::Markers.set(@task.state_file, :error,
                             reason: "limits_reached",
                             message: limit_message,
-                            retry_after: Hive::AgentLimit.retry_after)
+                            retry_after: Hive::AgentLimit.retry_after(text: limit_text))
         end
         result[:status] = :error
         result[:error_message] = limit_message
@@ -700,7 +705,7 @@ module Hive
         File.size(@expected_output).positive?
     end
 
-    def limit_error_message(result)
+    def detected_limit_text(result)
       return nil if result[:exit_code] == 0 && !result[:timed_out]
 
       # Prefer the limit text captured directly from the raw stream
@@ -711,7 +716,7 @@ module Hive
       limit = result[:final_message].to_s unless Hive::AgentLimit.limit_reached?(limit)
       return nil unless Hive::AgentLimit.limit_reached?(limit)
 
-      Hive::AgentLimit.error_message(limit, agent: @profile.name)
+      limit
     end
 
     def handle_exit_state_file_marker(result)

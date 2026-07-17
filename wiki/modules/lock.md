@@ -3,27 +3,28 @@ title: Hive::Lock
 type: module
 source: lib/hive/lock.rb
 created: 2026-04-25
-updated: 2026-07-09
+updated: 2026-07-17
 tags: [lock, concurrency, flock, commit-lock]
 ---
 
-**TLDR**: Two locking primitives — per-task `.lock` (long-lived, EXCL file create with PID-reuse defence) and per-project `.commit-lock` (short-lived, bounded flock for the brief hive-state git-commit window).
+**TLDR**: Two locking primitives — per-task `.lock` (long-lived, atomically published with process and lock-generation identity) and per-project `.commit-lock` (short-lived, bounded flock for the brief hive-state git-commit window).
 
 ## Per-task lock
 
 `with_task_lock(task_folder, payload = {})` wraps a block:
 
-1. `acquire_task_lock` opens `<task_folder>/.lock` with `WRONLY | CREAT | EXCL` (atomic create-or-fail), writes a YAML payload merged with `base_payload`.
-2. On `Errno::EEXIST`, calls `stale_lock?`. If stale, deletes and retries up to 3 times. If live, raises `Hive::ConcurrentRunError`.
+1. `acquire_task_lock` writes and fsyncs a complete YAML payload to a sibling tempfile, then hard-links it to `<task_folder>/.lock` with no-replace semantics. Readers therefore see either no lock or a complete payload, never an empty/partial newly created lock.
+2. Publication, stale replacement, updates, and release are serialized on the stable `<task_folder>/.lock.tmp.guard` flock. That name is covered by the existing hive-state ignore rule. On `Errno::EEXIST`, acquisition calls `stale_lock?`; if stale, it deletes and retries up to 3 times, otherwise it raises `Hive::ConcurrentRunError`.
 3. The block runs with the lock held.
-4. `release_task_lock` deletes the lock file in `ensure`.
+4. `release_task_lock` deletes the lock file in `ensure` only when its generated `lock_id` still matches. An old owner cannot delete a replacement generation. If a stage transition moved the task folder while locked, release does not recreate the vanished source; the transition removes the moved lock before commit.
 
 `base_payload`:
 ```ruby
 {
   "pid" => Process.pid,
   "started_at" => Time.now.utc.iso8601,
-  "process_start_time" => process_start_time(Process.pid)
+  "process_start_time" => process_start_time(Process.pid),
+  "lock_id" => SecureRandom.hex(16)
 }
 ```
 
@@ -35,6 +36,13 @@ the recorded start time with the live process before signalling it so a reused
 PID cannot target an unrelated process. If the platform cannot read a start
 time, the field is nil and that child-specific PID-reuse guard degrades to its
 existing PID-only behavior.
+
+`hive status --json` exposes the verified live holder's `task_lock_pid`,
+`task_lock_process_start_time`, and `task_lock_id`. Recovery consumers bind
+destructive actions to that exact observed generation. The TUI snapshot keeps
+all three values losslessly even though its renderer currently uses only the
+derived `live_task_lock` flag, so the status/TUI schema boundary remains
+additive and future recovery actions can use the same generation identity.
 
 ## Stale-lock detection (`stale_lock?`)
 
@@ -73,7 +81,7 @@ Per-task lock is held for the entire `hive run`, including long execute/review p
 
 ## Tests
 
-- `test/unit/lock_test.rb` — happy path, concurrent acquire raises, stale-lock retry, bounded commit-lock timeout, and commit-lock parallelism.
+- `test/unit/lock_test.rb` — happy path, complete-before-visible publication, generation-scoped release, concurrent acquire raises, stale-lock retry, bounded commit-lock timeout, and commit-lock parallelism.
 - `test/integration/new_test.rb` — `hive new` wraps the captured-task hive-state commit in the project commit lock.
 
 ## Backlinks

@@ -61,8 +61,17 @@ deliverable before status reports them archived.
    non-state-file spawn only returned quota text in its error envelope, the
    runner writes the equivalent marker with the selected profile as `provider`.
    Both paths return `commit=limits_reached` and retain a `retry_after` stamp so
-   the daemon cooldown healer can requeue the generic stage. Non-limit error
-   envelopes still become `ERROR reason=agent_preflight_failed`.
+   the daemon cooldown healer can requeue the generic stage.
+
+An error envelope does not by itself prove that the spawn wrote no marker.
+`Hive::Agent` writes specific state-file errors for provider limits, timeouts,
+and nonzero exits, while version/auth preflight failures return the same error
+envelope without changing the file. The runner snapshots the terminal marker
+before spawning. A changed marker is authoritative and retains its reason and
+recovery metadata. When the marker is unchanged, a quota envelope becomes
+`ERROR reason=limits_reached`; any other error envelope becomes
+`ERROR reason=agent_preflight_failed`, replacing stale waiting/complete/error
+state from an earlier run.
 
 The coding pipeline's `brainstorm` and `plan` names still use their bespoke
 tmux-capable runners even though their descriptor entries are `kind: :agent`;
@@ -74,8 +83,8 @@ name-first resolver precedence preserves the current coding runtime.
   wrapping, nil-skill fallback, formatted skill invocation, spawn arguments,
   descriptor-versus-loaded-config resource precedence, explicit budget/timeout
   overrides, marker-to-action mapping, provider-limit envelope classification,
-  preservation of agent-written quota markers, and the distinct non-limit
-  preflight fallback.
+  preservation of fresh agent-written quota and non-quota errors, and the
+  distinct unchanged-marker preflight fallback.
 
 ## Backlinks
 

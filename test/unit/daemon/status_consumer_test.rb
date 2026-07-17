@@ -91,7 +91,12 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
   # (Hive::Commands::Status) or the Row struct surfaces as a structured
   # test failure rather than a silent classification change downstream.
   def test_parses_live_task_lock_field_and_coerces_to_strict_boolean
-    task_true = task_row(slug: "live-runner").merge("live_task_lock" => true)
+    task_true = task_row(slug: "live-runner").merge(
+      "live_task_lock" => true,
+      "task_lock_pid" => 12_345,
+      "task_lock_process_start_time" => "observed-start",
+      "task_lock_id" => "observed-generation"
+    )
     task_false = task_row(slug: "no-runner").merge("live_task_lock" => false)
     task_missing = task_row(slug: "legacy-payload")
     payload = make_envelope(projects: [ {
@@ -105,6 +110,9 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
       rows = result.rows.each_with_object({}) { |r, h| h[r.slug] = r }
       assert_equal true, rows.fetch("live-runner").live_task_lock,
                    "explicit true must propagate"
+      assert_equal 12_345, rows.fetch("live-runner").task_lock_pid
+      assert_equal "observed-start", rows.fetch("live-runner").task_lock_process_start_time
+      assert_equal "observed-generation", rows.fetch("live-runner").task_lock_id
       assert_equal false, rows.fetch("no-runner").live_task_lock,
                    "explicit false must propagate"
       assert_equal false, rows.fetch("legacy-payload").live_task_lock,

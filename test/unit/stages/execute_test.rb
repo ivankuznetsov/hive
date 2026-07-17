@@ -101,11 +101,17 @@ class HiveStagesExecuteTest < Minitest::Test
       git = FakeGit.new(head: "base", branch: task.slug, dirty: false, ancestor_result: true)
       result = {
         status: :error,
-        error_message: "limits reached for codex: quota exhausted, try again at Jun 24th"
+        error_message: "limits reached for codex: You've hit your usage limit. " \
+                       "Try again at Jul 18th, 2026 7:50 AM."
       }
+      now = Time.utc(2026, 7, 12, 20, 0, 0)
 
-      run_result = with_fake_git_and_spawn(git, result: result) do
-        Hive::Stages::Execute.run_pass(task, execute_cfg("codex"), File.join(dir, "worktree"))
+      run_result = with_env("TZ" => "Europe/London") do
+        with_replaced_singleton_method(Time, :now, -> { now }) do
+          with_fake_git_and_spawn(git, result: result) do
+            Hive::Stages::Execute.run_pass(task, execute_cfg("codex"), File.join(dir, "worktree"))
+          end
+        end
       end
 
       marker = Hive::Markers.current(task.state_file)
@@ -114,7 +120,7 @@ class HiveStagesExecuteTest < Minitest::Test
       assert_equal "limits_reached", marker.attrs["reason"]
       assert_equal "codex", marker.attrs["provider"]
       assert_equal "implementer hit a usage/credit limit", marker.attrs["message"]
-      assert Time.parse(marker.attrs.fetch("retry_after")) > Time.now.utc
+      assert_equal "2026-07-18T06:51:00Z", marker.attrs.fetch("retry_after")
     end
   end
 

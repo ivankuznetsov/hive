@@ -225,7 +225,8 @@ module Hive
             name: name,
             output_path: output_path,
             status: :error,
-            error_message: msg
+            error_message: msg,
+            limit_text: spawn_result[:limit_text]
           )
         end
       end

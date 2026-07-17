@@ -303,6 +303,9 @@ module Hive
           # and would have to handle JSON null otherwise. Additive field per
           # the SCHEMA_VERSIONS policy in lib/hive.rb — no version bump.
           "live_task_lock" => row[:live_task_lock] == true,
+          "task_lock_pid" => row[:task_lock_pid],
+          "task_lock_process_start_time" => row[:task_lock_process_start_time],
+          "task_lock_id" => row[:task_lock_id],
           # Count of still-unanswered brainstorm Q&A questions (issue #270).
           # 0 for every non-brainstorm / non-needs_input row. Lets an agent
           # or operator tell "the daemon is holding this brainstorm because
@@ -721,7 +724,10 @@ module Hive
                 age: humanise_age(mtime),
                 claude_pid: claude_pid,
                 claude_pid_alive: claude_pid ? pid_alive?(claude_pid.to_i) : nil,
-                live_task_lock: !live_holder.nil?
+                live_task_lock: !live_holder.nil?,
+                task_lock_pid: live_holder && live_holder["pid"],
+                task_lock_process_start_time: live_holder && live_holder["process_start_time"],
+                task_lock_id: live_holder && live_holder["lock_id"]
               }
             # A mid-scan stage-move (atomic rename of <stage>/<slug> out from
             # under us) makes an in-folder read raise ENOENT even though the

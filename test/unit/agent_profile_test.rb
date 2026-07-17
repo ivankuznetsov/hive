@@ -1,5 +1,6 @@
 require "test_helper"
 require "hive/agent_profile"
+require "hive/implementation_identity"
 
 class AgentProfileTest < Minitest::Test
   include HiveTestHelper
@@ -51,6 +52,67 @@ class AgentProfileTest < Minitest::Test
       make_profile(initial_context_tokens: -1)
     end
     assert_includes error.message, "non-negative Integer"
+  end
+
+  def test_identity_arguments_translate_model_and_supported_effort_as_discrete_argv
+    profile = make_profile(
+      model_argument_builder: ->(model) { [ "--model", model ] },
+      effort_argument_builder: ->(effort) { [ "-c", "reasoning_effort=#{effort}" ] }
+    )
+
+    result = profile.identity_arguments(model: "gpt-5.6-terra", effort: "medium")
+
+    assert_equal [ "--model", "gpt-5.6-terra", "-c", "reasoning_effort=medium" ],
+                 result.native_arguments
+    assert_equal "medium", result.requested_effort
+    assert_equal "medium", result.effective_effort
+    assert result.effort_supported
+  end
+
+  def test_identity_arguments_report_unsupported_effort_without_native_argument
+    profile = make_profile(model_argument_builder: ->(model) { [ "--model", model ] })
+
+    result = profile.identity_arguments(model: "provider/model-v1", effort: "high")
+
+    assert_equal [ "--model", "provider/model-v1" ], result.native_arguments
+    assert_equal "high", result.requested_effort
+    assert_nil result.effective_effort
+    refute result.effort_supported
+  end
+
+  def test_identity_arguments_can_record_a_concrete_default_without_pinning_it
+    profile = make_profile(model_argument_builder: ->(model) { [ "--model", model ] })
+
+    result = profile.identity_arguments(model: "provider/default-v2", effort: nil, pin_model: false)
+
+    assert_equal [], result.native_arguments
+    assert_equal "provider/default-v2", result.model
+    refute result.model_pinned
+  end
+
+  def test_identity_arguments_reject_shell_shaped_model_and_invalid_effort
+    profile = make_profile(
+      model_argument_builder: ->(model) { [ "--model", model ] },
+      effort_argument_builder: ->(effort) { [ "--effort", effort ] }
+    )
+
+    assert_raises(Hive::ImplementationIdentity::InvalidIdentity) do
+      profile.identity_arguments(model: "safe\n--dangerous", effort: "high")
+    end
+    assert_raises(Hive::ImplementationIdentity::InvalidIdentity) do
+      profile.identity_arguments(model: "safe", effort: "high; touch /tmp/x")
+    end
+  end
+
+  def test_concrete_default_model_uses_profile_resolver_and_rejects_default_sentinel
+    resolved = make_profile(default_model_resolver: ->(**) { "vendor/model-1" })
+    assert_equal "vendor/model-1", resolved.concrete_default_model
+
+    unresolved = make_profile(default_model_resolver: ->(**) { "default" })
+    error = assert_raises(Hive::ImplementationIdentity::ResolutionError) do
+      unresolved.concrete_default_model
+    end
+    assert_match(/concrete default model/, error.message)
   end
 
   def test_bin_uses_env_override_when_set
@@ -364,6 +426,25 @@ class AgentProfileTest < Minitest::Test
     overridden = profile.with_overrides("min_version" => "9.9.9")
 
     assert_equal 12_345, overridden.initial_context_tokens
+  end
+
+  def test_with_overrides_preserves_identity_capabilities
+    resolver = ->(**) { "model-v1" }
+    model_builder = ->(model) { [ "--model", model ] }
+    effort_builder = ->(effort) { [ "--effort", effort ] }
+    profile = make_profile(
+      default_model_resolver: resolver,
+      model_argument_builder: model_builder,
+      effort_argument_builder: effort_builder,
+      launcher_identity: "custom-launcher/v2"
+    )
+
+    overridden = profile.with_overrides("min_version" => "9.9.9")
+
+    assert_same resolver, overridden.default_model_resolver
+    assert_same model_builder, overridden.model_argument_builder
+    assert_same effort_builder, overridden.effort_argument_builder
+    assert_equal "custom-launcher/v2", overridden.launcher_identity
   end
 
   # --- with_overrides ---------------------------------------------------

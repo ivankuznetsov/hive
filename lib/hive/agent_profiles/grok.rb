@@ -92,7 +92,12 @@ module Hive
       status_detection_mode: :output_file_exists,
       preflight: GROK_PREFLIGHT,
       usage_extractor: Hive::AgentProfiles::UsageExtractors::GROK,
-      skill_verifier: nil
+      skill_verifier: nil,
+      default_model_resolver: ->(**kwargs) {
+        Hive::ImplementationIdentity::NativeDefaults.resolve(:grok, **kwargs)
+      },
+      model_argument_builder: ->(model) { [ "--model", model ] },
+      launcher_identity: "grok-cli/v1"
     )
 
     register(:grok, GROK)

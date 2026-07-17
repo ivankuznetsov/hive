@@ -30,6 +30,12 @@ module Hive
       status_detection_mode: :state_file_marker,
       usage_extractor: Hive::AgentProfiles::UsageExtractors::CLAUDE,
       skill_verifier: Hive::SkillCheck::Claude.method(:verify),
+      default_model_resolver: ->(**kwargs) {
+        Hive::ImplementationIdentity::NativeDefaults.resolve(:claude, **kwargs)
+      },
+      model_argument_builder: ->(model) { [ "--model", model ] },
+      effort_argument_builder: ->(effort) { [ "--effort", effort ] },
+      launcher_identity: "claude-code/v1",
       cli_capabilities: {
         safe_mode: [ "--safe-mode" ],
         patrol_review_context: [

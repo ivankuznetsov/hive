@@ -1031,6 +1031,36 @@ class BabysitterDryRunEnvTest < Minitest::Test
     end
   end
 
+  def test_gh_stub_scrubs_godebug_before_allowlisted_api_passthrough
+    with_tmp_dir do |dir|
+      token = "github_pat_regression_secret"
+      marker_path = File.join(dir, "real-gh-ran")
+      real_gh = File.join(dir, "real-gh")
+      File.write(real_gh, <<~RUBY)
+        #!#{RbConfig.ruby}
+        File.write(#{marker_path.dump}, ARGV.join(" "))
+        if ENV.fetch("GODEBUG", "").split(",").any? { |value| value.start_with?("http2debug=") }
+          warn "http2: Transport encoding header authorization: Bearer " + ENV.fetch("GH_TOKEN")
+        end
+      RUBY
+      FileUtils.chmod("+x", real_gh)
+
+      env = {
+        "HIVE_BABYSITTER_REAL_GH" => real_gh,
+        "HIVE_BABYSITTER_DRY_RUN_LOG" => File.join(dir, "skipped.log"),
+        "GH_TOKEN" => token,
+        "GODEBUG" => "http2debug=2"
+      }
+
+      _out, err, status = Open3.capture3(env, stub_path("gh"), "api", "rate_limit")
+
+      assert status.success?, err
+      assert_equal "api rate_limit", File.read(marker_path)
+      refute_includes err, token
+      refute_match(/authorization/i, err)
+    end
+  end
+
   def test_gh_stub_scrubs_host_repo_and_enterprise_token_environment_before_passthrough
     with_tmp_dir do |dir|
       # The argv gate inspects argv only; gh also reads the target host/repo and enterprise

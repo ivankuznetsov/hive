@@ -19,7 +19,8 @@ module Hive
       # during the pre-claude window (issue #144).
       Row = Struct.new(:project, :slug, :stage, :workflow, :marker, :marker_attrs, :folder, :state_file,
                        :state_file_mtime, :action, :suggested_command, :claude_pid_alive,
-                       :live_task_lock, :diagnostic, :depends_on, :blocked_by,
+                       :live_task_lock, :task_lock_pid, :task_lock_process_start_time,
+                       :task_lock_id, :diagnostic, :depends_on, :blocked_by,
                        :dependency_stage, :blocked, :admission_error,
                        keyword_init: true)
       # Aggregated per-project legacy-layout signal lifted out of each
@@ -194,6 +195,9 @@ module Hive
               suggested_command: admission_error ? nil : task["suggested_command"],
               claude_pid_alive: task["claude_pid_alive"],
               live_task_lock: task["live_task_lock"] == true,
+              task_lock_pid: task["task_lock_pid"],
+              task_lock_process_start_time: task["task_lock_process_start_time"],
+              task_lock_id: task["task_lock_id"],
               diagnostic: task["diagnostic"],
               depends_on: task["depends_on"],
               blocked_by: task["blocked_by"],

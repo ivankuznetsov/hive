@@ -257,14 +257,15 @@ stage does not move; the only same-stage workflow enqueue is the
    for which the `ConcurrencyController` has a live in-flight slot, or
    rows where `StatusConsumer` reports `live_task_lock: true` because an
    external `hive run` still holds a verified task lock. The exception is
-   `REVIEW_WORKING`: if the row's `claude_pid_alive` is false, the lock
-   holder PID/start-time still match, and `pgrep -P <holder>` proves the
-   holder has no children, the healer treats the parent as wedged. It
-   logs `reason=review_agent_died` with the prior `phase`/`pass`, clears
-   the stale `REVIEW_WORKING` marker, terminates that holder, and deletes
-   the task `.lock`, so the daemon sees the row as ready and retries the
-   interrupted review phase. If child inspection fails, or children still
-   exist, it leaves the row alone. It also auto-clears retryable
+   `REVIEW_WORKING`: if the row's `claude_pid_alive` is false, the current
+   lock PID/start-time/lock-id still match the identity captured by status,
+   and `pgrep -P <holder>` proves the holder has no children, the healer treats
+   the parent as wedged. It terminates only that process identity, claims a new
+   task-lock generation, and clears only the matching marker while holding the
+   claim; a replacement holder or failed claim leaves the marker untouched.
+   It then logs `reason=review_agent_died` with the prior `phase`/`pass`, so the
+   daemon can retry the interrupted phase. If child inspection fails, or
+   children still exist, it leaves the row alone. It also auto-clears retryable
    review errors with no live task lock: `REVIEW_ERROR reason=review_agent_died`,
    and `REVIEW_ERROR phase=reviewers reason=reviewer_partial_failure` when the
    pass-specific `reviews/errors-NN.md` contains only

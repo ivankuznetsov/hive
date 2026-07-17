@@ -40,7 +40,9 @@ class LockTest < Minitest::Test
       assert_equal "ready\n", reader.gets
       reader.close
 
-      Hive::Lock.acquire_task_lock(dir, "pid" => child, "process_start_time" => Hive::Lock.process_start_time(child))
+      lock_data = Hive::Lock.acquire_task_lock(
+        dir, "pid" => child, "process_start_time" => Hive::Lock.process_start_time(child)
+      )
 
       # Now a different process trying to acquire should see live PID and raise.
       assert_raises(Hive::ConcurrentRunError) { Hive::Lock.acquire_task_lock(dir) }
@@ -52,7 +54,7 @@ class LockTest < Minitest::Test
           # Already gone.
         end
       end
-      Hive::Lock.release_task_lock(dir)
+      Hive::Lock.release_task_lock(dir, lock_id: lock_data && lock_data["lock_id"])
     end
   end
 
@@ -64,7 +66,7 @@ class LockTest < Minitest::Test
       data = Hive::Lock.acquire_task_lock(dir)
       assert_equal Process.pid, data["pid"]
     ensure
-      Hive::Lock.release_task_lock(dir)
+      Hive::Lock.release_task_lock(dir, lock_id: data && data["lock_id"])
     end
   end
 
@@ -74,7 +76,7 @@ class LockTest < Minitest::Test
       data = Hive::Lock.acquire_task_lock(dir)
       assert_equal Process.pid, data["pid"]
     ensure
-      Hive::Lock.release_task_lock(dir)
+      Hive::Lock.release_task_lock(dir, lock_id: data && data["lock_id"])
     end
   end
 
@@ -116,17 +118,11 @@ class LockTest < Minitest::Test
       lock_path = File.join(dir, ".lock")
       File.write(lock_path, { "pid" => Process.pid }.to_yaml)
       attempts = 0
-      original_open = File.method(:open)
-
       with_replaced_singleton_method(Hive::Lock, :stale_lock?, ->(_path) { true }) do
         with_replaced_singleton_method(File, :delete, ->(_path) { }) do
-          with_replaced_singleton_method(File, :open, lambda { |path, *args, &block|
-            if path == lock_path && (args.first & File::EXCL) != 0
-              attempts += 1
-              raise Errno::EEXIST
-            end
-
-            original_open.call(path, *args, &block)
+          with_replaced_singleton_method(Hive::Lock, :publish_task_lock, lambda { |_path, _data|
+            attempts += 1
+            raise Errno::EEXIST
           }) do
             error = assert_raises(Hive::ConcurrentRunError) { Hive::Lock.acquire_task_lock(dir) }
             assert_match(/another hive run is active/, error.message)
@@ -135,6 +131,40 @@ class LockTest < Minitest::Test
           end
         end
       end
+    end
+  end
+
+  def test_task_lock_is_fully_initialized_before_it_becomes_visible
+    with_tmp_dir do |dir|
+      lock_path = File.join(dir, ".lock")
+      observed = nil
+      original_link = File.method(:link)
+      test = self
+
+      with_replaced_singleton_method(File, :link, lambda { |source, destination|
+        test.refute File.exist?(destination), "target must remain absent while payload is written"
+        observed = YAML.safe_load(File.read(source))
+        original_link.call(source, destination)
+      }) do
+        data = Hive::Lock.acquire_task_lock(dir, "owner" => "atomic-test")
+        assert_equal data, observed
+        assert_equal data, YAML.safe_load(File.read(lock_path))
+      ensure
+        Hive::Lock.release_task_lock(dir, lock_id: data && data["lock_id"])
+      end
+    end
+  end
+
+  def test_old_owner_cannot_release_replacement_lock
+    with_tmp_dir do |dir|
+      old = Hive::Lock.acquire_task_lock(dir)
+      assert Hive::Lock.release_task_lock(dir, lock_id: old.fetch("lock_id"))
+      replacement = Hive::Lock.acquire_task_lock(dir)
+
+      refute Hive::Lock.release_task_lock(dir, lock_id: old.fetch("lock_id"))
+      assert_equal replacement.fetch("lock_id"), YAML.safe_load(File.read(File.join(dir, ".lock"))).fetch("lock_id")
+    ensure
+      Hive::Lock.release_task_lock(dir, lock_id: replacement && replacement["lock_id"])
     end
   end
 

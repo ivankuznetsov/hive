@@ -603,22 +603,26 @@ module Hive
         return unless row.claude_pid_alive == false
 
         holder = task_lock_holder(row)
+        return unless task_lock_matches_status_snapshot?(holder, row)
         return unless wedged_review_lock_holder?(holder)
 
         marker_attrs = review_marker_attrs(row)
-        return unless Hive::Markers.clear_current(
-          row.state_file,
-          expected_name: :review_working,
-          match_attrs: marker_attrs,
-          purge_history: true
-        )
+        return unless review_marker_matches?(row, marker_attrs)
 
-        # The verified-live old holder fences normal runners while the marker
-        # generation is checked and cleared. After terminating it, claim and
-        # release the task lock to remove only that now-stale generation. If a
-        # new runner wins the acquire race, its live lock remains untouched.
+        # Terminate only the exact holder identity captured by status, then
+        # acquire our own lock generation before clearing. A replacement run,
+        # undeletable lock, or still-live post-KILL holder makes the claim fail
+        # closed and leaves the marker untouched.
         terminate_lock_holder(holder)
-        with_review_heal_lock(row, reason: "review_agent_died") { true }
+        cleared = with_review_heal_lock(row, reason: "review_agent_died") do
+          Hive::Markers.clear_current(
+            row.state_file,
+            expected_name: :review_working,
+            match_attrs: marker_attrs,
+            purge_history: true
+          )
+        end
+        return unless cleared
 
         @logger.event(:marker_healed,
                       project: row.project,
@@ -694,6 +698,22 @@ module Hive
         nil
       end
 
+      def task_lock_matches_status_snapshot?(holder, row)
+        return false unless holder.is_a?(Hash)
+        return false unless row.task_lock_pid.is_a?(Integer)
+        return false unless holder["pid"] == row.task_lock_pid
+        return false unless holder["process_start_time"].to_s == row.task_lock_process_start_time.to_s
+
+        holder["lock_id"].to_s == row.task_lock_id.to_s
+      end
+
+      def review_marker_matches?(row, expected_attrs)
+        marker = Hive::Markers.current(row.state_file)
+        return false unless marker.name == :review_working
+
+        expected_attrs.all? { |key, value| marker.attrs[key.to_s].to_s == value.to_s }
+      end
+
       def wedged_review_lock_holder?(holder)
         return false unless holder.is_a?(Hash)
 
@@ -741,17 +761,26 @@ module Hive
       def terminate_lock_holder(holder)
         pid = holder["pid"]
         return unless pid.is_a?(Integer)
+        return unless lock_holder_process_alive?(holder)
 
         Process.kill("TERM", pid)
         deadline = Time.now + 1
         while Time.now < deadline
-          return unless pid_alive?(pid)
+          return unless lock_holder_process_alive?(holder)
 
           sleep 0.05
         end
-        Process.kill("KILL", pid) if pid_alive?(pid)
+        Process.kill("KILL", pid) if lock_holder_process_alive?(holder)
       rescue Errno::ESRCH, Errno::EPERM
         nil
+      end
+
+      def lock_holder_process_alive?(holder)
+        pid = holder["pid"]
+        return false unless pid.is_a?(Integer) && pid_alive?(pid)
+
+        recorded = holder["process_start_time"]
+        recorded.nil? || Hive::Lock.process_start_time(pid) == recorded
       end
 
       def with_review_heal_lock(row, reason:)

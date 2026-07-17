@@ -14,11 +14,12 @@ module Hive
         @unavailable_live_claims = unavailable_live_claims
       end
 
-      def project(configured_slots:, owners:, candidates:, prior_causal_buckets: [])
+      def project(configured_slots:, owners:, candidates:, prior_causal_buckets: [], accounting_errors: [])
         configured = configured_slots.to_i
         owner_rows = stringify_array(owners)
         candidate_rows = distinct_candidates(candidates, owner_rows)
-        errors = accounting_errors(configured, owner_rows)
+        errors = accounting_errors(configured, owner_rows) + Array(accounting_errors).map(&:to_s)
+        errors = errors.uniq
         freshness = Freshness.project(
           as_of: @as_of, heartbeat_at: @heartbeat_at,
           poll_interval_sec: @poll_interval_sec, daemon_running: @daemon_running,

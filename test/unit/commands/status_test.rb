@@ -819,7 +819,7 @@ class CommandsStatusTest < Minitest::Test
   # keep rendering the rest, never aborting `hive status` for the whole fleet.
   def test_text_status_isolates_a_project_that_fails_to_render
     raising = Class.new(Hive::Commands::Status) do
-      def render_project(project, **)
+      def render_project_from_status_payload(project)
         raise "boom in #{project['name']}" if project["name"] == "explodes"
 
         super

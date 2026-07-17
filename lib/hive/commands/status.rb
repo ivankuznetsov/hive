@@ -22,6 +22,9 @@ require "hive/brainstorm_parser"
 require "hive/gh"
 require "hive/pr"
 require "hive/tui/views/hyperlink"
+require "hive/attempts/store"
+require "hive/daemon/status_report"
+require "hive/scheduling_proof"
 
 module Hive
   module Commands
@@ -71,7 +74,9 @@ module Hive
         error: "⚠"
       }.freeze
 
-      def initialize(json: false, diagnose: nil, project: nil, stage: nil, write: false, force: false, archive: false)
+      def initialize(json: false, diagnose: nil, project: nil, stage: nil, write: false, force: false, archive: false,
+                     clock: -> { Time.now }, scheduler_snapshot_store: nil, attempt_store: nil,
+                     daemon_status_report: nil)
         @json = json
         @diagnose = diagnose
         @project = project
@@ -79,6 +84,10 @@ module Hive
         @write = write
         @force = force
         @archive = archive
+        @clock = clock
+        @scheduler_snapshot_store = scheduler_snapshot_store || Hive::SchedulingProof::SnapshotStore.new
+        @attempt_store = attempt_store || Hive::Attempts::Store.new
+        @daemon_status_report = daemon_status_report || Hive::Daemon::StatusReport.new
       end
 
       def call
@@ -112,8 +121,9 @@ module Hive
 
       def do_call
         projects = Hive::Config.registered_projects
+        payload = json_payload(projects)
         if @json
-          puts JSON.generate(json_payload(projects))
+          puts JSON.generate(payload)
           @stdout_written = true
           return
         end
@@ -123,18 +133,7 @@ module Hive
           return
         end
 
-        admission_context = build_admission_context(projects)
-        projects.each do |project|
-          render_project(project, project_count: projects.size, admission_context: admission_context)
-        rescue StandardError => e
-          # Symmetry with the JSON path's project_payload_or_degraded: isolate
-          # per-project failures so one project (e.g. a malformed workflow
-          # descriptor or config) doesn't blank text `status` for every other
-          # project. Degrade to a one-line breadcrumb and keep rendering the rest.
-          warn "hive: status: project #{project['name'].inspect} failed to render " \
-               "(#{e.class}: #{e.message}); skipping it so other projects still display"
-          puts "#{project['name']}: failed to load (#{e.message})"
-        end
+        render_status_payload(payload)
       end
 
       # Stable schema for agent / wrapper consumption. Adding new keys is
@@ -142,24 +141,34 @@ module Hive
       # version. `tasks[].marker` is the lowercased symbol name as a string;
       # `tasks[].attrs` is the marker's attribute map.
       def json_payload(projects, stages: nil, exclude_archived: false, admission_context: nil)
+        as_of = @clock.call.utc
+        @status_as_of = as_of
+        @status_render_rows = {}
+        @scheduler_context = scheduling_context(as_of)
         admission_context ||= build_admission_context(
           projects, exclude_archived: exclude_archived
         )
-        {
+        project_payloads = projects.map do |p|
+          project_payload_or_degraded(
+            p,
+            project_count: projects.size,
+            stages: stages,
+            exclude_archived: exclude_archived,
+            admission_context: admission_context
+          )
+        end
+        payload = {
           "schema" => "hive-status",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
           "ok" => true,
-          "generated_at" => Time.now.utc.iso8601,
-          "projects" => projects.map do |p|
-            project_payload_or_degraded(
-              p,
-              project_count: projects.size,
-              stages: stages,
-              exclude_archived: exclude_archived,
-              admission_context: admission_context
-            )
-          end
+          "generated_at" => as_of.iso8601,
+          "scheduler" => scheduler_payload(project_payloads),
+          "projects" => project_payloads
         }
+        payload
+      ensure
+        @scheduler_context = nil
+        @status_as_of = nil
       end
 
       # Isolate per-project failures. A single project with a malformed
@@ -226,6 +235,13 @@ module Hive
               rows, project, admission_context: admission_context
             )
             rows = archive_rows(rows) if @archive
+            enrolled = config&.dig("daemon", "enabled") == true
+            rows.each do |row|
+              row[:project_name] = project["name"]
+              row[:project_path] = project["path"]
+              row[:enrolled] = enrolled
+            end
+            @status_render_rows[[ project["name"], project["path"] ]] = rows if @status_render_rows
             out = base.merge("tasks" => rows.map { |r| task_payload(r) })
             # Always emit `legacy_stage_dirs` (default empty array) so
             # consumers can branch on `.empty?` without a `key?` probe and
@@ -299,7 +315,7 @@ module Hive
           "attrs" => row[:marker_attrs],
           "mtime" => row[:mtime].utc.iso8601(6),
           "folder_mtime" => row[:folder_mtime].utc.iso8601(6),
-          "age_seconds" => (Time.now - row[:mtime]).to_i,
+          "age_seconds" => [ ((@status_as_of || @clock.call) - row[:mtime]).to_i, 0 ].max,
           "claude_pid" => row[:claude_pid],
           "claude_pid_alive" => row[:claude_pid_alive],
           # Coerced to boolean so nil never leaks into JSON: live_task_lock is
@@ -340,7 +356,233 @@ module Hive
         if Hive::AgentLimit.held?(row[:marker_name], row[:marker_attrs])
           payload["held"] = Hive::AgentLimit.held_field(row[:marker_attrs])
         end
+        proof = scheduling_proof_for(row, payload)
+        payload["scheduling_proof"] = proof
+        row[:scheduling_proof] = proof
         payload
+      end
+
+      # Load all replaceable scheduler evidence once per status request. The
+      # projector below only receives plain hashes and never performs process,
+      # provider, journal, or filesystem I/O of its own.
+      def scheduling_context(as_of)
+        snapshot_result = @scheduler_snapshot_store.read
+        snapshot = snapshot_result.snapshot
+        scan = @attempt_store.scan
+        running = @daemon_status_report.running_state[:running] == true
+        daemon = Hive::Config.load_global_daemon
+        unavailable = Array(snapshot&.fetch("unavailable_live_claims", nil))
+        unavailable << "scheduler_snapshot" unless snapshot_result.status == :ok
+        unavailable << "attempt_ownership" unless scan.invalid_records.empty?
+        {
+          as_of: as_of,
+          snapshot: snapshot,
+          snapshot_status: snapshot_result.status,
+          attempts: scan.records.select(&:live?).map(&:to_h),
+          invalid_attempts: scan.invalid_records,
+          daemon_running: running,
+          configured_slots: daemon.fetch("max_concurrent_runs"),
+          poll_interval_sec: snapshot&.fetch("poll_interval_sec", nil) || daemon.fetch("poll_interval_sec"),
+          unavailable_live_claims: unavailable.map(&:to_s).uniq.sort
+        }
+      rescue StandardError => e
+        warn "hive: status: scheduler evidence failed (#{e.class}: #{e.message}); reporting unavailable live claims"
+        daemon = Hive::Config::DEFAULTS.fetch("daemon")
+        {
+          as_of: as_of, snapshot: nil, snapshot_status: :unavailable,
+          attempts: [], invalid_attempts: [ e ], daemon_running: false,
+          configured_slots: daemon.fetch("max_concurrent_runs"),
+          poll_interval_sec: daemon.fetch("poll_interval_sec"),
+          unavailable_live_claims: %w[attempt_ownership scheduler_snapshot]
+        }
+      end
+
+      def scheduling_proof_for(row, payload)
+        context = @scheduler_context
+        return nil unless context
+
+        proof_row = payload.merge(
+          "project" => row[:project_name],
+          "project_path" => row[:project_path]
+        )
+        generation = proof_row["condition_task_generation"]
+        attempt = context.fetch(:attempts).find do |candidate|
+          scheduling_identity_match?(candidate, proof_row, generation, attempt: true)
+        end
+        snapshot_observation = Array(context.dig(:snapshot, "tasks")).find do |candidate|
+          scheduling_identity_match?(candidate, proof_row, generation)
+        end
+        durable_observation = row.dig(:projection_data, "scheduling", "current")
+        observation = snapshot_observation || durable_observation
+        projector = Hive::SchedulingProof::Projector.new(
+          as_of: context.fetch(:as_of),
+          daemon_running: context.fetch(:daemon_running),
+          heartbeat_at: context.dig(:snapshot, "heartbeat_at"),
+          poll_interval_sec: context.fetch(:poll_interval_sec),
+          unavailable_live_claims: context.fetch(:unavailable_live_claims)
+        )
+        projector.project_task(
+          row: proof_row, enrolled: row[:enrolled] == true,
+          attempt: attempt, observation: observation
+        )
+      end
+
+      def scheduling_identity_match?(candidate, task, generation, attempt: false)
+        value = candidate.respond_to?(:to_h) ? candidate.to_h : {}
+        value["project"] == task["project"] &&
+          value["task_slug"] == task["slug"] &&
+          (attempt ? value["intended_stage"] : value["stage"]) == task["stage"] &&
+          (attempt ? value["task_input_epoch"] : value["task_generation"]) == generation
+      end
+
+      def scheduler_payload(project_payloads)
+        context = @scheduler_context
+        task_proofs = project_payloads.flat_map do |project|
+          project.fetch("tasks", []).filter_map do |task|
+            proof = task["scheduling_proof"]
+            proof && [ task, proof ]
+          end
+        end
+        owners = current_scheduler_owners(context.fetch(:attempts), task_proofs)
+        candidates = current_scheduler_candidates(context, task_proofs)
+        unavailable = context.fetch(:unavailable_live_claims).dup
+        unavailable << "project_status" if project_payloads.any? { |project| project["error"] }
+        prior = prior_causal_buckets(context)
+        accounting_errors = []
+        accounting_errors << "unreadable_attempt_record" unless context.fetch(:invalid_attempts).empty?
+        Hive::SchedulingProof::FleetProjector.new(
+          as_of: context.fetch(:as_of),
+          heartbeat_at: context.dig(:snapshot, "heartbeat_at"),
+          poll_interval_sec: context.fetch(:poll_interval_sec),
+          daemon_running: context.fetch(:daemon_running),
+          unavailable_live_claims: unavailable
+        ).project(
+          configured_slots: context.fetch(:configured_slots), owners: owners,
+          candidates: candidates, prior_causal_buckets: prior,
+          accounting_errors: accounting_errors
+        )
+      end
+
+      def current_scheduler_owners(attempts, task_proofs)
+        attempts.filter_map do |attempt|
+          pair = task_proofs.find do |_task, proof|
+            identity = proof.fetch("identity")
+            attempt["project"] == identity["project"] &&
+              attempt["task_slug"] == identity["task_slug"] &&
+              attempt["intended_stage"] == identity["stage"] &&
+              attempt["task_input_epoch"] == identity["task_generation"]
+          end
+          next unless pair
+
+          identity = pair.last.fetch("identity")
+          {
+            "project" => identity["project"], "task_slug" => identity["task_slug"],
+            "stage" => identity["stage"], "task_generation" => identity["task_generation"],
+            "attempt_id" => attempt["attempt_id"], "state" => attempt["state"]
+          }
+        end
+      end
+
+      def current_scheduler_candidates(context, task_proofs)
+        Array(context.dig(:snapshot, "tasks")).filter_map do |candidate|
+          pair = task_proofs.find do |_task, proof|
+            identity = proof.fetch("identity")
+            candidate["project"] == identity["project"] &&
+              candidate["task_slug"] == identity["task_slug"] &&
+              candidate["stage"] == identity["stage"] &&
+              candidate["task_generation"] == identity["task_generation"]
+          end
+          next unless pair
+
+          proof = pair.last
+          candidate.merge("reason" => proof["reason"], "eligible" => proof["eligible"])
+        end
+      end
+
+      def prior_causal_buckets(context)
+        snapshot = context[:snapshot]
+        return [] unless snapshot
+
+        heartbeat = snapshot["heartbeat_at"]
+        Hive::SchedulingProof::FleetProjector.new(
+          as_of: heartbeat, heartbeat_at: heartbeat,
+          poll_interval_sec: snapshot["poll_interval_sec"], daemon_running: true
+        ).project(
+          configured_slots: snapshot.dig("fleet", "configured_slots"),
+          owners: snapshot.dig("fleet", "owners"),
+          candidates: snapshot.dig("fleet", "candidates")
+        )["causal_buckets"]
+      rescue StandardError
+        []
+      end
+
+      # Text mode renders the already-built canonical status object. Cached
+      # display rows preserve the long-standing icon and alignment contract,
+      # while every scheduling explanation comes directly from the proof in
+      # that same payload.
+      def render_status_payload(payload)
+        scheduler = payload.fetch("scheduler")
+        puts "Scheduler: #{scheduler['summary']}"
+        payload.fetch("projects").each do |project|
+          render_project_from_status_payload(project)
+        rescue StandardError => e
+          warn "hive: status: project #{project['name'].inspect} failed to render " \
+               "(#{e.class}: #{e.message}); skipping it so other projects still display"
+          puts "#{project['name']}: failed to load (#{e.message})"
+        end
+      end
+
+      def render_project_from_status_payload(project)
+        rows = @status_render_rows.fetch([ project["name"], project["path"] ], [])
+        if project["error"] == "missing_project_path"
+          puts "#{project['name']}: missing project path #{project['path']}"
+          return
+        elsif project["error"] == "not_initialised"
+          puts "#{project['name']}: not initialised (no .hive-state)"
+          return
+        end
+
+        if @archive
+          render_archive_project(project, rows)
+          return
+        end
+
+        hidden_rows, visible_rows = rows.partition { |row| hide_archived_row?(row) }
+        puts project["name"]
+        legacy = project.fetch("legacy_stage_dirs", [])
+        render_legacy_stage_warning(legacy) unless legacy.empty?
+        if visible_rows.empty? && hidden_rows.empty?
+          puts "  no active tasks" if legacy.empty?
+          return
+        end
+
+        action_labels(visible_rows).each do |label|
+          stage_rows = visible_rows.select { |row| row[:action_label] == label }
+          next if stage_rows.empty?
+
+          puts "  #{label}"
+          stage_rows.sort_by { |row| -row[:mtime].to_i }.each do |row|
+            command = row[:suggested_command] || "-"
+            state = [ row[:state_label], dependency_indicator(row) ].compact.join(" ")
+            puts "    #{row[:icon]} #{display_identity_with_pr(row, TEXT_IDENTITY_WIDTH)} " \
+                 "#{state.ljust(24)} #{command} #{row[:age]}"
+            render_scheduling_proof(row[:scheduling_proof])
+          end
+        end
+        render_archived_hidden_summary(hidden_rows.size) unless hidden_rows.empty?
+      end
+
+      def render_scheduling_proof(proof)
+        return unless proof
+
+        freshness = proof.fetch("freshness")
+        suffix = freshness["stale"] ? " [stale]" : ""
+        puts "      scheduling: #{proof['summary']}#{suffix}"
+        blocker = proof.dig("dependency", "blocked_by") || proof.dig("babysitter", "blocker")
+        retry_at = proof.dig("retry", "retry_after") || proof.dig("retry", "next_probe_at")
+        puts "      blocker: #{blocker}" if blocker
+        puts "      retry/probe: #{retry_at}" if retry_at
+        puts "      safe action: #{proof.dig('action', 'text')}"
       end
 
       # Number of unanswered `### Q{n}.` slots in a brainstorm task's

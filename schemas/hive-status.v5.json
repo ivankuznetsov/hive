@@ -10,12 +10,13 @@
     "SuccessPayload": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schema", "schema_version", "ok", "generated_at", "projects"],
+      "required": ["schema", "schema_version", "ok", "generated_at", "scheduler", "projects"],
       "properties": {
         "schema": { "const": "hive-status" },
         "schema_version": { "const": 5 },
         "ok": { "const": true },
         "generated_at": { "type": "string", "format": "date-time" },
+        "scheduler": { "$ref": "#/$defs/Scheduler" },
         "projects": { "type": "array", "items": { "$ref": "#/$defs/Project" } }
       }
     },
@@ -102,6 +103,157 @@
         "safe_correction": { "type": "string" }
       }
     },
+    "UnavailableLiveClaim": {
+      "type": "string",
+      "enum": [
+        "attempt_ownership", "capacity", "project_status", "provider_route",
+        "queue_position", "scheduler_decision", "scheduler_snapshot",
+        "scheduling_observation"
+      ]
+    },
+    "ProofAction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "text", "command", "requires_confirmation", "preconditions"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["wait", "answer", "repair", "retry", "manual", "no_safe_action"]
+        },
+        "text": { "type": "string", "maxLength": 500 },
+        "command": { "type": ["string", "null"], "maxLength": 500 },
+        "requires_confirmation": { "type": "boolean" },
+        "preconditions": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["stage", "task_generation", "attempt_id"],
+          "properties": {
+            "stage": { "type": "string" },
+            "task_generation": { "type": "integer", "minimum": 0 },
+            "attempt_id": { "type": ["string", "null"] }
+          }
+        }
+      }
+    },
+    "Freshness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "as_of", "scheduler_heartbeat_at", "snapshot_age_sec", "stale_after_sec",
+        "stale", "daemon_state", "unavailable_live_claims"
+      ],
+      "properties": {
+        "as_of": { "type": "string", "format": "date-time" },
+        "scheduler_heartbeat_at": { "type": ["string", "null"], "format": "date-time" },
+        "snapshot_age_sec": { "type": ["integer", "null"], "minimum": 0 },
+        "stale_after_sec": { "type": "integer", "minimum": 90 },
+        "stale": { "type": "boolean" },
+        "daemon_state": { "type": "string", "enum": ["running", "stale", "stopped", "unavailable"] },
+        "unavailable_live_claims": {
+          "type": "array", "uniqueItems": true,
+          "items": { "$ref": "#/$defs/UnavailableLiveClaim" }
+        }
+      }
+    },
+    "SchedulingProof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind", "summary", "reason", "identity", "source", "enrolled", "eligible",
+        "queue", "capacity", "attempt", "provider", "dependency", "babysitter",
+        "retry", "last_transition_at", "last_dispatch", "error", "freshness", "prior", "action"
+      ],
+      "properties": {
+        "kind": { "type": "string", "enum": ["idle", "execution"] },
+        "summary": { "type": "string", "maxLength": 120 },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "executing", "needs_input", "edit_debounce", "dependency_wait", "admission_error",
+            "retry_wait", "cooldown", "quarantined", "legacy_policy_exhausted",
+            "provider_circuit_open", "provider_unavailable", "global_capacity", "project_capacity",
+            "daily_capacity", "merge_wait", "babysitter_blocked", "archive_guard", "project_dropped",
+            "terminal_error", "abandoned", "dispatch_pending", "dispatch_failed", "markerless_stalled",
+            "already_in_flight", "eligible_not_dispatched", "no_candidate", "daemon_not_running",
+            "daemon_stale", "live_evidence_unavailable", "accounting_inconsistent"
+          ]
+        },
+        "identity": {
+          "type": "object", "additionalProperties": false,
+          "required": ["project", "project_path", "task_id", "task_slug", "workflow", "stage", "task_generation"],
+          "properties": {
+            "project": { "type": "string" }, "project_path": { "type": "string" },
+            "task_id": { "type": ["integer", "null"] }, "task_slug": { "type": "string" },
+            "workflow": { "type": ["string", "null"] }, "stage": { "type": "string" },
+            "task_generation": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "source": {
+          "type": "object", "additionalProperties": false,
+          "required": ["task_generation", "attempt_id", "observed_at"],
+          "properties": {
+            "task_generation": { "type": "integer", "minimum": 0 },
+            "attempt_id": { "type": ["string", "null"] },
+            "observed_at": { "type": ["string", "null"], "format": "date-time" }
+          }
+        },
+        "enrolled": { "const": true },
+        "eligible": { "type": "boolean" },
+        "queue": {
+          "type": "object", "additionalProperties": false, "required": ["position"],
+          "properties": { "position": { "type": ["integer", "null"], "minimum": 1 } }
+        },
+        "capacity": { "type": "object", "additionalProperties": true, "required": ["owns_slot"], "properties": { "owns_slot": { "type": "boolean" } } },
+        "attempt": { "type": ["object", "null"], "additionalProperties": true },
+        "provider": { "type": ["object", "null"], "additionalProperties": true },
+        "dependency": { "type": ["object", "null"], "additionalProperties": true },
+        "babysitter": { "type": ["object", "null"], "additionalProperties": true },
+        "retry": { "type": ["object", "null"], "additionalProperties": true },
+        "last_transition_at": { "type": ["string", "null"], "format": "date-time" },
+        "last_dispatch": { "type": ["object", "null"], "additionalProperties": true },
+        "error": { "type": ["object", "null"], "additionalProperties": true },
+        "freshness": { "$ref": "#/$defs/Freshness" },
+        "prior": { "type": ["object", "null"], "additionalProperties": true },
+        "action": { "$ref": "#/$defs/ProofAction" }
+      }
+    },
+    "CausalBucket": {
+      "type": "object", "additionalProperties": false,
+      "required": ["reason", "units", "tasks"],
+      "properties": {
+        "reason": { "type": "string" }, "units": { "type": "integer", "minimum": 0 },
+        "tasks": { "type": "array", "uniqueItems": true, "items": { "type": "string" } }
+      }
+    },
+    "Scheduler": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "summary", "as_of", "configured_slots", "used_slots", "unused_slots", "owners",
+        "eligible_candidate_count", "causal_buckets", "prior_causal_buckets", "heartbeat_at",
+        "snapshot_age_sec", "stale", "unavailable_live_claims", "health", "accounting_errors", "action"
+      ],
+      "properties": {
+        "summary": { "type": "string", "maxLength": 120 },
+        "as_of": { "type": "string", "format": "date-time" },
+        "configured_slots": { "type": "integer", "minimum": 0 },
+        "used_slots": { "type": "integer", "minimum": 0 },
+        "unused_slots": { "type": ["integer", "null"], "minimum": 0 },
+        "owners": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+        "eligible_candidate_count": { "type": "integer", "minimum": 0 },
+        "causal_buckets": { "type": "array", "items": { "$ref": "#/$defs/CausalBucket" } },
+        "prior_causal_buckets": { "type": "array", "items": { "$ref": "#/$defs/CausalBucket" } },
+        "heartbeat_at": { "type": ["string", "null"], "format": "date-time" },
+        "snapshot_age_sec": { "type": ["integer", "null"], "minimum": 0 },
+        "stale": { "type": "boolean" },
+        "unavailable_live_claims": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/UnavailableLiveClaim" } },
+        "health": { "type": "string", "enum": ["ok", "accounting_inconsistent"] },
+        "accounting_errors": { "type": "array", "uniqueItems": true, "items": { "type": "string" } },
+        "action": {
+          "type": "object", "additionalProperties": false, "required": ["kind", "text"],
+          "properties": { "kind": { "type": "string", "enum": ["wait", "no_safe_action"] }, "text": { "type": "string", "maxLength": 500 } }
+        }
+      }
+    },
     "Task": {
       "type": "object",
       "additionalProperties": false,
@@ -115,7 +267,7 @@
         "evidence", "condition_gate", "condition_migration", "condition_provenance",
         "shadow_audit", "condition_warning", "unanswered_questions", "action",
         "action_label", "suggested_command",
-        "next_action", "diagnostic"
+        "next_action", "diagnostic", "scheduling_proof"
       ],
       "properties": {
         "stage": { "type": "string", "pattern": "^[0-9]+-[a-z0-9][a-z0-9-]*$" },
@@ -253,6 +405,12 @@
         "diagnostic": {
           "oneOf": [
             { "$ref": "#/$defs/Diagnostic" },
+            { "type": "null" }
+          ]
+        },
+        "scheduling_proof": {
+          "oneOf": [
+            { "$ref": "#/$defs/SchedulingProof" },
             { "type": "null" }
           ]
         }

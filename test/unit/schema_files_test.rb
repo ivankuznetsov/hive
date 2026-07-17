@@ -186,7 +186,7 @@ class SchemaFilesTest < Minitest::Test
   def test_hive_status_required_keys_match_producer_emission
     doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status")))
     schema_required = doc.dig("$defs", "SuccessPayload", "required").sort
-    assert_equal %w[generated_at ok projects schema schema_version].sort, schema_required
+    assert_equal %w[generated_at ok projects scheduler schema schema_version].sort, schema_required
 
     row = {
       stage: "1-inbox",
@@ -317,6 +317,7 @@ class SchemaFilesTest < Minitest::Test
       "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
       "ok" => true,
       "generated_at" => "2026-05-19T00:00:00Z",
+      "scheduler" => scheduler_fixture,
       "projects" => [
         {
           "name" => "alpha",
@@ -423,6 +424,7 @@ class SchemaFilesTest < Minitest::Test
       "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
       "ok" => true,
       "generated_at" => "2026-06-15T00:00:00Z",
+      "scheduler" => scheduler_fixture,
       "projects" => [
         {
           "name" => "demo",
@@ -2393,5 +2395,22 @@ class SchemaFilesTest < Minitest::Test
     prune = queue_cmd.send(:queue_envelope, action: "prune", pruned_count: 1,
                                             requests: [ request_hash ], malformed: [])
     assert_empty schemer.validate(prune).to_a, "prune envelope must validate"
+  end
+
+  def scheduler_fixture
+    {
+      "summary" => "0/3 task slots used; 3 unused (daemon_not_running=3).",
+      "as_of" => "2026-06-15T00:00:00Z", "configured_slots" => 3,
+      "used_slots" => 0, "unused_slots" => 3, "owners" => [],
+      "eligible_candidate_count" => 0,
+      "causal_buckets" => [ { "reason" => "daemon_not_running", "units" => 3, "tasks" => [] } ],
+      "prior_causal_buckets" => [], "heartbeat_at" => nil, "snapshot_age_sec" => nil,
+      "stale" => true,
+      "unavailable_live_claims" => %w[
+        attempt_ownership capacity provider_route queue_position scheduler_decision scheduler_snapshot
+      ],
+      "health" => "ok", "accounting_errors" => [],
+      "action" => { "kind" => "wait", "text" => "No fleet-level intervention is required." }
+    }
   end
 end

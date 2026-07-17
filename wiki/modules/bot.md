@@ -3,7 +3,7 @@ title: Hive::Bot
 type: module
 source: lib/hive/bot/
 created: 2026-05-14
-updated: 2026-06-30
+updated: 2026-07-17
 tags: [bot, telegram, module, mobile]
 ---
 
@@ -102,12 +102,11 @@ paths. The operator-facing message is `Stage stuck` plus one
 plain-language cause sentence. `Autofix` is shown only for retryable
 diagnostics; manual-only states such as `EXECUTE_STALE` and
 fix-tampered review errors show `Open laptop` / `Show details` instead.
-Autofix callbacks carry a marker attribute such as `pass=2` when one is
-available, so stale Telegram buttons cannot clear a newer marker. For
-`ERROR` rows they prefer the generated `marker_id` and fall back to
-observed `reason`/`exit_code` attrs for legacy markers. The dispatcher
-clears the persisted alert entry for that task before
-spawning the retry sequence. `/status [project]` and `/queue` are explicit
+Autofix callbacks carry the retry projection's task generation. A stale or
+projection-less callback is rejected with a refresh prompt; diagnostic attrs
+are never authorization. The dispatcher submits one `hive retry manual`
+intent and clears the persisted alert entry after the request is accepted.
+`/status [project]` and `/queue` are explicit
 pull surfaces and render actionable rows as `#id Title… — #561 — Stage`
 or `#id Title… — — — Stage`. They use Telegram HTML parse mode so valid
 `pr_url` values become clickable `#<number>` links; all dynamic title,
@@ -155,7 +154,7 @@ schema-version skew*. Bot-specific behaviour (fix-forward on #416):
 
 The bot does not move task folders or invent approval policy. State
 mutations go through existing `hive` commands (`new`, workflow verbs,
-`markers clear`, `accept-finding`, `reject-finding`, `run`) except for
+`retry`, `accept-finding`, `reject-finding`, `run`) except for
 two narrow in-process paths. Brainstorm answer insertion is deliberately narrow:
 `BrainstormAnswerWriter.append!` holds `Hive::Lock.with_task_lock`,
 re-parses the file under the lock, refuses non-empty answer slots, and
@@ -202,13 +201,11 @@ archive markers`), the dispatch is rewritten to
 request_id=…` event is logged. The daemon picks up the request
 on its next tick.
 
-For multi-command sequences (`dispatch_command_sequence`, used by
-Autofix's `markers clear` + retry-verb pair), the bot writes only the
-first queue-routable command and persists later commands as a hidden
-sequence sidecar keyed by that request id. The daemon promotes the next
-command only when the current request exits 0; a non-zero or killed
-clear command discards the sidecar so the retry cannot run against a
-still-set recovery marker.
+Recovery does not use a multi-command sequence. `RecoverySequence` emits one
+generation-fenced `hive retry manual` request, and the coordinator decides
+whether the durable record is still cooling, ready, running, or abandoned.
+The generic `dispatch_command_sequence` continuation mechanism remains for
+unrelated queue-routable command batches, but it is not a retry authority.
 
 Audit (CI-enforced post-merge):
 

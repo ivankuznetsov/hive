@@ -39,6 +39,22 @@ repaired snapshot.
 
 JSON rows also include `next_action`; it is usually `null`, but `EXECUTE_WAITING reason=...` rows carry the same structured recovery target that `hive run --json` emits. Every JSON row also includes `diagnostic`; it is `null` for ordinary rows and a bounded red-row payload for `recover_execute`, `recover_review`, and `error` rows. JSON rows carry `unanswered_questions` (issue #270): the count of still-unanswered `### Q{n}.` slots for a `2-brainstorm` `needs_input` row (computed via the shared `Hive::BrainstormParser`), and `0` for every other row. It lets an agent/operator tell a brainstorm the [[modules/daemon]] answers-pending gate is intentionally holding (count > 0) from one genuinely waiting for a first answer or broken. Dependency fields are also present on every task row: `depends_on`, `blocked_by`, `dependency_stage`, and `blocked`; text and TUI rows append `⏸ blocked by <slug> (<stage>)` or `(unresolved)` when `blocked` is true. The daemon consumes that `blocked` boolean directly.
 
+## Optional retry projection (status v4)
+
+Once a terminal attempt enters retry coordination, the row carries the exact
+journal-derived `retry` object. Older/no-history rows omit it. The object is the
+validated `hive-retry-record` v1 projection: key, predecessor/current attempt
+ids, `retry_count`, failure class/code, bounded evidence and guidance,
+first/last failure timestamps, absolute `retry_after`, state, authorization,
+operator metadata, and `last_event_id`.
+
+Status does not infer these fields from markers. Text output appends
+`retry=#N:<state>` and includes the absolute deadline while cooling; abandoned
+records render explicitly. `cooldown`, `running`, and `abandoned` override any
+workflow-ready-looking marker/action, while `ready` remains subject to ordinary
+daemon capacity. `StatusConsumer`, TUI snapshots, web feeds, and bot watchers
+copy this same optional object without recalculating deadlines or readiness.
+
 ## Archived tasks
 
 `Hive::ArchiveFilter` is the shared policy for day-to-day archive hiding. A row is hideable when `stage == Hive::Stages::DIRS.last` (`9-done`), the row timestamp is present, and `(now - mtime) > 3 days`. Marker state is not part of the policy: complete, unresolved, and markerless done rows all use the same age rule. The policy uses the task row's `mtime` (state-file mtime, the same timestamp rendered as row age) rather than `folder_mtime`, because sidecar updates such as `meta.yml` display-name backfills can touch the directory without making the archived task newly relevant. Older consumers that only have `folder_mtime` still get it as a fallback. If neither timestamp is available, the filter fails open and keeps the row visible rather than guessing. `hive archive` remains the full view.

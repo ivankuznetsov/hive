@@ -3,11 +3,11 @@ title: hive markers
 type: command
 source: lib/hive/commands/markers.rb
 created: 2026-04-26
-updated: 2026-05-27
+updated: 2026-07-17
 tags: [command, markers, recovery, json]
 ---
 
-**TLDR**: `hive markers clear FOLDER --name <NAME> [--project NAME] [--json]` removes a single recovery marker from a task's state file (atomic write) and records a `hive_commit` so the audit trail stays accurate. Replaces the previous "manually edit `task.md` and delete the marker comment" recovery prose with a deterministic, agent-callable surface.
+**TLDR**: `hive markers clear FOLDER --name <NAME> [--project NAME] [--json]` is a low-level audited marker repair. It removes one recovery marker atomically and records a `hive_commit`, but it neither resets the durable retry ladder nor authorizes redispatch. Normal recovery uses [[commands/retry]].
 
 ## Usage
 
@@ -26,11 +26,11 @@ Only recovery markers are clearable. Terminal-success markers (`REVIEW_COMPLETE`
 
 | Marker | When the runner sets it | What clearing it does |
 |--------|-------------------------|-----------------------|
-| `REVIEW_STALE`      | `Stages::Review` after `max_passes` or wall-clock cap                    | next `hive run` retries the highest pass when `escalations-NN.md` is missing, otherwise re-evaluates against the cleaned `reviews/` files |
-| `REVIEW_CI_STALE`   | `Stages::Review::CiFix` after `review.ci.max_attempts` red runs          | next `hive run` re-runs Phase 1 against the current `bin/ci`      |
-| `REVIEW_ERROR`      | `Stages::Review` on triage / fix / browser / runner-exception failures   | next `hive run` re-evaluates from pre-flight                       |
-| `EXECUTE_STALE`     | `Stages::Execute` on stale interrupt                                     | next `hive run` re-evaluates the execute state machine             |
-| `ERROR`             | any stage's agent on a recoverable failure                               | next `hive run` re-enters the stage from pre-flight                |
+| `REVIEW_STALE`      | `Stages::Review` after `max_passes` or wall-clock cap                    | Removes that marker only; retry projection is unchanged. |
+| `REVIEW_CI_STALE`   | `Stages::Review::CiFix` after `review.ci.max_attempts` red runs          | Removes that marker only; retry projection is unchanged. |
+| `REVIEW_ERROR`      | `Stages::Review` on triage / fix / browser / runner-exception failures   | Removes that marker only; retry projection is unchanged. |
+| `EXECUTE_STALE`     | `Stages::Execute` on stale interrupt                                     | Removes that marker only; retry projection is unchanged. |
+| `ERROR`             | any stage's agent on a terminal failure                                  | Removes that marker only; retry projection is unchanged. |
 
 `REVIEW_COMPLETE` / `EXECUTE_COMPLETE` / `COMPLETE` are not on the allowlist. To advance past them, use [[commands/approve]] (which validates them as forward-advance gates). To roll a task backward, use `hive approve <slug> --to <stage>`.
 
@@ -40,10 +40,10 @@ Only recovery markers are clearable. Terminal-success markers (`REVIEW_COMPLETE`
 2. Resolve `FOLDER`: path-shaped (contains `/` or starts with `~`/`.`) → used directly; bare slug → searched across registered projects (filtered by `--project` if given). Multi-stage hits inside one project are flagged as ambiguous (mirrors `hive approve`).
 3. Validate the requested `--name` against `Hive::Commands::Markers::ALLOWED_NAMES`. Anything else raises `Hive::WrongStage` (exit 4).
 4. Read the current marker via `Hive::Markers.current(state_file)`. If the marker name does NOT match `--name`, raise `Hive::WrongStage` — refusing to silently clear a different state.
-5. If `--match-attr` is present, require every supplied `KEY=VALUE` pair to match the current marker. Comma-separated pairs such as `reason=exit_code,exit_code=143` are all checked; any mismatch raises `Hive::WrongStage`. TUI ERROR recovery prefers generated `marker_id` attrs when available and uses observed reason/exit_code attrs for legacy rows.
+5. If `--match-attr` is present, require every supplied `KEY=VALUE` pair to match the current marker. Comma-separated pairs such as `reason=exit_code,exit_code=143` are all checked; any mismatch raises `Hive::WrongStage`.
 6. Remove the marker line: `File.read` the body, `sub` out the exact `marker.raw` comment plus its trailing newline (if it sat alone on a line), then `Hive::Markers.write_atomic` the result. Surrounding prose, headings, and other markers stay untouched.
 7. Record a `hive_commit` on the `hive/state` branch (`hive: <stage>/<slug> markers clear <NAME>`).
-8. Emit a stdout summary (or one-line `hive-markers-clear` JSON document with `--json`); print a `next: hive run <folder>` hint to stderr.
+8. Emit a stdout summary (or one-line `hive-markers-clear` JSON document with `--json`); human mode warns that marker clear does not reset retry state or authorize redispatch.
 
 ## JSON contract (`schema = "hive-markers-clear"`, version 1)
 

@@ -3,7 +3,7 @@ title: Agentic E2E Suite
 type: reference
 source: test/e2e/, bin/hive-e2e, Rakefile
 created: 2026-04-29
-updated: 2026-07-09
+updated: 2026-07-17
 tags: [test, e2e, tui, artifacts]
 ---
 
@@ -16,6 +16,8 @@ bundle exec rake e2e:lib_test   # harness library tests
 bin/hive-e2e list               # scenario inventory
 bin/hive-e2e run                # all scenarios
 bin/hive-e2e run --filter tui   # tag filter
+bin/hive-e2e run --filter retry-coordinator
+bin/hive-e2e replay RUN_ID SCENARIO
 bin/hive-e2e clean              # old run cleanup
 ```
 
@@ -143,6 +145,7 @@ On failure, the harness writes a scenario bundle containing:
 | `review_with_findings_then_develop` | `findings --json`, `accept-finding`, schema validation, review file toggles. |
 | `run_error_envelope` | `hive run --json` against a stale-locked task emits a parseable `hive-run` error payload. |
 | `stale_lock_recovery` | TEMPFAIL lock path, marker clear, rerun recovery. |
+| `retry_coordinator_incident_replay` | Mixed terminal families on one generation, retry-7 hourly repetition, sanitized Codex/MCP evidence, status-v4 projection, daemon-environment replacement, and replay-equivalent assertions. Tagged `retry-coordinator`. |
 | `tui_status_navigate_dispatch_plan` | TUI verb-key dispatch end-to-end: `p` on a ready-to-plan row spawns `bin/hive plan`, waits for the subprocess to exit, and asserts plan.md/COMPLETE landed. |
 | `tui_new_idea_editing` | TUI new-idea prompt paste delivery plus cursor navigation/insertion before submit. |
 | `tui_two_pane_navigate` | TUI v2 navigation between task list and detail panes, including focus changes and row movement. |
@@ -153,6 +156,23 @@ On failure, the harness writes a scenario bundle containing:
 | `update_flow_up_to_date` | Daemon update-check path when the installed version is already current. |
 
 ## Operational Notes
+
+### Retry incident run/replay workflow
+
+Committed retry fixtures live under `test/e2e/fixtures/retry-coordinator/` and
+contain only minimized, sanitized evidence: no tokens, environment maps, or
+absolute operator paths. Run the tagged scenario first, retain the reported run
+id, then replay its generated bundle:
+
+```bash
+bin/hive-e2e run --filter retry-coordinator --json
+bin/hive-e2e replay <run-id> retry_coordinator_incident_replay --json
+```
+
+`repro.sh` repeats the originating fixture commands and state/schema assertions;
+process success alone is not enough. This catches restart/dead-attempt,
+generation-fence, task-isolation, preserved-work, mixed-error, and
+current-daemon-environment regressions through the real `bin/hive` subprocess.
 
 The harness prepends repo `bin/` to the tmux environment PATH because TUI rows dispatch commands like `hive plan ...`. `tui_keys` with `text:` sends literal text one character at a time by default for deterministic slow typing; `paste: true` sends the full `text:` value as one literal tmux chunk to exercise the TUI paste-aware runner.
 `CliDriver` starts CLI subprocesses in their own process group and applies the step timeout to both the direct child and stdout/stderr reader threads, so descendants that inherit the capture pipes cannot hold an e2e step open after their parent exits.

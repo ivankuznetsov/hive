@@ -3,7 +3,7 @@ title: 6-review stage
 type: stage
 source: lib/hive/stages/review.rb, lib/hive/stages/auto_commit.rb, lib/hive/stages/review/{ci_fix,triage,browser_test,fix_guardrail,suppression}.rb, lib/hive/commands/adhoc_review.rb, templates/{fix,ci_fix,browser_test,triage_*}*.erb
 created: 2026-04-26
-updated: 2026-07-01
+updated: 2026-07-17
 tags: [stage, review, autonomous-loop, ci, triage, fix-guardrail]
 ---
 
@@ -23,7 +23,7 @@ tags: [stage, review, autonomous-loop, ci, triage, fix-guardrail]
 | `:review_complete` | print "already complete; run `hive artifacts` or move this folder to 7-artifacts/", return |
 | `:review_ci_stale` | warn; user fixes CI then `hive markers clear FOLDER --name REVIEW_CI_STALE` and re-runs |
 | `:review_stale` | warn; user clears/re-runs if highest pass lacks `escalations-NN.md`, otherwise trims `reviews/` then clears/re-runs |
-| `:review_error` | warn with attrs; most reasons require user investigation then `hive markers clear FOLDER --name REVIEW_ERROR` and re-run. `reason=limits_reached` is the cooldown exception: when the marker carries `retry_after`, the daemon healer can clear it after the usage window. For legacy pre-fix rows that were actually a provider limit but were written as `triage_failed`, `fix_failed`, or `ci_unrunnable`, clear the stale marker with `hive markers clear <slug> --name REVIEW_ERROR --project <project>` to re-dispatch. |
+| `:review_error` | terminal review evidence is normalized through `TerminalErrorRegistry` and submitted to the one durable coordinator. Provider/auth, agent death, timeout, integrity, and `unknown` retain different guidance but never different task-stage timing. Status surfaces the exact generation-scoped retry projection. |
 | `:review_waiting` | resume — skip Phase 2/3, jump straight to Phase 4 with the user's manually-ticked `[x]` marks |
 | no `worktree.yml` | exit 1 (must come from 4-execute) |
 | `worktree.yml` points at deleted path | exit 1 with `git worktree prune` recovery hint |
@@ -88,13 +88,13 @@ Spawns a triage agent with all per-reviewer files for the current pass concatena
 
 Triage's direct `cfg` fallback values match `Config::DEFAULTS`: `budget_usd.review_triage` falls back to `75` and `timeout_sec.review_triage` falls back to `1800`. Normal `Config.load` callers already receive those values through the deep merge; the explicit fallback only protects tests or internal callers that build a partial config hash by hand.
 
-Plan / worktree.yml / task.md are SHA-256 protected around the triage spawn (ADR-013); tampering yields `REVIEW_ERROR phase=triage reason=triage_tampered`.
+Plan / worktree.yml / task.md and current review artifacts remain SHA-256 protected around the fix spawn. A conservative Claude Stop-hook fallback may accept only complete local evidence; otherwise the phase writes a bounded terminal diagnostic. Provider limit, tamper, status-check, auto-commit, agent crash, and `unknown` outcomes all converge on `FailureReporter` and the same durable task-stage ladder. Integrity-specific guidance may require an audited repair before redispatch, but the review runner does not own a delayed-dispatch timer or marker-clear sequence.
 
 When `review.triage.suppress_no_fix` is not `false` (default on), `Review::Suppression` hardens repeated no-fix findings without changing the all-clean branch. Before triage, it loads `reviews/suppressed.md` and rewrites matching unchecked reviewer lines to `- [x] SUPPRESSED: ...`, so the triage prompt and fix collector ignore findings previously classified as triage `RESOLVED/NO-FIX`. After successful triage, it scans checked `RESOLVED/NO-FIX:` reviewer lines and appends their fingerprints to `suppressed.md`, grouped by severity with High first. The fingerprint key is intentionally loose: severity + normalized file refs (line numbers stripped) + normalized title; justification/body text is excluded. The file is bound to the reviewer compare-base SHA and is hand-editable: uncheck or delete a line to let the finding reach triage again.
 
-The triage spawn is wrapped in the same bounded retry as a per-reviewer spawn (`run_triage_with_retries`): a transient `:error` is retried up to `review.triage.max_attempts` (default `Hive::Reviewers::DEFAULT_REVIEWER_MAX_ATTEMPTS = 2`; `1` disables retry; validated as a positive integer in `Config::POSITIVE_INTEGER_KEYS`) with the shared `Hive::Reviewers.backoff_seconds_for` capped exponential backoff, so a single momentary infra blip (a `tmux has-session` read misread as a dead session, an "expected output missing" timeout) no longer parks the whole task on a terminal marker the daemon never auto-retries. `:tampered` and provider-limit outcomes short-circuit the retry (a retry would repeat the tamper, and a limit self-heals via `retry_after`). The retry also honors the review wall-clock budget — before starting another spawn it checks `review.max_wall_clock_sec` and bails to `REVIEW_STALE reason=wall_clock` (mirroring `run_reviewers`), so a high `max_attempts` × the 1800s triage timeout can't overrun the outer cap.
+The triage phase may make its existing bounded in-attempt subprocess attempts under the review wall-clock budget. Once the durable stage attempt terminalizes, that local phase handling is over: the outcome is reported once to `FailureReporter`, and only the task-stage retry coordinator can schedule or authorize another durable attempt.
 
-If the triage spawn returns an error carrying raw `limit_text`, a captured message matching `Hive::AgentLimit.limit_reached?`, or a legacy error message in `Hive::AgentLimit`'s own `limits reached for <agent>:` wire format, `mark_review_phase_failure` writes `REVIEW_ERROR phase=triage reason=limits_reached retry_after=<iso8601>`. The daemon healer treats that like the reviewers-phase limit marker and retries after the cooldown. Non-limit triage failures (including timeouts with no provider-limit text) that exhaust the retry budget remain manual, but their `reason=` is classified by `Hive::ReviewErrorReason` from the captured output: `merge_conflict`, `network_timeout`, `tool_permission_denied`, `agent_crashed`, or `unknown`. Input-contract caveat: `classify` inspects whatever text the caller hands it and never fetches raw agent output on its own. The current plumbing forwards a condensed wrapper string (`expected output file missing or empty: …`, `tmux_session_terminated before writing …`, `triage agent failed (timeout)`) rather than the agent's raw stdout/stderr, and those wrapper strings match no pattern — so in the field this almost always resolves to `unknown`. The specific buckets fire only when raw output carrying their signal is passed through, which the triage/fix plumbing does not yet do; don't build TUI affordances, healer arms, or metrics that assume the named buckets appear. The marker also carries a `message="<condensed error>"` attr (capped at `REVIEW_PHASE_ERROR_SUMMARY_MAX = 300` chars), so `status.md`, `hive status --json`, and the web diagnostic card show the raw cause even when the classifier falls back to `unknown`. The same helper is used by both triage and fix. CI does not route through this helper, but a CI-fix agent error carrying `limit_text` or the AgentLimit wire format writes `REVIEW_ERROR phase=ci reason=limits_reached message="ci hit a usage/credit limit" retry_after=<iso8601>`; non-limit CI errors still write `reason=ci_unrunnable` directly with no `message=` attr.
+If triage exhausts its in-attempt phase-spawn handling, `mark_review_phase_failure` writes the bounded diagnostic marker and terminalization reports it through `FailureReporter`. Provider-limit text is preserved as sanitized `limits_reached` evidence; non-limit output is normalized by `Hive::ReviewErrorReason`, with `unknown` as the fallback and `message=` capped for status. Historical marker `retry_after` attrs are compatibility diagnostics only and never control daemon deadlines. The same terminal reporting boundary applies to fix and CI phase failures.
 
 Escalations land in `reviews/escalations-<NN>.md` — every line that triage left as `[ ]` gets copied here as a digest for the user.
 
@@ -163,20 +163,27 @@ The runner overwrites the stale marker as it enters the new phase. Resume entry-
 - **`:triage_incomplete`** — reviewer files for pass N exist but `escalations-NN.md` is missing. `next_pass_for` returns N; the loop re-runs Phase 2/3 to re-derive escalations.
 - **`:fix_incomplete`** — reviewer files AND `escalations-NN.md` exist, AND one of: (a) neither the sentinel nor pass `N+1` reviewer files exist (fix never finished), OR (b) the sentinel exists but the operator edited `escalations-NN.md` strictly after the sentinel was written (`escalations.mtime > fix-success.mtime`). `next_pass_for` returns N; the loop **skips Phase 2/3** on the first iteration and runs Phase 4 directly on the operator's current `[x]` marks (mirrors a `REVIEW_WAITING` resume).
 
-The operator-edit detection (branch b above) is what makes the TUI's `r` gesture useful on max_passes-hit `REVIEW_STALE` rows: pressing Enter opens `escalations-NN.md` in `$EDITOR`, the operator edits + saves (which bumps the file's mtime past `fix-success-NN.md`'s), then pressing `r` clears the marker + dispatches `hive run`; the runner sees the edited mtime, treats the pass as `:fix_incomplete` instead of advancing to N+1 (which would hit the `max_passes` cap and re-write `REVIEW_STALE` immediately), and re-runs Phase 4 with the operator's edits as authoritative input. Comparison is strict `>` (not `>=`) so back-to-back same-second writes don't spuriously trigger retries; `File.mtime` errors fail-closed (return false) so a transient stat failure cannot surprise-retry the fix phase.
+The operator-edit detection keeps a repaired pass's current `[x]` marks
+authoritative. Enter opens the focal escalation file; after editing, the
+operator uses the generation-guarded retry action instead of clearing a marker
+and starting an unfenced stage process.
 
-The sentinel `reviews/fix-success-NN.md` is written by the runner at the two "pass N is done, advance" points: the Phase 2 zero-findings short-circuit to Phase 5, and post-guardrail-not-tripped continuation. `fix-success-` is in `ORCHESTRATOR_OWNED_PREFIXES` so it does not count as a reviewer file, and the current pass's sentinel path is protected during the fix-agent spawn so the agent cannot forge completion.
+The `reviews/fix-success-NN.md` sentinel remains protected orchestrator state.
 
 Recovery flow:
 
-1. If the highest pass is `:fix_incomplete` (most common cause of `REVIEW_STALE` after a wall-clock or interrupted-fix exit): just `hive markers clear FOLDER --name REVIEW_STALE` and `hive run` — Phase 4 retries with the operator's already-applied `[x]` marks. The TUI's `recover_review` Enter binding does this automatically. No manual edit needed.
-2. If `:triage_incomplete`: same — clear and rerun; the loop re-derives escalations from existing reviewer files.
-3. If `:complete` (genuine `max_passes` exhaustion): inspect the highest-NN per-reviewer files; either edit them down (consolidate/trim findings) or rename the highest NN to a lower NN (drops the derived pass count). Then clear and rerun. The TUI surfaces this row with the status `stale pass=N` (where N is `marker.attrs["pass"]`); pressing `Enter` opens the focal `reviews/escalations-NN.md` in `$EDITOR` via the same foreground-takeover machinery `o` and `Enter`-on-`needs_input` use. The browse handler reads `row.attrs["pass"]` to resolve the focal path, falls back to the `reviews/` directory if the focal file is missing, and refuses with `no review files for <slug>` if neither exists. No marker mutation, no auto-continue — clearing remains a deliberate `hive markers clear FOLDER --name REVIEW_STALE` round-trip so the operator owns the resolve decision after reading the findings.
-4. Wall-clock `REVIEW_STALE` (`reason=wall_clock`) can fire **before any reviewer files exist** (e.g. during Phase 1 CI-fix). The TUI treats this shape as auto-retryable regardless of disk state — give it more time via `review.max_wall_clock_sec` if it keeps timing out.
+1. Inspect and fix the current review artifacts. Preserved files let a fenced
+   successor resume incomplete triage or fix work.
+2. `hive retry manual TARGET --generation N` may wake only an already-due
+   record and never bypasses cooldown.
+3. After repair, run `hive retry repair TARGET --generation N --actor WHO
+   --reason WHY`; this audited reset makes the record ready for normal
+   capacity-gated durable dispatch.
+4. Genuine max-pass, CI, integrity, and unknown failures retain their specific
+   diagnostic guidance but use the same coordinator ladder.
 
-For `REVIEW_CI_STALE` (Phase 1 CI never went green) the equivalent flow is: edit `reviews/ci-blocked.md`, fix the CI failures locally, run `hive markers clear FOLDER --name REVIEW_CI_STALE`, then `hive run`. For `REVIEW_ERROR` (any phase failure recorded with `phase=…` and `reason=…`) the same pattern: investigate, run `hive markers clear FOLDER --name REVIEW_ERROR`, then `hive run`. The runner's pre-flight `warn` text emits the exact command per stuck-state. For the known tmux Stop-hook review-fix failure (`phase=fix reason=fix_failed` plus `claude stop hook did not signal completion`), operators must first verify the same evidence the fallback requires: `reviews/escalations-NN.md` exists, unresolved escalation count is zero, the worktree is readable, the tmux session was alive, and code-change evidence proves completion (a new commit, a dirty worktree pending auto-commit, or whole-pass no-change where every finding is `RESOLVED/NO-FIX:` with no unapplied `[x] AUTO-FIX:` line). Then clear only that marker with `hive markers clear FOLDER --name REVIEW_ERROR --match-attr phase=fix,reason=fix_failed` and rerun `hive run FOLDER`. `claude.mode: headless` remains the recommended workaround for affected versions and service hosts; Hive does not auto-revert operator config.
-
-No frontmatter edits required: pass count is filename-derived, not stored.
+No frontmatter edits are required: pass count is filename-derived, and
+preserved artifacts are not retry reset signals.
 
 ## Tests
 

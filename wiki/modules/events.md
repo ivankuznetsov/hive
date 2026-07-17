@@ -27,6 +27,27 @@ for versioned condition/generation/evidence/audit records. See
 
 `ROUND_EVENT_STAGES = %w[brainstorm plan]` is the registry that gates round events — adding a new stage that publishes `:waiting` / `:complete` round markers requires extending this list so `emit_marker_event` stays in sync with the producers.
 
+## Retry coordinator journal events
+
+Task-stage retry state is not an `Hive::Events` telemetry convention. Only
+`Hive::Daemon::RetryCoordinator` appends these authoritative task-journal event
+types through `Hive::TaskJournal::Writer`:
+
+| Event | Projection effect |
+|------|-------------------|
+| `retry_failure_scheduled` | Idempotently increments the class-agnostic count and projects `cooldown` with an absolute `retry_after`. |
+| `retry_ready` | Projects `ready` after the persisted deadline. |
+| `retry_dispatch_authorized` / `retry_successor_claimed` | Records the generation-fenced authorization, then the normally claimed successor attempt and `running` state. |
+| `retry_attempt_succeeded` | Projects same-stage `succeeded` without clearing the ladder. |
+| `retry_stage_reset` / `retry_generation_reset` | Clear the projection only at a successful stage boundary or fenced new task generation. |
+| `retry_repaired` / `retry_abandoned` / `retry_rearmed` / `retry_manual_requested` | Preserve immutable operator history and replace the visible projection under the expected-generation guard. |
+
+Each event carries the durable attempt/generation envelope, a coordinator
+provenance tag, and the complete replacement `retry` value (or `null` for a
+reset). `Hive::TaskProjection` replays those records into the single optional
+status-v4 retry object. `Hive::Events.emit` rejects these authoritative types;
+there is no second retry log or sidecar.
+
 ## Record shape
 
 ```json

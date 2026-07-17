@@ -3,7 +3,7 @@ title: Operating Hive
 type: operating
 source: README.md, bin/hv, install.sh, lib/hive/commands/daemon.rb, lib/hive/commands/babysit.rb, lib/hive/commands/bot.rb, examples/systemd/, examples/launchd/, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-07
-updated: 2026-07-14
+updated: 2026-07-17
 tags: [operating, daemon, bot, systemd, launchd, install]
 ---
 
@@ -575,7 +575,7 @@ Defaults in `Config::DEFAULTS["daemon"]`:
 | `poll_interval_sec`             | 30      | Tick cadence. ≥ 5 enforced.                                 |
 | `edit_debounce_sec`             | 30      | Mid-save grace for `needs_input` rows. 0 disables.          |
 | `pr_merge_poll_interval_sec`    | 300     | `gh pr view` cadence per task. ≥ 60 enforced (rate limits). |
-| `transient_retry_backoff_sec`   | 60      | Reserved (current backoff schedule is hardcoded).           |
+| `retry_backoff_sec`             | `[60, 60, 60, 300, 600, 3600]` | Durable task-stage ladder; the final value repeats forever. A project may explicitly override this whole array. |
 | `shutdown_grace_sec`            | 600     | TERM→KILL window for `hive daemon stop`.                    |
 | `log_max_bytes`                 | 10 MB   | Rotation threshold.                                         |
 | `log_max_files`                 | 5       | 5 × 10 MB = 50 MB log budget.                               |

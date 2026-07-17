@@ -3,7 +3,7 @@ title: Architectural Decisions
 type: decisions
 source: code + author's local planning notes (not committed)
 created: 2026-04-25
-updated: 2026-06-16
+updated: 2026-07-17
 tags: [decisions, adr]
 ---
 
@@ -125,9 +125,9 @@ behavior is covered in [[commands/web]].
 
 **Context:** ADR-026 made the Telegram bot a subprocess caller — it directly `Process.spawn`ed `hive run` (and friends) on its own. ADR-024 made the daemon track per-slug `state_file_mtime` baselines to suppress redundant edit-resume dispatches; that tracking relies on the daemon being the writer that observes the post-completion mtime via its own `ChildSupervisor.reap_all`. When the bot was a parallel writer of `hive run`, the daemon's `ConcurrencyController#observe_state_file_mtime` was never called for bot-driven children. The daemon's baseline went stale, and on its next tick the agent's own write to brainstorm.md looked like a "new user edit" — the daemon dispatched a redundant runner that held `Hive::Lock.with_task_lock` for 1–2 min, during which the bot rejected legitimate user answers with "Try again — another run holds the lock." Diagnosed 2026-05-28 on `explore-the-simplest-way-to-260528-2503`.
 
-**Decision:** Eliminate the dual-writer for state-mutating `hive` verbs by routing all of them through a file-backed request queue at `<state_home>/dispatch_requests/`. The bot stops being a subprocess caller for the allowlisted verb set; instead it writes a JSON request file via `Hive::Bot::DispatchRequestWriter.write!` (atomic via tmp + rename). Hivebox web later reused the same producer path for stage-run/recovery requests, and `Hive::Daemon::StaleAgentHealer` now enqueues `3-plan` reruns as `requestor=healer`. The daemon's tick loop scans the queue via `Hive::Daemon::DispatchRequestQueue.pending`, validates argv against `ALLOWED_VERBS` (and the request's slug against ADR-012's regex + project against a name regex), and dispatches through the same code path as auto-advance. The daemon's existing reap + `refresh_post_completion_mtime` then keeps the baseline current.
+**Decision:** Eliminate the dual-writer for state-mutating `hive` verbs by routing them through the file-backed request queue at `<state_home>/dispatch_requests/`. Bot and hivebox remain producers. Task recovery now enqueues a single generation-scoped `hive retry manual` intent; healers no longer enqueue `3-plan` or other reruns. A due retry reaches the queue/spawn path only after the journal-backed coordinator issues a fenced authorization, then normal durable admission and capacity apply.
 
-The queue schema is registered in `Hive::Schemas::SCHEMA_VERSIONS` and published under `schemas/` (per ADR-025 — every entry in SCHEMA_VERSIONS must have a corresponding schema file). `hive-dispatch-request.v1.json` was the original bot-only contract; current code writes `hive-dispatch-request.v2.json`, whose breaking change is the `requestor` enum gaining `healer` while preserving `bot` for Telegram and hivebox web. The live queue is strict-version-matched: mismatched versions are rejected as malformed/`unknown_schema_version`, so future queue-shape changes require a coordinated producer/daemon bump plus a new schema file before emission.
+The queue schema is registered in `Hive::Schemas::SCHEMA_VERSIONS` and published under `schemas/`. Current code writes v3 with task generation, predecessor attempt, and output intent; pending v2 remains readable. Future queue-shape changes still require coordinated producer/daemon/schema updates.
 
 The allowlist is closed: `run develop brainstorm plan review open-pr artifacts finalize archive markers`. Adding a new state-mutating verb to the daemon requires updating `ALLOWED_VERBS` and the schema's `$defs.ALLOWED_VERBS` in lockstep — a unit test asserts cross-list equality.
 
@@ -475,7 +475,7 @@ The TUI applies "auto-fix first, manual only when needed." Grid Enter opens red-
 1. Why is this red?
 2. What can Hive do next?
 
-Then it offers a unified two-action contract: `Enter` runs hive's automated recovery for the task and closes the screen (rows without an auto-recovery recipe surface a refusal flash naming `Open in agent` as the manual fallback and still close so the operator's binary gesture never strands them on a stale view), and `o` opens the task in the project's configured development agent (same path as grid `s`) and closes the screen as the TUI suspends. `q` / `Esc` returns to the grid. Existing deterministic paths stay direct: wall-clock review stale retries, max-passes review stale with an escalations file opens that file for browse/edit, and kill-class errors open the log tail while auto-heal runs. The previous `f` / `R` bindings (manual worktree editor + headless diagnosis refresh) were removed alongside `RedStatusDetailState#marker_signature` — refreshing a diagnosis is a `hive status --diagnose <slug> --write` shell affordance now.
+Then it offers a unified two-action contract: `Enter` submits a generation-fenced coordinator intent and closes the screen (rows without a current retry projection surface a refusal naming `Open in agent`), while `o` opens the task in the configured development agent and closes the screen as the TUI suspends. `q` / `Esc` returns to the grid. Browse-first review-stale paths still open their focal escalation file, and kill-class errors open the log tail while durable daemon reconciliation owns recovery. The previous `f` / `R` bindings were removed; refreshing diagnosis remains a `hive status --diagnose <slug> --write` shell affordance.
 
 **Consequences:**
 - Operators see the concrete artifact/log/marker explanation before retrying.

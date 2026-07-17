@@ -3,7 +3,7 @@ title: hive run
 type: command
 source: lib/hive/commands/run.rb
 created: 2026-04-25
-updated: 2026-07-16
+updated: 2026-07-17
 tags: [command, dispatcher, stages, json, rebase]
 ---
 
@@ -130,15 +130,15 @@ Protected-file basename guard (originally present pre-merge) was **removed** dur
 | `:complete` | `next: hive plan <slug>`, `hive develop <slug>`, or `hive archive <slug>` depending on current stage; JSON keeps path fields and uses the workflow command |
 | `:execute_complete` | `next: hive open-pr <slug>`; JSON: `next_action.kind = "approve"` with `command = "hive approve <slug> --from 4-execute"` |
 | `:review_complete` | `next: hive artifacts <slug>`; JSON: `next_action.kind = "approve"` with `command = "hive artifacts <slug> --from 6-review"` |
-| `:execute_stale` | `next: edit reviews/, lower task.md frontmatter pass:, remove EXECUTE_STALE marker, re-run` |
+| `:execute_stale` | `next: inspect/edit reviews/ or lower task.md frontmatter pass:, then use the generation-guarded retry repair action`. |
 | `:review_waiting` (escalations-only, no `reason` attr) | `next: edit reviews/escalations-NN.md or reviewer files, then `hive run <folder>` again`. JSON envelope: `target = task.folder`. |
 | `:review_waiting reason=fix_guardrail` | `next: review every finding in reviews/fix-guardrail-NN.md; tick every `[ ]` to `[x]` to approve the guarded commits (partial ticks keep the pause), then re-run`. Approval is rejected if the file's checkbox count differs from `marker.matches` or the worktree HEAD differs from `marker.head`. JSON envelope: `target = <folder>/reviews/fix-guardrail-NN.md`, `instructions` cites the count and HEAD rejection rules. |
-| `:review_error phase=reviewers reason=reviewer_partial_failure` | `next: recover review by clearing `REVIEW_ERROR` and rerunning`. JSON/status diagnostics include `<folder>/reviews/errors-NN.md`. |
-| `:review_ci_stale` | `next: fix CI, edit reviews/ci-blocked.md, remove REVIEW_CI_STALE marker, re-run` |
-| `:review_stale` | `next: if highest-pass reviewer files lack escalations-NN.md, remove REVIEW_STALE and re-run to retry that pass; otherwise edit/rename highest-pass review files, remove REVIEW_STALE, re-run` |
+| `:review_error phase=reviewers reason=reviewer_partial_failure` | `next: inspect <folder>/reviews/errors-NN.md`; normal recovery is coordinator-scheduled, and repaired conditions use the generation-guarded retry repair action. |
+| `:review_ci_stale` | `next: fix CI and edit reviews/ci-blocked.md`; use generation-guarded retry repair after the condition is repaired. |
+| `:review_stale` | `next: inspect/edit the highest-pass review files`; use generation-guarded retry repair after the condition is repaired. |
 | `:manual_steering` | `next: manual steering active; automated run skipped`. JSON uses `next_action.kind="no_op"` and `reason="manual_steering"`. |
-| `:review_error` | `next: investigate <reason>, then `hive markers clear FOLDER --name REVIEW_ERROR`, then re-run`. JSON: `next_action.kind = "review_error"` with `phase`, `reason`, and the full marker `attrs` surfaced so polling agents can branch without re-parsing the marker. Raises `Hive::TaskInErrorState` → exit 3 (`TASK_IN_ERROR`) after the JSON payload is emitted. |
-| `:error` | raises `Hive::TaskInErrorState` → `bin/hive` rescues → exit 3 (`TASK_IN_ERROR`). JSON mode emits the full payload first, then raises — dual signal. **Reason-gated branch:** `reason=ensure_clean_on_exit_failed` emits `next_action.kind="edit"` with `target=worktree_path` (falls back to `task.folder`), `residue_paths` parsed from the comma string into an array, `instructions` carrying the `hive markers clear … --match-attr reason=ensure_clean_on_exit_failed` recovery one-liner, `markers_to_clear=["error"]`, and `rerun_with` set to the stage's friendly command. `Hive::TaskAction#suggested_next_action_payload` returns `{kind: "manual_fix", command: nil}` for this reason, mirroring the bot's manual-only routing (no auto-retry verb dispatched). Other `:error` reasons keep the generic NO_OP shape with `error: marker.attrs`. |
+| `:review_error` | `next: investigate <reason>`; normal recovery is coordinator-scheduled, while an operator-confirmed repair uses `hive retry repair` with the current generation, actor, and reason. JSON retains `phase`, `reason`, full attrs, and bounded evidence but no marker-clear/rerun recipe. Raises `Hive::TaskInErrorState` → exit 3 after the payload is emitted. |
+| `:error` | Raises `Hive::TaskInErrorState` → exit 3 after emitting JSON. For `reason=ensure_clean_on_exit_failed`, JSON keeps `kind="edit"`, `target`, parsed `residue_paths`, and the original attrs so the operator can repair the worktree; it deliberately omits `markers_to_clear` and `rerun_with` and points to generation-guarded retry repair. Other reasons keep the generic NO_OP shape with `error: marker.attrs`. |
 
 `next_stage_dir` resolves the descriptor's successor via
 `task.workflow.next_stage_after(task.stage_name)`, not index arithmetic; the

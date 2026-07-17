@@ -3,7 +3,7 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-07-13
+updated: 2026-07-17
 tags: [command, web, hivebox, rails, turbo]
 ---
 
@@ -224,13 +224,17 @@ typed 422 error page, and the moved task folder is left intact.
 Task recovery is routed as `POST /tasks/:project/:slug/recover` →
 `TasksController#recover` → `Hive::Web::Dispatcher#recover`. The controller
 re-reads the current status row rather than trusting form-posted stage/marker
-state. The dispatcher refuses manual-only states with
-`RecoverySequence.manual_only_text`, derives the most discriminating
-`--match-attr` through `NotificationBuilders.recovery_match_attr`, then writes
-the first command (`hive markers clear ... --json`) to the daemon dispatch
-queue with `trigger=web_recover` and persists the stage rerun as the same
-request's sequence sidecar. If the guarded clear exits non-zero, the rerun is
-not promoted.
+state. It copies the row's journal-derived retry projection and enqueues one
+`hive retry manual <slug> --project <project> --generation <N>` request with
+`trigger=web_recover`. There is no marker-clear/stage-run sequence. An
+unexpired cooldown remains cooling, an abandoned record stays non-dispatchable,
+and a stale rendered generation is rejected by the coordinator.
+
+The task state partial and status feed render the exact optional status-v4
+`retry` object: state, count, absolute deadline, last canonical failure and
+guidance, plus operator metadata for abandonment. Web code does not derive
+readiness from marker reasons. Repair/reset, abandon, and re-arm are the audited
+operator actions and require expected generation, actor, and reason.
 
 Typed `Hive::Error`s render a readable error page (422; `InvalidTaskPath` →
 404) — never a blank 500. Stage-run posts validate the action map before

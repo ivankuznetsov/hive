@@ -20,7 +20,7 @@ module Hive
           [ "hive-task-generation-v1", locator, intended_stage.to_s, progress ].join("\0")
         )
         input_epoch = if task_input_epoch.nil?
-          if intended_stage.to_s == "4-execute"
+          if intended_stage.to_s == "4-execute" # coding-scoped: increment 1 tracks input epochs for coding execute only
             workflow_policy = if task.respond_to?(:workflow)
               task.workflow&.stage_named("execute")&.condition_policy&.to_h || {}
             else

@@ -188,7 +188,7 @@ module Hive
             event_type: event_type,
             task: { "id" => task_id, "slug" => @task.slug.to_s },
             workflow: task_workflow,
-            stage: "4-execute",
+            stage: "4-execute", # coding-scoped: this reconciler observes the coding execute stage
             attempt_id: @attempt.attempt_id,
             task_generation: generation.task_generation,
             ownership_generation: @attempt.ownership_generation,

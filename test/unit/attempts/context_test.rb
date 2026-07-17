@@ -175,6 +175,18 @@ class AttemptsContextTest < Minitest::Test
     end
   end
 
+  def test_legacy_opaque_generation_is_bridged_without_becoming_an_epoch
+    context = Hive::Attempts::Context.send(
+      :new, attempt_id: "attempt", task_generation: "opaque"
+    )
+
+    assert_equal 0, context.task_generation
+    assert_equal "opaque", context.ownership_generation
+    assert_raises(ArgumentError) do
+      Hive::Attempts::Context.send(:new, attempt_id: "attempt", task_generation: -1)
+    end
+  end
+
   private
 
   def with_running_attempt

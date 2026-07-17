@@ -1,5 +1,5 @@
 module Hive
-  VERSION = "0.4.2".freeze
+  VERSION = "0.4.3".freeze
   MIN_CLAUDE_VERSION = "2.1.118".freeze
   # Canonical GitHub org + repo. Referenced by the release probe
   # (UpdateCheck), the brew tap + installer URL (Commands::Update), etc.
@@ -13,7 +13,7 @@ module Hive
     # removed; adding new keys is non-breaking and does NOT require a bump.
     # Single source of truth so the two emit sites can't drift.
     SCHEMA_VERSIONS = {
-      "hive-status" => 4,
+      "hive-status" => 5,
       "hive-init" => 2,
       "hive-status-diagnose" => 2,
       "hive-run" => 2,
@@ -130,6 +130,11 @@ module Hive
           payload["holder"] = error.holder if error.holder
           payload["lock_path"] = error.lock_path if error.lock_path
         end
+        if error.is_a?(Hive::DependencyWaitError) || error.is_a?(Hive::DependencyAdmissionError)
+          payload["reason_code"] = error.reason_code
+          payload["offending_ref"] = error.offending_ref
+          payload["safe_correction"] = error.safe_correction
+        end
         payload
       end
     end
@@ -185,6 +190,7 @@ module Hive
       ARCHIVED            = "archived".freeze
       MANUAL_STEERING     = "manual_steering".freeze
       ERROR               = "error".freeze
+      ADMISSION_ERROR     = "admission_error".freeze
       ALL = constants(false).reject { |c| c == :ALL }.map { |c| const_get(c) }.freeze
     end
 
@@ -206,6 +212,8 @@ module Hive
       WORKTREE          = "worktree".freeze
       AMBIGUOUS_SLUG    = "ambiguous_slug".freeze
       INVALID_TASK_PATH = "invalid_task_path".freeze
+      DEPENDENCY_WAIT    = "dependency_wait".freeze
+      ADMISSION_ERROR    = "admission_error".freeze
       INTERNAL          = "internal".freeze
       ERROR             = "error".freeze
       ALL = constants(false).reject { |c| c == :ALL }.map { |c| const_get(c) }.freeze
@@ -488,6 +496,36 @@ module Hive
   class ConfigError < Error
     def exit_code
       ExitCodes::CONFIG
+    end
+  end
+
+  # A dependency is valid but has not reached the depending project's gate.
+  # This is retryable operational state, not a configuration error.
+  class DependencyWaitError < Error
+    attr_reader :reason_code, :offending_ref, :safe_correction
+
+    def initialize(message, reason_code: "dependency_wait", offending_ref:, safe_correction:)
+      super(message)
+      @reason_code = reason_code
+      @offending_ref = offending_ref
+      @safe_correction = safe_correction
+    end
+
+    def exit_code
+      ExitCodes::TEMPFAIL
+    end
+  end
+
+  # A fail-closed dependency admission result. ConfigError ancestry gives
+  # manual callers the stable, non-retryable CONFIG exit code.
+  class DependencyAdmissionError < ConfigError
+    attr_reader :reason_code, :offending_ref, :safe_correction
+
+    def initialize(message, reason_code:, offending_ref:, safe_correction:)
+      super(message)
+      @reason_code = reason_code
+      @offending_ref = offending_ref
+      @safe_correction = safe_correction
     end
   end
 

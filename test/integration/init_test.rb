@@ -14,6 +14,21 @@ require "hive/workflows/descriptor_parser"
 class InitTest < Minitest::Test
   include HiveTestHelper
 
+  def test_init_persists_canonical_origin_identity_in_registry
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        remote = File.join(File.dirname(dir), "origin.git")
+        run!("git", "init", "--bare", "--quiet", remote)
+        run!("git", "-C", dir, "remote", "add", "origin", remote)
+
+        capture_io { Hive::Commands::Init.new(dir).call }
+
+        entry = Hive::Config.registered_projects.find { |project| project["path"] == File.expand_path(dir) }
+        assert_equal Hive::RepositoryIdentity.normalize(remote), entry["repository_identity"]
+      end
+    end
+  end
+
   def with_tmp_home
     Dir.mktmpdir("hive-home") do |dir|
       old = ENV["HOME"]

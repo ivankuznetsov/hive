@@ -115,13 +115,14 @@ class HiveDaemonDispatcherTest < Minitest::Test
   end
 
   class FakeMergeWatcher
-    attr_reader :enqueued
+    attr_reader :enqueued, :dropped
     attr_accessor :next_archives, :next_dropped
     def initialize
       @enqueued = []
       @next_archives = []
       @last_tick_dropped = []
       @next_dropped = []
+      @dropped = []
     end
 
     def enqueue(project:, slug:, task_folder:, error_reason: nil)
@@ -134,6 +135,11 @@ class HiveDaemonDispatcherTest < Minitest::Test
       @last_tick_dropped = @next_dropped
       @next_dropped = []
       out
+    end
+
+    def drop(project:, slug:)
+      @dropped << { project: project, slug: slug }
+      @next_archives.reject! { |entry| entry[:project] == project && entry[:slug] == slug }
     end
 
     attr_reader :last_tick_dropped
@@ -713,7 +719,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
           mtime: T0 - 600, claude_pid_alive: nil, live_task_lock: nil,
           state_file: nil, folder: nil, marker_attrs: {},
           depends_on: nil, blocked_by: nil, dependency_stage: nil,
-          blocked: false, workflow: nil, attempt_id: nil, task_generation: nil)
+          blocked: false, workflow: nil, admission_error: nil,
+          attempt_id: nil, task_generation: nil)
     folder ||= make_existing_row_folder(project: project, stage: stage, slug: slug)
     Row.new(
       project: project, slug: slug, stage: stage, workflow: workflow, marker: marker,
@@ -724,6 +731,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       live_task_lock: live_task_lock, marker_attrs: marker_attrs,
       depends_on: depends_on, blocked_by: blocked_by,
       dependency_stage: dependency_stage, blocked: blocked,
+      admission_error: admission_error,
       attempt_id: attempt_id, task_generation: task_generation
     )
   end
@@ -1526,6 +1534,31 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal "s1", mw.enqueued.first[:slug]
   end
 
+  def test_admission_error_drops_merge_watch_and_never_spawns
+    error = Hive::DependencyAdmission::AdmissionError.new(
+      reason_code: "dependency_repository_mismatch",
+      offending_ref: "data:base",
+      safe_correction: "Re-enroll the intended repository."
+    )
+    rows = [ row(stage: "8-finalize", action: "admission_error", command: nil,
+                 blocked: true, admission_error: error) ]
+    dispatcher, sup, _ctrl, logger, mw = make_dispatcher(rows: rows, with_merge_watcher: true)
+    mw.next_archives = [ {
+      project: "p1", slug: "s1", stage: "8-finalize",
+      command: "hive archive s1 --from 8-finalize --project p1 --json",
+      state_file_mtime: nil, hive_state_path: nil
+    } ]
+
+    dispatcher.tick(now: T0)
+
+    assert_empty sup.spawned
+    assert_includes mw.dropped, { project: "p1", slug: "s1" }
+    event = logger.events.find { |name, attrs| name == :blocked && attrs[:reason] == "admission_error" }
+    refute_nil event
+    assert_equal "dependency_repository_mismatch", event[1][:reason_code]
+    assert_equal "data:base", event[1][:offending_ref]
+  end
+
   def test_finalize_recoverable_error_routes_to_merge_watcher
     rows = [
       row(stage: "8-finalize", marker: "error",
@@ -2248,6 +2281,26 @@ class HiveDaemonDispatcherTest < Minitest::Test
     dispatcher.tick(now: T0)
     assert controller.project_dropped?("p1")
     assert events_include?(logger, :project_dropped)
+  end
+
+  def test_admission_error_config_exit_does_not_drop_unrelated_project_work
+    dispatcher, _sup, controller, logger, _mw = make_dispatcher(rows: [])
+    exit_entry = ChildExit.new(
+      pid: 999, exit_code: Hive::ExitCodes::CONFIG, project: "p1", slug: "held",
+      stage: "4-execute", command: "hive run held --json", started_at: T0 - 1,
+      finished_at: T0, json_envelope: { "ok" => false, "error_kind" => "admission_error" }
+    )
+    dispatcher.supervisor.define_singleton_method(:reap_all) do |now:|
+      next [] if @admission_reaped
+
+      @admission_reaped = true
+      [ exit_entry ]
+    end
+
+    dispatcher.tick(now: T0)
+
+    refute controller.project_dropped?("p1")
+    refute logger.events.any? { |name, attrs| name == :project_dropped && attrs[:project] == "p1" }
   end
 
   # ── stale-agent healer integration ────────────────────────────────────
@@ -3534,6 +3587,69 @@ end
         assert_equal "hive run s1 --json", sup.spawned.first[:command]
         assert_equal "R1", sup.spawned.first[:request_id]
         assert_equal Hive::Paths.state_home, sup.spawned.first[:log_state_path]
+      ensure
+        restore_find_project!
+      end
+    end
+  end
+
+  def test_dispatch_request_honors_dependency_wait_without_consuming_request
+    held = row(
+      project: "p1", slug: "held", stage: "4-execute", action: "ready_to_run",
+      command: "hive run held --json", depends_on: "base", blocked_by: "base",
+      dependency_stage: "7-artifacts", blocked: true
+    )
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      dispatcher, supervisor, _controller, logger, _watcher = make_dispatcher(
+        rows: [ held ], dispatch_request_state_home: state_home
+      )
+      write_request_file(state_home, slug: "held", request_id: "DEPWAIT")
+      stub_find_project!(dispatcher, "p1")
+      begin
+        dispatcher.tick(now: T0)
+
+        blocked = logger.events.find do |name, attrs|
+          name == :dispatch_request_blocked && attrs[:request_id] == "DEPWAIT"
+        end
+        assert_equal "dependency_unmet", blocked[1][:reason]
+        assert_equal "base", blocked[1][:blocked_by]
+        assert_empty supervisor.spawned
+        assert_equal 1, Q.pending(state_home: state_home).size
+      ensure
+        restore_find_project!
+      end
+    end
+  end
+
+  def test_dispatch_request_honors_admission_error_but_allows_marker_repair
+    error = Hive::DependencyAdmission::AdmissionError.new(
+      reason_code: "dependency_cycle", offending_ref: "p1:held -> p1:held",
+      safe_correction: "Break the cycle."
+    )
+    held = row(
+      project: "p1", slug: "held", stage: "4-execute", action: "admission_error",
+      command: nil, blocked: true, admission_error: error
+    )
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      dispatcher, supervisor, _controller, logger, _watcher = make_dispatcher(
+        rows: [ held ], dispatch_request_state_home: state_home
+      )
+      write_request_file(state_home, slug: "held", request_id: "ADMISSION")
+      write_request_file(
+        state_home, slug: "held", request_id: "REPAIR",
+        argv: [ "hive", "markers", "clear", "held", "--json" ]
+      )
+      stub_find_project!(dispatcher, "p1")
+      begin
+        dispatcher.tick(now: T0)
+
+        blocked = logger.events.find do |name, attrs|
+          name == :dispatch_request_blocked && attrs[:request_id] == "ADMISSION"
+        end
+        assert_equal "admission_error", blocked[1][:reason]
+        assert_equal "dependency_cycle", blocked[1][:reason_code]
+        assert_equal [ "hive markers clear held --json" ], supervisor.spawned.map { |item| item[:command] }
+        assert_equal [ "ADMISSION" ], Q.pending(state_home: state_home).map(&:request_id)
       ensure
         restore_find_project!
       end

@@ -51,7 +51,7 @@ task default: :test
 
 | Path | Purpose |
 |------|---------|
-| `test/fixtures/fake-claude` | Shell fixture for Claude/Codex headless argv. It can log/output/write, make one commit, or create a deterministic multi-commit sequence with progress/release sentinels for durable caller-loss scenarios. |
+| `test/fixtures/fake-claude` | Shell fixture for built-in provider headless argv. It can log/output/write, make one commit, or create a deterministic multi-commit sequence with progress/release sentinels for durable caller-loss scenarios. E2E points `HIVE_CLAUDE_BIN`, `HIVE_CODEX_BIN`, `HIVE_PI_BIN`, and `HIVE_GROK_BIN` at it. |
 | `test/fixtures/fake-gh` | Shell script that handles `gh pr create` / `gh auth status` / `gh pr list`, returns a dummy URL. |
 | `test/fixtures/voice/voice-idea.oga` | Checked-in Ogg/Opus speech sample saying "voice idea" for the Telegram voice-note E2E path. `run_idea_e2e.sh` uses it by default when `TG_IDEA_MODE=voice`; explicit voice mode hard-fails when `HIVE_WHISPER_API_KEY` is unset. Voice mode uses the same fixture for both new audio idea capture and audio brainstorm answers. |
 
@@ -67,6 +67,8 @@ task default: :test
 | `attempts/*_test.rb`, `daemon/attempt_loss_healer_test.rb` | Durable task attempts — record/schema/CAS edges, competing claim/expiry, generation duplicates/successors, capacity, detached session lifecycle, framed log/client replay, PID-reuse-safe adoption and orphan cleanup, marker/git evidence precedence, legacy backfill, mutation-free dirty capture, and restart-persistent bounded loss healing. |
 | `lock_test.rb` | `Hive::Lock` — acquire/release, stale-PID detection, commit lock parallelism. |
 | `worktree_test.rb` | `Hive::Worktree` — create attach-vs-new, dependency override stacking (incl. narrow-refspec and origin-ahead-of-local **and** local-ahead-of-origin placeholders), empty placeholder re-pointing, fail-closed preservation when the emptiness check errors, local-only prerequisite fallback, real-commit preservation, PR-head materialization/retry/failure handling, delete-failure errors, `local_branch_ref_exists?` blank-name guard, remove, exists?, pointer round-trip, prefix validation. |
+| `dependencies_test.rb`, `task_meta_test.rb`, `plan_frontmatter_test.rb`, `repository_identity_test.rb`, `dependency_admission_test.rb`, `dependency_snapshot_test.rb` | Fail-closed dependency admission — exhaustive scalar grammar and duplicate-key rejection; tolerant-vs-strict metadata reads and corrupt-mutation refusal; bounded optional exact plan assertion; SSH/HTTPS/local remote normalization plus bounded TERM/KILL lookup; indexed same/cross-project and archived-fallback resolution; full cycle paths; concurrent folder-move fencing; workflow/gate validation; clear/wait/error verdicts; and unexpected-error backstop. |
+| `integration/dependency_admission_test.rb`, `run_approve_test.rb`, `run_stage_action_test.rb`, `new_test.rb` | Supported-boundary coverage — anonymized plan-only ordering and repository-mismatch fixtures, fresh validation before run/rebase/runner or forward approve mutation, retryable waits, non-retryable admission errors, `--force` refusal, backward recovery, composed JSON propagation, and all three creation forms. |
 | `git_ops_test.rb` | `Hive::GitOps` — default-branch detection, orphan worktree bootstrap, idempotent gitignore, empty-diff commit skip. |
 | `gh_test.rb` | `Hive::Gh` — PR frontmatter parsing, secret-scan fetch-failure semantics, open/merged PR lookup, `pr_state` success/error parsing, `pr_metadata` parsing/error handling/project `chdir:` scoping, `PushResult`, process-group timeout/termination including a TERM-resistant stdout-inheriting helper, exact created-PR head/base OID identity checks, `mergeStateStatus` request shape for open PR listing, and failing-job log clipping. |
 | `pr_test.rb` | `Hive::Pr` — pull-request-number extraction from `/pull/<number>` URLs, including query/fragment/trailing-slash tolerance, nil for issue/non-number/subpage URLs, `identifier_to_number` acceptance/rejection for `hive review --pr`, and http(s) URL validation including invalid-URI rejection. |
@@ -120,9 +122,9 @@ task default: :test
 | `stages/review/run_reviewers_test.rb` | `Hive::Stages::Review.run_reviewers` — reviewer list selection for normal vs patrol-sourced tasks, per-reviewer failures, wall-clock deadlines, shared Claude tmux sessions, and GitHub comment mirroring. |
 | `stages/review/phase_failure_helpers_test.rb` | `Hive::Stages::Review` phase-failure helpers — bounded `message=` summary truncation through `review_phase_error_summary`, capped exponential `triage_retry_backoff` delay through stubbed sleep, and the `run_triage_with_retries` wall-clock bail that returns `:wall_clock_exceeded` instead of launching another long triage spawn after the review budget is spent. |
 | `commands/status_test.rb`, `archive_filter_test.rb`, `tui/schema_correspondence_test.rb`, `tui/snapshot_test.rb`, `tui/views/archive_pane_test.rb` | Status/TUI archive and scan boundary — required `hive-status` task keys match `Status#task_payload`, `Snapshot::Row` has a field for every emitted task key, `folder_mtime` is preserved, old archives hide only from daily text/grid views by age regardless of marker state, no-target `hive archive` filters to `9-done`, explicit archive views remain age-unfiltered, and stage-move race coverage pins vanished-folder skips, surviving-folder `ENOENT` re-raises, and duplicate-pruning behavior. |
-| `commands/status_test.rb`, `archive_filter_test.rb`, `tui/schema_correspondence_test.rb`, `tui/snapshot_test.rb`, `tui/views/archive_pane_test.rb`, `tui/views/tasks_pane_test.rb`, `tui/views/hyperlink_test.rb` | Status/TUI archive, dependency state, quota-held state, PR column, and scan boundary — required `hive-status` task keys match `Status#task_payload`, `Snapshot::Row` has a field for every emitted task key, `folder_mtime` and `pr_url` are preserved, dependency fields render blocked/unblocked states, `ERROR`/`REVIEW_ERROR reason=limits_reached` rows render the shared held label and JSON `held` field without overloading `blocked_by`, text status/archive rows and the tasks pane render fixed PR-number columns with dash fallback, OSC 8 links validate/sanitize http URLs and stay disabled in captured non-TTY output, old archives hide only from daily text/grid views by age regardless of marker state, no-target `hive archive` filters to `9-done`, explicit archive views remain age-unfiltered, stage-move race coverage pins vanished-folder skips, surviving-folder `ENOENT` re-raises, duplicate-pruning behavior, and quiet `pr.md` ENOENT degradation during PR URL reads. |
+| `commands/status_test.rb`, `archive_filter_test.rb`, `tui/schema_correspondence_test.rb`, `tui/snapshot_test.rb`, `tui/views/archive_pane_test.rb`, `tui/views/tasks_pane_test.rb`, `tui/views/hyperlink_test.rb` | Status/TUI archive, admission state, quota-held state, PR column, and scan boundary — schema v5 required/nullable admission fields, distinct wait/error rendering with safe corrections, validator backstop, producer/TUI correspondence, archive filtering, PR columns/links, and stage-move race behavior. |
 | `tui/clipboard_test.rb` | `Hive::Tui::Clipboard` — Wayland/X11/macOS clipboard-command selection, image-byte/file probes, image signature and size guards, test-only fixture clipboard sequencing, timeout sentinels, and `DefaultShim.capture3` stdout/stderr/timeout behavior. Generic subprocess checks use tiny executable fixture scripts rather than nested `RbConfig.ruby` children so coverage-injected `RUBYOPT` does not dominate unrelated timeout assertions. |
-| `tui/app_test.rb`, `tui/state_source_test.rb` | `Hive::Tui::App` / `StateSource` — charm-only backend selection, synchronous startup snapshot seeding, snapshot-poller dedup/error dispatch, HUP termination hook, WINCH terminal-size seeding/dispatch, unavailable tty-size handling, signal-handler restore failure tolerance, mtime-gated refresh reuse, and liveness-fallback reparsing. |
+| `tui/app_test.rb`, `tui/state_source_test.rb`, `integration/tui_reactivity_perf_test.rb` | `Hive::Tui::App` / `StateSource` — charm-only backend selection, synchronous startup snapshot seeding, snapshot-poller dedup/error dispatch, HUP termination hook, WINCH terminal-size seeding/dispatch, unavailable tty-size handling, signal-handler restore failure tolerance, mtime-gated refresh reuse, liveness-fallback reparsing, lossless archived dependency-context caching and per-project degradation retention, and archive-size-independent active reparses. |
 
 `babysitter/dry_run_env_test.rb` also pins the private-permission boundary for
 both dry-run stubs: pre-existing `0644` and `0666` audit logs are left unchanged,
@@ -165,15 +167,29 @@ from changing the selected schema.
 
 ## E2E suite (`test/e2e/`)
 
-The e2e layer is documented in [[e2e]]. It is opt-in:
+The e2e layer is documented in [[e2e]]. It remains separate from the default
+`rake test` task and can be run directly with:
 
 ```bash
 bundle exec rake e2e:lib_test
 bin/hive-e2e list
 bin/hive-e2e run
+bin/hive-e2e run --filter incident-regression --json
 ```
 
-The current scenarios copy `test/e2e/sample-project/` into a per-run sandbox, set `HIVE_HOME` to a run-local directory, and call the real `bin/hive` as a subprocess. `SandboxEnv` routes both Claude and Codex profile binaries to `test/fixtures/fake-claude`; scenarios that exercise `4-execute` with the default Codex profile must ask the fixture to create a real worktree commit, or execute will correctly stop at `EXECUTE_WAITING reason=no_worktree_changes`. TUI scenarios use private tmux sockets (`hive-e2e-<run-id>`) so they never touch the operator's daily tmux server.
+The current scenarios copy `test/e2e/sample-project/` into a per-run sandbox, set `HIVE_HOME` to a run-local directory, and call the real `bin/hive` as a subprocess. `SandboxEnv` routes every built-in provider binary (Claude, Codex, Pi, and Grok) to `test/fixtures/fake-claude`, places the checked-in default-deny `gh` shim first on `PATH`, pins the direct `HIVE_GH_BIN` seam, and exposes only Bundler's resolved gem require paths through a protected `RUBYLIB` for every CLI, background, tmux, and replay process. Harness-owned home, dependency, agent, Hive, and GitHub paths cannot be replaced by scenario overrides. No scenario can fall through to a host `gh` or make a real GitHub request. Scenarios that exercise `4-execute` with the default Codex profile must ask the fixture to create a real worktree commit, or execute will correctly stop at `EXECUTE_WAITING reason=no_worktree_changes`. TUI scenarios use private tmux sockets (`hive-e2e-<run-id>`) so they never touch the operator's daily tmux server; teardown captures the final pane, terminates unfinished detached workflow process groups from the run-scoped PID lifecycle log, and then stops tmux before GitHub verification and filesystem evidence capture.
+
+Incident scenarios add stable incident and sibling metadata. Sibling-gated YAML
+remains visible in `report.json#scenario_metadata` with `pending: true`, while
+its steps and ordinary result row remain absent. CI runs
+`bundle exec rake e2e:lib_test` and `bundle exec rake e2e` in a dedicated
+pull-request job, uploads the configured `HIVE_E2E_RUNS_DIR` on success or
+failure, and uses `test/e2e/check_incident_budget.rb` to enforce below five
+seconds per enabled incident (including sandbox bootstrap) and below thirty
+seconds for the group. The #9771 dependency-gate and repository-routing
+incidents are enabled; four sibling-gated fixtures remain pending. The
+incident index and activation rules live in
+`test/e2e/scenarios/README.md`.
 
 `durable_attempt_1849_replay.yml` is the ownership acceptance replay. It starts
 a foreground develop attachment, makes three provider commits, kills the
@@ -182,6 +198,7 @@ daemon, releases the provider, and validates exactly one successful terminal
 receipt. Focused attempt unit suites cover claim/expiry races, PID reuse,
 framed logs, restart adoption, legacy backfill, dirty capture, and bounded
 successor healing.
+
 `test/e2e/lib/hive_e2e_binary_test.rb` pins the harness binary contract:
 scenario inventory JSON, cleanup JSON, the single-document stdout invariant for
 successful `list --json` / `clean --json` calls, unknown-command JSON errors,

@@ -353,6 +353,12 @@ module Hive
         # so a normal ~30s dispatcher tick does not hammer GitHub.
         run_refactor_patrol_merge_reconciler_tick(now: now)
 
+        # A merge watch may have been enqueued on a previous clear snapshot.
+        # Remove every newly-held row before the watcher polls or archives it;
+        # both admission errors and ordinary below-gate waits suppress all
+        # forward daemon work.
+        drop_held_merge_watches(result.rows)
+
         # 3a. PrMergeWatcher tick (if present): check pending merges
         # first. Archive dispatches MUST flow through the same enable +
         # cap checks that advance dispatches use, so a project disabled
@@ -380,7 +386,7 @@ module Hive
         # controller and the row scan's gate keeps the status-row loop
         # from double-dispatching. Single-writer invariant: only the
         # daemon spawns `hive run`-class verbs.
-        process_dispatch_requests(now: now)
+        process_dispatch_requests(now: now, rows: result.rows)
 
         # 3c. Project-level patrol scans are not task rows, so they do
         # not go through Policy. They still pass through the same
@@ -678,7 +684,8 @@ module Hive
           # permanent phantom entry the digest gate never consults. The
           # `!global_digest_stage?` guard covers BOTH pseudo-projects.
           if entry.exit_code == Hive::ExitCodes::CONFIG &&
-             !global_digest_stage?(entry.stage)
+             !global_digest_stage?(entry.stage) &&
+             entry.json_envelope&.dig("error_kind") != "admission_error"
             @controller.record_project_dropped(project: entry.project)
             @logger.event(:project_dropped, project: entry.project)
           end
@@ -931,10 +938,13 @@ module Hive
           now: now,
           edit_debounce_sec: @edit_debounce_sec,
           answers_pending: brainstorm_answers_pending?(row),
-          blocked: row.blocked == true
+          blocked: row.blocked == true,
+          admission_error: !row.admission_error.nil?
         )
 
         case decision
+        when :admission_error
+          log_admission_error(row)
         when :dispatch
           # Pass through the reason the dispatch fired so the
           # `:dispatched` logger event can distinguish plan-approval
@@ -995,6 +1005,32 @@ module Hive
           @logger.event(:skipped, project: row.project, slug: row.slug,
                                   stage: row.stage, action: row.action)
         end
+      end
+
+      def drop_held_merge_watches(rows)
+        return unless @merge_watcher
+
+        rows.each do |row|
+          next unless row.blocked == true || row.admission_error
+
+          @merge_watcher.drop(project: row.project, slug: row.slug)
+        end
+      end
+
+      def log_admission_error(row)
+        error = row.admission_error
+        @logger.event(
+          :blocked,
+          project: row.project,
+          slug: row.slug,
+          stage: row.stage,
+          action: row.action,
+          reason: "admission_error",
+          reason_code: error&.reason_code || "dependency_validation_failed",
+          offending_ref: error&.offending_ref || row.depends_on || row.slug,
+          safe_correction: error&.safe_correction ||
+            "Inspect dependency admission state before dispatching."
+        )
       end
 
       # True when `row` is a brainstorm `needs_input` row whose
@@ -1481,16 +1517,19 @@ module Hive
       #      `:dispatch_request_expired`.
       #   4. Project dropped (CONFIG=78 from a prior child) → remove +
       #      `:dispatch_request_rejected reason=project_dropped`.
-      #   5. Per-slug in-flight gate (controller's running_task?) →
+      #   5. Current status-row dependency/admission gate for every
+      #      task-advancing request; marker repair is exempt → leave
+      #      the file on disk, `:dispatch_request_blocked`.
+      #   6. Per-slug in-flight gate (controller's running_task?) →
       #      leave the file on disk, `:dispatch_request_blocked
       #      reason=in_flight`. Picked up next tick.
-      #   6. Concurrency gate (caps / cooldown / quarantine) → leave
+      #   7. Concurrency gate (caps / cooldown / quarantine) → leave
       #      the file on disk, `:dispatch_request_blocked
       #      reason=<gate>`. Picked up next tick.
-      #   7. Spawn via `dispatch_command`, threading `request_id`
+      #   8. Spawn via `dispatch_command`, threading `request_id`
       #      through the supervisor so `reap_completed` can unlink the
       #      file and log `:dispatch_request_completed`.
-      def process_dispatch_requests(now:)
+      def process_dispatch_requests(now:, rows:)
         pending = Hive::Daemon::DispatchRequestQueue.pending(
           state_home: dispatch_request_state_home,
           bad_handler: ->(path:, reason:) {
@@ -1521,7 +1560,7 @@ module Hive
           # the next tick to retry; the failure is logged for
           # operator visibility. Per R-01 from PR #241 ce-code-review.
           begin
-            process_dispatch_request_iteration(req, now: now)
+            process_dispatch_request_iteration(req, now: now, rows: rows)
           rescue StandardError => e
             @logger.event(:dispatch_request_rejected,
                           request_id: req.request_id, project: req.project,
@@ -1540,7 +1579,7 @@ module Hive
       # process_dispatch_requests captures any error from the gate
       # checks AND the actual spawn. Returns nil; side effects via
       # @controller, @logger, and the queue's remove() call.
-      def process_dispatch_request_iteration(req, now:)
+      def process_dispatch_request_iteration(req, now:, rows:)
         unless Hive::Daemon::DispatchRequestQueue.valid_argv?(req.argv)
           reject_request(req, reason: "invalid_argv")
           return
@@ -1573,6 +1612,26 @@ module Hive
           return
         end
 
+        if dependency_gated_request?(req)
+          row = rows.find { |candidate| candidate.project == req.project && candidate.slug == req.slug }
+          if row&.admission_error
+            @logger.event(
+              :dispatch_request_blocked,
+              request_id: req.request_id, project: req.project, slug: req.slug,
+              reason: "admission_error", reason_code: row.admission_error.reason_code
+            )
+            return
+          end
+          if row&.blocked == true
+            @logger.event(
+              :dispatch_request_blocked,
+              request_id: req.request_id, project: req.project, slug: req.slug,
+              reason: "dependency_unmet", blocked_by: row.blocked_by
+            )
+            return
+          end
+        end
+
         # Reverse the gate-evaluation order from the previous version:
         # check the cheap, deterministic running_task? gate first so an
         # in-flight slug doesn't incur the can_dispatch? scan. Per R-04
@@ -1597,6 +1656,14 @@ module Hive
         end
 
         dispatch_request!(req, now: now)
+      end
+
+      # Marker repair is deliberately exempt: clearing a corrupt/stale marker
+      # can be the operator's route back to a state that admission can inspect.
+      # Every other project-scoped request advances or archives task work and
+      # must honor the same status-row hold as automatic dispatch.
+      def dependency_gated_request?(req)
+        req.argv[1] != "markers"
       end
 
       # Host-global maintenance request (project == "__global__"): not tied to

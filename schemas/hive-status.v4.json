@@ -154,7 +154,7 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": [ "stage_dir", "task_count" ],
+            "required": ["stage_dir", "task_count"],
             "properties": {
               "stage_dir": { "type": "string" },
               "task_count": { "type": "integer", "minimum": 1 }
@@ -163,7 +163,7 @@
         },
         "legacy_migrate_command": {
           "description": "Machine-readable parity of the text-mode `hive migrate` recovery hint. \"hive migrate\" when `legacy_stage_dirs` is non-empty; `null` when the project is clean. Always present (never absent) — the same diagnostic-field-always-present convention `diagnostic` uses on Task.",
-          "type": [ "string", "null" ]
+          "type": ["string", "null"]
         }
       }
     },
@@ -191,8 +191,6 @@
         "claude_pid",
         "claude_pid_alive",
         "live_task_lock",
-        "attempt_id",
-        "task_generation",
         "unanswered_questions",
         "action",
         "action_label",
@@ -358,14 +356,6 @@
         "live_task_lock": {
           "description": "True when the task's .lock file points at a process that is still running (PID alive + start time matches). False when the lock is absent, the PID is dead, or PID reuse was detected. Coerced from nil/true/false to a strict boolean so external consumers (TUI, bots) never see JSON null.",
           "type": "boolean"
-        },
-        "attempt_id": {
-          "description": "Durable attempt projected into the compatibility lock, or null for legacy work.",
-          "type": [ "string", "null" ]
-        },
-        "task_generation": {
-          "description": "Durable task-generation owner projected into the compatibility lock, or null for legacy work.",
-          "type": [ "string", "null" ]
         },
         "unanswered_questions": {
           "description": "Count of still-unanswered brainstorm Q&A questions (`### Q{n}.` slots with no answer) for a 2-brainstorm needs_input row; 0 for every other row. Lets a consumer distinguish a brainstorm the daemon is intentionally holding (answers outstanding) from one genuinely waiting for a first answer or broken — the daemon's answers-pending gate is otherwise only visible in daemon.log. Degrades to 0 if the file is missing/mid-write/malformed.",

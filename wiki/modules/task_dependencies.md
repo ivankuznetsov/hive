@@ -1,88 +1,204 @@
 ---
 title: Task dependencies
 type: module
-source: lib/hive/dependencies.rb, lib/hive/dependency_snapshot.rb, lib/hive/commands/status.rb, lib/hive/daemon/policy.rb, lib/hive/stages/execute.rb, lib/hive/stages/open_pr.rb
+source: lib/hive/dependencies.rb, lib/hive/dependency_admission.rb, lib/hive/dependency_snapshot.rb, lib/hive/repository_identity.rb, lib/hive/plan_frontmatter.rb
 created: 2026-06-18
-updated: 2026-06-22
-tags: [task, dependencies, status, daemon, worktree, pr]
+updated: 2026-07-17
+tags: [task, dependencies, admission, status, daemon, repository]
 ---
 
-**TLDR**: A task can declare one `depends_on` prerequisite in durable
-`meta.yml`. `hive status` resolves that dependency inside the same project,
-surfaces the dependency fields in `hive-status` v4, and the daemon freezes
-auto-dispatch while `blocked: true`. When the prerequisite reaches the gate
-stage, dependent execute/open-pr stages stack on the prerequisite branch.
+**TLDR**: A task may declare exactly one authoritative `depends_on` value in
+`meta.yml`: a same-project slug or numeric id, or an explicit
+`project:slug`. One shared fail-closed validator returns clear, benign wait, or
+admission error for status, daemon, `hive run`, and forward `hive approve`.
+Invalid or indeterminate evidence never becomes “no dependency.”
 
-## Metadata
+## Scalar decision and grammar
 
-`depends_on` is stored in each task's `meta.yml`, not in the per-stage state
-file. That keeps the dependency stable across `mv`-based stage transitions.
-`Hive::Task#depends_on` delegates to `Hive::TaskMeta.read`, and `hive new
---depends-on <id-or-slug>` is the supported authoring path for new tasks.
-Existing tasks can still be edited manually by changing `meta.yml`.
+Hive deliberately retains one prerequisite rather than a general graph:
 
-The value is a single id-or-slug string. Multi-dependency arrays and per-task
-gate overrides are intentionally absent.
+```yaml
+depends_on: api-task-260716-abcd       # same project by slug
+depends_on: 42                         # same project by numeric id
+depends_on: api:api-task-260716-abcd   # exact enrolled project + slug
+```
 
-## Resolution
+`Hive::Dependencies.parse_reference` is the single parser. A bare reference
+never searches other projects. Cross-project numeric ids, lists, mappings,
+blank values, multiple separators, and gate suffixes are invalid. An explicit
+cross-project edge is a scheduling gate only: it never supplies a local
+stacked-branch or PR base. Same-project dependencies preserve the existing
+stacked-branch and declared revision behavior.
 
-`Hive::Dependencies` is pure. Given a same-project task snapshot and a
-configured threshold stage, it resolves by slug first and numeric id second.
-The result carries:
+The scalar model should be replaced by a typed DAG only when real work needs
+one or more of these tripwires: multiple prerequisites; cross-repository
+fan-out or fan-in; artifact-typed edges; revision pinning beyond the existing
+stacked-branch mechanism; optional dependencies; or distinct completion gates
+per edge. Until then, lists and per-edge syntax are rejected rather than
+partially interpreted.
 
-- `blocked_by` - resolved prerequisite slug, or nil.
-- `dependency_stage` - prerequisite stage directory, or nil.
-- `blocked` - true when the prerequisite has not reached the threshold.
-- `unresolved` - true for missing prerequisites and self-reference.
+## Evidence and strict reads
 
-Missing/deleted prerequisites and self-reference are fail-closed: the dependent
-stays blocked. Two-task cycles are not detected; they freeze both tasks until a
-human edits metadata or moves/approves manually.
+`meta.yml` is authoritative. `TaskMeta.read_for_admission` distinguishes an
+absent legacy sidecar from unreadable YAML, a non-mapping document, and an
+invalid `depends_on`. General display code may still use the tolerant reader,
+but admission never does. Metadata mutators refuse to rewrite corrupt input,
+so id/display-name backfill cannot erase damaged dependency evidence. The
+strict reader rejects duplicate top-level `depends_on` keys before YAML's
+last-key-wins behavior can hide one of two declarations.
 
-`dependency_gate_stage` is a top-level config key. The default is
-`8-finalize`; the only other valid value is `9-done`.
+`plan.md` may repeat the assertion in top-level YAML frontmatter:
 
-## Status Contract
+```yaml
+---
+depends_on: api:api-task-260716-abcd
+---
+```
 
-`hive status --json` is the source of truth. `Status#collect_rows` builds the
-same-project snapshot, resolves dependency state for each row, and emits
-`depends_on`, `blocked_by`, `dependency_stage`, and `blocked` on every task row.
-This bumped `hive-status` to schema v4.
+No frontmatter, or frontmatter without `depends_on`, is valid. When present,
+the plan value must parse with the same scalar grammar and normalize to exactly
+the metadata value. A plan-only assertion, mismatch, or malformed frontmatter
+is an admission error. Duplicate top-level `depends_on` keys are invalid here
+too. Frontmatter scanning stops at its closing delimiter and is capped at
+64 KiB, so admission never reads an unbounded plan body. Hive never scans plan
+prose for prerequisites.
 
-Text status and the TUI append a single inline indicator when a row is blocked:
-`⏸ blocked by <slug> (<stage>)`. If the dependency is unresolved, the indicator
-uses the raw dependency value and `(unresolved)`.
+This cross-check closes the ordering failure observed in the Honeycomb work:
+the plan named a prerequisite that scheduling metadata did not carry. The
+repository-identity check below closes the separate task-1854 provenance
+failure where a referenced task number appeared under the wrong repository.
 
-## Daemon Gate
+## Multi-project resolution and repository identity
 
-`Hive::Daemon::StatusConsumer` reads the dependency fields from
-`hive status --json`; it does not inspect task files directly.
-`Hive::Daemon::Policy#decide` trusts the row's `blocked` boolean and returns
-`:blocked_on_dependency` instead of dispatching forward actions. The dispatcher
-logs a `:blocked` event with `reason: "dependency_unmet"` plus dependency
-context.
+`hive init` stores the enrolled project's normalized `origin` identity in the
+global project registry. Common SSH and HTTPS spellings normalize to the same
+host/path; incidental `.git` and trailing slashes are removed. Local-path
+remotes normalize without network access. Host and repository path remain
+significant.
 
-The gate is daemon-only. Manual `hive run`, `hive approve`, and filesystem
-`mv` operations bypass this policy path.
+For `project:slug`, admission resolves the exact enrolled project name and
+compares its stored identity with the current repository's live `origin`
+before trusting its task snapshot. A missing identity, unknown project, or
+stored/live mismatch is held. Repositories without an origin may remain
+enrolled and use same-project dependencies; identity is required only when
+they participate as an explicit cross-project target. Hive does not guess or
+auto-repair repository identity. Live Git lookups run only for projects named
+by explicit cross-project edges, with a two-second process-group deadline and
+TERM-to-KILL cleanup; same-project-only snapshots spawn no Git lookups.
 
-## Stacked Branches
+Each admission invocation snapshots every enrolled project, its tasks, and
+its own workflow descriptors. Qualified `[project, slug]` identities and
+same-project numeric ids are indexed without using the global task resolver.
+The TUI's one-second active-only refresh is the bounded exception: it builds a
+new immutable context from current active tasks plus immutable terminal-task
+snapshots produced by the last full/archive status pass. Cached terminal
+snapshots preserve their exact workflow, dependency edge, validation error,
+and project repository identity. Active tasks shadow an archived snapshot with
+the same slug; otherwise O(1) slug/id indexes consult the archived context as a
+fallback, including for transitive chains. The periodic archive refresh
+replaces successful project snapshots while retaining the last lossless
+snapshot for a project whose archive read degraded transiently.
+Duplicate or ambiguous identities fail closed. Full-chain walking follows
+only explicit project edges, detects missing tasks, self-reference, corrupt
+upstream nodes, and cycles, and reports a cycle as an ordered qualified path
+including the repeated closing node. Cycle bookkeeping and immutable-context
+verdicts are indexed and memoized, so full status evaluates shared dependency
+tails once instead of rewalking them for every row. Each task folder's
+device/inode identity is checked before and after strict reads; a concurrent
+stage move invalidates that snapshot instead of retaining the enumerated old
+stage after an `ENOENT` race.
 
-When a dependent reaches `4-execute`, `Hive::Dependencies.base_branch_for`
-returns the prerequisite slug as the intended base. `Hive::Worktree#create!`
-then tries to create the dependent branch from `origin/<prerequisite-slug>`,
-then local `refs/heads/<prerequisite-slug>`, then the freshest default branch.
-If a same-named dependent branch already exists, real committed work is
-preserved; only an empty placeholder branch — carrying no unique commits beyond
-*either* default ref used for the emptiness check (`origin/<default>` when its
-tracking ref exists, **and** local `<default>` when that branch exists) — is
-deleted and recreated via the origin→local→default base resolution above.
+## Gate and three verdicts
 
-When the same dependent reaches `5-open-pr`, `OpenPr#render_prompt` includes
-`--base <prerequisite-slug>` in the `gh pr create` command only if the
-prerequisite branch still exists on origin. If it has already merged and been
-deleted, Hive omits `--base` and lets GitHub target the default branch.
+The depending project's `dependency_gate_stage` is authoritative. It defaults
+to `8-finalize`; `9-done` is the only other supported value. The prerequisite's
+own workflow must contain both its current stage and a reachable gate.
+
+Admission returns exactly one verdict:
+
+| Verdict | Meaning | Status shape |
+|---|---|---|
+| Clear | no dependency, or a valid prerequisite at/after the gate | `blocked: false`, wait fields null, `admission_error: null` |
+| Wait | valid prerequisite below the gate | `blocked: true`, `blocked_by` and `dependency_stage` populated, `admission_error: null` |
+| Admission error | invalid, inconsistent, or indeterminate evidence | `blocked: true`, wait fields null, action `admission_error`, no suggested command, structured `admission_error` |
+
+The admission-error object contains exactly `reason_code`, `offending_ref`, and
+`safe_correction`. The closed reason set is:
+
+- `dependency_metadata_unreadable`, `dependency_metadata_invalid`,
+  `dependency_reference_invalid`
+- `dependency_task_missing`, `dependency_self_reference`, `dependency_cycle`
+- `dependency_gate_unknown`, `dependency_gate_unreachable`
+- `dependency_project_unknown`, `dependency_repository_identity_missing`,
+  `dependency_repository_mismatch`
+- `plan_dependency_invalid`, `plan_dependency_missing`,
+  `plan_dependency_mismatch`
+- `dependency_validation_failed` (unexpected fail-closed backstop)
+
+Safe corrections describe the smallest known repair. They do not include a
+command unless Hive can prove it is valid for that state.
+
+## Enforcement boundaries
+
+`hive status` builds one immutable context and is the canonical snapshot for
+the daemon and TUI. Status still reports invalid admission after a raw
+filesystem move into a dispatchable stage. Arbitrary `mv` itself is outside
+Hive's preventable boundary.
+
+The daemon gives admission errors precedence over stage/action policy, logs
+the structured fields, drops any stale merge watch, and spawns nothing.
+Ordinary waits also suppress merge polling, including a configured `9-done`
+gate. Id/display-name backfill skips admission-error rows and uses strict
+metadata reads. File-backed dispatch requests for run/advance/archive verbs
+are checked against the same tick's status row before spawn and remain queued
+on a dependency wait or admission error. `hive markers ...` repair requests
+are deliberately exempt so an operator can repair stale/corrupt marker state.
+A task-local admission error exits 78 without dropping the entire enrolled
+project from daemon scheduling.
+
+`hive run` re-snapshots under the task lock before config, rebase, worktree, or
+runner side effects. Forward `hive approve` re-snapshots inside the commit and
+task locks immediately before moving. `--force` bypasses only terminal-marker
+validation, never admission. Same-stage no-ops and backward approvals remain
+available for repair.
+
+Manual waits raise retryable `Hive::DependencyWaitError` (exit 75); admission
+errors raise non-retryable `Hive::DependencyAdmissionError` (exit 78). JSON
+errors use `dependency_wait` or `admission_error` and carry the three structured
+fields. Workflow verbs inherit both checks through their composed approve/run
+calls.
+
+## Stacked branches
+
+A valid same-project dependency continues to supply the prerequisite slug to
+`DependencySnapshot.stacked_base`. Execute resolves the base from the remote
+branch, then local branch, then default branch under the existing placeholder
+preservation rules. Open-PR uses the prerequisite base only while that remote
+branch exists. Explicit cross-project edges always return no stacked base.
+
+## Recovery
+
+Inspect `hive status --json` or the TUI's admission text, then repair the named
+`meta.yml`, `plan.md`, project enrollment, remote, workflow, or gate. Do not
+delete dependency metadata merely to clear the row unless removing the edge is
+the intended model change. For corrupt state that must move out of a forward
+stage, use a backward `hive approve --to ...`; forward run/approval resumes only
+after admission becomes clear.
+
+## Tests
+
+- `test/unit/dependencies_test.rb`, `task_meta_test.rb`, and
+  `plan_frontmatter_test.rb` pin the declaration grammar and strict evidence.
+- `test/unit/dependency_admission_test.rb`, `dependency_snapshot_test.rb`, and
+  `repository_identity_test.rb` pin graph, gate, workflow, and remote identity.
+- `test/integration/dependency_admission_test.rb` reproduces anonymized
+  plan-only ordering and cross-project repository-mismatch failures across
+  status and manual boundaries.
+- status/TUI, daemon, command, and schema suites pin the same three verdicts at
+  every consumer.
 
 ## Backlinks
 
 - [[modules/task]] · [[commands/status]] · [[modules/daemon]]
+- [[commands/run]] · [[commands/approve]] · [[commands/new]] · [[stages/plan]]
 - [[modules/worktree]] · [[stages/execute]] · [[stages/open-pr]]

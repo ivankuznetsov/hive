@@ -1,6 +1,7 @@
 require "open3"
 require "json"
 require "time"
+require "hive/dependency_admission"
 
 module Hive
   module Daemon
@@ -19,7 +20,8 @@ module Hive
       Row = Struct.new(:project, :slug, :stage, :workflow, :marker, :marker_attrs, :folder, :state_file,
                        :state_file_mtime, :action, :suggested_command, :claude_pid_alive,
                        :live_task_lock, :diagnostic, :depends_on, :blocked_by,
-                       :dependency_stage, :blocked, :attempt_id, :task_generation,
+                       :dependency_stage, :blocked, :admission_error,
+                       :attempt_id, :task_generation,
                        keyword_init: true)
       # Aggregated per-project legacy-layout signal lifted out of each
       # project payload's `legacy_stage_dirs` array. The dispatcher uses
@@ -178,6 +180,7 @@ module Hive
 
           project = project_doc["name"]
           Array(project_doc["tasks"]).each do |task|
+            admission_error = extract_admission_error(task)
             rows << Row.new(
               project: project,
               slug: task["slug"],
@@ -188,8 +191,8 @@ module Hive
               folder: task["folder"],
               state_file: task["state_file"],
               state_file_mtime: parse_mtime(task["mtime"], task["state_file"]),
-              action: task["action"],
-              suggested_command: task["suggested_command"],
+              action: admission_error ? "admission_error" : task["action"],
+              suggested_command: admission_error ? nil : task["suggested_command"],
               claude_pid_alive: task["claude_pid_alive"],
               live_task_lock: task["live_task_lock"] == true,
               attempt_id: task["attempt_id"],
@@ -198,11 +201,45 @@ module Hive
               depends_on: task["depends_on"],
               blocked_by: task["blocked_by"],
               dependency_stage: task["dependency_stage"],
-              blocked: task["blocked"] == true
+              blocked: admission_error ? true : task["blocked"] == true,
+              admission_error: admission_error
             )
           end
         end
         rows
+      end
+
+      # Admission fields are policy-bearing, so schema drift must hold the
+      # row instead of silently treating an absent or malformed object as
+      # a clear dependency. A well-formed nil is the only clear value.
+      def extract_admission_error(task)
+        unless task.key?("admission_error")
+          return admission_backstop(task, "missing admission_error field")
+        end
+
+        value = task["admission_error"]
+        return nil if value.nil?
+
+        keys = %w[reason_code offending_ref safe_correction]
+        unless value.is_a?(Hash) && value.keys.sort == keys.sort &&
+               Hive::DependencyAdmission::REASON_CODES.include?(value["reason_code"]) &&
+               keys.all? { |key| value[key].is_a?(String) && !value[key].empty? }
+          return admission_backstop(task, "malformed admission_error field")
+        end
+
+        Hive::DependencyAdmission::AdmissionError.new(
+          reason_code: value["reason_code"],
+          offending_ref: value["offending_ref"],
+          safe_correction: value["safe_correction"]
+        )
+      end
+
+      def admission_backstop(task, problem)
+        Hive::DependencyAdmission::AdmissionError.new(
+          reason_code: "dependency_validation_failed",
+          offending_ref: task["slug"].to_s,
+          safe_correction: "Restart or update Hive and inspect status output before dispatching (#{problem})."
+        )
       end
 
       # Surface per-project payload-level signal (legacy_stage_dirs) so

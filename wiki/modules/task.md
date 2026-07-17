@@ -3,7 +3,7 @@ title: Hive::Task
 type: module
 source: lib/hive/task.rb, lib/hive/task_meta.rb, lib/hive/task_counter.rb
 created: 2026-04-25
-updated: 2026-06-19
+updated: 2026-07-16
 tags: [model, task, parsing, task-id, dependencies, workflows]
 ---
 
@@ -38,7 +38,7 @@ tags: [model, task, parsing, task-id, dependencies, workflows]
 | `#meta_yml_path` | `Hive::TaskMeta.path(folder)` |
 | `#id` | Numeric id from `meta.yml`, or nil when absent/malformed/unallocated |
 | `#display_name` | `display_name` from `meta.yml`, or nil |
-| `#depends_on` | Single id-or-slug prerequisite from `meta.yml`, or nil |
+| `#depends_on` | Single same-project id/slug or explicit `project:slug` prerequisite from `meta.yml`, or nil |
 | `#display_label` | `display_name || slug` |
 | `#lock_file` | `File.join(folder, ".lock")` |
 | `#log_dir` | `File.join(@hive_state_path, "logs", @slug)` |
@@ -61,9 +61,10 @@ For stages 4 and later:
 `Hive::TaskMeta` (`lib/hive/task_meta.rb`) owns the optional `<task>/meta.yml` sidecar:
 
 - `read(task_folder)` returns `{id:, slug:, display_name:, depends_on:, workflow:}` and is total over missing, malformed, or non-Hash YAML.
+- `read_for_admission(task_folder)` returns a result-bearing strict read. It distinguishes an absent legacy sidecar from unreadable YAML, a non-mapping document, and an invalid dependency reference; admission code must use this path rather than interpreting tolerant-read nil as “no dependency.”
 - `write(task_folder, id:, slug:, display_name:, depends_on: nil, workflow: nil)` normalizes empty strings to nil, normalizes ids with `Integer(...)`, writes optional `depends_on` / `workflow` only when present, and writes through `.<meta>.tmp.<pid>.<hex>` plus `File.rename`.
-- `update_display_name(task_folder, name)` preserves the existing id, slug, `depends_on`, and `workflow`, defaulting slug to `File.basename(task_folder)` when the sidecar is absent.
-- `update_id(task_folder, id)` preserves slug, display name, `depends_on`, and `workflow`; this keeps daemon id backfill from dropping a task-level workflow selector.
+- `update_display_name(task_folder, name)` preserves the existing id, slug, `depends_on`, and `workflow`, defaulting slug to `File.basename(task_folder)` only when the sidecar is absent. It refuses corrupt input.
+- `update_id(task_folder, id)` preserves slug, display name, `depends_on`, and `workflow`, and likewise refuses corrupt input; daemon backfill cannot sanitize dependency evidence by replacing a damaged mapping.
 
 `Hive::TaskCounter` (`lib/hive/task_counter.rb`) owns `<state_home>/task-counter.yml`:
 
@@ -75,7 +76,7 @@ For stages 4 and later:
 ## Tests
 
 - `test/unit/task_test.rb` — path parsing, descriptor-driven stage/index validation, workflow selection fallback, derived-path correctness, slug edge cases, and `meta.yml` readers.
-- `test/unit/task_meta_test.rb` — sidecar read/write, workflow selector reads/preservation, malformed YAML tolerance, display-name updates, and id backfill.
+- `test/unit/task_meta_test.rb` — tolerant and strict sidecar reads, dependency validation, workflow selector preservation, corrupt-input mutation refusal, display-name updates, and id backfill.
 - `test/unit/task_counter_test.rb` — first id, sequential ids, corrupt counter fallback, seeding, forked concurrency, and lock timeout.
 
 ## Backlinks

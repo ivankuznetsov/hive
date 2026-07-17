@@ -10,6 +10,8 @@ require "hive/workflows"
 require "hive/workflows/project"
 require "hive/archive_filter"
 require "hive/dependencies"
+require "hive/dependency_admission"
+require "hive/dependency_snapshot"
 require "hive/diagnostic_evidence"
 require "hive/diagnostic_helpers"
 require "hive/secret_patterns"
@@ -120,8 +122,9 @@ module Hive
           return
         end
 
+        admission_context = build_admission_context(projects)
         projects.each do |project|
-          render_project(project, project_count: projects.size)
+          render_project(project, project_count: projects.size, admission_context: admission_context)
         rescue StandardError => e
           # Symmetry with the JSON path's project_payload_or_degraded: isolate
           # per-project failures so one project (e.g. a malformed workflow
@@ -137,7 +140,10 @@ module Hive
       # non-breaking; removing or renaming keys must bump a documented
       # version. `tasks[].marker` is the lowercased symbol name as a string;
       # `tasks[].attrs` is the marker's attribute map.
-      def json_payload(projects, stages: nil, exclude_archived: false, extra_dependency_tasks: nil)
+      def json_payload(projects, stages: nil, exclude_archived: false, admission_context: nil)
+        admission_context ||= build_admission_context(
+          projects, exclude_archived: exclude_archived
+        )
         {
           "schema" => "hive-status",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
@@ -149,7 +155,7 @@ module Hive
               project_count: projects.size,
               stages: stages,
               exclude_archived: exclude_archived,
-              extra_dependency_tasks: dependency_tasks_for(extra_dependency_tasks, p)
+              admission_context: admission_context
             )
           end
         }
@@ -163,13 +169,14 @@ module Hive
       # project to an empty task list (with a stderr breadcrumb in
       # daemon.log) so the rest of the fleet keeps advancing. The fallback
       # entry still validates against the published hive-status schema.
-      def project_payload_or_degraded(project, project_count:, stages: nil, exclude_archived: false, extra_dependency_tasks: nil)
+      def project_payload_or_degraded(project, project_count:, stages: nil, exclude_archived: false,
+                                      admission_context: nil)
         project_payload(
           project,
           project_count: project_count,
           stages: stages,
           exclude_archived: exclude_archived,
-          extra_dependency_tasks: extra_dependency_tasks
+          admission_context: admission_context
         )
       rescue StandardError => e
         warn "hive: status: project #{project['name'].inspect} payload failed " \
@@ -184,7 +191,8 @@ module Hive
         }
       end
 
-      def project_payload(project, project_count:, stages: nil, exclude_archived: false, extra_dependency_tasks: nil)
+      def project_payload(project, project_count:, stages: nil, exclude_archived: false,
+                          admission_context: nil)
         path = project["path"]
         hive_state = project["hive_state_path"]
         base = {
@@ -209,7 +217,9 @@ module Hive
             # external consumers (TUI, daemon, bots) read `diagnostic` off
             # every row. Schema mandates the field.
             rows = annotate_actions(collect_rows(hive_state, stages: stages, exclude_archived: exclude_archived), project, project_count, with_diagnostic: true)
-            rows = annotate_dependencies(rows, project, extra_dependency_tasks: extra_dependency_tasks)
+            rows = annotate_dependencies(
+              rows, project, admission_context: admission_context
+            )
             rows = archive_rows(rows) if @archive
             out = base.merge("tasks" => rows.map { |r| task_payload(r) })
             # Always emit `legacy_stage_dirs` (default empty array) so
@@ -275,6 +285,7 @@ module Hive
           "blocked_by" => row[:blocked_by],
           "dependency_stage" => row[:dependency_stage],
           "blocked" => row[:blocked] == true,
+          "admission_error" => row[:admission_error]&.to_h,
           "folder" => row[:folder],
           "state_file" => row[:state_file],
           "worktree_path" => row[:worktree_path],
@@ -501,7 +512,7 @@ module Hive
         project ? project["name"] : File.basename(task.project_root)
       end
 
-      def render_project(project, project_count:)
+      def render_project(project, project_count:, admission_context: nil)
         path = project["path"]
         unless File.directory?(path)
           puts "#{project['name']}: missing project path #{path}"
@@ -519,7 +530,7 @@ module Hive
         # I/O that TaskAction#diagnostic performs per red row. JSON path
         # still pays the full cost via project_payload.
         rows = annotate_actions(collect_rows(hive_state), project, project_count, with_diagnostic: false)
-        rows = annotate_dependencies(rows, project)
+        rows = annotate_dependencies(rows, project, admission_context: admission_context)
         if @archive
           render_archive_project(project, rows)
           return
@@ -611,6 +622,10 @@ module Hive
 
       def dependency_indicator(row)
         return nil unless row[:blocked]
+        if row[:admission_error]
+          error = row[:admission_error]
+          return "⚠ admission #{error.reason_code}: #{error.safe_correction}"
+        end
 
         # Shared with the TUI's renderer so the unresolved-vs-resolved
         # discriminator (blocked_by presence) can never diverge between
@@ -759,82 +774,61 @@ module Hive
         drop_transient_stage_moves(rows)
       end
 
-      def annotate_dependencies(rows, project, extra_dependency_tasks: nil)
-        threshold_stage = dependency_gate_stage_for(project)
-        # filter_map + next: a future row source lacking :task must not
-        # KeyError on this never-fail surface (production rows always carry
-        # it). Rows without :task simply don't participate in the snapshot.
-        snapshot = rows.filter_map do |row|
-          task = row[:task]
-          next unless task
-
-          {
-            slug: row[:slug],
-            id: row[:id],
-            stage: row[:stage],
-            stage_index: task.stage_index
-          }
-        end
-        snapshot.concat(Array(extra_dependency_tasks))
-
-        rows.each { |row| apply_dependency_result(row, snapshot, threshold_stage) }
+      def annotate_dependencies(rows, project, admission_context: nil)
+        context = admission_context || build_admission_context([ project ])
+        rows.each { |row| apply_dependency_verdict(row, context, project) }
         rows
       end
 
-      def dependency_tasks_for(extra_dependency_tasks, project)
-        return nil unless extra_dependency_tasks
-
-        # `project["path"]` (not `fetch`): this never-fail status surface must
-        # degrade, not KeyError, if a future path-less project entry reaches
-        # here alongside non-nil extra_dependency_tasks.
-        extra_dependency_tasks[project["path"]]
-      end
-
-      # Threshold stage for the dependency gate. Config.load validates the
-      # key and raises ConfigError on a bad value (e.g. an operator typo
-      # `dependency_gate_stage: 5-open-pr`); degrade to the global default
-      # with a warn rather than let one project's bad config abort the
-      # whole `hive status --json` and freeze daemon auto-advance.
-      def dependency_gate_stage_for(project)
-        Hive::Config.load(project.fetch("path")).fetch("dependency_gate_stage")
-      rescue StandardError => e
-        # The degrade direction is security-relevant: the default
-        # (8-finalize) is MORE permissive than a deliberately-raised gate
-        # (e.g. 9-done), so this fallback can LOOSEN the gate and let a
-        # dependent dispatch one stage early. Erring toward dispatchable is
-        # the documented safe default (a transient/unrelated config error
-        # must not freeze fleet-wide auto-advance), but the warn names the
-        # direction so an operator can tell a genuine loosening apart from a
-        # no-op fallback.
-        default = Hive::Config::DEFAULTS["dependency_gate_stage"]
-        warn "hive: status: unusable dependency_gate_stage for project " \
-             "#{project['name'].inspect} (#{e.class}: #{e.message}); gate LOOSENED to " \
-             "default #{default} — a stricter configured gate is ignored, so a dependent " \
-             "may dispatch one stage early until the config loads cleanly"
-        default
-      end
-
-      # Resolve and stamp dependency state onto one row, failing OPEN on any
-      # resolver error (corrupt stage / malformed prereq shape): treat the
-      # row as unblocked with a breadcrumb. The gate erring toward
-      # "dispatchable" is the documented safe default, and a single bad task
-      # must not blank dependency state for the rest of the project.
-      def apply_dependency_result(row, snapshot, threshold_stage)
-        result = Hive::Dependencies.resolve(
-          depends_on: row[:depends_on],
-          tasks: snapshot,
-          threshold_stage: threshold_stage,
-          task: row
+      def build_admission_context(projects, exclude_archived: false)
+        Hive::DependencySnapshot.admission_context(
+          projects, exclude_archived: exclude_archived
         )
-        row[:blocked_by] = result.blocked_by
-        row[:dependency_stage] = result.dependency_stage
-        row[:blocked] = result.blocked
       rescue StandardError => e
-        warn "hive: status: dependency resolve failed for #{row[:slug].inspect} " \
-             "(#{e.class}: #{e.message}); treating as unblocked"
+        warn "hive: status: dependency admission snapshot failed " \
+             "(#{e.class}: #{e.message}); holding every affected row"
+        snapshots = projects.map do |project|
+          Hive::DependencyAdmission::ProjectSnapshot.new(
+            name: project["name"].to_s,
+            path: project["path"].to_s,
+            repository_identity: project["repository_identity"],
+            live_repository_identity: nil,
+            dependency_gate_stage: Hive::Config::DEFAULTS.fetch("dependency_gate_stage"),
+            tasks: [],
+            validation_error: "#{e.class}: #{e.message}"
+          )
+        end
+        Hive::DependencyAdmission::Context.new(projects: snapshots)
+      end
+
+      def apply_dependency_verdict(row, context, project)
+        verdict = context.verdict(project: project["name"], slug: row[:slug])
+        row[:blocked_by] = verdict.wait? ? verdict.blocked_by : nil
+        row[:dependency_stage] = verdict.wait? ? verdict.dependency_stage : nil
+        row[:blocked] = verdict.blocked?
+        row[:admission_error] = verdict.admission_error
+        return unless verdict.error?
+
+        row[:action_key] = Hive::Schemas::TaskActionKind::ADMISSION_ERROR
+        row[:action_label] = "Admission error"
+        row[:suggested_command] = nil
+        row[:next_action] = nil
+      rescue StandardError => e
+        warn "hive: status: dependency admission failed for #{row[:slug].inspect} " \
+             "(#{e.class}: #{e.message}); holding the row"
+        error = Hive::DependencyAdmission::AdmissionError.new(
+          reason_code: "dependency_validation_failed",
+          offending_ref: "#{project['name']}:#{row[:slug]}",
+          safe_correction: "Inspect project configuration and dependency metadata before retrying."
+        )
         row[:blocked_by] = nil
         row[:dependency_stage] = nil
-        row[:blocked] = false
+        row[:blocked] = true
+        row[:admission_error] = error
+        row[:action_key] = Hive::Schemas::TaskActionKind::ADMISSION_ERROR
+        row[:action_label] = "Admission error"
+        row[:suggested_command] = nil
+        row[:next_action] = nil
       end
 
       def pr_url_for(task)
@@ -915,6 +909,7 @@ module Hive
       end
 
       ACTION_LABEL_ORDER = [
+        "Admission error",
         "Ready to brainstorm",
         # Generic-workflow actions (non-coding descriptors). Sorted high with
         # the other actionable "ready"/"needs" rows so generic status rows
@@ -976,6 +971,7 @@ module Hive
           display_name: nil,
           workflow: nil,
           depends_on: nil,
+          admission_error: nil,
           folder: folder,
           # Schema requires a non-null string; the workflow never resolved, so
           # there's no real state file — point at the folder as a best-effort,

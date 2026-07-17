@@ -6,6 +6,7 @@ require "hive/agent_profiles"
 require "hive/babysitter/interval"
 require "hive/permission_scope"
 require "hive/paths"
+require "hive/repository_identity"
 require "hive/screenote/oauth_client"
 
 module Hive
@@ -977,7 +978,8 @@ module Hive
         out << {
           "name" => entry["name"],
           "path" => abs_path,
-          "hive_state_path" => entry["hive_state_path"] || File.join(abs_path, ".hive-state")
+          "hive_state_path" => entry["hive_state_path"] || File.join(abs_path, ".hive-state"),
+          "repository_identity" => entry["repository_identity"]
         }
       end
     end
@@ -1497,13 +1499,15 @@ module Hive
       defaults
     end
 
-    def register_project(name:, path:)
+    def register_project(name:, path:, repository_identity: :detect)
       entry = nil
       update_global_config! do |data|
         data["registered_projects"] = Array(data["registered_projects"])
         abs_path = File.expand_path(path)
         hive_state_path = File.join(abs_path, ".hive-state")
         entry = { "name" => name, "path" => abs_path, "hive_state_path" => hive_state_path }
+        identity = repository_identity == :detect ? Hive::RepositoryIdentity.current(abs_path) : repository_identity
+        entry["repository_identity"] = identity if identity
         real_path = realpath_or_nil(abs_path)
         entry["real_path"] = real_path if real_path
         existing = data["registered_projects"].find { |p| p.is_a?(Hash) && p["name"] == name }

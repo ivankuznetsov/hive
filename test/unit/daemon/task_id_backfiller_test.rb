@@ -130,6 +130,22 @@ class HiveDaemonTaskIdBackfillerTest < Minitest::Test
     assert_empty backfill_events
   end
 
+  def test_admission_error_row_is_skipped_without_allocating
+    folder = make_task_folder(id: nil)
+    row = make_row(folder)
+    row.admission_error = Hive::DependencyAdmission::AdmissionError.new(
+      reason_code: "dependency_metadata_unreadable",
+      offending_ref: row.slug,
+      safe_correction: "Repair meta.yml."
+    )
+    alloc = FakeAllocator.new(start: 100)
+
+    backfiller(allocate: alloc).backfill([ row ])
+
+    assert_equal 0, alloc.calls
+    assert_nil Hive::TaskMeta.read(folder)[:id]
+  end
+
   def test_dry_run_logs_without_allocating_or_writing
     folder = make_task_folder(id: nil)
     alloc = FakeAllocator.new(start: 100)
@@ -193,7 +209,7 @@ class HiveDaemonTaskIdBackfillerTest < Minitest::Test
     folder = make_task_folder(id: nil)
     alloc = FakeAllocator.new(start: 100)
 
-    with_replaced_singleton_method(Hive::TaskMeta, :read, ->(_f) { raise "boom read" }) do
+    with_replaced_singleton_method(Hive::TaskMeta, :read_for_admission, ->(_f) { raise "boom read" }) do
       backfiller(allocate: alloc).backfill([ make_row(folder) ])
     end
 

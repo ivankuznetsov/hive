@@ -2,6 +2,21 @@ require "test_helper"
 require "hive/config"
 
 class ConfigTest < Minitest::Test
+  def test_registry_round_trips_repository_identity
+    with_tmp_global_config do
+      with_tmp_git_repo do |repo|
+        remote = File.join(File.dirname(repo), "remote.git")
+        FileUtils.mkdir_p(remote)
+        run!("git", "-C", repo, "remote", "add", "origin", remote)
+
+        Hive::Config.register_project(name: "sample", path: repo)
+        entry = Hive::Config.registered_projects.find { |candidate| candidate["name"] == "sample" }
+
+        assert_equal Hive::RepositoryIdentity.normalize(remote), entry["repository_identity"]
+      end
+    end
+  end
+
   include HiveTestHelper
 
   def test_load_returns_defaults_when_no_config_file

@@ -24,6 +24,7 @@ class AgentTest < Minitest::Test
        HIVE_FAKE_CLAUDE_OUTPUT_AFTER_WRITE HIVE_FAKE_CLAUDE_FINAL_OUTPUT
        HIVE_FAKE_CLAUDE_DELAY_BEFORE_WRITE HIVE_FAKE_CLAUDE_DELAY_AFTER_WRITE_OUTPUT
        HIVE_FAKE_CLAUDE_HANG HIVE_FAKE_CLAUDE_IGNORE_TERM HIVE_FAKE_CLAUDE_LOG_DIR
+       HIVE_FAKE_CLAUDE_READY_FILE HIVE_FAKE_CLAUDE_RELEASE_FILE
        HIVE_SCREENOTE_BASE_URL].each { |k| ENV.delete(k) }
   end
 
@@ -194,6 +195,42 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_fake_agent_condition_barrier_announces_readiness_and_waits_for_release
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "")
+      ready = File.join(dir, "barrier", "ready")
+      release = File.join(dir, "barrier", "release")
+      ENV["HIVE_FAKE_CLAUDE_READY_FILE"] = ready
+      ENV["HIVE_FAKE_CLAUDE_RELEASE_FILE"] = release
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = task.state_file
+      ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "## Round 1\n<!-- WAITING -->\n"
+
+      worker = Thread.new do
+        Hive::Agent.new(task: task, prompt: "test", max_budget_usd: 1, timeout_sec: 5).run!
+      end
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 3
+      sleep 0.01 until File.exist?(ready) || Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+
+      assert File.exist?(ready), "fake agent must publish its readiness condition"
+      assert worker.alive?, "fake agent must remain live until the release condition exists"
+
+      FileUtils.mkdir_p(File.dirname(release))
+      File.write(release, "go\n")
+      result = worker.value
+
+      assert_equal :waiting, result[:status]
+      assert_equal :waiting, Hive::Markers.current(task.state_file).name
+    ensure
+      if worker&.alive? && release
+        FileUtils.mkdir_p(File.dirname(release))
+        FileUtils.touch(release)
+        worker.join(2)
+      end
+      worker&.kill if worker&.alive?
+    end
+  end
+
   def test_exception_before_handle_exit_emits_agent_end_with_exception_status
     with_tmp_dir do |dir|
       task = make_task(dir)
@@ -265,6 +302,29 @@ class AgentTest < Minitest::Test
       assert_equal %w[--allowedTools Read,LS], cmd.each_cons(2).find { |a, _| a == "--allowedTools" }
       assert_equal %w[--disallowedTools Write,Bash], cmd.each_cons(2).find { |a, _| a == "--disallowedTools" }
       assert_operator cmd.index("--allowedTools"), :<, cmd.index("--max-budget-usd")
+    end
+  end
+
+  def test_claude_headless_carries_path_qualified_rules_in_dont_ask_mode
+    with_tmp_dir do |dir|
+      agent = Hive::Agent.new(
+        task: make_task(dir),
+        prompt: "test",
+        max_budget_usd: 1,
+        timeout_sec: 5,
+        permission_mode: "dontAsk",
+        allowed_tools: [ "Read", "Edit(//tmp/task/inspect.md)", "Edit(//tmp/project/docs/**)" ],
+        disallowed_tools: %w[Bash]
+      )
+
+      cmd = agent.send(:build_cmd)
+
+      assert_equal %w[--permission-mode dontAsk],
+                   cmd.each_cons(2).find { |arg, _| arg == "--permission-mode" }
+      assert_equal [ "--allowedTools", "Read,Edit(//tmp/task/inspect.md),Edit(//tmp/project/docs/**)" ],
+                   cmd.each_cons(2).find { |arg, _| arg == "--allowedTools" }
+      assert_equal %w[--disallowedTools Bash],
+                   cmd.each_cons(2).find { |arg, _| arg == "--disallowedTools" }
     end
   end
 

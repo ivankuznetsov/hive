@@ -11,6 +11,13 @@ tags: [gap, todo]
 
 ## Current release gap
 
+- Cross-project dependency admission is covered with local-path remotes and
+  anonymized multi-project integration fixtures, including stored/live remote
+  mismatch. It has not yet been dogfooded end-to-end against two separately
+  hosted repositories through daemon dispatch and merge/archive. The current
+  implementation intentionally performs no network identity lookup; it trusts
+  only normalized enrolled/live `origin` strings and fails closed on missing
+  or ambiguous evidence.
 - Durable task attempts are race/unit/integration-pinned and the local Linux
   1849 subprocess replay proves caller-loss survival without a daemon. There
   is not yet a checked-in macOS/BSD detachment run or a paid-provider,
@@ -195,7 +202,7 @@ evidence closing the following June 16 gaps.
 
 ## Release install follow-ups
 
-Latest refresh (2026-07-14): v0.4.2 release-prep source is synchronized in
+Latest refresh (2026-07-17): v0.4.3 release-prep source is synchronized in
 `lib/hive.rb`, both lockfiles, README/install URLs, the changelog, and the
 release-facing wiki pages. This source commit does not itself prove the public
 tag, signed gem/assets, Homebrew/AUR updates, or multi-architecture hivebox
@@ -204,10 +211,10 @@ Historical commit `54fd3455` still provides commit-message evidence for the
 native arm64 GHCR smoke against `ghcr.io/ivankuznetsov/hivebox:0.3.1`.
 Dependency lock uncertainty is unchanged: the root bundle has
 `concurrent-ruby` 1.3.7 and Brakeman 8.0.5, while `web/Gemfile.lock` resolves
-`concurrent-ruby` 1.3.6 and Brakeman 8.0.4; v0.4.2 synchronizes only the local
+`concurrent-ruby` 1.3.6 and Brakeman 8.0.4; v0.4.3 synchronizes only the local
 `hive-cli` path-gem version in that independently resolved web bundle.
 
-1. **Release tag trust remains the main release-channel hardening gap.** Homebrew and AUR publishing are implemented and public install docs now route macOS users to the tap and Arch users to `yay -S hive-bin` (see ADR-032 in [[decisions]], `docs/RELEASING.md`, `README.md`, and `install.md`). The remaining trust gap is that release automation signs and publishes whatever a `vX.Y.Z` tag points at; a GitHub `v*` tag-protection ruleset and/or signed git-tag verification remains the compensating control to record before considering the release chain fully hardened.
+1. **Release tag creation is protected, while signed git-tag verification remains deferred.** Homebrew and AUR publishing are implemented and public install docs route macOS users to the tap and Arch users to `yay -S hive-bin` (see ADR-032 in [[decisions]], `docs/RELEASING.md`, `README.md`, and `install.md`). The live repository has an active `v*` tag ruleset restricting creation, update, deletion, and non-fast-forward changes to the configured repository-role bypass. Release automation still publishes the commit selected by an authorized tag without independently verifying a maintainer cryptographic git-tag signature.
 2. **macOS x86_64 install.sh support remains unsupported.** Current `install.sh` still accepts only `darwin-arm64` on macOS and glibc Linux `x86_64`/`aarch64`; a future follow-up can add best-effort Rosetta behavior once the release smoke matrix covers it.
 3. **Claude/Codex/Pi marketplace publishing is still a companion-package follow-up.** Claude/Codex/Pi marketplace install commands are documented in `install.md` and [[operating]], but agents must not run those commands until `ivankuznetsov/hive-skills` is actually published. This is a separate external publish step from the in-tree OpenClaw bundle in entry 4 below.
 4. **OpenClaw ClawHub listing is published; scan completion evidence is partial.** `openclaw/skills/hive/` is the only public OpenClaw skill source. It publishes to ClawHub as `hive-cli` at `https://clawhub.ai/ivankuznetsov/hive-cli`, installs a slash command named `/hive`, and handles all workflows as `/hive ...` arguments. `/hive setup` guides first-use Hive CLI install/verification, daemon install, and optional project init. The skill now documents `/hive wiki compile-log --check` as the read-only wiki changelog verification path, but no checked-in artifact proves that an installed OpenClaw session delegated that specific subcommand. The public `hive` slug is owned by another publisher, so Hive intentionally uses `hive-cli`; shortcut listings such as `hive-plan`, `hive-work`, or `hive-babysit` are not part of the public surface. The 2026-06-07 wiki log records `clawhub inspect hive-cli --json` reporting `latest: 0.1.1` and clean moderation fields, but also records `clawhub scan --slug hive-cli --version 0.1.1 --json` hanging without returning; no checked-in artifact independently proves a completed scan command.
@@ -349,6 +356,23 @@ before Hive can send TERM. The exact provider context/tokenization is not a
 stable local API, so the reserve is deliberately conservative rather than an
 exact forecast. Recalibrate from captured streams if Claude materially changes
 its headless context or event cadence.
+
+## Four incident e2e fixtures remain sibling-gated (2026-07-17)
+
+All six production-incident sequences are synthetic and parseable. The #9771
+plan-only dependency and repository-routing fixtures now execute as ordinary
+green results against the merged fail-closed contracts. Four remain visible as
+pending entries rather than claimed passes because the current tree does not expose the exact sibling-owned
+contracts needed to activate them: #9767's durable attempt lease and adoption
+reason, #9768's generation identity and reconciliation reason, #9769's
+finalize lifecycle terminal reason, and #9770's retry-owner evidence and bounded
+terminal reason. The harness deliberately does not infer those formats or strings.
+
+Close this gap one fixture at a time after the corresponding sibling lands:
+replace its activation guard with real CLI reconciliation and exact
+state/reason assertions, remove `pending: true`, and keep the report-measured
+runtime below five seconds. Full incident coverage is not complete until the
+incident report contains six ordinary green results and zero pending entries.
 
 ## Areas the wiki could be expanded
 

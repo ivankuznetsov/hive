@@ -56,7 +56,7 @@ steps:
     args: [artifacts, "{slug}", --from, 6-review]
     env:
       HIVE_FAKE_CLAUDE_WRITE_FILE: "{task_dir:7-artifacts}/artifact.md"
-      HIVE_FAKE_CLAUDE_WRITE_CONTENT: "# Artifacts\n\nNo additional artifacts.\n\n<!-- COMPLETE -->\n"
+      HIVE_FAKE_CLAUDE_WRITE_CONTENT: "# Synthetic artifact capture\n\nNo additional artifacts.\n\n<!-- COMPLETE -->\n"
   - kind: state_assert
     path: "{task_dir:7-artifacts}/artifact.md"
     marker: { current: COMPLETE }

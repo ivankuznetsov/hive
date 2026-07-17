@@ -259,6 +259,45 @@ class NewTest < Minitest::Test
     end
   end
 
+  def test_creates_ideas_with_numeric_and_cross_project_dependency_syntax
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        project = File.basename(dir)
+
+        capture_io { Hive::Commands::New.new(project, "numeric dependency", depends_on: "42").call }
+        capture_io do
+          Hive::Commands::New.new(
+            project,
+            "cross project dependency",
+            depends_on: "api:base-task"
+          ).call
+        end
+
+        folders = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "*")]
+        dependencies = folders.map { |folder| Hive::TaskMeta.read(folder)[:depends_on] }
+        assert_includes dependencies, "42"
+        assert_includes dependencies, "api:base-task"
+      end
+    end
+  end
+
+  def test_rejects_numeric_cross_project_dependency
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        setup_project { initialize_project(dir) }
+        project = File.basename(dir)
+
+        _, err, status = with_captured_exit do
+          Hive::Commands::New.new(project, "bad cross dependency", depends_on: "api:42").call
+        end
+
+        assert_equal 1, status
+        assert_includes err, "project:slug"
+      end
+    end
+  end
+
   def test_rejects_invalid_dependency
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

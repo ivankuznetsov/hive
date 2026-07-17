@@ -4,10 +4,15 @@ type: command
 source: lib/hive/commands/run.rb
 created: 2026-04-25
 updated: 2026-07-16
-tags: [command, dispatcher, stages, json, rebase]
+tags: [command, dispatcher, stages, json, rebase, dependencies, admission]
 ---
 
-**TLDR**: `hive run TARGET` resolves a task generation into a durable attempt, launches or attaches to its detached supervisor, streams output read-only, and returns the wrapper receipt's exit status. Inside the wrapper, the existing worker still takes task/project locks, runs auto-rebase and the stage runner, commits state, and reports the marker/next hint. Caller or daemon exit does not cancel accepted work.
+**TLDR**: `hive run TARGET` resolves a task generation into a durable attempt,
+launches or attaches to its detached supervisor (or replays its receipt),
+streams output read-only, and returns the receipt's exit status. Inside the
+wrapper, the worker takes the task lock and revalidates dependency admission
+from disk before loading config, rebasing, or invoking the stage runner.
+Caller or daemon exit does not cancel accepted work.
 
 ## Usage
 
@@ -30,18 +35,34 @@ hive run <project>/.hive-state/stages/<N>-<stage>/<slug> [--json] [--no-rebase]
 3. A detached wrapper claims and heartbeats before it starts
    `hive run <exact-folder>` in internal attempt context. Client interruption
    detaches only.
-4. The internal worker acquires the task lock. Concurrent legacy work still
-   raises `ConcurrentRunError` (75/TEMPFAIL).
-5. It handles `MANUAL_STEERING`, performs fail-soft auto-rebase, resolves and
-   runs the stage/provider, and emits stage events.
-6. If `result[:commit]`, it takes the project commit lock and commits state.
+4. The internal worker acquires the task lock. Concurrent legacy work raises
+   `ConcurrentRunError` (75/TEMPFAIL).
+5. While holding that lock, it builds a fresh all-project snapshot and calls
+   `DependencySnapshot.enforce_admission!`. A valid below-gate prerequisite
+   raises retryable `DependencyWaitError` (75); invalid evidence raises
+   non-retryable `DependencyAdmissionError` (78). Neither path reaches the
+   internal worker's config load, rebase/worktree operations, or runner, and
+   `--no-rebase` does not bypass the gate.
+6. It loads merged config, handles `MANUAL_STEERING`, performs fail-soft
+   auto-rebase, resolves and runs the stage/provider, and emits stage events.
+7. If `result[:commit]`, it takes the project commit lock and commits state.
    New locks/markers contain optional attempt/generation projections.
-7. The wrapper captures exit and atomically writes a
+8. The wrapper captures exit and atomically writes a
    succeeded/failed/cancelled receipt. The client returns that exit status
    while preserving text/JSON output.
 
 See [[modules/attempts]] for lease states, timers, duplicates, and loss
 recovery.
+
+## Dependency admission errors
+
+`hive-run` schema v2 error envelopes add `error_kind: "dependency_wait"` or
+`"admission_error"`. Both include `reason_code`, `offending_ref`, and
+`safe_correction`; waits use reason `dependency_wait`, while admission errors
+use the closed codes documented in [[modules/task_dependencies]]. The envelope
+is emitted before the typed exception propagates, so automation receives both
+machine-readable context and the exit code. `--force` is not a run option and
+workflow-verb composition cannot bypass this check.
 
 ## Auto-rebase pre-step (`Hive::Rebase.perform`)
 
@@ -98,7 +119,7 @@ Protected-file basename guard (originally present pre-merge) was **removed** dur
 }
 ```
 
-`reason` is `null` on success and a snake-case string (closed enum, validated by `schemas/hive-run.v1.json`) otherwise. The full set:
+`reason` is `null` on success and a snake-case string (closed enum, validated by `schemas/hive-run.v2.json`) otherwise. The full set:
 
 | Reason | Meaning |
 |--------|---------|
@@ -183,6 +204,7 @@ Per-stage integration tests exercise the dispatcher end-to-end:
 - `test/integration/run_finalize_test.rb`
 - `test/integration/run_done_test.rb`
 - `test/integration/full_flow_test.rb` (chains all stages)
+- `test/integration/dependency_admission_test.rb` (lock-boundary plan drift and repository mismatch; no rebase/runner side effects)
 
 ## Backlinks
 

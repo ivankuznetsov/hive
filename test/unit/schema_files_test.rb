@@ -121,7 +121,8 @@ class SchemaFilesTest < Minitest::Test
 
     producer_kinds = %w[
       ambiguous_slug destination_collision final_stage
-      wrong_stage rollback_failed invalid_task_path error
+      wrong_stage rollback_failed invalid_task_path dependency_wait
+      admission_error error
     ].sort
 
     assert_equal producer_kinds, schema_kinds,
@@ -146,8 +147,14 @@ class SchemaFilesTest < Minitest::Test
     assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
     assert_equal "hive-status",
                  doc.dig("$defs", "SuccessPayload", "properties", "schema", "const")
-    assert_equal 4,
+    assert_equal 5,
                  doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+  end
+
+  def test_hive_status_v4_schema_remains_for_back_compat
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status", version: 4)))
+    assert_equal 4, doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+    refute_includes doc.dig("$defs", "Task", "properties").keys, "admission_error"
   end
 
   def test_hive_status_v1_schema_remains_for_back_compat
@@ -190,6 +197,7 @@ class SchemaFilesTest < Minitest::Test
       blocked_by: nil,
       dependency_stage: nil,
       blocked: false,
+      admission_error: nil,
       folder: "/tmp/probe",
       state_file: "/tmp/probe/idea.md",
       pr_url: nil,
@@ -228,6 +236,23 @@ class SchemaFilesTest < Minitest::Test
                  doc.dig("$defs", "Task", "properties", "marker", "enum").sort
     assert_equal Hive::Schemas::TaskActionKind::ALL.sort,
                  doc.dig("$defs", "Task", "properties", "action", "enum").sort
+  end
+
+  def test_hive_status_admission_error_is_closed_and_matches_reason_codes
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status")))
+    definition = doc.dig("$defs", "AdmissionError")
+    assert_equal Hive::DependencyAdmission::REASON_CODES.sort,
+                 definition.dig("properties", "reason_code", "enum").sort
+
+    schemer = JSONSchemer.schema(definition)
+    valid = {
+      "reason_code" => "dependency_cycle",
+      "offending_ref" => "app:a -> app:b -> app:a",
+      "safe_correction" => "Break the cycle."
+    }
+    assert schemer.valid?(valid)
+    refute schemer.valid?(valid.merge("reason_code" => "unknown_reason"))
+    refute schemer.valid?(valid.merge("extra" => true))
   end
 
   def test_hive_status_schema_matches_tui_snapshot_row_keys
@@ -343,6 +368,7 @@ class SchemaFilesTest < Minitest::Test
       blocked_by: "base-task",
       dependency_stage: "7-artifacts",
       blocked: true,
+      admission_error: nil,
       folder: "/tmp/review-task",
       state_file: "/tmp/review-task/task.md",
       marker_name: :review_waiting,
@@ -803,6 +829,13 @@ class SchemaFilesTest < Minitest::Test
         candidates: [ { project: "alpha", stage: "2-brainstorm", folder: "/tmp/probe" } ]
       ),
       Hive::Schemas::RunErrorKind::INVALID_TASK_PATH => Hive::InvalidTaskPath.new("no such slug"),
+      Hive::Schemas::RunErrorKind::DEPENDENCY_WAIT => Hive::DependencyWaitError.new(
+        "waiting", offending_ref: "base", safe_correction: "Wait for base."
+      ),
+      Hive::Schemas::RunErrorKind::ADMISSION_ERROR => Hive::DependencyAdmissionError.new(
+        "invalid", reason_code: "dependency_cycle", offending_ref: "p:a -> p:a",
+        safe_correction: "Break the cycle."
+      ),
       Hive::Schemas::RunErrorKind::INTERNAL          => Hive::InternalError.new("internal bug"),
       Hive::Schemas::RunErrorKind::ERROR             => Hive::Error.new("plain")
     }

@@ -886,6 +886,13 @@ class BabysitterDryRunEnvTest < Minitest::Test
       # must still be seen as a method/payload so the mutating call is skipped, not exec'd.
       assert_stubbed env, "gh", "api", "-iX", "POST", "repos/owner/repo/dispatches"
       assert_stubbed env, "gh", "api", "repos/owner/repo/issues/123/comments", "-if", "body=hi"
+      [
+        %w[api -XPOST repos/owner/repo/issues], %w[api -X=POST repos/owner/repo/issues],
+        %w[api --method=POST repos/owner/repo/issues], %w[api repos/owner/repo/issues -fbody=hi],
+        %w[api repos/owner/repo/issues --raw-field=body=hi], %w[api repos/owner/repo/issues -Fbody=hi],
+        %w[api repos/owner/repo/issues --field=body=hi], %w[auth status --show-token=true],
+        %w[auth status -t=true]
+      ].each { |args| assert_stubbed env, "gh", *args }
       # An scp-style `git@host:owner/repo` carries a host through a single-slash
       # `--repo`/`-R` value, so the colon (not just `://` or the slash count) must
       # disqualify it.
@@ -922,6 +929,12 @@ class BabysitterDryRunEnvTest < Minitest::Test
       assert_passes env, "gh", "api", "-ip", "shadow-cat", "repos/owner/repo"
       assert_passes env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-f", "state=open"
       assert_passes env, "gh", "api", "--method", "GET", "repos/owner/repo/issues", "-F", "state=open"
+      [
+        %w[api -XGET repos/owner/repo/issues -fstate=open],
+        %w[api -X=GET repos/owner/repo/issues --raw-field=state=open],
+        %w[api --method=GET repos/owner/repo/issues -Fstate=open],
+        %w[api --method=GET repos/owner/repo/issues --field=state=open]
+      ].each { |args| assert_passes env, "gh", *args }
       %w[--method=GET -XGET -X=GET].each do |method|
         assert_passes env, "gh", "api", method, "repos/owner/repo/issues"
       end

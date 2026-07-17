@@ -598,7 +598,7 @@ module Hive
 
       # Case A (issue #320): the review parent still holds a verified-live
       # .lock but its Claude child died — terminate the wedged holder,
-      # drop the lock, and clear the marker so the daemon retries review.
+      # claim the lock, and clear the marker so the daemon retries review.
       def heal_wedged_review_row(row)
         return unless row.claude_pid_alive == false
 
@@ -613,8 +613,13 @@ module Hive
           purge_history: true
         )
 
+        # The verified-live old holder fences normal runners while the marker
+        # generation is checked and cleared. After terminating it, claim and
+        # release the task lock to remove only that now-stale generation. If a
+        # new runner wins the acquire race, its live lock remains untouched.
         terminate_lock_holder(holder)
-        release_task_lock(row)
+        with_review_heal_lock(row, reason: "review_agent_died") { true }
+
         @logger.event(:marker_healed,
                       project: row.project,
                       slug: row.slug,
@@ -644,21 +649,25 @@ module Hive
       # nothing else reconciles this. Past the grace window — so we don't
       # race a runner that just set REVIEW_WORKING but hasn't recorded its
       # lock yet (controller.running_task? already excludes in-process
-      # dispatches) — clear the marker and drop any stale .lock so the
-      # daemon re-dispatches review under normal concurrency control.
+      # dispatches) — claim the task lock, clear the marker, and release our
+      # claim so the daemon re-dispatches review under normal concurrency
+      # control. Claiming closes the stale-status race where an external run
+      # acquires a fresh .lock between the status snapshot and this heal.
       def heal_orphaned_review_row(row, now:)
         mtime = row.state_file_mtime
         return unless mtime && (now - mtime) > @grace_sec
 
         marker_attrs = review_marker_attrs(row)
-        return unless Hive::Markers.clear_current(
-          row.state_file,
-          expected_name: :review_working,
-          match_attrs: marker_attrs,
-          purge_history: true
-        )
+        cleared = with_review_heal_lock(row, reason: "review_orphaned") do
+          Hive::Markers.clear_current(
+            row.state_file,
+            expected_name: :review_working,
+            match_attrs: marker_attrs,
+            purge_history: true
+          )
+        end
+        return unless cleared
 
-        release_task_lock(row)
         @logger.event(:marker_healed,
                       project: row.project,
                       slug: row.slug,
@@ -745,19 +754,17 @@ module Hive
         nil
       end
 
-      def release_task_lock(row)
-        File.delete(File.join(row.folder.to_s, ".lock"))
-      rescue Errno::ENOENT
-        nil
-      rescue SystemCallError
-        # The marker heal has already succeeded by the time we drop the
-        # lock. A stale .lock we cannot delete (EACCES, EROFS, EISDIR, …)
-        # is non-fatal residue, not a failed heal — swallow it so it does
-        # not propagate to the caller's rescue and mislabel a succeeded
-        # heal as `marker_heal_failed` (which would also suppress the
-        # `marker_healed` success event). A later tick or the next
-        # dispatch reconciles the leaked lock.
-        nil
+      def with_review_heal_lock(row, reason:)
+        Hive::Lock.with_task_lock(
+          row.folder.to_s,
+          "owner" => "stale_agent_healer",
+          "reason" => reason
+        ) { yield }
+      rescue Hive::ConcurrentRunError
+        # A runner acquired the task after this tick's status snapshot.
+        # Leave both its lock and the marker untouched; the next tick will
+        # reconcile the new generation.
+        false
       end
 
       def classify_stale(row, now:)

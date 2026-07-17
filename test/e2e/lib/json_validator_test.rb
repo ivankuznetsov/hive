@@ -8,6 +8,26 @@ class E2EJsonValidatorTest < Minitest::Test
       "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
       "ok" => true,
       "generated_at" => Time.now.utc.iso8601,
+      "scheduler" => {
+        "summary" => "0/0 task slots used; 0 unused (fully utilized).",
+        "as_of" => Time.now.utc.iso8601,
+        "configured_slots" => 0,
+        "used_slots" => 0,
+        "unused_slots" => 0,
+        "owners" => [],
+        "eligible_candidate_count" => 0,
+        "causal_buckets" => [],
+        "prior_causal_buckets" => [],
+        "heartbeat_at" => nil,
+        "snapshot_age_sec" => nil,
+        "stale" => true,
+        "unavailable_live_claims" => %w[
+          capacity provider_route queue_position scheduler_decision scheduler_snapshot
+        ],
+        "health" => "ok",
+        "accounting_errors" => [],
+        "action" => { "kind" => "wait", "text" => "No fleet-level intervention is required." }
+      },
       "projects" => []
     }
 

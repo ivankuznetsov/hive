@@ -63,6 +63,14 @@ steps:
       FileUtils.mkdir_p(File.dirname(target))
       FileUtils.mv(source, target)
       File.write(File.join(target, "pr.md"), "# Prerequisite at dependency gate\n\n<!-- COMPLETE -->\n")
+      dependent = File.join(sandbox, ".hive-state", "stages", "4-execute", "synthetic-dependent-task", "task.md")
+      File.open(dependent, "a") { |file| file.write("\nDependency gate re-observed after prerequisite advance.\n") }
+      hive_state = File.join(sandbox, ".hive-state")
+      system("git", "-C", hive_state, "add", "stages", out: File::NULL, exception: true)
+      system(
+        "git", "-C", hive_state, "commit", "-m", "test: advance prerequisite to dependency gate",
+        out: File::NULL, exception: true
+      )
 
   - kind: cli
     description: Crossing the gate releases exactly one real execute dispatch.

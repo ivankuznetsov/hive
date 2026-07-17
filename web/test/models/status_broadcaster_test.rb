@@ -31,6 +31,7 @@ class StatusBroadcasterTest < ActiveSupport::TestCase
     StatusBroadcaster.feed = feed
     delivered = Queue.new
     calls = 0
+    original_broadcast = StatusBroadcaster.method(:broadcast)
     StatusBroadcaster.define_singleton_method(:broadcast) do |payload|
       calls += 1
       raise "boom" if calls == 1
@@ -50,7 +51,7 @@ class StatusBroadcasterTest < ActiveSupport::TestCase
     assert_equal [ { "name" => "b" } ], payload["projects"],
                  "the broadcast after the failure must still be delivered"
   ensure
-    StatusBroadcaster.singleton_class.remove_method(:broadcast)
+    StatusBroadcaster.define_singleton_method(:broadcast, original_broadcast) if original_broadcast
     StatusBroadcaster.send(:remove_const, :RETRY_SEC)
     StatusBroadcaster.const_set(:RETRY_SEC, original_retry)
   end
@@ -67,13 +68,16 @@ class StatusBroadcasterTest < ActiveSupport::TestCase
       replacement = [ args, kwargs ]
     end
 
-    Turbo::StreamsChannel.stub(:broadcast_refresh_to, refresh) do
-      Turbo::StreamsChannel.stub(:broadcast_replace_to, replace) do
-        StatusBroadcaster.send(:broadcast, payload)
-      end
-    end
+    original_refresh = Turbo::StreamsChannel.method(:broadcast_refresh_to)
+    original_replace = Turbo::StreamsChannel.method(:broadcast_replace_to)
+    Turbo::StreamsChannel.define_singleton_method(:broadcast_refresh_to, refresh)
+    Turbo::StreamsChannel.define_singleton_method(:broadcast_replace_to, replace)
+    StatusBroadcaster.send(:broadcast, payload)
 
     assert_equal payload["projects"], replacement.last.dig(:locals, :projects)
     assert_equal payload["scheduler"], replacement.last.dig(:locals, :scheduler)
+  ensure
+    Turbo::StreamsChannel.define_singleton_method(:broadcast_refresh_to, original_refresh) if original_refresh
+    Turbo::StreamsChannel.define_singleton_method(:broadcast_replace_to, original_replace) if original_replace
   end
 end

@@ -193,6 +193,17 @@
         "live_task_lock",
         "attempt_id",
         "task_generation",
+        "condition_task_generation",
+        "commit_generation",
+        "current_attempt",
+        "conditions",
+        "condition_history",
+        "evidence",
+        "condition_gate",
+        "condition_migration",
+        "condition_provenance",
+        "shadow_audit",
+        "condition_warning",
         "unanswered_questions",
         "action",
         "action_label",
@@ -365,6 +376,58 @@
         },
         "task_generation": {
           "description": "Durable task-generation owner projected into the compatibility lock, or null for legacy work.",
+          "type": [ "string", "null" ]
+        },
+        "condition_task_generation": {
+          "description": "Monotonic condition input epoch from the canonical task projection.",
+          "type": [ "integer", "null" ],
+          "minimum": 0
+        },
+        "commit_generation": {
+          "description": "Monotonic exact-HEAD revision within the condition task generation.",
+          "type": [ "integer", "null" ],
+          "minimum": 0
+        },
+        "current_attempt": {
+          "description": "Current durable attempt selected by the condition projection, or null before handoff.",
+          "type": [ "string", "null" ]
+        },
+        "conditions": {
+          "description": "Current condition facts selected by generation, attempt family, and commit scope.",
+          "type": "array",
+          "items": { "type": "object", "additionalProperties": true }
+        },
+        "condition_history": {
+          "description": "Historical and superseded condition facts retained for audit.",
+          "type": "array",
+          "items": { "type": "object", "additionalProperties": true }
+        },
+        "evidence": {
+          "description": "Typed evidence referenced by current condition facts.",
+          "type": "array",
+          "items": { "type": "object", "additionalProperties": true }
+        },
+        "condition_gate": {
+          "description": "Canonical gate evaluation for the row's condition-capable transition, or null.",
+          "type": [ "object", "null" ],
+          "additionalProperties": true
+        },
+        "condition_migration": {
+          "description": "Configured/effective marker-shadow-condition authority selection, or null for invalid rows.",
+          "type": [ "object", "null" ],
+          "additionalProperties": true
+        },
+        "condition_provenance": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "shadow_audit": {
+          "description": "Read-only parity evidence and explicit promotion-readiness summary.",
+          "type": "object",
+          "additionalProperties": true
+        },
+        "condition_warning": {
+          "description": "Operator-visible shadow divergence warning, or null.",
           "type": [ "string", "null" ]
         },
         "unanswered_questions": {

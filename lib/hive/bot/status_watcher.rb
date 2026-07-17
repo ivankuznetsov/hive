@@ -7,12 +7,20 @@ module Hive
     class StatusWatcher
       Row = Data.define(:project, :project_path, :hive_state_path, :slug, :id, :display_name, :stage, :workflow, :marker,
                         :attrs, :folder, :state_file, :pr_url, :state_file_mtime, :age_seconds,
-                        :action, :action_label, :suggested_command, :next_action, :diagnostic) do
+                        :action, :action_label, :suggested_command, :next_action, :diagnostic,
+                        :condition_task_generation, :commit_generation, :current_attempt,
+                        :conditions, :condition_history, :evidence, :condition_gate,
+                        :condition_migration, :condition_provenance, :shadow_audit,
+                        :condition_warning) do
         def initialize(project:, slug:, id: nil, display_name: nil, project_path: nil, hive_state_path: nil,
                        stage: nil, workflow: nil, marker: nil, attrs: {}, folder: nil,
                        state_file: nil, pr_url: nil, state_file_mtime: nil, age_seconds: nil,
                        action: nil, action_label: nil, suggested_command: nil,
-                       next_action: nil, diagnostic: nil)
+                       next_action: nil, diagnostic: nil, condition_task_generation: nil,
+                       commit_generation: nil, current_attempt: nil, conditions: [],
+                       condition_history: [], evidence: [], condition_gate: nil,
+                       condition_migration: nil, condition_provenance: {}, shadow_audit: {},
+                       condition_warning: nil)
           # Explicit-keyword super (matching Snapshot::Row) rather than the
           # bare positional form, so a future member-order change in the
           # Data.define above can't silently misbind constructor arguments.
@@ -22,7 +30,13 @@ module Hive
             attrs: attrs, folder: folder, state_file: state_file, pr_url: pr_url,
             state_file_mtime: state_file_mtime, age_seconds: age_seconds, action: action,
             action_label: action_label, suggested_command: suggested_command,
-            next_action: next_action, diagnostic: diagnostic
+            next_action: next_action, diagnostic: diagnostic,
+            condition_task_generation: condition_task_generation,
+            commit_generation: commit_generation, current_attempt: current_attempt,
+            conditions: conditions, condition_history: condition_history, evidence: evidence,
+            condition_gate: condition_gate, condition_migration: condition_migration,
+            condition_provenance: condition_provenance, shadow_audit: shadow_audit,
+            condition_warning: condition_warning
           )
         end
       end
@@ -293,7 +307,18 @@ module Hive
               action_label: task["action_label"],
               suggested_command: task["suggested_command"],
               next_action: task["next_action"],
-              diagnostic: task["diagnostic"]
+              diagnostic: task["diagnostic"],
+              condition_task_generation: task["condition_task_generation"],
+              commit_generation: task["commit_generation"],
+              current_attempt: task["current_attempt"],
+              conditions: Array(task["conditions"]),
+              condition_history: Array(task["condition_history"]),
+              evidence: Array(task["evidence"]),
+              condition_gate: task["condition_gate"],
+              condition_migration: task["condition_migration"],
+              condition_provenance: task["condition_provenance"] || {},
+              shadow_audit: task["shadow_audit"] || {},
+              condition_warning: task["condition_warning"]
             )
           end
         end

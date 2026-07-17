@@ -14,6 +14,7 @@ require "hive/diagnostic_evidence"
 require "hive/diagnostic_helpers"
 require "hive/secret_patterns"
 require "hive/task_action"
+require "hive/task_projection/store"
 require "hive/task_resolver"
 require "hive/brainstorm_parser"
 require "hive/gh"
@@ -208,7 +209,11 @@ module Hive
             # JSON path: pay the diagnostic-extraction cost because
             # external consumers (TUI, daemon, bots) read `diagnostic` off
             # every row. Schema mandates the field.
-            rows = annotate_actions(collect_rows(hive_state, stages: stages, exclude_archived: exclude_archived), project, project_count, with_diagnostic: true)
+            config = Hive::Config.load(path)
+            rows = annotate_actions(
+              collect_rows(hive_state, stages: stages, exclude_archived: exclude_archived),
+              project, project_count, config: config, with_diagnostic: true
+            )
             rows = annotate_dependencies(rows, project, extra_dependency_tasks: extra_dependency_tasks)
             rows = archive_rows(rows) if @archive
             out = base.merge("tasks" => rows.map { |r| task_payload(r) })
@@ -294,6 +299,17 @@ module Hive
           "live_task_lock" => row[:live_task_lock] == true,
           "attempt_id" => row[:attempt_id],
           "task_generation" => row[:task_generation],
+          "condition_task_generation" => row.dig(:projection_data, "identity", "task_generation"),
+          "commit_generation" => row.dig(:projection_data, "identity", "commit_generation"),
+          "current_attempt" => row.dig(:projection_data, "identity", "attempt_id"),
+          "conditions" => row.dig(:projection_data, "conditions", "current") || [],
+          "condition_history" => row.dig(:projection_data, "conditions", "history") || [],
+          "evidence" => row.dig(:projection_data, "evidence") || [],
+          "condition_gate" => row[:condition_gate],
+          "condition_migration" => row[:condition_migration],
+          "condition_provenance" => row.dig(:projection_data, "provenance") || {},
+          "shadow_audit" => row.dig(:projection_data, "shadow_audit") || {},
+          "condition_warning" => row[:condition_warning],
           # Count of still-unanswered brainstorm Q&A questions (issue #270).
           # 0 for every non-brainstorm / non-needs_input row. Lets an agent
           # or operator tell "the daemon is holding this brainstorm because
@@ -349,7 +365,10 @@ module Hive
         # result of, so the shadowing doesn't obscure intent at the call sites.
         marker_summary_text = marker_summary(marker)
         liveness = liveness_kwargs_for(task)
-        action = Hive::TaskAction.for(task, marker, project_name: project_name_for(task), **liveness)
+        config = Hive::Config.load(task.project_root)
+        action = Hive::TaskAction.for(
+          task, marker, config: config, project_name: project_name_for(task), **liveness
+        )
         diagnostic = action.diagnostic
 
         if @write
@@ -376,7 +395,9 @@ module Hive
 
           require "hive/diagnosis_agent"
           result = Hive::DiagnosisAgent.run!(task: task, local_diagnostic: diagnostic)
-          diagnostic = Hive::TaskAction.for(task, marker, project_name: project_name_for(task), **liveness).diagnostic
+          diagnostic = Hive::TaskAction.for(
+            task, marker, config: config, project_name: project_name_for(task), **liveness
+          ).diagnostic
           emit_diagnose_result(task, diagnostic, result[:path], marker_summary: marker_summary_text)
         else
           if diagnostic.nil?
@@ -518,7 +539,10 @@ module Hive
         # only — `diagnostic` is unused here, so skip the bounded file-
         # I/O that TaskAction#diagnostic performs per red row. JSON path
         # still pays the full cost via project_payload.
-        rows = annotate_actions(collect_rows(hive_state), project, project_count, with_diagnostic: false)
+        rows = annotate_actions(
+          collect_rows(hive_state), project, project_count,
+          config: Hive::Config.load(path), with_diagnostic: false
+        )
         rows = annotate_dependencies(rows, project)
         if @archive
           render_archive_project(project, rows)
@@ -671,6 +695,7 @@ module Hive
                 next
               end
               marker = Hive::Markers.current(task.state_file)
+              projection = Hive::TaskProjection::Store.new(task_folder: task.folder).read(marker: marker)
               folder_mtime = File.mtime(entry)
               mtime = File.exist?(task.state_file) ? File.mtime(task.state_file) : folder_mtime
               lock_holder = task_lock_holder(task)
@@ -701,6 +726,8 @@ module Hive
                 task: task,
                 marker_name: marker.name,
                 marker_attrs: marker.attrs,
+                projection: projection,
+                projection_data: projection.to_h,
                 icon: icon,
                 state_label: state_label,
                 mtime: mtime,
@@ -995,7 +1022,12 @@ module Hive
           claude_pid_alive: nil,
           live_task_lock: false,
           attempt_id: nil,
-          task_generation: nil
+          task_generation: nil,
+          projection: Hive::TaskProjection.project(records: []),
+          projection_data: Hive::TaskProjection.project(records: []).to_h,
+          condition_gate: nil,
+          condition_migration: nil,
+          condition_warning: nil
         }
       end
 
@@ -1011,7 +1043,7 @@ module Hive
         )
       end
 
-      def annotate_actions(rows, project, project_count, with_diagnostic: true)
+      def annotate_actions(rows, project, project_count, config: nil, with_diagnostic: true)
         slug_counts = rows.each_with_object(Hash.new(0)) { |row, counts| counts[row[:slug]] += 1 }
         grace_sec = agent_marker_grace_sec_from_config
         rows.map do |row|
@@ -1020,6 +1052,8 @@ module Hive
           action = Hive::TaskAction.for(
             row[:task],
             marker_from_row(row),
+            projection: row[:projection],
+            config: config,
             project_name: project["name"],
             project_count: project_count,
             stage_collision: slug_counts[row[:slug]] > 1,
@@ -1033,9 +1067,23 @@ module Hive
             action_label: action.label,
             suggested_command: action.command,
             next_action: action.next_action,
-            diagnostic: with_diagnostic ? action.diagnostic : nil
+            diagnostic: with_diagnostic ? action.diagnostic : nil,
+            condition_gate: action.condition_gate&.to_h,
+            condition_migration: action.migration_selection.to_h,
+            condition_warning: action.condition_warning,
+            state_label: condition_state_label(row, action)
           )
         end
+      end
+
+      def condition_state_label(row, action)
+        return "#{row[:state_label]} [#{action.condition_warning}]" if action.condition_warning
+        return row[:state_label] unless action.migration_selection.effective == "conditions"
+
+        diagnostic = action.condition_gate&.diagnostics&.first
+        return row[:state_label] unless diagnostic
+
+        "#{diagnostic['condition']}=#{diagnostic['state']}"
       end
 
       # Memoize per status call. The daemon's StaleAgentHealer reads the

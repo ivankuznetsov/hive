@@ -6,6 +6,10 @@ require "hive/agent_profiles"
 require "hive/stages"
 require "hive/workflows"
 require "hive/task_action/diagnostic"
+require "hive/conditions/gate_evaluator"
+require "hive/conditions/migration"
+require "hive/task_projection/store"
+require "hive/markers"
 
 module Hive
   # Classifier that turns a (Task, Marker) pair into a user-facing
@@ -181,7 +185,7 @@ module Hive
       }
     }.freeze
 
-    attr_reader :task, :marker, :project_name
+    attr_reader :task, :marker, :project_name, :projection
 
     # Default grace window for placeholder AGENT_WORKING markers (no PID
     # attribute) before they classify as orphaned. Mirrors the daemon's
@@ -190,12 +194,16 @@ module Hive
     # synthetic classification done here. Configurable per-instance.
     DEFAULT_AGENT_MARKER_GRACE_SEC = 300
 
-    def initialize(task, marker, project_name: nil, project_count: 1, stage_collision: false,
+    def initialize(task, marker = nil, projection: nil, config: nil,
+                   project_name: nil, project_count: 1, stage_collision: false,
                    pid_alive: nil, state_file_mtime: nil,
                    agent_marker_grace_sec: DEFAULT_AGENT_MARKER_GRACE_SEC,
                    live_task_lock: false)
       @task = task
-      @marker = marker
+      @projection = projection || load_projection(marker)
+      @marker = projected_marker(@projection) || marker ||
+                Hive::Markers::State.new(name: :none, attrs: {}, raw: nil)
+      @config = config || { "conditions" => { "authority" => "markers", "stages" => {} } }
       @project_name = project_name
       @project_count = project_count
       @stage_collision = stage_collision
@@ -205,7 +213,7 @@ module Hive
       @live_task_lock = live_task_lock
     end
 
-    def self.for(task, marker, **)
+    def self.for(task, marker = nil, **)
       new(task, marker, **)
     end
 
@@ -260,6 +268,28 @@ module Hive
         "command" => command,
         "next_action" => next_action
       }
+    end
+
+    def migration_selection
+      @migration_selection ||= Hive::Conditions::Migration.selection(
+        config: @config, stage: "#{task.stage_index}-#{task.stage_name}",
+        projection: projection
+      )
+    end
+
+    def condition_gate
+      return nil unless task.stage_name == "execute"
+
+      @condition_gate ||= Hive::Conditions::GateEvaluator.new(
+        projection: projection, rule: execute_condition_rule
+      ).evaluate(research: research_execution?, research_evidence: research_evidence?)
+    end
+
+    def condition_warning
+      return nil unless migration_selection.effective == "shadow"
+      return nil unless projection.to_h.dig("shadow_audit", "unexplained_mismatches").to_i.positive?
+
+      "condition shadow mismatch"
     end
 
     private
@@ -433,6 +463,10 @@ module Hive
     end
 
     def execute_action
+      if migration_selection.effective == "conditions"
+        return condition_gate.eligible? ? ACTIONS.fetch(:execute_complete) : ACTIONS.fetch(:execute_waiting)
+      end
+
       case marker.name
       when :execute_complete, :complete
         ACTIONS.fetch(:execute_complete)
@@ -456,6 +490,54 @@ module Hive
         # Policy than presuming the stage is runnable.
         ACTIONS.fetch(:error)
       end
+    end
+
+    def execute_condition_rule
+      workflow_stage&.condition_policy ||
+        Hive::Conditions::Policy.default.rule_for("execute_to_open_pr")
+    end
+
+    def research_execution?
+      path = File.join(task.folder, "plan.md")
+      return false unless File.file?(path)
+
+      frontmatter = File.read(path).match(/\A---\s*\n(.*?)\n---\s*\n/m)&.captures&.first
+      data = frontmatter && YAML.safe_load(frontmatter)
+      data.is_a?(Hash) && data["execution_mode"].to_s == "research"
+    rescue Psych::Exception, SystemCallError
+      false
+    end
+
+    def research_evidence?
+      return false unless research_execution?
+      return true if marker.name == :execute_complete && marker.attrs["mode"] == "research"
+
+      File.read(task.state_file).match?(/^## Execute Output\s*$\n\s*\S/m)
+    rescue SystemCallError
+      false
+    end
+
+    def load_projection(marker)
+      folder = task.respond_to?(:folder) && task.folder
+      if folder
+        Hive::TaskProjection::Store.new(task_folder: folder).read(marker: marker)
+      else
+        Hive::TaskProjection.project(records: [], marker: marker)
+      end
+    rescue Hive::TaskProjection::Error, SystemCallError
+      Hive::TaskProjection.project(records: [], marker: marker)
+    end
+
+    def projected_marker(value)
+      data = value.respond_to?(:to_h) ? value.to_h : value
+      compatibility = data&.dig("compatibility", "marker") ||
+                      data&.dig("compatibility", "marker_fallback")
+      return nil unless compatibility
+
+      Hive::Markers::State.new(
+        name: compatibility.fetch("name").to_sym,
+        attrs: compatibility.fetch("attrs", {}), raw: nil
+      )
     end
 
     def plan_action

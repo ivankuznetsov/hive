@@ -20,7 +20,7 @@ module Hive
             "slug" => task.slug.to_s
           },
           workflow: "coding",
-          stage: "4-execute",
+          stage: "4-execute", # coding-scoped: rollout evidence is limited to coding execute
           attempt_id: attempt.attempt_id,
           task_generation: task_generation,
           ownership_generation: attempt.ownership_generation,

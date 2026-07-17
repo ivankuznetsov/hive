@@ -33,19 +33,19 @@ module Hive
           registry.register(
             "AgentHealthy", family: "agent_health", supersession_family: "agent_health",
             scope: :attempt, allowed_evidence: %i[attempt_lease journal_event],
-            gate_role: :requirement, authoritative_stages: [ "4-execute" ],
+            gate_role: :requirement, authoritative_stages: [ "4-execute" ], # coding-scoped: increment 1 gate
             default_transitions: [ "execute_active" ]
           )
           registry.register(
             "ChangesPresent", family: "changes_present", supersession_family: "execute_outcome",
             scope: :commit, allowed_evidence: %i[commit journal_event file],
-            gate_role: :requirement, authoritative_stages: [ "4-execute" ],
+            gate_role: :requirement, authoritative_stages: [ "4-execute" ], # coding-scoped: increment 1 gate
             default_transitions: [ "execute_to_open_pr" ]
           )
           registry.register(
             "AwaitingHuman", family: "awaiting_human", supersession_family: "execute_outcome",
             scope: :attempt, allowed_evidence: %i[journal_event attempt_lease],
-            gate_role: :inhibitor, authoritative_stages: [ "4-execute" ],
+            gate_role: :inhibitor, authoritative_stages: [ "4-execute" ], # coding-scoped: increment 1 gate
             default_transitions: [ "execute_to_open_pr" ]
           )
           registry.register(

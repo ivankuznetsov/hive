@@ -18,7 +18,7 @@ module Hive
 
     module Migration
       MODES = %w[markers shadow conditions].freeze
-      CONDITION_AUTHORITY_STAGES = [ "4-execute" ].freeze
+      CONDITION_AUTHORITY_STAGES = [ "4-execute" ].freeze # coding-scoped: increment 1 enables coding execute only
 
       module_function
 
@@ -64,7 +64,7 @@ module Hive
             "slug" => task.slug.to_s
           },
           workflow: workflow,
-          stage: "4-execute",
+          stage: "4-execute", # coding-scoped: legacy baselines are introduced at the coding execute boundary
           attempt_id: Hive::TaskJournal::LEGACY_ATTEMPT_ID,
           task_generation: 0,
           commit_generation: 0,

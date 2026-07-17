@@ -10,13 +10,13 @@ module Hive
 
       def validate!(task, config: nil, force: false)
         return true if force
-        return true unless "#{task.stage_index}-#{task.stage_name}" == "4-execute"
+        return true unless "#{task.stage_index}-#{task.stage_name}" == "4-execute" # coding-scoped: increment 1 guards coding execute
 
         config ||= Hive::Config.load(task.project_root)
         marker = Hive::Markers.current(task.state_file)
         projection = Hive::TaskProjection::Store.new(task_folder: task.folder).read(marker: marker)
         selection = Hive::Conditions::Migration.selection(
-          config: config, stage: "4-execute", projection: projection
+          config: config, stage: "4-execute", projection: projection # coding-scoped: increment 1 guards coding execute
         )
         return true unless selection.effective == "conditions"
 

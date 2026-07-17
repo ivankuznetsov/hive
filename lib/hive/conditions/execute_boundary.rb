@@ -52,7 +52,7 @@ module Hive
           gate = gate_for(projection, research: research, research_evidence: research_evidence)
         end
         selection = Hive::Conditions::Migration.selection(
-          config: @config, stage: "4-execute", projection: projection
+          config: @config, stage: "4-execute", projection: projection # coding-scoped: increment 1 gates coding execute only
         )
         condition_marker, condition_attrs, condition_commit, condition_status = condition_outcome(
           gate, research: research
@@ -156,7 +156,7 @@ module Hive
         )
         projection = @projection_store.rebuild!
         selection = Hive::Conditions::Migration.selection(
-          config: @config, stage: "4-execute", projection: projection
+          config: @config, stage: "4-execute", projection: projection # coding-scoped: increment 1 gates coding execute only
         )
         BoundaryOutcome.new(
           marker_name: marker_name, marker_attrs: attrs, commit: commit, status: status,

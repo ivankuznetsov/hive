@@ -1,6 +1,7 @@
 {
   "current_conditions": {
     "AgentHealthy": { "attempt_id": "attempt-b", "commit_generation": 2, "event_id": "1849-b-agent", "reason": "attempt_terminal_succeeded", "state": "satisfied", "task_generation": 1 },
+    "ArchiveReady": { "attempt_id": null, "commit_generation": null, "event_id": null, "reason": "no_current_observation", "state": "pending", "task_generation": 1 },
     "ArtifactCurrent": { "attempt_id": null, "commit_generation": 2, "event_id": null, "reason": "no_current_observation", "state": "pending", "task_generation": 1 },
     "AwaitingHuman": { "attempt_id": "attempt-b", "commit_generation": 2, "event_id": "1849-b-wait", "reason": "not_waiting", "state": "unsatisfied", "task_generation": 1 },
     "BabysitterActive": { "attempt_id": null, "commit_generation": null, "event_id": null, "reason": "no_current_observation", "state": "pending", "task_generation": 1 },

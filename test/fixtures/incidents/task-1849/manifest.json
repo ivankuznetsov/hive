@@ -14,7 +14,7 @@
     "attempts.json": "e6b35eefe654d021af89f9d28d46c3b9c06aa0fe5c952c1df6aa12eb598e956f",
     "execute.log": "eefb3ab577f843abaef244230c921f3ba8342773ed264d99c182c88d8c36aee9",
     "provenance.md": "80cf12cd9120fd02dec72b7a0ad8fc2716b5f97a4ec910acc42a6ae80cd15e0a",
-    "expected-projection.json": "44f35c3a6d9b9550ecebd7e12797db1f7a198eccc07fe8194563598afca2843c"
+    "expected-projection.json": "b8ebaa7b88b8ec8365d2b2515b2d1bfb93c3ad81ea1a94c3425fdb5ac6137d30"
   },
   "synthetic_events": [
     "1849-a-head", "1849-a-agent", "1849-a-changes", "1849-a-wait",

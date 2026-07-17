@@ -125,6 +125,23 @@ class TaskJournalTest < Minitest::Test
     end
   end
 
+  def test_append_once_replays_identical_event_and_rejects_id_collision
+    with_writer do |writer, dir|
+      attributes = event("reconciliation", event_id: "stable-event")
+      first = writer.append_once(attributes)
+      replay = writer.append_once(attributes)
+
+      assert_equal first.cursor, replay.cursor
+      assert_equal 1, File.readlines(File.join(dir, "events.jsonl")).size
+
+      collision = attributes.merge(reason: "different")
+      assert_raises(Hive::TaskJournal::EventIdCollision) do
+        writer.append_once(collision)
+      end
+      assert_equal 1, File.readlines(File.join(dir, "events.jsonl")).size
+    end
+  end
+
   private
 
   def with_writer

@@ -66,6 +66,11 @@ module Hive
           registry.register(
             "Merged", family: "merged", supersession_family: "merged",
             scope: :pull_request, allowed_evidence: %i[pull_request journal_event],
+            gate_role: :informational, default_transitions: [ "finalize_to_archive" ]
+          )
+          registry.register(
+            "ArchiveReady", family: "archive_ready", supersession_family: "archive_ready",
+            scope: :task, allowed_evidence: %i[journal_event],
             gate_role: :requirement, default_transitions: [ "finalize_to_archive" ]
           )
           registry.freeze

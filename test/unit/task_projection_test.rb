@@ -9,7 +9,7 @@ class TaskProjectionTest < Minitest::Test
   def test_missing_observations_are_pending_and_later_stage_vocabulary_is_inactive
     projection = Hive::TaskProjection.project(records: [], cursor: 0, journal_hash: "empty")
 
-    assert_equal 7, projection["conditions"].fetch("current").size
+    assert_equal 8, projection["conditions"].fetch("current").size
     assert projection["conditions"].fetch("current").all? { |fact| fact["state"] == "pending" }
     assert_equal "reconcile_required",
                  projection["gates"].dig("execute_to_open_pr", "status")
@@ -115,6 +115,23 @@ class TaskProjectionTest < Minitest::Test
     end
   end
 
+  def test_finalization_projection_and_archive_ready_condition_rebuild_from_journal
+    records = [
+      finalization_event("finalized"),
+      finalization_event("merged", event_id: "merged", producer: {
+                           "kind" => "babysitter_job", "job_id" => "job-1", "claim_fence" => 2
+                         }, payload: finalization_coordinates.merge("merged_at" => NOW.iso8601)),
+      finalization_event("archive_ready", event_id: "archive", producer: {
+                           "kind" => "reconciler", "name" => "hive-finalization-reconciler-v1"
+                         }, payload: finalization_coordinates.merge("terminal_event_id" => "merged"))
+    ]
+    projection = Hive::TaskProjection.project(records: records)
+
+    assert_equal "archive_ready", projection["finalization"].fetch("state")
+    assert_equal "satisfied", projection.current_condition("ArchiveReady").fetch("state")
+    assert_equal "eligible", projection["gates"].dig("finalize_to_archive", "status")
+  end
+
   private
 
   def condition_event(name, state: "satisfied", event_id:, attempt_id: "attempt-a",
@@ -170,5 +187,27 @@ class TaskProjectionTest < Minitest::Test
 
   def commit_evidence(sha)
     [ { "type" => "commit", "sha" => sha, "branch" => "feature" } ]
+  end
+
+  def finalization_event(type, event_id: type, producer: nil, payload: finalization_coordinates)
+    event(
+      event_type: type,
+      event_id: event_id,
+      stage: "8-finalize",
+      task_generation: 3,
+      attempt_id: "finalize-attempt",
+      commit_generation: nil,
+      reason: type,
+      producer: producer || { "kind" => "finalize_attempt", "attempt_id" => "finalize-attempt" },
+      payload: payload
+    )
+  end
+
+  def finalization_coordinates
+    {
+      "job_id" => "job-1", "repository" => "github.com/acme/demo", "pr_number" => 12,
+      "pr_url" => "https://github.com/acme/demo/pull/12", "head_sha" => "a" * 40,
+      "head_generation" => 1, "finalize_attempt_id" => "finalize-attempt"
+    }
   end
 end

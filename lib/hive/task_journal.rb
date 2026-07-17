@@ -4,12 +4,14 @@ require "json"
 require "time"
 require "hive/task_journal/envelope"
 require "hive/conditions/value"
+require "hive/finalization/event"
 
 module Hive
   module TaskJournal
     class Error < Hive::Error; end
     class InvalidRecord < Error; end
     class AttemptMismatch < Error; end
+    class EventIdCollision < Error; end
 
     AUTHORITATIVE_EVENT_TYPES = %w[
       condition_observed
@@ -19,6 +21,18 @@ module Hive
       reconciliation
       shadow_audit
       operator_action
+      finalized
+      finalize_attempt_adopted
+      babysitter_activated
+      babysitter_active
+      babysitter_blocked
+      head_superseded
+      merge_ready
+      merged
+      no_pr_approved
+      finalization_rearmed
+      archive_ready
+      cleanup_completed
     ].freeze
     LEGACY_ATTEMPT_ID = "legacy".freeze
     JOURNAL_BASENAME = "events.jsonl".freeze
@@ -43,16 +57,44 @@ module Hive
         append_batch([ attributes ])
       end
 
+      def append_once(attributes)
+        event_id = attributes["event_id"] || attributes[:event_id]
+        unless event_id.is_a?(String) && !event_id.empty?
+          raise InvalidRecord, "append_once requires a deterministic event_id"
+        end
+        append_records([ attributes ], once: true)
+      end
+
       def append_batch(batch)
         raise InvalidRecord, "authoritative journal batch must not be empty" unless batch.is_a?(Array) && !batch.empty?
 
+        append_records(batch, once: false)
+      end
+
+      private
+
+      def append_records(batch, once:)
         records = batch.map do |attributes|
           Envelope.authoritative(attributes, id_generator: @id_generator, clock: @clock)
         end
-        records.each { |record| validate!(record) }
-        lines = records.map { |record| "#{JSON.generate(record)}\n" }.join
 
         with_lock do
+          existing = read_records_locked
+          if once
+            match = existing.find { |record| record["event_id"] == records.first["event_id"] }
+            return append_result_for([ match ]) if match == records.first
+            raise EventIdCollision, "event_id #{records.first['event_id'].inspect} has different content" if match
+          end
+
+          seen = existing.filter_map { |record| record["event_id"] }.to_h { |id| [ id, true ] }
+          records.each do |record|
+            raise EventIdCollision, "duplicate event_id #{record['event_id'].inspect}" if seen[record["event_id"]]
+
+            validate!(record, records: existing)
+            existing << record
+            seen[record["event_id"]] = true
+          end
+          lines = records.map { |record| "#{JSON.generate(record)}\n" }.join
           File.open(path, File::WRONLY | File::APPEND | File::CREAT, 0o644, encoding: "UTF-8") do |file|
             written = file.syswrite(lines)
             raise IOError, "short journal append" unless written == lines.bytesize
@@ -60,21 +102,13 @@ module Hive
             file.flush
             file.fsync
           end
-          cursor = File.size(path)
-          AppendResult.new(
-            cursor: cursor,
-            event_id: records.last.fetch("event_id"),
-            journal_hash: ::Digest::SHA256.file(path).hexdigest,
-            records: records.freeze
-          )
+          append_result_for(records)
         end
       rescue Error
         raise
       rescue SystemCallError, IOError, JSON::GeneratorError => e
         raise Error, "authoritative journal append failed: #{e.class}: #{e.message}"
       end
-
-      private
 
       def with_lock
         FileUtils.mkdir_p(task_folder)
@@ -86,7 +120,7 @@ module Hive
         end
       end
 
-      def validate!(record)
+      def validate!(record, records: [])
         unless record["schema"] == Envelope::SCHEMA && record["schema_version"] == Envelope::SCHEMA_VERSION
           raise InvalidRecord, "authoritative journal record has unsupported schema"
         end
@@ -117,8 +151,36 @@ module Hive
             raise InvalidRecord, e.message
           end
         end
-        validate_attempt!(record)
+        if Hive::Finalization::Event.finalization?(record)
+          Hive::Finalization::Event.validate!(record, records: records)
+          validate_attempt!(record) if record.dig("producer", "kind") == "finalize_attempt"
+        else
+          validate_attempt!(record)
+        end
         true
+      rescue Hive::Finalization::Error => e
+        raise InvalidRecord, e.message
+      end
+
+      def read_records_locked
+        return [] unless File.exist?(path)
+
+        File.readlines(path, chomp: true).filter_map.with_index do |line, index|
+          next if line.empty?
+
+          JSON.parse(line)
+        rescue JSON::ParserError => e
+          raise InvalidRecord, "invalid existing journal JSON at line #{index + 1}: #{e.message}"
+        end
+      end
+
+      def append_result_for(records)
+        AppendResult.new(
+          cursor: File.exist?(path) ? File.size(path) : 0,
+          event_id: records.last.fetch("event_id"),
+          journal_hash: File.exist?(path) ? ::Digest::SHA256.file(path).hexdigest : ::Digest::SHA256.hexdigest(""),
+          records: records.freeze
+        )
       end
 
       def validate_attempt!(record)

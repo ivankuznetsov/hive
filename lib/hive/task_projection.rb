@@ -5,11 +5,12 @@ require "hive/conditions/policy"
 require "hive/conditions/gate_evaluator"
 require "hive/conditions/shadow_audit"
 require "hive/task_journal/envelope"
+require "hive/finalization/projection"
 
 module Hive
   class TaskProjection
     SCHEMA = "hive-task-projection".freeze
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
 
     class Error < Hive::Error; end
     class InvalidJournal < Error; end
@@ -82,6 +83,7 @@ module Hive
       end
 
       authoritative = authoritative_records
+      finalization = Hive::Finalization::Projection.project(records: authoritative)
       last = authoritative.last
       task = last&.fetch("task", nil) || facts.last&.fetch("task", nil)
       current_attempt = current.reject { |fact| fact["state"] == "pending" }
@@ -106,6 +108,7 @@ module Hive
           "current" => current.map { |fact| fact.reject { |key, _| key == "journal_index" } },
           "history" => history.map { |fact| fact.reject { |key, _| key == "journal_index" } }
         },
+        "finalization" => finalization,
         "evidence" => current.flat_map { |fact| fact["evidence"] }.uniq,
         "gates" => {},
         "provenance" => {
@@ -119,6 +122,10 @@ module Hive
       rule = Hive::Conditions::Policy.default.rule_for("execute_to_open_pr")
       @data["gates"][rule.transition] = Hive::Conditions::GateEvaluator.new(
         projection: @data, rule: rule
+      ).evaluate.to_h
+      finalize_rule = Hive::Conditions::Policy.default.rule_for("finalize_to_archive")
+      @data["gates"][finalize_rule.transition] = Hive::Conditions::GateEvaluator.new(
+        projection: @data, rule: finalize_rule
       ).evaluate.to_h
       @data = self.class.canonical(@data)
       self
@@ -154,6 +161,9 @@ module Hive
 
     def condition_facts
       @condition_facts ||= authoritative_records.each_with_index.filter_map do |record, index|
+        if %w[merged archive_ready].include?(record["event_type"])
+          next finalization_condition_fact(record, index)
+        end
         next unless record["event_type"] == "condition_observed"
 
         Hive::Conditions::Value.validate_observation!(record, registry: @registry)
@@ -175,6 +185,30 @@ module Hive
           "journal_index" => index
         }
       end
+    end
+
+    def finalization_condition_fact(record, index)
+      name = record["event_type"] == "merged" ? "Merged" : "ArchiveReady"
+      {
+        "condition" => name,
+        "state" => "satisfied",
+        "reason" => record.fetch("reason"),
+        "transitioned_at" => record.fetch("occurred_at"),
+        "attempt_id" => record.fetch("attempt_id"),
+        "task_generation" => record.fetch("task_generation"),
+        "ownership_generation" => record["ownership_generation"],
+        "commit_generation" => nil,
+        "evidence" => if name == "ArchiveReady"
+          [ { "type" => "journal_event", "event_id" => record.fetch("event_id") } ]
+        else
+          deep_copy(record.fetch("evidence", []))
+        end,
+        "provenance" => deep_copy(record.fetch("provenance", {})),
+        "payload" => deep_copy(record.fetch("payload", {})),
+        "event_id" => record.fetch("event_id"),
+        "task" => deep_copy(record["task"]),
+        "journal_index" => index
+      }
     end
 
     def current_generation_from_events

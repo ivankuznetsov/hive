@@ -34,7 +34,7 @@ module Hive
           policy.add(transition: "open_pr_to_review", required: [ "BranchPushed" ])
           policy.add(transition: "review_active", required: [ "BabysitterActive" ])
           policy.add(transition: "artifacts_to_finalize", required: [ "ArtifactCurrent" ])
-          policy.add(transition: "finalize_to_archive", required: [ "Merged" ])
+          policy.add(transition: "finalize_to_archive", required: [ "ArchiveReady" ], authoritative_capable: true)
           policy.freeze
         end
       end

@@ -37,6 +37,7 @@ module Hive
           "ownership_generation" => input.delete("ownership_generation"),
           "commit_generation" => input.delete("commit_generation"),
           "reason" => input.delete("reason"),
+          "producer" => input.delete("producer"),
           "evidence" => input.delete("evidence") || [],
           "provenance" => input.delete("provenance") || {},
           "payload" => (input.delete("payload") || {}).merge(input)

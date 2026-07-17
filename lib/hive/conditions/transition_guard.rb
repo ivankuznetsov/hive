@@ -9,6 +9,14 @@ module Hive
       module_function
 
       def validate!(task, config: nil, force: false)
+        if "#{task.stage_index}-#{task.stage_name}" == "8-finalize"
+          projection = Hive::TaskProjection::Store.new(task_folder: task.folder).read(
+            marker: Hive::Markers.current(task.state_file)
+          )
+          return true if projection["finalization"].fetch("state") == "archive_ready"
+
+          raise Hive::WrongStage, "finalize condition gate blocks archive: archive_ready is not current"
+        end
         return true if force
         return true unless "#{task.stage_index}-#{task.stage_name}" == "4-execute" # coding-scoped: increment 1 guards coding execute
 

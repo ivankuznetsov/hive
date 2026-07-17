@@ -6,7 +6,7 @@ class ConditionsRegistryTest < Minitest::Test
     registry = Hive::Conditions::Registry.default
 
     assert_equal %w[
-      AgentHealthy ChangesPresent AwaitingHuman BranchPushed ArtifactCurrent BabysitterActive Merged
+      AgentHealthy ChangesPresent AwaitingHuman BranchPushed ArtifactCurrent BabysitterActive Merged ArchiveReady
     ], registry.names
     assert registry.fetch("AgentHealthy").authoritative_for?("4-execute")
     assert registry.fetch("ChangesPresent").authoritative_for?("4-execute")

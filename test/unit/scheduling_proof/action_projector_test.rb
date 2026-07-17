@@ -41,4 +41,14 @@ class SchedulingProofActionProjectorTest < Minitest::Test
     assert_equal "no_safe_action", action.fetch("kind")
     assert_nil action.fetch("command")
   end
+
+  def test_rejects_a_shell_command_with_invalid_quoting
+    action = Hive::SchedulingProof::ActionProjector.project(
+      reason: "terminal_error", action_key: "error", command: "hive run 'unterminated",
+      stage: "4-execute", task_generation: 2, attempt_id: nil
+    )
+
+    assert_equal "no_safe_action", action.fetch("kind")
+    assert_nil action.fetch("command")
+  end
 end

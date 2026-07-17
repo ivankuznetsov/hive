@@ -49,6 +49,25 @@ class SchedulingProofFleetProjectorTest < Minitest::Test
     assert proof.fetch("stale")
   end
 
+  def test_eligible_candidate_without_a_recorded_reason_is_dispatch_pending
+    proof = projector.project(
+      configured_slots: 1, owners: [],
+      candidates: [ candidate("c", nil) ]
+    )
+
+    assert_equal "dispatch_pending", proof.dig("causal_buckets", 0, "reason")
+    assert_equal 1, proof.fetch("eligible_candidate_count")
+  end
+
+  def test_inconsistent_rollup_still_counts_eligible_candidates
+    proof = projector.project(
+      configured_slots: -1, owners: [], candidates: [ candidate("c", "dependency_wait") ]
+    )
+
+    assert_equal "accounting_inconsistent", proof.fetch("health")
+    assert_equal 1, proof.fetch("eligible_candidate_count")
+  end
+
   private
 
   def projector(daemon_running: true)

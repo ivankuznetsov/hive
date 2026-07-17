@@ -40,4 +40,17 @@ class SchedulingProofFreshnessTest < Minitest::Test
     assert stopped.fetch("stale")
     assert missing.fetch("stale")
   end
+
+  def test_invalid_or_missing_times_degrade_to_epoch
+    missing = Hive::SchedulingProof::Freshness.project(
+      as_of: nil, heartbeat_at: nil, poll_interval_sec: 30, daemon_running: true
+    )
+    invalid = Hive::SchedulingProof::Freshness.project(
+      as_of: "not-a-time", heartbeat_at: "also-not-a-time",
+      poll_interval_sec: 30, daemon_running: true
+    )
+
+    assert_equal "1970-01-01T00:00:00.000000Z", missing.fetch("as_of")
+    assert_equal "1970-01-01T00:00:00.000000Z", invalid.fetch("scheduler_heartbeat_at")
+  end
 end

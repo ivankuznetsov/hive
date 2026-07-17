@@ -86,7 +86,10 @@ module Hive
         @archive = archive
         @clock = clock
         @scheduler_snapshot_store = scheduler_snapshot_store || Hive::SchedulingProof::SnapshotStore.new
-        @attempt_store = attempt_store || Hive::Attempts::Store.new
+        # Attempts::Store creates its owner-private directory tree. Keep the
+        # default lazy so Config can reject an explicitly missing HIVE_HOME
+        # before status performs any write-like initialization.
+        @attempt_store = attempt_store
         @daemon_status_report = daemon_status_report || Hive::Daemon::StatusReport.new
       end
 
@@ -368,7 +371,7 @@ module Hive
       def scheduling_context(as_of)
         snapshot_result = @scheduler_snapshot_store.read
         snapshot = snapshot_result.snapshot
-        scan = @attempt_store.scan
+        scan = (@attempt_store || Hive::Attempts::Store.new).scan
         running = @daemon_status_report.running_state[:running] == true
         daemon = Hive::Config.load_global_daemon
         unavailable = Array(snapshot&.fetch("unavailable_live_claims", nil))

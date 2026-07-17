@@ -65,6 +65,23 @@ class SchedulingProofProjectorTest < Minitest::Test
     assert_equal "daemon_runtime", proof.dig("error", "environment_provenance")
   end
 
+  def test_uses_durable_dependency_fields_and_accepts_string_as_of
+    string_clock_projector = Hive::SchedulingProof::Projector.new(
+      as_of: NOW.iso8601, daemon_running: true,
+      heartbeat_at: NOW - 5, poll_interval_sec: 30
+    )
+    proof = string_clock_projector.project_task(
+      row: row.merge(
+        "blocked" => true, "blocked_by" => "demo/prerequisite",
+        "dependency_stage" => "3-plan"
+      ),
+      observation: observation("dependency_wait"), enrolled: true
+    )
+
+    assert_equal "demo/prerequisite", proof.dig("dependency", "blocked_by")
+    assert_equal NOW.iso8601(6), proof.dig("freshness", "as_of")
+  end
+
   private
 
   def projector(daemon_running: true)

@@ -726,7 +726,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
           depends_on: nil, blocked_by: nil, dependency_stage: nil,
           blocked: false, workflow: nil, admission_error: nil,
           attempt_id: nil, task_generation: nil, condition_task_generation: 0,
-          id: 1, project_path: "/tmp/project")
+          id: 1, project_path: "/tmp/project", diagnostic: nil)
     folder ||= make_existing_row_folder(project: project, stage: stage, slug: slug)
     Row.new(
       project: project, slug: slug, stage: stage, workflow: workflow, marker: marker,
@@ -738,6 +738,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
       depends_on: depends_on, blocked_by: blocked_by,
       dependency_stage: dependency_stage, blocked: blocked,
       admission_error: admission_error,
+      diagnostic: diagnostic,
       attempt_id: attempt_id, task_generation: task_generation,
       condition_task_generation: condition_task_generation,
       id: id, project_path: project_path
@@ -796,6 +797,184 @@ class HiveDaemonDispatcherTest < Minitest::Test
       assert_equal "degraded", snapshot.fetch("tick_health")
       assert_includes snapshot.fetch("unavailable_live_claims"), "scheduler_decision"
       assert_equal "2026-05-06T12:01:00.000000Z", snapshot.fetch("heartbeat_at")
+    end
+  end
+
+  def test_legacy_layout_row_is_recorded_as_an_admission_error
+    with_tmp_dir do |dir|
+      store = Hive::SchedulingProof::SnapshotStore.new(path: File.join(dir, "scheduler.json"))
+      blocked = row(condition_task_generation: 4)
+      result = Hive::Daemon::StatusConsumer::Result.new(
+        ok: true, rows: [ blocked ],
+        projects: [ Hive::Daemon::StatusConsumer::ProjectInfo.new(
+          name: "p1", legacy_stage_dirs: [ { "stage_dir" => "3-old-plan", "task_count" => 1 } ]
+        ) ],
+        error: nil
+      )
+      dispatcher, = make_dispatcher(status_result: result, scheduler_snapshot_store: store)
+
+      dispatcher.tick(now: T0)
+
+      assert_equal "admission_error", store.read.snapshot.dig("tasks", 0, "reason")
+    end
+  end
+
+  def test_deferred_durable_dispatch_is_published_as_capacity_evidence
+    with_tmp_dir do |dir|
+      result = Hive::Attempts::DispatchResult.new(
+        status: :deferred, attempt: nil, receipt: nil,
+        attach_descriptor: nil, reason: nil
+      )
+      attempt_dispatcher = Object.new
+      attempt_dispatcher.define_singleton_method(:dispatch_request) { |*, **| result }
+      store = Hive::SchedulingProof::SnapshotStore.new(path: File.join(dir, "scheduler.json"))
+      dispatcher, = make_dispatcher(
+        rows: [ row(condition_task_generation: 2) ],
+        attempt_dispatcher: attempt_dispatcher, scheduler_snapshot_store: store
+      )
+
+      dispatcher.tick(now: T0)
+
+      candidate = store.read.snapshot.dig("tasks", 0)
+      assert_equal "global_capacity", candidate.fetch("reason")
+      assert_equal 5, candidate.dig("capacity", "configured_slots")
+    end
+  end
+
+  def test_dispatch_exception_records_a_candidate_before_propagating
+    attempt_dispatcher = Object.new
+    attempt_dispatcher.define_singleton_method(:dispatch_request) { |*, **| raise "dispatch broke" }
+    task = row(condition_task_generation: 2)
+    dispatcher, = make_dispatcher(rows: [], attempt_dispatcher: attempt_dispatcher)
+
+    error = assert_raises(RuntimeError) do
+      dispatcher.send(:dispatch_or_block, task, now: T0)
+    end
+
+    assert_equal "dispatch broke", error.message
+    candidate = dispatcher.instance_variable_get(:@scheduler_candidates).values.first
+    assert_equal "dispatch_failed", candidate.fetch("reason")
+    assert_equal "dispatch_exception", candidate.dig("error", "code")
+  end
+
+  def test_candidate_projection_failure_degrades_the_tick
+    task = row
+    dispatcher, _supervisor, _controller, logger = make_dispatcher
+    replacement = ->(**) { raise "projection broke" }
+
+    with_replaced_singleton_method(Hive::SchedulingProof::CandidateObservation, :build, replacement) do
+      dispatcher.send(:record_scheduler_candidate, task, reason: "needs_input", now: T0)
+    end
+
+    assert_equal "degraded", dispatcher.instance_variable_get(:@scheduler_tick_health)
+    assert_includes dispatcher.instance_variable_get(:@scheduler_tick_unavailable_claims), "scheduler_decision"
+    assert logger.events.any? { |name, attrs| name == :scheduling_observation_failed && attrs[:slug] == task.slug }
+  end
+
+  def test_scheduler_row_evidence_includes_normalized_diagnostic
+    task = row(
+      marker_attrs: { "reason" => "mcp_auth_failed" },
+      diagnostic: { "summary" => "Authentication failed" }
+    )
+    dispatcher, = make_dispatcher
+
+    evidence = dispatcher.send(:scheduler_row_evidence, task)
+
+    assert_equal "mcp_auth_failed", evidence.dig("error", "code")
+    assert_equal "Authentication failed", evidence.dig("error", "summary")
+    assert_equal "daemon_runtime", evidence.dig("error", "environment_provenance")
+  end
+
+  def test_scheduler_publication_reports_snapshot_write_failure
+    store = Object.new
+    store.define_singleton_method(:read) do
+      Hive::SchedulingProof::SnapshotStore::ReadResult.new(snapshot: nil, status: :missing, error: nil)
+    end
+    store.define_singleton_method(:write) { |_| raise IOError, "disk full" }
+    dispatcher, _supervisor, _controller, logger = make_dispatcher(
+      rows: [ row(action: "needs_input") ], scheduler_snapshot_store: store
+    )
+
+    dispatcher.tick(now: T0)
+
+    assert logger.events.any? { |name, attrs| name == :scheduler_snapshot_failed && attrs[:error].include?("disk full") }
+  end
+
+  def test_scheduler_observation_success_and_failure_are_visible
+    with_tmp_dir do |dir|
+      store = Hive::SchedulingProof::SnapshotStore.new(path: File.join(dir, "scheduler.json"))
+      recorded = Object.new
+      recorded.define_singleton_method(:record) { |_| true }
+      dispatcher, _supervisor, _controller, logger = make_dispatcher(
+        rows: [ row(action: "needs_input") ], scheduler_snapshot_store: store,
+        scheduling_observation_recorder: recorded
+      )
+
+      dispatcher.tick(now: T0)
+
+      assert logger.events.any? { |name, attrs| name == :scheduling_observation_recorded && attrs[:slug] == "s1" }
+
+      failing = Object.new
+      failing.define_singleton_method(:record) { |_| raise IOError, "journal unavailable" }
+      failed_dispatcher, _supervisor, _controller, failed_logger = make_dispatcher(
+        rows: [ row(action: "needs_input") ], scheduler_snapshot_store: store,
+        scheduling_observation_recorder: failing
+      )
+
+      failed_dispatcher.tick(now: T0 + 1)
+
+      assert_includes store.read.snapshot.fetch("unavailable_live_claims"), "scheduling_observation"
+      assert failed_logger.events.any? { |name, attrs|
+        name == :scheduling_observation_failed && attrs[:error].include?("journal unavailable")
+      }
+    end
+  end
+
+  def test_scheduler_owner_rows_use_current_live_attempt_identity
+    data = {
+      "project" => "p1", "task_slug" => "s1", "intended_stage" => "4-execute"
+    }
+    attempt = Object.new
+    attempt.define_singleton_method(:live?) { true }
+    attempt.define_singleton_method(:[]) { |key| data[key] }
+    attempt.define_singleton_method(:task_input_epoch) { 7 }
+    attempt.define_singleton_method(:attempt_id) { "attempt-7" }
+    attempt.define_singleton_method(:state) { "running" }
+    owned = Struct.new(:attempt).new(attempt)
+    dispatcher, = make_dispatcher
+    dispatcher.instance_variable_set(:@attempt_snapshot, Struct.new(:attempts).new([ owned ]))
+
+    owners = dispatcher.send(:scheduler_owner_rows)
+
+    assert_equal [ {
+      "project" => "p1", "task_slug" => "s1", "stage" => "4-execute",
+      "task_generation" => 7, "attempt_id" => "attempt-7", "attempt_state" => "running"
+    } ], owners
+  end
+
+  def test_scheduler_shutdown_updates_a_valid_snapshot_and_reports_failures
+    with_tmp_dir do |dir|
+      store = Hive::SchedulingProof::SnapshotStore.new(path: File.join(dir, "scheduler.json"))
+      dispatcher, _supervisor, _controller, logger = make_dispatcher(scheduler_snapshot_store: store)
+
+      dispatcher.send(:publish_scheduler_shutdown, now: T0)
+      refute logger.events.any? { |name, _| name == :scheduler_snapshot_failed }
+
+      dispatcher.send(:publish_scheduler_tick, now: T0)
+      dispatcher.send(:publish_scheduler_shutdown, now: T0 + 1)
+      snapshot = store.read.snapshot
+      assert_equal "stopped", snapshot.fetch("daemon_state")
+      assert_equal "degraded", snapshot.fetch("tick_health")
+
+      broken = Object.new
+      broken.define_singleton_method(:read) { raise IOError, "read failed" }
+      failed_dispatcher, _supervisor, _controller, failed_logger = make_dispatcher(
+        scheduler_snapshot_store: broken
+      )
+      failed_dispatcher.send(:publish_scheduler_shutdown, now: T0)
+      assert failed_logger.events.any? { |name, attrs|
+        name == :scheduler_snapshot_failed && attrs[:error].include?("read failed")
+      }
     end
   end
 

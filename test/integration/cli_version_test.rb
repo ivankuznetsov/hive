@@ -189,6 +189,17 @@ class CliVersionTest < Minitest::Test
   end
 
   def without_generated_at(payload)
-    payload.reject { |key, _value| key == "generated_at" }
+    case payload
+    when Hash
+      payload.each_with_object({}) do |(key, value), result|
+        next if %w[generated_at as_of].include?(key)
+
+        result[key] = without_generated_at(value)
+      end
+    when Array
+      payload.map { |value| without_generated_at(value) }
+    else
+      payload
+    end
   end
 end

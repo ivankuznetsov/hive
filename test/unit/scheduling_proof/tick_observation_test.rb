@@ -20,4 +20,16 @@ class SchedulingProofTickObservationTest < Minitest::Test
     assert_equal 3, snapshot.dig("fleet", "configured_slots")
     assert_equal "attempt-1", snapshot.dig("fleet", "owners", 0, "attempt_id")
   end
+
+  def test_accepts_iso8601_heartbeat
+    observation = Hive::SchedulingProof::TickObservation.new(
+      daemon_instance_id: "daemon", daemon_state: "stopped",
+      heartbeat_at: "2026-07-17T12:00:00Z", poll_interval_sec: 30,
+      configuration_fingerprint: "cfg", tick_health: "degraded",
+      unavailable_live_claims: [ "capacity" ], configured_slots: 0,
+      owners: [], candidates: []
+    )
+
+    assert_equal "2026-07-17T12:00:00.000000Z", observation.to_h.fetch("heartbeat_at")
+  end
 end

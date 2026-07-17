@@ -900,6 +900,43 @@ class CommandsStatusTest < Minitest::Test
                                   "hive_state_path" => "/tmp/nope/.hive-state" }, project_count: 1)
     end
     assert_includes out, "missing project path"
+
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      FileUtils.mkdir_p(hive_state)
+      out, = capture_io do
+        cmd.send(:render_project, status_project(project_root, hive_state), project_count: 1)
+      end
+      assert_includes out, "no active tasks"
+    end
+  end
+
+  def test_canonical_text_renderer_handles_degraded_and_archive_projects
+    command = Hive::Commands::Status.new
+    scheduler = { "summary" => "scheduler summary" }
+    projects = [
+      { "name" => "missing", "path" => "/missing", "error" => "missing_project_path" },
+      { "name" => "plain", "path" => "/plain", "error" => "not_initialised" }
+    ]
+    command.instance_variable_set(:@status_render_rows, {})
+
+    out, = capture_io do
+      command.render_status_payload("scheduler" => scheduler, "projects" => projects)
+    end
+    assert_includes out, "missing project path /missing"
+    assert_includes out, "not initialised"
+
+    archive_renderer = Class.new(Hive::Commands::Status) do
+      attr_reader :rendered_archive
+
+      def render_archive_project(project, rows)
+        @rendered_archive = [ project, rows ]
+      end
+    end.new(archive: true)
+    project = { "name" => "demo", "path" => "/demo", "tasks" => [], "legacy_stage_dirs" => [] }
+    archive_renderer.instance_variable_set(:@status_render_rows, { [ "demo", "/demo" ] => [] })
+    archive_renderer.render_status_payload("scheduler" => scheduler, "projects" => [ project ])
+    assert_equal [ project, [] ], archive_renderer.rendered_archive
   end
 
   def test_collect_rows_skips_invalid_entries_and_handles_live_agent_lock

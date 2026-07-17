@@ -37,6 +37,18 @@ class SchedulingProofObservationRecorderTest < Minitest::Test
     end
   end
 
+  def test_semantic_signature_canonicalizes_nested_arrays
+    recorder = Hive::SchedulingProof::ObservationRecorder.new
+    left = observation("/tmp/task").merge(
+      "provider" => [ { "model" => "gpt-5", "provider" => "codex" } ]
+    )
+    right = observation("/tmp/task").merge(
+      "provider" => [ { "provider" => "codex", "model" => "gpt-5" } ]
+    )
+
+    assert_equal recorder.semantic_signature(left), recorder.semantic_signature(right)
+  end
+
   private
 
   def observation(dir)

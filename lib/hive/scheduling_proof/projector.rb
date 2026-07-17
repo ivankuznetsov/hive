@@ -4,6 +4,7 @@ require "hive/secret_patterns"
 require "hive/scheduling_proof/action_projector"
 require "hive/scheduling_proof/freshness"
 require "hive/scheduling_proof/reason"
+require "hive/workflows"
 
 module Hive
   module SchedulingProof
@@ -74,7 +75,7 @@ module Hive
       private
 
       def archived?(row)
-        row["stage"] == "9-done" || row["action"] == "archived"
+        Hive::Workflows.all_terminal_stage_dirs.include?(row["stage"]) || row["action"] == "archived"
       end
 
       def task_generation(row)

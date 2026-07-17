@@ -47,6 +47,28 @@ class SchedulingProofSnapshotStoreTest < Minitest::Test
     end
   end
 
+  def test_rejects_unsupported_schema_before_writing
+    with_tmp_dir do |dir|
+      store = Hive::SchedulingProof::SnapshotStore.new(path: File.join(dir, "scheduler.json"))
+
+      assert_raises(Hive::SchedulingProof::SnapshotStore::CorruptSnapshot) { store.write({}) }
+    end
+  end
+
+  def test_wraps_atomic_write_failures
+    with_tmp_dir do |dir|
+      store = Hive::SchedulingProof::SnapshotStore.new(path: File.join(dir, "scheduler.json"))
+      replacement = ->(*) { raise IOError, "disk unavailable" }
+
+      with_replaced_singleton_method(Hive::AtomicFile, :write, replacement) do
+        error = assert_raises(Hive::SchedulingProof::SnapshotStore::Error) do
+          store.write(snapshot("failed"))
+        end
+        assert_includes error.message, "disk unavailable"
+      end
+    end
+  end
+
   private
 
   def snapshot(instance)

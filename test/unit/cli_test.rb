@@ -1,4 +1,5 @@
 require "test_helper"
+require "hive/commands/finalize_outcome"
 require "hive/cli"
 require "hive/commands/init"
 require "hive/commands/forget"
@@ -317,6 +318,26 @@ class HiveCliTest < Minitest::Test
       Hive::CLI.start([ "rebase-status", "slug", "--project", "proj", "--stage", "execute", "--json" ])
       assert_equal [ "slug" ], calls.first.fetch(:args)
       assert_equal({ project: "proj", stage: "execute", json: true }, calls.first.fetch(:kwargs))
+    end
+  end
+
+  def test_finalize_outcome_passes_guarded_operator_options
+    with_command_new_stub(Hive::Commands::FinalizeOutcome) do |calls|
+      Hive::CLI.start([
+        "finalize-outcome", "task", "approve", "--outcome", "superseded",
+        "--reason", "landed elsewhere", "--evidence", "https://example.test/pull/2",
+        "--project", "demo"
+      ])
+
+      assert_equal [ "task", "approve" ], calls.first.fetch(:args)
+      assert_equal(
+        {
+          outcome: "superseded", reason: "landed elsewhere",
+          evidence: "https://example.test/pull/2", project: "demo"
+        },
+        calls.first.fetch(:kwargs)
+      )
+      assert_equal :call, calls.last
     end
   end
 

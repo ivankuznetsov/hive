@@ -109,6 +109,115 @@ class FinalizationOutcomeValidatorTest < Minitest::Test
     assert_includes error.message, "claim evidence is invalid"
   end
 
+  def test_authority_requires_an_active_finalize_state_stage_and_complete_job
+    default_validator = Hive::Finalization::OutcomeValidator.new
+    assert_kind_of Time, default_validator.instance_variable_get(:@clock).call
+    inactive = finalization.merge("state" => "archive_ready")
+    assert_raises(Hive::Finalization::OutcomeValidator::NotEligible) do
+      build_validator.validate!(**attributes(outcome: "abandonment", evidence: nil,
+                                             finalization: inactive))
+    end
+
+    wrong_stage = task.with(stage_index: 9, stage_name: "done")
+    assert_raises(Hive::Finalization::OutcomeValidator::NotEligible) do
+      build_validator.validate!(**attributes(outcome: "abandonment", evidence: nil).merge(task: wrong_stage))
+    end
+
+    assert_raises(Hive::Finalization::OutcomeValidator::NotEligible) do
+      build_validator.validate!(**attributes(outcome: "abandonment", evidence: nil,
+                                             job: job.reject { |key, _value| key == "identity" }))
+    end
+
+    stale_attempt = job.merge("finalize_attempt_id" => "attempt-0")
+    error = assert_raises(Hive::Finalization::OutcomeValidator::NotEligible) do
+      build_validator.validate!(**attributes(outcome: "abandonment", evidence: nil, job: stale_attempt))
+    end
+    assert_includes error.message, "finalize attempt"
+  end
+
+  def test_outcome_specific_evidence_is_required_and_unambiguous
+    assert_raises(Hive::Finalization::OutcomeValidator::InvalidOutcome) do
+      build_validator.validate!(**attributes(outcome: "abandonment", evidence: "manual-note"))
+    end
+    assert_raises(Hive::Finalization::OutcomeValidator::InvalidOutcome) do
+      build_validator.validate!(**attributes(outcome: "superseded", evidence: ""))
+    end
+
+    same_pr = build_validator(snapshot_loader: lambda { |_url, _cfg|
+      snapshot(state: "MERGED", merged_at: NOW.iso8601)
+    })
+    assert_raises(Hive::Finalization::OutcomeValidator::NotEligible) do
+      same_pr.validate!(**attributes(outcome: "superseded", evidence: "https://github.com/acme/demo/pull/12"))
+    end
+
+    wrong_repo = build_validator(snapshot_loader: lambda { |_url, _cfg|
+      snapshot(number: 13, url: "https://github.com/other/demo/pull/13", state: "MERGED",
+               merged_at: NOW.iso8601).with(repository: "github.com/other/demo")
+    })
+    assert_raises(Hive::Finalization::OutcomeValidator::NotEligible) do
+      wrong_repo.validate!(**attributes(outcome: "superseded", evidence: "https://github.com/other/demo/pull/13"))
+    end
+
+    [ "", "abc123" ].each do |commit|
+      assert_raises(Hive::Finalization::OutcomeValidator::InvalidOutcome) do
+        build_validator.validate!(**attributes(outcome: "direct_landing", evidence: commit))
+      end
+    end
+  end
+
+  def test_default_direct_landing_checker_covers_git_failures_and_results
+    validator = Hive::Finalization::OutcomeValidator.new(clock: -> { NOW })
+    status = ->(success, exitstatus) { Struct.new(:success?, :exitstatus).new(success, exitstatus) }
+    assert_raises(Hive::Finalization::OutcomeValidator::NotEligible) do
+      validator.send(:commit_landed?, "/tmp", "a" * 40, "bad branch", {})
+    end
+    assert_raises(Hive::Finalization::OutcomeValidator::NotEligible) do
+      validator.send(:commit_landed?, "/definitely/missing", "a" * 40, "main", {})
+    end
+
+    with_tmp_dir do |path|
+      failed = status.call(false, 2)
+      with_replaced_singleton_method(Open3, :capture3, ->(*_args) { [ "", " fetch failed \n", failed ] }) do
+        error = assert_raises(Hive::Finalization::OutcomeValidator::NotEligible) do
+          validator.send(:commit_landed?, path, "a" * 40, "main", {})
+        end
+        assert_includes error.message, "fetch failed"
+      end
+
+      calls = 0
+      with_replaced_singleton_method(Open3, :capture3, lambda { |*_args|
+        calls += 1
+        calls == 1 ? [ "", "", status.call(true, 0) ] : [ "", "", status.call(true, 0) ]
+      }) do
+        assert validator.send(:commit_landed?, path, "a" * 40, "main", {})
+      end
+
+      calls = 0
+      with_replaced_singleton_method(Open3, :capture3, lambda { |*_args|
+        calls += 1
+        calls == 1 ? [ "", "", status.call(true, 0) ] : [ "", "", status.call(false, 1) ]
+      }) do
+        refute validator.send(:commit_landed?, path, "a" * 40, "main", {})
+      end
+
+      calls = 0
+      with_replaced_singleton_method(Open3, :capture3, lambda { |*_args|
+        calls += 1
+        calls == 1 ? [ "", "", status.call(true, 0) ] : [ "", " compare failed ", status.call(false, 2) ]
+      }) do
+        assert_raises(Hive::Finalization::OutcomeValidator::NotEligible) do
+          validator.send(:commit_landed?, path, "a" * 40, "main", {})
+        end
+      end
+
+      with_replaced_singleton_method(Open3, :capture3, ->(*_args) { raise Errno::EIO, "offline" }) do
+        assert_raises(Hive::Finalization::OutcomeValidator::NotEligible) do
+          validator.send(:commit_landed?, path, "a" * 40, "main", {})
+        end
+      end
+    end
+  end
+
   private
 
   def build_validator(snapshot_loader: ->(_url, _cfg) { raise "unexpected snapshot load" },

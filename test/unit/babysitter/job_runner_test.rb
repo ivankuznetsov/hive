@@ -87,6 +87,186 @@ class BabysitterJobRunnerTest < Minitest::Test
     end
   end
 
+  def test_stale_authority_and_stale_release_are_inert
+    with_active_job do |store, job, project|
+      with_replaced_singleton_method(Hive::Gh, :exact_pr_snapshot, lambda { |*_args, **_kwargs|
+        raise Hive::TaskJournal::AttemptMismatch, "attempt changed"
+      }) do
+        with_replaced_singleton_method(store, :release!, lambda { |*_args, **_kwargs|
+          raise Hive::Babysitter::JobStore::StaleClaim, "taken over"
+        }) do
+          assert_equal :stale_claim, run_job(store, job, project)
+        end
+      end
+    end
+  end
+
+  def test_sanctioned_push_rechecks_the_exact_remote_head
+    with_active_job do |store, job, project|
+      snapshots = [ pr_snapshot, pr_snapshot(head_sha: "b" * 40) ]
+      pending = pending_status
+      fixer = lambda do |*_args, **kwargs|
+        kwargs.fetch(:push_authorizer).call
+        :success
+      end
+      with_replaced_singleton_method(Hive::Gh, :exact_pr_snapshot,
+                                     ->(*_args, **_kwargs) { snapshots.shift || snapshots.last }) do
+        with_replaced_singleton_method(Hive::Gh, :pr_status_rollup, ->(*_args, **_kwargs) { pending }) do
+          with_replaced_singleton_method(Hive::Babysitter::PrFixer, :run, fixer) do
+            assert_equal :stale_claim, run_job(store, job, project)
+          end
+        end
+      end
+    end
+  end
+
+  def test_remediation_observes_a_runner_created_head
+    with_active_job do |store, job, project|
+      snapshots = [ pr_snapshot, pr_snapshot, pr_snapshot(head_sha: "b" * 40, observed_at: T0 + 1) ]
+      pending = pending_status
+      authorized = false
+      fixer = lambda do |*_args, **kwargs|
+        authorized = kwargs.fetch(:push_authorizer).call
+        :success
+      end
+      with_replaced_singleton_method(Hive::Gh, :exact_pr_snapshot,
+                                     ->(*_args, **_kwargs) { snapshots.shift }) do
+        with_replaced_singleton_method(Hive::Gh, :pr_status_rollup, ->(*_args, **_kwargs) { pending }) do
+          with_replaced_singleton_method(Hive::Babysitter::PrFixer, :run, fixer) do
+            assert_equal :head_changed, run_job(store, job, project)
+            assert authorized
+            assert_equal 2, store.read(job.fetch("job_id")).fetch("head_generation")
+          end
+        end
+      end
+    end
+  end
+
+  def test_remediation_refresh_observes_terminal_states
+    [ [ "MERGED", :merged ], [ "CLOSED", :needs_human ] ].each do |state, expected|
+      with_active_job do |store, job, project|
+        pending = pending_status
+        terminal = pr_snapshot(
+          state: state, merged_at: (T0 + 1).iso8601(6), observed_at: T0 + 1
+        )
+        terminal = terminal.with(merged_at: nil) if state == "CLOSED"
+        snapshots = [ pr_snapshot, pr_snapshot, terminal ]
+        fixer = lambda do |*_args, **kwargs|
+          kwargs.fetch(:push_authorizer).call
+          :success
+        end
+        with_replaced_singleton_method(Hive::Gh, :exact_pr_snapshot,
+                                       ->(*_args, **_kwargs) { snapshots.shift }) do
+          with_replaced_singleton_method(Hive::Gh, :pr_status_rollup, ->(*_args, **_kwargs) { pending }) do
+            with_replaced_singleton_method(Hive::Babysitter::PrFixer, :run, fixer) do
+              assert_equal expected, run_job(store, job, project)
+            end
+          end
+        end
+      end
+    end
+  end
+
+  def test_remediation_refresh_rechecks_readiness_and_human_blockers
+    [
+      [ ready_status, :merge_ready ],
+      [ pending_status.merge("reviewDecision" => "REVIEW_REQUIRED"), :needs_human ]
+    ].each do |refreshed_status, expected|
+      with_active_job do |store, job, project|
+        snapshots = [ pr_snapshot, pr_snapshot, pr_snapshot ]
+        statuses = [ pending_status, refreshed_status ]
+        fixer = lambda do |*_args, **kwargs|
+          kwargs.fetch(:push_authorizer).call
+          :success
+        end
+        with_replaced_singleton_method(Hive::Gh, :exact_pr_snapshot,
+                                       ->(*_args, **_kwargs) { snapshots.shift }) do
+          with_replaced_singleton_method(Hive::Gh, :pr_status_rollup,
+                                         ->(*_args, **_kwargs) { statuses.shift }) do
+            with_replaced_singleton_method(Hive::Babysitter::PrFixer, :run, fixer) do
+              assert_equal expected, run_job(store, job, project)
+            end
+          end
+        end
+      end
+    end
+  end
+
+  def test_status_rollup_head_movement_is_refreshed_before_decision
+    with_active_job do |store, job, project|
+      snapshots = [ pr_snapshot, pr_snapshot ]
+      moved_status = pending_status.merge("headRefOid" => "b" * 40)
+      with_replaced_singleton_method(Hive::Gh, :exact_pr_snapshot,
+                                     ->(*_args, **_kwargs) { snapshots.shift }) do
+        with_replaced_singleton_method(Hive::Gh, :pr_status_rollup, ->(*_args, **_kwargs) { moved_status }) do
+          assert_equal :blocked, run_job(store, job, project)
+          assert_equal "stale_status_snapshot", projection(job).dig("blocker", "code")
+        end
+      end
+    end
+
+    with_active_job do |store, job, project|
+      snapshots = [ pr_snapshot, pr_snapshot(head_sha: "b" * 40, observed_at: T0 + 1) ]
+      moved_status = pending_status.merge("headRefOid" => "b" * 40)
+      with_replaced_singleton_method(Hive::Gh, :exact_pr_snapshot,
+                                     ->(*_args, **_kwargs) { snapshots.shift }) do
+        with_replaced_singleton_method(Hive::Gh, :pr_status_rollup, ->(*_args, **_kwargs) { moved_status }) do
+          assert_equal :head_changed, run_job(store, job, project)
+        end
+      end
+    end
+  end
+
+  def test_snapshot_identity_status_and_blocker_helpers_are_closed
+    job = {
+      "identity" => { "repository" => "github.com/acme/demo", "pr_number" => 12 },
+      "pr_url" => "https://github.com/acme/demo/pull/12"
+    }
+    assert_raises(Hive::GhError) do
+      Hive::Babysitter::JobRunner.validate_snapshot_identity!(job, pr_snapshot(number: 13))
+    end
+
+    embedded = pr_snapshot.with(
+      mergeable: "MERGEABLE", merge_state_status: "CLEAN", review_decision: "APPROVED",
+      status_check_rollup: [ { "conclusion" => "SUCCESS" } ]
+    )
+    status = Hive::Babysitter::JobRunner.status_for(embedded, { "path" => "/tmp" }, {})
+    assert Hive::Babysitter::JobRunner.ready?(status)
+    assert_equal "review_required",
+                 Hive::Babysitter::JobRunner.blocker_for(status.merge("reviewDecision" => "CHANGES_REQUESTED")).first
+    assert_equal "checks_failed",
+                 Hive::Babysitter::JobRunner.blocker_for(status.merge(
+                   "statusCheckRollup" => [ { "conclusion" => "FAILURE" } ]
+                 )).first
+    assert_equal "checks_pending",
+                 Hive::Babysitter::JobRunner.blocker_for(status.merge(
+                   "statusCheckRollup" => [ { "conclusion" => "" } ]
+                 )).first
+    assert_equal "mergeability_blocked",
+                 Hive::Babysitter::JobRunner.blocker_for(status.merge("mergeable" => "CONFLICTING")).first
+    assert_equal 12, Hive::Babysitter::JobRunner.pr_hash(embedded, status).fetch("number")
+  end
+
+  def test_stale_claim_operational_event_is_best_effort
+    emitted = nil
+    project = { "name" => "demo", "path" => "/tmp" }
+    job = { "identity" => { "pr_number" => 12 }, "job_id" => "job", "head_sha" => "a" * 40,
+            "head_generation" => 1 }
+    with_replaced_singleton_method(Hive::Babysitter::Events, :emit, lambda { |**fields| emitted = fields }) do
+      Hive::Babysitter::JobRunner.emit_operational(
+        project, job, { "claim_fence" => 2 }, :stale_claim
+      )
+    end
+    assert_equal "stale_claim", emitted.fetch(:outcome)
+
+    with_replaced_singleton_method(Hive::Babysitter::Events, :emit, lambda { |**fields| emitted = fields }) do
+      Hive::Babysitter::JobRunner.emit_operational(
+        project, job, { "claim_fence" => 2 }, :active
+      )
+    end
+    assert_equal "active", emitted.fetch(:outcome)
+  end
+
   private
 
   def with_active_job
@@ -134,15 +314,24 @@ class BabysitterJobRunnerTest < Minitest::Test
     }
   end
 
-  def pr_snapshot(state: "OPEN", head_sha: "a" * 40, merged_at: nil, observed_at: T0)
+  def pr_snapshot(state: "OPEN", head_sha: "a" * 40, merged_at: nil, observed_at: T0,
+                  number: 12)
     Hive::Gh::PrSnapshot.new(
-      repository: "github.com/acme/demo", number: 12,
-      url: "https://github.com/acme/demo/pull/12", state: state,
+      repository: "github.com/acme/demo", number: number,
+      url: "https://github.com/acme/demo/pull/#{number}", state: state,
       head_sha: head_sha, head_branch: "feature/durable", base_branch: "main",
       merged_at: merged_at, observed_at: observed_at.utc.iso8601(6),
       mergeable: nil, merge_state_status: nil, review_decision: nil,
       status_check_rollup: nil
     )
+  end
+
+  def pending_status
+    {
+      "mergeable" => "UNKNOWN", "mergeStateStatus" => "BLOCKED",
+      "reviewDecision" => "", "headRefOid" => "a" * 40,
+      "statusCheckRollup" => [ { "conclusion" => "" } ]
+    }
   end
 
   def projection(job)

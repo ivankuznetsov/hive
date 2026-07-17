@@ -346,4 +346,55 @@ class BabysitterProjectTickTest < Minitest::Test
       logger&.close
     end
   end
+
+  def test_registered_job_failures_are_tallied_as_needs_human
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      write_config(dir, babysitter: { "enabled" => true, "max_concurrent_prs" => 2 })
+      logger = make_logger(dir)
+      job = { "job_id" => "bsj-v1-#{'a' * 32}", "state" => "active",
+              "identity" => { "pr_number" => 12 } }
+      store = Struct.new(:jobs).new([ job ])
+
+      with_replaced_singleton_method(Hive::Babysitter::JobRunner, :run, lambda { |**_kwargs|
+        raise "runner crash"
+      }) do
+        with_replaced_singleton_method(Hive::Gh, :list_open_prs, ->(*_args, **_kwargs) { [] }) do
+          summary = Hive::Babysitter::ProjectTick.run(
+            project, dry_run: false, logger: logger, inflight: Set.new, job_store: store
+          )
+          assert_equal({ total: 1, fixed: 0, untouched: 0, needs_human: 1 }, summary)
+        end
+      end
+    ensure
+      logger&.close
+    end
+  end
+
+  def test_registry_failures_are_visible_and_fail_closed
+    with_tmp_dir do |dir|
+      project = project_entry(dir)
+      write_config(dir, babysitter: { "enabled" => true })
+      logger = make_logger(dir)
+      store = Object.new
+      store.define_singleton_method(:jobs) do
+        raise Hive::Babysitter::JobStore::CorruptRecord, "truncated registry"
+      end
+
+      summary = Hive::Babysitter::ProjectTick.run(
+        project, dry_run: false, logger: logger, inflight: Set.new, job_store: store
+      )
+
+      assert_equal({ total: 0, fixed: 0, untouched: 0, needs_human: 1 }, summary)
+    ensure
+      logger&.close
+    end
+  end
+
+  def test_explicit_job_outcome_tally_distinguishes_head_changes_and_failures
+    assert_equal(
+      { total: 3, fixed: 1, untouched: 0, needs_human: 2 },
+      Hive::Babysitter::ProjectTick.tally_job_outcomes([ :head_changed, :needs_human, :failure ])
+    )
+  end
 end

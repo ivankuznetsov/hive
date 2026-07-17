@@ -88,6 +88,172 @@ class FinalizationEventTest < Minitest::Test
     end
   end
 
+  def test_payload_and_handoff_are_required_before_lifecycle_events
+    finalized = build(:finalized)
+    assert_raises(Hive::Finalization::InvalidEvent) do
+      Hive::Finalization::Event.validate!(finalized.merge("payload" => []), records: [])
+    end
+    assert_raises(Hive::Finalization::StaleEvidence) do
+      Hive::Finalization::Event.validate!(build(:merge_ready), records: [])
+    end
+  end
+
+  def test_every_producer_identity_is_strictly_validated
+    finalized = build(:finalized)
+    cases = [
+      [ finalized.merge("producer" => nil), Hive::Finalization::InvalidProducer ],
+      [ finalized.merge("producer" => babysitter_producer), Hive::Finalization::InvalidProducer ],
+      [ finalized.merge("producer" => { "kind" => "finalize_attempt", "attempt_id" => "other" }),
+        Hive::Finalization::InvalidProducer ],
+      [ build(:merge_ready, producer: { "kind" => "babysitter_job", "claim_fence" => 0 }),
+        Hive::Finalization::InvalidEvent ],
+      [ build(:archive_ready, producer: { "kind" => "reconciler", "name" => "other" }),
+        Hive::Finalization::InvalidProducer ],
+      [ build(:no_pr_approved, producer: { "kind" => "operator", "uid" => 1, "channel" => "local_tty" }),
+        Hive::Finalization::InvalidEvent ],
+      [ build(:no_pr_approved, producer: { "kind" => "operator", "uid" => 1, "login" => "me",
+                                          "channel" => "api" }),
+        Hive::Finalization::InvalidProducer ]
+    ]
+
+    cases.each do |record, error_class|
+      assert_raises(error_class) { Hive::Finalization::Event.validate_producer!(record, record["event_type"]) }
+    end
+  end
+
+  def test_coordinate_shape_rejects_missing_invalid_and_malformed_values
+    [
+      coordinates.reject { |key, _value| key == "job_id" },
+      coordinates.merge("pr_number" => 0),
+      coordinates.merge("head_generation" => 0),
+      coordinates.merge("head_sha" => "not-a-sha")
+    ].each do |payload|
+      assert_raises(Hive::Finalization::InvalidEvent) do
+        Hive::Finalization::Event.validate_coordinates!(payload)
+      end
+    end
+  end
+
+  def test_finalized_replay_requires_attempt_generation_or_valid_replacement
+    current = Hive::Finalization::Projection.project(records: [ build(:finalized) ])
+    wrong_attempt = build(:finalized, attempt_id: "attempt-2")
+    wrong_attempt["payload"]["finalize_attempt_id"] = "attempt-1"
+    assert_raises(Hive::Finalization::InvalidEvent) do
+      Hive::Finalization::Event.validate_finalized!(wrong_attempt, wrong_attempt["payload"],
+                                                    Hive::Finalization::Projection.empty_projection)
+    end
+
+    replay = build(:finalized, event_id: "duplicate")
+    assert_raises(Hive::Finalization::StaleEvidence) do
+      Hive::Finalization::Event.validate_finalized!(replay, replay["payload"], current)
+    end
+
+    newer = build(:finalized, event_id: "new-generation")
+    newer["task_generation"] = 4
+    assert Hive::Finalization::Event.validate_finalized!(newer, newer["payload"], current).nil?
+
+    replacement = build(:finalized, event_id: "replacement")
+    replacement["payload"] = replacement["payload"].merge(
+      "job_id" => "job-2", "supersedes_job_id" => "job-1",
+      "replacement_proof" => { "state" => "CLOSED" }
+    )
+    assert Hive::Finalization::Event.validate_finalized!(replacement, replacement["payload"], current).nil?
+  end
+
+  def test_stale_task_coordinates_attempts_heads_and_fences_are_rejected
+    current = Hive::Finalization::Projection.project(records: [ build(:finalized) ])
+    assert_raises(Hive::Finalization::StaleEvidence) do
+      Hive::Finalization::Event.validate_task_generation!({ "task_generation" => 9 }, current)
+    end
+    assert_raises(Hive::Finalization::StaleEvidence) do
+      Hive::Finalization::Event.validate_current_coordinates!(coordinates.merge("pr_number" => 99), current)
+    end
+
+    adopted = build(:finalize_attempt_adopted)
+    assert_raises(Hive::Finalization::StaleEvidence) do
+      Hive::Finalization::Event.validate_adoption!(adopted, adopted["producer"], adopted["payload"], current)
+    end
+    assert_raises(Hive::Finalization::StaleEvidence) do
+      Hive::Finalization::Event.validate_head_supersession!(coordinates, current)
+    end
+    assert_raises(Hive::Finalization::StaleEvidence) do
+      Hive::Finalization::Event.validate_claim_fence!({ "claim_fence" => 1 }, current.merge("claim_fence" => 2))
+    end
+  end
+
+  def test_terminal_blocker_and_state_helpers_fail_closed
+    assert_raises(Hive::Finalization::StaleEvidence) do
+      Hive::Finalization::Event.validate_archive_ready!(
+        { "terminal_event_id" => "missing" },
+        Hive::Finalization::Projection.empty_projection.merge("state" => "finalized")
+      )
+    end
+    assert_raises(Hive::Finalization::StaleEvidence) do
+      Hive::Finalization::Event.validate_archive_ready!(
+        { "terminal_event_id" => "old" },
+        Hive::Finalization::Projection.empty_projection.merge(
+          "state" => "merged", "evidence" => { "terminal_event_id" => "new" }
+        )
+      )
+    end
+    assert_raises(Hive::Finalization::InvalidEvent) do
+      Hive::Finalization::Event.validate_blocker!({ "code" => "", "needs_human" => true, "source" => "test" })
+    end
+    assert_raises(Hive::Finalization::StaleEvidence) do
+      Hive::Finalization::Event.require_state!({ "state" => "merged" }, [ "finalized" ], "merge_ready")
+    end
+  end
+
+  def test_no_pr_cleanup_generation_and_adoption_edge_cases_fail_closed
+    finalized = build(:finalized)
+    bad_outcome = build(
+      :no_pr_approved,
+      producer: { "kind" => "operator", "uid" => 1, "login" => "tester", "channel" => "local_tty" },
+      payload: coordinates.merge("outcome" => "label_done")
+    )
+    assert_raises(Hive::Finalization::InvalidEvent) do
+      Hive::Finalization::Event.validate!(bad_outcome, records: [ finalized ])
+    end
+
+    merged = build(:merged, event_id: "merged", payload: coordinates.merge("merged_at" => NOW.iso8601))
+    archive = build(
+      :archive_ready, event_id: "archive",
+      producer: { "kind" => "reconciler", "name" => "hive-finalization-reconciler-v1" },
+      payload: coordinates.merge("terminal_event_id" => "merged")
+    )
+    cleanup = build(
+      :cleanup_completed, event_id: "cleanup",
+      producer: { "kind" => "reconciler", "name" => "hive-finalization-reconciler-v1" },
+      payload: coordinates.merge("archive_ready_event_id" => "wrong")
+    )
+    assert_raises(Hive::Finalization::StaleEvidence) do
+      Hive::Finalization::Event.validate!(cleanup, records: [ finalized, merged, archive ])
+    end
+
+    bad_fence = build(
+      :merge_ready, producer: { "kind" => "babysitter_job", "job_id" => "job-1", "claim_fence" => 0 }
+    )
+    assert_raises(Hive::Finalization::InvalidProducer) do
+      Hive::Finalization::Event.validate_producer!(bad_fence, "merge_ready")
+    end
+
+    generation = build(:finalized)
+    generation["payload"]["head_generation"] = 2
+    assert_raises(Hive::Finalization::InvalidEvent) do
+      Hive::Finalization::Event.validate_finalized!(
+        generation, generation["payload"], Hive::Finalization::Projection.empty_projection
+      )
+    end
+
+    adoption = build(:finalize_attempt_adopted, attempt_id: "attempt-2")
+    assert_raises(Hive::Finalization::InvalidProducer) do
+      Hive::Finalization::Event.validate_adoption!(
+        adoption, { "attempt_id" => "attempt-3" }, adoption["payload"],
+        Hive::Finalization::Projection.project(records: [ finalized ])
+      )
+    end
+  end
+
   private
 
   def build(type, event_id: type.to_s, attempt_id: "attempt-1", producer: nil, payload: nil)

@@ -1,6 +1,7 @@
 require "test_helper"
 require "hive/task_journal"
 require "hive/attempts/store"
+require "hive/babysitter/job_store"
 
 class TaskJournalTest < Minitest::Test
   include HiveTestHelper
@@ -142,6 +143,60 @@ class TaskJournalTest < Minitest::Test
     end
   end
 
+  def test_append_once_requires_a_deterministic_id
+    with_writer do |writer, _dir|
+      assert_raises(Hive::TaskJournal::InvalidRecord) do
+        writer.append_once(event("reconciliation"))
+      end
+    end
+  end
+
+  def test_babysitter_events_require_a_validator_and_translate_authority_errors
+    with_tmp_dir do |dir|
+      record = Hive::TaskJournal::Envelope.authoritative(finalization_event)
+      records = [ finalized_record ]
+      writer = Hive::TaskJournal::Writer.new(task_folder: dir, clock: -> { NOW })
+      assert_raises(Hive::TaskJournal::AttemptMismatch) do
+        writer.send(:validate!, record, records: records)
+      end
+
+      validator = Object.new
+      validator.define_singleton_method(:validate_event_authority!) do |_event|
+        raise Hive::Babysitter::JobStore::StaleClaim, "stale fence"
+      end
+      writer = Hive::TaskJournal::Writer.new(
+        task_folder: dir, clock: -> { NOW }, authority_validator: validator
+      )
+      error = assert_raises(Hive::TaskJournal::AttemptMismatch) do
+        writer.send(:validate!, record, records: records)
+      end
+      assert_includes error.message, "stale fence"
+    end
+  end
+
+  def test_corrupt_existing_json_is_rejected_with_its_line_number
+    with_writer do |writer, dir|
+      File.write(File.join(dir, "events.jsonl"), "{\n")
+      error = assert_raises(Hive::TaskJournal::InvalidRecord) do
+        writer.append(event("reconciliation"))
+      end
+      assert_includes error.message, "line 1"
+    end
+  end
+
+  def test_finalization_validation_errors_are_normalized_as_invalid_records
+    with_tmp_dir do |dir|
+      writer = Hive::TaskJournal::Writer.new(task_folder: dir, clock: -> { NOW })
+      invalid = finalized_record
+      invalid["payload"]["head_generation"] = 2
+
+      error = assert_raises(Hive::TaskJournal::InvalidRecord) do
+        writer.send(:validate!, invalid, records: [])
+      end
+      assert_includes error.message, "head_generation 1"
+    end
+  end
+
   private
 
   def with_writer
@@ -178,5 +233,29 @@ class TaskJournalTest < Minitest::Test
       provenance: { "source" => "test" },
       payload: { "condition" => "ChangesPresent", "state" => "satisfied" }
     }.merge(overrides)
+  end
+
+  def finalization_event
+    {
+      event_id: "job-active", event_type: "babysitter_active", occurred_at: NOW.iso8601(6),
+      observed_at: NOW.iso8601(6), task: { "id" => "42", "slug" => "durable-task" },
+      workflow: "coding", stage: "8-finalize", attempt_id: "attempt-1", task_generation: 3,
+      ownership_generation: "job-1", reason: "active", evidence: [], provenance: { "source" => "test" },
+      producer: { "kind" => "babysitter_job", "job_id" => "job-1", "claim_fence" => 1 },
+      payload: {
+        "job_id" => "job-1", "repository" => "github.com/acme/demo", "pr_number" => 12,
+        "pr_url" => "https://github.com/acme/demo/pull/12", "head_sha" => "a" * 40,
+        "head_generation" => 1, "finalize_attempt_id" => "attempt-1"
+      }
+    }
+  end
+
+  def finalized_record
+    Hive::TaskJournal::Envelope.authoritative(
+      finalization_event.merge(
+        event_id: "finalized", event_type: "finalized", reason: "handoff",
+        producer: { "kind" => "finalize_attempt", "attempt_id" => "attempt-1" }
+      )
+    )
   end
 end

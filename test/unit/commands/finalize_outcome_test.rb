@@ -122,6 +122,108 @@ class CommandsFinalizeOutcomeTest < Minitest::Test
     end
   end
 
+  def test_argument_and_tty_errors_fail_before_resolution
+    with_context do |ctx|
+      assert_raises(Hive::InvalidTaskPath) do
+        command(ctx, action: "erase", input: tty_input("")).call
+      end
+      assert_raises(Hive::InvalidTaskPath) do
+        command(ctx, action: "rearm", outcome: "abandonment", evidence: "proof",
+                input: tty_input("")).call
+      end
+
+      broken_tty = StringIO.new
+      broken_tty.define_singleton_method(:tty?) { raise IOError, "closed" }
+      assert_raises(Hive::InvalidTaskPath) do
+        command(ctx, input: broken_tty).call
+      end
+    end
+  end
+
+  def test_missing_handoff_and_superseded_current_job_fail_closed
+    with_context do |ctx|
+      File.write(File.join(ctx.fetch(:task_folder), "events.jsonl"), "")
+      assert_raises(Hive::Finalization::OutcomeValidator::NotEligible) do
+        command(ctx, input: tty_input("")).call
+      end
+    end
+
+    with_context do |ctx|
+      old = ctx.fetch(:job)
+      replacement = ctx.fetch(:store).reserve_replacement!(
+        old_job_id: old.fetch("job_id"), remote_state: "CLOSED", remote_observed_at: NOW.iso8601,
+        project: old.dig("identity", "project"), task_id: 42, task_slug: "durable-task",
+        task_generation: 3, repository: "github.com/acme/demo", pr_number: 13,
+        pr_url: "https://github.com/acme/demo/pull/13", branch: "feature/durable",
+        head_sha: "b" * 40, head_generation: 1, finalize_attempt_id: "attempt-2",
+        task_folder: ctx.fetch(:task_folder), now: NOW
+      )
+      refute_equal old.fetch("job_id"), replacement.fetch("job_id")
+      assert_raises(Hive::Finalization::OutcomeValidator::NotEligible) do
+        command(ctx, input: tty_input("")).call
+      end
+    end
+  end
+
+  def test_rearm_retry_repairs_registry_without_a_duplicate_event
+    with_context do |ctx|
+      command(ctx, input: tty_input("approve durable-task 3 abandonment\n")).call
+      first = command(
+        ctx, action: "rearm", outcome: nil, reason: "resume",
+        input: tty_input("rearm durable-task 3\n")
+      ).call
+      replay = command(
+        ctx, action: "rearm", outcome: nil, reason: "resume",
+        input: tty_input("")
+      ).call
+
+      assert_equal :rearmed, first.status
+      assert_equal :already_recorded, replay.status
+      assert_equal 1, journal(ctx).count { |event| event["event_type"] == "finalization_rearmed" }
+    end
+  end
+
+  def test_rearm_requires_a_retired_or_active_operational_job
+    with_context do |ctx|
+      command(ctx, input: tty_input("approve durable-task 3 abandonment\n")).call
+      ctx.fetch(:store).send(:mutate, ctx.dig(:job, "job_id")) do |record|
+        record["state"] = "superseded"
+        record
+      end
+
+      assert_raises(Hive::Finalization::OutcomeValidator::NotEligible) do
+        command(
+          ctx, action: "rearm", outcome: nil, reason: "resume",
+          input: tty_input("rearm durable-task 3\n")
+        ).call
+      end
+    end
+  end
+
+  def test_local_actor_resolution_uses_os_identity_and_fails_closed
+    command_object = Hive::Commands::FinalizeOutcome.new(
+      "task", "approve", outcome: "abandonment", reason: "reason"
+    )
+    assert_kind_of Time, command_object.instance_variable_get(:@clock).call
+    actor = command_object.send(:local_actor)
+    assert_equal Process.euid, actor.fetch("uid")
+    refute_empty actor.fetch("login")
+
+    with_replaced_singleton_method(Etc, :getlogin, -> { "" }) do
+      empty_user = Struct.new(:name).new("")
+      with_replaced_singleton_method(Etc, :getpwuid, ->(_uid) { empty_user }) do
+        assert_raises(Hive::Finalization::OutcomeValidator::NotEligible) do
+          command_object.send(:local_actor)
+        end
+      end
+      with_replaced_singleton_method(Etc, :getpwuid, ->(_uid) { raise ArgumentError, "missing uid" }) do
+        assert_raises(Hive::Finalization::OutcomeValidator::NotEligible) do
+          command_object.send(:local_actor)
+        end
+      end
+    end
+  end
+
   private
 
   def command(ctx, action: "approve", outcome: "abandonment", reason: "retiring duplicate work",

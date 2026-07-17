@@ -2,6 +2,15 @@ require "test_helper"
 require "hive/finalization/projection"
 
 class FinalizationProjectionTest < Minitest::Test
+  def test_deep_copy_recursively_copies_arrays
+    original = [ { "values" => [ "one" ] } ]
+
+    copied = Hive::Finalization::Projection.deep_copy(original)
+    copied.first.fetch("values") << "two"
+
+    assert_equal [ "one" ], original.first.fetch("values")
+  end
+
   NOW = Time.utc(2026, 7, 17, 13, 0, 0)
 
   def test_normal_lifecycle_folds_to_archive_ready

@@ -55,6 +55,63 @@ class GhUnitTest < Minitest::Test
     assert_equal "2026-07-17T15:00:00.000000Z", snapshot.observed_at
   end
 
+  def test_pr_state_accepts_hashes_and_rejects_other_json_shapes
+    status = Hive::Gh::CommandStatus.new(exitstatus: 0)
+    with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*_args, **_kwargs|
+      [ JSON.generate("state" => "OPEN"), "", status ]
+    }) do
+      assert_equal "OPEN", Hive::Gh.pr_state("https://github.com/acme/demo/pull/12")
+    end
+    with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*_args, **_kwargs|
+      [ "[]", "", status ]
+    }) do
+      assert_raises(Hive::GhError) { Hive::Gh.pr_state("https://github.com/acme/demo/pull/12") }
+    end
+  end
+
+  def test_exact_pr_snapshot_rejects_command_identity_head_and_merge_corruption
+    success = Hive::Gh::CommandStatus.new(exitstatus: 0)
+    failure = Hive::Gh::CommandStatus.new(exitstatus: 1)
+    url = "https://github.com/acme/demo/pull/12"
+    base = {
+      "number" => 12, "url" => url, "state" => "OPEN", "headRefOid" => "a" * 40,
+      "headRefName" => "feature", "baseRefName" => "main", "mergedAt" => nil,
+      "headRepository" => { "nameWithOwner" => "acme/demo" }, "mergeable" => "UNKNOWN",
+      "mergeStateStatus" => "UNKNOWN", "reviewDecision" => nil, "statusCheckRollup" => []
+    }
+
+    with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_args, **_kwargs) { [ "offline", "", failure ] }) do
+      assert_raises(Hive::GhError) { Hive::Gh.exact_pr_snapshot(url) }
+    end
+
+    [
+      base.merge("headRefOid" => "bad"),
+      base.merge("state" => "MERGED", "mergedAt" => nil),
+      base.merge("state" => "MERGED", "mergedAt" => "not-time"),
+      base.merge("number" => 13, "url" => "https://github.com/acme/demo/pull/13")
+    ].each do |document|
+      body = JSON.generate(document)
+      with_replaced_singleton_method(Hive::Gh, :capture3, ->(*_args, **_kwargs) { [ body, "", success ] }) do
+        assert_raises(Hive::GhError) { Hive::Gh.exact_pr_snapshot(url) }
+      end
+    end
+  end
+
+  def test_legacy_exact_identity_rejects_missing_or_malformed_repository_data
+    request = "https://github.com/acme/demo/pull/12"
+    assert_raises(Hive::GhError) do
+      Hive::Gh.send(
+        :legacy_pr_identity,
+        { "url" => "https://github.com/pr/12", "number" => 12,
+          "headRepository" => { "nameWithOwner" => "" } },
+        request
+      )
+    end
+    assert_raises(Hive::GhError) do
+      Hive::Gh.send(:legacy_pr_identity, { "url" => "https://[broken", "number" => 12 }, request)
+    end
+  end
+
   # --- with_network_timeout --------------------------------------------
 
   def test_with_network_timeout_raises_typed_error_on_timeout

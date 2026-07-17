@@ -85,4 +85,11 @@ class PrTest < Minitest::Test
       Hive::Pr.canonical_identity("https://github.com/acme/demo/issues/12")
     end
   end
+
+  def test_canonical_identity_translates_invalid_uri_syntax
+    error = assert_raises(ArgumentError) do
+      Hive::Pr.canonical_identity("https://[broken")
+    end
+    assert_includes error.message, "invalid canonical"
+  end
 end

@@ -1564,6 +1564,29 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert logger.events.any? { |name, attrs| name == :finalization_reconciled && attrs[:archive_ready_event_id] == "archive-event" }
   end
 
+  def test_daemon_logs_invalid_terminal_evidence_without_archiving
+    watching = row(stage: "8-finalize", action: "watching", command: nil)
+    dispatcher, sup, _ctrl, logger = make_dispatcher(rows: [ watching ])
+    factory = Object.new
+    factory.define_singleton_method(:new) do |task_folder:|
+      raise "wrong folder" unless task_folder == watching.folder
+
+      Object.new.tap do |instance|
+        instance.define_singleton_method(:reconcile) do
+          raise Hive::Finalization::StaleEvidence, "stale merged head"
+        end
+      end
+    end
+    dispatcher.instance_variable_set(:@finalization_reconciler, factory)
+
+    dispatcher.tick(now: T0)
+
+    assert_empty sup.spawned
+    blocked = logger.events.find { |name, attrs| name == :blocked && attrs[:action] == "finalization_reconcile" }
+    refute_nil blocked
+    assert_equal "invalid_terminal_evidence", blocked.last.fetch(:reason)
+  end
+
   def test_admission_error_never_invokes_legacy_merge_watcher_or_spawns
     error = Hive::DependencyAdmission::AdmissionError.new(
       reason_code: "dependency_repository_mismatch",

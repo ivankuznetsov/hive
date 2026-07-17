@@ -1,6 +1,7 @@
 require "test_helper"
 require "hive/commands/init"
 require "hive/finalization/archive_cleanup"
+require "hive/task"
 
 class FinalizationArchiveCleanupTest < Minitest::Test
   include HiveTestHelper
@@ -136,6 +137,97 @@ class FinalizationArchiveCleanupTest < Minitest::Test
     end
   end
 
+  def test_cleanup_rejects_missing_stale_and_nonterminal_job_ownership
+    with_ready_task do |_dir, task, context|
+      job = context.fetch(:store).read(context.dig(:job, "job_id"))
+      [
+        nil,
+        job.merge("head_sha" => "b" * 40),
+        job.merge("state" => "active")
+      ].each do |current|
+        store = fake_job_store(current, current ? [ current ] : [])
+        assert_raises(Hive::Finalization::StaleEvidence) do
+          Hive::Finalization::ArchiveCleanup.new(task: task, clock: -> { NOW }, job_store: store).call
+        end
+      end
+    end
+  end
+
+  def test_cleanup_rejects_corrupt_claim_timestamps
+    with_ready_task do |_dir, task, context|
+      job = context.fetch(:store).read(context.dig(:job, "job_id"))
+      corrupt = job.merge("claims" => [ { "state" => "active", "expires_at" => "not-time" } ])
+
+      error = assert_raises(Hive::Finalization::StaleEvidence) do
+        Hive::Finalization::ArchiveCleanup.new(
+          task: task, clock: -> { NOW }, job_store: fake_job_store(corrupt, [ corrupt ])
+        ).call
+      end
+      assert_includes error.message, "claim evidence"
+    end
+  end
+
+  def test_cleanup_pointer_must_match_the_exact_task_path_and_branch
+    with_ready_task do |dir, task, context|
+      canonical_root = Hive::Worktree.canonical_root(dir)
+      FileUtils.mkdir_p(File.join(canonical_root, "other-task"))
+      File.write(File.join(task.folder, "worktree.yml"),
+                 { "path" => File.join(canonical_root, "other-task"), "branch" => task.slug }.to_yaml)
+      assert_raises(Hive::WorktreeError) do
+        Hive::Finalization::ArchiveCleanup.new(task: task, clock: -> { NOW }).call
+      end
+
+      File.write(File.join(task.folder, "worktree.yml"),
+                 { "path" => File.join(canonical_root, task.slug), "branch" => "other-branch" }.to_yaml)
+      assert_raises(Hive::WorktreeError) do
+        Hive::Finalization::ArchiveCleanup.new(task: task, clock: -> { NOW }).call
+      end
+      refute_nil context
+    end
+  end
+
+  def test_worktree_removal_handles_stale_registration_and_refuses_unregistered_paths
+    with_done_task do |dir, task|
+      expected = File.join(Hive::Worktree.canonical_root(dir), task.slug)
+      worktree = Object.new
+      worktree.define_singleton_method(:list_worktree_paths) { [ expected ] }
+      worktree.define_singleton_method(:remove!) { |**_kwargs| nil }
+      prunes = 0
+      git = Object.new
+      git.define_singleton_method(:prune_worktrees_strict!) { prunes += 1 }
+      cleanup = Hive::Finalization::ArchiveCleanup.new(
+        task: task, worktree_factory: ->(_root, _slug) { worktree }, git_ops: git
+      )
+      cleanup.send(:remove_worktree!, expected)
+      assert_equal 1, prunes
+      assert_raises(Hive::WorktreeError) { cleanup.send(:ensure_worktree_absent!, expected) }
+
+      FileUtils.mkdir_p(expected)
+      unregistered = Object.new
+      unregistered.define_singleton_method(:list_worktree_paths) { [] }
+      refusing = Hive::Finalization::ArchiveCleanup.new(
+        task: task, worktree_factory: ->(_root, _slug) { unregistered }, git_ops: git
+      )
+      assert_raises(Hive::WorktreeError) { refusing.send(:remove_worktree!, expected) }
+    end
+  end
+
+  def test_cleanup_receipt_requires_archive_task_identity
+    with_done_task do |_dir, task|
+      cleanup = Hive::Finalization::ArchiveCleanup.new(task: task)
+      finalization = {
+        "job_id" => "job", "repository" => "github.com/acme/demo", "pr_number" => 12,
+        "pr_url" => "https://github.com/acme/demo/pull/12", "head_sha" => "a" * 40,
+        "head_generation" => 1, "finalize_attempt_id" => "attempt-1", "task_generation" => 1,
+        "evidence" => { "archive_ready_event_id" => "archive" }
+      }
+      assert_raises(Hive::Finalization::StaleEvidence) do
+        cleanup.send(:append_receipt!, [ { "event_id" => "archive" } ], finalization,
+                     "/tmp/worktree", "branch")
+      end
+    end
+  end
+
   private
 
   def with_done_task
@@ -165,5 +257,12 @@ class FinalizationArchiveCleanupTest < Minitest::Test
   def cleanup_event(task)
     Hive::TaskProjection.read_journal(File.join(task.folder, "events.jsonl"))
                         .find { |record| record["event_type"] == "cleanup_completed" }
+  end
+
+  def fake_job_store(current, jobs)
+    Object.new.tap do |store|
+      store.define_singleton_method(:current_job) { |**_kwargs| current }
+      store.define_singleton_method(:jobs) { jobs }
+    end
   end
 end

@@ -888,4 +888,24 @@ class DiagnosticEvidenceTest < Minitest::Test
       end
     end
   end
+
+  def test_retry_evidence_is_bounded_and_redacts_secrets_controls_and_paths
+    evidence = Hive::DiagnosticEvidence.sanitize_retry(
+      "provider" => "codex",
+      "tool" => "honeycomb-mcp",
+      "message" => "401\u0000 missing bearer auth API_TOKEN=super-secret /home/alice/auth.log",
+      "authorization" => "Bearer this-must-not-survive",
+      "oversized" => "x" * 10_000
+    )
+
+    serialized = JSON.generate(evidence)
+    assert_operator evidence.length, :<=, Hive::DiagnosticEvidence::RETRY_EVIDENCE_MAX_ENTRIES
+    assert_includes serialized, "honeycomb-mcp"
+    refute_includes serialized, "super-secret"
+    refute_includes serialized, "this-must-not-survive"
+    refute_includes serialized, "/home/alice"
+    refute_includes serialized, "\\u0000"
+    assert_operator evidence.find { |item| item["field"] == "oversized" }.fetch("value").bytesize,
+                    :<=, Hive::DiagnosticEvidence::RETRY_EVIDENCE_VALUE_MAX
+  end
 end

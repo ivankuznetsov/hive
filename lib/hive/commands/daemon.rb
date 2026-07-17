@@ -267,6 +267,9 @@ module Hive
           outcome_store: lost_outcome_store,
           process_identity: attempt_process_identity
         )
+        failure_reporter = Hive::Daemon::FailureReporter.new(
+          attempt_store: attempt_store, global_daemon: daemon_cfg
+        )
 
         dispatcher = Hive::Daemon::Dispatcher.new(
           config: config, controller: controller, supervisor: supervisor,
@@ -282,7 +285,8 @@ module Hive
           attempt_dispatcher: attempt_dispatcher,
           attempt_reconciler: attempt_reconciler,
           lost_outcome_store: lost_outcome_store,
-          lost_outcome_processor: lost_outcome_processor
+          lost_outcome_processor: lost_outcome_processor,
+          failure_reporter: failure_reporter
         )
 
         reexec_requested = false

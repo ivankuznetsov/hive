@@ -36,6 +36,11 @@ module Hive
     SUMMARY_MAX = Hive::DiagnosticHelpers::SUMMARY_MAX
     LOG_GLOB_CAP = Hive::DiagnosticHelpers::LOG_GLOB_CAP
     FRONTMATTER_SCAN_BYTES = Hive::DiagnosticHelpers::FRONTMATTER_SCAN_BYTES
+    RETRY_EVIDENCE_MAX_ENTRIES = 24
+    RETRY_EVIDENCE_VALUE_MAX = 1_000
+    RETRY_SECRET_KEY = /(?:token|secret|password|credential|authorization|cookie|private[_-]?key)/i.freeze
+    RETRY_ENV_ASSIGNMENT = /\b[A-Z][A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|CREDENTIAL|API_KEY|AUTH)[A-Z0-9_]*\s*=\s*[^\s,;]+/i.freeze
+    RETRY_ABSOLUTE_PATH = %r{(?<![A-Za-z0-9:])/(?:home|Users|tmp|var|etc)/[^\s,;]+}.freeze
 
     # Cap on the marker-tier read. Markers live at a state file's tail and a
     # real hive state file is a few KB, so a candidate above this is junk (e.g.
@@ -55,6 +60,28 @@ module Hive
     }.freeze
 
     module_function
+
+    # Converts arbitrary producer diagnostics into a small JSON-safe list.
+    # Secret-bearing keys are discarded; values are UTF-8 scrubbed, redacted,
+    # path-sanitized, one-line, and byte bounded before journal persistence.
+    def sanitize_retry(payload)
+      pairs = flatten_retry_payload(payload).first(RETRY_EVIDENCE_MAX_ENTRIES)
+      pairs.filter_map do |key, value|
+        next if key.to_s.match?(RETRY_SECRET_KEY)
+
+        text = Hive::SecretPatterns.redact(value.to_s)
+        text = text.gsub(RETRY_ENV_ASSIGNMENT, "[REDACTED:environment]")
+                   .gsub(RETRY_ABSOLUTE_PATH, "[REDACTED:path]")
+                   .gsub(/[\u0000-\u001f\u007f]+/, " ")
+                   .gsub(/\s+/, " ").strip
+        next if text.empty?
+
+        text = text.byteslice(0, RETRY_EVIDENCE_VALUE_MAX).to_s
+        { "field" => key.to_s.byteslice(0, 80), "value" => text }
+      end
+    rescue StandardError, SystemStackError, NoMemoryError
+      [ { "field" => "diagnostic", "value" => "evidence unavailable after sanitization" } ]
+    end
 
     def source_label(kind)
       KIND_RENDERING.fetch(kind).fetch(:label)
@@ -405,6 +432,28 @@ module Hive
       utf8(value.to_s).gsub(/\s+/, " ").strip
     end
 
+    def flatten_retry_payload(value, prefix = nil, output = [])
+      return output if output.length >= RETRY_EVIDENCE_MAX_ENTRIES
+
+      case value
+      when Hash
+        value.each do |key, child|
+          break if output.length >= RETRY_EVIDENCE_MAX_ENTRIES
+          next if key.to_s.match?(RETRY_SECRET_KEY)
+
+          flatten_retry_payload(child, [ prefix, key ].compact.join("."), output)
+        end
+      when Array
+        value.each_with_index do |child, index|
+          break if output.length >= RETRY_EVIDENCE_MAX_ENTRIES
+          flatten_retry_payload(child, [ prefix, index ].compact.join("."), output)
+        end
+      else
+        output << [ prefix || "diagnostic", value ] unless value.nil?
+      end
+      output
+    end
+
     def utf8(value)
       Hive::DiagnosticHelpers.utf8(value)
     end
@@ -428,6 +477,7 @@ module Hive
                          :marker_summary_from_state_file,
                          :current_marker, :regular_marker_file?, :marker_file_oversized?,
                          :last_meaningful_line, :safe_read_head, :safe_mtime, :contained?,
+                         :flatten_retry_payload,
                          :evidence_roots, :summary_payload,
                          :present, :present_path, :one_line, :utf8, :breadcrumb
   end

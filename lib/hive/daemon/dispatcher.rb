@@ -12,6 +12,7 @@ require "hive/daemon/concurrency_controller"
 require "hive/daemon/child_supervisor"
 require "hive/daemon/status_consumer"
 require "hive/daemon/retry_coordinator"
+require "hive/daemon/failure_reporter"
 require "hive/daemon/stale_agent_healer"
 require "hive/daemon/recoverable_error_healer"
 require "hive/daemon/display_name_backfiller"
@@ -71,7 +72,7 @@ module Hive
                      dispatch_request_state_home: nil, dispatch_result_state_home: nil,
                      attempt_dispatcher: nil, attempt_reconciler: nil,
                      lost_outcome_store: nil, lost_outcome_processor: nil,
-                     retry_coordinator_factory: nil)
+                     retry_coordinator_factory: nil, failure_reporter: nil)
         @config = config
         @controller = controller
         @supervisor = supervisor
@@ -91,6 +92,7 @@ module Hive
         @retry_coordinators = {}
         @lost_outcome_store = lost_outcome_store
         @lost_outcome_processor = lost_outcome_processor
+        @failure_reporter = failure_reporter
         @attempt_snapshot = nil
 
         # Update-flow collaborators (plan 2026-05-27-002). The check runs
@@ -1969,6 +1971,7 @@ module Hive
 
         @attempt_snapshot = @attempt_reconciler.reconcile(now: now.utc)
         @controller.set_capacity_snapshot(@attempt_snapshot.capacity)
+        report_attempt_outcomes
         reconcile_attempt_deliveries(now: now)
         true
       rescue StandardError => e
@@ -1978,6 +1981,19 @@ module Hive
           keeping_previous: true
         )
         false
+      end
+
+      def report_attempt_outcomes
+        return unless @failure_reporter
+
+        failures = Array(@attempt_snapshot&.lost_attempts) +
+                   Array(@attempt_snapshot&.terminal_attempts).reject do |attempt|
+                     attempt.outcome == "succeeded"
+                   end
+        failures.each { |attempt| @failure_reporter.observe(attempt) }
+        Array(@attempt_snapshot&.terminal_attempts).select do |attempt|
+          attempt.outcome == "succeeded"
+        end.each { |attempt| @failure_reporter.observe(attempt) }
       end
 
       def reconcile_attempt_deliveries(now:)

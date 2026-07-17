@@ -133,8 +133,7 @@ class CommandsStatusTest < Minitest::Test
         explicit_json = JSON.generate(
           Hive::Commands::Status.new.json_payload(
             projects,
-            stages: Hive::Workflows.all_stage_dirs,
-            extra_dependency_tasks: {}
+            stages: Hive::Workflows.all_stage_dirs
           )
         )
       end
@@ -437,13 +436,16 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
-  def test_active_only_payload_uses_prevalidated_cached_dependency_tasks
+  def test_active_only_payload_uses_lossless_archived_admission_context
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")
       dependent = write_status_task(hive_state, "4-execute", "dependent-task-260626-bbbb",
                                     state_file: "task.md", marker: "EXECUTE_COMPLETE")
       Hive::TaskMeta.write(dependent, id: 2, slug: File.basename(dependent),
                                       display_name: nil, depends_on: "archived-task-260626-aaaa")
+      archived = write_status_task(hive_state, "9-done", "archived-task-260626-aaaa",
+                                   state_file: "task.md", marker: "COMPLETE")
+      Hive::TaskMeta.write(archived, id: 1, slug: File.basename(archived), display_name: nil)
       active_stages = Hive::Workflows.all_stage_dirs - [ Hive::ArchiveFilter::ARCHIVE_STAGE_DIR ]
       project = status_project(project_root, hive_state)
 
@@ -451,35 +453,23 @@ class CommandsStatusTest < Minitest::Test
         [ project ], stages: active_stages, exclude_archived: true
       )
                       .fetch("projects").first.fetch("tasks").first
-      blocked = Hive::Commands::Status.new.json_payload(
-        [ project ],
-        stages: active_stages,
-        exclude_archived: true,
-        extra_dependency_tasks: {
-          project.fetch("path") => [
-            { slug: "archived-task-260626-aaaa", id: 1, stage: "7-artifacts", stage_index: 7 }
-          ]
-        }
-      ).fetch("projects").first.fetch("tasks").first
+      full_context = Hive::DependencySnapshot.admission_context([ project ])
+      fallback = Hive::DependencyAdmission::Context.new(
+        projects: full_context.projects.map do |snapshot|
+          snapshot.with(tasks: snapshot.tasks.select { |task| task.stage == "9-done" })
+        end
+      )
+      active_context = Hive::DependencySnapshot.admission_context(
+        [ project ], exclude_archived: true, fallback_context: fallback
+      )
       unblocked = Hive::Commands::Status.new.json_payload(
-        [ project ],
-        stages: active_stages,
-        exclude_archived: true,
-        extra_dependency_tasks: {
-          project.fetch("path") => [
-            { "slug" => "archived-task-260626-aaaa", "id" => 1, "stage" => "9-done" }
-          ]
-        }
+        [ project ], stages: active_stages, exclude_archived: true,
+        admission_context: active_context
       ).fetch("projects").first.fetch("tasks").first
 
       assert_equal true, unresolved.fetch("blocked")
       assert_nil unresolved.fetch("blocked_by"),
                  "without archived identities, active-only dependency resolution is unresolved"
-      assert_equal true, blocked.fetch("blocked")
-      assert_equal "archived-task-260626-aaaa", blocked.fetch("blocked_by")
-      assert_equal "7-artifacts", blocked.fetch("dependency_stage")
-      assert_nil blocked.fetch("admission_error")
-
       assert_equal false, unblocked.fetch("blocked")
       assert_nil unblocked.fetch("blocked_by")
       assert_nil unblocked.fetch("dependency_stage")
@@ -660,6 +650,35 @@ class CommandsStatusTest < Minitest::Test
       assert_equal File.basename(base), good_row.fetch("blocked_by")
       assert_match(/dependency admission failed for/, err,
                    "the per-row fail-closed backstop must leave a stderr breadcrumb")
+    end
+  end
+
+  def test_snapshot_failure_holds_every_status_row
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      write_status_task(
+        hive_state, "4-execute", "dependent-task-260618-bbbb",
+        state_file: "task.md", marker: "EXECUTE_COMPLETE"
+      )
+      payload = nil
+
+      _out, err = capture_io do
+        with_replaced_singleton_method(
+          Hive::DependencySnapshot,
+          :admission_context,
+          ->(_projects, **_kwargs) { raise "snapshot exploded" }
+        ) do
+          payload = Hive::Commands::Status.new.json_payload([
+            status_project(project_root, hive_state).merge("name" => "demo")
+          ])
+        end
+      end
+
+      row = payload.fetch("projects").first.fetch("tasks").first
+      assert_equal true, row.fetch("blocked")
+      assert_equal "dependency_validation_failed", row.fetch("admission_error").fetch("reason_code")
+      assert_equal "admission_error", row.fetch("action")
+      assert_match(/dependency admission snapshot failed/, err)
     end
   end
 

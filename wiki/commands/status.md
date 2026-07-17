@@ -3,7 +3,7 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb, lib/hive/diagnostic_evidence.rb
 created: 2026-04-25
-updated: 2026-07-16
+updated: 2026-07-17
 tags: [command, status, observability, json, diagnostics, legacy-dirs, task-id, archive, dependencies, pr]
 ---
 
@@ -11,9 +11,11 @@ tags: [command, status, observability, json, diagnostics, legacy-dirs, task-id, 
 
 Full text/JSON status and daemon snapshots read the complete on-disk graph.
 The TUI's steady-state active-only refresh combines freshly parsed active
-tasks with immutable, prevalidated terminal identities from its last
-full/archive status pass; this keeps refresh cost independent of archive size
-without turning a cached terminal admission error into a clear dependency.
+tasks with lossless immutable terminal task snapshots from its last
+full/archive status pass. Those snapshots preserve exact workflow stages,
+dependency edges, validation errors, and enrolled repository identity. They
+are indexed once and reused as a fallback context, keeping refresh cost
+independent of archive size without changing transitive dependency verdicts.
 
 ## Output shape
 

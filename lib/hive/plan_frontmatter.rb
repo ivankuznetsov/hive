@@ -4,6 +4,8 @@ require "hive/dependencies"
 
 module Hive
   module PlanFrontmatter
+    MAX_FRONTMATTER_BYTES = 65_536
+
     Result = Data.define(:status, :data, :depends_on, :error) do
       def depends_on_present?
         !depends_on.nil?
@@ -17,14 +19,15 @@ module Hive
     module_function
 
     def read(path)
-      text = File.read(path)
-      return absent unless text.start_with?("---")
-
-      match = text.match(/\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|\z)/m)
-      return invalid("#{path} has malformed YAML frontmatter") unless match
+      frontmatter = read_frontmatter(path)
+      return absent if frontmatter == :absent
+      return invalid("#{path} has malformed YAML frontmatter") if frontmatter == :invalid
+      if Hive::Dependencies.duplicate_top_level_key?(frontmatter, "depends_on")
+        return invalid("#{path} frontmatter contains duplicate depends_on declarations")
+      end
 
       data = YAML.safe_load(
-        match[1],
+        frontmatter,
         permitted_classes: [ Time, Date ],
         aliases: false
       ) || {}
@@ -51,6 +54,23 @@ module Hive
 
     def invalid(message)
       Result.new(status: :invalid, data: {}, depends_on: nil, error: message)
+    end
+
+    def read_frontmatter(path)
+      File.open(path, "rb") do |file|
+        opening = file.gets
+        return :absent unless opening&.start_with?("---")
+        return :invalid unless opening.match?(/\A---[ \t]*(?:\r?\n|\z)/)
+
+        yaml = +""
+        while (line = file.gets)
+          return yaml if line.match?(/\A---[ \t]*(?:\r?\n|\z)/)
+          return :invalid if yaml.bytesize + line.bytesize > MAX_FRONTMATTER_BYTES
+
+          yaml << line
+        end
+        :invalid
+      end
     end
   end
 end

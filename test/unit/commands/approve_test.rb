@@ -134,6 +134,31 @@ class HiveCommandsApproveTest < Minitest::Test
     end
   end
 
+  def test_move_task_reports_destination_collision_when_rename_loses_race
+    Dir.mktmpdir("hive-approve-unit") do |root|
+      state = File.join(root, ".hive-state")
+      source = File.join(state, "stages", "2-brainstorm", "slug-260522-abcd")
+      FileUtils.mkdir_p(source)
+      approve_task = task(folder: source, hive_state_path: state, project_root: root)
+      cmd = command
+      cmd.define_singleton_method(:destination_exists?) { |_path| false }
+      original = File.singleton_class.instance_method(:rename)
+      File.define_singleton_method(:rename) do |from, _to|
+        raise Errno::ENOTEMPTY, "destination appeared" if from == source
+
+        original.bind_call(File, from, _to)
+      end
+
+      error = assert_raises(Hive::DestinationCollision) do
+        cmd.send(:move_task!, approve_task, "3-plan")
+      end
+
+      assert_equal File.join(state, "stages", "3-plan", "slug-260522-abcd"), error.path
+    ensure
+      File.singleton_class.define_method(:rename, original) if original
+    end
+  end
+
   def test_cross_device_move_cleans_partial_destination_on_copy_failure
     Dir.mktmpdir("hive-approve-unit") do |root|
       src = File.join(root, "src")

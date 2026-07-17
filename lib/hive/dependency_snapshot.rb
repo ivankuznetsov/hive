@@ -90,12 +90,20 @@ module Hive
     end
 
     def admission_context(registry_entries = Hive::Config.registered_projects,
-                          exclude_archived: false, extra_dependency_tasks: nil)
+                          exclude_archived: false, fallback_context: nil)
       projects = registry_entries.map do |entry|
-        extras = extra_dependency_tasks && extra_dependency_tasks[entry["path"]] if exclude_archived
-        admission_project(entry, exclude_archived: exclude_archived, extra_tasks: extras)
+        admission_project(
+          entry, exclude_archived: exclude_archived,
+          live_repository_identity: nil
+        )
       end
-      Hive::DependencyAdmission::Context.new(projects: projects)
+      identity_targets = cross_project_identity_targets(projects)
+      projects = projects.map do |project|
+        next project unless identity_targets.include?(project.name)
+
+        project.with(live_repository_identity: Hive::RepositoryIdentity.current(project.path))
+      end
+      Hive::DependencyAdmission::Context.new(projects: projects, fallback: fallback_context)
     end
 
     # Recompute dependency admission from disk and raise the typed manual
@@ -148,7 +156,8 @@ module Hive
       )
     end
 
-    def admission_project(entry, exclude_archived: false, extra_tasks: nil)
+    def admission_project(entry, exclude_archived: false,
+                          live_repository_identity: :detect)
       root = File.expand_path(entry.fetch("path"))
       config, config_error = admission_project_config(root)
       tasks = if config_error
@@ -158,15 +167,15 @@ module Hive
           root,
           config,
           project_name: entry.fetch("name"),
-          exclude_archived: exclude_archived,
-          extra_tasks: extra_tasks
+          exclude_archived: exclude_archived
         )
       end
       Hive::DependencyAdmission::ProjectSnapshot.new(
         name: entry.fetch("name"),
         path: root,
         repository_identity: entry["repository_identity"],
-        live_repository_identity: Hive::RepositoryIdentity.current(root),
+        live_repository_identity: live_repository_identity == :detect ?
+          Hive::RepositoryIdentity.current(root) : live_repository_identity,
         dependency_gate_stage: config.fetch("dependency_gate_stage", Hive::Config::DEFAULTS.fetch("dependency_gate_stage")),
         tasks: tasks,
         validation_error: config_error
@@ -183,6 +192,17 @@ module Hive
       )
     end
 
+    def cross_project_identity_targets(projects)
+      projects.each_with_object({}) do |project, targets|
+        project.tasks.each do |task|
+          reference = Hive::Dependencies.parse_optional_reference(task.depends_on)
+          targets[reference.project] = true if reference&.explicit_project
+        rescue Hive::Dependencies::InvalidReference
+          next
+        end
+      end.keys.freeze
+    end
+
     def admission_project_config(root)
       path = File.join(root, ".hive-state", "config.yml")
       return [ {}, nil ] unless File.exist?(path)
@@ -195,7 +215,7 @@ module Hive
       [ {}, "could not read #{path}: #{e.class}: #{e.message}" ]
     end
 
-    def admission_tasks(root, config, project_name: File.basename(root), exclude_archived: false, extra_tasks: nil)
+    def admission_tasks(root, config, project_name: File.basename(root), exclude_archived: false)
       folders = Dir.glob(File.join(root, ".hive-state", "stages", "*-*", "*"))
         .select { |folder| File.directory?(folder) }
         .sort
@@ -205,72 +225,14 @@ module Hive
 
       Hive::Workflows::Project.synchronize do
         Hive::Workflows::Project.load!(root)
-        live_tasks = folders.map do |folder|
+        folders.map do |folder|
           admission_task(root, folder, config, project_name: project_name)
         end
-        live_slugs = live_tasks.to_h { |task| [ task.slug, true ] }
-        cached_tasks = Array(extra_tasks).filter_map do |task|
-          cached_admission_task(task, project_name: project_name) unless live_slugs[field(task, :slug).to_s]
-        end
-        live_tasks + cached_tasks
       end
-    end
-
-    # TUI active-only emissions reuse immutable archived rows produced by the
-    # last full/archive status pass. Those rows have already crossed strict
-    # metadata, plan, workflow, and graph admission; carrying their terminal
-    # identity (or exact admission error) avoids rescanning an unbounded
-    # archive on every one-second refresh.
-    def cached_admission_task(task, project_name:)
-      slug = field(task, :slug).to_s
-      return nil if slug.empty?
-
-      stage = field(task, :stage).to_s
-      cached_error = cached_admission_error(field(task, :admission_error))
-      Hive::DependencyAdmission::TaskSnapshot.new(
-        project: project_name,
-        slug: slug,
-        id: field(task, :id),
-        stage: stage,
-        workflow_stages: (Hive::Stages::DIRS + [ stage ]).uniq,
-        depends_on: nil,
-        metadata_status: :ok,
-        metadata_error: nil,
-        plan_status: :absent,
-        plan_dependency: nil,
-        plan_error: nil,
-        folder: nil,
-        validation_error: cached_error
-      )
-    end
-
-    def cached_admission_error(value)
-      return nil if value.nil?
-      return "cached dependency admission error is malformed" unless value.respond_to?(:key?)
-
-      reason_code = field(value, :reason_code).to_s
-      offending_ref = field(value, :offending_ref).to_s
-      safe_correction = field(value, :safe_correction).to_s
-      unless Hive::DependencyAdmission::REASON_CODES.include?(reason_code) &&
-             !offending_ref.empty? && !safe_correction.empty?
-        return "cached dependency admission error is malformed"
-      end
-
-      Hive::DependencyAdmission::AdmissionError.new(
-        reason_code: reason_code,
-        offending_ref: offending_ref,
-        safe_correction: safe_correction
-      )
-    end
-
-    def field(value, key)
-      return value[key] if value.respond_to?(:key?) && value.key?(key)
-      return value[key.to_s] if value.respond_to?(:key?) && value.key?(key.to_s)
-
-      nil
     end
 
     def admission_task(root, folder, config, project_name: File.basename(root))
+      original_folder_identity = folder_identity(folder)
       metadata = Hive::TaskMeta.read_for_admission(folder)
       plan = Hive::PlanFrontmatter.read(File.join(folder, "plan.md"))
       selector = metadata.data[:workflow] || config["default_workflow"] || Hive::Config::DEFAULTS.fetch("default_workflow")
@@ -281,6 +243,9 @@ module Hive
         workflow_stages = Hive::Workflows::Registry.fetch(selector.to_sym).stage_dirs
       rescue StandardError => e
         validation_error = "workflow #{selector.inspect} could not be resolved: #{e.class}: #{e.message}"
+      end
+      if original_folder_identity.nil? || folder_identity(folder) != original_folder_identity
+        validation_error = "task folder changed while dependency admission was taking its snapshot"
       end
 
       stage = File.basename(File.dirname(folder))
@@ -306,6 +271,13 @@ module Hive
         folder: folder,
         validation_error: validation_error
       )
+    end
+
+    def folder_identity(folder)
+      stat = File.stat(folder)
+      [ stat.dev, stat.ino ]
+    rescue SystemCallError
+      nil
     end
   end
 end

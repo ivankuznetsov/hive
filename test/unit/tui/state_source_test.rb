@@ -565,6 +565,69 @@ class TuiStateSourceTest < Minitest::Test
     end
   end
 
+  def test_active_reparse_preserves_archived_transitive_dependency_wait
+    with_direct_project do |_project, hive_state|
+      write_state_task(hive_state, "7-artifacts", "upstream-task-260626-abcd",
+                       marker: "ARTIFACTS_COMPLETE", id: 1)
+      write_state_task(hive_state, "9-done", "archived-base-260626-abcd",
+                       marker: "COMPLETE", id: 2, depends_on: "upstream-task-260626-abcd")
+      dependent = write_state_task(
+        hive_state, "4-execute", "dependent-task-260626-abcd",
+        marker: "EXECUTE_COMPLETE", id: 3, depends_on: "archived-base-260626-abcd"
+      )
+      source = Hive::Tui::StateSource.new(poll_interval_seconds: 0.05)
+      source.send(:refresh_once)
+
+      File.utime(Time.now + 5, Time.now + 5, File.join(dependent, "task.md"))
+      source.send(:refresh_once)
+      row = source.current.rows.find { |candidate| candidate.slug == "dependent-task-260626-abcd" }
+
+      assert_equal true, row.blocked
+      assert_equal "upstream-task-260626-abcd", row.blocked_by
+      assert_equal "7-artifacts", row.dependency_stage
+      assert_nil row.admission_error
+    ensure
+      source&.stop
+    end
+  end
+
+  def test_background_archive_refresh_preserves_registered_repository_identity
+    with_tmp_global_config do |home|
+      app, app_state = add_direct_project(home, name: "app")
+      data, data_state = add_direct_project(home, name: "data")
+      identities = {
+        app.fetch("path") => "github.com/acme/app",
+        data.fetch("path") => "github.com/acme/data"
+      }
+      identities.each do |root, identity|
+        system("git", "init", "-q", root, out: File::NULL, err: File::NULL)
+        system("git", "-C", root, "remote", "add", "origin", "https://#{identity}.git",
+               out: File::NULL, err: File::NULL)
+      end
+      config_path = File.join(home, "config.yml")
+      config = YAML.safe_load(File.read(config_path))
+      config.fetch("registered_projects").each do |entry|
+        entry["repository_identity"] = identities.fetch(entry.fetch("path"))
+      end
+      File.write(config_path, config.to_yaml)
+      write_state_task(data_state, "9-done", "data-base-260626-abcd",
+                       marker: "COMPLETE", id: 1)
+      write_state_task(app_state, "9-done", "app-done-260626-abcd",
+                       marker: "COMPLETE", id: 2, depends_on: "data:data-base-260626-abcd")
+      source = Hive::Tui::StateSource.new(poll_interval_seconds: 0.05)
+      source.send(:refresh_once)
+      source.request_archive_refresh
+      source.send(:start_archive_refresh_if_needed)
+      assert wait_for { !source.instance_variable_get(:@archive_refresh_thread)&.alive? }
+
+      source.send(:refresh_once)
+      row = source.current.rows.find { |candidate| candidate.slug == "app-done-260626-abcd" }
+      assert_nil row.admission_error
+    ensure
+      source&.stop
+    end
+  end
+
   def test_registry_project_set_changes_are_reflected_and_drop_removed_archive_cache
     with_tmp_global_config do |home|
       _project_a, state_a = add_direct_project(home, name: "alpha")
@@ -679,25 +742,28 @@ class TuiStateSourceTest < Minitest::Test
     end
   end
 
-  # Identities derive from the cache's :projects rows (no parallel map to
-  # drift) and are memoized per cache object so the hot active reparse
-  # doesn't rebuild them every tick.
-  def test_archived_identities_are_memoized_per_cache_object
-    source = Hive::Tui::StateSource.new(poll_interval_seconds: 60)
-    cache = {
-      rows_by_path: {
-        "/p" => [ { "slug" => "a-260626-abcd", "id" => 1, "stage" => "9-done" }.freeze ].freeze
-      }.freeze
-    }.freeze
+  # The hot active-only pass reuses the indexed, lossless archive context;
+  # it must not rebuild TaskSnapshots or indexes in proportion to archive size.
+  def test_archived_admission_context_is_reused_by_active_reparse
+    with_direct_project do |_project, hive_state|
+      write_state_task(hive_state, "9-done", "archived-task-260626-abcd",
+                       marker: "COMPLETE", id: 1)
+      active = write_state_task(hive_state, "4-execute", "active-task-260626-abcd",
+                                marker: "EXECUTE_COMPLETE", id: 2)
+      source = Hive::Tui::StateSource.new(poll_interval_seconds: 60)
+      source.send(:refresh_once)
+      cache = source.instance_variable_get(:@archived_cache)
+      archived_context = cache.fetch(:admission_context)
 
-    first = source.send(:archived_identities_from_cache, cache)
-    second = source.send(:archived_identities_from_cache, cache)
+      File.utime(Time.now + 5, Time.now + 5, File.join(active, "task.md"))
+      source.send(:refresh_once)
 
-    assert_same first, second, "identities are memoized while the cache object is unchanged"
-    assert_equal(
-      [ { "slug" => "a-260626-abcd", "id" => 1, "stage" => "9-done", "admission_error" => nil } ],
-      first.fetch("/p")
-    )
+      assert_same cache, source.instance_variable_get(:@archived_cache)
+      assert_same archived_context,
+                  source.instance_variable_get(:@archived_cache).fetch(:admission_context)
+    ensure
+      source&.stop
+    end
   end
 
   # Codex regression: the steady-state active reparse must compute the
@@ -978,23 +1044,39 @@ class TuiStateSourceTest < Minitest::Test
       # On-disk evidence the empty payload is transient: the 9-done dir still
       # holds a task folder.
       FileUtils.mkdir_p(File.join(archive_dir, "done-260626-abcd"))
+      archived_task = Hive::DependencyAdmission::TaskSnapshot.new(
+        project: "demo", slug: "done-260626-abcd", id: 1, stage: "9-done",
+        workflow_stages: Hive::Stages::DIRS, depends_on: nil, metadata_status: :ok,
+        metadata_error: nil, plan_status: :absent, plan_dependency: nil, plan_error: nil,
+        folder: File.join(archive_dir, "done-260626-abcd"), validation_error: nil
+      )
+      project = Hive::DependencyAdmission::ProjectSnapshot.new(
+        name: "demo", path: dir, repository_identity: "github.com/acme/demo",
+        live_repository_identity: nil, dependency_gate_stage: "8-finalize",
+        tasks: [ archived_task ], validation_error: nil
+      )
+      admission_context = Hive::DependencyAdmission::Context.new(projects: [ project ])
 
       good = source.send(:archived_cache_from_payload, {
         "projects" => [
           { "path" => dir, "hive_state_path" => hive_state,
             "tasks" => [ { "slug" => "done-260626-abcd", "stage" => "9-done" } ] }
         ]
-      })
+      }, admission_context: admission_context)
       assert_equal 1, good.fetch(:rows_by_path).fetch(dir).size
 
       degraded = source.send(
         :archived_cache_from_payload,
         { "projects" => [ { "path" => dir, "hive_state_path" => hive_state, "tasks" => [] } ] },
+        admission_context: admission_context,
         previous: good
       )
 
       assert_equal [ "done-260626-abcd" ], degraded.fetch(:rows_by_path).fetch(dir).map { |t| t["slug"] },
                    "an empty payload must retain prior rows while the 9-done dir still holds task folders"
+      retained = degraded.fetch(:admission_context).project_for_path(dir)
+      assert_equal [ "done-260626-abcd" ], retained.tasks.map(&:slug)
+      assert_equal "github.com/acme/demo", retained.repository_identity
     end
   end
 
@@ -1004,6 +1086,7 @@ class TuiStateSourceTest < Minitest::Test
   # on-disk gate the retain-prior guard could never clear the final row.
   def test_archived_cache_clears_last_rows_when_archive_dir_is_empty
     source = Hive::Tui::StateSource.new(poll_interval_seconds: 60)
+    admission_context = Hive::DependencyAdmission::Context.new(projects: [])
     Dir.mktmpdir("state-source-drop") do |dir|
       hive_state = File.join(dir, ".hive-state")
       archive_dir = File.join(hive_state, "stages", Hive::ArchiveFilter::ARCHIVE_STAGE_DIR)
@@ -1013,7 +1096,7 @@ class TuiStateSourceTest < Minitest::Test
           { "path" => dir, "hive_state_path" => hive_state,
             "tasks" => [ { "slug" => "done-260626-abcd", "stage" => "9-done" } ] }
         ]
-      })
+      }, admission_context: admission_context)
       assert_equal 1, good.fetch(:rows_by_path).fetch(dir).size
 
       # Drop the LAST archived folder: the 9-done dir is now empty on disk, so
@@ -1022,6 +1105,7 @@ class TuiStateSourceTest < Minitest::Test
       cleared = source.send(
         :archived_cache_from_payload,
         { "projects" => [ { "path" => dir, "hive_state_path" => hive_state, "tasks" => [] } ] },
+        admission_context: admission_context,
         previous: good
       )
 

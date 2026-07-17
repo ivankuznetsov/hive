@@ -140,11 +140,9 @@ module Hive
       # non-breaking; removing or renaming keys must bump a documented
       # version. `tasks[].marker` is the lowercased symbol name as a string;
       # `tasks[].attrs` is the marker's attribute map.
-      def json_payload(projects, stages: nil, exclude_archived: false, extra_dependency_tasks: nil)
-        admission_context = build_admission_context(
-          projects,
-          exclude_archived: exclude_archived,
-          extra_dependency_tasks: extra_dependency_tasks
+      def json_payload(projects, stages: nil, exclude_archived: false, admission_context: nil)
+        admission_context ||= build_admission_context(
+          projects, exclude_archived: exclude_archived
         )
         {
           "schema" => "hive-status",
@@ -157,7 +155,6 @@ module Hive
               project_count: projects.size,
               stages: stages,
               exclude_archived: exclude_archived,
-              extra_dependency_tasks: dependency_tasks_for(extra_dependency_tasks, p),
               admission_context: admission_context
             )
           end
@@ -173,13 +170,12 @@ module Hive
       # daemon.log) so the rest of the fleet keeps advancing. The fallback
       # entry still validates against the published hive-status schema.
       def project_payload_or_degraded(project, project_count:, stages: nil, exclude_archived: false,
-                                      extra_dependency_tasks: nil, admission_context: nil)
+                                      admission_context: nil)
         project_payload(
           project,
           project_count: project_count,
           stages: stages,
           exclude_archived: exclude_archived,
-          extra_dependency_tasks: extra_dependency_tasks,
           admission_context: admission_context
         )
       rescue StandardError => e
@@ -196,7 +192,7 @@ module Hive
       end
 
       def project_payload(project, project_count:, stages: nil, exclude_archived: false,
-                          extra_dependency_tasks: nil, admission_context: nil)
+                          admission_context: nil)
         path = project["path"]
         hive_state = project["hive_state_path"]
         base = {
@@ -222,10 +218,7 @@ module Hive
             # every row. Schema mandates the field.
             rows = annotate_actions(collect_rows(hive_state, stages: stages, exclude_archived: exclude_archived), project, project_count, with_diagnostic: true)
             rows = annotate_dependencies(
-              rows,
-              project,
-              extra_dependency_tasks: extra_dependency_tasks,
-              admission_context: admission_context
+              rows, project, admission_context: admission_context
             )
             rows = archive_rows(rows) if @archive
             out = base.merge("tasks" => rows.map { |r| task_payload(r) })
@@ -777,26 +770,15 @@ module Hive
         drop_transient_stage_moves(rows)
       end
 
-      def annotate_dependencies(rows, project, extra_dependency_tasks: nil, admission_context: nil)
+      def annotate_dependencies(rows, project, admission_context: nil)
         context = admission_context || build_admission_context([ project ])
         rows.each { |row| apply_dependency_verdict(row, context, project) }
         rows
       end
 
-      def dependency_tasks_for(extra_dependency_tasks, project)
-        return nil unless extra_dependency_tasks
-
-        # `project["path"]` (not `fetch`): this never-fail status surface must
-        # degrade, not KeyError, if a future path-less project entry reaches
-        # here alongside non-nil extra_dependency_tasks.
-        extra_dependency_tasks[project["path"]]
-      end
-
-      def build_admission_context(projects, exclude_archived: false, extra_dependency_tasks: nil)
+      def build_admission_context(projects, exclude_archived: false)
         Hive::DependencySnapshot.admission_context(
-          projects,
-          exclude_archived: exclude_archived,
-          extra_dependency_tasks: extra_dependency_tasks
+          projects, exclude_archived: exclude_archived
         )
       rescue StandardError => e
         warn "hive: status: dependency admission snapshot failed " \

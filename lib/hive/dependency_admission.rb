@@ -52,10 +52,29 @@ module Hive
     class Context
       attr_reader :projects
 
-      def initialize(projects:)
+      def initialize(projects:, fallback: nil)
         @projects = projects.map do |project|
           project.with(tasks: project.tasks.dup.freeze).freeze
         end.freeze
+        @fallback = fallback
+        @projects_by_name = @projects.group_by(&:name).transform_values(&:freeze).freeze
+        @projects_by_path = @projects.group_by { |project| File.expand_path(project.path) }
+          .transform_values(&:freeze).freeze
+        @tasks_by_project_slug = {}
+        @tasks_by_project_id = {}
+        @projects.each do |project|
+          @tasks_by_project_slug[project.name] = project.tasks.group_by(&:slug)
+          @tasks_by_project_id[project.name] = project.tasks.group_by(&:id)
+        end
+        @tasks_by_project_slug.freeze
+        @tasks_by_project_id.freeze
+        @verdict_cache = {}
+        @verdict_cache_mutex = Mutex.new
+      end
+
+      def project_for_path(path)
+        matches = @projects_by_path[File.expand_path(path)] || []
+        matches.one? ? matches.first : nil
       end
 
       def verdict(project:, slug:)
@@ -70,7 +89,9 @@ module Hive
         source = source_matches.first
         return admission_error("dependency_task_missing", "#{project}:#{slug}", task_correction(project)) unless source
 
-        walk(source)
+        @verdict_cache_mutex.synchronize do
+          @verdict_cache.fetch(qualify(source)) { walk(source) }
+        end
       rescue StandardError => e
         admission_error(
           "dependency_validation_failed",
@@ -82,43 +103,45 @@ module Hive
       private
 
       def walk(source)
-        visited = []
+        path = []
+        visited_index = {}
         current = source
-        first_wait = nil
-
-        loop do
+        result = loop do
           qualified = qualify(current)
-          visited << qualified
+          break @verdict_cache[qualified] if @verdict_cache.key?(qualified)
+
+          visited_index[qualified] = path.length
+          path << [ qualified, nil ]
 
           node_error = validate_node(current)
-          return node_error if node_error
-          break unless current.depends_on
+          break node_error if node_error
+          break clear unless current.depends_on
 
           reference = parse_reference(current.depends_on)
-          return reference if reference.is_a?(Verdict)
+          break reference if reference.is_a?(Verdict)
 
           target_project = resolve_project(current.project, reference)
-          return target_project if target_project.is_a?(Verdict)
+          break target_project if target_project.is_a?(Verdict)
 
           if reference.explicit_project
             identity_error = validate_repository_identity(target_project, reference.to_s)
-            return identity_error if identity_error
+            break identity_error if identity_error
           end
 
           target = resolve_task(target_project, reference)
-          return target if target.is_a?(Verdict)
+          break target if target.is_a?(Verdict)
 
           target_qualified = qualify(target)
           if target_qualified == qualified
-            return admission_error(
+            break admission_error(
               "dependency_self_reference",
               reference.to_s,
               "Remove or correct depends_on in #{current.folder}/meta.yml."
             )
           end
-          if (cycle_start = visited.index(target_qualified))
-            cycle = (visited[cycle_start..] + [ target_qualified ]).join(" -> ")
-            return admission_error(
+          if (cycle_start = visited_index[target_qualified])
+            cycle = (path[cycle_start..].map(&:first) + [ target_qualified ]).join(" -> ")
+            break admission_error(
               "dependency_cycle",
               cycle,
               "Break the cycle by correcting one depends_on declaration in the reported path."
@@ -126,12 +149,17 @@ module Hive
           end
 
           gate_result = validate_gate(current, target, target_project, reference)
-          return gate_result if gate_result&.error?
-          first_wait ||= gate_result if gate_result&.wait?
+          break gate_result if gate_result&.error?
+
+          path.last[1] = gate_result
           current = target
         end
 
-        first_wait || clear
+        path.reverse_each do |qualified, gate_result|
+          result = gate_result if gate_result&.wait? && !result.error?
+          @verdict_cache[qualified] = result
+        end
+        result
       end
 
       def validate_node(task)
@@ -286,14 +314,24 @@ module Hive
       end
 
       def unique_project(name)
-        matches = projects.select { |project| project.name == name }
+        matches = @projects_by_name[name] || []
         matches.one? ? matches.first : nil
       end
 
       def task_matches(project, slug: nil, id: nil)
-        project.tasks.select do |task|
-          slug ? task.slug == slug : task.id == id
-        end
+        index = slug ? @tasks_by_project_slug : @tasks_by_project_id
+        matches = index.dig(project.name, slug || id) || []
+        return matches unless matches.empty?
+
+        @fallback&.send(:task_matches_by_project_name, project.name, slug: slug, id: id) || []
+      end
+
+      def task_matches_by_project_name(project_name, slug: nil, id: nil)
+        index = slug ? @tasks_by_project_slug : @tasks_by_project_id
+        matches = index.dig(project_name, slug || id) || []
+        return matches unless matches.empty?
+
+        @fallback&.send(:task_matches_by_project_name, project_name, slug: slug, id: id) || []
       end
 
       def qualify(task)

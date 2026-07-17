@@ -103,6 +103,135 @@ class DependencyAdmissionTest < Minitest::Test
     assert context(done).verdict(project: "app", slug: "dependent").clear?
   end
 
+  def test_indexed_fallback_preserves_archived_transitive_waits_and_workflows
+    archived = project(tasks: [
+      task("app", "archived", stage: "9-done", depends_on: "upstream"),
+      task("app", "custom", stage: "9-done", workflow_stages: %w[1-inbox 9-done])
+    ])
+    fallback = D::Context.new(projects: [ archived ])
+    active = project(tasks: [
+      task("app", "dependent", depends_on: "archived"),
+      task("app", "custom-dependent", depends_on: "custom"),
+      task("app", "upstream", stage: "7-artifacts")
+    ])
+    combined = D::Context.new(projects: [ active ], fallback: fallback)
+
+    wait = combined.verdict(project: "app", slug: "dependent")
+    assert wait.wait?
+    assert_equal "upstream", wait.blocked_by
+    assert_equal "7-artifacts", wait.dependency_stage
+    assert_error combined.verdict(project: "app", slug: "custom-dependent"),
+                 "dependency_gate_unreachable"
+  end
+
+  def test_active_task_shadows_same_slug_in_fallback_context
+    fallback = D::Context.new(projects: [
+      project(tasks: [ task("app", "base", stage: "7-artifacts") ])
+    ])
+    active = project(tasks: [
+      task("app", "dependent", depends_on: "base"),
+      task("app", "base", stage: "9-done")
+    ])
+
+    assert D::Context.new(projects: [ active ], fallback: fallback)
+      .verdict(project: "app", slug: "dependent").clear?
+  end
+
+  def test_context_indexes_projects_by_canonical_path
+    one = project
+    duplicate = project.with(name: "duplicate")
+    indexed = context(one)
+
+    assert_equal one.name, indexed.project_for_path("/tmp/app").name
+    assert_nil context(one, duplicate).project_for_path("/tmp/app")
+    assert_nil indexed.project_for_path("/tmp/missing")
+  end
+
+  def test_nested_fallback_context_resolves_without_scanning_archives
+    deep = context(project(tasks: [ task("app", "base", stage: "9-done") ]))
+    middle = D::Context.new(projects: [ project(tasks: []) ], fallback: deep)
+    active = D::Context.new(
+      projects: [ project(tasks: [ task("app", "dependent", depends_on: "base") ]) ],
+      fallback: middle
+    )
+
+    assert active.verdict(project: "app", slug: "dependent").clear?
+  end
+
+  def test_immutable_context_memoizes_shared_dependency_tails
+    indexed = context(project(tasks: [
+      task("app", "a", depends_on: "b"),
+      task("app", "b", depends_on: "c", stage: "9-done"),
+      task("app", "c", stage: "9-done")
+    ]))
+    original_validate = indexed.method(:validate_node)
+    validations = Hash.new(0)
+    indexed.define_singleton_method(:validate_node) do |snapshot|
+      validations[snapshot.slug] += 1
+      original_validate.call(snapshot)
+    end
+
+    assert indexed.verdict(project: "app", slug: "a").clear?
+    assert indexed.verdict(project: "app", slug: "b").clear?
+    assert indexed.verdict(project: "app", slug: "c").clear?
+    assert_equal({ "a" => 1, "b" => 1, "c" => 1 }, validations)
+  end
+
+  def test_invalid_metadata_and_reference_shapes_fail_closed
+    invalid_reference = task(
+      "app", "invalid-ref", depends_on: "bad:ref:shape", metadata_status: :invalid_reference
+    )
+    invalid_metadata = task("app", "invalid-meta", metadata_status: :invalid)
+    late_invalid_reference = task("app", "late-invalid", depends_on: "bad:ref:shape")
+    normalized_invalid = task(
+      "app", "normalized-invalid", depends_on: "bad:ref:shape",
+      plan_status: :ok, plan_dependency: "other"
+    )
+
+    assert_error context(project(tasks: [ invalid_reference ]))
+      .verdict(project: "app", slug: "invalid-ref"), "dependency_reference_invalid"
+    assert_error context(project(tasks: [ invalid_metadata ]))
+      .verdict(project: "app", slug: "invalid-meta"), "dependency_metadata_invalid"
+    assert_error context(project(tasks: [ late_invalid_reference ]))
+      .verdict(project: "app", slug: "late-invalid"), "dependency_reference_invalid"
+    assert_error context(project(tasks: [ normalized_invalid ]))
+      .verdict(project: "app", slug: "normalized-invalid"), "plan_dependency_mismatch"
+  end
+
+  def test_duplicate_task_resolution_and_snapshot_errors_fail_closed
+    dependent = task("app", "dependent", depends_on: "base")
+    duplicate_a = task("app", "base", id: 7)
+    duplicate_b = task("app", "base", id: 8)
+    duplicate_source = project(tasks: [ task("app", "same"), task("app", "same") ])
+    cached_error = D::AdmissionError.new(
+      reason_code: "dependency_metadata_invalid",
+      offending_ref: "app:cached",
+      safe_correction: "Repair cached metadata."
+    )
+    cached = task("app", "cached", validation_error: cached_error)
+    generic = task("app", "generic", validation_error: "snapshot changed")
+
+    assert_error context(project(tasks: [ dependent, duplicate_a, duplicate_b ]))
+      .verdict(project: "app", slug: "dependent"), "dependency_validation_failed"
+    assert_error context(duplicate_source).verdict(project: "app", slug: "same"),
+                 "dependency_validation_failed"
+    assert_error context(project(tasks: [ cached ])).verdict(project: "app", slug: "cached"),
+                 "dependency_metadata_invalid"
+    assert_error context(project(tasks: [ generic ])).verdict(project: "app", slug: "generic"),
+                 "dependency_validation_failed"
+  end
+
+  def test_unknown_source_and_unexpected_validator_failure_fail_closed
+    indexed = context(project(tasks: [ task("app", "known") ]))
+    assert_error indexed.verdict(project: "missing", slug: "known"), "dependency_project_unknown"
+    assert_error indexed.verdict(project: "app", slug: "missing"), "dependency_task_missing"
+
+    indexed.define_singleton_method(:walk) { |_source| raise "validator exploded" }
+    verdict = indexed.verdict(project: "app", slug: "known")
+    assert_error verdict, "dependency_validation_failed"
+    assert_match(/RuntimeError/, verdict.admission_error.safe_correction)
+  end
+
   private
 
   def context(*projects)
@@ -124,7 +253,7 @@ class DependencyAdmissionTest < Minitest::Test
 
   def task(project, slug, id: nil, depends_on: nil, stage: "4-execute",
            workflow_stages: Hive::Stages::DIRS, metadata_status: :ok, metadata_error: nil,
-           plan_status: :absent, plan_dependency: nil, plan_error: nil)
+           plan_status: :absent, plan_dependency: nil, plan_error: nil, validation_error: nil)
     D::TaskSnapshot.new(
       project: project,
       slug: slug,
@@ -138,7 +267,7 @@ class DependencyAdmissionTest < Minitest::Test
       plan_dependency: plan_dependency,
       plan_error: plan_error,
       folder: "/tmp/#{project}/#{slug}",
-      validation_error: nil
+      validation_error: validation_error
     )
   end
 

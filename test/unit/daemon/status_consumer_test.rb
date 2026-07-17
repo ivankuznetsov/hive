@@ -182,6 +182,38 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
     end
   end
 
+  def test_malformed_admission_objects_fail_closed_per_row
+    malformed = [
+      "not-an-object",
+      { "reason_code" => "dependency_cycle", "offending_ref" => "p:a" },
+      { "reason_code" => "unknown", "offending_ref" => "p:a", "safe_correction" => "Fix it." },
+      { "reason_code" => "dependency_cycle", "offending_ref" => "", "safe_correction" => "Fix it." },
+      {
+        "reason_code" => "dependency_cycle", "offending_ref" => "p:a",
+        "safe_correction" => "Fix it.", "extra" => true
+      }
+    ]
+    tasks = malformed.each_with_index.map do |value, index|
+      task_row(slug: "malformed-#{index}").merge("admission_error" => value)
+    end
+    payload = make_envelope(projects: [ {
+      "name" => "p", "path" => "/tmp/p", "hive_state_path" => "/tmp/p/.h",
+      "tasks" => tasks
+    } ])
+
+    with_fake_status(JSON.generate(payload)) do |bin|
+      rows = Hive::Daemon::StatusConsumer.new(hive_bin: bin).fetch.rows
+
+      assert_equal malformed.size, rows.size
+      rows.each do |row|
+        assert_equal true, row.blocked
+        assert_equal "admission_error", row.action
+        assert_nil row.suggested_command
+        assert_equal "dependency_validation_failed", row.admission_error.reason_code
+      end
+    end
+  end
+
   def test_parses_multiple_projects_and_tasks
     payload = make_envelope(projects: [
       {

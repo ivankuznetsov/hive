@@ -21,7 +21,10 @@ class AgentTest < Minitest::Test
     ENV["HIVE_CLAUDE_BIN"] = @prev_bin
     %w[HIVE_FAKE_CLAUDE_OUTPUT HIVE_FAKE_CLAUDE_EXIT
        HIVE_FAKE_CLAUDE_WRITE_FILE HIVE_FAKE_CLAUDE_WRITE_CONTENT
-       HIVE_FAKE_CLAUDE_HANG HIVE_FAKE_CLAUDE_LOG_DIR
+       HIVE_FAKE_CLAUDE_OUTPUT_AFTER_WRITE HIVE_FAKE_CLAUDE_FINAL_OUTPUT
+       HIVE_FAKE_CLAUDE_DELAY_BEFORE_WRITE HIVE_FAKE_CLAUDE_DELAY_AFTER_WRITE_OUTPUT
+       HIVE_FAKE_CLAUDE_HANG HIVE_FAKE_CLAUDE_IGNORE_TERM HIVE_FAKE_CLAUDE_LOG_DIR
+       HIVE_FAKE_CLAUDE_READY_FILE HIVE_FAKE_CLAUDE_RELEASE_FILE
        HIVE_SCREENOTE_BASE_URL].each { |k| ENV.delete(k) }
   end
 
@@ -29,6 +32,42 @@ class AgentTest < Minitest::Test
     folder = File.join(dir, ".hive-state", "stages", stage, slug)
     FileUtils.mkdir_p(folder)
     Hive::Task.new(folder)
+  end
+
+  def run_delta_before_write(dir, max_turns: nil, max_tokens: nil)
+    task = make_task(dir)
+    output = File.join(dir, "findings.json")
+    ENV["HIVE_FAKE_CLAUDE_OUTPUT"] = [
+      {
+        "type" => "stream_event",
+        "event" => {
+          "type" => "content_block_start",
+          "content_block" => { "type" => "tool_use", "name" => "Write" }
+        }
+      },
+      {
+        "type" => "stream_event",
+        "event" => {
+          "type" => "message_delta",
+          "delta" => { "stop_reason" => "tool_use" },
+          "usage" => { "input_tokens" => 20, "output_tokens" => 1 }
+        }
+      }
+    ].map { |event| JSON.generate(event) }.join("\n")
+    ENV["HIVE_FAKE_CLAUDE_DELAY_BEFORE_WRITE"] = "0.5"
+    ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = output
+    ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "{\"findings\":[]}\n"
+    ENV["HIVE_FAKE_CLAUDE_OUTPUT_AFTER_WRITE"] = JSON.generate(
+      "type" => "user", "tool_use_result" => { "type" => "create" }
+    )
+    ENV["HIVE_FAKE_CLAUDE_HANG"] = "10"
+
+    Hive::Agent.new(
+      task: task, prompt: "x", max_budget_usd: 1,
+      max_turns: max_turns, max_tokens: max_tokens,
+      timeout_sec: 8, status_mode: :output_file_exists,
+      expected_output: output
+    ).run!
   end
 
   def test_writes_marker_and_log_on_success
@@ -156,6 +195,42 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_fake_agent_condition_barrier_announces_readiness_and_waits_for_release
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "")
+      ready = File.join(dir, "barrier", "ready")
+      release = File.join(dir, "barrier", "release")
+      ENV["HIVE_FAKE_CLAUDE_READY_FILE"] = ready
+      ENV["HIVE_FAKE_CLAUDE_RELEASE_FILE"] = release
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = task.state_file
+      ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "## Round 1\n<!-- WAITING -->\n"
+
+      worker = Thread.new do
+        Hive::Agent.new(task: task, prompt: "test", max_budget_usd: 1, timeout_sec: 5).run!
+      end
+      deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 3
+      sleep 0.01 until File.exist?(ready) || Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+
+      assert File.exist?(ready), "fake agent must publish its readiness condition"
+      assert worker.alive?, "fake agent must remain live until the release condition exists"
+
+      FileUtils.mkdir_p(File.dirname(release))
+      File.write(release, "go\n")
+      result = worker.value
+
+      assert_equal :waiting, result[:status]
+      assert_equal :waiting, Hive::Markers.current(task.state_file).name
+    ensure
+      if worker&.alive? && release
+        FileUtils.mkdir_p(File.dirname(release))
+        FileUtils.touch(release)
+        worker.join(2)
+      end
+      worker&.kill if worker&.alive?
+    end
+  end
+
   def test_exception_before_handle_exit_emits_agent_end_with_exception_status
     with_tmp_dir do |dir|
       task = make_task(dir)
@@ -200,6 +275,17 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_declared_safe_mode_capability_is_not_added_to_unrelated_claude_runs
+    with_tmp_dir do |dir|
+      agent = Hive::Agent.new(
+        task: make_task(dir), prompt: "test", max_budget_usd: 1, timeout_sec: 5,
+        profile: Hive::AgentProfiles.lookup(:claude)
+      )
+
+      refute_includes agent.send(:build_cmd), "--safe-mode"
+    end
+  end
+
   def test_claude_headless_tool_scope_flags_ride_the_argv
     with_tmp_dir do |dir|
       agent = Hive::Agent.new(
@@ -216,6 +302,29 @@ class AgentTest < Minitest::Test
       assert_equal %w[--allowedTools Read,LS], cmd.each_cons(2).find { |a, _| a == "--allowedTools" }
       assert_equal %w[--disallowedTools Write,Bash], cmd.each_cons(2).find { |a, _| a == "--disallowedTools" }
       assert_operator cmd.index("--allowedTools"), :<, cmd.index("--max-budget-usd")
+    end
+  end
+
+  def test_claude_headless_carries_path_qualified_rules_in_dont_ask_mode
+    with_tmp_dir do |dir|
+      agent = Hive::Agent.new(
+        task: make_task(dir),
+        prompt: "test",
+        max_budget_usd: 1,
+        timeout_sec: 5,
+        permission_mode: "dontAsk",
+        allowed_tools: [ "Read", "Edit(//tmp/task/inspect.md)", "Edit(//tmp/project/docs/**)" ],
+        disallowed_tools: %w[Bash]
+      )
+
+      cmd = agent.send(:build_cmd)
+
+      assert_equal %w[--permission-mode dontAsk],
+                   cmd.each_cons(2).find { |arg, _| arg == "--permission-mode" }
+      assert_equal [ "--allowedTools", "Read,Edit(//tmp/task/inspect.md),Edit(//tmp/project/docs/**)" ],
+                   cmd.each_cons(2).find { |arg, _| arg == "--allowedTools" }
+      assert_equal %w[--disallowedTools Bash],
+                   cmd.each_cons(2).find { |arg, _| arg == "--disallowedTools" }
     end
   end
 
@@ -236,6 +345,24 @@ class AgentTest < Minitest::Test
 
       refute_includes cmd, "--allowedTools"
       refute_includes cmd, "--disallowedTools"
+    end
+  end
+
+  def test_codex_workspace_write_mode_replaces_dangerous_bypass_with_sandbox
+    with_tmp_dir do |dir|
+      profile = Hive::AgentProfiles.lookup(:codex)
+      agent = Hive::Agent.new(
+        task: make_task(dir), prompt: "test", max_budget_usd: nil,
+        timeout_sec: 5, profile: profile,
+        permission_mode: Hive::AgentProfile::WORKSPACE_WRITE_PERMISSION_MODE
+      )
+
+      cmd = agent.send(:build_cmd)
+
+      assert_equal %w[--sandbox workspace-write], cmd.each_cons(2).find { |flag, _| flag == "--sandbox" }
+      assert_includes cmd, "--ignore-user-config"
+      assert_includes cmd, "--ignore-rules"
+      refute_includes cmd, "--dangerously-bypass-approvals-and-sandbox"
     end
   end
 
@@ -427,6 +554,433 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_terminates_running_agent_when_streamed_tokens_reach_per_launch_limit
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "")
+      ENV["HIVE_FAKE_CLAUDE_OUTPUT"] = [
+        JSON.generate(
+          "type" => "stream_event",
+          "event" => {
+            "type" => "message_start",
+            "message" => {
+              "id" => "msg-1",
+              "usage" => {
+                "input_tokens" => 40,
+                "output_tokens" => 1,
+                "cache_read_input_tokens" => 30
+              }
+            }
+          }
+        ),
+        JSON.generate(
+          "type" => "stream_event",
+          "event" => {
+            "type" => "message_delta",
+            "usage" => { "output_tokens" => 20 }
+          }
+        )
+      ].join("\n")
+      ENV["HIVE_FAKE_CLAUDE_HANG"] = "10"
+
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      result = Hive::Agent.new(
+        task: task,
+        prompt: "x",
+        max_budget_usd: 1,
+        max_tokens: 80,
+        timeout_sec: 8,
+        status_mode: :exit_code_only
+      ).run!
+      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+
+      assert_operator elapsed, :<, 5, "streamed token guard must stop the process before timeout"
+      assert_equal :error, result[:status]
+      assert_equal "token_limit", result.dig(:resource_exhaustion, :reason)
+      assert_equal 80, result.dig(:resource_exhaustion, :limit)
+      assert_operator result.dig(:resource_exhaustion, :observed), :>=, 80
+      assert_match(/in-flight token limit/, result[:error_message])
+      refute result[:timed_out]
+    end
+  end
+
+  def test_force_kills_term_resistant_agent_after_streamed_token_limit
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "")
+      ENV["HIVE_FAKE_CLAUDE_OUTPUT"] = JSON.generate(
+        "type" => "stream_event",
+        "event" => {
+          "type" => "message_start",
+          "message" => { "usage" => { "input_tokens" => 80 } }
+        }
+      )
+      ENV["HIVE_FAKE_CLAUDE_IGNORE_TERM"] = "1"
+      ENV["HIVE_FAKE_CLAUDE_HANG"] = "20"
+
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      result = Hive::Agent.new(
+        task: task, prompt: "x", max_budget_usd: 1, max_tokens: 80,
+        timeout_sec: 15, status_mode: :exit_code_only
+      ).run!
+      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+
+      assert_operator elapsed, :<, 8, "token guard must escalate TERM before the wall-clock timeout"
+      assert_equal :error, result[:status]
+      assert_equal "token_limit", result.dig(:resource_exhaustion, :reason)
+      refute result[:timed_out]
+    end
+  end
+
+  def test_terminates_claude_after_the_configured_completed_turns
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "")
+      ENV["HIVE_FAKE_CLAUDE_OUTPUT"] = 3.times.map do |index|
+        JSON.generate(
+          "type" => "stream_event",
+          "event" => {
+            "type" => "message_delta",
+            "usage" => { "output_tokens" => index + 1 }
+          }
+        )
+      end.join("\n")
+      ENV["HIVE_FAKE_CLAUDE_HANG"] = "10"
+
+      result = Hive::Agent.new(
+        task: task, prompt: "x", max_budget_usd: 1, max_turns: 3,
+        timeout_sec: 8, status_mode: :exit_code_only
+      ).run!
+
+      assert_equal :error, result.fetch(:status)
+      assert_equal "turn_limit", result.dig(:resource_exhaustion, :reason)
+      assert_equal 3, result.dig(:resource_exhaustion, :observed)
+      assert_match(/in-flight turn limit/, result.fetch(:error_message))
+      refute result.fetch(:timed_out)
+    end
+  end
+
+  def test_turn_limit_accepts_a_completed_output_artifact
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      output = File.join(dir, "findings.json")
+      File.write(output, "{\"findings\":[]}\n")
+      agent = Hive::Agent.new(
+        task: task, prompt: "x", max_budget_usd: 1, max_turns: 3,
+        timeout_sec: 5, status_mode: :output_file_exists,
+        expected_output: output
+      )
+      result = {
+        resource_exhaustion: { reason: "turn_limit", observed: 3, limit: 3 }
+      }
+
+      agent.handle_exit(result)
+
+      assert_equal :ok, result.fetch(:status)
+      refute result.key?(:error_message)
+    end
+  end
+
+  def test_token_limit_accepts_a_completed_output_artifact_without_another_turn
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      output = File.join(dir, "findings.json")
+      File.write(output, "{\"findings\":[]}\n")
+      agent = Hive::Agent.new(
+        task: task, prompt: "x", max_budget_usd: 1, max_tokens: 40,
+        timeout_sec: 5, status_mode: :output_file_exists,
+        expected_output: output
+      )
+      result = {
+        resource_exhaustion: { reason: "token_limit", observed: 41, limit: 40 }
+      }
+
+      agent.handle_exit(result)
+
+      assert_equal :ok, result.fetch(:status)
+      refute result.key?(:error_message)
+    end
+  end
+
+  def test_completed_output_is_a_terminal_signal_on_the_write_result_event
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      output = File.join(dir, "findings.json")
+      File.write(output, "{\"findings\":[]}\n")
+      agent = Hive::Agent.new(
+        task: task, prompt: "x", max_budget_usd: 1, max_turns: 3,
+        timeout_sec: 5, status_mode: :output_file_exists,
+        expected_output: output
+      )
+      write_result = { "type" => "user", "tool_use_result" => { "type" => "create" } }
+
+      assert agent.send(:output_completed_event?, write_result)
+
+      result = { output_completed: true }
+      agent.handle_exit(result)
+      assert_equal :ok, result.fetch(:status)
+    end
+  end
+
+  def test_completed_output_stops_a_running_agent_on_the_next_structured_event
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      output = File.join(dir, "findings.json")
+      ENV["HIVE_FAKE_CLAUDE_OUTPUT"] = JSON.generate(
+        "type" => "stream_event",
+        "event" => {
+          "type" => "content_block_start",
+          "content_block" => { "type" => "tool_use", "name" => "Write" }
+        }
+      )
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = output
+      ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "{\"findings\":[]}\n"
+      ENV["HIVE_FAKE_CLAUDE_OUTPUT_AFTER_WRITE"] = JSON.generate(
+        "type" => "user", "tool_use_result" => { "type" => "create" }
+      )
+      ENV["HIVE_FAKE_CLAUDE_DELAY_AFTER_WRITE_OUTPUT"] = "1"
+      ENV["HIVE_FAKE_CLAUDE_FINAL_OUTPUT"] = JSON.generate(
+        "type" => "stream_event",
+        "event" => {
+          "type" => "message_delta",
+          "usage" => {
+            "input_tokens" => 27,
+            "cache_read_input_tokens" => 15_554,
+            "output_tokens" => 4_439
+          }
+        }
+      )
+      ENV["HIVE_FAKE_CLAUDE_HANG"] = "10"
+
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      result = Hive::Agent.new(
+        task: task, prompt: "x", max_budget_usd: 1, max_turns: 3,
+        timeout_sec: 8, status_mode: :output_file_exists,
+        expected_output: output
+      ).run!
+      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+
+      assert_operator elapsed, :<, 4
+      assert_equal :ok, result.fetch(:status)
+      assert result.fetch(:output_completed)
+      assert_nil result.fetch(:resource_exhaustion)
+      assert_equal({ input: 27, output: 4_439, cached: 15_554, model: nil }, result.fetch(:usage))
+    end
+  end
+
+  def test_turn_limit_allows_a_generated_write_to_finish_when_delta_arrives_first
+    with_tmp_dir do |dir|
+      result = run_delta_before_write(dir, max_turns: 1)
+
+      assert_equal :ok, result.fetch(:status)
+      assert result.fetch(:output_completed)
+      assert_equal "turn_limit", result.dig(:resource_exhaustion, :reason)
+    end
+  end
+
+  def test_token_limit_allows_a_generated_write_to_finish_when_delta_arrives_first
+    with_tmp_dir do |dir|
+      result = run_delta_before_write(dir, max_tokens: 10)
+
+      assert_equal :ok, result.fetch(:status)
+      assert result.fetch(:output_completed)
+      assert_equal "token_limit", result.dig(:resource_exhaustion, :reason)
+    end
+  end
+
+  def test_completed_output_does_not_wait_forever_for_a_missing_usage_delta
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      output = File.join(dir, "findings.json")
+      ENV["HIVE_FAKE_CLAUDE_OUTPUT"] = JSON.generate(
+        "type" => "stream_event",
+        "event" => {
+          "type" => "content_block_start",
+          "content_block" => { "type" => "tool_use", "name" => "Write" }
+        }
+      )
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = output
+      ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "{\"findings\":[]}\n"
+      ENV["HIVE_FAKE_CLAUDE_OUTPUT_AFTER_WRITE"] = JSON.generate(
+        "type" => "user", "tool_use_result" => { "type" => "create" }
+      )
+      ENV["HIVE_FAKE_CLAUDE_HANG"] = "10"
+
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      result = Hive::Agent.new(
+        task: task, prompt: "x", max_budget_usd: 1, max_turns: 3,
+        timeout_sec: 8, status_mode: :output_file_exists,
+        expected_output: output
+      ).run!
+      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+
+      assert_operator elapsed, :>=, Hive::Agent::COMPLETION_EVENT_GRACE_SECONDS - 0.5
+      assert_operator elapsed, :<, 7
+      assert_equal :ok, result.fetch(:status)
+      assert result.fetch(:output_completed)
+    end
+  end
+
+  def test_completed_output_stops_before_a_new_model_turn_when_usage_delta_is_missing
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      output = File.join(dir, "findings.json")
+      ENV["HIVE_FAKE_CLAUDE_OUTPUT"] = JSON.generate(
+        "type" => "stream_event",
+        "event" => {
+          "type" => "content_block_start",
+          "content_block" => { "type" => "tool_use", "name" => "Write" }
+        }
+      )
+      ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = output
+      ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "{\"findings\":[]}\n"
+      ENV["HIVE_FAKE_CLAUDE_OUTPUT_AFTER_WRITE"] = JSON.generate(
+        "type" => "user", "tool_use_result" => { "type" => "create" }
+      )
+      ENV["HIVE_FAKE_CLAUDE_DELAY_AFTER_WRITE_OUTPUT"] = "0.2"
+      ENV["HIVE_FAKE_CLAUDE_FINAL_OUTPUT"] = JSON.generate(
+        "type" => "stream_event",
+        "event" => { "type" => "message_start", "message" => { "usage" => {} } }
+      )
+      ENV["HIVE_FAKE_CLAUDE_HANG"] = "10"
+
+      result = Hive::Agent.new(
+        task: task, prompt: "x", max_budget_usd: 1, max_turns: 3,
+        timeout_sec: 8, status_mode: :output_file_exists,
+        expected_output: output
+      ).run!
+
+      assert_equal :ok, result.fetch(:status)
+      assert result.fetch(:output_completed)
+      assert_equal 0, result.dig(:usage, :output)
+    end
+  end
+
+  def test_stream_token_meter_sums_claude_turns_without_double_counting_deltas
+    meter = Hive::Agent::StreamTokenMeter.new(:claude)
+    first_start = {
+      "type" => "stream_event",
+      "event" => { "type" => "message_start" }
+    }
+    delta = {
+      "type" => "stream_event",
+      "event" => { "type" => "message_delta" }
+    }
+
+    assert_equal 71, meter.observe(
+      first_start, { input: 40, output: 1, cached: 30, model: "claude-test" }
+    )
+    assert_equal 90, meter.observe(delta, { input: 0, output: 20, cached: 0 })
+    assert_equal 90, meter.observe(delta, { input: 0, output: 19, cached: 0 })
+    assert_equal 105, meter.observe(
+      first_start, { input: 10, output: 0, cached: 5, model: "claude-test" }
+    )
+    assert_equal({ input: 50, output: 20, cached: 35, model: "claude-test" }, meter.usage)
+  end
+
+  def test_stream_token_meter_keeps_observed_usage_when_terminal_total_regresses
+    meter = Hive::Agent::StreamTokenMeter.new(:claude)
+    stream = {
+      "type" => "stream_event",
+      "event" => { "type" => "message_start" }
+    }
+
+    meter.observe(stream, { input: 80, output: 20, cached: 0, model: "claude-test" })
+    assert_equal 100, meter.observe(
+      { "type" => "result" }, { input: 70, output: 20, cached: 0, model: "claude-test" }
+    )
+    assert_equal 130, meter.observe(
+      { "type" => "result" }, { input: 90, output: 30, cached: 10, model: "claude-test" }
+    )
+    assert_equal({ input: 90, output: 30, cached: 10, model: "claude-test" }, meter.usage)
+  end
+
+  def test_stream_token_meter_accumulates_non_claude_usage_events
+    meter = Hive::Agent::StreamTokenMeter.new(:codex)
+
+    assert_equal 0, meter.observe({ "type" => "item.completed" }, nil)
+    assert_equal 6, meter.observe(
+      { "type" => "item.completed" },
+      { input: 1, output: 2, cached: 3, model: "codex-test" }
+    )
+    assert_equal 9, meter.observe(
+      { "type" => "item.completed" },
+      { input: 0, output: 3, cached: 0 }
+    )
+    assert_equal({ input: 1, output: 5, cached: 3, model: "codex-test" }, meter.usage)
+  end
+
+  def test_rejects_invalid_in_flight_token_limit
+    with_tmp_dir do |dir|
+      error = assert_raises(ArgumentError) do
+        Hive::Agent.new(
+          task: make_task(dir), prompt: "x", max_budget_usd: 1,
+          max_tokens: 0, timeout_sec: 5
+        )
+      end
+
+      assert_equal "max_tokens must be a positive integer", error.message
+    end
+  end
+
+  def test_rejects_invalid_in_flight_turn_limit
+    with_tmp_dir do |dir|
+      error = assert_raises(ArgumentError) do
+        Hive::Agent.new(
+          task: make_task(dir), prompt: "x", max_budget_usd: 1,
+          max_turns: 0, timeout_sec: 5
+        )
+      end
+
+      assert_equal "max_turns must be a positive integer", error.message
+    end
+  end
+
+  def test_token_limit_sets_structured_error_marker_for_state_file_agents
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "")
+      agent = Hive::Agent.new(
+        task: task, prompt: "x", max_budget_usd: 1,
+        max_tokens: 80, timeout_sec: 5
+      )
+      result = {
+        resource_exhaustion: { reason: "token_limit", observed: 90, limit: 80 }
+      }
+
+      agent.handle_exit(result)
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, result[:status]
+      assert_equal :error, marker.name
+      assert_equal "token_limit", marker.attrs["reason"]
+      assert_equal "90", marker.attrs["observed_tokens"]
+      assert_equal "80", marker.attrs["max_tokens"]
+    end
+  end
+
+  def test_turn_limit_sets_structured_error_marker_for_state_file_agents
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "")
+      agent = Hive::Agent.new(
+        task: task, prompt: "x", max_budget_usd: 1,
+        max_turns: 3, timeout_sec: 5
+      )
+      result = {
+        resource_exhaustion: { reason: "turn_limit", observed: 3, limit: 3 }
+      }
+
+      agent.handle_exit(result)
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, result.fetch(:status)
+      assert_equal "turn_limit", marker.attrs.fetch("reason")
+      assert_equal "3", marker.attrs.fetch("observed_turns")
+      assert_equal "3", marker.attrs.fetch("max_turns")
+    end
+  end
+
   def test_profile_without_usage_extractor_returns_no_usage
     with_tmp_dir do |dir|
       task = make_task(dir)
@@ -552,22 +1106,30 @@ class AgentTest < Minitest::Test
 
       # Build a fake-claude that writes via temp+rename (changes inode).
       atomic_bin = File.join(dir, "atomic-fake-claude")
-      File.write(atomic_bin, <<~SH)
-        #!/usr/bin/env bash
-        target="#{task.state_file}"
-        tmp="$(mktemp)"
-        printf '## Round 1\n<!-- WAITING -->\n' > "$tmp"
-        mv "$tmp" "$target"
+      inode_log = File.join(dir, "atomic-inodes")
+      File.write(atomic_bin, <<~RUBY)
+        #!#{RbConfig.ruby}
+        target = #{task.state_file.dump}
+        inode_log = #{inode_log.dump}
+        previous_inode = File.stat(target).ino
+        tmp = "#{task.state_file}.atomic-\#{Process.pid}"
+        File.write(tmp, "## Round 1\n<!-- WAITING -->\n")
+        replacement_inode = File.stat(tmp).ino
+        File.write(inode_log, [ previous_inode, replacement_inode ].join("\n"))
+        File.rename(tmp, target)
         exit 0
-      SH
+      RUBY
       File.chmod(0o755, atomic_bin)
       ENV["HIVE_CLAUDE_BIN"] = atomic_bin
 
-      pre_inode = File.stat(task.state_file).ino
       result = Hive::Agent.new(task: task, prompt: "x", max_budget_usd: 1, timeout_sec: 5).run!
       post_inode = File.stat(task.state_file).ino
+      previous_inode, replacement_inode = File.readlines(inode_log, chomp: true).map { |line| Integer(line) }
 
-      refute_equal pre_inode, post_inode, "fake must rotate the inode for this test to be meaningful"
+      refute_equal previous_inode, replacement_inode,
+                   "fake must create the replacement before releasing the previous inode"
+      assert_equal replacement_inode, post_inode,
+                   "the replacement inode must become the final task state file"
       assert_equal :waiting, result[:status],
                    "atomic-rename writes must not be misclassified as concurrent edits"
       assert_equal :waiting, Hive::Markers.current(task.state_file).name
@@ -895,6 +1457,21 @@ class AgentTest < Minitest::Test
       ))
     end
   end
+
+  def test_claude_write_tool_event_recognizes_completed_assistant_tool_use
+    with_tmp_dir do |dir|
+      agent = Hive::Agent.new(task: make_task(dir), prompt: "x", max_budget_usd: 1, timeout_sec: 5)
+      event = {
+        "type" => "assistant",
+        "message" => {
+          "content" => [ { "type" => "tool_use", "name" => "Write" } ]
+        }
+      }
+
+      assert agent.send(:claude_write_tool_event?, event)
+    end
+  end
+
   def test_event_stage_falls_back_to_parent_folder_for_synthetic_task_without_stage_name
     task = Struct.new(:folder).new("/tmp/project/.hive-state/stages/6-review/synthetic")
     agent = Hive::Agent.allocate

@@ -241,6 +241,8 @@ module Hive
         when Hive::WrongStage then "wrong_stage"
         when Hive::RollbackFailed then "rollback_failed"
         when Hive::InvalidTaskPath then "invalid_task_path"
+        when Hive::DependencyWaitError then "dependency_wait"
+        when Hive::DependencyAdmissionError then "admission_error"
         else "error"
         end
       end

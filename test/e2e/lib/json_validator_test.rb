@@ -28,4 +28,17 @@ class E2EJsonValidatorTest < Minitest::Test
     assert_equal :invalid, result.status
     assert result.parse_error
   end
+
+  def test_scenario_inventory_requires_incident_lifecycle_fields_on_every_row
+    row = {
+      "name" => "ordinary", "tags" => [], "description" => "", "path" => "ordinary.yml",
+      "steps_count" => 1, "incident_id" => nil, "sibling_task_id" => nil, "pending" => false
+    }
+    payload = { "schema" => "hive-e2e-scenarios", "schema_version" => 1, "scenarios" => [ row ] }
+
+    assert Hive::E2E::JsonValidator.new.validate("hive-e2e-scenarios", payload).ok?
+    refute Hive::E2E::JsonValidator.new.validate(
+      "hive-e2e-scenarios", payload.merge("scenarios" => [ row.reject { |key, _| key == "pending" } ])
+    ).ok?
+  end
 end

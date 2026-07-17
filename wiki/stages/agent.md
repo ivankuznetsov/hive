@@ -3,7 +3,7 @@ title: Generic Agent Stage Runner
 type: stage
 source: lib/hive/stages/agent.rb, templates/agent_prompt.md.erb
 created: 2026-06-19
-updated: 2026-07-09
+updated: 2026-07-13
 tags: [stage, agent, workflow]
 ---
 
@@ -46,19 +46,32 @@ deliverable before status reports them archived.
    source provides one. A budget is per spawn and only enforced when the
    selected profile has a native `budget_flag`; otherwise `spawn_agent` records
    the dropped cap in `config-warnings.log` while still enforcing timeout.
+   Scoped file rules such as `Edit(../../../../docs/**)` are normalized from the
+   task-relative descriptor form to Claude's absolute `Edit(//.../docs/**)`
+   form and run under `dontAsk`, so matching writes proceed while a write
+   unmatched by any loaded permission rule is denied without hanging the
+   headless stage. Loaded Claude setting sources can add broader trusted
+   operator allow rules; the descriptor does not erase them.
 8. Re-read `stage.state_file` and map markers: `WAITING` → `round_waiting`,
    `COMPLETE` → `complete`, `ERROR` → `error`, `NONE` → `nil` (an explicit arm —
    a markerless run has nothing to commit, so `commit_after` skips the commit),
-   otherwise `marker.name.to_s`.
+   otherwise `marker.name.to_s`. A provider-limit error is the exception to the
+   plain `ERROR` action: if `Hive::Agent` already wrote
+   `ERROR reason=limits_reached`, the runner preserves that marker; if a
+   non-state-file spawn only returned quota text in its error envelope, the
+   runner writes the equivalent marker with the selected profile as `provider`.
+   Both paths return `commit=limits_reached` and retain a `retry_after` stamp so
+   the daemon cooldown healer can requeue the generic stage.
 
 An error envelope does not by itself prove that the spawn wrote no marker.
 `Hive::Agent` writes specific state-file errors for provider limits, timeouts,
 and nonzero exits, while version/auth preflight failures return the same error
 envelope without changing the file. The runner snapshots the terminal marker
-before spawning and synthesizes `ERROR reason=agent_preflight_failed` only when
-the marker remains unchanged. Fresh agent-written errors therefore retain
-their reason and recovery metadata, including the `limits_reached`
-`retry_after` consumed by the daemon healer.
+before spawning. A changed marker is authoritative and retains its reason and
+recovery metadata. When the marker is unchanged, a quota envelope becomes
+`ERROR reason=limits_reached`; any other error envelope becomes
+`ERROR reason=agent_preflight_failed`, replacing stale waiting/complete/error
+state from an earlier run.
 
 The coding pipeline's `brainstorm` and `plan` names still use their bespoke
 tmux-capable runners even though their descriptor entries are `kind: :agent`;
@@ -69,8 +82,9 @@ name-first resolver precedence preserves the current coding runtime.
 - `test/unit/stages/agent_test.rb` covers prior-artifact selection, nonce
   wrapping, nil-skill fallback, formatted skill invocation, spawn arguments,
   descriptor-versus-loaded-config resource precedence, explicit budget/timeout
-  overrides, marker-to-action mapping, preflight marker synthesis, and
-  preservation of fresh retryable agent error markers.
+  overrides, marker-to-action mapping, provider-limit envelope classification,
+  preservation of fresh agent-written quota and non-quota errors, and the
+  distinct unchanged-marker preflight fallback.
 
 ## Backlinks
 

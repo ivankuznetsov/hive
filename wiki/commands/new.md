@@ -3,8 +3,8 @@ title: hive new
 type: command
 source: bin/hive, lib/hive/commands/new.rb, templates/idea.md.erb
 created: 2026-04-25
-updated: 2026-06-20
-tags: [command, capture, slug, task-id, commit-lock, workflow]
+updated: 2026-07-16
+tags: [command, capture, slug, task-id, commit-lock, workflow, dependencies]
 ---
 
 **TLDR**: `hive new PROJECT TEXT...` captures an idea: derives a slug, resolves the effective workflow (`--workflow` override, project `default_workflow`, then `coding`), scaffolds the descriptor's entry-stage folder plus state file and `meta.yml`, commits it on the `hive/state` branch, and best-effort starts display-name generation after the commit.
@@ -12,10 +12,17 @@ tags: [command, capture, slug, task-id, commit-lock, workflow]
 ## Usage
 
 ```
-hive new PROJECT [--workflow NAME] [--depends-on ID_OR_SLUG] TEXT...
+hive new PROJECT [--workflow NAME] [--depends-on ID_OR_SLUG_OR_PROJECT_SLUG] TEXT...
 ```
 
 `PROJECT` must already be registered (via `hive init`); otherwise exit 1 with `"project not initialized"`. `TEXT...` is joined with single spaces and rendered into the workflow entry state's file. Empty text raises `Hive::Error("missing task text")`. `--workflow NAME` is validated against `Hive::Workflows::Registry`; unknown names fail before seeding a task and list valid names.
+
+`--depends-on` accepts exactly one scalar reference. A bare slug or numeric id
+is scoped to the new task's project; `other-project:task-slug` is the only
+cross-project form. Lists, mappings, blanks, malformed separators, and
+`project:<numeric-id>` are rejected. Creation validates syntax and stores the
+normalized value; existence, repository identity, cycles, plan agreement, and
+gate reachability are revalidated at status/dispatch boundaries.
 
 The executable wrapper lifts standalone allow-listed `new` options from anywhere
 outside an explicit `--`: `--workflow NAME`, `--workflow=NAME`,
@@ -70,7 +77,7 @@ A `slug_override:` keyword is reserved on the constructor but not exposed as a C
 
 1. `Hive::Config.find_project(name)` → resolve `hive_state_path`. Exits 1 if not found.
 2. Validate slug → exits 1 with `"invalid slug"` or `"reserved or unsafe slug"` on failure.
-3. Resolve the effective workflow. A CLI override wins over project `default_workflow`, which wins over `coding`. The selected descriptor decides the entry stage directory and state filename. `meta.yml workflow:` is pinned when an override was passed or the project default is non-coding; plain coding captures remain field-less.
+3. Parse `--depends-on` through `Hive::Dependencies.parse_reference`, then resolve the effective workflow. A CLI override wins over project `default_workflow`, which wins over `coding`.
 4. `mkdir -p <hive_state_path>/stages/<entry-stage>/<slug>` — exits 1 with `"slug collision"` if the directory already exists (rare; user retries to regenerate the random suffix).
 5. Write the entry state from `templates/idea.md.erb`. Frontmatter:
    ```
@@ -96,13 +103,14 @@ Each captured task now gets `<task>/meta.yml`:
 id: 1
 slug: add-inbox-filter-260603-abcd
 display_name:
+depends_on: api:base-task-260716-abcd
 ```
 
-`id` comes from the process-global counter at `Hive::Paths.task_counter_path` (`<state_home>/task-counter.yml`), protected by `<state_home>/.task-counter.lock`. `display_name` starts nil; `Hive::Task#display_label` falls back to the slug until the initial name generator, a manual `hive generate-name`, `hive migrate`, or the daemon backfiller fills it. `workflow:` is omitted for plain coding captures, but set for explicit overrides and non-coding project defaults.
+`id` comes from the process-global counter at `Hive::Paths.task_counter_path` (`<state_home>/task-counter.yml`), protected by `<state_home>/.task-counter.lock`. `display_name` starts nil; `Hive::Task#display_label` falls back to the slug until name generation succeeds. `depends_on` is omitted when not supplied and remains the authoritative scheduling declaration when present. `workflow:` is omitted for plain coding captures, but set for explicit overrides and non-coding project defaults.
 
 ## Tests
 
-- `test/integration/new_test.rb` covers slug derivation, reserved-slug rejection, idempotent collisions, rich body/attachment capture, `meta.yml` capture, `--workflow` overrides/default pinning, non-coding entry markers, counter-lock fallback, the per-project commit-lock wrapper, display-name subprocess spawning, and the captured commit.
+- `test/integration/new_test.rb` covers slug derivation, dependency slug/numeric/`project:slug` grammar, reserved-slug rejection, collisions, rich capture, workflow pinning, counter-lock fallback, commit locking, and the captured commit.
 - `test/integration/new_wrapper_argv_test.rb` drives the real `bin/hive` subprocess and pins wrapper-only argv behavior: canonical `PROJECT --workflow ID "text"`, before-project and trailing options, `--workflow=ID`, combined dependency/workflow flags, literal `--workflow` substrings, lifted-but-plain `--json`, missing text after lifted options, and unrecognized options as task text.
 - `test/integration/tui_new_idea_attachments_test.rb` covers the TUI-internal rich submit path.
 

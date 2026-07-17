@@ -312,6 +312,7 @@ class StatusDiagnoseTest < Minitest::Test
     # multiple registered projects. The diagnose-specific error_kind
     # enum surfaces "ambiguous_slug" so callers can disambiguate from a
     # true unknown slug ("slug_not_found"). See PR #84 review row 4.
+    previous_hive_home = ENV["HIVE_HOME"]
     Dir.mktmpdir("hive-status-diagnose-ambig") do |home|
       project_a = File.join(home, "alpha")
       project_b = File.join(home, "beta")
@@ -342,7 +343,7 @@ class StatusDiagnoseTest < Minitest::Test
       assert_equal false, payload["ok"]
       assert_equal "ambiguous_slug", payload["error_kind"]
     ensure
-      ENV.delete("HIVE_HOME")
+      previous_hive_home.nil? ? ENV.delete("HIVE_HOME") : ENV["HIVE_HOME"] = previous_hive_home
     end
   end
 
@@ -351,6 +352,7 @@ class StatusDiagnoseTest < Minitest::Test
     # diagnose error_kind enum maps InvalidTaskPath to "slug_not_found"
     # so agent callers can branch on "the task no longer exists"
     # without parsing error messages.
+    previous_hive_home = ENV["HIVE_HOME"]
     Dir.mktmpdir("hive-status-diagnose-missing") do |home|
       File.write(File.join(home, "config.yml"), YAML.dump("registered_projects" => []))
 
@@ -365,7 +367,7 @@ class StatusDiagnoseTest < Minitest::Test
       assert_equal false, payload["ok"]
       assert_equal "slug_not_found", payload["error_kind"]
     ensure
-      ENV.delete("HIVE_HOME")
+      previous_hive_home.nil? ? ENV.delete("HIVE_HOME") : ENV["HIVE_HOME"] = previous_hive_home
     end
   end
 

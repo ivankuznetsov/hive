@@ -163,18 +163,55 @@ class UsageDbTest < Minitest::Test
     with_usage_db do
       now = Time.utc(2026, 5, 24, 12)
       record(stage: "patrol-review", input: 10, output: 5, cached: 1, started_at: now - 3600)
+      record(stage: "refactor-patrol-review", input: 4, output: 2, cached: 1, started_at: now - 3600)
       record(agent: "codex", stage: "patrol-fix", input: 20, output: 7, cached: 2, started_at: now - (8 * 24 * 60 * 60))
       record(stage: "2-brainstorm", input: 100, output: 50, cached: 10, started_at: now - 3600)
       record(project_slug: "beta", stage: "patrol-review", input: 999, output: 999, cached: 999, started_at: now - 3600)
 
       aggregate = Hive::UsageDb.aggregate(scope: { project_slug: "alpha" }, now: now)
 
-      assert_equal({ input: 10, output: 5, cached: 1 }, patrol_at(aggregate, :today))
-      assert_equal({ input: 10, output: 5, cached: 1 }, patrol_at(aggregate, :"7d"))
-      assert_equal({ input: 30, output: 12, cached: 3 }, patrol_at(aggregate, :"30d"))
-      assert_equal({ input: 30, output: 12, cached: 3 }, patrol_at(aggregate, :all))
-      assert_equal({ input: 130, output: 62, cached: 13 }, aggregate.fetch(:total).fetch(:all),
+      assert_equal({ input: 14, output: 7, cached: 2 }, patrol_at(aggregate, :today))
+      assert_equal({ input: 14, output: 7, cached: 2 }, patrol_at(aggregate, :"7d"))
+      assert_equal({ input: 34, output: 14, cached: 4 }, patrol_at(aggregate, :"30d"))
+      assert_equal({ input: 34, output: 14, cached: 4 }, patrol_at(aggregate, :all))
+      assert_equal({ input: 134, output: 64, cached: 14 }, aggregate.fetch(:total).fetch(:all),
                    "TOTAL remains the real per-agent sum and does not add the patrol row twice")
+    end
+  end
+
+  def test_patrol_activity_counts_metered_and_unmetered_launches_across_patrol_types
+    with_usage_db do
+      now = Time.utc(2026, 5, 24, 12)
+      record(stage: "patrol-review", input: 10, output: 5, cached: 1, started_at: now - 60)
+      record(stage: "refactor-patrol-fix-unmetered", input: 0, output: 0, cached: 0, started_at: now - 30)
+      record(stage: "2-brainstorm", input: 999, output: 999, cached: 999, started_at: now - 30)
+
+      activity = Hive::UsageDb.patrol_activity(
+        scope: { project_slug: "alpha" }, now: now
+      )
+
+      assert_equal 10, activity.fetch(:input)
+      assert_equal true, activity.fetch(:available)
+      assert_equal 5, activity.fetch(:output)
+      assert_equal 1, activity.fetch(:cached)
+      assert_equal 16, activity.fetch(:tokens)
+      assert_equal 2, activity.fetch(:agent_spawns)
+      assert_equal 1, activity.fetch(:unmetered_spawns)
+    end
+  end
+
+  def test_patrol_activity_marks_an_unavailable_store_instead_of_claiming_zero_usage
+    with_tmp_dir do |dir|
+      Hive::UsageDb.path = dir
+
+      _out, err = capture_io do
+        activity = Hive::UsageDb.patrol_activity(scope: {}, now: Time.utc(2026, 5, 24, 12))
+
+        assert_equal false, activity.fetch(:available)
+        assert_equal 0, activity.fetch(:tokens)
+      end
+
+      assert_match(/patrol usage aggregate failed/, err)
     end
   end
 

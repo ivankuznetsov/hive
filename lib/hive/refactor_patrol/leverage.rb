@@ -1,23 +1,60 @@
 require "open3"
 require "set"
+require "hive/patrol/architecture_mapper"
+require "hive/patrol/source_reader"
 
 module Hive
   module RefactorPatrol
     class Leverage
       SIGNALS = %w[churn fan_in complexity coupling bug_density coverage_gap].freeze
       DEFAULT_CAPS = {
-        "churn" => 20.0,
-        "fan_in" => 20.0,
-        "complexity" => 1_000.0,
-        "coupling" => 20.0,
+        "churn" => 30.0,
+        "fan_in" => 50.0,
+        "complexity" => 20.0,
+        "coupling" => 75.0,
         "bug_density" => 10.0,
         "coverage_gap" => 1.0
       }.freeze
+
+      def self.score_proposal(hotspot, drivers)
+        hotspot_breakdown = hotspot.is_a?(Hash) && hotspot["breakdown"].is_a?(Hash) ? hotspot["breakdown"] : {}
+        seen = {}
+        validated = Array(drivers).map do |driver|
+          raise ArgumentError, "proposal leverage driver must be an object" unless driver.is_a?(Hash)
+
+          signal = driver.fetch("signal")
+          relief = driver.fetch("relief")
+          mechanism = driver.fetch("mechanism").to_s.strip
+          raise ArgumentError, "unknown proposal leverage signal #{signal.inspect}" unless SIGNALS.include?(signal)
+          raise ArgumentError, "duplicate proposal leverage signal #{signal.inspect}" if seen[signal]
+          unless relief.is_a?(Numeric) && relief.to_f.finite? && relief.to_f.between?(0.0, 1.0)
+            raise ArgumentError, "proposal leverage relief must be between 0 and 1"
+          end
+          raise ArgumentError, "proposal leverage mechanism must be non-empty" if mechanism.empty?
+
+          seen[signal] = true
+          { "signal" => signal, "relief" => relief.to_f, "mechanism" => mechanism }
+        rescue KeyError => e
+          raise ArgumentError, "proposal leverage driver is missing #{e.key.inspect}"
+        end
+        breakdown = validated.to_h do |driver|
+          signal = driver.fetch("signal")
+          contribution = hotspot_breakdown.fetch(signal, 0).to_f * driver.fetch("relief").to_f
+          [ signal, contribution.round(4) ]
+        end
+
+        {
+          "score" => breakdown.values.sum.round(4),
+          "breakdown" => breakdown,
+          "drivers" => validated
+        }
+      end
 
       def initialize(project_root, cfg:, command_runner: nil)
         @project_root = File.expand_path(project_root)
         @cfg = cfg
         @command_runner = command_runner || method(:capture3)
+        @source_reader = Hive::Patrol::SourceReader.new(@project_root)
       end
 
       def score(feature, changed_since: nil, changed_boost: false)
@@ -39,10 +76,12 @@ module Hive
         end
 
         {
+          "scope" => "feature",
           "score" => score.round(4),
           "breakdown" => breakdown,
           "signals" => raw,
-          "normalized" => normalized
+          "normalized" => normalized,
+          "measurement" => architecture_scan.fetch(:measurement)
         }
       end
 
@@ -61,67 +100,140 @@ module Hive
       private
 
       def churn(feature, changed_since:)
-        args = [ "git", "-C", @project_root, "log", "--format=", "--name-only" ]
-        args << "#{changed_since}..HEAD" if changed_since
-        args << "--"
-        args.concat(Array(feature.owned_files))
-        out, _err, status = @command_runner.call(*args)
-        return 0 unless status.success?
-
         owned = Array(feature.owned_files).to_set
-        out.lines.map(&:strip).count { |path| owned.include?(path) }
-      rescue StandardError
-        0
+        counts = churn_counts(changed_since)
+        changes = owned.sum { |path| counts.fetch(path, 0) }
+        owned.empty? ? 0 : (changes.to_f / owned.size).round(4)
       end
 
       def fan_in(feature)
         needles = reference_needles(feature)
-        return 0 if needles.empty?
-
         owned = Array(feature.owned_files).to_set
-        tracked_files.count do |path|
+        roots = owned.filter_map { |path| component_roots[path] }.to_set
+        edges = dependency_edges
+        source_files.count do |path|
           next false if owned.include?(path)
+          next false if roots.include?(component_roots[path])
 
-          content = read(path).downcase
-          needles.any? { |needle| content.include?(needle.downcase) }
+          (Array(edges[path]) & owned.to_a).any? ||
+            needles.any? { |needle| reference_present?(read(path), needle) }
         end
       end
 
       def complexity(feature)
-        Array(feature.owned_files).sum do |path|
-          lines = read(path).lines
-          nesting = lines.count { |line| line.match?(/\b(if|case|while|for|rescue|elsif|else|switch|catch)\b/) }
-          lines.size + (nesting * 3)
+        lines = Array(feature.owned_files).flat_map do |path|
+          read(path).lines.reject { |line| line.strip.empty? }
         end
+        return 0 if lines.empty?
+
+        decisions = lines.sum do |line|
+          line.scan(/\b(?:if|case|when|while|until|for|rescue|elsif|else|switch|catch|match)\b/).size
+        end
+        ((decisions.to_f * 100) / lines.size).round(4)
       end
 
       def coupling(feature, inbound = nil)
         owned = Array(feature.owned_files).to_set
-        files = tracked_files
-        outbound = Array(feature.owned_files).sum do |path|
-          lowered = read(path).downcase
-          files.count { |candidate| !owned.include?(candidate) && references_path?(lowered, candidate) }
-        end
+        roots = owned.filter_map { |path| component_roots[path] }.to_set
+        outbound = owned.flat_map { |path| Array(dependency_edges[path]) }
+                        .reject do |path|
+                          owned.include?(path) || roots.include?(component_roots[path])
+                        end.uniq.size
         outbound + (inbound || fan_in(feature))
       end
 
       def reference_needles(feature)
         Array(feature.entrypoints).flat_map do |entrypoint|
-          basename = File.basename(entrypoint, File.extname(entrypoint))
-          [
-            entrypoint,
-            entrypoint.sub(/\.[^.]+\z/, ""),
-            basename
-          ]
+          reference_needles_for(entrypoint)
         end.compact.reject(&:empty?).uniq
       end
 
-      # +lowered+ is the already-downcased content of an owned file; callers
-      # hoist the downcase out of the per-candidate loop so it is computed
-      # once per owned file rather than once per (owned file × candidate).
-      def references_path?(lowered, path)
-        stem = path.sub(/\.[^.]+\z/, "")
-        lowered.include?(path.downcase) || lowered.include?(stem.downcase)
+      def reference_needles_for(path)
+        normalized = path.to_s.tr("\\", "/")
+        stem = normalized.sub(/\.[^.]+\z/, "")
+        segments = stem.split("/")
+        trimmed = if Hive::Patrol::ArchitectureMapper::SOURCE_ROOTS.any? do |root|
+          root.casecmp?(segments.first.to_s)
+        end
+          segments.drop(1).join("/")
+        else
+          stem
+        end
+        basename = File.basename(stem)
+        namespace = trimmed.split("/").map do |segment|
+          segment.split(/[^a-zA-Z0-9]+/).reject(&:empty?).map(&:capitalize).join
+        end.reject(&:empty?).join("::")
+        values = [ normalized, stem ]
+        segments = trimmed.split("/").reject(&:empty?)
+        segments.each_index do |index|
+          suffix = segments.drop(index)
+          next unless suffix.size >= 2
+
+          module_path = suffix.join("/")
+          values.concat([ module_path, module_path.tr("/", "."), module_path.tr("/", "\\") ])
+        end
+        values << namespace if segments.size >= 2 && !namespace.empty?
+        values << basename if basename.length >= 8
+        values.uniq
+      end
+
+      def reference_present?(content, needle)
+        pattern = /(?<![A-Za-z0-9_])#{Regexp.escape(needle)}(?![A-Za-z0-9_])/i
+        content.match?(pattern)
+      end
+
+      def churn_counts(changed_since)
+        @churn_counts ||= {}
+        key = changed_since.to_s
+        @churn_counts[key] ||= begin
+          args = [ "git", "-C", @project_root, "log", "--format=", "--name-only" ]
+          args << "#{changed_since}..HEAD" if changed_since
+          args << "--"
+          out, _err, status = @command_runner.call(*args)
+          status.success? ? utf8(out).lines.map(&:strip).reject(&:empty?).tally : {}
+        rescue StandardError
+          {}
+        end
+      end
+
+      def architecture_scan
+        @architecture_scan ||= begin
+          mapper = Hive::Patrol::ArchitectureMapper.new(@project_root, cfg: @cfg)
+          mapper.call(tracked_files)
+          {
+            component_roots: mapper.component_roots,
+            edges: mapper.dependency_edges,
+            source_files: (mapper.source_files + mapper.reserved_command_files).uniq.sort,
+            measurement: { "status" => "complete", "diagnostics" => [] }
+          }
+        rescue StandardError => e
+          message = e.message.to_s.encode(Encoding::UTF_8, invalid: :replace, undef: :replace).scrub("?")[0, 500]
+          {
+            component_roots: {}, edges: {}, source_files: [],
+            measurement: {
+              "status" => "incomplete",
+              "diagnostics" => [
+                {
+                  "kind" => "architecture_map_failed",
+                  "error_class" => e.class.name,
+                  "message" => message
+                }
+              ]
+            }
+          }
+        end
+      end
+
+      def component_roots
+        architecture_scan.fetch(:component_roots)
+      end
+
+      def dependency_edges
+        architecture_scan.fetch(:edges)
+      end
+
+      def source_files
+        architecture_scan.fetch(:source_files)
       end
 
       def tracked_files
@@ -130,17 +242,24 @@ module Hive
 
       def compute_tracked_files
         out, _err, status = @command_runner.call("git", "-C", @project_root, "ls-files", "-z")
-        files = status.success? ? out.split("\0").reject(&:empty?) : []
+        files = status.success? ? utf8(out).split("\0").reject(&:empty?) : []
         files = Dir.glob("**/*", File::FNM_DOTMATCH, base: @project_root).select do |path|
-          File.file?(File.join(@project_root, path))
+          @source_reader.regular_file?(path)
         end if files.empty?
 
-        files.map { |path| path.tr("\\", "/") }
+        files.map { |path| utf8(path).tr("\\", "/") }
              .reject { |path| path.split("/").include?(".git") }
              .reject { |path| excluded?(path) }
+             .select { |path| @source_reader.regular_file?(path) }
              .sort
       rescue StandardError
         []
+      end
+
+      # git emits raw filename bytes; one non-UTF-8 name must not raise from
+      # split/tr and silently zero every leverage signal via the rescue above.
+      def utf8(value)
+        value.to_s.b.force_encoding(Encoding::UTF_8).scrub
       end
 
       def excluded?(path)
@@ -159,7 +278,7 @@ module Hive
         SIGNALS.to_h do |signal|
           cap = DEFAULT_CAPS.fetch(signal)
           value = raw.fetch(signal, 0).to_f
-          [ signal, cap.positive? ? [ value / cap, 1.0 ].min : 0.0 ]
+          [ signal, cap.positive? && value.positive? ? value / (value + cap) : 0.0 ]
         end
       end
 
@@ -180,12 +299,7 @@ module Hive
       end
 
       def read_uncached(path)
-        # Tracked files may be binary or non-UTF-8; scrub invalid byte
-        # sequences so downcase/match? in the signal passes cannot raise
-        # ArgumentError and abort the whole scan (R5/U4 graceful degradation).
-        File.read(File.join(@project_root, path), encoding: "UTF-8").scrub("")
-      rescue SystemCallError, ArgumentError
-        ""
+        @source_reader.read_utf8(path)
       end
 
       def capture3(*args)

@@ -41,6 +41,19 @@ module Hive
       end
 
       def tick(now: Time.now)
+        candidates(now: now).filter_map { |candidate| reserve(candidate, now: now) }
+      end
+
+      # Side-effect-free with respect to dispatch ownership: callers may
+      # compare ordinary and architecture work without consuming a patrol
+      # turn (`@pending` is touched only by reserve/complete/cancel).
+      # Due-check throttles are NOT deferred, though: every project this
+      # scan evaluates commits its `@next_check_at` window at evaluation
+      # time — disabled, not-yet-due, and due candidates alike — and
+      # `reserve` never touches the throttle. So a due candidate the
+      # arbiter passes over is re-evaluated only after a full poll window,
+      # and a second `candidates` call within one tick yields no work.
+      def candidates(now: Time.now)
         dispatches = []
         @registry.call.each do |entry|
           project = entry.fetch("name")
@@ -57,21 +70,35 @@ module Hive
 
           cfg = @config_loader.call(entry.fetch("path"))
           patrol = cfg.fetch("patrol", {})
-          # Throttle every project we evaluate, including opted-out ones,
-          # *before* the enabled gate. Otherwise a disabled project skips
-          # the throttle and reloads its full config on every ~30s tick
-          # just to rediscover patrol.enabled: false. A project that flips
-          # to enabled mid-interval is picked up on its next poll window.
-          @next_check_at[project] = now + patrol.fetch("poll_interval_sec", 600).to_i
-          next unless patrol["enabled"] == true
-          next unless due?(entry, cfg, patrol, now)
+          # Throttle every project we evaluate, including opted-out ones:
+          # each branch below commits `@next_check_at` once the project's
+          # config has been loaded. Otherwise a disabled project would
+          # reload its full config on every ~30s tick just to rediscover
+          # patrol.enabled: false. A project that flips to enabled
+          # mid-interval is picked up on its next poll window.
+          unless patrol["enabled"] == true
+            @next_check_at[project] = now + patrol.fetch("poll_interval_sec", 600).to_i
+            next
+          end
+          unless due?(entry, cfg, patrol, now)
+            @next_check_at[project] = now + patrol.fetch("poll_interval_sec", 600).to_i
+            next
+          end
 
-          @pending[project] = { started_at: now }
-          dispatches << dispatch_for(entry)
+          @next_check_at[project] = now + patrol.fetch("poll_interval_sec", 600).to_i
+          dispatches << dispatch_for(entry, patrol: patrol)
         rescue Hive::ConfigError, Hive::GitError, KeyError
           next
         end
         dispatches
+      end
+
+      def reserve(candidate, now: Time.now)
+        project = candidate.fetch(:project)
+        return nil if pending?(project)
+
+        @pending[project] = { started_at: now }
+        public_dispatch(candidate)
       end
 
       def complete(project:, exit_code:, now: Time.now)
@@ -87,15 +114,18 @@ module Hive
         end
       end
 
-      # Release a project the Dispatcher marked pending in `tick` but
-      # then gated (daemon-disabled, legacy layout, or concurrency cap)
-      # before spawning. Clearing the pending marker lets the next
-      # eligible tick re-evaluate it; without this the project stays
-      # pending forever and is never patrolled again until daemon restart
-      # (the gated paths never reach `complete`, which is the only other
-      # thing that clears `@pending`). No failure is recorded — the scan
-      # never ran, so there is nothing to back off from. Genuine spawn
-      # *errors* go through `complete` with a non-zero exit instead.
+      # Legacy `tick`-path escape hatch. In that mode (no arbiter) `tick`
+      # reserves — marking `@pending` — before the Dispatcher applies its
+      # gates (daemon-disabled, legacy layout, concurrency cap), so a
+      # gated dispatch must release the marker here or the project would
+      # stay pending until daemon restart: the gated paths never reach
+      # `complete`, the only other thing that clears `@pending`. In
+      # always-on arbiter mode the Dispatcher calls `reserve` only AFTER
+      # those gates pass, so nothing is pending when they fire and its
+      # pre-reserve `cancel` calls are no-ops there. No failure is
+      # recorded — the scan never ran, so there is nothing to back off
+      # from. Genuine spawn *errors* go through `complete` with a
+      # non-zero exit instead.
       def cancel(project:)
         @pending.delete(project)
       end
@@ -157,17 +187,22 @@ module Hive
         nil
       end
 
-      def dispatch_for(entry)
+      def dispatch_for(entry, patrol: {})
         project = entry.fetch("name")
         {
           project: project,
           slug: PATROL_SLUG,
           stage: PATROL_STAGE,
           command: "hive patrol #{Shellwords.escape(project)} --json",
+          patrol_kind: :ordinary,
           state_file_mtime: nil,
           state_file_path: nil,
           hive_state_path: entry["hive_state_path"]
         }
+      end
+
+      def public_dispatch(candidate)
+        candidate.reject { |key, _value| key == :patrol_kind }
       end
     end
   end

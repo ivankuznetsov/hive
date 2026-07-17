@@ -12,6 +12,7 @@ require "hive/daemon/dispatch_baselines"
 require "hive/daemon/child_supervisor"
 require "hive/daemon/status_consumer"
 require "hive/daemon/pr_merge_watcher"
+require "hive/daemon/refactor_patrol_merge_reconciler"
 require "hive/daemon/patrol_scheduler"
 require "hive/daemon/digest_scheduler"
 require "hive/daemon/answer_digest_scheduler"
@@ -210,10 +211,21 @@ module Hive
           )
         )
         status_consumer = Hive::Daemon::StatusConsumer.new
+        refactor_patrol_merge_reconciler = Hive::Daemon::RefactorPatrolMergeReconciler.new(
+          poll_interval_sec: daemon_cfg.fetch("pr_merge_poll_interval_sec"),
+          dry_run: @dry_run
+        )
         merge_watcher = Hive::Daemon::PrMergeWatcher.new(
-          poll_interval_sec: daemon_cfg.fetch("pr_merge_poll_interval_sec")
+          poll_interval_sec: daemon_cfg.fetch("pr_merge_poll_interval_sec"),
+          merge_intake: refactor_patrol_merge_reconciler
         )
         patrol_scheduler = Hive::Daemon::PatrolScheduler.new
+        refactor_patrol_scheduler = Hive::Daemon::RefactorPatrolScheduler.new(dry_run: @dry_run)
+        patrol_arbiter = Hive::Daemon::PatrolArbiter.new(
+          ordinary_scheduler: patrol_scheduler,
+          architecture_scheduler: refactor_patrol_scheduler,
+          dry_run: @dry_run
+        )
         digest_scheduler = Hive::Daemon::DigestScheduler.new(
           enabled: digest_cfg.fetch("enabled", false),
           max_catchup_days: digest_cfg.fetch(
@@ -233,7 +245,11 @@ module Hive
         dispatcher = Hive::Daemon::Dispatcher.new(
           config: config, controller: controller, supervisor: supervisor,
           status_consumer: status_consumer, logger: logger,
-          merge_watcher: merge_watcher, patrol_scheduler: patrol_scheduler,
+          merge_watcher: merge_watcher,
+          refactor_patrol_merge_reconciler: refactor_patrol_merge_reconciler,
+          patrol_scheduler: patrol_scheduler,
+          refactor_patrol_scheduler: refactor_patrol_scheduler,
+          patrol_arbiter: patrol_arbiter,
           digest_scheduler: digest_scheduler, answer_digest_scheduler: answer_digest_scheduler,
           dry_run: @dry_run,
           update_state: Hive::UpdateCheck::State.new

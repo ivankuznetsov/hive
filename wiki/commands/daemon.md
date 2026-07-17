@@ -3,7 +3,7 @@ title: hive daemon
 type: command
 source: lib/hive/commands/daemon.rb, lib/hive/daemon/*
 created: 2026-05-06
-updated: 2026-07-10
+updated: 2026-07-12
 tags: [command, daemon, automation, json]
 ---
 
@@ -18,7 +18,9 @@ complete finalize rows or for two whitelisted stale finalize errors. It
 stops at human-input gates (`_WAITING` markers for Q&A / triage), manual
 recovery markers, and 8-finalize while the PR is still open on GitHub; selected
 retryable terminal `ERROR` markers are cleared by `StaleAgentHealer` before
-normal policy dispatch. When global `digest.enabled: true`, the same daemon
+normal policy dispatch. Separately, it ingests merged PRs and fairly schedules
+ordinary patrol alongside language-neutral architecture discovery/action
+resumes. When global `digest.enabled: true`, the same daemon
 also schedules one non-project-scoped `hive digest --date <day> --json` child
 after local midnight for the daily shipped digest.
 
@@ -123,6 +125,39 @@ extra tasks past `max_concurrent_runs` / `max_concurrent_per_project`.
 
 The closed-default policy means any unknown future `TaskActionKind`
 value falls through to `:skip` until the daemon is taught about it.
+
+## Architecture-patrol dispatch
+
+Architecture patrol does not enter through `hive status` task rows.
+`RefactorPatrolMergeReconciler` combines Hive finalize observations with
+exact-host, paginated GitHub catch-up, creates one checksummed v2 manifest per
+repository/PR/merge occurrence, and seeds a current high-water baseline on
+first enablement instead of importing old history. `PatrolArbiter` then shares
+each project's `daemon.max_concurrent_patrol_scans` capacity between ordinary
+patrol and architecture patrol, persists alternation across ticks, and selects
+architecture occurrences oldest-first so a continuously ready kind cannot
+starve the other.
+
+Discovery children run:
+
+```text
+hive refactor-patrol PROJECT --job-manifest MANIFEST --json
+```
+
+After classification, separately authorized action resumes run the same
+immutable job with `--actions`; both phases emit `hive-refactor-patrol.v2` to a
+job-bound result file consumed by the supervisor. Candidate selection shares
+one immutable ownership/config/identity snapshot across due jobs for the tick,
+but reservation re-resolves live ownership and config before claiming. Action
+execution repeats fresh consent, ownership, claim, and generation fences before
+every external effect and mandatory review handoff.
+
+The three gates are independent. `refactor_patrol.enabled` permits discovery
+only; `refactor_patrol.auto_fix.enabled` permits confined fix/PR attempts; and
+`refactor_patrol.issue_filing.enabled` permits deduplicated issues. Fresh init
+recommends discovery with a default-yes answer, while both external-effect gates
+remain default off. Missing `refactor_patrol` config in an existing project is
+still disabled. See [[commands/refactor-patrol]] for the job and policy model.
 
 ## Per-project enrollment
 

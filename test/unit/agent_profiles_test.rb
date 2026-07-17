@@ -85,6 +85,20 @@ class AgentProfilesTest < Minitest::Test
     assert_same by_sym, by_str
   end
 
+  def test_claude_patrol_profile_reserves_context_and_disables_customizations
+    claude = Hive::AgentProfiles.lookup(:claude)
+
+    assert_equal 20_000, claude.initial_context_tokens
+    assert_equal [
+      "--safe-mode", "--disable-slash-commands",
+      "--tools", "Read,Grep,Glob,Write"
+    ], claude.cli_capabilities.fetch(:patrol_review_context)
+    assert_equal [
+      "--safe-mode", "--disable-slash-commands",
+      "--tools", "Read,Grep,Glob,Bash,Edit,Write"
+    ], claude.cli_capabilities.fetch(:patrol_fix_context)
+  end
+
   def test_lookup_raises_unknown_agent_for_missing_name
     err = assert_raises(Hive::AgentProfiles::UnknownAgent) do
       Hive::AgentProfiles.lookup(:nonexistent)

@@ -606,9 +606,11 @@ class ProcessKillTest < Minitest::Test
 
   private
 
-  def wait_for_pid_file(path)
-    deadline = Time.now + 2
-    sleep 0.01 until File.exist?(path) || Time.now >= deadline
+  def wait_for_pid_file(path, timeout: 5)
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
+    sleep 0.01 until File.exist?(path) || Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+    flunk "timed out waiting #{timeout}s for child pid file #{File.basename(path)}" unless File.exist?(path)
+
     Integer(File.read(path))
   end
 

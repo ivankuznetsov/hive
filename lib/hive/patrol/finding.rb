@@ -2,7 +2,9 @@ module Hive
   module Patrol
     Finding = Struct.new(
       :id, :feature_id, :category, :severity, :confidence, :title,
-      :description, :recommendation, :evidence, :fingerprint,
+      :description, :recommendation, :scope, :contract, :impact,
+      :root_cause, :reproduction, :validation, :evidence, :alpha_score,
+      :fingerprint,
       keyword_init: true
     ) do
       def to_h
@@ -15,7 +17,14 @@ module Hive
           "title" => title,
           "description" => description,
           "recommendation" => recommendation,
+          "scope" => scope,
+          "contract" => contract,
+          "impact" => impact,
+          "root_cause" => root_cause,
+          "reproduction" => reproduction,
+          "validation" => validation,
           "evidence" => Array(evidence),
+          "alpha_score" => alpha_score,
           "fingerprint" => fingerprint
         }.compact
       end
@@ -30,7 +39,14 @@ module Hive
           title: hash["title"],
           description: hash["description"],
           recommendation: hash["recommendation"],
+          scope: hash["scope"],
+          contract: hash["contract"],
+          impact: hash["impact"],
+          root_cause: hash["root_cause"],
+          reproduction: hash["reproduction"],
+          validation: hash["validation"],
           evidence: Array(hash["evidence"]),
+          alpha_score: hash["alpha_score"],
           fingerprint: hash["fingerprint"]
         )
       end

@@ -364,7 +364,7 @@ class ReviewersAgentTest < Minitest::Test
       end
 
       refute_nil captured, "spawn_agent must have been called"
-      assert_equal "default", captured[:permission_mode]
+      assert_equal "dontAsk", captured[:permission_mode]
       assert_equal %w[Read Grep], captured[:allowed_tools]
       # Read/Grep are not in the read-only deny set, so the deny list is
       # unchanged — and it never overlaps the granted tools.

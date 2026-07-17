@@ -18,6 +18,21 @@ class RefactorPatrolCollisionsTest < Minitest::Test
     end
   end
 
+  def test_terminal_v2_fingerprint_is_suppressed_without_legacy_state
+    with_tmp_dir do |dir|
+      thesis = sample_thesis(fingerprint: "v2-fp")
+      result = Hive::RefactorPatrol::Collisions.new(
+        dir,
+        state: Hive::RefactorPatrol::StateStore.new(dir),
+        v2_fingerprints: { "v2-fp" => { "job_id" => "pr-7" } }
+      ).check(thesis)
+
+      assert result.suppressed
+      assert_equal "collision_already_seen", result.reason
+      assert_equal "v2-fp", result.reference
+    end
+  end
+
   def test_dismissed_refactor_fingerprint_is_suppressed
     with_tmp_dir do |dir|
       store = Hive::RefactorPatrol::StateStore.new(dir)

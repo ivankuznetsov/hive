@@ -3,7 +3,7 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-06-30
+updated: 2026-07-13
 tags: [command, web, hivebox, rails, turbo]
 ---
 
@@ -167,7 +167,7 @@ origin also prints the Host-header/reverse-proxy warning.
   operator's GitHub repository list (device-flow token; degrades to an inline
   notice when GitHub is unreachable or the grant was revoked). The setup form
   mirrors `hive init`'s questionnaire and carries a select-only Workflow
-  control: fresh clone setup lists built-ins only (`coding`, `content`) with
+  control: fresh clone setup lists built-ins only (`coding`, `content`, `bench`) with
   `coding` preselected, while "Re-run setup" lists built-ins plus that
   project's authored workflows and preselects the current `default_workflow`.
   The selected value is passed as `Hive::Commands::Init.new(..., workflow:)`;

@@ -51,6 +51,10 @@ module Hive
         DEFAULT_TRIAGE_BIAS = "courageous".freeze
         TRIAGE_BIASES = %w[courageous safetyist].freeze
         DEFAULT_ADHOC_AUTO_FIX = Hive::Config::DEFAULTS.fetch("review").fetch("adhoc").fetch("fix")
+        # Fresh-project recommendation only. Config::DEFAULTS intentionally
+        # remains false so a legacy project with no refactor_patrol block is
+        # never enrolled by an upgrade.
+        DEFAULT_REFACTOR_PATROL_ENABLED = true
 
         # Reviewer entries shipped in templates/project_config.yml.erb. The
         # multi-select prompt offers these as the toggleable set; rendering
@@ -97,10 +101,14 @@ module Hive
         # Tests inject `output: StringIO.new, summary_io: StringIO.new` to assert
         # both streams independently.
         def initialize(input: $stdin, output: $stderr, summary_io: $stdout,
-                       registered_agents: nil)
+                       registered_agents: nil, refactor_patrol_enabled: nil)
           @input = input
           @output = output
           @summary_io = summary_io
+          unless refactor_patrol_enabled.nil? || [ true, false ].include?(refactor_patrol_enabled)
+            raise ArgumentError, "refactor_patrol_enabled must be true, false, or nil"
+          end
+          @refactor_patrol_enabled = refactor_patrol_enabled
           # registered_agents is a list of strings (agent profile names).
           # When not injected, ask the live registry through Config's
           # symbol→string projection (the one wrapper this PR added to
@@ -134,6 +142,7 @@ module Hive
         #     "patrol_mode"       => String,           # ultrapatrol | high | medium | low | off
         #     "triage_bias"       => String,           # courageous | safetyist
         #     "adhoc_auto_fix"    => Boolean           # auto-fix ad-hoc PR reviews
+        #     "refactor_patrol_enabled" => Boolean     # architecture discovery only
         #     "budgets"  => Hash<String, Integer>,     # 10 keys (LIMIT_KEYS)
         #     "timeouts" => Hash<String, Integer>,     # 10 keys (LIMIT_KEYS)
         #     "daemon_enabled"    => Boolean           # auto-advance pipeline (ADR-024)
@@ -156,6 +165,11 @@ module Hive
           patrol_mode = prompt_patrol_mode
           triage_bias = prompt_triage_bias
           adhoc_auto_fix = prompt_adhoc_auto_fix
+          refactor_patrol_enabled = if @refactor_patrol_enabled.nil?
+            prompt_refactor_patrol_enabled
+          else
+            @refactor_patrol_enabled
+          end
           budgets, timeouts = prompt_limits
           daemon_enabled = prompt_daemon_enabled
           babysitter_enabled = prompt_babysitter_enabled
@@ -173,6 +187,7 @@ module Hive
             "patrol_mode" => patrol_mode,
             "triage_bias" => triage_bias,
             "adhoc_auto_fix" => adhoc_auto_fix,
+            "refactor_patrol_enabled" => refactor_patrol_enabled,
             "budgets" => budgets,
             "timeouts" => timeouts,
             "daemon_enabled" => daemon_enabled,
@@ -217,6 +232,7 @@ module Hive
             "patrol_mode" => DEFAULT_PATROL_MODE,
             "triage_bias" => DEFAULT_TRIAGE_BIAS,
             "adhoc_auto_fix" => DEFAULT_ADHOC_AUTO_FIX,
+            "refactor_patrol_enabled" => effective_refactor_patrol_default,
             "budgets" => default_budgets,
             "timeouts" => default_timeouts,
             "daemon_enabled" => true,
@@ -237,6 +253,7 @@ module Hive
             "patrol_mode=#{DEFAULT_PATROL_MODE}, " \
             "triage=#{DEFAULT_TRIAGE_BIAS}, " \
             "adhoc_auto_fix=#{DEFAULT_ADHOC_AUTO_FIX ? 'enabled' : 'disabled'}, " \
+            "refactor_patrol=#{effective_refactor_patrol_default ? 'enabled' : 'disabled'}, " \
             "limits=defaults, daemon=enabled, babysitter=enabled, daemon_autostart=disabled"
           )
           answers
@@ -249,6 +266,10 @@ module Hive
           # (which YAML.safe_load parses to nil and validate_review_attempts!
           # accepts only for the four `review_*` paths it knows about).
           LIMIT_KEYS.each_with_object({}) { |k, h| h[k] = Hive::Config::DEFAULTS["budget_usd"].fetch(k) }
+        end
+
+        def effective_refactor_patrol_default
+          @refactor_patrol_enabled.nil? ? DEFAULT_REFACTOR_PATROL_ENABLED : @refactor_patrol_enabled
         end
 
         def default_timeouts
@@ -537,12 +558,26 @@ module Hive
           @output.puts "  Leave disabled for review-only mode: Hive publishes review comments"
           @output.puts "  but does not prepare local fix commits for someone else's PR."
           @output.puts "  Enable only when you want accepted ad-hoc findings to enter the fix loop."
+          prompt_yes_no("Enable auto-fix for ad-hoc PR reviews?", default: false)
+        end
+
+        def prompt_refactor_patrol_enabled
+          @output.puts ""
+          @output.puts "Architecture patrol — review each future merged PR for refactor opportunities."
+          @output.puts "  Discovery is read-only. Auto-fixing and GitHub issue filing remain"
+          @output.puts "  independently disabled unless you enable their config gates later."
+          prompt_yes_no("Enable architecture patrol discovery for this project?", default: true)
+        end
+
+        def prompt_yes_no(question, default:)
+          suffix = default ? "[Y/n]" : "[y/N]"
           loop do
-            @output.print "Enable auto-fix for ad-hoc PR reviews? [y/N]: "
+            @output.print "#{question} #{suffix}: "
             @output.flush
             answer = read_line.downcase
-            return false if answer.empty? || answer == "n" || answer == "no"
-            return true  if answer == "y" || answer == "yes"
+            return default if answer.empty?
+            return true if answer == "y" || answer == "yes"
+            return false if answer == "n" || answer == "no"
 
             @output.puts "  please answer y or n"
           end
@@ -614,15 +649,7 @@ module Hive
           @output.puts "  It stops at human-input gates (brainstorm questions, review"
           @output.puts "  escalations, recovery markers). Disable later by setting"
           @output.puts "  daemon.enabled: false in .hive-state/config.yml."
-          loop do
-            @output.print "Enable hive daemon for this project? [Y/n]: "
-            @output.flush
-            answer = read_line.downcase
-            return true  if answer.empty? || answer == "y" || answer == "yes"
-            return false if answer == "n" || answer == "no"
-
-            @output.puts "  please answer y or n"
-          end
+          prompt_yes_no("Enable hive daemon for this project?", default: true)
         end
 
         def prompt_babysitter_enabled
@@ -631,15 +658,7 @@ module Hive
           @output.puts "  When enabled, `hive babysit start` can ask the development"
           @output.puts "  agent to rebase, resolve conflicts, fix red CI, and push"
           @output.puts "  PR branches. Disable later by setting babysitter.enabled: false."
-          loop do
-            @output.print "Enable hive-babysitter for this project? [Y/n]: "
-            @output.flush
-            answer = read_line.downcase
-            return true  if answer.empty? || answer == "y" || answer == "yes"
-            return false if answer == "n" || answer == "no"
-
-            @output.puts "  please answer y or n"
-          end
+          prompt_yes_no("Enable hive-babysitter for this project?", default: true)
         end
 
         def prompt_daemon_autostart
@@ -647,15 +666,7 @@ module Hive
           @output.puts "Hive daemon service — install the per-user service unit now."
           @output.puts "  The unit is written either way. Starting it now also enables"
           @output.puts "  launchd/systemd-user autostart for future logins."
-          loop do
-            @output.print "Enable and start the hive daemon now? [y/N]: "
-            @output.flush
-            answer = read_line.downcase
-            return false if answer.empty? || answer == "n" || answer == "no"
-            return true  if answer == "y" || answer == "yes"
-
-            @output.puts "  please answer y or n"
-          end
+          prompt_yes_no("Enable and start the hive daemon now?", default: false)
         end
 
         def summarize(answers)
@@ -672,6 +683,7 @@ module Hive
           @output.puts "  patrol_mode       = #{answers['patrol_mode']}"
           @output.puts "  triage_bias       = #{answers['triage_bias']}"
           @output.puts "  adhoc_auto_fix    = #{answers['adhoc_auto_fix'] ? 'enabled' : 'disabled'}"
+          @output.puts "  refactor_patrol   = #{answers['refactor_patrol_enabled'] ? 'enabled' : 'disabled'}"
           @output.puts "  limits            = #{summarize_limits(answers)}"
           @output.puts "  daemon            = #{answers['daemon_enabled'] ? 'enabled' : 'disabled'}"
           @output.puts "  babysitter        = #{answers['babysitter_enabled'] ? 'enabled' : 'disabled'}"

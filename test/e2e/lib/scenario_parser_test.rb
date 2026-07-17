@@ -79,4 +79,168 @@ class E2EScenarioParserTest < Minitest::Test
       end
     end
   end
+
+  def test_incident_metadata_parses_without_changing_legacy_scenarios
+    Dir.mktmpdir("scenario") do |dir|
+      path = File.join(dir, "incident.yml")
+      File.write(path, <<~YAML)
+        name: incident_fixture
+        description: Reproduces a synthetic dispatch ordering failure.
+        tags: [incident-regression]
+        incident_id: dispatch-ordering
+        sibling_task_id: "#9767"
+        pending: true
+        steps:
+          - kind: cli
+            args: [version]
+      YAML
+
+      scenario = Hive::E2E::ScenarioParser.parse(path)
+
+      assert_equal "dispatch-ordering", scenario.incident_id
+      assert_equal "#9767", scenario.sibling_task_id
+      assert_equal true, scenario.pending
+    end
+
+    legacy = Hive::E2E::ScenarioParser.parse(File.expand_path("../scenarios/full_pipeline_happy_path.yml", __dir__))
+    assert_nil legacy.incident_id
+    assert_nil legacy.sibling_task_id
+    assert_equal false, legacy.pending
+  end
+
+  def test_incident_metadata_requires_description_ids_and_sanitized_values
+    invalid_documents = {
+      "description" => <<~YAML,
+        name: missing_description
+        tags: [incident-regression]
+        incident_id: missing-description
+        sibling_task_id: "#9767"
+        pending: true
+        steps:
+          - kind: cli
+            args: [version]
+      YAML
+      "incident_id" => <<~YAML,
+        name: unsafe_incident
+        description: Synthetic incident.
+        tags: [incident-regression]
+        incident_id: "Unsafe Incident"
+        sibling_task_id: "#9767"
+        pending: true
+        steps:
+          - kind: cli
+            args: [version]
+      YAML
+      "sibling_task_id" => <<~YAML,
+        name: missing_sibling
+        description: Synthetic incident.
+        tags: [incident-regression]
+        incident_id: missing-sibling
+        pending: true
+        steps:
+          - kind: cli
+            args: [version]
+      YAML
+      "pending" => <<~YAML
+        name: invalid_pending
+        description: Synthetic incident.
+        tags: [incident-regression]
+        incident_id: invalid-pending
+        sibling_task_id: "#9767"
+        pending: later
+        steps:
+          - kind: cli
+            args: [version]
+      YAML
+    }
+
+    invalid_documents.each do |field, yaml|
+      Dir.mktmpdir("scenario") do |dir|
+        path = File.join(dir, "invalid.yml")
+        File.write(path, yaml)
+
+        error = assert_raises(Hive::E2E::ScenarioParser::InvalidScenario) do
+          Hive::E2E::ScenarioParser.parse(path)
+        end
+        assert_includes error.message, field
+        assert_operator error.line, :>, 0
+      end
+    end
+  end
+
+  def test_script_gh_requires_an_interactions_array
+    Dir.mktmpdir("scenario") do |dir|
+      path = File.join(dir, "gh.yml")
+      File.write(path, <<~YAML)
+        name: gh_script
+        steps:
+          - kind: script_gh
+            interactions: nope
+      YAML
+
+      error = assert_raises(Hive::E2E::ScenarioParser::InvalidScenario) do
+        Hive::E2E::ScenarioParser.parse(path)
+      end
+      assert_includes error.message, "script_gh.interactions must be an array"
+    end
+  end
+
+
+  def test_script_gh_rejects_malformed_nested_interactions_during_preflight
+    Dir.mktmpdir("scenario") do |dir|
+      path = File.join(dir, "gh.yml")
+      File.write(path, <<~YAML)
+        name: gh_script
+        steps:
+          - kind: script_gh
+            interactions:
+              - args: auth-status
+      YAML
+
+      error = assert_raises(Hive::E2E::ScenarioParser::InvalidScenario) do
+        Hive::E2E::ScenarioParser.parse(path)
+      end
+      assert_includes error.message, "args must be an array of strings"
+    end
+  end
+
+  def test_incident_metadata_requires_the_budgeted_incident_tag
+    Dir.mktmpdir("scenario") do |dir|
+      path = File.join(dir, "untagged.yml")
+      File.write(path, <<~YAML)
+        name: untagged_incident
+        description: Must not bypass the incident budget.
+        incident_id: untagged-incident
+        sibling_task_id: "#9767"
+        pending: false
+        steps:
+          - kind: cli
+            args: [version]
+      YAML
+
+      error = assert_raises(Hive::E2E::ScenarioParser::InvalidScenario) do
+        Hive::E2E::ScenarioParser.parse(path)
+      end
+      assert_includes error.message, "requires the incident-regression tag"
+    end
+  end
+
+  def test_multiple_script_gh_steps_fail_preflight
+    Dir.mktmpdir("scenario") do |dir|
+      path = File.join(dir, "gh.yml")
+      File.write(path, <<~YAML)
+        name: duplicate_gh_script
+        steps:
+          - kind: script_gh
+            interactions: []
+          - kind: script_gh
+            interactions: []
+      YAML
+
+      error = assert_raises(Hive::E2E::ScenarioParser::InvalidScenario) do
+        Hive::E2E::ScenarioParser.parse(path)
+      end
+      assert_includes error.message, "only one ordered script_gh"
+    end
+  end
 end

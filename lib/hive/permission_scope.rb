@@ -14,12 +14,32 @@ module Hive
     # despite being granted.
     READ_ONLY_ALLOWED = %w[Read LS Grep Glob].freeze
     READ_ONLY_DISALLOWED = %w[Write Edit MultiEdit NotebookEdit Bash].freeze
+    FILE_EDIT_TOOLS = %w[Write Edit MultiEdit NotebookEdit].freeze
+    UNMATCHED_FILE_RULE_REPLACEMENTS = {
+      "Write" => "Edit",
+      "MultiEdit" => "Edit",
+      "NotebookEdit" => "Edit",
+      "LS" => "Read",
+      "Grep" => "Read",
+      "Glob" => "Read"
+    }.freeze
 
-    # The permission mode every non-yolo scope runs in. "default" (not plan
-    # mode, which would change agent behavior) lets allowedTools/disallowedTools
-    # pre-approve the intended set without prompting. The allow/deny list
-    # derivation is documented at READ_ONLY_ALLOWED above and in scoped_scope.
+    # Claude permission rules are either a bare tool name or one path/command
+    # specifier in parentheses (for example `Edit(./docs/**)`). Hive keeps the
+    # accepted form deliberately whitespace/comma-free because tool_csv emits
+    # one comma-separated argv value.
+    TOOL_RULE_PATTERN = /\A(?<tool>[A-Za-z][A-Za-z0-9_.:*-]*)(?:\((?<specifier>[^(),\s\x00]+)\))?\z/
+
+    # The read-only permission mode. "default" (not plan mode, which would
+    # change agent behavior) combines with the explicit mutating/shell deny
+    # list while preserving ordinary read behavior.
     NON_PROMPTING_PERMISSION_MODE = "default".freeze
+
+    # Path-qualified allow rules need a default-deny fallback: without it, an
+    # out-of-scope edit would become an interactive prompt and strand a
+    # headless stage. `dontAsk` executes matching allow rules and rejects any
+    # remaining permission request non-interactively.
+    SCOPED_PERMISSION_MODE = "dontAsk".freeze
 
     PRESETS = {
       "yolo" => {
@@ -33,7 +53,7 @@ module Hive
         disallowed_tools: READ_ONLY_DISALLOWED
       },
       "scoped" => {
-        permission_mode: NON_PROMPTING_PERMISSION_MODE
+        permission_mode: SCOPED_PERMISSION_MODE
       }
     }.freeze
 
@@ -120,11 +140,20 @@ module Hive
         # Claude's deny rules win over allow rules, so the lists MUST be
         # disjoint or a granted tool would be silently denied.
         overlap = Array(allowed_tools) & Array(disallowed_tools)
-        return if overlap.empty?
+        unless overlap.empty?
+          raise ArgumentError,
+                "scope #{preset.inspect} would both grant and deny #{overlap.inspect}; " \
+                "deny rules win, so the allow and deny lists must be disjoint"
+        end
+
+        granted_names = Array(allowed_tools).flat_map { |rule| PermissionScope.granted_tool_names(rule) }
+        denied_names = Array(disallowed_tools).filter_map { |rule| PermissionScope.tool_name(rule) }
+        semantic_overlap = granted_names & denied_names
+        return if semantic_overlap.empty?
 
         raise ArgumentError,
-              "scope #{preset.inspect} would both grant and deny #{overlap.inspect}; " \
-              "deny rules win, so the allow and deny lists must be disjoint"
+              "scope #{preset.inspect} would grant and deny tools #{semantic_overlap.inspect}; " \
+              "deny rules win, so a path-qualified Edit allow cannot retain a file-edit deny"
       end
     end
 
@@ -140,8 +169,9 @@ module Hive
       # raise — and those don't depend on the task folder — so a placeholder root
       # surfaces them. (The non-`claude` profile mismatch can't be checked here,
       # since the profile is a run-time choice; resolve still fails closed on it.)
-      if parsed.fetch("preset") == "scoped" && parsed.key?("dirs")
-        resolve_dirs(parsed["dirs"], task_folder: "/", stage: stage)
+      if parsed.fetch("preset") == "scoped"
+        normalize_tools(parsed["tools"], task_folder: "/", stage: stage) if parsed.key?("tools")
+        resolve_dirs(parsed["dirs"], task_folder: "/", stage: stage) if parsed.key?("dirs")
       end
       true
     end
@@ -189,6 +219,18 @@ module Hive
       return nil if values.empty?
 
       values.join(",")
+    end
+
+    def tool_name(rule)
+      TOOL_RULE_PATTERN.match(rule.to_s)&.[](:tool)
+    end
+
+    def granted_tool_names(rule)
+      match = TOOL_RULE_PATTERN.match(rule.to_s)
+      return [] unless match
+      return FILE_EDIT_TOOLS if match[:tool] == "Edit" && match[:specifier]
+
+      [ match[:tool] ]
     end
 
     def parse_spec(spec, stage:)
@@ -303,6 +345,17 @@ module Hive
                              "tools[#{idx}] #{tool.inspect} must be a single tool name " \
                              "without commas, whitespace, or null bytes")
         end
+        match = TOOL_RULE_PATTERN.match(stripped)
+        unless match
+          raise invalid_spec(stage, original,
+                             "tools[#{idx}] #{tool.inspect} is a malformed permission rule; " \
+                             "expected Tool or Tool(non-empty-specifier)")
+        end
+        if match[:specifier] && (replacement = UNMATCHED_FILE_RULE_REPLACEMENTS[match[:tool]])
+          raise invalid_spec(stage, original,
+                             "tools[#{idx}] #{tool.inspect} is unsupported; Claude does not enforce " \
+                             "#{match[:tool]}(path), use #{replacement}(path) instead")
+        end
       end
     end
 
@@ -340,34 +393,56 @@ module Hive
 
     def scoped_scope(spec, task_folder:, stage:)
       allowed = if spec.key?("tools")
-        normalize_tools(spec.fetch("tools"))
+        normalize_tools(spec.fetch("tools"), task_folder: task_folder, stage: stage)
       else
         tools = READ_ONLY_ALLOWED.dup
         tools << "Bash" if spec["bash"] == true
         tools
       end
+      granted_names = allowed.flat_map { |rule| granted_tool_names(rule) }.uniq
       Scope.build(
         preset: "scoped",
-        permission_mode: NON_PROMPTING_PERMISSION_MODE,
+        permission_mode: SCOPED_PERMISSION_MODE,
         allowed_tools: allowed,
         # Subtract the granted tools so the deny list never overlaps the
         # allow list. Claude's deny rules take precedence over allow rules,
         # so emitting a granted tool (e.g. Write/Edit/Bash) in BOTH lists
         # would deny it despite the explicit `tools:`/`bash:` grant —
         # silently breaking `scoped`'s entire purpose.
-        disallowed_tools: READ_ONLY_DISALLOWED - allowed,
+        disallowed_tools: READ_ONLY_DISALLOWED.reject do |denied|
+          granted_names.include?(denied)
+        end,
         add_dirs_extra: resolve_dirs(spec["dirs"], task_folder: task_folder, stage: stage)
       )
     end
 
     # `tools` arrived via parse_spec → validate_scoped! → validate_tools! on
-    # the resolve path, so entries are already non-blank Strings; this only
-    # strips surrounding whitespace. It does NOT dedup or reject
-    # blank-after-strip — that is deferred to tool_csv (the emit chokepoint),
-    # which drops blanks and collapses duplicates. A direct caller that
-    # bypasses validate_tools! gets those unguarded entries.
-    def normalize_tools(tools)
-      tools.map { |tool| tool.to_s.strip }
+    # the resolve path. Bare rules pass through after trimming. Read/Edit path
+    # rules are descriptor-portable and task-relative, so resolve them to the
+    # double-slash absolute syntax Claude's permission matcher requires.
+    def normalize_tools(tools, task_folder:, stage:)
+      tools.map do |tool|
+        rule = tool.to_s.strip
+        match = TOOL_RULE_PATTERN.match(rule)
+        next rule unless match && match[:specifier] && %w[Read Edit].include?(match[:tool])
+
+        path = match[:specifier]
+        expanded = File.absolute_path?(path) ? File.expand_path(path) : File.expand_path(path, task_folder)
+        "#{match[:tool]}(#{claude_absolute_permission_path(expanded)})"
+      rescue ArgumentError, TypeError => e
+        raise invalid_spec(stage, rule, "tool path could not be resolved (#{e.message})")
+      end
+    end
+
+    # Claude normalizes Windows paths to POSIX drive syntax before matching
+    # permission rules (`C:\\Users` -> `/c/Users`). CLI absolute rules add one
+    # more leading slash, so emit `//c/Users` on Windows and `//tmp/...` on
+    # Unix. File.expand_path normally returns forward slashes on Windows, but
+    # `tr` also keeps overridden/custom Ruby path implementations safe.
+    def claude_absolute_permission_path(path)
+      normalized = path.tr("\\", "/")
+      normalized = normalized.sub(/\A([A-Za-z]):/) { "/#{Regexp.last_match(1).downcase}" }
+      "//#{normalized.sub(%r{\A/+}, "")}"
     end
 
     def resolve_dirs(dirs, task_folder:, stage:)

@@ -3,17 +3,36 @@ title: Gaps
 type: gaps
 source: wiki/* vs lib/, templates/, test/, bin/
 created: 2026-04-25
-updated: 2026-07-09
+updated: 2026-07-16
 tags: [gap, todo]
 ---
 
 **TLDR**: The wiki has broad domain coverage for the current `lib/`, command, stage, TUI, daemon, bot, hivebox web, testing/static-analysis, template/prompt, and release surfaces, but the source-file map below is representative rather than an automatically verified one-file-per-source audit. Remaining gaps are mainly live behavioral verification and a few deeper reference pages.
 
+## Current release gap
+
+- Cross-project dependency admission is covered with local-path remotes and
+  anonymized multi-project integration fixtures, including stored/live remote
+  mismatch. It has not yet been dogfooded end-to-end against two separately
+  hosted repositories through daemon dispatch and merge/archive. The current
+  implementation intentionally performs no network identity lookup; it trusts
+  only normalized enrolled/live `origin` strings and fails closed on missing
+  or ambiguous evidence.
+
+- The built-in `bench` descriptor, packaged stage instructions, self-contained
+  runtime snapshot, and `hive init . --workflow bench` path are covered locally,
+  but they have not yet shipped in a Hive release or completed a live
+  paid-provider campaign from a fresh standalone benchmark project. Honeycomb
+  is not deployed and is not a dependency of this named-workflow path.
+- The packaged mixed Sol/Terra/Grok profiles, stage-specific Codex shim, sole
+  Sol `ce-code-review` policy, and combined Sol-runner selection are locally
+  test-pinned but still need their first paid end-to-end cell.
+
 ## Source-file coverage (representative map)
 
 | Area / file set | Page |
 |-----------------|------|
-| `bin/hive`, `lib/hive/cli.rb`, command registration | ✓ [[cli]], [[commands]] cover command registration plus the wrapper-level `--version`, command-local help rewrite, leading JSON boolean grammar contracts, last-recognized-JSON-boolean error-mode semantics, and the `hive new PROJECT` lift-and-rebuild contract that lifts recognized `--workflow`/`--depends-on` (and their `=VALUE`/JSON-boolean forms) from anywhere outside an explicit `--`, rebuilds the `PROJECT TEXT...` tail behind a protective `--`, and leaves a trailing/value-less value option as literal task text. |
+| `bin/hive`, `lib/hive/cli.rb`, command registration | ✓ [[cli]], [[commands]] cover command registration plus the wrapper-level `--version`, command-local help rewrite, leading JSON boolean grammar contracts, first-`--` option-scan termination, snapshot-based last-recognized-JSON-boolean error-mode semantics, and the `hive new PROJECT` lift-and-rebuild contract that lifts recognized `--workflow`/`--depends-on` (and their `=VALUE`/JSON-boolean forms) from anywhere outside an explicit `--`, rebuilds the `PROJECT TEXT...` tail behind a protective `--`, and leaves a trailing/value-less value option as literal task text. |
 | `bin/hive`, `lib/hive/cli.rb`, command registration | ✓ [[cli]], [[commands]] cover command registration plus the wrapper-level `--version`, command-local help rewrite, leading JSON boolean grammar, and pre-dispatch JSON usage-error contracts for required-argument command surfaces. |
 | `lib/hive/commands/*.rb` | ✓ `wiki/commands/*` pages cover the active command surface, including setup, daemon, bot, web, init, new, generate-name, status/archive listing, run, stage-action, markers, migrate, findings, metrics, update, uninstall, wiki, bench-submit, and rebase-status. |
 | `bin/hive`, `lib/hive/cli.rb`, command registration | ✓ [[cli]], [[commands]] cover command registration plus the wrapper-level `--version`, command-local help rewrite, and leading JSON boolean grammar contracts. |
@@ -21,6 +40,7 @@ tags: [gap, todo]
 | `lib/hive/commands/{connect,disconnect}.rb`, `lib/hive/screenote/**` | ✓ [[commands/screenote]], [[modules/config]], and [[stages/artifacts]] cover Screenote OAuth setup, credential storage, MCP injection, and fail-soft artifact behavior. |
 | `lib/hive/stages/*.rb`, `lib/hive/stages/review/**` | ✓ [[stages/index]] plus per-stage pages; review submodules are covered by [[stages/review]]. |
 | `lib/hive/patrol/*`, `lib/hive/commands/patrol.rb` | ✓ [[modules/patrol]] and [[commands/patrol]] cover the repository-patrol engine, PR opener, fingerprint/dismissal state, and patrol-to-`6-review` handoff. |
+| `lib/hive/refactor_patrol/*`, `lib/hive/commands/refactor_patrol.rb`, daemon architecture-patrol scheduling | ✓ [[commands/refactor-patrol]], [[modules/daemon]], [[modules/config]], [[modules/gh]], [[state-model]], and [[testing]] cover language-neutral merge discovery, durable jobs/actions, scheduling, fencing, publication, and recovery. |
 | `lib/hive/daemon/*` | ✓ [[modules/daemon]] and [[commands/daemon]] cover dispatcher, healer, display-name backfiller, queues, merge watcher, status consumer, logging, and service/queue command surfaces. |
 | `lib/hive/babysitter/**`, `lib/hive/commands/babysit.rb`, `bin/hive-babysitter-stub-git`, `bin/hive-babysitter-stub-gh` | ✓ [[modules/babysitter]] and [[commands/babysit]] cover the experimental PR babysitter process, lifecycle command, GitHub PR repair loop, dry-run wrapper-launcher handoff, and executable `git`/`gh` default-deny stub API boundaries. |
 | `lib/hive/bot/*` | ✓ [[modules/bot]] and [[commands/bot]] |
@@ -138,7 +158,6 @@ completed real GitHub/Codex/Claude provider login plus a daemon-owned PR push.
 47. **`bin/hive-eval` usage/env contract is focused-test pinned but not full judged-eval smoked.** The eval-wrapper follow-up changes the checkout-local eval wrapper's usage text so one unexpected positional argument prints `unexpected argument: ...`, multiple positional arguments print `unexpected arguments: ...`, path separators report `scenario basename must not contain path separators`, and unsafe separator-free names report a generic safe-basename error without echoing the value. Commit `ed404213` then changes environment propagation so inherited `HIVE_EVAL_NO_JUDGE=1` is cleared unless `--no-judge` is passed, preventing caller environment from silently disabling Codex judge assertions. The patrol follow-up also rejects inherited `RAKEOPT=-n`/`--dry-run`, clears `RAKEOPT` before launching Rake, and refuses a zero child exit unless the report is parseable, identifies itself as `hive-eval-report` version 1, contains at least one scenario, and includes the requested scenario when filtered. The current focused tests pin the first positional scenario argument, a trailing extra argument, the stray positional scenario argument, path separators, unsafe names, invalid options, missing option values, ambient `TEST` isolation, all-scenario filtering, successful report writes, deliberate failing-scenario report shape, the judge-enabled env-clear fixture, inherited Rake dry-run rejection, child `RAKEOPT` scrubbing, missing reports after a successful child, malformed/wrong-schema reports, empty reports, and filtered reports naming the wrong scenario. This refresh did not find an in-tree artifact from a full `bin/hive-eval` run with real Codex judge/persona calls enabled after `ed404213`; the verified surface is the local structural wrapper/test path.
 46. **`hive new` capture commit serialization is pinned, but adjacent display-name commits remain best-effort.** Commit `bdd9a9fa` wraps the captured-task `Hive::GitOps#hive_commit(stage_name: "1-inbox", action: "captured")` in `Hive::Lock.with_commit_lock(hive_state)`, and `test/integration/new_test.rb` now asserts the wrapper path. The committed wiki fragment records a local direct multi-process repro, but this refresh did not find an in-tree artifact proving the original parallel hivebox Rails/system-worker failure no longer reproduces. Source inspection also shows `Hive::DisplayName::Generator#commit_name` still calls `Hive::GitOps#hive_commit` directly and swallows `Hive::GitError`; that best-effort path may recover naturally through daemon backfill, but it is not serialized by `Hive::Lock.with_commit_lock` today.
 46. **`hive digest` is implemented and test-pinned, but live provider evidence remains external.** Commits `7a75ee6e`, `814cd123`, `6bc04c90`, `742d4fab`, `ab35b657`, and the digest config follow-up add the shipped-digest pipeline: local-date windows, ship-time extraction from `hive/state`, `9-done` task collection, agent categorization through `templates/digest_prompt.md.erb`, Telegram MarkdownV2 rendering, `Digest::Sender`, the public `hive digest [--date] [--dry-run] [--json]` command, `Config.load_global_digest_config`, `digest.enabled` daemon scheduling, and `DigestScheduler` catch-up. Focused tests cover collection, ship-time precedence, categorizer output mapping/fallbacks, renderer escaping/order, orchestration statuses, sender chat-id resolution, dry-run token bypass, CLI date parsing, success JSON, global config validation, daemon catch-up/DST behavior, dry-run digest completion, and fatal-log isolation when scheduler completion raises. `test/digest/e2e_test.rb` now exists for a real agent + Telegram Bot API run (including a live failed-notice send) and fails loudly when `HIVE_TELEGRAM_BOT_TOKEN` or `HIVE_DIGEST_TEST_CHAT_ID` is missing, but this refresh did not run it and did not produce an in-tree artifact showing a delivered real digest. The `hive-digest` JSON document is now registered in `Hive::Schemas::SCHEMA_VERSIONS` (v1, published under `schemas/hive-digest.v1.json`) and emits `schema_version`; a malformed invocation caught before dispatch emits the shared error envelope via `JSON_USAGE_ERROR_CONTRACTS`, while other hard failures (bad `--date`, Telegram send error) remain on the stderr + exit-code path by design.
-48. **`hive patrol` similarity-skip JSON schema coverage is unpinned.** Rechecked after commit `239b93c6` on 2026-06-18: `Hive::Commands::Patrol#skip_reason` can still return `similar_to_existing` when `Hive::Patrol::Fingerprint.similar_known?` suppresses a duplicate issue, and [[modules/patrol]] plus [[commands/patrol]] document that behavior. The published `schemas/hive-patrol.v1.json` `skipped_findings[].reason` enum still lists only `dismissed`, `existing_pr`, `low_confidence`, and `low_severity`, while `test_hive_patrol_success_payload_validates` exercises only `low_confidence`. No focused test or checked-in fixture proves a `similar_to_existing` patrol success payload validates against the published schema today.
 49. **Append-only log.d fragment carries a stale `:marker` kind reference (U11).** `wiki/log.d/20260620T120000Z-task-action-review-fixes.md:7` says the `:none` inert fall-through gate "excludes `:agent`, `:marker`, and `nil`". That was accurate at its 2026-06-20 timestamp, but U11 retired the `:marker` kind: `Hive::Workflow::KNOWN_KINDS` is now `[nil, :agent, :inert, :execute, :review_council, :finalize]` (`refute_includes ..., :marker` pins the absence in `test/unit/workflow_test.rb`), and the live code comment in `lib/hive/task_action.rb` was updated to "coding runtime kinds". Per the repo's append-only `log.d` convention the fragment is NOT rewritten; this note exists so an `rg :marker` reader treats that line as historical, not current. The only authoritative kind list lives in `lib/hive/workflow.rb`. See [[modules/task_action]].
 
 49. **Screenote live capture test-token endpoint is blocked on Screenote-side availability.** The OAuth/MCP implementation has opt-in live discovery, dynamic-registration, and preseeded auth-code exchange coverage in `test/integration/screenote_oauth_live_test.rb`. The live `create_screenshot_upload` round-trip is written in `test/integration/screenote_capture_live_test.rb`, but it skips until the Screenote non-interactive test-token endpoint URL, secret, and project id are provided. As of 2026-06-22 the upload tool's request/response contract is covered in CI by `test_call_tool_create_screenshot_upload_round_trips_through_http_seam` (`test/unit/screenote/mcp_client_test.rb`) through the FakeHttp seam; the remaining gap is narrowed to proving the *signed upload* against a real Screenote bearer, which still requires the blocked live endpoint.
@@ -178,7 +197,7 @@ evidence closing the following June 16 gaps.
 
 ## Release install follow-ups
 
-Latest refresh (2026-07-10): v0.4.1 release-prep source is synchronized in
+Latest refresh (2026-07-17): v0.4.3 release-prep source is synchronized in
 `lib/hive.rb`, both lockfiles, README/install URLs, the changelog, and the
 release-facing wiki pages. This source commit does not itself prove the public
 tag, signed gem/assets, Homebrew/AUR updates, or multi-architecture hivebox
@@ -187,10 +206,10 @@ Historical commit `54fd3455` still provides commit-message evidence for the
 native arm64 GHCR smoke against `ghcr.io/ivankuznetsov/hivebox:0.3.1`.
 Dependency lock uncertainty is unchanged: the root bundle has
 `concurrent-ruby` 1.3.7 and Brakeman 8.0.5, while `web/Gemfile.lock` resolves
-`concurrent-ruby` 1.3.6 and Brakeman 8.0.4; v0.4.1 synchronizes only the local
+`concurrent-ruby` 1.3.6 and Brakeman 8.0.4; v0.4.3 synchronizes only the local
 `hive-cli` path-gem version in that independently resolved web bundle.
 
-1. **Release tag trust remains the main release-channel hardening gap.** Homebrew and AUR publishing are implemented and public install docs now route macOS users to the tap and Arch users to `yay -S hive-bin` (see ADR-032 in [[decisions]], `docs/RELEASING.md`, `README.md`, and `install.md`). The remaining trust gap is that release automation signs and publishes whatever a `vX.Y.Z` tag points at; a GitHub `v*` tag-protection ruleset and/or signed git-tag verification remains the compensating control to record before considering the release chain fully hardened.
+1. **Release tag creation is protected, while signed git-tag verification remains deferred.** Homebrew and AUR publishing are implemented and public install docs route macOS users to the tap and Arch users to `yay -S hive-bin` (see ADR-032 in [[decisions]], `docs/RELEASING.md`, `README.md`, and `install.md`). The live repository has an active `v*` tag ruleset restricting creation, update, deletion, and non-fast-forward changes to the configured repository-role bypass. Release automation still publishes the commit selected by an authorized tag without independently verifying a maintainer cryptographic git-tag signature.
 2. **macOS x86_64 install.sh support remains unsupported.** Current `install.sh` still accepts only `darwin-arm64` on macOS and glibc Linux `x86_64`/`aarch64`; a future follow-up can add best-effort Rosetta behavior once the release smoke matrix covers it.
 3. **Claude/Codex/Pi marketplace publishing is still a companion-package follow-up.** Claude/Codex/Pi marketplace install commands are documented in `install.md` and [[operating]], but agents must not run those commands until `ivankuznetsov/hive-skills` is actually published. This is a separate external publish step from the in-tree OpenClaw bundle in entry 4 below.
 4. **OpenClaw ClawHub listing is published; scan completion evidence is partial.** `openclaw/skills/hive/` is the only public OpenClaw skill source. It publishes to ClawHub as `hive-cli` at `https://clawhub.ai/ivankuznetsov/hive-cli`, installs a slash command named `/hive`, and handles all workflows as `/hive ...` arguments. `/hive setup` guides first-use Hive CLI install/verification, daemon install, and optional project init. The skill now documents `/hive wiki compile-log --check` as the read-only wiki changelog verification path, but no checked-in artifact proves that an installed OpenClaw session delegated that specific subcommand. The public `hive` slug is owned by another publisher, so Hive intentionally uses `hive-cli`; shortcut listings such as `hive-plan`, `hive-work`, or `hive-babysit` are not part of the public surface. The 2026-06-07 wiki log records `clawhub inspect hive-cli --json` reporting `latest: 0.1.1` and clean moderation fields, but also records `clawhub scan --slug hive-cli --version 0.1.1 --json` hanging without returning; no checked-in artifact independently proves a completed scan command.
@@ -202,6 +221,10 @@ Dependency lock uncertainty is unchanged: the root bundle has
 3. **Two patterns for marker writes** — `Markers.set` (now uses flock + tempfile-rename atomic write) vs the agent writing into the state file via `Edit`/`Write`. The orchestrator now owns the terminal marker after every stage (the reviewer template explicitly does not write `task.md`), so concurrent-write races on the state file should not arise during normal flow. The remaining unprotected case is a user editing the state file in vim/VSCode while AGENT_WORKING — documented as "don't do that" in the README.
 
 ## Open enhancements
+
+- **Ordinary-patrol alpha weights are Hive-corpus calibrated, not yet cross-project calibrated.** The 0–100 scorer, semantic clustering, component cooldown, and proof gates are language-neutral, but the empirical audit behind the default threshold used 218 generated PRs from this repository. No checked-in evidence yet compares acceptance, duplicate rate, surface diversity, or delivered weighted alpha across unrelated Python, TypeScript, Go, Rust, JVM, infrastructure, or mixed-language projects. Persisted immutable finding/selection/outcome metadata now makes that calibration possible; a future evaluation should tune weights from several repositories without using raw patrol count as a positive signal for already-overpatrolled surfaces.
+
+- **Ordinary-patrol exact publication recovery is locally pinned, not live-smoked.** Unit/integration coverage now binds scan, proof, branch push, PR identity, and review handoff to exact Git SHAs; uses expected-OID leases; and reuses the validated patch after a handoff failure. No disposable hosted-repository run has yet advanced the default branch during ordinary-patrol publication or failed/retried the real GitHub `6-review` handoff, so remote-provider race behavior remains proven by fake-`gh` contracts rather than a live trace.
 
 - **Generic workflows have no dedicated stale/error resting-marker surface** — `TaskAction#generic_action`'s `else` arm classifies every non-`{complete,waiting,none}` marker as `generic_ready_to_run` / `ready_to_run` ("Ready to run") with no diagnostic, so a future non-coding workflow that invents a stale/error-style resting marker (other than `:error`/`:agent_working`, which the universal overrides already catch) would read as "ready to run" with no signal, unlike the coding path's dedicated stale/error arms. Dormant today for production workflows; a future descriptor-workflow follow-up should wire a generic error/stale surface without changing coding's bespoke action map. See [[modules/task_action]].
 
@@ -285,6 +308,63 @@ controller-owned limits while preserving controller identity and existing
 in-flight accounting. A live daemon running a release containing the fix has
 not yet repeated the same 3→4 reload and dispatched the fourth task without a
 restart; capture that daemon-log sequence after deployment to close this gap.
+
+## Architecture-patrol remote recovery is locally pinned, not live-smoked (2026-07-11)
+
+The v2 architecture-patrol lifecycle has fake-`gh`, unit, and integration
+coverage for immutable merge intake, language-neutral discovery, durable
+feature checkpoints, dead-owner claim recovery, isolated fixes, issue routing,
+creation intents, exact repository/branch reconciliation, mandatory `6-review`
+handoff, and read-only provider enforcement. This refresh did not run a
+disposable live GitHub or GitHub Enterprise repository through branch push, PR
+creation, issue creation, open/closed reconciliation, crash-after-intent
+recovery, and handoff creation. Until that smoke exists, the checked-in tests
+prove Hive's local state machine and command contracts, not the complete hosted
+provider behavior under real network ambiguity.
+
+## Non-Claude patrol in-flight token enforcement needs live stream fixtures (2026-07-16)
+
+Claude 2.1.179 patrol logs and focused process-group tests prove that nested
+`message_start` usage plus cumulative `message_delta` output can stop a running
+agent at `max_tokens_per_agent`. Codex and Pi terminal totals are parsed, while
+current Grok streaming JSON exposes no counts, but representative live interim
+usage streams for those three profiles have not been captured. Until they are,
+Hive can mark a terminal-total run over-limit but cannot promise an early token
+interrupt for that provider; launch ceilings and wall-clock timeouts remain the
+provider-independent bounds. Capture real streams before adding profile-specific
+interim accounting so cumulative events are not accidentally double-counted.
+
+## Patrol provider-event ceilings remain event-granular (2026-07-16)
+
+Live Claude patrol sampling showed that provider-owned startup context can be
+charged before Hive receives its first measurable usage event. Hive now refuses
+a patrol launch unless the remaining allowance covers Claude's conservative
+20,000-token initial-context reserve plus one token per prompt byte, and a
+three-turn/output-complete boundary prevents an unnecessary follow-up after the
+artifact is written. This closes the previously observed unbounded pre-event
+launch and extra-response paths, but it cannot make provider telemetry
+continuous: a single usage event can still cross the configured token ceiling
+before Hive can send TERM. The exact provider context/tokenization is not a
+stable local API, so the reserve is deliberately conservative rather than an
+exact forecast. Recalibrate from captured streams if Claude materially changes
+its headless context or event cadence.
+
+## Four incident e2e fixtures remain sibling-gated (2026-07-17)
+
+All six production-incident sequences are synthetic and parseable. The #9771
+plan-only dependency and repository-routing fixtures now execute as ordinary
+green results against the merged fail-closed contracts. Four remain visible as
+pending entries rather than claimed passes because the current tree does not expose the exact sibling-owned
+contracts needed to activate them: #9767's durable attempt lease and adoption
+reason, #9768's generation identity and reconciliation reason, #9769's
+finalize lifecycle terminal reason, and #9770's retry-owner evidence and bounded
+terminal reason. The harness deliberately does not infer those formats or strings.
+
+Close this gap one fixture at a time after the corresponding sibling lands:
+replace its activation guard with real CLI reconciliation and exact
+state/reason assertions, remove `pending: true`, and keep the report-measured
+runtime below five seconds. Full incident coverage is not complete until the
+incident report contains six ordinary green results and zero pending entries.
 
 ## Areas the wiki could be expanded
 

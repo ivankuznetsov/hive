@@ -75,12 +75,17 @@ module Hive
       CUSTOM_WORKFLOW_HINT_MESSAGE = "custom workflows live in this project — author one with `#{CUSTOM_WORKFLOW_HINT_COMMAND}`".freeze
 
       def initialize(project_path, force: false, json: false, prompts: nil,
-                     workflow: nil, new_workflow: nil, workflow_input: $stdin, workflow_output: $stderr)
+                     workflow: nil, new_workflow: nil, refactor_patrol: nil,
+                     workflow_input: $stdin, workflow_output: $stderr)
         @project_path = File.expand_path(project_path)
         @force = force
         @json = json
         @workflow_name = workflow
         @new_workflow = new_workflow
+        unless refactor_patrol.nil? || [ true, false ].include?(refactor_patrol)
+          raise ArgumentError, "refactor_patrol must be true, false, or nil"
+        end
+        @refactor_patrol = refactor_patrol
         @workflow_input = workflow_input
         @workflow_output = workflow_output
         # Optional Prompts instance for testability. Tests inject a
@@ -103,6 +108,7 @@ module Hive
         validate_clean_tree! unless @force
 
         ops = Hive::GitOps.new(@project_path)
+        reject_existing_refactor_patrol_selector!(ops)
         if @new_workflow
           init_with_new_workflow(ops)
           return
@@ -136,7 +142,11 @@ module Hive
         # so a re-run of `hive init` proceeds normally.
         answers = collect_prompt_answers
         project_config_content = render_project_config(ops, answers: answers, default_workflow: workflow_choice.descriptor.id)
-        entry = initialize_project_state(ops, content: project_config_content)
+        entry = initialize_project_state(
+          ops,
+          content: project_config_content,
+          workflow: workflow_choice.descriptor.id
+        )
 
         if @json
           emit_json_summary(entry: entry, ops: ops, answers: answers, workflow: workflow_choice.descriptor.id)
@@ -166,6 +176,15 @@ module Hive
         else
           scaffold_and_bind_fresh(ops, id)
         end
+      end
+
+      def reject_existing_refactor_patrol_selector!(ops)
+        return if @refactor_patrol.nil? || !ops.hive_state_branch_exists?
+
+        selector = @refactor_patrol ? "--refactor-patrol" : "--no-refactor-patrol"
+        raise Hive::ConfigError,
+              "hive init #{selector} is only valid for a fresh project; " \
+              "edit refactor_patrol.enabled in #{File.join(ops.hive_state_path, 'config.yml')} for an existing project"
       end
 
       def scaffold_and_bind_fresh(ops, id)
@@ -269,6 +288,7 @@ module Hive
         # `:implicit` re-init already raised AlreadyInitialized in `call` before
         # reaching here, so this path only sees :flag / :prompt — both express a
         # default-workflow intent and run the (idempotent) rebind.
+        install_builtin_workflow_runtime!(ops, workflow_choice.descriptor.id)
         update_existing_default_workflow!(ops, workflow_choice.descriptor.id)
         Hive::Config.register_project(name: File.basename(@project_path), path: @project_path)
         if @json
@@ -477,7 +497,7 @@ module Hive
         end
       end
 
-      def initialize_project_state(ops, content:, &after_bootstrap)
+      def initialize_project_state(ops, content:, workflow: nil, &after_bootstrap)
         rollback_on_failure = false
         side_effect_snapshot = capture_init_side_effect_snapshot
         begin
@@ -485,6 +505,7 @@ module Hive
           init_result = ops.hive_state_init
           rollback_on_failure = init_result == :created
           write_per_project_config(ops, content: content)
+          install_builtin_workflow_runtime!(ops, workflow)
           ops.add_hive_state_to_master_gitignore!
           Hive::LlmWikiBootstrap.install!(@project_path, post_commit_hook: false, scheduler: false)
           ops.commit_llm_wiki_bootstrap!
@@ -497,6 +518,12 @@ module Hive
           rollback_partial_init(ops, side_effect_snapshot: side_effect_snapshot) if rollback_on_failure
           raise
         end
+      end
+
+      def install_builtin_workflow_runtime!(ops, workflow_id)
+        return unless workflow_id.to_s == "bench"
+
+        Hive::Workflows::Bench.install_runtime!(ops)
       end
 
       def rollback_partial_init(ops, side_effect_snapshot: nil)
@@ -807,6 +834,7 @@ module Hive
           "patrol_mode" => answers.fetch("patrol_mode", Hive::Commands::Init::Prompts::DEFAULT_PATROL_MODE),
           "triage_bias" => answers.fetch("triage_bias", Hive::Commands::Init::Prompts::DEFAULT_TRIAGE_BIAS),
           "adhoc_auto_fix" => answers.fetch("adhoc_auto_fix", Hive::Commands::Init::Prompts::DEFAULT_ADHOC_AUTO_FIX),
+          "refactor_patrol_enabled" => answers.fetch("refactor_patrol_enabled"),
           "budgets" => answers.fetch("budgets"),
           "timeouts" => answers.fetch("timeouts"),
           "daemon_enabled" => answers.fetch("daemon_enabled", true),
@@ -876,6 +904,7 @@ module Hive
           [ "hive state",     ops.hive_state_path ],
           [ "worktree root",  worktree_root ],
           [ "ad-hoc auto-fix", answers.fetch("adhoc_auto_fix", Hive::Commands::Init::Prompts::DEFAULT_ADHOC_AUTO_FIX) ? "enabled" : "disabled" ],
+          [ "architecture patrol", answers.fetch("refactor_patrol_enabled") ? "enabled" : "disabled" ],
           [ "daemon",         answers.fetch("daemon_enabled", true) ? "enabled" : "disabled" ],
           [ "babysitter",     answers.fetch("babysitter_enabled", true) ? "enabled" : "disabled" ]
         ]
@@ -908,8 +937,15 @@ module Hive
 
       def collect_prompt_answers
         summary_io = @json ? StringIO.new : $stdout
-        prompts = @prompts || Hive::Commands::Init::Prompts.new(input: $stdin, output: $stderr, summary_io: summary_io)
-        prompts.collect
+        prompts = @prompts || Hive::Commands::Init::Prompts.new(
+          input: $stdin,
+          output: $stderr,
+          summary_io: summary_io,
+          refactor_patrol_enabled: @refactor_patrol
+        )
+        answers = prompts.collect
+        answers["refactor_patrol_enabled"] = @refactor_patrol unless @refactor_patrol.nil?
+        answers
       rescue Hive::Commands::Init::Prompts::Aborted => e
         # Distinct exit code (USAGE / 64) from generic crashes (GENERIC / 1)
         # so a scripted agent can tell "user explicitly declined" from
@@ -1147,6 +1183,7 @@ module Hive
       # Hive::Commands::Init::Prompts (planning_agent / claude_mode /
       # claude_permission_mode / development_agent / enabled_reviewers /
       # patrol_reviewers / patrol_mode / triage_bias / adhoc_auto_fix /
+      # refactor_patrol_enabled /
       # budgets / timeouts / daemon_enabled / babysitter_enabled /
       # daemon_autostart). The single source of truth
       # for the answers hash is `Prompts#collect`; this binding never invents
@@ -1178,6 +1215,7 @@ module Hive
           @patrol_mode = answers.fetch("patrol_mode")
           @triage_bias = answers.fetch("triage_bias")
           @adhoc_auto_fix = answers.fetch("adhoc_auto_fix")
+          @refactor_patrol_enabled = answers.fetch("refactor_patrol_enabled")
           @budgets = required_limit_answers(answers.fetch("budgets"), "budgets")
           @timeouts = required_limit_answers(answers.fetch("timeouts"), "timeouts")
           @daemon_enabled = answers.fetch("daemon_enabled")
@@ -1189,7 +1227,8 @@ module Hive
                     :default_workflow,
                     :planning_agent, :claude_mode, :claude_permission_mode,
                     :claude_model, :claude_effort, :development_agent,
-                    :enabled_reviewers, :patrol_reviewers, :patrol_mode, :triage_bias, :adhoc_auto_fix, :budgets, :timeouts,
+                    :enabled_reviewers, :patrol_reviewers, :patrol_mode, :triage_bias, :adhoc_auto_fix,
+                    :refactor_patrol_enabled, :budgets, :timeouts,
                     :daemon_enabled, :babysitter_enabled, :daemon_autostart
 
         def binding_for_erb

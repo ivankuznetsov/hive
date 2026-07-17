@@ -3,8 +3,8 @@ title: 3-plan stage
 type: stage
 source: lib/hive/stages/plan.rb, templates/plan_prompt.md.erb
 created: 2026-04-25
-updated: 2026-06-11
-tags: [stage, plan, llm-wiki, ce-plan]
+updated: 2026-07-16
+tags: [stage, plan, llm-wiki, ce-plan, dependencies]
 ---
 
 **TLDR**: Agent reads `brainstorm.md`, runs Hive's configured wiki-first planning skill to generate a structured `plan.md`, and waits for human review/edits via `<!-- WAITING -->` until ready (`<!-- COMPLETE -->`). The default is agent-aware: Claude uses `/plan`, Codex uses `/llm-wiki:wiki-plan`, and Pi receives `/skill:wiki-plan` after profile formatting.
@@ -31,6 +31,21 @@ tags: [stage, plan, llm-wiki, ce-plan]
 
 Agent must not modify any file other than `plan.md`. Must not execute code in the project (execution happens in 4-execute).
 
+If planning identifies a known prerequisite, the agent writes it as optional
+top-level YAML frontmatter using the same scalar syntax as task metadata:
+
+```yaml
+---
+depends_on: api:base-task-260716-abcd
+---
+```
+
+`meta.yml` remains authoritative. Plan frontmatter is a drift assertion, not a
+second scheduling edge: it may be absent even when metadata has a dependency,
+but when present it must exactly match metadata after normalization. A
+plan-only, mismatched, or malformed declaration becomes an admission error at
+status/run/forward-approve. Hive does not inspect plan prose for ordering.
+
 If a daemon stop or killed agent leaves a zero-byte `plan.md`, or a missing `plan.md` after a `plan-*.log` shows the plan agent started, status classifies the row as `Error` with `PLAN_MISSING_OUTPUT` instead of `Needs your input`. A freshly promoted plan folder with no `plan.md` and no plan-run log still remains `Needs your input` because it is valid and runnable. `PLAN_MISSING_OUTPUT` is a synthetic markerless error, so recovery is a direct rerun: `hive plan ... --from 3-plan`; there is no `ERROR` marker to clear.
 
 When the plan agent did write a recoverable terminal `ERROR` marker,
@@ -55,6 +70,7 @@ classifies as markerless `:error` and the daemon policy would otherwise skip.
 ## Tests
 
 - `test/integration/run_plan_test.rb`.
+- `test/unit/plan_frontmatter_test.rb` and `test/integration/dependency_admission_test.rb` pin structured dependency parsing and plan/metadata drift.
 
 ## Backlinks
 

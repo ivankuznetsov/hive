@@ -41,7 +41,7 @@ absolute-path invocations bypass it. Use the bare `git` and `gh`
 commands so the overlay can enforce this read allowlist (subject to its
 safe-option and host checks):
 
-- git branch, cat-file, describe, diff, grep, log, ls-files, ls-tree,
+- git branch, cat-file, describe, grep, log, ls-files, ls-tree,
   merge-base, rev-list, rev-parse, show, status, remote, and config reads
 - gh api GET reads; gh auth status; gh pr checks/diff/list/status/view;
   gh run list/view/watch; gh repo view; and gh workflow list/view

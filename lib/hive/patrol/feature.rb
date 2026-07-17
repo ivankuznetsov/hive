@@ -4,6 +4,10 @@ module Hive
       :id, :kind, :entrypoints, :owned_files, :context_files, :tests,
       keyword_init: true
     ) do
+      def documentation?
+        kind.to_s == "documentation"
+      end
+
       def to_h
         {
           "id" => id,

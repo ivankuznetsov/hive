@@ -3,7 +3,7 @@ title: hive workflow
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/workflow.rb, templates/workflows/
 created: 2026-06-21
-updated: 2026-06-24
+updated: 2026-07-13
 tags: [command, workflow, authoring]
 ---
 
@@ -37,7 +37,7 @@ writes:
 
 It refuses to overwrite an existing descriptor, instruction directory, or
 instruction file. `ID` must match the descriptor safe-slug rule and cannot be a
-built-in workflow id such as `coding` or `content`.
+built-in workflow id such as `coding`, `content`, or `bench`.
 
 On success, the command validates the generated descriptor with
 `Hive::Workflows::DescriptorParser`, resets the project workflow cache, commits

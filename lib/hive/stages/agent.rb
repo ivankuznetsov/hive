@@ -1,3 +1,4 @@
+require "hive/agent_limit"
 require "hive/markers"
 require "hive/stages/base"
 require "hive/workflows/registry"
@@ -58,23 +59,39 @@ module Hive
         )
 
         marker = Hive::Markers.current(output_path)
-        # A preflight/version failure returns `{status: :error}` without writing
-        # a marker, while a spawned state-file agent can return the same envelope
-        # after writing a more specific marker (limits_reached, timeout, etc.).
-        # Synthesize agent_preflight_failed only when the terminal marker is
-        # unchanged from before the spawn. This still replaces stale
-        # waiting/complete markers on genuine preflight failures without
-        # clobbering fresh retry metadata written by Hive::Agent.
         marker_unchanged = marker.name == marker_before_spawn.name && marker.raw == marker_before_spawn.raw
-        if result.is_a?(Hash) && result[:status] == :error && marker_unchanged
-          Hive::Markers.set(
-            output_path, :error,
-            reason: "agent_preflight_failed",
-            message: result[:error_message].to_s[0, 200]
-          )
+        # `spawn_agent` returns `{status: :error}` for both preflight failures
+        # and spawned failures. A changed marker is authoritative agent output;
+        # preserve it rather than relabeling it as a preflight failure. If the
+        # marker is unchanged, classify a provider quota envelope before the
+        # generic preflight fallback so the daemon can honor `retry_after`.
+        if result.is_a?(Hash) && result[:status] == :error
+          if Hive::AgentLimit.held?(marker.name, marker.attrs)
+            # The agent already wrote the authoritative quota marker.
+          elsif !marker_unchanged
+            # The agent wrote another specific terminal marker (for example a
+            # timeout or exit-code error); its recovery metadata wins.
+          elsif limit_error_envelope?(result)
+            Hive::Markers.set(
+              output_path, :error,
+              reason: "limits_reached",
+              provider: profile.name,
+              message: result[:error_message].to_s[0, 200],
+              retry_after: Hive::AgentLimit.retry_after
+            )
+          else
+            # A preflight/version failure writes no marker. Replace any stale
+            # marker from a prior run so the new failure stays observable.
+            Hive::Markers.set(
+              output_path, :error,
+              reason: "agent_preflight_failed",
+              message: result[:error_message].to_s[0, 200]
+            )
+          end
           marker = Hive::Markers.current(output_path)
         end
-        { commit: action_for(marker.name), status: marker.name }
+        commit = Hive::AgentLimit.held?(marker.name, marker.attrs) ? "limits_reached" : action_for(marker.name)
+        { commit: commit, status: marker.name }
       end
 
       def render_prompt(task, _cfg, stage, profile:, instruction_body:)
@@ -125,6 +142,12 @@ module Hive
             "## #{File.basename(path)}\n(unreadable: #{e.class})"
           end
         end.join("\n\n")[0, 8000]
+      end
+
+      def limit_error_envelope?(result)
+        Hive::AgentLimit.limit_reached?(result[:limit_text].to_s) ||
+          Hive::AgentLimit.from_limit?(result[:error_message].to_s) ||
+          Hive::AgentLimit.limit_reached?(result[:error_message].to_s)
       end
 
       def action_for(marker_name)

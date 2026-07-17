@@ -486,7 +486,30 @@ class StagesAgentTest < Minitest::Test
     end
   end
 
-  def test_run_preserves_retryable_limit_marker_written_by_agent
+  def test_run_preserves_provider_limit_error_envelope_as_retryable_quota_marker
+    with_tmp_dir do |project|
+      task = task_for(project, "plan")
+
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, lambda { |_task, **_kwargs|
+        {
+          status: :error,
+          error_message: "limits reached for claude: You've hit your session limit"
+        }
+      }) do
+        result = Hive::Stages::Agent.run!(task, {})
+
+        marker = Hive::Markers.current(task.state_file)
+        assert_equal({ commit: "limits_reached", status: :error }, result)
+        assert_equal :error, marker.name
+        assert_equal "limits_reached", marker.attrs["reason"]
+        assert_equal "claude", marker.attrs["provider"]
+        assert_includes marker.attrs["message"], "limits reached for claude"
+        assert Time.parse(marker.attrs.fetch("retry_after")) > Time.now.utc
+      end
+    end
+  end
+
+  def test_run_preserves_retryable_limit_marker_written_over_stale_marker
     with_tmp_dir do |project|
       task = task_for(project, "plan")
       Hive::Markers.set(task.state_file, :error, reason: "agent_preflight_failed")
@@ -505,9 +528,53 @@ class StagesAgentTest < Minitest::Test
         result = Hive::Stages::Agent.run!(task, {})
 
         marker = Hive::Markers.current(task.state_file)
-        assert_equal({ commit: "error", status: :error }, result)
+        assert_equal({ commit: "limits_reached", status: :error }, result)
         assert_equal "limits_reached", marker.attrs["reason"]
         assert_equal retry_after, marker.attrs["retry_after"]
+      end
+    end
+  end
+
+  def test_run_does_not_overwrite_quota_marker_written_by_agent
+    with_tmp_dir do |project|
+      task = task_for(project, "plan")
+      retry_after = "2026-07-13T23:00:00Z"
+
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, lambda { |spawned_task, **_kwargs|
+        Hive::Markers.set(
+          spawned_task.state_file, :error,
+          reason: "limits_reached",
+          message: "limits reached for claude: session limit",
+          retry_after: retry_after
+        )
+        { status: :error, error_message: "limits reached for claude: session limit" }
+      }) do
+        result = Hive::Stages::Agent.run!(task, {})
+
+        marker = Hive::Markers.current(task.state_file)
+        assert_equal({ commit: "limits_reached", status: :error }, result)
+        assert_equal "limits_reached", marker.attrs["reason"]
+        assert_equal retry_after, marker.attrs["retry_after"]
+        refute marker.attrs.key?("provider"), "preserving the marker must not synthesize or replace attrs"
+      end
+    end
+  end
+
+  def test_run_does_not_relabel_another_fresh_agent_error_as_preflight_failure
+    with_tmp_dir do |project|
+      task = task_for(project, "plan")
+      Hive::Markers.set(task.state_file, :complete)
+
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, lambda { |spawned_task, **_kwargs|
+        Hive::Markers.set(spawned_task.state_file, :error, reason: "timeout", timeout_sec: 300)
+        { status: :error, error_message: "agent timed out" }
+      }) do
+        result = Hive::Stages::Agent.run!(task, {})
+
+        marker = Hive::Markers.current(task.state_file)
+        assert_equal({ commit: "error", status: :error }, result)
+        assert_equal "timeout", marker.attrs["reason"]
+        assert_equal "300", marker.attrs["timeout_sec"]
       end
     end
   end

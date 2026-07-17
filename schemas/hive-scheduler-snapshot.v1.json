@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:hive:schema:scheduler-snapshot:v1",
+  "title": "Hive owner-private scheduler snapshot (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "schema_version", "daemon_instance_id", "daemon_state",
+    "heartbeat_at", "poll_interval_sec", "configuration_fingerprint",
+    "tick_health", "unavailable_live_claims", "tasks", "fleet"
+  ],
+  "properties": {
+    "schema": { "const": "hive-scheduler-snapshot" },
+    "schema_version": { "const": 1 },
+    "daemon_instance_id": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "daemon_state": { "type": "string", "enum": ["running", "stopped"] },
+    "heartbeat_at": { "type": "string", "format": "date-time" },
+    "poll_interval_sec": { "type": "integer", "minimum": 1 },
+    "configuration_fingerprint": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "tick_health": { "type": "string", "enum": ["ok", "degraded"] },
+    "unavailable_live_claims": {
+      "type": "array",
+      "maxItems": 20,
+      "uniqueItems": true,
+      "items": { "type": "string", "maxLength": 80 }
+    },
+    "tasks": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": { "$ref": "#/$defs/Candidate" }
+    },
+    "fleet": { "$ref": "#/$defs/Fleet" }
+  },
+  "$defs": {
+    "Owner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project", "task_slug", "stage", "task_generation", "attempt_id", "attempt_state"],
+      "properties": {
+        "project": { "type": "string", "minLength": 1 },
+        "task_slug": { "type": "string", "minLength": 1 },
+        "stage": { "type": "string", "minLength": 1 },
+        "task_generation": { "type": "integer", "minimum": 0 },
+        "attempt_id": { "type": "string", "minLength": 1 },
+        "attempt_state": { "type": "string", "enum": ["launching", "running"] }
+      }
+    },
+    "Action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "text", "command", "requires_confirmation", "preconditions"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["wait", "answer", "repair", "retry", "manual", "no_safe_action"] },
+        "text": { "type": "string", "maxLength": 500 },
+        "command": { "type": ["string", "null"], "maxLength": 1000 },
+        "requires_confirmation": { "type": "boolean" },
+        "preconditions": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["stage", "task_generation", "attempt_id"],
+          "properties": {
+            "stage": { "type": "string" },
+            "task_generation": { "type": "integer", "minimum": 0 },
+            "attempt_id": { "type": ["string", "null"] }
+          }
+        }
+      }
+    },
+    "Candidate": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "project", "task_slug", "stage", "task_generation", "attempt_id",
+        "reason", "observed_at", "eligible", "queue_position", "action"
+      ],
+      "properties": {
+        "project": { "type": "string", "minLength": 1 },
+        "task_id": { "type": ["integer", "string", "null"] },
+        "task_slug": { "type": "string", "minLength": 1 },
+        "workflow": { "type": ["string", "null"] },
+        "stage": { "type": "string", "minLength": 1 },
+        "task_generation": { "type": "integer", "minimum": 0 },
+        "attempt_id": { "type": ["string", "null"] },
+        "reason": { "type": "string", "minLength": 1 },
+        "observed_at": { "type": "string", "format": "date-time" },
+        "eligible": { "type": "boolean" },
+        "queue_position": { "type": ["integer", "null"], "minimum": 1 },
+        "action": { "$ref": "#/$defs/Action" }
+      }
+    },
+    "Fleet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["configured_slots", "owners", "candidates"],
+      "properties": {
+        "configured_slots": { "type": "integer", "minimum": 0 },
+        "owners": { "type": "array", "items": { "$ref": "#/$defs/Owner" } },
+        "candidates": { "type": "array", "items": { "$ref": "#/$defs/Candidate" } }
+      }
+    }
+  }
+}

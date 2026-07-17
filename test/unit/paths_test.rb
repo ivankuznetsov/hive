@@ -36,6 +36,8 @@ class PathsTest < Minitest::Test
         assert_equal File.join(attempts, "logs"), Hive::Paths.attempt_logs_root
         assert_equal File.join(attempts, "outputs"), Hive::Paths.attempt_outputs_root
         assert_equal File.join(attempts, "generation-locks"), Hive::Paths.attempt_generation_locks_root
+        assert_equal File.join(dir, "state", "hive", "scheduler", "snapshot.v1.json"),
+                     Hive::Paths.scheduler_snapshot_path
       end
     end
   end

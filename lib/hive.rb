@@ -76,7 +76,9 @@ module Hive
       # chat. See `Hive::Daemon::DispatchResultQueue` (ADV-1).
       "hive-dispatch-result" => 2,
       # Internal source-of-truth record for durable task-stage ownership.
-      "hive-attempt" => 1
+      "hive-attempt" => 1,
+      # Owner-private replaceable heartbeat and volatile scheduling evidence.
+      "hive-scheduler-snapshot" => 1
     }.freeze
 
     # Closed enum of Diagnostic.generated_by values accepted by the

@@ -19,6 +19,7 @@ module Hive
       reconciliation
       shadow_audit
       operator_action
+      scheduling_observed
     ].freeze
     LEGACY_ATTEMPT_ID = "legacy".freeze
     JOURNAL_BASENAME = "events.jsonl".freeze
@@ -93,7 +94,9 @@ module Hive
         unless AUTHORITATIVE_EVENT_TYPES.include?(record["event_type"])
           raise InvalidRecord, "unknown authoritative event_type #{record['event_type'].inspect}"
         end
-        require_non_empty!(record, %w[event_id event_type occurred_at stage attempt_id reason])
+        required = %w[event_id event_type occurred_at stage reason]
+        required << "attempt_id" unless record["event_type"] == "scheduling_observed"
+        require_non_empty!(record, required)
         validate_time!(record["occurred_at"], "occurred_at")
         validate_time!(record["observed_at"], "observed_at") if record["observed_at"]
         task = record["task"]
@@ -122,6 +125,9 @@ module Hive
       end
 
       def validate_attempt!(record)
+        if record["event_type"] == "scheduling_observed" && record["attempt_id"].nil?
+          return
+        end
         if record["attempt_id"] == LEGACY_ATTEMPT_ID
           unless record["event_type"] == "legacy_baseline" && record["task_generation"].zero?
             raise AttemptMismatch, "legacy attempt identity is valid only for a generation-0 baseline"

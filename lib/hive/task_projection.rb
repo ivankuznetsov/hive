@@ -80,6 +80,7 @@ module Hive
         replacement = selected[fact["condition"]] || family_replacement(fact, selected)
         supersede(fact, replacement, generation, commit_generation, head_sha)
       end
+      scheduling = scheduling_projection(generation)
 
       authoritative = authoritative_records
       last = authoritative.last
@@ -106,6 +107,7 @@ module Hive
           "current" => current.map { |fact| fact.reject { |key, _| key == "journal_index" } },
           "history" => history.map { |fact| fact.reject { |key, _| key == "journal_index" } }
         },
+        "scheduling" => scheduling,
         "evidence" => current.flat_map { |fact| fact["evidence"] }.uniq,
         "gates" => {},
         "provenance" => {
@@ -179,6 +181,29 @@ module Hive
 
     def current_generation_from_events
       authoritative_records.filter_map { |record| record["task_generation"] if record["task_generation"].is_a?(Integer) }.max || 0
+    end
+
+    def scheduling_projection(generation)
+      observations = authoritative_records.each_with_index.filter_map do |record, index|
+        next unless record["event_type"] == "scheduling_observed"
+
+        payload = record.fetch("payload")
+        observation = deep_copy(payload.fetch("observation"))
+        observation["semantic_signature"] = payload.fetch("semantic_signature")
+        observation["event_id"] = record.fetch("event_id")
+        observation["journal_index"] = index
+        observation
+      end
+      current = observations.select { |entry| entry["task_generation"] == generation }
+                            .max_by { |entry| entry.fetch("journal_index") }
+      history = observations.reject { |entry| entry.equal?(current) }.map do |entry|
+        reason = entry["task_generation"] == generation ? "newer_observation" : "older_task_generation"
+        entry.merge("superseded_reason" => reason)
+      end
+      {
+        "current" => current&.reject { |key, _| key == "journal_index" },
+        "history" => history.map { |entry| entry.reject { |key, _| key == "journal_index" } }
+      }
     end
 
     def current_commit_generation(generation)

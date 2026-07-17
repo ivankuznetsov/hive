@@ -51,6 +51,12 @@ module Hive
       File.join(attempts_root, "generation-locks")
     end
 
+    # Replaceable, owner-private last-live scheduling evidence. Durable task
+    # and attempt authority remains in task journals and attempts/v1.
+    def scheduler_snapshot_path
+      File.join(state_home, "scheduler", "snapshot.v1.json")
+    end
+
     def bin_home
       # bin_home intentionally ignores HIVE_HOME — install.sh places
       # the `hive`/`hv` symlinks under XDG_BIN_HOME (or ~/.local/bin),

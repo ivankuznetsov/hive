@@ -61,6 +61,18 @@ class RetryCoordinatorTest < Minitest::Test
       assert_raises(Hive::Daemon::StaleRetryGeneration) do
         coordinator.authorize(expected_generation: 2)
       end
+
+      successor = store.create_launching(
+        attempt_id: "attempt-2", request_id: "request-2",
+        predecessor_attempt_id: attempt.attempt_id,
+        task_id: "42", project: "demo", task_slug: "durable-task", intended_stage: "4-execute",
+        task_generation: "ownership-1", ownership_generation: "ownership-1", task_input_epoch: 3,
+        progress_token: "progress", provider: "codex", starting_revision: "a" * 40,
+        retry_charge: 0, inherited_outputs: [], launch_timeout_sec: 30, now: NOW
+      )
+      running = coordinator.record_claim(authorization: authorization, attempt_id: successor.attempt_id)
+      assert_equal "running", running.state
+      assert_equal successor.attempt_id, running.current_attempt_id
     end
   end
 

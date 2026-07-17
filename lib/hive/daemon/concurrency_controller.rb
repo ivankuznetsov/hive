@@ -4,8 +4,8 @@ require "date"
 module Hive
   module Daemon
     # In-memory bookkeeper for "may we spawn a child for this
-    # (project, slug) right now?" plus retry / cooldown / quarantine /
-    # daily-rate state across the daemon's lifetime.
+    # (project, slug) right now?" plus daily-rate state across the daemon's
+    # lifetime. Retry state belongs exclusively to RetryCoordinator.
     #
     # The controller is the single load-bearing budget gate inside the
     # daemon. Per-task `.lock` (ADR-007) is the last-resort safety net,
@@ -13,24 +13,8 @@ module Hive
     # in the first place — the controller is what stops 40 enrolled
     # projects from fanning out 40 simultaneous `hive run` children.
     #
-    # State is in-memory only; restart clears everything (cooldowns and
-    # quarantines included). The trade-off is operational: a daemon
-    # crash + restart re-attempts a quarantined task once, which is
-    # safer than persisting bad state across restarts and worse only
-    # when the same task is genuinely permanently broken.
+    # State is in-memory only; durable attempts supply restart-safe capacity.
     class ConcurrencyController
-      # Protective backoff after a WRONG_STAGE exit. WRONG_STAGE usually
-      # means another actor advanced the task or classification raced a
-      # marker change, so backing off avoids retry churn while the next
-      # status scan catches up.
-      WRONG_STAGE_BACKOFF_SEC = 60
-
-      # Transient-failure backoff schedule (seconds). After the Nth
-      # consecutive transient failure on the same (project, slug),
-      # the entry's cooldown becomes the Nth element. Past the end of
-      # the schedule, the entry is quarantined.
-      TRANSIENT_BACKOFF_SCHEDULE = [ 60, 120, 300 ].freeze
-
       attr_reader :max_concurrent_runs, :max_concurrent_per_project,
                   :max_runs_per_day_per_project, :max_concurrent_patrol_scans
 
@@ -60,12 +44,6 @@ module Hive
         @durable_daily_counts = {}
         # [project, Date] → Integer
         @daily_counts = Hash.new(0)
-        # [project, slug] → Time (cooldown expiry)
-        @cooldown_until = {}
-        # [project, slug] → Integer (count of consecutive transient failures)
-        @transient_failures = Hash.new(0)
-        # Set<[project, slug]>
-        @quarantine = Set.new
         # Set<project> (post-CONFIG=78)
         @dropped_projects = Set.new
         # [project, slug] → Time (mtime LAST observed on the state file —
@@ -95,15 +73,10 @@ module Hive
       # work already in flight while keeping waiting rows (`needs_input`,
       # recovery states, etc.) out of the cap.
       # Returns one of :ok | :global_cap | :project_cap | :daily_cap |
-      #   :cooldown | :quarantined | :project_dropped
+      #   :project_dropped
       def can_dispatch?(project:, slug:, now: Time.now,
                         external_global_count: 0, external_project_count: 0)
         return :project_dropped if @dropped_projects.include?(project)
-        return :quarantined     if @quarantine.include?([ project, slug ])
-
-        cooldown_expiry = @cooldown_until[[ project, slug ]]
-        return :cooldown if cooldown_expiry && cooldown_expiry > now
-
         external_global = [ @external_running_global, external_global_count.to_i ].max
         external_project = [ @external_running_by_project[project].to_i, external_project_count.to_i ].max
         # Task caps count only task-kind runs; patrol scans live on their
@@ -264,16 +237,11 @@ module Hive
         persist_dispatch_baselines! if @last_dispatched_mtime.size != before
       end
 
-      # Record a child completion. Side-effects on cooldown / quarantine
-      # / daily-counter depend on exit_code per Hive::ExitCodes:
+      # Record a child completion. Task failures carry no retry policy here;
+      # they are reported to RetryCoordinator by the terminalization path.
       #
-      #   0  SUCCESS              → no cooldown; next stage may dispatch immediately
-      #   3  TASK_IN_ERROR        → no cooldown (marker handles re-entry policy via Policy)
-      #   4  WRONG_STAGE          → 1 min cooldown (race or classifier bug; back off)
-      #   64 USAGE                → quarantine for daemon lifetime
       #   75 TEMPFAIL             → no cooldown, refund daily-rate slot, allow retry
       #   78 CONFIG               → drop the entire project
-      #   1/70/other              → transient: backoff (60/120/300s) then quarantine
       def record_completion(pid:, exit_code:, completed_at: Time.now)
         entry = @running.delete(pid)
         return unless entry
@@ -287,36 +255,14 @@ module Hive
         # is the only bookkeeping the digest needs here.
         return if entry[:kind] == :digest
 
-        key = [ entry[:project], entry[:slug] ]
-
         case exit_code
-        when Hive::ExitCodes::SUCCESS
-          @transient_failures.delete(key)
-        when Hive::ExitCodes::TASK_IN_ERROR
-          @transient_failures.delete(key)
-          # Marker now classifies as recover_stale → Policy returns :skip;
-          # no controller-level quarantine needed.
-        when Hive::ExitCodes::WRONG_STAGE
-          @cooldown_until[key] = completed_at + WRONG_STAGE_BACKOFF_SEC
-        when Hive::ExitCodes::USAGE
-          @quarantine.add(key)
-          @transient_failures.delete(key)
         when Hive::ExitCodes::TEMPFAIL
           # Refund daily-rate slot — TEMPFAIL means we didn't actually
           # do work (lock held by a concurrent runner). The dispatcher
           # will retry next poll once the lock clears.
           dec_daily(entry[:project], entry[:started_at])
-          @transient_failures.delete(key)
         when Hive::ExitCodes::CONFIG
           @dropped_projects.add(entry[:project])
-        else
-          # Transient failures: 1, 70, or any other non-typed code.
-          n = @transient_failures[key] += 1
-          if n > TRANSIENT_BACKOFF_SCHEDULE.size
-            @quarantine.add(key)
-          else
-            @cooldown_until[key] = completed_at + TRANSIENT_BACKOFF_SCHEDULE[n - 1]
-          end
         end
       end
 
@@ -339,10 +285,6 @@ module Hive
 
       def in_flight_count
         @running.size + @external_running_global
-      end
-
-      def quarantined?(project:, slug:)
-        @quarantine.include?([ project, slug ])
       end
 
       def project_dropped?(project)

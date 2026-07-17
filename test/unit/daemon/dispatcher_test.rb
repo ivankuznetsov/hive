@@ -305,6 +305,51 @@ class HiveDaemonDispatcherTest < Minitest::Test
     end
   end
 
+  class FakeRetryCoordinator
+    attr_reader :authorized_generations, :claims, :due_evaluations
+
+    def initialize(authorization:, due_state: "ready")
+      @authorization = authorization
+      @due_state = due_state
+      @authorized_generations = []
+      @claims = []
+      @due_evaluations = 0
+    end
+
+    def evaluate_due
+      @due_evaluations += 1
+      Struct.new(:state).new(@due_state)
+    end
+
+    def authorize(expected_generation:)
+      @authorized_generations << expected_generation
+      @authorization
+    end
+
+    def record_claim(authorization:, attempt_id:)
+      @claims << [ authorization, attempt_id ]
+    end
+  end
+
+  class FakeAuthorizedAttemptDispatcher
+    Attempt = Struct.new(:attempt_id, :task_generation, :state, keyword_init: true)
+    attr_reader :calls
+
+    def initialize
+      @calls = []
+    end
+
+    def dispatch_authorized_request(authorization:, request:, interactive:, now:, on_claim:)
+      @calls << { authorization: authorization, request: request, interactive: interactive, now: now }
+      attempt = Attempt.new(attempt_id: "successor-1", task_generation: authorization.generation,
+                            state: "launching")
+      on_claim.call(attempt)
+      Hive::Attempts::DispatchResult.new(
+        status: :accepted, attempt: attempt, receipt: nil, attach_descriptor: nil, reason: nil
+      )
+    end
+  end
+
   # ── construction helpers ───────────────────────────────────────────────
 
   def make_dispatcher(rows: [], dry_run: false, with_merge_watcher: false,
@@ -314,7 +359,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
                       with_digest_scheduler: false, with_answer_digest_scheduler: false,
                       refactor_patrol_merge_reconciler: nil,
                       refactor_patrol_scheduler: nil, patrol_arbiter: nil,
-                      attempt_dispatcher: nil, attempt_reconciler: nil)
+                      attempt_dispatcher: nil, attempt_reconciler: nil,
+                      retry_coordinator_factory: nil)
     config = {
       "daemon" => {
         "edit_debounce_sec" => 30,
@@ -364,7 +410,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
       dispatch_request_state_home: dispatch_request_state_home,
       dispatch_result_state_home: dispatch_result_state_home,
       attempt_dispatcher: attempt_dispatcher,
-      attempt_reconciler: attempt_reconciler
+      attempt_reconciler: attempt_reconciler,
+      retry_coordinator_factory: retry_coordinator_factory
     )
     # Bypass the Hive::Config.find_project / Config.load lookup chain
     # for unit tests — stub the predicate directly.
@@ -713,7 +760,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
           mtime: T0 - 600, claude_pid_alive: nil, live_task_lock: nil,
           state_file: nil, folder: nil, marker_attrs: {},
           depends_on: nil, blocked_by: nil, dependency_stage: nil,
-          blocked: false, workflow: nil, attempt_id: nil, task_generation: nil)
+          blocked: false, workflow: nil, attempt_id: nil, task_generation: nil,
+          retry_projection: nil)
     folder ||= make_existing_row_folder(project: project, stage: stage, slug: slug)
     Row.new(
       project: project, slug: slug, stage: stage, workflow: workflow, marker: marker,
@@ -724,7 +772,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
       live_task_lock: live_task_lock, marker_attrs: marker_attrs,
       depends_on: depends_on, blocked_by: blocked_by,
       dependency_stage: dependency_stage, blocked: blocked,
-      attempt_id: attempt_id, task_generation: task_generation
+      attempt_id: attempt_id, task_generation: task_generation,
+      retry: retry_projection
     )
   end
 
@@ -735,6 +784,52 @@ class HiveDaemonDispatcherTest < Minitest::Test
   end
 
   # ── core dispatch flow ────────────────────────────────────────────────
+
+  def test_retry_cooldown_blocks_before_coordinator_or_spawn
+    projection = {
+      "key" => { "project" => "p1", "task" => "s1", "stage" => "4-execute", "generation" => 3 },
+      "retry_count" => 4, "retry_after" => (T0 + 300).iso8601, "state" => "cooldown"
+    }
+    factory_calls = []
+    rows = [ row(stage: "4-execute", retry_projection: projection) ]
+    dispatcher, supervisor, = make_dispatcher(
+      rows: rows,
+      retry_coordinator_factory: ->(retry_row) { factory_calls << retry_row; flunk("not due") }
+    )
+
+    dispatcher.tick(now: T0)
+
+    assert_empty factory_calls
+    assert_empty supervisor.spawned
+  end
+
+  def test_ready_retry_uses_fenced_durable_successor_dispatch
+    projection = {
+      "key" => { "project" => "p1", "task" => "s1", "stage" => "4-execute", "generation" => 3 },
+      "predecessor_attempt_id" => "failed-1", "retry_count" => 2,
+      "retry_after" => nil, "state" => "ready"
+    }
+    authorization = Hive::Daemon::RetryCoordinator::DispatchAuthorization.new(
+      token: "auth-1", project: "p1", task_slug: "s1", stage: "4-execute",
+      generation: 3, predecessor_attempt_id: "failed-1", retry_count: 2, issued_at: T0.iso8601
+    )
+    coordinator = FakeRetryCoordinator.new(authorization: authorization)
+    attempts = FakeAuthorizedAttemptDispatcher.new
+    rows = [ row(stage: "4-execute", retry_projection: projection) ]
+    dispatcher, supervisor, _controller, logger = make_dispatcher(
+      rows: rows, attempt_dispatcher: attempts,
+      retry_coordinator_factory: ->(_retry_row) { coordinator }
+    )
+
+    dispatcher.tick(now: T0)
+
+    assert_empty supervisor.spawned
+    assert_equal [ 3 ], coordinator.authorized_generations
+    assert_equal [ [ authorization, "successor-1" ] ], coordinator.claims
+    assert_equal %w[hive run s1 --project p1 --stage 4-execute], attempts.calls.fetch(0).fetch(:request).argv
+    assert events_include?(logger, :attempt_accepted)
+    assert events_include?(logger, :dispatched)
+  end
 
   def test_advance_action_dispatches_workflow_verb
     rows = [ row(action: "ready_to_plan", command: "hive plan s1 --from 2-brainstorm") ]

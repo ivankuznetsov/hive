@@ -6,6 +6,8 @@ require "hive/workflows"
 
 module Hive
   module Attempts
+    class InvalidSuccessorAuthorization < Hive::Error; end
+
     # Result of semantic admission. Live duplicates are ordinary successful
     # resolutions, not errors; only a fresh :accepted result invokes launcher.
     DispatchResult = Data.define(:status, :attempt, :receipt, :attach_descriptor, :reason) do
@@ -68,6 +70,50 @@ module Hive
         )
       end
 
+      # RetryCoordinator is the only producer of delayed-retry authorization.
+      # The attempt layer validates its fenced fields, then performs the same
+      # capacity/claim/launch path as every other durable dispatch.
+      def dispatch_authorized_successor(authorization:, predecessor:, task:, project:, argv:,
+                                        request_id:, provider:, inherited_outputs: nil,
+                                        interactive: false, now: @clock.call, on_claim: nil)
+        validate_successor_authorization!(authorization, predecessor)
+        generation = Generation.resolve(
+          task: task,
+          project: project,
+          intended_stage: predecessor["intended_stage"],
+          progress_token: predecessor["progress_token"],
+          ownership_generation: predecessor.ownership_generation,
+          task_input_epoch: predecessor.task_input_epoch
+        )
+        inherited = inherited_outputs ||
+                    (predecessor["inherited_outputs"] + predecessor["current_outputs"]).uniq
+        admit(
+          task: task, generation: generation, argv: argv, request_id: request_id,
+          provider: provider, interactive: interactive,
+          predecessor_attempt_id: predecessor.attempt_id,
+          inherited_outputs: inherited, retry_charge: predecessor["retry_charge"],
+          successor_of: predecessor.attempt_id,
+          successor_states: %w[terminal lost], on_claim: on_claim, now: now
+        )
+      end
+
+      # Resolves a daemon request through the normal durable-dispatch task and
+      # provider boundary, but requires the RetryCoordinator's fenced token.
+      # This keeps delayed redispatch from growing a parallel spawn path.
+      def dispatch_authorized_request(authorization:, request:, interactive: false,
+                                      now: @clock.call, on_claim: nil)
+        task = @task_resolver.call(request)
+        predecessor = @store.fetch(authorization.predecessor_attempt_id)
+        raise InvalidSuccessorAuthorization, "retry predecessor does not exist" unless predecessor
+
+        dispatch_authorized_successor(
+          authorization: authorization, predecessor: predecessor, task: task,
+          project: request.project, argv: request.argv, request_id: request.request_id,
+          provider: provider_for(task), inherited_outputs: request.inherited_outputs,
+          interactive: interactive, now: now, on_claim: on_claim
+        )
+      end
+
       def dispatch_request(request, interactive: false, now: @clock.call)
         task = @task_resolver.call(request)
         intended_stage = intended_stage_for(request.argv, task)
@@ -95,7 +141,8 @@ module Hive
       private
 
       def admit(task:, generation:, argv:, request_id:, provider:, interactive:,
-                predecessor_attempt_id:, inherited_outputs:, retry_charge:, successor_of:, now:)
+                predecessor_attempt_id:, inherited_outputs:, retry_charge:, successor_of:, now:,
+                successor_states: [ "lost" ], on_claim: nil)
         result = nil
         created = nil
         @store.with_generation_lock(generation.task_generation) do
@@ -108,7 +155,7 @@ module Hive
 
           exact = records.select { |record| record.task_generation == generation.task_generation }
           terminal = exact.reverse.find { |record| record.state == "terminal" }
-          if terminal
+          if terminal && successor_of.nil?
             result = DispatchResult.new(
               status: :terminal_replay, attempt: terminal, receipt: terminal.receipt,
               attach_descriptor: nil, reason: nil
@@ -118,7 +165,7 @@ module Hive
 
           lost = exact.select { |record| record.state == "lost" }
           predecessor = successor_of && exact.find { |record| record.attempt_id == successor_of }
-          if successor_of && (!predecessor || predecessor.state != "lost")
+          if successor_of && (!predecessor || !successor_states.include?(predecessor.state))
             result = DispatchResult.new(
               status: :deferred, attempt: predecessor, receipt: nil,
               attach_descriptor: nil, reason: "invalid_predecessor"
@@ -170,7 +217,20 @@ module Hive
 
         return result if result
 
-        @launcher.launch(created, argv: argv)
+        begin
+          on_claim&.call(created)
+          @launcher.launch(created, argv: argv)
+        rescue StandardError
+          begin
+            current = @store.fetch(created.attempt_id)
+            @store.mark_lost(current, reason: "successor_launch_failed", now: now) if current&.live?
+          rescue Hive::Error
+            # The original callback/launcher error remains the actionable one;
+            # reconciliation will retain the still-live reservation if the
+            # defensive loss transition itself raced.
+          end
+          raise
+        end
         DispatchResult.new(
           status: :accepted, attempt: created, receipt: nil,
           attach_descriptor: interactive ? attach_descriptor(created) : nil,
@@ -188,6 +248,24 @@ module Hive
           same_task && record["intended_stage"] == generation.intended_stage && record.live?
         end
         candidates.max_by { |record| [ record["accepted_at"], record.lease_version ] }
+      end
+
+      def validate_successor_authorization!(authorization, predecessor)
+        fields = %i[token project task_slug stage generation predecessor_attempt_id]
+        unless fields.all? { |field| authorization.respond_to?(field) }
+          raise InvalidSuccessorAuthorization, "retry successor requires a typed coordinator authorization"
+        end
+        unless authorization.token.is_a?(String) && !authorization.token.empty? && predecessor&.final?
+          raise InvalidSuccessorAuthorization, "retry successor authorization is incomplete"
+        end
+        unless authorization.project.to_s == predecessor["project"] &&
+               authorization.task_slug.to_s == predecessor["task_slug"] &&
+               authorization.stage.to_s == predecessor["intended_stage"] &&
+               authorization.generation == predecessor.task_input_epoch &&
+               authorization.predecessor_attempt_id.to_s == predecessor.attempt_id &&
+               !(predecessor.state == "terminal" && predecessor.outcome == "succeeded")
+          raise InvalidSuccessorAuthorization, "retry successor authorization is stale or mismatched"
+        end
       end
 
       def live_result(record, interactive:)

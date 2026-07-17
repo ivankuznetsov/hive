@@ -138,6 +138,31 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
     end
   end
 
+  def test_passes_through_exact_retry_projection
+    retry_projection = {
+      "schema" => "hive-retry-record",
+      "schema_version" => 1,
+      "key" => { "project" => "p", "task" => "cooling", "stage" => "4-execute", "generation" => 7 },
+      "predecessor_attempt_id" => "attempt-a",
+      "current_attempt_id" => nil,
+      "retry_count" => 4,
+      "retry_after" => "2026-07-17T12:05:00Z",
+      "state" => "cooldown"
+    }
+    task = task_row(slug: "cooling", stage: "4-execute").merge("retry" => retry_projection)
+    legacy = task_row(slug: "legacy")
+    payload = make_envelope(projects: [ {
+      "name" => "p", "path" => "/tmp/p", "hive_state_path" => "/tmp/p/.h",
+      "tasks" => [ task, legacy ]
+    } ])
+
+    with_fake_status(JSON.generate(payload)) do |bin|
+      rows = Hive::Daemon::StatusConsumer.new(hive_bin: bin).fetch.rows
+      assert_equal retry_projection, rows.fetch(0).retry
+      assert_nil rows.fetch(1).retry
+    end
+  end
+
   def test_parses_dependency_fields_and_coerces_blocked_to_boolean
     task_blocked = task_row(slug: "dependent").merge(
       "depends_on" => "base",

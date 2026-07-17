@@ -110,6 +110,95 @@ class AttemptsDispatcherTest < Minitest::Test
     end
   end
 
+  def test_coordinator_authorization_claims_a_terminal_failure_before_launch
+    with_dispatcher do |dispatcher, launcher, task, store|
+      first = dispatch(dispatcher, task, request_id: "request-one")
+      owner = { "pid" => Process.pid, "start_fingerprint" => "start",
+                "session_id" => Process.getsid(0), "process_group_id" => Process.getpgrp }
+      claimed = store.claim(first.attempt, owner: owner, first_heartbeat_timeout_sec: 30, now: NOW + 1)
+      running = store.first_heartbeat(claimed, stale_sec: 30, now: NOW + 2)
+      failed = store.terminalize(
+        running, outcome: "failed", exit_status: 1,
+        final_checkpoint: { "revision" => "b" * 40, "progress_token" => first.attempt["progress_token"] },
+        output_references: [],
+        log_reference: { "path" => "logs/log.frames", "size" => 0, "sha256" => "0" * 64 },
+        now: NOW + 3
+      )
+      authorization = Struct.new(
+        :token, :project, :task_slug, :stage, :generation, :predecessor_attempt_id,
+        keyword_init: true
+      ).new(
+        token: "authorization-1", project: "demo", task_slug: task.slug,
+        stage: "4-execute", generation: failed.task_input_epoch,
+        predecessor_attempt_id: failed.attempt_id
+      )
+      callback_attempt = nil
+
+      successor = dispatcher.dispatch_authorized_successor(
+        authorization: authorization, predecessor: failed, task: task,
+        project: "demo", argv: [ "hive", "run", task.slug ],
+        request_id: "request-two", provider: "codex", now: NOW + 4,
+        on_claim: lambda { |attempt|
+          assert_equal 1, launcher.launched.size, "claim callback must run before successor launch"
+          callback_attempt = attempt
+        }
+      )
+
+      assert_equal :accepted, successor.status
+      assert_equal successor.attempt.attempt_id, callback_attempt.attempt_id
+      assert_equal failed.attempt_id, successor.attempt["predecessor_attempt_id"]
+      assert_equal failed.task_input_epoch, successor.attempt.task_input_epoch
+      assert_equal 2, launcher.launched.size
+    end
+  end
+
+  def test_terminal_successor_rejects_untyped_or_stale_authorization
+    with_dispatcher do |dispatcher, _launcher, task, store|
+      first = dispatch(dispatcher, task, request_id: "request-one")
+      failed = store.mark_lost(first.attempt, reason: "owner_gone", now: NOW + 1)
+
+      assert_raises(Hive::Attempts::InvalidSuccessorAuthorization) do
+        dispatcher.dispatch_authorized_successor(
+          authorization: Object.new, predecessor: failed, task: task, project: "demo",
+          argv: [ "hive", "run", task.slug ], request_id: "request-two",
+          provider: "codex", now: NOW + 2
+        )
+      end
+    end
+  end
+
+  def test_authorized_request_resolves_task_provider_and_predecessor_through_normal_boundary
+    with_dispatcher do |dispatcher, launcher, task, store|
+      first = dispatch(dispatcher, task, request_id: "request-one")
+      failed = store.mark_lost(first.attempt, reason: "owner_gone", now: NOW + 1)
+      authorization = Struct.new(
+        :token, :project, :task_slug, :stage, :generation, :predecessor_attempt_id,
+        keyword_init: true
+      ).new(
+        token: "authorization-1", project: "demo", task_slug: task.slug,
+        stage: "4-execute", generation: failed.task_input_epoch,
+        predecessor_attempt_id: failed.attempt_id
+      )
+      request = FakeRequest.new(
+        slug: task.slug, project: "demo", argv: [ "hive", "run", task.slug ],
+        request_id: "request-two", inherited_outputs: []
+      )
+      dispatcher.instance_variable_set(:@task_resolver, ->(_request) { task })
+      dispatcher.define_singleton_method(:provider_for) { |_task| "codex" }
+      claimed = nil
+
+      result = dispatcher.dispatch_authorized_request(
+        authorization: authorization, request: request, now: NOW + 2,
+        on_claim: ->(attempt) { claimed = attempt }
+      )
+
+      assert_equal :accepted, result.status
+      assert_equal result.attempt.attempt_id, claimed.attempt_id
+      assert_equal failed.attempt_id, result.attempt["predecessor_attempt_id"]
+      assert_equal 2, launcher.launched.size
+    end
+  end
+
   def test_successor_chain_is_not_blocked_by_an_older_lost_ancestor
     with_dispatcher do |dispatcher, launcher, task, store|
       first = dispatch(dispatcher, task, request_id: "request-one")

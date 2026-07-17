@@ -11,6 +11,7 @@ require "hive/daemon/plan_approval"
 require "hive/daemon/concurrency_controller"
 require "hive/daemon/child_supervisor"
 require "hive/daemon/status_consumer"
+require "hive/daemon/retry_coordinator"
 require "hive/daemon/stale_agent_healer"
 require "hive/daemon/recoverable_error_healer"
 require "hive/daemon/display_name_backfiller"
@@ -69,7 +70,8 @@ module Hive
                      update_state: nil, update_checker: nil, channel_detector: nil,
                      dispatch_request_state_home: nil, dispatch_result_state_home: nil,
                      attempt_dispatcher: nil, attempt_reconciler: nil,
-                     lost_outcome_store: nil, lost_outcome_processor: nil)
+                     lost_outcome_store: nil, lost_outcome_processor: nil,
+                     retry_coordinator_factory: nil)
         @config = config
         @controller = controller
         @supervisor = supervisor
@@ -85,6 +87,8 @@ module Hive
         @dry_run = dry_run
         @attempt_dispatcher = attempt_dispatcher
         @attempt_reconciler = attempt_reconciler
+        @retry_coordinator_factory = retry_coordinator_factory
+        @retry_coordinators = {}
         @lost_outcome_store = lost_outcome_store
         @lost_outcome_processor = lost_outcome_processor
         @attempt_snapshot = nil
@@ -915,6 +919,7 @@ module Hive
       def handle_row(row, now:)
         return unless project_enabled?(row.project)
         return if @legacy_layout_projects.key?(row.project)
+        return if handle_retry_projection(row, now: now)
         if merged_pr_recoverable_finalize_error?(row)
           enqueue_merge_watch(row, error_reason: row.marker_attrs.to_h["reason"].to_s)
           return
@@ -995,6 +1000,143 @@ module Hive
           @logger.event(:skipped, project: row.project, slug: row.slug,
                                   stage: row.stage, action: row.action)
         end
+      end
+
+      # Retry readiness is a durable coordinator projection, not something
+      # marker/action policy may infer. A cooling, running, or abandoned row
+      # is terminal for this tick. Only an elapsed persisted deadline (or an
+      # already-ready record) can reach successor authorization.
+      def handle_retry_projection(row, now:)
+        retry_projection = row.respond_to?(:retry) ? row.retry : nil
+        return false unless retry_projection.is_a?(Hash)
+
+        state = retry_projection["state"].to_s
+        case state
+        when "cooldown"
+          retry_after = Time.iso8601(retry_projection.fetch("retry_after"))
+          if now.utc < retry_after
+            log_retry_block(row, retry_projection, reason: "retry_cooldown")
+            return true
+          end
+
+          coordinator = retry_coordinator_for(row)
+          ready = coordinator&.evaluate_due
+          unless ready&.state == "ready"
+            log_retry_block(row, retry_projection, reason: "retry_unavailable")
+            return true
+          end
+          dispatch_retry_or_block(row, coordinator: coordinator, now: now)
+          true
+        when "ready"
+          coordinator = retry_coordinator_for(row)
+          unless coordinator
+            log_retry_block(row, retry_projection, reason: "retry_unavailable")
+            return true
+          end
+          dispatch_retry_or_block(row, coordinator: coordinator, now: now)
+          true
+        when "running"
+          log_retry_block(row, retry_projection, reason: "retry_running")
+          true
+        when "abandoned"
+          log_retry_block(row, retry_projection, reason: "retry_abandoned")
+          true
+        when "succeeded"
+          false
+        else
+          log_retry_block(row, retry_projection, reason: "retry_invalid_state")
+          true
+        end
+      rescue ArgumentError, KeyError => e
+        @logger.event(:blocked, project: row.project, slug: row.slug, stage: row.stage,
+                               reason: "retry_invalid_projection", error: e.message)
+        true
+      rescue Hive::Daemon::RetryCoordinatorError, Hive::Attempts::InvalidSuccessorAuthorization => e
+        @logger.event(:blocked, project: row.project, slug: row.slug, stage: row.stage,
+                               reason: "retry_fence_rejected", error: e.message)
+        true
+      end
+
+      def log_retry_block(row, retry_projection, reason:)
+        @logger.event(
+          :blocked, project: row.project, slug: row.slug, stage: row.stage,
+          reason: reason, retry_count: retry_projection["retry_count"],
+          retry_after: retry_projection["retry_after"]
+        )
+      end
+
+      def dispatch_retry_or_block(row, coordinator:, now:)
+        unless row.folder && File.directory?(row.folder.to_s)
+          @logger.event(:skipped, project: row.project, slug: row.slug, stage: row.stage,
+                                  reason: row.folder.to_s.empty? ? "folder_missing_nil" : "folder_missing")
+          return
+        end
+        unless @attempt_dispatcher
+          log_retry_block(row, row.retry, reason: "retry_dispatcher_unavailable")
+          return
+        end
+
+        gate = @controller.can_dispatch?(
+          project: row.project, slug: row.slug, now: now,
+          external_global_count: @external_active_agent_total,
+          external_project_count: external_active_agent_count_for(row.project)
+        )
+        unless gate == :ok
+          log_retry_block(row, row.retry, reason: gate.to_s)
+          return
+        end
+
+        generation = row.retry.dig("key", "generation")
+        authorization = coordinator.authorize(expected_generation: generation)
+        request = Hive::Daemon::DispatchRequestQueue::Request.new(
+          request_id: Hive::Daemon::DispatchRequestQueue.generate_request_id,
+          created_at: now.utc, project: row.project, slug: row.slug,
+          argv: [ "hive", "run", row.slug, "--project", row.project, "--stage", row.stage ],
+          requestor: "retry_coordinator", chat_id: nil, update_id: nil,
+          trigger: "retry_due", task_generation: generation,
+          predecessor_attempt_id: authorization.predecessor_attempt_id,
+          inherited_outputs: [], schema_version: Hive::Daemon::DispatchRequestQueue::SCHEMA_VERSION,
+          path: nil
+        )
+        result = @attempt_dispatcher.dispatch_authorized_request(
+          authorization: authorization, request: request, interactive: false, now: now,
+          on_claim: ->(attempt) {
+            coordinator.record_claim(authorization: authorization, attempt_id: attempt.attempt_id)
+          }
+        )
+        log_attempt_admission(result)
+        @logger.event(
+          result.status == :deferred ? :blocked : :dispatched,
+          attempt_id: result.attempt&.attempt_id,
+          task_generation: result.attempt&.task_generation,
+          attempt_state: result.attempt&.state,
+          project: row.project, slug: row.slug, stage: row.stage,
+          command: request.argv.join(" "), trigger: "retry_due",
+          reason: result.reason, dry_run: false
+        )
+        @dispatched_today += 1 unless result.status == :deferred
+      end
+
+      def retry_coordinator_for(row)
+        return @retry_coordinator_factory.call(row) if @retry_coordinator_factory
+
+        attempt_store = @attempt_reconciler&.respond_to?(:store) ? @attempt_reconciler.store : nil
+        return nil unless attempt_store && row.folder
+
+        @retry_coordinators[row.folder] ||= begin
+          entry = Hive::Config.find_project(row.project)
+          raise Hive::ConfigError, "unknown retry project #{row.project}" unless entry
+
+          project_cfg = Hive::Config.load(entry.fetch("path"))
+          schedule = Hive::Config.retry_backoff(project_cfg, global_daemon: @daemon_cfg)
+          RetryCoordinator.new(
+            task_folder: row.folder, attempt_store: attempt_store, schedule: schedule
+          )
+        end
+      rescue Hive::ConfigError => e
+        @logger.event(:fatal, message: "retry coordinator unavailable: #{e.message}",
+                               project: row.project, slug: row.slug, keeping_previous: true)
+        nil
       end
 
       # True when `row` is a brainstorm `needs_input` row whose

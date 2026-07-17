@@ -310,6 +310,9 @@ module Hive
           "condition_provenance" => row.dig(:projection_data, "provenance") || {},
           "shadow_audit" => row.dig(:projection_data, "shadow_audit") || {},
           "condition_warning" => row[:condition_warning],
+          # Exact journal-derived retry projection. Consumers must not
+          # reconstruct retry readiness or deadlines from marker state.
+          "retry" => row.dig(:projection_data, "retry"),
           # Count of still-unanswered brainstorm Q&A questions (issue #270).
           # 0 for every non-brainstorm / non-needs_input row. Lets an agent
           # or operator tell "the daemon is holding this brainstorm because

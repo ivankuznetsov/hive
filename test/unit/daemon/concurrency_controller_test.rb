@@ -3,8 +3,8 @@ require "tmpdir"
 require "hive/daemon/concurrency_controller"
 require "hive/daemon/dispatch_baselines"
 
-# Pin the concurrency controller's caps + backoff + quarantine + daily-
-# rate semantics. Pure unit — no I/O, no Process.spawn. The controller
+# Pin the concurrency controller's capacity + daily-rate semantics. Pure unit
+# — no I/O, no Process.spawn. The controller
 # is the daemon's load-bearing budget gate; misclassifying an exit code
 # (e.g., consuming a daily slot on TEMPFAIL) breaks fairness across the
 # whole pipeline.
@@ -213,55 +213,16 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
     assert_equal :ok, c.can_dispatch?(project: "p1", slug: "s1", now: T0 + 5)
   end
 
-  # ── transient retry → quarantine after schedule exhausted ──────────────
-
-  def test_transient_failure_backs_off_then_quarantines
+  # Task failures are evidence for RetryCoordinator. Capacity bookkeeping must
+  # never create a second timer, failure counter, or quarantine.
+  def test_task_failures_only_free_capacity
     c = make
-    pid = 100
-    Hive::Daemon::ConcurrencyController::TRANSIENT_BACKOFF_SCHEDULE.each_with_index do |backoff, idx|
-      dispatch(c, pid + idx, "p1", "s1")
-      c.record_completion(pid: pid + idx, exit_code: Hive::ExitCodes::SOFTWARE,
-                          completed_at: T0 + idx)
-      # During cooldown the slug is blocked.
-      result = c.can_dispatch?(project: "p1", slug: "s1", now: T0 + idx + 1)
-      assert_equal :cooldown, result, "after failure ##{idx + 1} must be in cooldown (#{backoff}s)"
+    [ Hive::ExitCodes::SOFTWARE, Hive::ExitCodes::WRONG_STAGE,
+      Hive::ExitCodes::USAGE, Hive::ExitCodes::TASK_IN_ERROR ].each_with_index do |code, index|
+      dispatch(c, 100 + index, "p1", "s1", started_at: T0 + index)
+      c.record_completion(pid: 100 + index, exit_code: code, completed_at: T0 + index + 1)
+      assert_equal :ok, c.can_dispatch?(project: "p1", slug: "s1", now: T0 + index + 2)
     end
-
-    # One more failure past the schedule's last entry → quarantine.
-    next_pid = pid + Hive::Daemon::ConcurrencyController::TRANSIENT_BACKOFF_SCHEDULE.size
-    dispatch(c, next_pid, "p1", "s1",
-             started_at: T0 + Hive::Daemon::ConcurrencyController::TRANSIENT_BACKOFF_SCHEDULE.size + 1000)
-    c.record_completion(pid: next_pid, exit_code: Hive::ExitCodes::SOFTWARE,
-                        completed_at: T0 + 100_000)
-    assert c.quarantined?(project: "p1", slug: "s1"),
-           "exhausted backoff schedule must transition to :quarantined"
-    assert_equal :quarantined,
-                 c.can_dispatch?(project: "p1", slug: "s1", now: T0 + 1_000_000)
-  end
-
-  def test_success_after_transient_resets_failure_counter
-    c = make
-    dispatch(c, 100, "p1", "s1")
-    c.record_completion(pid: 100, exit_code: Hive::ExitCodes::SOFTWARE, completed_at: T0 + 1)
-
-    # Re-attempt later (simulate cooldown elapsed by passing future now)
-    future = T0 + 10_000
-    dispatch(c, 101, "p1", "s1", started_at: future)
-    c.record_completion(pid: 101, exit_code: Hive::ExitCodes::SUCCESS, completed_at: future + 1)
-
-    refute c.quarantined?(project: "p1", slug: "s1"),
-           "SUCCESS after transient must clear the failure counter, not preserve it"
-  end
-
-  def test_wrong_stage_triggers_short_cooldown
-    c = make
-    backoff = Hive::Daemon::ConcurrencyController::WRONG_STAGE_BACKOFF_SEC
-    dispatch(c, 100, "p1", "s1")
-
-    c.record_completion(pid: 100, exit_code: Hive::ExitCodes::WRONG_STAGE, completed_at: T0 + 1)
-
-    assert_equal :cooldown, c.can_dispatch?(project: "p1", slug: "s1", now: T0 + 2)
-    assert_equal :ok, c.can_dispatch?(project: "p1", slug: "s1", now: T0 + 1 + backoff + 1)
   end
 
   # ── TEMPFAIL refunds daily slot ───────────────────────────────────────
@@ -278,35 +239,20 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
     assert_equal :ok, c.can_dispatch?(project: "p1", slug: "s2", now: T0 + 100)
   end
 
-  def test_tempfail_does_not_quarantine_or_cooldown
+  def test_tempfail_does_not_create_retry_policy_state
     c = make
     dispatch(c, 100, "p1", "s1")
     c.record_completion(pid: 100, exit_code: Hive::ExitCodes::TEMPFAIL, completed_at: T0 + 1)
     assert_equal :ok, c.can_dispatch?(project: "p1", slug: "s1", now: T0 + 2)
-    refute c.quarantined?(project: "p1", slug: "s1")
   end
 
-  # ── TASK_IN_ERROR clears running entry but doesn't quarantine ─────────
+  # ── TASK_IN_ERROR clears running entry ────────────────────────────────
 
-  def test_task_in_error_does_not_quarantine_in_controller
-    # Marker handles the recovery via Policy upstream; controller just
-    # cleans up the running entry.
+  def test_task_in_error_clears_running_entry
     c = make
     dispatch(c, 100, "p1", "s1")
     c.record_completion(pid: 100, exit_code: Hive::ExitCodes::TASK_IN_ERROR, completed_at: T0 + 1)
-    refute c.quarantined?(project: "p1", slug: "s1")
     assert_equal 0, c.in_flight_count
-  end
-
-  # ── USAGE quarantines ────────────────────────────────────────────────
-
-  def test_usage_quarantines_for_daemon_lifetime
-    c = make
-    dispatch(c, 100, "p1", "s1")
-    c.record_completion(pid: 100, exit_code: Hive::ExitCodes::USAGE, completed_at: T0 + 1)
-    assert c.quarantined?(project: "p1", slug: "s1")
-    assert_equal :quarantined, c.can_dispatch?(project: "p1", slug: "s1",
-                                               now: T0 + 1_000_000)
   end
 
   # ── CONFIG drops the project ─────────────────────────────────────────
@@ -599,7 +545,7 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
                  "the global digest runs off the task caps and must not block task dispatch"
   end
 
-  def test_failed_digest_completion_does_not_leak_per_date_cooldown_or_quarantine
+  def test_failed_digest_completion_does_not_leak_per_date_retry_state
     c = make
     dispatch(c, 100, "digest", "2026-06-13", kind: :digest)
     # A non-zero, non-CONFIG exit on a normal task would accrue cooldown/
@@ -607,7 +553,6 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
     # slug would make that grow unbounded and never be read by the digest gate.
     c.record_completion(pid: 100, exit_code: 1, completed_at: T0)
 
-    refute c.quarantined?(project: "digest", slug: "2026-06-13")
     assert_equal :ok, c.can_dispatch_digest?(now: T0),
                  "the freed digest slot must be reusable with no residual per-date state"
   end

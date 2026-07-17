@@ -149,6 +149,41 @@ module Hive
         end
       end
 
+      def record_claim(authorization:, attempt_id:)
+        unless authorization.is_a?(DispatchAuthorization)
+          raise StaleRetryAttempt, "successor claim requires coordinator authorization"
+        end
+        record = current
+        guard_generation!(record, authorization.generation)
+        projected = record.to_h.fetch("authorization", nil)
+        unless projected && projected["token"] == authorization.token &&
+               authorization.predecessor_attempt_id == record.predecessor_attempt_id
+          raise StaleRetryAttempt, "successor authorization is stale"
+        end
+
+        attempt = @attempt_store.fetch(attempt_id)
+        key = record.key
+        unless attempt&.live? && attempt["predecessor_attempt_id"] == record.predecessor_attempt_id &&
+               attempt["project"] == key.fetch("project") &&
+               attempt["task_slug"] == key.fetch("task") &&
+               attempt["intended_stage"] == key.fetch("stage") &&
+               attempt.task_input_epoch == key.fetch("generation")
+          raise StaleRetryAttempt, "claimed successor does not match the retry authorization"
+        end
+
+        append_computed(
+          event_type: "retry_successor_claimed",
+          idempotency_key: "retry-claim:#{authorization.token}:#{attempt_id}",
+          attempt: attempt, task: task_for(record), workflow: nil,
+          stage: key.fetch("stage"), reason: "successor_claimed", evidence: []
+        ) do |value|
+          replace(
+            value || record, "state" => "running", "retry_after" => nil,
+            "current_attempt_id" => attempt_id
+          )
+        end
+      end
+
       def record_stage_transition(attempt_id:, to_stage:)
         record = current
         raise RetryCoordinatorError, "no retry record exists" unless record

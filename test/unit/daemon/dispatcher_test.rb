@@ -630,6 +630,12 @@ class HiveDaemonDispatcherTest < Minitest::Test
         json_envelope: { "ok" => false, "error_kind" => "config" }
       )
     ]
+    controller.record_dispatch(
+      pid: 123, project: "p1", slug: "patrol",
+      stage: Hive::Daemon::PatrolScheduler::PATROL_STAGE,
+      command: "hive patrol p1 --json", started_at: T0 - 5,
+      state_file_mtime: nil, kind: :patrol_scan
+    )
 
     dispatcher.tick(now: T0)
 

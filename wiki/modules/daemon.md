@@ -556,7 +556,9 @@ dropped; unrelated rows remain schedulable.
 
 Patrol and refactor-patrol CONFIG exits are likewise job-local. Missing patrol
 validation commands enter scheduler backoff without marking the registered
-project dropped, so ordinary task stages continue to dispatch.
+project dropped, so ordinary task stages continue to dispatch. The concurrency
+controller frees patrol capacity without applying per-task CONFIG/drop state;
+the patrol scheduler is the sole owner of scan backoff.
 
 `reap_completed` always refreshes the controller's
 `last_dispatched_mtime` baseline (no longer just for daemon-spawned

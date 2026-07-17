@@ -107,6 +107,17 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
     assert_equal :ok, c.can_dispatch_patrol_scan?(project: "hive", now: T0)
   end
 
+  def test_patrol_config_completion_does_not_drop_project_or_block_tasks
+    c = make
+    dispatch(c, 100, "hive", "patrol-scan", kind: :patrol_scan)
+
+    c.record_completion(pid: 100, exit_code: Hive::ExitCodes::CONFIG, completed_at: T0)
+
+    refute c.project_dropped?("hive")
+    assert_equal :ok, c.can_dispatch?(project: "hive", slug: "ordinary-task", now: T0)
+    assert_equal :ok, c.can_dispatch_patrol_scan?(project: "hive", now: T0)
+  end
+
   # ── caps ──────────────────────────────────────────────────────────────
 
   def test_empty_controller_allows_dispatch

@@ -222,6 +222,11 @@ class AgentTest < Minitest::Test
       assert_equal :waiting, result[:status]
       assert_equal :waiting, Hive::Markers.current(task.state_file).name
     ensure
+      if worker&.alive? && release
+        FileUtils.mkdir_p(File.dirname(release))
+        FileUtils.touch(release)
+        worker.join(2)
+      end
       worker&.kill if worker&.alive?
     end
   end

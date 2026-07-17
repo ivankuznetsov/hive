@@ -51,7 +51,7 @@ task default: :test
 
 | Path | Purpose |
 |------|---------|
-| `test/fixtures/fake-claude` | Shell script that takes Claude/Codex headless argv, optionally writes captured args to a log, optionally echoes a scenario-controlled response, optionally writes a file, and can commit a scenario-controlled file in cwd. Pointed at via `HIVE_CLAUDE_BIN` and e2e `HIVE_CODEX_BIN`. |
+| `test/fixtures/fake-claude` | Shell script that takes built-in provider headless argv, optionally writes captured args to a log, optionally echoes a scenario-controlled response, optionally writes a file, and can commit a scenario-controlled file in cwd. E2E points `HIVE_CLAUDE_BIN`, `HIVE_CODEX_BIN`, `HIVE_PI_BIN`, and `HIVE_GROK_BIN` at it. |
 | `test/fixtures/fake-gh` | Shell script that handles `gh pr create` / `gh auth status` / `gh pr list`, returns a dummy URL. |
 | `test/fixtures/voice/voice-idea.oga` | Checked-in Ogg/Opus speech sample saying "voice idea" for the Telegram voice-note E2E path. `run_idea_e2e.sh` uses it by default when `TG_IDEA_MODE=voice`; explicit voice mode hard-fails when `HIVE_WHISPER_API_KEY` is unset. Voice mode uses the same fixture for both new audio idea capture and audio brainstorm answers. |
 
@@ -176,7 +176,7 @@ bin/hive-e2e run
 bin/hive-e2e run --filter incident-regression --json
 ```
 
-The current scenarios copy `test/e2e/sample-project/` into a per-run sandbox, set `HIVE_HOME` to a run-local directory, and call the real `bin/hive` as a subprocess. `SandboxEnv` routes both Claude and Codex profile binaries to `test/fixtures/fake-claude` and places the checked-in default-deny `gh` shim first on `PATH` for every CLI, background, tmux, and replay process. No scenario can fall through to a host `gh` or make a real GitHub request. Scenarios that exercise `4-execute` with the default Codex profile must ask the fixture to create a real worktree commit, or execute will correctly stop at `EXECUTE_WAITING reason=no_worktree_changes`. TUI scenarios use private tmux sockets (`hive-e2e-<run-id>`) so they never touch the operator's daily tmux server.
+The current scenarios copy `test/e2e/sample-project/` into a per-run sandbox, set `HIVE_HOME` to a run-local directory, and call the real `bin/hive` as a subprocess. `SandboxEnv` routes every built-in provider binary (Claude, Codex, Pi, and Grok) to `test/fixtures/fake-claude`, places the checked-in default-deny `gh` shim first on `PATH`, and pins the direct `HIVE_GH_BIN` seam for every CLI, background, tmux, and replay process. Harness-owned home, bundle, agent, Hive, and GitHub paths cannot be replaced by scenario overrides. No scenario can fall through to a host `gh` or make a real GitHub request. Scenarios that exercise `4-execute` with the default Codex profile must ask the fixture to create a real worktree commit, or execute will correctly stop at `EXECUTE_WAITING reason=no_worktree_changes`. TUI scenarios use private tmux sockets (`hive-e2e-<run-id>`) so they never touch the operator's daily tmux server; teardown captures the final pane, terminates unfinished detached workflow process groups from the run-scoped PID lifecycle log, and then stops tmux before GitHub verification and filesystem evidence capture.
 
 Incident scenarios add stable incident and sibling metadata. Sibling-gated YAML
 remains visible in `report.json#scenario_metadata` with `pending: true`, while
@@ -184,7 +184,9 @@ its steps and ordinary result row remain absent. CI runs
 `bundle exec rake e2e:lib_test` and `bundle exec rake e2e` in a dedicated
 pull-request job, uploads the configured `HIVE_E2E_RUNS_DIR` on success or
 failure, and uses `test/e2e/check_incident_budget.rb` to enforce below five
-seconds per enabled incident and below thirty seconds for the group. The
+seconds per enabled incident (including sandbox bootstrap) and below thirty
+seconds for the group. The #9771 dependency-gate and repository-routing
+incidents are enabled; four sibling-gated fixtures remain pending. The
 incident index and activation rules live in
 `test/e2e/scenarios/README.md`.
 `test/e2e/lib/hive_e2e_binary_test.rb` pins the harness binary contract:

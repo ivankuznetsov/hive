@@ -1,4 +1,5 @@
 require "fileutils"
+require "json"
 require "rbconfig"
 require "shellwords"
 require_relative "paths"
@@ -44,6 +45,7 @@ module Hive
           "set -euo pipefail",
           "cd #{Shellwords.escape(Paths.repo_root)}"
         ]
+        SandboxEnv::LEAKY_KEYS.each { |key| lines << "unset #{key}" }
         env.each { |key, value| lines << "export #{key}=#{Shellwords.escape(value.to_s)}" }
         # Setup-step replay (seed_state / write_file / register_project)
         # references the sandbox by an explicit env var so the heredoc bodies
@@ -56,8 +58,13 @@ module Hive
         # listening on the sandbox lock or a stub holding an ephemeral port.
         lines.concat(harness_teardown_prelude)
         lines << "echo 'Replaying setup and failed CLI-visible steps for #{@failed_index}'"
-        @steps.first(@failed_index.to_i).each do |step|
+        replayed_steps = @steps.first(@failed_index.to_i)
+        replayed_steps.each do |step|
           lines.concat(emit_step(step))
+        end
+        if replayed_steps.any? { |step| step.kind == "script_gh" }
+          lines << "_hive_repro_cleanup"
+          lines.concat(emit_gh_verification)
         end
         lines.join("\n") + "\n"
       end
@@ -280,12 +287,25 @@ module Hive
         ruby = [
           "require 'json'",
           "require 'gh_stub'",
-          "Hive::E2E::GhStub.new(ARGV.fetch(1)).install(JSON.parse(ARGV.fetch(0)))"
+          "stub = Hive::E2E::GhStub.new(ARGV.fetch(1))",
+          "FileUtils.rm_rf(stub.root)",
+          "stub.install(JSON.parse(ARGV.fetch(0)))"
         ].join("\n")
         [
           "# step #{step.position} script_gh: #{interactions.size} interaction(s)",
           Shellwords.join([ RbConfig.ruby, "-I#{File.join(Paths.e2e_root, 'lib')}", "-e", ruby,
                             JSON.generate(interactions), @run_home ])
+        ]
+      end
+
+      def emit_gh_verification
+        ruby = [
+          "require 'gh_stub'",
+          "Hive::E2E::GhStub.new(ARGV.fetch(0)).verify!"
+        ].join("\n")
+        [
+          "# verify the complete default-deny GitHub transcript",
+          Shellwords.join([ RbConfig.ruby, "-I#{File.join(Paths.e2e_root, 'lib')}", "-e", ruby, @run_home ])
         ]
       end
 
@@ -520,6 +540,8 @@ module Hive
           "cfg_path = File.join(project, '.hive-state', 'config.yml')",
           "cfg = YAML.safe_load(File.read(cfg_path)) || {}",
           "cfg['worktree_root'] = File.join(run_dir, 'worktrees')",
+          "cfg['claude'] ||= {}",
+          "cfg['claude']['mode'] = 'headless'",
           "cfg['review'] ||= {}",
           "cfg['review']['ci'] ||= {}",
           "cfg['review']['ci']['command'] = nil",

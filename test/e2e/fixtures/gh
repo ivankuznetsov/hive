@@ -2,16 +2,20 @@
 
 require "fileutils"
 require "json"
+require_relative "../../../lib/hive/repository_identity"
 
 DENY_EXIT = 86
 
-def repository_from(argv)
+def repository_from(argv, cwd)
   argv.each_with_index do |arg, index|
-    return argv[index + 1] if %w[--repo -R].include?(arg)
-    return arg.split("=", 2).last if arg.start_with?("--repo=")
-    return arg.delete_prefix("-R") if arg.start_with?("-R") && arg.length > 2
+    return [ argv[index + 1], "argument" ] if %w[--repo -R].include?(arg)
+    return [ arg.split("=", 2).last, "argument" ] if arg.start_with?("--repo=")
+    return [ arg.delete_prefix("-R"), "argument" ] if arg.start_with?("-R") && arg.length > 2
   end
-  ENV["GH_REPO"]
+  return [ ENV["GH_REPO"], "environment" ] if ENV["GH_REPO"]
+
+  identity = Hive::RepositoryIdentity.current(cwd)
+  [ identity, identity ? "cwd_origin" : nil ]
 end
 
 def regular_json(path, label)
@@ -47,7 +51,7 @@ audit_path = File.join(root, "audit.jsonl")
 lock_path = File.join(root, ".lock")
 argv = ARGV.map(&:to_s)
 cwd = File.expand_path(Dir.pwd)
-repository = repository_from(argv)
+repository, repository_source = repository_from(argv, cwd)
 interaction = nil
 exit_status = DENY_EXIT
 reason = nil
@@ -95,6 +99,7 @@ File.open(lock_path, File::RDWR | File::CREAT, 0o600) do |lock|
       "argv" => argv,
       "cwd" => cwd,
       "repository" => repository,
+      "repository_source" => repository_source,
       "expected_index" => expected_index,
       "expected_argv" => expected_argv,
       "matched" => reason.nil?,

@@ -1,4 +1,5 @@
 require "psych"
+require_relative "gh_stub"
 require_relative "path_safety"
 require_relative "scenario"
 
@@ -62,6 +63,9 @@ module Hive
         tags = Array(data["tags"]).map(&:to_s)
         incident_id, sibling_task_id, pending = parse_incident_metadata(data, description, tags)
         steps = parse_steps(data["steps"])
+        if steps.count { |step| step.kind == "script_gh" } > 1
+          invalid!("scenario may install only one ordered script_gh interaction sequence", line_for("script_gh"))
+        end
         Scenario.new(
           name: name,
           description: description,
@@ -80,7 +84,12 @@ module Hive
       private
 
       def parse_incident_metadata(data, description, tags)
-        incident = tags.include?(INCIDENT_TAG) || %w[incident_id sibling_task_id pending].any? { |key| data.key?(key) }
+        metadata_present = %w[incident_id sibling_task_id pending].any? { |key| data.key?(key) }
+        tagged = tags.include?(INCIDENT_TAG)
+        if metadata_present && !tagged
+          invalid!("incident metadata requires the #{INCIDENT_TAG} tag", metadata_line(data))
+        end
+        incident = tagged
         return [ nil, nil, false ] unless incident
 
         invalid!("incident description must be non-empty", metadata_line(data)) if description.strip.empty?
@@ -136,6 +145,11 @@ module Hive
           invalid!("tui_keys step needs exactly one of keys or text", line_for(kind)) unless key_count == 1
         when "script_gh"
           invalid!("script_gh.interactions must be an array", line_for(kind)) unless step["interactions"].is_a?(Array)
+          begin
+            GhStub.validate_interactions(step["interactions"])
+          rescue ArgumentError => e
+            invalid!(e.message, line_for(kind))
+          end
         end
       end
 

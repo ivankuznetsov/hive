@@ -47,6 +47,25 @@ class E2ERunnerTest < Minitest::Test
     end
   end
 
+  def test_duplicate_scenario_names_fail_preflight
+    with_isolated_dirs do |scenarios_dir, runs_dir|
+      %w[first second].each do |file|
+        write_scenario(scenarios_dir, file, <<~YAML)
+          name: duplicate_name
+          steps:
+            - kind: cli
+              args: [version]
+        YAML
+      end
+
+      error = assert_raises(Hive::E2E::ScenarioParser::InvalidScenario) do
+        Hive::E2E::Runner.new(scenarios_dir: scenarios_dir, runs_dir: runs_dir).select_scenarios
+      end
+
+      assert_includes error.message, "duplicate scenario name"
+    end
+  end
+
   def test_failed_step_keeps_run_complete_but_marks_scenario_failed
     with_isolated_dirs do |scenarios_dir, runs_dir|
       write_scenario(scenarios_dir, "smoke_fail", <<~YAML)
@@ -83,6 +102,7 @@ class E2ERunnerTest < Minitest::Test
       # Force the bootstrap to fail by stubbing Sandbox.bootstrap once.
       original = Hive::E2E::Sandbox.method(:bootstrap)
       Hive::E2E::Sandbox.singleton_class.define_method(:bootstrap) do |*_args, **_kw|
+        sleep 0.03
         raise "bootstrap exploded for #{missing_sample}"
       end
       begin
@@ -96,6 +116,8 @@ class E2ERunnerTest < Minitest::Test
       assert_equal 1, report["summary"]["setup_failed"], "setup_failed scenarios should appear in summary"
       scenario = report["scenarios"].first
       assert_equal "setup_failed", scenario["status"]
+      assert_operator scenario["duration_seconds"], :>=, 0.03,
+                      "setup failures must include bootstrap time in incident budgets"
       assert_nil scenario["failed_step_index"], "no step index when bootstrap fails before steps run"
       assert_nil scenario["artifacts_dir"], "no artifacts_dir when bootstrap fails before any are written"
     end

@@ -11,6 +11,7 @@ class E2EIncidentInventoryTest < Minitest::Test
     "repository-routing" => [ "incident_repository_routing.yml", "#9771" ],
     "provider-limit-retry" => [ "incident_provider_limit_retry.yml", "#9770" ]
   }.freeze
+  ENABLED_INCIDENTS = %w[plan-only-dependency-gate repository-routing].freeze
 
   def incident_scenarios
     Dir[File.join(Hive::E2E::Paths.scenarios_dir, "*.yml")]
@@ -31,14 +32,15 @@ class E2EIncidentInventoryTest < Minitest::Test
     end.to_h
   end
 
-  def test_six_sibling_owned_incidents_are_unique_parseable_and_pending
+  def test_six_sibling_owned_incidents_are_unique_and_landed_contracts_are_enabled
     actual = incident_scenarios.to_h do |scenario|
       [ scenario.incident_id, [ File.basename(scenario.path), scenario.sibling_task_id ] ]
     end
 
     assert_equal 6, incident_scenarios.size
     assert_equal 6, incident_scenarios.map(&:incident_id).uniq.size
-    assert incident_scenarios.all?(&:pending), "sibling-gated shells must stay pending until exact contracts land"
+    assert_equal ENABLED_INCIDENTS.sort, incident_scenarios.reject(&:pending).map(&:incident_id).sort
+    assert_equal 4, incident_scenarios.count(&:pending)
     assert_equal EXPECTED_INCIDENTS, actual
   end
 

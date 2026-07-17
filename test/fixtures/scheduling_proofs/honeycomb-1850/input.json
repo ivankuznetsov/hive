@@ -1,0 +1,32 @@
+{
+  "as_of": "2026-07-17T12:00:00Z",
+  "configured_slots": 2,
+  "row": {
+    "project": "honeycomb", "project_path": "/srv/honeycomb", "id": 1850,
+    "slug": "auth-failure", "workflow": "coding", "stage": "4-execute",
+    "condition_task_generation": 7, "action": "error", "suggested_command": null,
+    "blocked": false,
+    "diagnostic": { "summary": "Codex MCP authentication failed.", "detail": "Authentication profile needs repair." }
+  },
+  "observation": {
+    "project": "honeycomb", "task_id": 1850, "task_slug": "auth-failure",
+    "workflow": "coding", "stage": "4-execute", "task_generation": 7,
+    "attempt_id": null, "reason": "terminal_error", "observed_at": "2026-07-17T11:58:00Z",
+    "eligible": false, "queue_position": 1,
+    "retry": { "count": 2, "retry_after": "2026-07-17T12:30:00Z" },
+    "error": {
+      "code": "mcp_authentication_failed", "summary": "Codex MCP authentication failed.",
+      "detail": "Authentication profile needs repair.", "environment_provenance": "daemon_runtime",
+      "adapter": "codex", "profile": "default"
+    },
+    "action": {
+      "kind": "repair", "text": "Repair the daemon authentication profile, then retry through the guarded workflow.",
+      "command": null, "requires_confirmation": true
+    }
+  },
+  "expected": {
+    "proof.reason": "terminal_error", "proof.action.kind": "repair",
+    "proof.error.code": "mcp_authentication_failed", "proof.error.environment_provenance": "daemon_runtime",
+    "proof.retry.count": 2, "fleet.causal_buckets.0.reason": "terminal_error"
+  }
+}

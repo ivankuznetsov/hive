@@ -1,0 +1,30 @@
+{
+  "as_of": "2026-07-17T12:00:00Z",
+  "configured_slots": 2,
+  "row": {
+    "project": "hive", "project_path": "/srv/hive", "id": 9769,
+    "slug": "merge-wait", "workflow": "coding", "stage": "8-finalize",
+    "condition_task_generation": 9, "action": "ready_to_archive",
+    "suggested_command": "hive archive merge-wait --from 8-finalize", "blocked": false, "diagnostic": null
+  },
+  "observation": {
+    "project": "hive", "task_id": 9769, "task_slug": "merge-wait",
+    "workflow": "coding", "stage": "8-finalize", "task_generation": 9,
+    "attempt_id": null, "reason": "babysitter_blocked", "observed_at": "2026-07-17T11:59:00Z",
+    "eligible": false, "queue_position": 1,
+    "babysitter": {
+      "job_id": "pr-42-head-9", "pr_number": 42, "head_generation": 9,
+      "state": "awaiting_merge", "blocker": "checks_failing", "archive_ready": false,
+      "last_update_at": "2026-07-17T11:58:00Z"
+    },
+    "action": {
+      "kind": "wait", "text": "Wait for the current-generation pull request checks and merge.",
+      "command": null, "requires_confirmation": false
+    }
+  },
+  "expected": {
+    "proof.reason": "babysitter_blocked", "proof.action.kind": "wait",
+    "proof.babysitter.pr_number": 42, "proof.babysitter.head_generation": 9,
+    "proof.babysitter.archive_ready": false, "fleet.causal_buckets.0.reason": "babysitter_blocked"
+  }
+}

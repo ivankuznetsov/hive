@@ -1,0 +1,25 @@
+{
+  "as_of": "2026-07-17T12:00:00Z",
+  "configured_slots": 3,
+  "row": {
+    "project": "hive", "project_path": "/srv/hive", "id": 9764,
+    "slug": "architecture", "workflow": "coding", "stage": "4-execute",
+    "condition_task_generation": 4, "action": "error", "suggested_command": null,
+    "blocked": false, "diagnostic": null
+  },
+  "observation": {
+    "project": "hive", "task_id": 9764, "task_slug": "architecture",
+    "workflow": "coding", "stage": "4-execute", "task_generation": 4,
+    "attempt_id": null, "reason": "legacy_policy_exhausted", "observed_at": "2026-07-17T11:57:00Z",
+    "eligible": false, "queue_position": 1,
+    "provider": { "provider": "codex", "model": "gpt-5", "circuit_state": "open", "observed_at": "2026-07-17T11:56:00Z" },
+    "retry": { "legacy_policy": "exhausted", "legacy_hold_expired_at": "2026-07-17T11:30:00Z" },
+    "capacity": { "configured_slots": 3, "used_slots": 0 },
+    "action": null
+  },
+  "expected": {
+    "proof.reason": "legacy_policy_exhausted", "proof.action.kind": "no_safe_action",
+    "proof.provider.circuit_state": "open", "proof.retry.legacy_policy": "exhausted",
+    "fleet.unused_slots": 3, "fleet.causal_buckets.0.reason": "legacy_policy_exhausted"
+  }
+}

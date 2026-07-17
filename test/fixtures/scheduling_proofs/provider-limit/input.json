@@ -1,0 +1,28 @@
+{
+  "as_of": "2026-07-17T12:00:00Z",
+  "configured_slots": 1,
+  "row": {
+    "project": "hive", "project_path": "/srv/hive", "id": 9770,
+    "slug": "provider-limit", "workflow": "coding", "stage": "4-execute",
+    "condition_task_generation": 5, "action": "ready_to_develop",
+    "suggested_command": "hive develop provider-limit --from 4-execute", "blocked": false, "diagnostic": null
+  },
+  "observation": {
+    "project": "hive", "task_id": 9770, "task_slug": "provider-limit",
+    "workflow": "coding", "stage": "4-execute", "task_generation": 5,
+    "attempt_id": null, "reason": "provider_circuit_open", "observed_at": "2026-07-17T11:59:00Z",
+    "eligible": false, "queue_position": 1,
+    "provider": {
+      "provider": "codex", "model": "gpt-5", "circuit_state": "open",
+      "limit_code": "rate_limited", "next_probe_at": "2026-07-17T12:15:00Z"
+    },
+    "retry": { "retry_after": "2026-07-17T12:15:00Z", "otherwise_eligible": true },
+    "action": null
+  },
+  "expected": {
+    "proof.reason": "provider_circuit_open", "proof.action.kind": "wait",
+    "proof.provider.provider": "codex", "proof.provider.model": "gpt-5",
+    "proof.provider.next_probe_at": "2026-07-17T12:15:00Z",
+    "fleet.causal_buckets.0.reason": "provider_circuit_open"
+  }
+}

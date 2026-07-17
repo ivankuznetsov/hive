@@ -20,7 +20,7 @@ class ConfigTest < Minitest::Test
       assert_equal 1800, cfg["timeout_sec"]["digest"]
       assert_equal "8-finalize", cfg["dependency_gate_stage"]
       assert_equal "coding", cfg["default_workflow"]
-      assert_equal true, cfg.dig("daemon", "auto_retry", "enabled")
+      assert_equal [ 60, 60, 60, 300, 600, 3600 ], cfg.dig("daemon", "retry_backoff_sec")
       assert_equal 5, cfg["attempt_heartbeat_sec"]
       assert_equal 30, cfg["attempt_stale_sec"]
       assert_equal 30, cfg["attempt_launch_timeout_sec"]
@@ -62,24 +62,35 @@ class ConfigTest < Minitest::Test
     end
   end
 
-  def test_load_allows_daemon_auto_retry_enabled_override
+  def test_load_allows_one_project_retry_schedule_override
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))
       File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
         daemon:
-          auto_retry:
-            enabled: false
+          retry_backoff_sec: [5, 10]
       YAML
 
       cfg = Hive::Config.load(dir)
 
-      assert_equal false, cfg.dig("daemon", "auto_retry", "enabled")
+      assert_equal [ 5, 10 ], Hive::Config.retry_backoff(
+        cfg, global_daemon: { "retry_backoff_sec" => [ 90 ] }
+      )
       assert_equal 30, cfg.dig("daemon", "poll_interval_sec"),
-                   "nested daemon auto_retry override must deep-merge without dropping siblings"
+                   "daemon retry override must not drop sibling settings"
     end
   end
 
-  def test_load_rejects_non_hash_daemon_auto_retry
+  def test_project_defaults_do_not_shadow_the_global_retry_schedule
+    with_tmp_dir do |dir|
+      cfg = Hive::Config.load(dir)
+
+      assert_equal [ 90, 120 ], Hive::Config.retry_backoff(
+        cfg, global_daemon: { "retry_backoff_sec" => [ 90, 120 ] }
+      )
+    end
+  end
+
+  def test_load_rejects_retired_daemon_retry_keys
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))
       File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
@@ -89,24 +100,24 @@ class ConfigTest < Minitest::Test
 
       err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
 
-      assert_includes err.message, "daemon.auto_retry"
-      assert_includes err.message, "must be a hash"
+      assert_includes err.message, "retired retry keys"
+      assert_includes err.message, "auto_retry"
     end
   end
 
-  def test_load_rejects_non_boolean_daemon_auto_retry_enabled
-    with_tmp_dir do |dir|
-      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
-      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
-        daemon:
-          auto_retry:
-            enabled: sometimes
-      YAML
+  def test_load_rejects_invalid_and_nested_retry_schedules
+    [
+      "retry_backoff_sec: []",
+      "retry_backoff_sec: [60, 0]",
+      "retry_backoff_sec: [60, nope]",
+      "retry_backoff_by_error: {auth: [1]}"
+    ].each do |line|
+      with_tmp_dir do |dir|
+        FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+        File.write(File.join(dir, ".hive-state", "config.yml"), "daemon:\n  #{line}\n")
 
-      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
-
-      assert_includes err.message, "daemon.auto_retry.enabled"
-      assert_includes err.message, "must be a boolean"
+        assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      end
     end
   end
 
@@ -3216,7 +3227,7 @@ class ConfigTest < Minitest::Test
       assert_equal 3,     cfg.dig("daemon", "max_concurrent_runs")
       assert_equal 3,     cfg.dig("daemon", "max_concurrent_per_project")
       assert_equal 50,    cfg.dig("daemon", "max_runs_per_day_per_project")
-      assert_equal 60,    cfg.dig("daemon", "transient_retry_backoff_sec")
+      assert_equal [ 60, 60, 60, 300, 600, 3600 ], cfg.dig("daemon", "retry_backoff_sec")
       assert_equal 600,   cfg.dig("daemon", "shutdown_grace_sec")
       # R-02 per-child timeout knobs.
       assert_equal 0,     cfg.dig("daemon", "child_timeout_sec")
@@ -3442,6 +3453,7 @@ class ConfigTest < Minitest::Test
       assert_equal 1, cfg["fast_poll_sec"]
       assert_equal 3, cfg["max_concurrent_runs"]
       assert_equal 50, cfg["max_runs_per_day_per_project"]
+      assert_equal [ 60, 60, 60, 300, 600, 3600 ], cfg["retry_backoff_sec"]
     end
   end
 

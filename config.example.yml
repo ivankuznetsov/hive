@@ -1,12 +1,11 @@
 ---
 registered_projects: []
 
-# Global daemon defaults. Project enrollment still lives in each
-# project's .hive-state/config.yml; this kill-switch disables daemon
-# auto-clearing of allowlisted recoverable terminal error markers.
+# Global daemon defaults. A project may override the whole ladder with the
+# same key; there are no per-error/provider/stage schedules. The final value
+# repeats indefinitely.
 # daemon:
-#   auto_retry:
-#     enabled: true
+#   retry_backoff_sec: [60, 60, 60, 300, 600, 3600]
 
 # Optional hosted screenshot links for 7-artifacts visual demos.
 # Run `hive connect screenote` to authorize uploads. HIVE_SCREENOTE_BASE_URL

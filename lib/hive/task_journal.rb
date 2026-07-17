@@ -19,12 +19,24 @@ module Hive
       reconciliation
       shadow_audit
       operator_action
+      retry_failure_scheduled
+      retry_ready
+      retry_dispatch_authorized
+      retry_successor_claimed
+      retry_attempt_succeeded
+      retry_stage_reset
+      retry_generation_reset
+      retry_repaired
+      retry_abandoned
+      retry_rearmed
+      retry_manual_requested
     ].freeze
     LEGACY_ATTEMPT_ID = "legacy".freeze
     JOURNAL_BASENAME = "events.jsonl".freeze
     LOCK_BASENAME = ".events.lock".freeze
 
     AppendResult = Data.define(:cursor, :event_id, :journal_hash, :records)
+    IdempotentAppendResult = Data.define(:append_result, :record, :duplicate)
 
     class Writer
       attr_reader :task_folder, :path, :lock_path
@@ -74,7 +86,77 @@ module Hive
         raise Error, "authoritative journal append failed: #{e.class}: #{e.message}"
       end
 
+      # Compute and append an authoritative transition while holding the
+      # task-journal lock. The builder sees the current journal, so retry
+      # counters cannot race. Duplicate terminal delivery returns the original
+      # event without writing another line.
+      def append_idempotent(idempotency_key:)
+        unless idempotency_key.is_a?(String) && !idempotency_key.empty?
+          raise InvalidRecord, "idempotency_key must be a non-empty string"
+        end
+
+        with_lock do
+          existing_records = read_records_locked
+          existing = existing_records.find do |record|
+            record.dig("payload", "idempotency_key") == idempotency_key
+          end
+          if existing
+            return IdempotentAppendResult.new(
+              append_result: current_result(existing_records),
+              record: existing,
+              duplicate: true
+            )
+          end
+
+          attributes = yield(existing_records)
+          payload = (attributes[:payload] || attributes["payload"] || {}).merge(
+            "idempotency_key" => idempotency_key
+          )
+          attributes = attributes.merge(payload: payload)
+          record = Envelope.authoritative(attributes, id_generator: @id_generator, clock: @clock)
+          validate!(record)
+          append_lines_locked([ record ])
+          result = current_result(existing_records + [ record ])
+          IdempotentAppendResult.new(append_result: result, record: record, duplicate: false)
+        end
+      rescue Error
+        raise
+      rescue SystemCallError, IOError, JSON::GeneratorError, JSON::ParserError => e
+        raise Error, "authoritative journal append failed: #{e.class}: #{e.message}"
+      end
+
       private
+
+      def read_records_locked
+        return [] unless File.exist?(path)
+
+        File.readlines(path, chomp: true).filter_map do |line|
+          next if line.empty?
+
+          JSON.parse(line)
+        end
+      end
+
+      def append_lines_locked(records)
+        lines = records.map { |record| "#{JSON.generate(record)}\n" }.join
+        File.open(path, File::WRONLY | File::APPEND | File::CREAT, 0o644, encoding: "UTF-8") do |file|
+          written = file.syswrite(lines)
+          raise IOError, "short journal append" unless written == lines.bytesize
+
+          file.flush
+          file.fsync
+        end
+      end
+
+      def current_result(records)
+        bytes = File.exist?(path) ? File.binread(path) : ""
+        AppendResult.new(
+          cursor: bytes.bytesize,
+          event_id: records.reverse_each.find { |record| record["event_id"] }&.fetch("event_id", nil),
+          journal_hash: ::Digest::SHA256.hexdigest(bytes),
+          records: records.freeze
+        )
+      end
 
       def with_lock
         FileUtils.mkdir_p(task_folder)

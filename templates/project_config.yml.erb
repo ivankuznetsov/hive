@@ -239,6 +239,9 @@ review:
 # Disable per-project by flipping this flag and running `hive daemon reload`.
 daemon:
   enabled: <%= daemon_enabled %>
+  # Optional whole-project override of the global error-agnostic retry
+  # ladder. The last delay repeats indefinitely.
+  # retry_backoff_sec: [60, 60, 60, 300, 600, 3600]
 
 # Experimental hive-babysitter: watches open PRs out-of-band and asks
 # the development agent to keep them mergeable (rebase, conflicts, red CI).

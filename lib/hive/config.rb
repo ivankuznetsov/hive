@@ -329,9 +329,7 @@ module Hive
       "daemon" => {
         "enabled" => false,
         "autostart" => false,
-        "auto_retry" => {
-          "enabled" => true
-        },
+        "retry_backoff_sec" => [ 60, 60, 60, 300, 600, 3600 ],
         "poll_interval_sec" => 30,
         "fast_poll_sec" => 1,
         "edit_debounce_sec" => 30,
@@ -342,7 +340,6 @@ module Hive
         # Patrol scans (`hive patrol PROJECT`) run on their own budget so a
         # long codex-backed scan never consumes a task-dispatch slot.
         "max_concurrent_patrol_scans" => 1,
-        "transient_retry_backoff_sec" => 60,
         "shutdown_grace_sec" => 600,
         # R-02: per-child wall-clock timeout for daemon-spawned `hive`
         # children. `child_timeout_sec` is the default cap (0 disables —
@@ -701,6 +698,7 @@ module Hive
     EXPLICIT_CLAUDE_MODE_KEY = :__hive_explicit_claude_mode
     EXPLICIT_BRAINSTORM_RUNTIME_KEY = :__hive_explicit_brainstorm_runtime
     EXPLICIT_RESOURCE_LIMITS_KEY = :__hive_explicit_resource_limits
+    EXPLICIT_DAEMON_RETRY_BACKOFF_KEY = :__hive_explicit_daemon_retry_backoff
     RESOURCE_LIMIT_FIELDS = %w[budget_usd timeout_sec].freeze
 
     module_function
@@ -769,6 +767,7 @@ module Hive
       merged[EXPLICIT_CLAUDE_MODE_KEY] = nested_key?(data, "claude", "mode")
       merged[EXPLICIT_BRAINSTORM_RUNTIME_KEY] = nested_key?(data, "brainstorm", "runtime")
       merged[EXPLICIT_RESOURCE_LIMITS_KEY] = explicit_resource_limits(data)
+      merged[EXPLICIT_DAEMON_RETRY_BACKOFF_KEY] = nested_key?(data, "daemon", "retry_backoff_sec")
       inject_bot_runtime_path_defaults!(merged)
       validate!(merged, candidate)
       merged
@@ -834,6 +833,20 @@ module Hive
         cursor = cursor[key]
       end
       true
+    end
+
+    # Project defaults are merged into Config.load, so presence alone cannot
+    # decide precedence. Only an explicitly authored project value overrides
+    # the global daemon ladder.
+    def retry_backoff(cfg, global_daemon: nil)
+      explicit = if cfg.key?(EXPLICIT_DAEMON_RETRY_BACKOFF_KEY)
+        cfg[EXPLICIT_DAEMON_RETRY_BACKOFF_KEY] == true
+      else
+        nested_key?(cfg, "daemon", "retry_backoff_sec")
+      end
+      return cfg.dig("daemon", "retry_backoff_sec") if explicit
+
+      (global_daemon || load_global_daemon).fetch("retry_backoff_sec")
     end
 
     # Resolve a workflow descriptor's per-stage resource default without
@@ -2356,7 +2369,6 @@ module Hive
     #                                      under heavy load
     #   max_concurrent_*  >= 1         — caps below 1 disable dispatch
     #   max_runs_per_day_per_project >= 1
-    #   transient_retry_backoff_sec >= 1
     #   shutdown_grace_sec >= 0        — 0 means "no grace, immediate
     #                                    SIGTERM on stop"; valid choice
     #   log_max_bytes >= 1024          — anything smaller breaks Logger
@@ -2370,7 +2382,6 @@ module Hive
       [ "max_concurrent_per_project", 1 ],
       [ "max_concurrent_patrol_scans", 1 ],
       [ "max_runs_per_day_per_project", 1 ],
-      [ "transient_retry_backoff_sec", 1 ],
       [ "shutdown_grace_sec", 0 ],
       # child_timeout_sec >= 0  — 0 disables the per-child wall-clock cap
       # child_kill_grace_sec >= 0 — 0 means "SIGKILL on the next timeout tick after TERM"
@@ -2422,17 +2433,21 @@ module Hive
               "(true / false); got #{autostart.inspect} (#{autostart.class})"
       end
 
-      auto_retry = daemon["auto_retry"]
-      unless auto_retry.nil? || auto_retry.is_a?(Hash)
+      retired = %w[
+        auto_retry transient_retry_backoff_sec retry_backoff_by_error
+        retry_backoff_by_provider retry_backoff_by_stage
+      ].select { |key| daemon.key?(key) }
+      unless retired.empty?
         raise ConfigError,
-              "daemon.auto_retry in #{describe_source(source_path)} must be a hash; " \
-              "got #{auto_retry.inspect} (#{auto_retry.class})"
+              "daemon in #{describe_source(source_path)} contains retired retry keys: #{retired.join(', ')}"
       end
-      auto_retry_enabled = auto_retry && auto_retry["enabled"]
-      unless auto_retry_enabled.nil? || auto_retry_enabled == true || auto_retry_enabled == false
+
+      schedule = daemon["retry_backoff_sec"]
+      unless schedule.is_a?(Array) && !schedule.empty? &&
+             schedule.all? { |value| value.is_a?(Integer) && value.positive? }
         raise ConfigError,
-              "daemon.auto_retry.enabled in #{describe_source(source_path)} must be a boolean " \
-              "(true / false); got #{auto_retry_enabled.inspect} (#{auto_retry_enabled.class})"
+              "daemon.retry_backoff_sec in #{describe_source(source_path)} must be a non-empty " \
+              "array of positive integer seconds"
       end
 
       DAEMON_NUMERIC_BOUNDS.each do |key, min|

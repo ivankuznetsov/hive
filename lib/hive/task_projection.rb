@@ -87,7 +87,7 @@ module Hive
       current_attempt = current.reject { |fact| fact["state"] == "pending" }
                                .max_by { |fact| fact.fetch("journal_index", -1) }
                                &.fetch("attempt_id", nil)
-      @data = self.class.canonical(
+      projected = {
         "schema" => SCHEMA,
         "schema_version" => SCHEMA_VERSION,
         "journal" => {
@@ -115,7 +115,10 @@ module Hive
         },
         "compatibility" => legacy_compatibility(authoritative),
         "shadow_audit" => Hive::Conditions::ShadowAudit.summary(records: authoritative)
-      )
+      }
+      retry_value = retry_projection(generation)
+      projected["retry"] = retry_value if retry_value
+      @data = self.class.canonical(projected)
       rule = Hive::Conditions::Policy.default.rule_for("execute_to_open_pr")
       @data["gates"][rule.transition] = Hive::Conditions::GateEvaluator.new(
         projection: @data, rule: rule
@@ -145,6 +148,15 @@ module Hive
     end
 
     private
+
+    def retry_projection(generation)
+      event = authoritative_records.reverse.find do |record|
+        record["event_type"].to_s.start_with?("retry_") &&
+          record["task_generation"] == generation &&
+          record.fetch("payload", {}).key?("retry")
+      end
+      event && deep_copy(event.dig("payload", "retry"))
+    end
 
     def authoritative_records
       @authoritative_records ||= @records.select do |record|

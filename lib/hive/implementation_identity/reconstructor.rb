@@ -161,7 +161,8 @@ module Hive
 
       def execute_attempts
         @execute_attempts ||= @attempt_store.scan.records.select do |attempt|
-          attempt["task_slug"] == @task.slug.to_s && attempt["intended_stage"] == "4-execute"
+          attempt["task_slug"] == @task.slug.to_s &&
+            attempt["intended_stage"] == "4-execute" # coding-scoped: legacy execute reconstruction
         end.sort_by { |attempt| attempt["accepted_at"].to_s }
       end
 

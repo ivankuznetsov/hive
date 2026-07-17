@@ -489,3 +489,7 @@ still has no project-scoped promotion/rollback CLI or public snapshot-rebuild
 command; those are operator-ergonomics follow-ups rather than authority gaps,
 because marker mode remains default, status replays snapshots read-only, and
 promotion is deliberately explicit/manual.
+
+## Pi/Grok concrete-default config discovery needs live drift monitoring (2026-07-17)
+
+Implementation ownership resolves pi from project/home `settings.json` and Grok from project/home `settings.json` or top-level `config.toml`, extracting only provider/model identifiers. Deterministic tests cover those current shapes and ensure PR opening remains unpinned, but neither CLI publishes a Hive-stable config schema. A future upstream path/key change will intentionally fail before execute capture rather than serialize `default` or route to another provider. The next verified CLI upgrade should re-check these read-only paths and update the headless matrix plus fixtures if native configuration moved.

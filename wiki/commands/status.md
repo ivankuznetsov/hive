@@ -76,6 +76,12 @@ Every task row has `depends_on`, `blocked_by`, `dependency_stage`, `blocked`, an
 
 Text/TUI render a benign wait as `⏸ blocked by <task> (<stage>)`. Admission errors render the stable reason and safe correction ahead of ordinary waits and are never described as waiting on an in-flight task. An unexpected validator exception becomes `dependency_validation_failed`, never an unblocked row.
 
+### Implementation ownership
+
+Coding task rows may also carry `implementation_identity`: the numeric generation, a pending flag, and stage entries for `execute`, `open_pr`, `review.fix`, and `review.ci`. Resolved entries come from projected journal launch events; unlaunched downstream entries are read-only previews from the persisted execute owner plus raw override provenance. Each entry exposes provider, concrete model, requested/effective effort, support, source (`persisted_execute`, `explicit_override`, or `legacy_backfill`), attempts, and resolved/preview status. Unsupported effort is rendered as requested but not applied.
+
+Repeated CLI/TUI/web status reads never reconstruct legacy ownership or append journal events. Text and TUI rows append a bounded execute-owner token after primary error/dependency signals; `I` opens the TUI's full four-stage table, and Hivebox task details show the same projection.
+
 ## Archived tasks
 
 `Hive::ArchiveFilter` is the shared policy for day-to-day archive hiding. A row is hideable when `stage == Hive::Stages::DIRS.last` (`9-done`), the row timestamp is present, and `(now - mtime) > 3 days`. Marker state is not part of the policy: complete, unresolved, and markerless done rows all use the same age rule. The policy uses the task row's `mtime` (state-file mtime, the same timestamp rendered as row age) rather than `folder_mtime`, because sidecar updates such as `meta.yml` display-name backfills can touch the directory without making the archived task newly relevant. Older consumers that only have `folder_mtime` still get it as a fallback. If neither timestamp is available, the filter fails open and keeps the row visible rather than guessing. `hive archive` remains the full view.

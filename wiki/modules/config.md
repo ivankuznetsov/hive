@@ -7,7 +7,7 @@ updated: 2026-07-17
 tags: [config, yaml, validation]
 ---
 
-**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects plus daemon, bot, digest, update, web, and Screenote base-url settings, including voice-transcription defaults; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, default workflow, worktree root, budgets, timeouts, **stage agents**, project/top-level and per-stage `permissions`, project-global `claude.mode`/`claude.permission_mode` plus `claude.model`/`claude.effort` pins, review-stage roles, daemon enrollment, experimental babysitter enrollment, ordinary patrol, and scheduled architecture patrol). Architecture-patrol discovery, auto-fixing, and issue filing are independent consent gates. `Config.load(project_root)` resolves `patrol.mode` into scheduler knobs, **recursively** deep-merges per-project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays are replaced wholesale, never per-element merged. Screenote OAuth tokens live outside YAML in `screenote.json`, created by `hive connect screenote`.
+**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects plus daemon, bot, digest, update, web, and Screenote base-url settings, including voice-transcription defaults; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, default workflow, worktree root, budgets, timeouts, **stage agents**, project/top-level and per-stage `permissions`, project-global `claude.mode`/`claude.permission_mode` plus `claude.model`/`claude.effort` pins, review-stage roles, daemon enrollment, experimental babysitter enrollment, ordinary patrol, and scheduled architecture patrol). Architecture-patrol discovery, auto-fixing, and issue filing are independent consent gates. `Config.load(project_root)` captures frozen raw field provenance for implementation-owning `agent`/`model`/`effort` keys before it **recursively** deep-merges project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays are replaced wholesale, never per-element merged. Screenote OAuth tokens live outside YAML in `screenote.json`, created by `hive connect screenote`.
 
 ## Condition authority
 
@@ -23,6 +23,12 @@ permits explicit `conditions` authority only for `4-execute`; trying it on any
 other stage is a config error. Hive never promotes this field automatically.
 See [[modules/conditions]] and the
 [rollout runbook](../../docs/condition-rollout.md).
+
+## Implementation identity provenance
+
+`Config.load` records whether `agent`, `model`, and `effort` were actually authored under `execute`, `open_pr`, `review.fix`, and `review.ci` before defaults are merged. `Hive::ImplementationIdentity::Resolver` consumes that frozen map, so absence means automatic inheritance and an authored value equal to a former default still counts as an override. Fresh templates omit downstream identity fields and show commented override examples. There is no inheritance sentinel or configurable utility-model map.
+
+The built-in downstream policy is `open_pr=medium`, `review.fix=high`, and `review.ci=high`. PR opening keeps the execute provider and maps Claude to `sonnet`, Codex to `gpt-5.6-terra`, and pi/grok to their provider-native default without a pin. Both review repair paths retain the exact execute model. Authored fields override individually; an authored cross-provider agent with no model uses that provider's concrete default rather than pairing it with another provider's model. Independent `review.reviewers`, `review.triage`, and `review.browser_test` configuration is unchanged.
 
 ## Defaults (`Config::DEFAULTS`)
 
@@ -56,15 +62,13 @@ See [[modules/conditions]] and the
     "review_ci" => 3600, "review_triage" => 1800,
     "review_fix" => 14400, "review_browser" => 3600, "patrol" => 3600, "digest" => 1800
   },
-  # Stage-level agent for single-agent stages (ADR-023). 6-review
-  # keeps its own per-role agent fields under review.{ci,triage,fix,
-  # browser_test}.agent. Runtime fallback is `cfg.dig("<stage>", "agent")
-  # || "claude"` (see Hive::Stages::Base.stage_profile in
-  # [[modules/stages]]) so legacy configs keep working.
+  # Stage-level agent defaults remain for independently owned stages.
+  # Implementation-owned downstream stages intentionally omit active
+  # agent/model/effort defaults so the persisted execute owner applies.
   "brainstorm" => { "agent" => "claude", "runtime" => "headless" }, # runtime is legacy read-back-compat
   "plan"       => { "agent" => "claude" },
   "execute"    => { "agent" => "claude" },  # rendered template recommends `codex`
-  "open_pr"    => { "agent" => "claude" },
+  "open_pr"    => {},
   "artifacts"  => { "agent" => "claude" },
   "finalize"   => { "agent" => "claude" },
   "agents" => {
@@ -74,13 +78,13 @@ See [[modules/conditions]] and the
     "grok"   => { "bin" => "grok",   "env_override" => "HIVE_GROK_BIN",   "min_version" => "0.2.90" }
   },
   "review" => {
-    "ci"           => { "command" => nil, "max_attempts" => 3, "agent" => "claude",
+    "ci"           => { "command" => nil, "max_attempts" => 3,
                         "prompt_template" => "ci_fix_prompt.md.erb" },
     "reviewers"    => [],
     "adhoc"        => { "reviewers" => nil, "fix" => false },
     "triage"       => { "enabled" => true, "agent" => "claude", "bias" => "courageous",
                         "prompt_template" => nil, "custom_prompt" => nil },
-    "fix"          => { "agent" => "claude", "prompt_template" => "fix_prompt.md.erb" },
+    "fix"          => { "prompt_template" => "fix_prompt.md.erb" },
     "browser_test" => { "enabled" => false, "agent" => "claude",
                         "prompt_template" => "browser_test_prompt.md.erb", "max_attempts" => 2 },
     "max_passes"        => 2,

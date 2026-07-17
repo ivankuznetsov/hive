@@ -187,6 +187,12 @@ lost attempt state reconciles current `AgentHealthy` even before the daemon
 lifecycle observation lands.
 See [[modules/conditions]].
 
+### Implementation identity events
+
+The same task journal is the sole authority for implementation ownership. `implementation_identity_captured` and `implementation_identity_backfilled` retain one immutable execute identity per numeric task generation; `implementation_identity_fallback` makes last-resort legacy config recovery visible; and `implementation_stage_resolved` records the actual PR-opening or repair selection before its process starts. The projection retains execute history and the latest stage resolution for the current generation. Idempotency keys make equivalent retries no-ops and reject conflicting captures.
+
+The identity stores only provider, concrete model, profile/launcher label, source, generation, originating/resolved attempt, model-pin policy, and requested/effective effort support. Credentials, arbitrary provider configuration, prompts, and raw environment values are excluded. Any compatibility snapshot is cursor/hash-validated and replaceable from the journal.
+
 ## Runtime dispatch queue and web snapshots
 
 The daemon's producer queue lives under `$HIVE_HOME/dispatch_requests/`
@@ -541,16 +547,14 @@ timeout_sec:
   review_triage: 1800
   review_fix: 14400
   review_browser: 3600
-# Stage-level agent for the three single-agent stages (ADR-023). The
-# 6-review stage keeps per-role agent fields under `review.{ci,triage,
-# fix,browser_test}.agent`. Runtime fallback in stage code stays
-# `cfg.dig("<stage>", "agent") || "claude"`, so legacy configs without
-# these keys keep working.
+# Stage-level agent defaults remain for independently owned stages.
+# open_pr and review ci/fix omit active identity defaults so the persisted
+# generation-scoped execute owner applies; raw authored fields override it.
 claude:     { mode: tmux, permission_mode: bypassPermissions }  # mode is tmux | headless; permission_mode applies to every Claude-backed launch in both tmux and headless mode via `AgentProfile#permission_flags` (`bypassPermissions` default → `--dangerously-skip-permissions`, otherwise `--permission-mode <mode>`; `auto` for Claude Code auto-mode rules). DEFAULTS-seeded — always non-nil after Config.load. `Config.explicit_claude_mode?` is a strict `EXPLICIT_CLAUDE_MODE_KEY == true` check (no dig fallback) so synthesised cfgs in tests/daemon helpers must set the flag themselves. Applies to every Claude-backed launch via `Hive::ClaudeLauncher` (shared tmux envelope across brainstorm/plan/execute/open_pr/artifacts/finalize/review). `hive doctor` surfaces the active mode.
 brainstorm: { agent: claude, runtime: headless }  # runtime is legacy read-back-compat only
 plan:       { agent: claude }
 execute:    { agent: claude }   # rendered template recommends `codex`; DEFAULTS stays `claude`
-open_pr:    { agent: claude }
+open_pr:    {}
 artifacts:  { agent: claude }
 finalize:   { agent: claude }
 agents:                 # per-CLI profile overrides (claude, codex, pi, grok)
@@ -559,10 +563,9 @@ agents:                 # per-CLI profile overrides (claude, codex, pi, grok)
   pi:     { bin: pi,     env_override: HIVE_PI_BIN,     min_version: 0.70.2 }
   grok:   { bin: grok,   env_override: HIVE_GROK_BIN,   min_version: 0.2.90 }
 review:                 # 6-review stage config (U2)
-  ci:           { command: null, max_attempts: 3, agent: claude, prompt_template: ci_fix_prompt.md.erb }
+  ci:           { command: null, max_attempts: 3, prompt_template: ci_fix_prompt.md.erb }
   triage:       { enabled: true, agent: claude, bias: courageous, prompt_template: null, custom_prompt: null }
   fix:
-    agent: claude
     prompt_template: fix_prompt.md.erb
     auto_commit:
       sign_policy: inherit   # inherit | bypass | fail

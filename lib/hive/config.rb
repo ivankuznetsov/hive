@@ -78,11 +78,10 @@ module Hive
         "patrol" => 3600,
         "digest" => 1800
       },
-      # Stage-level agent for single-agent stages. The review
-      # stage has its own per-role agent fields under "review.{ci,triage,
-      # fix,browser_test}.agent". Runtime fallback in stage code stays
-      # `cfg.dig("<stage>", "agent") || "claude"` so legacy configs without
-      # these keys keep behaving as today (ADR-023). The recommended-default
+      # Stage-level agents remain for independently owned stages. Execute is
+      # captured once per generation; open_pr plus review ci/fix intentionally
+      # omit identity defaults so the persisted owner applies. Triage,
+      # browser-test, and reviewer identities remain independent. The recommended-default
       # for execute is `codex` only at the rendered-template level, not in
       # DEFAULTS itself, to avoid silently flipping the implementer for old
       # projects on next load.

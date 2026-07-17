@@ -550,12 +550,22 @@ module Hive
         derive_flags_from_cfg = cli_flags.nil? && identity_arguments.nil?
         cli_flags ||= []
         if identity_arguments.nil? && (model || effort)
-          concrete_model = model || profile.concrete_default_model(
-            cfg: cfg, project_root: cfg && cfg["project_root"]
-          )
-          identity_arguments = profile.identity_arguments(
-            model: concrete_model, effort: effort
-          ).native_arguments
+          if profile.model_argument_builder
+            concrete_model = model || profile.concrete_default_model(
+              cfg: cfg, project_root: cfg && cfg["project_root"]
+            )
+            identity_arguments = profile.identity_arguments(
+              model: concrete_model, effort: effort
+            ).native_arguments
+          else
+            # Old-shape custom profiles predate normalized identity
+            # capabilities. Preserve their historical launch behavior for
+            # this legacy call form; implementation-owning stages pass an
+            # already-resolved identity_arguments array and never use this
+            # compatibility path.
+            warn_model_effort_dropped(task, profile, model: model, effort: effort)
+            identity_arguments = []
+          end
         elsif derive_flags_from_cfg && cfg && profile.name == :claude
           permission_mode ||= Hive::Config.claude_permission_mode(cfg)
           cli_flags = Hive::Config.claude_cli_flags(cfg, model: model, effort: effort)
@@ -712,7 +722,7 @@ module Hive
         fields = { "model" => model, "effort" => effort }.compact
         message = "[hive] agent profile #{profile.name.inspect} does not honor per-stage " \
                   "#{fields.map { |key, value| "#{key}=#{value.inspect}" }.join(', ')}; " \
-                  "these are only applied on the :claude profile and are ignored for this spawn."
+                  "the profile has no normalized model capability, so they are ignored for this spawn."
         write_spawn_warning(task, "config-warnings.log", message)
       end
 

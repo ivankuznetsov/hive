@@ -54,4 +54,26 @@ class StatusBroadcasterTest < ActiveSupport::TestCase
     StatusBroadcaster.send(:remove_const, :RETRY_SEC)
     StatusBroadcaster.const_set(:RETRY_SEC, original_retry)
   end
+
+
+  test "scheduler and projects are replaced from the same payload" do
+    payload = {
+      "scheduler" => { "summary" => "1/3 task slots used." },
+      "projects" => [ { "name" => "demo", "tasks" => [] } ]
+    }
+    replacement = nil
+    refresh = ->(*) { }
+    replace = lambda do |*args, **kwargs|
+      replacement = [ args, kwargs ]
+    end
+
+    Turbo::StreamsChannel.stub(:broadcast_refresh_to, refresh) do
+      Turbo::StreamsChannel.stub(:broadcast_replace_to, replace) do
+        StatusBroadcaster.send(:broadcast, payload)
+      end
+    end
+
+    assert_equal payload["projects"], replacement.last.dig(:locals, :projects)
+    assert_equal payload["scheduler"], replacement.last.dig(:locals, :scheduler)
+  end
 end

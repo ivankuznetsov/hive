@@ -16,6 +16,16 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_response :success
     assert_match @slug, response.body
     assert_select "#projects", 1
+    assert_select "#projects > .state-banner", text: /task slots used/
+  end
+
+  test "task detail renders canonical scheduling proof without new controls" do
+    get "/tasks/#{@project}/#{@slug}"
+
+    assert_response :success
+    assert_select "#task-state .state-banner", text: /task daemon is not running/i
+    assert_select "#task-state .state-banner", text: /safe action/i
+    assert_select "#task-state button", { text: /restart daemon|force retry/i, count: 0 }
   end
 
   test "an unpassable stage offers Force approve, never a doomed Approve" do

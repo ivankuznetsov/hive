@@ -358,7 +358,7 @@ module Hive
         end
         proof = scheduling_proof_for(row, payload)
         payload["scheduling_proof"] = proof
-        row[:scheduling_proof] = proof
+        row[:scheduling_proof] = proof unless row.frozen?
         payload
       end
 

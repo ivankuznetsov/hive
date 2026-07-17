@@ -9,7 +9,8 @@ class HiveBotNotificationBuildersTest < Minitest::Test
 
   def row(action:, marker:, attrs: {}, slug: "slug-260514-abcd", stage: "2-brainstorm",
           diagnostic: nil, id: nil, display_name: nil, pr_url: nil, workflow: "coding",
-          folder: "/tmp/slug-260514-abcd", state_file: nil, suggested_command: nil, next_action: nil)
+          folder: "/tmp/slug-260514-abcd", state_file: nil, suggested_command: nil, next_action: nil,
+          scheduling_proof: nil)
     Row.new(
       project: "hive",
       slug: slug,
@@ -26,6 +27,7 @@ class HiveBotNotificationBuildersTest < Minitest::Test
       suggested_command: suggested_command,
       next_action: next_action,
       diagnostic: diagnostic,
+      scheduling_proof: scheduling_proof,
       pr_url: pr_url
     )
   end
@@ -398,6 +400,24 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     assert_includes text, "Attrs: reason=operator"
     assert_includes text, "Open on a laptop to advance."
     refute_includes text, "No diagnostic available"
+  end
+
+  def test_details_reply_includes_canonical_proof_without_adding_actions
+    proof = {
+      "summary" => "Provider circuit is open.", "freshness" => { "stale" => true },
+      "dependency" => nil, "babysitter" => { "blocker" => "checks_failing" },
+      "retry" => { "next_probe_at" => "2026-07-17T12:30:00Z" },
+      "action" => { "text" => "Wait for checks and the next probe." }
+    }
+    text = Hive::Bot::NotificationBuilders.details_reply(
+      row(action: "needs_input", marker: "waiting", scheduling_proof: proof)
+    )
+
+    assert_includes text, "Scheduling: Provider circuit is open."
+    assert_includes text, "Freshness: stale"
+    assert_includes text, "Blocker: checks_failing"
+    assert_includes text, "Retry/probe: 2026-07-17T12:30:00Z"
+    assert_includes text, "Safe action: Wait for checks and the next probe."
   end
 
   def test_details_reply_prefers_structured_next_step_when_available

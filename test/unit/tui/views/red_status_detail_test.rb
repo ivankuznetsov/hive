@@ -7,7 +7,7 @@ class HiveTuiViewsRedStatusDetailTest < Minitest::Test
   def row(diagnostic: nil, action_key: "recover_review", stage: "6-review",
           marker: "review_error", attrs: { "phase" => "fix", "pass" => "2" },
           folder: nil, slug: "red-task", id: 42, display_name: "Red Task",
-          worktree_path: "/tmp/red-task-worktree")
+          worktree_path: "/tmp/red-task-worktree", scheduling_proof: nil)
     folder ||= "/tmp/demo/.hive-state/stages/#{stage}/#{slug}"
     Hive::Tui::Snapshot::Row.new(
       project_name: "alpha", stage: stage, slug: slug, id: id, display_name: display_name, folder: folder,
@@ -16,7 +16,8 @@ class HiveTuiViewsRedStatusDetailTest < Minitest::Test
       attrs: attrs, mtime: nil, age_seconds: 0,
       claude_pid: nil, claude_pid_alive: nil,
       action_key: action_key, action_label: "Needs recovery",
-      suggested_command: nil, next_action: nil, diagnostic: diagnostic
+      suggested_command: nil, next_action: nil, diagnostic: diagnostic,
+      scheduling_proof: scheduling_proof
     )
   end
 
@@ -80,6 +81,24 @@ class HiveTuiViewsRedStatusDetailTest < Minitest::Test
     refute_includes output, "pass=2"
     refute_includes output, "Q: Why is this red?"
     refute_includes output, "Q: What can Hive do next?"
+  end
+
+  def test_renders_canonical_proof_freshness_blocker_retry_and_action
+    proof = {
+      "summary" => "Provider circuit is open.",
+      "freshness" => { "stale" => true },
+      "dependency" => { "blocked_by" => "base-task" },
+      "babysitter" => nil,
+      "retry" => { "next_probe_at" => "2026-07-17T12:30:00Z" },
+      "action" => { "text" => "Wait for the provider probe." }
+    }
+
+    output = Hive::Tui::Views::RedStatusDetail.render(model_for(row(scheduling_proof: proof)))
+
+    assert_includes output, "Provider circuit is open. (stale)"
+    assert_includes output, "Blocker: base-task"
+    assert_includes output, "Retry/probe: 2026-07-17T12:30:00Z"
+    assert_includes output, "Safe action: Wait for the provider probe."
   end
 
   def test_header_bar_is_single_row_with_status_project_stage_slug_and_worktree

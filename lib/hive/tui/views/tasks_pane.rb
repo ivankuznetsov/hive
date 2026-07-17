@@ -237,6 +237,9 @@ module Hive
         # dependency block. Shared by status_label so the blocked and
         # unblocked paths compute the same base label.
         def action_state_label(row)
+          proof_summary = Hive::Tui::Text.sanitize(row.scheduling_proof&.fetch("summary", nil))
+          return proof_summary unless proof_summary.empty?
+
           return admission_error_status(row) if row.action_key.to_s == "admission_error"
           return review_recovery_status(row) if row.action_key.to_s == "recover_review"
           return error_status(row) if row.action_key.to_s == "error"

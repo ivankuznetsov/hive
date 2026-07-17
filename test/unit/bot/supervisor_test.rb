@@ -11,7 +11,8 @@ class HiveBotSupervisorTest < Minitest::Test
                    :marker, :attrs, :diagnostic,
                    :id, :display_name, :pr_url,
                    keyword_init: true)
-  StatusResult = Struct.new(:ok, :rows, :legacy_stage_dirs, :error, :envelope, :warning, keyword_init: true)
+  StatusResult = Struct.new(:ok, :rows, :legacy_stage_dirs, :error, :envelope, :warning, :scheduler,
+                            keyword_init: true)
 
   FakeTelegram = Struct.new(:messages, :raise_on_send, :keyboard_clears,
                             :commands_registered, :raise_on_set_my_commands, keyword_init: true) do
@@ -1591,6 +1592,15 @@ class HiveBotSupervisorTest < Minitest::Test
     refute_includes text, "COMPLETE"
     refute_includes text, "done"
     refute_includes text, "running"
+  end
+
+  def test_render_queue_prefixes_canonical_scheduler_summary
+    text = @supervisor.send(
+      :render_queue, [ row(slug: "proof-row") ],
+      scheduler: { "summary" => "1/3 task slots used; 2 unused <live>." }
+    )
+
+    assert_includes text, "1/3 task slots used; 2 unused &lt;live&gt;."
   end
 
   # The cap path is the fixture most likely to exceed Telegram's 4096-char

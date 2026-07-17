@@ -19,6 +19,7 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
                 folder_mtime: "2026-05-01T00:00:00Z",
                 depends_on: nil, blocked_by: nil, dependency_stage: nil,
                 blocked: false, admission_error: nil,
+                scheduling_proof: nil,
                 suggested: "hive plan #{slug} --from 2-brainstorm")
     {
       "slug" => slug,
@@ -43,7 +44,7 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
       "action" => action,
       "action_label" => action_label,
       "suggested_command" => suggested
-    }
+    }.merge("scheduling_proof" => scheduling_proof)
   end
 
   def make_snapshot(projects)
@@ -89,6 +90,17 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     ])
     out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap, scope: 2), width: 80)
     assert_includes out, "Tasks · myapp"
+  end
+
+  def test_status_column_uses_canonical_proof_summary
+    proof = { "summary" => "Provider circuit is open." }
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [ make_task(slug: "proof-row", scheduling_proof: proof) ] }
+    ])
+
+    out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 110)
+
+    assert_includes out, "Provider circuit is open."
   end
 
   def test_render_omits_old_clean_archived_rows_but_keeps_visible_rows

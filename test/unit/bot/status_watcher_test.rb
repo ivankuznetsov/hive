@@ -103,6 +103,20 @@ class HiveBotStatusWatcherTest < Minitest::Test
     end
   end
 
+  def test_fetch_preserves_scheduler_and_task_proof
+    payload = envelope([ task(slug: "proof-task").merge(
+      "scheduling_proof" => { "reason" => "retry_wait", "summary" => "Waiting for retry." }
+    ) ])
+    payload["scheduler"] = { "summary" => "0/3 task slots used; 3 unused." }
+
+    with_fake_status(JSON.generate(payload)) do |bin|
+      result = Hive::Bot::StatusWatcher.new(hive_bin: bin).fetch
+
+      assert_equal payload["scheduler"], result.scheduler
+      assert_equal "retry_wait", result.rows.first.scheduling_proof.fetch("reason")
+    end
+  end
+
   def test_tick_fetches_status_rows
     with_fake_status(JSON.generate(envelope([ task(slug: "tick-task") ]))) do |bin|
       result = Hive::Bot::StatusWatcher.new(hive_bin: bin).tick(now: Time.utc(2026, 1, 1))

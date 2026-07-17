@@ -428,13 +428,30 @@ module Hive
         # details_summary / details_hint always return non-nil strings, so the
         # array needs no compaction; diagnostic_detail may be nil, so only that
         # tail is compacted before joining.
-        sections = [ details_summary(row), details_hint(row) ]
+        sections = [ details_summary(row), scheduling_proof_detail(row), details_hint(row) ].compact
         diagnostic = diagnostic_detail(row)
         text = (sections + [ diagnostic&.text ].compact).join("\n\n")
         return text if text.length <= TELEGRAM_MESSAGE_MAX_CHARS
         return truncate_diagnostic_reply(sections, diagnostic, text) if diagnostic
 
         truncate_text(text)
+      end
+
+      def scheduling_proof_detail(row)
+        proof = row.respond_to?(:scheduling_proof) ? row.scheduling_proof : nil
+        return nil unless proof.is_a?(Hash)
+
+        freshness = proof["freshness"] || {}
+        lines = [
+          "Scheduling: #{proof['summary']}",
+          "Freshness: #{freshness['stale'] ? 'stale' : 'fresh'}"
+        ]
+        blocker = proof.dig("dependency", "blocked_by") || proof.dig("babysitter", "blocker")
+        retry_at = proof.dig("retry", "retry_after") || proof.dig("retry", "next_probe_at")
+        lines << "Blocker: #{blocker}" if blocker
+        lines << "Retry/probe: #{retry_at}" if retry_at
+        lines << "Safe action: #{proof.dig('action', 'text')}"
+        lines.join("\n")
       end
 
       def recovery_match_attr(row)

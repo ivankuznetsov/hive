@@ -11,7 +11,7 @@ module Hive
                         :condition_task_generation, :commit_generation, :current_attempt,
                         :conditions, :condition_history, :evidence, :condition_gate,
                         :condition_migration, :condition_provenance, :shadow_audit,
-                        :condition_warning) do
+                        :condition_warning, :scheduling_proof) do
         def initialize(project:, slug:, id: nil, display_name: nil, project_path: nil, hive_state_path: nil,
                        stage: nil, workflow: nil, marker: nil, attrs: {}, folder: nil,
                        state_file: nil, pr_url: nil, state_file_mtime: nil, age_seconds: nil,
@@ -20,7 +20,7 @@ module Hive
                        commit_generation: nil, current_attempt: nil, conditions: [],
                        condition_history: [], evidence: [], condition_gate: nil,
                        condition_migration: nil, condition_provenance: {}, shadow_audit: {},
-                       condition_warning: nil)
+                       condition_warning: nil, scheduling_proof: nil)
           # Explicit-keyword super (matching Snapshot::Row) rather than the
           # bare positional form, so a future member-order change in the
           # Data.define above can't silently misbind constructor arguments.
@@ -36,7 +36,7 @@ module Hive
             conditions: conditions, condition_history: condition_history, evidence: evidence,
             condition_gate: condition_gate, condition_migration: condition_migration,
             condition_provenance: condition_provenance, shadow_audit: shadow_audit,
-            condition_warning: condition_warning
+            condition_warning: condition_warning, scheduling_proof: scheduling_proof
           )
         end
       end
@@ -104,8 +104,9 @@ module Hive
       # supervisor prepends a one-line banner to the rendered `/status`
       # reply when present. nil on a clean fetch. Mirrors the daemon's
       # StatusConsumer::Result#warning.
-      Result = Data.define(:ok, :rows, :legacy_stage_dirs, :error, :envelope, :warning) do
-        def initialize(ok:, rows: [], legacy_stage_dirs: [], error: nil, envelope: nil, warning: nil)
+      Result = Data.define(:ok, :rows, :legacy_stage_dirs, :error, :envelope, :warning, :scheduler) do
+        def initialize(ok:, rows: [], legacy_stage_dirs: [], error: nil, envelope: nil, warning: nil,
+                       scheduler: nil)
           super
         end
       end
@@ -168,7 +169,8 @@ module Hive
           legacy_stage_dirs: legacy_stage_dirs,
           error: nil,
           envelope: doc,
-          warning: (skew == :newer ? forward_skew_warning(doc) : nil)
+          warning: (skew == :newer ? forward_skew_warning(doc) : nil),
+          scheduler: doc["scheduler"]
         )
       rescue JSON::ParserError => e
         failure("malformed JSON from hive status: #{e.message}")
@@ -318,7 +320,8 @@ module Hive
               condition_migration: task["condition_migration"],
               condition_provenance: task["condition_provenance"] || {},
               shadow_audit: task["shadow_audit"] || {},
-              condition_warning: task["condition_warning"]
+              condition_warning: task["condition_warning"],
+              scheduling_proof: task["scheduling_proof"]
             )
           end
         end

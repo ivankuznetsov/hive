@@ -1053,7 +1053,8 @@ module Hive
               legacy_stage_dirs = []
             end
             safe_send_message(chat_id: update.chat_id,
-                              text: render_queue(rows, legacy_stage_dirs: legacy_stage_dirs),
+                              text: render_queue(rows, legacy_stage_dirs: legacy_stage_dirs,
+                                                       scheduler: (fetch_result.scheduler if fetch_result.respond_to?(:scheduler))),
                               parse_mode: :html,
                               reply_markup: status_keyboard(rows))
           end
@@ -1533,12 +1534,16 @@ module Hive
 
       QUEUE_DISPLAY_CAP = 10
 
-      def render_queue(rows, legacy_stage_dirs: [])
+      def render_queue(rows, legacy_stage_dirs: [], scheduler: nil)
         actionable = actionable_queue_rows(rows)
+        scheduler_lines = []
+        if scheduler.is_a?(Hash) && !scheduler["summary"].to_s.empty?
+          scheduler_lines << Hive::Bot::Format.html_escape(scheduler["summary"])
+        end
         legacy_lines = legacy_stage_dirs.map do |row|
           Hive::Bot::Format.html_escape(Hive::Bot::NotificationBuilders.legacy_stage_dirs(row).text)
         end
-        return (legacy_lines + [ "No active Hive tasks." ]).join("\n") if actionable.empty?
+        return (scheduler_lines + legacy_lines + [ "No active Hive tasks." ]).join("\n") if actionable.empty?
 
         lines = actionable.first(QUEUE_DISPLAY_CAP).map do |row|
           title = Hive::Bot::Format.html_escape(Hive::Bot::NotificationBuilders.display_title(row))
@@ -1549,7 +1554,7 @@ module Hive
         if actionable.size > QUEUE_DISPLAY_CAP
           lines << "+ #{actionable.size - QUEUE_DISPLAY_CAP} more tasks — open on a laptop for the full list."
         end
-        (legacy_lines + [ header ] + lines).join("\n")
+        (scheduler_lines + legacy_lines + [ header ] + lines).join("\n")
       end
 
       def pr_link_or_dash(row)

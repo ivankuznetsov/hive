@@ -89,7 +89,8 @@ module Hive
         :next_action,
         :diagnostic,
         :live_task_lock,
-        :unanswered_questions
+        :unanswered_questions,
+        :scheduling_proof
       ) do
         # worktree_path defaults to nil so existing test factories that
         # predate PR #84 finding #8 can keep their existing Row.new
@@ -113,7 +114,8 @@ module Hive
                        folder_mtime: nil, live_task_lock: false,
                        unanswered_questions: 0, depends_on: nil,
                        blocked_by: nil, dependency_stage: nil,
-                       blocked: false, admission_error: nil, held: nil, **rest)
+                       blocked: false, admission_error: nil, held: nil,
+                       scheduling_proof: nil, **rest)
           super(id: id, display_name: display_name,
                 workflow: workflow,
                 depends_on: depends_on,
@@ -139,14 +141,16 @@ module Hive
                 held: held,
                 folder_mtime: folder_mtime,
                 live_task_lock: live_task_lock,
-                unanswered_questions: unanswered_questions, **rest)
+                unanswered_questions: unanswered_questions,
+                scheduling_proof: scheduling_proof, **rest)
         end
       end
 
-      attr_reader :generated_at, :projects
+      attr_reader :generated_at, :scheduler, :projects
 
-      def initialize(generated_at:, projects:)
+      def initialize(generated_at:, projects:, scheduler: nil)
         @generated_at = generated_at
+        @scheduler = scheduler
         @projects = projects.freeze
         freeze
       end
@@ -157,7 +161,7 @@ module Hive
         payload ||= {}
         project_payloads = Array(payload["projects"])
         projects = project_payloads.map { |p| build_project_view(p) }
-        new(generated_at: payload["generated_at"], projects: projects)
+        new(generated_at: payload["generated_at"], scheduler: payload["scheduler"], projects: projects)
       end
 
       # Rows are sorted by `Status::ACTION_LABEL_ORDER` at construction so
@@ -233,7 +237,8 @@ module Hive
           next_action: payload["next_action"],
           diagnostic: payload["diagnostic"],
           live_task_lock: payload["live_task_lock"] == true,
-          unanswered_questions: payload["unanswered_questions"].to_i
+          unanswered_questions: payload["unanswered_questions"].to_i,
+          scheduling_proof: payload["scheduling_proof"]
         ).freeze
       end
 
@@ -270,7 +275,7 @@ module Hive
             legacy_migrate_command: project.legacy_migrate_command
           ).freeze
         end
-        self.class.new(generated_at: @generated_at, projects: filtered)
+        self.class.new(generated_at: @generated_at, scheduler: @scheduler, projects: filtered)
       end
 
       def without_old_archived(now: Time.now)
@@ -278,7 +283,7 @@ module Hive
           rows = project.rows.reject { |row| old_archived_row?(row, now: now) }
           project.with(rows: rows.freeze)
         end
-        self.class.new(generated_at: @generated_at, projects: filtered)
+        self.class.new(generated_at: @generated_at, scheduler: @scheduler, projects: filtered)
       end
 
       def hidden_old_archived_count(now: Time.now)
@@ -293,9 +298,9 @@ module Hive
         return self if n.zero?
 
         if n.between?(1, @projects.size)
-          self.class.new(generated_at: @generated_at, projects: [ @projects[n - 1] ])
+          self.class.new(generated_at: @generated_at, scheduler: @scheduler, projects: [ @projects[n - 1] ])
         else
-          self.class.new(generated_at: @generated_at, projects: [])
+          self.class.new(generated_at: @generated_at, scheduler: @scheduler, projects: [])
         end
       end
 

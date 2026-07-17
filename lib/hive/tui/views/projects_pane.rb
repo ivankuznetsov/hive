@@ -54,10 +54,16 @@ module Hive
         def build_rows(model, inner_width)
           all_row = render_row(ALL_PROJECTS_LABEL, model.scope.zero?, inner_width)
           projects = (model.snapshot && model.snapshot.projects) || []
+          scheduler = model.snapshot && model.snapshot.scheduler
+          scheduler_line = scheduler && scheduler["summary"]
+          header = [
+            Styles::HEADER.render(truncate(TITLE, inner_width)),
+            Styles::HINT.render(truncate(scheduler_line || "Scheduler evidence unavailable", inner_width)),
+            ""
+          ]
           if projects.empty?
             return [
-              Styles::HEADER.render(truncate(TITLE, inner_width)),
-              "",
+              *header,
               all_row,
               Styles::HINT.render(truncate(EMPTY_PLACEHOLDER, inner_width)),
               Styles::HINT.render(truncate(EMPTY_PLACEHOLDER_HINT, inner_width))
@@ -70,8 +76,7 @@ module Hive
             render_row(label, model.scope == scope_index, inner_width)
           end
           [
-            Styles::HEADER.render(truncate(TITLE, inner_width)),
-            "",
+            *header,
             all_row,
             *project_rows
           ]
@@ -125,11 +130,11 @@ module Hive
 
         def fit_rows(rows, height:, selected_index:)
           inner_height = [ height.to_i - 2, 1 ].max
-          header = rows.first(2)
+          header = rows.first(3)
           return pad_rows(header.first(inner_height), inner_height) if inner_height <= header.size
 
           list_capacity = inner_height - header.size
-          list_rows = rows.drop(2)
+          list_rows = rows.drop(3)
           start = viewport_start(
             total: list_rows.size,
             capacity: list_capacity,

@@ -100,6 +100,20 @@ class TuiSnapshotTest < Minitest::Test
     assert_equal [], snapshot.rows
   end
 
+  def test_preserves_scheduler_and_task_proof_through_visible_projections
+    proof = { "reason" => "provider_circuit_open", "summary" => "Provider circuit is open." }
+    payload = sample_payload([
+      { "name" => "alpha", "tasks" => [ sample_task(slug: "proof-task").merge("scheduling_proof" => proof) ] }
+    ])
+    payload["scheduler"] = { "summary" => "0/3 task slots used." }
+
+    snapshot = Hive::Tui::Snapshot.from_payload(payload)
+    projected = snapshot.scope_to_project_index(1).filter_by_slug("proof")
+
+    assert_equal payload["scheduler"], projected.scheduler
+    assert_equal proof, projected.rows.first.scheduling_proof
+  end
+
   def test_from_payload_defaults_missing_folder_mtime_to_nil
     row = sample_task(slug: "legacy-payload")
     row.delete("folder_mtime")

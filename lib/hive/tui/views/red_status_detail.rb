@@ -65,6 +65,7 @@ module Hive
           body_lines << truncate("Project: #{safe(row.project_name)}", inner_width)
           body_lines << truncate("Stage: #{safe(row.stage)}", inner_width)
           body_lines.concat(wrapped("Why: #{summary_text(row)}", inner_width))
+          body_lines.concat(scheduling_proof_lines(row, inner_width))
           body_lines << ""
           body_lines << Styles::HEADER.render(truncate("Actions", inner_width))
           body_lines.concat(action_bar(state.agent_label, inner_width).lines.map(&:chomp))
@@ -73,6 +74,21 @@ module Hive
           append_log_preview(body_lines, state, inner_width, inner_body_height)
 
           body_lines
+        end
+
+        def scheduling_proof_lines(row, width)
+          proof = row.scheduling_proof
+          return [] unless proof.is_a?(Hash)
+
+          freshness = proof["freshness"] || {}
+          stale = freshness["stale"] ? "stale" : "fresh"
+          lines = wrapped("Scheduling: #{proof['summary']} (#{stale})", width)
+          blocker = proof.dig("dependency", "blocked_by") || proof.dig("babysitter", "blocker")
+          retry_at = proof.dig("retry", "retry_after") || proof.dig("retry", "next_probe_at")
+          lines.concat(wrapped("Blocker: #{blocker}", width)) if blocker
+          lines.concat(wrapped("Retry/probe: #{retry_at}", width)) if retry_at
+          lines.concat(wrapped("Safe action: #{proof.dig('action', 'text')}", width))
+          lines
         end
 
         def append_log_preview(body_lines, state, inner_width, inner_body_height)

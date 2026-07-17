@@ -8,6 +8,23 @@
     <span class="task-meta"><%= status_dot(@row) %> <%= @row["action_label"].presence || @row["marker"].presence || "idle" %></span>
   </div>
 
+  <% if (proof = @row["scheduling_proof"]) %>
+    <div class="state-banner <%= "state-banner-error" if proof.dig("freshness", "stale") %>">
+      <span class="status-dot <%= "status-dot-error" if proof.dig("freshness", "stale") %>"></span>
+      <span>
+        <strong><%= proof["summary"] %></strong>
+        · <%= proof.dig("freshness", "stale") ? "stale" : "fresh" %>
+        <% if (blocker = proof.dig("dependency", "blocked_by") || proof.dig("babysitter", "blocker")) %>
+          · blocker <%= blocker %>
+        <% end %>
+        <% if (retry_at = proof.dig("retry", "retry_after") || proof.dig("retry", "next_probe_at")) %>
+          · retry/probe <%= retry_at %>
+        <% end %>
+        · safe action <%= proof.dig("action", "text") %>
+      </span>
+    </div>
+  <% end %>
+
   <%# Only the state-driven primary actions appear (Approve when the gate is
       passable, Run when the operator drives stages manually, Diff when a
       worktree exists). The sharp tools live in the Advanced section. %>

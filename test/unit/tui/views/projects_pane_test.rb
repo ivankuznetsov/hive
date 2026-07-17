@@ -12,9 +12,10 @@ class HiveTuiViewsProjectsPaneTest < Minitest::Test
 
   PROJECT_NAMES = %w[hive myapp appcrawl].freeze
 
-  def make_snapshot(names: PROJECT_NAMES)
+  def make_snapshot(names: PROJECT_NAMES, scheduler: nil)
     Hive::Tui::Snapshot.from_payload(
       "generated_at" => "2026-05-01T00:00:00Z",
+      "scheduler" => scheduler,
       "projects" => names.map { |n| { "name" => n, "tasks" => [] } }
     )
   end
@@ -48,6 +49,13 @@ class HiveTuiViewsProjectsPaneTest < Minitest::Test
   def test_renders_projects_pane_title
     out = Hive::Tui::Views::ProjectsPane.render(make_model, width: 30)
     assert_includes out, "Projects", "pane should carry a 'Projects' title header"
+  end
+
+  def test_renders_canonical_scheduler_summary
+    snapshot = make_snapshot(scheduler: { "summary" => "1/3 task slots used; 2 unused." })
+    out = Hive::Tui::Views::ProjectsPane.render(make_model(snapshot: snapshot), width: 50)
+
+    assert_includes out, "1/3 task slots used; 2 unused."
   end
 
   # ---- Selection (cursor highlight) ----

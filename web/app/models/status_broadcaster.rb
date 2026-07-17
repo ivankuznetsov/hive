@@ -63,7 +63,10 @@ class StatusBroadcaster
         CHANNEL,
         target: "projects",
         partial: "status/projects",
-        locals: { projects: payload.fetch("projects", []) }
+        locals: {
+          projects: payload.fetch("projects", []),
+          scheduler: payload["scheduler"]
+        }
       )
     end
   end

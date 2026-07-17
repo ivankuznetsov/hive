@@ -2,6 +2,7 @@ class StatusController < ApplicationController
   def index
     @payload = StatusBroadcaster.snapshot
     @projects = @payload.fetch("projects", [])
+    @scheduler = @payload["scheduler"]
     @daemon_status = daemon_status
   end
 

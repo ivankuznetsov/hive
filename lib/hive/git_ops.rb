@@ -183,7 +183,8 @@ module Hive
     # the per-pathspec `git add -A --` runs in the hive-state worktree
     # and supports already-deleted entries (pathspec scope is honoured
     # by `ls-files` so untracked siblings cannot leak in).
-    def hive_commit(stage_name:, slug:, action:, body: nil, pathspecs: nil, allow_empty: false)
+    def hive_commit(stage_name:, slug:, action:, body: nil, pathspecs: nil, allow_empty: false,
+                    after_stage: nil)
       message = "hive: #{stage_name}/#{slug} #{action}"
       task_path = File.join("stages", stage_name, slug)
       if pathspecs
@@ -192,6 +193,7 @@ module Hive
         run_git!("-C", hive_state_path, "add", task_path) if File.directory?(File.join(hive_state_path, task_path))
         run_git!("-C", hive_state_path, "add", "logs") if File.directory?(File.join(hive_state_path, "logs"))
       end
+      after_stage&.call
       _, _, status = Open3.capture3("git", "-C", hive_state_path, "diff", "--cached", "--quiet")
       if status.success? && !allow_empty
         :nothing_to_commit

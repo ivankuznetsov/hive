@@ -136,6 +136,7 @@ task default: :test
 | `daemon_stale_agent_healing_test.rb` | Status-to-healer integration — real `hive status --json` rows feed `Hive::Daemon::StaleAgentHealer`, pinning stale `AGENT_WORKING` classification, on-disk healing, closed logger events (`marker_healed`, `heal_requeued`, `marker_heal_failed`), `daemon.agent_marker_grace_sec` threading, and the `3-plan` terminal-loss healer writing a real allowlisted dispatch request. |
 | `full_flow_test.rb` | End-to-end: idea → brainstorm → plan → execute → open-pr → review → finalize → done. |
 | `cli_version_test.rb`, `cli_usage_error_json_test.rb`, `new_wrapper_argv_test.rb` | `bin/hive` wrapper contract — top-level `--version`, command-local help after option-bearing invocations (`hive approve --from 2-brainstorm --help`), leading `--json=true`, malformed `--json=1` / `--json=yes` assignment rejection before command text/targets, invalid-byte argv rejection before Thor parsing, `hive new PROJECT` preserving post-project `--help` and `--json=yes` as literal task text while lifting allow-listed `new` options (`--workflow`, `--depends-on`, and JSON booleans) from before project, between project and text, or after text, and pre-dispatch JSON usage-error envelopes for missing required arguments on representative command schemas (`hive-run`, `hive-approve`, `hive-markers-clear`, `hive-drop`, `hive-findings`, `hive-rebase-status`, `hive-stage-action`, and the patrol-specific `hive-patrol` / `error_kind: "error"` case). |
+| `hive-eval_binary_test.rb` | `bin/hive-eval` fast wrapper contract — parser rejection before dispatch, ambient `TEST` / `HIVE_EVAL_NO_JUDGE` isolation, no-judge forwarding, stale-report cleanup, and read-only help behavior through a fake `bundle` seam. The `hive-eval` filename also associates this suite with the patrol command feature. |
 | `patrol_command_test.rb` | `hive patrol` — JSON envelope, dry-run behavior, scan-state recording, inbox non-interference, retry/backoff outcomes, and schema validation with fake mapper/reviewer/fixer/PR opener collaborators. |
 | `wiki_command_test.rb` | `hive wiki` — compile-log writes the generated aggregate, `--check` distinguishes stale vs up-to-date output, invalid subcommands/missing wiki dirs raise usage errors, CLI dispatch reaches the command, and help lists the wiki surface. |
 | `tui_smoke_test.rb`, `tui_smoke_charm_test.rb` | PTY-driven `bin/hive tui` smokes — boot, first useful paint with a seeded project, clean `q` exit, horizontal and vertical resize handling, and the startup regression gate (a generous 5s bound that catches a revert to the starved-poll loading grid without flaking; the 10s read_until is the hard gate). |
@@ -251,6 +252,11 @@ The Telegram bot eval harness is opt-in and separate from the default suite:
 bundle exec rake test:eval
 bin/hive-eval --scenario s1_status --no-judge --report /tmp/hive-eval.json
 ```
+
+The executable's fast parser, environment-isolation, and report-lifecycle
+contracts live in `test/integration/hive-eval_binary_test.rb`, where a fake
+`bundle` executable keeps them in the default CI suite without running eval
+scenarios. Full report generation and scenario behavior remain opt-in here.
 
 `test/eval/support/` provides an in-process fake Telegram transport, a programmable status watcher, child-supervisor and dispatch-request captures, a scenario DSL, typed-reason contract assertions, scripted/Codex personas, and a Codex prose judge. Scenario files live under `test/eval/scenarios/` and drive the real `Hive::Bot::Supervisor#process_update` / `#status_tick` entrypoints without changing production bot behavior. Queue-routable bot verbs are captured through the fake `DispatchRequestWriter`, and `Harness#dispatched_commands` lets scenarios assert command intent across both queued and child-spawned dispatch paths.
 

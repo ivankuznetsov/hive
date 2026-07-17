@@ -3,7 +3,7 @@ title: Interaction Surface
 type: commands
 source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/cli.rb, lib/hive/commands/adhoc_review.rb, lib/hive/commands/setup.rb, lib/hive/commands/connect.rb, lib/hive/commands/disconnect.rb, lib/hive/commands/bench_submit.rb, lib/hive/commands/digest.rb, lib/hive/commands/pairing.rb, lib/hive/digest.rb, lib/hive/digest/, lib/hive/web/, public/, hive.gemspec, packaging/docker/, .github/workflows/release.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-14
-updated: 2026-07-09
+updated: 2026-07-12
 tags: [commands, api]
 ---
 
@@ -58,8 +58,9 @@ lifecycle commands, diagnostics, markers, findings, metrics, update/uninstall,
 registry maintenance, Screenote connect/disconnect, the `hive bench submit`
 corpus-submission producer, the `hive digest` shipped-digest producer,
 the [[commands/pairing]] Telegram pairing approval surface,
-[[commands/refactor-patrol]] as the reporting-only architecture refactor thesis
-scanner, and
+[[commands/refactor-patrol]] as the architecture refactor thesis scanner (only
+its legacy on-demand v1 mode is reporting-only; merged-PR v2 can take separately
+authorized actions), and
 `--json` envelopes where the command page says they exist.
 The wrapper also normalizes command-local help before Thor dispatch:
 `hive <cmd> --help`, `hive <cmd> -h`, and option-bearing forms such as

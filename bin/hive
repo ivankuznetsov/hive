@@ -4,6 +4,7 @@ $LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
 
 require "hive"
 require "hive/cli"
+require "hive/refactor_patrol/reporter"
 require "json"
 
 if ARGV == [ "--version" ] || ARGV == [ "-v" ]
@@ -23,7 +24,7 @@ JSON_USAGE_ERROR_CONTRACTS = {
   "drop" => { schema: "hive-drop", error_kind: "invalid_task_path" },
   "findings" => { schema: "hive-findings", error_kind: "invalid_task_path" },
   "patrol" => { schema: "hive-patrol", error_kind: "error" },
-  "refactor-patrol" => { schema: "hive-refactor-patrol", error_kind: "error" },
+  "refactor-patrol" => { reporter: :refactor_patrol, error_kind: "error" },
   "setup" => { schema: "hive-setup", schema_version: false, error_kind: "usage" },
   "connect" => { error_kind: "usage", extras: { "service" => "screenote" } },
   "disconnect" => { error_kind: "usage", extras: { "service" => "screenote" } },
@@ -62,6 +63,10 @@ JSON_USAGE_ERROR_CONTRACTS = {
   end
 ).freeze
 
+def wrapper_option_argv(argv)
+  argv.take(argv.index("--") || argv.length)
+end
+
 # Thor treats a class option before the subcommand as input to its help path.
 # Keep `hive --json status` equivalent to `hive status --json`.
 def normalize_leading_json_options!(argv)
@@ -69,7 +74,7 @@ def normalize_leading_json_options!(argv)
   leading << argv.shift while JSON_BOOLEAN_OPTIONS.include?(argv.first)
   return if leading.empty?
 
-  cmd_idx = argv.index { |a| !a.start_with?("-") }
+  cmd_idx = wrapper_option_argv(argv).index { |a| !a.start_with?("-") }
   return argv.unshift(*leading) unless cmd_idx
 
   argv.insert(cmd_idx + 1, *leading)
@@ -83,13 +88,14 @@ def new_value_assignment?(arg)
 end
 
 def new_text_start_index(argv)
-  cmd_idx = argv.index { |a| !a.start_with?("-") }
+  option_argv = wrapper_option_argv(argv)
+  cmd_idx = option_argv.index { |a| !a.start_with?("-") }
   return nil unless cmd_idx && argv[cmd_idx] == "new"
 
   idx = cmd_idx + 1
   project_idx = nil
-  while idx < argv.length
-    arg = argv[idx]
+  while idx < option_argv.length
+    arg = option_argv[idx]
     if JSON_BOOLEAN_OPTIONS.include?(arg)
       idx += 1
       next
@@ -129,13 +135,14 @@ end
 def rewrite_help_flag!(argv)
   return if argv.empty?
 
-  cmd_idx = argv.index { |a| !a.start_with?("-") }
+  option_argv = wrapper_option_argv(argv)
+  cmd_idx = option_argv.index { |a| !a.start_with?("-") }
   return unless cmd_idx
 
   text_start_idx = new_text_start_index(argv)
-  help_idx = argv.each_index.find do |idx|
+  scan_limit = [ option_argv.length, text_start_idx ].compact.min
+  help_idx = (cmd_idx + 1...scan_limit).find do |idx|
     next false if idx <= cmd_idx
-    next false if text_start_idx && idx >= text_start_idx
 
     argv[idx] == "--help" || argv[idx] == "-h"
   end
@@ -150,7 +157,7 @@ end
 # `new` — before the project, between the project and the task text, or after the
 # text.
 def lift_new_options!(argv)
-  cmd_idx = argv.index { |a| !a.start_with?("-") }
+  cmd_idx = wrapper_option_argv(argv).index { |a| !a.start_with?("-") }
   return unless cmd_idx && argv[cmd_idx] == "new"
 
   lifted = []
@@ -195,11 +202,12 @@ def lift_new_options!(argv)
 end
 
 def json_requested?(argv)
-  JSON_TRUE_OPTIONS.include?(argv.reverse.find { |arg| JSON_BOOLEAN_OPTIONS.include?(arg) })
+  options = wrapper_option_argv(argv)
+  JSON_TRUE_OPTIONS.include?(options.reverse.find { |arg| JSON_BOOLEAN_OPTIONS.include?(arg) })
 end
 
 def reject_invalid_argv_encoding!(argv)
-  idx = argv.index { |arg| !arg.valid_encoding? }
+  idx = argv.index { |arg| !arg.dup.force_encoding(Encoding::UTF_8).valid_encoding? }
   return unless idx
 
   raise Thor::MalformattedArgumentError, "invalid byte sequence in argument #{idx + 1}"
@@ -207,7 +215,7 @@ end
 
 def reject_unsupported_json_assignments!(argv)
   text_start_idx = new_text_start_index(argv)
-  arg = argv.each_with_index.find do |candidate, idx|
+  arg = wrapper_option_argv(argv).each_with_index.find do |candidate, idx|
     next false if text_start_idx && idx >= text_start_idx
 
     candidate.start_with?("--json=") && !JSON_BOOLEAN_OPTIONS.include?(candidate)
@@ -305,12 +313,89 @@ def json_usage_error_contract(argv)
   when "digest"
     schema = digest_merged_pr_argv?(option_argv) ? "hive-merged-pr-digest" : "hive-digest"
     return { schema: schema, error_kind: "usage" }
+  when "refactor-patrol"
+    if (jobs = refactor_patrol_jobs_argv(option_argv))
+      return {
+        schema: "hive-refactor-patrol-jobs", error_kind: "usage",
+        extras: { "action" => jobs.fetch(:action) }
+      }
+    end
   end
 
   JSON_USAGE_ERROR_CONTRACTS[command]
 end
 
-def json_usage_error_payload(contract, error)
+def refactor_patrol_jobs_argv(argv)
+  list = nil
+  full = nil
+  show = false
+  modifier = argv.any? do |arg|
+    arg == "--limit" || arg.start_with?("--limit=") ||
+      arg == "--cursor" || arg.start_with?("--cursor=")
+  end
+  argv.each do |arg|
+    if arg == "--show" || arg.start_with?("--show=")
+      show = true
+    elsif %w[--no-list --skip-list].include?(arg)
+      list = false
+    elsif arg == "--list"
+      list = true
+    elsif arg.start_with?("--list=")
+      value = arg.split("=", 2).last.to_s.downcase
+      list = !%w[false f no n 0].include?(value)
+    elsif %w[--no-full --skip-full].include?(arg)
+      full = false
+    elsif arg == "--full"
+      full = true
+    elsif arg.start_with?("--full=")
+      value = arg.split("=", 2).last.to_s.downcase
+      full = !%w[false f no n 0].include?(value)
+    end
+  end
+  action = if list == true
+    "list"
+  elsif show
+    "show"
+  end
+  return unless action || full == true || modifier
+
+  { action: action }
+end
+
+def refactor_patrol_v2_argv?(argv)
+  return true if argv.any? do |arg|
+    arg == "--pr" || arg.start_with?("--pr=") ||
+      arg == "--job-manifest" || arg.start_with?("--job-manifest=")
+  end
+
+  actions = nil
+  argv.each do |arg|
+    if %w[--no-actions --skip-actions].include?(arg)
+      actions = false
+    elsif arg == "--actions"
+      actions = true
+    elsif arg.start_with?("--actions=")
+      value = arg.split("=", 2).last.to_s.downcase
+      actions = !%w[false f no n 0].include?(value)
+    end
+  end
+  actions == true
+end
+
+def json_usage_error_payload(contract, error, argv: [])
+  if contract[:reporter] == :refactor_patrol
+    version = if refactor_patrol_v2_argv?(argv)
+      Hive::RefactorPatrol::Reporter::V2_SCHEMA_VERSION
+    else
+      Hive::RefactorPatrol::Reporter::V1_SCHEMA_VERSION
+    end
+    return Hive::RefactorPatrol::Reporter.error_envelope(
+      error,
+      version: version,
+      error_kind: contract.fetch(:error_kind)
+    )
+  end
+
   schema = contract[:schema]
   error_kind = contract.fetch(:error_kind)
   extras = contract.fetch(:extras, {})
@@ -344,11 +429,13 @@ def emit_json_usage_error(argv, error)
   contract = json_usage_error_contract(argv)
   return false unless contract && json_requested?(argv)
 
-  puts JSON.generate(json_usage_error_payload(contract, error))
+  puts JSON.generate(json_usage_error_payload(contract, error, argv: argv))
   true
 rescue Errno::EPIPE, JSON::GeneratorError
   true
 end
+
+original_argv = ARGV.dup
 
 begin
   reject_invalid_argv_encoding!(ARGV)
@@ -359,7 +446,7 @@ begin
   Hive::CLI.start(ARGV, debug: true)
 rescue Thor::Error => e
   error = Hive::InvalidTaskPath.new(e.message)
-  emitted_json = emit_json_usage_error(ARGV, error)
+  emitted_json = emit_json_usage_error(original_argv, error)
   warn(emitted_json ? "hive: #{error.message}" : error.message)
   exit(error.exit_code)
 rescue Hive::Error => e

@@ -1,5 +1,7 @@
 require "json"
+require "time"
 require "timeout"
+require "uri"
 require "yaml"
 require "hive/secret_patterns"
 
@@ -46,8 +48,10 @@ module Hive
 
     module_function
 
-    def ensure_authenticated!(cfg = nil)
-      out, err, status = capture3("gh", "auth", "status", cfg: cfg)
+    def ensure_authenticated!(cfg = nil, host: nil, timeout_sec: nil)
+      args = [ "gh", "auth", "status" ]
+      args.push("--hostname", validated_github_host(host)) if host
+      out, err, status = capture3(*args, cfg: cfg, timeout_sec: timeout_sec)
       return if status.success?
 
       raise Hive::GhError, "gh not authenticated (`gh auth login`):\n#{err.empty? ? out : err}"
@@ -56,12 +60,29 @@ module Hive
     # Push the branch and return a PushResult. Callers that want to
     # exit on failure can do so explicitly; finalize prefers to write
     # a structured marker.
-    def push_branch(worktree_path, branch, cfg: nil, force: false)
-      args = [ "git", "-C", worktree_path, "push", "-u" ]
+    def push_branch(worktree_path, branch, cfg: nil, force: false,
+                    expected_remote_oid: nil, expected_remote_absent: false,
+                    remote: "origin", set_upstream: true)
+      branch = validated_branch_name(branch)
+      remote = validated_remote_target(remote)
+      args = [ "git", "-C", worktree_path, "push" ]
+      args << "-u" if set_upstream
       # --force-with-lease (not --force): a concurrent third-party update to
       # the branch aborts the push instead of being clobbered.
-      args << "--force-with-lease" if force
-      args.push("origin", branch)
+      if expected_remote_oid && expected_remote_absent
+        raise Hive::GhError, "remote branch cannot require both an OID and absence"
+      elsif expected_remote_oid
+        oid = expected_remote_oid.to_s
+        unless oid.match?(/\A[0-9a-f]{40,64}\z/i)
+          raise Hive::GhError, "expected remote branch OID is invalid"
+        end
+        args << "--force-with-lease=refs/heads/#{branch}:#{oid.downcase}"
+      elsif expected_remote_absent
+        args << "--force-with-lease=refs/heads/#{branch}:"
+      elsif force
+        args << "--force-with-lease"
+      end
+      args.push(remote, branch)
       out, err, status = capture3(*args, cfg: cfg)
       PushResult.new(success: status.success?, stdout: out, stderr: err)
     rescue Hive::GhError => e
@@ -69,11 +90,44 @@ module Hive
     end
 
     # Hard-fail wrapper for callers that have no recovery path (open-pr).
-    def push_branch!(worktree_path, branch, cfg: nil)
-      result = push_branch(worktree_path, branch, cfg: cfg)
+    def push_branch!(worktree_path, branch, cfg: nil,
+                     expected_remote_oid: nil, expected_remote_absent: false,
+                     remote: "origin", set_upstream: true)
+      result = push_branch(
+        worktree_path, branch, cfg: cfg, expected_remote_oid: expected_remote_oid,
+        expected_remote_absent: expected_remote_absent, remote: remote,
+        set_upstream: set_upstream
+      )
       return if result.success?
 
       raise Hive::GhError, "git push failed: #{result.stderr.strip.empty? ? result.stdout : result.stderr}"
+    end
+
+    def remote_branch_oid(worktree_path, branch, cfg: nil, remote: "origin")
+      name = validated_branch_name(branch)
+      remote = validated_remote_target(remote)
+
+      ref = "refs/heads/#{name}"
+      out, err, status = capture3(
+        "git", "-C", worktree_path, "ls-remote", "--heads", remote, ref,
+        cfg: cfg
+      )
+      unless status.success?
+        raise Hive::GhError,
+              "git ls-remote failed: #{err.to_s.strip.empty? ? out : err}"
+      end
+      lines = out.lines.map(&:strip).reject(&:empty?)
+      return nil if lines.empty?
+      unless lines.one?
+        raise Hive::GhError, "git ls-remote returned multiple records for #{ref}"
+      end
+
+      oid, returned_ref = lines.first.split(/\s+/, 2)
+      unless returned_ref == ref && oid.to_s.match?(/\A[0-9a-f]{40,64}\z/i)
+        raise Hive::GhError, "git ls-remote returned an invalid record for #{ref}"
+      end
+
+      oid.downcase
     end
 
     # Look up all pull requests for `branch`. Returns the raw array from
@@ -85,7 +139,7 @@ module Hive
     # The returned hashes may omit optional fields on older/future gh JSON
     # shapes. Stage code treats a missing `isDraft` key as draft for
     # forward compatibility; only an explicit false means "already ready".
-    def lookup_prs_for_branch(worktree_path, branch, cfg: nil)
+    def lookup_prs_for_branch(worktree_path, branch, repository: nil, host: nil, cfg: nil)
       # `gh -R` accepts a `owner/repo` slug but not a worktree path;
       # `--repo` likewise. `gh` resolves the remote from cwd's git
       # config, so route through chdir. Earlier passes flagged the
@@ -93,9 +147,18 @@ module Hive
       # in this module; the difference is load-bearing (gh has no
       # `-C` flag), not stylistic. Kept here with a comment so the
       # next reader doesn't "fix" it.
-      out, err, status = capture3("gh", "pr", "list", "--head", branch,
-                                  "--state", "all", "--json", "url,number,state,isDraft,headRefName,headRefOid",
-                                  chdir: worktree_path, cfg: cfg)
+      args = [
+        "gh", "pr", "list", "--head", branch, "--state", "all", "--json",
+        "url,number,state,isDraft,headRefName,headRefOid,body,baseRefName,baseRefOid,headRepository"
+      ]
+      if repository || host
+        unless repository && host
+          raise Hive::GhError, "repository and host must be provided together for pull-request lookup"
+        end
+
+        args.push("--repo", github_repository_target(repository, host))
+      end
+      out, err, status = capture3(*args, chdir: worktree_path, cfg: cfg)
       unless status.success?
         raise Hive::GhError, "`gh pr list` failed for branch #{branch}: #{err.to_s.strip.empty? ? out : err.strip}"
       end
@@ -141,6 +204,57 @@ module Hive
     rescue JSON::ParserError => e
       raise Hive::GhError, "`gh pr view #{number}` returned unparseable JSON: #{e.message}"
     end
+
+    def validated_repository_slug(repository)
+      value = repository.to_s.strip
+      segments = value.split("/", -1)
+      valid = segments.size == 2 && segments.all? do |segment|
+        segment.match?(/\A[a-zA-Z0-9_.-]+\z/) && !%w[. ..].include?(segment)
+      end
+      raise Hive::GhError, "repository must be an owner/name slug" unless valid
+
+      value
+    end
+    private_class_method :validated_repository_slug
+
+    def validated_branch_name(branch)
+      value = branch.to_s
+      unless value.match?(/\A[a-zA-Z0-9][a-zA-Z0-9._\/-]{0,240}\z/) &&
+             !value.include?("..") && !value.end_with?("/", ".")
+        raise Hive::GhError, "remote branch name is invalid"
+      end
+
+      value
+    end
+    private_class_method :validated_branch_name
+
+    def validated_remote_target(remote)
+      value = remote.to_s
+      if value.empty? || value.start_with?("-") || value.match?(/[\0\r\n]/)
+        raise Hive::GhError, "git remote target is invalid"
+      end
+
+      value
+    end
+    private_class_method :validated_remote_target
+
+    def validated_github_host(host)
+      value = host.to_s.strip
+      uri = URI.parse("https://#{value}")
+      valid = !value.empty? && uri.host == value && uri.path.empty? &&
+              uri.userinfo.nil? && uri.query.nil? && uri.fragment.nil?
+      raise Hive::GhError, "GitHub host must be a hostname without a scheme or path" unless valid
+
+      value
+    rescue URI::InvalidURIError
+      raise Hive::GhError, "GitHub host must be a hostname without a scheme or path"
+    end
+    private_class_method :validated_github_host
+
+    def github_repository_target(repository, host)
+      "#{validated_github_host(host)}/#{validated_repository_slug(repository)}"
+    end
+    private_class_method :github_repository_target
 
     def pr_state(pr_url, cfg: nil)
       out, err, status = capture3("gh", "pr", "view", pr_url.to_s, "--json", "state", cfg: cfg)
@@ -189,22 +303,67 @@ module Hive
     end
 
     def repo_name_with_owner(worktree_path, cfg: nil)
-      out, err, status = capture3("gh", "repo", "view", "--json", "nameWithOwner",
-                                  chdir: worktree_path, cfg: cfg)
+      repository_identity(worktree_path, cfg: cfg).fetch("repository")
+    end
+
+    def repository_identity(worktree_path, cfg: nil, timeout_sec: nil)
+      repository_identity_from_remote(
+        origin_push_url(worktree_path, cfg: cfg, timeout_sec: timeout_sec)
+      )
+    end
+
+    def origin_push_url(worktree_path, cfg: nil, timeout_sec: nil)
+      out, err, status = capture3(
+        "git", "-C", worktree_path, "remote", "get-url", "--push", "--all", "origin",
+        cfg: cfg, timeout_sec: timeout_sec
+      )
       unless status.success?
-        raise Hive::GhError, "`gh repo view` failed in #{worktree_path}: #{err.to_s.strip.empty? ? out : err.strip}"
+        raise Hive::GhError,
+              "`git remote get-url --push --all origin` failed in #{worktree_path}: " \
+              "#{err.to_s.strip.empty? ? out : err.strip}"
+      end
+      urls = out.lines.map(&:strip).reject(&:empty?)
+      unless urls.one?
+        raise Hive::GhError, "origin push URL lookup returned #{urls.size} records"
       end
 
-      doc = JSON.parse(out)
-      raise Hive::GhError, "`gh repo view` returned #{doc.class}; expected Hash" unless doc.is_a?(Hash)
-
-      slug = doc["nameWithOwner"].to_s
-      raise Hive::GhError, "`gh repo view` returned blank nameWithOwner in #{worktree_path}" if slug.empty?
-
-      slug
-    rescue JSON::ParserError => e
-      raise Hive::GhError, "`gh repo view` returned unparseable JSON in #{worktree_path}: #{e.message}"
+      urls.first
     end
+
+    def repository_identity_from_remote(remote_url)
+      value = remote_url.to_s.strip
+      scp = value.match(/\A(?:[^@\/]+@)?([^:\/]+):\/?([^\/]+\/[^\/]+?)\z/)
+      if scp && !value.match?(/\A[a-z][a-z0-9+.-]*:\/\//i)
+        return remote_identity(scp[1], scp[2])
+      end
+
+      uri = URI.parse(value)
+      unless %w[http https ssh git].include?(uri.scheme.to_s.downcase) && uri.host
+        raise Hive::GhError, "origin push URL is not a supported GitHub remote"
+      end
+      credentials = uri.userinfo.to_s
+      unsafe_credentials = if %w[http https git].include?(uri.scheme.to_s.downcase)
+        !credentials.empty?
+      else
+        credentials.include?(":")
+      end
+      if unsafe_credentials || uri.query || uri.fragment
+        raise Hive::GhError, "origin push URL contains unsupported credentials or suffixes"
+      end
+
+      remote_identity(uri.host, uri.path.to_s.sub(%r{\A/}, ""))
+    rescue URI::InvalidURIError => e
+      raise Hive::GhError, "origin push URL is invalid: #{e.message}"
+    end
+
+    def remote_identity(host, repository)
+      slug = repository.to_s.sub(/\.git\z/i, "")
+      {
+        "repository" => validated_repository_slug(slug),
+        "host" => validated_github_host(host)
+      }
+    end
+    private_class_method :remote_identity
 
     def list_merged_prs(repo, since:, until_date:, cfg: nil)
       fields = %w[
@@ -484,19 +643,24 @@ module Hive
     end
 
     def capture3(*cmd, chdir: nil, cfg: nil, timeout_sec: nil)
-      timeout_sec ||= network_timeout_sec(cfg)
+      timeout_sec = normalized_timeout(timeout_sec || network_timeout_sec(cfg))
       stdout_r, stdout_w = IO.pipe
       stderr_r, stderr_w = IO.pipe
       env = { "GIT_TERMINAL_PROMPT" => "0", "GIT_SSH_COMMAND" => "ssh -o BatchMode=yes" }
-      spawn_options = { out: stdout_w, err: stderr_w }
+      # A dedicated process group lets the deadline cover helpers that inherit
+      # stdout/stderr after the direct gh process exits. Otherwise waitpid can
+      # succeed while reader threads block forever on a descendant-held pipe.
+      spawn_options = { out: stdout_w, err: stderr_w, pgroup: true }
       spawn_options[:chdir] = chdir if chdir
       pid = Process.spawn(env, *cmd, **spawn_options)
       stdout_w.close
       stderr_w.close
-      stdout_reader = Thread.new { stdout_r.read }
-      stderr_reader = Thread.new { stderr_r.read }
+      stdout_reader = Thread.new { read_capture_stream(stdout_r) }
+      stderr_reader = Thread.new { read_capture_stream(stderr_r) }
 
-      status = wait_with_deadline(pid, timeout_sec, cmd)
+      status = wait_with_deadline(
+        pid, timeout_sec, cmd, readers: [ stdout_reader, stderr_reader ]
+      )
       [ stdout_reader.value, stderr_reader.value, status ]
     rescue SystemCallError => e
       raise Hive::GhError, "failed to run #{cmd.join(' ')}: #{e.message}"
@@ -508,27 +672,67 @@ module Hive
       end
     end
 
-    def wait_with_deadline(pid, timeout_sec, cmd)
-      deadline = Time.now + timeout_sec
+    def wait_with_deadline(pid, timeout_sec, cmd, readers: [])
+      deadline = monotonic_now + timeout_sec
+      status = nil
       loop do
-        waited = Process.waitpid2(pid, Process::WNOHANG)
-        return waited[1] if waited
+        waited = Process.waitpid2(pid, Process::WNOHANG) unless status
+        status = waited[1] if waited
+        return status if status && readers.none?(&:alive?)
 
-        if Time.now >= deadline
-          terminate_process(pid)
+        if monotonic_now >= deadline
+          terminate_process_group(pid)
           raise Hive::GhError, "network operation exceeded #{timeout_sec}s while running #{cmd.join(' ')}"
         end
         sleep POLL_INTERVAL_SEC
       end
     end
 
+    def read_capture_stream(io)
+      io.read
+    rescue IOError
+      ""
+    end
+
+    def terminate_process_group(pid)
+      signal_process_group("TERM", pid)
+      deadline = monotonic_now + 1
+      while process_group_alive?(pid) && monotonic_now < deadline
+        reap_process(pid, nonblock: true)
+        sleep POLL_INTERVAL_SEC
+      end
+      signal_process_group("KILL", pid) if process_group_alive?(pid)
+      reap_process(pid, nonblock: false)
+    rescue Errno::ESRCH, Errno::ECHILD
+      nil
+    end
+
+    def signal_process_group(signal, pid)
+      Process.kill(signal, -Integer(pid))
+    end
+
+    def process_group_alive?(pid)
+      Process.kill(0, -Integer(pid))
+      true
+    rescue Errno::ESRCH
+      false
+    rescue Errno::EPERM
+      true
+    end
+
+    def reap_process(pid, nonblock:)
+      Process.waitpid2(pid, nonblock ? Process::WNOHANG : 0)
+    rescue Errno::ECHILD
+      nil
+    end
+
     def terminate_process(pid)
       Process.kill("TERM", pid)
-      deadline = Time.now + 1
+      deadline = monotonic_now + 1
       loop do
         waited = Process.waitpid2(pid, Process::WNOHANG)
         return waited[1] if waited
-        break if Time.now >= deadline
+        break if monotonic_now >= deadline
 
         sleep POLL_INTERVAL_SEC
       end
@@ -536,6 +740,21 @@ module Hive
       Process.waitpid2(pid)
     rescue Errno::ESRCH, Errno::ECHILD
       nil
+    end
+
+    def normalized_timeout(value)
+      timeout = Float(value)
+      unless timeout.finite? && timeout.positive?
+        raise Hive::GhError, "network timeout must be positive"
+      end
+
+      timeout
+    rescue TypeError, ArgumentError
+      raise Hive::GhError, "network timeout must be positive"
+    end
+
+    def monotonic_now
+      Process.clock_gettime(Process::CLOCK_MONOTONIC)
     end
 
     def with_network_timeout(timeout_sec: NETWORK_TIMEOUT_SEC, &block)

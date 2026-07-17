@@ -109,11 +109,17 @@ module Hive
         report = runner.run_all(pattern: pattern, tag: options[:filter], keep_artifacts: options[:keep_artifacts])
         if options[:json]
           puts JSON.pretty_generate(report)
+        else
+          pending = report.fetch("scenario_metadata").count { |entry| entry.fetch("pending") }
+          summary = report.fetch("summary")
+          puts "selected #{report.fetch('scenario_metadata').size}, executed #{summary.fetch('total')}, " \
+               "pending #{pending}, passed #{summary.fetch('passed')}, " \
+               "failed #{summary.fetch('failed') + summary.fetch('setup_failed', 0)}"
         end
         summary = report.fetch("summary")
         failed = summary.fetch("failed") + summary.fetch("setup_failed", 0)
         exit(failed.zero? ? BinaryExit::SUCCESS : BinaryExit::FAILURE)
-      rescue PreflightError => e
+      rescue PreflightError, ScenarioParser::InvalidScenario, Psych::Exception => e
         exit_with_error(e, error_kind: "preflight", exit_code: BinaryExit::CONFIG)
       rescue StandardError => e
         exit_with_error(e, error_kind: "run_failed", exit_code: BinaryExit::FAILURE)
@@ -138,9 +144,12 @@ module Hive
         else
           scenarios.each do |scenario|
             tags = scenario.tags.empty? ? "" : " [#{scenario.tags.join(', ')}]"
-            puts "#{scenario.name}#{tags}"
+            pending = scenario.pending ? " (pending: #{scenario.sibling_task_id})" : ""
+            puts "#{scenario.name}#{tags}#{pending}"
           end
         end
+      rescue ScenarioParser::InvalidScenario, Psych::Exception => e
+        exit_with_error(e, error_kind: "preflight", exit_code: BinaryExit::CONFIG)
       end
 
       desc "replay RUN_ID SCENARIO", "Replay a stored scenario repro script"
@@ -209,12 +218,15 @@ module Hive
           "tags" => scenario.tags,
           "description" => scenario.description,
           "path" => scenario.path,
-          "steps_count" => scenario.steps.size
+          "steps_count" => scenario.steps.size,
+          "incident_id" => scenario.incident_id,
+          "sibling_task_id" => scenario.sibling_task_id,
+          "pending" => scenario.pending
         }
       end
 
       def tui_scenario?(scenario)
-        scenario.steps.any? { |step| %w[tui_keys tui_expect tui_refute wait_subprocess].include?(step.kind) }
+        !scenario.pending && scenario.steps.any? { |step| %w[tui_keys tui_expect tui_refute wait_subprocess].include?(step.kind) }
       end
 
       def artifact_path_without_symlinks?(*paths)
@@ -252,13 +264,18 @@ module Hive
   end
 end
 
+def wrapper_option_argv(argv)
+  argv.take(argv.index("--") || argv.length)
+end
+
 def rewrite_help_flag!(argv)
   return if argv.empty?
 
-  cmd_idx = argv.index { |arg| !arg.start_with?("-") }
+  option_argv = wrapper_option_argv(argv)
+  cmd_idx = option_argv.index { |arg| !arg.start_with?("-") }
   return unless cmd_idx
 
-  help_idx = argv[(cmd_idx + 1)..]&.index { |arg| arg == "--help" || arg == "-h" }
+  help_idx = option_argv[(cmd_idx + 1)..]&.index { |arg| arg == "--help" || arg == "-h" }
   return unless help_idx
 
   cmd = argv[cmd_idx]
@@ -289,21 +306,40 @@ end
 # `--json=<value>` assignments are rejected before Thor can use the value as a
 # command or pattern.
 def json_requested?(argv)
-  JSON_TRUE_OPTIONS.include?(argv.reverse.find { |arg| JSON_BOOLEAN_OPTIONS.include?(arg) })
+  options = wrapper_option_argv(argv)
+  JSON_TRUE_OPTIONS.include?(options.reverse.find { |arg| JSON_BOOLEAN_OPTIONS.include?(arg) })
 end
 
 def reject_invalid_argv_encoding!(argv)
-  idx = argv.index { |arg| !arg.valid_encoding? }
+  idx = argv.index { |arg| !arg.dup.force_encoding(Encoding::UTF_8).valid_encoding? }
   return unless idx
 
   raise Thor::MalformattedArgumentError, "invalid byte sequence in argument #{idx + 1}"
 end
 
 def reject_unsupported_json_assignments!(argv)
-  arg = argv.find { |candidate| candidate.start_with?("--json=") && !JSON_BOOLEAN_OPTIONS.include?(candidate) }
+  arg = wrapper_option_argv(argv).find do |candidate|
+    candidate.start_with?("--json=") && !JSON_BOOLEAN_OPTIONS.include?(candidate)
+  end
   return unless arg
 
   raise Thor::MalformattedArgumentError, "invalid boolean value for --json: #{arg.split('=', 2).last.inspect}"
+end
+
+RETENTION_VALUE_OPTIONS = %w[--retain-days --retain-failed-days].freeze
+
+def reject_missing_retention_values!(argv)
+  return unless argv.first == "clean"
+
+  wrapper_option_argv(argv).each_index do |idx|
+    arg = argv[idx]
+    next unless RETENTION_VALUE_OPTIONS.include?(arg)
+
+    value = argv[idx + 1]
+    next if value && !value.empty? && (!value.start_with?("-") || value.match?(/\A-\d+\z/))
+
+    raise Thor::MalformattedArgumentError, "No value provided for option '#{arg}'"
+  end
 end
 
 HELP_FLAGS = %w[--help -h].freeze
@@ -363,6 +399,7 @@ begin
     exit 0
   end
   rewrite_help_flag!(ARGV)
+  reject_missing_retention_values!(ARGV)
   # Thor::Base#start rescues Thor::Error internally and exits 1 when
   # exit_on_failure? is true. Passing `debug: true` makes Thor re-raise
   # instead so the rescue below can preserve human/JSON formatting while

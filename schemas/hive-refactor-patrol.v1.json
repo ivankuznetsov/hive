@@ -18,6 +18,9 @@
         "project",
         "project_root",
         "dry_run",
+        "review_complete",
+        "review_errors",
+        "feature_results",
         "features_mapped",
         "theses",
         "ranked",
@@ -32,6 +35,15 @@
         "project": { "type": "string" },
         "project_root": { "type": "string" },
         "dry_run": { "type": "boolean" },
+        "review_complete": { "type": "boolean" },
+        "review_errors": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/ReviewError" }
+        },
+        "feature_results": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/FeatureResult" }
+        },
         "features_mapped": { "type": "integer", "minimum": 0 },
         "theses": { "type": "integer", "minimum": 0 },
         "ranked": {
@@ -47,6 +59,28 @@
           "items": { "$ref": "#/$defs/SuppressedThesis" }
         },
         "last_scanned_sha": { "type": "string" }
+      }
+    },
+    "ReviewError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["feature_id", "error"],
+      "properties": {
+        "feature_id": { "type": "string" },
+        "error": { "type": "string", "minLength": 1 },
+        "message": { "type": "string" },
+        "details": { "type": "object" }
+      }
+    },
+    "FeatureResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["feature_id", "complete", "thesis_ids", "errors"],
+      "properties": {
+        "feature_id": { "type": "string", "minLength": 1 },
+        "complete": { "type": "boolean" },
+        "thesis_ids": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "errors": { "type": "array", "items": { "$ref": "#/$defs/ReviewError" } }
       }
     },
     "RankedThesis": {

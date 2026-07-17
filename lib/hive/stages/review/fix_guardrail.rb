@@ -140,8 +140,12 @@ module Hive
             # DELETES `.github/workflows/*.yml` — header reads `+++ /dev/null`,
             # path lives only on the `--- a/` side) trip :file_path
             # patterns just like additions and modifications do.
-            header_match = chomped.match(%r{\A--- a/(.+)\z}) ||
-                           chomped.match(%r{\A\+\+\+ b/(.+)\z})
+            # With diff.mnemonicPrefix enabled git emits c/ (commit), i/
+            # (index), w/ (worktree), or o/ (object) instead of a/ and b/.
+            # Accept either form so cached architecture-patrol diffs receive
+            # the same file-path protections as commit-to-commit review diffs.
+            header_match = chomped.match(%r{\A--- [aciow]/(.+)\z}) ||
+                           chomped.match(%r{\A\+\+\+ [bciow]/(.+)\z})
             if header_match
               path = header_match[1]
               current_file = path

@@ -36,8 +36,59 @@ class E2EBinaryTest < Minitest::Test
     assert_kind_of Array, payload["scenarios"], "envelope should carry a scenarios array"
     assert payload["scenarios"].any?, "at least one scenario should be inventoried"
     sample = payload["scenarios"].first
-    %w[name tags description path steps_count].each do |key|
+    %w[name tags description path steps_count incident_id sibling_task_id pending].each do |key|
       assert sample.key?(key), "scenario summary should expose #{key.inspect}"
+    end
+
+    incident = payload.fetch("scenarios").find { |entry| entry["incident_id"] }
+    assert incident
+    assert_match(/\A#\d+\z/, incident.fetch("sibling_task_id"))
+    assert_includes [ true, false ], incident.fetch("pending")
+  end
+
+  def test_incident_inventory_reports_enabled_results_and_pending_metadata
+    Dir.mktmpdir("e2e-incident-report") do |runs_dir|
+      out, err, status = Open3.capture3(
+        { "HIVE_E2E_RUNS_DIR" => runs_dir },
+        hive_e2e, "run", "--filter", "incident-regression", "--json"
+      )
+
+      assert status.success?, "pending incident inventory should exit 0, stderr was: #{err}"
+      report = parse_single_json_document(out)
+      metadata = report.fetch("scenario_metadata")
+
+      assert_equal 6, metadata.size
+      assert_equal 4, metadata.count { |entry| entry["pending"] == true }
+      assert_equal 6, metadata.map { |entry| entry["incident_id"] }.uniq.size
+      assert_equal 2, report.dig("summary", "total")
+      assert_equal 2, report.dig("summary", "passed")
+      assert_equal %w[incident_plan_only_dependency_gate incident_repository_routing],
+                   report.fetch("scenarios").map { |scenario| scenario.fetch("name") }.sort
+      assert_equal "complete", report.fetch("status")
+    end
+  end
+
+  def test_human_incident_run_reports_executed_and_pending_counts
+    Dir.mktmpdir("e2e-incident-report") do |runs_dir|
+      out, err, status = Open3.capture3(
+        { "HIVE_E2E_RUNS_DIR" => runs_dir },
+        hive_e2e, "run", "--filter", "incident-regression"
+      )
+
+      assert status.success?, err
+      assert_match(/selected 6, executed 2, pending 4, passed 2, failed 0/, out)
+    end
+  end
+
+  def test_pending_only_human_run_is_green_but_not_silent
+    Dir.mktmpdir("e2e-incident-report") do |runs_dir|
+      out, err, status = Open3.capture3(
+        { "HIVE_E2E_RUNS_DIR" => runs_dir },
+        hive_e2e, "run", "incident_attempt_adoption_after_caller_loss"
+      )
+
+      assert status.success?, err
+      assert_match(/selected 1, executed 0, pending 1, passed 0, failed 0/, out)
     end
   end
 
@@ -241,6 +292,15 @@ class E2EBinaryTest < Minitest::Test
     assert status.success?, "bin/hive-e2e run --filter tui --help should exit 0, stderr was: #{err}"
     assert_includes out, "Run e2e scenarios"
     refute_includes err, "no scenarios match"
+  end
+
+  def test_run_treats_help_after_delimiter_as_literal_pattern
+    out, err, status = Open3.capture3(hive_e2e, "run", "--", "--help")
+
+    assert_equal 64, status.exitstatus
+    assert_empty out
+    assert_match(/no scenarios match --help/, err)
+    refute_match(/Usage:/, err)
   end
 
   def test_replay_missing_repro_emits_json_error_when_requested
@@ -450,6 +510,15 @@ class E2EBinaryTest < Minitest::Test
     end
   end
 
+  def test_run_treats_unsupported_json_assignment_after_delimiter_as_literal_pattern
+    out, err, status = Open3.capture3(hive_e2e, "run", "--", "--json=bogus")
+
+    assert_equal 64, status.exitstatus
+    assert_empty out
+    assert_match(/no scenarios match --json=bogus/, err)
+    refute_match(/invalid boolean value for --json/, err)
+  end
+
   def test_run_no_match_emits_json_error_when_requested
     out, err, status = Open3.capture3(hive_e2e, "run", "definitely-no-scenario", "--json")
     assert_equal 64, status.exitstatus
@@ -460,6 +529,55 @@ class E2EBinaryTest < Minitest::Test
     assert_equal "no_scenarios", payload["error_kind"]
     assert_equal 64, payload["exit_code"]
     assert_match(/no scenarios match definitely-no-scenario/, payload["message"])
+  end
+
+  def test_malformed_scenario_is_preflight_error_in_json_mode
+    name = "malformed_scenario_#{Process.pid}"
+    with_temp_scenario(name, "name: #{name}\nsteps:\n  - kind: [\n") do
+      [ [ "list" ], [ "run", name ] ].each do |args|
+        out, err, status = Open3.capture3(hive_e2e, *args, "--json")
+
+        assert_equal 78, status.exitstatus, "#{args.first}: malformed scenario config must exit 78"
+        assert_empty err
+        payload = JSON.parse(out)
+        assert_equal "hive-e2e-error", payload["schema"]
+        assert_equal "preflight", payload["error_kind"]
+        assert_equal 78, payload["exit_code"]
+        assert_match(/#{name}\.yml/, payload["message"])
+      end
+    end
+  end
+
+  def test_malformed_scenario_is_preflight_error_in_human_mode
+    name = "malformed_scenario_#{Process.pid}"
+    with_temp_scenario(name, "name: #{name}\nsteps:\n  - kind: [\n") do
+      [ [ "list" ], [ "run", name ] ].each do |args|
+        out, err, status = Open3.capture3(hive_e2e, *args)
+
+        assert_equal 78, status.exitstatus, "#{args.first}: malformed scenario config must exit 78"
+        assert_empty out
+        assert_match(/hive-e2e: .*#{name}\.yml/, err)
+      end
+    end
+  end
+
+  def test_malformed_script_gh_contract_is_preflight_error
+    name = "malformed_gh_scenario_#{Process.pid}"
+    with_temp_scenario(name, <<~YAML) do
+      name: #{name}
+      steps:
+        - kind: script_gh
+          interactions:
+            - args: auth-status
+    YAML
+      out, err, status = Open3.capture3(hive_e2e, "list", "--json")
+
+      assert_equal 78, status.exitstatus
+      assert_empty err
+      payload = JSON.parse(out)
+      assert_equal "preflight", payload["error_kind"]
+      assert_match(/args must be an array of strings/, payload["message"])
+    end
   end
 
   def test_tui_refute_only_scenario_preflights_missing_tmux
@@ -497,8 +615,8 @@ class E2EBinaryTest < Minitest::Test
     assert_match(/run_id must be a safe basename/, payload["message"])
   end
 
-  def test_replay_invalid_byte_name_emits_usage_error_when_json_requested
-    out, err, status = Open3.capture3(hive_e2e, "replay", "--json", "bad\xFF".b, "scenario")
+  def test_run_invalid_byte_pattern_emits_usage_error_in_c_locale
+    out, err, status = Open3.capture3({ "LC_ALL" => "C" }, hive_e2e, "run", "--json", "bad\xFF".b)
     assert_equal 64, status.exitstatus
     assert_empty err
 
@@ -522,6 +640,34 @@ class E2EBinaryTest < Minitest::Test
       payload = JSON.parse(out)
       assert_equal "usage", payload["error_kind"]
       assert_match(/retain_days must be a non-negative integer/, payload["message"])
+    end
+  end
+
+  def test_clean_rejects_bare_retention_options_before_cleanup
+    [ "--retain-days", "--retain-failed-days" ].product([ [], [ "--json" ], [ "--dry-run" ] ]).each do |flag, suffix|
+      Dir.mktmpdir("e2e-clean-test") do |tmp_runs_dir|
+        run_dir = File.join(tmp_runs_dir, "2026-04-30T12-00-00Z-1234-abcd")
+        FileUtils.mkdir_p(run_dir)
+        old_time = Time.now - (30 * 86_400)
+        File.utime(old_time, old_time, run_dir)
+
+        out, err, status = Open3.capture3(
+          { "HIVE_E2E_RUNS_DIR" => tmp_runs_dir },
+          hive_e2e, "clean", flag, *suffix
+        )
+
+        assert_equal 64, status.exitstatus, "#{([ flag ] + suffix).inspect}: malformed cleanup must be rejected"
+        assert File.exist?(run_dir), "#{([ flag ] + suffix).inspect}: malformed cleanup must not delete artifacts"
+        if suffix.include?("--json")
+          assert_empty err
+          payload = parse_single_json_document(out)
+          assert_equal "usage", payload["error_kind"]
+          assert_match(/No value provided for option '#{Regexp.escape(flag)}'/, payload["message"])
+        else
+          assert_empty out
+          assert_match(/No value provided for option '#{Regexp.escape(flag)}'/, err)
+        end
+      end
     end
   end
 
@@ -612,6 +758,20 @@ class E2EBinaryTest < Minitest::Test
       assert_empty out, "#{flags.join(" ")}: final false JSON flag must force prose output"
       assert_match(/hive-e2e:/, err)
     end
+  end
+
+  def test_usage_error_ignores_json_booleans_after_delimiter
+    out, err, status = Open3.capture3(hive_e2e, "run", "--json", "pattern", "--", "--no-json")
+
+    assert_equal 64, status.exitstatus
+    assert_equal "hive-e2e-error", JSON.parse(out)["schema"]
+    assert_empty err
+
+    out, err, status = Open3.capture3(hive_e2e, "run", "--no-json", "pattern", "--", "--json")
+
+    assert_equal 64, status.exitstatus
+    assert_empty out
+    assert_match(/hive-e2e:/, err)
   end
 
   def test_missing_required_args_with_json_true_emits_envelope_on_stdout

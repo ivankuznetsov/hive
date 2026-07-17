@@ -1,20 +1,33 @@
 require "json"
+require "pathname"
 require "securerandom"
 require "hive/agent"
 require "hive/agent_profiles"
 require "hive/patrol/finding"
 require "hive/patrol/fingerprint"
 require "hive/patrol/runner_task"
+require "hive/patrol/agent_launch"
+require "hive/patrol/source_reader"
 require "hive/patrol/state_store"
+require "hive/patrol/token_budget"
 require "hive/stages/base"
-require "hive/usage_db"
 
 module Hive
   module Patrol
     class Reviewer
+      STAGE = "patrol-review".freeze
+      MAX_OUTPUT_BYTES = 64 * 1024
       VALID_CATEGORIES = %w[bug security performance documentation test-gap maintainability].freeze
       VALID_SEVERITIES = %w[critical high medium low].freeze
       VALID_CONFIDENCE = %w[high medium low].freeze
+      VALID_SCOPES = %w[local feature cross_feature system].freeze
+      PRODUCTION_CATEGORIES = %w[bug security performance].freeze
+      REVIEW_ERROR_KINDS = %w[agent_failed malformed_json schema_invalid review_error].freeze
+      REQUIRED_TEXT_FIELDS = %w[
+        title description recommendation contract impact root_cause reproduction validation
+      ].freeze
+      DOCUMENTATION_EXTENSIONS = %w[.md .mdx .rst .adoc .asciidoc .txt].freeze
+      OutputReadError = Class.new(StandardError)
 
       TemplateBindings = Struct.new(
         :project_root, :feature, :output_path, :max_findings, :user_supplied_tag,
@@ -23,18 +36,21 @@ module Hive
         def binding_for_erb = binding
       end
 
-      # Features whose review failed this run (agent error, malformed
-      # JSON, or any other read/parse failure). A non-empty list means the
-      # scan was partial; the caller must not advance last_scanned_sha as
+      # Features whose review failed this run (agent error, malformed or
+      # schema-invalid JSON, or any other read/parse failure). A non-empty
+      # list means the scan was partial; the caller must not advance last_scanned_sha as
       # if the commit reviewed cleanly (U5 fail-loud).
       attr_reader :review_errors
 
-      def initialize(project_root, cfg:, state: StateStore.new(project_root), agent_runner: nil)
+      def initialize(project_root, cfg:, state: StateStore.new(project_root), agent_runner: nil,
+                     token_budget: nil)
         @project_root = File.expand_path(project_root)
         @cfg = cfg
         @state = state
         @agent_runner = agent_runner || method(:run_agent)
+        @token_budget = token_budget || TokenBudget.new(@project_root, cfg: cfg)
         @review_errors = []
+        @source_reader = Hive::Patrol::SourceReader.new(@project_root)
       end
 
       def call(features)
@@ -44,7 +60,8 @@ module Hive
       private
 
       # One feature's failure must never abort the whole scan: a flaky or
-      # non-zero agent (Agent#run! sets status :error rather than raising)
+      # non-zero agent (Agent#run! sets status :error, or :timeout for a
+      # timed-out run, rather than raising)
       # would otherwise leave no output file and the previous
       # `File.read(output_path)` raised an uncaught Errno::ENOENT through
       # `flat_map`, discarding every other feature's findings. We record
@@ -57,10 +74,12 @@ module Hive
         result = @agent_runner.call(feature: feature, prompt: prompt,
                                     output_path: output_path, run_dir: run_dir)
         if agent_failed?(result)
-          return record_feature_error(feature, "agent_failed", agent_error_message(result))
+          return record_feature_error(
+            feature, "agent_failed", agent_error_message(result), agent_error_details(result)
+          )
         end
 
-        parse_findings(feature, output_path)
+        parse_findings(feature, output_path, run_id: File.basename(run_dir).delete_prefix("review-"))
       rescue JSON::ParserError => e
         record_feature_error(feature, "malformed_json", e.message)
       rescue StandardError => e
@@ -68,20 +87,35 @@ module Hive
       end
 
       def agent_failed?(result)
-        result.is_a?(Hash) && result[:status] == :error
+        result.is_a?(Hash) && %i[error timeout].include?(result[:status])
       end
 
       def agent_error_message(result)
-        result.is_a?(Hash) ? result[:error_message].to_s : ""
+        message = result.is_a?(Hash) ? result[:error_message].to_s : ""
+        return "review agent timed out" if message.empty? && result.is_a?(Hash) && result[:status] == :timeout
+
+        message
       end
 
-      def record_feature_error(feature, kind, message)
-        @review_errors << { "feature_id" => feature.id, "error" => kind, "message" => message }
-        @state.write_run_log("review-error-#{SecureRandom.hex(4)}", {
-          "feature_id" => feature.id,
-          "error" => kind,
-          "message" => message
-        })
+      def agent_error_details(result)
+        exhaustion = result.is_a?(Hash) ? result[:resource_exhaustion] : nil
+        return {} unless exhaustion.is_a?(Hash)
+
+        {
+          "details" => {
+            "resource_exhaustion" => {
+              "reason" => exhaustion[:reason].to_s,
+              "limit" => exhaustion[:limit].to_i,
+              "observed" => exhaustion[:observed].to_i
+            }
+          }
+        }
+      end
+
+      def record_feature_error(feature, kind, message, details = {})
+        error = { "feature_id" => feature.id, "error" => kind, "message" => message }.merge(details)
+        @review_errors << error
+        @state.write_run_log("review-error-#{SecureRandom.hex(4)}", error)
         []
       end
 
@@ -98,34 +132,80 @@ module Hive
         )
       end
 
-      def parse_findings(feature, output_path)
-        doc = JSON.parse(File.read(output_path))
-        items = doc.is_a?(Hash) ? doc.fetch("findings", []) : doc
-        Array(items).first(max_findings).filter_map.with_index do |raw, idx|
-          normalize_finding(feature, raw, idx)
+      def parse_findings(feature, output_path, run_id:)
+        doc = JSON.parse(read_output(output_path))
+        unless doc.is_a?(Hash) && doc.keys == [ "findings" ] && doc.fetch("findings").is_a?(Array)
+          return record_feature_error(
+            feature, "schema_invalid", "reviewer output must be an object containing only a findings array"
+          )
+        end
+
+        findings = doc.fetch("findings").first(max_findings).map.with_index do |raw, idx|
+          finding = normalize_finding(feature, raw, idx, run_id: run_id)
+          unless finding
+            return record_feature_error(
+              feature, "schema_invalid", "finding #{idx + 1} does not satisfy the patrol finding contract"
+            )
+          end
+
+          finding
+        end
+        findings.each { |finding| @state.write_finding(finding) }
+        findings
+      end
+
+      def read_output(output_path)
+        flags = File::RDONLY | File::BINARY
+        flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+        flags |= File::NONBLOCK if File.const_defined?(:NONBLOCK)
+
+        File.open(output_path, flags) do |file|
+          raise OutputReadError, "reviewer output is not a regular file" unless file.stat.file?
+
+          bytes = file.read(MAX_OUTPUT_BYTES + 1) || "".b
+          if bytes.bytesize > MAX_OUTPUT_BYTES
+            raise OutputReadError, "reviewer output exceeds #{MAX_OUTPUT_BYTES} bytes"
+          end
+
+          bytes
         end
       end
 
-      def normalize_finding(feature, raw, idx)
+      def normalize_finding(feature, raw, idx, run_id:)
         return nil unless raw.is_a?(Hash)
 
         category = raw["category"].to_s
         severity = raw["severity"].to_s
         confidence = raw["confidence"].to_s
+        scope = raw["scope"].to_s
         return nil unless VALID_CATEGORIES.include?(category)
         return nil unless VALID_SEVERITIES.include?(severity)
         return nil unless VALID_CONFIDENCE.include?(confidence)
+        return nil unless VALID_SCOPES.include?(scope)
+        return nil unless REQUIRED_TEXT_FIELDS.all? { |field| present_text?(raw[field]) }
+
+        evidence = normalized_evidence(raw["evidence"])
+        return nil unless evidence&.any?
+        return nil if PRODUCTION_CATEGORIES.include?(category) && evidence.none? { |item| production_evidence?(item) }
+        return nil unless slice_anchored?(feature, evidence)
+        evidence = prioritize_slice_evidence(feature, evidence)
 
         finding = Finding.new(
-          id: "#{feature.id}-#{idx + 1}",
+          id: "#{feature.id}-#{run_id}-#{idx + 1}",
           feature_id: feature.id,
           category: category,
           severity: severity,
           confidence: confidence,
-          title: raw["title"] || raw["summary"],
+          title: raw["title"],
           description: raw["description"],
           recommendation: raw["recommendation"],
-          evidence: Array(raw["evidence"])
+          scope: scope,
+          contract: raw["contract"],
+          impact: raw["impact"],
+          root_cause: raw["root_cause"],
+          reproduction: raw["reproduction"],
+          validation: raw["validation"],
+          evidence: evidence
         )
         # Stamp the fingerprint before persisting so the durable
         # findings/*.json record links back to dedup/PR state. Without
@@ -134,8 +214,64 @@ module Hive
         # leaving the audit record unlinked. Commands::Patrol stamps with
         # `||=`, so the value computed here is reused, not overwritten.
         finding.fingerprint = Fingerprint.compute(finding, project_root: @project_root)
-        @state.write_finding(finding)
         finding
+      end
+
+      def present_text?(value)
+        value.is_a?(String) && !value.strip.empty?
+      end
+
+      def normalized_evidence(value)
+        return unless value.is_a?(Array)
+
+        evidence = value.map do |item|
+          next unless item.is_a?(Hash)
+
+          path = item["file"].to_s.tr("\\", "/")
+          line = item["line"]
+          snippet = item["snippet"]
+          next if path.empty? || Pathname.new(path).absolute? || path.split("/").include?("..")
+          next unless line.is_a?(Integer) && line.positive?
+          next unless present_text?(snippet)
+
+          snippet = snippet.strip
+          source_line = @source_reader.read_utf8(path).lines[line - 1]
+          next unless source_line&.include?(snippet)
+
+          item.merge("file" => path, "line" => line, "snippet" => snippet)
+        end
+        return if evidence.any?(&:nil?)
+
+        evidence
+      end
+
+      def production_evidence?(item)
+        path = item.fetch("file").downcase
+        parts = path.split("/")
+        return false if (parts & %w[test tests spec specs __tests__ fixtures]).any?
+        return false if File.basename(path).match?(/(?:_test|_spec|\.test|\.spec)\.[^.]+\z/)
+
+        !DOCUMENTATION_EXTENSIONS.include?(File.extname(path))
+      end
+
+      def slice_anchored?(feature, evidence)
+        owned = slice_owned_paths(feature)
+        evidence.any? { |item| slice_anchor?(owned, item) }
+      end
+
+      def prioritize_slice_evidence(feature, evidence)
+        owned = slice_owned_paths(feature)
+        primary, supporting = evidence.partition { |item| slice_anchor?(owned, item) }
+        primary + supporting
+      end
+
+      def slice_owned_paths(feature)
+        (Array(feature.entrypoints) + Array(feature.owned_files)).map { |path| path.to_s.tr("\\", "/") }
+      end
+
+      def slice_anchor?(owned, item)
+        role = item["role"].to_s
+        owned.include?(item.fetch("file")) && (role.empty? || %w[trigger root_cause].include?(role))
       end
 
       def run_agent(prompt:, output_path:, run_dir:, **)
@@ -144,54 +280,43 @@ module Hive
           project_root: @project_root,
           state_file: File.join(run_dir, "review.md"),
           log_dir: File.join(@state.root, "logs"),
-          slug: "patrol-review"
+          slug: STAGE
         )
         profile = Hive::AgentProfiles.lookup(@cfg.dig("patrol", "agent") || "claude", cfg: @cfg)
+        launch = Hive::Patrol::AgentLaunch.prepare(profile: profile, prompt: prompt, role: :review)
+        unless @token_budget.acquire(stage: STAGE, minimum_tokens: launch.fetch(:minimum_tokens))
+          return { status: :error, error_message: @token_budget.exhaustion_message }
+        end
         started_at = Time.now.utc
-        result = Hive::Agent.new(
-          task: task,
-          prompt: prompt,
-          add_dirs: [ @project_root ],
-          cwd: @project_root,
-          max_budget_usd: @cfg.dig("budget_usd", "patrol") || 100,
-          timeout_sec: @cfg.dig("timeout_sec", "patrol") || 3600,
-          log_label: "patrol-review",
-          profile: profile,
-          expected_output: output_path,
-          status_mode: :output_file_exists
-        ).run!
-        record_usage(result, profile, "patrol-review", started_at)
+        result = nil
+        begin
+          result = Hive::Agent.new(
+            task: task,
+            prompt: prompt,
+            add_dirs: [ @project_root ],
+            cwd: @project_root,
+            max_budget_usd: @token_budget.max_budget_usd(
+              @cfg.dig("budget_usd", "patrol") || 100, stage: STAGE
+            ),
+            max_tokens: @token_budget.max_tokens(stage: STAGE),
+            max_turns: launch.fetch(:max_turns),
+            timeout_sec: @cfg.dig("timeout_sec", "patrol") || 3600,
+            log_label: STAGE,
+            profile: profile,
+            expected_output: output_path,
+            status_mode: :output_file_exists,
+            cli_flags: launch.fetch(:cli_flags)
+          ).run!
+        ensure
+          @token_budget.record!(
+            result: result, profile: profile, stage: STAGE, started_at: started_at
+          )
+        end
         result
       end
 
-      def record_usage(result, profile, stage, started_at)
-        usage = result && result[:usage]
-        return unless usage
-
-        Hive::UsageDb.record!(
-          agent: profile_name(profile),
-          model: usage[:model] || result[:model],
-          project_slug: File.basename(@project_root.to_s),
-          task_slug: stage,
-          stage: stage,
-          started_at: started_at,
-          ended_at: Time.now.utc.iso8601,
-          input: usage[:input] || 0,
-          output: usage[:output] || 0,
-          cached: usage[:cached] || 0
-        )
-      rescue StandardError => e
-        warn "[hive] usage record failed: #{e.message}"
-      end
-
-      def profile_name(profile)
-        return profile.name.to_s if profile.respond_to?(:name)
-
-        (@cfg.dig("patrol", "agent") || "claude").to_s
-      end
-
       def max_findings
-        @cfg.dig("patrol", "max_findings_per_feature") || 10
+        @cfg.dig("patrol", "max_findings_per_feature") || 3
       end
     end
   end

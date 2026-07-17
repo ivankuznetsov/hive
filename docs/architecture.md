@@ -177,7 +177,11 @@ patrol:
   poll_interval_sec: 600
   agent: claude
   min_confidence_to_fix: medium
-  max_findings_per_feature: 10
+  min_alpha_to_fix: 70
+  max_findings_per_feature: 3
+  max_features_per_cycle: 12
+  max_fixes_per_feature_per_cycle: 1
+  max_fix_attempts_per_cycle: 6
   max_prs_per_cycle: 3
   draft_prs: false
   review_prs: true

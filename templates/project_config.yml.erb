@@ -262,8 +262,22 @@ patrol:
   mode: <%= patrol_mode.inspect %>
   agent: claude
   min_confidence_to_fix: medium
-  max_findings_per_feature: 10
+  # Findings are ranked globally by evidence-backed delivery value. Only
+  # scores at or above this 0-100 gate are eligible for automatic fixing.
+  min_alpha_to_fix: 70
+  max_findings_per_feature: 3
+  # Review a rotating component batch; the cursor persists until the map is covered.
+  max_features_per_cycle: 12
+  # Keep a hot component from consuming a whole patrol cycle.
+  max_fixes_per_feature_per_cycle: 1
+  # Bound expensive fix-agent work even when findings are stale or fail validation.
+  max_fix_attempts_per_cycle: 6
   max_prs_per_cycle: 3
+  # Streamed usage stops each ordinary agent at the mode's per-agent token
+  # allowance. Architecture gets 2x that allowance plus 2x the per-cycle
+  # token/launch envelope, while UTC-day and native budget guards stay shared.
+  # max_tokens_per_agent: 50000
+  # architecture_budget_multiplier: 2
   # Open ready (non-draft) PRs by default so the babysitter — which skips
   # draft PRs — picks them up. Set true to open draft PRs instead.
   draft_prs: false
@@ -286,8 +300,8 @@ patrol:
   # single-pass adapter; optionally add the ce-code-review fan-out or
   # Claude during init when you want broader patrol review coverage.
   review:
-    max_context_files: 24
-    max_owned_files: 12
+    max_context_files: 4
+    max_owned_files: 4
     reviewers:
 <% if patrol_reviewers.include?("codex-native-review") -%>
       # Native `codex review` — one cheap, tuned, read-only pass whose
@@ -319,6 +333,28 @@ patrol:
         budget_usd: 50
         timeout_sec: 5400
 <% end -%>
+
+# Architecture patrol is independent from ordinary patrol. Fresh init
+# recommends read-only discovery, while every external side effect remains a
+# separate explicit opt-in. Existing projects with no block keep the disabled
+# Config::DEFAULTS policy.
+refactor_patrol:
+  enabled: <%= refactor_patrol_enabled ? "true" : "false" %>
+  # Low-leverage proposals remain visible but report-only.
+  min_leverage_score: 0.25
+  # Absolute wall-clock budget shared by every feature review in one child.
+  # Unfinished features remain durable and resume in a later patrol run.
+  max_review_seconds_per_run: 3600
+  auto_fix:
+    enabled: false
+    agent: codex
+  commands:
+    # Optional project-owned API/contract check for ecosystems without a
+    # built-in declaration adapter. It is consulted only when auto-fix is on.
+    public_contract: null
+  issue_filing:
+    enabled: false
+    min_leverage_score: 0.25
 
 # Auto-rebase pre-step for `hive run` (plan
 # docs/plans/2026-05-14-001-feat-hive-auto-rebase-stale-worktree-plan.md).

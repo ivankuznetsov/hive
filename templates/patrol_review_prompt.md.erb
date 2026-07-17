@@ -1,4 +1,4 @@
-You are reviewing one semantic feature slice for bugs and quality issues.
+You are reviewing one semantic feature slice for high-value production defects.
 
 Project root: <%= project_root %>
 Feature id: <%= feature.id %>
@@ -20,10 +20,42 @@ Associated tests:
 - <%= path %>
 <% end -%>
 
-Return at most <%= max_findings %> findings. Categories must be one of:
+Prefer zero findings to a speculative, narrow, cosmetic, or quota-filling
+finding. Return at most <%= max_findings %> findings, and never split several
+symptoms or option spellings of one root cause into separate findings.
+
+Ordinary patrol auto-fixes production behavior. Do not return documentation,
+test-gap, or maintainability findings; those belong in docs or Architecture
+Patrol. Categories in the wire format remain:
 bug, security, performance, documentation, test-gap, maintainability.
 Severity must be critical, high, medium, or low. Confidence must be high,
 medium, or low.
+
+Use at most two bounded inspection rounds before producing the JSON. Read the
+listed slice first, in parallel where possible. Only when that establishes a
+concrete defect hypothesis, use one follow-up round for its direct caller,
+guard, or test. Never run a repository-wide search or return a broad file list;
+if the listed evidence does not establish a production defect, immediately
+write an empty `findings` array.
+
+Response contract: your first response may read the listed paths; your second
+may perform the one bounded follow-up; your third response MUST call `Write`
+for the JSON output and MUST NOT call Read, Grep, or Glob. The output response
+still counts when the correct result is an empty array.
+
+Before reporting a finding:
+- Verify it against the current checkout and try to disprove it by reading
+  guards, callers, tests, configuration, and platform/library semantics.
+- Identify a violated contract, a reachable trigger, a real consequence, and
+  the shared root cause. A missing test alone is not a production defect.
+- Anchor the trigger or root cause in an entrypoint/owned file from this
+  slice. Cross-feature evidence may support the trace, but must not be used to
+  misattribute another component's defect to this slice.
+- Audit sibling call paths and input variants so the recommendation fixes the
+  complete root cause rather than one token or example.
+- Provide a deterministic reproduction (or precise static trace) and a
+  targeted validation that would fail before the fix and pass afterward.
+- Choose scope from local, feature, cross_feature, or system.
 
 Write a JSON object to this exact path:
 <%= output_path %>
@@ -35,11 +67,17 @@ Required shape:
       "category": "bug",
       "severity": "high",
       "confidence": "medium",
+      "scope": "cross_feature",
       "title": "short title",
       "description": "specific problem",
-      "recommendation": "concrete fix",
+      "contract": "expected invariant or public contract",
+      "impact": "observable consequence for a real consumer or boundary",
+      "root_cause": "feature-independent underlying cause",
+      "reproduction": "current-checkout reproduction or precise static trace",
+      "validation": "targeted before/after proof plus broader checks",
+      "recommendation": "smallest coherent root-cause fix",
       "evidence": [
-        {"file": "relative/path.rb", "line": 12, "snippet": "code anchor"}
+        {"file": "relative/path", "line": 12, "snippet": "code anchor", "role": "trigger|root_cause|impact"}
       ]
     }
   ]

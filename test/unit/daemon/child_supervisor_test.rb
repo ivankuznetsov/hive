@@ -250,6 +250,32 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
     end
   end
 
+  def test_parse_result_file_accepts_architecture_envelope_larger_than_log_tail
+    with_tmp_dir do |dir|
+      path = File.join(dir, "result.json")
+      payload = { "schema" => "hive-refactor-patrol", "evidence" => "x" * (128 * 1024) }
+      File.write(path, JSON.generate(payload))
+
+      parsed = make.send(:parse_result_file, path)
+
+      assert_equal payload, parsed
+      assert File.exist?(path), "parsing alone must not unlink before child completion consumes it"
+    end
+  end
+
+  def test_parse_result_file_does_not_reject_a_valid_large_monorepo_envelope
+    with_tmp_dir do |dir|
+      path = File.join(dir, "result.json")
+      payload = {
+        "schema" => "hive-refactor-patrol",
+        "feature_results" => [ { "evidence" => "x" * (9 * 1024 * 1024) } ]
+      }
+      File.binwrite(path, JSON.generate(payload))
+
+      assert_equal payload, make.send(:parse_result_file, path)
+    end
+  end
+
   def test_read_tail_returns_nil_on_io_errors
     sup = make
 
@@ -356,6 +382,24 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
 
       sup.terminate_all(grace_sec: 2)
       assert_equal 0, sup.in_flight_count, "TERM (with grace) must reap all running children"
+    end
+  end
+
+  def test_terminate_child_awaits_exact_group_and_preserves_dispatch_token_for_reap
+    with_tmp_dir do |dir|
+      sup = make(log_dir: dir)
+      token = { kind: :architecture_patrol, job_id: "job-7", owner: "daemon", generation: 1 }
+      pid = sup.spawn(
+        command_string: "hive run a --exit-code 0 --sleep 30",
+        project: "p1", slug: "a", stage: "refactor-patrol", dispatch_token: token
+      )
+
+      assert sup.terminate_child(pid, grace_sec: 1)
+      completed = sup.reap_all
+      assert_equal 1, completed.size
+      assert_equal token, completed.first.dispatch_token
+      assert_nil completed.first.exit_code, "signal termination must not masquerade as exit zero"
+      assert_equal 0, sup.in_flight_count
     end
   end
 
@@ -466,6 +510,101 @@ class HiveDaemonChildSupervisorTest < Minitest::Test
 
       completed = wait_for_completion(sup, max_attempts: 100)
       assert_equal 1, completed.size, "the killed child must surface as a ChildExit on reap"
+    end
+  end
+
+  def test_terminate_child_escalates_to_kill_when_term_does_not_reap
+    sup = make
+    pid = 1234
+    sup.instance_variable_set(:@running, {
+      pid => {
+        project: "p1", slug: "architecture", stage: "refactor-patrol",
+        command: "hive refactor-patrol p1", started_at: Time.utc(2026, 7, 10),
+        log_path: nil, dry_run: false, dispatch_token: { kind: :architecture_patrol }
+      }
+    })
+    statuses = [ nil, Struct.new(:exitstatus).new(nil) ]
+    kills = []
+    sup.define_singleton_method(:pgid_for) { |_child_pid| 4321 }
+    sup.define_singleton_method(:safe_kill) { |signal, target| kills << [ signal, target ] }
+    sup.define_singleton_method(:wait_for_child) { |_child_pid, _seconds| statuses.shift }
+
+    assert sup.terminate_child(pid, grace_sec: 0)
+    assert_equal [ [ :TERM, -4321 ], [ :KILL, -4321 ] ], kills
+    assert_equal pid, sup.reap_all.first.pid
+  end
+
+  def test_process_identity_requires_verified_start_time_and_process_group
+    sup = make
+    start_time = Hive::Lock.process_start_time(Process.pid)
+    skip "process start identity unavailable" if start_time.to_s.empty?
+
+    identity = sup.process_identity(Process.pid)
+
+    assert_equal start_time.to_s, identity.fetch(:process_start_time)
+    assert_operator identity.fetch(:pgid), :>, 1
+    assert_nil sup.process_identity(nil)
+    assert_nil sup.process_identity(1)
+
+    with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(_pid) { nil }) do
+      assert_nil sup.process_identity(Process.pid)
+    end
+    with_replaced_singleton_method(Process, :getpgid, ->(_pid) { raise Errno::EPERM }) do
+      assert_nil sup.process_identity(Process.pid)
+    end
+  end
+
+  def test_wait_for_child_returns_nil_when_process_is_already_reaped
+    sup = make
+    with_replaced_singleton_method(Process, :wait2, ->(*_args) { raise Errno::ECHILD }) do
+      assert_nil sup.send(:wait_for_child, 999_999, 0)
+    end
+  end
+
+  def test_completion_envelope_reads_and_removes_job_bound_result_file
+    with_tmp_dir do |dir|
+      path = File.join(dir, "result.json")
+      payload = { "schema" => "hive-refactor-patrol", "ok" => true }
+      File.write(path, JSON.generate(payload))
+      sup = make
+
+      actual = sup.send(
+        :completion_envelope,
+        dispatch_token: { result_path: path }, log_path: nil
+      )
+
+      assert_equal payload, actual
+      refute File.exist?(path), "the one-shot result artifact is consumed after completion"
+    end
+  end
+
+  def test_parse_result_file_fails_closed_for_non_objects_and_malformed_json
+    with_tmp_dir do |dir|
+      path = File.join(dir, "result.json")
+      sup = make
+      File.write(path, JSON.generate([ "not", "an", "envelope" ]))
+      assert_nil sup.send(:parse_result_file, path)
+
+      File.write(path, "{")
+      assert_nil sup.send(:parse_result_file, path)
+      assert_nil sup.send(:parse_result_file, File.join(dir, "missing.json"))
+    end
+  end
+
+  def test_log_path_fallback_uses_project_state_or_system_tmp_directory
+    with_tmp_dir do |dir|
+      sup = make
+
+      state_path = sup.send(
+        :log_path_for, project: "demo", slug: "architecture", log_state_path: dir
+      )
+      tmp_path = sup.send(
+        :log_path_for, project: "demo", slug: "architecture", log_state_path: nil
+      )
+
+      assert state_path.start_with?(File.join(dir, "logs", "daemon-children", "demo", "architecture"))
+      assert tmp_path.start_with?(File.join(Dir.tmpdir, "hive-daemon-logs", "demo", "architecture"))
+      assert_equal "daemon-run.log", File.basename(state_path)
     end
   end
 

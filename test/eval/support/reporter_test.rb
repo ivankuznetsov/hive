@@ -744,6 +744,35 @@ class HiveEvalReporterTest < Minitest::Test
     end
   end
 
+  def test_cli_fails_loudly_when_existing_report_cannot_be_removed
+    skip "root bypasses directory write permissions" if Process.uid.zero?
+
+    Dir.mktmpdir("hive-eval-report") do |dir|
+      report = File.join(dir, "stale.json")
+      File.write(report, JSON.dump({ "schema" => "hive-eval-report", "stale" => true }))
+
+      with_fake_bundle do |env, marker|
+        File.chmod(0555, dir)
+        begin
+          _out, err, status = Open3.capture3(env, "bin/hive-eval", "--report", report, "--no-judge")
+        ensure
+          File.chmod(0700, dir)
+        end
+
+        refute status.success?
+        assert_match(/Errno::EACCES/, err)
+        assert File.exist?(report), "failed cleanup must leave the stale report observable"
+        refute File.exist?(marker), "hive-eval must stop after report cleanup fails"
+
+        _out, err, status = Open3.capture3(env, "bin/hive-eval", "--report", report, "--bogus")
+        assert_equal 64, status.exitstatus
+        assert_match(/invalid option: --bogus/, err)
+        assert File.exist?(report), "usage validation must preserve a caller-selected report"
+        refute File.exist?(marker), "usage validation must stop before launching eval"
+      end
+    end
+  end
+
   def test_cli_help_is_read_only_and_preserves_selected_report
     [ "--help", "-h" ].each do |help_flag|
       Dir.mktmpdir("hive-eval-report") do |dir|

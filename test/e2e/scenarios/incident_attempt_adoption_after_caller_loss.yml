@@ -1,0 +1,24 @@
+name: incident_attempt_adoption_after_caller_loss
+description: Proves an accepted attempt survives caller loss and is adopted once by exact attempt ID.
+tags: [incident-regression]
+incident_id: accepted-attempt-caller-loss
+sibling_task_id: "#9767"
+pending: true
+
+# Activation contract (#9767): replace the guard below with steps that use
+# the sibling-owned lease writer/reader. Preserve this causal order:
+# accepted attempt + live fake-agent barrier -> caller death -> daemon adoption
+# -> advancing heartbeat -> writers stopped -> exact one-claim/zero-duplicate
+# assertions. Do not encode a lease document or adoption reason in this file
+# until #9767 defines them.
+steps:
+  - kind: seed_state
+    stage: 4-execute
+    slug: synthetic-adoption-task
+    state_file: task.md
+    content: "# Synthetic accepted-attempt caller-loss fixture\n"
+
+  - kind: state_assert
+    description: Activation guard; replace with #9767 lease assertions before enabling.
+    path: "{run_home}/pending-contracts/9767-enabled"
+    contains: "lease contract and reason assertions installed"

@@ -23,6 +23,7 @@ module Hive
     # project-authored workflows; making the list project-aware later means
     # editing only that one method.
     WORKFLOW_VOCABULARY = Hive::Workflows::Registry.ids.join(", ").freeze
+    INIT_SCHEMA_ID = "hive-init.v#{Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-init")}".freeze
 
     # The one place the `--workflow` help is composed, shared by `init` and
     # `new` so they stay symmetric.
@@ -99,7 +100,7 @@ module Hive
         daemon=enabled, babysitter=enabled, daemon_autostart=disabled
 
       With --json, init suppresses that prose and emits a single
-      hive-init.v1 success payload containing the resolved answers plus
+      #{INIT_SCHEMA_ID} success payload containing the resolved answers plus
       project path, default branch, hive-state path, and worktree root.
       When used with --new-workflow, the payload also includes
       descriptor_path and instruction_path.
@@ -119,9 +120,13 @@ module Hive
       already-initialized project scaffolds the workflow and rebinds the
       default in one hive-state commit.
 
-      To set non-default values from automation, run init and then
-      hand-edit `.hive-state/config.yml` (see `wiki/modules/config.md`
-      for the schema). Legacy Compound Engineering skill values such as
+      Headless callers can explicitly select architecture discovery before
+      any state is written with --refactor-patrol or --no-refactor-patrol;
+      omitting both keeps the fresh-project default enabled. Set other
+      non-default values after init in `.hive-state/config.yml` (see
+      `wiki/modules/config.md` for the schema). Existing projects reject both
+      selectors rather than silently ignoring them during a workflow rebind.
+      Legacy Compound Engineering skill values such as
       `/compound-engineering:ce-brainstorm` are normalized to the current
       `/ce-brainstorm` form before prompts are rendered. Piped STDIN is
       intentionally NOT consumed.
@@ -138,6 +143,8 @@ module Hive
     option :workflow, type: :string, desc: workflow_option_desc
     option :new_workflow, type: :string,
                           desc: "scaffold custom workflow ID, bind it as this project's default, and print paths to edit"
+    option :refactor_patrol, type: :boolean, default: nil,
+                             desc: "enable or disable post-merge architecture discovery before init writes state"
     def init(project_path = Dir.pwd)
       require "hive/commands/init"
       Hive::Commands::Init.new(
@@ -145,7 +152,8 @@ module Hive
         force: options[:force],
         json: options[:json],
         workflow: options[:workflow],
-        new_workflow: options[:new_workflow]
+        new_workflow: options[:new_workflow],
+        refactor_patrol: options[:refactor_patrol]
       ).call
     end
 
@@ -440,8 +448,8 @@ module Hive
       --depends-on stacks this task on a prerequisite: the daemon holds
       auto-advance until the prerequisite reaches the project's dependency
       gate stage (8-finalize by default, configurable via
-      `dependency_gate_stage`). The value is a prerequisite task id (a
-      positive integer) or slug (lowercase, starts with a letter).
+      `dependency_gate_stage`). Use a prerequisite task id or slug for the
+      same project, or project:slug for an explicit cross-project dependency.
 
       Examples:
 
@@ -450,9 +458,11 @@ module Hive
         hive new myproj --depends-on 42 "add export button"
 
         hive new myproj --depends-on add-export-endpoint-260618-ab12 "wire up export API"
+
+        hive new myproj --depends-on api:add-export-endpoint-260618-ab12 "wire up export UI"
     DESC
     option :depends_on, type: :string,
-                        desc: "stack on a prerequisite task id or slug; hold daemon " \
+                        desc: "depend on a same-project id/slug or explicit project:slug; hold daemon " \
                               "auto-advance until it reaches the dependency gate stage " \
                               "(8-finalize by default)"
     option :workflow, type: :string, desc: workflow_option_desc
@@ -670,10 +680,13 @@ module Hive
 
     desc "patrol PROJECT", "Run one repository patrol scan cycle for a registered project"
     long_desc <<~DESC
-      Maps the registered project's repository into durable feature slices
-      under <project>/.hive-state/patrol/, asks the configured patrol
-      agent to review each slice, attempts isolated fixes above the
-      confidence gate, validates configured commands, and opens ready
+      Maps the registered project's repository into language-neutral
+      component slices under <project>/.hive-state/patrol/, asks the
+      configured patrol agent for bounded, source-verified production defects
+      across a persisted rotating feature batch,
+      globally ranks semantic root causes above the alpha gate, requires
+      an independently observed fail-before/pass-after proof on a fresh base,
+      validates configured commands, and opens ready
       (non-draft) PRs for validated fixes (set patrol.draft_prs: true for
       draft PRs). By default, each opened patrol PR is also handed to the
       standard 6-review flow as a visible "Patrol: ..." task; set
@@ -681,7 +694,7 @@ module Hive
 
       Use --dry-run to map and review without creating fix worktrees,
       pushing branches, or opening PRs. With --json, emits
-      hive-patrol.v1.
+      hive-patrol.v2.
     DESC
     option :dry_run, type: :boolean, default: false,
                      desc: "map and review, but do not fix, push, or open PRs"
@@ -706,6 +719,20 @@ module Hive
       With --changed-since alone, changed features are boosted but full
       discovery still runs; combined with a scope hint, changed files further
       restrict that scoped set. With --json, emits hive-refactor-patrol.v1.
+
+      Use --pr with a merged PR number or URL to analyze only its immutable
+      changed-path manifest from a clean registered default-branch checkout.
+      PR mode requires --json, cannot be combined with legacy scope hints, and
+      emits hive-refactor-patrol.v2 through an enforceable read-only agent.
+
+      The daemon uses --actions with --job-manifest to resume the immutable
+      per-thesis action ledger after discovery. It emits the same v2 contract.
+
+      Use --list or --show JOB_ID to inspect the authoritative durable job
+      ledger without enqueueing, claiming, replaying, or resuming work. With
+      --json these operations emit hive-refactor-patrol-jobs.v1. List output is
+      paginated with --limit/--cursor. Show output bounds retry/publication
+      histories by --limit unless --full explicitly requests every entry.
     DESC
     option :dry_run, type: :boolean, default: false,
                      desc: "preview without persisting refactor-patrol state"
@@ -713,6 +740,23 @@ module Hive
     option :entrypoint, type: :string, desc: "only review the feature owning this entrypoint"
     option :path, type: :string, desc: "only review features with owned files under this path"
     option :changed_since, type: :string, desc: "git ref used for changed-feature ranking/filtering"
+    option :pr, type: :string, desc: "analyze one merged PR number or URL with the v2 read-only contract"
+    option :job_manifest, type: :string,
+                          desc: "analyze one immutable merge-intake manifest (daemon/internal)"
+    option :actions, type: :boolean, default: false,
+                     desc: "resume actions for --job-manifest (daemon/internal)"
+    option :result_file, type: :string,
+                         desc: "write daemon completion envelope to a fenced result file (internal)"
+    option :list, type: :boolean, default: false,
+                  desc: "list durable architecture-patrol jobs without changing state"
+    option :show, type: :string,
+                  desc: "show one durable architecture-patrol job without changing state"
+    option :limit, type: :numeric,
+                   desc: "query page/history limit (1-100; default: 100)"
+    option :cursor, type: :string,
+                    desc: "continue a --list query from an opaque cursor"
+    option :full, type: :boolean, default: false,
+                  desc: "include complete unbounded histories with --show"
     def refactor_patrol(project)
       require "hive/commands/refactor_patrol"
       Hive::Commands::RefactorPatrol.new(
@@ -722,7 +766,16 @@ module Hive
         feature: options[:feature],
         entrypoint: options[:entrypoint],
         path: options[:path],
-        changed_since: options[:changed_since]
+        changed_since: options[:changed_since],
+        pr: options[:pr],
+        job_manifest: options[:job_manifest],
+        actions: options[:actions],
+        result_file: options[:result_file],
+        list: options[:list],
+        show: options[:show],
+        limit: options[:limit],
+        cursor: options[:cursor],
+        full: options[:full]
       ).call
     end
 

@@ -59,6 +59,25 @@ class UsageExtractorsTest < Minitest::Test
     assert_equal({ input: 3, output: 2, cached: 5, model: nil }, result)
   end
 
+  def test_claude_message_start_extracts_nested_message_usage
+    result = CLAUDE.call(event(
+      "type" => "stream_event",
+      "event" => {
+        "type" => "message_start",
+        "message" => {
+          "model" => "claude-opus-4-8",
+          "usage" => {
+            "input_tokens" => 30,
+            "output_tokens" => 4,
+            "cache_read_input_tokens" => 70
+          }
+        }
+      }
+    ))
+
+    assert_equal({ input: 30, output: 4, cached: 70, model: "claude-opus-4-8" }, result)
+  end
+
   def test_non_usage_lines_return_nil
     assert_nil CLAUDE.call(event("type" => "system"))
     assert_nil CLAUDE.call(event("type" => "assistant", "message" => { "content" => [] }))

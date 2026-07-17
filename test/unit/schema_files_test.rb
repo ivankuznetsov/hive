@@ -8,10 +8,13 @@ require "hive/commands/daemon"
 require "hive/commands/drop"
 require "hive/commands/forget"
 require "hive/commands/init"
+require "hive/commands/patrol"
 require "hive/commands/prune"
 require "hive/commands/run"
 require "hive/commands/stage_action"
 require "hive/commands/status"
+require "hive/patrol/candidate_selector"
+require "hive/patrol/reviewer"
 require "hive/tui/snapshot"
 require "hive/daemon/dispatch_request_queue"
 require "hive/daemon/dispatch_result_queue"
@@ -118,7 +121,8 @@ class SchemaFilesTest < Minitest::Test
 
     producer_kinds = %w[
       ambiguous_slug destination_collision final_stage
-      wrong_stage rollback_failed invalid_task_path error
+      wrong_stage rollback_failed invalid_task_path dependency_wait
+      admission_error error
     ].sort
 
     assert_equal producer_kinds, schema_kinds,
@@ -143,8 +147,14 @@ class SchemaFilesTest < Minitest::Test
     assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
     assert_equal "hive-status",
                  doc.dig("$defs", "SuccessPayload", "properties", "schema", "const")
-    assert_equal 4,
+    assert_equal 5,
                  doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+  end
+
+  def test_hive_status_v4_schema_remains_for_back_compat
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status", version: 4)))
+    assert_equal 4, doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+    refute_includes doc.dig("$defs", "Task", "properties").keys, "admission_error"
   end
 
   def test_hive_status_v1_schema_remains_for_back_compat
@@ -187,6 +197,7 @@ class SchemaFilesTest < Minitest::Test
       blocked_by: nil,
       dependency_stage: nil,
       blocked: false,
+      admission_error: nil,
       folder: "/tmp/probe",
       state_file: "/tmp/probe/idea.md",
       pr_url: nil,
@@ -225,6 +236,23 @@ class SchemaFilesTest < Minitest::Test
                  doc.dig("$defs", "Task", "properties", "marker", "enum").sort
     assert_equal Hive::Schemas::TaskActionKind::ALL.sort,
                  doc.dig("$defs", "Task", "properties", "action", "enum").sort
+  end
+
+  def test_hive_status_admission_error_is_closed_and_matches_reason_codes
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status")))
+    definition = doc.dig("$defs", "AdmissionError")
+    assert_equal Hive::DependencyAdmission::REASON_CODES.sort,
+                 definition.dig("properties", "reason_code", "enum").sort
+
+    schemer = JSONSchemer.schema(definition)
+    valid = {
+      "reason_code" => "dependency_cycle",
+      "offending_ref" => "app:a -> app:b -> app:a",
+      "safe_correction" => "Break the cycle."
+    }
+    assert schemer.valid?(valid)
+    refute schemer.valid?(valid.merge("reason_code" => "unknown_reason"))
+    refute schemer.valid?(valid.merge("extra" => true))
   end
 
   def test_hive_status_schema_matches_tui_snapshot_row_keys
@@ -340,6 +368,7 @@ class SchemaFilesTest < Minitest::Test
       blocked_by: "base-task",
       dependency_stage: "7-artifacts",
       blocked: true,
+      admission_error: nil,
       folder: "/tmp/review-task",
       state_file: "/tmp/review-task/task.md",
       marker_name: :review_waiting,
@@ -800,6 +829,13 @@ class SchemaFilesTest < Minitest::Test
         candidates: [ { project: "alpha", stage: "2-brainstorm", folder: "/tmp/probe" } ]
       ),
       Hive::Schemas::RunErrorKind::INVALID_TASK_PATH => Hive::InvalidTaskPath.new("no such slug"),
+      Hive::Schemas::RunErrorKind::DEPENDENCY_WAIT => Hive::DependencyWaitError.new(
+        "waiting", offending_ref: "base", safe_correction: "Wait for base."
+      ),
+      Hive::Schemas::RunErrorKind::ADMISSION_ERROR => Hive::DependencyAdmissionError.new(
+        "invalid", reason_code: "dependency_cycle", offending_ref: "p:a -> p:a",
+        safe_correction: "Break the cycle."
+      ),
       Hive::Schemas::RunErrorKind::INTERNAL          => Hive::InternalError.new("internal bug"),
       Hive::Schemas::RunErrorKind::ERROR             => Hive::Error.new("plain")
     }
@@ -1061,8 +1097,16 @@ class SchemaFilesTest < Minitest::Test
     assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
     assert_equal "hive-init",
                  doc.dig("$defs", "SuccessPayload", "properties", "schema", "const")
-    assert_equal 1,
+    assert_equal 2,
                  doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+  end
+
+  def test_hive_init_v1_schema_remains_pinned
+    path = Hive::Schemas.schema_path("hive-init", version: 1)
+    doc = JSON.parse(File.read(path))
+
+    assert_equal 1, doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+    refute_includes doc.dig("$defs", "Answers", "required"), "refactor_patrol_enabled"
   end
 
   def test_hive_init_required_keys_match_producer_emission
@@ -1072,10 +1116,10 @@ class SchemaFilesTest < Minitest::Test
     expected = %w[
       adhoc_auto_fix answers babysitter_enabled budgets claude_mode daemon_autostart_requested daemon_enabled
       default_branch development_agent enabled_reviewers hints hive_state_path ok path patrol_mode patrol_reviewers planning_agent
-      project schema schema_version timeouts triage_bias workflow worktree_root
+      project refactor_patrol_enabled schema schema_version timeouts triage_bias workflow worktree_root
     ].sort
     assert_equal expected, schema_required,
-                 "schema/producer required-key drift in hive-init.v1.json"
+                 "schema/producer required-key drift in hive-init.v2.json"
 
     # Sandbox the project root: success_payload now drives load_dir against
     # <hive_state_path>/workflows, so a hardcoded /tmp/demo would read a real,
@@ -1086,7 +1130,7 @@ class SchemaFilesTest < Minitest::Test
       entry = { "name" => "demo", "path" => dir, "hive_state_path" => state_path }
       answers = Hive::Commands::Init::Prompts.new(input: StringIO.new, summary_io: StringIO.new).collect
       assert_equal answers.keys.sort, answers_required,
-                   "schema/prompt answer-key drift in hive-init.v1.json"
+                   "schema/prompt answer-key drift in hive-init.v2.json"
       producer = Hive::Commands::Init.new(dir, json: true).send(
         :success_payload, entry: entry, ops: ops, answers: answers, workflow: :coding
       )
@@ -1402,6 +1446,15 @@ class SchemaFilesTest < Minitest::Test
                  doc.dig("$defs", "SuccessPayload", "properties", "schema", "const")
     assert_equal 1,
                  doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+  end
+
+  def test_hive_patrol_v1_remains_pinned_for_back_compat
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-patrol", version: 1)))
+
+    assert_equal 1, doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+    reasons = doc.dig("$defs", "SuccessPayload", "properties", "skipped_findings",
+                      "items", "properties", "reason", "enum")
+    assert_equal %w[dismissed existing_pr similar_to_existing low_confidence low_severity], reasons
   end
 
   def test_hive_prune_required_keys_match_producer_emission
@@ -1866,7 +1919,7 @@ class SchemaFilesTest < Minitest::Test
     assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
     assert_equal "hive-patrol",
                  doc.dig("$defs", "SuccessPayload", "properties", "schema", "const")
-    assert_equal 1,
+    assert_equal 2,
                  doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
   end
 
@@ -1875,8 +1928,9 @@ class SchemaFilesTest < Minitest::Test
     schema_required = doc.dig("$defs", "SuccessPayload", "required").sort
     producer_required = %w[
       schema schema_version ok project project_root dry_run features_mapped
+      features_review_attempted features_reviewed review_complete review_errors
       findings fix_candidates fixes_attempted fixes_validated prs_opened
-      pr_urls review_handoff_errors skipped_findings last_scanned_sha
+      pr_urls review_handoff_errors fix_results skipped_findings last_scanned_sha
     ].sort
 
     assert_equal producer_required, schema_required,
@@ -1887,12 +1941,16 @@ class SchemaFilesTest < Minitest::Test
     schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-patrol"))))
     payload = {
       "schema" => "hive-patrol",
-      "schema_version" => 1,
+      "schema_version" => 2,
       "ok" => true,
       "project" => "demo",
       "project_root" => "/tmp/demo",
       "dry_run" => false,
       "features_mapped" => 1,
+      "features_review_attempted" => 1,
+      "features_reviewed" => 1,
+      "review_complete" => true,
+      "review_errors" => [],
       "findings" => 1,
       "fix_candidates" => 1,
       "fixes_attempted" => 1,
@@ -1901,6 +1959,14 @@ class SchemaFilesTest < Minitest::Test
       "pr_urls" => [ "https://example.com/pr/1" ],
       "review_handoff_errors" => [
         { "pr_url" => "https://example.com/pr/2", "reason" => "review_handoff_failed" }
+      ],
+      "fix_results" => [
+        {
+          "finding_id" => "f1", "patch_id" => "p1", "passed" => true,
+          "reason" => "validated", "patch_artifact" => ".hive-state/patrol/patches/p1.json",
+          "detail" => nil, "publication_status" => "opened", "publication_reason" => nil,
+          "publication_detail" => nil, "pr_url" => "https://example.com/pr/1"
+        }
       ],
       "skipped_findings" => [
         { "finding_id" => "f2", "fingerprint" => "fp2", "reason" => "low_confidence" },
@@ -1911,6 +1977,36 @@ class SchemaFilesTest < Minitest::Test
 
     errors = schemer.validate(payload).map { |e| e["error"] }
     assert_empty errors, "hive-patrol success payload must validate"
+  end
+
+  def test_hive_patrol_v2_accepts_every_candidate_selector_skip_reason
+    document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-patrol")))
+    allowed = document.dig("$defs", "SuccessPayload", "properties", "skipped_findings",
+                           "items", "properties", "reason", "enum")
+    produced = Hive::Patrol::CandidateSelector::SKIP_REASONS
+
+    assert_equal produced.sort, allowed.sort
+  end
+
+  def test_hive_patrol_v2_review_error_kinds_match_reviewer
+    document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-patrol")))
+    allowed = document.dig("$defs", "SuccessPayload", "properties", "review_errors",
+                           "items", "properties", "error", "enum")
+
+    assert_equal Hive::Patrol::Reviewer::REVIEW_ERROR_KINDS.sort, allowed.sort
+  end
+
+  def test_hive_patrol_v2_fix_and_publication_reasons_match_producers
+    document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-patrol")))
+    properties = document.dig("$defs", "SuccessPayload", "properties", "fix_results",
+                              "items", "properties")
+
+    assert_equal Hive::Commands::Patrol::FIX_RESULT_REASONS.sort,
+                 properties.dig("reason", "enum").sort
+    assert_equal Hive::Patrol::PrOpener::RESULT_STATUSES.map(&:to_s).sort,
+                 properties.dig("publication_status", "enum").compact.sort
+    assert_equal Hive::Patrol::PrOpener::RESULT_REASONS.compact.sort,
+                 properties.dig("publication_reason", "enum").compact.sort
   end
 
   def test_hive_patrol_finding_schema_file_exists_and_accepts_record
@@ -1929,6 +2025,13 @@ class SchemaFilesTest < Minitest::Test
       "title" => "Nil dereference",
       "description" => "The route calls a nil receiver.",
       "recommendation" => "Guard the receiver before use.",
+      "scope" => "cross_feature",
+      "contract" => "A missing record must produce a not-found response.",
+      "impact" => "A normal request crashes the process instead.",
+      "root_cause" => "The shared lookup path assumes records always exist.",
+      "reproduction" => "Request a valid route with an unknown record id.",
+      "validation" => "Run the focused request regression and full request suite.",
+      "alpha_score" => 84,
       "fingerprint" => "fp1",
       "evidence" => [
         { "file" => "app.rb", "line" => 12, "snippet" => "user.name" }
@@ -1936,6 +2039,21 @@ class SchemaFilesTest < Minitest::Test
     }
     errors = JSONSchemer.schema(doc).validate(payload).map { |e| e["error"] }
     assert_empty errors, "durable patrol finding record must validate"
+
+    legacy = payload.reject do |key, _value|
+      %w[scope contract impact root_cause reproduction validation alpha_score].include?(key)
+    end
+    legacy_errors = JSONSchemer.schema(doc).validate(legacy).map { |e| e["error"] }
+    assert_empty legacy_errors, "v2 must continue accepting durable records written before alpha scoring"
+  end
+
+  def test_hive_patrol_finding_v1_remains_pinned_for_back_compat
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-patrol-finding", version: 1)))
+    properties = doc.fetch("properties")
+
+    assert_equal "hive patrol finding record (v1)", doc.fetch("title")
+    refute properties.key?("root_cause"), "v1 must not be rewritten with v2 fields"
+    refute properties.key?("alpha_score"), "v1 must remain the original closed contract"
   end
 
   # ── hive-answer-digest ───────────────────────────────────────────────────
@@ -2095,6 +2213,64 @@ class SchemaFilesTest < Minitest::Test
                      "#{expected_basename}: title version suffix must match SCHEMA_VERSIONS"
       end
     end
+  end
+
+  def test_refactor_patrol_retains_v1_while_v2_is_current
+    assert_equal 2, Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-refactor-patrol")
+
+    v1 = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 1)))
+    v2 = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 2)))
+    assert_equal 1, v1.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+    assert_equal 2, v2.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+  end
+
+  def test_refactor_patrol_v2_requires_a_complete_immutable_thesis_snapshot
+    document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 2)))
+    snapshot_schema = JSONSchemer.schema(
+      { "$ref" => "#/$defs/ThesisSnapshot", "$defs" => document.fetch("$defs") }
+    )
+
+    incomplete = {
+      "id" => "thesis-1", "feature_id" => "checkout", "fingerprint" => "fp-1"
+    }
+    refute snapshot_schema.valid?(incomplete)
+
+    required = document.dig("$defs", "ThesisSnapshot", "required")
+    assert_includes required, "problem"
+    assert_includes required, "expected_leverage"
+    assert_includes required, "required_validation"
+    assert_includes required, "admissible"
+  end
+
+  # The standalone thesis schema is the normalizer gate; the report envelope
+  # embeds the same shape as ThesisSnapshot. Their non-empty narrative-field
+  # contracts must stay in lockstep or an agent thesis with an empty `problem`
+  # would pass the normalizer and then poison the whole discovery envelope.
+  def test_refactor_patrol_thesis_narrative_min_lengths_match_the_envelope_snapshot
+    thesis = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol-thesis", version: 2)))
+    envelope = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 2)))
+
+    %w[problem cost proposed_refactor].each do |field|
+      assert_equal 1, thesis.dig("properties", field, "minLength"),
+                   "#{field}: the thesis schema must reject empty strings at the normalizer gate"
+      assert_equal thesis.dig("properties", field, "minLength"),
+                   envelope.dig("$defs", "ThesisSnapshot", "properties", field, "minLength"),
+                   "#{field}: thesis schema and envelope ThesisSnapshot must agree"
+    end
+  end
+
+  def test_refactor_patrol_v2_pins_complete_source_and_action_identity
+    document = JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 2)))
+
+    source_required = document.dig("$defs", "SourcePr", "required")
+    assert_includes source_required, "registration"
+    assert_includes source_required, "changed_paths"
+    assert_includes source_required, "manifest_checksum"
+
+    action_required = document.dig("$defs", "Action", "required")
+    assert_includes action_required, "canonical_action_id"
+    assert_includes action_required, "thesis_fingerprint"
+    assert_includes action_required, "owner_job_id"
   end
 
   # ── hive-dispatch-request: claimed-file contract (#247) ─────────────────

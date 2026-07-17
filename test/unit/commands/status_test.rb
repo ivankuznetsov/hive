@@ -67,6 +67,49 @@ class CommandsStatusTest < Minitest::Test
     assert_equal %w[execute open_pr review.fix review.ci], status["stages"].keys
   end
 
+  def test_implementation_identity_status_surfaces_preview_errors_and_sources
+    execute = {
+      "stage" => "execute", "provider" => "codex", "model" => "gpt-5.6-sol",
+      "profile_name" => "codex", "launcher_identity" => "codex-cli/v1",
+      "source" => "legacy_backfill", "generation" => 2,
+      "originating_attempt" => "execute-2", "requested_effort" => nil,
+      "effective_effort" => nil, "effort_supported" => true,
+      "model_pinned" => true
+    }
+    blank_override = { "agent" => "" }.freeze
+    cfg = {
+      "execute" => { "agent" => "codex", "model" => "gpt-5.6-sol" },
+      "review" => { "fix" => { "agent" => "" } },
+      Hive::Config::IMPLEMENTATION_IDENTITY_PROVENANCE_KEY => {
+        "execute" => {}, "open_pr" => {}, "review.fix" => blank_override, "review.ci" => {}
+      }.freeze
+    }
+    command = Hive::Commands::Status.new
+
+    status = command.implementation_identity_status(
+      { "generation" => 2, "execute" => execute, "stages" => {} }, cfg
+    )
+
+    assert_equal "resolution_error", status.dig("stages", "review.fix", "status")
+    assert_equal "explicit_override", status.dig("stages", "review.fix", "source")
+    assert_equal "legacy_backfill", status.dig("stages", "review.ci", "source")
+    assert_equal "legacy_backfill",
+                 command.send(:implementation_preview_source, cfg, "review.ci", execute)
+  end
+
+  def test_implementation_owner_token_bounds_long_model_names
+    row = {
+      implementation_identity: {
+        "stages" => {
+          "execute" => { "provider" => "codex", "model" => "gpt-5.6-extra-long-model" }
+        }
+      }
+    }
+
+    assert_equal "owner=codex/gpt-5.6-ext…",
+                 Hive::Commands::Status.new.send(:implementation_owner_token, row)
+  end
+
   def test_json_payload_ignores_archived_manual_stage_sibling
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")

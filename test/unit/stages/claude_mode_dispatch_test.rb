@@ -154,11 +154,18 @@ class ClaudeModeDispatchTest < Minitest::Test
       File.write(File.join(task.folder, "plan.md"), "## Plan\n")
       worktree_path = File.join(dir, "worktree")
       FileUtils.mkdir_p(worktree_path)
+      identity = Hive::ImplementationIdentity::Resolver.new(cfg: identity_config).resolve_execute(
+        generation: 1, attempt_id: "exec"
+      )
 
       with_spawn_capture do |captured|
-        Hive::Stages::Execute.spawn_implementation(task, cfg, worktree_path)
+        Hive::Stages::Execute.spawn_implementation(
+          task, cfg, worktree_path, identity: identity
+        )
 
         assert_equal :headless, captured.fetch(0).fetch(:launcher)
+        assert_equal [ "--model", "gpt-5.6-sol" ],
+                     captured[0][:kwargs][:identity_arguments].first(2)
       end
     end
   end

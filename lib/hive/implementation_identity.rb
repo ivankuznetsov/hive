@@ -170,7 +170,7 @@ module Hive
             next if line.lstrip.start_with?("#")
             break if line.lstrip.start_with?("[")
 
-            match = line.match(/\A\s*model\s*=\s*["']([^"']+)["']\s*(?:#.*)?\z/)
+            match = line.match(/\A\s*model\s*=\s*["']([^"']+)["']\s*(?:#.*)?\s*\z/)
             return match[1] if match
           end
         end

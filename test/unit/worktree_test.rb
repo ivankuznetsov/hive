@@ -1068,6 +1068,13 @@ class WorktreeTest < Minitest::Test
     end
   end
 
+  def test_fetch_origin_branch_returns_failure_for_invalid_timeout
+    _out, err, status = Hive::Worktree.fetch_origin_branch("/tmp/project", "main", timeout_sec: 0)
+
+    refute status.success?
+    assert_includes err, "fetch timeout must be positive"
+  end
+
   # Plan R12: drop must converge even when worktree.yml has been
   # truncated, hand-edited, or corrupted by a crashed prior writer.
   # read_pointer treats parse failure as "no pointer" (returns nil)

@@ -56,6 +56,38 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
     end
   end
 
+  def test_structured_history_is_bound_to_project_task_and_generation
+    with_legacy_attempts do |task, store, current|
+      matching = compatibility_attempt(store, "matching-execute", "4-execute", "codex")
+      store.checkpoint(
+        matching,
+        checkpoint: {
+          "implementation_identity" => {
+            "provider" => "codex", "model" => "gpt-5.6-sol", "effort" => "high"
+          }
+        },
+        now: Time.now.utc
+      )
+      foreign = compatibility_attempt(
+        store, "foreign-execute", "4-execute", "claude", project: "other"
+      )
+      store.checkpoint(
+        foreign,
+        checkpoint: {
+          "implementation_identity" => {
+            "provider" => "claude", "model" => "claude-fable-5", "effort" => "high"
+          }
+        },
+        now: Time.now.utc
+      )
+
+      selection = with_context(current) { described_class(task, store).reconstruct! }
+
+      assert_equal "codex", selection.provider
+      assert_equal "matching-execute", selection.originating_attempt
+    end
+  end
+
   def test_missing_history_never_uses_merged_claude_default_implicitly
     with_legacy_attempts(explicit_execute: false) do |task, store, current|
       error = assert_raises(Hive::ImplementationIdentity::ResolutionError) do
@@ -64,6 +96,88 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
 
       assert_match(/not explicitly configured/, error.message)
       assert_empty journal(task)
+    end
+  end
+
+  def test_logged_codex_argv_recovers_model_and_reasoning_effort
+    with_legacy_attempts do |task, store, current|
+      historical = compatibility_attempt(store, "historical-execute", "4-execute", "codex")
+      log_dir = File.join(task.folder, "logs")
+      FileUtils.mkdir_p(log_dir)
+      File.write(
+        File.join(log_dir, "execute.log"),
+        '[hive] spawn cmd=["codex","exec","--model","gpt-5.6-sol","-c",' \
+          '"model_reasoning_effort=xhigh"]' + "\n"
+      )
+
+      selection = with_context(current) { described_class(task, store).reconstruct! }
+
+      assert_equal "codex", selection.provider
+      assert_equal "gpt-5.6-sol", selection.model
+      assert_equal "xhigh", selection.effective_effort
+      assert_equal historical.attempt_id, selection.originating_attempt
+      event = journal(task).find { |record| record["event_type"] == "implementation_identity_backfilled" }
+      assert_equal "logged_argv", event.dig("provenance", "recovery")
+    end
+  end
+
+  def test_missing_current_attempt_fails_before_recovery
+    with_tmp_dir do |root|
+      task = TaskStub.new(
+        folder: root, state_file: File.join(root, "pr.md"), slug: "legacy-task",
+        id: 42, project_root: root
+      )
+      projection = Struct.new(:value) { def read = value }.new({ "implementation_identity" => {} })
+      attempt_store = Struct.new(:unused) { def fetch(*) = nil }.new
+      subject = Hive::ImplementationIdentity::Reconstructor.new(
+        task: task, cfg: config(root), attempt_store: attempt_store,
+        projection_store: projection
+      )
+
+      error = assert_raises(Hive::ImplementationIdentity::ResolutionError) do
+        with_attempt_context(
+          attempt_id: "missing", task_generation: 0, ownership_generation: "owner-0"
+        ) { subject.reconstruct! }
+      end
+      assert_match(/durable attempt "missing" is unavailable/, error.message)
+    end
+  end
+
+  def test_log_recovery_skips_unreadable_logs_and_rejects_untrusted_argv_shapes
+    with_legacy_attempts do |task, store, current|
+      log_dir = File.join(task.folder, "logs")
+      FileUtils.mkdir_p(log_dir)
+      path = File.join(log_dir, "execute.log")
+      File.write(path, "unreadable")
+      subject = described_class(task, store)
+      original = File.method(:readlines)
+
+      with_replaced_singleton_method(File, :readlines, lambda { |candidate, **kwargs|
+        raise Errno::EACCES, candidate if candidate == path
+
+        original.call(candidate, **kwargs)
+      }) do
+        assert_nil subject.send(:logged_argv_components, current)
+      end
+
+      assert_nil subject.send(:parse_logged_argv, "cmd=[not-json]")
+      assert_nil subject.send(:parse_logged_argv, "cmd=#{"[" + ("x" * (33 * 1024)) + "]"}")
+      assert_nil subject.send(:parse_logged_argv, "cmd=[1]")
+      assert_nil subject.send(:codex_effort, [ "codex", "--model", "gpt" ])
+      refute subject.send(:usable_components?, "provider" => "codex", "model" => "default")
+    end
+  end
+
+  def test_log_path_discovery_degrades_when_metadata_is_unreadable
+    with_legacy_attempts do |task, store, _current|
+      log_dir = File.join(task.folder, "logs")
+      FileUtils.mkdir_p(log_dir)
+      path = File.join(log_dir, "execute.log")
+      File.write(path, "log")
+
+      with_replaced_singleton_method(File, :mtime, ->(_candidate) { raise Errno::EACCES, path }) do
+        assert_equal [], described_class(task, store).send(:log_paths)
+      end
     end
   end
 
@@ -93,11 +207,11 @@ class ImplementationIdentityReconstructorTest < Minitest::Test
     end
   end
 
-  def compatibility_attempt(store, id, stage, provider)
+  def compatibility_attempt(store, id, stage, provider, project: "demo", input_epoch: 0)
     store.create_compatibility_running(
-      attempt_id: id, task_id: "42", project: "demo", task_slug: "legacy-task",
+      attempt_id: id, task_id: "42", project: project, task_slug: "legacy-task",
       intended_stage: stage, task_generation: "owner-0", ownership_generation: "owner-0",
-      task_input_epoch: 0, progress_token: "progress-#{id}", owner: OWNER,
+      task_input_epoch: input_epoch, progress_token: "progress-#{id}", owner: OWNER,
       provider: provider, starting_revision: nil, now: Time.now.utc
     )
   end

@@ -115,6 +115,30 @@ class AgentProfileTest < Minitest::Test
     assert_match(/concrete default model/, error.message)
   end
 
+  def test_concrete_default_model_requires_and_wraps_profile_resolver_failures
+    missing = make_profile
+    error = assert_raises(Hive::ImplementationIdentity::ResolutionError) do
+      missing.concrete_default_model
+    end
+    assert_match(/cannot resolve a concrete default model/, error.message)
+
+    broken = make_profile(default_model_resolver: ->(**) { raise IOError, "settings unavailable" })
+    error = assert_raises(Hive::ImplementationIdentity::ResolutionError) do
+      broken.concrete_default_model
+    end
+    assert_match(/default-model resolution failed: settings unavailable/, error.message)
+  end
+
+  def test_identity_arguments_requires_model_pin_support
+    profile = make_profile
+
+    error = assert_raises(Hive::ImplementationIdentity::ResolutionError) do
+      profile.identity_arguments(model: "provider/model-v1", effort: nil)
+    end
+
+    assert_match(/cannot pin model/, error.message)
+  end
+
   def test_bin_uses_env_override_when_set
     profile = make_profile(bin_default: "/nonexistent/claude", env_bin_override_key: "HIVE_CLAUDE_BIN")
     assert_equal FAKE_BIN, profile.bin

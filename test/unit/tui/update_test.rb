@@ -460,6 +460,48 @@ class HiveTuiUpdateTest < Minitest::Test
     assert_nil new_model.flash
   end
 
+  def test_snapshot_arrived_updates_implementation_identity_detail_row
+    row = build_row(project: "alpha", slug: "owned", folder: "/a/owned")
+    refreshed = build_row(
+      project: "alpha", slug: "owned", stage: "5-open-pr", folder: "/a/owned"
+    )
+    state = Hive::Tui::Model::ImplementationIdentityDetailState.new(row: row)
+    starting = model.with(
+      mode: :implementation_identity_detail,
+      implementation_identity_detail_state: state
+    )
+
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::SnapshotArrived.new(snapshot: snapshot_with_rows(refreshed))
+    )
+
+    assert_equal :implementation_identity_detail, new_model.mode
+    assert_same refreshed, new_model.implementation_identity_detail_state.row
+  end
+
+  def test_snapshot_arrived_closes_implementation_identity_detail_when_row_disappears
+    row = build_row(project: "alpha", slug: "owned", folder: "/a/owned")
+    state = Hive::Tui::Model::ImplementationIdentityDetailState.new(row: row)
+    starting = model.with(
+      mode: :implementation_identity_detail,
+      implementation_identity_detail_state: state
+    )
+
+    new_model, _cmd = Hive::Tui::Update.apply(
+      starting,
+      Hive::Tui::Messages::SnapshotArrived.new(
+        snapshot: snapshot_with_rows(
+          build_row(project: "alpha", slug: "other", folder: "/a/other")
+        )
+      )
+    )
+
+    assert_equal :grid, new_model.mode
+    assert_nil new_model.implementation_identity_detail_state
+    assert_match(/owned no longer/, new_model.flash)
+  end
+
   # ---------- PollFailed ----------
 
 

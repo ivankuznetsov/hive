@@ -49,6 +49,23 @@ class ImplementationIdentityDetailViewTest < Minitest::Test
     refute_includes output, "claude/"
   end
 
+  def test_renders_missing_stage_owner_as_pending
+    row = Hive::Tui::Snapshot.from_payload(
+      payload("generation" => 1, "pending" => false, "stages" => {})
+    ).rows.first
+    model = Hive::Tui::Model.initial.with(
+      mode: :implementation_identity_detail,
+      implementation_identity_detail_state:
+        Hive::Tui::Model::ImplementationIdentityDetailState.new(row: row)
+    )
+
+    output = Hive::Tui::Views::ImplementationIdentityDetail.render(model)
+
+    assert_includes output, "execute"
+    assert_includes output, "—"
+    assert_includes output, "status=pending"
+  end
+
   private
 
   def stage(provider, model, effort, supported, source, status)

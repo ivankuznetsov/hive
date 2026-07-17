@@ -93,6 +93,16 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_deep_freeze_recurses_into_arrays
+    value = { "nested" => [ { "model" => "gpt" } ] }
+
+    Hive::Config.deep_freeze(value)
+
+    assert value.frozen?
+    assert value.fetch("nested").frozen?
+    assert value.dig("nested", 0).frozen?
+  end
+
   def test_load_validates_attempt_timer_relationships
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))

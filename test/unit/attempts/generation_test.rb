@@ -11,6 +11,8 @@ class AttemptsGenerationTest < Minitest::Test
     keyword_init: true
   )
 
+  FolderTask = Struct.new(:folder, :state_file, keyword_init: true)
+
   def test_stable_task_id_stage_and_artifact_identity_form_generation
     with_tmp_dir do |dir|
       state_file = File.join(dir, "task.md")
@@ -124,14 +126,121 @@ class AttemptsGenerationTest < Minitest::Test
         File.join(folder, Hive::TaskJournal::JOURNAL_BASENAME),
         "#{JSON.generate(record)}\n"
       )
+      store = Hive::Attempts::Store.new(root: File.join(dir, "attempts"))
+      store.create_compatibility_running(
+        attempt_id: "attempt-1", task_id: "42", project: "demo", task_slug: "task-one",
+        intended_stage: "4-execute", task_generation: "owner-7",
+        ownership_generation: "owner-7", task_input_epoch: 7,
+        progress_token: "progress-attempt-1", owner: current_owner,
+        provider: "codex", starting_revision: nil, now: Time.now.utc
+      )
       task = FakeTask.new(id: 42, slug: "task-one", state_file: state_file,
                           stage_index: 5, stage_name: "open-pr")
 
       generation = Hive::Attempts::Generation.resolve(
-        task: task, project: "demo", intended_stage: "5-open-pr"
+        task: task, project: "demo", intended_stage: "5-open-pr", attempt_store: store
       )
 
       assert_equal 7, generation.task_input_epoch
     end
+  end
+
+  def test_downstream_generation_rejects_malformed_or_unbound_journal
+    with_tmp_dir do |dir|
+      state_file = File.join(dir, "pr.md")
+      File.write(state_file, "body")
+      task = FakeTask.new(id: 42, slug: "task-one", state_file: state_file,
+                          stage_index: 5, stage_name: "open-pr")
+      journal = File.join(dir, Hive::TaskJournal::JOURNAL_BASENAME)
+      store = Hive::Attempts::Store.new(root: File.join(dir, "attempts"))
+
+      File.write(journal, "not-json\n")
+      assert_raises(Hive::TaskProjection::InvalidJournal) do
+        Hive::Attempts::Generation.current_task_input_epoch(task, attempt_store: store)
+      end
+
+      record = Hive::TaskJournal::Envelope.authoritative(
+        {
+          event_type: "implementation_identity_captured",
+          task: { "id" => "42", "slug" => "task-one" }, workflow: "coding",
+          stage: "4-execute", attempt_id: "missing-attempt", task_generation: 7,
+          ownership_generation: "owner-7", commit_generation: 0,
+          reason: "execute_identity_captured", evidence: [], provenance: {}, payload: {}
+        }
+      )
+      File.write(journal, "#{JSON.generate(record)}\n")
+      assert_raises(Hive::TaskProjection::InvalidJournal) do
+        Hive::Attempts::Generation.current_task_input_epoch(task, attempt_store: store)
+      end
+    end
+  end
+
+  def test_downstream_generation_propagates_journal_read_failure
+    with_tmp_dir do |dir|
+      state_file = File.join(dir, "pr.md")
+      File.write(state_file, "body")
+      File.write(File.join(dir, Hive::TaskJournal::JOURNAL_BASENAME), "{}\n")
+      task = FakeTask.new(id: 42, slug: "task-one", state_file: state_file,
+                          stage_index: 5, stage_name: "open-pr")
+
+      with_replaced_singleton_method(File, :readlines, ->(*_args, **_kwargs) { raise Errno::EACCES }) do
+        assert_raises(Errno::EACCES) do
+          Hive::Attempts::Generation.current_task_input_epoch(task)
+        end
+      end
+    end
+  end
+
+  def test_current_input_epoch_uses_task_folder_and_rejects_empty_journal
+    with_tmp_dir do |dir|
+      nested_state = File.join(dir, "elsewhere", "pr.md")
+      task = FolderTask.new(folder: dir, state_file: nested_state)
+      File.write(File.join(dir, Hive::TaskJournal::JOURNAL_BASENAME), "")
+
+      error = assert_raises(Hive::TaskProjection::InvalidJournal) do
+        Hive::Attempts::Generation.current_task_input_epoch(task)
+      end
+
+      assert_match(/exists but is empty/, error.message)
+    end
+  end
+
+  def test_current_input_epoch_builds_default_read_only_attempt_store
+    with_tmp_dir do |dir|
+      task = FolderTask.new(folder: dir, state_file: File.join(dir, "pr.md"))
+      attempt_root = File.join(dir, "attempts")
+      store = Hive::Attempts::Store.new(root: attempt_root)
+      store.create_compatibility_running(
+        attempt_id: "attempt-3", task_id: "42", project: "demo", task_slug: "task",
+        intended_stage: "4-execute", task_generation: "owner-3",
+        ownership_generation: "owner-3", task_input_epoch: 3,
+        progress_token: "progress-attempt-3", owner: current_owner,
+        provider: "codex", starting_revision: nil, now: Time.now.utc
+      )
+      record = Hive::TaskJournal::Envelope.authoritative(
+        {
+          event_type: "generation_advanced", task: { "id" => "42", "slug" => "task" },
+          workflow: "coding", stage: "4-execute", attempt_id: "attempt-3", task_generation: 3,
+          ownership_generation: "owner-3", commit_generation: 0, reason: "input_changed",
+          evidence: [], provenance: {}, payload: {}
+        }
+      )
+      File.write(File.join(dir, Hive::TaskJournal::JOURNAL_BASENAME), "#{JSON.generate(record)}\n")
+
+      with_env("HIVE_ATTEMPT_STORE_ROOT" => attempt_root) do
+        assert_equal 3, Hive::Attempts::Generation.current_task_input_epoch(task)
+      end
+    end
+  end
+
+  private
+
+  def current_owner
+    {
+      "pid" => Process.pid,
+      "start_fingerprint" => "start",
+      "session_id" => Process.getsid(0),
+      "process_group_id" => Process.getpgrp
+    }
   end
 end

@@ -5,7 +5,10 @@ require "hive/implementation_identity/store"
 class ImplementationIdentityStoreTest < Minitest::Test
   include HiveTestHelper
 
-  TaskStub = Struct.new(:folder, :state_file, :slug, :id, :project_root, keyword_init: true)
+  TaskStub = Struct.new(
+    :folder, :state_file, :slug, :id, :project_root, :workflow,
+    keyword_init: true
+  )
 
   def test_capture_is_durable_before_callback_and_reused_across_config_drift
     with_identity_attempt do |task, attempt_store, attempt|
@@ -77,17 +80,78 @@ class ImplementationIdentityStoreTest < Minitest::Test
         task: task, cfg: execute_cfg, attempt_store: attempt_store
       )
 
-      selection = Hive::Attempts::Context.with(
+      selection = with_attempt_context(
         attempt_id: attempt.attempt_id, task_generation: 1,
         ownership_generation: attempt.ownership_generation
       ) { store.resolve_stage!("open_pr") }
 
       assert_equal [ "--model", "gpt-5.6-terra", "-c", "model_reasoning_effort=medium" ],
                    selection.native_arguments
-      events = File.readlines(File.join(task.folder, "events.jsonl")).map { |line| JSON.parse(line) }
+      events = File.readlines(File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME)).map do |line|
+        JSON.parse(line)
+      end
       stage_event = events.find { |record| record["event_type"] == "implementation_stage_resolved" }
       assert_equal "open_pr", stage_event.dig("payload", "identity", "stage")
       assert_equal selection.to_h.except("native_arguments"), stage_event.dig("payload", "identity")
+    end
+  end
+
+  def test_ensure_execute_reconstructs_legacy_identity_and_reports_current_generation
+    with_identity_attempt(intended_stage: "5-open-pr", attempt_id: "legacy-open-pr") do |task, attempt_store, attempt|
+      store = Hive::ImplementationIdentity::Store.new(
+        task: task, cfg: execute_config("codex", "gpt-5.6-sol"),
+        attempt_store: attempt_store
+      )
+
+      selection = with_attempt_context(
+        attempt_id: attempt.attempt_id, task_generation: 1,
+        ownership_generation: attempt.ownership_generation
+      ) { store.ensure_execute! }
+
+      assert_equal "codex", selection.provider
+      assert_equal "legacy_backfill", selection.source
+    end
+  end
+
+  def test_capture_rejects_attempt_generation_mismatch
+    with_identity_attempt do |task, attempt_store, attempt|
+      decision = Hive::Conditions::GenerationDecision.new(
+        task_generation: 2, input_fingerprint: "fingerprint", advanced: false,
+        reason: "accepted_input_changed", invalidation_token: nil
+      )
+      tracker = Object.new
+      tracker.define_singleton_method(:resolve) { |**_kwargs| decision }
+      store = Hive::ImplementationIdentity::Store.new(
+        task: task, cfg: execute_config("codex", "gpt-5.6-sol"),
+        attempt_store: attempt_store, generation_tracker: tracker
+      )
+
+      error = assert_raises(Hive::Conditions::GenerationMismatch) do
+        with_attempt_context(
+          attempt_id: attempt.attempt_id, task_generation: 1,
+          ownership_generation: attempt.ownership_generation
+        ) { store.capture_execute! }
+      end
+
+      assert_match(/owns generation 1, but current inputs require 2/, error.message)
+    end
+  end
+
+  def test_default_attempt_store_honors_explicit_root
+    with_tmp_dir do |root|
+      task = TaskStub.new(
+        folder: root, state_file: File.join(root, "task.md"), slug: "task",
+        id: 1, project_root: root
+      )
+
+      with_env("HIVE_ATTEMPT_STORE_ROOT" => File.join(root, "attempts")) do
+        store = Hive::ImplementationIdentity::Store.new(
+          task: task, cfg: execute_config("codex", "gpt-5.6-sol")
+        )
+
+        assert_equal File.join(root, "attempts"),
+                     store.instance_variable_get(:@attempt_store).root
+      end
     end
   end
 
@@ -123,9 +187,11 @@ class ImplementationIdentityStoreTest < Minitest::Test
       task_id: "42", project: "demo", task_slug: task.slug, intended_stage: "4-execute",
       task_generation: "owner-1", ownership_generation: "owner-1", task_input_epoch: 1,
       progress_token: "seed-progress", provider: "codex", starting_revision: nil,
+      worker_argv: [ "hive", "run", task.slug ],
+      claim_capability_digest: Hive::Attempts::Capability.digest("c" * 64),
       retry_charge: 0, inherited_outputs: [], launch_timeout_sec: 30, now: Time.now.utc
     )
-    Hive::Attempts::Context.with(
+    with_attempt_context(
       attempt_id: execute_attempt.attempt_id, task_generation: 1,
       ownership_generation: execute_attempt.ownership_generation
     ) do

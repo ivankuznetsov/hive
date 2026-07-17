@@ -586,10 +586,13 @@ module Hive
             "reviews/suppressed.md",
             fix_success_relative_path(pass)
           ]
+          fix_identity = Hive::Stages::Base.implementation_stage_identity(task, cfg, "review.fix")
           before_fix_sha = Hive::ProtectedFiles.snapshot(task.folder, protected_set)
           before_fix_head = git_head(worktree_path)
 
-          fix_result = spawn_fix_agent(task, cfg, ctx_pass, accepted: accepted)
+          fix_result = spawn_fix_agent(
+            task, cfg, ctx_pass, accepted: accepted, identity: fix_identity
+          )
           after_fix_sha = Hive::ProtectedFiles.snapshot(task.folder, protected_set)
           after_fix_head = git_head(worktree_path)
 

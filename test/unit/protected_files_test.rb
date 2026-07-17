@@ -9,8 +9,8 @@ require "hive/protected_files"
 class ProtectedFilesTest < Minitest::Test
   include HiveTestHelper
 
-  def test_orchestrator_owned_lists_the_three_canonical_files
-    assert_equal %w[plan.md worktree.yml task.md],
+  def test_orchestrator_owned_lists_canonical_state_and_identity_files
+    assert_equal %w[plan.md worktree.yml task.md task-journal.jsonl task-projection.json],
                  Hive::ProtectedFiles::ORCHESTRATOR_OWNED,
                  "ORCHESTRATOR_OWNED is the single source of truth for the protected set"
   end
@@ -20,6 +20,8 @@ class ProtectedFilesTest < Minitest::Test
       File.write(File.join(dir, "plan.md"), "plan body\n")
       File.write(File.join(dir, "worktree.yml"), "path: /x\n")
       File.write(File.join(dir, "task.md"), "## task\n")
+      File.write(File.join(dir, "task-journal.jsonl"), "{}\n")
+      File.write(File.join(dir, "task-projection.json"), "{}\n")
 
       snap = Hive::ProtectedFiles.snapshot(dir)
       assert_kind_of Hash, snap
@@ -47,6 +49,8 @@ class ProtectedFilesTest < Minitest::Test
                  "missing file records nil so a later add yields a diff"
       assert_nil snap["worktree.yml"],
                  "missing file records nil so a later add yields a diff"
+      assert_nil snap["task-journal.jsonl"]
+      assert_nil snap["task-projection.json"]
     end
   end
 

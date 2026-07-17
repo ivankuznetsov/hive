@@ -27,8 +27,10 @@ class ImplementationIdentityRoutingTest < Minitest::Test
                      selection.native_arguments
       end
 
-      projection = Hive::TaskProjection::Store.new(task_folder: task.folder).read
-      journal_path = File.join(task.folder, "events.jsonl")
+      projection = Hive::TaskProjection::Store.new(
+        task_folder: task.folder, attempt_store: attempts
+      ).read
+      journal_path = File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME)
       journal_before = File.binread(journal_path)
       command = Hive::Commands::Status.new
       first = command.implementation_identity_status(projection["implementation_identity"], cfg)
@@ -53,7 +55,9 @@ class ImplementationIdentityRoutingTest < Minitest::Test
 
       File.write(File.join(task.folder, "plan.md"), "# accepted replacement plan\n")
       second = capture_execute(task, attempts, claude_cfg, generation: 2, attempt_id: "execute-generation-2")
-      projection = Hive::TaskProjection::Store.new(task_folder: task.folder).read
+      projection = Hive::TaskProjection::Store.new(
+        task_folder: task.folder, attempt_store: attempts
+      ).read
       identity = projection["implementation_identity"]
 
       assert_equal "claude", second.provider
@@ -139,12 +143,14 @@ class ImplementationIdentityRoutingTest < Minitest::Test
       task_generation: "owner-#{generation}", ownership_generation: "owner-#{generation}",
       task_input_epoch: generation, progress_token: "progress-#{attempt_id}", provider: provider,
       starting_revision: nil, retry_charge: 0, inherited_outputs: [], launch_timeout_sec: 30,
+      worker_argv: [ "hive", "run", task.slug ],
+      claim_capability_digest: Hive::Attempts::Capability.digest("c" * 64),
       now: Time.now.utc
     )
   end
 
   def with_attempt(attempt, generation, &block)
-    Hive::Attempts::Context.with(
+    with_attempt_context(
       attempt_id: attempt.attempt_id, task_generation: generation,
       ownership_generation: attempt.ownership_generation, &block
     )

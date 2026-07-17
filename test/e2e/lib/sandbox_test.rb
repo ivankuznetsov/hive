@@ -31,6 +31,8 @@ class E2ESandboxTest < Minitest::Test
       project_config = YAML.safe_load(File.read(File.join(sandbox.sandbox_dir, ".hive-state", "config.yml")))
       assert_equal "headless", project_config.dig("claude", "mode"),
                    "fake Claude must not enter the production interactive tmux readiness loop"
+      assert_equal "codex-e2e-model", project_config.dig("execute", "model"),
+                   "the synthetic Codex runner must not depend on operator-owned model config"
     end
   end
 

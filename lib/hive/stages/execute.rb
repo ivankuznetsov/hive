@@ -37,7 +37,9 @@ module Hive
       # 4-execute owns plan.md and worktree.yml; task.md is owned but
       # the implementer agent writes the AGENT_WORKING marker into it,
       # so it's deliberately NOT in the SHA-protected set here.
-      PROTECTED_FILES = %w[plan.md worktree.yml].freeze
+      PROTECTED_FILES = %w[
+        plan.md worktree.yml task-journal.jsonl task-projection.json
+      ].freeze
 
       def run!(task, cfg)
         plan_path = File.join(task.folder, "plan.md")
@@ -129,8 +131,9 @@ module Hive
         baseline_head = execute_baseline_head(task, worktree_git)
         return worktree_git_failed(task, cfg, worktree_path) unless baseline_head
 
+        identity = capture_implementation_identity(task, cfg)
         before_impl = Hive::ProtectedFiles.snapshot(task.folder, PROTECTED_FILES)
-        impl_result = spawn_implementation(task, cfg, worktree_path)
+        impl_result = spawn_implementation(task, cfg, worktree_path, identity: identity)
         after_impl = Hive::ProtectedFiles.snapshot(task.folder, PROTECTED_FILES)
         append_implementation_output(task, impl_result)
 
@@ -254,7 +257,7 @@ module Hive
             marker_name: :error,
             attrs: {
               reason: "limits_reached",
-               provider: execute_agent_name(cfg),
+              provider: implementation_provider(impl_result, cfg),
                message: "implementer hit a usage/credit limit",
                retry_after: Hive::AgentLimit.retry_after(text: implementer_limit_text(impl_result))
              },
@@ -268,7 +271,7 @@ module Hive
           marker_name: :error,
           attrs: {
             reason: "implementer_failed",
-            provider: execute_agent_name(cfg),
+            provider: implementation_provider(impl_result, cfg),
             status: impl_result&.fetch(:status, nil),
             message: impl_result&.fetch(:error_message, nil)
           },
@@ -295,7 +298,17 @@ module Hive
         nil
       end
 
-      def spawn_implementation(task, cfg, worktree_path)
+      def implementation_provider(result, cfg)
+        result&.fetch(:implementation_provider, nil) || execute_agent_name(cfg)
+      end
+
+      def capture_implementation_identity(task, cfg)
+        return nil unless Hive::Attempts::Context.current
+
+        Hive::ImplementationIdentity::Store.new(task: task, cfg: cfg).capture_execute!
+      end
+
+      def spawn_implementation(task, cfg, worktree_path, identity: nil)
         plan_text = File.read(File.join(task.folder, "plan.md"))
         prompt = Hive::Stages::Base.render(
           "execute_prompt.md.erb",
@@ -307,9 +320,7 @@ module Hive
             user_supplied_tag: Hive::Stages::Base.user_supplied_tag
           )
         )
-        identity = if Hive::Attempts::Context.current
-          Hive::ImplementationIdentity::Store.new(task: task, cfg: cfg).capture_execute!
-        end
+        identity ||= capture_implementation_identity(task, cfg)
         profile = if identity
           Hive::AgentProfiles.lookup(identity.provider, cfg: cfg)
         else
@@ -346,7 +357,7 @@ module Hive
           status_mode: :exit_code_only,
           identity_arguments: identity&.native_arguments
         }
-        if profile.name == :claude
+        result = if profile.name == :claude
           Hive::Stages::Base.spawn_claude_with_tmux_marker!(
             task,
             cfg,
@@ -356,6 +367,7 @@ module Hive
         else
           Hive::Stages::Base.spawn_agent(task, **kwargs)
         end
+        result&.merge(implementation_provider: profile.name.to_s)
       end
 
       def record_tamper(task, tampered, who:)

@@ -288,6 +288,21 @@ class TaskJournalTest < Minitest::Test
     end
   end
 
+  def test_idempotent_append_wraps_low_level_io_failures
+    with_writer do |writer, _dir|
+      writer.define_singleton_method(:append_records) { |_records| raise Errno::ENOSPC }
+
+      error = assert_raises(Hive::TaskJournal::Error) do
+        writer.append_idempotent(
+          event("condition_observed"), idempotency_key: "task/3/condition"
+        )
+      end
+
+      assert_includes error.message, "authoritative journal append failed"
+      assert_includes error.message, "ENOSPC"
+    end
+  end
+
   private
 
   def with_writer

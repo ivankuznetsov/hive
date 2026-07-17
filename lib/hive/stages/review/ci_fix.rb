@@ -114,6 +114,9 @@ module Hive
               )
             end
 
+            fix_identity = Hive::Stages::Base.implementation_stage_identity(
+              synthetic_task(ctx), cfg, "review.ci"
+            )
             before = Hive::ProtectedFiles.snapshot(ctx.task_folder, PROTECTED_FILES)
             spawn_result = spawn_fix_agent(
               cfg: cfg,
@@ -121,7 +124,8 @@ module Hive
               command: command,
               attempt: attempts,
               max_attempts: max_attempts,
-              captured_output: output
+              captured_output: output,
+              identity: fix_identity
             )
             after = Hive::ProtectedFiles.snapshot(ctx.task_folder, PROTECTED_FILES)
             tampered = Hive::ProtectedFiles.diff(before, after)

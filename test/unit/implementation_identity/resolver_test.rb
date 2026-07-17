@@ -115,6 +115,41 @@ class ImplementationIdentityResolverTest < Minitest::Test
     end
   end
 
+  def test_downstream_resolution_rejects_unknown_stage_and_blank_provider_override
+    execute = resolver(config).resolve_execute(generation: 1, attempt_id: "exec")
+
+    assert_raises(Hive::ImplementationIdentity::ResolutionError) do
+      resolver(config).resolve_stage("artifacts", execute_identity: execute)
+    end
+
+    cfg = config(review_fix: { "agent" => "" })
+    assert_raises(Hive::ImplementationIdentity::ResolutionError) do
+      resolver(cfg).resolve_stage("review.fix", execute_identity: execute)
+    end
+  end
+
+  def test_downstream_inherits_legacy_source
+    execute = resolver(config).resolve_legacy(
+      provider: "codex", model: "gpt-5.6-sol", effort: nil,
+      generation: 1, attempt_id: "legacy-exec"
+    )
+
+    selection = resolver(config).resolve_stage("review.ci", execute_identity: execute)
+
+    assert_equal "legacy_backfill", selection.source
+  end
+
+  def test_claude_execute_uses_explicit_global_model_and_effort
+    cfg = config(execute: { "agent" => "claude" })
+    cfg["claude"] = { "model" => "claude-fable-5", "effort" => "medium" }
+
+    selection = resolver(cfg).resolve_execute(generation: 1, attempt_id: "exec")
+
+    assert_equal "claude-fable-5", selection.model
+    assert_equal "medium", selection.effective_effort
+    assert_equal %w[--model claude-fable-5 --effort medium], selection.native_arguments
+  end
+
   private
 
   def resolver(cfg)

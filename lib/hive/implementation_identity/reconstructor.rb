@@ -27,7 +27,12 @@ module Hive
         projected = @projection_store.read["implementation_identity"]&.dig("execute")
         return selection_from(projected) if projected && projected["generation"] == context.task_generation
 
-        components, recovery = structured_components || logged_argv_components || config_components(context)
+        current_attempt = @attempt_store.fetch(context.attempt_id)
+        unless current_attempt
+          raise ResolutionError, "durable attempt #{context.attempt_id.inspect} is unavailable"
+        end
+        components, recovery = structured_components(current_attempt) ||
+          logged_argv_components(current_attempt) || config_components(context)
         selection = @resolver.resolve_legacy(
           provider: components.fetch("provider"), model: components.fetch("model"),
           effort: components["effort"], generation: context.task_generation,
@@ -44,8 +49,8 @@ module Hive
 
       private
 
-      def structured_components
-        execute_attempts.reverse_each do |attempt|
+      def structured_components(current_attempt)
+        execute_attempts(current_attempt).reverse_each do |attempt|
           data = attempt.to_h
           values = [
             data.dig("checkpoint", "implementation_identity"),
@@ -61,7 +66,7 @@ module Hive
         nil
       end
 
-      def logged_argv_components
+      def logged_argv_components(current_attempt)
         log_paths.reverse_each do |path|
           File.readlines(path, chomp: true).reverse_each do |line|
             argv = parse_logged_argv(line)
@@ -76,7 +81,7 @@ module Hive
               "provider" => provider.to_s,
               "model" => model,
               "effort" => effort,
-              "originating_attempt" => execute_attempts.last&.attempt_id
+              "originating_attempt" => execute_attempts(current_attempt).last&.attempt_id
             }
             next unless usable_components?(values)
 
@@ -159,9 +164,12 @@ module Hive
                                 .merge(native_arguments: arguments.native_arguments))
       end
 
-      def execute_attempts
+      def execute_attempts(current_attempt)
         @execute_attempts ||= @attempt_store.scan.records.select do |attempt|
           attempt["task_slug"] == @task.slug.to_s &&
+            attempt["project"] == current_attempt["project"] &&
+            attempt["task_id"].to_s == current_attempt["task_id"].to_s &&
+            attempt.task_input_epoch == current_attempt.task_input_epoch &&
             attempt["intended_stage"] == "4-execute" # coding-scoped: legacy execute reconstruction
         end.sort_by { |attempt| attempt["accepted_at"].to_s }
       end

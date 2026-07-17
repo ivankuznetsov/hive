@@ -42,7 +42,7 @@ module Hive
         selection_from_projection(projected_execute(context.task_generation))
       end
 
-      def projected_execute(generation = current_generation)
+      def projected_execute(generation)
         identity = @projection_store.read["implementation_identity"]
         execute = identity && identity["execute"]
         execute if execute && execute["generation"] == generation
@@ -72,10 +72,6 @@ module Hive
         )
         @projection_store.rebuild!
         selection
-      end
-
-      def current_generation
-        @projection_store.read.dig("implementation_identity", "generation") || 0
       end
 
       def selection_from_projection(identity)
@@ -155,10 +151,6 @@ module Hive
 
       def persisted_identity(selection)
         selection.to_h.reject { |key, _| key == "native_arguments" }
-      end
-
-      def projected_identity
-        @projection_store.read["implementation_identity"]
       end
 
       def identity_key(generation)

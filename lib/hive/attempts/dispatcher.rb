@@ -46,30 +46,6 @@ module Hive
         )
       end
 
-      def dispatch_successor(predecessor:, task:, project:, argv:, request_id:, provider:,
-                             inherited_outputs: nil, retry_charge: nil, interactive: false,
-                             now: @clock.call)
-        @launcher.preflight!
-        generation = Generation.resolve(
-          task: task,
-          project: project,
-          intended_stage: predecessor["intended_stage"],
-          progress_token: predecessor["progress_token"],
-          ownership_generation: predecessor.ownership_generation,
-          task_input_epoch: predecessor.task_input_epoch
-        )
-        inherited = inherited_outputs ||
-                    (predecessor["inherited_outputs"] + predecessor["current_outputs"]).uniq
-        admit(
-          task: task, generation: generation, argv: argv, request_id: request_id,
-          provider: provider, interactive: interactive,
-          predecessor_attempt_id: predecessor.attempt_id,
-          inherited_outputs: inherited,
-          retry_charge: retry_charge.nil? ? predecessor["retry_charge"] : retry_charge,
-          successor_of: predecessor.attempt_id, now: now
-        )
-      end
-
       # RetryCoordinator is the only producer of delayed-retry authorization.
       # The attempt layer validates its fenced fields, then performs the same
       # capacity/claim/launch path as every other durable dispatch.
@@ -123,11 +99,12 @@ module Hive
         )
         predecessor_id = request.respond_to?(:predecessor_attempt_id) ? request.predecessor_attempt_id : nil
         predecessor = predecessor_id && @store.fetch(predecessor_id)
-        return dispatch_successor(
-          predecessor: predecessor, task: task, project: request.project, argv: request.argv,
-          request_id: request.request_id, provider: provider_for(task),
-          inherited_outputs: request.inherited_outputs, interactive: interactive, now: now
-        ) if predecessor&.state == "lost"
+        if predecessor&.state == "lost"
+          return DispatchResult.new(
+            status: :deferred, attempt: predecessor, receipt: nil,
+            attach_descriptor: nil, reason: "retry_authorization_required"
+          )
+        end
 
         dispatch(
           task: task, project: request.project, intended_stage: intended_stage,

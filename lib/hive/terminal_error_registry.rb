@@ -21,7 +21,7 @@ module Hive
     # Exact marker reasons currently emitted by terminal agent/stage paths,
     # plus canonical families used when durable ownership supplies the signal.
     CODES = %w[
-      unknown agent_died timeout codex_auth provider_auth provider_failure
+      unknown agent_died agent_orphaned timeout codex_auth provider_auth provider_failure
       review_failed pr_open_failed pr_rebase_failed pr_push_failed finalize_failed
       attempt_lost owner_identity_mismatch owner_gone legacy_owner_gone launch_timeout
       first_heartbeat_timeout successor_launch_failed

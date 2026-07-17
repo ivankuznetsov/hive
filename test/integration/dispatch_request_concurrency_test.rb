@@ -161,9 +161,7 @@ class HiveDispatchRequestConcurrencyTest < Minitest::Test
     assert_equal request_b, @supervisor.spawned.last[:request_id]
   end
 
-  def test_quarantined_slug_request_stays_on_disk_for_retry
-    @controller.instance_variable_get(:@quarantine).add([ @project, @slug ])
-
+  def test_legacy_quarantine_state_no_longer_suppresses_a_task
     request_id = Hive::Bot::DispatchRequestWriter.write!(
       project: @project, slug: @slug,
       argv: [ "hive", "run", @slug, "--json" ],
@@ -172,12 +170,9 @@ class HiveDispatchRequestConcurrencyTest < Minitest::Test
 
     @dispatcher.tick(now: T0 + 1)
 
-    assert_empty @supervisor.spawned, "a quarantined slug must not dispatch"
-    blocked = @logger.events.find { |(n, attrs)|
-      n == :dispatch_request_blocked && attrs[:request_id] == request_id
-    }
-    refute_nil blocked, "the quarantined request must log :dispatch_request_blocked"
-    assert_equal "quarantined", blocked[1][:reason]
-    refute_empty queue_files, "blocked-by-quarantine requests stay on disk for a later tick"
+    refute @controller.instance_variable_defined?(:@quarantine)
+    assert_equal 1, @supervisor.spawned.size
+    assert_equal request_id, @supervisor.spawned.first[:request_id]
+    assert_empty queue_files
   end
 end

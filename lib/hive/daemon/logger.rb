@@ -37,24 +37,15 @@ module Hive
         child_timeout
         config_reloaded
         project_dropped
-        transient_retry
-        quarantined
         dry_run
         merge_watcher_enqueued
         merge_watcher_polled
         merge_watcher_dispatched
         merge_watcher_dropped
         gh_error
-        marker_healed
-        heal_requeued
-        heal_requeue_failed
-        marker_heal_failed
-        marker_heal_exhausted
-        marker_heal_observer_missing
-        auto_retry
-        auto_retry_skipped
-        auto_retry_exhausted
-        auto_retry_failed
+        agent_reconciled
+        agent_reconcile_failed
+        terminal_diagnostic_observed
         display_name_backfill
         update_available
         update_check_no_result

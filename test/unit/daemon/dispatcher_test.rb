@@ -2367,9 +2367,9 @@ class HiveDaemonDispatcherTest < Minitest::Test
       dispatcher, _sup, _ctrl, logger, _mw = make_dispatcher(rows: [ stale_row ])
       dispatcher.tick(now: T0)
 
-      assert events_include?(logger, :marker_healed),
+      assert events_include?(logger, :agent_reconciled),
              "dispatcher#tick must invoke the real healer; events=#{logger.events.inspect}"
-      heal_attrs = logger.events.find { |(n, _)| n == :marker_healed }[1]
+      heal_attrs = logger.events.find { |(n, _)| n == :agent_reconciled }[1]
       assert_equal "agent_died", heal_attrs[:reason]
       assert_match(/ERROR\s+reason=agent_died/, File.read(state_file),
                    "healer must rewrite the on-disk marker, not just log")
@@ -2408,7 +2408,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
       dispatcher.tick(now: T0)
 
-      refute events_include?(logger, :marker_healed),
+      refute events_include?(logger, :agent_reconciled),
              "half-migrated projects must be excluded from healing; events=#{logger.events.inspect}"
       assert_match(/AGENT_WORKING/, File.read(state_file),
                    "marker on disk must be untouched when project is half-migrated")
@@ -2437,37 +2437,23 @@ class HiveDaemonDispatcherTest < Minitest::Test
                  "per-row dispatch must still run after healer crash to avoid StartLimitBurst flapping"
   end
 
-  def test_dispatcher_runs_recoverable_error_healer_after_stale_healer_before_dispatch
+  def test_dispatcher_runs_only_observational_stale_healer_before_dispatch
     advance_row = row(action: "ready_to_plan", command: "hive plan s1 --from 2-brainstorm")
     dispatcher, sup, _ctrl, _logger, _mw = make_dispatcher(rows: [ advance_row ])
     order = []
     stale = Object.new
-    recoverable = Object.new
     stale.define_singleton_method(:heal) { |*_args, **_kwargs| order << :stale }
-    recoverable.define_singleton_method(:heal) { |*_args, **_kwargs| order << :recoverable }
     dispatcher.instance_variable_set(:@stale_agent_healer, stale)
-    dispatcher.instance_variable_set(:@recoverable_error_healer, recoverable)
 
     dispatcher.tick(now: T0)
 
-    assert_equal [ :stale, :recoverable ], order
-    assert_equal 1, sup.spawned.size, "dispatch must run after both healer slots"
+    assert_equal [ :stale ], order
+    assert_equal 1, sup.spawned.size, "dispatch must run after reconciliation"
   end
 
-  def test_dispatcher_outer_rescue_logs_recoverable_healer_fatal_and_continues_dispatch
-    advance_row = row(action: "ready_to_plan", command: "hive plan s1 --from 2-brainstorm")
-    dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(rows: [ advance_row ])
-    healer = dispatcher.instance_variable_get(:@recoverable_error_healer)
-    def healer.heal(*, **)
-      raise NoMethodError, "simulated recoverable healer bug"
-    end
-
-    dispatcher.tick(now: T0)
-
-    fatal = logger.events.find { |(n, attrs)| n == :fatal && attrs[:message].include?("recoverable_error_healer raised") }
-    assert fatal, "outer rescue must log :fatal when recoverable healer raises; events=#{logger.events.inspect}"
-    assert_equal 1, sup.spawned.size,
-                 "per-row dispatch must still run after recoverable healer crash"
+  def test_dispatcher_has_no_recoverable_marker_retry_healer
+    dispatcher, = make_dispatcher
+    refute dispatcher.instance_variable_defined?(:@recoverable_error_healer)
   end
 
   def test_reload_config_rebuilds_healer_with_new_grace_sec
@@ -2495,29 +2481,6 @@ class HiveDaemonDispatcherTest < Minitest::Test
                 "reload_config! must rebuild the healer so new daemon.agent_marker_grace_sec binds"
     assert_equal 60, rebuilt.instance_variable_get(:@grace_sec),
                  "rebuilt healer must carry the reloaded grace value"
-  end
-
-  def test_reload_config_rebuilds_recoverable_error_healer
-    dispatcher, _sup, _ctrl, _logger, _mw = make_dispatcher
-    original_healer = dispatcher.instance_variable_get(:@recoverable_error_healer)
-    refute_nil original_healer, "dispatcher must construct recoverable error healer at boot"
-
-    new_cfg = {
-      "agent_marker_grace_sec" => 60,
-      "edit_debounce_sec" => 30,
-      "auto_retry" => { "enabled" => false }
-    }
-    original = Hive::Config.method(:load_global_daemon)
-    Hive::Config.define_singleton_method(:load_global_daemon) { new_cfg }
-    begin
-      dispatcher.send(:reload_config!)
-    ensure
-      Hive::Config.define_singleton_method(:load_global_daemon, &original)
-    end
-
-    rebuilt = dispatcher.instance_variable_get(:@recoverable_error_healer)
-    refute_same original_healer, rebuilt,
-                "reload_config! must rebuild recoverable healer so in-memory budgets reset"
   end
 
 def test_run_forever_reloads_ticks_and_shuts_down_cleanly
@@ -3219,8 +3182,6 @@ end
               .define_singleton_method(:heal) { |*_args, **_kwargs| order << :stale_healer }
     dispatcher.instance_variable_get(:@stale_agent_healer)
               .define_singleton_method(:heal_attempt_losses) { |*_args, **_kwargs| order << :attempt_loss_healer }
-    dispatcher.instance_variable_get(:@recoverable_error_healer)
-              .define_singleton_method(:heal) { |*_args, **_kwargs| order << :recoverable_healer }
 
     dispatcher.tick(now: T0)
 
@@ -3229,7 +3190,7 @@ end
     assert_operator order.index(:attempt_loss_healer), :<, order.index(:status)
     assert_operator order.index(:reconcile), :<, order.index(:status)
     assert_operator order.index(:reconcile), :<, order.index(:stale_healer)
-    assert_operator order.index(:reconcile), :<, order.index(:recoverable_healer)
+    refute_includes order, :recoverable_healer
   end
 
   def test_lease_backed_status_row_is_not_double_counted_as_legacy_capacity

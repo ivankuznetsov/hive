@@ -14,7 +14,6 @@ require "hive/daemon/status_consumer"
 require "hive/daemon/retry_coordinator"
 require "hive/daemon/failure_reporter"
 require "hive/daemon/stale_agent_healer"
-require "hive/daemon/recoverable_error_healer"
 require "hive/daemon/display_name_backfiller"
 require "hive/daemon/task_id_backfiller"
 require "hive/daemon/dispatch_request_queue"
@@ -128,14 +127,9 @@ module Hive
           logger: @logger,
           grace_sec: agent_marker_grace_sec,
           attempt_store: @attempt_reconciler&.respond_to?(:store) ? @attempt_reconciler.store : nil,
-          attempt_dispatcher: @attempt_dispatcher,
           lost_outcome_store: @lost_outcome_store,
-          lost_outcome_processor: @lost_outcome_processor
-        )
-        @recoverable_error_healer = RecoverableErrorHealer.new(
-          controller: @controller,
-          logger: @logger,
-          config: @config
+          lost_outcome_processor: @lost_outcome_processor,
+          failure_reporter: @failure_reporter
         )
         # Additive self-heal for tasks whose one-shot name generation at
         # `hive new` never landed (agent/codex outage). Re-spawns
@@ -317,16 +311,6 @@ module Hive
         rescue StandardError => e
           @logger.event(:fatal,
                         message: "stale_agent_healer raised: #{e.class}: #{e.message}",
-                        keeping_previous: true)
-        end
-
-        begin
-          @recoverable_error_healer.heal(
-            result.rows, now: now, legacy_layout_projects: @legacy_layout_projects
-          )
-        rescue StandardError => e
-          @logger.event(:fatal,
-                        message: "recoverable_error_healer raised: #{e.class}: #{e.message}",
                         keeping_previous: true)
         end
 
@@ -2533,14 +2517,9 @@ module Hive
             Hive::TaskAction::DEFAULT_AGENT_MARKER_GRACE_SEC
           ),
           attempt_store: @attempt_reconciler&.respond_to?(:store) ? @attempt_reconciler.store : nil,
-          attempt_dispatcher: @attempt_dispatcher,
           lost_outcome_store: @lost_outcome_store,
-          lost_outcome_processor: @lost_outcome_processor
-        )
-        @recoverable_error_healer = RecoverableErrorHealer.new(
-          controller: @controller,
-          logger: @logger,
-          config: @config
+          lost_outcome_processor: @lost_outcome_processor,
+          failure_reporter: @failure_reporter
         )
         # Rebuild alongside the healer on SIGHUP reload so a future
         # operator-tunable knob (e.g. max_per_tick) would take effect

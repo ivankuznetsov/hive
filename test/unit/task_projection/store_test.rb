@@ -37,6 +37,25 @@ class TaskProjectionStoreTest < Minitest::Test
     end
   end
 
+  def test_valid_snapshot_overlays_post_publication_compatibility_marker_without_writing
+    with_tmp_dir do |dir|
+      write_journal(dir, [ condition_event("event-1") ])
+      store = Hive::TaskProjection::Store.new(task_folder: dir)
+      store.rebuild!
+      before = File.binread(store.snapshot_path)
+      marker = Hive::Markers::State.new(
+        name: :execute_complete, attrs: { "mode" => "research" }, raw: nil
+      )
+
+      projection = store.read(marker: marker)
+
+      assert_equal "execute_complete", projection["compatibility"].dig("marker", "name")
+      assert_equal "execute_complete",
+                   projection["compatibility"].dig("marker_fallback", "name")
+      assert_equal before, File.binread(store.snapshot_path)
+    end
+  end
+
   def test_rebuild_is_byte_deterministic_and_publishes_cursor_hash_binding
     with_tmp_dir do |dir|
       write_journal(dir, [ condition_event("event-1") ])

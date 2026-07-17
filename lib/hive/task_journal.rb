@@ -64,7 +64,7 @@ module Hive
           AppendResult.new(
             cursor: cursor,
             event_id: records.last.fetch("event_id"),
-            journal_hash: Digest::SHA256.file(path).hexdigest,
+            journal_hash: ::Digest::SHA256.file(path).hexdigest,
             records: records.freeze
           )
         end

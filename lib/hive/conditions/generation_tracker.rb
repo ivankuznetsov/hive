@@ -22,7 +22,7 @@ module Hive
       end
 
       def input_fingerprint(task:, workflow_policy: {}, operator_decisions: [])
-        digest = Digest::SHA256.new
+        digest = ::Digest::SHA256.new
         digest << "hive-condition-input-v1\0"
         @input_files.each do |basename|
           path = File.join(task_folder(task), basename)
@@ -97,9 +97,9 @@ module Hive
       def file_digest(path)
         return "missing" unless File.file?(path)
 
-        Digest::SHA256.file(path).hexdigest
+        ::Digest::SHA256.file(path).hexdigest
       rescue SystemCallError, IOError => e
-        Digest::SHA256.hexdigest("unreadable\0#{e.class}\0#{path}")
+        ::Digest::SHA256.hexdigest("unreadable\0#{e.class}\0#{path}")
       end
 
       def authoritative(records)

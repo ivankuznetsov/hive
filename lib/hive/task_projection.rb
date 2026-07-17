@@ -1,6 +1,9 @@
 require "json"
 require "hive/conditions/registry"
 require "hive/conditions/value"
+require "hive/conditions/policy"
+require "hive/conditions/gate_evaluator"
+require "hive/conditions/shadow_audit"
 require "hive/task_journal/envelope"
 
 module Hive
@@ -110,8 +113,14 @@ module Hive
           "authoritative_event_count" => authoritative.size,
           "legacy_event_count" => @records.size - authoritative.size
         },
-        "compatibility" => legacy_compatibility(authoritative)
+        "compatibility" => legacy_compatibility(authoritative),
+        "shadow_audit" => Hive::Conditions::ShadowAudit.summary(records: authoritative)
       )
+      rule = Hive::Conditions::Policy.default.rule_for("execute_to_open_pr")
+      @data["gates"][rule.transition] = Hive::Conditions::GateEvaluator.new(
+        projection: @data, rule: rule
+      ).evaluate.to_h
+      @data = self.class.canonical(@data)
       self
     end
 
@@ -120,6 +129,19 @@ module Hive
 
     def current_condition(name)
       self["conditions"].fetch("current").find { |fact| fact["condition"] == name.to_s }
+    end
+
+    # Compatibility markers are written after snapshot publication. Overlay
+    # the currently observed marker in memory so status can consume a valid
+    # snapshot without republishing it or classifying markers outside this
+    # projection boundary.
+    def with_marker(marker)
+      copy = deep_copy(to_h)
+      copy["compatibility"] = compatibility_for(
+        baseline: copy.dig("compatibility", "baseline_present") == true,
+        marker: marker
+      )
+      self.class.allocate.tap { |projection| projection.instance_variable_set(:@data, self.class.canonical(copy)) }
     end
 
     private
@@ -253,13 +275,21 @@ module Hive
 
     def legacy_compatibility(authoritative)
       baseline = authoritative.any? { |record| record["event_type"] == "legacy_baseline" }
-      marker = if @marker
+      compatibility_for(baseline: baseline, marker: @marker)
+    end
+
+    def compatibility_for(baseline:, marker:)
+      marker = if marker
         {
-          "name" => @marker.respond_to?(:name) ? @marker.name.to_s : @marker.fetch("name").to_s,
-          "attrs" => deep_copy(@marker.respond_to?(:attrs) ? @marker.attrs : @marker.fetch("attrs", {}))
+          "name" => marker.respond_to?(:name) ? marker.name.to_s : marker.fetch("name").to_s,
+          "attrs" => deep_copy(marker.respond_to?(:attrs) ? marker.attrs : marker.fetch("attrs", {}))
         }
       end
-      { "baseline_present" => baseline, "marker_fallback" => baseline ? nil : marker }
+      {
+        "baseline_present" => baseline,
+        "marker" => marker,
+        "marker_fallback" => baseline ? nil : marker
+      }
     end
 
     def deep_copy(value)

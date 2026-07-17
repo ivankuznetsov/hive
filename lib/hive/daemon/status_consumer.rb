@@ -22,6 +22,10 @@ module Hive
                        :live_task_lock, :diagnostic, :depends_on, :blocked_by,
                        :dependency_stage, :blocked, :admission_error,
                        :attempt_id, :task_generation,
+                       :condition_task_generation, :commit_generation, :current_attempt,
+                       :conditions, :condition_history, :evidence, :condition_gate,
+                       :condition_migration, :condition_provenance, :shadow_audit,
+                       :condition_warning,
                        keyword_init: true)
       # Aggregated per-project legacy-layout signal lifted out of each
       # project payload's `legacy_stage_dirs` array. The dispatcher uses
@@ -197,6 +201,17 @@ module Hive
               live_task_lock: task["live_task_lock"] == true,
               attempt_id: task["attempt_id"],
               task_generation: task["task_generation"],
+              condition_task_generation: task["condition_task_generation"],
+              commit_generation: task["commit_generation"],
+              current_attempt: task["current_attempt"],
+              conditions: Array(task["conditions"]),
+              condition_history: Array(task["condition_history"]),
+              evidence: Array(task["evidence"]),
+              condition_gate: task["condition_gate"],
+              condition_migration: task["condition_migration"],
+              condition_provenance: task["condition_provenance"] || {},
+              shadow_audit: task["shadow_audit"] || {},
+              condition_warning: task["condition_warning"],
               diagnostic: task["diagnostic"],
               depends_on: task["depends_on"],
               blocked_by: task["blocked_by"],

@@ -21,7 +21,12 @@ module Hive
       def read(marker: nil)
         binding = journal_binding
         snapshot = read_snapshot
-        return Hive::TaskProjection.allocate.tap { |projection| projection.instance_variable_set(:@data, snapshot) } if valid?(snapshot, binding)
+        if valid?(snapshot, binding)
+          projection = Hive::TaskProjection.allocate.tap do |value|
+            value.instance_variable_set(:@data, snapshot)
+          end
+          return marker ? projection.with_marker(marker) : projection
+        end
 
         replay(binding, marker: marker)
       end
@@ -62,7 +67,7 @@ module Hive
       end
 
       def journal_binding
-        return { "cursor" => 0, "hash" => Digest::SHA256.hexdigest(""), "event_id" => nil } unless File.exist?(journal_path)
+        return { "cursor" => 0, "hash" => ::Digest::SHA256.hexdigest(""), "event_id" => nil } unless File.exist?(journal_path)
 
         bytes = File.binread(journal_path)
         event_id = bytes.lines.reverse_each.filter_map do |line|
@@ -70,7 +75,7 @@ module Hive
         rescue JSON::ParserError
           nil
         end.first
-        { "cursor" => bytes.bytesize, "hash" => Digest::SHA256.hexdigest(bytes), "event_id" => event_id }
+        { "cursor" => bytes.bytesize, "hash" => ::Digest::SHA256.hexdigest(bytes), "event_id" => event_id }
       end
 
       def read_snapshot

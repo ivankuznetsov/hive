@@ -11,7 +11,7 @@ module Hive
                         :condition_task_generation, :commit_generation, :current_attempt,
                         :conditions, :condition_history, :evidence, :condition_gate,
                         :condition_migration, :condition_provenance, :shadow_audit,
-                        :condition_warning) do
+                        :condition_warning, :retry) do
         def initialize(project:, slug:, id: nil, display_name: nil, project_path: nil, hive_state_path: nil,
                        stage: nil, workflow: nil, marker: nil, attrs: {}, folder: nil,
                        state_file: nil, pr_url: nil, state_file_mtime: nil, age_seconds: nil,
@@ -20,10 +20,11 @@ module Hive
                        commit_generation: nil, current_attempt: nil, conditions: [],
                        condition_history: [], evidence: [], condition_gate: nil,
                        condition_migration: nil, condition_provenance: {}, shadow_audit: {},
-                       condition_warning: nil)
+                       condition_warning: nil, **rest)
           # Explicit-keyword super (matching Snapshot::Row) rather than the
           # bare positional form, so a future member-order change in the
           # Data.define above can't silently misbind constructor arguments.
+          retry_projection = rest.delete(:retry)
           super(
             project: project, project_path: project_path, hive_state_path: hive_state_path,
             slug: slug, id: id, display_name: display_name, stage: stage, workflow: workflow, marker: marker,
@@ -36,7 +37,7 @@ module Hive
             conditions: conditions, condition_history: condition_history, evidence: evidence,
             condition_gate: condition_gate, condition_migration: condition_migration,
             condition_provenance: condition_provenance, shadow_audit: shadow_audit,
-            condition_warning: condition_warning
+            condition_warning: condition_warning, **{ retry: retry_projection }
           )
         end
       end
@@ -318,7 +319,8 @@ module Hive
               condition_migration: task["condition_migration"],
               condition_provenance: task["condition_provenance"] || {},
               shadow_audit: task["shadow_audit"] || {},
-              condition_warning: task["condition_warning"]
+              condition_warning: task["condition_warning"],
+              retry: task["retry"]
             )
           end
         end

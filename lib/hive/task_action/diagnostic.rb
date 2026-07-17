@@ -110,7 +110,7 @@ module Hive
 
         {
           "summary" => stale_agent_summary(reason),
-          "detail" => "AGENT_WORKING marker is stale. The daemon's StaleAgentHealer will rewrite it to ERROR reason=#{reason} on its next tick (typically within 30 seconds). Once healed, re-read `hive status --json` or use the standard red-status flow, then run the reported suggested_next_action.command so the current ERROR marker guard is included. If the daemon is not running, start it with `systemctl --user start hive-daemon` (or your platform equivalent).",
+          "detail" => "AGENT_WORKING marker is stale. The daemon will terminalize the durable attempt and report reason=#{reason} to the retry coordinator on its next reconciliation tick. Re-read `hive status --json` for the generation-scoped retry projection. If the daemon is not running, start it with `systemctl --user start hive-daemon` (or your platform equivalent).",
           "source" => "marker",
           "source_path" => nil,
           "artifact_paths" => [],
@@ -444,7 +444,7 @@ module Hive
       def suggested_next_action_payload
         return nil unless diagnostic_action?
 
-        return { "kind" => "retry", "command" => workflow_command("plan") } if incomplete_plan_artifact?
+        return { "kind" => "retry", "command" => nil } if incomplete_plan_artifact?
 
         return manual_fix if finalize_missing_pr_md? || finalize_missing_metadata_error?
         return manual_fix if finalize_missing_pr_url? || finalize_pr_url_mismatch?
@@ -469,9 +469,10 @@ module Hive
         # so CLI-driven consumers don't try to construct one themselves).
         return manual_fix if clean_exit_manual_failure?
 
-        cmd = retry_command_string or return nil
-
-        { "kind" => "retry", "command" => cmd }
+        # Retry authorization is generation-scoped state supplied by the task
+        # projection, not something diagnostics can safely reconstruct from a
+        # marker. Surfaces compose `hive retry manual` from that projection.
+        { "kind" => "retry", "command" => nil }
       end
 
       def manual_fix
@@ -482,40 +483,6 @@ module Hive
         Hive::TaskAction.max_passes_review_stale_with_escalations?(
           folder: task.folder, marker_name: marker.name, attrs: marker.attrs
         )
-      end
-
-      # `hive markers clear` accepts --match-attr KEY=VALUE or comma-separated
-      # KEY=VALUE pairs; pick the most-identifying guard per marker shape. The
-      # recipe stays a copy-pasteable one-liner so external agents and humans
-      # can run it from a shell unchanged.
-      def retry_command_string
-        attrs = marker.attrs || {}
-        case marker.name
-        when :review_error, :review_ci_stale
-          attr_pair = priority_match_attr(attrs, %w[pass phase reason])
-          clear_argv = [ "hive", "markers", "clear", task.folder,
-                         "--name", marker.name.to_s.upcase, *attr_pair ]
-          "#{clear_argv.shelljoin} && #{[ 'hive', 'run', task.folder ].shelljoin}"
-        when :review_stale
-          attr_pair = priority_match_attr(attrs, %w[pass reason])
-          clear_argv = [ "hive", "markers", "clear", task.folder,
-                         "--name", "REVIEW_STALE", *attr_pair ]
-          "#{clear_argv.shelljoin} && #{[ 'hive', 'run', task.folder ].shelljoin}"
-        when :error
-          match_attr = Hive::Markers.error_recovery_match_attr(attrs)
-          attr_pair = match_attr ? [ "--match-attr", match_attr ] : []
-          clear_argv = [ "hive", "markers", "clear", task.folder,
-                         "--name", "ERROR", *attr_pair ]
-          "#{clear_argv.shelljoin} && #{[ 'hive', 'run', task.folder ].shelljoin}"
-        end
-      end
-
-      def priority_match_attr(attrs, keys)
-        keys.each do |key|
-          value = attrs[key]
-          return [ "--match-attr", "#{key}=#{value}" ] if value && !value.to_s.empty?
-        end
-        []
       end
 
       def workflow_command(verb)

@@ -81,6 +81,11 @@ class HiveBotStatusWatcherTest < Minitest::Test
     status_task["current_attempt"] = "attempt-b"
     status_task["conditions"] = [ { "condition" => "ChangesPresent", "state" => "satisfied" } ]
     status_task["condition_migration"] = { "effective" => "conditions" }
+    status_task["retry"] = {
+      "state" => "cooldown", "retry_count" => 4,
+      "retry_after" => "2026-07-17T15:00:00Z",
+      "key" => { "generation" => 6 }
+    }
 
     with_fake_status(JSON.generate(envelope([ status_task ]))) do |bin|
       result = Hive::Bot::StatusWatcher.new(hive_bin: bin).fetch
@@ -100,6 +105,8 @@ class HiveBotStatusWatcherTest < Minitest::Test
       assert_equal 2, row.commit_generation
       assert_equal "attempt-b", row.current_attempt
       assert_equal "conditions", row.condition_migration.fetch("effective")
+      assert_equal 4, row.retry.fetch("retry_count")
+      assert_equal 6, row.retry.dig("key", "generation")
     end
   end
 

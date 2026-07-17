@@ -150,6 +150,31 @@ class SchemaFilesTest < Minitest::Test
                  doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
   end
 
+  def test_hive_status_retry_projection_is_optional_and_state_checked
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status")))
+    refute_includes doc.dig("$defs", "Task", "required"), "retry"
+
+    schemer = JSONSchemer.schema(doc.dig("$defs", "Retry"))
+    record = {
+      "schema" => "hive-retry-record", "schema_version" => 1,
+      "key" => { "project" => "demo", "task" => "retry-task-260717-abcd",
+                 "stage" => "4-execute", "generation" => 3 },
+      "predecessor_attempt_id" => "attempt-1", "current_attempt_id" => nil,
+      "retry_count" => 4, "failure_class" => "agent_died", "failure_code" => "agent_died",
+      "evidence" => [], "guidance" => "repair the agent runtime",
+      "first_failure_at" => "2026-07-17T12:00:00Z",
+      "last_failure_at" => "2026-07-17T12:04:00Z",
+      "retry_after" => "2026-07-17T12:09:00Z", "state" => "cooldown",
+      "authorization" => nil, "operator" => nil, "last_event_id" => "terminal-4"
+    }
+
+    assert schemer.valid?(record)
+    refute schemer.valid?(record.merge("retry_after" => nil)),
+           "cooldown must carry its absolute durable deadline"
+    refute schemer.valid?(record.merge("state" => "running", "retry_after" => nil)),
+           "running must identify the claimed successor attempt"
+  end
+
   def test_hive_status_v1_schema_remains_for_back_compat
     doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status", version: 1)))
     assert_equal 1, doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")

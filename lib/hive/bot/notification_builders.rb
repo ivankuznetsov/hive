@@ -294,7 +294,8 @@ module Hive
           text: [
             "⚠ #{TitleFormatter.stage_label(row.stage, logger: logger)} stuck — \"#{display_title(row)}\"",
             cause_sentence_for(row),
-            retryable ? "Tap Autofix to retry the stage cleanly." :
+            retry_status_text(row),
+            retryable ? "Tap Autofix to request coordinator evaluation." :
               "Tap Show details to see what needs manual intervention."
           ].join("\n"),
           keyboard: recovery_keyboard(row, retryable: retryable)
@@ -323,14 +324,31 @@ module Hive
         # disambiguates it from match_attr by content — match_attr always
         # contains `=`, a workflow id never does.
         parts << row.workflow if row.respond_to?(:workflow) && !Hive::Workflows.coding_row?(row)
+        generation = retry_generation(row)
+        parts << "generation=#{generation}" if generation
         parts.join(":")
       end
 
       def retryable_recovery?(row)
-        return false if manual_only_recovery?(row)
+        retry_record = row.respond_to?(:retry) ? row.retry : nil
+        retry_record.is_a?(Hash) && retry_generation(row) && retry_record["state"].to_s != "abandoned"
+      end
 
-        suggested = suggested_next_action(row)
-        suggested && suggested["kind"].to_s == "retry"
+      def retry_generation(row)
+        retry_record = row.respond_to?(:retry) ? row.retry : nil
+        generation = retry_record.is_a?(Hash) ? retry_record.dig("key", "generation") : nil
+        generation if generation.is_a?(Integer) && generation >= 0
+      end
+
+      def retry_status_text(row)
+        retry_record = row.respond_to?(:retry) ? row.retry : nil
+        return "No durable retry record is available yet." unless retry_record.is_a?(Hash)
+
+        count = retry_record["retry_count"].to_i
+        state = retry_record["state"].to_s
+        deadline = retry_record["retry_after"].to_s
+        suffix = deadline.empty? ? "" : " until #{deadline}"
+        "Retry ##{count} is #{state}#{suffix}."
       end
 
       # Markers that are ALWAYS manual-only regardless of attrs. Adding a new

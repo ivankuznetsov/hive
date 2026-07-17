@@ -336,6 +336,7 @@ module Hive
             project: row.project, slug: row.slug, stage: row.stage,
             marker: row.marker, match_attr: match_attr, attrs: row.attrs,
             workflow: row.respond_to?(:workflow) ? row.workflow : nil,
+            generation: Hive::Bot::NotificationBuilders.retry_generation(row),
             result_class: @result_class, clear_keyboard: false
           )
         end

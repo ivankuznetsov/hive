@@ -5,6 +5,28 @@ require "hive/task_action"
 class CommandsStatusTest < Minitest::Test
   include HiveTestHelper
 
+  def test_task_payload_copies_optional_retry_projection_exactly
+    retry_projection = {
+      "schema" => "hive-retry-record",
+      "schema_version" => 1,
+      "state" => "cooldown",
+      "retry_count" => 4,
+      "retry_after" => "2026-07-17T14:05:00.000000Z",
+      "key" => { "generation" => 8 }
+    }
+    row = {
+      stage: "4-execute", slug: "retry-task-260717-abcd", marker_name: :error,
+      marker_attrs: {}, mtime: Time.utc(2026, 7, 17, 14),
+      folder_mtime: Time.utc(2026, 7, 17, 14), projection_data: { "retry" => retry_projection }
+    }
+
+    payload = Hive::Commands::Status.new(json: true).task_payload(row)
+    assert_equal retry_projection, payload.fetch("retry")
+
+    row[:projection_data] = {}
+    refute Hive::Commands::Status.new(json: true).task_payload(row).key?("retry")
+  end
+
   def test_json_payload_ignores_archived_manual_stage_sibling
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")

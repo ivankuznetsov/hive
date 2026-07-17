@@ -165,8 +165,8 @@ module Hive
         end
 
         def clear_and_retry(data)
-          _prefix, project, slug, stage, marker, *rest = split_callback(data, [ 5, 6, 7 ])
-          match_attr, workflow = recovery_tail(rest)
+          _prefix, project, slug, stage, marker, *rest = split_callback(data, [ 5, 6, 7, 8 ])
+          match_attr, workflow, generation = recovery_tail(rest)
           # Legacy clear_retry: buttons (from messages predating the Autofix
           # rename) route here. Go through RecoverySequence.build, not
           # retry_commands directly, so a stale clear_retry on a manual-only
@@ -177,17 +177,17 @@ module Hive
           # uses the marker-only manual-only check (ALWAYS_MANUAL_MARKERS).
           RecoverySequence.build(
             project: project, slug: slug, stage: stage,
-            marker: marker, match_attr: match_attr, workflow: workflow,
+            marker: marker, match_attr: match_attr, workflow: workflow, generation: generation,
             result_class: @result_class, clear_keyboard: true
           )
         end
 
         def autofix(data)
-          _prefix, project, slug, stage, marker, *rest = split_callback(data, [ 5, 6, 7 ])
-          match_attr, workflow = recovery_tail(rest)
+          _prefix, project, slug, stage, marker, *rest = split_callback(data, [ 5, 6, 7, 8 ])
+          match_attr, workflow, generation = recovery_tail(rest)
           RecoverySequence.build(
             project: project, slug: slug, stage: stage, marker: marker,
-            match_attr: match_attr, workflow: workflow,
+            match_attr: match_attr, workflow: workflow, generation: generation,
             result_class: @result_class, clear_keyboard: true
           )
         end
@@ -418,9 +418,13 @@ module Hive
         # Coding rows omit the workflow token (nil ⟹ coding), so older 5/6-part
         # callbacks parse unchanged.
         def recovery_tail(rest)
-          match_attr = rest.find { |token| token.to_s.include?("=") }
+          generation_token = rest.find { |token| token.to_s.start_with?("generation=") }
+          match_attr = rest.find do |token|
+            token.to_s.include?("=") && !token.to_s.start_with?("generation=")
+          end
           workflow = rest.find { |token| !token.to_s.include?("=") }
-          [ match_attr, workflow ]
+          generation = generation_token&.split("=", 2)&.last
+          [ match_attr, workflow, generation ]
         end
       end
     end

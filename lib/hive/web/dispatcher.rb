@@ -77,56 +77,28 @@ module Hive
       # the bot's row struct) reads a web status-row hash.
       RecoveryRow = Struct.new(:marker, :attrs)
 
-      # Recovery = the bot's Autofix, web-shaped: clear the failure marker,
-      # then re-run the stage verb — dispatched through the daemon queue as
-      # ONE sequence, so the retry stays invisible until the clear exits 0
-      # (true because a clear always precedes it — the guard above refuses
-      # marker-less rows). RecoverySequence is the single source of truth
-      # for the argvs and the manual-only guard, so web and bot recover
-      # byte-identically; the TUI has its own subprocess-based clear +
-      # `hive run` path with separate gates.
-      def recover(slug:, project:, stage:, marker:, attrs: nil, workflow: nil)
-        attrs = (attrs || {}).to_h.transform_keys(&:to_s)
-        # No failure marker = nothing to recover. RecoverySequence would
-        # skip the clear and queue a bare, UNGUARDED stage rerun behind a
-        # "Recovery queued" notice — on a row that (since the controller
-        # re-reads live state) already moved on. Refuse honestly instead.
-        marker_name = marker.to_s.downcase
-        if marker_name.empty? || %w[none agent_working].include?(marker_name)
-          raise Hive::Error,
-                "nothing to recover: #{slug} has no failure marker (its state changed — reload the page)"
+      # Recovery is a generation-fenced coordinator intent. Marker state is
+      # display-only and cannot authorize a clear-and-rerun sequence.
+      def recover(slug:, project:, stage:, marker:, attrs: nil, workflow: nil, retry_projection: nil)
+        if retry_projection.is_a?(Hash) && retry_projection["state"].to_s == "abandoned"
+          raise Hive::Error, "retry is abandoned for #{slug}; re-arm it before requesting a retry"
         end
-        if Hive::Bot::Handlers::RecoverySequence.manual_only?(marker, attrs)
-          raise Hive::Error, Hive::Bot::Handlers::RecoverySequence.manual_only_text(marker, attrs)
-        end
-
-        match_attr = Hive::Bot::NotificationBuilders.recovery_match_attr(RecoveryRow.new(marker, attrs))
+        generation = retry_projection.is_a?(Hash) ? retry_projection.dig("key", "generation") : nil
         commands = Hive::Bot::Handlers::RecoverySequence.retry_commands(
-          project: project, slug: slug, stage: stage, marker: marker, match_attr: match_attr,
-          workflow: workflow
+          project: project, slug: slug, stage: stage, marker: marker,
+          workflow: workflow, generation: generation
         )
-        raise Hive::Error, "no retry verb for stage #{stage.inspect}" if commands.empty?
+        if commands.empty?
+          raise Hive::Error,
+                "retry state changed or is unavailable for #{slug}; reload the page"
+        end
 
         request_id = Hive::Bot::DispatchRequestWriter.generate_request_id
-        first, *remaining = commands
-        if remaining.any?
-          Hive::Bot::DispatchRequestWriter.write_sequence!(request_id: request_id,
-                                                           remaining_argvs: remaining)
-        end
-        begin
-          Hive::Bot::DispatchRequestWriter.write!(project: project, slug: slug, argv: first,
-                                                  trigger: "web_recover", request_id: request_id)
-        rescue StandardError
-          # Sequence-first is deliberate (request-first could let the daemon
-          # finish the clear before the sidecar lands, silently skipping the
-          # retry) — but it means a failed request write would orphan a
-          # .sequence file nothing ever cleans. Mirror the bot supervisor:
-          # discard, then let the error surface to the operator.
-          if remaining.any?
-            Hive::Bot::DispatchRequestWriter.discard_sequence!(request_id: request_id)
-          end
-          raise
-        end
+        Hive::Bot::DispatchRequestWriter.write!(
+          project: project, slug: slug, argv: commands.fetch(0),
+          trigger: "web_recover", request_id: request_id,
+          task_generation: generation
+        )
         request_id
       end
 

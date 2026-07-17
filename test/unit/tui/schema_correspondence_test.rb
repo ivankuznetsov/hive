@@ -37,7 +37,8 @@ class TuiSchemaCorrespondenceTest < Minitest::Test
     claude_pid_alive: nil,
     action_key: "ready_to_brainstorm",
     action_label: "Ready to brainstorm",
-    suggested_command: "hive brainstorm probe --from 1-inbox"
+    suggested_command: "hive brainstorm probe --from 1-inbox",
+    projection_data: { "retry" => { "state" => "ready" } }
   }.freeze
 
   # Map JSON keys -> Row member symbols. The single rename is

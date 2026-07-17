@@ -63,7 +63,7 @@ class WebDispatcherTest < Minitest::Test
     end
   end
 
-  def test_recover_queues_marker_clear_then_stage_rerun_as_one_sequence
+  def test_recover_queues_one_generation_fenced_coordinator_request
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         project, slug, dest = seed_task_at(dir, "6-review")
@@ -73,24 +73,21 @@ class WebDispatcherTest < Minitest::Test
         request_id = Hive::Web::Dispatcher.new.recover(
           slug: slug, project: project, stage: "6-review",
           marker: "review_error",
-          attrs: { "phase" => "triage", "reason" => "merge_conflict", "pass" => "1" }
+          attrs: { "phase" => "triage", "reason" => "merge_conflict", "pass" => "1" },
+          retry_projection: retry_projection(7)
         )
 
         requests = Dir[File.join(Hive::Paths.state_home, "dispatch_requests", "**", "*#{request_id}*")]
-        assert requests.any? { |f| File.file?(f) && File.read(f).include?("markers") },
-               "the FIRST queued command must be the guarded marker clear"
-        first = requests.map { |f| File.read(f) if File.file?(f) }.compact.join
-        assert_includes first, "pass=1", "the clear must be guarded by the most discriminating attr"
-
-        sequence = Dir[File.join(Hive::Paths.state_home, "**", "*#{request_id}*")]
-                   .select { |f| File.file?(f) && File.read(f).include?("review") }
-        assert sequence.any?,
-               "the stage rerun must ride the same request id so it stays invisible until the clear succeeds"
+        payload = requests.filter_map { |f| JSON.parse(File.read(f)) if File.file?(f) }.first
+        assert_equal %w[hive retry manual], payload.fetch("argv").first(3)
+        assert_equal "7", payload.fetch("argv")[payload.fetch("argv").index("--generation") + 1]
+        assert_equal 7, payload.fetch("task_generation")
+        refute_includes payload.fetch("argv"), "markers"
       end
     end
   end
 
-  def test_recover_discards_the_sequence_sidecar_when_the_request_write_fails
+  def test_recover_propagates_request_write_failure_without_sequence_sidecar
     with_tmp_global_config do
       original = Hive::Bot::DispatchRequestWriter.method(:write!)
       Hive::Bot::DispatchRequestWriter.define_singleton_method(:write!) do |**|
@@ -101,7 +98,8 @@ class WebDispatcherTest < Minitest::Test
         Hive::Web::Dispatcher.new.recover(
           slug: "stuck-260612-bbbb", project: "p", stage: "6-review",
           marker: "review_error",
-          attrs: { "phase" => "triage", "reason" => "merge_conflict", "pass" => "1" }
+          attrs: { "phase" => "triage", "reason" => "merge_conflict", "pass" => "1" },
+          retry_projection: retry_projection(2)
         )
       end
 
@@ -113,27 +111,27 @@ class WebDispatcherTest < Minitest::Test
     end
   end
 
-  def test_recover_refuses_a_row_without_a_failure_marker
+  def test_recover_refuses_a_row_without_retry_projection
     with_tmp_global_config do
       error = assert_raises(Hive::Error) do
         Hive::Web::Dispatcher.new.recover(
           slug: "fine-260612-cccc", project: "p", stage: "6-review", marker: "none"
         )
       end
-      assert_match(/nothing to recover/, error.message,
-                   "a bare rerun behind a 'Recovery queued' notice would be a hidden, unguarded Run")
+      assert_match(/retry state changed or is unavailable/, error.message)
     end
   end
 
-  def test_recover_refuses_manual_only_states_with_a_readable_error
+  def test_recover_refuses_abandoned_projection
     with_tmp_global_config do
       error = assert_raises(Hive::Error) do
         Hive::Web::Dispatcher.new.recover(
           slug: "s", project: "p", stage: "6-review",
-          marker: "review_error", attrs: { "phase" => "fix", "reason" => "fix_tampered" }
+          marker: "review_error", attrs: { "phase" => "fix", "reason" => "fix_tampered" },
+          retry_projection: retry_projection(3, state: "abandoned")
         )
       end
-      refute_empty error.message, "the manual-only reply must reach the operator"
+      assert_match(/re-arm/, error.message)
     end
   end
 
@@ -144,16 +142,16 @@ class WebDispatcherTest < Minitest::Test
     with_tmp_global_config do
       request_id = Hive::Web::Dispatcher.new.recover(
         slug: "generic-260620-aaaa", project: "p", stage: "2-gather",
-        marker: "error", attrs: {}, workflow: "research"
+        marker: "error", attrs: {}, workflow: "research", retry_projection: retry_projection(5)
       )
 
       contents = Dir[File.join(Hive::Paths.state_home, "**", "*#{request_id}*")]
                  .select { |f| File.file?(f) }
                  .map { |f| File.read(f) }.join("\n")
 
-      assert_includes contents, "2-gather", "the generic rerun must target the generic stage dir"
-      assert_includes contents, "--stage", "generic rerun scopes by --stage"
-      refute_includes contents, "--from", "generic `hive run` must never use --from"
+      assert_includes contents, "retry"
+      assert_includes contents, "--generation"
+      refute_includes contents, "markers"
     end
   end
 
@@ -462,5 +460,15 @@ Already answered
       assert_equal [ "hive", "run", "generic-task", "--project", "demo", "--stage", "1-intake" ],
                    result[:argv]
     end
+  end
+
+  private
+
+  def retry_projection(generation, state: "cooldown")
+    {
+      "state" => state,
+      "retry_count" => 1,
+      "key" => { "generation" => generation }
+    }
   end
 end

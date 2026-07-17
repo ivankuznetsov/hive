@@ -152,7 +152,9 @@ class HiveBotSlashHandlersTest < Minitest::Test
     folder: "/tmp/stuck-260525-abcd",
     action: "recover_review",
     action_label: "Needs recovery",
-    diagnostic: { "suggested_next_action" => { "kind" => "retry" } }
+    diagnostic: { "suggested_next_action" => { "kind" => "retry" } },
+    **{ retry: { "state" => "cooldown", "retry_count" => 2,
+                 "key" => { "generation" => 7 } } }
   ).freeze
 
   EXECUTE_STALE_ROW = Row.new(
@@ -426,7 +428,9 @@ class HiveBotSlashHandlersTest < Minitest::Test
   def test_autofix_with_slug_matching_numeric_id_uses_slug_path
     numeric_slug_row = Row.new(project: "hive", slug: "9281-260525-abcd", id: 1111,
                                stage: "6-review", marker: "review_error", attrs: {},
-                               diagnostic: { "suggested_next_action" => { "kind" => "retry" } })
+                               diagnostic: { "suggested_next_action" => { "kind" => "retry" } },
+                               **{ retry: { "state" => "ready", "retry_count" => 1,
+                                            "key" => { "generation" => 3 } } })
     handlers = autofix_handlers([ numeric_slug_row ])
 
     result = handlers.autofix(Update.new(text: "/autofix 9281-260525-abcd", chat_id: 1))
@@ -502,9 +506,7 @@ class HiveBotSlashHandlersTest < Minitest::Test
     assert_equal "stuck-260525-abcd", result.slug
     assert_nil result.text, "a successful autofix dispatch carries no operator reply text"
     assert_equal [
-      [ "hive", "markers", "clear", "stuck-260525-abcd", "--name", "REVIEW_ERROR",
-        "--project", "hive", "--match-attr", "pass=2", "--json" ],
-      [ "hive", "review", "stuck-260525-abcd", "--from", "6-review", "--project", "hive", "--json" ]
+      %w[hive retry manual stuck-260525-abcd --project hive --generation 7 --json]
     ], result.commands
     assert_equal({ project: "hive", slug: "stuck-260525-abcd", stage: "6-review",
                    marker: "review_error", match_attr: "pass=2" }, result.alert_reset)
@@ -650,9 +652,7 @@ class HiveBotSlashHandlersTest < Minitest::Test
     assert_match(/no automatic recovery/, result.text)
   end
 
-  def test_autofix_no_retry_verb_for_stage_replies_cleanly
-    # A retryable 9-done row passes the retryable gate but has no retry verb,
-    # so RecoverySequence.build's stage check produces the clean refusal.
+  def test_autofix_without_retry_projection_replies_cleanly
     done_retryable = Row.new(project: "hive", slug: "done-260525-abcd", stage: "9-done",
                              marker: "review_error", attrs: {},
                              diagnostic: { "suggested_next_action" => { "kind" => "retry" } })
@@ -661,7 +661,7 @@ class HiveBotSlashHandlersTest < Minitest::Test
     result = handlers.autofix(Update.new(text: "/autofix done-260525-abcd", chat_id: 1))
 
     assert_equal :reply, result.action
-    assert_match(/No retry verb for stage 9-done/, result.text)
+    assert_match(/no automatic retry available/, result.text)
   end
 
   def test_autofix_non_retryable_recovery_row_points_to_details

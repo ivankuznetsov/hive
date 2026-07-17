@@ -310,9 +310,6 @@ module Hive
           "condition_provenance" => row.dig(:projection_data, "provenance") || {},
           "shadow_audit" => row.dig(:projection_data, "shadow_audit") || {},
           "condition_warning" => row[:condition_warning],
-          # Exact journal-derived retry projection. Consumers must not
-          # reconstruct retry readiness or deadlines from marker state.
-          "retry" => row.dig(:projection_data, "retry"),
           # Count of still-unanswered brainstorm Q&A questions (issue #270).
           # 0 for every non-brainstorm / non-needs_input row. Lets an agent
           # or operator tell "the daemon is holding this brainstorm because
@@ -329,6 +326,11 @@ module Hive
           "diagnostic" => row[:diagnostic]
         }
         payload["workflow"] = row[:workflow].to_s if row.key?(:workflow) && !row[:workflow].nil?
+        # Rollout-compatible: old task projections have no coordinator
+        # history. Once present, copy the exact journal-derived object; do
+        # not reconstruct readiness or deadlines from marker state.
+        retry_projection = row.dig(:projection_data, "retry")
+        payload["retry"] = retry_projection if retry_projection
         if Hive::AgentLimit.held?(row[:marker_name], row[:marker_attrs])
           payload["held"] = Hive::AgentLimit.held_field(row[:marker_attrs])
         end
@@ -568,7 +570,7 @@ module Hive
           puts "  #{label}"
           stage_rows.sort_by { |r| -r[:mtime].to_i }.each do |r|
             command = r[:suggested_command] || "-"
-            state = [ r[:state_label], dependency_indicator(r) ].compact.join(" ")
+            state = [ r[:state_label], retry_indicator(r), dependency_indicator(r) ].compact.join(" ")
             puts "    #{r[:icon]} #{display_identity_with_pr(r, TEXT_IDENTITY_WIDTH)} " \
                  "#{state.ljust(24)} #{command} #{r[:age]}"
           end
@@ -595,7 +597,7 @@ module Hive
         puts "  Archived"
         rows.sort_by { |row| -row[:mtime].to_i }.each do |row|
           command = row[:suggested_command] || "-"
-          state = [ row[:state_label], dependency_indicator(row) ].compact.join(" ")
+          state = [ row[:state_label], retry_indicator(row), dependency_indicator(row) ].compact.join(" ")
           puts "    #{row[:icon]} #{display_identity_with_pr(row, TEXT_IDENTITY_WIDTH)} " \
                "#{state.ljust(24)} #{command} #{row[:age]}"
         end
@@ -607,6 +609,18 @@ module Hive
 
       def render_archived_hidden_summary(hidden_count)
         puts "  … and #{hidden_count} archived >3d ago (hive archive to view)"
+      end
+
+      def retry_indicator(row)
+        retry_record = row.dig(:projection_data, "retry")
+        return nil unless retry_record.is_a?(Hash)
+
+        state = retry_record["state"].to_s
+        count = retry_record["retry_count"].to_i
+        return "retry=abandoned" if state == "abandoned"
+
+        suffix = state == "cooldown" && retry_record["retry_after"] ? "@#{retry_record['retry_after']}" : ""
+        "retry=##{count}:#{state}#{suffix}"
       end
 
       # Identity column = `#id  #PR display-name`, padded to `width` visible

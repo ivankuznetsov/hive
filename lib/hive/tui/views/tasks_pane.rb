@@ -220,6 +220,8 @@ module Hive
 
         def status_label(row)
           base = action_state_label(row)
+          retry_label = retry_status(row)
+          base = [ base, retry_label ].reject { |part| part.to_s.empty? }.join(" ")
           return base unless row.blocked
 
           # Append the dependency block rather than replace the action-state
@@ -229,6 +231,25 @@ module Hive
           # BOTH labels in either renderer instead of the TUI dropping the
           # error/recover context.
           [ base, dependency_status(row) ].reject { |part| part.to_s.empty? }.join(" ")
+        end
+
+        def retry_status(row)
+          retry_record = row.respond_to?(:retry) ? row.retry : nil
+          return nil unless retry_record.is_a?(Hash)
+
+          count = retry_record["retry_count"].to_i
+          case retry_record["state"].to_s
+          when "cooldown"
+            "retry ##{count} cooling"
+          when "ready"
+            "retry ##{count} ready"
+          when "running"
+            "retry ##{count} running"
+          when "abandoned"
+            "retry abandoned"
+          when "succeeded"
+            "retry ##{count} succeeded"
+          end
         end
 
         # The action-state portion of the status column, independent of any

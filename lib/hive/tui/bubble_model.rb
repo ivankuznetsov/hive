@@ -402,7 +402,8 @@ module Hive
       def handle_side_effect(message)
         case message
         when Hive::Tui::Messages::SnapshotArrived
-          auto_heal_kill_class_errors(message.snapshot)
+          # Retry state is reconciled by the daemon coordinator. The TUI is a
+          # projection consumer and never clears markers or heals tasks.
           nil
         when Hive::Tui::Messages::SubprocessExited
           diagnose_subprocess_exit(message)
@@ -706,14 +707,7 @@ module Hive
       # re-classifies (typically back to "Ready for X" because the
       # agent's pre-kill state is preserved in the task folder).
       def auto_heal_kill_class_errors(snapshot)
-        return if snapshot.nil?
-
-        snapshot.rows.each do |row|
-          next unless kill_class_error?(row)
-          next unless register_heal_attempt(row.folder)
-
-          spawn_heal_thread(row)
-        end
+        nil
       end
 
       def kill_class_error?(row)
@@ -849,27 +843,10 @@ module Hive
       # and heal, the match refuses, backoff is refreshed, and the next
       # eligible snapshot sees the real failure instead of erasing it.
       def heal_marker(row)
-        argv = [ "hive", "markers", "clear", row.folder, "--name", "ERROR" ]
-        match_attr = error_recovery_match_attr(row)
-        argv += [ "--match-attr", match_attr ] if match_attr
-        exit_code, _out, err = Hive::Tui::Subprocess.run_quiet!(argv)
-        return if exit_code.zero?
-
-        Hive::Tui::Debug.log(
-          "auto_heal",
-          "clear failed for #{row.slug}: exit=#{exit_code} err=#{err.lines.first&.chomp.to_s[0, 120]}"
-        )
-        record_heal_failure(row.folder)
-      rescue StandardError => e
-        Hive::Tui::Debug.log("auto_heal", "failed for #{row.slug}: #{e.class.name}: #{e.message}")
-        record_heal_failure(row.folder)
+        nil
       end
 
       def red_status_autofix(row)
-        if manual_only_red_status_recovery?(row)
-          return [ flashed("Hive has no automatic recovery for this state — try Open in agent"), nil ]
-        end
-
         if row.action_key.to_s == "error" && row.marker.to_s != "error"
           return dispatch_diagnostic_retry(row)
         end
@@ -950,12 +927,15 @@ module Hive
       end
 
       def diagnostic_retry_command(row)
-        suggested = row.diagnostic && row.diagnostic["suggested_next_action"]
-        return nil unless suggested.is_a?(Hash)
-        return nil unless suggested["kind"].to_s == "retry"
+        retry_record = row.respond_to?(:retry) ? row.retry : nil
+        return nil unless retry_record.is_a?(Hash)
+        return nil if retry_record["state"].to_s == "abandoned"
 
-        command = suggested["command"].to_s.strip
-        command.empty? ? nil : command
+        generation = retry_record.dig("key", "generation")
+        return nil unless generation.is_a?(Integer) && generation >= 0
+
+        [ "hive", "retry", "manual", row.slug, "--project", row.project_name,
+          "--generation", generation.to_s, "--json" ].shelljoin
       end
 
       # The `r` grid-mode gesture (PR #72) sets force: true ONLY for
@@ -1011,13 +991,7 @@ module Hive
           return open_review_stale_file(row)
         end
 
-        unless register_review_recovery_attempt(row.folder)
-          return [ flashed("review recovery already in progress for #{row.slug}"), nil ]
-        end
-
-        detail = review_recovery_detail(row, marker_name)
-        spawn_review_recovery_thread(row, marker_name)
-        [ flashed("review recovery: clearing #{Hive::Tui::Text.sanitize(detail)[0, 160]}…"), nil ]
+        dispatch_diagnostic_retry(row)
       end
 
       # Atomic claim-or-skip on @review_recovery_inflight. Prevents
@@ -1077,23 +1051,9 @@ module Hive
       # them to the operator as a misleading "review recovery failed"
       # flash.
       def perform_review_recovery(row, marker_name)
-        clear_argv = review_recovery_clear_argv(row, marker_name)
-        exit_code, _out, err = Hive::Tui::Subprocess.run_quiet!(clear_argv)
-        unless exit_code.zero?
-          reason = err.to_s.lines.first&.chomp.to_s
-          reason = "exit #{exit_code}" if reason.empty?
-          Hive::Tui::Debug.log(
-            "review_recovery",
-            "clear failed for #{row.slug}: exit=#{exit_code} err=#{err.to_s.lines.first&.chomp.to_s[0, 200]}"
-          )
-          flash_async("review recovery failed: #{Hive::Tui::Text.sanitize(reason)[0, 120]}")
-          return
-        end
+        return unless dispatch_recovery_rerun(row, label: "review retry", debug_scope: "review_retry")
 
-        return unless dispatch_recovery_rerun(row, label: "review recovery", debug_scope: "review_recovery")
-
-        detail = review_recovery_detail(row, marker_name)
-        flash_async("review recovery: #{Hive::Tui::Text.sanitize(detail)[0, 160]}; running `hive run`…")
+        flash_async("review retry requested through the coordinator")
       rescue SystemCallError, IOError, Hive::Tui::Subprocess::TimeoutError => e
         Hive::Tui::Debug.log("review_recovery", "failed for #{row.slug}: #{e.class.name}: #{e.message}")
         flash_async(
@@ -1102,16 +1062,20 @@ module Hive
       end
 
       def dispatch_recovery_rerun(row, label:, debug_scope:)
+        argv = coordinator_retry_argv(row)
+        unless argv
+          flash_async("#{label}: retry projection unavailable; refresh status")
+          return false
+        end
         started = Hive::Tui::Subprocess.dispatch_background(
-          [ "hive", "run", row.folder ],
+          argv,
           dispatch: @dispatch
         )
         return true unless started == false
 
         Hive::Tui::Debug.log(debug_scope, "dispatch returned false for #{row.slug} (marker cleared)")
         flash_async(
-          "#{label}: marker cleared, but `hive run` failed to start; " \
-          "run `hive run #{row.folder}` manually"
+          "#{label}: coordinator request failed to start; refresh status and retry"
         )
         false
       rescue SystemCallError, IOError, Hive::Tui::Subprocess::TimeoutError => e
@@ -1120,8 +1084,8 @@ module Hive
           "dispatch failed for #{row.slug} (marker cleared): #{e.class.name}: #{e.message}"
         )
         flash_async(
-          "#{label}: marker cleared, but `hive run` failed to start: " \
-          "#{Hive::Tui::Text.sanitize(e.message)[0, 80]}; run `hive run #{row.folder}` manually"
+          "#{label}: coordinator request failed to start: " \
+          "#{Hive::Tui::Text.sanitize(e.message)[0, 80]}"
         )
         false
       end
@@ -1135,9 +1099,7 @@ module Hive
       end
 
       def review_recovery_clear_argv(row, marker_name)
-        argv = [ "hive", "markers", "clear", row.folder, "--name", marker_name ]
-        match_attr = review_recovery_match_attr(row)
-        match_attr ? argv + [ "--match-attr", match_attr ] : argv
+        coordinator_retry_argv(row) || []
       end
 
       def review_recovery_match_attr(row)
@@ -1226,18 +1188,7 @@ module Hive
           return [ flashed("error recovery unavailable: action=#{row.action_key}"), nil ]
         end
 
-        attrs = row.attrs || {}
-        if kill_class_error?(row)
-          return [ flashed("error recovery: kill-class exit_code=#{attrs['exit_code']} auto-heals"), nil ]
-        end
-
-        unless register_error_recovery_attempt(row.folder)
-          return [ flashed("error recovery already in progress for #{row.slug}"), nil ]
-        end
-
-        detail = error_recovery_detail(row)
-        spawn_error_recovery_thread(row)
-        [ flashed("error recovery: clearing #{Hive::Tui::Text.sanitize(detail)[0, 160]}…"), nil ]
+        dispatch_diagnostic_retry(row)
       end
 
       def register_error_recovery_attempt(folder)
@@ -1287,23 +1238,9 @@ module Hive
       # debug log surfaces them instead of presenting a misleading
       # "error recovery failed" flash.
       def perform_error_recovery(row)
-        clear_argv = error_recovery_clear_argv(row)
-        exit_code, _out, err = Hive::Tui::Subprocess.run_quiet!(clear_argv)
-        unless exit_code.zero?
-          reason = err.to_s.lines.first&.chomp.to_s
-          reason = "exit #{exit_code}" if reason.empty?
-          Hive::Tui::Debug.log(
-            "error_recovery",
-            "clear failed for #{row.slug}: exit=#{exit_code} err=#{err.to_s.lines.first&.chomp.to_s[0, 200]}"
-          )
-          flash_async(error_recovery_failure_flash(row, exit_code, reason))
-          return
-        end
+        return unless dispatch_recovery_rerun(row, label: "error retry", debug_scope: "error_retry")
 
-        return unless dispatch_recovery_rerun(row, label: "error recovery", debug_scope: "error_recovery")
-
-        detail = error_recovery_detail(row)
-        flash_async("error recovery: #{Hive::Tui::Text.sanitize(detail)[0, 160]}; running `hive run`…")
+        flash_async("error retry requested through the coordinator")
       rescue SystemCallError, IOError, Hive::Tui::Subprocess::TimeoutError => e
         Hive::Tui::Debug.log("error_recovery", "failed for #{row.slug}: #{e.class.name}: #{e.message}")
         flash_async(
@@ -1316,9 +1253,12 @@ module Hive
       # rows without marker_id fall back to the observed reason/exit_code
       # attrs, preserving same-code/different-reason race protection.
       def error_recovery_clear_argv(row)
-        argv = [ "hive", "markers", "clear", row.folder, "--name", "ERROR" ]
-        match_attr = error_recovery_match_attr(row)
-        match_attr ? argv + [ "--match-attr", match_attr ] : argv
+        coordinator_retry_argv(row) || []
+      end
+
+      def coordinator_retry_argv(row)
+        command = diagnostic_retry_command(row)
+        command && Shellwords.split(command)
       end
 
       def error_recovery_match_attr(row)
@@ -1345,7 +1285,7 @@ module Hive
         sanitised_reason = Hive::Tui::Text.sanitize(reason)[0, 120]
         case exit_code
         when Hive::Tui::Subprocess::COMMAND_TIMEOUT_EXIT
-          "error recovery failed: markers-clear timed out after 30s (lock contention); retry shortly or `hive markers clear #{row.folder} --name ERROR` manually"
+          "error retry request timed out; refresh status and retry shortly"
         else
           "error recovery failed: #{sanitised_reason}"
         end

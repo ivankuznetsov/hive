@@ -430,6 +430,10 @@
           "description": "Operator-visible shadow divergence warning, or null.",
           "type": [ "string", "null" ]
         },
+        "retry": {
+          "description": "Optional journal-derived durable retry projection. Absent until a terminal condition has entered the retry coordinator; consumers must copy this object rather than infer retry state from markers.",
+          "$ref": "#/$defs/Retry"
+        },
         "unanswered_questions": {
           "description": "Count of still-unanswered brainstorm Q&A questions (`### Q{n}.` slots with no answer) for a 2-brainstorm needs_input row; 0 for every other row. Lets a consumer distinguish a brainstorm the daemon is intentionally holding (answers outstanding) from one genuinely waiting for a first answer or broken — the daemon's answers-pending gate is otherwise only visible in daemon.log. Degrades to 0 if the file is missing/mid-write/malformed.",
           "type": "integer",
@@ -500,6 +504,62 @@
           ]
         }
       }
+    },
+    "Retry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema", "schema_version", "key", "predecessor_attempt_id",
+        "current_attempt_id", "retry_count", "failure_class", "failure_code",
+        "evidence", "guidance", "first_failure_at", "last_failure_at",
+        "retry_after", "state", "authorization", "operator", "last_event_id"
+      ],
+      "properties": {
+        "schema": { "const": "hive-retry-record" },
+        "schema_version": { "const": 1 },
+        "key": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [ "project", "task", "stage", "generation" ],
+          "properties": {
+            "project": { "type": "string", "minLength": 1 },
+            "task": { "type": "string", "minLength": 1 },
+            "stage": { "type": "string", "minLength": 1 },
+            "generation": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "predecessor_attempt_id": { "type": "string", "minLength": 1 },
+        "current_attempt_id": { "type": [ "string", "null" ] },
+        "retry_count": { "type": "integer", "minimum": 0 },
+        "failure_class": { "type": [ "string", "null" ] },
+        "failure_code": { "type": [ "string", "null" ] },
+        "evidence": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "type": "object", "additionalProperties": true }
+        },
+        "guidance": { "type": [ "string", "null" ] },
+        "first_failure_at": { "type": [ "string", "null" ], "format": "date-time" },
+        "last_failure_at": { "type": [ "string", "null" ], "format": "date-time" },
+        "retry_after": { "type": [ "string", "null" ], "format": "date-time" },
+        "state": {
+          "type": "string",
+          "enum": [ "cooldown", "ready", "running", "succeeded", "abandoned" ]
+        },
+        "authorization": { "type": [ "object", "null" ], "additionalProperties": true },
+        "operator": { "type": [ "object", "null" ], "additionalProperties": true },
+        "last_event_id": { "type": "string", "minLength": 1 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "state": { "const": "cooldown" } }, "required": [ "state" ] },
+          "then": { "properties": { "retry_after": { "type": "string", "format": "date-time" } } }
+        },
+        {
+          "if": { "properties": { "state": { "const": "running" } }, "required": [ "state" ] },
+          "then": { "properties": { "current_attempt_id": { "type": "string", "minLength": 1 } } }
+        }
+      ]
     },
     "Diagnostic": {
       "type": "object",

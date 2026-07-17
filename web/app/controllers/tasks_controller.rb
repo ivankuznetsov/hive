@@ -106,9 +106,9 @@ class TasksController < ApplicationController
     row = task_row!
     dispatcher.recover(slug: params[:slug], project: @project["name"],
                        stage: row["stage"], marker: row["marker"], attrs: row["attrs"],
-                       workflow: row["workflow"])
+                       workflow: row["workflow"], retry_projection: row["retry"])
     redirect_to task_path(@project["name"], params[:slug]),
-                notice: "Recovery queued — clearing the error and re-running the stage"
+                notice: "Retry request queued through the coordinator"
   end
 
   def intervene

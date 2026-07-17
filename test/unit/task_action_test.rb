@@ -118,8 +118,7 @@ class TaskActionTest < Minitest::Test
       assert_match(/Rerun the plan stage to regenerate plan\.md/, empty.diagnostic["detail"])
       assert_equal "marker", empty.diagnostic["source"]
       assert_equal "retry", empty.diagnostic.fetch("suggested_next_action").fetch("kind")
-      assert_equal "hive plan demo-260426-aaaa --from 3-plan",
-                   empty.diagnostic.fetch("suggested_next_action").fetch("command")
+      assert_nil empty.diagnostic.fetch("suggested_next_action").fetch("command")
     end
   end
 
@@ -540,8 +539,7 @@ class TaskActionTest < Minitest::Test
     refute_nil diag, "stale agent_working must emit a synthetic diagnostic so the red-status surface has something to render"
     assert_includes diag["summary"], "12345",
                     "diagnostic summary should surface the recorded pid for operator triage"
-    assert_includes diag["detail"], "suggested_next_action.command",
-                    "synthetic stale-agent guidance must send agents back through guarded status diagnostics"
+    assert_includes diag["detail"], "retry coordinator"
     refute_match(/hive markers clear .*--name ERROR/, diag["detail"],
                  "synthetic stale-agent guidance must not teach a bare ERROR clear before marker_id exists")
   end
@@ -572,7 +570,7 @@ class TaskActionTest < Minitest::Test
       pid_alive: false, agent_marker_grace_sec: 300
     )
     died_detail = died_action.diagnostic["detail"]
-    assert_includes died_detail, "suggested_next_action.command"
+    assert_includes died_detail, "retry coordinator"
     refute_match(/hive markers clear .*--name ERROR/, died_detail)
 
     # agent_orphaned branch: marker has NO pid attr, mtime past grace.
@@ -581,7 +579,7 @@ class TaskActionTest < Minitest::Test
       pid_alive: nil, state_file_mtime: Time.now - 600, agent_marker_grace_sec: 300
     )
     orphan_detail = orphan_action.diagnostic["detail"]
-    assert_includes orphan_detail, "suggested_next_action.command"
+    assert_includes orphan_detail, "retry coordinator"
     refute_match(/hive markers clear .*--name ERROR/, orphan_detail)
   end
 
@@ -1631,7 +1629,7 @@ class TaskActionTest < Minitest::Test
     end
   end
 
-  def test_review_stale_and_error_retry_commands_include_priority_match_attrs
+  def test_retry_diagnostics_do_not_construct_out_of_band_commands
     review_task = fake_task(stage_name: "review", stage_index: 6)
     review_suggested = Hive::TaskAction.for(
       review_task,
@@ -1639,11 +1637,7 @@ class TaskActionTest < Minitest::Test
     ).diagnostic.fetch("suggested_next_action")
 
     assert_equal "retry", review_suggested.fetch("kind")
-    review_parts = Shellwords.split(review_suggested.fetch("command"))
-    assert_includes review_parts, "--name"
-    assert_includes review_parts, "REVIEW_STALE"
-    assert_includes review_parts, "--match-attr"
-    assert_includes review_parts, "pass=2"
+    assert_nil review_suggested.fetch("command")
 
     error_task = fake_task(stage_name: "execute", stage_index: 4)
     error_action = Hive::TaskAction.for(
@@ -1654,34 +1648,19 @@ class TaskActionTest < Minitest::Test
     error_suggested = error_diagnostic.fetch("suggested_next_action")
 
     assert_equal "retry", error_suggested.fetch("kind")
-    # F1: `error_recovery_match_attr` now encodes `marker_id` + `reason` as a
-    # comma-separated pair so the bot's inline-button callback path can route
-    # `manual_only?` on `reason` without re-reading the state file. The
-    # markers-clear CLI handles comma-separated pairs natively (parse_match_attrs
-    # in lib/hive/commands/markers.rb), so the encoded form is consumer-safe.
-    assert_equal [
-      "hive", "markers", "clear", error_task.folder,
-      "--name", "ERROR", "--match-attr", "marker_id=err-70,reason=agent_failed",
-      "&&", "hive", "run", error_task.folder
-    ], Shellwords.split(error_suggested.fetch("command"))
+    assert_nil error_suggested.fetch("command")
     refute_includes error_diagnostic.fetch("summary"), "marker_id"
     refute_includes error_diagnostic.fetch("detail"), "marker_id"
-    assert_includes Shellwords.split(error_suggested.fetch("command")),
-                    "marker_id=err-70,reason=agent_failed"
 
     legacy_error_suggested = Hive::TaskAction.for(
       error_task,
       marker(:error, "exit_code" => "70", "reason" => "agent_failed")
     ).diagnostic.fetch("suggested_next_action")
 
-    assert_equal [
-      "hive", "markers", "clear", error_task.folder,
-      "--name", "ERROR", "--match-attr", "reason=agent_failed,exit_code=70",
-      "&&", "hive", "run", error_task.folder
-    ], Shellwords.split(legacy_error_suggested.fetch("command"))
+    assert_nil legacy_error_suggested.fetch("command")
   end
 
-  def test_incomplete_plan_retry_command_includes_project_when_needed
+  def test_incomplete_plan_retry_is_deferred_to_projection
     Dir.mktmpdir("task-action-plan-project") do |root|
       folder = File.join(root, ".hive-state", "stages", "3-plan", "demo-260426-aaaa")
       state_file = File.join(folder, "plan.md")
@@ -1704,8 +1683,8 @@ class TaskActionTest < Minitest::Test
         project_count: 2
       ).diagnostic.fetch("suggested_next_action")
 
-      assert_includes suggested.fetch("command"), "--project demo-project"
-      assert_includes suggested.fetch("command"), "--from 3-plan"
+      assert_equal "retry", suggested.fetch("kind")
+      assert_nil suggested.fetch("command")
     end
   end
 

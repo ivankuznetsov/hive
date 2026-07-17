@@ -68,6 +68,7 @@ module Hive
         :condition_provenance,
         :shadow_audit,
         :condition_warning,
+        :retry,
         :marker,
         :attrs,
         # Carried verbatim from the JSON `held` object for payload↔Row
@@ -113,6 +114,7 @@ module Hive
                        unanswered_questions: 0, depends_on: nil,
                        blocked_by: nil, dependency_stage: nil,
                        blocked: false, held: nil, **rest)
+          rest[:retry] = nil unless rest.key?(:retry)
           super(id: id, display_name: display_name,
                 workflow: workflow,
                 depends_on: depends_on,
@@ -216,6 +218,7 @@ module Hive
           condition_provenance: payload["condition_provenance"] || {},
           shadow_audit: payload["shadow_audit"] || {},
           condition_warning: payload["condition_warning"],
+          retry: payload["retry"],
           marker: payload["marker"],
           attrs: payload["attrs"],
           held: payload["held"],

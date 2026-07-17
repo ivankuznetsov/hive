@@ -73,6 +73,11 @@ module ApplicationHelper
     %w[recover_execute recover_review error].include?(row["action"].to_s)
   end
 
+  def retry_requestable?(row)
+    retry_record = row["retry"]
+    retry_record.is_a?(Hash) && retry_record["state"].to_s != "abandoned"
+  end
+
   # Pipeline-generated display names arrive later in a task's life; until
   # then prefer the operator's ORIGINAL idea text (idea.md front matter) —
   # a de-slugged title truncates mid-phrase ("Add dark mode toggle to").

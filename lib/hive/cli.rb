@@ -955,6 +955,27 @@ module Hive
       ).call
     end
 
+    desc "retry ACTION TARGET", "Request, repair/reset, abandon, or re-arm a durable task retry"
+    long_desc <<~DESC
+      Routes every retry-related operator action through the durable retry
+      coordinator. ACTION is manual, repair (or reset), abandon, or rearm.
+      --generation is mandatory and fences the action to the task generation
+      the operator inspected. repair/reset, abandon, and rearm also require
+      --actor and --reason for the immutable audit trail. A manual request
+      never bypasses an unexpired cooldown.
+    DESC
+    option :project, type: :string, desc: "scope task lookup to one registered project"
+    option :generation, type: :string, required: true, desc: "expected retry task generation"
+    option :actor, type: :string, desc: "operator identity for audited state changes"
+    option :reason, type: :string, desc: "non-empty audit reason for state changes"
+    def retry(action, target)
+      require "hive/commands/retry"
+      Hive::Commands::Retry.new(
+        action, target, project: options[:project], generation: options[:generation],
+        actor: options[:actor], reason: options[:reason], json: options[:json]
+      ).call
+    end
+
     desc "approve TARGET", "Move a task to the next stage (or --to <stage>); agent-callable equivalent of `mv`"
     long_desc <<~DESC
       TARGET is either a task folder path or a bare slug. A bare slug is

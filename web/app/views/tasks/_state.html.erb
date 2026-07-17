@@ -18,11 +18,25 @@
     </div>
   <% end %>
 
+  <% if (retry_record = @row["retry"]).is_a?(Hash) %>
+    <div class="state-banner <%= "state-banner-error" if retry_record["state"] == "abandoned" %>">
+      <span class="status-dot <%= retry_record["state"] == "abandoned" ? "status-dot-error" : "status-dot-waiting" %>"></span>
+      <span>
+        Retry <%= retry_record["retry_count"] %> is <%= retry_record["state"] %>.
+        <% if retry_record["retry_after"].present? %>
+          Next evaluation after <time datetime="<%= retry_record["retry_after"] %>"><%= retry_record["retry_after"] %></time>.
+        <% end %>
+        <%= retry_record["guidance"] %>
+        <% if retry_record["state"] == "abandoned" && retry_record.dig("operator", "actor").present? %>
+          Abandoned by <%= retry_record.dig("operator", "actor") %>: <%= retry_record.dig("operator", "reason") %>.
+        <% end %>
+      </span>
+    </div>
+  <% end %>
+
   <div class="task-actions">
-    <% if recovery_action?(@row) %>
-      <%# The bot's Autofix, web-shaped: clears the failure marker (guarded
-          by its attrs) and re-runs the stage verb as one queued sequence. %>
-      <%= button_to "Retry stage", task_recover_path(@project["name"], @row["slug"]),
+    <% if retry_requestable?(@row) %>
+      <%= button_to "Request retry", task_recover_path(@project["name"], @row["slug"]),
             data: { turbo_submits_with: "Queueing…" } %>
     <% end %>
     <% if stage_passable?(@row) %>

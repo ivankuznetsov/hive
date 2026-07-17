@@ -19,6 +19,15 @@ class RetryAuthorityContractTest < Minitest::Test
     refute healer_sources.values.any? { |body| body.include?("Markers.clear_current") }
     refute healer_sources.values.any? { |body| body.include?("write_request!") }
 
+    recovery_surfaces = sources.select do |path, _body|
+      path.match?(%r{lib/hive/(?:bot|web|tui|task_action)/})
+    end
+    direct_marker_retry = recovery_surfaces.select do |_path, body|
+      body.match?(/\[\s*["']hive["']\s*,\s*["']markers["']\s*,\s*["']clear["']/)
+    end
+    assert_empty direct_marker_retry.keys,
+                 "operator surfaces must route through `hive retry`, not marker clear: #{direct_marker_retry.keys.join(', ')}"
+
     authorization_writers = sources.select do |path, body|
       body.include?("DispatchAuthorization.new") && !path.end_with?("retry_coordinator.rb")
     end

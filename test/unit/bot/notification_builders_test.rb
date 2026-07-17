@@ -9,7 +9,8 @@ class HiveBotNotificationBuildersTest < Minitest::Test
 
   def row(action:, marker:, attrs: {}, slug: "slug-260514-abcd", stage: "2-brainstorm",
           diagnostic: nil, id: nil, display_name: nil, pr_url: nil, workflow: "coding",
-          folder: "/tmp/slug-260514-abcd", state_file: nil, suggested_command: nil, next_action: nil)
+          folder: "/tmp/slug-260514-abcd", state_file: nil, suggested_command: nil, next_action: nil,
+          retry_projection: nil)
     Row.new(
       project: "hive",
       slug: slug,
@@ -26,7 +27,8 @@ class HiveBotNotificationBuildersTest < Minitest::Test
       suggested_command: suggested_command,
       next_action: next_action,
       diagnostic: diagnostic,
-      pr_url: pr_url
+      pr_url: pr_url,
+      **{ retry: retry_projection }
     )
   end
 
@@ -49,6 +51,10 @@ class HiveBotNotificationBuildersTest < Minitest::Test
 
   def manual_diagnostic
     { "suggested_next_action" => { "kind" => "manual_fix", "command" => nil } }
+  end
+
+  def retry_projection(generation, state: "cooldown")
+    { "state" => state, "retry_count" => 1, "key" => { "generation" => generation } }
   end
 
   def assert_live_agent_skip_logged(logger, marker:, action:, slug: "slug-260514-abcd", stage: "4-execute")
@@ -859,13 +865,15 @@ class HiveBotNotificationBuildersTest < Minitest::Test
         id: 42,
         display_name: "Improve Recovery",
         stage: "6-review",
-        diagnostic: retry_diagnostic(command: "hive review we-need-to-improve-this-260522-db23 --json")
+        diagnostic: retry_diagnostic(command: "hive review we-need-to-improve-this-260522-db23 --json"),
+        retry_projection: retry_projection(9)
       )
     )
 
     assert_includes notification.text, "⚠ Review stuck — \"#42 Improve Recovery\""
     assert_includes notification.text, "The review agent crashed before it could finish."
-    assert_includes notification.text, "Tap Autofix to retry the stage cleanly."
+    assert_includes notification.text, "Retry #1 is cooldown"
+    assert_includes notification.text, "Tap Autofix to request coordinator evaluation."
     refute_includes notification.text, "phase="
     refute_includes notification.text, "reason="
     refute_includes notification.text, "marker"
@@ -879,14 +887,14 @@ class HiveBotNotificationBuildersTest < Minitest::Test
     notification = Hive::Bot::NotificationBuilders.build(
       row(action: "recover_review", marker: "review_error", attrs: { "pass" => "2" },
           slug: "we-need-to-improve-this-260522-db23", stage: "6-review",
-          diagnostic: retry_diagnostic)
+          diagnostic: retry_diagnostic, retry_projection: retry_projection(9))
     )
 
     assert_equal 1, notification.keyboard.length
     assert_equal 1, notification.keyboard.first.length
     button = notification.keyboard.first.first
     assert_equal "🔧 Autofix", button[:text]
-    assert_equal "autofix:hive:we-need-to-improve-this-260522-db23:6-review:review_error:pass=2",
+    assert_equal "autofix:hive:we-need-to-improve-this-260522-db23:6-review:review_error:pass=2:generation=9",
                  Hive::Bot::NotificationBuilders.resolve_callback(button[:callback_data])
   end
 

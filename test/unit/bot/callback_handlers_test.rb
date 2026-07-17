@@ -765,28 +765,24 @@ class HiveBotCallbackHandlersTest < Minitest::Test
     )
   end
 
-  def test_clear_and_retry_uses_current_review_stage_name
+  def test_legacy_clear_and_retry_without_generation_refuses_dispatch
     result = @handlers.handle(
       :callback_clear_and_retry,
       update("clear_retry:alpha:red-task-260518-cccc:6-review:REVIEW_ERROR")
     )
 
-    assert_equal(
-      [ "hive", "review", "red-task-260518-cccc", "--from", "6-review", "--project", "alpha", "--json" ],
-      result.commands.last,
-      "clear-and-retry must dispatch the current review-stage verb, not a retired stage map"
-    )
+    assert_equal :reply, result.action
+    assert_match(/Refresh status/, result.text)
   end
 
   def test_clear_and_retry_passes_marker_match_attr_when_present
     result = @handlers.handle(
       :callback_clear_and_retry,
-      update("clear_retry:alpha:red-task-260518-cccc:6-review:REVIEW_ERROR:pass=2")
+      update("clear_retry:alpha:red-task-260518-cccc:6-review:REVIEW_ERROR:pass=2:generation=4")
     )
 
     assert_equal(
-      [ "hive", "markers", "clear", "red-task-260518-cccc", "--name",
-        "REVIEW_ERROR", "--project", "alpha", "--match-attr", "pass=2", "--json" ],
+      %w[hive retry manual red-task-260518-cccc --project alpha --generation 4 --json],
       result.commands.first
     )
     assert_equal({ project: "alpha", slug: "red-task-260518-cccc", stage: "6-review",
@@ -796,12 +792,12 @@ class HiveBotCallbackHandlersTest < Minitest::Test
   def test_clear_and_retry_none_marker_skips_marker_clear_and_runs_stage
     result = @handlers.handle(
       :callback_clear_and_retry,
-      update("clear_retry:alpha:plan-task-260519-abcd:3-plan:NONE")
+      update("clear_retry:alpha:plan-task-260519-abcd:3-plan:NONE:generation=4")
     )
 
     assert_equal :dispatch_commands, result.action
     assert_equal(
-      [ [ "hive", "plan", "plan-task-260519-abcd", "--from", "3-plan", "--project", "alpha", "--json" ] ],
+      [ %w[hive retry manual plan-task-260519-abcd --project alpha --generation 4 --json] ],
       result.commands,
       "markerless synthetic errors must retry the stage directly instead of clearing a non-existent ERROR marker"
     )
@@ -814,8 +810,7 @@ class HiveBotCallbackHandlersTest < Minitest::Test
     )
 
     assert_equal :reply, result.action
-    assert_match(/No retry verb for stage 9-done/, result.text,
-                 "clear_and_retry must short-circuit instead of dispatching zero commands plus an alert_reset")
+    assert_match(/Refresh status/, result.text)
     assert_nil result.alert_reset,
                "with no commands to run, alert_reset must NOT fire (otherwise the alert clears without any retry)"
   end
@@ -831,23 +826,19 @@ class HiveBotCallbackHandlersTest < Minitest::Test
     )
 
     assert_equal :reply, result.action
-    assert_match(/no automatic recovery/, result.text)
+    assert_match(/Refresh status/, result.text)
     assert_nil result.commands, "manual-only refusal must not dispatch any commands"
   end
 
   def test_autofix_marker_dispatches_clear_then_retry
     result = @handlers.handle(
       :callback_autofix,
-      update("autofix:alpha:red-task-260518-cccc:6-review:REVIEW_ERROR:pass=2")
+      update("autofix:alpha:red-task-260518-cccc:6-review:REVIEW_ERROR:pass=2:generation=4")
     )
 
     assert_equal :dispatch_commands, result.action
     assert_equal(
-      [
-        [ "hive", "markers", "clear", "red-task-260518-cccc", "--name",
-          "REVIEW_ERROR", "--project", "alpha", "--match-attr", "pass=2", "--json" ],
-        [ "hive", "review", "red-task-260518-cccc", "--from", "6-review", "--project", "alpha", "--json" ]
-      ],
+      [ %w[hive retry manual red-task-260518-cccc --project alpha --generation 4 --json] ],
       result.commands
     )
     assert_equal({ project: "alpha", slug: "red-task-260518-cccc", stage: "6-review",
@@ -856,24 +847,25 @@ class HiveBotCallbackHandlersTest < Minitest::Test
                  "Autofix must request keyboard removal to prevent double-tap dispatch."
   end
 
-  def test_autofix_execute_stale_replies_without_dispatch
+  def test_autofix_execute_stale_routes_through_error_agnostic_coordinator
     result = @handlers.handle(
       :callback_autofix,
-      update("autofix:alpha:exec-task-260519-abcd:4-execute:EXECUTE_STALE")
+      update("autofix:alpha:exec-task-260519-abcd:4-execute:EXECUTE_STALE:generation=5")
     )
 
-    assert_equal :reply, result.action
-    assert_match(/no automatic recovery/i, result.text)
+    assert_equal :dispatch_commands, result.action
+    assert_equal [ %w[hive retry manual exec-task-260519-abcd --project alpha --generation 5 --json] ],
+                 result.commands
   end
 
   def test_autofix_none_marker_dispatches_retry_only
     result = @handlers.handle(
       :callback_autofix,
-      update("autofix:alpha:plan-task-260519-abcd:3-plan:NONE")
+      update("autofix:alpha:plan-task-260519-abcd:3-plan:NONE:generation=6")
     )
 
     assert_equal(
-      [ [ "hive", "plan", "plan-task-260519-abcd", "--from", "3-plan", "--project", "alpha", "--json" ] ],
+      [ %w[hive retry manual plan-task-260519-abcd --project alpha --generation 6 --json] ],
       result.commands
     )
     # NONE marker is the synthetic markerless retry — alert_reset omits
@@ -886,34 +878,35 @@ class HiveBotCallbackHandlersTest < Minitest::Test
   def test_autofix_agent_working_marker_dispatches_retry_only
     result = @handlers.handle(
       :callback_autofix,
-      update("autofix:alpha:exec-task-260519-abcd:4-execute:AGENT_WORKING")
+      update("autofix:alpha:exec-task-260519-abcd:4-execute:AGENT_WORKING:generation=7")
     )
 
     assert_equal(
-      [ [ "hive", "develop", "exec-task-260519-abcd", "--from", "4-execute", "--project", "alpha", "--json" ] ],
+      [ %w[hive retry manual exec-task-260519-abcd --project alpha --generation 7 --json] ],
       result.commands
     )
   end
 
-  def test_autofix_unknown_stage_replies_without_dispatch
+  def test_autofix_stage_does_not_select_retry_policy
     result = @handlers.handle(
       :callback_autofix,
-      update("autofix:alpha:done-task-260519-abcd:9-done:ERROR")
+      update("autofix:alpha:done-task-260519-abcd:9-done:ERROR:generation=8")
     )
 
-    assert_equal :reply, result.action
-    assert_equal "No retry verb for stage 9-done.", result.text
+    assert_equal :dispatch_commands, result.action
+    assert_equal [ %w[hive retry manual done-task-260519-abcd --project alpha --generation 8 --json] ],
+                 result.commands
   end
 
-  def test_autofix_empty_stage_reply_labels_stage_as_empty
+  def test_autofix_empty_stage_still_uses_generation_fence
     result = @handlers.handle(
       :callback_autofix,
-      update("autofix:alpha:some-task-260519-abcd::ERROR")
+      update("autofix:alpha:some-task-260519-abcd::ERROR:generation=9")
     )
 
-    assert_equal :reply, result.action
-    assert_equal "No retry verb for stage (empty).", result.text,
-                 "empty stage must be labelled (empty) rather than leaving a blank in the reply"
+    assert_equal :dispatch_commands, result.action
+    assert_equal [ %w[hive retry manual some-task-260519-abcd --project alpha --generation 9 --json] ],
+                 result.commands
   end
 
   def test_refresh_diagnose_rejects_malformed_callback_data

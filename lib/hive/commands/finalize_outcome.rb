@@ -39,7 +39,8 @@ module Hive
         validate_arguments!
         require_interactive!
         task = Hive::TaskResolver.new(
-          @target, project_filter: @project_filter, stage_filter: "8-finalize"
+          @target, project_filter: @project_filter,
+          stage_filter: "8-finalize" # coding-scoped: guarded finalization outcome command
         ).resolve
         context = load_context(task)
         @action == "approve" ? approve(task, context) : rearm(task, context)
@@ -221,7 +222,7 @@ module Hive
           observed_at: occurred_at,
           task: source.fetch("task"),
           workflow: source["workflow"] || task.workflow.id.to_s,
-          stage: "8-finalize",
+          stage: "8-finalize", # coding-scoped: finalization journal vocabulary
           attempt_id: finalization.fetch("finalize_attempt_id"),
           task_generation: finalization.fetch("task_generation"),
           ownership_generation: "operator:#{actor.fetch('uid')}:#{occurred_at}",

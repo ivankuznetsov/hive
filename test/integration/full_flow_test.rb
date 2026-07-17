@@ -1,8 +1,13 @@
 require "test_helper"
+require "set"
 require "hive/commands/init"
 require "hive/commands/new"
 require "hive/commands/run"
+require "hive/commands/stage_action"
 require "hive/commands/status"
+require "hive/babysitter/job_runner"
+require "hive/babysitter/job_store"
+require "hive/finalization/reconciler"
 
 class FullFlowTest < Minitest::Test
   include HiveTestHelper
@@ -37,6 +42,8 @@ class FullFlowTest < Minitest::Test
       HIVE_FLOW_FOLDER HIVE_FLOW_PHASE HIVE_FLOW_FINDINGS HIVE_FLOW_PASS
       HIVE_FLOW_DRIVER_LOG HIVE_FAKE_GH_PR_EXISTS
       HIVE_FAKE_GH_PR_EXISTS_FILE HIVE_FAKE_GH_PR_EXISTS_URL HIVE_FAKE_GH_PR_EXISTS_NUMBER
+      HIVE_FAKE_GH_STATE HIVE_FAKE_GH_URL HIVE_FAKE_GH_NUMBER HIVE_FAKE_GH_HEAD_REF_OID
+      HIVE_FAKE_GH_HEAD_REF_NAME HIVE_FAKE_GH_BASE_REF_NAME HIVE_FAKE_GH_MERGED_AT
     ].each { |k| ENV.delete(k) }
     Array(@spawned_worktrees).each { |p| FileUtils.rm_rf(p) }
   end
@@ -277,16 +284,35 @@ class FullFlowTest < Minitest::Test
 
         ENV["HIVE_FLOW_FOLDER"] = finalize_dir
         ENV["HIVE_FLOW_PHASE"] = "finalize"
-        capture_io { Hive::Commands::Run.new(finalize_dir).call }
+        with_finalize_attempt(task_folder: finalize_dir) do
+          capture_io { Hive::Commands::Run.new(finalize_dir).call }
+        end
         assert_equal :complete, Hive::Markers.current(File.join(finalize_dir, "pr.md")).name
         assert File.exist?(File.join(finalize_dir, "summary.md"))
 
-        # 8-finalize → 9-done (no agent invoked)
+        # The exact handed-off PR becomes explicitly merged; reconciliation,
+        # not the finalize marker, authorizes the one archive transition.
+        job_store = Hive::Babysitter::JobStore.new(project_root: dir)
+        job = job_store.current_job(task_slug: slug, task_generation: 1)
+        ENV["HIVE_FAKE_GH_STATE"] = "MERGED"
+        ENV["HIVE_FAKE_GH_URL"] = job.fetch("pr_url")
+        ENV["HIVE_FAKE_GH_NUMBER"] = job.dig("identity", "pr_number").to_s
+        ENV["HIVE_FAKE_GH_HEAD_REF_OID"] = job.fetch("head_sha")
+        ENV["HIVE_FAKE_GH_HEAD_REF_NAME"] = job.fetch("branch")
+        ENV["HIVE_FAKE_GH_BASE_REF_NAME"] = "master"
+        ENV["HIVE_FAKE_GH_MERGED_AT"] = "2026-07-17T17:30:00Z"
+        Hive::Babysitter::JobRunner.run(
+          job: job, store: job_store,
+          project: { "name" => File.basename(dir), "path" => dir },
+          cfg: { "babysitter" => { "budget_minutes" => 5 } },
+          dry_run: false, logger: nil, inflight: Set.new
+        )
+        Hive::Finalization::Reconciler.new(task_folder: finalize_dir).reconcile
+
+        # 8-finalize → 9-done performs exact local cleanup (no agent invoked).
         done_dir = File.join(dir, ".hive-state", "stages", "9-done", slug)
-        FileUtils.mkdir_p(File.dirname(done_dir))
-        FileUtils.mv(finalize_dir, done_dir)
-        out, _err = capture_io { Hive::Commands::Run.new(done_dir).call }
-        assert_includes out, "git worktree remove"
+        out, _err = capture_io { Hive::Commands::StageAction.new("archive", slug).call }
+        assert_includes out, "local recovery state was removed"
         assert_equal :complete, Hive::Markers.current(File.join(done_dir, "task.md")).name
 
         # All hive-state commits land on hive/state, not master.

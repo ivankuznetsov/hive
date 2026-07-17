@@ -1,4 +1,7 @@
 require "json"
+require "securerandom"
+require "hive/attempts/context"
+require "hive/attempts/store"
 require "hive/babysitter/job_store"
 require "hive/finalization/reconciler"
 require "hive/task_journal/envelope"
@@ -6,6 +9,25 @@ require "hive/worktree"
 
 module HiveFinalizationTestHelper
   FINALIZATION_TEST_NOW = Time.utc(2026, 7, 17, 17, 0, 0)
+
+  def with_finalize_attempt(task_folder:, attempt_id: nil, task_generation: 1)
+    task = Hive::Task.new(task_folder)
+    attempt_id ||= "finalize-test-#{SecureRandom.hex(8)}"
+    ownership_generation = "owner-#{attempt_id}"
+    store = Hive::Attempts::Store.new
+    store.create_launching(
+      attempt_id: attempt_id, request_id: "request-#{attempt_id}", predecessor_attempt_id: nil,
+      task_id: task.id || task.slug, project: File.basename(task.project_root), task_slug: task.slug,
+      intended_stage: "8-finalize", task_generation: ownership_generation,
+      ownership_generation: ownership_generation, task_input_epoch: task_generation,
+      progress_token: "progress", provider: "codex", starting_revision: nil,
+      retry_charge: 0, inherited_outputs: [], launch_timeout_sec: 30, now: Time.now.utc
+    )
+    Hive::Attempts::Context.with(
+      attempt_id: attempt_id, task_generation: task_generation,
+      ownership_generation: ownership_generation
+    ) { yield }
+  end
 
   def prepare_archive_ready(project_root:, task_folder:, slug:, branch: slug,
                             task_generation: 1, now: FINALIZATION_TEST_NOW,

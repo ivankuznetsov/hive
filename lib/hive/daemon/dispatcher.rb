@@ -770,7 +770,7 @@ module Hive
 
       def reconcile_finalization_rows(rows)
         Array(rows).count do |row|
-          next false unless row.stage.to_s == "8-finalize"
+          next false unless row.stage.to_s == "8-finalize" # coding-scoped: finalized job reconciliation
           next false unless row.folder && File.directory?(row.folder)
 
           result = @finalization_reconciler.new(task_folder: row.folder).reconcile

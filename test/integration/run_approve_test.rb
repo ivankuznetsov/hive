@@ -683,6 +683,7 @@ class RunApproveTest < Minitest::Test
         FileUtils.mkdir_p(File.dirname(pr_dir))
         FileUtils.mv(inbox, pr_dir)
         write_marker(pr_dir, :complete)
+        prepare_archive_ready(project_root: dir, task_folder: pr_dir, slug: slug)
 
         out, _err = capture_io { Hive::Commands::Approve.new(slug, json: true).call }
         payload = JSON.parse(out)

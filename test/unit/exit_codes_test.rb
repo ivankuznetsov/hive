@@ -74,7 +74,7 @@ class ExitCodesTest < Minitest::Test
       ready_to_brainstorm ready_to_plan ready_to_develop ready_to_open_pr ready_for_review
       ready_to_artifacts ready_to_finalize ready_to_archive ready_to_advance ready_to_run
       needs_input recover_execute recover_review agent_running archived manual_steering error
-      review_parked admission_error
+      review_parked admission_error watching
     ].sort
     assert_equal expected, Hive::Schemas::TaskActionKind::ALL.sort
   end

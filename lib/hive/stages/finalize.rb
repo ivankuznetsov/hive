@@ -265,7 +265,7 @@ module Hive
           observed_at: snapshot.observed_at,
           task: { "id" => task.id, "slug" => task.slug },
           workflow: task.workflow.id,
-          stage: "8-finalize",
+          stage: "8-finalize", # coding-scoped: finalize handoff journal event
           attempt_id: context.attempt_id,
           task_generation: context.task_generation,
           ownership_generation: context.ownership_generation,

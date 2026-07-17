@@ -40,7 +40,7 @@ module Hive
           observed_at: now,
           task: task,
           workflow: terminal["workflow"] || "coding",
-          stage: terminal["stage"] || "8-finalize",
+          stage: terminal["stage"] || "8-finalize", # coding-scoped: finalization journal fallback
           attempt_id: finalization.fetch("finalize_attempt_id"),
           task_generation: finalization.fetch("task_generation"),
           ownership_generation: "finalization-reconciler-v1",

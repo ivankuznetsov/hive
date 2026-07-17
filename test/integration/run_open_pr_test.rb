@@ -67,7 +67,9 @@ class RunOpenPrTest < Minitest::Test
 	          <!-- COMPLETE pr_url=https://example.com/pr/1 is_draft=false -->
           MD
 
-          capture_io { Hive::Commands::Run.new(finalize_dir).call }
+          with_finalize_attempt(task_folder: finalize_dir) do
+            capture_io { Hive::Commands::Run.new(finalize_dir).call }
+          end
           log = gh_argv_log
           refute_match(/arg=ready\n/, log,
                        "finalize must not call `gh pr ready` when gh reports the PR is already ready")

@@ -9,7 +9,7 @@ module Hive
       module_function
 
       def validate!(task, config: nil, force: false)
-        if "#{task.stage_index}-#{task.stage_name}" == "8-finalize"
+        if "#{task.stage_index}-#{task.stage_name}" == "8-finalize" # coding-scoped: archive evidence gate
           projection = Hive::TaskProjection::Store.new(task_folder: task.folder).read(
             marker: Hive::Markers.current(task.state_file)
           )

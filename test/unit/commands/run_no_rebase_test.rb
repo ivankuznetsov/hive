@@ -11,10 +11,17 @@ require "hive/rebase"
 class HiveCommandsRunNoRebaseTest < Minitest::Test
   include HiveTestHelper
 
-  FakeTask = Struct.new(:slug, :folder, :worktree_path, :stage_name, :project_root)
+  FakeStage = Struct.new(:dir)
+  FakeWorkflow = Struct.new(:stages)
+  FakeTask = Struct.new(
+    :slug, :folder, :worktree_path, :stage_name, :project_root, :stage_index, :workflow
+  )
 
   def fake_task
-    FakeTask.new("demo-260514-bbbb", "/tmp/folder", "/tmp/wt", "4-execute", "/tmp/proj")
+    FakeTask.new(
+      "demo-260514-bbbb", "/tmp/folder", "/tmp/wt", "execute", "/tmp/proj", 4,
+      FakeWorkflow.new([ FakeStage.new("9-done") ])
+    )
   end
 
   def test_no_rebase_short_circuits_with_cli_override_reason

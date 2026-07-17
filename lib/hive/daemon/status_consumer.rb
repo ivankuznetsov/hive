@@ -19,7 +19,8 @@ module Hive
       # during the pre-claude window (issue #144).
       Row = Struct.new(:project, :slug, :stage, :workflow, :marker, :marker_attrs, :folder, :state_file,
                        :state_file_mtime, :action, :suggested_command, :claude_pid_alive,
-                       :live_task_lock, :diagnostic, :depends_on, :blocked_by,
+                       :live_task_lock, :task_lock_pid, :task_lock_process_start_time,
+                       :task_lock_id, :diagnostic, :depends_on, :blocked_by,
                        :dependency_stage, :blocked, :admission_error,
                        :attempt_id, :task_generation,
                        keyword_init: true)
@@ -197,6 +198,9 @@ module Hive
               live_task_lock: task["live_task_lock"] == true,
               attempt_id: task["attempt_id"],
               task_generation: task["task_generation"],
+              task_lock_pid: task["task_lock_pid"],
+              task_lock_process_start_time: task["task_lock_process_start_time"],
+              task_lock_id: task["task_lock_id"],
               diagnostic: task["diagnostic"],
               depends_on: task["depends_on"],
               blocked_by: task["blocked_by"],

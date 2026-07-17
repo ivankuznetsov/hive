@@ -89,14 +89,28 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
   # on-disk marker name), not row.action, so we use the production-
   # accurate combo by default. Tests can override via the action: kwarg.
   def make_row(state_file, pid_alive:, mtime: NOW - 1000, project: "p", slug: "s", stage: "4-execute",
-               marker: "agent_working", marker_attrs: {}, action: "error", live_task_lock: nil, workflow: nil)
+               marker: "agent_working", marker_attrs: {}, action: "error", live_task_lock: nil, workflow: nil,
+               task_lock_pid: nil, task_lock_process_start_time: nil, task_lock_id: nil)
     Row.new(
       project: project, slug: slug, stage: stage, workflow: workflow,
       marker: marker, marker_attrs: marker_attrs, folder: File.dirname(state_file), state_file: state_file,
       state_file_mtime: mtime,
       action: action, suggested_command: nil,
-      claude_pid_alive: pid_alive, live_task_lock: live_task_lock, diagnostic: nil
+      claude_pid_alive: pid_alive, live_task_lock: live_task_lock,
+      task_lock_pid: task_lock_pid,
+      task_lock_process_start_time: task_lock_process_start_time,
+      task_lock_id: task_lock_id,
+      diagnostic: nil
     )
+  end
+
+  def lock_identity(lock_path)
+    holder = YAML.safe_load(File.read(lock_path))
+    {
+      task_lock_pid: holder["pid"],
+      task_lock_process_start_time: holder["process_start_time"],
+      task_lock_id: holder["lock_id"]
+    }
   end
 
   def test_heals_dead_pid_to_agent_died
@@ -222,11 +236,12 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
         marker: "review_working",
         marker_attrs: { "phase" => "reviewers", "pass" => "1" },
         action: "agent_running",
-        live_task_lock: true
+        live_task_lock: true,
+        **lock_identity(lock_path)
       )
 
       with_replaced_singleton_method(@healer, :child_pids, ->(_pid) { [] }) do
-        with_replaced_singleton_method(@healer, :terminate_lock_holder, ->(_holder) { nil }) do
+        with_replaced_singleton_method(@healer, :terminate_lock_holder, ->(_holder) { File.delete(lock_path) }) do
           heal([ row ])
         end
       end
@@ -257,7 +272,8 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
         marker: "review_working",
         marker_attrs: { "phase" => "fix", "pass" => "2" },
         action: "agent_running",
-        live_task_lock: true
+        live_task_lock: true,
+        **lock_identity(File.join(File.dirname(state_file), ".lock"))
       )
 
       with_replaced_singleton_method(@healer, :child_pids, ->(_pid) { [ 12_345 ] }) do
@@ -266,6 +282,114 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
 
       refute @logger.events.any? { |name, _| name == :marker_healed }
       assert_match(/REVIEW_WORKING/, File.read(state_file))
+    end
+  end
+
+  def test_wedged_review_working_does_not_clear_newer_marker_generation
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- REVIEW_WORKING phase=reviewers pass=1 marker_id=newer -->\n")
+      lock_path = File.join(File.dirname(state_file), ".lock")
+      File.write(lock_path, {
+        "pid" => Process.pid,
+        "process_start_time" => Hive::Lock.process_start_time(Process.pid),
+        "claude_pid" => 999_999
+      }.to_yaml)
+      row = make_row(
+        state_file,
+        pid_alive: false,
+        stage: "6-review",
+        marker: "review_working",
+        marker_attrs: { "phase" => "reviewers", "pass" => "1", "marker_id" => "older" },
+        action: "agent_running",
+        live_task_lock: true,
+        **lock_identity(lock_path)
+      )
+
+      with_replaced_singleton_method(@healer, :child_pids, ->(_pid) { [] }) do
+        heal([ row ])
+      end
+
+      assert_match(/REVIEW_WORKING.*marker_id=newer/, File.read(state_file))
+      assert File.exist?(lock_path), "a stale row must not release the newer review run's lock"
+      refute @logger.events.any? { |name, _| name == :marker_healed }
+    end
+  end
+
+  def test_wedged_review_working_does_not_terminate_replacement_lock_holder
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- REVIEW_WORKING phase=reviewers pass=1 marker_id=observed -->\n")
+      lock_path = File.join(File.dirname(state_file), ".lock")
+      File.write(lock_path, {
+        "pid" => Process.pid,
+        "process_start_time" => Hive::Lock.process_start_time(Process.pid),
+        "lock_id" => "replacement-generation",
+        "owner" => "replacement"
+      }.to_yaml)
+      row = make_row(
+        state_file, pid_alive: false, stage: "6-review",
+        marker: "review_working",
+        marker_attrs: { "phase" => "reviewers", "pass" => "1", "marker_id" => "observed" },
+        action: "agent_running", live_task_lock: true,
+        task_lock_pid: Process.pid,
+        task_lock_process_start_time: Hive::Lock.process_start_time(Process.pid),
+        task_lock_id: "observed-generation"
+      )
+
+      with_replaced_singleton_method(@healer, :terminate_lock_holder, ->(_holder) { flunk "replacement holder must not be terminated" }) do
+        heal([ row ])
+      end
+
+      assert_match(/REVIEW_WORKING/, File.read(state_file))
+      assert_equal "replacement", YAML.safe_load(File.read(lock_path)).fetch("owner")
+      refute @logger.events.any? { |name, _| name == :marker_healed }
+    end
+  end
+
+  def test_termination_does_not_kill_a_pid_reused_after_term
+    signals = []
+    starts = [ "observed-start", "observed-start", "replacement-start" ]
+    holder = { "pid" => 12_345, "process_start_time" => "observed-start" }
+
+    with_replaced_singleton_method(Process, :kill, lambda { |signal, pid|
+      signals << [ signal, pid ]
+      1
+    }) do
+      with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(_pid) { starts.shift }) do
+        @healer.send(:terminate_lock_holder, holder)
+      end
+    end
+
+    assert_includes signals, [ "TERM", 12_345 ]
+    refute_includes signals, [ "KILL", 12_345 ],
+                    "a replacement process reusing the pid must not receive KILL"
+  end
+
+  def test_wedged_review_working_keeps_marker_when_healer_cannot_claim_lock
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- REVIEW_WORKING phase=reviewers pass=1 marker_id=observed -->\n")
+      lock_path = File.join(File.dirname(state_file), ".lock")
+      File.write(lock_path, {
+        "pid" => Process.pid,
+        "process_start_time" => Hive::Lock.process_start_time(Process.pid),
+        "claude_pid" => 999_999
+      }.to_yaml)
+      row = make_row(
+        state_file, pid_alive: false, stage: "6-review",
+        marker: "review_working",
+        marker_attrs: { "phase" => "reviewers", "pass" => "1", "marker_id" => "observed" },
+        action: "agent_running", live_task_lock: true,
+        **lock_identity(lock_path)
+      )
+
+      with_replaced_singleton_method(@healer, :child_pids, ->(_pid) { [] }) do
+        with_replaced_singleton_method(@healer, :terminate_lock_holder, ->(_holder) { nil }) do
+          heal([ row ])
+        end
+      end
+
+      assert_match(/REVIEW_WORKING.*marker_id=observed/, File.read(state_file))
+      assert File.exist?(lock_path)
+      refute @logger.events.any? { |name, _| name == :marker_healed }
     end
   end
 
@@ -284,19 +408,24 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
         marker: "review_working",
         marker_attrs: { "phase" => "reviewers", "pass" => "1" },
         action: "agent_running",
-        live_task_lock: true
+        live_task_lock: true,
+        **lock_identity(File.join(File.dirname(state_file), ".lock"))
       )
 
       original = Hive::Markers.method(:clear_current)
-      Hive::Markers.define_singleton_method(:clear_current) do |path, *args|
+      Hive::Markers.define_singleton_method(:clear_current) do |path, **kwargs|
         raise Errno::ENOSPC, "no space left" if path == state_file
 
-        original.call(path, *args)
+        original.call(path, **kwargs)
       end
 
       begin
         with_replaced_singleton_method(@healer, :child_pids, ->(_pid) { [] }) do
-          heal([ row ])
+          with_replaced_singleton_method(
+            @healer, :terminate_lock_holder, ->(_holder) { File.delete(File.join(File.dirname(state_file), ".lock")) }
+          ) do
+            heal([ row ])
+          end
         end
       ensure
         Hive::Markers.define_singleton_method(:clear_current, &original)
@@ -369,7 +498,62 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
-  def test_heal_still_succeeds_when_stale_lock_cannot_be_deleted
+  def test_orphaned_review_working_does_not_clear_newer_marker_generation
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- REVIEW_WORKING phase=triage pass=2 marker_id=newer -->\n")
+      lock_path = File.join(File.dirname(state_file), ".lock")
+      File.write(lock_path, {
+        "pid" => Process.pid,
+        "process_start_time" => Hive::Lock.process_start_time(Process.pid)
+      }.to_yaml)
+      row = make_row(
+        state_file,
+        pid_alive: false,
+        mtime: NOW - 1000,
+        stage: "6-review",
+        marker: "review_working",
+        marker_attrs: { "phase" => "triage", "pass" => "2", "marker_id" => "older" },
+        action: "agent_running",
+        live_task_lock: false
+      )
+
+      heal([ row ])
+
+      assert_match(/REVIEW_WORKING.*marker_id=newer/, File.read(state_file))
+      assert File.exist?(lock_path), "a stale row must not release the newer review run's lock"
+      refute @logger.events.any? { |name, _| name == :marker_healed }
+    end
+  end
+
+  def test_orphaned_review_working_does_not_delete_lock_acquired_after_status_snapshot
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- REVIEW_WORKING phase=triage pass=2 marker_id=observed -->\n")
+      lock_path = File.join(File.dirname(state_file), ".lock")
+      row = make_row(
+        state_file,
+        pid_alive: false,
+        mtime: NOW - 1000,
+        stage: "6-review",
+        marker: "review_working",
+        marker_attrs: { "phase" => "triage", "pass" => "2", "marker_id" => "observed" },
+        action: "agent_running",
+        live_task_lock: false
+      )
+      File.write(lock_path, {
+        "pid" => Process.pid,
+        "process_start_time" => Hive::Lock.process_start_time(Process.pid),
+        "owner" => "new_runner"
+      }.to_yaml)
+
+      heal([ row ])
+
+      assert_match(/REVIEW_WORKING.*marker_id=observed/, File.read(state_file))
+      assert_equal "new_runner", YAML.safe_load(File.read(lock_path)).fetch("owner")
+      refute @logger.events.any? { |name, _| name == :marker_healed }
+    end
+  end
+
+  def test_orphaned_review_working_fails_closed_when_stale_lock_cannot_be_replaced
     with_marker_file do |state_file|
       File.write(state_file, "# task\n\n<!-- REVIEW_WORKING phase=triage pass=2 -->\n")
       lock_path = File.join(File.dirname(state_file), ".lock")
@@ -387,11 +571,11 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
 
       heal([ row ])
 
-      heal_event = @logger.events.find { |name, _| name == :marker_healed }
-      assert heal_event, "expected marker_healed despite undeletable lock, got: #{@logger.events.inspect}"
-      assert_equal "review_orphaned", heal_event[1][:reason]
       assert File.directory?(lock_path), "undeletable lock residue should be left for a later tick"
-      refute_match(/REVIEW_WORKING|REVIEW_ERROR/, File.read(state_file))
+      assert_match(/REVIEW_WORKING/, File.read(state_file))
+      failure = @logger.events.find { |name, _| name == :marker_heal_failed }
+      assert failure, "expected fail-closed marker_heal_failed, got: #{@logger.events.inspect}"
+      assert_equal "review_orphaned", failure[1][:reason]
     end
   end
 
@@ -463,10 +647,10 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       )
 
       original = Hive::Markers.method(:clear_current)
-      Hive::Markers.define_singleton_method(:clear_current) do |path, *args|
+      Hive::Markers.define_singleton_method(:clear_current) do |path, **kwargs|
         raise Errno::ENOSPC, "no space left" if path == state_file
 
-        original.call(path, *args)
+        original.call(path, **kwargs)
       end
 
       begin
@@ -918,6 +1102,28 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
         assert Hive::Markers.current(state_file).none?,
                "#{stage} limits_reached must clear so the daemon re-dispatches"
       end
+    end
+  end
+
+  def test_error_cooldown_recovery_purges_shadowed_working_and_error_markers
+    with_marker_file do |state_file|
+      past = (NOW - 60).iso8601
+      File.write(state_file, <<~MD)
+        # task
+
+        <!-- AGENT_WORKING pid=100 started=2026-05-20T10:00:00Z -->
+        <!-- ERROR reason=limits_reached retry_after=2026-05-20T10:30:00Z -->
+        <!-- AGENT_WORKING pid=200 started=2026-05-20T11:00:00Z -->
+        <!-- ERROR reason=limits_reached retry_after=#{past} -->
+      MD
+      row = make_error_limit_row(state_file, retry_after: past, stage: "2-generate")
+
+      heal([ row ])
+
+      assert Hive::Markers.current(state_file).none?,
+             "a successful retry clear must not expose a stale working/error marker"
+      refute_match Hive::Markers::MARKER_RE, File.read(state_file)
+      assert @logger.events.any? { |name, attrs| name == :marker_healed && attrs[:reason] == "limits_reached" }
     end
   end
 
@@ -1852,10 +2058,10 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       )
 
       original = Hive::Markers.method(:clear_current)
-      Hive::Markers.define_singleton_method(:clear_current) do |path, *args|
+      Hive::Markers.define_singleton_method(:clear_current) do |path, **kwargs|
         raise Errno::ENOSPC, "no space left" if path == state_file
 
-        original.call(path, *args)
+        original.call(path, **kwargs)
       end
 
       begin
@@ -1868,6 +2074,34 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       assert failure, "expected marker_heal_failed, got: #{@logger.events.inspect}"
       assert_equal "finalize_unpushed_commits", failure[1][:reason]
       assert_match(/ENOSPC/, failure[1][:error])
+    end
+  end
+
+  def test_review_error_recovery_does_not_clear_newer_marker_generation
+    with_marker_file do |state_file|
+      File.write(
+        state_file,
+        "# task\n\n<!-- REVIEW_ERROR phase=reviewers reason=review_agent_died pass=1 marker_id=newer -->\n"
+      )
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "6-review",
+        marker: "review_error",
+        marker_attrs: {
+          "phase" => "reviewers",
+          "reason" => "review_agent_died",
+          "pass" => "1",
+          "marker_id" => "older"
+        },
+        action: "recover_review",
+        live_task_lock: false
+      )
+
+      heal([ row ])
+
+      assert_match(/REVIEW_ERROR.*marker_id=newer/, File.read(state_file))
+      refute @logger.events.any? { |name, _| name == :marker_healed }
     end
   end
 
@@ -1964,10 +2198,10 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       )
 
       original = Hive::Markers.method(:clear_current)
-      Hive::Markers.define_singleton_method(:clear_current) do |path, *args|
+      Hive::Markers.define_singleton_method(:clear_current) do |path, **kwargs|
         raise Errno::ENOSPC, "no space left" if path == state_file
 
-        original.call(path, *args)
+        original.call(path, **kwargs)
       end
 
       begin
@@ -2053,7 +2287,6 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
   def test_private_stale_review_helpers_cover_process_and_lock_edges
     row = make_row("/tmp/missing-task.md", pid_alive: false, live_task_lock: true)
     assert_nil @healer.send(:task_lock_holder, row)
-    assert_nil @healer.send(:release_task_lock, row)
 
     with_replaced_singleton_method(Open3, :capture3, lambda { |*_args|
       [ "", "", Struct.new(:exitstatus) { def success? = false }.new(1) ]

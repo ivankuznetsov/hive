@@ -29,6 +29,10 @@ class TuiSnapshotTest < Minitest::Test
       "age_seconds" => 42,
       "claude_pid" => nil,
       "claude_pid_alive" => nil,
+      "live_task_lock" => true,
+      "task_lock_pid" => 12_345,
+      "task_lock_process_start_time" => "recorded-start",
+      "task_lock_id" => "recorded-generation",
       "action" => "ready_to_brainstorm",
       "action_label" => "Ready to brainstorm",
       "suggested_command" => "hive brainstorm #{slug}"
@@ -85,6 +89,10 @@ class TuiSnapshotTest < Minitest::Test
     assert_equal 42, first.age_seconds
     assert_nil first.claude_pid
     assert_nil first.claude_pid_alive
+    assert_equal true, first.live_task_lock
+    assert_equal 12_345, first.task_lock_pid
+    assert_equal "recorded-start", first.task_lock_process_start_time
+    assert_equal "recorded-generation", first.task_lock_id
     assert_equal "ready_to_brainstorm", first.action_key,
                  "JSON 'action' lands on :action_key"
     assert_equal "Ready to brainstorm", first.action_label

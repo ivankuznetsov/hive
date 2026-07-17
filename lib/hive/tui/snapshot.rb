@@ -78,6 +78,9 @@ module Hive
         :next_action,
         :diagnostic,
         :live_task_lock,
+        :task_lock_pid,
+        :task_lock_process_start_time,
+        :task_lock_id,
         :unanswered_questions
       ) do
         # worktree_path defaults to nil so existing test factories that
@@ -96,6 +99,7 @@ module Hive
         def initialize(id: nil, display_name: nil, workflow: nil, worktree_path: nil,
                        pr_url: nil, attempt_id: nil, task_generation: nil,
                        folder_mtime: nil, live_task_lock: false,
+                       task_lock_pid: nil, task_lock_process_start_time: nil, task_lock_id: nil,
                        unanswered_questions: 0, depends_on: nil,
                        blocked_by: nil, dependency_stage: nil,
                        blocked: false, admission_error: nil, held: nil, **rest)
@@ -113,6 +117,9 @@ module Hive
                 held: held,
                 folder_mtime: folder_mtime,
                 live_task_lock: live_task_lock,
+                task_lock_pid: task_lock_pid,
+                task_lock_process_start_time: task_lock_process_start_time,
+                task_lock_id: task_lock_id,
                 unanswered_questions: unanswered_questions, **rest)
         end
       end
@@ -196,6 +203,9 @@ module Hive
           next_action: payload["next_action"],
           diagnostic: payload["diagnostic"],
           live_task_lock: payload["live_task_lock"] == true,
+          task_lock_pid: payload["task_lock_pid"],
+          task_lock_process_start_time: payload["task_lock_process_start_time"],
+          task_lock_id: payload["task_lock_id"],
           unanswered_questions: payload["unanswered_questions"].to_i
         ).freeze
       end

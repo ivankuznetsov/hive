@@ -80,7 +80,8 @@ class CommandsStatusTest < Minitest::Test
       File.write(File.join(live_folder, "task.md"), "<!-- EXECUTE_COMPLETE -->\n")
       File.write(File.join(live_folder, ".lock"), YAML.dump(
         "pid" => Process.pid,
-        "process_start_time" => Hive::Lock.process_start_time(Process.pid)
+        "process_start_time" => Hive::Lock.process_start_time(Process.pid),
+        "lock_id" => "live-generation"
       ))
       File.write(File.join(idle_folder, "task.md"), "<!-- EXECUTE_COMPLETE -->\n")
 
@@ -92,8 +93,14 @@ class CommandsStatusTest < Minitest::Test
       idle = tasks.find { |t| t.fetch("slug") == "idle-task-260525-bbbb" }
 
       assert_equal true, live.fetch("live_task_lock")
+      assert_equal Process.pid, live.fetch("task_lock_pid")
+      assert_equal Hive::Lock.process_start_time(Process.pid), live.fetch("task_lock_process_start_time")
+      assert_equal "live-generation", live.fetch("task_lock_id")
       assert_equal false, idle.fetch("live_task_lock"),
                    "rows without a .lock must serialise as false, never nil"
+      assert_nil idle.fetch("task_lock_pid")
+      assert_nil idle.fetch("task_lock_process_start_time")
+      assert_nil idle.fetch("task_lock_id")
     end
   end
 

@@ -208,7 +208,7 @@ module Hive
                             reason: "limits_reached",
                             provider: execute_agent_name(cfg),
                             message: "implementer hit a usage/credit limit",
-                            retry_after: Hive::AgentLimit.retry_after)
+                            retry_after: Hive::AgentLimit.retry_after(text: implementer_limit_text(impl_result)))
           return { commit: "limits_reached", status: :error }
         end
 
@@ -225,6 +225,11 @@ module Hive
 
         Hive::AgentLimit.limit_reached?(impl_result[:limit_text].to_s) ||
           Hive::AgentLimit.limit_reached?(impl_result[:error_message].to_s)
+      end
+
+      def implementer_limit_text(impl_result)
+        text = impl_result&.fetch(:limit_text, nil).to_s
+        text.empty? ? impl_result&.fetch(:error_message, nil).to_s : text
       end
 
       def execute_agent_name(cfg)

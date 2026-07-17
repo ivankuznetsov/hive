@@ -1,3 +1,4 @@
+require "date"
 require "time"
 
 module Hive
@@ -5,14 +6,28 @@ module Hive
     # How long to wait, after a `limits_reached` marker is written, before
     # the daemon healer is allowed to auto-retry the parked task. A usage /
     # credit window has plausibly reset by then, so the marker self-heals
-    # instead of staying red until a human runs `hive markers clear`. A
-    # fixed cooldown is the robust default — we deliberately do NOT parse the
-    # provider's "try again at 4:42 PM" wall-clock hint (a future enhancement).
+    # instead of staying red until a human runs `hive markers clear`. A fixed
+    # cooldown remains the fallback. When a provider gives a complete
+    # dated reset hint (month, day, year, and time), prefer that boundary so a
+    # week-long quota wall does not consume every bounded daemon retry hourly.
+    # Time-only hints remain on the fixed cooldown because their date and zone
+    # are ambiguous.
     # Overridable per-process via HIVE_LIMITS_RETRY_COOLDOWN_SEC (a positive
     # integer of seconds); a missing / unparseable / non-positive value falls
     # back to the default so a typo can never silently disable the cooldown.
     RETRY_COOLDOWN_SEC = 3600
     RETRY_COOLDOWN_ENV = "HIVE_LIMITS_RETRY_COOLDOWN_SEC".freeze
+    RESET_HINT_GRACE_SEC = 60
+    MAX_RESET_HINT_SEC = 366 * 24 * 60 * 60
+    RESET_HINT_RE = %r{
+      \b(?:try\s+again|available\s+again|resets?|reset)\s+(?:at|on)\s+
+      (?<stamp>
+        [a-z]{3,9}\s+\d{1,2}(?:st|nd|rd|th)?,\s+\d{4}\s+
+        (?:at\s+)?(?<hour>\d{1,2}):(?<minute>\d{2})\s*(?:a\.?m\.?|p\.?m\.?)
+      )
+      (?<zone>\s*(?:\([^)]+\)|[a-z][a-z0-9_+:/-]*))?
+      (?=\s*(?:[.!?,;]|\z))
+    }ix.freeze
 
     # Lines that merely MENTION limits without being a wall. Claude Code's
     # chrome (banner, footer, hint bar) carries informational copy that
@@ -96,6 +111,25 @@ module Hive
     end
 
     def live_limit_line(pane)
+      live_limit_match(pane)&.first
+    end
+
+    # Return only the live provider wall and its adjacent menu/reset lines.
+    # Passing the whole pane to retry parsing would let unrelated dated prose
+    # elsewhere in an agent transcript forge a much longer quota hold.
+    def live_limit_context(pane)
+      match = live_limit_match(pane)
+      return nil unless match
+
+      _line, source_index, indexed_lines = match
+      indexed_lines
+        .drop_while { |_candidate, index| index < source_index }
+        .first(LIVE_MENU_TAIL_LINES + 1)
+        .map(&:first)
+        .join("\n")
+    end
+
+    def live_limit_match(pane)
       indexed_lines = normalized_non_empty_lines(pane)
       return nil if indexed_lines.empty?
 
@@ -106,7 +140,7 @@ module Hive
         next unless limit_line?(line)
         next if ready_or_activity_below?(indexed_lines, index)
 
-        return line
+        return [ line, index, indexed_lines ]
       end
 
       nil
@@ -133,10 +167,26 @@ module Hive
     end
 
     # ISO8601 timestamp the daemon healer may retry a `limits_reached` task
-    # at: `now` (UTC) plus the cooldown window. Stamped into the marker at
-    # write time so the comparison is a pure on-disk read at heal time.
-    def retry_after(now: Time.now.utc)
-      (now.utc + retry_cooldown_sec).iso8601
+    # at. Prefer a complete provider reset date when present; otherwise use
+    # `now` (UTC) plus the fixed cooldown. Stamped into the marker at write
+    # time so the comparison is a pure on-disk read at heal time.
+    def retry_after(text: nil, now: Time.now.utc)
+      retry_after_time_for(text, now: now).iso8601
+    end
+
+    # Multiple reviewers can fail against different providers/windows in one
+    # pass. Hold until the latest boundary so reviewer ordering cannot spend a
+    # bounded daemon retry while another provider is still known to be limited.
+    def retry_after_for(texts, now: Time.now.utc)
+      candidates = Array(texts).map { |text| retry_after_time_for(text, now: now) }
+      (candidates.max || retry_after_time_for(nil, now: now)).iso8601
+    end
+
+    def retry_after_time_for(text, now:)
+      explicit = explicit_retry_after(text, now: now)
+      return explicit if explicit
+
+      now.utc + retry_cooldown_sec
     end
 
     # The `held_*` family below is the shared rendering layer over a
@@ -254,6 +304,37 @@ module Hive
       return nil unless token.match?(/\A[a-z0-9_-]+\z/i)
 
       token
+    end
+
+    def explicit_retry_after(text, now:)
+      match = normalize(text).match(RESET_HINT_RE)
+      return nil unless match
+      return nil unless (1..12).cover?(match[:hour].to_i) && (0..59).cover?(match[:minute].to_i)
+
+      stamp = match[:stamp]
+      zone = match[:zone].to_s.strip.delete_prefix("(").delete_suffix(")")
+      utc_zone = %w[UTC GMT Z].any? { |name| zone.casecmp?(name) }
+      return nil unless zone.empty? || utc_zone
+
+      parts = Date._parse(stamp, false)
+      required = %i[year mon mday hour min]
+      return nil unless required.all? { |key| parts.key?(key) }
+      return nil unless Date.valid_date?(parts[:year], parts[:mon], parts[:mday])
+      return nil unless (0..23).cover?(parts[:hour]) && (0..59).cover?(parts[:min])
+
+      values = required.map { |key| parts.fetch(key) }
+      parsed = if utc_zone
+                 Time.utc(*values)
+      else
+                 Time.local(*values)
+      end
+      parsed = parsed.utc + RESET_HINT_GRACE_SEC
+      delta = parsed - now.utc
+      return nil unless delta.positive? && delta <= MAX_RESET_HINT_SEC
+
+      parsed
+    rescue ArgumentError
+      nil
     end
 
     def retry_after_time(attrs)

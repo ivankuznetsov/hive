@@ -208,6 +208,38 @@ class MarkersCommandTest < Minitest::Test
 
   # ── Allowlist enforcement ──────────────────────────────────────────────
 
+  def test_clear_purges_shadowed_marker_history_before_retry
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, folder, _slug = seed_error_with_attrs(
+          dir,
+          marker_attrs: { reason: "limits_reached", retry_after: "2026-07-12T23:51:00Z" }
+        )
+        state = File.join(folder, "task.md")
+        current_error = Hive::Markers.current(state)
+        body = File.read(state)
+        File.write(
+          state,
+          body.sub(
+            current_error.raw,
+            "<!-- AGENT_WORKING pid=2244077 started=2026-07-12T20:58:40Z -->\n#{current_error.raw}"
+          )
+        )
+
+        capture_io do
+          Hive::Commands::Markers.new(
+            "clear", folder, name: "ERROR", match_attr: "marker_id=#{current_error.attrs.fetch('marker_id')}"
+          ).call
+        end
+
+        assert Hive::Markers.current(state).none?,
+               "manual recovery must not expose a completed run's shadowed AGENT_WORKING marker"
+        refute_match Hive::Markers::MARKER_RE, File.read(state)
+        assert_includes File.read(state), "## Implementation"
+      end
+    end
+  end
+
   def test_rejects_unknown_marker_name
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

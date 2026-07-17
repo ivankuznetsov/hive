@@ -305,6 +305,9 @@ module Hive
           "live_task_lock" => row[:live_task_lock] == true,
           "attempt_id" => row[:attempt_id],
           "task_generation" => row[:task_generation],
+          "task_lock_pid" => row[:task_lock_pid],
+          "task_lock_process_start_time" => row[:task_lock_process_start_time],
+          "task_lock_id" => row[:task_lock_id],
           # Count of still-unanswered brainstorm Q&A questions (issue #270).
           # 0 for every non-brainstorm / non-needs_input row. Lets an agent
           # or operator tell "the daemon is holding this brainstorm because
@@ -725,7 +728,10 @@ module Hive
                 claude_pid_alive: claude_pid ? pid_alive?(claude_pid.to_i) : nil,
                 live_task_lock: !live_holder.nil?,
                 attempt_id: lock_holder && lock_holder["attempt_id"],
-                task_generation: lock_holder && lock_holder["task_generation"]
+                task_generation: lock_holder && lock_holder["task_generation"],
+                task_lock_pid: live_holder && live_holder["pid"],
+                task_lock_process_start_time: live_holder && live_holder["process_start_time"],
+                task_lock_id: live_holder && live_holder["lock_id"]
               }
             # A mid-scan stage-move (atomic rename of <stage>/<slug> out from
             # under us) makes an in-folder read raise ENOENT even though the

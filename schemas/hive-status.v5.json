@@ -110,8 +110,9 @@
         "dependency_stage", "blocked", "admission_error", "folder", "state_file",
         "worktree_path", "pr_url", "marker", "attrs", "mtime", "folder_mtime",
         "age_seconds", "claude_pid", "claude_pid_alive", "live_task_lock",
-        "attempt_id", "task_generation", "unanswered_questions", "action",
-        "action_label", "suggested_command",
+        "attempt_id", "task_generation",
+        "task_lock_pid", "task_lock_process_start_time", "task_lock_id",
+        "unanswered_questions", "action", "action_label", "suggested_command",
         "next_action", "diagnostic"
       ],
       "properties": {
@@ -171,6 +172,9 @@
           "description": "Durable task-generation owner projected into the compatibility lock, or null for legacy work.",
           "type": ["string", "null"]
         },
+        "task_lock_pid": { "type": ["integer", "null"], "minimum": 1 },
+        "task_lock_process_start_time": { "type": ["string", "null"] },
+        "task_lock_id": { "type": ["string", "null"] },
         "unanswered_questions": { "type": "integer", "minimum": 0 },
         "action": {
           "type": "string",

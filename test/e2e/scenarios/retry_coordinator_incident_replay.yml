@@ -1,0 +1,96 @@
+name: retry_coordinator_incident_replay
+description: Mixed dead-agent and Codex/MCP auth failures share one durable ladder and survive a manual wake without leaking secrets.
+tags: [retry-coordinator, incident-replay, cli-only, acceptance]
+steps:
+  - kind: seed_state
+    stage: 4-execute
+    slug: retry-incident-260717-abcd
+    state_file: task.md
+    content: "# Retry incident\n\n<!-- ERROR reason=agent_died exit_code=1 -->\n"
+    files:
+      - path: partial-work.txt
+        content: "preserved successor input\n"
+  - kind: ruby_block
+    block: |
+      require "hive/attempts/store"
+      require "hive/config"
+      require "hive/daemon/retry_coordinator"
+      require "hive/diagnostic_evidence"
+      task_folder = File.join(sandbox, ".hive-state", "stages", "4-execute", slug)
+      project = File.basename(sandbox)
+      store = Hive::Attempts::Store.new(root: File.join(run_home, "attempts", "v1"))
+      current_time = Time.utc(2026, 7, 17, 10, 0, 0)
+      coordinator = Hive::Daemon::RetryCoordinator.new(
+        task_folder: task_folder, attempt_store: store, clock: -> { current_time }
+      )
+      codes = %w[agent_died agent_died agent_died agent_died agent_died codex_auth]
+      codes.each_with_index do |code, index|
+        id = "incident-attempt-#{index + 1}"
+        terminal = store.fetch(id)
+        unless terminal
+          launching = store.create_launching(
+            attempt_id: id, request_id: "incident-request-#{index + 1}", predecessor_attempt_id: nil,
+            task_id: "42", project: project, task_slug: slug, intended_stage: "4-execute",
+            task_generation: "ownership-1", ownership_generation: "ownership-1",
+            task_input_epoch: 3, progress_token: "partial-work", provider: "codex",
+            starting_revision: "a" * 40, retry_charge: 0, inherited_outputs: [],
+            launch_timeout_sec: 30, now: current_time
+          )
+          claimed = store.claim(
+            launching,
+            owner: {
+              "pid" => Process.pid, "start_fingerprint" => "incident-owner",
+              "session_id" => Process.getsid(0), "process_group_id" => Process.getpgrp
+            },
+            first_heartbeat_timeout_sec: 30, now: current_time + 1
+          )
+          running = store.first_heartbeat(claimed, stale_sec: 30, now: current_time + 2)
+          terminal = store.terminalize(
+            running, outcome: "failed", exit_status: 1,
+            final_checkpoint: { "revision" => "a" * 40, "progress_token" => "partial-work" },
+            output_references: [],
+            log_reference: {
+              "path" => "logs/#{id}.frames", "size" => 0, "sha256" => "0" * 64
+            },
+            now: current_time + 3
+          )
+        end
+        evidence = Hive::DiagnosticEvidence.sanitize_retry(
+          "provider" => "codex", "tool" => "honeycomb-mcp",
+          "message" => "#{code}: 401 missing bearer auth API_TOKEN=incident-secret",
+          "authorization" => "Bearer do-not-persist"
+        )
+        coordinator.report_failure(
+          project: project, task: { "id" => "42", "slug" => slug }, workflow: "coding",
+          stage: "4-execute", generation: 3, ownership_generation: "ownership-1",
+          attempt_id: terminal.attempt_id, terminal_event_id: "incident-terminal-#{index + 1}",
+          failure_class: code, code: code, evidence: evidence,
+          guidance: "Repair the daemon runtime."
+        )
+        current_time += 10_000
+      end
+  - kind: json_assert
+    args: [status, --json]
+    schema: hive-status
+    pick: [projects, 0, tasks, 0, retry, retry_count]
+    equals: 6
+  - kind: json_assert
+    args: [status, --json]
+    schema: hive-status
+    pick: [projects, 0, tasks, 0, retry, state]
+    equals: cooldown
+  - kind: cli
+    args: [retry, manual, "{slug}", --project, "{project}", --generation, "3", --json]
+  - kind: ruby_block
+    block: |
+      task_folder = File.join(sandbox, ".hive-state", "stages", "4-execute", slug)
+      projection = JSON.parse(File.read(File.join(task_folder, "task-projection.json"))).fetch("retry")
+      raise "manual wake bypassed cooldown" unless projection["state"] == "cooldown"
+      raise "mixed failure ladder reset" unless projection["retry_count"] == 6
+      delay = Time.iso8601(projection.fetch("retry_after")) - Time.iso8601(projection.fetch("last_failure_at"))
+      raise "retry six must be hourly, got #{delay}" unless delay == 3600
+      durable = File.read(File.join(task_folder, "events.jsonl")) + JSON.generate(projection)
+      %w[incident-secret do-not-persist].each do |secret|
+        raise "secret leaked into durable retry state: #{secret}" if durable.include?(secret)
+      end
+      raise "partial work was lost" unless File.read(File.join(task_folder, "partial-work.txt")) == "preserved successor input\n"

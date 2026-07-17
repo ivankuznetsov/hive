@@ -44,6 +44,59 @@ class HiveStagesExecuteTest < Minitest::Test
     end
   end
 
+  def test_apply_execute_outcome_publishes_projection_before_compatibility_marker
+    with_tmp_git_repo do |worktree|
+      with_tmp_dir do |dir|
+        task = build_task(dir)
+        task.project_root = worktree
+        task.define_singleton_method(:worktree_path) { worktree }
+        write_plan(task)
+        baseline = Hive::GitOps.new(worktree).head_sha
+        store = Hive::Attempts::Store.new(root: File.join(dir, "attempts"))
+        policy = Hive::Workflows::Coding::DESCRIPTOR.stage_named("execute").condition_policy.to_h
+        attempt = store.create_launching(
+          attempt_id: "attempt-1", request_id: "request-1", predecessor_attempt_id: nil,
+          task_id: task.id.to_s, project: "demo", task_slug: task.slug,
+          intended_stage: "4-execute", task_generation: "owner-1",
+          ownership_generation: "owner-1", task_input_epoch: 1,
+          progress_token: Digest::SHA256.hexdigest(Hive::TaskProjection.canonical_json(policy)),
+          provider: "codex", starting_revision: baseline, retry_charge: 0,
+          inherited_outputs: [], launch_timeout_sec: 30, now: Time.now.utc
+        )
+        cfg = { "conditions" => { "authority" => "markers",
+                                  "stages" => { "4-execute" => "conditions" } } }
+        original = Hive::Markers.method(:set)
+        observed = []
+        Hive::Markers.define_singleton_method(:set) do |path, name, attrs = {}|
+          projection_path = File.join(File.dirname(path), "task-projection.json")
+          journal_path = File.join(File.dirname(path), "events.jsonl")
+          observed << [ File.exist?(journal_path), File.exist?(projection_path), name ]
+          original.call(path, name, attrs)
+        end
+
+        with_env("HIVE_ATTEMPT_STORE_ROOT" => File.join(dir, "attempts")) do
+          Hive::Attempts::Context.with(
+            attempt_id: attempt.attempt_id, task_generation: 1,
+            ownership_generation: attempt.ownership_generation
+          ) do
+            File.write(File.join(worktree, "change.txt"), "change\n")
+            run!("git", "-C", worktree, "add", "change.txt")
+            run!("git", "-C", worktree, "commit", "-m", "change", "--quiet")
+            result = Hive::Stages::Execute.apply_execute_outcome(
+              task, cfg, worktree, baseline,
+              marker_name: :execute_complete, attrs: {}, commit: "execute_complete",
+              status: :execute_complete
+            )
+            assert_equal :execute_complete, result.fetch(:status)
+          end
+        end
+        assert_equal [ [ true, true, :execute_complete ] ], observed
+      ensure
+        Hive::Markers.define_singleton_method(:set, original) if original
+      end
+    end
+  end
+
   def test_run_exits_when_worktree_pointer_path_is_missing
     with_tmp_dir do |dir|
       task = build_task(dir)

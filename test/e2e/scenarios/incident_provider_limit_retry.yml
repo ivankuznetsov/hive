@@ -1,0 +1,26 @@
+name: incident_provider_limit_retry
+description: Proves provider-limit cooldown and retry ownership prevent repeated daemon ticks from creating a retry storm.
+tags: [incident-regression]
+incident_id: provider-limit-retry
+sibling_task_id: "#9770"
+pending: true
+
+# Activation contract (#9770): first hold this synthetic provider-limit state
+# through multiple ineligible daemon ticks, then make it eligible through the
+# supported cooldown seam. Stop the daemon before replacing the guard with
+# exact dispatch/capacity counts and #9770's terminal state and reason. Do not
+# infer retry ownership fields from the current generic healer implementation.
+steps:
+  - kind: seed_state
+    stage: 4-execute
+    slug: synthetic-provider-limit-task
+    state_file: task.md
+    content: |
+      # Synthetic provider-limit retry fixture
+
+      <!-- ERROR reason=limits_reached provider=codex retry_after=2099-01-01T00:00:00Z -->
+
+  - kind: state_assert
+    description: Activation guard; replace with #9770 retry ownership assertions before enabling.
+    path: "{run_home}/pending-contracts/9770-enabled"
+    contains: "provider retry contract and reason assertions installed"

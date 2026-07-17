@@ -1,4 +1,5 @@
 require "open3"
+require "json"
 require "securerandom"
 require "shellwords"
 require "tmpdir"
@@ -102,8 +103,17 @@ module Hive
           return false
         end
 
+        unless record_managed_subprocess("start", spawn_id, pid)
+          Process.kill("KILL", -pid)
+          Process.wait(pid)
+          dispatch.call(Messages::SubprocessExited.new(verb: verb, exit_code: -1, spawn_id: spawn_id))
+          return false
+        end
         spawn_reaper_thread(pid, verb, argv, dispatch, spawn_id)
         nil
+      rescue Errno::ESRCH, Errno::ECHILD
+        dispatch.call(Messages::SubprocessExited.new(verb: verb, exit_code: -1, spawn_id: spawn_id))
+        false
       end
 
       # Foreground takeover for verbs that need the user's tty (stdin
@@ -279,7 +289,33 @@ module Hive
             # — logged and silenced. See lifecycle note above.
             Hive::Tui::Debug.log("dispatch_background", "reaper-dispatch: #{inner.class.name}")
           end
+        ensure
+          record_managed_subprocess("finish", spawn_id, pid)
         end
+      end
+
+      # When HIVE_TUI_LOG_DIR is configured, publish enough lifecycle data for
+      # the owning harness to reap detached workflow process groups. Normal
+      # interactive TUI sessions intentionally allow these children to outlive
+      # the dashboard; the run-scoped e2e harness instead needs a hard
+      # quiescence boundary before it verifies synthetic GitHub evidence.
+      MANAGED_SUBPROCESS_LOG_NAME = "hive-tui-subprocess-pids.jsonl"
+
+      def record_managed_subprocess(event, spawn_id, pid)
+        return true if ENV["HIVE_TUI_LOG_DIR"].to_s.empty? || spawn_id.to_s.empty?
+
+        FileUtils.mkdir_p(log_dir)
+        path = File.join(log_dir, MANAGED_SUBPROCESS_LOG_NAME)
+        flags = File::WRONLY | File::CREAT | File::APPEND
+        flags |= File::NOFOLLOW if defined?(File::NOFOLLOW)
+        File.open(path, flags, 0o600) do |file|
+          file.flock(File::LOCK_EX)
+          file.puts(JSON.generate("event" => event, "id" => spawn_id, "pid" => Integer(pid)))
+        end
+        true
+      rescue StandardError => e
+        Hive::Tui::Debug.log("dispatch_background", "managed-subprocess-log: #{e.class.name}")
+        false
       end
 
       # Per-spawn capture file path. `dispatch_background` redirects

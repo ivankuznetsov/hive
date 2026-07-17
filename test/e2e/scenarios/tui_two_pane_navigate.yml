@@ -54,7 +54,7 @@ steps:
   - kind: tui_keys
     keys: "j"
   - kind: tui_expect
-    anchor: "scope=sandbox"
+    anchor: "Tasks · sandbox"
     timeout: 3
 
   # `Right` jumps focus back to the tasks pane. A following `k` should
@@ -65,7 +65,7 @@ steps:
   - kind: tui_keys
     keys: "k"
   - kind: tui_expect
-    anchor: "scope=sandbox"
+    anchor: "Tasks · sandbox"
     timeout: 3
 
   # `n` opens the new-idea prompt at the bottom. The label format is

@@ -174,6 +174,27 @@ class TuiKeyMapMessageForTest < Minitest::Test
     assert_same Hive::Tui::Messages::NOOP, msg
   end
 
+  def test_grid_capital_i_opens_implementation_identity_detail
+    row = make_row(action_key: "ready_to_plan")
+    msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "I", row: row)
+
+    assert_kind_of Hive::Tui::Messages::OpenImplementationIdentityDetail, msg
+    assert_equal row, msg.row
+  end
+
+  def test_implementation_identity_detail_closes_only_on_documented_keys
+    [ "I", "q", :key_escape ].each do |key|
+      assert_same Hive::Tui::Messages::BACK,
+                  Hive::Tui::KeyMap.message_for(
+                    mode: :implementation_identity_detail, key: key, row: nil
+                  )
+    end
+    assert_same Hive::Tui::Messages::NOOP,
+                Hive::Tui::KeyMap.message_for(
+                  mode: :implementation_identity_detail, key: "x", row: nil
+                )
+  end
+
   def test_grid_capital_t_returns_open_token_stats
     msg = Hive::Tui::KeyMap.message_for(mode: :grid, key: "T", row: nil)
     assert_same Hive::Tui::Messages::OPEN_TOKEN_STATS, msg

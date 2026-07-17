@@ -299,6 +299,18 @@ class HiveTuiUpdateTest < Minitest::Test
                  new_model.red_status_detail_state.agent_label
   end
 
+  def test_open_implementation_identity_detail_enters_read_only_mode
+    row = build_row(project: "alpha", slug: "owned")
+    new_model, cmd = Hive::Tui::Update.apply(
+      model,
+      Hive::Tui::Messages::OpenImplementationIdentityDetail.new(row: row)
+    )
+
+    assert_nil cmd
+    assert_equal :implementation_identity_detail, new_model.mode
+    assert_same row, new_model.implementation_identity_detail_state.row
+  end
+
   def test_red_status_detail_scroll_down_reduces_offset
     state = Hive::Tui::Model::RedStatusDetailState.new(
       row: red_detail_row,
@@ -1716,6 +1728,20 @@ class HiveTuiUpdateTest < Minitest::Test
 
     assert_equal :grid, new_model.mode
     assert_nil new_model.info_panel_state
+  end
+
+  def test_back_from_implementation_identity_detail_clears_state
+    row = build_row(project: "alpha", slug: "owned")
+    state = Hive::Tui::Model::ImplementationIdentityDetailState.new(row: row)
+    starting = model.with(
+      mode: :implementation_identity_detail,
+      implementation_identity_detail_state: state
+    )
+
+    new_model, _cmd = Hive::Tui::Update.apply(starting, Hive::Tui::Messages::BACK)
+
+    assert_equal :grid, new_model.mode
+    assert_nil new_model.implementation_identity_detail_state
   end
 
   def test_back_from_idea_preview_preserves_cursor_and_scope

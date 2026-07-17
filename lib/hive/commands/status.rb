@@ -17,6 +17,7 @@ require "hive/diagnostic_helpers"
 require "hive/secret_patterns"
 require "hive/task_action"
 require "hive/task_projection/store"
+require "hive/implementation_identity/resolver"
 require "hive/task_resolver"
 require "hive/brainstorm_parser"
 require "hive/gh"
@@ -219,8 +220,11 @@ module Hive
             # external consumers (TUI, daemon, bots) read `diagnostic` off
             # every row. Schema mandates the field.
             config = task_action_config(path)
+            rows = annotate_implementation_identities(
+              collect_rows(hive_state, stages: stages, exclude_archived: exclude_archived), config
+            )
             rows = annotate_actions(
-              collect_rows(hive_state, stages: stages, exclude_archived: exclude_archived),
+              rows,
               project, project_count, config: config, with_diagnostic: true
             )
             rows = annotate_dependencies(
@@ -326,6 +330,7 @@ module Hive
           "condition_provenance" => row.dig(:projection_data, "provenance") || {},
           "shadow_audit" => row.dig(:projection_data, "shadow_audit") || {},
           "condition_warning" => row[:condition_warning],
+          "implementation_identity" => row[:implementation_identity],
           # Count of still-unanswered brainstorm Q&A questions (issue #270).
           # 0 for every non-brainstorm / non-needs_input row. Lets an agent
           # or operator tell "the daemon is holding this brainstorm because
@@ -342,6 +347,7 @@ module Hive
           "diagnostic" => row[:diagnostic]
         }
         payload["workflow"] = row[:workflow].to_s if row.key?(:workflow) && !row[:workflow].nil?
+        payload.delete("implementation_identity") unless row[:implementation_identity]
         if Hive::AgentLimit.held?(row[:marker_name], row[:marker_attrs])
           payload["held"] = Hive::AgentLimit.held_field(row[:marker_attrs])
         end
@@ -555,9 +561,11 @@ module Hive
         # only — `diagnostic` is unused here, so skip the bounded file-
         # I/O that TaskAction#diagnostic performs per red row. JSON path
         # still pays the full cost via project_payload.
+        config = task_action_config(path)
+        rows = annotate_implementation_identities(collect_rows(hive_state), config)
         rows = annotate_actions(
-          collect_rows(hive_state), project, project_count,
-          config: task_action_config(path), with_diagnostic: false
+          rows, project, project_count,
+          config: config, with_diagnostic: false
         )
         rows = annotate_dependencies(rows, project, admission_context: admission_context)
         if @archive
@@ -581,7 +589,7 @@ module Hive
           puts "  #{label}"
           stage_rows.sort_by { |r| -r[:mtime].to_i }.each do |r|
             command = r[:suggested_command] || "-"
-            state = [ r[:state_label], dependency_indicator(r) ].compact.join(" ")
+            state = [ r[:state_label], dependency_indicator(r), implementation_owner_token(r) ].compact.join(" ")
             puts "    #{r[:icon]} #{display_identity_with_pr(r, TEXT_IDENTITY_WIDTH)} " \
                  "#{state.ljust(24)} #{command} #{r[:age]}"
           end
@@ -608,7 +616,7 @@ module Hive
         puts "  Archived"
         rows.sort_by { |row| -row[:mtime].to_i }.each do |row|
           command = row[:suggested_command] || "-"
-          state = [ row[:state_label], dependency_indicator(row) ].compact.join(" ")
+          state = [ row[:state_label], dependency_indicator(row), implementation_owner_token(row) ].compact.join(" ")
           puts "    #{row[:icon]} #{display_identity_with_pr(row, TEXT_IDENTITY_WIDTH)} " \
                "#{state.ljust(24)} #{command} #{row[:age]}"
         end
@@ -664,6 +672,77 @@ module Hive
           blocked_by: row[:blocked_by],
           dependency_stage: row[:dependency_stage]
         )
+      end
+
+      # Build the public ownership view exclusively from the read-only task
+      # projection. Missing downstream launches are previews resolved from
+      # the immutable execute record plus raw configuration provenance; this
+      # method never reconstructs legacy state or appends journal events.
+      def annotate_implementation_identities(rows, config)
+        rows.each do |row|
+          next if row[:invalid]
+          next unless Hive::Workflows.coding_id?(row[:workflow])
+
+          row[:implementation_identity] = implementation_identity_status(
+            row.dig(:projection_data, "implementation_identity"), config
+          )
+        end
+      end
+
+      def implementation_identity_status(projected, config)
+        projected ||= {}
+        generation = projected["generation"] || 0
+        execute = projected["execute"]
+        return { "generation" => generation, "pending" => true, "stages" => {} } unless execute
+
+        stages = { "execute" => public_identity_stage(execute, status: "resolved") }
+        resolver = Hive::ImplementationIdentity::Resolver.new(cfg: config)
+        %w[open_pr review.fix review.ci].each do |stage|
+          actual = projected.dig("stages", stage)
+          identity = actual || resolver.resolve_stage(stage, execute_identity: execute)
+          stages[stage] = public_identity_stage(identity, status: actual ? "resolved" : "preview")
+        rescue Hive::ImplementationIdentity::Error, Hive::ConfigError => e
+          stages[stage] = {
+            "status" => "resolution_error",
+            "source" => implementation_preview_source(config, stage, execute),
+            "resolution_error" => e.message.to_s[0, 240]
+          }
+        end
+        { "generation" => generation, "pending" => false, "stages" => stages }
+      end
+
+      def public_identity_stage(identity, status:)
+        value = identity.respond_to?(:to_h) ? identity.to_h : identity
+        {
+          "provider" => value["provider"],
+          "model" => value["model"],
+          "requested_effort" => value["requested_effort"],
+          "effective_effort" => value["effective_effort"],
+          "effort_supported" => value["effort_supported"] == true,
+          "source" => value["source"],
+          "originating_attempt" => value["originating_attempt"],
+          "resolved_attempt" => value["resolved_attempt"],
+          "status" => status
+        }
+      end
+
+      def implementation_preview_source(config, stage, execute)
+        fields = config ? Hive::Config.implementation_identity_fields(config, stage) : {}
+        return "explicit_override" unless fields.empty?
+
+        execute["source"] == "legacy_backfill" ? "legacy_backfill" : "persisted_execute"
+      end
+
+      # Bounded token appended after the primary state/dependency signals, so
+      # a narrow text or TUI column truncates ownership before it hides the
+      # operational state that tells the operator what to do next.
+      def implementation_owner_token(row)
+        identity = row.dig(:implementation_identity, "stages", "execute")
+        return nil unless identity && identity["provider"] && identity["model"]
+
+        model = identity["model"].to_s
+        model = "#{model[0, 11]}…" if model.length > 12
+        "owner=#{identity['provider']}/#{model}"
       end
 
       def render_legacy_stage_warning(legacy)

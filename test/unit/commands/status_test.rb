@@ -44,6 +44,29 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_implementation_identity_status_previews_downstream_policy_from_persisted_execute
+    execute_fields = { "agent" => "codex", "model" => "gpt-5.6-sol" }.freeze
+    cfg = {
+      "execute" => execute_fields.dup,
+      Hive::Config::IMPLEMENTATION_IDENTITY_PROVENANCE_KEY => {
+        "execute" => execute_fields, "open_pr" => {}, "review.fix" => {}, "review.ci" => {}
+      }.freeze
+    }
+    execute = Hive::ImplementationIdentity::Resolver.new(cfg: cfg).resolve_execute(
+      generation: 2, attempt_id: "execute-2"
+    ).to_h
+    projected = { "generation" => 2, "execute" => execute, "stages" => {} }
+
+    status = Hive::Commands::Status.new.implementation_identity_status(projected, cfg)
+
+    assert_equal false, status["pending"]
+    assert_equal "gpt-5.6-terra", status.dig("stages", "open_pr", "model")
+    assert_equal "medium", status.dig("stages", "open_pr", "effective_effort")
+    assert_equal "gpt-5.6-sol", status.dig("stages", "review.fix", "model")
+    assert_equal "high", status.dig("stages", "review.ci", "effective_effort")
+    assert_equal %w[execute open_pr review.fix review.ci], status["stages"].keys
+  end
+
   def test_json_payload_ignores_archived_manual_stage_sibling
     with_tmp_dir do |project_root|
       hive_state = File.join(project_root, ".hive-state")

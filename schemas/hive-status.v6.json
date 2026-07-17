@@ -240,6 +240,12 @@
            "description": "Operator-visible shadow divergence warning, or null.",
            "type": ["string", "null"]
          },
+        "implementation_identity": {
+          "oneOf": [
+            { "$ref": "#/$defs/ImplementationIdentity" },
+            { "type": "null" }
+          ]
+        },
         "unanswered_questions": { "type": "integer", "minimum": 0 },
         "action": {
           "type": "string",
@@ -271,6 +277,65 @@
           ]
         }
       }
+    },
+    "ImplementationIdentity": {
+      "description": "Generation-scoped implementation ownership projected from the task journal. Status reads are pure: preview entries describe the policy that would be used if the stage launched now, while resolved entries came from launch events.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generation", "pending", "stages"],
+      "properties": {
+        "generation": { "type": "integer", "minimum": 0 },
+        "pending": { "type": "boolean" },
+        "stages": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "execute": { "$ref": "#/$defs/ImplementationIdentityStage" },
+            "open_pr": { "$ref": "#/$defs/ImplementationIdentityStage" },
+            "review.fix": { "$ref": "#/$defs/ImplementationIdentityStage" },
+            "review.ci": { "$ref": "#/$defs/ImplementationIdentityStage" }
+          }
+        }
+      }
+    },
+    "ImplementationIdentityStage": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "provider", "model", "requested_effort", "effective_effort",
+            "effort_supported", "source", "originating_attempt", "resolved_attempt", "status"
+          ],
+          "properties": {
+            "provider": { "type": "string", "minLength": 1 },
+            "model": { "type": "string", "minLength": 1 },
+            "requested_effort": { "type": ["string", "null"] },
+            "effective_effort": { "type": ["string", "null"] },
+            "effort_supported": { "type": "boolean" },
+            "source": {
+              "type": "string",
+              "enum": ["persisted_execute", "explicit_override", "legacy_backfill"]
+            },
+            "originating_attempt": { "type": ["string", "null"] },
+            "resolved_attempt": { "type": ["string", "null"] },
+            "status": { "type": "string", "enum": ["resolved", "preview"] }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "source", "resolution_error"],
+          "properties": {
+            "status": { "const": "resolution_error" },
+            "source": {
+              "type": "string",
+              "enum": ["persisted_execute", "explicit_override", "legacy_backfill"]
+            },
+            "resolution_error": { "type": "string", "minLength": 1, "maxLength": 240 }
+          }
+        }
+      ]
     },
     "Diagnostic": {
       "type": "object",

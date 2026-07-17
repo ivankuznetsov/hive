@@ -27,6 +27,7 @@ class E2ESandboxEnvTest < Minitest::Test
         assert_equal Hive::E2E::Paths.hive_bin, yielded["HIVE_BIN"]
         assert_equal Hive::E2E::Paths.hive_bin, yielded["HIVE_INVOKED_BIN"]
         assert_equal Hive::E2E::Paths.gh_shim, yielded["HIVE_GH_BIN"]
+        assert_equal Hive::E2E::SandboxEnv.bundle_require_path, yielded["RUBYLIB"]
         assert_equal "xterm-256color", yielded["TERM"]
         refute_includes yielded.keys, "BUNDLE_PATH"
         refute_includes yielded.keys, "RUBYOPT"

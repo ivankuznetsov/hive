@@ -81,7 +81,7 @@ module Hive
       marker_name = name.to_s.upcase
       raise ArgumentError, "unknown marker #{marker_name}" unless KNOWN_NAMES.include?(marker_name)
 
-      attrs = attrs_with_error_marker_id(marker_name, attrs)
+      attrs = attrs_with_recovery_marker_id(marker_name, attrs)
       new_marker = build_marker(marker_name, attrs)
       ensure_dir(state_file_path)
       with_markers_lock(state_file_path) do
@@ -155,9 +155,9 @@ module Hive
       File.delete(tmp) if tmp && File.exist?(tmp)
     end
 
-    def attrs_with_error_marker_id(marker_name, attrs)
+    def attrs_with_recovery_marker_id(marker_name, attrs)
       attrs = attrs ? attrs.to_h : {}
-      return attrs unless marker_name == "ERROR"
+      return attrs unless %w[ERROR REVIEW_ERROR REVIEW_WORKING].include?(marker_name)
       return attrs unless attrs["marker_id"].to_s.empty? && attrs[:marker_id].to_s.empty?
 
       attrs.merge("marker_id" => SecureRandom.hex(8))

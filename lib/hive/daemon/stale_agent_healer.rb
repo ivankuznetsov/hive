@@ -701,7 +701,8 @@ module Hive
 
       def review_marker_attrs(row)
         attrs = marker_attrs_for(row)
-        out = {}
+        marker_id = attrs["marker_id"].to_s
+        out = { "marker_id" => marker_id.empty? ? nil : marker_id }
         out["phase"] = attrs["phase"] if attrs["phase"]
         out["pass"] = attrs["pass"] if attrs["pass"]
         out

@@ -269,6 +269,35 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
     end
   end
 
+  def test_wedged_review_working_does_not_clear_newer_marker_generation
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- REVIEW_WORKING phase=reviewers pass=1 marker_id=newer -->\n")
+      lock_path = File.join(File.dirname(state_file), ".lock")
+      File.write(lock_path, {
+        "pid" => Process.pid,
+        "process_start_time" => Hive::Lock.process_start_time(Process.pid),
+        "claude_pid" => 999_999
+      }.to_yaml)
+      row = make_row(
+        state_file,
+        pid_alive: false,
+        stage: "6-review",
+        marker: "review_working",
+        marker_attrs: { "phase" => "reviewers", "pass" => "1", "marker_id" => "older" },
+        action: "agent_running",
+        live_task_lock: true
+      )
+
+      with_replaced_singleton_method(@healer, :child_pids, ->(_pid) { [] }) do
+        heal([ row ])
+      end
+
+      assert_match(/REVIEW_WORKING.*marker_id=newer/, File.read(state_file))
+      assert File.exist?(lock_path), "a stale row must not release the newer review run's lock"
+      refute @logger.events.any? { |name, _| name == :marker_healed }
+    end
+  end
+
   def test_review_working_heal_logs_failure_when_marker_clear_raises
     with_marker_file do |state_file|
       File.write(state_file, "# task\n\n<!-- REVIEW_WORKING phase=reviewers pass=1 -->\n")
@@ -366,6 +395,30 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       refute File.exist?(lock_path), "stale review lock should be removed so the daemon re-dispatches"
       refute_match(/REVIEW_WORKING|REVIEW_ERROR/, File.read(state_file),
                    "orphaned REVIEW_WORKING should clear so review re-dispatches under the cap")
+    end
+  end
+
+  def test_orphaned_review_working_does_not_clear_newer_marker_generation
+    with_marker_file do |state_file|
+      File.write(state_file, "# task\n\n<!-- REVIEW_WORKING phase=triage pass=2 marker_id=newer -->\n")
+      lock_path = File.join(File.dirname(state_file), ".lock")
+      File.write(lock_path, { "pid" => 999_999, "claude_pid" => 999_998 }.to_yaml)
+      row = make_row(
+        state_file,
+        pid_alive: false,
+        mtime: NOW - 1000,
+        stage: "6-review",
+        marker: "review_working",
+        marker_attrs: { "phase" => "triage", "pass" => "2", "marker_id" => "older" },
+        action: "agent_running",
+        live_task_lock: false
+      )
+
+      heal([ row ])
+
+      assert_match(/REVIEW_WORKING.*marker_id=newer/, File.read(state_file))
+      assert File.exist?(lock_path), "a stale row must not release the newer review run's lock"
+      refute @logger.events.any? { |name, _| name == :marker_healed }
     end
   end
 
@@ -1890,6 +1943,34 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
       assert failure, "expected marker_heal_failed, got: #{@logger.events.inspect}"
       assert_equal "finalize_unpushed_commits", failure[1][:reason]
       assert_match(/ENOSPC/, failure[1][:error])
+    end
+  end
+
+  def test_review_error_recovery_does_not_clear_newer_marker_generation
+    with_marker_file do |state_file|
+      File.write(
+        state_file,
+        "# task\n\n<!-- REVIEW_ERROR phase=reviewers reason=review_agent_died pass=1 marker_id=newer -->\n"
+      )
+      row = make_row(
+        state_file,
+        pid_alive: nil,
+        stage: "6-review",
+        marker: "review_error",
+        marker_attrs: {
+          "phase" => "reviewers",
+          "reason" => "review_agent_died",
+          "pass" => "1",
+          "marker_id" => "older"
+        },
+        action: "recover_review",
+        live_task_lock: false
+      )
+
+      heal([ row ])
+
+      assert_match(/REVIEW_ERROR.*marker_id=newer/, File.read(state_file))
+      refute @logger.events.any? { |name, _| name == :marker_healed }
     end
   end
 

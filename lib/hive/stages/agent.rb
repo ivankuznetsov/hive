@@ -77,7 +77,9 @@ module Hive
               reason: "limits_reached",
               provider: profile.name,
               message: result[:error_message].to_s[0, 200],
-              retry_after: Hive::AgentLimit.retry_after
+              retry_after: Hive::AgentLimit.retry_after(
+                text: result[:limit_text] || result[:error_message]
+              )
             )
           else
             # A preflight/version failure writes no marker. Replace any stale

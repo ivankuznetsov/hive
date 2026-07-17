@@ -143,6 +143,24 @@ class MarkersTest < Minitest::Test
     end
   end
 
+  def test_review_recovery_markers_get_unique_marker_ids
+    with_tmp_dir do |dir|
+      file = File.join(dir, "x.md")
+
+      %i[review_error review_working].each do |name|
+        Hive::Markers.set(file, name, phase: "reviewers", pass: 1)
+        first_id = Hive::Markers.current(file).attrs.fetch("marker_id")
+        Hive::Markers.set(file, name, phase: "reviewers", pass: 1)
+        second_id = Hive::Markers.current(file).attrs.fetch("marker_id")
+
+        assert_match(/\A[0-9a-f]{16}\z/, first_id)
+        assert_match(/\A[0-9a-f]{16}\z/, second_id)
+        refute_equal first_id, second_id,
+                     "same-shaped #{name} rotations need distinct recovery ids"
+      end
+    end
+  end
+
   def test_error_recovery_match_attr_prefers_marker_id_alone_when_no_reason
     attrs = { "exit_code" => "70", "marker_id" => "err-70" }
 
@@ -360,8 +378,8 @@ class MarkersTest < Minitest::Test
       Hive::Markers.set(file, :review_working, phase: :reviewers, pass: 1)
       Hive::Markers.set(file, :review_working, phase: :triage, pass: 1)
       content = File.read(file)
-      assert_includes content, "<!-- REVIEW_WORKING phase=triage pass=1 -->"
-      refute_includes content, "<!-- REVIEW_WORKING phase=reviewers pass=1 -->",
+      assert_includes content, "<!-- REVIEW_WORKING phase=triage pass=1 marker_id="
+      refute_includes content, "<!-- REVIEW_WORKING phase=reviewers pass=1",
                       "previous transient marker must be replaced, not accumulated"
       state = Hive::Markers.current(file)
       assert_equal :review_working, state.name

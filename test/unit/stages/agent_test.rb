@@ -509,6 +509,28 @@ class StagesAgentTest < Minitest::Test
     end
   end
 
+  def test_run_uses_provider_reset_date_from_limit_error_envelope
+    with_tmp_dir do |project|
+      task = task_for(project, "plan")
+      reset_at = Time.now.utc + (7 * 24 * 60 * 60)
+      limit_text = "You've hit your usage limit. Try again at #{reset_at.strftime('%b %-d, %Y %-I:%M %p')} UTC."
+
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, lambda { |_task, **_kwargs|
+        {
+          status: :error,
+          error_message: "limits reached for codex: usage limit",
+          limit_text: limit_text
+        }
+      }) do
+        Hive::Stages::Agent.run!(task, {})
+
+        retry_after = Time.parse(Hive::Markers.current(task.state_file).attrs.fetch("retry_after"))
+        assert_operator retry_after, :>, Time.now.utc + (6 * 24 * 60 * 60)
+        assert_operator retry_after, :<, Time.now.utc + (8 * 24 * 60 * 60)
+      end
+    end
+  end
+
   def test_run_preserves_retryable_limit_marker_written_over_stale_marker
     with_tmp_dir do |project|
       task = task_for(project, "plan")

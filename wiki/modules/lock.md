@@ -39,7 +39,10 @@ existing PID-only behavior.
 
 `hive status --json` exposes the verified live holder's `task_lock_pid`,
 `task_lock_process_start_time`, and `task_lock_id`. Recovery consumers bind
-destructive actions to that exact observed generation.
+destructive actions to that exact observed generation. The TUI snapshot keeps
+all three values losslessly even though its renderer currently uses only the
+derived `live_task_lock` flag, so the status/TUI schema boundary remains
+additive and future recovery actions can use the same generation identity.
 
 ## Stale-lock detection (`stale_lock?`)
 

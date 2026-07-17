@@ -182,6 +182,24 @@ class LockTest < Minitest::Test
     end
   end
 
+  def test_release_tolerates_task_folder_disappearing_during_guard_acquisition
+    with_tmp_dir do |dir|
+      with_replaced_singleton_method(Hive::Lock, :with_task_lock_guard, lambda { |_path, &_block|
+        raise Errno::ENOENT
+      }) do
+        refute Hive::Lock.release_task_lock(dir, lock_id: "vanished-generation")
+      end
+    end
+  end
+
+  def test_read_task_lock_returns_nil_when_lock_disappears
+    with_tmp_dir do |dir|
+      lock_path = File.join(dir, ".lock")
+
+      assert_nil Hive::Lock.send(:read_task_lock, lock_path)
+    end
+  end
+
   def test_update_task_lock_removes_tempfile_when_rename_fails
     with_tmp_dir do |dir|
       lock_path = File.join(dir, ".lock")

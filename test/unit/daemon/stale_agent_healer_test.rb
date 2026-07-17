@@ -347,7 +347,7 @@ class HiveDaemonStaleAgentHealerTest < Minitest::Test
 
   def test_termination_does_not_kill_a_pid_reused_after_term
     signals = []
-    starts = [ "observed-start", "replacement-start" ]
+    starts = [ "observed-start", "observed-start", "replacement-start" ]
     holder = { "pid" => 12_345, "process_start_time" => "observed-start" }
 
     with_replaced_singleton_method(Process, :kill, lambda { |signal, pid|

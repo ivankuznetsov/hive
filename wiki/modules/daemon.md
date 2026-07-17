@@ -3,7 +3,7 @@ title: Hive::Daemon
 type: module
 source: lib/hive/daemon/
 created: 2026-05-06
-updated: 2026-07-16
+updated: 2026-07-17
 tags: [daemon, module, automation, dispatcher]
 ---
 
@@ -17,6 +17,13 @@ agents are detached durable attempts observed by the daemon;
 `ChildSupervisor` owns ancillary work only. The daemon also owns merge intake,
 fair scheduling, and fenced completion for the
 language-neutral [[commands/refactor-patrol]] lifecycle.
+
+`StatusConsumer` now passes through the additive condition projection fields
+from `hive status --json`. Dispatch still consumes the canonical `action` and
+diagnostic calculated by `TaskAction`; the daemon defines no condition family,
+supersession, or gate rule of its own. Valid snapshots keep polling cheap, and
+status polling never triggers reconciliation, git/GitHub probes, or journal
+writes. See [[modules/conditions]].
 
 ## Module map
 

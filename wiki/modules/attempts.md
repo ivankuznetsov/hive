@@ -3,7 +3,7 @@ title: Durable task attempts
 type: module
 source: lib/hive/attempts/
 created: 2026-07-16
-updated: 2026-07-16
+updated: 2026-07-17
 tags: [attempts, ownership, leases, daemon, recovery]
 ---
 
@@ -47,6 +47,13 @@ Task generation—not request ID—is semantic idempotency. Duplicate live
 deliveries receive the same attempt; completed duplicates replay the receipt.
 A loss successor has a new attempt ID but inherits generation, predecessor,
 outputs, worktree/branch, and an incremented retry charge.
+
+Condition projection adds an explicit numeric `task_input_epoch` to attempt
+records/context while retaining the prerequisite's opaque ownership generation
+as `ownership_generation`. Old v1 records remain readable and bridge to epoch
+0 in memory; they are not rewritten. Every non-legacy condition event must
+name a durable attempt whose task/stage ownership matches the record. Retry and
+adoption reuse the numeric epoch when accepted inputs are unchanged.
 
 ## State protocol
 

@@ -126,6 +126,23 @@ transitions. See [[modules/attempts]].
 - **Per-task lock**: `<task folder>/.lock` — compatibility/work-area exclusion projection. New workers include optional `attempt_id` and `task_generation`; old readers tolerate their absence. It is not the restart-safe owner.
 - **Per-project commit lock**: `<project>/.hive-state/.commit-lock` — short flock around the `git add && git commit` in the hive-state worktree to serialize concurrent writers. See [[modules/lock]].
 
+## Task condition journal and projection
+
+The existing task-local `events.jsonl` now carries two durability contracts.
+Legacy telemetry remains fail-soft. Versioned condition/generation/evidence/
+audit records are appended synchronously through `Hive::TaskJournal::Writer`
+with a task-local journal flock, complete JSON-line batch, flush, and fsync.
+Those records reuse the durable attempt ID from [[modules/attempts]] and add a
+numeric task input epoch plus exact-HEAD commit generation.
+
+`<task>/task-projection.json` is an atomic, disposable materialized view bound
+to the journal cursor, last event ID, and SHA-256. It contains projected
+identity, current and superseded conditions, evidence, gate diagnostics,
+compatibility state, provenance, and shadow audit. Missing/corrupt/stale views
+replay from the journal without git/GitHub calls. Status replay is read-only;
+the next mutating execute boundary republishes the view. See
+[[modules/conditions]].
+
 ## Runtime dispatch queue and web snapshots
 
 The daemon's producer queue lives under `$HIVE_HOME/dispatch_requests/`

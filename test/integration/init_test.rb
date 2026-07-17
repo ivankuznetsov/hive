@@ -846,19 +846,20 @@ class InitTest < Minitest::Test
         # ...AND make the config.yml working-tree restore fail inside the
         # rollback. The rescue-within-rescue must warn without masking the
         # original GitError the caller re-raises.
-        original_binwrite = File.method(:binwrite)
         warnings = []
         begin
-          with_replaced_singleton_method(File, :binwrite, lambda { |path, *args|
-            raise Errno::EACCES, path.to_s if path == cfg_path
+          init = Hive::Commands::Init.new(dir, new_workflow: "writing")
+          original_atomic_write = init.method(:atomic_write)
+          config_writes = 0
+          init.define_singleton_method(:atomic_write) do |path, content|
+            config_writes += 1 if path == cfg_path
+            raise Errno::EACCES, path.to_s if path == cfg_path && config_writes > 1
 
-            original_binwrite.call(path, *args)
-          }) do
-            init = Hive::Commands::Init.new(dir, new_workflow: "writing")
-            init.define_singleton_method(:write_warn) { |line| warnings << line }
-            assert_raises(Hive::GitError) do
-              capture_io { init.call }
-            end
+            original_atomic_write.call(path, content)
+          end
+          init.define_singleton_method(:write_warn) { |line| warnings << line }
+          assert_raises(Hive::GitError) do
+            capture_io { init.call }
           end
         ensure
           FileUtils.rm_f(hook)

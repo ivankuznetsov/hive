@@ -1,6 +1,7 @@
 require "test_helper"
 require "hive/cli"
 require "hive/workflows"
+require "hive/workflows/project"
 
 # Direct coverage for Hive::Workflows. The workflow verb map is the
 # single source of truth for `hive brainstorm/plan/develop/review/pr/
@@ -8,6 +9,16 @@ require "hive/workflows"
 # or target stage. Pin every public surface so a future refactor /
 # rebase can't drift the contract without breaking this file.
 class WorkflowsTest < Minitest::Test
+  def setup
+    super
+    Hive::Workflows::Project.reset!
+  end
+
+  def teardown
+    Hive::Workflows::Project.reset!
+    super
+  end
+
   def test_verbs_has_canonical_keys_in_order
     assert_equal %w[brainstorm plan develop open-pr review artifacts finalize archive],
                  Hive::Workflows::VERBS.keys,

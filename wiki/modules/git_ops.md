@@ -3,7 +3,7 @@ title: Hive::GitOps
 type: module
 source: lib/hive/git_ops.rb
 created: 2026-04-25
-updated: 2026-06-14
+updated: 2026-07-17
 tags: [git, init, commit]
 ---
 
@@ -85,15 +85,16 @@ Stages the managed llm-wiki context paths written by `Hive::LlmWikiBootstrap`:
 
 If staging produces a diff, commits `chore: initialize llm-wiki`; otherwise returns `:nothing_to_commit`. `hive init` calls this before installing the runtime post-commit hook so the bootstrap commit does not launch a wiki refresh immediately.
 
-## `hive_commit(stage_name:, slug:, action:, body: nil, pathspecs: nil, allow_empty: false)`
+## `hive_commit(stage_name:, slug:, action:, body: nil, pathspecs: nil, allow_empty: false, after_stage: nil)`
 
 Records a hive-state audit commit. `GitOps` does not acquire the project commit lock itself; durable command callers wrap this method in `Hive::Lock.with_commit_lock(<hive_state_path>)` when concurrent writers can touch the same `.hive-state` worktree. Current locked callers include `Commands::Run`, `Commands::New`, `Commands::Approve`, `Commands::Markers`, `Commands::Drop`, and `Commands::Migrate`. `Hive::DisplayName::Generator` is a best-effort exception: it writes `meta.yml`, calls `hive_commit`, and swallows `Hive::GitError` if that commit loses a race.
 
 1. Build the message `hive: <stage_name>/<slug> <action>`, plus an optional second body paragraph when `body:` is present.
 2. With no `pathspecs:`, stage only `stages/<stage_name>/<slug>` when that directory exists, plus `logs/` when present. This avoids sweeping unrelated sibling-task changes into the commit.
 3. With `pathspecs:`, stage each explicit hive-state-relative pathspec via `git add -A -- <pathspec>` only when the path exists or is already tracked, so deletion commits work without untracked sibling leakage.
-4. `git diff --cached --quiet`. If exit 0 (nothing staged), return `:nothing_to_commit`.
-5. Otherwise commit and return `:committed`; `allow_empty: true` adds `--allow-empty`.
+4. Invoke optional `after_stage` after all scoped adds and before inspecting or committing the index. Safety-sensitive migrations use this boundary to verify that a raced path did not reappear in either the worktree or staged index; raising aborts before `git commit`.
+5. `git diff --cached --quiet`. If exit 0 (nothing staged), return `:nothing_to_commit`.
+6. Otherwise commit and return `:committed`; `allow_empty: true` adds `--allow-empty`.
 
 Empty diffs are silently skipped (e.g. an `inbox.run!` that deliberately does nothing).
 

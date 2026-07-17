@@ -35,6 +35,10 @@ class ConditionsRegistryTest < Minitest::Test
       registry.register("Two", family: "two", scope: :unknown,
                         allowed_evidence: [ :journal_event ], gate_role: :informational)
     end
+    assert_raises(Hive::Conditions::RegistryError) do
+      registry.register("Two", family: "two", scope: :task,
+                        allowed_evidence: [ :journal_event ], gate_role: :unknown)
+    end
     assert_raises(Hive::Conditions::RegistryError) { registry.fetch("missing") }
   end
 

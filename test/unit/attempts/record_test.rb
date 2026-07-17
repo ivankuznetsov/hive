@@ -50,6 +50,21 @@ class AttemptsRecordTest < Minitest::Test
       Hive::Attempts::Record.validate_receipt!(broken,
                                                attempt_id: "attempt-1", task_generation: "generation-1")
     end
+
+
+    assert_raises(Hive::Attempts::InvalidReceipt) do
+      Hive::Attempts::Record.validate_receipt!(
+        valid.merge("task_input_epoch" => 2),
+        attempt_id: "attempt-1", task_generation: "generation-1", task_input_epoch: 1
+      )
+    end
+    assert_raises(Hive::Attempts::InvalidReceipt) do
+      Hive::Attempts::Record.validate_receipt!(
+        valid.merge("ownership_generation" => "owner-2"),
+        attempt_id: "attempt-1", task_generation: "generation-1",
+        ownership_generation: "owner-1"
+      )
+    end
   end
 
   def test_final_states_are_irreversible
@@ -109,6 +124,8 @@ class AttemptsRecordTest < Minitest::Test
 
     invalid_changes = [
       { "lease_version" => -1 },
+      { "ownership_generation" => "" },
+      { "task_input_epoch" => -1 },
       { "retry_charge" => -1 },
       { "current_outputs" => {} },
       { "current_outputs" => [ { "path" => "bad" } ] },

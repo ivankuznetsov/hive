@@ -87,5 +87,19 @@ class ConditionsMigrationTest < Minitest::Test
     assert_raises(Hive::ConfigError) do
       Hive::Config.validate_conditions!(invalid, "/tmp/config.yml")
     end
+
+    invalid_settings = [
+      { "authority" => "markers", "unknown" => true },
+      { "authority" => "automatic" },
+      { "authority" => "markers", "stages" => [] },
+      { "authority" => "markers", "stages" => { "99-unknown" => "markers" } }
+    ]
+    invalid_settings.each do |settings|
+      candidate = Marshal.load(Marshal.dump(defaults))
+      candidate["conditions"] = settings
+      assert_raises(Hive::ConfigError) do
+        Hive::Config.validate_conditions!(candidate, "/tmp/config.yml")
+      end
+    end
   end
 end

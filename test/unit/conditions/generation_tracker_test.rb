@@ -84,6 +84,24 @@ class ConditionsGenerationTrackerTest < Minitest::Test
     refute missing.advanced
   end
 
+  def test_unreadable_input_is_fingerprinted_as_unverifiable_evidence
+    with_tmp_dir do |dir|
+      task = FakeTask.new(folder: dir, state_file: File.join(dir, "task.md"))
+      plan = File.join(dir, "plan.md")
+      File.write(plan, "plan\n")
+      original = ::Digest::SHA256.method(:file)
+
+      with_replaced_singleton_method(::Digest::SHA256, :file, lambda { |path|
+        raise Errno::EACCES, "blocked" if path == plan
+
+        original.call(path)
+      }) do
+        fingerprint = Hive::Conditions::GenerationTracker.new.input_fingerprint(task: task)
+        assert_match(/\A[0-9a-f]{64}\z/, fingerprint)
+      end
+    end
+  end
+
   private
 
   def generation_record(decision)

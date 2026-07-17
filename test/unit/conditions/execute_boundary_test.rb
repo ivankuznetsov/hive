@@ -14,6 +14,11 @@ class ConditionsExecuteBoundaryTest < Minitest::Test
     keyword_init: true
   )
 
+  class UnavailableGit
+    def head_sha = raise(Hive::GitError, "head unavailable")
+    def current_branch = raise(Errno::EACCES, "branch unavailable")
+  end
+
   def test_mode_matrix_uses_marker_shadow_or_condition_authority_and_rollback_preserves_history
     with_fixture do |task, store, attempt, context, baseline|
       marker = evaluate(task, store, attempt, context, baseline, mode: "markers",
@@ -130,6 +135,86 @@ class ConditionsExecuteBoundaryTest < Minitest::Test
         assert File.exist?(File.join(dir, "task-projection.json"))
         assert_equal :execute_complete, outcome.marker_name
       end
+    end
+  end
+
+  def test_missing_gate_evidence_triggers_exactly_one_inline_reconciliation
+    with_fixture do |task, store, attempt, context, baseline|
+      boundary = Hive::Conditions::ExecuteBoundary.new(
+        task: task, config: config("conditions"), worktree_path: task.worktree_path,
+        attempt_store: store, context: context
+      )
+      original_gate = boundary.method(:gate_for)
+      calls = 0
+      boundary.define_singleton_method(:gate_for) do |projection, **options|
+        calls += 1
+        if calls == 1
+          Hive::Conditions::GateResult.new(
+            status: :reconcile_required, transition: "execute_to_open_pr",
+            diagnostics: [ { "condition" => "ChangesPresent", "state" => "missing" } ],
+            waivers: []
+          )
+        else
+          original_gate.call(projection, **options)
+        end
+      end
+
+      outcome = boundary.evaluate(
+        legacy_marker_name: :execute_complete, legacy_commit: "execute_complete",
+        legacy_status: :execute_complete, baseline_head: baseline
+      )
+
+      assert_equal 2, calls
+      assert_equal :execute_waiting, outcome.marker_name
+    end
+  end
+
+  def test_mismatched_durable_context_fails_before_reconciliation
+    with_fixture do |task, store, attempt, _context, baseline|
+      mismatched = Hive::Attempts::Context.new(
+        attempt_id: attempt.attempt_id, task_generation: 2,
+        ownership_generation: attempt.ownership_generation
+      )
+      boundary = Hive::Conditions::ExecuteBoundary.new(
+        task: task, config: config("conditions"), worktree_path: task.worktree_path,
+        attempt_store: store, context: mismatched
+      )
+
+      assert_raises(Hive::Conditions::GenerationMismatch) do
+        boundary.evaluate(
+          legacy_marker_name: :execute_complete, legacy_commit: "execute_complete",
+          legacy_status: :execute_complete, baseline_head: baseline
+        )
+      end
+      refute File.exist?(File.join(task.folder, "events.jsonl"))
+    end
+  end
+
+  def test_legacy_boundary_tolerates_unavailable_head_and_branch
+    with_tmp_git_repo do |worktree|
+      with_tmp_dir do |dir|
+        task = build_task(dir, worktree)
+        outcome = Hive::Conditions::ExecuteBoundary.new(
+          task: task, config: config("markers"), worktree_path: worktree,
+          context: nil, attempt_store: nil, git_ops: UnavailableGit.new
+        ).evaluate(
+          legacy_marker_name: :execute_waiting, legacy_commit: "execute_waiting",
+          legacy_status: :execute_waiting, baseline_head: nil
+        )
+
+        assert_equal :execute_waiting, outcome.marker_name
+      end
+    end
+  end
+
+  def test_transition_guard_research_probes_fail_closed_on_unreadable_inputs
+    with_tmp_dir do |dir|
+      task = build_task(dir, dir)
+      File.write(File.join(dir, "plan.md"), "---\n[unterminated\n---\n")
+      refute Hive::Conditions::TransitionGuard.research_execution?(task)
+
+      File.delete(task.state_file)
+      refute Hive::Conditions::TransitionGuard.research_output?(task)
     end
   end
 

@@ -71,6 +71,27 @@ class TaskJournalTest < Minitest::Test
     end
   end
 
+  def test_each_authoritative_envelope_invariant_fails_closed
+    with_writer do |writer, _dir|
+      invalid_events = [
+        event("unknown_event"),
+        event("reconciliation", task: nil),
+        event("reconciliation", commit_generation: -1),
+        event("reconciliation", evidence: {}),
+        event("reconciliation", occurred_at: "not-a-time")
+      ]
+      invalid_events.each do |candidate|
+        assert_raises(Hive::TaskJournal::InvalidRecord) { writer.append(candidate) }
+      end
+
+      envelope = Hive::TaskJournal::Envelope.authoritative(event("reconciliation"))
+      envelope["schema"] = "unsupported"
+      assert_raises(Hive::TaskJournal::InvalidRecord) do
+        writer.send(:validate!, envelope)
+      end
+    end
+  end
+
   def test_strict_io_failure_surfaces_instead_of_becoming_acknowledgement
     with_writer do |writer, _dir|
       original_open = File.method(:open)

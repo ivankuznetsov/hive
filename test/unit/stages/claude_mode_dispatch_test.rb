@@ -6,6 +6,9 @@ require "hive/stages/open_pr"
 require "hive/stages/plan"
 require "hive/stages/artifacts"
 require "hive/stages/brainstorm"
+require "hive/stages/review"
+require "hive/stages/review/ci_fix"
+require "hive/reviewers"
 
 class ClaudeModeDispatchTest < Minitest::Test
   include HiveTestHelper
@@ -180,6 +183,99 @@ class ClaudeModeDispatchTest < Minitest::Test
         assert_equal "Read,Write,Edit,Bash,LS,Glob,Grep", captured[1][:kwargs][:allowed_tools]
       end
     end
+  end
+
+  def test_open_pr_forwards_codex_utility_identity_arguments
+    with_tmp_dir do |dir|
+      cfg = { "claude" => { "mode" => "tmux" } }
+      task = make_task(dir, stage_name: "open-pr", state_name: "pr.md")
+      worktree_path = File.join(dir, "worktree")
+      FileUtils.mkdir_p(worktree_path)
+      identity_cfg = identity_config
+      execute = Hive::ImplementationIdentity::Resolver.new(cfg: identity_cfg).resolve_execute(
+        generation: 1, attempt_id: "exec"
+      )
+      identity = Hive::ImplementationIdentity::Resolver.new(cfg: identity_cfg).resolve_stage(
+        "open_pr", execute_identity: execute
+      )
+
+      with_spawn_capture do |captured|
+        Hive::Stages::OpenPr.spawn_open_pr_agent(
+          task, cfg, "prompt", codex_profile(cfg), worktree_path, identity: identity
+        )
+
+        assert_equal :headless, captured.fetch(0).fetch(:launcher)
+        assert_equal [ "--model", "gpt-5.6-terra", "-c", "model_reasoning_effort=medium" ],
+                     captured[0][:kwargs][:identity_arguments]
+      end
+    end
+  end
+
+  def test_review_fix_forwards_execute_model_with_high_effort
+    with_tmp_dir do |dir|
+      cfg = identity_config
+      task = make_task(dir, stage_name: "review", state_name: "task.md")
+      worktree_path = File.join(dir, "worktree")
+      FileUtils.mkdir_p(worktree_path)
+      FileUtils.mkdir_p(File.join(task.folder, "reviews"))
+      ctx = Hive::Reviewers::Context.new(
+        worktree_path: worktree_path, task_folder: task.folder,
+        default_branch: "main", pass: 1
+      )
+      identity = review_identity(cfg, "review.fix")
+
+      with_spawn_capture do |captured|
+        Hive::Stages::Review.spawn_fix_agent(
+          task, cfg, ctx, accepted: [], identity: identity
+        )
+
+        assert_equal :headless, captured.fetch(0).fetch(:launcher)
+        assert_equal [ "--model", "gpt-5.6-sol", "-c", "model_reasoning_effort=high" ],
+                     captured[0][:kwargs][:identity_arguments]
+      end
+    end
+  end
+
+  def test_ci_fix_forwards_execute_model_with_high_effort
+    with_tmp_dir do |dir|
+      cfg = identity_config
+      task = make_task(dir, stage_name: "review", state_name: "task.md")
+      worktree_path = File.join(dir, "worktree")
+      FileUtils.mkdir_p(worktree_path)
+      FileUtils.mkdir_p(File.join(task.folder, "logs"))
+      ctx = Hive::Reviewers::Context.new(
+        worktree_path: worktree_path, task_folder: task.folder,
+        default_branch: "main", pass: 1
+      )
+      identity = review_identity(cfg, "review.ci")
+
+      with_spawn_capture do |captured|
+        Hive::Stages::Review::CiFix.spawn_fix_agent(
+          cfg: cfg, ctx: ctx, command: [ "bin/test" ], attempt: 1,
+          max_attempts: 2, captured_output: "failure", identity: identity
+        )
+
+        assert_equal :headless, captured.fetch(0).fetch(:launcher)
+        assert_equal [ "--model", "gpt-5.6-sol", "-c", "model_reasoning_effort=high" ],
+                     captured[0][:kwargs][:identity_arguments]
+      end
+    end
+  end
+
+  def identity_config
+    fields = { "agent" => "codex", "model" => "gpt-5.6-sol" }.freeze
+    {
+      "execute" => fields.dup,
+      Hive::Config::IMPLEMENTATION_IDENTITY_PROVENANCE_KEY => {
+        "execute" => fields, "open_pr" => {}, "review.fix" => {}, "review.ci" => {}
+      }.freeze
+    }
+  end
+
+  def review_identity(cfg, stage)
+    resolver = Hive::ImplementationIdentity::Resolver.new(cfg: cfg)
+    execute = resolver.resolve_execute(generation: 1, attempt_id: "exec")
+    resolver.resolve_stage(stage, execute_identity: execute)
   end
 
   def test_artifacts_uses_stage_specific_claude_session

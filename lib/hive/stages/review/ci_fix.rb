@@ -328,8 +328,10 @@ module Hive
           status.success? && !out.empty?
         end
 
-        def spawn_fix_agent(cfg:, ctx:, command:, attempt:, max_attempts:, captured_output:)
-          profile_name = cfg.dig("review", "ci", "agent") || "claude"
+        def spawn_fix_agent(cfg:, ctx:, command:, attempt:, max_attempts:, captured_output:, identity: nil)
+          task = synthetic_task(ctx)
+          identity ||= Hive::Stages::Base.implementation_stage_identity(task, cfg, "review.ci")
+          profile_name = identity&.provider || cfg.dig("review", "ci", "agent") || "claude"
           profile = Hive::AgentProfiles.lookup(profile_name, cfg: cfg)
 
           template = cfg.dig("review", "ci", "prompt_template") || "ci_fix_prompt.md.erb"
@@ -354,7 +356,6 @@ module Hive
             )
           )
 
-          task = synthetic_task(ctx)
           scope = Hive::Stages::Base.stage_permission_scope(
             cfg, "review.ci", task, profile,
             default_allowed_tools: Hive::ClaudeLauncher::IMPLEMENTER_ALLOWED_TOOLS
@@ -368,7 +369,8 @@ module Hive
             log_label: "review-ci-fix-attempt#{format('%02d', attempt)}",
             profile: profile,
             **Hive::Stages::Base.tool_scope_kwargs(scope),
-            status_mode: :exit_code_only
+            status_mode: :exit_code_only,
+            identity_arguments: identity&.native_arguments
           }
           if profile.name == :claude
             Hive::Stages::Base.spawn_claude!(

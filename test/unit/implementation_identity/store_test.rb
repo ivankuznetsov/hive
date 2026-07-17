@@ -69,9 +69,31 @@ class ImplementationIdentityStoreTest < Minitest::Test
     end
   end
 
+  def test_downstream_resolution_is_journaled_before_launch_and_matches_native_arguments
+    with_identity_attempt(intended_stage: "5-open-pr", attempt_id: "open-pr-attempt") do |task, attempt_store, attempt|
+      execute_cfg = execute_config("codex", "gpt-5.6-sol")
+      seed_execute_identity(task, attempt_store, execute_cfg)
+      store = Hive::ImplementationIdentity::Store.new(
+        task: task, cfg: execute_cfg, attempt_store: attempt_store
+      )
+
+      selection = Hive::Attempts::Context.with(
+        attempt_id: attempt.attempt_id, task_generation: 1,
+        ownership_generation: attempt.ownership_generation
+      ) { store.resolve_stage!("open_pr") }
+
+      assert_equal [ "--model", "gpt-5.6-terra", "-c", "model_reasoning_effort=medium" ],
+                   selection.native_arguments
+      events = File.readlines(File.join(task.folder, "events.jsonl")).map { |line| JSON.parse(line) }
+      stage_event = events.find { |record| record["event_type"] == "implementation_stage_resolved" }
+      assert_equal "open_pr", stage_event.dig("payload", "identity", "stage")
+      assert_equal selection.to_h.except("native_arguments"), stage_event.dig("payload", "identity")
+    end
+  end
+
   private
 
-  def with_identity_attempt
+  def with_identity_attempt(intended_stage: "4-execute", attempt_id: "execute-attempt")
     with_tmp_dir do |root|
       folder = File.join(root, "task")
       FileUtils.mkdir_p(folder)
@@ -83,8 +105,8 @@ class ImplementationIdentityStoreTest < Minitest::Test
       File.write(File.join(folder, "plan.md"), "# plan\n")
       attempt_store = Hive::Attempts::Store.new(root: File.join(root, "attempts"))
       attempt = attempt_store.create_launching(
-        attempt_id: "execute-attempt", request_id: "request", predecessor_attempt_id: nil,
-        task_id: "42", project: "demo", task_slug: task.slug, intended_stage: "4-execute",
+        attempt_id: attempt_id, request_id: "request", predecessor_attempt_id: nil,
+        task_id: "42", project: "demo", task_slug: task.slug, intended_stage: intended_stage,
         task_generation: "owner-1", ownership_generation: "owner-1", task_input_epoch: 1,
         progress_token: "progress", provider: "codex", starting_revision: nil,
         worker_argv: [ "hive", "run", task.slug ],
@@ -92,6 +114,24 @@ class ImplementationIdentityStoreTest < Minitest::Test
         retry_charge: 0, inherited_outputs: [], launch_timeout_sec: 30, now: Time.now.utc
       )
       yield task, attempt_store, attempt
+    end
+  end
+
+  def seed_execute_identity(task, attempt_store, cfg)
+    execute_attempt = attempt_store.create_launching(
+      attempt_id: "seed-execute", request_id: "seed", predecessor_attempt_id: nil,
+      task_id: "42", project: "demo", task_slug: task.slug, intended_stage: "4-execute",
+      task_generation: "owner-1", ownership_generation: "owner-1", task_input_epoch: 1,
+      progress_token: "seed-progress", provider: "codex", starting_revision: nil,
+      retry_charge: 0, inherited_outputs: [], launch_timeout_sec: 30, now: Time.now.utc
+    )
+    Hive::Attempts::Context.with(
+      attempt_id: execute_attempt.attempt_id, task_generation: 1,
+      ownership_generation: execute_attempt.ownership_generation
+    ) do
+      Hive::ImplementationIdentity::Store.new(
+        task: task, cfg: cfg, attempt_store: attempt_store
+      ).capture_execute!
     end
   end
 

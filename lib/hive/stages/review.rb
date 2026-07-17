@@ -2048,8 +2048,9 @@ module Hive
         File.write(path, body)
       end
 
-      def spawn_fix_agent(task, cfg, ctx, accepted:)
-        profile_name = cfg.dig("review", "fix", "agent") || "claude"
+      def spawn_fix_agent(task, cfg, ctx, accepted:, identity: nil)
+        identity ||= Hive::Stages::Base.implementation_stage_identity(task, cfg, "review.fix")
+        profile_name = identity&.provider || cfg.dig("review", "fix", "agent") || "claude"
         profile = Hive::AgentProfiles.lookup(profile_name, cfg: cfg)
         scope = Hive::Stages::Base.stage_permission_scope(
           cfg, "review.fix", task, profile,
@@ -2086,7 +2087,8 @@ module Hive
           log_label: "review-fix-pass#{format('%02d', ctx.pass)}",
           profile: profile,
           **Hive::Stages::Base.tool_scope_kwargs(scope),
-          status_mode: :exit_code_only
+          status_mode: :exit_code_only,
+          identity_arguments: identity&.native_arguments
         }
         if profile.name == :claude
           Hive::Stages::Base.spawn_claude!(

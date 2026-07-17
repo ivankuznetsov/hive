@@ -11,6 +11,8 @@ require "hive/permission_scope"
 require "hive/stages/clean_exit"
 require "hive/usage_db"
 require "hive/worktree"
+require "hive/attempts/context"
+require "hive/implementation_identity/store"
 
 module Hive
   module Stages
@@ -118,6 +120,16 @@ module Hive
       def stage_profile(cfg, stage_name, explicit_agent: nil)
         name = explicit_agent || cfg.dig(stage_name, "agent") || "claude"
         Hive::AgentProfiles.lookup(name, cfg: cfg)
+      end
+
+      # Production stage launches run inside a durable attempt. Direct unit
+      # calls predating attempt supervision receive nil and retain their
+      # explicit test profile seam; real launches always resolve and journal
+      # implementation ownership before Process.spawn/tmux starts.
+      def implementation_stage_identity(task, cfg, stage)
+        return nil unless Hive::Attempts::Context.current
+
+        Hive::ImplementationIdentity::Store.new(task: task, cfg: cfg).resolve_stage!(stage)
       end
 
       def stage_permission_scope(cfg, stage_name, task, profile,

@@ -6,6 +6,11 @@ class AttemptsGenerationTest < Minitest::Test
 
   FakeTask = Struct.new(:id, :slug, :state_file, :stage_index, :stage_name, keyword_init: true)
 
+  ProjectTask = Struct.new(
+    :id, :slug, :state_file, :stage_index, :stage_name, :project_root,
+    keyword_init: true
+  )
+
   def test_stable_task_id_stage_and_artifact_identity_form_generation
     with_tmp_dir do |dir|
       state_file = File.join(dir, "task.md")
@@ -51,6 +56,36 @@ class AttemptsGenerationTest < Minitest::Test
         unreadable = Hive::Attempts::Generation.artifact_token(task)
         assert_match(/\A[0-9a-f]{64}\z/, unreadable)
         refute_equal missing, unreadable
+      end
+    end
+  end
+
+  def test_dependency_admission_change_advances_generation
+    with_tmp_dir do |dir|
+      state_file = File.join(dir, "task.md")
+      File.write(state_file, "unchanged")
+      task = ProjectTask.new(
+        id: 42, slug: "dependent", state_file: state_file,
+        stage_index: 4, stage_name: "execute", project_root: dir
+      )
+      fingerprint = "wait"
+      resolver = ->(_task) { fingerprint }
+
+      with_replaced_singleton_method(Hive::DependencySnapshot, :admission_fingerprint, resolver) do
+        waiting = Hive::Attempts::Generation.resolve(
+          task: task, project: "demo", intended_stage: "4-execute"
+        )
+        same_wait = Hive::Attempts::Generation.resolve(
+          task: task, project: "demo", intended_stage: "4-execute"
+        )
+        fingerprint = "clear"
+        clear = Hive::Attempts::Generation.resolve(
+          task: task, project: "demo", intended_stage: "4-execute"
+        )
+
+        assert_equal waiting.task_generation, same_wait.task_generation
+        refute_equal waiting.progress_token, clear.progress_token
+        refute_equal waiting.task_generation, clear.task_generation
       end
     end
   end

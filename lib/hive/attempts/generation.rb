@@ -1,4 +1,5 @@
 require "digest"
+require "hive/dependency_snapshot"
 
 module Hive
   module Attempts
@@ -31,7 +32,7 @@ module Hive
 
       def self.artifact_token(task)
         digest = ::Digest::SHA256.new
-        digest << "hive-progress-v1\0"
+        digest << "hive-progress-v2\0"
         digest << task.state_file.to_s
         if File.file?(task.state_file)
           File.open(task.state_file, "rb") do |file|
@@ -40,9 +41,13 @@ module Hive
         else
           digest << "\0missing"
         end
+        if task.respond_to?(:project_root) && task.respond_to?(:slug)
+          digest << "\0dependency-admission\0"
+          digest << Hive::DependencySnapshot.admission_fingerprint(task)
+        end
         digest.hexdigest
       rescue SystemCallError, IOError => e
-        ::Digest::SHA256.hexdigest("hive-progress-v1\0unreadable\0#{e.class}\0#{task.state_file}")
+        ::Digest::SHA256.hexdigest("hive-progress-v2\0unreadable\0#{e.class}\0#{task.state_file}")
       end
     end
   end

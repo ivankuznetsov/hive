@@ -46,10 +46,13 @@ fields. The capability itself is never persisted. Large payloads remain
 owner-private referenced files with canonical relative path, byte size, and
 SHA-256.
 
-Task generation—not request ID—is semantic idempotency. Duplicate live
-deliveries receive the same attempt; completed duplicates replay the receipt.
-A loss successor has a new attempt ID but inherits generation, predecessor,
-outputs, worktree/branch, and an incremented retry charge.
+Task generation—not request ID—is semantic idempotency. Its progress token
+hashes both the stage artifact and this task's deterministic dependency-
+admission verdict. Duplicate live deliveries receive the same attempt and an
+unchanged completed generation replays its receipt, while a dependency wait
+that later becomes clear advances generation instead of replaying the stale
+exit-75 receipt. A loss successor has a new attempt ID but inherits generation,
+predecessor, outputs, worktree/branch, and an incremented retry charge.
 
 ## State protocol
 

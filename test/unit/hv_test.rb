@@ -289,6 +289,62 @@ class HvTest < Minitest::Test
     end
   end
 
+  def test_stdout_inheriting_probe_child_is_killed_when_timeout_binary_is_available
+    skip "requires a system timeout command" unless system("timeout", "--version", out: File::NULL, err: File::NULL)
+
+    with_tmp_dir do |dir|
+      pidfile = File.join(dir, "probe-child.pid")
+      wrapper = File.join(dir, "custom", "hive")
+      FileUtils.mkdir_p(File.dirname(wrapper))
+      File.write(wrapper, <<~SH)
+        #!/bin/sh
+        if [ "$1" = "--version" ]; then
+          #{RbConfig.ruby} -e 'sleep 60' &
+          echo "$!" > "#{pidfile}"
+          exit 0
+        fi
+        echo wrapper:$1
+      SH
+      FileUtils.chmod(0o755, wrapper)
+
+      bash_env = File.join(dir, "bash-env")
+      File.write(bash_env, <<~SH)
+        sleep() {
+          case "${1:-}" in
+            5|1) builtin command sleep 0.1 ;;
+            *) builtin command sleep "$@" ;;
+          esac
+        }
+      SH
+
+      xdg_bin = File.join(dir, "xdg-bin")
+      FileUtils.mkdir_p(xdg_bin)
+      File.write(File.join(xdg_bin, "hive"), <<~SH)
+        #!/bin/sh
+        if [ "$1" = "--version" ]; then echo "2.3.4"; exit 0; fi
+        echo xdg:$1
+      SH
+      FileUtils.chmod(0o755, File.join(xdg_bin, "hive"))
+
+      out, err, status = capture_hv_with_timeout(
+        {
+          "HIVE_BIN_OVERRIDE" => wrapper,
+          "XDG_BIN_HOME" => xdg_bin,
+          "HOMEBREW_PREFIX" => File.join(dir, "empty-homebrew"),
+          "BASH_ENV" => bash_env
+        },
+        "probe",
+        timeout_sec: 2
+      )
+
+      assert status.success?, err
+      assert_equal "xdg:probe\n", out
+      refute probe_child_alive?(Integer(File.read(pidfile).strip))
+    ensure
+      reap_probe_child(pidfile)
+    end
+  end
+
   def test_self_recursion_guard_resolves_symlinks_via_realpath_rung
     assert_recursion_guard_holds(disabled_resolvers: [])
   end
@@ -402,12 +458,12 @@ class HvTest < Minitest::Test
   # Timeout::Error flakes — 30s detects a genuine hang while tolerating load.
   HV_HANG_TIMEOUT_SEC = 30
 
-  def capture_hv_with_timeout(env, *args)
+  def capture_hv_with_timeout(env, *args, timeout_sec: HV_HANG_TIMEOUT_SEC)
     Open3.popen3(env, HV_BIN, *args) do |stdin, stdout, stderr, wait_thread|
       stdin.close
       out_reader = Thread.new { stdout.read }
       err_reader = Thread.new { stderr.read }
-      status = Timeout.timeout(HV_HANG_TIMEOUT_SEC) { wait_thread.value }
+      status = Timeout.timeout(timeout_sec) { wait_thread.value }
       [ out_reader.value, err_reader.value, status ]
     rescue Timeout::Error
       Process.kill("TERM", wait_thread.pid)

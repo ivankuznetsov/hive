@@ -107,7 +107,9 @@ refreshing an existing owned symlink. The in-tree `bin/hv` fallback probes only
 `${XDG_BIN_HOME:-$HOME/.local/bin}/hive`, `${HOMEBREW_PREFIX:-/opt/homebrew}/bin/hive`,
 and `/usr/local/bin/hive`; it intentionally does not fall through to
 `/usr/bin/hive` or `/opt/hive/bin/hive`, because those are common Apache Hive
-locations. Use `HIVE_BIN_OVERRIDE` for a custom Hive CLI install path. RubyGems
+locations. Each candidate's `--version` probe runs in a dedicated process group
+with a five-second watchdog so forked helpers cannot hold the probe open or
+survive its cleanup. Use `HIVE_BIN_OVERRIDE` for a custom Hive CLI install path. RubyGems
 does not advertise `hv` as a gem executable, because RubyGems would wrap the
 bash launcher in a Ruby binstub; install channels create the working `hv`
 wrapper/symlink themselves. The AUR package also uses an `hv -> hive` symlink;

@@ -78,5 +78,12 @@ class AttemptsContextTest < Minitest::Test
     assert_raises(ArgumentError) do
       Hive::Attempts::Context.new(attempt_id: "attempt", task_generation: -1)
     end
+
+    unreadable = Object.new
+    unreadable.define_singleton_method(:to_s) { raise TypeError, "not stringable" }
+    error = assert_raises(ArgumentError) do
+      Hive::Attempts::Context.new(attempt_id: "attempt", task_generation: unreadable)
+    end
+    assert_includes error.message, "numeric task generation"
   end
 end

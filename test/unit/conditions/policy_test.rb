@@ -31,6 +31,8 @@ class ConditionsPolicyTest < Minitest::Test
 
   def test_policy_rejects_unknown_duplicate_conflicting_or_wrong_role_conditions
     invalid = [
+      [],
+      {},
       { "transition" => "x", "required" => [ "Unknown" ] },
       { "transition" => "x", "required" => %w[ChangesPresent ChangesPresent] },
       { "transition" => "x", "required" => [ "AwaitingHuman" ] },
@@ -43,6 +45,10 @@ class ConditionsPolicyTest < Minitest::Test
       assert_raises(Hive::Conditions::InvalidPolicy) do
         Hive::Conditions::Policy.rule_from_descriptor(descriptor)
       end
+    end
+
+    assert_raises(Hive::Conditions::InvalidPolicy) do
+      Hive::Conditions::Policy.default.rule_for("unknown_transition")
     end
   end
 end

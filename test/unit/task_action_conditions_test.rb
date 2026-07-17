@@ -48,6 +48,63 @@ class TaskActionConditionsTest < Minitest::Test
     end
   end
 
+  def test_research_evidence_accepts_marker_or_execute_output_and_fails_closed_on_io
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      File.write(File.join(dir, "plan.md"), "---\nexecution_mode: research\n---\nplan\n")
+
+      completed = marker(:execute_complete, "mode" => "research")
+      action = Hive::TaskAction.new(
+        task, completed, projection: Hive::TaskProjection.project(records: [], marker: completed)
+      )
+      assert action.send(:research_evidence?)
+
+      waiting = marker(:execute_waiting)
+      File.write(task.state_file, "## Execute Output\n\nresult\n")
+      action = Hive::TaskAction.new(
+        task, waiting, projection: Hive::TaskProjection.project(records: [], marker: waiting)
+      )
+      assert action.send(:research_evidence?)
+
+      File.delete(task.state_file)
+      refute action.send(:research_evidence?)
+    end
+  end
+
+  def test_research_frontmatter_parse_errors_fail_closed
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      File.write(File.join(dir, "plan.md"), "---\n[unterminated\n---\n")
+      action = Hive::TaskAction.new(
+        task, marker(:execute_waiting),
+        projection: Hive::TaskProjection.project(records: [], marker: marker(:execute_waiting))
+      )
+
+      refute action.send(:research_execution?)
+    end
+  end
+
+  def test_projection_loading_supports_folderless_tasks_and_store_failures
+    folderless = TaskStub.new(
+      folder: nil, state_file: "/tmp/folderless-task.md", slug: "folderless",
+      stage_index: 4, stage_name: "execute", workflow: Hive::Workflows::Coding::DESCRIPTOR
+    )
+    action = Hive::TaskAction.new(folderless, marker(:execute_waiting))
+    assert_equal 0, action.projection["identity"].fetch("task_generation")
+
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      broken_store = Object.new
+      broken_store.define_singleton_method(:read) { |**| raise Errno::EACCES, "blocked" }
+      with_replaced_singleton_method(
+        Hive::TaskProjection::Store, :new, ->(**) { broken_store }
+      ) do
+        recovered = Hive::TaskAction.new(task, marker(:execute_waiting))
+        assert_equal 0, recovered.projection["identity"].fetch("task_generation")
+      end
+    end
+  end
+
   private
 
   def build_task(dir)

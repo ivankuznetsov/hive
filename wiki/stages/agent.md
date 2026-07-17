@@ -46,6 +46,12 @@ deliverable before status reports them archived.
    source provides one. A budget is per spawn and only enforced when the
    selected profile has a native `budget_flag`; otherwise `spawn_agent` records
    the dropped cap in `config-warnings.log` while still enforcing timeout.
+   Scoped file rules such as `Edit(../../../../docs/**)` are normalized from the
+   task-relative descriptor form to Claude's absolute `Edit(//.../docs/**)`
+   form and run under `dontAsk`, so matching writes proceed while a write
+   unmatched by any loaded permission rule is denied without hanging the
+   headless stage. Loaded Claude setting sources can add broader trusted
+   operator allow rules; the descriptor does not erase them.
 8. Re-read `stage.state_file` and map markers: `WAITING` → `round_waiting`,
    `COMPLETE` → `complete`, `ERROR` → `error`, `NONE` → `nil` (an explicit arm —
    a markerless run has nothing to commit, so `commit_after` skips the commit),

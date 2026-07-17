@@ -305,6 +305,29 @@ class AgentTest < Minitest::Test
     end
   end
 
+  def test_claude_headless_carries_path_qualified_rules_in_dont_ask_mode
+    with_tmp_dir do |dir|
+      agent = Hive::Agent.new(
+        task: make_task(dir),
+        prompt: "test",
+        max_budget_usd: 1,
+        timeout_sec: 5,
+        permission_mode: "dontAsk",
+        allowed_tools: [ "Read", "Edit(//tmp/task/inspect.md)", "Edit(//tmp/project/docs/**)" ],
+        disallowed_tools: %w[Bash]
+      )
+
+      cmd = agent.send(:build_cmd)
+
+      assert_equal %w[--permission-mode dontAsk],
+                   cmd.each_cons(2).find { |arg, _| arg == "--permission-mode" }
+      assert_equal [ "--allowedTools", "Read,Edit(//tmp/task/inspect.md),Edit(//tmp/project/docs/**)" ],
+                   cmd.each_cons(2).find { |arg, _| arg == "--allowedTools" }
+      assert_equal %w[--disallowedTools Bash],
+                   cmd.each_cons(2).find { |arg, _| arg == "--disallowedTools" }
+    end
+  end
+
   def test_non_claude_profiles_omit_tool_scope_flags
     with_tmp_dir do |dir|
       profile = Hive::AgentProfiles.lookup(:codex)

@@ -95,7 +95,7 @@ class PermissionScopeTest < Minitest::Test
       )
 
       assert_equal "scoped", scope.preset
-      assert_equal "default", scope.permission_mode
+      assert_equal "dontAsk", scope.permission_mode
       assert_equal %w[Read Write Edit], scope.allowed_tools
       # The granted tools (Write, Edit) are subtracted from the read-only
       # deny list — otherwise Claude's deny rules would override the grant
@@ -135,6 +135,69 @@ class PermissionScopeTest < Minitest::Test
         end
       end
     end
+  end
+
+  def test_bare_file_tool_allow_only_removes_that_exact_deny
+    with_tmp_dir do |dir|
+      scope = Hive::PermissionScope.resolve(
+        { "preset" => "scoped", "tools" => [ "Write" ] },
+        task_folder: dir,
+        profile: claude_profile,
+        stage: "execute"
+      )
+
+      assert_equal %w[Edit MultiEdit NotebookEdit Bash], scope.disallowed_tools
+    end
+  end
+
+  def test_scoped_accepts_path_qualified_file_rules_and_keeps_them_bounded
+    with_tmp_dir do |dir|
+      tools = [
+        "Read",
+        "Edit(./inspect.md)",
+        "Edit(../../../../docs/**)"
+      ]
+      scope = Hive::PermissionScope.resolve(
+        { "preset" => "scoped", "tools" => tools, "dirs" => [ "../../../.." ] },
+        task_folder: dir,
+        profile: claude_profile,
+        stage: "inspect"
+      )
+
+      assert_equal "dontAsk", scope.permission_mode
+      assert_equal [
+        "Read",
+        "Edit(//#{File.expand_path("inspect.md", dir).delete_prefix("/")})",
+        "Edit(//#{File.expand_path("../../../../docs/**", dir).delete_prefix("/")})"
+      ], scope.allowed_tools
+      assert_equal %w[Bash], scope.disallowed_tools
+      refute_includes scope.disallowed_tools, "Write"
+      refute_includes scope.disallowed_tools, "Edit"
+      refute_includes scope.disallowed_tools, "MultiEdit"
+      refute_includes scope.disallowed_tools, "NotebookEdit"
+      assert_equal [ File.expand_path("../../../..", dir) ], scope.add_dirs_extra
+    end
+  end
+
+  def test_scoped_preserves_mcp_wildcard_and_hyphenated_tool_rules
+    with_tmp_dir do |dir|
+      tools = [ "mcp__browser-tools__*", "Agent(review-agent)" ]
+      scope = Hive::PermissionScope.resolve(
+        { "preset" => "scoped", "tools" => tools },
+        task_folder: dir,
+        profile: claude_profile,
+        stage: "review"
+      )
+
+      assert_equal tools, scope.allowed_tools
+    end
+  end
+
+  def test_claude_absolute_permission_path_normalizes_windows_drive_paths
+    assert_equal "//c/Users/alice/project/docs/**",
+                 Hive::PermissionScope.claude_absolute_permission_path("C:\\Users\\alice\\project\\docs\\**")
+    assert_equal "//tmp/project/docs/**",
+                 Hive::PermissionScope.claude_absolute_permission_path("/tmp/project/docs/**")
   end
 
   # resolve_dirs runs File.expand_path, which raises ArgumentError on an
@@ -203,6 +266,20 @@ class PermissionScopeTest < Minitest::Test
     assert_match(/could not be resolved/, error.message)
   end
 
+  def test_validate_rejects_unresolvable_tilde_user_tool_path_at_parse_time
+    error = assert_raises(Hive::ConfigError) do
+      Hive::PermissionScope.validate!(
+        {
+          "preset" => "scoped",
+          "tools" => [ "Read", "Edit(~hive_no_such_user_42/docs/**)" ]
+        },
+        stage: "execute"
+      )
+    end
+
+    assert_match(/tool path could not be resolved/, error.message)
+  end
+
   # A relative or absolute dir resolves fine at validate! time (no task folder
   # needed to know it CAN resolve), so a normal scoped block still validates.
   def test_validate_accepts_resolvable_relative_and_absolute_dirs
@@ -250,6 +327,18 @@ class PermissionScopeTest < Minitest::Test
         /tools\[0\] .* must be a single tool name without commas, whitespace, or null bytes/ ],
       [ { "preset" => "scoped", "tools" => [ "a\0b" ] },
         /tools\[0\] .* must be a single tool name without commas, whitespace, or null bytes/ ],
+      [ { "preset" => "scoped", "tools" => [ "Edit()" ] },
+        /tools\[0\] .* malformed permission rule/ ],
+      [ { "preset" => "scoped", "tools" => [ "Edit(./docs/**" ] },
+        /tools\[0\] .* malformed permission rule/ ],
+      [ { "preset" => "scoped", "tools" => [ "Edit((./docs/**)" ] },
+        /tools\[0\] .* malformed permission rule/ ],
+      [ { "preset" => "scoped", "tools" => [ "Write(./docs/**)" ] },
+        /tools\[0\] .* does not enforce Write\(path\), use Edit\(path\)/ ],
+      [ { "preset" => "scoped", "tools" => [ "NotebookEdit(./docs/**)" ] },
+        /tools\[0\] .* does not enforce NotebookEdit\(path\), use Edit\(path\)/ ],
+      [ { "preset" => "scoped", "tools" => [ "Glob(./docs/**)" ] },
+        /tools\[0\] .* does not enforce Glob\(path\), use Read\(path\)/ ],
       [ { "preset" => "scoped", "dirs" => "tmp", "bash" => false }, /dirs: must be an Array/ ],
       # Per-entry dirs validation: a blank entry and a null-byte-bearing entry
       # are both rejected (a null byte would corrupt the add-dir argv).
@@ -356,6 +445,21 @@ class PermissionScopeTest < Minitest::Test
     end
 
     assert_match(/would both grant and deny \["Bash"\]/, error.message)
+    assert_match(/deny rules win/, error.message)
+  end
+
+  def test_scope_build_rejects_path_rule_with_bare_deny_for_same_tool
+    error = assert_raises(ArgumentError) do
+      Hive::PermissionScope::Scope.build(
+        preset: "scoped",
+        permission_mode: "dontAsk",
+        allowed_tools: [ "Read", "Edit(./docs/**)" ],
+        disallowed_tools: %w[Write Bash],
+        add_dirs_extra: []
+      )
+    end
+
+    assert_match(/would grant and deny tools \["Write"\]/, error.message)
     assert_match(/deny rules win/, error.message)
   end
 

@@ -96,8 +96,12 @@ conditions:
   stages: {}
   # stages:
   #   4-execute: shadow
-open_pr:
-  agent: claude
+# Open-PR implementation ownership is inherited from execute. Advanced escape hatch:
+# open_pr:
+#   agent: codex
+#   model: gpt-5.6-terra
+#   effort: medium
+open_pr: {}
 artifacts:
   agent: claude
 finalize:
@@ -141,7 +145,10 @@ review:
     # Example: "bin/ci" for hive itself, "bin/rails test" for a Rails project.
     command: null
     max_attempts: 3
-    agent: claude
+    # agent/model/effort overrides are optional; absent fields inherit execute ownership.
+    # agent: codex
+    # model: gpt-5.6-sol
+    # effort: high
     prompt_template: ci_fix_prompt.md.erb
   triage:
     enabled: true
@@ -157,7 +164,10 @@ review:
     # preset's prompt entirely.
     custom_prompt: null
   fix:
-    agent: claude
+    # agent/model/effort overrides are optional; absent fields inherit execute ownership.
+    # agent: codex
+    # model: gpt-5.6-sol
+    # effort: high
     prompt_template: fix_prompt.md.erb
     auto_commit:
       # inherit preserves the repository's commit signing config. Use

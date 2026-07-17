@@ -27,6 +27,36 @@ module Hive
       end
     end
 
+    Selection = Data.define(
+      :stage, :provider, :model, :profile_name, :launcher_identity, :source,
+      :generation, :originating_attempt, :requested_effort, :effective_effort,
+      :effort_supported, :model_pinned, :native_arguments
+    ) do
+      def initialize(stage:, provider:, model:, profile_name:, launcher_identity:, source:,
+                     generation:, originating_attempt:, requested_effort:, effective_effort:,
+                     effort_supported:, model_pinned:, native_arguments:)
+        super(
+          stage: stage.to_s.freeze,
+          provider: provider.to_s.freeze,
+          model: model.to_s.freeze,
+          profile_name: profile_name.to_s.freeze,
+          launcher_identity: launcher_identity.to_s.freeze,
+          source: source.to_s.freeze,
+          generation: Integer(generation),
+          originating_attempt: originating_attempt&.to_s&.freeze,
+          requested_effort: requested_effort&.to_s&.freeze,
+          effective_effort: effective_effort&.to_s&.freeze,
+          effort_supported: effort_supported == true,
+          model_pinned: model_pinned == true,
+          native_arguments: Array(native_arguments).map { |arg| arg.to_s.dup.freeze }.freeze
+        )
+      end
+
+      def to_h
+        members.to_h { |member| [ member.to_s, public_send(member) ] }
+      end
+    end
+
     module_function
 
     def normalize_model(model, concrete: false)
@@ -84,6 +114,9 @@ module Hive
           raise ResolutionError, "unknown provider #{provider.inspect}"
         end
 
+        if value.to_s.strip.empty?
+          raise ResolutionError, "#{provider} did not expose a concrete default model"
+        end
         Hive::ImplementationIdentity.normalize_model(value, concrete: true)
       rescue Errno::ENOENT, Errno::EACCES, JSON::ParserError, ArgumentError => e
         raise ResolutionError, "could not inspect #{provider} default model: #{e.message}"

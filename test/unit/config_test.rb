@@ -42,7 +42,54 @@ class ConfigTest < Minitest::Test
       assert_equal 30, cfg["attempt_first_heartbeat_timeout_sec"]
       assert_nil cfg.dig("review", "adhoc", "reviewers")
       assert_equal false, cfg.dig("review", "adhoc", "fix")
+      assert_nil cfg.dig("open_pr", "agent")
+      assert_nil cfg.dig("review", "ci", "agent")
+      assert_nil cfg.dig("review", "fix", "agent")
       assert_equal dir, cfg["project_root"]
+    end
+  end
+
+  def test_load_records_frozen_field_level_implementation_identity_provenance
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        execute:
+          agent: codex
+          model: gpt-5.6-sol
+        open_pr:
+          effort: low
+        review:
+          ci:
+            model: gpt-5.6-terra
+          fix:
+            agent: claude
+            effort: high
+      YAML
+
+      cfg = Hive::Config.load(dir)
+      provenance = cfg.fetch(Hive::Config::IMPLEMENTATION_IDENTITY_PROVENANCE_KEY)
+
+      assert_equal({ "agent" => "codex", "model" => "gpt-5.6-sol" },
+                   provenance.fetch("execute"))
+      assert_equal({ "effort" => "low" }, provenance.fetch("open_pr"))
+      assert_equal({ "model" => "gpt-5.6-terra" }, provenance.fetch("review.ci"))
+      assert_equal({ "agent" => "claude", "effort" => "high" },
+                   provenance.fetch("review.fix"))
+      assert provenance.frozen?
+      assert provenance.values.all?(&:frozen?)
+    end
+  end
+
+  def test_implementation_identity_fields_use_raw_provenance_not_merged_defaults
+    with_tmp_dir do |dir|
+      cfg = Hive::Config.load(dir)
+
+      assert_equal({}, Hive::Config.implementation_identity_fields(cfg, "open_pr"))
+      assert_equal({}, Hive::Config.implementation_identity_fields(cfg, "review.fix"))
+
+      synthetic = { "review" => { "fix" => { "agent" => "claude" } } }
+      assert_equal({ "agent" => "claude" },
+                   Hive::Config.implementation_identity_fields(synthetic, "review.fix"))
     end
   end
 
@@ -1728,7 +1775,8 @@ class ConfigTest < Minitest::Test
       cfg = Hive::Config.load(dir)
       assert_equal "bin/ci", cfg.dig("review", "ci", "command")
       assert_equal 3,        cfg.dig("review", "ci", "max_attempts"), "max_attempts must fall back to default"
-      assert_equal "claude", cfg.dig("review", "ci", "agent"),        "agent must fall back to default"
+      assert_nil cfg.dig("review", "ci", "agent"),
+                 "implementation-owning CI agent stays absent for execute inheritance"
       assert_equal "ci_fix_prompt.md.erb", cfg.dig("review", "ci", "prompt_template")
       # Other sibling blocks at review.* must also stay intact.
       assert_equal "courageous", cfg.dig("review", "triage", "bias")
@@ -2676,7 +2724,7 @@ class ConfigTest < Minitest::Test
     with_tmp_dir do |dir|
       cfg = Hive::Config.load(dir)
       assert_equal 3,         cfg.dig("review", "ci", "max_attempts")
-      assert_equal "claude",  cfg.dig("review", "ci", "agent")
+      assert_nil cfg.dig("review", "ci", "agent")
       assert_equal "courageous", cfg.dig("review", "triage", "bias")
       assert_equal false,     cfg.dig("review", "browser_test", "enabled")
       assert_equal 2,         cfg.dig("review", "max_passes")

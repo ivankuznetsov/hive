@@ -164,6 +164,7 @@ class PatrolCommandTest < Minitest::Test
 
   def test_patrol_dry_run_reviews_but_does_not_fix_or_open_pr
     with_patrol_project do |repo|
+      set_patrol_commands(repo, "format" => nil, "lint" => nil, "typecheck" => nil, "test" => nil)
       finder = sample_finding
       patch = sample_patch(repo, finder)
       fixer = FakeFixer.new(patch)
@@ -188,6 +189,29 @@ class PatrolCommandTest < Minitest::Test
       assert_equal 0, payload.fetch("prs_opened")
       assert_empty fixer.attempted
       assert_empty pr_opener.opened
+    end
+  end
+
+  def test_patrol_without_validation_commands_fails_before_agent_work_or_state_mutation
+    with_patrol_project do |repo|
+      set_patrol_commands(repo, "format" => nil, "lint" => nil, "typecheck" => nil, "test" => nil)
+      exploding_mapper = Class.new do
+        def call
+          raise "mapper must not run"
+        end
+      end.new
+
+      out, err, status = with_captured_exit do
+        command_for(mapper: exploding_mapper).call
+      end
+
+      payload = JSON.parse(out)
+      assert_equal Hive::ExitCodes::CONFIG, status
+      assert_equal "config", payload.fetch("error_kind")
+      assert_includes payload.fetch("message"), "patrol.commands"
+      assert_includes err, "patrol.commands"
+      refute Dir.exist?(File.join(repo, ".hive-state", "patrol")),
+             "preflight must fail before patrol state is created or watermarks can move"
     end
   end
 
@@ -815,6 +839,13 @@ class PatrolCommandTest < Minitest::Test
   end
 
   private
+
+  def set_patrol_commands(repo, commands)
+    path = File.join(repo, ".hive-state", "config.yml")
+    cfg = YAML.safe_load(File.read(path))
+    cfg["patrol"]["commands"] = commands
+    File.write(path, cfg.to_yaml)
+  end
 
   def with_patrol_project
     with_tmp_global_config do

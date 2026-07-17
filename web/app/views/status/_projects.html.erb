@@ -28,7 +28,15 @@
                 <%= stage_badge(task["stage"]) %>
                 <span class="task-meta">
                   <%= status_dot(task) %>
-                  <%= task["action_label"].presence || task["marker"].presence || "idle" %>
+                  <% finalization = task["finalization"] %>
+                  <% if finalization.is_a?(Hash) && finalization["state"] != "unfinalized" %>
+                    <%= finalization["state"] %>
+                    <% if finalization.dig("blocker", "code").present? %>
+                      · <%= finalization.dig("blocker", "code") %>
+                    <% end %>
+                  <% else %>
+                    <%= task["action_label"].presence || task["marker"].presence || "idle" %>
+                  <% end %>
                 </span>
                 <span class="task-meta faint"><%= relative_age(task["age_seconds"]) %></span>
               </article>

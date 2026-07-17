@@ -94,6 +94,23 @@ class TuiSnapshotTest < Minitest::Test
     assert first.frozen?, "row records must be frozen"
   end
 
+  def test_from_payload_preserves_finalization_without_reclassifying_it
+    row = sample_task(slug: "watching-task", stage: "8-finalize", marker: "complete")
+    row["action"] = "watching"
+    row["action_label"] = "Watching pull request"
+    row["finalization"] = {
+      "state" => "merge_ready", "head_sha" => "a" * 40, "head_generation" => 5,
+      "blocker" => nil,
+      "safe_action" => { "code" => "wait_for_merge", "label" => "Wait for merge" }
+    }
+
+    snapshot = Hive::Tui::Snapshot.from_payload(sample_payload([
+      { "name" => "alpha", "tasks" => [ row ] }
+    ]))
+
+    assert_equal row.fetch("finalization"), snapshot.rows.first.finalization
+  end
+
   def test_from_payload_with_empty_projects_yields_empty_rows
     snapshot = Hive::Tui::Snapshot.from_payload(sample_payload([]))
     assert_equal [], snapshot.projects

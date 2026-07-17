@@ -663,3 +663,21 @@ pre {
   font-size: 0.85rem;
   word-break: break-word;
 }
+
+.finalization-state {
+  margin: 18px 0;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+}
+
+.finalization-state h2 { margin-top: 0; }
+.finalization-state dl {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 6px 16px;
+  margin-bottom: 0;
+}
+.finalization-state dt { color: var(--ink-muted); }
+.finalization-state dd { margin: 0; overflow-wrap: anywhere; }

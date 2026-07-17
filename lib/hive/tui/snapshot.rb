@@ -2,6 +2,7 @@ require "hive"
 require "time"
 require "hive/archive_filter"
 require "hive/commands/status"
+require "hive/finalization/projection"
 
 module Hive
   module Tui
@@ -69,6 +70,7 @@ module Hive
         :condition_provenance,
         :shadow_audit,
         :condition_warning,
+        :finalization,
         :marker,
         :attrs,
         # Carried verbatim from the JSON `held` object for payload↔Row
@@ -110,6 +112,7 @@ module Hive
                        current_attempt: nil, conditions: [], condition_history: [],
                        evidence: [], condition_gate: nil, condition_migration: nil,
                        condition_provenance: {}, shadow_audit: {}, condition_warning: nil,
+                       finalization: nil,
                        folder_mtime: nil, live_task_lock: false,
                        unanswered_questions: 0, depends_on: nil,
                        blocked_by: nil, dependency_stage: nil,
@@ -136,6 +139,7 @@ module Hive
                 condition_provenance: condition_provenance,
                 shadow_audit: shadow_audit,
                 condition_warning: condition_warning,
+                finalization: finalization || Hive::Finalization::Projection.project(records: []),
                 held: held,
                 folder_mtime: folder_mtime,
                 live_task_lock: live_task_lock,
@@ -219,6 +223,7 @@ module Hive
           condition_provenance: payload["condition_provenance"] || {},
           shadow_audit: payload["shadow_audit"] || {},
           condition_warning: payload["condition_warning"],
+          finalization: payload["finalization"],
           marker: payload["marker"],
           attrs: payload["attrs"],
           held: payload["held"],

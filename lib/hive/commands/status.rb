@@ -294,7 +294,7 @@ module Hive
           "folder" => row[:folder],
           "state_file" => row[:state_file],
           "worktree_path" => row[:worktree_path],
-          "pr_url" => row[:pr_url],
+          "pr_url" => status_pr_url(row),
           "marker" => row[:marker_name].to_s,
           "attrs" => row[:marker_attrs],
           "mtime" => row[:mtime].utc.iso8601(6),
@@ -321,6 +321,7 @@ module Hive
           "condition_provenance" => row.dig(:projection_data, "provenance") || {},
           "shadow_audit" => row.dig(:projection_data, "shadow_audit") || {},
           "condition_warning" => row[:condition_warning],
+          "finalization" => finalization_payload(row),
           # Count of still-unanswered brainstorm Q&A questions (issue #270).
           # 0 for every non-brainstorm / non-needs_input row. Lets an agent
           # or operator tell "the daemon is holding this brainstorm because
@@ -341,6 +342,16 @@ module Hive
           payload["held"] = Hive::AgentLimit.held_field(row[:marker_attrs])
         end
         payload
+      end
+
+      def finalization_payload(row)
+        value = row.dig(:projection_data, "finalization")
+        value.is_a?(Hash) ? value : Hive::Finalization::Projection.project(records: [])
+      end
+
+      def status_pr_url(row)
+        finalization_url = finalization_payload(row)["pr_url"].to_s
+        finalization_url.empty? ? row[:pr_url] : finalization_url
       end
 
       # Number of unanswered `### Q{n}.` slots in a brainstorm task's
@@ -579,6 +590,8 @@ module Hive
             state = [ r[:state_label], dependency_indicator(r) ].compact.join(" ")
             puts "    #{r[:icon]} #{display_identity_with_pr(r, TEXT_IDENTITY_WIDTH)} " \
                  "#{state.ljust(24)} #{command} #{r[:age]}"
+            detail = finalization_text_detail(r)
+            puts "      #{detail}" if detail
           end
         end
         render_archived_hidden_summary(hidden_rows.size) unless hidden_rows.empty?
@@ -634,14 +647,15 @@ module Hive
       # PR cell rather than any digits inside the name.
       def display_identity_with_pr(row, width)
         id = row[:id] ? "##{row[:id]}" : "—"
-        token = Hive::Pr.number(row[:pr_url]) || "—"
+        pr_url = status_pr_url(row)
+        token = Hive::Pr.number(pr_url) || "—"
         pr_cell = token.rjust(TEXT_PR_WIDTH)
         name = row[:display_name] || row[:slug]
         padded = "#{id} #{pr_cell} #{name}".ljust(width)
         return padded if token == "—"
 
         token_start = id.length + 1 + (pr_cell.length - token.length)
-        Hive::Tui::Views::Hyperlink.splice(padded, token_start, token.length, row[:pr_url], enabled: $stdout.tty?)
+        Hive::Tui::Views::Hyperlink.splice(padded, token_start, token.length, pr_url, enabled: $stdout.tty?)
       end
 
       def dependency_indicator(row)
@@ -1084,6 +1098,12 @@ module Hive
       end
 
       def condition_state_label(row, action)
+        finalization = finalization_payload(row)
+        unless finalization.fetch("state") == "unfinalized"
+          state = finalization.fetch("state")
+          blocker = finalization.dig("blocker", "code")
+          return blocker ? "#{state} blocker=#{blocker}" : state
+        end
         return "#{row[:state_label]} [#{action.condition_warning}]" if action.condition_warning
         return row[:state_label] unless action.migration_selection.effective == "conditions"
 
@@ -1091,6 +1111,30 @@ module Hive
         return row[:state_label] unless diagnostic
 
         "#{diagnostic['condition']}=#{diagnostic['state']}"
+      end
+
+      def finalization_text_detail(row)
+        finalization = finalization_payload(row)
+        return nil if finalization.fetch("state") == "unfinalized"
+
+        blocker = finalization["blocker"]
+        parts = [
+          "finalization=#{finalization['state']}",
+          "pr=#{finalization['pr_url']}",
+          "job=#{finalization['job_id']}",
+          "task_generation=#{finalization['task_generation']}",
+          "finalize_attempt=#{finalization['finalize_attempt_id']}",
+          "head_generation=#{finalization['head_generation']}",
+          "sha=#{finalization['head_sha']}",
+          "updated_at=#{finalization['updated_at']}"
+        ]
+        if blocker
+          parts << "blocker=#{blocker['code']}"
+          parts << "needs_human=#{blocker['needs_human']}"
+          parts << "detail=#{status_attr_value(blocker['detail'])}"
+        end
+        parts << "next=#{finalization.dig('safe_action', 'code')}"
+        parts.join(" ")
       end
 
       # Memoize per status call. The daemon's StaleAgentHealer reads the

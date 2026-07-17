@@ -1,6 +1,7 @@
 require "test_helper"
 require "tmpdir"
 require_relative "../../../test/support/workflow_helpers"
+require "hive/task_journal/envelope"
 
 class TasksTest < ActionDispatch::IntegrationTest
   include HiveWorkflowTestHelper
@@ -67,6 +68,42 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert css_select("details[data-artifact-name='artifact.md']").first["open"],
            "the leading artifact must render expanded"
     assert_includes names, "idea.md", "the chronological story still follows"
+  end
+
+  test "finalize watching renders the shared lifecycle identity blocker and safe action" do
+    FileUtils.mv(stage_dir(@project, "1-inbox").join(@slug),
+                 stage_dir(@project, "8-finalize").join(@slug))
+    folder = stage_dir(@project, "8-finalize").join(@slug)
+    pr_url = "https://github.com/acme/demo/pull/295"
+    folder.join("pr.md").write("---\npr_url: #{pr_url}\n---\n<!-- COMPLETE -->\n")
+    event = Hive::TaskJournal::Envelope.authoritative({
+      event_id: "finalized-web", event_type: "finalized", occurred_at: "2026-07-17T20:00:00Z",
+      observed_at: "2026-07-17T20:00:00Z", task: { "id" => "42", "slug" => @slug },
+      workflow: "coding", stage: "8-finalize", attempt_id: "attempt-2", task_generation: 3,
+      ownership_generation: "owner-2", reason: "handoff", evidence: [],
+      provenance: { "source" => "test" },
+      producer: { "kind" => "finalize_attempt", "attempt_id" => "attempt-2" },
+      payload: {
+        "job_id" => "bsj-v1-web-probe", "repository" => "github.com/acme/demo", "pr_number" => 295,
+        "pr_url" => pr_url, "head_sha" => "b" * 40, "head_generation" => 1,
+        "finalize_attempt_id" => "attempt-2"
+      }
+    })
+    folder.join("events.jsonl").write("#{JSON.generate(event)}\n")
+
+    get "/tasks/#{@project}/#{@slug}"
+
+    assert_response :success
+    assert_select "section.finalization-state[aria-label='Pull request finalization']", 1
+    assert_select ".finalization-state", text: /Lifecycle\s+finalized/
+    assert_select ".finalization-state a[href=?]", pr_url, text: "#295"
+    assert_select ".finalization-state", text: /bsj-v1-web-probe/
+    assert_select ".finalization-state", text: /Task generation\s+3/
+    assert_select ".finalization-state", text: /attempt-2/
+    assert_select ".finalization-state", text: /Retry babysitter/
+
+    get "/"
+    assert_select ".task-row", text: /finalized/
   end
 
   test "a non-coding workflow renders its own stage artifacts, derived from the descriptor" do

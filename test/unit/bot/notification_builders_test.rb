@@ -993,6 +993,42 @@ class HiveBotNotificationBuildersTest < Minitest::Test
                  Hive::Bot::NotificationBuilders.fingerprint(with_pr)
   end
 
+  def test_watching_notification_renders_shared_finalization_and_changes_only_on_semantic_delta
+    finalization = {
+      "state" => "blocked", "task_generation" => 3, "finalize_attempt_id" => "attempt-2",
+      "job_id" => "bsj-v1-probe", "repository" => "github.com/acme/demo", "pr_number" => 295,
+      "pr_url" => "https://github.com/acme/demo/pull/295", "head_sha" => "b" * 40,
+      "head_generation" => 2, "claim_fence" => 4, "updated_at" => "2026-07-17T20:00:00Z",
+      "blocker" => { "code" => "closed_unmerged", "needs_human" => true,
+                       "detail" => "Closed without merge", "source" => "babysitter" },
+      "safe_action" => { "code" => "confirm_terminal_outcome",
+                           "label" => "Resolve or confirm terminal outcome", "target" => "task",
+                           "confirmation_required" => true }
+    }
+    first = row(action: "watching", marker: "complete", stage: "8-finalize").with(finalization: finalization)
+
+    notification = Hive::Bot::NotificationBuilders.build(first)
+
+    assert_includes notification.text, "PR watching: blocked"
+    assert_includes notification.text, "https://github.com/acme/demo/pull/295"
+    assert_includes notification.text, "Job: bsj-v1-probe"
+    assert_includes notification.text, "Task generation: 3; finalize attempt: attempt-2"
+    assert_includes notification.text, "Head generation: 2; SHA: #{'b' * 40}"
+    assert_includes notification.text, "Blocker: closed_unmerged (needs human: yes)"
+    assert_includes notification.text, "Safe next action: Resolve or confirm terminal outcome"
+    assert_nil notification.keyboard
+
+    volatile_only = first.with(finalization: finalization.merge(
+      "updated_at" => "2026-07-17T20:01:00Z", "claim_fence" => 5
+    ))
+    assert_equal Hive::Bot::NotificationBuilders.fingerprint(first),
+                 Hive::Bot::NotificationBuilders.fingerprint(volatile_only)
+
+    new_head = first.with(finalization: finalization.merge("head_sha" => "c" * 40, "head_generation" => 3))
+    refute_equal Hive::Bot::NotificationBuilders.fingerprint(first),
+                 Hive::Bot::NotificationBuilders.fingerprint(new_head)
+  end
+
   class StubLogger
     attr_reader :events
 

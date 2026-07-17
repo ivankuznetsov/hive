@@ -40,6 +40,20 @@ class StatusFeedTest < Minitest::Test
     end
   end
 
+  def test_snapshot_passes_the_finalization_object_through_unchanged
+    finalization = {
+      "state" => "blocked", "job_id" => "bsj-v1-probe",
+      "head_sha" => "b" * 40, "head_generation" => 2,
+      "blocker" => { "code" => "closed_unmerged", "needs_human" => true },
+      "safe_action" => { "code" => "confirm_terminal_outcome" }
+    }
+    payload = { "projects" => [ { "tasks" => [ { "finalization" => finalization } ] } ] }
+    feed = Hive::Web::StatusFeed.new(status_command: CountingStatus.new([ payload ]))
+
+    assert_equal finalization,
+                 feed.snapshot.dig("projects", 0, "tasks", 0, "finalization")
+  end
+
   def test_snapshot_preserves_content_workflow_rows
     with_registered_workflow(content_workflow) do
       with_tmp_global_config do

@@ -81,6 +81,11 @@ class HiveBotStatusWatcherTest < Minitest::Test
     status_task["current_attempt"] = "attempt-b"
     status_task["conditions"] = [ { "condition" => "ChangesPresent", "state" => "satisfied" } ]
     status_task["condition_migration"] = { "effective" => "conditions" }
+    status_task["finalization"] = {
+      "state" => "blocked", "job_id" => "bsj-v1-probe", "head_generation" => 2,
+      "head_sha" => "b" * 40, "blocker" => { "code" => "closed_unmerged" },
+      "safe_action" => { "code" => "confirm_terminal_outcome" }
+    }
 
     with_fake_status(JSON.generate(envelope([ status_task ]))) do |bin|
       result = Hive::Bot::StatusWatcher.new(hive_bin: bin).fetch
@@ -100,6 +105,8 @@ class HiveBotStatusWatcherTest < Minitest::Test
       assert_equal 2, row.commit_generation
       assert_equal "attempt-b", row.current_attempt
       assert_equal "conditions", row.condition_migration.fetch("effective")
+      assert_equal "blocked", row.finalization.fetch("state")
+      assert_equal "closed_unmerged", row.finalization.dig("blocker", "code")
     end
   end
 

@@ -8,6 +8,28 @@
     <span class="task-meta"><%= status_dot(@row) %> <%= @row["action_label"].presence || @row["marker"].presence || "idle" %></span>
   </div>
 
+  <% finalization = @row["finalization"] %>
+  <% if finalization.is_a?(Hash) && finalization["state"] != "unfinalized" %>
+    <section class="finalization-state" aria-label="Pull request finalization">
+      <h2>Pull request watching</h2>
+      <dl>
+        <dt>Lifecycle</dt><dd><%= finalization["state"] %></dd>
+        <dt>Pull request</dt>
+        <dd><%= link_to "##{finalization["pr_number"]}", finalization["pr_url"], rel: "noopener noreferrer", target: "_blank" %></dd>
+        <dt>Job</dt><dd><code><%= finalization["job_id"] %></code></dd>
+        <dt>Task generation</dt><dd><%= finalization["task_generation"] %></dd>
+        <dt>Finalize attempt</dt><dd><code><%= finalization["finalize_attempt_id"] %></code></dd>
+        <dt>Head</dt><dd><code><%= finalization["head_sha"] %></code> (generation <%= finalization["head_generation"] %>)</dd>
+        <dt>Updated</dt><dd><%= finalization["updated_at"] %></dd>
+        <% if (blocker = finalization["blocker"]).is_a?(Hash) %>
+          <dt>Blocker</dt><dd><%= blocker["code"] %><%= " — #{blocker["detail"]}" if blocker["detail"].present? %></dd>
+          <dt>Needs human</dt><dd><%= blocker["needs_human"] ? "yes" : "no" %></dd>
+        <% end %>
+        <dt>Safe next action</dt><dd><%= finalization.dig("safe_action", "label") %></dd>
+      </dl>
+    </section>
+  <% end %>
+
   <%# Only the state-driven primary actions appear (Approve when the gate is
       passable, Run when the operator drives stages manually, Diff when a
       worktree exists). The sharp tools live in the Advanced section. %>

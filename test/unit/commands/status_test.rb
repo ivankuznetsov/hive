@@ -1,9 +1,74 @@
 require "test_helper"
 require "hive/commands/status"
 require "hive/task_action"
+require "hive/task_journal/envelope"
 
 class CommandsStatusTest < Minitest::Test
   include HiveTestHelper
+
+  def test_task_payload_publishes_one_finalization_object_and_canonical_pr
+    finalization = finalization_fixture
+    row = {
+      stage: "8-finalize", slug: "watching-task", id: 42, display_name: "Watching task",
+      depends_on: nil, blocked_by: nil, dependency_stage: nil, blocked: false,
+      admission_error: nil, folder: "/tmp/watching-task", state_file: "/tmp/watching-task/task.md",
+      worktree_path: "/tmp/wt", pr_url: "https://github.com/wrong/legacy/pull/1",
+      marker_name: :complete, marker_attrs: {}, mtime: Time.now, folder_mtime: Time.now,
+      claude_pid: nil, claude_pid_alive: nil, live_task_lock: false,
+      projection_data: { "finalization" => finalization },
+      action_key: "watching", action_label: "Watching pull request", suggested_command: nil,
+      next_action: nil, diagnostic: nil
+    }
+
+    payload = Hive::Commands::Status.new.task_payload(row)
+
+    assert_equal finalization, payload.fetch("finalization")
+    assert_equal finalization.fetch("pr_url"), payload.fetch("pr_url")
+    detail = Hive::Commands::Status.new.send(:finalization_text_detail, row)
+    %w[finalization=blocked job=bsj-v1-probe task_generation=3 finalize_attempt=attempt-2
+       head_generation=2 sha=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb blocker=closed_unmerged
+       needs_human=true next=confirm_terminal_outcome].each do |token|
+      assert_includes detail, token
+    end
+  end
+
+  def test_finalization_status_read_has_no_github_journal_or_snapshot_side_effect
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      folder = write_status_task(
+        hive_state, "8-finalize", "pure-watch-task", state_file: "pr.md", marker: "COMPLETE"
+      )
+      Hive::TaskMeta.write(folder, id: 42, slug: "pure-watch-task", display_name: nil)
+      event = Hive::TaskJournal::Envelope.authoritative({
+        event_id: "pure-finalized", event_type: "finalized", occurred_at: "2026-07-17T20:00:00Z",
+        observed_at: "2026-07-17T20:00:00Z", task: { "id" => "42", "slug" => "pure-watch-task" },
+        workflow: "coding", stage: "8-finalize", attempt_id: "attempt-2", task_generation: 3,
+        ownership_generation: "owner-2", reason: "handoff", evidence: [], provenance: { "source" => "test" },
+        producer: { "kind" => "finalize_attempt", "attempt_id" => "attempt-2" },
+        payload: {
+          "job_id" => "bsj-v1-pure", "repository" => "github.com/acme/demo", "pr_number" => 295,
+          "pr_url" => "https://github.com/acme/demo/pull/295", "head_sha" => "b" * 40,
+          "head_generation" => 1, "finalize_attempt_id" => "attempt-2"
+        }
+      })
+      journal_path = File.join(folder, "events.jsonl")
+      File.write(journal_path, "#{JSON.generate(event)}\n")
+      original_journal = File.binread(journal_path)
+      snapshot_path = File.join(folder, Hive::TaskProjection::Store::SNAPSHOT_BASENAME)
+
+      payload = with_replaced_singleton_method(Hive::Gh, :exact_pr_snapshot, lambda { |*|
+        raise "status must not call GitHub"
+      }) do
+        Hive::Commands::Status.new.json_payload([ status_project(project_root, hive_state) ])
+      end
+
+      row = payload.dig("projects", 0, "tasks", 0)
+      assert_equal "finalized", row.dig("finalization", "state")
+      assert_equal "watching", row.fetch("action")
+      assert_equal original_journal, File.binread(journal_path)
+      refute File.exist?(snapshot_path), "status reads must not publish a projection snapshot"
+    end
+  end
 
   def test_corrupt_metadata_in_dispatchable_stage_emits_structured_admission_error
     with_tmp_dir do |project_root|
@@ -1901,6 +1966,26 @@ class CommandsStatusTest < Minitest::Test
   end
 
   private
+
+  def finalization_fixture
+    {
+      "state" => "blocked", "task_generation" => 3, "finalize_attempt_id" => "attempt-2",
+      "job_id" => "bsj-v1-probe", "repository" => "github.com/acme/demo", "pr_number" => 295,
+      "pr_url" => "https://github.com/acme/demo/pull/295", "head_sha" => "b" * 40,
+      "head_generation" => 2, "claim_fence" => 4, "updated_at" => "2026-07-17T20:00:00Z",
+      "blocker" => { "code" => "closed_unmerged", "needs_human" => true,
+                       "detail" => "Closed without merge", "source" => "babysitter" },
+      "evidence" => {
+        "finalized_event_id" => "finalized", "merge_ready_event_id" => nil,
+        "terminal_event_id" => nil, "terminal_kind" => nil, "merged_at" => nil,
+        "archive_ready_event_id" => nil, "cleanup_event_id" => nil
+      },
+      "safe_action" => {
+        "code" => "confirm_terminal_outcome", "label" => "Resolve or confirm terminal outcome",
+        "target" => "task", "confirmation_required" => true
+      }
+    }
+  end
 
   def status_project(project_root, hive_state)
     { "name" => "demo", "path" => project_root, "hive_state_path" => hive_state }

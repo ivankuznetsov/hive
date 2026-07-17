@@ -164,6 +164,37 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     assert_includes out, label
   end
 
+  def test_watching_status_uses_shared_lifecycle_head_and_blocker
+    task = make_task(
+      slug: "watching-task", stage: "8-finalize", action: "watching",
+      action_label: "Watching pull request", marker: "complete",
+      pr_url: "https://github.com/acme/demo/pull/295"
+    )
+    task["finalization"] = {
+      "state" => "blocked", "pr_number" => 295, "job_id" => "bsj-v1-probe",
+      "task_generation" => 3, "finalize_attempt_id" => "attempt-2",
+      "head_sha" => "b" * 40, "head_generation" => 2, "updated_at" => "2026-07-17T20:00:00Z",
+      "blocker" => { "code" => "closed_unmerged", "needs_human" => true,
+                       "detail" => "Closed without merge" },
+      "safe_action" => { "label" => "Resolve or confirm terminal outcome" }
+    }
+    snap = make_snapshot([ { "name" => "hive", "tasks" => [ task ] } ])
+    row = snap.rows.first
+
+    label = Hive::Tui::Views::TasksPane.status_label(row)
+
+    assert_includes label, "blocked"
+    assert_includes label, "hg2"
+    assert_includes label, "bbbbbbb"
+    assert_includes label, "closed_unmerged"
+
+    rendered = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 180)
+    assert_includes rendered, "PR #295 · blocked · job=bsj-v1-probe"
+    assert_includes rendered, "task-gen=3 · finalize=attempt-2 · head-gen=2 · sha=#{'b' * 40}"
+    assert_includes rendered, "blocker=closed_unmerged · needs-human=true · Closed without merge"
+    assert_includes rendered, "next=Resolve or confirm terminal outcome"
+  end
+
   def test_renders_dash_pr_column_without_url
     snap = make_snapshot([
       { "name" => "hive", "tasks" => [

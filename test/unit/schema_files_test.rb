@@ -147,8 +147,14 @@ class SchemaFilesTest < Minitest::Test
     assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
     assert_equal "hive-status",
                  doc.dig("$defs", "SuccessPayload", "properties", "schema", "const")
-    assert_equal 5,
+    assert_equal 6,
                  doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+  end
+
+  def test_hive_status_v5_schema_remains_for_back_compat
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status", version: 5)))
+    assert_equal 5, doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+    refute_includes doc.dig("$defs", "Task", "properties").keys, "finalization"
   end
 
   def test_hive_status_v4_schema_remains_for_back_compat
@@ -236,6 +242,16 @@ class SchemaFilesTest < Minitest::Test
                  doc.dig("$defs", "Task", "properties", "marker", "enum").sort
     assert_equal Hive::Schemas::TaskActionKind::ALL.sort,
                  doc.dig("$defs", "Task", "properties", "action", "enum").sort
+  end
+
+  def test_hive_status_finalization_enums_match_projection_contract
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status")))
+    definition = doc.fetch("$defs").fetch("Finalization")
+
+    assert_equal Hive::Finalization::Projection::STATES.sort,
+                 definition.dig("properties", "state", "enum").sort
+    assert_equal Hive::Finalization::Projection::SAFE_ACTION_CODES.sort,
+                 doc.dig("$defs", "FinalizationSafeAction", "properties", "code", "enum").sort
   end
 
   def test_hive_status_admission_error_is_closed_and_matches_reason_codes

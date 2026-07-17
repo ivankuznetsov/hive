@@ -58,6 +58,7 @@ module Hive
           "ready_to_artifacts"  => "▶ ",
           "ready_to_finalize"   => "▶ ",
           "ready_to_archive"    => "▶ ",
+          "watching"            => "◉ ",
           # Generic-workflow action keys (non-coding descriptors): a markerless
           # stage runs, a complete non-terminal stage advances. Without these
           # they fell through to DEFAULT_ICON and rendered iconless.
@@ -133,8 +134,35 @@ module Hive
             end
           end
 
-          lines = visible_task_lines(lines, row_lines, model.cursor, inner_height)
+          detail_lines = selected_finalization_lines(visible, model.cursor, inner_width)
+          # Reserve room for the selected watching row's lifecycle panel. The
+          # row viewport remains row-count based; the detail panel is a fixed
+          # footer and therefore cannot desynchronise cursor coordinates.
+          task_height = inner_height && [ inner_height - detail_lines.size, 1 ].max
+          lines = visible_task_lines(lines, row_lines, model.cursor, task_height)
+          lines.concat(detail_lines)
+          lines = fit_lines(lines, inner_height)
           lines.join("\n")
+        end
+
+        def selected_finalization_lines(snapshot, cursor, width)
+          return [] unless cursor.is_a?(Array) && cursor.size == 2
+
+          row = snapshot.projects[cursor[0]]&.rows&.[](cursor[1])
+          value = row&.finalization
+          return [] unless value.is_a?(Hash) && value["state"].to_s != "unfinalized"
+
+          blocker = value["blocker"].is_a?(Hash) ? value["blocker"] : nil
+          action = value["safe_action"].is_a?(Hash) ? value["safe_action"] : {}
+          lines = [
+            "PR ##{value['pr_number']} · #{value['state']} · job=#{value['job_id']}",
+            "task-gen=#{value['task_generation']} · finalize=#{value['finalize_attempt_id']} · " \
+              "head-gen=#{value['head_generation']} · sha=#{value['head_sha']}",
+            "updated=#{value['updated_at']}",
+            ("blocker=#{blocker['code']} · needs-human=#{blocker['needs_human']} · #{blocker['detail']}" if blocker),
+            "next=#{action['label']}"
+          ].compact
+          [ "", *lines.map { |line| truncate(Hive::Tui::Text.sanitize(line), width) } ]
         end
 
         def title_for(model)
@@ -240,8 +268,20 @@ module Hive
           return admission_error_status(row) if row.action_key.to_s == "admission_error"
           return review_recovery_status(row) if row.action_key.to_s == "recover_review"
           return error_status(row) if row.action_key.to_s == "error"
+          return finalization_status(row) if row.action_key.to_s == "watching"
 
           row.action_label.to_s
+        end
+
+        def finalization_status(row)
+          value = row.finalization.is_a?(Hash) ? row.finalization : {}
+          state = Hive::Tui::Text.sanitize(value["state"])
+          head = value["head_sha"].to_s[0, 7]
+          generation = value["head_generation"]
+          blocker = Hive::Tui::Text.sanitize(value.dig("blocker", "code"))
+          action = Hive::Tui::Text.sanitize(value.dig("safe_action", "label"))
+          suffix = blocker.empty? ? action : "blocked: #{blocker}"
+          [ state, ("hg#{generation}" if generation), head, suffix ].reject { |part| part.to_s.empty? }.join(" · ")
         end
 
         def admission_error_status(row)

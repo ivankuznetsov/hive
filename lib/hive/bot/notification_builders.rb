@@ -83,6 +83,8 @@ module Hive
 
         if READY_ACTIONS.include?(row.action)
           stage_approval(row)
+        elsif row.action == Hive::Schemas::TaskActionKind::WATCHING
+          watching(row)
         elsif row.action == Hive::Schemas::TaskActionKind::NEEDS_INPUT
           needs_input(row)
         elsif recovery?(row)
@@ -121,7 +123,53 @@ module Hive
       def fingerprint(row)
         return legacy_stage_dirs_fingerprint(row) if legacy_stage_dirs?(row)
 
-        ::Digest::SHA256.hexdigest(JSON.generate([ row.project, row.slug, row.stage, row.marker, sorted_attr_pairs(row) ]))
+        ::Digest::SHA256.hexdigest(JSON.generate([
+          row.project, row.slug, row.stage, row.marker, sorted_attr_pairs(row), finalization_fingerprint(row)
+        ]))
+      end
+
+      def finalization_fingerprint(row)
+        value = row.respond_to?(:finalization) && row.finalization.is_a?(Hash) ? row.finalization : {}
+        return nil if value["state"].to_s == "unfinalized" || value.empty?
+
+        blocker = value["blocker"].is_a?(Hash) ? value["blocker"] : {}
+        action = value["safe_action"].is_a?(Hash) ? value["safe_action"] : {}
+        [
+          value["state"], value["task_generation"], value["finalize_attempt_id"], value["job_id"],
+          value["repository"], value["pr_number"], value["pr_url"], value["head_sha"],
+          value["head_generation"], blocker["code"], blocker["needs_human"], blocker["detail"],
+          blocker["source"], action["code"], action["label"], action["target"],
+          action["confirmation_required"]
+        ]
+      end
+
+      def watching(row)
+        value = row.finalization.is_a?(Hash) ? row.finalization : {}
+        blocker = value["blocker"].is_a?(Hash) ? value["blocker"] : nil
+        lines = [
+          header(row),
+          "PR watching: #{bounded_finalization_text(value['state'], 64)}",
+          "PR: #{bounded_finalization_text(value['pr_url'], 1000)}",
+          "Job: #{bounded_finalization_text(value['job_id'], 200)}",
+          "Task generation: #{value['task_generation']}; " \
+            "finalize attempt: #{bounded_finalization_text(value['finalize_attempt_id'], 200)}",
+          "Head generation: #{value['head_generation']}; SHA: #{bounded_finalization_text(value['head_sha'], 64)}",
+          "Updated: #{bounded_finalization_text(value['updated_at'], 64)}"
+        ]
+        if blocker
+          lines << "Blocker: #{bounded_finalization_text(blocker['code'], 64)} " \
+                   "(needs human: #{blocker['needs_human'] ? 'yes' : 'no'})"
+          detail = bounded_finalization_text(blocker["detail"], 300)
+          lines << "Detail: #{detail}" unless detail.empty?
+        end
+        lines << "Safe next action: #{bounded_finalization_text(value.dig('safe_action', 'label'), 120)}"
+        text = lines.join("\n")
+        text = truncate_text(text) if text.length > TELEGRAM_MESSAGE_MAX_CHARS
+        Notification.new(text: text, keyboard: nil)
+      end
+
+      def bounded_finalization_text(value, limit)
+        Hive::Bot::Format.strip_control_chars(value).gsub(/\s+/, " ").strip[0, limit]
       end
 
       # Sorted [key, value] pairs of a row's attrs with stringified keys — the

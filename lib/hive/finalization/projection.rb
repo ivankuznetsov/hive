@@ -3,6 +3,14 @@ require "hive/finalization/event"
 module Hive
   module Finalization
     module Projection
+      STATES = %w[
+        unfinalized finalized babysitter_active merge_ready blocked merged approved_no_pr archive_ready
+      ].freeze
+      SAFE_ACTION_CODES = %w[
+        rerun_finalize retry_babysitter inspect_pr wait_for_merge confirm_terminal_outcome
+        wait_for_archive archive
+      ].freeze
+
       module_function
 
       def project(records:)

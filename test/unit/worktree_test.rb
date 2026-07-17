@@ -994,6 +994,80 @@ class WorktreeTest < Minitest::Test
     end
   end
 
+  def test_fetch_origin_branch_uses_the_explicit_remote_head_when_a_tag_has_the_same_name
+    origin = Dir.mktmpdir("hive-origin")
+    seed = Dir.mktmpdir("hive-origin-seed")
+    clone = Dir.mktmpdir("hive-origin-clone")
+    run!("git", "init", "--bare", origin)
+    run!("git", "-C", seed, "init", "-b", "master", "--quiet")
+    run!("git", "-C", seed, "config", "user.email", "test@example.com")
+    run!("git", "-C", seed, "config", "user.name", "Test")
+    File.write(File.join(seed, "version.txt"), "tag\n")
+    run!("git", "-C", seed, "add", "version.txt")
+    run!("git", "-C", seed, "commit", "-m", "tag target", "--quiet")
+    tag_sha = run!("git", "-C", seed, "rev-parse", "HEAD").strip
+    run!("git", "-C", seed, "remote", "add", "origin", origin)
+    run!("git", "-C", seed, "push", "origin", "refs/heads/master:refs/heads/master")
+    run!("git", "-C", seed, "update-ref", "refs/tags/master", tag_sha)
+    run!("git", "-C", seed, "push", "origin", "refs/tags/master:refs/tags/master")
+    File.write(File.join(seed, "version.txt"), "branch\n")
+    run!("git", "-C", seed, "add", "version.txt")
+    run!("git", "-C", seed, "commit", "-m", "advance branch", "--quiet")
+    branch_sha = run!("git", "-C", seed, "rev-parse", "HEAD").strip
+    run!("git", "-C", seed, "push", "origin", "refs/heads/master:refs/heads/master")
+    run!("git", "clone", origin, clone)
+    run!("git", "-C", clone, "update-ref", "-d", "refs/remotes/origin/master")
+
+    _out, err, status = Hive::Worktree.fetch_origin_branch(clone, "master")
+
+    assert status.success?, err
+    assert_equal branch_sha,
+                 run!("git", "-C", clone, "rev-parse", "refs/remotes/origin/master").strip
+    refute_equal tag_sha, branch_sha
+  ensure
+    FileUtils.rm_rf(origin) if origin
+    FileUtils.rm_rf(seed) if seed
+    FileUtils.rm_rf(clone) if clone
+  end
+
+  def test_fetch_origin_branch_times_out_and_reaps_the_transport_process_group
+    with_tmp_git_repo do |repo|
+      fake_bin = File.join(repo, "fake-bin")
+      pid_file = File.join(repo, "ssh-pids")
+      FileUtils.mkdir_p(fake_bin)
+      ssh = File.join(fake_bin, "ssh")
+      File.write(ssh, <<~SH)
+        #!/bin/sh
+        trap '' TERM
+        sleep 30 &
+        child=$!
+        printf '%s %s\n' "$$" "$child" > "$HIVE_TEST_FETCH_PID_FILE"
+        wait
+      SH
+      FileUtils.chmod(0o755, ssh)
+      run!("git", "-C", repo, "remote", "add", "origin", "ssh://example.invalid/repo.git")
+
+      _out, err, status = with_env(
+        "PATH" => "#{fake_bin}:#{ENV.fetch('PATH')}",
+        "HIVE_TEST_FETCH_PID_FILE" => pid_file
+      ) do
+        Hive::Worktree.fetch_origin_branch(repo, "master", timeout_sec: 0.1)
+      end
+
+      refute status.success?
+      assert_includes err, "timed out"
+      pids = File.read(pid_file).split.map { |value| Integer(value, 10) }
+      assert_equal 2, pids.size
+      pids.each do |pid|
+        process_state, _err, process_status = Open3.capture3(
+          "ps", "-o", "stat=", "-p", pid.to_s
+        )
+        running = process_status.success? && !process_state.lstrip.start_with?("Z")
+        refute running, "timed-out transport pid #{pid} must not remain running"
+      end
+    end
+  end
+
   # Plan R12: drop must converge even when worktree.yml has been
   # truncated, hand-edited, or corrupted by a crashed prior writer.
   # read_pointer treats parse failure as "no pointer" (returns nil)

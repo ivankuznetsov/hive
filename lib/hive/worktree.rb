@@ -2,6 +2,7 @@ require "open3"
 require "fileutils"
 require "yaml"
 require "hive/config"
+require "hive/git_ops"
 
 module Hive
   class Worktree
@@ -17,6 +18,12 @@ module Hive
       "GIT_HTTP_LOW_SPEED_LIMIT" => "1000",
       "GIT_HTTP_LOW_SPEED_TIME" => "30"
     }.freeze
+    FETCH_TIMEOUT_SEC = 60
+    FetchStatus = Struct.new(:exitstatus, keyword_init: true) do
+      def success?
+        exitstatus.zero?
+      end
+    end
 
     attr_reader :project_root, :slug
 
@@ -277,7 +284,7 @@ module Hive
       has_origin.success?
     end
 
-    def self.fetch_origin_branch(project_root, branch_name)
+    def self.fetch_origin_branch(project_root, branch_name, timeout_sec: FETCH_TIMEOUT_SEC)
       # Fetch into an EXPLICIT colon-refspec so the local tracking ref
       # `refs/remotes/origin/<branch>` is written deterministically,
       # independent of the clone's configured fetch refspec. A plain
@@ -291,9 +298,24 @@ module Hive
       # the default base (4-execute branches off origin/<default>,
       # 5-open-pr drops `--base <prereq>`). The leading `+` force-updates
       # the tracking ref exactly as the wildcard refspec would.
-      Open3.capture3(NONINTERACTIVE_FETCH_ENV, "git", "-C", project_root,
-                     "fetch", "origin",
-                     "+#{branch_name}:refs/remotes/origin/#{branch_name}")
+      timeout = Float(timeout_sec)
+      raise ArgumentError, "fetch timeout must be positive" unless timeout.finite? && timeout.positive?
+
+      success, err, timed_out = Hive::GitOps.new(project_root).run_git_with_timeout(
+        [
+        "git", "-C", project_root, "fetch", "origin",
+        "+refs/heads/#{branch_name}:refs/remotes/origin/#{branch_name}"
+        ],
+        env: NONINTERACTIVE_FETCH_ENV,
+        timeout_sec: timeout
+      )
+      if timed_out
+        timeout_detail = "git fetch origin #{branch_name} timed out after #{timeout_sec}s"
+        err = err.empty? ? timeout_detail : "#{err.rstrip}\n#{timeout_detail}"
+      end
+      [ "", err, FetchStatus.new(exitstatus: success ? 0 : 1) ]
+    rescue StandardError => e
+      [ "", e.message, FetchStatus.new(exitstatus: 1) ]
     end
 
     def self.origin_branch_ref_exists?(project_root, branch_name)

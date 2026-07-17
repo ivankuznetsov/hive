@@ -3,7 +3,7 @@ title: Hive::Worktree
 type: module
 source: lib/hive/worktree.rb
 created: 2026-04-25
-updated: 2026-06-29
+updated: 2026-07-17
 tags: [worktree, git, pointer, dependencies]
 ---
 
@@ -58,7 +58,7 @@ New branches always start at `origin/<default>` (after a quick fetch) rather tha
 
 The helper:
 1. Checks `git config remote.origin.url` — if no `origin` is configured (early-stage repos, internal forks without upstream), return `default_branch` (local fallback). No fetch attempted.
-2. Runs `git fetch origin <default_branch>` with non-interactive env (`GIT_TERMINAL_PROMPT=0`, `GIT_SSH_COMMAND="ssh -oBatchMode=yes -oConnectTimeout=10"` — same shape as `GitOps#fetch_default_branch`) so credential prompts cannot hang worktree creation.
+2. Runs an explicit `+refs/heads/<default_branch>:refs/remotes/origin/<default_branch>` fetch. Fully qualifying the source prevents a same-named tag from shadowing the branch. The fetch uses non-interactive env (`GIT_TERMINAL_PROMPT=0`, `GIT_SSH_COMMAND="ssh -oBatchMode=yes -oConnectTimeout=10"`, plus HTTPS low-speed limits), a 60-second absolute deadline, a bounded 64 KiB capture per stream, and process-group TERM/KILL cleanup so a connected-but-stalled transport cannot hang worktree creation or patrol.
 3. On fetch failure (network down, auth missing, dead remote), warn to stderr (`[hive] worktree base: fetch origin <default> failed (<err>); branching from local <default>`) and return `default_branch` (fall back). The worktree is still created so the operator can keep working offline.
 4. On fetch success, return `"origin/#{default_branch}"`.
 
@@ -131,7 +131,7 @@ This prevents an agent (with Write access to `worktree.yml`) from setting `path:
 
 ## Tests
 
-- `test/unit/worktree_test.rb` — create attach-vs-new, dependency override stacking (incl. narrow-refspec and origin-ahead-of-local **and** local-ahead-of-origin placeholders), empty placeholder re-pointing, fail-closed preservation when the emptiness check errors, local-only prerequisite fallback, real-commit preservation, PR-head materialization/retry/failure handling, delete-failure errors, `local_branch_ref_exists?` blank-name guard, remove, exists?, pointer round-trip, prefix-validation rejection.
+- `test/unit/worktree_test.rb` — create attach-vs-new, dependency override stacking (incl. narrow-refspec and origin-ahead-of-local **and** local-ahead-of-origin placeholders), explicit remote-head fetching despite a same-named tag, stalled-transport process-group timeout, empty placeholder re-pointing, fail-closed preservation when the emptiness check errors, local-only prerequisite fallback, real-commit preservation, PR-head materialization/retry/failure handling, delete-failure errors, `local_branch_ref_exists?` blank-name guard, remove, exists?, pointer round-trip, prefix-validation rejection.
 
 ## Backlinks
 

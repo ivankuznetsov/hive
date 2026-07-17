@@ -16,6 +16,7 @@ require "hive/patrol/reviewer"
 require "hive/patrol/state_store"
 require "hive/patrol/token_budget"
 require "hive/patrol/validator"
+require "hive/worktree"
 
 module Hive
   module Commands
@@ -215,10 +216,31 @@ module Hive
 
       def current_default_sha(project_root, cfg)
         branch = cfg["default_branch"] || Hive::GitOps.new(project_root).detect_default_branch
-        out, err, status = Open3.capture3("git", "-C", project_root, "rev-parse", branch)
-        raise Hive::GitError, "git rev-parse #{branch} failed: #{err.strip.empty? ? out : err}" unless status.success?
+        ref = branch
+        if Hive::Worktree.origin_configured?(project_root)
+          out, err, status = Hive::Worktree.fetch_origin_branch(project_root, branch)
+          unless status.success?
+            detail = err.to_s.strip.empty? ? out.to_s.strip : err.to_s.strip
+            raise Hive::GitError,
+                  "cannot fetch fresh patrol scan base origin/#{branch}: #{detail}"
+          end
+          ref = "refs/remotes/origin/#{branch}"
+        end
 
-        out.strip
+        out, err, status = Open3.capture3(
+          "git", "-C", project_root, "rev-parse", "--verify", "#{ref}^{commit}"
+        )
+        unless status.success?
+          detail = err.to_s.strip.empty? ? out.to_s.strip : err.to_s.strip
+          raise Hive::GitError, "git rev-parse #{ref} failed: #{detail}"
+        end
+
+        sha = out.strip
+        unless sha.match?(/\A[0-9a-f]{40,64}\z/i)
+          raise Hive::GitError, "fresh patrol scan base resolved an invalid SHA"
+        end
+
+        sha.downcase
       end
 
       def sweep_target_sha(project_root, cfg, state)
@@ -227,9 +249,20 @@ module Hive
         active_sha = snapshot["feature_review_sha"].to_s
         active = snapshot["feature_review_active"] == true
         legacy_active = !snapshot.key?("feature_review_active") && cursor.positive?
-        return active_sha if (active || legacy_active) && !active_sha.empty?
+        if (active || legacy_active) && materializable_commit?(project_root, active_sha)
+          return active_sha.downcase
+        end
 
         current_default_sha(project_root, cfg)
+      end
+
+      def materializable_commit?(project_root, sha)
+        return false unless sha.match?(/\A[0-9a-f]{40,64}\z/i)
+
+        _out, _err, status = Open3.capture3(
+          "git", "-C", project_root, "rev-parse", "--verify", "#{sha}^{commit}"
+        )
+        status.success?
       end
 
       def with_scan_checkout(project_root, target_sha)

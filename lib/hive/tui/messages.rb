@@ -127,14 +127,12 @@ module Hive
       OpenLogTail = Data.define(:row)
 
       # Enter on a `recover_review` row. REVIEW_ERROR / REVIEW_CI_STALE
-      # clear the observed marker and re-run. REVIEW_STALE does the same
-      # only for incomplete triage artifacts; completed stale passes
-      # report the manual pass-cleanup step (or open the focal escalations
-      # file in browse mode) and leave the marker intact.
+      # request generation-fenced coordinator evaluation. REVIEW_STALE opens
+      # the focal escalation file first when operator repair is required.
       #
       # `force: true` is set by the `r` verb-key path in key_map.rb. It
-      # is the operator's explicit "I edited the file, retry now"
-      # gesture and bypasses BubbleModel#recover_review's
+      # is the operator's explicit "I edited the file, evaluate retry state"
+      # gesture and bypasses BubbleModel#recover_review's browse-first
       # `retryable_review_stale?` gate so max_passes-hit REVIEW_STALE
       # rows are re-runnable from the TUI. The default `force: false`
       # preserves Enter's existing browse-not-retry behavior.
@@ -144,15 +142,9 @@ module Hive
         end
       end
 
-      # Enter on an `error` row whose marker is a non-kill-class ERROR.
-      # Kill-class signal kills (130/137/143) are auto-healed elsewhere;
-      # this message handles real failures (exit_code=1 etc.) the
-      # auto-healer deliberately leaves alone. The handler clears the
-      # ERROR marker via `hive markers clear --name ERROR --match-attr
-      # marker_id=N` when available, or observed reason/exit_code attrs
-      # for legacy rows, then re-runs the task with `hive run <folder>`
-      # if the clear succeeds. Mirrors RecoverReview so the user keeps a
-      # uniform "Enter to retry" gesture across recoverable failures.
+      # Enter on an `error` row whose marker is a non-kill-class ERROR. The
+      # handler submits the same generation-fenced coordinator intent as
+      # RecoverReview; it never clears the marker or chooses a stage verb.
       RecoverError = Data.define(:row)
 
       # Enter on a gated red row — open the diagnosis/action view

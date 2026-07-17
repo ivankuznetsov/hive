@@ -692,16 +692,13 @@ class HiveBotRouterTest < Minitest::Test
                    "--project", "hive", "--json" ], result.command_argv
   end
 
-  def test_clear_retry_callback_dispatches_marker_clear_then_retry
+  def test_legacy_clear_retry_callback_without_generation_requires_refresh
     result = @router.handle(
       update(callback_data: "clear_retry:hive:slug-260514-abcd:5-review:review_error")
     )
 
-    assert_equal :dispatch_commands, result.action
-    assert_equal [ "hive", "markers", "clear", "slug-260514-abcd", "--name",
-                   "REVIEW_ERROR", "--project", "hive", "--json" ], result.commands.first
-    assert_equal [ "hive", "review", "slug-260514-abcd", "--from", "5-review",
-                   "--project", "hive", "--json" ], result.commands.last
+    assert_equal :reply, result.action
+    assert_equal "Retry state changed or is unavailable. Refresh status and try again.", result.text
   end
 
   def test_default_projects_provider_reads_registered_projects

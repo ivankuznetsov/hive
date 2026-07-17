@@ -150,6 +150,8 @@ class RunReviewTest < Minitest::Test
 
         _out, err = capture_io { Hive::Commands::Run.new(folder).call }
         assert_match(/REVIEW_CI_STALE/, err)
+        assert_match(/hive retry repair/, err)
+        refute_match(/markers clear/, err)
         marker = Hive::Markers.current(File.join(folder, "task.md"))
         assert_equal :review_ci_stale, marker.name
       end
@@ -164,6 +166,8 @@ class RunReviewTest < Minitest::Test
 
         _out, err = capture_io { Hive::Commands::Run.new(folder).call }
         assert_match(/REVIEW_STALE/, err)
+        assert_match(/hive retry repair/, err)
+        refute_match(/markers clear/, err)
         marker = Hive::Markers.current(File.join(folder, "task.md"))
         assert_equal :review_stale, marker.name
       end
@@ -185,6 +189,8 @@ class RunReviewTest < Minitest::Test
         marker = Hive::Markers.current(File.join(folder, "task.md"))
         assert_equal :review_error, marker.name
         assert_match(/REVIEW_ERROR/, err)
+        assert_match(/hive retry repair/, err)
+        refute_match(/markers clear/, err)
       end
     end
   end

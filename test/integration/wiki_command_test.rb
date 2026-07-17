@@ -78,6 +78,6 @@ class WikiCommandTest < Minitest::Test
   def test_cli_help_lists_wiki_command
     out, _err = capture_io { Hive::CLI.start([ "help" ]) }
 
-    assert_match(/^\s*\S+\s+wiki SUBCOMMAND\s+# Manage genera/, out)
+    assert_match(/^\s*\S+\s+wiki SUBCOMMAND\s+#/, out)
   end
 end

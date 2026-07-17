@@ -276,7 +276,8 @@ module Hive
           approve_action(task, next_stage_dir(task))
         when :execute_stale
           { "kind" => kind::RECOVER_STALE,
-            "instructions" => "edit reviews/, lower task.md frontmatter pass:, remove EXECUTE_STALE marker, re-run" }
+            "instructions" => "edit reviews/ or lower task.md frontmatter pass:, then use the " \
+                              "generation-guarded `hive retry repair` action" }
         when :review_waiting
           # ce-review round-3 P2 #5 — branch the JSON envelope on
           # marker.attrs["reason"] so agents reading the contract get
@@ -313,15 +314,13 @@ module Hive
           end
         when :review_stale
           { "kind" => kind::RECOVER_STALE,
-            "instructions" => "if highest-pass reviewer files lack escalations-NN.md, remove the REVIEW_STALE " \
-                              "marker and re-run to retry that pass; otherwise edit/rename highest-pass review " \
-                              "files, remove the marker, then re-run",
-            "markers_to_clear" => [ "review_stale" ] }
+            "instructions" => "if highest-pass reviewer files contain unresolved escalations, edit/rename " \
+                              "those files; after repairing the condition, use the generation-guarded " \
+                              "`hive retry repair` action" }
         when :review_ci_stale
           { "kind" => kind::RECOVER_STALE,
-            "instructions" => "fix CI failures, edit reviews/ci-blocked.md, remove the REVIEW_CI_STALE marker, " \
-                              "then re-run",
-            "markers_to_clear" => [ "review_ci_stale" ] }
+            "instructions" => "fix CI failures and update reviews/ci-blocked.md; after repairing the " \
+                              "condition, use the generation-guarded `hive retry repair` action" }
         when :manual_steering
           { "kind" => Hive::Schemas::NextActionKind::NO_OP, "reason" => "manual_steering" }
         when :error
@@ -333,13 +332,13 @@ module Hive
           # `:review_error/fix_auto_commit_*` shape — target the
           # worktree root, echo `residue_paths` as a parsed array so
           # callers don't have to split the comma string themselves,
-          # and include the canonical recovery one-liner so an agent
-          # can shell-exec it directly. Other `:error` reasons keep
-          # the generic NO_OP fallthrough.
+          # without inventing a marker-clear/rerun recipe. The durable
+          # status projection supplies the generation required by the
+          # audited repair action. Other `:error` reasons keep the generic
+          # NO_OP fallthrough.
           if marker.attrs["reason"].to_s == "ensure_clean_on_exit_failed"
             target = task.respond_to?(:worktree_path) && task.worktree_path ? task.worktree_path : task.folder
             residue_paths = marker.attrs["residue_paths"].to_s.split(",").map(&:strip).reject(&:empty?)
-            verb = friendly_command(task, marker)
             return {
               "kind" => Hive::Schemas::NextActionKind::EDIT,
               "target" => target,
@@ -347,10 +346,7 @@ module Hive
               "residue_paths" => residue_paths,
               "error" => marker.attrs,
               "instructions" => "commit or discard the residue paths in #{target}, " \
-                                "then `hive markers clear #{task.folder} --name ERROR --match-attr reason=ensure_clean_on_exit_failed` " \
-                                "and re-run",
-              "markers_to_clear" => [ "error" ],
-              "rerun_with" => verb
+                                "then use the generation-guarded `hive retry repair` action"
             }
           end
 
@@ -373,8 +369,7 @@ module Hive
               "error" => marker.attrs,
               "instructions" => "inspect the auto-commit scope artifact and worktree changes; " \
                                 "remove/revert rejected files or adjust review.fix.auto_commit.scope_check, " \
-                                "then clear REVIEW_ERROR and re-run",
-              "rerun_with" => "hive run #{task.folder}"
+                                "then use the generation-guarded `hive retry repair` action"
             }
           end
 
@@ -387,8 +382,9 @@ module Hive
               "reason" => marker.attrs["reason"],
               "error" => marker.attrs,
               "instructions" => "inspect the fix-agent worktree changes and signing config; " \
-                                "manually commit or revert remaining worktree changes before clearing REVIEW_ERROR; " \
-                                "fix signing or adjust review.fix.auto_commit.sign_policy before re-running"
+                                "manually commit or revert remaining worktree changes; fix signing or adjust " \
+                                "review.fix.auto_commit.sign_policy, then use the generation-guarded " \
+                                "`hive retry repair` action"
             }
           end
 
@@ -403,10 +399,9 @@ module Hive
               "reason" => marker.attrs["reason"],
               "error" => marker.attrs,
               "instructions" => "one or more reviewers failed for this pass; inspect " \
-                                "#{File.basename(target)} for the failing reviewer, then either re-run " \
-                                "hoping for recovery or clear the marker via " \
-                                "`hive markers clear #{task.folder} --name REVIEW_ERROR` to accept partial coverage",
-              "rerun_with" => "hive run #{task.folder}"
+                                "#{File.basename(target)} for the failing reviewer; the coordinator will " \
+                                "schedule recovery, or an operator can use generation-guarded " \
+                                "`hive retry repair` after fixing the condition"
             }
           end
 
@@ -415,8 +410,8 @@ module Hive
             "phase" => marker.attrs["phase"],
             "reason" => marker.attrs["reason"],
             "error" => marker.attrs,
-            "instructions" => "investigate; clear the marker via " \
-                              "`hive markers clear #{task.folder} --name REVIEW_ERROR`; re-run"
+            "instructions" => "investigate the REVIEW_ERROR terminal evidence; normal recovery is coordinator-scheduled, " \
+                              "and a repaired condition must use generation-guarded `hive retry repair`"
           }
         else
           { "kind" => Hive::Schemas::NextActionKind::NO_OP }
@@ -465,15 +460,17 @@ module Hive
           command = friendly_command(task, marker)
           puts "  next: #{command}" if command
         when :execute_stale
-          puts "  next: edit reviews/, lower task.md frontmatter pass:, remove EXECUTE_STALE marker, re-run"
+          puts "  next: edit reviews/ or lower task.md frontmatter pass:, then use generation-guarded " \
+               "`hive retry repair`"
         when :review_waiting
           puts "  next: answer open questions in reviews/escalations-NN.md; legacy reviewer files still accept [x], " \
                "then `hive run #{task.folder}`"
         when :review_stale
-          puts "  next: if highest-pass reviewer files lack escalations-NN.md, remove REVIEW_STALE and re-run; " \
-               "otherwise edit/rename highest-pass review files, remove REVIEW_STALE, then re-run"
+          puts "  next: inspect and resolve highest-pass review files, then use generation-guarded " \
+               "`hive retry repair`"
         when :review_ci_stale
-          puts "  next: fix CI failures, edit reviews/ci-blocked.md, remove the REVIEW_CI_STALE marker, then re-run"
+          puts "  next: fix CI failures and edit reviews/ci-blocked.md, then use generation-guarded " \
+               "`hive retry repair`"
         when :manual_steering
           puts "  next: manual steering active; automated run skipped"
         when :error, :review_error
@@ -487,11 +484,11 @@ module Hive
               pass = marker.attrs["pass"].to_s
               pass_suffix = pass.match?(/\A\d+\z/) ? format("%02d", pass.to_i) : nil
               detail = pass_suffix ? "reviews/errors-#{pass_suffix}.md" : "reviews/"
-              warn "  next: inspect #{detail} for the failing reviewer, then re-run for recovery or clear " \
-                   "the marker via `hive markers clear #{task.folder} --name REVIEW_ERROR` to accept partial coverage"
+              warn "  next: inspect #{detail} for the failing reviewer; recovery is coordinator-scheduled, " \
+                   "or use generation-guarded `hive retry repair` after fixing the condition"
             else
-              warn "  next: investigate; clear the marker via " \
-                   "`hive markers clear #{task.folder} --name REVIEW_ERROR`; re-run"
+              warn "  next: investigate; recovery is coordinator-scheduled, or use generation-guarded " \
+                   "`hive retry repair` after fixing the condition"
             end
           end
           raise Hive::TaskInErrorState, "stage recorded :#{marker.name} (#{marker.attrs.inspect})"

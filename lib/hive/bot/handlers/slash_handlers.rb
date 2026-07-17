@@ -317,7 +317,8 @@ module Hive
           # (including the diagnostic), so a directly-typed /autofix on a row
           # that isn't auto-retryable — a manual-only state, or a recovery row
           # whose diagnostic carries no suggested_next_action.retry — must
-          # refuse here rather than dispatch markers-clear + a retry verb.
+          # refuse here rather than submit a coordinator intent without a
+          # current generation fence.
           # Without this, manually typing /autofix bypassed the retryability
           # gate that both other surfaces enforce.
           unless Hive::Bot::NotificationBuilders.retryable_recovery?(row)

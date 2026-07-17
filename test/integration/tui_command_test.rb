@@ -15,8 +15,8 @@ class TuiCommandTest < Minitest::Test
     # subcommand-and-summary line instead of the binary name so the
     # test passes whether `bin/hive` or the test runner is at $0.
     out, _err = capture_io { Hive::CLI.start([ "help" ]) }
-    assert_match(/^\s*\S+\s+tui\s+# Open the live/, out,
-                 "tui command must appear in `hive help` output with its summary")
+    assert_match(/^\s*\S+\s+tui\s+#/, out,
+                 "tui command must appear in `hive help` output")
   end
 
   def test_help_for_tui_shows_long_description

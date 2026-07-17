@@ -839,10 +839,10 @@ module Hive
         commands = Array(result.commands)
         reset_pending = !@dry_run && needs_alert_reset?(result)
 
-        # If every command in the sequence is queue-routable, write only
-        # the first request and keep the rest as a daemon-promoted
-        # continuation. The retry command is not visible to the daemon until
-        # `markers clear` exits 0.
+        # If every command in a generic sequence is queue-routable, write only
+        # the first request and keep the rest as a daemon-promoted continuation.
+        # Retry recovery itself emits one coordinator command, so it never uses
+        # this continuation mechanism.
         if commands.all? { |argv| queue_routable?(argv) }
           return enqueue_command_sequence(commands, result, update)
         end
@@ -871,11 +871,9 @@ module Hive
         reset_alert_for_result(result) if reset_pending && !failed
       end
 
-      # Queue path for `dispatch_command_sequence`: write only the FIRST
-      # request and store the remaining argv list as a continuation sidecar.
-      # The daemon promotes that continuation only after the current request
-      # exits 0, preserving the old `markers clear` -> retry dependency while
-      # keeping the daemon as the sole process spawner.
+      # Queue path for a generic `dispatch_command_sequence`: write only the
+      # FIRST request and store remaining argv as a continuation sidecar. The
+      # daemon promotes a continuation only after its predecessor exits 0.
       def enqueue_command_sequence(commands, result, update)
         first, *remaining = commands
         request_id = @dispatch_request_writer.generate_request_id

@@ -352,7 +352,7 @@ module Hive
           return [
             marker_summary,
             "Hive rejected the fix-agent fallback commit because staged paths were outside review.fix.auto_commit.scope_check.",
-            "Inspect the listed files, remove or revert rejected worktree changes, or adjust review.fix.auto_commit.scope_check before clearing REVIEW_ERROR."
+            "Inspect the listed files, remove or revert rejected worktree changes, or adjust review.fix.auto_commit.scope_check; then use the generation-guarded retry repair action."
           ].join("\n")
         end
 
@@ -360,7 +360,7 @@ module Hive
           return [
             marker_summary,
             "Hive could not create the fix-agent fallback commit because commit signing policy or signing execution blocked it.",
-            "Inspect the worktree changes, manually commit or revert remaining changes, fix signing config or set review.fix.auto_commit.sign_policy to inherit/bypass/fail as appropriate, then clear REVIEW_ERROR and re-run."
+            "Inspect the worktree changes, manually commit or revert remaining changes, fix signing config or set review.fix.auto_commit.sign_policy to inherit/bypass/fail as appropriate, then use the generation-guarded retry repair action."
           ].join("\n")
         end
 
@@ -368,7 +368,7 @@ module Hive
           return [
             marker_summary,
             "Hive could not read the task worktree Git status before or after running the review fix agent.",
-            "Repair the worktree or repository state, then clear REVIEW_ERROR and re-run the review."
+            "Repair the worktree or repository state, then use the generation-guarded retry repair action."
           ].join("\n")
         end
 

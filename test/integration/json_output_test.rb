@@ -571,7 +571,8 @@ class JsonOutputTest < Minitest::Test
         assert_equal "review_stale", payload["marker"]
         next_action = payload["next_action"]
         assert_equal Hive::Schemas::NextActionKind::RECOVER_STALE, next_action["kind"]
-        assert_equal [ "review_stale" ], next_action["markers_to_clear"]
+        refute next_action.key?("markers_to_clear")
+        assert_match(/hive retry repair/, next_action["instructions"])
         refute_empty next_action["instructions"].to_s,
                      "instructions must be non-empty so an agent / human knows how to recover"
       end
@@ -593,7 +594,8 @@ class JsonOutputTest < Minitest::Test
         assert_equal "review_ci_stale", payload["marker"]
         next_action = payload["next_action"]
         assert_equal Hive::Schemas::NextActionKind::RECOVER_STALE, next_action["kind"]
-        assert_equal [ "review_ci_stale" ], next_action["markers_to_clear"]
+        refute next_action.key?("markers_to_clear")
+        assert_match(/hive retry repair/, next_action["instructions"])
       end
     end
   end

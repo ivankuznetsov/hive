@@ -44,10 +44,10 @@ module Hive
 
         # Inline keyboard callback_data carries `key=value` pairs via
         # `recovery_match_attr`, comma-separated when more than one is
-        # encoded (e.g. `marker_id=abc,reason=ensure_clean_on_exit_failed`
-        # — both tokens are needed so `manual_only?` can route on
-        # `reason` while `marker_id` remains the race-safe clear
-        # guard). Split each pair on the first `=` so a value like
+        # encoded (e.g. `marker_id=abc,reason=ensure_clean_on_exit_failed`).
+        # The attrs remain bounded diagnostic/routing context only; retry
+        # authorization comes from the generation token. Split each pair on
+        # the first `=` so a value like
         # `foo=bar=baz` keeps the trailing `=baz` intact.
         def self.attrs_from_match_attr(match_attr)
           raw = match_attr.to_s

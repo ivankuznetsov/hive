@@ -119,9 +119,8 @@ module Hive
           restore_terminate_hook(prev_hup) if prev_hup
           restore_resize_hook(prev_winch) if prev_winch
           Hive::Tui::SubprocessRegistry.kill_inflight!
-          # F8: heal Threads spawned by auto-heal can outlive the
-          # runner; reap them with a 2s join-then-kill so the process
-          # doesn't exit with zombies.
+          # Reap any legacy background workers with a bounded join-then-kill so
+          # the process cannot exit with zombies.
           bubble_model&.kill_inflight_heals!
         end
       end

@@ -168,13 +168,9 @@ module Hive
           _prefix, project, slug, stage, marker, *rest = split_callback(data, [ 5, 6, 7, 8 ])
           match_attr, workflow, generation = recovery_tail(rest)
           # Legacy clear_retry: buttons (from messages predating the Autofix
-          # rename) route here. Go through RecoverySequence.build, not
-          # retry_commands directly, so a stale clear_retry on a manual-only
-          # marker (e.g. EXECUTE_STALE) gets the same "open it on a laptop"
-          # refusal the current Autofix paths enforce — rather than blindly
-          # dispatching markers-clear + a retry verb against a state that has
-          # no safe auto-recovery. callback_data carries no attrs, so this
-          # uses the marker-only manual-only check (ALWAYS_MANUAL_MARKERS).
+          # rename) route here. RecoverySequence requires the generation fence
+          # added to current buttons, so pre-coordinator callbacks fail with a
+          # refresh prompt instead of reviving the retired marker-clear path.
           RecoverySequence.build(
             project: project, slug: slug, stage: stage,
             marker: marker, match_attr: match_attr, workflow: workflow, generation: generation,
@@ -411,12 +407,10 @@ module Hive
           [ nil, Hive::Bot::NotificationBuilders::STATUS_LOOKUP_FAILED_REPLY ]
         end
 
-        # The recovery callbacks (autofix / clear_and_retry) carry up to two
-        # optional trailing tokens — a match_attr and a workflow id — in either
-        # order. They're disambiguated by content: a match_attr is always a
-        # `key=value` pair (contains `=`), a workflow id never contains `=`.
-        # Coding rows omit the workflow token (nil ⟹ coding), so older 5/6-part
-        # callbacks parse unchanged.
+        # Recovery callbacks carry optional diagnostic attrs/workflow context
+        # plus the required `generation=N` fence. Attrs and workflow remain
+        # compatibility context only; RecoverySequence rejects callbacks whose
+        # generation is absent or malformed.
         def recovery_tail(rest)
           generation_token = rest.find { |token| token.to_s.start_with?("generation=") }
           match_attr = rest.find do |token|

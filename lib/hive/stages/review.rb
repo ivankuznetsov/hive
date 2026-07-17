@@ -139,17 +139,16 @@ module Hive
           warn "hive: already complete; mv this folder to #{next_dir}/ to continue"
           return { commit: nil, status: :review_complete }
         when :review_ci_stale
-          warn "hive: REVIEW_CI_STALE — fix CI failures, edit reviews/ci-blocked.md, then run " \
-               "`hive markers clear #{task.folder} --name REVIEW_CI_STALE` and re-run `hive run`"
+          warn "hive: REVIEW_CI_STALE — fix CI failures and edit reviews/ci-blocked.md; " \
+               "normal recovery is coordinator-scheduled, or use generation-guarded `hive retry repair` after repair"
           return { commit: nil, status: :review_ci_stale }
         when :review_stale
-          warn "hive: REVIEW_STALE — if the highest pass has reviewer files but no escalations-NN.md, clear " \
-               "the marker and re-run to retry it; otherwise edit/rename highest-pass review files, then run " \
-               "`hive markers clear #{task.folder} --name REVIEW_STALE` and re-run `hive run`"
+          warn "hive: REVIEW_STALE — inspect and resolve the highest-pass review files; " \
+               "normal recovery is coordinator-scheduled, or use generation-guarded `hive retry repair` after repair"
           return { commit: nil, status: :review_stale }
         when :review_error
-          warn "hive: REVIEW_ERROR (#{marker.attrs.inspect}) — investigate, then run " \
-               "`hive markers clear #{task.folder} --name REVIEW_ERROR` and re-run `hive run`"
+          warn "hive: REVIEW_ERROR (#{marker.attrs.inspect}) — investigate the terminal evidence; " \
+               "normal recovery is coordinator-scheduled, or use generation-guarded `hive retry repair` after repair"
           return { commit: nil, status: :review_error }
         end
 
@@ -483,8 +482,8 @@ module Hive
             # NOT proof that the worktree is clean — it only proves
             # the reviewers that ran found nothing. Surface as a
             # recoverable REVIEW_ERROR rather than REVIEW_WAITING:
-            # no user answer is required; the right default action is
-            # clearing the error marker and rerunning reviewers.
+            # no user answer is required; the coordinator schedules the
+            # successor without a marker-clear/rerun side path.
             errors_path = File.join(
               ctx_pass.task_folder,
               "reviews",

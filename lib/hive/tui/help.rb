@@ -20,7 +20,7 @@ module Hive
         { mode: :grid, key: "b", action: :brainstorm,    description: "run hive brainstorm on highlighted task" },
         { mode: :grid, key: "p", action: :plan,          description: "run hive plan" },
         { mode: :grid, key: "d", action: :develop,       description: "run hive develop" },
-        { mode: :grid, key: "r", action: :review,        description: "run hive review; on a max_passes-hit REVIEW_STALE row this is the force-retry gesture — clears the marker + reruns after you've edited the focal escalations file (Enter on the same row opens that file in $EDITOR)" },
+        { mode: :grid, key: "r", action: :review,        description: "run hive review; on a max_passes-hit REVIEW_STALE row this requests coordinator evaluation after you've edited the focal escalations file (Enter opens that file in $EDITOR; cooldown still applies)" },
         { mode: :grid, key: "P", action: :"open-pr",     description: "run hive open-pr (capital so it doesn't collide with plan)" },
         { mode: :grid, key: "A", action: :artifacts,     description: "run hive artifacts (capital so it doesn't collide with archive)" },
         { mode: :grid, key: "F", action: :finalize,      description: "run hive finalize" },

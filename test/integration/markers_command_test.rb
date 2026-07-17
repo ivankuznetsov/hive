@@ -154,9 +154,11 @@ class MarkersCommandTest < Minitest::Test
         assert_includes before, "REVIEW_STALE", "fixture must include the marker"
         assert_includes before, "wip\n", "fixture body must include surrounding content"
 
-        capture_io do
+        _out, err = capture_io do
           Hive::Commands::Markers.new("clear", folder, name: "REVIEW_STALE").call
         end
+        assert_match(/does not reset retry state/, err)
+        refute_match(/next: hive run/, err)
 
         after = File.read(state)
         refute_includes after, "REVIEW_STALE",

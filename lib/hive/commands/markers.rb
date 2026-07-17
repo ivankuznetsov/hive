@@ -16,12 +16,9 @@ module Hive
     # the named marker line from the task's state file (atomic write)
     # and records a `hive_commit` so the audit trail stays accurate.
     #
-    # Recovery from `REVIEW_STALE` / `REVIEW_CI_STALE` / `REVIEW_ERROR`
-    # / `EXECUTE_STALE` / `EXECUTE_ERROR` previously required the user
-    # to hand-edit `task.md` and delete the marker comment. The runner's
-    # pre-flight `warn` told the user "remove the marker, then re-run"
-    # but the action surface was prose. This command turns that prose
-    # into a deterministic call.
+    # This is a low-level, audited marker-repair surface. Clearing a marker
+    # does not reset the durable retry ladder or authorize redispatch; normal
+    # operator recovery uses the generation-guarded `hive retry` actions.
     #
     # Terminal-success markers (`REVIEW_COMPLETE` / `EXECUTE_COMPLETE` /
     # `COMPLETE`) are deliberately excluded from the allowlist — those
@@ -103,7 +100,7 @@ module Hive
         # rewrite, and the rewrite (using the body we read pre-write)
         # erases that fresh marker. The hive_commit follows under
         # `with_commit_lock` to serialise hive/state branch writes
-        # against any concurrent committer (auto-heal, run loop).
+        # against any concurrent committer.
         Hive::Markers.with_markers_lock(task.state_file) do
           marker = Hive::Markers.current(task.state_file)
           actual = marker.name.to_s.upcase
@@ -124,10 +121,9 @@ module Hive
         emit_success(task, normalized)
       end
 
-      # Cross-process race guard. The TUI observes an ERROR marker at
-      # time T and dispatches `hive markers clear` at T+1s. If a
-      # concurrent `hive run` writes a fresh ERROR marker in that
-      # window, the name-based check still passes. `--match-attr
+      # Cross-process race guard for low-level callers. If a caller observes an
+      # ERROR marker and a concurrent `hive run` writes a fresh one before the
+      # clear, the name-based check still passes. `--match-attr
       # marker_id=<observed>` ties the clear to the specific generated
       # marker when present; legacy callers can pass comma-separated
       # observed attrs such as `reason=exit_code,exit_code=143` so
@@ -251,7 +247,8 @@ module Hive
           puts JSON.generate(payload)
         else
           puts "hive: cleared #{normalized} from #{task.slug}"
-          warn "next: hive run #{task.folder}"
+          warn "note: marker clear does not reset retry state or authorize redispatch; " \
+               "use a generation-guarded `hive retry` action for recovery"
         end
       end
 

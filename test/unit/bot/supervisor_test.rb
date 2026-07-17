@@ -9,7 +9,7 @@ class HiveBotSupervisorTest < Minitest::Test
   Update = Struct.new(:chat_id, :update_id, :message_id, keyword_init: true)
   Row = Struct.new(:project, :project_path, :hive_state_path, :slug, :stage, :workflow, :action, :action_label,
                    :marker, :attrs, :diagnostic,
-                   :id, :display_name, :pr_url,
+                   :id, :display_name, :pr_url, :retry,
                    keyword_init: true)
   StatusResult = Struct.new(:ok, :rows, :legacy_stage_dirs, :error, :envelope, :warning, keyword_init: true)
 
@@ -241,11 +241,17 @@ class HiveBotSupervisorTest < Minitest::Test
 
   def row(project: "hive", slug: "task", stage: "3-plan", workflow: "coding", action: "ready_to_develop",
           action_label: "Develop", marker: "COMPLETE", attrs: {}, diagnostic: nil,
-          id: nil, display_name: nil, pr_url: nil, project_path: "/tmp/#{project}")
+          id: nil, display_name: nil, pr_url: nil, project_path: "/tmp/#{project}", **rest)
+    retry_projection_value = rest[:retry]
     Row.new(project: project, project_path: project_path, hive_state_path: File.join(project_path, ".hive-state"),
             slug: slug, stage: stage, workflow: workflow, action: action,
             action_label: action_label, marker: marker, attrs: attrs, diagnostic: diagnostic,
-            id: id, display_name: display_name, pr_url: pr_url)
+            id: id, display_name: display_name, pr_url: pr_url,
+            **{ retry: retry_projection_value })
+  end
+
+  def retry_projection(generation: 7, state: "cooldown")
+    { "key" => { "generation" => generation }, "state" => state, "retry_count" => 1 }
   end
 
 
@@ -1163,7 +1169,8 @@ class HiveBotSupervisorTest < Minitest::Test
     # and /details replied "Slug not found" for every slug until restart.
     retryable = row(slug: "stuck-260526-cccc", stage: "6-review", action: "recover_review",
                     marker: "review_error", attrs: { "pass" => "2" },
-                    diagnostic: { "suggested_next_action" => { "kind" => "retry" } })
+                    diagnostic: { "suggested_next_action" => { "kind" => "retry" } },
+                    retry: retry_projection)
     supervisor = Hive::Bot::Supervisor.new(
       config: @config, token: "test-token", logger: @logger, telegram: @telegram,
       status_watcher: @status_watcher, notification_dispatcher: @notification_dispatcher,
@@ -1189,22 +1196,24 @@ class HiveBotSupervisorTest < Minitest::Test
     supervisor.process_update(update)
 
     queued = @dispatch_request_writer.writes.map { |w| w[:argv] }
-    assert(queued.any? { |argv| argv[0, 3] == [ "hive", "markers", "clear" ] },
-           "after SIGHUP reload, /autofix must still resolve the slug and queue the " \
-           "recover sequence — proving the rebuilt Router kept status_snapshot_provider")
+    assert_includes queued,
+                    %w[hive retry manual stuck-260526-cccc --project hive --generation 7 --json],
+                    "after SIGHUP reload, /autofix must still resolve the slug and queue the " \
+                    "coordinator intent — proving the rebuilt Router kept status_snapshot_provider"
     assert_empty @child_supervisor.dispatched,
                  "queue-routable verbs must not spawn from the bot (single-dispatcher invariant)"
   end
 
-  def test_default_status_snapshot_provider_dispatches_recover_sequence_for_cached_row
+  def test_default_status_snapshot_provider_dispatches_coordinator_intent_for_cached_row
     # Exercises the full default wiring (real Router built by the constructor)
     # end-to-end: the status_snapshot_provider lambda must reach
     # latest_status_rows, resolve the cached row, and dispatch the recover
-    # sequence. Asserts the dispatched argv, not merely "some message sent",
+    # coordinator intent. Asserts the dispatched argv, not merely "some message sent",
     # so the lambda returning [] or the row failing to resolve would fail.
     retryable = row(slug: "wire-260526-aaaa", stage: "6-review", action: "recover_review",
                     marker: "review_error", attrs: { "pass" => "2" },
-                    diagnostic: { "suggested_next_action" => { "kind" => "retry" } })
+                    diagnostic: { "suggested_next_action" => { "kind" => "retry" } },
+                    retry: retry_projection)
     supervisor = Hive::Bot::Supervisor.new(
       config: @config, token: "test-token", logger: @logger, telegram: @telegram,
       status_watcher: @status_watcher, notification_dispatcher: @notification_dispatcher,
@@ -1221,9 +1230,10 @@ class HiveBotSupervisorTest < Minitest::Test
     supervisor.process_update(update)
 
     queued = @dispatch_request_writer.writes.map { |w| w[:argv] }
-    assert(queued.any? { |argv| argv[0, 3] == [ "hive", "markers", "clear" ] },
-           "default snapshot provider must route /autofix through latest_status_rows " \
-           "to a real recover-sequence queued dispatch")
+    assert_includes queued,
+                    %w[hive retry manual wire-260526-aaaa --project hive --generation 7 --json],
+                    "default snapshot provider must route /autofix through latest_status_rows " \
+                    "to a real coordinator-intent queued dispatch"
     assert_empty @child_supervisor.dispatched,
                  "queue-routable verbs must not spawn from the bot (single-dispatcher invariant)"
   end
@@ -1680,7 +1690,8 @@ class HiveBotSupervisorTest < Minitest::Test
     retryable_recovery = row(slug: "stuck-260526-cccc", stage: "6-review",
                              action: "recover_review", marker: "review_error",
                              attrs: { "phase" => "fix", "pass" => "2" },
-                             diagnostic: { "suggested_next_action" => { "kind" => "retry" } })
+                             diagnostic: { "suggested_next_action" => { "kind" => "retry" } },
+                             retry: retry_projection)
     manual_recovery = row(slug: "stale-260526-dddd", stage: "4-execute",
                           action: "recover_review", marker: "execute_stale",
                           attrs: {}, diagnostic: nil)
@@ -1706,7 +1717,10 @@ class HiveBotSupervisorTest < Minitest::Test
                     "generic needs-input rows get a universal run button"
     assert_includes callbacks, "findings:accept_all:hive:review-260624-abcd:6-review",
                     "review waiting rows get an accept-all primary button"
-    assert_includes callbacks, "autofix:hive:stuck-260526-cccc:6-review:review_error:pass=2",
+    expected_autofix = Hive::Bot::NotificationBuilders.compact_callback(
+      "autofix:hive:stuck-260526-cccc:6-review:review_error:pass=2:generation=7"
+    )
+    assert_includes callbacks, expected_autofix,
                     "retryable recovery rows get an autofix button"
     assert_includes callbacks, "details:hive:stale-260526-dddd:4-execute",
                     "manual-only recovery rows get a details button"

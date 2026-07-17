@@ -94,7 +94,7 @@ class HvTest < Minitest::Test
     end
   end
 
-  def test_slow_candidate_is_bounded_when_timeout_binary_is_absent
+  def test_slow_candidate_uses_watchdog_when_timeout_lacks_kill_after
     with_tmp_dir do |dir|
       slow = File.join(dir, "custom", "hive")
       FileUtils.mkdir_p(File.dirname(slow))
@@ -105,13 +105,13 @@ class HvTest < Minitest::Test
       SH
       FileUtils.chmod(0o755, slow)
 
+      fake_bin = File.join(dir, "fake-bin")
+      FileUtils.mkdir_p(fake_bin)
+      File.write(File.join(fake_bin, "timeout"), "#!/bin/sh\nexit 64\n")
+      FileUtils.chmod(0o755, File.join(fake_bin, "timeout"))
+
       bash_env = File.join(dir, "bash-env")
       File.write(bash_env, <<~SH)
-        command() {
-          if [ "$1" = "-v" ] && [ "${2:-}" = "timeout" ]; then return 1; fi
-          builtin command "$@"
-        }
-
         sleep() {
           case "${1:-}" in
             5|1) builtin command sleep 0.1 ;;
@@ -134,7 +134,8 @@ class HvTest < Minitest::Test
           "HIVE_BIN_OVERRIDE" => slow,
           "XDG_BIN_HOME" => xdg_bin,
           "HOMEBREW_PREFIX" => File.join(dir, "empty-homebrew"),
-          "BASH_ENV" => bash_env
+          "BASH_ENV" => bash_env,
+          "PATH" => [ fake_bin, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR)
         },
         "probe"
       )
@@ -142,6 +143,81 @@ class HvTest < Minitest::Test
       assert status.success?, err
       assert_equal "xdg:probe\n", out
       refute_includes out, "slow:probe"
+    end
+  end
+
+  def test_timeout_kill_after_bounds_term_ignoring_probe_tree
+    with_tmp_dir do |dir|
+      pidfile = File.join(dir, "probe-child.pid")
+      wrapper = File.join(dir, "custom", "hive")
+      FileUtils.mkdir_p(File.dirname(wrapper))
+      File.write(wrapper, <<~SH)
+        #!/bin/sh
+        if [ "$1" = "--version" ]; then
+          trap '' TERM
+          ( trap '' TERM; exec #{RbConfig.ruby} -e 'sleep 60' ) &
+          echo "$!" > "#{pidfile}"
+          wait
+          exit 0
+        fi
+        echo wrapper:$1
+      SH
+      FileUtils.chmod(0o755, wrapper)
+
+      fake_bin = File.join(dir, "fake-bin")
+      FileUtils.mkdir_p(fake_bin)
+      fake_timeout = File.join(fake_bin, "timeout")
+      File.write(fake_timeout, <<~SH)
+        #!/usr/bin/env bash
+        [ "${1:-}" = "-k" ] && [ "${2:-}" = "1" ] || exit 64
+        shift 2
+        case "${1:-}" in 1|5) shift ;; *) exit 64 ;; esac
+
+        set -m
+        "$@" &
+        pid=$!
+        set +m
+        sleep 0.1
+        if ! kill -0 "$pid" 2>/dev/null; then
+          wait "$pid"
+          exit $?
+        fi
+
+        kill -TERM "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+        sleep 0.1
+        kill -KILL "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null
+        exit 124
+      SH
+      FileUtils.chmod(0o755, fake_timeout)
+
+      xdg_bin = File.join(dir, "xdg-bin")
+      FileUtils.mkdir_p(xdg_bin)
+      File.write(File.join(xdg_bin, "hive"), <<~SH)
+        #!/bin/sh
+        if [ "$1" = "--version" ]; then echo "2.3.4"; exit 0; fi
+        echo xdg:$1
+      SH
+      FileUtils.chmod(0o755, File.join(xdg_bin, "hive"))
+
+      out, err, status = capture_hv_with_timeout(
+        {
+          "HIVE_BIN_OVERRIDE" => wrapper,
+          "XDG_BIN_HOME" => xdg_bin,
+          "HOMEBREW_PREFIX" => File.join(dir, "empty-homebrew"),
+          "PATH" => [ fake_bin, ENV.fetch("PATH", "") ].join(File::PATH_SEPARATOR)
+        },
+        "probe"
+      )
+
+      assert status.success?, err
+      assert_equal "xdg:probe\n", out, "hv must fall through after timeout kills the hung wrapper"
+
+      child_pid = Integer(File.read(pidfile).strip)
+      refute probe_child_alive?(child_pid),
+             "timeout kill-after must clean up a TERM-ignoring probe helper"
+    ensure
+      reap_probe_child(pidfile)
     end
   end
 

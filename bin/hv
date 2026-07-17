@@ -29,10 +29,13 @@ xdg_bin_home="${XDG_BIN_HOME:-${HOME:+$HOME/.local/bin}}"
 # always close the probe's stdin (</dev/null) and cap each probe so a
 # slow candidate falls through to the next instead of hanging.
 timeout_bin="$(command -v timeout 2>/dev/null || true)"
+if [[ -n "$timeout_bin" ]] && ! "$timeout_bin" -k 1 1 /bin/sh -c 'exit 0' </dev/null >/dev/null 2>&1; then
+  timeout_bin=""
+fi
 
 probe_version() {
   if [[ -n "$timeout_bin" ]]; then
-    "$timeout_bin" 5 "$1" --version </dev/null 2>/dev/null
+    "$timeout_bin" -k 1 5 "$1" --version </dev/null 2>/dev/null
   else
     local output_file pid status watchdog
     output_file="$(mktemp "${TMPDIR:-/tmp}/hv-version.XXXXXX")" || return

@@ -243,7 +243,7 @@ expiry, client id, issuer, MCP resource URL, base URL, and default
 | `hive_home` | `ENV["HIVE_HOME"] || Hive::Paths.config_home` (XDG default `~/.config/hive`; legacy `~/Dev/hive/config.yml` is migrated) |
 | `global_config_path` | `<hive_home>/config.yml` |
 | `hive_state_dir(project_root, name = ".hive-state")` | `<project_root>/<name>` |
-| `load(project_root)` | Reads `<project_root>/.hive-state/config.yml`, rewraps YAML parse and configuration-read failures as path-bearing `ConfigError`s, recursively deep-merges onto DEFAULTS, validates, and returns a Hash with `"project_root"` injected. Returns a DEFAULTS-only hash if config is absent. |
+| `load(project_root)` | Reads `<project_root>/.hive-state/config.yml`, treating only an initial `ENOENT` as absent and rewrapping traversal, symlink-loop, read, and YAML parse failures as path-bearing `ConfigError`s; then recursively deep-merges onto DEFAULTS, validates, and returns a Hash with `"project_root"` injected. |
 | `registered_projects` | Reads global config; returns `[{name, path, hive_state_path, repository_identity}, …]` (paths `expand_path`-ed). The identity is a normalized canonical `origin` captured at enrollment when available. |
 | `find_project(name)` | First entry from `registered_projects` matching `name` (or `nil`). |
 | `register_project(name:, path:, repository_identity: :detect)` | Adds or replaces an entry under `config.yml.lock`; stores private `real_path` for relink detection and the transport-independent canonical `origin` identity when detectable. Enrollment still succeeds without an origin, but an explicit cross-project dependency targeting that project later fails closed until identity is configured and re-enrolled. |

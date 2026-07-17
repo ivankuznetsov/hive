@@ -617,6 +617,27 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal "hive patrol p1", supervisor.spawned.fetch(0).fetch(:command)
   end
 
+  def test_patrol_config_exit_backs_off_without_dropping_project
+    dispatcher, supervisor, controller, logger, _watcher, patrol = make_dispatcher(
+      rows: [], with_patrol_scheduler: true
+    )
+    supervisor.next_exits = [
+      ChildExit.new(
+        pid: 123, exit_code: Hive::ExitCodes::CONFIG,
+        project: "p1", slug: "patrol", stage: Hive::Daemon::PatrolScheduler::PATROL_STAGE,
+        command: "hive patrol p1 --json", state_file_path: nil,
+        started_at: T0 - 5, finished_at: T0,
+        json_envelope: { "ok" => false, "error_kind" => "config" }
+      )
+    ]
+
+    dispatcher.tick(now: T0)
+
+    refute controller.project_dropped?("p1")
+    refute logger.events.any? { |name, attrs| name == :project_dropped && attrs[:project] == "p1" }
+    assert_equal [ { project: "p1", exit_code: Hive::ExitCodes::CONFIG, now: T0 } ], patrol.completed
+  end
+
   def test_unverified_architecture_child_claim_is_preserved_if_termination_cannot_be_proved
     architecture = FakeRefactorPatrolScheduler.new
     candidate = {

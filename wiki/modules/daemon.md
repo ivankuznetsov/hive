@@ -554,6 +554,10 @@ A child JSON envelope with `error_kind: admission_error` and CONFIG exit 78 is
 task-local validation state. Reaping it does not mark the whole project
 dropped; unrelated rows remain schedulable.
 
+Patrol and refactor-patrol CONFIG exits are likewise job-local. Missing patrol
+validation commands enter scheduler backoff without marking the registered
+project dropped, so ordinary task stages continue to dispatch.
+
 `reap_completed` always refreshes the controller's
 `last_dispatched_mtime` baseline (no longer just for daemon-spawned
 children — the bot doesn't spawn them anymore). The bug dissolves:

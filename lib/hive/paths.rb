@@ -51,6 +51,26 @@ module Hive
       File.join(attempts_root, "generation-locks")
     end
 
+    def babysitter_root(project_root)
+      File.join(File.expand_path(project_root), ".hive-state", "babysitter")
+    end
+
+    def babysitter_jobs_root(project_root)
+      File.join(babysitter_root(project_root), "jobs")
+    end
+
+    def babysitter_job_locks_root(project_root)
+      File.join(babysitter_root(project_root), "locks", "jobs")
+    end
+
+    def babysitter_current_root(project_root)
+      File.join(babysitter_root(project_root), "current")
+    end
+
+    def babysitter_current_locks_root(project_root)
+      File.join(babysitter_root(project_root), "locks", "current")
+    end
+
     def bin_home
       # bin_home intentionally ignores HIVE_HOME — install.sh places
       # the `hive`/`hv` symlinks under XDG_BIN_HOME (or ~/.local/bin),

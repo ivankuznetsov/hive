@@ -16,6 +16,12 @@ module Hive
         label-apply
         give-up
         dry_run
+        job-claim
+        exact-pr
+        head-change
+        readiness
+        merged
+        blocked
       ].freeze
 
       OUTCOMES = %w[
@@ -31,6 +37,12 @@ module Hive
         pipeline_owned
         fork_pr
         dry_run
+        active
+        ready
+        merged
+        closed_unmerged
+        unavailable
+        stale_claim
       ].freeze
 
       module_function

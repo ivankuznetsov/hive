@@ -4,6 +4,7 @@ require "hive/config"
 require "hive/babysitter/interval"
 require "hive/babysitter/logger"
 require "hive/babysitter/project_tick"
+require "hive/babysitter/job_store"
 
 module Hive
   module Babysitter
@@ -29,11 +30,14 @@ module Hive
         @poll_interval_sec = next_interval(enabled.map { |entry| entry[:cfg] })
 
         enabled.each do |entry|
+          job_store = Hive::Babysitter::JobStore.new(project_root: entry[:project].fetch("path"))
+          job_store.repair_activations!(now: now)
           Hive::Babysitter::ProjectTick.run(
             entry[:project],
             dry_run: @dry_run || entry[:cfg].dig("babysitter", "dry_run") == true,
             logger: @logger,
-            inflight: @inflight
+            inflight: @inflight,
+            job_store: job_store
           )
           @logger.event(:project_tick,
                         project: entry[:project]["name"],

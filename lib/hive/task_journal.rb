@@ -44,13 +44,14 @@ module Hive
       attr_reader :task_folder, :path, :lock_path
 
       def initialize(task_folder:, attempt_store: nil, id_generator: -> { SecureRandom.uuid },
-                     clock: -> { Time.now.utc })
+                     clock: -> { Time.now.utc }, authority_validator: nil)
         @task_folder = File.expand_path(task_folder)
         @path = File.join(@task_folder, JOURNAL_BASENAME)
         @lock_path = File.join(@task_folder, LOCK_BASENAME)
         @attempt_store = attempt_store
         @id_generator = id_generator
         @clock = clock
+        @authority_validator = authority_validator
       end
 
       def append(attributes)
@@ -153,7 +154,19 @@ module Hive
         end
         if Hive::Finalization::Event.finalization?(record)
           Hive::Finalization::Event.validate!(record, records: records)
-          validate_attempt!(record) if record.dig("producer", "kind") == "finalize_attempt"
+          producer_kind = record.dig("producer", "kind")
+          if producer_kind == "finalize_attempt"
+            validate_attempt!(record)
+          elsif producer_kind == "babysitter_job"
+            unless @authority_validator&.respond_to?(:validate_event_authority!)
+              raise AttemptMismatch, "babysitter journal event requires a job authority validator"
+            end
+            begin
+              @authority_validator.validate_event_authority!(record)
+            rescue Hive::Error => e
+              raise AttemptMismatch, e.message
+            end
+          end
         else
           validate_attempt!(record)
         end

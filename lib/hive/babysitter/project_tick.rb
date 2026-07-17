@@ -14,7 +14,7 @@ module Hive
     module ProjectTick
       module_function
 
-      def run(project_entry, dry_run:, logger:, inflight:)
+      def run(project_entry, dry_run:, logger:, inflight:, job_store: nil)
         started = Time.now
         # Re-read config here (rather than accepting the dispatcher's cached
         # cfg) so a per-tick edit to babysitter.* takes effect on the next

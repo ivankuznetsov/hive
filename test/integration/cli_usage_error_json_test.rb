@@ -24,6 +24,32 @@ class CliUsageErrorJsonTest < Minitest::Test
     Open3.capture3({ "HIVE_HOME" => home }, RbConfig.ruby, "-Ilib", HIVE_BIN, *args)
   end
 
+  def assert_pre_dispatch_error(home, argv, schema:, error_kind:)
+    out, _err, status = run_hive(home, *argv)
+
+    refute status.success?, "#{argv.inspect} should fail"
+    assert_equal Hive::ExitCodes::USAGE, status.exitstatus
+    payload = JSON.parse(out)
+    assert_equal schema, payload["schema"]
+    assert_equal false, payload["ok"]
+    if schema == "hive-metrics-rollback-rate"
+      refute payload.key?("error_class"), "the metrics v1 error schema has no error_class field"
+    else
+      assert_equal "InvalidTaskPath", payload["error_class"]
+    end
+    assert_equal error_kind, payload["error_kind"]
+    assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
+
+    if Hive::Schemas::SCHEMA_VERSIONS.key?(schema)
+      assert_equal Hive::Schemas::SCHEMA_VERSIONS.fetch(schema), payload["schema_version"]
+      schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path(schema))))
+      assert_empty schemer.validate(payload).map { |error| error["error"] },
+                   "#{argv.inspect} envelope must validate against #{schema}"
+    else
+      refute payload.key?("schema_version"), "#{schema} is an unversioned legacy envelope"
+    end
+  end
+
   def test_json_usage_errors_emit_envelopes_before_command_dispatch
     cases = [
       [ %w[run --json], "hive-run", {} ],
@@ -53,6 +79,73 @@ class CliUsageErrorJsonTest < Minitest::Test
         assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
         extras.each { |key, value| assert_equal value, payload[key] }
       end
+    end
+  end
+
+  def test_screenote_commands_json_usage_errors_emit_unversioned_envelopes
+    with_tmp_global_config do |home|
+      [
+        [ %w[connect --json], /Usage: "hive connect SERVICE"/ ],
+        [ %w[disconnect --json], /Usage: "hive disconnect SERVICE"/ ]
+      ].each do |argv, message_pattern|
+        out, err, status = run_hive(home, *argv)
+
+        refute status.success?, "#{argv.join(' ')} should fail"
+        assert_equal Hive::ExitCodes::USAGE, status.exitstatus
+        payload = JSON.parse(out)
+        assert_equal false, payload["ok"]
+        assert_equal "screenote", payload["service"]
+        assert_equal "InvalidTaskPath", payload["error_class"]
+        assert_equal "usage", payload["error_kind"]
+        assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
+        assert_match message_pattern, payload["message"]
+        refute payload.key?("schema"), "Screenote connect/disconnect JSON failures are unversioned"
+        assert_match(/^hive: ERROR: /, err.lines.first)
+      end
+    end
+  end
+
+  def test_merged_pr_digest_json_usage_errors_use_merged_pr_schema
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-merged-pr-digest"))))
+    cases = [
+      %w[digest --source merged-prs --bad --json],
+      %w[digest --repo owner/repo --bad --json]
+    ]
+
+    with_tmp_global_config do |home|
+      cases.each do |argv|
+        out, _err, status = run_hive(home, *argv)
+
+        refute status.success?, "#{argv.join(' ')} should fail"
+        assert_equal Hive::ExitCodes::USAGE, status.exitstatus
+        payload = JSON.parse(out)
+        assert_equal "hive-merged-pr-digest", payload["schema"]
+        assert_equal Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-merged-pr-digest"), payload["schema_version"]
+        assert_equal false, payload["ok"]
+        assert_equal "InvalidTaskPath", payload["error_class"]
+        assert_equal "usage", payload["error_kind"]
+        assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
+        assert_empty schemer.validate(payload).map { |e| e["error"] },
+                     "#{argv.join(' ')} envelope must validate against hive-merged-pr-digest schema"
+      end
+    end
+  end
+
+  def test_setup_extra_positional_json_usage_error_uses_setup_envelope
+    with_tmp_global_config do |home|
+      out, err, status = run_hive(home, "setup", "extra", "--json")
+
+      refute status.success?
+      assert_equal Hive::ExitCodes::USAGE, status.exitstatus
+      payload = JSON.parse(out)
+      assert_equal "hive-setup", payload["schema"]
+      refute payload.key?("schema_version"), "hive-setup JSON is unversioned"
+      assert_equal false, payload["ok"]
+      assert_equal "InvalidTaskPath", payload["error_class"]
+      assert_equal "usage", payload["error_kind"]
+      assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
+      assert_match(/Usage: "hive setup"/, payload["message"])
+      assert_match(/^hive: ERROR: /, err.lines.first)
     end
   end
 
@@ -213,8 +306,8 @@ class CliUsageErrorJsonTest < Minitest::Test
   # command-level usage-error emitters. With --json it must still ride the
   # hive-bot-status envelope via the bin/hive "bot" usage-error contract
   # (error_kind "extra_arguments", error_class "InvalidTaskPath", exit 64), not
-  # bare Thor arity prose on stderr. This is the sole reason the "bot" entry
-  # exists in JSON_USAGE_ERROR_CONTRACTS.
+  # bare Thor arity prose on stderr. This is the sole reason the resolver has a
+  # dedicated `bot` branch in json_usage_error_contract.
   def test_bot_extra_positional_json_usage_error_rides_bot_status_envelope
     schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-bot-status"))))
     with_tmp_global_config do |home|
@@ -252,12 +345,74 @@ class CliUsageErrorJsonTest < Minitest::Test
     end
   end
 
-  def test_invalid_byte_json_arg_uses_command_usage_envelope
+  def test_documented_json_surfaces_wrap_thor_arity_errors
+    cases = [
+      [ %w[status extra --json], "hive-status", "error" ],
+      [ %w[status --diagnose task extra --json], "hive-status-diagnose", "error" ],
+      [ %w[status --json -- extra --diagnose=task], "hive-status", "error" ],
+      [ %w[prune extra --json], "hive-prune", "usage" ],
+      [ %w[forget project extra --json], "hive-forget", "usage" ],
+      [ %w[metrics rollback-rate extra --json], "hive-metrics-rollback-rate", "error" ],
+      [ %w[web status extra --json], "hive-web-status", "invalid_task_path" ],
+      [ %w[web install extra --json], "hive-web-install", "invalid_task_path" ],
+      [ %w[web --bind install status extra --json], "hive-web-status", "invalid_task_path" ],
+      [ %w[digest extra --json], "hive-digest", "usage" ],
+      [ %w[digest --json -- extra --source merged-prs], "hive-digest", "usage" ],
+      [ %w[digest --source merged-prs extra --json], "hive-merged-pr-digest", "usage" ]
+    ]
+
     with_tmp_global_config do |home|
-      out, err, status = run_hive(home, "run", "--json", "bad\xFF".b)
+      cases.each do |argv, schema, error_kind|
+        assert_pre_dispatch_error(home, argv, schema: schema, error_kind: error_kind)
+      end
+    end
+  end
+
+  def test_invalid_byte_errors_use_the_selected_json_surface
+    invalid = "bad\xFF".b
+    cases = [
+      [ [ "status", "--diagnose", "task", "--json", invalid ], "hive-status-diagnose", "error" ],
+      [ [ "web", "status", "--json", invalid ], "hive-web-status", "invalid_task_path" ],
+      [ [ "bot", "status", "--json", invalid ], "hive-bot-status", "extra_arguments" ],
+      [ [ "pairing", "list", "--json", invalid ], "hive-pairing-list", "invalid_arguments" ],
+      [ [ "pairing", "unknown", "approve", "--json", invalid ],
+        "hive-pairing-list", "invalid_arguments" ],
+      [ [ "pairing", "approve", "telegram", "CODE", "--json", invalid ],
+        "hive-pairing-approve", "invalid_arguments" ],
+      [ [ "digest", "--json", invalid ], "hive-digest", "usage" ],
+      [ [ "digest", "--source", invalid, "--json" ], "hive-digest", "usage" ],
+      [ [ "digest", "--source", "merged-prs", "--json", invalid ],
+        "hive-merged-pr-digest", "usage" ]
+    ]
+
+    with_tmp_global_config do |home|
+      cases.each do |argv, schema, error_kind|
+        assert_pre_dispatch_error(home, argv, schema: schema, error_kind: error_kind)
+      end
+    end
+  end
+
+  def test_invalid_command_encoding_is_not_attributed_to_a_later_command
+    with_tmp_global_config do |home|
+      out, err, status = run_hive(home, "bad\xFF".b, "status", "--json")
 
       refute status.success?
       assert_equal Hive::ExitCodes::USAGE, status.exitstatus
+      assert_empty out
+      assert_match(/invalid byte sequence/, err)
+    end
+  end
+
+  def test_invalid_byte_json_arg_uses_command_usage_envelope
+    with_tmp_global_config do |home|
+      out, err, status = Open3.capture3(
+        { "HIVE_HOME" => home, "LC_ALL" => "C" },
+        RbConfig.ruby, "-Ilib", HIVE_BIN, "run", "--json", "bad\xFF".b
+      )
+
+      refute status.success?
+      assert_equal Hive::ExitCodes::USAGE, status.exitstatus
+      refute_empty out, "JSON usage errors must emit an envelope"
       refute_match(%r{/thor/}, err)
       payload = JSON.parse(out)
       assert_equal "hive-run", payload["schema"]

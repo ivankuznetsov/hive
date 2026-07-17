@@ -73,6 +73,13 @@ class CommandsStageActionTest < Minitest::Test
       Hive::WrongStage.new("wrong", current_stage: "1-inbox") => "wrong_stage",
       Hive::RollbackFailed.new("rollback failed") => "rollback_failed",
       Hive::InvalidTaskPath.new("invalid") => "invalid_task_path",
+      Hive::DependencyWaitError.new(
+        "waiting", offending_ref: "base", safe_correction: "Wait for base."
+      ) => "dependency_wait",
+      Hive::DependencyAdmissionError.new(
+        "invalid", reason_code: "dependency_cycle", offending_ref: "app:a",
+        safe_correction: "Break the cycle."
+      ) => "admission_error",
       Hive::Error.new("generic") => "error"
     }
 

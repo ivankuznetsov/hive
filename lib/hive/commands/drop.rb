@@ -330,7 +330,7 @@ module Hive
           killed: !killed_pids.empty?,
           pid: candidates.first[:pid],
           killed_pids: killed_pids.uniq,
-          skipped_reason: killed_pids.empty? ? skipped_reasons.compact.first : nil
+          skipped_reason: skipped_reasons.compact.first
         }
       end
 
@@ -340,7 +340,7 @@ module Hive
           lock = lock_payload(File.join(entry[:folder], ".lock"))
           if integer_like?(lock["claude_pid"])
             register_candidate(by_pid, lock["claude_pid"].to_i,
-                               process_start_time: nil, group: true)
+                               process_start_time: lock["claude_pid_start_time"], group: true)
           end
           if integer_like?(lock["pid"])
             register_candidate(by_pid, lock["pid"].to_i,

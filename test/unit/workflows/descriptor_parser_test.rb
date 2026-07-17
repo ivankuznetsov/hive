@@ -71,6 +71,161 @@ class WorkflowsDescriptorParserTest < Minitest::Test
     assert_equal "/ship", workflow.stage_named("work").skill
   end
 
+  def test_agent_stage_accepts_per_stage_agent_model_and_effort
+    workflow = Hive::Workflows::DescriptorParser.parse_hash(
+      {
+        "id" => "agent-choice",
+        "stages" => [
+          { "name" => "inbox", "kind" => "terminal", "state_file" => "idea.md" },
+          {
+            "name" => "work",
+            "kind" => "agent",
+            "state_file" => "work.md",
+            "skill" => "/ship",
+            "agent" => "codex",
+            "model" => "opus",
+            "effort" => "high"
+          },
+          { "name" => "done", "kind" => "terminal", "state_file" => "done.md" }
+        ]
+      },
+      path: "/tmp/agent-choice.yml"
+    )
+
+    work = workflow.stage_named("work")
+    assert_equal "codex", work.agent
+    assert_equal "opus", work.model
+    assert_equal "high", work.effort
+  end
+
+  def test_active_stages_accept_per_stage_budget_and_timeout
+    workflow = Hive::Workflows::DescriptorParser.parse_hash(
+      {
+        "id" => "resource-limits",
+        "stages" => [
+          {
+            "name" => "work",
+            "kind" => "agent",
+            "state_file" => "work.md",
+            "skill" => "/ship",
+            "budget_usd" => 12.5,
+            "timeout_sec" => 7200
+          },
+          {
+            "name" => "review",
+            "kind" => "council",
+            "state_file" => "review.md",
+            "budget_usd" => 25,
+            "timeout_sec" => 3600,
+            "reviewers" => [ { "name" => "one", "prompt" => "Review." } ]
+          },
+          { "name" => "done", "kind" => "terminal", "state_file" => "done.md" }
+        ]
+      },
+      path: "/tmp/resource-limits.yml"
+    )
+
+    work = workflow.stage_named("work")
+    assert_equal 12.5, work.budget_usd
+    assert_equal 7200, work.timeout_sec
+
+    review = workflow.stage_named("review")
+    assert_equal 25, review.budget_usd
+    assert_equal 3600, review.timeout_sec
+  end
+
+  def test_per_stage_budget_and_timeout_default_to_nil
+    workflow = Hive::Workflows::DescriptorParser.parse_hash(
+      {
+        "id" => "resource-defaults",
+        "stages" => [
+          { "name" => "work", "kind" => "agent", "state_file" => "work.md", "skill" => "/ship" },
+          { "name" => "done", "kind" => "terminal", "state_file" => "done.md" }
+        ]
+      },
+      path: "/tmp/resource-defaults.yml"
+    )
+
+    work = workflow.stage_named("work")
+    assert_nil work.budget_usd
+    assert_nil work.timeout_sec
+  end
+
+  def test_per_stage_budget_and_timeout_must_be_positive
+    {
+      "budget_usd" => [ 0, -1, "12" ],
+      "timeout_sec" => [ 0, -1, 1.5, "7200" ]
+    }.each do |field, invalid_values|
+      invalid_values.each do |value|
+        error = assert_config_error(
+          {
+            "id" => "bad",
+            "stages" => [
+              { "name" => "work", "kind" => "agent", "state_file" => "work.md", "skill" => "/ship",
+                field => value }
+            ]
+          },
+          path: "/tmp/bad.yml"
+        )
+
+        assert_includes error.message, "stage 1 #{field} must be a positive"
+      end
+    end
+  end
+
+  def test_yaml_infinite_budget_is_rejected
+    with_tmp_dir do |dir|
+      path = write_descriptor(dir, "infinite-budget", <<~YAML)
+        id: infinite-budget
+        stages:
+          - name: work
+            kind: agent
+            state_file: work.md
+            skill: /ship
+            budget_usd: .inf
+      YAML
+
+      error = assert_raises(Hive::ConfigError) do
+        Hive::Workflows::DescriptorParser.parse_file(path)
+      end
+
+      assert_includes error.message, "stage 1 budget_usd must be a positive finite number"
+    end
+  end
+
+  def test_terminal_stage_rejects_budget_and_timeout
+    error = assert_config_error(
+      {
+        "id" => "bad",
+        "stages" => [
+          { "name" => "done", "kind" => "terminal", "state_file" => "done.md",
+            "budget_usd" => 10, "timeout_sec" => 60 }
+        ]
+      },
+      path: "/tmp/bad.yml"
+    )
+
+    assert_includes error.message, '["budget_usd", "timeout_sec"] are only valid on an agent stage'
+  end
+
+  def test_agent_stage_defaults_per_stage_agent_model_and_effort_to_nil
+    workflow = Hive::Workflows::DescriptorParser.parse_hash(
+      {
+        "id" => "agent-defaults",
+        "stages" => [
+          { "name" => "work", "kind" => "agent", "state_file" => "work.md", "skill" => "/ship" },
+          { "name" => "done", "kind" => "terminal", "state_file" => "done.md" }
+        ]
+      },
+      path: "/tmp/agent-defaults.yml"
+    )
+
+    work = workflow.stage_named("work")
+    assert_nil work.agent
+    assert_nil work.model
+    assert_nil work.effort
+  end
+
   def test_parse_file_wraps_yaml_errors_with_path
     with_tmp_dir do |dir|
       path = File.join(dir, "broken.yml")
@@ -219,13 +374,273 @@ class WorkflowsDescriptorParserTest < Minitest::Test
     end
   end
 
-  def test_council_kind_is_reserved
+  def test_council_stage_parses_reviewers_and_config
+    workflow = Hive::Workflows::DescriptorParser.parse_hash(
+      {
+        "id" => "doc-review",
+        "stages" => [
+          { "name" => "draft", "kind" => "agent", "state_file" => "draft.md", "skill" => "/draft" },
+          {
+            "name" => "review",
+            "kind" => "council",
+            "state_file" => "review.md",
+            "input" => "draft.md",
+            "agent" => "claude",
+            "model" => "opus",
+            "effort" => "high",
+            "reviewers" => [
+              { "name" => "fable-doc", "agent" => "codex", "skill" => "/doc-review", "output_basename" => "fable" },
+              { "name" => "codex-doc", "prompt" => "Review the document." }
+            ],
+            "council" => {
+              "quorum" => 2,
+              "max_rounds" => 3,
+              "exit_rule" => "consensus",
+              "triage_output" => "reviews/triage.md",
+              "revise" => { "agent" => "claude", "skill" => "/revise" }
+            }
+          },
+          { "name" => "done", "kind" => "terminal", "state_file" => "done.md" }
+        ]
+      },
+      path: "/tmp/doc-review.yml"
+    )
+
+    review = workflow.stage_named("review")
+    assert_equal :council, review.kind
+    assert_equal "draft.md", review.input
+    assert_equal "claude", review.agent
+    assert_equal "opus", review.model
+    assert_equal "high", review.effort
+    assert_equal 2, review.reviewers.length
+    assert_equal "fable-doc", review.reviewers.first.name
+    assert_equal "codex", review.reviewers.first.agent
+    assert_equal "/doc-review", review.reviewers.first.skill
+    assert_equal "fable", review.reviewers.first.output_basename
+    assert_equal "Review the document.", review.reviewers.last.prompt
+    assert_equal 2, review.council.quorum
+    assert_equal 3, review.council.max_rounds
+    assert_equal :consensus, review.council.exit_rule
+    assert_equal "reviews/triage.md", review.council.triage_output
+    assert_equal "/revise", review.council.revise.skill
+  end
+
+  def test_council_defaults_input_to_nil_and_config_to_reviewer_count
+    workflow = Hive::Workflows::DescriptorParser.parse_hash(
+      {
+        "id" => "doc-review",
+        "stages" => [
+          { "name" => "draft", "kind" => "agent", "state_file" => "draft.md", "skill" => "/draft" },
+          {
+            "name" => "review",
+            "kind" => "council",
+            "state_file" => "review.md",
+            "reviewers" => [
+              { "name" => "one", "prompt" => "Review." }
+            ]
+          },
+          { "name" => "done", "kind" => "terminal", "state_file" => "done.md" }
+        ]
+      },
+      path: "/tmp/doc-review.yml"
+    )
+
+    review = workflow.stage_named("review")
+    assert_nil review.input
+    assert_equal 1, review.council.quorum
+    assert_equal 1, review.council.max_rounds
+    assert_equal :human, review.council.exit_rule
+    assert_equal "reviews/triage.md", review.council.triage_output
+    assert_nil review.council.revise
+  end
+
+  def test_nonterminal_deliverable_is_rejected
     error = assert_config_error(
-      { "id" => "bad", "stages" => [ { "name" => "review", "kind" => "council", "state_file" => "review.md" } ] },
+      {
+        "id" => "bad",
+        "stages" => [
+          { "name" => "draft", "kind" => "agent", "state_file" => "draft.md", "skill" => "/draft",
+            "deliverable" => "draft.md" },
+          { "name" => "done", "kind" => "terminal", "state_file" => "done.md" }
+        ]
+      },
       path: "/tmp/bad.yml"
     )
 
-    assert_includes error.message, "kind 'council' is not yet supported"
+    assert_includes error.message, "deliverable is only consumed on the last stage"
+  end
+
+  def test_parser_terminal_last_stage_validation_reports_internal_kind_drift
+    parser = Hive::Workflows::DescriptorParser.new("/tmp/bad.yml")
+    stage = Hive::Workflow::Stage.new(name: "execute", index: 1, state_file: "x.md", kind: :execute)
+
+    error = assert_raises(Hive::ConfigError) do
+      parser.send(:validate_terminal_last_stage!, [ stage ])
+    end
+
+    assert_includes error.message, 'last stage "execute" must be terminal, agent, or council'
+  end
+
+  def test_council_stage_requires_reviewers
+    error = assert_config_error(
+      {
+        "id" => "bad",
+        "stages" => [
+          { "name" => "review", "kind" => "council", "state_file" => "review.md" },
+          { "name" => "done", "kind" => "terminal", "state_file" => "done.md" }
+        ]
+      },
+      path: "/tmp/bad.yml"
+    )
+
+    assert_includes error.message, "council stage must declare reviewers"
+  end
+
+  def test_council_rejects_duplicate_reviewer_names_and_sanitized_outputs
+    [
+      [
+        [
+          { "name" => "same", "prompt" => "Review." },
+          { "name" => "same", "prompt" => "Review." }
+        ],
+        'duplicate reviewer names: ["same"]'
+      ],
+      [
+        [
+          { "name" => "one", "prompt" => "Review.", "output_basename" => "a b" },
+          { "name" => "two", "prompt" => "Review.", "output_basename" => "a/b" }
+        ],
+        'duplicate reviewer output_basenames: ["a-b"]'
+      ]
+    ].each do |reviewers, message|
+      error = assert_config_error(
+        {
+          "id" => "bad",
+          "stages" => [
+            { "name" => "review", "kind" => "council", "state_file" => "review.md", "reviewers" => reviewers },
+            { "name" => "done", "kind" => "terminal", "state_file" => "done.md" }
+          ]
+        },
+        path: "/tmp/bad.yml"
+      )
+      assert_includes error.message, message
+    end
+  end
+
+  def test_council_stage_rejects_invalid_quorum_exit_rule_and_rounds
+    [
+      [ { "quorum" => 2 }, "quorum 2 cannot exceed reviewer count 1" ],
+      [ { "max_rounds" => 0 }, "max_rounds must be a positive integer" ],
+      [ { "exit_rule" => "whatever" }, 'exit_rule "whatever" must be one of' ]
+    ].each do |council, message|
+      error = assert_config_error(
+        {
+          "id" => "bad",
+          "stages" => [
+            {
+              "name" => "review",
+              "kind" => "council",
+              "state_file" => "review.md",
+              "reviewers" => [ { "name" => "one", "prompt" => "Review." } ],
+              "council" => council
+            },
+            { "name" => "done", "kind" => "terminal", "state_file" => "done.md" }
+          ]
+        },
+        path: "/tmp/bad.yml"
+      )
+      assert_includes error.message, message
+    end
+  end
+
+  def test_council_reviewer_requires_exactly_one_instruction_source
+    [
+      [ {}, "must declare exactly one of" ],
+      [ { "skill" => "/review", "prompt" => "Review." }, "must declare exactly one of" ]
+    ].each do |extra, message|
+      error = assert_config_error(
+        {
+          "id" => "bad",
+          "stages" => [
+            {
+              "name" => "review",
+              "kind" => "council",
+              "state_file" => "review.md",
+              "reviewers" => [ { "name" => "one" }.merge(extra) ]
+            },
+            { "name" => "done", "kind" => "terminal", "state_file" => "done.md" }
+          ]
+        },
+        path: "/tmp/bad.yml"
+      )
+      assert_includes error.message, message
+    end
+  end
+
+  def test_council_revise_requires_exactly_one_instruction_source
+    [
+      [ {}, "must declare exactly one of" ],
+      [ { "skill" => "/revise", "prompt" => "Revise." }, "must declare exactly one of" ]
+    ].each do |revise, message|
+      error = assert_config_error(
+        {
+          "id" => "bad",
+          "stages" => [
+            {
+              "name" => "review",
+              "kind" => "council",
+              "state_file" => "review.md",
+              "reviewers" => [ { "name" => "one", "prompt" => "Review." } ],
+              "council" => { "revise" => revise }
+            },
+            { "name" => "done", "kind" => "terminal", "state_file" => "done.md" }
+          ]
+        },
+        path: "/tmp/bad.yml"
+      )
+      assert_includes error.message, message
+    end
+  end
+
+  def test_council_revise_noop_combinations_warn
+    [
+      [ { "revise" => { "skill" => "/revise" } }, /max_rounds: 1/ ],
+      [ { "max_rounds" => 2, "exit_rule" => "human", "revise" => { "skill" => "/revise" } }, /exit_rule: human/ ]
+    ].each do |council, warning|
+      _out, err = capture_io do
+        Hive::Workflows::DescriptorParser.parse_hash(
+          {
+            "id" => "warn",
+            "stages" => [
+              { "name" => "review", "kind" => "council", "state_file" => "review.md",
+                "reviewers" => [ { "name" => "one", "prompt" => "Review." } ],
+                "council" => council },
+              { "name" => "done", "kind" => "terminal", "state_file" => "done.md" }
+            ]
+          },
+          path: "/tmp/warn.yml"
+        )
+      end
+      assert_match warning, err
+    end
+  end
+
+  def test_council_triage_output_stays_inside_stage_folder
+    [ "/tmp/triage.md", "../triage.md", "reviews/../triage.md" ].each do |triage_output|
+      error = assert_config_error(
+        {
+          "id" => "bad",
+          "stages" => [
+            { "name" => "review", "kind" => "council", "state_file" => "review.md",
+              "reviewers" => [ { "name" => "one", "prompt" => "Review." } ],
+              "council" => { "triage_output" => triage_output } },
+            { "name" => "done", "kind" => "terminal", "state_file" => "done.md" }
+          ]
+        },
+        path: "/tmp/bad.yml"
+      )
+      assert_includes error.message, "must stay inside the stage folder"
+    end
   end
 
   def test_unknown_kind_is_rejected
@@ -234,7 +649,7 @@ class WorkflowsDescriptorParserTest < Minitest::Test
       path: "/tmp/bad.yml"
     )
 
-    assert_includes error.message, 'stage 1 kind "marker" must be agent or terminal'
+    assert_includes error.message, 'stage 1 kind "marker" must be agent, council, or terminal'
 
     # The coding runtime kinds (execute/review_council/finalize) are Ruby-only:
     # only Workflows::Coding declares them via Stage.new, and parse_kind must keep
@@ -250,7 +665,7 @@ class WorkflowsDescriptorParserTest < Minitest::Test
         path: "/tmp/bad.yml"
       )
 
-      assert_includes runtime_error.message, %(stage 1 kind "#{coding_runtime_kind}" must be agent or terminal),
+      assert_includes runtime_error.message, %(stage 1 kind "#{coding_runtime_kind}" must be agent, council, or terminal),
                       "YAML descriptors must not be able to declare Ruby-only coding runtime kind " \
                       "#{coding_runtime_kind.inspect}"
     end
@@ -281,6 +696,32 @@ class WorkflowsDescriptorParserTest < Minitest::Test
       end
       assert_includes both.message, "agent stages must declare exactly one"
     end
+  end
+
+  def test_kind_specific_fields_are_rejected
+    agent_error = assert_config_error(
+      {
+        "id" => "bad",
+        "stages" => [
+          { "name" => "work", "kind" => "agent", "state_file" => "work.md", "skill" => "/ship",
+            "reviewers" => [ { "name" => "one", "prompt" => "Review." } ] }
+        ]
+      },
+      path: "/tmp/bad.yml"
+    )
+    assert_includes agent_error.message, '["reviewers"] is only valid on a council stage'
+
+    council_error = assert_config_error(
+      {
+        "id" => "bad",
+        "stages" => [
+          { "name" => "review", "kind" => "council", "state_file" => "review.md",
+            "skill" => "/ship", "reviewers" => [ { "name" => "one", "prompt" => "Review." } ] }
+        ]
+      },
+      path: "/tmp/bad.yml"
+    )
+    assert_includes council_error.message, '["skill"] is only valid on a agent stage'
   end
 
   def test_instruction_must_reference_readable_file
@@ -367,6 +808,38 @@ class WorkflowsDescriptorParserTest < Minitest::Test
     assert_includes error.message, "stage 1 skill must be a non-empty string"
   end
 
+  def test_per_stage_model_and_effort_must_be_non_empty_when_present
+    %w[model effort].each do |field|
+      error = assert_config_error(
+        {
+          "id" => "bad",
+          "stages" => [
+            { "name" => "work", "kind" => "agent", "state_file" => "work.md", "skill" => "/ship", field => " " }
+          ]
+        },
+        path: "/tmp/bad.yml"
+      )
+
+      assert_includes error.message, "stage 1 #{field} must be a non-empty string"
+    end
+  end
+
+  def test_unknown_per_stage_agent_is_rejected_with_registered_names
+    error = assert_config_error(
+      {
+        "id" => "bad",
+        "stages" => [
+          { "name" => "work", "kind" => "agent", "state_file" => "work.md", "skill" => "/ship", "agent" => "nonesuch" },
+          { "name" => "done", "kind" => "terminal", "state_file" => "done.md" }
+        ]
+      },
+      path: "/tmp/bad.yml"
+    )
+
+    assert_includes error.message, 'agent "nonesuch" is not registered'
+    assert_includes error.message, "registered:"
+  end
+
   def test_nil_advance_verb_is_allowed_for_bare_mv_stage
     workflow = Hive::Workflows::DescriptorParser.parse_hash(
       {
@@ -389,24 +862,51 @@ class WorkflowsDescriptorParserTest < Minitest::Test
     assert_nil workflow.stage_named("work").advance_verb
   end
 
-  def test_last_stage_must_be_terminal
-    error = assert_config_error(
+  def test_last_stage_may_be_agent_with_deliverable
+    workflow = Hive::Workflows::DescriptorParser.parse_hash(
       {
-        "id" => "no-terminal",
+        "id" => "agent-terminal",
         "stages" => [
           { "name" => "inbox", "kind" => "terminal", "state_file" => "idea.md" },
-          { "name" => "work", "kind" => "agent", "state_file" => "work.md", "skill" => "/ship" }
+          {
+            "name" => "work",
+            "kind" => "agent",
+            "state_file" => "work.md",
+            "skill" => "/ship",
+            "deliverable" => "architecture.md"
+          }
         ]
       },
-      path: "/tmp/no-terminal.yml"
+      path: "/tmp/agent-terminal.yml"
     )
 
-    assert_includes error.message, "last stage \"work\" must be a terminal stage"
-    assert_includes error.message, "undroppable"
+    assert_equal :agent, workflow.stage_named("work").kind
+    assert_equal "architecture.md", workflow.stage_named("work").deliverable
+  end
+
+  def test_last_stage_may_be_council
+    workflow = Hive::Workflows::DescriptorParser.parse_hash(
+      {
+        "id" => "council-terminal",
+        "stages" => [
+          { "name" => "draft", "kind" => "agent", "state_file" => "draft.md", "skill" => "/draft" },
+          {
+            "name" => "review",
+            "kind" => "council",
+            "state_file" => "review.md",
+            "reviewers" => [ { "name" => "one", "prompt" => "Review." } ],
+            "council" => { "quorum" => 1 }
+          }
+        ]
+      },
+      path: "/tmp/council-terminal.yml"
+    )
+
+    assert_equal :council, workflow.stage_named("review").kind
   end
 
   def test_terminal_stage_rejects_agent_only_fields
-    %w[skill instruction permissions].each do |field|
+    %w[skill instruction agent model effort permissions].each do |field|
       error = assert_config_error(
         {
           "id" => "bad",

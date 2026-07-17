@@ -57,7 +57,7 @@ module HiveDaemonE2EHarness
     end
 
     def spawn(command_string:, project:, slug:, stage:,
-              hive_state_path: nil, state_file_path: nil, dry_run: nil, request_id: nil)
+              log_state_path: nil, state_file_path: nil, dry_run: nil, request_id: nil)
       pid = (@next_pid += 1)
       @spawned << { command: command_string, project: project, slug: slug, stage: stage }
       exit_code = @run.call(command_string)

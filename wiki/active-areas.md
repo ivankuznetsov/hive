@@ -3,20 +3,23 @@ title: Active Areas
 type: active-areas
 source: git log + working tree
 created: 2026-04-25
-updated: 2026-06-25
+updated: 2026-07-17
 tags: [roadmap, status]
 ---
 
-**TLDR**: Phase 1 MVP shipped Apr-25 and the active surface is now wider than the original loop: PR-first review, `7-artifacts`, daemon auto-advance/archive, descriptor-backed custom workflows, TUI dashboard, Telegram bot, managed llm-wiki bootstrap, release/install verification, eval harness, token usage accounting, and project-global Claude tmux/headless routing are all implemented. Current deferred work is mostly depth/scale: parallel reviewers, observability exports, richer PR-comment ingestion, daemon/bot operational polish, and live-provider smoke depth.
+**TLDR**: Phase 1 MVP shipped Apr-25 and the active surface is now wider than the original loop: PR-first review, `7-artifacts`, daemon auto-advance/archive, descriptor-backed custom workflows with resource controls, Claude/Codex/Pi/Grok agent profiles, `hive refactor-patrol`, TUI dashboard, Telegram bot, managed llm-wiki bootstrap, release/install verification, eval harness, token usage accounting, and project-global Claude tmux/headless routing are all implemented. Current deferred work is mostly depth/scale: parallel reviewers, observability exports, richer PR-comment ingestion, daemon/bot operational polish, and live-provider smoke depth.
 
 ## Status
 
 Daemon autostart hardening landed on `main` via #189 (2026-05-26): autostart is now install-time/global infrastructure. A Linux host without systemd-user writes the unit and reports the `unsupported` success outcome (exit 0) instead of a spurious failure; `install.sh` captures the real install exit code and carries the verified `hive`/`hv` wrapper through daemon install + `hive init`; `Hive::InvokedBinary` replaces the dead `which` delegators. See log entries 2026-05-26 (21:22Z / 22:55Z / 23:30Z) and ADR-024.
 
-Recent release/dependency/history inspected on 2026-06-25:
+Recent release/dependency/history inspected on 2026-07-17:
 
 | Commit | Area | Notes |
 |--------|------|-------|
+| `#695` / `#713` | Grok agent backend | Adds the built-in Grok profile, streaming response assembly, config/diagnosis/web/TUI surfaces, compact report-only reviewer, and direct `GROK_AUTH_PATH` precedence shared by preflight and login status. |
+| `#700` | Workflow resource controls | Adds descriptor-level `timeout_sec` / `budget_usd` for agent and council stages, including process-group timeout enforcement and explicit unsupported-budget warnings. |
+| `#656` | Refactor patrol | Adds `hive refactor-patrol` as a bounded architecture-cleanup discovery command feeding the existing patrol workflow. |
 | `54fd3455` | Release / hivebox image smoke | Replaces the broken hosted macOS/Colima post-publish arm64 smoke with native `ubuntu-24.04-arm` Docker and records green validation against the live `ghcr.io/ivankuznetsov/hivebox:0.3.1` arm64 image. |
 | `9efbca2a` | Release / custom workflows | Prepares v0.3.1, syncs both root and web path-gem lockfile versions, points public Linux installer snippets at `v0.3.1`, and updates README/release notes around custom workflows as the headline feature. |
 | `9ca14ae0` | Dependency / web tests | Bumps the root RuboCop constraint and lockfile to 1.88, and adds retry/child-diff handling for rare generated task slug collisions in the Rails web test helper. |
@@ -63,7 +66,7 @@ Recent release/dependency/history inspected on 2026-06-25:
 | Telegram bot (ADR-026) | `lib/hive/bot/*`, `lib/hive/commands/bot.rb`, `wiki/commands/bot.md`, `wiki/modules/bot.md` | Mobile human-input surface: long-polls Telegram, notifies on waiting/recovery gates, writes brainstorm answers under lock, and dispatches existing `hive` commands from inline buttons. `hive bot install` adds an opt-in reboot-survivable per-user service (systemd-user/launchd) that runs `hive bot start --foreground` with no inline token; torn down by `hive uninstall`. |
 | Shared service installer | `lib/hive/commands/service_installer/{base,outcome}.rb`, `lib/hive/commands/{daemon,bot}/service_installer.rb`, `schemas/hive-{bot,daemon}-install.v1.json`, `docs/solutions/…cross-platform-service-installer-base…` | `ServiceInstaller::Base` extracted from the daemon installer (daemon behavior byte-identical) and subclassed by daemon + bot, returning a `ServiceInstaller::Outcome` value object. Content-comparison drift detection (`--force` to overwrite), `unsupported` outcome on hosts with no service manager, exit codes 0/64/70, and a read-only `service_state` probe surfaced as `service_installed`/`service_enabled`/`unit_path` in both `bot`/`daemon status --json`. |
 | Testing and eval | `test/unit/`, `test/integration/`, `test/e2e/`, `test/eval/`, `Rakefile`, `bin/hive-eval` | Default `bundle exec rake test`; strict `bundle exec rake coverage`; opt-in e2e and Telegram bot eval layers. |
-| Release/install | `install.sh`, `install.md`, `packaging/`, `.github/workflows/install-smoke.yml`, `.github/workflows/release.yml` | v0.3.1 release prep is gem-based across Homebrew, AUR, and `install.sh`, with custom workflows as the release headline and a native Linux arm64 post-publish smoke for the GHCR hivebox image. Update/uninstall, release artifact verification, install-smoke `jq` provisioning, daemon service install JSON envelopes, hivebox Docker install/smoke flow, and remaining tag-trust/macOS x86_64/live-provider follow-ups are documented in [[operating]], [[commands/web]], [[testing]], and [[gaps]]. |
+| Release/install | `install.sh`, `install.md`, `packaging/`, `.github/workflows/install-smoke.yml`, `.github/workflows/release.yml` | v0.4.3 release prep synchronizes both path-gem locks and public installer pins after path-qualified workflow permissions, repository-aware dependency admission, durable architecture patrol, and incident-CI hardening. Update/uninstall, release artifact verification, install-smoke `jq` provisioning, daemon service install JSON envelopes, hivebox Docker install/smoke flow, and remaining signed-tag/macOS x86_64/live-provider follow-ups are documented in [[operating]], [[commands/web]], [[testing]], and [[gaps]]. |
 | Docs/wiki | `README.md`, `docs/notes/`, `wiki/`, `.llm-wiki/` | Managed llm-wiki context is installed for Codex/Claude/Pi; refresh automation is Codex-owned by `.llm-wiki/config.json`. |
 
 ## Phase 1 deferred work

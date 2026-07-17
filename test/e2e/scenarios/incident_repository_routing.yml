@@ -1,0 +1,68 @@
+name: incident_repository_routing
+description: Proves repository identity routes or rejects work without attributing operations to another project.
+tags: [incident-regression]
+incident_id: repository-routing
+sibling_task_id: "#9771"
+pending: false
+
+steps:
+  - kind: register_project
+    name: synthetic-project-b
+
+  - kind: seed_state
+    stage: 8-finalize
+    slug: synthetic-routing-prerequisite
+    project: synthetic-project-b
+    state_file: pr.md
+    content: "# Cross-project prerequisite\n\n<!-- COMPLETE -->\n"
+
+  - kind: ruby_block
+    description: Pin the registered identity, then make the checkout remote disagree.
+    block: |
+      require "hive/repository_identity"
+      project_b = File.join(File.dirname(run_home), "synthetic-project-b")
+      expected = File.join(File.dirname(run_home), "expected-project-b.git")
+      wrong = File.join(File.dirname(run_home), "wrong-project-b.git")
+      FileUtils.mkdir_p(expected)
+      FileUtils.mkdir_p(wrong)
+      system("git", "-C", project_b, "remote", "add", "origin", wrong, exception: true)
+      config_path = File.join(run_home, "config.yml")
+      config = YAML.safe_load(File.read(config_path))
+      entry = config.fetch("registered_projects").find { |project| project.fetch("name") == "synthetic-project-b" }
+      entry["repository_identity"] = Hive::RepositoryIdentity.normalize(expected)
+      File.write(config_path, config.to_yaml)
+
+  - kind: seed_state
+    stage: 4-execute
+    slug: synthetic-routing-dependent
+    state_file: task.md
+    content: "# Dependent must not dispatch through the wrong repository\n"
+    files:
+      - path: meta.yml
+        content: |
+          id: 42
+          depends_on: synthetic-project-b:synthetic-routing-prerequisite
+
+  - kind: json_assert
+    description: The supported run boundary rejects the mismatched registered repository.
+    args: [run, synthetic-routing-dependent, --json]
+    expect_exit: 78
+    schema: hive-run
+    pick: [reason_code]
+    equals: dependency_repository_mismatch
+    env:
+      HIVE_FAKE_CLAUDE_READY_FILE: "{run_home}/routing-agent-ready"
+
+  - kind: state_assert
+    path: "{run_home}/routing-agent-ready"
+    absent: true
+
+  - kind: ruby_block
+    description: Rejection must not mutate the non-target prerequisite.
+    block: |
+      state_file = File.join(
+        File.dirname(run_home), "synthetic-project-b", ".hive-state", "stages",
+        "8-finalize", "synthetic-routing-prerequisite", "pr.md"
+      )
+      current = Hive::Markers.current(state_file).name
+      raise "non-target prerequisite changed to #{current}" unless current == :complete

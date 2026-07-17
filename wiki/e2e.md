@@ -3,8 +3,8 @@ title: Agentic E2E Suite
 type: reference
 source: test/e2e/, bin/hive-e2e, Rakefile
 created: 2026-04-29
-updated: 2026-06-21
-tags: [test, e2e, tui, artifacts]
+updated: 2026-07-16
+tags: [test, e2e, tui, incidents, artifacts]
 ---
 
 **TLDR**: `test/e2e/` is the outer test layer. It drives the real `bin/hive` binary in a copied Ruby sample project, uses tmux for TUI scenarios, validates JSON output against published schemas, and writes versioned run artifacts for later debugging. The `bin/hive-e2e` Thor executable is also a small public harness surface with pinned exit codes and JSON error envelopes for wrapper/CI callers.
@@ -16,6 +16,8 @@ bundle exec rake e2e:lib_test   # harness library tests
 bin/hive-e2e list               # scenario inventory
 bin/hive-e2e run                # all scenarios
 bin/hive-e2e run --filter tui   # tag filter
+bin/hive-e2e run --filter incident-regression --json
+test/e2e/check_incident_budget.rb test/e2e/runs
 bin/hive-e2e clean              # old run cleanup
 ```
 
@@ -30,37 +32,51 @@ bin/hive-e2e clean              # old run cleanup
 | `0` | all selected scenarios passed |
 | `1` | one or more scenarios failed, or an unclassified harness error occurred |
 | `64` | usage error: unknown command, missing required Thor arguments, unsafe replay path, invalid retention window, or no matching scenarios |
-| `78` | preflight/config failure: missing `tmux`, missing `asciinema` when required, missing replay repro artifact, or a replay `repro.sh` that is not a regular executable file |
+| `78` | preflight/config failure: malformed scenario YAML/definitions, missing `tmux`, missing `asciinema` when required, missing replay repro artifact, or a replay `repro.sh` that is not a regular executable file |
 
-Thor is started exactly once with `debug: true` so `Thor::Error` re-raises into the executable's outer rescue instead of taking Thor's built-in human path; a second `Binary.start` call would rerun successful commands and emit duplicate JSON envelopes. That outer rescue maps both human and `--json` usage failures to `64`. With `--json`, usage and preflight failures emit a `hive-e2e-error` envelope on stdout with `ok: false`, `error_kind`, `message`, and `exit_code`; human mode prefixes prose errors with `hive-e2e:` on stderr and exits with the same code. Replay artifact failures are split: a missing `repro.sh` emits `error_kind: "missing_repro"`, while an existing but non-executable `repro.sh` emits `error_kind: "unusable_repro"`; both exit `78`. Top-level `--version` / `-v` is intercepted before Thor dispatch so binary smoke tests get only `Hive::VERSION`.
+Thor is started exactly once with `debug: true` so `Thor::Error` re-raises into the executable's outer rescue instead of taking Thor's built-in human path; a second `Binary.start` call would rerun successful commands and emit duplicate JSON envelopes. That outer rescue maps both human and `--json` usage failures to `64`. With `--json`, usage and preflight failures emit a `hive-e2e-error` envelope on stdout with `ok: false`, `error_kind`, `message`, and `exit_code`; human mode prefixes prose errors with `hive-e2e:` on stderr and exits with the same code. Scenario parse/config failures from both `run` and `list` use `error_kind: "preflight"` and exit `78`, before any scenario executes. Replay artifact failures are split: a missing `repro.sh` emits `error_kind: "missing_repro"`, while an existing but non-executable `repro.sh` emits `error_kind: "unusable_repro"`; both exit `78`. Top-level `--version` / `-v` is intercepted before Thor dispatch so binary smoke tests get only `Hive::VERSION`.
 Successful `--json` commands emit exactly one top-level JSON document on stdout, including `list --json` and `clean --json`, so wrapper callers can parse stdout directly.
 
 `bin/hive-e2e replay RUN_ID SCENARIO` validates safe run/scenario basenames,
 resolves the stored `scenarios/<scenario>/repro.sh` under the selected run
 directory, and only `exec`s it when it is both a regular file and executable.
 Missing scripts return `error_kind: missing_repro`; existing but unusable
-scripts, including symlinked repro entries (even dangling symlinks, which are a
-present-but-unusable repro entry rather than a missing one), return
-`error_kind: unusable_repro`. Both are config failures (`78`) and use the
-`hive-e2e-error` envelope in `--json` mode.
+scripts, including symlinked runs roots, scenario directories, and repro
+entries (even dangling symlinks, which are a present-but-unusable repro entry
+rather than a missing one), return `error_kind: unusable_repro`. Both are
+config failures (`78`) and use the `hive-e2e-error` envelope in `--json` mode.
 
 `bin/hive-e2e` is a checkout-only harness entrypoint, not a packaged
 `hive-cli` executable. It handles top-level `--version` / `-v` before Thor
 dispatch and rewrites command-local `--help` / `-h` before scenario selection.
 That keeps help requests non-mutating and preflight-free even when command
 options precede the help flag, e.g. `bin/hive-e2e run --filter tui --help`.
+When a leading JSON class option precedes command help for a recognized command
+(`bin/hive-e2e --json --help run` or `--json -h run`), the JSON flag is dropped
+and Thor renders the same human `run` help as `--help run` with exit `0`.
+If the help flag is followed by a non-command trailer such as `missing` or an
+option-looking token such as `--filter`, the JSON flag is restored so the
+usage/no-scenarios path still emits the `hive-e2e-error` envelope.
 Leading JSON class options are normalized with the same Thor-style boolean
 grammar as `bin/hive`: bare `--json`, exact truthy assignments
 (`--json=true`/`TRUE`/`t`/`T`), bare negative forms, and exact false
-assignments are moved behind a recognized command. Unsupported assignments such
-as `--json=1` or `--json=yes` are usage errors before the value can become the
-default `run` pattern. Wrapper-owned error formatting checks the last
+assignments are moved behind a recognized command, or stripped before top-level
+`--help` / `-h` / `--version` / `-v` so those flags remain wrapper requests.
+Unsupported assignments such as `--json=1` or `--json=yes` are usage errors
+before the value can become the default `run` pattern. Wrapper-owned error
+formatting checks the last
 recognized JSON boolean flag rather than any truthy flag, so duplicate flags
 with a final false form, such as `--json --no-json`, emit the human
-`hive-e2e:` stderr path. Invalid-byte `ARGV` entries are rejected before those
-rewrites and before Thor dispatch, and are reported as usage errors (`64`);
-JSON callers receive the normal `hive-e2e-error` envelope with
-`error_kind: "usage"`.
+`hive-e2e:` stderr path. `ARGV` entries that are not valid UTF-8 are rejected
+before those rewrites and before Thor dispatch, regardless of the process
+locale, and are reported as usage errors (`64`); JSON callers receive the
+normal `hive-e2e-error` envelope with `error_kind: "usage"`.
+
+`clean` also validates separate-form `--retain-days` and
+`--retain-failed-days` values before Thor dispatch. A bare retention flag, or
+one followed by another option such as `--json` or `--dry-run`, is a usage
+error (`64`) and never reaches artifact cleanup; Thor cannot silently reuse the
+configured retention default for a malformed destructive invocation.
 
 ## Layout
 
@@ -68,8 +84,11 @@ JSON callers receive the normal `hive-e2e-error` envelope with
 |------|---------|
 | `test/e2e/lib/` | Harness library: sandbox bootstrap, CLI driver, tmux driver, parser, executor, artifact capture, report writer. |
 | `test/e2e/scenarios/*.yml` | Agent-authorable scenarios using the locked YAML vocabulary. |
+| `test/e2e/scenarios/README.md` | Incident metadata, activation lifecycle, sibling index, GitHub scripting, and process-isolation contract. |
+| `test/e2e/fixtures/gh` | Run-global, default-deny GitHub CLI shim with no host-binary fallback. |
 | `test/e2e/sample-project/` | Tiny Ruby fixture copied into each scenario sandbox. Vendored gems keep bootstrap offline. |
 | `test/e2e/runs/` | Gitignored run artifacts. Each run has `report.json` and per-scenario artifact directories. |
+| `test/e2e/check_incident_budget.rb` | Report-driven below-5s-per-incident and below-30s-aggregate CI gate. |
 | `bin/hive-e2e` | Thor shell for run/list/replay/clean. |
 
 ## Scenario DSL
@@ -82,6 +101,8 @@ Supported step kinds:
 - `seed_state`, `write_file`, `register_project`, `ruby_block`: fixture setup escape hatches.
 - `tui_expect`, `tui_keys`, `wait_subprocess`: tmux-backed TUI interaction.
 - `editor_action`, `log_assert`: narrower fixture helpers for editor/log flows.
+- `script_gh`: install an ordered sequence of exact GitHub argv, optional cwd/repository expectations, response JSON/stdout, stderr, and exit status.
+- `start_releases_stub`, `spawn_background`, `stop_process`: start controlled release responses and attached, harness-owned process groups for daemon-style scenarios.
 
 Template variables include `{sandbox}`, `{run_home}`, `{project}`, `{slug}`, `{run_id}`, and `{task_dir:<stage>}`.
 
@@ -101,6 +122,62 @@ Each entry in `report.json#scenarios[]` carries a `status`:
 - `failed` — at least one step raised; failure artifacts are written under `scenarios/<name>/`.
 - `setup_failed` — `Sandbox.bootstrap` raised before any step ran. `failed_step_index` is `null`, `artifacts_dir` is `null`. The aggregate run-level status (`complete` / `partial` / `crashed`) is unaffected.
 
+### Incident metadata and pending fixtures
+
+Scenarios tagged `incident-regression` require a non-empty `description`, a
+lowercase-kebab `incident_id`, and a `sibling_task_id` shaped like `#9767`.
+`pending: true` is a temporary sibling gate, not a scenario result status. A
+selected pending fixture is parsed and included in the additive top-level
+`scenario_metadata` array, but its steps do not execute, it contributes no
+`scenarios[]` row, and it does not change existing summary counts. A
+pending-only run is therefore complete and green with `summary.total: 0`, but
+does not claim that any incident passed. Legacy v1 reports without
+`scenario_metadata` remain schema-valid.
+
+Activation consumes the sibling task's exact persisted state, terminal state,
+and reason code before removing `pending`. Harness fixtures must not infer
+those contracts. The scenario README is the canonical six-incident index and
+activation checklist.
+
+`list --json` exposes `incident_id`, `sibling_task_id`, and `pending` on every
+inventory row (nullable IDs on ordinary scenarios); human list/run output marks
+pending fixtures and reports selected, executed, pending, passed, and failed
+counts. Incident metadata without the `incident-regression` tag is rejected so
+it cannot bypass runtime budgets.
+
+### Hermetic GitHub and agents
+
+`SandboxEnv` puts `test/e2e/fixtures/gh` first on `PATH`, pins the exact require
+paths from Bundler's resolved specs as `RUBYLIB` so subprocesses retain the
+locked dependency set without inheriting Bundler setup, and pins
+`HIVE_GH_BIN` to the same shim for blocking, background, tmux, and replay
+subprocesses. `script_gh` interactions are
+consumed atomically. An absent or exhausted script, unexpected argv, cwd
+mismatch, or repository mismatch exits non-zero and records the rejected call;
+the shim never resolves or executes the machine's real `gh`. Thus e2e GitHub
+reads and mutations are synthetic and no real network access is possible.
+Git commands without `--repo`/`GH_REPO` derive a normalized identity from the
+checkout origin and record that provenance. One ordered script is allowed per
+scenario, the audit is append-only, and background plus tmux/TUI producers
+(including detached TUI workflow process groups recorded in the run-scoped
+lifecycle log) stop before the locked final verification or failure evidence snapshot.
+Harness-owned `BUNDLE_GEMFILE`, `HIVE_HOME`, built-in agent fixture binaries,
+`HIVE_BIN`, and `HIVE_INVOKED_BIN` cannot be replaced by scenario or operator
+overrides.
+
+Claude, Codex, Pi, and Grok profiles resolve to `test/fixtures/fake-claude`.
+Its `HIVE_FAKE_CLAUDE_READY_FILE` /
+`HIVE_FAKE_CLAUDE_RELEASE_FILE` barrier publishes a real PID atomically and
+waits on a condition file, allowing cross-process races without fixed sleeps.
+`spawn_background` owns a process group, and both explicit `stop_process` and
+scenario teardown terminate and reap registered groups.
+The copied project pins `claude.mode: headless`; this keeps fake Claude on its
+subprocess contract instead of sending it through production interactive-tmux
+readiness detection. TUI scenarios still run the real long-lived `hive tui`
+inside tmux. The harness creates that tmux server inside
+`Bundler.with_unbundled_env`, preventing the parent root bundle's `RUBYOPT` or
+`BUNDLE_PATH` from being combined with the sample project's Gemfile.
+
 ## Artifacts
 
 Every run writes `report.json`:
@@ -118,8 +195,9 @@ On failure, the harness writes a scenario bundle containing:
 - `sandbox-tree.txt`
 - copied `.hive-state/stages/` and per-`.log` copies under `logs/<slug>/<basename>.log` plus a sibling `<basename>.tail` (last 200 lines) for fast agent reads
 - `repro.sh`
+- `gh/script.json`, `gh/state.json`, and `gh/audit.jsonl` when GitHub scripting was installed or rejected
 - `manifest.json` with size and SHA-256 per artifact
-- TUI failures also include keystroke captures, run-scoped TUI subprocess marker/capture logs under `tui-subprocess/`, plus `pane-before.txt` (snapshot taken just before the most recent `tui_keys`) and `pane-after.txt`. Cast recording is implemented by `AsciinemaDriver`, but depends on local `asciinema >= 2.4`.
+- TUI failures also include keystroke captures, run-scoped TUI subprocess marker/capture logs under `tui-subprocess/` (including the current shared marker log and its single `.log.1` rotation), plus `pane-before.txt` (snapshot taken just before the most recent `tui_keys`) and `pane-after.txt`. Cast recording is implemented by `AsciinemaDriver`, but depends on local `asciinema >= 2.4`.
 
 ## Current Scenarios
 
@@ -137,10 +215,24 @@ On failure, the harness writes a scenario bundle containing:
 | `update_flow_tui_footer` | TUI update footer rendering after the update check records a newer release. |
 | `update_flow_tui_no_nudge` | TUI no-update-nudge path when update state should not be shown. |
 | `update_flow_up_to_date` | Daemon update-check path when the installed version is already current. |
+| `incident_plan_only_dependency_gate` | Rejects a plan-only assertion, holds exact metadata below the gate, then proves one real dispatch after the prerequisite reaches `8-finalize`. |
+| `incident_repository_routing` | Rejects a cross-project dependency whose registered repository identity disagrees with its live origin and preserves the non-target task. |
+
+The six incident-regression fixtures and their current pending/green states
+are indexed in `test/e2e/scenarios/README.md`. The two #9771 fixtures are green;
+pending fixtures for #9767, #9768, #9769, and #9770 remain report-visible until
+their sibling-owned persistence and reason contracts are available.
 
 ## Operational Notes
 
 The harness prepends repo `bin/` to the tmux environment PATH because TUI rows dispatch commands like `hive plan ...`. `tui_keys` with `text:` sends literal text one character at a time by default for deterministic slow typing; `paste: true` sends the full `text:` value as one literal tmux chunk to exercise the TUI paste-aware runner.
+`CliDriver` starts CLI subprocesses in their own process group and applies the step timeout to both the direct child and stdout/stderr reader threads, so descendants that inherit the capture pipes cannot hold an e2e step open after their parent exits.
+
+Routine pull-request CI runs `e2e:lib_test` and `rake e2e` in a separate job,
+retains the run directory even after failure, and then reads enabled incident
+durations from `report.json`. Durations include sandbox bootstrap; each enabled
+incident must be below five seconds and the group below thirty seconds. This job does not fold e2e into the default
+`rake test` task.
 
 `tmux` is required for TUI scenarios. `asciinema` is test-time optional until a TUI failure needs a cast, but missing/corrupt casts are recorded in artifacts instead of crashing unrelated CLI scenarios. If `asciinema` is installed outside PATH, set `HIVE_ASCIINEMA_BIN=/absolute/path/to/asciinema`.
 

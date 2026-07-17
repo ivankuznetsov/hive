@@ -27,11 +27,21 @@ class HivePatrolValueObjectsTest < Minitest::Test
       "title" => "Crash",
       "description" => "nil crash",
       "recommendation" => "guard",
+      "scope" => "cross_feature",
+      "contract" => "Requests must not dereference a missing user.",
+      "impact" => "A valid request crashes before returning a response.",
+      "root_cause" => "The shared request path assumes lookup always succeeds.",
+      "reproduction" => "Call the route with an unknown user id.",
+      "validation" => "Run the route regression and the request suite.",
+      "alpha_score" => 87,
       "evidence" => [ { "file" => "app.rb" } ],
       "fingerprint" => "fp"
     )
     assert_equal "f1", finding.id
     assert_equal "fp", finding.fingerprint
+    assert_equal "cross_feature", finding.scope
+    assert_equal 87, finding.alpha_score
+    assert_equal "Requests must not dereference a missing user.", finding.to_h.fetch("contract")
   end
 
   def test_state_store_non_hash_json_reads_as_empty

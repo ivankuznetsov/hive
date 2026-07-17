@@ -1,0 +1,84 @@
+# Ephemeral per-cell runner image for hive-bench.
+#
+# Used for two phases with DIFFERENT network postures:
+#   - generation (U3): the candidate agent edits a restored repo. It needs
+#     egress to its model API, so this runs with the model endpoint reachable
+#     (gen mode; full egress is acknowledged via HB_ALLOW_EGRESS=1, see
+#     harness/lib/isolation.sh). Auth is NEVER baked into an image layer —
+#     OPENROUTER_API_KEY is passed at run time.
+#   - gate (U4): apply the candidate diff and run the repo's tests with
+#     --network none. No agent, no model, no egress.
+#
+# Ruby base because the v1 corpus is Ruby/CLI-weighted (the gate runs repo
+# tests); Node + the Pi agent CLI are layered on for the generation phase.
+FROM ruby:3.4-slim
+
+# Node powers the candidate agent CLI (pi). Pi is pinned to match the host CLI
+# so a fresh container reproduces local results.
+ARG NODE_VERSION=26.3.1
+ARG PI_VERSION=0.80.2
+ARG CLAUDE_VERSION=2.1.191
+ARG CODEX_VERSION=0.142.2
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends git ca-certificates curl xz-utils libatomic1 \
+  && rm -rf /var/lib/apt/lists/*
+
+# Official static Node build (no version manager inside the image).
+RUN curl -fsSLo /tmp/node.tar.xz "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" \
+  && tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 \
+  && rm /tmp/node.tar.xz \
+  && node --version && npm --version
+
+# Candidate agent CLIs (the open-model harness pi, and claude-code for the
+# claude cells). Auth is NOT installed here — only the binaries. Provider keys /
+# OAuth credentials are injected at run time (OpenRouter key as env; the claude
+# OAuth creds file bind-mounted read-only by harness/lib/isolation.sh).
+# Grok CLI is a native binary via x.ai's installer (version-pinned arg).
+ARG GROK_VERSION=0.2.93
+# The installer symlinks into /root/.grok (untraversable for the runner
+# user) — materialize the real binary in /usr/local/bin instead.
+RUN curl -fsSL https://x.ai/cli/install.sh | GROK_BIN_DIR=/usr/local/bin bash -s "${GROK_VERSION}" \
+  && real="$(readlink -f /usr/local/bin/grok)" && rm /usr/local/bin/grok \
+  && cp "$real" /usr/local/bin/grok && chmod 755 /usr/local/bin/grok \
+  && rm -rf /root/.grok && grok --version
+
+RUN npm install -g "@earendil-works/pi-coding-agent@${PI_VERSION}" \
+  && npm install -g "@anthropic-ai/claude-code@${CLAUDE_VERSION}" \
+  && npm install -g "@openai/codex@${CODEX_VERSION}" \
+  && pi --version && claude --version && codex --version
+
+# --- Real hive CLI (v2 drives ACTUAL hive stages, not a reimplementation) ---
+# Build deps for hive's native gems: bigdecimal compiles from source; sqlite3 and
+# the Charm bindings (lipgloss/bubbletea) ship precompiled x86_64-linux-gnu. Kept
+# in the final image because the TARGET repo's own `bundle install` / CI (run by
+# the review stage) may also need to compile native gems.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends build-essential libsqlite3-dev pkg-config \
+  && rm -rf /var/lib/apt/lists/*
+
+# Pinned hive source: a clean `git archive HEAD` of the hive repo, dropped into
+# the build context by harness/build_runner.sh. Installed as a GEM (not via a
+# mounted bundle) so hive's deps resolve through rubygems and never leak a
+# BUNDLE_GEMFILE into the target repo's CI (the hive tool and the target repo are
+# independent checkouts of the same project).
+COPY hive-src.tar /tmp/hive-src.tar
+RUN mkdir -p /tmp/hive-build \
+  && tar xf /tmp/hive-src.tar -C /tmp/hive-build \
+  && cd /tmp/hive-build \
+  && gem build hive.gemspec \
+  && gem install ./hive-cli-*.gem --no-document \
+  && ln -sf /usr/local/bundle/bin/hive /usr/local/bin/hive \
+  && hive --version \
+  && rm -rf /tmp/hive-build /tmp/hive-src.tar
+
+# Non-root: the candidate's code and the gate's tests run unprivileged. uid 1000
+# matches the typical host user so files written into the mounted /work keep
+# host ownership (no root-owned artifacts left behind).
+RUN useradd --create-home --shell /bin/bash runner
+USER runner
+WORKDIR /work
+
+# Agent auth is bind-injected as env at run time by harness/lib/isolation.sh,
+# never baked into an image layer (auth must not ship in a public image).
+ENTRYPOINT ["/bin/bash", "-lc"]

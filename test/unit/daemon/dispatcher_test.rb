@@ -46,22 +46,27 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
   class FakeSupervisor
     attr_reader :spawned, :next_pid
-    attr_accessor :next_exits
+    attr_accessor :next_exits, :identity, :terminate_result, :spawn_error
     def initialize
       @spawned = []
       @next_pid = 100
       @next_exits = []
+      @identity = { process_start_time: "start", pgid: 100 }
+      @terminate_result = true
     end
 
     def spawn(command_string:, project:, slug:, stage:,
-              hive_state_path: nil, state_file_path: nil, dry_run: nil,
-              request_id: nil)
+              log_state_path: nil, state_file_path: nil, dry_run: nil,
+              request_id: nil, dispatch_token: nil)
+      raise spawn_error if spawn_error
+
       pid = @next_pid
       @next_pid += 1
       @spawned << {
         pid: pid, command: command_string, project: project, slug: slug,
         stage: stage, state_file_path: state_file_path, dry_run: dry_run,
-        request_id: request_id
+        request_id: request_id, log_state_path: log_state_path,
+        dispatch_token: dispatch_token
       }
       pid
     end
@@ -94,16 +99,29 @@ class HiveDaemonDispatcherTest < Minitest::Test
     def in_flight_count
       @spawned.size
     end
+
+    def process_identity(_pid)
+      @identity
+    end
+
+    def terminate_child(pid, grace_sec: 2)
+      @terminated ||= []
+      @terminated << pid
+      terminate_result
+    end
+
+    attr_reader :terminated
   end
 
   class FakeMergeWatcher
-    attr_reader :enqueued
+    attr_reader :enqueued, :dropped
     attr_accessor :next_archives, :next_dropped
     def initialize
       @enqueued = []
       @next_archives = []
       @last_tick_dropped = []
       @next_dropped = []
+      @dropped = []
     end
 
     def enqueue(project:, slug:, task_folder:, error_reason: nil)
@@ -118,17 +136,23 @@ class HiveDaemonDispatcherTest < Minitest::Test
       out
     end
 
+    def drop(project:, slug:)
+      @dropped << { project: project, slug: slug }
+      @next_archives.reject! { |entry| entry[:project] == project && entry[:slug] == slug }
+    end
+
     attr_reader :last_tick_dropped
   end
 
   class FakePatrolScheduler
     attr_accessor :next_dispatches
-    attr_reader :completed, :cancelled
+    attr_reader :completed, :cancelled, :reserved
 
     def initialize
       @next_dispatches = []
       @completed = []
       @cancelled = []
+      @reserved = []
     end
 
     def tick(now:)
@@ -143,6 +167,82 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
     def cancel(project:)
       @cancelled << project
+    end
+
+    def reserve(candidate, now:)
+      @reserved << { candidate: candidate, now: now }
+      candidate
+    end
+  end
+
+  class FakeRefactorPatrolScheduler
+    attr_accessor :attach_error, :events, :completion_status, :reserve_error
+    attr_reader :reserved, :spawned_calls, :cancelled, :completed
+
+    def initialize
+      @reserved = []
+      @spawned_calls = []
+      @cancelled = []
+      @completed = []
+      @events = []
+      @completion_status = :closed
+    end
+
+    def drain_events
+      drained = events.dup
+      events.clear
+      drained
+    end
+
+    def reserve(candidate, now:)
+      raise reserve_error if reserve_error
+
+      @reserved << [ candidate, now ]
+      candidate.merge(
+        command: "hive refactor-patrol p1 --job-manifest /tmp/job.json --json",
+        dispatch_token: { kind: :architecture_patrol, job_id: candidate.fetch(:job_id), owner: "daemon", generation: 1 }
+      )
+    end
+
+    def spawned(dispatch, pid:, process_start_time:, pgid:, now:)
+      raise attach_error if attach_error
+
+      @spawned_calls << { dispatch: dispatch, pid: pid, process_start_time: process_start_time, pgid: pgid, now: now }
+    end
+
+    def cancel(dispatch, reason:, now:)
+      @cancelled << { dispatch: dispatch, reason: reason, now: now }
+    end
+
+    def complete(dispatch_token:, exit_code:, envelope:, now:)
+      @completed << { dispatch_token: dispatch_token, exit_code: exit_code, envelope: envelope, now: now }
+      {
+        status: completion_status, job_id: dispatch_token.fetch(:job_id), pr_number: 7,
+        pr_url: "https://github.com/acme/demo/pull/7",
+        accepted_count: 0, flagged_count: 0, suppressed_count: 0
+      }
+    end
+  end
+
+  class FakePatrolArbiter
+    attr_accessor :items, :commit_error, :candidate_error
+    attr_reader :committed
+
+    def initialize(items)
+      @items = items
+      @committed = []
+    end
+
+    def candidates(now:)
+      raise candidate_error if candidate_error
+
+      items
+    end
+
+    def commit(candidate, now:)
+      raise commit_error if commit_error
+
+      @committed << { candidate: candidate, now: now }
     end
   end
 
@@ -216,7 +316,9 @@ class HiveDaemonDispatcherTest < Minitest::Test
                       with_patrol_scheduler: false, project_enabled: true,
                       dispatch_state: nil, status_result: nil,
                       dispatch_request_state_home: nil, dispatch_result_state_home: nil,
-                      with_digest_scheduler: false, with_answer_digest_scheduler: false)
+                      with_digest_scheduler: false, with_answer_digest_scheduler: false,
+                      refactor_patrol_merge_reconciler: nil,
+                      refactor_patrol_scheduler: nil, patrol_arbiter: nil)
     config = {
       "daemon" => {
         "edit_debounce_sec" => 30,
@@ -256,7 +358,10 @@ class HiveDaemonDispatcherTest < Minitest::Test
       status_consumer: status,
       logger: logger,
       merge_watcher: merge_watcher,
+      refactor_patrol_merge_reconciler: refactor_patrol_merge_reconciler,
       patrol_scheduler: patrol_scheduler,
+      refactor_patrol_scheduler: refactor_patrol_scheduler,
+      patrol_arbiter: patrol_arbiter,
       digest_scheduler: digest_scheduler,
       answer_digest_scheduler: answer_digest_scheduler,
       dry_run: dry_run,
@@ -272,6 +377,332 @@ class HiveDaemonDispatcherTest < Minitest::Test
     ]
   end
 
+
+  def test_architecture_patrol_spawn_attaches_fence_then_commits_arbiter_and_routes_completion
+    architecture = FakeRefactorPatrolScheduler.new
+    candidate = {
+      project: "p1", patrol_kind: :architecture, job_id: "job-7",
+      pr_number: 7, pr_url: "https://github.com/acme/demo/pull/7",
+      slug: "refactor-patrol-job-7", stage: "refactor-patrol",
+      state_file_mtime: nil, state_file_path: nil, hive_state_path: "/tmp/state"
+    }
+    arbiter = FakePatrolArbiter.new([ candidate ])
+    dispatcher, supervisor, _controller, logger = make_dispatcher(
+      refactor_patrol_scheduler: architecture, patrol_arbiter: arbiter
+    )
+
+    dispatcher.tick(now: T0)
+
+    assert_equal 1, architecture.spawned_calls.size
+    assert_equal 1, arbiter.committed.size
+    token = supervisor.spawned.first.fetch(:dispatch_token)
+    assert_equal "job-7", token.fetch(:job_id)
+    assert logger.events.any? { |name, _attrs| name == :architecture_patrol_opened }
+
+    supervisor.next_exits = [
+      ChildExit.new(
+        pid: supervisor.spawned.first.fetch(:pid), exit_code: 0,
+        project: "p1", slug: "refactor-patrol-job-7", stage: "refactor-patrol",
+        command: supervisor.spawned.first.fetch(:command), started_at: T0,
+        finished_at: T0 + 1, json_envelope: { "ok" => true }, dispatch_token: token
+      )
+    ]
+    arbiter.items = []
+    dispatcher.tick(now: T0 + 1)
+
+    assert_equal 1, architecture.completed.size
+    closed = logger.events.find { |name, _attrs| name == :architecture_patrol_closed }
+    assert_equal "job-7", closed.last.fetch(:job_id)
+    assert_equal 7, closed.last.fetch(:pr_number)
+  end
+
+  def test_architecture_identity_failure_terminates_child_before_claim_release
+    architecture = FakeRefactorPatrolScheduler.new
+    candidate = {
+      project: "p1", patrol_kind: :architecture, job_id: "job-7", pr_number: 7,
+      pr_url: "url", slug: "refactor-patrol-job-7", stage: "refactor-patrol",
+      state_file_mtime: nil, state_file_path: nil, hive_state_path: "/tmp/state"
+    }
+    arbiter = FakePatrolArbiter.new([ candidate ])
+    dispatcher, supervisor = make_dispatcher(
+      refactor_patrol_scheduler: architecture, patrol_arbiter: arbiter
+    )
+    supervisor.identity = nil
+
+    dispatcher.tick(now: T0)
+
+    assert_equal [ 100 ], supervisor.terminated
+    assert_equal "unverified_child_identity", architecture.cancelled.first.fetch(:reason)
+    assert_empty arbiter.committed
+  end
+
+  def test_arbiter_commit_error_does_not_cancel_valid_running_architecture_child
+    architecture = FakeRefactorPatrolScheduler.new
+    candidate = {
+      project: "p1", patrol_kind: :architecture, job_id: "job-7", pr_number: 7,
+      pr_url: "url", slug: "refactor-patrol-job-7", stage: "refactor-patrol",
+      state_file_mtime: nil, state_file_path: nil, hive_state_path: "/tmp/state"
+    }
+    arbiter = FakePatrolArbiter.new([ candidate ])
+    arbiter.commit_error = IOError.new("disk full")
+    dispatcher, _supervisor, controller, logger = make_dispatcher(
+      refactor_patrol_scheduler: architecture, patrol_arbiter: arbiter
+    )
+
+    dispatcher.tick(now: T0)
+
+    assert_empty architecture.cancelled
+    assert controller.running_task?(project: "p1", slug: "refactor-patrol-job-7")
+    assert logger.events.any? { |name, attrs| name == :fatal && attrs[:message].include?("arbiter commit") }
+  end
+
+  def test_corrupt_arbiter_state_is_visible_and_does_not_crash_tick
+    architecture = FakeRefactorPatrolScheduler.new
+    arbiter = FakePatrolArbiter.new([])
+    arbiter.candidate_error = Hive::Daemon::PatrolArbiter::StateError.new("newer schema")
+    dispatcher, supervisor, _controller, logger = make_dispatcher(
+      refactor_patrol_scheduler: architecture, patrol_arbiter: arbiter
+    )
+
+    dispatcher.tick(now: T0)
+
+    assert_empty supervisor.spawned
+    assert logger.events.any? do |name, attrs|
+      name == :architecture_patrol_blocked && attrs[:reason] == "arbiter_state_error"
+    end
+  end
+
+  def test_architecture_claim_attach_failure_terminates_child_before_release
+    architecture = FakeRefactorPatrolScheduler.new
+    architecture.attach_error = IOError.new("fsync failed")
+    candidate = {
+      project: "p1", patrol_kind: :architecture, job_id: "job-7", pr_number: 7,
+      pr_url: "url", slug: "refactor-patrol-job-7", stage: "refactor-patrol",
+      state_file_mtime: nil, state_file_path: nil, hive_state_path: "/tmp/state"
+    }
+    arbiter = FakePatrolArbiter.new([ candidate ])
+    dispatcher, supervisor = make_dispatcher(
+      refactor_patrol_scheduler: architecture, patrol_arbiter: arbiter
+    )
+
+    dispatcher.tick(now: T0)
+
+    assert_equal [ 100 ], supervisor.terminated
+    assert_equal "claim_attach_failed", architecture.cancelled.first.fetch(:reason)
+    assert_empty arbiter.committed
+  end
+
+  def test_refactor_patrol_merge_reconciler_runs_intake_without_dispatching_jobs
+    reconciler = Struct.new(:calls) do
+      def tick(now:)
+        calls << now
+        [ { project: "p1", status: :blocked, enqueued_prs: [], reason: "pagination failed" } ]
+      end
+    end.new([])
+    dispatcher, supervisor, _controller, logger = make_dispatcher(
+      rows: [],
+      refactor_patrol_merge_reconciler: reconciler
+    )
+
+    dispatcher.tick(now: T0)
+
+    assert_equal [ T0 ], reconciler.calls
+    assert_empty supervisor.spawned, "U5 intake must not schedule or execute architecture jobs"
+    event = logger.events.find { |name, attrs| name == :blocked && attrs[:action] == "refactor_patrol_intake" }
+    assert event
+    assert_equal "pagination failed", event.last.fetch(:reason)
+  end
+
+  def test_scheduler_block_events_are_forwarded_without_internal_status_field
+    architecture = FakeRefactorPatrolScheduler.new
+    architecture.events << {
+      status: :blocked, project: "p1", job_id: "job-7", reason: "duplicate_registration"
+    }
+    dispatcher, _supervisor, _controller, logger = make_dispatcher(
+      refactor_patrol_scheduler: architecture,
+      patrol_arbiter: FakePatrolArbiter.new([])
+    )
+
+    dispatcher.tick(now: T0)
+
+    name, attrs = logger.events.find { |event_name, _| event_name == :architecture_patrol_blocked }
+    assert_equal :architecture_patrol_blocked, name
+    assert_equal "duplicate_registration", attrs.fetch(:reason)
+    refute attrs.key?(:status)
+  end
+
+  def test_architecture_completion_routes_progress_and_retry_events
+    [ [ :classified, :architecture_patrol_progress ], [ :retry, :architecture_patrol_blocked ] ].each do |status, expected_event|
+      architecture = FakeRefactorPatrolScheduler.new
+      architecture.completion_status = status
+      candidate = {
+        project: "p1", patrol_kind: :architecture, job_id: "job-7",
+        pr_number: 7, pr_url: "url", slug: "refactor-patrol-job-7",
+        stage: "refactor-patrol", state_file_mtime: nil,
+        state_file_path: nil, hive_state_path: "/tmp/state"
+      }
+      arbiter = FakePatrolArbiter.new([ candidate ])
+      dispatcher, supervisor, _controller, logger = make_dispatcher(
+        refactor_patrol_scheduler: architecture, patrol_arbiter: arbiter
+      )
+      dispatcher.tick(now: T0)
+      token = supervisor.spawned.fetch(0).fetch(:dispatch_token)
+      supervisor.next_exits = [
+        ChildExit.new(
+          pid: 100, exit_code: status == :retry ? 1 : 0,
+          project: "p1", slug: "refactor-patrol-job-7", stage: "refactor-patrol",
+          command: supervisor.spawned.fetch(0).fetch(:command), started_at: T0,
+          finished_at: T0 + 1, json_envelope: nil, dispatch_token: token
+        )
+      ]
+      arbiter.items = []
+
+      dispatcher.tick(now: T0 + 1)
+
+      assert logger.events.any? { |name, attrs| name == expected_event && attrs[:status] == status }
+    end
+  end
+
+  def test_merge_reconciler_logs_seeded_and_nonempty_catch_up_results
+    reconciler = Struct.new(:results) do
+      def tick(now:)
+        results
+      end
+    end.new([
+      { project: "p1", status: :seeded, enqueued_prs: [], reason: nil },
+      { project: "p1", status: :ok, enqueued_prs: [], reason: nil },
+      { project: "p2", status: :ok, enqueued_prs: [ 7, 8 ], reason: nil }
+    ])
+    dispatcher, _supervisor, _controller, logger = make_dispatcher(
+      refactor_patrol_merge_reconciler: reconciler
+    )
+
+    dispatcher.tick(now: T0)
+
+    assert logger.events.any? do |name, attrs|
+      name == :skipped && attrs[:action] == "refactor_patrol_intake" && attrs[:reason] == "baseline_seeded"
+    end
+    catch_up = logger.events.find { |name, attrs| name == :merge_watcher_polled && attrs[:source] == "catch_up" }
+    assert_equal [ 7, 8 ], catch_up.last.fetch(:enqueued_prs)
+  end
+
+  def test_merge_reconciler_failure_is_isolated_as_fatal
+    reconciler = Object.new
+    reconciler.define_singleton_method(:tick) { |**| raise IOError, "GitHub unavailable" }
+    dispatcher, _supervisor, _controller, logger = make_dispatcher(
+      refactor_patrol_merge_reconciler: reconciler
+    )
+
+    dispatcher.tick(now: T0)
+
+    assert logger.events.any? do |name, attrs|
+      name == :fatal && attrs[:message].include?("merge reconciliation failed: IOError: GitHub unavailable")
+    end
+  end
+
+  def test_arbiter_reserves_ordinary_patrol_before_spawn
+    candidate = {
+      project: "p1", patrol_kind: :ordinary, slug: "patrol-p1", stage: "patrol",
+      command: "hive patrol p1", state_file_mtime: nil, state_file_path: nil,
+      hive_state_path: "/tmp/state"
+    }
+    arbiter = FakePatrolArbiter.new([ candidate ])
+    dispatcher, supervisor, _controller, _logger, _watcher, patrol = make_dispatcher(
+      with_patrol_scheduler: true, patrol_arbiter: arbiter
+    )
+
+    dispatcher.tick(now: T0)
+
+    assert_equal candidate, patrol.reserved.fetch(0).fetch(:candidate)
+    assert_equal "hive patrol p1", supervisor.spawned.fetch(0).fetch(:command)
+  end
+
+  def test_unverified_architecture_child_claim_is_preserved_if_termination_cannot_be_proved
+    architecture = FakeRefactorPatrolScheduler.new
+    candidate = {
+      project: "p1", patrol_kind: :architecture, job_id: "job-7", pr_number: 7,
+      pr_url: "url", slug: "refactor-patrol-job-7", stage: "refactor-patrol",
+      state_file_mtime: nil, state_file_path: nil, hive_state_path: "/tmp/state"
+    }
+    dispatcher, supervisor, _controller, logger = make_dispatcher(
+      refactor_patrol_scheduler: architecture,
+      patrol_arbiter: FakePatrolArbiter.new([ candidate ])
+    )
+    supervisor.identity = nil
+    supervisor.terminate_result = false
+
+    dispatcher.tick(now: T0)
+
+    assert_empty architecture.cancelled
+    assert logger.events.any? do |name, attrs|
+      name == :fatal && attrs[:message].include?("cannot resolve or terminate architecture patrol child identity")
+    end
+  end
+
+  def test_claim_attach_failure_preserves_claim_if_child_termination_cannot_be_proved
+    architecture = FakeRefactorPatrolScheduler.new
+    architecture.attach_error = IOError.new("fsync failed")
+    candidate = {
+      project: "p1", patrol_kind: :architecture, job_id: "job-7", pr_number: 7,
+      pr_url: "url", slug: "refactor-patrol-job-7", stage: "refactor-patrol",
+      state_file_mtime: nil, state_file_path: nil, hive_state_path: "/tmp/state"
+    }
+    dispatcher, supervisor, _controller, logger = make_dispatcher(
+      refactor_patrol_scheduler: architecture,
+      patrol_arbiter: FakePatrolArbiter.new([ candidate ])
+    )
+    supervisor.terminate_result = false
+
+    dispatcher.tick(now: T0)
+
+    assert_empty architecture.cancelled
+    assert logger.events.any? do |name, attrs|
+      name == :fatal && attrs[:message].include?("cannot terminate architecture patrol child after claim attach failure")
+    end
+  end
+
+  def test_reservation_block_is_logged_without_attempting_spawn
+    architecture = FakeRefactorPatrolScheduler.new
+    architecture.reserve_error = Hive::Daemon::RefactorPatrolScheduler::ReservationBlocked.new(
+      "repository_identity_drift", { "expected" => "acme/demo" }
+    )
+    candidate = {
+      project: "p1", patrol_kind: :architecture, job_id: "job-7", pr_number: 7,
+      pr_url: "url", slug: "refactor-patrol-job-7", stage: "refactor-patrol"
+    }
+    dispatcher, supervisor, _controller, logger = make_dispatcher(
+      refactor_patrol_scheduler: architecture,
+      patrol_arbiter: FakePatrolArbiter.new([ candidate ])
+    )
+
+    dispatcher.tick(now: T0)
+
+    assert_empty supervisor.spawned
+    event = logger.events.find do |name, attrs|
+      name == :architecture_patrol_blocked && attrs[:reason] == "repository_identity_drift"
+    end
+    assert_equal({ "expected" => "acme/demo" }, event.last.fetch(:evidence))
+  end
+
+  def test_architecture_spawn_error_releases_reserved_claim
+    architecture = FakeRefactorPatrolScheduler.new
+    candidate = {
+      project: "p1", patrol_kind: :architecture, job_id: "job-7", pr_number: 7,
+      pr_url: "url", slug: "refactor-patrol-job-7", stage: "refactor-patrol",
+      state_file_mtime: nil, state_file_path: nil, hive_state_path: "/tmp/state"
+    }
+    dispatcher, supervisor, _controller, logger = make_dispatcher(
+      refactor_patrol_scheduler: architecture,
+      patrol_arbiter: FakePatrolArbiter.new([ candidate ])
+    )
+    supervisor.spawn_error = Errno::EAGAIN.new("fork unavailable")
+
+    dispatcher.tick(now: T0)
+
+    assert_equal "dispatch_error", architecture.cancelled.fetch(0).fetch(:reason)
+    assert logger.events.any? { |name, attrs| name == :fatal && attrs[:message].include?("patrol dispatch error") }
+  end
+
   class StubLogger
     attr_reader :events
     def initialize; @events = []; end
@@ -284,7 +715,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
           mtime: T0 - 600, claude_pid_alive: nil, live_task_lock: nil,
           state_file: nil, folder: nil, marker_attrs: {},
           depends_on: nil, blocked_by: nil, dependency_stage: nil,
-          blocked: false, workflow: nil)
+          blocked: false, workflow: nil, admission_error: nil)
     folder ||= make_existing_row_folder(project: project, stage: stage, slug: slug)
     Row.new(
       project: project, slug: slug, stage: stage, workflow: workflow, marker: marker,
@@ -294,7 +725,8 @@ class HiveDaemonDispatcherTest < Minitest::Test
       suggested_command: command, claude_pid_alive: claude_pid_alive,
       live_task_lock: live_task_lock, marker_attrs: marker_attrs,
       depends_on: depends_on, blocked_by: blocked_by,
-      dependency_stage: dependency_stage, blocked: blocked
+      dependency_stage: dependency_stage, blocked: blocked,
+      admission_error: admission_error
     )
   end
 
@@ -309,7 +741,12 @@ class HiveDaemonDispatcherTest < Minitest::Test
   def test_advance_action_dispatches_workflow_verb
     rows = [ row(action: "ready_to_plan", command: "hive plan s1 --from 2-brainstorm") ]
     dispatcher, sup, _ctrl, logger, _mw = make_dispatcher(rows: rows)
-    dispatcher.tick(now: T0)
+    with_tmp_dir do |state_home|
+      with_replaced_singleton_method(Hive::Paths, :state_home, -> { state_home }) do
+        dispatcher.tick(now: T0)
+      end
+      assert_equal state_home, sup.spawned.first[:log_state_path]
+    end
     assert_equal 1, sup.spawned.size
     assert_equal "hive plan s1 --from 2-brainstorm", sup.spawned.first[:command]
     assert events_include?(logger, :dispatched)
@@ -662,6 +1099,52 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
     assert_equal({ enabled: true, max_catchup_days: 3 }, digest.reconfigured&.last,
                  "SIGHUP reload must push the reloaded digest config into the scheduler")
+  end
+
+  def test_reload_config_reconfigures_concurrency_limits_in_place
+    dispatcher, _sup, controller, logger, _mw = make_dispatcher
+    controller.record_dispatch(
+      pid: 123,
+      project: "hive-bench",
+      slug: "existing-run",
+      stage: "2-generate",
+      command: "hive run existing-run",
+      started_at: T0,
+      state_file_mtime: T0 - 1
+    )
+    assert_equal :ok,
+                 controller.can_dispatch?(project: "hive-bench", slug: "next-run", now: T0)
+
+    new_cfg = Hive::Config::DEFAULTS.fetch("daemon").merge(
+      "max_concurrent_runs" => 2,
+      "max_concurrent_per_project" => 1,
+      "max_runs_per_day_per_project" => 7,
+      "max_concurrent_patrol_scans" => 2
+    )
+    with_replaced_singleton_method(Hive::Config, :load_global_daemon, -> { new_cfg }) do
+      dispatcher.send(:reload_config!)
+    end
+
+    assert_same controller, dispatcher.controller,
+                "reload must retain the controller's in-flight state"
+    assert_equal 2, controller.max_concurrent_runs
+    assert_equal 1, controller.max_concurrent_per_project
+    assert_equal 7, controller.max_runs_per_day_per_project
+    assert_equal 2, controller.max_concurrent_patrol_scans
+    assert_equal :project_cap,
+                 controller.can_dispatch?(project: "hive-bench", slug: "next-run", now: T0),
+                 "the reloaded per-project cap must apply immediately"
+    reload_event = logger.events.find { |name, _attrs| name == :config_reloaded }
+    assert_equal(
+      {
+        max_concurrent_runs: 2,
+        max_concurrent_per_project: 1,
+        max_runs_per_day_per_project: 7,
+        max_concurrent_patrol_scans: 2
+      },
+      reload_event&.last,
+      "the reload event must expose the effective limits to machine consumers"
+    )
   end
 
   def test_answer_digest_scheduler_dispatches_global_answer_digest_without_project_gate
@@ -1043,6 +1526,31 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert_equal 0, sup.spawned.size, "archive must NOT spawn directly"
     assert_equal 1, mw.enqueued.size
     assert_equal "s1", mw.enqueued.first[:slug]
+  end
+
+  def test_admission_error_drops_merge_watch_and_never_spawns
+    error = Hive::DependencyAdmission::AdmissionError.new(
+      reason_code: "dependency_repository_mismatch",
+      offending_ref: "data:base",
+      safe_correction: "Re-enroll the intended repository."
+    )
+    rows = [ row(stage: "8-finalize", action: "admission_error", command: nil,
+                 blocked: true, admission_error: error) ]
+    dispatcher, sup, _ctrl, logger, mw = make_dispatcher(rows: rows, with_merge_watcher: true)
+    mw.next_archives = [ {
+      project: "p1", slug: "s1", stage: "8-finalize",
+      command: "hive archive s1 --from 8-finalize --project p1 --json",
+      state_file_mtime: nil, hive_state_path: nil
+    } ]
+
+    dispatcher.tick(now: T0)
+
+    assert_empty sup.spawned
+    assert_includes mw.dropped, { project: "p1", slug: "s1" }
+    event = logger.events.find { |name, attrs| name == :blocked && attrs[:reason] == "admission_error" }
+    refute_nil event
+    assert_equal "dependency_repository_mismatch", event[1][:reason_code]
+    assert_equal "data:base", event[1][:offending_ref]
   end
 
   def test_finalize_recoverable_error_routes_to_merge_watcher
@@ -1769,6 +2277,26 @@ class HiveDaemonDispatcherTest < Minitest::Test
     assert events_include?(logger, :project_dropped)
   end
 
+  def test_admission_error_config_exit_does_not_drop_unrelated_project_work
+    dispatcher, _sup, controller, logger, _mw = make_dispatcher(rows: [])
+    exit_entry = ChildExit.new(
+      pid: 999, exit_code: Hive::ExitCodes::CONFIG, project: "p1", slug: "held",
+      stage: "4-execute", command: "hive run held --json", started_at: T0 - 1,
+      finished_at: T0, json_envelope: { "ok" => false, "error_kind" => "admission_error" }
+    )
+    dispatcher.supervisor.define_singleton_method(:reap_all) do |now:|
+      next [] if @admission_reaped
+
+      @admission_reaped = true
+      [ exit_entry ]
+    end
+
+    dispatcher.tick(now: T0)
+
+    refute controller.project_dropped?("p1")
+    refute logger.events.any? { |name, attrs| name == :project_dropped && attrs[:project] == "p1" }
+  end
+
   # ── stale-agent healer integration ────────────────────────────────────
 
   def test_dispatcher_tick_heals_dead_pid_agent_working_marker_on_disk
@@ -2453,17 +2981,47 @@ def test_project_enabled_returns_false_for_missing_or_invalid_project_config
 end
 
 def test_reload_config_error_logs_and_keeps_previous_config
-  dispatcher, _sup, _ctrl, logger, _mw = make_dispatcher
+  dispatcher, _sup, controller, logger, _mw = make_dispatcher
   original_cfg = dispatcher.instance_variable_get(:@daemon_cfg)
+  original_limits = [
+    controller.max_concurrent_runs,
+    controller.max_concurrent_per_project,
+    controller.max_runs_per_day_per_project,
+    controller.max_concurrent_patrol_scans
+  ]
+  controller.record_dispatch(
+    pid: 123,
+    project: "hive-bench",
+    slug: "existing-run",
+    stage: "2-generate",
+    command: "hive run existing-run",
+    started_at: T0,
+    state_file_mtime: T0 - 1
+  )
 
-  with_replaced_singleton_method(Hive::Config, :load_global_daemon, -> { raise Hive::ConfigError, "broken yaml" }) do
+  with_replaced_singleton_method(Hive::Config, :load_global_daemon, lambda {
+    raise Hive::ConfigError, "daemon.max_concurrent_runs must be an integer; got nil"
+  }) do
     dispatcher.send(:reload_config!)
   end
 
   assert_same original_cfg, dispatcher.instance_variable_get(:@daemon_cfg)
+  assert_same controller, dispatcher.controller,
+              "an invalid reload must retain the live controller object"
+  assert_equal original_limits, [
+    controller.max_concurrent_runs,
+    controller.max_concurrent_per_project,
+    controller.max_runs_per_day_per_project,
+    controller.max_concurrent_patrol_scans
+  ]
+  assert controller.running_task?(project: "hive-bench", slug: "existing-run"),
+         "an invalid reload must retain in-flight accounting"
   fatal = logger.events.find { |(name, attrs)| name == :fatal && attrs[:message].include?("config reload failed") }
   refute_nil fatal
-  assert_includes fatal[1][:message], "broken yaml"
+  assert_equal true, fatal[1][:keeping_previous]
+  assert_includes fatal[1][:message], "max_concurrent_runs"
+  refute logger.events.any? { |name, _attrs| name == :config_reloaded },
+         "an invalid reload must not emit a success event"
 end
 
 def test_interruptible_sleep_stops_after_shutdown_request
@@ -2646,6 +3204,70 @@ end
         assert_equal 1, sup.spawned.size
         assert_equal "hive run s1 --json", sup.spawned.first[:command]
         assert_equal "R1", sup.spawned.first[:request_id]
+        assert_equal Hive::Paths.state_home, sup.spawned.first[:log_state_path]
+      ensure
+        restore_find_project!
+      end
+    end
+  end
+
+  def test_dispatch_request_honors_dependency_wait_without_consuming_request
+    held = row(
+      project: "p1", slug: "held", stage: "4-execute", action: "ready_to_run",
+      command: "hive run held --json", depends_on: "base", blocked_by: "base",
+      dependency_stage: "7-artifacts", blocked: true
+    )
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      dispatcher, supervisor, _controller, logger, _watcher = make_dispatcher(
+        rows: [ held ], dispatch_request_state_home: state_home
+      )
+      write_request_file(state_home, slug: "held", request_id: "DEPWAIT")
+      stub_find_project!(dispatcher, "p1")
+      begin
+        dispatcher.tick(now: T0)
+
+        blocked = logger.events.find do |name, attrs|
+          name == :dispatch_request_blocked && attrs[:request_id] == "DEPWAIT"
+        end
+        assert_equal "dependency_unmet", blocked[1][:reason]
+        assert_equal "base", blocked[1][:blocked_by]
+        assert_empty supervisor.spawned
+        assert_equal 1, Q.pending(state_home: state_home).size
+      ensure
+        restore_find_project!
+      end
+    end
+  end
+
+  def test_dispatch_request_honors_admission_error_but_allows_marker_repair
+    error = Hive::DependencyAdmission::AdmissionError.new(
+      reason_code: "dependency_cycle", offending_ref: "p1:held -> p1:held",
+      safe_correction: "Break the cycle."
+    )
+    held = row(
+      project: "p1", slug: "held", stage: "4-execute", action: "admission_error",
+      command: nil, blocked: true, admission_error: error
+    )
+    Dir.mktmpdir("hive-dispatch-queue") do |state_home|
+      dispatcher, supervisor, _controller, logger, _watcher = make_dispatcher(
+        rows: [ held ], dispatch_request_state_home: state_home
+      )
+      write_request_file(state_home, slug: "held", request_id: "ADMISSION")
+      write_request_file(
+        state_home, slug: "held", request_id: "REPAIR",
+        argv: [ "hive", "markers", "clear", "held", "--json" ]
+      )
+      stub_find_project!(dispatcher, "p1")
+      begin
+        dispatcher.tick(now: T0)
+
+        blocked = logger.events.find do |name, attrs|
+          name == :dispatch_request_blocked && attrs[:request_id] == "ADMISSION"
+        end
+        assert_equal "admission_error", blocked[1][:reason]
+        assert_equal "dependency_cycle", blocked[1][:reason_code]
+        assert_equal [ "hive markers clear held --json" ], supervisor.spawned.map { |item| item[:command] }
+        assert_equal [ "ADMISSION" ], Q.pending(state_home: state_home).map(&:request_id)
       ensure
         restore_find_project!
       end

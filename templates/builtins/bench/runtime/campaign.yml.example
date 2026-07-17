@@ -1,0 +1,57 @@
+# v3 campaign pre-registration.
+# Copy this file into a bench task folder as campaign.yml, edit it, and commit it
+# in the hive-state checkout before the generate stage runs.
+
+campaign_id: v3-example
+source: /home/user/Dev/hive
+corpus_version: v3
+
+# Corpus slugs. Each must exist at corpus/<slug>/manifest.yml.
+tasks:
+  - fix-claude-tmux-ready-detector-260629-50cc
+
+# Candidate ids from harness/profiles/candidates.rb.
+candidates:
+  - all-opus-4.8
+
+# Candidate-id -> effort. Today effort pins live in candidate profiles; this is
+# a review contract rather than a hive_run.rb flag.
+effort_pins: {}
+
+# Judge samples. Use at least 3 for published results.
+seeds: 3
+
+# Judge backends and exact invocation provenance. The default mirrors the
+# maintained campaign: Fable plus GPT-5.6 Sol at ultra. Set a backend to null
+# to disable it; keep at least two enabled for blind cross-checking and
+# deliberation. OpenRouter is optional and disabled by default.
+judges:
+  claude:
+    model: claude-fable-5
+  codex:
+    model: gpt-5.6-sol
+    reasoning_effort: ultra
+  openrouter:
+
+# Review-enforced caps. The current harness does not enforce these as per-run
+# flags.
+budgets:
+  per_cell_usd: 25
+
+# Timeout declarations. `hive_seconds` IS enforced: the generate stage exports
+# it as HB_HIVE_TIMEOUT for every hive_run.rb invocation. Use `timeouts: {}`
+# to let harness defaults apply — the `timeouts` key itself is required by the
+# generate contract, so removing it entirely parks generate at WAITING.
+timeouts:
+  hive_seconds: 14400
+
+# Cells intentionally excluded from the campaign matrix.
+# Example:
+#   - task: fix-claude-tmux-ready-detector-260629-50cc
+#     candidate: all-opus-4.8
+#     reason: documented reason
+exclusions: []
+
+aggregation: >
+  Gate pass_rate on gated subset; judge mean with cross-family judge emphasis;
+  efficiency is reported, not ranked.

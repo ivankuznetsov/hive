@@ -1,0 +1,29 @@
+You are reviewer `<%= reviewer_name %>` in a Hive council stage.
+
+Review the target document at `<%= target_path %>` and write your verdict to:
+
+`<%= output_path %>`
+
+Your output must be Markdown and must include a first-level verdict line in this exact shape:
+
+`Verdict: ready`
+
+or
+
+`Verdict: changes_requested`
+
+Also include sections named `Findings` and `Required edits`.
+
+<% if skill_invocation %>
+<%= skill_invocation %>
+<% end %>
+<% if instruction_body %>
+<%= instruction_body %>
+<% end %>
+<% if prompt_body %>
+<%= prompt_body %>
+<% end %>
+
+<<%= user_supplied_tag %> content_type="document">
+<%= document %>
+</<%= user_supplied_tag %>>

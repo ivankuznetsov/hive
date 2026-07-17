@@ -44,14 +44,18 @@ class HivePatrolDismissalsTest < Minitest::Test
       write_json(File.join(dir, ".hive-state", "patrol", "fingerprints.json"), {
         "fp1" => { "branch" => "hive-patrol/x", "pr_url" => "https://example.com/pr/1",
                    "state" => "open", "category" => "security",
-                   "title_tokens" => %w[implicit post mutations] }
+                   "feature_id" => "command-bin-x",
+                   "title_tokens" => %w[implicit post mutations],
+                   "root_cause_tokens" => %w[payload changes method] }
       })
       gh = FakeGh.new([ { "state" => "CLOSED", "url" => "https://example.com/pr/1" } ])
 
       dismissed = Hive::Patrol::Dismissals.new(dir, gh: gh).reconcile(now: Time.utc(2026, 5, 28, 12))
 
       assert_equal "security", dismissed["fp1"]["category"]
+      assert_equal "command-bin-x", dismissed["fp1"]["feature_id"]
       assert_equal %w[implicit post mutations], dismissed["fp1"]["title_tokens"]
+      assert_equal %w[payload changes method], dismissed["fp1"]["root_cause_tokens"]
     end
   end
 
@@ -88,6 +92,46 @@ class HivePatrolDismissalsTest < Minitest::Test
       fingerprints = state.fingerprints
       assert_equal "open", fingerprints["fp-open"]["state"]
       refute fingerprints["fp-error"].key?("state")
+    end
+  end
+
+  def test_open_pr_does_not_erase_publication_retry_states
+    %w[reconciliation_pending review_handoff_failed].each do |retry_state|
+      with_tmp_dir do |dir|
+        state = Hive::Patrol::StateStore.new(dir)
+        state.write_fingerprints(
+          "fp1" => {
+            "branch" => "hive-patrol/x",
+            "pr_url" => "https://example.com/pr/1",
+            "state" => retry_state
+          }
+        )
+        gh = FakeGh.new([ { "state" => "OPEN", "url" => "https://example.com/pr/1" } ])
+
+        Hive::Patrol::Dismissals.new(dir, state: state, gh: gh).reconcile
+
+        assert_equal retry_state, state.fingerprints.fetch("fp1").fetch("state"),
+                     "dismissal reconciliation must not suppress #{retry_state} recovery"
+      end
+    end
+  end
+
+  def test_publication_retry_does_not_reconcile_a_different_pr_on_the_branch
+    with_tmp_dir do |dir|
+      state = Hive::Patrol::StateStore.new(dir)
+      state.write_fingerprints(
+        "fp1" => {
+          "branch" => "hive-patrol/x",
+          "pr_url" => "https://example.com/pr/expected",
+          "state" => "reconciliation_pending"
+        }
+      )
+      gh = FakeGh.new([ { "state" => "CLOSED", "url" => "https://example.com/pr/other" } ])
+
+      dismissed = Hive::Patrol::Dismissals.new(dir, state: state, gh: gh).reconcile
+
+      assert_empty dismissed
+      assert_equal "reconciliation_pending", state.fingerprints.fetch("fp1").fetch("state")
     end
   end
 end

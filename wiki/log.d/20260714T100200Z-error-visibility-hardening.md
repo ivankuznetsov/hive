@@ -1,0 +1,6 @@
+# 2026-07-14 — Refactor-patrol error visibility hardening
+
+- `FamilyStore` now quarantines only the corrupt/inconsistent family record (bytes preserved under `quarantine/families/` with evidence, JobStore-style) instead of rebuilding from authoritative jobs and bulk-deleting valid pre-authoritative records; dry runs stay non-mutating.
+- `ReviewHandoff` propagates `SystemCallError`/`IOError` from metadata reads (nil only for JSON/YAML parse failures), so an unreadable live task is retried instead of being quarantined or duplicated; `PrOpener#handoff` keeps such errors retryable (`review_handoff_pending`) but settles `ReviewHandoff::Conflict`/`ArgumentError` terminally as `review_handoff_failed` with the error in receipts.
+- Patrol/leverage mappers scrub git-emitted filename bytes to valid UTF-8 at the boundary (`mapper.rb`, `architecture_mapper.rb`, `leverage.rb`), so one Latin-1 filename can no longer raise `ArgumentError` or silently zero leverage signals.
+- `hive-refactor-patrol-thesis.v2` requires `minLength: 1` on `problem`/`cost`/`proposed_refactor`, matching the envelope's `ThesisSnapshot`; an empty-narrative thesis now fails at the `ThesisNormalizer` gate as a recorded `schema_invalid` slice error instead of poisoning the discovery envelope. See [[modules/patrol]] and [[stages/review]].

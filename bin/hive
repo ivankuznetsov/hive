@@ -4,6 +4,7 @@ $LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
 
 require "hive"
 require "hive/cli"
+require "hive/refactor_patrol/reporter"
 require "json"
 
 if ARGV == [ "--version" ] || ARGV == [ "-v" ]
@@ -23,6 +24,10 @@ JSON_USAGE_ERROR_CONTRACTS = {
   "drop" => { schema: "hive-drop", error_kind: "invalid_task_path" },
   "findings" => { schema: "hive-findings", error_kind: "invalid_task_path" },
   "patrol" => { schema: "hive-patrol", error_kind: "error" },
+  "refactor-patrol" => { reporter: :refactor_patrol, error_kind: "error" },
+  "setup" => { schema: "hive-setup", schema_version: false, error_kind: "usage" },
+  "connect" => { error_kind: "usage", extras: { "service" => "screenote" } },
+  "disconnect" => { error_kind: "usage", extras: { "service" => "screenote" } },
   "accept-finding" => {
     schema: "hive-findings",
     error_kind: "invalid_task_path",
@@ -34,20 +39,19 @@ JSON_USAGE_ERROR_CONTRACTS = {
     extras: { "operation" => "reject" }
   },
   "markers" => { schema: "hive-markers-clear", error_kind: "invalid_task_path" },
-  "digest" => { schema: "hive-digest", error_kind: "usage" },
-  "pairing" => { schema: "hive-pairing-approve", error_kind: "usage" },
+  "status" => { schema: "hive-status", error_kind: "error" },
+  "prune" => { schema: "hive-prune", error_kind: "usage" },
+  "forget" => { schema: "hive-forget", error_kind: "usage" },
+  "metrics" => {
+    schema: "hive-metrics-rollback-rate",
+    error_kind: "error",
+    omit_error_class: true
+  },
   "answer-digest" => { schema: "hive-answer-digest", error_kind: "usage" },
   # Residual workflow argv-shape errors raised by Thor before command dispatch
   # (for example too many positionals) must ride the same JSON envelope as the
   # command's own UsageError. Bare `hive workflow` is handled in-command.
   "workflow" => { schema: "hive-workflow-new", error_kind: "usage" },
-  # `hive bot` takes a single SUBCOMMAND positional and (unlike `daemon`) has no
-  # `*targets` splat, so an extra positional such as `hive bot status extra` is
-  # rejected by Thor before `Hive::Commands::Bot#call` runs — bypassing the
-  # command-level usage-error emitters. Ride the same hive-bot-status envelope
-  # those emitters use so every `hive bot ... --json` usage error still produces
-  # an ok:false document on stdout instead of bare Thor prose on stderr.
-  "bot" => { schema: "hive-bot-status", error_kind: "extra_arguments" },
   "pr" => {
     schema: "hive-stage-action",
     error_kind: "invalid_task_path",
@@ -59,6 +63,10 @@ JSON_USAGE_ERROR_CONTRACTS = {
   end
 ).freeze
 
+def wrapper_option_argv(argv)
+  argv.take(argv.index("--") || argv.length)
+end
+
 # Thor treats a class option before the subcommand as input to its help path.
 # Keep `hive --json status` equivalent to `hive status --json`.
 def normalize_leading_json_options!(argv)
@@ -66,7 +74,7 @@ def normalize_leading_json_options!(argv)
   leading << argv.shift while JSON_BOOLEAN_OPTIONS.include?(argv.first)
   return if leading.empty?
 
-  cmd_idx = argv.index { |a| !a.start_with?("-") }
+  cmd_idx = wrapper_option_argv(argv).index { |a| !a.start_with?("-") }
   return argv.unshift(*leading) unless cmd_idx
 
   argv.insert(cmd_idx + 1, *leading)
@@ -80,13 +88,14 @@ def new_value_assignment?(arg)
 end
 
 def new_text_start_index(argv)
-  cmd_idx = argv.index { |a| !a.start_with?("-") }
+  option_argv = wrapper_option_argv(argv)
+  cmd_idx = option_argv.index { |a| !a.start_with?("-") }
   return nil unless cmd_idx && argv[cmd_idx] == "new"
 
   idx = cmd_idx + 1
   project_idx = nil
-  while idx < argv.length
-    arg = argv[idx]
+  while idx < option_argv.length
+    arg = option_argv[idx]
     if JSON_BOOLEAN_OPTIONS.include?(arg)
       idx += 1
       next
@@ -126,13 +135,14 @@ end
 def rewrite_help_flag!(argv)
   return if argv.empty?
 
-  cmd_idx = argv.index { |a| !a.start_with?("-") }
+  option_argv = wrapper_option_argv(argv)
+  cmd_idx = option_argv.index { |a| !a.start_with?("-") }
   return unless cmd_idx
 
   text_start_idx = new_text_start_index(argv)
-  help_idx = argv.each_index.find do |idx|
+  scan_limit = [ option_argv.length, text_start_idx ].compact.min
+  help_idx = (cmd_idx + 1...scan_limit).find do |idx|
     next false if idx <= cmd_idx
-    next false if text_start_idx && idx >= text_start_idx
 
     argv[idx] == "--help" || argv[idx] == "-h"
   end
@@ -147,7 +157,7 @@ end
 # `new` — before the project, between the project and the task text, or after the
 # text.
 def lift_new_options!(argv)
-  cmd_idx = argv.index { |a| !a.start_with?("-") }
+  cmd_idx = wrapper_option_argv(argv).index { |a| !a.start_with?("-") }
   return unless cmd_idx && argv[cmd_idx] == "new"
 
   lifted = []
@@ -192,11 +202,12 @@ def lift_new_options!(argv)
 end
 
 def json_requested?(argv)
-  JSON_TRUE_OPTIONS.include?(argv.reverse.find { |arg| JSON_BOOLEAN_OPTIONS.include?(arg) })
+  options = wrapper_option_argv(argv)
+  JSON_TRUE_OPTIONS.include?(options.reverse.find { |arg| JSON_BOOLEAN_OPTIONS.include?(arg) })
 end
 
 def reject_invalid_argv_encoding!(argv)
-  idx = argv.index { |arg| !arg.valid_encoding? }
+  idx = argv.index { |arg| !arg.dup.force_encoding(Encoding::UTF_8).valid_encoding? }
   return unless idx
 
   raise Thor::MalformattedArgumentError, "invalid byte sequence in argument #{idx + 1}"
@@ -204,7 +215,7 @@ end
 
 def reject_unsupported_json_assignments!(argv)
   text_start_idx = new_text_start_index(argv)
-  arg = argv.each_with_index.find do |candidate, idx|
+  arg = wrapper_option_argv(argv).each_with_index.find do |candidate, idx|
     next false if text_start_idx && idx >= text_start_idx
 
     candidate.start_with?("--json=") && !JSON_BOOLEAN_OPTIONS.include?(candidate)
@@ -216,18 +227,24 @@ end
 
 DIGEST_MERGED_PRS_SOURCE = "merged-prs".freeze
 
+def json_usage_option_region(argv, command_index)
+  argv.drop(command_index + 1).take_while { |arg| arg != "--" }
+end
+
 # Mirror Commands::Digest#normalized_source at the argv level: the merged-PR
 # path is selected by `--source merged-prs` or by any `--repo` with no other
 # --source. A Thor usage error there (e.g. `hive digest --source merged-prs
-# --bad --json`) is raised before the command runs, so without this the static
-# "digest" contract would emit the shipped-digest `hive-digest` schema instead
-# of the `hive-merged-pr-digest` envelope the command itself emits.
+# --bad --json`) is raised before the command runs, so the resolver must select
+# `hive-merged-pr-digest` instead of the shipped-digest `hive-digest` schema.
 def digest_merged_pr_argv?(argv)
   source = nil
   repo = false
   argv.each_with_index do |arg, idx|
+    next unless arg.valid_encoding?
+
     if arg == "--source"
-      source = argv[idx + 1].to_s
+      value = argv[idx + 1]
+      source = value.to_s if value&.valid_encoding?
     elsif arg.start_with?("--source=")
       source = arg.split("=", 2).last
     elsif arg == "--repo" || arg.start_with?("--repo=")
@@ -239,48 +256,186 @@ def digest_merged_pr_argv?(argv)
   source.to_s.strip.empty? && repo
 end
 
+def json_usage_subcommand(argv, command_index, value_options: [])
+  skip_value = false
+  options = true
+  argv.drop(command_index + 1).each do |arg|
+    if skip_value
+      skip_value = false
+      next
+    end
+    return unless arg.valid_encoding?
+
+    if options && arg == "--"
+      options = false
+    elsif options && value_options.include?(arg)
+      skip_value = true
+    elsif options && arg.start_with?("-")
+      next
+    else
+      return arg
+    end
+  end
+  nil
+end
+
 def json_usage_error_contract(argv)
-  command = argv.find { |arg| !arg.start_with?("-") }
-  if command == "digest" && digest_merged_pr_argv?(argv)
-    return { schema: "hive-merged-pr-digest", error_kind: "usage" }
+  command_index = argv.index { |arg| !arg.b.start_with?("-") }
+  return unless command_index
+
+  command = argv.fetch(command_index)
+  return unless command.valid_encoding?
+  option_argv = json_usage_option_region(argv, command_index)
+
+  case command
+  when "status"
+    diagnose = option_argv.any? do |arg|
+      arg.valid_encoding? && (arg == "--diagnose" || arg.start_with?("--diagnose="))
+    end
+    return { schema: "hive-status-diagnose", error_kind: "error" } if diagnose
+  when "web"
+    subcommand = json_usage_subcommand(argv, command_index, value_options: %w[--bind --port])
+    return unless %w[install status].include?(subcommand)
+
+    return {
+      schema: "hive-web-#{subcommand}",
+      error_kind: "invalid_task_path",
+      schema_version: false
+    }
+  when "bot"
+    # hive-bot-status is deliberately the usage-error contract for the whole
+    # bot surface; the stop/reload schemas only describe lifecycle results.
+    return { schema: "hive-bot-status", error_kind: "extra_arguments" }
+  when "pairing"
+    subcommand = json_usage_subcommand(argv, command_index)
+    schema = subcommand == "approve" ? "hive-pairing-approve" : "hive-pairing-list"
+    return { schema: schema, error_kind: "invalid_arguments" }
+  when "digest"
+    schema = digest_merged_pr_argv?(option_argv) ? "hive-merged-pr-digest" : "hive-digest"
+    return { schema: schema, error_kind: "usage" }
+  when "refactor-patrol"
+    if (jobs = refactor_patrol_jobs_argv(option_argv))
+      return {
+        schema: "hive-refactor-patrol-jobs", error_kind: "usage",
+        extras: { "action" => jobs.fetch(:action) }
+      }
+    end
   end
 
   JSON_USAGE_ERROR_CONTRACTS[command]
 end
 
-def json_usage_error_payload(contract, error)
-  schema = contract.fetch(:schema)
+def refactor_patrol_jobs_argv(argv)
+  list = nil
+  full = nil
+  show = false
+  modifier = argv.any? do |arg|
+    arg == "--limit" || arg.start_with?("--limit=") ||
+      arg == "--cursor" || arg.start_with?("--cursor=")
+  end
+  argv.each do |arg|
+    if arg == "--show" || arg.start_with?("--show=")
+      show = true
+    elsif %w[--no-list --skip-list].include?(arg)
+      list = false
+    elsif arg == "--list"
+      list = true
+    elsif arg.start_with?("--list=")
+      value = arg.split("=", 2).last.to_s.downcase
+      list = !%w[false f no n 0].include?(value)
+    elsif %w[--no-full --skip-full].include?(arg)
+      full = false
+    elsif arg == "--full"
+      full = true
+    elsif arg.start_with?("--full=")
+      value = arg.split("=", 2).last.to_s.downcase
+      full = !%w[false f no n 0].include?(value)
+    end
+  end
+  action = if list == true
+    "list"
+  elsif show
+    "show"
+  end
+  return unless action || full == true || modifier
+
+  { action: action }
+end
+
+def refactor_patrol_v2_argv?(argv)
+  return true if argv.any? do |arg|
+    arg == "--pr" || arg.start_with?("--pr=") ||
+      arg == "--job-manifest" || arg.start_with?("--job-manifest=")
+  end
+
+  actions = nil
+  argv.each do |arg|
+    if %w[--no-actions --skip-actions].include?(arg)
+      actions = false
+    elsif arg == "--actions"
+      actions = true
+    elsif arg.start_with?("--actions=")
+      value = arg.split("=", 2).last.to_s.downcase
+      actions = !%w[false f no n 0].include?(value)
+    end
+  end
+  actions == true
+end
+
+def json_usage_error_payload(contract, error, argv: [])
+  if contract[:reporter] == :refactor_patrol
+    version = if refactor_patrol_v2_argv?(argv)
+      Hive::RefactorPatrol::Reporter::V2_SCHEMA_VERSION
+    else
+      Hive::RefactorPatrol::Reporter::V1_SCHEMA_VERSION
+    end
+    return Hive::RefactorPatrol::Reporter.error_envelope(
+      error,
+      version: version,
+      error_kind: contract.fetch(:error_kind)
+    )
+  end
+
+  schema = contract[:schema]
   error_kind = contract.fetch(:error_kind)
   extras = contract.fetch(:extras, {})
-  if Hive::Schemas::SCHEMA_VERSIONS.key?(schema)
-    return Hive::Schemas::ErrorEnvelope.build(
+  if schema && Hive::Schemas::SCHEMA_VERSIONS.key?(schema)
+    payload = Hive::Schemas::ErrorEnvelope.build(
       schema: schema,
       error: error,
       error_kind: error_kind,
       extras: extras
     )
+    payload.delete("error_class") if contract[:omit_error_class]
+    return payload
   end
 
-  {
-    "schema" => schema,
-    "schema_version" => contract.fetch(:schema_version, 1),
+  payload = {}
+  if schema
+    payload["schema"] = schema
+    payload["schema_version"] = contract.fetch(:schema_version, 1) unless contract[:schema_version] == false
+  end
+
+  payload.merge!(
     "ok" => false,
     "error_class" => error.class.name.split("::").last,
     "error_kind" => error_kind,
     "exit_code" => error.respond_to?(:exit_code) ? error.exit_code : Hive::ExitCodes::GENERIC,
     "message" => error.message
-  }.merge(extras)
+  ).merge(extras)
 end
 
 def emit_json_usage_error(argv, error)
   contract = json_usage_error_contract(argv)
   return false unless contract && json_requested?(argv)
 
-  puts JSON.generate(json_usage_error_payload(contract, error))
+  puts JSON.generate(json_usage_error_payload(contract, error, argv: argv))
   true
 rescue Errno::EPIPE, JSON::GeneratorError
   true
 end
+
+original_argv = ARGV.dup
 
 begin
   reject_invalid_argv_encoding!(ARGV)
@@ -291,7 +446,7 @@ begin
   Hive::CLI.start(ARGV, debug: true)
 rescue Thor::Error => e
   error = Hive::InvalidTaskPath.new(e.message)
-  emitted_json = emit_json_usage_error(ARGV, error)
+  emitted_json = emit_json_usage_error(original_argv, error)
   warn(emitted_json ? "hive: #{error.message}" : error.message)
   exit(error.exit_code)
 rescue Hive::Error => e

@@ -9,8 +9,8 @@
       "note": "False positive. params[:project] never reaches the filesystem raw: find_project! resolves it against the REGISTERED projects allowlist and returns the registry's own hive_state_path; params[:slug] is route-constrained and additionally File.basename()d. The taint laundering through the registry lookup is invisible to static analysis."
     },
     {
-      "fingerprint": "3a5269f601bcaa4cba48697518aa32a79c4f7ae236c97f07e1af4998ecc61205",
-      "note": "False positive. Open3.capture3 argv form in Patrol::Fixer#commit_changes. The finding title becomes the value for git commit's `-m` argument as a discrete argv element; no shell is invoked."
+      "fingerprint": "39935726f57dbea8879202ad20f3a2a5761516234aa62e2627f2be45e4af8762",
+      "note": "False positive. Open3.capture3 argv form in Patrol::Fixer#prepare_branch_for_retry!: the generated branch is required to start with hive-patrol/ and is interpolated into one refs/heads/<branch> argument. No shell is invoked."
     },
     {
       "fingerprint": "3d163b314ee9716cb24303b7176fe947c1fdd774cce70af90c3dfdc8f951394c",
@@ -37,8 +37,8 @@
       "note": "False positive. Open3.capture3 array form: branch_name is interpolated only into a refs/heads/<name> refspec literal passed as a single argv element to git via execve(2); no shell ever sees it."
     },
     {
-      "fingerprint": "872fe3ac01d8099ac5fc97f31b105f0c7023eb663f5ed4a462d80988ee6e1692",
-      "note": "False positive. Open3.capture3 argv form in Patrol::Fixer#committed_since_base?. default_branch is interpolated into a single git revspec argv element (`branch...HEAD`); no shell is invoked."
+      "fingerprint": "c4afb8380f692138e5e5e0da60fbb7394589208904fa17063567d2eaa9967e79",
+      "note": "False positive. Open3.capture3 argv form in Patrol::Fixer#committed_since_base?. base_sha is an exact git-verified object id for production calls and becomes one <sha>...HEAD argv element; no shell is invoked."
     },
     {
       "fingerprint": "907f70565e5132a49765208c31e28bbf8433b7819fb85fbc46413a8cb7649f81",
@@ -71,8 +71,48 @@
     {
       "fingerprint": "53a89404d256e9d4c6944d3f732e77dc5710c1731467867f0b8e6e1cdc4d6800",
       "note": "False positive. Hive::Gh.capture3 uses Process.spawn argv form in Gh#list_merged_prs. The search string is one literal gh-search argv element (`merged:<since>..<until_date>`), where the production caller passes Date#iso8601 calendar strings computed by MergedPr::Collector; no shell sees or expands the value."
+    },
+    {
+      "fingerprint": "53a87d6be6def9153c7422776e6ef0411c9a909aa8718a3a6f4de6ac570a52b3",
+      "note": "False positive. The packaged hive-bench Profile probe invokes Open3.capture3 with discrete argv elements (`bin`, `flag`); no shell sees or expands either value."
+    },
+    {
+      "fingerprint": "a98ed9eef5d01e92add813cb7f87d24ba348101d0d758d04e3fa30c7989dd857",
+      "note": "False positive. The packaged hive-bench extractor invokes sqlite3 through Open3.capture3 argv form. The database path and SQL are separate argv elements passed directly to execve(2), not a shell command."
+    },
+    {
+      "fingerprint": "f74ae0226a7716c15cff765f647a29a11e0ad654a9b838930c9d72e26f4213ae",
+      "note": "False positive. The packaged hive-bench Codex judge constructs an argv array and splats it into Open3.capture3; model, effort, and binary values are discrete argv elements and never enter a shell."
+    },
+    {
+      "fingerprint": "1b72cc3bd317334598f29b8c5e98645d02e3436b979e7e12705fae0d6b05005c",
+      "note": "False positive. RefactorPatrol::Fixer uses Open3.capture3 argv form. base_sha is the pinned validated Git OID and changed_path has already passed root-confined changed-path validation; the combined git-show revspec is one execve argv element and never reaches a shell."
+    },
+    {
+      "fingerprint": "2d44415f4cdaf3549554f808960ed397fb04de4d86d56459057a952a67f9c571",
+      "note": "False positive. RefactorPatrol::Fixer uses Open3.capture3 argv form. base_sha is the pinned validated Git OID and changed_path has already passed root-confined changed-path validation; the combined git cat-file revspec is one execve argv element and never reaches a shell."
+    },
+    {
+      "fingerprint": "ae91ab26856fb8517a5d6031844d1ff8a7f0940ccb4936ea18e405440e90c90d",
+      "note": "False positive. RefactorPatrol::Fixer uses Open3.capture3 argv form. base_sha is the pinned validated Git OID, and the git cat-file commit revspec is one execve argv element that never reaches a shell."
+    },
+    {
+      "fingerprint": "45a80fef796e4e34b70db6fc1179d19cb48136f9984495afe3eba36b7440354d",
+      "note": "False positive. RefactorPatrol::PrOpener uses Open3.capture3 argv form after both publication_base_sha and commit_sha pass the lowercase 40-64 hex OID contract. The diff range is one execve argv element and never reaches a shell."
+    },
+    {
+      "fingerprint": "d477ab89b88d0ab84d095f04100e6fbb82265ced4d13e75fc9edcdf7be348972",
+      "note": "False positive. Hive::Gh.capture3 uses Process.spawn argv form. push_branch validates the branch grammar and refuses empty, option-shaped, NUL, or newline-bearing remote targets before building discrete argv elements; no shell interprets the lease, remote, or branch."
+    },
+    {
+      "fingerprint": "7487c4d0cdd78678c023482df25ec60bbb46046c33205efae8efe51288f49dff",
+      "note": "False positive. Worktree#create_exact! uses Open3.capture3 argv form. Architecture patrol derives branch_name from a strict fix-<sha256> canonical action id, and refs/heads/<branch> is passed as one execve argv element rather than through a shell."
+    },
+    {
+      "fingerprint": "00cf972fda785fe09a937e3969b8926d1333fd0f297592595eb42b2543148a21",
+      "note": "False positive. Hive::Gh.capture3 uses Process.spawn argv form. remote_branch_oid validates the branch grammar and refuses empty, option-shaped, NUL, or newline-bearing remote targets; the remote and exact refs/heads/<branch> are discrete execve argv elements."
     }
   ],
-  "updated": "2026-07-02 00:00:00 +0000",
+  "updated": "2026-07-13 00:00:00 +0000",
   "brakeman_version": "8.0.5"
 }

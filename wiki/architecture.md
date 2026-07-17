@@ -3,11 +3,11 @@ title: Architecture
 type: architecture
 source: lib/hive/, bin/hive, templates/
 created: 2026-04-25
-updated: 2026-06-24
+updated: 2026-07-13
 tags: [architecture, overview]
 ---
 
-**TLDR**: Hive is a Ruby 3.4 / Thor agent workflow engine over folder-backed state machines. The flagship `coding` workflow is the nine-stage idea-to-PR pipeline, while the built-in `content` workflow and project-authored descriptors run through the same generic workflow/data layer. The CLI dispatches into per-stage runners; stage agents run through configured AgentProfile CLIs inside per-task and per-project locks. Optional long-running surfaces sit beside the CLI: `hive daemon` advances safe tasks automatically, `hive tui` renders a terminal dashboard, `hive bot` turns human-input gates into Telegram interactions, and `hive web` provides the hivebox browser surface. Workflow state has no application database; durable task/project state is the filesystem plus global YAML config, while token-usage metrics use a small SQLite store.
+**TLDR**: Hive is a Ruby 3.4 / Thor agent workflow engine over folder-backed state machines. The flagship `coding` workflow is the nine-stage idea-to-PR pipeline, while the built-in `content` and `bench` workflows and project-authored descriptors run through the same generic workflow/data layer. The CLI dispatches into per-stage runners; stage agents run through configured AgentProfile CLIs inside per-task and per-project locks. Optional long-running surfaces sit beside the CLI: `hive daemon` advances safe tasks and can run language-neutral architecture patrol after merges, `hive tui` renders a terminal dashboard, `hive bot` turns human-input gates into Telegram interactions, and `hive web` provides the hivebox browser surface. Workflow state has no application database; durable task/project state is the filesystem plus global YAML config, while token-usage metrics use a small SQLite store.
 
 ## Layer cake
 
@@ -48,6 +48,58 @@ Master is never modified by Hive (apart from one initial `chore: ignore .hive-st
 
 Concurrency: any number of `hive run` processes on **different** tasks can proceed in parallel; the per-project commit lock serialises only the brief `git commit` window.
 
+## Scheduled architecture-patrol boundary
+
+Architecture patrol is a post-merge subsystem beside the ordinary task state
+machine. `RefactorPatrolMergeReconciler` turns finalize observations and
+paginated GitHub catch-up into immutable, checksummed merge manifests. A
+durable job aggregate then owns feature-level discovery progress, exhaustive
+thesis dispositions, generation-fenced claims, and per-thesis action receipts.
+`PatrolArbiter` shares one per-project scan budget between ordinary patrol and
+architecture patrol and alternates kinds so neither queue can starve the
+other.
+
+Discovery is language-neutral and read-only. The mapper forms bounded
+package/component slices from common and unfamiliar text-source extensions,
+manifests, source roots, build files, infrastructure layouts, and shebang
+scripts; lightweight import resolution supplies a source-only dependency graph
+without treating tests, docs, assets, generated files, or chunk boundaries as
+architectural coupling. Fixture/test manifests never become review slices. A
+mapper failure is retained as an incomplete-measurement diagnostic, so fallback
+zero signals cannot be mistaken for evidence that a component has no leverage.
+The reviewer sees only affected feature slices from the
+merge manifest, runs under provider-specific read-only enforcement, and must
+leave the registered checkout byte-for-byte unchanged. A strict run-wide thesis
+budget leaves later slices resumable, and every cited file/line/snippet is
+verified against the pinned checkout's real bytes before a thesis is admissible.
+The mutation boundary is intentionally narrower. Each accepted thesis is
+processed in an isolated worktree only when a certified public-contract guard,
+feature-boundary checks, configured validation, secret scanning, dependency
+and patch caps, and the independently enabled `auto_fix` policy all pass.
+Otherwise an independently enabled issue policy may publish one deduplicated
+strategic issue, or the action is durably suppressed. Architecture patrol never
+merges its own PRs; an OPEN or MERGED publication succeeds only after entering
+the normal `6-review` flow.
+
+The daemon passes large child results through an atomic, job-bound result file
+instead of relying on the bounded stdout tail. Full authority requires the
+target's exact live registration; enabled owners and disabled registrations
+with pending remote continuations participate in fresh repository-ownership
+checks. PR and issue creation persist an intent before the first remote
+mutation and re-check both ownership and the exact claim generation around
+publication. Canonical actions bind source host, repository, kind, and thesis
+identity; fixes publish through the repository-global
+`hive-refactor/<canonical-action-id>` branch. Exact-host PR verification, a
+fresh handoff fence, remote branch OID checks, and action marker reconciliation
+make crash recovery fail closed. Family, fingerprint, and global canonical
+catalog indexes are rebuildable projections. Validated terminal effects are
+also copied into immutable global per-action proof archives, allowing exact
+cross-registration reuse even after owner deregistration or path removal;
+corrupt/conflicting proof blocks. Immutable manifests and job aggregates remain
+the per-occurrence authority. See
+[[commands/refactor-patrol]], [[modules/daemon]], [[modules/gh]], and
+[[state-model]].
+
 ## Stage-runner dispatch
 
 `Commands::Run#pick_runner` (`lib/hive/commands/run.rb:27`) is a `case` on `task.stage_name`:
@@ -71,7 +123,7 @@ Inbox/Done are the two non-working stages: capture-only and archive-only.
 Headless agent spawns are profile-driven. `Hive::Agent#build_cmd`
 starts with the selected `AgentProfile` binary/headless flag, then adds
 profile-specific permission, add-dir, budget, per-run CLI extras, and
-output-format flags. Claude, Codex, and Pi therefore share one subprocess
+output-format flags. Claude, Codex, Pi, and Grok therefore share one subprocess
 wrapper while keeping their CLI-specific argv and status-detection
 contracts in `lib/hive/agent_profiles/`.
 
@@ -331,4 +383,4 @@ the single-dispatcher invariant. See [[modules/daemon]]
 - [[cli]] — command surface.
 - [[dependencies]] — gem choices.
 - [[decisions]] — architectural decisions (ADR style).
-- [[modules/agent]] · [[modules/agent_profile]] · [[modules/worktree]] · [[modules/git_ops]] · [[modules/markers]] · [[modules/lock]] · [[modules/task]] · [[modules/config]] · [[modules/daemon]] · [[modules/bot]]
+- [[modules/agent]] · [[modules/agent_profile]] · [[modules/worktree]] · [[modules/git_ops]] · [[modules/markers]] · [[modules/lock]] · [[modules/task]] · [[modules/config]] · [[modules/daemon]] · [[modules/gh]] · [[modules/bot]] · [[commands/refactor-patrol]]

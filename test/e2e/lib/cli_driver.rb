@@ -10,6 +10,7 @@ module Hive
   module E2E
     class CliDriver
       Result = Data.define(:stdout, :stderr, :exit_code, :duration_seconds, :timed_out)
+      READER_JOIN_GRACE_SECONDS = 0.1
 
       class ExitMismatchError < StandardError
         attr_reader :expected, :actual, :stdout, :stderr
@@ -45,7 +46,7 @@ module Hive
         started = monotonic_time
         result = nil
         SandboxEnv.with(@sandbox_dir, @run_home, @fake_claude_path) do |env|
-          result = spawn_and_capture(env.merge(SandboxEnv.stringify_env(env_overrides)), args, cwd, timeout)
+          result = spawn_and_capture(SandboxEnv.merge(env, env_overrides), args, cwd, timeout)
         end
         duration = monotonic_time - started
         result = Result.new(stdout: result.stdout, stderr: result.stderr, exit_code: result.exit_code,
@@ -64,6 +65,7 @@ module Hive
       ProcessResult = Data.define(:stdout, :stderr, :exit_code, :timed_out)
 
       def spawn_and_capture(env, args, cwd, timeout)
+        deadline = monotonic_time + timeout
         stdout = +""
         stderr = +""
         timed_out = false
@@ -78,11 +80,28 @@ module Hive
             terminate(wait_thr.pid)
           end
           status = wait_thr.value
-          stdout = out_reader.value.to_s
-          stderr = err_reader.value.to_s
+          readers = [ out_reader, err_reader ]
+          reader_deadline = timed_out ? monotonic_time + READER_JOIN_GRACE_SECONDS : deadline
+          unless readers_finished?(readers, reader_deadline)
+            timed_out = true
+            terminate(wait_thr.pid)
+            readers_finished?(readers, monotonic_time + READER_JOIN_GRACE_SECONDS)
+          end
+          status = nil if timed_out
+          stdout = safe_thread_value(out_reader)
+          stderr = safe_thread_value(err_reader)
         end
 
         ProcessResult.new(stdout: stdout, stderr: stderr, exit_code: status&.exitstatus, timed_out: timed_out)
+      end
+
+      def readers_finished?(readers, deadline)
+        readers.all? do |reader|
+          next true unless reader.alive?
+
+          remaining = deadline - monotonic_time
+          remaining.positive? && reader.join(remaining)
+        end
       end
 
       def read_stream(stream)
@@ -91,14 +110,21 @@ module Hive
         ""
       end
 
+      def safe_thread_value(thread)
+        thread.kill if thread.alive?
+        thread.value.to_s
+      rescue StandardError
+        ""
+      end
+
       # Signal the entire process group (negative pid) so any children spawned by the
-      # CLI under test (editor shims, sub-shells, etc.) are torn down too. Without
-      # pgroup-targeted kills, descendants outlive the timeout and leak.
+      # CLI under test (editor shims, sub-shells, etc.) are torn down too. Open3's
+      # pgroup: true makes the child pid the process-group id, so this still works
+      # after the direct child has exited and only descendants remain.
       def terminate(pid)
-        pgid = Process.getpgid(pid)
-        Process.kill("TERM", -pgid)
+        Process.kill("TERM", -pid)
         sleep 0.5
-        Process.kill("KILL", -pgid)
+        Process.kill("KILL", -pid)
       rescue Errno::ESRCH
         nil
       end

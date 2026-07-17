@@ -7,12 +7,15 @@ require "hive/tui/bubble_model"
 class HiveTuiBubbleModelTest < Minitest::Test
   include HiveTestHelper
 
+  EmptyUpdateState = Data.define(:nudge)
+
   def setup
     @messages = []
     @dispatch = ->(m) { @messages << m }
     @model = Hive::Tui::BubbleModel.new(
       hive_model: Hive::Tui::Model.initial,
-      dispatch: @dispatch
+      dispatch: @dispatch,
+      update_state: EmptyUpdateState.new(nudge: nil)
     )
   end
 

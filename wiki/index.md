@@ -3,17 +3,17 @@ title: hive Wiki
 type: index
 source: wiki/**/*.md
 created: 2026-05-14
-updated: 2026-06-30
+updated: 2026-07-13
 tags: [index, wiki]
 ---
 
 
 **TLDR**: Catalog of the LLM-maintained wiki for `hive`.
 
-Page count: 85
-Updated: 2026-06-30
+Page count: 87
+Updated: 2026-07-13
 
-Folder-as-agent workflow engine: a Ruby 3.4 / Thor CLI control plane where descriptor-backed workflows move task folders through filesystem stages, stage agents run via configurable AgentProfile CLIs (`claude` default, `codex`, `pi`), and `mv` between directories remains the approval primitive. The built-in `coding` workflow drives the nine-stage PR pipeline (`1-inbox` → `2-brainstorm` → `3-plan` → `4-execute` → `5-open-pr` → `6-review` → `7-artifacts` → `8-finalize` → `9-done`), while `content` and project-authored workflows share the same generic runner/status/action machinery. The public release surface is the `hive-cli` rubygem installed through Homebrew, AUR, or `install.sh`, with `hv` as the Apache Hive collision fallback entrypoint, plus the hivebox GHCR Docker image and one-command `hivecli.sh/box` shell / `hivecli.sh/box.ps1` PowerShell installers; `hive web`/hivebox, `hive init` workflow selection and normal-vs-patrol reviewer split, project-global Claude model/effort pins, `hive connect screenote` for OAuth-backed Screenote MCP uploads, `hive patrol` handoff into `6-review`, `hive babysit`, `hive bench submit` for hive-bench corpus submissions, `hive digest` for the daily shipped digest, and the single ClawHub `hive-cli` listing that installs the OpenClaw `/hive` skill are covered by dedicated command/module pages.
+Folder-as-agent workflow engine: a Ruby 3.4 / Thor CLI control plane where descriptor-backed workflows move task folders through filesystem stages, stage agents run via configurable AgentProfile CLIs (`claude` default, `codex`, `pi`, `grok`), and `mv` between directories remains the approval primitive. The built-in `coding` workflow drives the nine-stage PR pipeline (`1-inbox` → `2-brainstorm` → `3-plan` → `4-execute` → `5-open-pr` → `6-review` → `7-artifacts` → `8-finalize` → `9-done`), while the built-in `content` and `bench` workflows and project-authored workflows share the same generic runner/status/action machinery. The public release surface is the `hive-cli` rubygem installed through Homebrew, AUR, or `install.sh`, with `hv` as the Apache Hive collision fallback entrypoint, plus the hivebox GHCR Docker image and one-command `hivecli.sh/box` shell / `hivecli.sh/box.ps1` PowerShell installers; `hive web`/hivebox, `hive init` workflow selection and normal-vs-patrol reviewer split, project-global Claude model/effort pins, `hive connect screenote` for OAuth-backed Screenote MCP uploads, ordinary `hive patrol` handoff into `6-review`, default-recommended language-neutral post-merge discovery through `hive refactor-patrol`, `hive babysit`, `hive bench submit` for hive-bench corpus submissions, `hive digest` for the daily shipped digest, and the single ClawHub `hive-cli` listing that installs the OpenClaw `/hive` skill are covered by dedicated command/module pages.
 
 ## Pages
 
@@ -41,6 +41,7 @@ Folder-as-agent workflow engine: a Ruby 3.4 / Thor CLI control plane where descr
 - [[commands/pairing]] — `wiki/commands/pairing.md`
 - [[commands/prune]] — `wiki/commands/prune.md`
 - [[commands/rebase-status]] — `wiki/commands/rebase-status.md`
+- [[commands/refactor-patrol]] — `wiki/commands/refactor-patrol.md`
 - [[commands/run]] — `wiki/commands/run.md`
 - [[commands/screenote]] — `wiki/commands/screenote.md`
 - [[commands/setup]] — `wiki/commands/setup.md`
@@ -92,6 +93,7 @@ Folder-as-agent workflow engine: a Ruby 3.4 / Thor CLI control plane where descr
 - [[stages/agent]] — `wiki/stages/agent.md`
 - [[stages/artifacts]] — `wiki/stages/artifacts.md`
 - [[stages/brainstorm]] — `wiki/stages/brainstorm.md`
+- [[stages/council]] — `wiki/stages/council.md`
 - [[stages/done]] — `wiki/stages/done.md`
 - [[stages/execute]] — `wiki/stages/execute.md`
 - [[stages/finalize]] — `wiki/stages/finalize.md`

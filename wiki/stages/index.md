@@ -3,11 +3,11 @@ title: Stages Index
 type: index
 source: lib/hive/stages/
 created: 2026-04-25
-updated: 2026-06-21
+updated: 2026-07-08
 tags: [stage, index]
 ---
 
-**TLDR**: Nine wired pipeline stages, no gaps. PR creation happens before review in `5-open-pr`; `7-artifacts` is the artifact-collection handoff; `8-finalize` refreshes the PR and marks it ready.
+**TLDR**: Nine wired coding pipeline stages, plus reusable descriptor-backed agent and council runners for custom workflows. PR creation happens before review in `5-open-pr`; `7-artifacts` is the artifact-collection handoff; `8-finalize` refreshes the PR and marks it ready.
 
 | Stage | Runner | State file | Spawns agent? | Page |
 |-------|--------|------------|----------------|------|
@@ -27,6 +27,9 @@ All active stages share `Hive::Stages::Base.spawn_agent` for headless agent invo
 future `kind: :agent` stages outside the coding runner names. See
 [[stages/agent]].
 
+`Hive::Stages::Council` is a reusable descriptor-backed document review runner
+for `kind: :council` custom workflow stages. See [[stages/council]].
+
 ## 6-review phase order
 
 1. **CI** (`Review::CiFix`, U7) — runs `review.ci.command` once on entry; on failure feeds log to fix agent up to `review.ci.max_attempts`. Hard-block → `REVIEW_CI_STALE` + `reviews/ci-blocked.md`.
@@ -42,4 +45,4 @@ Loop terminates with one of: `REVIEW_COMPLETE` (clean) · `REVIEW_WAITING` (user
 
 ## Backlinks
 
-- [[architecture]] · [[state-model]] · [[cli]] · [[commands/approve]] · [[commands/run]] · [[modules/markers]] · [[stages/agent]]
+- [[architecture]] · [[state-model]] · [[cli]] · [[commands/approve]] · [[commands/run]] · [[modules/markers]] · [[stages/agent]] · [[stages/council]]

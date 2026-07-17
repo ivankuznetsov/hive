@@ -3,7 +3,7 @@ title: hive daemon
 type: command
 source: lib/hive/commands/daemon.rb, lib/hive/daemon/*
 created: 2026-05-06
-updated: 2026-07-01
+updated: 2026-07-12
 tags: [command, daemon, automation, json]
 ---
 
@@ -18,7 +18,9 @@ complete finalize rows or for two whitelisted stale finalize errors. It
 stops at human-input gates (`_WAITING` markers for Q&A / triage), manual
 recovery markers, and 8-finalize while the PR is still open on GitHub; selected
 retryable terminal `ERROR` markers are cleared by `StaleAgentHealer` before
-normal policy dispatch. When global `digest.enabled: true`, the same daemon
+normal policy dispatch. Separately, it ingests merged PRs and fairly schedules
+ordinary patrol alongside language-neutral architecture discovery/action
+resumes. When global `digest.enabled: true`, the same daemon
 also schedules one non-project-scoped `hive digest --date <day> --json` child
 after local midnight for the daily shipped digest.
 
@@ -41,7 +43,7 @@ hive daemon queue   [list | show <id> | prune]  [--json]
 | `start`    | Acquires the PID file (`~/Dev/hive/.daemon.pid`); without `--detach` runs in the foreground. With `--detach` calls `Process.daemon(true, true)` and the parent returns immediately. With `--dry-run` logs every dispatch decision but does NOT spawn child `hive ...` processes. Refuses with exit `75 (TEMPFAIL)` if a live daemon already holds the PID file. |
 | `stop`     | Sends `SIGTERM` to the running daemon's PID. Waits up to `daemon.shutdown_grace_sec` (default 600s) for the daemon to exit, then escalates to `SIGKILL`. Idempotent: `stop` with no PID file exits 0 with `daemon not running` on stderr; a stale PID file (process gone) is removed and the call exits 0. With `--json`, emits a `hive-daemon-stop` envelope (fields: `running`, `was_running`, `stale_pid?`, `reason?` — `pid_reused` / `unverified` for safety bailouts). |
 | `status`   | Reports running / not running. Exit code 0 if running, 1 if not. With `--json`, emits a `hive-daemon-status` envelope with `running`, `pid`, `uptime_sec`, `pid_file`, `log_file`, plus the autostart-service state `service_installed`, `service_enabled`, and `unit_path` (read-only probe) so an agent can tell whether `hive daemon install` has run without a mutating call. The JSON envelope is produced by `Hive::Daemon::StatusReport`, which also feeds the web dashboard, and reports `installed_binary`, `expected_binary`, `installed_binary_version`, `cli_version`, and `binary_drift` (`none`, `path`, `version`, `unparseable`, `unreadable`, or `not_applicable`) so local setup and the web UI can detect a stale unit. `unparseable` means the unit is present but its ExecStart/ProgramArguments binary could not be read; `unreadable` means the unit points at the expected path but `installed_binary --version` failed or timed out; `not_applicable` means no unit is installed or the service probe could not run. `path`, `version`, `unparseable`, and `unreadable` are actionable repair states. The published schema enum still omits `unreadable`; see [[gaps]]. |
-| `reload`   | Sends `SIGHUP` to the running daemon's PID, which triggers config reload at the next tick boundary. In-flight children continue uninterrupted. Exit 1 if no daemon running. With `--json`, emits a `hive-daemon-reload` envelope (`ok`, `reason`, `pid`, `message`). |
+| `reload`   | Sends `SIGHUP` to the running daemon's PID, which triggers config reload at the next tick boundary. In-flight children continue uninterrupted. Reloaded concurrency limits (`max_concurrent_runs`, `max_concurrent_per_project`, `max_runs_per_day_per_project`, and `max_concurrent_patrol_scans`) are applied in place to the existing controller so active-child accounting, cooldowns, quarantine, daily counters, and dispatch baselines survive while new dispatch decisions use the new limits immediately. The structured `config_reloaded` daemon-log event reports all four effective limits for machine verification. Invalid numeric settings, including explicit YAML `null`, fail validation and leave the live limits unchanged. Exit 1 if no daemon running. With `--json`, emits a `hive-daemon-reload` envelope (`ok`, `reason`, `pid`, `message`). |
 | `tail`     | `tail -F` semantics on `~/Dev/hive/logs/daemon.log` (self-implemented; doesn't shell out to the `tail` binary). Exit 1 if the log file doesn't exist. |
 | `install`  | (Re)writes the platform-native unit file (`~/.config/systemd/user/hive-daemon.service` on Linux, `~/Library/LaunchAgents/local.hive-daemon.plist` on macOS) and starts/enables the service. Installers and agent-assisted setup run this by default so daemon autostart is global install-time infrastructure, independent of any project. Without `--force`, refuses to overwrite a pre-existing unit (preserving operator hand-edits); exit `64` (USAGE) with a message pointing at `--force` so automation can branch without clobbering local changes. With `--force`, saves the previous content to a timestamped `<path>.bak-YYYYMMDDTHHMMSSZ` (rotated, never overwritten) via atomic write, then — only when an existing unit was actually overwritten (the `upgraded` outcome) — restarts the running daemon on Linux / unloads-then-loads on macOS so new `Environment=` lines take effect (a first-time `--force` install with no prior unit just starts/enables, no restart). A service-manager failure (systemctl reload/enable, or launchctl load rejecting the unit) exits `70` (SOFTWARE). A host with no systemd-user manager at all is different: the unit is still written, but autostart cannot be enabled, so it exits `0` with the `unsupported` outcome (and `target_path` set to the written unit) — a known-platform limitation, not a failure. With `--json`, every outcome (success and error) emits a `hive-daemon-install.v1` envelope. Units point at the user-facing wrapper path when installers provide it, so bash/Homebrew installs preserve the GEM_HOME/GEM_PATH wrapper across login/reboot; `hv` invocations remain valid when Apache Hive shadows `hive`. Use this after upgrading hive when the unit template has changed or when autostart needs repair. |
 | `enable`   | Sets `daemon.enabled: true` in `<project>/.hive-state/config.yml`. This enrolls a project for dispatch; it does not install, start, or autostart the global daemon service. Surgical line-level YAML editor (upsert) preserves comments, key order, and file-mode bits across enable/disable flips; rejects inline-flow `daemon: { ... }`, CRLF endings, and 4-space-indented children before any write. Atomic write goes via tempfile + `flock(LOCK_EX)` + `fsync` + rename; tempfile is ensure-cleaned on rename failure (ENOSPC / EACCES / EXDEV). Pre-flight (`preflight_targets`) validates every target before any write so `--all` cannot half-flip the registry on a bad middle project. Pass a registered project name OR `--all` (mutually exclusive — passing both raises USAGE 64). Exit 64 on missing/unknown target / not-initialised project / no registered projects. With `--json`, emits a `hive-daemon-enroll` envelope on success and an `EnrollErrorKind` JSON error envelope on failure (`missing_project` / `unknown_project` / `project_and_all` / `not_initialised` / `no_projects` / `config` / `internal`); YAML parse failures surface as `Hive::ConfigError` (exit 78). |
@@ -123,6 +125,39 @@ extra tasks past `max_concurrent_runs` / `max_concurrent_per_project`.
 
 The closed-default policy means any unknown future `TaskActionKind`
 value falls through to `:skip` until the daemon is taught about it.
+
+## Architecture-patrol dispatch
+
+Architecture patrol does not enter through `hive status` task rows.
+`RefactorPatrolMergeReconciler` combines Hive finalize observations with
+exact-host, paginated GitHub catch-up, creates one checksummed v2 manifest per
+repository/PR/merge occurrence, and seeds a current high-water baseline on
+first enablement instead of importing old history. `PatrolArbiter` then shares
+each project's `daemon.max_concurrent_patrol_scans` capacity between ordinary
+patrol and architecture patrol, persists alternation across ticks, and selects
+architecture occurrences oldest-first so a continuously ready kind cannot
+starve the other.
+
+Discovery children run:
+
+```text
+hive refactor-patrol PROJECT --job-manifest MANIFEST --json
+```
+
+After classification, separately authorized action resumes run the same
+immutable job with `--actions`; both phases emit `hive-refactor-patrol.v2` to a
+job-bound result file consumed by the supervisor. Candidate selection shares
+one immutable ownership/config/identity snapshot across due jobs for the tick,
+but reservation re-resolves live ownership and config before claiming. Action
+execution repeats fresh consent, ownership, claim, and generation fences before
+every external effect and mandatory review handoff.
+
+The three gates are independent. `refactor_patrol.enabled` permits discovery
+only; `refactor_patrol.auto_fix.enabled` permits confined fix/PR attempts; and
+`refactor_patrol.issue_filing.enabled` permits deduplicated issues. Fresh init
+recommends discovery with a default-yes answer, while both external-effect gates
+remain default off. Missing `refactor_patrol` config in an existing project is
+still disabled. See [[commands/refactor-patrol]] for the job and policy model.
 
 ## Per-project enrollment
 

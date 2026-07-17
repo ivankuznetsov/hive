@@ -1,6 +1,7 @@
 require_relative "../../test_helper"
 require "json"
 require "tmpdir"
+require "json_schemer"
 require_relative "runner"
 require_relative "paths"
 
@@ -46,6 +47,25 @@ class E2ERunnerTest < Minitest::Test
     end
   end
 
+  def test_duplicate_scenario_names_fail_preflight
+    with_isolated_dirs do |scenarios_dir, runs_dir|
+      %w[first second].each do |file|
+        write_scenario(scenarios_dir, file, <<~YAML)
+          name: duplicate_name
+          steps:
+            - kind: cli
+              args: [version]
+        YAML
+      end
+
+      error = assert_raises(Hive::E2E::ScenarioParser::InvalidScenario) do
+        Hive::E2E::Runner.new(scenarios_dir: scenarios_dir, runs_dir: runs_dir).select_scenarios
+      end
+
+      assert_includes error.message, "duplicate scenario name"
+    end
+  end
+
   def test_failed_step_keeps_run_complete_but_marks_scenario_failed
     with_isolated_dirs do |scenarios_dir, runs_dir|
       write_scenario(scenarios_dir, "smoke_fail", <<~YAML)
@@ -82,6 +102,7 @@ class E2ERunnerTest < Minitest::Test
       # Force the bootstrap to fail by stubbing Sandbox.bootstrap once.
       original = Hive::E2E::Sandbox.method(:bootstrap)
       Hive::E2E::Sandbox.singleton_class.define_method(:bootstrap) do |*_args, **_kw|
+        sleep 0.03
         raise "bootstrap exploded for #{missing_sample}"
       end
       begin
@@ -95,6 +116,8 @@ class E2ERunnerTest < Minitest::Test
       assert_equal 1, report["summary"]["setup_failed"], "setup_failed scenarios should appear in summary"
       scenario = report["scenarios"].first
       assert_equal "setup_failed", scenario["status"]
+      assert_operator scenario["duration_seconds"], :>=, 0.03,
+                      "setup failures must include bootstrap time in incident budgets"
       assert_nil scenario["failed_step_index"], "no step index when bootstrap fails before steps run"
       assert_nil scenario["artifacts_dir"], "no artifacts_dir when bootstrap fails before any are written"
     end
@@ -221,6 +244,71 @@ class E2ERunnerTest < Minitest::Test
       ))
 
       assert_equal 14, Hive::E2E::Sandbox.retention_days_for(run_dir, retain_days: 7, retain_failed_days: 14)
+    end
+  end
+
+  def test_pending_incident_is_reported_without_executing_steps_or_counting_as_passed
+    with_isolated_dirs do |scenarios_dir, runs_dir|
+      write_scenario(scenarios_dir, "pending_incident", <<~YAML)
+        name: pending_incident
+        description: Reproduces a synthetic pending incident.
+        tags: [incident-regression]
+        incident_id: pending-fixture
+        sibling_task_id: "#9767"
+        pending: true
+        steps:
+          - kind: ruby_block
+            block: "raise 'pending steps must not execute'"
+      YAML
+
+      Hive::E2E::Runner.new(scenarios_dir: scenarios_dir, runs_dir: runs_dir).run_all
+      report = report_for(runs_dir)
+
+      assert_equal "complete", report["status"]
+      assert_equal({ "total" => 0, "passed" => 0, "failed" => 0, "setup_failed" => 0 }, report["summary"])
+      assert_empty report["scenarios"]
+      assert_equal [ {
+        "name" => "pending_incident",
+        "description" => "Reproduces a synthetic pending incident.",
+        "tags" => [ "incident-regression" ],
+        "incident_id" => "pending-fixture",
+        "sibling_task_id" => "#9767",
+        "pending" => true
+      } ], report["scenario_metadata"]
+
+      schema = JSONSchemer.schema(JSON.parse(File.read(Hive::E2E::Schemas.schema_path("hive-e2e-report"))))
+      assert_empty schema.validate(report).to_a
+
+      legacy_report = report.reject { |key, _| key == "scenario_metadata" }
+      assert_empty schema.validate(legacy_report).to_a,
+                   "v1 reports produced before scenario_metadata was added must remain valid"
+    end
+  end
+
+  def test_enabled_incident_metadata_is_additive_to_unchanged_result_shape
+    with_isolated_dirs do |scenarios_dir, runs_dir|
+      write_scenario(scenarios_dir, "enabled_incident", <<~YAML)
+        name: enabled_incident
+        description: Exercises an enabled synthetic incident.
+        tags: [incident-regression]
+        incident_id: enabled-fixture
+        sibling_task_id: "#9767"
+        pending: false
+        steps:
+          - kind: cli
+            args: [version]
+      YAML
+
+      Hive::E2E::Runner.new(scenarios_dir: scenarios_dir, runs_dir: runs_dir).run_all
+      report = report_for(runs_dir)
+
+      assert_equal 1, report["summary"]["total"]
+      assert_equal "passed", report["scenarios"].first["status"]
+      assert_equal %w[
+        artifacts_dir duration_seconds error_summary failed_step_index failed_step_kind name repro status
+      ], report["scenarios"].first.keys.map(&:to_s).sort
+      assert_equal false, report["scenario_metadata"].first["pending"]
+      assert_equal "enabled-fixture", report["scenario_metadata"].first["incident_id"]
     end
   end
 end

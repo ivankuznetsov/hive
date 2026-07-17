@@ -10,7 +10,15 @@ class InitSetup
 
   TRIAGE_CHOICES = %w[courageous safetyist].freeze
   EFFORT_CHOICES = Prompts::CLAUDE_EFFORT_CHOICES
-  BOOLEAN_KEYS = %w[adhoc_auto_fix daemon_enabled babysitter_enabled daemon_autostart].freeze
+  BOOLEAN_KEYS = %w[
+    adhoc_auto_fix
+    refactor_patrol_enabled
+    daemon_enabled
+    babysitter_enabled
+    daemon_autostart
+  ].freeze
+  TRUE_VALUES = %w[1 true on y yes].freeze
+  FALSE_VALUES = %w[0 false off n no].freeze
 
   class << self
     # registered_names yields symbols; everything downstream (form values,
@@ -49,6 +57,7 @@ class InitSetup
         "patrol_mode" => Prompts::DEFAULT_PATROL_MODE,
         "triage_bias" => Prompts::DEFAULT_TRIAGE_BIAS,
         "adhoc_auto_fix" => Prompts::DEFAULT_ADHOC_AUTO_FIX,
+        "refactor_patrol_enabled" => Prompts::DEFAULT_REFACTOR_PATROL_ENABLED,
         "budgets" => limit_keys.index_with { |k| Hive::Config::DEFAULTS["budget_usd"].fetch(k) },
         "timeouts" => limit_keys.index_with { |k| Hive::Config::DEFAULTS["timeout_sec"].fetch(k) },
         "daemon_enabled" => true,
@@ -140,6 +149,10 @@ class InitSetup
   def boolean(params, key, defaults)
     return defaults.fetch(key) unless params.key?(key)
 
-    [ "1", "true", "on" ].include?(params[key].to_s)
+    value = params[key].to_s.downcase
+    return true if TRUE_VALUES.include?(value)
+    return false if FALSE_VALUES.include?(value)
+
+    raise Hive::Error, "#{key} must be a boolean (got #{params[key].inspect})"
   end
 end

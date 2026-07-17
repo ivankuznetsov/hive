@@ -1,4 +1,5 @@
 require "test_helper"
+require "hive/config"
 require "hive/markers"
 require "hive/stages/agent"
 
@@ -190,7 +191,7 @@ class StagesAgentTest < Minitest::Test
       task = task_for(project, "plan")
       profile = RaisingProfile.new(name: :no_skill)
 
-      with_replaced_singleton_method(Hive::Stages::Base, :stage_profile, ->(_cfg, _stage_name) { profile }) do
+      with_replaced_singleton_method(Hive::Stages::Base, :stage_profile, ->(_cfg, _stage_name, **_kwargs) { profile }) do
         with_stubbed_spawn do |captured|
           Hive::Stages::Agent.run!(task, {})
 
@@ -310,6 +311,100 @@ class StagesAgentTest < Minitest::Test
     end
   end
 
+  def test_descriptor_limits_override_merged_defaults_when_project_does_not_set_them
+    with_tmp_dir do |project|
+      descriptor = resource_workflow(name: "plan", budget_usd: 1.5, timeout_sec: 60)
+      task = task_for(project, "plan", descriptor: descriptor)
+      cfg = Hive::Config.load(project)
+
+      with_stubbed_spawn do |captured|
+        Hive::Stages::Agent.run!(task, cfg)
+
+        kwargs = captured.first.fetch(:kwargs)
+        assert_equal 1.5, kwargs.fetch(:max_budget_usd)
+        assert_equal 60, kwargs.fetch(:timeout_sec)
+      end
+    end
+  end
+
+  def test_explicit_project_limits_override_descriptor_limits_after_config_load
+    with_tmp_dir do |project|
+      descriptor = resource_workflow(name: "plan", budget_usd: 1.5, timeout_sec: 60)
+      task = task_for(project, "plan", descriptor: descriptor)
+      File.write(
+        File.join(project, ".hive-state", "config.yml"),
+        <<~YAML
+          budget_usd:
+            plan: 2.5
+          timeout_sec:
+            plan: 90
+        YAML
+      )
+      cfg = Hive::Config.load(project)
+
+      with_stubbed_spawn do |captured|
+        Hive::Stages::Agent.run!(task, cfg)
+
+        kwargs = captured.first.fetch(:kwargs)
+        assert_equal 2.5, kwargs.fetch(:max_budget_usd)
+        assert_equal 90, kwargs.fetch(:timeout_sec)
+      end
+    end
+  end
+
+  def test_null_project_limits_fall_back_to_descriptor_limits_after_config_load
+    with_tmp_dir do |project|
+      descriptor = resource_workflow(name: "plan", budget_usd: 1.5, timeout_sec: 60)
+      task = task_for(project, "plan", descriptor: descriptor)
+      File.write(
+        File.join(project, ".hive-state", "config.yml"),
+        <<~YAML
+          budget_usd:
+            plan:
+          timeout_sec:
+            plan:
+        YAML
+      )
+      cfg = Hive::Config.load(project)
+
+      with_stubbed_spawn do |captured|
+        Hive::Stages::Agent.run!(task, cfg)
+
+        kwargs = captured.first.fetch(:kwargs)
+        assert_equal 1.5, kwargs.fetch(:max_budget_usd)
+        assert_equal 60, kwargs.fetch(:timeout_sec)
+      end
+    end
+  end
+
+  def test_descriptor_agent_overrides_project_stage_agent
+    with_tmp_dir do |project|
+      descriptor = instruction_workflow_with_agent(agent: "codex")
+      task = task_for(project, "work", descriptor: descriptor)
+
+      with_stubbed_spawn do |captured|
+        Hive::Stages::Agent.run!(task, { "work" => { "agent" => "pi" } })
+
+        assert_equal :codex, captured.first.fetch(:kwargs).fetch(:profile).name
+      end
+    end
+  end
+
+  def test_descriptor_model_and_effort_are_passed_to_spawn
+    with_tmp_dir do |project|
+      descriptor = instruction_workflow_with_agent(model: "opus", effort: "high")
+      task = task_for(project, "work", descriptor: descriptor)
+
+      with_stubbed_spawn do |captured|
+        Hive::Stages::Agent.run!(task, {})
+
+        kwargs = captured.first.fetch(:kwargs)
+        assert_equal "opus", kwargs.fetch(:model)
+        assert_equal "high", kwargs.fetch(:effort)
+      end
+    end
+  end
+
   def test_spawn_honors_cfg_budget_and_timeout_overrides
     with_tmp_dir do |project|
       task = task_for(project, "brainstorm")
@@ -387,6 +482,54 @@ class StagesAgentTest < Minitest::Test
         assert_equal :error, marker.name
         assert_equal "agent_preflight_failed", marker.attrs["reason"]
         assert_equal "profile unavailable", marker.attrs["message"]
+      end
+    end
+  end
+
+  def test_run_preserves_provider_limit_error_envelope_as_retryable_quota_marker
+    with_tmp_dir do |project|
+      task = task_for(project, "plan")
+
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, lambda { |_task, **_kwargs|
+        {
+          status: :error,
+          error_message: "limits reached for claude: You've hit your session limit"
+        }
+      }) do
+        result = Hive::Stages::Agent.run!(task, {})
+
+        marker = Hive::Markers.current(task.state_file)
+        assert_equal({ commit: "limits_reached", status: :error }, result)
+        assert_equal :error, marker.name
+        assert_equal "limits_reached", marker.attrs["reason"]
+        assert_equal "claude", marker.attrs["provider"]
+        assert_includes marker.attrs["message"], "limits reached for claude"
+        assert Time.parse(marker.attrs.fetch("retry_after")) > Time.now.utc
+      end
+    end
+  end
+
+  def test_run_does_not_overwrite_quota_marker_written_by_agent
+    with_tmp_dir do |project|
+      task = task_for(project, "plan")
+      retry_after = "2026-07-13T23:00:00Z"
+
+      with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, lambda { |spawned_task, **_kwargs|
+        Hive::Markers.set(
+          spawned_task.state_file, :error,
+          reason: "limits_reached",
+          message: "limits reached for claude: session limit",
+          retry_after: retry_after
+        )
+        { status: :error, error_message: "limits reached for claude: session limit" }
+      }) do
+        result = Hive::Stages::Agent.run!(task, {})
+
+        marker = Hive::Markers.current(task.state_file)
+        assert_equal({ commit: "limits_reached", status: :error }, result)
+        assert_equal "limits_reached", marker.attrs["reason"]
+        assert_equal retry_after, marker.attrs["retry_after"]
+        refute marker.attrs.key?("provider"), "preserving the marker must not synthesize or replace attrs"
       end
     end
   end
@@ -496,6 +639,24 @@ class StagesAgentTest < Minitest::Test
 
   private
 
+    def resource_workflow(name:, budget_usd:, timeout_sec:)
+      Hive::Workflow.new(
+        id: :resource_limits,
+        stages: [
+          Hive::Workflow::Stage.new(
+            name: name,
+            index: 1,
+            state_file: "#{name}.md",
+            kind: :agent,
+            skill: "/#{name}",
+            status_mode: :state_file_marker,
+            budget_usd: budget_usd,
+            timeout_sec: timeout_sec
+          )
+        ]
+      )
+    end
+
     def instruction_workflow(instruction_path, permissions: nil)
       Hive::Workflow.new(
         id: :instruction,
@@ -509,6 +670,26 @@ class StagesAgentTest < Minitest::Test
             kind: :agent,
             instruction: instruction_path,
             permissions: permissions
+          )
+        ]
+      )
+    end
+
+    def instruction_workflow_with_agent(agent: nil, model: nil, effort: nil)
+      Hive::Workflow.new(
+        id: :instruction,
+        stages: [
+          Hive::Workflow::Stage.new(name: "inbox", index: 1, state_file: "idea.md", kind: :inert),
+          Hive::Workflow::Stage.new(
+            name: "work",
+            index: 2,
+            state_file: "work.md",
+            advance_verb: Hive::Workflow::AdvanceVerb.new(name: "work"),
+            kind: :agent,
+            skill: "/ship",
+            agent: agent,
+            model: model,
+            effort: effort
           )
         ]
       )

@@ -109,11 +109,17 @@ module Hive
         report = runner.run_all(pattern: pattern, tag: options[:filter], keep_artifacts: options[:keep_artifacts])
         if options[:json]
           puts JSON.pretty_generate(report)
+        else
+          pending = report.fetch("scenario_metadata").count { |entry| entry.fetch("pending") }
+          summary = report.fetch("summary")
+          puts "selected #{report.fetch('scenario_metadata').size}, executed #{summary.fetch('total')}, " \
+               "pending #{pending}, passed #{summary.fetch('passed')}, " \
+               "failed #{summary.fetch('failed') + summary.fetch('setup_failed', 0)}"
         end
         summary = report.fetch("summary")
         failed = summary.fetch("failed") + summary.fetch("setup_failed", 0)
         exit(failed.zero? ? BinaryExit::SUCCESS : BinaryExit::FAILURE)
-      rescue PreflightError => e
+      rescue PreflightError, ScenarioParser::InvalidScenario, Psych::Exception => e
         exit_with_error(e, error_kind: "preflight", exit_code: BinaryExit::CONFIG)
       rescue StandardError => e
         exit_with_error(e, error_kind: "run_failed", exit_code: BinaryExit::FAILURE)
@@ -138,16 +144,20 @@ module Hive
         else
           scenarios.each do |scenario|
             tags = scenario.tags.empty? ? "" : " [#{scenario.tags.join(', ')}]"
-            puts "#{scenario.name}#{tags}"
+            pending = scenario.pending ? " (pending: #{scenario.sibling_task_id})" : ""
+            puts "#{scenario.name}#{tags}#{pending}"
           end
         end
+      rescue ScenarioParser::InvalidScenario, Psych::Exception => e
+        exit_with_error(e, error_kind: "preflight", exit_code: BinaryExit::CONFIG)
       end
 
       desc "replay RUN_ID SCENARIO", "Replay a stored scenario repro script"
       def replay(run_id, scenario)
         run_id = PathSafety.safe_basename!(run_id, "run_id")
         scenario = PathSafety.safe_basename!(scenario, "scenario")
-        run_dir = PathSafety.contained_path!(Paths.runs_dir, run_id, "run dir")
+        runs_root = File.expand_path(Paths.runs_dir)
+        run_dir = PathSafety.contained_path!(runs_root, run_id, "run dir")
         scenario_root = PathSafety.contained_path!(run_dir, "scenarios", "scenario root")
         scenario_dir = PathSafety.contained_path!(scenario_root, scenario, "scenario dir")
         script = PathSafety.contained_path!(scenario_dir, "repro.sh", "repro script")
@@ -158,7 +168,7 @@ module Hive
             exit_code: BinaryExit::CONFIG
           )
         end
-        unless artifact_path_without_symlinks?(run_dir, scenario_root, scenario_dir, script) &&
+        unless artifact_path_without_symlinks?(runs_root, run_dir, scenario_root, scenario_dir, script) &&
                File.lstat(script).file? && File.executable?(script)
           exit_with_error(
             "Run ##{run_id} scenario #{scenario} repro.sh is not executable (#{script})",
@@ -208,12 +218,15 @@ module Hive
           "tags" => scenario.tags,
           "description" => scenario.description,
           "path" => scenario.path,
-          "steps_count" => scenario.steps.size
+          "steps_count" => scenario.steps.size,
+          "incident_id" => scenario.incident_id,
+          "sibling_task_id" => scenario.sibling_task_id,
+          "pending" => scenario.pending
         }
       end
 
       def tui_scenario?(scenario)
-        scenario.steps.any? { |step| %w[tui_keys tui_expect tui_refute wait_subprocess].include?(step.kind) }
+        !scenario.pending && scenario.steps.any? { |step| %w[tui_keys tui_expect tui_refute wait_subprocess].include?(step.kind) }
       end
 
       def artifact_path_without_symlinks?(*paths)
@@ -251,13 +264,18 @@ module Hive
   end
 end
 
+def wrapper_option_argv(argv)
+  argv.take(argv.index("--") || argv.length)
+end
+
 def rewrite_help_flag!(argv)
   return if argv.empty?
 
-  cmd_idx = argv.index { |arg| !arg.start_with?("-") }
+  option_argv = wrapper_option_argv(argv)
+  cmd_idx = option_argv.index { |arg| !arg.start_with?("-") }
   return unless cmd_idx
 
-  help_idx = argv[(cmd_idx + 1)..]&.index { |arg| arg == "--help" || arg == "-h" }
+  help_idx = option_argv[(cmd_idx + 1)..]&.index { |arg| arg == "--help" || arg == "-h" }
   return unless help_idx
 
   cmd = argv[cmd_idx]
@@ -267,6 +285,7 @@ end
 JSON_TRUE_OPTIONS = %w[--json --json=true --json=TRUE --json=t --json=T].freeze
 JSON_FALSE_OPTIONS = %w[--no-json --skip-json --json=false --json=FALSE --json=f --json=F].freeze
 JSON_BOOLEAN_OPTIONS = (JSON_TRUE_OPTIONS + JSON_FALSE_OPTIONS).freeze
+TOP_LEVEL_FLAGS = %w[--help -h --version -v].freeze
 
 def normalize_leading_class_options!(argv)
   return if argv.length < 2
@@ -287,22 +306,43 @@ end
 # `--json=<value>` assignments are rejected before Thor can use the value as a
 # command or pattern.
 def json_requested?(argv)
-  JSON_TRUE_OPTIONS.include?(argv.reverse.find { |arg| JSON_BOOLEAN_OPTIONS.include?(arg) })
+  options = wrapper_option_argv(argv)
+  JSON_TRUE_OPTIONS.include?(options.reverse.find { |arg| JSON_BOOLEAN_OPTIONS.include?(arg) })
 end
 
 def reject_invalid_argv_encoding!(argv)
-  idx = argv.index { |arg| !arg.valid_encoding? }
+  idx = argv.index { |arg| !arg.dup.force_encoding(Encoding::UTF_8).valid_encoding? }
   return unless idx
 
   raise Thor::MalformattedArgumentError, "invalid byte sequence in argument #{idx + 1}"
 end
 
 def reject_unsupported_json_assignments!(argv)
-  arg = argv.find { |candidate| candidate.start_with?("--json=") && !JSON_BOOLEAN_OPTIONS.include?(candidate) }
+  arg = wrapper_option_argv(argv).find do |candidate|
+    candidate.start_with?("--json=") && !JSON_BOOLEAN_OPTIONS.include?(candidate)
+  end
   return unless arg
 
   raise Thor::MalformattedArgumentError, "invalid boolean value for --json: #{arg.split('=', 2).last.inspect}"
 end
+
+RETENTION_VALUE_OPTIONS = %w[--retain-days --retain-failed-days].freeze
+
+def reject_missing_retention_values!(argv)
+  return unless argv.first == "clean"
+
+  wrapper_option_argv(argv).each_index do |idx|
+    arg = argv[idx]
+    next unless RETENTION_VALUE_OPTIONS.include?(arg)
+
+    value = argv[idx + 1]
+    next if value && !value.empty? && (!value.start_with?("-") || value.match?(/\A-\d+\z/))
+
+    raise Thor::MalformattedArgumentError, "No value provided for option '#{arg}'"
+  end
+end
+
+HELP_FLAGS = %w[--help -h].freeze
 
 def normalize_leading_global_options!(argv)
   leading = []
@@ -310,24 +350,63 @@ def normalize_leading_global_options!(argv)
   return if leading.empty?
 
   commands = Hive::E2E::Binary.all_tasks.keys + [ "run" ]
+
+  # A *bare* top-level flag (`--json --version`, `--json -h`) is handled as
+  # human-only version/help output, so the leading --json is irrelevant and
+  # stays dropped. But when tokens trail the flag (`--json --version --filter
+  # tui`) it is no longer a standalone top-level invocation: Thor consumes it
+  # as a pattern and dispatches into `run_scenarios`, whose body reads
+  # `options[:json]`. Restore --json there so the command honors the caller's
+  # JSON request instead of emitting prose (the outer rescue's json_mode
+  # snapshot only guards Thor-level errors, not the command body).
+  if TOP_LEVEL_FLAGS.include?(argv.first)
+    return if argv.length == 1
+
+    # `--json --help <command>` / `--json -h <command>` requests that command's
+    # help. Thor renders command help natively when a help flag leads and a
+    # recognized command follows (exactly as `--help run` does) — but only while
+    # the leading --json stays dropped. Restoring --json ahead of --help makes
+    # Thor stop treating --help as the help switch and instead dispatch into
+    # run_scenarios with [--help, <command>], exiting 64. Help output is human
+    # prose, so the now-irrelevant --json can stay dropped. Non-command trailers
+    # (`--json --help missing`, `--json --help --filter tui`) fall through to the
+    # restore path so their usage errors still honor the JSON-envelope contract.
+    return if HELP_FLAGS.include?(argv.first) && commands.include?(argv[1])
+
+    return argv.unshift(*leading)
+  end
+
   cmd_idx = argv.index { |arg| commands.include?(arg) }
   return argv.unshift(*leading) unless cmd_idx
 
   argv.insert(cmd_idx + 1, *leading)
 end
 
+# Snapshot the caller's JSON request from the pristine ARGV. Normalization can
+# shift a leading `--json` out of ARGV and then return early without restoring
+# it (e.g. `--json --help missing`, `--json --version extra`, where a top-level
+# flag follows the class option). If Thor later raises a usage error, the rescue
+# blocks below would otherwise consult a mutated ARGV that no longer carries the
+# flag and emit prose on stderr instead of honoring the JSON-envelope contract.
+json_mode = json_requested?(ARGV)
+
 begin
   reject_invalid_argv_encoding!(ARGV)
   reject_unsupported_json_assignments!(ARGV)
   normalize_leading_global_options!(ARGV)
+  if ARGV == [ "--version" ] || ARGV == [ "-v" ]
+    puts Hive::VERSION
+    exit 0
+  end
   rewrite_help_flag!(ARGV)
+  reject_missing_retention_values!(ARGV)
   # Thor::Base#start rescues Thor::Error internally and exits 1 when
   # exit_on_failure? is true. Passing `debug: true` makes Thor re-raise
   # instead so the rescue below can preserve human/JSON formatting while
   # mapping usage failures to BinaryExit::USAGE.
   Hive::E2E::Binary.start(ARGV, debug: true)
 rescue Hive::E2E::PreflightError => e
-  if json_requested?(ARGV)
+  if json_mode
     puts JSON.pretty_generate(Hive::E2E::JsonError.payload(error_kind: "preflight", message: e.message,
                                                           exit_code: Hive::E2E::BinaryExit::CONFIG))
   else
@@ -335,7 +414,7 @@ rescue Hive::E2E::PreflightError => e
   end
   exit Hive::E2E::BinaryExit::CONFIG
 rescue Thor::Error => e
-  if json_requested?(ARGV)
+  if json_mode
     puts JSON.pretty_generate(Hive::E2E::JsonError.payload(error_kind: "usage", message: e.message,
                                                           exit_code: Hive::E2E::BinaryExit::USAGE))
   else
@@ -343,7 +422,7 @@ rescue Thor::Error => e
   end
   exit Hive::E2E::BinaryExit::USAGE
 rescue StandardError => e
-  if json_requested?(ARGV)
+  if json_mode
     puts JSON.pretty_generate(Hive::E2E::JsonError.payload(error_kind: "error", message: e.message,
                                                           exit_code: Hive::E2E::BinaryExit::FAILURE))
   else

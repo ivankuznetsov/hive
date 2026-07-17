@@ -207,7 +207,7 @@ class AgentProfileModesTest < Minitest::Test
     end
   end
 
-  # --- per-profile build_cmd shape (claude / codex / pi) -------------------
+  # --- per-profile build_cmd shape (claude / codex / pi / grok) ------------
 
   def test_claude_profile_build_cmd_matches_legacy_shape
     with_tmp_dir do |dir|
@@ -305,6 +305,22 @@ class AgentProfileModesTest < Minitest::Test
       assert_includes cmd, "--no-session"
       # prompt last
       assert_equal "do work", cmd.last
+    end
+  end
+
+  def test_grok_profile_build_cmd_attaches_prompt_to_single_flag
+    profile = Hive::AgentProfiles.lookup(:grok)
+    with_tmp_dir do |dir|
+      agent = Hive::Agent.new(
+        task: make_task(dir), prompt: "do work",
+        max_budget_usd: 5, timeout_sec: 5,
+        profile: profile
+      )
+
+      assert_equal [
+        profile.bin, "-p", "do work", "--always-approve",
+        "--output-format", "streaming-json"
+      ], agent.build_cmd
     end
   end
 

@@ -8,7 +8,7 @@ module Hive
   module Tui
     module Views
       module TokenStats
-        AGENTS = %i[claude codex pi].freeze
+        AGENTS = %i[claude codex pi grok].freeze
         BUCKETS = %i[today 7d 30d all].freeze
         HEADER = [ "agent", "today", "7d", "30d", "all" ].freeze
         HELP = "← → drill • ↑ ↓ select • q close".freeze

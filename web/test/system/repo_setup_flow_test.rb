@@ -11,14 +11,15 @@ class RepoSetupFlowTest < ApplicationSystemTestCase
       visit "/repos/new?url=ivankuznetsov/#{name}&name=#{name}"
 
       assert_selector "label", text: "Workflow", wait: 5
-      # coding-first + content present rather than an exact set, so a third
-      # built-in workflow doesn't break this with no behavior regression
-      # (plan U7; mirrors the rerun test's soft assertions below).
+      # Pin the current built-ins without an exact set, so future additions do
+      # not break this with no behavior regression.
       values = workflow_option_values
       assert_equal "coding", values.first,
                    "fresh setup should list the coding workflow first"
       assert_includes values, "content",
                       "fresh setup should offer the built-in content workflow"
+      assert_includes values, "bench",
+                      "fresh setup should offer the built-in benchmark workflow"
       assert_equal "coding", workflow_select.value,
                    "fresh setup should preselect coding"
       # The options are already materialized by the waited assertions above

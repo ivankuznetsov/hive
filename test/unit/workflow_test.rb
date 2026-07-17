@@ -21,9 +21,17 @@ class WorkflowTest < Minitest::Test
     assert_nil stage.budget_usd
     assert_nil stage.timeout_sec
     assert_nil stage.capability
+    assert_nil stage.agent
+    assert_nil stage.model
+    assert_nil stage.effort
+    assert_nil stage.input
+    assert_nil stage.reviewers
+    assert_nil stage.council
+    assert_nil stage.deliverable
   end
 
   def test_known_kinds_include_coding_runtime_primitives
+    assert_includes Hive::Workflow::KNOWN_KINDS, :council
     assert_includes Hive::Workflow::KNOWN_KINDS, :execute
     assert_includes Hive::Workflow::KNOWN_KINDS, :review_council
     assert_includes Hive::Workflow::KNOWN_KINDS, :finalize
@@ -40,11 +48,17 @@ class WorkflowTest < Minitest::Test
       state_file: "work.md",
       kind: :agent,
       instruction: "/tmp/hive-work.md",
-      permissions: "read-only"
+      permissions: "read-only",
+      agent: "codex",
+      model: "opus",
+      effort: "high"
     )
 
     assert_equal "/tmp/hive-work.md", stage.instruction
     assert_equal "read-only", stage.permissions
+    assert_equal "codex", stage.agent
+    assert_equal "opus", stage.model
+    assert_equal "high", stage.effort
   end
 
   def test_advance_verb_defaults_flags_to_false

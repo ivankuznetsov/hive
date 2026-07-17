@@ -14,6 +14,21 @@ require "hive/workflows/descriptor_parser"
 class InitTest < Minitest::Test
   include HiveTestHelper
 
+  def test_init_persists_canonical_origin_identity_in_registry
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        remote = File.join(File.dirname(dir), "origin.git")
+        run!("git", "init", "--bare", "--quiet", remote)
+        run!("git", "-C", dir, "remote", "add", "origin", remote)
+
+        capture_io { Hive::Commands::Init.new(dir).call }
+
+        entry = Hive::Config.registered_projects.find { |project| project["path"] == File.expand_path(dir) }
+        assert_equal Hive::RepositoryIdentity.normalize(remote), entry["repository_identity"]
+      end
+    end
+  end
+
   def with_tmp_home
     Dir.mktmpdir("hive-home") do |dir|
       old = ENV["HOME"]
@@ -153,7 +168,7 @@ class InitTest < Minitest::Test
     with_registered_workflow(content_workflow) do
       with_tmp_global_config do
         with_tmp_git_repo do |dir|
-          workflow_input = StringIO.new("3\n")
+          workflow_input = StringIO.new("4\n")
           workflow_input.define_singleton_method(:tty?) { true }
           workflow_output = StringIO.new
           prompts = Hive::Commands::Init::Prompts.new(
@@ -173,7 +188,8 @@ class InitTest < Minitest::Test
 
           assert_includes workflow_output.string, "1) coding"
           assert_includes workflow_output.string, "2) content"
-          assert_includes workflow_output.string, "3) content_fixture"
+          assert_includes workflow_output.string, "3) bench"
+          assert_includes workflow_output.string, "4) content_fixture"
           config = YAML.safe_load(File.read(File.join(dir, ".hive-state", "config.yml")))
           assert_equal "content_fixture", config.fetch("default_workflow")
         end
@@ -184,9 +200,9 @@ class InitTest < Minitest::Test
   def test_init_workflow_prompt_pick_selects_the_named_index
     # Discriminator against a "selection ignored, always writes the one
     # registered non-coding default" regression: with BOTH content (built-in,
-    # index 2) and content_fixture (index 3) on the menu, picking "2" must bind
+    # index 2) and content_fixture (index 4) on the menu, picking "2" must bind
     # content — not whatever single non-coding default a broken loop might emit.
-    # The sibling test above pins "3" → content_fixture, so the two together
+    # The sibling test above pins "4" → content_fixture, so the two together
     # prove the chosen index actually drives the on-disk default.
     with_registered_workflow(content_workflow) do
       with_tmp_global_config do
@@ -368,7 +384,7 @@ class InitTest < Minitest::Test
           workflow_input = StringIO.new("#{author_index}\nwriting\n")
           workflow_input.define_singleton_method(:tty?) { true }
           workflow_output = StringIO.new
-          setup_inputs = ([ "codex", "", "", "", "", "", "", "", "", "", "" ] +
+          setup_inputs = ([ "codex", "", "", "", "", "", "", "", "", "", "", "" ] +
                           ([ "" ] * Hive::Commands::Init::Prompts::LIMIT_KEYS.size) +
                           [ "", "", "", "" ]).join("\n") + "\n"
           prompts = make_tty_prompts(setup_inputs)
@@ -1349,7 +1365,7 @@ class InitTest < Minitest::Test
         refute_includes out, "hive: using defaults"
         refute_includes out, "hive: initialized"
         assert_equal "hive-init", payload.fetch("schema")
-        assert_equal 1, payload.fetch("schema_version")
+        assert_equal 2, payload.fetch("schema_version")
         assert_equal true, payload.fetch("ok")
         assert_equal File.basename(dir), payload.fetch("project")
         assert_equal File.expand_path(dir), payload.fetch("path")
@@ -1365,6 +1381,8 @@ class InitTest < Minitest::Test
         assert_equal "claude", payload.fetch("answers").fetch("planning_agent")
         assert_equal "medium", payload.fetch("answers").fetch("patrol_mode")
         assert_equal "medium", payload.fetch("patrol_mode")
+        assert_equal true, payload.fetch("answers").fetch("refactor_patrol_enabled")
+        assert_equal true, payload.fetch("refactor_patrol_enabled")
         assert_equal payload.fetch("answers").fetch("budgets"), payload.fetch("budgets")
         assert_equal false, payload.fetch("daemon_autostart_requested")
 
@@ -1413,6 +1431,52 @@ class InitTest < Minitest::Test
 
       assert_equal [], payload.fetch("hints"),
                    "a coding default whose workflows dir already holds a descriptor must emit no authoring hint"
+    end
+  end
+
+  def test_non_tty_default_prompt_summary_mentions_adhoc_auto_fix
+    summary = StringIO.new
+    answers = Hive::Commands::Init::Prompts.new(input: StringIO.new, summary_io: summary).collect
+
+    assert_equal false, answers.fetch("adhoc_auto_fix")
+    assert_includes summary.string, "adhoc_auto_fix=disabled"
+  end
+
+  def test_non_tty_default_prompt_summary_recommends_refactor_patrol
+    summary = StringIO.new
+    answers = Hive::Commands::Init::Prompts.new(input: StringIO.new, summary_io: summary).collect
+
+    assert_equal true, answers.fetch("refactor_patrol_enabled")
+    assert_includes summary.string, "refactor_patrol=enabled"
+  end
+
+  def test_non_tty_prompt_override_disables_refactor_patrol_before_rendering
+    summary = StringIO.new
+    answers = Hive::Commands::Init::Prompts.new(
+      input: StringIO.new,
+      summary_io: summary,
+      refactor_patrol_enabled: false
+    ).collect
+
+    assert_equal false, answers.fetch("refactor_patrol_enabled")
+    assert_includes summary.string, "refactor_patrol=disabled"
+  end
+
+  def test_non_tty_default_prompt_summary_mentions_enabled_adhoc_auto_fix
+    prompts = Hive::Commands::Init::Prompts
+    original = prompts.const_get(:DEFAULT_ADHOC_AUTO_FIX)
+    prompts.send(:remove_const, :DEFAULT_ADHOC_AUTO_FIX)
+    prompts.const_set(:DEFAULT_ADHOC_AUTO_FIX, true)
+    summary = StringIO.new
+
+    answers = prompts.new(input: StringIO.new, summary_io: summary).collect
+
+    assert_equal true, answers.fetch("adhoc_auto_fix")
+    assert_includes summary.string, "adhoc_auto_fix=enabled"
+  ensure
+    if defined?(prompts) && defined?(original)
+      prompts.send(:remove_const, :DEFAULT_ADHOC_AUTO_FIX)
+      prompts.const_set(:DEFAULT_ADHOC_AUTO_FIX, original)
     end
   end
 
@@ -1532,11 +1596,12 @@ class InitTest < Minitest::Test
   def test_init_json_mirrors_non_default_prompt_answers
     # Order: planning, claude_mode, claude_permission_mode, development,
     # reviewers, patrol_reviewers, patrol_mode, triage, ad-hoc auto-fix,
+    # architecture patrol discovery,
     # then limits, daemon-enable, babysitter-enable, daemon-autostart, confirm.
     # Two blank slots after claude_permission_mode accept the model/effort
     # defaults. patrol_reviewers index 3 = claude-ce-code-review
     # (1=codex-native-review, 2=codex-ce-code-review, 3=claude-ce-code-review).
-    inputs = ([ "codex", "2", "", "", "", "pi", "2", "3", "high", "safetyist", "y", "60,120" ] +
+    inputs = ([ "codex", "2", "", "", "", "pi", "2", "3", "high", "safetyist", "y", "", "60,120" ] +
               ([ "" ] * (Hive::Commands::Init::Prompts::LIMIT_KEYS.size - 1)) +
               [ "n", "", "", "" ]).join("\n") + "\n"
 
@@ -1555,6 +1620,7 @@ class InitTest < Minitest::Test
         assert_equal "high", answers.fetch("patrol_mode")
         assert_equal "safetyist", answers.fetch("triage_bias")
         assert_equal true, answers.fetch("adhoc_auto_fix")
+        assert_equal true, answers.fetch("refactor_patrol_enabled")
         assert_equal 60, answers.fetch("budgets").fetch("brainstorm")
         assert_equal 120, answers.fetch("timeouts").fetch("brainstorm")
         assert_equal false, answers.fetch("daemon_enabled")
@@ -1563,7 +1629,7 @@ class InitTest < Minitest::Test
 
         %w[
           planning_agent claude_mode development_agent enabled_reviewers patrol_reviewers
-          patrol_mode triage_bias adhoc_auto_fix budgets timeouts daemon_enabled babysitter_enabled
+          patrol_mode triage_bias adhoc_auto_fix refactor_patrol_enabled budgets timeouts daemon_enabled babysitter_enabled
         ].each do |key|
           assert_equal answers.fetch(key), payload.fetch(key), "top-level #{key} must mirror answers"
         end
@@ -1615,16 +1681,17 @@ class InitTest < Minitest::Test
           assert File.executable?(refresh_script)
           assert File.executable?(post_commit_script)
           assert_includes File.read(refresh_script), 'codex exec --add-dir "$LLM_WIKI_QMD_CACHE_DIR" -C "$project_root"'
-          # The worktree-safe post-commit script reads the just-committed code in
-          # the committing tree (-C "$committing_tree") and assembles its --add-dir
-          # list (qmd cache always, plus the main checkout when run from a linked
-          # worktree) into an array rather than the static refresh-wiki.sh form.
+          # Post-commit refreshes run only in a disposable managed worktree on
+          # llm-wiki/refresh. The source commit is queued before lock acquisition.
           assert_includes File.read(post_commit_script), 'add_dir_args=( --add-dir "$LLM_WIKI_QMD_CACHE_DIR" )'
-          assert_includes File.read(post_commit_script), 'codex exec "${add_dir_args[@]}" -C "$committing_tree"'
+          assert_includes File.read(post_commit_script), 'codex exec "${add_dir_args[@]}" -C "$refresh_root"'
+          assert_includes File.read(post_commit_script), 'refresh_branch="${LLM_WIKI_REFRESH_BRANCH:-llm-wiki/refresh}"'
+          assert_includes File.read(post_commit_script), 'mv -f "$queue_tmp" "$pending_dir/$sha"'
+          refute_includes File.read(post_commit_script), 'wiki_root="$main_checkout"'
           assert_includes File.read(refresh_script), "LLM_WIKI_QMD_CACHE_DIR"
           assert_includes File.read(post_commit_script), "LLM_WIKI_QMD_CACHE_DIR"
           assert_includes File.read(refresh_script), ".llm-wiki/qmd-cache"
-          assert_includes File.read(post_commit_script), ".llm-wiki/qmd-cache"
+          assert_includes File.read(post_commit_script), 'export XDG_CACHE_HOME="$state_dir/cache"'
           assert_includes File.read(refresh_script), "LLM_WIKI_CODEX_TIMEOUT"
           assert_includes File.read(refresh_script), "LLM_WIKI_QMD_TIMEOUT"
           assert_includes File.read(refresh_script), "qmd embed --max-docs-per-batch 64 --max-batch-mb 64"
@@ -1645,9 +1712,9 @@ class InitTest < Minitest::Test
             end
           end
           assert_includes File.read(post_commit_script), "qmd embed --max-docs-per-batch 64 --max-batch-mb 64"
-          assert_includes File.read(post_commit_script), "Do not run qmd update or qmd embed yourself"
+          assert_includes File.read(post_commit_script), "Do not run\nqmd; the wrapper handles bounded index maintenance"
           assert_includes File.read(post_commit_script), "wiki/log.d/<timestamp>-<slug>.md"
-          assert_includes File.read(post_commit_script), "without editing compiled wiki/log.md"
+          assert_includes File.read(post_commit_script), "without\nediting compiled wiki/log.md"
           refute_includes File.read(refresh_script), "QMD_LLAMA_GPU"
           refute_includes File.read(post_commit_script), "QMD_LLAMA_GPU"
           refute_includes File.read(refresh_script), "claude -p"
@@ -1810,11 +1877,15 @@ class InitTest < Minitest::Test
         end
 
         log = File.read(log_path)
+        git_common_dir = run!("git", "-C", dir, "rev-parse", "--git-common-dir").strip
+        git_common_dir = File.expand_path(git_common_dir, dir)
+        refresh_log_path = File.join(git_common_dir, "llm-wiki", "post-commit-refresh.log")
+        refresh_log = File.exist?(refresh_log_path) ? File.read(refresh_log_path) : "(missing)"
         env_var_names.each do |name|
           assert_includes log, "codex:#{name}=\n",
-                          "codex must observe scrubbed #{name}"
+                          "codex must observe scrubbed #{name}; refresh log:\n#{refresh_log}"
           assert_includes log, "qmd:#{name}=\n",
-                          "qmd must observe scrubbed #{name}"
+                          "qmd must observe scrubbed #{name}; refresh log:\n#{refresh_log}"
         end
         refute_includes log, "foreign.index"
         refute_includes log, dir
@@ -1874,6 +1945,67 @@ class InitTest < Minitest::Test
         assert_equal "timer", cfg.dig("patrol", "trigger")
         assert_equal 14_400, cfg.dig("patrol", "poll_interval_sec")
         assert_equal true, cfg.dig("patrol", "enabled")
+      end
+    end
+  end
+
+  def test_init_renders_recommended_refactor_patrol_discovery_with_side_effects_disabled
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        out, _err = capture_io { Hive::Commands::Init.new(dir).call }
+        raw = YAML.safe_load(File.read(File.join(dir, ".hive-state", "config.yml")))
+        resolved = Hive::Config.load(dir)
+
+        assert_equal true, raw.dig("refactor_patrol", "enabled")
+        assert_equal false, raw.dig("refactor_patrol", "auto_fix", "enabled")
+        assert_nil raw.dig("refactor_patrol", "commands", "public_contract")
+        assert_equal false, raw.dig("refactor_patrol", "issue_filing", "enabled")
+        assert_equal true, resolved.dig("refactor_patrol", "enabled")
+        assert_nil resolved.dig("refactor_patrol", "commands", "public_contract")
+        assert_includes out, "architecture patrol"
+        assert_includes out, "enabled"
+      end
+    end
+  end
+
+  def test_init_explicitly_disables_refactor_patrol_before_writing_state
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir, refactor_patrol: false).call }
+        raw = YAML.safe_load(File.read(File.join(dir, ".hive-state", "config.yml")))
+
+        assert_equal false, raw.dig("refactor_patrol", "enabled")
+        assert_equal false, raw.dig("refactor_patrol", "auto_fix", "enabled")
+        assert_equal false, raw.dig("refactor_patrol", "issue_filing", "enabled")
+      end
+    end
+  end
+
+  def test_refactor_patrol_init_selectors_reject_every_existing_project_reinit_path
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        state_root = File.join(dir, ".hive-state")
+        config_path = File.join(state_root, "config.yml")
+        before_config = File.binread(config_path)
+        before_head = run!("git", "-C", state_root, "rev-parse", "HEAD")
+
+        [
+          { refactor_patrol: false },
+          { workflow: "coding", refactor_patrol: false },
+          { new_workflow: "writing", refactor_patrol: true }
+        ].each do |options|
+          error = assert_raises(Hive::ConfigError) do
+            capture_io { Hive::Commands::Init.new(dir, **options).call }
+          end
+          assert_match(/only valid for a fresh project/, error.message)
+          assert_match(/refactor_patrol\.enabled/, error.message)
+        end
+
+        assert_equal before_config, File.binread(config_path)
+        assert_equal before_head, run!("git", "-C", state_root, "rev-parse", "HEAD")
+        refute File.exist?(File.join(state_root, "workflows", "writing.yml")),
+               "a rejected existing-project selector must not scaffold a workflow"
       end
     end
   end
@@ -2060,7 +2192,7 @@ class InitTest < Minitest::Test
   end
 
   def default_setup_prompt_input
-    (([ "" ] * 11) + ([ "" ] * Hive::Commands::Init::Prompts::LIMIT_KEYS.size) +
+    (([ "" ] * 12) + ([ "" ] * Hive::Commands::Init::Prompts::LIMIT_KEYS.size) +
       [ "", "", "", "" ]).join("\n") + "\n"
   end
 
@@ -2094,7 +2226,7 @@ class InitTest < Minitest::Test
     # budget/timeout, keep ad-hoc PR auto-fix disabled, accept the rest.
     inputs = [
       "codex", "", "", "", "", "2", "1,3", "", "high", "safetyist",
-      "", "", "30,900", "", "", "", "", "", "", "", "",
+      "", "", "", "30,900", "", "", "", "", "", "", "", "",
       "", "", "", ""
     ].join("\n") + "\n"
     with_tmp_global_config do
@@ -2138,9 +2270,10 @@ class InitTest < Minitest::Test
   def test_init_with_headless_claude_mode_writes_matching_config
     # planning=blank(claude), claude_mode="2"(headless), claude_permission_mode=blank,
     # dev=blank, reviewers=blank, patrol_reviewers=blank, patrol_mode=blank,
-    # triage=blank, ad-hoc auto-fix=blank, limit blanks, daemon-enable=blank,
+    # triage=blank, ad-hoc auto-fix=blank, architecture patrol=blank,
+    # limit blanks, daemon-enable=blank,
     # babysitter-enable=blank, daemon-autostart=blank, confirm=blank.
-    inputs = ([ "", "2", "", "", "", "", "", "", "", "", "" ] +
+    inputs = ([ "", "2", "", "", "", "", "", "", "", "", "", "" ] +
               ([ "" ] * Hive::Commands::Init::Prompts::LIMIT_KEYS.size) +
               [ "", "", "", "" ]).join("\n") + "\n"
     with_tmp_global_config do
@@ -2162,9 +2295,10 @@ class InitTest < Minitest::Test
 
   def test_init_with_claude_permission_mode_auto_writes_matching_config
     # planning=blank, claude_mode=blank, claude_permission_mode="2"(auto),
-    # dev/reviewers/patrol_reviewers/patrol_mode/triage/ad-hoc auto-fix=blank, limits blank,
+    # dev/reviewers/patrol_reviewers/patrol_mode/triage/ad-hoc auto-fix/
+    # architecture patrol=blank, limits blank,
     # daemon/babysitter/autostart/confirm blank.
-    inputs = ([ "", "", "2", "", "", "", "", "", "", "", "" ] +
+    inputs = ([ "", "", "2", "", "", "", "", "", "", "", "", "" ] +
               ([ "" ] * Hive::Commands::Init::Prompts::LIMIT_KEYS.size) +
               [ "", "", "", "" ]).join("\n") + "\n"
     with_tmp_global_config do
@@ -2182,9 +2316,10 @@ class InitTest < Minitest::Test
   def test_init_with_daemon_disabled_writes_disabled_config
     # Same shape as above but explicitly answer `n` to the daemon prompt.
     # Blanks: planning (claude), claude mode, Claude permission mode, dev,
-    # reviewers, patrol reviewers, patrol mode, triage bias, ad-hoc auto-fix, limits. Then "n" for daemon-enable and blanks for
+    # reviewers, patrol reviewers, patrol mode, triage bias, ad-hoc auto-fix,
+    # architecture patrol, limits. Then "n" for daemon-enable and blanks for
     # babysitter-enable, daemon-autostart, and confirm.
-    inputs = (([ "" ] * (11 + Hive::Commands::Init::Prompts::LIMIT_KEYS.size)) +
+    inputs = (([ "" ] * (12 + Hive::Commands::Init::Prompts::LIMIT_KEYS.size)) +
               [ "n", "", "", "" ]).join("\n") + "\n"
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
@@ -2201,9 +2336,10 @@ class InitTest < Minitest::Test
   def test_init_aborts_with_zero_disk_state_when_user_says_n
     # Blank for everything until confirmation; answer `n` at the end.
     # Blanks: planning (claude), claude mode, Claude permission mode, dev,
-    # reviewers, patrol reviewers, patrol mode, triage bias, ad-hoc auto-fix, limits, daemon-enable, babysitter-enable,
+    # reviewers, patrol reviewers, patrol mode, triage bias, ad-hoc auto-fix,
+    # architecture patrol, limits, daemon-enable, babysitter-enable,
     # daemon-autostart.
-    inputs = (([ "" ] * (14 + Hive::Commands::Init::Prompts::LIMIT_KEYS.size)) +
+    inputs = (([ "" ] * (15 + Hive::Commands::Init::Prompts::LIMIT_KEYS.size)) +
               [ "n" ]).join("\n") + "\n"
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

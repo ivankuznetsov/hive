@@ -3,7 +3,7 @@ title: Hive::Lock
 type: module
 source: lib/hive/lock.rb
 created: 2026-04-25
-updated: 2026-06-14
+updated: 2026-07-09
 tags: [lock, concurrency, flock, commit-lock]
 ---
 
@@ -27,7 +27,14 @@ tags: [lock, concurrency, flock, commit-lock]
 }
 ```
 
-The runner adds `slug:` and `stage:` to the payload. `Hive::Agent` later injects `claude_pid` via `update_task_lock`, used by `hive status` to detect stale agents.
+The runner adds `slug:` and `stage:` to the payload. After launch, both the
+headless `Hive::Agent` writer and the tmux-backed `Hive::ClaudeLauncher` writer
+inject `claude_pid` plus `claude_pid_start_time` through `update_task_lock`.
+`hive status` uses the child PID for liveness, while cleanup commands compare
+the recorded start time with the live process before signalling it so a reused
+PID cannot target an unrelated process. If the platform cannot read a start
+time, the field is nil and that child-specific PID-reuse guard degrades to its
+existing PID-only behavior.
 
 ## Stale-lock detection (`stale_lock?`)
 
@@ -38,7 +45,9 @@ The runner adds `slug:` and `stage:` to the payload. `Hive::Agent` later injects
    - `EPERM` → process exists but we can't signal → not stale (live).
 4. Read `process_start_time` from the lock and the live `/proc/<pid>/stat` field 22. If recorded ≠ live → PID was reused after we locked → stale.
 
-This is the PID-reuse defence: a fresh process with the same PID would have a different start time.
+This is the runner PID-reuse defence: a fresh process with the same PID would
+have a different start time. The optional `claude_pid_start_time` applies the
+same identity principle to the recorded agent child during cleanup.
 
 ## `process_start_time(pid)`
 

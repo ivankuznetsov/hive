@@ -129,6 +129,23 @@ class FixGuardrailTest < Minitest::Test
     end
   end
 
+  def test_trips_on_cached_diff_with_mnemonic_commit_and_index_prefixes
+    diff = <<~DIFF
+      diff --git c/.github/workflows/deploy.yml i/.github/workflows/deploy.yml
+      --- c/.github/workflows/deploy.yml
+      +++ i/.github/workflows/deploy.yml
+      @@ -1 +1 @@
+      -name: build
+      +name: deploy
+    DIFF
+
+    matches = Hive::Stages::Review::FixGuardrail.scan_diff(
+      diff, Hive::Stages::Review::FixGuardrail.resolve_patterns(cfg)
+    )
+
+    assert matches.any? { |match| match.pattern_name == "ci_workflow_edit" }
+  end
+
   def test_trips_on_github_workflow_deletion
     # A fix agent that DELETES `.github/workflows/deploy.yml` (rather
     # than editing it) emits `+++ /dev/null` in the diff header — the

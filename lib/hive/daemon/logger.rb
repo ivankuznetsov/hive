@@ -22,6 +22,7 @@ module Hive
 
       EVENTS = %i[
         dispatcher_started
+        legacy_layout_detected
         dispatcher_stopping
         tick_begin
         tick_end
@@ -80,6 +81,10 @@ module Hive
         digest_state_unreadable
         answer_digest_failure_backoff
         answer_digest_state_unreadable
+        architecture_patrol_opened
+        architecture_patrol_progress
+        architecture_patrol_closed
+        architecture_patrol_blocked
         fatal
       ].freeze
 

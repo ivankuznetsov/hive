@@ -8,6 +8,7 @@ class GemspecTest < Minitest::Test
 
     assert_includes spec.files, "bin/hive-babysitter-skip-log.rb"
     assert_includes spec.files, "bin/hive-babysitter-stub-gh"
+    assert_includes spec.files, "bin/hive-babysitter-stub-gh.rb"
     assert_includes spec.files, "bin/hive-babysitter-stub-git"
   end
 
@@ -16,6 +17,14 @@ class GemspecTest < Minitest::Test
 
     assert_includes spec.files, "lib/hive/scripts/interactive_claude_wrapper.sh"
     assert_includes spec.files, "lib/hive/scripts/stop_hook.sh"
+  end
+
+  def test_gem_package_includes_builtin_bench_instructions
+    spec = Gem::Specification.load(GEMSPEC_PATH)
+
+    %w[extract generate judge publish].each do |stage|
+      assert_includes spec.files, "templates/builtins/bench/#{stage}.md"
+    end
   end
 
   def test_gem_executables_exclude_bash_hv_launcher

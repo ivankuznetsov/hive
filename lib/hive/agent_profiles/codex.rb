@@ -20,7 +20,13 @@ module Hive
       # Codex headless mode is the `exec` subcommand. The first positional
       # after the bin is `exec`; subsequent flags are exec-scoped.
       headless_flag: "exec",
+      prompt_style: :stdin,
       permission_skip_flag: "--dangerously-bypass-approvals-and-sandbox",
+      workspace_write_flags: [
+        "--sandbox", "workspace-write",
+        "-c", 'approval_policy="never"',
+        "--ephemeral", "--ignore-user-config", "--ignore-rules"
+      ],
       add_dir_flag: "--add-dir",
       budget_flag: nil, # codex has no native --max-budget-usd
       output_format_flags: [ "--json" ],

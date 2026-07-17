@@ -1,0 +1,548 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require "fileutils"
+
+require_relative "hive-babysitter-skip-log"
+
+argv = ARGV.map(&:b)
+
+# `gh --repo`/`-R` accept `[HOST/]OWNER/REPO`, a full URL, or an scp-style
+# `git@host:owner/repo`; only the bare `OWNER/REPO` slug (exactly one slash and
+# no host marker) keeps gh on its default host. Any colon flags both the
+# `scheme://` URL and the scp `host:owner/repo` forms — the latter has a single
+# slash, so the slash count alone would wave it through to the real gh against an
+# agent-chosen host. Anything else carries an agent-chosen host.
+def repo_value_selects_host?(value)
+  value = value.to_s
+  value.include?(":") || value.count("/") != 1
+end
+
+# Value-taking short flags for allowlisted read commands, excluding `-R` itself.
+# When one appears before `R` in a shorthand cluster, pflag treats the rest of
+# the token as that option's value, not as more flags.
+GH_REPO_CLUSTER_VALUE_SHORT_OPTIONS = {
+  %w[api] => %w[H X F f q t p],
+  %w[pr checks] => %w[i q t],
+  %w[pr diff] => %w[e],
+  %w[pr list] => %w[a A B H q l L S s t],
+  %w[pr status] => %w[q t],
+  %w[pr view] => %w[q t],
+  %w[repo view] => %w[b q t],
+  %w[run list] => %w[b c e q L s t u w],
+  %w[run view] => %w[a j q t],
+  %w[run watch] => %w[i],
+  %w[workflow list] => %w[q L t],
+  %w[workflow view] => %w[r]
+}.freeze
+
+def repo_cluster_value_options(rest)
+  GH_REPO_CLUSTER_VALUE_SHORT_OPTIONS[rest[0, 2]] || GH_REPO_CLUSTER_VALUE_SHORT_OPTIONS[rest[0, 1]] || []
+end
+
+def short_cluster_repo_value(arg, next_arg, value_options)
+  return [ false, nil ] unless arg.start_with?("-") && !arg.start_with?("--") && arg.length > 2
+
+  chars = arg[1..].chars
+  chars.each_with_index do |char, char_index|
+    if char == "R"
+      glued = (chars[(char_index + 1)..] || []).join
+      return [ true, (glued[1..] || "") ] if glued.start_with?("=")
+
+      return [ true, glued.empty? ? next_arg : glued ]
+    end
+
+    return [ false, nil ] if value_options.include?(char)
+  end
+
+  [ false, nil ]
+end
+
+# Default-deny any host override anywhere in argv, not just in the leading
+# globals. The gate classifies the *stripped* argv but `exec`s the *original*
+# argv, so a host-qualified `--repo`/`-R`/`--repo=` value, a glued short
+# `-R<val>`/`-R=<val>` (pflag strips the `=`), a clustered `-cR<val>`, or an
+# `--hostname`/`--hostname=` selector would otherwise reach the real gh against
+# an agent-chosen host even on an allowlisted read — whether it leads the call or
+# trails the subcommand.
+# (`auth status`'s short `-h`/`-h<host>` is handled in auth_status_read_only?,
+# since `-h` means `--help` on other gh subcommands.)
+def host_override?(argv, rest)
+  value_options = repo_cluster_value_options(rest)
+  argv.each_with_index do |arg, index|
+    case arg
+    when "-R", "--repo"
+      return true if repo_value_selects_host?(argv[index + 1])
+    when /\A--repo=(.*)\z/m
+      return true if repo_value_selects_host?(Regexp.last_match(1))
+    when /\A-R=?(.+)\z/m
+      return true if repo_value_selects_host?(Regexp.last_match(1))
+    when "--hostname", /\A--hostname=/
+      return true
+    end
+
+    has_repo, value = short_cluster_repo_value(arg, argv[index + 1], value_options)
+    return true if has_repo && repo_value_selects_host?(value)
+  end
+  false
+end
+
+# `host_override?` only inspects `-R`/`--repo`/`--hostname` flags, but the same
+# read-only subcommands accept the target as a *positional* operand that carries
+# an agent-chosen host the flag gate never sees: `gh repo view [HOST/]OWNER/REPO`
+# (or a URL / scp `git@host:owner/repo`) and `gh pr {view,checks,diff} <url>`.
+# Reject those positionals too. The host-qualified slug rule (a colon or a second
+# slash) is scoped to `repo view`, because `gh api repos/owner/repo` endpoints and
+# `gh pr view feature/branch` refs legitimately carry slashes; for pr reads only a
+# full `scheme://host` URL names a host.
+def positional_host_override?(rest)
+  return api_endpoint_host_override?(rest) if rest[0] == "api"
+
+  case rest[0, 2]
+  when %w[repo view]
+    target_operands(rest.drop(2)).any? { |arg| arg.include?(":") || arg.count("/") > 1 }
+  when %w[pr view], %w[pr checks], %w[pr diff]
+    target_operands(rest.drop(2)).any? { |arg| arg.include?("://") }
+  else
+    false
+  end
+end
+
+# Yield the bare positional operands, skipping flags and the separate value of
+# gh's value-taking read flags so a `--branch feature/x/y` or `--json a,b` value
+# is not mistaken for a host-qualified target. Glued `--flag=val` / `-fval` forms
+# start with `-` and are skipped as flags; their value never stands alone.
+def target_operands(operands)
+  positionals = []
+  index = 0
+  while index < operands.length
+    arg = operands[index]
+    if %w[-R --repo -b --branch --json -q --jq -t --template].include?(arg)
+      index += 2
+    elsif arg.start_with?("-")
+      index += 1
+    else
+      positionals << arg
+      index += 1
+    end
+  end
+  positionals
+end
+
+def uri_scheme_or_host?(value)
+  value = value.to_s.b
+  value.match?(/\A[A-Za-z][A-Za-z0-9+\-.]*:/n) || value.start_with?("//")
+end
+
+API_ENDPOINT_VALUE_OPTIONS = %w[
+  --cache --field --header --input --jq --method --preview --raw-field --template
+].freeze
+
+# The short forms of gh api's value-taking options (`-H`/`-X`/`-F`/`-f`/`-q`/`-t`/`-p`).
+API_VALUE_SHORT_OPTIONS = %w[H X F f q t p].freeze
+
+# Mirror pflag's left-to-right shorthand-cluster parsing: scan each char of a
+# `-iXp`-style cluster and stop at the first value-taking shorthand. It consumes
+# the *next* argv only when it is the cluster's last char; otherwise the rest of
+# the cluster is its glued value and the next argv stands alone. Booleans (`-i`)
+# before it are skipped. Without this, a boolean shorthand ahead of a value option
+# (`gh api -ip shadow-cat <URL>`, which gh reads as `-i -p shadow-cat <URL>`) would
+# let the scanner treat the option value as the endpoint and wave the trailing
+# attacker host through to real gh.
+def api_short_cluster_consumes_next?(arg)
+  chars = arg[1..].chars
+  chars.each_with_index do |char, index|
+    return index == chars.length - 1 if API_VALUE_SHORT_OPTIONS.include?(char)
+  end
+
+  false
+end
+
+def api_endpoint_host_override?(rest)
+  index = 1
+  while index < rest.length
+    arg = rest[index]
+
+    if arg == "--"
+      return uri_scheme_or_host?(rest[index + 1])
+    elsif arg.start_with?("--")
+      name = arg.split("=", 2).first
+      index += API_ENDPOINT_VALUE_OPTIONS.include?(name) && !arg.include?("=") ? 2 : 1
+    elsif arg.start_with?("-") && arg != "-"
+      index += api_short_cluster_consumes_next?(arg) ? 2 : 1
+    else
+      return uri_scheme_or_host?(arg)
+    end
+  end
+
+  false
+end
+
+def stripped_global_options(argv)
+  rest = argv.dup
+  loop do
+    case rest.first
+    when "-R", "--repo"
+      rest.shift(2)
+    when /\A--repo=/
+      rest.shift
+    when /\A-R=?/
+      rest.shift
+    when /\A-/
+      # Unknown leading globals may take values; fail closed instead of stripping
+      # them and reclassifying the remaining argv as a safe subcommand.
+      return argv
+    else
+      break
+    end
+  end
+  rest
+end
+
+# `-F`/`--field name=@file` (and the glued `-Fname=@file` / `--field=name=@file`
+# forms) reads the value from a file, which gh sends as a request body even on a
+# GET — so it must be treated as an unsafe payload. The `.to_s` guards cover a
+# nil value (a trailing `-F` with no argument) and an empty split result, which
+# would otherwise raise `NoMethodError` on `nil.start_with?`.
+def field_uses_file?(value)
+  value.to_s.sub(/\A=/, "").split("=", 2).last.to_s.start_with?("@")
+end
+
+# pflag clusters short options, and a value-taking shorthand consumes the rest of
+# its cluster (or the next argv). A boolean shorthand ahead of it — `gh api -iX POST`
+# (read as `-i -X POST`) or `gh api -ifbody=hi` (`-i -f body=hi`) — would otherwise
+# hide the method/payload option from the classifier below and let a mutating call
+# pass as a read. Drop the leading boolean run so the first value-taking shorthand
+# leads the token the `case` already understands; its glued value (or next argv)
+# stays in place for that branch to consume.
+def expose_api_value_shorthand(arg)
+  return arg unless arg.start_with?("-") && !arg.start_with?("--") && arg.length > 1
+
+  chars = arg[1..].chars
+  first = chars.index { |char| API_VALUE_SHORT_OPTIONS.include?(char) }
+  return arg if first.nil? || first.zero?
+
+  "-#{chars[first..].join}"
+end
+
+def api_read_only?(rest)
+  return false unless rest.first == "api"
+
+  method = nil
+  payload = false
+  unsafe_payload = false
+  cache = false
+  index = 1
+  while index < rest.length
+    arg = expose_api_value_shorthand(rest[index])
+    case arg
+    when "-X", "--method"
+      method = rest[index + 1]
+      index += 2
+    when /\A--method=(.+)\z/
+      method = Regexp.last_match(1)
+      index += 1
+    when /\A-X=?(.+)\z/
+      method = Regexp.last_match(1)
+      index += 1
+    when "-f", "--raw-field"
+      payload = true
+      index += 2
+    when "--cache", /\A--cache=/
+      return false
+    when "-F", "--field"
+      payload = true
+      unsafe_payload ||= field_uses_file?(rest[index + 1])
+      index += 2
+    when "--input"
+      payload = true
+      unsafe_payload = true
+      index += 2
+    when "--cache"
+      cache = true
+      index += 2
+    when /\A-f.+\z/, /\A--raw-field=.+\z/
+      payload = true
+      index += 1
+    when /\A-F(.+)\z/
+      payload = true
+      unsafe_payload ||= field_uses_file?(Regexp.last_match(1))
+      index += 1
+    when /\A--field=(.+)\z/
+      payload = true
+      unsafe_payload ||= field_uses_file?(Regexp.last_match(1))
+      index += 1
+    when /\A--input=.+\z/
+      payload = true
+      unsafe_payload = true
+      index += 1
+    when /\A--cache=.*\z/
+      cache = true
+      index += 1
+    else
+      if arg.start_with?("--")
+        name = arg.split("=", 2).first
+        index += API_ENDPOINT_VALUE_OPTIONS.include?(name) && !arg.include?("=") ? 2 : 1
+      elsif arg.start_with?("-") && arg != "-"
+        index += api_short_cluster_consumes_next?(arg) ? 2 : 1
+      else
+        index += 1
+      end
+    end
+  end
+
+  return method.casecmp("GET").zero? && !unsafe_payload && !cache if method
+
+  !payload && !cache
+end
+
+# `gh auth status` exposes `-t`/`--show-token` (boolean) alongside the boolean
+# `-a`/`--active` and the value-taking `-h`/`--hostname`. gh (pflag) clusters
+# boolean shorthands, so `-at`, `-ta`, `-ath`, ... all reveal the token even
+# though they never equal a bare `-t`. We mirror pflag's left-to-right cluster
+# consumption: `t` reveals the token, while `h` swallows the rest of the cluster
+# as its hostname value (so trailing chars after `h` are data, not flags).
+def auth_status_shows_token?(arg)
+  return true if arg == "--show-token" || arg.start_with?("--show-token=")
+  return false unless arg.start_with?("-") && !arg.start_with?("--")
+
+  arg[1..].each_char do |char|
+    case char
+    when "t" then return true
+    when "h" then return false
+    end
+  end
+  false
+end
+
+# `gh auth status` also takes `-h`/`--hostname <host>` to target a specific host.
+# In dry-run the agent must not be able to redirect the authenticated status probe
+# to an arbitrary host, so any hostname selector disqualifies the read: the long
+# `--hostname`/`--hostname=` forms, the glued `-h<host>`, and an `h` reached inside
+# a boolean shorthand cluster (e.g. `-ah`), where pflag consumes the rest as the
+# hostname value.
+def auth_status_selects_host?(arg)
+  return true if arg == "--hostname" || arg.start_with?("--hostname=")
+  return false unless arg.start_with?("-") && !arg.start_with?("--")
+
+  arg[1..].each_char { |char| return true if char == "h" }
+  false
+end
+
+def auth_status_read_only?(rest)
+  return false unless rest[1] == "status"
+
+  rest.drop(2).none? { |arg| auth_status_shows_token?(arg) || auth_status_selects_host?(arg) }
+end
+
+def read_only?(rest)
+  case rest[0]
+  when "api"
+    api_read_only?(rest)
+  when "auth"
+    auth_status_read_only?(rest)
+  when "pr"
+    %w[checks diff list status view].include?(rest[1])
+  when "run"
+    %w[list view watch].include?(rest[1])
+  when "repo"
+    rest[1] == "view"
+  when "workflow"
+    %w[list view].include?(rest[1])
+  else
+    false
+  end
+end
+
+GH_BROWSER_COMMAND_VALUE_OPTIONS = {
+  %w[pr checks] => {
+    short: %w[i q t R],
+    long: %w[--interval --jq --json --template --repo]
+  },
+  %w[pr diff] => {
+    short: %w[e R],
+    long: %w[--color --exclude --repo]
+  },
+  %w[pr list] => {
+    short: %w[a A B H q l L S s t R],
+    long: %w[
+      --app --assignee --author --base --head --jq --json --label --limit --search --state --template --repo
+    ]
+  },
+  %w[pr view] => {
+    short: %w[q t R],
+    long: %w[--jq --json --template --repo]
+  },
+  %w[repo view] => {
+    short: %w[b q t],
+    long: %w[--branch --jq --json --template]
+  },
+  %w[run view] => {
+    short: %w[a j q t R],
+    long: %w[--attempt --job --jq --json --template --repo]
+  },
+  %w[workflow view] => {
+    short: %w[r R],
+    long: %w[--ref --repo]
+  }
+}.freeze
+
+def short_option_cluster_has_web?(arg, value_options)
+  chars = arg[1..].chars
+  chars.each_with_index do |char, index|
+    return [ true, false ] if char == "w"
+    return [ false, index == chars.length - 1 ] if value_options.include?(char)
+  end
+
+  [ false, false ]
+end
+
+def external_launcher_option?(rest)
+  spec = GH_BROWSER_COMMAND_VALUE_OPTIONS[rest[0, 2]]
+  return false unless spec
+
+  index = 2
+  while index < rest.length
+    arg = rest[index]
+
+    if arg == "--"
+      break
+    elsif arg == "--web" || arg.start_with?("--web=")
+      return true
+    elsif arg.start_with?("--")
+      name = arg.split("=", 2).first
+      index += spec.fetch(:long).include?(name) && !arg.include?("=") ? 2 : 1
+    elsif arg.start_with?("-") && arg != "-"
+      has_web, consumes_next = short_option_cluster_has_web?(arg, spec.fetch(:short))
+      return true if has_web
+
+      index += consumes_next ? 2 : 1
+    else
+      index += 1
+    end
+  end
+
+  false
+end
+
+def make_gh_config_home
+  root = "/tmp"
+
+  128.times do
+    nonce = "%d-%d-%08x" % [
+      Process.pid,
+      Process.clock_gettime(Process::CLOCK_REALTIME, :nanosecond),
+      rand(0x1_0000_0000)
+    ]
+    path = File.join(root, "hive-babysitter-gh-#{nonce}")
+
+    begin
+      Dir.mkdir(path, 0o700)
+      return path
+    rescue Errno::EEXIST
+      next
+    end
+  end
+
+  raise IOError, "failed to create temporary gh config dir under #{root}"
+end
+
+def materialize_trusted_gh_config(source_dir)
+  destination_dir = make_gh_config_home
+  return destination_dir if source_dir.to_s.empty?
+
+  source_dir_stat = File.lstat(source_dir)
+  return destination_dir unless File.absolute_path?(source_dir) && source_dir_stat.directory? &&
+    source_dir_stat.uid == Process.uid && (source_dir_stat.mode & 0o022).zero?
+
+  source_path = File.join(source_dir, "hosts.yml")
+  preopen_stat = File.lstat(source_path)
+  return destination_dir unless preopen_stat.file? && preopen_stat.uid == Process.uid &&
+    preopen_stat.nlink == 1 && (preopen_stat.mode & 0o077).zero?
+
+  File.open(source_path, File::RDONLY | File::NOFOLLOW) do |source|
+    opened_stat = source.stat
+    return destination_dir unless opened_stat.dev == preopen_stat.dev && opened_stat.ino == preopen_stat.ino
+
+    destination_path = File.join(destination_dir, "hosts.yml")
+    File.open(destination_path, File::WRONLY | File::CREAT | File::EXCL, 0o600) do |destination|
+      IO.copy_stream(source, destination)
+    end
+  end
+
+  destination_dir
+rescue SystemCallError, IOError
+  destination_dir || make_gh_config_home
+end
+
+rest = stripped_global_options(argv)
+
+unless read_only?(rest) && !external_launcher_option?(rest) && !host_override?(argv, rest) && !positional_host_override?(rest)
+  log_skip("gh", argv)
+  warn "[dry-run] gh #{escaped_argv(argv)} skipped"
+  exit 0
+end
+
+real = ENV["HIVE_BABYSITTER_REAL_GH"].to_s
+if real.empty?
+  warn "hive-babysitter dry-run: HIVE_BABYSITTER_REAL_GH is unset; refusing to guess a path for the real gh binary"
+  exit 127
+end
+unless File.absolute_path?(real)
+  warn "hive-babysitter dry-run: HIVE_BABYSITTER_REAL_GH must be an absolute path; refusing to exec #{real.inspect}"
+  exit 127
+end
+
+trusted_config_home = ENV["HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR"].to_s
+
+# The argv gate (host_override?) only inspects argv; gh also reads the target host,
+# repo, and enterprise credentials from the environment. GH_HOST / GH_REPO redirect an
+# allowlisted read at an agent-chosen host (GH_REPO carries an optional `[HOST/]`), and
+# GH_ENTERPRISE_TOKEN / GITHUB_ENTERPRISE_TOKEN supply the credentials for it, so scrub
+# them too, the same host-redirect threat the argv gate defends against.
+# Proxy and TLS trust-store env can still redirect a safe read through an agent-controlled
+# MITM before real gh sees GitHub credentials, so scrub those at the same exec seam.
+# Real gh can also invoke git for repo probes; scrub git's trace, config, and helper-command
+# env seams before those child git processes can inherit them. Pin PATH too, so those child
+# git probes cannot resolve an agent-controlled git binary from the caller's PATH.
+%w[
+  LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT
+  DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH DYLD_FRAMEWORK_PATH
+  DYLD_FALLBACK_LIBRARY_PATH DYLD_FALLBACK_FRAMEWORK_PATH
+  DYLD_VERSIONED_LIBRARY_PATH DYLD_VERSIONED_FRAMEWORK_PATH DYLD_PRINT_TO_FILE
+  RUBYOPT RUBYLIB BUNDLE_GEMFILE BUNDLE_BIN_PATH GEM_HOME GEM_PATH
+  BUNDLER_SETUP BUNDLER_VERSION
+  GH_PAGER PAGER GH_BROWSER BROWSER GH_EDITOR GIT_EDITOR VISUAL EDITOR GH_FORCE_TTY
+  GH_CONFIG_DIR XDG_CONFIG_HOME HIVE_BABYSITTER_TRUSTED_GH_CONFIG_DIR
+  GH_HOST GH_REPO GH_ENTERPRISE_TOKEN GITHUB_ENTERPRISE_TOKEN
+  GIT_ASKPASS GIT_EXEC_PATH GIT_EXTERNAL_DIFF GIT_PAGER GIT_PROXY_COMMAND SSH_ASKPASS
+  HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy
+  SSL_CERT_FILE SSL_CERT_DIR ssl_cert_file ssl_cert_dir
+].each { |key| ENV.delete(key) }
+ENV.keys.grep(/\ABUNDLER_ORIG_/).each { |key| ENV.delete(key) }
+ENV.keys.grep(/\AGIT_CONFIG/).each { |key| ENV.delete(key) }
+ENV.keys.grep(/\AGIT_SSH/).each { |key| ENV.delete(key) }
+ENV.keys.grep(/\AGIT_TRACE/).each { |key| ENV.delete(key) }
+ENV["PATH"] = "/usr/bin:/bin"
+ENV["GH_PROMPT_DISABLED"] = "1"
+# Treat DryRunEnv's run-scoped auth view only as a source. The agent can discover and mutate that
+# handoff path, so each passthrough copies only a validated hosts.yml into a new private directory;
+# executable config.yml settings can never reach the authenticated gh process.
+config_home = materialize_trusted_gh_config(trusted_config_home)
+ENV["HOME"] = config_home
+ENV["GH_CONFIG_DIR"] = config_home
+
+begin
+  pid = Process.spawn(ENV, real, *argv)
+  _pid, status = Process.wait2(pid)
+  exit(status.exitstatus || 128 + status.termsig.to_i)
+rescue SystemCallError => e
+  warn "hive-babysitter dry-run: cannot exec real gh at #{real.inspect}: #{e.message}"
+  exit 127
+ensure
+  begin
+    FileUtils.remove_entry_secure(config_home) if config_home && File.exist?(config_home)
+  rescue SystemCallError => e
+    warn "hive-babysitter dry-run: failed to remove temporary gh config #{config_home.inspect}: #{e.message}"
+  end
+end

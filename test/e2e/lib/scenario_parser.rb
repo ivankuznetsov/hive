@@ -1,4 +1,5 @@
 require "psych"
+require_relative "gh_stub"
 require_relative "path_safety"
 require_relative "scenario"
 
@@ -20,6 +21,7 @@ module Hive
         cli tui_keys tui_expect tui_refute state_assert json_assert seed_state write_file
         register_project wait_subprocess editor_action log_assert ruby_block
         start_releases_stub spawn_background stop_process
+        script_gh
       ].freeze
 
       REQUIRED_KEYS = {
@@ -36,8 +38,13 @@ module Hive
         "ruby_block" => %w[block],
         "start_releases_stub" => %w[tag],
         "spawn_background" => %w[id args],
-        "stop_process" => %w[id]
+        "stop_process" => %w[id],
+        "script_gh" => %w[interactions]
       }.freeze
+
+      INCIDENT_TAG = "incident-regression"
+      INCIDENT_ID = /\A[a-z0-9]+(?:-[a-z0-9]+)*\z/
+      SIBLING_TASK_ID = /\A#\d+\z/
 
       def self.parse(path)
         new(path).parse
@@ -52,20 +59,65 @@ module Hive
         invalid!("scenario root must be a map", 1) unless data.is_a?(Hash)
 
         name = safe_scenario_name(required_string(data, "name"))
+        description = data["description"].to_s
+        tags = Array(data["tags"]).map(&:to_s)
+        incident_id, sibling_task_id, pending = parse_incident_metadata(data, description, tags)
         steps = parse_steps(data["steps"])
+        if steps.count { |step| step.kind == "script_gh" } > 1
+          invalid!("scenario may install only one ordered script_gh interaction sequence", line_for("script_gh"))
+        end
         Scenario.new(
           name: name,
-          description: data["description"].to_s,
-          tags: Array(data["tags"]).map(&:to_s),
+          description: description,
+          tags: tags,
           setup: data["setup"].is_a?(Hash) ? data["setup"] : {},
           steps: steps.freeze,
-          path: @path
+          path: @path,
+          incident_id: incident_id,
+          sibling_task_id: sibling_task_id,
+          pending: pending
         ).freeze
       rescue Psych::SyntaxError => e
         invalid!(e.message, e.line)
       end
 
       private
+
+      def parse_incident_metadata(data, description, tags)
+        metadata_present = %w[incident_id sibling_task_id pending].any? { |key| data.key?(key) }
+        tagged = tags.include?(INCIDENT_TAG)
+        if metadata_present && !tagged
+          invalid!("incident metadata requires the #{INCIDENT_TAG} tag", metadata_line(data))
+        end
+        incident = tagged
+        return [ nil, nil, false ] unless incident
+
+        invalid!("incident description must be non-empty", metadata_line(data)) if description.strip.empty?
+
+        incident_id = data["incident_id"].to_s
+        unless INCIDENT_ID.match?(incident_id)
+          invalid!("incident_id must be a lowercase kebab-case identifier", line_for("incident_id"))
+        end
+
+        sibling_task_id = data["sibling_task_id"].to_s
+        unless SIBLING_TASK_ID.match?(sibling_task_id)
+          invalid!("sibling_task_id must match #<digits>", line_for("sibling_task_id"))
+        end
+
+        pending = data.fetch("pending", false)
+        unless pending == true || pending == false
+          invalid!("pending must be true or false", line_for("pending"))
+        end
+
+        [ incident_id, sibling_task_id, pending ]
+      end
+
+      def metadata_line(data)
+        %w[incident_id sibling_task_id pending tags name].each do |key|
+          return line_for(key) if data.key?(key)
+        end
+        1
+      end
 
       def parse_steps(raw)
         invalid!("scenario must have at least one step", line_for("steps")) unless raw.is_a?(Array) && raw.any?
@@ -91,6 +143,13 @@ module Hive
         when "tui_keys"
           key_count = %w[keys text].count { |key| step.key?(key) }
           invalid!("tui_keys step needs exactly one of keys or text", line_for(kind)) unless key_count == 1
+        when "script_gh"
+          invalid!("script_gh.interactions must be an array", line_for(kind)) unless step["interactions"].is_a?(Array)
+          begin
+            GhStub.validate_interactions(step["interactions"])
+          rescue ArgumentError => e
+            invalid!(e.message, line_for(kind))
+          end
         end
       end
 

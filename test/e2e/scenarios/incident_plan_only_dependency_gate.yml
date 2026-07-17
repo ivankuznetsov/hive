@@ -1,0 +1,82 @@
+name: incident_plan_only_dependency_gate
+description: Proves a plan-only prerequisite blocks dependent dispatch until the sibling-defined threshold.
+tags: [incident-regression]
+incident_id: plan-only-dependency-gate
+sibling_task_id: "#9771"
+pending: false
+
+steps:
+  - kind: seed_state
+    stage: 3-plan
+    slug: synthetic-plan-prerequisite
+    state_file: plan.md
+    content: "# Plan-only prerequisite below dispatch gate\n\n<!-- WAITING -->\n"
+
+  - kind: seed_state
+    stage: 4-execute
+    slug: synthetic-dependent-task
+    state_file: task.md
+    content: "# Dependent held below the prerequisite gate\n"
+    files:
+      - path: plan.md
+        content: |
+          ---
+          depends_on: synthetic-plan-prerequisite
+          ---
+          # Plan-only dependency declaration
+
+  - kind: json_assert
+    description: A plan-only declaration cannot silently become admitted metadata.
+    args: [run, synthetic-dependent-task, --json]
+    expect_exit: 78
+    schema: hive-run
+    pick: [reason_code]
+    equals: plan_dependency_missing
+    env:
+      HIVE_FAKE_CLAUDE_READY_FILE: "{run_home}/dependency-agent-ready"
+
+  - kind: write_file
+    path: "{sandbox}/.hive-state/stages/4-execute/synthetic-dependent-task/meta.yml"
+    content: |
+      id: 42
+      depends_on: synthetic-plan-prerequisite
+
+  - kind: json_assert
+    description: Exact metadata remains held while the prerequisite is below the gate.
+    args: [run, synthetic-dependent-task, --json]
+    expect_exit: 75
+    schema: hive-run
+    pick: [reason_code]
+    equals: dependency_wait
+    env:
+      HIVE_FAKE_CLAUDE_READY_FILE: "{run_home}/dependency-agent-ready"
+
+  - kind: state_assert
+    path: "{run_home}/dependency-agent-ready"
+    absent: true
+
+  - kind: ruby_block
+    description: Advance the prerequisite to the configured 8-finalize gate.
+    block: |
+      source = File.join(sandbox, ".hive-state", "stages", "3-plan", "synthetic-plan-prerequisite")
+      target = File.join(sandbox, ".hive-state", "stages", "8-finalize", "synthetic-plan-prerequisite")
+      FileUtils.mkdir_p(File.dirname(target))
+      FileUtils.mv(source, target)
+      File.write(File.join(target, "pr.md"), "# Prerequisite at dependency gate\n\n<!-- COMPLETE -->\n")
+
+  - kind: cli
+    description: Crossing the gate releases exactly one real execute dispatch.
+    args: [run, synthetic-dependent-task]
+    env:
+      HIVE_FAKE_CLAUDE_READY_FILE: "{run_home}/dependency-agent-ready"
+      HIVE_FAKE_CLAUDE_COMMIT_FILE: dependency-release.txt
+      HIVE_FAKE_CLAUDE_COMMIT_CONTENT: "released once\n"
+      HIVE_FAKE_CLAUDE_COMMIT_MESSAGE: "test: release dependency-gated dispatch"
+
+  - kind: state_assert
+    path: "{run_home}/dependency-agent-ready"
+    exists: true
+
+  - kind: state_assert
+    path: "{sandbox}/.hive-state/stages/4-execute/synthetic-dependent-task/task.md"
+    marker: {current: EXECUTE_COMPLETE}

@@ -11,7 +11,7 @@ Gem::Specification.new do |spec|
     approach, execute writes the code, review hardens it, and finalize ships the
     PR. Every task is a directory of plain markdown artefacts you can edit, and
     the dashboard (`hive tui`) drives stage agents on single keystrokes. The CLI
-    surface is `--json`-clean so coding agents (Claude Code, Codex, Gemini, Pi)
+    surface is `--json`-clean so coding agents (Claude Code, Codex, Grok, Pi)
     can drive it programmatically.
   DESC
   spec.homepage    = "https://github.com/ivankuznetsov/hive"
@@ -33,11 +33,13 @@ Gem::Specification.new do |spec|
     "bin/hive",
     "bin/hive-babysitter-skip-log.rb",
     "bin/hive-babysitter-stub-gh",
+    "bin/hive-babysitter-stub-gh.rb",
     "bin/hive-babysitter-stub-git",
     "bin/hv",
     "lib/**/*.rb",
     "lib/hive/scripts/**/*.sh",
     "templates/**/*",
+    "templates/builtins/bench/runtime/.dockerignore",
     "schemas/**/*.json",
     "examples/systemd/*",
     "examples/launchd/*",
@@ -58,6 +60,11 @@ Gem::Specification.new do |spec|
   # transitively through telegram-bot-ruby today, but declaring them directly
   # keeps transcription from breaking with a LoadError if an upstream bump
   # drops or re-scopes them.
+  # erb is a bundled-but-unbundling gem: Arch already ships it as a separate
+  # ruby-erb package, and stages/base.rb requires it at load time — without an
+  # explicit dependency, vendored installs (pacman, gem install --install-dir)
+  # crash with LoadError before any stage can run.
+  spec.add_dependency "erb", ">= 4.0"
   spec.add_dependency "faraday", ">= 2.14.2", "< 3.0"
   spec.add_dependency "faraday-multipart", "~> 1.0"
   spec.add_dependency "lipgloss", "~> 0.2.2"

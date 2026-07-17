@@ -80,7 +80,17 @@ class DropCommandTest < Minitest::Test
       File.write(File.join(log_dir, "execute.log"), "running\n")
       commit_hive_state(ops, "4-execute", slug)
 
-      pid = Process.spawn("sleep", "60", pgroup: true, out: File::NULL, err: File::NULL)
+      child_pid_path = File.join(dir, "nested-agent-child.pid")
+      pid = Process.spawn(
+        RbConfig.ruby, "-e", <<~'RUBY', child_pid_path,
+          child = Process.spawn("sleep", "60", pgroup: true, out: File::NULL, err: File::NULL)
+          File.write(ARGV.fetch(0), child)
+          sleep 60
+        RUBY
+        pgroup: true, out: File::NULL, err: File::NULL
+      )
+      nested_pid = wait_for_pid_file(child_pid_path)
+      nested_pgid = Process.getpgid(nested_pid)
       begin
         File.write(File.join(folder, ".lock"), { "claude_pid" => pid }.to_yaml)
 
@@ -95,6 +105,10 @@ class DropCommandTest < Minitest::Test
         assert_equal [ "4-execute" ], payload["from_stages"]
         assert_equal true, payload["agent_killed"]
         assert_includes payload["agent_killed_pids"], pid
+        refute Hive::ProcessKill.pid_alive?(pid),
+               "the recorded agent root must not survive drop"
+        refute process_group_alive?(nested_pgid),
+               "a nested tool subprocess in its own process group must not survive drop"
         assert_equal true, payload["worktree_removed"]
         assert_equal true, payload["branch_deleted"]
         refute File.directory?(folder)
@@ -104,8 +118,10 @@ class DropCommandTest < Minitest::Test
         log = `git -C #{File.join(dir, ".hive-state")} log --format=%s -1`.strip
         assert_equal "hive: dropped/#{slug} dropped", log
       ensure
-        # Reap the helper sleep so a failed assertion doesn't leak a
-        # 60s child until the test runner exits.
+        # Reap the helper tree so a failed assertion doesn't leak a
+        # nested 60s child until the test runner exits.
+        kill_process_group(nested_pgid)
+        kill_process_group(pid)
         reap_spawn(pid)
       end
     end
@@ -305,6 +321,62 @@ class DropCommandTest < Minitest::Test
         assert_equal Process.pid, payload["agent_pid"]
         assert_equal "pid_reuse_guard", payload["agent_kill_skipped_reason"]
       end
+    end
+  end
+
+  def test_drop_reports_partial_multi_candidate_cleanup_and_passes_group_start_time
+    with_drop_project do |dir, _ops, project|
+      slug = "partial-agent-cleanup-260709-aaaa"
+      folder = create_task(dir, "4-execute", slug)
+      group_pid = 81_001
+      runner_pid = 81_002
+      File.write(
+        File.join(folder, ".lock"),
+        {
+          "claude_pid" => group_pid,
+          "claude_pid_start_time" => "recorded-group-start",
+          "pid" => runner_pid,
+          "process_start_time" => "recorded-runner-start"
+        }.to_yaml
+      )
+
+      group_calls = []
+      runner_calls = []
+      group_result = Hive::ProcessKill::Result.new(pid: group_pid, killed: true, skipped_reason: nil)
+      runner_result = Hive::ProcessKill::Result.new(
+        pid: runner_pid, killed: false, skipped_reason: "pid_reuse_guard"
+      )
+
+      with_replaced_singleton_method(
+        Hive::ProcessKill, :terminate_process_group,
+        lambda do |pid, recorded_start_time: nil, **_kwargs|
+          group_calls << [ pid, recorded_start_time ]
+          group_result
+        end
+      ) do
+        with_replaced_singleton_method(
+          Hive::ProcessKill, :terminate_process,
+          lambda do |pid, recorded_start_time: nil, **_kwargs|
+            runner_calls << [ pid, recorded_start_time ]
+            runner_result
+          end
+        ) do
+          out, _err = capture_io do
+            Hive::Commands::Drop.new(slug, project: project, json: true).call
+          end
+          payload = JSON.parse(out)
+
+          assert_equal true, payload["agent_killed"],
+                       "one successful candidate must keep the aggregate cleanup successful"
+          assert_equal [ group_pid ], payload["agent_killed_pids"]
+          assert_equal "pid_reuse_guard", payload["agent_kill_skipped_reason"],
+                       "partial cleanup must retain the failed candidate's reason"
+        end
+      end
+
+      assert_equal [ [ group_pid, "recorded-group-start" ] ], group_calls,
+                   "drop must pass claude_pid_start_time to group cleanup"
+      assert_equal [ [ runner_pid, "recorded-runner-start" ] ], runner_calls
     end
   end
 
@@ -541,6 +613,25 @@ class DropCommandTest < Minitest::Test
     rescue Errno::ECHILD
       # already reaped
     end
+  end
+
+  def wait_for_pid_file(path)
+    deadline = Time.now + 2
+    sleep 0.01 until File.exist?(path) || Time.now >= deadline
+    Integer(File.read(path))
+  end
+
+  def process_group_alive?(pgid)
+    Process.kill(0, -pgid)
+    true
+  rescue Errno::ESRCH
+    false
+  end
+
+  def kill_process_group(pgid)
+    Process.kill("KILL", -pgid) if pgid && process_group_alive?(pgid)
+  rescue Errno::ESRCH, Errno::EPERM
+    nil
   end
 
   def test_drop_path_target_refuses_archived_task

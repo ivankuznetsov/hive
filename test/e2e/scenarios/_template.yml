@@ -2,6 +2,13 @@ name: template
 description: Reference scenario showing every v1 step kind.
 tags: [template]
 
+# Incident regressions additionally require all of the following metadata.
+# Leave `pending: true` until the sibling task defines the exact persisted
+# state, terminal reason, and reconciler contract asserted by the scenario.
+# incident_id: stable-lowercase-kebab-id
+# sibling_task_id: "#1234"
+# pending: true
+
 # `setup:` is intentionally minimal in v1.
 #
 # Optional keys:
@@ -79,6 +86,19 @@ steps:
   - kind: register_project
     name: project-b
 
+  # script_gh — install an ordered, exact script for every subsequent `gh`
+  # invocation. The run-global shim rejects absent/exhausted scripts, argv,
+  # cwd, and repository mismatches; it never falls through to a host binary.
+  # Required per interaction: args (array of exact strings)
+  # Optional: cwd, repository, response (JSON value), stdout, stderr,
+  #           exit_status (default 0). `response` and `stdout` are exclusive.
+  - kind: script_gh
+    interactions:
+      - args: [pr, view, "42", --json, state]
+        cwd: "{sandbox}"
+        repository: github.example/acme/widgets
+        response: { state: OPEN }
+
   # ruby_block — DANGER: eval-based escape hatch. Runs the `block` string with
   # `self == StepExecutor` and locals `sandbox`, `slug`, `run_home`. Anyone
   # who can commit a scenario can execute arbitrary code at test-runtime;
@@ -115,6 +135,20 @@ steps:
   # Optional: same as `cli`
   - kind: editor_action
     args: [version]
+
+  # spawn_background — start an attached real `bin/hive` subprocess in an
+  # owned process group; stop_process ends and reaps that entire group. The
+  # executor also stops all registered groups during failure teardown.
+  # Required: id, args
+  # Optional: env (hash)
+  - kind: spawn_background
+    id: daemon
+    args: [daemon, start]
+    env:
+      HIVE_DAEMON_NO_AUTO_REEXEC: "1"
+
+  - kind: stop_process
+    id: daemon
 
   # log_assert — assert a regex match against a sandbox file's full contents.
   # Use for matching against `.hive-state/logs/<slug>/<stage>-NN.log` etc.

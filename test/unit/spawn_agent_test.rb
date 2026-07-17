@@ -222,6 +222,32 @@ class SpawnAgentTest < Minitest::Test
     end
   end
 
+  def test_model_and_effort_overrides_win_over_config_derivation
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      log_dir = Dir.mktmpdir("fake-claude-argv")
+      ENV["HIVE_FAKE_CLAUDE_LOG_DIR"] = log_dir
+      Hive::Stages::Base.spawn_agent(
+        task,
+        prompt: "x", max_budget_usd: 1, timeout_sec: 5,
+        cfg: { "claude" => { "model" => "sonnet", "effort" => "medium" } },
+        model: "opus",
+        effort: "high"
+      )
+
+      argv = File.read(File.join(log_dir, "fake-claude-argv.log"))
+      assert_includes argv, "arg=--model"
+      assert_includes argv, "arg=opus"
+      assert_includes argv, "arg=--effort"
+      assert_includes argv, "arg=high"
+      refute_includes argv, "arg=sonnet"
+      refute_includes argv, "arg=medium"
+    ensure
+      FileUtils.rm_rf(log_dir) if log_dir
+    end
+  end
+
   # --- preflight ordering --------------------------------------------------
 
   def test_preflight_runs_before_agent_spawn_returns_error_envelope
@@ -358,6 +384,55 @@ class SpawnAgentTest < Minitest::Test
     end
   end
 
+  def test_budget_warning_written_when_profile_has_no_native_budget_flag
+    profile = Hive::AgentProfile.new(
+      name: :budgetless,
+      bin_default: FAKE_BIN,
+      env_bin_override_key: "HIVE_CLAUDE_BIN",
+      headless_flag: "-p",
+      add_dir_flag: "--add-dir",
+      budget_flag: nil,
+      output_format_flags: [ "--verbose" ],
+      version_flag: "--version",
+      skill_syntax_format: "/%{skill}",
+      status_detection_mode: :state_file_marker
+    )
+
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      File.write(task.state_file, "<!-- WAITING -->\n")
+      Hive::Stages::Base.spawn_agent(
+        task,
+        prompt: "x", max_budget_usd: 9, timeout_sec: 5,
+        profile: profile
+      )
+
+      log_path = File.join(task.log_dir, "config-warnings.log")
+      assert File.exist?(log_path), "config-warnings.log must be written"
+      content = File.read(log_path)
+      assert_match(/profile :budgetless has no native budget flag/, content)
+      assert_match(/budget_usd=9 is not enforced/, content)
+    end
+  end
+
+  def test_budget_warning_falls_back_to_stderr_when_log_path_is_unwritable
+    with_tmp_dir do |dir|
+      blocked_log_dir = File.join(dir, "blocked-log-dir")
+      File.write(blocked_log_dir, "not a directory\n")
+      task = Object.new
+      task.define_singleton_method(:log_dir) { blocked_log_dir }
+      profile = Object.new
+      profile.define_singleton_method(:name) { :budgetless }
+
+      _out, err = capture_io do
+        Hive::Stages::Base.send(:warn_budget_unenforced, task, profile, 9)
+      end
+
+      assert_match(/profile :budgetless has no native budget flag/, err)
+      assert_match(/budget_usd=9 is not enforced/, err)
+    end
+  end
+
   def test_isolation_warning_rejects_non_array_add_dirs
     no_add_dir_profile = Hive::AgentProfile.new(
       name: :no_isolation,
@@ -441,6 +516,12 @@ class SpawnAgentTest < Minitest::Test
   def test_stage_profile_resolves_configured_agent_name
     cfg = { "brainstorm" => { "agent" => "codex" } }
     profile = Hive::Stages::Base.stage_profile(cfg, "brainstorm")
+    assert_equal :codex, profile.name
+  end
+
+  def test_stage_profile_explicit_agent_wins_over_configured_agent_name
+    cfg = { "brainstorm" => { "agent" => "pi" } }
+    profile = Hive::Stages::Base.stage_profile(cfg, "brainstorm", explicit_agent: "codex")
     assert_equal :codex, profile.name
   end
 
@@ -556,6 +637,7 @@ class SpawnAgentTest < Minitest::Test
 
       assert_equal [ task.folder, File.join(task.folder, "drafts"), absolute ], scope.fetch(:add_dirs)
       assert_equal %w[Read Write Edit], scope.fetch(:allowed_tools)
+      assert_equal "dontAsk", scope.fetch(:permission_mode)
     end
   end
 

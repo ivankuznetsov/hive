@@ -11,7 +11,7 @@ module Hive
   # basename, by design, so multiple checkouts of the same project collapse into
   # the same aggregate bucket.
   module UsageDb
-    AGENTS = %i[claude codex pi].freeze
+    AGENTS = %i[claude codex pi grok].freeze
     BUCKETS = %i[today 7d 30d all].freeze
     SCHEMA_SQL = <<~SQL.freeze
       CREATE TABLE IF NOT EXISTS token_usage (
@@ -108,6 +108,36 @@ module Hive
       zero_aggregate
     end
 
+    # Current-day patrol consumption used by the runtime budget gate. Both
+    # ordinary and architecture patrol stages share the same project budget;
+    # an "-unmetered" row represents a real agent launch whose CLI returned
+    # no trustworthy positive token totals.
+    def patrol_activity(scope:, now: Time.now.utc)
+      # Unlike the read-only TUI aggregate, enforcement deliberately creates
+      # the empty store before the first spawn. That distinguishes a genuine
+      # zero-usage day from an unavailable store, which must fail closed.
+      with_database(create: true) do |db|
+        ensure_schema!(db)
+        since = bucket_starts(now).fetch(:today)
+        sql = +"SELECT SUM(input), SUM(output), SUM(cached), COUNT(*), " \
+               "SUM(CASE WHEN stage LIKE '%-unmetered' THEN 1 ELSE 0 END) FROM token_usage"
+        clauses, binds = aggregate_clauses(scope || {}, since)
+        append_patrol_clause!(clauses, binds)
+        sql << " WHERE #{clauses.join(' AND ')}"
+        input, output, cached, spawns, unmetered = db.execute(sql, binds).first
+        usage = { input: integer(input), output: integer(output), cached: integer(cached) }
+        usage.merge(
+          available: true,
+          tokens: usage.values.sum,
+          agent_spawns: integer(spawns),
+          unmetered_spawns: integer(unmetered)
+        )
+      end
+    rescue StandardError => e
+      warn "[hive] patrol usage aggregate failed: #{e.class}: #{e.message}"
+      zero_patrol_activity(available: false)
+    end
+
     def ensure_schema!(db)
       db.execute_batch(SCHEMA_SQL)
     end
@@ -128,6 +158,12 @@ module Hive
       { input: 0, output: 0, cached: 0 }
     end
 
+    def zero_patrol_activity(available: true)
+      zero_usage.merge(
+        available: available, tokens: 0, agent_spawns: 0, unmetered_spawns: 0
+      )
+    end
+
     def aggregate_rows(db, scope, since)
       sql = +"SELECT agent, SUM(input), SUM(output), SUM(cached) FROM token_usage"
       clauses, binds = aggregate_clauses(scope, since)
@@ -139,10 +175,14 @@ module Hive
     def aggregate_patrol_row(db, scope, since)
       sql = +"SELECT SUM(input), SUM(output), SUM(cached) FROM token_usage"
       clauses, binds = aggregate_clauses(scope, since)
-      clauses << "stage LIKE ?"
-      binds << "patrol%"
+      append_patrol_clause!(clauses, binds)
       sql << " WHERE #{clauses.join(' AND ')}"
       db.execute(sql, binds).first || [ 0, 0, 0 ]
+    end
+
+    def append_patrol_clause!(clauses, binds)
+      clauses << "(stage LIKE ? OR stage LIKE ?)"
+      binds.concat([ "patrol%", "refactor-patrol%" ])
     end
 
     def aggregate_clauses(scope, since)

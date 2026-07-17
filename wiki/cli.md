@@ -3,7 +3,7 @@ title: CLI Surface
 type: api
 source: bin/hive, bin/hv, lib/hive/cli.rb
 created: 2026-04-25
-updated: 2026-06-30
+updated: 2026-07-12
 tags: [cli, api]
 ---
 
@@ -40,31 +40,43 @@ unrecognized `--foo`, and quoted strings containing `--workflow` remain task
 text. When the wrapper itself catches a usage error, JSON-vs-prose mode is
 decided from the last recognized JSON boolean flag in argv, so a trailing false
 form such as `--no-json` or `--json=false` overrides an earlier `--json`.
-Before any wrapper rewrite or Thor dispatch, every `ARGV` entry must have valid
-encoding. Invalid-byte arguments raise through the same usage-error path as
-malformed wrapper options, so JSON callers still receive the command-specific
-error envelope instead of a Ruby/Thor backtrace.
+Before any wrapper rewrite or Thor dispatch, every `ARGV` entry must be valid
+UTF-8 regardless of the process locale. Invalid-byte arguments raise through
+the same usage-error path as malformed wrapper options, so JSON callers still
+receive the command-specific error envelope instead of a Ruby/Thor backtrace.
 
 When a JSON request fails in Thor before the command object runs, `bin/hive`
 uses `JSON_USAGE_ERROR_CONTRACTS` to keep the error shaped like the requested
-surface. Missing-target or missing-project usage errors for `run`,
-`rebase-status`, workflow verbs, `approve`, `drop`, `findings`,
-`accept-finding`, `reject-finding`, `markers`, and `patrol` emit a
-command-specific JSON failure on stdout before the human `hive:` stderr line.
-Schemas registered in `Hive::Schemas::SCHEMA_VERSIONS` use
-`Hive::Schemas::ErrorEnvelope` and include `schema_version`; the older
-`hive-rebase-status` inspector keeps its unversioned sibling shape. Workflow
-verbs include the `verb` extra (`pr` maps to `open-pr`), finding toggles include
-`operation`, and patrol's pre-dispatch usage failure uses the `hive-patrol`
-schema with `error_kind: "error"`.
+surface. Missing-target, missing-project, missing-service, or extra-argument
+usage errors for `setup`, `connect`, `disconnect`, `run`, `rebase-status`,
+workflow verbs, `approve`, `drop`, `findings`, `accept-finding`,
+`reject-finding`, `markers`, and `patrol` emit command-specific JSON on stdout
+before the human `hive:` stderr line. Schemas registered in
+`Hive::Schemas::SCHEMA_VERSIONS` use `Hive::Schemas::ErrorEnvelope` and include
+`schema_version`; the older `hive-rebase-status` inspector keeps its unversioned
+sibling shape, `setup` keeps the unversioned `hive-setup` shape, and Screenote
+`connect`/`disconnect` keep their schema-less `ok:false`,
+`service:"screenote"` failure document. Workflow verbs include the `verb` extra
+(`pr` maps to `open-pr`), finding toggles include `operation`, and patrol's
+pre-dispatch usage failure uses the `hive-patrol` schema with
+`error_kind: "error"`.
 
-`bin/hv` is a bash fallback launcher for Apache Hive name collisions. It deliberately avoids `command -v hive`; instead it probes only `HIVE_BIN_OVERRIDE`, `${XDG_BIN_HOME:-$HOME/.local/bin}/hive`, `${HOMEBREW_PREFIX:-/opt/homebrew}/bin/hive`, and `/usr/local/bin/hive`, skipping a target that resolves back to itself. It does not implicitly exec `/usr/bin/hive` or `/opt/hive/bin/hive`, because those paths may be Apache Hive installs. If no candidate is executable it exits `127` and tells the operator to set `HIVE_BIN_OVERRIDE` or install through the documented channels. `bin/hv` remains in the gem payload for channel installers to copy/read, but it is not listed in `spec.executables`; RubyGems would otherwise generate a Ruby binstub for this bash launcher. See [[operating]] for channel-level `hv` behavior.
+The pre-dispatch resolver is command/subcommand-aware for JSON surfaces whose
+schema varies by argv. It distinguishes status diagnostics, web install/status,
+pairing list/approve, and shipped/merged-PR digest errors; it also covers Thor
+arity failures for status, prune, forget, metrics, bot, and the documented web
+commands. Option values cannot impersonate subcommands, and flags after the
+`--` terminator remain positional data rather than switching the status or
+digest schema. Existing setup, Screenote connect/disconnect, and other static
+contracts retain their established unversioned or schema-less shapes.
+
+`bin/hv` is a bash fallback launcher for Apache Hive name collisions. It deliberately avoids `command -v hive`; instead it probes only `HIVE_BIN_OVERRIDE`, `${XDG_BIN_HOME:-$HOME/.local/bin}/hive`, `${HOMEBREW_PREFIX:-/opt/homebrew}/bin/hive`, and `/usr/local/bin/hive`, skipping a target that resolves back to itself. Each `--version` probe runs in its own process group with temp-file stdout capture and a watchdog/KILL sweep, so a bad candidate cannot keep `hv` blocked by forking a stdout-inheriting child. When the watchdog's timeout elapses it records a sentinel, and `probe_version` forces a non-zero (124, mirroring GNU `timeout`) status regardless of the probe's own exit code — so a candidate that prints a bare semver and then hangs (trapping the watchdog's TERM to exit 0) is rejected rather than exec'd. It does not implicitly exec `/usr/bin/hive` or `/opt/hive/bin/hive`, because those paths may be Apache Hive installs. If no candidate is executable it exits `127` and tells the operator to set `HIVE_BIN_OVERRIDE` or install through the documented channels. `bin/hv` remains in the gem payload for channel installers to copy/read, but it is not listed in `spec.executables`; RubyGems would otherwise generate a Ruby binstub for this bash launcher. See [[operating]] for channel-level `hv` behavior.
 
 ## Command table
 
 | Command | Synopsis | Routes to | Page |
 |---------|----------|-----------|------|
-| `hive init [PROJECT_PATH] [--json]` | Bootstrap `.hive-state` orphan branch + worktree plus managed llm-wiki context in a git project; `--json` emits `hive-init.v1` on success | `Hive::Commands::Init` | [[commands/init]] |
+| `hive init [PROJECT_PATH] [--json] [--refactor-patrol\|--no-refactor-patrol]` | Bootstrap `.hive-state` plus managed llm-wiki context; fresh projects enable architecture discovery by default, and the boolean flag resolves it before any state write; `--json` emits `hive-init.v2` | `Hive::Commands::Init` | [[commands/init]] |
 | `hive new PROJECT TEXT...` | Create a task in `1-inbox/` of a registered project, writing `idea.md` plus `meta.yml`; stdout prints a next-step hint that uses the numeric task id when allocation succeeds | `Hive::Commands::New` | [[commands/new]] |
 | `hive workflow new ID [--json]` | Scaffold a blank per-project workflow descriptor plus placeholder instruction under `<hive_state_path>/workflows/` | `Hive::Commands::Workflow` | [[commands/workflow]] |
 | `hive generate-name TARGET [--project NAME] [--stage STAGE]` | Generate and persist a short display title for a task; target resolves by path, slug, or numeric id | `Hive::Commands::GenerateName` | [[commands/generate-name]] |
@@ -88,6 +100,7 @@ schema with `error_kind: "error"`.
 | `hive disconnect screenote [--json]` | Revoke the stored Screenote token when possible and clear `screenote.json`; no-op when already disconnected. | `Hive::Commands::Disconnect` | [[commands/screenote]] |
 | `hive bench submit SLUG [--project NAME] [--json]` | Extract a completed `9-done` task into a hive-bench corpus entry and open a submission PR from the hive-bench checkout. Requires `HIVE_BENCH_PATH` or `~/Dev/hive-bench`, a GitHub `origin` remote for the source project, `worktree.yml`, `pr.md`, and a clean local secret-token preflight. | `Hive::Commands::BenchSubmit` | [[commands/bench-submit]] |
 | `hive digest [--date YYYY-MM-DD] [--dry-run] [--json]` | Build the daily shipped digest for tasks that reached `9-done` on one local calendar date. Dry-run prints the rendered Telegram MarkdownV2 body; real delivery loads global digest/bot config, then sends through `Hive::Digest::Sender` and the bot Telegram client. The daemon can schedule this globally after local midnight when `digest.enabled: true`. | `Hive::Commands::Digest` → `Hive::Digest` | [[commands/digest]] |
+| `hive refactor-patrol PROJECT [--list \| --show JOB_ID] [--limit N] [--cursor CURSOR] [--full] [--json]` | Run architecture-patrol modes, or inspect the authoritative durable job ledger without mutation. List pages and show histories default to 100 records; list cursors freeze an immutable intake-sequence high-water and show requires explicit `--full` for unbounded histories. JSON uses `hive-refactor-patrol-jobs.v1`. | `Hive::Commands::RefactorPatrol` → `Hive::RefactorPatrol::JobQuery` | [[commands/refactor-patrol]] |
 | `hive run TARGET [--no-rebase]` | Lower-level dispatcher for a slug or task folder. `--no-rebase` skips the auto-rebase pre-step for one invocation (one-off override of `cfg.rebase.enabled`). | `Hive::Commands::Run` → stage runner | [[commands/run]] |
 | `hive rebase-status TARGET` | Read-only inspector: reports whether the next `hive run` would attempt an auto-rebase, how many commits behind `origin/<default>` the worktree is, and which guard (if any) would short-circuit. Never mutates; never calls `git fetch`. | `Hive::Commands::RebaseStatus` | [[commands/rebase-status]] |
 | `hive approve TARGET [--to STAGE] [--from STAGE]` | Move a task between stages + record a hive/state commit (agent-callable equivalent of shell `mv`; `--from` asserts current stage for retry idempotency) | `Hive::Commands::Approve` | [[commands/approve]] |
@@ -112,9 +125,9 @@ schema with `error_kind: "error"`.
 - `bench submit` is implemented as the `bench` Thor command with a subcommand switch; unknown bench subcommands exit USAGE (64).
 - `run_task` is mapped to `run`.
 - Stage verbs use `--from` for source-stage disambiguation because the verb already implies the target stage.
-- `init` accepts `--force` (skip clean-tree check) and `--json` (single `hive-init.v1` success document with resolved answers and project metadata; precondition failures keep the legacy stderr + exit-code contract).
+- `init` accepts `--force`, `--json`, and the pre-write `--refactor-patrol` / `--no-refactor-patrol` discovery choice. Omitting the boolean keeps fresh discovery enabled; neither value enables auto-fixing or issue filing.
 - `init` and `new` share one `--workflow` help string sourced from the built-in workflow registry, then append a static note that project-authored workflows are valid and can be created with `hive workflow new ID`. Thor captures (bakes) this string at class-load time and replays it later via `help`, so help does not dynamically enumerate active-project descriptors.
-- `--json` is a `class_option` honoured by `init`, `status`, `run`, `rebase-status`, `approve`, `drop`, `findings`, `accept-finding`, `reject-finding`, the workflow verbs (`brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, `archive`), `markers clear`, `metrics`, `forget`, `prune`, `workflow new`, `connect screenote`, `disconnect screenote`, `bench submit`, `digest`, `pairing`, the `daemon` subcommands (`status`, `stop`, `reload`, `install`, `enable`, `disable`, `queue`), and the `bot` lifecycle subcommands (`status`, `stop`, `reload`). Daemon JSON is published as `hive-daemon-status.v1` / `-stop.v1` / `-reload.v1` / `-install.v1` / `-enroll.v1` / `-queue.v1`; bot lifecycle JSON is published as `hive-bot-status.v1` / `-stop.v1` / `-reload.v1`; pairing JSON is published as `hive-pairing-list.v1` and `hive-pairing-approve.v1`. `hive babysit` is bare-text in v1. Each command with full envelope support emits a typed JSON document on success and a structured error envelope on failure. Workflow verbs emit a single `hive-stage-action` envelope (inner Approve and Run are passed `quiet: true` to avoid double-emission). `init` emits `hive-init.v1` on success; `drop` emits `hive-drop.v2` (v1 remains loadable by explicit schema version for pinned consumers); `rebase-status` emits a sibling read-only `hive-rebase-status` envelope — not validated against `hive-run.v1`; Screenote connect/disconnect emit unversioned success documents and keep failures on stderr + exit code; `workflow new`, `bench submit`, and `digest` emit unversioned success documents, and `workflow new` also emits unversioned JSON errors for its typed usage/config/git failures.
+- `--json` is a `class_option` honoured by `init`, `status`, `run`, `rebase-status`, `approve`, `drop`, `findings`, `accept-finding`, `reject-finding`, the workflow verbs (`brainstorm`, `plan`, `develop`, `open-pr`, `review`, `artifacts`, `finalize`, `archive`), `markers clear`, `metrics`, `forget`, `prune`, `workflow new`, `connect screenote`, `disconnect screenote`, `bench submit`, `digest`, `pairing`, the `daemon` subcommands (`status`, `stop`, `reload`, `install`, `enable`, `disable`, `queue`), and the `bot` lifecycle subcommands (`status`, `stop`, `reload`). Daemon JSON is published as `hive-daemon-status.v1` / `-stop.v1` / `-reload.v1` / `-install.v1` / `-enroll.v1` / `-queue.v1`; bot lifecycle JSON is published as `hive-bot-status.v1` / `-stop.v1` / `-reload.v1`; pairing JSON is published as `hive-pairing-list.v1` and `hive-pairing-approve.v1`. `hive babysit` is bare-text in v1. Each command with full envelope support emits a typed JSON document on success and a structured error envelope on failure. Workflow verbs emit a single `hive-stage-action` envelope (inner Approve and Run are passed `quiet: true` to avoid double-emission). `init` emits `hive-init.v2` on success (v1 remains loadable by explicit schema version for pinned consumers); `drop` emits `hive-drop.v2` (v1 remains loadable by explicit schema version for pinned consumers); `rebase-status` emits a sibling read-only `hive-rebase-status` envelope — not validated against `hive-run.v1`; `setup` emits unversioned `hive-setup` success and wrapper usage-error documents; Screenote connect/disconnect emit unversioned success/error documents, including schema-less wrapper usage failures for a missing `SERVICE`; `workflow new`, `bench submit`, and `digest` emit unversioned success documents, and `workflow new` also emits unversioned JSON errors for its typed usage/config/git failures.
 - `bin/hive` rewrites `<cmd> --help` / `<cmd> -h` (including forms with command options before the help flag, such as `hive approve --from 2-brainstorm --help`) into `help <cmd>` before Thor dispatch, so the convention agents try first works without leaking command-local args into Thor's `help` command.
 - `bin/hive` handles top-level `--version` / `-v` before Thor dispatch so wrappers can smoke-test the binary without parsing help output.
 - `bin/hive` normalizes leading Thor-style JSON boolean forms such as `--json=true status` or `--no-json status` to command-local options and rejects unsupported `--json=<value>` assignments before Thor can leave the value behind as a positional. For `hive new`, that rejection and the command-local help rewrite stop once `PROJECT` has been found; the remaining argv is task text and is protected with a `--` sentinel before Thor dispatch.
@@ -139,7 +152,7 @@ Codes are stable; bumping a code requires updating `test/unit/exit_codes_test.rb
 
 The CLI itself has no auth. Preconditions checked at runtime by individual stage runners:
 
-- Per-spawn `AgentProfile#check_version!` + `preflight!` (Claude: parses `claude --version` against `Hive::MIN_CLAUDE_VERSION = "2.1.118"`; Codex/Pi: profile-specific). Raises `AgentError` on mismatch. Default profile is `:claude`; `Stages::Base.spawn_agent(profile:)` selects an alternate via `Hive::AgentProfiles.lookup(...)`.
+- Per-spawn `AgentProfile#check_version!` + `preflight!` (Claude: parses `claude --version` against `Hive::MIN_CLAUDE_VERSION = "2.1.118"`; Codex/Pi/Grok: profile-specific). Grok accepts API keys, device-login credentials, `GROK_AUTH_PATH`, and `GROK_HOME`, with the direct auth path taking precedence. Raises `AgentError` on mismatch. Default profile is `:claude`; `Stages::Base.spawn_agent(profile:)` selects an alternate via `Hive::AgentProfiles.lookup(...)`.
 - `Hive::Gh.ensure_authenticated!` (called from both `Stages::OpenPr` and `Stages::Finalize`) runs `gh auth status` and exits 1 with stderr if unauthenticated. `Stages::OpenPr` invokes `Hive::Gh.push_branch!` before spawning the open-pr agent; `Stages::Finalize` invokes `Hive::Gh.push_branch` (non-`!`) so a persistent push failure surfaces as `ERROR reason=unpushed_commits` instead of an uncaught exit. The daemon-only merged-finalize-error archive path uses `Hive::Gh.pr_state` to re-confirm `MERGED` before accepting an internal archive recovery flag.
 - `Init#validate_git_repo!` rejects non-git dirs and rejects targets that are themselves worktrees (must run on the main checkout).
 - `Init#validate_clean_tree!` aborts on dirty working tree unless `--force`.
@@ -163,11 +176,11 @@ The CLI itself has no auth. Preconditions checked at runtime by individual stage
 
 A few stage runners still call `warn`/`exit N` directly for non-bug user errors that don't yet have a typed class — most notably `Init#validate_git_repo!` / `validate_clean_tree!` (exit 1), `Execute#run!` for `plan.md missing` (exit 1), and the `OpenPr` / `Finalize` network/auth abort paths. Migrating these to typed exceptions is tracked as Phase 2 follow-up work.
 
-**Error envelopes.** Every full-envelope `--json` command (`status`, `run`, `approve`, `findings`, `accept-finding`, `reject-finding`, `markers clear`, `metrics rollback-rate`, `forget`, `prune`, and the workflow verbs `brainstorm` / `plan` / `develop` / `open-pr` / `review` / `artifacts` / `finalize` / `archive`) emits a `Hive::Schemas::ErrorEnvelope` document on stdout when an error is raised. Detect failure by `payload.ok == false`. The envelope carries `schema`, `schema_version`, `ok=false`, `error_class`, `error_kind` (a closed enum per command — see `Hive::Schemas::RunErrorKind` / `StatusErrorKind` / etc.), `exit_code` (matches the raised `Hive::Error`'s `exit_code` per `Hive::ExitCodes`), and `message`. Per-error structured extras (`candidates` for `AmbiguousSlug`, `id` for `UnknownFinding`, `path` for `DestinationCollision`, `stage` for `FinalStageReached`) appear automatically. The wrapper also emits command-shaped JSON for the pre-dispatch missing-argument cases named in `JSON_USAGE_ERROR_CONTRACTS`, so agent callers do not lose the schema contract just because Thor rejects argv before a handler is instantiated. `hive daemon queue --json` uses its own `hive-daemon-queue.v1` `ErrorPayload` arm for queue-command failures (`unknown_action`, `missing_request_id`, `internal`) so queue inspectors still receive one schema-specific document. `hive run --json` additionally preserves the existing dual-signal contract on `:error` / `:review_error` markers — the SuccessPayload is emitted to stdout BEFORE the `TaskInErrorState` raise, so the rescue's ErrorPayload is suppressed (one document, exit 3). `hive bench submit --json` is success-only today, so a raised `BenchSubmit::UsageError` still renders as `hive: ...` on stderr with exit 64. Errors that fire before the wrapper can load Hive or inspect argv (gem-load failures, shebang errors) cannot emit JSON — those remain stderr-text + exit-code only.
+**Error envelopes.** Every full-envelope `--json` command (`status`, `run`, `approve`, `findings`, `accept-finding`, `reject-finding`, `markers clear`, `metrics rollback-rate`, `forget`, `prune`, and the workflow verbs `brainstorm` / `plan` / `develop` / `open-pr` / `review` / `artifacts` / `finalize` / `archive`) emits a `Hive::Schemas::ErrorEnvelope` document on stdout when an error is raised. Detect failure by `payload.ok == false`. The envelope carries `schema`, `schema_version`, `ok=false`, `error_class`, `error_kind` (a closed enum per command — see `Hive::Schemas::RunErrorKind` / `StatusErrorKind` / etc.), `exit_code` (matches the raised `Hive::Error`'s `exit_code` per `Hive::ExitCodes`), and `message`. Per-error structured extras (`candidates` for `AmbiguousSlug`, `id` for `UnknownFinding`, `path` for `DestinationCollision`, `stage` for `FinalStageReached`) appear automatically. The wrapper also emits command-shaped JSON for the pre-dispatch missing-argument cases named in `JSON_USAGE_ERROR_CONTRACTS`, so agent callers do not lose the JSON contract just because Thor rejects argv before a handler is instantiated; that includes the unversioned `hive-setup` usage payload and Screenote's schema-less `ok:false`, `service:"screenote"` usage payloads. `hive daemon queue --json` uses its own `hive-daemon-queue.v1` `ErrorPayload` arm for queue-command failures (`unknown_action`, `missing_request_id`, `internal`) so queue inspectors still receive one schema-specific document. `hive run --json` additionally preserves the existing dual-signal contract on `:error` / `:review_error` markers — the SuccessPayload is emitted to stdout BEFORE the `TaskInErrorState` raise, so the rescue's ErrorPayload is suppressed (one document, exit 3). `hive bench submit --json` is success-only today, so a raised `BenchSubmit::UsageError` still renders as `hive: ...` on stderr with exit 64. Errors that fire before the wrapper can load Hive or inspect argv (gem-load failures, shebang errors) cannot emit JSON — those remain stderr-text + exit-code only.
 
 ## Backlinks
 
 - [[architecture]]
 - [[modules/gh]] · [[modules/digest]]
-- [[commands/init]] · [[commands/new]] · [[commands/workflow]] · [[commands/run]] · [[commands/rebase-status]] · [[commands/status]] · [[commands/daemon]] · [[commands/approve]] · [[commands/drop]] · [[commands/findings]] · [[commands/stage_action]] · [[commands/babysit]] · [[commands/bot]] · [[commands/pairing]] · [[commands/screenote]] · [[commands/bench-submit]] · [[commands/digest]]
+- [[commands/init]] · [[commands/new]] · [[commands/workflow]] · [[commands/run]] · [[commands/rebase-status]] · [[commands/status]] · [[commands/daemon]] · [[commands/refactor-patrol]] · [[commands/approve]] · [[commands/drop]] · [[commands/findings]] · [[commands/stage_action]] · [[commands/babysit]] · [[commands/bot]] · [[commands/pairing]] · [[commands/screenote]] · [[commands/bench-submit]] · [[commands/digest]]
 - [[stages/inbox]] · [[stages/brainstorm]] · [[stages/plan]] · [[stages/execute]] · [[stages/open-pr]] · [[stages/review]] · [[stages/artifacts]] · [[stages/finalize]] · [[stages/done]]

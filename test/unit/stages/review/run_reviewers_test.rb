@@ -2249,7 +2249,7 @@ class RunReviewersTest < Minitest::Test
                    scope.fetch(:add_dirs),
                    "scoped dirs must EXTEND [ctx.task_folder], not replace it"
       assert_equal %w[Read Grep], scope.fetch(:allowed_tools)
-      assert_equal "default", scope.fetch(:permission_mode)
+      assert_equal "dontAsk", scope.fetch(:permission_mode)
     end
   end
 end

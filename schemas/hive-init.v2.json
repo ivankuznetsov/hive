@@ -1,0 +1,222 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-init.v2.json",
+  "title": "hive init output (v2)",
+  "description": "Stable success contract emitted by `hive init --json`. V2 adds the explicit fresh-project architecture patrol discovery choice while leaving auto-fix and issue-filing policy in project config.",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/AlreadyInitializedPayload" }
+  ],
+  "$defs": {
+    "AlreadyInitializedPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "already_initialized",
+        "project",
+        "path",
+        "hive_state_path",
+        "workflow"
+      ],
+      "properties": {
+        "schema": { "const": "hive-init" },
+        "schema_version": { "const": 2 },
+        "ok": { "const": true },
+        "already_initialized": { "const": true },
+        "project": { "type": "string" },
+        "path": { "type": "string" },
+        "hive_state_path": { "type": "string" },
+        "descriptor_path": { "type": "string" },
+        "instruction_path": { "type": "string" },
+        "workflow": { "type": "string" }
+      }
+    },
+    "LimitMap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "brainstorm",
+        "plan",
+        "execute_implementation",
+        "open_pr",
+        "artifacts",
+        "finalize",
+        "review_ci",
+        "review_triage",
+        "review_fix",
+        "review_browser"
+      ],
+      "properties": {
+        "brainstorm": { "type": "integer", "minimum": 1 },
+        "plan": { "type": "integer", "minimum": 1 },
+        "execute_implementation": { "type": "integer", "minimum": 1 },
+        "open_pr": { "type": "integer", "minimum": 1 },
+        "artifacts": { "type": "integer", "minimum": 1 },
+        "finalize": { "type": "integer", "minimum": 1 },
+        "review_ci": { "type": "integer", "minimum": 1 },
+        "review_triage": { "type": "integer", "minimum": 1 },
+        "review_fix": { "type": "integer", "minimum": 1 },
+        "review_browser": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "Answers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "planning_agent",
+        "claude_mode",
+        "claude_permission_mode",
+        "claude_model",
+        "claude_effort",
+        "development_agent",
+        "enabled_reviewers",
+        "patrol_reviewers",
+        "patrol_mode",
+        "triage_bias",
+        "adhoc_auto_fix",
+        "refactor_patrol_enabled",
+        "budgets",
+        "timeouts",
+        "daemon_enabled",
+        "babysitter_enabled",
+        "daemon_autostart"
+      ],
+      "properties": {
+        "planning_agent": { "type": "string" },
+        "claude_mode": {
+          "type": "string",
+          "enum": [ "tmux", "headless" ]
+        },
+        "claude_permission_mode": {
+          "type": "string",
+          "enum": [ "acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan" ]
+        },
+        "claude_model": { "type": "string", "minLength": 1 },
+        "claude_effort": {
+          "type": "string",
+          "enum": [ "default", "low", "medium", "high" ]
+        },
+        "development_agent": { "type": "string" },
+        "enabled_reviewers": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "patrol_reviewers": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "patrol_mode": {
+          "type": "string",
+          "enum": [ "ultrapatrol", "high", "medium", "low", "off" ]
+        },
+        "triage_bias": {
+          "type": "string",
+          "enum": [ "courageous", "safetyist" ]
+        },
+        "adhoc_auto_fix": { "type": "boolean" },
+        "refactor_patrol_enabled": {
+          "type": "boolean",
+          "description": "Whether fresh-project architecture patrol discovery was enabled. This does not authorize auto-fixing or issue filing."
+        },
+        "budgets": { "$ref": "#/$defs/LimitMap" },
+        "timeouts": { "$ref": "#/$defs/LimitMap" },
+        "daemon_enabled": { "type": "boolean" },
+        "babysitter_enabled": { "type": "boolean" },
+        "daemon_autostart": { "type": "boolean" }
+      }
+    },
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "schema_version",
+        "ok",
+        "project",
+        "path",
+        "default_branch",
+        "hive_state_path",
+        "workflow",
+        "hints",
+        "worktree_root",
+        "answers",
+        "planning_agent",
+        "claude_mode",
+        "development_agent",
+        "enabled_reviewers",
+        "patrol_reviewers",
+        "patrol_mode",
+        "triage_bias",
+        "adhoc_auto_fix",
+        "refactor_patrol_enabled",
+        "budgets",
+        "timeouts",
+        "daemon_enabled",
+        "babysitter_enabled",
+        "daemon_autostart_requested"
+      ],
+      "properties": {
+        "schema": { "const": "hive-init" },
+        "schema_version": { "const": 2 },
+        "ok": { "const": true },
+        "project": { "type": "string" },
+        "path": { "type": "string" },
+        "default_branch": { "type": "string" },
+        "hive_state_path": { "type": "string" },
+        "descriptor_path": { "type": "string" },
+        "instruction_path": { "type": "string" },
+        "workflow": { "type": "string" },
+        "hints": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [ "kind", "command", "message" ],
+            "properties": {
+              "kind": { "const": "custom_workflow" },
+              "command": { "type": "string" },
+              "message": { "type": "string" }
+            }
+          }
+        },
+        "worktree_root": { "type": "string" },
+        "answers": { "$ref": "#/$defs/Answers" },
+        "planning_agent": { "type": "string" },
+        "claude_mode": {
+          "type": "string",
+          "enum": [ "tmux", "headless" ]
+        },
+        "development_agent": { "type": "string" },
+        "enabled_reviewers": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "patrol_reviewers": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "patrol_mode": {
+          "type": "string",
+          "enum": [ "ultrapatrol", "high", "medium", "low", "off" ]
+        },
+        "triage_bias": {
+          "type": "string",
+          "enum": [ "courageous", "safetyist" ]
+        },
+        "adhoc_auto_fix": { "type": "boolean" },
+        "refactor_patrol_enabled": {
+          "type": "boolean",
+          "description": "Mirrors answers.refactor_patrol_enabled for machine consumers."
+        },
+        "budgets": { "$ref": "#/$defs/LimitMap" },
+        "timeouts": { "$ref": "#/$defs/LimitMap" },
+        "daemon_enabled": { "type": "boolean" },
+        "babysitter_enabled": { "type": "boolean" },
+        "daemon_autostart_requested": { "type": "boolean" }
+      }
+    }
+  }
+}

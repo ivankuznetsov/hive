@@ -25,6 +25,7 @@ class HiveTuiViewsTokenStatsTest < Minitest::Test
     assert_includes out, "scope: alpha / task-one"
     assert_includes out, "agent"
     assert_includes out, "claude"
+    assert_includes out, "grok"
     assert_includes out, "1.5k/1.2M/400k"
     assert_includes out, "patrol"
     assert_includes out, "2k/300/10"

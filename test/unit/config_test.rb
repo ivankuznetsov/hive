@@ -2,6 +2,21 @@ require "test_helper"
 require "hive/config"
 
 class ConfigTest < Minitest::Test
+  def test_registry_round_trips_repository_identity
+    with_tmp_global_config do
+      with_tmp_git_repo do |repo|
+        remote = File.join(File.dirname(repo), "remote.git")
+        FileUtils.mkdir_p(remote)
+        run!("git", "-C", repo, "remote", "add", "origin", remote)
+
+        Hive::Config.register_project(name: "sample", path: repo)
+        entry = Hive::Config.registered_projects.find { |candidate| candidate["name"] == "sample" }
+
+        assert_equal Hive::RepositoryIdentity.normalize(remote), entry["repository_identity"]
+      end
+    end
+  end
+
   include HiveTestHelper
 
   def test_load_returns_defaults_when_no_config_file
@@ -146,15 +161,21 @@ class ConfigTest < Minitest::Test
       assert_equal 600, cfg.dig("patrol", "poll_interval_sec")
       assert_equal "claude", cfg.dig("patrol", "agent")
       assert_equal "medium", cfg.dig("patrol", "min_confidence_to_fix")
-      assert_equal 10, cfg.dig("patrol", "max_findings_per_feature")
+      assert_equal 3, cfg.dig("patrol", "max_findings_per_feature")
+      assert_equal 12, cfg.dig("patrol", "max_features_per_cycle")
+      assert_equal 70, cfg.dig("patrol", "min_alpha_to_fix")
+      assert_equal 1, cfg.dig("patrol", "max_fixes_per_feature_per_cycle")
+      assert_equal 6, cfg.dig("patrol", "max_fix_attempts_per_cycle")
       assert_equal 3, cfg.dig("patrol", "max_prs_per_cycle")
       assert_equal false, cfg.dig("patrol", "draft_prs")
       assert_equal true, cfg.dig("patrol", "review_prs")
       assert_equal [], cfg.dig("patrol", "include")
       assert_includes cfg.dig("patrol", "exclude"), "node_modules"
       assert_nil cfg.dig("patrol", "commands", "test")
-      assert_equal 12, cfg.dig("patrol", "review", "max_owned_files")
-      assert_equal 24, cfg.dig("patrol", "review", "max_context_files")
+      refute cfg.dig("patrol", "commands").key?("public_contract"),
+             "architecture-patrol validation must not alter ordinary patrol"
+      assert_equal 4, cfg.dig("patrol", "review", "max_owned_files")
+      assert_equal 4, cfg.dig("patrol", "review", "max_context_files")
       assert_equal %w[codex-native-review],
                    cfg.dig("patrol", "review", "reviewers").map { |entry| entry.fetch("name") }
       native = cfg.dig("patrol", "review", "reviewers").first
@@ -162,6 +183,321 @@ class ConfigTest < Minitest::Test
       assert_equal "codex", native["agent"]
       assert_equal "reviewer_codex_native_review.md.erb", native["prompt_template"]
       refute native.key?("skill"), "the codex-native patrol reviewer takes no CE skill"
+    end
+  end
+
+  def test_load_leaves_refactor_patrol_disabled_when_no_config
+    with_tmp_dir do |dir|
+      cfg = Hive::Config.load(dir)
+
+      assert_equal false, cfg.dig("refactor_patrol", "enabled")
+      assert_equal false, cfg.dig("refactor_patrol", "auto_fix", "enabled")
+      assert_equal "codex", cfg.dig("refactor_patrol", "auto_fix", "agent")
+      assert_equal false, cfg.dig("refactor_patrol", "issue_filing", "enabled")
+      assert_equal 0.25, cfg.dig("refactor_patrol", "issue_filing", "min_leverage_score")
+      assert_equal "claude", cfg.dig("refactor_patrol", "agent")
+      assert_equal "medium", cfg.dig("refactor_patrol", "min_confidence")
+      assert_equal 1, cfg.dig("refactor_patrol", "max_theses_per_feature")
+      assert_equal 10, cfg.dig("refactor_patrol", "max_theses_per_run")
+      assert_equal 3600, cfg.dig("refactor_patrol", "max_review_seconds_per_run")
+      assert_includes cfg.dig("refactor_patrol", "exclude"), "node_modules"
+      assert_nil cfg.dig("refactor_patrol", "commands", "test")
+      assert_nil cfg.dig("refactor_patrol", "commands", "docs")
+      assert cfg.dig("refactor_patrol", "commands").key?("public_contract")
+      assert_nil cfg.dig("refactor_patrol", "commands", "public_contract")
+      assert_equal 8, cfg.dig("refactor_patrol", "caps", "max_files")
+      assert_equal 400, cfg.dig("refactor_patrol", "caps", "max_diff_lines")
+      assert_equal true, cfg.dig("refactor_patrol", "caps", "single_feature_only")
+      assert_equal false, cfg.dig("refactor_patrol", "caps", "allow_cross_feature")
+      assert_equal 0.3, cfg.dig("refactor_patrol", "leverage", "weights", "churn")
+      assert_equal 0.0, cfg.dig("refactor_patrol", "leverage", "weights", "coverage_gap")
+      assert_equal 6, cfg.dig("refactor_patrol", "review", "max_owned_files")
+      assert_equal 6, cfg.dig("refactor_patrol", "review", "max_context_files")
+    end
+  end
+
+  def test_load_merges_refactor_patrol_overrides
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        patrol:
+          mode: off
+        refactor_patrol:
+          enabled: true
+          auto_fix:
+            enabled: true
+            agent: codex
+          issue_filing:
+            enabled: true
+            min_leverage_score: 0.5
+          agent: codex
+          min_confidence: high
+          max_theses_per_run: 4
+          max_review_seconds_per_run: 600
+          commands:
+            test: bundle exec rake test
+          caps:
+            max_files: 4
+          leverage:
+            weights:
+              churn: 0.9
+      YAML
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal false, cfg.dig("patrol", "enabled")
+      assert_equal true, cfg.dig("refactor_patrol", "enabled")
+      assert_equal true, cfg.dig("refactor_patrol", "auto_fix", "enabled")
+      assert_equal "codex", cfg.dig("refactor_patrol", "auto_fix", "agent")
+      assert_equal true, cfg.dig("refactor_patrol", "issue_filing", "enabled")
+      assert_equal 0.5, cfg.dig("refactor_patrol", "issue_filing", "min_leverage_score")
+      assert_equal "codex", cfg.dig("refactor_patrol", "agent")
+      assert_equal "high", cfg.dig("refactor_patrol", "min_confidence")
+      assert_equal 4, cfg.dig("refactor_patrol", "max_theses_per_run")
+      assert_equal 600, cfg.dig("refactor_patrol", "max_review_seconds_per_run")
+      assert_equal "bundle exec rake test", cfg.dig("refactor_patrol", "commands", "test")
+      assert_equal 4, cfg.dig("refactor_patrol", "caps", "max_files")
+      assert_equal 400, cfg.dig("refactor_patrol", "caps", "max_diff_lines")
+      assert_equal 0.9, cfg.dig("refactor_patrol", "leverage", "weights", "churn")
+      assert_equal 0.25, cfg.dig("refactor_patrol", "leverage", "weights", "fan_in")
+    end
+  end
+
+  def test_load_rejects_invalid_refactor_patrol_caps_confidence_and_weights
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        refactor_patrol:
+          min_confidence: bogus
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_includes err.message, "refactor_patrol.min_confidence"
+      assert_includes err.message, "low"
+      assert_includes err.message, "medium"
+      assert_includes err.message, "high"
+    end
+
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        refactor_patrol:
+          min_leverage_score: 1.1
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_includes err.message, "refactor_patrol.min_leverage_score"
+      assert_includes err.message, "between 0 and 1"
+    end
+
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        refactor_patrol:
+          issue_filing:
+            min_leverage_score: 1.1
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_includes err.message, "refactor_patrol.issue_filing.min_leverage_score"
+      assert_includes err.message, "between 0 and 1"
+    end
+
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        refactor_patrol:
+          caps:
+            allow_cross_feature: sometimes
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_includes err.message, "refactor_patrol.caps.allow_cross_feature"
+      assert_includes err.message, "must be a boolean"
+    end
+
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        refactor_patrol:
+          caps:
+            max_files: 0
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_includes err.message, "refactor_patrol.caps.max_files"
+      assert_includes err.message, ">= 1"
+    end
+
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        refactor_patrol:
+          leverage:
+            weights:
+              churn: -1
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_includes err.message, "refactor_patrol.leverage.weights.churn"
+      assert_includes err.message, ">= 0"
+    end
+
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        refactor_patrol:
+          commands: nope
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_includes err.message, "refactor_patrol.commands"
+      assert_includes err.message, "must be a Hash"
+    end
+
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        refactor_patrol:
+          commands:
+            test: " "
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_includes err.message, "refactor_patrol.commands.test"
+      assert_includes err.message, "non-empty String"
+    end
+
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        refactor_patrol:
+          commands:
+            docs: " "
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_includes err.message, "refactor_patrol.commands.docs"
+      assert_includes err.message, "non-empty String"
+    end
+
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        refactor_patrol:
+          commands:
+            public_contract: " "
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_includes err.message, "refactor_patrol.commands.public_contract"
+      assert_includes err.message, "non-empty String"
+    end
+
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        refactor_patrol:
+          caps: nope
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_includes err.message, "refactor_patrol.caps"
+      assert_includes err.message, "must be a Hash"
+    end
+
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        refactor_patrol:
+          leverage: nope
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_includes err.message, "refactor_patrol.leverage"
+      assert_includes err.message, "must be a Hash"
+    end
+
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        refactor_patrol:
+          leverage:
+            weights: nope
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_includes err.message, "refactor_patrol.leverage.weights"
+      assert_includes err.message, "must be a Hash"
+    end
+
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        refactor_patrol:
+          leverage:
+            weights:
+              churn: 0
+              fan_in: 0
+              complexity: 0
+              coupling: 0
+              bug_density: 0
+              coverage_gap: 0
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_includes err.message, "at least one positive weight"
+    end
+
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        refactor_patrol:
+          review: nope
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_includes err.message, "refactor_patrol.review"
+      assert_includes err.message, "must be a Hash"
+    end
+
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        refactor_patrol:
+          enabled: maybe
+      YAML
+
+      err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_includes err.message, "refactor_patrol.enabled"
+      assert_includes err.message, "must be a boolean"
+    end
+
+    %w[auto_fix issue_filing].each do |gate|
+      with_tmp_dir do |dir|
+        FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+        File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+          refactor_patrol:
+            #{gate}: nope
+        YAML
+
+        err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+        assert_includes err.message, "refactor_patrol.#{gate}"
+        assert_includes err.message, "must be a Hash"
+      end
+
+      with_tmp_dir do |dir|
+        FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+        File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+          refactor_patrol:
+            #{gate}:
+              enabled: maybe
+        YAML
+
+        err = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+        assert_includes err.message, "refactor_patrol.#{gate}.enabled"
+        assert_includes err.message, "must be a boolean"
+      end
     end
   end
 
@@ -183,7 +519,11 @@ class ConfigTest < Minitest::Test
       assert_equal "continuous", cfg.dig("patrol", "trigger")
       assert_equal 600, cfg.dig("patrol", "poll_interval_sec")
       assert_equal "codex", cfg.dig("patrol", "agent")
-      assert_equal 10, cfg.dig("patrol", "max_findings_per_feature")
+      assert_equal 3, cfg.dig("patrol", "max_findings_per_feature")
+      assert_equal 12, cfg.dig("patrol", "max_features_per_cycle")
+      assert_equal 70, cfg.dig("patrol", "min_alpha_to_fix")
+      assert_equal 1, cfg.dig("patrol", "max_fixes_per_feature_per_cycle")
+      assert_equal 6, cfg.dig("patrol", "max_fix_attempts_per_cycle")
       assert_equal 3, cfg.dig("patrol", "max_prs_per_cycle")
       assert_equal "medium", cfg.dig("patrol", "min_confidence_to_fix")
     end
@@ -287,14 +627,15 @@ class ConfigTest < Minitest::Test
 
   def test_load_resolves_patrol_frequency_modes
     cases = {
-      "ultrapatrol" => [ "timer", 1800, true ],
-      "high" => [ "timer", 7200, true ],
-      "medium" => [ "timer", 14_400, true ],
-      "low" => [ "new_commits", 600, true ],
-      "off" => [ "continuous", 600, false ]
+      "ultrapatrol" => [ "timer", 1800, true, 800_000, 2_400_000, 100_000, 10, 36, 100 ],
+      "high" => [ "timer", 7200, true, 400_000, 1_200_000, 75_000, 6, 18, 50 ],
+      "medium" => [ "timer", 14_400, true, 200_000, 600_000, 50_000, 3, 8, 25 ],
+      "low" => [ "new_commits", 600, true, 100_000, 200_000, 40_000, 1, 2, 10 ],
+      "off" => [ "continuous", 600, false, 200_000, 600_000, 50_000, 3, 8, 25 ]
     }
 
-    cases.each do |mode, (trigger, poll_interval_sec, enabled)|
+    cases.each do |mode, (trigger, poll_interval_sec, enabled, cycle_tokens, daily_tokens, agent_tokens,
+                          cycle_spawns, daily_spawns, agent_budget)|
       with_tmp_dir do |dir|
         FileUtils.mkdir_p(File.join(dir, ".hive-state"))
         File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
@@ -308,10 +649,23 @@ class ConfigTest < Minitest::Test
         assert_equal trigger, cfg.dig("patrol", "trigger")
         assert_equal poll_interval_sec, cfg.dig("patrol", "poll_interval_sec")
         assert_equal enabled, cfg.dig("patrol", "enabled")
-        assert_equal 10, cfg.dig("patrol", "max_findings_per_feature"),
+        assert_equal 3, cfg.dig("patrol", "max_findings_per_feature"),
                      "#{mode} must not change the findings cap"
+        assert_equal 12, cfg.dig("patrol", "max_features_per_cycle"),
+                     "#{mode} must not change the feature review cap"
+        assert_equal 70, cfg.dig("patrol", "min_alpha_to_fix"),
+                     "#{mode} must not change the alpha gate"
         assert_equal 3, cfg.dig("patrol", "max_prs_per_cycle"),
                      "#{mode} must not change the PR cap"
+        assert_equal 6, cfg.dig("patrol", "max_fix_attempts_per_cycle"),
+                     "#{mode} must not change the fix-attempt cap"
+        assert_equal cycle_tokens, cfg.dig("patrol", "max_tokens_per_cycle")
+        assert_equal daily_tokens, cfg.dig("patrol", "max_tokens_per_day")
+        assert_equal agent_tokens, cfg.dig("patrol", "max_tokens_per_agent")
+        assert_equal cycle_spawns, cfg.dig("patrol", "max_agent_spawns_per_cycle")
+        assert_equal daily_spawns, cfg.dig("patrol", "max_agent_spawns_per_day")
+        assert_equal agent_budget, cfg.dig("patrol", "max_budget_usd_per_agent")
+        assert_equal 2, cfg.dig("patrol", "architecture_budget_multiplier")
         assert_equal "medium", cfg.dig("patrol", "min_confidence_to_fix"),
                      "#{mode} must not change the confidence gate"
       end
@@ -418,6 +772,17 @@ class ConfigTest < Minitest::Test
       "draft_prs: sometimes",
       "review_prs: sometimes",
       "min_confidence_to_fix: certain",
+      "min_alpha_to_fix: 101",
+      "max_features_per_cycle: 0",
+      "max_fixes_per_feature_per_cycle: 0",
+      "max_fix_attempts_per_cycle: 0",
+      "max_tokens_per_cycle: 0",
+      "max_tokens_per_day: nope",
+      "max_tokens_per_agent: 0",
+      "max_agent_spawns_per_cycle: 0",
+      "max_agent_spawns_per_day: 1.5",
+      "architecture_budget_multiplier: 0",
+      "max_budget_usd_per_agent: 0",
       "poll_interval_sec: 30",
       "commands: []",
       "commands:\n    test: ''",
@@ -3102,6 +3467,25 @@ class ConfigTest < Minitest::Test
       YAML
       err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_daemon }
       assert_match(/daemon.fast_poll_sec.*>= 1/, err.message)
+    end
+  end
+
+  def test_load_global_daemon_rejects_null_concurrency_limits
+    %w[
+      max_concurrent_runs
+      max_concurrent_per_project
+      max_concurrent_patrol_scans
+      max_runs_per_day_per_project
+    ].each do |key|
+      with_tmp_global_config do |home|
+        File.write(
+          File.join(home, "config.yml"),
+          { "registered_projects" => [], "daemon" => { key => nil } }.to_yaml
+        )
+
+        err = assert_raises(Hive::ConfigError) { Hive::Config.load_global_daemon }
+        assert_match(/daemon\.#{Regexp.escape(key)}.*integer >= 1/, err.message)
+      end
     end
   end
 

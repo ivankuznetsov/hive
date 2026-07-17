@@ -3,6 +3,7 @@ require "json"
 require "shellwords"
 require "time"
 require "tmpdir"
+require "hive/lock"
 
 module Hive
   module Daemon
@@ -18,7 +19,7 @@ module Hive
     class ChildSupervisor
       ChildExit = Struct.new(:pid, :exit_code, :project, :slug, :stage, :command,
                              :state_file_path, :started_at, :finished_at, :json_envelope,
-                             :request_id,
+                             :request_id, :dispatch_token,
                              keyword_init: true)
 
       # A child that breached its wall-clock timeout. The dispatcher logs
@@ -43,8 +44,8 @@ module Hive
         @dry_run = dry_run
         # Optional injection point: tests pass a lambda taking (project, slug)
         # → an absolute path to write the child's combined stdout/stderr.
-        # Falls back to a tmp-style scheme using the project's hive-state
-        # directory if the dispatcher doesn't supply one.
+        # Falls back to a tmp-style scheme if the dispatcher does not supply
+        # Hive's durable state directory for this spawn.
         @log_dir_for_task = log_dir_for_task
         # R-02 per-verb wall-clock timeout. `default_timeout_sec` applies
         # to every spawned child unless `verb_timeouts[verb]` overrides
@@ -61,6 +62,7 @@ module Hive
         # pid → { project, slug, stage, command, started_at, log_path,
         #         timeout_sec, terminating_at, killed }
         @running = {}
+        @forced_completions = []
       end
 
       # Resolve the wall-clock timeout (seconds) for a hive verb. A
@@ -92,8 +94,8 @@ module Hive
       # ConcurrencyController bookkeeping stays consistent across both
       # modes.
       def spawn(command_string:, project:, slug:, stage:,
-                hive_state_path: nil, state_file_path: nil, dry_run: nil,
-                request_id: nil)
+                log_state_path: nil, state_file_path: nil, dry_run: nil,
+                request_id: nil, dispatch_token: nil)
         effective_dry_run = dry_run.nil? ? @dry_run : dry_run
 
         argv = parse_command(command_string)
@@ -114,18 +116,17 @@ module Hive
             project: project, slug: slug, stage: stage,
             command: command_string, state_file_path: state_file_path,
             started_at: Time.now, log_path: nil, dry_run: true,
-            request_id: request_id, timeout_sec: timeout_sec
+            request_id: request_id, dispatch_token: dispatch_token, timeout_sec: timeout_sec
           }
           return @running.keys.last
         end
 
         log_path = log_path_for(project: project, slug: slug,
-                                hive_state_path: hive_state_path)
+                                log_state_path: log_state_path)
         FileUtils.mkdir_p(File.dirname(log_path))
-        # Open with truncation ("w") so each child run starts a fresh
-        # per-task log; logs from prior runs are not preserved here —
-        # the daemon's own log file at ~/Dev/hive/logs/daemon.log
-        # carries the cross-run history.
+        # Open with truncation ("w") so the durable per-task capture starts
+        # fresh on every child run. The daemon's own log file at
+        # ~/Dev/hive/logs/daemon.log carries the cross-run history.
         log_io = File.open(log_path, "w")
         log_io.puts("[hive-daemon] #{Time.now.utc.iso8601} spawn argv=#{argv.inspect}")
         log_io.flush
@@ -137,7 +138,7 @@ module Hive
           project: project, slug: slug, stage: stage,
           command: command_string, state_file_path: state_file_path,
           started_at: Time.now, log_path: log_path, dry_run: false,
-          request_id: request_id, timeout_sec: timeout_sec
+          request_id: request_id, dispatch_token: dispatch_token, timeout_sec: timeout_sec
         }
         pid
       end
@@ -181,7 +182,7 @@ module Hive
       # Array<ChildExit> for the dispatcher to feed into the
       # concurrency controller. Empty array when nothing has completed.
       def reap_all(now: Time.now)
-        completed = []
+        completed = @forced_completions.shift(@forced_completions.length)
         loop do
           # Process.wait with WNOHANG returns nil when nothing is ready.
           pid, status = Process.wait2(-1, Process::WNOHANG)
@@ -195,14 +196,7 @@ module Hive
           # be in their own process groups already. Be defensive anyway.
           next if entry.nil?
 
-          envelope = parse_envelope(entry[:log_path])
-          completed << ChildExit.new(
-            pid: pid, exit_code: status.exitstatus,
-            project: entry[:project], slug: entry[:slug], stage: entry[:stage],
-            command: entry[:command], state_file_path: entry[:state_file_path],
-            started_at: entry[:started_at], finished_at: now, json_envelope: envelope,
-            request_id: entry[:request_id]
-          )
+          completed << child_exit(pid, status, entry, now)
         end
         completed
       end
@@ -220,7 +214,7 @@ module Hive
             project: entry[:project], slug: entry[:slug], stage: entry[:stage],
             command: entry[:command], state_file_path: entry[:state_file_path],
             started_at: entry[:started_at], finished_at: now, json_envelope: nil,
-            request_id: entry[:request_id]
+            request_id: entry[:request_id], dispatch_token: entry[:dispatch_token]
           )
         end
         completed.each { |c| @running.delete(c.pid) }
@@ -267,7 +261,68 @@ module Hive
         @running.size
       end
 
+      # Terminate and await one exact child process group. Used when a spawn
+      # succeeded but its durable PID/start-time/PGID fence could not be
+      # persisted; releasing the claim before the child is gone would allow a
+      # second generation to overlap it.
+      def terminate_child(pid, grace_sec: 2)
+        entry = @running[pid]
+        return false unless entry && !entry[:dry_run]
+
+        pgid = pgid_for(pid)
+        safe_kill(:TERM, -pgid) if pgid
+        status = wait_for_child(pid, grace_sec)
+        unless status
+          pgid = pgid_for(pid)
+          safe_kill(:KILL, -pgid) if pgid
+          status = wait_for_child(pid, 1)
+        end
+        return false unless status
+
+        @running.delete(pid)
+        @forced_completions << child_exit(pid, status, entry, Time.now)
+        true
+      end
+
+      # Capture the same PID-reuse and process-group fence persisted by the
+      # architecture scheduler immediately after spawn.
+      def process_identity(pid)
+        return nil unless pid.is_a?(Integer) && pid > 1
+
+        start_time = Hive::Lock.process_start_time(pid)
+        pgid = Process.getpgid(pid)
+        return nil if start_time.to_s.empty? || pgid <= 1
+
+        { process_start_time: start_time.to_s, pgid: pgid }
+      rescue Errno::ESRCH, Errno::EPERM
+        nil
+      end
+
       private
+
+      def wait_for_child(pid, seconds)
+        deadline = Time.now + seconds
+        loop do
+          waited_pid, status = Process.wait2(pid, Process::WNOHANG)
+          return status if waited_pid
+          return nil if Time.now >= deadline
+
+          sleep 0.02
+        end
+      rescue Errno::ECHILD
+        nil
+      end
+
+      def child_exit(pid, status, entry, now)
+        ChildExit.new(
+          pid: pid, exit_code: status.exitstatus,
+          project: entry[:project], slug: entry[:slug], stage: entry[:stage],
+          command: entry[:command], state_file_path: entry[:state_file_path],
+          started_at: entry[:started_at], finished_at: now,
+          json_envelope: completion_envelope(entry),
+          request_id: entry[:request_id], dispatch_token: entry[:dispatch_token]
+        )
+      end
 
       def parse_command(command_string)
         Shellwords.split(command_string)
@@ -299,16 +354,19 @@ module Hive
         )
       end
 
-      def log_path_for(project:, slug:, hive_state_path:)
+      def log_path_for(project:, slug:, log_state_path:)
         return @log_dir_for_task.call(project, slug) if @log_dir_for_task
 
-        # Fallback: write under <hive_state_path>/logs/<slug>/. The
-        # supervisor doesn't know hive-state paths globally; the
-        # dispatcher passes one when it has it. If nothing's available
-        # we drop into a tmp directory keyed by PID so the file is
-        # discoverable but doesn't pollute project state.
-        base = hive_state_path ? File.join(hive_state_path, "logs", slug) : nil
-        base ||= File.join(Dir.tmpdir, "hive-daemon-logs", project.to_s, slug.to_s)
+        # The dispatcher supplies Hive's durable XDG state directory so
+        # captures neither depend on a quota-limited tmpdir nor dirty the
+        # project's tracked hive-state worktree. Standalone callers without
+        # that context retain the historical tmpdir fallback.
+        if log_state_path
+          base = File.join(log_state_path, "logs", "daemon-children", project.to_s, slug.to_s)
+          return File.join(base, "daemon-run.log")
+        end
+
+        base = File.join(Dir.tmpdir, "hive-daemon-logs", project.to_s, slug.to_s)
         ts = Time.now.utc.strftime("%Y%m%dT%H%M%SZ")
         File.join(base, "daemon-run-#{ts}-#{Process.pid}.log")
       end
@@ -319,6 +377,25 @@ module Hive
       # for a single JSON document but bounded against a runaway child
       # that wrote gigabytes of prose. PR-40 follow-up review C1.
       ENVELOPE_TAIL_BYTES = 64 * 1024
+
+      def completion_envelope(entry)
+        token = entry[:dispatch_token]
+        result_path = token && (token[:result_path] || token["result_path"])
+        return parse_envelope(entry[:log_path]) unless result_path
+
+        parse_result_file(result_path)
+      ensure
+        FileUtils.rm_f(result_path) if result_path
+      end
+
+      def parse_result_file(path)
+        return nil unless File.file?(path)
+
+        payload = JSON.parse(File.binread(path))
+        payload.is_a?(Hash) ? payload : nil
+      rescue JSON::ParserError, EncodingError, SystemCallError, IOError
+        nil
+      end
 
       def parse_envelope(log_path)
         return nil if log_path.nil? || !File.exist?(log_path)

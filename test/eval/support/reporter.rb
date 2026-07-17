@@ -36,12 +36,27 @@ module Hive
 
         path = ENV.fetch("HIVE_EVAL_REPORT")
         FileUtils.mkdir_p(File.dirname(path))
-        File.write(path, JSON.pretty_generate({
+        write_fresh_report(path, JSON.pretty_generate({
           schema: "hive-eval-report",
           schema_version: 1,
           generated_at: Time.now.utc.iso8601,
           scenarios: entries
         }))
+      end
+
+      # Write the report to a fresh regular file at PATH. A bare File.write
+      # follows a symlink or hard link at the report path and clobbers the
+      # linked target — e.g. a caller passing --report pointing at a symlink to
+      # an unrelated file. Unlink any existing entry first: rm_f drops the
+      # symlink itself (never its target) or one hard-link reference, leaving
+      # the linked file's data intact. Then open with O_CREAT|O_EXCL|O_NOFOLLOW
+      # so a symlink recreated in the race window is refused rather than
+      # followed, and the report always lands on a new regular file.
+      def write_fresh_report(path, contents)
+        FileUtils.rm_f(path)
+        File.open(path, File::WRONLY | File::CREAT | File::EXCL | File::NOFOLLOW, 0o644) do |file|
+          file.write(contents)
+        end
       end
 
       def source_location_for(test)

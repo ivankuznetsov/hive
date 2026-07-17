@@ -3,7 +3,7 @@ title: Interaction Surface
 type: commands
 source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/cli.rb, lib/hive/commands/adhoc_review.rb, lib/hive/commands/setup.rb, lib/hive/commands/connect.rb, lib/hive/commands/disconnect.rb, lib/hive/commands/bench_submit.rb, lib/hive/commands/digest.rb, lib/hive/commands/pairing.rb, lib/hive/digest.rb, lib/hive/digest/, lib/hive/web/, public/, hive.gemspec, packaging/docker/, .github/workflows/release.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-14
-updated: 2026-06-30
+updated: 2026-07-12
 tags: [commands, api]
 ---
 
@@ -57,7 +57,10 @@ GitHub PR, project workflow authoring via [[commands/workflow]], daemon/bot/baby
 lifecycle commands, diagnostics, markers, findings, metrics, update/uninstall,
 registry maintenance, Screenote connect/disconnect, the `hive bench submit`
 corpus-submission producer, the `hive digest` shipped-digest producer,
-the [[commands/pairing]] Telegram pairing approval surface, and
+the [[commands/pairing]] Telegram pairing approval surface,
+[[commands/refactor-patrol]] as the architecture refactor thesis scanner (only
+its legacy on-demand v1 mode is reporting-only; merged-PR v2 can take separately
+authorized actions), and
 `--json` envelopes where the command page says they exist.
 The wrapper also normalizes command-local help before Thor dispatch:
 `hive <cmd> --help`, `hive <cmd> -h`, and option-bearing forms such as
@@ -73,7 +76,11 @@ exception: after `hive new PROJECT`, later `--help`, `-h`, or malformed
 `--json=...` tokens are treated as literal task text, with `bin/hive` inserting
 `--` before the tail so Thor leaves the idea text alone. Wrapper-owned usage
 errors use the last recognized JSON boolean flag, so `--json --no-json` and
-`--json --json=false` choose human prose instead of an error envelope.
+`--json --json=false` choose human prose instead of an error envelope. When the
+final recognized JSON flag is truthy, pre-dispatch Thor usage errors listed in
+`JSON_USAGE_ERROR_CONTRACTS` emit command-shaped JSON before stderr, including
+unversioned `hive-setup` usage failures and Screenote connect/disconnect
+missing-`SERVICE` failures.
 
 `bin/hv` is the Apache Hive collision fallback entrypoint. It probes only the
 owned Hive CLI locations and `HIVE_BIN_OVERRIDE`; it intentionally does not
@@ -178,6 +185,9 @@ as an end-user workflow command. It mirrors the main wrapper's entrypoint
 conventions for top-level `--version`, command-local help, and wrapper-level
 JSON boolean grammar, so `bin/hive-e2e run --filter tui --help` prints the
 `run` usage instead of selecting scenarios or running preflight checks, while
+`bin/hive-e2e --json --help run` / `--json -h run` drop the now-irrelevant JSON
+flag and render human `run` help with exit `0`. Non-command help trailers such
+as `--json --help missing` still keep the JSON-envelope contract.
 `bin/hive-e2e --json=true list` dispatches to `list` and unsupported
 `--json=<value>` assignments fail before the default `run` pattern can consume
 the value. Its wrapper-owned usage/preflight/error envelopes also follow the

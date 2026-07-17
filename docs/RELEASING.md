@@ -19,6 +19,9 @@ A push of a `vX.Y.Z` tag triggers `.github/workflows/release.yml`, which:
    the released gem, renders `PKGBUILD` from `packaging/aur/PKGBUILD.template`
    via `packaging/render.rb`, regenerates `.SRCINFO` with
    `makepkg --printsrcinfo`, and pushes a version bump to the AUR package.
+5. Announces the release on Discord with the supported `hive update` command
+   when `DISCORD_RELEASE_WEBHOOK` is configured. Announcement failures are
+   non-fatal and do not block package publication.
 
 Both channel templates render through one helper (`packaging/render.rb`), so a
 release's version/sha is substituted identically everywhere.

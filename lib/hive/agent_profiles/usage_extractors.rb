@@ -26,6 +26,16 @@ module Hive
         end
       end
 
+      # Grok's streaming-json currently carries no usage counts. Preserve
+      # unavailable usage as nil rather than polluting aggregates with a
+      # fabricated measured zero. If a future CLI adds usage, consume it.
+      GROK = lambda do |event|
+        next nil unless event.is_a?(Hash)
+
+        usage = usage_hash(event)
+        usage_result(event, usage, model_from(event)) if usage
+      end
+
       PI = lambda do |event|
         next nil unless event.is_a?(Hash)
 
@@ -46,6 +56,7 @@ module Hive
           event["usage"],
           event["token_usage"],
           event.dig("event", "usage"),
+          event.dig("event", "message", "usage"),
           event.dig("info", "usage"),
           event.dig("info", "total_token_usage"),
           event.dig("response", "usage"),

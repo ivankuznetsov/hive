@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "incident": "task-1849",
+  "source": "sanitized repository durable-attempt replay plus legacy state excerpts",
+  "sanitization": "Paths, task names, attempt IDs, timestamps, and SHAs are non-production stand-ins.",
+  "state_file": "task.md",
+  "journal": "events.jsonl",
+  "attempts_file": "attempts.json",
+  "expected_projection": "expected-projection.json",
+  "files": {
+    "events.jsonl": "b28ce1bc8634960198b4424bc666ee94bf8c73fe27216aa3a9bf04d3a0c0924d",
+    "task.md": "a4a2bb98f379ad96457ae1f49d93ea494b98005f2ca61d51a15945695039fad4",
+    "worktree.yml": "9667232f999bf45ce8953b3404c2430175618316e7ecae76218aced7f92efe97",
+    "attempts.json": "e6b35eefe654d021af89f9d28d46c3b9c06aa0fe5c952c1df6aa12eb598e956f",
+    "execute.log": "eefb3ab577f843abaef244230c921f3ba8342773ed264d99c182c88d8c36aee9",
+    "provenance.md": "80cf12cd9120fd02dec72b7a0ad8fc2716b5f97a4ec910acc42a6ae80cd15e0a",
+    "expected-projection.json": "44f35c3a6d9b9550ecebd7e12797db1f7a198eccc07fe8194563598afca2843c"
+  },
+  "synthetic_events": [
+    "1849-a-head", "1849-a-agent", "1849-a-changes", "1849-a-wait",
+    "1849-b-head", "1849-b-agent", "1849-b-changes", "1849-b-wait"
+  ],
+  "provenance": {
+    "source_records": [ "legacy execute_waiting event", "task.md", "worktree.yml", "attempts.json", "execute.log" ],
+    "synthetic_record_policy": "Every condition-era event is explicit and carries provenance.synthetic=true."
+  },
+  "assertions": {
+    "current_changes_attempt": "attempt-b",
+    "current_head": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "historical_wait_event": "1849-a-wait",
+    "gate_status": "eligible"
+  }
+}

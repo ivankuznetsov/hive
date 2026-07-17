@@ -166,6 +166,7 @@ class AttemptsRecordTest < Minitest::Test
 
   def test_legacy_v1_record_gains_generation_bridge_only_in_memory
     legacy = Hive::Attempts::Record.launching(**identity, now: NOW, launch_timeout_sec: 30).to_h
+    legacy["schema_version"] = 1
     legacy.delete("ownership_generation")
     legacy.delete("task_input_epoch")
 
@@ -173,7 +174,40 @@ class AttemptsRecordTest < Minitest::Test
 
     assert_equal "generation-1", record.ownership_generation
     assert_equal 0, record.task_input_epoch
+    assert_equal 2, record["schema_version"]
     refute legacy.key?("ownership_generation")
+  end
+
+  def test_unknown_current_schema_version_is_rejected
+    invalid = Hive::Attempts::Record.launching(
+      **identity, now: NOW, launch_timeout_sec: 30
+    ).to_h.merge("schema_version" => 99)
+
+    error = assert_raises(Hive::Attempts::InvalidRecord) do
+      Hive::Attempts::Record.new(invalid)
+    end
+    assert_includes error.message, "unsupported schema_version"
+  end
+
+  def test_legacy_terminal_receipt_gains_generation_bridge_in_memory
+    legacy = Hive::Attempts::Record.launching(
+      **identity, now: NOW, launch_timeout_sec: 30
+    ).to_h.merge(
+      "schema_version" => 1,
+      "state" => "terminal",
+      "outcome" => "succeeded",
+      "ended_at" => (NOW + 5).iso8601(6),
+      "receipt" => receipt
+    )
+    legacy.delete("ownership_generation")
+    legacy.delete("task_input_epoch")
+    legacy.fetch("receipt").delete("ownership_generation")
+    legacy.fetch("receipt").delete("task_input_epoch")
+
+    record = Hive::Attempts::Record.new(legacy)
+
+    assert_equal "generation-1", record["receipt"].fetch("ownership_generation")
+    assert_equal 0, record["receipt"].fetch("task_input_epoch")
   end
 
   private
@@ -202,6 +236,8 @@ class AttemptsRecordTest < Minitest::Test
     {
       "attempt_id" => "attempt-1",
       "task_generation" => "generation-1",
+      "ownership_generation" => "generation-1",
+      "task_input_epoch" => 0,
       "outcome" => "succeeded",
       "exit_status" => 0,
       "started_at" => NOW.iso8601(6),

@@ -24,7 +24,7 @@ module Hive
                        :dependency_stage, :blocked, :admission_error,
                        :attempt_id, :task_generation,
                        :condition_task_generation, :commit_generation, :current_attempt,
-                       :conditions, :condition_history, :evidence, :condition_gate,
+                       :conditions, :condition_history, :evidence, :condition_overrides, :condition_gate,
                        :condition_migration, :condition_provenance, :shadow_audit,
                        :condition_warning,
                        keyword_init: true)
@@ -211,6 +211,7 @@ module Hive
               conditions: Array(task["conditions"]),
               condition_history: Array(task["condition_history"]),
               evidence: Array(task["evidence"]),
+              condition_overrides: Array(task["condition_overrides"]),
               condition_gate: task["condition_gate"],
               condition_migration: task["condition_migration"],
               condition_provenance: task["condition_provenance"] || {},

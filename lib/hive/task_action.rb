@@ -1,13 +1,13 @@
 require "shellwords"
 require "digest"
 require "time"
-require "yaml"
 require "hive/agent_profiles"
 require "hive/stages"
 require "hive/workflows"
 require "hive/task_action/diagnostic"
 require "hive/conditions/gate_evaluator"
 require "hive/conditions/migration"
+require "hive/plan_frontmatter"
 require "hive/task_projection/store"
 require "hive/markers"
 
@@ -273,7 +273,8 @@ module Hive
     def migration_selection
       @migration_selection ||= Hive::Conditions::Migration.selection(
         config: @config, stage: "#{task.stage_index}-#{task.stage_name}",
-        projection: projection
+        projection: projection,
+        rule: task.stage_name == "execute" ? execute_condition_rule : nil
       )
     end
 
@@ -499,22 +500,18 @@ module Hive
 
     def research_execution?
       path = File.join(task.folder, "plan.md")
-      return false unless File.file?(path)
-
-      frontmatter = File.read(path).match(/\A---\s*\n(.*?)\n---\s*\n/m)&.captures&.first
-      data = frontmatter && YAML.safe_load(frontmatter)
-      data.is_a?(Hash) && data["execution_mode"].to_s == "research"
-    rescue Psych::Exception, SystemCallError
-      false
+      result = Hive::PlanFrontmatter.read(path)
+      result.valid? && result.data["execution_mode"].to_s == "research"
     end
 
     def research_evidence?
       return false unless research_execution?
-      return true if marker.name == :execute_complete && marker.attrs["mode"] == "research"
 
-      File.read(task.state_file).match?(/^## Execute Output\s*$\n\s*\S/m)
-    rescue SystemCallError
-      false
+      fact = projection.current_condition("ChangesPresent")
+      fact&.dig("payload", "research_output_evidence") == true &&
+        Array(fact["evidence"]).any? do |entry|
+          entry["type"] == "file" && entry["purpose"] == "research_output"
+        end
     end
 
     def load_projection(marker)
@@ -524,8 +521,6 @@ module Hive
       else
         Hive::TaskProjection.project(records: [], marker: marker)
       end
-    rescue Hive::TaskProjection::Error, SystemCallError
-      Hive::TaskProjection.project(records: [], marker: marker)
     end
 
     def projected_marker(value)
@@ -641,6 +636,7 @@ module Hive
         finalize_pr_url_mismatch: finalize_pr_url_mismatch?,
         legacy_execute_findings: legacy_execute_findings?,
         stale_agent_reason: stale_agent_reason,
+        condition_gate: migration_selection.effective == "conditions" ? condition_gate : nil,
         state_file_mtime: @state_file_mtime,
         project_name: project_name,
         project_count: @project_count

@@ -91,6 +91,28 @@ class TaskProjectionTest < Minitest::Test
     assert_equal "b" * 40, current["identity"].fetch("head_sha")
   end
 
+  def test_new_unverifiable_commit_fact_stays_current_after_a_prior_known_head
+    records = [
+      commit_event(event_id: "head-a", commit_generation: 1, sha: "a" * 40),
+      condition_event(
+        "ChangesPresent", state: "satisfied", event_id: "known-change",
+        commit_generation: 1, evidence: commit_evidence("a" * 40)
+      ),
+      condition_event(
+        "ChangesPresent", state: "unverifiable", event_id: "git-unavailable",
+        attempt_id: "attempt-b", commit_generation: 1,
+        reason: "worktree_evidence_unverifiable",
+        evidence: [ { "type" => "journal_event", "event_id" => "git-read-failed" } ]
+      )
+    ]
+
+    projection = Hive::TaskProjection.project(records: records)
+    current = projection.current_condition("ChangesPresent")
+    assert_equal "git-unavailable", current.fetch("event_id")
+    assert_equal "unverifiable", current.fetch("state")
+    assert_equal "worktree_evidence_unverifiable", current.fetch("reason")
+  end
+
   def test_marker_fallback_is_centralized_and_disappears_after_baseline
     marker = Hive::Markers::State.new(name: :execute_complete, attrs: { "mode" => "research" }, raw: nil)
     fallback = Hive::TaskProjection.project(records: [], marker: marker)
@@ -105,7 +127,7 @@ class TaskProjectionTest < Minitest::Test
 
   def test_duplicate_event_ids_and_malformed_journal_are_rejected
     with_tmp_dir do |dir|
-      path = File.join(dir, "events.jsonl")
+      path = File.join(dir, "task-journal.jsonl")
       event = condition_event("AgentHealthy", event_id: "duplicate")
       File.write(path, "#{JSON.generate(event)}\n#{JSON.generate(event)}\n")
       assert_raises(Hive::TaskProjection::InvalidJournal) { Hive::TaskProjection.read_journal(path) }
@@ -113,6 +135,40 @@ class TaskProjectionTest < Minitest::Test
       File.write(path, "{\n")
       assert_raises(Hive::TaskProjection::InvalidJournal) { Hive::TaskProjection.read_journal(path) }
     end
+  end
+
+  def test_snapshot_and_hash_attempt_metadata_validation_fail_closed
+    assert_raises(Hive::TaskProjection::InvalidJournal) do
+      Hive::TaskProjection.from_data("schema" => "wrong", "schema_version" => 1)
+    end
+
+    metadata = Hive::TaskProjection.durable_attempt_metadata(
+      "attempt_id" => "attempt-a", "task_id" => "42", "task_slug" => "task",
+      "intended_stage" => "4-execute", "task_input_epoch" => 3,
+      "ownership_generation" => "owner-a", "accepted_at" => NOW.iso8601(6),
+      "predecessor_attempt_id" => nil, "state" => "running",
+      "outcome" => nil, "lease_version" => 2
+    )
+    assert_equal 3, metadata.fetch("task_generation")
+    assert_equal "owner-a", metadata.fetch("ownership_generation")
+    assert_equal 2, metadata.fetch("lease_version")
+  end
+
+  def test_causal_attempt_lookup_walks_multi_hop_predecessors
+    lineage = [
+      attempt_binding("attempt-a", predecessor: nil),
+      attempt_binding("attempt-b", predecessor: "attempt-a"),
+      attempt_binding("attempt-c", predecessor: "attempt-b")
+    ]
+    record = generation_event(event_id: "generation", task_generation: 1)
+    record["__attempt_lineage"] = lineage
+    projection = Hive::TaskProjection.new(
+      records: [ record ], cursor: nil, journal_hash: nil,
+      marker: nil, registry: Hive::Conditions::Registry.default
+    )
+
+    assert projection.send(:attempt_descends_from?, "attempt-c", "attempt-a")
+    refute projection.send(:attempt_descends_from?, "attempt-a", "attempt-c")
   end
 
   private
@@ -170,5 +226,20 @@ class TaskProjectionTest < Minitest::Test
 
   def commit_evidence(sha)
     [ { "type" => "commit", "sha" => sha, "branch" => "feature" } ]
+  end
+
+  def attempt_binding(attempt_id, predecessor:)
+    {
+      "attempt_id" => attempt_id,
+      "task" => { "id" => "42", "slug" => "task" },
+      "stage" => "4-execute",
+      "task_generation" => 1,
+      "ownership_generation" => "owner-#{attempt_id}",
+      "accepted_at" => NOW.iso8601(6),
+      "predecessor_attempt_id" => predecessor,
+      "state" => "running",
+      "outcome" => nil,
+      "lease_version" => 1
+    }
   end
 end

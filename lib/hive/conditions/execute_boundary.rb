@@ -14,6 +14,8 @@ module Hive
     )
 
     class ExecuteBoundary
+      EXECUTE_STAGE = "4-execute" # coding-scoped: condition rollout currently governs coding execute
+
       def initialize(task:, config:, worktree_path:, attempt_store: nil, context: nil,
                      writer: nil, projection_store: nil, git_ops: nil)
         @task = task
@@ -25,7 +27,9 @@ module Hive
         @writer = writer || Hive::TaskJournal::Writer.new(
           task_folder: task.folder, attempt_store: @attempt_store
         )
-        @projection_store = projection_store || Hive::TaskProjection::Store.new(task_folder: task.folder)
+        @projection_store = projection_store || Hive::TaskProjection::Store.new(
+          task_folder: task.folder, attempt_store: @attempt_store
+        )
         @git_ops = git_ops || Hive::GitOps.new(worktree_path)
       end
 
@@ -36,23 +40,31 @@ module Hive
           marker_name: legacy_marker_name, attrs: legacy_attrs,
           commit: legacy_commit, status: legacy_status,
           head_sha: safe_head, branch: safe_branch
-        ) unless supervised_attempt?
+        ) unless @context
+
+        unless @attempt
+          raise Hive::Conditions::GenerationMismatch,
+                "execute boundary durable attempt #{@context.attempt_id} is unavailable"
+        end
 
         verify_context!
         reconciliation = reconcile(
-          baseline_head: baseline_head, waiting_reason: waiting_reason, research: research
+          baseline_head: baseline_head, waiting_reason: waiting_reason, research: research,
+          research_evidence: research_evidence
         )
         projection = reconciliation.projection
         gate = gate_for(projection, research: research, research_evidence: research_evidence)
         if gate.reconcile_required?
           reconciliation = reconcile(
-            baseline_head: baseline_head, waiting_reason: waiting_reason, research: research
+            baseline_head: baseline_head, waiting_reason: waiting_reason, research: research,
+            research_evidence: research_evidence
           )
           projection = reconciliation.projection
           gate = gate_for(projection, research: research, research_evidence: research_evidence)
         end
         selection = Hive::Conditions::Migration.selection(
-          config: @config, stage: "4-execute", projection: projection # coding-scoped: increment 1 gates coding execute only
+          config: @config, stage: EXECUTE_STAGE, projection: projection,
+          rule: execute_rule # coding-scoped: increment 1 gates coding execute only
         )
         condition_marker, condition_attrs, condition_commit, condition_status = condition_outcome(
           gate, research: research
@@ -60,7 +72,8 @@ module Hive
 
         if selection.effective == "shadow"
           projection = append_shadow_audit(
-            projection: projection, category: category || category_for(legacy_marker_name, legacy_attrs),
+            projection: projection,
+            category: category || category_for(legacy_marker_name, legacy_attrs, projection: projection),
             marker_action: legacy_marker_name.to_s, condition_action: condition_marker.to_s
           )
           if legacy_marker_name.to_s != condition_marker.to_s
@@ -89,10 +102,6 @@ module Hive
 
       private
 
-      def supervised_attempt?
-        @context && @attempt
-      end
-
       def default_attempt_store
         return nil unless @context
 
@@ -110,13 +119,14 @@ module Hive
         end
       end
 
-      def reconcile(baseline_head:, waiting_reason:, research:)
+      def reconcile(baseline_head:, waiting_reason:, research:, research_evidence:)
         Hive::Conditions::Reconcilers::Execute.new(
           task: @task, attempt: @attempt, attempt_store: @attempt_store,
           writer: @writer, projection_store: @projection_store, git_ops: @git_ops,
           workflow_policy: execute_rule.to_h
         ).reconcile(
-          baseline_head: baseline_head, waiting_reason: waiting_reason, research: research
+          baseline_head: baseline_head, waiting_reason: waiting_reason, research: research,
+          research_evidence: research_evidence
         )
       end
 
@@ -156,7 +166,8 @@ module Hive
         )
         projection = @projection_store.rebuild!
         selection = Hive::Conditions::Migration.selection(
-          config: @config, stage: "4-execute", projection: projection # coding-scoped: increment 1 gates coding execute only
+          config: @config, stage: EXECUTE_STAGE, projection: projection,
+          rule: execute_rule # coding-scoped: increment 1 gates coding execute only
         )
         BoundaryOutcome.new(
           marker_name: marker_name, marker_attrs: attrs, commit: commit, status: status,
@@ -166,6 +177,20 @@ module Hive
 
       def append_shadow_audit(projection:, category:, marker_action:, condition_action:)
         identity = projection["identity"]
+        records = Hive::TaskProjection.read_journal(
+          @writer.path, attempt_store: @writer.attempt_store
+        )
+        existing = records.any? do |record|
+          record["event_type"] == "shadow_audit" &&
+            record["attempt_id"] == @attempt.attempt_id &&
+            record["task_generation"] == identity.fetch("task_generation") &&
+            record["commit_generation"] == identity.fetch("commit_generation") &&
+            record.dig("payload", "category") == category &&
+            record.dig("payload", "marker_action") == marker_action &&
+            record.dig("payload", "condition_action") == condition_action
+        end
+        return projection if existing
+
         event = Hive::Conditions::ShadowAudit.event(
           task: @task, attempt: @attempt,
           task_generation: identity.fetch("task_generation"),
@@ -177,14 +202,23 @@ module Hive
         @projection_store.rebuild!
       end
 
-      def category_for(marker_name, attrs)
+      def category_for(marker_name, attrs, projection:)
         reason = attrs.to_h[:reason] || attrs.to_h["reason"]
         return "research_success" if attrs.to_h[:mode] == "research" || attrs.to_h["mode"] == "research"
         return "no_change" if reason == "no_worktree_changes"
-        return "agent_loss" if reason.to_s.include?("agent") || reason.to_s.include?("attempt")
+        return "agent_loss" if %w[implementer_failed limits_reached].include?(reason.to_s) ||
+                               reason.to_s.include?("agent") || reason.to_s.include?("attempt")
         return "operator_repair" if reason.to_s.include?("repair")
+        return "operator_repair" if marker_name.to_sym == :execute_complete && repair_history?(projection)
 
         marker_name.to_sym == :execute_complete ? "commit_success" : "no_change"
+      end
+
+      def repair_history?(projection)
+        projection["conditions"].fetch("history").any? do |fact|
+          (fact["condition"] == "AgentHealthy" && fact["original_state"] == "unsatisfied") ||
+            (fact["condition"] == "AwaitingHuman" && fact["original_state"] == "satisfied")
+        end
       end
 
       def safe_head

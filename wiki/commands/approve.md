@@ -31,7 +31,7 @@ hive approve <slug> --json                 # machine-readable result (success AN
 4. `validate_from!`: if `--from` was passed, assert the task is at the named stage; raise `WrongStage` (4) on mismatch.
 5. `resolve_destination`: `--to` (long or short stage name), or auto = the descriptor's next stage (`task.workflow.next_stage_after(task.stage_name)`). At the terminal stage (`9-done` for coding) this raises `FinalStageReached` (also exit 4).
 6. **Same-stage no-op**: if destination resolves to the current stage, emit a `noop: true` payload (or one-line `hive: noop —` text) and return success. No mv, no commit.
-7. `validate_move!`: forward auto-advance requires `:complete`, `:execute_complete`, or `:review_complete` marker. `--to` (backward direction) and `--force` both bypass.
+7. `validate_move!`: forward auto-advance requires `:complete`, `:execute_complete`, or `:review_complete` marker. At `4-execute`, effective condition authority is checked first. `--to` (backward direction) bypasses; `--force` bypasses the marker/condition result only after an idempotent `operator_action` audit is durable. Audit failure prevents the move.
 8. **Locking**:
    - `Hive::Lock.with_commit_lock(hive_state_path)` outermost — serialises hive/state writes and surfaces contention BEFORE any filesystem mutation (a 30-second commit-lock timeout never leaves a half-applied move).
    - `Hive::Lock.with_task_lock(task.folder)` inner — blocks a concurrent `hive run` on the same task during the move.
@@ -97,6 +97,7 @@ Different errors carry different structured fields:
 - `FinalStageReached` → `stage: "9-done"`
 - `DependencyWaitError` → `error_kind: "dependency_wait"`, exit 75, plus `reason_code`, `offending_ref`, `safe_correction`
 - `DependencyAdmissionError` → `error_kind: "admission_error"`, exit 78, plus the same structured fields
+- `ConditionGateBlocked` → `error_kind: "wrong_stage"`, exit 4, plus the complete `condition_gate` and reason-specific `next_action`
 
 The envelope is emitted on stdout BEFORE the exception propagates, mirroring `hive run --json`'s dual-signal pattern (JSON document + non-zero exit code).
 

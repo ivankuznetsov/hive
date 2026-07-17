@@ -45,9 +45,10 @@ The legacy rules below describe `Hive::Events.emit`. Authoritative
 `hive-task-journal-event` records use a separate writer: a per-task flock,
 validated stable event envelope, one complete batch write, flush/fsync, and a
 surfaced exception on any failure. `Events.emit` rejects authoritative event
-types so a swallowed telemetry error cannot be mistaken for gate state. Both
-forms remain one-record-per-line in the same `events.jsonl`; replay normalizes
-legacy records without rewriting them.
+types so a swallowed telemetry error cannot be mistaken for gate state. The
+contracts also use separate files: fail-soft operational telemetry stays in
+`events.jsonl`, while strict condition authority lives in
+`task-journal.jsonl`. Neither reader has to negotiate mixed unversioned shapes.
 
 - **Path**: `<task_folder>/events.jsonl` (one file per task slug, lives next to `task.md`).
 - **Append**: single `File.write` of `JSON.generate(record) + "\n"` opened `O_WRONLY | O_APPEND | O_CREAT`. Records stay well under `PIPE_BUF` (~4 KiB), so POSIX append-atomicity holds across concurrent emitters; the single-write contract is load-bearing and must not be split into "write JSON then write newline."

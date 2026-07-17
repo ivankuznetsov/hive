@@ -29,6 +29,7 @@ require "hive/attempts/process_identity"
 require "hive/attempts/legacy_backfiller"
 require "hive/attempts/reconciler"
 require "hive/attempts/lost_outcome"
+require "hive/conditions/attempt_observer"
 
 module Hive
   module Commands
@@ -264,6 +265,9 @@ module Hive
           store: attempt_store,
           process_identity: attempt_process_identity,
           legacy_backfiller: attempt_backfiller,
+          condition_observer: Hive::Conditions::AttemptObserver.new(
+            store: attempt_store, logger: logger
+          ),
           logger: logger
         )
         lost_outcome_store = Hive::Attempts::LostOutcomeStore.new(store: attempt_store)

@@ -37,10 +37,10 @@ class ConditionsReconcilersExecuteTest < Minitest::Test
       end
       assert historical_wait
 
-      journal_size = File.size(File.join(task.folder, "events.jsonl"))
+      journal_size = File.size(File.join(task.folder, "task-journal.jsonl"))
       repeated = reconciler.reconcile(baseline_head: baseline)
       assert_nil repeated.append_result
-      assert_equal journal_size, File.size(File.join(task.folder, "events.jsonl"))
+      assert_equal journal_size, File.size(File.join(task.folder, "task-journal.jsonl"))
     end
   end
 
@@ -53,6 +53,36 @@ class ConditionsReconcilersExecuteTest < Minitest::Test
       assert_equal "unsatisfied", result.projection.current_condition("ChangesPresent").fetch("state")
       assert_equal "research_no_commit", result.projection.current_condition("ChangesPresent").fetch("reason")
       assert_equal "unsatisfied", result.projection.current_condition("AwaitingHuman").fetch("state")
+
+      with_output = build_reconciler(task, store, attempt).reconcile(
+        baseline_head: baseline, research: true, research_evidence: true
+      )
+      changes = with_output.projection.current_condition("ChangesPresent")
+      assert_equal true, changes.dig("payload", "research_output_evidence")
+      assert changes.fetch("evidence").any? do |entry|
+        entry["type"] == "file" && entry["purpose"] == "research_output"
+      end
+    end
+  end
+
+  def test_unreadable_research_output_is_not_claimed_as_durable_evidence
+    with_fixture do |task, store, attempt, baseline|
+      original_file = Digest::SHA256.method(:file)
+      replacement = lambda do |path|
+        raise Errno::EACCES, path if path == task.state_file
+
+        original_file.call(path)
+      end
+
+      result = with_replaced_singleton_method(Digest::SHA256, :file, replacement) do
+        build_reconciler(task, store, attempt).reconcile(
+          baseline_head: baseline, research: true, research_evidence: true
+        )
+      end
+
+      changes = result.projection.current_condition("ChangesPresent")
+      assert_equal false, changes.dig("payload", "research_output_evidence")
+      refute changes.fetch("evidence").any? { |entry| entry["purpose"] == "research_output" }
     end
   end
 
@@ -87,11 +117,11 @@ class ConditionsReconcilersExecuteTest < Minitest::Test
       assert_raises(Hive::Conditions::GenerationMismatch) do
         build_reconciler(task, store, attempt).reconcile(baseline_head: baseline)
       end
-      refute File.exist?(File.join(task.folder, "events.jsonl"))
+      refute File.exist?(File.join(task.folder, "task-journal.jsonl"))
     end
   end
 
-  def test_terminal_attempt_health_is_journaled_as_informational
+  def test_terminal_attempt_health_preserves_success_or_failure
     %w[succeeded failed].each do |outcome|
       with_fixture do |task, store, attempt, baseline|
         terminal = terminalize(store, attempt, outcome: outcome)
@@ -100,7 +130,8 @@ class ConditionsReconcilersExecuteTest < Minitest::Test
 
         assert_equal(outcome == "succeeded" ? "satisfied" : "unsatisfied", health.fetch("state"))
         assert_equal "attempt_terminal_#{outcome}", health.fetch("reason")
-        assert_equal true, health.dig("payload", "informational_after_terminal")
+        assert_equal outcome == "succeeded",
+                     health.dig("payload", "informational_after_terminal")
       end
     end
   end
@@ -140,7 +171,10 @@ class ConditionsReconcilersExecuteTest < Minitest::Test
           attempt_id: "attempt-1", request_id: "request-1", predecessor_attempt_id: nil,
           task_id: "42", project: "demo", task_slug: "task", intended_stage: "4-execute",
           task_generation: "owner-1", task_input_epoch: task_input_epoch,
-          progress_token: "progress", provider: "codex", starting_revision: baseline,
+          progress_token: "progress", provider: "codex",
+          worker_argv: [ "hive", "run", task.slug ],
+          claim_capability_digest: Hive::Attempts::Capability.digest("c" * 64),
+          starting_revision: baseline,
           retry_charge: 0, inherited_outputs: [], launch_timeout_sec: 30, now: Time.now.utc
         )
         yield task, store, attempt, baseline
@@ -157,7 +191,8 @@ class ConditionsReconcilersExecuteTest < Minitest::Test
   def terminalize(store, attempt, outcome:)
     now = Time.now.utc
     claimed = store.claim(
-      attempt, owner: { "pid" => 1 }, first_heartbeat_timeout_sec: 30, now: now
+      attempt, owner: { "pid" => 1 }, claim_capability: "c" * 64,
+      first_heartbeat_timeout_sec: 30, now: now
     )
     running = store.first_heartbeat(claimed, stale_sec: 30, now: now)
     store.terminalize(

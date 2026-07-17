@@ -186,6 +186,7 @@ module Hive
           "name" => project["name"],
           "path" => project["path"],
           "hive_state_path" => project["hive_state_path"],
+          "error" => "project_load_failed",
           "tasks" => [],
           "legacy_stage_dirs" => [],
           "legacy_migrate_command" => nil
@@ -319,6 +320,7 @@ module Hive
           "conditions" => row.dig(:projection_data, "conditions", "current") || [],
           "condition_history" => row.dig(:projection_data, "conditions", "history") || [],
           "evidence" => row.dig(:projection_data, "evidence") || [],
+          "condition_overrides" => row.dig(:projection_data, "condition_overrides") || [],
           "condition_gate" => row[:condition_gate],
           "condition_migration" => row[:condition_migration],
           "condition_provenance" => row.dig(:projection_data, "provenance") || {},
@@ -713,7 +715,7 @@ module Hive
                 next
               end
               marker = Hive::Markers.current(task.state_file)
-              projection = Hive::TaskProjection::Store.new(task_folder: task.folder).read(marker: marker)
+              marker, projection = status_projection(task, marker)
               folder_mtime = File.mtime(entry)
               mtime = File.exist?(task.state_file) ? File.mtime(task.state_file) : folder_mtime
               lock_holder = task_lock_holder(task)
@@ -805,6 +807,24 @@ module Hive
           end
         end
         drop_transient_stage_moves(rows)
+      end
+
+      def status_projection(task, marker)
+        projection = Hive::TaskProjection::Store.new(task_folder: task.folder).read(marker: marker)
+        [ marker, projection ]
+      rescue Hive::TaskProjection::Error, Hive::TaskJournal::Error,
+             SystemCallError, IOError => e
+        warn "hive: status: #{task.folder} condition projection failed " \
+             "(#{e.class}: #{e.message}); surfaced as an Error row"
+        error_marker = Hive::Markers::State.new(
+          name: :error,
+          attrs: {
+            "reason" => "condition_projection_invalid",
+            "message" => e.message.to_s[0, 500]
+          },
+          raw: nil
+        )
+        [ error_marker, Hive::TaskProjection.project(records: [], marker: error_marker) ]
       end
 
       def annotate_dependencies(rows, project, admission_context: nil)

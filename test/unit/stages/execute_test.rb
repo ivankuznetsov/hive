@@ -60,7 +60,9 @@ class HiveStagesExecuteTest < Minitest::Test
           intended_stage: "4-execute", task_generation: "owner-1",
           ownership_generation: "owner-1", task_input_epoch: 1,
           progress_token: Digest::SHA256.hexdigest(Hive::TaskProjection.canonical_json(policy)),
-          provider: "codex", starting_revision: baseline, retry_charge: 0,
+          provider: "codex", worker_argv: [ "hive", "run", task.folder ],
+          claim_capability_digest: Hive::Attempts::Capability.digest("c" * 64),
+          starting_revision: baseline, retry_charge: 0,
           inherited_outputs: [], launch_timeout_sec: 30, now: Time.now.utc
         )
         cfg = { "conditions" => { "authority" => "markers",
@@ -69,13 +71,13 @@ class HiveStagesExecuteTest < Minitest::Test
         observed = []
         Hive::Markers.define_singleton_method(:set) do |path, name, attrs = {}|
           projection_path = File.join(File.dirname(path), "task-projection.json")
-          journal_path = File.join(File.dirname(path), "events.jsonl")
+          journal_path = File.join(File.dirname(path), "task-journal.jsonl")
           observed << [ File.exist?(journal_path), File.exist?(projection_path), name ]
           original.call(path, name, attrs)
         end
 
         with_env("HIVE_ATTEMPT_STORE_ROOT" => File.join(dir, "attempts")) do
-          Hive::Attempts::Context.with(
+          with_attempt_context(
             attempt_id: attempt.attempt_id, task_generation: 1,
             ownership_generation: attempt.ownership_generation
           ) do

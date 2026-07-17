@@ -6,12 +6,13 @@ module Hive
   module Conditions
     class InvalidMigrationMode < Hive::Error; end
 
-    ModeSelection = Data.define(:configured, :effective, :handoff_complete) do
+    ModeSelection = Data.define(:configured, :effective, :handoff_complete, :authority_capable) do
       def to_h
         {
           "configured" => configured,
           "effective" => effective,
-          "handoff_complete" => handoff_complete
+          "handoff_complete" => handoff_complete,
+          "authority_capable" => authority_capable
         }
       end
     end
@@ -32,13 +33,29 @@ module Hive
         mode
       end
 
-      def selection(config:, stage:, projection:)
+      def selection(config:, stage:, projection:, rule: nil, registry: Hive::Conditions::Registry.default)
         configured = configured_mode(config, stage)
         data = projection.respond_to?(:to_h) ? projection.to_h : projection
-        attempt_id = data.dig("identity", "attempt_id")
+        attempt_id = data.dig("identity", "attempt_id") ||
+                     data.dig("journal", "attempts")&.last&.fetch("attempt_id", nil) ||
+                     data.dig("compatibility", "marker", "attrs", "attempt_id") ||
+                     data.dig("compatibility", "marker_fallback", "attrs", "attempt_id")
         handoff = !attempt_id.to_s.empty? && attempt_id != Hive::TaskJournal::LEGACY_ATTEMPT_ID
-        effective = handoff ? configured : "markers"
-        ModeSelection.new(configured: configured, effective: effective, handoff_complete: handoff)
+        capable = authority_capable?(rule: rule, stage: stage, registry: registry)
+        effective = handoff && capable ? configured : "markers"
+        ModeSelection.new(
+          configured: configured, effective: effective,
+          handoff_complete: handoff, authority_capable: capable
+        )
+      end
+
+      def authority_capable?(rule:, stage:, registry: Hive::Conditions::Registry.default)
+        return true unless rule
+        return false unless rule.authoritative_capable
+
+        (rule.required + rule.inhibitors).all? do |name|
+          registry.fetch(name).authoritative_for?(stage)
+        end
       end
 
       def validate_mode!(mode, stage)
@@ -51,7 +68,7 @@ module Hive
       end
 
       def ensure_legacy_baseline!(task:, writer:, marker:, head_sha:, branch:, workflow: "coding")
-        records = Hive::TaskProjection.read_journal(writer.path)
+        records = Hive::TaskProjection.read_journal(writer.path, attempt_store: writer.attempt_store)
         existing = records.find { |record| record["event_type"] == "legacy_baseline" }
         return existing if existing
 

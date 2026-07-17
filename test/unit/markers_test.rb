@@ -74,8 +74,9 @@ class MarkersTest < Minitest::Test
 
       attrs = Hive::Markers.current(file).attrs
       assert_equal "attempt-1", attrs["attempt_id"]
-      assert_equal "1", attrs["task_generation"]
+      assert_equal "generation-1", attrs["task_generation"]
       assert_equal "generation-1", attrs["ownership_generation"]
+      assert_equal "1", attrs["task_input_epoch"]
       assert_equal({ "reason" => "question" }, Hive::Markers.display_attrs(attrs))
     end
   end

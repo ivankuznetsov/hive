@@ -30,8 +30,8 @@ class AttemptsContextTest < Minitest::Test
       assert Hive::Attempts::Context.active?
       assert_equal(
         {
-          "attempt_id" => "attempt-1", "task_generation" => 7,
-          "ownership_generation" => "generation-1"
+          "attempt_id" => "attempt-1", "task_generation" => "generation-1",
+          "ownership_generation" => "generation-1", "task_input_epoch" => 7
         },
         Hive::Attempts::Context.projection
       )
@@ -125,7 +125,9 @@ class AttemptsContextTest < Minitest::Test
 
   def test_generation_is_revalidated_once_before_worker_side_effects
     task = FakeTask.new(id: 42, slug: "task", stage_index: 4, stage_name: "execute")
-    current = Struct.new(:task_generation).new("generation-current")
+    current = Struct.new(:task_generation, :ownership_generation, :task_input_epoch).new(
+      "generation-current", "generation-current", 0
+    )
     calls = 0
     test_case = self
     resolver = lambda do |task:, project:, intended_stage:|
@@ -153,6 +155,17 @@ class AttemptsContextTest < Minitest::Test
       error = assert_raises(Hive::ConcurrentRunError) { stale.validate_generation!(task) }
       assert_includes error.message, "generation is stale"
       assert_equal Hive::ExitCodes::TEMPFAIL, error.exit_code
+    end
+
+    epoch_stale = Hive::Attempts::Context.send(
+      :new, attempt_id: "attempt-epoch-stale", task_generation: 1,
+      ownership_generation: "generation-current", project: "demo", intended_stage: "4-execute"
+    )
+    current_epoch = Struct.new(:ownership_generation, :task_input_epoch).new(
+      "generation-current", 2
+    )
+    with_replaced_singleton_method(Hive::Attempts::Generation, :resolve, ->(**) { current_epoch }) do
+      assert_raises(Hive::ConcurrentRunError) { epoch_stale.validate_generation!(task) }
     end
   end
 
@@ -185,6 +198,13 @@ class AttemptsContextTest < Minitest::Test
     assert_raises(ArgumentError) do
       Hive::Attempts::Context.send(:new, attempt_id: "attempt", task_generation: -1)
     end
+
+    unreadable = Object.new
+    unreadable.define_singleton_method(:to_s) { raise TypeError, "not stringable" }
+    error = assert_raises(ArgumentError) do
+      Hive::Attempts::Context.send(:new, attempt_id: "attempt", task_generation: unreadable)
+    end
+    assert_includes error.message, "numeric task generation"
   end
 
   private
@@ -246,12 +266,5 @@ class AttemptsContextTest < Minitest::Test
     rescue Errno::EBADF
       nil
     end
-
-    unreadable = Object.new
-    unreadable.define_singleton_method(:to_s) { raise TypeError, "not stringable" }
-    error = assert_raises(ArgumentError) do
-      Hive::Attempts::Context.new(attempt_id: "attempt", task_generation: unreadable)
-    end
-    assert_includes error.message, "numeric task generation"
   end
 end

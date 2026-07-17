@@ -35,8 +35,9 @@ class LockTest < Minitest::Test
         )
 
         assert_equal "attempt-1", data["attempt_id"]
-        assert_equal 1, data["task_generation"]
+        assert_equal "generation-1", data["task_generation"]
         assert_equal "generation-1", data["ownership_generation"]
+        assert_equal 1, data["task_input_epoch"]
         assert_equal data, YAML.safe_load(File.read(File.join(dir, ".lock")))
       end
     ensure

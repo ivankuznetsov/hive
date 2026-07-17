@@ -216,9 +216,9 @@ class AdhocReviewIntegrationTest < Minitest::Test
   def test_review_pr_json_uses_standard_stage_action_envelope
     with_registered_project do |_repo, _hive_state, _worktree_root|
       with_adhoc_review_stubs do |_materialized|
-        out, _err, status = with_captured_exit { Hive::CLI.start([ "review", "--pr", "197", "--json" ]) }
+        out, err, status = with_captured_exit { Hive::CLI.start([ "review", "--pr", "197", "--json" ]) }
 
-        assert_equal Hive::ExitCodes::SUCCESS, status
+        assert_equal Hive::ExitCodes::SUCCESS, status, "stderr: #{err}\nstdout: #{out}"
         payload = JSON.parse(out)
         assert_equal "hive-stage-action", payload.fetch("schema")
         assert_equal "review", payload.fetch("verb")

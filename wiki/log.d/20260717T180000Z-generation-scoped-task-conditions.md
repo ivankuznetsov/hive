@@ -5,7 +5,7 @@ tags: [conditions, projection, journal, execute, status]
 ---
 
 - Added a strict, fsynced authoritative record path to task-local
-  `events.jsonl`, reusing durable attempt identity and adding numeric task and
+  `task-journal.jsonl`, reusing durable attempt identity and adding numeric task and
   commit generations without rewriting legacy attempts.
 - Added the seven-condition registry, typed evidence, pure supersession
   projection, cursor/hash-bound atomic snapshots, versioned execute policy,

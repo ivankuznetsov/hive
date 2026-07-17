@@ -127,6 +127,30 @@ class CommandsRunTest < Minitest::Test
     end
   end
 
+  def test_report_checks_execute_transition_before_emitting_completion
+    with_tmp_dir do |dir|
+      t = task(folder: dir, stage_name: "execute", stage_index: 4)
+      File.write(t.state_file, "# state\n<!-- EXECUTE_COMPLETE -->\n")
+      checked = []
+      guard = lambda do |guarded_task, config:|
+        checked << [ guarded_task, config ]
+        raise Hive::WrongStage, "condition gate blocked"
+      end
+      cfg = { conditions: { mode: "conditions" } }
+
+      error = with_replaced_singleton_method(Hive::Config, :load, ->(_root) { cfg }) do
+        with_replaced_singleton_method(Hive::Conditions::TransitionGuard, :validate!, guard) do
+          assert_raises(Hive::WrongStage) do
+            capture_io { command.send(:report, t, commit: nil, status: :execute_complete) }
+          end
+        end
+      end
+
+      assert_equal "condition gate blocked", error.message
+      assert_equal [ [ t, cfg ] ], checked
+    end
+  end
+
   def test_report_json_uses_disabled_rebase_fallback_and_cleanup_instructions
     run = command(json: true)
     t = task
@@ -344,6 +368,31 @@ class CommandsRunTest < Minitest::Test
     assert run.instance_variable_get(:@stdout_written)
   ensure
     JSON.define_singleton_method(:generate, original) if original
+  end
+
+  def test_condition_gate_error_envelope_preserves_gate_and_recovery_action
+    error = Hive::ConditionGateBlocked.new(
+      "blocked",
+      current_stage: "4-execute", target_stage: "5-open-pr",
+      condition_gate: {
+        "status" => "blocked", "transition" => "execute_to_open_pr",
+        "diagnostics" => [ { "condition" => "AgentHealthy", "state" => "unsatisfied" } ],
+        "waivers" => []
+      },
+      next_action: {
+        "kind" => Hive::Schemas::NextActionKind::RUN,
+        "reason" => "attempt_lost"
+      }
+    )
+
+    out, = capture_io { command(json: true).send(:emit_error_envelope, error) }
+    payload = JSON.parse(out)
+    assert_equal "blocked", payload.dig("condition_gate", "status")
+    assert_equal "AgentHealthy",
+                 payload.dig("condition_gate", "diagnostics", 0, "condition")
+    assert_equal Hive::Schemas::NextActionKind::RUN, payload.dig("next_action", "kind")
+    assert_equal "4-execute", payload.fetch("current_stage")
+    assert_equal "5-open-pr", payload.fetch("target_stage")
   end
 
   def test_durable_call_dispatches_worker_without_running_body_in_caller

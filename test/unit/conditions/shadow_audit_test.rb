@@ -35,6 +35,8 @@ class ConditionsShadowAuditTest < Minitest::Test
       records: records, allow_list: [], fixture_status: { "task-1849" => true }
     )
     assert ready.fetch("ready")
+    assert ready.fetch("parity_ready")
+    assert_equal false, ready.fetch("external_fixture_evidence_required")
     assert_equal false, ready.fetch("automatic_promotion")
 
     variants = [
@@ -53,6 +55,11 @@ class ConditionsShadowAuditTest < Minitest::Test
       )
       refute summary.fetch("ready")
     end
+
+    projection_only = Hive::Conditions::ShadowAudit.summary(records: records)
+    assert projection_only.fetch("parity_ready")
+    assert projection_only.fetch("external_fixture_evidence_required")
+    refute projection_only.fetch("ready")
   end
 
   def test_explained_mismatch_is_reported_but_does_not_count_as_unexplained

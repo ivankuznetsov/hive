@@ -129,6 +129,9 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
       "conditions" => [ condition ],
       "condition_history" => [ condition.merge("state" => "superseded") ],
       "evidence" => [ { "type" => "commit", "sha" => "b" * 40 } ],
+      "condition_overrides" => [ {
+        "reason" => "forced_condition_transition", "source_command" => "approve"
+      } ],
       "condition_gate" => { "status" => "eligible" },
       "condition_migration" => { "effective" => "conditions" },
       "condition_provenance" => { "projector" => "TaskProjection/v1" },
@@ -146,6 +149,7 @@ class HiveDaemonStatusConsumerTest < Minitest::Test
       assert_equal 2, row.commit_generation
       assert_equal "attempt-b", row.current_attempt
       assert_equal [ condition ], row.conditions
+      assert_equal "approve", row.condition_overrides.fetch(0).fetch("source_command")
       assert_equal "eligible", row.condition_gate.fetch("status")
       assert_equal "conditions", row.condition_migration.fetch("effective")
     end

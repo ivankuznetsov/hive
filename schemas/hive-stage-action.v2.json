@@ -253,6 +253,24 @@
         },
         "safe_correction": {
           "type": "string"
+        },
+        "condition_gate": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "next_action": {
+          "$ref": "#/$defs/ConditionRecoveryAction"
+        }
+      }
+    },
+    "ConditionRecoveryAction": {
+      "type": "object",
+      "required": ["kind"],
+      "additionalProperties": true,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["edit", "mv", "approve", "run", "recover_stale", "no_op"]
         }
       }
     },

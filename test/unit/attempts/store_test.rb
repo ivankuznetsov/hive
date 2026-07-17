@@ -183,6 +183,18 @@ class AttemptsStoreTest < Minitest::Test
     end
   end
 
+  def test_read_only_store_does_not_create_directories
+    with_tmp_dir do |dir|
+      root = File.join(dir, "missing-attempts")
+      store = Hive::Attempts::Store.new(root: root, create_directories: false)
+
+      refute File.exist?(root)
+      assert_nil store.fetch("missing")
+      assert_empty store.scan.records
+      refute File.exist?(root)
+    end
+  end
+
   def test_invalid_mutation_immutable_identity_and_unsafe_ids_fail_closed
     with_store do |store|
       launching = store.create_launching(**identity, launch_timeout_sec: 30, now: NOW)

@@ -84,6 +84,31 @@ class AttemptsSupervisorTest < Minitest::Test
     end
   end
 
+  def test_hive_worker_receives_capability_context_only_after_durable_checkpoint
+    worker_argv = [ "hive", "run", "durable-task" ]
+    with_attempt(worker_argv: worker_argv) do |store, attempt|
+      worker = <<~'RUBY'
+        context = IO.for_fd(Integer(ENV.fetch("HIVE_ATTEMPT_CONTEXT_FD")), "r")
+        gate = IO.for_fd(Integer(ENV.fetch("HIVE_ATTEMPT_GATE_FD")), "r")
+        abort "invalid capability" unless context.read == "c" * 64
+        abort "gate not released" unless gate.read(1) == "1"
+      RUBY
+      supervisor = Hive::Attempts::Supervisor.new(
+        store: store, attempt_id: attempt.attempt_id,
+        claim_io: StringIO.new(CLAIM_CAPABILITY),
+        heartbeat_sec: 0.01, stale_sec: 1, first_heartbeat_timeout_sec: 1
+      )
+      supervisor.define_singleton_method(:resolved_worker_argv) do |_record|
+        [ RbConfig.ruby, "-e", worker ]
+      end
+
+      assert_equal 0, Timeout.timeout(2) { supervisor.run }
+      terminal = store.fetch(attempt.attempt_id)
+      assert_equal "succeeded", terminal.outcome
+      assert terminal.worker.fetch("pid").positive?
+    end
+  end
+
   def test_timeout_and_heartbeat_continue_while_descendant_holds_output_pipe
     worker_argv = [
       "/bin/sh", "-c",

@@ -22,13 +22,13 @@ module Hive
     class Store
       attr_reader :root, :records_root, :logs_root, :outputs_root, :generation_locks_root
 
-      def initialize(root: Hive::Paths.attempts_root)
+      def initialize(root: Hive::Paths.attempts_root, create_directories: true)
         @root = File.expand_path(root)
         @records_root = File.join(@root, "records")
         @logs_root = File.join(@root, "logs")
         @outputs_root = File.join(@root, "outputs")
         @generation_locks_root = File.join(@root, "generation-locks")
-        ensure_private_directories!
+        ensure_private_directories! if create_directories
       end
 
       def create_launching(**attributes)

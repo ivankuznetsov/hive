@@ -28,8 +28,12 @@ module Hive
 
           {
             "attempt_id" => context.attempt_id,
-            "task_generation" => context.task_generation,
-            "ownership_generation" => context.ownership_generation
+            # Compatibility consumers have always treated task_generation as
+            # the opaque durable owner token. Keep that wire meaning stable;
+            # the numeric condition epoch is additive and explicitly named.
+            "task_generation" => context.ownership_generation,
+            "ownership_generation" => context.ownership_generation,
+            "task_input_epoch" => context.task_generation
           }
         end
 
@@ -142,6 +146,7 @@ module Hive
                      project: nil, task_slug: nil, intended_stage: nil)
         @attempt_id = attempt_id.to_s
         @task_generation, bridged_ownership = numeric_generation_or_legacy(task_generation)
+        @legacy_opaque_generation = !bridged_ownership.nil? && ownership_generation.nil?
         @ownership_generation = ownership_generation&.to_s || bridged_ownership
         @project = project&.to_s
         @task_slug = task_slug&.to_s
@@ -163,7 +168,9 @@ module Hive
         current = Generation.resolve(
           task: task, project: project, intended_stage: intended_stage
         )
-        unless current.ownership_generation == ownership_generation
+        ownership_matches = current.ownership_generation == ownership_generation
+        epoch_matches = @legacy_opaque_generation || current.task_input_epoch == task_generation
+        unless ownership_matches && epoch_matches
           raise Hive::ConcurrentRunError,
                 "durable attempt #{attempt_id} generation is stale; redispatch the current task state"
         end

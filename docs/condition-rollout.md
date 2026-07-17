@@ -1,7 +1,7 @@
 # Generation-scoped condition rollout
 
 Generation-scoped conditions are an execute-stage safety system. The durable
-`events.jsonl` journal is authoritative; `task-projection.json` is a validated,
+`task-journal.jsonl` journal is authoritative; `task-projection.json` is a validated,
 disposable materialized view; task markers remain a reversible compatibility
 surface. Inbox, brainstorm, plan, open-PR, review, artifacts, finalize, and
 archive transitions remain marker-authoritative in this increment.
@@ -55,10 +55,25 @@ Diagnostics distinguish `pending`, `unsatisfied`, and `unverifiable` facts.
 requirement. The current and historical condition arrays preserve the reason,
 attempt, generation, commit revision, evidence, and supersession provenance.
 
-Status is read-only: it validates the snapshot cursor/hash and replays the
-journal in memory when the snapshot is missing, stale, corrupt, or from an
-unsupported schema. It does not inspect git/GitHub, append a baseline/audit,
-or publish a repaired snapshot.
+Status is read-only: it validates the snapshot cursor/hash and revalidates the
+snapshot's unique current/predecessor attempt bindings against the durable
+attempt store. It replays and fully validates the journal in memory when the
+snapshot is missing, stale, corrupt, or from an unsupported schema, and fails
+closed if an authoritative attempt/lineage is missing, cyclic, or mismatched.
+After a durable snapshot or attempt-stamped `execute_*` marker proves condition
+handoff, a missing or empty journal is an error on both read and rebuild; the
+last snapshot is never replaced by an empty projection. Non-execute markers do
+not claim this execute-journal handoff.
+It does not inspect git/GitHub, append a baseline/audit, or publish a repaired
+snapshot.
+
+Blocked condition rows carry a reason-specific `next_action` even when the
+compatibility marker is stale. A blocked `hive run --json`, `hive approve
+--json`, or workflow-verb transition returns the same `condition_gate` and
+`next_action` instead of requiring prose parsing. `hive approve --force`
+records an idempotent `operator_action` before it advances; a failed audit
+append fails the override closed. Status exposes the latest 20 such overrides
+as `condition_overrides`, while the journal retains the complete history.
 
 ## Repairing a snapshot
 
@@ -100,7 +115,10 @@ bundle exec ruby -Itest test/unit/task_projection_replay_test.rb
 ```
 
 The `shadow_audit` status object reports counts and readiness evidence but
-cannot mutate configuration. Classify a mismatch from the journal evidence;
+cannot mutate configuration. `parity_ready` covers journal volume/category/
+drift/allow-list criteria; `ready` additionally requires externally supplied
+green fixture evidence and therefore remains false in the pure per-task status
+projection. Classify a mismatch from the journal evidence;
 fix the policy/reconciler/projection cause rather than adding a permanent
 allow-list entry. When the complete bar is green, an operator explicitly edits
 the project config to `4-execute: conditions` and observes the next transitions.

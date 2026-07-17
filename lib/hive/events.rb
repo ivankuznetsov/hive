@@ -48,7 +48,9 @@ module Hive
     # an O_APPEND single-syscall append is atomic against concurrent
     # appenders via the inode lock; we cap message size (see
     # MAX_MESSAGE_BYTES) so the full line stays small and well-defined.
-    # status.md is derived state and is rewritten with atomic rename.
+    # Authoritative condition records use task-journal.jsonl instead, keeping
+    # this legacy telemetry contract homogeneous. status.md is derived state
+    # and is rewritten with atomic rename.
     def emit(task_folder:, slug:, stage:, event_type:, agent: nil, message: nil)
       event_type = event_type.to_sym
       unless EVENT_TYPES.include?(event_type)

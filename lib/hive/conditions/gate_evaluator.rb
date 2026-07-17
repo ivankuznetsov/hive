@@ -22,12 +22,11 @@ module Hive
         @rule = rule
       end
 
-      def evaluate(research: false, research_evidence: false)
+      def evaluate(research: false, research_evidence: nil)
         diagnostics = []
         waivers = []
         @rule.required.each do |name|
           fact = current(name)
-          next if terminal_agent_health_informational?(name, fact)
           next if fact && fact["state"] == "satisfied"
           if research_waiver?(name, fact, research: research, research_evidence: research_evidence)
             waivers << {
@@ -80,14 +79,18 @@ module Hive
         }
       end
 
-      def terminal_agent_health_informational?(name, fact)
-        name == "AgentHealthy" && fact&.dig("payload", "informational_after_terminal") == true
-      end
-
       def research_waiver?(name, fact, research:, research_evidence:)
+        evidence_present = if research_evidence.nil?
+          fact&.dig("payload", "research_output_evidence") == true &&
+            Array(fact&.fetch("evidence", [])).any? do |entry|
+              entry["type"] == "file" && entry["purpose"] == "research_output"
+            end
+        else
+          research_evidence == true
+        end
         name == "ChangesPresent" &&
           @rule.options["no_commit_success"] == true &&
-          research && research_evidence &&
+          research && evidence_present &&
           fact&.fetch("state", nil) == "unsatisfied" &&
           fact&.fetch("reason", nil) == "research_no_commit"
       end

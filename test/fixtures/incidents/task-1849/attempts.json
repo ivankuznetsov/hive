@@ -1,7 +1,7 @@
 {
   "source": "sanitized durable-attempt replay metadata",
   "attempts": [
-    { "attempt_id": "attempt-a", "ownership_generation": "ownership-a", "task_input_epoch": 1, "state": "terminal", "outcome": "succeeded", "starting_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
-    { "attempt_id": "attempt-b", "ownership_generation": "ownership-b", "task_input_epoch": 1, "state": "terminal", "outcome": "succeeded", "starting_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
+    { "attempt_id": "attempt-a", "task_slug": "sanitized-1849", "task_id": "1849", "intended_stage": "4-execute", "ownership_generation": "ownership-a", "task_input_epoch": 1, "state": "terminal", "outcome": "succeeded", "starting_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+    { "attempt_id": "attempt-b", "task_slug": "sanitized-1849", "task_id": "1849", "intended_stage": "4-execute", "ownership_generation": "ownership-b", "task_input_epoch": 1, "state": "terminal", "outcome": "succeeded", "starting_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
   ]
 }

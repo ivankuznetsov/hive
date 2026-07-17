@@ -49,6 +49,28 @@ class ConditionsMigrationTest < Minitest::Test
     end
   end
 
+  def test_non_authoritative_descriptor_rule_cannot_activate_condition_authority
+    rule = Hive::Conditions::Policy.rule_from_descriptor({
+      "transition" => "custom_execute",
+      "required" => [ "ChangesPresent" ],
+      "inhibitors" => [ "AwaitingHuman" ]
+    })
+    selection = Hive::Conditions::Migration.selection(
+      config: {
+        "conditions" => {
+          "authority" => "markers", "stages" => { "4-execute" => "conditions" }
+        }
+      },
+      stage: "4-execute", projection: { "identity" => { "attempt_id" => "attempt-1" } },
+      rule: rule
+    )
+
+    refute selection.authority_capable
+    assert selection.handoff_complete
+    assert_equal "conditions", selection.configured
+    assert_equal "markers", selection.effective
+  end
+
   def test_legacy_baseline_is_written_once_only_at_explicit_mutating_boundary
     with_tmp_dir do |dir|
       task = TaskStub.new(id: 42, slug: "legacy-task")

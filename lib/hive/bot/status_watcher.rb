@@ -9,7 +9,7 @@ module Hive
                         :attrs, :folder, :state_file, :pr_url, :state_file_mtime, :age_seconds,
                         :action, :action_label, :suggested_command, :next_action, :diagnostic,
                         :condition_task_generation, :commit_generation, :current_attempt,
-                        :conditions, :condition_history, :evidence, :condition_gate,
+                        :conditions, :condition_history, :evidence, :condition_overrides, :condition_gate,
                         :condition_migration, :condition_provenance, :shadow_audit,
                         :condition_warning) do
         def initialize(project:, slug:, id: nil, display_name: nil, project_path: nil, hive_state_path: nil,
@@ -18,7 +18,7 @@ module Hive
                        action: nil, action_label: nil, suggested_command: nil,
                        next_action: nil, diagnostic: nil, condition_task_generation: nil,
                        commit_generation: nil, current_attempt: nil, conditions: [],
-                       condition_history: [], evidence: [], condition_gate: nil,
+                       condition_history: [], evidence: [], condition_overrides: [], condition_gate: nil,
                        condition_migration: nil, condition_provenance: {}, shadow_audit: {},
                        condition_warning: nil)
           # Explicit-keyword super (matching Snapshot::Row) rather than the
@@ -34,6 +34,7 @@ module Hive
             condition_task_generation: condition_task_generation,
             commit_generation: commit_generation, current_attempt: current_attempt,
             conditions: conditions, condition_history: condition_history, evidence: evidence,
+            condition_overrides: condition_overrides,
             condition_gate: condition_gate, condition_migration: condition_migration,
             condition_provenance: condition_provenance, shadow_audit: shadow_audit,
             condition_warning: condition_warning
@@ -314,6 +315,7 @@ module Hive
               conditions: Array(task["conditions"]),
               condition_history: Array(task["condition_history"]),
               evidence: Array(task["evidence"]),
+              condition_overrides: Array(task["condition_overrides"]),
               condition_gate: task["condition_gate"],
               condition_migration: task["condition_migration"],
               condition_provenance: task["condition_provenance"] || {},

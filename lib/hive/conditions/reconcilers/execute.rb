@@ -1,3 +1,4 @@
+require "digest"
 require "hive/conditions/generation_tracker"
 require "hive/git_ops"
 require "hive/task_journal"
@@ -20,7 +21,9 @@ module Hive
           @writer = writer || Hive::TaskJournal::Writer.new(
             task_folder: task.folder, attempt_store: attempt_store
           )
-          @projection_store = projection_store || Hive::TaskProjection::Store.new(task_folder: task.folder)
+          @projection_store = projection_store || Hive::TaskProjection::Store.new(
+            task_folder: task.folder, attempt_store: attempt_store
+          )
           @git_ops = git_ops || Hive::GitOps.new(task.worktree_path)
           @generation_tracker = generation_tracker
           @workflow_policy = workflow_policy
@@ -28,8 +31,11 @@ module Hive
         end
 
         def reconcile(baseline_head: nil, waiting_reason: nil, research: false,
-                      generation_reason: "accepted_input_changed", invalidation_token: nil)
-          records = Hive::TaskProjection.read_journal(@writer.path)
+                      research_evidence: false, generation_reason: "accepted_input_changed",
+                      invalidation_token: nil)
+          records = Hive::TaskProjection.read_journal(
+            @writer.path, attempt_store: @writer.attempt_store
+          )
           generation = @generation_tracker.resolve(
             task: @task, records: records, workflow_policy: @workflow_policy,
             operator_decisions: @operator_decisions, reason: generation_reason,
@@ -48,8 +54,8 @@ module Hive
           )
           observations = build_observations(
             records: records, generation: generation, commit: commit, worktree: worktree,
-            baseline_head: baseline_head || @attempt["starting_revision"],
-            waiting_reason: waiting_reason, research: research
+            baseline_head: baseline_head || @attempt["starting_revision"], waiting_reason: waiting_reason,
+            research: research, research_evidence: research_evidence
           )
           fresh = observations.reject { |observation| already_recorded?(records, observation) }
           append_result = fresh.empty? ? nil : @writer.append_batch(fresh)
@@ -74,7 +80,7 @@ module Hive
         end
 
         def build_observations(records:, generation:, commit:, worktree:, baseline_head:,
-                               waiting_reason:, research:)
+                               waiting_reason:, research:, research_evidence:)
           observations = []
           observations << generation_event(generation) if generation.advanced
           observations << commit_event(generation, commit) if commit.advanced
@@ -83,10 +89,12 @@ module Hive
           changes_state, changes_reason = changes_outcome(
             worktree: worktree, baseline_head: baseline_head, research: research
           )
+          output_evidence = research && research_evidence ? research_output_evidence : nil
           observations << condition_event(
             "ChangesPresent", state: changes_state, reason: changes_reason,
             generation: generation, commit: commit,
-            evidence: changes_evidence(worktree, commit, changes_reason)
+            evidence: changes_evidence(worktree, commit, changes_reason, output_evidence: output_evidence),
+            payload: { "research_output_evidence" => !output_evidence.nil? }
           )
 
           wait_reason = waiting_reason || derived_wait_reason(
@@ -136,7 +144,11 @@ module Hive
           end
           condition_event(
             "AgentHealthy", state: state, reason: reason, generation: generation, commit: commit,
-            evidence: [ attempt_evidence ], payload: { "informational_after_terminal" => @attempt.final? }
+            evidence: [ attempt_evidence ],
+            payload: {
+              "informational_after_terminal" =>
+                @attempt.state == "terminal" && @attempt.outcome == "succeeded"
+            }
           )
         end
 
@@ -149,8 +161,8 @@ module Hive
           [ "unsatisfied", "no_worktree_changes" ]
         end
 
-        def changes_evidence(worktree, commit, reason)
-          if worktree[:head]
+        def changes_evidence(worktree, commit, reason, output_evidence: nil)
+          evidence = if worktree[:head]
             [ commit_evidence(worktree[:head], worktree[:branch]).merge(
               "dirty" => worktree[:dirty], "observation" => reason
             ) ]
@@ -164,6 +176,22 @@ module Hive
               }
             ]
           end
+          evidence << output_evidence if output_evidence
+          evidence
+        end
+
+        def research_output_evidence
+          path = @task.state_file
+          return nil unless File.file?(path)
+
+          {
+            "type" => "file",
+            "path" => File.basename(path),
+            "digest" => ::Digest::SHA256.file(path).hexdigest,
+            "purpose" => "research_output"
+          }
+        rescue SystemCallError, IOError
+          nil
         end
 
         def derived_wait_reason(worktree:, changes_state:, changes_reason:, research:)
@@ -198,7 +226,9 @@ module Hive
             provenance: {
               "source" => "execute_reconciler",
               "attempt_id" => @attempt.attempt_id,
-              "lease_version" => @attempt.lease_version
+              "lease_version" => @attempt.lease_version,
+              "attempt_accepted_at" => @attempt["accepted_at"],
+              "predecessor_attempt_id" => @attempt["predecessor_attempt_id"]
             },
             payload: payload
           }

@@ -59,7 +59,12 @@ class ConditionsGateEvaluatorTest < Minitest::Test
     })
     projection = projection(
       "AgentHealthy" => fact("AgentHealthy", "satisfied"),
-      "ChangesPresent" => fact("ChangesPresent", "unsatisfied", reason: "research_no_commit"),
+      "ChangesPresent" => fact(
+        "ChangesPresent", "unsatisfied", reason: "research_no_commit",
+        payload: { "research_output_evidence" => true },
+        evidence: [ { "type" => "file", "path" => "task.md", "digest" => "a" * 64,
+                      "purpose" => "research_output" } ]
+      ),
       "AwaitingHuman" => fact("AwaitingHuman", "unsatisfied")
     )
 
@@ -67,12 +72,12 @@ class ConditionsGateEvaluatorTest < Minitest::Test
                                                .evaluate(research: true, research_evidence: false)
     assert_equal :blocked, denied.status
     allowed = Hive::Conditions::GateEvaluator.new(projection: projection, rule: rule)
-                                                .evaluate(research: true, research_evidence: true)
+                                                .evaluate(research: true)
     assert allowed.eligible?
     assert_equal "no_commit_success", allowed.waivers.first.fetch("reason")
   end
 
-  def test_terminal_agent_health_is_informational
+  def test_failed_terminal_agent_health_remains_a_blocking_negative
     result = evaluate(
       "AgentHealthy" => fact(
         "AgentHealthy", "unsatisfied", payload: { "informational_after_terminal" => true }
@@ -80,7 +85,8 @@ class ConditionsGateEvaluatorTest < Minitest::Test
       "ChangesPresent" => fact("ChangesPresent", "satisfied"),
       "AwaitingHuman" => fact("AwaitingHuman", "unsatisfied")
     )
-    assert result.eligible?
+    assert_equal :blocked, result.status
+    assert_equal "AgentHealthy", result.diagnostics.first.fetch("condition")
   end
 
   private
@@ -96,7 +102,10 @@ class ConditionsGateEvaluatorTest < Minitest::Test
     { "conditions" => { "current" => facts.values, "history" => [] } }
   end
 
-  def fact(name, state, reason: "observed", payload: {})
-    { "condition" => name, "state" => state, "reason" => reason, "payload" => payload }
+  def fact(name, state, reason: "observed", payload: {}, evidence: [])
+    {
+      "condition" => name, "state" => state, "reason" => reason,
+      "payload" => payload, "evidence" => evidence
+    }
   end
 end

@@ -12,7 +12,8 @@ module Hive
     # generation lock; callers can only observe snapshots.
     class Record
       SCHEMA = "hive-attempt"
-      SCHEMA_VERSION = 1
+      SCHEMA_VERSION = 2
+      SUPPORTED_SCHEMA_VERSIONS = [ 1, SCHEMA_VERSION ].freeze
       STATES = %w[launching running terminal lost].freeze
       TERMINAL_OUTCOMES = %w[succeeded failed cancelled].freeze
       FINAL_STATES = %w[terminal lost].freeze
@@ -169,6 +170,7 @@ module Hive
 
       def initialize(data)
         @data = self.class.deep_copy(data)
+        validate_source_schema!
         normalize_generation_bridge!
         validate!
         @data.freeze
@@ -227,9 +229,6 @@ module Hive
         missing = REQUIRED_KEYS - @data.keys
         raise InvalidRecord, "attempt record missing #{missing.join(', ')}" unless missing.empty?
         raise InvalidRecord, "attempt record has invalid schema" unless @data["schema"] == SCHEMA
-        unless @data["schema_version"] == SCHEMA_VERSION
-          raise InvalidRecord, "attempt record has unsupported schema_version #{@data['schema_version'].inspect}"
-        end
         raise InvalidRecord, "attempt record has invalid state" unless STATES.include?(state)
         unless @data["lease_version"].is_a?(Integer) && @data["lease_version"] >= 0
           raise InvalidRecord, "attempt record lease_version must be non-negative"
@@ -274,6 +273,14 @@ module Hive
         raise InvalidRecord, e.message
       end
 
+      def validate_source_schema!
+        raise InvalidRecord, "attempt record has invalid schema" unless @data["schema"] == SCHEMA
+        return if SUPPORTED_SCHEMA_VERSIONS.include?(@data["schema_version"])
+
+        raise InvalidRecord,
+              "attempt record has unsupported schema_version #{@data['schema_version'].inspect}"
+      end
+
       def validate_state_fields!
         if state == "terminal"
           raise InvalidRecord, "terminal attempt requires an outcome" unless TERMINAL_OUTCOMES.include?(outcome)
@@ -308,13 +315,16 @@ module Hive
       end
 
       def normalize_generation_bridge!
+        return unless @data["schema_version"] == 1
+
         @data["ownership_generation"] ||= @data["task_generation"]
         @data["task_input_epoch"] = 0 unless @data.key?("task_input_epoch")
         receipt = @data["receipt"]
-        return unless receipt.is_a?(Hash)
-
-        receipt["ownership_generation"] ||= @data["ownership_generation"]
-        receipt["task_input_epoch"] = @data["task_input_epoch"] unless receipt.key?("task_input_epoch")
+        if receipt.is_a?(Hash)
+          receipt["ownership_generation"] ||= @data["ownership_generation"]
+          receipt["task_input_epoch"] = @data["task_input_epoch"] unless receipt.key?("task_input_epoch")
+        end
+        @data["schema_version"] = SCHEMA_VERSION
       end
 
       class << self

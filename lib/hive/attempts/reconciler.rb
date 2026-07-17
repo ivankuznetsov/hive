@@ -148,7 +148,7 @@ module Hive
 
         marker = Hive::Markers.current(task.state_file)
         attrs = marker.attrs.to_h
-        generation_matches = attrs["task_generation"].to_s == record.task_input_epoch.to_s ||
+        generation_matches = attrs["task_input_epoch"].to_s == record.task_input_epoch.to_s ||
                              attrs["task_generation"] == record.task_generation
         ownership_matches = attrs["ownership_generation"].nil? ||
                             attrs["ownership_generation"] == record.ownership_generation

@@ -46,11 +46,11 @@ module Hive
         mismatches = audits.reject { |record| record.dig("payload", "match") == true }
         unexplained = mismatches.reject { |record| record.dig("payload", "explained") == true }
         fixtures = fixture_status.to_h.transform_keys(&:to_s)
-        ready = audits.size >= MINIMUM_TRANSITIONS &&
-                categories.values.all?(&:positive?) &&
-                unexplained.empty? &&
-                allow_list.empty? &&
-                !fixtures.empty? && fixtures.values.all? { |value| value == true }
+        parity_ready = audits.size >= MINIMUM_TRANSITIONS &&
+                       categories.values.all?(&:positive?) &&
+                       unexplained.empty? &&
+                       allow_list.empty?
+        fixture_ready = !fixtures.empty? && fixtures.values.all? { |value| value == true }
         {
           "total_transitions" => audits.size,
           "categories" => categories,
@@ -58,7 +58,9 @@ module Hive
           "unexplained_mismatches" => unexplained.size,
           "allow_list" => allow_list,
           "fixtures" => fixtures,
-          "ready" => ready,
+          "parity_ready" => parity_ready,
+          "external_fixture_evidence_required" => fixtures.empty?,
+          "ready" => parity_ready && fixture_ready,
           "automatic_promotion" => false
         }
       end

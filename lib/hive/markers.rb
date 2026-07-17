@@ -46,7 +46,9 @@ module Hive
     # code here updates both consumers; previously each module had its
     # own private copy and would drift on edit.
     KILL_CLASS_EXIT_CODES = %w[130 137 143].freeze
-    INTERNAL_ATTR_KEYS = %w[marker_id attempt_id task_generation ownership_generation].freeze
+    INTERNAL_ATTR_KEYS = %w[
+      marker_id attempt_id task_generation ownership_generation task_input_epoch
+    ].freeze
 
     State = Struct.new(:name, :attrs, :raw, keyword_init: true) do
       def none?

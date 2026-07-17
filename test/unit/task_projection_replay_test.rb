@@ -45,14 +45,14 @@ class TaskProjectionReplayTest < Minitest::Test
     error = assert_raises(HiveTestSupport::TaskProjectionReplay::InvalidFixture) do
       replay(TASK_1849).replay(shuffle: true)
     end
-    assert_match(/digest mismatch for events\.jsonl/, error.message)
+    assert_match(/digest mismatch for task-journal\.jsonl/, error.message)
   end
 
   def test_synthetic_events_require_declared_source_provenance
     with_tmp_dir do |dir|
       bundle = File.join(dir, "task-1849")
       FileUtils.cp_r(TASK_1849, bundle)
-      journal = File.join(bundle, "events.jsonl")
+      journal = File.join(bundle, "task-journal.jsonl")
       content = File.read(journal).sub(
         '"source":"incident_reconstruction","synthetic":true',
         '"source":"","synthetic":true'
@@ -60,7 +60,7 @@ class TaskProjectionReplayTest < Minitest::Test
       File.write(journal, content)
       manifest_path = File.join(bundle, "manifest.json")
       manifest = JSON.parse(File.read(manifest_path))
-      manifest.fetch("files")["events.jsonl"] = ::Digest::SHA256.file(journal).hexdigest
+      manifest.fetch("files")["task-journal.jsonl"] = ::Digest::SHA256.file(journal).hexdigest
       File.write(manifest_path, JSON.pretty_generate(manifest))
 
       error = assert_raises(HiveTestSupport::TaskProjectionReplay::InvalidFixture) do
@@ -76,6 +76,23 @@ class TaskProjectionReplayTest < Minitest::Test
     assert_equal "sample-current", result.manifest.fetch("incident")
     assert_equal "sample-attempt", result.canonical.dig("identity", "attempt_id")
     assert_equal "eligible", result.canonical.dig("gate", "status")
+  end
+
+  def test_attempt_metadata_independently_rejects_forged_journal_task_identity
+    with_tmp_dir do |dir|
+      bundle = File.join(dir, "sample-current")
+      FileUtils.cp_r(File.join(FIXTURES, "sample-current"), bundle)
+      attempts_path = File.join(bundle, "attempts.json")
+      attempts = JSON.parse(File.read(attempts_path))
+      attempts.fetch("attempts").first["task_slug"] = "different-task"
+      File.write(attempts_path, JSON.pretty_generate(attempts))
+      manifest_path = File.join(bundle, "manifest.json")
+      manifest = JSON.parse(File.read(manifest_path))
+      manifest.fetch("files")["attempts.json"] = ::Digest::SHA256.file(attempts_path).hexdigest
+      File.write(manifest_path, JSON.pretty_generate(manifest))
+
+      assert_raises(Hive::TaskProjection::InvalidJournal) { replay(bundle).replay }
+    end
   end
 
   private

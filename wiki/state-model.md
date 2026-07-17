@@ -154,20 +154,38 @@ admission wait is unchanged but cannot mask a later prerequisite advance.
 
 ## Task condition journal and projection
 
-The existing task-local `events.jsonl` now carries two durability contracts.
-Legacy telemetry remains fail-soft. Versioned condition/generation/evidence/
-audit records are appended synchronously through `Hive::TaskJournal::Writer`
-with a task-local journal flock, complete JSON-line batch, flush, and fsync.
-Those records reuse the durable attempt ID from [[modules/attempts]] and add a
-numeric task input epoch plus exact-HEAD commit generation.
+The task-local durability contracts are deliberately separate. Legacy,
+fail-soft operational telemetry remains in `events.jsonl` under
+`Hive::Events`. Versioned condition/generation/evidence/audit records live in
+the strict `task-journal.jsonl` and are appended synchronously through
+`Hive::TaskJournal::Writer` with a separate task-local journal flock, complete
+JSON-line batch, short-write retry, flush, and fsync. A failed append truncates
+and re-syncs to the pre-append byte boundary before reporting failure. Those
+records reuse the durable attempt ID from [[modules/attempts]] and add a
+numeric task input epoch plus exact-HEAD commit generation. Projection replay
+applies the same structural, schema-version, and durable attempt task/stage/
+generation checks as the writer; unknown record shapes fail closed.
+Validation follows predecessor lineage and rejects missing, incompatible, or
+cyclic links. Projection selection uses that causal chain before timestamps,
+so clock regression cannot reverse retry order.
 
 `<task>/task-projection.json` is an atomic, disposable materialized view bound
 to the journal cursor, last event ID, and SHA-256. It contains projected
 identity, current and superseded conditions, evidence, gate diagnostics,
 compatibility state, provenance, and shadow audit. Missing/corrupt/stale views
-replay from the journal without git/GitHub calls. Status replay is read-only;
-the next mutating execute boundary republishes the view. See
-[[modules/conditions]].
+replay from the journal without git/GitHub calls. A binding-matched cached view
+hashes the journal bytes and revalidates each unique current/predecessor attempt
+binding, including mutable state/outcome/lease; changed bindings take the full
+parse/replay path. A missing or empty journal after a durable snapshot or
+attempt-stamped `execute_*` marker fails both read and rebuild without
+replacing the last snapshot; non-execute markers do not claim an execute
+condition-journal handoff. Status replay is
+read-only; the next mutating execute boundary republishes the view. The view
+also carries at most the latest 20 `condition_overrides` projected from forced-
+transition `operator_action` records; the journal keeps all of them. Terminal/
+lost attempt state reconciles current `AgentHealthy` even before the daemon
+lifecycle observation lands.
+See [[modules/conditions]].
 
 ## Runtime dispatch queue and web snapshots
 

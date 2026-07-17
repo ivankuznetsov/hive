@@ -4,10 +4,12 @@
   "source": "minimal authored fixture",
   "sanitization": "No production data.",
   "state_file": "task.md",
-  "journal": "events.jsonl",
+  "journal": "task-journal.jsonl",
+  "attempts_file": "attempts.json",
   "expected_projection": "expected-projection.json",
   "files": {
-    "events.jsonl": "641b13e235bc08ec45871bfaf443a52b4500a2c8135b415ef99b49331c78bac2",
+    "task-journal.jsonl": "641b13e235bc08ec45871bfaf443a52b4500a2c8135b415ef99b49331c78bac2",
+    "attempts.json": "0cd6cca34439f9d60ed673e600085d8255000a2e168492d6195cbbbb2bd5394e",
     "task.md": "ad7ee17e92462822017df7829116486bf57c66ae916a2b08fd32a45bc0546321",
     "expected-projection.json": "85875e9fb29021eaac712fe25c951742662146a58032500e9215c9ff98a8c850"
   },

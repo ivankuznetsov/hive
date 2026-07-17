@@ -33,7 +33,7 @@ module HiveTestSupport
         verify_files!(task_folder)
 
         marker = Hive::Markers.current(File.join(task_folder, manifest.fetch("state_file")))
-        projection = Hive::TaskProjection::Store.new(task_folder: task_folder).read(marker: marker)
+        projection = projection_store(task_folder).read(marker: marker)
         canonical = canonical_projection(projection)
         expected = JSON.parse(File.read(File.join(task_folder, manifest.fetch("expected_projection"))))
         unless Hive::TaskProjection.canonical_json(canonical) == Hive::TaskProjection.canonical_json(expected)
@@ -115,7 +115,7 @@ module HiveTestSupport
     end
 
     def prepare_snapshot(task_folder, mode)
-      store = Hive::TaskProjection::Store.new(task_folder: task_folder)
+      store = projection_store(task_folder)
       case mode.to_sym
       when :missing
         nil
@@ -137,6 +137,26 @@ module HiveTestSupport
       path = File.join(task_folder, manifest.fetch("journal"))
       lines = File.readlines(path)
       File.write(path, lines.reverse.join)
+    end
+
+    def projection_store(task_folder)
+      Hive::TaskProjection::Store.new(
+        task_folder: task_folder, attempt_store: fixture_attempt_store(task_folder)
+      )
+    end
+
+    def fixture_attempt_store(task_folder)
+      metadata = JSON.parse(File.read(File.join(task_folder, manifest.fetch("attempts_file"))))
+      attempts = metadata.fetch("attempts").to_h do |attributes|
+        attempt = attributes.dup
+        attempt.define_singleton_method(:attempt_id) { fetch("attempt_id") }
+        attempt.define_singleton_method(:task_input_epoch) { fetch("task_input_epoch") }
+        attempt.define_singleton_method(:ownership_generation) { fetch("ownership_generation") }
+        [ attempt.fetch("attempt_id"), attempt ]
+      end
+      Object.new.tap do |store|
+        store.define_singleton_method(:fetch) { |attempt_id| attempts[attempt_id] }
+      end
     end
 
     def canonical_projection(projection)

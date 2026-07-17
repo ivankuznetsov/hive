@@ -85,7 +85,9 @@ module Hive
       private
 
       def journal_records(task)
-        Hive::TaskProjection.read_journal(File.join(task_folder(task), "events.jsonl"))
+        Hive::TaskProjection.read_journal(
+          File.join(task_folder(task), Hive::TaskJournal::JOURNAL_BASENAME)
+        )
       end
 
       def task_folder(task)

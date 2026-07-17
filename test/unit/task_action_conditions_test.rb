@@ -48,14 +48,85 @@ class TaskActionConditionsTest < Minitest::Test
     end
   end
 
-  def test_research_evidence_accepts_marker_or_execute_output_and_fails_closed_on_io
+  def test_blocked_condition_action_uses_diagnostic_even_when_marker_is_stale
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      stale = marker(:execute_complete)
+      lost = observation(
+        "agent-lost", "AgentHealthy", "unsatisfied", "attempt_lost",
+        [ { "type" => "attempt_lease", "attempt_id" => "attempt-b",
+            "lease_version" => 2, "state" => "lost", "outcome" => nil } ]
+      )
+      records = satisfied_records.reject { |record| record["event_id"] == "agent" } + [ lost ]
+      action = Hive::TaskAction.for(
+        task,
+        projection: Hive::TaskProjection.project(records: records, marker: stale),
+        config: condition_config("conditions")
+      )
+
+      assert_equal "needs_input", action.key
+      next_action = action.next_action
+      assert_equal Hive::Schemas::NextActionKind::RUN, next_action.fetch("kind")
+      assert_equal "AgentHealthy", next_action.fetch("condition")
+      assert_equal "attempt_lost", next_action.fetch("reason")
+      assert_equal dir, next_action.fetch("target")
+      assert_includes next_action.fetch("rerun_with"), "hive develop"
+    end
+  end
+
+  def test_pending_condition_action_explicitly_requests_reconciliation
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      stale = marker(:execute_complete, "attempt_id" => "attempt-b")
+      action = Hive::TaskAction.for(
+        task,
+        projection: Hive::TaskProjection.project(records: [], marker: stale),
+        config: condition_config("conditions")
+      )
+
+      next_action = action.next_action
+      assert_equal Hive::Schemas::NextActionKind::NO_OP, next_action.fetch("kind")
+      assert_equal "condition_reconciliation_required", next_action.fetch("reason")
+      assert_equal "AgentHealthy", next_action.fetch("condition")
+    end
+  end
+
+  def test_hash_gate_and_unverifiable_evidence_build_typed_recovery_actions
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      pending = Hive::Conditions::RecoveryAction.build(
+        task: task,
+        gate: { "diagnostics" => [
+          { "condition" => "AgentHealthy", "state" => "missing", "code" => "missing" }
+        ] }
+      )
+      assert_equal Hive::Schemas::NextActionKind::NO_OP, pending.fetch("kind")
+
+      marker = marker(:execute_waiting, "reason" => "evidence_unverifiable")
+      action = Hive::ExecuteWaitingAction.build(task, marker)
+      assert_equal Hive::Schemas::NextActionKind::EDIT, action.fetch("kind")
+      assert_equal dir, action.fetch("target")
+    end
+  end
+
+  def test_research_evidence_comes_only_from_the_current_journal_projection
     with_tmp_dir do |dir|
       task = build_task(dir)
       File.write(File.join(dir, "plan.md"), "---\nexecution_mode: research\n---\nplan\n")
 
+      evidence = [
+        { "type" => "commit", "sha" => "b" * 40, "branch" => "task" },
+        { "type" => "file", "path" => "task.md", "digest" => "c" * 64,
+          "purpose" => "research_output" }
+      ]
+      research = observation(
+        "research", "ChangesPresent", "unsatisfied", "research_no_commit", evidence,
+        "research_output_evidence" => true
+      )
       completed = marker(:execute_complete, "mode" => "research")
       action = Hive::TaskAction.new(
-        task, completed, projection: Hive::TaskProjection.project(records: [], marker: completed)
+        task, completed,
+        projection: Hive::TaskProjection.project(records: satisfied_records + [ research ], marker: completed)
       )
       assert action.send(:research_evidence?)
 
@@ -64,9 +135,6 @@ class TaskActionConditionsTest < Minitest::Test
       action = Hive::TaskAction.new(
         task, waiting, projection: Hive::TaskProjection.project(records: [], marker: waiting)
       )
-      assert action.send(:research_evidence?)
-
-      File.delete(task.state_file)
       refute action.send(:research_evidence?)
     end
   end
@@ -84,7 +152,20 @@ class TaskActionConditionsTest < Minitest::Test
     end
   end
 
-  def test_projection_loading_supports_folderless_tasks_and_store_failures
+  def test_research_frontmatter_uses_shared_parser_for_crlf_and_eof_closing_delimiter
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      File.binwrite(File.join(dir, "plan.md"), "---\r\nexecution_mode: research\r\n---")
+      action = Hive::TaskAction.new(
+        task, marker(:execute_waiting),
+        projection: Hive::TaskProjection.project(records: [], marker: marker(:execute_waiting))
+      )
+
+      assert action.send(:research_execution?)
+    end
+  end
+
+  def test_projection_loading_supports_folderless_tasks_and_propagates_store_failures
     folderless = TaskStub.new(
       folder: nil, state_file: "/tmp/folderless-task.md", slug: "folderless",
       stage_index: 4, stage_name: "execute", workflow: Hive::Workflows::Coding::DESCRIPTOR
@@ -99,8 +180,9 @@ class TaskActionConditionsTest < Minitest::Test
       with_replaced_singleton_method(
         Hive::TaskProjection::Store, :new, ->(**) { broken_store }
       ) do
-        recovered = Hive::TaskAction.new(task, marker(:execute_waiting))
-        assert_equal 0, recovered.projection["identity"].fetch("task_generation")
+        assert_raises(Errno::EACCES) do
+          Hive::TaskAction.new(task, marker(:execute_waiting))
+        end
       end
     end
   end

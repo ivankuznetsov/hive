@@ -141,24 +141,6 @@ module Hive
         build_result(result, attempts, max_attempts)
       end
 
-      def max_attempts_from_spec
-        value = spec["max_attempts"]
-        return Hive::Reviewers::DEFAULT_REVIEWER_MAX_ATTEMPTS if value.nil?
-
-        Integer(value)
-      rescue ArgumentError
-        # pr-review-toolkit round-5 H1 + M4: surface the defensive
-        # fallback to stderr so a programmatic / test-only path that
-        # bypassed Hive::Config.validate_reviewers! doesn't silently
-        # land on a default the caller didn't ask for. (TypeError is
-        # dead with the `value.nil?` short-circuit above — only
-        # ArgumentError is reachable here, from Integer("two") and
-        # friends.)
-        warn "[hive.reviewers] reviewer #{spec['name'].inspect}: invalid max_attempts " \
-             "#{value.inspect}; using default #{Hive::Reviewers::DEFAULT_REVIEWER_MAX_ATTEMPTS}"
-        Hive::Reviewers::DEFAULT_REVIEWER_MAX_ATTEMPTS
-      end
-
       # pr-review-toolkit round-5 M2: TOCTOU-safe wrapper for the two
       # `File.delete(output_path)` sites in the retry loop. Distinguishes
       # ENOENT (file may not exist on first attempt — normal) from

@@ -580,17 +580,6 @@ module Hive
         )
       end
 
-      def max_attempts_from_spec
-        value = spec["max_attempts"]
-        return Hive::Reviewers::DEFAULT_REVIEWER_MAX_ATTEMPTS if value.nil?
-
-        Integer(value)
-      rescue ArgumentError
-        warn "[hive.reviewers] reviewer #{spec['name'].inspect}: invalid max_attempts " \
-             "#{value.inspect}; using default #{Hive::Reviewers::DEFAULT_REVIEWER_MAX_ATTEMPTS}"
-        Hive::Reviewers::DEFAULT_REVIEWER_MAX_ATTEMPTS
-      end
-
       def backoff_seconds_for(failed_attempt)
         Hive::Reviewers.backoff_seconds_for(failed_attempt)
       end

@@ -80,6 +80,20 @@ module Hive
 
       private
 
+      # Reviewer specs are validated before adapter construction, but custom
+      # integrations can still instantiate an adapter directly. Keep their
+      # defensive fallback and warning consistent across every adapter.
+      def max_attempts_from_spec
+        value = spec["max_attempts"]
+        return Hive::Reviewers::DEFAULT_REVIEWER_MAX_ATTEMPTS if value.nil?
+
+        Integer(value)
+      rescue ArgumentError
+        warn "[hive.reviewers] reviewer #{spec['name'].inspect}: invalid max_attempts " \
+             "#{value.inspect}; using default #{Hive::Reviewers::DEFAULT_REVIEWER_MAX_ATTEMPTS}"
+        Hive::Reviewers::DEFAULT_REVIEWER_MAX_ATTEMPTS
+      end
+
       # `deadline` is a monotonic timestamp. Nil preserves the adapter's
       # configured timeout; otherwise no spawn may outlive the caller's
       # remaining review-stage budget.

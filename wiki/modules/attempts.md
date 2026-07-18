@@ -3,7 +3,7 @@ title: Durable task attempts
 type: module
 source: lib/hive/attempts/
 created: 2026-07-16
-updated: 2026-07-17
+updated: 2026-07-18
 tags: [attempts, ownership, leases, daemon, recovery]
 ---
 
@@ -17,7 +17,7 @@ reconciles and applies policy; it does not own or reap task agents.
 
 | Module | Responsibility |
 |--------|----------------|
-| `Record`, `Store` | Write v2 records, ingest v1/v2, and perform locked guarded transitions with atomic write/fsync/rename persistence. |
+| `Record`, `Store` | Write v2 records, ingest v1/v2, perform locked guarded transitions with atomic write/fsync/rename persistence, and copy nested record/checkpoint/receipt values through `Hive::StringifyKeys`. |
 | `Capability`, `Context` | Generate one-time launch authority, authenticate the exact worker process/task/stage, revalidate generation at the mutation boundary, and expose process-local compatibility projections after transport variables are scrubbed. |
 | `Generation` | Bind stable task identity, intended stage, and a workflow progress token into the semantic ownership key. |
 | `Dispatcher` | Resolve receipt replay, live duplicate attachment, loss deferral, capacity, fresh admission, and explicit successors. |
@@ -46,6 +46,12 @@ deadlines, checkpoint, integrity references, diagnostics, and loss or receipt
 fields. The capability itself is never persisted. Large payloads remain
 owner-private referenced files with canonical relative path, byte size, and
 SHA-256.
+
+Record construction/readers and store transitions all use the same
+non-mutating `Hive::StringifyKeys` transform as the task journal and projection.
+It recursively copies hashes/arrays and stringifies keys while leaving scalar
+values unchanged, preserving the former `Record.deep_copy` contract without a
+second normalization implementation.
 
 Task generation—not request ID—is semantic idempotency. Its progress token
 hashes both the stage artifact and this task's deterministic dependency-

@@ -141,6 +141,24 @@ class RunApproveTest < Minitest::Test
     end
   end
 
+  def test_unsupported_project_root_key_blocks_approve_before_mutation
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _, inbox, slug = seed_project_with_inbox_task(dir)
+        File.write(File.join(dir, ".hive-state", "config.yml"), "defualt_branch: main\n")
+
+        _out, err, status = with_captured_exit do
+          Hive::Commands::Approve.new(slug, force: true).call
+        end
+
+        assert_equal Hive::ExitCodes::CONFIG, status
+        assert_includes err, "Unknown top-level key `defualt_branch`."
+        assert File.directory?(inbox), "invalid config must leave the task in its original stage"
+        refute File.exist?(File.join(dir, ".hive-state", "stages", "2-brainstorm", slug))
+      end
+    end
+  end
+
   def test_explicit_to_allows_backward_move_for_recovery
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

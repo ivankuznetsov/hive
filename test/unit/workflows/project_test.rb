@@ -180,6 +180,19 @@ class WorkflowsProjectTest < Minitest::Test
     end
   end
 
+  def test_load_surfaces_unsupported_project_root_keys_instead_of_falling_back
+    with_tmp_dir do |project_root|
+      FileUtils.mkdir_p(File.join(project_root, ".hive-state"))
+      File.write(File.join(project_root, ".hive-state", "config.yml"), "defualt_branch: main\n")
+
+      error = assert_raises(Hive::ConfigError) do
+        capture_io { Hive::Workflows::Project.load!(project_root) }
+      end
+
+      assert_includes error.message, "Unknown top-level key `defualt_branch`."
+    end
+  end
+
   # The documented mid-load exception safety: load! drops @active_root to nil
   # BEFORE loading and re-sets it only after a clean load, so a load that raises
   # partway leaves @active_root nil — the next same-root load! re-attempts

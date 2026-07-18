@@ -256,6 +256,8 @@ module Hive
 
       warn_if_unregistered_project_default(configured)
       configured
+    rescue Hive::UnsupportedProjectConfigError
+      raise
     rescue Hive::ConfigError, Psych::Exception, SystemCallError, IOError => e
       warn "hive: task: failed to read default_workflow from #{config_path} " \
            "(#{e.class}: #{e.message}); falling back to #{Hive::Config::DEFAULTS["default_workflow"]}"

@@ -820,7 +820,7 @@ module Hive
           "Unknown top-level key #{render_project_key(key)}."
         end
       end
-      raise ConfigError,
+      raise UnsupportedProjectConfigError,
             "Unsupported top-level project configuration in #{describe_source(source_path)}:\n" \
             "#{findings.map { |finding| "- #{finding}" }.join("\n")}"
     end

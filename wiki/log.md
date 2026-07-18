@@ -3,6 +3,2492 @@
 Append-only log of all wiki operations.
 
 <!-- BEGIN GENERATED WIKI LOG FRAGMENTS -->
+## [2026-07-18T19:50:56Z] fix — preserve strict config failures at task boundaries
+
+**Action:** Classified unsupported project root keys as
+`UnsupportedProjectConfigError`, preserving the `ConfigError`/exit-78 contract
+while preventing workflow-directory and task default-workflow fallback paths
+from converting the shared validation failure into the built-in `coding`
+workflow. Recoverable malformed or unreadable config fallback behavior remains
+unchanged.
+
+**Coverage:** Added focused workflow-loader and task regressions plus a real
+`approve` mutation-boundary check that leaves the task in its original stage.
+Updated [[modules/config]] and [[modules/task]].
+
+## [2026-07-18T17:25:55Z] config — strict project top-level keys
+
+**Action:** `Hive::Config.load` now validates raw project configuration root
+keys before defaults or synthetic values are merged. Supported keys come from
+`Config::DEFAULTS`, explicit no-default sections such as `gh`, and exact stage
+names from built-in and active project workflow descriptors. Unsupported keys
+are aggregated into one deterministic, source-path-bearing `ConfigError`.
+
+A literal top-level `reviewers` key always fails, regardless of its value, with
+guidance to move the list under `review.reviewers`. The project allowlist does
+not apply to global Hive config. Because the boundary is shared, review runs
+stop before reviewer side effects and `hive doctor` exits 78 before running
+probes or emitting a successful report.
+
+**Coverage:** Updated [[modules/config]], [[commands/doctor]], and
+`docs/workflows.md`. Added focused config/workflow tests plus init, review, and
+real doctor subprocess regressions. Did not edit compiled [[log]].
+
+---
+title: Prepare v0.5.2 Honeycomb catalog client release
+created: 2026-07-18T17:00:00Z
+tags: [release, packaging, honeycomb, workflow-registry]
+---
+
+- Prepared Hive v0.5.2 from the merged Honeycomb catalog-v2 client.
+- Synchronized `Hive::VERSION`, both path-gem lockfiles, and public pinned
+  installer URLs at `0.5.2` / `v0.5.2`.
+- Added user-facing notes for flat-catalog resolution, immutable catalog-commit
+  generations, full manifest and tree verification, lifecycle handling,
+  security-sensitive updates, and fail-closed task-local read-only admission.
+- Publication remains unproven until the release branch merges, the protected
+  tag workflow publishes signed artifacts and downstream channels, and a real
+  listed Honeycomb installs from the released CLI.
+
+---
+title: Prepare v0.5.1 dogfood hotfix release
+created: 2026-07-18T16:01:46Z
+tags: [release, packaging, doctor, hivebox]
+---
+
+- Prepared Hive v0.5.1 from the merged v0.5.0 dogfood fixes.
+- Synchronized `Hive::VERSION`, both path-gem lockfiles, and the public pinned
+  installer URLs at `0.5.1` / `v0.5.1`.
+- Added user-facing patch notes for mixed-agent doctor diagnostics, verifier
+  service-manager isolation, the packaged architecture-patrol schema runtime,
+  stable daemon-deep hivebox smoke, exact native digest promotion, and
+  supervised-daemon status truthfulness.
+- Publication remains unproven until the release branch merges, the tag-driven
+  workflow publishes and verifies all channels, and the released AUR package
+  is installed and exercised on the operator workstation.
+
+## [2026-07-18T13:49:05Z] release/doctor — fix v0.5.0 dogfood regressions
+
+**Action:** Fixed four regressions found while dogfooding the published v0.5.0
+artifact. The release verifier now places inert platform service-manager stubs
+ahead of `PATH` before install, init, daemon-install, or uninstall checks, so a
+sandboxed `HOME` cannot still disable or restart the operator's live user
+service. Managed-skill inspection now keeps an unmanaged custom reviewer on a
+registered agent without a Hive skill resolver (such as Grok) as informational
+unavailable evidence instead of aborting all of `hive doctor` with a config
+error.
+
+The published hivebox image also proved Rails could be healthy while its
+supervised daemon crashed on `LoadError: json_schemer`: architecture patrol
+made schema validation a runtime path but the validator remained test-only in
+the root Gemfile. Declared it as a gem runtime dependency and made the image
+smoke require daemon-backed `/health?deep=1` across the supervisor's
+ten-second fast-failure window, with a final post-front-door probe, before
+publication. Every curl call has explicit connect/request timeouts and both
+polling phases have absolute deadlines. Native amd64 and arm64 jobs now smoke
+their exact untagged registry digests before a downstream job promotes those
+immutable inputs to the public versioned and `latest` multi-arch tags.
+
+Finally, the live hivebox dashboard rendered contradictory daemon state:
+`running` followed by `daemon is down`. The supervisor intentionally runs the
+daemon without a platform service unit, so the view now gates service-repair
+guidance on the daemon actually being down rather than treating
+`service_installed: false` alone as an outage.
+
+**Tests:** Added focused inspector coverage for a Grok custom reviewer, gemspec
+coverage for the architecture-patrol validator, and packaging contract tests
+that pin service-manager isolation before the first installed Hive invocation
+plus stable daemon-deep hivebox health around the front-door assertions. The
+smoke harness rejects a single transient healthy probe. Added a Rails
+integration regression for the supervised-running daemon strip and a release
+workflow contract for digest-only promotion after both architecture smokes.
+
+**Refreshed pages:**
+- [[commands/doctor]]
+- [[commands/web]]
+- [[dependencies]]
+- [[operating]]
+- [[testing]]
+
+# Honeycomb v2 client contract
+
+**Action:** Replaced the official install reader's legacy nested catalog and
+`workflows/NAME/manifest.json` assumptions with canonical
+`honeycomb-catalog/v2` flat entries and immutable
+`packages/NAME/VERSION/manifest.yml` snapshots. The catalog commit is now the
+durable materialization/task-pin identity; review head and upstream source SHA
+remain separate audit/provenance identities. Added canonical YAML,
+`release_sha256`, complete tree/hash, catalog-binding, lifecycle, update diff,
+and task-pin coverage.
+The registry manifest uses an absolute `::Digest` lookup so its release check
+remains valid after Hive's own `Hive::Digest` namespace is loaded by the full
+suite. Hive-version admission also ignores SemVer build metadata, matching
+SemVer precedence while remaining compatible with RubyGems version comparison.
+
+**Safety boundary:** Hive only maps the lossless low-risk task-local read-only
+v2 disclosure to its exact managed runtime policy. Broader v2 disclosures fail
+closed before mutation. Bench and Docs Sync currently resolve/verify but remain
+uninstallable, and the existing publish command remains a legacy package
+producer.
+
+**Coverage:** Updated [[modules/workflows]], [[commands/workflow]], [[testing]],
+[[gaps]], `docs/workflows.md`, and `docs/permissions.md`. Did not edit compiled
+[[log]] and did not run `qmd update` or `qmd embed`.
+
+---
+title: Prepare v0.5.0 minor release
+created: 2026-07-18T11:53:14Z
+tags: [release, packaging, workflows, attempts, patrol]
+---
+
+- Prepared Hive v0.5.0 as the next minor release from the published v0.4.2
+  baseline, superseding the untagged v0.4.3 prep and including every subsequent
+  merged change.
+- Synchronized `Hive::VERSION`, both path-gem lockfiles, and the public pinned
+  installer URLs at `0.5.0` / `v0.5.0`.
+- Replaced the unpublished v0.4.3 changelog section with explicit, grouped
+  v0.5.0 notes focused on Honeycomb workflow lifecycle commands, managed agent
+  skill setup, durable task-stage/condition/implementation ownership, workflow
+  permissions and dependencies, patrol quality, and architecture patrol.
+- Publication remains unproven until the release branch merges, tag-triggered
+  GitHub workflow completes, signed assets and install channels verify, and the
+  released binary is exercised locally.
+
+## [2026-07-18T04:45:00Z] agents - harden provisioning prerequisites and timeouts
+
+**Action:** Review-hardened managed agent-skill provisioning. Filtered target
+resolution now recursively retains manifest-declared package prerequisites,
+and adapter planning blocks a dependent package unless each prerequisite is
+scheduled or proven healthy. Native inventory and install commands now run in
+dedicated process groups with bounded TERM/KILL cleanup and reaping, preventing
+a timed-out installer or descendant from continuing mutations after Hive has
+reported failure.
+
+**Safety and coverage:** Added real TERM-resistant parent/child cleanup
+coverage, filtered-prerequisite resolution coverage, and fail-closed tests for
+missing and unhealthy prerequisites. Updated [[commands/setup-agents]],
+[[modules/agent_profile]], and [[testing]]; did not edit compiled [[log]].
+
+## 2026-07-18 — Harden Honeycomb runtime and lifecycle review boundaries
+
+- Moved generated managed-policy files outside agent-writable task trees,
+  isolated tmux launches with the same compiled child environment as headless
+  runs, and closed shell/path/domain hook bypasses.
+- Bound catalog disclosures to the verified manifest and serialized selection
+  recovery and generation cleanup with task creation/moves.
+- Added inspect-before-consent install/remove dry runs, closed lifecycle JSON
+  schema arms, and adversarial regression coverage for each repaired boundary.
+
+## [2026-07-17T23:25:26Z] implementation identity — harden durable ownership boundaries
+
+**Action:** Bound legacy identity reconstruction to the current durable attempt's project, task, and numeric generation; made downstream generation reads validate journal records against the Attempts store and fail closed on malformed, empty, unreadable, or unbound journals; and carried the persisted provider into execute failure markers.
+
+**Protection:** Implementation-owning stages now resolve identity before their protected-file snapshot and pass that exact resolution into the agent spawn, avoiding heartbeat-driven projection rebuilds inside the protected interval. `task-journal.jsonl` plus `task-projection.json` are orchestrator-owned files. Review synthetic tasks carry the durable slug/id required by journal events. Focused regression coverage exercises cross-project attempt collisions, CI task identity, journal tampering, generation corruption, and provider drift.
+
+**Compatibility:** Provider-default discovery accepts a top-level Codex TOML model assignment with an inline comment. The web golden-path fixture pins the concrete model exposed by its fake Claude CLI, and the CLI E2E sandbox pins its synthetic Codex model, so clean runners capture execute identity before launch without borrowing operator-owned provider settings.
+
+---
+title: Patrol scans fresh remote defaults
+type: log
+created: 2026-07-17
+tags: [patrol, git, worktree, freshness]
+---
+
+**Action:** Changed every new ordinary-patrol sweep to fetch and review the
+exact `refs/heads/<default_branch>` commit instead of resolving a potentially
+stale local default branch. The explicit source ref cannot be shadowed by a
+same-named tag, and a process-group deadline bounds stalled transports. A
+configured remote fetch failure now stops before mapper or reviewer work;
+repositories without an origin retain the local-only path. An active snapshot
+that Git can no longer materialize restarts at the current default and cursor
+zero instead of remaining stuck.
+
+**Safety chain:** The scan checkout leaves the operator's local default branch
+untouched. The fixer independently re-fetches immediately before creating each
+patrol branch, publication verifies the remote base before and after the leased
+push, and synthetic `6-review` handoff requires the created PR's exact validated
+base/head identity, and rechecks the live remote head/base immediately before
+every first or retried task handoff. An older cursor-pinned review snapshot or
+failed-handoff retry therefore cannot create a task on an old-base branch.
+
+**Coverage:** `test/integration/patrol_command_test.rb` advances a bare remote
+while local main stays behind, proves the detached scan uses the remote commit,
+and proves an unreachable configured origin fails before reviewer creation.
+Real-Git coverage adds same-name branch/tag resolution and a TERM-resistant
+stalled SSH transport; command and PR-opener regressions cover dead snapshot
+replacement and base advancement before first/retried handoff.
+
+Pages: [[commands/patrol]], [[modules/patrol]], [[modules/worktree]], [[testing]].
+
+---
+title: Condition journal review hardening
+date: 2026-07-17
+tags: [conditions, journal, projection, status, review]
+---
+
+- Reused one authoritative-record validator for journal writes and projection
+  replay, including exact schema-version and durable attempt task/stage/input-
+  epoch/ownership checks; forged and future-version records now fail closed.
+- Made authoritative appends retry short writes and roll back to the prior
+  fsynced byte boundary when a later write or sync fails.
+- Separated strict `task-journal.jsonl` authority from fail-soft
+  `events.jsonl` telemetry, and made even binding-matched projection snapshots
+  revalidate their journal's durable attempt identity.
+- Preserved published `hive-attempt` v1 and `hive-status` v5, moved the new
+  wire shapes to v2 and v6, and kept the compatibility lock's
+  `task_generation` field as the opaque owner token.
+- Isolated `project_load_failed` per project so one bad projection cannot
+  masquerade as a healthy empty project or erase healthy sibling rows.
+- Wired terminal/lost execute attempt reconciliation into idempotent
+  `AgentHealthy` journal observations, and made research waivers derive from
+  persisted file evidence rather than caller booleans.
+- Added fault-injection, replay, fixture, snapshot, and status regressions for
+  the hardened boundaries.
+- Added a bounded valid-snapshot path that hashes journal bytes and validates
+  each unique current/predecessor attempt once; changed bindings still take a
+  full parse/replay. Terminal observer deliveries are memoized per daemon
+  process, while durable restart idempotency remains journal-backed.
+- Made predecessor lineage causal authority: missing/incompatible/cyclic links
+  fail closed and a clock-regressed successor still supersedes its predecessor.
+  Terminal/lost durable state also reconciles current `AgentHealthy` before the
+  daemon observer lands.
+- Missing/empty post-handoff journals now fail both read and rebuild without
+  overwriting the last snapshot. Marker-only proof is scoped to attempt-stamped
+  `execute_*` markers so review and other stage markers do not falsely claim an
+  execute condition-journal handoff. First-create retries fsync the task
+  directory.
+- Added condition-specific recovery actions and structured blocked-transition
+  error envelopes. Forced condition overrides must durably append an
+  idempotent `operator_action`; status exposes the latest 20 overrides while
+  the journal retains their complete history.
+
+---
+title: Generation-scoped execute task conditions
+date: 2026-07-17
+tags: [conditions, projection, journal, execute, status]
+---
+
+- Added a strict, fsynced authoritative record path to task-local
+  `task-journal.jsonl`, reusing durable attempt identity and adding numeric task and
+  commit generations without rewriting legacy attempts.
+- Added the seven-condition registry, typed evidence, pure supersession
+  projection, cursor/hash-bound atomic snapshots, versioned execute policy,
+  marker/shadow/conditions authority, legacy baseline, and parity audit.
+- Routed execute reconciliation, completion, and forward transition guards
+  through journal → snapshot → gate → compatibility marker ordering.
+- Put the canonical projection under TaskAction/status and passed the additive
+  condition contract through daemon, TUI, bot, and web consumers.
+- Added a reusable incident replay harness plus sanitized task-1849 fixture,
+  operator rollout/repair/rollback documentation, and an explicit live-shadow
+  evidence gap.
+
+---
+date: 2026-07-17
+summary: Close exact-head durable-attempt admission and output gaps
+---
+
+- Serialized capacity scan and reservation creation with one shared admission
+  lock outside the per-generation lock, preventing different task generations
+  from simultaneously consuming the same final capacity slot.
+- Recomputed the admitted generation under the task lock immediately before
+  run/approve side effects, so a task or dependency change between dispatch and
+  worker start fails retryably instead of executing stale work twice.
+- Tracked replayed stdout bytes and routed non-zero durable JSON outcomes with
+  no worker document through the command's normal versioned error envelope.
+- Preserved nullable process-identity keys on compatibility backfills so their
+  stored records satisfy the published attempt schema.
+- Clarified that durable context is an application ownership boundary: Hive's
+  process-level state-root environment remains trusted, and stronger same-UID
+  isolation requires a separate broker/protected authority.
+
+---
+title: Bind durable attempts to dependency admission
+date: 2026-07-17
+---
+
+**Action:** Added the task's deterministic dependency-admission verdict to the
+durable attempt progress token. Terminal receipts still replay for an unchanged
+generation, but a prerequisite advancing from a blocking stage to the configured
+gate now creates a fresh generation instead of replaying the earlier exit-75
+dependency wait. The real incident-regression scenario pins the wait-to-clear
+transition through the public CLI.
+
+---
+date: 2026-07-17
+summary: Close durable-attempt review gaps across launch, recovery, and daemon restart
+---
+
+- Failed or false launcher handoffs now mark unclaimed reservations lost and
+  defer retryably; a wrapper that already claimed is adopted after a CAS race.
+- Lost foreground attachments raise a typed retryable error so both run and
+  workflow JSON surfaces emit versioned envelopes.
+- Loss successors preserve exact admitted workflow argv/flags, retarget moved
+  task folders, and remove only a source assertion already satisfied on disk.
+- Queue claims repair a crash-window missing attempt ID from immutable request
+  correlation, and daemon admissions resolve attempt timers per project.
+- Removed production context construction/thread overrides and ignored
+  worker-supplied store paths; documented the remaining same-UID privilege
+  boundary explicitly.
+- Preserved attempt process groups across systemd daemon replacement and made
+  a surviving leaderless group fail closed during orphan reconciliation.
+
+## [2026-07-17T13:10:00Z] fix — preserve task-lock identity in TUI snapshots
+
+**Action:** Extended `Hive::Tui::Snapshot::Row` and its status-payload mapper
+to retain `task_lock_pid`, `task_lock_process_start_time`, and `task_lock_id`.
+The renderer still classifies rows from the strict `live_task_lock` boolean,
+but the lossless snapshot now matches the additive `hive-status` v5 contract.
+Added mapping assertions plus coverage for task-folder disappearance during
+lock release, missing lock reads, and the healer's TERM grace loop. The full
+coverage gate passed at 100.00% line coverage.
+
+---
+title: Authenticate durable attempt launch and worker context
+date: 2026-07-17
+tags: [attempts, security, ownership, supervisor]
+---
+
+- Persist the exact admitted worker argv and only a SHA-256 digest of a random
+  per-attempt launch capability in the immutable attempt record.
+- Pass claim authority through an inherited descriptor, remove arbitrary worker
+  argv from `__attempt-supervise`, and make the supervisor execute the record.
+- Gate Hive worker startup until its PID/start/session/group identity is
+  durably checkpointed, then authenticate argv, task, intended stage, state,
+  identity, and capability before installing process-local attempt context.
+- Scrub inherited `HIVE_ATTEMPT_*` transport keys before any worker descendants
+  can inherit the durable-admission bypass.
+
+# Review marker generation and reset-date preservation
+
+**Action:** Review-owned `REVIEW_WORKING` and `REVIEW_ERROR` writes now receive
+the same generated recovery identity as generic `ERROR` markers. Stale-agent
+healing matches the observed identity and claims the task lock before clearing
+a marker, preventing an old status row from disrupting a newer review run or
+deleting a lock acquired after the snapshot.
+Task locks now appear only after their complete payload is fsynced, carry a
+generated lock id, and use ownership-scoped release. Status publishes the
+verified holder identity, so wedged-review recovery terminates only the
+observed process generation and clears a marker only after claiming the lock.
+Generic descriptor stages also preserve a provider's raw quota reset text when
+synthesizing `limits_reached`, so dated multi-day reset windows do not collapse
+to the one-hour fallback.
+
+**Verification:** Added marker rotation, stale review-generation, and dated
+quota-envelope regressions alongside the existing focused agent/daemon suites.
+
+# 2026-07-17 — Harden legacy bench migration review findings
+
+- Made the legacy descriptor archive, packaged runtime replacement, and
+  `default_workflow: bench` rebind one commit-locked hive-state transaction.
+- Reset staged migration paths before filesystem rollback and restore config,
+  descriptor, and prior runtime after rejected commits or Ctrl-C.
+- Retain and report the previous runtime backup when deletion of a failed new
+  runtime does not converge, preventing backup nesting or overwrite.
+- Reject symlinked legacy workflow roots, descriptors, and instruction roots
+  before archive copying, with realpath confinement beneath hive state.
+- Added fault-injection coverage for rejected-commit retry, both interrupt
+  windows, symlink escape attempts, archive tracking, automatic cache reset,
+  and rollback deletion failure.
+- Deferred asynchronous interrupts across each mutation/bookkeeping pair and
+  commit-result capture, preserving a migration that was already committed.
+- Required a clean hive-state index and made the config pathspec conditional on
+  an actual rebind so idempotent refresh cannot absorb unrelated config edits.
+- Published instruction archives from private staging and refused a raced
+  symlink destination without traversing it.
+- Bound legacy classification and archival to the same no-follow descriptor
+  inode/content snapshot, rejecting atomic replacement by a custom descriptor.
+- Pinned the validated workflows directory for archive and rollback operations,
+  then rejected logical-parent replacement before commit so an external symlink
+  cannot redirect migration writes or deletion.
+- Replaced the final descriptor path deletion with atomic quarantine,
+  snapshot revalidation, and no-clobber archive publication; a reappearing
+  custom descriptor is preserved and the legacy copy is retained for recovery.
+- Added a post-staging Git invariant for the pinned descriptor path and index,
+  preventing a replacement at commit entry from being included in migration.
+
+# 2026-07-17 — Prepare Hive v0.4.3
+
+**Action:** Bumped the CLI and both local path-gem locks to `0.4.3`, pinned the
+public installer snippets to `v0.4.3`, and added the matching patch changelog.
+
+**Why:** The release carries path-qualified workflow file permissions required
+by scoped Honeycomb packages, together with repository-aware dependency
+admission, durable architecture patrol, and the post-v0.4.2 safety hardening
+already merged to `main`.
+
+**Verification boundary:** Release metadata tests, the complete repository test
+suite, package build, and local gem inspection cover the prepared source. The
+public release, signed assets, channel updates, and install verification remain
+unproven until an authorized `v0.4.3` tag triggers the release workflow.
+
+**Trust note:** The live repository's active `v*` tag ruleset now supplies the
+documented creation/update/delete/non-fast-forward protection. Independent
+cryptographic maintainer git-tag verification remains a deferred hardening.
+
+---
+title: Automatic generation-scoped implementation ownership
+date: 2026-07-17
+tags: [agents, identity, journal, execute, open-pr, review, status]
+---
+
+- Added immutable normalized provider/model/effort selections and provider-native argv translation for Claude, Codex, pi, and Grok.
+- Captured concrete execute ownership in the authoritative task journal before spawn, with idempotent per-generation replay, legacy reconstruction/backfill, and retained history.
+- Routed PR opening to provider-local utility/default models and review/CI repairs to the exact execute model, while preserving raw field-level overrides and independent reviewer/triage/browser identities.
+- Exposed resolved and preview ownership through status JSON/text, the TUI `I` detail view, and Hivebox without turning reads into mutation boundaries.
+- Added lifecycle, generation-drift, unsupported-effort, schema, launcher-envelope, and status-purity coverage; recorded native pi/grok config-schema drift as a known gap.
+
+# 2026-07-17: Path-scoped workflow permissions
+
+- Added portable task-relative `Read(path)` and `Edit(path)` rules to scoped
+  workflow permissions.
+- Scoped launches now use Claude `dontAsk` and normalize file rules to absolute
+  permission paths, allowing project reads with docs-only writes without an
+  interactive permission prompt.
+- Treat qualified `Edit` as the family rule for every built-in file editor and
+  reject unsupported file-tool path rules in favor of Claude's enforced
+  `Read(path)` / `Edit(path)` forms.
+- Preserved MCP wildcard/hyphenated tool rules, normalized Windows drive paths,
+  and moved unresolvable file-rule failures to config load.
+- Documented that Claude merges CLI permission rules with loaded setting
+  sources, so descriptor scopes express Hive's request but do not erase
+  broader trusted operator policy.
+
+---
+title: Harden incident e2e isolation and activate landed dependency contracts
+date: 2026-07-17
+tags: [e2e, incidents, dependencies, hermetic, review]
+---
+
+- Activated the #9771 plan-only dependency-gate and cross-project repository-identity incidents against their merged fail-closed reason codes; four sibling-gated fixtures remain pending.
+- Made GitHub evidence append-only and lock-verified after background and tmux/TUI producers stop, pinned both PATH and `HIVE_GH_BIN`, inferred cwd-origin repository identity, and rejected replacement scripts.
+- Protected run-local home/bundle, all built-in fake-agent binaries, and checkout binaries from scenario overrides so routine e2e cannot reach operator state or consume a real agent subscription.
+- Moved nested `script_gh` validation to scenario preflight, rejected untagged incident metadata and duplicate scenario names, exposed lifecycle fields in inventory output, and included sandbox bootstrap in incident duration budgets.
+- Kept generated repros hermetic, headless for secondary projects, and fail-closed on unconsumed GitHub interactions after replay producers stop.
+- Kept the incident run directory in the runner temp area while scoping the `runner.temp` expression to workflow steps, where GitHub Actions permits that context, so the required CI workflow parses and starts.
+- Preserved Bundler's exact resolved require paths as a protected subprocess `RUBYLIB`, allowing hermetic `bin/hive` launches to resolve locked dependencies when CI installs gems only under `vendor/bundle`.
+
+**Action:** Hardened fail-closed dependency admission after the #764 review. Strict metadata and plan reads now reject duplicate top-level `depends_on` keys; plan frontmatter reads are bounded; explicit cross-project repository lookups are selective and process-group timed; and task-folder snapshots detect concurrent stage moves.
+
+**Behavior:** Admission contexts index projects, slugs, ids, and cycle positions, then memoize verdicts across shared dependency tails. The TUI reuses lossless immutable archived TaskSnapshots as an indexed fallback, preserving custom workflows, transitive edges, exact errors, and enrolled repository identity without scanning the archive on each hot refresh. Active tasks shadow cached terminal snapshots, while transient per-project archive degradation retains the last good context.
+
+**Daemon:** File-backed run/advance/archive requests now honor the same tick's dependency/admission holds before spawn; marker repair remains available. A task-local admission CONFIG/78 envelope no longer drops unrelated tasks in the project.
+
+**Coverage:** Added regressions for duplicate declarations, long/nested fallback resolution, stale-folder races, degraded archive retention, selective and TERM-resistant repository lookup, queued-request gating, marker-repair exemption, and task-local admission child exits. Updated [[modules/task_dependencies]], [[commands/status]], [[modules/daemon]], [[commands/stage_action]], and [[testing]].
+
+---
+date: 2026-07-17
+summary: Keep durable attempt timeouts, drains, and capacity fail-closed
+---
+
+- Wired foreground and daemon durable-attempt launchers to resolve the exact
+  Hive verb's `daemon.child_verb_timeouts` fallback and configured
+  `child_kill_grace_sec` from the fresh global daemon config.
+- Made `ConfiguredDispatcher` derive global, per-project, and daily limits from
+  each fresh global config load, while project config still supplies lease
+  timers, so raised caps and timeout settings apply to the next initial attempt
+  or loss successor without a daemon restart.
+- Kept supervisor heartbeat and timeout enforcement active after the worker
+  leader exits. Descendants that retain stdout/stderr now receive bounded
+  TERM/KILL cleanup and cannot strand the wrapper waiting forever for EOF.
+- Kept lost attempts with a recorded worker capacity-reserving until durable
+  cleanup proves `absent`, `terminated`, or `no_worker`; missing, corrupt, or
+  unsafe/manual cleanup evidence remains fail-closed.
+
+---
+date: 2026-07-17
+summary: Preserve durable attempt processes across daemon replacement
+---
+
+- Changed the shipped Linux daemon unit to `KillMode=process`, so systemd
+  stop/restart targets the daemon while detached, lease-owned attempt wrappers
+  and workers remain available for adoption by its replacement.
+- Made orphan cleanup probe the recorded process group when its worker leader
+  is missing. A live or unverifiable group now fails closed instead of being
+  classified absent and permitting a concurrent successor.
+- Added focused process-identity and rendered-service regressions for both
+  lifecycle boundaries.
+
+---
+date: 2026-07-16
+slug: babysitter-gh-api-option-values
+pages: [commands/babysit, modules/babysitter]
+---
+
+The shared pflag-compatible scanner in `bin/hive-babysitter-stub-gh.rb`
+consumes all separate values for known value-taking `gh api` options before
+deriving method and payload state. This fragment adds a focused regression for
+the security boundary: a `-XGET` value belonging to header, jq, preview, or
+template is data, so a following scalar field remains an implicit POST and is
+skipped instead of reaching the authenticated real `gh` binary.
+
+`test/unit/babysitter/dry_run_env_test.rb` now covers both long and short forms
+of those four options with a GraphQL mutation and a recording fake `gh` binary.
+
+---
+title: Patrol launch headroom and finding quality
+date: 2026-07-16T20:38:16Z
+---
+
+- Added conservative initial-context admission to ordinary and architecture
+  patrol review/fix launches. Claude reserves 20,000 provider-context tokens
+  plus the rendered prompt bytes before a launch can consume the shared
+  subscription-backed daily allowance.
+- Restricted Claude patrol context to verified role-specific tool sets,
+  disabled slash commands, capped reviews at three completed turns, and stopped them
+  once an expected structured artifact is written. Completed artifacts still
+  pass through the existing schema/evidence validators.
+- Preserved the final usage delta and an already-generated `Write` regardless
+  of which provider event arrives first. A three-second protocol grace closes
+  the race without allowing a fourth reasoning turn.
+- Narrowed ordinary mapping to four owned plus four context files. Architecture
+  retains six plus six for full-component leverage measurement while its agent
+  sees at most four owned files selected with a 32 KiB source budget, retaining
+  the first entrypoint when it alone is larger. Both prompts allow one
+  bounded evidence follow-up and prefer empty output to speculative findings.
+- Live local Hive sampling produced one concrete ordinary-patrol defect:
+  `Fingerprint.snippet_at` called `join` on a nil out-of-range slice. The
+  reproducer is now a regression test and the helper safely normalizes that
+  slice to an empty array. The architecture sample correctly returned no
+  thesis when it could not establish a current material consequence.
+- Architecture keeps its 2x cycle/per-agent/launch allowance, while ordinary
+  and architecture patrols retain one shared per-project daily token ceiling.
+
+---
+title: Bound babysitter dry-run skip-log growth
+date: 2026-07-16T20:09:44Z
+tags: [babysitter, dry-run, logging, performance]
+---
+
+**Action:** Capped escaped dry-run stub argv at 4 KiB and stopped new records from growing the persistent skipped-command audit log beyond 64 KiB. The shared git/gh helper locks the validated log inode around its size check and append so concurrent denied commands cannot race past the cap. If a complete record would overflow the cap, the existing history is preserved and the best-effort write warning is emitted; lock acquisition uses a short monotonic deadline so a stalled holder warns instead of hanging a denied command. Added exact-boundary, concurrent record-integrity, and pre-held-lock latency regressions while retaining the existing unsafe-target and binary-argv coverage.
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[modules/babysitter]]
+
+---
+title: Durable task-stage attempt ownership
+date: 2026-07-16
+tags: [attempts, daemon, recovery, e2e]
+---
+
+- Unified CLI, workflow actions, queued bot/web delivery, daemon auto-advance,
+  and loss successors behind generation-idempotent durable admission.
+- Added detached wrappers, guarded lease/receipt records, framed logs,
+  restart adoption, lease-first capacity, and conservative legacy backfill.
+- Added verified orphan cleanup, mutation-free dirty capture, one durable
+  `attempt_lost` outcome, and bounded same-generation successors.
+- Added the YAML 1849 replay proving three commits survive temporary caller
+  termination and finish from one wrapper receipt without a daemon.
+- Updated the hivebox golden-path ordering gate to treat `attempt_terminal` as
+  the durable equivalent of legacy `child_exited` before it accepts the
+  brainstorm edit-resume baseline.
+
+---
+title: Make the routine e2e runtime hermetic under Bundler and host overrides
+date: 2026-07-16
+tags: [e2e, bundler, tmux, fixtures]
+---
+
+- Started harness-owned TUI tmux servers inside the unbundled environment so a root `bundle exec` cannot combine startup flags with the sample project's lockfile.
+- Pinned nested Hive commands to the checkout binary and fake Claude to headless mode, preventing operator environment overrides and interactive readiness races.
+- Refreshed the full-pipeline artifacts output and TUI scope anchors to the current production contracts, restoring all existing scenarios in the new routine CI job.
+
+---
+title: Isolate wiki refreshes and bound patrol signal cost
+date: 2026-07-16
+tags: [llm-wiki, patrol, refactor-patrol, tokens, findings]
+---
+
+- Post-commit LLM-wiki refreshes now queue source commits in the shared Git directory and commit wiki-only updates on a local `llm-wiki/refresh` branch through a disposable managed worktree; user checkouts, logs, and QMD caches are no longer refresh outputs. Atomic source receipt refs make changed and no-op crash replay idempotent, and an ownership-checked compare-and-swap Git ref prevents stale-lock reclaimer races.
+- Every ordinary patrol review/fix launch receives a tier-specific in-flight token cap; architecture launches receive the configured larger token allowance without multiplying the subscription provider's native dollar-equivalent guard. A project-wide agent-lifetime lock prevents concurrent workers from double-spending shared daily headroom.
+- Claude message-start/delta usage now stops a process group at the smallest of its per-agent and remaining cycle/day ceilings, escalates TERM-resistant children to KILL, and all four ordinary/architecture launch paths record the resulting resource exhaustion.
+- Architecture discovery skips slices that cannot mathematically reach the leverage floor, defaults to one thesis per feature, requires evidence of a current consequence, and retains any residual below-floor thesis as an audited suppression instead of a ranked finding.
+- Ordinary and legacy architecture reports retain structured token-exhaustion evidence; legacy architecture output now marks partial review progress explicitly instead of presenting an interrupted run as a clean zero-finding result.
+
+---
+title: Bound patrol tokens and unmetered launches by tier
+date: 2026-07-16
+tags: [patrol, refactor-patrol, tokens, config, observability]
+---
+
+- Added low/medium/high/ultrapatrol token, agent-launch, and per-agent budget-equivalent runaway ceilings for each cycle and UTC day.
+- Shared the project budget across ordinary review/fix and architecture review/fix spawns.
+- Included `refactor-patrol-*` rows in patrol usage aggregates and recorded missing token payloads as explicit unmetered launches.
+- Simplified durable publication recovery by reusing one receipt constructor and loading an exact receipted patch directly.
+- Reused the canonical PR-manifest JSON encoder for architecture proof digests.
+
+---
+title: Add sibling-gated incident regression coverage to the outer e2e harness
+date: 2026-07-16
+tags: [e2e, incidents, github, ci]
+---
+
+- Added validated incident/sibling metadata and report-visible pending fixtures without changing ordinary result statuses or v1 compatibility.
+- Added a staged, exact-match, default-deny `gh` shim whose scripts and invocation audit are retained with failure evidence.
+- Added a condition-driven fake-agent barrier while leaving durable attempt lease details gated on #9767's authoritative contract.
+- Added six synthetic sibling-owned incident scenario shells for #9767 through #9771 and documented their activation rules.
+- Added a separate pull-request e2e job, report-driven incident duration budgets, retained artifacts, and an inventory consistency test.
+
+---
+title: Give architecture patrol a larger bounded cycle envelope
+date: 2026-07-16
+tags: [patrol, refactor-patrol, tokens, config, subscription]
+---
+
+- Added `patrol.architecture_budget_multiplier`, defaulting to `2`, for architecture review/fix cycle tokens, cycle launches, and the per-agent budget-equivalent guard.
+- Kept the selected patrol tier's UTC-day token and launch ceilings shared across ordinary and architecture patrol.
+- Clarified that `max_budget_usd_per_agent` follows agent CLI terminology and is a runaway kill switch for subscription-backed agents, not a separate Hive payment.
+
+---
+title: Fail-closed dependency admission across dispatch boundaries
+type: log
+created: 2026-07-16
+tags: [dependencies, admission, status, daemon, cli, repository]
+---
+
+**Action:** Replaced the daemon-only same-project dependency gate with one
+strict three-verdict admission subsystem shared by status, daemon policy,
+manual run, and forward approval. The scalar grammar now supports same-project
+slug/numeric references and explicit `project:slug`, verifies enrolled
+canonical remotes, walks complete cross-project chains and cycles, checks
+workflow gates, and cross-checks optional structured plan frontmatter.
+
+**Safety:** Corrupt or inconsistent evidence produces a structured admission
+error and inert status action. Daemon merge watching and metadata healing stop
+for held rows; manual commands revalidate under task/commit locks, and
+`--force` cannot bypass the gate. Backward recovery and same-stage no-ops
+remain available.
+
+The TUI's active-only poll reuses immutable prevalidated terminal snapshots,
+so admission remains fail-closed without making hot refresh time grow with the
+archive.
+
+**Contract:** `hive-status` is now v5 with required nullable
+`admission_error`. Command error envelopes distinguish retryable
+`dependency_wait` (exit 75) from non-retryable `admission_error` (exit 78) and
+carry `reason_code`, `offending_ref`, and `safe_correction`.
+
+**Evidence:** Focused parser, metadata, identity, graph, status/TUI, daemon,
+manual-command, creation, schema, and anonymized two-project integration suites
+cover the plan-only ordering failure and repository-mismatch provenance.
+
+# Ordinary patrol resume and publication hardening
+
+Ordinary patrol now records an explicit active review snapshot, so a provider or
+contract error in the first feature batch pins the attempted SHA even while its
+cursor remains zero. A later default-branch commit cannot silently replace that
+incomplete review; the next cycle finishes the durable snapshot first.
+
+Created pull requests now enter a retryable `reconciliation_pending` state with
+an exact PR URL and validated patch/base/head/worktree receipt. Lookup lag,
+authentication failure, dismissal reconciliation, or restart reuses only that
+patch and does not suppress the finding. The fingerprint becomes `open` only
+after exact hosted identity and review handoff settle.
+
+Fix-proof ingestion now opens agent-controlled output without following links,
+uses nonblocking reads, rejects non-regular files, and retains the 64 KiB cap,
+preventing symlink or FIFO output from escaping or stalling the fixer.
+
+# Patrol P1 retry, identity, and deadline hardening
+
+Agent version and capability preflights now own a bounded process group, escalate
+TERM to KILL, and reap their output readers, so a hung CLI or stdout-inheriting
+descendant cannot strand architecture-patrol discovery before the stage timeout.
+
+Architecture discovery now shares one configurable monotonic wall-clock budget
+across every mapped feature. Each agent spawn receives only the remaining slice,
+and unfinished features stay durable for a later run. Created pull requests must
+also prove the exact validated base OID as well as their head and repository
+identity before review handoff.
+
+Ordinary optional review handoffs now use the same fingerprint-locked exact
+reconciliation as mandatory handoffs. A retry after an ambiguous rename or
+directory-fsync failure reuses the matching synthetic review task and rejects
+conflicting PR/head metadata instead of creating a duplicate.
+
+# Contain project-config and Patrol failures
+
+**Action:** Wrapped malformed or unreadable per-project YAML in Hive's `ConfigError` contract, added a normal-mode Patrol preflight for missing validation commands, and captured each Patrol worktree's immutable pre-agent HEAD for patch measurement.
+
+**Result:** One bad registered-project config is isolated by existing daemon gates instead of terminating the service and its active workers. Patrol no longer spends reviewer/fixer quota when it cannot validate a fix, while `--dry-run` remains available for review-only scans. A patrol-only CONFIG exit bypasses controller-level project drops and enters scheduler backoff without blocking ordinary tasks or consuming their daily quota. Patch JSON now records `base_sha` and `head_sha`, and attempt diffstats no longer depend on a stale local default branch.
+
+**Coverage:** Config and dispatcher regressions exercise syntax, safe-load,
+filesystem-read, inaccessible-parent, and symlink-loop failures; Patrol command
+tests prove the preflight runs before agents or state mutation; fixer tests
+cover stale default refs, no-op agents, self-contained diffstats, and
+failed-attempt provenance.
+
+# 2026-07-16 — Patrol timeout and publication ledger hardening
+
+- Fixer and Reviewer now treat `Agent#run!` status `:timeout` like `:error`: a timed-out
+  agent's half-finished changes are never validated, shipped, or parsed as review output.
+- PrOpener persists the fingerprint-to-PR mapping immediately after `gh pr create`, so a
+  reconciliation miss or identity mismatch can no longer orphan a real open PR from the ledger.
+- Control-worktree and scan-checkout cleanup failures no longer mask the in-flight exception
+  (or discard a completed scan); added overlay-execution proof and pinned fingerprint-digest tests.
+
+# Consolidate merge-worthy Patrol PRs
+
+**Action:** Reconciled the non-overlapping, merge-worthy findings from the July 15 Patrol queue
+onto current `main`, then reviewed the combined boundary instead of independently rebasing and
+testing every stale Patrol branch.
+
+**Result:** Git/GitHub babysitter reads now share stricter argument parsing, immutable
+per-invocation GitHub authentication views, prompt suppression, lazy-fetch protection with an
+explicit Git-version preflight, working-tree diff and verbose-status denial, and race-safe skip
+logging. Duplicate and superseded Patrol patches can close against one validated merge.
+
+**Coverage:** Focused dry-run tests exercise the combined safety boundary, including prompt
+behavior on a TTY, consumed `gh api` option values, legacy Git diagnostics, auth-view cleanup,
+verbose status, and skip-log pathname races.
+
+---
+title: Wrapper option scans respect the end-of-options delimiter
+type: log
+created: 2026-07-15
+tags: [cli, e2e, argv, json, help]
+---
+
+**Action:** Fixed `bin/hive` and `bin/hive-e2e` wrapper preprocessing so the
+first explicit `--` ends wrapper-owned help and JSON option scans. Tokens after
+the delimiter now remain literal arguments, including `--help`, JSON booleans,
+and unsupported `--json=VALUE` assignments. Both wrappers snapshot argv before
+rewrites and Thor dispatch, and wrapper-owned error formatting derives JSON mode
+from recognized pre-delimiter options in that snapshot.
+
+**Evidence:** `test/integration/cli_version_test.rb` and
+`test/e2e/lib/hive_e2e_binary_test.rb` cover literal post-delimiter help and
+invalid JSON assignments plus both true/false JSON precedence directions.
+Focused wrapper suites, adjacent `hive new` and JSON usage-error suites,
+targeted RuboCop, and the full 7,281-test suite pass.
+
+## 2026-07-15 — Hive-owned Honeycomb registry lifecycle
+
+- Added canonical manifests/catalog schemas, path-safe package verification,
+  location-only security diagnostics, and deterministic package generation.
+- Added fail-closed managed Claude policy compilation shared by headless/tmux,
+  with isolated settings/MCP/environment and command/domain pre-tool checks.
+- Added official catalog resolution, immutable local generations, atomic
+  activation journals, Loader refresh, and task commit/digest provenance.
+- Added `workflow install`, `list`, `update`, `remove`, and `publish` with
+  versioned JSON schemas, offline ownership safety, semantic update escalation,
+  and fork-aware pending-review submissions.
+- Deferred Honeycomb repository contents, GitHub rules, catalog publication,
+  release pinning, and live trust-chain acceptance to the separate Honeycomb
+  project task.
+
+---
+date: 2026-07-14
+slug: legacy-bench-workflow-migration
+---
+
+## Legacy bench workflow migration
+
+- Keep tasks using the exact pre-built-in project `bench.yml` visible and
+  runnable after upgrading to the built-in `bench` workflow.
+- Teach `hive init PROJECT --workflow bench` to archive that legacy descriptor
+  and a copy of its instructions while retaining the shared instruction path
+  and installing the packaged runtime in the same hive-state commit.
+- Restore the legacy descriptor, prior runtime, and clean index state when that
+  hive-state commit fails, so a rejected migration remains retryable.
+- Preserve strict built-in collision failures for modified or independently
+  authored project workflows named `bench`.
+- Live-smoke the migration against hive-bench's existing state: retain the
+  shared instruction path used by `bench-generate`, pin the one field-less
+  coding task before rebinding the default, and preserve all nine status rows
+  plus the unrelated dirty-state fingerprint.
+
+## [2026-07-14T21:49:46Z] babysitter - block verbose status textconv execution
+
+**Action:** Fixed Hive patrol finding `command-bin-hive-e2e-2` by rejecting
+every Git-accepted positive verbose form for allowlisted `git status` reads:
+`-v`, repeated or clustered short flags, and unambiguous long prefixes from
+`--v` through `--verbose`. Verbose status renders a diff, so passing these forms
+through could execute a repository-configured `diff.<driver>.textconv` helper.
+
+**Coverage:** Added a real-Git regression that installs a marker-writing
+textconv driver and confirms every verbose status spelling is skipped without
+creating the marker. Plain non-verbose status remains allowlisted.
+
+## [2026-07-14T21:21:56Z] babysitter - skip git diff conversion filters in dry-run
+
+**Action:** Fixed patrol finding `command-bin-hive-babysitter-skip-log-rb-3` by removing `git diff` from the dry-run stub's read-only allowlist. Git working-tree diff performs check-in conversion, so repository-local `.gitattributes` and `filter.<driver>.clean` / `filter.<driver>.process` config could execute commands despite the existing `--no-ext-diff --no-textconv` hardening. All diff forms now take the default-deny skip/log path.
+
+**Coverage:** Added real-Git regressions for clean and process filters. Each test configures a marker-writing repository filter and verifies a dry-run diff is skipped without executing it.
+
+**Verification:** `bundle exec ruby -Itest test/unit/babysitter/dry_run_env_test.rb`; `bundle exec rubocop bin/hive-babysitter-stub-git test/unit/babysitter/dry_run_env_test.rb`.
+
+**Links:** [[commands/babysit]], [[modules/babysitter]], [[testing]], [[gaps]]
+
+---
+date: 2026-07-14T20:28:31Z
+slug: babysitter-git-ambiguous-separator
+pages: [commands/babysit, modules/babysitter, testing]
+---
+
+## babysitter - fail closed on ambiguous Git separators
+
+`bin/hive-babysitter-stub-git` now keeps scanning after a `--` that
+immediately follows an unmodeled option. Real Git may consume that token as the
+option's value rather than treat it as the pathspec separator; continuing the
+safety scan prevents a later write or executable-affecting option from being
+hidden. Unambiguous separators, including `git log -- -o`, still end scanning.
+
+The real-Git regression in `test/unit/babysitter/dry_run_env_test.rb` proves
+`git log --decorate-refs -- --output=PATH -1 HEAD` is skipped and cannot
+create the requested output file.
+
+# 2026-07-14 — Prepare Hive v0.4.2
+
+**Action:** Bumped the CLI and both local path-gem locks to `0.4.2`, pinned the
+public installer snippets to `v0.4.2`, and added the matching patch changelog.
+The release collects the built-in benchmark workflow, quota-aware generic-stage
+recovery, and daemon child-log isolation changes merged after v0.4.1. Release
+announcements now direct existing users to the channel-preserving `hive update`
+command instead of an unsupported direct `gem install` invocation that cannot
+resolve Hive's GitHub-release-only gem.
+
+**Docs:** Release-facing operating, dependency, active-area, and gaps pages now
+record the synchronized v0.4.2 source state and the remaining tag-triggered
+publication boundary.
+
+**Verification boundary:** Source checks can prove version/reference parity,
+gem construction, and the existing focused regressions before merge. Signed
+artifacts, the GitHub Release, Homebrew/AUR updates, and hivebox images are
+verified only after the public `v0.4.2` tag triggers the release workflow.
+
+# 2026-07-14 — Refactor-patrol error visibility hardening
+
+- `FamilyStore` now quarantines only the corrupt/inconsistent family record (bytes preserved under `quarantine/families/` with evidence, JobStore-style) instead of rebuilding from authoritative jobs and bulk-deleting valid pre-authoritative records; dry runs stay non-mutating.
+- `ReviewHandoff` propagates `SystemCallError`/`IOError` from metadata reads (nil only for JSON/YAML parse failures), so an unreadable live task is retried instead of being quarantined or duplicated; `PrOpener#handoff` keeps such errors retryable (`review_handoff_pending`) but settles `ReviewHandoff::Conflict`/`ArgumentError` terminally as `review_handoff_failed` with the error in receipts.
+- Patrol/leverage mappers scrub git-emitted filename bytes to valid UTF-8 at the boundary (`mapper.rb`, `architecture_mapper.rb`, `leverage.rb`), so one Latin-1 filename can no longer raise `ArgumentError` or silently zero leverage signals.
+- `hive-refactor-patrol-thesis.v2` requires `minLength: 1` on `problem`/`cost`/`proposed_refactor`, matching the envelope's `ThesisSnapshot`; an empty-narrative thesis now fails at the `ThesisNormalizer` gate as a recorded `schema_invalid` slice error instead of poisoning the discovery envelope. See [[modules/patrol]] and [[stages/review]].
+
+# 2026-07-14 — Discovery claim validation and scheduler recovery coverage
+
+- Closed the "zombie fence" gap in `JobRecordValidator`: attempts of kind
+  `discovery_claim` now get the same schema discipline as action claims — at
+  most one active attempt, strictly increasing generations, complete claim
+  shapes, plus append-only history with monotonic heartbeats and legal state
+  transitions — so a record with two active discovery attempts can no longer
+  be written and later resurrect a stale prior-generation token through
+  `active_discovery_attempt`.
+- Added behavioral coverage for daemon crash recovery: an expired discovery
+  claim is reclaimed by `RefactorPatrolScheduler#reserve` only when the
+  injected `claim_resolver` proves the recorded owner gone (`:resolved`);
+  `:unresolved` keeps the claim and fails the reservation closed.
+- Corrected misleading comments: heartbeat renewal refuses only on proof of
+  death/PID reuse (fail-closed lives in the takeover paths), patrol due-check
+  throttles commit at evaluation time (not on reserve), and the pending-marker
+  `cancel` calls in `Dispatcher#dispatch_patrol_with_gates` serve only the
+  legacy no-arbiter `tick` path.
+
+# 2026-07-14 — Refactor patrol fixer audit rename/symlink hardening
+
+- All fixer audit diffs (`--name-only`, `--numstat`, `--unified=0`, trunk
+  drift) now pass `--no-renames`, so a staged rename surfaces both endpoints
+  and can no longer bypass the boundary, public-contract, or diff-size guards.
+- The audit rejects any changed path that is (or crosses) a symlink inside the
+  worktree with the new terminal `symlinked_path` outcome, which is also
+  issue-eligible as a deterministic nonfixable reason.
+- The public-contract guard now verifies the base commit with `git cat-file -e`
+  before treating a failed `git show` as a new file; any other git failure
+  re-raises instead of letting a deleted public declaration pass unaudited.
+- `Hive::ConfigError`/`ArgumentError` in `Fixer#attempt` produce a terminal
+  `fix_error`, and ActionRunner persists non-terminal fix error details as
+  write-once `fix_release_<generation>` receipts instead of dropping them.
+
+## [2026-07-14T03:52:51Z] e2e - classify malformed scenarios as config failures
+
+**Action:** Fixed `bin/hive-e2e run` and `list` so malformed scenario YAML or
+definitions emit the existing `preflight` error contract and exit `78` instead
+of being reported as generic harness/test failures with exit `1`. Added focused
+executable regressions for both commands in JSON and human modes, and refreshed
+[[e2e]] / [[testing]] contract wording.
+
+**Verified:** `bundle exec ruby -Itest test/e2e/lib/hive_e2e_binary_test.rb`;
+`bundle exec rake e2e:lib_test`; `bundle exec rake test`;
+`bundle exec rubocop bin/hive-e2e test/e2e/lib/hive_e2e_binary_test.rb`.
+
+## [2026-07-14T03:38:34Z] babysitter — preserve stored gh auth in dry-run reads
+
+**Root cause:** `DryRunEnv` still captured the parent gh config directory, but the shared `gh` stub deleted that trusted handoff and replaced both `HOME` and `GH_CONFIG_DIR` with a fresh empty directory. With token environment variables absent, real `gh` therefore lost the `hosts.yml` host/account context needed to retrieve the operator's stored/keyring credential, so allowlisted reads failed authentication.
+
+**Change:** `DryRunEnv` now resolves and validates the parent config directory and `hosts.yml` as current-uid, non-group/world-writable entries, copies only `hosts.yml` into a private run-scoped temp directory, pins that view through the launcher, and removes it on exit. The stub validates the pinned directory before using it for `HOME` and `GH_CONFIG_DIR`; executable `config.yml` settings and command-local home/config overrides remain excluded, with an empty temp directory retained as the fail-closed fallback.
+
+**Coverage:** Strengthened `test/unit/babysitter/dry_run_env_test.rb` to prove the view contains only the trusted host/account file, excludes `config.yml`, resists command-local handoff replacement, and is cleaned up. Added `test/smoke/live_gh_dry_run_auth_smoke_test.rb`, which removes all token env variables and exercises stored authentication through the wrapper with the real `gh` binary. The broader full-agent dry-run uncertainty remains recorded in [[gaps]].
+
+**Verified:** focused unit regression; remaining dry-run unit cases and the large allowlist matrix; real-gh stored-auth smoke; RuboCop and wiki log validation.
+
+**Links:** [[commands/babysit]], [[modules/babysitter]], [[testing]], [[gaps]]
+
+---
+title: Benchmark runtime CI boundaries
+type: change
+date: 2026-07-13
+---
+
+- Kept the packaged benchmark runtime synchronized with hive-bench while
+  excluding the snapshot from Hive's separate RuboCop style policy.
+- Retained Brakeman coverage over the runtime and documented three argv-form
+  `Open3.capture3` false positives in the root ignore file.
+- Replaced ShellCheck-sensitive word splitting and `ls` parsing in both the
+  canonical harness and packaged snapshot.
+
+# 2026-07-13 — Package mixed-model benchmark follow-up workflows
+
+The built-in `bench` runtime now carries the Sol/Terra and Sol/Fable/Grok
+follow-up profiles from hive-bench, including stage-specific Codex model/effort
+selection and a sole Sol xhigh Codex `ce-code-review` reviewer. Generate selects
+`hive-bench-runner:sol` for any GPT-5.6 stage; that image also carries Grok, so
+mixed Sol/Grok cells use one compatible runner. Focused descriptor and
+hive-bench smoke coverage pin the image-selection branches. Paid live validation
+remains outstanding.
+
+---
+title: Self-contained built-in benchmark runtime
+type: change
+date: 2026-07-13
+---
+
+- `hive init --workflow bench` now snapshots the packaged benchmark harness,
+  runner image, and campaign example into `.hive-state/bench-runtime` and
+  commits them on `hive/state`.
+- Packaged bench stage scripts resolve their executable runtime from that
+  state snapshot while keeping `corpus/` and `runs/` in the benchmark project.
+- A fresh benchmark project no longer requires a separate hive-bench checkout;
+  the public repository remains the evidence, contribution, and methodology
+  home.
+
+## [2026-07-13T21:45:00Z] workflows/daemon — preserve quota retry semantics in generic agent stages
+
+**Action:** Fixed `Hive::Stages::Agent` treating every `{status: :error}` spawn
+envelope as `agent_preflight_failed`. A live built-in benchmark extract stage
+hit Claude's session wall; `Hive::Agent` correctly wrote
+`ERROR reason=limits_reached retry_after=...`, but the generic runner immediately
+overwrote it with the permanent preflight marker, preventing the daemon's quota
+cooldown healer from retrying the task. The runner now preserves an existing
+quota marker, recognizes provider-limit text in markerless error envelopes,
+stamps the selected profile when it owns the marker, and returns the distinct
+`limits_reached` commit action. Genuine version/preflight failures keep their
+existing `agent_preflight_failed` behavior. Added focused regression coverage
+for both the marker-preserving and markerless-envelope paths. The built-in
+benchmark descriptor now also pins its shell-control stages to Codex
+and gives generate/judge seven-day timeouts (extract/publish retain one hour),
+so a deliberately serialized multi-cell campaign neither consumes the Claude
+account merely to launch scripts nor dies at the generic one-hour ceiling.
+The generate instruction now also classifies an unfinished matrix containing
+only harness `pending` entries (the harness's provider-wall bucket) as
+`ERROR reason=limits_reached retry_after=...`; the normal daemon cooldown
+healer can resume it after reset. Missing/unreadable results, contradictory
+terminal cells, and any `failed` entries still produce manual `WAITING`, so the
+automatic path cannot hide data corruption or non-limit benchmark failures.
+
+## [2026-07-13T19:58:55Z] cli - make argv UTF-8 validation locale-independent
+
+**Action:** Updated the pre-dispatch argv guards in `bin/hive` and
+`bin/hive-e2e` to validate a duplicated UTF-8 view of each argument. Raw invalid
+bytes are now rejected under `LC_ALL=C` instead of being accepted as valid
+`ASCII-8BIT` and reaching command dispatch.
+
+**Verified:** Added `LC_ALL=C` raw-byte regressions for both binaries and ran
+`bundle exec ruby -Itest -Ilib test/integration/cli_usage_error_json_test.rb`,
+`bundle exec ruby -Itest -Ilib test/e2e/lib/hive_e2e_binary_test.rb`, and
+`bundle exec rubocop bin/hive bin/hive-e2e test/integration/cli_usage_error_json_test.rb test/e2e/lib/hive_e2e_binary_test.rb`.
+
+# Built-in benchmark workflow
+
+- Registered `bench` as a built-in workflow with the native
+  `inbox -> extract -> generate -> judge -> publish -> done` stage sequence.
+- Packaged the hive-bench stage instructions in the gem so
+  `hive init . --workflow bench` needs no project-local descriptor or prompt
+  copies.
+- Added descriptor, packaging, registry, and init/new integration coverage.
+- Documented the named workflow setup and reserved built-in id.
+
+## [2026-07-13T02:10:26Z] testing - hive-eval surfaces report cleanup failures
+
+**Action:** Fixed Hive patrol finding `command-bin-hive-6`. `bin/hive-eval` now removes a selected report with `File.unlink`, tolerating only `Errno::ENOENT`; permission and other unlink failures abort before a usage result or Rake launch can leave stale JSON looking current. Added wrapper coverage with a stale report in a non-writable directory and a fake Bundle marker that proves Rake is not launched.
+
+## [2026-07-13T01:42:51Z] bug - hive-e2e rejects bare cleanup retention flags
+
+**Action:** Added pre-dispatch validation for separate-form `--retain-days` and `--retain-failed-days` options in `bin/hive-e2e`. Thor retains an optional string option's configured default when the flag is terminal or followed by another switch; malformed `clean` calls could therefore reach destructive cleanup with the default window. Bare or option-followed retention flags now raise the existing usage error before Thor dispatch, while explicit negative values still reach the retention-window validator.
+
+**Tests:** Added a six-case binary regression covering both retention flags as the final token and immediately before `--json` or `--dry-run`. Every case must exit `64`, use the expected JSON or human error surface, and preserve an eligible old run directory. Verified the full `test/e2e/lib/hive_e2e_binary_test.rb` suite (38 tests, 305 assertions).
+
+---
+title: Manual marker recovery purges shadowed history
+module: markers
+tags: [markers, recovery, daemon]
+---
+
+## [2026-07-12T21:58:00Z] markers — manual recovery leaves a markerless retry artifact
+
+**Action:** Changed `hive markers clear` to remove all recognized marker comments
+after its current-marker and optional `--match-attr` guards succeed. Generic
+stage runs append terminal markers after transient `AGENT_WORKING` markers, so
+removing only the newest `ERROR` could expose the completed run's older working
+marker and make the daemon defer redispatch until stale-agent recovery. Manual
+and daemon-managed recovery now share the same markerless postcondition while
+preserving state-file prose and the guarded clear audit commit.
+
+**Coverage:** Added an integration regression with a shadowed
+`AGENT_WORKING` plus a marker-ID-guarded `ERROR` clear; it asserts no marker is
+current afterward and surrounding implementation prose remains intact.
+
+# 2026-07-12 — Higher-alpha ordinary patrol
+
+- Audited every patrol-titled GitHub PR created from 2026-05-12 through
+  2026-07-12. Of 218 generated `Hive patrol:` findings, 144 merged, 65 closed
+  unmerged, and 9 remained open. All 218 originated from only nine legacy
+  slices; seven command/test slices produced 211. In June 1–20, 48 of 53
+  closed findings were explicitly duplicate, redundant, or superseded, and
+  model-authored severity/confidence did not predict novelty or delivery.
+- Replaced ordinary patrol's overlapping route/package/monolithic-test mapping
+  with the language-neutral component/import mapper plus separate public
+  command slices. Generic text source and unfamiliar languages under common
+  code roots remain first-class; subsystem tests attach to their component
+  instead of forming one broad provenance bucket.
+- Tightened discovery to evidence-backed production defects. New findings
+  carry contract, impact, scope, root cause, reproduction, and targeted
+  validation; evidence must be a confined regular repository file and the
+  primary trigger/root cause must belong to the mapped slice. The prompt
+  prefers zero findings and routes documentation, test-gap, and
+  maintainability work away from ordinary auto-fixing.
+- Added deterministic 0–100 alpha scoring and a globally ranked candidate
+  portfolio. Semantic same-run/historical duplicates, active-feature overlap,
+  low-value categories/scores, and excess findings from one feature are
+  suppressed before fixer work. Structured fingerprints no longer depend on
+  volatile feature attribution, while legacy records retain their v1 fallback.
+  Severity and confidence are gates/small tie-breakers rather than dominant
+  weights because those model-authored labels did not predict corpus delivery.
+- Changed the fix contract from the smallest code change to the smallest
+  complete root-cause repair. The fixer starts from freshly fetched default
+  branch state, declares bounded regression/audit paths, and receives a
+  machine-observed before/after receipt; stale, false, or proof-less findings fail closed without
+  publication. PR/review handoffs preserve the alpha, contract, impact, root
+  cause, reproduction, and validation context.
+- Command entrypoints remain supporting context in architecture components but
+  are primary evidence anchors only in their dedicated command slice. Manifest
+  scripts are grouped into one contract review, preventing repeated agent calls
+  over identical owned files. Fix proofs are bounded to 64 KiB, and a separate
+  six-attempt cycle cap limits fixer cost when candidates are stale or fail.
+- Finding ids now include their unique review occurrence instead of overwriting
+  the prior run, and each cycle writes an immutable selection audit with scores
+  and skip reasons. Defaults are three findings per feature, alpha gate 70,
+  one automatic fix per feature per cycle, six fixer attempts, and three opened
+  PRs per cycle.
+- Bounded review cost with a deterministic 12-feature rotating batch. The
+  exact detached SHA and cursor survive daemon cycles—even when default moves—
+  and `last_scanned_sha` advances only after that complete map is covered.
+  Reviewer output is capped, strict, atomically admitted, source-verified, and
+  v2 exposes attempted/success counts plus exact partial-review errors.
+- Made fix proof machine-owned: Hive runs the selected configured command on an
+  isolated unpatched base with bounded agent-declared regression files overlaid
+  and on the patched tree, requires a normal regression-identified failure then
+  pass, applies the changed-path guardrail, and labels root-cause/audit prose as
+  agent-reported. Fixer rejection no longer permanently resolves a finding.
+- Bound publication to the validated commit: strict fresh fetch, exact base/head
+  and clean-worktree checks, full title/body/exact-diff secret scanning, leased
+  push, remote/PR reconciliation, and exact-patch reuse after handoff failure.
+  Diff/ref/fetch failures block instead of falling back or publishing.
+  Refreshed the two Brakeman argv-form false-positive fingerprints after the
+  new exact-ref helpers moved those calls.
+- Published the expanded ordinary-patrol response and durable finding record as
+  `hive-patrol.v2` and `hive-patrol-finding.v2` while preserving both v1
+  schemas. The response exposes review completeness/errors and closed per-attempt
+  fix/publication outcomes with dynamic detail separated from reason codes.
+
+## [2026-07-12T20:20:00Z] agent/daemon — honor complete provider reset dates
+
+**Action:** A live Codex quota wall said `try again at Jul 18th, 2026 7:50 AM`,
+but every `limits_reached` writer discarded that text and stamped the fixed
+one-hour cooldown. The daemon consequently spent all three bounded retries in
+three hours and parked the task days before the real reset. `Hive::AgentLimit`
+now conservatively parses only complete dated reset hints (month, day, year,
+and time), adds a one-minute boundary grace, rejects expired or more-than-one-
+year dates, and otherwise retains the fixed cooldown. Agent, Claude launcher,
+execute, CI, triage, and fix marker writers forward their captured provider
+text into the helper. Live tmux detection passes only the matched limit menu
+and its adjacent reset lines, so unrelated dated transcript prose cannot forge
+a hold. When every reviewer is limited, Hive waits for the latest captured
+provider boundary rather than whichever reviewer happened to run first. Added
+parser, headless-agent, launcher, reviewer, and execute-stage regression
+coverage for the exact Codex shape and multiline Claude menu path.
+
+# 2026-07-12 — Architecture patrol review resolution
+
+- Narrowed architecture boundaries: `Hive::Gh` remains shared GitHub/git
+  transport while `Hive::RefactorPatrol::GithubGateway` owns patrol-specific
+  issue, merged-PR, and publication-proof protocol. `JobStore` remains the sole
+  lock/read/write facade while record validation, claim transitions, and
+  rebuildable index projection live in dedicated collaborators. Issue inventory
+  validates real REST pull-request rows against `/pull/N` identity before
+  excluding them, while issue rows retain strict `/issues/N` validation.
+- Made merged-PR catch-up incremental and restart-safe without changing the
+  authoritative `reconciler.json` v2 checkpoint. An identity- and
+  checkpoint-fingerprint-bound progress sidecar persists page/intake cursors
+  and jittered exponential backoff; monotonic tick/per-call budgets plus fair
+  project rotation prevent a slow GitHub repository from stalling the daemon.
+  Each scan freezes both its merge-time upper bound and first-page result count,
+  uses stable creation ordering, and restarts page traversal without moving that
+  bound if GitHub indexing changes the count or terminal size. Strict persisted
+  cursor/scalar/timestamp/OID validation quarantines impossible continuation
+  state before another GitHub call.
+  Catch-up, bounded finalize-watcher state polling, and immediate watcher
+  hydration—including origin identity discovery—share that absolute budget, so
+  a batch of merged PRs cannot each claim a fresh remote timeout; deadline
+  deferral preserves the watcher entry
+  without consuming its failure budget, while a hung `gh pr view` is terminated
+  and enters ordinary watcher backoff instead of pinning the dispatcher.
+  Durable retry `not_before` is anchored at observed failure time using
+  monotonic elapsed time, and consecutive watcher-intake failures no longer get
+  reset merely because the preceding PR-state poll succeeded.
+- Scoped PR publication recovery to validated patch generations. Append-only
+  publication attempts bind base/commit identity and immutable push/create
+  phases, reconcile a landed push before drift supersession, recheck trunk
+  immediately before creation intent, reject a missing completed remote, and
+  allow branch replacement only under an exact lease for the previously pushed
+  OID. Legacy flat replacement proof remains usable after additive namespaced
+  migration, and phase evidence remains part of unique continuation ownership
+  across restarts or consent changes.
+- Added explicit fresh-init `--refactor-patrol` / `--no-refactor-patrol`
+  selectors before any state write while retaining default-enabled discovery
+  and separate default-off auto-fix/issue gates. Existing-project re-init paths
+  reject those fresh-only selectors instead of silently ignoring them. Added non-mutating
+  `hive refactor-patrol PROJECT --list|--show JOB_ID [--json]` inspection with
+  the versioned `hive-refactor-patrol-jobs.v1` contract. List pages now use an
+  explicit 1..100 bound plus an immutable sequence/high-water cursor and read
+  only selected full jobs instead of the permanent ledger. Writer registration
+  now reserves immutable membership before the authoritative job write and
+  publishes only a contiguous durable prefix; exact crash retries recover
+  unpublished membership, pre-index jobs migrate on the next authoritative
+  write, and explicit rebuilds scan under the writer lock before atomically
+  swapping a fully prepared generation. Show retry/publication
+  histories use the same default bound unless `--full` is requested, and invalid
+  show ids or selector-less query modifiers remain usage errors without masking
+  corruption in valid-id records. Legacy flat patch history now reports honest
+  truncation metadata, while new action blocks snapshot claim generations so
+  same-second writes or clock rollback cannot hide a live blocker. Superseded
+  retry failures no longer appear as current blockers after a job succeeds.
+- Retained the other review hardening: verified Claude safe mode for read-only
+  discovery, root-confined bounded source reads at the outer mapper boundary
+  before package, Python-route, or documentation paths reach a reviewer,
+  the same 256 KiB bound for cited evidence verification,
+  mode-correct v1/v2 CLI errors,
+  non-draft PR reconciliation, later-stage handoff-proof recovery, tick-scoped
+  candidate ownership snapshots with fresh effect fences, and shared atomic
+  directory-fsync behavior.
+- Hardened the shared GitHub timeout itself: captures now own a process group
+  and include pipe drain in the deadline, so a TERM-resistant helper that
+  inherits stdout after `gh` exits is killed instead of hanging the daemon.
+  Push/ref lookup now also rejects unsafe branch and option-shaped remote
+  targets. The progress store uses JSON rather than `Marshal` for detached
+  dry-run state, and narrowly documented argv-form Git calls remain explicit
+  Brakeman false positives rather than security warnings.
+- Expanded focused unit, integration, schema, and command validation, including
+  a real-git/bare-remote regression whose forked worker is hard-killed after
+  push but before completion persistence, followed by dead-claim recovery,
+  durable supersession, exact old-OID replacement, one verified PR, and one
+  mandatory review handoff. Refreshed CLI, command, GitHub, daemon,
+  state-model, testing, and public documentation for the resolved contracts.
+
+---
+title: Pin manual daemon children to the invoked Hive binary
+date: 2026-07-12
+---
+
+- `hive daemon start` now fills an absent `HIVE_BIN` from the invoked
+  `hive`/`hv` executable after daemonization. Manual foreground and detached
+  daemons therefore dispatch the same checkout or package that launched them
+  instead of silently resolving an older `hive` from `PATH`.
+- Explicit `HIVE_BIN` values from systemd/launchd units or operators remain
+  authoritative.
+- Added command tests for both inferred and explicit runtime binary selection.
+
+# 2026-07-12 — Architecture patrol review fixes
+
+- Hardened read-only discovery with Claude's verified `--safe-mode`
+  capability, confined mapper/leverage reads to regular files beneath the real
+  project root, and capped each source read at 256 KiB. A reviewer that mutates
+  tracked checkout content now fails the command, releases its claim, and
+  checkpoints no findings.
+- Tightened publication and recovery: OPEN draft PRs no longer reconcile as
+  successful publications, and canonical proof rebuilds accept mandatory handoff tasks that have
+  legitimately advanced from `6-review` through `9-done` while rejecting other
+  or nested paths.
+- Made candidate ownership evaluation tick-scoped for bounded repeated work
+  while retaining fresh reservation/effect-time checks, and centralized
+  architecture state/handoff directory durability through
+  `Hive::AtomicFile.fsync_directory`.
+- Added mode-aware v1/v2 wrapper usage-error envelopes, corrected init help and
+  CLI references to the current `hive-init.v2` producer, and pinned init help to
+  the schema-version registry so the advertised contract cannot drift.
+- Refreshed architecture-patrol, daemon, agent-profile, GitHub, state, and test
+  wiki coverage for these reviewed boundaries. Auto-fixing and issue filing
+  remain separate default-off gates from default-recommended discovery.
+
+---
+title: Purge shadowed markers during daemon retries
+type: fix
+date: 2026-07-11
+---
+
+Healer-managed marker clears now atomically remove shadowed marker history
+after the current marker name and attributes pass their race guard. Repeated
+generic workflow attempts can leave an older `AGENT_WORKING` plus terminal
+errors beneath the current retryable error; clearing only the newest marker
+made the daemon rediscover that dead history and wait through another stale
+grace cycle instead of redispatching.
+
+Manual `hive markers clear` remains a single-current-marker operation. New
+marker and stale-healer regressions cover stacked working/error history while
+proving that state-file prose remains intact.
+
+---
+title: Preserve generic-stage agent limit markers
+type: fix
+date: 2026-07-11
+---
+
+Generic workflow agent stages now distinguish an unchanged terminal marker
+from a fresh marker written during the spawn. Error envelopes synthesize
+`agent_preflight_failed` only in the unchanged/preflight case, preserving
+specific runtime errors such as `limits_reached` and their daemon
+`retry_after` metadata.
+
+A regression covers the Codex usage-wall shape that previously lost its timed
+retry as the generic runner returned.
+
+# 2026-07-11 — Scheduled architecture patrol
+
+- Fresh terminal and web initialization now recommend enabling post-merge
+  architecture discovery by default, while auto-fixing and issue filing remain
+  independent, explicit, default-off consent gates.
+- Added immutable merge manifests, durable v2 job/action ledgers, feature-level
+  retry checkpoints, semantic-family deduplication, fenced dead-owner recovery,
+  large-result file transport, and fair daemon scheduling alongside ordinary
+  patrol. The catch-up checkpoint is now schema v2 and binds registration,
+  exact host, repository, and default branch.
+- Discovery and documentation mapping are language- and project-neutral.
+  Source grouping now recognizes common ecosystems, unfamiliar text-source
+  extensions, shebang scripts, build/infrastructure files, and independent
+  manifest slices; source-only import edges drive leverage without counting
+  tests, docs, assets, fixture manifests, or arbitrary mapper chunks as
+  coupling. Mapper failures now surface bounded incomplete-measurement
+  diagnostics and force affected theses into report-only status instead of
+  masquerading as genuine zero leverage.
+  Automatic fixes stay isolated and fail closed unless public-contract,
+  boundary, validation, dependency, patch-cap, and secret checks can prove the
+  change safe; deterministic non-fixable findings can route to deduplicated
+  issues when that separate gate is enabled.
+- Proposal leverage now defaults to a `0.25` automatic-action floor, reviewer
+  output obeys one strict run-wide thesis budget, and every cited file, line,
+  and snippet is verified against root-confined checkout bytes. Configured
+  `refactor_patrol.commands.public_contract` checks run for every relevant
+  source/public-surface fix in addition to built-in ecosystem guards. Ruby
+  visibility is scoped per parsed class/module, and architecture-specific
+  review budgets take precedence over ordinary patrol defaults. Extensionless
+  script changes are detected from current or pinned-base shebang bytes and
+  require configured contract certification before automatic publication.
+- Existing issues reconcile from a complete exact-host open/closed inventory:
+  v2 action markers win first, while only strictly shaped markerless historical
+  bodies can join a semantic family. Malformed or pairwise-incompatible legacy
+  candidates fail closed instead of suppressing a new finding.
+- PR and issue publication now persist creation intents, bind recovery to the
+  source host/repository and exact remote branch state, re-check current policy,
+  claim generation, and unique repository ownership immediately before each
+  request, reconcile ambiguous attempts before retrying, and require successful
+  OPEN/MERGED patrol publications to enter `6-review` without ever merging them
+  automatically. Refactor pushes reuse one validated origin URL with exact
+  absence/OID leases; multiple push URLs fail closed. Canonical action and
+  semantic-family ids include the source host, and fixes use the repository-global
+  `hive-refactor/<canonical-action-id>` branch across jobs and registration
+  handoffs.
+- Terminal PR/issue/handoff proof is archived immutably under global state;
+  the canonical-action catalog is a disposable projection. Exact proof can be
+  materialized across registrations without rerunning adapters and survives
+  catalog loss, owner deregistration, or owner-path removal, while corrupt or
+  conflicting archives block. Dry-run reads this state without writing either
+  archive or catalog.
+- Full publication authority now requires the target's exact live
+  registration. Enabled duplicate owners, disabled registrations with pending
+  remote continuation evidence, missing registration, and unresolved
+  config/identity/continuation state all block visibly. Scheduler config
+  failures are durably recorded as `project_config_unavailable`, including a
+  failure between candidate selection and reservation.
+- Newly created PRs are re-read from the exact host/repository and must match
+  URL/number, OPEN non-draft state, head repository/branch/OID, and base before
+  a separately fenced `6-review` handoff. Exact-host merge-detail and GraphQL
+  intake validate returned PR identity before advancing catch-up state.
+- Expanded unit, integration, schema, scheduler, supervisor, and fake-GitHub
+  coverage for mixed fix/issue/suppression lifecycles, explicit terminal-job
+  replay, dry-run consent/ownership parity and non-mutation, stale claim
+  fencing, crash recovery, and language-neutral safety behavior.
+
+# babysitter skip-log open-race hardening
+
+**Action:** Fixed patrol finding `command-bin-hive-babysitter-skip-log-rb-1`: the skip-log preflight discarded the `File.lstat` identity, and missing targets were created without exclusivity, so a concurrent pathname swap could substitute another current-user file before the descriptor checks.
+
+**Result:** Existing logs now require the opened descriptor's device/inode to match the preflighted file. Missing logs use `File::CREAT | File::EXCL`; creation and replacement races are rejected and warned rather than retried. The existing no-follow, nonblocking, regular-file, owner, and link-count checks remain in place.
+
+**Coverage:** `test/unit/babysitter/dry_run_env_test.rb` deterministically swaps an existing path at the `File.open` seam and races a missing-path creation with a hard link, verifying both attempts are rejected without modifying the substituted target. Refreshed [[commands/babysit]], [[modules/babysitter]], and [[testing]].
+
+# Keep daemon child logs out of shared tmp and project Git state
+
+Daemon dispatches now pass Hive's XDG state home to `ChildSupervisor`. Combined
+child output lands at `logs/daemon-children/<project>/<slug>/daemon-run.log`
+instead of the machine-wide tmpdir, preventing an unrelated `/tmp` quota
+exhaustion from crashing the dispatcher before `Process.spawn`. The per-task
+file is truncated on each run so durable captures remain bounded.
+
+The capture directory is also outside each project's tracked `.hive-state`
+worktree, so a child cannot dirty workflow Git state by emitting its final JSON
+envelope after the stage commit. The tmpdir layout remains only for standalone
+supervisor callers without a supplied state home. Dispatcher tests pin normal
+row and request-queue routing; an integration test verifies the resulting log
+location.
+
+# 2026-07-10 — Prepare Hive v0.4.1
+
+**Action:** Bumped the CLI and both local path-gem locks to `0.4.1`, pinned the
+public installer snippets to `v0.4.1`, and added the matching patch changelog.
+The release collects the post-v0.4.0 Grok auth-path, daemon reload, JSON usage,
+babysitter dry-run/log, eval report, and descendant cleanup hardening.
+
+**Docs:** Release-facing operating, dependency, active-area, and gaps pages now
+record the synchronized v0.4.1 source state and the remaining tag-triggered
+publication boundary.
+
+**Verification boundary:** Source checks can prove version/reference parity,
+gem construction, and the existing focused regressions before merge. Signed
+artifacts, the GitHub Release, Homebrew/AUR updates, and hivebox images are
+verified only after the public `v0.4.1` tag triggers the release workflow.
+
+## 2026-07-10 — Document the babysitter dry-run prompt contract
+
+**Action:** The PR-fixer dry-run prompt now lists the read-only `git` and `gh`
+allowlist and explains that blocked commands return synthetic success. Agents
+must treat the stderr skip marker as authoritative; the persistent skip log is
+best-effort because unsafe or unavailable audit targets are rejected and
+produce a warning instead of a write.
+
+**Tests:** Prompt-rendering coverage pins the allowlist, skip marker, synthetic
+success, best-effort audit write, and audit-write warning language.
+
+**Wiki page updated:** `wiki/commands/babysit.md`.
+
+## 2026-07-10 — Reload daemon concurrency limits in place
+
+**Action:** `hive daemon reload` now applies the reloaded global, per-project,
+daily, and patrol-scan concurrency limits to the existing
+`ConcurrencyController`. Updating the controller in place preserves live child
+accounting, cooldowns, quarantine, daily counters, and dispatch baselines while
+subsequent admission decisions use the new limits immediately. Explicit YAML
+`null` values for numeric daemon settings are rejected during config validation,
+so an invalid reload cannot replace a live controller limit with `nil`. The
+structured `config_reloaded` event now includes the four effective limits so
+automation can verify the applied result rather than only the delivered signal.
+
+**Root cause:** `Dispatcher#reload_config!` reloaded the global daemon YAML into
+`@daemon_cfg` but refreshed only selected consumers such as child timeouts and
+healers. The controller retained the limits captured by its constructor until
+a full daemon restart.
+
+**Tests:** Added a focused SIGHUP regression that changes every controller-owned
+limit, asserts the controller object and in-flight state are retained, and
+proves the new per-project cap affects the next dispatch check. Added config
+coverage for null concurrency limits and dispatcher coverage proving a rejected
+reload preserves all four live limits and in-flight accounting without emitting
+a false `config_reloaded` success event.
+
+**Wiki pages updated:** `wiki/commands/daemon.md`, `wiki/modules/daemon.md`, and
+`wiki/gaps.md`.
+
+## 2026-07-10 — Require absolute Grok auth overrides
+
+**Action:** `GROK_AUTH_PATH` and explicit `GROK_HOME` values must now be
+absolute. This guarantees that Hive's
+parent-process preflight and a Grok child launched with a different working
+directory resolve the same credential file and state directory. Relative path
+overrides fail closed in both preflight and login-status checks, even when an
+API key is present.
+
+**Tests:** Added focused preflight and login-status coverage for relative paths
+and API-key bypass attempts.
+
+**Wiki page updated:** `wiki/modules/agent_profile.md`.
+
+**Docs updated:** `docs/architecture.md` and
+`docs/notes/headless-agent-cli-matrix.md`.
+
+# 2026-07-10 — Prepare Hive v0.4.0
+
+**Action:** Bumped the CLI and both local path-gem locks to `0.4.0`, pinned the
+public installer snippets to `v0.4.0`, and added the matching changelog section.
+The release headline is the built-in Grok backend, descriptor-level stage
+resource controls, and first-class refactor patrol, with the intervening patrol
+and E2E hardening summarized for maintainers.
+
+**Docs:** README and gem metadata now list Grok alongside the existing agent
+backends. Release-facing operating, dependency, CLI, active-area, and gaps pages
+record the synchronized source state and Grok authentication precedence.
+
+**Verification boundary:** Source checks can prove version/reference parity,
+gem construction, and focused tests before merge. The signed gem/assets,
+GitHub Release notes, package channels, and hivebox images are verified only
+after the public `v0.4.0` tag triggers `.github/workflows/release.yml`.
+
+# 2026-07-10 — Grok preflight honors the CLI credential path
+
+**Action:** Grok agent preflight and login-status probes now resolve
+`GROK_AUTH_PATH` before `GROK_HOME` and the default `~/.grok/auth.json`.
+An explicit but missing path fails closed instead of falling back to a different
+refresh-token chain. This lets containerized workflows share one canonical
+credential file and adjacent refresh lock without creating a compatibility
+copy solely for Hive.
+
+**Tests:** Added focused coverage for direct-path precedence, missing-path
+failure, login-status parity, and explicit auth locations in runners where the
+operating-system home directory cannot be resolved.
+
+**Wiki pages updated:** `wiki/modules/agent_profile.md`,
+`wiki/commands/web.md`, and `wiki/gaps.md`.
+
+**Docs updated:** `docs/architecture.md` and
+`docs/notes/headless-agent-cli-matrix.md`.
+
+## [2026-07-10T09:48:17Z] hive-eval - require executed scenario reports
+
+**Action:** Fixed patrol finding `command-bin-hive-e2e-1`. `bin/hive-eval`
+now rejects inherited Rake dry-run options (including bundled, abbreviated,
+underscored, and shell-quoted forms), clears `RAKEOPT` before launching the
+child, and treats a zero child exit as success only after validating complete,
+passing scenario records in a version-1 `hive-eval-report`. Filtered runs also
+require the requested scenario file. Each invocation writes to a private report
+path and atomically publishes only its own validated output, so concurrent runs
+cannot validate each other's report.
+
+**Coverage:** Added subprocess regressions for Rake dry-run spellings, child
+`RAKEOPT` scrubbing, a child that exits zero without writing its private report,
+malformed/wrong-schema/empty/semantically incomplete reports, failed entries on
+a zero child exit, filtered reports that omit the requested scenario, and
+overlapping invocations sharing one requested path.
+
+Private report directories require a non-writable or sticky parent. Cleanup
+failures warn without overriding the child/result exit status.
+
+**Verified:** `bundle exec ruby -Itest test/eval/support/reporter_test.rb` and
+`bundle exec rubocop bin/hive-eval test/eval/support/reporter_test.rb`
+
+**Links:** [[testing]], [[gaps]]
+
+## [2026-07-10T09:32:34Z] babysitter - reject non-private existing skip logs
+
+**Action:** Fixed Hive patrol finding `command-bin-hive-3` by extending the
+shared dry-run skip-log helper's existing pre-open and post-open identity checks
+to reject files with any group or world permission bits. The `0600` create mode
+does not alter a pre-existing file, so accepting an existing `0644` or `0666`
+log could disclose skipped argv and let another local user forge the audit
+trail.
+
+**Coverage:** Added a focused regression for both the `git` and `gh` stubs that
+verifies existing `0644` and `0666` logs remain untouched and the skipped
+command still exits successfully with a warning. Verified the full
+`test/unit/babysitter/dry_run_env_test.rb` suite.
+
+**Refreshed pages:**
+- [[commands/babysit]]
+- [[modules/babysitter]]
+- [[testing]]
+
+# 2026-07-10 — Grok agent profile
+
+**Action:** Added xAI Grok CLI as a fourth built-in `AgentProfile`. Hive now
+delivers prompts with `grok -p <prompt>`, consumes `streaming-json` text chunks
+without losing inter-chunk whitespace, supports `XAI_API_KEY`,
+`GROK_CODE_XAI_API_KEY`, `GROK_HOME`, and device login, and preserves prompt
+delivery when project overrides rebuild the profile. Grok is included in
+diagnosis schemas, config defaults, Hivebox login/status, and token-stat rows;
+unavailable Grok usage remains nil instead of being recorded as zero.
+
+**Review hardening:** Replaced the 93 KB embedded CE skill snapshot with a
+compact, self-contained, report-only reviewer prompt that treats repository
+content as untrusted and forbids source edits, commits, and network access.
+
+**Verification:** Added focused tests for exact argv, environment/file auth,
+stream chunk concatenation, profile overrides, reviewer rendering, diagnosis,
+usage aggregation, schemas, and Hivebox login. Live native Grok skill
+resolution and token telemetry remain recorded in [[gaps]].
+
+**Wiki:** Updated [[index]], [[architecture]], [[modules/agent]],
+[[modules/agent_profile]], [[modules/config]], [[modules/diagnosis_agent]],
+[[commands/status]], [[commands/web]], [[stages/review]], [[token-usage]],
+[[decisions]], and [[gaps]].
+
+---
+title: Variant-aware pre-dispatch JSON usage contracts
+type: log
+created: 2026-07-10
+tags: [cli, json, schemas, thor, argv]
+---
+
+**Action:** Replaced the wrapper's command-only JSON usage lookup with
+variant-aware resolution for status/diagnose, web status/install, pairing
+list/approve, and shipped/merged-PR digest output. Added the previously omitted
+status, prune, forget, and metrics contracts while preserving the established
+whole-bot `hive-bot-status` usage-error schema. The positional resolver consumes
+known option values and fails closed on an invalid command token, preventing a
+later argument from impersonating a command or subcommand. Forget's closed
+error-kind enum now distinguishes wrapper-level `usage` from `internal` faults.
+The resolver also stops option interpretation at `--`, so later flag-looking
+positionals cannot switch the status or digest schema.
+
+**Evidence:** `test/integration/cli_usage_error_json_test.rb` now drives the
+real `bin/hive` subprocess through Thor extra-positional failures and the
+pre-Thor invalid-encoding guard, parses every stdout envelope, and validates
+registered surfaces against their published JSON schemas. Legacy web JSON
+envelopes remain unversioned to match their successful output. Collision cases
+cover web option values, later pairing arguments, invalid digest source values,
+and invalid command-position bytes.
+
+## [2026-07-10T06:00:00Z] agents - make provisioning digests load-order safe
+
+**Fix:** Qualified provisioning SHA-256 references as top-level
+`::Digest::SHA256`. In the complete suite, loading the existing `Hive::Digest`
+feature before agent-skill adapters caused Ruby constant lookup to select
+`Hive::Digest` and fail planning; focused agent-skill tests had not loaded that
+unrelated namespace. Adapter/provisioner tests now deliberately load
+`hive/digest` first to pin the collision regression.
+
+**Verification:** Focused adapter, provisioner, and process-level setup
+acceptance suites pass with the colliding namespace loaded. Did not edit
+compiled [[log]].
+
+## [2026-07-10T05:00:00Z] agents - provision enabled built-in skills
+
+**Action:** Added the packaged `config/agent-skills.yml` source of truth, strict
+default-coverage validation, effective target resolution, and one shared
+evidence-rich inspector for Claude, Codex, and Pi. `hive doctor` is read-only
+and now emits `hive-doctor.v2`; `hive setup-agents` previews one aggregate
+native-operation plan, enforces consent, revalidates ownership/state, continues
+independent operations, and post-verifies with `hive-setup-agents.v1` automation
+output. Interactive init may delegate to the same setup engine after project
+creation while JSON/non-TTY init remains non-mutating.
+
+**Safety and coverage:** Native adapters preserve user-owned Codex sources,
+unrelated TOML bytes/mode, concurrent edits, and user-authored Claude `/plan`
+aliases. Process-level fake CLI acceptance covers fresh convergence, no-op
+reruns, conflicts, unavailable agents, unattended consent, and partial failure.
+Authenticated provider activation remains opt-in through disposable-home smoke
+tests. Updated [[commands/doctor]], [[commands/setup-agents]], [[commands/init]],
+[[modules/agent_profile]], [[testing]], and [[gaps]]; did not edit compiled
+[[log]].
+
+# Drop terminates descendant processes
+
+`hive drop` now snapshots the recorded agent's descendant processes before
+termination, confirms each PID's parent, process group, and start time in a
+second full snapshot, and signals only the verified PIDs present in both reads
+through TERM/KILL escalation. This prevents a PID reused between the ancestry
+and identity reads from inheriting an old process's trusted ancestry. Both
+headless and tmux launchers now record
+`.lock` `claude_pid_start_time` alongside `claude_pid`, and drop compares that
+identity before signalling the child. A process-tree discovery failure falls
+back to root-PID-only cleanup and is reported as incomplete with
+`process_tree_unavailable` rather than as a complete tree kill.
+
+A real-process regression test covers an agent process with a nested tool process,
+and focused unit coverage pins snapshot failure, PID-reuse, fallback cleanup, and
+permission-denied paths at 100% line coverage for `Hive::ProcessKill`.
+The confirmed snapshot still has a concurrent-fork race: a descendant created
+after confirmation can escape, and fully closing that gap requires durable
+OS-level containment.
+
+# Workflow descriptors accept stage resource limits
+
+Project-authored agent and council stages can now set `budget_usd` and
+`timeout_sec` directly in their workflow descriptors. The descriptor parser
+validates both values and passes them to the existing generic stage runners as
+defaults that explicitly authored project stage configuration can override.
+Merged built-in defaults no longer shadow descriptor values. Council command
+reviewers/revisers now honor the same timeout with process-group termination,
+and profiles without native budget support write an explicit warning instead
+of silently dropping the cap.
+
+Terminal stages continue to reject active-runner fields, including these new
+resource limits.
+
+## [2026-07-09T16:27:05Z] e2e - preserve rotated TUI marker artifacts
+
+**Action:** `ArtifactCapture` now copies the run-scoped `hive-tui-subprocess.log.1` rotation alongside the current shared TUI marker log when a TUI scenario fails, so marker history is not lost before the live log directory is removed.
+
+**Coverage:** Extended `test/e2e/lib/artifact_capture_test.rb` to seed both `hive-tui-subprocess.log` and `hive-tui-subprocess.log.1` and assert both are copied into `tui-subprocess/` and listed in `manifest.json`. Updated [[e2e]]; did not edit compiled [[log]].
+
+## [2026-07-09T16:23:51Z] e2e — leading JSON command-help coverage
+
+**Action:** Refreshed command/API wiki coverage for branch HEAD after it changed
+`bin/hive-e2e` normalization around leading JSON flags and command help. Read
+`AGENTS.md`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent
+[[log]] entries first; `qmd search "hive-e2e replay help leading JSON"` found
+no indexed project-wiki hits, and the configured main wiki path was unavailable
+in this sandbox, so verification used direct wiki/source reads. Inspected the
+committed diff plus current `bin/hive-e2e` and
+`test/e2e/lib/hive_e2e_binary_test.rb`. Documented that leading-JSON command
+help (`--json --help run` and `--json -h run`) now drops the irrelevant JSON
+flag and renders human `run` help with exit `0`, while non-command help
+trailers still restore the JSON path so usage/no-scenarios failures emit
+`hive-e2e-error`. Carried forward the uncertainty that this checkout-only
+harness behavior is source/test-pinned, not live-smoked through patrol or
+babysitter wrappers. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands]]
+- [[e2e]]
+- [[testing]]
+- [[gaps]]
+
+## [2026-07-09T16:04:26Z] hive web - normalize relative app overrides
+
+Fixed `hive web` boot when `HIVEBOX_WEB_APP_DIR` is set to a relative Rails app
+path. The override is now returned as an absolute path after the Rails marker is
+verified, so the exported `BUNDLE_GEMFILE` still points at the real Gemfile
+after `Dir.chdir(app_dir)`. Added focused coverage in
+`test/unit/web/web_command_test.rb` for the relative override exec env.
+
+Pages: [[commands/web]], [[testing]].
+
+---
+ts: 2026-07-09T07:41:08Z
+area: babysitter
+---
+
+**Action:** Hardened `Hive::Babysitter::DryRunEnv` overlay setup so dry-run wrapper generation no longer follows a pre-existing `.hive-babysitter-dry-run-bin` symlink. The setup now `lstat`s and removes any existing overlay path, creates a fresh owned `0700` directory, and verifies it before writing `git` / `gh` launchers.
+
+**Coverage:** Added `test_with_env_replaces_preexisting_overlay_symlink_before_writing_wrappers`, which pre-creates the overlay name as a symlink to a temp directory and verifies wrapper files are not written through it.
+
+## [2026-07-09T00:23:03Z] cli - JSON usage contracts for setup and Screenote
+
+**Action:** Added `bin/hive` wrapper-level JSON usage contracts for `hive setup`,
+`hive connect`, and `hive disconnect` so Thor pre-dispatch failures keep a
+parseable stdout document under `--json`. `setup` now emits an unversioned
+`hive-setup` `ok:false` usage payload for extra positionals, while Screenote
+connect/disconnect missing-`SERVICE` failures emit the existing schema-less
+Screenote failure family with `service:"screenote"` and `error_kind:"usage"`.
+
+**Tests:** Added focused wrapper integration coverage for `hive connect --json`,
+`hive disconnect --json`, and `hive setup extra --json` in
+`test/integration/cli_usage_error_json_test.rb`; `bundle exec ruby -Itest
+test/integration/cli_usage_error_json_test.rb` passed.
+
+**Refreshed pages:** [[cli]], [[commands]], [[commands/setup]],
+[[commands/screenote]], and [[testing]]. Did not edit compiled [[log]] or run
+`qmd update` / `qmd embed`.
+
+## [2026-07-09T00:10:53Z] babysitter - scrub dynamic-loader env before git dry-run passthrough
+
+**Action:** Fixed patrol finding `command-bin-hive-babysitter-stub-git-3` by removing inherited `LD_*` / `DYLD_*` dynamic-loader environment from `Hive::Babysitter::DryRunEnv.with_env` before generated overlay wrappers can hand off to the Ruby stubs. `bin/hive-babysitter-stub-git` also deletes those names before `exec`ing the real git binary as defense in depth, alongside the existing Git config/helper/pager scrub.
+
+**Coverage:** Extended `test/unit/babysitter/dry_run_env_test.rb` with a Linux `LD_PRELOAD` constructor probe that must not run through the generated dry-run `git` overlay, plus a git passthrough env-recording regression that proves Linux `LD_*` and macOS `DYLD_*` names are absent from the real git process.
+
+**Verified:** `env -u GIT_EXEC_PATH -u GIT_EXTERNAL_DIFF -u GIT_SSH_COMMAND -u GIT_SSH -u GIT_ASKPASS -u SSH_ASKPASS -u GIT_PROXY_COMMAND -u GIT_CONFIG_PARAMETERS -u GIT_CONFIG_COUNT -u GIT_CONFIG_GLOBAL -u GIT_CONFIG_SYSTEM ruby -Itest test/unit/babysitter/dry_run_env_test.rb`
+
+**Links:** [[commands/babysit]], [[modules/babysitter]], [[testing]]
+
+## [2026-07-08T23:47:08Z] babysitter - block git remerge-diff dry-run passthrough
+
+**Action:** Fixed patrol finding `command-bin-hive-babysitter-stub-git-2` by hardening `bin/hive-babysitter-stub-git` before it execs an allowlisted `git log` / `git show` read. The stub now skips `--remerge-diff`, `--diff-merges=remerge`, and `--diff-merges=r` because Git replays merge machinery for those formats and can execute repo-local merge drivers. Allowed passthrough also pins `log.diffMerges=separate`, so `-m` / `--diff-merges=on` cannot inherit a repo-local `log.diffMerges=remerge` default.
+
+**Coverage:** Extended `test/unit/babysitter/dry_run_env_test.rb` with a real temporary merge repository whose `merge=pwn` driver writes a marker. The regression proves explicit remerge-diff options are skipped without running the driver, while ordinary `-m` / `--diff-merges=on` passthrough still reaches real git without honoring a configured remerge default. Refreshed [[commands/babysit]], [[modules/babysitter]], [[testing]], and [[gaps]].
+
+**Verified:** `ruby -c bin/hive-babysitter-stub-git`; `ruby -c test/unit/babysitter/dry_run_env_test.rb`; `bundle exec ruby -Itest test/unit/babysitter/dry_run_env_test.rb -n '/remerge/'`; `bundle exec ruby -Itest test/unit/babysitter/dry_run_env_test.rb`; `bundle exec rubocop bin/hive-babysitter-stub-git test/unit/babysitter/dry_run_env_test.rb`.
+
+**Links:** [[commands/babysit]], [[modules/babysitter]], [[testing]], [[gaps]]
+
+## [2026-07-08T21:00:00Z] workflows - descriptor field scoping + council parity (review pass 2)
+
+**Parser (`Hive::Workflows::DescriptorParser`):** Tightened field scoping so a
+field set on a stage kind that never reads it fails at load rather than becoming
+a silent no-op. `skill`/`instruction` are now rejected on `kind: council` (a
+council reads its reviewers' instructions, not the stage's), and
+`input`/`reviewers`/`council` are rejected on `kind: agent` (only the council
+runner consumes them). `deliverable` is now allowed only on the last stage (the
+terminal completion gate is the only reader). The `revise` + `max_rounds: 1`
+load-time warning was extended to also cover `revise` under any non-`consensus`
+`exit_rule` (the council loop only revises under `exit_rule: consensus`, which
+defaults to `human`). Duplicate reviewer `output_basename` detection now compares
+the SANITIZED basename (same `gsub` as `Council::Reviewer#output_path`), so
+`a/b` vs `a-b` collisions are caught. `triage_output` is validated to stay inside
+the stage folder (no leading `/`, no `..` segment) per R2.
+
+**Council runner:** `Council::Reviewer#run!` clears any stale
+`reviews/<name>-NN.md` before each attempt so a leftover file from a failed
+attempt/interrupted run cannot satisfy the success check and count toward quorum.
+The `AGENT_WORKING` marker now carries `pid`/`started` for parity with the agent
+runner (`hive status` can show which runner owns an in-flight council).
+Deterministic triage readiness (`Triage#ready?`) tolerates an optional leading
+Markdown-heading prefix (`## Verdict: ready`). Reviewer verdict files remain in
+`reviews/` regardless of a custom `triage_output` dir — documented as intentional
+(review paths are passed explicitly, never globbed).
+
+**Base:** `spawn_agent`'s "profile does not honor per-stage model/effort" note is
+now gated on `profile.name != :claude`, so a claude caller supplying explicit
+`cli_flags:` with `model`/`effort` no longer gets the misleading warning.
+
+## [2026-07-08T19:30:00Z] workflows - council review-pass hardening
+
+**Action:** Fixed a batch of council robustness/correctness issues surfaced in
+review. `Hive::Stages::Council#run!` now runs a pre-flight on the current marker
+(a `COMPLETE` council short-circuits without re-spawning reviewers; a `WAITING`
+council resumes by re-triaging the same round instead of opening a new one) and
+rescues `SystemCallError` so a file renamed/deleted between parse and run writes
+an attributed `:error` marker (`reason=council_io_error`) instead of crashing.
+`next_round` derives its glob dir from `triage_output` so custom triage dirs
+track rounds correctly. Deterministic triage no longer sniffs free-text prose
+for readiness — a missing structured `Verdict:`/`Status:` line defaults to
+not-ready — and the "Rejected findings" placeholder wording clarifies it is not
+derivable by deterministic triage. Reviewer `max_attempts` is now honored via a
+retry loop.
+
+**Parser/base:** `parse_reviewers` rejects duplicate reviewer `name`/
+`output_basename` (both resolve to the same review file), a parse-time warning
+fires when a `revise` agent is paired with `max_rounds: 1` (a silent no-op), and
+`spawn_agent` logs a note (`config-warnings.log`) when a non-`:claude` profile
+sets `model`/`effort` (only applied on claude). The `reviews/triage.md` default
+is hoisted to `Hive::Workflow::DEFAULT_TRIAGE_OUTPUT` (single source of truth).
+
+**Tests:** Added council tests for failed-reviewer `:error` markers, explicit
+`input:` resolution, resume-after-waiting round continuity, and `COMPLETE`
+short-circuiting; extended triage-content assertions to Accepted/Rejected
+sections.
+
+## [2026-07-08T18:43:34Z] babysitter - neutralize config-selected submodule diff mode
+
+**Action:** Closed the remaining half of patrol finding `command-bin-hive-4`. The argv guard added earlier only sees `--submodule=diff` / split `--submodule diff` on the command line; a worktree-local `diff.submodule=diff` (or `=log`) config selects the same nested-submodule diff expansion with no `--submodule` token in argv, so it slips past the argv scan while git still enters each submodule repo and runs its local diff drivers — the exec seam the top-level `--no-ext-diff --no-textconv` do not reach inside a nested submodule. `hardened_passthrough_argv` now injects `-c diff.submodule=short` alongside the existing gpg/core `-c` overrides, pinning the inert commit-hash summary format; the `-c` override outranks the worktree config.
+
+**Coverage:** Updated `test/unit/babysitter/dry_run_env_test.rb` — the injected-override assertion and the `expected_real_invocation` helper now include `-c diff.submodule=short`, so every allowlisted git passthrough (including `diff`/`log`/`show`) is checked to carry the override.
+
+**Verified:** `bundle exec ruby -Itest test/unit/babysitter/dry_run_env_test.rb`; `ruby -c bin/hive-babysitter-stub-git`; `bundle exec rubocop bin/hive-babysitter-stub-git test/unit/babysitter/dry_run_env_test.rb`.
+
+**Links:** [[modules/babysitter]], [[testing]]
+
+## [2026-07-08T18:02:29Z] workflows - native councils and active terminal stages
+
+**Action:** Added native custom-workflow support for per-stage `agent` /
+`model` / `effort`, `kind: council`, and active terminal agent/council stages.
+Descriptor parsing now validates council reviewers, quorum, max rounds, exit
+rules, optional revise agents, and terminal `deliverable:` aliases. The generic
+agent runner honors descriptor-level profile/model overrides, while the new
+`Hive::Stages::Council` runner reviews document artifacts with per-reviewer
+outputs, deterministic triage files, quorum gating, optional revise loops, and
+generic `WAITING` / `COMPLETE` markers. Terminal active stages classify as
+archived only when the marker is complete and the deliverable file is non-empty.
+
+**Templates/tests:** Added the `architecture` workflow template
+(`inbox -> draft -> review(council) -> architecture(agent-terminal)`) plus
+unit coverage for parser/status/resolver/council behavior and an integration
+test that drives the architecture workflow end-to-end with deterministic agent
+stubs.
+
+## [2026-07-08T17:33:38Z] babysitter - skip git submodule diff passthrough
+
+**Action:** Fixed patrol finding `command-bin-hive-4` by hardening `bin/hive-babysitter-stub-git` against `--submodule=diff` and split `--submodule diff` on allowlisted read commands. The dry-run stub already injects top-level `--no-ext-diff --no-textconv` for `diff` / `log` / `show`; the new guard skips submodule diff expansion because it can enter nested repositories outside that top-level hardening.
+
+**Coverage:** Extended `test/unit/babysitter/dry_run_env_test.rb` so both submodule diff spellings are logged as skipped and do not reach the recording real git.
+
+**Verified:** `bundle exec ruby -Itest test/unit/babysitter/dry_run_env_test.rb`; `ruby -c bin/hive-babysitter-stub-git`; `bundle exec rubocop bin/hive-babysitter-stub-git test/unit/babysitter/dry_run_env_test.rb`.
+
+**Links:** [[modules/babysitter]], [[testing]]
+
+## [2026-07-08T01:41:24Z] e2e - reject symlinked replay runs roots
+
+**Action:** Hardened `bin/hive-e2e replay` so the configured `HIVE_E2E_RUNS_DIR` root is part of the symlink-free artifact chain before a stored `repro.sh` can be executed. A symlinked runs root now reports `error_kind: "unusable_repro"` with exit `78` instead of following the root to an executable script outside the intended runs tree.
+
+**Coverage:** Added `test_replay_symlinked_runs_root_emits_json_artifact_error_when_requested` to `test/e2e/lib/hive_e2e_binary_test.rb`, and refreshed [[e2e]] / [[testing]] contract wording. Did not run `qmd update` or `qmd embed`.
+
+## [2026-07-08T01:32:44Z] testing - hive-eval preserves non-report files on usage errors
+
+**Action:** Hardened `bin/hive-eval` report cleanup so usage-error paths remove the default report or an existing selected JSON document only when it is a `hive-eval-report`. Normal eval runs still clear the selected report path after argv and scenario validation succeeds, but malformed invocations no longer unlink arbitrary caller files passed through `--report`.
+
+**Tests:** Added `test_cli_usage_errors_preserve_existing_non_report_files` in `test/eval/support/reporter_test.rb`, covering parser rescue, stray positional arguments, and missing scenarios. Verified with `bundle exec ruby -Itest -Itest/eval test/eval/support/reporter_test.rb` and `bundle exec rubocop bin/hive-eval test/eval/support/reporter_test.rb`.
+
+# 2026-07-07 — bound e2e CLI stream readers after parent exit
+
+`test/e2e/lib/cli_driver.rb` now treats stdout/stderr reader threads as part
+of the CLI step timeout. If the direct `bin/hive` child exits but a descendant
+keeps inherited capture pipes open, the driver marks the run timed out, signals
+the spawned process group by `-pid`, and returns a nil exit code so normal
+`expect_exit` validation fails instead of hanging the e2e suite. The regression
+coverage in `test/e2e/lib/cli_driver_test.rb` uses a temporary Ruby fixture that
+forks a sleeping child and exits immediately while keeping stdout/stderr open.
+Pages: [[e2e]].
+
+## [2026-07-07T09:40:33Z] e2e — leading JSON top-level help/version
+
+**Action:** Fixed `bin/hive-e2e` wrapper normalization so recognized leading JSON boolean flags are stripped before top-level `--help` / `-h` / `--version` / `-v`; those invocations now print usage or the version instead of falling into default scenario selection with `no_scenarios`. Added focused `test/e2e/lib/hive_e2e_binary_test.rb` coverage for `--json --help`, `--json -h`, `--json --version`, and `--json -v`.
+
+**Refreshed pages:**
+- [[e2e]]
+- [[testing]]
+
+## [2026-07-06T19:00:00Z] cli - hv rejects semver-then-hang probe via watchdog-fired sentinel
+
+**Action:** Fixed Hive patrol finding `command-bin-hv` (bug/regression): a
+candidate whose `hive --version` printed a bare semver, then hung and handled
+the watchdog's TERM by exiting 0, was accepted — `wait "$pid"` recorded status
+0, the captured semver matched the version regex, and `hv` exec'd the hung
+candidate. This silently regressed the removed GNU `timeout` path, which
+returned 124 for the same overrun and fell through to the next candidate.
+
+`probe_version` now records a sentinel (`$output_file.timed-out`) the moment the
+watchdog's arming delay elapses, and after teardown forces a non-zero status
+(124, mirroring GNU `timeout`) whenever the sentinel is present — regardless of
+the probe's own exit code. The fast path is untouched: a probe that finishes
+before the timeout tears the watchdog down before it can write the sentinel.
+
+Added `HvTest#test_candidate_that_prints_semver_then_hangs_is_rejected_not_exec_d`,
+which asserts `hv` falls through such a candidate to a well-behaved one instead
+of exec'ing it.
+
+**Refreshed pages:**
+- [[cli]]
+- [[testing]]
+
+## [2026-07-06T17:47:16Z] cli/install - harden hv version probe watchdog
+
+**Action:** Fixed Hive patrol finding `command-bin-hv-1` (bug/medium): the
+`bin/hv` GNU `timeout` fast path let a bad candidate's stdout feed the wrapper's
+command substitution directly, so a forked helper that inherited stdout could
+hold the pipe open after the wrapper timed out.
+
+Removed the GNU `timeout` shortcut so every candidate uses the existing temp-file
+stdout capture, process-group watchdog, and post-wait KILL sweep. Added
+`HvTest#test_timeout_present_probe_tree_uses_watchdog_and_does_not_leak_stdout_pipe`,
+which puts a fake `timeout` on `PATH`, exercises a TERM-ignoring
+stdout-inheriting helper, verifies `hv` falls through to the next candidate, and
+checks the helper is not left behind.
+
+**Refreshed pages:**
+- [[cli]]
+- [[testing]]
+
+## [2026-07-06T10:07:58Z] testing - hive-eval preserves custom reports on validation errors
+
+**Action:** Fixed `bin/hive-eval` report cleanup ordering for Hive patrol finding `command-bin-hive-3`. Custom `--report` paths are no longer unlinked before stray positional arguments, scenario basename validation, or scenario existence checks have passed; parser-level cleanup is limited to the default `tmp/hive-eval-report.json`, and valid eval runs still clear the selected report immediately before invoking `rake test:eval`.
+
+**Tests:** Updated `test/eval/support/reporter_test.rb` to preserve preexisting caller-provided report paths on parser and validation errors while keeping the default stale-report cleanup coverage. Verified `bundle exec ruby -Itest -Itest/eval test/eval/support/reporter_test.rb`.
+
+## [2026-07-06T09:50:00Z] babysitter - pin gh dry-run passthrough PATH
+
+**Action:** Fixed patrol finding `command-bin-hive-2` by hardening `bin/hive-babysitter-stub-gh` before it execs a real allowlisted `gh` read. The stub already scrubbed gh config, host, proxy, TLS, and Git child-process environment; it now also pins `PATH=/usr/bin:/bin` so real `gh` cannot resolve child `git` helpers from caller-writable PATH entries during dry-run passthrough.
+
+**Coverage:** Added `test_gh_stub_pins_path_before_allowlisted_pr_view_passthrough` to `test/unit/babysitter/dry_run_env_test.rb`. The regression prepends a fake `git` to PATH, runs the allowlisted `gh pr view --json number` path through a fake real `gh` that calls `git --version`, and asserts the fake `git` marker is not created while real `gh` still runs.
+
+**Verified:** `bundle exec ruby -Itest test/unit/babysitter/dry_run_env_test.rb -n '/test_gh_stub_pins_path_before_allowlisted_pr_view_passthrough/'`; `bundle exec ruby -Itest test/unit/babysitter/dry_run_env_test.rb`.
+
+**Links:** [[modules/babysitter]], [[commands/babysit]], [[testing]]
+
+## [2026-07-06T09:38:55Z] babysitter - skip git help viewer dispatch in dry-run
+
+**Action:** Hardened `bin/hive-babysitter-stub-git` so allowlisted read commands now skip help/manual dispatch options before passthrough. `git <command> --help` routes through `git help` and can execute repo/user configured manual, web, or info viewers, so the stub now treats `--help`, `--man`, `--web`, `--html`, and `--info` as unsafe command options.
+
+**Coverage:** Added a real-git regression in `test/unit/babysitter/dry_run_env_test.rb` that configures a repo-local `man.viewer` helper, invokes `git status --help` through the dry-run stub, and asserts the command is skipped, logged, and the helper marker is not created. Verified with `bundle exec ruby -Itest test/unit/babysitter/dry_run_env_test.rb`.
+
+---
+title: Refactor patrol public-API advisory semantics
+date: 2026-07-04T13:00:00Z
+tags: [command, refactor-patrol, decision]
+---
+
+Dogfood follow-up on [[commands/refactor-patrol]]: every thesis in a
+`bin/`-owned slice was flagged `public_api_impact` and never counted as
+accepted, because the caps heuristic conflated *working inside files that
+host public surface* with *changing the public contract*. Refactoring
+preserves the contract by definition — if it changes the public API it is
+not a refactor.
+
+- Path-heuristic matches (`bin/`, `cli.rb`, `schemas/`, routes, docs) are now
+  a non-blocking `touches_public_api_surface` advisory in the new
+  `risk.advisories` array; `public_api_details` still lists the surface files.
+- Only agent-declared `risk.public_api_impact: true` (an admitted contract
+  change) still flags `public_api_impact` and blocks acceptance —
+  flag-not-drop keeps it visible as out-of-contract.
+- Ranked envelope items carry `advisories` (required in
+  `hive-refactor-patrol.v1`); the thesis schema's `Risk` gains an optional
+  `advisories` array; the text report appends `advisories=` when present.
+- The review prompt states the definition: the public contract must behave
+  identically post-refactor; proposals that cannot avoid changing it must
+  declare it and are reported, not accepted.
+
+Live dogfood dry-run went from `accepted: 0` (both theses flagged
+`public_api_impact`) to `accepted: 2` with the advisory visible.
+
+---
+title: Refactor patrol architecture pass
+date: 2026-07-04T12:00:00Z
+tags: [command, refactor-patrol, architecture]
+---
+
+Two-step architecture pass on [[commands/refactor-patrol]] (behavior
+unchanged, each step live-tested with a real-agent dry run):
+
+- **`ThesisNormalizer`** — raw-thesis normalization (alias/evidence repair),
+  admissibility, and behavior-preservation guidance moved out of `Reviewer`
+  into a pure class (no I/O, no agent coupling) returning a `Thesis` or an
+  `Invalid` carrying schema errors. This is the fastest-evolving policy
+  surface, now unit-tested directly.
+- **`ReviewAgentRunner`** — the production agent spawn + usage recording
+  extracted from `Reviewer`; the `agent_runner:` call protocol is now the
+  only seam. `Reviewer` is pure per-feature orchestration (~130 lines).
+- **`Commands::RefactorPatrol#run_cycle`** decomposed into named stages:
+  `resolve_project!` → `scoped_features` → `score_features` →
+  `guard_theses` → `build_payload`, with the module-wide
+  `(project_root, cfg, state)` argument convention.
+- Thesis test fixtures deduplicated into `test/unit/refactor_patrol/
+  thesis_fixtures.rb` shared by reviewer/normalizer tests.
+
+---
+title: Refactor patrol evidence normalization
+date: 2026-07-04T10:00:00Z
+tags: [command, refactor-patrol, decision]
+---
+
+Dogfood-driven polish on [[commands/refactor-patrol]]: the first real run
+returned 0 accepted theses because the agent emitted file-anchored evidence in
+a shape the admissibility gate didn't recognize (`files` array + `claim` prose,
+named signal without a `value`, `refactor` instead of `proposed_refactor`).
+
+- **The review prompt now teaches the contract by example.** A full worked
+  thesis (with the exact evidence item shape) replaces the bare
+  `{"theses": []}` skeleton, and the rules spell out singular `file` and
+  the required measured `value`.
+- **The reviewer normalizes honestly recoverable drift.** A plural
+  `files`/`paths` array expands to one evidence item per path; file-less
+  evidence whose text literally names an owned file is anchored to it (never
+  invented); a measurable signal missing `value` is backfilled from the
+  feature's own measured leverage signals; `refactor`,
+  `characterization_notes`, and object-shaped `feature` aliases map to their
+  schema fields. Evidence that stays path-less remains flagged inadmissible.
+- Replaying the captured dogfood `theses.json` through the fixed reviewer
+  accepts all 3 theses (previously 0).
+
+## [2026-07-03T17:36:22Z] babysitter - scrub loader env before gh dry-run handoff
+
+**Action:** Hardened `bin/hive-babysitter-stub-gh` after a patrol finding showed the Ruby executable stub and allowlisted passthrough could inherit startup hooks such as `LD_PRELOAD`. Read `.llm-wiki/config.json`, searched QMD and the configured master wiki, then checked [[commands/babysit]], [[testing]], `lib/hive/babysitter/dry_run_env.rb`, `bin/hive-babysitter-stub-gh`, and `test/unit/babysitter/dry_run_env_test.rb`.
+
+**Result:** The installed `gh` stub is now a shell launcher that clears Ruby/Bundler/Gem startup env plus common dynamic-loader env before loading `bin/hive-babysitter-stub-gh.rb`. The dry-run PATH overlay clears the same startup/loader list before invoking Ruby, and the Ruby guard deletes those variables again before execing real `gh`.
+
+**Coverage:** Extended `test/unit/babysitter/dry_run_env_test.rb` so direct `gh` stub execution rejects `RUBYOPT` startup injection and allowlisted `gh` passthrough records loader/Ruby/Bundler startup env as unset. Extended `test/unit/gemspec_test.rb` so the gem includes the new Ruby implementation file.
+
+**Verified:** `bundle exec ruby -Itest test/unit/babysitter/dry_run_env_test.rb`; `bundle exec ruby -Itest test/unit/gemspec_test.rb`; `sh -n bin/hive-babysitter-stub-gh`; `ruby -c bin/hive-babysitter-stub-gh.rb`; `ruby -c lib/hive/babysitter/dry_run_env.rb`; `bundle exec rubocop bin/hive-babysitter-stub-gh.rb lib/hive/babysitter/dry_run_env.rb test/unit/babysitter/dry_run_env_test.rb test/unit/gemspec_test.rb`.
+
+**Links:** [[commands/babysit]], [[testing]]
+
+## [2026-07-03T09:56:36Z] babysitter - scrub dynamic-loader env in dry-run command stubs
+
+**Action:** Fixed patrol finding `command-bin-hv-1` by adding the dynamic-loader environment family to the babysitter dry-run boundary. The generated PATH overlay launchers now unset `LD_PRELOAD`, `LD_LIBRARY_PATH`, `LD_AUDIT`, `LD_DEBUG_OUTPUT`, `DYLD_INSERT_LIBRARIES`, `DYLD_LIBRARY_PATH`, `DYLD_FRAMEWORK_PATH`, and `DYLD_FALLBACK_LIBRARY_PATH` before handing off to the Ruby stubs; both `git` and `gh` shared stubs scrub the same keys again before any allowlisted real-binary passthrough.
+
+**Coverage:** Extended `test/unit/babysitter/dry_run_env_test.rb` with overlay-handoff and direct-stub passthrough regressions proving those keys are unset before reaching fake real `git` / `gh` binaries.
+
+**Verified:** `bundle exec ruby -Itest test/unit/babysitter/dry_run_env_test.rb`; `bundle exec rubocop bin/hive-babysitter-skip-log.rb bin/hive-babysitter-stub-git bin/hive-babysitter-stub-gh lib/hive/babysitter/dry_run_env.rb test/unit/babysitter/dry_run_env_test.rb`.
+
+**Links:** [[modules/babysitter]], [[commands/babysit]], [[testing]]
+
+## [2026-07-03T09:55:00Z] testing - hive-eval report write neutralizes symlinks/hard links
+
+**Action:** Fixed a follow-on regression from the schema-gated report cleanup: on the valid write path, a `--report` path that is a symlink or hard link to a non-report file survived the schema-gated `remove_existing_eval_report`, and `ReportStore.write!`'s bare `File.write` then followed the link and clobbered the target. `write!` now routes through `write_fresh_report`, which unlinks any existing entry (dropping the symlink itself or one hard-link reference, never the linked data) and opens with `O_CREAT|O_EXCL|O_NOFOLLOW`, so the report always lands on a fresh regular file. The schema-gated cleanup on invalid-invocation exits (`bin/hive-eval` parse-error, unexpected-args, unsafe-scenario, and missing-scenario paths) is unchanged.
+
+**Tests:** Added `test_cli_report_link_to_non_report_file_is_not_followed` in `test/eval/support/reporter_test.rb`, covering both symlink and hard-link `--report` targets; verified it fails against the bare `File.write` and passes after the guard. Ran the full `test/eval/support/reporter_test.rb` (28 runs, 197 assertions, green).
+
+---
+date: 2026-07-03T09:42:19Z
+slug: babysitter-gh-path-pinning
+pages: [modules/babysitter, testing]
+---
+
+## babysitter - pin PATH before gh dry-run passthrough
+
+Fixed patrol finding `command-bin-hive-babysitter-stub-gh-1` by pinning
+`PATH=/usr/bin:/bin` before `bin/hive-babysitter-stub-gh` execs an
+allowlisted real `gh` read. The stub already scrubbed Git child-process env
+seams; the new PATH pin prevents real `gh` repository probes from resolving a
+caller-controlled `git` binary while credentials and passthrough environment are
+still available.
+
+Added focused `test/unit/babysitter/dry_run_env_test.rb` coverage where fake
+real `gh` shells out to `git --version` while PATH points first at a poisoned
+`git`. The test now proves the poisoned child `git` is not executed.
+
+Updated [[modules/babysitter]] and [[testing]].
+
+## [2026-07-03T09:26:47Z] testing - hive-eval report cleanup is schema-gated
+
+**Action:** Fixed the `bin/hive-eval` report cleanup boundary so usage errors and pre-run cleanup only remove existing files that parse as `hive-eval-report` JSON documents. Non-report files supplied via `--report` now survive parse errors and missing-scenario validation failures, while stale eval reports are still cleared before callers can read old JSON.
+
+**Tests:** Added `test_cli_invalid_invocations_preserve_non_report_files_passed_as_report` in `test/eval/support/reporter_test.rb`; verified it failed before the runner change and passed after. Also ran `bundle exec ruby -Itest -Itest/eval test/eval/support/reporter_test.rb`.
+
+# 2026-07-03 — scope HIVE_CLI_ROOT to the managed bundle (image-smoke fix)
+
+The v0.3.4/v0.3.5 hivebox image smoke failed at `db:prepare`: the runtime
+HIVE_CLI_ROOT export (added for the managed bundle) re-pointed the web
+Gemfile's hive-cli path source under the image's PREBUILT /app/web bundle
+(built against ".." = /app, while the runtime hive is the installed gem, so
+its root differs). `hive web` now exports HIVE_CLI_ROOT only when serving
+the managed bundle (`app_dir == AppBundle.app_dir`); source checkouts and
+HIVEBOX_WEB_APP_DIR overrides keep their build-time ".." resolution.
+Verified by running the release job's exact sequence locally: gem build →
+image build → `packaging/docker/smoke.sh` → PASS (first pass since v0.3.2).
+Pages: [[commands/web]].
+
+---
+title: Init ad-hoc PR auto-fix prompt
+type: log
+created: 2026-07-02
+tags: [init, review, adhoc, config, wiki]
+---
+
+**Action:** Updated `hive init` so the setup questionnaire explicitly asks whether ad-hoc PR reviews created by `hive review --pr` should enter the auto-fix loop. The default remains review-only: `review.github_publish.enabled` is rendered true so reviewer/escalation comments can be posted to GitHub, while `review.adhoc.fix` renders from the init answer and defaults to false.
+
+**Evidence:** `lib/hive/commands/init/prompts.rb` now derives `DEFAULT_ADHOC_AUTO_FIX` from `Hive::Config::DEFAULTS`, records `adhoc_auto_fix` in interactive and non-TTY answers, and includes it in summaries. `templates/project_config.yml.erb` renders `review.adhoc.fix` from that answer. `schemas/hive-init.v1.json` includes the field in both nested `answers` and the top-level success payload. Focused prompt, config-rendering, schema, and integration tests cover the new prompt ordering and JSON contract.
+
+---
+title: Refactor patrol review fixes
+date: 2026-07-02T19:00:00Z
+tags: [command, refactor-patrol, decision]
+---
+
+Review-fix pass on [[commands/refactor-patrol]]:
+
+- **Dry-run is now truly non-persistent.** `--dry-run` no longer creates
+  `.hive-state/refactor_patrol/` (the command skips `state.ensure!`), the
+  reviewer scratches agent output in a temp dir, and it writes no thesis JSON
+  or run-error logs. Previously only `persist`/`update_scan_state` were guarded.
+- **Leverage ranking is deterministic (R5).** The reviewer discards the agent's
+  `expected_leverage.score`/`breakdown` and stamps the computed churn/fan-in/
+  complexity/coupling blend, so ranking is always explained by measured signals.
+  The agent estimate is advisory only.
+- **Behaviour-preservation guidance is required for every admissible thesis
+  (R8).** Test-rich slices with empty validation commands get the configured
+  `test` command injected; otherwise `characterization_first` is forced.
+- **Evidence without a file path is flagged, not dropped.** The thesis schema no
+  longer requires `evidence[].file`, so a no-path evidence item is returned as
+  `admissible: false` instead of failing schema validation and silently pinning
+  `last_scanned_sha`.
+- **Leverage tolerates binary/non-UTF-8 files** (scrubbed on read), memoizes
+  `tracked_files`/`fan_in`, and honours `refactor_patrol.exclude` globs.
+- `Caps` no longer false-positives `cross_feature_impact` on a feature's own
+  entrypoints; the review prompt fences repo-derived context in a per-spawn
+  `user_supplied` block.
+
+---
+title: Refactor patrol command
+date: 2026-07-02T12:00:00Z
+tags: [command, refactor-patrol, architecture]
+---
+
+Added [[commands/refactor-patrol]] for `hive refactor-patrol`: an opt-in,
+reporting-only sibling to [[commands/patrol]] that maps feature slices, reviews
+schema-shaped refactor theses, scores leverage, flags caps/guardrails, and
+persists independent `.hive-state/refactor_patrol/` memory without opening PRs
+or enqueueing review tasks.
+
+# 2026-07-02 — managed web bundle could never bundle-install (release blocker)
+
+Pre-release testing of the 0.3.3 managed-bundle path (with
+`HIVE_WEB_BUNDLE_URL` pointed at a local web/ tree, simulating the release
+asset) exposed that `web/Gemfile`'s `gem "hive-cli", path: ".."` can only
+resolve in a source checkout: the extracted `hive-web-<version>.tar.gz` has
+no gem at `..` and hive-cli is not on rubygems, so `AppBundle.bundle_install!`
+failed on every gem install. The GitHub-release 404 (no asset published yet)
+had masked this — nobody had ever completed the fetch → bundle-install path.
+
+Fix: the Gemfile resolves the path gem via `ENV.fetch("HIVE_CLI_ROOT", "..")`;
+`AppBundle.bundle_install!` and the `hive web` foreground env both export
+`HIVE_CLI_ROOT` = the running gem's root (`AppBundle.hive_cli_root`). Source
+checkouts are unaffected (default `..`; web CI's frozen install unchanged).
+Verified live: full ensure! → real bundle install → db:prepare → Rails 200
+from the managed dir. Pages: [[commands/web]].
+
+## [2026-07-02T00:51:37Z] babysitter - restore shared skip-log helper wiring
+
+**Action:** Fixed Hive patrol finding `command-bin-hive-eval-1`
+(maintainability/medium) by restoring the documented shared skip-log helper for
+the dry-run `git` and `gh` babysitter stubs. The stubs now both
+`require_relative "hive-babysitter-skip-log"`, call `log_skip("git", argv)` or
+`log_skip("gh", argv)`, and keep the security-critical skip-log open and argv
+escaping helpers in one file. `hive.gemspec` and its packaging test include the
+shared helper so packaged stubs can load it.
+
+**Verified:**
+- `ruby -c bin/hive-babysitter-skip-log.rb && ruby -c bin/hive-babysitter-stub-git && ruby -c bin/hive-babysitter-stub-gh`
+- `bundle exec ruby -Itest test/unit/gemspec_test.rb`
+- `bundle exec ruby -Itest test/unit/babysitter/dry_run_env_test.rb`
+- `bundle exec rubocop bin/hive-babysitter-skip-log.rb bin/hive-babysitter-stub-git bin/hive-babysitter-stub-gh hive.gemspec test/unit/gemspec_test.rb`
+
+**Links:** [[modules/babysitter]]
+
+# 2026-07-02 — drop the reserved `rate_limited` enum member (arch pass)
+
+Architecture review of the review-error-reason PR (#627): `rate_limited`
+was a reserved-but-unemitted member of `Hive::ReviewErrorReason::REASONS`,
+justified as "accepted on read" — but nothing anywhere reads REASONS (the
+healer keys on the literal `limits_reached`; notification_builders keeps
+its own manual-only lists), so the reservation guarded nothing. Removed it:
+every REASONS member is now written by exactly one live code path, and the
+docstring says to add members only together with the code that emits them.
+The wiki ([[stages/review]]) already listed the enum without it.
+
+## [2026-07-02T00:30:39Z] babysitter - scrub Git env before gh dry-run passthrough
+
+**Action:** Fixed patrol finding `command-bin-hive-babysitter-stub-gh-1` by hardening `bin/hive-babysitter-stub-gh` before it execs a real allowlisted `gh` read. The stub already scrubbed gh/proxy/config environment; it now also deletes Git child-process seams (`GIT_CONFIG*`, `GIT_TRACE*`, `GIT_EXEC_PATH`, `GIT_EXTERNAL_DIFF`, `GIT_SSH*`, `GIT_ASKPASS`, `SSH_ASKPASS`, `GIT_PROXY_COMMAND`, and `GIT_PAGER`) so real `gh` cannot hand them to its internal git probes.
+
+**Coverage:** Extended `test/unit/babysitter/dry_run_env_test.rb` so the gh env-scrub regression records those Git vars as unset, and added a focused `gh pr view` passthrough test whose fake real `gh` runs `git status` and proves an inherited `GIT_TRACE` file is not created while the command still reaches real `gh`.
+
+**Verified:** `ruby -Itest test/unit/babysitter/dry_run_env_test.rb`
+
+**Links:** [[modules/babysitter]], [[testing]]
+
+# 2026-07-02 — Hive::AtomicFile (arch pass over the pairing PR)
+
+Architecture review of the Telegram pairing PR (#629): the feature adds two
+more private copies of the tmp+rename(+fsync) atomic-write pattern, joining
+at least five pre-existing ones (`Markers#write_atomic`, `Events`,
+`Commands::Init`, `ServiceInstaller::Base#atomic_write`, review
+suppression). Introduced `lib/hive/atomic_file.rb` (`Hive::AtomicFile.write`
+with `mode:`/`fsync:`) and pointed the two NEW call sites at it
+(`PairingStore#write_entries`, `PairingApprovalQueue.write!`). Migrating the
+legacy copies is deliberately left as a follow-up — noted in [[gaps]]-style
+debt: new state files should use the helper instead of adding another copy.
+
+---
+title: Merged PR digest source
+date: 2026-07-02T00:00:00Z
+---
+
+- Added `hive digest --source merged-prs` as a read-only GitHub reporting source
+  beside the existing shipped-task digest. The default source remains unchanged.
+- The merged-PR source supports repeatable `--repo owner/name`, local-day
+  `mergedAt.getlocal.to_date` filtering, partial per-repo failure tolerance,
+  mechanical MarkdownV2 rendering, and the new `hive-merged-pr-digest` v1 JSON
+  schema.
+
+## [2026-07-02T00:03:40+01:00] setup — post-commit audit for arch-review-local-web-install
+
+**Action:** Refreshed wiki planning/documentation coverage after branch `arch-review-local-web-install` committed the `hive setup` cleanup that removed the dead `--yes` flag and extracted a shared setup phase runner. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "setup phase runner --yes local web install"` returned no indexed hits, and the configured main wiki path had no matching setup context. Inspected the committed diff plus current `lib/hive/cli.rb`, `lib/hive/commands/setup.rb`, `test/unit/cli_test.rb`, focused setup tests under `test/unit/commands/setup/`, and the current main-checkout wiki pages.
+
+**Coverage:** Confirmed the main wiki already matches the commit: [[commands/setup]] lists `hive setup [--json] [--service] [--no-bootstrap] [--no-init]`, explicitly notes that `--yes` was removed because setup has no interactive prompt path, and documents the shared `phase(name)` contract where provisioning blocks return `[ok, data]` and `StandardError` becomes an `ok:false` phase message instead of aborting before the `hive-setup` JSON envelope. [[testing]] already names the focused setup tests for that shared failure shape, and [[gaps]] already carries forward that this remains source/test-pinned with no live Homebrew/AUR/install.sh release-install smoke artifact. Page coverage did not change, so [[index]] needed no catalog edit. Did not edit compiled [[log]], and did not run `qmd update` or `qmd embed`.
+
+## [2026-07-01T23:01:42Z] setup — remove dead --yes flag and document shared phase runner
+
+**Action:** Refreshed command/API wiki coverage after branch `arch-review-local-web-install` touched the `hive setup` CLI surface, setup command handler, CLI tests, and the committed setup wiki page. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "arch-review-local-web-install local web install command api routes handlers executable README"` returned no indexed hits, and the configured main wiki path had no matching setup context. Inspected the committed diff plus current `lib/hive/cli.rb`, `lib/hive/commands/setup.rb`, `test/unit/cli_test.rb`, and focused `test/unit/commands/setup/*_test.rb`.
+
+**Coverage:** Updated [[commands/setup]] to remove the stale `--yes` flag from the canonical setup synopsis and document that setup has no interactive prompt path. Preserved the broader main-checkout local web install coverage while adding the shared `phase(name)` contract: provisioning blocks return `[ok, data]`, and any `StandardError` becomes an `ok:false` phase with a class/message instead of aborting before the `hive-setup` JSON envelope. Refreshed [[testing]] to describe the focused setup tests for that shared failure shape, and carried forward in [[gaps]] that this refresh found source/test coverage only, not a live Homebrew/AUR/install.sh release-install smoke artifact. Page count stayed 86, so [[index]] did not need a catalog edit. Did not edit compiled [[log]], and did not run `qmd update` or `qmd embed`.
+
+## [2026-07-01T23:58:03+01:00] daemon/web — post-commit wiki audit for arch-review-local-web-install
+
+**Action:** Refreshed wiki planning/documentation coverage after branch `arch-review-local-web-install` committed its wiki refresh for the shared daemon-status producer. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "arch-review-local-web-install local web install daemon status unreadable setup web bundle"` returned no indexed hits, and the configured main wiki path had no relevant matches. Inspected the committed diff plus `git show` path reads for the branch's wiki fragment/gaps page, then checked current `lib/hive/daemon/status_report.rb`, `lib/hive/commands/daemon.rb`, `web/app/controllers/status_controller.rb`, `web/app/views/status/_daemon.html.erb`, `schemas/hive-daemon-status.v1.json`, and focused daemon tests.
+
+Confirmed the main wiki already documents `Hive::Daemon::StatusReport` as the shared `hive-daemon-status` producer for CLI JSON and hivebox, including the web-safe `safe_payload` path and `StatusReport::BINARY_DRIFT_ACTIONABLE` repair-affordance enum. Carried forward the remaining uncertainty in [[gaps]]: source and tests cover source-level `binary_drift: "unreadable"`, but the published `hive-daemon-status` schema still omits that enum value, and no live daemon/web repair artifact was found. Page coverage stayed within existing pages, so [[index]] did not need a page-list update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[gaps]]
+
+## [2026-07-01T23:55:06+01:00] daemon/web — refresh StatusReport command and API coverage
+
+**Action:** Refreshed command/API and web route coverage after branch `arch-review-local-web-install` extracted the `hive-daemon-status` producer from `Hive::Commands::Daemon` into `Hive::Daemon::StatusReport`. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "daemon status status_payload StatusReport binary_drift web dashboard"` returned no indexed hits, and the configured main wiki path had no relevant matches. Inspected the committed diff plus `lib/hive/daemon/status_report.rb`, `lib/hive/commands/daemon.rb`, `web/app/controllers/status_controller.rb`, `web/app/views/status/_daemon.html.erb`, `schemas/hive-daemon-status.v1.json`, and focused daemon tests.
+
+Documented that `hive daemon status --json` and hivebox now share `Hive::Daemon::StatusReport`, with `safe_payload` as the web-safe in-process path and `StatusReport::BINARY_DRIFT_ACTIONABLE` as the web Repair affordance enum source. Updated the daemon command docs to include the source-level `unreadable` drift state. Narrowed the old unreadable-binary gap: source and tests now cover `unreadable`, but the published `hive-daemon-status` schema still omits it from the enum, so an actual unreadable payload is schema-unpinned. Page coverage count stayed the same, so [[index]] did not need a page-list update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/daemon]]
+- [[commands/web]]
+- [[modules/daemon]]
+- [[testing]]
+- [[gaps]]
+
+---
+date: 2026-07-01
+slug: review-error-reason-input-contract
+pages: [stages/review, state-model, modules/markers]
+---
+
+Documented `Hive::ReviewErrorReason.classify`'s input contract after review
+found the code comments and wiki overstated what the classifier delivers in
+the field. `classify` inspects whatever text the caller passes and never
+fetches raw agent output on its own; today's triage/fix plumbing forwards a
+condensed wrapper string (`expected output file missing or empty`,
+`tmux_session_terminated before writing …`, `triage agent failed (timeout)`)
+that matches no PATTERN, so production input almost always resolves to
+`unknown` — the named buckets (`merge_conflict`, `network_timeout`,
+`tool_permission_denied`, `agent_crashed`) fire only when raw stdout/stderr
+carrying their signal is passed through. Added the caveat to the `classify`
+docstring and to the review/state-model/markers wiki pages so a maintainer
+does not build TUI affordances, healer arms, or metrics around buckets that
+rarely appear. The raw cause stays visible in the marker's `message=` attr.
+
+## [2026-07-01T21:13:54Z] openclaw — marker recovery guidance
+
+**Action:** Added a `## Marker Recovery` section to the OpenClaw `/hive` skill, placed immediately after Safety Boundaries, so operators inspect with `hive status --json` / `hive daemon status --json`, wait for healer-managed signatures, start a stopped daemon with `hive daemon start --detach`, and ask before guarded manual `hive markers clear` remediation.
+
+**Coverage:** Added `test_umbrella_skill_classifies_recovery_markers` to pin the recovery literals, section ordering, and the existing Safety Boundaries confirmation language. Updated [[operating]] and [[testing]].
+
+---
+timestamp: 2026-07-01T09:32:32Z
+title: HEAD review-fix Stop-hook recovery coverage refresh
+---
+
+Refreshed wiki coverage after branch HEAD narrowed `docs/notes/claude-tmux-launch-mode.md` recovery guidance for Claude/tmux review-fix Stop-hook failures. Inspected the committed diff, the committed note via `git show HEAD:docs/notes/claude-tmux-launch-mode.md`, `docs/recipes.md`, `lib/hive/claude_launcher.rb`, `lib/hive/stages/review.rb`, `lib/hive/daemon/stale_agent_healer.rb`, `lib/hive/events.rb`, `test/integration/run_review_test.rb`, and `test/unit/daemon/stale_agent_healer_test.rb`. Updated [[stages/review]], [[state-model]], and [[testing]] so the wiki documents the actual fallback predicate: session-alive launcher evidence plus review facts, artifacts, zero unresolved escalations, readable worktree, and commit / dirty-worktree / whole-pass `RESOLVED/NO-FIX` evidence before `claude_completion_fallback` can suppress the known stop-hook timeout. Added [[gaps]] uncertainty because this is still source/integration-pinned; no checked-in live Claude/tmux replay artifact was found. Did not edit compiled [[log]] and did not run `qmd update` or `qmd embed`.
+
+## [2026-07-01T00:00:00Z] web/setup — refresh local web install command/API coverage
+
+**Action:** Refreshed command/API and executable-service coverage for HEAD after it added local managed web mode. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "hive web setup local bundle service installer app bundle"` had no exact indexed hits, and the configured main wiki path had no matching local-web context. Inspected the committed diff and current source for `lib/hive/cli.rb`, `lib/hive/commands/web.rb`, `lib/hive/commands/web/service_installer.rb`, `lib/hive/web/app_bundle.rb`, `lib/hive/config.rb`, `lib/hive/paths.rb`, `web/app/controllers/application_controller.rb`, and the launchd/systemd example units, plus focused web command, app-bundle, bind-policy, service-installer, and Rails loopback-auth tests.
+
+**Notes:** Existing [[commands/web]], [[commands/setup]], [[commands]], [[architecture]], and [[gaps]] already covered the managed bundle, `hive web install|start|stop|status`, loopback no-auth gate, and separate `hive-web` service. Updated [[modules/config]] so the defaults and validation summary now include `web.local_loopback`, and carried forward the missing live Homebrew/AUR/install.sh release-install smoke evidence in [[gaps]]. Page coverage count did not change, so [[index]] did not need a page-list update. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[modules/config]]
+- [[gaps]]
+
+## [2026-06-30T23:06:15Z] setup/web — pass-02 wiki cleanup audit
+
+**Action:** Refreshed planning/documentation coverage after branch `add-local-hive-web-install-260629-f4ca` produced a pass-02 review-fix commit that touched wiki pages and changelog fragments. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first. Ran `qmd search "local web setup install hive setup web bundle daemon web same binary"` (no hits), checked the configured main wiki path, inspected the committed diff and committed wiki pages via `git show`, and rechecked current source/tests for `Hive::Commands::Setup`, `Hive::Web::AppBundle`, `Hive::Commands::Web`, daemon/web service installers, daemon-status drift handling, and focused setup/web/daemon coverage.
+
+**Coverage:** Kept the main-checkout setup/web pages as canonical because current source still supports their broader coverage for `hive setup`, managed web-bundle refresh/install safety, daemon/web same-binary service install, local loopback/no-auth gating, and `hive web start --detach` systemd reload behavior. Corrected [[commands/daemon]] to match the inspected daemon-status enum: current source/schema/tests expose `none`, `path`, `version`, `unparseable`, and `not_applicable`, not a separate `unreadable` state. Updated [[gaps]] to carry forward the missing live release-install smoke evidence and to record the actual same-path unreadable-binary behavior gap. Page coverage did not change, so [[index]] needed no catalog edit. Did not edit compiled [[log]], and did not run `qmd update` or `qmd embed`.
+
+## [2026-06-30T22:53:24Z] wiki — final audit local web install residue
+
+**Action:** Refreshed planning/documentation coverage after branch `add-local-hive-web-install-260629-f4ca` produced another residual 6-review wiki-only commit. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first. Ran `qmd search "add-local-hive-web-install setup web install"` (no hits), checked the configured main wiki path plus the main-checkout wiki, inspected the committed diff with `git show`, and used committed-path reads for `wiki/commands/setup.md` and `wiki/gaps.md`. Rechecked current setup/web/daemon source and focused tests for `Hive::Commands::Setup`, `Hive::Web::AppBundle`, `Hive::Commands::Web`, `Hive::Commands::Daemon`, service installers, and daemon-status schema coverage.
+
+**Coverage:** Kept the global main-checkout wiki pages as canonical. The committed residue is stale relative to the main wiki: it narrows `[[commands/setup]]`, removes `hive setup` from `[[cli]]`, drops managed web-bundle wording from `[[commands]]`, narrows `[[commands/web]]` back toward source-checkout/Docker-only language, and removes focused setup/AppBundle/service-installer coverage from `[[testing]]`. Current source still supports the broader main-wiki coverage for local setup, managed web-bundle install/refresh, same-binary daemon/web service install, loopback/no-auth gating, `hive web start --detach` systemd reload behavior, daemon binary-drift reporting, and focused tests. Updated [[gaps]] only to carry forward that no live Homebrew/AUR/install.sh local-install smoke artifact was found and that `binary_drift: unreadable` remains a schema/test uncertainty. Page coverage did not change, so [[index]] needed no catalog edit. Did not edit compiled [[log]], and did not run `qmd update` or `qmd embed`.
+
+## [2026-06-30T17:53:39Z] wiki — post-commit audit local web install residue
+
+**Action:** Refreshed planning/documentation coverage after branch `add-local-hive-web-install-260629-f4ca` produced a 6-review residual wiki-only commit. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first. Ran `qmd search "add-local-hive-web-install local setup web install daemon service binary drift unreadable"` (no hits), checked the configured main wiki path, inspected the committed diff with `git show`, and used the required commit-path form for `wiki/commands/setup.md`, `wiki/commands/daemon.md`, and `wiki/gaps.md` to compare the committed wiki residue with the global main wiki. Rechecked current setup/web/daemon source and focused tests.
+
+**Coverage:** Kept the global main-checkout wiki pages as canonical. They already contain fuller current coverage for `hive setup`, managed web-bundle install/refresh, daemon/web same-binary service install, local loopback/no-auth gating, `hive web start --detach` systemd reload behavior, daemon binary-drift reporting, and focused AppBundle/service-installer/daemon drift test coverage. Updated [[gaps]] to carry forward that no live Homebrew/AUR/install.sh local-install smoke artifact was found and that `binary_drift: unreadable` remains a schema/test uncertainty. Page coverage did not change, so [[index]] needed no catalog edit. Did not edit compiled [[log]], and did not run `qmd update` or `qmd embed`.
+
+---
+title: Residual wiki cleanup for daemon auto-retry and ad-hoc review
+date: 2026-06-30
+---
+
+Refreshed main-checkout LLM wiki coverage for `make-the-hive-daemon-automatically-260629-223d` after its residual 6-review commit changed wiki pages and changelog fragments.
+
+Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], recent [[log]] entries, and the configured main-wiki path first. `qmd search "make hive daemon automatically auto retry recoverable ad hoc review"` returned no indexed hits, so verification used direct wiki/source search and the branch diff.
+
+Inspected the committed diff plus current source/tests: `Hive::Daemon::RecoverableErrorHealer` still emits task-local `auto_retry` / `auto_retry_skipped` while daemon logs accept `auto_retry`, `auto_retry_skipped`, `auto_retry_exhausted`, and `auto_retry_failed`; `daemon.auto_retry.enabled` remains the kill switch; and `hive review --pr` is implemented through `Hive::Commands::AdhocReview`, `Hive::Gh.pr_metadata`, `Hive::Pr.identifier_to_number`, and `Hive::Worktree.materialize_pr`.
+
+Normalized branch-only wording in [[cli]], [[commands]], [[commands/stage_action]], [[modules/config]], [[modules/gh]], [[modules/pr]], [[modules/worktree]], [[state-model]], [[stages/review]], and [[testing]]. Carried forward [[gaps]] uncertainty for the missing live-daemon recoverable-error smoke and missing live `hive review --pr` smoke. No page was created, so [[index]] page coverage did not change. Did not edit compiled [[log]], and did not run `qmd update` or `qmd embed`.
+
+## [2026-06-30T16:52:33Z] wiki — audit local web install residue commit
+
+**Action:** Refreshed planning/documentation coverage after branch `add-local-hive-web-install-260629-f4ca` produced a 6-review residual wiki-only commit. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], recent [[log]] entries, ran `qmd search "local hive web install setup service web bundle binary drift unreadable"` (no hits), checked the configured main wiki path, inspected the committed diff with `git show`, and rechecked current setup/web/daemon source and tests for the documented local install surface.
+
+**Coverage:** Kept the main-checkout wiki pages as canonical because they already contain the stronger current coverage for `hive setup`, managed web-bundle bootstrap, daemon/web same-binary service install, loopback no-auth gating, daemon binary-drift reporting, web service start behavior, and focused test coverage. No page/index edits were needed beyond this changelog fragment: [[gaps]] already records that this residue audit did not add live local-install smoke evidence and did not resolve the `binary_drift: unreadable` schema/test uncertainty. Did not edit compiled [[log]], and did not run `qmd update` or `qmd embed`.
+
+---
+slug: claude-tmux-ready-detector-refresh
+created: 2026-06-30T16:30:00Z
+---
+
+**Action:** Refreshed main-checkout wiki coverage for branch `fix-claude-tmux-ready-detector-260629-50cc` after its finalize backstop commit touched wiki files. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "claude tmux ready detector packaging detector review limit text threading"` returned no indexed hits. Inspected the committed wiki diff plus current `lib/hive/claude_launcher.rb`, `test/unit/claude_launcher_test.rb`, `hive.gemspec`, `test/unit/gemspec_test.rb`, `test/integration/gem_package_scripts_test.rb`, and existing wiki pages. Updated the shared Claude/tmux ready-prompt docs for Claude Code 2.1.179 separator/caret/footer prompt chrome, Unicode separator spaces, and the stricter bypass-permissions footer check; carried forward the local-gem live replay gap using the branch slug rather than a raw commit reference. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[modules/agent]]
+- [[stages/brainstorm]]
+- [[testing]]
+- [[gaps]]
+
+## [2026-06-30T15:52:48Z] setup/web/daemon — residual wiki coverage audit
+
+**Action:** Refreshed wiki planning/documentation coverage after branch `add-local-hive-web-install-260629-f4ca` produced a residual 6-review wiki-only commit. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], recent [[log]] entries, ran `qmd search "local setup web install daemon status binary drift unreadable"` (no hits), checked the configured main wiki path, inspected the committed diff and committed wiki pages via `git show`, and rechecked current source/tests for `Hive::Commands::Setup`, `Hive::Commands::Web`, `Hive::Web::AppBundle`, `Hive::Commands::Daemon`, `schemas/hive-daemon-status.v1.json`, and related unit coverage.
+
+**Coverage:** Kept the main-checkout wiki pages as the canonical coverage because they are already more complete than the residual committed `commands/setup` page and include the current local setup, managed web-bundle, same-binary service install, loopback auth, daemon-status, and test coverage details. Updated [[gaps]] only to record that this residual refresh did not close the missing live local-install smoke evidence and did not resolve the `binary_drift: unreadable` daemon-status schema/test uncertainty. Did not edit compiled [[log]], and did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[gaps]]
+
+---
+slug: claude-tmux-packaging-detector-refresh
+created: 2026-06-30T15:30:00Z
+---
+
+**Action:** Refreshed main-checkout wiki coverage for branch HEAD after it
+documented the local validation path for unreleased Claude tmux launcher-script
+packaging fixes. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]],
+[[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search
+"Claude tmux packaging detector ready"` returned no indexed hits, and the
+configured master wiki path did not exist in this checkout. Inspected the
+committed diff plus current `hive.gemspec`, `lib/hive/claude_launcher.rb`,
+`lib/hive/commands/daemon.rb`,
+`lib/hive/commands/daemon/service_installer.rb`,
+`test/unit/gemspec_test.rb`, and
+`test/integration/gem_package_scripts_test.rb`. Copied the operating guidance
+into the global main wiki and recorded that source/tests prove the script
+packaging contract, but no in-tree artifact proves a locally built gem replayed
+the affected Claude tmux task to `WAITING` or later. Did not run `qmd update`
+or `qmd embed`.
+
+**Refreshed pages:**
+- [[operating]]
+- [[gaps]]
+
+## [2026-06-30T14:54:19Z] setup/web/daemon — residual local install coverage refresh
+
+**Action:** Refreshed command/API wiki coverage for branch `add-local-hive-web-install-260629-f4ca` after its residual 6-review commit touched `Hive::Commands::Setup`, `Hive::Commands::Web`, daemon/web service installers, `Hive::Web::AppBundle`, `Hive::Web::Loopback`, and `Hive::Daemon::DispatchRequestQueue`. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[architecture]], [[decisions]], [[gaps]], recent [[log]] entries, ran `qmd search "local hive web install service installer daemon web loopback app bundle"` (no hits), and inspected the committed diff plus current source/tests.
+
+**Coverage:** Added missing [[commands/setup]] for the local non-Docker provisioning surface, added it to [[index]]/[[cli]]/[[commands]], and refreshed [[commands/daemon]], [[commands/web]], [[modules/daemon]], [[testing]], and [[gaps]]. Documented `--no-bootstrap` as diagnose-only, setup phase/exit semantics, QMD/web-bundle bootstrap failure reporting, managed web-bundle stale refresh and safe extraction, same-binary daemon/web service install, shared launchd rendering and daemon plist `$0` parsing, web loopback/no-auth gating, `hive web start --detach` systemd reload behavior, and the narrowed daemon queue global-maintenance allowlist. Recorded remaining uncertainty that source can emit `binary_drift: unreadable` while the inspected `hive-daemon-status.v1` schema enum still lacks that value, plus missing live smoke for `hive setup --service` against a real local release install. Did not edit compiled [[log]], and did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/setup]]
+- [[index]]
+- [[cli]]
+- [[commands]]
+- [[commands/daemon]]
+- [[commands/web]]
+- [[modules/daemon]]
+- [[testing]]
+- [[gaps]]
+
+## [2026-06-30T14:48:32Z] wiki — audit make-the-hive-daemon-automatically-260629-223d docs cleanup
+
+**Action:** Refreshed the global project wiki after branch `make-the-hive-daemon-automatically-260629-223d` touched wiki pages and log fragments. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "adhoc review daemon auto retry diagnostic evidence"` returned no indexed hits, and the configured `main_wiki_path` (`/home/asterio/wikis/master/wiki`) was absent, so verification used direct source/wiki reads. Inspected the branch diff plus current `Hive::Commands::AdhocReview`, `Hive::Worktree.materialize_pr`, `Hive::Gh.pr_metadata`, `Hive::Pr.identifier_to_number`, daemon recoverable/stale healer code, `Hive::DiagnosticEvidence`, and focused tests.
+
+The existing global wiki already preserved the ad-hoc PR review source mappings and daemon auto-retry coverage that the branch diff touched. Updated [[commands/status]] because it still described read-only `hive status --diagnose` as identical to status-row JSON; current code uses `Hive::DiagnosticEvidence` to synthesize diagnostics for non-red rows when on-disk evidence exists. Updated [[testing]] and [[gaps]] so `lib/hive/diagnostic_evidence.rb` and `test/unit/diagnostic_evidence_test.rb` are discoverable. Carried forward the live-evidence uncertainty in [[gaps]]: no new artifact was found proving a real daemon recoverable-error retry or a real registered-project ad-hoc PR review flow. Did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/status]]
+- [[testing]]
+- [[gaps]]
+
+## 2026-06-30 — Telegram pairing flow
+
+- Added `bot.pairing_enabled` and the `hive pairing` owner command so unknown Telegram DM users can request access with `/start`, receive a short-lived pairing code, and be approved into `bot.chat_id_allowlist` without hand-editing config.
+- Added file-backed pairing state under `~/.local/state/hive/.bot.pairings.json` and a separate `pairing_approvals/` notice queue drained by the bot reaper for the proactive approved DM.
+- Updated digest behavior to mention pending pairing requests and documented the new CLI, bot, config, state, operating, and testing surfaces in the wiki.
+
+---
+title: Review-fix wiki cleanup for daemon auto-retry and ad-hoc review
+date: 2026-06-30
+---
+
+Refreshed main-checkout LLM wiki coverage for branch `make-the-hive-daemon-automatically-260629-223d` after its review-fix commit changed wiki pages and changelog fragments.
+
+Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], recent [[log]] entries, and the configured main-wiki path first. `qmd search "make-the-hive-daemon-automatically recoverable error healer adhoc review"` returned no hits, and the configured main-wiki path had no branch-specific context.
+
+Inspected the committed wiki diff plus current branch source/tests: `Hive::Daemon::RecoverableErrorHealer` still provides the fixed v1 dependency-outage auto-retry path with task-local `auto_retry` / `auto_retry_skipped` and broader daemon-log audit names, and `Hive::Commands::AdhocReview` still creates/reuses `6-review/adhoc-review-pr-N` tasks through PR metadata, PR-head materialization, and normal `6-review` dispatch. The same source check found no `lib/hive/commands/setup.rb` and no daemon binary-drift status payload in the branch.
+
+Removed stale setup-command and daemon binary-drift coverage from [[index]], [[cli]], [[commands]], [[commands/daemon]], [[commands/web]], [[testing]], and [[gaps]], and deleted the stale [[commands/setup]] page from the main wiki. Carried forward [[gaps]] uncertainty for the missing live-daemon recoverable-error smoke and missing live `hive review --pr` smoke. Did not edit compiled [[log]], and did not run `qmd update` or `qmd embed`.
+
+---
+title: Residual wiki refresh for daemon auto-retry and ad-hoc review
+date: 2026-06-30
+---
+
+Refreshed LLM wiki coverage for branch `make-the-hive-daemon-automatically-260629-223d` after its residual 6-review commit touched command/module/state/test wiki pages, gaps, index metadata, and changelog fragments.
+
+Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[decisions]], [[gaps]], recent [[log]] entries, and existing branch-specific log fragments first. `qmd search "make-the-hive-daemon-automatically recoverable auto retry adhoc review"` returned no indexed hits, so verification used direct wiki/source search plus the configured main-wiki path.
+
+Verified the committed wiki diff and source/test evidence with `git show make-the-hive-daemon-automatically-260629-223d:<path>`: `Hive::Daemon::RecoverableErrorHealer` handles only the fixed dependency-outage allowlist, emits task-local `auto_retry` / `auto_retry_skipped` events while daemon logs keep `auto_retry_exhausted` / `auto_retry_failed`, observes pre-clear mtimes, and requeues `3-plan` after successful clears; `Hive::Commands::AdhocReview` creates or reuses synthetic `6-review/adhoc-review-pr-N` tasks through `Hive::Gh.pr_metadata`, `Hive::Pr.identifier_to_number`, and `Hive::Worktree.materialize_pr`, with ad-hoc fixes disabled by default through `review.adhoc.fix: false`.
+
+Updated [[state-model]] to include the recoverable dependency-outage healer alongside existing terminal-`ERROR` auto-clear semantics, and carried forward [[gaps]] uncertainty for the missing live-daemon Codex/Claude retry smoke and missing live `hive review --pr` smoke. No page was created, so [[index]] page coverage did not change. Did not edit compiled [[log]], and did not run `qmd update` or `qmd embed`.
+
+---
+date: 2026-06-30
+slug: review-error-reasons
+pages: [active-areas, stages/review, state-model, modules/markers, commands/tui, testing]
+---
+
+Added `Hive::ReviewErrorReason` for residual 6-review triage/fix phase-agent
+failures. `mark_review_phase_failure` still checks `Hive::AgentLimit` first, so
+provider quota/rate/429 text continues to write `reason=limits_reached` with
+`retry_after` for daemon cooldown healing. Non-limit triage/fix errors now write
+a closed terminal reason (`merge_conflict`, `network_timeout`,
+`tool_permission_denied`, `agent_crashed`, or `unknown`) while preserving the
+existing capped `message=` cause.
+
+Tests now cover the standalone classifier, triage and fix integration through
+the runner, the generic `unknown` fallback, and the TUI status column rendering a
+classified `reason=` value verbatim. Refreshed current wiki pages to describe the
+new marker vocabulary and kept historical `wiki/log.d/` fragments unchanged.
+
+## [2026-06-30T11:21:02Z] babysitter - extract shared skip-log/escaping helper for the dry-run stubs
+
+**Action:** Fixed Hive patrol finding `command-bin-hive-babysitter-stub-git-2`
+(maintainability/medium): the security-critical skip-log and control-char
+escaping helpers (`log_skip`, `append_skip_log`, `escaped_argv`,
+`escape_control_chars`) were copy-pasted byte-for-byte across
+`bin/hive-babysitter-stub-git` and `bin/hive-babysitter-stub-gh`, so a future
+hardening pass on the audit-log open path or the binary-safe escaping could land
+in one stub and silently diverge from the other.
+
+Extracted the four helpers into a single `bin/hive-babysitter-skip-log.rb` that
+both stubs `require_relative`. require_relative resolves from each stub's real
+`bin/` dir, which survives the PATH-overlay shim handoff because
+`Hive::Babysitter::DryRunEnv#prepare_overlay` execs the stub by its absolute
+`bin/` path through the pinned interpreter. `log_skip` now takes the
+`"git"`/`"gh"` label as its first argument so the audit line still names the
+entrypoint; the only per-stub difference is removed from the duplicated body.
+Added the shared file to `hive.gemspec` `spec.files` so it ships with the gem
+(verified `Gem::Specification.load`).
+
+Verified behaviorally: both stubs still skip a mutating command, write the
+correct command-prefixed line to the skip log, exit 0, and the escaping path
+stays binary-safe (control bytes -> `\xHH`, high bytes pass through, non-UTF-8
+argv does not raise). Full minitest suite (`test/babysitter/acceptance/dry_run_test.rb`,
+`test/unit/gemspec_test.rb`) runs under Hive validation; minitest is not
+installed in this worktree's gem home for a local run.
+
+**Refreshed pages:**
+- [[modules/babysitter]]
+
+---
+timestamp: 2026-06-30T11:05:00Z
+title: Review fix stop-hook failures are bounded auto-recoverable
+---
+
+- `StaleAgentHealer` now treats `REVIEW_ERROR phase=fix reason=fix_failed message="claude stop hook did not signal completion"` as a narrow recoverable infrastructure failure.
+- Generic `fix_failed` markers remain manual; the healer includes the stop-hook `message` in the guarded marker clear so stale rows cannot clear a different fix failure.
+
+---
+title: Recoverable healer and ad-hoc review wiki refresh
+date: 2026-06-29
+---
+
+Refreshed LLM wiki coverage for branch `make-the-hive-daemon-automatically-260629-223d` after its residual docs commit touched command/module/state/test wiki pages and changelog fragments.
+
+Verified the committed wiki diff against committed source and tests using `git show <branch-change>:<path>`: `Hive::Daemon::RecoverableErrorHealer` keeps task-local events to `auto_retry` / `auto_retry_skipped` while daemon logs also accept `auto_retry_exhausted` / `auto_retry_failed`; `daemon.auto_retry.enabled` is the global kill switch; and the branch also adds the `hive review --pr` ad-hoc PR review path through `Hive::Commands::AdhocReview`, `Hive::Gh.pr_metadata`, `Hive::Pr.identifier_to_number`, and `Hive::Worktree.materialize_pr`.
+
+Updated [[cli]], [[commands]], [[commands/daemon]], [[commands/stage_action]], [[modules/config]], [[modules/gh]], [[modules/pr]], [[modules/worktree]], [[stages/review]], [[testing]], and [[gaps]]. No page was created, so [[index]] page coverage did not change. Did not edit compiled [[log]], and did not run `qmd update` or `qmd embed`.
+
+---
+title: Recoverable error healer routing refresh
+date: 2026-06-29
+---
+
+Refreshed LLM wiki coverage for branch `make-the-hive-daemon-automatically-260629-223d` after its docs-only review fix corrected recoverable auto-retry event-channel routing.
+
+Verified the committed wiki diff against current source and tests: `Hive::Events::EVENT_TYPES` only allows task-local `auto_retry` / `auto_retry_skipped`, while `Hive::Daemon::Logger::EVENTS` allows the broader daemon-log audit set (`auto_retry`, `auto_retry_skipped`, `auto_retry_exhausted`, `auto_retry_failed`). `RecoverableErrorHealer` suppresses task events for non-allowlisted reasons, maps exhausted retries to task `auto_retry_skipped`, keeps all four names in the daemon log, guards nil `state_file_mtime` before clears, and lets `HealerSupport#requeue_plan_rerun` log `heal_requeue_failed` after a successful clear without relabeling the clear as `auto_retry_failed`.
+
+Updated [[modules/daemon]] because the main wiki still lacked the recoverable-healer module row and tick-order placement, and added [[gaps]] uncertainty for the missing live-daemon smoke of the Codex-auth / Claude-launch recoverable auto-retry path. No page was created, so [[index]] page coverage did not change.
+
+## [2026-06-29T12:32:47Z] setup/daemon/web — local setup and daemon binary-drift status
+
+**Action:** Refreshed command/API wiki coverage after branch `add-local-hive-web-install-260629-f4ca` touched the local setup command, daemon status payload/schema, daemon service-installer parsing, setup diagnostics, and hivebox status rendering. Read `AGENTS.md`, `.llm-wiki/config.json`, [[index]], [[architecture]], [[decisions]], [[gaps]], and recent [[log]] entries first; `qmd search "daemon status binary drift installed_binary hive-daemon-status"` returned no indexed hits, and the configured main wiki path had no matching context. Inspected the committed diff plus committed versions of `lib/hive/commands/setup.rb`, `lib/hive/setup/diagnostics.rb`, `lib/hive/commands/daemon.rb`, `lib/hive/commands/daemon/service_installer.rb`, `schemas/hive-daemon-status.v1.json`, `web/app/controllers/status_controller.rb`, `web/app/views/status/_daemon.html.erb`, and focused tests.
+
+**Coverage:** Added [[commands/setup]] for the local non-Docker web/daemon provisioning path and updated [[cli]], [[commands]], [[commands/daemon]], [[commands/web]], [[modules/agent_profile]], [[testing]], [[gaps]], and [[index]]. Documented the `hive-setup` phase report, setup diagnostic status/auth semantics, daemon-status binary-drift fields and enum, bounded installed-binary version probe, macOS launchd `$0` binary parsing, and hivebox's in-process daemon status payload plus actionable repair states. Recorded missing live evidence for real `hive setup` service repair and concurrent web dashboard daemon-status rendering. Did not edit compiled [[log]], and did not run `qmd update` or `qmd embed`.
+
+**Refreshed pages:**
+- [[commands/setup]]
+- [[cli]]
+- [[commands]]
+- [[commands/daemon]]
+- [[commands/web]]
+- [[modules/agent_profile]]
+- [[testing]]
+- [[gaps]]
+- [[index]]
+
 ---
 timestamp: 2026-06-25T17:34:45Z
 slug: release-smoke-wiki-refresh

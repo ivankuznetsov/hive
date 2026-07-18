@@ -156,6 +156,8 @@ module Hive
         return Hive::Workflows::Loader.workflow_dir(project_root, config: config) if config
 
         Hive::Workflows::Loader.workflow_dir(project_root)
+      rescue Hive::UnsupportedProjectConfigError
+        raise
       rescue Hive::ConfigError, Psych::Exception, SystemCallError, IOError => e
         fallback = File.join(project_root, Hive::Config::DEFAULTS.fetch("hive_state_path"), "workflows")
         # Surface the fallback so a project with a CUSTOM hive_state_path whose

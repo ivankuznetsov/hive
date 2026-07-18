@@ -8,9 +8,10 @@ module Hive
       module_function
 
       # Canonical "<hive_state_path>/workflows" resolver. The single spelling of
-      # this path — Hive::Workflows::Project#workflow_dir_for wraps it with a
-      # config-error fallback, and Hive::Commands::Workflow#workflow_dir
-      # delegates here for scaffolding. `expand_path(..., project_root)` resolves
+      # this path — Hive::Workflows::Project#workflow_dir_for wraps recoverable
+      # config errors with a fallback while re-raising unsupported root keys,
+      # and Hive::Commands::Workflow#workflow_dir delegates here for scaffolding.
+      # `expand_path(..., project_root)` resolves
       # a relative hive_state_path against the project and honors an absolute
       # one, where a bare File.join would mis-concatenate.
       def workflow_dir(project_root, config: nil, hive_state_path: nil)

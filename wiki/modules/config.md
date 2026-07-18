@@ -21,7 +21,11 @@ top-level per-stage override keys. Arbitrary lookalikes are not extension
 namespaces.
 
 All unsupported root keys are reported together in deterministic order and the
-error names the source config path. A literal root-level `reviewers` key is
+error names the source config path. The loader raises
+`UnsupportedProjectConfigError` (a `ConfigError`, exit 78) so task/workflow
+discovery cannot mistake this shared validation result for a recoverable config
+read failure and fall back to the built-in `coding` workflow. A literal
+root-level `reviewers` key is
 always invalid, including `reviewers: null`, `reviewers: []`, or a populated
 list. Move reviewer entries under `review.reviewers`:
 

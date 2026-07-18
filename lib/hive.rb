@@ -578,6 +578,13 @@ module Hive
     end
   end
 
+  # A project config reached the shared loader with unsupported root keys.
+  # Task/workflow discovery may recover from unreadable or otherwise invalid
+  # config to preserve legacy task visibility, but this validation result must
+  # reach every command unchanged instead of falling back to coding defaults.
+  class UnsupportedProjectConfigError < ConfigError
+  end
+
   # A dependency is valid but has not reached the depending project's gate.
   # This is retryable operational state, not a configuration error.
   class DependencyWaitError < Error

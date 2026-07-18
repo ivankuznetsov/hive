@@ -375,6 +375,23 @@ class TaskTest < Minitest::Test
     end
   end
 
+  def test_unsupported_project_root_keys_do_not_fall_back_to_coding
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      File.write(config_path, "defualt_branch: main\n")
+      task = Hive::Task.allocate
+      task.instance_variable_set(:@project_root, dir)
+      task.instance_variable_set(:@hive_state_path, File.join(dir, ".hive-state"))
+
+      error = assert_raises(Hive::ConfigError) do
+        capture_io { task.send(:load_project_default_workflow, config_path) }
+      end
+
+      assert_includes error.message, "Unknown top-level key `defualt_branch`."
+    end
+  end
+
   def test_malformed_project_config_yaml_falls_back_to_coding
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))

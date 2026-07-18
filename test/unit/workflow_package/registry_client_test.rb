@@ -112,6 +112,20 @@ class WorkflowPackageRegistryClientTest < Minitest::Test
     end
   end
 
+  def test_rejects_verified_manifests_with_incomplete_catalog_metadata
+    client = Hive::WorkflowPackage::RegistryClient.new
+    resolution = Hive::WorkflowPackage::RegistryClient::Resolution.new(
+      name: "demo", version: "1.0.0", source_commit: "a" * 40, catalog_commit: "b" * 40,
+      manifest_digest: "d" * 64, summary: "Demo", permissions: permissions
+    )
+    manifest = Struct.new(:data).new({ "version" => "1.0.0", "summary" => "Demo" })
+
+    error = assert_raises(Hive::WorkflowPackage::RegistryError) do
+      client.send(:bind_catalog_metadata!, resolution, manifest)
+    end
+    assert_match(/metadata is incomplete/, error.message)
+  end
+
   def test_materialization_rejects_incomplete_trees_and_link_records
     with_tmp_dir do |package|
       write_package(package)

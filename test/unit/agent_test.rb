@@ -661,12 +661,20 @@ class AgentTest < Minitest::Test
       ENV["HIVE_FAKE_CLAUDE_IGNORE_TERM"] = "1"
       ENV["HIVE_FAKE_CLAUDE_HANG"] = "20"
 
-      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      result = Hive::Agent.new(
-        task: task, prompt: "x", max_budget_usd: 1, max_tokens: 80,
-        timeout_sec: 15, status_mode: :exit_code_only
-      ).run!
-      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+      original_grace = Hive::Agent::TERMINATION_GRACE_SECONDS
+      Hive::Agent.send(:remove_const, :TERMINATION_GRACE_SECONDS)
+      Hive::Agent.const_set(:TERMINATION_GRACE_SECONDS, 0)
+      begin
+        started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+        result = Hive::Agent.new(
+          task: task, prompt: "x", max_budget_usd: 1, max_tokens: 80,
+          timeout_sec: 15, status_mode: :exit_code_only
+        ).run!
+        elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+      ensure
+        Hive::Agent.send(:remove_const, :TERMINATION_GRACE_SECONDS)
+        Hive::Agent.const_set(:TERMINATION_GRACE_SECONDS, original_grace)
+      end
 
       assert_operator elapsed, :<, 8, "token guard must escalate TERM before the wall-clock timeout"
       assert_equal :error, result[:status]

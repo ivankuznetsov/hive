@@ -180,6 +180,12 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
         "tool_input" => { "notebook_path" => File.join(task, "analysis.ipynb") }
       )
       assert_equal "allow", decision
+
+      policy["allowed_tools"] << "LS"
+      decision, = Hive::Scripts::WorkflowPolicyHook.evaluate(
+        policy, "tool_name" => "LS", "tool_input" => { "path" => File.join(task, "reports") }
+      )
+      assert_equal "allow", decision
     end
   end
 

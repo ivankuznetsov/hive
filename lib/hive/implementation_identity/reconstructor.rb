@@ -1,5 +1,6 @@
 require "json"
 require "hive/attempts/context"
+require "hive/implementation_identity/event_builder"
 require "hive/implementation_identity/resolver"
 require "hive/task_journal"
 require "hive/task_projection/store"
@@ -12,6 +13,7 @@ module Hive
         @task = task
         @cfg = cfg
         @attempt_store = attempt_store
+        @event_builder = EventBuilder.new(task: task, attempt_store: attempt_store)
         @writer = writer || Hive::TaskJournal::Writer.new(
           task_folder: task.folder, attempt_store: attempt_store
         )
@@ -116,7 +118,7 @@ module Hive
 
       def append_fallback_warning(context)
         @writer.append_idempotent(
-          base_event(
+          @event_builder.build(
             context, event_type: "implementation_identity_fallback",
             reason: "legacy_current_config_fallback",
             provenance: { "source" => "legacy_backfill", "warning" => true },
@@ -127,7 +129,7 @@ module Hive
       end
 
       def identity_event(context, selection, recovery)
-        base_event(
+        @event_builder.build(
           context, event_type: "implementation_identity_backfilled",
           reason: "legacy_identity_#{recovery}",
           provenance: { "source" => "legacy_backfill", "recovery" => recovery.to_s },
@@ -135,23 +137,6 @@ module Hive
             "identity" => selection.to_h.reject { |key, _| key == "native_arguments" }
           }
         )
-      end
-
-      def base_event(context, event_type:, reason:, provenance:, payload:)
-        attempt = @attempt_store.fetch(context.attempt_id)
-        raise ResolutionError, "durable attempt #{context.attempt_id.inspect} is unavailable" unless attempt
-
-        {
-          event_type: event_type,
-          task: { "id" => task_id, "slug" => @task.slug.to_s },
-          workflow: "coding", stage: attempt["intended_stage"],
-          attempt_id: context.attempt_id,
-          task_generation: context.task_generation,
-          ownership_generation: context.ownership_generation,
-          commit_generation: 0, reason: reason,
-          evidence: [ { "type" => "attempt_lease", "attempt_id" => context.attempt_id } ],
-          provenance: provenance, payload: payload
-        }
       end
 
       def selection_from(identity)

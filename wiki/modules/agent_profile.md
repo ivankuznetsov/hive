@@ -3,7 +3,7 @@ title: Hive::AgentProfile + Hive::AgentProfiles
 type: module
 source: lib/hive/agent_profile.rb, lib/hive/agent_profiles.rb, lib/hive/agent_profiles/{claude,codex,pi,grok}.rb, lib/hive/agent_skills/
 created: 2026-04-26
-updated: 2026-07-17
+updated: 2026-07-18
 tags: [agent, profile, registry, architecture, skills, provisioning, permissions, honeycomb]
 ---
 
@@ -70,6 +70,12 @@ Module-level singleton, mutex-guarded. `register(name, profile)` adds (or replac
 Auto-required from `lib/hive/agent_profiles.rb`:
 
 For implementation identity, Claude translates normalized values to `--model <model> --effort <effort>` and Codex to `--model <model> -c model_reasoning_effort=<effort>`. Pi and Grok can resolve and optionally pin a concrete provider-native model but declare effort unsupported. An unsupported effort stays visible as requested while native argv omits it and `effective_effort` remains unset.
+
+`Hive::ImplementationIdentity::EventBuilder` owns the durable journal envelope
+shared by first-time identity capture and legacy reconstruction. It binds the
+task, coding workflow/stage, durable attempt, input/ownership generations,
+attempt-lease evidence, provenance, and payload in one place; `Store` retains
+generation/selection policy and `Reconstructor` retains recovery policy.
 
 - `claude` — default skip flag `--dangerously-skip-permissions`, `--add-dir`, `--max-budget-usd`, headless via `-p`, stream-json output with `--verbose`, Claude skill verifier, interim plus terminal usage extraction, and opt-in verified capabilities for `safe_mode` plus the minimal patrol review/fix contexts. Patrol disables slash commands; review exposes `Read,Grep,Glob,Write`, while fix additionally exposes `Bash,Edit`. The profile reserves 20,000 initial-context tokens for patrol admission. Message-start/delta counters support a true in-flight patrol stop. Min version `2.1.118`. `:state_file_marker` mode. `AgentProfile#permission_flags(mode)` is the single source of truth for permission argv, shared by the headless `Hive::Agent` path and the tmux `Hive::ClaudeLauncher#wrapper_command` path: `bypassPermissions` (and a nil mode) yields `--dangerously-skip-permissions`, any other ordinary Claude mode yields `--permission-mode <mode>`.
 - `codex` — `--dangerously-bypass-approvals-and-sandbox`, `--add-dir`, headless via the `exec` subcommand, `--json` output, and a dedicated `workspace_write_flags` bundle (`--sandbox workspace-write`, approval policy `never`, ephemeral execution, and ignored user config/rules) for confined architecture-patrol fixes. Prompts are delivered on stdin with `-` in argv. No native budget flag. Hive consumes usage events when present, but real interim-event coverage remains unverified, so spawn/day quotas and the wall-clock timeout are the provider-independent fallback. Min version `0.125.0`. `:output_file_exists`.

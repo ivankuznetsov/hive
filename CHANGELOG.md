@@ -2,6 +2,12 @@
 
 All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with user-facing bullets and, for notable releases, descriptive subsections — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
+## 0.5.3
+
+- Fixed Architecture Patrol merge intake timing out after querying every merged
+  pull request. Bounded runs now use one exact GitHub merged-time range and
+  inspect only pull requests from the current patrol window.
+
 ## 0.5.2
 
 - Added the production Honeycomb catalog-v2 client. `hive workflow install`,

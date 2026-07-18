@@ -62,6 +62,22 @@ module Hive
           string.lines.flat_map { |line| wrap_line(line.chomp, width) }
         end
 
+        # Fixed-width character chunks for cursor-aware and read-only text
+        # surfaces. Always return one row so an empty composer has a cursor
+        # target and an empty preview line remains visible.
+        def character_chunks(label, capacity)
+          string = label.to_s
+          return [ "" ] if string.empty?
+
+          chunks = []
+          offset = 0
+          while offset < string.length
+            chunks << string[offset, capacity].to_s
+            offset += capacity
+          end
+          chunks
+        end
+
         def display_width(label)
           Unicode::DisplayWidth.of(label.to_s)
         end

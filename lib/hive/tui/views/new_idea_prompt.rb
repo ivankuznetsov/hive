@@ -1,6 +1,7 @@
 require "lipgloss"
 require "set"
 require "hive/tui/styles"
+require "hive/tui/views/format"
 
 module Hive
   module Tui
@@ -67,23 +68,8 @@ module Hive
           )
         end
 
-        # Split `buffer` into chunks of `capacity` chars each. Always
-        # returns at least one chunk (empty string) so the cursor has
-        # somewhere to land.
-        def chunk_buffer(buffer, capacity)
-          return [ "" ] if buffer.empty?
-
-          chunks = []
-          offset = 0
-          while offset < buffer.length
-            chunks << buffer[offset, capacity].to_s
-            offset += capacity
-          end
-          chunks
-        end
-
         def chunk_buffer_with_cursor(buffer, cursor, capacity)
-          chunks = chunk_buffer(buffer, capacity)
+          chunks = Views::Format.character_chunks(buffer, capacity)
           cursor = cursor.to_i.clamp(0, buffer.length)
           cursor_chunk_idx, cursor_offset = cursor_position(buffer, cursor, capacity, chunks)
           [ chunks, cursor_chunk_idx, cursor_offset ]

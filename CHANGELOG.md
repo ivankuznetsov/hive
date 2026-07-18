@@ -2,6 +2,18 @@
 
 All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with user-facing bullets and, for notable releases, descriptive subsections — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
+## 0.5.2
+
+- Added the production Honeycomb catalog-v2 client. `hive workflow install`,
+  `update`, `list`, and `remove` now resolve the official flat catalog, verify
+  canonical manifests, complete package trees, release fingerprints, catalog
+  commit pins, lifecycle state, Hive compatibility, and security-sensitive
+  update diffs before mutation.
+- Added fail-closed runtime admission for reviewed v2 packages. The current
+  release admits only the lossless low-risk task-local read-only permission
+  shape; broader coarse disclosures remain blocked until Hive can enforce them
+  exactly.
+
 ## 0.5.1
 
 ### Diagnostics and release safety

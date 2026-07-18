@@ -207,7 +207,8 @@ module Hive
         repository_identity: entry["repository_identity"],
         live_repository_identity: live_repository_identity == :detect ?
           Hive::RepositoryIdentity.current(root) : live_repository_identity,
-        dependency_gate_stage: config.fetch("dependency_gate_stage", Hive::Config::DEFAULTS.fetch("dependency_gate_stage")),
+        dependency_gate_stage: config["dependency_gate_stage"],
+        dependency_gate_explicit: config.key?("dependency_gate_stage"),
         tasks: tasks,
         validation_error: config_error
       )
@@ -218,6 +219,7 @@ module Hive
         repository_identity: entry["repository_identity"],
         live_repository_identity: nil,
         dependency_gate_stage: Hive::Config::DEFAULTS.fetch("dependency_gate_stage"),
+        dependency_gate_explicit: false,
         tasks: [],
         validation_error: "#{e.class}: #{e.message}"
       )
@@ -271,7 +273,8 @@ module Hive
       validation_error = nil
       begin
         Hive::Workflows::Project.assert_descriptor_loadable!(selector.to_sym, project_root: root)
-        workflow_stages = Hive::Workflows::Registry.fetch(selector.to_sym).stage_dirs
+        workflow = Hive::Workflows::Registry.fetch(selector.to_sym)
+        workflow_stages = workflow.stage_dirs
       rescue StandardError => e
         validation_error = "workflow #{selector.inspect} could not be resolved: #{e.class}: #{e.message}"
       end
@@ -293,6 +296,8 @@ module Hive
         id: metadata.data[:id],
         stage: stage,
         workflow_stages: workflow_stages,
+        workflow_dependency_gate: workflow&.dependency_gate_stage,
+        workflow_finalize_stage: workflow&.find { |candidate| candidate.kind == :finalize }&.dir,
         depends_on: metadata.data[:depends_on],
         metadata_status: metadata_status,
         metadata_error: metadata.error,

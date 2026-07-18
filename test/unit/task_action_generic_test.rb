@@ -86,6 +86,21 @@ class TaskActionGenericTest < Minitest::Test
     assert_nil errored.command
   end
 
+  def test_generic_transitions_are_descriptor_ordered_without_invented_backwards_moves
+    forward = action_for("gather", :complete).allowed_transitions
+    assert_equal [
+      {
+        "destination" => "3-report",
+        "verb" => "approve",
+        "direction" => "forward",
+        "confirmation" => "none",
+        "label" => "Move to Report"
+      }
+    ], forward
+
+    assert_empty action_for("gather", :waiting).allowed_transitions
+  end
+
   def test_council_marker_to_action_matrix
     fresh = action_for("review", :none, descriptor: council_workflow)
     assert_equal "ready_to_run", fresh.key

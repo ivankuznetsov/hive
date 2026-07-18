@@ -926,6 +926,7 @@ module Hive
             repository_identity: project["repository_identity"],
             live_repository_identity: nil,
             dependency_gate_stage: Hive::Config::DEFAULTS.fetch("dependency_gate_stage"),
+            dependency_gate_explicit: false,
             tasks: [],
             validation_error: "#{e.class}: #{e.message}"
           )

@@ -1,11 +1,11 @@
 require "hive/conditions/policy"
 
 module Hive
-  Workflow = Data.define(:id, :stages) do
-    def initialize(id:, stages:)
+  Workflow = Data.define(:id, :stages, :dependency_gate_stage) do
+    def initialize(id:, stages:, dependency_gate_stage: nil)
       # Shallow freeze: the element Stages stay shared with the caller, which is
       # safe only because Stage is itself frozen. This dup does NOT deep-copy.
-      super(id: id, stages: stages.dup.freeze)
+      super(id: id, stages: stages.dup.freeze, dependency_gate_stage: dependency_gate_stage&.to_s&.freeze)
       validate_structure!
     end
   end
@@ -134,6 +134,11 @@ module Hive
           raise ArgumentError,
                 "workflow #{id.inspect} stage #{stage.name.inspect} has unknown kind #{stage.kind.inspect} " \
                 "(known: #{KNOWN_KINDS.map(&:inspect).join(', ')})"
+      end
+
+      if dependency_gate_stage && !stage_for_dir(dependency_gate_stage)
+        raise ArgumentError,
+              "workflow #{id.inspect} dependency_gate_stage #{dependency_gate_stage.inspect} is not a declared stage"
       end
 
       stages.first.advance_verb.nil? or

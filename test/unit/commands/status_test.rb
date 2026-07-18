@@ -833,20 +833,16 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
-  # Regression guard for the High finding: one project with an invalid
-  # dependency_gate_stage (which Config.load rejects with ConfigError) must
-  # NOT abort the whole `hive status --json` — that would feed the daemon
-  # ok:false and freeze auto-advance fleet-wide. The dependency threshold
-  # degrades to the global default (with a stderr breadcrumb) so the bad
-  # project still reports its tasks and the healthy project is untouched.
-  def test_json_payload_isolates_a_project_with_invalid_config
+  # A syntactically valid but unreachable explicit dependency gate is a
+  # task-local admission error. It must not abort the status envelope or hide
+  # either the affected project or healthy neighbours.
+  def test_json_payload_isolates_a_project_with_unreachable_explicit_gate
     with_tmp_dir do |bad_root|
       with_tmp_dir do |good_root|
         bad_state = File.join(bad_root, ".hive-state")
         good_state = File.join(good_root, ".hive-state")
         FileUtils.mkdir_p(bad_state)
-        # 5-open-pr is below the allowed gate stages, so Config.load raises.
-        File.write(File.join(bad_state, "config.yml"), "dependency_gate_stage: 5-open-pr\n")
+        File.write(File.join(bad_state, "config.yml"), "dependency_gate_stage: 10-release\n")
         bad_base = write_status_task(bad_state, "4-execute", "bad-base-task-260618-aaaa",
                                      state_file: "task.md", marker: "EXECUTE_COMPLETE")
         bad_dependent = write_status_task(bad_state, "4-execute", "bad-proj-task-260618-aaaa",
@@ -858,7 +854,7 @@ class CommandsStatusTest < Minitest::Test
                           state_file: "task.md", marker: "EXECUTE_COMPLETE")
 
         payload = nil
-        _out, err = capture_io do
+        capture_io do
           payload = Hive::Commands::Status.new.json_payload([
             { "name" => "bad", "path" => bad_root, "hive_state_path" => bad_state },
             { "name" => "good", "path" => good_root, "hive_state_path" => good_state }
@@ -876,8 +872,7 @@ class CommandsStatusTest < Minitest::Test
         assert_includes good_slugs, "good-proj-task-260618-bbbb",
                         "a healthy project must still report its tasks"
         held = bad.fetch("tasks").find { |task| task["slug"] == File.basename(bad_dependent) }
-        assert_equal "dependency_gate_unknown", held.fetch("admission_error").fetch("reason_code")
-        assert_match(/dependency_gate_stage/, err)
+        assert_equal "dependency_gate_unreachable", held.fetch("admission_error").fetch("reason_code")
       end
     end
   end

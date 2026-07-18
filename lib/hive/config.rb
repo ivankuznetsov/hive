@@ -695,7 +695,7 @@ module Hive
     # `Hive::Stages::DIRS.last(2)` so a stage rename/addition is a
     # deliberate review point here, not a silent propagation — if DIRS
     # changes, update this list to match.
-    DEPENDENCY_GATE_STAGES = %w[8-finalize 9-done].freeze # coding-scoped: coding dependency-gate stages (last two of Stages::DIRS)
+    DEPENDENCY_GATE_STAGE_RE = /\A[1-9]\d*-[a-z0-9][a-z0-9-]*\z/.freeze
     EXPLICIT_CLAUDE_MODE_KEY = :__hive_explicit_claude_mode
     EXPLICIT_BRAINSTORM_RUNTIME_KEY = :__hive_explicit_brainstorm_runtime
     EXPLICIT_RESOURCE_LIMITS_KEY = :__hive_explicit_resource_limits
@@ -2352,11 +2352,11 @@ module Hive
 
     def validate_dependency_gate_stage!(cfg, source_path)
       stage = cfg["dependency_gate_stage"]
-      return if DEPENDENCY_GATE_STAGES.include?(stage)
+      return if stage.is_a?(String) && DEPENDENCY_GATE_STAGE_RE.match?(stage)
 
       raise ConfigError,
-            "dependency_gate_stage in #{describe_source(source_path)} must be one of " \
-            "#{DEPENDENCY_GATE_STAGES.inspect}; got #{stage.inspect} (#{stage.class})"
+            "dependency_gate_stage in #{describe_source(source_path)} must be a stage directory " \
+            "such as 8-finalize; got #{stage.inspect} (#{stage.class})"
     end
 
     def validate_brainstorm_runtime!(cfg, source_path)

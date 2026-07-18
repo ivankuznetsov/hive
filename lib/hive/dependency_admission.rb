@@ -41,13 +41,41 @@ module Hive
     TaskSnapshot = Data.define(
       :project, :slug, :id, :stage, :workflow_stages, :depends_on,
       :metadata_status, :metadata_error, :plan_status, :plan_dependency,
-      :plan_error, :folder, :validation_error
-    )
+      :plan_error, :folder, :validation_error, :workflow_dependency_gate,
+      :workflow_finalize_stage
+    ) do
+      def initialize(project:, slug:, id:, stage:, workflow_stages:, depends_on:,
+                     metadata_status:, metadata_error:, plan_status:, plan_dependency:,
+                     plan_error:, folder:, validation_error:, workflow_dependency_gate: nil,
+                     workflow_finalize_stage: nil)
+        super(
+          project: project, slug: slug, id: id, stage: stage,
+          workflow_stages: workflow_stages, depends_on: depends_on,
+          metadata_status: metadata_status, metadata_error: metadata_error,
+          plan_status: plan_status, plan_dependency: plan_dependency,
+          plan_error: plan_error, folder: folder, validation_error: validation_error,
+          workflow_dependency_gate: workflow_dependency_gate,
+          workflow_finalize_stage: workflow_finalize_stage
+        )
+      end
+    end
 
     ProjectSnapshot = Data.define(
       :name, :path, :repository_identity, :live_repository_identity,
-      :dependency_gate_stage, :tasks, :validation_error
-    )
+      :dependency_gate_stage, :tasks, :validation_error, :dependency_gate_explicit
+    ) do
+      def initialize(name:, path:, repository_identity:, live_repository_identity:,
+                     dependency_gate_stage:, tasks:, validation_error:,
+                     dependency_gate_explicit: true)
+        super(
+          name: name, path: path, repository_identity: repository_identity,
+          live_repository_identity: live_repository_identity,
+          dependency_gate_stage: dependency_gate_stage, tasks: tasks,
+          validation_error: validation_error,
+          dependency_gate_explicit: dependency_gate_explicit
+        )
+      end
+    end
 
     class Context
       attr_reader :projects
@@ -286,13 +314,11 @@ module Hive
         depending_project = unique_project(depending_task.project)
         return validation_failure("depending project snapshot is ambiguous", depending_task.project) unless depending_project
 
-        gate = depending_project.dependency_gate_stage
-        unless Hive::Config::DEPENDENCY_GATE_STAGES.include?(gate)
-          return admission_error(
-            "dependency_gate_unknown",
-            gate.to_s,
-            "Set dependency_gate_stage to 8-finalize or 9-done in #{depending_project.path}/.hive-state/config.yml."
-          )
+        gate = if depending_project.dependency_gate_explicit
+          depending_project.dependency_gate_stage
+        else
+          prerequisite.workflow_dependency_gate || prerequisite.workflow_finalize_stage ||
+            prerequisite.workflow_stages.last
         end
 
         gate_index = prerequisite.workflow_stages.index(gate)
@@ -301,7 +327,7 @@ module Hive
           return admission_error(
             "dependency_gate_unreachable",
             "#{prerequisite_project.name}:#{prerequisite.slug}@#{gate}",
-            "Use a prerequisite workflow that contains #{gate}, or correct the depending project's gate."
+            "Use a prerequisite workflow that contains #{gate}, or correct the explicitly configured gate."
           )
         end
 

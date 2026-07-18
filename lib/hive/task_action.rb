@@ -261,12 +261,48 @@ module Hive
       parts.shelljoin
     end
 
+    # Complete, serializable transition contract for every UI consumer. The
+    # current action remains the legality source; descriptors supply ordering
+    # and destinations. Generic workflows never receive invented backwards
+    # semantics, while coding keeps its established prior-gate reject path.
+    def allowed_transitions
+      return [] unless transitionable_action?
+
+      transitions = []
+      stage = workflow_stage
+      return transitions unless stage
+
+      if key == Hive::Schemas::TaskActionKind::READY_TO_RUN
+        transitions << transition_payload(
+          destination: stage.dir, verb: "run", direction: "run",
+          label: "Run #{stage_label(stage)}"
+        )
+      elsif (destination = task_workflow.next_stage_after(stage.name))
+        transitions << transition_payload(
+          destination: destination.dir,
+          verb: action[:command] == "approve" ? "approve" : action[:command],
+          direction: "forward",
+          label: "Move to #{stage_label(destination)}"
+        )
+      end
+
+      if Hive::Workflows.coding_id?(task_workflow.id) && stage.index > 1
+        prior = task_workflow.stages.fetch(stage.index - 2)
+        transitions << transition_payload(
+          destination: prior.dir, verb: "reject", direction: "backward",
+          confirmation: "confirm", label: "Send back to #{stage_label(prior)}"
+        )
+      end
+      transitions
+    end
+
     def payload
       {
         "key" => key,
         "label" => label,
         "command" => command,
-        "next_action" => next_action
+        "next_action" => next_action,
+        "allowed_transitions" => allowed_transitions
       }
     end
 
@@ -294,6 +330,35 @@ module Hive
     end
 
     private
+
+    TRANSITIONABLE_KEYS = [
+      Hive::Schemas::TaskActionKind::READY_TO_BRAINSTORM,
+      Hive::Schemas::TaskActionKind::READY_TO_PLAN,
+      Hive::Schemas::TaskActionKind::READY_TO_DEVELOP,
+      Hive::Schemas::TaskActionKind::READY_TO_OPEN_PR,
+      Hive::Schemas::TaskActionKind::READY_FOR_REVIEW,
+      Hive::Schemas::TaskActionKind::READY_TO_ARTIFACTS,
+      Hive::Schemas::TaskActionKind::READY_TO_FINALIZE,
+      Hive::Schemas::TaskActionKind::READY_TO_ARCHIVE,
+      Hive::Schemas::TaskActionKind::READY_TO_ADVANCE,
+      Hive::Schemas::TaskActionKind::READY_TO_RUN
+    ].freeze
+
+    def transitionable_action? = TRANSITIONABLE_KEYS.include?(key)
+
+    def transition_payload(destination:, verb:, direction:, label:, confirmation: "none")
+      {
+        "destination" => destination,
+        "verb" => verb,
+        "direction" => direction,
+        "confirmation" => confirmation,
+        "label" => label
+      }
+    end
+
+    def stage_label(stage)
+      stage.name.split("-").map(&:capitalize).join(" ")
+    end
 
     def action
       override = universal_action

@@ -719,8 +719,49 @@ class TaskActionTest < Minitest::Test
   def test_payload_has_expected_keys
     task = fake_task(stage_name: "brainstorm", stage_index: 2)
     payload = Hive::TaskAction.for(task, marker(:complete)).payload
-    assert_equal %w[command key label next_action].sort, payload.keys.sort
+    assert_equal %w[allowed_transitions command key label next_action].sort, payload.keys.sort
     assert_equal "ready_to_plan", payload["key"]
+  end
+
+  def test_allowed_transitions_follow_the_coding_descriptor
+    task = fake_task(stage_name: "brainstorm", stage_index: 2)
+    action = Hive::TaskAction.for(task, marker(:complete))
+
+    assert_equal [
+      {
+        "destination" => "3-plan",
+        "verb" => "plan",
+        "direction" => "forward",
+        "confirmation" => "none",
+        "label" => "Move to Plan"
+      },
+      {
+        "destination" => "1-inbox",
+        "verb" => "reject",
+        "direction" => "backward",
+        "confirmation" => "confirm",
+        "label" => "Send back to Inbox"
+      }
+    ], action.allowed_transitions
+  end
+
+  def test_guarded_states_have_no_ordinary_transitions
+    task = fake_task(stage_name: "execute", stage_index: 4)
+
+    %i[execute_waiting execute_stale error agent_working].each do |marker_name|
+      options = marker_name == :agent_working ? { pid_alive: true } : {}
+      action = Hive::TaskAction.for(task, marker(marker_name), **options)
+      assert_empty action.allowed_transitions, marker_name
+    end
+  end
+
+  def test_ready_to_run_targets_the_current_stage
+    task = fake_task(stage_name: "plan", stage_index: 3)
+    transition = Hive::TaskAction.for(task, marker(:none)).allowed_transitions.fetch(0)
+
+    assert_equal "3-plan", transition.fetch("destination")
+    assert_equal "run", transition.fetch("verb")
+    assert_equal "run", transition.fetch("direction")
   end
 
   def test_non_recovery_rows_do_not_emit_diagnostic

@@ -12,7 +12,7 @@ module Hive
     # mid-flight) stay as arguments because they vary within a single parse.
     class DescriptorParser
       SAFE_SLUG = /\A[a-z0-9][a-z0-9-]*\z/
-      TOP_LEVEL_KEYS = %w[id stages].freeze
+      TOP_LEVEL_KEYS = %w[id dependency_gate_stage stages].freeze
       STAGE_KEYS = %w[
         name
         kind
@@ -84,7 +84,11 @@ module Hive
         validate_terminal_last_stage!(stages)
         validate_deliverable_position!(stages)
 
-        build_workflow(id, stages)
+        dependency_gate_stage = optional_string(
+          descriptor["dependency_gate_stage"], label: "dependency_gate_stage"
+        )
+
+        build_workflow(id, stages, dependency_gate_stage: dependency_gate_stage)
       end
 
       private
@@ -127,8 +131,10 @@ module Hive
       # Wrapping the whole parse body (as before) would mislabel an unrelated
       # wrong-kwarg bug in a future Stage.new/Workflow.new signature change as a
       # descriptor error, hiding a genuine code bug from the maintainer.
-      def build_workflow(id, stages)
-        Hive::Workflow.new(id: id.to_sym, stages: stages)
+      def build_workflow(id, stages, dependency_gate_stage: nil)
+        Hive::Workflow.new(
+          id: id.to_sym, stages: stages, dependency_gate_stage: dependency_gate_stage
+        )
       rescue ArgumentError => e
         raise descriptor_error(e.message)
       end

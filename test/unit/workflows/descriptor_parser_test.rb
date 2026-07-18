@@ -96,6 +96,35 @@ class WorkflowsDescriptorParserTest < Minitest::Test
     end
   end
 
+  def test_dependency_gate_must_resolve_inside_the_descriptor
+    workflow = Hive::Workflows::DescriptorParser.parse_hash(
+      {
+        "id" => "gated-flow",
+        "dependency_gate_stage" => "2-release",
+        "stages" => [
+          { "name" => "work", "kind" => "agent", "state_file" => "work.md", "skill" => "/work" },
+          { "name" => "release", "kind" => "terminal", "state_file" => "release.md" }
+        ]
+      },
+      path: "/tmp/gated-flow.yml"
+    )
+    assert_equal "2-release", workflow.dependency_gate_stage
+
+    error = assert_raises(Hive::ConfigError) do
+      Hive::Workflows::DescriptorParser.parse_hash(
+        {
+          "id" => "gated-flow",
+          "dependency_gate_stage" => "3-missing",
+          "stages" => [
+            { "name" => "done", "kind" => "terminal", "state_file" => "done.md" }
+          ]
+        },
+        path: "/tmp/gated-flow.yml"
+      )
+    end
+    assert_match(/dependency_gate_stage/, error.message)
+  end
+
   def test_skill_backed_agent_stage_is_valid
     workflow = Hive::Workflows::DescriptorParser.parse_hash(
       {

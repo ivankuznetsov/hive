@@ -1,13 +1,13 @@
 ---
 title: Hive::Gh
 type: module
-source: lib/hive/gh.rb
+source: lib/hive/gh.rb, lib/hive/gh/repository_identity.rb
 created: 2026-06-08
-updated: 2026-07-12
+updated: 2026-07-18
 tags: [github, gh, module, pr]
 ---
 
-**TLDR**: `Hive::Gh` is the shared GitHub CLI / git transport for PR publication, finalization, review mirroring, babysitter context, authentication, and repository identity. It wraps `gh`/`git` subprocesses with non-interactive environment defaults, a bounded network timeout, typed return structs, and fail-loud JSON parsing. Architecture-patrol-specific issue, merged-PR intake, and publication-proof protocol lives behind `Hive::RefactorPatrol::GithubGateway` instead of widening this global helper.
+**TLDR**: `Hive::Gh` is the shared GitHub CLI / git transport for PR publication, finalization, review mirroring, babysitter context, authentication, and repository identity. It wraps `gh`/`git` subprocesses with non-interactive environment defaults, a bounded network timeout, typed return structs, and fail-loud JSON parsing. `Hive::Gh::RepositoryIdentity` owns the strict GitHub host and owner/name validation used by both the transport and architecture patrol. Architecture-patrol-specific issue, merged-PR intake, and publication-proof protocol lives behind `Hive::RefactorPatrol::GithubGateway` instead of widening this global helper.
 
 ## API Map
 
@@ -25,6 +25,7 @@ tags: [github, gh, module, pr]
 | `pr_metadata(number, cfg: nil, chdir: nil)` | Runs `gh pr view <n> --json number,url,baseRefName,headRefOid,isCrossRepository,state` and returns `PrMetadata`. `Hive::Commands::AdhocReview` uses it to confirm the PR exists, record declared base/head state, and cross-check the materialized worktree HEAD. The load-bearing `chdir:` kwarg runs the `gh` call in the resolved project root because `gh` has no `-C`; this makes `hive review --pr N --project NAME` query the selected repository instead of the caller's cwd. |
 | `list_open_prs(worktree_path, cfg: nil)` | Runs `gh pr list --state open --limit 1000` and includes `mergeStateStatus`; [[modules/babysitter]] uses that field to prioritize dirty/conflicted PRs before age. |
 | `repo_name_with_owner(worktree_path, cfg: nil)` / `repository_identity(worktree_path, cfg: nil, timeout_sec: nil)` | Parse the actual origin push URL into canonical `owner/repo` plus host. They do not trust ambient `GH_REPO` or `gh repo view`, so GitHub Enterprise, duplicate registration, and repository drift gates bind to the Git target. The optional timeout is threaded through the underlying origin lookup. |
+| `Gh::RepositoryIdentity.validated_repository_slug` / `validated_github_host` / `github_repository_target` | Enforce one strict owner/name and hostname-only policy for both normal GitHub transport and architecture-patrol remote operations. Invalid values retain the established `Hive::GhError` messages. |
 | `pr_status_rollup` / `pr_failing_job_logs` | Fetch PR merge/check state and tail-clipped failing job logs for babysitter repair context. |
 | `pr_diff_stat` / `pr_base_divergence` | Fetch base and compute diff/divergence context for babysitter prompts. `pr_base_divergence` is best-effort and returns blank fields on git hiccups. |
 | `pr_stats(pr_url, cfg:)` | Fetch a PR's `additions`/`deletions`/commit count via `gh pr view <url> --json additions,deletions,commits` (keyed off the URL, no worktree/chdir needed) for the [[modules/digest]] footer. Returns `{additions:, deletions:, commits:}` (commits as a count); raises `Hive::GhError` on a failed/unparseable lookup so the caller can drop just that PR. |
@@ -38,7 +39,9 @@ tags: [github, gh, module, pr]
 (`lib/hive/refactor_patrol/github_gateway.rb`) owns the remote protocol that is
 specific to durable architecture patrol. It accepts `Hive::Gh` as an injected
 transport, using only shared authentication, repository identity, and
-`capture3` behavior from that module. The split keeps feature-specific response
+`capture3` behavior from that module. Its repository/host inputs pass through
+the same `Hive::Gh::RepositoryIdentity` validator as ordinary transport calls.
+The split keeps feature-specific response
 shapes and fail-closed reconciliation rules out of unrelated GitHub callers.
 
 | Adapter API | Purpose |

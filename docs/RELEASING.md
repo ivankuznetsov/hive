@@ -53,10 +53,11 @@ depends on the gem via `path: ".."`, so a stale web lock fails its frozen
 && git push origin vX.Y.Z`. The tag drives `release.yml` (above). The owner
 bypasses the `v*` tag-protection ruleset.
 
-**CHANGELOG style:** newest-first `## X.Y.Z` sections with terse `-` bullets
-(prefix fixes with "Fixed"); no `[Unreleased]` accumulator, no per-category
-subheadings, no dates — the git tag carries the date. A release with nothing
-user-facing gets a one-line "no user-facing changes" note.
+**CHANGELOG style:** newest-first `## X.Y.Z` sections with user-facing `-`
+bullets (prefix fixes with "Fixed"); no `[Unreleased]` accumulator and no dates
+— the git tag carries the date. Use descriptive `###` category subheadings for
+notable minor/major releases; keep routine patch releases terse. A release with
+nothing user-facing gets a one-line "no user-facing changes" note.
 
 ---
 

@@ -1,22 +1,89 @@
 # Changelog
 
-All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with terse bullets — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
+All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with user-facing bullets and, for notable releases, descriptive subsections — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
-## 0.4.3
+## 0.5.0
 
+Hive 0.5.0 makes long-running autonomous work durable, adds a safe lifecycle
+for reusable community workflows, and substantially expands both ordinary and
+architecture patrol. It includes every change merged since v0.4.2; the
+previously prepared but unpublished 0.4.3 changes are included here.
+
+### Community workflows and agent setup
+
+- Added the Honeycomb workflow lifecycle: `hive workflow install`, `list`,
+  `update`, `remove`, and `publish` can manage reviewed community workflows
+  with deterministic manifests, immutable task-pinned generations, semantic
+  and security diffs, crash-safe activation, and explicit consent for
+  permission escalation. Managed workflows fail closed before installation and
+  again before agent launch when their tool, command, path, or network policy
+  cannot be enforced; existing built-in and project-authored workflows keep
+  their previous behavior. (#751)
+- Added evidence-backed diagnosis and provisioning for the enabled Claude,
+  Codex, and Pi skills Hive depends on. `hive doctor` remains read-only,
+  `hive setup-agents` previews and verifies one consented repair plan, and
+  interactive `hive init` can hand unresolved defaults to the same engine
+  without overwriting user-owned aliases or Codex sources. (#750)
 - Added path-qualified `Read(...)` and `Edit(...)` workflow permissions, with
   exact task/repository scope projection and fail-closed portable-path
-  validation. This enables repository-wide reads with writes constrained to
+  validation. Workflows can now read a repository while limiting writes to
   selected files or subtrees. (#769)
 - Added strict repository-aware dependency admission across manual commands,
-  daemon dispatch, and status v5 so missing, ambiguous, or stale cross-project
-  dependencies stop safely with actionable diagnostics.
-- Expanded post-merge architecture patrol into a durable scheduled workflow
-  with bounded discovery, resumable fenced actions, isolated automatic fixes,
-  validated GitHub publication, and persistent lifecycle reconciliation.
+  daemon dispatch, and status. Missing, ambiguous, corrupt, cross-repository,
+  or stale dependencies now hold safely with an explicit reason and correction
+  instead of running against the wrong prerequisite.
+- Fixed upgrades from the former project-local hive-bench workflow. An exact
+  legacy `bench.yml` remains visible and runnable with a migration hint, and
+  `hive init PROJECT --workflow bench` archives it and atomically selects the
+  built-in workflow without disturbing modified or independently authored
+  descriptors. (#747)
+
+### Durable autonomous execution
+
+- Added durable task-stage attempt ownership. Accepted agents run under a
+  detached supervisor with leases, heartbeats, checkpoints, framed logs, and a
+  terminal receipt, so work can survive the CLI, bot/web request, or daemon
+  process that launched it. Daemon restarts adopt live work, duplicate delivery
+  attaches or replays instead of spawning a second agent, and a definitively
+  lost owner preserves evidence for a bounded successor. (#767)
+- Added generation-scoped task conditions backed by an fsynced event journal
+  and rebuildable projection. Execute decisions now use evidence from the
+  current task input, attempt family, and exact HEAD, so an old no-change wait
+  cannot block a repaired attempt that produced a commit; status, daemon, TUI,
+  bot, web, and task actions consume the same reproducible decision. (#768)
+- Added durable implementation identity across execute, PR opening, and review
+  fixes. Retries and restarts keep the selected provider/model, PR opening uses
+  that provider's utility model, review and CI fixes retain the exact execute
+  model, and CLI/JSON/TUI/web status explains the ownership and effort source.
+  (#773)
+- Fixed generic agent stages overwriting provider-limit cooldowns and other
+  agent-authored terminal errors with `agent_preflight_failed`; the daemon can
+  now retain and resume the specific retryable state. (#728)
+
+### Patrol and architecture patrol
+
+- Expanded post-merge architecture patrol into a durable scheduled workflow:
+  immutable merge manifests feed bounded language-neutral discovery, semantic
+  finding families, leverage scoring, resumable fenced actions, isolated
+  automatic fixes, validated GitHub issue/PR publication, and persistent
+  reconciliation after crashes or partial remote success.
+- Raised ordinary patrol signal quality with repository-wide candidate
+  selection, evidence/impact/novelty ranking, component-level deduplication,
+  immutable selection receipts, proof-gated fixes, and shared token, turn,
+  timeout, concurrency, and daily-spend ceilings for ordinary and architecture
+  patrol.
+- Fixed patrol scanning and review handoff so every new or resumed publication
+  proves the current remote default-branch commit and exact patrol head. Failed
+  fetches, unusable saved pins, same-named tags, stalled transports, or an
+  advanced base now fail closed instead of publishing stale review work. (#783)
+- Fixed malformed or unreadable project configuration taking down the global
+  daemon. Patrol now isolates that project, refuses model spend when no
+  validation command can prove a shippable fix, and measures each patch from
+  its immutable pre-agent base. (#758)
 - Hardened patrol and incident-regression CI against option-value spoofing,
-  unsafe repository Git helpers, unbounded logs/work, stale artifacts, and
-  non-hermetic subprocess state.
+  unsafe repository Git helpers, path/symlink/rename escapes, unbounded logs or
+  work, stale artifacts, non-hermetic subprocess state, incomplete retries,
+  corrupt durable state, and publication/reconciliation edge cases.
 
 ## 0.4.2
 
@@ -73,14 +140,6 @@ All notable changes are documented here, newest first. Hive ships frequent micro
 
 ## 0.3.7
 
-- Added manifest-driven diagnosis and consent-safe provisioning for enabled
-  built-in Claude, Codex, and Pi skills. `hive doctor --json` now emits the
-  evidence-rich `hive-doctor.v2` contract; `hive setup-agents` previews,
-  revalidates, provisions through native CLIs, and verifies without clobbering
-  user-owned aliases or Codex sources.
-- Interactive `hive init` can hand unresolved managed skills to the same setup
-  engine after project creation. JSON and non-TTY init remain non-mutating and
-  print standalone remediation instead.
 - Fixed hive failing to start on Arch Linux with `cannot load such file -- erb`:
   erb is now a declared runtime dependency. Distros ship erb as a separate
   package since ruby unbundled it, so every verb (`tui`, `plan`, the daemon)

@@ -53,6 +53,28 @@ class WorkflowPackageSemanticDiffTest < Minitest::Test
     assert_includes result.escalation_reasons, "dependencies.hive.changed"
   end
 
+  def test_registry_v2_hash_maps_and_permission_risk_are_compared_without_legacy_projection
+    old_manifest = registry_manifest("permissions" => registry_policy)
+    new_manifest = registry_manifest(
+      "description" => "Changed",
+      "permissions" => registry_policy(
+        "risk" => "moderate", "capabilities" => %w[filesystem-read filesystem-write],
+        "filesystem_write" => [ "repository/docs/**" ]
+      ),
+      "files" => {
+        "packages/demo/1.0.0/instructions/work.md" => "c" * 64,
+        "packages/demo/1.0.0/workflow.yml" => "b" * 64
+      }
+    )
+
+    result = Hive::WorkflowPackage::SemanticDiff.compare(old_manifest, new_manifest)
+    assert result.escalation?
+    assert_includes result.escalation_reasons, "permissions.risk.increased"
+    assert_includes result.escalation_reasons, "permissions.filesystem_write.added"
+    assert_equal({ "from" => "Demo", "to" => "Changed" }, result.metadata.fetch("summary"))
+    assert_equal [ "instructions/work.md" ], result.content.dig("instructions", "modified")
+  end
+
   private
 
   def manifest(overrides = {})
@@ -74,5 +96,24 @@ class WorkflowPackageSemanticDiffTest < Minitest::Test
   def policy(overrides = {})
     { "tools" => [ "Read" ], "deny" => [ "Bash" ], "directories" => [],
       "commands" => [], "domains" => [], "credentials" => [] }.merge(overrides)
+  end
+
+  def registry_manifest(overrides = {})
+    {
+      "name" => "demo", "version" => "1.0.0", "description" => "Demo",
+      "author" => { "name" => "Test", "url" => "https://example.test/test" },
+      "hive_min_version" => "0.4.3", "permissions" => registry_policy,
+      "files" => {
+        "packages/demo/1.0.0/instructions/work.md" => "b" * 64,
+        "packages/demo/1.0.0/workflow.yml" => "a" * 64
+      }
+    }.merge(overrides)
+  end
+
+  def registry_policy(overrides = {})
+    {
+      "risk" => "low", "capabilities" => [ "filesystem-read" ], "network_hosts" => [],
+      "filesystem_read" => %w[repository task], "filesystem_write" => [], "secrets" => []
+    }.merge(overrides)
   end
 end

@@ -27,19 +27,31 @@ hive workflow publish my-flow --version 1.0.0
 
 ## Honeycomb Lifecycle
 
-The official-source grammar is closed: `honeycomb/NAME`, a listed semantic
-version, or its listed full source SHA. Mutable refs, abbreviated/unlisted
-commits, arbitrary namespaces, and arbitrary repositories fail resolution.
-Install validates the pinned catalog and source ancestry, canonical manifest,
-complete payload inventory, static diagnostics, and every descriptor-selected
-runner before it places and atomically selects a generation.
+The official-source grammar is closed: `honeycomb/NAME`, a catalog semantic
+version, or its catalog-listed full upstream source SHA. Mutable refs,
+abbreviated/unlisted commits, arbitrary namespaces, and arbitrary repositories
+fail resolution. Bare discovery/latest considers only listed/discoverable
+entries; exact soft-hidden and yanked versions remain resolvable, while revoked
+versions fail closed with advisory IDs. Install materializes the immutable
+package directory from the pinned catalog commit itself and validates canonical
+`manifest.yml`, `release_sha256`, complete payload inventory/hashes, catalog
+binding, static diagnostics, and every descriptor-selected runner before
+mutation. The review head is audit identity and `source_sha` is upstream
+provenance, not install-tree Git identity.
 
 Managed storage is
-`workflows/NAME/versions/SOURCE_SHA/` plus
-`workflows/NAME/honeycomb.lock.json`. New tasks copy the selected source commit
-and manifest digest into `meta.yml`; update/remove retain any referenced
+`workflows/NAME/versions/CATALOG_COMMIT/` plus
+`workflows/NAME/honeycomb.lock.json`. New tasks copy the selected catalog commit
+and release digest into `meta.yml`; update/remove retain any referenced
 generation. Loader fingerprints include managed locks and selected generations,
 while a pinned task loads its exact descriptor directly from the managed store.
+
+Current v2 permissions are coarse disclosure data. Only the exact low-risk,
+task-local read-only subset maps losslessly to Hive's managed runtime; broader
+packages fail admission without writes. Consequently the current Bench and
+Docs Sync seeds resolve and verify but their advertised install commands do not
+yet succeed. The existing `publish` command also remains a legacy submission
+producer, not a `packages/NAME/VERSION/manifest.yml` publisher.
 
 Consent is deliberately non-composable. JSON and non-TTY install/remove/update
 require `--yes` for mutation. `--dry-run --json` on all three commands returns
@@ -54,7 +66,7 @@ non-interactive consent is `consent_required`/USAGE.
 `list` emits orthogonal `origin`, `selection`, `integrity`, and
 `catalog_visibility` fields, including tampered/malformed and retained entries.
 Its offline visibility is `unknown_offline`. Publish copies only referenced
-instructions, README, and `honeycomb.yml`, generates the canonical manifest,
+instructions, README, and `honeycomb.yml`, generates the legacy canonical manifest,
 runs preflight before GitHub calls, and uses a deterministic fork branch/body
 file. A returned PR remains `pending_review` and `listed: false`.
 

@@ -62,7 +62,7 @@ module Hive
         fail!("manifest.unreadable", FILE_NAME, "manifest is missing or unreadable")
       end
 
-      def self.inventory(root)
+      def self.inventory(root, exclude: [ FILE_NAME ])
         root = File.realpath(root)
         entries = []
         seen_case = {}
@@ -89,7 +89,7 @@ module Hive
             fail!("package.path_case_collision", relative, "package paths must not collide by case")
           end
           seen_case[folded] = relative
-          next if relative == FILE_NAME
+          next if Array(exclude).include?(relative)
 
           fail!("package.hardlink", relative, "hard-linked files are not permitted in workflow packages") if stat.nlink > 1
           fail!("package.file_too_large", relative, "package file exceeds #{MAX_FILE_BYTES} bytes") if stat.size > MAX_FILE_BYTES
@@ -243,6 +243,12 @@ module Hive
         @digest = ::Digest::SHA256.hexdigest(@bytes).freeze
         freeze
       end
+
+      def file_entries = data.fetch("files")
+      def file_name = FILE_NAME
+      def descriptor = data.fetch("descriptor")
+      def summary = data.fetch("summary")
+      def permissions = data.fetch("permissions")
     end
   end
 end

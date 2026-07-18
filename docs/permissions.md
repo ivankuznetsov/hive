@@ -30,12 +30,17 @@ hivebox.
 ## Managed Honeycomb Policy
 
 Reviewed Honeycomb packages do not inherit the owner-authored default above.
-Their canonical manifest declares a normalized tool allowlist and deny list,
-task-relative directories, exact shell commands, network domains, credential
-needs, and justifications. Hive rejects blank/overlapping declarations,
-unsupported tools, unrestricted Bash, undeclared WebFetch domains, credential
-injection, path escapes, and any selected runner that cannot represent every
-required capability.
+The current `honeycomb-manifest/v1` declares a generated coarse disclosure:
+risk, capabilities, network hosts, filesystem read/write sets, and secrets.
+Hive validates that disclosure against the catalog and package fingerprint,
+but does not reinterpret it as the older exact tool/deny/command policy.
+
+Only `risk: low`, `capabilities: [filesystem-read]`, task-only read access, and
+empty network/write/secret sets have a lossless mapping today. That maps to
+Hive's read-only tool set. Every broader disclosure fails admission before
+project state changes. The current Bench and Docs Sync seeds therefore verify
+as registry content but are not installable until Hive can enforce v2 precisely
+or the registry adds an exact runtime policy contract.
 
 For an admitted Claude package, Hive generates a private settings file, empty
 strict MCP config, `dontAsk` permission mode, sanitized environment/PATH, and a
@@ -52,8 +57,10 @@ launches consume the same compiled policy; tmux starts the wrapper through an
 empty environment populated only from the compiled safe environment and
 orchestrator-owned stage variables.
 
-Admission runs before installation/update/publish, then the policy is compiled
-again from the task-pinned manifest immediately before spawn. Codex, Pi, Grok,
+Admission runs before installation/update, then the policy is compiled again
+from the task-pinned manifest immediately before spawn. The still-legacy
+`workflow publish` path performs its existing exact-policy admission separately.
+Codex, Pi, Grok,
 custom profiles without the full `policy_capabilities` set, and explicit
 managed actors selecting them fail closed. These controls reduce agent/tool
 capability but do not change the process's OS user or claim universal network

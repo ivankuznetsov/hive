@@ -90,14 +90,17 @@ still visible and the unrelated dirty-state fingerprint unchanged.
 `Hive::WorkflowPackage` defines a second, stricter trust boundary without
 weakening owner-authored descriptor compatibility:
 
-- `Manifest`, `CanonicalJSON`, `Validator`, and `SecurityScanner` enforce
+- `Manifest`, `RegistryManifest`, `CanonicalJSON`, `CanonicalYAML`, `Validator`, and `SecurityScanner` enforce
   canonical metadata, full path/hash coverage, safe package filesystem shapes,
   package-name descriptor binding, redacted diagnostics, and objective
   warning/error rules.
-- `RegistryClient` accepts only official catalog-listed versions/full SHAs,
-  proves source ancestry from one catalog snapshot, materializes listed git
-  blobs into temporary storage, and rejects catalog version/summary/permission
-  metadata that does not match the verified manifest.
+- `RegistryClient` consumes canonical `honeycomb-catalog/v2` flat entries,
+  applies listed/latest plus exact soft-hidden/yanked and revoked-blocked
+  lifecycle semantics, materializes `packages/NAME/VERSION/` only from the
+  exact catalog commit, and rejects tree, release fingerprint, source
+  provenance, description, or permission metadata that does not bind to the
+  canonical `manifest.yml`. Review head SHA remains audit data; upstream
+  `source_sha` remains source provenance, and neither is the install tree.
 - `ManagedStore` places immutable generations and selects one through an atomic
   lock. `TransactionJournal` plus the workflow mutation lock reconcile an
   interrupted activation/removal before Loader or lifecycle access. Selection
@@ -118,6 +121,12 @@ weakening owner-authored descriptor compatibility:
 Managed locks/generations are Hive-owned. Lifecycle commands cannot overwrite a
 built-in or `<id>.yml` authored descriptor, and task metadata rewrites preserve
 both managed provenance fields.
+
+Honeycomb v2 permission summaries are not exact runtime policies. The only
+current lossless admission is low-risk task-local read-only; broader summaries
+fail closed. Bench and Docs Sync therefore resolve/verify but are not yet
+installable. `Publisher` also remains on the legacy submission layout and is
+not a v2 package authoring path.
 
 ## Constants
 

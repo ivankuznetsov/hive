@@ -1,11 +1,13 @@
 require "test_helper"
+require "digest"
 require "hive/commands/workflow/install"
 require "hive/commands/workflow/list"
 require "hive/commands/workflow/remove"
 require "hive/commands/workflow/update"
 require "hive/task"
 require "hive/workflow_package/canonical_json"
-require "hive/workflow_package/manifest"
+require "hive/workflow_package/canonical_yaml"
+require "hive/workflow_package/registry_manifest"
 
 class HoneycombWorkflowLifecycleTest < Minitest::Test
   include HiveTestHelper
@@ -98,34 +100,31 @@ class HoneycombWorkflowLifecycleTest < Minitest::Test
   end
 
   def publish_version(repository, versions, version, instruction)
-    package = File.join(repository, "workflows", "demo")
-    FileUtils.rm_rf(package)
-    write_package(package, version, instruction)
-    run!("git", "-C", repository, "add", "workflows/demo")
+    package = File.join(repository, "packages", "demo", version)
+    source_revision = Digest::SHA1.hexdigest("demo-#{version}")
+    manifest = write_package(package, version, instruction, source_revision: source_revision)
+    run!("git", "-C", repository, "add", "packages/demo/#{version}")
     run!("git", "-C", repository, "commit", "-m", "package #{version}", "--quiet")
-    source_commit = run!("git", "-C", repository, "rev-parse", "HEAD").strip
-    digest = Hive::WorkflowPackage::Manifest.load(File.join(package, "manifest.json")).digest
-    versions[version] = {
-      "source_commit" => source_commit,
-      "manifest_digest" => digest,
-      "summary" => "Demo #{version}",
-      "permissions" => permissions
-    }
+    review_head = run!("git", "-C", repository, "rev-parse", "HEAD").strip
+    versions[version] = catalog_entry(
+      version, source_revision: source_revision, review_head: review_head,
+      release_sha256: manifest.fetch("release_sha256")
+    )
+    versions.each_value { |entry| entry["latest_version"] = version }
     catalog = {
-      "schema_version" => 1,
-      "registry" => "honeycomb",
-      "workflows" => { "demo" => { "latest" => version, "versions" => versions } }
+      "schema" => "honeycomb-catalog/v2",
+      "entries" => versions.values
     }
     File.binwrite(File.join(repository, "catalog.json"), Hive::WorkflowPackage::CanonicalJSON.generate(catalog))
     run!("git", "-C", repository, "add", "catalog.json")
     run!("git", "-C", repository, "commit", "-m", "catalog #{version}", "--quiet")
-    { source_commit: source_commit, manifest_digest: digest }
+    catalog_commit = run!("git", "-C", repository, "rev-parse", "HEAD").strip
+    { source_commit: catalog_commit, manifest_digest: manifest.fetch("release_sha256") }
   end
 
-  def write_package(package, version, instruction)
+  def write_package(package, version, instruction, source_revision:)
     FileUtils.mkdir_p(File.join(package, "instructions"))
     File.write(File.join(package, "README.md"), "# Demo #{version}\n")
-    File.write(File.join(package, "honeycomb.yml"), "name: demo\nversion: #{version}\n")
     File.write(File.join(package, "instructions", "work.md"), instruction)
     File.write(File.join(package, "workflow.yml"), <<~YAML)
       id: demo
@@ -144,20 +143,52 @@ class HoneycombWorkflowLifecycleTest < Minitest::Test
           state_file: done.md
           advance_verb: done
     YAML
-    manifest = Hive::WorkflowPackage::Manifest.build(
-      package,
-      metadata: {
-        "name" => "demo", "version" => version, "summary" => "Demo #{version}",
-        "author" => { "name" => "Test" }, "dependencies" => {}, "permissions" => permissions
-      }
+    prefix = "packages/demo/#{version}/"
+    files = %w[README.md instructions/work.md workflow.yml].to_h do |relative|
+      [ "#{prefix}#{relative}", Digest::SHA256.file(File.join(package, relative)).hexdigest ]
+    end
+    manifest = {
+      "schema" => "honeycomb-manifest/v1", "name" => "demo", "version" => version,
+      "description" => "Demo #{version}",
+      "author" => { "name" => "Test", "url" => "https://example.test/test" },
+      "license" => "MIT", "hive_min_version" => "0.4.3",
+      "source" => { "url" => "https://example.test/demo/#{version}", "revision" => source_revision },
+      "permissions" => permissions, "files" => files
+    }
+    manifest["release_sha256"] = Digest::SHA256.hexdigest(
+      Hive::WorkflowPackage::CanonicalYAML.dump_manifest(manifest, include_release: false)
     )
-    File.binwrite(File.join(package, "manifest.json"), manifest.bytes)
+    File.binwrite(File.join(package, "manifest.yml"), Hive::WorkflowPackage::CanonicalYAML.dump_manifest(manifest))
+    manifest
   end
 
   def permissions
     {
-      "tools" => [ "Read" ], "deny" => [ "Bash", "WebFetch", "WebSearch" ],
-      "directories" => [], "commands" => [], "domains" => [], "credentials" => []
+      "risk" => "low", "capabilities" => [ "filesystem-read" ], "network_hosts" => [],
+      "filesystem_read" => [ "task" ], "filesystem_write" => [], "secrets" => []
+    }
+  end
+
+  def catalog_entry(version, source_revision:, review_head:, release_sha256:)
+    {
+      "name" => "demo", "version" => version, "latest_version" => version,
+      "description" => "Demo #{version}", "release_tier" => "community", "current_tier" => "community",
+      "permission_risk" => "low", "state" => "listed", "discoverable" => true,
+      "exact_resolution" => "allowed", "verification" => nil, "history" => [], "advisories" => [],
+      "author" => { "name" => "Test", "url" => "https://example.test/test" }, "license" => "MIT",
+      "hive_min_version" => "0.4.3", "permissions" => permissions,
+      "install_command" => "hive workflow install honeycomb/demo",
+      "package_url" => "https://example.test/packages/demo/#{version}",
+      "reviews_url" => "https://example.test/reviews/demo/#{version}", "community_reviews_url" => nil,
+      "source_sha" => source_revision,
+      "listing_approval" => {
+        "release_sha256" => release_sha256, "head_sha" => review_head,
+        "lint_checked_at" => "2026-07-17T08:00:00Z", "approved_by" => [ "reviewer" ],
+        "approved_at" => "2026-07-17T09:00:00Z", "reviews" => [ {
+          "reviewer" => "reviewer", "reviewed_at" => "2026-07-17T09:00:00Z",
+          "review_url" => "https://example.test/review/#{version}", "evidence_digest" => "e" * 64
+        } ]
+      }
     }
   end
 end

@@ -268,7 +268,8 @@ class WorkflowLifecycleCommandsTest < Minitest::Test
     File.binwrite(File.join(root, "manifest.json"), manifest.bytes)
     Hive::WorkflowPackage::RegistryClient::Resolution.new(
       name: "demo", version: "1.0.0", source_commit: "a" * 40, catalog_commit: "b" * 40,
-      manifest_digest: manifest.digest, summary: "Demo", permissions: permissions
+      source_revision: "a" * 40, manifest_digest: manifest.digest, hive_min_version: "0.4.3",
+      summary: "Demo", permissions: permissions
     )
   end
 

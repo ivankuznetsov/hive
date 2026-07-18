@@ -34,16 +34,19 @@ tags: [gap, todo]
   equivalent protected signing/storage authority), not another in-process
   Ruby guard.
 
-- Hive now contains the Honeycomb package validator, managed runtime policy,
-  official catalog client, immutable store/task pins, lifecycle commands,
-  semantic update consent, and publish-by-PR client. The separate
-  `ivankuznetsov/honeycomb` repository still needs the deferred U3/U8 rollout:
-  reviewed seed contents, deterministic catalog publisher, pinned released
-  Hive validator/checksum, protected CODEOWNERS/status/latest-push approval
-  rules, fork validation, catalog-only PR provenance gate, and live install/run
-  smoke. Until those controls and a compatible Hive release exist, a merged
-  package must remain unlisted and the official client may have nothing to
-  resolve. No Honeycomb monorepo files belong in this Hive tree.
+- Hive now resolves and verifies the current `honeycomb-catalog/v2` and
+  `packages/NAME/VERSION/manifest.yml` contract, but the manifest's coarse
+  permission disclosure is not generally convertible to Hive's exact managed
+  runtime policy. Only low-risk task-local read-only is admitted losslessly.
+  The current Bench and Docs Sync seeds therefore resolve/verify but fail
+  admission before any install/update write. Close this by adding exact v2
+  runtime-policy data or an equally precise Hive enforcement path, then run a
+  live install/run smoke. Do not advertise either seed install as working yet.
+- `hive workflow publish` still creates the legacy
+  `workflows/NAME/manifest.json` submission layout. It does not author the
+  current immutable version directory/canonical YAML contract and needs a
+  separate v2 publication migration before its pending-review output can feed
+  the deployed registry.
 - The built-in `bench` descriptor, packaged stage instructions, self-contained
   runtime snapshot, and `hive init . --workflow bench` path are covered locally,
   but they have not yet shipped in a Hive release or completed a live

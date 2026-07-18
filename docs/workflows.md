@@ -69,9 +69,12 @@ hive new <project> --workflow my-flow "<your idea>"
 ## Reviewed Honeycomb Packages
 
 Honeycomb packages are a separate, untrusted-by-default workflow origin. Hive
-accepts only `honeycomb/<name>[@<listed-version-or-full-commit>]` from the
-hard-coded official registry. Branches, tags, abbreviated commits, arbitrary
-repositories, and unlisted versions are rejected.
+consumes the official flat `honeycomb-catalog/v2` snapshot and accepts only
+`honeycomb/<name>[@<listed-version-or-full-source-revision>]`. Bare names select
+the highest listed/discoverable version; exact soft-hidden or yanked versions
+remain available; revoked versions fail closed with their advisory IDs.
+Branches, tags, abbreviated revisions, arbitrary repositories, and unlisted
+versions are rejected.
 
 ```bash
 hive workflow install honeycomb/repo-brief --yes
@@ -82,17 +85,20 @@ hive workflow remove repo-brief --yes
 hive workflow publish my-flow --version 1.0.0
 ```
 
-Install verifies the catalog commit, package source ancestry, canonical
-manifest digest, every payload hash, static security findings, and runner
-capabilities before asking for confirmation. A managed selection is an atomic
-lock over an immutable generation:
+Install clones one exact catalog snapshot, materializes
+`packages/<name>/<version>/` from that catalog commit (not from the review-head
+audit identity or upstream `source_sha`), and verifies canonical `manifest.yml`
+bytes, `release_sha256`, the complete Git tree, every payload hash, catalog to
+manifest metadata binding, static security findings, and runner capabilities
+before asking for confirmation. A managed selection is an atomic lock over an
+immutable catalog-commit generation:
 
 ```text
 .hive-state/workflows/<name>/honeycomb.lock.json
-.hive-state/workflows/<name>/versions/<source-commit>/
+.hive-state/workflows/<name>/versions/<catalog-commit>/
 ```
 
-New tasks pin the source commit and manifest digest in `meta.yml`. Updating or
+New tasks pin the catalog commit and release digest in `meta.yml`. Updating or
 removing the project selection therefore affects only new tasks; generations
 still referenced by existing tasks remain verifiable and runnable. Tampering
 is an integrity error, never an implicit local override.
@@ -110,12 +116,17 @@ never deletes task-pinned generations or owner-authored/built-in workflows.
 List and remove work offline; catalog visibility is reported as
 `unknown_offline` until a trusted refresh is available.
 
-Publish rewrites only referenced instruction paths into `instructions/`,
-generates canonical `manifest.json`, runs the same local validator and runtime
-admission used by install, and opens a fork pull request. Success means
-`pending_review`, not listed. Catalog publication and GitHub repository rules
-are owned by the separate Honeycomb repository and must be deployed before an
-official package can resolve.
+The current Honeycomb v2 manifest carries a coarse risk/capability/filesystem
+disclosure rather than Hive's legacy exact tool/command policy. Hive maps only
+the lossless low-risk, task-local read-only subset to its existing managed
+runtime policy. Every broader v2 disclosure fails admission before install or
+update mutation. In particular, the current Bench and Docs Sync seed packages
+can resolve and pass registry integrity verification, but cannot yet be
+installed by this client.
+
+`workflow publish` still emits the legacy `workflows/<name>/manifest.json`
+submission shape. It remains `pending_review`, not listed, and does not yet
+produce the current `packages/<name>/<version>/manifest.yml` registry contract.
 
 ## Descriptor Schema
 

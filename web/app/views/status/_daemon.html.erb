@@ -25,7 +25,7 @@
     <%= button_to "Repair", daemon_repair_path, method: :post,
           class: "btn btn-sm",
           form: { data: { turbo_confirm: "Reinstall the daemon service with the current hive binary?" } } %>
-  <% elsif actionable_drift || daemon_status["service_installed"] == false %>
+  <% elsif !running && (actionable_drift || daemon_status["service_installed"] == false) %>
     <span class="task-meta">
       daemon is down — run <code>hive daemon install --force</code> to repair
     </span>

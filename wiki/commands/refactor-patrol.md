@@ -421,8 +421,10 @@ mix snapshots, reset trunk, or create an implicit analysis worktree.
 
 ## State and JSON
 
-Legacy state remains under `.hive-state/refactor_patrol/`. V2 uses a separate
-namespace:
+Legacy state remains under `.hive-state/refactor_patrol/`. It shares directory,
+atomic JSON-write, tolerant-read, and run-artifact mechanics with ordinary
+patrol through `Hive::Patrol::BaseStateStore`, while retaining its own namespace
+and thesis schema. V2 uses a separate namespace:
 
 ```text
 .hive-state/refactor_patrol/v2/

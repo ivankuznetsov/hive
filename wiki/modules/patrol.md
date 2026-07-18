@@ -3,7 +3,7 @@ title: Hive::Patrol
 type: module
 source: lib/hive/patrol/
 created: 2026-05-28
-updated: 2026-07-17
+updated: 2026-07-18
 tags: [module, patrol, review, worktree, pr, codex]
 ---
 
@@ -28,7 +28,8 @@ tags: [module, patrol, review, worktree, pr, codex]
 | `Hive::Patrol::AgentLaunch` | `lib/hive/patrol/agent_launch.rb` | Builds the provider-specific patrol launch envelope. Claude reserves 20,000 tokens for provider-owned initial context plus one conservative token per prompt byte, uses a verified minimal review/fix tool set, and caps reviews at three completed turns. |
 | `Hive::Patrol::TokenBudget` | `lib/hive/patrol/token_budget.rb` | Shares measured-token and agent-launch ceilings across ordinary review/fix and architecture discovery/action phases and supplies an actual per-launch streamed-token cap to `Hive::Agent`. A launch is refused before spawn when the remaining per-agent/cycle/day allowance cannot cover `AgentLaunch`'s initial reserve. A project-keyed advisory lock serializes full agent lifetimes so daily headroom cannot be double-spent by concurrent workers. Architecture defaults to a 2x cycle/per-agent-token envelope, while the native budget guard and durable current-day project ceiling remain shared. Missing usage is recorded as an unmetered launch. |
 | `Hive::Patrol::Dismissals` | `lib/hive/patrol/dismissals.rb` | Reconciles closed-unmerged patrol PRs into `dismissed.json` so the same finding is not immediately re-filed. Retryable publication entries match only their exact receipted PR URL and remain retryable while that PR is open. |
-| `Hive::Patrol::StateStore` | `lib/hive/patrol/state_store.rb` | Creates and atomically writes the `.hive-state/patrol/` JSON tree. |
+| `Hive::Patrol::BaseStateStore` | `lib/hive/patrol/base_state_store.rb` | Shared JSON lifecycle for ordinary patrol and architecture patrol's legacy reporting state: directory creation, state/fingerprint/dismissal files, run artifacts, and tolerant reads. It delegates atomic replacement to `Hive::AtomicFile` while preserving the stores' prior no-fsync behavior. |
+| `Hive::Patrol::StateStore` | `lib/hive/patrol/state_store.rb` | Defines the ordinary-patrol collections and records written under `.hive-state/patrol/`; architecture patrol retains its own subclass, namespace, and thesis records. |
 
 ## State
 
@@ -76,7 +77,9 @@ to speculation. A Claude review receives only `Read`, `Grep`, `Glob`, and
 non-empty output artifact has been written, Hive terminates the child and lets
 the existing schema/evidence parser decide whether the result is admissible.
 
-The two systems deliberately retain separate namespaces:
+The two systems share only the legacy JSON persistence mechanics in
+`Hive::Patrol::BaseStateStore`; their domain records and proof remain separate.
+They deliberately retain separate namespaces:
 `.hive-state/patrol/` for ordinary patrol and
 `.hive-state/refactor_patrol/v2/` for architecture manifests, jobs, semantic
 families, indexes, and result receipts. `Hive::Daemon::PatrolArbiter` is the

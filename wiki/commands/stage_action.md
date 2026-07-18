@@ -91,6 +91,9 @@ No-target `hive archive` is a CLI overlay in `Hive::CLI#archive`: when `target.n
 
 `error_kind` enum: `ambiguous_slug`, `destination_collision`, `final_stage`, `wrong_stage`, `rollback_failed`, `invalid_task_path`, `dependency_wait`, `admission_error`, `error`.
 
+The enum is classified by the composed Approve command, so direct approve and
+workflow-stage envelopes cannot drift on the same transition exception.
+
 Dependency errors also carry `reason_code`, `offending_ref`, and
 `safe_correction`. `dependency_wait` is retryable after the prerequisite
 reaches its gate; `admission_error` requires repairing the named metadata,

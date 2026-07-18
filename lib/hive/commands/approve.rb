@@ -43,6 +43,20 @@ module Hive
 
       VALID_TERMINAL_MARKERS = %i[complete execute_complete review_complete].freeze
 
+      def self.error_kind_for(error)
+        case error
+        when Hive::AmbiguousSlug then "ambiguous_slug"
+        when Hive::DestinationCollision then "destination_collision"
+        when Hive::FinalStageReached then "final_stage"
+        when Hive::WrongStage then "wrong_stage"
+        when Hive::RollbackFailed then "rollback_failed"
+        when Hive::InvalidTaskPath then "invalid_task_path"
+        when Hive::DependencyWaitError then "dependency_wait"
+        when Hive::DependencyAdmissionError then "admission_error"
+        else "error"
+        end
+      end
+
       def initialize(target, to: nil, from: nil, project: nil, force: false, json: false, quiet: false)
         @target = target
         @to = to
@@ -504,17 +518,7 @@ module Hive
       end
 
       def error_kind_for(error)
-        case error
-        when Hive::AmbiguousSlug then "ambiguous_slug"
-        when Hive::DestinationCollision then "destination_collision"
-        when Hive::FinalStageReached then "final_stage"
-        when Hive::WrongStage then "wrong_stage"
-        when Hive::RollbackFailed then "rollback_failed"
-        when Hive::InvalidTaskPath then "invalid_task_path"
-        when Hive::DependencyWaitError then "dependency_wait"
-        when Hive::DependencyAdmissionError then "admission_error"
-        else "error"
-        end
+        self.class.error_kind_for(error)
       end
     end
   end

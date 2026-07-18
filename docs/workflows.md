@@ -122,6 +122,15 @@ never deletes task-pinned generations or owner-authored/built-in workflows.
 List and remove work offline; catalog visibility is reported as
 `unknown_offline` until a trusted refresh is available.
 
+Hivebox exposes the same project-scoped lifecycle under **Workflows**. It lists
+built-in, authored, selected, and retained generations; scaffolds project
+workflows; and makes install/update/remove a two-step review. The first step is
+the command's real dry-run disclosure. The second uses a 15-minute signed
+receipt plus the commit/digest guards above, and security-expanding updates
+require their own checkbox in addition to ordinary update consent. The current
+legacy `workflow publish` output is shown as a known limitation rather than an
+action that would open an unusable v2 registry PR.
+
 The current Honeycomb v2 manifest carries a coarse risk/capability/filesystem
 disclosure rather than Hive's legacy exact tool/command policy. Hive maps only
 the lossless low-risk, task-local read-only subset to its existing managed

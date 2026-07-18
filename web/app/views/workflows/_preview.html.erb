@@ -1,0 +1,113 @@
+<section class="card workflow-preview" aria-labelledby="workflow-preview-heading">
+  <% if operation == "install" %>
+    <h2 id="workflow-preview-heading">Review install: <%= preview.fetch("name") %> <%= preview.fetch("version") %></h2>
+    <p class="muted">Verified package at source commit <code><%= preview.fetch("source_commit") %></code>, catalog commit <code><%= preview.fetch("catalog_commit") %></code>, and manifest <code><%= preview.fetch("manifest_digest") %></code>.</p>
+    <h3>Runtime permissions</h3>
+    <dl class="permission-grid">
+      <% preview.fetch("permissions").each do |key, value| %>
+        <dt><%= key.humanize %></dt>
+        <dd><%= value.is_a?(Array) ? (value.any? ? value.join(", ") : "none") : value %></dd>
+      <% end %>
+    </dl>
+    <%= form_with url: install_workflow_path, class: "preview-confirm-form" do |f| %>
+      <%= hidden_field_tag :preview_token, token %>
+      <label class="check">
+        <%= check_box_tag :consent, "workflow_install", false, required: true %>
+        Install this exact verified package with the permissions above
+      </label>
+      <p><%= f.submit "Install workflow", data: { turbo_submits_with: "Installing…" } %></p>
+    <% end %>
+  <% elsif operation == "update" %>
+    <% diff = preview.fetch("diff") %>
+    <h2 id="workflow-preview-heading">Review update: <%= preview.fetch("name") %></h2>
+    <p class="muted">Commit <code><%= preview.fetch("from_commit")[0, 10] %></code> → <code><%= preview.fetch("to_commit")[0, 10] %></code>. Prompt content is represented by hashes, never copied into this page.</p>
+    <div class="workflow-diff-summary">
+      <span><strong><%= diff.dig("files", "added").length %></strong> files added</span>
+      <span><strong><%= diff.dig("files", "removed").length %></strong> removed</span>
+      <span><strong><%= diff.dig("files", "modified").length %></strong> modified</span>
+      <span><strong><%= diff.fetch("metadata").length %></strong> metadata changes</span>
+    </div>
+    <% unless diff.fetch("security").empty? %>
+      <h3>Security changes</h3>
+      <dl class="permission-grid workflow-change-list">
+        <% diff.fetch("security").each do |key, change| %>
+          <dt><%= key.humanize %></dt>
+          <dd>
+            <% if change.key?("added") || change.key?("removed") %>
+              added: <%= Array(change["added"]).presence&.join(", ") || "none" %>;
+              removed: <%= Array(change["removed"]).presence&.join(", ") || "none" %>
+            <% else %>
+              <%= change["from"].presence || "none" %> → <%= change["to"].presence || "none" %>
+            <% end %>
+          </dd>
+        <% end %>
+      </dl>
+    <% end %>
+    <% unless diff.fetch("dependencies").empty? %>
+      <h3>Dependency changes</h3>
+      <dl class="permission-grid workflow-change-list">
+        <% diff.fetch("dependencies").each do |key, change| %>
+          <dt><%= key.humanize %></dt>
+          <dd>
+            <% if change.key?("added") || change.key?("removed") %>
+              added: <%= Array(change["added"]).presence&.join(", ") || "none" %>;
+              removed: <%= Array(change["removed"]).presence&.join(", ") || "none" %>
+            <% else %>
+              <%= change["from"].presence || "none" %> → <%= change["to"].presence || "none" %>
+            <% end %>
+          </dd>
+        <% end %>
+      </dl>
+    <% end %>
+    <details class="workflow-file-changes">
+      <summary>Changed file inventory</summary>
+      <% %w[added removed modified].each do |kind| %>
+        <p><strong><%= kind.humanize %>:</strong> <%= diff.dig("files", kind).presence&.join(", ") || "none" %></p>
+      <% end %>
+    </details>
+    <% if diff.fetch("escalation") %>
+      <div class="state-banner workflow-escalation">
+        <span class="status-dot status-dot-waiting"></span>
+        <span><strong>Security capabilities expand.</strong> <%= diff.fetch("escalation_reasons").join(", ") %></span>
+      </div>
+    <% else %>
+      <p class="muted">No security capability escalation detected.</p>
+    <% end %>
+    <%= form_with url: update_workflow_path, class: "preview-confirm-form" do |f| %>
+      <%= hidden_field_tag :preview_token, token %>
+      <label class="check">
+        <%= check_box_tag :consent, "workflow_update", false, required: true %>
+        Apply the exact update reviewed above
+      </label>
+      <% if diff.fetch("escalation") %>
+        <label class="check">
+          <%= check_box_tag :allow_escalation, "1", false, required: true %>
+          Separately allow the disclosed security escalation
+        </label>
+      <% end %>
+      <p><%= f.submit "Update workflow", data: { turbo_submits_with: "Updating…" } %></p>
+    <% end %>
+  <% elsif operation == "remove" %>
+    <h2 id="workflow-preview-heading">Review removal: <%= preview.fetch("name") %></h2>
+    <p>New tasks will stop using this managed workflow. Existing task pins remain runnable.</p>
+    <div class="workflow-diff-summary">
+      <span><strong><%= preview.fetch("retained_commits").length %></strong> generations retained</span>
+      <span><strong><%= preview.fetch("deletable_commits").length %></strong> unreferenced generations deleted</span>
+    </div>
+    <% if preview.fetch("retained_commits").any? %>
+      <p class="muted">Retained: <code><%= preview.fetch("retained_commits").join(", ") %></code></p>
+    <% end %>
+    <% if preview.fetch("deletable_commits").any? %>
+      <p class="muted">Deleted after removal: <code><%= preview.fetch("deletable_commits").join(", ") %></code></p>
+    <% end %>
+    <%= form_with url: remove_workflow_path, class: "preview-confirm-form" do |f| %>
+      <%= hidden_field_tag :preview_token, token %>
+      <label class="check">
+        <%= check_box_tag :consent, "workflow_remove", false, required: true %>
+        Remove this selection for new tasks with the retention shown above
+      </label>
+      <p><%= f.submit "Remove workflow", class: "btn-danger", data: { turbo_submits_with: "Removing…" } %></p>
+    <% end %>
+  <% end %>
+  <p><%= link_to "Cancel preview", workflows_path(project: project.fetch("name")), class: "btn btn-ghost btn-sm" %></p>
+</section>

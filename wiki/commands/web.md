@@ -3,7 +3,7 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-07-18
+updated: 2026-07-19
 tags: [command, web, hivebox, rails, turbo]
 ---
 
@@ -16,8 +16,9 @@ in-process, task Drop calls `Hive::Commands::Drop` in-process, stage runs go
 through the daemon dispatch queue (`Hive::Web::Dispatcher`), daemon status
 renders the shared `Hive::Daemon::StatusReport.safe_payload` producer used by
 `hive daemon status --json`, and setup flows
-reuse `Hive::Web::GithubAuth`, `AgentsAuth`, and the Telegram validators from
-the gem. Red task recovery uses the bot's `RecoverySequence` path so the web
+reuse `Hive::Web::GithubAuth`, `AgentsAuth`, `WorkflowLifecycle`, and the
+Telegram validators from the gem. Red task recovery uses the bot's
+`RecoverySequence` path so the web
 Retry button and Telegram Autofix share the same guarded clear plus rerun
 contract; the TUI's Recover has its own subprocess-based clear + `hive run`
 path with separate gates.
@@ -180,6 +181,26 @@ origin also prints the Host-header/reverse-proxy warning.
   Red diagnostic rows also render a danger banner from
   `tasks[].diagnostic.summary` so the page says why the row is stuck before
   offering Retry.
+- **Workflows** — a project-scoped view of the real `hive workflow list`
+  dimensions: built-in and authored descriptors, managed selected/retained
+  generations, integrity, version/provenance, and the configured default.
+  Owner-authored scaffolds delegate to `Hive::Commands::Workflow new` with the
+  packaged templates and commit on `hive/state`; the page links back to project
+  setup to choose the default. Managed install/update/remove are two-step:
+  their first POST runs the command's exact no-write dry-run and renders
+  permissions, content/file/dependency/security changes, escalation reasons,
+  or retained/deletable generations. Preview forms intentionally use native
+  navigation because they return a successful review page rather than Turbo's
+  required mutation redirect. Applying requires an explicit checkbox plus a
+  15-minute MessageVerifier receipt bound to project, operation, source, and
+  package/selection commit+digest. The adapter re-fetches candidate packages
+  and the command/store layers recheck the selected baseline; stale tabs fail
+  before mutation. Security expansion has a second, non-composable checkbox.
+  The known legacy-vs-v2 `workflow publish` gap is stated in the page instead
+  of exposing a button that opens an unusable registry PR. At mobile widths the
+  primary header wraps to a second full-width row, keeping all five sections
+  visible without document overflow while preserving the local GitHub-connect
+  action.
 - **Repos** — registered projects, clone-by-URL (same allowlist as before:
   github.com https/ssh or `owner/repo`, leading-dash guard), and the
   operator's GitHub repository list (device-flow token; degrades to an inline
@@ -299,6 +320,8 @@ agent-login status rendering for
 binary PTY output, Grok route reachability, and operator-ward poll flows,
 managed-skill opt-in inspection and consent-gated repair, root favicon/icon
 assets,
+workflow list/scaffold delegation, signed preview tamper rejection,
+non-composable update escalation consent, and removal-retention disclosure,
 plain-vs-deep health semantics, the oversized diff cap/truncation notice,
 media route streaming/refusal cases, and captured/skipped/failed Demo
 rendering. Repos coverage pins the workflow select's built-in fresh list and
@@ -318,7 +341,8 @@ follow/pause/resume with node-preserving frame morph reloads, artifact
 open-state preservation across pushed morphs with live content refresh, and
 repo setup workflow selection (fresh `content` writes config, re-run lists a
 project-authored workflow and preselects the current default), plus
-browser-visible Demo gallery images and failed-capture banner states. CI runs
+real browser workflow scaffolding and exact-permission managed install review,
+plus browser-visible Demo gallery images and failed-capture banner states. CI runs
 both in the `web` job (`.github/workflows/ci.yml`) plus the web app's own
 rubocop, and it explicitly runs `web/test/e2e/golden_path_e2e.rb`; the golden
 path's daemon/Turbo row-replacement retry contract is covered in [[testing]].

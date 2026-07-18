@@ -20,6 +20,15 @@ Rails.application.routes.draw do
 
   post "ideas" => "ideas#create", as: :ideas
 
+  get  "workflows" => "workflows#index", as: :workflows
+  post "workflows" => "workflows#create", as: :create_workflow
+  post "workflows/install/preview" => "workflows#preview_install", as: :preview_workflow_install
+  post "workflows/install" => "workflows#install", as: :install_workflow
+  post "workflows/update/preview" => "workflows#preview_update", as: :preview_workflow_update
+  post "workflows/update" => "workflows#update", as: :update_workflow
+  post "workflows/remove/preview" => "workflows#preview_remove", as: :preview_workflow_remove
+  post "workflows/remove" => "workflows#remove", as: :remove_workflow
+
   # Task pages are addressed by project name + task slug, mirroring the CLI.
   scope "tasks/:project/:slug", constraints: { slug: /[a-z][a-z0-9-]{0,62}[a-z0-9]/, project: %r{[^/]+} } do
     get  "" => "tasks#show", as: :task

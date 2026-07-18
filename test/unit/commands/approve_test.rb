@@ -172,7 +172,7 @@ class HiveCommandsApproveTest < Minitest::Test
       }
     )
 
-    out, = capture_io { command.send(:emit_error_envelope, error) }
+    out, = capture_io { command.send(:emit_envelope, error) }
     payload = JSON.parse(out)
     assert_equal "blocked", payload.dig("condition_gate", "status")
     assert_equal "ChangesPresent",
@@ -394,7 +394,7 @@ class HiveCommandsApproveTest < Minitest::Test
     assert_equal "error", cmd.send(:error_kind_for, Hive::Error.new("generic"))
 
     out, _err = capture_io do
-      cmd.send(:emit_error_envelope, StandardError.new("plain"))
+      cmd.send(:emit_envelope, StandardError.new("plain"))
     end
     payload = JSON.parse(out)
     assert_equal "error", payload.fetch("error_kind")

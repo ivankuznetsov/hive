@@ -219,7 +219,7 @@ class CommandsStageActionTest < Minitest::Test
     )
     command = Hive::Commands::StageAction.new("open-pr", "task", json: true)
 
-    out, = capture_io { command.send(:emit_error_envelope, error) }
+    out, = capture_io { command.send(:emit_envelope, error) }
     payload = JSON.parse(out)
     assert_equal "blocked", payload.dig("condition_gate", "status")
     assert_equal "AgentHealthy",

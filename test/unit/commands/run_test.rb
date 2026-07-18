@@ -362,7 +362,7 @@ class CommandsRunTest < Minitest::Test
     end
 
     capture_io do
-      run.send(:emit_error_envelope, Hive::InternalError.new("bad"))
+      run.send(:emit_envelope, Hive::InternalError.new("bad"))
     end
 
     assert run.instance_variable_get(:@stdout_written)
@@ -385,7 +385,7 @@ class CommandsRunTest < Minitest::Test
       }
     )
 
-    out, = capture_io { command(json: true).send(:emit_error_envelope, error) }
+    out, = capture_io { command(json: true).send(:emit_envelope, error) }
     payload = JSON.parse(out)
     assert_equal "blocked", payload.dig("condition_gate", "status")
     assert_equal "AgentHealthy",

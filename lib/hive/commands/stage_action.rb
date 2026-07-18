@@ -30,6 +30,8 @@ module Hive
     # In `--json` mode the inner Approve and Run are quieted and a single
     # `hive-stage-action` envelope is emitted at the end.
     class StageAction
+      include Hive::Schemas::EnvelopeEmitter
+
       def initialize(verb, target, project: nil, from: nil, json: false,
                      recover_merged_error_reason: nil, durable: false,
                      attempt_entrypoint: nil)
@@ -44,16 +46,21 @@ module Hive
       end
 
       def call
-        return dispatch_durable if @durable && !Hive::Attempts::Context.active?
+        call_with_envelope do
+          @durable && !Hive::Attempts::Context.active? ? dispatch_durable : do_call
+        end
+      end
 
-        do_call
-      rescue Hive::Error => e
-        emit_error_envelope(e) if @json
-        raise
-      rescue StandardError => e
-        wrapped = Hive::InternalError.new("internal error: #{e.class}: #{e.message}")
-        emit_error_envelope(wrapped) if @json
-        raise wrapped
+      def envelope_schema
+        "hive-stage-action"
+      end
+
+      def envelope_extras
+        { "verb" => @verb }
+      end
+
+      def envelope_error_kind(error)
+        error_kind_for(error)
       end
 
       private
@@ -275,16 +282,6 @@ module Hive
         }
         payload["reason"] = reason if reason
         payload
-      end
-
-      def emit_error_envelope(error)
-        payload = Hive::Schemas::ErrorEnvelope.build(
-          schema: "hive-stage-action",
-          error: error,
-          error_kind: error_kind_for(error),
-          extras: { "verb" => @verb }
-        )
-        puts JSON.generate(payload)
       end
 
       def error_kind_for(error)

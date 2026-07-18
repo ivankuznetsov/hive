@@ -267,12 +267,12 @@ module Hive
     #   * `envelope_error_kind(error)` — map an exception to a
     #     closed-enum `error_kind` value
     #
-    # Used by `Hive::Commands::Forget`, `Hive::Commands::Prune`,
-    # `Hive::Commands::Daemon` (enable/disable), and
-    # `Hive::Commands::AdhocReview`. The eight pre-existing emit sites
-    # (Approve, Markers, Metrics, FindingToggle, Status, Run, Findings,
-    # StageAction) have not yet been migrated — see Issue for the full
-    # sweep. This module exists so new emit sites do not add an 11th copy.
+    # Used by default-stdout command producers whose error schemas share
+    # ErrorEnvelope's common shape. Commands with injected output streams,
+    # variant schema routing, or schema-specific payloads keep specialised
+    # emitters. Metrics, for example, deliberately retains its narrower v1
+    # payload, which omits `error_class`; forcing it through this mixin would
+    # change a published contract rather than remove duplication.
     #
     # Consumers may also override `envelope_extras` to merge per-command
     # fields (e.g. `{"verb" => "review"}`) into the envelope; the default is
@@ -282,11 +282,11 @@ module Hive
         @stdout_written = false
         yield
       rescue Hive::Error => e
-        emit_envelope(e) if @json && !@stdout_written
+        emit_envelope(e) if envelope_enabled? && !@stdout_written
         raise
       rescue StandardError => e
         wrapped = Hive::InternalError.new("internal error: #{e.class}: #{e.message}")
-        emit_envelope(wrapped) if @json && !@stdout_written
+        emit_envelope(wrapped) if envelope_enabled? && !@stdout_written
         raise wrapped
       end
 
@@ -295,7 +295,7 @@ module Hive
           schema: envelope_schema,
           error: error,
           error_kind: envelope_error_kind(error),
-          extras: envelope_extras
+          extras: envelope_extras_for(error)
         )
         puts JSON.generate(payload)
         @stdout_written = true
@@ -314,6 +314,18 @@ module Hive
       # e.g. `{"verb" => "review"}`; the default is no extras.
       def envelope_extras
         {}
+      end
+
+      # Composing commands may suppress their child-facing envelope while
+      # still preserving typed exceptions for the outer command.
+      def envelope_enabled?
+        @json
+      end
+
+      # Most extras are command-scoped. Commands with error-specific fields
+      # can override this hook without making the common emitter conditional.
+      def envelope_extras_for(_error)
+        envelope_extras
       end
     end
 

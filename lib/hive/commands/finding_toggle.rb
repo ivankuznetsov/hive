@@ -19,6 +19,8 @@ module Hive
     # invocation like `accept-finding TARGET 3 --severity high` accepts
     # finding 3 plus every finding in the High section.
     class FindingToggle
+      include Hive::Schemas::EnvelopeEmitter
+
       ACCEPT = :accept
       REJECT = :reject
 
@@ -36,14 +38,19 @@ module Hive
       end
 
       def call
-        do_call
-      rescue Hive::Error => e
-        emit_error_envelope(e) if @json
-        raise
-      rescue StandardError => e
-        wrapped = Hive::InternalError.new("internal error: #{e.class}: #{e.message}")
-        emit_error_envelope(wrapped) if @json
-        raise wrapped
+        call_with_envelope { do_call }
+      end
+
+      def envelope_schema
+        "hive-findings"
+      end
+
+      def envelope_extras
+        { "operation" => @operation.to_s }
+      end
+
+      def envelope_error_kind(error)
+        error_kind_for(error)
       end
 
       private
@@ -235,16 +242,6 @@ module Hive
         stage_dir = "#{task.stage_index}-#{task.stage_name}"
         { "kind" => kind::RUN, "folder" => task.folder,
           "command" => "hive develop #{task.slug} --from #{stage_dir}", "reason" => reason }
-      end
-
-      def emit_error_envelope(error)
-        payload = Hive::Schemas::ErrorEnvelope.build(
-          schema: "hive-findings",
-          error: error,
-          error_kind: error_kind_for(error),
-          extras: { "operation" => @operation.to_s }
-        )
-        puts JSON.generate(payload)
       end
 
       def error_kind_for(error)

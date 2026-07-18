@@ -1964,7 +1964,7 @@ class CommandsStatusTest < Minitest::Test
     end
 
     with_replaced_singleton_method(JSON, :generate, ->(_payload) { raise JSON::GeneratorError, "nope" }) do
-      out, = capture_io { cmd.send(:emit_error_envelope, Hive::Error.new("boom")) }
+      out, = capture_io { cmd.send(:emit_envelope, Hive::Error.new("boom")) }
       assert_equal "", out
     end
   end

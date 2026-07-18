@@ -18,6 +18,8 @@ require "hive/attempts/entrypoint"
 module Hive
   module Commands
     class Run
+      include Hive::Schemas::EnvelopeEmitter
+
       # Single source of truth for the hive-run JSON envelope's required keys.
       # `report_json` builds the payload from this list so the schema-drift
       # test (test/unit/schema_files_test.rb) and the producer share one
@@ -46,17 +48,21 @@ module Hive
       end
 
       def call
-        @stdout_written = false
-        return dispatch_durable if @durable && !Hive::Attempts::Context.active?
+        call_with_envelope do
+          @durable && !Hive::Attempts::Context.active? ? dispatch_durable : do_call
+        end
+      end
 
-        do_call
-      rescue Hive::Error => e
-        emit_error_envelope(e) if @json && !@stdout_written
-        raise
-      rescue StandardError => e
-        wrapped = Hive::InternalError.new("internal error: #{e.class}: #{e.message}")
-        emit_error_envelope(wrapped) if @json && !@stdout_written
-        raise wrapped
+      def envelope_schema
+        "hive-run"
+      end
+
+      def envelope_extras
+        { "slug" => @target, "stage_filter" => @stage_filter }.compact
+      end
+
+      def envelope_error_kind(error)
+        error_kind_for(error)
       end
 
       def do_call
@@ -540,37 +546,6 @@ module Hive
       def project_name_for(task)
         project = Hive::Config.registered_projects.find { |p| p["path"] == task.project_root }
         project ? project["name"] : task.project_name
-      end
-
-      # Emit a hive-run ErrorPayload to stdout. Gated on @json + the
-      # @stdout_written flag in #call so we don't double-emit when
-      # report_json already wrote the dual-signal SuccessPayload before
-      # raising TaskInErrorState (see lib/hive/commands/run.rb#report_json
-      # and the contract documented at the top of report_json).
-      def emit_error_envelope(error)
-        # `stage_filter` carries the user-supplied `--stage` value (input);
-        # the structured `current_stage`/`target_stage` fields populated by
-        # ErrorEnvelope.build for WrongStage describe the resolved stage
-        # context (output). They live in different keys so an agent can read
-        # `payload.stage_filter` without ambiguity.
-        extras = { "slug" => @target, "stage_filter" => @stage_filter }.compact
-        payload = Hive::Schemas::ErrorEnvelope.build(
-          schema: "hive-run",
-          error: error,
-          error_kind: error_kind_for(error),
-          extras: extras
-        )
-        puts JSON.generate(payload)
-        @stdout_written = true
-      rescue Errno::EPIPE, JSON::GeneratorError
-        # Consumer closed the pipe (`hive run --json | jq -e ...` exiting
-        # early) or the error message contained non-encodable bytes (a
-        # subprocess stderr proxy with binary garbage). Swallow the emit
-        # failure so the original Hive::Error still propagates with its
-        # documented exit_code via bin/hive's outer rescue. The agent loses
-        # the structured envelope on this path but still receives the exit
-        # code, which is the load-bearing failure signal.
-        @stdout_written = true
       end
 
       # Map a Hive::Error subclass to a RunErrorKind value. Ordering matters:

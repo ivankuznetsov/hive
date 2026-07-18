@@ -10,6 +10,8 @@ module Hive
     # JSON document. Read-only; the agent-callable inspection step before
     # `hive accept-finding` / `hive reject-finding`.
     class Findings
+      include Hive::Schemas::EnvelopeEmitter
+
       def initialize(target, pass: nil, project: nil, stage: nil, json: false)
         @target = target
         @pass = pass
@@ -19,14 +21,15 @@ module Hive
       end
 
       def call
-        do_call
-      rescue Hive::Error => e
-        emit_error_envelope(e) if @json
-        raise
-      rescue StandardError => e
-        wrapped = Hive::InternalError.new("internal error: #{e.class}: #{e.message}")
-        emit_error_envelope(wrapped) if @json
-        raise wrapped
+        call_with_envelope { do_call }
+      end
+
+      def envelope_schema
+        "hive-findings"
+      end
+
+      def envelope_error_kind(error)
+        error_kind_for(error)
       end
 
       private
@@ -85,15 +88,6 @@ module Hive
         s = doc.summary
         warn ""
         warn "  total=#{s['total']} accepted=#{s['accepted']} by_severity=#{s['by_severity'].to_a.map { |k, v| "#{k}:#{v}" }.join(' ')}"
-      end
-
-      def emit_error_envelope(error)
-        payload = Hive::Schemas::ErrorEnvelope.build(
-          schema: "hive-findings",
-          error: error,
-          error_kind: error_kind_for(error)
-        )
-        puts JSON.generate(payload)
       end
 
       def error_kind_for(error)

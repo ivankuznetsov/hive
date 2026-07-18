@@ -30,6 +30,8 @@ module Hive
     # markers gate `hive approve`'s forward-advance check, and clearing
     # them silently would let an agent skip the approval gesture.
     class Markers
+      include Hive::Schemas::EnvelopeEmitter
+
       # Markers that map to a "user / agent stuck on a recoverable
       # error" runner pre-flight branch. Keep this list in sync with
       # the `case marker.name` in `lib/hive/stages/review.rb` and the
@@ -54,14 +56,15 @@ module Hive
       end
 
       def call
-        do_call
-      rescue Hive::Error => e
-        emit_error_envelope(e) if @json
-        raise
-      rescue StandardError => e
-        wrapped = Hive::InternalError.new("internal error: #{e.class}: #{e.message}")
-        emit_error_envelope(wrapped) if @json
-        raise wrapped
+        call_with_envelope { do_call }
+      end
+
+      def envelope_schema
+        "hive-markers-clear"
+      end
+
+      def envelope_error_kind(error)
+        error_kind_for(error)
       end
 
       private
@@ -255,20 +258,6 @@ module Hive
           puts "hive: cleared #{normalized} from #{task.slug}"
           warn "next: hive run #{task.folder}"
         end
-      end
-
-      def emit_error_envelope(error)
-        payload = {
-          "schema" => "hive-markers-clear",
-          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-markers-clear"),
-          "ok" => false,
-          "error_class" => error.class.name.split("::").last,
-          "error_kind" => error_kind_for(error),
-          "exit_code" => error.respond_to?(:exit_code) ? error.exit_code : Hive::ExitCodes::GENERIC,
-          "message" => error.message
-        }
-        payload["candidates"] = error.candidates if error.is_a?(Hive::AmbiguousSlug)
-        puts JSON.generate(payload)
       end
 
       def error_kind_for(error)

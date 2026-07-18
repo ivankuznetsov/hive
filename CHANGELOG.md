@@ -2,6 +2,27 @@
 
 All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with user-facing bullets and, for notable releases, descriptive subsections — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
+## 0.5.1
+
+### Diagnostics and release safety
+
+- Fixed `hive doctor` aborting when a configured custom reviewer has no
+  Hive-managed skill resolver; unmanaged agents now remain visible as
+  informational diagnostics.
+- Fixed the published-release verifier reaching the operator's live user
+  service manager. Lifecycle checks now use inert `systemctl` / `launchctl`
+  stubs inside the isolated verification prefix.
+
+### Hivebox reliability
+
+- Fixed the hivebox daemon crashing at startup because the architecture-patrol
+  schema validator was missing from the packaged gem's runtime dependencies.
+- Fixed image publication so native amd64 and arm64 images must each sustain
+  daemon-deep health before their exact digests are promoted to the versioned
+  and `latest` multi-architecture tags.
+- Fixed supervised hivebox dashboards showing the daemon as both running and
+  down when no separate platform service unit is installed.
+
 ## 0.5.0
 
 Hive 0.5.0 makes long-running autonomous work durable, adds a safe lifecycle

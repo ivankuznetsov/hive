@@ -3,7 +3,7 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-07-13
+updated: 2026-07-18
 tags: [command, web, hivebox, rails, turbo]
 ---
 
@@ -77,6 +77,10 @@ Local loopback mode is a deliberate no-auth bypass for local foreground use:
 when the CLI bind address is `localhost`, `::1`, or any `127.0.0.0/8` address
 and `web.local_loopback` is not `false`, it exports `HIVEBOX_LOCAL_LOOPBACK=1`.
 Rails still checks that the request peer is loopback before skipping login.
+That connection-authenticated operator sees the complete primary navigation
+and is labelled `Local`; GitHub-dependent repository browsing stays behind an
+explicit **Connect GitHub** action instead of making the rest of hivebox look
+signed out.
 Non-loopback binds require either `--unsafe` or a configured `web.github.owner`;
 when an owner gate authorizes a non-loopback bind, the CLI warns that
 `web.github.owner` is the only login gate, and `0.0.0.0` without an HTTPS
@@ -174,7 +178,10 @@ origin also prints the Host-header/reverse-proxy warning.
   `coding` preselected, while "Re-run setup" lists built-ins plus that
   project's authored workflows and preselects the current `default_workflow`.
   The selected value is passed as `Hive::Commands::Init.new(..., workflow:)`;
-  it is intentionally outside the `prompts:` answers hash. Clone runs call
+  it is intentionally outside the `prompts:` answers hash. The web adapter
+  also supplies a non-TTY provisioning input, so newly added CLI preflight
+  questions can report their non-interactive remediation but can never wait on
+  Puma's inherited terminal and strand the browser on “Cloning…”. Clone runs call
   `gh repo clone` with the session token in `GH_TOKEN`, in a separate process
   group with `HIVEBOX_CLONE_TIMEOUT_SEC` (default 180s) as a hard deadline; on
   failure or timeout the partial target is removed so retry starts clean. A
@@ -252,6 +259,9 @@ session eviction, and later non-owner refusal,
 and the real `Commands::New`/`Approve`/`Drop` plus web recovery queue writes
 against a sandboxed `HIVE_HOME` (the suite NEVER touches the developer's real
 config — `test_helper.rb` sets the sandbox before the app loads). It pins that
+a loopback-authenticated local operator gets the full navigation and an
+explicit GitHub connection action, and that repository setup always invokes
+the CLI init adapter with non-TTY provisioning input. It also pins that
 a red task page shows the diagnostic banner and Retry button, and that the
 route queues the marker-clear command plus the hidden rerun sequence. It also
 pins the Telegram first-run guide shape and strict chat-ID validation, repo

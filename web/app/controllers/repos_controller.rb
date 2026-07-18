@@ -1,4 +1,5 @@
 require "open3"
+require "stringio"
 require "tempfile"
 
 class ReposController < ApplicationController
@@ -118,9 +119,18 @@ class ReposController < ApplicationController
   end
 
   # The InitSetup adapter rides Init's `prompts:` seam, so a web setup is
-  # indistinguishable from an interactive `hive init`.
+  # indistinguishable from an interactive `hive init`. HTTP requests must
+  # never inherit Puma's terminal: new preflight questions would otherwise
+  # wait forever with no browser surface on which the operator can answer.
   def reinit!(target, setup, workflow: nil)
-    Hive::Commands::Init.new(target, force: true, json: false, prompts: setup, workflow: workflow).call
+    Hive::Commands::Init.new(
+      target,
+      force: true,
+      json: false,
+      prompts: setup,
+      workflow: workflow,
+      provisioning_input: StringIO.new
+    ).call
   end
 
   # A hung clone (slow network, wedged gh) would otherwise hold a Puma

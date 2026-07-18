@@ -11,7 +11,8 @@ class ReposTest < ActionDispatch::IntegrationTest
     get "/repos"
     assert_response :success
     assert_match @project, response.body
-    assert_match "Sign in again to grant repository access", response.body
+    assert_match "Reconnect GitHub to browse your repositories", response.body
+    assert_select "a[href='/login']", text: "Reconnect GitHub"
   end
 
   test "github listing degrades to an inline error on a bad token" do
@@ -74,9 +75,11 @@ class ReposTest < ActionDispatch::IntegrationTest
     # default_workflow assertion below can't by itself tell a flag bind from a
     # prompt bind; the system test covers the prompt-skip only implicitly.
     captured_workflow = :unset
+    captured_provisioning_input = nil
     original_init_new = Hive::Commands::Init.method(:new)
     Hive::Commands::Init.define_singleton_method(:new) do |*args, **kwargs|
       captured_workflow = kwargs[:workflow]
+      captured_provisioning_input = kwargs[:provisioning_input]
       original_init_new.call(*args, **kwargs)
     end
 
@@ -98,6 +101,10 @@ class ReposTest < ActionDispatch::IntegrationTest
     assert_redirected_to "/repos"
     assert_equal "content", captured_workflow,
                  "the web path must supply the workflow as an Init flag, bypassing the interactive prompt"
+    refute_nil captured_provisioning_input,
+               "web init must supply its own non-interactive provisioning input instead of inheriting Puma's stdin"
+    assert_equal false, captured_provisioning_input.tty?,
+                 "a foreground `hive web` TTY must never leak an invisible setup-agents prompt into an HTTP request"
     config = File.read(File.join(dir, ".hive-state", "config.yml"))
     assert_match(/headless/, config, "the chosen claude mode must land in the project config")
     assert_match(/safetyist/, config, "the chosen triage bias must land in the project config")

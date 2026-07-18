@@ -438,6 +438,11 @@ subsecond precision for the daemon's mtime-to-mtime comparison. The Telegram
 leg lives in `test/e2e/tg` (real Bot API, secret-gated) and now asserts the
 /start welcome ahead of the idea flow.
 
+Open-PR and finalize pointer-entry tests exercise the shared
+`Hive::Stages::Base.worktree_pointer_or_exit` policy. They pin status 1 and the
+existing warnings for both a missing `worktree.yml` and a pointer whose
+directory has disappeared.
+
 ## Backlinks
 
 - [[architecture]]

@@ -17,7 +17,7 @@ module Hive
       module_function
 
       def run!(task, cfg)
-        pointer = worktree_pointer_or_exit(task)
+        pointer = Hive::Stages::Base.worktree_pointer_or_exit(task)
         worktree_path = pointer.fetch("path")
         branch = pointer["branch"] || task.slug
 
@@ -165,19 +165,6 @@ module Hive
         else
           Hive::Stages::Base.spawn_agent(task, **kwargs)
         end
-      end
-
-      def worktree_pointer_or_exit(task)
-        pointer = Hive::Worktree.read_pointer(task.folder)
-        unless pointer && pointer["path"]
-          warn "hive: no worktree pointer; this task did not pass through 4-execute"
-          exit 1
-        end
-        unless File.directory?(pointer["path"])
-          warn "hive: worktree pointer at #{pointer['path']} no longer exists; recreate or move task back to 4-execute"
-          exit 1
-        end
-        pointer
       end
 
       def render_prompt(task, worktree_path, branch, base_branch: nil)

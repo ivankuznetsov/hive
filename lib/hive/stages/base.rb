@@ -421,6 +421,21 @@ module Hive
         nil
       end
 
+      # Open-PR and finalize share the same hard precondition: execute must
+      # have left a pointer to a worktree that still exists on disk.
+      def worktree_pointer_or_exit(task)
+        pointer = Hive::Worktree.read_pointer(task.folder)
+        unless pointer && pointer["path"]
+          warn "hive: no worktree pointer; this task did not pass through 4-execute"
+          exit 1
+        end
+        unless File.directory?(pointer["path"])
+          warn "hive: worktree pointer at #{pointer['path']} no longer exists; recreate or move task back to 4-execute"
+          exit 1
+        end
+        pointer
+      end
+
       def log_clean_exit_event(task, stage, result)
         return unless result[:status] == :auto_committed
 

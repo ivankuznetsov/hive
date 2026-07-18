@@ -78,6 +78,21 @@ class WorktreeTest < Minitest::Test
     end
   end
 
+  def test_create_detached_exact_materializes_clean_commit_without_a_branch
+    with_initialized_project do |dir, root|
+      pinned = run!("git", "-C", dir, "rev-parse", "HEAD").strip
+      File.write(File.join(dir, "README.md"), "dirty registered checkout\n")
+      wt = Hive::Worktree.new(dir, "analysis-pinned", worktree_root: root)
+
+      assert_equal :created, wt.create_detached_exact!(base_sha: pinned)
+
+      assert_equal pinned, run!("git", "-C", wt.path, "rev-parse", "HEAD").strip
+      assert_empty run!("git", "-C", wt.path, "branch", "--show-current").strip
+      assert_empty run!("git", "-C", wt.path, "status", "--porcelain=v1", "-z")
+      assert_equal "dirty registered checkout\n", File.read(File.join(dir, "README.md"))
+    end
+  end
+
   def test_create_exact_rejects_same_named_branch_outside_pinned_history
     with_initialized_project do |dir, root|
       pinned = run!("git", "-C", dir, "rev-parse", "HEAD").strip

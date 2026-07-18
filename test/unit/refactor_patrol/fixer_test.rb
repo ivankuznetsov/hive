@@ -185,16 +185,19 @@ class RefactorPatrolFixerTest < Minitest::Test
     end
   end
 
-  def test_dirty_registered_checkout_fails_before_agent_or_worktree_mutation
+  def test_dirty_registered_checkout_does_not_block_isolated_fix_worktree
     with_repo do |repo, analysis_sha|
       File.write(File.join(repo, "README.md"), "uncommitted\n")
+      agent = lambda do |worktree_path:, **|
+        File.write(File.join(worktree_path, "lib/checkout.rb"), "module Checkout\n  def self.call = :old\n  UPDATED = true\nend\n")
+        { status: :ok }
+      end
 
-      patch = fixer(repo, agent: ->(**) { flunk "dirty checkout must not run the agent" })
+      patch = fixer(repo, agent: agent)
               .attempt(thesis: thesis, job_id: "job-7", analysis_sha: analysis_sha)
 
-      assert_equal "fix_error", patch.outcome
-      refute patch.terminal
-      assert_includes patch.details.fetch("error"), "must be clean"
+      assert patch.publishable?, patch.to_h.inspect
+      assert_equal "uncommitted\n", File.read(File.join(repo, "README.md"))
     end
   end
 
@@ -958,7 +961,7 @@ class RefactorPatrolFixerTest < Minitest::Test
     end
   end
 
-  def test_registered_checkout_branch_switch_during_fix_fails_closed
+  def test_registered_checkout_branch_switch_does_not_affect_isolated_fix
     with_repo do |repo, analysis_sha|
       run!("git", "-C", repo, "branch", "diverted")
       agent = lambda do |worktree_path:, **|
@@ -970,10 +973,8 @@ class RefactorPatrolFixerTest < Minitest::Test
       patch = fixer(repo, agent: agent)
               .attempt(thesis: thesis, job_id: "job-7", analysis_sha: analysis_sha)
 
-      assert_equal "fix_error", patch.outcome
-      refute patch.terminal
-      assert_includes patch.details.fetch("error"), "configured default branch"
-      refute File.directory?(patch.worktree_path)
+      assert patch.publishable?, patch.to_h.inspect
+      assert_equal "diverted", run!("git", "-C", repo, "branch", "--show-current").strip
     end
   end
 
@@ -1099,13 +1100,10 @@ class RefactorPatrolFixerTest < Minitest::Test
       assert_equal [ "missing", nil, nil ], subject.send(:file_identity, File.join(repo, "missing"))
 
       run!("git", "-C", repo, "switch", "-c", "feature", "--quiet")
-      assert_raises(Hive::GitError) { subject.send(:registered_checkout_snapshot!, analysis_sha) }
-      run!("git", "-C", repo, "switch", "master", "--quiet")
-
-      before = { branch: "master", head: analysis_sha, status: "" }
-      File.write(File.join(repo, "uncommitted.txt"), "changed\n")
-      error = assert_raises(Hive::GitError) { subject.send(:assert_registered_checkout!, before) }
-      assert_includes error.message, "changed during refactor fix"
+      snapshot = subject.send(:default_branch_snapshot!, analysis_sha)
+      assert_equal analysis_sha, snapshot.fetch(:head)
+      run!("git", "-C", repo, "branch", "-f", "master", analysis_sha, "--quiet")
+      assert_equal analysis_sha, subject.send(:assert_default_branch_descends!, snapshot)
     end
   end
 

@@ -12,10 +12,10 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
       @sha = sha
     end
 
-    def validate_and_snapshot!(merge_sha:)
+    def validate_and_snapshot!(merge_sha:, analysis_sha: nil)
       raise "missing merge" if merge_sha.to_s.empty?
 
-      { "analysis_sha" => @sha }
+      { "analysis_sha" => analysis_sha || @sha }
     end
   end
 
@@ -480,7 +480,7 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
-  def test_pinned_partial_job_blocks_visibly_when_registered_head_advances
+  def test_pinned_partial_job_reuses_exact_analysis_sha_when_default_branch_advances
     with_project do |_dir, entry, store|
       enqueue(store)
       first = scheduler(entry, store)
@@ -494,16 +494,12 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
         owner: "daemon-b"
       )
 
-      error = assert_raises(Hive::Daemon::RefactorPatrolScheduler::ReservationBlocked) do
-        advanced.reserve(advanced.candidates(now: T0 + 60).first, now: T0 + 60)
-      end
+      resumed = advanced.reserve(advanced.candidates(now: T0 + 60).first, now: T0 + 60)
 
-      assert_equal "analysis_checkout_changed_after_pin", error.reason
-      assert_equal "head", error.evidence.fetch("expected_analysis_sha")
-      assert_equal "advanced-head", error.evidence.fetch("current_analysis_sha")
+      assert_equal "head", resumed.dig(:dispatch_token, :analysis_sha)
       aggregate = store.read_job("job-7")
-      assert_equal "analysis_checkout_changed_after_pin", aggregate.fetch("attempts").last.fetch("reason")
       assert_equal "head", aggregate.fetch("analysis_sha")
+      assert_equal "claimed", aggregate.fetch("attempts").last.fetch("state")
     end
   end
 

@@ -3,7 +3,7 @@ title: State Model
 type: data-model
 source: lib/hive/task.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/review_handoff.rb, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/daemon/display_name_backfiller.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
 created: 2026-04-25
-updated: 2026-07-17
+updated: 2026-07-19
 tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, dependencies, admission, web]
 ---
 
@@ -349,6 +349,17 @@ creation intents, validation/patch/PR/issue/handoff receipts, and parent
 completeness. Writes use a locked atomic tempfile/fsync/rename transition and
 the shared `Hive::AtomicFile.fsync_directory` policy to persist directory-entry
 changes where the platform supports directory fsync.
+
+V2 discovery materializes `analysis_sha` at
+`<worktree_root>/.refactor-patrol/analysis/<job-id>` as an ephemeral detached,
+clean worktree. Source mapping, leverage scoring, and review use only that
+tree; manifests, job aggregates, collision state, logs, and result receipts
+remain under the registered project's `.hive-state`. The tree is validated at
+feature checkpoints and removed before successful completion. An interrupted
+clean tree may be reused only at the same exact SHA; a dirty, attached, or
+different-SHA tree fails closed. The worktree is transport, never completion
+authority, and a partial job keeps its durable SHA when the default branch
+advances.
 
 Fix-action receipts scope remote publication to the validated patch generation.
 `publication_attempts` is an append-only object whose key is

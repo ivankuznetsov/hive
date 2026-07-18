@@ -28,6 +28,7 @@ require "hive/refactor_patrol/repository_ownership"
 require "hive/refactor_patrol/reviewer"
 require "hive/refactor_patrol/state_store"
 require "hive/refactor_patrol/thesis"
+require "hive/worktree"
 
 module Hive
   module Commands
@@ -62,7 +63,8 @@ module Hive
                      mapper_factory: nil, reviewer_factory: nil, leverage_factory: nil,
                      caps_factory: nil, collisions_factory: nil, manifest_resolver_factory: nil,
                      action_runner_factory: nil, job_store_factory: nil,
-                     repository_ownership: nil,
+                     repository_ownership: nil, checkout_guard_factory: nil,
+                     analysis_worktree_factory: nil,
                      heartbeat_interval_sec: CLAIM_HEARTBEAT_INTERVAL_SEC,
                      heartbeat_lease_sec: CLAIM_HEARTBEAT_LEASE_SEC,
                      heartbeat_clock: -> { Time.now }, heartbeat_resolver: ClaimLivenessResolver.new)
@@ -104,6 +106,10 @@ module Hive
         @repository_ownership = repository_ownership || Hive::RefactorPatrol::RepositoryOwnership.new
         @action_runner_factory = action_runner_factory
         @job_store_factory = job_store_factory || ->(root) { Hive::RefactorPatrol::JobStore.new(root) }
+        @checkout_guard_factory = checkout_guard_factory || lambda do |root, branch|
+          Hive::RefactorPatrol::CheckoutGuard.new(root, default_branch: branch)
+        end
+        @analysis_worktree_factory = analysis_worktree_factory || method(:build_analysis_worktree)
         @heartbeat_interval_sec = heartbeat_interval_sec.to_f
         @heartbeat_lease_sec = heartbeat_lease_sec.to_i
         @heartbeat_clock = heartbeat_clock
@@ -156,18 +162,19 @@ module Hive
         if @existing_lifecycle
           return [ lifecycle_payload(entry, project_root, @existing_lifecycle), lifecycle_theses(@existing_lifecycle) ]
         end
+        analysis_root = pr_mode? ? materialize_analysis_worktree!(project_root, cfg) : project_root
         state = Hive::RefactorPatrol::StateStore.new(project_root)
         # A dry run must not create durable artifacts under
         # .hive-state/refactor_patrol/; all reads tolerate a missing dir.
         state.ensure! unless ephemeral_discovery?
 
-        features = scoped_features(project_root, cfg, state)
+        features = scoped_features(analysis_root, cfg, state)
         completed = completed_feature_results
         existing_theses = prior_theses
         existing_suppressions = prior_suppressions
         pending_features = features.reject { |feature| completed.key?(feature.id.to_s) }
         token_budget = Hive::Patrol::TokenBudget.new(project_root, cfg: cfg)
-        reviewer = build_reviewer(project_root, cfg, state, token_budget)
+        reviewer = build_reviewer(analysis_root, cfg, state, token_budget)
         yielded_thesis_ids = {}
         incrementally_suppressed = []
         completed_new_theses = []
@@ -176,7 +183,7 @@ module Hive
         new_theses = with_claim_heartbeat(@manifest&.fetch("job_id", nil)) do
           reviewer.call(
             pending_features,
-            leverage_by_feature: score_features(pending_features, project_root, cfg)
+            leverage_by_feature: score_features(pending_features, analysis_root, cfg)
           ) do |reviewed_feature, feature_theses, feature_result|
             guarded = guard_theses(feature_theses, project_root, cfg, state)
             incrementally_suppressed.concat(guarded)
@@ -195,7 +202,7 @@ module Hive
             )
           end
         end
-        @checkout_guard.assert_unchanged!(@checkout_snapshot) if pr_mode?
+        assert_analysis_worktree! if pr_mode?
         unyielded = new_theses.reject do |thesis|
           yielded_thesis_ids[[ thesis.feature_id.to_s, thesis.id.to_s ]]
         end
@@ -214,8 +221,11 @@ module Hive
           entry, project_root, cfg, state, features, theses, suppressed,
           reviewer, feature_results: feature_results
         )
+        cleanup_analysis_worktree! if pr_mode?
         checkpoint_manual_discovery!(payload) if @manual_claim_token
         [ payload, theses ]
+      ensure
+        cleanup_analysis_worktree!(raise_on_drift: $!.nil?)
       end
 
       def resolve_project!
@@ -620,7 +630,7 @@ module Hive
         token = current_discovery_claim_token
         return unless token
 
-        @checkout_guard.assert_unchanged!(@checkout_snapshot)
+        assert_analysis_worktree!
         results = completed.merge(new_results).values.sort_by { |item| item.fetch("feature_id") }
         result_ids = results.to_h { |item| [ item.fetch("feature_id"), true ] }
         checkpoint_features = features.select { |feature| result_ids[feature.id.to_s] }
@@ -1020,10 +1030,67 @@ module Hive
 
       def pin_checkout!(project_root, cfg)
         branch = cfg["default_branch"] || Hive::GitOps.new(project_root).default_branch
-        @checkout_guard = Hive::RefactorPatrol::CheckoutGuard.new(project_root, default_branch: branch)
-        @checkout_snapshot = @checkout_guard.validate_and_snapshot!(
-          merge_sha: @manifest.dig("source", "merge_sha")
+        guard = @checkout_guard_factory.call(project_root, branch)
+        @checkout_snapshot = guard.validate_and_snapshot!(
+          merge_sha: @manifest.dig("source", "merge_sha"),
+          analysis_sha: pinned_analysis_sha(project_root)
         )
+      end
+
+      def pinned_analysis_sha(project_root)
+        store = @job_store || @job_store_factory.call(project_root)
+        store.read_job(@manifest.fetch("job_id"))["analysis_sha"]
+      rescue Hive::RefactorPatrol::JobStore::RecordNotFound
+        nil
+      end
+
+      def materialize_analysis_worktree!(project_root, cfg)
+        @analysis_worktree = @analysis_worktree_factory.call(
+          project_root, cfg, @manifest.fetch("job_id")
+        )
+        @analysis_worktree.create_detached_exact!(
+          base_sha: @checkout_snapshot.fetch("analysis_sha")
+        )
+        assert_analysis_worktree!
+        @analysis_worktree.path
+      end
+
+      def build_analysis_worktree(project_root, cfg, job_id)
+        configured_root = cfg["worktree_root"] ||
+                          Hive::Worktree.default_worktree_root(File.basename(project_root))
+        root = File.join(File.expand_path(configured_root), ".refactor-patrol", "analysis")
+        slug = job_id.to_s.gsub(/[^a-zA-Z0-9_.-]+/, "-")[0, 100]
+        Hive::Worktree.new(project_root, slug, worktree_root: root)
+      end
+
+      def assert_analysis_worktree!
+        raise Hive::WorktreeError, "architecture patrol analysis worktree is unavailable" unless @analysis_worktree
+
+        @analysis_worktree.assert_detached_exact!(
+          base_sha: @checkout_snapshot.fetch("analysis_sha")
+        )
+      end
+
+      def cleanup_analysis_worktree!(raise_on_drift: true)
+        return unless @analysis_worktree
+
+        worktree = @analysis_worktree
+        drift_error = begin
+          assert_analysis_worktree!
+          nil
+        rescue Hive::Error => e
+          e
+        end
+        cleanup_error = begin
+          worktree.remove!(force: true)
+          nil
+        rescue Hive::Error => e
+          e
+        end
+        error = drift_error || cleanup_error
+        raise error if error && raise_on_drift
+      ensure
+        @analysis_worktree = nil
       end
 
       def ephemeral_discovery?

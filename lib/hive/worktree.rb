@@ -138,6 +138,50 @@ module Hive
       :created
     end
 
+    # Materialize one exact commit as a detached, read-only analysis tree.
+    # Unlike create_exact!, this creates no branch ref for an agent to move.
+    # A prior interrupted analysis may be reused only when it is still
+    # detached, clean, and pinned to the same commit.
+    def create_detached_exact!(base_sha:)
+      FileUtils.mkdir_p(File.dirname(path))
+      expected = self.class.run_materialize_git!(
+        @project_root, "rev-parse", "--verify", "#{base_sha}^{commit}"
+      ).strip
+
+      if exists?
+        assert_detached_exact!(base_sha: expected)
+        return :existing
+      end
+
+      self.class.run_materialize_git!(
+        @project_root, "worktree", "add", "--detach", path, expected
+      )
+      assert_detached_exact!(base_sha: expected)
+      :created
+    end
+
+    def assert_detached_exact!(base_sha:)
+      expected = self.class.run_materialize_git!(
+        @project_root, "rev-parse", "--verify", "#{base_sha}^{commit}"
+      ).strip
+      raise WorktreeError, "analysis worktree #{path} is not registered" unless exists?
+
+      branch = self.class.run_materialize_git!(path, "branch", "--show-current").strip
+      raise WorktreeError, "analysis worktree #{path} is attached to branch #{branch}" unless branch.empty?
+
+      actual = self.class.run_materialize_git!(path, "rev-parse", "HEAD").strip
+      unless actual == expected
+        raise WorktreeError,
+              "analysis worktree #{path} is at #{actual}, expected pinned commit #{expected}"
+      end
+      status = self.class.run_materialize_git!(
+        path, "status", "--porcelain=v1", "--untracked-files=all", "-z"
+      )
+      raise WorktreeError, "analysis worktree #{path} is dirty" unless status.empty?
+
+      true
+    end
+
     def remove!(path: self.path, force: false)
       args = [ "worktree", "remove" ]
       args << "--force" if force

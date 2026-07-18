@@ -419,37 +419,78 @@ class RefactorPatrolCommandTest < Minitest::Test
     end
   end
 
-  def test_pr_discovery_releases_claim_without_results_when_reviewer_mutates_checkout
+  def test_pr_discovery_uses_isolated_snapshot_when_registered_checkout_is_mutated
     with_refactor_patrol_project do |repo|
       head = run!("git", "-C", repo, "rev-parse", "HEAD").strip
       manifest = pr_manifest(merge_sha: head)
       item = thesis("checkout", feature_id: "checkout", fingerprint: "fp-checkout")
       reviewer = MutatingCompleteReviewer.new(File.join(repo, "README.md"), item)
+      analysis_paths = []
+      root_observer = lambda do |_kind, root|
+        analysis_paths << root
+        refute_equal repo, root
+        assert_equal head, run!("git", "-C", root, "rev-parse", "HEAD").strip
+        assert_empty run!("git", "-C", root, "branch", "--show-current").strip
+        assert_empty run!("git", "-C", root, "status", "--porcelain=v1", "-z")
+      end
 
       out, err, status = with_captured_exit do
         command_for(
           pr: "7", manifest_resolver: FakeManifestResolver.new(manifest),
           features: [ feature("checkout", files: [ "lib/checkout.rb" ]) ],
           reviewer: reviewer,
-          leverage_scores: leverage_scores("checkout" => 0.9)
+          leverage_scores: leverage_scores("checkout" => 0.9),
+          root_observer: root_observer
         ).call
       end
 
-      assert_equal Hive::ExitCodes::SOFTWARE, status, "#{out}\n#{err}"
+      assert_equal Hive::ExitCodes::SUCCESS, status, "#{out}\n#{err}"
       payload = JSON.parse(out)
       assert v2_refactor_schemer.valid?(payload),
              v2_refactor_schemer.validate(payload).map { |error| error["error"] }.inspect
-      assert_includes payload.fetch("message"), "registered checkout is dirty"
+      assert payload.fetch("complete")
+      assert_equal head, payload.fetch("analysis_sha")
+      assert_equal [ "checkout" ], payload.fetch("accepted").map { |entry| entry.fetch("id") }
+      assert_equal "reviewer mutated tracked source\n", File.read(File.join(repo, "README.md"))
+      assert_equal 3, analysis_paths.size
+      assert_equal 1, analysis_paths.uniq.size
+      refute File.exist?(analysis_paths.first), "analysis worktree must be removed after discovery"
 
       aggregate = Hive::RefactorPatrol::JobStore.new(repo).read_job(manifest.fetch("job_id"))
-      assert_equal "blocked", aggregate.fetch("state")
-      assert_empty aggregate.fetch("feature_results")
-      Hive::RefactorPatrol::JobStore::DISPOSITIONS.each do |disposition|
-        assert_empty aggregate.dig("dispositions", disposition)
-      end
+      assert_equal "complete", aggregate.fetch("state")
+      assert aggregate.fetch("complete")
+      assert_equal [ "checkout" ], aggregate.fetch("feature_results").map { |entry| entry.fetch("feature_id") }
       claim = aggregate.fetch("attempts").last
-      assert_equal "released", claim.fetch("state")
-      assert_equal "command_error", claim.fetch("outcome")
+      assert_equal "complete", claim.fetch("state")
+    end
+  end
+
+  def test_pr_discovery_rejects_and_removes_a_dirtied_analysis_worktree
+    with_refactor_patrol_project do |repo|
+      head = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      manifest = pr_manifest(merge_sha: head)
+      analysis_path = nil
+      root_observer = lambda do |kind, root|
+        next unless kind == :reviewer
+
+        analysis_path = root
+        File.write(File.join(root, "README.md"), "dirty analysis checkout\n")
+      end
+
+      out, _err, status = with_captured_exit do
+        command_for(
+          pr: "7", manifest_resolver: FakeManifestResolver.new(manifest),
+          features: [ feature("checkout", files: [ "lib/checkout.rb" ]) ],
+          reviewer: FakeReviewer.new({}),
+          leverage_scores: leverage_scores("checkout" => 0.9),
+          root_observer: root_observer
+        ).call
+      end
+
+      refute_equal Hive::ExitCodes::SUCCESS, status
+      assert_includes JSON.parse(out).fetch("message"), "analysis worktree"
+      refute_nil analysis_path
+      refute File.exist?(analysis_path), "failed analysis worktree must still be removed"
     end
   end
 
@@ -1616,7 +1657,7 @@ class RefactorPatrolCommandTest < Minitest::Test
 
   def command_for(project: "demo", json: true, dry_run: false, feature_hint: nil, entrypoint_hint: nil, path_hint: nil, changed_since: nil,
                   pr: nil, job_manifest: nil, actions: false, result_file: nil, manifest_resolver: nil, features: [], theses_by_feature: {}, reviewer: nil, leverage_scores: {},
-                  use_default_mapper: false, repository_ownership: nil)
+                  use_default_mapper: false, repository_ownership: nil, root_observer: nil)
     reviewer ||= FakeReviewer.new(theses_by_feature)
     repository_ownership ||= lambda do |**_arguments|
       Hive::RefactorPatrol::RepositoryOwnership::Decision.new(
@@ -1635,9 +1676,18 @@ class RefactorPatrolCommandTest < Minitest::Test
       job_manifest: job_manifest,
       actions: actions,
       result_file: result_file,
-      mapper_factory: use_default_mapper ? nil : ->(_root, _cfg, _state) { FakeMapper.new(features) },
-      reviewer_factory: ->(_root, _cfg, _state) { reviewer },
-      leverage_factory: ->(_root, _cfg) { FakeLeverage.new(leverage_scores) },
+      mapper_factory: use_default_mapper ? nil : lambda do |root, _cfg, _state|
+        root_observer&.call(:mapper, root)
+        FakeMapper.new(features)
+      end,
+      reviewer_factory: lambda do |root, _cfg, _state|
+        root_observer&.call(:reviewer, root)
+        reviewer
+      end,
+      leverage_factory: lambda do |root, _cfg|
+        root_observer&.call(:leverage, root)
+        FakeLeverage.new(leverage_scores)
+      end,
       manifest_resolver_factory: manifest_resolver && ->(*) { manifest_resolver },
       repository_ownership: repository_ownership
     )

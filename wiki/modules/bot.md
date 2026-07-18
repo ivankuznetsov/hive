@@ -3,7 +3,7 @@ title: Hive::Bot
 type: module
 source: lib/hive/bot/
 created: 2026-05-14
-updated: 2026-06-30
+updated: 2026-07-18
 tags: [bot, telegram, module, mobile]
 ---
 
@@ -24,8 +24,8 @@ answering is now deterministic Q-by-Q.)
 | `PollHealth` | `lib/hive/bot/poll_health.rb` | Small injectable health tracker for the Telegram long-poll loop. It escalates a sustained outage once per unhealthy episode via `poll_unhealthy` after the consecutive-failure or no-success silence threshold, then re-arms after the next successful poll. |
 | `Format` | `lib/hive/bot/format.rb` | Telegram-safe HTML helpers for status/queue and notification messages: text/attribute escaping, control-character stripping, http(s) URL validation, and `pr_url` → clickable `#<number>` links via [[modules/pr]]. |
 | `Router` | `lib/hive/bot/router.rb` | Closed-enum intent classifier and pure dispatch into slash/callback/free-text handlers. Performs allowlist auth before any handler sees an update. The first-contact `/start` command has its own `:slash_start` intent so a newly connected Telegram chat receives a welcome instead of the unknown-command hint. Idea capture includes media updates, voice-note transcription/edit intents, awaiting-text drafts, project-pick callbacks, transcript confirm/discard callbacks, and Done/Skip callbacks. Voice notes sent during an active or reattached `/answer` conversation route to the transcription action with answer context instead of being treated as blank free text. Legacy `path_a_yes:` / `path_a_type:` callbacks classify only to retirement replies; retired `codex_*` callback data has no live intent. |
-| `PairingStore` | `lib/hive/bot/pairing_store.rb` | File-backed pending Telegram pairing requests under `<state_home>/.bot.pairings.json`. Codes are 8-character `A-Z`, chat-id bound, stable while pending, and expire after 24 hours. Cross-process bot/CLI writes use a sidecar flock plus atomic replace. |
-| `PairingApprovalQueue` | `lib/hive/bot/pairing_approval_queue.rb` | Owner-only approval notice queue under `<state_home>/pairing_approvals/`. The `hive pairing approve telegram <CODE>` CLI writes notices here so the running bot, which owns the Telegram token, can proactively DM approved chats. |
+| `PairingStore` | `lib/hive/bot/pairing_store.rb` | File-backed pending Telegram pairing requests under `<state_home>/.bot.pairings.json`. Codes are 8-character `A-Z`, chat-id bound, stable while pending, and expire after 24 hours. Cross-process bot/CLI writes use a sidecar flock plus [[modules/atomic_file]] replacement. |
+| `PairingApprovalQueue` | `lib/hive/bot/pairing_approval_queue.rb` | Owner-only approval notice queue under `<state_home>/pairing_approvals/`. The `hive pairing approve telegram <CODE>` CLI writes notices through [[modules/atomic_file]] so the running bot, which owns the Telegram token, can proactively DM approved chats. |
 | `Handlers::*` | `lib/hive/bot/handlers/` | Slash command, callback, and free-text logic returning descriptors; no direct Telegram I/O. `SlashHandlers#start` is a pure reply descriptor with a "Connected" welcome plus `/status`, `/idea`, and `/help` next steps. |
 | `IdeaDraftStore` | `lib/hive/bot/idea_draft_store.rb` | In-memory per-chat `/idea` draft state with TTL, project/text/attachment metadata, voice-origin and transcript-confirm phases, monotonic attachment counters, temp staging-dir allocation, and cleanup on clear/prune. |
 | `IdeaAttachmentPolicy` | `lib/hive/bot/idea_attachment_policy.rb` | Pure classifier for Telegram photo/document attachments. Allows jpg/jpeg/png/webp/gif/pdf/txt/md/docx, enforces count/byte caps, and normalizes extensions through `Hive::Tui::ComposerStaging`. |

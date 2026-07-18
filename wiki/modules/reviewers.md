@@ -3,8 +3,7 @@ title: Hive::Reviewers
 type: module
 source: lib/hive/reviewers.rb, lib/hive/reviewers/{base,agent,codex_review,synthetic_task,plan_context}.rb
 created: 2026-04-26
-updated: 2026-06-18
-updated: 2026-06-19
+updated: 2026-07-18
 tags: [reviewer, dispatch, agent, codex, patrol, architecture]
 ---
 

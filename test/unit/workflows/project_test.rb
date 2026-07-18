@@ -33,12 +33,30 @@ class WorkflowsProjectTest < Minitest::Test
     with_tmp_dir do |project_root|
       write_project_workflow(project_root, "resolved-flow")
       config = Hive::Config.load(project_root)
+      Hive::Workflows::Project.reset!
 
       with_replaced_singleton_method(Hive::Config, :load, ->(*) { flunk "config should already be resolved" }) do
         Hive::Workflows::Project.load!(project_root, config: config)
       end
 
       assert_equal :"resolved-flow", Hive::Workflows::Registry.fetch(:"resolved-flow").id
+    end
+  end
+
+  def test_config_load_accepts_active_project_stage_override_and_rejects_lookalike
+    with_tmp_dir do |project_root|
+      write_project_workflow(project_root, "my-flow", stage_name: "assemble")
+      config_path = File.join(project_root, ".hive-state", "config.yml")
+      File.write(config_path, { "assemble" => { "agent" => "codex", "timeout_sec" => 90 } }.to_yaml)
+
+      cfg = Hive::Config.load(project_root)
+
+      assert_equal({ "agent" => "codex", "timeout_sec" => 90 }, cfg.fetch("assemble"))
+      assert_includes Hive::Workflows.all_stage_names, "assemble"
+
+      File.write(config_path, { "assembly" => { "agent" => "codex" } }.to_yaml)
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load(project_root) }
+      assert_includes error.message, "Unknown top-level key `assembly`."
     end
   end
 

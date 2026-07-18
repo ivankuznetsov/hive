@@ -49,6 +49,117 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_load_rejects_top_level_reviewers_for_every_yaml_value_with_migration_guidance
+    values = [
+      [ { "name" => "legacy" } ],
+      [],
+      nil,
+      {},
+      "",
+      7
+    ]
+
+    values.each do |value|
+      with_tmp_dir do |dir|
+        config_path = File.join(dir, ".hive-state", "config.yml")
+        FileUtils.mkdir_p(File.dirname(config_path))
+        File.write(config_path, { "reviewers" => value }.to_yaml)
+
+        error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+        assert_includes error.message,
+                        "Unknown top-level key `reviewers`; move it to `review.reviewers`."
+        assert_includes error.message, config_path
+      end
+    end
+  end
+
+  def test_load_aggregates_unknown_top_level_keys_in_deterministic_order
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, <<~YAML)
+        zeta_typo: true
+        reviewers:
+        17: numeric
+        alpha_typo: true
+      YAML
+
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+      expected_findings = [
+        "Unknown top-level key `alpha_typo`.",
+        "Unknown top-level key `reviewers`; move it to `review.reviewers`.",
+        "Unknown top-level key `zeta_typo`.",
+        "Unknown top-level key 17."
+      ]
+      expected_findings.each { |finding| assert_equal 1, error.message.scan(finding).length }
+      positions = expected_findings.map { |finding| error.message.index(finding) }
+      assert_equal positions.sort, positions
+      assert_includes error.message, config_path
+    end
+  end
+
+  def test_load_accepts_all_static_project_keys_plus_gh
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      raw = Hive::Config.deep_dup(Hive::Config::DEFAULTS)
+      raw["gh"] = { "network_timeout_sec" => 60 }
+      raw["conditions"] = { "authority" => "markers", "stages" => { "4-execute" => "shadow" } }
+      raw["attempt_heartbeat_sec"] = 2
+      raw["attempt_stale_sec"] = 3
+      raw["attempt_launch_timeout_sec"] = 4
+      raw["attempt_first_heartbeat_timeout_sec"] = 5
+      File.write(config_path, raw.to_yaml)
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal raw.keys.sort, (cfg.keys.grep(String) - [ "project_root" ]).sort
+      assert_equal 60, cfg.dig("gh", "network_timeout_sec")
+      assert_equal "shadow", cfg.dig("conditions", "stages", "4-execute")
+    end
+  end
+
+  def test_load_accepts_builtin_workflow_stage_override
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, { "inbox" => { "timeout_sec" => 12 } }.to_yaml)
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal({ "timeout_sec" => 12 }, cfg.fetch("inbox"))
+    end
+  end
+
+  def test_load_preserves_exact_nested_reviewer_entry
+    reviewer = {
+      "name" => "codex-native-review",
+      "kind" => "codex_review",
+      "agent" => "codex",
+      "output_basename" => "codex-native-review",
+      "prompt_template" => "reviewer_codex_native_review.md.erb",
+      "timeout_sec" => 5400
+    }
+
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, { "review" => { "reviewers" => [ reviewer ] } }.to_yaml)
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal reviewer, cfg.dig("review", "reviewers", 0)
+    end
+  end
+
+  def test_shared_value_validation_still_accepts_global_only_keys
+    global = Hive::Config.merge_defaults("registered_projects" => [])
+
+    assert_nil Hive::Config.send(:validate!, global, "global config")
+  end
+
   def test_load_records_frozen_field_level_implementation_identity_provenance
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))
@@ -1031,13 +1142,14 @@ class ConfigTest < Minitest::Test
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))
       File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
         default_branch: main
-        max_review_passes: 6
+        review:
+          max_passes: 6
         budget_usd:
           brainstorm: 20
       YAML
       cfg = Hive::Config.load(dir)
       assert_equal "main", cfg["default_branch"]
-      assert_equal 6, cfg["max_review_passes"]
+      assert_equal 6, cfg.dig("review", "max_passes")
       assert_equal 20, cfg["budget_usd"]["brainstorm"], "explicit override must win"
       assert_equal 100, cfg["budget_usd"]["plan"], "plan budget should fall back to bumped default"
     end
@@ -1268,7 +1380,7 @@ class ConfigTest < Minitest::Test
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))
       File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
-        max_passes: 4
+        default_branch: main
       YAML
 
       cfg = Hive::Config.load(dir)

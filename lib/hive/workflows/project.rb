@@ -39,11 +39,13 @@ module Hive
       # call `reset!` afterwards — `reset!` is why Commands::Workflow#call!
       # clears the overlay so a LATER (separate) invocation discovers the new
       # descriptor; `call!` does not re-resolve in-process.
-      def load!(project_root, config: nil)
+      def load!(project_root, config: nil, hive_state_path: nil)
         LOCK.synchronize do
           project_root = File.expand_path(project_root)
-          workflow_dir = config ? workflow_dir_for(project_root, config:) : workflow_dir_for(project_root)
-          fingerprint = Hive::Workflows::Loader.fingerprint(workflow_dir)
+          workflow_dir = workflow_dir_for(project_root, config: config, hive_state_path: hive_state_path)
+          # Include the resolved directory so changing hive_state_path cannot
+          # reuse an overlay cached from a different, equally empty directory.
+          fingerprint = [ workflow_dir, *Hive::Workflows::Loader.fingerprint(workflow_dir) ].freeze
           return if @active_root == project_root && @active_fingerprint == fingerprint
 
           # Clear the prior project's overlay BEFORE loading, and drop
@@ -149,10 +151,11 @@ module Hive
         @warned_skips ||= Set.new
       end
 
-      def workflow_dir_for(project_root, config: nil)
-        return Hive::Workflows::Loader.workflow_dir(project_root) unless config
+      def workflow_dir_for(project_root, config: nil, hive_state_path: nil)
+        return Hive::Workflows::Loader.workflow_dir(project_root, hive_state_path: hive_state_path) unless hive_state_path.nil?
+        return Hive::Workflows::Loader.workflow_dir(project_root, config: config) if config
 
-        Hive::Workflows::Loader.workflow_dir(project_root, config:)
+        Hive::Workflows::Loader.workflow_dir(project_root)
       rescue Hive::ConfigError, Psych::Exception, SystemCallError, IOError => e
         fallback = File.join(project_root, Hive::Config::DEFAULTS.fetch("hive_state_path"), "workflows")
         # Surface the fallback so a project with a CUSTOM hive_state_path whose

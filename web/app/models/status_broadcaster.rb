@@ -3,6 +3,8 @@
 # replace of the projects frame to every connected dashboard. Pages render
 # the same snapshot synchronously on first paint, so the stream only ever
 # *updates* what the server already rendered.
+require "securerandom"
+
 class StatusBroadcaster
   CHANNEL = "status".freeze
 
@@ -21,6 +23,12 @@ class StatusBroadcaster
       feed.snapshot
     end
 
+    def stream_cursor
+      @stream_epoch ||= SecureRandom.uuid
+      @stream_generation ||= 0
+      { epoch: @stream_epoch, generation: @stream_generation }
+    end
+
     # Self-healing by construction: a raising broadcast (a solid_cable
     # hiccup, one bad row blowing up the partial render) must not silently
     # freeze live updates forever — the first version logged once and let
@@ -29,6 +37,7 @@ class StatusBroadcaster
     # discards a dead thread before the ||=.
     def start!
       @thread = nil unless @thread&.alive?
+      reset_stream! unless @thread
       @thread ||= Thread.new do
         Thread.current.name = "status-broadcaster"
         loop do
@@ -47,17 +56,23 @@ class StatusBroadcaster
       @thread = nil
       @feed&.stop
       @feed = nil
+      @stream_epoch = nil
+      @stream_generation = 0
     end
 
     private
 
     def broadcast(payload)
-      # Refresh signal FIRST: it carries no payload and cannot fail on
-      # content, while the partial render below can (one bad row). Task
-      # pages subscribe to the same channel and morph-refresh on this
-      # signal — push, not poll: zero traffic when idle, instant when the
-      # pipeline moves. Ordering keeps task pages live even while a grid
-      # render bug is being logged every retry.
+      cursor = advance_stream!
+      Turbo::StreamsChannel.broadcast_replace_to(
+        CHANNEL,
+        target: "board_sync",
+        partial: "board/sync",
+        locals: cursor
+      )
+      # Task pages and filtered board clients use a fresh, user-specific
+      # morph. The cursor above lets the board detect missed or reordered
+      # frames before trusting that refresh.
       Turbo::StreamsChannel.broadcast_refresh_to(CHANNEL)
       Turbo::StreamsChannel.broadcast_replace_to(
         CHANNEL,
@@ -65,6 +80,17 @@ class StatusBroadcaster
         partial: "status/projects",
         locals: { projects: StatusVisibility.projects(payload) }
       )
+    end
+
+    def reset_stream!
+      @stream_epoch = SecureRandom.uuid
+      @stream_generation = 0
+    end
+
+    def advance_stream!
+      cursor = stream_cursor
+      @stream_generation = cursor.fetch(:generation) + 1
+      { epoch: cursor.fetch(:epoch), generation: @stream_generation }
     end
   end
 end

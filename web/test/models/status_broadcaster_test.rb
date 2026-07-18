@@ -31,6 +31,7 @@ class StatusBroadcasterTest < ActiveSupport::TestCase
     StatusBroadcaster.feed = feed
     delivered = Queue.new
     calls = 0
+    original_broadcast = StatusBroadcaster.method(:broadcast)
     StatusBroadcaster.define_singleton_method(:broadcast) do |payload|
       calls += 1
       raise "boom" if calls == 1
@@ -50,8 +51,42 @@ class StatusBroadcasterTest < ActiveSupport::TestCase
     assert_equal [ { "name" => "b" } ], payload["projects"],
                  "the broadcast after the failure must still be delivered"
   ensure
-    StatusBroadcaster.singleton_class.remove_method(:broadcast)
+    StatusBroadcaster.define_singleton_method(:broadcast, original_broadcast) if original_broadcast
     StatusBroadcaster.send(:remove_const, :RETRY_SEC)
     StatusBroadcaster.const_set(:RETRY_SEC, original_retry)
+  end
+
+  test "board cursor advances and changes epoch after restart" do
+    replacements = []
+    refreshes = []
+    StatusBroadcaster.send(:reset_stream!)
+    before = StatusBroadcaster.stream_cursor
+
+    replace = lambda do |*args, **kwargs|
+      replacements << [ args, kwargs ]
+    end
+    refresh = lambda do |*args, **kwargs|
+      refreshes << [ args, kwargs ]
+    end
+
+    original_replace = Turbo::StreamsChannel.method(:broadcast_replace_to)
+    original_refresh = Turbo::StreamsChannel.method(:broadcast_refresh_to)
+    Turbo::StreamsChannel.define_singleton_method(:broadcast_replace_to, replace)
+    Turbo::StreamsChannel.define_singleton_method(:broadcast_refresh_to, refresh)
+    StatusBroadcaster.send(:broadcast, { "projects" => [] })
+
+    after = StatusBroadcaster.stream_cursor
+    assert_equal before[:epoch], after[:epoch]
+    assert_equal before[:generation] + 1, after[:generation]
+    assert_equal %w[board_sync projects], replacements.map { |_args, kwargs| kwargs.fetch(:target) }
+    assert_equal 1, refreshes.size
+
+    StatusBroadcaster.stop!
+    restarted = StatusBroadcaster.stream_cursor
+    refute_equal after[:epoch], restarted[:epoch]
+    assert_equal 0, restarted[:generation]
+  ensure
+    Turbo::StreamsChannel.define_singleton_method(:broadcast_replace_to, original_replace) if original_replace
+    Turbo::StreamsChannel.define_singleton_method(:broadcast_refresh_to, original_refresh) if original_refresh
   end
 end

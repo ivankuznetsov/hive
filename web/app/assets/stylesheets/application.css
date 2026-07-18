@@ -384,6 +384,7 @@ label { font-size: 0.9rem; color: var(--ink-muted); display: block; margin-botto
 .board-band { min-width: 0; }
 .board-band-header { display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px; }
 .board-band-header h2 { margin: 0; }
+.stage-pager { display: none; }
 .workflow-label {
   color: var(--accent-strong); background: var(--accent-soft); border-radius: 999px;
   font-size: 0.78rem; font-weight: 650; padding: 2px 9px;
@@ -420,17 +421,32 @@ label { font-size: 0.9rem; color: var(--ink-muted); display: block; margin-botto
 .board-age { margin-left: auto; color: var(--ink-faint); font-size: 0.74rem; }
 .settings-page { max-width: 680px; margin: 0 auto; }
 .settings-page form { display: flex; align-items: end; gap: 10px; margin-top: 16px; }
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
 
 @media (max-width: 900px) {
   .board-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .board-filters input { grid-column: 1 / -1; }
 }
 
+@media (max-width: 767px) {
+  .stage-pager { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  .stage-pager span { color: var(--ink-muted); font-size: 0.82rem; }
+  .stage-pager select { flex: 1; }
+  .board-columns { display: block; overflow: visible; }
+  .board-column { width: 100%; }
+}
+
 @media (max-width: 600px) {
   main.board-main { padding-left: 14px; padding-right: 14px; }
   .board-toolbar { align-items: start; }
   .board-filters { grid-template-columns: 1fr 1fr; }
-  .board-columns { grid-auto-columns: minmax(88vw, 88vw); }
   .settings-page form { align-items: stretch; flex-direction: column; }
 }
 

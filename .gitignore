@@ -1,6 +1,7 @@
 /.bundle/
 /vendor/bundle/
 **/vendor/bundle/
+**/vendor/playwright/
 /tmp/
 *.gem
 # Operator-local secrets (HIVE_TELEGRAM_BOT_TOKEN, etc). The bot loads

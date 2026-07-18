@@ -21,6 +21,7 @@ class BoardController < ApplicationController
     @agent_options = @projects.flat_map { |project| project.fetch("tasks", []).filter_map { |task| task_agent(task) } }
       .uniq.sort
     @daemon_status = daemon_status
+    @stream_cursor = StatusBroadcaster.stream_cursor
   end
 
   private

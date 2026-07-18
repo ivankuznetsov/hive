@@ -18,6 +18,10 @@ class BoardTest < ActionDispatch::IntegrationTest
     assert_select "[data-stage='1-inbox']", 1
     assert_select "[data-stage='2-work']", 1
     assert_select "[data-card-slug='ship-board-260718-abcd']", 1
+    assert_select "#board_sync[data-epoch][data-generation]", 1
+    assert_select "[aria-live='polite']", 1
+    assert_select ".stage-pager select[aria-label='Stage for alpha']", 1
+    assert_select "[data-board-navigation-target='card'][tabindex='-1']", minimum: 1
     assert_select "a[href='#{grid_path}']", text: "Grid"
 
     get grid_path

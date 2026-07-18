@@ -1,6 +1,6 @@
 <article class="board-card state-<%= task["dominant_state"] %>" id="card_<%= dom_id_for(project["name"], task["slug"]) %>"
          data-card-slug="<%= task["slug"] %>" data-state="<%= task["dominant_state"] %>"
-         data-card-digest="<%= task["card_digest"] %>" tabindex="0">
+         data-card-digest="<%= task["card_digest"] %>" data-board-navigation-target="card" tabindex="-1">
   <div class="board-card-heading">
     <%= status_dot(task) %>
     <%= link_to task_title(task), task_path(project["name"], task["slug"]), class: "board-card-title" %>

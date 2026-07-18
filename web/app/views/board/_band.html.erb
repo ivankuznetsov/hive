@@ -6,6 +6,14 @@
     <span class="workflow-label"><%= band["workflow"]["id"].to_s.tr("_-", "  ").titleize %></span>
     <span class="muted"><%= pluralize(band["tasks"].size, "task") %></span>
   </header>
+  <label class="stage-pager">
+    <span>Stage</span>
+    <select data-action="change->board-navigation#selectStage" aria-label="Stage for <%= band["project"]["name"] %>">
+      <% band["workflow"].fetch("stages", []).each do |stage| %>
+        <option value="<%= stage["dir"] %>"><%= stage["name"].to_s.tr("_-", "  ").titleize %></option>
+      <% end %>
+    </select>
+  </label>
   <div class="board-columns" role="list" aria-label="<%= band["project"]["name"] %> <%= band["workflow"]["id"] %> stages">
     <% band["workflow"].fetch("stages", []).each do |stage| %>
       <%= render "board/column", band: band, stage: stage %>

@@ -33,11 +33,19 @@
     <noscript><%= submit_tag "Apply", class: "btn btn-secondary btn-sm" %></noscript>
   <% end %>
 
-  <div id="board" class="kanban-board" data-controller="board-navigation">
-    <% if @bands.empty? %>
-      <div class="empty-state"><p>No tasks match these filters.</p></div>
-    <% else %>
-      <%= render partial: "board/band", collection: @bands, as: :band %>
-    <% end %>
+  <div id="board_live" data-controller="board-live announce"
+       data-action="board:announce->announce#speak"
+       data-board-live-epoch-value="<%= @stream_cursor[:epoch] %>"
+       data-board-live-generation-value="<%= @stream_cursor[:generation] %>">
+    <%= render "board/sync", epoch: @stream_cursor[:epoch], generation: @stream_cursor[:generation] %>
+    <p class="sr-only" aria-live="polite" aria-atomic="true" data-announce-target="region"></p>
+    <div id="board" class="kanban-board" data-controller="board-navigation"
+         data-action="keydown->board-navigation#keydown">
+      <% if @bands.empty? %>
+        <div class="empty-state"><p>No tasks match these filters.</p></div>
+      <% else %>
+        <%= render partial: "board/band", collection: @bands, as: :band %>
+      <% end %>
+    </div>
   </div>
 </div>

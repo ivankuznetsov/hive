@@ -183,6 +183,11 @@ module Hive
         cfg["worktree_root"] = File.join(@run_dir, "worktrees")
         cfg["claude"] ||= {}
         cfg["claude"]["mode"] = "headless"
+        cfg["execute"] ||= {}
+        # The synthetic Codex binary has no provider-owned config to inspect.
+        # Pin a concrete fixture model so the harness never borrows a
+        # developer's ~/.codex/config.toml and behaves the same on clean CI.
+        cfg["execute"]["model"] = "codex-e2e-model"
         cfg["review"] ||= {}
         cfg["review"]["ci"] ||= {}
         cfg["review"]["ci"]["command"] = nil

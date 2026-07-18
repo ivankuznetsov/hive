@@ -152,11 +152,11 @@ module Hive
                 allowed_tools: nil,
                 disallowed_tools: nil,
                 permission_mode: nil, mcp_config_path: nil,
-                strict_mcp_config: false)
+                strict_mcp_config: false, identity_arguments: nil)
       profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
       ensure_claude_profile!(profile)
       permission_mode ||= Hive::Config.claude_permission_mode(cfg)
-      cli_flags = cfg ? Hive::Config.claude_cli_flags(cfg) : []
+      cli_flags = identity_arguments || (cfg ? Hive::Config.claude_cli_flags(cfg) : [])
       launch_mode = Hive::Config.claude_mode(cfg)
 
       if launch_mode == :headless

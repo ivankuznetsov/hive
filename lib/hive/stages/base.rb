@@ -11,6 +11,8 @@ require "hive/permission_scope"
 require "hive/stages/clean_exit"
 require "hive/usage_db"
 require "hive/worktree"
+require "hive/attempts/context"
+require "hive/implementation_identity/store"
 
 module Hive
   module Stages
@@ -118,6 +120,16 @@ module Hive
       def stage_profile(cfg, stage_name, explicit_agent: nil)
         name = explicit_agent || cfg.dig(stage_name, "agent") || "claude"
         Hive::AgentProfiles.lookup(name, cfg: cfg)
+      end
+
+      # Production stage launches run inside a durable attempt. Direct unit
+      # calls predating attempt supervision receive nil and retain their
+      # explicit test profile seam; real launches always resolve and journal
+      # implementation ownership before Process.spawn/tmux starts.
+      def implementation_stage_identity(task, cfg, stage)
+        return nil unless Hive::Attempts::Context.current
+
+        Hive::ImplementationIdentity::Store.new(task: task, cfg: cfg).resolve_stage!(stage)
       end
 
       def stage_permission_scope(cfg, stage_name, task, profile,
@@ -506,7 +518,7 @@ module Hive
                       profile: nil, expected_output: nil, status_mode: nil,
                       cfg: nil, permission_mode: nil, allowed_tools: nil,
                       disallowed_tools: nil, cli_flags: nil,
-                      model: nil, effort: nil)
+                      model: nil, effort: nil, identity_arguments: nil)
         profile ||= Hive::AgentProfiles.lookup(:claude)
         # Translate preflight/version-check failures (e.g. Pi missing
         # ~/.pi/agent/auth.json mid-loop) into a typed :error envelope
@@ -535,21 +547,28 @@ module Hive
         # path, already assembled the flags and must win over cfg; commit
         # 01841e12). Keying derivation on nil-vs-[] keeps those two intents
         # distinct rather than collapsing both to "empty".
-        derive_flags_from_cfg = cli_flags.nil?
+        derive_flags_from_cfg = cli_flags.nil? && identity_arguments.nil?
         cli_flags ||= []
-        if derive_flags_from_cfg && cfg && profile.name == :claude
+        if identity_arguments.nil? && (model || effort)
+          if profile.model_argument_builder
+            concrete_model = model || profile.concrete_default_model(
+              cfg: cfg, project_root: cfg && cfg["project_root"]
+            )
+            identity_arguments = profile.identity_arguments(
+              model: concrete_model, effort: effort
+            ).native_arguments
+          else
+            # Old-shape custom profiles predate normalized identity
+            # capabilities. Preserve their historical launch behavior for
+            # this legacy call form; implementation-owning stages pass an
+            # already-resolved identity_arguments array and never use this
+            # compatibility path.
+            warn_model_effort_dropped(task, profile, model: model, effort: effort)
+            identity_arguments = []
+          end
+        elsif derive_flags_from_cfg && cfg && profile.name == :claude
           permission_mode ||= Hive::Config.claude_permission_mode(cfg)
           cli_flags = Hive::Config.claude_cli_flags(cfg, model: model, effort: effort)
-        elsif (model || effort) && profile.name != :claude
-          # model/effort are only translated to CLI flags on the :claude profile
-          # (above). A per-stage/per-reviewer `model:`/`effort:` on a codex/fable/
-          # pi stage is therefore a no-op — plan U2 requires it be a LOGGED no-op,
-          # not a silent drop, so an author who sets it on a non-claude profile
-          # gets a breadcrumb rather than surprising unchanged behavior. Gate on
-          # `profile.name != :claude` so a claude caller that supplied explicit
-          # `cli_flags:` (derive_flags_from_cfg == false) with model/effort does
-          # NOT get the misleading "does not honor per-stage model/effort" note.
-          warn_model_effort_dropped(task, profile, model: model, effort: effort)
         end
 
         started_at = Time.now.utc.iso8601
@@ -567,7 +586,8 @@ module Hive
           permission_mode: permission_mode,
           allowed_tools: allowed_tools,
           disallowed_tools: disallowed_tools,
-          cli_flags: cli_flags
+          cli_flags: cli_flags,
+          identity_arguments: identity_arguments || []
         ).run!
         record_usage(task, profile, result, started_at)
         result
@@ -591,7 +611,7 @@ module Hive
                          profile: nil, expected_output: nil, status_mode: nil,
                          permission_mode: nil, allowed_tools: nil,
                          disallowed_tools: nil, mcp_config_path: nil,
-                         strict_mcp_config: false)
+                         strict_mcp_config: false, identity_arguments: nil)
         require "hive/claude_launcher"
 
         profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
@@ -617,7 +637,8 @@ module Hive
           allowed_tools: allowed_tools,
           disallowed_tools: disallowed_tools,
           mcp_config_path: mcp_config_path,
-          strict_mcp_config: strict_mcp_config
+          strict_mcp_config: strict_mcp_config,
+          identity_arguments: identity_arguments
         )
       end
 
@@ -701,7 +722,7 @@ module Hive
         fields = { "model" => model, "effort" => effort }.compact
         message = "[hive] agent profile #{profile.name.inspect} does not honor per-stage " \
                   "#{fields.map { |key, value| "#{key}=#{value.inspect}" }.join(', ')}; " \
-                  "these are only applied on the :claude profile and are ignored for this spawn."
+                  "the profile has no normalized model capability, so they are ignored for this spawn."
         write_spawn_warning(task, "config-warnings.log", message)
       end
 

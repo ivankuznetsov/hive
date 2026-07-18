@@ -76,6 +76,8 @@ Hive moves the task to `3-plan/`, writes `plan.md`, and pauses for edits if the 
 
 `hive new` wrote an `idea.md` file. `hive brainstorm` and `hive plan` moved the task directory between stage folders and ran the stage agents. The current marker at the bottom of each stage file tells Hive whether the next action is human input, another run, or promotion to the next stage.
 
+When the task reaches execute, Hive durably captures its concrete provider and model before spawning the implementation process. Later PR-opening and repair stages follow that owner automatically unless you explicitly configure a stage override. Run `hive status --json` for full provenance, or press `I` on the task in `hive tui` to inspect execute, PR-opening, review-fix, and CI-fix ownership without changing task state.
+
 ## Artefacts
 
 - [docs/assets/xbookmark-walkthrough.txt](assets/xbookmark-walkthrough.txt) replays the completed dogfood task.

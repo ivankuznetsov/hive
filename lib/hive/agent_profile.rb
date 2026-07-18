@@ -1,5 +1,6 @@
 require "open3"
 require "timeout"
+require "hive/implementation_identity"
 
 module Hive
   # Per-CLI invocation contract for a headless agent.
@@ -41,7 +42,9 @@ module Hive
                 :skill_syntax_format, :headless_supported, :min_version,
                 :status_detection_mode, :usage_extractor,
                 :workspace_write_flags, :cli_capabilities,
-                :initial_context_tokens
+                :initial_context_tokens, :default_model_resolver,
+                :model_argument_builder, :effort_argument_builder,
+                :launcher_identity
 
     # Public API — do not break.
     #
@@ -111,7 +114,11 @@ module Hive
                    workspace_write_flags: nil,
                    cli_capabilities: {},
                    initial_context_tokens: 0,
-                   prompt_style: nil)
+                   prompt_style: nil,
+                   default_model_resolver: nil,
+                   model_argument_builder: nil,
+                   effort_argument_builder: nil,
+                   launcher_identity: nil)
       prompt_style ||= name.to_sym == :codex ? :stdin : :positional
       unless PROMPT_STYLES.include?(prompt_style)
         raise ArgumentError,
@@ -148,6 +155,10 @@ module Hive
       @cli_capabilities = normalize_cli_capabilities(cli_capabilities)
       @initial_context_tokens = initial_context_tokens
       @prompt_style = prompt_style
+      @default_model_resolver = default_model_resolver
+      @model_argument_builder = model_argument_builder
+      @effort_argument_builder = effort_argument_builder
+      @launcher_identity = (launcher_identity || "AgentProfile/v1:#{name}").to_s.freeze
 
       freeze
     end
@@ -225,6 +236,50 @@ module Hive
 
     def workspace_write_supported?
       !@workspace_write_flags.empty?
+    end
+
+    def concrete_default_model(cfg: nil, project_root: nil, home: nil)
+      unless @default_model_resolver
+        raise Hive::ImplementationIdentity::ResolutionError,
+              "agent profile #{@name.inspect} cannot resolve a concrete default model"
+      end
+
+      value = @default_model_resolver.call(cfg: cfg, project_root: project_root, home: home)
+      Hive::ImplementationIdentity.normalize_model(value, concrete: true)
+    rescue Hive::ImplementationIdentity::Error
+      raise
+    rescue StandardError => e
+      raise Hive::ImplementationIdentity::ResolutionError,
+            "agent profile #{@name.inspect} default-model resolution failed: #{e.message}"
+    end
+
+    def identity_arguments(model:, effort:, pin_model: true)
+      normalized_model = Hive::ImplementationIdentity.normalize_model(model, concrete: true)
+      requested_effort = Hive::ImplementationIdentity.normalize_effort(effort)
+      native_arguments = []
+      if pin_model
+        unless @model_argument_builder
+          raise Hive::ImplementationIdentity::ResolutionError,
+                "agent profile #{@name.inspect} cannot pin model #{normalized_model.inspect}"
+        end
+        native_arguments.concat(@model_argument_builder.call(normalized_model))
+      end
+
+      effort_supported = !@effort_argument_builder.nil?
+      effective_effort = nil
+      if requested_effort && effort_supported
+        native_arguments.concat(@effort_argument_builder.call(requested_effort))
+        effective_effort = requested_effort
+      end
+
+      Hive::ImplementationIdentity::LaunchArguments.new(
+        model: normalized_model,
+        requested_effort: requested_effort,
+        effective_effort: effective_effort,
+        effort_supported: effort_supported,
+        model_pinned: pin_model,
+        native_arguments: Hive::ImplementationIdentity.validate_native_arguments(native_arguments)
+      )
     end
 
     # Return the argv for an explicitly declared CLI capability, but only
@@ -505,7 +560,11 @@ module Hive
         workspace_write_flags: @workspace_write_flags.dup,
         cli_capabilities: @cli_capabilities.transform_values(&:dup),
         initial_context_tokens: @initial_context_tokens,
-        prompt_style: @prompt_style
+        prompt_style: @prompt_style,
+        default_model_resolver: @default_model_resolver,
+        model_argument_builder: @model_argument_builder,
+        effort_argument_builder: @effort_argument_builder,
+        launcher_identity: @launcher_identity
       }
     end
 

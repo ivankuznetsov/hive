@@ -8,6 +8,41 @@
     <span class="task-meta"><%= status_dot(@row) %> <%= @row["action_label"].presence || @row["marker"].presence || "idle" %></span>
   </div>
 
+  <% if (ownership = @row["implementation_identity"]) %>
+    <details class="implementation-identity">
+      <summary>Implementation ownership · generation <%= ownership["generation"] %></summary>
+      <% if ownership["pending"] %>
+        <p class="muted">Pending execute capture.</p>
+      <% else %>
+        <table>
+          <thead>
+            <tr><th>Stage</th><th>Owner</th><th>Effort</th><th>Source</th><th>Status</th></tr>
+          </thead>
+          <tbody>
+            <% %w[execute open_pr review.fix review.ci].each do |stage| %>
+              <% entry = ownership.dig("stages", stage) || {} %>
+              <tr>
+                <td><%= stage %></td>
+                <td><%= entry["provider"] && entry["model"] ? "#{entry['provider']}/#{entry['model']}" : "—" %></td>
+                <td>
+                  <% if entry["effort_supported"] %>
+                    <%= entry["effective_effort"] || entry["requested_effort"] || "—" %>
+                  <% elsif entry["requested_effort"] %>
+                    <%= entry["requested_effort"] %> (requested, not applied)
+                  <% else %>
+                    —
+                  <% end %>
+                </td>
+                <td><%= entry["source"] || "—" %></td>
+                <td><%= entry["status"] || "pending" %></td>
+              </tr>
+            <% end %>
+          </tbody>
+        </table>
+      <% end %>
+    </details>
+  <% end %>
+
   <%# Only the state-driven primary actions appear (Approve when the gate is
       passable, Run when the operator drives stages manually, Diff when a
       worktree exists). The sharp tools live in the Advanced section. %>

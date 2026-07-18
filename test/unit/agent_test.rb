@@ -247,17 +247,31 @@ class AgentTest < Minitest::Test
     end
   end
 
-  def test_cli_flags_refuse_non_claude_profiles
+  def test_typed_identity_flags_reach_codex_as_discrete_arguments
     with_tmp_dir do |dir|
       profile = Hive::AgentProfiles.lookup(:codex)
+      identity = profile.identity_arguments(model: "gpt-5.6-terra", effort: "medium")
       agent = Hive::Agent.new(task: make_task(dir), prompt: "test",
                               max_budget_usd: 1, timeout_sec: 5,
                               profile: profile,
-                              cli_flags: [ "--model", "sonnet" ])
+                              identity_arguments: identity.native_arguments)
+
+      cmd = agent.send(:build_cmd)
+      assert_equal %w[--model gpt-5.6-terra], cmd.each_cons(2).find { |a, _| a == "--model" }
+      assert_equal [ "-c", "model_reasoning_effort=medium" ],
+                   cmd.each_cons(2).find { |a, _| a == "-c" }
+    end
+  end
+
+  def test_rejects_untyped_claude_cli_flags_for_non_claude_profiles
+    with_tmp_dir do |dir|
+      agent = Hive::Agent.new(
+        task: make_task(dir), prompt: "test", max_budget_usd: 1, timeout_sec: 5,
+        profile: Hive::AgentProfiles.lookup(:codex), cli_flags: [ "--model", "unsafe" ]
+      )
 
       error = assert_raises(ArgumentError) { agent.send(:build_cmd) }
-      assert_match(/claude-specific/, error.message,
-                   "handing codex --model sonnet would fail or silently mean something else")
+      assert_includes error.message, "cli_flags are claude-specific"
     end
   end
 

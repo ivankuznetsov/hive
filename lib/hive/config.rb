@@ -78,11 +78,10 @@ module Hive
         "patrol" => 3600,
         "digest" => 1800
       },
-      # Stage-level agent for single-agent stages. The review
-      # stage has its own per-role agent fields under "review.{ci,triage,
-      # fix,browser_test}.agent". Runtime fallback in stage code stays
-      # `cfg.dig("<stage>", "agent") || "claude"` so legacy configs without
-      # these keys keep behaving as today (ADR-023). The recommended-default
+      # Stage-level agents remain for independently owned stages. Execute is
+      # captured once per generation; open_pr plus review ci/fix intentionally
+      # omit identity defaults so the persisted owner applies. Triage,
+      # browser-test, and reviewer identities remain independent. The recommended-default
       # for execute is `codex` only at the rendered-template level, not in
       # DEFAULTS itself, to avoid silently flipping the implementer for old
       # projects on next load.
@@ -111,7 +110,7 @@ module Hive
         "authority" => "markers",
         "stages" => {}
       },
-      "open_pr" => { "agent" => "claude" },
+      "open_pr" => {},
       "artifacts" => { "agent" => "claude" },
       "finalize" => { "agent" => "claude" },
       # Per-CLI agent profiles. Each project may override `bin`,
@@ -154,7 +153,6 @@ module Hive
         "ci" => {
           "command" => nil,
           "max_attempts" => 3,
-          "agent" => "claude",
           "prompt_template" => "ci_fix_prompt.md.erb"
         },
         "reviewers" => [],
@@ -176,7 +174,6 @@ module Hive
           "custom_prompt" => nil
         },
         "fix" => {
-          "agent" => "claude",
           "prompt_template" => "fix_prompt.md.erb",
           "auto_commit" => {
             "sign_policy" => "inherit",
@@ -702,6 +699,14 @@ module Hive
     EXPLICIT_CLAUDE_MODE_KEY = :__hive_explicit_claude_mode
     EXPLICIT_BRAINSTORM_RUNTIME_KEY = :__hive_explicit_brainstorm_runtime
     EXPLICIT_RESOURCE_LIMITS_KEY = :__hive_explicit_resource_limits
+    IMPLEMENTATION_IDENTITY_PROVENANCE_KEY = :__hive_implementation_identity_provenance
+    IMPLEMENTATION_IDENTITY_PATHS = {
+      "execute" => %w[execute],
+      "open_pr" => %w[open_pr],
+      "review.fix" => %w[review fix],
+      "review.ci" => %w[review ci]
+    }.freeze
+    IMPLEMENTATION_IDENTITY_FIELDS = %w[agent model effort].freeze
     RESOURCE_LIMIT_FIELDS = %w[budget_usd timeout_sec].freeze
 
     module_function
@@ -784,6 +789,7 @@ module Hive
       merged[EXPLICIT_CLAUDE_MODE_KEY] = nested_key?(data, "claude", "mode")
       merged[EXPLICIT_BRAINSTORM_RUNTIME_KEY] = nested_key?(data, "brainstorm", "runtime")
       merged[EXPLICIT_RESOURCE_LIMITS_KEY] = explicit_resource_limits(data)
+      merged[IMPLEMENTATION_IDENTITY_PROVENANCE_KEY] = implementation_identity_provenance(data)
       inject_bot_runtime_path_defaults!(merged)
       validate!(merged, candidate)
       merged
@@ -849,6 +855,43 @@ module Hive
         cursor = cursor[key]
       end
       true
+    end
+
+    def implementation_identity_fields(cfg, stage)
+      stage = stage.to_s
+      path = IMPLEMENTATION_IDENTITY_PATHS[stage]
+      raise ConfigError, "unknown implementation identity stage #{stage.inspect}" unless path
+
+      if cfg.key?(IMPLEMENTATION_IDENTITY_PROVENANCE_KEY)
+        return cfg.fetch(IMPLEMENTATION_IDENTITY_PROVENANCE_KEY).fetch(stage, {})
+      end
+
+      block = path.reduce(cfg) { |memo, key| memo.is_a?(Hash) ? memo[key] : nil }
+      return {} unless block.is_a?(Hash)
+
+      IMPLEMENTATION_IDENTITY_FIELDS.each_with_object({}) do |field, fields|
+        fields[field] = block[field] if block.key?(field)
+      end.freeze
+    end
+
+    def implementation_identity_provenance(raw)
+      IMPLEMENTATION_IDENTITY_PATHS.to_h do |stage, path|
+        block = path.reduce(raw) { |memo, key| memo.is_a?(Hash) ? memo[key] : nil }
+        fields = IMPLEMENTATION_IDENTITY_FIELDS.each_with_object({}) do |field, selected|
+          selected[field] = deep_dup(block[field]) if block.is_a?(Hash) && block.key?(field)
+        end
+        [ stage.freeze, deep_freeze(fields) ]
+      end.freeze
+    end
+
+    def deep_freeze(value)
+      case value
+      when Hash
+        value.each { |key, child| key.freeze; deep_freeze(child) }
+      when Array
+        value.each { |child| deep_freeze(child) }
+      end
+      value.freeze
     end
 
     # Resolve a workflow descriptor's per-stage resource default without

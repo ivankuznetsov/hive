@@ -132,6 +132,8 @@ both dry-run stubs: pre-existing `0644` and `0666` audit logs are left unchanged
 the blocked invocation is not appended, and stderr reports both the permission
 refusal and normal skip marker.
 
+Implementation ownership has focused unit coverage in `implementation_identity/{resolver,store,reconstructor}_test.rb`, `task_journal_test.rb`, `task_projection_test.rb`, `attempts/generation_test.rb`, `protected_files_test.rb`, agent/profile argv tests, the three implementation-owning stage launch tests, status/schema correspondence, and the TUI detail view. These tests pin durable-before-spawn ordering, journal/projection tamper detection, fail-closed downstream generation reads, project/task/generation-bound legacy reconstruction, persisted-provider failure attribution, generation idempotency/conflicts, raw partial overrides, legacy precedence, exact Claude/Codex argv, provider-default pi/grok behavior, and honest unsupported effort.
+
 ## Integration suite (`test/integration/`)
 
 | File | Covers |
@@ -165,6 +167,8 @@ Pre-dispatch JSON integration coverage also exercises variant-aware status,
 web, pairing, bot, and digest error envelopes, including option-value collisions,
 invalid encodings, and `--` terminators that keep later flag-looking positionals
 from changing the selected schema.
+
+`test/integration/implementation_identity_routing_test.rb` drives a real temporary attempt store, task journal, projection, generation change, and status preview without external model calls. It covers Codex routing/status correspondence, restart/config-drift stability, a fenced new owner, and unpinned pi/grok provider defaults. `run_execute_test.rb`, `run_open_pr_test.rb`, and `run_review_test.rb` retain the stage-level fake-launcher coverage.
 
 ## E2E suite (`test/e2e/`)
 

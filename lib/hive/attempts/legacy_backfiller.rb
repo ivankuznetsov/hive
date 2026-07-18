@@ -47,7 +47,8 @@ module Hive
         task = Hive::Task.new(File.dirname(lock_path))
         intended_stage = "#{task.stage_index}-#{task.stage_name}"
         generation = Generation.resolve(
-          task: task, project: project.fetch("name"), intended_stage: intended_stage
+          task: task, project: project.fetch("name"), intended_stage: intended_stage,
+          attempt_store: @store
         )
         created = nil
         @store.with_admission_lock do

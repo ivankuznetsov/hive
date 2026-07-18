@@ -136,7 +136,7 @@ module Hive
                    profile: nil, expected_output: nil, status_mode: nil,
                    permission_mode: nil, allowed_tools: nil,
                    disallowed_tools: nil, cli_flags: [], max_tokens: nil,
-                   max_turns: nil)
+                   max_turns: nil, identity_arguments: [])
       @task = task
       @prompt = prompt
       @add_dirs = Array(add_dirs)
@@ -163,6 +163,7 @@ module Hive
       @allowed_tools = allowed_tools
       @disallowed_tools = disallowed_tools
       @cli_flags = Array(cli_flags)
+      @identity_arguments = Hive::ImplementationIdentity.validate_native_arguments(identity_arguments).freeze
     end
 
     # Effective mode for this spawn — explicit kwarg wins, falls back to
@@ -488,10 +489,11 @@ module Hive
       if @profile.budget_flag && @max_budget_usd
         cmd << @profile.budget_flag << @max_budget_usd.to_s
       end
-      # Per-run CLI extras (claude model/effort pins from config). Guarded:
-      # every valid value today is claude vocabulary, and handing another
-      # profile `--model sonnet` would fail (or worse, mean something else)
-      # silently — the invariant lives here rather than in the call sites.
+      # Typed profile-native identity argv is provider-safe and always
+      # arrives as discrete Process.spawn arguments. The raw cli_flags path
+      # remains Claude-only for backward compatibility with callers that
+      # need unrelated Claude flags (MCP, legacy capability adapters).
+      cmd.concat(@identity_arguments)
       if @cli_flags.any? && @profile.name != :claude
         raise ArgumentError, "cli_flags are claude-specific; got #{@cli_flags.inspect} for #{@profile.name}"
       end

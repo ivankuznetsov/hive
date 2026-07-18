@@ -280,6 +280,25 @@ class CurrentMainCoverageGapTest < Minitest::Test
     end
   end
 
+  def test_base_resolves_implementation_identity_inside_attempt_context
+    identity = Object.new
+    store = Object.new
+    store.define_singleton_method(:resolve_stage!) { |_stage| identity }
+
+    with_replaced_singleton_method(
+      Hive::ImplementationIdentity::Store, :new,
+      ->(task:, cfg:) { store }
+    ) do
+      resolved = with_attempt_context(
+        attempt_id: "attempt", task_generation: 1, ownership_generation: "owner"
+      ) do
+        Hive::Stages::Base.implementation_stage_identity(Object.new, {}, "open_pr")
+      end
+
+      assert_same identity, resolved
+    end
+  end
+
   def test_review_run_maps_tmux_unavailable_agent_error
     with_tmp_dir do |root|
       folder = task_folder(root)
@@ -362,7 +381,7 @@ class CurrentMainCoverageGapTest < Minitest::Test
             with_replaced_singleton_method(Hive::Stages::Review, :reviewer_compare_ref, ->(_cfg, _ops) { "main" }) do
               with_replaced_singleton_method(Hive::Stages::Review, :git_head, ->(_path) { "head-before-fix" }) do
                 with_replaced_singleton_method(Hive::Stages::Review, :worktree_status, ->(_path) { status_checks.shift }) do
-                  with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, ->(_task, _cfg, _ctx, accepted:) { { status: :ok } }) do
+                  with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, ->(_task, _cfg, _ctx, accepted:, identity: nil) { { status: :ok } }) do
                     with_replaced_singleton_method(Hive::Stages::Review, :auto_commit_fix_worktree, ->(_task, _cfg, _ctx, _accepted) {
                       { success: false, message: "git add -A failed: permission denied" }
                     }) do
@@ -405,7 +424,7 @@ class CurrentMainCoverageGapTest < Minitest::Test
             with_replaced_singleton_method(Hive::Stages::Review, :reviewer_compare_ref, ->(_cfg, _ops) { "main" }) do
               with_replaced_singleton_method(Hive::Stages::Review, :git_head, ->(_path) { "head-before-fix" }) do
                 with_replaced_singleton_method(Hive::Stages::Review, :worktree_status, ->(_path) { status_checks.shift }) do
-                  with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, ->(_task, _cfg, _ctx, accepted:) { { status: :ok } }) do
+                  with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, ->(_task, _cfg, _ctx, accepted:, identity: nil) { { status: :ok } }) do
                     result = Hive::Stages::Review.run!(task, { "review" => {} })
 
                     assert_equal :review_error, result[:status]

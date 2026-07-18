@@ -60,6 +60,22 @@ class HiveTuiBubbleModelTest < Minitest::Test
     }) { yield }
   end
 
+  def test_view_renders_implementation_identity_detail_mode
+    identity = { "generation" => 1, "pending" => false, "stages" => {} }
+    row = make_task_row.with(implementation_identity: identity)
+    state = Hive::Tui::Model::ImplementationIdentityDetailState.new(row: row)
+    bubble = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :implementation_identity_detail,
+        implementation_identity_detail_state: state
+      ),
+      dispatch: @dispatch,
+      update_state: EmptyUpdateState.new(nudge: nil)
+    )
+
+    assert_includes bubble.view, "Implementation ownership"
+  end
+
   def write_idea_md(dir, original_text:, slug: "some-slug", created_at: "2026-05-20T00:00:00Z")
     indented_original = original_text.lines.map { |line| "  #{line.chomp}" }
     body = [

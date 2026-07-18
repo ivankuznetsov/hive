@@ -141,4 +141,31 @@ class AttemptsEntrypointTest < Minitest::Test
     assert_same launcher, captured.fetch(:launcher)
     assert_equal daemon.fetch("max_concurrent_runs"), captured.dig(:limits, :max_global)
   end
+
+  def test_dispatch_uses_registered_project_name_for_matching_root
+    task = FakeTask.new(slug: "task", project_root: "/tmp/registered", project_name: "fallback")
+    result = Hive::Attempts::DispatchResult.new(
+      status: :existing_live, attempt: Struct.new(:attempt_id).new("attempt-1"), receipt: nil,
+      attach_descriptor: nil, reason: nil
+    )
+    dispatcher = Object.new
+    captured = nil
+    dispatcher.define_singleton_method(:dispatch) { |**kwargs| captured = kwargs; result }
+    entrypoint = Hive::Attempts::Entrypoint.new(
+      store: Object.new, dispatcher: dispatcher,
+      config_loader: ->(_root) { Hive::Config.merge_defaults({}) }
+    )
+
+    with_replaced_singleton_method(
+      Hive::Config, :registered_projects,
+      -> { [ { "name" => "registered", "path" => "/tmp/registered" } ] }
+    ) do
+      entrypoint.dispatch(
+        task: task, intended_stage: "4-execute", argv: [ "hive", "develop", "task" ],
+        interactive: false
+      )
+    end
+
+    assert_equal "registered", captured.fetch(:project)
+  end
 end

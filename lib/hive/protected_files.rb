@@ -9,13 +9,14 @@ module Hive
   # that differ so a tampering attempt lands a structured error marker
   # (ADR-013 / ADR-019 / ADR-021).
   #
-  # The fix-agent gets a copy of plan.md, worktree.yml, and task.md but
-  # writes only to the worktree itself. This module is the single
-  # source of truth for "what counts as orchestrator-owned" so a future
-  # addition to that set lands in one place instead of four.
+  # The fix-agent gets task-folder context but writes only to the worktree
+  # itself. Plans, pointers, markers, and durable identity state therefore
+  # share this single protected-file source of truth.
   module ProtectedFiles
     # Files the orchestrator owns; sub-spawns must not modify them.
-    ORCHESTRATOR_OWNED = %w[plan.md worktree.yml task.md].freeze
+    ORCHESTRATOR_OWNED = %w[
+      plan.md worktree.yml task.md task-journal.jsonl task-projection.json
+    ].freeze
 
     module_function
 

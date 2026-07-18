@@ -221,16 +221,22 @@ module Hive
 
         def status_label(row)
           base = action_state_label(row)
-          return base if row.admission_error
-          return base unless row.blocked
+          # Ownership is deliberately last. Fixed-width rendering truncates
+          # the tail, preserving the action and dependency signals on narrow
+          # layouts while still surfacing the owner when space permits.
+          parts = [ base ]
+          parts << dependency_status(row) if row.blocked && !row.admission_error
+          parts << implementation_owner_token(row)
+          parts.reject { |part| part.to_s.empty? }.join(" ")
+        end
 
-          # Append the dependency block rather than replace the action-state
-          # label, mirroring Commands::Status (text mode), which composes
-          # `state_label` with `dependency_indicator` via compact.join. A row
-          # that is blocked AND in an error/recover_review state then surfaces
-          # BOTH labels in either renderer instead of the TUI dropping the
-          # error/recover context.
-          [ base, dependency_status(row) ].reject { |part| part.to_s.empty? }.join(" ")
+        def implementation_owner_token(row)
+          execute = row.implementation_identity&.dig("stages", "execute")
+          return nil unless execute && execute["provider"] && execute["model"]
+
+          model = execute["model"].to_s
+          model = "#{model[0, 11]}…" if model.length > 12
+          "owner=#{execute['provider']}/#{model}"
         end
 
         # The action-state portion of the status column, independent of any

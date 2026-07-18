@@ -56,7 +56,8 @@ module Hive
           project: project,
           intended_stage: predecessor["intended_stage"],
           progress_token: predecessor["progress_token"],
-          task_generation: predecessor.task_generation
+          task_generation: predecessor.task_generation,
+          attempt_store: @store
         )
         inherited = inherited_outputs ||
                     (predecessor["inherited_outputs"] + predecessor["current_outputs"]).uniq
@@ -75,7 +76,8 @@ module Hive
         intended_stage = intended_stage_for(request.argv, task)
         generation = Generation.resolve(
           task: task, project: request.project, intended_stage: intended_stage,
-          task_generation: request.respond_to?(:task_generation) ? request.task_generation : nil
+          task_generation: request.respond_to?(:task_generation) ? request.task_generation : nil,
+          attempt_store: @store
         )
         predecessor_id = request.respond_to?(:predecessor_attempt_id) ? request.predecessor_attempt_id : nil
         predecessor = predecessor_id && @store.fetch(predecessor_id)
@@ -271,7 +273,7 @@ module Hive
 
         Generation.resolve(
           task: task, project: project, intended_stage: intended_stage,
-          task_generation: generation
+          task_generation: generation, attempt_store: @store
         )
       end
 

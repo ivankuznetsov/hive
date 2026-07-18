@@ -66,6 +66,14 @@ Finalize verifies the branch is clean and pushed, refreshes the PR body, writes 
 
 Done archives the task and prints manual cleanup commands for the feature worktree and branch. See [wiki/stages/done.md](../wiki/stages/done.md).
 
+## Durable Implementation Ownership
+
+The built-in coding workflow captures one concrete implementation identity before the first execute process starts. That generation-scoped journal record contains the provider, concrete model, profile/launcher identity, originating attempt, and execute effort. Retries and restarts reuse it even if project configuration changes; an accepted-input change creates a new generation and captures a new owner.
+
+PR creation and repair work follow that owner automatically. `open_pr` stays on the same provider and uses Claude `sonnet`, Codex `gpt-5.6-terra`, or the normal pi/grok provider default with `medium` effort. `review.fix` and `review.ci` use the exact execute model with `high` effort. Authored `agent`, `model`, or `effort` fields under one of those downstream stages override only the authored fields. Reviewers, triage, and browser tests remain independently configured.
+
+`hive status --json`, the TUI (`I` on a selected task), and Hivebox expose the projected owner. An effort can be requested without being applied when a provider has no verified native effort control; those surfaces say so explicitly.
+
 ## Markers As The Protocol
 
 Markers are HTML comments at the bottom of the stage state file. The last marker wins.

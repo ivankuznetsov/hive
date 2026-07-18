@@ -19,6 +19,7 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
                 folder_mtime: "2026-05-01T00:00:00Z",
                 depends_on: nil, blocked_by: nil, dependency_stage: nil,
                 blocked: false, admission_error: nil,
+                implementation_identity: nil,
                 suggested: "hive plan #{slug} --from 2-brainstorm")
     {
       "slug" => slug,
@@ -40,10 +41,33 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
       "age_seconds" => age,
       "claude_pid" => nil,
       "claude_pid_alive" => nil,
+      "implementation_identity" => implementation_identity,
       "action" => action,
       "action_label" => action_label,
       "suggested_command" => suggested
     }
+  end
+
+  def test_status_column_surfaces_bounded_execute_owner_after_action_state
+    identity = {
+      "generation" => 1, "pending" => false,
+      "stages" => {
+        "execute" => {
+          "provider" => "codex", "model" => "gpt-5.6-sol",
+          "requested_effort" => "high", "effective_effort" => "high",
+          "effort_supported" => true, "source" => "persisted_execute",
+          "originating_attempt" => "exec", "resolved_attempt" => "exec",
+          "status" => "resolved"
+        }
+      }
+    }
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [ make_task(slug: "owned", implementation_identity: identity) ] }
+    ])
+
+    out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 120)
+
+    assert_match(/Ready to plan.*owner=codex\/gpt-5\.6-s…/, out)
   end
 
   def make_snapshot(projects)

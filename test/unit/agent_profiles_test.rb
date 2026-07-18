@@ -3,6 +3,7 @@ require "tmpdir"
 require "fileutils"
 require "json"
 require "hive/agent_profiles"
+require "hive/implementation_identity/utility_models"
 
 class AgentProfilesTest < Minitest::Test
   include HiveTestHelper
@@ -97,6 +98,44 @@ class AgentProfilesTest < Minitest::Test
       "--safe-mode", "--disable-slash-commands",
       "--tools", "Read,Grep,Glob,Bash,Edit,Write"
     ], claude.cli_capabilities.fetch(:patrol_fix_context)
+  end
+
+  def test_builtin_profiles_translate_normalized_identity_arguments
+    claude = Hive::AgentProfiles.lookup(:claude).identity_arguments(
+      model: "sonnet", effort: "medium"
+    )
+    codex = Hive::AgentProfiles.lookup(:codex).identity_arguments(
+      model: "gpt-5.6-terra", effort: "high"
+    )
+    pi = Hive::AgentProfiles.lookup(:pi).identity_arguments(
+      model: "google/gemini-2.5-pro", effort: "medium", pin_model: false
+    )
+    grok = Hive::AgentProfiles.lookup(:grok).identity_arguments(
+      model: "grok-code-fast-1", effort: "high", pin_model: false
+    )
+
+    assert_equal %w[--model sonnet --effort medium], claude.native_arguments
+    assert_equal [ "--model", "gpt-5.6-terra", "-c", "model_reasoning_effort=high" ],
+                 codex.native_arguments
+    [ pi, grok ].each do |result|
+      assert_equal [], result.native_arguments
+      refute result.effort_supported
+      assert_nil result.effective_effort
+    end
+  end
+
+  def test_utility_model_registry_never_crosses_providers
+    assert_equal({ model: "sonnet", pin_model: true },
+                 Hive::ImplementationIdentity::UtilityModels.resolve(:claude))
+    assert_equal({ model: "gpt-5.6-terra", pin_model: true },
+                 Hive::ImplementationIdentity::UtilityModels.resolve(:codex))
+    assert_equal({ model: nil, pin_model: false },
+                 Hive::ImplementationIdentity::UtilityModels.resolve(:pi))
+    assert_equal({ model: nil, pin_model: false },
+                 Hive::ImplementationIdentity::UtilityModels.resolve(:grok))
+    assert_raises(Hive::ImplementationIdentity::ResolutionError) do
+      Hive::ImplementationIdentity::UtilityModels.resolve(:unknown)
+    end
   end
 
   def test_lookup_raises_unknown_agent_for_missing_name

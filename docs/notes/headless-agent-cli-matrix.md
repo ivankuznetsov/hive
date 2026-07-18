@@ -216,6 +216,19 @@ No Grok skill verifier exists yet; the bundled Grok CE reviewer therefore uses
 a compact, self-contained, report-only prompt instead of claiming native skill
 resolution.
 
+## Normalized implementation identity arguments (2026-07-17)
+
+Implementation-owning stages pass normalized model and effort values through the selected `AgentProfile`; stage code does not assemble provider flags. The verified translations are:
+
+| Provider | Model argv | Effort argv | Automatic open-PR policy |
+|---|---|---|---|
+| Claude | `--model <model>` | `--effort <value>` | `sonnet`, `medium` |
+| Codex | `--model <model>` | `-c model_reasoning_effort=<value>` | literal `gpt-5.6-terra`, `medium` |
+| Pi | `--model <model>` when pinned | unsupported | normal provider default, no model pin |
+| Grok | `--model <model>` when pinned | unsupported | normal provider default, no model pin |
+
+Review-fix and CI-fix retain the exact concrete execute model and request `high`. Pi and Grok honestly report the request as unsupported and omit an effort argument. Their open-PR utility route deliberately omits a model pin so provider-native configuration remains authoritative, while the resolved concrete default is retained for audit/status. Every value is a discrete argv element; model and effort never ride shell interpolation or credential-bearing environment snapshots.
+
 ## Brainstorm Interactive Tmux Addendum
 
 The matrix above describes headless `AgentProfile` spawns. Claude now has

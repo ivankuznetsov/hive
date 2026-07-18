@@ -11,6 +11,7 @@ module Hive
     class Error < Hive::Error; end
     class InvalidRecord < Error; end
     class AttemptMismatch < Error; end
+    class Conflict < Error; end
 
     AUTHORITATIVE_EVENT_TYPES = %w[
       condition_observed
@@ -20,6 +21,10 @@ module Hive
       reconciliation
       shadow_audit
       operator_action
+      implementation_identity_captured
+      implementation_identity_backfilled
+      implementation_identity_fallback
+      implementation_stage_resolved
     ].freeze
     LEGACY_ATTEMPT_ID = "legacy".freeze
     JOURNAL_BASENAME = "task-journal.jsonl".freeze
@@ -195,34 +200,9 @@ module Hive
           Envelope.authoritative(attributes, id_generator: @id_generator, clock: @clock)
         end
         records.each { |record| validate!(record) }
-        lines = records.map { |record| "#{JSON.generate(record)}\n" }.join
 
         with_lock do
-          created = !File.exist?(path) || File.zero?(path)
-          File.open(path, File::WRONLY | File::APPEND | File::CREAT, 0o644, encoding: "UTF-8") do |file|
-            original_size = file.stat.size
-            begin
-              offset = 0
-              while offset < lines.bytesize
-                written = file.syswrite(lines.byteslice(offset..))
-                raise IOError, "short journal append" unless written.is_a?(Integer) && written.positive?
-
-                offset += written
-              end
-              file.flush
-              file.fsync
-            rescue SystemCallError, IOError => e
-              rollback_append!(file, original_size, e)
-            end
-          end
-          Hive::AtomicFile.fsync_directory(task_folder) if created
-          cursor = File.size(path)
-          AppendResult.new(
-            cursor: cursor,
-            event_id: records.last.fetch("event_id"),
-            journal_hash: ::Digest::SHA256.file(path).hexdigest,
-            records: records.freeze
-          )
+          append_records(records)
         end
       rescue Error
         raise
@@ -230,7 +210,106 @@ module Hive
         raise Error, "authoritative journal append failed: #{e.class}: #{e.message}"
       end
 
+      def append_idempotent(attributes, idempotency_key:)
+        input = Envelope.stringify(attributes)
+        payload = input["payload"] ||= {}
+        payload["idempotency_key"] = idempotency_key.to_s
+        record = Envelope.authoritative(input, id_generator: @id_generator, clock: @clock)
+        validate!(record)
+
+        with_lock do
+          existing = read_records.find do |candidate|
+            candidate.dig("payload", "idempotency_key") == idempotency_key.to_s
+          end
+          if existing
+            unless idempotency_signature(existing) == idempotency_signature(record)
+              raise Conflict, "conflicting authoritative event for idempotency key #{idempotency_key.inspect}"
+            end
+
+            return current_result(existing)
+          end
+
+          append_records([ record ])
+        end
+      rescue Error
+        raise
+      rescue SystemCallError, IOError, JSON::ParserError, JSON::GeneratorError => e
+        raise Error, "authoritative journal append failed: #{e.class}: #{e.message}"
+      end
+
       private
+
+      def append_records(records)
+        lines = records.map { |record| "#{JSON.generate(record)}\n" }.join
+        created = !File.exist?(path) || File.zero?(path)
+        File.open(path, File::WRONLY | File::APPEND | File::CREAT, 0o644, encoding: "UTF-8") do |file|
+          original_size = file.stat.size
+          begin
+            offset = 0
+            while offset < lines.bytesize
+              written = file.syswrite(lines.byteslice(offset..))
+              raise IOError, "short journal append" unless written.is_a?(Integer) && written.positive?
+
+              offset += written
+            end
+            file.flush
+            file.fsync
+          rescue SystemCallError, IOError => e
+            rollback_append!(file, original_size, e)
+          end
+        end
+        Hive::AtomicFile.fsync_directory(task_folder) if created
+        current_result(records.last, records: records)
+      end
+
+      def current_result(record, records: [ record ])
+        AppendResult.new(
+          cursor: File.size(path),
+          event_id: record.fetch("event_id"),
+          journal_hash: ::Digest::SHA256.file(path).hexdigest,
+          records: records.freeze
+        )
+      end
+
+      def read_records
+        return [] unless File.exist?(path)
+
+        File.readlines(path, chomp: true).filter_map do |line|
+          next if line.empty?
+
+          JSON.parse(line)
+        end
+      end
+
+      def idempotency_signature(record)
+        payload = record.fetch("payload", {}).reject { |key, _| key == "idempotency_key" }
+        canonical_json(
+          "event_type" => record["event_type"],
+          "task" => record["task"],
+          "workflow" => record["workflow"],
+          "stage" => record["stage"],
+          "attempt_id" => record["attempt_id"],
+          "task_generation" => record["task_generation"],
+          "ownership_generation" => record["ownership_generation"],
+          "commit_generation" => record["commit_generation"],
+          "reason" => record["reason"],
+          "evidence" => record["evidence"],
+          "provenance" => record["provenance"],
+          "payload" => payload
+        )
+      end
+
+      def canonical_json(value)
+        canonical = case value
+        when Hash
+          value.keys.sort.to_h { |key| [ key.to_s, JSON.parse(canonical_json(value[key])) ] }
+        when Array
+          value.map { |child| JSON.parse(canonical_json(child)) }
+        else
+          value
+        end
+        JSON.generate(canonical)
+      end
 
       def with_lock
         FileUtils.mkdir_p(task_folder)

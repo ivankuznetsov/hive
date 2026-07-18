@@ -3,11 +3,11 @@ title: Hive::AgentProfile + Hive::AgentProfiles
 type: module
 source: lib/hive/agent_profile.rb, lib/hive/agent_profiles.rb, lib/hive/agent_profiles/{claude,codex,pi,grok}.rb
 created: 2026-04-26
-updated: 2026-07-16
+updated: 2026-07-17
 tags: [agent, profile, registry, architecture]
 ---
 
-**TLDR**: `Hive::AgentProfile` is a frozen value object describing one CLI's invocation contract (binary path, prompt delivery, permissions, root-confined workspace-write support, opt-in verified CLI capabilities, initial-context admission reserve, version requirement, status detection, usage extraction, and skill verification). `Hive::AgentProfiles` is the singleton registry — built-in profiles for `claude`, `codex`, `pi`, and `grok` auto-register on `require "hive/agent_profiles"`. Stages look up a profile by name (`AgentProfiles.lookup(:claude)`) and pass it to `Stages::Base.spawn_agent`. Replaces the previous claude-only singleton on `Hive::Agent`. References ADR-017 / ADR-018 / ADR-019.
+**TLDR**: `Hive::AgentProfile` is a frozen value object describing one CLI's invocation contract (binary path, prompt delivery, permissions, normalized model/effort translation, concrete default-model discovery, root-confined workspace-write support, opt-in verified CLI capabilities, initial-context admission reserve, version requirement, status detection, usage extraction, and skill verification). `Hive::AgentProfiles` is the singleton registry — built-in profiles for `claude`, `codex`, `pi`, and `grok` auto-register on `require "hive/agent_profiles"`. Stages look up a profile by name (`AgentProfiles.lookup(:claude)`) and pass it to `Stages::Base.spawn_agent`. Replaces the previous claude-only singleton on `Hive::Agent`. References ADR-017 / ADR-018 / ADR-019.
 
 ## `Hive::AgentProfile` — value object
 
@@ -35,6 +35,10 @@ Constructor kwargs (every profile freezes after init):
 | `workspace_write_flags:` | Optional argv that guarantees a writable workspace confined to the spawn root. An empty value means the profile cannot enforce that boundary. Codex declares `--sandbox workspace-write`, `approval_policy="never"`, ephemeral mode, and user-config/rules suppression. |
 | `cli_capabilities:` | Optional map from a named capability to opt-in argv. Capability users must call `require_cli_capability!`; Hive checks that the installed/overridden binary's help advertises every required flag before returning them. Claude declares `safe_mode: ["--safe-mode"]`. |
 | `initial_context_tokens:` | Non-negative conservative token reserve for provider-owned context emitted before the first streamed usage event. Defaults to zero; Claude declares 20,000 for patrol admission. |
+| `default_model_resolver:` | Optional read-only callable that resolves provider-native configuration to one concrete model; `default`/`inherit` are rejected. |
+| `model_argument_builder:` | Optional callable translating a normalized model to discrete native argv. |
+| `effort_argument_builder:` | Optional callable translating a normalized effort to discrete native argv; absence means unsupported. |
+| `launcher_identity:` | Stable profile/launcher version label stored in implementation identity events. |
 
 ### Key methods
 
@@ -49,6 +53,8 @@ Constructor kwargs (every profile freezes after init):
 | `permission_flags(mode = nil)` | Returns profile-owned permission argv. Ordinary modes preserve the existing Claude behavior. The special cross-profile mode `workspace-write` returns only `workspace_write_flags` and raises if the profile cannot enforce the sandbox. |
 | `workspace_write_supported?` | True only when the profile declares non-empty root-confined workspace-write argv. Architecture patrol uses this as a fail-closed auto-fix provider gate. |
 | `require_cli_capability!(name)` | Version-checks the resolved binary, probes `<bin> <capability-argv> --help` under the same bounded process-group deadline as version discovery, verifies every option token (arguments such as a `--tools` CSV are not mistaken for flags), caches the result by binary/version/capability/argv, and returns a copy. Missing declarations, flags, binaries, failed help, and timeouts raise `Hive::AgentError`. |
+| `concrete_default_model(cfg:, project_root:)` | Resolves and validates a provider-native model without copying credentials or arbitrary CLI configuration into Hive state. Codex discovery reads the top-level TOML `model` assignment and accepts ordinary inline comments. |
+| `identity_arguments(model:, effort:, pin_model:)` | Returns normalized model/effort observability plus discrete native argv, including requested/effective effort and support. |
 
 `STATUS_DETECTION_MODES` is the closed enum used by `Hive::Agent#handle_exit` to decide success: `state_file_marker` (claude default — agent writes the marker), `exit_code_only` (CI-fix loops — make the command succeed), `output_file_exists` (reviewer/triage spawns — produce the artifact).
 
@@ -61,6 +67,8 @@ Module-level singleton, mutex-guarded. `register(name, profile)` adds (or replac
 ## Built-in profiles
 
 Auto-required from `lib/hive/agent_profiles.rb`:
+
+For implementation identity, Claude translates normalized values to `--model <model> --effort <effort>` and Codex to `--model <model> -c model_reasoning_effort=<effort>`. Pi and Grok can resolve and optionally pin a concrete provider-native model but declare effort unsupported. An unsupported effort stays visible as requested while native argv omits it and `effective_effort` remains unset.
 
 - `claude` — default skip flag `--dangerously-skip-permissions`, `--add-dir`, `--max-budget-usd`, headless via `-p`, stream-json output with `--verbose`, Claude skill verifier, interim plus terminal usage extraction, and opt-in verified capabilities for `safe_mode` plus the minimal patrol review/fix contexts. Patrol disables slash commands; review exposes `Read,Grep,Glob,Write`, while fix additionally exposes `Bash,Edit`. The profile reserves 20,000 initial-context tokens for patrol admission. Message-start/delta counters support a true in-flight patrol stop. Min version `2.1.118`. `:state_file_marker` mode. `AgentProfile#permission_flags(mode)` is the single source of truth for permission argv, shared by the headless `Hive::Agent` path and the tmux `Hive::ClaudeLauncher#wrapper_command` path: `bypassPermissions` (and a nil mode) yields `--dangerously-skip-permissions`, any other ordinary Claude mode yields `--permission-mode <mode>`.
 - `codex` — `--dangerously-bypass-approvals-and-sandbox`, `--add-dir`, headless via the `exec` subcommand, `--json` output, and a dedicated `workspace_write_flags` bundle (`--sandbox workspace-write`, approval policy `never`, ephemeral execution, and ignored user config/rules) for confined architecture-patrol fixes. Prompts are delivered on stdin with `-` in argv. No native budget flag. Hive consumes usage events when present, but real interim-event coverage remains unverified, so spawn/day quotas and the wall-clock timeout are the provider-independent fallback. Min version `0.125.0`. `:output_file_exists`.

@@ -151,10 +151,13 @@ class StatusTest < Minitest::Test
         capture_io { Hive::Commands::New.new(project, "legacy status row").call }
         folder = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "legacy-status-row-*")].first
 
-        capture_io { Hive::Commands::Status.new(json: true).call }
+        out, = capture_io { Hive::Commands::Status.new(json: true).call }
 
         refute File.exist?(File.join(folder, "events.jsonl"))
         refute File.exist?(File.join(folder, "task-projection.json"))
+        identity = JSON.parse(out).dig("projects", 0, "tasks", 0, "implementation_identity")
+        assert_equal true, identity["pending"]
+        assert_equal({}, identity["stages"])
       end
     end
   end

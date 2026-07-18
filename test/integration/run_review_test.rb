@@ -1310,7 +1310,7 @@ class RunReviewTest < Minitest::Test
               status: :ok, escalations_path: esc, error_message: nil, tampered_files: [], limit_text: nil
             )
           }) do
-            with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:|
+            with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:, identity: nil|
               flunk "ad-hoc review should not run fix by default with accepted=#{accepted.inspect}"
             }) do
               capture_io { Hive::Commands::Run.new(folder).call }
@@ -1341,7 +1341,7 @@ class RunReviewTest < Minitest::Test
         Hive::Markers.set(File.join(folder, "task.md"), :review_waiting, pass: 1, escalations: 1)
 
         accepted_seen = nil
-        with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:|
+        with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:, identity: nil|
           accepted_seen = accepted
           { status: :ok }
         }) do
@@ -2327,15 +2327,24 @@ class RunReviewTest < Minitest::Test
         Hive::Markers.set(File.join(folder, "task.md"), :review_waiting, pass: 1, escalations: 1)
 
         accepted_seen = nil
-        with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:|
-          accepted_seen = accepted
-          { status: :error, error_message: "fix failed" }
-        }) do
-          _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
-          assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+        identity_seen = nil
+        resolved_identity = Object.new
+        with_replaced_singleton_method(
+          Hive::Stages::Base, :implementation_stage_identity,
+          ->(*_args) { resolved_identity }
+        ) do
+          with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:, identity: nil|
+            accepted_seen = accepted
+            identity_seen = identity
+            { status: :error, error_message: "fix failed" }
+          }) do
+            _out, _err, status = with_captured_exit { Hive::Commands::Run.new(folder).call }
+            assert_equal Hive::ExitCodes::TASK_IN_ERROR, status
+          end
         end
 
         assert_match(/apply a fix/, accepted_seen)
+        assert_same resolved_identity, identity_seen
         marker = Hive::Markers.current(File.join(folder, "task.md"))
         assert_equal :review_error, marker.name
         assert_equal "fix", marker.attrs["phase"]
@@ -2357,7 +2366,7 @@ class RunReviewTest < Minitest::Test
         Hive::Markers.set(File.join(folder, "task.md"), :review_waiting, pass: 1, escalations: 1)
 
         accepted_seen = nil
-        with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:|
+        with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:, identity: nil|
           accepted_seen = accepted
           File.write(File.join(worktree_path, "fix.txt"), "fixed\n")
           system("git", "-C", worktree_path, "add", "fix.txt") || raise("git add failed")
@@ -2409,7 +2418,7 @@ class RunReviewTest < Minitest::Test
         Hive::Markers.set(File.join(folder, "task.md"), :review_waiting, pass: 1, escalations: 1)
 
         accepted_seen = nil
-        with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:|
+        with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:, identity: nil|
           accepted_seen = accepted
           # Whole-pass no-change: the fix agent investigated the finding,
           # found the code already correct, and dispositioned it
@@ -2459,7 +2468,7 @@ class RunReviewTest < Minitest::Test
         Hive::Markers.set(File.join(folder, "task.md"), :review_waiting, pass: 1, escalations: 1)
 
         accepted_seen = nil
-        with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:|
+        with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:, identity: nil|
           accepted_seen = accepted
           {
             status: :timeout,
@@ -2501,7 +2510,7 @@ class RunReviewTest < Minitest::Test
         Hive::Markers.set(File.join(folder, "task.md"), :review_waiting, pass: 1, escalations: 1)
 
         accepted_seen = nil
-        with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:|
+        with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:, identity: nil|
           accepted_seen = accepted
           {
             status: :error,
@@ -2543,7 +2552,7 @@ class RunReviewTest < Minitest::Test
                    "# Escalations for pass 01\n\n- [ ] needs human review\n")
         Hive::Markers.set(File.join(folder, "task.md"), :review_waiting, pass: 1, escalations: 1)
 
-        with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:|
+        with_replaced_singleton_method(Hive::Stages::Review, :spawn_fix_agent, lambda { |_task, _cfg, _ctx, accepted:, identity: nil|
           File.write(File.join(worktree_path, "fix.txt"), "fixed\n")
           system("git", "-C", worktree_path, "add", "fix.txt") || raise("git add failed")
           system("git", "-C", worktree_path, "commit", "-m", "fix review finding", "--quiet") ||

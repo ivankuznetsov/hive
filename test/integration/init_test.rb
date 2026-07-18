@@ -1926,6 +1926,13 @@ class InitTest < Minitest::Test
         assert_equal "courageous", cfg.dig("review", "triage", "bias")
         assert_equal 2,            cfg.dig("review", "max_passes")
         assert_equal 28_800,       cfg.dig("review", "max_wall_clock_sec")
+
+        raw = YAML.safe_load(File.read(File.join(dir, ".hive-state", "config.yml")))
+        refute raw.fetch("open_pr").key?("agent")
+        refute raw.dig("review", "ci").key?("agent")
+        refute raw.dig("review", "fix").key?("agent")
+        assert_equal "claude", raw.dig("review", "triage", "agent")
+        assert_equal "claude", raw.dig("review", "browser_test", "agent")
       end
     end
   end

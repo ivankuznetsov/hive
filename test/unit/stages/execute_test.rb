@@ -227,6 +227,52 @@ class HiveStagesExecuteTest < Minitest::Test
     end
   end
 
+  def test_run_pass_attributes_failure_to_persisted_provider
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      write_pointer(task, "path" => File.join(dir, "worktree"), "branch" => task.slug,
+                    "execute_base_head" => "base")
+      git = FakeGit.new(head: "base", branch: task.slug, dirty: false, ancestor_result: true)
+      result = {
+        status: :error, error_message: "401 unauthorized",
+        implementation_provider: "codex"
+      }
+
+      with_fake_git_and_spawn(git, result: result) do
+        Hive::Stages::Execute.run_pass(task, execute_cfg("claude"), File.join(dir, "worktree"))
+      end
+
+      assert_equal "codex", Hive::Markers.current(task.state_file).attrs["provider"]
+    end
+  end
+
+  def test_run_pass_detects_implementation_identity_journal_tampering
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      write_pointer(task, "path" => File.join(dir, "worktree"), "branch" => task.slug,
+                    "execute_base_head" => "base")
+      git = FakeGit.new(head: "base", branch: task.slug, dirty: false, ancestor_result: true)
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(_path) { git }) do
+        with_replaced_singleton_method(
+          Hive::Stages::Execute, :spawn_implementation,
+          lambda { |_task, _cfg, _path, **_kwargs|
+            File.write(File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME), "tampered\n")
+            { status: :ok }
+          }
+        ) do
+          result = Hive::Stages::Execute.run_pass(task, {}, File.join(dir, "worktree"))
+          assert_equal({ commit: "implementer_tampered", status: :error }, result)
+        end
+      end
+
+      assert_includes Hive::Markers.current(task.state_file).attrs["files"],
+                      Hive::TaskJournal::JOURNAL_BASENAME
+    end
+  end
+
   # `agent_failed?` is true for :timeout as well as :error, and the
   # non-limit branch records `status: impl_result[:status]` verbatim — so a
   # timeout (e.g. the exit_code_only "stop hook did not signal completion"
@@ -380,6 +426,40 @@ class HiveStagesExecuteTest < Minitest::Test
     end
   end
 
+  def test_spawn_implementation_never_reaches_launcher_when_identity_capture_fails
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      fake_store = Object.new
+      fake_store.define_singleton_method(:capture_execute!) do
+        raise Hive::TaskJournal::Error, "synthetic append failure"
+      end
+      spawned = false
+
+      with_replaced_singleton_method(Hive::ImplementationIdentity::Store, :new, ->(**) { fake_store }) do
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, lambda { |*_, **_kwargs|
+          spawned = true
+        }) do
+          with_attempt_context(
+            attempt_id: "attempt", task_generation: 1, ownership_generation: "owner"
+          ) do
+            assert_raises(Hive::TaskJournal::Error) do
+              Hive::Stages::Execute.spawn_implementation(
+                task, execute_cfg("codex").merge(
+                  "budget_usd" => { "execute_implementation" => 1 },
+                  "timeout_sec" => { "execute_implementation" => 5 }
+                ),
+                File.join(dir, "worktree")
+              )
+            end
+          end
+        end
+      end
+
+      refute spawned
+    end
+  end
+
   def build_task(project_root, depends_on: nil)
     folder = File.join(project_root, ".hive-state", "stages", "4-execute", "demo-260522-aaaa")
     FileUtils.mkdir_p(folder)
@@ -409,7 +489,7 @@ class HiveStagesExecuteTest < Minitest::Test
 
   def with_fake_git_and_spawn(git, status: :ok, result: nil)
     with_replaced_singleton_method(Hive::GitOps, :new, ->(_path) { git }) do
-      with_replaced_singleton_method(Hive::Stages::Execute, :spawn_implementation, lambda { |_task, _cfg, _path|
+      with_replaced_singleton_method(Hive::Stages::Execute, :spawn_implementation, lambda { |_task, _cfg, _path, **_kwargs|
         result || { status: status }
       }) do
         yield

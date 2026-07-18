@@ -280,7 +280,13 @@ class GoldenPathE2E < ApplicationSystemTestCase
   def force_headless_claude!(project)
     path = File.join(ENV["HIVE_TEST_HOME_ROOT"], "repos", project, ".hive-state", "config.yml")
     data = YAML.safe_load_file(path)
-    data["claude"] = (data["claude"] || {}).merge("mode" => "headless")
+    data["claude"] = (data["claude"] || {}).merge(
+      "mode" => "headless",
+      # The fake CLI has no provider-owned settings file for identity
+      # discovery. Pin the model so implementation ownership can be captured
+      # before execute launches, just as a real explicit Claude selection is.
+      "model" => "claude-fable-5"
+    )
     # The default implementer is codex; this E2E fakes only claude, so every
     # stage must run through it.
     data["execute"] = (data["execute"] || {}).merge("agent" => "claude")

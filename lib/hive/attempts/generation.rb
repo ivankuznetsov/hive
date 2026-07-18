@@ -1,6 +1,9 @@
 require "digest"
 require "hive/dependency_snapshot"
+require "hive/attempts/store"
 require "hive/conditions/generation_tracker"
+require "hive/paths"
+require "hive/task_projection"
 
 module Hive
   module Attempts
@@ -12,7 +15,8 @@ module Hive
       :progress_token, :task_generation, :ownership_generation, :task_input_epoch
     ) do
       def self.resolve(task:, project:, intended_stage:, progress_token: nil,
-                       task_generation: nil, ownership_generation: nil, task_input_epoch: nil)
+                       task_generation: nil, ownership_generation: nil, task_input_epoch: nil,
+                       attempt_store: nil)
         task_id = task.respond_to?(:id) ? task.id : nil
         slug = task.slug.to_s
         locator = task_id.nil? ? "project:#{project}/slug:#{slug}" : "id:#{task_id}"
@@ -31,7 +35,7 @@ module Hive
               task: task, workflow_policy: workflow_policy
             ).task_generation
           else
-            0
+            current_task_input_epoch(task, attempt_store: attempt_store)
           end
         else
           Integer(task_input_epoch)
@@ -67,6 +71,38 @@ module Hive
         digest.hexdigest
       rescue SystemCallError, IOError => e
         ::Digest::SHA256.hexdigest("hive-progress-v2\0unreadable\0#{e.class}\0#{task.state_file}")
+      end
+
+      def self.current_task_input_epoch(task, attempt_store: nil)
+        folder = if task.respond_to?(:folder) && task.folder
+          task.folder
+        else
+          File.dirname(task.state_file)
+        end
+        path = File.join(folder, Hive::TaskJournal::JOURNAL_BASENAME)
+        begin
+          File.lstat(path)
+        rescue Errno::ENOENT
+          return 0
+        end
+        lines = File.readlines(path, chomp: true)
+        if lines.empty?
+          raise Hive::TaskProjection::InvalidJournal,
+                "authoritative task journal exists but is empty"
+        end
+        store = attempt_store || default_attempt_store
+        Hive::TaskProjection.parse_journal(lines, attempt_store: store)
+                            .filter_map { |record| record["task_generation"] }
+                            .select { |value| value.is_a?(Integer) }
+                            .max || 0
+      end
+
+      def self.default_attempt_store
+        root = ENV["HIVE_ATTEMPT_STORE_ROOT"].to_s
+        Hive::Attempts::Store.new(
+          root: root.empty? ? Hive::Paths.attempts_root : root,
+          create_directories: false
+        )
       end
     end
   end

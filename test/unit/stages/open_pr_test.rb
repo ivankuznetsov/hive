@@ -85,6 +85,39 @@ class HiveStagesOpenPrTest < Minitest::Test
     end
   end
 
+  def test_run_uses_persisted_implementation_provider_profile
+    with_tmp_dir do |root|
+      task = make_task(root)
+      worktree = File.join(root, "worktree")
+      FileUtils.mkdir_p(worktree)
+      write_pointer(task, worktree)
+      identity = Struct.new(:provider).new("codex")
+      looked_up = []
+
+      with_basic_open_pr_run_stubs do
+        with_replaced_singleton_method(
+          Hive::Stages::Base, :implementation_stage_identity,
+          ->(_task, _cfg, _stage) { identity }
+        ) do
+          with_replaced_singleton_method(
+            Hive::AgentProfiles, :lookup,
+            ->(provider, cfg:) { looked_up << [ provider, cfg ]; :persisted_profile }
+          ) do
+            with_replaced_singleton_method(Hive::ProtectedFiles, :snapshot, ->(_folder) { Object.new }) do
+              with_replaced_singleton_method(Hive::ProtectedFiles, :diff, ->(_before, _after) { [ "worktree.yml" ] }) do
+                with_replaced_singleton_method(Hive::Stages::OpenPr, :spawn_open_pr_agent, ->(*_args, **_kwargs) { }) do
+                  capture_io { Hive::Stages::OpenPr.run!(task, cfg) }
+                end
+              end
+            end
+          end
+        end
+      end
+
+      assert_equal [ [ "codex", cfg ] ], looked_up
+    end
+  end
+
   def test_run_returns_non_terminal_marker_status_without_rewriting_error
     with_tmp_dir do |root|
       task = make_task(root)

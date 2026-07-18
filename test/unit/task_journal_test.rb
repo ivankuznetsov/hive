@@ -264,6 +264,45 @@ class TaskJournalTest < Minitest::Test
     end
   end
 
+  def test_idempotent_append_reuses_equivalent_identity_and_rejects_conflict
+    with_writer do |writer, dir|
+      identity = event(
+        "implementation_identity_captured",
+        reason: "execute_identity_captured",
+        payload: {
+          "idempotency_key" => "task/3/execute-identity",
+          "identity" => { "provider" => "codex", "model" => "gpt-5.6-sol" }
+        }
+      )
+      first = writer.append_idempotent(identity, idempotency_key: "task/3/execute-identity")
+      second = writer.append_idempotent(identity, idempotency_key: "task/3/execute-identity")
+
+      assert_equal first.event_id, second.event_id
+      assert_equal 1, File.readlines(File.join(dir, Hive::TaskJournal::JOURNAL_BASENAME)).size
+
+      conflict = Marshal.load(Marshal.dump(identity))
+      conflict[:payload]["identity"]["provider"] = "claude"
+      assert_raises(Hive::TaskJournal::Conflict) do
+        writer.append_idempotent(conflict, idempotency_key: "task/3/execute-identity")
+      end
+    end
+  end
+
+  def test_idempotent_append_wraps_low_level_io_failures
+    with_writer do |writer, _dir|
+      writer.define_singleton_method(:append_records) { |_records| raise Errno::ENOSPC }
+
+      error = assert_raises(Hive::TaskJournal::Error) do
+        writer.append_idempotent(
+          event("condition_observed"), idempotency_key: "task/3/condition"
+        )
+      end
+
+      assert_includes error.message, "authoritative journal append failed"
+      assert_includes error.message, "ENOSPC"
+    end
+  end
+
   private
 
   def with_writer

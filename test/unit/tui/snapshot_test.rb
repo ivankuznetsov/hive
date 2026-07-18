@@ -18,6 +18,7 @@ class TuiSnapshotTest < Minitest::Test
       "blocked_by" => "base-task",
       "dependency_stage" => "7-artifacts",
       "blocked" => true,
+      "admission_error" => nil,
       "folder" => "/tmp/hive/#{slug}",
       "state_file" => "/tmp/hive/#{slug}/idea.md",
       "pr_url" => nil,
@@ -28,6 +29,10 @@ class TuiSnapshotTest < Minitest::Test
       "age_seconds" => 42,
       "claude_pid" => nil,
       "claude_pid_alive" => nil,
+      "live_task_lock" => true,
+      "task_lock_pid" => 12_345,
+      "task_lock_process_start_time" => "recorded-start",
+      "task_lock_id" => "recorded-generation",
       "action" => "ready_to_brainstorm",
       "action_label" => "Ready to brainstorm",
       "suggested_command" => "hive brainstorm #{slug}"
@@ -73,6 +78,7 @@ class TuiSnapshotTest < Minitest::Test
     assert_equal "base-task", first.blocked_by
     assert_equal "7-artifacts", first.dependency_stage
     assert_equal true, first.blocked
+    assert_nil first.admission_error
     assert_equal "/tmp/hive/first-task", first.folder
     assert_equal "/tmp/hive/first-task/idea.md", first.state_file
     assert_nil first.pr_url
@@ -83,6 +89,10 @@ class TuiSnapshotTest < Minitest::Test
     assert_equal 42, first.age_seconds
     assert_nil first.claude_pid
     assert_nil first.claude_pid_alive
+    assert_equal true, first.live_task_lock
+    assert_equal 12_345, first.task_lock_pid
+    assert_equal "recorded-start", first.task_lock_process_start_time
+    assert_equal "recorded-generation", first.task_lock_id
     assert_equal "ready_to_brainstorm", first.action_key,
                  "JSON 'action' lands on :action_key"
     assert_equal "Ready to brainstorm", first.action_label
@@ -163,6 +173,25 @@ class TuiSnapshotTest < Minitest::Test
     snapshot = Hive::Tui::Snapshot.from_payload(payload)
 
     assert_equal row.fetch("held"), snapshot.rows.first.held
+  end
+
+  def test_from_payload_preserves_admission_error
+    row = sample_task(slug: "held-row")
+    row["action"] = "admission_error"
+    row["action_label"] = "Admission error"
+    row["suggested_command"] = nil
+    row["blocked_by"] = nil
+    row["dependency_stage"] = nil
+    row["admission_error"] = {
+      "reason_code" => "dependency_cycle",
+      "offending_ref" => "app:a -> app:b -> app:a",
+      "safe_correction" => "Break the cycle."
+    }
+    snapshot = Hive::Tui::Snapshot.from_payload(sample_payload([
+      { "name" => "alpha", "tasks" => [ row ] }
+    ]))
+
+    assert_equal row["admission_error"], snapshot.rows.first.admission_error
   end
 
   def test_from_payload_handles_nil_payload

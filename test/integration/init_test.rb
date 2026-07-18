@@ -14,6 +14,21 @@ require "hive/workflows/descriptor_parser"
 class InitTest < Minitest::Test
   include HiveTestHelper
 
+  def test_init_persists_canonical_origin_identity_in_registry
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        remote = File.join(File.dirname(dir), "origin.git")
+        run!("git", "init", "--bare", "--quiet", remote)
+        run!("git", "-C", dir, "remote", "add", "origin", remote)
+
+        capture_io { Hive::Commands::Init.new(dir).call }
+
+        entry = Hive::Config.registered_projects.find { |project| project["path"] == File.expand_path(dir) }
+        assert_equal Hive::RepositoryIdentity.normalize(remote), entry["repository_identity"]
+      end
+    end
+  end
+
   def with_tmp_home
     Dir.mktmpdir("hive-home") do |dir|
       old = ENV["HOME"]
@@ -831,19 +846,20 @@ class InitTest < Minitest::Test
         # ...AND make the config.yml working-tree restore fail inside the
         # rollback. The rescue-within-rescue must warn without masking the
         # original GitError the caller re-raises.
-        original_binwrite = File.method(:binwrite)
         warnings = []
         begin
-          with_replaced_singleton_method(File, :binwrite, lambda { |path, *args|
-            raise Errno::EACCES, path.to_s if path == cfg_path
+          init = Hive::Commands::Init.new(dir, new_workflow: "writing")
+          original_atomic_write = init.method(:atomic_write)
+          config_writes = 0
+          init.define_singleton_method(:atomic_write) do |path, content|
+            config_writes += 1 if path == cfg_path
+            raise Errno::EACCES, path.to_s if path == cfg_path && config_writes > 1
 
-            original_binwrite.call(path, *args)
-          }) do
-            init = Hive::Commands::Init.new(dir, new_workflow: "writing")
-            init.define_singleton_method(:write_warn) { |line| warnings << line }
-            assert_raises(Hive::GitError) do
-              capture_io { init.call }
-            end
+            original_atomic_write.call(path, content)
+          end
+          init.define_singleton_method(:write_warn) { |line| warnings << line }
+          assert_raises(Hive::GitError) do
+            capture_io { init.call }
           end
         ensure
           FileUtils.rm_f(hook)
@@ -1910,6 +1926,13 @@ class InitTest < Minitest::Test
         assert_equal "courageous", cfg.dig("review", "triage", "bias")
         assert_equal 2,            cfg.dig("review", "max_passes")
         assert_equal 28_800,       cfg.dig("review", "max_wall_clock_sec")
+
+        raw = YAML.safe_load(File.read(File.join(dir, ".hive-state", "config.yml")))
+        refute raw.fetch("open_pr").key?("agent")
+        refute raw.dig("review", "ci").key?("agent")
+        refute raw.dig("review", "fix").key?("agent")
+        assert_equal "claude", raw.dig("review", "triage", "agent")
+        assert_equal "claude", raw.dig("review", "browser_test", "agent")
       end
     end
   end
@@ -2489,8 +2512,10 @@ class InitTest < Minitest::Test
       FileUtils.chmod(0755, hive)
       old_program_name = $PROGRAM_NAME
       begin
-        $PROGRAM_NAME = hive
-        assert_equal hive, Hive::Commands::Init.new(dir).send(:current_binary_path)
+        with_env("HIVE_INVOKED_BIN" => nil) do
+          $PROGRAM_NAME = hive
+          assert_equal hive, Hive::Commands::Init.new(dir).send(:current_binary_path)
+        end
       ensure
         $PROGRAM_NAME = old_program_name
       end

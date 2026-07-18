@@ -1,6 +1,7 @@
 require "test_helper"
 require "shellwords"
 require "hive/cli"
+require "hive/attempts/context"
 require "hive/commands/init"
 require "hive/commands/new"
 require "hive/daemon/concurrency_controller"
@@ -23,43 +24,48 @@ class ContentWorkflowE2ETest < Minitest::Test
         slug = content_slug(project_root)
         ran = []
         with_deterministic_content_agent(record: ran) do
-          supervisor = InlineSupervisor.new(
-            run: ->(command) { capture_io { Hive::CLI.start(Shellwords.split(command).drop(1)) }; 0 }
-          )
-          logger = CollectingLogger.new
-          dispatcher = Hive::Daemon::Dispatcher.new(
-            config: { "daemon" => { "edit_debounce_sec" => 0, "poll_interval_sec" => 30 } },
-            controller: Hive::Daemon::ConcurrencyController.new(
-              max_concurrent_runs: 5,
-              max_concurrent_per_project: 5,
-              max_runs_per_day_per_project: 100
-            ),
-            supervisor: supervisor,
-            status_consumer: LiveStatusConsumer.new(fetch: method(:status_snapshot)),
-            logger: logger
-          )
+          with_attempt_context(
+            attempt_id: "content-workflow-test-attempt",
+            task_generation: "content-workflow-test-generation"
+          ) do
+            supervisor = InlineSupervisor.new(
+              run: ->(command) { capture_io { Hive::CLI.start(Shellwords.split(command).drop(1)) }; 0 }
+            )
+            logger = CollectingLogger.new
+            dispatcher = Hive::Daemon::Dispatcher.new(
+              config: { "daemon" => { "edit_debounce_sec" => 0, "poll_interval_sec" => 30 } },
+              controller: Hive::Daemon::ConcurrencyController.new(
+                max_concurrent_runs: 5,
+                max_concurrent_per_project: 5,
+                max_runs_per_day_per_project: 100
+              ),
+              supervisor: supervisor,
+              status_consumer: LiveStatusConsumer.new(fetch: method(:status_snapshot)),
+              logger: logger
+            )
 
-          30.times do
-            break if File.file?(File.join(task_folder(project_root, "6-done", slug), "article.md"))
+            30.times do
+              break if File.file?(File.join(task_folder(project_root, "6-done", slug), "article.md"))
 
+              advance_tick(dispatcher, supervisor)
+            end
+
+            # Rest proof (Decision 2 / R1): once article.md exists the terminal
+            # `done` stage must REST — a further tick re-classifies it without
+            # re-dispatching or error-looping. Without this the loop only proves
+            # `done` does not *advance* (the break fires before the tick), never
+            # that a regression making it re-dispatchable would be caught.
+            ran_at_rest = ran.dup
+            spawned_at_rest = supervisor.spawned.size
             advance_tick(dispatcher, supervisor)
+            assert_equal ran_at_rest, ran,
+                         "terminal done stage must not re-dispatch an agent after article.md exists"
+            assert_equal spawned_at_rest, supervisor.spawned.size,
+                         "terminal done stage must not spawn another command after article.md exists"
+
+            @spawned_commands = supervisor.spawned.map { |spawn| spawn.fetch(:command) }
+            @logged_event_names = logger.events.map { |entry| entry.fetch(:name) }
           end
-
-          # Rest proof (Decision 2 / R1): once article.md exists the terminal
-          # `done` stage must REST — a further tick re-classifies it without
-          # re-dispatching or error-looping. Without this the loop only proves
-          # `done` does not *advance* (the break fires before the tick), never
-          # that a regression making it re-dispatchable would be caught.
-          ran_at_rest = ran.dup
-          spawned_at_rest = supervisor.spawned.size
-          advance_tick(dispatcher, supervisor)
-          assert_equal ran_at_rest, ran,
-                       "terminal done stage must not re-dispatch an agent after article.md exists"
-          assert_equal spawned_at_rest, supervisor.spawned.size,
-                       "terminal done stage must not spawn another command after article.md exists"
-
-          @spawned_commands = supervisor.spawned.map { |spawn| spawn.fetch(:command) }
-          @logged_event_names = logger.events.map { |entry| entry.fetch(:name) }
         end
 
         final = task_folder(project_root, "6-done", slug)

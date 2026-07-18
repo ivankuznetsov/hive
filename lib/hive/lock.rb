@@ -2,67 +2,121 @@ require "yaml"
 require "fileutils"
 require "time"
 require "securerandom"
+require "hive/attempts/context"
 
 module Hive
   module Lock
     module_function
 
     def with_task_lock(task_folder, payload = {})
-      acquire_task_lock(task_folder, payload)
+      lock_data = acquire_task_lock(task_folder, payload)
       begin
         yield
       ensure
-        release_task_lock(task_folder)
+        release_task_lock(task_folder, lock_id: lock_data.fetch("lock_id"))
       end
     end
 
     def acquire_task_lock(task_folder, payload = {})
       lock_path = File.join(task_folder, ".lock")
       FileUtils.mkdir_p(task_folder)
-      data = base_payload.merge(payload.transform_keys(&:to_s))
+      data = base_payload
+             .merge(payload.transform_keys(&:to_s))
+             .merge(Hive::Attempts::Context.projection)
+             .merge("lock_id" => SecureRandom.hex(16))
 
-      attempts = 0
-      begin
-        attempts += 1
-        File.open(lock_path, File::WRONLY | File::CREAT | File::EXCL, 0o644) do |f|
-          f.write(data.to_yaml)
+      with_task_lock_guard(lock_path) do
+        attempts = 0
+        begin
+          attempts += 1
+          publish_task_lock(lock_path, data)
+        rescue Errno::EEXIST
+          if stale_lock?(lock_path)
+            File.delete(lock_path)
+            retry if attempts < 3
+          end
+          holder = read_task_lock(lock_path)
+          raise ConcurrentRunError.new(
+            "another hive run is active for #{task_folder} (lock at #{lock_path})",
+            holder: holder,
+            lock_path: lock_path
+          )
         end
-      rescue Errno::EEXIST
-        if stale_lock?(lock_path)
-          File.delete(lock_path)
-          retry if attempts < 3
-        end
-        # Best-effort holder snapshot: a torn read from a concurrent writer is
-        # acceptable here since the envelope's holder block is advisory. The
-        # raise still goes through with `holder: nil` if YAML parsing fails.
-        holder = (YAML.safe_load(File.read(lock_path), permitted_classes: [ Time ]) rescue nil)
-        raise ConcurrentRunError.new(
-          "another hive run is active for #{task_folder} (lock at #{lock_path})",
-          holder: holder,
-          lock_path: lock_path
-        )
       end
       data
     end
 
-    def release_task_lock(task_folder)
+    def release_task_lock(task_folder, lock_id:)
       lock_path = File.join(task_folder, ".lock")
-      File.delete(lock_path) if File.exist?(lock_path)
+      return false unless File.directory?(task_folder)
+
+      with_task_lock_guard(lock_path) do
+        return false unless File.exist?(lock_path)
+
+        current = read_task_lock(lock_path)
+        return false unless current && current["lock_id"] == lock_id
+
+        File.delete(lock_path)
+        true
+      end
+    rescue Errno::ENOENT
+      # Stage transitions may atomically move the locked task folder. Never
+      # recreate the vanished source merely to release a lock that moved with
+      # it; the transition owner removes that orphan at the destination.
+      false
     end
 
     # Atomic read-modify-write to prevent torn reads during stale-lock checks
     # by a concurrent process. Writes via tempfile + rename.
     def update_task_lock(task_folder, additions)
       lock_path = File.join(task_folder, ".lock")
-      return unless File.exist?(lock_path)
+      tmp = nil
+      with_task_lock_guard(lock_path) do
+        return unless File.exist?(lock_path)
 
-      data = YAML.safe_load(File.read(lock_path)) || {}
-      additions.each { |k, v| data[k.to_s] = v }
-      tmp = "#{lock_path}.tmp.#{Process.pid}.#{SecureRandom.hex(4)}"
-      File.write(tmp, data.to_yaml)
-      File.rename(tmp, lock_path)
+        data = YAML.safe_load(File.read(lock_path)) || {}
+        additions.each { |k, v| data[k.to_s] = v }
+        tmp = "#{lock_path}.tmp.#{Process.pid}.#{SecureRandom.hex(4)}"
+        File.write(tmp, data.to_yaml)
+        File.rename(tmp, lock_path)
+      end
     ensure
       File.delete(tmp) if tmp && File.exist?(tmp)
+    end
+
+    # Serialize lock-path publication, stale replacement, updates, and
+    # ownership-checked release on a stable sidecar inode. The guard is held
+    # only for these short filesystem operations, never for the task run.
+    def with_task_lock_guard(lock_path)
+      # `.lock.tmp.*` is already ignored by every existing hive-state repo.
+      # Keep the stable guard in that namespace so it never enters commits.
+      guard_path = "#{lock_path}.tmp.guard"
+      File.open(guard_path, File::RDWR | File::CREAT, 0o644) do |guard|
+        guard.flock(File::LOCK_EX)
+        yield
+      end
+    end
+
+    # Publish a fully initialized YAML inode with no replacement semantics.
+    # A contender can observe either no .lock or the complete payload, never
+    # the empty/partial O_EXCL file that older code misclassified as stale.
+    def publish_task_lock(lock_path, data)
+      tmp = "#{lock_path}.tmp.#{Process.pid}.#{SecureRandom.hex(8)}"
+      File.open(tmp, File::WRONLY | File::CREAT | File::EXCL, 0o644) do |file|
+        file.write(data.to_yaml)
+        file.flush
+        file.fsync
+      end
+      File.link(tmp, lock_path)
+    ensure
+      File.delete(tmp) if tmp && File.exist?(tmp)
+    end
+
+    def read_task_lock(lock_path)
+      data = YAML.safe_load(File.read(lock_path), permitted_classes: [ Time ]) || {}
+      data.is_a?(Hash) ? data : nil
+    rescue StandardError
+      nil
     end
 
     COMMIT_LOCK_TIMEOUT_SEC = 30

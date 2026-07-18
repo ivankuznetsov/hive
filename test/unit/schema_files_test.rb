@@ -169,7 +169,8 @@ class SchemaFilesTest < Minitest::Test
 
     producer_kinds = %w[
       ambiguous_slug destination_collision final_stage
-      wrong_stage rollback_failed invalid_task_path error
+      wrong_stage rollback_failed invalid_task_path dependency_wait
+      admission_error error
     ].sort
 
     assert_equal producer_kinds, schema_kinds,
@@ -194,8 +195,20 @@ class SchemaFilesTest < Minitest::Test
     assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
     assert_equal "hive-status",
                  doc.dig("$defs", "SuccessPayload", "properties", "schema", "const")
-    assert_equal 4,
+    assert_equal Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
                  doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+  end
+
+  def test_hive_status_v5_schema_remains_for_back_compat
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status", version: 5)))
+    assert_equal 5, doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+    refute_includes doc.dig("$defs", "Task", "properties").keys, "conditions"
+  end
+
+  def test_hive_status_v4_schema_remains_for_back_compat
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status", version: 4)))
+    assert_equal 4, doc.dig("$defs", "SuccessPayload", "properties", "schema_version", "const")
+    refute_includes doc.dig("$defs", "Task", "properties").keys, "admission_error"
   end
 
   def test_hive_status_v1_schema_remains_for_back_compat
@@ -238,6 +251,7 @@ class SchemaFilesTest < Minitest::Test
       blocked_by: nil,
       dependency_stage: nil,
       blocked: false,
+      admission_error: nil,
       folder: "/tmp/probe",
       state_file: "/tmp/probe/idea.md",
       pr_url: nil,
@@ -276,6 +290,23 @@ class SchemaFilesTest < Minitest::Test
                  doc.dig("$defs", "Task", "properties", "marker", "enum").sort
     assert_equal Hive::Schemas::TaskActionKind::ALL.sort,
                  doc.dig("$defs", "Task", "properties", "action", "enum").sort
+  end
+
+  def test_hive_status_admission_error_is_closed_and_matches_reason_codes
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-status")))
+    definition = doc.dig("$defs", "AdmissionError")
+    assert_equal Hive::DependencyAdmission::REASON_CODES.sort,
+                 definition.dig("properties", "reason_code", "enum").sort
+
+    schemer = JSONSchemer.schema(definition)
+    valid = {
+      "reason_code" => "dependency_cycle",
+      "offending_ref" => "app:a -> app:b -> app:a",
+      "safe_correction" => "Break the cycle."
+    }
+    assert schemer.valid?(valid)
+    refute schemer.valid?(valid.merge("reason_code" => "unknown_reason"))
+    refute schemer.valid?(valid.merge("extra" => true))
   end
 
   def test_hive_status_schema_matches_tui_snapshot_row_keys
@@ -391,6 +422,7 @@ class SchemaFilesTest < Minitest::Test
       blocked_by: "base-task",
       dependency_stage: "7-artifacts",
       blocked: true,
+      admission_error: nil,
       folder: "/tmp/review-task",
       state_file: "/tmp/review-task/task.md",
       marker_name: :review_waiting,
@@ -851,6 +883,13 @@ class SchemaFilesTest < Minitest::Test
         candidates: [ { project: "alpha", stage: "2-brainstorm", folder: "/tmp/probe" } ]
       ),
       Hive::Schemas::RunErrorKind::INVALID_TASK_PATH => Hive::InvalidTaskPath.new("no such slug"),
+      Hive::Schemas::RunErrorKind::DEPENDENCY_WAIT => Hive::DependencyWaitError.new(
+        "waiting", offending_ref: "base", safe_correction: "Wait for base."
+      ),
+      Hive::Schemas::RunErrorKind::ADMISSION_ERROR => Hive::DependencyAdmissionError.new(
+        "invalid", reason_code: "dependency_cycle", offending_ref: "p:a -> p:a",
+        safe_correction: "Break the cycle."
+      ),
       Hive::Schemas::RunErrorKind::INTERNAL          => Hive::InternalError.new("internal bug"),
       Hive::Schemas::RunErrorKind::ERROR             => Hive::Error.new("plain")
     }
@@ -2230,6 +2269,33 @@ class SchemaFilesTest < Minitest::Test
     end
   end
 
+  def test_internal_attempt_schema_pins_state_and_receipt_contract
+    path = Hive::Schemas.schema_path("hive-attempt")
+    doc = JSON.parse(File.read(path))
+
+    assert_equal Hive::Attempts::Record::SCHEMA_VERSION,
+                 doc.fetch("properties").dig("schema_version", "const")
+    assert_equal %w[launching running terminal lost], doc.fetch("properties").dig("state", "enum")
+    assert_includes doc.fetch("required"), "worker_argv"
+    assert_includes doc.fetch("required"), "claim_capability_digest"
+    assert_includes doc.fetch("required"), "ownership_generation"
+    assert_includes doc.fetch("required"), "task_input_epoch"
+    assert_equal "^[0-9a-f]{64}$", doc.fetch("properties").dig("claim_capability_digest", "pattern")
+    receipt_required = doc.dig("$defs", "Receipt", "required")
+    %w[attempt_id task_generation ownership_generation task_input_epoch outcome exit_status started_at ended_at final_checkpoint output_references log_reference].each do |key|
+      assert_includes receipt_required, key
+    end
+  end
+
+
+  def test_internal_attempt_v1_schema_remains_for_back_compat
+    doc = JSON.parse(File.read(Hive::Schemas.schema_path("hive-attempt", version: 1)))
+
+    assert_equal 1, doc.fetch("properties").dig("schema_version", "const")
+    refute_includes doc.fetch("properties").keys, "task_input_epoch"
+    refute_includes doc.fetch("properties").keys, "ownership_generation"
+  end
+
   def test_refactor_patrol_retains_v1_while_v2_is_current
     assert_equal 2, Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-refactor-patrol")
 
@@ -2320,7 +2386,7 @@ class SchemaFilesTest < Minitest::Test
     doc = JSON.parse(File.read(path))
     assert_equal "https://json-schema.org/draft/2020-12/schema", doc["$schema"]
     assert_equal "hive-dispatch-result", doc.dig("properties", "schema", "const")
-    assert_equal 1, doc.dig("properties", "schema_version", "const")
+    assert_equal 2, doc.dig("properties", "schema_version", "const")
   end
 
   def test_hive_dispatch_result_required_keys_match_producer
@@ -2330,7 +2396,7 @@ class SchemaFilesTest < Minitest::Test
     # except the optional/nullable update_id is required.
     producer_required = %w[
       schema schema_version result_id created_at chat_id project slug
-      request_id exit_code command
+      request_id exit_code command attempt_id attempt_state receipt
     ].sort
     assert_equal producer_required, schema_required,
                  "schema/producer required-key drift in hive-dispatch-result.v1.json"
@@ -2358,10 +2424,11 @@ class SchemaFilesTest < Minitest::Test
   def test_hive_dispatch_result_chat_id_must_be_non_zero
     schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-dispatch-result"))))
     base = {
-      "schema" => "hive-dispatch-result", "schema_version" => 1,
+      "schema" => "hive-dispatch-result", "schema_version" => 2,
       "result_id" => "abc12345", "created_at" => "2026-06-03T12:00:00Z",
       "project" => "hive", "slug" => "my-task", "request_id" => "req00001",
-      "exit_code" => 1, "command" => "hive review my-task"
+      "exit_code" => 1, "command" => "hive review my-task",
+      "attempt_id" => nil, "attempt_state" => nil, "receipt" => nil
     }
     assert schemer.valid?(base.merge("chat_id" => 12_345)), "positive private chat id validates"
     assert schemer.valid?(base.merge("chat_id" => -1_001_234_567_890)), "negative group chat id validates"

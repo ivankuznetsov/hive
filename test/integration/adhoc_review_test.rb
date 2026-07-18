@@ -1,6 +1,7 @@
 require "test_helper"
 require "json"
 require "hive/cli"
+require "hive/attempts/context"
 require "hive/commands/adhoc_review"
 require "hive/gh"
 require "hive/markers"
@@ -66,7 +67,10 @@ class AdhocReviewIntegrationTest < Minitest::Test
                             pass: 1)
           { commit: nil, status: :review_waiting }
         }) do
-          yield materialized
+          with_attempt_context(
+            attempt_id: "adhoc-review-test-attempt",
+            task_generation: "adhoc-review-test-generation"
+          ) { yield materialized }
         end
       end
     end
@@ -212,9 +216,9 @@ class AdhocReviewIntegrationTest < Minitest::Test
   def test_review_pr_json_uses_standard_stage_action_envelope
     with_registered_project do |_repo, _hive_state, _worktree_root|
       with_adhoc_review_stubs do |_materialized|
-        out, _err, status = with_captured_exit { Hive::CLI.start([ "review", "--pr", "197", "--json" ]) }
+        out, err, status = with_captured_exit { Hive::CLI.start([ "review", "--pr", "197", "--json" ]) }
 
-        assert_equal Hive::ExitCodes::SUCCESS, status
+        assert_equal Hive::ExitCodes::SUCCESS, status, "stderr: #{err}\nstdout: #{out}"
         payload = JSON.parse(out)
         assert_equal "hive-stage-action", payload.fetch("schema")
         assert_equal "review", payload.fetch("verb")

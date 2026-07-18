@@ -136,21 +136,26 @@ class ReviewPhaseFailureHelpersTest < Minitest::Test
       File.write(state_file, "# task\n")
       task = Struct.new(:state_file).new(state_file)
 
-      limited = Hive::Stages::Review.send(
-        :mark_review_phase_failure,
-        task,
-        phase: :triage,
-        pass: 1,
-        error_message: "limits reached for claude: Claude Code v2.1.170",
-        limit_text: "You've hit your session limit"
-      )
+      now = Time.utc(2026, 7, 12, 20, 0, 0)
+      limited = with_env("TZ" => "Europe/London") do
+        with_replaced_singleton_method(Time, :now, -> { now }) do
+          Hive::Stages::Review.send(
+            :mark_review_phase_failure,
+            task,
+            phase: :triage,
+            pass: 1,
+            error_message: "limits reached for codex: provider wall",
+            limit_text: "You've hit your usage limit. Try again at Jul 18th, 2026 7:50 AM."
+          )
+        end
+      end
 
       marker = Hive::Markers.current(state_file)
       assert limited
       assert_equal :review_error, marker.name
       assert_equal "limits_reached", marker.attrs.fetch("reason")
       assert_equal "triage hit a usage/credit limit", marker.attrs.fetch("message")
-      refute_nil marker.attrs["retry_after"]
+      assert_equal "2026-07-18T06:51:00Z", marker.attrs.fetch("retry_after")
     end
   end
 

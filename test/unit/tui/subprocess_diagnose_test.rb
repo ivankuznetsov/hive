@@ -1,6 +1,7 @@
 require "test_helper"
 require "rbconfig"
 require "tmpdir"
+require "timeout"
 require "hive/tui/subprocess"
 
 # Direct unit tests for `Subprocess.diagnose_recent_failure` and its
@@ -503,6 +504,80 @@ class HiveTuiSubprocessDiagnoseTest < Minitest::Test
     end
   ensure
     old.nil? ? ENV.delete("HIVE_TUI_LOG_DIR") : ENV["HIVE_TUI_LOG_DIR"] = old
+  end
+
+  def test_managed_subprocess_lifecycle_is_recorded_under_the_scoped_log_dir
+    with_log_dir do |dir|
+      assert Hive::Tui::Subprocess.send(:record_managed_subprocess, "start", "deadbeef", 12_345)
+      assert Hive::Tui::Subprocess.send(:record_managed_subprocess, "finish", "deadbeef", 12_345)
+
+      path = File.join(dir, Hive::Tui::Subprocess::MANAGED_SUBPROCESS_LOG_NAME)
+      assert_equal [ "start", "finish" ], File.readlines(path).map { |line| JSON.parse(line).fetch("event") }
+    end
+  end
+
+  def test_dispatch_background_keeps_nil_success_contract_with_managed_logging
+    with_log_dir do
+      messages = Queue.new
+
+      result = Hive::Tui::Subprocess.dispatch_background(
+        [ RbConfig.ruby, "-e", "exit 0" ], dispatch: ->(message) { messages << message }
+      )
+
+      assert_nil result
+      assert_equal 0, Timeout.timeout(2) { messages.pop }.exit_code
+    end
+  end
+
+  def test_dispatch_background_fails_closed_when_managed_logging_fails
+    with_log_dir do
+      messages = []
+      with_replaced_singleton_method(
+        Hive::Tui::Subprocess, :record_managed_subprocess, ->(*_args) { false }
+      ) do
+        result = Hive::Tui::Subprocess.dispatch_background(
+          [ RbConfig.ruby, "-e", "sleep 30" ], dispatch: ->(message) { messages << message }
+        )
+
+        assert_equal false, result
+        assert_equal(-1, messages.fetch(0).exit_code)
+      end
+    end
+  end
+
+  def test_dispatch_background_reports_failed_start_when_spawned_group_disappears
+    with_log_dir do
+      messages = []
+      with_replaced_singleton_method(
+        Hive::Tui::Subprocess, :spawn_background_child, ->(*_args) { 12_345 }
+      ) do
+        with_replaced_singleton_method(
+          Hive::Tui::Subprocess, :record_managed_subprocess, ->(*_args) { false }
+        ) do
+          with_replaced_singleton_method(Process, :kill, ->(*_args) { raise Errno::ESRCH }) do
+            result = Hive::Tui::Subprocess.dispatch_background(
+              %w[hive plan task], dispatch: ->(message) { messages << message }
+            )
+
+            assert_equal false, result
+            assert_equal(-1, messages.fetch(0).exit_code)
+          end
+        end
+      end
+    end
+  end
+
+  def test_managed_subprocess_logging_failure_is_reported_and_fails_closed
+    logs = []
+    with_log_dir do
+      with_replaced_singleton_method(File, :open, ->(*_args) { raise Errno::EACCES }) do
+        with_replaced_singleton_method(Hive::Tui::Debug, :log, ->(*args) { logs << args }) do
+          refute Hive::Tui::Subprocess.send(:record_managed_subprocess, "start", "deadbeef", 12_345)
+        end
+      end
+    end
+
+    assert logs.any? { |scope, message| scope == "dispatch_background" && message.include?("managed-subprocess-log") }
   end
 
   def test_spawn_reaper_thread_logs_wait_and_dispatch_failures

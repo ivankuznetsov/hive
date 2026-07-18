@@ -18,7 +18,8 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
                 mtime: "2026-05-01T00:00:00Z",
                 folder_mtime: "2026-05-01T00:00:00Z",
                 depends_on: nil, blocked_by: nil, dependency_stage: nil,
-                blocked: false,
+                blocked: false, admission_error: nil,
+                implementation_identity: nil,
                 suggested: "hive plan #{slug} --from 2-brainstorm")
     {
       "slug" => slug,
@@ -28,6 +29,7 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
       "blocked_by" => blocked_by,
       "dependency_stage" => dependency_stage,
       "blocked" => blocked,
+      "admission_error" => admission_error,
       "stage" => stage,
       "folder" => "/tmp/#{slug}",
       "state_file" => "/tmp/#{slug}/brainstorm.md",
@@ -39,10 +41,33 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
       "age_seconds" => age,
       "claude_pid" => nil,
       "claude_pid_alive" => nil,
+      "implementation_identity" => implementation_identity,
       "action" => action,
       "action_label" => action_label,
       "suggested_command" => suggested
     }
+  end
+
+  def test_status_column_surfaces_bounded_execute_owner_after_action_state
+    identity = {
+      "generation" => 1, "pending" => false,
+      "stages" => {
+        "execute" => {
+          "provider" => "codex", "model" => "gpt-5.6-sol",
+          "requested_effort" => "high", "effective_effort" => "high",
+          "effort_supported" => true, "source" => "persisted_execute",
+          "originating_attempt" => "exec", "resolved_attempt" => "exec",
+          "status" => "resolved"
+        }
+      }
+    }
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [ make_task(slug: "owned", implementation_identity: identity) ] }
+    ])
+
+    out = Hive::Tui::Views::TasksPane.render(make_model(snapshot: snap), width: 120)
+
+    assert_match(/Ready to plan.*owner=codex\/gpt-5\.6-s…/, out)
   end
 
   def make_snapshot(projects)
@@ -268,6 +293,26 @@ class HiveTuiViewsTasksPaneTest < Minitest::Test
     assert_equal "Ready to plan ⏸ blocked by base-task (7-artifacts)",
                  Hive::Tui::Views::TasksPane.status_label(row),
                  "a blocked row must append the dependency block to its action-state label"
+  end
+
+  def test_admission_error_shows_reason_and_safe_correction_without_wait_label
+    error = {
+      "reason_code" => "dependency_cycle",
+      "offending_ref" => "app:a -> app:b -> app:a",
+      "safe_correction" => "Break the cycle in meta.yml."
+    }
+    snap = make_snapshot([
+      { "name" => "hive", "tasks" => [
+        make_task(slug: "held-task", action: "admission_error", action_label: "Admission error",
+                  blocked: true, admission_error: error, suggested: nil)
+      ] }
+    ])
+    row = snap.projects.first.rows.first
+    label = Hive::Tui::Views::TasksPane.status_label(row)
+
+    assert_includes label, "ADMISSION dependency_cycle"
+    assert_includes label, "Break the cycle in meta.yml."
+    refute_includes label, "blocked by"
   end
 
   # CLAUDE.md test-rule 10: an at-gate dependent (blocked:false, prereq past

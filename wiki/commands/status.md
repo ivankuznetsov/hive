@@ -3,11 +3,27 @@ title: hive status
 type: command
 source: lib/hive/commands/status.rb, lib/hive/diagnostic_evidence.rb
 created: 2026-04-25
-updated: 2026-06-30
+updated: 2026-07-17
 tags: [command, status, observability, json, diagnostics, legacy-dirs, task-id, archive, dependencies, pr]
 ---
 
-**TLDR**: `hive status` walks every registered project's `.hive-state/stages/<N>-<name>/<slug>/` directory across `Hive::Workflows.all_stage_dirs`, reads each task's marker and `meta.yml`, resolves same-project task dependencies, and prints human task identities grouped by the next useful action. Status scans tolerate normal stage-move races: vanished task folders are skipped, and duplicate-slug rows are collapsed only when one duplicate folder has already disappeared. Normal text status hides `9-done` tasks whose row `mtime` is older than 3 days and prints a count summary; `hive status --json` still emits every row for daemon/bot consumers. `hive archive` with no target delegates to status archive mode for the age-unfiltered archive listing. Pass `--diagnose <task>` to inspect one red row, and add `--write` only when you want the configured development agent to write `diagnostics/red-status.md`.
+**TLDR**: `hive status` walks every enrolled project, builds one immutable multi-project dependency-admission context, and prints tasks grouped by their next useful action. It distinguishes clear tasks, valid below-gate waits, and fail-closed admission errors, including invalid state produced by raw filesystem moves. Normal text status hides `9-done` tasks older than 3 days; JSON remains complete for daemon/bot consumers.
+
+Full text/JSON status and daemon snapshots read the complete on-disk graph.
+The TUI's steady-state active-only refresh combines freshly parsed active
+tasks with lossless immutable terminal task snapshots from its last
+full/archive status pass. Those snapshots preserve exact workflow stages,
+dependency edges, validation errors, and enrolled repository identity. They
+are indexed once and reused as a fallback context, keeping refresh cost
+independent of archive size without changing transitive dependency verdicts.
+
+The JSON envelope isolates project-local failures. Missing roots report
+`error: missing_project_path`, missing state roots report
+`error: not_initialised`, and an unexpected project load/projection exception
+reports `error: project_load_failed`; each degraded project has an empty task
+array while healthy projects remain present. The machine-readable error keeps
+an unexpected failure distinguishable from a legitimately empty project, with
+the detailed exception retained in the stderr/daemon-log breadcrumb.
 
 ## Output shape
 
@@ -27,7 +43,44 @@ Rows also include `workflow`, the descriptor id that resolved the task (`"coding
 
 Rows also include `pr_url`: once a coding task reaches `5-open-pr` or later, status reads `<task>/pr.md` frontmatter through `Hive::Gh.pr_frontmatter` and emits a stripped non-empty `pr_url`; before a PR exists, or when `pr.md` is missing, blank, or malformed, the field is `null`. This is a sibling task-payload field, not copied out of marker attrs, so consumers do not need to scrape `<!-- COMPLETE pr_url=... -->`.
 
-JSON rows also include `next_action`; it is usually `null`, but `EXECUTE_WAITING reason=...` rows carry the same structured recovery target that `hive run --json` emits. Every JSON row also includes `diagnostic`; it is `null` for ordinary rows and a bounded red-row payload for `recover_execute`, `recover_review`, and `error` rows. JSON rows carry `unanswered_questions` (issue #270): the count of still-unanswered `### Q{n}.` slots for a `2-brainstorm` `needs_input` row (computed via the shared `Hive::BrainstormParser`), and `0` for every other row. It lets an agent/operator tell a brainstorm the [[modules/daemon]] answers-pending gate is intentionally holding (count > 0) from one genuinely waiting for a first answer or broken. Dependency fields are also present on every task row: `depends_on`, `blocked_by`, `dependency_stage`, and `blocked`; text and TUI rows append `⏸ blocked by <slug> (<stage>)` or `(unresolved)` when `blocked` is true. The daemon consumes that `blocked` boolean directly.
+Condition-aware rows add `condition_task_generation`, `commit_generation`,
+`current_attempt`, `conditions`, `condition_history`, `evidence`,
+`condition_gate`, `condition_migration`, `condition_provenance`,
+`condition_overrides`, `shadow_audit`, and `condition_warning`. Existing marker/action/attrs fields
+stay stable. Status reads the one canonical [[modules/conditions]] projection;
+daemon, TUI, bot, and web pass through that payload instead of deriving their
+own condition semantics. Snapshot validation or journal replay is read-only:
+status never observes git/GitHub, creates a baseline/audit, or publishes a
+repaired snapshot.
+
+These fields and the `project_load_failed` project error are published as
+`hive-status` v6. The existing `task_generation` compatibility field remains
+the opaque durable ownership token (string or null); the numeric condition
+epoch is `condition_task_generation`. The v5 schema remains unchanged for
+stored-output and rolling-consumer compatibility.
+
+JSON rows also include `next_action`; it is usually `null`, but legacy
+`EXECUTE_WAITING reason=...` and condition-authoritative blocked rows carry the
+same structured recovery target that run/approve/workflow-verb JSON errors
+emit. Pending evidence uses `kind=no_op reason=condition_reconciliation_required`;
+attempt loss/failure uses `kind=run`; worktree/evidence repairs identify an
+editable target. `condition_overrides` contains the latest 20 forced gate
+waivers with source command and waived diagnostics; the journal retains full
+history. Every JSON row also includes `diagnostic`; it is `null` for ordinary rows and a bounded red-row payload for `recover_execute`, `recover_review`, and `error` rows. JSON rows carry `unanswered_questions` (issue #270): the count of still-unanswered `### Q{n}.` slots for a `2-brainstorm` `needs_input` row, and `0` otherwise.
+
+Every task row has `depends_on`, `blocked_by`, `dependency_stage`, `blocked`, and required nullable `admission_error`. The correlations are closed:
+
+- clear: `blocked: false`, ordinary wait fields null, `admission_error: null`;
+- benign wait: `blocked: true`, `blocked_by`/`dependency_stage` populated, `admission_error: null`;
+- admission error: `blocked: true`, ordinary wait fields null, action `admission_error`, `suggested_command: null`, and an object containing exactly `reason_code`, `offending_ref`, `safe_correction`.
+
+Text/TUI render a benign wait as `⏸ blocked by <task> (<stage>)`. Admission errors render the stable reason and safe correction ahead of ordinary waits and are never described as waiting on an in-flight task. An unexpected validator exception becomes `dependency_validation_failed`, never an unblocked row.
+
+### Implementation ownership
+
+Coding task rows may also carry `implementation_identity`: the numeric generation, a pending flag, and stage entries for `execute`, `open_pr`, `review.fix`, and `review.ci`. Resolved entries come from projected journal launch events; unlaunched downstream entries are read-only previews from the persisted execute owner plus raw override provenance. Each entry exposes provider, concrete model, requested/effective effort, support, source (`persisted_execute`, `explicit_override`, or `legacy_backfill`), attempts, and resolved/preview status. Unsupported effort is rendered as requested but not applied.
+
+Repeated CLI/TUI/web status reads never reconstruct legacy ownership or append journal events. Text and TUI rows append a bounded execute-owner token after primary error/dependency signals; `I` opens the TUI's full four-stage table, and Hivebox task details show the same projection.
 
 ## Archived tasks
 
@@ -51,7 +104,7 @@ When the field is non-empty, the text output prints a warning under the project 
 
 The warning is singular for one hidden task (`1 task hidden`) and plural otherwise. The TUI projects pane mirrors the warning by prefixing the affected project's name with `⚠` and the short hint `legacy dirs — run hive migrate`. The Telegram bot also sends a proactive project-level notification on the clean-to-legacy transition, deduped by the bot alert store while the project remains legacy-dirty, even if the hidden task count changes. Bot messages include a project-path-scoped `hive migrate <project_path>` command because the bot is global. Running `hive migrate` moves the slugs into the canonical stage directory listed in `Hive::Commands::Migrate::STAGE_RENAMES`, and after the next status poll the warning disappears.
 
-The `legacy_stage_dirs` field was an additive, non-breaking extension of `urn:hive:schema:status:v2`. Task `id` / `display_name` fields bumped the status schema to v3 and the diagnose schema to v2. Dependency fields bumped `hive-status` to v4; `blocked` is required while `depends_on`, `blocked_by`, and `dependency_stage` are nullable. `folder_mtime` and `pr_url` are part of the current `hive-status` task payload.
+The `legacy_stage_dirs` field was an additive extension of status v2. Task `id` / `display_name` fields produced v3; dependency waits produced v4. Fail-closed admission is `hive-status` v5, with required nullable `admission_error` and closed reason/action enums; condition fields and isolated projection failures produce v6. Historical v4/v5 schemas remain available. An older daemon safely ignores an admission-error row because it is both `blocked: true` and carries the unknown inert `admission_error` action with no command.
 
 ## Icon legend (`Status::ICON`, `lib/hive/commands/status.rb:11`)
 
@@ -126,8 +179,9 @@ Normal `status` and `status --diagnose` without `--write` do not mutate filesyst
 
 ## Tests
 
-- `test/integration/status_test.rb` — empty registry, action grouping, suggested commands, stale-lock decoration.
-- `test/unit/commands/status_test.rb` — status row collection, vanished-folder and transient duplicate stage-move races, non-finalize forward moves, state-file `ENOENT` re-raise when the folder survives, multi-row duplicate pruning, genuine collision preservation, corrupted finalize rows, legacy dir warnings, live task-lock action override, `folder_mtime` JSON emission, `pr_url` extraction from `pr.md` frontmatter, text/archive PR-column rendering, old-archive hiding, and archive-mode listing.
+- `test/integration/status_test.rb` — empty registry, action grouping, suggested commands, stale-lock decoration, and v5 admission fields.
+- `test/integration/dependency_admission_test.rb` — plan-only ordering drift and cross-project repository identity mismatch.
+- `test/unit/commands/status_test.rb` — status row collection, per-project `project_load_failed` degradation, vanished-folder and transient duplicate stage-move races, non-finalize forward moves, state-file `ENOENT` re-raise when the folder survives, multi-row duplicate pruning, genuine collision preservation, corrupted finalize rows, legacy dir warnings, live task-lock action override, `folder_mtime` JSON emission, `pr_url` extraction from `pr.md` frontmatter, text/archive PR-column rendering, old-archive hiding, and archive-mode listing.
 - `test/unit/commands/status_diagnose_test.rb` — local diagnose JSON, read-only `DiagnosticEvidence` fallback for non-red rows, schema validation of evidence payloads, and agent-written artifact refresh.
 - `test/unit/diagnostic_evidence_test.rb` — evidence-tier ordering, source labels, newest-log selection, global log-dir inference, marker-tier fallback, redaction/truncation, invalid UTF-8 handling, symlink/regular-file safety, never-raise degradation, and deep YAML hardening.
 - `test/unit/task_action_test.rb` — diagnostic extraction, redaction, artifact selection, marker fallback, non-red nil.

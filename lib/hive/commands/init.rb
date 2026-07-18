@@ -298,8 +298,11 @@ module Hive
         # `:implicit` re-init already raised AlreadyInitialized in `call` before
         # reaching here, so this path only sees :flag / :prompt — both express a
         # default-workflow intent and run the (idempotent) rebind.
-        install_builtin_workflow_runtime!(ops, workflow_choice.descriptor.id)
-        update_existing_default_workflow!(ops, workflow_choice.descriptor.id)
+        if workflow_choice.descriptor.id.to_s == "bench"
+          install_and_rebind_existing_bench!(ops, workflow_choice.descriptor.id)
+        else
+          update_existing_default_workflow!(ops, workflow_choice.descriptor.id)
+        end
         Hive::Config.register_project(name: File.basename(@project_path), path: @project_path)
         if @json
           emit_existing_json_summary(ops, workflow_choice: workflow_choice)
@@ -384,17 +387,54 @@ module Hive
         end
       end
 
-      def restore_config_snapshot(cfg_path, before)
-        if before == :absent
-          FileUtils.rm_f(cfg_path)
-        else
-          File.binwrite(cfg_path, before)
+      # Legacy bench migration changes three pieces of durable state: the
+      # project-authored descriptor archive, the packaged runtime, and the
+      # default_workflow binding. Keep them under Bench's single commit lock and
+      # single scoped commit so a rejected commit or Ctrl-C restores all three.
+      def install_and_rebind_existing_bench!(ops, workflow_id)
+        cfg_path = File.join(ops.hive_state_path, "config.yml")
+        config_before = nil
+        config_mutated = false
+        next_value = workflow_id.to_s
+        before_commit = lambda do
+          current, corrupt = current_default_workflow_with_status(ops)
+          next if current == next_value && !corrupt
+
+          warn_on_fieldless_tasks_rebinding(ops, from: current, to: next_value)
+          Thread.handle_interrupt(Interrupt => :never) do
+            config_before = File.exist?(cfg_path) ? File.binread(cfg_path) : :absent
+            config_mutated = true
+            write_default_workflow!(cfg_path, next_value)
+          end
         end
+        rollback = lambda do
+          restore_config_snapshot!(cfg_path, config_before) if config_mutated
+        end
+
+        install_builtin_workflow_runtime!(
+          ops,
+          workflow_id,
+          additional_pathspecs: -> { config_mutated ? [ "config.yml" ] : [] },
+          before_commit: before_commit,
+          rollback: rollback
+        )
+      end
+
+      def restore_config_snapshot(cfg_path, before)
+        restore_config_snapshot!(cfg_path, before)
       rescue StandardError => e
         # A failed restore must not mask the original commit error; surface it
         # and let the original (re-raised by the caller) propagate.
         write_warn("hive: could not restore config.yml after a failed default_workflow commit " \
                    "(#{e.class}: #{e.message}); re-run `hive init --workflow` to retry")
+      end
+
+      def restore_config_snapshot!(cfg_path, before)
+        if before == :absent
+          FileUtils.rm_f(cfg_path)
+        else
+          atomic_write(cfg_path, before)
+        end
       end
 
       def current_default_workflow(ops)
@@ -530,10 +570,14 @@ module Hive
         end
       end
 
-      def install_builtin_workflow_runtime!(ops, workflow_id)
+      def install_builtin_workflow_runtime!(ops, workflow_id, **options)
         return unless workflow_id.to_s == "bench"
 
-        Hive::Workflows::Bench.install_runtime!(ops)
+        Hive::Workflows::Bench.install_runtime!(ops, **options)
+        # A legacy project descriptor may have been archived by install_runtime!.
+        # Drop the process-local overlay/cache so later same-process task reads
+        # resolve the newly installed built-in instead of the now-absent file.
+        Hive::Workflows::Project.reset!
       end
 
       def rollback_partial_init(ops, side_effect_snapshot: nil)

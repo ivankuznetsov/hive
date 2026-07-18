@@ -1,13 +1,13 @@
 ---
 title: State Model
 type: data-model
-source: lib/hive/task.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/review_handoff.rb, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/daemon/display_name_backfiller.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
+source: lib/hive/task.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/review_handoff.rb, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/daemon/display_name_backfiller.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
 created: 2026-04-25
-updated: 2026-07-12
-tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, web]
+updated: 2026-07-17
+tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, dependencies, admission, web]
 ---
 
-**TLDR**: Hive's workflow state has no application database. Persistent task/project state lives in two filesystem trees per project — `<project>/.hive-state/` (an orphan-branch worktree holding task folders, configs, locks, logs, and architecture-patrol ledgers) and `~/Dev/<project>.worktrees/<slug>/` (feature worktrees holding actual code) — plus one global `~/.config/hive/config.yml` (or `HIVE_HOME/config.yml` / a migrated legacy registry). Token-usage metrics are the exception and use the SQLite store described in [[token-usage]]. Hivebox web adds no workflow tables: it reads `hive status` snapshots through `StatusFeed`/`StatusBroadcaster` and writes daemon dispatch requests as JSON files under the global state home. The workflow "data model" is the directory layout, marker grammar, YAML sidecars, and runtime JSON queue files described below.
+**TLDR**: Hive's workflow state has no application database. Task/project state lives in `.hive-state` and feature worktrees; durable task execution ownership lives in versioned attempt records under the global state home. Global config/queues remain filesystem records. Token metrics alone use SQLite. Hivebox reads status snapshots and writes delivery requests; leases, not web/daemon process lifetime, own accepted agents.
 
 ## Stage directory layout
 
@@ -65,9 +65,16 @@ id: 1
 slug: add-foo-260603-abcd
 display_name:
 workflow:
+depends_on: api:base-task-260716-abcd
 ```
 
-`Hive::Task#id`, `#display_name`, `#display_label`, `#depends_on`, and the optional workflow selector are derived from this sidecar. Missing, malformed, or non-Hash YAML is tolerated by returning `{id: nil, slug: nil, display_name: nil, depends_on: nil, workflow: nil}`; `display_label` then falls back to the folder slug. `workflow:` was read-only in U3 (no writer emitted it); as of U6 `hive new` pins `meta.yml workflow:` only when an override was passed or the project `default_workflow` is non-coding (and then it pins that non-coding id) — a plain coding capture stays field-less (see [[commands/new]]). A manually tagged task still resolves the selected descriptor before validating its stage directory. `TaskMeta.update_id`/`update_display_name` preserve the selector on rewrite. Writes use a dot-prefixed tempfile in the task folder followed by `File.rename`. `hive migrate` backfills missing or null ids for legacy tasks, preserves existing display names, and generates missing display names with `Hive::DisplayName::Generator` after the locked id/config/stage migration completes. When the global daemon is running, `Hive::Daemon::DisplayNameBackfiller` also retries tasks whose sidecar `display_name` remains nil/blank by spawning `hive generate-name <folder>` on later ticks; this is cosmetic sidecar repair only, so the daemon does not write task ids, markers, or stage transitions. Patrol review handoff writes `meta.yml` with a normal `Hive::TaskCounter` id and display name `Patrol: <finding title>` because the task joins the standard review flow after the PR opens; only counter lock contention leaves that id null.
+`Hive::Task#id`, `#display_name`, `#display_label`, `#depends_on`, and the optional workflow selector are derived from this sidecar. The tolerant reader remains total for display/task construction, but dependency admission uses `TaskMeta.read_for_admission`, which distinguishes an absent legacy file from unreadable YAML, a non-mapping document, and an invalid scalar reference. Admission therefore never converts corrupt metadata into “no dependency.” `TaskMeta.update_id` and `update_display_name` refuse corrupt input and preserve every dependency/workflow field on healthy rewrites. Writes remain atomic tempfile-plus-rename.
+
+`depends_on` is one scalar: same-project slug/numeric id, or explicit `project:slug`. The global registry stores canonical remote identity for cross-project verification. An optional `plan.md` frontmatter `depends_on` is only an exact drift assertion; `meta.yml` remains authoritative and prose is ignored. See [[modules/task_dependencies]].
+
+`hive status` v5 projects strict evidence into a three-state read model: clear; benign below-gate wait (`blocked_by`/`dependency_stage`); or structured admission error (`reason_code`, `offending_ref`, `safe_correction`). Raw folder moves remain possible, but the next status or supported dispatch boundary observes and holds invalid state.
+
+`workflow:` is pinned by `hive new` only for an explicit override or non-coding project default. `hive migrate` backfills legacy ids/names. Daemon display-name and id backfillers skip admission-error rows and strict-read failures, so background healing cannot erase dependency evidence. Patrol review handoff writes a normal id and display name because the task joins the standard review flow.
 
 Task ids are allocated from the global counter file `<state_home>/task-counter.yml` via `Hive::TaskCounter.next!` (`lib/hive/task_counter.rb`). The counter is protected by `<state_home>/.task-counter.lock` (`flock LOCK_EX`, default 30s timeout, 0.2s polling) and stores the next id as YAML:
 
@@ -95,7 +102,7 @@ Markers are HTML comments at end-of-file in the state file. Exactly one is "curr
 | `<!-- COMPLETE -->` | stage finished, ready for `mv` to next stage | brainstorm/plan/open-pr/finalize agents; `done` runner |
 | `<!-- AGENT_WORKING pid=N started=ISO -->` | claude subprocess is running right now | `Hive::Agent#run!` pre-spawn |
 | `<!-- ERROR reason=... marker_id=<hex16> -->` | runner or launcher detected timeout, non-zero exit, concurrent edit, protected-file tamper, tmux session loss, or a stage-specific preflight failure; `Markers.set` generates `marker_id` for new `ERROR` markers | `Hive::Agent#handle_exit`, `Hive::ClaudeLauncher`, stage runners |
-| `<!-- ERROR reason=limits_reached provider=<agent>? message="limits reached for <agent>: ..." retry_after=<iso8601> marker_id=<hex16> -->` | provider account/rate/quota limit surfaced by agent stdout/stderr or a Claude tmux pane menu; used to avoid masking account exhaustion as `timeout`, `exit_code`, `tmux_session_terminated`, `implementer_failed`, or "interactive prompt did not become ready". The `retry_after` stamp (`now + Hive::AgentLimit::RETRY_COOLDOWN_SEC`, default 1h, env `HIVE_LIMITS_RETRY_COOLDOWN_SEC`) lets the daemon healer self-heal once the usage window has plausibly reset instead of staying red until manual `hive markers clear` — see [[daemon]]. `4-execute` stamps `provider=<execute-agent>` because its runner owns the final marker in `:exit_code_only` mode; older agent/launcher writers may only expose the provider in `message=`. | `Hive::Agent#handle_exit`, `Hive::ClaudeLauncher`, `Stages::Execute#run_pass` |
+| `<!-- ERROR reason=limits_reached provider=<agent>? message="limits reached for <agent>: ..." retry_after=<iso8601> marker_id=<hex16> -->` | provider account/rate/quota limit surfaced by agent stdout/stderr or a Claude tmux pane menu; used to avoid masking account exhaustion as `timeout`, `exit_code`, `tmux_session_terminated`, `implementer_failed`, or "interactive prompt did not become ready". When the captured provider text includes a complete dated reset hint (month, day, year, and time), `Hive::AgentLimit.retry_after` uses that boundary plus a one-minute grace; ambiguous time-only text and unparseable/expired/implausibly distant dates fall back to `now + RETRY_COOLDOWN_SEC` (default 1h, env `HIVE_LIMITS_RETRY_COOLDOWN_SEC`). Tmux parsing bounds this input to the live matched limit line and adjacent menu/reset lines, excluding unrelated transcript dates; all-reviewer failures use the latest captured provider boundary. The stamp lets the daemon healer wait for the real usage window instead of burning its bounded retries hourly or staying red until manual `hive markers clear` — see [[daemon]]. `4-execute` stamps `provider=<execute-agent>` because its runner owns the final marker in `:exit_code_only` mode; older agent/launcher writers may only expose the provider in `message=`. | `Hive::Agent#handle_exit`, `Hive::ClaudeLauncher`, `Stages::Execute#run_pass` |
 | `<!-- ERROR reason=ensure_clean_on_exit_failed residue_paths=<rel,paths> marker_id=<hex16> -->` | the clean-exit invariant (`Hive::Stages::CleanExit`, gated on `stages.ensure_clean_on_exit`) overwrote a stage's outcome marker because residue at stage exit was out-of-scope for `review.fix.auto_commit.scope_check`, git add/commit failed (including `git status` / `git add -A` / `git reset HEAD --` / `git diff --cached --name-only` exceeding the shared `AUTO_COMMIT_OP_TIMEOUT_SEC = 300` cap — `AutoCommit.capture_git_with_timeout` wraps the previously unbounded `Open3.capture3` calls so a hung pre-commit hook or frozen pager surfaces as `timed_out: true` instead of pinning the runner), or auto-commit raised `Hive::ConfigError` (invalid `review.fix.auto_commit.sign_policy` etc. — surfaced with `detail="invalid sign_policy config: ..."` instead of silently dropping into the generic StandardError warn-and-continue path). `residue_paths` is the comma-joined list of worktree-relative paths (absent on the config-error variant; the message is always carried in the `detail=` attr, truncated to 200 chars). When this marker overwrites a runner's own marker, `with_stage_events` also rewrites `result[:commit]` to `"ensure_clean_on_exit_failed"` and `result[:status]` to `:error` so the post-run hive-state commit (`commands/run.rb#commit_after`) matches the on-disk marker rather than the runner's stale success commit action. The bot routes this reason through manual-only reply (no inline retry); operator must inspect, fix the config or commit/discard residue, then `hive markers clear <folder> --name ERROR --match-attr reason=ensure_clean_on_exit_failed` and re-run the stage verb. | `Hive::Stages::Base#enforce_clean_exit!` via `with_stage_events` exit hook + `Stages::Finalize` entry backstop |
 | `<!-- EXECUTE_WAITING reason=no_worktree_changes\|dirty_worktree\|missing_research_output\|branch_mismatch\|head_not_descendant -->` | impl spawn exited cleanly but cannot be marked done yet; inspect `## Execute Output`, revise/mark research, clean/commit worktree changes, or recover the expected task branch | `Stages::Execute#run!` |
 | `<!-- EXECUTE_COMPLETE mode=research? -->` | impl pass committed cleanly on the expected task branch, or explicit research-mode pass captured structured output; ready for `mv` to `5-open-pr/` | `Stages::Execute#run!` (impl-only since U9) |
@@ -105,6 +112,17 @@ Markers are HTML comments at end-of-file in the state file. Exactly one is "curr
 | `<!-- REVIEW_STALE pass=NN -->` | hit `cfg.review.max_passes` (default 2) | `Stages::Review` orchestrator |
 | `<!-- REVIEW_COMPLETE pass=NN browser=passed\|warned\|skipped -->` | review loop done — ready to run `hive artifacts` into 7-artifacts (`browser=warned` = soft-warn surfaced in PR body) | `Stages::Review` orchestrator |
 | `<!-- REVIEW_ERROR phase=... reason=... message="..." -->` | agent-level error or protected-file tampering (mirrors ADR-013's `:error` shape for `EXECUTE_*`). Most review errors remain human-recoverable, but the daemon auto-clears no-live-lock `reason=review_agent_died`, `phase=reviewers reason=reviewer_partial_failure` when `reviews/errors-NN.md` contains only Claude/tmux `tmux_session_terminated before writing expected output file` failures, `phase=fix reason=fix_failed message="claude stop hook did not signal completion"` for the legacy Claude stop-hook completion bug, and `reason=limits_reached` once its `retry_after` cooldown elapses. The review runner can suppress the known Claude/tmux fix Stop-hook failure before this marker is written only when launcher evidence and review facts prove a completed pass: artifacts exist, no unresolved escalations remain, the worktree is readable, and commit/dirty-worktree/whole-pass `RESOLVED/NO-FIX` evidence exists. Review limit markers can come from CI-fix, all reviewers failing on limits, or triage/fix spawn failures whose captured error text matches `Hive::AgentLimit`; this limit gate runs before any terminal classifier so rate-limit/429 text keeps the cooldown path. Residual non-limit triage/fix phase-agent failures use `Hive::ReviewErrorReason`'s closed enum (`merge_conflict`, `network_timeout`, `tool_permission_denied`, `agent_crashed`, `unknown`) and carry a whitespace-collapsed, 300-char-capped `message=` attr from the captured error so `status.md`, `hive status --json`, and the web diagnostic card show the real cause even when `reason=unknown` (in practice the triage/fix plumbing forwards a condensed wrapper string rather than raw agent output, so the named buckets rarely fire and this normally lands on `unknown` — see [[stages/review]]) (non-limit CI errors write `reason=ci_unrunnable` directly and carry no `message=`). Auto-clear is bounded per daemon process by failure signature (default 3); repeated identical failures stay red after the budget is exhausted. | `Stages::Review` orchestrator |
+
+New `REVIEW_WORKING` and `REVIEW_ERROR` writes carry a generated `marker_id`,
+just like generic `ERROR` writes. Review healers match the id observed in the
+status row and claim the per-task lock before clearing; a legacy row without an
+id can clear only another legacy no-id marker. If an external run acquired the
+lock after the status snapshot, healing leaves its lock and marker untouched.
+For a live-but-wedged review holder, status also snapshots the lock PID,
+process start time, and generated lock id. The healer rechecks that exact
+identity before signaling, claims its own lock generation after termination,
+and only then clears the matching marker. Together these fences prevent an old
+healer tick from disrupting a newer review or runner generation.
 
 `5-open-pr`, `7-artifacts`, and `8-finalize` reuse the generic `COMPLETE` / `ERROR` marker names with stage-specific attrs such as `pr_url=...`, `is_draft=true|false`, `idempotent=true`, and `reason=...`. Most `ERROR` markers remain manual recovery states, but the daemon auto-clears a narrow no-live-lock subset with marker-id guards and bounded per-process budgets: `8-finalize` `reason=unpushed_commits`, plus non-review terminal agent-loss `reason=tmux_session_terminated` / `reason=agent_orphaned` in `2-brainstorm`, `3-plan`, `4-execute`, `7-artifacts`, and `8-finalize`. `reason=limits_reached` (any stage, including review `REVIEW_ERROR` markers from reviewers/triage/fix) also self-heals, gated on its `retry_after` cooldown stamp rather than on stage. A second recoverable terminal-error healer handles dependency outages: Codex-auth `ERROR reason=implementer_failed provider=codex message=...401...` and `ERROR reason=claude_launch_failed` can be cleared only after fail-closed work-area safety checks, changed health signal/backoff gates, and successful dependency probes; `daemon.auto_retry.enabled: false` disables that path. `hive status`, `hive status --json`, and the TUI render quota holds through `Hive::AgentLimit`: human/TUI text says `held: agent quota (...) — retry after ... UTC; top up or switch execute agent`, while JSON adds `"held": {"reason":"quota","provider":...,"retry_after":...}` without overloading dependency `blocked_by`. The `3-plan` terminal-error path writes a `DispatchRequestQueue` request for `hive plan <slug> --project <project> --from 3-plan` after any successful terminal `ERROR` clear there, including terminal agent-loss, elapsed `limits_reached`, and recoverable dependency-outage clears, because clearing the marker can leave an empty markerless `plan.md` that otherwise classifies straight back to `:error`. See [[daemon]]. Separately, an `8-finalize` `ERROR reason=git_status_failed` or `reason=claude_launch_failed` stays red while the PR is open unless the recoverable-error healer clears it; `PrMergeWatcher` can also retire it after the PR is merged by dispatching the internal archive recovery path, and `StageAction` re-confirms the marker reason and GitHub `MERGED` state before moving the folder to `9-done`.
 
@@ -116,8 +134,64 @@ Recovery from a stale or error marker is agent-callable via `hive markers clear 
 
 ## Concurrency files
 
-- **Per-task lock**: `<task folder>/.lock` — YAML payload `{pid, started_at, process_start_time, claude_pid?, claude_pid_start_time?, slug?, stage?}`. Acquired EXCL by `Hive::Lock.acquire_task_lock` (`lib/hive/lock.rb:18`). Stale check uses `Process.kill(0, pid)` plus `/proc/<pid>/stat` field-22 cross-check to defeat runner PID reuse. After spawning, both headless `Hive::Agent` and tmux-backed `Hive::ClaudeLauncher` write the child `claude_pid` and its `claude_pid_start_time`; cleanup compares that identity metadata with the live process before signalling so PID reuse cannot target an unrelated child.
+Durable leases under `$HIVE_HOME/attempts/v1/records/` are the authoritative
+execution owner. Records are `launching`, `running`, `terminal`, or `lost`;
+wrapper/worker PID start fingerprints and session/group IDs make adoption and
+cleanup PID-reuse safe. Each non-compatibility record also immutably stores the
+exact admitted worker argv and only the digest of a random claim capability.
+The secret crosses exec through inherited descriptors, claims once, and gates
+worker context installation until the exact worker identity is durable.
+The worker cannot select an alternate record-store path, and no production
+thread-local/public constructor can synthesize the authenticated context.
+Per-generation flocks plus guarded lease version/deadline comparisons serialize
+claim, heartbeat, terminal, and loss transitions. See [[modules/attempts]].
+The generation progress token includes the task's current dependency-admission
+verdict as well as its stage artifact, so terminal replay is stable while an
+admission wait is unchanged but cannot mask a later prerequisite advance.
+
+- **Per-task lock**: `<task folder>/.lock` — compatibility/work-area exclusion projection, not the restart-safe owner. Its YAML payload is `{pid, started_at, process_start_time, lock_id, attempt_id?, task_generation?, claude_pid?, claude_pid_start_time?, slug?, stage?}`; old readers tolerate the optional attempt fields. `Hive::Lock.acquire_task_lock` writes and fsyncs a sibling tempfile, then atomically hard-links the complete payload into place under an already-ignored `.lock.tmp.guard` flock. Stale check uses `Process.kill(0, pid)` plus `/proc/<pid>/stat` field-22 cross-check to defeat runner PID reuse; release compares `lock_id` so an old owner cannot remove a replacement generation and does not recreate a source folder moved by a stage transition. After spawning, both headless `Hive::Agent` and tmux-backed `Hive::ClaudeLauncher` write the child `claude_pid` and its `claude_pid_start_time`; cleanup compares that identity metadata with the live process before signalling so PID reuse cannot target an unrelated child.
 - **Per-project commit lock**: `<project>/.hive-state/.commit-lock` — short flock around the `git add && git commit` in the hive-state worktree to serialize concurrent writers. See [[modules/lock]].
+
+## Task condition journal and projection
+
+The task-local durability contracts are deliberately separate. Legacy,
+fail-soft operational telemetry remains in `events.jsonl` under
+`Hive::Events`. Versioned condition/generation/evidence/audit records live in
+the strict `task-journal.jsonl` and are appended synchronously through
+`Hive::TaskJournal::Writer` with a separate task-local journal flock, complete
+JSON-line batch, short-write retry, flush, and fsync. A failed append truncates
+and re-syncs to the pre-append byte boundary before reporting failure. Those
+records reuse the durable attempt ID from [[modules/attempts]] and add a
+numeric task input epoch plus exact-HEAD commit generation. Projection replay
+applies the same structural, schema-version, and durable attempt task/stage/
+generation checks as the writer; unknown record shapes fail closed.
+Validation follows predecessor lineage and rejects missing, incompatible, or
+cyclic links. Projection selection uses that causal chain before timestamps,
+so clock regression cannot reverse retry order.
+
+`<task>/task-projection.json` is an atomic, disposable materialized view bound
+to the journal cursor, last event ID, and SHA-256. It contains projected
+identity, current and superseded conditions, evidence, gate diagnostics,
+compatibility state, provenance, and shadow audit. Missing/corrupt/stale views
+replay from the journal without git/GitHub calls. A binding-matched cached view
+hashes the journal bytes and revalidates each unique current/predecessor attempt
+binding, including mutable state/outcome/lease; changed bindings take the full
+parse/replay path. A missing or empty journal after a durable snapshot or
+attempt-stamped `execute_*` marker fails both read and rebuild without
+replacing the last snapshot; non-execute markers do not claim an execute
+condition-journal handoff. Status replay is
+read-only; the next mutating execute boundary republishes the view. The view
+also carries at most the latest 20 `condition_overrides` projected from forced-
+transition `operator_action` records; the journal keeps all of them. Terminal/
+lost attempt state reconciles current `AgentHealthy` even before the daemon
+lifecycle observation lands.
+See [[modules/conditions]].
+
+### Implementation identity events
+
+The same task journal is the sole authority for implementation ownership. `implementation_identity_captured` and `implementation_identity_backfilled` retain one immutable execute identity per numeric task generation; `implementation_identity_fallback` makes last-resort legacy config recovery visible; and `implementation_stage_resolved` records the actual PR-opening or repair selection before its process starts. Reconstruction accepts historical execute attempts only when project, task id/slug, and numeric generation match the current durable attempt. The journal and projection are protected across implementation-owning agent spawns. The projection retains execute history and the latest stage resolution for the current generation. Idempotency keys make equivalent retries no-ops and reject conflicting captures.
+
+The identity stores only provider, concrete model, profile/launcher label, source, generation, originating/resolved attempt, model-pin policy, and requested/effective effort support. Credentials, arbitrary provider configuration, prompts, and raw environment values are excluded. Any compatibility snapshot is cursor/hash-validated and replaceable from the journal.
 
 ## Runtime dispatch queue and web snapshots
 
@@ -132,7 +206,7 @@ Each pending request is one JSON file:
 
 ```yaml
 schema: hive-dispatch-request
-schema_version: 2
+schema_version: 3
 request_id: <hex16>
 created_at: <UTC-ISO8601>
 project: <registered project name>
@@ -142,15 +216,17 @@ requestor: bot|healer
 chat_id:
 update_id:
 trigger:
+task_generation:
+predecessor_attempt_id:
+inherited_outputs: []
 ```
 
-The current strict wire contract is `hive-dispatch-request.v2`: v2 adds the
-closed `requestor: healer` producer used by `StaleAgentHealer` while preserving
-`bot` for Telegram and hivebox web (web still writes through
-`Hive::Bot::DispatchRequestWriter`). The daemon rejects any file whose
-`schema_version` does not equal `DispatchRequestQueue::SCHEMA_VERSION` with
-`unknown_schema_version`; older schema files remain in `schemas/` for pinned
-validators, not for mixed-version live queue operation.
+Current producers write `hive-dispatch-request.v3`, adding generation intent,
+predecessor, and inherited outputs. Consumers continue accepting pending v2
+files and infer their generation under the same admission lock. Queue and
+claim sidecars remain delivery records: after admission the claim stores the
+attempt ID/generation, follows a loss successor, and completes from its
+terminal receipt.
 
 `Hive::Daemon::DispatchRequestQueue.valid_argv?` requires `argv[0] == "hive"`
 and allowlists only workflow-mutating verbs (`run`, `develop`, `brainstorm`,
@@ -158,9 +234,12 @@ and allowlists only workflow-mutating verbs (`run`, `develop`, `brainstorm`,
 Pending requests expire after `EXPIRY_SEC = 600`. On dispatch, the daemon
 renames the file to `<id>.json.claimed` and writes
 `<id>.json.claimed.claim` with `pid`, `process_start_time`, and `claimed_at`;
-those claim files are the at-most-once dispatch record. Multi-step recoveries
+after task admission it also carries `attempt_id` and `task_generation`.
+If the daemon dies after admission but before writing those fields, startup
+recovers them from the attempt record's immutable `request_id` correlation.
+Those claims are at-most-once delivery records, not execution owners. Multi-step recoveries
 store later argv arrays in `<request_id>.sequence` and promote the next request
-only after the previous child exits 0; non-zero/nil exits discard the sequence.
+only after the previous attempt receipt exits 0; non-zero/lost outcomes discard the sequence.
 Hivebox `recover` writes the sequence sidecar first, then the guarded
 `hive markers clear ... --json` request, and discards the sidecar if the
 request write fails so no orphaned continuation remains.
@@ -468,16 +547,14 @@ timeout_sec:
   review_triage: 1800
   review_fix: 14400
   review_browser: 3600
-# Stage-level agent for the three single-agent stages (ADR-023). The
-# 6-review stage keeps per-role agent fields under `review.{ci,triage,
-# fix,browser_test}.agent`. Runtime fallback in stage code stays
-# `cfg.dig("<stage>", "agent") || "claude"`, so legacy configs without
-# these keys keep working.
+# Stage-level agent defaults remain for independently owned stages.
+# open_pr and review ci/fix omit active identity defaults so the persisted
+# generation-scoped execute owner applies; raw authored fields override it.
 claude:     { mode: tmux, permission_mode: bypassPermissions }  # mode is tmux | headless; permission_mode applies to every Claude-backed launch in both tmux and headless mode via `AgentProfile#permission_flags` (`bypassPermissions` default → `--dangerously-skip-permissions`, otherwise `--permission-mode <mode>`; `auto` for Claude Code auto-mode rules). DEFAULTS-seeded — always non-nil after Config.load. `Config.explicit_claude_mode?` is a strict `EXPLICIT_CLAUDE_MODE_KEY == true` check (no dig fallback) so synthesised cfgs in tests/daemon helpers must set the flag themselves. Applies to every Claude-backed launch via `Hive::ClaudeLauncher` (shared tmux envelope across brainstorm/plan/execute/open_pr/artifacts/finalize/review). `hive doctor` surfaces the active mode.
 brainstorm: { agent: claude, runtime: headless }  # runtime is legacy read-back-compat only
 plan:       { agent: claude }
 execute:    { agent: claude }   # rendered template recommends `codex`; DEFAULTS stays `claude`
-open_pr:    { agent: claude }
+open_pr:    {}
 artifacts:  { agent: claude }
 finalize:   { agent: claude }
 agents:                 # per-CLI profile overrides (claude, codex, pi, grok)
@@ -486,10 +563,9 @@ agents:                 # per-CLI profile overrides (claude, codex, pi, grok)
   pi:     { bin: pi,     env_override: HIVE_PI_BIN,     min_version: 0.70.2 }
   grok:   { bin: grok,   env_override: HIVE_GROK_BIN,   min_version: 0.2.90 }
 review:                 # 6-review stage config (U2)
-  ci:           { command: null, max_attempts: 3, agent: claude, prompt_template: ci_fix_prompt.md.erb }
+  ci:           { command: null, max_attempts: 3, prompt_template: ci_fix_prompt.md.erb }
   triage:       { enabled: true, agent: claude, bias: courageous, prompt_template: null, custom_prompt: null }
   fix:
-    agent: claude
     prompt_template: fix_prompt.md.erb
     auto_commit:
       sign_policy: inherit   # inherit | bypass | fail

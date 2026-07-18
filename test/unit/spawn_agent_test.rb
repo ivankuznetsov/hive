@@ -248,6 +248,44 @@ class SpawnAgentTest < Minitest::Test
     end
   end
 
+  def test_normalized_codex_model_and_effort_reach_spawn_argv
+    with_tmp_dir do |dir|
+      task = make_task(dir)
+      argv_log = File.join(dir, "argv.log")
+      binary = File.join(dir, "fake-codex")
+      File.write(binary, <<~SH)
+        #!/usr/bin/env bash
+        if [ "$1" = "--version" ]; then echo "codex-cli 0.144.3"; exit 0; fi
+        printf '%s\n' "$@" > "#{argv_log}"
+      SH
+      File.chmod(0o755, binary)
+      profile = Hive::AgentProfile.new(
+        name: :codex,
+        bin_default: binary,
+        headless_flag: "exec",
+        prompt_style: :stdin,
+        version_flag: "--version",
+        skill_syntax_format: "/%{skill}",
+        status_detection_mode: :exit_code_only,
+        model_argument_builder: ->(model) { [ "--model", model ] },
+        effort_argument_builder: ->(effort) { [ "-c", "model_reasoning_effort=#{effort}" ] }
+      )
+
+      Hive::Stages::Base.spawn_agent(
+        task,
+        prompt: "x", max_budget_usd: nil, timeout_sec: 5,
+        profile: profile, status_mode: :exit_code_only,
+        model: "gpt-5.6-terra", effort: "medium"
+      )
+
+      argv = File.readlines(argv_log, chomp: true)
+      model_index = argv.index("--model")
+      effort_index = argv.index("-c")
+      assert_equal "gpt-5.6-terra", argv.fetch(model_index + 1)
+      assert_equal "model_reasoning_effort=medium", argv.fetch(effort_index + 1)
+    end
+  end
+
   # --- preflight ordering --------------------------------------------------
 
   def test_preflight_runs_before_agent_spawn_returns_error_envelope
@@ -544,9 +582,11 @@ class SpawnAgentTest < Minitest::Test
       "execute" => { "agent" => "codex" },
       "agents"  => { "codex" => { "bin" => "/custom/codex/path" } }
     }
-    profile = Hive::Stages::Base.stage_profile(cfg, "execute")
-    assert_equal :codex, profile.name
-    assert_equal "/custom/codex/path", profile.bin
+    with_env("HIVE_CODEX_BIN" => nil) do
+      profile = Hive::Stages::Base.stage_profile(cfg, "execute")
+      assert_equal :codex, profile.name
+      assert_equal "/custom/codex/path", profile.bin
+    end
   end
 
   def test_stage_profile_raises_on_unknown_agent_name
@@ -637,6 +677,7 @@ class SpawnAgentTest < Minitest::Test
 
       assert_equal [ task.folder, File.join(task.folder, "drafts"), absolute ], scope.fetch(:add_dirs)
       assert_equal %w[Read Write Edit], scope.fetch(:allowed_tools)
+      assert_equal "dontAsk", scope.fetch(:permission_mode)
     end
   end
 

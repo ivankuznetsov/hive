@@ -6,6 +6,7 @@ require "hive/agent_profiles"
 require "hive/patrol/architecture_mapper"
 require "hive/patrol/runner_task"
 require "hive/patrol/token_budget"
+require "hive/patrol/agent_launch"
 require "hive/patrol/validator"
 require "hive/refactor_patrol/caps"
 require "hive/secret_patterns"
@@ -470,7 +471,8 @@ module Hive
           slug: STAGE
         )
         profile = fix_profile
-        unless @token_budget.acquire(stage: STAGE)
+        launch = Hive::Patrol::AgentLaunch.prepare(profile: profile, prompt: prompt, role: :fix)
+        unless @token_budget.acquire(stage: STAGE, minimum_tokens: launch.fetch(:minimum_tokens))
           return { status: :error, error_message: @token_budget.exhaustion_message }
         end
         started_at = Time.now.utc
@@ -482,8 +484,10 @@ module Hive
               @cfg.dig("budget_usd", "patrol") || 100, stage: STAGE
             ),
             max_tokens: @token_budget.max_tokens(stage: STAGE),
+            max_turns: launch.fetch(:max_turns),
             timeout_sec: @cfg.dig("timeout_sec", "patrol") || 3600,
             log_label: STAGE, profile: profile, status_mode: :exit_code_only,
+            cli_flags: launch.fetch(:cli_flags),
             permission_mode: Hive::AgentProfile::WORKSPACE_WRITE_PERMISSION_MODE
           ).run!
         ensure

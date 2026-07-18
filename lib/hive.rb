@@ -1,5 +1,5 @@
 module Hive
-  VERSION = "0.4.2".freeze
+  VERSION = "0.4.3".freeze
   MIN_CLAUDE_VERSION = "2.1.118".freeze
   # Canonical GitHub org + repo. Referenced by the release probe
   # (UpdateCheck), the brew tap + installer URL (Commands::Update), etc.
@@ -13,7 +13,7 @@ module Hive
     # removed; adding new keys is non-breaking and does NOT require a bump.
     # Single source of truth so the two emit sites can't drift.
     SCHEMA_VERSIONS = {
-      "hive-status" => 4,
+      "hive-status" => 6,
       "hive-init" => 2,
       "hive-setup-agents" => 1,
       "hive-doctor" => 2,
@@ -72,11 +72,13 @@ module Hive
       # `dispatch_requests/` directory. See
       # `Hive::Daemon::DispatchRequestQueue` and
       # `Hive::Bot::DispatchRequestWriter`.
-      "hive-dispatch-request" => 2,
+      "hive-dispatch-request" => 3,
       # Reverse-direction notice the daemon writes for the bot to relay a
       # non-zero, bot-originated dispatch back to the originating Telegram
       # chat. See `Hive::Daemon::DispatchResultQueue` (ADV-1).
-      "hive-dispatch-result" => 1
+      "hive-dispatch-result" => 2,
+      # Internal source-of-truth record for durable task-stage ownership.
+      "hive-attempt" => 2
     }.freeze
 
     # Closed enum of Diagnostic.generated_by values accepted by the
@@ -126,9 +128,18 @@ module Hive
           payload["current_stage"] = error.current_stage if error.current_stage
           payload["target_stage"] = error.target_stage if error.target_stage
         end
+        if error.is_a?(Hive::ConditionGateBlocked)
+          payload["condition_gate"] = error.condition_gate
+          payload["next_action"] = error.next_action
+        end
         if error.is_a?(Hive::ConcurrentRunError)
           payload["holder"] = error.holder if error.holder
           payload["lock_path"] = error.lock_path if error.lock_path
+        end
+        if error.is_a?(Hive::DependencyWaitError) || error.is_a?(Hive::DependencyAdmissionError)
+          payload["reason_code"] = error.reason_code
+          payload["offending_ref"] = error.offending_ref
+          payload["safe_correction"] = error.safe_correction
         end
         payload
       end
@@ -185,6 +196,7 @@ module Hive
       ARCHIVED            = "archived".freeze
       MANUAL_STEERING     = "manual_steering".freeze
       ERROR               = "error".freeze
+      ADMISSION_ERROR     = "admission_error".freeze
       ALL = constants(false).reject { |c| c == :ALL }.map { |c| const_get(c) }.freeze
     end
 
@@ -206,6 +218,8 @@ module Hive
       WORKTREE          = "worktree".freeze
       AMBIGUOUS_SLUG    = "ambiguous_slug".freeze
       INVALID_TASK_PATH = "invalid_task_path".freeze
+      DEPENDENCY_WAIT    = "dependency_wait".freeze
+      ADMISSION_ERROR    = "admission_error".freeze
       INTERNAL          = "internal".freeze
       ERROR             = "error".freeze
       ALL = constants(false).reject { |c| c == :ALL }.map { |c| const_get(c) }.freeze
@@ -491,6 +505,36 @@ module Hive
     end
   end
 
+  # A dependency is valid but has not reached the depending project's gate.
+  # This is retryable operational state, not a configuration error.
+  class DependencyWaitError < Error
+    attr_reader :reason_code, :offending_ref, :safe_correction
+
+    def initialize(message, reason_code: "dependency_wait", offending_ref:, safe_correction:)
+      super(message)
+      @reason_code = reason_code
+      @offending_ref = offending_ref
+      @safe_correction = safe_correction
+    end
+
+    def exit_code
+      ExitCodes::TEMPFAIL
+    end
+  end
+
+  # A fail-closed dependency admission result. ConfigError ancestry gives
+  # manual callers the stable, non-retryable CONFIG exit code.
+  class DependencyAdmissionError < ConfigError
+    attr_reader :reason_code, :offending_ref, :safe_correction
+
+    def initialize(message, reason_code:, offending_ref:, safe_correction:)
+      super(message)
+      @reason_code = reason_code
+      @offending_ref = offending_ref
+      @safe_correction = safe_correction
+    end
+  end
+
   class UnavailableError < Error
     def exit_code
       ExitCodes::UNAVAILABLE
@@ -509,6 +553,24 @@ module Hive
   class InternalError < Error
     def exit_code
       ExitCodes::SOFTWARE
+    end
+  end
+
+  # A detached durable worker reached a non-zero terminal outcome without
+  # emitting the JSON document its caller requested. Carry the worker's exact
+  # exit status through the ordinary command envelope/rescue path.
+  class AttemptExecutionError < Error
+    attr_reader :attempt_id, :outcome
+
+    def initialize(message, exit_code:, attempt_id:, outcome:)
+      super(message)
+      @attempt_exit_code = Integer(exit_code)
+      @attempt_id = attempt_id.to_s
+      @outcome = outcome.to_s
+    end
+
+    def exit_code
+      @attempt_exit_code
     end
   end
 
@@ -572,6 +634,19 @@ module Hive
 
     def exit_code
       ExitCodes::WRONG_STAGE
+    end
+  end
+
+  # A forward transition rejected by condition authority. Carries the exact
+  # gate and recovery action so JSON callers never need to parse WrongStage
+  # prose or issue a second status request to decide what to do next.
+  class ConditionGateBlocked < WrongStage
+    attr_reader :condition_gate, :next_action
+
+    def initialize(message, condition_gate:, next_action:, **stage_context)
+      super(message, **stage_context)
+      @condition_gate = condition_gate
+      @next_action = next_action
     end
   end
 

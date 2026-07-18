@@ -165,6 +165,10 @@ module Hive
         end
       end
 
+      # `I` in grid mode — open the read-only four-stage implementation
+      # ownership/provenance table carried by the status snapshot.
+      OpenImplementationIdentityDetail = Data.define(:row)
+
       # Enter inside the red-status detail view — run the same
       # recovery handler the grid row used to run directly.
       RedStatusAutofix = Data.define(:row)

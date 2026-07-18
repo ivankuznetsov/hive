@@ -68,6 +68,21 @@ class ReviewersSyntheticTaskTest < Minitest::Test
     end
   end
 
+  def test_synthetic_task_carries_durable_slug_and_id
+    with_tmp_dir do |dir|
+      ctx = make_ctx(dir)
+      FileUtils.mkdir_p(ctx.task_folder)
+      Hive::TaskMeta.write(
+        ctx.task_folder, id: 42, slug: "synth-task", display_name: nil
+      )
+
+      task = Hive::Reviewers.synthetic_task_for(ctx)
+
+      assert_equal "synth-task", task.slug
+      assert_equal 42, task.id
+    end
+  end
+
   def test_synthetic_task_struct_is_keyword_init
     # keyword_init: true means positional args raise ArgumentError —
     # documents the constructor contract so a future drop of the kwarg

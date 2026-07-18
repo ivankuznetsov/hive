@@ -1254,11 +1254,22 @@ class HivePatrolFixerTest < Minitest::Test
   def test_run_agent_wrapper_refuses_an_exhausted_patrol_budget
     with_tmp_git_repo do |repo|
       budget = Object.new
-      budget.define_singleton_method(:acquire) { |stage:| stage != "patrol-fix" }
+      budget.define_singleton_method(:acquire) do |stage:, minimum_tokens:|
+        minimum_tokens >= 0 && stage != "patrol-fix"
+      end
       budget.define_singleton_method(:exhaustion_message) { "cycle exhausted" }
       fixer = Hive::Patrol::Fixer.new(repo, cfg: cfg(repo), token_budget: budget)
+      profile = Struct.new(:name, :initial_context_tokens) do
+        def require_cli_capability!(name)
+          raise "unexpected capability #{name.inspect}" unless name == :patrol_fix_context
 
-      result = fixer.send(:run_agent, prompt: "p", run_dir: repo, worktree_path: repo)
+          [ "--safe-mode", "--disable-slash-commands" ]
+        end
+      end.new(:claude, 20_000)
+
+      result = with_replaced_singleton_method(Hive::AgentProfiles, :lookup, ->(*) { profile }) do
+        fixer.send(:run_agent, prompt: "p", run_dir: repo, worktree_path: repo)
+      end
 
       assert_equal :error, result.fetch(:status)
       assert_equal "cycle exhausted", result.fetch(:error_message)

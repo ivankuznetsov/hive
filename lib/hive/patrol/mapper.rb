@@ -271,7 +271,9 @@ module Hive
 
       def architecture_features(files, separately_reviewed: [])
         reviewed_paths = separately_reviewed.flat_map(&:owned_files).to_set
-        ArchitectureMapper.new(@project_root, cfg: @cfg).call(files).filter_map do |feature|
+        ArchitectureMapper.new(
+          @project_root, cfg: @cfg, review_scope: :patrol
+        ).call(files).filter_map do |feature|
           # Dedicated command-contract slices already own these paths. Keep
           # command entrypoints as component context, but never as a second
           # root-cause anchor; omit manifest components whose sole owned file
@@ -384,11 +386,11 @@ module Hive
       end
 
       def max_owned_files
-        @cfg.dig("patrol", "review", "max_owned_files") || 12
+        @cfg.dig("patrol", "review", "max_owned_files") || 4
       end
 
       def max_context_files
-        @cfg.dig("patrol", "review", "max_context_files") || 24
+        @cfg.dig("patrol", "review", "max_context_files") || 4
       end
 
       def capped(items, limit)

@@ -60,6 +60,22 @@ class HiveTuiBubbleModelTest < Minitest::Test
     }) { yield }
   end
 
+  def test_view_renders_implementation_identity_detail_mode
+    identity = { "generation" => 1, "pending" => false, "stages" => {} }
+    row = make_task_row.with(implementation_identity: identity)
+    state = Hive::Tui::Model::ImplementationIdentityDetailState.new(row: row)
+    bubble = Hive::Tui::BubbleModel.new(
+      hive_model: Hive::Tui::Model.initial.with(
+        mode: :implementation_identity_detail,
+        implementation_identity_detail_state: state
+      ),
+      dispatch: @dispatch,
+      update_state: EmptyUpdateState.new(nudge: nil)
+    )
+
+    assert_includes bubble.view, "Implementation ownership"
+  end
+
   def write_idea_md(dir, original_text:, slug: "some-slug", created_at: "2026-05-20T00:00:00Z")
     indented_original = original_text.lines.map { |line| "  #{line.chomp}" }
     body = [
@@ -3250,7 +3266,9 @@ class HiveTuiBubbleModelTest < Minitest::Test
         folder: folder, marker: "error", attrs: { "reason" => "exit_code" }, suggested_command: nil
       )
 
-      @model.update(Hive::Tui::Messages::OpenRedStatusDetail.new(row: row))
+      with_env("HIVE_CODEX_BIN" => nil) do
+        @model.update(Hive::Tui::Messages::OpenRedStatusDetail.new(row: row))
+      end
 
       assert_equal :red_status_detail, @model.hive_model.mode
       assert_equal "codex", @model.hive_model.red_status_detail_state.agent_label

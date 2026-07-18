@@ -105,11 +105,6 @@ module Hive
         @stat_error_streaks = {}
         @archived_cache = empty_archived_cache
         @snapshot_archived_cache = @archived_cache
-        # Poll-thread-local memo of the identities derived from a given
-        # archived cache, so the hot active-reparse path doesn't rebuild
-        # them every tick (see #archived_identities_from_cache).
-        @archived_identities = nil
-        @archived_identities_source = nil
         @archive_dir_mtimes = {}
         @archive_last_refresh_at = nil
         @archive_refresh_dirty = false
@@ -224,8 +219,13 @@ module Hive
           # payload IS already the merged active+archived view — publish it
           # directly instead of stripping archived rows and re-merging them
           # from a cache derived from this same payload.
-          payload = Hive::Commands::Status.new.json_payload(projects)
-          @archived_cache = archived_cache_from_payload(payload, previous: @archived_cache)
+          admission_context = Hive::DependencySnapshot.admission_context(projects)
+          payload = Hive::Commands::Status.new.json_payload(
+            projects, admission_context: admission_context
+          )
+          @archived_cache = archived_cache_from_payload(
+            payload, admission_context: admission_context, previous: @archived_cache
+          )
           @archive_last_refresh_at = Time.now
           publish_snapshot(payload, archived_cache: @archived_cache)
           @archive_dir_mtimes = archive_dir_mtimes_for(@current.projects)
@@ -236,10 +236,13 @@ module Hive
           # workflow overlay (computed after `load!`), so a custom-workflow
           # project's active stages aren't dropped the way a single
           # pre-computed union would drop them.
-          active_payload = Hive::Commands::Status.new.json_payload(
+          admission_context = Hive::DependencySnapshot.admission_context(
             projects,
             exclude_archived: true,
-            extra_dependency_tasks: archived_identities_from_cache(cache)
+            fallback_context: cache.fetch(:admission_context)
+          )
+          active_payload = Hive::Commands::Status.new.json_payload(
+            projects, exclude_archived: true, admission_context: admission_context
           )
           publish_snapshot(merge_archived_payload(active_payload, cache), archived_cache: cache)
         end
@@ -392,7 +395,10 @@ module Hive
       end
 
       def empty_archived_cache
-        { rows_by_path: {}.freeze }.freeze
+        {
+          rows_by_path: {}.freeze,
+          admission_context: Hive::DependencyAdmission::Context.new(projects: [])
+        }.freeze
       end
 
       # Builds the frozen archived-row cache keyed by project path. `previous`
@@ -410,9 +416,10 @@ module Hive
       # refresh, leaving a permanent ghost in the archive pane (plan Risk #6).
       # Genuine removals that shrink a project to a smaller non-empty set are
       # still published verbatim.
-      def archived_cache_from_payload(payload, previous: nil)
+      def archived_cache_from_payload(payload, admission_context:, previous: nil)
         previous_rows = previous && previous.fetch(:rows_by_path, nil)
         rows_by_path = {}
+        retained_paths = {}
         Array(payload["projects"]).each do |project|
           path = project["path"]
           next unless path
@@ -422,6 +429,7 @@ module Hive
             prior = previous_rows && previous_rows[path]
             if prior && !prior.empty? && archive_dir_has_tasks?(project["hive_state_path"])
               rows_by_path[path] = prior
+              retained_paths[File.expand_path(path)] = true
               next
             end
           end
@@ -431,7 +439,22 @@ module Hive
           # across threads.
           rows_by_path[path] = archived_rows.map { |task| task.dup.freeze }.freeze
         end
-        { rows_by_path: rows_by_path.freeze }.freeze
+        archived_projects = admission_context.projects.map do |project|
+          if retained_paths[File.expand_path(project.path)]
+            previous&.fetch(:admission_context)&.project_for_path(project.path) ||
+              project.with(tasks: archived_tasks(project))
+          else
+            project.with(tasks: archived_tasks(project))
+          end
+        end
+        {
+          rows_by_path: rows_by_path.freeze,
+          admission_context: Hive::DependencyAdmission::Context.new(projects: archived_projects)
+        }.freeze
+      end
+
+      def archived_tasks(project)
+        project.tasks.select { |task| archived_stage?(task.stage) }
       end
 
       # Positive on-disk evidence that a project's `9-done` dir still holds at
@@ -454,30 +477,6 @@ module Hive
         end
       rescue StandardError
         true
-      end
-
-      def dependency_identity_for(task)
-        {
-          "slug" => task["slug"],
-          "id" => task["id"],
-          "stage" => task["stage"]
-        }
-      end
-
-      # Derived from the `:rows_by_path` rows rather than stored as a second
-      # parallel map, so the dependency identities can never drift out of
-      # sync with the cached archived rows they describe. Memoized per
-      # cache object (frozen + replaced wholesale on each archive refresh)
-      # so the steady-state active reparse — the hot reactivity path —
-      # doesn't rebuild every archived identity on every tick. The memo is
-      # poll-thread-local; only the cache it derives from is shared.
-      def archived_identities_from_cache(cache)
-        return @archived_identities if cache.equal?(@archived_identities_source)
-
-        @archived_identities_source = cache
-        @archived_identities = cache.fetch(:rows_by_path).transform_values do |rows|
-          rows.map { |task| dependency_identity_for(task) }
-        end
       end
 
       def refresh_archive_signals(projects)
@@ -548,11 +547,17 @@ module Hive
       end
 
       def projects_from_snapshot(snapshot)
+        registered = Hive::Config.registered_projects.group_by do |entry|
+          File.expand_path(entry.fetch("path"))
+        end
         Array(snapshot&.projects).map do |project|
+          matches = registered[File.expand_path(project.path)] || []
+          registry_entry = matches.one? ? matches.first : nil
           {
             "name" => project.name,
             "path" => project.path,
-            "hive_state_path" => project.hive_state_path
+            "hive_state_path" => project.hive_state_path,
+            "repository_identity" => registry_entry && registry_entry["repository_identity"]
           }
         end
       end
@@ -566,13 +571,17 @@ module Hive
         # the in-process call so those degrade-path warns — which never reach
         # the operator under the alt-screen anyway — can't corrupt the frame
         # (`capture_status_io`, mirroring `BubbleModel#capture_command_io`).
+        admission_context = Hive::DependencySnapshot.admission_context(projects)
         payload = capture_status_io do
           Hive::Commands::Status.new.json_payload(
             projects,
-            stages: [ Hive::ArchiveFilter::ARCHIVE_STAGE_DIR ]
+            stages: [ Hive::ArchiveFilter::ARCHIVE_STAGE_DIR ],
+            admission_context: admission_context
           )
         end
-        @archived_cache = archived_cache_from_payload(payload, previous: @archived_cache)
+        @archived_cache = archived_cache_from_payload(
+          payload, admission_context: admission_context, previous: @archived_cache
+        )
         @archive_last_refresh_at = Time.now
         @archive_refresh_failures = 0
         @archive_last_error = nil

@@ -6,6 +6,7 @@ require "hive/agent"
 require "hive/agent_profiles"
 require "hive/patrol/runner_task"
 require "hive/patrol/token_budget"
+require "hive/patrol/agent_launch"
 require "hive/permission_scope"
 require "hive/stages/base"
 
@@ -41,8 +42,8 @@ module Hive
         )
         profile = Hive::AgentProfiles.lookup(configured_agent, cfg: @cfg)
         scope = read_only_scope(profile)
-        cli_flags = @read_only ? profile.require_cli_capability!(:safe_mode) : []
-        unless @token_budget.acquire(stage: STAGE)
+        launch = Hive::Patrol::AgentLaunch.prepare(profile: profile, prompt: prompt, role: :review)
+        unless @token_budget.acquire(stage: STAGE, minimum_tokens: launch.fetch(:minimum_tokens))
           return { status: :error, error_message: @token_budget.exhaustion_message }
         end
         started_at = Time.now.utc
@@ -57,14 +58,18 @@ module Hive
               @cfg.dig("budget_usd", "patrol") || 100, stage: STAGE
             ),
             max_tokens: @token_budget.max_tokens(stage: STAGE),
+            max_turns: launch.fetch(:max_turns),
             timeout_sec: effective_timeout(timeout_sec),
             log_label: STAGE,
             profile: profile,
             expected_output: @read_only ? nil : output_path,
             status_mode: @read_only ? :exit_code_only : :output_file_exists,
-            cli_flags: cli_flags,
+            cli_flags: launch.fetch(:cli_flags),
             **scope
           ).run!
+          if @read_only && resource_limited_with_final_message?(result)
+            result = result.merge(status: :ok)
+          end
           result = materialize_read_only_output(result, output_path) if @read_only
         ensure
           @token_budget.record!(
@@ -112,6 +117,12 @@ module Hive
         result
       rescue JSON::ParserError => e
         result.merge(status: :error, error_message: "invalid read-only review output: #{e.message}")
+      end
+
+      def resource_limited_with_final_message?(result)
+        result.is_a?(Hash) &&
+          %w[token_limit turn_limit].include?(result.dig(:resource_exhaustion, :reason)) &&
+          !result[:final_message].to_s.strip.empty?
       end
 
       # Kept as the runner's narrow recording seam for tests and adapters;

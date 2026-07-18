@@ -87,8 +87,21 @@ execute:
   #   preset: scoped
   #   tools: [Read, Write, Edit]
   #   dirs: [./drafts]
-open_pr:
-  agent: claude
+
+# Generation-scoped conditions roll out explicitly. `markers` preserves the
+# compatibility state machine; set only `4-execute: shadow` to gather parity
+# evidence, then `4-execute: conditions` after the operator readiness checks.
+conditions:
+  authority: markers
+  stages: {}
+  # stages:
+  #   4-execute: shadow
+# Open-PR implementation ownership is inherited from execute. Advanced escape hatch:
+# open_pr:
+#   agent: codex
+#   model: gpt-5.6-terra
+#   effort: medium
+open_pr: {}
 artifacts:
   agent: claude
 finalize:
@@ -132,7 +145,10 @@ review:
     # Example: "bin/ci" for hive itself, "bin/rails test" for a Rails project.
     command: null
     max_attempts: 3
-    agent: claude
+    # agent/model/effort overrides are optional; absent fields inherit execute ownership.
+    # agent: codex
+    # model: gpt-5.6-sol
+    # effort: high
     prompt_template: ci_fix_prompt.md.erb
   triage:
     enabled: true
@@ -148,7 +164,10 @@ review:
     # preset's prompt entirely.
     custom_prompt: null
   fix:
-    agent: claude
+    # agent/model/effort overrides are optional; absent fields inherit execute ownership.
+    # agent: codex
+    # model: gpt-5.6-sol
+    # effort: high
     prompt_template: fix_prompt.md.erb
     auto_commit:
       # inherit preserves the repository's commit signing config. Use
@@ -300,8 +319,8 @@ patrol:
   # single-pass adapter; optionally add the ce-code-review fan-out or
   # Claude during init when you want broader patrol review coverage.
   review:
-    max_context_files: 24
-    max_owned_files: 12
+    max_context_files: 4
+    max_owned_files: 4
     reviewers:
 <% if patrol_reviewers.include?("codex-native-review") -%>
       # Native `codex review` — one cheap, tuned, read-only pass whose

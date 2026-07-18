@@ -7,7 +7,7 @@ updated: 2026-07-16
 tags: [agent, claude, subprocess]
 ---
 
-**TLDR**: Agent subprocess wrapper. Sets `AGENT_WORKING` pre-spawn for marker-owned spawns, streams stdout/stderr to the per-stage log, captures a bounded final-message summary, enforces native budget-equivalent, streamed token, and wall-clock limits, kills the process group on exhaustion, classifies provider account/rate/quota limits before generic failures, and translates the exit into a status/marker according to the selected `AgentProfile` status mode. The state file is mutated atomically by `Markers.set` (tempfile + rename); `Markers.current` always reads a complete file.
+**TLDR**: Agent subprocess wrapper. Sets `AGENT_WORKING` pre-spawn for marker-owned spawns, streams stdout/stderr to the per-stage log, captures a bounded final-message summary, enforces native budget-equivalent, streamed token, optional completed-turn, and wall-clock limits, kills the process group on exhaustion or completed output, classifies provider account/rate/quota limits before generic failures, and translates the exit into a status/marker according to the selected `AgentProfile` status mode. The state file is mutated atomically by `Markers.set` (tempfile + rename); `Markers.current` always reads a complete file.
 
 ## Class shape
 
@@ -17,6 +17,7 @@ Hive::Agent.new(
   prompt:,              # rendered ERB string
   max_budget_usd:,      # required, no default
   max_tokens: nil,      # optional positive in-flight token ceiling
+  max_turns: nil,       # optional positive Claude completed-turn ceiling
   timeout_sec:,         # required, no default
   add_dirs: [],         # extra --add-dir paths
   cwd: nil,             # defaults to task.folder
@@ -34,7 +35,11 @@ Hive::Agent.new(
 ## Constants
 
 - `FINAL_MESSAGE_TAIL_BYTES = 64 * 1024` caps the plain stdout/stderr tail retained in `result[:final_message]` when no structured final agent message was parsed.
-- `TOKEN_LIMIT_TERM_GRACE_SECONDS = 3` bounds graceful shutdown after a streamed token ceiling before Hive escalates the process group to KILL.
+- `TERMINATION_GRACE_SECONDS = 3` bounds graceful shutdown after a streamed token ceiling, completed-turn ceiling, or completed expected output before Hive escalates the process group to KILL.
+- `COMPLETION_EVENT_GRACE_SECONDS = 3` lets an already-generated Claude `Write`
+  and its usage-bearing turn delta settle in either event order; expiry or a
+  next-turn start sends TERM, so the protocol allowance cannot become another
+  reasoning turn.
 
 ## Provider-limit classification
 
@@ -156,11 +161,11 @@ launches send the prompt through stdin with `-` in argv.
    reused PID before signalling the recorded child.
 6. Trap `INT`/`TERM` to forward `kill -TERM -<pgid>`. Old handlers are restored in `ensure`.
 7. Reader thread: `r.each_line` writes timestamped lines to the log, captures the last structured agent final message it recognizes, and captures the first raw stream line whose text matches `Hive::AgentLimit`. Claude-style `result` / `assistant` events and Codex-style `item.completed` assistant messages set `result[:final_message_source] = :structured`; non-JSON output is retained as a bounded plain tail with `:plain` source. When `max_tokens` is set, `StreamTokenMeter` also converts usage events into one monotonic count. Claude message-start/delta events sum completed turns while maxing cumulative current-turn fields; terminal run totals replace the aggregate only when they are not smaller than already observed usage.
-8. Polling loop: `Process.wait(pid, WNOHANG)` every `[remaining, 0.2].min` seconds until the deadline. Reaching `max_tokens` on a non-terminal event sends TERM immediately; a process group still alive after the token grace receives KILL independently of the longer wall-clock timeout.
+8. Polling loop: `Process.wait(pid, WNOHANG)` every `[remaining, 0.2].min` seconds until the deadline. Reaching `max_tokens`, reaching the Claude `max_turns` ceiling, or observing a non-empty expected output begins termination. Claude can emit its local `Write` result before or after the same turn's usage-bearing `message_delta`, so Hive waits at most the completion-event grace for the missing half, captures the delta when available, and sends TERM before a next model turn. A process group still alive after the termination grace receives KILL independently of the longer wall-clock timeout.
 9. On timeout: `kill_group(pgid)` (TERM), then `sleep_grace_then_kill` (3s grace, then KILL).
 10. Reap with `Process.wait(pid)` (rescuing `Errno::ECHILD`).
 11. Join the reader thread (kill if still alive after 2s).
-12. Return `{pid, pgid, exit_code, timed_out, log_file, final_message, final_message_source, usage, resource_exhaustion, status: nil}`. Token exhaustion carries `reason: "token_limit"`, the configured limit, and observed usage.
+12. Return `{pid, pgid, exit_code, timed_out, log_file, final_message, final_message_source, usage, resource_exhaustion, output_completed, status: nil}`. Resource exhaustion carries `reason: "token_limit"` or `"turn_limit"`, the configured limit, and the observed count. A completed output is accepted only in `:output_file_exists` mode and remains subject to the caller's structured parser.
 
 `final_message` is for orchestrators that need a human-readable agent answer even when the agent does not edit the state file. 4-execute writes this into `task.md` under `## Execute Output`; only structured final messages satisfy research-mode completion.
 
@@ -180,6 +185,7 @@ Claude/tmux teardown is deliberately narrower than a shell-pattern kill. `with_s
 | Condition | Marker set |
 |-----------|------------|
 | `result[:resource_exhaustion].reason == "token_limit"` | `<!-- ERROR reason=token_limit observed_tokens=N max_tokens=N marker_id=<hex16> -->` for `:state_file_marker`; other modes return the same error status without clobbering orchestrator-owned markers |
+| `result[:resource_exhaustion].reason == "turn_limit"` | `<!-- ERROR reason=turn_limit observed_turns=N max_turns=N marker_id=<hex16> -->` for `:state_file_marker`; a completed output-file artifact is retained for downstream parsing |
 | provider-limit text in a failed/timeout result's raw stream `limit_text` or `final_message` | `<!-- ERROR reason=limits_reached message="limits reached for <agent>: ..." marker_id=<hex16> -->` for `:state_file_marker`; other status modes return `result[:error_message] = "limits reached for <agent>: ..."` without clobbering orchestrator-owned markers |
 | `result[:timed_out]` | `<!-- ERROR reason=timeout timeout_sec=N marker_id=<hex16> -->` |
 | `exit_code` non-zero | `<!-- ERROR reason=exit_code exit_code=N marker_id=<hex16> -->` |

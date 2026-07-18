@@ -18,6 +18,19 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_select "#projects", 1
   end
 
+  test "task state renders implementation ownership as pending without mutating legacy state" do
+    folder = stage_dir(@project, "1-inbox").join(@slug)
+
+    get "/tasks/#{@project}/#{@slug}"
+
+    assert_response :success
+    assert_select "details.implementation-identity", 1
+    assert_select "details.implementation-identity summary", text: /generation 0/
+    assert_select "details.implementation-identity", text: /Pending execute capture/
+    refute folder.join("events.jsonl").exist?
+    refute folder.join("task-projection.json").exist?
+  end
+
   test "an unpassable stage offers Force approve, never a doomed Approve" do
     get "/tasks/#{@project}/#{@slug}"
     assert_response :success

@@ -7,6 +7,9 @@ require "hive/stages"
 require "hive/task_resolver"
 require "hive/workflows"
 require "hive/task_action"
+require "hive/attempts/context"
+require "hive/attempts/entrypoint"
+require "hive/conditions/transition_guard"
 
 module Hive
   module Commands
@@ -28,16 +31,21 @@ module Hive
     # `hive-stage-action` envelope is emitted at the end.
     class StageAction
       def initialize(verb, target, project: nil, from: nil, json: false,
-                     recover_merged_error_reason: nil)
+                     recover_merged_error_reason: nil, durable: false,
+                     attempt_entrypoint: nil)
         @verb = verb
         @target = target
         @project_filter = project
         @from = from
         @json = json
         @recover_merged_error_reason = recover_merged_error_reason
+        @durable = durable
+        @attempt_entrypoint = attempt_entrypoint
       end
 
       def call
+        return dispatch_durable if @durable && !Hive::Attempts::Context.active?
+
         do_call
       rescue Hive::Error => e
         emit_error_envelope(e) if @json
@@ -49,6 +57,51 @@ module Hive
       end
 
       private
+
+      def dispatch_durable
+        task = resolve_task
+        intended_stage = Hive::Workflows.for_verb(@verb).fetch(:target)
+        result = (@attempt_entrypoint || Hive::Attempts::Entrypoint.new).dispatch(
+          task: task,
+          intended_stage: intended_stage,
+          argv: durable_worker_argv(task),
+          interactive: true
+        )
+        handle_durable_failure!(result) unless result.exit_status.zero?
+
+        result
+      end
+
+      def handle_durable_failure!(result)
+        if result.status == :lost
+          exit(result.exit_status) if @json && result.stdout_emitted?
+
+          raise Hive::ConcurrentRunError,
+                "durable attempt lost before producing a receipt for #{@target}: #{result.attempt_id}"
+        end
+
+        if @json && !result.stdout_emitted?
+          raise Hive::AttemptExecutionError.new(
+            "durable attempt #{result.attempt_id} finished with #{result.outcome || 'an error'} " \
+            "(exit #{result.exit_status}) before emitting JSON",
+            exit_code: result.exit_status,
+            attempt_id: result.attempt_id,
+            outcome: result.outcome
+          )
+        end
+
+        exit(result.exit_status)
+      end
+
+      def durable_worker_argv(task)
+        argv = [ "hive", @verb, task.folder ]
+        argv.concat([ "--from", @from ]) if @from
+        argv << "--json" if @json
+        if @recover_merged_error_reason
+          argv.concat([ "--recover-merged-error-reason", @recover_merged_error_reason ])
+        end
+        argv
+      end
 
       def do_call
         config = Hive::Workflows.for_verb(@verb)
@@ -116,6 +169,7 @@ module Hive
         return if config[:force_source]
 
         marker = Hive::Markers.current(task.state_file)
+        Hive::Conditions::TransitionGuard.validate!(task, force: config[:force_source])
         return if terminal_marker?(marker)
         return if archive_merged_error_recovery_marker?(task, marker, config)
 
@@ -241,6 +295,8 @@ module Hive
         when Hive::WrongStage then "wrong_stage"
         when Hive::RollbackFailed then "rollback_failed"
         when Hive::InvalidTaskPath then "invalid_task_path"
+        when Hive::DependencyWaitError then "dependency_wait"
+        when Hive::DependencyAdmissionError then "admission_error"
         else "error"
         end
       end

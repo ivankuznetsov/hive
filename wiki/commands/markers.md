@@ -3,11 +3,11 @@ title: hive markers
 type: command
 source: lib/hive/commands/markers.rb
 created: 2026-04-26
-updated: 2026-05-27
+updated: 2026-07-12
 tags: [command, markers, recovery, json]
 ---
 
-**TLDR**: `hive markers clear FOLDER --name <NAME> [--project NAME] [--json]` removes a single recovery marker from a task's state file (atomic write) and records a `hive_commit` so the audit trail stays accurate. Replaces the previous "manually edit `task.md` and delete the marker comment" recovery prose with a deterministic, agent-callable surface.
+**TLDR**: `hive markers clear FOLDER --name <NAME> [--project NAME] [--json]` validates the current recovery marker, removes marker history from the task's state file (atomic write), and records a `hive_commit` so the audit trail stays accurate. Replaces the previous "manually edit `task.md` and delete the marker comment" recovery prose with a deterministic, agent-callable surface.
 
 ## Usage
 
@@ -41,7 +41,7 @@ Only recovery markers are clearable. Terminal-success markers (`REVIEW_COMPLETE`
 3. Validate the requested `--name` against `Hive::Commands::Markers::ALLOWED_NAMES`. Anything else raises `Hive::WrongStage` (exit 4).
 4. Read the current marker via `Hive::Markers.current(state_file)`. If the marker name does NOT match `--name`, raise `Hive::WrongStage` — refusing to silently clear a different state.
 5. If `--match-attr` is present, require every supplied `KEY=VALUE` pair to match the current marker. Comma-separated pairs such as `reason=exit_code,exit_code=143` are all checked; any mismatch raises `Hive::WrongStage`. TUI ERROR recovery prefers generated `marker_id` attrs when available and uses observed reason/exit_code attrs for legacy rows.
-6. Remove the marker line: `File.read` the body, `sub` out the exact `marker.raw` comment plus its trailing newline (if it sat alone on a line), then `Hive::Markers.write_atomic` the result. Surrounding prose, headings, and other markers stay untouched.
+6. Remove every recognized marker comment with `Hive::Markers.remove_all_markers`, preserving surrounding prose and headings. Runs append terminal markers after transient markers, so removing only the current recovery marker could expose a completed run's shadowed `AGENT_WORKING`, `REVIEW_WORKING`, or older error marker and strand the retry.
 7. Record a `hive_commit` on the `hive/state` branch (`hive: <stage>/<slug> markers clear <NAME>`).
 8. Emit a stdout summary (or one-line `hive-markers-clear` JSON document with `--json`); print a `next: hive run <folder>` hint to stderr.
 

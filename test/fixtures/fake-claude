@@ -30,8 +30,24 @@ if [[ -n "${HIVE_FAKE_CLAUDE_OUTPUT:-}" ]]; then
   printf '%s\n' "${HIVE_FAKE_CLAUDE_OUTPUT}"
 fi
 
+if [[ -n "${HIVE_FAKE_CLAUDE_DELAY_BEFORE_WRITE:-}" ]]; then
+  sleep "${HIVE_FAKE_CLAUDE_DELAY_BEFORE_WRITE}"
+fi
+
 if [[ -n "${HIVE_FAKE_CLAUDE_WRITE_FILE:-}" && -n "${HIVE_FAKE_CLAUDE_WRITE_CONTENT:-}" ]]; then
   printf '%s' "${HIVE_FAKE_CLAUDE_WRITE_CONTENT}" > "${HIVE_FAKE_CLAUDE_WRITE_FILE}"
+fi
+
+if [[ -n "${HIVE_FAKE_CLAUDE_OUTPUT_AFTER_WRITE:-}" ]]; then
+  printf '%s\n' "${HIVE_FAKE_CLAUDE_OUTPUT_AFTER_WRITE}"
+fi
+
+if [[ -n "${HIVE_FAKE_CLAUDE_DELAY_AFTER_WRITE_OUTPUT:-}" ]]; then
+  sleep "${HIVE_FAKE_CLAUDE_DELAY_AFTER_WRITE_OUTPUT}"
+fi
+
+if [[ -n "${HIVE_FAKE_CLAUDE_FINAL_OUTPUT:-}" ]]; then
+  printf '%s\n' "${HIVE_FAKE_CLAUDE_FINAL_OUTPUT}"
 fi
 
 if [[ -n "${HIVE_FAKE_CLAUDE_COMMIT_FILE:-}" ]]; then
@@ -39,6 +55,40 @@ if [[ -n "${HIVE_FAKE_CLAUDE_COMMIT_FILE:-}" ]]; then
   git add -- "${HIVE_FAKE_CLAUDE_COMMIT_FILE}"
   if ! git diff --cached --quiet; then
     git commit -m "${HIVE_FAKE_CLAUDE_COMMIT_MESSAGE:-test: fake agent commit}" --quiet
+  fi
+fi
+
+# Durable-attempt acceptance fixture. Create a deterministic sequence of
+# commits, publish a readiness sentinel, then wait on a release sentinel.
+# This lets the e2e harness terminate the temporary CLI attachment after
+# useful work exists while proving the detached wrapper continues ownership.
+if [[ -n "${HIVE_FAKE_CLAUDE_MULTI_COMMIT_COUNT:-}" ]]; then
+  count="${HIVE_FAKE_CLAUDE_MULTI_COMMIT_COUNT}"
+  prefix="${HIVE_FAKE_CLAUDE_MULTI_COMMIT_PREFIX:-durable-attempt-progress}"
+  if [[ -n "${HIVE_FAKE_CLAUDE_BASE_REVISION_FILE:-}" ]]; then
+    mkdir -p "$(dirname "${HIVE_FAKE_CLAUDE_BASE_REVISION_FILE}")"
+    git rev-parse HEAD > "${HIVE_FAKE_CLAUDE_BASE_REVISION_FILE}"
+  fi
+  for ((i = 1; i <= count; i++)); do
+    file="${prefix}-${i}.txt"
+    printf 'durable attempt progress %s\n' "$i" > "$file"
+    git add -- "$file"
+    git commit -m "test: durable attempt progress ${i}" --quiet
+  done
+  if [[ -n "${HIVE_FAKE_CLAUDE_PROGRESS_FILE:-}" ]]; then
+    mkdir -p "$(dirname "${HIVE_FAKE_CLAUDE_PROGRESS_FILE}")"
+    : > "${HIVE_FAKE_CLAUDE_PROGRESS_FILE}"
+  fi
+  if [[ -n "${HIVE_FAKE_CLAUDE_RELEASE_FILE:-}" ]]; then
+    deadline=$((SECONDS + ${HIVE_FAKE_CLAUDE_RELEASE_TIMEOUT_SEC:-60}))
+    until [[ -e "${HIVE_FAKE_CLAUDE_RELEASE_FILE}" ]]; do
+      if ((SECONDS >= deadline)); then
+        printf 'fake-claude: timed out waiting for release sentinel %s\n' \
+          "${HIVE_FAKE_CLAUDE_RELEASE_FILE}" >&2
+        exit 124
+      fi
+      sleep 0.05
+    done
   fi
 fi
 
@@ -50,6 +100,23 @@ fi
 if [[ -n "${HIVE_FAKE_GH_PR_EXISTS_FILE:-}" ]]; then
   mkdir -p "$(dirname "${HIVE_FAKE_GH_PR_EXISTS_FILE}")"
   : > "${HIVE_FAKE_GH_PR_EXISTS_FILE}"
+fi
+
+# Condition-driven barrier for cross-process e2e races. Publish readiness
+# atomically, then remain live until the release file exists. The harness
+# owns the timeout and process-group teardown, so this fixture needs no fixed
+# duration and cannot leak after a failed assertion.
+if [[ -n "${HIVE_FAKE_CLAUDE_READY_FILE:-}" ]]; then
+  mkdir -p "$(dirname "${HIVE_FAKE_CLAUDE_READY_FILE}")"
+  ready_tmp="${HIVE_FAKE_CLAUDE_READY_FILE}.tmp.$$"
+  printf '%s\n' "$$" > "$ready_tmp"
+  mv -f -- "$ready_tmp" "${HIVE_FAKE_CLAUDE_READY_FILE}"
+fi
+
+if [[ -n "${HIVE_FAKE_CLAUDE_RELEASE_FILE:-}" ]]; then
+  while [[ ! -e "${HIVE_FAKE_CLAUDE_RELEASE_FILE}" ]]; do
+    sleep 0.02
+  done
 fi
 
 if [[ -n "${HIVE_FAKE_CLAUDE_HANG:-}" ]]; then

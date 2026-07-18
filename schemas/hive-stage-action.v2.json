@@ -161,6 +161,8 @@
             "wrong_stage",
             "rollback_failed",
             "invalid_task_path",
+            "dependency_wait",
+            "admission_error",
             "error"
           ]
         },
@@ -224,6 +226,51 @@
         "lock_path": {
           "type": "string",
           "description": "Filesystem path of the lock file that triggered ConcurrentRunError."
+        },
+        "reason_code": {
+          "type": "string",
+          "enum": [
+            "dependency_wait",
+            "dependency_metadata_unreadable",
+            "dependency_metadata_invalid",
+            "dependency_reference_invalid",
+            "dependency_task_missing",
+            "dependency_self_reference",
+            "dependency_cycle",
+            "dependency_gate_unknown",
+            "dependency_gate_unreachable",
+            "dependency_project_unknown",
+            "dependency_repository_identity_missing",
+            "dependency_repository_mismatch",
+            "plan_dependency_invalid",
+            "plan_dependency_missing",
+            "plan_dependency_mismatch",
+            "dependency_validation_failed"
+          ]
+        },
+        "offending_ref": {
+          "type": "string"
+        },
+        "safe_correction": {
+          "type": "string"
+        },
+        "condition_gate": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "next_action": {
+          "$ref": "#/$defs/ConditionRecoveryAction"
+        }
+      }
+    },
+    "ConditionRecoveryAction": {
+      "type": "object",
+      "required": ["kind"],
+      "additionalProperties": true,
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["edit", "mv", "approve", "run", "recover_stale", "no_op"]
         }
       }
     },
@@ -255,7 +302,8 @@
             "agent_running",
             "archived",
             "manual_steering",
-            "error"
+            "error",
+            "admission_error"
           ]
         },
         "label": {

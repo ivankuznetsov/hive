@@ -50,6 +50,20 @@ module Hive
                             "agent/profile/prompt output, then re-run so Hive can capture the final answer " \
                             "under `## Execute Output`"
         }
+      when "attempt_lost", "attempt_terminal_failed", "attempt_terminal_cancelled"
+        {
+          "kind" => kind::RUN,
+          "target" => task.folder,
+          "instructions" => "the durable execute attempt ended without a successful result; inspect its " \
+                            "receipt or loss diagnostics, then re-run execute to dispatch a successor"
+        }
+      when "worktree_evidence_unverifiable", "evidence_unverifiable", "attempt_state_unverifiable"
+        {
+          "kind" => kind::EDIT,
+          "target" => worktree_path,
+          "instructions" => "Hive could not verify the current execute evidence; repair worktree or attempt " \
+                            "store access, then re-run reconciliation"
+        }
       else
         {
           "kind" => kind::EDIT,

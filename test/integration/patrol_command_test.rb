@@ -164,6 +164,7 @@ class PatrolCommandTest < Minitest::Test
 
   def test_patrol_dry_run_reviews_but_does_not_fix_or_open_pr
     with_patrol_project do |repo|
+      set_patrol_commands(repo, "format" => nil, "lint" => nil, "typecheck" => nil, "test" => nil)
       finder = sample_finding
       patch = sample_patch(repo, finder)
       fixer = FakeFixer.new(patch)
@@ -188,6 +189,29 @@ class PatrolCommandTest < Minitest::Test
       assert_equal 0, payload.fetch("prs_opened")
       assert_empty fixer.attempted
       assert_empty pr_opener.opened
+    end
+  end
+
+  def test_patrol_without_validation_commands_fails_before_agent_work_or_state_mutation
+    with_patrol_project do |repo|
+      set_patrol_commands(repo, "format" => nil, "lint" => nil, "typecheck" => nil, "test" => nil)
+      exploding_mapper = Class.new do
+        def call
+          raise "mapper must not run"
+        end
+      end.new
+
+      out, err, status = with_captured_exit do
+        command_for(mapper: exploding_mapper).call
+      end
+
+      payload = JSON.parse(out)
+      assert_equal Hive::ExitCodes::CONFIG, status
+      assert_equal "config", payload.fetch("error_kind")
+      assert_includes payload.fetch("message"), "patrol.commands"
+      assert_includes err, "patrol.commands"
+      refute Dir.exist?(File.join(repo, ".hive-state", "patrol")),
+             "preflight must fail before patrol state is created or watermarks can move"
     end
   end
 
@@ -295,6 +319,118 @@ class PatrolCommandTest < Minitest::Test
     end
   end
 
+  def test_new_sweep_fetches_and_reviews_the_exact_remote_default
+    with_patrol_project do |repo|
+      origin = "#{repo}.origin.git"
+      scratch = nil
+      begin
+        run!("git", "clone", "--bare", repo, origin)
+        run!("git", "-C", repo, "remote", "add", "origin", origin)
+        local_sha = run!("git", "-C", repo, "rev-parse", "master").strip
+
+        scratch = Dir.mktmpdir("patrol-origin-pusher")
+        run!("git", "clone", origin, scratch)
+        run!("git", "-C", scratch, "config", "user.email", "test@example.com")
+        run!("git", "-C", scratch, "config", "user.name", "Test")
+        File.write(File.join(scratch, "fresh-upstream.txt"), "fresh\n")
+        run!("git", "-C", scratch, "add", "fresh-upstream.txt")
+        run!("git", "-C", scratch, "commit", "-m", "advance remote default", "--quiet")
+        run!("git", "-C", scratch, "push", "origin", "master:master")
+        remote_sha = run!("git", "-C", scratch, "rev-parse", "HEAD").strip
+
+        scan_sha = nil
+        out, _err, status = with_captured_exit do
+          command_for(
+            dry_run: true,
+            mapper_factory: lambda do |root, _cfg, _state|
+              scan_sha = run!("git", "-C", root, "rev-parse", "HEAD").strip
+              assert File.exist?(File.join(root, "fresh-upstream.txt")),
+                     "a new patrol sweep must review the freshly fetched remote default"
+              FakeMapper.new([ sample_feature ])
+            end,
+            reviewer: FakeReviewer.new([])
+          ).call
+        end
+
+        assert_equal Hive::ExitCodes::SUCCESS, status
+        assert JSON.parse(out).fetch("ok")
+        assert_equal remote_sha, scan_sha
+        assert_equal local_sha, run!("git", "-C", repo, "rev-parse", "master").strip,
+                     "patrol must not move the operator's local default branch"
+      ensure
+        FileUtils.rm_rf(scratch) if scratch
+        FileUtils.rm_rf(origin)
+      end
+    end
+  end
+
+  def test_new_sweep_fails_closed_when_remote_default_cannot_be_fetched
+    with_patrol_project do |repo|
+      missing_origin = File.join(File.dirname(repo), "missing-origin.git")
+      run!("git", "-C", repo, "remote", "add", "origin", missing_origin)
+      reviewer_ran = false
+
+      out, _err, status = with_captured_exit do
+        command_for(
+          dry_run: true,
+          reviewer_factory: lambda do |_root, _cfg, _state|
+            reviewer_ran = true
+            FakeReviewer.new([])
+          end
+        ).call
+      end
+
+      assert_equal Hive::ExitCodes::SOFTWARE, status
+      refute reviewer_ran
+      payload = JSON.parse(out)
+      assert_equal false, payload.fetch("ok")
+      assert_includes payload.fetch("message"), "cannot fetch fresh patrol scan base"
+    end
+  end
+
+  def test_unmaterializable_active_snapshot_restarts_from_the_current_default
+    with_patrol_project do |repo|
+      missing_sha = "f" * 40
+      state_dir = File.join(repo, ".hive-state", "patrol")
+      FileUtils.mkdir_p(state_dir)
+      File.write(
+        File.join(state_dir, "state.json"),
+        JSON.generate(
+          "last_scanned_sha" => "PRIOR",
+          "feature_review_active" => true,
+          "feature_review_sha" => missing_sha,
+          "feature_review_cursor" => 1
+        )
+      )
+      current_sha = run!("git", "-C", repo, "rev-parse", "master").strip
+      features = (1..2).map do |index|
+        Hive::Patrol::Feature.new(
+          id: "feature-#{index}", kind: "architecture", entrypoints: [],
+          owned_files: [], context_files: [], tests: []
+        )
+      end
+      reviewer = FakeReviewer.new([])
+      scanned_sha = nil
+
+      out, _err, status = with_captured_exit do
+        command_for(
+          dry_run: true,
+          mapper_factory: lambda do |root, _cfg, _state|
+            scanned_sha = run!("git", "-C", root, "rev-parse", "HEAD").strip
+            FakeMapper.new(features)
+          end,
+          reviewer: reviewer
+        ).call
+      end
+
+      assert_equal Hive::ExitCodes::SUCCESS, status
+      assert_equal current_sha, scanned_sha
+      assert_equal %w[feature-1 feature-2], reviewer.features.map(&:id),
+                   "a replacement snapshot must restart the feature cursor"
+      assert_equal current_sha, JSON.parse(out).fetch("last_scanned_sha")
+    end
+  end
+
   def test_scan_checkout_rejects_a_sha_other_than_the_requested_target
     command = command_for(dry_run: true)
     git_calls = []
@@ -362,6 +498,32 @@ class PatrolCommandTest < Minitest::Test
 
       assert_includes error.message, "git rev-parse HEAD failed:"
       assert_match(/not a git repository/i, error.message)
+    end
+  end
+
+  def test_fresh_scan_base_rejects_unresolved_or_invalid_local_default
+    command = command_for
+    cfg = { "default_branch" => "master" }
+    status = Struct.new(:exitstatus) { def success? = exitstatus.zero? }
+
+    with_replaced_singleton_method(Hive::Worktree, :origin_configured?, ->(_root) { false }) do
+      with_replaced_singleton_method(
+        Open3, :capture3, ->(*) { [ "", "missing default", status.new(1) ] }
+      ) do
+        error = assert_raises(Hive::GitError) do
+          command.send(:current_default_sha, "/project", cfg)
+        end
+        assert_includes error.message, "git rev-parse master failed: missing default"
+      end
+
+      with_replaced_singleton_method(
+        Open3, :capture3, ->(*) { [ "not-an-oid\n", "", status.new(0) ] }
+      ) do
+        error = assert_raises(Hive::GitError) do
+          command.send(:current_default_sha, "/project", cfg)
+        end
+        assert_includes error.message, "fresh patrol scan base resolved an invalid SHA"
+      end
     end
   end
 
@@ -815,6 +977,13 @@ class PatrolCommandTest < Minitest::Test
   end
 
   private
+
+  def set_patrol_commands(repo, commands)
+    path = File.join(repo, ".hive-state", "config.yml")
+    cfg = YAML.safe_load(File.read(path))
+    cfg["patrol"]["commands"] = commands
+    File.write(path, cfg.to_yaml)
+  end
 
   def with_patrol_project
     with_tmp_global_config do

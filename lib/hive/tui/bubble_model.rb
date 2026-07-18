@@ -31,6 +31,7 @@ require "hive/tui/views/projects_pane"
 require "hive/tui/views/tasks_pane"
 require "hive/tui/views/log_tail"
 require "hive/tui/views/red_status_detail"
+require "hive/tui/views/implementation_identity_detail"
 require "hive/tui/views/help_overlay"
 require "hive/tui/views/filter_prompt"
 require "hive/tui/views/idea_preview"
@@ -245,6 +246,7 @@ module Hive
         when :grid then compose_two_pane_view
         when :log_tail then Views::LogTail.render(@hive_model)
         when :red_status_detail then Views::RedStatusDetail.render(@hive_model)
+        when :implementation_identity_detail then Views::ImplementationIdentityDetail.render(@hive_model)
         when :token_stats then token_stats_view
         when :archive then archive_view
         when :help then Views::HelpOverlay.render(@hive_model)

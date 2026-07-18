@@ -28,6 +28,23 @@ class DaemonServiceInstallerTest < Minitest::Test
     end
   end
 
+  def test_linux_unit_preserves_durable_attempt_processes_across_daemon_restart
+    with_tmp_dir do |dir|
+      installer = Hive::Commands::Daemon::ServiceInstaller.new(
+        host_os: "linux",
+        home: dir,
+        binary_path: "/tmp/hive",
+        systemctl_available: false
+      )
+
+      installer.install!(autostart: false)
+      unit = File.read(File.join(dir, ".config/systemd/user/hive-daemon.service"))
+
+      assert_includes unit, "KillMode=process"
+      refute_includes unit, "KillMode=mixed"
+    end
+  end
+
   def test_linux_autostart_invokes_enable_when_systemd_available
     with_tmp_dir do |dir|
       commands = []

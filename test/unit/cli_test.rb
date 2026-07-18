@@ -354,7 +354,8 @@ class HiveCliTest < Minitest::Test
     with_command_new_stub(Hive::Commands::Run) do |calls|
       Hive::CLI.start([ "run", "slug", "--project", "proj", "--stage", "plan", "--json", "--no-rebase" ])
       assert_equal [ "slug" ], calls.first.fetch(:args)
-      assert_equal({ project: "proj", stage: "plan", json: true, no_rebase: true }, calls.first.fetch(:kwargs))
+      assert_equal({ project: "proj", stage: "plan", json: true, no_rebase: true, durable: true },
+                   calls.first.fetch(:kwargs))
     end
 
     with_command_new_stub(Hive::Commands::RebaseStatus) do |calls|
@@ -383,7 +384,9 @@ class HiveCliTest < Minitest::Test
       end
 
       actual = calls.grep(Hash).map { |call| [ call.fetch(:args), call.fetch(:kwargs) ] }
-      assert_equal expected.values.map { |verb| [ [ verb, "slug" ], { project: "proj", from: "inbox", json: true } ] }, actual
+      assert_equal expected.values.map { |verb|
+        [ [ verb, "slug" ], { project: "proj", from: "inbox", json: true, durable: true } ]
+      }, actual
     end
   end
 
@@ -403,7 +406,7 @@ class HiveCliTest < Minitest::Test
 
         stage_ctor = stage_calls.grep(Hash).first
         assert_equal [ "review", "adhoc-review-pr-197" ], stage_ctor.fetch(:args)
-        assert_equal({ project: "resolved-proj", json: true }, stage_ctor.fetch(:kwargs))
+        assert_equal({ project: "resolved-proj", json: true, durable: true }, stage_ctor.fetch(:kwargs))
         assert_equal :call, stage_calls.last
       end
     end
@@ -415,7 +418,7 @@ class HiveCliTest < Minitest::Test
 
       ctor = calls.grep(Hash).first
       assert_equal [ "review", "197" ], ctor.fetch(:args)
-      assert_equal({ project: "proj", from: nil, json: true }, ctor.fetch(:kwargs))
+      assert_equal({ project: "proj", from: nil, json: true, durable: true }, ctor.fetch(:kwargs))
       assert_equal :call, calls.last
     end
   end

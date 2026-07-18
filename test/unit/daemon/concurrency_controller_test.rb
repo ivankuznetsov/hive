@@ -107,6 +107,19 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
     assert_equal :ok, c.can_dispatch_patrol_scan?(project: "hive", now: T0)
   end
 
+  def test_patrol_config_completion_does_not_drop_project_or_block_tasks
+    c = make(daily: 1)
+    dispatch(c, 100, "hive", "patrol-scan", kind: :patrol_scan)
+
+    c.record_completion(pid: 100, exit_code: Hive::ExitCodes::CONFIG, completed_at: T0)
+
+    refute c.project_dropped?("hive")
+    assert_equal 0, c.daily_count_for("hive", T0),
+                 "a patrol scan must not consume an ordinary task's daily quota"
+    assert_equal :ok, c.can_dispatch?(project: "hive", slug: "ordinary-task", now: T0)
+    assert_equal :ok, c.can_dispatch_patrol_scan?(project: "hive", now: T0)
+  end
+
   # ── caps ──────────────────────────────────────────────────────────────
 
   def test_empty_controller_allows_dispatch
@@ -157,6 +170,26 @@ class HiveDaemonConcurrencyControllerTest < Minitest::Test
     c.set_external_running_counts(per_project: { "p1" => 1 })
     assert_equal :project_cap, c.can_dispatch?(project: "p1", slug: "s2", now: T0)
     assert_equal :ok, c.can_dispatch?(project: "p2", slug: "s2", now: T0)
+  end
+
+  def test_durable_snapshot_rebuilds_capacity_and_daily_counts
+    snapshot = Struct.new(:global_count, :per_project, :daily_counts).new(
+      2, { "p1" => 1, "p2" => 1 }, { [ "p1", T0.to_date ] => 3 }
+    )
+    c = make(global: 3, per_project: 2, daily: 3)
+    c.set_capacity_snapshot(snapshot, legacy_per_project: { "legacy" => 1 })
+
+    assert_equal 3, c.in_flight_count
+    assert_equal :global_cap, c.can_dispatch?(project: "p3", slug: "s3", now: T0)
+
+    c.set_capacity_snapshot(snapshot, legacy_per_project: {})
+    assert_equal :daily_cap, c.can_dispatch?(project: "p1", slug: "s2", now: T0,
+                                             external_project_count: 0)
+
+    project_limited = make(global: 4, per_project: 1, daily: 10)
+    project_limited.set_capacity_snapshot(snapshot, legacy_per_project: {})
+    assert_equal :project_cap,
+                 project_limited.can_dispatch?(project: "p1", slug: "s2", now: T0)
   end
 
   def test_daily_cap_blocks_after_n_dispatches

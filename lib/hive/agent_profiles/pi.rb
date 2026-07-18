@@ -90,7 +90,12 @@ module Hive
       status_detection_mode: :output_file_exists,
       preflight: PI_PREFLIGHT,
       usage_extractor: Hive::AgentProfiles::UsageExtractors::PI,
-      skill_verifier: Hive::SkillCheck::Pi.method(:verify)
+      skill_verifier: Hive::SkillCheck::Pi.method(:verify),
+      default_model_resolver: ->(**kwargs) {
+        Hive::ImplementationIdentity::NativeDefaults.resolve(:pi, **kwargs)
+      },
+      model_argument_builder: ->(model) { [ "--model", model ] },
+      launcher_identity: "pi-coding-agent/v1"
     )
 
     register(:pi, PI)

@@ -1,5 +1,6 @@
 require "monitor"
 require "set"
+require "shellwords"
 require "hive/workflows/descriptor_parser"
 require "hive/workflows/loader"
 require "hive/workflows/registry"
@@ -56,7 +57,7 @@ module Hive
           workflows = loaded_workflows.fetch(project_root) do
             loaded_workflows[project_root] = Hive::Workflows::Loader.load_dir(workflow_dir)
           end
-          workflows.each_value { |workflow| register_descriptor(workflow, workflow_dir) }
+          workflows.each_value { |workflow| register_descriptor(workflow, workflow_dir, project_root) }
           # No trailing reset_union_cache! here: both register! and
           # reset_project_registrations! already invalidate the union cache, so an
           # explicit call would be dead in every path (and re-spell the
@@ -65,8 +66,13 @@ module Hive
         end
       end
 
-      def register_descriptor(workflow, workflow_dir)
+      def register_descriptor(workflow, workflow_dir, project_root)
         source_path = File.join(workflow_dir, "#{workflow.id}.yml")
+        if Hive::Workflows::Bench.legacy_project_descriptor?(workflow, source_path: source_path) &&
+           warned_skips.add?(source_path)
+          warn "hive: legacy bench workflow at #{source_path} remains active; " \
+               "run `hive init #{Shellwords.escape(project_root)} --workflow bench` to migrate to the built-in"
+        end
         Hive::Workflows::Registry.register!(workflow, project: true, source_path: source_path)
       rescue Hive::ConfigError => e
         # A descriptor whose id collides with a built-in (or another already-

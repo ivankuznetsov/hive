@@ -2,6 +2,22 @@
 
 All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with terse bullets — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
+## 0.4.3
+
+- Added path-qualified `Read(...)` and `Edit(...)` workflow permissions, with
+  exact task/repository scope projection and fail-closed portable-path
+  validation. This enables repository-wide reads with writes constrained to
+  selected files or subtrees. (#769)
+- Added strict repository-aware dependency admission across manual commands,
+  daemon dispatch, and status v5 so missing, ambiguous, or stale cross-project
+  dependencies stop safely with actionable diagnostics.
+- Expanded post-merge architecture patrol into a durable scheduled workflow
+  with bounded discovery, resumable fenced actions, isolated automatic fixes,
+  validated GitHub publication, and persistent lifecycle reconciliation.
+- Hardened patrol and incident-regression CI against option-value spoofing,
+  unsafe repository Git helpers, unbounded logs/work, stale artifacts, and
+  non-hermetic subprocess state.
+
 ## 0.4.2
 
 - Added `bench` as a third built-in workflow for reproducible coding-agent

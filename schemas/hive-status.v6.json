@@ -1,0 +1,373 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:hive:schema:status:v6",
+  "title": "hive status output (v6)",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
+  ],
+  "$defs": {
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "generated_at", "projects"],
+      "properties": {
+        "schema": { "const": "hive-status" },
+        "schema_version": { "const": 6 },
+        "ok": { "const": true },
+        "generated_at": { "type": "string", "format": "date-time" },
+        "projects": { "type": "array", "items": { "$ref": "#/$defs/Project" } }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "error_class", "error_kind", "exit_code", "message"],
+      "properties": {
+        "schema": { "const": "hive-status" },
+        "schema_version": { "const": 6 },
+        "ok": { "const": false },
+        "error_class": { "type": "string" },
+        "error_kind": { "type": "string", "enum": ["config", "internal", "error"] },
+        "exit_code": { "type": "integer", "minimum": 0, "maximum": 255 },
+        "message": { "type": "string" },
+        "candidates": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["project", "stage", "folder"],
+            "properties": {
+              "project": { "type": "string" },
+              "stage": { "type": "string" },
+              "folder": { "type": "string" }
+            }
+          }
+        },
+        "id": { "type": "string" },
+        "path": { "type": "string" }
+      }
+    },
+    "Project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "path", "hive_state_path", "tasks"],
+      "properties": {
+        "name": { "type": "string" },
+        "path": { "type": "string" },
+        "hive_state_path": { "type": "string" },
+        "error": {
+          "type": "string",
+          "enum": ["missing_project_path", "not_initialised", "project_load_failed"]
+        },
+        "tasks": { "type": "array", "items": { "$ref": "#/$defs/Task" } },
+        "legacy_stage_dirs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["stage_dir", "task_count"],
+            "properties": {
+              "stage_dir": { "type": "string" },
+              "task_count": { "type": "integer", "minimum": 1 }
+            }
+          }
+        },
+        "legacy_migrate_command": { "type": ["string", "null"] }
+      }
+    },
+    "AdmissionError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reason_code", "offending_ref", "safe_correction"],
+      "properties": {
+        "reason_code": {
+          "type": "string",
+          "enum": [
+            "dependency_metadata_unreadable",
+            "dependency_metadata_invalid",
+            "dependency_reference_invalid",
+            "dependency_task_missing",
+            "dependency_self_reference",
+            "dependency_cycle",
+            "dependency_gate_unknown",
+            "dependency_gate_unreachable",
+            "dependency_project_unknown",
+            "dependency_repository_identity_missing",
+            "dependency_repository_mismatch",
+            "plan_dependency_invalid",
+            "plan_dependency_missing",
+            "plan_dependency_mismatch",
+            "dependency_validation_failed"
+          ]
+        },
+        "offending_ref": { "type": "string" },
+        "safe_correction": { "type": "string" }
+      }
+    },
+    "Task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage", "slug", "id", "display_name", "depends_on", "blocked_by",
+        "dependency_stage", "blocked", "admission_error", "folder", "state_file",
+        "worktree_path", "pr_url", "marker", "attrs", "mtime", "folder_mtime",
+        "age_seconds", "claude_pid", "claude_pid_alive", "live_task_lock",
+        "attempt_id", "task_generation",
+        "task_lock_pid", "task_lock_process_start_time", "task_lock_id",
+        "condition_task_generation",
+         "commit_generation", "current_attempt", "conditions", "condition_history",
+         "evidence", "condition_overrides", "condition_gate", "condition_migration", "condition_provenance",
+         "shadow_audit", "condition_warning", "unanswered_questions", "action",
+         "action_label", "suggested_command",
+        "next_action", "diagnostic"
+      ],
+      "properties": {
+        "stage": { "type": "string", "pattern": "^[0-9]+-[a-z0-9][a-z0-9-]*$" },
+        "slug": { "type": "string" },
+        "id": { "type": ["integer", "null"] },
+        "display_name": { "type": ["string", "null"] },
+        "workflow": { "type": ["string", "null"] },
+        "depends_on": { "type": ["string", "null"] },
+        "blocked_by": { "type": ["string", "null"] },
+        "dependency_stage": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9]+-[a-z0-9][a-z0-9-]*$"
+        },
+        "blocked": { "type": "boolean" },
+        "admission_error": {
+          "oneOf": [
+            { "$ref": "#/$defs/AdmissionError" },
+            { "type": "null" }
+          ]
+        },
+        "folder": { "type": "string" },
+        "state_file": { "type": "string" },
+        "worktree_path": { "type": ["string", "null"] },
+        "pr_url": { "type": ["string", "null"] },
+        "marker": {
+          "type": "string",
+          "enum": [
+            "none", "waiting", "complete", "agent_working", "manual_steering",
+            "execute_waiting", "execute_complete", "execute_stale", "review_working",
+            "review_waiting", "review_ci_stale", "review_stale", "review_complete",
+            "review_error", "error"
+          ]
+        },
+        "attrs": { "type": "object", "additionalProperties": true },
+        "held": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["reason", "provider", "retry_after"],
+          "properties": {
+            "reason": { "const": "quota" },
+            "provider": { "type": ["string", "null"], "pattern": "^[A-Za-z0-9_-]+$" },
+            "retry_after": { "type": ["string", "null"], "format": "date-time" }
+          }
+        },
+        "mtime": { "type": "string", "format": "date-time" },
+        "folder_mtime": { "type": "string", "format": "date-time" },
+        "age_seconds": { "type": "integer", "minimum": 0 },
+        "claude_pid": { "type": ["integer", "null"], "minimum": 1 },
+        "claude_pid_alive": { "type": ["boolean", "null"] },
+        "live_task_lock": { "type": "boolean" },
+        "attempt_id": {
+          "description": "Durable attempt projected into the compatibility lock, or null for legacy work.",
+          "type": ["string", "null"]
+        },
+        "task_generation": {
+          "description": "Durable task-generation owner projected into the compatibility lock, or null for legacy work.",
+          "type": ["string", "null"]
+        },
+        "task_lock_pid": { "type": ["integer", "null"], "minimum": 1 },
+        "task_lock_process_start_time": { "type": ["string", "null"] },
+        "task_lock_id": { "type": ["string", "null"] },
+         "condition_task_generation": {
+          "description": "Monotonic condition input epoch from the canonical task projection.",
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "commit_generation": {
+          "description": "Monotonic exact-HEAD revision within the condition task generation.",
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "current_attempt": {
+          "description": "Current durable attempt selected by the condition projection, or null before handoff.",
+          "type": ["string", "null"]
+        },
+        "conditions": {
+          "description": "Current condition facts selected by generation, attempt family, and commit scope.",
+          "type": "array",
+          "items": { "type": "object", "additionalProperties": true }
+        },
+        "condition_history": {
+          "description": "Historical and superseded condition facts retained for audit.",
+          "type": "array",
+          "items": { "type": "object", "additionalProperties": true }
+        },
+        "evidence": {
+          "description": "Typed evidence referenced by current condition facts.",
+          "type": "array",
+          "items": { "type": "object", "additionalProperties": true }
+        },
+        "condition_overrides": {
+          "description": "Latest durable forced condition-gate overrides, retained in full in the journal.",
+          "type": "array",
+          "maxItems": 20,
+          "items": { "type": "object", "additionalProperties": true }
+        },
+        "condition_gate": {
+          "description": "Canonical gate evaluation for the row's condition-capable transition, or null.",
+          "type": ["object", "null"],
+          "additionalProperties": true
+        },
+        "condition_migration": {
+          "description": "Configured/effective marker-shadow-condition authority selection, or null for invalid rows.",
+          "type": ["object", "null"],
+          "additionalProperties": true
+        },
+        "condition_provenance": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "shadow_audit": {
+          "description": "Read-only parity evidence and explicit promotion-readiness summary.",
+          "type": "object",
+          "additionalProperties": true
+        },
+         "condition_warning": {
+           "description": "Operator-visible shadow divergence warning, or null.",
+           "type": ["string", "null"]
+         },
+        "implementation_identity": {
+          "oneOf": [
+            { "$ref": "#/$defs/ImplementationIdentity" },
+            { "type": "null" }
+          ]
+        },
+        "unanswered_questions": { "type": "integer", "minimum": 0 },
+        "action": {
+          "type": "string",
+          "enum": [
+            "ready_to_brainstorm", "ready_to_plan", "ready_to_develop",
+            "ready_to_open_pr", "ready_for_review", "ready_to_artifacts",
+            "ready_to_finalize", "ready_to_archive", "ready_to_advance",
+            "ready_to_run", "review_parked", "needs_input", "recover_execute",
+            "recover_review", "agent_running", "archived", "manual_steering",
+            "error", "admission_error"
+          ]
+        },
+        "action_label": { "type": "string" },
+        "suggested_command": { "type": ["string", "null"] },
+        "next_action": {
+          "type": ["object", "null"],
+          "additionalProperties": true,
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": ["edit", "mv", "approve", "run", "recover_stale", "no_op"]
+            }
+          }
+        },
+        "diagnostic": {
+          "oneOf": [
+            { "$ref": "#/$defs/Diagnostic" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "ImplementationIdentity": {
+      "description": "Generation-scoped implementation ownership projected from the task journal. Status reads are pure: preview entries describe the policy that would be used if the stage launched now, while resolved entries came from launch events.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generation", "pending", "stages"],
+      "properties": {
+        "generation": { "type": "integer", "minimum": 0 },
+        "pending": { "type": "boolean" },
+        "stages": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "execute": { "$ref": "#/$defs/ImplementationIdentityStage" },
+            "open_pr": { "$ref": "#/$defs/ImplementationIdentityStage" },
+            "review.fix": { "$ref": "#/$defs/ImplementationIdentityStage" },
+            "review.ci": { "$ref": "#/$defs/ImplementationIdentityStage" }
+          }
+        }
+      }
+    },
+    "ImplementationIdentityStage": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "provider", "model", "requested_effort", "effective_effort",
+            "effort_supported", "source", "originating_attempt", "resolved_attempt", "status"
+          ],
+          "properties": {
+            "provider": { "type": "string", "minLength": 1 },
+            "model": { "type": "string", "minLength": 1 },
+            "requested_effort": { "type": ["string", "null"] },
+            "effective_effort": { "type": ["string", "null"] },
+            "effort_supported": { "type": "boolean" },
+            "source": {
+              "type": "string",
+              "enum": ["persisted_execute", "explicit_override", "legacy_backfill"]
+            },
+            "originating_attempt": { "type": ["string", "null"] },
+            "resolved_attempt": { "type": ["string", "null"] },
+            "status": { "type": "string", "enum": ["resolved", "preview"] }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "source", "resolution_error"],
+          "properties": {
+            "status": { "const": "resolution_error" },
+            "source": {
+              "type": "string",
+              "enum": ["persisted_execute", "explicit_override", "legacy_backfill"]
+            },
+            "resolution_error": { "type": "string", "minLength": 1, "maxLength": 240 }
+          }
+        }
+      ]
+    },
+    "Diagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "summary", "detail", "source", "source_path", "artifact_paths",
+        "generated_by", "marker_signature", "suggested_next_action", "updated_at"
+      ],
+      "properties": {
+        "summary": { "type": "string", "maxLength": 120 },
+        "detail": { "type": "string", "maxLength": 4000 },
+        "source": { "type": "string", "enum": ["marker", "artifact"] },
+        "source_path": { "type": ["string", "null"] },
+        "artifact_paths": { "type": "array", "items": { "type": "string" }, "maxItems": 20 },
+        "generated_by": { "type": "string", "enum": ["local", "claude", "codex", "pi", "grok"] },
+        "marker_signature": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "suggested_next_action": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "command"],
+              "properties": {
+                "kind": { "type": "string", "enum": ["retry", "clear_marker", "manual_fix"] },
+                "command": { "type": ["string", "null"] }
+              }
+            },
+            { "type": "null" }
+          ]
+        },
+        "updated_at": { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}

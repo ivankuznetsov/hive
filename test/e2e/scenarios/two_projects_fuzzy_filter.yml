@@ -33,7 +33,7 @@ steps:
   - kind: tui_keys
     keys: "2"
   - kind: tui_expect
-    anchor: "scope=2"
+    anchor: "Tasks · project-b"
     timeout: 5
   - kind: tui_keys
     keys: "q"

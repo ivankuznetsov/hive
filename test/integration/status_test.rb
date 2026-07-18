@@ -143,6 +143,25 @@ class StatusTest < Minitest::Test
     end
   end
 
+  def test_status_read_does_not_create_condition_journal_or_snapshot_for_legacy_task
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        project = File.basename(dir)
+        capture_io { Hive::Commands::New.new(project, "legacy status row").call }
+        folder = Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "legacy-status-row-*")].first
+
+        out, = capture_io { Hive::Commands::Status.new(json: true).call }
+
+        refute File.exist?(File.join(folder, "events.jsonl"))
+        refute File.exist?(File.join(folder, "task-projection.json"))
+        identity = JSON.parse(out).dig("projects", 0, "tasks", 0, "implementation_identity")
+        assert_equal true, identity["pending"]
+        assert_equal({}, identity["stages"])
+      end
+    end
+  end
+
   def test_status_json_renders_content_fixture_stage_set
     with_registered_workflow(content_workflow) do
       with_tmp_global_config do

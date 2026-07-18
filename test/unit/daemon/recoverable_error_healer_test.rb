@@ -419,4 +419,14 @@ class HiveDaemonRecoverableErrorHealerTest < Minitest::Test
                    "a raised post-clear audit must not un-clear the marker nor crash the tick"
     end
   end
+
+  def test_attempt_lost_is_reserved_for_durable_loss_healer
+    with_error_row(attrs: { "reason" => "attempt_lost" }) do |row, state_file, _dir|
+      healer.heal([ row ], now: NOW)
+
+      assert_equal :error, Hive::Markers.current(state_file).name
+      assert_empty @probe.calls
+      refute @logger.events.any? { |name, _attrs| name == :auto_retry }
+    end
+  end
 end

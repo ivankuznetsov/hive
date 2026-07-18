@@ -366,6 +366,64 @@ class HivePatrolPrOpenerTest < Minitest::Test
     end
   end
 
+  def test_failed_handoff_retry_does_not_enqueue_after_the_remote_base_advances
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      gh = FakeGh.new
+      failed = Hive::Patrol::PrOpener.new(
+        dir,
+        cfg: cfg,
+        gh: gh,
+        review_handoff: FailingReviewHandoff.new
+      ).open(finding, patch(worktree_path: dir))
+      assert_equal :opened_review_handoff_failed, failed.status
+
+      gh.base_remote_oid = "d" * 40
+      handoff = RecordingReviewHandoff.new
+      retried = Hive::Patrol::PrOpener.new(
+        dir,
+        cfg: cfg,
+        gh: gh,
+        review_handoff: handoff
+      ).open(finding, patch(worktree_path: dir))
+
+      assert_equal :error, retried.status
+      assert_equal "gh_error", retried.reason
+      assert_match(/existing PR identity mismatch/, retried.detail)
+      assert_empty handoff.calls, "an old-base patrol PR must never create a review task"
+      fingerprints = JSON.parse(File.read(File.join(dir, ".hive-state", "patrol", "fingerprints.json")))
+      assert_equal "review_handoff_failed", fingerprints.fetch("fp1").fetch("state")
+    end
+  end
+
+  def test_remote_base_is_rechecked_immediately_before_review_handoff
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      gh = FakeGh.new
+      handoff = RecordingReviewHandoff.new
+      lookup_count = 0
+      original_lookup = gh.method(:lookup_prs_for_branch)
+      gh.define_singleton_method(:lookup_prs_for_branch) do |*args, **kwargs|
+        result = original_lookup.call(*args, **kwargs)
+        lookup_count += 1
+        @base_remote_oid = "d" * 40 if lookup_count == 2
+        result
+      end
+
+      result = Hive::Patrol::PrOpener.new(
+        dir,
+        cfg: cfg,
+        gh: gh,
+        review_handoff: handoff
+      ).open(finding, patch(worktree_path: dir))
+
+      assert_equal :error, result.status
+      assert_equal "gh_error", result.reason
+      assert_match(/remote patrol base identity mismatch/, result.detail)
+      assert_empty handoff.calls
+    end
+  end
+
   def test_existing_merged_pr_does_not_enqueue_review_task
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))

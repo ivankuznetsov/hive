@@ -28,7 +28,10 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
       "requestor" => requestor,
       "chat_id" => chat_id,
       "update_id" => update_id,
-      "trigger" => trigger
+      "trigger" => trigger,
+      "task_generation" => nil,
+      "predecessor_attempt_id" => nil,
+      "inherited_outputs" => []
     }
     File.write(path, JSON.generate(payload))
     path
@@ -416,6 +419,78 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
     end
   end
 
+  def test_claimed_delivery_exposes_attempt_correlation
+    Dir.mktmpdir("hive-queue") do |dir|
+      at = Time.utc(2026, 7, 16, 12, 0, 0)
+      request_id = Q.write_request!(
+        project: "demo", slug: "demo-task", argv: %w[hive run demo-task],
+        request_id: "request-1", state_home: dir, now: at
+      )
+      Q.claim(
+        request_id, pid: nil, attempt_id: "attempt-1",
+        task_generation: "generation-1", state_home: dir, now: at
+      )
+
+      delivery = Q.claimed(state_home: dir).first
+      assert_equal "request-1", delivery.request.request_id
+      assert_equal "attempt-1", delivery.claim["attempt_id"]
+      assert_equal "generation-1", delivery.claim["task_generation"]
+    end
+  end
+
+  def test_recover_claims_follows_live_attempt_instead_of_nil_claim_pid
+    Dir.mktmpdir("hive-queue") do |dir|
+      at = Time.utc(2026, 7, 16, 12, 0, 0)
+      request_id = Q.write_request!(
+        project: "demo", slug: "demo-task", argv: %w[hive run demo-task],
+        request_id: "request-1", state_home: dir, now: at
+      )
+      Q.claim(
+        request_id, pid: nil, attempt_id: "attempt-1",
+        task_generation: "generation-1", state_home: dir, now: at
+      )
+
+      removed = Q.recover_claims(
+        state_home: dir, now: at + 99_999,
+        alive: ->(_pid, _start) { false },
+        attempt_alive: ->(attempt_id, generation) {
+          attempt_id == "attempt-1" && generation == "generation-1"
+        }
+      )
+
+      assert_equal 0, removed
+      assert_equal 1, Q.claimed(state_home: dir).length
+    end
+  end
+
+  def test_recover_claims_repairs_admitted_attempt_after_preclaim_crash
+    Dir.mktmpdir("hive-queue") do |dir|
+      at = Time.utc(2026, 7, 16, 12, 0, 0)
+      request_id = Q.write_request!(
+        project: "demo", slug: "demo-task", argv: %w[hive run demo-task],
+        request_id: "request-crash", state_home: dir, now: at
+      )
+      Q.claim(request_id, pid: nil, state_home: dir, now: at)
+
+      removed = Q.recover_claims(
+        state_home: dir, now: at + 10,
+        alive: ->(_pid, _start) { false },
+        attempt_for_request: ->(seen_request_id) {
+          assert_equal request_id, seen_request_id
+          { attempt_id: "attempt-1", task_generation: "generation-1" }
+        },
+        attempt_alive: ->(attempt_id, generation) {
+          attempt_id == "attempt-1" && generation == "generation-1"
+        }
+      )
+
+      assert_equal 0, removed
+      delivery = Q.claimed(state_home: dir).fetch(0)
+      assert_equal "attempt-1", delivery.claim.fetch("attempt_id")
+      assert_equal "generation-1", delivery.claim.fetch("task_generation")
+    end
+  end
+
   def test_recover_claims_expires_aged_claim_even_when_owner_alive
     Dir.mktmpdir("hive-dispatch-queue") do |dir|
       write_request(dir, request_id: "aged0001", created_at: Time.utc(2026, 5, 28, 18, 0, 0))
@@ -681,5 +756,105 @@ class HiveDaemonDispatchRequestQueueTest < Minitest::Test
       refute File.exist?(claimed)
       refute File.exist?("#{claimed}#{Q::CLAIM_META_SUFFIX}")
     end
+  end
+
+  def test_v3_round_trips_generation_and_v2_remains_readable
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      Q.write_request!(
+        project: "hive", slug: "task", argv: [ "hive", "run", "task" ],
+        request_id: "v3request", task_generation: "generation-1",
+        predecessor_attempt_id: "attempt-zero",
+        inherited_outputs: [ { "path" => "outputs/old.json", "size" => 2, "sha256" => "0" * 64 } ],
+        state_home: dir, now: Time.utc(2026, 7, 16, 12, 0, 0)
+      )
+      write_request(dir, request_id: "v2request", created_at: Time.utc(2026, 7, 16, 11, 0, 0),
+                    schema_version: 2)
+
+      v2, v3 = Q.pending(state_home: dir)
+      assert_nil v2.task_generation
+      assert_equal 2, v2.schema_version
+      assert_equal "generation-1", v3.task_generation
+      assert_equal "attempt-zero", v3.predecessor_attempt_id
+      assert_equal 3, v3.schema_version
+      assert_equal 1, v3.inherited_outputs.size
+    end
+  end
+
+  def test_v3_rejects_invalid_output_references_at_write_and_read_boundaries
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      bad_reference = { "path" => "../escape", "size" => 1, "sha256" => "0" * 64 }
+      error = assert_raises(ArgumentError) do
+        Q.write_request!(
+          project: "hive", slug: "task", argv: [ "hive", "run", "task" ],
+          inherited_outputs: [ bad_reference ], state_home: dir
+        )
+      end
+      assert_includes error.message, "path"
+
+      path = write_request(
+        dir, request_id: "invalidref", created_at: Time.utc(2026, 7, 16, 12, 0, 0)
+      )
+      payload = JSON.parse(File.read(path))
+      payload["inherited_outputs"] = [ bad_reference ]
+      File.write(path, JSON.generate(payload))
+      bads = []
+      assert_empty Q.pending(
+        state_home: dir,
+        bad_handler: ->(path:, reason:) { bads << [ path, reason ] }
+      )
+      assert_equal "invalid_inherited_outputs", bads.first.last
+    end
+  end
+
+  def test_claimed_reports_malformed_requests_and_missing_sidecars
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      directory = Q.directory(state_home: dir)
+      malformed = File.join(directory, "malformed.json#{Q::CLAIMED_SUFFIX}")
+      missing_sidecar = File.join(directory, "missing.json#{Q::CLAIMED_SUFFIX}")
+      File.write(malformed, "{")
+      source = write_request(
+        dir, request_id: "missing01", created_at: Time.utc(2026, 7, 16, 12, 0, 0)
+      )
+      File.rename(source, missing_sidecar)
+      bads = []
+
+      assert_empty Q.claimed(
+        state_home: dir,
+        bad_handler: ->(path:, reason:) { bads << [ path, reason ] }
+      )
+      assert_equal %w[malformed_json missing_claim_metadata], bads.map(&:last).sort
+    end
+  end
+
+  def test_claimed_treats_a_disappearing_directory_as_empty
+    with_tmp_dir do |state_home|
+      with_replaced_singleton_method(Dir, :glob, ->(_pattern) { raise Errno::ENOENT }) do
+        assert_equal [], Q.claimed(state_home: state_home)
+      end
+    end
+  end
+
+  def test_claim_sidecar_records_resolved_attempt_reference
+    Dir.mktmpdir("hive-dispatch-queue") do |dir|
+      Q.write_request!(project: "hive", slug: "task", argv: [ "hive", "run", "task" ],
+                       request_id: "claimed01", state_home: dir)
+      claimed = Q.claim("claimed01", pid: nil, attempt_id: "attempt-one",
+                        task_generation: "generation-one", state_home: dir)
+      metadata = Q.send(:read_claim_metadata, claimed)
+
+      assert_equal "attempt-one", metadata["attempt_id"]
+      assert_equal "generation-one", metadata["task_generation"]
+    end
+  end
+
+  def test_dispatch_delegates_delivery_to_shared_attempt_dispatcher
+    request = Q::Request.new(request_id: "r1", project: "hive", slug: "task",
+                             argv: [ "hive", "run", "task" ])
+    fake = Object.new
+    fake.define_singleton_method(:dispatch_request) { |value, **kwargs| [ value, kwargs ] }
+
+    value, kwargs = Q.dispatch(request, dispatcher: fake, interactive: false)
+    assert_same request, value
+    assert_equal false, kwargs[:interactive]
   end
 end

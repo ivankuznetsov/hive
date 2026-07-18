@@ -156,6 +156,8 @@ stage name.
 
 ## Migration Notes
 
+The automatic implementation-owner policy applies only to the built-in coding workflow's `execute`, `open_pr`, `review.fix`, and `review.ci` boundaries. Descriptor-backed agent and council stages continue to resolve their own optional `agent`, `model`, and `effort` fields, and council reviewers are never inherited from the coding execute owner.
+
 Existing workflow descriptors continue to load: all new fields are optional.
 Workflows that used a prompt-encoded review panel can replace it with
 `kind: council`. Workflows that appended a dummy final `kind: terminal` stage

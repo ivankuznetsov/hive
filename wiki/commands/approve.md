@@ -3,11 +3,11 @@ title: hive approve
 type: command
 source: lib/hive/commands/approve.rb
 created: 2026-04-25
-updated: 2026-04-26
-tags: [command, approval, json]
+updated: 2026-07-16
+tags: [command, approval, json, dependencies, admission]
 ---
 
-**TLDR**: `hive approve TARGET [--to STAGE] [--from STAGE] [--project NAME] [--force] [--json]` moves a task folder between stages and records a commit on `hive/state`. The agent-callable equivalent of shell `mv <task> <next-stage>/` — same effect, plus marker validation, ambiguity resolution, idempotency assertion, locking, rollback on commit failure, and a structured exit-code / JSON contract (success and error paths).
+**TLDR**: `hive approve` moves a task folder and commits the transition. Forward moves revalidate dependency admission under the existing commit/task locks immediately before mutation. Backward recovery and same-stage no-ops remain available; `--force` cannot bypass admission.
 
 ## Usage
 
@@ -31,24 +31,23 @@ hive approve <slug> --json                 # machine-readable result (success AN
 4. `validate_from!`: if `--from` was passed, assert the task is at the named stage; raise `WrongStage` (4) on mismatch.
 5. `resolve_destination`: `--to` (long or short stage name), or auto = the descriptor's next stage (`task.workflow.next_stage_after(task.stage_name)`). At the terminal stage (`9-done` for coding) this raises `FinalStageReached` (also exit 4).
 6. **Same-stage no-op**: if destination resolves to the current stage, emit a `noop: true` payload (or one-line `hive: noop —` text) and return success. No mv, no commit.
-7. `validate_move!`: forward auto-advance requires `:complete`, `:execute_complete`, or `:review_complete` marker. `--to` (backward direction) and `--force` both bypass.
+7. `validate_move!`: forward auto-advance requires `:complete`, `:execute_complete`, or `:review_complete` marker. At `4-execute`, effective condition authority is checked first. `--to` (backward direction) bypasses; `--force` bypasses the marker/condition result only after an idempotent `operator_action` audit is durable. Audit failure prevents the move.
 8. **Locking**:
    - `Hive::Lock.with_commit_lock(hive_state_path)` outermost — serialises hive/state writes and surfaces contention BEFORE any filesystem mutation (a 30-second commit-lock timeout never leaves a half-applied move).
    - `Hive::Lock.with_task_lock(task.folder)` inner — blocks a concurrent `hive run` on the same task during the move.
-9. `move_task!`: direct `File.rename` from source to destination, with a rescue for `Errno::ENOTEMPTY` / `EEXIST` / `EISDIR` that surfaces as `Hive::DestinationCollision` (covers the TOCTOU window where a non-hive process `mkdir`s the destination between the pre-check and the rename). Cross-device fallback uses `cp_r` + `rm_rf`.
-10. Cleanup: the task `.lock` file moves with the folder; the orphan at the destination is deleted before commit so per-process lock metadata isn't tracked in hive/state.
-11. `record_hive_commit`: **slug-scoped** `git add -A stages/<src>/<slug> stages/<dst>/<slug>` (the source side is added only if it has tracked files; the destination is always added). Sibling-task changes in the same parent stage directory do NOT get swept into the commit message. Commit message: `hive: <from>/<slug> approve <from> -> <to>`.
-12. **Rollback**: if the commit fails (pre-commit hook abort, disk full, lock contention mid-flight), the move is reversed (`FileUtils.mv` back) and the original error is re-raised wrapped in `Hive::Error` so filesystem and git history don't diverge.
-13. Report: human prose by default (`hive: approved <slug>` to stdout, `next: hive run …` hint to stderr); one-line `hive-approve` JSON document with `--json`.
+9. For a forward move, build a fresh all-project dependency snapshot and enforce admission inside both locks, after the read-only destination collision check and immediately before `File.rename`. A benign dependency wait raises `DependencyWaitError` (exit 75); an admission error raises `DependencyAdmissionError` (exit 78). `--force` bypasses only step 7's marker check. Backward moves skip admission so corrupt metadata can be repaired by moving to an earlier stage.
+10. `move_task!`: direct `File.rename` from source to destination, with a rescue for `Errno::ENOTEMPTY` / `EEXIST` / `EISDIR` that surfaces as `Hive::DestinationCollision`. Cross-device fallback uses `cp_r` + `rm_rf`.
+11. Cleanup the moved `.lock`, record the slug-scoped commit, and roll the move back if commit fails.
+12. Report human prose or one `hive-approve` JSON document.
 
-## JSON contract (`schema = "hive-approve"`, version 1)
+## JSON contract (`schema = "hive-approve"`, version 2)
 
 ### Success
 
 ```json
 {
   "schema": "hive-approve",
-  "schema_version": 1,
+  "schema_version": 2,
   "ok": true,
   "noop": false,
   "slug": "fix-bug-260424-aaaa",
@@ -79,7 +78,7 @@ The split `from_stage` (bare) + `from_stage_index` + `from_stage_dir` (combined)
 ```json
 {
   "schema": "hive-approve",
-  "schema_version": 1,
+  "schema_version": 2,
   "ok": false,
   "error_class": "AmbiguousSlug",
   "error_kind": "ambiguous_slug",
@@ -96,15 +95,18 @@ Different errors carry different structured fields:
 - `AmbiguousSlug` → `candidates: [{project, stage, folder}, ...]`
 - `DestinationCollision` → `path: "<conflicting destination>"`
 - `FinalStageReached` → `stage: "9-done"`
+- `DependencyWaitError` → `error_kind: "dependency_wait"`, exit 75, plus `reason_code`, `offending_ref`, `safe_correction`
+- `DependencyAdmissionError` → `error_kind: "admission_error"`, exit 78, plus the same structured fields
+- `ConditionGateBlocked` → `error_kind: "wrong_stage"`, exit 4, plus the complete `condition_gate` and reason-specific `next_action`
 
 The envelope is emitted on stdout BEFORE the exception propagates, mirroring `hive run --json`'s dual-signal pattern (JSON document + non-zero exit code).
 
-Pinned by `Hive::Schemas::SCHEMA_VERSIONS["hive-approve"]` and `test/integration/run_approve_test.rb` (`test_json_output_emits_stable_schema` for the success path; one test per error class for envelopes). External consumers can validate emitted documents against the published JSON Schema at `schemas/hive-approve.v1.json` (draft 2020-12); resolve the absolute path via `Hive::Schemas.schema_path("hive-approve")` from Ruby, or use any draft-2020-12 validator (ajv, json_schemer, etc.) directly. `test/unit/schema_files_test.rb` pins the schema file's required-key set against the producer so code-vs-schema drift fails at test time.
+Pinned by `Hive::Schemas::SCHEMA_VERSIONS["hive-approve"]` and the command/schema suites. The current artifact is `schemas/hive-approve.v2.json`; v1 remains available for historical validation.
 
 ## Slug resolution rules
 
 - **Slug not found**: `Hive::InvalidTaskPath` → exit 64 (USAGE).
-- **Slug appears in multiple stages of the same project**: `Hive::AmbiguousSlug` → exit 64. Pass an absolute folder path to pick a specific stage; `--to` selects the destination, not the source, so it cannot disambiguate this case.
+- **Slug appears in multiple stages of the same project**: bare resolution raises `Hive::AmbiguousSlug` (64). An absolute folder selects the source, but forward dependency admission still rejects the duplicate qualified identity with `dependency_validation_failed`; repair the duplicate state rather than dispatching through it.
 - **Slug appears in multiple projects**: `Hive::AmbiguousSlug` → exit 64 with a hint to pass `--project <name>`.
 - **`--project NAME`** scopes the slug lookup to a single registered project. Combining `--project` with an absolute folder path is allowed only if the path's project matches the name; mismatch raises `Hive::InvalidTaskPath`.
 - **Bare slug + cwd shadow**: a bare slug is always resolved through the cross-project search even if a directory of the same name exists in `pwd`.
@@ -121,8 +123,8 @@ Pinned by `Hive::Schemas::SCHEMA_VERSIONS["hive-approve"]` and `test/integration
 
 | Direction | Marker required | Override |
 |-----------|-----------------|----------|
-| Forward auto (no `--to`) | one of `VALID_TERMINAL_MARKERS` | `--force` |
-| Forward via `--to`       | one of `VALID_TERMINAL_MARKERS` | `--force` |
+| Forward auto (no `--to`) | terminal marker **and clear dependency admission** | `--force` affects marker only |
+| Forward via `--to`       | terminal marker **and clear dependency admission** | `--force` affects marker only |
 | Backward via `--to`      | none                            | n/a      |
 | Same stage (no-op)       | none                            | n/a      |
 
@@ -149,10 +151,14 @@ If the task is at `2-brainstorm`, advance to `3-plan` as usual. If it's at any o
 | Destination already exists | 1 (`GENERIC`) | `Hive::DestinationCollision` |
 | Commit failed; mv rolled back | 1 (`GENERIC`) | `Hive::Error` |
 | Lock contention (commit lock held >30s) | 75 (`TEMPFAIL`) | `Hive::ConcurrentRunError` |
+| Valid prerequisite below its gate | 75 (`TEMPFAIL`) | `Hive::DependencyWaitError` |
+| Invalid/indeterminate dependency admission | 78 (`CONFIG`) | `Hive::DependencyAdmissionError` |
 
 ## Why not just use `mv`?
 
-`mv` works fine for humans. Agent callers want:
+Raw `mv` remains possible, but it bypasses supported-command validation. The
+next `hive status`, daemon tick, `hive run`, or forward `hive approve` detects
+and holds invalid dependency state. Agent callers use `approve` for:
 - a stable exit code on each failure mode, including the dual-signal JSON envelope on every error path
 - a single source of truth for stage names (`--to plan` ≡ `--to 3-plan`; enforced by Thor `enum:`)
 - a marker check that prevents "approve a WAITING task" mistakes

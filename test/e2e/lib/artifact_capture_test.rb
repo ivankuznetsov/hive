@@ -28,6 +28,8 @@ class E2EArtifactCaptureTest < Minitest::Test
       .collect(error: error, failed_step: failed_step,
                step_results: overrides[:step_results] || [],
                tmux_driver: overrides[:tmux_driver],
+               tmux_keystrokes: overrides[:tmux_keystrokes],
+               pane_after: overrides[:pane_after],
                schema_diff: overrides[:schema_diff],
                pane_before: overrides[:pane_before])
   end
@@ -140,6 +142,18 @@ class E2EArtifactCaptureTest < Minitest::Test
 
       assert_equal "BEFORE_PANE_TEXT\n", pane_before
       assert_equal "AFTER_PANE_TEXT\n", pane_after
+    end
+  end
+
+  def test_pre_captured_tmux_evidence_survives_server_cleanup
+    with_dirs do |scenario_dir, sandbox, run_home|
+      collect(scenario_dir, sandbox, run_home,
+              tmux_keystrokes: [ { "keys" => [ "enter" ] } ],
+              pane_after: "FINAL_PANE_BEFORE_SHUTDOWN\n")
+
+      assert_equal "FINAL_PANE_BEFORE_SHUTDOWN\n", File.read(File.join(scenario_dir, "pane-after.txt"))
+      assert_equal [ { "keys" => [ "enter" ] } ],
+                   JSON.parse(File.read(File.join(scenario_dir, "keystrokes.log")))
     end
   end
 
@@ -383,6 +397,22 @@ class E2EArtifactCaptureTest < Minitest::Test
       assert_includes error["error"], "Errno::ENOENT"
     ensure
       Digest::SHA256.define_singleton_method(:file, original_digest_file) if original_digest_file
+    end
+  end
+
+  def test_gh_script_state_and_audit_are_copied_into_failure_bundle
+    with_dirs do |scenario_dir, sandbox, run_home|
+      gh_root = File.join(run_home, "gh-stub")
+      FileUtils.mkdir_p(gh_root)
+      File.write(File.join(gh_root, "script.json"), "{}\n")
+      File.write(File.join(gh_root, "state.json"), "{\"next_index\":0}\n")
+      File.write(File.join(gh_root, "audit.jsonl"), "{\"matched\":false}\n")
+
+      collect(scenario_dir, sandbox, run_home)
+
+      assert_equal "{\"matched\":false}\n", File.read(File.join(scenario_dir, "gh", "audit.jsonl"))
+      manifest = JSON.parse(File.read(File.join(scenario_dir, "manifest.json")))
+      assert_includes manifest.fetch("files").map { |entry| entry.fetch("path") }, "gh/script.json"
     end
   end
 end

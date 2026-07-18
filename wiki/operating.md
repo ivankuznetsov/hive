@@ -3,7 +3,7 @@ title: Operating Hive
 type: operating
 source: README.md, bin/hv, install.sh, lib/hive/commands/daemon.rb, lib/hive/commands/babysit.rb, lib/hive/commands/bot.rb, lib/hive/commands/setup_agents.rb, examples/systemd/, examples/launchd/, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-07
-updated: 2026-07-14
+updated: 2026-07-17
 tags: [operating, daemon, bot, systemd, launchd, install, skills]
 ---
 
@@ -60,7 +60,7 @@ yay -S hive-bin
 # glibc Linux fallback / Ubuntu 22.04+ (pin to the release tag, not main)
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
-curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.4.2/install.sh -o "$tmpdir/hive-install.sh"
+curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.4.3/install.sh -o "$tmpdir/hive-install.sh"
 bash "$tmpdir/hive-install.sh"
 ```
 
@@ -193,8 +193,8 @@ the published schemas, and asserts no state leaks outside the prefix.
 Local usage:
 
 ```bash
-packaging/verify-release.sh --version=v0.4.2
-packaging/verify-release.sh --version=v0.4.2 --report=json | jq .ok
+packaging/verify-release.sh --version=v0.4.3
+packaging/verify-release.sh --version=v0.4.3 --report=json | jq .ok
 ```
 
 For unreleased packaging fixes, validate against the locally built gem rather
@@ -392,14 +392,21 @@ sudo loginctl enable-linger $USER
 The unit declares `Type=simple` and runs `hive daemon start` in the
 foreground — systemd is the supervisor. `Restart=on-failure` brings
 the daemon back after a crash; the daemon's own SIGTERM handler does
-the graceful drain (`daemon.shutdown_grace_sec`, default 600 s).
+the graceful drain (`daemon.shutdown_grace_sec`, default 600 s). The shipped
+unit uses `KillMode=process`, so a service stop or restart signals only the
+daemon process. Durable attempt wrapper/worker processes survive daemon
+replacement and remain lease-owned until the new daemon adopts or reconciles
+them. Existing installs whose unit still says `KillMode=mixed` should run
+`hive daemon install --force` once after upgrading; the installer backs up the
+old unit before loading this lifecycle policy.
 
 The shipped unit hardcodes `TimeoutStopSec=900` (15 min — drain budget
 plus headroom). If you raise `daemon.shutdown_grace_sec` above 900,
 **also** raise `TimeoutStopSec=` in your installed unit to match
 (`shutdown_grace_sec + 300` is a reasonable cushion). Otherwise
-systemd will SIGKILL still-running stage children mid-`hive run`,
-losing in-flight work.
+systemd can force-stop the old daemon before its graceful accounting finishes.
+Durable attempts are still preserved by `KillMode=process` and reconciled by
+the replacement daemon.
 
 If `hive` lives behind a version manager (rbenv / asdf / mise), edit
 the `ExecStart=` line to use the shim's absolute path — systemd-user

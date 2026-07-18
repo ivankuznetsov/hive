@@ -21,6 +21,15 @@ require "hive/daemon/dispatch_request_queue"
 require "hive/daemon/status_report"
 require "hive/invoked_binary"
 require "hive/update_check/state"
+require "hive/attempts/store"
+require "hive/attempts/detached_launcher"
+require "hive/attempts/dispatcher"
+require "hive/attempts/configured_dispatcher"
+require "hive/attempts/process_identity"
+require "hive/attempts/legacy_backfiller"
+require "hive/attempts/reconciler"
+require "hive/attempts/lost_outcome"
+require "hive/conditions/attempt_observer"
 
 module Hive
   module Commands
@@ -131,6 +140,17 @@ module Hive
           Process.daemon(true, true)
         end
 
+        # A manually-started daemon must keep using the exact Hive CLI that
+        # launched it. Without an explicit HIVE_BIN, ChildSupervisor,
+        # StatusConsumer, and the display-name backfiller fall back to the
+        # first `hive` on PATH. That can silently mix a checkout daemon with
+        # an older packaged gem for every dispatched child. Service units
+        # already export HIVE_BIN; pin the equivalent value for foreground
+        # and --detach starts while preserving an operator override.
+        runtime_hive_bin_was_set = ENV.key?("HIVE_BIN")
+        original_runtime_hive_bin = ENV["HIVE_BIN"]
+        pin_runtime_hive_bin!
+
         # PR-40 follow-up review C5: refuse to start if we can't capture
         # our own start_time. Without it the PID-reuse defense degrades
         # to "trust everything" silently — and `hive daemon stop` could
@@ -231,6 +251,32 @@ module Hive
           logger: logger
         )
 
+        attempt_store = Hive::Attempts::Store.new
+        attempt_dispatcher = Hive::Attempts::ConfiguredDispatcher.new(
+          store: attempt_store
+        )
+        attempt_process_identity = Hive::Attempts::ProcessIdentity.new
+        attempt_backfiller = Hive::Attempts::LegacyBackfiller.new(
+          store: attempt_store,
+          process_identity: attempt_process_identity,
+          logger: logger
+        )
+        attempt_reconciler = Hive::Attempts::Reconciler.new(
+          store: attempt_store,
+          process_identity: attempt_process_identity,
+          legacy_backfiller: attempt_backfiller,
+          condition_observer: Hive::Conditions::AttemptObserver.new(
+            store: attempt_store, logger: logger
+          ),
+          logger: logger
+        )
+        lost_outcome_store = Hive::Attempts::LostOutcomeStore.new(store: attempt_store)
+        lost_outcome_processor = Hive::Attempts::LostOutcomeProcessor.new(
+          store: attempt_store,
+          outcome_store: lost_outcome_store,
+          process_identity: attempt_process_identity
+        )
+
         dispatcher = Hive::Daemon::Dispatcher.new(
           config: config, controller: controller, supervisor: supervisor,
           status_consumer: status_consumer, logger: logger,
@@ -241,7 +287,11 @@ module Hive
           patrol_arbiter: patrol_arbiter,
           digest_scheduler: digest_scheduler, answer_digest_scheduler: answer_digest_scheduler,
           dry_run: @dry_run,
-          update_state: Hive::UpdateCheck::State.new
+          update_state: Hive::UpdateCheck::State.new,
+          attempt_dispatcher: attempt_dispatcher,
+          attempt_reconciler: attempt_reconciler,
+          lost_outcome_store: lost_outcome_store,
+          lost_outcome_processor: lost_outcome_processor
         )
 
         reexec_requested = false
@@ -264,6 +314,14 @@ module Hive
         return unless reexec_requested
 
         reexec_with_fresh_code!
+      ensure
+        if defined?(runtime_hive_bin_was_set)
+          if runtime_hive_bin_was_set
+            ENV["HIVE_BIN"] = original_runtime_hive_bin
+          else
+            ENV.delete("HIVE_BIN")
+          end
+        end
       end
 
       # Source-file drift detected (e.g. `git pull` bumped a schema
@@ -644,6 +702,14 @@ module Hive
 
       def current_binary_path
         Hive::InvokedBinary.path
+      end
+
+      def pin_runtime_hive_bin!
+        return ENV["HIVE_BIN"] unless ENV["HIVE_BIN"].to_s.empty?
+
+        invoked = current_binary_path
+        ENV["HIVE_BIN"] = invoked if invoked
+        invoked
       end
 
       def safe_install_platform(installer)

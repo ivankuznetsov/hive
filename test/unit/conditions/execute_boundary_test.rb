@@ -1,0 +1,491 @@
+require "test_helper"
+require "hive/conditions/execute_boundary"
+require "hive/conditions/transition_guard"
+require "hive/attempts/generation"
+require "hive/attempts/store"
+require "hive/workflows/coding"
+
+class ConditionsExecuteBoundaryTest < Minitest::Test
+  include HiveTestHelper
+
+  TaskStub = Struct.new(
+    :folder, :state_file, :slug, :id, :worktree_path, :workflow,
+    :stage_index, :stage_name, :project_root,
+    keyword_init: true
+  )
+
+  class UnavailableGit
+    def head_sha = raise(Hive::GitError, "head unavailable")
+    def current_branch = raise(Errno::EACCES, "branch unavailable")
+  end
+
+  def test_mode_matrix_uses_marker_shadow_or_condition_authority_and_rollback_preserves_history
+    with_fixture do |task, store, attempt, context, baseline|
+      marker = evaluate(task, store, attempt, context, baseline, mode: "markers",
+                        legacy_marker: :execute_complete)
+      assert_equal :execute_complete, marker.marker_name
+      assert_equal "markers", marker.selection.effective
+
+      shadow_err = capture_io do
+        shadow = evaluate(task, store, attempt, context, baseline, mode: "shadow",
+                          legacy_marker: :execute_complete)
+        assert_equal :execute_complete, shadow.marker_name
+        assert_equal "shadow", shadow.selection.effective
+      end.last
+      assert_includes shadow_err, "shadow mismatch"
+      records = Hive::TaskProjection.read_journal(File.join(task.folder, "task-journal.jsonl"))
+      assert_equal 1, records.count { |record| record["event_type"] == "shadow_audit" }
+      capture_io do
+        evaluate(task, store, attempt, context, baseline, mode: "shadow",
+                 legacy_marker: :execute_complete)
+      end
+      records = Hive::TaskProjection.read_journal(File.join(task.folder, "task-journal.jsonl"))
+      assert_equal 1, records.count { |record| record["event_type"] == "shadow_audit" },
+                   "re-evaluating the same transition must not inflate rollout volume"
+
+      conditioned = evaluate(task, store, attempt, context, baseline, mode: "conditions",
+                             legacy_marker: :execute_complete)
+      assert_equal :execute_waiting, conditioned.marker_name
+      assert_equal "no_worktree_changes", conditioned.marker_attrs.fetch(:reason)
+
+      count = records.size
+      rolled_back = evaluate(task, store, attempt, context, baseline, mode: "markers",
+                             legacy_marker: :execute_complete)
+      assert_equal :execute_complete, rolled_back.marker_name
+      assert_operator Hive::TaskProjection.read_journal(File.join(task.folder, "task-journal.jsonl")).size,
+                      :>=, count
+    end
+  end
+
+  def test_shadow_categories_distinguish_agent_loss_and_operator_repair
+    boundary = Hive::Conditions::ExecuteBoundary.allocate
+    empty_projection = { "conditions" => { "history" => [] } }
+    repaired_projection = {
+      "conditions" => {
+        "history" => [
+          { "condition" => "AgentHealthy", "original_state" => "unsatisfied" }
+        ]
+      }
+    }
+    human_repaired_projection = {
+      "conditions" => {
+        "history" => [
+          { "condition" => "AwaitingHuman", "original_state" => "satisfied" }
+        ]
+      }
+    }
+
+    assert_equal "agent_loss", boundary.send(
+      :category_for, :execute_waiting, { reason: "implementer_failed" },
+      projection: empty_projection
+    )
+    assert_equal "operator_repair", boundary.send(
+      :category_for, :execute_complete, {}, projection: repaired_projection
+    )
+    assert_equal "operator_repair", boundary.send(
+      :category_for, :execute_complete, {}, projection: human_repaired_projection
+    )
+  end
+
+  def test_attempt_b_new_head_satisfies_gate_and_supersedes_attempt_a_wait
+    with_fixture do |task, store, attempt_a, context_a, baseline|
+      first = evaluate(task, store, attempt_a, context_a, baseline, mode: "conditions",
+                       legacy_marker: :execute_waiting, waiting_reason: "no_worktree_changes")
+      assert_equal :execute_waiting, first.marker_name
+
+      lost = store.mark_lost(attempt_a, reason: "owner_gone", now: Time.now.utc)
+      File.write(File.join(task.worktree_path, "change.txt"), "change\n")
+      run!("git", "-C", task.worktree_path, "add", "change.txt")
+      run!("git", "-C", task.worktree_path, "commit", "-m", "change", "--quiet")
+      attempt_b = store.create_launching(
+        **attempt_identity(task, baseline).merge(
+          attempt_id: "attempt-b", request_id: "request-b",
+          predecessor_attempt_id: lost.attempt_id
+        ),
+        launch_timeout_sec: 30, now: Time.now.utc
+      )
+      context_b = Hive::Attempts::Context.send(
+        :new,
+        attempt_id: attempt_b.attempt_id, task_generation: 1,
+        ownership_generation: attempt_b.ownership_generation
+      )
+      second = evaluate(task, store, attempt_b, context_b, baseline, mode: "conditions",
+                        legacy_marker: :execute_complete)
+
+      assert_equal :execute_complete, second.marker_name
+      changes = second.projection.current_condition("ChangesPresent")
+      assert_equal "attempt-b", changes.fetch("attempt_id")
+      old_wait = second.projection["conditions"].fetch("history").find do |fact|
+        fact["condition"] == "AwaitingHuman" && fact["attempt_id"] == "attempt-a"
+      end
+      assert_equal "newer_incompatible_attempt", old_wait.fetch("superseded_reason")
+    end
+  end
+
+  def test_research_success_requires_explicit_policy_and_output_evidence
+    with_fixture(research: true) do |task, store, attempt, context, baseline|
+      denied = evaluate(
+        task, store, attempt, context, baseline, mode: "conditions",
+        legacy_marker: :execute_complete, research: true, research_evidence: false
+      )
+      assert_equal :execute_waiting, denied.marker_name
+
+      allowed = evaluate(
+        task, store, attempt, context, baseline, mode: "conditions",
+        legacy_marker: :execute_complete, research: true, research_evidence: true
+      )
+      assert_equal :execute_complete, allowed.marker_name
+      assert_equal "research", allowed.marker_attrs.fetch(:mode)
+      assert_equal "no_commit_success", allowed.gate.waivers.first.fetch("reason")
+      replayed = Hive::TaskProjection::Store.new(
+        task_folder: task.folder, attempt_store: store
+      ).read
+      replayed_gate = Hive::Conditions::GateEvaluator.new(
+        projection: replayed,
+        rule: task.workflow.stage_named("execute").condition_policy
+      ).evaluate(research: true)
+      assert replayed_gate.eligible?
+      assert_equal true,
+                   replayed.current_condition("ChangesPresent")
+                           .dig("payload", "research_output_evidence")
+    end
+  end
+
+  def test_transition_guard_blocks_marker_only_bypass_in_condition_mode
+    with_fixture do |task, store, attempt, context, baseline|
+      outcome = evaluate(task, store, attempt, context, baseline, mode: "conditions",
+                         legacy_marker: :execute_complete)
+      assert_equal :execute_waiting, outcome.marker_name
+      Hive::Markers.set(task.state_file, :execute_complete)
+
+      with_env("HIVE_ATTEMPT_STORE_ROOT" => store.root) do
+        error = assert_raises(Hive::ConditionGateBlocked) do
+          Hive::Conditions::TransitionGuard.validate!(task, config: config("conditions"))
+        end
+        assert_equal "blocked", error.condition_gate.fetch("status")
+        assert_equal "ChangesPresent", error.next_action.fetch("condition")
+        assert_equal Hive::Schemas::NextActionKind::EDIT, error.next_action.fetch("kind")
+        assert Hive::Conditions::TransitionGuard.validate!(task, config: config("markers"))
+        assert Hive::Conditions::TransitionGuard.validate!(
+          task, config: config("conditions"), force: true, source: "approve"
+        )
+        assert Hive::Conditions::TransitionGuard.validate!(
+          task, config: config("conditions"), force: true, source: "approve"
+        )
+
+        records = Hive::TaskProjection.read_journal(
+          File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME), attempt_store: store
+        )
+        overrides = records.select { |record| record["event_type"] == "operator_action" }
+        assert_equal 1, overrides.size
+        assert_equal "forced_condition_transition", overrides.first.fetch("reason")
+        assert_equal "approve", overrides.first.dig("payload", "source_command")
+        assert_equal "ChangesPresent",
+                     overrides.first.dig("payload", "waived_diagnostics", 0, "condition")
+        projection = Hive::TaskProjection::Store.new(
+          task_folder: task.folder, attempt_store: store
+        ).read
+        public_override = projection["condition_overrides"].fetch(0)
+        assert_equal "forced_condition_transition", public_override.fetch("reason")
+        assert_equal "approve", public_override.fetch("source_command")
+        assert_equal "ChangesPresent",
+                     public_override.dig("waived_diagnostics", 0, "condition")
+      end
+    end
+  end
+
+  def test_transition_guard_markers_mode_does_not_read_invalid_condition_journal
+    with_tmp_git_repo do |worktree|
+      with_tmp_dir do |dir|
+        task = build_task(dir, worktree)
+        File.write(File.join(dir, "task-journal.jsonl"), "not-json\n")
+
+        assert Hive::Conditions::TransitionGuard.validate!(task, config: config("markers"))
+        assert_raises(Hive::TaskProjection::InvalidJournal) do
+          Hive::Conditions::TransitionGuard.validate!(task, config: config("conditions"))
+        end
+      end
+    end
+  end
+
+  def test_transition_guard_fails_closed_when_post_handoff_journal_is_missing_or_empty
+    with_fixture do |task, store, attempt, context, baseline|
+      evaluate(task, store, attempt, context, baseline, mode: "conditions",
+               legacy_marker: :execute_complete)
+      Hive::Markers.set(task.state_file, :execute_complete)
+      journal_path = File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME)
+      journal = File.binread(journal_path)
+
+      with_env("HIVE_ATTEMPT_STORE_ROOT" => store.root) do
+        File.delete(journal_path)
+        assert_raises(Hive::TaskProjection::InvalidJournal) do
+          Hive::Conditions::TransitionGuard.validate!(task, config: config("conditions"))
+        end
+
+        File.binwrite(journal_path, journal)
+        File.truncate(journal_path, 0)
+        assert_raises(Hive::TaskProjection::InvalidJournal) do
+          Hive::Conditions::TransitionGuard.validate!(task, config: config("conditions"))
+        end
+      end
+    end
+  end
+
+  def test_forced_condition_transition_does_not_advance_when_audit_append_fails
+    with_fixture do |task, store, attempt, context, baseline|
+      evaluate(task, store, attempt, context, baseline, mode: "conditions",
+               legacy_marker: :execute_complete)
+      failing_writer = Object.new
+      failing_writer.define_singleton_method(:append) do |**|
+        raise Hive::TaskJournal::Error, "audit disk full"
+      end
+
+      with_env("HIVE_ATTEMPT_STORE_ROOT" => store.root) do
+        with_replaced_singleton_method(
+          Hive::TaskJournal::Writer, :new, ->(**) { failing_writer }
+        ) do
+          error = assert_raises(Hive::TaskJournal::Error) do
+            Hive::Conditions::TransitionGuard.validate!(
+              task, config: config("conditions"), force: true, source: "approve"
+            )
+          end
+          assert_includes error.message, "audit disk full"
+        end
+      end
+
+      records = Hive::TaskProjection.read_journal(
+        File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME), attempt_store: store
+      )
+      refute records.any? { |record| record["event_type"] == "operator_action" }
+    end
+  end
+
+  def test_forced_condition_transition_requires_a_durable_attempt_binding
+    with_tmp_dir do |dir|
+      task = build_task(dir, dir)
+      projection = Hive::TaskProjection.project(records: [])
+      projection_store = Struct.new(:journal_path, :attempt_store).new(
+        File.join(dir, "task-journal.jsonl"), nil
+      )
+      result = Hive::Conditions::GateResult.new(
+        status: :blocked, transition: "execute_to_open_pr",
+        diagnostics: [], waivers: []
+      )
+
+      error = assert_raises(Hive::TaskProjection::InvalidJournal) do
+        Hive::Conditions::TransitionGuard.audit_force!(
+          task: task, projection: projection, projection_store: projection_store,
+          marker: nil, result: result, source: "approve"
+        )
+      end
+      assert_includes error.message, "cannot identify its durable attempt"
+    end
+  end
+
+  def test_legacy_boundary_writes_baseline_and_snapshot_before_returning_marker_outcome
+    with_tmp_git_repo do |worktree|
+      with_tmp_dir do |dir|
+        task = build_task(dir, worktree)
+        baseline = Hive::GitOps.new(worktree).head_sha
+        outcome = Hive::Conditions::ExecuteBoundary.new(
+          task: task, config: config("conditions"), worktree_path: worktree,
+          context: nil, attempt_store: nil
+        ).evaluate(
+          legacy_marker_name: :execute_complete, legacy_commit: "execute_complete",
+          legacy_status: :execute_complete, baseline_head: baseline
+        )
+
+        assert_equal "markers", outcome.selection.effective
+        assert File.exist?(File.join(dir, "task-journal.jsonl"))
+        assert File.exist?(File.join(dir, "task-projection.json"))
+        assert_equal :execute_complete, outcome.marker_name
+      end
+    end
+  end
+
+  def test_missing_gate_evidence_triggers_exactly_one_inline_reconciliation
+    with_fixture do |task, store, attempt, context, baseline|
+      boundary = Hive::Conditions::ExecuteBoundary.new(
+        task: task, config: config("conditions"), worktree_path: task.worktree_path,
+        attempt_store: store, context: context
+      )
+      original_gate = boundary.method(:gate_for)
+      calls = 0
+      boundary.define_singleton_method(:gate_for) do |projection, **options|
+        calls += 1
+        if calls == 1
+          Hive::Conditions::GateResult.new(
+            status: :reconcile_required, transition: "execute_to_open_pr",
+            diagnostics: [ { "condition" => "ChangesPresent", "state" => "missing" } ],
+            waivers: []
+          )
+        else
+          original_gate.call(projection, **options)
+        end
+      end
+
+      outcome = boundary.evaluate(
+        legacy_marker_name: :execute_complete, legacy_commit: "execute_complete",
+        legacy_status: :execute_complete, baseline_head: baseline
+      )
+
+      assert_equal 2, calls
+      assert_equal :execute_waiting, outcome.marker_name
+    end
+  end
+
+  def test_mismatched_durable_context_fails_before_reconciliation
+    with_fixture do |task, store, attempt, _context, baseline|
+      mismatched = Hive::Attempts::Context.send(
+        :new,
+        attempt_id: attempt.attempt_id, task_generation: 2,
+        ownership_generation: attempt.ownership_generation
+      )
+      boundary = Hive::Conditions::ExecuteBoundary.new(
+        task: task, config: config("conditions"), worktree_path: task.worktree_path,
+        attempt_store: store, context: mismatched
+      )
+
+      assert_raises(Hive::Conditions::GenerationMismatch) do
+        boundary.evaluate(
+          legacy_marker_name: :execute_complete, legacy_commit: "execute_complete",
+          legacy_status: :execute_complete, baseline_head: baseline
+        )
+      end
+      refute File.exist?(File.join(task.folder, "task-journal.jsonl"))
+    end
+  end
+
+  def test_missing_durable_attempt_context_fails_closed_without_legacy_baseline
+    with_tmp_git_repo do |worktree|
+      with_tmp_dir do |dir|
+        task = build_task(dir, worktree)
+        store = Hive::Attempts::Store.new(root: File.join(dir, "attempts"))
+        context = Hive::Attempts::Context.send(
+          :new, attempt_id: "deleted-attempt", task_generation: 1,
+          ownership_generation: "owner-deleted"
+        )
+        boundary = Hive::Conditions::ExecuteBoundary.new(
+          task: task, config: config("conditions"), worktree_path: worktree,
+          attempt_store: store, context: context
+        )
+
+        assert_raises(Hive::Conditions::GenerationMismatch) do
+          boundary.evaluate(
+            legacy_marker_name: :execute_complete, legacy_commit: "execute_complete",
+            legacy_status: :execute_complete, baseline_head: Hive::GitOps.new(worktree).head_sha
+          )
+        end
+        refute File.exist?(File.join(dir, Hive::TaskJournal::JOURNAL_BASENAME))
+        refute File.exist?(File.join(dir, Hive::TaskProjection::Store::SNAPSHOT_BASENAME))
+      end
+    end
+  end
+
+  def test_legacy_boundary_tolerates_unavailable_head_and_branch
+    with_tmp_git_repo do |worktree|
+      with_tmp_dir do |dir|
+        task = build_task(dir, worktree)
+        outcome = Hive::Conditions::ExecuteBoundary.new(
+          task: task, config: config("markers"), worktree_path: worktree,
+          context: nil, attempt_store: nil, git_ops: UnavailableGit.new
+        ).evaluate(
+          legacy_marker_name: :execute_waiting, legacy_commit: "execute_waiting",
+          legacy_status: :execute_waiting, baseline_head: nil
+        )
+
+        assert_equal :execute_waiting, outcome.marker_name
+      end
+    end
+  end
+
+  def test_transition_guard_research_probes_fail_closed_on_unreadable_inputs
+    with_tmp_dir do |dir|
+      task = build_task(dir, dir)
+      File.write(File.join(dir, "plan.md"), "---\n[unterminated\n---\n")
+      refute Hive::Conditions::TransitionGuard.research_execution?(task)
+    end
+  end
+
+  def test_transition_guard_uses_shared_frontmatter_parser_for_crlf_and_eof_closing_delimiter
+    with_tmp_dir do |dir|
+      task = build_task(dir, dir)
+      File.binwrite(File.join(dir, "plan.md"), "---\r\nexecution_mode: research\r\n---")
+
+      assert Hive::Conditions::TransitionGuard.research_execution?(task)
+    end
+  end
+
+  private
+
+  def with_fixture(research: false)
+    with_tmp_git_repo do |worktree|
+      with_tmp_dir do |dir|
+        task = build_task(dir, worktree, research: research)
+        baseline = Hive::GitOps.new(worktree).head_sha
+        store = Hive::Attempts::Store.new(root: File.join(dir, "attempts"))
+        attempt = store.create_launching(
+          **attempt_identity(task, baseline), launch_timeout_sec: 30, now: Time.now.utc
+        )
+        context = Hive::Attempts::Context.send(
+          :new,
+          attempt_id: attempt.attempt_id, task_generation: 1,
+          ownership_generation: attempt.ownership_generation
+        )
+        yield task, store, attempt, context, baseline
+      end
+    end
+  end
+
+  def build_task(dir, worktree, research: false)
+    plan = research ? "---\nexecution_mode: research\n---\nplan\n" : "plan\n"
+    File.write(File.join(dir, "plan.md"), plan)
+    File.write(File.join(dir, "task.md"), "task\n")
+    TaskStub.new(
+      folder: dir, state_file: File.join(dir, "task.md"), slug: "task", id: 42,
+      worktree_path: worktree, workflow: Hive::Workflows::Coding::DESCRIPTOR,
+      stage_index: 4, stage_name: "execute", project_root: worktree
+    )
+  end
+
+  def attempt_identity(task, baseline)
+    policy = task.workflow.stage_named("execute").condition_policy.to_h
+    generation = Hive::Attempts::Generation.resolve(
+      task: task, project: "demo", intended_stage: "4-execute",
+      ownership_generation: "owner-1", task_input_epoch: 1
+    )
+    {
+      attempt_id: "attempt-a", request_id: "request-a", predecessor_attempt_id: nil,
+      task_id: "42", project: "demo", task_slug: "task", intended_stage: "4-execute",
+      task_generation: generation.ownership_generation,
+      ownership_generation: generation.ownership_generation,
+      task_input_epoch: generation.task_input_epoch,
+      progress_token: Digest::SHA256.hexdigest(Hive::TaskProjection.canonical_json(policy)),
+      provider: "codex", worker_argv: [ "hive", "run", task.folder ],
+      claim_capability_digest: Hive::Attempts::Capability.digest("c" * 64),
+      starting_revision: baseline,
+      retry_charge: 0, inherited_outputs: []
+    }
+  end
+
+  def evaluate(task, store, attempt, context, baseline, mode:, legacy_marker:,
+               waiting_reason: nil, research: false, research_evidence: false)
+    Hive::Conditions::ExecuteBoundary.new(
+      task: task, config: config(mode), worktree_path: task.worktree_path,
+      attempt_store: store, context: context
+    ).evaluate(
+      legacy_marker_name: legacy_marker,
+      legacy_attrs: legacy_marker == :execute_waiting ? { reason: waiting_reason } : {},
+      legacy_commit: legacy_marker.to_s,
+      legacy_status: legacy_marker,
+      baseline_head: baseline,
+      waiting_reason: waiting_reason,
+      research: research,
+      research_evidence: research_evidence
+    )
+  end
+
+  def config(mode)
+    { "conditions" => { "authority" => "markers", "stages" => { "4-execute" => mode } } }
+  end
+end

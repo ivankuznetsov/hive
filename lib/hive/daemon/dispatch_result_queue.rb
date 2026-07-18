@@ -40,7 +40,8 @@ module Hive
       module_function
 
       SCHEMA = "hive-dispatch-result".freeze
-      SCHEMA_VERSION = 1
+      SCHEMA_VERSION = 2
+      SUPPORTED_SCHEMA_VERSIONS = [ 1, 2 ].freeze
       DIRNAME = "dispatch_results".freeze
 
       # Age after which a notice is considered stale: not worth relaying
@@ -51,7 +52,8 @@ module Hive
 
       Result = Struct.new(
         :result_id, :created_at, :chat_id, :update_id, :project, :slug,
-        :request_id, :exit_code, :command, :path,
+        :request_id, :exit_code, :command, :attempt_id, :attempt_state,
+        :receipt, :schema_version, :path,
         keyword_init: true
       )
 
@@ -66,7 +68,8 @@ module Hive
       # `chat_id` is required — a notice with no chat to reply to is
       # pointless, so the daemon only calls this when it has one.
       def write!(chat_id:, project:, slug:, request_id:, exit_code:, command:,
-                 update_id: nil, state_home: Hive::Paths.state_home, now: Time.now)
+                 update_id: nil, attempt_id: nil, attempt_state: nil, receipt: nil,
+                 state_home: Hive::Paths.state_home, now: Time.now)
         result_id = SecureRandom.hex(8)
         created_at = now.utc
         payload = {
@@ -80,7 +83,10 @@ module Hive
           "slug" => slug.to_s,
           "request_id" => request_id.to_s,
           "exit_code" => exit_code,
-          "command" => command.to_s
+          "command" => command.to_s,
+          "attempt_id" => attempt_id,
+          "attempt_state" => attempt_state,
+          "receipt" => receipt
         }
 
         dir = directory(state_home: state_home)
@@ -175,7 +181,8 @@ module Hive
         else
           return :not_a_hash unless data.is_a?(Hash)
           return :wrong_schema unless data["schema"] == SCHEMA
-          return :unknown_schema_version unless data["schema_version"] == SCHEMA_VERSION
+          schema_version = data["schema_version"]
+          return :unknown_schema_version unless SUPPORTED_SCHEMA_VERSIONS.include?(schema_version)
 
           result_id = data["result_id"].to_s
           return :missing_result_id if result_id.empty?
@@ -192,7 +199,9 @@ module Hive
             chat_id: data["chat_id"], update_id: data["update_id"],
             project: data["project"].to_s, slug: data["slug"].to_s,
             request_id: data["request_id"].to_s, exit_code: data["exit_code"],
-            command: data["command"].to_s, path: path
+            command: data["command"].to_s,
+            attempt_id: data["attempt_id"], attempt_state: data["attempt_state"],
+            receipt: data["receipt"], schema_version: schema_version, path: path
           )
         end
       end

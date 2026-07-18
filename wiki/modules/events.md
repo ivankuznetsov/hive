@@ -3,11 +3,15 @@ title: Hive::Events
 type: module
 source: lib/hive/events.rb
 created: 2026-05-23
-updated: 2026-05-23
+updated: 2026-07-17
 tags: [module, events, observability, status, append-only]
 ---
 
-**TLDR**: Append-only task-local event log + derived `status.md` renderer. Every stage run is bracketed by `stage_enter` / `stage_exit`, every agent spawn by `agent_start` / `agent_end`, and the review loop adds per-phase `agent_start` / `agent_end` pairs on top. Records are written one O_APPEND JSON line at a time to `<task>/events.jsonl`; `status.md` is rewritten via atomic rename after every emit and tails the last 20 events plus the currently-open agent.
+**TLDR**: One append-only task-local journal serves two explicit contracts.
+`Hive::Events.emit` remains best-effort telemetry plus the derived `status.md`
+renderer; `Hive::TaskJournal::Writer` is the strict, fsynced authoritative path
+for versioned condition/generation/evidence/audit records. See
+[[modules/conditions]].
 
 ## Event types (`Hive::Events::EVENT_TYPES`)
 
@@ -36,6 +40,15 @@ tags: [module, events, observability, status, append-only]
 - `message` — short human-readable detail. `agent_start` carries `cwd=<full @cwd path> timeout_sec=N max_budget_usd=N` (full path, not basename — basename collapsed the worktree-vs-task-folder distinction); `agent_end` carries `status=… exit_code=… pid=…` (or `status=exception` with the error class); `stage_exit` carries `status=<marker> phase=… reason=… pass=…` when those marker attrs are present.
 
 ## Storage and atomicity
+
+The legacy rules below describe `Hive::Events.emit`. Authoritative
+`hive-task-journal-event` records use a separate writer: a per-task flock,
+validated stable event envelope, one complete batch write, flush/fsync, and a
+surfaced exception on any failure. `Events.emit` rejects authoritative event
+types so a swallowed telemetry error cannot be mistaken for gate state. The
+contracts also use separate files: fail-soft operational telemetry stays in
+`events.jsonl`, while strict condition authority lives in
+`task-journal.jsonl`. Neither reader has to negotiate mixed unversioned shapes.
 
 - **Path**: `<task_folder>/events.jsonl` (one file per task slug, lives next to `task.md`).
 - **Append**: single `File.write` of `JSON.generate(record) + "\n"` opened `O_WRONLY | O_APPEND | O_CREAT`. Records stay well under `PIPE_BUF` (~4 KiB), so POSIX append-atomicity holds across concurrent emitters; the single-write contract is load-bearing and must not be split into "write JSON then write newline."

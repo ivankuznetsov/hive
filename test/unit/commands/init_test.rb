@@ -619,11 +619,13 @@ end
       FileUtils.chmod(0o755, hive)
       previous_program = $PROGRAM_NAME
       previous_path = ENV["PATH"]
-      $PROGRAM_NAME = "hive"
-      ENV["PATH"] = dir
+      with_env("HIVE_INVOKED_BIN" => nil) do
+        $PROGRAM_NAME = "hive"
+        ENV["PATH"] = dir
 
-      assert_equal hive, command.send(:current_binary_path)
-      assert_nil Hive::InvokedBinary.which("missing-hive")
+        assert_equal hive, command.send(:current_binary_path)
+        assert_nil Hive::InvokedBinary.which("missing-hive")
+      end
     ensure
       $PROGRAM_NAME = previous_program
       ENV["PATH"] = previous_path
@@ -643,10 +645,12 @@ end
       FileUtils.chmod(0o755, hv)
       previous_program = $PROGRAM_NAME
       previous_path = ENV["PATH"]
-      $PROGRAM_NAME = "hv"
-      ENV["PATH"] = [ File.dirname(apache), hv_dir ].join(File::PATH_SEPARATOR)
+      with_env("HIVE_INVOKED_BIN" => nil) do
+        $PROGRAM_NAME = "hv"
+        ENV["PATH"] = [ File.dirname(apache), hv_dir ].join(File::PATH_SEPARATOR)
 
-      assert_equal hv, command.send(:current_binary_path)
+        assert_equal hv, command.send(:current_binary_path)
+      end
     ensure
       $PROGRAM_NAME = previous_program
       ENV["PATH"] = previous_path

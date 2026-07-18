@@ -157,11 +157,13 @@ class DisplayNameGeneratorTest < Minitest::Test
         printf 'Codex stdin name\\n'
       SH
 
-      with_generator(agent: "codex", script: script, commit: false) do |gen, task|
-        File.write(task.state_file, "raw idea for codex prompt")
+      with_env("HIVE_CODEX_BIN" => nil) do
+        with_generator(agent: "codex", script: script, commit: false) do |gen, task|
+          File.write(task.state_file, "raw idea for codex prompt")
 
-        assert_equal "Codex stdin name", gen.send(:generate_name)
-        assert_includes File.read(prompt_capture), "raw idea for codex prompt"
+          assert_equal "Codex stdin name", gen.send(:generate_name)
+          assert_includes File.read(prompt_capture), "raw idea for codex prompt"
+        end
       end
     end
   end

@@ -123,9 +123,10 @@ class GoldenPathE2E < ApplicationSystemTestCase
     visit "/tasks/#{@project}/#{slug}"
     answer_field = find("textarea[name='answers[1]']", wait: 45)
     assert_text "Ship the sample feature?"
-    # Answer only AFTER the daemon has reaped the round-1 child: the edit
-    # baseline is seeded from the state file's mtime at child_exited, so an
-    # answer written before the reap is swallowed and the resume never
+    # Answer only AFTER the daemon has observed the round-1 owner complete:
+    # the edit baseline is seeded from the state file's mtime after legacy
+    # child exit or durable-attempt terminalization, so an answer written
+    # before that observation is swallowed and the resume never
     # fires (recorded in wiki/gaps.md as a real product edge — an operator
     # answering within one daemon tick of the agent finishing strands the
     # task). The daemon's event log and the state file's mtime are the
@@ -179,7 +180,7 @@ class GoldenPathE2E < ApplicationSystemTestCase
 
   # The resume watcher only sees edits NEWER than its baseline, and the
   # baseline is seeded by the first classification tick AFTER the round-1
-  # child is reaped. Answering inside that window strands the task
+  # owner is observed complete. Answering inside that window strands the task
   # (wiki/gaps.md records this as a real product edge). Wait for both
   # events IN ORDER in the daemon's own log, then wait for a distinct
   # state-file mtime tick so coarse CI filesystems cannot collapse the
@@ -190,9 +191,11 @@ class GoldenPathE2E < ApplicationSystemTestCase
     deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
     loop do
       log = File.exist?(events) ? File.read(events) : ""
-      exited = log.match(/"child_exited".*#{slug_re}|#{slug_re}.*"child_exited"/)
-      if exited
-        rest = log[exited.end(0)..]
+      completed = log.match(
+        /"(?:child_exited|attempt_terminal)".*#{slug_re}|#{slug_re}.*"(?:child_exited|attempt_terminal)"/
+      )
+      if completed
+        rest = log[completed.end(0)..]
         break if rest.lines.any? do |line|
           line.include?(slug) && line.include?("2-brainstorm") &&
             line.match?(/"(skipped|debouncing|dispatched)"/)
@@ -277,7 +280,13 @@ class GoldenPathE2E < ApplicationSystemTestCase
   def force_headless_claude!(project)
     path = File.join(ENV["HIVE_TEST_HOME_ROOT"], "repos", project, ".hive-state", "config.yml")
     data = YAML.safe_load_file(path)
-    data["claude"] = (data["claude"] || {}).merge("mode" => "headless")
+    data["claude"] = (data["claude"] || {}).merge(
+      "mode" => "headless",
+      # The fake CLI has no provider-owned settings file for identity
+      # discovery. Pin the model so implementation ownership can be captured
+      # before execute launches, just as a real explicit Claude selection is.
+      "model" => "claude-fable-5"
+    )
     # The default implementer is codex; this E2E fakes only claude, so every
     # stage must run through it.
     data["execute"] = (data["execute"] || {}).merge("agent" => "claude")

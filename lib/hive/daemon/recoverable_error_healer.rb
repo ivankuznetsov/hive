@@ -58,6 +58,7 @@ module Hive
       def heal_row(row, now:, legacy_layout_projects:)
         return if legacy_layout_projects.include?(row.project)
         return if row.marker.to_s != "error"
+        return if marker_reason(row) == "attempt_lost"
         return if row.live_task_lock == true
         return if @controller.running_task?(project: row.project, slug: row.slug)
 

@@ -104,7 +104,7 @@ class RunStageActionTest < Minitest::Test
     end
   end
 
-  def test_from_disambiguates_same_slug_stage_collision
+  def test_from_resolves_stage_but_admission_holds_duplicate_slug_identity
     with_tmp_global_config do
       with_tmp_git_repo do |dir|
         inbox, slug = seed_inbox(dir)
@@ -118,10 +118,14 @@ class RunStageActionTest < Minitest::Test
         ENV["HIVE_FAKE_CLAUDE_WRITE_FILE"] = File.join(plan, "plan.md")
         ENV["HIVE_FAKE_CLAUDE_WRITE_CONTENT"] = "## Updated\n<!-- COMPLETE -->\n"
 
-        capture_io { Hive::Commands::StageAction.new("plan", slug, from: "plan").call }
+        _, err, status = with_captured_exit do
+          Hive::Commands::StageAction.new("plan", slug, from: "plan").call
+        end
 
+        assert_equal Hive::ExitCodes::CONFIG, status
+        assert_includes err, "dependency_validation_failed"
         assert File.directory?(brainstorm), "existing brainstorm task must not move"
-        assert_equal :complete, Hive::Markers.current(File.join(plan, "plan.md")).name
+        assert_equal :waiting, Hive::Markers.current(File.join(plan, "plan.md")).name
       end
     end
   end

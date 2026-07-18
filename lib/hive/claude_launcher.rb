@@ -152,11 +152,11 @@ module Hive
                 allowed_tools: nil,
                 disallowed_tools: nil,
                 permission_mode: nil, mcp_config_path: nil,
-                strict_mcp_config: false)
+                strict_mcp_config: false, identity_arguments: nil)
       profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
       ensure_claude_profile!(profile)
       permission_mode ||= Hive::Config.claude_permission_mode(cfg)
-      cli_flags = cfg ? Hive::Config.claude_cli_flags(cfg) : []
+      cli_flags = identity_arguments || (cfg ? Hive::Config.claude_cli_flags(cfg) : [])
       launch_mode = Hive::Config.claude_mode(cfg)
 
       if launch_mode == :headless
@@ -739,13 +739,15 @@ module Hive
 
     def limits_reached_marker(task, runner)
       pane = capture_limit_tail(runner)
-      limit_line = Hive::AgentLimit.live_limit_line(pane)
-      return nil unless limit_line
+      limit_context = Hive::AgentLimit.live_limit_context(pane)
+      return nil unless limit_context
+
+      limit_line = limit_context.each_line.first.to_s.strip
 
       Hive::Markers.set(task.state_file, :error,
                         reason: "limits_reached",
                         message: Hive::AgentLimit.error_message(limit_line, agent: "claude"),
-                        retry_after: Hive::AgentLimit.retry_after)
+                        retry_after: Hive::AgentLimit.retry_after(text: limit_context))
       Hive::Markers.current(task.state_file)
     end
 
@@ -775,10 +777,11 @@ module Hive
       loop do
         output_available = expected_output_available?(expected_output)
         pane_tail = capture_limit_tail(runner)
-        if (limit_line = Hive::AgentLimit.live_limit_line(pane_tail))
+        if (limit_context = Hive::AgentLimit.live_limit_context(pane_tail))
+          limit_line = limit_context.each_line.first.to_s.strip
           return {
             status: :error,
-            limit_text: limit_line,
+            limit_text: limit_context,
             error_message: Hive::AgentLimit.error_message(limit_line, agent: "claude")
           }
         end
@@ -861,10 +864,11 @@ module Hive
         # execute stage stamps `reason="limits_reached"` and the cooldown
         # healer can hold/retry. `capture_limit_tail` is nil-runner safe.
         pane_tail = capture_limit_tail(runner)
-        if (limit_line = Hive::AgentLimit.live_limit_line(pane_tail))
+        if (limit_context = Hive::AgentLimit.live_limit_context(pane_tail))
+          limit_line = limit_context.each_line.first.to_s.strip
           return {
             status: :error,
-            limit_text: limit_line,
+            limit_text: limit_context,
             error_message: Hive::AgentLimit.error_message(limit_line, agent: "claude")
           }
         end

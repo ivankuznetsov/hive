@@ -31,6 +31,10 @@ module Hive
         "ready_to_run" => "run"
       }.freeze
 
+      def initialize(dispatch_writer: Hive::Bot::DispatchRequestWriter)
+        @dispatch_writer = dispatch_writer
+      end
+
       def approve(slug:, project:, from: nil, to: nil, force: false)
         Hive::Commands::Approve.new(
           slug,
@@ -154,7 +158,7 @@ module Hive
         # advance/approve verb asserts the source stage with --from.
         argv += [ verb == "run" ? "--stage" : "--from", stage ] if stage
         begin
-          request_id = Hive::Bot::DispatchRequestWriter.write!(
+          reference = @dispatch_writer.dispatch!(
             project: project,
             slug: slug,
             argv: argv,
@@ -166,7 +170,14 @@ module Hive
           # unqueueable. A typed error beats a 500 from the writer.
           raise Hive::Error, "cannot queue this dispatch: #{e.message}"
         end
-        { ok: true, request_id: request_id, argv: argv }
+        {
+          ok: true,
+          request_id: reference.request_id,
+          attempt_id: reference.attempt_id,
+          state: reference.state,
+          dispatch_status: reference.status,
+          argv: argv
+        }
       end
 
       def repair_daemon

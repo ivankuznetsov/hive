@@ -30,6 +30,11 @@
                   <%= status_dot(task) %>
                   <%= task["action_label"].presence || task["marker"].presence || "idle" %>
                 </span>
+                <% if (owner = task.dig("implementation_identity", "stages", "execute")) %>
+                  <span class="task-meta faint" title="Implementation owner">
+                    <%= owner["provider"] %>/<%= truncate(owner["model"], length: 18) %>
+                  </span>
+                <% end %>
                 <span class="task-meta faint"><%= relative_age(task["age_seconds"]) %></span>
               </article>
             <% end %>

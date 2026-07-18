@@ -216,9 +216,12 @@ class HivePatrolFingerprintTest < Minitest::Test
   def test_snippet_at_reads_context_and_handles_missing_files
     with_tmp_dir do |dir|
       File.write(File.join(dir, "app.rb"), "a\nb\nc\n")
+      File.write(File.join(dir, "empty.rb"), "")
 
       assert_equal "a b c", Hive::Patrol::Fingerprint.snippet_at(dir, "app.rb", 2)
       assert_equal "", Hive::Patrol::Fingerprint.snippet_at(dir, "missing.rb", 1)
+      assert_equal "", Hive::Patrol::Fingerprint.snippet_at(dir, "app.rb", 1_000_000)
+      assert_equal "", Hive::Patrol::Fingerprint.snippet_at(dir, "empty.rb", 3)
     end
   end
 

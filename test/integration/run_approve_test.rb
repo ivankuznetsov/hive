@@ -406,9 +406,12 @@ class RunApproveTest < Minitest::Test
         assert_includes err, "ambiguous"
         assert_includes err, "multiple stages"
 
-        # Folder-path target disambiguates and works.
-        capture_io { Hive::Commands::Approve.new(inbox, force: true).call }
-        assert File.directory?(File.join(dir, ".hive-state", "stages", "2-brainstorm", slug))
+        # A folder path disambiguates task resolution, but dependency admission
+        # still rejects the duplicate qualified task identity before mutation.
+        _, err, status = with_captured_exit { Hive::Commands::Approve.new(inbox, force: true).call }
+        assert_equal Hive::ExitCodes::CONFIG, status
+        assert_includes err, "dependency_validation_failed"
+        assert File.directory?(inbox)
       end
     end
   end
@@ -847,8 +850,12 @@ class RunApproveTest < Minitest::Test
         files_in_commit = `git -C #{File.join(dir, ".hive-state")} show --pretty= --name-only HEAD`.lines.map(&:strip)
         refute_includes files_in_commit, "stages/3-plan/#{slug}/.lock",
                         "the per-process .lock file must not be committed"
+        refute_includes files_in_commit, "stages/3-plan/#{slug}/.lock.tmp.guard",
+                        "the stable task-lock guard must remain ignored"
         refute File.exist?(File.join(plan, ".lock")),
                "orphan .lock from with_task_lock must be cleaned at destination"
+        assert File.exist?(File.join(plan, ".lock.tmp.guard")),
+               "the regression must exercise the persistent guard artifact"
       end
     end
   end

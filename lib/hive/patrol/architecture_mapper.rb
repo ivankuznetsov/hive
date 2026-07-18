@@ -93,9 +93,10 @@ module Hive
 
       attr_reader :component_roots, :dependency_edges, :reserved_command_files, :source_files
 
-      def initialize(project_root, cfg:)
+      def initialize(project_root, cfg:, review_scope: :refactor_patrol)
         @project_root = File.expand_path(project_root)
         @cfg = cfg
+        @review_scope = review_scope.to_sym
         @source_reader = Hive::Patrol::SourceReader.new(@project_root)
       end
 
@@ -765,16 +766,23 @@ module Hive
       end
 
       def max_component_files
-        configured = @cfg.dig("refactor_patrol", "review", "max_owned_files")
-        configured = @cfg.dig("patrol", "review", "max_owned_files") if configured.nil?
+        configured = review_limit("max_owned_files")
         configured ||= MAX_COMPONENT_FILES
         [ [ configured.to_i, 1 ].max, MAX_COMPONENT_FILES ].min
       end
 
       def max_context_files
-        configured = @cfg.dig("refactor_patrol", "review", "max_context_files")
-        configured = @cfg.dig("patrol", "review", "max_context_files") if configured.nil?
-        [ configured || 24, 0 ].max
+        configured = review_limit("max_context_files")
+        [ configured || 6, 0 ].max
+      end
+
+      def review_limit(key)
+        if @review_scope == :patrol
+          @cfg.dig("patrol", "review", key)
+        else
+          @cfg.dig("refactor_patrol", "review", key) ||
+            @cfg.dig("patrol", "review", key)
+        end
       end
 
       def ordered_cap(paths, limit)

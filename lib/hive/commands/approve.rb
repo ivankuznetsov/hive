@@ -11,6 +11,9 @@ require "hive/git_ops"
 require "hive/stages"
 require "hive/workflows"
 require "hive/commit_or_rollback"
+require "hive/dependency_snapshot"
+require "hive/attempts/context"
+require "hive/conditions/transition_guard"
 
 module Hive
   module Commands
@@ -83,7 +86,11 @@ module Hive
         validate_move!(task, next_stage_dir, marker)
         direction = direction_of(task, next_stage_dir)
 
-        new_folder, commit_action = perform_move_and_commit(task, next_stage_dir)
+        new_folder, commit_action = perform_move_and_commit(
+          task,
+          next_stage_dir,
+          enforce_admission: direction == "forward"
+        )
         emit_success(task, next_stage_dir, new_folder, marker, commit_action, direction)
       end
 
@@ -174,7 +181,9 @@ module Hive
 
       def validate_move!(task, dest_stage, marker)
         dest = stage_for_dest!(task, dest_stage)
-        return if dest.index <= task.stage_index || @force
+        return if dest.index <= task.stage_index
+        Hive::Conditions::TransitionGuard.validate!(task, force: @force, source: "approve")
+        return if @force
         return if VALID_TERMINAL_MARKERS.include?(marker.name)
 
         valid = VALID_TERMINAL_MARKERS.map { |m| ":#{m}" }.join(", ")
@@ -225,11 +234,19 @@ module Hive
       #     release no-ops on the gone source path. We delete the orphan at
       #     the new path before committing so the per-process lock metadata
       #     isn't tracked in hive/state.
-      def perform_move_and_commit(task, dest_stage)
+      def perform_move_and_commit(task, dest_stage, enforce_admission: false)
         new_folder = nil
         commit_action = nil
         Hive::Lock.with_commit_lock(task.hive_state_path) do
           Hive::Lock.with_task_lock(task.folder, slug: task.slug, op: "approve") do
+            # Preserve the command's typed collision contract before building
+            # a multi-project snapshot: a pre-existing destination necessarily
+            # duplicates the slug, but it is first and foremost an unsafe move
+            # destination and requires no dependency inference to reject.
+            raise_destination_collision(destination_folder(task, dest_stage)) if
+              destination_exists?(destination_folder(task, dest_stage))
+            Hive::DependencySnapshot.enforce_admission!(task) if enforce_admission
+            Hive::Attempts::Context.current&.validate_generation!(task)
             new_folder = move_task!(task, dest_stage)
           end
           cleanup_orphan_task_lock(new_folder)
@@ -242,7 +259,7 @@ module Hive
       def move_task!(task, dest_stage)
         new_parent = File.join(task.hive_state_path, "stages", dest_stage)
         FileUtils.mkdir_p(new_parent)
-        new_folder = File.join(new_parent, task.slug)
+        new_folder = destination_folder(task, dest_stage)
 
         # Pre-check is the early-exit fast path; the rescue below is the
         # real safety net. POSIX rename(2) on a non-empty destination
@@ -250,7 +267,7 @@ module Hive
         # implementations vary (Linux glibc replaces; some libcs surface
         # as EEXIST/EISDIR). The rescue covers all three so the outcome
         # is uniform regardless of platform.
-        raise_destination_collision(new_folder) if File.exist?(new_folder)
+        raise_destination_collision(new_folder) if destination_exists?(new_folder)
 
         begin
           File.rename(task.folder, new_folder)
@@ -260,6 +277,14 @@ module Hive
           cross_device_move!(task.folder, new_folder)
         end
         new_folder
+      end
+
+      def destination_folder(task, dest_stage)
+        File.join(task.hive_state_path, "stages", dest_stage, task.slug)
+      end
+
+      def destination_exists?(path)
+        File.exist?(path) || File.directory?(path)
       end
 
       # Cross-device fallback: copy then remove. If the copy fails partway
@@ -466,17 +491,11 @@ module Hive
       end
 
       def emit_error_envelope(error)
-        payload = {
-          "schema" => "hive-approve",
-          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-approve"),
-          "ok" => false,
-          "error_class" => error.class.name.split("::").last,
-          "error_kind" => error_kind_for(error),
-          "exit_code" => error.respond_to?(:exit_code) ? error.exit_code : Hive::ExitCodes::GENERIC,
-          "message" => error.message
-        }
-        payload["candidates"] = error.candidates if error.is_a?(Hive::AmbiguousSlug)
-        payload["path"] = error.path if error.is_a?(Hive::DestinationCollision)
+        payload = Hive::Schemas::ErrorEnvelope.build(
+          schema: "hive-approve",
+          error: error,
+          error_kind: error_kind_for(error)
+        )
         payload["stage"] = error.stage if error.is_a?(Hive::FinalStageReached)
         puts JSON.generate(payload)
       end
@@ -489,6 +508,8 @@ module Hive
         when Hive::WrongStage then "wrong_stage"
         when Hive::RollbackFailed then "rollback_failed"
         when Hive::InvalidTaskPath then "invalid_task_path"
+        when Hive::DependencyWaitError then "dependency_wait"
+        when Hive::DependencyAdmissionError then "admission_error"
         else "error"
         end
       end

@@ -1141,7 +1141,7 @@ class ClaudeLauncherTest < Minitest::Test
       result = Hive::ClaudeLauncher.wait_for_expected_output(task, runner, 10, output, "review")
 
       assert_equal :error, result.fetch(:status)
-      assert_equal "❯ 1. Stop and wait for limit to reset", result.fetch(:limit_text)
+      assert_equal limit_menu.lines.last(3).map(&:strip).join("\n"), result.fetch(:limit_text)
       assert_equal "limits reached for claude: ❯ 1. Stop and wait for limit to reset",
                    result.fetch(:error_message)
       refute_match(/tmux_session_terminated/, result.fetch(:error_message))
@@ -1375,7 +1375,7 @@ class ClaudeLauncherTest < Minitest::Test
       result = Hive::ClaudeLauncher.wait_for_done_signal(task, runner, 10, "ci")
 
       assert_equal :error, result.fetch(:status)
-      assert_equal "❯ 1. Stop and wait for limit to reset", result.fetch(:limit_text)
+      assert_equal limit_menu.lines.last(3).map(&:strip).join("\n"), result.fetch(:limit_text)
       assert_equal "limits reached for claude: ❯ 1. Stop and wait for limit to reset",
                    result.fetch(:error_message)
       refute_match(/stop hook did not signal/, result.fetch(:error_message))
@@ -1475,27 +1475,25 @@ class ClaudeLauncherTest < Minitest::Test
       Hive::Markers.set(task.state_file, :agent_working,
                         pid: Process.pid,
                         started: Time.now.utc.iso8601)
-      limit_menu = pane_fixture("limit_menu_live.txt")
+      limit_menu = "#{pane_fixture('limit_menu_live.txt')}\nTry again at Jul 18th, 2026 7:50 AM.\n"
       runner = Struct.new(:name, :tail) do
         def session_exists? = true
         def capture_pane_tail(bytes:) = tail
       end.new("limited-stage", limit_menu)
 
-      # Floor: retry_after is a second-precision iso8601 stamp.
-      before = Time.now.utc.floor
-      with_replaced_singleton_method(Hive::ClaudeLauncher, :sleep, ->(_seconds) { }) do
-        marker = Hive::ClaudeLauncher.wait_for_terminal_marker(task, runner, 10)
-        after = Time.now.utc
+      now = Time.utc(2026, 7, 12, 20, 0, 0)
+      with_env("TZ" => "Europe/London") do
+        with_replaced_singleton_method(Time, :now, -> { now }) do
+          with_replaced_singleton_method(Hive::ClaudeLauncher, :sleep, ->(_seconds) { }) do
+            marker = Hive::ClaudeLauncher.wait_for_terminal_marker(task, runner, 10)
 
-        assert_equal :error, marker.name
-        assert_equal "limits_reached", marker.attrs.fetch("reason")
-        assert_match(/\Alimits reached for claude:/, marker.attrs.fetch("message"))
+            assert_equal :error, marker.name
+            assert_equal "limits_reached", marker.attrs.fetch("reason")
+            assert_match(/\Alimits reached for claude:/, marker.attrs.fetch("message"))
 
-        retry_after = Time.parse(marker.attrs.fetch("retry_after"))
-        cooldown = Hive::AgentLimit::RETRY_COOLDOWN_SEC
-        assert retry_after >= before + cooldown,
-               "limits_reached marker must stamp a cooldown retry_after"
-        assert retry_after <= after + cooldown
+            assert_equal "2026-07-18T06:51:00Z", marker.attrs.fetch("retry_after")
+          end
+        end
       end
     end
   end

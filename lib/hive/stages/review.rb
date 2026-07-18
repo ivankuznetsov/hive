@@ -221,7 +221,9 @@ module Hive
               Hive::Markers.set(task.state_file, :review_error,
                                 phase: :ci, reason: "limits_reached",
                                 message: "ci hit a usage/credit limit",
-                                retry_after: Hive::AgentLimit.retry_after)
+                                retry_after: Hive::AgentLimit.retry_after(
+                                  text: limit_failure_text(ci_result.limit_text, ci_result.error_message)
+                                ))
               return { commit: "ci_limits_reached", status: :review_error }
             end
 
@@ -390,9 +392,11 @@ module Hive
           unless skip_review_and_triage
             @current_phase = :reviewers
             mark_working(task, phase: :reviewers, pass: pass)
+            reviewer_limit_texts = []
             reviewers_result = run_reviewers(
               cfg, ctx_pass, task,
-              started_at: started_at, max_wall_clock_sec: max_wall_clock
+              started_at: started_at, max_wall_clock_sec: max_wall_clock,
+              limit_texts: reviewer_limit_texts
             )
             if reviewers_result == :wall_clock_exceeded
               return finalize_wall_clock_stale(task, started_at, pass: pass)
@@ -406,7 +410,7 @@ module Hive
                 # Stamp the cooldown so the daemon healer can self-heal once
                 # the usage window has plausibly reset (see AgentLimit). Only
                 # the limit marker gets a retry_after — `all_failed` stays manual.
-                attrs[:retry_after] = Hive::AgentLimit.retry_after
+                attrs[:retry_after] = Hive::AgentLimit.retry_after_for(reviewer_limit_texts)
               end
               Hive::Markers.set(task.state_file, :review_error, attrs)
               return { commit: "reviewers_#{reason}_pass_#{format('%02d', pass)}",
@@ -582,10 +586,13 @@ module Hive
             "reviews/suppressed.md",
             fix_success_relative_path(pass)
           ]
+          fix_identity = Hive::Stages::Base.implementation_stage_identity(task, cfg, "review.fix")
           before_fix_sha = Hive::ProtectedFiles.snapshot(task.folder, protected_set)
           before_fix_head = git_head(worktree_path)
 
-          fix_result = spawn_fix_agent(task, cfg, ctx_pass, accepted: accepted)
+          fix_result = spawn_fix_agent(
+            task, cfg, ctx_pass, accepted: accepted, identity: fix_identity
+          )
           after_fix_sha = Hive::ProtectedFiles.snapshot(task.folder, protected_set)
           after_fix_head = git_head(worktree_path)
 
@@ -1128,7 +1135,9 @@ module Hive
           Hive::Markers.set(task.state_file, :review_error,
                             phase: phase, reason: "limits_reached", pass: pass,
                             message: "#{phase} hit a usage/credit limit",
-                            retry_after: Hive::AgentLimit.retry_after)
+                            retry_after: Hive::AgentLimit.retry_after(
+                              text: limit_failure_text(limit_text, error_message)
+                            ))
           true
         else
           reason = Hive::ReviewErrorReason.classify(error_message.to_s)
@@ -1141,6 +1150,11 @@ module Hive
 
       def limit_failure?(limit_text:, error_message:)
         !limit_text.to_s.empty? || Hive::AgentLimit.from_limit?(error_message.to_s)
+      end
+
+      def limit_failure_text(limit_text, error_message)
+        text = limit_text.to_s
+        text.empty? ? error_message.to_s : text
       end
 
       # Condense a phase agent's `error_message` into a single-line marker
@@ -1408,7 +1422,7 @@ module Hive
       # we short-circuit between reviewers as soon as the budget is
       # gone — the partial results stay on disk for the next run to
       # consume.
-      def run_reviewers(cfg, ctx, task, started_at: nil, max_wall_clock_sec: nil)
+      def run_reviewers(cfg, ctx, task, started_at: nil, max_wall_clock_sec: nil, limit_texts: [])
         specs = reviewer_specs_for(cfg, task)
 
         # Clear stale errors-NN.md BEFORE any early return. The docs
@@ -1480,6 +1494,7 @@ module Hive
 
             statuses << result.status
             error_messages << result.error_message if result.error?
+            limit_texts << result.limit_text if result.error? && !result.limit_text.to_s.empty?
             handle_reviewer_result(task, cfg, ctx, spec, result)
             remaining_specs -= 1
           end
@@ -1509,6 +1524,7 @@ module Hive
 
                 statuses << result.status
                 error_messages << result.error_message if result.error?
+                limit_texts << result.limit_text if result.error? && !result.limit_text.to_s.empty?
                 handle_reviewer_result(task, cfg, ctx, spec, result)
                 remaining_specs -= 1
               end
@@ -1526,6 +1542,7 @@ module Hive
 
             statuses << result.status
             error_messages << result.error_message if result.error?
+            limit_texts << result.limit_text if result.error? && !result.limit_text.to_s.empty?
             handle_reviewer_result(task, cfg, ctx, spec, result)
             remaining_specs -= 1
           end
@@ -1539,7 +1556,9 @@ module Hive
           # errors (e.g. codex "you've hit your usage limit"), surface that
           # distinctly so the run is marked limits_reached rather than a
           # generic all_failed.
-          if error_messages.any? { |m| Hive::AgentLimit.from_limit?(m.to_s) }
+          fallback_limit = error_messages.find { |message| Hive::AgentLimit.from_limit?(message.to_s) }
+          limit_texts << fallback_limit if limit_texts.empty? && fallback_limit
+          if !limit_texts.empty?
             :all_failed_limit
           else
             :all_failed
@@ -2032,8 +2051,9 @@ module Hive
         File.write(path, body)
       end
 
-      def spawn_fix_agent(task, cfg, ctx, accepted:)
-        profile_name = cfg.dig("review", "fix", "agent") || "claude"
+      def spawn_fix_agent(task, cfg, ctx, accepted:, identity: nil)
+        identity ||= Hive::Stages::Base.implementation_stage_identity(task, cfg, "review.fix")
+        profile_name = identity&.provider || cfg.dig("review", "fix", "agent") || "claude"
         profile = Hive::AgentProfiles.lookup(profile_name, cfg: cfg)
         scope = Hive::Stages::Base.stage_permission_scope(
           cfg, "review.fix", task, profile,
@@ -2070,7 +2090,8 @@ module Hive
           log_label: "review-fix-pass#{format('%02d', ctx.pass)}",
           profile: profile,
           **Hive::Stages::Base.tool_scope_kwargs(scope),
-          status_mode: :exit_code_only
+          status_mode: :exit_code_only,
+          identity_arguments: identity&.native_arguments
         }
         if profile.name == :claude
           Hive::Stages::Base.spawn_claude!(

@@ -3,7 +3,7 @@ title: Hive::Markers
 type: module
 source: lib/hive/markers.rb
 created: 2026-04-25
-updated: 2026-06-18
+updated: 2026-07-12
 tags: [marker, protocol, flock]
 ---
 
@@ -34,6 +34,13 @@ tags: [marker, protocol, flock]
 Allowlist: see `KNOWN_NAMES` in `lib/hive/markers.rb`.
 
 `ERROR` markers written through `Markers.set` receive a generated `marker_id` attr unless the caller supplies one. This is the high-cardinality recovery discriminator for `hive markers clear --match-attr marker_id=...`; legacy rows without it fall back to observed attrs such as `reason=exit_code,exit_code=143`.
+
+`Markers.clear_current(..., purge_history: true)` supports guarded daemon-healer
+clears, while manual `hive markers clear` performs the same history purge after
+its current-name and optional attribute guards pass. Both paths remove every
+recognized marker comment from the state artifact while preserving surrounding
+prose. This prevents a successful retry clear from exposing an older shadowed
+`AGENT_WORKING`, `REVIEW_WORKING`, or `ERROR` marker.
 
 `KILL_CLASS_EXIT_CODES = %w[130 137 143]` — POSIX signal exit codes (SIGINT/SIGKILL/SIGTERM). Only an `ERROR` marker shaped as `reason=exit_code exit_code=130|137|143` means the task was interrupted rather than broken. Same numeric codes with another reason remain structured recoverable failures. The numeric list is shared by `Hive::Tui::BubbleModel#auto_heal_kill_class_errors` (auto-clears explicit signal-kill markers) and `Hive::Tui::KeyMap.error_message` (routes Enter to OpenLogTail instead of RecoverError so Enter doesn't race the auto-healer for the markers-lock).
 

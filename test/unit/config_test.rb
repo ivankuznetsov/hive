@@ -2,6 +2,21 @@ require "test_helper"
 require "hive/config"
 
 class ConfigTest < Minitest::Test
+  def test_registry_round_trips_repository_identity
+    with_tmp_global_config do
+      with_tmp_git_repo do |repo|
+        remote = File.join(File.dirname(repo), "remote.git")
+        FileUtils.mkdir_p(remote)
+        run!("git", "-C", repo, "remote", "add", "origin", remote)
+
+        Hive::Config.register_project(name: "sample", path: repo)
+        entry = Hive::Config.registered_projects.find { |candidate| candidate["name"] == "sample" }
+
+        assert_equal Hive::RepositoryIdentity.normalize(remote), entry["repository_identity"]
+      end
+    end
+  end
+
   include HiveTestHelper
 
   def test_load_returns_defaults_when_no_config_file
@@ -21,9 +36,172 @@ class ConfigTest < Minitest::Test
       assert_equal "8-finalize", cfg["dependency_gate_stage"]
       assert_equal "coding", cfg["default_workflow"]
       assert_equal true, cfg.dig("daemon", "auto_retry", "enabled")
+      assert_equal 5, cfg["attempt_heartbeat_sec"]
+      assert_equal 30, cfg["attempt_stale_sec"]
+      assert_equal 30, cfg["attempt_launch_timeout_sec"]
+      assert_equal 30, cfg["attempt_first_heartbeat_timeout_sec"]
       assert_nil cfg.dig("review", "adhoc", "reviewers")
       assert_equal false, cfg.dig("review", "adhoc", "fix")
+      assert_nil cfg.dig("open_pr", "agent")
+      assert_nil cfg.dig("review", "ci", "agent")
+      assert_nil cfg.dig("review", "fix", "agent")
       assert_equal dir, cfg["project_root"]
+    end
+  end
+
+  def test_load_records_frozen_field_level_implementation_identity_provenance
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        execute:
+          agent: codex
+          model: gpt-5.6-sol
+        open_pr:
+          effort: low
+        review:
+          ci:
+            model: gpt-5.6-terra
+          fix:
+            agent: claude
+            effort: high
+      YAML
+
+      cfg = Hive::Config.load(dir)
+      provenance = cfg.fetch(Hive::Config::IMPLEMENTATION_IDENTITY_PROVENANCE_KEY)
+
+      assert_equal({ "agent" => "codex", "model" => "gpt-5.6-sol" },
+                   provenance.fetch("execute"))
+      assert_equal({ "effort" => "low" }, provenance.fetch("open_pr"))
+      assert_equal({ "model" => "gpt-5.6-terra" }, provenance.fetch("review.ci"))
+      assert_equal({ "agent" => "claude", "effort" => "high" },
+                   provenance.fetch("review.fix"))
+      assert provenance.frozen?
+      assert provenance.values.all?(&:frozen?)
+    end
+  end
+
+  def test_implementation_identity_fields_use_raw_provenance_not_merged_defaults
+    with_tmp_dir do |dir|
+      cfg = Hive::Config.load(dir)
+
+      assert_equal({}, Hive::Config.implementation_identity_fields(cfg, "open_pr"))
+      assert_equal({}, Hive::Config.implementation_identity_fields(cfg, "review.fix"))
+
+      synthetic = { "review" => { "fix" => { "agent" => "claude" } } }
+      assert_equal({ "agent" => "claude" },
+                   Hive::Config.implementation_identity_fields(synthetic, "review.fix"))
+    end
+  end
+
+  def test_deep_freeze_recurses_into_arrays
+    value = { "nested" => [ { "model" => "gpt" } ] }
+
+    Hive::Config.deep_freeze(value)
+
+    assert value.frozen?
+    assert value.fetch("nested").frozen?
+    assert value.dig("nested", 0).frozen?
+  end
+
+  def test_load_validates_attempt_timer_relationships
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        attempt_heartbeat_sec: 10
+        attempt_stale_sec: 9
+      YAML
+
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+      assert_includes error.message, "attempt_stale_sec"
+      assert_includes error.message, "attempt_heartbeat_sec"
+    end
+  end
+
+  def test_load_rejects_non_positive_attempt_timers
+    %w[
+      attempt_heartbeat_sec
+      attempt_stale_sec
+      attempt_launch_timeout_sec
+      attempt_first_heartbeat_timeout_sec
+    ].each do |key|
+      with_tmp_dir do |dir|
+        FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+        File.write(File.join(dir, ".hive-state", "config.yml"), "#{key}: 0\n")
+        error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+        assert_includes error.message, key
+        assert_includes error.message, "positive integer"
+      end
+    end
+  end
+
+  def test_load_rewraps_malformed_project_yaml_as_config_error
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, "daemon: [\n")
+
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+      assert_includes error.message, config_path
+      assert_includes error.message, "not valid YAML"
+    end
+  end
+
+  def test_load_rewraps_disallowed_project_yaml_class_as_config_error
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(File.dirname(config_path))
+      File.write(config_path, "daemon: !ruby/object:Object {}\n")
+
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+      assert_includes error.message, config_path
+      assert_includes error.message, "not valid YAML"
+    end
+  end
+
+  def test_load_rewraps_unreadable_project_config_as_config_error
+    with_tmp_dir do |dir|
+      config_path = File.join(dir, ".hive-state", "config.yml")
+      FileUtils.mkdir_p(config_path)
+
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+      assert_includes error.message, config_path
+      assert_includes error.message, "not readable"
+    end
+  end
+
+  def test_load_rewraps_inaccessible_project_config_parent_as_config_error
+    skip "permission bits are not enforced for root" if Process.uid.zero?
+
+    with_tmp_dir do |dir|
+      state_dir = File.join(dir, ".hive-state")
+      config_path = File.join(state_dir, "config.yml")
+      FileUtils.mkdir_p(state_dir)
+      File.write(config_path, "daemon:\n  enabled: true\n")
+      File.chmod(0o000, state_dir)
+
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+      assert_includes error.message, config_path
+      assert_includes error.message, "not readable"
+    ensure
+      File.chmod(0o700, state_dir) if state_dir && File.exist?(state_dir)
+    end
+  end
+
+  def test_load_rewraps_project_config_symlink_loop_as_config_error
+    with_tmp_dir do |dir|
+      state_dir = File.join(dir, ".hive-state")
+      config_path = File.join(state_dir, "config.yml")
+      FileUtils.mkdir_p(state_dir)
+      File.symlink("config.yml", config_path)
+
+      error = assert_raises(Hive::ConfigError) { Hive::Config.load(dir) }
+
+      assert_includes error.message, config_path
+      assert_includes error.message, "not readable"
     end
   end
 
@@ -159,8 +337,8 @@ class ConfigTest < Minitest::Test
       assert_nil cfg.dig("patrol", "commands", "test")
       refute cfg.dig("patrol", "commands").key?("public_contract"),
              "architecture-patrol validation must not alter ordinary patrol"
-      assert_equal 12, cfg.dig("patrol", "review", "max_owned_files")
-      assert_equal 24, cfg.dig("patrol", "review", "max_context_files")
+      assert_equal 4, cfg.dig("patrol", "review", "max_owned_files")
+      assert_equal 4, cfg.dig("patrol", "review", "max_context_files")
       assert_equal %w[codex-native-review],
                    cfg.dig("patrol", "review", "reviewers").map { |entry| entry.fetch("name") }
       native = cfg.dig("patrol", "review", "reviewers").first
@@ -196,8 +374,8 @@ class ConfigTest < Minitest::Test
       assert_equal false, cfg.dig("refactor_patrol", "caps", "allow_cross_feature")
       assert_equal 0.3, cfg.dig("refactor_patrol", "leverage", "weights", "churn")
       assert_equal 0.0, cfg.dig("refactor_patrol", "leverage", "weights", "coverage_gap")
-      assert_equal 12, cfg.dig("refactor_patrol", "review", "max_owned_files")
-      assert_equal 24, cfg.dig("refactor_patrol", "review", "max_context_files")
+      assert_equal 6, cfg.dig("refactor_patrol", "review", "max_owned_files")
+      assert_equal 6, cfg.dig("refactor_patrol", "review", "max_context_files")
     end
   end
 
@@ -1607,7 +1785,8 @@ class ConfigTest < Minitest::Test
       cfg = Hive::Config.load(dir)
       assert_equal "bin/ci", cfg.dig("review", "ci", "command")
       assert_equal 3,        cfg.dig("review", "ci", "max_attempts"), "max_attempts must fall back to default"
-      assert_equal "claude", cfg.dig("review", "ci", "agent"),        "agent must fall back to default"
+      assert_nil cfg.dig("review", "ci", "agent"),
+                 "implementation-owning CI agent stays absent for execute inheritance"
       assert_equal "ci_fix_prompt.md.erb", cfg.dig("review", "ci", "prompt_template")
       # Other sibling blocks at review.* must also stay intact.
       assert_equal "courageous", cfg.dig("review", "triage", "bias")
@@ -2555,7 +2734,7 @@ class ConfigTest < Minitest::Test
     with_tmp_dir do |dir|
       cfg = Hive::Config.load(dir)
       assert_equal 3,         cfg.dig("review", "ci", "max_attempts")
-      assert_equal "claude",  cfg.dig("review", "ci", "agent")
+      assert_nil cfg.dig("review", "ci", "agent")
       assert_equal "courageous", cfg.dig("review", "triage", "bias")
       assert_equal false,     cfg.dig("review", "browser_test", "enabled")
       assert_equal 2,         cfg.dig("review", "max_passes")

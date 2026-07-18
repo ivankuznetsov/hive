@@ -44,6 +44,61 @@ class HiveStagesExecuteTest < Minitest::Test
     end
   end
 
+  def test_apply_execute_outcome_publishes_projection_before_compatibility_marker
+    with_tmp_git_repo do |worktree|
+      with_tmp_dir do |dir|
+        task = build_task(dir)
+        task.project_root = worktree
+        task.define_singleton_method(:worktree_path) { worktree }
+        write_plan(task)
+        baseline = Hive::GitOps.new(worktree).head_sha
+        store = Hive::Attempts::Store.new(root: File.join(dir, "attempts"))
+        policy = Hive::Workflows::Coding::DESCRIPTOR.stage_named("execute").condition_policy.to_h
+        attempt = store.create_launching(
+          attempt_id: "attempt-1", request_id: "request-1", predecessor_attempt_id: nil,
+          task_id: task.id.to_s, project: "demo", task_slug: task.slug,
+          intended_stage: "4-execute", task_generation: "owner-1",
+          ownership_generation: "owner-1", task_input_epoch: 1,
+          progress_token: Digest::SHA256.hexdigest(Hive::TaskProjection.canonical_json(policy)),
+          provider: "codex", worker_argv: [ "hive", "run", task.folder ],
+          claim_capability_digest: Hive::Attempts::Capability.digest("c" * 64),
+          starting_revision: baseline, retry_charge: 0,
+          inherited_outputs: [], launch_timeout_sec: 30, now: Time.now.utc
+        )
+        cfg = { "conditions" => { "authority" => "markers",
+                                  "stages" => { "4-execute" => "conditions" } } }
+        original = Hive::Markers.method(:set)
+        observed = []
+        Hive::Markers.define_singleton_method(:set) do |path, name, attrs = {}|
+          projection_path = File.join(File.dirname(path), "task-projection.json")
+          journal_path = File.join(File.dirname(path), "task-journal.jsonl")
+          observed << [ File.exist?(journal_path), File.exist?(projection_path), name ]
+          original.call(path, name, attrs)
+        end
+
+        with_env("HIVE_ATTEMPT_STORE_ROOT" => File.join(dir, "attempts")) do
+          with_attempt_context(
+            attempt_id: attempt.attempt_id, task_generation: 1,
+            ownership_generation: attempt.ownership_generation
+          ) do
+            File.write(File.join(worktree, "change.txt"), "change\n")
+            run!("git", "-C", worktree, "add", "change.txt")
+            run!("git", "-C", worktree, "commit", "-m", "change", "--quiet")
+            result = Hive::Stages::Execute.apply_execute_outcome(
+              task, cfg, worktree, baseline,
+              marker_name: :execute_complete, attrs: {}, commit: "execute_complete",
+              status: :execute_complete
+            )
+            assert_equal :execute_complete, result.fetch(:status)
+          end
+        end
+        assert_equal [ [ true, true, :execute_complete ] ], observed
+      ensure
+        Hive::Markers.define_singleton_method(:set, original) if original
+      end
+    end
+  end
+
   def test_run_exits_when_worktree_pointer_path_is_missing
     with_tmp_dir do |dir|
       task = build_task(dir)
@@ -101,11 +156,17 @@ class HiveStagesExecuteTest < Minitest::Test
       git = FakeGit.new(head: "base", branch: task.slug, dirty: false, ancestor_result: true)
       result = {
         status: :error,
-        error_message: "limits reached for codex: quota exhausted, try again at Jun 24th"
+        error_message: "limits reached for codex: You've hit your usage limit. " \
+                       "Try again at Jul 18th, 2026 7:50 AM."
       }
+      now = Time.utc(2026, 7, 12, 20, 0, 0)
 
-      run_result = with_fake_git_and_spawn(git, result: result) do
-        Hive::Stages::Execute.run_pass(task, execute_cfg("codex"), File.join(dir, "worktree"))
+      run_result = with_env("TZ" => "Europe/London") do
+        with_replaced_singleton_method(Time, :now, -> { now }) do
+          with_fake_git_and_spawn(git, result: result) do
+            Hive::Stages::Execute.run_pass(task, execute_cfg("codex"), File.join(dir, "worktree"))
+          end
+        end
       end
 
       marker = Hive::Markers.current(task.state_file)
@@ -114,7 +175,7 @@ class HiveStagesExecuteTest < Minitest::Test
       assert_equal "limits_reached", marker.attrs["reason"]
       assert_equal "codex", marker.attrs["provider"]
       assert_equal "implementer hit a usage/credit limit", marker.attrs["message"]
-      assert Time.parse(marker.attrs.fetch("retry_after")) > Time.now.utc
+      assert_equal "2026-07-18T06:51:00Z", marker.attrs.fetch("retry_after")
     end
   end
 
@@ -163,6 +224,52 @@ class HiveStagesExecuteTest < Minitest::Test
       assert_equal "error", marker.attrs["status"]
       assert_equal "exit_code=1 compile error", marker.attrs["message"]
       refute marker.attrs.key?("retry_after")
+    end
+  end
+
+  def test_run_pass_attributes_failure_to_persisted_provider
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      write_pointer(task, "path" => File.join(dir, "worktree"), "branch" => task.slug,
+                    "execute_base_head" => "base")
+      git = FakeGit.new(head: "base", branch: task.slug, dirty: false, ancestor_result: true)
+      result = {
+        status: :error, error_message: "401 unauthorized",
+        implementation_provider: "codex"
+      }
+
+      with_fake_git_and_spawn(git, result: result) do
+        Hive::Stages::Execute.run_pass(task, execute_cfg("claude"), File.join(dir, "worktree"))
+      end
+
+      assert_equal "codex", Hive::Markers.current(task.state_file).attrs["provider"]
+    end
+  end
+
+  def test_run_pass_detects_implementation_identity_journal_tampering
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      write_pointer(task, "path" => File.join(dir, "worktree"), "branch" => task.slug,
+                    "execute_base_head" => "base")
+      git = FakeGit.new(head: "base", branch: task.slug, dirty: false, ancestor_result: true)
+
+      with_replaced_singleton_method(Hive::GitOps, :new, ->(_path) { git }) do
+        with_replaced_singleton_method(
+          Hive::Stages::Execute, :spawn_implementation,
+          lambda { |_task, _cfg, _path, **_kwargs|
+            File.write(File.join(task.folder, Hive::TaskJournal::JOURNAL_BASENAME), "tampered\n")
+            { status: :ok }
+          }
+        ) do
+          result = Hive::Stages::Execute.run_pass(task, {}, File.join(dir, "worktree"))
+          assert_equal({ commit: "implementer_tampered", status: :error }, result)
+        end
+      end
+
+      assert_includes Hive::Markers.current(task.state_file).attrs["files"],
+                      Hive::TaskJournal::JOURNAL_BASENAME
     end
   end
 
@@ -285,6 +392,15 @@ class HiveStagesExecuteTest < Minitest::Test
     end
   end
 
+  def test_research_execution_uses_shared_plan_frontmatter_parser
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task, "---\nexecution_mode: research\ndepends_on: base-task\n---\nbody\n")
+
+      assert_equal true, Hive::Stages::Execute.research_execution?(task)
+    end
+  end
+
   # End-to-end through the real 4-execute spawn helper: a non-yolo scope on
   # a non-claude runner (the A8 gate) must replace the stale AGENT_WORKING
   # marker with an attributed :error before the ConfigError propagates,
@@ -307,6 +423,40 @@ class HiveStagesExecuteTest < Minitest::Test
       marker = Hive::Markers.current(task.state_file)
       assert_equal :error, marker.name, "stale AGENT_WORKING must become attributed :error"
       assert_equal "permission_config_error", marker.attrs["reason"]
+    end
+  end
+
+  def test_spawn_implementation_never_reaches_launcher_when_identity_capture_fails
+    with_tmp_dir do |dir|
+      task = build_task(dir)
+      write_plan(task)
+      fake_store = Object.new
+      fake_store.define_singleton_method(:capture_execute!) do
+        raise Hive::TaskJournal::Error, "synthetic append failure"
+      end
+      spawned = false
+
+      with_replaced_singleton_method(Hive::ImplementationIdentity::Store, :new, ->(**) { fake_store }) do
+        with_replaced_singleton_method(Hive::Stages::Base, :spawn_agent, lambda { |*_, **_kwargs|
+          spawned = true
+        }) do
+          with_attempt_context(
+            attempt_id: "attempt", task_generation: 1, ownership_generation: "owner"
+          ) do
+            assert_raises(Hive::TaskJournal::Error) do
+              Hive::Stages::Execute.spawn_implementation(
+                task, execute_cfg("codex").merge(
+                  "budget_usd" => { "execute_implementation" => 1 },
+                  "timeout_sec" => { "execute_implementation" => 5 }
+                ),
+                File.join(dir, "worktree")
+              )
+            end
+          end
+        end
+      end
+
+      refute spawned
     end
   end
 
@@ -339,7 +489,7 @@ class HiveStagesExecuteTest < Minitest::Test
 
   def with_fake_git_and_spawn(git, status: :ok, result: nil)
     with_replaced_singleton_method(Hive::GitOps, :new, ->(_path) { git }) do
-      with_replaced_singleton_method(Hive::Stages::Execute, :spawn_implementation, lambda { |_task, _cfg, _path|
+      with_replaced_singleton_method(Hive::Stages::Execute, :spawn_implementation, lambda { |_task, _cfg, _path, **_kwargs|
         result || { status: status }
       }) do
         yield

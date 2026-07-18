@@ -21,6 +21,7 @@ module Hive
           token_stats: "Token stats mode (T)",
           filter: "Filter prompt",
           idea_preview: "Idea preview (i)",
+          implementation_identity_detail: "Implementation ownership (I)",
           new_idea: "New-idea prompt (n)"
         }.freeze
 

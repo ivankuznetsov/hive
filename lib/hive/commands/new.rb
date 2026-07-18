@@ -140,7 +140,7 @@ module Hive
         begin
           File.write(idea_path, render_initial_state(slug, @text, body_override: @body_override, workflow: workflow))
           copy_attachments!(task_dir)
-          id = allocate_task_id
+          id = Hive::TaskCounter.next_or_nil
           write_task_meta(task_dir, id: id, slug: slug, depends_on: depends_on,
                           workflow: workflow, workflow_info: workflow_info, hive_state: hive_state)
         rescue StandardError
@@ -358,12 +358,6 @@ module Hive
 
           FileUtils.cp(src_path, File.join(assets_dir, name))
         end
-      end
-
-      def allocate_task_id
-        Hive::TaskCounter.next!
-      rescue Hive::ConcurrentRunError
-        nil
       end
 
       def spawn_name_generator(task_dir)

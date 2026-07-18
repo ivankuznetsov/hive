@@ -82,7 +82,7 @@ Task ids are allocated from the global counter file `<state_home>/task-counter.y
 next_id: 2
 ```
 
-`TaskCounter.peek` returns `1` on missing/corrupt input; `seed_at_least!` can advance the next id without moving it backwards. `hive new` treats counter lock contention as fail-soft: it writes `meta.yml` with `id: null` and still captures the task. `hive migrate` seeds the counter above existing sidecar ids before assigning new ones.
+`TaskCounter.peek` returns `1` on missing/corrupt input; `seed_at_least!` can advance the next id without moving it backwards. Capture paths (`hive new`, ad-hoc review, and patrol review handoff) use `next_or_nil`: counter lock contention writes `meta.yml` with `id: null` and preserves the already-created task for daemon backfill. `hive migrate` and the backfiller keep strict `next!` allocation; migration seeds the counter above existing sidecar ids before assigning new ones.
 
 ## Slug grammar
 

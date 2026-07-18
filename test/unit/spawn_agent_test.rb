@@ -1,4 +1,5 @@
 require "test_helper"
+require "json"
 require "hive/markers"
 require "hive/lock"
 require "hive/config"
@@ -7,6 +8,7 @@ require "hive/agent"
 require "hive/agent_profiles"
 require "hive/claude_launcher"
 require "hive/stages/base"
+require "hive/scripts/workflow_policy_hook"
 
 # Direct coverage for Hive::Stages::Base.spawn_agent: profile check_version! /
 # preflight! ordering, the warn_isolation_reduced trigger when the configured
@@ -614,6 +616,46 @@ class SpawnAgentTest < Minitest::Test
       assert_nil scope.fetch(:permission_mode)
       assert_nil scope.fetch(:allowed_tools)
       assert_nil scope.fetch(:disallowed_tools)
+    end
+  end
+
+  def test_stage_permission_scope_compiles_task_pinned_managed_policy
+    with_tmp_dir do |dir|
+      task_folder = File.join(dir, "task")
+      FileUtils.mkdir_p(task_folder)
+      workflow = Struct.new(:id).new(:demo)
+      task = Object.new
+      task.define_singleton_method(:managed_workflow?) { true }
+      task.define_singleton_method(:hive_state_path) { File.join(dir, ".hive-state") }
+      task.define_singleton_method(:workflow) { workflow }
+      task.define_singleton_method(:workflow_commit) { "a" * 40 }
+      task.define_singleton_method(:workflow_manifest_digest) { "b" * 64 }
+      task.define_singleton_method(:folder) { task_folder }
+      manifest = Struct.new(:data).new({
+        "permissions" => {
+          "tools" => [ "Read" ], "deny" => [ "Bash" ], "directories" => [],
+          "commands" => [], "domains" => [], "credentials" => []
+        }
+      })
+      store = Object.new
+      store.define_singleton_method(:manifest) { |*| manifest }
+      with_replaced_singleton_method(Hive::WorkflowPackage::ManagedStore, :new, ->(*) { store }) do
+        scope = Hive::Stages::Base.stage_permission_scope(
+          {}, "work", task, Hive::AgentProfiles.lookup(:claude)
+        )
+        assert_equal "dontAsk", scope.fetch(:permission_mode)
+        assert_equal [ "Read" ], scope.fetch(:allowed_tools)
+        assert_equal task_folder, scope.fetch(:add_dirs).first
+        policy = scope.fetch(:runtime_policy)
+        assert_instance_of Hive::WorkflowPackage::RuntimePolicy::Policy, policy
+        refute policy.policy_path.start_with?(task_folder + File::SEPARATOR)
+        assert policy.policy_path.start_with?(File.join(dir, ".hive-state", ".managed-policies") + File::SEPARATOR)
+        decision, = Hive::Scripts::WorkflowPolicyHook.evaluate(
+          JSON.parse(File.read(policy.policy_path)),
+          "tool_name" => "Write", "tool_input" => { "file_path" => policy.policy_path }
+        )
+        assert_equal "deny", decision
+      end
     end
   end
 

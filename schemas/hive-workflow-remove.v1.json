@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-workflow-remove.v1.json",
+  "title": "hive workflow remove output v1",
+  "oneOf": [
+    {"$ref": "#/$defs/SuccessPayload"},
+    {"$ref": "#/$defs/ErrorPayload"}
+  ],
+  "$defs": {
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "status", "name", "source_commit", "manifest_digest", "retained_commits", "deletable_commits"],
+      "properties": {
+        "schema": {"const": "hive-workflow-remove"},
+        "schema_version": {"const": 1},
+        "ok": {"const": true},
+        "status": {"enum": ["dry_run", "removed", "cancelled"]},
+        "name": {"type": "string"},
+        "source_commit": {"type": "string"},
+        "manifest_digest": {"type": "string"},
+        "retained_commits": {"type": "array", "items": {"type": "string"}},
+        "deletable_commits": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "error_class", "error_kind", "exit_code", "message"],
+      "properties": {
+        "schema": {"const": "hive-workflow-remove"},
+        "schema_version": {"const": 1},
+        "ok": {"const": false},
+        "error_class": {"type": "string"},
+        "error_kind": {"enum": ["consent_required", "ownership", "update_required", "concurrent_run", "git", "config", "registry", "error"]},
+        "exit_code": {"enum": [1, 64, 69, 70, 75, 78]},
+        "message": {"type": "string"},
+        "holder": {"type": "object", "additionalProperties": true},
+        "lock_path": {"type": "string"}
+      }
+    }
+  }
+}

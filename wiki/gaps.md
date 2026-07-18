@@ -34,11 +34,21 @@ tags: [gap, todo]
   equivalent protected signing/storage authority), not another in-process
   Ruby guard.
 
+- Hive now contains the Honeycomb package validator, managed runtime policy,
+  official catalog client, immutable store/task pins, lifecycle commands,
+  semantic update consent, and publish-by-PR client. The separate
+  `ivankuznetsov/honeycomb` repository still needs the deferred U3/U8 rollout:
+  reviewed seed contents, deterministic catalog publisher, pinned released
+  Hive validator/checksum, protected CODEOWNERS/status/latest-push approval
+  rules, fork validation, catalog-only PR provenance gate, and live install/run
+  smoke. Until those controls and a compatible Hive release exist, a merged
+  package must remain unlisted and the official client may have nothing to
+  resolve. No Honeycomb monorepo files belong in this Hive tree.
 - The built-in `bench` descriptor, packaged stage instructions, self-contained
   runtime snapshot, and `hive init . --workflow bench` path are covered locally,
   but they have not yet shipped in a Hive release or completed a live
   paid-provider campaign from a fresh standalone benchmark project. Honeycomb
-  is not deployed and is not a dependency of this named-workflow path.
+  is not a dependency of this named-workflow path.
 - The packaged mixed Sol/Terra/Grok profiles, stage-specific Codex shim, sole
   Sol `ce-code-review` policy, and combined Sol-runner selection are locally
   test-pinned but still need their first paid end-to-end cell.

@@ -5,6 +5,7 @@ require "hive/task_meta"
 require "hive/workflows/project"
 require "hive/workflows/registry"
 require "hive/worktree"
+require "hive/workflow_package/managed_store"
 
 module Hive
   class Task
@@ -34,6 +35,10 @@ module Hive
 
     attr_reader :folder, :project_root, :hive_state_path, :stage_index,
                 :stage_name, :slug, :state_dir_basename, :workflow
+
+    def workflow_commit = meta[:workflow_commit]
+    def workflow_manifest_digest = meta[:workflow_manifest_digest]
+    def managed_workflow? = !workflow_commit.nil? && !workflow_manifest_digest.nil?
 
     def initialize(folder)
       folder = File.expand_path(folder)
@@ -138,6 +143,18 @@ module Hive
     # re-enter without deadlock, and `Task.new` (a widely-reused constructor)
     # needs no caller-side lock.
     def resolve_workflow
+      if meta[:workflow_commit] || meta[:workflow_manifest_digest]
+        unless meta[:workflow] && meta[:workflow_commit] && meta[:workflow_manifest_digest]
+          raise InvalidTaskPath, "managed workflow task provenance is incomplete"
+        end
+        store = Hive::WorkflowPackage::ManagedStore.new(@hive_state_path)
+        begin
+          return store.workflow(meta[:workflow], meta[:workflow_commit], meta[:workflow_manifest_digest])
+        rescue Hive::ConfigError => e
+          raise InvalidTaskPath, e.message
+        end
+      end
+
       Hive::Workflows::Project.synchronize do
         Hive::Workflows::Project.load!(@project_root)
         selector = meta[:workflow]

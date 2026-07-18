@@ -168,8 +168,8 @@ class CliUsageErrorJsonTest < Minitest::Test
       assert_equal "UsageError", payload["error_class"]
       assert_equal "usage", payload["error_kind"]
       assert_equal Hive::ExitCodes::USAGE, payload["exit_code"]
-      assert_equal "missing SUBCOMMAND (expected: new)", payload["message"]
-      assert_equal [ "new" ], payload["expected"]
+      assert_equal "missing SUBCOMMAND (expected: new, install, list, update, remove, publish)", payload["message"]
+      assert_equal %w[new install list update remove publish], payload["expected"]
     end
   end
 
@@ -180,7 +180,7 @@ class CliUsageErrorJsonTest < Minitest::Test
       refute status.success?
       assert_equal Hive::ExitCodes::USAGE, status.exitstatus
       assert_empty out
-      assert_equal "hive workflow: missing SUBCOMMAND (expected: new)\n", err
+      assert_equal "hive workflow: missing SUBCOMMAND (expected: new, install, list, update, remove, publish)\n", err
     end
   end
 

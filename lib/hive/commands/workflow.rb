@@ -19,7 +19,7 @@ module Hive
       DEFAULT_TEMPLATE = "blank".freeze
       WORKFLOW_ID_RE = Hive::Workflows::DescriptorParser::SAFE_SLUG
       SCHEMA = "hive-workflow-new".freeze
-      SUBCOMMANDS = %w[new].freeze
+      SUBCOMMANDS = %w[new install list update remove publish].freeze
 
       class UsageError < Hive::Error
         attr_reader :value, :expected
@@ -234,8 +234,19 @@ module Hive
         template_instruction_files(template_dir).each do |file|
           File.write(File.join(paths.fetch(:instruction_dir), file), File.read(File.join(template_dir, file)))
         end
+        write_optional_template_asset(id, template_dir, "README.md.erb", File.join(paths.fetch(:instruction_dir), "README.md"))
+        write_optional_template_asset(id, template_dir, "honeycomb.yml.erb", File.join(paths.fetch(:instruction_dir), "honeycomb.yml"))
       end
       private_class_method :write_scaffold!
+
+      def self.write_optional_template_asset(id, template_dir, template_name, destination)
+        source = File.join(template_dir, template_name)
+        return unless File.file?(source)
+
+        rendered = ERB.new(File.read(source), trim_mode: "-").result_with_hash(id: id)
+        File.write(destination, rendered)
+      end
+      private_class_method :write_optional_template_asset
 
       def self.render_descriptor(id, template_dir)
         template = File.read(File.join(template_dir, "descriptor.yml.erb"))
@@ -269,13 +280,18 @@ module Hive
       end
       private_class_method :warn_failed_scaffold_cleanup
 
-      def initialize(subcommand, id = nil, project_root: Dir.pwd, json: false, stdout: $stdout, template: DEFAULT_TEMPLATE)
+      def initialize(subcommand, id = nil, project_root: Dir.pwd, json: false, stdout: $stdout, template: DEFAULT_TEMPLATE,
+                     yes: false, dry_run: false, allow_escalation: false, version: nil)
         @subcommand = subcommand
         @id = id
         @project_root = File.expand_path(project_root)
         @json = json
         @stdout = stdout
         @template = template
+        @yes = yes
+        @dry_run = dry_run
+        @allow_escalation = allow_escalation
+        @version = version
       end
 
       def call
@@ -309,13 +325,15 @@ module Hive
           )
         end
 
-        unless @subcommand == "new"
+        unless SUBCOMMANDS.include?(@subcommand)
           raise UsageError.new(
             "unknown workflow subcommand #{@subcommand.inspect} (expected: #{expected_list})",
             value: @subcommand,
             expected: SUBCOMMANDS
           )
         end
+
+        return lifecycle_command.call unless @subcommand == "new"
 
         scaffold = self.class.scaffold_files!(@id, project_root: @project_root, template: @template)
         id = scaffold.fetch(:id)
@@ -347,6 +365,39 @@ module Hive
       end
 
       private
+
+      def lifecycle_command
+        case @subcommand
+        when "install"
+          require "hive/commands/workflow/install"
+          Hive::Commands::Workflow::Install.new(
+            @id, project_root: @project_root, json: @json, yes: @yes,
+            dry_run: @dry_run, stdout: @stdout
+          )
+        when "list"
+          raise UsageError.new("workflow list does not accept an id", value: @id) if @id
+
+          require "hive/commands/workflow/list"
+          Hive::Commands::Workflow::List.new(project_root: @project_root, json: @json, stdout: @stdout)
+        when "remove"
+          require "hive/commands/workflow/remove"
+          Hive::Commands::Workflow::Remove.new(
+            @id, project_root: @project_root, json: @json, yes: @yes,
+            dry_run: @dry_run, stdout: @stdout
+          )
+        when "update"
+          require "hive/commands/workflow/update"
+          Hive::Commands::Workflow::Update.new(
+            @id, project_root: @project_root, json: @json, yes: @yes,
+            allow_escalation: @allow_escalation, dry_run: @dry_run, stdout: @stdout
+          )
+        when "publish"
+          require "hive/commands/workflow/publish"
+          Hive::Commands::Workflow::Publish.new(
+            @id, project_root: @project_root, json: @json, version: @version, stdout: @stdout
+          )
+        end
+      end
 
       def commit_scaffold!(id, paths)
         ops = Hive::GitOps.new(@project_root)

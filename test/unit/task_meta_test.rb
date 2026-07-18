@@ -72,6 +72,32 @@ class TaskMetaTest < Minitest::Test
     end
   end
 
+  def test_managed_workflow_provenance_round_trips_and_survives_updates
+    with_tmp_dir do |dir|
+      Hive::TaskMeta.write(
+        dir, id: 7, slug: "managed-260715-aaaa", display_name: nil, workflow: "demo",
+        workflow_commit: "a" * 40, workflow_manifest_digest: "b" * 64
+      )
+
+      assert_equal "a" * 40, Hive::TaskMeta.read(dir)[:workflow_commit]
+      assert_equal "b" * 64, Hive::TaskMeta.read(dir)[:workflow_manifest_digest]
+      Hive::TaskMeta.update_display_name(dir, "Managed")
+      Hive::TaskMeta.update_id(dir, 8)
+      assert_equal "a" * 40, Hive::TaskMeta.read(dir)[:workflow_commit]
+      assert_equal "b" * 64, Hive::TaskMeta.read(dir)[:workflow_manifest_digest]
+    end
+  end
+
+  def test_managed_workflow_provenance_must_be_written_as_a_pair
+    with_tmp_dir do |dir|
+      assert_raises(ArgumentError) do
+        Hive::TaskMeta.write(
+          dir, id: 7, slug: "managed-260715-aaaa", display_name: nil,
+          workflow_commit: "a" * 40
+        )
+      end
+    end
+  end
   include HiveTestHelper
 
   def test_write_and_read_round_trip
@@ -129,7 +155,7 @@ class TaskMetaTest < Minitest::Test
 
   def test_missing_or_malformed_file_returns_nil_fields
     with_tmp_dir do |dir|
-      assert_equal({ id: nil, slug: nil, display_name: nil, depends_on: nil, workflow: nil }, Hive::TaskMeta.read(dir))
+      assert_equal Hive::TaskMeta.empty, Hive::TaskMeta.read(dir)
 
       File.write(File.join(dir, "meta.yml"), ":\n:not yaml")
       # Malformed YAML hits the warn arm of read; capture so it isn't leaked to
@@ -137,10 +163,10 @@ class TaskMetaTest < Minitest::Test
       # test_malformed_yaml_warns_that_depends_on_and_workflow_were_dropped).
       result = nil
       capture_io { result = Hive::TaskMeta.read(dir) }
-      assert_equal({ id: nil, slug: nil, display_name: nil, depends_on: nil, workflow: nil }, result)
+      assert_equal Hive::TaskMeta.empty, result
 
       File.write(File.join(dir, "meta.yml"), "- not\n- a hash\n")
-      assert_equal({ id: nil, slug: nil, display_name: nil, depends_on: nil, workflow: nil }, Hive::TaskMeta.read(dir))
+      assert_equal Hive::TaskMeta.empty, Hive::TaskMeta.read(dir)
     end
   end
 
@@ -172,7 +198,7 @@ class TaskMetaTest < Minitest::Test
       result = nil
       _out, err = capture_io { result = Hive::TaskMeta.read(dir) }
       assert_equal Hive::TaskMeta.empty, result
-      assert_match(/depends_on, workflow dropped/, err,
+      assert_match(/depends_on, workflow dropped; managed provenance dropped/, err,
                    "a YAML parse failure must warn that depends_on (and the " \
                    "workflow selector) were dropped")
     end

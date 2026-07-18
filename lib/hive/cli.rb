@@ -441,12 +441,17 @@ module Hive
       ).call
     end
 
-    desc "workflow SUBCOMMAND [ID]", "Manage per-project workflow descriptors"
+    desc "workflow SUBCOMMAND [ID]", "Manage project workflows and reviewed Honeycomb packages"
     long_desc <<~DESC
       Subcommands:
         new ID    Scaffold a per-project workflow descriptor under
                   <hive_state_path>/workflows/ID.yml plus its stage
                   instruction(s) under <hive_state_path>/workflows/ID/.
+        install honeycomb/NAME[@VERSION]  Verify and install a reviewed package.
+        list                              Inspect built-in, authored, and managed workflows.
+        update NAME                       Diff and advance a managed package.
+        remove NAME                       Disable a managed package for new tasks.
+        publish ID                        Package an authored workflow and open a registry PR.
 
       By default `new` scaffolds the blank `inbox -> work -> done` stub. Pass
       `--template NAME` to seed from a richer sample workflow instead (e.g.
@@ -455,6 +460,14 @@ module Hive
     DESC
     option :template, type: :string,
                       desc: "for `new`: seed from a named sample workflow (e.g. writing, research) instead of the blank stub"
+    option :yes, type: :boolean, default: false,
+                 desc: "confirm install/update/remove in JSON or non-interactive mode"
+    option :dry_run, type: :boolean, default: false,
+                     desc: "for `install`, `update`, or `remove`: validate and report without changing project state"
+    option :allow_escalation, type: :boolean, default: false,
+                              desc: "for `update`: separately allow a security capability increase"
+    option :version, type: :string,
+                     desc: "for `publish`: semantic package version"
     def workflow(subcommand = nil, id = nil)
       require "hive/commands/workflow"
       Hive::Commands::Workflow.new(
@@ -462,7 +475,11 @@ module Hive
         id,
         project_root: Dir.pwd,
         json: options[:json],
-        template: options[:template]
+        template: options[:template],
+        yes: options[:yes],
+        dry_run: options[:dry_run],
+        allow_escalation: options[:allow_escalation],
+        version: options[:version]
       ).call
     end
 

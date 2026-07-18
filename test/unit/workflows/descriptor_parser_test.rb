@@ -3,6 +3,47 @@ require "securerandom"
 require "hive/workflows/descriptor_parser"
 
 class WorkflowsDescriptorParserTest < Minitest::Test
+  def test_package_descriptor_binds_workflow_yml_to_expected_package_name
+    with_tmp_dir do |dir|
+      path = File.join(dir, "workflow.yml")
+      File.write(path, <<~YAML)
+        id: packaged
+        stages:
+          - name: done
+            kind: terminal
+            state_file: done.md
+      YAML
+
+      workflow = Hive::Workflows::DescriptorParser.parse_package_file(path, package_name: "packaged")
+      assert_equal :packaged, workflow.id
+
+      error = assert_raises(Hive::ConfigError) do
+        Hive::Workflows::DescriptorParser.parse_package_file(path, package_name: "other")
+      end
+      assert_includes error.message, "package name"
+    end
+  end
+
+  def test_package_descriptor_rejects_instruction_escape
+    with_tmp_dir do |dir|
+      package = File.join(dir, "package")
+      FileUtils.mkdir_p(package)
+      File.write(File.join(dir, "outside.md"), "outside")
+      path = File.join(package, "workflow.yml")
+      File.write(path, <<~YAML)
+        id: packaged
+        stages:
+          - name: work
+            kind: agent
+            state_file: work.md
+            instruction: ../outside.md
+      YAML
+
+      assert_raises(Hive::ConfigError) do
+        Hive::Workflows::DescriptorParser.parse_package_file(path, package_name: "packaged")
+      end
+    end
+  end
   include HiveTestHelper
 
   def test_valid_descriptor_maps_user_vocabulary_and_resolves_instruction

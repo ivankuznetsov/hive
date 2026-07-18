@@ -344,6 +344,17 @@ def json_usage_error_contract(argv)
         extras: { "action" => jobs.fetch(:action) }
       }
     end
+  when "workflow"
+    subcommand = json_usage_subcommand(argv, command_index)
+    schema = case subcommand
+    when "install" then "hive-workflow-install"
+    when "list" then "hive-workflow-list"
+    when "remove" then "hive-workflow-remove"
+    when "update" then "hive-workflow-update"
+    when "publish" then "hive-workflow-publish"
+    else "hive-workflow-new"
+    end
+    return { schema: schema, error_kind: "usage" } if Hive::Schemas::SCHEMA_VERSIONS.key?(schema)
   end
 
   JSON_USAGE_ERROR_CONTRACTS[command]

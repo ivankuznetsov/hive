@@ -2,7 +2,7 @@
 set -eu
 
 usage() {
-  echo "usage: interactive_claude_wrapper.sh --cwd DIR [--add-dir DIR ...] [--permission-mode MODE | --dangerously-skip-permissions] [--mcp-config FILE] [--strict-mcp-config] [--allowedTools TOOLS] [--disallowedTools TOOLS] [--model MODEL] [--effort LEVEL] [--bin PATH]" >&2
+  echo "usage: interactive_claude_wrapper.sh --cwd DIR [--add-dir DIR ...] [--permission-mode MODE | --dangerously-skip-permissions] [--settings FILE] [--setting-sources SOURCES] [--mcp-config FILE] [--strict-mcp-config] [--allowedTools TOOLS] [--disallowedTools TOOLS] [--model MODEL] [--effort LEVEL] [--bin PATH]" >&2
   exit 64
 }
 
@@ -49,6 +49,18 @@ while [ "$remaining" -gt 0 ]; do
     --mcp-config)
       [ "$remaining" -ge 1 ] || usage
       set -- "$@" "--mcp-config" "$1"
+      shift
+      remaining=$((remaining - 1))
+      ;;
+    --settings)
+      [ "$remaining" -ge 1 ] || usage
+      set -- "$@" "--settings" "$1"
+      shift
+      remaining=$((remaining - 1))
+      ;;
+    --setting-sources)
+      [ "$remaining" -ge 1 ] || usage
+      set -- "$@" "--setting-sources" "$1"
       shift
       remaining=$((remaining - 1))
       ;;

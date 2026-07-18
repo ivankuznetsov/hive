@@ -44,7 +44,7 @@ module Hive
                 :workspace_write_flags, :cli_capabilities,
                 :initial_context_tokens, :default_model_resolver,
                 :model_argument_builder, :effort_argument_builder,
-                :launcher_identity
+                :launcher_identity, :policy_capabilities
 
     # Public API — do not break.
     #
@@ -118,7 +118,8 @@ module Hive
                    default_model_resolver: nil,
                    model_argument_builder: nil,
                    effort_argument_builder: nil,
-                   launcher_identity: nil)
+                   launcher_identity: nil,
+                   policy_capabilities: [])
       prompt_style ||= name.to_sym == :codex ? :stdin : :positional
       unless PROMPT_STYLES.include?(prompt_style)
         raise ArgumentError,
@@ -159,6 +160,7 @@ module Hive
       @model_argument_builder = model_argument_builder
       @effort_argument_builder = effort_argument_builder
       @launcher_identity = (launcher_identity || "AgentProfile/v1:#{name}").to_s.freeze
+      @policy_capabilities = Array(policy_capabilities).map(&:to_sym).uniq.freeze
 
       freeze
     end
@@ -564,7 +566,8 @@ module Hive
         default_model_resolver: @default_model_resolver,
         model_argument_builder: @model_argument_builder,
         effort_argument_builder: @effort_argument_builder,
-        launcher_identity: @launcher_identity
+        launcher_identity: @launcher_identity,
+        policy_capabilities: @policy_capabilities.dup
       }
     end
 

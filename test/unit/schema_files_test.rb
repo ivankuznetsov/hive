@@ -75,6 +75,16 @@ class SchemaFilesTest < Minitest::Test
     assert_empty schemer.validate(payload).to_a
   end
 
+  def test_honeycomb_contract_schema_files_are_valid_and_versioned
+    %w[honeycomb-manifest.v1.json honeycomb-catalog.v1.json].each do |name|
+      path = File.join(Hive::Schemas.schema_dir, name)
+      assert File.file?(path), "schema file missing: #{path}"
+      document = JSON.parse(File.read(path))
+      assert_equal "https://json-schema.org/draft/2020-12/schema", document["$schema"]
+      assert_equal 1, document.dig("properties", "schema_version", "const")
+    end
+  end
+
   def test_hive_approve_v2_schema_file_exists_and_is_valid_json
     path = Hive::Schemas.schema_path("hive-approve")
     assert File.exist?(path), "schema file missing: #{path}"

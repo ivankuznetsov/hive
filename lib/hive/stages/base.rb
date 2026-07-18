@@ -1,3 +1,4 @@
+require "digest"
 require "erb"
 require "fileutils"
 require "securerandom"
@@ -136,6 +137,24 @@ module Hive
                                  base_add_dirs: [ task.folder ],
                                  default_allowed_tools: nil,
                                  explicit_permission_spec: MISSING_EXPLICIT_PERMISSION_SPEC)
+        if task.respond_to?(:managed_workflow?) && task.managed_workflow?
+          require "hive/workflow_package/managed_store"
+          require "hive/workflow_package/runtime_policy"
+          store = Hive::WorkflowPackage::ManagedStore.new(task.hive_state_path)
+          manifest = store.manifest(task.workflow.id.to_s, task.workflow_commit, task.workflow_manifest_digest)
+          runtime_policy = Hive::WorkflowPackage::RuntimePolicy.compile(
+            manifest.data.fetch("permissions"), task_folder: task.folder, profile: profile,
+            policy_dir: managed_policy_dir(task, stage_name)
+          )
+          return {
+            add_dirs: runtime_policy.directories,
+            permission_mode: runtime_policy.permission_mode,
+            allowed_tools: runtime_policy.allowed_tools,
+            disallowed_tools: runtime_policy.disallowed_tools,
+            runtime_policy: runtime_policy
+          }
+        end
+
         spec = if explicit_permission_spec.equal?(MISSING_EXPLICIT_PERMISSION_SPEC)
           Hive::Config.permission_spec(cfg || {}, stage_name)
         else
@@ -166,6 +185,14 @@ module Hive
         }
       end
 
+      # Policy files are enforcement state, so they must not live below the
+      # task directory that managed agents can write. The digest also keeps
+      # task and stage policy material isolated without exposing task names.
+      def managed_policy_dir(task, stage_name)
+        identity = ::Digest::SHA256.hexdigest("#{File.expand_path(task.folder)}\0#{stage_name}")
+        File.join(task.hive_state_path, ".managed-policies", identity)
+      end
+
       # The three tool-scoping kwargs every spawn site forwards from a
       # resolved-scope Hash to spawn_agent / spawn_claude! /
       # with_shared_session. Splat this (`**Base.tool_scope_kwargs(scope)`)
@@ -173,11 +200,13 @@ module Hive
       # across the spawn sites. `scope` is the Hash stage_permission_scope
       # returns, NOT the PermissionScope::Scope struct.
       def tool_scope_kwargs(scope)
-        {
+        kwargs = {
           permission_mode: scope.fetch(:permission_mode),
           allowed_tools: scope.fetch(:allowed_tools),
           disallowed_tools: scope.fetch(:disallowed_tools)
         }
+        kwargs[:runtime_policy] = scope[:runtime_policy] if scope[:runtime_policy]
+        kwargs
       end
 
       # The per-spec explicit-permission passthrough every reviewer
@@ -518,7 +547,7 @@ module Hive
                       profile: nil, expected_output: nil, status_mode: nil,
                       cfg: nil, permission_mode: nil, allowed_tools: nil,
                       disallowed_tools: nil, cli_flags: nil,
-                      model: nil, effort: nil, identity_arguments: nil)
+                      model: nil, effort: nil, identity_arguments: nil, runtime_policy: nil)
         profile ||= Hive::AgentProfiles.lookup(:claude)
         # Translate preflight/version-check failures (e.g. Pi missing
         # ~/.pi/agent/auth.json mid-loop) into a typed :error envelope
@@ -587,7 +616,8 @@ module Hive
           allowed_tools: allowed_tools,
           disallowed_tools: disallowed_tools,
           cli_flags: cli_flags,
-          identity_arguments: identity_arguments || []
+          identity_arguments: identity_arguments || [],
+          runtime_policy: runtime_policy
         ).run!
         record_usage(task, profile, result, started_at)
         result
@@ -611,7 +641,7 @@ module Hive
                          profile: nil, expected_output: nil, status_mode: nil,
                          permission_mode: nil, allowed_tools: nil,
                          disallowed_tools: nil, mcp_config_path: nil,
-                         strict_mcp_config: false, identity_arguments: nil)
+                         strict_mcp_config: false, identity_arguments: nil, runtime_policy: nil)
         require "hive/claude_launcher"
 
         profile ||= Hive::AgentProfiles.lookup(:claude, cfg: cfg)
@@ -638,7 +668,8 @@ module Hive
           disallowed_tools: disallowed_tools,
           mcp_config_path: mcp_config_path,
           strict_mcp_config: strict_mcp_config,
-          identity_arguments: identity_arguments
+          identity_arguments: identity_arguments,
+          runtime_policy: runtime_policy
         )
       end
 

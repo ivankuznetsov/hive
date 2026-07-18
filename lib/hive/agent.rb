@@ -129,14 +129,15 @@ module Hive
     }.freeze
 
     attr_reader :task, :prompt, :add_dirs, :cwd, :max_budget_usd, :max_tokens, :max_turns, :timeout_sec,
-                :profile, :expected_output, :status_mode, :permission_mode
+                :profile, :expected_output, :status_mode, :permission_mode,
+                :runtime_policy, :child_environment
 
     def initialize(task:, prompt:, max_budget_usd:, timeout_sec:,
                    add_dirs: [], cwd: nil, log_label: nil,
                    profile: nil, expected_output: nil, status_mode: nil,
                    permission_mode: nil, allowed_tools: nil,
                    disallowed_tools: nil, cli_flags: [], max_tokens: nil,
-                   max_turns: nil, identity_arguments: [])
+                   max_turns: nil, identity_arguments: [], runtime_policy: nil)
       @task = task
       @prompt = prompt
       @add_dirs = Array(add_dirs)
@@ -147,6 +148,7 @@ module Hive
       @timeout_sec = timeout_sec
       @log_label = log_label || task.stage_name
       @profile = profile || Hive::AgentProfiles.lookup(:claude)
+      @runtime_policy = runtime_policy
       @expected_output = expected_output
       # Per-spawn override of the profile's default detection mode. The
       # same CLI (e.g., claude) serves multiple roles — 4-execute uses
@@ -159,10 +161,20 @@ module Hive
               "unknown status_mode: #{status_mode.inspect}; valid: #{Hive::AgentProfile::STATUS_DETECTION_MODES.inspect}"
       end
       @status_mode = status_mode
-      @permission_mode = permission_mode
-      @allowed_tools = allowed_tools
-      @disallowed_tools = disallowed_tools
-      @cli_flags = Array(cli_flags)
+      if @runtime_policy
+        @permission_mode = @runtime_policy.permission_mode
+        @allowed_tools = @runtime_policy.allowed_tools
+        @disallowed_tools = @runtime_policy.disallowed_tools
+        @add_dirs = @runtime_policy.directories
+        @cli_flags = Array(cli_flags) + @runtime_policy.cli_flags
+        @child_environment = @runtime_policy.environment.merge(SCRUBBED_CHILD_ENV)
+      else
+        @permission_mode = permission_mode
+        @allowed_tools = allowed_tools
+        @disallowed_tools = disallowed_tools
+        @cli_flags = Array(cli_flags)
+        @child_environment = SCRUBBED_CHILD_ENV
+      end
       @identity_arguments = Hive::ImplementationIdentity.validate_native_arguments(identity_arguments).freeze
     end
 
@@ -254,8 +266,9 @@ module Hive
       end
       r, w = IO.pipe
       spawn_opts = { chdir: @cwd, pgroup: true, out: w, err: w }
+      spawn_opts[:unsetenv_others] = true if @runtime_policy
       spawn_opts[:in] = stdin_file if stdin_file
-      pid = Process.spawn(SCRUBBED_CHILD_ENV, *cmd, **spawn_opts)
+      pid = Process.spawn(@child_environment, *cmd, **spawn_opts)
       w.close
       pgid = begin
         Process.getpgid(pid)

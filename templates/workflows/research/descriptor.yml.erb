@@ -8,14 +8,17 @@ stages:
     kind: agent
     state_file: gather.md
     instruction: ./<%= id %>/gather.md
+    permissions: read-only
   - name: synthesize
     kind: agent
     state_file: synthesize.md
     instruction: ./<%= id %>/synthesize.md
+    permissions: read-only
   - name: report
     kind: agent
     state_file: report.md
     instruction: ./<%= id %>/report.md
+    permissions: read-only
   - name: done
     kind: terminal
     state_file: done.md

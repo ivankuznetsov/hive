@@ -986,6 +986,47 @@ class ClaudeLauncherTest < Minitest::Test
     assert_equal %w[--disallowedTools Write,Bash], command.each_cons(2).find { |a, _| a == "--disallowedTools" }
   end
 
+
+  def test_wrapper_command_carries_managed_settings_isolation
+    profile = Hive::AgentProfiles.lookup(:claude)
+    policy = Struct.new(
+      :permission_mode, :allowed_tools, :disallowed_tools, :directories,
+      :settings_path, :mcp_config_path, :cli_flags, keyword_init: true
+    ).new(
+      permission_mode: "dontAsk", allowed_tools: %w[Read Bash], disallowed_tools: %w[Write WebSearch],
+      directories: [ "/tmp/task" ], settings_path: "/tmp/policy/settings.json",
+      mcp_config_path: "/tmp/policy/mcp.json",
+      cli_flags: [ "--settings", "/tmp/policy/settings.json", "--setting-sources", "",
+                   "--mcp-config", "/tmp/policy/mcp.json", "--strict-mcp-config" ]
+    )
+    command = Hive::ClaudeLauncher.send(
+      :wrapper_command,
+      cwd: "/tmp/task", add_dirs: [], profile: profile,
+      permission_mode: nil, runtime_policy: policy
+    )
+
+    assert_equal "dontAsk", command[command.index("--permission-mode") + 1]
+    assert_equal "/tmp/policy/settings.json", command[command.index("--settings") + 1]
+    assert_equal "", command[command.index("--setting-sources") + 1]
+    assert_includes command, "--strict-mcp-config"
+    assert_equal policy.allowed_tools.join(","), command[command.index("--allowedTools") + 1]
+  end
+
+  def test_managed_tmux_command_starts_with_only_the_compiled_environment
+    policy = Struct.new(:environment, keyword_init: true).new(
+      environment: { "HOME" => "/safe/home", "PATH" => "/usr/bin", "HIVE_MANAGED_POLICY" => "1" }
+    )
+    task = Struct.new(:folder).new("/safe/task")
+    command = Hive::ClaudeLauncher.send(:isolated_managed_command, [ "/usr/bin/env" ], policy, task)
+
+    out, err, status = Open3.capture3({ "PARENT_SECRET" => "must-not-leak" }, *command)
+    assert status.success?, err
+    environment = out.lines.map(&:chomp)
+    assert_includes environment, "PATH=/usr/bin"
+    assert_includes environment, "HIVE_TASK_STAGE_DIR=/safe/task"
+    refute environment.any? { |line| line.start_with?("PARENT_SECRET=") }
+  end
+
   # Readiness-wins contract: the limit menu is only classified AFTER the
   # ready wait exhausts (no fail-fast inside the loop — banner/footer copy
   # in a still-booting pane must never kill a launch). The clock is stubbed

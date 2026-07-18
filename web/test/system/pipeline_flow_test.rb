@@ -63,6 +63,13 @@ class PipelineFlowTest < ApplicationSystemTestCase
 
     submit_idea
     assert_selector ".flash-notice", text: "Idea added", wait: 5
+    assert_equal "", find("textarea[aria-label='New idea']").value,
+                 "a submitted permanent composer must not retain a duplicate-ready draft"
+    assert_no_selector ".chip", wait: 0
+    assert_equal 0, page.evaluate_script("document.querySelector('[data-composer-target=\"files\"]').files.length"),
+                 "successful submission must release the staged upload transport"
+    assert_equal @project, find(".composer select[name='project']").value,
+                 "clearing the completed draft should retain the operator's project context"
 
     # The task folder + asset must exist on disk (real Commands::New ran).
     folder = stage_dir(@project, "1-inbox").children

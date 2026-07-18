@@ -109,21 +109,32 @@ origin also prints the Host-header/reverse-proxy warning.
   the dashboard partial raises. The index opts that refresh into Turbo morphing
   with scroll preservation so a live row arrival does not yank the operator
   back to the top; the composer form is `data-turbo-permanent` because
-  typed-but-unsent idea text and staged image chips live in browser state. No
-  polling JS, no SSE. The daemon strip on the grid uses
+  typed-but-unsent idea text and staged image chips live in browser state. Its
+  Stimulus controller rehydrates the staged-file index if Turbo reconnects the
+  permanent node, revokes removed preview URLs, and clears the submitted text,
+  chips, and upload transport only after a successful response; the selected
+  project remains as working context, so the next idea cannot accidentally
+  resubmit the completed draft. No polling JS, no SSE. The daemon strip uses
   `Hive::Daemon::StatusReport.safe_payload` directly instead of constructing a
   `Hive::Commands::Daemon` CLI object; the view also reads
   `StatusReport::BINARY_DRIFT_ACTIONABLE` for the Repair affordance, so CLI
   JSON and web drift handling share the same producer constants.
   A running supervised hivebox daemon intentionally has no separate platform
-  service unit; the strip therefore shows CLI repair guidance only when the
-  daemon is actually down, not merely when `service_installed` is false.
+  service unit; the strip therefore shows CLI recovery guidance only when the
+  daemon is actually down, not merely when `service_installed` is false. A
+  stopped, otherwise healthy daemon points to `hive daemon start --detach`;
+  a missing or drifted service points to `hive daemon install --force`.
 - **Task page** — state-driven actions (Retry stage for red
   `recover_review` / `recover_execute` / `error` rows; Approve only when the
   marker makes a forward move possible; Run <verb> only when the project daemon
   is disabled; Diff only when the worktree exists; Reject, Force approve, and
   Drop — the TUI Shift+X parity hard delete via `Commands::Drop`, no undo — as
-  described cards in a bottom Advanced section, confirm-gated), per-question
+  described cards in a bottom Advanced section, confirm-gated). Because every
+  browser stage run is still consumed by the single daemon dispatcher, an
+  enrolled task whose daemon is down shows an explicit auto-advance blocker
+  with `hive daemon start --detach` instead of offering a queue action that
+  cannot run. The liveness-only probe avoids the service/binary inspection cost
+  of the full dashboard envelope. The page also provides per-question
   brainstorm Q&A (the original idea shown above the form; answers go through
   BrainstormAnswerWriter; the forms are not `data-turbo-permanent`, and the
   answers controller snapshots/restores typed text plus caret across morphs,
@@ -299,7 +310,8 @@ button for real; clipboard paste via a synthetic DataTransfer event — the
 sanctioned JS exception), Turbo Stream live row arrival without reload, grid
 project-rail filtering with URL sync, composer project sync, and
 `+ Add project` routing, plus re-application after a live broadcast, grid
-scroll plus composer draft preservation across a live broadcast, both approve
+scroll plus composer draft preservation across a live broadcast, successful
+composer text/chip/file reset with project-context retention, both approve
 paths (typed refusal page + confirmed force), Q&A round replacement without a
 lingering old form, typed Q&A preservation across a pushed morph, log-tail
 follow/pause/resume with node-preserving frame morph reloads, artifact

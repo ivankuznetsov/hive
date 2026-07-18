@@ -53,6 +53,17 @@
     </div>
   <% end %>
 
+  <% if @daemon_enabled && !@daemon_running && @row["stage"].to_s != "9-done" %>
+    <div class="state-banner daemon-blocker">
+      <span class="status-dot status-dot-waiting"></span>
+      <span>
+        <strong>Auto-advance is paused.</strong>
+        The daemon is not running. Run <code>hive daemon start --detach</code>;
+        this task will continue automatically when it is ready.
+      </span>
+    </div>
+  <% end %>
+
   <div class="task-actions">
     <% if recovery_action?(@row) %>
       <%# The bot's Autofix, web-shaped: clears the failure marker (guarded

@@ -544,6 +544,16 @@ class TasksTest < ActionDispatch::IntegrationTest
     end
   end
 
+  test "daemon-enabled task gives a recovery command when auto-advance is down" do
+    get "/tasks/#{@project}/#{@slug}"
+
+    assert_response :success
+    assert_select ".daemon-blocker", text: /Auto-advance is paused/
+    assert_select ".daemon-blocker code", text: "hive daemon start --detach"
+    assert_select "form[action$='/run']", 0,
+                  "web must not offer a queue button that a stopped daemon cannot consume"
+  end
+
   test "all-answered brainstorm shows the waiting banner on a push-refreshed page" do
     folder = stage_dir(@project, "1-inbox").join(@slug)
     folder.join("brainstorm.md").write("### Q1. Scope?\n\n### A1.\nDone\n\n<!-- WAITING -->\n")

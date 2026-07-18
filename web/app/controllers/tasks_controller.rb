@@ -12,6 +12,7 @@ class TasksController < ApplicationController
     @questions = open_questions(@row)
     @worktree_exists = worktree_exists?(@row)
     @daemon_enabled = project_daemon_enabled?
+    @daemon_running = daemon_running?
   end
 
   # Per-question answers from the Q&A form (answers[n] => text), written
@@ -338,6 +339,17 @@ class TasksController < ApplicationController
   rescue StandardError => e
     Rails.logger.warn("project config unreadable for #{@project["name"]}: #{e.class}: #{e.message}")
     true
+  end
+
+  # Cheap liveness-only probe for the task-page blocker. The full status
+  # envelope also inspects service units and installed binary versions; that
+  # belongs on the dashboard, not on every pushed task-page morph.
+  def daemon_running?
+    require "hive/daemon/status_report"
+    Hive::Daemon::StatusReport.new.running_state[:running] == true
+  rescue StandardError => e
+    Rails.logger.warn("daemon liveness probe failed: #{e.class}: #{e.message}")
+    false
   end
 
   def latest_log

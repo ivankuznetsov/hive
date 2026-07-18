@@ -811,6 +811,62 @@ class CommandsStatusTest < Minitest::Test
     end
   end
 
+  def test_json_payload_emits_project_scoped_workflows_and_complete_card_contract
+    with_tmp_dir do |project_root|
+      hive_state = File.join(project_root, ".hive-state")
+      FileUtils.mkdir_p(hive_state)
+      File.write(File.join(hive_state, "config.yml"), "default_workflow: content\n")
+      folder = write_status_task(
+        hive_state, "1-inbox", "content-task-260718-abcd",
+        state_file: "idea.md", marker: "WAITING"
+      )
+      Hive::TaskMeta.write(
+        folder, id: 9, slug: File.basename(folder), display_name: "Content Task",
+        workflow: "content"
+      )
+
+      project = Hive::Commands::Status.new.json_payload([
+        { "name" => "content-project", "path" => project_root, "hive_state_path" => hive_state }
+      ]).fetch("projects").first
+      content = project.fetch("workflows").find { |workflow| workflow.fetch("id") == "content" }
+      card = project.fetch("tasks").first
+
+      assert_equal %w[1-inbox 2-research 3-outline 4-draft 5-critique 6-done],
+                   content.fetch("stages").map { |stage| stage.fetch("dir") }
+      %w[fingerprint card_digest dominant_state state_rank allowed_transitions blocked_reason
+         lock dependency queued_request retries operational_chips].each do |field|
+        assert card.key?(field), "missing card field #{field}"
+      end
+      assert_match(/\Atfp1:[0-9a-f]{64}\z/, card.fetch("fingerprint"))
+      assert_match(/\Acard1:[0-9a-f]{64}\z/, card.fetch("card_digest"))
+    end
+  end
+
+  def test_card_digest_changes_for_dependency_lock_queue_and_pr_facts
+    base = {
+      stage: "4-execute", slug: "probe", id: 1, display_name: "Probe", workflow: "coding",
+      depends_on: nil, blocked_by: nil, dependency_stage: nil, blocked: false,
+      admission_error: nil, folder: "/tmp/probe", state_file: "/tmp/probe/task.md",
+      worktree_path: nil, pr_url: nil, marker_name: :execute_complete, marker_attrs: {},
+      mtime: Time.at(1), folder_mtime: Time.at(1), claude_pid: nil, claude_pid_alive: nil,
+      live_task_lock: false, action_key: Hive::Schemas::TaskActionKind::READY_TO_OPEN_PR,
+      action_label: "Ready to open PR", suggested_command: nil, next_action: nil,
+      diagnostic: nil, allowed_transitions: [], queued_request: nil, operational_chips: []
+    }
+    status = Hive::Commands::Status.new
+    original = status.task_payload(base)
+
+    dependency = status.task_payload(base.merge(blocked: true, blocked_by: "base", dependency_stage: "2-work"))
+    locked = status.task_payload(base.merge(live_task_lock: true, task_lock_pid: 123))
+    queued = status.task_payload(base.merge(queued_request: { "request_id" => "request-1" }))
+    pr = status.task_payload(base.merge(pr_url: "https://github.com/acme/repo/pull/1"))
+
+    [ dependency, locked, queued, pr ].each do |changed|
+      refute_equal original.fetch("card_digest"), changed.fetch("card_digest")
+    end
+    assert_equal original.fetch("fingerprint"), locked.fetch("fingerprint")
+  end
+
   # The `same_task?` self-reference branch runs in production via `task: row`
   # but was asserted only at the resolver level. A task depending on its own
   # slug must surface as blocked with no blocked_by through the JSON path.
@@ -868,7 +924,7 @@ class CommandsStatusTest < Minitest::Test
         bad_slugs = bad.fetch("tasks").map { |t| t["slug"] }
         good_slugs = good.fetch("tasks").map { |t| t["slug"] }
         assert_includes bad_slugs, "bad-proj-task-260618-aaaa",
-                        "the bad-config project still reports tasks (gate falls back to default)"
+                        "the bad-config project still reports tasks while failing admission closed"
         assert_includes good_slugs, "good-proj-task-260618-bbbb",
                         "a healthy project must still report its tasks"
         held = bad.fetch("tasks").find { |task| task["slug"] == File.basename(bad_dependent) }

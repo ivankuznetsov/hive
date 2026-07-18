@@ -12,6 +12,9 @@ require "hive/archive_filter"
 require "hive/dependencies"
 require "hive/dependency_admission"
 require "hive/dependency_snapshot"
+require "hive/task_fingerprint"
+require "hive/blocked_reason"
+require "hive/daemon/dispatch_request_queue"
 require "hive/diagnostic_evidence"
 require "hive/diagnostic_helpers"
 require "hive/secret_patterns"
@@ -146,6 +149,7 @@ module Hive
         admission_context ||= build_admission_context(
           projects, exclude_archived: exclude_archived
         )
+        queue_index = pending_queue_index
         {
           "schema" => "hive-status",
           "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-status"),
@@ -157,7 +161,8 @@ module Hive
               project_count: projects.size,
               stages: stages,
               exclude_archived: exclude_archived,
-              admission_context: admission_context
+              admission_context: admission_context,
+              queue_index: queue_index
             )
           end
         }
@@ -172,13 +177,14 @@ module Hive
       # daemon.log) so the rest of the fleet keeps advancing. The fallback
       # entry still validates against the published hive-status schema.
       def project_payload_or_degraded(project, project_count:, stages: nil, exclude_archived: false,
-                                      admission_context: nil)
+                                      admission_context: nil, queue_index: nil)
         project_payload(
           project,
           project_count: project_count,
           stages: stages,
           exclude_archived: exclude_archived,
-          admission_context: admission_context
+          admission_context: admission_context,
+          queue_index: queue_index
         )
       rescue StandardError => e
         warn "hive: status: project #{project['name'].inspect} payload failed " \
@@ -195,7 +201,7 @@ module Hive
       end
 
       def project_payload(project, project_count:, stages: nil, exclude_archived: false,
-                          admission_context: nil)
+                          admission_context: nil, queue_index: nil)
         path = project["path"]
         hive_state = project["hive_state_path"]
         base = {
@@ -230,8 +236,12 @@ module Hive
             rows = annotate_dependencies(
               rows, project, admission_context: admission_context
             )
+            rows = annotate_queued_requests(rows, project, queue_index || {})
             rows = archive_rows(rows) if @archive
-            out = base.merge("tasks" => rows.map { |r| task_payload(r) })
+            out = base.merge(
+              "workflows" => workflow_payloads,
+              "tasks" => rows.map { |r| task_payload(r) }
+            )
             # Always emit `legacy_stage_dirs` (default empty array) so
             # consumers can branch on `.empty?` without a `key?` probe and
             # the schema's optional-but-never-undefined contract holds.
@@ -286,6 +296,13 @@ module Hive
       end
 
       def task_payload(row)
+        allowed_transitions = if row[:blocked] || row[:admission_error]
+          []
+        else
+          row[:allowed_transitions] || row[:task_action]&.allowed_transitions || []
+        end
+        dominant_state = dominant_state_for(row, allowed_transitions)
+        blocked_reason = blocked_reason_for(row)
         payload = {
           "stage" => row[:stage],
           "slug" => row[:slug],
@@ -351,7 +368,159 @@ module Hive
         if Hive::AgentLimit.held?(row[:marker_name], row[:marker_attrs])
           payload["held"] = Hive::AgentLimit.held_field(row[:marker_attrs])
         end
+        payload.merge!(
+          "fingerprint" => Hive::TaskFingerprint.for_row(row),
+          "dominant_state" => dominant_state,
+          "state_rank" => Hive::BlockedReason::STATE_RANK.fetch(dominant_state),
+          "allowed_transitions" => allowed_transitions,
+          "blocked_reason" => blocked_reason,
+          "lock" => lock_payload(row),
+          "dependency" => dependency_payload(row),
+          "queued_request" => row[:queued_request],
+          "retries" => retries_payload(row),
+          "operational_chips" => row[:operational_chips] || operational_chips(row)
+        )
+        payload["card_digest"] = Hive::TaskFingerprint.card_digest(payload)
         payload
+      end
+
+      def workflow_payloads
+        Hive::Workflows::Registry.all.map do |workflow|
+          {
+            "id" => workflow.id.to_s,
+            "dependency_gate_stage" => workflow.dependency_gate_stage,
+            "stages" => workflow.stages.map do |stage|
+              {
+                "name" => stage.name,
+                "dir" => stage.dir,
+                "index" => stage.index,
+                "kind" => stage.kind&.to_s
+              }
+            end
+          }
+        end.sort_by { |workflow| workflow["id"] }
+      end
+
+      def dominant_state_for(row, transitions)
+        action = row[:action_key].to_s
+        Hive::BlockedReason.dominant_state(
+          needs_input: action == Hive::Schemas::TaskActionKind::NEEDS_INPUT,
+          error: [ Hive::Schemas::TaskActionKind::ERROR,
+                  Hive::Schemas::TaskActionKind::ADMISSION_ERROR ].include?(action),
+          recovery: [ Hive::Schemas::TaskActionKind::RECOVER_EXECUTE,
+                      Hive::Schemas::TaskActionKind::RECOVER_REVIEW ].include?(action),
+          running: action == Hive::Schemas::TaskActionKind::AGENT_RUNNING || row[:live_task_lock],
+          queued: !row[:queued_request].nil?,
+          blocked: row[:blocked] == true,
+          ready: !transitions.empty? || action.start_with?("ready_")
+        )
+      end
+
+      def blocked_reason_for(row)
+        Hive::BlockedReason.for(
+          action_key: row[:action_key],
+          blocked_by: row[:blocked_by],
+          dependency_stage: row[:dependency_stage],
+          admission_error: row[:admission_error],
+          diagnostic: row[:diagnostic],
+          live_task_lock: row[:live_task_lock],
+          queued_request: row[:queued_request]
+        ).payload
+      end
+
+      def lock_payload(row)
+        {
+          "live" => row[:live_task_lock] == true,
+          "pid" => row[:task_lock_pid],
+          "process_start_time" => row[:task_lock_process_start_time],
+          "id" => row[:task_lock_id]
+        }
+      end
+
+      def dependency_payload(row)
+        {
+          "depends_on" => row[:depends_on],
+          "blocked_by" => row[:blocked_by],
+          "stage" => row[:dependency_stage],
+          "blocked" => row[:blocked] == true,
+          "admission_error" => row[:admission_error]&.to_h
+        }
+      end
+
+      def retries_payload(row)
+        attrs = row[:marker_attrs] || {}
+        {
+          "attempt" => attrs["attempt"] || attrs["pass"],
+          "retry_after" => attrs["retry_after"]
+        }
+      end
+
+      def operational_chips(row)
+        chips = []
+        chips << disk_pr_chip(row) if row[:pr_url]
+        reviews = disk_review_chip(row)
+        chips << reviews if reviews
+        chips << {
+          "kind" => "queue", "status" => "pending", "source" => "dispatch_request",
+          "observed_at" => row.dig(:queued_request, "created_at")
+        } if row[:queued_request]
+        chips.compact
+      end
+
+      def disk_pr_chip(row)
+        path = File.join(row[:folder].to_s, "pr.md")
+        {
+          "kind" => "pr",
+          "status" => row[:pr_url].to_s,
+          "source" => File.file?(path) ? "pr.md" : "marker",
+          "observed_at" => safe_file_time(path) || row[:mtime]&.utc&.iso8601(6)
+        }
+      end
+
+      def disk_review_chip(row)
+        files = Dir.glob(File.join(row[:folder].to_s, "reviews", "*.{md,json}"))
+          .select { |path| File.file?(path) }
+        return nil if files.empty?
+
+        latest = files.max_by { |path| File.mtime(path) }
+        {
+          "kind" => "review",
+          "status" => "#{files.size} artifact#{files.size == 1 ? '' : 's'}",
+          "source" => File.basename(latest),
+          "observed_at" => safe_file_time(latest)
+        }
+      rescue SystemCallError
+        nil
+      end
+
+      def safe_file_time(path)
+        File.mtime(path).utc.iso8601(6) if File.file?(path)
+      rescue SystemCallError
+        nil
+      end
+
+      def pending_queue_index
+        Hive::Daemon::DispatchRequestQueue.pending(
+          bad_handler: lambda do |path:, reason:|
+            warn "hive: status: ignored malformed dispatch request #{path} (#{reason})"
+          end
+        ).each_with_object({}) do |request, index|
+          index[[ request.project, request.slug ]] = {
+            "request_id" => request.request_id,
+            "verb" => request.argv[1],
+            "requestor" => request.requestor,
+            "trigger" => request.trigger,
+            "created_at" => request.created_at.utc.iso8601(6)
+          }
+        end
+      rescue StandardError => e
+        warn "hive: status: dispatch queue unavailable (#{e.class}: #{e.message}); continuing without queue chips"
+        {}
+      end
+
+      def annotate_queued_requests(rows, project, queue_index)
+        rows.each { |row| row[:queued_request] = queue_index[[ project["name"], row[:slug] ]] }
+        rows
       end
 
       # Number of unanswered `### Q{n}.` slots in a brainstorm task's
@@ -1173,6 +1342,7 @@ module Hive
             condition_gate: action.condition_gate&.to_h,
             condition_migration: action.migration_selection.to_h,
             condition_warning: action.condition_warning,
+            task_action: action,
             state_label: condition_state_label(row, action)
           )
         end

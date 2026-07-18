@@ -94,7 +94,18 @@ module Hive
         :task_lock_process_start_time,
         :task_lock_id,
         :implementation_identity,
-        :unanswered_questions
+        :unanswered_questions,
+        :fingerprint,
+        :card_digest,
+        :dominant_state,
+        :state_rank,
+        :allowed_transitions,
+        :blocked_reason,
+        :lock,
+        :dependency,
+        :queued_request,
+        :retries,
+        :operational_chips
       ) do
         # worktree_path defaults to nil so existing test factories that
         # predate PR #84 finding #8 can keep their existing Row.new
@@ -120,7 +131,11 @@ module Hive
                        implementation_identity: nil,
                        unanswered_questions: 0, depends_on: nil,
                        blocked_by: nil, dependency_stage: nil,
-                       blocked: false, admission_error: nil, held: nil, **rest)
+                       blocked: false, admission_error: nil, held: nil,
+                       fingerprint: nil, card_digest: nil, dominant_state: nil,
+                       state_rank: nil, allowed_transitions: [], blocked_reason: nil,
+                       lock: {}, dependency: {}, queued_request: nil, retries: {},
+                       operational_chips: [], **rest)
           super(id: id, display_name: display_name,
                 workflow: workflow,
                 depends_on: depends_on,
@@ -151,7 +166,19 @@ module Hive
                 task_lock_process_start_time: task_lock_process_start_time,
                 task_lock_id: task_lock_id,
                 implementation_identity: implementation_identity,
-                unanswered_questions: unanswered_questions, **rest)
+                unanswered_questions: unanswered_questions,
+                fingerprint: fingerprint,
+                card_digest: card_digest,
+                dominant_state: dominant_state,
+                state_rank: state_rank,
+                allowed_transitions: allowed_transitions,
+                blocked_reason: blocked_reason,
+                lock: lock,
+                dependency: dependency,
+                queued_request: queued_request,
+                retries: retries,
+                operational_chips: operational_chips,
+                **rest)
         end
       end
 
@@ -250,7 +277,18 @@ module Hive
           task_lock_process_start_time: payload["task_lock_process_start_time"],
           task_lock_id: payload["task_lock_id"],
           implementation_identity: payload["implementation_identity"],
-          unanswered_questions: payload["unanswered_questions"].to_i
+          unanswered_questions: payload["unanswered_questions"].to_i,
+          fingerprint: payload["fingerprint"],
+          card_digest: payload["card_digest"],
+          dominant_state: payload["dominant_state"],
+          state_rank: payload["state_rank"],
+          allowed_transitions: Array(payload["allowed_transitions"]).freeze,
+          blocked_reason: payload["blocked_reason"],
+          lock: payload["lock"] || {},
+          dependency: payload["dependency"] || {},
+          queued_request: payload["queued_request"],
+          retries: payload["retries"] || {},
+          operational_chips: Array(payload["operational_chips"]).freeze
         ).freeze
       end
 

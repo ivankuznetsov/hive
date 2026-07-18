@@ -599,19 +599,6 @@ module Hive
         sleep(seconds)
       end
 
-      def deadline_remaining(deadline)
-        deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      end
-
-      def effective_timeout(configured_timeout, deadline)
-        return configured_timeout unless deadline
-
-        remaining = deadline_remaining(deadline)
-        return remaining.floor if remaining <= 0
-
-        [ configured_timeout, remaining.floor ].min
-      end
-
       def delete_output!
         File.delete(output_path)
       rescue Errno::ENOENT

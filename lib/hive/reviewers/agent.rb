@@ -185,22 +185,6 @@ module Hive
         Hive::Reviewers.backoff_seconds_for(failed_attempt)
       end
 
-      # ce-review round-3 P1 #3 helpers. `deadline` is a monotonic
-      # timestamp; `nil` means "no caller-imposed deadline" and the
-      # adapter behaves identically to pre-deadline code.
-      def deadline_remaining(deadline)
-        deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
-      end
-
-      def effective_timeout(configured_timeout, deadline)
-        return configured_timeout unless deadline
-
-        remaining = deadline_remaining(deadline)
-        return remaining.floor if remaining <= 0
-
-        [ configured_timeout, remaining.floor ].min
-      end
-
       def backoff(seconds)
         sleep(seconds)
       end

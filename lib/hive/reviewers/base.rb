@@ -77,6 +77,24 @@ module Hive
       def ensure_reviews_dir!
         FileUtils.mkdir_p(File.dirname(output_path))
       end
+
+      private
+
+      # `deadline` is a monotonic timestamp. Nil preserves the adapter's
+      # configured timeout; otherwise no spawn may outlive the caller's
+      # remaining review-stage budget.
+      def deadline_remaining(deadline)
+        deadline - Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      end
+
+      def effective_timeout(configured_timeout, deadline)
+        return configured_timeout unless deadline
+
+        remaining = deadline_remaining(deadline)
+        return remaining.floor if remaining <= 0
+
+        [ configured_timeout, remaining.floor ].min
+      end
     end
   end
 end

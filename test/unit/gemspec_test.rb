@@ -27,6 +27,12 @@ class GemspecTest < Minitest::Test
     end
   end
 
+  def test_gem_package_includes_agent_skills_manifest
+    spec = Gem::Specification.load(GEMSPEC_PATH)
+
+    assert_includes spec.files, "config/agent-skills.yml"
+  end
+
   def test_gem_executables_exclude_bash_hv_launcher
     spec = Gem::Specification.load(GEMSPEC_PATH)
 

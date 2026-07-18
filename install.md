@@ -151,17 +151,30 @@ If the current directory is a git project and the user wants Hive enabled here, 
 
 During `hive init`, keep the user's prompt choices. The daemon prompt is per-project enrollment (`daemon.enabled`) only; the service autostart has already been installed globally. If init is non-interactive, Hive uses recommended defaults and enrolls the project. `hive doctor` runs AFTER `hive init` because it requires an initialized project root.
 
-## Optional Skills
+## Provision Agent Skills
 
-The Hive skills package is deferred to a v0.1.x follow-up (tracked in `wiki/gaps.md`). DO NOT RUN these commands until that package is published; treat the slugs below as the intended marketplace identifiers. If/when the package is published, offer the matching command:
+`hive doctor` is read-only and reports the enabled built-in capabilities for
+Claude, Codex, and Pi. If it finds unresolved managed rows, offer Hive's
+aggregate, consent-safe setup command instead of hand-installing packages:
 
 ```bash
-claude plugin install ivankuznetsov/hive-skills
-codex plugin install ivankuznetsov/hive-skills
-pi install ivankuznetsov/hive-skills
+"$hive_cmd" setup-agents
 ```
 
-If the package is unavailable, report: "Hive core installed; skills package coming soon at ivankuznetsov/hive-skills."
+The command prints the exact native package commands and Hive-owned files,
+prompts once, revalidates, executes independent operations, and verifies the
+result. Never answer the consent prompt on the user's behalf. In an explicitly
+unattended flow where the user already authorized mutation, use:
+
+```bash
+"$hive_cmd" setup-agents --yes --json
+```
+
+Hive manages the declared Compound Engineering, llm-wiki, and Claude PR Review
+Toolkit packages. It does not install agent CLIs, authenticate providers,
+replace custom skills, overwrite a user-owned Codex source, or replace a
+user-authored Claude `/plan` command. Report conflicts with the remediation
+printed by doctor/setup.
 
 ## Final Report
 
@@ -174,4 +187,4 @@ Report:
 - whether `hive init` was run
 - missing runtime dependencies from `hive doctor`
 - `qmd --version` output, or the reason QMD install/repair was skipped
-- whether the optional skills package was installed or skipped
+- whether managed agent skills were healthy, provisioned with consent, unavailable, or left conflicted

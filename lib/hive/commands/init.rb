@@ -16,7 +16,7 @@ require "hive/workflows/loader"
 require "hive/llm_wiki_bootstrap"
 require "hive/commands/workflow"
 require "hive/commands/init/prompts"
-require "hive/commands/doctor"
+require "hive/commands/setup_agents"
 require "hive/commands/daemon/service_installer"
 require "hive/invoked_binary"
 
@@ -76,7 +76,10 @@ module Hive
 
       def initialize(project_path, force: false, json: false, prompts: nil,
                      workflow: nil, new_workflow: nil, refactor_patrol: nil,
-                     workflow_input: $stdin, workflow_output: $stderr)
+                     workflow_input: $stdin, workflow_output: $stderr,
+                     provisioning_input: $stdin, provisioning_output: $stdout,
+                     provisioning_error: $stderr, preflight_inspector: nil,
+                     setup_agents_factory: nil)
         @project_path = File.expand_path(project_path)
         @force = force
         @json = json
@@ -88,6 +91,13 @@ module Hive
         @refactor_patrol = refactor_patrol
         @workflow_input = workflow_input
         @workflow_output = workflow_output
+        @provisioning_input = provisioning_input
+        @provisioning_output = provisioning_output
+        @provisioning_error = provisioning_error
+        @preflight_inspector = preflight_inspector
+        @setup_agents_factory = setup_agents_factory || lambda do |**kwargs|
+          Hive::Commands::SetupAgents.new(**kwargs)
+        end
         # Optional Prompts instance for testability. Tests inject a
         # pre-fed StringIO-backed instance to drive the interactive flow
         # without touching $stdin. Production keeps this nil so the
@@ -754,10 +764,10 @@ module Hive
         "#{worktree} && #{branch}"
       end
 
-      # Non-fatal skill preflight: after init succeeds, run the doctor
-      # against the freshly-written config and emit stderr warnings for
-      # any `:missing` rows. Init's exit code is unaffected — install
-      # gaps surface but never block bootstrap.
+      # Non-transactional post-init aid. The shared inspector diagnoses the
+      # freshly written effective config. A TTY may delegate accepted repair
+      # to SetupAgents with recorded consent; JSON/non-TTY flows only report
+      # remediation, and setup failures never roll back project creation.
       #
       # Rescue scope: `StandardError` for verifier bugs (with a
       # bug-report hint in the warning so silent swallow is mitigated).
@@ -766,33 +776,66 @@ module Hive
       # `SystemExit` propagate (Ctrl-C honored as user intent).
       def run_init_preflight!
         cfg = Hive::Config.load(@project_path)
-        doctor = Hive::Commands::Doctor.new(
+        inspector = @preflight_inspector || Hive::AgentSkills::Inspector.new(
           config: cfg,
-          project_root: @project_path,
-          output: StringIO.new
+          project_root: @project_path
         )
-        exit_code = doctor.call
-        if exit_code == Hive::Commands::Doctor::EXIT_CONFIG_ERROR
-          # Doctor caught a config issue internally; @rows is nil. Surface a
-          # pointer rather than going silent.
-          write_warn("hive: doctor pre-flight — config issue detected; run `hive doctor` for details")
+        rows = inspector.inspect
+        actionable = rows.select do |row|
+          row.managed && %w[missing stale incompatible conflicting].include?(row.health)
+        end
+        return if actionable.empty?
+
+        unless interactive_provisioning?
+          emit_preflight_warnings(actionable)
           return
         end
 
-        missing = Array(doctor.rows).select { |r| r[:status] == "missing" }
-        return if missing.empty?
+        @provisioning_error.print "Provision unresolved agent skills now? [y/N]: "
+        @provisioning_error.flush
+        answer = @provisioning_input.gets.to_s.strip.downcase
+        unless %w[y yes].include?(answer)
+          emit_preflight_warnings(actionable)
+          return
+        end
 
-        emit_preflight_warnings(missing)
+        setup = @setup_agents_factory.call(
+          config: cfg,
+          project_root: @project_path,
+          consent_provenance: "init_interactive",
+          input: @provisioning_input,
+          output: @provisioning_output,
+          error: @provisioning_error
+        )
+        exit_code = setup.call
+        return if exit_code.zero?
+
+        @provisioning_error.puts "hive: optional agent skill setup finished with exit #{exit_code}; " \
+                                 "the project remains initialized. Re-run `hive setup-agents`."
+      rescue Hive::ConfigError => e
+        @provisioning_error.puts "hive: doctor pre-flight — config issue detected (#{e.message}); " \
+                                 "run `hive doctor` for details"
       rescue StandardError => e
         emit_preflight_bug(e)
       end
 
-      def emit_preflight_warnings(missing)
-        write_warn("hive: doctor pre-flight — found #{missing.size} issue(s):")
-        missing.each do |r|
-          write_warn("  [#{r[:label]}/#{r[:agent]}] #{r[:message]}")
+      def interactive_provisioning?
+        return false if @json
+        @provisioning_input.respond_to?(:tty?) && @provisioning_input.tty?
+      rescue IOError
+        false
+      end
+
+      def emit_preflight_warnings(rows)
+        @provisioning_error.puts "hive: doctor pre-flight — found #{rows.size} issue(s):"
+        rows.each do |row|
+          label = row.surfaces.join(",")
+          @provisioning_error.puts "  [#{label}/#{row.agent}] #{row.explanation}"
+          @provisioning_error.puts "    repair: #{row.remediation}" if row.remediation
         end
-        write_warn("  See `hive doctor` for details.")
+        @provisioning_error.puts "  See `hive doctor` for details or run `hive setup-agents`."
+      rescue Errno::EPIPE
+        nil
       end
 
       def emit_preflight_bug(error)

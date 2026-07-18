@@ -30,9 +30,27 @@ require "hive/commands/daemon"
 require "hive/commands/bot"
 require "hive/commands/metrics"
 require "hive/commands/setup"
+require "hive/commands/setup_agents"
 
 class HiveCliTest < Minitest::Test
   include HiveTestHelper
+
+  def test_setup_agents_help_exposes_consent_json_and_filters
+    out, _err = capture_io { Hive::CLI.start([ "help", "setup-agents" ]) }
+
+    assert_includes out, "--yes"
+    assert_includes out, "--json"
+    assert_includes out, "--agent"
+    assert_includes out, "--skill"
+  end
+
+  def test_doctor_help_advertises_v2_read_only_health_contract
+    out, _err = capture_io { Hive::CLI.start([ "help", "doctor" ]) }
+
+    assert_includes out, "hive-doctor.v2"
+    assert_includes out, "setup-agents"
+    assert_includes out, "never installs"
+  end
 
   CommandDouble = Struct.new(:return_value, :calls) do
     def call
@@ -152,6 +170,33 @@ class HiveCliTest < Minitest::Test
         assert_equal 65, status
         assert_equal [ Dir.pwd ], loaded
         assert_equal({ config: { "ok" => true }, project_root: Dir.pwd, json: true }, calls.first.fetch(:kwargs))
+      end
+    end
+  end
+
+  def test_setup_agents_loads_project_config_forwards_filters_and_exits
+    loaded = []
+    with_replaced_singleton_method(Hive::Config, :load, lambda { |path|
+      loaded << path
+      { "ok" => true }
+    }) do
+      with_command_new_stub(Hive::Commands::SetupAgents, return_value: 1) do |calls|
+        _out, _err, status = with_captured_exit do
+          Hive::CLI.start([
+            "setup-agents", "--yes", "--json",
+            "--agent", "claude", "codex", "--skill", "ce-brainstorm"
+          ])
+        end
+
+        assert_equal 1, status
+        assert_equal [ Dir.pwd ], loaded
+        assert_equal(
+          {
+            config: { "ok" => true }, project_root: Dir.pwd,
+            yes: true, json: true, agents: %w[claude codex], skills: [ "ce-brainstorm" ]
+          },
+          calls.first.fetch(:kwargs)
+        )
       end
     end
   end

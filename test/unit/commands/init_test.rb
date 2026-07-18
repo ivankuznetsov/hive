@@ -139,23 +139,23 @@ class HiveCommandsInitTest < Minitest::Test
     end
   end
 
-  def test_run_init_preflight_warns_when_doctor_reports_config_error
-    cmd = command
-    warnings = []
-    fake_doctor = Object.new
-    fake_doctor.define_singleton_method(:call) { Hive::Commands::Doctor::EXIT_CONFIG_ERROR }
+  def test_run_init_preflight_warns_when_inspector_reports_config_error
+    error = StringIO.new
+    cmd = Hive::Commands::Init.new("/tmp/project", provisioning_error: error)
+    fake_inspector = Object.new
+    fake_inspector.define_singleton_method(:inspect) { raise Hive::ConfigError, "broken config" }
     original_load = Hive::Config.singleton_class.instance_method(:load)
-    original_doctor_new = Hive::Commands::Doctor.singleton_class.instance_method(:new)
+    original_inspector_new = Hive::AgentSkills::Inspector.singleton_class.instance_method(:new)
     Hive::Config.define_singleton_method(:load) { |_path| {} }
-    Hive::Commands::Doctor.define_singleton_method(:new) { |**_kwargs| fake_doctor }
-    cmd.define_singleton_method(:write_warn) { |line| warnings << line }
+    Hive::AgentSkills::Inspector.define_singleton_method(:new) { |**_kwargs| fake_inspector }
 
     cmd.send(:run_init_preflight!)
 
-    assert_equal [ "hive: doctor pre-flight — config issue detected; run `hive doctor` for details" ], warnings
+    assert_match(/doctor pre-flight — config issue detected \(broken config\)/, error.string)
+    assert_match(/run `hive doctor` for details/, error.string)
   ensure
     Hive::Config.singleton_class.define_method(:load, original_load) if original_load
-    Hive::Commands::Doctor.singleton_class.define_method(:new, original_doctor_new) if original_doctor_new
+    Hive::AgentSkills::Inspector.singleton_class.define_method(:new, original_inspector_new) if original_inspector_new
   end
 
   def test_write_warn_swallows_epipe

@@ -68,6 +68,29 @@ Cause: the selected finding ID does not exist in the current review file. Fix: r
 
 Cause: `accept-finding` or `reject-finding` got no selector. Fix: pass IDs, `--severity <name>`, or `--all`.
 
+### `hive doctor` reports a missing or stale managed skill
+
+Doctor never installs anything. Run `hive setup-agents` to see one aggregate
+preview and confirm once, or use `hive setup-agents --yes --json` only in an
+already-authorized unattended flow. You can scope repair with
+`--agent claude --skill ce-brainstorm`; the exact command is printed in the
+doctor row.
+
+### `hive doctor` reports `conflicting`
+
+Hive found a user-owned alias, marketplace/plugin source, or a higher-priority
+skill path that would win runtime resolution. Setup intentionally leaves it
+untouched. Follow the row's manual remediation: remove or rename the shadow if
+you own it, or update the Hive config to invoke your custom skill. Do not
+overwrite the reported file merely to make setup green.
+
+### An agent is `unavailable`
+
+Hive does not install or authenticate agent CLIs. Unavailable rows are visible,
+non-blocking skips; install/log in to that agent separately and rerun setup.
+Failures for one available agent do not roll back successful independent
+operations for another, and a rerun schedules only unresolved work.
+
 ### Stale `.lock`
 
 Cause: a prior run left a lock file. Fix: re-run the command; Hive clears stale locks when the recorded PID is dead and the PID-reuse check passes.

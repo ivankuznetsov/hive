@@ -126,6 +126,17 @@ The normal Hive loop is simple: the daemon advances ready tasks, and the TUI is 
    hive init .
    ```
 
+   Interactive init offers to provision any unresolved built-in agent skills.
+   You can also inspect and provision them explicitly:
+
+   ```bash
+   hive doctor
+   hive setup-agents          # preview, then confirm once
+   ```
+
+   For unattended setup use `hive setup-agents --yes`; add `--json` for the
+   versioned automation envelope. Doctor is always read-only.
+
    During `hive init`, choose the Claude launch mode and permission mode for the project. `tmux` is the default: Claude-backed stages run in attachable tmux sessions using your logged-in Claude session. With the upcoming Anthropic pricing changes this is the mode we now suggest for most users, but treat it as an **experimental workflow** for now — expect some rough edges. The recommended permission default is `bypassPermissions` so local dogfood runs do not pause on file-operation approvals; choose `auto` when you want Claude Code auto-mode rules. Pick `headless` for service-only hosts or CI-style runs that should use normal non-interactive CLI spawns.
 
    When `hive init` asks about the daemon, keep the project enabled. The service itself is already global autostart infrastructure; this prompt only controls whether this project is picked up. The daemon is the worker: it polls Hive, starts the next stage when a task is ready, and stops at human-input or recovery gates.
@@ -282,7 +293,7 @@ The TUI is the recommended human interface and an agent-driven CLI is the recomm
 | Review findings | `hive findings`, `hive accept-finding`, `hive reject-finding` | Inspect GFM-checkbox findings from the latest review pass and tick which ones should feed the next fix pass. See [docs/cli.md#findings-triage](docs/cli.md#findings-triage). |
 | Patrol | `hive patrol` | Run one opt-in repository patrol cycle: map feature slices, review them, validate fixes, and open PRs for passed fixes only. See [docs/cli.md#patrol](docs/cli.md#patrol). |
 | Daemon | `hive daemon install/enable/start/status/tail/stop/disable` | Manage the global daemon service plus per-project enrollment. The service polls `hive status --json` and dispatches workflow verbs for enrolled projects. Read [wiki/operating.md](wiki/operating.md) before going live. See [docs/cli.md#daemon](docs/cli.md#daemon). |
-| Diagnostics | `hive status`, `hive doctor`, `hive rebase-status`, `hive markers clear`, `hive metrics rollback-rate` | Inspect task state, validate configured stage/reviewer skills, check whether the next run would auto-rebase, clear a recovery marker by name, or report fix-agent rollback rate. See [docs/cli.md#diagnostics](docs/cli.md#diagnostics). |
+| Diagnostics & agent setup | `hive status`, `hive doctor`, `hive setup-agents`, `hive rebase-status`, `hive markers clear`, `hive metrics rollback-rate` | Inspect task state, diagnose configured stage/reviewer skills without writes, consent to provision managed built-ins, check whether the next run would auto-rebase, clear a recovery marker, or report fix-agent rollback rate. See [docs/cli.md#diagnostics](docs/cli.md#diagnostics). |
 | Registry & lifecycle | `hive init`, `hive update`, `hive uninstall`, `hive forget`, `hive prune`, `hive migrate`, `hive tree` | Attach Hive to a project, upgrade to the latest release, remove the installed CLI, prune the global registry, rename old stage folders, or print the Thor command tree. See [docs/cli.md#lower-level-surface](docs/cli.md#lower-level-surface). |
 
 Full per-command reference, every flag, every envelope field, and every exit code lives in [docs/cli.md](docs/cli.md).

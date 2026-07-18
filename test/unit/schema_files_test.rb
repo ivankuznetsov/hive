@@ -6,6 +6,7 @@ require "hive/commands/approve"
 require "hive/commands/bot"
 require "hive/commands/daemon"
 require "hive/commands/drop"
+require "hive/commands/doctor"
 require "hive/commands/forget"
 require "hive/commands/init"
 require "hive/commands/patrol"
@@ -15,6 +16,7 @@ require "hive/commands/stage_action"
 require "hive/commands/status"
 require "hive/patrol/candidate_selector"
 require "hive/patrol/reviewer"
+require "hive/commands/setup_agents"
 require "hive/tui/snapshot"
 require "hive/daemon/dispatch_request_queue"
 require "hive/daemon/dispatch_result_queue"
@@ -27,6 +29,52 @@ require "tmpdir"
 #   3. Pin the same required-key set the producer code emits, so a producer
 #      change without a schema update fails at test time.
 class SchemaFilesTest < Minitest::Test
+  def test_doctor_v1_schema_remains_available_and_v2_payload_validates
+    assert File.exist?(Hive::Schemas.schema_path("hive-doctor", version: 1))
+    target = Hive::AgentSkills::Target.new(
+      surfaces: [ "brainstorm" ], kind: "stage", agent: "claude",
+      configured_skill: "/ce-brainstorm", invocation: "/ce-brainstorm",
+      capability_id: "ce-brainstorm", package_id: "compound-engineering", managed: true
+    )
+    health = Hive::AgentSkills::Inspection.new(
+      target: target, expected: {}, native: { "available" => false }, resolution: {},
+      health: "unavailable", severity: "warning", explanation: "not installed",
+      remediation: "hive setup-agents --agent claude --skill ce-brainstorm"
+    )
+    inspector = Struct.new(:rows) { def inspect = rows }.new([ health ])
+    output = StringIO.new
+    Hive::Commands::Doctor.new(
+      config: { "claude" => { "mode" => "headless" } },
+      project_root: nil,
+      json: true,
+      output: output,
+      inspector: inspector
+    ).call
+    schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-doctor"))))
+
+    assert_empty schemer.validate(JSON.parse(output.string)).to_a
+  end
+
+  def test_setup_agents_schema_file_accepts_command_payload
+    path = Hive::Schemas.schema_path("hive-setup-agents")
+    assert File.exist?(path), "schema file missing: #{path}"
+    schemer = JSONSchemer.schema(JSON.parse(File.read(path)))
+    plan = Hive::AgentSkills::ProvisioningPlan.new(
+      inspections: [], operations: [], conflicts: [],
+      filters: { "agents" => [], "skills" => [] }, fingerprint: "a" * 64
+    )
+    result = Hive::AgentSkills::ProvisioningResult.new(
+      preview: plan,
+      consent: { "granted" => true, "provenance" => "not_required" },
+      operation_results: [], final_health: [], exit_code: 0, classification: "no_op"
+    )
+    payload = Hive::Commands::SetupAgents.new(
+      config: Hive::Config::DEFAULTS, project_root: Dir.pwd
+    ).send(:payload, result)
+
+    assert_empty schemer.validate(payload).to_a
+  end
+
   def test_honeycomb_contract_schema_files_are_valid_and_versioned
     %w[honeycomb-manifest.v1.json honeycomb-catalog.v1.json].each do |name|
       path = File.join(Hive::Schemas.schema_dir, name)

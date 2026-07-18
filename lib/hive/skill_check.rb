@@ -27,6 +27,7 @@ module Hive
     #   /name           -> Invocation.new(plugin: nil, name: "name")
     #   /plugin:name    -> Invocation.new(plugin: "plugin", name: "name")
     Invocation = Struct.new(:plugin, :name, keyword_init: true)
+    Resolution = Data.define(:status, :path, :message, :candidates, :parse_errors)
 
     # Raises ArgumentError on malformed input so callers can surface the
     # error rather than silently treating garbage as a valid skill.
@@ -94,27 +95,40 @@ module Hive
       # has no explicit `<plugin>:` prefix. The fallback matches that
       # runtime behaviour.
       def verify(invocation, project_root: nil)
-        inv = Hive::SkillCheck.parse(invocation)
-        home = ENV["HOME"] || Dir.home
-        candidates = build_candidates(inv, home: home, project_root: project_root)
-        path = Hive::SkillCheck.first_existing(candidates)
-        return [ :present, path ] if path
-
-        [ :missing, install_hint(inv) ]
-      rescue ArgumentError => e
-        [ :missing, "claude: #{e.message}" ]
+        resolution = resolve(invocation, project_root: project_root)
+        [ resolution.status, resolution.message ]
       end
 
-      def build_candidates(inv, home:, project_root:)
+      def resolve(invocation, project_root: nil, environment: ENV)
+        inv = Hive::SkillCheck.parse(invocation)
+        home = environment["HOME"] || Dir.home
+        config_dir = environment["CLAUDE_CONFIG_DIR"].to_s
+        config_dir = File.join(home, ".claude") if config_dir.empty?
+        config_dir = File.expand_path(config_dir)
+        candidates = build_candidates(inv, config_dir: config_dir, project_root: project_root)
+        path = Hive::SkillCheck.first_existing(candidates)
+        return Resolution.new(status: :present, path: path, message: path,
+                              candidates: candidates.freeze, parse_errors: [].freeze) if path
+
+        message = install_hint(inv)
+        Resolution.new(status: :missing, path: nil, message: message,
+                       candidates: candidates.freeze, parse_errors: [].freeze)
+      rescue ArgumentError => e
+        message = "claude: #{e.message}"
+        Resolution.new(status: :missing, path: nil, message: message,
+                       candidates: [].freeze, parse_errors: [].freeze)
+      end
+
+      def build_candidates(inv, config_dir:, project_root:)
         if inv.plugin
           plugin = Hive::SkillCheck.glob_escape(inv.plugin)
           name = Hive::SkillCheck.glob_escape(inv.name)
           # Cache layout: <marketplace>/<plugin>/<version>/skills/<name>/SKILL.md
-          cache_skill_glob = File.join(home, ".claude/plugins/cache/*", plugin, "*", "skills", name, "SKILL.md")
-          cache_cmd_glob   = File.join(home, ".claude/plugins/cache/*", plugin, "*", "commands", "#{name}.md")
+          cache_skill_glob = File.join(config_dir, "plugins/cache/*", plugin, "*", "skills", name, "SKILL.md")
+          cache_cmd_glob   = File.join(config_dir, "plugins/cache/*", plugin, "*", "commands", "#{name}.md")
           # Marketplace source layout: <marketplace>/plugins/<plugin>/skills/<name>/SKILL.md
-          mp_skill_glob = File.join(home, ".claude/plugins/marketplaces/*/plugins", plugin, "skills", name, "SKILL.md")
-          mp_cmd_glob   = File.join(home, ".claude/plugins/marketplaces/*/plugins", plugin, "commands", "#{name}.md")
+          mp_skill_glob = File.join(config_dir, "plugins/marketplaces/*/plugins", plugin, "skills", name, "SKILL.md")
+          mp_cmd_glob   = File.join(config_dir, "plugins/marketplaces/*/plugins", plugin, "commands", "#{name}.md")
           (Dir[cache_skill_glob] + Dir[cache_cmd_glob] + Dir[mp_skill_glob] + Dir[mp_cmd_glob])
         else
           name = Hive::SkillCheck.glob_escape(inv.name)
@@ -123,15 +137,15 @@ module Hive
             paths << File.join(project_root, ".claude/commands/#{inv.name}.md")
             paths << File.join(project_root, ".claude/skills/#{inv.name}/SKILL.md")
           end
-          paths << File.join(home, ".claude/commands/#{inv.name}.md")
-          paths << File.join(home, ".claude/skills/#{inv.name}/SKILL.md")
+          paths << File.join(config_dir, "commands/#{inv.name}.md")
+          paths << File.join(config_dir, "skills/#{inv.name}/SKILL.md")
           # Plugin-fallback for bare invocations: claude's runtime
           # resolves `/foo` against any installed plugin's skill named
           # `foo` (in addition to user-level commands/skills).
-          paths.concat(Dir[File.join(home, ".claude/plugins/cache/*/*/*/skills", name, "SKILL.md")])
-          paths.concat(Dir[File.join(home, ".claude/plugins/cache/*/*/*/commands", "#{name}.md")])
-          paths.concat(Dir[File.join(home, ".claude/plugins/marketplaces/*/plugins/*/skills", name, "SKILL.md")])
-          paths.concat(Dir[File.join(home, ".claude/plugins/marketplaces/*/plugins/*/commands", "#{name}.md")])
+          paths.concat(Dir[File.join(config_dir, "plugins/cache/*/*/*/skills", name, "SKILL.md")])
+          paths.concat(Dir[File.join(config_dir, "plugins/cache/*/*/*/commands", "#{name}.md")])
+          paths.concat(Dir[File.join(config_dir, "plugins/marketplaces/*/plugins/*/skills", name, "SKILL.md")])
+          paths.concat(Dir[File.join(config_dir, "plugins/marketplaces/*/plugins/*/commands", "#{name}.md")])
           paths
         end
       end
@@ -166,24 +180,37 @@ module Hive
       #     2. ~/.codex/skills/.system/<name>/SKILL.md
       #     3. ~/.codex/plugins/cache/*/*/*/skills/<name>/SKILL.md (plugin fallback)
       def verify(invocation, project_root: nil)
-        inv = Hive::SkillCheck.parse(invocation)
-        home = ENV["HOME"] || Dir.home
-        candidates = build_candidates(inv, home: home, project_root: project_root)
-        path = Hive::SkillCheck.first_existing(candidates)
-        return [ :present, path ] if path
-
-        [ :missing, install_hint(inv) ]
-      rescue ArgumentError => e
-        [ :missing, "codex: #{e.message}" ]
+        resolution = resolve(invocation, project_root: project_root)
+        [ resolution.status, resolution.message ]
       end
 
-      def build_candidates(inv, home:, project_root:)
+      def resolve(invocation, project_root: nil, environment: ENV)
+        inv = Hive::SkillCheck.parse(invocation)
+        home = environment["HOME"] || Dir.home
+        config_dir = environment["CODEX_HOME"].to_s
+        config_dir = File.join(home, ".codex") if config_dir.empty?
+        config_dir = File.expand_path(config_dir)
+        candidates = build_candidates(inv, config_dir: config_dir, project_root: project_root)
+        path = Hive::SkillCheck.first_existing(candidates)
+        return Resolution.new(status: :present, path: path, message: path,
+                              candidates: candidates.freeze, parse_errors: [].freeze) if path
+
+        message = install_hint(inv)
+        Resolution.new(status: :missing, path: nil, message: message,
+                       candidates: candidates.freeze, parse_errors: [].freeze)
+      rescue ArgumentError => e
+        message = "codex: #{e.message}"
+        Resolution.new(status: :missing, path: nil, message: message,
+                       candidates: [].freeze, parse_errors: [].freeze)
+      end
+
+      def build_candidates(inv, config_dir:, project_root:)
         if inv.plugin
           plugin = Hive::SkillCheck.glob_escape(inv.plugin)
           name = Hive::SkillCheck.glob_escape(inv.name)
-          # Cache layout produced by `codex plugin install`:
+          # Cache layout produced by `codex plugin add`:
           # ~/.codex/plugins/cache/<owner>-<marketplace>/<plugin>/<version>/skills/<name>/SKILL.md
-          glob = File.join(home, ".codex/plugins/cache/*", plugin, "*", "skills", name, "SKILL.md")
+          glob = File.join(config_dir, "plugins/cache/*", plugin, "*", "skills", name, "SKILL.md")
           Dir[glob]
         else
           name = Hive::SkillCheck.glob_escape(inv.name)
@@ -191,12 +218,12 @@ module Hive
           if project_root
             paths << File.join(project_root, ".codex/skills/#{inv.name}/SKILL.md")
           end
-          paths << File.join(home, ".codex/skills/#{inv.name}/SKILL.md")
-          paths << File.join(home, ".codex/skills/.system/#{inv.name}/SKILL.md")
+          paths << File.join(config_dir, "skills/#{inv.name}/SKILL.md")
+          paths << File.join(config_dir, "skills/.system/#{inv.name}/SKILL.md")
           # Plugin fallback: codex resolves `/foo` against any installed
           # plugin's skill named `foo` in addition to user-level
           # ~/.codex/skills/. Mirrors claude's behaviour.
-          paths.concat(Dir[File.join(home, ".codex/plugins/cache/*/*/*/skills", name, "SKILL.md")])
+          paths.concat(Dir[File.join(config_dir, "plugins/cache/*/*/*/skills", name, "SKILL.md")])
           paths
         end
       end
@@ -205,7 +232,7 @@ module Hive
         if inv.plugin
           "codex: /#{inv.plugin}:#{inv.name} not found under " \
             "~/.codex/plugins/cache/*/#{inv.plugin}/*/skills/. " \
-            "Install via `codex plugin install <marketplace>` for the marketplace " \
+            "Install via `codex plugin add <plugin>@<marketplace>` for the marketplace " \
             "that ships #{inv.plugin}."
         else
           "codex: /#{inv.name} not found under ~/.codex/skills/, ~/.codex/skills/.system/, " \
@@ -241,30 +268,45 @@ module Hive
       # message naming the form mismatch — pi has no way to resolve
       # such an invocation as a skill.
       def verify(invocation, project_root: nil)
-        inv = Hive::SkillCheck.parse(invocation)
-        unless inv.plugin == "skill"
-          return [ :not_applicable,
-                   "pi resolves skills as `/skill:<name>`, but got " \
-                     "#{invocation.inspect}. The invocation form is wrong for pi's " \
-                     "skill resolver — either change the agent profile's " \
-                     "`skill_syntax_format` to `/skill:%{skill}` or install a pi " \
-                     "extension that registers `#{invocation}` as a slash command." ]
-        end
-
-        home = ENV["HOME"] || Dir.home
-        parse_errors = []
-        candidates = build_candidates(inv, home: home, project_root: project_root, parse_errors: parse_errors)
-        path = Hive::SkillCheck.first_existing(candidates)
-        return [ :present, path ] if path
-
-        [ :missing, install_hint(inv, parse_errors: parse_errors) ]
-      rescue ArgumentError => e
-        [ :missing, "pi: #{e.message}" ]
+        resolution = resolve(invocation, project_root: project_root)
+        [ resolution.status, resolution.message ]
       end
 
-      def build_candidates(inv, home:, project_root:, parse_errors: [])
+      def resolve(invocation, project_root: nil, environment: ENV)
+        inv = Hive::SkillCheck.parse(invocation)
+        unless inv.plugin == "skill"
+          message = "pi resolves skills as `/skill:<name>`, but got " \
+                    "#{invocation.inspect}. The invocation form is wrong for pi's " \
+                    "skill resolver — either change the agent profile's " \
+                    "`skill_syntax_format` to `/skill:%{skill}` or install a pi " \
+                    "extension that registers `#{invocation}` as a slash command."
+          return Resolution.new(status: :not_applicable, path: nil, message: message,
+                                candidates: [].freeze, parse_errors: [].freeze)
+        end
+
+        home = environment["HOME"] || Dir.home
+        agent_dir = environment["PI_CODING_AGENT_DIR"].to_s
+        agent_dir = File.join(home, ".pi", "agent") if agent_dir.empty?
+        agent_dir = File.expand_path(agent_dir)
+        parse_errors = []
+        candidates = build_candidates(inv, home: home, agent_dir: agent_dir,
+                                      project_root: project_root, parse_errors: parse_errors)
+        path = Hive::SkillCheck.first_existing(candidates)
+        return Resolution.new(status: :present, path: path, message: path,
+                              candidates: candidates.freeze, parse_errors: parse_errors.freeze) if path
+
+        message = install_hint(inv, parse_errors: parse_errors)
+        Resolution.new(status: :missing, path: nil, message: message,
+                       candidates: candidates.freeze, parse_errors: parse_errors.freeze)
+      rescue ArgumentError => e
+        message = "pi: #{e.message}"
+        Resolution.new(status: :missing, path: nil, message: message,
+                       candidates: [].freeze, parse_errors: [].freeze)
+      end
+
+      def build_candidates(inv, home:, agent_dir: File.join(home, ".pi", "agent"), project_root:, parse_errors: [])
         paths = []
-        paths.concat(skill_location_candidates(File.join(home, ".pi/agent/skills"), inv.name, include_root_md: true))
+        paths.concat(skill_location_candidates(File.join(agent_dir, "skills"), inv.name, include_root_md: true))
         paths.concat(skill_location_candidates(File.join(home, ".agents/skills"), inv.name, include_root_md: false))
 
         if project_root
@@ -275,7 +317,7 @@ module Hive
           end
         end
 
-        settings_paths = [ File.join(home, ".pi/agent/settings.json") ]
+        settings_paths = [ File.join(agent_dir, "settings.json") ]
         if project_root
           settings_paths << File.join(File.expand_path(project_root), ".pi/settings.json")
         end
@@ -286,7 +328,9 @@ module Hive
           paths.concat(settings_skill_candidates(settings, settings_path, home, inv.name, project_root: project_root))
         end
 
-        paths.concat(package_candidates(home: home, project_root: project_root, settings_paths: settings_paths, name: inv.name, parse_errors: parse_errors))
+        paths.concat(package_candidates(home: home, agent_dir: agent_dir, project_root: project_root,
+                                        settings_paths: settings_paths, name: inv.name,
+                                        parse_errors: parse_errors))
         paths.compact.uniq
       end
 
@@ -331,11 +375,11 @@ module Hive
         dirs
       end
 
-      def package_candidates(home:, project_root:, settings_paths:, name:, parse_errors: [])
+      def package_candidates(home:, agent_dir: File.join(home, ".pi", "agent"), project_root:, settings_paths:, name:, parse_errors: [])
         paths = []
         node_roots = [
           File.join(home, ".pi/npm/node_modules"),
-          File.join(home, ".pi/agent/npm/node_modules"),
+          File.join(agent_dir, "npm/node_modules"),
           global_npm_root
         ]
         if project_root
@@ -348,7 +392,7 @@ module Hive
           paths.concat(node_modules_skill_candidates(node_root, name))
         end
 
-        git_roots = [ File.join(home, ".pi/agent/git") ]
+        git_roots = [ File.join(agent_dir, "git") ]
         git_roots << File.join(File.expand_path(project_root), ".pi/git") if project_root
         git_roots.each do |git_root|
           paths.concat(git_skill_candidates(git_root, name))
@@ -367,7 +411,10 @@ module Hive
 
       def global_npm_root
         out, _err, status = Timeout.timeout(NPM_ROOT_TIMEOUT_SEC) do
-          Open3.capture3("npm", "root", "-g")
+          # npm writes a debug log under ~/.npm even for this read-only query.
+          # Point its cache at the platform null device so doctor/setup previews
+          # cannot modify the user's home merely by resolving Pi packages.
+          Open3.capture3({ "npm_config_cache" => File::NULL }, "npm", "root", "-g")
         end
         return nil unless status.success?
 

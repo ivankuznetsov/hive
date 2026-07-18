@@ -546,7 +546,6 @@ class AgentProfileTest < Minitest::Test
     assert_nil profile.extract_usage_event({ "type" => "result" })
   end
 
-
   def capability_binary(dir, help:, help_exit: 0)
     path = File.join(dir, "capable-cli")
     File.write(path, <<~SH)
@@ -573,5 +572,20 @@ class AgentProfileTest < Minitest::Test
   ensure
     Hive::AgentProfile.send(:remove_const, :VERSION_CHECK_TIMEOUT_SEC)
     Hive::AgentProfile.const_set(:VERSION_CHECK_TIMEOUT_SEC, original)
+  end
+
+  def test_verify_skill_reports_not_applicable_or_delegates
+    assert_equal [ :not_applicable, "no skill verifier configured for this profile" ],
+                 make_profile.verify_skill("/anything")
+
+    calls = []
+    verifier = lambda do |invocation, project_root:|
+      calls << [ invocation, project_root ]
+      [ :present, "/tmp/SKILL.md" ]
+    end
+    profile = make_profile(skill_verifier: verifier)
+
+    assert_equal [ :present, "/tmp/SKILL.md" ], profile.verify_skill("/demo", project_root: "/repo")
+    assert_equal [ [ "/demo", "/repo" ] ], calls
   end
 end

@@ -141,6 +141,7 @@ Implementation ownership has focused unit coverage in `implementation_identity/{
 |------|--------|
 | `init_test.rb` | `hive init` — preconditions, force flag, idempotent re-init, `--workflow` project defaults, TTY workflow prompt/default behavior, unknown-workflow fail-fast, in-flight field-less task warnings on default changes, current `hive-init.v2` JSON payload (with retained v1 schema compatibility), Claude model/effort answer/template defaults, normal reviewer rendering, patrol reviewer rendering, and prompt defaults. |
 | `bench_workflow_install_test.rb` / `workflows/bench_test.rb` | Fresh `hive init --workflow bench` installs and commits the packaged runtime under `.hive-state/bench-runtime`, creates a bench-pinned task without copying a project descriptor, and resolves the built-in stage/state contract. Legacy-upgrade coverage pins one-commit archive/runtime/config rebinding, same-process descriptor cache reset, tracked instruction archives, safe retry after a rejected commit, Ctrl-C cleanup at archive and both runtime-move boundaries, preservation after a post-commit interrupt, symlink-root and raced-target refusal, descriptor/child-name/parent-directory replacement rejection at classification, quarantine, and post-staging boundaries, dirty-config isolation, staged-index preflight, and previous-runtime retention when rollback deletion fails. The descriptor test pins Codex as the shell-control agent, campaign-sized one-hour/seven-day stage timeouts, provider-only pending generation as cooldown-aware `limits_reached` rather than manual `WAITING`, and GPT-5.6 stage-profile selection to the combined `hive-bench-runner:sol` image. |
+| `agent_skill_adapters_test.rb`, `setup_agents_test.rb` | Process-level fake Claude/Codex/Pi contracts — native argv/JSON, fresh convergence and second-run no-op, unattended refusal, unavailable skips, independent offline failure, cache/resolution verification, filtered prerequisite retention/fail-closed blocking, timed-out descendant process-group cleanup, and Codex conflict byte preservation. |
 | `new_test.rb` | `hive new` — slug derivation, reserved rejection, `--workflow` task overrides, non-coding project-default pinning, coding override in non-coding projects, unknown-workflow fail-fast, marker handling for non-coding inert versus agent entries, captured commit, and per-project commit-lock serialization around the `hive/state` write. |
 | `run_brainstorm_test.rb` | `hive run` of `2-brainstorm/`. |
 | `run_plan_test.rb` | `hive run` of `3-plan/`. |
@@ -280,6 +281,21 @@ credentials inside a running box.
 The live Telegram bot E2E wrapper lives at `test/e2e/tg/run_idea_e2e.sh` and is also opt-in because it uses a real Bot API test token plus a Telethon user session. In default text mode it drives `/idea <nonce>` through the project picker. With `TG_IDEA_MODE=voice`, the wrapper requires the voice fixture and `HIVE_WHISPER_API_KEY`, starts the bot from the current checkout, drives a new voice idea through transcript confirmation/project selection, seeds a temporary `2-brainstorm/<slug>/brainstorm.md` in the scratch project, then sends `/answer <slug>` and answers Q1 with the same voice note. Cleanup resets the scratch state repo to the captured baseline and removes temporary inbox/brainstorm folders.
 
 `test/e2e/lib/hive_e2e_binary_test.rb` is the focused contract suite for the executable itself. It pins `list --json`, `clean --json`, leading JSON option normalization including `--json=true`, duplicate JSON boolean handling where a final false flag chooses prose, malformed `--json=1` / `--json=yes` rejection, error-envelope shapes, help/version handling, leading `--json --help run` / `--json -h run` command-help rendering, replay path validation, missing/non-executable/symlinked runs-root and replay artifact errors (`missing_repro` / `unusable_repro`, exit `78`), and the usage exit-code contract: unknown commands and missing required arguments exit `64` in both human and `--json` modes. Human usage errors are expected to print a `hive-e2e:`-prefixed prose message on stderr.
+
+## Live agent skill resolution smoke
+
+`test/smoke/live_agent_skill_resolution_smoke_test.rb` is excluded from the
+offline suite. It requires `HIVE_LIVE_AGENT_SKILLS=1`, a real authenticated
+agent binary, and optionally `HIVE_LIVE_AGENT=claude|codex|pi`. Each job copies
+only that provider's credential artifact into a disposable config home,
+installs `ce-brainstorm` through `hive setup-agents --yes`, reruns the shared
+doctor inspector, invokes the provider headlessly, and requires structured
+native skill/plugin activation metadata rather than model prose. Production
+manifest mappings are separately pinned offline.
+
+`bundle exec rake smoke` also contains older live Claude workflows and may
+incur provider cost. Normal `rake test` and `rake coverage` remain local and
+network-free.
 
 ## Live Claude tmux dogfood
 

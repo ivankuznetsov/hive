@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hivecli.dev/schemas/hive-doctor.v2.json",
+  "title": "hive-doctor.v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "schema_version", "managed_skills", "checks", "summary"],
+  "properties": {
+    "schema": { "const": "hive-doctor.v2" },
+    "schema_version": { "const": 2 },
+    "managed_skills": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/ManagedSkill" }
+    },
+    "checks": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/LegacyCheck" }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["managed", "legacy_failures", "warnings"],
+      "properties": {
+        "managed": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["conflicting", "incompatible", "unavailable", "stale", "missing", "healthy"],
+          "properties": {
+            "conflicting": { "type": "integer", "minimum": 0 },
+            "incompatible": { "type": "integer", "minimum": 0 },
+            "unavailable": { "type": "integer", "minimum": 0 },
+            "stale": { "type": "integer", "minimum": 0 },
+            "missing": { "type": "integer", "minimum": 0 },
+            "healthy": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "legacy_failures": { "type": "integer", "minimum": 0 },
+        "warnings": { "type": "integer", "minimum": 0 }
+      }
+    }
+  },
+  "$defs": {
+    "ManagedSkill": {
+      "type": "object",
+      "required": ["kind", "stage", "label", "agent", "capability", "managed", "configured_skill", "skill", "status", "health", "severity", "message", "remediation", "expected", "native", "resolution"],
+      "properties": {
+        "kind": { "const": "managed_skill" },
+        "agent": { "type": "string" },
+        "capability": { "type": ["string", "null"] },
+        "managed": { "type": "boolean" },
+        "status": { "enum": ["healthy", "missing", "stale", "incompatible", "conflicting", "unavailable"] },
+        "health": { "enum": ["healthy", "missing", "stale", "incompatible", "conflicting", "unavailable"] },
+        "severity": { "enum": ["info", "warning", "error"] },
+        "remediation": { "type": ["string", "null"] }
+      }
+    },
+    "LegacyCheck": {
+      "type": "object",
+      "required": ["kind", "stage", "label", "agent", "configured_skill", "skill", "status", "message"],
+      "properties": {
+        "kind": { "enum": ["dependency", "warning"] },
+        "status": { "enum": ["present", "missing", "version_too_old", "warning", "not_applicable"] }
+      }
+    }
+  }
+}

@@ -105,6 +105,12 @@ module Hive
       When used with --new-workflow, the payload also includes
       descriptor_path and instruction_path.
 
+      After project creation, interactive init diagnoses the enabled managed
+      agent skills and offers to invoke the same consent-safe engine as
+      `hive setup-agents`. Declining prints standalone remediation. Non-TTY
+      and --json init never offer or mutate agent state, and optional setup
+      failure never rolls back the initialized project.
+
       To bootstrap a new custom workflow in one pass, use:
 
         hive init --new-workflow writing ~/Dev/writing
@@ -215,18 +221,19 @@ module Hive
       Hive::Commands::Prune.new(dry_run: options[:dry_run], json: options[:json]).call
     end
 
-    desc "doctor", "Verify each stage's configured skill is installed for its agent"
+    desc "doctor", "Inspect managed agent skill health without changing agent state"
     long_desc <<~DESC
-      Walks the brainstorm and plan stage configs and asks the
-      configured agent profile (claude / codex / pi / grok) to probe whether
-      its skill (`<stage>.skill` in config.yml) actually resolves to
-      an installed slash-command or skill on disk.
+      Resolves the effective enabled stages, named reviewers, browser hooks,
+      and their configured agent profiles (claude / codex / pi / grok)
+      against Hive's packaged agent-skills manifest. For each managed
+      capability it combines bounded native CLI inventory with the exact
+      filesystem path that would win at runtime. Custom skills and capabilities
+      unsupported by the manifest remain visible but unmanaged.
 
-      Hive ships expecting both llm-wiki (`/plan`) and
-      compound-engineering (`/compound-engineering:ce-*`) to be
-      installed alongside your agent CLI. `hive doctor` is the
-      preflight that catches a missing install before a stage spawns
-      and the agent reports `skill not found` mid-run.
+      The manifest currently maps Compound Engineering (`/ce-*`), llm-wiki
+      planning (`/plan`, `/llm-wiki:wiki-plan`, or `/skill:wiki-plan`), and
+      Claude's PR Review Toolkit. `hive doctor` catches missing, stale,
+      incompatible, or shadowed installs before a stage spawns.
 
       Per-agent search rules:
       - claude: `~/.claude/{commands/<name>.md, skills/<name>/SKILL.md}`
@@ -247,8 +254,18 @@ module Hive
         package_root). Each row's `message` field is the authoritative
         install hint.
 
-      Exit codes: 0 all checks present or N/A; 65 at least one missing
-      skill; 78 config error.
+      Managed rows report healthy, missing, stale, incompatible, conflicting,
+      or unavailable with native inventory and resolver-path evidence. An
+      unavailable CLI is a visible non-blocking warning; other unresolved
+      managed rows include an exact `hive setup-agents --agent ... --skill ...`
+      remediation. Doctor never installs or writes agent state.
+
+      --json emits the versioned hive-doctor.v2 envelope. The v1 schema file
+      remains packaged for consumers pinned to the former resolution-only
+      contract.
+
+      Exit codes: 0 all available managed skills healthy (unavailable-only is
+      non-blocking); 65 actionable skill/dependency failure; 78 config error.
 
       Examples:
 
@@ -262,6 +279,38 @@ module Hive
         config: cfg,
         project_root: Dir.pwd,
         json: options[:json]
+      ).call
+    end
+
+    desc "setup-agents", "Provision managed skills for configured Claude, Codex, and Pi agents"
+    long_desc <<~DESC
+      Inspects every enabled, manifest-managed coding workflow capability,
+      prints one aggregate plan of native commands and Hive-owned files, and
+      performs the plan only after explicit consent. The plan is revalidated
+      immediately before execution and each independent agent/package
+      continues if another operation fails.
+
+      Without --yes, stdin must be a TTY and the operator must confirm. JSON
+      mode never prompts, so --json requires --yes whenever mutations are
+      planned. Repeat --agent/--skill values (or pass several values after one
+      flag) to scope setup to effective managed targets.
+
+      Exit codes: 0 healthy/no-op; 1 attempted or residual failure;
+      64 consent required/refused; 78 invalid manifest/config/filter.
+    DESC
+    option :yes, type: :boolean, default: false, desc: "accept the revalidated aggregate plan"
+    option :agent, type: :array, desc: "scope to configured agent name(s)"
+    option :skill, type: :array, desc: "scope to managed capability id(s)"
+    def setup_agents
+      require "hive/commands/setup_agents"
+      cfg = Hive::Config.load(Dir.pwd)
+      exit Hive::Commands::SetupAgents.new(
+        config: cfg,
+        project_root: Dir.pwd,
+        yes: options[:yes],
+        json: options[:json],
+        agents: options[:agent],
+        skills: options[:skill]
       ).call
     end
 

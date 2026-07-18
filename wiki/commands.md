@@ -1,10 +1,10 @@
 ---
 title: Interaction Surface
 type: commands
-source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/cli.rb, lib/hive/commands/adhoc_review.rb, lib/hive/commands/setup.rb, lib/hive/commands/connect.rb, lib/hive/commands/disconnect.rb, lib/hive/commands/bench_submit.rb, lib/hive/commands/digest.rb, lib/hive/commands/pairing.rb, lib/hive/digest.rb, lib/hive/digest/, lib/hive/web/, public/, hive.gemspec, packaging/docker/, .github/workflows/release.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
+source: bin/hive, bin/hv, bin/hive-e2e, lib/hive/cli.rb, lib/hive/commands/, lib/hive/agent_skills/, config/agent-skills.yml, lib/hive/digest/, lib/hive/web/, public/, hive.gemspec, packaging/docker/, .github/workflows/release.yml, openclaw/skills/hive/SKILL.md, openclaw/README.md
 created: 2026-05-14
 updated: 2026-07-12
-tags: [commands, api]
+tags: [commands, api, skills, provisioning]
 ---
 
 **TLDR**: Hive's external interaction surface is the Thor CLI (`hive` plus the
@@ -12,7 +12,9 @@ tags: [commands, api]
 documented in [[commands/web]], `hive connect screenote` as the Screenote OAuth
 setup surface for artifacts MCP uploads, `hive bench submit` as the hive-bench
 corpus producer, `hive digest` as the daily shipped digest producer,
-`hive pairing` as the Telegram first-contact approval surface, and the
+`hive pairing` as the Telegram first-contact approval surface, the read-only
+`hive doctor` / consent-safe `hive setup-agents` split for managed agent
+skills, and the
 single ClawHub `hive-cli` OpenClaw skill whose installed slash command is `/hive`.
 The Ruby command/API contract lives in [[cli]] and the
 per-command pages. OpenClaw does not add a second runtime and does not publish
@@ -30,6 +32,9 @@ one ClawHub listing per Hive verb.
 - `lib/hive/commands/bench_submit.rb`
 - `lib/hive/commands/digest.rb`
 - `lib/hive/commands/pairing.rb`
+- `lib/hive/commands/setup_agents.rb`
+- `lib/hive/agent_skills/**/*.rb`
+- `config/agent-skills.yml`
 - `lib/hive/digest.rb`
 - `lib/hive/digest/**/*.rb`
 - `lib/hive/web/**/*.rb`
@@ -61,6 +66,8 @@ the [[commands/pairing]] Telegram pairing approval surface,
 [[commands/refactor-patrol]] as the architecture refactor thesis scanner (only
 its legacy on-demand v1 mode is reporting-only; merged-PR v2 can take separately
 authorized actions), and
+[[commands/doctor]] read-only managed health reporting,
+[[commands/setup-agents]] consent-safe native provisioning,
 `--json` envelopes where the command page says they exist.
 The wrapper also normalizes command-local help before Thor dispatch:
 `hive <cmd> --help`, `hive <cmd> -h`, and option-bearing forms such as

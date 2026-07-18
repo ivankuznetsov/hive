@@ -62,11 +62,18 @@ module Hive
         # contract documented in wiki/commands/init.md (see "Stable-iteration-
         # order contract") — reordering is a breaking change for scripted
         # automation that uses index answers.
-        DEFAULT_REVIEWER_NAMES = %w[
-          claude-ce-code-review
-          codex-ce-code-review
-          pr-review-toolkit
-        ].freeze
+        REVIEWER_CAPABILITIES = {
+          "claude-ce-code-review" => {
+            "kind" => "agent", "agent" => "claude", "capability" => "ce-code-review"
+          }.freeze,
+          "codex-ce-code-review" => {
+            "kind" => "agent", "agent" => "codex", "capability" => "ce-code-review"
+          }.freeze,
+          "pr-review-toolkit" => {
+            "kind" => "agent", "agent" => "claude", "capability" => "pr-review-toolkit:review-pr"
+          }.freeze
+        }.freeze
+        DEFAULT_REVIEWER_NAMES = REVIEWER_CAPABILITIES.keys.freeze
         PATROL_REVIEWER_NAMES = %w[
           codex-native-review
           codex-ce-code-review

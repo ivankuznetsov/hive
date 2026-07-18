@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hivecli.dev/schemas/hive-doctor.v1.json",
+  "title": "hive-doctor.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "checks", "summary"],
+  "properties": {
+    "schema": { "const": "hive-doctor.v1" },
+    "checks": { "type": "array", "items": { "type": "object" } },
+    "summary": { "type": "object" }
+  }
+}

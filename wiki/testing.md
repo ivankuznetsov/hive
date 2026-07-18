@@ -247,11 +247,11 @@ many web tests intentionally reuse the same task title inside a persistent
 sandbox project, the helper retries rare `SlugCollisionError` cases and
 identifies the created folder by comparing inbox children before/after the
 command instead of relying on mtime ordering.
-After adding the sample idea, the golden-path E2E captures the task slug from a
-single current-DOM query while the status grid is still visible, then re-resolves
-and clicks the current task link. It does not retain a `.task-row` Capybara
-element across daemon-driven Turbo replacements, because a grid broadcast can
-detach the row while Playwright is preparing a click. Before submitting the
+Browser tests never retain a `.task-row` Capybara element across daemon-driven
+Turbo replacements, because a grid broadcast can detach the row while
+Playwright is preparing a click. The system test visits the route from the task
+folder it just created; the golden-path E2E resolves the slug from one
+current-DOM query and visits that stable route directly. Before submitting the
 brainstorm answer, it waits for the daemon to classify the
 `needs_input` row and for the current `brainstorm.md` mtime second to pass, so
 the answer write is strictly newer than the daemon's edit-resume baseline even

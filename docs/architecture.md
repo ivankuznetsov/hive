@@ -83,7 +83,10 @@ resolution rules stages use. It is read-only and reports `healthy`, `missing`,
 turns only missing/stale managed rows into one immutable operation plan,
 obtains consent once, revalidates ownership/state, uses supported native CLIs,
 and then runs the shared inspector again. Package work is deduplicated while
-capability health remains per row.
+capability health remains per row. Narrow filters recursively retain declared
+package prerequisites; an uninspectable or unhealthy prerequisite blocks its
+dependent operation. Native commands run in owned process groups that are
+terminated and reaped before a timeout is reported.
 
 Hive owns a Claude `/plan` alias only when absent or already Hive-owned. A
 user-authored alias, higher-precedence shadow skill, or mismatched Codex

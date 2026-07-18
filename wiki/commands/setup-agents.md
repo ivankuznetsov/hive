@@ -3,7 +3,7 @@ title: hive setup-agents
 type: command
 source: config/agent-skills.yml, lib/hive/agent_skills/, lib/hive/commands/setup_agents.rb
 created: 2026-07-10
-updated: 2026-07-10
+updated: 2026-07-18
 tags: [command, agents, skills, provisioning, consent]
 ---
 
@@ -20,8 +20,11 @@ hive setup-agents --yes --json
 
 `--agent` and `--skill` are array/repeatable filters over effective managed
 targets. Unknown filters and filters that select unmanaged custom skills fail
-before mutation. With no filters, setup addresses every unresolved managed
-capability in the effective coding configuration.
+before mutation. Package prerequisites are added recursively after filtering,
+so a narrow request cannot omit a required package. A prerequisite that cannot
+be inspected, repaired, or proven healthy blocks its dependent operation. With
+no filters, setup addresses every unresolved managed capability in the
+effective coding configuration.
 
 ## Consent and lifecycle
 
@@ -57,8 +60,11 @@ install but keep individual verification rows.
   owns config and cache population.
 - Pi uses native package list/install/update commands.
 
-All commands execute as argv arrays. Missing CLIs are `unavailable` skips;
-Hive does not install or authenticate providers.
+All commands execute as argv arrays in dedicated process groups. A deadline
+terminates and reaps the command plus descendants before setup reports a
+timeout, so an installer cannot continue mutating after its operation has
+failed. Missing CLIs are `unavailable` skips; Hive does not install or
+authenticate providers.
 
 ## Ownership and failure safety
 

@@ -95,8 +95,12 @@ match actual stage spawns. It then pairs each profile's native inventory with
 
 The profile is the runtime contract; `config/agent-skills.yml` is the package
 contract. Adapters use the profile's binary/version gate plus manifest-declared
-native actions, package source, and compatible version. They do not alter the
-profile registry or make arbitrary custom profiles provisionable. See
+native actions, package source, and compatible version. Filtered target
+resolution recursively retains package prerequisites; adapters fail closed
+when a prerequisite is neither scheduled nor proven healthy. Provisioning CLI
+deadlines own and reap a process group so timed-out descendants cannot keep
+installing in the background. Adapters do not alter the profile registry or
+make arbitrary custom profiles provisionable. See
 [[commands/doctor]] and [[commands/setup-agents]].
 
 ## Tests

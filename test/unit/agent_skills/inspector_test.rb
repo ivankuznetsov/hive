@@ -295,18 +295,39 @@ class AgentSkillsInspectorTest < Minitest::Test
     end
   end
 
-  def test_command_runner_classifies_timeout_and_spawn_errors
-    runner = Hive::AgentSkills::CommandRunner.new
-    with_replaced_singleton_method(Timeout, :timeout, ->(_seconds, &_block) { raise Timeout::Error, "slow" }) do
-      result = runner.call([ "anything" ])
+  def test_command_runner_timeout_terminates_and_reaps_the_process_group
+    with_tmp_dir do |dir|
+      script = File.join(dir, "hang")
+      pid_file = File.join(dir, "pids")
+      File.write(script, <<~SH)
+        #!/bin/sh
+        trap '' TERM
+        sleep 30 &
+        child=$!
+        printf '%s %s\n' "$$" "$child" > "$1"
+        wait
+      SH
+      FileUtils.chmod(0o755, script)
+
+      result = Hive::AgentSkills::CommandRunner.new.call([ script, pid_file ], timeout: 0.1)
+
       assert result.timed_out
-      assert_equal "slow", result.error
+      assert_match(/timed out/, result.error)
+      pids = File.read(pid_file).split.map { |value| Integer(value, 10) }
+      assert_equal 2, pids.size
+      pids.each do |pid|
+        process_state, _err, status = Open3.capture3("ps", "-o", "stat=", "-p", pid.to_s)
+        running = status.success? && !process_state.lstrip.start_with?("Z")
+        refute running, "timed-out provisioning pid #{pid} must not remain running"
+      end
     end
-    with_replaced_singleton_method(Open3, :capture3, ->(*_args) { raise Errno::ENOENT, "missing" }) do
-      result = runner.call([ "anything" ])
-      refute result.timed_out
-      assert_match(/ENOENT/, result.error)
-    end
+  end
+
+  def test_command_runner_classifies_spawn_errors
+    result = Hive::AgentSkills::CommandRunner.new.call([ "/definitely/missing/hive-agent-skill-command" ])
+
+    refute result.timed_out
+    assert_match(/ENOENT/, result.error)
   end
 
   def test_target_resolver_covers_adhoc_patrol_filters_and_serialization
@@ -326,6 +347,9 @@ class AgentSkillsInspectorTest < Minitest::Test
     assert targets.any? { |target| target.surfaces == [ "review.adhoc.reviewers[0]" ] }
     assert targets.any? { |target| target.surfaces == [ "patrol.review.reviewers[0]" ] }
     assert_equal "brainstorm", resolver.resolve(agents: [ "claude" ], skills: [ "ce-brainstorm" ]).first.to_h.fetch("surfaces").first
+    wiki_targets = resolver.resolve(agents: [ "claude" ], skills: [ "wiki-plan" ])
+    assert_equal %w[compound-engineering llm-wiki], wiki_targets.map(&:package_id).sort,
+                 "a filtered package must retain its declared prerequisite"
     assert_raises(Hive::ConfigError) { resolver.resolve(agents: [ "ghost" ]) }
     assert_raises(Hive::ConfigError) { resolver.resolve(skills: [ "ghost-skill" ]) }
   end

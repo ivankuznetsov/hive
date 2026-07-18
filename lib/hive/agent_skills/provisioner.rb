@@ -34,6 +34,7 @@ module Hive
 
     class Provisioner
       ACTIONABLE_HEALTH = %w[missing stale incompatible conflicting].freeze
+      PROVISIONABLE_HEALTH = %w[missing stale].freeze
 
       def initialize(config:, project_root:, manifest: Manifest.load,
                      inspector: nil, adapters: nil, runner: CommandRunner.new,
@@ -66,8 +67,10 @@ module Hive
 
         operations = []
         conflicts = []
-        actionable = inspections.select { |row| row.managed && %w[missing stale].include?(row.health) }
-        actionable.group_by(&:agent).each do |agent, rows|
+        managed = inspections.select(&:managed)
+        managed.group_by(&:agent).each do |agent, rows|
+          next unless rows.any? { |row| PROVISIONABLE_HEALTH.include?(row.health) }
+
           adapter_plan = @adapters.fetch(agent).plan(rows)
           operations.concat(adapter_plan.operations)
           conflicts.concat(adapter_plan.conflicts)

@@ -142,6 +142,12 @@ module Hive
         end
       end
 
+      def capability_for_package(agent:, package_id:)
+        @capabilities.find do |capability|
+          capability.package_id == package_id.to_s && capability.agents.key?(agent.to_s)
+        end
+      end
+
       def validate_default_coverage!(declarations)
         missing = declarations.filter_map do |row|
           capability = @capability_index[row.fetch(:capability).to_s]

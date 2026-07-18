@@ -108,8 +108,12 @@ class AgentSkillAdaptersTest < Minitest::Test
     with_tmp_dir do |dir|
       row = inspection(agent: "claude", capability: "wiki-plan", package: "llm-wiki",
                        health: "missing", bin: "/fake/claude")
+      prerequisite = inspection(
+        agent: "claude", capability: "ce-brainstorm", package: "compound-engineering",
+        health: "healthy", bin: "/fake/claude"
+      )
       adapter = adapter(Hive::AgentSkills::Adapters::Claude, dir: dir)
-      plan = adapter.plan([ row ])
+      plan = adapter.plan([ prerequisite, row ])
       alias_operation = plan.operations.find { |operation| operation.kind == "alias_write" }
 
       assert_equal [ File.join(dir, ".claude", "commands", "plan.md") ], alias_operation.files
@@ -135,6 +139,35 @@ class AgentSkillAdaptersTest < Minitest::Test
       wiki_operations = operations.select { |operation| operation.package_id == "llm-wiki" }
 
       assert wiki_operations.all? { |operation| operation.depends_on.include?(ce_final.id) }
+    end
+  end
+
+  def test_missing_uninspected_prerequisite_blocks_dependent_package
+    with_tmp_dir do |dir|
+      wiki = inspection(agent: "claude", capability: "wiki-plan", package: "llm-wiki",
+                        health: "missing", bin: "/fake/claude")
+
+      plan = adapter(Hive::AgentSkills::Adapters::Claude, dir: dir).plan([ wiki ])
+
+      assert_empty plan.operations
+      assert_equal 1, plan.conflicts.size
+      assert_match(/llm-wiki requires compound-engineering.*not inspected/, plan.conflicts.first)
+    end
+  end
+
+  def test_unhealthy_prerequisite_blocks_dependent_package
+    with_tmp_dir do |dir|
+      prerequisite = inspection(
+        agent: "claude", capability: "ce-brainstorm", package: "compound-engineering",
+        health: "incompatible", bin: "/fake/claude"
+      )
+      wiki = inspection(agent: "claude", capability: "wiki-plan", package: "llm-wiki",
+                        health: "missing", bin: "/fake/claude")
+
+      plan = adapter(Hive::AgentSkills::Adapters::Claude, dir: dir).plan([ prerequisite, wiki ])
+
+      assert_empty plan.operations
+      assert_match(/prerequisite is incompatible/, plan.conflicts.first)
     end
   end
 
@@ -351,17 +384,21 @@ class AgentSkillAdaptersTest < Minitest::Test
     with_tmp_dir do |dir|
       row = inspection(agent: "claude", capability: "wiki-plan", package: "llm-wiki",
                        health: "missing", bin: "/fake/claude")
+      prerequisite = inspection(
+        agent: "claude", capability: "ce-brainstorm", package: "compound-engineering",
+        health: "healthy", bin: "/fake/claude"
+      )
       claude = adapter(Hive::AgentSkills::Adapters::Claude, dir: dir)
       path = File.join(dir, ".claude", "commands", "plan.md")
       spec = Hive::AgentSkills::Manifest.load.capability("wiki-plan").agent("claude").alias_spec
       FileUtils.mkdir_p(File.dirname(path))
       [ Hive::AgentSkills::Manifest.alias_content(spec), "private\n" ].each do |content|
         File.write(path, content)
-        refute claude.plan([ row ]).operations.any? { |operation| operation.kind == "alias_write" }
+        refute claude.plan([ prerequisite, row ]).operations.any? { |operation| operation.kind == "alias_write" }
       end
 
       FileUtils.rm_f(path)
-      operation = claude.plan([ row ]).operations.find { |item| item.kind == "alias_write" }
+      operation = claude.plan([ prerequisite, row ]).operations.find { |item| item.kind == "alias_write" }
       File.write(path, "appeared after preview\n")
       outcome = claude.execute(operation)
       assert_match(/changed since preview/, outcome.message)

@@ -66,6 +66,14 @@ module Hive
           operations = []
 
           ordered_package_ids(groups.keys).each do |package_id|
+            blockers = prerequisite_blockers(package_id, inspections, groups)
+            next if blockers.empty?
+
+            conflicts.concat(blockers)
+            groups.delete(package_id)
+          end
+
+          ordered_package_ids(groups.keys).each do |package_id|
             package_rows = groups.fetch(package_id)
             package = @manifest.package(package_id)
             native_spec = package.native_for(agent)
@@ -288,6 +296,20 @@ module Hive
           end
           ids.each { |id| visit.call(id) }
           order
+        end
+
+        def prerequisite_blockers(package_id, inspections, actionable_groups)
+          @manifest.package(package_id).prerequisites.filter_map do |prerequisite|
+            next if actionable_groups.key?(prerequisite)
+
+            rows = inspections.select do |row|
+              row.agent == agent && row.managed && row.package_id == prerequisite
+            end
+            next if !rows.empty? && rows.all? { |row| row.health == "healthy" }
+
+            state = rows.empty? ? "not inspected" : rows.map(&:health).uniq.sort.join(", ")
+            "#{agent} package #{package_id} requires #{prerequisite}, but the prerequisite is #{state}"
+          end
         end
 
         def add_prerequisite_dependencies(operations)

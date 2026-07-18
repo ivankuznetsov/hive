@@ -225,11 +225,14 @@ class HiveCommandsDoctorTest < Minitest::Test
 
       env = JSON.parse(out.string)
       assert_equal "hive-doctor.v2", env["schema"]
-      assert_equal 2, env["managed_skills"].length
-      assert_equal 1, env.dig("summary", "managed", "missing")
+      assert_equal 3, env["managed_skills"].length
+      assert_equal 2, env.dig("summary", "managed", "missing")
       assert_equal 1, env.dig("summary", "managed", "healthy")
       assert(env["managed_skills"].any? { |c| c["stage"] == "plan" && c["health"] == "healthy" })
       assert(env["managed_skills"].any? { |c| c["stage"] == "brainstorm" && c["health"] == "missing" })
+      assert(env["managed_skills"].any? do |row|
+        row["stage"] == "prerequisite:llm-wiki" && row["health"] == "missing"
+      end)
     end
   end
 
@@ -261,6 +264,7 @@ class HiveCommandsDoctorTest < Minitest::Test
       # No user-level claude /plan, but project-level present.
       with_tmp_dir do |project|
         write_file("#{home}/.claude/commands/x.md")
+        write_file("#{home}/.claude/plugins/cache/mp/compound-engineering/3.0.1/skills/ce-brainstorm/SKILL.md")
         write_file("#{project}/.claude/commands/plan.md")
         out = StringIO.new
         cfg = base_config(

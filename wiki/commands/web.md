@@ -228,9 +228,17 @@ origin also prints the Host-header/reverse-proxy warning.
   `@userinfobot`, sending `/start` before the round-trip test, the
   no-webhook/long-polling model, and BotFather `/revoke` token rotation;
   getMe-validated token save, allowlist, supervisor SIGHUP, round-trip test
-  message. Chat IDs are parsed with strict `Integer(..., exception: false)`
-  before any Telegram network call or config/env write: blank input and
-  handles such as `@mychannel` render 422 and persist nothing.
+  message, and first-contact pairing. Pairing can securely bootstrap with an
+  empty allowlist: the form persists `bot.pairing_enabled`, pending 24-hour
+  codes come from the shared `hive pairing list` JSON contract, and an
+  owner-confirmed approval delegates to the command's atomic
+  resolve/allowlist/reload/notice/consume lifecycle. An already validated token
+  can be left blank while changing authorization settings; only a replacement
+  token is sent through `getMe` and persisted. Chat IDs are parsed with strict
+  `Integer(..., exception: false)`
+  before any Telegram network call or config/env write: when pairing is off,
+  blank input renders 422, and handles such as `@mychannel` always render 422
+  and persist nothing.
 
 Task Drop is routed as `POST /tasks/:project/:slug/drop` →
 `TasksController#drop` → `Hive::Web::Dispatcher#drop` →
@@ -273,8 +281,10 @@ explicit GitHub connection action, and that repository setup always invokes
 the CLI init adapter with non-TTY provisioning input. It also pins that
 a red task page shows the diagnostic banner and Retry button, and that the
 route queues the marker-clear command plus the hidden rerun sequence. It also
-pins the Telegram first-run guide shape and strict chat-ID validation, repo
-clone target refusal for non-directories, agent-login status rendering for
+pins the Telegram first-run guide shape, strict chat-ID validation, empty-list
+pairing bootstrap, saved-token reuse, pending-code rendering, and
+consent-gated approval, repo clone target refusal for non-directories,
+agent-login status rendering for
 binary PTY output, Grok route reachability, and operator-ward poll flows,
 managed-skill opt-in inspection and consent-gated repair, root favicon/icon
 assets,

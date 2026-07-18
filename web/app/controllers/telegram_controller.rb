@@ -2,41 +2,43 @@ require "hive/env_file"
 
 class TelegramController < ApplicationController
   def show
-    @bot = Hive::Config.load_global_bot
+    load_telegram_page
   end
 
   def update
-    token = params[:token].to_s.strip
+    entered_token = params[:token].to_s.strip
+    token = entered_token.presence || saved_telegram_token.to_s.strip
     raise Hive::Error, "token required" if token.empty?
+    pairing_enabled = params[:pairing_enabled] == "1"
 
     # Strict parse BEFORE enabling: `to_i` would turn "@mychannel" into 0
     # (authorizing nobody the operator meant) and blank input into an empty
     # allowlist that only fails much later, at bot runtime.
     raw_chats = params[:chat_ids].to_s.split(/[,\s]+/).reject(&:empty?)
     chats = raw_chats.map { |c| Integer(c, exception: false) }
-    if raw_chats.empty? || chats.any?(&:nil?)
-      @bot = Hive::Config.load_global_bot
+    if (raw_chats.empty? && !pairing_enabled) || chats.any?(&:nil?)
       bad = raw_chats.zip(chats).select { |_, n| n.nil? }.map(&:first)
-      flash.now[:alert] = if raw_chats.empty?
-        "At least one numeric chat ID is required to enable the bot. Nothing was saved."
+      message = if raw_chats.empty?
+        "At least one numeric chat ID is required unless pairing is enabled. Nothing was saved."
       else
         "Chat IDs must be numeric (got: #{bad.join(', ')}). Use the ID from @userinfobot, not a @handle. Nothing was saved."
       end
-      return render :show, status: :unprocessable_entity
+      return render_settings_error(message)
     end
 
     # Validate against the real Telegram API (getMe) BEFORE saving. An
-    # invalid token persists nothing and re-renders with an inline error.
-    unless Hive::Web::TelegramValidator.call(token)
-      @bot = Hive::Config.load_global_bot
-      flash.now[:alert] = "Telegram rejected this token (getMe failed). Nothing was saved."
-      return render :show, status: :unprocessable_entity
+    # invalid NEW token persists nothing. A blank token field keeps the
+    # previously validated secret, so changing pairing/allowlist settings does
+    # not force the operator to retrieve and re-enter it.
+    if entered_token.present? && !Hive::Web::TelegramValidator.call(token)
+      return render_settings_error("Telegram rejected this token (getMe failed). Nothing was saved.")
     end
 
-    write_env_value("HIVE_TELEGRAM_BOT_TOKEN", token)
+    write_env_value("HIVE_TELEGRAM_BOT_TOKEN", token) if entered_token.present?
     Hive::Config.update_global_config! do |data|
       data["bot"] ||= {}
       data["bot"]["enabled"] = true
+      data["bot"]["pairing_enabled"] = pairing_enabled
       data["bot"]["chat_id_allowlist"] = chats
     end
     if request_bot_restart
@@ -53,7 +55,7 @@ class TelegramController < ApplicationController
   # Round-trip confirmation: getMe + a real sendMessage to every configured
   # chat, reported inline.
   def test
-    @bot = Hive::Config.load_global_bot
+    load_telegram_page
     token = saved_telegram_token
     if token.to_s.strip.empty?
       flash.now[:alert] = "Save a bot token before sending a test message."
@@ -70,7 +72,51 @@ class TelegramController < ApplicationController
     end
   end
 
+  def approve_pairing
+    unless params[:consent] == "approve_telegram_pairing"
+      raise Hive::Error, "confirm the Telegram pairing approval from the Telegram page"
+    end
+
+    result = pairing_gateway.approve(params[:code])
+    notice = "Approved Telegram chat #{result.fetch('chat_id')}."
+    notice += if result["reloaded"]
+      " The running bot was reloaded."
+    else
+      " Restart the bot to load the updated allowlist."
+    end
+    redirect_to telegram_path, notice: notice
+  end
+
   private
+
+  def load_telegram_page
+    @bot = Hive::Config.load_global_bot
+    @token_saved = saved_telegram_token.to_s.strip.present?
+    @pairings = []
+    return unless @bot["pairing_enabled"]
+
+    begin
+      @pairings = pairing_gateway.pending
+    rescue Hive::Error => e
+      @pairing_error = e.message
+    end
+  end
+
+  def render_settings_error(message)
+    load_telegram_page
+    flash.now[:alert] = message
+    render :show, status: :unprocessable_entity
+  end
+
+  def pairing_gateway
+    self.class.pairing_gateway
+  end
+
+  class << self
+    def pairing_gateway
+      @pairing_gateway ||= Hive::Web::TelegramPairing.new
+    end
+  end
 
   # The container supervisor sets HIVEBOX_SUPERVISOR_PID on its children and
   # reloads its child set on SIGHUP, bringing the bot up without recreating

@@ -473,6 +473,24 @@ pre {
 .setup-steps li { margin: 10px 0; line-height: 1.55; }
 .setup-steps code { font-family: var(--font-mono); font-size: 0.85em; background: var(--bg-sunken); border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; }
 
+.checkbox-row { grid-template-columns: auto 1fr; align-items: start; column-gap: 9px; }
+.checkbox-row input { margin-top: 4px; }
+.checkbox-row p { grid-column: 2; margin: 0; }
+.pairing-section { margin: 30px 0; }
+.pairing-list { display: grid; gap: 10px; margin-top: 14px; }
+.pairing-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 16px;
+  align-items: center;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 13px 18px;
+}
+.pairing-code { font-family: var(--font-mono); letter-spacing: 0.1em; display: block; }
+.pairing-row .faint { display: block; margin-top: 3px; }
+
 .intervene { margin: 26px 0; }
 .intervene textarea { width: 100%; min-height: 70px; }
 .intervene summary { cursor: pointer; font-size: 0.9rem; }

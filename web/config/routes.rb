@@ -54,4 +54,6 @@ Rails.application.routes.draw do
   get  "telegram" => "telegram#show", as: :telegram
   post "telegram" => "telegram#update", as: :update_telegram
   post "telegram/test" => "telegram#test", as: :test_telegram
+  post "telegram/pairings/:code" => "telegram#approve_pairing", as: :telegram_pairing_approve,
+       constraints: { code: /[A-Za-z]{8}/ }
 end

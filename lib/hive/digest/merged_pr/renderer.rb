@@ -35,18 +35,9 @@ module Hive
         end
 
         def render_line(pr)
-          label = truncate_label("##{pr.number} #{pr.title}")
+          label = Hive::Digest::Renderer.truncate_label("##{pr.number} #{pr.title}")
           link = pr.url.to_s.empty? ? escape(label) : "[#{escape(label)}](#{escape_link(pr.url)})"
           "#{escape('•')} #{link} #{escape('—')} #{suffix(pr)}"
-        end
-
-        # Bound the label on the raw text (before escaping) so an overlong
-        # title can't push a rendered line toward Telegram's chunk boundary.
-        def truncate_label(text)
-          text = text.to_s
-          return text if text.length <= MAX_LABEL_LENGTH
-
-          "#{text[0, MAX_LABEL_LENGTH - 1].rstrip}…"
         end
 
         def suffix(pr)

@@ -138,7 +138,10 @@ structured `:send_failure` event on the bot logger (which exposes only
 `#event`, not `#error`) and re-raised; the daemon scheduler then retries the
 whole date on a later tick (at-least-once delivery across restarts). The
 renderer caps each model summary well under the limit so a single rendered
-line can never split a MarkdownV2 escape across a chunk boundary.
+line can never split a MarkdownV2 escape across a chunk boundary. Summary,
+overall-summary, shipped-task label, and merged-PR label caps share one raw-text
+truncation primitive in `Digest::Renderer`; each public policy method retains
+its own limit constant.
 
 The default log path is `cfg.dig("bot", "log_file")` or
 `<state_home>/logs/bot.log`, sharing the bot logger surface.

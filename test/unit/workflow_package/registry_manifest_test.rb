@@ -114,7 +114,52 @@ class WorkflowPackageRegistryManifestTest < Minitest::Test
     end
   end
 
+  def test_registry_manifest_maps_parser_and_io_failures_to_typed_diagnostics
+    with_tmp_dir do |root|
+      malformed = File.join(root, "manifest.yml")
+      File.write(malformed, "schema: [\n")
+
+      assert_package_rule("manifest.invalid_yaml") do
+        Hive::WorkflowPackage::RegistryManifest.load(malformed)
+      end
+      assert_package_rule("manifest.unreadable") do
+        Hive::WorkflowPackage::RegistryManifest.load(File.join(root, "missing.yml"))
+      end
+    end
+  end
+
+  def test_registry_manifest_rejects_each_nested_shape_boundary
+    with_registry_package do |_root, document|
+      cases = [
+        [ "manifest.invalid_shape", ->(data) { data.delete("license") } ],
+        [ "manifest.invalid_author", ->(data) { data["author"] = {} } ],
+        [ "manifest.invalid_source", ->(data) { data["source"] = {} } ],
+        [ "manifest.invalid_source", ->(data) { data["source"]["revision"] = "short" } ],
+        [ "manifest.invalid_permissions", ->(data) { data["permissions"].delete("secrets") } ],
+        [ "package.path_escape", ->(data) { data["files"] = { "outside" => "a" * 64 } } ],
+        [ "manifest.invalid_permissions", ->(data) { data["permissions"]["capabilities"] = [ "filesystem-read", "filesystem-read" ] } ],
+        [ "manifest.invalid_permissions", ->(data) { data["permissions"]["filesystem_read"] = [ "*", "task" ] } ],
+        [ "manifest.invalid_permissions", ->(data) { data["permissions"]["capabilities"] = [ "future" ] } ],
+        [ "manifest.invalid_value", ->(data) { data["description"] = "" } ],
+        [ "manifest.invalid_url", ->(data) { data["author"]["url"] = "http://[" } ]
+      ]
+
+      cases.each do |rule, mutate|
+        candidate = Marshal.load(Marshal.dump(document))
+        mutate.call(candidate)
+        assert_package_rule(rule) do
+          Hive::WorkflowPackage::RegistryManifest.validate_shape!(candidate)
+        end
+      end
+    end
+  end
+
   private
+
+  def assert_package_rule(expected)
+    error = assert_raises(Hive::WorkflowPackage::PackageError) { yield }
+    assert_equal expected, error.diagnostic.rule_id
+  end
 
   def with_registry_package
     with_tmp_dir do |root|

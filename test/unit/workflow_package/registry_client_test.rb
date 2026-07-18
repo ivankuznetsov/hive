@@ -186,6 +186,54 @@ class WorkflowPackageRegistryClientTest < Minitest::Test
     end
   end
 
+  def test_catalog_entry_validation_rejects_each_consumer_boundary
+    client = Hive::WorkflowPackage::RegistryClient.new
+    cases = [
+      [ "catalog version entry is malformed", ->(entry) { entry.delete("description") } ],
+      [ "catalog version identity is malformed", ->(entry) { entry["name"] = "INVALID" } ],
+      [ "catalog latest version is malformed", ->(entry) { entry["latest_version"] = "latest" } ],
+      [ "catalog Hive minimum version is malformed", ->(entry) { entry["hive_min_version"] = "future" } ],
+      [ "catalog lifecycle entry is malformed", ->(entry) { entry["discoverable"] = false } ],
+      [ "catalog trust entry is malformed", ->(entry) { entry["release_tier"] = "unknown" } ],
+      [ "catalog author is malformed", ->(entry) { entry["author"] = {} } ],
+      [ "catalog permission disclosure is malformed", ->(entry) { entry["permissions"]["capabilities"] = [ "future" ] } ],
+      [ "catalog permission risk does not match its disclosure", ->(entry) { entry["permission_risk"] = "moderate" } ],
+      [ "catalog audit or install metadata is malformed", ->(entry) { entry["history"] = {} } ],
+      [ "catalog listing approval is malformed", ->(entry) { entry["listing_approval"]["approved_by"] = [] } ]
+    ]
+
+    cases.each do |message, mutate|
+      entry = Marshal.load(Marshal.dump(catalog_entry))
+      mutate.call(entry)
+      error = assert_raises(Hive::WorkflowPackage::RegistryError) do
+        client.send(:validate_version_entry!, entry)
+      end
+      assert_equal message, error.message
+    end
+  end
+
+  def test_catalog_resolution_and_manifest_binding_map_missing_metadata
+    client = Hive::WorkflowPackage::RegistryClient.new
+    malformed = { "schema" => "honeycomb-catalog/v2", "entries" => [
+      { "name" => "demo", "source_sha" => "c" * 40 }
+    ] }
+    error = assert_raises(Hive::WorkflowPackage::RegistryError) do
+      client.send(:resolve_catalog, malformed, "demo", "c" * 40, "b" * 40)
+    end
+    assert_equal "catalog entry for honeycomb/demo is malformed", error.message
+
+    resolution = Hive::WorkflowPackage::RegistryClient::Resolution.new(
+      name: "demo", version: "1.0.0", source_commit: "b" * 40, catalog_commit: "b" * 40,
+      source_revision: "c" * 40, manifest_digest: "d" * 64,
+      hive_min_version: "0.4.3", summary: "Demo", permissions: v2_permissions
+    )
+    manifest = Struct.new(:data).new({})
+    error = assert_raises(Hive::WorkflowPackage::RegistryError) do
+      client.send(:bind_catalog_metadata!, resolution, manifest)
+    end
+    assert_equal "verified manifest metadata is incomplete", error.message
+  end
+
   private
 
   def with_registry

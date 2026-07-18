@@ -1,5 +1,7 @@
 require "digest"
+require "rubygems/version"
 require "hive/workflow_package/manifest"
+require "hive/workflow_package/registry_manifest"
 require "hive/workflow_package/security_scanner"
 require "hive/workflows/descriptor_parser"
 
@@ -41,27 +43,33 @@ module Hive
 
       def validate
         diagnostics = []
-        manifest = Manifest.load(File.join(@root, Manifest::FILE_NAME))
+        manifest = load_manifest
         digest = manifest.digest
         if @expected_manifest_digest && !secure_equal?(digest, @expected_manifest_digest)
-          diagnostics << diagnostic("manifest.digest_mismatch", Manifest::FILE_NAME,
+          diagnostics << diagnostic("manifest.digest_mismatch", manifest.file_name,
                                     "manifest digest does not match trusted catalog or installed lock")
         end
         if @expected_name && manifest.data.fetch("name") != @expected_name
-          diagnostics << diagnostic("manifest.name_mismatch", Manifest::FILE_NAME,
+          diagnostics << diagnostic("manifest.name_mismatch", manifest.file_name,
                                     "manifest name does not match the requested package")
         end
+        if manifest.is_a?(RegistryManifest) && comparable_version(Hive::VERSION) < comparable_version(manifest.data.fetch("hive_min_version"))
+          diagnostics << diagnostic(
+            "manifest.hive_version_unsupported", RegistryManifest::FILE_NAME,
+            "package requires Hive #{manifest.data.fetch('hive_min_version')} or newer; current Hive is #{Hive::VERSION}"
+          )
+        end
 
-        actual = Manifest.inventory(@root)
-        expected = manifest.data.fetch("files")
+        actual = Manifest.inventory(@root, exclude: [ Manifest::FILE_NAME, RegistryManifest::FILE_NAME ])
+        expected = manifest.file_entries
         compare_inventory(expected, actual, diagnostics)
-        descriptor_path = File.join(@root, manifest.data.fetch("descriptor"))
+        descriptor_path = File.join(@root, manifest.descriptor)
         workflow = parse_workflow(descriptor_path, manifest.data.fetch("name"), diagnostics)
         validate_managed_workflow(workflow, diagnostics) if workflow && @managed
         diagnostics.concat(SecurityScanner.scan_files(
           @root,
           paths: expected.map { |entry| entry.fetch("path") },
-          permissions: manifest.data.fetch("permissions")
+          permissions: manifest.permissions
         ))
         Result.new(manifest: manifest, workflow: workflow, manifest_digest: digest, diagnostics: diagnostics.freeze)
       rescue PackageError => e
@@ -72,6 +80,22 @@ module Hive
       end
 
       private
+
+      def comparable_version(version)
+        Gem::Version.new(version.split("+", 2).first)
+      end
+
+      def load_manifest
+        registry_path = File.join(@root, RegistryManifest::FILE_NAME)
+        legacy_path = File.join(@root, Manifest::FILE_NAME)
+        if File.file?(registry_path)
+          raise_package_error("manifest.ambiguous", RegistryManifest::FILE_NAME,
+                              "package must not contain both registry and legacy manifests") if File.exist?(legacy_path)
+          RegistryManifest.load(registry_path)
+        else
+          Manifest.load(legacy_path)
+        end
+      end
 
       def compare_inventory(expected, actual, diagnostics)
         expected_by_path = expected.to_h { |entry| [ entry.fetch("path"), entry ] }
@@ -88,10 +112,14 @@ module Hive
           if expected_entry.fetch("sha256") != actual_entry.fetch("sha256")
             diagnostics << diagnostic("manifest.hash_mismatch", path, "payload hash does not match the manifest")
           end
-          if expected_entry.fetch("size") != actual_entry.fetch("size")
+          if expected_entry.key?("size") && expected_entry.fetch("size") != actual_entry.fetch("size")
             diagnostics << diagnostic("manifest.size_mismatch", path, "payload size does not match the manifest")
           end
         end
+      end
+
+      def raise_package_error(rule, path, message)
+        raise PackageError, diagnostic(rule, path, message)
       end
 
       def parse_workflow(path, name, diagnostics)

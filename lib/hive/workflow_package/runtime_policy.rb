@@ -56,7 +56,7 @@ module Hive
       end
 
       def initialize(permissions, task_folder:, profile:, policy_dir:)
-        @permissions = stringify_hash(permissions)
+        @permissions = normalize_registry_permissions(stringify_hash(permissions))
         @task_folder = File.realpath(task_folder)
         @profile = profile
         @policy_dir = File.expand_path(policy_dir)
@@ -137,6 +137,33 @@ module Hive
       end
 
       private
+
+      # honeycomb-manifest/v1 publishes a deliberately coarse disclosure, not
+      # the legacy command/tool policy. Only the one lossless subset supported
+      # by the current runtime is admitted here. Anything broader stays closed
+      # until Hive has an equally precise v2 enforcement path.
+      def normalize_registry_permissions(permissions)
+        return permissions unless permissions.key?("risk")
+
+        keys = %w[risk capabilities network_hosts filesystem_read filesystem_write secrets]
+        safe_read_only = permissions.keys.sort == keys.sort &&
+                         permissions["risk"] == "low" &&
+                         permissions["capabilities"] == [ "filesystem-read" ] &&
+                         permissions["network_hosts"] == [] &&
+                         permissions["filesystem_read"] == [ "task" ] &&
+                         permissions["filesystem_write"] == [] &&
+                         permissions["secrets"] == []
+        unless safe_read_only
+          raise Hive::ConfigError,
+                "Honeycomb v2 summarized permissions cannot be safely admitted by this Hive runtime"
+        end
+
+        {
+          "tools" => %w[Read LS Grep Glob],
+          "deny" => %w[Write Edit MultiEdit NotebookEdit Bash WebFetch WebSearch],
+          "directories" => [], "commands" => [], "domains" => [], "credentials" => []
+        }
+      end
 
       def validate_profile!
         capabilities = @profile.respond_to?(:policy_capabilities) ? @profile.policy_capabilities : []

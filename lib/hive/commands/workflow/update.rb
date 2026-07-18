@@ -32,9 +32,12 @@ module Hive
               return emit(noop_payload(candidate), human_lines: [ "hive: honeycomb/#{@name} is already current" ])
             end
             old_manifest = store.manifest(@name, current.fetch("source_commit"), current.fetch("manifest_digest"))
-            new_manifest = Hive::WorkflowPackage::Manifest.load(File.join(candidate_root, "manifest.json"))
-            diff = Hive::WorkflowPackage::SemanticDiff.compare(old_manifest, new_manifest)
-            admit_runtime!(candidate, candidate_root)
+            validated = Hive::WorkflowPackage::Validator.validate!(
+              candidate_root, expected_name: candidate.name,
+              expected_manifest_digest: candidate.manifest_digest
+            )
+            diff = Hive::WorkflowPackage::SemanticDiff.compare(old_manifest, validated.manifest)
+            admit_runtime!(candidate, validated.workflow)
             report = payload("dry_run", current, candidate, diff)
             return emit(report, human_lines: human_diff(report)) if @dry_run
 
@@ -80,16 +83,12 @@ module Hive
           %w[y yes].include?(@stdin.gets.to_s.strip.downcase)
         end
 
-        def admit_runtime!(candidate, candidate_root)
+        def admit_runtime!(candidate, workflow)
           Dir.mktmpdir("hive-workflow-update-admission-") do |dir|
             task = File.join(dir, "task")
             FileUtils.mkdir_p(task)
-            validated = Hive::WorkflowPackage::Validator.validate!(
-              candidate_root, expected_name: candidate.name,
-              expected_manifest_digest: candidate.manifest_digest
-            )
             Hive::WorkflowPackage::RuntimePolicy.admit_workflow!(
-              validated.workflow, candidate.permissions, task_folder: task,
+              workflow, candidate.permissions, task_folder: task,
               policy_dir: File.join(dir, "policy")
             )
           end

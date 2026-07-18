@@ -5,6 +5,7 @@ require "timeout"
 require "tmpdir"
 require "hive/workflow_package/canonical_json"
 require "hive/workflow_package/manifest"
+require "hive/workflow_package/registry_manifest"
 require "hive/workflow_package/validator"
 
 module Hive
@@ -21,8 +22,20 @@ module Hive
 
       Resolution = Data.define(
         :name, :version, :source_commit, :catalog_commit,
-        :manifest_digest, :summary, :permissions
+        :source_revision, :manifest_digest, :hive_min_version, :summary, :permissions
       )
+
+      CATALOG_SCHEMA = "honeycomb-catalog/v2".freeze
+      ENTRY_KEYS = %w[
+        name version latest_version description release_tier current_tier
+        permission_risk state discoverable exact_resolution verification history
+        advisories author license hive_min_version permissions install_command
+        package_url reviews_url community_reviews_url source_sha listing_approval
+      ].freeze
+      LISTING_APPROVAL_KEYS = %w[
+        release_sha256 head_sha lint_checked_at approved_by approved_at reviews
+      ].freeze
+      STATES = %w[listed soft_hidden yanked revoked].freeze
 
       def initialize(repository: OFFICIAL_REPOSITORY, timeout_sec: TIMEOUT_SEC)
         @repository = repository
@@ -41,10 +54,6 @@ module Hive
           catalog_bytes = git!("-C", checkout, "show", "#{catalog_commit}:catalog.json", binary: true)
           catalog = parse_catalog(catalog_bytes)
           resolution = resolve_catalog(catalog, name, requested_ref, catalog_commit)
-          unless git_success?("-C", checkout, "merge-base", "--is-ancestor",
-                              resolution.source_commit, catalog_commit)
-            raise RegistryError, "catalog-listed source commit is not an ancestor of the catalog snapshot"
-          end
           materialize(checkout, resolution, destination)
           result = Validator.validate!(
             destination,
@@ -74,8 +83,11 @@ module Hive
       def bind_catalog_metadata!(resolution, manifest)
         data = manifest.data
         matches = data.fetch("version") == resolution.version &&
-                  data.fetch("summary") == resolution.summary &&
-                  data.fetch("permissions") == resolution.permissions
+                  manifest.summary == resolution.summary &&
+                  manifest.permissions == resolution.permissions &&
+                  data.dig("source", "revision") == resolution.source_revision &&
+                  data.fetch("hive_min_version") == resolution.hive_min_version &&
+                  data.fetch("release_sha256") == resolution.manifest_digest
         raise RegistryError, "catalog metadata does not match the verified manifest" unless matches
       rescue KeyError
         raise RegistryError, "verified manifest metadata is incomplete"
@@ -86,9 +98,16 @@ module Hive
         unless bytes == CanonicalJSON.generate(data)
           raise RegistryError, "official catalog is not canonical JSON"
         end
-        unless data.is_a?(Hash) && data.keys.sort == %w[registry schema_version workflows] &&
-               data["schema_version"] == 1 && data["registry"] == "honeycomb" && data["workflows"].is_a?(Hash)
+        unless data.is_a?(Hash) && data.keys.sort == %w[entries schema] &&
+               data["schema"] == CATALOG_SCHEMA && data["entries"].is_a?(Array)
           raise RegistryError, "official catalog has an unsupported or malformed schema"
+        end
+        seen = {}
+        data["entries"].each do |entry|
+          validate_version_entry!(entry)
+          identity = [ entry.fetch("name"), entry.fetch("version") ]
+          raise RegistryError, "official catalog contains a duplicate version entry" if seen[identity]
+          seen[identity] = true
         end
         data
       rescue JSON::ParserError, EncodingError
@@ -96,31 +115,38 @@ module Hive
       end
 
       def resolve_catalog(catalog, name, requested_ref, catalog_commit)
-        workflow = catalog.fetch("workflows").fetch(name) do
-          raise RegistryError, "workflow honeycomb/#{name} is not listed"
-        end
-        unless workflow.is_a?(Hash) && workflow.keys.sort == %w[latest versions] && workflow["versions"].is_a?(Hash)
-          raise RegistryError, "catalog entry for honeycomb/#{name} is malformed"
-        end
-        versions = workflow.fetch("versions")
-        version = if requested_ref.nil?
-                    workflow.fetch("latest")
-        elsif versions.key?(requested_ref)
-                    requested_ref
-        elsif FULL_SHA.match?(requested_ref)
-                    versions.find { |_candidate, entry| entry.is_a?(Hash) && entry["source_commit"] == requested_ref }&.first
-        end
-        raise RegistryError, "requested workflow ref is mutable, abbreviated, or not listed" unless version
+        entries = catalog.fetch("entries").select { |entry| entry.is_a?(Hash) && entry["name"] == name }
+        raise RegistryError, "workflow honeycomb/#{name} is not listed" if entries.empty?
 
-        entry = versions.fetch(version)
-        validate_version_entry!(entry)
+        entry = if requested_ref.nil?
+                  latest = entries.map { |candidate| candidate["latest_version"] }.compact.uniq
+                  candidate = latest.one? && entries.find do |item|
+                    item["version"] == latest.first && item["state"] == "listed" && item["discoverable"] == true
+                  end
+                  candidate
+        elsif RegistryManifest::SEMVER.match?(requested_ref)
+                  entries.find { |candidate| candidate["version"] == requested_ref }
+        elsif RegistryManifest::REVISION.match?(requested_ref)
+                  matches = entries.select { |candidate| candidate["source_sha"] == requested_ref }
+                  raise RegistryError, "requested full source SHA is ambiguous across catalog versions" if matches.length > 1
+                  matches.first
+        end
+        raise RegistryError, "requested workflow ref is mutable, abbreviated, or not listed" unless entry
+        if entry["state"] == "revoked" || entry["exact_resolution"] == "blocked"
+          advisory_ids = entry.fetch("advisories").filter_map { |advisory| advisory["id"] }.join(", ")
+          suffix = advisory_ids.empty? ? "" : " (#{advisory_ids})"
+          raise RegistryError, "honeycomb/#{name}@#{entry.fetch('version')} is revoked#{suffix}"
+        end
+
         Resolution.new(
           name: name,
-          version: version,
-          source_commit: entry.fetch("source_commit"),
+          version: entry.fetch("version"),
+          source_commit: catalog_commit,
           catalog_commit: catalog_commit,
-          manifest_digest: entry.fetch("manifest_digest"),
-          summary: entry.fetch("summary"),
+          source_revision: entry.fetch("source_sha"),
+          manifest_digest: entry.dig("listing_approval", "release_sha256"),
+          hive_min_version: entry.fetch("hive_min_version"),
+          summary: entry.fetch("description"),
           permissions: entry.fetch("permissions")
         ).freeze
       rescue KeyError
@@ -128,27 +154,65 @@ module Hive
       end
 
       def validate_version_entry!(entry)
-        required = %w[manifest_digest permissions source_commit summary]
-        unless entry.is_a?(Hash) && entry.keys.sort == required
+        unless entry.is_a?(Hash) && entry.keys.sort == ENTRY_KEYS.sort
           raise RegistryError, "catalog version entry is malformed"
         end
-        validate_full_sha!(entry["source_commit"], "source commit")
-        unless entry["manifest_digest"].is_a?(String) && Manifest::SHA256.match?(entry["manifest_digest"])
-          raise RegistryError, "catalog manifest digest is malformed"
+        unless RegistryManifest::NAME.match?(entry["name"].to_s) && RegistryManifest::SEMVER.match?(entry["version"].to_s)
+          raise RegistryError, "catalog version identity is malformed"
         end
-        raise RegistryError, "catalog summary is malformed" unless entry["summary"].is_a?(String) && !entry["summary"].empty?
-        Manifest.validate_permissions!(entry["permissions"])
+        if entry["latest_version"] && !RegistryManifest::SEMVER.match?(entry["latest_version"].to_s)
+          raise RegistryError, "catalog latest version is malformed"
+        end
+        unless RegistryManifest::SEMVER.match?(entry["hive_min_version"].to_s)
+          raise RegistryError, "catalog Hive minimum version is malformed"
+        end
+        unless STATES.include?(entry["state"]) && entry["discoverable"] == (entry["state"] == "listed") &&
+               entry["exact_resolution"] == (entry["state"] == "revoked" ? "blocked" : "allowed")
+          raise RegistryError, "catalog lifecycle entry is malformed"
+        end
+        unless %w[community verified].include?(entry["release_tier"]) &&
+               %w[community verified].include?(entry["current_tier"]) &&
+               RegistryManifest::RISKS.include?(entry["permission_risk"])
+          raise RegistryError, "catalog trust entry is malformed"
+        end
+        raise RegistryError, "catalog description is malformed" unless entry["description"].is_a?(String) && !entry["description"].empty?
+        unless entry["author"].is_a?(Hash) && entry["author"].keys.sort == %w[name url] &&
+               entry["author"].values.all? { |value| value.is_a?(String) && !value.empty? }
+          raise RegistryError, "catalog author is malformed"
+        end
+        RegistryManifest.validate_permissions!(entry["permissions"])
+        unless entry["permission_risk"] == entry.dig("permissions", "risk")
+          raise RegistryError, "catalog permission risk does not match its disclosure"
+        end
+        unless RegistryManifest::REVISION.match?(entry["source_sha"].to_s)
+          raise RegistryError, "catalog source revision is malformed"
+        end
+        validate_listing_approval!(entry["listing_approval"])
+        unless entry["history"].is_a?(Array) && entry["advisories"].is_a?(Array) &&
+               entry["install_command"] == "hive workflow install honeycomb/#{entry.fetch('name')}"
+          raise RegistryError, "catalog audit or install metadata is malformed"
+        end
       rescue PackageError
         raise RegistryError, "catalog permission disclosure is malformed"
       end
 
+      def validate_listing_approval!(approval)
+        unless approval.is_a?(Hash) && approval.keys.sort == LISTING_APPROVAL_KEYS.sort &&
+               Manifest::SHA256.match?(approval["release_sha256"].to_s) &&
+               RegistryManifest::REVISION.match?(approval["head_sha"].to_s) &&
+               approval["approved_by"].is_a?(Array) && !approval["approved_by"].empty? &&
+               approval["reviews"].is_a?(Array) && !approval["reviews"].empty?
+          raise RegistryError, "catalog listing approval is malformed"
+        end
+      end
+
       def materialize(checkout, resolution, destination)
-        prefix = "workflows/#{resolution.name}/"
-        manifest_path = "#{prefix}manifest.json"
-        manifest_bytes = git!("-C", checkout, "show", "#{resolution.source_commit}:#{manifest_path}", binary: true)
+        prefix = "packages/#{resolution.name}/#{resolution.version}/"
+        manifest_path = "#{prefix}#{RegistryManifest::FILE_NAME}"
+        manifest_bytes = git!("-C", checkout, "show", "#{resolution.catalog_commit}:#{manifest_path}", binary: true)
         manifest = parse_manifest_bytes(manifest_bytes)
-        expected_paths = [ "manifest.json" ] + manifest.data.fetch("files").map { |entry| entry.fetch("path") }
-        tree = git!("-C", checkout, "ls-tree", "-r", "-z", resolution.source_commit, "--", prefix, binary: true)
+        expected_paths = [ RegistryManifest::FILE_NAME ] + manifest.file_entries.map { |entry| entry.fetch("path") }
+        tree = git!("-C", checkout, "ls-tree", "-r", "-z", resolution.catalog_commit, "--", prefix, binary: true)
         tree_paths = parse_tree(tree, prefix)
         unless tree_paths.sort == expected_paths.sort
           raise RegistryError, "source commit package tree does not match its complete manifest inventory"
@@ -156,8 +220,8 @@ module Hive
 
         FileUtils.mkdir_p(destination, mode: 0o700)
         expected_paths.each do |relative|
-          bytes = relative == "manifest.json" ? manifest_bytes :
-            git!("-C", checkout, "show", "#{resolution.source_commit}:#{prefix}#{relative}", binary: true)
+          bytes = relative == RegistryManifest::FILE_NAME ? manifest_bytes :
+            git!("-C", checkout, "show", "#{resolution.catalog_commit}:#{prefix}#{relative}", binary: true)
           target = File.join(destination, relative)
           FileUtils.mkdir_p(File.dirname(target), mode: 0o700)
           File.binwrite(target, bytes)
@@ -166,9 +230,9 @@ module Hive
 
       def parse_manifest_bytes(bytes)
         Dir.mktmpdir("hive-honeycomb-manifest-") do |dir|
-          path = File.join(dir, Manifest::FILE_NAME)
+          path = File.join(dir, RegistryManifest::FILE_NAME)
           File.binwrite(path, bytes)
-          return Manifest.load(path)
+          return RegistryManifest.load(path)
         end
       end
 
@@ -198,15 +262,6 @@ module Hive
         raise RegistryError, "registry git operation timed out after #{@timeout_sec}s"
       rescue Errno::ENOENT, Errno::EACCES
         raise RegistryError, "git is not available for registry access"
-      end
-
-      def git_success?(*args)
-        _out, _err, status = Timeout.timeout(@timeout_sec) do
-          Open3.capture3({ "LC_ALL" => "C", "LANG" => "C" }, "git", *args)
-        end
-        status.success?
-      rescue Timeout::Error, Errno::ENOENT, Errno::EACCES
-        false
       end
     end
   end

@@ -33,7 +33,7 @@ module Hive
         refuse_authored_collision!(resolution.name)
         staging = File.join(workflows_dir, ".staging-#{resolution.name}-#{Process.pid}-#{SecureRandom.hex(4)}")
         FileUtils.mkdir_p(staging, mode: 0o700)
-        result.manifest.data.fetch("files").map { |entry| entry.fetch("path") }.push(Manifest::FILE_NAME).each do |relative|
+        result.manifest.file_entries.map { |entry| entry.fetch("path") }.push(result.manifest.file_name).each do |relative|
           source = File.join(package_root, relative)
           target = File.join(staging, relative)
           FileUtils.mkdir_p(File.dirname(target), mode: 0o700)

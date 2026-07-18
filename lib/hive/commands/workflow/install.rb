@@ -90,6 +90,15 @@ module Hive
 
         def human_disclosure(resolution, verb: "installed")
           permissions = resolution.permissions
+          if permissions.key?("risk")
+            return [
+              "hive: #{verb} honeycomb/#{resolution.name}@#{resolution.version}",
+              "registry: #{resolution.catalog_commit} source provenance: #{resolution.source_revision} manifest: #{resolution.manifest_digest}",
+              "risk: #{permissions['risk']}; capabilities: #{Array(permissions['capabilities']).join(', ')}",
+              "network: #{Array(permissions['network_hosts']).join(', ')}; read: #{Array(permissions['filesystem_read']).join(', ')}; " \
+                "write: #{Array(permissions['filesystem_write']).join(', ')}; secrets: #{Array(permissions['secrets']).join(', ')}"
+            ]
+          end
           [
             "hive: #{verb} honeycomb/#{resolution.name}@#{resolution.version}",
             "source: #{resolution.source_commit} manifest: #{resolution.manifest_digest}",

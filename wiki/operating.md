@@ -37,8 +37,8 @@ verify the signature, run `gem install` against it, and write an
 `install-channel` marker so `hive update` delegates back to the same channel.
 Runtime gem constraints live in `hive.gemspec` and resolve from rubygems.org:
 the direct set is `thor`, `telegram-bot-ruby`, `faraday`,
-`faraday-multipart`, `bubbletea`, `lipgloss`, `sqlite3`, and
-`unicode-display_width`. The managed llm-wiki indexer, QMD, is installed
+`faraday-multipart`, `bubbletea`, `erb`, `json_schemer`, `lipgloss`, `rexml`,
+`sqlite3`, and `unicode-display_width`. The managed llm-wiki indexer, QMD, is installed
 separately through npm into Hive's data prefix when npm is available; Hive
 does not auto-install Node.js/npm itself.
 

@@ -198,6 +198,20 @@ by `packaging/verify-channel.sh` and the reusable `.github/workflows/install-ver
 3. **Weekly canary** (`install-canary.yml`, Mondays 06:00 UTC + `workflow_dispatch`)
    — re-installs the latest release to catch dependency / base-image drift.
 
+The hivebox image gate is daemon-deep: `packaging/docker/smoke.sh` waits for
+Rails `/health`, then requires daemon-backed `/health?deep=1` to stay healthy
+across the supervisor's ten-second fast-failure window before checking the
+claimable login and owner gate. It probes deep health again afterward. This
+prevents a web-healthy image with a missing or crashlooping CLI/daemon bundle
+from receiving public versioned or `latest` tags.
+
+Both architectures are fail-closed before public tagging. The amd64 and native
+arm64 jobs push untagged content by digest, run the smoke against those exact
+digests, and expose the proven digests as job outputs. Only after both jobs
+succeed does `hivebox-image` create the versioned and `latest` multi-arch
+manifest from those two immutable inputs; it never rebuilds between smoke and
+promotion.
+
 Any failure opens or updates a single **`install-failure`** GitHub issue (one
 aggregation job, so no duplicate spam) naming the run. To check a specific
 version on demand:

@@ -68,6 +68,10 @@ Gem::Specification.new do |spec|
   spec.add_dependency "erb", ">= 4.0"
   spec.add_dependency "faraday", ">= 2.14.2", "< 3.0"
   spec.add_dependency "faraday-multipart", "~> 1.0"
+  # Architecture-patrol manifests are runtime JSON contracts. The scheduler
+  # loads their validator in daemon/web-supervisor processes, so keeping this
+  # dependency test-only makes installed gems and hivebox crash on daemon boot.
+  spec.add_dependency "json_schemer", "~> 2.5"
   spec.add_dependency "lipgloss", "~> 0.2.2"
   # rexml stopped being a default gem in Ruby 3.4, so it is not guaranteed
   # present. The launchd service-installer drift probe parses plists with

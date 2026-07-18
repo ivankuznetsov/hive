@@ -234,81 +234,102 @@ jobs:
             echo "aur-publish: skipped; AUR_SSH_PRIVATE_KEY is not set"
           fi
 
-  # hivebox Docker image — the golden-path install artifact. Multi-arch so
-  # both x86 servers and ARM home boxes (Apple silicon, Pi 5) pull native.
-  # Gated on release-finalize: an image tag should never exist for a version
-  # whose gem failed to publish.
-  hivebox-image:
-    name: hivebox image (ghcr)
+  # Build each native hivebox architecture to an untagged registry digest and
+  # smoke that exact digest before any public version/latest tag can exist.
+  # The promotion job below creates one multi-arch manifest from only the two
+  # already-proven digests.
+  hivebox-image-amd64:
+    name: hivebox image smoke (amd64)
     runs-on: ubuntu-24.04
     needs: release-finalize
     permissions:
       contents: read
       packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     steps:
       - uses: actions/checkout@v7
-      - uses: docker/setup-qemu-action@v4
       - uses: docker/setup-buildx-action@v4
       - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Derive tags
-        id: tags
-        run: |
-          version="${GITHUB_REF_NAME#v}"
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
-      # Build-test-THEN-push: the amd64 image boots and passes the
-      # golden-path front-door smoke before any tag reaches the registry.
       - uses: docker/build-push-action@v7
+        id: build
         with:
           context: .
           file: packaging/docker/Dockerfile
           platforms: linux/amd64
-          load: true
-          tags: hivebox-prepush:smoke
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-      - name: Smoke the image before publishing (linux/amd64)
-        run: packaging/docker/smoke.sh hivebox-prepush:smoke
+          outputs: type=image,name=ghcr.io/${{ github.repository_owner }}/hivebox,push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=hivebox-amd64
+          cache-to: type=gha,mode=max,scope=hivebox-amd64
+      - name: Smoke the exact amd64 digest
+        env:
+          OWNER: ${{ github.repository_owner }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: packaging/docker/smoke.sh "ghcr.io/${OWNER}/hivebox@${DIGEST}"
+
+  hivebox-image-arm64:
+    name: hivebox image smoke (arm64, native docker)
+    runs-on: ubuntu-24.04-arm
+    needs: release-finalize
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - uses: docker/build-push-action@v7
+        id: build
         with:
           context: .
           file: packaging/docker/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/hivebox:${{ steps.tags.outputs.version }}
-            ghcr.io/${{ github.repository_owner }}/hivebox:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-  # The published image is a multi-arch manifest; this verifies the arm64
-  # variant actually boots from the registry post-publish (multi-arch manifests
-  # only exist after push). It runs on a native arm64 *Linux* runner with
-  # native Docker — NOT macOS/colima: hosted macOS runners are Apple M-series
-  # with nested virtualization disabled, so colima (VZ or QEMU+HVF) cannot boot
-  # a VM there at all (#463 — even setup-docker-macos-action refuses with
-  # "Detected M-series processor runner without nested virtualization
-  # support"). arm64 Linux pulls the arm64 image and runs it with no VM layer.
-  hivebox-smoke-arm64:
-    name: hivebox image smoke (arm64, native docker)
-    runs-on: ubuntu-24.04-arm
-    needs: hivebox-image
-    permissions:
-      packages: read
-    steps:
-      - uses: actions/checkout@v7
-      - name: Log in to ghcr
-        env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ACTOR: ${{ github.actor }}
-        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
-      - name: Smoke the published arm64 image (pulled native)
+          platforms: linux/arm64
+          outputs: type=image,name=ghcr.io/${{ github.repository_owner }}/hivebox,push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=hivebox-arm64
+          cache-to: type=gha,mode=max,scope=hivebox-arm64
+      - name: Smoke the exact arm64 digest
         env:
           OWNER: ${{ github.repository_owner }}
-        run: packaging/docker/smoke.sh "ghcr.io/${OWNER}/hivebox:${GITHUB_REF_NAME#v}"
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: packaging/docker/smoke.sh "ghcr.io/${OWNER}/hivebox@${DIGEST}"
+
+  hivebox-image:
+    name: hivebox image (ghcr)
+    runs-on: ubuntu-24.04
+    needs: [hivebox-image-amd64, hivebox-image-arm64]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Promote the two proven digests
+        env:
+          OWNER: ${{ github.repository_owner }}
+          AMD64_DIGEST: ${{ needs.hivebox-image-amd64.outputs.digest }}
+          ARM64_DIGEST: ${{ needs.hivebox-image-arm64.outputs.digest }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          image="ghcr.io/${OWNER}/hivebox"
+          docker buildx imagetools create \
+            --tag "${image}:${version}" \
+            --tag "${image}:latest" \
+            "${image}@${AMD64_DIGEST}" \
+            "${image}@${ARM64_DIGEST}"
+          docker buildx imagetools inspect "${image}:${version}"
 
   aur-publish:
     name: Publish AUR hive-bin

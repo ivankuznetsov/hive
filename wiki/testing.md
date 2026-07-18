@@ -251,20 +251,23 @@ on coarse CI filesystems. The production path also depends on
 written in the same second as the baseline can be reported as older or equal.
 
 The packaged hivebox image smoke lives at `packaging/docker/smoke.sh`: it
-boots a fresh container on a random host port, polls `/health`, asserts the
-ownerless `/login` page is claimable, and verifies unauthenticated `/` is
-owner-gated with a 302. The image's runtime Docker `HEALTHCHECK` is deeper
-than that smoke and hits `/health?deep=1`, so a stale/missing daemon pidfile
-turns the container unhealthy even when Rails is still serving.
-`.github/workflows/release.yml` runs that smoke against the amd64 image before
-any GHCR push. After publish, `hivebox-smoke-arm64` runs on
-`ubuntu-24.04-arm`, logs into GHCR, pulls
-`ghcr.io/<owner>/hivebox:${GITHUB_REF_NAME#v}`, and runs the same smoke against
-the native arm64 Linux image without a VM layer. Commit `54fd3455` replaced the
-previous hosted macOS/Colima check after proving hosted Apple Silicon runners
-cannot provide the nested virtualization Colima needs; its commit message
-records a green validation against the live `ghcr.io/ivankuznetsov/hivebox:0.3.1`
-arm64 image on a real arm64 runner. Current `.github/workflows/ci.yml` does not
+boots a fresh container on a random host port, polls Rails `/health`, requires
+daemon-backed `/health?deep=1` to stay healthy across the supervisor's
+ten-second fast-failure window, asserts the ownerless `/login` page is
+claimable, verifies unauthenticated `/` is owner-gated with a 302, and probes
+deep health once more. The
+image's runtime Docker `HEALTHCHECK` uses the same deep endpoint, so a missing
+runtime gem, crashlooping daemon, or stale/missing daemon pidfile fails the
+publish smoke even when Rails is still serving.
+`test/unit/packaging/verify_release_test.rb` executes the smoke against stubbed
+Docker/curl commands to prove one transient deep-health success cannot pass.
+`.github/workflows/release.yml` pushes amd64 and native arm64 content without
+public tags, runs the smoke against each exact registry digest, and promotes
+only those two proven digests into the versioned and `latest` multi-arch tags.
+The native arm64 job runs on `ubuntu-24.04-arm`; a failed architecture smoke
+therefore leaves no public release tag to pull. Commit `54fd3455` established
+the native runner after proving hosted Apple Silicon runners cannot provide
+the nested virtualization Colima needs. Current `.github/workflows/ci.yml` does not
 build or smoke a local hivebox Docker image on push/PR; it covers the Rails web
 tests, the golden-path browser E2E, and the Windows installer-script harness.
 The Windows CI surface is

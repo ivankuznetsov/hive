@@ -41,6 +41,14 @@ class GemspecTest < Minitest::Test
     assert_includes spec.files, "bin/hv"
   end
 
+  def test_runtime_dependencies_include_architecture_patrol_schema_validator
+    spec = Gem::Specification.load(GEMSPEC_PATH)
+    dependency = spec.runtime_dependencies.find { |candidate| candidate.name == "json_schemer" }
+
+    refute_nil dependency
+    assert dependency.requirement.satisfied_by?(Gem::Version.new("2.5.0"))
+  end
+
   # The web tier is a Rails app under web/, supported only in the Docker
   # image or a source checkout — the gem must stay a lean CLI and not
   # package the app or its old Sinatra-era assets.

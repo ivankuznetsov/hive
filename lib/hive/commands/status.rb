@@ -22,6 +22,7 @@ require "hive/task_resolver"
 require "hive/brainstorm_parser"
 require "hive/gh"
 require "hive/pr"
+require "hive/process_kill"
 require "hive/tui/views/hyperlink"
 
 module Hive
@@ -1242,12 +1243,7 @@ module Hive
       end
 
       def pid_alive?(pid)
-        Process.kill(0, pid)
-        true
-      rescue Errno::ESRCH
-        false
-      rescue Errno::EPERM
-        true
+        Hive::ProcessKill.pid_alive?(pid)
       end
 
       def task_lock_holder(task)

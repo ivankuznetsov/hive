@@ -3,6 +3,7 @@ require "fileutils"
 require "json"
 require "time"
 require "hive/atomic_file"
+require "hive/stringify_keys"
 require "hive/task_journal/envelope"
 require "hive/conditions/value"
 
@@ -211,7 +212,7 @@ module Hive
       end
 
       def append_idempotent(attributes, idempotency_key:)
-        input = Envelope.stringify(attributes)
+        input = Hive::StringifyKeys.call(attributes)
         payload = input["payload"] ||= {}
         payload["idempotency_key"] = idempotency_key.to_s
         record = Envelope.authoritative(input, id_generator: @id_generator, clock: @clock)

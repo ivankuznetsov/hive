@@ -138,6 +138,11 @@ refusal and normal skip marker.
 
 Implementation ownership has focused unit coverage in `implementation_identity/{resolver,store,reconstructor}_test.rb`, `task_journal_test.rb`, `task_projection_test.rb`, `attempts/generation_test.rb`, `protected_files_test.rb`, agent/profile argv tests, the three implementation-owning stage launch tests, status/schema correspondence, and the TUI detail view. These tests pin durable-before-spawn ordering, journal/projection tamper detection, fail-closed downstream generation reads, project/task/generation-bound legacy reconstruction, persisted-provider failure attribution, generation idempotency/conflicts, raw partial overrides, legacy precedence, exact Claude/Codex argv, provider-default pi/grok behavior, and honest unsupported effort.
 
+`stringify_keys_test.rb` pins the shared recursive key transform's deep-copy
+contract. The task-journal, condition evidence/policy/reconciler, attempt
+generation, and Screenote credential suites exercise every migrated consumer;
+their combined focused run is 42 runs and 184 assertions.
+
 ## Integration suite (`test/integration/`)
 
 | File | Covers |

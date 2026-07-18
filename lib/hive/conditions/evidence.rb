@@ -1,3 +1,5 @@
+require "hive/stringify_keys"
+
 module Hive
   module Conditions
     class InvalidEvidence < Hive::Error; end
@@ -14,7 +16,7 @@ module Hive
       module_function
 
       def validate!(value, allowed: nil)
-        evidence = stringify(value)
+        evidence = Hive::StringifyKeys.call(value)
         raise InvalidEvidence, "condition evidence must be an object" unless evidence.is_a?(Hash)
 
         type_name = evidence["type"].to_s
@@ -52,14 +54,6 @@ module Hive
 
       def missing_value?(value)
         value.nil? || (value.respond_to?(:empty?) && value.empty?)
-      end
-
-      def stringify(value)
-        case value
-        when Hash then value.to_h { |key, child| [ key.to_s, stringify(child) ] }
-        when Array then value.map { |child| stringify(child) }
-        else value
-        end
       end
 
       def deep_freeze(value)

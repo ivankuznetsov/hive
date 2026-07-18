@@ -16,6 +16,8 @@ class WorkflowFlowTest < ApplicationSystemTestCase
     click_link "Workflows"
 
     assert_current_path workflows_path
+    select @project, from: "Project workflows"
+    click_button "View workflows"
     assert_selector "h2", text: "#{@project} workflows", wait: 5
     assert_selector "[data-workflow-origin='built_in']", text: /coding.*default/m
     assert_selector "select[name='template'] option:checked", text: "blank"

@@ -691,10 +691,15 @@ pre {
     order: 3;
     flex: 1 0 100%;
     flex-wrap: nowrap;
+    justify-content: space-between;
+    gap: 0;
     overflow-x: auto;
     scrollbar-width: none;
   }
-  .topbar .nav-link { padding: 5px 8px; font-size: 0.86rem; }
+  .topbar .nav-link {
+    padding: 5px clamp(4px, 1.5vw, 6px);
+    font-size: clamp(0.75rem, 3.5vw, 0.86rem);
+  }
   .topbar nav::-webkit-scrollbar { display: none; }
   .session-login { display: none; }
   .task-row { grid-template-columns: 1fr; gap: 8px; }

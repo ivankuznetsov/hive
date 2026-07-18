@@ -24,6 +24,7 @@ reconciles and applies policy; it does not own or reap task agents.
 | `DetachedLauncher` | Reject unsupported platforms before handoff, create a POSIX session, and start the private supervisor route. |
 | `Supervisor` | Claim, first-heartbeat, spawn the existing Hive command, heartbeat, frame output, enforce timeout/cancellation, and terminalize. |
 | `Client` | Tail frames read-only and replay a terminal result. Interrupt means detach; it never signals the owner group. |
+| `CommandDispatch` | Give `hive run` and workflow stage commands one attach-result policy: shared durable dispatch, lost-attempt translation, receipt exit propagation, and single-document JSON fallback when a failed worker emitted no stdout. |
 | `Reconciler`, `ProcessIdentity` | Adopt without `wait2`, detect PID/start/session/group mismatch, preserve suspects, expire launches, and normalize loss. |
 | `DirtyStateCapture`, `LostOutcomeStore` | Inventory partial git/untracked/binary work without mutation and make cleanup/successor policy restart-idempotent. |
 | `LegacyBackfiller` | Create a compatibility lease only when legacy task/PID/start identity is trustworthy. |
@@ -109,9 +110,13 @@ dependency changes. It immediately deletes every inherited
 the admission bypass. The attempt transport cannot supply a dedicated store
 override, and production exposes neither public context construction nor a
 `Context.with` override. The authenticated context remains only in the worker
-process. An attached client records whether any stdout frame was replayed; a
-non-zero terminal result with no worker stdout is routed through the command's
-normal versioned JSON error envelope instead of returning an empty document.
+process. An attached client records whether any stdout frame was replayed.
+`Hive::Attempts::CommandDispatch` applies that result identically for `hive
+run` and workflow verbs: a non-zero terminal result with no worker stdout is
+routed through the owning command's normal versioned JSON error envelope
+instead of returning an empty document; a worker-emitted document is never
+duplicated; lost attempts without output become the command's typed concurrent
+run error; and every other non-zero receipt preserves its exit status.
 
 This is an application ownership boundary, not privilege separation. Hive's
 configured global attempt store, its `HIVE_HOME`/`XDG_STATE_HOME`/`HOME`

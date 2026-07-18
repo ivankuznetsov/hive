@@ -12,7 +12,9 @@ launches or attaches to its detached supervisor (or replays its receipt),
 streams output read-only, and returns the receipt's exit status. Inside the
 wrapper, the worker takes the task lock and revalidates dependency admission
 from disk before loading config, rebasing, or invoking the stage runner.
-Caller or daemon exit does not cancel accepted work.
+Caller or daemon exit does not cancel accepted work. Public `run` and workflow
+verbs share `Hive::Attempts::CommandDispatch` for attachment failure handling;
+they differ only in intended-stage resolution and the worker argv they admit.
 
 ## Usage
 

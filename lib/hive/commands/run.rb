@@ -13,12 +13,13 @@ require "hive/task_resolver"
 require "hive/dependency_snapshot"
 require "hive/attempts/context"
 require "hive/conditions/transition_guard"
-require "hive/attempts/entrypoint"
+require "hive/attempts/command_dispatch"
 
 module Hive
   module Commands
     class Run
       include Hive::Schemas::EnvelopeEmitter
+      include Hive::Attempts::CommandDispatch
 
       # Single source of truth for the hive-run JSON envelope's required keys.
       # `report_json` builds the payload from this list so the schema-drift
@@ -94,38 +95,8 @@ module Hive
         ).resolve
       end
 
-      def dispatch_durable
-        task = resolve_task
-        result = (@attempt_entrypoint || Hive::Attempts::Entrypoint.new).dispatch(
-          task: task,
-          intended_stage: "#{task.stage_index}-#{task.stage_name}",
-          argv: durable_worker_argv(task),
-          interactive: true
-        )
-        handle_durable_failure!(result) unless result.exit_status.zero?
-
-        result
-      end
-
-      def handle_durable_failure!(result)
-        if result.status == :lost
-          exit(result.exit_status) if @json && result.stdout_emitted?
-
-          raise Hive::ConcurrentRunError,
-                "durable attempt lost before producing a receipt for #{@target}: #{result.attempt_id}"
-        end
-
-        if @json && !result.stdout_emitted?
-          raise Hive::AttemptExecutionError.new(
-            "durable attempt #{result.attempt_id} finished with #{result.outcome || 'an error'} " \
-            "(exit #{result.exit_status}) before emitting JSON",
-            exit_code: result.exit_status,
-            attempt_id: result.attempt_id,
-            outcome: result.outcome
-          )
-        end
-
-        exit(result.exit_status)
+      def durable_intended_stage(task)
+        "#{task.stage_index}-#{task.stage_name}"
       end
 
       def durable_worker_argv(task)

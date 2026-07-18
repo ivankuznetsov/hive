@@ -42,6 +42,7 @@ Rails.application.routes.draw do
   post "repos" => "repos#create", as: :create_repo
 
   get  "agents" => "agents#index", as: :agents
+  post "agents/skills/repair" => "agents#repair_skills", as: :agent_skills_repair
   post "agents/:agent/login" => "agents#start_login", as: :agent_login,
        constraints: { agent: /claude|codex|grok|gh/ }
   get  "agents/:agent/login/:session_id" => "agents#login_status", as: :agent_login_status,

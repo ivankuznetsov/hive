@@ -215,7 +215,14 @@ origin also prints the Host-header/reverse-proxy warning.
   render-safe UTF-8 before the `<pre>` output is interpolated, and captured
   URLs are sanitized by replacing ANSI/terminal-control runs with spaces
   before re-extracting the first URL so adjacent URLs are split rather than
-  spliced into one href.
+  spliced into one href. The page also exposes the managed-skill health model
+  shared with `hive doctor`: the operator explicitly checks one registered
+  project at a time (opening Agents does not synchronously inventory every
+  agent CLI), then sees per-capability health and remediation. **Repair safe
+  changes** delegates to `hive setup-agents`' in-process command with explicit
+  browser consent and a non-TTY input. It installs or updates missing/stale
+  Hive-managed packages and rechecks the result; conflicting and custom skills
+  retain the provisioner's no-overwrite behavior.
 - **Telegram** — first-timer setup guide (collapsible, open while the bot is
   unconfigured) covering BotFather `/newbot`, numeric chat IDs from
   `@userinfobot`, sending `/start` before the round-trip test, the
@@ -269,7 +276,8 @@ route queues the marker-clear command plus the hidden rerun sequence. It also
 pins the Telegram first-run guide shape and strict chat-ID validation, repo
 clone target refusal for non-directories, agent-login status rendering for
 binary PTY output, Grok route reachability, and operator-ward poll flows,
-root favicon/icon assets,
+managed-skill opt-in inspection and consent-gated repair, root favicon/icon
+assets,
 plain-vs-deep health semantics, the oversized diff cap/truncation notice,
 media route streaming/refusal cases, and captured/skipped/failed Demo
 rendering. Repos coverage pins the workflow select's built-in fresh list and

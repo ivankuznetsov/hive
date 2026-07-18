@@ -12,6 +12,7 @@ class AgentsTest < ActionDispatch::IntegrationTest
     # AgentsController.agents_auth is a class-memoized process singleton —
     # drop it so a seeded session can't leak into another test.
     AgentsController.instance_variable_set(:@agents_auth, nil)
+    AgentsController.instance_variable_set(:@agent_skills, nil)
   end
 
   test "login_status renders binary CLI output as 200, not a 500" do
@@ -90,6 +91,62 @@ class AgentsTest < ActionDispatch::IntegrationTest
                     "polling must stop once the login is done")
   end
 
+  test "managed skill health is explicit and checked only for the selected project" do
+    project = register_skill_project("agent-health-app")
+    calls = []
+    rows = [
+      skill_row(health: "healthy", agent: "claude", capability: "ce-brainstorm"),
+      skill_row(health: "missing", agent: "codex", capability: "wiki-plan"),
+      skill_row(health: "conflicting", agent: "claude", capability: "ce-code-review")
+    ]
+    install_agent_skills_fake(
+      inspect: lambda do |entry|
+        calls << entry.fetch("name")
+        rows
+      end
+    )
+    sign_in!(login: "alice")
+
+    get agents_path
+    assert_response :success
+    assert_empty calls, "opening Agents must not synchronously inventory every registered project's CLIs"
+    assert_select "select[name='project'] option[value='#{project}']"
+
+    get agents_path, params: { project: project }
+    assert_response :success
+    assert_equal [ project ], calls
+    assert_select "[data-skill-health='healthy']", text: /ce-brainstorm/
+    assert_select "[data-skill-health='missing']", text: /wiki-plan/
+    assert_select "[data-skill-health='conflicting']", text: /ce-code-review/
+    assert_select "form[action='#{agent_skills_repair_path}'] input[name='consent'][value='repair_managed_skills']"
+    assert_match "Conflicting and custom skills stay untouched", response.body
+  end
+
+  test "managed skill repair requires explicit browser consent and rechecks the project" do
+    project = register_skill_project("agent-repair-app")
+    repairs = []
+    rows = [ skill_row(health: "healthy") ]
+    install_agent_skills_fake(
+      inspect: ->(_entry) { rows },
+      repair: lambda do |entry|
+        repairs << entry.fetch("name")
+        { "classification" => "success", "exit_code" => 0 }
+      end
+    )
+    sign_in!(login: "alice")
+
+    post agent_skills_repair_path, params: { project: project }
+    assert_response :unprocessable_entity
+    assert_empty repairs, "a crafted POST without the form's consent marker must not provision agent files"
+
+    post agent_skills_repair_path,
+         params: { project: project, consent: "repair_managed_skills" }
+
+    assert_redirected_to agents_path(project: project)
+    assert_equal [ project ], repairs
+    assert_equal "Managed agent skills are ready for #{project}.", flash[:notice]
+  end
+
   test "paste-back agent (claude) keeps the code form and stops polling at the URL" do
     sign_in!(login: "alice")
     seed_session("sess-claude", agent: "claude", url: "https://claude.ai/device",
@@ -104,6 +161,34 @@ class AgentsTest < ActionDispatch::IntegrationTest
   end
 
   private
+
+  def register_skill_project(name)
+    dir = File.join(ENV.fetch("HIVE_TEST_HOME_ROOT"), "skill-projects", name)
+    FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+    File.write(File.join(dir, ".hive-state", "config.yml"), { "project_name" => name }.to_yaml)
+    Hive::Config.register_project(name: name, path: dir, repository_identity: nil)
+    name
+  end
+
+  def install_agent_skills_fake(inspect:, repair: ->(_entry) { raise "unexpected repair" })
+    service = Object.new
+    service.define_singleton_method(:inspect, &inspect)
+    service.define_singleton_method(:repair, &repair)
+    AgentsController.instance_variable_set(:@agent_skills, service)
+  end
+
+  def skill_row(health:, agent: "claude", capability: "ce-brainstorm")
+    {
+      "agent" => agent,
+      "capability" => capability,
+      "surfaces" => [ "brainstorm" ],
+      "managed" => true,
+      "health" => health,
+      "severity" => health == "healthy" ? "info" : "error",
+      "explanation" => "#{capability} is #{health}",
+      "remediation" => "hive setup-agents --agent #{agent} --skill #{capability}"
+    }
+  end
 
   def seed_session(id, agent:, url:, output:, done:, error: nil)
     session = Hive::Web::AgentsAuth::Session.new(

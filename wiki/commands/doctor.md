@@ -25,7 +25,10 @@ commands, alias writes, or network/model calls.
 including `brainstorm`, `plan`, `review.reviewers`, optional browser testing,
 ad-hoc reviewers, and enabled patrol reviewers. Manifest-known built-ins are
 managed. Native reviewers and custom skills remain visible but never become
-setup operations.
+setup operations. When a registered agent has no Hive skill resolver (for
+example Grok), an unmanaged custom reviewer remains visible as informational
+`unavailable` evidence instead of aborting the whole report; Hive leaves that
+skill's installation and resolution to the agent's own tooling.
 
 `Hive::AgentSkills::Inspector` uses
 `AgentProfiles.lookup(name, cfg: config)`, so project binary overrides match

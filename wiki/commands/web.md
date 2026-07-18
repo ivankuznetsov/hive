@@ -111,6 +111,9 @@ origin also prints the Host-header/reverse-proxy warning.
   `Hive::Commands::Daemon` CLI object; the view also reads
   `StatusReport::BINARY_DRIFT_ACTIONABLE` for the Repair affordance, so CLI
   JSON and web drift handling share the same producer constants.
+  A running supervised hivebox daemon intentionally has no separate platform
+  service unit; the strip therefore shows CLI repair guidance only when the
+  daemon is actually down, not merely when `service_installed` is false.
 - **Task page** — state-driven actions (Retry stage for red
   `recover_review` / `recover_execute` / `error` rows; Approve only when the
   marker makes a forward move possible; Run <verb> only when the project daemon
@@ -321,15 +324,17 @@ and avoids requiring `sh` or Git Bash volume-path translation.
 `.github/workflows/release.yml` publishes the matching multi-arch GHCR image as
 `ghcr.io/<owner>/hivebox:<version>` and `ghcr.io/<owner>/hivebox:latest` after
 `release-finalize` succeeds. Image publishing is smoke-gated by
-`packaging/docker/smoke.sh`: the release job boots the amd64 image before
-pushing tags, and the post-publish `hivebox-smoke-arm64` job pulls the arm64
-registry image on native `ubuntu-24.04-arm` Docker and runs the same smoke
-against the published manifest. This replaced the old hosted macOS/Colima
+`packaging/docker/smoke.sh`: native amd64 and arm64 jobs each push untagged
+content by digest, require both `/health` and a ten-second stable window of
+daemon-backed `/health?deep=1`, and recheck deep health after the front-door
+assertions. Only then does a promotion job attach the versioned and `latest`
+tags to a multi-arch manifest built from those exact proven digests. The arm64
+job runs on native `ubuntu-24.04-arm` Docker. This replaced the old hosted macOS/Colima
 attempt: hosted Apple Silicon runners do not expose nested virtualization, so
 Colima cannot boot a Linux VM there. Current `.github/workflows/ci.yml` does
 not run a push/PR Docker image smoke; it covers Rails web tests, the
-golden-path browser E2E, and the Windows installer harness. The smoke is
-intentionally front-door only (`/health`,
+golden-path browser E2E, and the Windows installer harness. The smoke covers
+web and daemon health plus the front door (`/health`, `/health?deep=1`,
 claimable `/login`, owner-gated `/`). The Windows workflow cannot run Linux
 containers on hosted runners, so it syntax-checks `install-box.ps1` and runs
 `packaging/docker/test-install-box.ps1` against a stubbed Docker CLI to pin the

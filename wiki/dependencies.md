@@ -7,7 +7,7 @@ updated: 2026-07-18
 tags: [dependencies, gems, runtime]
 ---
 
-**TLDR**: The `hive-cli` gem has ten direct runtime gems; root development/test tooling is declared in `Gemfile`; the Rails hivebox app under `web/` carries its own bundle. Sinatra, rack-protection, and puma left the gem runtime with the Rails web rewrite, while the web bundle owns Rails/Turbo/solid-stack dependencies plus Redcarpet for sanitized markdown artifact rendering.
+**TLDR**: The `hive-cli` gem has eleven direct runtime gems; root development/test tooling is declared in `Gemfile`; the Rails hivebox app under `web/` carries its own bundle. Sinatra, rack-protection, and puma left the gem runtime with the Rails web rewrite, while the web bundle owns Rails/Turbo/solid-stack dependencies plus Redcarpet for sanitized markdown artifact rendering.
 
 `hive.gemspec` owns runtime gem constraints; `Gemfile` uses `gemspec`
 to pull those constraints into Bundler, then adds development/test-only
@@ -29,7 +29,10 @@ as of this refresh.
 | `faraday` | `>= 2.14.2, < 3.0` (locked 2.14.2) | HTTP transport used directly by `Hive::Bot::Transcriber` and indirectly through `telegram-bot-ruby`. The lower bound is the bundler-audit floor for CVE-2026-33637 / GHSA-5rv5-xj5j-3484. |
 | `faraday-multipart` | `~> 1.0` (locked 1.2.0) | Multipart upload support for `Hive::Bot::Transcriber` voice-note POSTs and Telegram Bot API file transport. |
 | `bubbletea` | `~> 0.1.4` | MVU runtime for `hive tui`. FFI binding to the Charm Go library. Owns alt-screen lifecycle, raw-mode toggling, resize handling, and the keystroke event stream. `Hive::Tui::App.run_charm` boots a `Bubbletea::Runner` against the `Hive::Tui::BubbleModel` adapter. |
+| `erb` | `>= 4.0` | Template rendering used by stages, task creation, workflows, and display names. Declared because Ruby is unbundling it and packaged installs cannot assume it is present. |
 | `lipgloss` | `~> 0.2.2` | Lipgloss-ruby — declarative terminal styles consumed by every `Hive::Tui::Views::*` module (`Style#foreground/.bold/.reverse/.border/.padding/.render`). FFI binding to the Charm Go library. ANSI is stripped when stdout isn't a tty (the v0.2.2 limitation tracked in `docs/solutions/2026-04-27-charm-bubbletea-api-gaps.md`). |
+| `json_schemer` | `~> 2.5` (locked 2.5.0) | Runtime JSON Schema validation for architecture-patrol manifests in daemon and hivebox supervisor processes; also reused by the e2e schema validator. |
+| `rexml` | `~> 3.2` | Launchd plist parsing for daemon install/status drift checks; explicit because Ruby 3.4 no longer guarantees it as a default gem. |
 | `sqlite3` | `~> 2.0` | Runtime token-usage store for `Hive::UsageDb`; loaded lazily when agent usage rows are written or queried. |
 | `unicode-display_width` | `~> 3.2` | Terminal display-cell measurement for TUI table layout. `Hive::Tui::Views::Format` uses it to truncate and pad wide glyphs such as emoji without shifting fixed columns. |
 
@@ -75,7 +78,6 @@ Why Bubble Tea + Lipgloss (over the original curses choice): MVU keeps every sta
 |-----|---------|---------|
 | `minitest` | `~> 6.0` (locked 6.0.6) | Test framework — all tests under `test/` extend `Minitest::Test`. Chosen over RSpec for lower ceremony. Bumped 5.x → 6.0 in commit `429ff4c`. |
 | `rake` | `~> 13.0` (locked 13.4.2) | Task runner — `Rakefile` defines `rake test` (default) using `Rake::TestTask`. |
-| `json_schemer` | `~> 2.5` (locked 2.5.0) | Test/e2e JSON Schema validator for `schemas/hive-*.json` contracts. Used by `test/e2e/lib/json_validator.rb`; not loaded by runtime commands. |
 | `rubocop` | `~> 1.88` (locked 1.88.0 in the root bundle) | Linter — config in `.rubocop.yml`. `bin/rubocop` is the canonical lint command. |
 | `rubocop-rails-omakase` | `~> 1.1` (locked 1.1.0) | Rails/Omakase lint rules layered onto RuboCop. Declared in the root dev/test bundle and mirrored in the web bundle. |
 | `brakeman` | `~> 8.0` (locked 8.0.5 in the root bundle; 8.0.4 in the web bundle) | Static security scanner. `CONTRIBUTING.md` lists `bundle exec brakeman --no-pager`; the web app also has `web/bin/brakeman`. |

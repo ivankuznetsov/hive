@@ -37,8 +37,8 @@ verify the signature, run `gem install` against it, and write an
 `install-channel` marker so `hive update` delegates back to the same channel.
 Runtime gem constraints live in `hive.gemspec` and resolve from rubygems.org:
 the direct set is `thor`, `telegram-bot-ruby`, `faraday`,
-`faraday-multipart`, `bubbletea`, `lipgloss`, `sqlite3`, and
-`unicode-display_width`. The managed llm-wiki indexer, QMD, is installed
+`faraday-multipart`, `bubbletea`, `erb`, `json_schemer`, `lipgloss`, `rexml`,
+`sqlite3`, and `unicode-display_width`. The managed llm-wiki indexer, QMD, is installed
 separately through npm into Hive's data prefix when npm is available; Hive
 does not auto-install Node.js/npm itself.
 
@@ -188,7 +188,11 @@ script installs a published release into an isolated XDG/HIVE_HOME/HOME
 tmp prefix, walks the command surface (`hive --version`, `hive doctor`,
 `hive init`, `hive new`, `hive status --json`, `hive daemon install
 [--force] --json`, `hive uninstall`), validates JSON envelopes against
-the published schemas, and asserts no state leaks outside the prefix.
+the published schemas, and asserts no state leaks outside the prefix. It also
+prepends inert `systemctl`/`launchctl` stubs inside that prefix: a rewritten
+`HOME` confines unit files but does not isolate the live per-user service
+manager, so verifier lifecycle calls must never reach the operator's actual
+Hive services.
 
 Local usage:
 

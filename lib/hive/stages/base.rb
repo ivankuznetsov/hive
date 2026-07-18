@@ -1,3 +1,4 @@
+require "digest"
 require "erb"
 require "fileutils"
 require "securerandom"
@@ -143,7 +144,7 @@ module Hive
           manifest = store.manifest(task.workflow.id.to_s, task.workflow_commit, task.workflow_manifest_digest)
           runtime_policy = Hive::WorkflowPackage::RuntimePolicy.compile(
             manifest.data.fetch("permissions"), task_folder: task.folder, profile: profile,
-            policy_dir: File.join(task.folder, ".hive-policy", stage_name.to_s)
+            policy_dir: managed_policy_dir(task, stage_name)
           )
           return {
             add_dirs: runtime_policy.directories,
@@ -182,6 +183,14 @@ module Hive
           allowed_tools: scope.allowed_tools,
           disallowed_tools: scope.disallowed_tools
         }
+      end
+
+      # Policy files are enforcement state, so they must not live below the
+      # task directory that managed agents can write. The digest also keeps
+      # task and stage policy material isolated without exposing task names.
+      def managed_policy_dir(task, stage_name)
+        identity = ::Digest::SHA256.hexdigest("#{File.expand_path(task.folder)}\0#{stage_name}")
+        File.join(task.hive_state_path, ".managed-policies", identity)
       end
 
       # The three tool-scoping kwargs every spawn site forwards from a

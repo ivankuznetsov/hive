@@ -414,7 +414,7 @@ module Hive
     option :yes, type: :boolean, default: false,
                  desc: "confirm install/update/remove in JSON or non-interactive mode"
     option :dry_run, type: :boolean, default: false,
-                     desc: "for `update`: validate and report without changing project state"
+                     desc: "for `install`, `update`, or `remove`: validate and report without changing project state"
     option :allow_escalation, type: :boolean, default: false,
                               desc: "for `update`: separately allow a security capability increase"
     option :version, type: :string,

@@ -17,7 +17,7 @@ module Hive
       ].freeze
       ALWAYS_DENIED_TOOLS = %w[WebSearch Task Skill EnterPlanMode ExitPlanMode AskUserQuestion].freeze
       SAFE_ENV_KEYS = %w[HOME LANG LC_ALL TMPDIR].freeze
-      COMMAND_META = /[|<>`\n\r]|\$\(|\$\{|\*\*(?!\z)/
+      COMMAND_META = /[|<>&`\n\r]|\$\(|\$\{|\*\*(?!\z)/
       DOMAIN = /\A(?:\*\.)?[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\z/i
 
       Policy = Data.define(

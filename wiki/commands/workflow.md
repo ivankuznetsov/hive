@@ -3,7 +3,7 @@ title: hive workflow
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/workflow.rb, templates/workflows/
 created: 2026-06-21
-updated: 2026-07-15
+updated: 2026-07-18
 tags: [command, workflow, authoring, honeycomb, registry]
 ---
 
@@ -16,10 +16,12 @@ hive workflow new my-flow
 hive workflow new my-flow --template writing
 hive workflow new my-flow --json
 hive workflow install honeycomb/repo-brief --yes
+hive workflow install honeycomb/repo-brief --dry-run --json
 hive workflow list --json
 hive workflow update repo-brief --dry-run --json
 hive workflow update repo-brief --yes --allow-escalation
 hive workflow remove repo-brief --yes
+hive workflow remove repo-brief --dry-run --json
 hive workflow publish my-flow --version 1.0.0
 ```
 
@@ -40,7 +42,9 @@ generation. Loader fingerprints include managed locks and selected generations,
 while a pinned task loads its exact descriptor directly from the managed store.
 
 Consent is deliberately non-composable. JSON and non-TTY install/remove/update
-require `--yes`. An update that adds tools/directories/commands/domains,
+require `--yes` for mutation. `--dry-run --json` on all three commands returns
+the exact permission, diff, or retained/deletable-generation consequences
+without requiring consent and without changing project state. An update that adds tools/directories/commands/domains,
 credentials, dependencies, removes deny rules, or changes an incomparable
 dependency additionally requires `--allow-escalation`. Dry-run validates and
 reports content, dependency, security, and file categories without a project
@@ -94,7 +98,8 @@ document with `ok: false`, `error_class`, `exit_code`, and `message`.
 A bare or unknown workflow subcommand is a USAGE error (exit 64). Human output
 lists the closed `new, install, list, update, remove, publish` verb set. With
 `--json`, those subcommand-shape errors carry a structured `expected` array
-such as `["new"]`; unknown subcommands also carry `value` with the rejected
+such as `["new", "install", "list", "update", "remove", "publish"]`;
+unknown subcommands also carry `value` with the rejected
 token.
 
 ## Generated Descriptor

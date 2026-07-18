@@ -1012,6 +1012,21 @@ class ClaudeLauncherTest < Minitest::Test
     assert_equal policy.allowed_tools.join(","), command[command.index("--allowedTools") + 1]
   end
 
+  def test_managed_tmux_command_starts_with_only_the_compiled_environment
+    policy = Struct.new(:environment, keyword_init: true).new(
+      environment: { "HOME" => "/safe/home", "PATH" => "/usr/bin", "HIVE_MANAGED_POLICY" => "1" }
+    )
+    task = Struct.new(:folder).new("/safe/task")
+    command = Hive::ClaudeLauncher.send(:isolated_managed_command, [ "/usr/bin/env" ], policy, task)
+
+    out, err, status = Open3.capture3({ "PARENT_SECRET" => "must-not-leak" }, *command)
+    assert status.success?, err
+    environment = out.lines.map(&:chomp)
+    assert_includes environment, "PATH=/usr/bin"
+    assert_includes environment, "HIVE_TASK_STAGE_DIR=/safe/task"
+    refute environment.any? { |line| line.start_with?("PARENT_SECRET=") }
+  end
+
   # Readiness-wins contract: the limit menu is only classified AFTER the
   # ready wait exhausts (no fail-fast inside the loop — banner/footer copy
   # in a still-booting pane must never kill a launch). The clock is stubbed

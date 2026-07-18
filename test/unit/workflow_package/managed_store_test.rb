@@ -126,6 +126,72 @@ class WorkflowPackageManagedStoreTest < Minitest::Test
     end
   end
 
+  def test_selection_reads_wait_for_live_workflow_transactions
+    with_tmp_dir do |dir|
+      store = Hive::WorkflowPackage::ManagedStore.new(File.join(dir, ".hive-state"))
+      package = File.join(dir, "package")
+      resolution = write_package(package, "a" * 40)
+      store.place_generation(package, resolution)
+      store.activate(resolution)
+      entered = Queue.new
+      release = Queue.new
+      holder = Thread.new do
+        Hive::WorkflowPackage::MutationLock.with_lock(store.workflows_dir) do
+          entered << true
+          release.pop
+        end
+      end
+      entered.pop
+
+      reader = Thread.new { store.selected("demo") }
+      refute reader.join(0.05), "selection read must not reconcile a live transaction"
+      release << true
+      holder.join
+      reader.join
+      assert_equal resolution.source_commit, reader.value.fetch("source_commit")
+    end
+  end
+
+  def test_cleanup_waits_for_task_moves_and_fails_closed_on_invalid_metadata
+    with_tmp_dir do |dir|
+      hive_state = File.join(dir, ".hive-state")
+      store = Hive::WorkflowPackage::ManagedStore.new(hive_state)
+      package = File.join(dir, "package")
+      resolution = write_package(package, "a" * 40)
+      store.place_generation(package, resolution)
+      store.activate(resolution)
+      task = File.join(hive_state, "stages", "1-inbox", "managed-260715-aaaa")
+      Hive::TaskMeta.write(
+        task, id: 1, slug: File.basename(task), display_name: nil, workflow: "demo",
+        workflow_commit: resolution.source_commit,
+        workflow_manifest_digest: resolution.manifest_digest
+      )
+      store.remove_selection("demo")
+
+      started = Queue.new
+      cleanup = nil
+      Hive::WorkflowPackage::MutationLock.with_lock(store.workflows_dir, shared: true) do
+        cleanup = Thread.new do
+          started << true
+          store.cleanup_unreferenced("demo")
+        end
+        started.pop
+        refute cleanup.join(0.05), "cleanup must wait while a task path can move"
+        destination = File.join(hive_state, "stages", "2-work", File.basename(task))
+        FileUtils.mkdir_p(File.dirname(destination))
+        File.rename(task, destination)
+        task = destination
+      end
+      cleanup.join
+      assert_includes cleanup.value, resolution.source_commit
+      assert File.directory?(store.generation_path("demo", resolution.source_commit))
+
+      File.write(Hive::TaskMeta.path(task), "workflow: [invalid\n")
+      assert_raises(Hive::ConfigError) { store.cleanup_unreferenced("demo") }
+      assert File.directory?(store.generation_path("demo", resolution.source_commit))
+    end
+  end
+
   def test_store_rejects_invalid_names_commits_and_resolution_provenance
     with_tmp_dir do |dir|
       store = Hive::WorkflowPackage::ManagedStore.new(File.join(dir, ".hive-state"))

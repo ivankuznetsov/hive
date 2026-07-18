@@ -95,11 +95,14 @@ weakening owner-authored descriptor compatibility:
   package-name descriptor binding, redacted diagnostics, and objective
   warning/error rules.
 - `RegistryClient` accepts only official catalog-listed versions/full SHAs,
-  proves source ancestry from one catalog snapshot, and materializes listed git
-  blobs into temporary storage.
+  proves source ancestry from one catalog snapshot, materializes listed git
+  blobs into temporary storage, and rejects catalog version/summary/permission
+  metadata that does not match the verified manifest.
 - `ManagedStore` places immutable generations and selects one through an atomic
   lock. `TransactionJournal` plus the workflow mutation lock reconcile an
-  interrupted activation/removal before Loader or lifecycle access.
+  interrupted activation/removal before Loader or lifecycle access. Selection
+  reads participate in that lock, while cleanup is serialized with managed task
+  creation and stage moves and aborts on unreadable pin metadata.
 - `Loader` registers selected managed workflows beside built-ins and authored
   descriptors while rejecting id collisions and reloading when its managed
   fingerprint changes. Task-pinned generations bypass the single-id overlay and

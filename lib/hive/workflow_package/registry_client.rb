@@ -52,6 +52,7 @@ module Hive
             expected_manifest_digest: resolution.manifest_digest
           )
           raise RegistryError, result.errors.first.to_s unless result.valid?
+          bind_catalog_metadata!(resolution, result.manifest)
 
           resolution
         end
@@ -69,6 +70,16 @@ module Hive
       end
 
       private
+
+      def bind_catalog_metadata!(resolution, manifest)
+        data = manifest.data
+        matches = data.fetch("version") == resolution.version &&
+                  data.fetch("summary") == resolution.summary &&
+                  data.fetch("permissions") == resolution.permissions
+        raise RegistryError, "catalog metadata does not match the verified manifest" unless matches
+      rescue KeyError
+        raise RegistryError, "verified manifest metadata is incomplete"
+      end
 
       def parse_catalog(bytes)
         data = JSON.parse(bytes)

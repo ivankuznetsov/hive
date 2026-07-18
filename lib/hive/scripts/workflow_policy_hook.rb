@@ -7,6 +7,8 @@ require "uri"
 module Hive
   module Scripts
     module WorkflowPolicyHook
+      NETWORK_CLIENTS = %w[curl wget].freeze
+
       module_function
 
       def run(policy_path, input: $stdin, output: $stdout)
@@ -30,7 +32,7 @@ module Hive
 
         denial = bash_denial(policy, input) if tool == "Bash"
         denial ||= web_fetch_denial(policy, input) if tool == "WebFetch"
-        denial ||= path_denial(policy, input)
+        denial ||= path_denial(policy, tool, input)
         denial || [ "allow", "declared by managed workflow policy" ]
       end
 
@@ -52,7 +54,7 @@ module Hive
       end
 
       def unsafe_shell_syntax?(command)
-        command.empty? || command.match?(/[|<>`\n\r]|\$\(|\$\{/)
+        command.empty? || command.match?(/[|<>`\n\r]|(?<!&)&(?!&)|\$\(|\$\{/)
       end
 
       def executable_approved?(executable, resolved)
@@ -76,6 +78,10 @@ module Hive
         rescue URI::InvalidURIError
           ""
         end
+        if hosts.empty? && policy.fetch("domains").any? &&
+           NETWORK_CLIENTS.include?(File.basename(arguments.first.to_s))
+          return false
+        end
         hosts.all? { |host| !host.empty? && domain_allowed?(policy, host) }
       end
 
@@ -95,9 +101,18 @@ module Hive
         end
       end
 
-      def path_denial(policy, input)
-        path = input["file_path"] || input["path"]
-        return unless path
+      def path_denial(policy, tool, input)
+        path = case tool
+        when "NotebookEdit"
+          input["notebook_path"]
+        when "Read", "Write", "Edit", "MultiEdit"
+          input["file_path"]
+        when "LS", "Grep", "Glob"
+          input["path"]
+        else
+          return
+        end
+        return denied("managed workflow tool path is missing") unless path.is_a?(String) && !path.empty?
 
         resolved = resolve_with_existing_ancestor(path)
         allowed = policy.fetch("directories").any? do |directory|

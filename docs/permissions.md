@@ -39,13 +39,18 @@ required capability.
 
 For an admitted Claude package, Hive generates a private settings file, empty
 strict MCP config, `dontAsk` permission mode, sanitized environment/PATH, and a
-Hive-owned pre-tool hook. The hook rechecks Bash subcommands and WebFetch
-domains; repository-local executable shims and inherited user/project settings,
+Hive-owned pre-tool hook. These enforcement files live under orchestrator-owned
+`.hive-state/.managed-policies/`, outside the writable task tree. The hook
+rechecks Bash subcommands and WebFetch domains, treats exact domains and `*.`
+wildcards distinctly, and maps every supported file tool to its actual path
+field; repository-local executable shims and inherited user/project settings,
 hooks, plugins, MCP servers, or permission rules cannot expand the package.
 When Bash is declared, the generated settings also enable Claude's OS sandbox,
 fail when it is unavailable, disable unsandboxed-command escape, and pass the
 declared write directories and network domain allowlist. Headless and tmux
-launches consume the same compiled policy.
+launches consume the same compiled policy; tmux starts the wrapper through an
+empty environment populated only from the compiled safe environment and
+orchestrator-owned stage variables.
 
 Admission runs before installation/update/publish, then the policy is compiled
 again from the task-pinned manifest immediately before spawn. Codex, Pi, Grok,

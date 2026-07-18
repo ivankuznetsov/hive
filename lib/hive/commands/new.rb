@@ -196,9 +196,8 @@ module Hive
       def write_task_meta(task_dir, id:, slug:, depends_on:, workflow:, workflow_info:, hive_state:)
         managed = workflow_info.fetch(:managed)
         store = Hive::WorkflowPackage::ManagedStore.new(hive_state)
-        Hive::WorkflowPackage::MutationLock.with_lock(store.workflows_dir, shared: true) do
+        store.with_stable_selection(workflow.id.to_s) do |current|
           if managed
-            current = store.selected(workflow.id.to_s)
             unless current && current.fetch("source_commit") == managed.fetch("source_commit") &&
                    current.fetch("manifest_digest") == managed.fetch("manifest_digest")
               raise Hive::ConcurrentRunError.new("managed workflow selection changed while creating the task")

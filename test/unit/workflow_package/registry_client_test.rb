@@ -91,6 +91,27 @@ class WorkflowPackageRegistryClientTest < Minitest::Test
     end
   end
 
+  def test_fetch_rejects_catalog_metadata_that_disagrees_with_the_manifest
+    with_registry do |repository, _source_commit, _catalog_commit|
+      catalog_path = File.join(repository, "catalog.json")
+      catalog = JSON.parse(File.read(catalog_path))
+      catalog.dig("workflows", "demo", "versions", "1.0.0")["summary"] = "Catalog-only summary"
+      File.write(catalog_path, Hive::WorkflowPackage::CanonicalJSON.generate(catalog))
+      run!("git", "-C", repository, "add", "catalog.json")
+      run!("git", "-C", repository, "commit", "-m", "mismatched catalog metadata", "--quiet")
+
+      with_tmp_dir do |destination|
+        error = assert_raises(Hive::WorkflowPackage::RegistryError) do
+          Hive::WorkflowPackage::RegistryClient.new(repository: repository).fetch(
+            "honeycomb/demo", destination: destination
+          )
+        end
+        assert_match(/catalog metadata does not match/, error.message)
+        assert_empty Dir.children(destination)
+      end
+    end
+  end
+
   def test_materialization_rejects_incomplete_trees_and_link_records
     with_tmp_dir do |package|
       write_package(package)

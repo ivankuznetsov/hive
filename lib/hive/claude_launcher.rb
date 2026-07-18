@@ -255,6 +255,7 @@ module Hive
           strict_mcp_config: strict_mcp_config,
           runtime_policy: runtime_policy
         )
+        launch_command = isolated_managed_command(launch_command, runtime_policy, task) if runtime_policy
         # (Re)establish the shared claude session. Reused as the handle's
         # `reestablish` closure so a reviewer that finds the session dead
         # (a prior reviewer's claude exited/crashed, closing the tmux
@@ -519,6 +520,16 @@ module Hive
       command.concat([ "--disallowedTools", disallowed ]) if disallowed
       command.concat([ "--bin", profile.bin ])
       command
+    end
+
+    def isolated_managed_command(command, runtime_policy, task)
+      environment = runtime_policy.environment.merge(
+        "ANTHROPIC_API_KEY" => "",
+        "CLAUDE_API_KEY" => "",
+        "HIVE_SCREENOTE_BASE_URL" => "",
+        "HIVE_TASK_STAGE_DIR" => task.folder
+      )
+      [ "/usr/bin/env", "-i", *environment.sort.map { |key, value| "#{key}=#{value}" }, *command ]
     end
 
     def mcp_cli_flags(path, strict)

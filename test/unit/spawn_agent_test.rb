@@ -1,4 +1,5 @@
 require "test_helper"
+require "json"
 require "hive/markers"
 require "hive/lock"
 require "hive/config"
@@ -7,6 +8,7 @@ require "hive/agent"
 require "hive/agent_profiles"
 require "hive/claude_launcher"
 require "hive/stages/base"
+require "hive/scripts/workflow_policy_hook"
 
 # Direct coverage for Hive::Stages::Base.spawn_agent: profile check_version! /
 # preflight! ordering, the warn_isolation_reduced trigger when the configured
@@ -644,7 +646,15 @@ class SpawnAgentTest < Minitest::Test
         assert_equal "dontAsk", scope.fetch(:permission_mode)
         assert_equal [ "Read" ], scope.fetch(:allowed_tools)
         assert_equal task_folder, scope.fetch(:add_dirs).first
-        assert_instance_of Hive::WorkflowPackage::RuntimePolicy::Policy, scope.fetch(:runtime_policy)
+        policy = scope.fetch(:runtime_policy)
+        assert_instance_of Hive::WorkflowPackage::RuntimePolicy::Policy, policy
+        refute policy.policy_path.start_with?(task_folder + File::SEPARATOR)
+        assert policy.policy_path.start_with?(File.join(dir, ".hive-state", ".managed-policies") + File::SEPARATOR)
+        decision, = Hive::Scripts::WorkflowPolicyHook.evaluate(
+          JSON.parse(File.read(policy.policy_path)),
+          "tool_name" => "Write", "tool_input" => { "file_path" => policy.policy_path }
+        )
+        assert_equal "deny", decision
       end
     end
   end

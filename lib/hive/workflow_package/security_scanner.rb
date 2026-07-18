@@ -97,7 +97,7 @@ module Hive
       def domain_allowed?(domain, allowed)
         allowed.any? do |entry|
           normalized = entry.to_s.downcase.sub(/\A\*\./, "")
-          domain == normalized || domain.end_with?(".#{normalized}")
+          domain == normalized || (entry.to_s.start_with?("*.") && domain.end_with?(".#{normalized}"))
         end
       end
 

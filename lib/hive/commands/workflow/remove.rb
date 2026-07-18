@@ -8,9 +8,11 @@ module Hive
       class Remove < Base
         SCHEMA = "hive-workflow-remove".freeze
 
-        def initialize(name, project_root:, json: false, yes: false, stdout: $stdout, stdin: $stdin, committer: nil)
+        def initialize(name, project_root:, json: false, yes: false, dry_run: false,
+                       stdout: $stdout, stdin: $stdin, committer: nil)
           super(project_root: project_root, json: json, stdout: stdout, stdin: stdin, yes: yes, committer: committer)
           @name = name.to_s.delete_prefix("honeycomb/")
+          @dry_run = dry_run
         end
 
         def call!
@@ -24,6 +26,11 @@ module Hive
           retained = store.task_references(@name).map { |reference| reference.fetch(:commit) }.uniq.sort
           versions = Dir.glob(File.join(store.workflows_dir, @name, "versions", "*")).map { |path| File.basename(path) }
           deletable = versions - retained
+          if @dry_run
+            return emit(payload("dry_run", lock, retained, deletable), human_lines: [
+              "hive: would remove honeycomb/#{@name}; retain #{retained.length}, delete #{deletable.length} generation(s)"
+            ])
+          end
           cancelled = payload("cancelled", lock, retained, deletable)
           unless confirmed?("Remove honeycomb/#{@name} for new tasks?")
             return emit(cancelled, human_lines: [ "hive: remove cancelled; no project state changed" ])

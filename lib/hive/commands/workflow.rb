@@ -371,7 +371,8 @@ module Hive
         when "install"
           require "hive/commands/workflow/install"
           Hive::Commands::Workflow::Install.new(
-            @id, project_root: @project_root, json: @json, yes: @yes, stdout: @stdout
+            @id, project_root: @project_root, json: @json, yes: @yes,
+            dry_run: @dry_run, stdout: @stdout
           )
         when "list"
           raise UsageError.new("workflow list does not accept an id", value: @id) if @id
@@ -381,7 +382,8 @@ module Hive
         when "remove"
           require "hive/commands/workflow/remove"
           Hive::Commands::Workflow::Remove.new(
-            @id, project_root: @project_root, json: @json, yes: @yes, stdout: @stdout
+            @id, project_root: @project_root, json: @json, yes: @yes,
+            dry_run: @dry_run, stdout: @stdout
           )
         when "update"
           require "hive/commands/workflow/update"

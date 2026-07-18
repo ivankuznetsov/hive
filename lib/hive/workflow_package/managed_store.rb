@@ -51,9 +51,9 @@ module Hive
         raise Hive::ConfigError, "managed generation is not installed" unless File.directory?(generation_path(resolution.name, resolution.source_commit))
 
         MutationLock.with_lock(workflows_dir) do
-          reconcile!
+          reconcile_unlocked!
           if expected_current
-            current = selected(resolution.name)
+            current = selected_unlocked(resolution.name)
             unless current && current.fetch("source_commit") == expected_current.fetch("source_commit") &&
                    current.fetch("manifest_digest") == expected_current.fetch("manifest_digest")
               raise Hive::ConcurrentRunError.new("managed workflow selection changed after validation")
@@ -68,7 +68,7 @@ module Hive
 
       def remove_selection(name, commit: nil)
         MutationLock.with_lock(workflows_dir) do
-          reconcile!
+          reconcile_unlocked!
           raise Hive::ConfigError, "managed workflow #{name.inspect} is not selected" unless File.file?(lock_path(name))
 
           Transaction.remove(lock_path: lock_path(name), workflows_dir: workflows_dir, commit: commit)
@@ -76,26 +76,21 @@ module Hive
       end
 
       def selected(name)
-        return nil unless Hive::Workflows::DescriptorParser::SAFE_SLUG.match?(name.to_s)
-
-        reconcile!
-        data = JSON.parse(File.read(lock_path(name)))
-        validate_lock!(data, expected_name: name)
-        data
-      rescue Errno::ENOENT
-        nil
-      rescue JSON::ParserError
-        raise Hive::ConfigError, "managed workflow lock for #{name.inspect} is malformed"
+        result = nil
+        with_stable_read { result = selected_unlocked(name) }
+        result
       end
 
       def selections
-        return [] unless File.directory?(workflows_dir)
-
-        Dir.glob(File.join(workflows_dir, "*", LOCK_FILE)).sort.filter_map do |path|
-          selected(File.basename(File.dirname(path)))
-        rescue Hive::ConfigError
-          nil
+        result = []
+        with_stable_read do
+          result = Dir.glob(File.join(workflows_dir, "*", LOCK_FILE)).sort.filter_map do |path|
+            selected_unlocked(File.basename(File.dirname(path)))
+          rescue Hive::ConfigError
+            nil
+          end
         end
+        result
       end
 
       def generation_path(name, commit)
@@ -119,9 +114,21 @@ module Hive
       end
 
       def task_references(name = nil)
+        MutationLock.with_lock(workflows_dir, shared: true) { task_references_unlocked(name) }
+      end
+
+      def with_stable_selection(name)
+        with_stable_read { yield selected_unlocked(name) }
+      end
+
+      def task_references_unlocked(name = nil)
         pattern = File.join(hive_state_path, "stages", "*", "*", Hive::TaskMeta::FILENAME)
         Dir.glob(pattern).filter_map do |path|
-          meta = Hive::TaskMeta.read(File.dirname(path))
+          read = Hive::TaskMeta.read_for_admission(File.dirname(path))
+          unless read.status == :ok
+            raise Hive::ConfigError, "managed cleanup cannot safely read #{path}: #{read.error || read.status}"
+          end
+          meta = read.data
           next unless meta[:workflow_commit] && meta[:workflow_manifest_digest]
           next if name && meta[:workflow] != name
 
@@ -132,17 +139,24 @@ module Hive
       # Returns commits retained by task pins. Unselected and unpinned
       # generations are deleted.
       def cleanup_unreferenced(name)
-        retained = task_references(name).map { |entry| entry.fetch(:commit) }.uniq
-        active = selected(name)&.fetch("source_commit")
-        keep = retained + Array(active)
-        versions = File.join(workflows_dir, name, "versions")
-        Dir.glob(File.join(versions, "*")).each do |path|
-          FileUtils.rm_rf(path) unless keep.include?(File.basename(path))
+        MutationLock.with_lock(workflows_dir) do
+          reconcile_unlocked!
+          retained = task_references_unlocked(name).map { |entry| entry.fetch(:commit) }.uniq
+          active = selected_unlocked(name)&.fetch("source_commit")
+          keep = retained + Array(active)
+          versions = File.join(workflows_dir, name, "versions")
+          Dir.glob(File.join(versions, "*")).each do |path|
+            FileUtils.rm_rf(path) unless keep.include?(File.basename(path))
+          end
+          retained
         end
-        retained
       end
 
       def reconcile!
+        MutationLock.with_lock(workflows_dir) { reconcile_unlocked! }
+      end
+
+      def reconcile_unlocked!
         journal = TransactionJournal.new(workflows_dir)
         data = journal.read
         return false unless data
@@ -159,6 +173,23 @@ module Hive
       end
 
       private
+
+      def with_stable_read
+        MutationLock.with_lock(workflows_dir) { reconcile_unlocked! }
+        MutationLock.with_lock(workflows_dir, shared: true) { yield }
+      end
+
+      def selected_unlocked(name)
+        return nil unless Hive::Workflows::DescriptorParser::SAFE_SLUG.match?(name.to_s)
+
+        data = JSON.parse(File.read(lock_path(name)))
+        validate_lock!(data, expected_name: name)
+        data
+      rescue Errno::ENOENT
+        nil
+      rescue JSON::ParserError
+        raise Hive::ConfigError, "managed workflow lock for #{name.inspect} is malformed"
+      end
 
       def lock_data(resolution)
         {

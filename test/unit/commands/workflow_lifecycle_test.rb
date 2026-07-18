@@ -194,6 +194,33 @@ class WorkflowLifecycleCommandsTest < Minitest::Test
     end
   end
 
+  def test_install_and_remove_json_dry_runs_disclose_without_mutating
+    with_project_and_package do |project, package, resolution|
+      store = Hive::WorkflowPackage::ManagedStore.new(File.join(project, ".hive-state"))
+      install = Hive::Commands::Workflow::Install.new(
+        "honeycomb/demo", project_root: project, json: true, dry_run: true,
+        stdout: StringIO.new, registry_client: stub_client(package, resolution), committer: ->(*) { }
+      ).call!
+      assert_equal "dry_run", install.fetch("status")
+      assert_equal resolution.permissions, install.fetch("permissions")
+      assert_nil store.selected("demo")
+      refute File.exist?(store.generation_path("demo", resolution.source_commit))
+
+      Hive::Commands::Workflow::Install.new(
+        "honeycomb/demo", project_root: project, json: true, yes: true,
+        stdout: StringIO.new, registry_client: stub_client(package, resolution), committer: ->(*) { }
+      ).call!
+      remove = Hive::Commands::Workflow::Remove.new(
+        "demo", project_root: project, json: true, dry_run: true,
+        stdout: StringIO.new, committer: ->(*) { }
+      ).call!
+      assert_equal "dry_run", remove.fetch("status")
+      assert_equal [ resolution.source_commit ], remove.fetch("deletable_commits")
+      assert_equal resolution.source_commit, store.selected("demo").fetch("source_commit")
+      assert File.directory?(store.generation_path("demo", resolution.source_commit))
+    end
+  end
+
   private
 
   def with_project_and_package

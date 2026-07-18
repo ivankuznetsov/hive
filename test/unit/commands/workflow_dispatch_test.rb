@@ -28,4 +28,13 @@ class WorkflowDispatchTest < Minitest::Test
 
     assert_raises(Hive::Commands::Workflow::UsageError) { command.send(:lifecycle_command) }
   end
+
+  def test_dispatcher_forwards_dry_run_to_install_and_remove
+    %w[install remove].each do |subcommand|
+      command = Hive::Commands::Workflow.new(
+        subcommand, "demo", project_root: Dir.pwd, stdout: StringIO.new, dry_run: true
+      ).send(:lifecycle_command)
+      assert_equal true, command.instance_variable_get(:@dry_run)
+    end
+  end
 end

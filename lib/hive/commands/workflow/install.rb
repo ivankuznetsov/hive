@@ -12,10 +12,11 @@ module Hive
       class Install < Base
         SCHEMA = "hive-workflow-install".freeze
 
-        def initialize(source, project_root:, json: false, yes: false, stdout: $stdout, stdin: $stdin,
+        def initialize(source, project_root:, json: false, yes: false, dry_run: false, stdout: $stdout, stdin: $stdin,
                        registry_client: nil, committer: nil)
           super(project_root: project_root, json: json, stdout: stdout, stdin: stdin, yes: yes, committer: committer)
           @source = source
+          @dry_run = dry_run
           @registry_client = registry_client || Hive::WorkflowPackage::RegistryClient.new
         end
 
@@ -34,6 +35,9 @@ module Hive
             end
 
             admit_runtime!(resolution, package_root)
+            if @dry_run
+              return emit(payload(resolution, "dry_run"), human_lines: human_disclosure(resolution, verb: "would install"))
+            end
             disclosure = payload(resolution, "cancelled")
             unless confirmed?("Install honeycomb/#{resolution.name}@#{resolution.version} with the disclosed policy?")
               return emit(disclosure, human_lines: [ "hive: install cancelled; no project state changed" ])
@@ -84,10 +88,10 @@ module Hive
           }
         end
 
-        def human_disclosure(resolution)
+        def human_disclosure(resolution, verb: "installed")
           permissions = resolution.permissions
           [
-            "hive: installed honeycomb/#{resolution.name}@#{resolution.version}",
+            "hive: #{verb} honeycomb/#{resolution.name}@#{resolution.version}",
             "source: #{resolution.source_commit} manifest: #{resolution.manifest_digest}",
             "tools: #{Array(permissions['tools']).join(', ')}; deny: #{Array(permissions['deny']).join(', ')}",
             "commands: #{Array(permissions['commands']).join(', ')}; domains: #{Array(permissions['domains']).join(', ')}"

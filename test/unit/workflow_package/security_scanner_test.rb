@@ -20,6 +20,28 @@ class WorkflowPackageSecurityScannerTest < Minitest::Test
     assert_equal :warning, warning.first.severity
   end
 
+  def test_exact_domains_do_not_authorize_subdomains_without_a_wildcard
+    text = "Fetch https://child.api.example.com/report.\n"
+
+    exact = Hive::WorkflowPackage::SecurityScanner.scan_text(
+      text, path: "instructions/work.md",
+      permissions: { "domains" => [ "api.example.com" ], "network_justification" => "fetch data" }
+    )
+    assert_equal "security.undeclared_network", exact.first.rule_id
+
+    wildcard = Hive::WorkflowPackage::SecurityScanner.scan_text(
+      text, path: "instructions/work.md",
+      permissions: { "domains" => [ "*.api.example.com" ], "network_justification" => "fetch data" }
+    )
+    assert_equal "security.declared_network", wildcard.first.rule_id
+
+    suffix = Hive::WorkflowPackage::SecurityScanner.scan_text(
+      "Fetch https://api.example.com.attacker.test/report.\n", path: "instructions/work.md",
+      permissions: { "domains" => [ "*.api.example.com" ], "network_justification" => "fetch data" }
+    )
+    assert_equal "security.undeclared_network", suffix.first.rule_id
+  end
+
   def test_secret_diagnostic_has_location_but_no_snippet
     secret = "sk-ant-#{'x' * 30}"
     diagnostic = Hive::WorkflowPackage::SecurityScanner.scan_text(

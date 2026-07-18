@@ -1062,11 +1062,47 @@ def test_merged_prs_page_exposes_graphql_cursor_and_complete_merge_identity
   assert captured.first.any? { |arg| arg.include?("base:main") }
   search_arg = captured.first.find { |arg| arg.start_with?("searchQuery=") }
   assert_includes search_arg, "sort:created-asc"
-  assert_includes search_arg, "merged:>=2026-07-10T09:00:00Z"
-  assert_includes search_arg, "merged:<=2026-07-10T11:00:00Z"
+  assert_includes search_arg, "merged:2026-07-10T09:00:00Z..2026-07-10T11:00:00Z"
+  refute_includes search_arg, "merged:>="
+  refute_includes search_arg, "merged:<="
+  assert_equal 1, search_arg.scan("merged:").length
   assert_equal "/tmp/demo", captured.last.fetch(:chdir)
   assert_operator captured.last.fetch(:timeout_sec), :>, 0
   assert_operator captured.last.fetch(:timeout_sec), :<=, 2.0
+end
+
+def test_merged_prs_page_preserves_one_sided_merge_bounds
+  status = Hive::Gh::CommandStatus.new(exitstatus: 0)
+  response = {
+    "data" => {
+      "search" => {
+        "issueCount" => 0,
+        "nodes" => [],
+        "pageInfo" => { "hasNextPage" => false, "endCursor" => nil }
+      }
+    }
+  }
+  searches = []
+
+  with_replaced_singleton_method(Hive::Gh, :capture3, lambda { |*cmd, **|
+    searches << cmd.find { |arg| arg.start_with?("searchQuery=") }
+    [ JSON.generate(response), "", status ]
+  }) do
+    refactor_patrol_github.merged_prs_page(
+      repository: "acme/demo", host: "github.com", default_branch: "main",
+      cursor: nil, merged_since: Time.utc(2026, 7, 10, 9), per_page: 25,
+      worktree_path: "/tmp/demo"
+    )
+    refactor_patrol_github.merged_prs_page(
+      repository: "acme/demo", host: "github.com", default_branch: "main",
+      cursor: nil, merged_since: nil, merged_until: Time.utc(2026, 7, 10, 11),
+      per_page: 25, worktree_path: "/tmp/demo"
+    )
+  end
+
+  assert_includes searches.fetch(0), "merged:>=2026-07-10T09:00:00Z"
+  assert_includes searches.fetch(1), "merged:<=2026-07-10T11:00:00Z"
+  searches.each { |search| assert_equal 1, search.scan("merged:").length }
 end
 
 def test_merged_prs_page_rejects_graphql_errors_or_missing_page_info

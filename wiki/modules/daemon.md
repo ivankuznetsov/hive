@@ -209,13 +209,15 @@ fingerprint of the unchanged v2 checkpoint. Its scan section stores the fixed
 overlap start and upper time bound, the first page's frozen result count,
 pagination cursor and seen cursors, accumulated PR identities, then the
 manifest-intake index and already-enqueued PR numbers. GitHub search uses stable
-creation order inside that fixed merge-time window. If GitHub indexing changes
-the count or terminal traversal size between pages, the scan restarts from page
-one while retaining the original upper bound, so first-enable cannot absorb a
-new merge into its baseline. Every completed page and intake step is written
-atomically before the next step. A daemon restart therefore resumes the next
-page or item; if a crash occurred after a write-once job was enqueued but before
-the sidecar advanced, replay converges through idempotent intake.
+creation order and one exact ISO timestamp range qualifier inside that fixed
+merge-time window. This keeps GitHub's result count and the terminal traversal
+bound to the same second-level interval. If GitHub indexing changes the count
+or terminal traversal size between pages, the scan restarts from page one while
+retaining the original upper bound, so first-enable cannot absorb a new merge
+into its baseline. Every completed page and intake step is written atomically
+before the next step. A daemon restart therefore resumes the next page or item;
+if a crash occurred after a write-once job was enqueued but before the sidecar
+advanced, replay converges through idempotent intake.
 
 The project slice begins before origin identity discovery: the local `git`
 remote lookup, authentication, page fetch, and exact-PR metadata/file hydration

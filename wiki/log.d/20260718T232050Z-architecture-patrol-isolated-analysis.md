@@ -16,4 +16,6 @@ operator's checkout. Dirty or mismatched analysis trees still fail closed.
 
 **Tests:** Added fresh-remote pinning, dirty-checkout and branch-switch
 isolation, exact detached materialization, partial-retry SHA reuse, contaminated
-analysis cleanup, and automatic-fix regression coverage.
+analysis cleanup, malformed pinned-OID rejection, and automatic-fix regression
+coverage. Git commit resolution now also fences option parsing and validates the
+resolved full object ID.

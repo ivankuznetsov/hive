@@ -97,4 +97,20 @@ class RefactorPatrolCheckoutGuardTest < Minitest::Test
       assert_includes error.message, "analysis commit"
     end
   end
+
+  def test_rejects_non_oid_analysis_commit_before_git_resolution
+    with_tmp_git_repo do |repo|
+      head = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+
+      error = assert_raises(Hive::GitError) do
+        Hive::RefactorPatrol::CheckoutGuard.new(repo, default_branch: "master")
+                                          .validate_and_snapshot!(
+                                            merge_sha: head,
+                                            analysis_sha: "--help"
+                                          )
+      end
+
+      assert_includes error.message, "full hexadecimal Git object ID"
+    end
+  end
 end

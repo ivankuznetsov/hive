@@ -85,6 +85,10 @@ uncommitted edits are therefore outside the analysis boundary. The daemon
 consumes only the write-once manifest published by merge intake; it never
 re-fetches mutable PR metadata during discovery.
 
+On partial-job resume, the durable `analysis_sha` must be a full 40- or
+64-character hexadecimal Git object ID. Commit resolution fences option
+parsing and revalidates Git's returned object ID before materializing a tree.
+
 Discovery requires Claude's read-only tool scope plus its verified
 `--safe-mode` capability, so project customizations cannot run before the
 read-only boundary is established; an older or overridden Claude binary that

@@ -10,14 +10,17 @@ stages:
     kind: agent
     state_file: research.md
     instruction: ./<%= id %>/research.md
+    permissions: read-only
   - name: draft
     kind: agent
     state_file: draft.md
     instruction: ./<%= id %>/draft.md
+    permissions: read-only
   - name: edit
     kind: agent
     state_file: edit.md
     instruction: ./<%= id %>/edit.md
+    permissions: read-only
   - name: done
     kind: terminal
     state_file: done.md

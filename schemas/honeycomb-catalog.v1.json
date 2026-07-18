@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/honeycomb-catalog.v1.json",
+  "title": "Official Honeycomb catalog v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "registry", "workflows"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "registry": {"const": "honeycomb"},
+    "workflows": {
+      "type": "object",
+      "propertyNames": {"pattern": "^[a-z0-9][a-z0-9-]*$"},
+      "additionalProperties": {"$ref": "#/$defs/workflow"}
+    }
+  },
+  "$defs": {
+    "workflow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["latest", "versions"],
+      "properties": {
+        "latest": {"type": "string"},
+        "versions": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/version"}
+        }
+      }
+    },
+    "version": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_commit", "manifest_digest", "summary", "permissions"],
+      "properties": {
+        "source_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "manifest_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "summary": {"type": "string", "minLength": 1},
+        "permissions": {"$ref": "honeycomb-manifest.v1.json#/$defs/permissions"}
+      }
+    }
+  }
+}

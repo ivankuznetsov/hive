@@ -10,6 +10,7 @@ stages:
     kind: agent
     state_file: work.md
     instruction: ./<%= id %>/work.md
+    permissions: read-only
   - name: done
     kind: terminal
     state_file: done.md

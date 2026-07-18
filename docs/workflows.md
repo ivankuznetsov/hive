@@ -48,17 +48,74 @@ This writes a minimal `inbox -> work -> done` workflow:
 ```
 .hive-state/workflows/my-flow.yml
 .hive-state/workflows/my-flow/work.md
+.hive-state/workflows/my-flow/README.md
+.hive-state/workflows/my-flow/honeycomb.yml
 ```
 
 The generated descriptor is valid immediately, and the placeholder
 `work.md` is the prompt for the `work` stage. Edit that file to define what the
 agent should do.
 
+`README.md` and `honeycomb.yml` are publish-preflight inputs. The scaffolded
+summary and author are placeholders; edit them before running `workflow
+publish`. They do not change how an owner-authored workflow runs locally.
+
 Then create a task with:
 
 ```bash
 hive new <project> --workflow my-flow "<your idea>"
 ```
+
+## Reviewed Honeycomb Packages
+
+Honeycomb packages are a separate, untrusted-by-default workflow origin. Hive
+accepts only `honeycomb/<name>[@<listed-version-or-full-commit>]` from the
+hard-coded official registry. Branches, tags, abbreviated commits, arbitrary
+repositories, and unlisted versions are rejected.
+
+```bash
+hive workflow install honeycomb/repo-brief --yes
+hive workflow list
+hive workflow update repo-brief --dry-run
+hive workflow update repo-brief --yes
+hive workflow remove repo-brief --yes
+hive workflow publish my-flow --version 1.0.0
+```
+
+Install verifies the catalog commit, package source ancestry, canonical
+manifest digest, every payload hash, static security findings, and runner
+capabilities before asking for confirmation. A managed selection is an atomic
+lock over an immutable generation:
+
+```text
+.hive-state/workflows/<name>/honeycomb.lock.json
+.hive-state/workflows/<name>/versions/<source-commit>/
+```
+
+New tasks pin the source commit and manifest digest in `meta.yml`. Updating or
+removing the project selection therefore affects only new tasks; generations
+still referenced by existing tasks remain verifiable and runnable. Tampering
+is an integrity error, never an implicit local override.
+
+`workflow update --dry-run` validates and returns descriptor, instruction,
+manifest, dependency, permission, command, domain, and file changes without
+writing project state. An applied update always needs ordinary confirmation.
+Capability additions, removed deny rules, dependency additions, or
+incomparable dependency changes additionally require a separate
+`--allow-escalation`; neither consent flag implies the other.
+
+`workflow list` keeps origin, selection, integrity, and catalog visibility as
+orthogonal fields. `workflow remove` operates only on Hive-managed locks and
+never deletes task-pinned generations or owner-authored/built-in workflows.
+List and remove work offline; catalog visibility is reported as
+`unknown_offline` until a trusted refresh is available.
+
+Publish rewrites only referenced instruction paths into `instructions/`,
+generates canonical `manifest.json`, runs the same local validator and runtime
+admission used by install, and opens a fork pull request. Success means
+`pending_review`, not listed. Catalog publication and GitHub repository rules
+are owned by the separate Honeycomb repository and must be deployed before an
+official package can resolve.
 
 ## Descriptor Schema
 
@@ -175,6 +232,8 @@ hive workflow new architecture --template architecture
 
 Project workflow descriptors are trusted project-owner configuration. An
 `instruction:` file is injected into the agent prompt as the stage instruction,
-not treated as untrusted task data. Permission scopes are tool-level controls,
-not an OS sandbox; run Hive in a sandboxed user/container when isolation from a
-descriptor author matters.
+not treated as untrusted task data. Managed Honeycomb instructions instead pass
+package admission and run through a generated Hive-owned policy with inherited
+settings, hooks, plugins, and MCP configuration disabled. Both permission
+systems are tool-level controls, not a universal OS sandbox; run Hive in a
+sandboxed user/container when host isolation matters.

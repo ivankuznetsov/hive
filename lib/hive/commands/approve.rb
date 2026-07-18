@@ -14,6 +14,7 @@ require "hive/commit_or_rollback"
 require "hive/dependency_snapshot"
 require "hive/attempts/context"
 require "hive/conditions/transition_guard"
+require "hive/workflow_package/mutation_lock"
 
 module Hive
   module Commands
@@ -257,6 +258,13 @@ module Hive
       end
 
       def move_task!(task, dest_stage)
+        workflows_dir = File.join(task.hive_state_path, "workflows")
+        Hive::WorkflowPackage::MutationLock.with_lock(workflows_dir, shared: true) do
+          move_task_under_workflow_lock!(task, dest_stage)
+        end
+      end
+
+      def move_task_under_workflow_lock!(task, dest_stage)
         new_parent = File.join(task.hive_state_path, "stages", dest_stage)
         FileUtils.mkdir_p(new_parent)
         new_folder = destination_folder(task, dest_stage)

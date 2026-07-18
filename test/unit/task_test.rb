@@ -5,6 +5,26 @@ require "hive/task"
 class TaskTest < Minitest::Test
   include HiveTestHelper
 
+  def test_managed_task_rejects_incomplete_and_unresolvable_provenance
+    with_tmp_dir do |dir|
+      folder = File.join(dir, ".hive-state", "stages", "1-inbox", "managed-260715-aaaa")
+      FileUtils.mkdir_p(folder)
+      File.write(File.join(folder, "meta.yml"), <<~YAML)
+        workflow: demo
+        workflow_commit: #{'a' * 40}
+      YAML
+      assert_raises(Hive::InvalidTaskPath) { Hive::Task.new(folder) }
+
+      File.write(File.join(folder, "meta.yml"), <<~YAML)
+        workflow: demo
+        workflow_commit: #{'a' * 40}
+        workflow_manifest_digest: #{'b' * 64}
+      YAML
+      error = assert_raises(Hive::InvalidTaskPath) { Hive::Task.new(folder) }
+      assert_includes error.message, "manifest"
+    end
+  end
+
   def test_parses_valid_path
     with_tmp_dir do |dir|
       folder = File.join(dir, ".hive-state", "stages", "2-brainstorm", "add-foo")

@@ -24,6 +24,15 @@ Hive is a Ruby CLI around filesystem state, agent subprocesses, and git worktree
 
 The project checkout holds code. `.hive-state/` holds durable Hive state on the separate `hive/state` branch. The feature worktree holds code changes for one task branch.
 
+Managed Honeycomb workflows add immutable package generations below
+`.hive-state/workflows/<name>/versions/<source-commit>/`. A canonical
+`honeycomb.lock.json` is the only activation pointer. Lifecycle changes share a
+workflow mutation lock and durable transaction journal; package placement is
+inert until the pointer is atomically replaced and the scoped state commit
+succeeds. Task metadata pins the source commit plus manifest digest, so a task
+resolves its exact generation without registering duplicate workflow ids in the
+process-wide Loader overlay.
+
 ## Storage Layout
 
 `hive init .` creates the per-project storage tree:

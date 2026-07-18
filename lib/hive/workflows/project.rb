@@ -42,7 +42,9 @@ module Hive
       def load!(project_root)
         LOCK.synchronize do
           project_root = File.expand_path(project_root)
-          return if @active_root == project_root
+          workflow_dir = workflow_dir_for(project_root)
+          fingerprint = Hive::Workflows::Loader.fingerprint(workflow_dir)
+          return if @active_root == project_root && @active_fingerprint == fingerprint
 
           # Clear the prior project's overlay BEFORE loading, and drop
           # @active_root to nil first. @active_root is re-set to the new root only
@@ -53,9 +55,13 @@ module Hive
           Hive::Workflows::Registry.reset_project_registrations!
           @active_root = nil
 
-          workflow_dir = workflow_dir_for(project_root)
-          workflows = loaded_workflows.fetch(project_root) do
-            loaded_workflows[project_root] = Hive::Workflows::Loader.load_dir(workflow_dir)
+          cached = loaded_workflows[project_root]
+          workflows = if cached && cached.fetch(:fingerprint) == fingerprint
+                        cached.fetch(:workflows)
+          else
+                        Hive::Workflows::Loader.load_dir(workflow_dir).tap do |loaded|
+                          loaded_workflows[project_root] = { fingerprint: fingerprint, workflows: loaded }
+                        end
           end
           workflows.each_value { |workflow| register_descriptor(workflow, workflow_dir, project_root) }
           # No trailing reset_union_cache! here: both register! and
@@ -63,6 +69,7 @@ module Hive
           # explicit call would be dead in every path (and re-spell the
           # respond_to? guard the registry already encapsulates).
           @active_root = project_root
+          @active_fingerprint = fingerprint
         end
       end
 
@@ -118,6 +125,7 @@ module Hive
       def reset!
         LOCK.synchronize do
           @active_root = nil
+          @active_fingerprint = nil
           loaded_workflows.clear
           warned_skips.clear
           Hive::Workflows::Registry.reset_project_registrations!

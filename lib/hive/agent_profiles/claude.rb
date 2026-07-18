@@ -28,6 +28,7 @@ module Hive
       headless_supported: true,
       min_version: Hive::MIN_CLAUDE_VERSION,
       status_detection_mode: :state_file_marker,
+      policy_capabilities: %i[tools directories commands domains settings_isolation mcp_isolation environment_isolation],
       usage_extractor: Hive::AgentProfiles::UsageExtractors::CLAUDE,
       skill_verifier: Hive::SkillCheck::Claude.method(:verify),
       default_model_resolver: ->(**kwargs) {

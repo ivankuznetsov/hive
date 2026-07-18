@@ -8,12 +8,14 @@ stages:
     kind: agent
     state_file: draft.md
     instruction: ./<%= id %>/draft.md
+    permissions: read-only
     model: opus
     effort: high
   - name: review
     kind: council
     state_file: review.md
     input: draft.md
+    permissions: read-only
     council:
       quorum: 2
       max_rounds: 3
@@ -22,11 +24,13 @@ stages:
       revise:
         agent: claude
         instruction: ./<%= id %>/revise.md
+        permissions: read-only
     reviewers:
       - name: claude-doc
         agent: claude
         prompt: Review the architecture draft for clarity, feasibility, risks, and missing decisions.
         output_basename: claude-doc
+        permissions: read-only
       - name: codex-doc
         agent: codex
         prompt: Review the architecture draft for implementation risks, testability, and unresolved assumptions.
@@ -36,5 +40,6 @@ stages:
     state_file: architecture.md
     deliverable: architecture.md
     instruction: ./<%= id %>/architecture.md
+    permissions: read-only
     model: opus
     effort: high

@@ -3,6 +3,15 @@ require "hive/agent_profile"
 require "hive/implementation_identity"
 
 class AgentProfileTest < Minitest::Test
+  def test_policy_capabilities_are_optional_and_frozen
+    profile = make_profile
+    assert_equal [], profile.policy_capabilities
+
+    capable = make_profile(policy_capabilities: %i[tools settings_isolation])
+    assert_equal %i[tools settings_isolation], capable.policy_capabilities
+    assert_predicate capable.policy_capabilities, :frozen?
+  end
+
   include HiveTestHelper
 
   FAKE_BIN = File.expand_path("../fixtures/fake-claude", __dir__)

@@ -20,7 +20,7 @@ class KanbanBoardTest < ApplicationSystemTestCase
     band = find(".board-band[data-project-name='#{@project}']")
     card = band.find(".board-card", text: /Keyboard board task/i)
     card.send_keys(:enter)
-    assert_selector "h1", text: /Keyboard board task/i, wait: 5
+    assert_selector "[role='dialog'] h2", text: /Keyboard board task/i, wait: 5
 
     visit board_path
     create_task!(@project, "Live board arrival")

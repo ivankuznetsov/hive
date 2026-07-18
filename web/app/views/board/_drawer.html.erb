@@ -1,0 +1,20 @@
+<%= turbo_frame_tag "task_drawer" do %>
+  <div class="drawer-backdrop" aria-hidden="true" data-action="click->drawer#close"></div>
+  <section class="task-drawer-panel" role="dialog" aria-modal="true" aria-labelledby="task_drawer_title">
+    <header class="task-drawer-header">
+      <div>
+        <h2 id="task_drawer_title"><%= task_title(@row) %></h2>
+        <p class="task-slug"><%= @project["name"] %> · <%= @row["slug"] %></p>
+      </div>
+      <div class="task-drawer-actions">
+        <%= link_to "Open page", task_path(@project["name"], @row["slug"]),
+              class: "btn btn-ghost btn-sm", data: { turbo_frame: "_top" } %>
+        <button type="button" class="btn btn-ghost btn-sm" aria-label="Close task details"
+                data-drawer-focus data-action="drawer#close">Close</button>
+      </div>
+    </header>
+    <div class="task-drawer-body">
+      <%= render "tasks/details" %>
+    </div>
+  </section>
+<% end %>

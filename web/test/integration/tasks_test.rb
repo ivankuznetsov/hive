@@ -31,6 +31,42 @@ class TasksTest < ActionDispatch::IntegrationTest
     refute folder.join("task-projection.json").exist?
   end
 
+  test "task details render in the board frame without duplicating the page shell" do
+    get task_path(@project, @slug), headers: { "Turbo-Frame" => "task_drawer" }
+
+    assert_response :success
+    assert_select "turbo-frame#task_drawer", 1
+    assert_select "[role='dialog'][aria-modal='true']", 1
+    assert_select "#task_drawer_title", text: /actions probe/i
+    assert_select ".task-details #task-state", 1
+    assert_select ".topbar", 0
+    assert_select "body > main", 0
+  end
+
+  test "task details render structured blocked explanations and remedies" do
+    snapshot = StatusBroadcaster.snapshot
+    row = snapshot.fetch("projects").find { |project| project["name"] == @project }
+      .fetch("tasks").find { |task| task["slug"] == @slug }
+    row["depends_on"] = "upstream:base-task-260718-cafe"
+    row["blocked_by"] = "base-task-260718-cafe"
+    row["blocked_reason"] = {
+      "summary" => "Dependency has not reached its admission gate",
+      "detail" => "base-task-260718-cafe is currently at plan.",
+      "remedies" => [ { "kind" => "open_task", "task" => "base-task-260718-cafe" } ]
+    }
+    original_snapshot = StatusBroadcaster.method(:snapshot)
+    StatusBroadcaster.define_singleton_method(:snapshot) { snapshot }
+
+    get task_path(@project, @slug), headers: { "Turbo-Frame" => "task_drawer" }
+
+    assert_response :success
+    assert_select ".blocked-explanation", text: /Dependency has not reached/
+    assert_select ".blocked-explanation a[href='#{task_path("upstream", "base-task-260718-cafe")}']",
+      text: /Open prerequisite/
+  ensure
+    StatusBroadcaster.define_singleton_method(:snapshot, original_snapshot) if original_snapshot
+  end
+
   test "an unpassable stage offers Force approve, never a doomed Approve" do
     get "/tasks/#{@project}/#{@slug}"
     assert_response :success

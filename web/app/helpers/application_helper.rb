@@ -64,6 +64,16 @@ module ApplicationHelper
     grouped.sort.to_h
   end
 
+  def dependency_task_path(project_name, task, fallback_slug: nil)
+    reference = Hive::Dependencies.parse_optional_reference(task["depends_on"])
+    slug = fallback_slug.presence || task["blocked_by"].presence || reference&.task
+    return nil unless slug
+
+    task_path(reference&.project || project_name, slug)
+  rescue Hive::Dependencies::InvalidReference
+    nil
+  end
+
   MARKDOWN_TAGS = %w[
     h1 h2 h3 h4 h5 h6 p a ul ol li blockquote pre code em strong del hr br img
     table thead tbody tr th td

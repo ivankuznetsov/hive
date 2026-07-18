@@ -12,6 +12,7 @@ class TasksController < ApplicationController
     @questions = open_questions(@row)
     @worktree_exists = worktree_exists?(@row)
     @daemon_enabled = project_daemon_enabled?
+    render partial: "board/drawer" if turbo_frame_request?
   end
 
   # Per-question answers from the Q&A form (answers[n] => text), written

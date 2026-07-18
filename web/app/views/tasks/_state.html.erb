@@ -8,6 +8,8 @@
     <span class="task-meta"><%= status_dot(@row) %> <%= @row["action_label"].presence || @row["marker"].presence || "idle" %></span>
   </div>
 
+  <%= render "tasks/blocked_reason", reason: @row["blocked_reason"], row: @row, project: @project %>
+
   <% if (ownership = @row["implementation_identity"]) %>
     <details class="implementation-identity">
       <summary>Implementation ownership · generation <%= ownership["generation"] %></summary>

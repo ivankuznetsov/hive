@@ -18,6 +18,8 @@ class BoardTest < ActionDispatch::IntegrationTest
     assert_select "[data-stage='1-inbox']", 1
     assert_select "[data-stage='2-work']", 1
     assert_select "[data-card-slug='ship-board-260718-abcd']", 1
+    assert_select "a[data-turbo-frame='task_drawer'][data-action='drawer#remember']", minimum: 1
+    assert_select "turbo-frame#task_drawer[data-turbo-permanent]", 1
     assert_select "#board_sync[data-epoch][data-generation]", 1
     assert_select "[aria-live='polite']", 1
     assert_select ".stage-pager select[aria-label='Stage for alpha']", 1
@@ -57,6 +59,19 @@ class BoardTest < ActionDispatch::IntegrationTest
 
     assert_select "[data-card-slug='ship-board-260718-abcd']", 1
     assert_select "[data-card-slug='old-done-260701-dead']", 0
+  end
+
+  test "dependency chips deep link across projects" do
+    payload = BoardTest.payload
+    task = payload.dig("projects", 0, "tasks", 0)
+    task["depends_on"] = "upstream:base-task-260718-cafe"
+    task["blocked_by"] = "base-task-260718-cafe"
+    StatusBroadcaster.define_singleton_method(:snapshot) { payload }
+
+    get board_path
+
+    assert_select "a.board-chip[href='#{task_path("upstream", "base-task-260718-cafe")}']",
+      text: "base-task-260718-cafe"
   end
 
   def self.payload

@@ -3,7 +3,12 @@
     <span class="board-chip" title="Implementation agent"><%= agent %></span>
   <% end %>
   <% if task["blocked_by"].present? %>
-    <span class="board-chip board-chip-warn" title="Blocked by dependency"><%= task["blocked_by"] %></span>
+    <% if (dependency_path = dependency_task_path(project["name"], task)) %>
+      <%= link_to task["blocked_by"], dependency_path, class: "board-chip board-chip-warn",
+            title: "Blocked by dependency", data: { turbo_frame: "task_drawer", action: "drawer#remember" } %>
+    <% else %>
+      <span class="board-chip board-chip-warn" title="Blocked by dependency"><%= task["blocked_by"] %></span>
+    <% end %>
   <% end %>
   <% task.fetch("operational_chips", []).each do |chip| %>
     <span class="board-chip" title="<%= chip["source"] %> · <%= chip["observed_at"] %>"><%= chip["kind"] %></span>

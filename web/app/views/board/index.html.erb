@@ -6,7 +6,8 @@
 <% end %>
 <%= turbo_stream_from StatusBroadcaster::CHANNEL %>
 
-<div class="board-shell">
+<div class="board-shell" data-controller="drawer"
+     data-action="turbo:frame-load->drawer#opened keydown@window->drawer#keydown">
   <div class="board-toolbar">
     <%= render "status/view_switch" %>
     <%= link_to "View settings", settings_path, class: "btn btn-ghost btn-sm" %>
@@ -48,4 +49,6 @@
       <% end %>
     </div>
   </div>
+  <%= turbo_frame_tag "task_drawer", class: "task-drawer-frame",
+        data: { drawer_target: "frame", turbo_permanent: true } %>
 </div>

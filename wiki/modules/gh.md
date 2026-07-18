@@ -45,7 +45,7 @@ shapes and fail-closed reconciliation rules out of unrelated GitHub callers.
 |-------------|---------|
 | `issues_for_repository` / `issues_with_marker` / `create_issue` | Validate the complete exact-host issue inventory, exclude pull requests, reconcile exact markers, and create a bounded body through a temporary file. |
 | `merged_pr_details` | Resolve one merged PR plus its complete paginated file/status/rename manifest against the checkout's canonical host and repository. Identity lookup, authentication, metadata, and files share one monotonic deadline. |
-| `merged_prs_page` | Fetch and validate one cursor-addressed GraphQL page of strictly typed merged-PR occurrence identities for catch-up, using stable creation order and an optional fixed merge-time upper bound. |
+| `merged_prs_page` | Fetch and validate one cursor-addressed GraphQL page of strictly typed merged-PR occurrence identities for catch-up, using stable creation order and one exact ISO timestamp `merged:<lower>..<upper>` qualifier for the fixed merge-time window. |
 | `verify_pr_identity!` | Re-read a newly created patrol PR and require the expected URL, repository, OPEN non-draft state, branch, head OID, and base before handoff. |
 
 ## Subprocess Contract
@@ -93,7 +93,7 @@ generation remain owned by [[commands/refactor-patrol]]'s job aggregate.
 
 ## Tests
 
-- `test/unit/gh_test.rb` covers shared frontmatter, secret-scan, PR lookup, remote-OID/lease, repository identity, subprocess, and status APIs. The same file exercises `GithubGateway`'s created-PR proof, exact-host merged-PR detail intake, and GraphQL pagination through an injected transport.
+- `test/unit/gh_test.rb` covers shared frontmatter, secret-scan, PR lookup, remote-OID/lease, repository identity, subprocess, and status APIs. The same file exercises `GithubGateway`'s created-PR proof, exact-host merged-PR detail intake, and GraphQL pagination through an injected transport, including the single-qualifier exact timestamp range used for merge catch-up.
 - `test/unit/gh_issue_helpers_test.rb` covers `GithubGateway`'s full paginated inventory, pull-request exclusion, exact-marker delegation, explicit host/repository issue creation, and malformed/cross-repository fail-closed behavior. `test/unit/refactor_patrol/issue_filer_test.rb` covers exact-marker precedence plus strict legacy semantic grouping, malformed historical bodies, and pairwise-ambiguous matches.
 - `test/unit/refactor_patrol/pr_opener_test.rb` pins exact absence/OID leases and pre-create trunk checks. `test/unit/refactor_patrol/action_runner_test.rb` covers the real-git crash/restart path from a durably pushed stale generation through supersession, exact old-OID replacement, one verified PR, and one mandatory review handoff.
 - `test/unit/daemon/pr_merge_watcher_test.rb`, `test/unit/daemon/dispatcher_test.rb`, and `test/integration/run_stage_action_test.rb` cover the merged-finalize-error archive path that uses `pr_state`.

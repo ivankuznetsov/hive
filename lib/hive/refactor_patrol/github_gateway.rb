@@ -244,18 +244,19 @@ module Hive
         end
 
         search = "repo:#{repository} is:pr is:merged base:#{branch} sort:created-asc"
-        since = nil
-        if merged_since
-          since = merged_since.is_a?(Time) ? merged_since : Time.iso8601(merged_since.to_s)
-          search = "#{search} merged:>=#{since.utc.iso8601}"
+        since = merged_since && (merged_since.is_a?(Time) ? merged_since : Time.iso8601(merged_since.to_s))
+        upper = merged_until && (merged_until.is_a?(Time) ? merged_until : Time.iso8601(merged_until.to_s))
+        if since && upper && upper < since
+          raise Hive::GhError, "merged-PR pagination upper bound cannot precede its lower bound"
         end
-        if merged_until
-          upper = merged_until.is_a?(Time) ? merged_until : Time.iso8601(merged_until.to_s)
-          if since && upper < since
-            raise Hive::GhError, "merged-PR pagination upper bound cannot precede its lower bound"
-          end
-          search = "#{search} merged:<=#{upper.utc.iso8601}"
+        merged_range = if since && upper
+          "#{since.utc.iso8601}..#{upper.utc.iso8601}"
+        elsif since
+          ">=#{since.utc.iso8601}"
+        elsif upper
+          "<=#{upper.utc.iso8601}"
         end
+        search = "#{search} merged:#{merged_range}" if merged_range
         query = <<~GRAPHQL
           query($searchQuery: String!, $pageSize: Int!, $cursor: String) {
             search(query: $searchQuery, type: ISSUE, first: $pageSize, after: $cursor) {

@@ -436,6 +436,31 @@ class AgentSkillsInspectorTest < Minitest::Test
     end
   end
 
+  def test_unmanaged_reviewer_without_a_skill_resolver_is_non_blocking
+    with_tmp_dir do |dir|
+      bin = File.join(dir, "bin", "grok")
+      executable(bin)
+      reviewer = {
+        "name" => "grok-ce", "kind" => "agent",
+        "agent" => "grok", "skill" => "ce-code-review"
+      }
+      cfg = config(reviewers: [ reviewer ])
+      cfg["agents"]["grok"]["bin"] = bin
+
+      row = Hive::AgentSkills::Inspector.new(
+        config: cfg, project_root: dir, runner: FakeRunner.new,
+        environment: { "HOME" => dir, "PATH" => "" }
+      ).inspect(skills: [ "ce-code-review" ]).first
+
+      assert_equal false, row.managed
+      assert_equal "unavailable", row.health
+      assert_equal "info", row.severity
+      assert_equal "unsupported", row.resolution.fetch("status")
+      assert_match(/unsupported skill resolver for "grok"/, row.explanation)
+      assert_match(/Hive does not manage custom skills/, row.remediation)
+    end
+  end
+
   def test_version_probe_failure_old_cli_disabled_package_and_invalid_package_version
     with_tmp_dir do |dir|
       bin = File.join(dir, "bin", "claude")

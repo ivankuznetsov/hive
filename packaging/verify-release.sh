@@ -145,6 +145,28 @@ export HOME="$PREFIX/home"
 mkdir -p "$XDG_BIN_HOME" "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" \
          "$XDG_STATE_HOME" "$XDG_CACHE_HOME" "$HIVE_HOME" "$HOME"
 
+# HOME confines unit/plist files, but `systemctl --user` and `launchctl`
+# still talk to the operator's live per-user service manager. Put a harmless
+# platform stub ahead of PATH before install.sh, init, daemon install, or
+# uninstall can reach those managers. The verifier still exercises unit
+# rendering, backup rotation, JSON envelopes, and removal while guaranteeing
+# it cannot start, restart, stop, enable, or disable a real Hive service.
+SERVICE_MANAGER_BIN="$PREFIX/service-manager-bin"
+mkdir -p "$SERVICE_MANAGER_BIN"
+case "$(uname -s)" in
+  Linux)
+    printf '%s\n' '#!/bin/sh' 'exit 0' > "$SERVICE_MANAGER_BIN/systemctl"
+    chmod 0755 "$SERVICE_MANAGER_BIN/systemctl"
+    SERVICE_MANAGER_COMMAND="systemctl"
+    ;;
+  Darwin)
+    printf '%s\n' '#!/bin/sh' 'exit 0' > "$SERVICE_MANAGER_BIN/launchctl"
+    chmod 0755 "$SERVICE_MANAGER_BIN/launchctl"
+    SERVICE_MANAGER_COMMAND="launchctl"
+    ;;
+  *) SERVICE_MANAGER_COMMAND="" ;;
+esac
+
 # Sentinel file for leak detection: anchor `find -newer` on a file
 # whose mtime never moves, not on $PREFIX (whose mtime updates every
 # time a child file is added — which would mask early leaks because
@@ -154,7 +176,14 @@ START_MARKER="$PREFIX/.start-marker"
 
 # Put the installed binary first on PATH so subsequent `hive` calls
 # resolve to the just-installed artifact, not a host install.
-export PATH="$XDG_BIN_HOME:$PATH"
+export PATH="$SERVICE_MANAGER_BIN:$XDG_BIN_HOME:$PATH"
+if [[ -n "$SERVICE_MANAGER_COMMAND" ]]; then
+  RESOLVED_SERVICE_MANAGER="$(command -v "$SERVICE_MANAGER_COMMAND" || true)"
+  if [[ "$RESOLVED_SERVICE_MANAGER" != "$SERVICE_MANAGER_BIN/$SERVICE_MANAGER_COMMAND" ]]; then
+    echo "verify-release: failed to isolate $SERVICE_MANAGER_COMMAND (resolved: $RESOLVED_SERVICE_MANAGER)" >&2
+    exit 3
+  fi
+fi
 
 PASS_COUNT=0
 FAIL_COUNT=0

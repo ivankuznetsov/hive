@@ -188,7 +188,11 @@ script installs a published release into an isolated XDG/HIVE_HOME/HOME
 tmp prefix, walks the command surface (`hive --version`, `hive doctor`,
 `hive init`, `hive new`, `hive status --json`, `hive daemon install
 [--force] --json`, `hive uninstall`), validates JSON envelopes against
-the published schemas, and asserts no state leaks outside the prefix.
+the published schemas, and asserts no state leaks outside the prefix. It also
+prepends inert `systemctl`/`launchctl` stubs inside that prefix: a rewritten
+`HOME` confines unit files but does not isolate the live per-user service
+manager, so verifier lifecycle calls must never reach the operator's actual
+Hive services.
 
 Local usage:
 

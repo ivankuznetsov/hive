@@ -127,7 +127,22 @@ module Hive
         end
 
         if target.kind == "agent" || target.kind == "reviewer"
-          resolved = skill_module(target.agent).resolve(
+          resolver = begin
+            skill_module(target.agent)
+          rescue Hive::ConfigError => e
+            return build_inspection(
+              target: target,
+              expected: { "managed" => false }.freeze,
+              native: { "available" => true, "bin" => bin }.freeze,
+              resolution: {
+                "status" => "unsupported", "path" => nil,
+                "message" => e.message, "candidates" => [], "parse_errors" => []
+              }.freeze,
+              issues: [ [ "unavailable", e.message ] ],
+              remediation: "install or configure #{target.configured_skill.inspect} manually; Hive does not manage custom skills"
+            )
+          end
+          resolved = resolver.resolve(
             target.invocation, project_root: @project_root, environment: @environment
           )
           health = resolved.status == :present ? "healthy" : "missing"

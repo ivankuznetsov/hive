@@ -206,6 +206,12 @@ version on demand:
 gh workflow run install-verify.yml -f version=vX.Y.Z
 ```
 
+The local end-to-end verifier prepends inert `systemctl`/`launchctl` stubs
+inside its isolated prefix. Changing `HOME` confines unit files but does not
+isolate the live per-user service manager; the stubs keep verification from
+starting, stopping, enabling, disabling, or restarting the operator's actual
+Hive services while preserving unit rendering and lifecycle assertions.
+
 Scope note: aarch64 covers `install.sh` (`ubuntu-24.04-arm`) and macOS (arm64);
 aarch64-AUR is deferred (the official `archlinux` image is x86_64-only — needs an
 Arch-Linux-ARM image).

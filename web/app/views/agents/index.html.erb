@@ -1,6 +1,6 @@
 <% content_for(:title, "hivebox — agents") %>
 <h1>Agents</h1>
-<p class="muted">Authenticate the coding agents the pipeline runs. Credentials persist on the box's <code>/data</code> mount.</p>
+<p class="muted">Authenticate the agents the pipeline runs. Credentials persist in Hive's data home on this machine.</p>
 
 <div class="agent-cards">
   <% @statuses.each do |agent, status| %>
@@ -11,7 +11,7 @@
         <span class="status-dot <%= logged_in ? "status-dot-running" : "status-dot-idle" %>"></span>
         <%= logged_in ? "Logged in" : "Not logged in" %>
       </p>
-      <% if %w[claude codex gh].include?(agent.to_s) %>
+      <% if %w[claude codex grok gh].include?(agent.to_s) %>
         <%= button_to logged_in ? "Log in again" : "Start login",
               agent_login_path(agent), class: logged_in ? "btn-ghost btn-sm" : "btn-secondary btn-sm",
               data: { turbo_submits_with: "Starting…" } %>

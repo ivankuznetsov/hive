@@ -204,7 +204,9 @@ origin also prints the Host-header/reverse-proxy warning.
   Codex uses `codex login --device-auth` rather than the localhost-callback
   `codex login`, because the callback server would bind inside the container
   and surface an unreachable localhost URL to the host browser. Grok uses
-  `grok login --device-auth`. Codex, Grok, and `gh`
+  `grok login --device-auth`, exposed through the same first-class login action
+  and constrained session routes as the other relayed agents. Codex, Grok,
+  and `gh`
   are operator-ward poll flows: the one-time code is entered at the provider,
   the CLI keeps polling, and the status turbo-frame keeps refreshing until the
   PTY child exits while hiding the paste-back form. Claude remains the
@@ -266,7 +268,8 @@ a red task page shows the diagnostic banner and Retry button, and that the
 route queues the marker-clear command plus the hidden rerun sequence. It also
 pins the Telegram first-run guide shape and strict chat-ID validation, repo
 clone target refusal for non-directories, agent-login status rendering for
-binary PTY output and operator-ward poll flows, root favicon/icon assets,
+binary PTY output, Grok route reachability, and operator-ward poll flows,
+root favicon/icon assets,
 plain-vs-deep health semantics, the oversized diff cap/truncation notice,
 media route streaming/refusal cases, and captured/skipped/failed Demo
 rendering. Repos coverage pins the workflow select's built-in fresh list and

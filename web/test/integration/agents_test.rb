@@ -52,6 +52,31 @@ class AgentsTest < ActionDispatch::IntegrationTest
                     "operator-ward agents must not show a paste-the-code form")
   end
 
+  test "agents page offers the supported Grok device login" do
+    sign_in!(login: "alice")
+
+    get agents_path
+
+    assert_response :success
+    assert_select "form[action='#{agent_login_path("grok")}'] button", text: "Start login"
+    assert_select ".agent-card", { text: /grok.*Uses the token form below/m, count: 0 },
+                  "Grok has a first-class device flow and must not be described as token-only"
+  end
+
+  test "operator-ward agent (grok) keeps polling and shows no paste-back form" do
+    sign_in!(login: "alice")
+    seed_session("sess-grok", agent: "grok", url: "https://accounts.x.ai/device",
+                 output: "Enter this code: GROK-CODE", done: false)
+
+    get agent_login_status_path("grok", "sess-grok")
+
+    assert_response :success
+    assert_match "https://accounts.x.ai/device", response.body
+    assert_match "updates automatically", response.body
+    assert_match 'data-controller="poll"', response.body
+    assert_no_match(/Complete login/, response.body)
+  end
+
   test "operator-ward agent shows success and stops polling once done" do
     sign_in!(login: "alice")
     seed_session("sess-done", agent: "codex", url: "https://auth.openai.com/codex/device",

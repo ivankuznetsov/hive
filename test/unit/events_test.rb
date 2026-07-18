@@ -61,6 +61,23 @@ class EventsTest < Minitest::Test
     end
   end
 
+  def test_operator_action_accepts_structured_request_metadata
+    with_tmp_dir do |dir|
+      Hive::Events.emit!(
+        task_folder: dir, slug: "event-test-260522-aaaa", stage: "3-plan",
+        event_type: :operator_action, agent: "web:alice", message: "2-brainstorm -> 3-plan",
+        metadata: { actor: "alice", request_id: "req-1", from: "2-brainstorm", to: "3-plan" }
+      )
+
+      event = JSON.parse(File.readlines(File.join(dir, "events.jsonl")).last)
+      assert_equal "operator_action", event.fetch("event_type")
+      assert_equal "alice", event.fetch("actor")
+      assert_equal "req-1", event.fetch("request_id")
+      assert_equal "2-brainstorm", event.fetch("from")
+      assert_equal "3-plan", event.fetch("to")
+    end
+  end
+
   def test_claude_completion_fallback_event_is_allowed
     with_tmp_dir do |dir|
       Hive::Events.emit(

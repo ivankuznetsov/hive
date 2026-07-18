@@ -3654,6 +3654,35 @@ end
     dispatcher
   end
 
+  def test_guarded_web_request_revalidates_fingerprint_and_exact_transition
+    dispatcher, = make_dispatcher(rows: [])
+    request = Q::Request.new(
+      request_id: "WEB1", project: "p1", slug: "s1",
+      argv: %w[hive plan s1 --project p1 --from 3-plan],
+      requestor: "web", actor: "alice", expected_fingerprint: "tfp1:expected",
+      transition_destination: "4-execute"
+    )
+    status = Object.new
+    status.define_singleton_method(:task_card) do |**|
+      {
+        "fingerprint" => "tfp1:expected",
+        "allowed_transitions" => [ { "destination" => "4-execute", "verb" => "plan" } ]
+      }
+    end
+    original_new = Hive::Commands::Status.method(:new)
+    Hive::Commands::Status.define_singleton_method(:new) { status }
+
+    assert dispatcher.send(:guarded_transition_current?, request)
+
+    rejected = []
+    dispatcher.define_singleton_method(:reject_request) { |_request, reason:| rejected << reason }
+    request.expected_fingerprint = "tfp1:stale"
+    refute dispatcher.send(:guarded_transition_current?, request)
+    assert_equal [ "stale_transition" ], rejected
+  ensure
+    Hive::Commands::Status.define_singleton_method(:new, original_new) if original_new
+  end
+
   def restore_find_project!
     if Hive::Config.singleton_class.method_defined?(:__orig_find_project)
       Hive::Config.define_singleton_method(:find_project, Hive::Config.method(:__orig_find_project))

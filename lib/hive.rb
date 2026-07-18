@@ -642,6 +642,20 @@ module Hive
     end
   end
 
+  # A mutation request was based on a semantic task snapshot that is no
+  # longer current, or names a transition that current core policy no longer
+  # permits. The fresh card travels with the error so web clients can snap
+  # back without guessing which filesystem change won the race.
+  class StaleTask < WrongStage
+    attr_reader :expected_fingerprint, :current_card
+
+    def initialize(message, expected_fingerprint:, current_card:)
+      super(message, current_stage: current_card && current_card["stage"])
+      @expected_fingerprint = expected_fingerprint
+      @current_card = current_card
+    end
+  end
+
   # A forward transition rejected by condition authority. Carries the exact
   # gate and recovery action so JSON callers never need to parse WrongStage
   # prose or issue a second status request to decide what to do next.

@@ -31,6 +31,8 @@ require "hive/update_check"
 require "hive/update_check/state"
 require "hive/install_channel"
 require "hive/commands/update"
+require "hive/commands/status"
+require "hive/events"
 require "hive/attempts/dispatcher"
 
 module Hive
@@ -1620,6 +1622,8 @@ module Hive
           return
         end
 
+        return unless guarded_transition_current?(req)
+
         if dependency_gated_request?(req)
           row = rows.find { |candidate| candidate.project == req.project && candidate.slug == req.slug }
           if row&.admission_error
@@ -1672,6 +1676,47 @@ module Hive
       # must honor the same status-row hold as automatic dispatch.
       def dependency_gated_request?(req)
         req.argv[1] != "markers"
+      end
+
+      def guarded_transition_current?(req)
+        return true if req.expected_fingerprint.to_s.empty?
+
+        card = Hive::Commands::Status.new.task_card(project: req.project, slug: req.slug)
+        valid = card["fingerprint"] == req.expected_fingerprint &&
+                Array(card["allowed_transitions"]).any? do |transition|
+                  transition["destination"] == req.transition_destination &&
+                    transition["verb"] == req.argv[1]
+                end
+        return true if valid
+
+        reject_request(req, reason: "stale_transition")
+        false
+      rescue Hive::Error => e
+        reject_request(req, reason: "transition_revalidation_failed: #{e.class}: #{e.message[0, 160]}")
+        false
+      end
+
+      def audit_web_dispatch(req)
+        return unless req.requestor == "web" && !req.actor.to_s.empty?
+
+        task = Hive::TaskResolver.new(req.slug, project_filter: req.project).resolve
+        from = "#{task.stage_index}-#{task.stage_name}"
+        Hive::Events.emit(
+          task_folder: task.folder, slug: task.slug, stage: from,
+          event_type: :operator_action, agent: "web:#{req.actor}",
+          message: "queued #{req.argv[1]} for #{req.transition_destination}",
+          metadata: {
+            actor: req.actor, request_id: req.request_id, from: from,
+            to: req.transition_destination,
+            direction: from == req.transition_destination ? "run" : "forward"
+          }
+        )
+      rescue Hive::Error, SystemCallError => e
+        @logger.event(
+          :dispatch_request_audit_failed, request_id: req.request_id,
+          project: req.project, slug: req.slug,
+          reason: "#{e.class}: #{e.message[0, 160]}"
+        )
       end
 
       # Host-global maintenance request (project == "__global__"): not tied to
@@ -1736,6 +1781,7 @@ module Hive
             command: command, trigger: req.trigger,
             chat_id: req.chat_id, update_id: req.update_id
           )
+          audit_web_dispatch(req)
           return result
         end
 
@@ -1758,6 +1804,7 @@ module Hive
                       project: req.project, slug: req.slug,
                       command: command, trigger: req.trigger,
                       chat_id: req.chat_id, update_id: req.update_id)
+        audit_web_dispatch(req)
       rescue StandardError
         Hive::Daemon::DispatchRequestQueue.release_claim(
           req.request_id, state_home: dispatch_request_state_home

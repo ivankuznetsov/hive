@@ -6,6 +6,8 @@ require "hive/bot/notification_builders"
 require "hive/commands/approve"
 require "hive/commands/drop"
 require "hive/commands/new"
+require "hive/commands/status"
+require "hive/lock"
 require "hive/stages"
 
 module Hive
@@ -44,6 +46,43 @@ module Hive
           force: force,
           json: true
         ).call
+      end
+
+      # Canonical board mutation contract. The client supplies only a desired
+      # destination and the semantic snapshot it rendered; core status derives
+      # the exact verb. Synchronous moves revalidate again inside Approve's
+      # owning commit lock, while run-class actions are durably queued with the
+      # same guard for consume-time revalidation.
+      def transition(slug:, project:, destination:, expected_fingerprint:, actor:,
+                     request_id: Hive::Bot::DispatchRequestWriter.generate_request_id, reason: nil)
+        raise Hive::Error, "destination is required" if destination.to_s.empty?
+        raise Hive::Error, "expected fingerprint is required" if expected_fingerprint.to_s.empty?
+
+        card = current_card(project: project, slug: slug)
+        transition = exact_transition!(
+          card, destination: destination, expected_fingerprint: expected_fingerprint
+        )
+        if %w[approve reject].include?(transition.fetch("verb"))
+          result = Hive::Commands::Approve.new(
+            slug,
+            project: project,
+            from: card.fetch("stage"),
+            to: transition.fetch("destination"),
+            force: transition["verb"] == "reject" || card["marker"] == "none",
+            quiet: true,
+            expected_fingerprint: expected_fingerprint,
+            transition_verb: transition.fetch("verb"),
+            audit: { actor: actor, request_id: request_id, reason: reason }
+          ).call
+          return { ok: true, state: "applied", request_id: request_id, transition: transition, result: result }
+        end
+
+        queue_transition!(
+          card: card, transition: transition, project: project, slug: slug,
+          expected_fingerprint: expected_fingerprint, actor: actor,
+          request_id: request_id
+        )
+        { ok: true, state: "queued", request_id: request_id, transition: transition }
       end
 
       # Reject = send a task back to its immediately-prior gate, the parity
@@ -282,6 +321,60 @@ module Hive
       end
 
       private
+
+      def current_card(project:, slug:)
+        Hive::Commands::Status.new.task_card(project: project, slug: slug)
+      end
+
+      def exact_transition!(card, destination:, expected_fingerprint:)
+        unless card["fingerprint"] == expected_fingerprint
+          raise Hive::StaleTask.new(
+            "task changed since the board rendered; review the current card and retry",
+            expected_fingerprint: expected_fingerprint, current_card: card
+          )
+        end
+
+        transition = Array(card["allowed_transitions"]).find do |candidate|
+          candidate["destination"] == destination.to_s
+        end
+        return transition if transition
+
+        raise Hive::StaleTask.new(
+          "the requested destination is not currently allowed",
+          expected_fingerprint: expected_fingerprint, current_card: card
+        )
+      end
+
+      def queue_transition!(card:, transition:, project:, slug:, expected_fingerprint:, actor:, request_id:)
+        project_entry = Hive::Config.find_project(project) ||
+                        raise(Hive::InvalidTaskPath, "unknown project #{project}")
+        Hive::Lock.with_commit_lock(project_entry.fetch("hive_state_path")) do
+          fresh = current_card(project: project, slug: slug)
+          exact = exact_transition!(
+            fresh,
+            destination: transition.fetch("destination"),
+            expected_fingerprint: expected_fingerprint
+          )
+          unless exact["verb"] == transition["verb"]
+            raise Hive::StaleTask.new(
+              "the transition verb changed while the request was being admitted",
+              expected_fingerprint: expected_fingerprint, current_card: fresh
+            )
+          end
+
+          verb = exact.fetch("verb")
+          argv = [ "hive", verb, slug, "--project", project ]
+          argv += [ verb == "run" ? "--stage" : "--from", fresh.fetch("stage") ]
+          @dispatch_writer.write!(
+            project: project, slug: slug, argv: argv,
+            requestor: "web", actor: actor, trigger: "web_transition",
+            request_id: request_id, expected_fingerprint: expected_fingerprint,
+            transition_destination: exact.fetch("destination")
+          )
+        end
+      rescue ArgumentError => e
+        raise Hive::Error, "cannot queue this transition: #{e.message}"
+      end
 
       # Map the task's current stage dir (e.g. "6-review") to the directory # not-a-stage-ref: documentation example
       # of the stage immediately before it. An absent `from` falls back to

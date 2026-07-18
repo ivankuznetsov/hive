@@ -38,6 +38,7 @@ Rails.application.routes.draw do
     post "recover" => "tasks#recover", as: :task_recover
     post "intervene" => "tasks#intervene", as: :task_intervene
     post "answers" => "tasks#answer", as: :task_answers
+    post "transition" => "tasks#transition", as: :task_transition
   end
 
   get  "repos" => "repos#index", as: :repos

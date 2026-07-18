@@ -18,6 +18,7 @@ module Hive
       claude_completion_fallback
       auto_retry
       auto_retry_skipped
+      operator_action
     ].freeze
 
     STATUS_TAIL_LINES = 20
@@ -51,7 +52,20 @@ module Hive
     # Authoritative condition records use task-journal.jsonl instead, keeping
     # this legacy telemetry contract homogeneous. status.md is derived state
     # and is rewritten with atomic rename.
-    def emit(task_folder:, slug:, stage:, event_type:, agent: nil, message: nil)
+    def emit(task_folder:, slug:, stage:, event_type:, agent: nil, message: nil, metadata: nil)
+      emit!(
+        task_folder: task_folder, slug: slug, stage: stage, event_type: event_type,
+        agent: agent, message: message, metadata: metadata
+      )
+    rescue SystemCallError => e
+      warn "[hive.events] failed to emit #{event_type} for #{task_folder}: #{e.class}: #{e.message}"
+      nil
+    end
+
+    # Strict variant for state transactions. Callers that must roll back when
+    # audit persistence fails use this instead of the telemetry-friendly
+    # `emit`, whose historical contract is warn-and-continue.
+    def emit!(task_folder:, slug:, stage:, event_type:, agent: nil, message: nil, metadata: nil)
       event_type = event_type.to_sym
       unless EVENT_TYPES.include?(event_type)
         raise ArgumentError, "unknown event_type #{event_type.inspect}; valid: #{EVENT_TYPES.inspect}"
@@ -64,6 +78,9 @@ module Hive
         event_type: event_type,
         message: message.nil? ? nil : truncate_message(message.to_s)
       )
+      extras = Hive::TaskJournal::Envelope.stringify(metadata || {})
+      extras.delete_if { |key, _| record.key?(key) }
+      record.merge!(extras)
 
       FileUtils.mkdir_p(task_folder)
       events_path = File.join(task_folder, "events.jsonl")
@@ -76,9 +93,6 @@ module Hive
       end
       render_status!(task_folder, record)
       record
-    rescue SystemCallError => e
-      warn "[hive.events] failed to emit #{event_type} for #{task_folder}: #{e.class}: #{e.message}"
-      nil
     end
 
     def truncate_message(message)

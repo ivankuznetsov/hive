@@ -15,6 +15,8 @@ require "hive/dependency_snapshot"
 require "hive/attempts/context"
 require "hive/conditions/transition_guard"
 require "hive/workflow_package/mutation_lock"
+require "hive/commands/status"
+require "hive/events"
 
 module Hive
   module Commands
@@ -41,7 +43,8 @@ module Hive
     class Approve
       VALID_TERMINAL_MARKERS = %i[complete execute_complete review_complete].freeze
 
-      def initialize(target, to: nil, from: nil, project: nil, force: false, json: false, quiet: false)
+      def initialize(target, to: nil, from: nil, project: nil, force: false, json: false, quiet: false,
+                     expected_fingerprint: nil, transition_verb: nil, audit: nil)
         @target = target
         @to = to
         @from = from
@@ -52,10 +55,13 @@ module Hive
         # (e.g. StageAction) that emit their own unified envelope.
         # State changes and typed exceptions still propagate normally.
         @quiet = quiet
+        @expected_fingerprint = expected_fingerprint
+        @transition_verb = transition_verb
+        @audit = audit&.to_h
       end
 
       def call
-        do_call
+        @expected_fingerprint ? guarded_call : do_call
       rescue Hive::Error => e
         emit_error_envelope(e) if @json && !@quiet
         raise
@@ -93,6 +99,49 @@ module Hive
           enforce_admission: direction == "forward"
         )
         emit_success(task, next_stage_dir, new_folder, marker, commit_action, direction)
+      end
+
+      # Web mutations enter through this lock-first path. The initial resolve
+      # locates the owning commit lock only; every policy-bearing read is
+      # repeated after acquisition so a CLI/daemon move between render and
+      # submit cannot validate against stale objects.
+      def guarded_call
+        owner_hint = Hive::TaskResolver.new(@target, project_filter: @project_filter).resolve
+        Hive::Lock.with_commit_lock(owner_hint.hive_state_path) do
+          task = Hive::TaskResolver.new(@target, project_filter: @project_filter).resolve
+          validate_stage_refs!
+          next_stage_dir = resolve_destination(task)
+          card = Hive::Commands::Status.new.task_card(project: @project_filter, slug: task.slug)
+          validate_guarded_transition!(card, next_stage_dir)
+          validate_from!(task) if @from
+
+          marker = Hive::Markers.current(task.state_file)
+          validate_move!(task, next_stage_dir, marker)
+          direction = direction_of(task, next_stage_dir)
+          new_folder, commit_action = perform_move_and_commit_under_lock(
+            task, next_stage_dir, enforce_admission: direction == "forward", direction: direction
+          )
+          emit_success(task, next_stage_dir, new_folder, marker, commit_action, direction)
+        end
+      end
+
+      def validate_guarded_transition!(card, destination)
+        unless card["fingerprint"] == @expected_fingerprint
+          raise Hive::StaleTask.new(
+            "task changed since the board rendered; review the current card and retry",
+            expected_fingerprint: @expected_fingerprint, current_card: card
+          )
+        end
+
+        allowed = Array(card["allowed_transitions"]).any? do |transition|
+          transition["destination"] == destination && transition["verb"] == @transition_verb
+        end
+        return if allowed
+
+        raise Hive::StaleTask.new(
+          "the requested transition is no longer allowed",
+          expected_fingerprint: @expected_fingerprint, current_card: card
+        )
       end
 
       # Reject a clearly-invalid --from/--to stage ref against the union of every
@@ -235,25 +284,31 @@ module Hive
       #     release no-ops on the gone source path. We delete the orphan at
       #     the new path before committing so the per-process lock metadata
       #     isn't tracked in hive/state.
-      def perform_move_and_commit(task, dest_stage, enforce_admission: false)
-        new_folder = nil
-        commit_action = nil
+      def perform_move_and_commit(task, dest_stage, enforce_admission: false, direction: nil)
         Hive::Lock.with_commit_lock(task.hive_state_path) do
-          Hive::Lock.with_task_lock(task.folder, slug: task.slug, op: "approve") do
-            # Preserve the command's typed collision contract before building
-            # a multi-project snapshot: a pre-existing destination necessarily
-            # duplicates the slug, but it is first and foremost an unsafe move
-            # destination and requires no dependency inference to reject.
-            raise_destination_collision(destination_folder(task, dest_stage)) if
-              destination_exists?(destination_folder(task, dest_stage))
-            Hive::DependencySnapshot.enforce_admission!(task) if enforce_admission
-            Hive::Attempts::Context.current&.validate_generation!(task)
-            new_folder = move_task!(task, dest_stage)
-          end
-          cleanup_orphan_task_lock(new_folder)
-          commit_action = "approve #{task.stage_index}-#{task.stage_name} -> #{dest_stage}"
-          record_commit_or_rollback!(task, dest_stage, new_folder, commit_action)
+          perform_move_and_commit_under_lock(
+            task, dest_stage, enforce_admission: enforce_admission,
+            direction: direction || direction_of(task, dest_stage)
+          )
         end
+      end
+
+      def perform_move_and_commit_under_lock(task, dest_stage, enforce_admission:, direction:)
+        new_folder = nil
+        Hive::Lock.with_task_lock(task.folder, slug: task.slug, op: "approve") do
+          # Preserve the command's typed collision contract before building
+          # a multi-project snapshot: a pre-existing destination necessarily
+          # duplicates the slug, but it is first and foremost an unsafe move
+          # destination and requires no dependency inference to reject.
+          raise_destination_collision(destination_folder(task, dest_stage)) if
+            destination_exists?(destination_folder(task, dest_stage))
+          Hive::DependencySnapshot.enforce_admission!(task) if enforce_admission
+          Hive::Attempts::Context.current&.validate_generation!(task)
+          new_folder = move_task!(task, dest_stage)
+        end
+        cleanup_orphan_task_lock(new_folder)
+        commit_action = "approve #{task.stage_index}-#{task.stage_name} -> #{dest_stage}"
+        record_commit_or_rollback!(task, dest_stage, new_folder, commit_action, direction: direction)
         [ new_folder, commit_action ]
       end
 
@@ -374,13 +429,15 @@ module Hive
       #      re-created mid-flight). Both errors must surface — the
       #      original commit failure is the cause; the rollback failure
       #      is what actually blocks recovery.
-      def record_commit_or_rollback!(task, dest_stage, new_folder, action)
+      def record_commit_or_rollback!(task, dest_stage, new_folder, action, direction:)
+        audit_snapshot = snapshot_audit_files(new_folder) if @audit
+        append_operator_audit!(task, dest_stage, new_folder, direction) if @audit
         record_hive_commit(task, dest_stage, action)
-      rescue Hive::Error, SystemCallError => e
-        attempt_rollback!(task, new_folder, e)
+      rescue StandardError => e
+        attempt_rollback!(task, new_folder, e, audit_snapshot: audit_snapshot)
       end
 
-      def attempt_rollback!(task, new_folder, original_error)
+      def attempt_rollback!(task, new_folder, original_error, audit_snapshot: nil)
         # The pre-condition check stays in this caller — the helper only
         # owns the rescue + re-raise contract. If the source path now
         # exists, an undo would clobber it; surface a manual-recovery
@@ -394,7 +451,10 @@ module Hive
 
         Hive::CommitOrRollback.attempt!(
           original_error,
-          on_undo: -> { FileUtils.mv(new_folder, task.folder) },
+          on_undo: lambda {
+            restore_audit_files(audit_snapshot) if audit_snapshot
+            FileUtils.mv(new_folder, task.folder)
+          },
           rolled_back_message: lambda do |e|
             "approve aborted; mv rolled back to #{task.folder}. " \
               "underlying: #{e.class}: #{e.message}"
@@ -405,6 +465,36 @@ module Hive
               "commit error: #{orig.class}: #{orig.message}. " \
               "rollback error: #{rb.class}: #{rb.message}"
           end
+        )
+      end
+
+      def snapshot_audit_files(folder)
+        %w[events.jsonl status.md].to_h do |name|
+          path = File.join(folder, name)
+          [ path, File.file?(path) ? File.binread(path) : nil ]
+        end
+      end
+
+      def restore_audit_files(snapshot)
+        snapshot.each do |path, content|
+          content.nil? ? FileUtils.rm_f(path) : File.binwrite(path, content)
+        end
+      end
+
+      def append_operator_audit!(task, dest_stage, new_folder, direction)
+        audit = @audit.transform_keys(&:to_s)
+        metadata = {
+          "actor" => audit["actor"],
+          "request_id" => audit["request_id"],
+          "from" => "#{task.stage_index}-#{task.stage_name}",
+          "to" => dest_stage,
+          "direction" => direction,
+          "confirmation_reason" => audit["reason"]
+        }.compact
+        Hive::Events.emit!(
+          task_folder: new_folder, slug: task.slug, stage: dest_stage,
+          event_type: :operator_action, agent: "web:#{audit['actor']}",
+          message: "#{metadata['from']} -> #{dest_stage}", metadata: metadata
         )
       end
 

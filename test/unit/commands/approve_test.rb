@@ -228,6 +228,34 @@ class HiveCommandsApproveTest < Minitest::Test
     end
   end
 
+  def test_audit_and_move_roll_back_together_when_commit_fails
+    Dir.mktmpdir("hive-approve-audit") do |root|
+      state = File.join(root, ".hive-state")
+      source = File.join(state, "stages", "2-brainstorm", "slug-260522-abcd")
+      destination = File.join(state, "stages", "3-plan", "slug-260522-abcd")
+      FileUtils.mkdir_p(File.dirname(destination))
+      FileUtils.mkdir_p(source)
+      File.write(File.join(source, "events.jsonl"), "{\"event_type\":\"stage_enter\"}\n")
+      File.write(File.join(source, "status.md"), "before\n")
+      FileUtils.mv(source, destination)
+      approve_task = task(folder: source, hive_state_path: state, project_root: root)
+      cmd = command(audit: { actor: "alice", request_id: "req-rollback" })
+      cmd.define_singleton_method(:record_hive_commit) { |*| raise Hive::GitError, "commit failed" }
+
+      assert_raises(Hive::GitError) do
+        cmd.send(
+          :record_commit_or_rollback!, approve_task, "3-plan", destination,
+          "approve 2-brainstorm -> 3-plan", direction: "forward"
+        )
+      end
+
+      assert File.directory?(source)
+      refute File.exist?(destination)
+      assert_equal "{\"event_type\":\"stage_enter\"}\n", File.read(File.join(source, "events.jsonl"))
+      assert_equal "before\n", File.read(File.join(source, "status.md"))
+    end
+  end
+
   def test_source_has_tracked_files_reports_git_failures_from_stdout_or_stderr
     cmd = command
     original = Open3.singleton_class.instance_method(:capture3)

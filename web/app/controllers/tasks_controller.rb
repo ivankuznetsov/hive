@@ -77,6 +77,23 @@ class TasksController < ApplicationController
     redirect_to root_path, notice: "Approved #{params[:slug]}"
   end
 
+  def transition
+    result = dispatcher.transition(
+      slug: params[:slug], project: @project["name"],
+      destination: params.require(:destination),
+      expected_fingerprint: params.require(:expected_fingerprint),
+      actor: current_login || "local-owner", request_id: request.request_id,
+      reason: params[:reason]
+    )
+    render json: result, status: result[:state] == "queued" ? :accepted : :ok
+  rescue Hive::Error => e
+    TransitionMetrics.denied!(
+      reason: e.class.name, request_id: request.request_id,
+      project: @project["name"], slug: params[:slug], actor: current_login
+    )
+    raise
+  end
+
   def reject
     dispatcher.reject(slug: params[:slug], project: @project["name"],
                       from: params[:from], to: params[:to])

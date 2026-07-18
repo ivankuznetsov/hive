@@ -22,13 +22,14 @@ module Hive
       def write!(project:, slug:, argv:, chat_id: nil, update_id: nil,
                  trigger: nil, request_id: generate_request_id,
                  task_generation: nil, predecessor_attempt_id: nil,
-                 inherited_outputs: [],
+                 inherited_outputs: [], requestor: "bot", actor: nil,
+                 expected_fingerprint: nil, transition_destination: nil,
                  state_home: Hive::Paths.state_home, now: Time.now)
         Hive::Daemon::DispatchRequestQueue.write_request!(
           project: project,
           slug: slug,
           argv: argv,
-          requestor: "bot",
+          requestor: requestor,
           chat_id: chat_id,
           update_id: update_id,
           trigger: trigger,
@@ -36,6 +37,9 @@ module Hive
           task_generation: task_generation,
           predecessor_attempt_id: predecessor_attempt_id,
           inherited_outputs: inherited_outputs,
+          actor: actor,
+          expected_fingerprint: expected_fingerprint,
+          transition_destination: transition_destination,
           state_home: state_home,
           now: now
         )

@@ -31,6 +31,14 @@ class ApplicationController < ActionController::Base
     render_typed_error(:not_found, "Not found", e.message)
   end
 
+  rescue_from Hive::StaleTask do |e|
+    render json: {
+      error: "stale_task", message: e.message,
+      expected_fingerprint: e.expected_fingerprint,
+      card: e.current_card
+    }, status: :conflict
+  end
+
   private
 
   # Hive's typed errors render an HTML error page for browser requests. Binary
@@ -39,7 +47,9 @@ class ApplicationController < ActionController::Base
   # task/project there must HEAD the status — otherwise the rescue itself
   # raises ActionView::MissingTemplate and the clean 404 becomes a 500.
   def render_typed_error(status, heading, message)
-    if request.format.html?
+    if request.format.json?
+      render json: { error: heading.parameterize(separator: "_"), message: message }, status: status
+    elsif request.format.html?
       render "errors/show", status: status, locals: { heading: heading, message: message }
     else
       head status

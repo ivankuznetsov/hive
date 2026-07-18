@@ -168,6 +168,17 @@ module Hive
         }
       end
 
+      # Fresh, authoritative card lookup for mutation guards. This deliberately
+      # rebuilds the shared status payload rather than teaching writers a
+      # second interpretation of markers, dependencies, or workflow overlays.
+      def task_card(project:, slug:)
+        project_name = project.respond_to?(:fetch) ? project.fetch("name") : project.to_s
+        payload = json_payload(Hive::Config.registered_projects)
+        project_payload = payload.fetch("projects", []).find { |entry| entry["name"] == project_name }
+        card = project_payload&.fetch("tasks", [])&.find { |task| task["slug"] == slug.to_s }
+        card || raise(Hive::InvalidTaskPath, "unknown task #{slug} in project #{project_name}")
+      end
+
       # Isolate per-project failures. A single project with a malformed
       # config.yml (e.g. an invalid `dependency_gate_stage`) used to raise
       # out of `project_payload` and abort the entire `hive status --json`;
@@ -509,6 +520,7 @@ module Hive
             "request_id" => request.request_id,
             "verb" => request.argv[1],
             "requestor" => request.requestor,
+            "actor" => request.actor,
             "trigger" => request.trigger,
             "created_at" => request.created_at.utc.iso8601(6)
           }

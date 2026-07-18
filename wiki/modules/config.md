@@ -7,7 +7,39 @@ updated: 2026-07-22
 tags: [config, yaml, validation]
 ---
 
-**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects plus daemon, bot, digest, update, web, and Screenote base-url settings, including voice-transcription defaults; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, default workflow, worktree root, budgets, timeouts, **stage agents**, project/top-level and per-stage `permissions`, project-global `claude.mode`/`claude.permission_mode` plus `claude.model`/`claude.effort` pins, review-stage roles, daemon enrollment, experimental babysitter enrollment, ordinary patrol, and scheduled architecture patrol). Architecture-patrol discovery, issue review output, and automatic mutation remain separate settings. Fresh init enables issue output with discovery as the default review surface; legacy or hand-written config that omits `issue_filing.enabled` remains effect-free. `Config.load(project_root)` captures frozen raw field provenance for implementation-owning `agent`/`model`/`effort` keys before it **recursively** deep-merges project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays are replaced wholesale, never per-element merged. Screenote OAuth tokens live outside YAML in `screenote.json`, created by `hive connect screenote`.
+**TLDR**: Two YAML configs — global at `~/.config/hive/config.yml` (registered projects plus daemon, bot, digest, update, web, and Screenote base-url settings, including voice-transcription defaults; `HIVE_HOME/config.yml` when overridden, legacy `~/Dev/hive/config.yml` when migrated) and per-project at `<project>/.hive-state/config.yml` (default branch, default workflow, worktree root, budgets, timeouts, **stage agents**, project/top-level and per-stage `permissions`, project-global `claude.mode`/`claude.permission_mode` plus `claude.model`/`claude.effort` pins, review-stage roles, daemon enrollment, experimental babysitter enrollment, ordinary patrol, and scheduled architecture patrol). Project config root keys are strict: `Config.load(project_root)` rejects unsupported keys before merging defaults, while registered workflow stage names remain the sanctioned dynamic extension for stage overrides. Architecture-patrol discovery, issue review output, and automatic mutation remain separate settings. Fresh init enables issue output with discovery as the default review surface; legacy or hand-written config that omits `issue_filing.enabled` remains effect-free. `Config.load(project_root)` captures frozen raw field provenance for implementation-owning `agent`/`model`/`effort` keys before it **recursively** deep-merges project values onto `Config::DEFAULTS`, then runs `validate!`. Arrays are replaced wholesale, never per-element merged. Screenote OAuth tokens live outside YAML in `screenote.json`, created by `hive connect screenote`.
+
+## Strict project root keys
+
+After YAML parsing confirms that `.hive-state/config.yml` is a mapping,
+`Config.load` validates its raw top-level keys before patrol mode expansion,
+default merging, provenance fields, or other synthetic values are added. The
+supported static vocabulary is `Config::DEFAULTS.keys` plus explicitly
+supported no-default sections such as `gh`. Hive also loads the built-in and
+active project workflow descriptors and accepts their exact stage names as
+top-level per-stage override keys. Arbitrary lookalikes are not extension
+namespaces.
+
+All unsupported root keys are reported together in deterministic order and the
+error names the source config path. A literal root-level `reviewers` key is
+always invalid, including `reviewers: null`, `reviewers: []`, or a populated
+list. Move reviewer entries under `review.reviewers`:
+
+```yaml
+review:
+  reviewers:
+    - name: codex-native-review
+      kind: codex_review
+      agent: codex
+      output_basename: codex-native-review
+      prompt_template: reviewer_codex_native_review.md.erb
+```
+
+This root allowlist applies only to project config loaded through
+`Config.load`; global Hive config retains its separate vocabulary, including
+`registered_projects`. Because every project command shares this boundary, the
+same malformed project config fails consistently in `hive run`, `hive doctor`,
+and other consumers instead of reaching command-specific fallback behavior.
 
 ## Condition authority
 
@@ -275,7 +307,7 @@ expiry, client id, issuer, MCP resource URL, base URL, and default
 | `hive_home` | `ENV["HIVE_HOME"] || Hive::Paths.config_home` (XDG default `~/.config/hive`; legacy `~/Dev/hive/config.yml` is migrated) |
 | `global_config_path` | `<hive_home>/config.yml` |
 | `hive_state_dir(project_root, name = ".hive-state")` | `<project_root>/<name>` |
-| `load(project_root)` | Reads `<project_root>/.hive-state/config.yml`, treating only an initial `ENOENT` as absent and rewrapping traversal, symlink-loop, read, and YAML parse failures as path-bearing `ConfigError`s; then recursively deep-merges onto DEFAULTS, validates, and returns a Hash with `"project_root"` injected. |
+| `load(project_root)` | Reads `<project_root>/.hive-state/config.yml`, treating only an initial `ENOENT` as absent and rewrapping traversal, symlink-loop, read, and YAML parse failures as path-bearing `ConfigError`s; validates raw project root keys against static keys plus registered workflow stage names; then recursively deep-merges onto DEFAULTS, validates values, and returns a Hash with `"project_root"` injected. |
 | `registered_projects` | Reads global config; returns `[{name, path, hive_state_path, repository_identity}, …]` (paths `expand_path`-ed). The identity is a normalized canonical `origin` captured at enrollment when available. |
 | `find_project(name)` | First entry from `registered_projects` matching `name` (or `nil`). |
 | `register_project(name:, path:, repository_identity: :detect)` | Adds or replaces an entry under `config.yml.lock`; stores private `real_path` for relink detection and the transport-independent canonical `origin` identity when detectable. Enrollment still succeeds without an origin, but an explicit cross-project dependency targeting that project later fails closed until identity is configured and re-enrolled. |
@@ -315,7 +347,13 @@ key → descriptor default → merged Hive default/fallback.
 
 ## Validation (`Config.validate!`)
 
-Runs after merge so a default value can never trigger a failure — only user input does. Raises `Hive::ConfigError` (single class for all "config is bad" cases). Key checks include:
+Project root-key validation is deliberately performed only in `Config.load`
+against the raw project mapping. `Config.validate!` remains the shared
+post-merge value validator because global config paths also call it with keys
+such as `registered_projects`. It runs after merge so a default value can never
+trigger a failure — only user input does. Both boundaries raise
+`Hive::ConfigError` (the single class for all "config is bad" cases). Key checks
+include:
 
 1. **`validate_hash_shaped_keys!`** — every hash-shaped top-level key (`brainstorm`, `claude`, `plan`, `execute`, `open_pr`, `artifacts`, `finalize`, `budget_usd`, `timeout_sec`, `review`, `agents`, `daemon`, `bot`, `web`, `babysitter`, `patrol`, `digest`, `rebase`) must be a Hash when present. Catches scalar/nil/integer overrides (e.g. YAML `brainstorm: claude`, `budget_usd: ~`, `timeout_sec: 600`) that would otherwise survive `deep_merge` and crash later as `TypeError`/`NoMethodError`.
 2. **`validate_reviewers!` / `validate_review_adhoc!`** — `review.reviewers` must be an Array (nil fails with a hint to remove the key vs. set `[]`). Each entry must be a Hash. `name` and `output_basename` must be unique across the list (basename uniqueness prevents concurrent file-write collisions on `reviews/<basename>-NN.md`). Empty/whitespace `output_basename` is rejected (would yield `reviews/-01.md`). Each entry's `agent` is checked via `validate_agent_name!`. `review.adhoc.reviewers` is either nil or the same reviewer-entry Array shape, and `review.adhoc.fix` is boolean.

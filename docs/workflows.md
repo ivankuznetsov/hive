@@ -271,6 +271,23 @@ above produces `1-inbox`, `2-work`, and `3-done`. The first stage has no
 incoming advance verb; later stages default their incoming advance verb to the
 stage name.
 
+Project configuration has a strict top-level vocabulary. Exact stage names
+from built-in and active project workflow descriptors are the sanctioned
+dynamic extension point for per-stage agent, model, effort, permission, budget,
+and timeout overrides:
+
+```yaml
+work:
+  agent: codex
+  timeout_sec: 3600
+```
+
+Hive rejects arbitrary top-level names, including stage-name lookalikes. The
+stage must be present in a registered descriptor before its override is valid.
+Project review adapters are a separate configuration surface and belong under
+`review.reviewers`; the `reviewers:` list shown inside a `kind: council` stage
+above is nested descriptor data, not a project-config root key.
+
 ## Migration Notes
 
 The automatic implementation-owner policy applies only to the built-in coding workflow's `execute`, `open_pr`, `review.fix`, and `review.ci` boundaries. Descriptor-backed agent and council stages continue to resolve their own optional `agent`, `model`, and `effort` fields, and council reviewers are never inherited from the coding execute owner.

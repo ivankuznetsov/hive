@@ -221,6 +221,28 @@ class WorkflowLifecycleCommandsTest < Minitest::Test
     end
   end
 
+  def test_browser_preview_baseline_must_still_match_before_remove
+    with_project_and_package do |project, package, resolution|
+      Hive::Commands::Workflow::Install.new(
+        "honeycomb/demo", project_root: project, json: true, yes: true,
+        stdout: StringIO.new, registry_client: stub_client(package, resolution), committer: ->(*) { }
+      ).call!
+      stale = {
+        "source_commit" => resolution.source_commit,
+        "manifest_digest" => "0" * 64
+      }
+
+      assert_raises(Hive::ConcurrentRunError) do
+        Hive::Commands::Workflow::Remove.new(
+          "demo", project_root: project, json: true, yes: true,
+          stdout: StringIO.new, committer: ->(*) { }, expected_current: stale
+        ).call!
+      end
+      store = Hive::WorkflowPackage::ManagedStore.new(File.join(project, ".hive-state"))
+      assert_equal resolution.source_commit, store.selected("demo").fetch("source_commit")
+    end
+  end
+
   private
 
   def with_project_and_package

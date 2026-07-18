@@ -103,6 +103,12 @@ removing the project selection therefore affects only new tasks; generations
 still referenced by existing tasks remain verifiable and runnable. Tampering
 is an integrity error, never an implicit local override.
 
+Lifecycle mutations recheck the selected source commit and manifest digest
+inside the workflow mutation lock. A first install likewise verifies that no
+selection appeared after validation. If another operator changes the selection
+between preview and apply, Hive stops with a retryable conflict instead of
+installing, updating, or removing a generation the caller did not review.
+
 `workflow update --dry-run` validates and returns descriptor, instruction,
 manifest, dependency, permission, command, domain, and file changes without
 writing project state. An applied update always needs ordinary confirmation.

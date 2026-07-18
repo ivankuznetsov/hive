@@ -98,10 +98,24 @@ class WorkflowUpdateCommandTest < Minitest::Test
     end
   end
 
+  def test_browser_preview_baseline_must_still_match_before_update
+    with_update_fixture do |project, store, old, candidate_root, candidate|
+      stale = {
+        "source_commit" => "f" * 40,
+        "manifest_digest" => old.manifest_digest
+      }
+
+      assert_raises(Hive::ConcurrentRunError) do
+        command(project, candidate_root, candidate, yes: true, expected_current: stale).call!
+      end
+      assert_equal old.source_commit, store.selected("demo").fetch("source_commit")
+    end
+  end
+
   private
 
   def command(project, package, resolution, yes: false, allow_escalation: false, dry_run: false,
-              json: true, stdin: $stdin, committer: ->(*) { })
+              json: true, stdin: $stdin, committer: ->(*) { }, expected_current: nil)
     client = Object.new
     client.define_singleton_method(:fetch) do |_source, destination:|
       FileUtils.cp_r(Dir.glob(File.join(package, "*")), destination)
@@ -110,7 +124,8 @@ class WorkflowUpdateCommandTest < Minitest::Test
     Hive::Commands::Workflow::Update.new(
       "demo", project_root: project, json: json, yes: yes,
       allow_escalation: allow_escalation, dry_run: dry_run,
-      stdin: stdin, stdout: StringIO.new, registry_client: client, committer: committer
+      stdin: stdin, stdout: StringIO.new, registry_client: client, committer: committer,
+      expected_current: expected_current
     )
   end
 

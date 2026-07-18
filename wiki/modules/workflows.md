@@ -105,7 +105,11 @@ weakening owner-authored descriptor compatibility:
   lock. `TransactionJournal` plus the workflow mutation lock reconcile an
   interrupted activation/removal before Loader or lifecycle access. Selection
   reads participate in that lock, while cleanup is serialized with managed task
-  creation and stage moves and aborts on unreadable pin metadata.
+  creation and stage moves and aborts on unreadable pin metadata. Activation can
+  distinguish "no baseline check" from an explicit "still unselected" baseline;
+  activation and removal compare expected source commit plus manifest digest
+  under the mutation lock so a reviewed lifecycle action cannot race a different
+  selection into place.
 - `Loader` registers selected managed workflows beside built-ins and authored
   descriptors while rejecting id collisions and reloading when its managed
   fingerprint changes. Task-pinned generations bypass the single-id overlay and

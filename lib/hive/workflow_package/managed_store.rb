@@ -13,6 +13,7 @@ module Hive
   module WorkflowPackage
     class ManagedStore
       LOCK_FILE = "honeycomb.lock.json".freeze
+      NO_SELECTION_CHECK = Object.new.freeze
 
       attr_reader :hive_state_path, :workflows_dir
 
@@ -46,18 +47,23 @@ module Hive
         FileUtils.rm_rf(staging) if staging && File.exist?(staging)
       end
 
-      def activate(resolution, commit: nil, expected_current: nil)
+      def activate(resolution, commit: nil, expected_current: NO_SELECTION_CHECK)
         validate_resolution!(resolution)
         raise Hive::ConfigError, "managed generation is not installed" unless File.directory?(generation_path(resolution.name, resolution.source_commit))
 
         MutationLock.with_lock(workflows_dir) do
           reconcile_unlocked!
-          if expected_current
-            current = selected_unlocked(resolution.name)
-            unless current && current.fetch("source_commit") == expected_current.fetch("source_commit") &&
-                   current.fetch("manifest_digest") == expected_current.fetch("manifest_digest")
-              raise Hive::ConcurrentRunError.new("managed workflow selection changed after validation")
+          current = selected_unlocked(resolution.name)
+          selection_changed =
+            if expected_current.equal?(NO_SELECTION_CHECK)
+              false
+            elsif expected_current.nil?
+              !current.nil?
+            else
+              !same_selection?(current, expected_current)
             end
+          if selection_changed
+            raise Hive::ConcurrentRunError.new("managed workflow selection changed after validation")
           end
           Transaction.activate(
             lock_path: lock_path(resolution.name), workflows_dir: workflows_dir,
@@ -66,10 +72,13 @@ module Hive
         end
       end
 
-      def remove_selection(name, commit: nil)
+      def remove_selection(name, commit: nil, expected_current: nil)
         MutationLock.with_lock(workflows_dir) do
           reconcile_unlocked!
           raise Hive::ConfigError, "managed workflow #{name.inspect} is not selected" unless File.file?(lock_path(name))
+          if expected_current && !same_selection?(selected_unlocked(name), expected_current)
+            raise Hive::ConcurrentRunError.new("managed workflow selection changed after validation")
+          end
 
           Transaction.remove(lock_path: lock_path(name), workflows_dir: workflows_dir, commit: commit)
         end
@@ -173,6 +182,11 @@ module Hive
       end
 
       private
+
+      def same_selection?(current, expected)
+        current && current.fetch("source_commit") == expected.fetch("source_commit") &&
+          current.fetch("manifest_digest") == expected.fetch("manifest_digest")
+      end
 
       def with_stable_read
         MutationLock.with_lock(workflows_dir) { reconcile_unlocked! }

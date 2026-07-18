@@ -14,17 +14,22 @@ module Hive
         SCHEMA = "hive-workflow-update".freeze
 
         def initialize(name, project_root:, json: false, yes: false, allow_escalation: false,
-                       dry_run: false, stdout: $stdout, stdin: $stdin, registry_client: nil, committer: nil)
+                       dry_run: false, stdout: $stdout, stdin: $stdin, registry_client: nil, committer: nil,
+                       expected_current: nil)
           super(project_root: project_root, json: json, stdout: stdout, stdin: stdin, yes: yes, committer: committer)
           @name = name.to_s.delete_prefix("honeycomb/")
           @allow_escalation = allow_escalation
           @dry_run = dry_run
           @registry_client = registry_client || Hive::WorkflowPackage::RegistryClient.new
+          @expected_current = expected_current
         end
 
         def call!
           current = store.selected(@name)
           raise OwnershipError, "managed workflow #{@name.inspect} is not installed" unless current
+          if @expected_current && !same_selection?(current, @expected_current)
+            raise Hive::ConcurrentRunError.new("managed workflow selection changed since the reviewed update preview")
+          end
 
           Dir.mktmpdir("hive-workflow-update-") do |candidate_root|
             candidate = @registry_client.fetch("honeycomb/#{@name}", destination: candidate_root)
@@ -70,6 +75,11 @@ module Hive
         end
 
         private
+
+        def same_selection?(current, expected)
+          current.fetch("source_commit") == expected.fetch("source_commit") &&
+            current.fetch("manifest_digest") == expected.fetch("manifest_digest")
+        end
 
         def escalation_confirmed?(diff)
           return true unless diff.escalation?

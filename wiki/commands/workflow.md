@@ -45,6 +45,12 @@ Managed storage is
 and release digest into `meta.yml`; update/remove retain any referenced
 generation. Loader fingerprints include managed locks and selected generations,
 while a pinned task loads its exact descriptor directly from the managed store.
+Install now binds activation to the still-absent (or exact no-op) selection it
+observed after package validation. Update and remove accept an internal expected
+source-commit/manifest-digest baseline for browser preview receipts, check it
+before remote or destructive work, and recheck the same selection inside the
+mutation lock. A changed baseline raises retryable `ConcurrentRunError` instead
+of applying a lifecycle action to an unreviewed generation.
 
 Current v2 permissions are coarse disclosure data. Only the exact low-risk,
 task-local read-only subset maps losslessly to Hive's managed runtime; broader

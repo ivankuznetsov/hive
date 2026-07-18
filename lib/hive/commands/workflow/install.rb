@@ -45,7 +45,10 @@ module Hive
 
             store.place_generation(package_root, resolution)
             begin
-              store.activate(resolution, commit: -> { commit_state(resolution.name, "installed") })
+              store.activate(
+                resolution, expected_current: current,
+                commit: -> { commit_state(resolution.name, "installed") }
+              )
             rescue StandardError
               store.cleanup_unreferenced(resolution.name)
               raise

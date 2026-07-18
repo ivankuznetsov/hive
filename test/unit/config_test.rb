@@ -100,6 +100,13 @@ class ConfigTest < Minitest::Test
     end
   end
 
+  def test_project_key_rendering_survives_an_inspect_failure
+    key = Object.new
+    key.define_singleton_method(:inspect) { raise "broken inspect" }
+
+    assert_equal "<Object>", Hive::Config.send(:safe_project_key_inspect, key)
+  end
+
   def test_load_accepts_all_static_project_keys_plus_gh
     with_tmp_dir do |dir|
       config_path = File.join(dir, ".hive-state", "config.yml")

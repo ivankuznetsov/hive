@@ -1,0 +1,14 @@
+<section class="board-band" id="band_<%= dom_id_for(band["project"]["name"], band["workflow"]["id"]) %>"
+         data-board-band="<%= band["project"]["name"] %>:<%= band["workflow"]["id"] %>"
+         data-project-name="<%= band["project"]["name"] %>" data-workflow="<%= band["workflow"]["id"] %>">
+  <header class="board-band-header">
+    <h2><%= band["project"]["name"] %></h2>
+    <span class="workflow-label"><%= band["workflow"]["id"].to_s.tr("_-", "  ").titleize %></span>
+    <span class="muted"><%= pluralize(band["tasks"].size, "task") %></span>
+  </header>
+  <div class="board-columns" role="list" aria-label="<%= band["project"]["name"] %> <%= band["workflow"]["id"] %> stages">
+    <% band["workflow"].fetch("stages", []).each do |stage| %>
+      <%= render "board/column", band: band, stage: stage %>
+    <% end %>
+  </div>
+</section>

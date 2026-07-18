@@ -1,0 +1,12 @@
+<div class="board-card-chips">
+  <% if (agent = task.dig("implementation_identity", "stages", "execute", "provider")) %>
+    <span class="board-chip" title="Implementation agent"><%= agent %></span>
+  <% end %>
+  <% if task["blocked_by"].present? %>
+    <span class="board-chip board-chip-warn" title="Blocked by dependency"><%= task["blocked_by"] %></span>
+  <% end %>
+  <% task.fetch("operational_chips", []).each do |chip| %>
+    <span class="board-chip" title="<%= chip["source"] %> · <%= chip["observed_at"] %>"><%= chip["kind"] %></span>
+  <% end %>
+  <span class="board-age"><%= relative_age(task["age_seconds"]) %></span>
+</div>

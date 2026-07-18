@@ -1,4 +1,5 @@
 class ApplicationController < ActionController::Base
+  WORK_VIEWS = %w[board grid].freeze
   # Rails 8 enables forgery protection by default; explicit so static
   # scanners (and readers) see the contract without chasing framework
   # defaults.
@@ -11,7 +12,7 @@ class ApplicationController < ActionController::Base
 
   before_action :require_login
 
-  helper_method :current_login
+  helper_method :current_login, :default_work_view
 
   # Hive's typed errors are operator-readable by design ("task not in stage",
   # "invalid clone URL"). Render them on an error page instead of a blank
@@ -47,6 +48,11 @@ class ApplicationController < ActionController::Base
 
   def current_login
     session[:github_login]
+  end
+
+  def default_work_view
+    view = cookies.signed[:hive_default_view].to_s
+    WORK_VIEWS.include?(view) ? view : "board"
   end
 
   def require_login

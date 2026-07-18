@@ -15,7 +15,10 @@ Rails.application.routes.draw do
   get  "auth/github/wait" => "sessions#wait", as: :auth_github_wait
   post "logout" => "sessions#destroy", as: :logout
 
-  root "status#index"
+  root "home#index"
+  get "board" => "board#index", as: :board
+  get "grid" => "status#index", as: :grid
+  resource :settings, only: %i[show update]
   post "daemon/repair" => "daemon#repair", as: :daemon_repair
 
   post "ideas" => "ideas#create", as: :ideas

@@ -17,8 +17,9 @@ module Hive
     # param was dropped. Fail-open by design — when neither timestamp is
     # known we can't compute an age, so the row is never hidden rather
     # than guessed at.
-    def hide?(stage:, mtime: nil, folder_mtime: nil, now: Time.now)
-      return false unless archived?(stage)
+    def hide?(stage:, mtime: nil, folder_mtime: nil, now: Time.now, terminal: nil)
+      is_terminal = terminal.nil? ? archived?(stage) : terminal
+      return false unless is_terminal
       archived_at = mtime || folder_mtime
       return false unless archived_at
 

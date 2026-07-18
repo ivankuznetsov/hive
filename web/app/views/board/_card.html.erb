@@ -1,0 +1,11 @@
+<article class="board-card state-<%= task["dominant_state"] %>" id="card_<%= dom_id_for(project["name"], task["slug"]) %>"
+         data-card-slug="<%= task["slug"] %>" data-state="<%= task["dominant_state"] %>"
+         data-card-digest="<%= task["card_digest"] %>" tabindex="0">
+  <div class="board-card-heading">
+    <%= status_dot(task) %>
+    <%= link_to task_title(task), task_path(project["name"], task["slug"]), class: "board-card-title" %>
+  </div>
+  <span class="task-slug"><%= task["slug"] %></span>
+  <p class="board-card-state"><%= task["action_label"].presence || task["marker"].presence || "Idle" %></p>
+  <%= render "board/card_chips", task: task %>
+</article>

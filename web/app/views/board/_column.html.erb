@@ -1,0 +1,13 @@
+<% tasks = band["tasks"].select { |task| task["stage"] == stage["dir"] } %>
+<section class="board-column" role="listitem" data-stage="<%= stage["dir"] %>">
+  <header class="board-column-header">
+    <h3><%= stage["name"].to_s.tr("_-", "  ").titleize %></h3>
+    <span class="board-count" aria-label="<%= pluralize(tasks.size, "task") %>"><%= tasks.size %></span>
+  </header>
+  <div class="board-column-cards">
+    <% grouped_board_tasks(tasks, @filters["group"], band["project"]["name"]).each do |lane, lane_tasks| %>
+      <%= render "board/lane", lane: lane, tasks: lane_tasks, grouped: @filters["group"] != "none",
+                               project: band["project"] %>
+    <% end %>
+  </div>
+</section>

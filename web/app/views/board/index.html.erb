@@ -1,0 +1,43 @@
+<% content_for(:title, "hivebox — board") %>
+<% content_for(:main_class, "board-main") %>
+<% content_for(:head) do %>
+  <meta name="turbo-refresh-method" content="morph">
+  <meta name="turbo-refresh-scroll" content="preserve">
+<% end %>
+<%= turbo_stream_from StatusBroadcaster::CHANNEL %>
+
+<div class="board-shell">
+  <div class="board-toolbar">
+    <%= render "status/view_switch" %>
+    <%= link_to "View settings", settings_path, class: "btn btn-ghost btn-sm" %>
+  </div>
+
+  <%= render "status/composer" %>
+  <%= render "status/daemon", daemon_status: @daemon_status %>
+
+  <%= form_with url: board_path, method: :get, class: "board-filters",
+                data: { controller: "board-filter", turbo_frame: "_top" } do %>
+    <%= select_tag :project, options_for_select([["All projects", ""]] + @project_options, @filters["project"]),
+          aria: { label: "Project" }, data: { action: "change->board-filter#submit" } %>
+    <%= select_tag :workflow, options_for_select([["All workflows", ""]] + @workflow_options, @filters["workflow"]),
+          aria: { label: "Workflow" }, data: { action: "change->board-filter#submit" } %>
+    <%= select_tag :state, options_for_select([["All states", ""]] + @state_options, @filters["state"]),
+          aria: { label: "State" }, data: { action: "change->board-filter#submit" } %>
+    <%= select_tag :agent, options_for_select([["All agents", ""]] + @agent_options, @filters["agent"]),
+          aria: { label: "Agent" }, data: { action: "change->board-filter#submit" } %>
+    <%= select_tag :group, options_for_select([["No grouping", "none"], ["Agent", "agent"],
+                                              ["Dependency", "dependency"], ["Project", "project"]], @filters["group"]),
+          aria: { label: "Group by" }, data: { action: "change->board-filter#submit" } %>
+    <%= search_field_tag :q, @filters["q"], placeholder: "Search tasks…", aria: { label: "Search tasks" },
+          data: { action: "input->board-filter#search" } %>
+    <noscript><%= submit_tag "Apply", class: "btn btn-secondary btn-sm" %></noscript>
+  <% end %>
+
+  <div id="board" class="kanban-board" data-controller="board-navigation">
+    <% if @bands.empty? %>
+      <div class="empty-state"><p>No tasks match these filters.</p></div>
+    <% else %>
+      <%= render partial: "board/band", collection: @bands, as: :band %>
+    <% end %>
+  </div>
+</div>

@@ -1,0 +1,6 @@
+<div class="board-lane" data-board-lane="<%= lane %>">
+  <% if grouped %><h4><%= lane %></h4><% end %>
+  <% tasks.each do |task| %>
+    <%= render "board/card", task: task, project: project %>
+  <% end %>
+</div>

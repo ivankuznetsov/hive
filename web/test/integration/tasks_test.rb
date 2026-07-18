@@ -12,7 +12,7 @@ class TasksTest < ActionDispatch::IntegrationTest
   end
 
   test "status grid lists the task" do
-    get "/"
+    get grid_path
     assert_response :success
     assert_match @slug, response.body
     assert_select "#projects", 1

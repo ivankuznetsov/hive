@@ -1,0 +1,13 @@
+<% content_for(:title, "hivebox — settings") %>
+<div class="settings-page">
+  <h1>Settings</h1>
+  <div class="card">
+    <h2>Default work view</h2>
+    <p class="muted">Board and grid contain the same live workflow state. Choose which one opens from the hivebox logo.</p>
+    <%= form_with url: settings_path, method: :patch do %>
+      <%= label_tag :default_view, "Open work as" %>
+      <%= select_tag :default_view, options_for_select([["Board", "board"], ["Grid", "grid"]], @default_view) %>
+      <%= submit_tag "Save", class: "btn", data: { turbo_submits_with: "Saving…" } %>
+    <% end %>
+  </div>
+</div>

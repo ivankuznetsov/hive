@@ -1,4 +1,4 @@
-<% content_for(:title, "hivebox — status") %>
+<% content_for(:title, "hivebox — grid") %>
 <%# The status channel delivers BOTH a targeted #projects replace and a page
     refresh signal (task pages need the latter). Without these metas the
     refresh falls back to a full-body replace — which resets window scroll to
@@ -26,45 +26,12 @@
   </aside>
   <div class="status-main">
 
+<%= render "status/view_switch" %>
+
 <%# data-turbo-permanent: a morph must never touch the composer — it holds
     typed-but-unsent idea text and staged image attachments (Stimulus state
     the server can't re-render). %>
-<%= form_with url: ideas_path, multipart: true, class: "composer", id: "composer",
-              data: { controller: "composer", turbo_permanent: true } do |f| %>
-  <div class="composer-box">
-    <%= f.text_area :text, placeholder: "Drop a new idea — paste or attach screenshots…",
-          required: true, data: { composer_target: "text", action: "paste->composer#paste" },
-          aria: { label: "New idea" } %>
-    <div class="attachment-chips" data-composer-target="chips"></div>
-    <div class="composer-toolbar">
-      <% names = registered_project_names %>
-      <%# The placeholder is a disabled+hidden option: it reads as the closed
-          value, but is not an entry in the open list (a selectable
-          "Project…" row is noise). required + value="" still blocks submit
-          until a real project is chosen. %>
-      <% placeholder = names.size == 1 ? "".html_safe : tag.option("Project…", value: "", selected: true, disabled: true, hidden: true) %>
-      <%# select_tag, not f.select: the FormBuilder insists on injecting its
-          own blank first option for required selects (an empty row in the
-          open list); our hidden placeholder already serves that contract. %>
-      <%= select_tag "project", placeholder + options_for_select(names, names.size == 1 ? names.first : nil),
-            required: true, aria: { label: "Project" } %>
-      <button type="button" class="btn btn-ghost btn-sm composer-attach" data-action="composer#pick" aria-label="Attach image">
-        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
-        Image
-      </button>
-      <%# Two inputs: the nameless picker only opens the OS dialog; the named
-          transport carries the staged (renamed imageN.*) files. One input
-          can't do both — clearing the picker after a pick would wipe the
-          staged FileList. %>
-      <input type="file" multiple accept="image/*" hidden
-             data-composer-target="picker" data-action="change->composer#picked">
-      <%= f.file_field :images, multiple: true, hidden: true, name: "images[]",
-            data: { composer_target: "files" } %>
-      <span class="spacer"></span>
-      <%= f.submit "Add idea", data: { turbo_submits_with: "Adding…" } %>
-    </div>
-  </div>
-<% end %>
+<%= render "status/composer" %>
 
 <%= render "status/daemon", daemon_status: @daemon_status %>
 

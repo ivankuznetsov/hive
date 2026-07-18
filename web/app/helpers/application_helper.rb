@@ -1,13 +1,19 @@
 module ApplicationHelper
   NAV_SECTIONS = {
-    status: ->(c) { c == "status" || c == "tasks" || c == "ideas" },
+    board: ->(c) { c == "board" || c == "tasks" || c == "ideas" },
+    grid: ->(c) { c == "status" },
     repos: ->(c) { c == "repos" },
     agents: ->(c) { c == "agents" },
-    telegram: ->(c) { c == "telegram" }
+    telegram: ->(c) { c == "telegram" },
+    settings: ->(c) { c == "settings" }
   }.freeze
 
   def nav_class(section)
-    active = NAV_SECTIONS.fetch(section).call(controller_name)
+    active = if controller_name == "home" && %i[board grid].include?(section)
+      section.to_s == default_work_view
+    else
+      NAV_SECTIONS.fetch(section).call(controller_name)
+    end
     class_names("nav-link", "nav-link-active": active)
   end
 
@@ -36,6 +42,26 @@ module ApplicationHelper
 
   def registered_project_names
     Hive::Config.registered_projects.map { |p| p["name"] }
+  end
+
+  def dom_id_for(*parts)
+    parts.join("_").parameterize(separator: "_")
+  end
+
+  def grouped_board_tasks(tasks, group, project_name)
+    grouped = case group
+    when "agent"
+      tasks.group_by do |task|
+        task.dig("implementation_identity", "stages", "execute", "provider").presence || "Unassigned"
+      end
+    when "dependency"
+      tasks.group_by { |task| task["blocked_by"].presence || task["depends_on"].presence || "No dependency" }
+    when "project"
+      { project_name => tasks }
+    else
+      { "all" => tasks }
+    end
+    grouped.sort.to_h
   end
 
   MARKDOWN_TAGS = %w[

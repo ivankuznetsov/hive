@@ -26,10 +26,12 @@
         <%= link_to "hivebox", root_path, class: "brand" %>
         <% if current_login %>
           <nav aria-label="Primary">
-            <%= link_to "Status", root_path, class: nav_class(:status) %>
+            <%= link_to "Board", board_path, class: nav_class(:board) %>
+            <%= link_to "Grid", grid_path, class: nav_class(:grid) %>
             <%= link_to "Repos", repos_path, class: nav_class(:repos) %>
             <%= link_to "Agents", agents_path, class: nav_class(:agents) %>
             <%= link_to "Telegram", telegram_path, class: nav_class(:telegram) %>
+            <%= link_to "Settings", settings_path, class: nav_class(:settings) %>
           </nav>
           <div class="topbar-session">
             <span class="session-login"><%= current_login %></span>
@@ -38,7 +40,7 @@
         <% end %>
       </div>
     </header>
-    <main>
+    <main class="<%= content_for(:main_class) %>">
       <% if notice %>
         <div class="flash flash-notice" role="status"><%= notice %></div>
       <% end %>

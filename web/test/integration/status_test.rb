@@ -16,7 +16,7 @@ class StatusTest < ActionDispatch::IntegrationTest
     StatusBroadcaster.define_singleton_method(:snapshot) { { "projects" => [] } }
     Hive::Daemon::StatusReport.define_singleton_method(:new) { report }
 
-    get "/"
+    get grid_path
 
     assert_response :success
     assert_select ".daemon-panel .task-meta", text: "running"

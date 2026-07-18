@@ -63,7 +63,7 @@ class StatusBroadcaster
         CHANNEL,
         target: "projects",
         partial: "status/projects",
-        locals: { projects: payload.fetch("projects", []) }
+        locals: { projects: StatusVisibility.projects(payload) }
       )
     end
   end

@@ -330,6 +330,44 @@ class AgentSkillsInspectorTest < Minitest::Test
     assert_match(/ENOENT/, result.error)
   end
 
+  def test_command_runner_defensive_io_and_process_group_errors_are_bounded
+    runner = Hive::AgentSkills::CommandRunner.new
+    stdin = StringIO.new
+    stdout = Object.new
+    stdout.define_singleton_method(:read) { "" }
+    stdout.define_singleton_method(:closed?) { false }
+    stdout.define_singleton_method(:close) { raise IOError, "synthetic close failure" }
+    stderr = StringIO.new
+    status = Struct.new(:exitstatus).new(0)
+    waiter = Object.new
+    waiter.define_singleton_method(:alive?) { false }
+    waiter.define_singleton_method(:value) { status }
+
+    result = with_replaced_singleton_method(
+      Open3, :popen3, ->(*_args, **_kwargs) { [ stdin, stdout, stderr, waiter ] }
+    ) do
+      runner.call([ "ignored" ])
+    end
+    assert result.success?
+
+    unreadable = Object.new
+    unreadable.define_singleton_method(:read) { raise IOError, "synthetic read failure" }
+    assert_equal "", runner.send(:capture_reader, unreadable).value
+
+    uncloseable = Object.new
+    uncloseable.define_singleton_method(:closed?) { false }
+    uncloseable.define_singleton_method(:close) { raise IOError, "synthetic close failure" }
+    runner.send(:stop_readers, [], uncloseable)
+
+    with_replaced_singleton_method(Process, :kill, ->(*_args) { raise Errno::ESRCH }) do
+      assert_nil runner.send(:signal_process_group, "TERM", 123)
+      refute runner.send(:process_group_alive?, 123)
+    end
+    with_replaced_singleton_method(Process, :kill, ->(*_args) { raise Errno::EPERM }) do
+      assert runner.send(:process_group_alive?, 123)
+    end
+  end
+
   def test_target_resolver_covers_adhoc_patrol_filters_and_serialization
     cfg = config
     cfg["review"]["adhoc"] = {
@@ -352,6 +390,26 @@ class AgentSkillsInspectorTest < Minitest::Test
                  "a filtered package must retain its declared prerequisite"
     assert_raises(Hive::ConfigError) { resolver.resolve(agents: [ "ghost" ]) }
     assert_raises(Hive::ConfigError) { resolver.resolve(skills: [ "ghost-skill" ]) }
+  end
+
+  def test_target_resolver_rejects_a_prerequisite_without_an_agent_capability
+    package = Struct.new(:prerequisites).new([ "missing-package" ])
+    manifest = Object.new
+    manifest.define_singleton_method(:package) { |_id| package }
+    manifest.define_singleton_method(:capability_for_package) { |agent:, package_id:| nil }
+    resolver = Hive::AgentSkills::TargetResolver.new(
+      config: config, project_root: "/tmp/project", manifest: manifest
+    )
+    target = Hive::AgentSkills::Target.new(
+      surfaces: [ "test" ], kind: "stage", agent: "codex",
+      configured_skill: "dependent", invocation: "/dependent",
+      capability_id: "dependent", package_id: "dependent-package", managed: true
+    )
+
+    error = assert_raises(Hive::ConfigError) do
+      resolver.send(:with_prerequisites, [ target ])
+    end
+    assert_match(/missing-package.*no codex capability/, error.message)
   end
 
   def test_unmanaged_targets_are_inspected_when_available_or_unavailable

@@ -1,6 +1,13 @@
+<% transitions = Array(task["allowed_transitions"]) %>
+<% drag_transitions = transitions.select { |transition| transition["confirmation"] == "none" } %>
 <article class="board-card state-<%= task["dominant_state"] %>" id="card_<%= dom_id_for(project["name"], task["slug"]) %>"
+         data-controller="card-menu"
          data-card-slug="<%= task["slug"] %>" data-state="<%= task["dominant_state"] %>"
-         data-card-digest="<%= task["card_digest"] %>" data-board-navigation-target="card" tabindex="-1">
+         data-card-digest="<%= task["card_digest"] %>" data-board-navigation-target="card" tabindex="-1"
+         data-card-menu-url-value="<%= task_transition_path(project["name"], task["slug"]) %>"
+         data-card-menu-fingerprint-value="<%= task["fingerprint"] %>"
+         data-board-dnd-transitions="<%= drag_transitions.to_json %>"
+         data-action="board:transition-request->card-menu#moveEvent">
   <div class="board-card-heading">
     <%= status_dot(task) %>
     <%= link_to task_title(task), task_path(project["name"], task["slug"]), class: "board-card-title",
@@ -9,4 +16,24 @@
   <span class="task-slug"><%= task["slug"] %></span>
   <p class="board-card-state"><%= task["action_label"].presence || task["marker"].presence || "Idle" %></p>
   <%= render "board/card_chips", task: task, project: project %>
+  <% if transitions.any? %>
+    <details class="card-menu" data-card-menu-target="details" data-action="keydown->card-menu#keydown">
+      <summary class="btn btn-ghost btn-sm">Move to</summary>
+      <div class="card-menu-items" role="menu" aria-label="Move <%= task_title(task) %>">
+        <% transitions.each do |transition| %>
+          <%= form_with url: task_transition_path(project["name"], task["slug"]), method: :post,
+                data: { action: "submit->card-menu#submit" } do |form| %>
+            <%= form.hidden_field :destination, value: transition["destination"] %>
+            <%= form.hidden_field :expected_fingerprint, value: task["fingerprint"] %>
+            <%= form.button transition["label"], type: "submit", role: "menuitem",
+                  class: "card-menu-item", data: { card_menu_target: "item",
+                    destination: transition["destination"],
+                    confirmation: transition["confirmation"],
+                    transition_label: transition["label"]
+                  } %>
+          <% end %>
+        <% end %>
+      </div>
+    </details>
+  <% end %>
 </article>

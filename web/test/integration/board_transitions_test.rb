@@ -31,6 +31,19 @@ class BoardTransitionsTest < ActionDispatch::IntegrationTest
     assert_equal "2-brainstorm", request.transition_destination
   end
 
+  test "the plain HTML Move-to form remains a complete non-JavaScript path" do
+    card = current_card
+
+    post task_transition_path(@project, @slug), params: {
+      destination: "2-brainstorm", expected_fingerprint: card.fetch("fingerprint")
+    }, headers: { "HTTP_REFERER" => board_url(project: @project) }
+
+    assert_redirected_to board_url(project: @project)
+    assert_match(/Move queued/, flash[:notice])
+    request = Hive::Daemon::DispatchRequestQueue.pending.find { |entry| entry.slug == @slug }
+    assert_equal "web", request.requestor
+  end
+
   test "illegal destination returns a fresh card and increments only denial metrics" do
     card = current_card
 

@@ -40,8 +40,12 @@
        data-board-live-generation-value="<%= @stream_cursor[:generation] %>">
     <%= render "board/sync", epoch: @stream_cursor[:epoch], generation: @stream_cursor[:generation] %>
     <p class="sr-only" aria-live="polite" aria-atomic="true" data-announce-target="region"></p>
-    <div id="board" class="kanban-board" data-controller="board-navigation"
-         data-action="keydown->board-navigation#keydown">
+    <div id="board" class="kanban-board" data-controller="board-navigation board-dnd"
+         data-action="keydown->board-navigation#keydown
+                      dragstart->board-dnd#start dragend->board-dnd#finish
+                      dragover->board-dnd#over dragleave->board-dnd#leave drop->board-dnd#drop
+                      board:transition-complete->board-dnd#settled
+                      board:transition-failed->board-dnd#failed">
       <% if @bands.empty? %>
         <div class="empty-state"><p>No tasks match these filters.</p></div>
       <% else %>

@@ -85,7 +85,12 @@ class TasksController < ApplicationController
       actor: current_login || "local-owner", request_id: request.request_id,
       reason: params[:reason]
     )
-    render json: result, status: result[:state] == "queued" ? :accepted : :ok
+    if request.format.json?
+      render json: result, status: result[:state] == "queued" ? :accepted : :ok
+    else
+      redirect_back fallback_location: board_path,
+                    notice: result[:state] == "queued" ? "Move queued for #{params[:slug]}" : "Moved #{params[:slug]}"
+    end
   rescue Hive::Error => e
     TransitionMetrics.denied!(
       reason: e.class.name, request_id: request.request_id,

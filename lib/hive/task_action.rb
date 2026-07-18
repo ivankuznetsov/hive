@@ -275,6 +275,7 @@ module Hive
       if key == Hive::Schemas::TaskActionKind::READY_TO_RUN
         transitions << transition_payload(
           destination: stage.dir, verb: "run", direction: "run",
+          confirmation: "confirm",
           label: "Run #{stage_label(stage)}"
         )
       elsif (destination = task_workflow.next_stage_after(stage.name))

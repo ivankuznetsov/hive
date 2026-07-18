@@ -24,6 +24,11 @@ class BoardTest < ActionDispatch::IntegrationTest
     assert_select "[aria-live='polite']", 1
     assert_select ".stage-pager select[aria-label='Stage for alpha']", 1
     assert_select "[data-board-navigation-target='card'][tabindex='-1']", minimum: 1
+    assert_select "[data-controller~='card-menu'][data-card-menu-fingerprint-value]", minimum: 1
+    assert_select "form[action='#{task_transition_path("alpha", "ship-board-260718-abcd")}'][method='post']", minimum: 1 do
+      assert_select "input[name='destination'][value='3-done']", 1
+      assert_select "button[role='menuitem']", text: "Move to Done"
+    end
     assert_select "a[href='#{grid_path}']", text: "Grid"
 
     get grid_path
@@ -112,6 +117,19 @@ class BoardTest < ActionDispatch::IntegrationTest
           "action" => stage.end_with?("done") ? "archived" : "ready_to_run",
           "action_label" => stage.end_with?("done") ? "Archived" : "Ready to run",
           "dominant_state" => stage.end_with?("done") ? "idle" : "ready",
+          "fingerprint" => "task-fingerprint-v1:#{slug}",
+          "card_digest" => "card-digest-v1:#{slug}",
+          "allowed_transitions" => (
+            if stage.end_with?("done")
+              []
+            else
+              [ {
+                "destination" => stages.fetch(stages.index(stage) + 1),
+                "verb" => "approve", "direction" => "forward",
+                "confirmation" => "none", "label" => "Move to #{stages.fetch(stages.index(stage) + 1).split("-", 2).last.titleize}"
+              } ]
+            end
+          ),
           "age_seconds" => (Time.now.utc - mtime).to_i,
           "mtime" => mtime.iso8601,
           "folder_mtime" => mtime.iso8601,

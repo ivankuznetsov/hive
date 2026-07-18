@@ -762,6 +762,7 @@ class TaskActionTest < Minitest::Test
     assert_equal "3-plan", transition.fetch("destination")
     assert_equal "run", transition.fetch("verb")
     assert_equal "run", transition.fetch("direction")
+    assert_equal "confirm", transition.fetch("confirmation")
   end
 
   def test_non_recovery_rows_do_not_emit_diagnostic

@@ -1,5 +1,6 @@
 <% tasks = band["tasks"].select { |task| task["stage"] == stage["dir"] } %>
-<section class="board-column" role="listitem" data-stage="<%= stage["dir"] %>">
+<section class="board-column" role="listitem" data-stage="<%= stage["dir"] %>"
+         aria-label="<%= stage["name"].to_s.tr("_-", "  ").titleize %>, <%= pluralize(tasks.size, "task") %>">
   <header class="board-column-header">
     <h3><%= stage["name"].to_s.tr("_-", "  ").titleize %></h3>
     <span class="board-count" aria-label="<%= pluralize(tasks.size, "task") %>"><%= tasks.size %></span>

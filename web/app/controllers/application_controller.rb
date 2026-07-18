@@ -32,11 +32,15 @@ class ApplicationController < ActionController::Base
   end
 
   rescue_from Hive::StaleTask do |e|
-    render json: {
-      error: "stale_task", message: e.message,
-      expected_fingerprint: e.expected_fingerprint,
-      card: e.current_card
-    }, status: :conflict
+    if request.format.json?
+      render json: {
+        error: "stale_task", message: e.message,
+        expected_fingerprint: e.expected_fingerprint,
+        card: e.current_card
+      }, status: :conflict
+    else
+      render_typed_error(:conflict, "Task changed", e.message)
+    end
   end
 
   private

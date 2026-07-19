@@ -2,12 +2,28 @@
 
 All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with user-facing bullets and, for notable releases, descriptive subsections — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
+## 0.6.4
+
+- Fixed hivebox occasionally retaining a successfully submitted idea in its
+  permanent composer while Turbo rendered the redirect. Successful responses
+  now clear duplicate-ready text and attachments before the permanent node can
+  disconnect, while retaining the selected project as working context.
+- Fixed concurrent babysitter dry-run commands racing to create their shared
+  audit log and dropping all but the first record. Dry-run setup now creates a
+  private empty log before agent commands launch; every append retains the
+  existing fail-closed target and descriptor checks.
+
 ## 0.6.3
 
 - Retired the reduced Architecture and Writing scaffold templates now that
   their full reviewed workflows ship through Honeycomb. Old `--template`
   invocations now point to the corresponding install command; blank and
   research scaffolds remain available.
+- Fixed Architecture Patrol rejecting a valid leading JSON fence when Claude
+  appended a plain-text leverage rationale. Hive now treats that first fenced
+  document as canonical while still rejecting leading prose or ambiguous
+  additional backtick/tilde fences, and retains the exact raw response for
+  audit.
 
 ## 0.6.2
 

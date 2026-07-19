@@ -1,5 +1,5 @@
 module Hive
-  VERSION = "0.6.3".freeze
+  VERSION = "0.6.4".freeze
   MIN_CLAUDE_VERSION = "2.1.118".freeze
   # Canonical GitHub org + repo. Referenced by the release probe
   # (UpdateCheck), the brew tap + installer URL (Commands::Update), etc.

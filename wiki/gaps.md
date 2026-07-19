@@ -519,17 +519,18 @@ could consume its three-launch cycle envelope, report the remaining features as
 errors, and leave the cursor at zero. Live architecture jobs then exposed the
 same exhausted shared 8-launch UTC-day ceiling as one synthetic failure for
 every remaining feature and retried it every minute without starting another
-provider process. An earlier live architecture run also produced a single
-fenced JSON final response that strict parsing rejected, while the ephemeral
-PR-mode run directory removed the raw response before quality review. Focused
-unit and integration tests now pin launch-aware batching, one reserved ordinary
-fixer launch, clean-prefix cursor progress, one-error architecture stops,
-next-UTC-day scheduler backoff, whole-message fence handling, and durable raw
-response retention with job/PR/feature identity. Durable architecture review
-run directories do not yet have an automatic retention policy, so long-running
-installations should monitor `.hive-state/refactor_patrol/runs/` growth. A
-release containing these changes has not yet repeated
-both real runs because the project's shared UTC-day patrol launch quota was
-already exhausted; retain this gap until post-release ordinary and architecture
-dogfood confirms forward progress, no quota churn, and inspectable accepted
-output.
+provider process. Post-release v0.6.2 ordinary patrol mapped 209 features,
+reviewed exactly the launch-aware three-feature batch without errors, advanced
+its clean prefix, and ranked one source-anchored systemd startup defect at alpha
+80. Architecture Patrol reached the isolated exact checkout and retained its
+raw response, proving the dirty-checkout and ephemeral-evidence fixes, but
+exposed a valid leading JSON fence followed by plain-text rationale that v0.6.2
+rejected. The v0.6.3 parser accepts that canonical document shape; exact-main
+dogfood then completed clean PR-scoped reviews and a full scan produced the
+meaningful `invert-usage-error-contract-ownership` thesis above the configured
+0.25 discovery floor. Automation correctly rejected it for unverified evidence,
+multi-feature scope, and file/diff limits. Durable architecture review run
+directories still have no automatic retention policy, so long-running
+installations should monitor `.hive-state/refactor_patrol/runs/` growth. Retain
+this gap only until the installed v0.6.4 package repeats both patrol modes
+without dirty-checkout, quota-churn, or response-envelope errors.

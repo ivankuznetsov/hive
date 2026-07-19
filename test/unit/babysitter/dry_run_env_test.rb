@@ -38,7 +38,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
         assert File.directory?(overlay), "overlay shims must exist inside the block"
         assert File.executable?(File.join(overlay, "git"))
         assert File.executable?(File.join(overlay, "gh"))
-        # Exercise a mutating command so the skip log is actually written.
+        # Exercise a mutating command so the pre-created skip log gets a record.
         _out, _err, status = Open3.capture3("git", "push", "origin", "HEAD:feature")
         assert status.success?
       end
@@ -46,6 +46,60 @@ class BabysitterDryRunEnvTest < Minitest::Test
       refute File.exist?(overlay), "overlay-bin dir must be cleaned up on exit"
       assert File.exist?(File.join(dir, ".babysitter-dry-run-skipped.log")),
              "skip log must survive exit — it is the dry-run diagnostic record"
+    end
+  end
+
+  def test_with_env_prepares_private_empty_skip_log_before_agent_commands
+    with_tmp_dir do |dir|
+      log_path = File.join(dir, ".babysitter-dry-run-skipped.log")
+
+      Hive::Babysitter::DryRunEnv.with_env(dir) do
+        stat = File.lstat(log_path)
+        assert stat.file?
+        assert_equal Process.uid, stat.uid
+        assert_equal 1, stat.nlink
+        assert_equal 0, stat.mode & 0o077
+        assert_empty File.binread(log_path)
+      end
+    end
+  end
+
+  def test_prepare_skip_log_leaves_existing_target_for_stub_validation
+    with_tmp_dir do |dir|
+      log_path = File.join(dir, "skipped.log")
+      File.write(log_path, "existing\n")
+      File.chmod(0o644, log_path)
+
+      Hive::Babysitter::DryRunEnv.prepare_skip_log(log_path)
+
+      assert_equal "existing\n", File.read(log_path)
+      assert_equal 0o644, File.stat(log_path).mode & 0o777
+    end
+  end
+
+  def test_prepare_skip_log_rejects_path_replacement_after_creation
+    with_tmp_dir do |dir|
+      log_path = File.join(dir, "skipped.log")
+      original_lstat = File.method(:lstat)
+      replaced = false
+      replacement = lambda do |target|
+        if target == log_path && !replaced
+          replaced = true
+          File.rename(log_path, "#{log_path}.original")
+          File.write(log_path, "replacement\n")
+          File.chmod(0o600, log_path)
+        end
+        original_lstat.call(target)
+      end
+
+      error = assert_raises(IOError) do
+        with_replaced_singleton_method(File, :lstat, replacement) do
+          Hive::Babysitter::DryRunEnv.prepare_skip_log(log_path)
+        end
+      end
+
+      assert_includes error.message, "changed during preparation"
+      assert_equal "replacement\n", File.read(log_path)
     end
   end
 
@@ -647,6 +701,7 @@ class BabysitterDryRunEnvTest < Minitest::Test
   def test_skip_log_serializes_concurrent_large_records_without_loss
     with_tmp_dir do |dir|
       log_path = File.join(dir, "skipped.log")
+      Hive::Babysitter::DryRunEnv.prepare_skip_log(log_path)
       env = { "HIVE_BABYSITTER_DRY_RUN_LOG" => log_path }
 
       results = Array.new(12) do |index|

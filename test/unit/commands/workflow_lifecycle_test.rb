@@ -41,11 +41,20 @@ class WorkflowLifecycleCommandsTest < Minitest::Test
       assert_equal installed.fetch("mappings"), row.fetch("mappings")
       assert_equal [], row.fetch("optional_inputs")
 
-      removed = Hive::Commands::Workflow::Remove.new(
+      remove = Hive::Commands::Workflow::Remove.new(
         "demo", project_root: project, json: true, yes: true,
         stdout: StringIO.new, committer: ->(*) { }
-      ).call!
-      assert_equal "removed", removed.fetch("status")
+      )
+      loads = 0
+      original_load = Hive::Config.method(:load)
+      with_replaced_singleton_method(Hive::Config, :load, lambda { |root|
+        loads += 1
+        original_load.call(root)
+      }) do
+        removed = remove.call!
+        assert_equal "removed", removed.fetch("status")
+      end
+      assert_equal 1, loads
       assert_nil Hive::WorkflowPackage::ManagedStore.new(File.join(project, ".hive-state")).selected("demo")
     end
   end

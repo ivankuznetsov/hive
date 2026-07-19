@@ -183,6 +183,58 @@ class StagesCouncilTest < Minitest::Test
     end
   end
 
+  def test_managed_reviewer_context_failure_replaces_working_marker
+    with_tmp_dir do |project|
+      workflow = mixed_provider_council_workflow
+      stage = workflow.stage_named("review")
+      task = task_for(project, workflow: workflow)
+      task.define_singleton_method(:managed_workflow?) { true }
+      task.define_singleton_method(:managed_runtime_context) do |_slot|
+        raise Hive::ConfigError, "pinned managed context is unavailable"
+      end
+      target = File.join(task.folder, "draft.md")
+      File.write(target, "Architecture draft\n")
+      Hive::Markers.set(task.state_file, :agent_working, phase: "council")
+      runner = Hive::Stages::Council::Reviewer.new(
+        task: task, cfg: {}, stage: stage, reviewer: stage.reviewers.first,
+        round: 1, target_path: target
+      )
+
+      assert_raises(Hive::ConfigError) { runner.run! }
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, marker.name
+      assert_equal "permission_config_error", marker.attrs.fetch("reason")
+    end
+  end
+
+  def test_managed_reviser_context_failure_replaces_working_marker
+    with_tmp_dir do |project|
+      workflow = mixed_provider_council_workflow
+      stage = workflow.stage_named("review")
+      task = task_for(project, workflow: workflow)
+      task.define_singleton_method(:managed_workflow?) { true }
+      task.define_singleton_method(:managed_runtime_context) do |_slot|
+        raise Hive::ConfigError, "pinned managed context is unavailable"
+      end
+      target = File.join(task.folder, "draft.md")
+      triage = File.join(task.folder, "triage.md")
+      File.write(target, "Architecture draft\n")
+      File.write(triage, "Revise the risks.\n")
+      Hive::Markers.set(task.state_file, :agent_working, phase: "council")
+      runner = Hive::Stages::Council::Revise.new(
+        task: task, cfg: {}, stage: stage, revise: stage.council.revise,
+        round: 1, target_path: target, triage_path: triage
+      )
+
+      assert_raises(Hive::ConfigError) { runner.run! }
+
+      marker = Hive::Markers.current(task.state_file)
+      assert_equal :error, marker.name
+      assert_equal "permission_config_error", marker.attrs.fetch("reason")
+    end
+  end
+
   def test_unmanaged_council_children_retain_parent_identity_fallback
     with_tmp_dir do |project|
       workflow = mixed_provider_council_workflow(managed_children: false)
@@ -626,7 +678,7 @@ class StagesCouncilTest < Minitest::Test
       }
       with_replaced_singleton_method(
         Hive::Stages::Base,
-        :stage_permission_scope_or_mark!,
+        :stage_permission_scope,
         ->(*, **) { scope }
       ) { yield }
     end

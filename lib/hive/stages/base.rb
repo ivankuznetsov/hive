@@ -193,14 +193,16 @@ module Hive
       # permission scope cannot observe different configuration generations.
       def actor_prompt_and_scope(cfg, stage_name, task, profile, prompt:,
                                  managed_slot: "stages.#{stage_name}", **scope_kwargs)
-        context = task.managed_runtime_context(managed_slot) if
-          task.respond_to?(:managed_workflow?) && task.managed_workflow?
-        prompt = task.managed_prompt(managed_slot, prompt, context) if context
-        scope = stage_permission_scope_or_mark!(
-          cfg, stage_name, task, profile,
-          managed_slot: managed_slot, managed_context: context, **scope_kwargs
-        )
-        [ prompt, scope ]
+        with_permission_config_error_marker(task) do
+          context = task.managed_runtime_context(managed_slot) if
+            task.respond_to?(:managed_workflow?) && task.managed_workflow?
+          prompt = task.managed_prompt(managed_slot, prompt, context) if context
+          scope = stage_permission_scope(
+            cfg, stage_name, task, profile,
+            managed_slot: managed_slot, managed_context: context, **scope_kwargs
+          )
+          [ prompt, scope ]
+        end
       end
 
       # The three tool-scoping kwargs every spawn site forwards from a
@@ -262,7 +264,13 @@ module Hive
       # outer Review.run! rescue maps the same ConfigError to :review_error
       # against the real task (see review.rb).
       def stage_permission_scope_or_mark!(cfg, stage_name, task, profile, **kwargs)
-        stage_permission_scope(cfg, stage_name, task, profile, **kwargs)
+        with_permission_config_error_marker(task) do
+          stage_permission_scope(cfg, stage_name, task, profile, **kwargs)
+        end
+      end
+
+      def with_permission_config_error_marker(task)
+        yield
       rescue Hive::ConfigError => e
         Hive::Markers.set(task.state_file, :error,
                           reason: "permission_config_error",

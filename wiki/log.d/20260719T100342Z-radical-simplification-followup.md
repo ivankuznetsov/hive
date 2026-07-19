@@ -19,3 +19,5 @@
   permission setup, and stopped creating empty actor-policy directories.
 - Made task capture resolve managed selection once, loading project config only
   when a legacy lock actually needs its compatibility snapshot.
+- Kept managed context failures inside the permission-error marker boundary,
+  reused the remaining exact helpers, and corrected actor-policy documentation.

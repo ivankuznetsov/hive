@@ -79,7 +79,7 @@ module Hive
             @task,
             profile,
             prompt: prompt(profile),
-            managed_slot: managed_slot,
+            managed_slot: "stages.#{@stage.name}.reviewers.#{@reviewer.name}",
             **permission_kwargs
           )
           resource_limits = Hive::Stages::Base.stage_resource_limits(@cfg, @stage)
@@ -139,8 +139,6 @@ module Hive
             )
           )
         end
-
-        def managed_slot = "stages.#{@stage.name}.reviewers.#{@reviewer.name}"
 
         def timeout_sec
           Hive::Stages::Base.stage_resource_limits(@cfg, @stage).fetch(:timeout_sec)

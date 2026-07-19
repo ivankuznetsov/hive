@@ -18,7 +18,7 @@ module Hive
         def call!
           lock = store.selected(@name)
           raise ownership_error unless lock
-          configured_default = Hive::Config.load(@project_root)["default_workflow"].to_s
+          configured_default = project_config["default_workflow"].to_s
           if configured_default == @name
             raise OwnershipError, "managed workflow #{@name.inspect} is the project default; choose another default before removal"
           end

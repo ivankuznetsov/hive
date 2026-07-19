@@ -257,7 +257,8 @@ hive workflow new architecture --template architecture
 Project workflow descriptors are trusted project-owner configuration. An
 `instruction:` file is injected into the agent prompt as the stage instruction,
 not treated as untrusted task data. Managed Honeycomb instructions instead pass
-package admission and run through a generated Hive-owned policy with inherited
-settings, hooks, plugins, and MCP configuration disabled. Both permission
-systems are tool-level controls, not a universal OS sandbox; run Hive in a
-sandboxed user/container when host isolation matters.
+package admission and run with a task-pinned exact permission scope plus a
+sanitized child environment. V2 actor presets do not disable inherited Claude
+settings, hooks, plugins, or MCP configuration. Both permission systems are
+tool-level controls, not a universal OS sandbox; run Hive in a sandboxed
+user/container when host and configuration-source isolation matter.

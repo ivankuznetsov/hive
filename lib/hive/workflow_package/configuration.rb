@@ -136,9 +136,8 @@ module Hive
       def input_status_for(slot_id, runtime_metadata:, environment: ENV)
         Array(runtime_metadata["optional_inputs"]).filter_map do |entry|
           next unless Array(entry["authorized_slots"]).include?(slot_id)
-          name = entry.fetch("name")
-          env_name = data.fetch("input_bindings")[name]
-          { "name" => name, "binding" => env_name, "available" => !!(env_name && !environment[env_name].to_s.empty?) }
+
+          input_status(entry, environment)
         end
       end
 
@@ -159,14 +158,9 @@ module Hive
 
       def input_rows(runtime_metadata:, environment: ENV)
         Array(runtime_metadata["optional_inputs"]).map do |entry|
-          name = entry.fetch("name")
-          binding = data.fetch("input_bindings")[name]
-          {
-            "name" => name,
-            "authorized_slots" => entry.fetch("authorized_slots"),
-            "binding" => binding,
-            "available" => !!(binding && !environment[binding].to_s.empty?)
-          }
+          input_status(entry, environment).tap do |row|
+            row["authorized_slots"] = entry.fetch("authorized_slots")
+          end
         end
       end
 
@@ -290,6 +284,16 @@ module Hive
       end
 
       private
+
+      def input_status(entry, environment)
+        name = entry.fetch("name")
+        binding = data.fetch("input_bindings")[name]
+        {
+          "name" => name,
+          "binding" => binding,
+          "available" => !!(binding && !environment[binding].to_s.empty?)
+        }
+      end
 
       def mapping_for(slot, cfg, verify_profiles)
         mapping = data.fetch("mappings").fetch(slot.id)

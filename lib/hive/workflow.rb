@@ -68,41 +68,47 @@ module Hive
       :name, :index, :state_file, :advance_verb, :kind, :skill, :instruction,
       :permissions, :status_mode, :budget_usd, :timeout_sec, :capability,
       :agent, :model, :effort, :input, :reviewers, :council, :deliverable,
-      :condition_policy
+      :condition_policy, :mapping_role, :mapping_contract
     ) do
       def initialize(name:, index:, state_file:, advance_verb: nil, kind: nil,
                      skill: nil, instruction: nil, permissions: nil,
                      status_mode: nil, budget_usd: nil, timeout_sec: nil,
                      capability: nil, agent: nil, model: nil, effort: nil,
                      input: nil, reviewers: nil, council: nil, deliverable: nil,
-                     condition_policy: nil)
+                     condition_policy: nil, mapping_role: nil, mapping_contract: nil)
         super
       end
 
       def dir = "#{index}-#{name}"
     end
 
-    Council = Data.define(:quorum, :max_rounds, :exit_rule, :triage_output, :revise) do
+    Council = Data.define(:quorum, :max_rounds, :exit_rule, :on_max_rounds, :triage_output, :revise) do
       def initialize(quorum:, max_rounds: 1, exit_rule: :human,
-                     triage_output: DEFAULT_TRIAGE_OUTPUT, revise: nil)
+                     on_max_rounds: :wait, triage_output: DEFAULT_TRIAGE_OUTPUT, revise: nil)
         super
       end
     end
 
     Reviewer = Data.define(
       :name, :agent, :model, :effort, :skill, :instruction, :prompt,
-      :command, :output_basename, :permissions, :max_attempts
+      :command, :output_basename, :permissions, :max_attempts,
+      :mapping_role, :mapping_contract
     ) do
       def initialize(name:, agent: nil, model: nil, effort: nil, skill: nil,
                      instruction: nil, prompt: nil, command: nil,
-                     output_basename: nil, permissions: nil, max_attempts: nil)
+                     output_basename: nil, permissions: nil, max_attempts: nil,
+                     mapping_role: nil, mapping_contract: nil)
         super
       end
     end
 
-    Revise = Data.define(:agent, :model, :effort, :skill, :instruction, :prompt, :command, :permissions) do
+    Revise = Data.define(
+      :agent, :model, :effort, :skill, :instruction, :prompt, :command,
+      :permissions, :mapping_role, :mapping_contract
+    ) do
       def initialize(agent: nil, model: nil, effort: nil, skill: nil,
-                     instruction: nil, prompt: nil, command: nil, permissions: nil)
+                     instruction: nil, prompt: nil, command: nil, permissions: nil,
+                     mapping_role: nil, mapping_contract: nil)
         super
       end
     end

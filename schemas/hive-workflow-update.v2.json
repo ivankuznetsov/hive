@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-workflow-update.v2.json",
+  "title": "hive workflow update output v2",
+  "oneOf": [
+    {"$ref": "#/$defs/SuccessPayload"},
+    {"$ref": "#/$defs/ErrorPayload"}
+  ],
+  "$defs": {
+    "Mapping": {
+      "type": "object", "additionalProperties": false,
+      "required": ["slot", "mapping_role", "mapping_contract", "agent", "model", "effort", "profile_fingerprint", "policy_fingerprint"],
+      "properties": {
+        "slot": {"type": "string"}, "mapping_role": {"enum": ["planning", "development", "reviewer"]},
+        "mapping_contract": {"type": "string", "minLength": 1},
+        "agent": {"type": "string", "minLength": 1},
+        "model": {"type": ["string", "null"]}, "effort": {"type": ["string", "null"]},
+        "profile_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "policy_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "OptionalInput": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "authorized_slots", "binding", "available"],
+      "properties": {
+        "name": {"type": "string"}, "authorized_slots": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "binding": {"type": ["string", "null"]}, "available": {"type": "boolean"}
+      }
+    },
+    "SuccessPayload": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "status", "name", "from_commit", "to_commit", "manifest_digest", "diff", "configuration_digest", "mappings", "optional_inputs"],
+      "properties": {
+        "schema": {"const": "hive-workflow-update"}, "schema_version": {"const": 2}, "ok": {"const": true},
+        "status": {"enum": ["dry_run", "updated", "cancelled", "already_current"]},
+        "name": {"type": "string"}, "from_commit": {"type": "string"}, "to_commit": {"type": "string"},
+        "manifest_digest": {"type": "string"}, "diff": {"type": ["object", "null"]},
+        "configuration_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "mappings": {"type": "array", "items": {"$ref": "#/$defs/Mapping"}, "minItems": 1},
+        "optional_inputs": {"type": "array", "items": {"$ref": "#/$defs/OptionalInput"}},
+        "retained_commits": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "ErrorPayload": {
+      "type": "object", "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "error_class", "error_kind", "exit_code", "message"],
+      "properties": {
+        "schema": {"const": "hive-workflow-update"}, "schema_version": {"const": 2}, "ok": {"const": false},
+        "error_class": {"type": "string"}, "error_kind": {"enum": ["consent_required", "ownership", "update_required", "concurrent_run", "git", "config", "registry", "error"]},
+        "exit_code": {"enum": [1, 64, 69, 70, 75, 78]}, "message": {"type": "string"},
+        "holder": {"type": "object", "additionalProperties": true}, "lock_path": {"type": "string"}
+      }
+    }
+  }
+}

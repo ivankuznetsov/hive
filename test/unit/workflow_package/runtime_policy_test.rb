@@ -351,6 +351,33 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
     end
   end
 
+  def test_actor_policy_rejects_malformed_inputs_and_unavailable_package_context
+    with_tmp_dir do |dir|
+      task = File.join(dir, "task")
+      package = File.join(dir, "package")
+      FileUtils.mkdir_p([ task, package ])
+      profile = Hive::AgentProfiles.lookup(:claude)
+
+      [ { "PATH" => "override" }, { "SEO_TOKEN" => :not_a_string } ].each_with_index do |environment, index|
+        error = assert_raises(Hive::ConfigError) do
+          Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+            "read-only", task_folder: task, package_root: package, profile: profile,
+            environment: environment, policy_dir: File.join(dir, "policy-#{index}")
+          )
+        end
+        assert_match(/environment is malformed/, error.message)
+      end
+
+      error = assert_raises(Hive::ConfigError) do
+        Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+          "read-only", task_folder: task, package_root: File.join(dir, "missing"), profile: profile,
+          policy_dir: File.join(dir, "missing-policy")
+        )
+      end
+      assert_match(/package context is unavailable/, error.message)
+    end
+  end
+
   private
 
   def permissions

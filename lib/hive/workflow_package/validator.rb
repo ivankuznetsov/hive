@@ -1,8 +1,12 @@
 require "digest"
 require "rubygems/version"
+require "set"
 require "hive/workflow_package/manifest"
 require "hive/workflow_package/registry_manifest"
+require "hive/workflow_package/runtime_policy"
 require "hive/workflow_package/security_scanner"
+require "hive/workflow_package/configuration"
+require "hive/workflow_package/input_name"
 require "hive/workflows/descriptor_parser"
 
 module Hive
@@ -65,7 +69,9 @@ module Hive
         compare_inventory(expected, actual, diagnostics)
         descriptor_path = File.join(@root, manifest.descriptor)
         workflow = parse_workflow(descriptor_path, manifest.data.fetch("name"), diagnostics)
-        validate_managed_workflow(workflow, diagnostics) if workflow && @managed
+        validate_managed_workflow(workflow, diagnostics, registry: manifest.is_a?(RegistryManifest)) if workflow && @managed
+        validate_permission_disclosure(manifest, workflow, diagnostics) if workflow && manifest.is_a?(RegistryManifest)
+        validate_hive_extension(manifest, workflow, diagnostics) if workflow && manifest.is_a?(RegistryManifest)
         diagnostics.concat(SecurityScanner.scan_files(
           @root,
           paths: expected.map { |entry| entry.fetch("path") },
@@ -129,30 +135,176 @@ module Hive
         nil
       end
 
-      def validate_managed_workflow(workflow, diagnostics)
+      def validate_managed_workflow(workflow, diagnostics, registry: false)
         workflow.stages.each do |stage|
           next unless [ :agent, :council ].include?(stage.kind)
 
-          if stage.permissions.nil? || stage.permissions.to_s == Hive::PermissionScope::YOLO ||
-             (stage.permissions.is_a?(Hash) && stage.permissions.fetch("preset", stage.permissions[:preset]).to_s == Hive::PermissionScope::YOLO)
-            diagnostics << diagnostic("policy.missing_or_yolo", "workflow.yml",
-                                      "every managed active stage must declare a non-yolo permission policy")
+          if stage.permissions.nil?
+            diagnostics << diagnostic("policy.missing", "workflow.yml",
+                                      "every managed active stage must declare an explicit permission policy")
           end
+          validate_actor_mapping(stage, "stage #{stage.name}", diagnostics) if registry
           diagnostics << diagnostic("policy.external_skill", "workflow.yml",
                                     "managed workflow stages may not reference mutable external skills") if stage.skill
           next unless stage.kind == :council
 
           stage.reviewers.each do |reviewer|
+            if reviewer.respond_to?(:permissions) && reviewer.permissions.nil?
+              diagnostics << diagnostic("policy.missing", "workflow.yml",
+                                        "every managed reviewer must declare an explicit permission policy")
+            end
+            validate_actor_mapping(reviewer, "reviewer #{reviewer.name}", diagnostics, required_role: "reviewer") if registry
             diagnostics << diagnostic("policy.raw_council_command", "workflow.yml",
                                       "managed council reviewers may not execute raw commands") if reviewer.command
             diagnostics << diagnostic("policy.external_skill", "workflow.yml",
                                       "managed council reviewers may not reference mutable external skills") if reviewer.skill
           end
           revise = stage.council&.revise
+          if revise&.respond_to?(:permissions) && revise.permissions.nil?
+            diagnostics << diagnostic("policy.missing", "workflow.yml",
+                                      "every managed revise actor must declare an explicit permission policy")
+          end
+          validate_actor_mapping(revise, "revise actor", diagnostics) if registry && revise
           diagnostics << diagnostic("policy.raw_council_command", "workflow.yml",
                                     "managed council revise agents may not execute raw commands") if revise&.command
           diagnostics << diagnostic("policy.external_skill", "workflow.yml",
                                     "managed council revise agents may not reference mutable external skills") if revise&.skill
+        end
+      end
+
+      def validate_actor_mapping(actor, label, diagnostics, required_role: nil)
+        if actor.agent || actor.model || actor.effort
+          diagnostics << diagnostic("mapping.embedded_identity", "workflow.yml",
+                                    "#{label} must not embed agent, model, or effort")
+        end
+        unless actor.mapping_role && actor.mapping_contract
+          diagnostics << diagnostic("mapping.missing_contract", "workflow.yml",
+                                    "#{label} must declare mapping_role and mapping_contract")
+        end
+        if required_role && actor.mapping_role != required_role
+          diagnostics << diagnostic("mapping.invalid_role", "workflow.yml",
+                                    "#{label} mapping_role must be #{required_role}")
+        end
+      end
+
+      def validate_permission_disclosure(manifest, workflow, diagnostics)
+        reasons = RuntimePolicy.workflow_escalation_reasons(workflow)
+        return if reasons.empty?
+
+        permissions = manifest.permissions
+        missing = []
+        missing << "risk=high" unless permissions["risk"] == "high"
+        if (reasons & %w[actor_yolo actor_unbounded_shell]).any?
+          missing.concat(RegistryManifest::CAPABILITIES - permissions.fetch("capabilities"))
+          %w[network_hosts filesystem_read filesystem_write secrets].each do |key|
+            missing << "#{key}=*" unless permissions.fetch(key).include?("*")
+          end
+        elsif reasons.include?("actor_unbounded_write")
+          missing << "filesystem-write" unless permissions.fetch("capabilities").include?("filesystem-write")
+          missing << "filesystem_write=*" unless permissions.fetch("filesystem_write").include?("*")
+        end
+        return if missing.empty?
+
+        diagnostics << diagnostic(
+          "policy.disclosure_mismatch", RegistryManifest::FILE_NAME,
+          "manifest permission disclosure is not a conservative superset of actor policy (missing: #{missing.uniq.sort.join(', ')})"
+        )
+      end
+
+      def validate_hive_extension(manifest, workflow, diagnostics)
+        extension = manifest.data.fetch("x-hive", { "tools" => [], "optional_inputs" => [] })
+        valid_keys = [ %w[optional_inputs tools], %w[optional_inputs prompt_assets tools] ]
+        unless extension.is_a?(Hash) && valid_keys.include?(extension.keys.sort)
+          diagnostics << diagnostic("x-hive.invalid_shape", RegistryManifest::FILE_NAME,
+                                    "x-hive must contain only optional_inputs, prompt_assets, and tools")
+          return
+        end
+        slots = Configuration.slots_for(workflow).map(&:id)
+        validate_hive_tools(extension["tools"], manifest, diagnostics)
+        validate_hive_prompt_assets(extension.fetch("prompt_assets", []), manifest, diagnostics)
+        validate_hive_inputs(extension["optional_inputs"], slots, diagnostics)
+      end
+
+      def validate_hive_tools(tools, manifest, diagnostics)
+        unless tools.is_a?(Array) && tools.all? { |entry| entry.is_a?(Hash) && entry.keys == [ "path" ] }
+          diagnostics << diagnostic("x-hive.invalid_tools", RegistryManifest::FILE_NAME,
+                                    "x-hive tools must be path-only maps")
+          return
+        end
+        paths = tools.map { |entry| entry["path"] }
+        unless paths == paths.compact.sort.uniq
+          diagnostics << diagnostic("x-hive.invalid_tools", RegistryManifest::FILE_NAME,
+                                    "x-hive tool paths must be a sorted unique set")
+          return
+        end
+        inventory = manifest.file_entries.to_set { |entry| entry.fetch("path") }
+        paths.each do |path|
+          begin
+            RegistryManifest.validate_relative_path!(path)
+          rescue PackageError
+            diagnostics << diagnostic("x-hive.invalid_tool_path", path.to_s,
+                                      "declared tool path must remain inside the package")
+            next
+          end
+          target = File.join(@root, path)
+          unless inventory.include?(path) && File.file?(target) && !File.symlink?(target) && File.executable?(target)
+            diagnostics << diagnostic("x-hive.tool_not_executable", path,
+                                      "declared tool must be manifest-hashed and executable (100755)")
+          end
+        end
+      end
+
+      def validate_hive_inputs(inputs, slots, diagnostics)
+        valid_shape = inputs.is_a?(Array) && inputs.all? do |entry|
+          entry.is_a?(Hash) && entry.keys.sort == %w[authorized_slots name] &&
+            entry["name"].is_a?(String) && InputName.valid?(entry["name"]) &&
+            entry["authorized_slots"].is_a?(Array)
+        end
+        unless valid_shape
+          diagnostics << diagnostic("x-hive.invalid_inputs", RegistryManifest::FILE_NAME,
+                                    "x-hive optional_inputs entries are malformed")
+          return
+        end
+        names = inputs.map { |entry| entry.fetch("name") }
+        unless names == names.sort.uniq
+          diagnostics << diagnostic("x-hive.invalid_inputs", RegistryManifest::FILE_NAME,
+                                    "x-hive optional input names must be sorted and unique")
+        end
+        inputs.each do |entry|
+          authorized = entry.fetch("authorized_slots")
+          unless authorized == authorized.sort.uniq && !authorized.empty? && (authorized - slots).empty?
+            diagnostics << diagnostic("x-hive.invalid_input_slots", RegistryManifest::FILE_NAME,
+                                      "optional input #{entry.fetch('name')} must authorize known sorted stable slots")
+          end
+        end
+      end
+
+      def validate_hive_prompt_assets(assets, manifest, diagnostics)
+        unless assets.is_a?(Array) && assets.all? { |entry| entry.is_a?(Hash) && entry.keys == [ "path" ] }
+          diagnostics << diagnostic("x-hive.invalid_prompt_assets", RegistryManifest::FILE_NAME,
+                                    "x-hive prompt_assets must be path-only maps")
+          return
+        end
+        paths = assets.map { |entry| entry["path"] }
+        unless paths == paths.compact.sort.uniq
+          diagnostics << diagnostic("x-hive.invalid_prompt_assets", RegistryManifest::FILE_NAME,
+                                    "x-hive prompt asset paths must be a sorted unique set")
+          return
+        end
+        inventory = manifest.file_entries.to_set { |entry| entry.fetch("path") }
+        paths.each do |path|
+          begin
+            RegistryManifest.validate_relative_path!(path)
+          rescue PackageError
+            diagnostics << diagnostic("x-hive.invalid_prompt_asset_path", path.to_s,
+                                      "declared prompt asset path must remain inside the package")
+            next
+          end
+          target = File.join(@root, path)
+          unless inventory.include?(path) && File.file?(target) && !File.symlink?(target)
+            diagnostics << diagnostic("x-hive.prompt_asset_untrusted", path,
+                                      "declared prompt asset must be manifest-hashed and regular")
+          end
         end
       end
 

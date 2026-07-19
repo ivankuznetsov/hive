@@ -110,19 +110,28 @@ Capability additions, removed deny rules, dependency additions, or
 incomparable dependency changes additionally require a separate
 `--allow-escalation`; neither consent flag implies the other.
 
-`workflow list` keeps origin, selection, integrity, and catalog visibility as
-orthogonal fields. `workflow remove` operates only on Hive-managed locks and
-never deletes task-pinned generations or owner-authored/built-in workflows.
+`workflow list --json` schema v2 keeps origin, selection, integrity, and
+catalog visibility as orthogonal fields. A verified selected row also reports
+its active configuration digest, every stable-slot agent/model/effort mapping,
+and optional-input environment binding plus current availability. Values are
+never read into the document. A task-retained row carries its configuration
+digest when the task metadata has one, but does not present that historical
+snapshot as the active mapping. Owner-authored and built-in rows retain their
+generation-free shape. `workflow remove` operates only on Hive-managed locks
+and never deletes task-pinned generations or owner-authored/built-in workflows.
 List and remove work offline; catalog visibility is reported as
 `unknown_offline` until a trusted refresh is available.
 
-The current Honeycomb v2 manifest carries a coarse risk/capability/filesystem
-disclosure rather than Hive's legacy exact tool/command policy. Hive maps only
-the lossless low-risk, task-local read-only subset to its existing managed
-runtime policy. Every broader v2 disclosure fails admission before install or
-update mutation. In particular, the current Bench and Docs Sync seed packages
-can resolve and pass registry integrity verification, but cannot yet be
-installed by this client.
+Honeycomb v2 manifests carry coarse disclosure for review and consent, while
+each executable stage, reviewer, and reviser declares its exact runtime
+`permissions:`. Install rejects a manifest that understates those actor
+permissions. High-risk actors require a separate `--allow-escalation` consent.
+The strict `x-hive` extension names manifest-hashed executable tools, optional
+prompt assets, and optional environment inputs authorized for stable actor
+slots. Input values remain in the operator environment: configuration stores
+only the binding name, injects a current value only into its authorized child,
+and rejects package-declared process-control names such as `PATH`, `HOME`,
+`RUBYOPT`, and `LD_PRELOAD`.
 
 `workflow publish` still emits the legacy `workflows/<name>/manifest.json`
 submission shape. It remains `pending_review`, not listed, and does not yet
@@ -194,6 +203,7 @@ Council stages declare reviewers and a council policy:
     quorum: 2
     max_rounds: 3
     exit_rule: consensus # consensus | human
+    on_max_rounds: wait   # wait | complete
     triage_output: reviews/triage.md
     revise:
       agent: claude
@@ -214,8 +224,11 @@ Each reviewer declares exactly one of `skill:`, `instruction:`, `prompt:`, or
 verdicts, accepted findings, rejected findings, required edits, open
 disagreements, and readiness. If quorum is not met, `exit_rule: human` pauses
 with `WAITING reason=needs_revision`; `exit_rule: consensus` runs the optional
-revise agent until quorum or `max_rounds`, then pauses with
-`WAITING reason=max_rounds`.
+revise agent until quorum or `max_rounds`. The default
+`on_max_rounds: wait` pauses with `WAITING reason=max_rounds`; bounded editorial
+workflows may opt into `on_max_rounds: complete`, which writes
+`COMPLETE reason=max_rounds` so a downstream delivery stage can emit an
+explicit non-publishable capped outcome.
 
 Stage indexes and stage directories are derived from array order. The example
 above produces `1-inbox`, `2-work`, and `3-done`. The first stage has no

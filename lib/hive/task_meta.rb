@@ -40,6 +40,11 @@ module Hive
           raw["workflow_manifest_digest"] || raw[:workflow_manifest_digest]
         )
       end
+      if raw.key?("workflow_configuration_digest") || raw.key?(:workflow_configuration_digest)
+        data[:workflow_configuration_digest] = normalize_string(
+          raw["workflow_configuration_digest"] || raw[:workflow_configuration_digest]
+        )
+      end
       data
     rescue Errno::ENOENT
       # No meta.yml (pre-`hive new` / legacy folders) — a normal, expected
@@ -113,14 +118,18 @@ module Hive
     end
 
     def write(task_folder, id:, slug:, display_name:, depends_on: nil, workflow: nil,
-              workflow_commit: nil, workflow_manifest_digest: nil)
+              workflow_commit: nil, workflow_manifest_digest: nil, workflow_configuration_digest: nil)
       FileUtils.mkdir_p(task_folder)
       normalized_depends_on = normalize_string(depends_on)
       normalized_workflow = normalize_string(workflow)
       normalized_commit = normalize_string(workflow_commit)
       normalized_digest = normalize_string(workflow_manifest_digest)
+      normalized_configuration_digest = normalize_string(workflow_configuration_digest)
       if normalized_commit.nil? != normalized_digest.nil?
         raise ArgumentError, "workflow_commit and workflow_manifest_digest must be written together"
+      end
+      if normalized_configuration_digest && normalized_commit.nil?
+        raise ArgumentError, "workflow_configuration_digest requires immutable workflow provenance"
       end
       data = {
         "id" => normalize_id(id),
@@ -131,6 +140,7 @@ module Hive
       data["workflow"] = normalized_workflow if normalized_workflow
       data["workflow_commit"] = normalized_commit if normalized_commit
       data["workflow_manifest_digest"] = normalized_digest if normalized_digest
+      data["workflow_configuration_digest"] = normalized_configuration_digest if normalized_configuration_digest
       tmp = File.join(task_folder, ".#{FILENAME}.tmp.#{Process.pid}.#{SecureRandom.hex(4)}")
       File.write(tmp, data.to_yaml)
       File.rename(tmp, path(task_folder))
@@ -140,6 +150,7 @@ module Hive
       if normalized_commit
         result[:workflow_commit] = normalized_commit
         result[:workflow_manifest_digest] = normalized_digest
+        result[:workflow_configuration_digest] = normalized_configuration_digest if normalized_configuration_digest
       end
       result
     ensure
@@ -157,7 +168,8 @@ module Hive
         depends_on: current[:depends_on],
         workflow: current[:workflow],
         workflow_commit: current[:workflow_commit],
-        workflow_manifest_digest: current[:workflow_manifest_digest]
+        workflow_manifest_digest: current[:workflow_manifest_digest],
+        workflow_configuration_digest: current[:workflow_configuration_digest]
       )
     end
 
@@ -178,7 +190,8 @@ module Hive
         # the task to the project default (mirrors update_display_name).
         workflow: current[:workflow],
         workflow_commit: current[:workflow_commit],
-        workflow_manifest_digest: current[:workflow_manifest_digest]
+        workflow_manifest_digest: current[:workflow_manifest_digest],
+        workflow_configuration_digest: current[:workflow_configuration_digest]
       )
     end
 
@@ -201,7 +214,8 @@ module Hive
         depends_on: normalize_string(fetch(raw, "depends_on")),
         workflow: normalize_string(fetch(raw, "workflow")),
         workflow_commit: normalize_string(fetch(raw, "workflow_commit")),
-        workflow_manifest_digest: normalize_string(fetch(raw, "workflow_manifest_digest"))
+        workflow_manifest_digest: normalize_string(fetch(raw, "workflow_manifest_digest")),
+        workflow_configuration_digest: normalize_string(fetch(raw, "workflow_configuration_digest"))
       }
     end
 

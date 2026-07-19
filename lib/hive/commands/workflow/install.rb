@@ -156,8 +156,7 @@ module Hive
 
         def configuration_resolver(validated, resolution, overrides: @mapping_overrides, previous: nil)
           ConfigurationResolver.new(
-            workflow: validated.workflow, resolution: resolution, cfg: project_config,
-            runtime_metadata: validated.manifest.data.fetch("x-hive", {}),
+            validated: validated, resolution: resolution, cfg: project_config,
             mapping_overrides: overrides, input_bindings: @input_bindings, previous: previous
           )
         end

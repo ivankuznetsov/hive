@@ -136,40 +136,55 @@ module Hive
       end
 
       def validate_managed_workflow(workflow, diagnostics, registry: false)
-        workflow.stages.each do |stage|
-          next unless [ :agent, :council ].include?(stage.kind)
-
-          if stage.permissions.nil?
-            diagnostics << diagnostic("policy.missing", "workflow.yml",
-                                      "every managed active stage must declare an explicit permission policy")
+        workflow.executable_slots.each do |slot|
+          actor = slot.actor
+          if actor.permissions.nil?
+            diagnostics << diagnostic(
+              "policy.missing", "workflow.yml", missing_policy_message(slot.kind)
+            )
           end
-          validate_actor_mapping(stage, "stage #{stage.name}", diagnostics) if registry
-          diagnostics << diagnostic("policy.external_skill", "workflow.yml",
-                                    "managed workflow stages may not reference mutable external skills") if stage.skill
-          next unless stage.kind == :council
-
-          stage.reviewers.each do |reviewer|
-            if reviewer.respond_to?(:permissions) && reviewer.permissions.nil?
-              diagnostics << diagnostic("policy.missing", "workflow.yml",
-                                        "every managed reviewer must declare an explicit permission policy")
-            end
-            validate_actor_mapping(reviewer, "reviewer #{reviewer.name}", diagnostics, required_role: "reviewer") if registry
-            diagnostics << diagnostic("policy.raw_council_command", "workflow.yml",
-                                      "managed council reviewers may not execute raw commands") if reviewer.command
-            diagnostics << diagnostic("policy.external_skill", "workflow.yml",
-                                      "managed council reviewers may not reference mutable external skills") if reviewer.skill
+          if registry
+            validate_actor_mapping(
+              actor, actor_label(slot), diagnostics,
+              required_role: slot.kind == :reviewer ? "reviewer" : nil
+            )
           end
-          revise = stage.council&.revise
-          if revise&.respond_to?(:permissions) && revise.permissions.nil?
-            diagnostics << diagnostic("policy.missing", "workflow.yml",
-                                      "every managed revise actor must declare an explicit permission policy")
+          if [ :reviewer, :revise ].include?(slot.kind) && actor.command
+            diagnostics << diagnostic(
+              "policy.raw_council_command", "workflow.yml", raw_command_message(slot.kind)
+            )
           end
-          validate_actor_mapping(revise, "revise actor", diagnostics) if registry && revise
-          diagnostics << diagnostic("policy.raw_council_command", "workflow.yml",
-                                    "managed council revise agents may not execute raw commands") if revise&.command
-          diagnostics << diagnostic("policy.external_skill", "workflow.yml",
-                                    "managed council revise agents may not reference mutable external skills") if revise&.skill
+          if actor.skill
+            diagnostics << diagnostic(
+              "policy.external_skill", "workflow.yml", external_skill_message(slot.kind)
+            )
+          end
         end
+      end
+
+      def actor_label(slot)
+        return "revise actor" if slot.kind == :revise
+
+        "#{slot.kind} #{slot.actor.name}"
+      end
+
+      def missing_policy_message(kind)
+        actor = kind == :stage ? "active stage" : kind == :revise ? "revise actor" : "reviewer"
+        "every managed #{actor} must declare an explicit permission policy"
+      end
+
+      def raw_command_message(kind)
+        "managed #{actor_group(kind)} may not execute raw commands"
+      end
+
+      def external_skill_message(kind)
+        "managed #{actor_group(kind)} may not reference mutable external skills"
+      end
+
+      def actor_group(kind)
+        return "workflow stages" if kind == :stage
+
+        "council #{kind == :reviewer ? 'reviewers' : 'revise agents'}"
       end
 
       def validate_actor_mapping(actor, label, diagnostics, required_role: nil)

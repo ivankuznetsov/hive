@@ -131,6 +131,10 @@ weakening owner-authored descriptor compatibility:
   and redacted optional-input binding/availability. Retained task rows expose
   only a pinned configuration digest, when available, so historical identity
   is not confused with the active selection.
+- `Hive::Workflow#executable_slots` is the single actor-topology boundary for
+  configuration snapshots, package validation, and runtime admission. The
+  configuration object also owns the redacted mapping/input disclosure used by
+  lifecycle commands, so JSON surfaces cannot drift from snapshot semantics.
 - `Loader` registers selected managed workflows beside built-ins and authored
   descriptors while rejecting id collisions and reloading when its managed
   fingerprint changes. Task-pinned generations bypass the single-id overlay and

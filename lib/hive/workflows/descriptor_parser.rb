@@ -55,7 +55,7 @@ module Hive
         agent model effort skill instruction prompt command permissions
         mapping_role mapping_contract
       ].freeze
-      MAPPING_ROLES = %w[planning development reviewer].freeze
+      MAPPING_ROLES = Hive::Workflow::MAPPING_ROLES
       REVIEWER_INSTRUCTION_KEYS = %w[skill instruction prompt command].freeze
       EXIT_RULES = %w[consensus human].freeze
 

@@ -130,28 +130,10 @@ module Hive
         def configuration_details(configuration, manifest)
           runtime_metadata = manifest.data.fetch("x-hive", {})
           {
-            mappings: configuration.data.fetch("mappings").map do |slot, mapping|
-              {
-                "slot" => slot,
-                "mapping_role" => mapping.fetch("mapping_role"),
-                "mapping_contract" => mapping.fetch("mapping_contract"),
-                "agent" => mapping.fetch("agent"),
-                "model" => mapping["model"],
-                "effort" => mapping["effort"],
-                "profile_fingerprint" => mapping.fetch("profile_fingerprint"),
-                "policy_fingerprint" => mapping.fetch("policy_fingerprint")
-              }
-            end,
-            optional_inputs: Array(runtime_metadata["optional_inputs"]).map do |entry|
-              name = entry.fetch("name")
-              binding = configuration.data.fetch("input_bindings")[name]
-              {
-                "name" => name,
-                "authorized_slots" => entry.fetch("authorized_slots"),
-                "binding" => binding,
-                "available" => !!(binding && !@environment[binding].to_s.empty?)
-              }
-            end
+            mappings: configuration.mapping_rows,
+            optional_inputs: configuration.input_rows(
+              runtime_metadata: runtime_metadata, environment: @environment
+            )
           }
         end
 

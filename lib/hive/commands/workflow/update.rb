@@ -42,8 +42,7 @@ module Hive
             )
             diff = Hive::WorkflowPackage::SemanticDiff.compare(old_manifest, validated.manifest)
             resolver = ConfigurationResolver.new(
-              workflow: validated.workflow, resolution: candidate, cfg: project_config,
-              runtime_metadata: validated.manifest.data.fetch("x-hive", {}),
+              validated: validated, resolution: candidate, cfg: project_config,
               mapping_overrides: @mapping_overrides, input_bindings: @input_bindings,
               previous: previous_configuration
             )

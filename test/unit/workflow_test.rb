@@ -208,6 +208,34 @@ class WorkflowTest < Minitest::Test
     assert dirs.frozen?
   end
 
+  def test_executable_slots_cover_managed_stage_reviewer_and_revise_topology
+    reviewer = Hive::Workflow::Reviewer.new(name: "security")
+    revise = Hive::Workflow::Revise.new
+    workflow = Hive::Workflow.new(
+      id: :managed,
+      stages: [
+        Hive::Workflow::Stage.new(
+          name: "inbox", index: 1, state_file: "idea.md", kind: :inert
+        ),
+        Hive::Workflow::Stage.new(
+          name: "draft", index: 2, state_file: "draft.md", kind: :agent
+        ),
+        Hive::Workflow::Stage.new(
+          name: "review", index: 3, state_file: "review.md", kind: :council,
+          reviewers: [ reviewer ],
+          council: Hive::Workflow::Council.new(quorum: 1, revise: revise)
+        )
+      ]
+    )
+
+    assert_equal [
+      [ "stages.draft", :stage, "development" ],
+      [ "stages.review", :stage, "development" ],
+      [ "stages.review.reviewers.security", :reviewer, "reviewer" ],
+      [ "stages.review.revise", :revise, "development" ]
+    ], workflow.executable_slots.map { |slot| [ slot.id, slot.kind, slot.default_role ] }
+  end
+
   def test_single_stage_workflow_has_no_next_stage
     assert_nil single_stage_workflow.next_stage_after("only")
   end

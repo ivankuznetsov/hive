@@ -3,6 +3,13 @@ require "hive/digest"
 require "hive/workflow_package/configuration"
 
 class WorkflowPackageConfigurationTest < Minitest::Test
+  def test_contract_constants_reuse_workflow_and_manifest_authorities
+    assert_same Hive::Workflow::MAPPING_ROLES,
+                Hive::WorkflowPackage::Configuration::ROLES
+    assert_same Hive::WorkflowPackage::Manifest::SHA256,
+                Hive::WorkflowPackage::Configuration::SHA256
+  end
+
   def test_builds_byte_stable_snapshot_and_overlays_every_actor
     configuration = build_configuration
     reloaded = Hive::WorkflowPackage::Configuration.load(configuration.bytes)
@@ -133,6 +140,29 @@ class WorkflowPackageConfigurationTest < Minitest::Test
     )
   end
 
+  def test_disclosure_rows_share_snapshot_semantics_without_exposing_values
+    configuration = build_configuration(
+      input_bindings: { "GSC_TOKEN" => "GSC_RUNTIME_TOKEN" }
+    )
+    secret = "secret-canary"
+    inputs = configuration.input_rows(
+      runtime_metadata: runtime_metadata,
+      environment: { "GSC_RUNTIME_TOKEN" => secret }
+    )
+
+    assert_equal configuration.data.fetch("mappings").keys,
+                 configuration.mapping_rows.map { |row| row.fetch("slot") }
+    assert_equal [
+      {
+        "name" => "GSC_TOKEN",
+        "authorized_slots" => [ "stages.draft" ],
+        "binding" => "GSC_RUNTIME_TOKEN",
+        "available" => true
+      }
+    ], inputs
+    refute_includes JSON.generate(inputs), secret
+  end
+
   def test_reviewer_suggestions_use_configured_review_agents
     configuration = build_configuration(
       overrides: { "stages.draft" => { "agent" => "codex" } },
@@ -166,10 +196,16 @@ class WorkflowPackageConfigurationTest < Minitest::Test
     end
   end
 
-  def test_nested_array_helpers_are_recursive_and_configuration_values_must_be_maps
+  def test_symbol_keys_are_normalized_recursively_and_configuration_values_must_be_maps
     configuration = build_configuration
-    stringified = configuration.send(:deep_stringify, [ { key: [ :value ] } ])
-    assert_equal [ { "key" => [ :value ] } ], stringified
+    data = JSON.parse(configuration.bytes)
+    symbol_keyed = {
+      schema_version: data.fetch("schema_version"),
+      generation: data.fetch("generation").transform_keys(&:to_sym),
+      mappings: data.fetch("mappings").transform_values { |mapping| mapping.transform_keys(&:to_sym) },
+      input_bindings: data.fetch("input_bindings")
+    }
+    assert_equal data, Hive::WorkflowPackage::Configuration.new(symbol_keyed).data
     assert_predicate configuration.send(:deep_freeze, [ [ "value" ] ]), :frozen?
 
     assert_raises(Hive::ConfigError) do

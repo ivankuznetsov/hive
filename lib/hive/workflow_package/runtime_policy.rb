@@ -75,7 +75,8 @@ module Hive
       end
 
       def self.workflow_escalation_reasons(workflow)
-        executable_actors(workflow).flat_map do |actor|
+        workflow.executable_slots.flat_map do |slot|
+          actor = slot.actor
           spec = actor.respond_to?(:permissions) ? actor.permissions : nil
           spec.nil? ? [] : permission_escalation_reasons(spec)
         end.uniq.sort
@@ -104,7 +105,8 @@ module Hive
       # that selects a runner unable to enforce the package policy before the
       # generation is activated (and the same compile runs again at spawn).
       def self.admit_workflow!(workflow, permissions = nil, task_folder:, policy_dir:, package_root: task_folder)
-        executable_actors(workflow).each_with_index do |actor, index|
+        workflow.executable_slots.each_with_index do |slot, index|
+          actor = slot.actor
           name = actor.respond_to?(:agent) && actor.agent || :claude
           spec = actor.respond_to?(:permissions) ? actor.permissions : permissions
           raise Hive::ConfigError, "managed executable actor is missing permissions" if spec.nil?
@@ -123,20 +125,6 @@ module Hive
         end
         true
       end
-
-      def self.executable_actors(workflow)
-        workflow.stages.flat_map do |stage|
-          next [] unless [ :agent, :council ].include?(stage.kind)
-
-          values = [ stage ]
-          if stage.kind == :council
-            values.concat(stage.reviewers)
-            values << stage.council.revise if stage.council&.revise
-          end
-          values
-        end
-      end
-      private_class_method :executable_actors
 
       def initialize(permissions, task_folder:, profile:, policy_dir:)
         @permissions = normalize_registry_permissions(stringify_hash(permissions))

@@ -141,22 +141,24 @@ class WorkflowLifecycleCommandsTest < Minitest::Test
 
       error = assert_raises(Hive::ConfigError) do
         Hive::Commands::Workflow::ConfigurationResolver.new(
-          workflow: changed, resolution: resolution, cfg: {}, runtime_metadata: {}, previous: previous
+          validated: validated.with(workflow: changed), resolution: resolution,
+          cfg: {}, previous: previous
         )
       end
       assert_match(/mapping contract changed/, error.message)
 
       reconfirmed = Hive::Commands::Workflow::ConfigurationResolver.new(
-        workflow: changed, resolution: resolution, cfg: {}, runtime_metadata: {}, previous: previous,
+        validated: validated.with(workflow: changed), resolution: resolution,
+        cfg: {}, previous: previous,
         mapping_overrides: { "stages.work" => { "agent" => "claude" } }
       )
       assert_equal "demo-work-v2", reconfirmed.mappings.fetch(0).fetch("mapping_contract")
 
       error = assert_raises(Hive::ConfigError) do
         Hive::Commands::Workflow::ConfigurationResolver.new(
-          workflow: validated.workflow, resolution: resolution,
+          validated: validated, resolution: resolution,
           cfg: { "agents" => { "claude" => { "bin" => "/tmp/drifted-claude" } } },
-          runtime_metadata: {}, previous: previous
+          previous: previous
         )
       end
       assert_match(/profile drifted/, error.message)

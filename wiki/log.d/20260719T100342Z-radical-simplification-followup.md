@@ -5,3 +5,9 @@
 - Kept web dispatch narrower by projecting the shared map through the daemon
   queue allowlist; `ready_to_advance` remains an in-process approve action.
 - Closed the corresponding Hivebox residual in `wiki/gaps.md`.
+- Made `Hive::Workflow#executable_slots` the shared actor topology for
+  configuration, managed validation, and runtime admission.
+- Moved redacted mapping/input presentation onto the configuration snapshot and
+  made lifecycle resolution consume a single validated package result.
+- Reused the shared recursive key normalizer, digest pattern, and mapping-role
+  vocabulary instead of maintaining workflow-package copies.

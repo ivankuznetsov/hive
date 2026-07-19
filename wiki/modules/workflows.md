@@ -113,7 +113,10 @@ weakening owner-authored descriptor compatibility:
   operator-selected agent/model/effort identity, mapping role/contract, profile
   fingerprint, and per-actor policy fingerprint. Snapshot construction rejects
   non-null pins that the selected profile cannot express as native arguments;
-  unsupported project defaults remain nil. Managed council reviewers and
+  unsupported project defaults remain nil. Automatic agent suggestions also
+  fall back to Claude when the project-default profile cannot enforce a
+  non-`yolo` actor scope; explicit mappings are preserved for the existing
+  fail-closed runtime admission check. Managed council reviewers and
   revisers launch exclusively from their child-slot snapshot identity, so a
   nil child model/effort cannot leak the parent stage's provider-specific
   defaults. Owner-authored unmanaged councils retain their historical parent

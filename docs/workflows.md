@@ -93,6 +93,13 @@ manifest metadata binding, static security findings, and runner capabilities
 before asking for confirmation. A managed selection is an atomic lock over an
 immutable catalog-commit generation:
 
+Before consent, Hive shows an agent mapping for every stage, council reviewer,
+and reviser. Suggestions start from the project choices made by `hive init`.
+When one of those agents cannot enforce an actor's non-`yolo` tool scope, Hive
+suggests Claude for that slot instead so accepting all defaults remains
+runnable. An explicit mapping is never rewritten: an incompatible explicit
+choice fails runtime admission before project state changes.
+
 ```text
 .hive-state/workflows/<name>/honeycomb.lock.json
 .hive-state/workflows/<name>/versions/<catalog-commit>/

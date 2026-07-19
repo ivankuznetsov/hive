@@ -1,6 +1,7 @@
 require "digest"
 require "json"
 require "hive/agent_profiles"
+require "hive/permission_scope"
 require "hive/workflow_package/canonical_json"
 require "hive/workflow_package/input_name"
 require "hive/workflow_package/registry_client"
@@ -31,6 +32,7 @@ module Hive
         mappings = slots.each_with_index.to_h do |slot, index|
           override = normalize_override(normalized_overrides.fetch(slot.id, {}), slot.id)
           suggested = suggested_agent(slot.role, cfg, reviewer_defaults, index)
+          suggested = policy_compatible_suggestion(slot, suggested, cfg) unless override.key?("agent")
           agent = override.fetch("agent", suggested).to_s
           profile = Hive::AgentProfiles.lookup(agent, cfg: cfg)
           model = override.key?("model") ? normalize_optional(override["model"]) : suggested_model(slot.role, cfg, profile)
@@ -213,6 +215,18 @@ module Hive
           when "reviewer" then reviewer_defaults[index % reviewer_defaults.length]
           end
           value.to_s.empty? ? "claude" : value.to_s
+        end
+
+        # Non-yolo actor policies currently require Claude's native tool
+        # scoping. Keep operator-supplied mappings exact (runtime admission
+        # rejects an incompatible explicit choice), but never suggest a
+        # project default that Hive already knows it cannot launch.
+        def policy_compatible_suggestion(slot, suggested, cfg)
+          preset = Hive::PermissionScope.parse_spec(slot.permissions, stage: slot.id).fetch("preset")
+          profile = Hive::AgentProfiles.lookup(suggested, cfg: cfg)
+          return suggested if preset == Hive::PermissionScope::YOLO || profile.name == :claude
+
+          "claude"
         end
 
         def reviewer_agents(cfg)

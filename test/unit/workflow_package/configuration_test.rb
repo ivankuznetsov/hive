@@ -133,14 +133,28 @@ class WorkflowPackageConfigurationTest < Minitest::Test
     )
   end
 
-  def test_reviewer_suggestions_use_configured_review_agents
+  def test_scoped_reviewer_suggestions_fall_back_to_an_enforceable_agent
     configuration = build_configuration(
       overrides: { "stages.draft" => { "agent" => "codex" } },
       cfg: { "review" => { "reviewers" => [ { "agent" => "codex" } ] } }
     )
 
     mapping = configuration.data.fetch("mappings").fetch("stages.review.reviewers.security")
-    assert_equal "codex", mapping.fetch("agent")
+    assert_equal "claude", mapping.fetch("agent")
+  end
+
+  def test_explicit_scoped_mapping_is_preserved_for_runtime_admission
+    configuration = build_configuration(
+      overrides: { "stages.review.reviewers.security" => { "agent" => "codex" } },
+      cfg: {
+        "execute" => { "agent" => "codex" },
+        "review" => { "reviewers" => [ { "agent" => "codex" } ] }
+      }
+    )
+
+    mappings = configuration.data.fetch("mappings")
+    assert_equal "codex", mappings.fetch("stages.draft").fetch("agent")
+    assert_equal "codex", mappings.fetch("stages.review.reviewers.security").fetch("agent")
   end
 
   def test_apply_rejects_mapping_contract_drift

@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/ci.yml, .github/workflows/release.yml, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-07-17
+updated: 2026-07-19
 tags: [test, minitest, fixtures, honeycomb]
 ---
 
@@ -231,7 +231,23 @@ unrelated third-party apt outage does not hide the verifier's actual behavior.
 inert per-prefix `systemctl`/`launchctl` stubs enter `PATH` before any installed
 Hive command can contact the host's live user service manager.
 
-The browser layer lives in the Rails app: `web/test/integration/*` (device-flow auth via the http DI seam, ownerless first-login claim and later non-owner refusal, plain `/health` versus daemon-backed `/health?deep=1`, ideas with uploads, task Q&A/actions including Advanced Drop, stale-stage 422, red-task Retry recovery queueing, task artifact ordering/markdown rendering/log layout, bounded oversized task diff rendering, media route streaming/refusal plus captured/skipped/failed Demo gallery rendering, repos questionnaire, Repos SSH-origin normalization, non-directory clone-target refusal, Agents-page binary PTY rendering plus operator-ward login polling, favicon/icon serving, Telegram setup guide, and strict blank/@handle chat-ID rejection) and `web/test/system/pipeline_flow_test.rb` (Capybara + Playwright: login gate, composer image attach both paths, Turbo Stream live update, status-grid scroll and composer draft preservation across a live broadcast, Q&A round replacement plus typed-answer survival across morph refreshes, both approve outcomes, log-tail follow/pause/resume, node-preserving log-frame morph reloads, artifact open-state preservation across broadcast-triggered morphs with live content refresh, visible Demo media, and failed-capture banners). CI runs them in the `web` job, installs the root bundle into `vendor/root-bundle`, passes that path as `GOLDEN_E2E_BUNDLE_PATH`, and explicitly runs `web/test/e2e/golden_path_e2e.rb`. The golden-path E2E pins `BUNDLE_GEMFILE`, points `BUNDLE_PATH` at the supplied root bundle, deletes inherited web-bundle deployment/config keys, and preflights the daemon spawn environment with `bundle exec ruby -Ilib bin/hive --version` before starting the foreground daemon, so a broken Bundler/Ruby env fails with the real stderr/stdout instead of a later browser timeout.
+The browser layer lives in the Rails app: `web/test/integration/*` covers the
+device-flow owner gate, health, ideas/uploads, task actions/recovery/details,
+repos/agents/Telegram, plus the equal `/board` and `/grid` route/default-setting
+matrix. Board integration pins project-scoped workflow bands, combined URL
+filters, descriptor-aware shared retention, lazy drawer responses, guarded
+JSON and plain-HTML transitions, stale-card responses, denial metrics, and a
+20-project × 500-scanned-task fixture that renders at most 1,000 retained cards
+under 1.5 seconds with rendered bytes/card under 8 KiB. `web/test/system/*`
+uses Capybara + Playwright for grid pipeline regressions and for board keyboard
+navigation, mobile stage paging, focus-safe drawer behavior, live
+reconciliation, keyboard Move-to, and legal/illegal fine-pointer drag. CI runs
+the Rails job plus `web/test/e2e/golden_path_e2e.rb`, with the root bundle
+pinned through `GOLDEN_E2E_BUNDLE_PATH` so daemon preflight failures surface
+before browser timeouts. That E2E clears the activated web bundle's lockfile,
+Bundler executable/version/setup variables, and restores the original RubyGems
+paths before probing the root daemon; changing only `BUNDLE_GEMFILE` is not
+enough because Bundler otherwise keeps resolving against `web/Gemfile.lock`.
 `web/test/test_helper.rb#create_task!` wraps real `Hive::Commands::New`
 task creation. Because generated task slugs use a 16-bit random suffix and
 many web tests intentionally reuse the same task title inside a persistent

@@ -10,7 +10,12 @@ class StatusVisibility
       workflows = project.fetch("workflows", []).index_by { |workflow| workflow["id"].to_s }
       visible_tasks = project.fetch("tasks", []).reject do |task|
         workflow = workflows[task["workflow"].to_s]
-        terminal = workflow&.fetch("stages", [])&.last&.dig("dir") == task["stage"]
+        terminal = if task.key?("terminal")
+          task["terminal"] == true
+        else
+          # Rolling compatibility for stored pre-card payloads.
+          workflow&.fetch("stages", [])&.last&.dig("dir") == task["stage"]
+        end
         Hive::ArchiveFilter.hide?(
           stage: task["stage"], terminal: terminal,
           mtime: parse_time(task["mtime"]), folder_mtime: parse_time(task["folder_mtime"])

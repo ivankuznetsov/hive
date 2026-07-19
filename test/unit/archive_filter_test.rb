@@ -73,4 +73,17 @@ class ArchiveFilterTest < Minitest::Test
       now: now
     )
   end
+
+  def test_explicit_workflow_terminal_identity_overrides_coding_directory_names
+    now = Time.utc(2026, 7, 19, 12, 0, 0)
+
+    assert Hive::ArchiveFilter.hide?(
+      stage: "3-published", terminal: true,
+      folder_mtime: now - (5 * 86_400), now: now
+    )
+    refute Hive::ArchiveFilter.hide?(
+      stage: "9-done", terminal: false,
+      folder_mtime: now - (5 * 86_400), now: now
+    )
+  end
 end

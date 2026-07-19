@@ -121,6 +121,28 @@ Read [wiki/operating.md](../wiki/operating.md) before running it live.
 
 `hive tui` opens the terminal dashboard for humans. `hive bot start|stop|status|reload|tail|install` runs the Telegram surface for human-input gates. Both read the same state as the CLI; the TUI intentionally rejects `--json`. `hive bot install [--force] [--json]` installs and enables a per-user autostart service for the bot (systemd-user on Linux, launchd on macOS) so it survives reboot/login — opt-in, mirroring `hive daemon install`; the token comes from `~/.config/hive/.env`, and `hive uninstall` removes the service.
 
+## Web Board And Grid
+
+`hive web` serves two equal live work views over the same `hive status --json`
+snapshot: `/board` groups cards by project workflow and descriptor-ordered
+stage, while `/grid` keeps the compact task table. `/` opens Board by default;
+Settings can make Grid the default for that browser. Both explicit routes stay
+available.
+
+Board cards expose only core-returned Move-to transitions. The accessible form
+is the canonical path; desktop fine-pointer drag is an optional binding to the
+same fingerprint-guarded endpoint. Every request is re-read under the project
+commit lock. CLI/daemon movement wins a race, stale browser requests return the
+fresh card, and only successful operator actions enter task-local
+`events.jsonl`. Queue-backed moves retain their actor, request id, destination,
+and expected fingerprint for daemon-time revalidation. Rails stores no task or
+workflow state.
+
+Terminal visibility is the shared descriptor-aware retention policy used by
+CLI, TUI, board, and grid. PR/review chips are snapshots of on-disk marker,
+`pr.md`, and review artifacts; their displayed source/time is not a live GitHub
+poll.
+
 ## Diagnostics
 
 | Command | Use it for |

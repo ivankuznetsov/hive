@@ -4,13 +4,14 @@ require "hive/tui/snapshot"
 require "hive/tui/views/archive_pane"
 
 class HiveTuiViewsArchivePaneTest < Minitest::Test
-  def task(slug:, stage:, project: "demo", marker: "complete", age: 120)
+  def task(slug:, stage:, project: "demo", marker: "complete", age: 120, terminal: nil)
     {
       "stage" => stage,
       "slug" => slug,
       "folder" => "/tmp/#{project}/#{slug}",
       "state_file" => "/tmp/#{project}/#{slug}/task.md",
       "marker" => marker,
+      "terminal" => terminal.nil? ? stage == "9-done" : terminal,
       "attrs" => {},
       "mtime" => "2026-05-01T00:00:00Z",
       "folder_mtime" => "2026-05-01T00:00:00Z",
@@ -51,7 +52,9 @@ class HiveTuiViewsArchivePaneTest < Minitest::Test
                         "path" => "/tmp/beta",
                         "hive_state_path" => "/tmp/beta/.hive-state",
                         "tasks" => [
-                          task(slug: "beta-archived", stage: "9-done", project: "beta", age: 86_400)
+                          task(slug: "beta-archived", stage: "9-done", project: "beta", age: 86_400),
+                          task(slug: "custom-published", stage: "3-published", project: "beta",
+                                age: 86_400, terminal: true)
                         ]
                       }
                     ])
@@ -62,6 +65,7 @@ class HiveTuiViewsArchivePaneTest < Minitest::Test
     assert_includes out, "old-archived"
     assert_includes out, "recent-archived"
     assert_includes out, "beta-archived"
+    assert_includes out, "custom-published"
     assert_includes out, "alpha"
     assert_includes out, "beta"
     refute_includes out, "active-task"

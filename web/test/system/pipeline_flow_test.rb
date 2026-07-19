@@ -52,6 +52,7 @@ class PipelineFlowTest < ApplicationSystemTestCase
     assert_no_selector ".task-row", wait: 0
 
     sign_in!
+    visit grid_path
 
     # Composer: attach an image via the upload button; the placeholder must
     # appear in the text and a removable chip must render.
@@ -112,7 +113,7 @@ class PipelineFlowTest < ApplicationSystemTestCase
     create_task!(@project, "Demo task one")
     create_task!(second, "Second task one")
     sign_in!
-    visit "/"
+    visit grid_path
     assert_selector ".project-section[data-project-name='#{@project}']"
     assert_selector ".project-section[data-project-name='second-app']"
 
@@ -149,7 +150,7 @@ class PipelineFlowTest < ApplicationSystemTestCase
     create_task!(second, "Second deep task")
     sign_in!
 
-    visit "/?project=#{@project}"
+    visit grid_path(project: @project)
     assert_selector ".project-section[data-project-name='#{@project}']"
     assert_selector ".project-section[data-project-name='second-app']", count: 0
     assert_equal @project, find(".composer select[name='project']").value,
@@ -157,7 +158,7 @@ class PipelineFlowTest < ApplicationSystemTestCase
 
     # Ghost link (renamed/forgotten project): never an empty grid — fall
     # back to All projects and clean the URL.
-    visit "/?project=ghost-app"
+    visit grid_path(project: "ghost-app")
     assert_selector ".project-section[data-project-name='#{@project}']"
     assert_selector ".project-section[data-project-name='second-app']"
     assert_selector ".project-nav-item.active", text: "All projects"
@@ -169,7 +170,7 @@ class PipelineFlowTest < ApplicationSystemTestCase
     # Enough rows to overflow the viewport so window scroll is meaningful.
     30.times { |n| create_task!(@project, "Filler idea number #{n}") }
     sign_in!
-    visit "/"
+    visit grid_path
     assert_selector ".task-row", text: "Filler idea number 29", wait: 10
     fill_in "New idea", with: "half-typed thought"
 

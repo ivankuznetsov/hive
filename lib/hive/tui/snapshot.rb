@@ -56,6 +56,7 @@ module Hive
         :state_file,
         :worktree_path,
         :pr_url,
+        :terminal,
         :attempt_id,
         :task_generation,
         :condition_task_generation,
@@ -120,8 +121,9 @@ module Hive
         # unanswered_questions defaults to 0 so payloads / test factories
         # that predate issue #270 keep working; production payloads always
         # emit the integer explicitly.
-        def initialize(id: nil, display_name: nil, workflow: nil, worktree_path: nil,
+        def initialize(stage:, id: nil, display_name: nil, workflow: nil, worktree_path: nil,
                        pr_url: nil, attempt_id: nil, task_generation: nil,
+                       terminal: nil,
                        condition_task_generation: nil, commit_generation: nil,
                        current_attempt: nil, conditions: [], condition_history: [],
                        evidence: [], condition_overrides: [], condition_gate: nil, condition_migration: nil,
@@ -136,7 +138,7 @@ module Hive
                        state_rank: nil, allowed_transitions: [], blocked_reason: nil,
                        lock: {}, dependency: {}, queued_request: nil, retries: {},
                        operational_chips: [], **rest)
-          super(id: id, display_name: display_name,
+          super(stage: stage, id: id, display_name: display_name,
                 workflow: workflow,
                 depends_on: depends_on,
                 blocked_by: blocked_by,
@@ -145,6 +147,7 @@ module Hive
                 admission_error: admission_error,
                 worktree_path: worktree_path,
                 pr_url: pr_url,
+                terminal: terminal.nil? ? Hive::ArchiveFilter.archived?(stage) : terminal,
                 attempt_id: attempt_id,
                 task_generation: task_generation,
                 condition_task_generation: condition_task_generation,
@@ -245,6 +248,7 @@ module Hive
           state_file: payload["state_file"],
           worktree_path: payload["worktree_path"],
           pr_url: payload["pr_url"],
+          terminal: payload["terminal"],
           attempt_id: payload["attempt_id"],
           task_generation: payload["task_generation"],
           condition_task_generation: payload["condition_task_generation"],
@@ -386,6 +390,7 @@ module Hive
       def old_archived_row?(row, now:)
         Hive::ArchiveFilter.hide?(
           stage: row.stage,
+          terminal: row.terminal,
           mtime: parse_time(row.mtime),
           folder_mtime: parse_folder_mtime(row.folder_mtime),
           now: now

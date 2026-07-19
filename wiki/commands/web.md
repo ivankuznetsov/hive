@@ -3,7 +3,7 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-07-13
+updated: 2026-07-19
 tags: [command, web, hivebox, rails, turbo]
 ---
 
@@ -84,7 +84,20 @@ origin also prints the Host-header/reverse-proxy warning.
 
 ## Surfaces
 
-- **Status grid (`/`)** — a TUI-left-pane-parity project rail filters the
+- **Board (`/board`) and grid (`/grid`)** are equal first-class work views.
+  `/` opens the browser's selected default (Board until changed in Settings),
+  and both explicit routes remain stable. The setting is a signed browser
+  cookie, not workflow state or an operator-wide rollout switch.
+- **Board** — one band per `(project, workflow)`, with descriptor-ordered stage
+  columns, server-computed dominant state, filters/search/grouping in the URL,
+  and the shared terminal-retention projection. Cards open task details in a
+  lazy Turbo drawer while direct task URLs remain full pages. Core-returned
+  Move-to forms are the canonical keyboard/no-JavaScript action surface.
+  Stimulus adds pending announcements and native desktop fine-pointer drag for
+  ordinary moves; touch/mobile, reduced-motion, confirmation-required, and
+  illegal destinations never become drop targets. Every gesture posts the
+  same destination plus semantic fingerprint to the same endpoint.
+- **Grid** — a TUI-left-pane-parity project rail filters the
   grid client-side ("All projects" + one button per registered project;
   buttons not links so the permanent composer's typed text survives; a
   `+ Add project` link navigates to Repos because adding a project is a real
@@ -95,18 +108,23 @@ origin also prints the Host-header/reverse-proxy warning.
   replace/morph), composer (new idea with image attach: clipboard
   paste AND upload button; images become `[imageN]` placeholders and land in
   the task's `assets/` dir — `Commands::New`'s TUI contract), per-project
-  task rows with stage badges and liveness dots. Live-updates over **Turbo
-  Streams**: `StatusBroadcaster` subscribes to `StatusFeed#each_snapshot`;
+  task rows with stage badges and liveness dots.
+- **Shared live updates** use **Turbo Streams**:
+  `StatusBroadcaster` subscribes to `StatusFeed#each_snapshot`;
   `StatusFeed` suppresses unchanged snapshots by comparing with only
   `generated_at` and `age_seconds` removed while keeping `mtime` /
   `folder_mtime` as liveness signals. The broadcaster sends the status-channel
   refresh first, then renders and replaces the `projects` frame over
   solid_cable, so task pages without that frame still receive a morph signal if
-  the dashboard partial raises. The index opts that refresh into Turbo morphing
-  with scroll preservation so a live row arrival does not yank the operator
-  back to the top; the composer form is `data-turbo-permanent` because
+  the dashboard partial raises. Board streams also carry an in-process epoch
+  and monotonic generation; a restart, gap, duplicate, or out-of-order frame
+  causes one fresh reconciliation. Card changes use the assembled
+  `card_digest`, so dependency, queue, lock/PID, retry, and on-disk PR/review
+  changes refresh even when the mutation fingerprint is unchanged. Both views
+  opt refreshes into Turbo morphing with scroll preservation; the composer form
+  is `data-turbo-permanent` because
   typed-but-unsent idea text and staged image chips live in browser state. No
-  polling JS, no SSE. The daemon strip on the grid uses
+  polling JS, no SSE. The daemon strip uses
   `Hive::Daemon::StatusReport.safe_payload` directly instead of constructing a
   `Hive::Commands::Daemon` CLI object; the view also reads
   `StatusReport::BINARY_DRIFT_ACTIONABLE` for the Repair affordance, so CLI
@@ -219,7 +237,8 @@ origin also prints the Host-header/reverse-proxy warning.
 Task Drop is routed as `POST /tasks/:project/:slug/drop` →
 `TasksController#drop` → `Hive::Web::Dispatcher#drop` →
 `Hive::Commands::Drop`. It is intentionally in-process, not a daemon dispatch:
-the task is gone after success, so the controller redirects to the grid. The
+the task is gone after success, so the controller redirects to the selected
+work view. The
 form posts the row's rendered `stage` as `from`; if the task moved after the
 page rendered, `Commands::Drop` raises `Hive::WrongStage`, Rails renders the
 typed 422 error page, and the moved task folder is left intact.
@@ -234,6 +253,26 @@ the first command (`hive markers clear ... --json`) to the daemon dispatch
 queue with `trigger=web_recover` and persists the stage rerun as the same
 request's sequence sidecar. If the guarded clear exits non-zero, the rerun is
 not promoted.
+
+Board transitions use `POST /tasks/:project/:slug/transition`. The client does
+not choose a verb: `Hive::Web::Dispatcher` reads the current status card and
+derives the exact destination/verb tuple. Synchronous moves acquire the owning
+project commit lock before re-resolving the task, comparing the semantic
+fingerprint, recomputing dependency/marker legality, moving the folder,
+appending `operator_action`, and committing. Commit or audit failure restores
+the folder and audit files together. Run-class moves write a v3 dispatch
+request with `requestor=web`, actor, request id, expected fingerprint, and
+destination; the daemon revalidates those fields before spawn. Denials write
+structured Rails/daemon logs and increment `TransitionMetrics` in process, but
+never append a canonical task event.
+
+The board/card snapshot is additive `hive-status` v6 data. `fingerprint` guards
+mutations; `card_digest` guards rendering. `terminal` is derived from each
+task's actual workflow descriptor, so board, grid, CLI, and TUI apply the same
+three-day daily retention rule without a web-only cap. Operational PR/review
+chips are built only from marker, `pr.md`, and review artifacts and include
+source plus observed time; no request performs a live GitHub poll or persists
+`PrMergeWatcher` memory.
 
 Typed `Hive::Error`s render a readable error page (422; `InvalidTaskPath` →
 404) — never a blank 500. Stage-run posts validate the action map before
@@ -259,7 +298,10 @@ clone target refusal for non-directories, agent-login status rendering for
 binary PTY output and operator-ward poll flows, root favicon/icon assets,
 plain-vs-deep health semantics, the oversized diff cap/truncation notice,
 media route streaming/refusal cases, and captured/skipped/failed Demo
-rendering. Repos coverage pins the workflow select's built-in fresh list and
+rendering. Board coverage pins the route/default-setting matrix, project-scoped
+workflow bands, combined filters, shared terminal retention, guarded transition
+responses, non-JavaScript forms, and the 20-project × 500-scanned-task render
+budget. Repos coverage pins the workflow select's built-in fresh list and
 that posting `settings[workflow]` writes the same real `default_workflow` that
 CLI init writes.
 `web/test/system/` runs Capybara +
@@ -275,7 +317,10 @@ follow/pause/resume with node-preserving frame morph reloads, artifact
 open-state preservation across pushed morphs with live content refresh, and
 repo setup workflow selection (fresh `content` writes config, re-run lists a
 project-authored workflow and preselects the current default), plus
-browser-visible Demo gallery images and failed-capture banner states. CI runs
+browser-visible Demo gallery images and failed-capture banner states. Board
+system coverage adds roving keyboard navigation, mobile stage paging, a
+focus-safe full-screen drawer, keyboard Move-to, authoritative queued-state
+reconciliation, and legal/illegal desktop drag behavior. CI runs
 both in the `web` job (`.github/workflows/ci.yml`) plus the web app's own
 rubocop, and it explicitly runs `web/test/e2e/golden_path_e2e.rb`; the golden
 path's daemon/Turbo row-replacement retry contract is covered in [[testing]].

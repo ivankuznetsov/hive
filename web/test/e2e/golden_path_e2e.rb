@@ -100,7 +100,7 @@ class GoldenPathE2E < ApplicationSystemTestCase
 
     # The wait page meta-refreshes once per interval; the next render polls
     # the (stubbed) token endpoint and admits.
-    assert_selector "#projects", wait: 15
+    assert_selector "#board", wait: 15
     config = YAML.safe_load_file(File.join(ENV["HIVE_HOME"], "config.yml"))
     assert_equal "goldenpath", config.dig("web", "github", "owner"),
                  "the claim must be persisted as the box's owner"
@@ -109,17 +109,17 @@ class GoldenPathE2E < ApplicationSystemTestCase
     fill_in "New idea", with: "Golden path sample idea"
     find(".composer select[name='project']").find("option[value='#{@project}']").select_option
     click_button "Add idea"
-    assert_selector ".task-row", text: "Golden path sample idea", wait: 10
+    assert_selector ".board-card", text: "Golden path sample idea", wait: 10
 
     # --- The daemon pulls it from the inbox on its own ----------------------
     # No clicking: the golden path is "drop the idea, the pipeline runs".
     # (A manual Force approve here would race the daemon's own advance.)
 
     # --- Brainstorm round 1: the daemon's agent asks, we answer ------------
-    # Turbo may replace the grid row while the daemon advances the task. Read
+    # Turbo may replace the board card while the daemon advances the task. Read
     # the slug from the current DOM, then navigate directly instead of holding
-    # a row element across live updates.
-    slug = task_slug_from_grid!("Golden path sample idea")
+    # a card element across live updates.
+    slug = task_slug_from_board!("Golden path sample idea")
     visit "/tasks/#{@project}/#{slug}"
     answer_field = find("textarea[name='answers[1]']", wait: 45)
     assert_text "Ship the sample feature?"
@@ -155,23 +155,23 @@ class GoldenPathE2E < ApplicationSystemTestCase
 
   private
 
-  # The status grid is Turbo-replaced while the daemon advances tasks. Read the
+  # The board is Turbo-refreshed while the daemon advances tasks. Read the
   # slug from a single current-DOM query instead of retaining a Capybara element.
-  def task_slug_from_grid!(title, timeout: 10)
+  def task_slug_from_board!(title, timeout: 10)
     title_json = title.to_json
     deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + timeout
     loop do
       slug = page.evaluate_script(<<~JS)
         (() => {
-          const rows = Array.from(document.querySelectorAll(".task-row"));
-          const row = rows.find((node) => node.textContent.includes(#{title_json}));
-          return row?.querySelector(".task-slug")?.textContent?.trim();
+          const cards = Array.from(document.querySelectorAll(".board-card"));
+          const card = cards.find((node) => node.textContent.includes(#{title_json}));
+          return card?.querySelector(".task-slug")?.textContent?.trim();
         })()
       JS
       return slug if slug && !slug.empty?
 
       if Process.clock_gettime(Process::CLOCK_MONOTONIC) > deadline
-        raise "task row for #{title.inspect} never exposed a slug"
+        raise "task card for #{title.inspect} never exposed a slug"
       end
 
       sleep 0.1
@@ -310,7 +310,14 @@ class GoldenPathE2E < ApplicationSystemTestCase
       # installed the root bundle.
       "BUNDLE_GEMFILE" => File.join(REPO_ROOT, "Gemfile"),
       "BUNDLE_PATH" => ENV["GOLDEN_E2E_BUNDLE_PATH"],
+      # A Rails process activated through the web bundle also exports its
+      # lockfile and exact Bundler activation. Clearing only BUNDLE_GEMFILE
+      # leaves the root daemon resolving against web/Gemfile.lock.
       "BUNDLE_APP_CONFIG" => nil, "BUNDLE_DEPLOYMENT" => nil, "BUNDLE_FROZEN" => nil,
+      "BUNDLE_LOCKFILE" => nil, "BUNDLE_BIN_PATH" => nil,
+      "BUNDLER_VERSION" => nil, "BUNDLER_SETUP" => nil,
+      "GEM_HOME" => original_bundler_env("GEM_HOME"),
+      "GEM_PATH" => original_bundler_env("GEM_PATH"),
       "RUBYOPT" => nil, "RUBYLIB" => nil
     }
     # Fail fast with the REAL error: on CI a broken spawn env produced a
@@ -326,5 +333,12 @@ class GoldenPathE2E < ApplicationSystemTestCase
     @daemon_pid = Process.spawn(env, "bundle", "exec", "ruby", "-Ilib", "bin/hive",
                                 "daemon", "start", "--foreground",
                                 chdir: REPO_ROOT, out: @daemon_log, err: @daemon_log)
+  end
+
+  def original_bundler_env(key)
+    value = ENV["BUNDLER_ORIG_#{key}"]
+    return nil if value.nil? || value == "BUNDLER_ENVIRONMENT_PRESERVER_INTENTIONALLY_NIL"
+
+    value
   end
 end

@@ -586,4 +586,21 @@ class TuiSnapshotTest < Minitest::Test
     assert_equal [ "blank-mtime", "invalid-mtime" ], filtered.rows.map(&:slug)
     assert_equal 0, snapshot.hidden_old_archived_count(now: now)
   end
+
+  def test_without_old_archived_uses_status_terminal_identity_for_custom_workflows
+    now = Time.utc(2026, 7, 19, 12, 0, 0)
+    terminal = sample_task(slug: "published", stage: "3-published", marker: "complete")
+    terminal["terminal"] = true
+    terminal["mtime"] = (now - (5 * 86_400)).iso8601
+    active = sample_task(slug: "draft", stage: "2-draft", marker: "complete")
+    active["terminal"] = false
+    active["mtime"] = (now - (5 * 86_400)).iso8601
+    snapshot = Hive::Tui::Snapshot.from_payload(sample_payload([
+      { "name" => "custom", "path" => "/tmp/custom", "hive_state_path" => "/tmp/custom/.hive-state",
+        "tasks" => [ terminal, active ] }
+    ]))
+
+    assert_equal [ "draft" ], snapshot.without_old_archived(now: now).rows.map(&:slug)
+    assert_equal 1, snapshot.hidden_old_archived_count(now: now)
+  end
 end

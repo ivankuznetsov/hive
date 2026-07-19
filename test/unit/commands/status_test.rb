@@ -834,12 +834,30 @@ class CommandsStatusTest < Minitest::Test
       assert_equal %w[1-inbox 2-research 3-outline 4-draft 5-critique 6-done],
                    content.fetch("stages").map { |stage| stage.fetch("dir") }
       %w[fingerprint card_digest dominant_state state_rank allowed_transitions blocked_reason
-         lock dependency queued_request retries operational_chips].each do |field|
+         lock dependency queued_request retries operational_chips terminal].each do |field|
         assert card.key?(field), "missing card field #{field}"
       end
       assert_match(/\Atfp1:[0-9a-f]{64}\z/, card.fetch("fingerprint"))
       assert_match(/\Acard1:[0-9a-f]{64}\z/, card.fetch("card_digest"))
     end
+  end
+
+  def test_task_payload_derives_terminal_identity_from_each_workflow
+    base = {
+      slug: "terminal-probe", id: 1, display_name: "Terminal Probe", depends_on: nil,
+      blocked_by: nil, dependency_stage: nil, blocked: false, admission_error: nil,
+      folder: "/tmp/terminal-probe", state_file: "/tmp/terminal-probe/article.md",
+      worktree_path: nil, pr_url: nil, marker_name: :complete, marker_attrs: {},
+      mtime: Time.at(1), folder_mtime: Time.at(1), claude_pid: nil, claude_pid_alive: nil,
+      action_key: Hive::Schemas::TaskActionKind::ARCHIVED, action_label: "Archived",
+      suggested_command: nil
+    }
+
+    terminal = Hive::Commands::Status.new.task_payload(base.merge(stage: "6-done", workflow: "content"))
+    active = Hive::Commands::Status.new.task_payload(base.merge(stage: "5-critique", workflow: "content"))
+
+    assert_equal true, terminal.fetch("terminal")
+    assert_equal false, active.fetch("terminal")
   end
 
   def test_card_digest_changes_for_dependency_lock_queue_and_pr_facts

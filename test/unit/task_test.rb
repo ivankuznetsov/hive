@@ -362,7 +362,7 @@ class TaskTest < Minitest::Test
   def test_broken_project_config_default_workflow_falls_back_to_coding
     with_tmp_dir do |dir|
       FileUtils.mkdir_p(File.join(dir, ".hive-state"))
-      File.write(File.join(dir, ".hive-state", "config.yml"), "dependency_gate_stage: 7-artifacts\n")
+      File.write(File.join(dir, ".hive-state", "config.yml"), "execute:\n  agent: ghost\n")
       folder = File.join(dir, ".hive-state", "stages", "2-brainstorm", "x-260424-7a3b")
       FileUtils.mkdir_p(folder)
 

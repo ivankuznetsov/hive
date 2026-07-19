@@ -328,6 +328,11 @@ module Hive
           "state_file" => row[:state_file],
           "worktree_path" => row[:worktree_path],
           "pr_url" => row[:pr_url],
+          # Descriptor-derived terminal identity is part of the shared card
+          # contract so CLI, TUI, and web apply one retention policy even
+          # when custom workflows finish somewhere other than coding's
+          # 9-done directory.
+          "terminal" => terminal_row?(row),
           "marker" => row[:marker_name].to_s,
           "attrs" => row[:marker_attrs],
           "mtime" => row[:mtime].utc.iso8601(6),
@@ -781,6 +786,7 @@ module Hive
       def hide_archived_row?(row)
         Hive::ArchiveFilter.hide?(
           stage: row[:stage],
+          terminal: terminal_row?(row),
           mtime: row[:mtime],
           folder_mtime: row[:folder_mtime]
         )
@@ -804,7 +810,15 @@ module Hive
       end
 
       def archive_rows(rows)
-        rows.select { |row| Hive::ArchiveFilter.archived?(row[:stage]) }
+        rows.select { |row| terminal_row?(row) }
+      end
+
+      def terminal_row?(row)
+        workflow = row[:task]&.workflow
+        workflow ||= Hive::Workflows::Registry.fetch(row[:workflow].to_sym) if row[:workflow]
+        workflow&.stages&.last&.dir == row[:stage]
+      rescue KeyError, Hive::UnknownWorkflow
+        false
       end
 
       def render_archived_hidden_summary(hidden_count)

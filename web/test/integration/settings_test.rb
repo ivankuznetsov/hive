@@ -21,7 +21,7 @@ class SettingsTest < ActionDispatch::IntegrationTest
   end
 
   test "settings reject unknown views" do
-    patch settings_path, params: { default_view: "classic" }
+    patch settings_path, params: { default_view: "timeline" }
 
     assert_response :unprocessable_entity
   end

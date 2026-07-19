@@ -509,3 +509,18 @@ promotion is deliberately explicit/manual.
 ## Pi/Grok concrete-default config discovery needs live drift monitoring (2026-07-17)
 
 Implementation ownership resolves pi from project/home `settings.json` and Grok from project/home `settings.json` or top-level `config.toml`, extracting only provider/model identifiers. Deterministic tests cover those current shapes and ensure PR opening remains unpinned, but neither CLI publishes a Hive-stable config schema. A future upstream path/key change will intentionally fail before execute capture rather than serialize `default` or route to another provider. The next verified CLI upgrade should re-check these read-only paths and update the headless matrix plus fixtures if native configuration moved.
+
+## Kanban board release runtime is source/test-pinned but not live-smoked (2026-07-19)
+
+Board/grid routing, descriptor-scoped bands, semantic fingerprints, guarded
+menu/drag transitions, queue-time revalidation, operator audit rollback, Turbo
+epoch/generation reconciliation, the drawer, mobile paging, shared workflow
+terminal retention, and the synthetic 20 × 500 render budget are covered in
+root/Rails/browser tests. This implementation run did not build a release web
+bundle or Hivebox image and did not exercise the board against a long-running
+real daemon plus external CLI changes on a deployed box. Release verification
+should smoke both explicit routes and the selected `/` default from the managed
+bundle/container, then confirm queue-to-daemon movement and reconnect recovery
+under real process restarts. On-disk PR/review chips intentionally prove only
+their recorded source/time; live GitHub freshness remains outside the web
+request path.

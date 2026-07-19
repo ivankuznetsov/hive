@@ -3,7 +3,7 @@ title: State Model
 type: data-model
 source: lib/hive/task.rb, lib/hive/markers.rb, lib/hive/config.rb, lib/hive/attempts/*, lib/hive/lock.rb, lib/hive/worktree.rb, lib/hive/metrics.rb, lib/hive/usage_db.rb, lib/hive/bot/*, lib/hive/patrol/review_handoff.rb, lib/hive/refactor_patrol/*, lib/hive/daemon/refactor_patrol_merge_*.rb, lib/hive/daemon/display_name_backfiller.rb, lib/hive/daemon/dispatch_request_queue.rb, lib/hive/web/status_feed.rb, web/app/models/status_broadcaster.rb
 created: 2026-04-25
-updated: 2026-07-17
+updated: 2026-07-19
 tags: [state, filesystem, model, architecture, review, task-id, display-name, archive, dependencies, admission, web]
 ---
 
@@ -198,10 +198,11 @@ The identity stores only provider, concrete model, profile/launcher label, sourc
 The daemon's producer queue lives under `$HIVE_HOME/dispatch_requests/`
 (`Hive::Paths.state_home`, not inside a project `.hive-state/`). Producers are
 the Telegram bot, hivebox web, and the `3-plan` terminal-error healer.
-Web paths currently write through `Hive::Bot::DispatchRequestWriter`, so the
-JSON `requestor` field is commonly `bot`; `trigger` values such as `web` and
-`web_recover` distinguish the web-originated requests, while the healer writes
-`requestor=healer`.
+Web paths write through `Hive::Bot::DispatchRequestWriter`. Recovery sequences
+retain their historical trigger metadata; board transitions use
+`requestor=web` and persist actor, semantic fingerprint, and destination so
+the daemon can revalidate the exact rendered intent before spawn. The healer
+writes `requestor=healer`.
 Each pending request is one JSON file:
 
 ```yaml
@@ -212,7 +213,10 @@ created_at: <UTC-ISO8601>
 project: <registered project name>
 slug: <task slug>
 argv: ["hive", "<allowlisted verb>", ...]
-requestor: bot|healer
+requestor: bot|healer|web
+actor:
+expected_fingerprint:
+transition_destination:
 chat_id:
 update_id:
 trigger:
@@ -244,6 +248,14 @@ Hivebox `recover` writes the sequence sidecar first, then the guarded
 `hive markers clear ... --json` request, and discards the sidecar if the
 request write fails so no orphaned continuation remains.
 
+Synchronous board moves do not pass through the queue. They resolve the owner,
+take the project commit lock, re-resolve the task, compare the semantic
+fingerprint, and recompute the exact transition before moving. The successful
+`operator_action` append and `hive/state` commit share the rollback boundary:
+neither a moved task without its audit nor an audit for a rolled-back move may
+survive. Denials are non-state observations and remain in structured
+Rails/daemon logs plus the process-local denial counter.
+
 Hivebox's `web/app/models/status_broadcaster.rb` is a Rails model class, but it
 is not an ActiveRecord workflow entity. It bridges `Hive::Web::StatusFeed` to
 Turbo Streams. `StatusFeed#snapshot` computes a fresh
@@ -257,6 +269,16 @@ publishes a status-channel refresh before rendering and replacing the
 dashboard's `projects` frame, so task pages that do not contain that frame
 still receive a morph signal even if a bad project row makes the grid partial
 raise.
+
+The same snapshot now supplies workflow definitions and self-contained board
+cards. `fingerprint` covers mutation-relevant task content; `card_digest`
+covers the assembled read model, including queue, dependency, retry, lock/PID,
+and on-disk PR/review facts. Board streams carry an in-process epoch and
+generation so reconnects and missed frames reconcile from a fresh snapshot.
+The additive `terminal` bit is derived from the task's selected workflow,
+making the shared three-day daily retention rule descriptor-aware in CLI, TUI,
+board, and grid. Rails stores only its existing cable/cache/queue plumbing;
+task folders and `hive/state` remain the sole workflow authority.
 
 ## Architecture-patrol v2 state
 

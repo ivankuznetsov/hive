@@ -33,6 +33,13 @@ class IdeasTest < ActionDispatch::IntegrationTest
     assert_match "[image1]", folder.join("idea.md").read, "the placeholder must survive into idea.md"
   end
 
+  test "creation returns to the explicit work view" do
+    post ideas_path, params: { project: @project, text: "Stay on the grid" },
+         headers: { "HTTP_REFERER" => grid_url(project: @project) }
+
+    assert_redirected_to grid_url(project: @project)
+  end
+
   test "a forged placeholder name cannot escape the assets dir" do
     evil = Rack::Test::UploadedFile.new(
       StringIO.new("x"), "image/png", original_filename: "../../escape.png"

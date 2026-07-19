@@ -6,11 +6,10 @@ class WebTelegramPairingTest < Minitest::Test
     calls = []
     command_class = command_factory(calls) do |subcommand, kwargs|
       assert_equal "list", subcommand
-      kwargs.fetch(:output).puts JSON.generate(
+      {
         "schema" => "hive-pairing-list",
         "pending" => [ { "code" => "ABCDEFGH", "chat_id" => 123 } ]
-      )
-      []
+      }
     end
 
     pending = Hive::Web::TelegramPairing.new(command_class: command_class).pending
@@ -33,11 +32,8 @@ class WebTelegramPairingTest < Minitest::Test
     assert_equal true, kwargs.fetch(:json)
   end
 
-  def test_pending_maps_malformed_command_output_to_a_typed_error
-    command_class = command_factory([]) do |_subcommand, kwargs|
-      kwargs.fetch(:output).write("not-json")
-      []
-    end
+  def test_pending_maps_malformed_command_result_to_a_typed_error
+    command_class = command_factory([]) { |_subcommand, _kwargs| [] }
 
     error = assert_raises(Hive::Error) do
       Hive::Web::TelegramPairing.new(command_class: command_class).pending

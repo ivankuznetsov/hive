@@ -180,7 +180,10 @@ origin also prints the Host-header/reverse-proxy warning.
   notice.
   Red diagnostic rows also render a danger banner from
   `tasks[].diagnostic.summary` so the page says why the row is stuck before
-  offering Retry.
+  offering Retry. A stopped-daemon blocker is shown only for non-terminal
+  tasks; terminal directories come from every registered workflow descriptor,
+  so content, bench, managed, and project-authored workflows do not inherit the
+  coding workflow's `9-done` assumption.
 - **Workflows** — a project-scoped view of the real `hive workflow list`
   dimensions: built-in and authored descriptors, managed selected/retained
   generations, integrity, version/provenance, and the configured default.
@@ -313,15 +316,18 @@ explicit GitHub connection action, and that repository setup always invokes
 the CLI init adapter with non-TTY provisioning input. It also pins that
 a red task page shows the diagnostic banner and Retry button, and that the
 route queues the marker-clear command plus the hidden rerun sequence. It also
-pins the Telegram first-run guide shape, strict chat-ID validation, empty-list
-pairing bootstrap, saved-token reuse, pending-code rendering, and
-consent-gated approval, repo clone target refusal for non-directories,
+pins the Telegram first-run guide shape, strict token/chat-ID validation,
+empty-list pairing bootstrap, saved-token reuse, pending-code rendering,
+corrupt-store visibility, and consent-gated approval, repo clone target refusal
+for non-directories,
 agent-login status rendering for
 binary PTY output, Grok route reachability, and operator-ward poll flows,
 managed-skill opt-in inspection and consent-gated repair, root favicon/icon
 assets,
 workflow list/scaffold delegation, signed preview tamper rejection,
 non-composable update escalation consent, and removal-retention disclosure,
+running/stopped daemon banner behavior plus descriptor-derived terminal-stage
+suppression,
 plain-vs-deep health semantics, the oversized diff cap/truncation notice,
 media route streaming/refusal cases, and captured/skipped/failed Demo
 rendering. Repos coverage pins the workflow select's built-in fresh list and

@@ -554,6 +554,36 @@ class TasksTest < ActionDispatch::IntegrationTest
                   "web must not offer a queue button that a stopped daemon cannot consume"
   end
 
+  test "running daemon does not show an auto-advance blocker" do
+    report = Object.new
+    report.define_singleton_method(:running_state) { { running: true } }
+    original_new = Hive::Daemon::StatusReport.method(:new)
+    Hive::Daemon::StatusReport.define_singleton_method(:new) { report }
+
+    get "/tasks/#{@project}/#{@slug}"
+
+    assert_response :success
+    assert_select ".daemon-blocker", 0
+  ensure
+    Hive::Daemon::StatusReport.define_singleton_method(:new, original_new) if original_new
+  end
+
+  test "terminal stages from non-coding workflows do not show an auto-advance blocker" do
+    with_registered_workflow(content_workflow) do
+      project = create_hive_project!("completed-content-app")
+      slug = "completed-content-260719-aaaa"
+      folder = stage_dir(project, "4-done").join(slug)
+      folder.mkpath
+      folder.join("done.md").write("# Done\n")
+      Hive::TaskMeta.write(folder.to_s, id: 1, slug: slug, display_name: nil, workflow: "content_fixture")
+
+      get "/tasks/#{project}/#{slug}"
+
+      assert_response :success
+      assert_select ".daemon-blocker", 0
+    end
+  end
+
   test "all-answered brainstorm shows the waiting banner on a push-refreshed page" do
     folder = stage_dir(@project, "1-inbox").join(@slug)
     folder.join("brainstorm.md").write("### Q1. Scope?\n\n### A1.\nDone\n\n<!-- WAITING -->\n")

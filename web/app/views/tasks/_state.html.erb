@@ -53,7 +53,7 @@
     </div>
   <% end %>
 
-  <% if @daemon_enabled && !@daemon_running && @row["stage"].to_s != "9-done" %>
+  <% if @daemon_enabled && !@daemon_running && !Hive::Workflows.all_terminal_stage_dirs.include?(@row["stage"].to_s) %>
     <div class="state-banner daemon-blocker">
       <span class="status-dot status-dot-waiting"></span>
       <span>

@@ -44,6 +44,17 @@ class TelegramTest < ActionDispatch::IntegrationTest
            "a rejected submit must not flip bot.enabled"
   end
 
+  test "blank token without a saved secret is a 422" do
+    sign_in!
+
+    post update_telegram_path,
+         params: { token: "", chat_ids: "123456", pairing_enabled: "0" }
+
+    assert_response :unprocessable_entity
+    assert_match "token required", response.body
+    refute Hive::Config.load_global_bot["enabled"]
+  end
+
   test "a @handle chat ID is a readable 422, not a silent 0 in the allowlist" do
     sign_in!
     post "/telegram", params: { token: "123:abc", chat_ids: "@mychannel" }
@@ -132,6 +143,42 @@ class TelegramTest < ActionDispatch::IntegrationTest
     assert_response :success
     assert_empty calls
     assert_match "Enable pairing above", response.body
+  end
+
+  test "corrupt pairing store is shown as an owner-visible error, not an empty list" do
+    sign_in!
+    enable_pairing!
+    store = Hive::Bot::PairingStore.new
+    FileUtils.mkdir_p(File.dirname(store.path))
+    File.write(store.path, "{not json")
+
+    get telegram_path
+
+    assert_response :success
+    assert_select ".flash-alert", text: /failed to read pending pairing requests.*unreadable/m
+    refute_match "No pending pairing requests", response.body
+  ensure
+    FileUtils.rm_f(store&.path)
+  end
+
+  test "expired pairing approval is a readable 422" do
+    sign_in!
+    enable_pairing!
+    install_pairing_gateway(
+      pending: [],
+      approve: ->(_code) do
+        raise Hive::Commands::Pairing::ApprovalError.new(
+          "pairing code ABCDEFGH expired; refresh the page and ask the user to run /start again",
+          error_kind: "expired_code"
+        )
+      end
+    )
+
+    post telegram_pairing_approve_path("ABCDEFGH"),
+         params: { consent: "approve_telegram_pairing" }
+
+    assert_response :unprocessable_entity
+    assert_match(/expired.*refresh the page/m, response.body)
   end
 
   private

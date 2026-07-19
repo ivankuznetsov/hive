@@ -1,4 +1,3 @@
-require "json"
 require "stringio"
 
 require "hive/commands/pairing"
@@ -14,10 +13,8 @@ module Hive
       end
 
       def pending
-        output = StringIO.new
-        @command_class.new("list", json: true, output: output).call
-        JSON.parse(output.string).fetch("pending")
-      rescue JSON::ParserError, KeyError
+        @command_class.new("list", json: true, output: StringIO.new).call.fetch("pending")
+      rescue KeyError, NoMethodError, TypeError
         raise Hive::Error, "could not read pending Telegram pairings — run `hive pairing list` for details"
       end
 

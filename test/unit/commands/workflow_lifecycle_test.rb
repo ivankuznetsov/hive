@@ -83,6 +83,26 @@ class WorkflowLifecycleCommandsTest < Minitest::Test
     end
   end
 
+  def test_install_rejects_a_configuration_that_changed_after_web_preview
+    with_project_and_package do |project, package, resolution|
+      client = stub_client(package, resolution)
+      preview = Hive::Commands::Workflow::Install.new(
+        "honeycomb/demo", project_root: project, json: true, dry_run: true,
+        stdout: StringIO.new, registry_client: client, committer: ->(*) { }
+      ).call!
+
+      assert_raises(Hive::ConcurrentRunError) do
+        Hive::Commands::Workflow::Install.new(
+          "honeycomb/demo", project_root: project, json: true, yes: true,
+          expected_configuration_digest: "0" * 64,
+          stdout: StringIO.new, registry_client: client, committer: ->(*) { }
+        ).call!
+      end
+      refute_equal "0" * 64, preview.fetch("configuration_digest")
+      assert_empty Hive::WorkflowPackage::ManagedStore.new(File.join(project, ".hive-state")).selections
+    end
+  end
+
   def test_unbounded_install_requires_separate_escalation_acknowledgement
     with_project_and_package(permission_spec: "yolo") do |project, package, resolution|
       client = stub_client(package, resolution)
@@ -395,6 +415,28 @@ class WorkflowLifecycleCommandsTest < Minitest::Test
     end
   end
 
+  def test_install_cleanup_failure_does_not_mask_the_activation_error
+    with_project_and_package do |project, package, resolution|
+      command = Hive::Commands::Workflow::Install.new(
+        "honeycomb/demo", project_root: project, json: true, yes: true,
+        stdout: StringIO.new, registry_client: stub_client(package, resolution),
+        committer: ->(*) { raise Hive::GitError, "commit failed" }
+      )
+      store = Hive::WorkflowPackage::ManagedStore.new(File.join(project, ".hive-state"))
+      store.define_singleton_method(:cleanup_unreferenced) { |_name| raise Errno::ENOSPC }
+      command.instance_variable_set(:@store, store)
+
+      error = nil
+      _stdout, stderr = capture_io do
+        error = assert_raises(Hive::GitError) { command.call! }
+      end
+
+      assert_equal "commit failed", error.message
+      assert_match(/candidate cleanup also failed.*ENOSPC/, stderr)
+      assert_nil store.selected("demo")
+    end
+  end
+
   def test_list_surfaces_authored_and_malformed_entries
     with_project_and_package do |project, package, resolution|
       workflows = File.join(project, ".hive-state", "workflows")
@@ -496,6 +538,53 @@ class WorkflowLifecycleCommandsTest < Minitest::Test
       assert_equal [ resolution.source_commit ], remove.fetch("deletable_commits")
       assert_equal resolution.source_commit, store.selected("demo").fetch("source_commit")
       assert File.directory?(store.generation_path("demo", resolution.source_commit))
+    end
+  end
+
+  def test_browser_preview_baseline_must_still_match_before_remove
+    with_project_and_package do |project, package, resolution|
+      Hive::Commands::Workflow::Install.new(
+        "honeycomb/demo", project_root: project, json: true, yes: true,
+        stdout: StringIO.new, registry_client: stub_client(package, resolution), committer: ->(*) { }
+      ).call!
+      stale = {
+        "source_commit" => resolution.source_commit,
+        "manifest_digest" => "0" * 64,
+        "configuration_digest" => Hive::WorkflowPackage::ManagedStore
+          .new(File.join(project, ".hive-state")).selected("demo").fetch("configuration_digest")
+      }
+
+      assert_raises(Hive::ConcurrentRunError) do
+        Hive::Commands::Workflow::Remove.new(
+          "demo", project_root: project, json: true, yes: true,
+          stdout: StringIO.new, committer: ->(*) { }, expected_current: stale
+        ).call!
+      end
+      store = Hive::WorkflowPackage::ManagedStore.new(File.join(project, ".hive-state"))
+      assert_equal resolution.source_commit, store.selected("demo").fetch("source_commit")
+    end
+  end
+
+  def test_remove_returns_a_warning_when_post_commit_bookkeeping_fails
+    with_project_and_package do |project, package, resolution|
+      Hive::Commands::Workflow::Install.new(
+        "honeycomb/demo", project_root: project, json: true, yes: true,
+        stdout: StringIO.new, registry_client: stub_client(package, resolution), committer: ->(*) { }
+      ).call!
+      committer = lambda do |action, *_rest|
+        raise Hive::GitError, "cleanup commit failed" if action == "cleaned"
+      end
+      command = Hive::Commands::Workflow::Remove.new(
+        "demo", project_root: project, json: true, yes: true,
+        stdout: StringIO.new, committer: committer
+      )
+
+      payload = nil
+      capture_io { payload = command.call! }
+
+      assert_equal "removed", payload.fetch("status")
+      assert_match(/cleanup state commit failed.*already succeeded/, payload.fetch("warnings").first)
+      assert_nil Hive::WorkflowPackage::ManagedStore.new(File.join(project, ".hive-state")).selected("demo")
     end
   end
 

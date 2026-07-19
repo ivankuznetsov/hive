@@ -20,6 +20,15 @@ Rails.application.routes.draw do
 
   post "ideas" => "ideas#create", as: :ideas
 
+  get  "workflows" => "workflows#index", as: :workflows
+  post "workflows" => "workflows#create", as: :create_workflow
+  post "workflows/install/preview" => "workflows#preview_install", as: :preview_workflow_install
+  post "workflows/install" => "workflows#install", as: :install_workflow
+  post "workflows/update/preview" => "workflows#preview_update", as: :preview_workflow_update
+  post "workflows/update" => "workflows#update", as: :update_workflow
+  post "workflows/remove/preview" => "workflows#preview_remove", as: :preview_workflow_remove
+  post "workflows/remove" => "workflows#remove", as: :remove_workflow
+
   # Task pages are addressed by project name + task slug, mirroring the CLI.
   scope "tasks/:project/:slug", constraints: { slug: /[a-z][a-z0-9-]{0,62}[a-z0-9]/, project: %r{[^/]+} } do
     get  "" => "tasks#show", as: :task
@@ -42,15 +51,18 @@ Rails.application.routes.draw do
   post "repos" => "repos#create", as: :create_repo
 
   get  "agents" => "agents#index", as: :agents
+  post "agents/skills/repair" => "agents#repair_skills", as: :agent_skills_repair
   post "agents/:agent/login" => "agents#start_login", as: :agent_login,
-       constraints: { agent: /claude|codex|gh/ }
+       constraints: { agent: /claude|codex|grok|gh/ }
   get  "agents/:agent/login/:session_id" => "agents#login_status", as: :agent_login_status,
-       constraints: { agent: /claude|codex|gh/ }
+       constraints: { agent: /claude|codex|grok|gh/ }
   post "agents/:agent/login/:session_id/complete" => "agents#complete_login", as: :agent_login_complete,
-       constraints: { agent: /claude|codex|gh/ }
+       constraints: { agent: /claude|codex|grok|gh/ }
   post "agents/pi_token" => "agents#save_pi_token", as: :agent_pi_token
 
   get  "telegram" => "telegram#show", as: :telegram
   post "telegram" => "telegram#update", as: :update_telegram
   post "telegram/test" => "telegram#test", as: :test_telegram
+  post "telegram/pairings/:code" => "telegram#approve_pairing", as: :telegram_pairing_approve,
+       constraints: { code: /[A-Za-z]{8}/ }
 end

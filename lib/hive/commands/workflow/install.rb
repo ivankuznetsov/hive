@@ -13,7 +13,7 @@ module Hive
 
         def initialize(source, project_root:, json: false, yes: false, dry_run: false, stdout: $stdout, stdin: $stdin,
                        registry_client: nil, committer: nil, allow_escalation: false,
-                       mapping_overrides: [], input_bindings: [])
+                       mapping_overrides: [], input_bindings: [], expected_configuration_digest: nil)
           super(project_root: project_root, json: json, stdout: stdout, stdin: stdin, yes: yes, committer: committer)
           @source = source
           @dry_run = dry_run
@@ -21,6 +21,7 @@ module Hive
           @allow_escalation = allow_escalation
           @mapping_overrides = mapping_overrides
           @input_bindings = input_bindings
+          @expected_configuration_digest = expected_configuration_digest
         end
 
         def call!
@@ -47,6 +48,7 @@ module Hive
                 human_disclosure(resolution, resolver, verb: "proposed").each { |line| @stdout.puts line }
               end
             end
+            ensure_reviewed_configuration!(resolver)
             if same_generation && current.fetch("configuration_digest") == resolver.configuration.digest
               return emit(payload(resolution, resolver, "already_installed"), human_lines: [
                 "hive: honeycomb/#{resolution.name} is already installed at #{resolution.source_commit}",
@@ -81,9 +83,8 @@ module Hive
                 expected_current: current,
                 commit: -> { commit_state(resolution.name, "installed") }
               )
-            rescue StandardError
-              store.cleanup_unreferenced(resolution.name)
-              raise
+            rescue StandardError => e
+              cleanup_after_failed_activation(resolution.name, e)
             end
             Hive::Workflows::Project.reset!
             emit(payload(resolution, resolver, "installed"), human_lines: human_disclosure(resolution, resolver))
@@ -91,6 +92,15 @@ module Hive
         end
 
         private
+
+        def ensure_reviewed_configuration!(resolver)
+          return unless @expected_configuration_digest
+          return if resolver.configuration.digest == @expected_configuration_digest
+
+          raise Hive::ConcurrentRunError.new(
+            "the workflow configuration changed since the reviewed install preview"
+          )
+        end
 
         def payload(resolution, resolver, status)
           {

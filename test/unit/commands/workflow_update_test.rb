@@ -214,10 +214,73 @@ class WorkflowUpdateCommandTest < Minitest::Test
     assert_equal({ diff: 1, actor_policy: 1, inputs: 1 }, calls)
   end
 
+  def test_cleanup_failure_does_not_mask_the_activation_error
+    with_update_fixture do |project, store, old, candidate_root, candidate|
+      command = command(
+        project, candidate_root, candidate, yes: true,
+        committer: ->(*) { raise Hive::GitError, "commit failed" }
+      )
+      store.define_singleton_method(:cleanup_unreferenced) { |_name| raise Errno::ENOSPC }
+      command.instance_variable_set(:@store, store)
+
+      error = nil
+      _stdout, stderr = capture_io do
+        error = assert_raises(Hive::GitError) { command.call! }
+      end
+
+      assert_equal "commit failed", error.message
+      assert_match(/candidate cleanup also failed.*ENOSPC/, stderr)
+      assert_equal old.source_commit, store.selected("demo").fetch("source_commit")
+    end
+  end
+
+  def test_post_commit_cleanup_failure_returns_an_updated_warning
+    with_update_fixture do |project, store, _old, candidate_root, candidate|
+      command = command(project, candidate_root, candidate, yes: true)
+      store.define_singleton_method(:cleanup_unreferenced) { |_name| raise Errno::ENOSPC }
+      command.instance_variable_set(:@store, store)
+
+      payload = nil
+      capture_io { payload = command.call! }
+
+      assert_equal "updated", payload.fetch("status")
+      assert_equal candidate.source_commit, store.selected("demo").fetch("source_commit")
+      assert_match(/generation cleanup failed.*already succeeded/, payload.fetch("warnings").first)
+    end
+  end
+
+  def test_browser_preview_baseline_must_still_match_before_update
+    with_update_fixture do |project, store, old, candidate_root, candidate|
+      stale = {
+        "source_commit" => "f" * 40,
+        "manifest_digest" => old.manifest_digest,
+        "configuration_digest" => store.selected("demo").fetch("configuration_digest")
+      }
+
+      assert_raises(Hive::ConcurrentRunError) do
+        command(project, candidate_root, candidate, yes: true, expected_current: stale).call!
+      end
+      assert_equal old.source_commit, store.selected("demo").fetch("source_commit")
+    end
+  end
+
+  def test_browser_preview_candidate_configuration_must_still_match
+    with_update_fixture do |project, store, old, candidate_root, candidate|
+      assert_raises(Hive::ConcurrentRunError) do
+        command(
+          project, candidate_root, candidate, yes: true,
+          expected_configuration_digest: "0" * 64
+        ).call!
+      end
+      assert_equal old.source_commit, store.selected("demo").fetch("source_commit")
+    end
+  end
+
   private
 
   def command(project, package, resolution, yes: false, allow_escalation: false, dry_run: false,
-              json: true, stdin: $stdin, committer: ->(*) { }, mapping_overrides: [], input_bindings: [])
+              json: true, stdin: $stdin, committer: ->(*) { }, expected_current: nil,
+              expected_configuration_digest: nil, mapping_overrides: [], input_bindings: [])
     client = Object.new
     client.define_singleton_method(:fetch) do |_source, destination:|
       FileUtils.cp_r(Dir.glob(File.join(package, "*")), destination)
@@ -227,6 +290,8 @@ class WorkflowUpdateCommandTest < Minitest::Test
       "demo", project_root: project, json: json, yes: yes,
       allow_escalation: allow_escalation, dry_run: dry_run,
       stdin: stdin, stdout: StringIO.new, registry_client: client, committer: committer,
+      expected_current: expected_current,
+      expected_configuration_digest: expected_configuration_digest,
       mapping_overrides: mapping_overrides, input_bindings: input_bindings
     )
   end

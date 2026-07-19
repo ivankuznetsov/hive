@@ -11,7 +11,7 @@ class ApplicationController < ActionController::Base
 
   before_action :require_login
 
-  helper_method :current_login
+  helper_method :current_login, :operator_access?, :operator_label
 
   # Hive's typed errors are operator-readable by design ("task not in stage",
   # "invalid clone URL"). Render them on an error page instead of a blank
@@ -47,6 +47,17 @@ class ApplicationController < ActionController::Base
 
   def current_login
     session[:github_login]
+  end
+
+  # Loopback mode is authenticated by the connection itself rather than a
+  # GitHub session. Treat that operator as signed in for navigation while
+  # keeping GitHub-specific actions behind an explicit account connection.
+  def operator_access?
+    current_login.present? || local_loopback_request?
+  end
+
+  def operator_label
+    current_login.presence || "Local"
   end
 
   def require_login

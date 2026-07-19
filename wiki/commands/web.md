@@ -3,7 +3,7 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-07-13
+updated: 2026-07-19
 tags: [command, web, hivebox, rails, turbo]
 ---
 
@@ -16,8 +16,9 @@ in-process, task Drop calls `Hive::Commands::Drop` in-process, stage runs go
 through the daemon dispatch queue (`Hive::Web::Dispatcher`), daemon status
 renders the shared `Hive::Daemon::StatusReport.safe_payload` producer used by
 `hive daemon status --json`, and setup flows
-reuse `Hive::Web::GithubAuth`, `AgentsAuth`, and the Telegram validators from
-the gem. Red task recovery uses the bot's `RecoverySequence` path so the web
+reuse `Hive::Web::GithubAuth`, `AgentsAuth`, `WorkflowLifecycle`, and the
+Telegram validators from the gem. Red task recovery uses the bot's
+`RecoverySequence` path so the web
 Retry button and Telegram Autofix share the same guarded clear plus rerun
 contract; the TUI's Recover has its own subprocess-based clear + `hive run`
 path with separate gates.
@@ -77,6 +78,10 @@ Local loopback mode is a deliberate no-auth bypass for local foreground use:
 when the CLI bind address is `localhost`, `::1`, or any `127.0.0.0/8` address
 and `web.local_loopback` is not `false`, it exports `HIVEBOX_LOCAL_LOOPBACK=1`.
 Rails still checks that the request peer is loopback before skipping login.
+That connection-authenticated operator sees the complete primary navigation
+and is labelled `Local`; GitHub-dependent repository browsing stays behind an
+explicit **Connect GitHub** action instead of making the rest of hivebox look
+signed out.
 Non-loopback binds require either `--unsafe` or a configured `web.github.owner`;
 when an owner gate authorizes a non-loopback bind, the CLI warns that
 `web.github.owner` is the only login gate, and `0.0.0.0` without an HTTPS
@@ -105,21 +110,32 @@ origin also prints the Host-header/reverse-proxy warning.
   the dashboard partial raises. The index opts that refresh into Turbo morphing
   with scroll preservation so a live row arrival does not yank the operator
   back to the top; the composer form is `data-turbo-permanent` because
-  typed-but-unsent idea text and staged image chips live in browser state. No
-  polling JS, no SSE. The daemon strip on the grid uses
+  typed-but-unsent idea text and staged image chips live in browser state. Its
+  Stimulus controller rehydrates the staged-file index if Turbo reconnects the
+  permanent node, revokes removed preview URLs, and clears the submitted text,
+  chips, and upload transport only after a successful response; the selected
+  project remains as working context, so the next idea cannot accidentally
+  resubmit the completed draft. No polling JS, no SSE. The daemon strip uses
   `Hive::Daemon::StatusReport.safe_payload` directly instead of constructing a
   `Hive::Commands::Daemon` CLI object; the view also reads
   `StatusReport::BINARY_DRIFT_ACTIONABLE` for the Repair affordance, so CLI
   JSON and web drift handling share the same producer constants.
   A running supervised hivebox daemon intentionally has no separate platform
-  service unit; the strip therefore shows CLI repair guidance only when the
-  daemon is actually down, not merely when `service_installed` is false.
+  service unit; the strip therefore shows CLI recovery guidance only when the
+  daemon is actually down, not merely when `service_installed` is false. A
+  stopped, otherwise healthy daemon points to `hive daemon start --detach`;
+  a missing or drifted service points to `hive daemon install --force`.
 - **Task page** — state-driven actions (Retry stage for red
   `recover_review` / `recover_execute` / `error` rows; Approve only when the
   marker makes a forward move possible; Run <verb> only when the project daemon
   is disabled; Diff only when the worktree exists; Reject, Force approve, and
   Drop — the TUI Shift+X parity hard delete via `Commands::Drop`, no undo — as
-  described cards in a bottom Advanced section, confirm-gated), per-question
+  described cards in a bottom Advanced section, confirm-gated). Because every
+  browser stage run is still consumed by the single daemon dispatcher, an
+  enrolled task whose daemon is down shows an explicit auto-advance blocker
+  with `hive daemon start --detach` instead of offering a queue action that
+  cannot run. The liveness-only probe avoids the service/binary inspection cost
+  of the full dashboard envelope. The page also provides per-question
   brainstorm Q&A (the original idea shown above the form; answers go through
   BrainstormAnswerWriter; the forms are not `data-turbo-permanent`, and the
   answers controller snapshots/restores typed text plus caret across morphs,
@@ -164,7 +180,35 @@ origin also prints the Host-header/reverse-proxy warning.
   notice.
   Red diagnostic rows also render a danger banner from
   `tasks[].diagnostic.summary` so the page says why the row is stuck before
-  offering Retry.
+  offering Retry. A stopped-daemon blocker is shown only for non-terminal
+  tasks; terminal directories come from every registered workflow descriptor,
+  so content, bench, managed, and project-authored workflows do not inherit the
+  coding workflow's `9-done` assumption.
+- **Workflows** — a project-scoped view of the real `hive workflow list`
+  dimensions: built-in and authored descriptors, managed selected/retained
+  generations, integrity, version/provenance, and the configured default.
+  Owner-authored scaffolds delegate to `Hive::Commands::Workflow new` with the
+  packaged templates and commit on `hive/state`; the page links back to project
+  setup to choose the default. Managed install/update/remove are two-step:
+  their first POST runs the command's exact no-write dry-run and renders
+  permissions, content/file/dependency/security changes, escalation reasons,
+  or retained/deletable generations. Preview forms intentionally use native
+  navigation because they return a successful review page rather than Turbo's
+  required mutation redirect. Applying requires an explicit checkbox plus a
+  15-minute MessageVerifier receipt bound to project and operation, plus source
+  for install or workflow name for update/remove, and the exact package or
+  selection commit+digest. The adapter re-fetches candidate packages
+  and requires complete candidate/current identity fields; the command/store
+  layers recheck the selected baseline, so stale or incomplete receipts fail
+  before mutation. Security expansion has a second, non-composable checkbox.
+  Receipt tests cover cross-operation replay, real expiry, and missing consent
+  for every mutation. A fixture-backed integration test runs the real workflow
+  commands through the adapter for the full preview/apply lifecycle.
+  The known legacy-vs-v2 `workflow publish` gap is stated in the page instead
+  of exposing a button that opens an unusable registry PR. At mobile widths the
+  primary header wraps to a second full-width row, keeping all five sections
+  visible without document overflow while preserving the local GitHub-connect
+  action.
 - **Repos** — registered projects, clone-by-URL (same allowlist as before:
   github.com https/ssh or `owner/repo`, leading-dash guard), and the
   operator's GitHub repository list (device-flow token; degrades to an inline
@@ -174,7 +218,12 @@ origin also prints the Host-header/reverse-proxy warning.
   `coding` preselected, while "Re-run setup" lists built-ins plus that
   project's authored workflows and preselects the current `default_workflow`.
   The selected value is passed as `Hive::Commands::Init.new(..., workflow:)`;
-  it is intentionally outside the `prompts:` answers hash. Clone runs call
+  it is intentionally outside the `prompts:` answers hash. The web adapter
+  also supplies a non-TTY provisioning input and a request-local error capture,
+  so CLI preflight questions can never wait on Puma's inherited terminal and
+  strand the browser on “Cloning…”. Non-interactive doctor/agent-skill findings
+  return as an alert alongside the successful registration/settings notice
+  instead of disappearing into Puma stderr. Clone runs call
   `gh repo clone` with the session token in `GH_TOKEN`, in a separate process
   group with `HIVEBOX_CLONE_TIMEOUT_SEC` (default 180s) as a hard deadline; on
   failure or timeout the partial target is removed so retry starts clean. A
@@ -197,7 +246,9 @@ origin also prints the Host-header/reverse-proxy warning.
   Codex uses `codex login --device-auth` rather than the localhost-callback
   `codex login`, because the callback server would bind inside the container
   and surface an unreachable localhost URL to the host browser. Grok uses
-  `grok login --device-auth`. Codex, Grok, and `gh`
+  `grok login --device-auth`, exposed through the same first-class login action
+  and constrained session routes as the other relayed agents. Codex, Grok,
+  and `gh`
   are operator-ward poll flows: the one-time code is entered at the provider,
   the CLI keeps polling, and the status turbo-frame keeps refreshing until the
   PTY child exits while hiding the paste-back form. Claude remains the
@@ -206,15 +257,34 @@ origin also prints the Host-header/reverse-proxy warning.
   render-safe UTF-8 before the `<pre>` output is interpolated, and captured
   URLs are sanitized by replacing ANSI/terminal-control runs with spaces
   before re-extracting the first URL so adjacent URLs are split rather than
-  spliced into one href.
+  spliced into one href. The page also exposes the managed-skill health model
+  shared with `hive doctor`: the operator explicitly checks one registered
+  project at a time (opening Agents does not synchronously inventory every
+  agent CLI), then sees per-capability health and remediation. **Repair safe
+  changes** delegates to `hive setup-agents`' in-process command with explicit
+  browser consent and a non-TTY input. It installs or updates missing/stale
+  Hive-managed packages and rechecks the result; conflicting and custom skills
+  retain the provisioner's no-overwrite behavior. Failed/residual repair
+  redirects include the command classification and up to three failed/skipped
+  operation messages (or residual health/stderr fallback), and the same bounded
+  details are logged so transient registry failures are distinguishable from
+  persistent configuration conflicts.
 - **Telegram** — first-timer setup guide (collapsible, open while the bot is
   unconfigured) covering BotFather `/newbot`, numeric chat IDs from
   `@userinfobot`, sending `/start` before the round-trip test, the
   no-webhook/long-polling model, and BotFather `/revoke` token rotation;
   getMe-validated token save, allowlist, supervisor SIGHUP, round-trip test
-  message. Chat IDs are parsed with strict `Integer(..., exception: false)`
-  before any Telegram network call or config/env write: blank input and
-  handles such as `@mychannel` render 422 and persist nothing.
+  message, and first-contact pairing. Pairing can securely bootstrap with an
+  empty allowlist: the form persists `bot.pairing_enabled`, pending 24-hour
+  codes come from the shared `hive pairing list` JSON contract, and an
+  owner-confirmed approval delegates to the command's atomic
+  resolve/allowlist/reload/notice/consume lifecycle. An already validated token
+  can be left blank while changing authorization settings; only a replacement
+  token is sent through `getMe` and persisted. Chat IDs are parsed with strict
+  `Integer(..., exception: false)`
+  before any Telegram network call or config/env write: when pairing is off,
+  blank input renders 422, and handles such as `@mychannel` always render 422
+  and persist nothing.
 
 Task Drop is routed as `POST /tasks/:project/:slug/drop` →
 `TasksController#drop` → `Hive::Web::Dispatcher#drop` →
@@ -252,11 +322,25 @@ session eviction, and later non-owner refusal,
 and the real `Commands::New`/`Approve`/`Drop` plus web recovery queue writes
 against a sandboxed `HIVE_HOME` (the suite NEVER touches the developer's real
 config — `test_helper.rb` sets the sandbox before the app loads). It pins that
+a loopback-authenticated local operator gets the full navigation and an
+explicit GitHub connection action, and that repository setup always invokes
+the CLI init adapter with non-TTY provisioning input. It also pins that
 a red task page shows the diagnostic banner and Retry button, and that the
 route queues the marker-clear command plus the hidden rerun sequence. It also
-pins the Telegram first-run guide shape and strict chat-ID validation, repo
-clone target refusal for non-directories, agent-login status rendering for
-binary PTY output and operator-ward poll flows, root favicon/icon assets,
+pins the Telegram first-run guide shape, strict token/chat-ID validation,
+empty-list pairing bootstrap, saved-token reuse, pending-code rendering,
+corrupt-store visibility, and consent-gated approval, repo clone target refusal
+for non-directories,
+agent-login status rendering for
+binary PTY output, Grok route reachability, and operator-ward poll flows,
+managed-skill opt-in inspection and consent-gated repair, root favicon/icon
+assets, repair failure-cause rendering, successful repo-init preflight alerts,
+workflow list/scaffold delegation, signed preview tamper rejection,
+cross-operation replay/expiry/missing-consent rejection, non-composable update
+escalation consent, real adapter-to-command lifecycle execution, and
+removal-retention disclosure,
+running/stopped daemon banner behavior plus descriptor-derived terminal-stage
+suppression,
 plain-vs-deep health semantics, the oversized diff cap/truncation notice,
 media route streaming/refusal cases, and captured/skipped/failed Demo
 rendering. Repos coverage pins the workflow select's built-in fresh list and
@@ -268,14 +352,19 @@ button for real; clipboard paste via a synthetic DataTransfer event — the
 sanctioned JS exception), Turbo Stream live row arrival without reload, grid
 project-rail filtering with URL sync, composer project sync, and
 `+ Add project` routing, plus re-application after a live broadcast, grid
-scroll plus composer draft preservation across a live broadcast, both approve
+scroll plus composer draft preservation across a live broadcast, successful
+composer text/chip/file reset with project-context retention, failed-submit
+draft/file retention on a 422-shaped Turbo event, and attachment-index rebuild
+after a real Stimulus disconnect/reconnect before adding and submitting another
+image, both approve
 paths (typed refusal page + confirmed force), Q&A round replacement without a
 lingering old form, typed Q&A preservation across a pushed morph, log-tail
 follow/pause/resume with node-preserving frame morph reloads, artifact
 open-state preservation across pushed morphs with live content refresh, and
 repo setup workflow selection (fresh `content` writes config, re-run lists a
 project-authored workflow and preselects the current default), plus
-browser-visible Demo gallery images and failed-capture banner states. CI runs
+real browser workflow scaffolding and exact-permission managed install review,
+plus browser-visible Demo gallery images and failed-capture banner states. CI runs
 both in the `web` job (`.github/workflows/ci.yml`) plus the web app's own
 rubocop, and it explicitly runs `web/test/e2e/golden_path_e2e.rb`; the golden
 path's daemon/Turbo row-replacement retry contract is covered in [[testing]].

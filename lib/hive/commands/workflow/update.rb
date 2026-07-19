@@ -14,12 +14,15 @@ module Hive
 
         def initialize(name, project_root:, json: false, yes: false, allow_escalation: false,
                        dry_run: false, stdout: $stdout, stdin: $stdin, registry_client: nil, committer: nil,
+                       expected_current: nil, expected_configuration_digest: nil,
                        mapping_overrides: [], input_bindings: [])
           super(project_root: project_root, json: json, stdout: stdout, stdin: stdin, yes: yes, committer: committer)
           @name = name.to_s.delete_prefix("honeycomb/")
           @allow_escalation = allow_escalation
           @dry_run = dry_run
           @registry_client = registry_client || Hive::WorkflowPackage::RegistryClient.new
+          @expected_current = expected_current
+          @expected_configuration_digest = expected_configuration_digest
           @mapping_overrides = mapping_overrides
           @input_bindings = input_bindings
         end
@@ -27,6 +30,9 @@ module Hive
         def call!
           current = store.selected(@name, cfg: project_config)
           raise OwnershipError, "managed workflow #{@name.inspect} is not installed" unless current
+          if @expected_current && !same_selection?(current, @expected_current)
+            raise Hive::ConcurrentRunError.new("managed workflow selection changed since the reviewed update preview")
+          end
 
           Dir.mktmpdir("hive-workflow-update-") do |candidate_root|
             candidate = @registry_client.fetch("honeycomb/#{@name}", destination: candidate_root)
@@ -44,6 +50,7 @@ module Hive
               mapping_overrides: @mapping_overrides, input_bindings: @input_bindings,
               previous: previous_configuration
             )
+            ensure_reviewed_configuration!(resolver)
             same_generation = candidate.source_commit == current.fetch("source_commit")
             if same_generation && resolver.configuration.digest == current.fetch("configuration_digest")
               report = noop_payload(candidate, current, resolver)
@@ -78,19 +85,29 @@ module Hive
                 expected_current: current,
                 commit: -> { commit_state(@name, "updated") }
               )
-            rescue StandardError
-              store.cleanup_unreferenced(@name)
-              raise
+            rescue StandardError => e
+              cleanup_after_failed_activation(@name, e)
             end
-            retained = store.cleanup_unreferenced(@name)
-            commit_state(@name, "cleaned")
-            Hive::Workflows::Project.reset!
-            report = report.merge("status" => "updated", "retained_commits" => retained)
-            emit(report, human_lines: human_diff(report))
+            warnings = []
+            retained = post_commit_step(warnings, "unreferenced generation cleanup") do
+              store.cleanup_unreferenced(@name)
+            end
+            post_commit_step(warnings, "cleanup state commit") { commit_state(@name, "cleaned") } if retained
+            post_commit_step(warnings, "workflow cache refresh") { Hive::Workflows::Project.reset! }
+            report = report.merge("status" => "updated")
+            report["retained_commits"] = retained if retained
+            report["warnings"] = warnings unless warnings.empty?
+            emit(report, human_lines: human_diff(report) + warning_lines(warnings))
           end
         end
 
         private
+
+        def same_selection?(current, expected)
+          current.fetch("source_commit") == expected.fetch("source_commit") &&
+            current.fetch("manifest_digest") == expected.fetch("manifest_digest") &&
+            current.fetch("configuration_digest") == expected.fetch("configuration_digest")
+        end
 
         def escalation_confirmed?(escalation)
           return true unless escalation
@@ -102,6 +119,15 @@ module Hive
 
           @stdout.print "This update expands or weakens security capabilities. Allow escalation? [y/N] "
           %w[y yes].include?(@stdin.gets.to_s.strip.downcase)
+        end
+
+        def ensure_reviewed_configuration!(resolver)
+          return unless @expected_configuration_digest
+          return if resolver.configuration.digest == @expected_configuration_digest
+
+          raise Hive::ConcurrentRunError.new(
+            "the workflow configuration changed since the reviewed update preview"
+          )
         end
 
         def noop_payload(candidate, current, resolver)

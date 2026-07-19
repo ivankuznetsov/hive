@@ -88,6 +88,13 @@ re-fetches mutable PR metadata during discovery.
 On partial-job resume, the durable `analysis_sha` must be a full 40- or
 64-character hexadecimal Git object ID. Commit resolution fences option
 parsing and revalidates Git's returned object ID before materializing a tree.
+An explicit replay of a terminal job creates its new occurrence before this
+pin step, so the replay samples the current committed default branch while an
+incomplete retry continues to reuse its original durable SHA. PR dry runs use
+an invocation-unique analysis-worktree key and therefore cannot reuse or
+remove a same-job daemon worker's tree. If an interrupted removal leaves only
+stale Git worktree administration, the next materialization prunes that orphan
+record and retries without operator repair.
 
 Discovery requires Claude's read-only tool scope plus its verified
 `--safe-mode` capability, so project customizations cannot run before the
@@ -264,7 +271,8 @@ Manual `--pr` uses this same manifest, policy snapshot, job claim, fencing
 generation, checkpoint, and report path. The first invocation can intentionally
 backfill a merge the catch-up baseline omitted. Invoking it again after that
 job is terminal creates an explicit `-replay-N` occurrence with the current
-policy snapshot while preserving the original job bytes. Canonical action ids
+policy snapshot and a freshly pinned current-default `analysis_sha`, while
+preserving the original job bytes. Canonical action ids
 still prevent duplicate remote effects across replays. Production ids hash the
 normalized source host, repository, action kind, and either the fix fingerprint
 or issue family id. Semantic-family descriptors and ids also include the source

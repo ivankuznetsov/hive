@@ -12,10 +12,14 @@ committed default branch; discovery runs mapper, leverage, and reviewer reads
 inside a detached exact worktree and removes it before completion. Partial jobs
 rematerialize their durable `analysis_sha` after default-branch advancement,
 and automatic fixes fence against the committed default ref rather than the
-operator's checkout. Dirty or mismatched analysis trees still fail closed.
+operator's checkout. A terminal manual replay now pins only after its new
+occurrence exists, dry-run previews receive invocation-unique analysis paths,
+and stale worktree registrations self-heal before materialization. Dirty or
+mismatched analysis trees still fail closed.
 
 **Tests:** Added fresh-remote pinning, dirty-checkout and branch-switch
 isolation, exact detached materialization, partial-retry SHA reuse, contaminated
 analysis cleanup, malformed pinned-OID rejection, and automatic-fix regression
-coverage. Git commit resolution now also fences option parsing and validates the
-resolved full object ID.
+coverage, plus replay-after-default-advance, dry-run ownership, and orphaned
+worktree-registration recovery. Git commit resolution now also fences option
+parsing and validates the resolved full object ID.

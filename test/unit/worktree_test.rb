@@ -103,6 +103,20 @@ class WorktreeTest < Minitest::Test
     end
   end
 
+  def test_create_detached_exact_prunes_orphaned_registration_before_retry
+    with_initialized_project do |dir, root|
+      pinned = run!("git", "-C", dir, "rev-parse", "HEAD").strip
+      wt = Hive::Worktree.new(dir, "analysis-orphaned", worktree_root: root)
+      wt.create_detached_exact!(base_sha: pinned)
+      FileUtils.rm_rf(wt.path)
+      assert_includes wt.list_worktree_paths, wt.path
+
+      assert_equal :created, wt.create_detached_exact!(base_sha: pinned)
+      assert wt.exists?
+      assert_equal pinned, run!("git", "-C", wt.path, "rev-parse", "HEAD").strip
+    end
+  end
+
   def test_assert_detached_exact_rejects_a_different_pinned_commit
     with_initialized_project do |dir, root|
       pinned = run!("git", "-C", dir, "rev-parse", "HEAD").strip

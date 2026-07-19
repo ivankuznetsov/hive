@@ -359,7 +359,11 @@ feature checkpoints and removed before successful completion. An interrupted
 clean tree may be reused only at the same exact SHA; a dirty, attached, or
 different-SHA tree fails closed. The worktree is transport, never completion
 authority, and a partial job keeps its durable SHA when the default branch
-advances.
+advances. A terminal manual replay receives a new current-default SHA after
+its replay occurrence is created. Dry-run occurrences use invocation-unique
+tree keys so they cannot collide with claimed discovery, and a missing tree
+whose stale Git registration survived an interruption is pruned before the
+deterministic retry materializes it again.
 
 Fix-action receipts scope remote publication to the validated patch generation.
 `publication_attempts` is an append-only object whose key is

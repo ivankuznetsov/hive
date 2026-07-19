@@ -153,6 +153,16 @@ module Hive
         return :existing
       end
 
+      # A killed remove or an external directory cleanup can leave Git's
+      # administrative record behind after the worktree path disappears.
+      # The deterministic analysis slug would otherwise fail every retry with
+      # "already registered" until an operator pruned it manually.
+      if !File.directory?(path) && list_worktree_paths.include?(path)
+        self.class.run_materialize_git!(
+          @project_root, "worktree", "prune", "--expire", "now"
+        )
+      end
+
       self.class.run_materialize_git!(
         @project_root, "worktree", "add", "--detach", path, expected
       )

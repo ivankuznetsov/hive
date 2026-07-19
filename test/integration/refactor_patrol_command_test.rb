@@ -758,6 +758,10 @@ class RefactorPatrolCommandTest < Minitest::Test
       config = YAML.safe_load(File.read(config_path))
       config.fetch("refactor_patrol").fetch("auto_fix")["enabled"] = true
       File.write(config_path, config.to_yaml)
+      File.write(File.join(repo, "replay-head.txt"), "advance default branch\n")
+      run!("git", "-C", repo, "add", "replay-head.txt")
+      run!("git", "-C", repo, "commit", "-m", "advance replay head", "--quiet")
+      replay_head = run!("git", "-C", repo, "rev-parse", "HEAD").strip
       second_out, second_err, second_status = with_captured_exit do
         command_for(
           pr: "7", manifest_resolver: FakeManifestResolver.new(manifest),
@@ -772,8 +776,39 @@ class RefactorPatrolCommandTest < Minitest::Test
       assert_equal true, replay.dig("policy", "auto_fix")
       assert_equal "classified", replay.fetch("state")
       assert_equal [ "replayable" ], replay.dig("dispositions", "accepted").map { |entry| entry.fetch("id") }
+      assert_equal replay_head, replay.fetch("analysis_sha")
+      assert_equal head, original.fetch("analysis_sha")
       assert_empty JSON.parse(second_out).fetch("suppressed")
       assert_equal original_bytes, File.binread(original_path)
+    end
+  end
+
+  def test_pr_dry_runs_use_invocation_unique_analysis_worktrees
+    with_refactor_patrol_project do |repo|
+      head = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      manifest = pr_manifest(merge_sha: head)
+      analysis_paths = []
+
+      2.times do
+        out, err, status = with_captured_exit do
+          command_for(
+            dry_run: true, pr: "7",
+            manifest_resolver: FakeManifestResolver.new(manifest),
+            features: [ feature("checkout") ],
+            leverage_scores: leverage_scores("checkout" => 0.9),
+            root_observer: lambda do |kind, root|
+              analysis_paths << root if kind == :mapper
+            end
+          ).call
+        end
+        assert_equal Hive::ExitCodes::SUCCESS, status, "#{out}\n#{err}"
+      end
+
+      assert_equal 2, analysis_paths.uniq.size
+      analysis_paths.each do |path|
+        assert_match(/-dry-run-\d+-[0-9a-f]{12}\z/, path)
+        refute File.exist?(path)
+      end
     end
   end
 
@@ -1353,6 +1388,7 @@ class RefactorPatrolCommandTest < Minitest::Test
       )
       unavailable.instance_variable_set(:@manifest, manifest)
       unavailable.instance_variable_set(:@checkout_snapshot, { "analysis_sha" => "head" })
+      unavailable.define_singleton_method(:pin_checkout!) { |*| }
       with_replaced_singleton_method(Hive::Lock, :process_start_time, ->(_pid) { nil }) do
         error = assert_raises(Hive::ConfigError) do
           unavailable.send(:prepare_durable_discovery!, entry, repo, cfg)

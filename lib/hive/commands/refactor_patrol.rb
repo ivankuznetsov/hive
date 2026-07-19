@@ -1,6 +1,7 @@
 require "json"
 require "fileutils"
 require "open3"
+require "securerandom"
 require "set"
 require "time"
 require "uri"
@@ -157,8 +158,7 @@ module Hive
         assert_repository_ownership!(entry, cfg) if pr_mode?
         @manifest = resolve_manifest(entry, project_root, cfg) if pr_mode?
         validate_result_file!(project_root) if @result_file
-        pin_checkout!(project_root, cfg) if pr_mode?
-        prepare_durable_discovery!(entry, project_root, cfg) if pr_mode? && !@dry_run
+        prepare_checkout_and_discovery!(entry, project_root, cfg) if pr_mode?
         if @existing_lifecycle
           return [ lifecycle_payload(entry, project_root, @existing_lifecycle), lifecycle_theses(@existing_lifecycle) ]
         end
@@ -574,6 +574,11 @@ module Hive
           return
         end
 
+        # A completed PR is replaced by a replay manifest above. Pin only
+        # after that replacement so a new replay samples the current default
+        # branch instead of inheriting the completed occurrence's snapshot.
+        # Incomplete occurrences still reuse their durable analysis_sha.
+        pin_checkout!(project_root, cfg)
         process_start_time = Hive::Lock.process_start_time(Process.pid)
         if process_start_time.to_s.empty?
           raise Hive::ConfigError, "refactor patrol cannot verify the current process identity"
@@ -1043,6 +1048,18 @@ module Hive
         )
       end
 
+      def prepare_checkout_and_discovery!(entry, project_root, cfg)
+        if @pr && !@dry_run
+          prepare_durable_discovery!(entry, project_root, cfg)
+        else
+          # Scheduler job manifests are already durable/claimed, while dry
+          # runs deliberately create no durable job. Both still need an exact
+          # source snapshot before materialization.
+          pin_checkout!(project_root, cfg)
+          prepare_durable_discovery!(entry, project_root, cfg) unless @dry_run
+        end
+      end
+
       def pinned_analysis_sha(project_root)
         store = @job_store || @job_store_factory.call(project_root)
         store.read_job(@manifest.fetch("job_id"))["analysis_sha"]
@@ -1052,13 +1069,20 @@ module Hive
 
       def materialize_analysis_worktree!(project_root, cfg)
         @analysis_worktree = @analysis_worktree_factory.call(
-          project_root, cfg, @manifest.fetch("job_id")
+          project_root, cfg, analysis_worktree_key
         )
         @analysis_worktree.create_detached_exact!(
           base_sha: @checkout_snapshot.fetch("analysis_sha")
         )
         assert_analysis_worktree!
         @analysis_worktree.path
+      end
+
+      def analysis_worktree_key
+        job_id = @manifest.fetch("job_id")
+        return job_id unless @dry_run
+
+        @analysis_worktree_key ||= "#{job_id}-dry-run-#{Process.pid}-#{SecureRandom.hex(6)}"
       end
 
       def build_analysis_worktree(project_root, cfg, job_id)

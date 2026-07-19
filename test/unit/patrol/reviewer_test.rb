@@ -195,6 +195,11 @@ class HivePatrolReviewerTest < Minitest::Test
       assert_includes captured, '"reproduction"'
       assert_includes captured, "Do not return documentation"
       assert_includes captured, "test-gap, or maintainability"
+      assert_includes captured, "exact substring"
+      assert_includes captured, "single source line"
+      assert_match(/Never span multiple\s+lines/, captured)
+      assert_includes captured, "rejects the complete finding"
+      assert_includes captured, '"snippet": "exact single-line source substring"'
     end
   end
 

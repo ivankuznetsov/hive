@@ -185,6 +185,14 @@ module Hive
       }
     }.freeze
 
+    # Ready actions are the shared dispatch vocabulary for status consumers.
+    # Derive the lookup from the classifier table so bot and web adapters
+    # cannot drift from the command Hive actually reports for an action.
+    READY_COMMANDS = ACTIONS.values.each_with_object({}) do |action, commands|
+      key = action.fetch(:key)
+      commands[key] = action.fetch(:command) if key.start_with?("ready_")
+    end.freeze
+
     attr_reader :task, :marker, :project_name, :projection
 
     # Default grace window for placeholder AGENT_WORKING markers (no PID

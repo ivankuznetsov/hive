@@ -148,6 +148,11 @@ weakening owner-authored descriptor compatibility:
   layout, packages deterministically, runs the shared validator/runtime
   admission, then delegates to a fork-aware PR client.
 
+Status dispatch adapters share the classifier's derived
+`TaskAction::READY_COMMANDS` lookup. The bot exposes every ready command,
+including in-process `approve`; the web exposes only commands accepted by the
+daemon dispatch-request queue.
+
 Managed locks/generations/configurations are Hive-owned. Lifecycle commands cannot overwrite a
 built-in or `<id>.yml` authored descriptor, and task metadata rewrites preserve
 all three managed provenance fields.

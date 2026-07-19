@@ -16,6 +16,13 @@ require "hive/daemon/dispatch_request_queue"
 class WebDispatcherTest < Minitest::Test
   include HiveTestHelper
 
+  def test_stage_dispatch_actions_are_the_queueable_task_action_commands
+    expected = Hive::TaskAction::READY_COMMANDS.select do |_action, verb|
+      Hive::Daemon::DispatchRequestQueue::ALLOWED_VERBS.include?(verb)
+    end
+    assert_equal expected, Hive::Web::Dispatcher::STAGE_VERB_BY_ACTION
+  end
+
   def seed_task_at(dir, stage)
     capture_io { Hive::Commands::Init.new(dir).call }
     project = File.basename(dir)

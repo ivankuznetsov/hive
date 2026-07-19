@@ -476,6 +476,7 @@ class WorkflowsDescriptorParserTest < Minitest::Test
               "quorum" => 2,
               "max_rounds" => 3,
               "exit_rule" => "consensus",
+              "on_max_rounds" => "complete",
               "triage_output" => "reviews/triage.md",
               "revise" => { "agent" => "claude", "skill" => "/revise" }
             }
@@ -501,6 +502,7 @@ class WorkflowsDescriptorParserTest < Minitest::Test
     assert_equal 2, review.council.quorum
     assert_equal 3, review.council.max_rounds
     assert_equal :consensus, review.council.exit_rule
+    assert_equal :complete, review.council.on_max_rounds
     assert_equal "reviews/triage.md", review.council.triage_output
     assert_equal "/revise", review.council.revise.skill
   end
@@ -530,6 +532,7 @@ class WorkflowsDescriptorParserTest < Minitest::Test
     assert_equal 1, review.council.quorum
     assert_equal 1, review.council.max_rounds
     assert_equal :human, review.council.exit_rule
+    assert_equal :wait, review.council.on_max_rounds
     assert_equal "reviews/triage.md", review.council.triage_output
     assert_nil review.council.revise
   end

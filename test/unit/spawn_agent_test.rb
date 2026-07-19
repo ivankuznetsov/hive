@@ -622,7 +622,8 @@ class SpawnAgentTest < Minitest::Test
   def test_stage_permission_scope_compiles_task_pinned_managed_policy
     with_tmp_dir do |dir|
       task_folder = File.join(dir, "task")
-      FileUtils.mkdir_p(task_folder)
+      package_root = File.join(dir, ".hive-state", "workflows", "demo", "versions", "a" * 40)
+      FileUtils.mkdir_p([ task_folder, package_root ])
       workflow = Struct.new(:id).new(:demo)
       task = Object.new
       task.define_singleton_method(:managed_workflow?) { true }
@@ -631,31 +632,25 @@ class SpawnAgentTest < Minitest::Test
       task.define_singleton_method(:workflow_commit) { "a" * 40 }
       task.define_singleton_method(:workflow_manifest_digest) { "b" * 64 }
       task.define_singleton_method(:folder) { task_folder }
-      manifest = Struct.new(:data).new({
-        "permissions" => {
-          "tools" => [ "Read" ], "deny" => [ "Bash" ], "directories" => [],
-          "commands" => [], "domains" => [], "credentials" => []
-        }
-      })
-      store = Object.new
-      store.define_singleton_method(:manifest) { |*| manifest }
-      with_replaced_singleton_method(Hive::WorkflowPackage::ManagedStore, :new, ->(*) { store }) do
-        scope = Hive::Stages::Base.stage_permission_scope(
-          {}, "work", task, Hive::AgentProfiles.lookup(:claude)
-        )
-        assert_equal "dontAsk", scope.fetch(:permission_mode)
-        assert_equal [ "Read" ], scope.fetch(:allowed_tools)
-        assert_equal task_folder, scope.fetch(:add_dirs).first
-        policy = scope.fetch(:runtime_policy)
-        assert_instance_of Hive::WorkflowPackage::RuntimePolicy::Policy, policy
-        refute policy.policy_path.start_with?(task_folder + File::SEPARATOR)
-        assert policy.policy_path.start_with?(File.join(dir, ".hive-state", ".managed-policies") + File::SEPARATOR)
-        decision, = Hive::Scripts::WorkflowPolicyHook.evaluate(
-          JSON.parse(File.read(policy.policy_path)),
-          "tool_name" => "Write", "tool_input" => { "file_path" => policy.policy_path }
-        )
-        assert_equal "deny", decision
+      requested_slots = []
+      task.define_singleton_method(:managed_runtime_context) do |slot_id|
+        requested_slots << slot_id
+        { package_root: package_root, environment: { "DEMO_INPUT" => "configured" } }
       end
+
+      scope = Hive::Stages::Base.stage_permission_scope(
+        {}, "work", task, Hive::AgentProfiles.lookup(:claude),
+        explicit_permission_spec: "read-only"
+      )
+      assert_equal [ "stages.work" ], requested_slots
+      assert_equal "default", scope.fetch(:permission_mode)
+      assert_equal %w[Read LS Grep Glob], scope.fetch(:allowed_tools)
+      assert_equal [ task_folder, package_root ], scope.fetch(:add_dirs)
+      policy = scope.fetch(:runtime_policy)
+      assert_instance_of Hive::WorkflowPackage::RuntimePolicy::Policy, policy
+      assert_nil policy.policy_path
+      assert_includes policy.disallowed_tools, "Write"
+      assert_equal "configured", policy.environment.fetch("DEMO_INPUT")
     end
   end
 

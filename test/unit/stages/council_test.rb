@@ -122,6 +122,64 @@ class StagesCouncilTest < Minitest::Test
     end
   end
 
+  def test_managed_council_children_launch_with_only_their_mapped_identity
+    with_tmp_dir do |project|
+      workflow = mixed_provider_council_workflow
+      task = task_for(project, workflow: workflow)
+      task.define_singleton_method(:managed_workflow?) { true }
+      File.write(File.join(task.folder, "draft.md"), "Architecture draft\n")
+      outputs = [
+        "Verdict: ready\n",
+        "Verdict: changes_requested\n\n## Required edits\n- Expand risks.\n",
+        "Verdict: ready\n",
+        "Verdict: ready\n"
+      ]
+
+      with_stubbed_managed_scope(task) do
+        with_stubbed_spawn(outputs) do |captured|
+          result = Hive::Stages::Council.run!(task, {})
+
+          assert_equal({ commit: "complete", status: :complete }, result)
+          reviewer_one = captured.select { |kwargs| kwargs.fetch(:log_label) == "review-one" }
+          reviewer_two = captured.select { |kwargs| kwargs.fetch(:log_label) == "review-two" }
+          reviser = captured.select { |kwargs| kwargs.fetch(:log_label) == "review-revise" }
+          assert_equal 2, reviewer_one.length
+          assert reviewer_one.all? do |kwargs|
+            kwargs.fetch(:profile).name == :pi &&
+              kwargs.fetch(:model) == "pi-child" && kwargs[:effort].nil?
+          end
+          assert_equal 2, reviewer_two.length
+          assert reviewer_two.all? do |kwargs|
+            kwargs.fetch(:profile).name == :codex &&
+              kwargs.fetch(:model) == "codex-child" && kwargs.fetch(:effort) == "medium"
+          end
+          assert_equal 1, reviser.length
+          assert_equal :grok, reviser.first.fetch(:profile).name
+          assert_equal "grok-child", reviser.first.fetch(:model)
+          assert_nil reviser.first[:effort]
+        end
+      end
+    end
+  end
+
+  def test_unmanaged_council_children_retain_parent_identity_fallback
+    with_tmp_dir do |project|
+      workflow = mixed_provider_council_workflow(managed_children: false)
+      task = task_for(project, workflow: workflow)
+      File.write(File.join(task.folder, "draft.md"), "Architecture draft\n")
+
+      with_stubbed_spawn([ "Verdict: ready\n", "Verdict: ready\n" ]) do |captured|
+        result = Hive::Stages::Council.run!(task, {})
+
+        assert_equal({ commit: "complete", status: :complete }, result)
+        assert_equal 2, captured.length
+        assert captured.all? { |kwargs| kwargs.fetch(:profile).name == :claude }
+        assert captured.all? { |kwargs| kwargs.fetch(:model) == "claude-parent" }
+        assert captured.all? { |kwargs| kwargs.fetch(:effort) == "high" }
+      end
+    end
+  end
+
   def test_command_revise_runs_before_next_round
     with_tmp_dir do |project|
       revise = Hive::Workflow::Revise.new(
@@ -214,6 +272,27 @@ class StagesCouncilTest < Minitest::Test
 
         marker = Hive::Markers.current(task.state_file)
         assert_equal({ commit: "round_waiting", status: :waiting }, result)
+        assert_equal "max_rounds", marker.attrs.fetch("reason")
+        assert_equal 2, captured.length, "revise must not run after max_rounds is reached"
+      end
+    end
+  end
+
+  def test_max_rounds_can_complete_for_bounded_delivery_workflows
+    with_tmp_dir do |project|
+      workflow = council_workflow(exit_rule: :consensus, max_rounds: 1, revise: true)
+      council = workflow.stage_named("review").council.with(on_max_rounds: :complete)
+      stages = workflow.stages.map do |stage|
+        stage.name == "review" ? stage.with(council: council) : stage
+      end
+      task = task_for(project, workflow: Hive::Workflow.new(id: workflow.id, stages: stages))
+      File.write(File.join(task.folder, "draft.md"), "Architecture draft\n")
+
+      with_stubbed_spawn([ "Verdict: changes_requested\n", "Verdict: changes_requested\n" ]) do |captured|
+        result = Hive::Stages::Council.run!(task, {})
+
+        marker = Hive::Markers.current(task.state_file)
+        assert_equal({ commit: "complete", status: :complete }, result)
         assert_equal "max_rounds", marker.attrs.fetch("reason")
         assert_equal 2, captured.length, "revise must not run after max_rounds is reached"
       end
@@ -496,6 +575,58 @@ class StagesCouncilTest < Minitest::Test
       Hive::Stages::Base.define_singleton_method(:spawn_agent) do |*args, **kwargs, &block|
         original.call(*args, **kwargs, &block)
       end
+    end
+
+    def with_stubbed_managed_scope(task)
+      scope = {
+        add_dirs: [ task.folder ], permission_mode: nil,
+        allowed_tools: nil, disallowed_tools: nil
+      }
+      with_replaced_singleton_method(
+        Hive::Stages::Base,
+        :stage_permission_scope_or_mark!,
+        ->(*, **) { scope }
+      ) { yield }
+    end
+
+    def mixed_provider_council_workflow(managed_children: true)
+      reviewers = if managed_children
+        [
+          Hive::Workflow::Reviewer.new(
+            name: "one", skill: "/review", agent: "pi", model: "pi-child"
+          ),
+          Hive::Workflow::Reviewer.new(
+            name: "two", skill: "/review", agent: "codex", model: "codex-child", effort: "medium"
+          )
+        ]
+      else
+        [
+          Hive::Workflow::Reviewer.new(name: "one", skill: "/review"),
+          Hive::Workflow::Reviewer.new(name: "two", skill: "/review")
+        ]
+      end
+      revise = if managed_children
+        Hive::Workflow::Revise.new(skill: "/revise", agent: "grok", model: "grok-child")
+      else
+        Hive::Workflow::Revise.new(skill: "/revise")
+      end
+      Hive::Workflow.new(
+        id: :mixed_provider_council,
+        stages: [
+          Hive::Workflow::Stage.new(
+            name: "draft", index: 1, state_file: "draft.md", kind: :agent, skill: "/draft"
+          ),
+          Hive::Workflow::Stage.new(
+            name: "review", index: 2, state_file: "review.md", kind: :council,
+            agent: "claude", model: "claude-parent", effort: "high",
+            reviewers: reviewers,
+            council: Hive::Workflow::Council.new(
+              quorum: 2, max_rounds: 2, exit_rule: :consensus, revise: revise
+            )
+          ),
+          Hive::Workflow::Stage.new(name: "done", index: 3, state_file: "done.md", kind: :inert)
+        ]
+      )
     end
 
     def council_workflow(quorum: 2, max_rounds: 1, exit_rule: :human, revise: false, input: nil,

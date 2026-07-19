@@ -17,6 +17,7 @@ class WorkflowPackageRegistryClientTest < Minitest::Test
           assert_equal catalog_commit, resolution.source_commit
           assert_equal catalog_commit, resolution.catalog_commit
           assert File.file?(File.join(destination, "manifest.yml"))
+          assert File.executable?(File.join(destination, "tools", "demo.sh"))
           assert Hive::WorkflowPackage::Validator.validate!(
             destination,
             expected_name: "demo",
@@ -260,9 +261,11 @@ class WorkflowPackageRegistryClientTest < Minitest::Test
   end
 
   def write_v2_package(package, repository_root:, source_revision: "c" * 40)
-    FileUtils.mkdir_p(File.join(package, "instructions"))
+    FileUtils.mkdir_p([ File.join(package, "instructions"), File.join(package, "tools") ])
     File.write(File.join(package, "README.md"), "# Demo\n")
     File.write(File.join(package, "instructions", "work.md"), "Read files only.\n")
+    File.write(File.join(package, "tools", "demo.sh"), "#!/bin/sh\nprintf 'demo\\n'\n")
+    File.chmod(0o755, File.join(package, "tools", "demo.sh"))
     File.write(File.join(package, "workflow.yml"), <<~YAML)
       id: demo
       stages:
@@ -275,13 +278,15 @@ class WorkflowPackageRegistryClientTest < Minitest::Test
           advance_verb: work
           instruction: instructions/work.md
           permissions: read-only
+          mapping_role: development
+          mapping_contract: demo-work-v1
         - name: done
           kind: terminal
           state_file: done.md
           advance_verb: done
     YAML
     prefix = "packages/demo/1.0.0/"
-    files = %w[README.md instructions/work.md workflow.yml].to_h do |relative|
+    files = %w[README.md instructions/work.md tools/demo.sh workflow.yml].to_h do |relative|
       [ "#{prefix}#{relative}", Digest::SHA256.file(File.join(package, relative)).hexdigest ]
     end
     manifest = {
@@ -289,7 +294,8 @@ class WorkflowPackageRegistryClientTest < Minitest::Test
       "description" => "Demo", "author" => { "name" => "Test", "url" => "https://example.test/test" },
       "license" => "MIT", "hive_min_version" => "0.4.3",
       "source" => { "url" => "https://example.test/source", "revision" => source_revision },
-      "permissions" => v2_permissions, "files" => files
+      "permissions" => v2_permissions, "files" => files,
+      "x-hive" => { "optional_inputs" => [], "tools" => [ { "path" => "tools/demo.sh" } ] }
     }
     manifest["release_sha256"] = Digest::SHA256.hexdigest(
       Hive::WorkflowPackage::CanonicalYAML.dump_manifest(manifest, include_release: false)

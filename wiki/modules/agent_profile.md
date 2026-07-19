@@ -3,7 +3,7 @@ title: Hive::AgentProfile + Hive::AgentProfiles
 type: module
 source: lib/hive/agent_profile.rb, lib/hive/agent_profiles.rb, lib/hive/agent_profiles/{claude,codex,pi,grok}.rb, lib/hive/agent_skills/
 created: 2026-04-26
-updated: 2026-07-17
+updated: 2026-07-18
 tags: [agent, profile, registry, architecture, skills, provisioning, permissions, honeycomb]
 ---
 
@@ -85,14 +85,12 @@ For implementation identity, Claude translates normalized values to `--model <mo
 - `Hive::RefactorPatrol::Fixer` — accepts only a profile with `workspace_write_supported?` and invokes it through the special `workspace-write` permission mode.
 - `Stages::Base.record_usage` — reads each profile's `usage_extractor` output and stores per-spawn rows in `Hive::UsageDB`.
 - `Hive::Config.validate_role_agent_names!` and `validate_reviewers!` — every `agent:` field in `review.{ci,triage,fix,browser_test}` and `review.reviewers[]` must resolve via `AgentProfiles.lookup`.
-- `Hive::WorkflowPackage::RuntimePolicy` — requires tools, directories,
-  commands, domains, settings isolation, MCP isolation, and environment
-  isolation for every managed actor. Claude declares the full set; other
-  shipped/custom profiles currently fail managed admission. The generated
-  `dontAsk` settings, strict empty MCP config, pre-tool hook, sanitized PATH,
-  child environment, and (for Bash) fail-if-unavailable OS sandbox with a
-  domain allowlist/no unsandboxed escape are shared by headless and tmux spawn
-  paths and are recompiled from task-pinned provenance before spawn.
+- `Hive::WorkflowPackage::RuntimePolicy` — legacy packages can still compile
+  their command/domain policy, while current Honeycomb actors resolve their
+  descriptor `permissions:` independently. Explicit `yolo` works on any
+  profile; bounded mappings fail closed unless the profile enforces them.
+  Managed launches isolate the environment, add the immutable package root,
+  and inject only values authorized for the executing stable slot.
 
 ## Managed skill inspection and provisioning
 

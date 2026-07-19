@@ -91,7 +91,7 @@ returns every flat patch and supersession receipt.
 | `hive migrate [PROJECT_PATH]` | Rename in-flight task folders from older stage layouts and backfill legacy task metadata. |
 | `hive workflow new ID` | Scaffold a blank project workflow descriptor under `<hive_state_path>/workflows/`. |
 | `hive workflow install honeycomb/NAME[@REF]` | Verify and atomically select a reviewed package. |
-| `hive workflow list` | Show built-in, authored, selected, and retained workflows with integrity/provenance. |
+| `hive workflow list` | Show built-in, authored, selected, and retained workflows with integrity/provenance; JSON v2 includes the active managed configuration and redacted input availability. |
 | `hive workflow update NAME [--dry-run]` | Report a semantic/security diff and atomically advance after consent. |
 | `hive workflow remove NAME` | Disable a managed selection while retaining task-pinned generations. |
 | `hive workflow publish ID --version X.Y.Z` | Package an authored workflow and submit a fork PR as pending review. |

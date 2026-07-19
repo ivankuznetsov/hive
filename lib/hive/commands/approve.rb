@@ -82,6 +82,8 @@ module Hive
         error_kind_for(error)
       end
 
+      def envelope_serialization_failure_policy = :raise
+
       def envelope_enabled?
         @json && !@quiet
       end

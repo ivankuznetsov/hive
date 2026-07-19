@@ -277,9 +277,9 @@ module Hive
     # Consumers may also override `envelope_extras` to merge per-command
     # fields (e.g. `{"verb" => "review"}`) into the envelope; the default is
     # no extras. `envelope_payload_for` preserves schema-specific field
-    # allowlists, while `suppress_envelope_serialization_errors?` preserves the
-    # two legacy producers whose documented exit code remains the fallback
-    # when an error payload itself cannot be encoded.
+    # allowlists, while `envelope_serialization_failure_policy` preserves each
+    # producer's legacy warning, suppression, or re-raise behavior when an
+    # error payload itself cannot be encoded.
     module EnvelopeEmitter
       def call_with_envelope
         @stdout_written = false
@@ -301,9 +301,18 @@ module Hive
         # stdout closed; the re-raise still carries the failure to bin/hive
         # for the exit code + stderr line. Nothing to surface.
         @stdout_written = true
-      rescue JSON::GeneratorError
-        raise unless suppress_envelope_serialization_errors?
-
+      rescue JSON::GeneratorError => e
+        case envelope_serialization_failure_policy
+        when :raise
+          raise
+        when :warn
+          warn "[hive] #{envelope_schema} error envelope was not serialisable: #{e.class}: #{e.message}"
+        when :suppress
+          nil
+        else
+          raise ArgumentError, "unknown envelope serialization failure policy: " \
+                               "#{envelope_serialization_failure_policy.inspect}"
+        end
         @stdout_written = true
       end
 
@@ -334,8 +343,8 @@ module Hive
         envelope_extras
       end
 
-      def suppress_envelope_serialization_errors?
-        false
+      def envelope_serialization_failure_policy
+        :warn
       end
     end
 

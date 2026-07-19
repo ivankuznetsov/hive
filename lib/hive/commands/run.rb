@@ -66,9 +66,7 @@ module Hive
         error_kind_for(error)
       end
 
-      def suppress_envelope_serialization_errors?
-        true
-      end
+      def envelope_serialization_failure_policy = :suppress
 
       def do_call
         task = resolve_task

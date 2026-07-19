@@ -53,6 +53,8 @@ module Hive
         error_kind_for(error)
       end
 
+      def envelope_serialization_failure_policy = :raise
+
       private
 
       # Locking strategy mirrors `Hive::Commands::Approve`:

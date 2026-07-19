@@ -32,6 +32,8 @@ module Hive
         error_kind_for(error)
       end
 
+      def envelope_serialization_failure_policy = :raise
+
       private
 
       def do_call

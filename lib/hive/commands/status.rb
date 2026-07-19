@@ -105,9 +105,7 @@ module Hive
         error_kind_for(error)
       end
 
-      def suppress_envelope_serialization_errors?
-        true
-      end
+      def envelope_serialization_failure_policy = :suppress
 
       # `--diagnose` routes through diagnose_call which emits the
       # `hive-status-diagnose` envelope on success; the top-level rescue

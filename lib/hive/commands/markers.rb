@@ -67,6 +67,8 @@ module Hive
         error_kind_for(error)
       end
 
+      def envelope_serialization_failure_policy = :raise
+
       private
 
       # The published v1 error schema deliberately exposes only the marker

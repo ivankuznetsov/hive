@@ -13,3 +13,5 @@
   vocabulary instead of maintaining workflow-package copies.
 - Hoisted project configuration and temporary runtime admission into the
   workflow command base, and made update reports single-evaluation values.
+- Routed task metadata mutations through one field-preserving rewrite and
+  generic agent/council marker actions through their shared stage base.

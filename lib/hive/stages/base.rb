@@ -214,6 +214,18 @@ module Hive
         kwargs
       end
 
+      # Generic agent and council stages use the same state-file marker
+      # vocabulary when naming their durable hive-state commits.
+      def marker_commit_action(marker_name)
+        case marker_name
+        when :waiting then "round_waiting"
+        when :complete then "complete"
+        when :error then "error"
+        when :none then nil
+        else marker_name.to_s
+        end
+      end
+
       # The per-spec explicit-permission passthrough every reviewer
       # scope-building site needs: forward `spec["permissions"]` as
       # :explicit_permission_spec ONLY when the key is present, so an absent

@@ -8,6 +8,10 @@ All notable changes are documented here, newest first. Hive ships frequent micro
   permanent composer while Turbo rendered the redirect. Successful responses
   now clear duplicate-ready text and attachments before the permanent node can
   disconnect, while retaining the selected project as working context.
+- Fixed concurrent babysitter dry-run commands racing to create their shared
+  audit log and dropping all but the first record. Dry-run setup now creates a
+  private empty log before agent commands launch; every append retains the
+  existing fail-closed target and descriptor checks.
 
 ## 0.6.3
 

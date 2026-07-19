@@ -78,12 +78,18 @@ module Hive
           return
         end
 
-        @failure = nil
         state = read_state
         last = parse_date(state["last_digested_date"])
-        return if last && last >= local_date
+        if last && last >= local_date
+          @failure = nil
+          return
+        end
 
         write_state("last_digested_date" => local_date.iso8601, "updated_at" => now.utc.iso8601)
+        @failure = nil
+      rescue StandardError
+        record_failure(now)
+        raise
       end
 
       private

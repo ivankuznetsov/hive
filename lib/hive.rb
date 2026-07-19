@@ -276,7 +276,10 @@ module Hive
     #
     # Consumers may also override `envelope_extras` to merge per-command
     # fields (e.g. `{"verb" => "review"}`) into the envelope; the default is
-    # no extras.
+    # no extras. `envelope_payload_for` preserves schema-specific field
+    # allowlists, while `suppress_envelope_serialization_errors?` preserves the
+    # two legacy producers whose documented exit code remains the fallback
+    # when an error payload itself cannot be encoded.
     module EnvelopeEmitter
       def call_with_envelope
         @stdout_written = false
@@ -291,23 +294,26 @@ module Hive
       end
 
       def emit_envelope(error)
-        payload = Hive::Schemas::ErrorEnvelope.build(
-          schema: envelope_schema,
-          error: error,
-          error_kind: envelope_error_kind(error),
-          extras: envelope_extras_for(error)
-        )
+        payload = envelope_payload_for(error)
         puts JSON.generate(payload)
         @stdout_written = true
       rescue Errno::EPIPE
         # stdout closed; the re-raise still carries the failure to bin/hive
         # for the exit code + stderr line. Nothing to surface.
         @stdout_written = true
-      rescue JSON::GeneratorError => e
-        # A non-serialisable payload is a bug, not a closed pipe — don't hide
-        # it. The real error still re-raises through call_with_envelope.
-        warn "[hive] #{envelope_schema} error envelope was not serialisable: #{e.class}: #{e.message}"
+      rescue JSON::GeneratorError
+        raise unless suppress_envelope_serialization_errors?
+
         @stdout_written = true
+      end
+
+      def envelope_payload_for(error)
+        Hive::Schemas::ErrorEnvelope.build(
+          schema: envelope_schema,
+          error: error,
+          error_kind: envelope_error_kind(error),
+          extras: envelope_extras_for(error)
+        )
       end
 
       # Per-command fields merged into the error envelope. Override to add
@@ -326,6 +332,10 @@ module Hive
       # can override this hook without making the common emitter conditional.
       def envelope_extras_for(_error)
         envelope_extras
+      end
+
+      def suppress_envelope_serialization_errors?
+        false
       end
     end
 

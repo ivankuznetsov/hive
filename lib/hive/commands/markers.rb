@@ -69,6 +69,16 @@ module Hive
 
       private
 
+      # The published v1 error schema deliberately exposes only the marker
+      # command's original fields. Commit-lock diagnostics remain on stderr
+      # and in the typed exception instead of widening this closed payload.
+      def envelope_payload_for(error)
+        super.tap do |payload|
+          payload.delete("holder")
+          payload.delete("lock_path")
+        end
+      end
+
       def do_call
         unless VALID_SUBCOMMANDS.include?(@subcommand)
           raise Hive::InvalidTaskPath,

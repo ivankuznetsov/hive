@@ -361,10 +361,12 @@ class CommandsRunTest < Minitest::Test
       raise JSON::GeneratorError, "bad json"
     end
 
-    capture_io do
+    out, err = capture_io do
       run.send(:emit_envelope, Hive::InternalError.new("bad"))
     end
 
+    assert_empty out
+    assert_empty err
     assert run.instance_variable_get(:@stdout_written)
   ensure
     JSON.define_singleton_method(:generate, original) if original
@@ -497,6 +499,24 @@ class CommandsRunTest < Minitest::Test
     out, = capture_io do
       exit_error = assert_raises(SystemExit) { run.call }
       assert_equal Hive::ExitCodes::SOFTWARE, exit_error.status
+    end
+    assert_empty out
+  end
+
+  def test_failed_durable_text_attempt_preserves_exit_without_json
+    result = Hive::Attempts::ClientResult.new(
+      status: :terminal, exit_status: 7, outcome: "failed",
+      receipt: {}, attempt_id: "attempt-text", stdout_bytes: 0
+    )
+    entrypoint = Object.new
+    entrypoint.define_singleton_method(:dispatch) { |**_kwargs| result }
+    run = command(durable: true, json: false, attempt_entrypoint: entrypoint)
+    resolved = task(folder: "/tmp/task-folder", stage_name: "execute", stage_index: 4)
+    run.define_singleton_method(:resolve_task) { resolved }
+
+    out, = capture_io do
+      exit_error = assert_raises(SystemExit) { run.call }
+      assert_equal 7, exit_error.status
     end
     assert_empty out
   end

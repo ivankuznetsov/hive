@@ -3,7 +3,7 @@ title: Hive::Digest
 type: module
 source: lib/hive/digest.rb, lib/hive/digest/, templates/digest_prompt.md.erb
 created: 2026-06-14
-updated: 2026-06-30
+updated: 2026-07-19
 tags: [digest, shipped, telegram, module]
 ---
 
@@ -198,7 +198,11 @@ the dispatch through the concurrency controller (tagged `kind: :digest`, off
 the task caps, at most one in flight). A successful child exit advances the
 cursor; a non-zero exit clears the pending marker, leaves the cursor for retry,
 and records an escalating failure backoff (`60`/`300`/`900`s) so the same date
-is **not** re-dispatched every tick. The dispatcher isolates scheduler
+is **not** re-dispatched every tick. A successful send whose cursor write fails
+also records that bounded backoff before re-raising; the day stays owed without
+being re-sent on every daemon poll. Shared atomic writes retain the original
+write/rename policy (`fsync: false`) rather than adding a new per-tick flush.
+The dispatcher isolates scheduler
 `tick` / `complete` exceptions as `fatal` log events with
 `keeping_previous: true`, so digest-state I/O faults do not crash the daemon
 poll loop. Dry-run pseudo-child reaping calls the same `complete` hook as real
@@ -225,7 +229,8 @@ allowlisted chat) and OFF otherwise — see [[commands/daemon]] and
   mechanical rendering, and runner orchestration.
 - `test/unit/digest/sender_test.rb` — chat-id resolution, dry-run bypass, Telegram send args.
 - `test/unit/daemon/digest_scheduler_test.rb` — first-run guard, catch-up,
-  cap logging, retry, disabled mode, and DST local-date behavior.
+  cap logging, child/write-failure backoff, disabled mode, and DST local-date
+  behavior.
 - `test/unit/daemon/dispatcher_test.rb` — scheduler dispatch/reap wiring,
   dry-run digest completion, and fatal-log isolation when scheduler completion
   raises.

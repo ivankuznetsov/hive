@@ -89,7 +89,9 @@ module Hive
       end
 
       def write_state(data)
-        Hive::AtomicFile.write(@state_path, JSON.pretty_generate(data))
+        # Preserve the schedulers' pre-consolidation write/rename durability
+        # contract; they did not flush each cursor update to physical storage.
+        Hive::AtomicFile.write(@state_path, JSON.pretty_generate(data), fsync: false)
       end
 
       def scheduler_contract

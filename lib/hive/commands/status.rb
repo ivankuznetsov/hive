@@ -105,6 +105,10 @@ module Hive
         error_kind_for(error)
       end
 
+      def suppress_envelope_serialization_errors?
+        true
+      end
+
       # `--diagnose` routes through diagnose_call which emits the
       # `hive-status-diagnose` envelope on success; the top-level rescue
       # must match the same schema so consumers can validate either

@@ -66,6 +66,10 @@ module Hive
         error_kind_for(error)
       end
 
+      def suppress_envelope_serialization_errors?
+        true
+      end
+
       def do_call
         task = resolve_task
         Hive::Lock.with_task_lock(task.folder, slug: task.slug, stage: task.stage_name) do

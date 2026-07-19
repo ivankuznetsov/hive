@@ -3,7 +3,7 @@ title: Testing
 type: reference
 source: test/, Rakefile, bin/hive-eval, .rubocop.yml, .github/workflows/ci.yml, .github/workflows/release.yml, config/brakeman.ignore
 created: 2026-04-25
-updated: 2026-07-17
+updated: 2026-07-19
 tags: [test, minitest, fixtures, honeycomb]
 ---
 
@@ -178,7 +178,9 @@ exercise every migrated consumer. The follow-up attempt/projection slice runs
 Pre-dispatch JSON integration coverage also exercises variant-aware status,
 web, pairing, bot, and digest error envelopes, including option-value collisions,
 invalid encodings, and `--` terminators that keep later flag-looking positionals
-from changing the selected schema.
+from changing the selected schema. Focused command tests also pin the shared
+envelope scaffold's legacy serialization-failure policies, the closed markers
+error key set, text-mode durable failure exits, and recursive copy isolation.
 
 `test/integration/implementation_identity_routing_test.rb` drives a real temporary attempt store, task journal, projection, generation change, and status preview without external model calls. It covers Codex routing/status correspondence, restart/config-drift stability, a fenced new owner, and unpinned pi/grok provider defaults. `run_execute_test.rb`, `run_open_pr_test.rb`, and `run_review_test.rb` retain the stage-level fake-launcher coverage.
 

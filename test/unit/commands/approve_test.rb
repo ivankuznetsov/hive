@@ -56,6 +56,22 @@ class HiveCommandsApproveTest < Minitest::Test
     assert_equal "", out
   end
 
+  def test_emit_envelope_preserves_json_generation_failure
+    cmd = command(json: true)
+
+    with_replaced_singleton_method(JSON, :generate, lambda { |_payload|
+      raise JSON::GeneratorError, "bad json"
+    }) do
+      out, err = capture_io do
+        assert_raises(JSON::GeneratorError) do
+          cmd.send(:emit_envelope, Hive::Error.new("boom"))
+        end
+      end
+      assert_empty out
+      assert_empty err
+    end
+  end
+
   def test_direction_of_reports_same_stage
     current = task(stage_index: 3, stage_name: "plan")
 

@@ -2,6 +2,13 @@
 
 All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with user-facing bullets and, for notable releases, descriptive subsections — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
+## 0.6.3
+
+- Retired the reduced Architecture and Writing scaffold templates now that
+  their full reviewed workflows ship through Honeycomb. Old `--template`
+  invocations now point to the corresponding install command; blank and
+  research scaffolds remain available.
+
 ## 0.6.2
 
 - Fixed ordinary patrol exhausting its launch allowance without advancing past

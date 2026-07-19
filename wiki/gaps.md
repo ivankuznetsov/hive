@@ -11,14 +11,6 @@ tags: [gap, todo]
 
 ## Current release gap
 
-- The managed-workflow configuration/pinning/exact-policy contract is source-
-  and focused-test-pinned, but no released Hive artifact has yet installed and
-  completed Architecture, Writing, and SEO Content from the public Honeycomb
-  catalog. The remaining proof must record the released Hive digest, catalog
-  commit, package/configuration digests, completed flagship artifacts, and
-  optional SEO inputs absent/partial without value disclosure. Hive's built-in
-  architecture and writing scaffold templates must remain until that proof.
-
 - Cross-project dependency admission is covered with local-path remotes and
   anonymized multi-project integration fixtures, including stored/live remote
   mismatch. It has not yet been dogfooded end-to-end against two separately

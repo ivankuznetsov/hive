@@ -77,13 +77,21 @@ Branches, tags, abbreviated revisions, arbitrary repositories, and unlisted
 versions are rejected.
 
 ```bash
-hive workflow install honeycomb/repo-brief --yes
+hive workflow install honeycomb/architecture --yes
+hive workflow install honeycomb/writing --yes
+hive workflow install honeycomb/seo-content --yes --allow-escalation
 hive workflow list
-hive workflow update repo-brief --dry-run
-hive workflow update repo-brief --yes
-hive workflow remove repo-brief --yes
+hive workflow update architecture --dry-run
+hive workflow update architecture --yes
+hive workflow remove architecture --yes
 hive workflow publish my-flow --version 1.0.0
 ```
+
+Architecture and Writing previously existed as lightweight `workflow new`
+scaffold templates. Their full reviewed packages now own those names in
+Honeycomb; `--template architecture` and `--template writing` return the exact
+install command instead of creating a reduced local copy. The owner-authored
+samples that remain in Hive are `blank` and `research`.
 
 Install clones one exact catalog snapshot, materializes
 `packages/<name>/<version>/` from that catalog commit (not from the review-head
@@ -271,7 +279,8 @@ differs from `state_file`.
 For a ready-to-copy example:
 
 ```bash
-hive workflow new architecture --template architecture
+hive workflow install honeycomb/architecture --yes
+hive new <project> --workflow architecture "Plan the system..."
 ```
 
 ## Trust Boundary

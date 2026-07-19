@@ -17,7 +17,7 @@ class WorkflowsTest < ActionDispatch::IntegrationTest
       ]
     end
 
-    def templates = %w[blank writing]
+    def templates = %w[blank research]
     def list(_project) = @rows
 
     def scaffold(project, id:, template:)
@@ -128,10 +128,10 @@ class WorkflowsTest < ActionDispatch::IntegrationTest
 
   test "project workflow scaffolding delegates to the real lifecycle boundary" do
     post create_workflow_path,
-         params: { project: @project, id: "launch-copy", template: "writing" }
+         params: { project: @project, id: "launch-copy", template: "research" }
 
     assert_redirected_to workflows_path(project: @project)
-    assert_includes @lifecycle.calls, [ :scaffold, @project, "launch-copy", "writing" ]
+    assert_includes @lifecycle.calls, [ :scaffold, @project, "launch-copy", "research" ]
   end
 
   test "install requires an untampered permission preview and explicit consent" do

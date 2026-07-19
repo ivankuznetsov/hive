@@ -42,7 +42,7 @@ Hive ships as a rubygem (`hive-cli`) attached to each GitHub Release, signed wit
 | Platform | Channel |
 |----------|---------|
 | macOS arm64 | [`brew install ivankuznetsov/hive/hive`](https://github.com/ivankuznetsov/homebrew-hive) |
-| Ubuntu 22.04+ / glibc Linux x86_64/aarch64 | <code>tmpdir="$(mktemp -d)" && trap 'rm -rf "$tmpdir"' EXIT && curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.6.2/install.sh -o "$tmpdir/hive-install.sh" && bash "$tmpdir/hive-install.sh"</code> |
+| Ubuntu 22.04+ / glibc Linux x86_64/aarch64 | <code>tmpdir="$(mktemp -d)" && trap 'rm -rf "$tmpdir"' EXIT && curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.6.3/install.sh -o "$tmpdir/hive-install.sh" && bash "$tmpdir/hive-install.sh"</code> |
 | Arch Linux x86_64/aarch64 | [`yay -S hive-bin`](https://aur.archlinux.org/packages/hive-bin) |
 
 Prerequisites: **Ruby 3.4** (the gem and its runtime deps install against this), git ≥ 2.40, authenticated `claude` ≥ 2.1.118, `codex` ≥ 0.125.0 for the default execute agent, `grok` ≥ 0.2.90 when selected, authenticated `gh`, `tmux` ≥ 3.0 when the project uses the default `claude.mode: tmux`, and Node.js/npm for managed QMD install/repair. The bash installer reports its own installer-side prereqs (`curl`, `jq`, `gem`, checksum tool) on first run; if npm is missing, Hive still installs and `hive doctor` reports the QMD gap non-fatally.
@@ -254,16 +254,24 @@ hive new benchmark-project "benchmark campaign"
 
 A workflow is just an **ordered list of stages in a YAML descriptor**, so you can author your own per project: writing, research, triage, translation, a weekly-report generator — any task that moves through a sequence of steps where an AI agent does the work at each one. You describe the stages; the daemon runs the pipeline.
 
+Architecture, Writing, and SEO Content ship as full reviewed Honeycomb workflows. Installation chooses an agent for every stage/reviewer slot, suggests runnable defaults from `hive init`, and keeps those choices in project configuration rather than the package:
+
+```bash
+hive workflow install honeycomb/architecture --yes
+hive workflow install honeycomb/writing --yes
+hive workflow install honeycomb/seo-content --yes --allow-escalation
+```
+
 Scaffold one from a sample and run it:
 
 ```bash
-# Bootstrap a project bound to a new "writing" workflow, seeded from a sample.
-hive init --new-workflow writing ~/Dev/essays
-cd ~/Dev/essays
+# Bootstrap a project bound to a new owner-authored workflow.
+hive init --new-workflow weekly-report ~/Dev/reports
+cd ~/Dev/reports
 
-# Edit the copied-in stage instructions to taste, then drop in an idea.
-hive new essays "an essay on folder-as-agent pipelines"
-hive status            # watch the daemon move it: research → draft → edit → done
+# Edit the descriptor and stage instruction, then drop in an idea.
+hive new reports "summarize this week's shipped work"
+hive status
 ```
 
 A descriptor is short enough to read top to bottom — an entry gate, agent stages that each do one job, an exit gate:
@@ -278,7 +286,7 @@ stages:
   - { name: done,     kind: terminal, state_file: done.md }
 ```
 
-Three commands cover authoring: `hive workflow new ID` (scaffold a blank starter in an existing project), `hive workflow new ID --template writing|research` (seed from a real multi-stage sample), and `hive init --new-workflow ID` (bootstrap a project and bind the workflow as its default in one go). Custom workflows are discovered from `.hive-state/workflows/*.yml` and run through the same surfaces as the built-ins — `hive new --workflow`, `status`, `run`, `approve`, and the daemon.
+Three commands cover authoring: `hive workflow new ID` (scaffold a blank starter in an existing project), `hive workflow new ID --template research` (seed from the multi-stage research sample), and `hive init --new-workflow ID` (bootstrap a project and bind the workflow as its default in one go). Custom workflows are discovered from `.hive-state/workflows/*.yml` and run through the same surfaces as the built-ins — `hive new --workflow`, `status`, `run`, `approve`, and the daemon.
 
 **Full walkthrough** — mental model, descriptor anatomy, writing stage instructions, advanced options (terminal approval gates, `skill:` stages, per-stage permissions), and gotchas: **[hivecli.sh/docs/custom-workflows](https://hivecli.sh/docs/custom-workflows/)** (also in-repo at [docs/workflows.md](docs/workflows.md)).
 
@@ -289,7 +297,7 @@ The TUI is the recommended human interface and an agent-driven CLI is the recomm
 | Group | Verbs | What it's for |
 |---|---|---|
 | Workflow | `hive new`, `hive brainstorm`, `hive plan`, `hive develop`, `hive open-pr`, `hive review`, `hive artifacts`, `hive finalize`, `hive archive`, `hive run`, `hive approve` | Drive a single stage of a single task by hand. `--from <stage>` lets you re-run a stage in place. See [docs/cli.md#day-to-day-workflow](docs/cli.md#day-to-day-workflow). |
-| Workflow authoring | `hive workflow new` | Scaffold a project-local workflow descriptor under `.hive-state/workflows/` (`--template writing\|research` seeds from a sample). See [Custom Workflows](#custom-workflows) and [docs/workflows.md](docs/workflows.md). |
+| Workflow authoring | `hive workflow new` | Scaffold a project-local workflow descriptor under `.hive-state/workflows/` (`--template research` seeds from a sample). See [Custom Workflows](#custom-workflows) and [docs/workflows.md](docs/workflows.md). |
 | Review findings | `hive findings`, `hive accept-finding`, `hive reject-finding` | Inspect GFM-checkbox findings from the latest review pass and tick which ones should feed the next fix pass. See [docs/cli.md#findings-triage](docs/cli.md#findings-triage). |
 | Patrol | `hive patrol` | Run one opt-in repository patrol cycle: map feature slices, review them, validate fixes, and open PRs for passed fixes only. See [docs/cli.md#patrol](docs/cli.md#patrol). |
 | Daemon | `hive daemon install/enable/start/status/tail/stop/disable` | Manage the global daemon service plus per-project enrollment. The service polls `hive status --json` and dispatches workflow verbs for enrolled projects. Read [wiki/operating.md](wiki/operating.md) before going live. See [docs/cli.md#daemon](docs/cli.md#daemon). |

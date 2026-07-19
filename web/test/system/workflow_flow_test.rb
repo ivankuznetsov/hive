@@ -23,7 +23,7 @@ class WorkflowFlowTest < ApplicationSystemTestCase
     assert_selector "select[name='template'] option:checked", text: "blank"
     within("[aria-labelledby='author-workflow-heading']") do
       fill_in "Workflow ID", with: "launch-brief"
-      select "writing", from: "Starting template"
+      select "research", from: "Starting template"
       click_button "Create workflow"
     end
 
@@ -33,8 +33,8 @@ class WorkflowFlowTest < ApplicationSystemTestCase
     root = File.join(ENV.fetch("HIVE_TEST_HOME_ROOT"), "repos", @project, ".hive-state", "workflows")
     assert File.file?(File.join(root, "launch-brief.yml")),
            "the browser must create the real project descriptor"
-    assert File.file?(File.join(root, "launch-brief", "research.md")),
-           "the selected writing template must create its stage instructions"
+    assert File.file?(File.join(root, "launch-brief", "gather.md")),
+           "the selected research template must create its stage instructions"
   end
 
   test "operator reviews exact managed permissions before installing" do
@@ -90,7 +90,7 @@ class WorkflowFlowTest < ApplicationSystemTestCase
       @installed_sources = []
     end
 
-    def templates = %w[blank writing]
+    def templates = %w[blank research]
 
     def list(_project)
       rows = [ row("coding", "built_in") ]

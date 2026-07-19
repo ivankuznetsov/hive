@@ -52,18 +52,19 @@ module Hive
         def run_agent!
           identity = launch_identity
           profile = Hive::Stages::Base.stage_profile(@cfg, @stage.name, explicit_agent: identity.fetch(:agent))
-          scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
+          actor_prompt, scope = Hive::Stages::Base.actor_prompt_and_scope(
             @cfg,
             @stage.name,
             @task,
             profile,
-            managed_slot: "stages.#{@stage.name}.revise",
+            prompt: prompt(profile),
+            managed_slot: managed_slot,
             **permission_kwargs
           )
           resource_limits = Hive::Stages::Base.stage_resource_limits(@cfg, @stage)
           result = Hive::Stages::Base.spawn_agent(
             @task,
-            prompt: managed_prompt(prompt(profile)),
+            prompt: actor_prompt,
             add_dirs: scope.fetch(:add_dirs),
             cwd: @task.folder,
             **resource_limits,
@@ -115,11 +116,7 @@ module Hive
           )
         end
 
-        def managed_prompt(body)
-          return body unless @task.respond_to?(:managed_prompt)
-
-          @task.managed_prompt("stages.#{@stage.name}.revise", body)
-        end
+        def managed_slot = "stages.#{@stage.name}.revise"
 
         def timeout_sec
           Hive::Stages::Base.stage_resource_limits(@cfg, @stage).fetch(:timeout_sec)

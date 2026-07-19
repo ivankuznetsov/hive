@@ -127,6 +127,18 @@ class StagesCouncilTest < Minitest::Test
       workflow = mixed_provider_council_workflow
       task = task_for(project, workflow: workflow)
       task.define_singleton_method(:managed_workflow?) { true }
+      context_slots = []
+      prompt_slots = []
+      task.define_singleton_method(:managed_runtime_context) do |slot|
+        context_slots << slot
+        { slot: slot }
+      end
+      task.define_singleton_method(:managed_prompt) do |slot, body, context|
+        raise "wrong managed context" unless context.fetch(:slot) == slot
+
+        prompt_slots << slot
+        "#{slot}:#{body}"
+      end
       File.write(File.join(task.folder, "draft.md"), "Architecture draft\n")
       outputs = [
         "Verdict: ready\n",
@@ -157,6 +169,15 @@ class StagesCouncilTest < Minitest::Test
           assert_equal :grok, reviser.first.fetch(:profile).name
           assert_equal "grok-child", reviser.first.fetch(:model)
           assert_nil reviser.first[:effort]
+          assert_equal(
+            {
+              "stages.review.reviewers.one" => 2,
+              "stages.review.reviewers.two" => 2,
+              "stages.review.revise" => 1
+            },
+            context_slots.tally
+          )
+          assert_equal context_slots, prompt_slots
         end
       end
     end
@@ -520,13 +541,12 @@ class StagesCouncilTest < Minitest::Test
     assert_equal "paused", Hive::Stages::Council.action_for(:paused)
   end
 
-  def test_managed_council_children_require_mapped_agents_and_wrap_revise_prompts
+  def test_managed_council_children_require_mapped_agents
     stage = Hive::Workflow::Stage.new(
       name: "review", index: 1, state_file: "review.md", kind: :council
     )
     task = Object.new
     task.define_singleton_method(:managed_workflow?) { true }
-    task.define_singleton_method(:managed_prompt) { |slot, body| "#{slot}:#{body}" }
 
     reviewer = Hive::Workflow::Reviewer.new(name: "missing", prompt: "Review", permissions: "read-only")
     reviewer_runner = Hive::Stages::Council::Reviewer.new(
@@ -540,7 +560,6 @@ class StagesCouncilTest < Minitest::Test
       target_path: "/tmp/draft.md", triage_path: "/tmp/triage.md"
     )
     assert_raises(Hive::ConfigError) { revise_runner.send(:launch_identity) }
-    assert_equal "stages.review.revise:body", revise_runner.send(:managed_prompt, "body")
   end
 
   private

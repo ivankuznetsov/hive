@@ -175,7 +175,9 @@ catalog materialization and generation placement. Generation directories and
 ordinary files are hardened to 0555 and 0444 before same-parent atomic
 publication, trusted executable payloads remain 0555, and reuse repairs mode
 tampering after content validation. Snapshots store environment variable names
-only and inject a current value only into its executing slot.
+only and inject a current value only into its executing slot. Each actor spawn
+loads that immutable runtime context once for both prompt and permission setup;
+preset actor compilation is in-memory and does not create empty policy state.
 `gh` and `qmd` remain baseline Hive dependencies. `Publisher` remains on the
 legacy submission layout and is not a v2 package authoring path.
 

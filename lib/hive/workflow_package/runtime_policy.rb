@@ -35,7 +35,7 @@ module Hive
       # Builds an isolated child environment around one descriptor actor's
       # exact permission block. Unlike #compile, this does not reconstruct a
       # policy from the package-wide catalog disclosure.
-      def self.compile_actor(permission_spec, task_folder:, profile:, policy_dir:, package_root:, environment: {})
+      def self.compile_actor(permission_spec, task_folder:, profile:, package_root:, environment: {})
         task_root = File.realpath(task_folder)
         package_root = File.realpath(package_root)
         scope = Hive::PermissionScope.resolve(
@@ -55,7 +55,6 @@ module Hive
           end
           child_environment[name] = value
         end
-        FileUtils.mkdir_p(policy_dir, mode: 0o700)
         Policy.new(
           permission_mode: scope.permission_mode,
           allowed_tools: scope.allowed_tools,
@@ -118,8 +117,7 @@ module Hive
           else
             compile_actor(
               spec, task_folder: task_folder, package_root: package_root,
-              profile: Hive::AgentProfiles.lookup(name), environment: {},
-              policy_dir: File.join(policy_dir, "actor-#{index}-#{name}")
+              profile: Hive::AgentProfiles.lookup(name), environment: {}
             )
           end
         end

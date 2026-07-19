@@ -240,6 +240,40 @@ class StagesAgentTest < Minitest::Test
     end
   end
 
+  def test_managed_actor_reuses_one_runtime_context_for_prompt_and_permissions
+    with_tmp_dir do |project|
+      instruction_path = File.join(project, "workflow-work.md")
+      package_root = File.join(project, ".hive-state", "workflows", "demo", "versions", "#{'a' * 40}")
+      File.write(instruction_path, "Do managed work.\n")
+      FileUtils.mkdir_p(package_root)
+      descriptor = instruction_workflow(instruction_path, permissions: "read-only")
+      task = task_for(project, "work", descriptor: descriptor)
+      context = { package_root: package_root, environment: { "DEMO_INPUT" => "configured" } }
+      loads = 0
+      task.define_singleton_method(:managed_workflow?) { true }
+      task.define_singleton_method(:managed_runtime_context) do |slot_id|
+        loads += 1
+        raise "wrong managed slot" unless slot_id == "stages.work"
+
+        context
+      end
+      task.define_singleton_method(:managed_prompt) do |slot_id, body, supplied_context|
+        raise "wrong managed context" unless supplied_context.equal?(context)
+
+        "#{slot_id}:#{body}"
+      end
+
+      with_stubbed_spawn do |captured|
+        Hive::Stages::Agent.run!(task, {})
+
+        assert_equal 1, loads
+        assert_match(/\Astages\.work:/, captured.first.fetch(:prompt))
+        policy = captured.first.fetch(:kwargs).fetch(:runtime_policy)
+        assert_equal "configured", policy.environment.fetch("DEMO_INPUT")
+      end
+    end
+  end
+
   def test_descriptor_permissions_fail_closed_when_runner_cannot_enforce_scope
     with_tmp_dir do |project|
       instruction_path = File.join(project, "workflow-work.md")

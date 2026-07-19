@@ -371,7 +371,7 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
         error = assert_raises(Hive::ConfigError) do
           Hive::WorkflowPackage::RuntimePolicy.compile_actor(
             "read-only", task_folder: task, package_root: package, profile: profile,
-            environment: environment, policy_dir: File.join(dir, "policy-#{index}")
+            environment: environment
           )
         end
         assert_match(/environment is malformed/, error.message)
@@ -379,8 +379,7 @@ class WorkflowPackageRuntimePolicyTest < Minitest::Test
 
       error = assert_raises(Hive::ConfigError) do
         Hive::WorkflowPackage::RuntimePolicy.compile_actor(
-          "read-only", task_folder: task, package_root: File.join(dir, "missing"), profile: profile,
-          policy_dir: File.join(dir, "missing-policy")
+          "read-only", task_folder: task, package_root: File.join(dir, "missing"), profile: profile
         )
       end
       assert_match(/package context is unavailable/, error.message)

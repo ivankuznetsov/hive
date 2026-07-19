@@ -15,3 +15,5 @@
   workflow command base, and made update reports single-evaluation values.
 - Routed task metadata mutations through one field-preserving rewrite and
   generic agent/council marker actions through their shared stage base.
+- Reused one immutable managed runtime context across each actor's prompt and
+  permission setup, and stopped creating empty actor-policy directories.

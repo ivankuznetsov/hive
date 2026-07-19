@@ -11,3 +11,5 @@
   made lifecycle resolution consume a single validated package result.
 - Reused the shared recursive key normalizer, digest pattern, and mapping-role
   vocabulary instead of maintaining workflow-package copies.
+- Hoisted project configuration and temporary runtime admission into the
+  workflow command base, and made update reports single-evaluation values.

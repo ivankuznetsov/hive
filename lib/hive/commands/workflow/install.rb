@@ -1,9 +1,7 @@
 require "tmpdir"
-require "hive/agent_profiles"
 require "hive/commands/workflow/base"
 require "hive/commands/workflow/configuration_resolver"
 require "hive/workflow_package/registry_client"
-require "hive/workflow_package/runtime_policy"
 require "hive/workflow_package/validator"
 require "hive/workflows/project"
 
@@ -60,7 +58,9 @@ module Hive
                     "honeycomb/#{resolution.name} is already managed at another commit; use `hive workflow update #{resolution.name}`"
             end
 
-            admit_runtime!(validated.workflow, resolver.configuration, package_root)
+            admit_runtime!(
+              validated.workflow, package_root, configuration: resolver.configuration
+            )
             if @dry_run
               return emit(payload(resolution, resolver, "dry_run"),
                           human_lines: human_disclosure(resolution, resolver, verb: "would install"))
@@ -91,19 +91,6 @@ module Hive
         end
 
         private
-
-        def admit_runtime!(workflow, configuration, package_root)
-          Dir.mktmpdir("hive-workflow-admission-") do |admission_root|
-            task_folder = File.join(admission_root, "task")
-            FileUtils.mkdir_p(task_folder)
-            configured = configuration.apply(workflow, cfg: project_config)
-            Hive::WorkflowPackage::RuntimePolicy.admit_workflow!(
-              configured,
-              task_folder: task_folder,
-              policy_dir: File.join(admission_root, "policy"), package_root: package_root
-            )
-          end
-        end
 
         def payload(resolution, resolver, status)
           {
@@ -148,10 +135,6 @@ module Hive
             *optional_input_disclosure(resolver.inputs),
             *mapping_lines
           ]
-        end
-
-        def project_config
-          @project_config ||= Hive::Config.load(@project_root).merge("project_root" => @project_root)
         end
 
         def configuration_resolver(validated, resolution, overrides: @mapping_overrides, previous: nil)

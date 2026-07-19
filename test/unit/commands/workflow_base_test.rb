@@ -16,6 +16,8 @@ class WorkflowBaseTest < Minitest::Test
     def confirm(prompt) = confirmed?(prompt)
     def commit(name, action) = commit_state(name, action)
     def kind(error) = error_kind(error)
+    def config = project_config
+    def state_path = hive_state_path
     def envelope_schema = "hive-workflow-install"
   end
 
@@ -65,6 +67,29 @@ class WorkflowBaseTest < Minitest::Test
     end
 
     assert_equal [ "workflows/demo" ], calls.first.fetch(:pathspecs)
+  end
+
+  def test_project_config_is_shared_by_store_path_and_subclasses
+    with_tmp_dir do |project|
+      FileUtils.mkdir_p(File.join(project, ".hive-state"))
+      File.write(
+        File.join(project, ".hive-state", "config.yml"),
+        Hive::Config::DEFAULTS.merge("hive_state_path" => ".state").to_yaml
+      )
+      loads = 0
+      original = Hive::Config.method(:load)
+      replacement = lambda do |root|
+        loads += 1
+        original.call(root)
+      end
+      command = Probe.new(project_root: project, json: false, stdout: StringIO.new)
+
+      with_replaced_singleton_method(Hive::Config, :load, replacement) do
+        assert_equal project, command.config.fetch("project_root")
+        assert_equal File.join(project, ".state"), command.state_path
+      end
+      assert_equal 1, loads
+    end
   end
 
   def test_error_kind_covers_every_lifecycle_recovery_category

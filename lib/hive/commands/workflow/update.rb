@@ -1,9 +1,7 @@
 require "tmpdir"
-require "hive/agent_profiles"
 require "hive/commands/workflow/base"
 require "hive/commands/workflow/configuration_resolver"
 require "hive/workflow_package/registry_client"
-require "hive/workflow_package/runtime_policy"
 require "hive/workflow_package/semantic_diff"
 require "hive/workflow_package/validator"
 require "hive/workflows/project"
@@ -54,19 +52,20 @@ module Hive
                 *optional_input_disclosure(report.fetch("optional_inputs"))
               ])
             end
-            configured = resolver.configuration.apply(validated.workflow, cfg: project_config)
-            admit_runtime!(configured, candidate_root)
+            admit_runtime!(
+              validated.workflow, candidate_root, configuration: resolver.configuration
+            )
             report = payload("dry_run", current, candidate, diff, resolver)
             return emit(report, human_lines: human_diff(report)) if @dry_run
 
             human_diff(report).each { |line| @stdout.puts line } if interactive?
 
             unless confirmed?("Update honeycomb/#{@name} #{current.fetch('version')} -> #{candidate.version}?")
-              return emit(payload("cancelled", current, candidate, diff, resolver),
+              return emit(report.merge("status" => "cancelled"),
                           human_lines: [ "hive: update cancelled; the previous selection is unchanged" ])
             end
-            unless escalation_confirmed?(diff.escalation? || resolver.actor_policy_changed?)
-              return emit(payload("cancelled", current, candidate, diff, resolver),
+            unless escalation_confirmed?(report.dig("diff", "escalation"))
+              return emit(report.merge("status" => "cancelled"),
                           human_lines: [ "hive: escalation declined; the previous selection is unchanged" ])
             end
 
@@ -86,8 +85,8 @@ module Hive
             retained = store.cleanup_unreferenced(@name)
             commit_state(@name, "cleaned")
             Hive::Workflows::Project.reset!
-            emit(payload("updated", current, candidate, diff, resolver).merge("retained_commits" => retained),
-                 human_lines: human_diff(payload("updated", current, candidate, diff, resolver)))
+            report = report.merge("status" => "updated", "retained_commits" => retained)
+            emit(report, human_lines: human_diff(report))
           end
         end
 
@@ -103,17 +102,6 @@ module Hive
 
           @stdout.print "This update expands or weakens security capabilities. Allow escalation? [y/N] "
           %w[y yes].include?(@stdin.gets.to_s.strip.downcase)
-        end
-
-        def admit_runtime!(workflow, package_root)
-          Dir.mktmpdir("hive-workflow-update-admission-") do |dir|
-            task = File.join(dir, "task")
-            FileUtils.mkdir_p(task)
-            Hive::WorkflowPackage::RuntimePolicy.admit_workflow!(
-              workflow, task_folder: task,
-              policy_dir: File.join(dir, "policy"), package_root: package_root
-            )
-          end
         end
 
         def noop_payload(candidate, current, resolver)
@@ -134,6 +122,8 @@ module Hive
         end
 
         def payload(status, current, candidate, diff, resolver)
+          actor_policy_changed = resolver.actor_policy_changed?
+          diff_data = diff.to_h
           {
             "schema" => SCHEMA,
             "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch(SCHEMA),
@@ -143,12 +133,12 @@ module Hive
             "from_commit" => current.fetch("source_commit"),
             "to_commit" => candidate.source_commit,
             "manifest_digest" => candidate.manifest_digest,
-            "diff" => diff.to_h.merge(
-              "actor_policy_changed" => resolver.actor_policy_changed?,
+            "diff" => diff_data.merge(
+              "actor_policy_changed" => actor_policy_changed,
               "input_bindings_changed" => resolver.input_bindings_changed?,
-              "escalation" => diff.escalation? || resolver.actor_policy_changed?,
-              "escalation_reasons" => (diff.to_h.fetch("escalation_reasons") +
-                (resolver.actor_policy_changed? ? [ "actor_policy_redistribution" ] : [])).uniq
+              "escalation" => diff.escalation? || actor_policy_changed,
+              "escalation_reasons" => (diff_data.fetch("escalation_reasons") +
+                (actor_policy_changed ? [ "actor_policy_redistribution" ] : [])).uniq
             ),
             "configuration_digest" => resolver.configuration.digest,
             "mappings" => resolver.mappings,
@@ -168,10 +158,6 @@ module Hive
         end
 
         def envelope_schema = SCHEMA
-
-        def project_config
-          @project_config ||= Hive::Config.load(@project_root).merge("project_root" => @project_root)
-        end
       end
     end
   end

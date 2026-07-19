@@ -137,10 +137,6 @@ module Hive
           }
         end
 
-        def project_config
-          @project_config ||= Hive::Config.load(@project_root).merge("project_root" => @project_root)
-        end
-
         def envelope_schema = SCHEMA
       end
     end

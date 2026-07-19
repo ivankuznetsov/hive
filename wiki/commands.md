@@ -89,6 +89,17 @@ final recognized JSON flag is truthy, pre-dispatch Thor usage errors listed in
 unversioned `hive-setup` usage failures and Screenote connect/disconnect
 missing-`SERVICE` failures.
 
+After dispatch, commands whose published failures use the common
+`Hive::Schemas::ErrorEnvelope` shape route through
+`Hive::Schemas::EnvelopeEmitter`. The mixin owns exception normalization,
+single-document stdout guarding, schema construction, and closed-pipe handling;
+commands supply only their schema, error-kind mapping, and optional fields.
+This covers approve, findings inspection/toggles, marker clearing, run, workflow
+stage actions, status/diagnose, and the existing forget/prune/daemon/drop/ad-hoc
+review producers. Commands with injected output streams, variant schema routing,
+or deliberately different published fields retain dedicated emitters rather
+than changing their wire contracts merely to share implementation.
+
 `bin/hv` is the Apache Hive collision fallback entrypoint. It probes only the
 owned Hive CLI locations and `HIVE_BIN_OVERRIDE`; it intentionally does not
 fall through to common Apache Hive paths. See [[operating]] for install-channel

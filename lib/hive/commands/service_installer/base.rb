@@ -1,6 +1,7 @@
 require "cgi"
 require "fileutils"
 require "hive/install_channel"
+require "hive/invoked_binary"
 require "hive/commands/service_installer/outcome"
 require "rbconfig"
 require "shellwords"
@@ -399,11 +400,7 @@ module Hive
         end
 
         def which(name)
-          ENV["PATH"].to_s.split(File::PATH_SEPARATOR).each do |dir|
-            path = File.join(dir, name)
-            return path if File.file?(path) && File.executable?(path)
-          end
-          nil
+          Hive::InvokedBinary.which(name)
         end
 
         def platform

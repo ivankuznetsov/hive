@@ -174,6 +174,7 @@ module Hive
         existing_suppressions = prior_suppressions
         pending_features = features.reject { |feature| completed.key?(feature.id.to_s) }
         token_budget = Hive::Patrol::TokenBudget.new(project_root, cfg: cfg)
+        review_features = bounded_review_features(pending_features, token_budget)
         reviewer = build_reviewer(analysis_root, cfg, state, token_budget)
         yielded_thesis_ids = {}
         incrementally_suppressed = []
@@ -182,8 +183,8 @@ module Hive
         completed_new_results = {}
         new_theses = with_claim_heartbeat(@manifest&.fetch("job_id", nil)) do
           reviewer.call(
-            pending_features,
-            leverage_by_feature: score_features(pending_features, analysis_root, cfg)
+            review_features,
+            leverage_by_feature: score_features(review_features, analysis_root, cfg)
           ) do |reviewed_feature, feature_theses, feature_result|
             guarded = guard_theses(feature_theses, project_root, cfg, state)
             incrementally_suppressed.concat(guarded)
@@ -210,16 +211,19 @@ module Hive
         theses = existing_theses + new_theses
         suppressed = existing_suppressions + new_suppressed
         feature_results = merged_feature_results(
-          completed, reviewer, pending_features, new_theses
+          completed, reviewer, review_features, new_theses
         )
+        result_ids = feature_results.to_h { |item| [ item.fetch("feature_id").to_s, true ] }
+        reported_features = features.select { |feature| result_ids[feature.id.to_s] }
+        scope_complete = pending_features.all? { |feature| result_ids[feature.id.to_s] }
 
         unless ephemeral_discovery?
           persist(state, theses, suppressed)
           update_scan_state(state, project_root, cfg, reviewer)
         end
         payload = build_payload(
-          entry, project_root, cfg, state, features, theses, suppressed,
-          reviewer, feature_results: feature_results
+          entry, project_root, cfg, state, reported_features, theses, suppressed,
+          reviewer, feature_results: feature_results, complete: scope_complete
         )
         cleanup_analysis_worktree! if pr_mode?
         checkpoint_manual_discovery!(payload) if @manual_claim_token
@@ -318,11 +322,11 @@ module Hive
       end
 
       def build_payload(entry, project_root, cfg, state, features, theses, suppressed, reviewer,
-                        feature_results: nil)
+                        feature_results: nil, complete: nil)
         @reporter = Hive::RefactorPatrol::Reporter.new(cfg)
         return build_v2_payload(
           entry, project_root, features, theses, suppressed, reviewer,
-          feature_results: feature_results
+          feature_results: feature_results, complete: complete
         ) if pr_mode?
 
         scanned_sha = @dry_run ? current_default_sha(project_root, cfg) : state.state["last_scanned_sha"].to_s
@@ -348,9 +352,16 @@ module Hive
           root,
           cfg: cfg,
           state: state,
-          dry_run: ephemeral_discovery?,
+          # PR-scoped discovery is read-only, but it is still a real daemon
+          # run whose prompt, logs, and raw final message must remain auditable.
+          dry_run: @dry_run,
           source_pr: pr_mode? ? source_pr_context : nil,
           read_only: pr_mode?,
+          audit_context: pr_mode? ? {
+            "job_id" => @manifest.fetch("job_id"),
+            "analysis_sha" => @checkout_snapshot.fetch("analysis_sha"),
+            "source_pr" => source_pr_context
+          } : nil,
           token_budget: token_budget
         )
       end
@@ -796,20 +807,15 @@ module Hive
           end
         end
         by_feature = current.to_h { |item| [ item["feature_id"].to_s, item ] }
-        pending_features.each do |feature|
-          next if by_feature.key?(feature.id.to_s)
-
-          error = {
-            "feature_id" => feature.id.to_s,
-            "error" => "missing_feature_result",
-            "message" => "reviewer returned no completion evidence for mapped feature"
-          }
-          by_feature[feature.id.to_s] = {
-            "feature_id" => feature.id.to_s, "complete" => false,
-            "thesis_ids" => [], "errors" => [ error ]
-          }
-        end
         completed.merge(by_feature).values.sort_by { |item| item.fetch("feature_id") }
+      end
+
+      def bounded_review_features(pending_features, token_budget)
+        return pending_features unless pr_mode?
+        return [] if pending_features.empty?
+
+        capacity = token_budget.remaining_launches(stage: Hive::RefactorPatrol::ReviewAgentRunner::STAGE)
+        pending_features.first([ capacity, 1 ].max)
       end
 
       def lifecycle_theses(aggregate)
@@ -888,7 +894,7 @@ module Hive
       end
 
       def build_v2_payload(entry, project_root, features, theses, suppressed, reviewer,
-                           feature_results: nil)
+                           feature_results: nil, complete: nil)
         progress = Array(feature_results)
         errors = if progress.empty? && features.empty?
           []
@@ -913,7 +919,7 @@ module Hive
           features: features,
           theses: current_theses,
           suppressed: current_suppressions,
-          complete: errors.empty? && progress.all? { |item| item["complete"] == true },
+          complete: complete != false && errors.empty? && progress.all? { |item| item["complete"] == true },
           review_errors: errors,
           feature_results: progress,
           actions: [],

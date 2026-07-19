@@ -63,6 +63,15 @@ module Hive
           payload
         end
 
+        def optional_input_disclosure(inputs)
+          Array(inputs).map do |input|
+            binding = input["binding"] || "unbound"
+            availability = input["available"] ? "available; value: [redacted]" : "unavailable"
+            "optional input: #{input.fetch('name')}; binding: #{binding}; " \
+              "authorized slots: #{Array(input.fetch('authorized_slots')).join(', ')}; #{availability}"
+          end
+        end
+
         def confirmed?(prompt)
           return true if @yes
           unless interactive?

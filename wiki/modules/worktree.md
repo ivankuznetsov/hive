@@ -3,7 +3,7 @@ title: Hive::Worktree
 type: module
 source: lib/hive/worktree.rb
 created: 2026-04-25
-updated: 2026-07-17
+updated: 2026-07-18
 tags: [worktree, git, pointer, dependencies]
 ---
 
@@ -105,7 +105,7 @@ created_at: 2026-04-25T10:23:45Z
 execute_base_head: <sha>   # optional; set by 4-execute for commit-baseline checks
 ```
 
-`read_pointer` parses with `YAML.safe_load` and validates the result is a Hash; raises `WorktreeError` otherwise.
+`read_pointer` parses with `YAML.safe_load` and validates the result is a Hash; raises `WorktreeError` otherwise. `Hive::Stages::Base.worktree_pointer_or_exit` owns the stricter stage-entry policy shared by open-PR and finalize: the pointer must contain `path`, that directory must still exist, and either failure preserves the established warning and exit status 1.
 
 `execute_base_head` records the worktree HEAD immediately after 4-execute creates the task branch. Execute completion compares later HEADs against this baseline, not just against the current spawn's starting HEAD, so a dirty-worktree pause can be recovered by cleaning the worktree without requiring a second empty commit.
 
@@ -123,8 +123,8 @@ This prevents an agent (with Write access to `worktree.yml`) from setting `path:
 
 - `Stages::Execute#run_init_pass` — creates the worktree, writes the pointer, validates the prefix.
 - `Stages::Execute#run_iteration_pass` — re-reads the pointer, re-validates.
-- `Stages::OpenPr#run!` — reads pointer for the worktree path; `git push` runs there.
-- `Stages::Finalize#run!` — reads pointer to verify the final branch state before wrapping up the PR.
+- `Stages::OpenPr#run!` — uses the shared stage-entry pointer validator before `git push` runs in the worktree.
+- `Stages::Finalize#run!` — uses the same validator before verifying the final branch state.
 - `Stages::Done#run!` — reads pointer to print cleanup instructions.
 - `Hive::Commands::AdhocReview` — materializes a PR head at the normal worktree root before creating a synthetic `6-review` task.
 - `Hive::Babysitter::Worktree` — delegates PR-head materialization here while keeping babysitter-specific cleanup and fork policy around it.

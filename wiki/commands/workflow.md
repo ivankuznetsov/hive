@@ -3,7 +3,7 @@ title: hive workflow
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/workflow.rb, templates/workflows/
 created: 2026-06-21
-updated: 2026-07-18
+updated: 2026-07-19
 tags: [command, workflow, authoring, honeycomb, registry]
 ---
 
@@ -16,6 +16,9 @@ hive workflow new my-flow
 hive workflow new my-flow --template writing
 hive workflow new my-flow --json
 hive workflow install honeycomb/repo-brief --yes
+hive workflow install honeycomb/repo-brief --yes --allow-escalation \
+  --mapping stages.research=codex,model=gpt-5.6-sol,effort=high \
+  --input-binding GSC_TOKEN=PRODUCTION_GSC_TOKEN
 hive workflow install honeycomb/repo-brief --dry-run --json
 hive workflow list --json
 hive workflow update repo-brief --dry-run --json
@@ -41,17 +44,49 @@ provenance, not install-tree Git identity.
 
 Managed storage is
 `workflows/NAME/versions/CATALOG_COMMIT/` plus
-`workflows/NAME/honeycomb.lock.json`. New tasks copy the selected catalog commit
-and release digest into `meta.yml`; update/remove retain any referenced
-generation. Loader fingerprints include managed locks and selected generations,
-while a pinned task loads its exact descriptor directly from the managed store.
+`workflows/NAME/configurations/CONFIGURATION_DIGEST.json` plus
+`workflows/NAME/honeycomb.lock.json`. Install enumerates each active stage,
+reviewer, and reviser, shows one complete suggested mapping summary, and lets an
+interactive operator accept the defaults or edit each slot. New tasks copy the
+catalog commit, release digest, and configuration digest into `meta.yml`;
+update/remove retain every identity referenced by an in-flight task. When the
+selected pointer is a legacy schema-v1 lock, Hive derives its compatibility
+configuration from the project's effective agent profiles and durably stores
+the snapshot before writing task metadata, so a later schema-v2 update cannot
+strand the task's configuration pin.
 
-Current v2 permissions are coarse disclosure data. Only the exact low-risk,
-task-local read-only subset maps losslessly to Hive's managed runtime; broader
-packages fail admission without writes. Consequently the current Bench and
-Docs Sync seeds resolve and verify but their advertised install commands do not
-yet succeed. The existing `publish` command also remains a legacy submission
-producer, not a `packages/NAME/VERSION/manifest.yml` publisher.
+Package descriptors cannot select agent/model/effort; immutable installation
+configuration overlays those choices in memory. Planning/development defaults
+follow the project's init choices and reviewer roles cycle configured review
+agents. Updates preserve only slots whose stable ID, role, and
+`mapping_contract` match. Profile drift or contract changes require explicit
+remapping. A non-null model or effort pin is accepted only when the selected
+profile can translate it into native launch arguments; unsupported suggested
+defaults remain unset, while an explicit unsupported pin fails before managed
+state is mutated. JSON schema v2 discloses the mapping, configuration digest,
+actor policy fingerprints, and optional-input availability without values.
+Human previews likewise name each optional input, its authorized stable slots,
+and its environment-variable binding while replacing every available value
+with `[redacted]`. A compatible binding from the installed configuration wins
+over a new same-name environment suggestion during update; an explicit
+`--input-binding` wins over both. Rebinding is disclosed as a configuration
+change before ordinary update consent, while an authorization-scope gain is an
+actor-policy change and therefore uses the separate escalation consent.
+Re-running install or update against the selected catalog commit resolves these
+options against the selected snapshot: it is a no-op only when the resulting
+configuration digest also matches. Otherwise Hive admits and activates a new
+immutable configuration snapshot against the same generation using the full
+source, manifest, and configuration baseline as its concurrency check.
+
+The catalog permission union remains coarse disclosure. Runtime admission and
+spawn use exact actor permissions. Unbounded installs require both ordinary
+consent and `--allow-escalation`; this includes explicit `yolo`, scoped shell,
+and unqualified scoped file-write actors. Registry manifests must conservatively
+disclose those actors as high risk with the corresponding wildcard capability
+surface. Actor-level policy redistribution also escalates when the package
+union is unchanged. `--input-binding NAME=ENV_NAME`
+stores only an environment reference, and absent optional inputs do not block
+prompt-only execution. `publish` remains a legacy submission producer.
 
 Consent is deliberately non-composable. JSON and non-TTY install/remove/update
 require `--yes` for mutation. `--dry-run --json` on all three commands returns
@@ -65,10 +100,16 @@ non-interactive consent is `consent_required`/USAGE.
 
 `list` emits orthogonal `origin`, `selection`, `integrity`, and
 `catalog_visibility` fields, including tampered/malformed and retained entries.
-Its offline visibility is `unknown_offline`. Publish copies only referenced
-instructions, README, and `honeycomb.yml`, generates the legacy canonical manifest,
-runs preflight before GitHub calls, and uses a deterministic fork branch/body
-file. A returned PR remains `pending_review` and `listed: false`.
+JSON schema v2 adds the selected configuration digest, its stable-slot
+agent/model/effort mappings and fingerprints, and each declared optional
+input's authorized slots, environment-variable binding, and availability.
+Environment values are never emitted. Task-retained rows expose their pinned
+configuration digest when present but omit active mapping/input details;
+built-in and authored rows keep their generation-free shape. Its offline
+visibility is `unknown_offline`. Publish copies only referenced instructions,
+README, and `honeycomb.yml`, generates the legacy canonical manifest, runs
+preflight before GitHub calls, and uses a deterministic fork branch/body file.
+A returned PR remains `pending_review` and `listed: false`.
 
 For a fresh project that should default to the custom workflow immediately,
 prefer `hive init --new-workflow my-flow [PROJECT_PATH]`; it performs init,

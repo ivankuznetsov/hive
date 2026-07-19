@@ -93,6 +93,32 @@ class RefactorPatrolReviewerTest < Minitest::Test
     end
   end
 
+  def test_real_review_run_records_job_and_feature_identity
+    with_tmp_dir do |dir|
+      state = Hive::RefactorPatrol::StateStore.new(dir)
+      runner = lambda do |output_path:, **|
+        File.write(output_path, JSON.generate("theses" => []))
+        {}
+      end
+      context = {
+        "job_id" => "pr-7-stable", "analysis_sha" => "a" * 40,
+        "source_pr" => { "number" => 7, "url" => "https://example.test/pull/7" }
+      }
+      reviewer = Hive::RefactorPatrol::Reviewer.new(
+        dir, cfg: cfg, state: state, agent_runner: runner, audit_context: context
+      )
+
+      reviewer.call([ feature ], leverage_by_feature: leverage_by_feature)
+
+      path = Dir.glob(File.join(state.root, "runs", "review-*", "review-context.json")).fetch(0)
+      recorded = JSON.parse(File.read(path))
+      assert_equal "pr-7-stable", recorded.fetch("job_id")
+      assert_equal "a" * 40, recorded.fetch("analysis_sha")
+      assert_equal "checkout", recorded.fetch("feature_id")
+      assert_equal 7, recorded.dig("source_pr", "number")
+    end
+  end
+
   def test_prompt_view_bounds_files_without_changing_measured_feature
     with_tmp_dir do |dir|
       complete = Hive::Patrol::Feature.new(
@@ -252,6 +278,31 @@ class RefactorPatrolReviewerTest < Minitest::Test
       assert_equal "agent stopped", reviewer.review_errors.first.fetch("message")
       assert_equal({ "reason" => "token_limit", "limit" => 100, "observed" => 104 },
                    reviewer.review_errors.first.dig("details", "resource_exhaustion"))
+    end
+  end
+
+  def test_review_stops_after_first_failed_feature_and_leaves_the_tail_unattempted
+    with_tmp_dir do |dir|
+      reviewed = []
+      runner = lambda do |feature:, **|
+        reviewed << feature.id
+        { status: :error, error_message: "daily quota exhausted" }
+      end
+      reviewer = Hive::RefactorPatrol::Reviewer.new(
+        dir, cfg: cfg, state: Hive::RefactorPatrol::StateStore.new(dir), agent_runner: runner
+      )
+      features = %w[checkout search billing].map do |id|
+        Hive::Patrol::Feature.from_h(feature.to_h.merge("id" => id))
+      end
+      leverage = features.to_h do |candidate|
+        [ candidate.id, leverage_by_feature.fetch("checkout") ]
+      end
+
+      assert_empty reviewer.call(features, leverage_by_feature: leverage)
+
+      assert_equal [ "checkout" ], reviewed
+      assert_equal [ "checkout" ], reviewer.feature_results.map { |item| item.fetch("feature_id") }
+      assert_equal 1, reviewer.review_errors.size
     end
   end
 

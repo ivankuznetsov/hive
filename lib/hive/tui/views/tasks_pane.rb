@@ -357,7 +357,7 @@ module Hive
 
           capacity = inner_height - header.size
           selected_index = row_lines.index { |row| row[:coord] == cursor } || 0
-          start = viewport_start(
+          start = Format.viewport_start(
             total: row_lines.size,
             capacity: capacity,
             selected_index: selected_index
@@ -369,13 +369,6 @@ module Hive
           return lines if height.nil?
 
           lines.first(height) + Array.new([ height - lines.size, 0 ].max, "")
-        end
-
-        def viewport_start(total:, capacity:, selected_index:)
-          return 0 if total <= capacity
-
-          selected = selected_index.clamp(0, total - 1)
-          selected < capacity ? 0 : [ selected - capacity + 1, total - capacity ].min
         end
       end
     end

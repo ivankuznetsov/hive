@@ -27,6 +27,7 @@ require "hive/daemon/pr_merge_watcher"
 require "hive/daemon/refactor_patrol_merge_reconciler"
 require "hive/lock"
 require "hive/paths"
+require "hive/process_kill"
 require "hive/update_check"
 require "hive/update_check/state"
 require "hive/install_channel"
@@ -2062,12 +2063,7 @@ module Hive
       end
 
       def process_alive?(pid)
-        Process.kill(0, pid)
-        true
-      rescue Errno::ESRCH
-        false
-      rescue Errno::EPERM
-        true
+        Hive::ProcessKill.pid_alive?(pid)
       end
 
       # C3 (#5): age a claim out only after the child's full run budget

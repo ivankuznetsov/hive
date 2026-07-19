@@ -609,7 +609,7 @@ class HiveStagesOpenPrTest < Minitest::Test
       write_pointer(task, File.join(root, "missing-worktree"))
 
       _out, err, status = with_captured_exit do
-        Hive::Stages::OpenPr.worktree_pointer_or_exit(task)
+        Hive::Stages::Base.worktree_pointer_or_exit(task)
       end
 
       assert_equal 1, status

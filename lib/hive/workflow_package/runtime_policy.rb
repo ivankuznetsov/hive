@@ -4,7 +4,9 @@ require "rbconfig"
 require "shellwords"
 require "hive/atomic_file"
 require "hive/agent_profiles"
+require "hive/permission_scope"
 require "hive/workflow_package/canonical_json"
+require "hive/workflow_package/input_name"
 
 module Hive
   module WorkflowPackage
@@ -30,30 +32,111 @@ module Hive
         new(permissions, task_folder: task_folder, profile: profile, policy_dir: policy_dir).compile
       end
 
+      # Builds an isolated child environment around one descriptor actor's
+      # exact permission block. Unlike #compile, this does not reconstruct a
+      # policy from the package-wide catalog disclosure.
+      def self.compile_actor(permission_spec, task_folder:, profile:, policy_dir:, package_root:, environment: {})
+        task_root = File.realpath(task_folder)
+        package_root = File.realpath(package_root)
+        scope = Hive::PermissionScope.resolve(
+          permission_spec, task_folder: task_root, profile: profile, stage: "managed-workflow"
+        )
+        directories = ([ task_root, package_root ] + scope.add_dirs_extra).uniq
+        child_environment = SAFE_ENV_KEYS.each_with_object({}) do |key, out|
+          value = ENV[key]
+          out[key] = value if value && !value.empty?
+        end
+        child_environment["PATH"] = ENV.fetch("PATH", "/usr/local/bin:/usr/bin:/bin")
+        child_environment["HIVE_MANAGED_POLICY"] = "1"
+        environment.each do |key, value|
+          name = key.to_s
+          unless InputName.valid?(name) && value.is_a?(String)
+            raise Hive::ConfigError, "managed workflow input environment is malformed"
+          end
+          child_environment[name] = value
+        end
+        FileUtils.mkdir_p(policy_dir, mode: 0o700)
+        Policy.new(
+          permission_mode: scope.permission_mode,
+          allowed_tools: scope.allowed_tools,
+          disallowed_tools: scope.disallowed_tools,
+          directories: directories.freeze,
+          commands: [].freeze,
+          domains: [].freeze,
+          executables: {}.freeze,
+          environment: child_environment.freeze,
+          settings_path: nil,
+          mcp_config_path: nil,
+          policy_path: nil,
+          cli_flags: [].freeze
+        ).freeze
+      rescue Errno::ENOENT, Errno::EACCES => e
+        raise Hive::ConfigError, "managed runtime package context is unavailable (#{e.class.name.split('::').last})"
+      end
+
+      def self.workflow_escalation_reasons(workflow)
+        executable_actors(workflow).flat_map do |actor|
+          spec = actor.respond_to?(:permissions) ? actor.permissions : nil
+          spec.nil? ? [] : permission_escalation_reasons(spec)
+        end.uniq.sort
+      end
+
+      def self.permission_escalation_reasons(permission_spec)
+        spec = Hive::PermissionScope.parse_spec(permission_spec, stage: "managed-workflow")
+        return [ "actor_yolo" ] if spec.fetch("preset") == Hive::PermissionScope::YOLO
+        return [] unless spec.fetch("preset") == "scoped"
+        return [ "actor_unbounded_shell" ] if spec["bash"] == true
+
+        Array(spec["tools"]).each_with_object([]) do |rule, reasons|
+          match = Hive::PermissionScope::TOOL_RULE_PATTERN.match(rule.to_s.strip)
+          next unless match
+
+          tool = match[:tool]
+          reasons << "actor_unbounded_shell" if tool == "Bash"
+          if match[:specifier].nil? && Hive::PermissionScope::FILE_EDIT_TOOLS.include?(tool)
+            reasons << "actor_unbounded_write"
+          end
+        end.uniq.sort
+      end
+
       # Admission mirrors every descriptor-selected runner, not just the
       # default stage profile. This catches a council reviewer or revise actor
       # that selects a runner unable to enforce the package policy before the
       # generation is activated (and the same compile runs again at spawn).
-      def self.admit_workflow!(workflow, permissions, task_folder:, policy_dir:)
-        actor_names = workflow.stages.flat_map do |stage|
-          next [] unless [ :agent, :council ].include?(stage.kind)
-
-          names = [ stage.agent || :claude ]
-          if stage.kind == :council
-            names.concat(stage.reviewers.map { |reviewer| reviewer.agent || :claude })
-            names << (stage.council.revise.agent || :claude) if stage.council&.revise
+      def self.admit_workflow!(workflow, permissions = nil, task_folder:, policy_dir:, package_root: task_folder)
+        executable_actors(workflow).each_with_index do |actor, index|
+          name = actor.respond_to?(:agent) && actor.agent || :claude
+          spec = actor.respond_to?(:permissions) ? actor.permissions : permissions
+          raise Hive::ConfigError, "managed executable actor is missing permissions" if spec.nil?
+          if spec.is_a?(Hash) && !(spec.key?("preset") || spec.key?(:preset))
+            compile(
+              spec, task_folder: task_folder, profile: Hive::AgentProfiles.lookup(name),
+              policy_dir: File.join(policy_dir, "actor-#{index}-#{name}")
+            )
+          else
+            compile_actor(
+              spec, task_folder: task_folder, package_root: package_root,
+              profile: Hive::AgentProfiles.lookup(name), environment: {},
+              policy_dir: File.join(policy_dir, "actor-#{index}-#{name}")
+            )
           end
-          names
-        end
-        actor_names.map(&:to_sym).uniq.each_with_index do |name, index|
-          compile(
-            permissions, task_folder: task_folder,
-            profile: Hive::AgentProfiles.lookup(name),
-            policy_dir: File.join(policy_dir, "actor-#{index}-#{name}")
-          )
         end
         true
       end
+
+      def self.executable_actors(workflow)
+        workflow.stages.flat_map do |stage|
+          next [] unless [ :agent, :council ].include?(stage.kind)
+
+          values = [ stage ]
+          if stage.kind == :council
+            values.concat(stage.reviewers)
+            values << stage.council.revise if stage.council&.revise
+          end
+          values
+        end
+      end
+      private_class_method :executable_actors
 
       def initialize(permissions, task_folder:, profile:, policy_dir:)
         @permissions = normalize_registry_permissions(stringify_hash(permissions))

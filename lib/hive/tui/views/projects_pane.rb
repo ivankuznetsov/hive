@@ -130,19 +130,12 @@ module Hive
 
           list_capacity = inner_height - header.size
           list_rows = rows.drop(2)
-          start = viewport_start(
+          start = Format.viewport_start(
             total: list_rows.size,
             capacity: list_capacity,
             selected_index: selected_index
           )
           pad_rows(header + list_rows.slice(start, list_capacity).to_a, inner_height)
-        end
-
-        def viewport_start(total:, capacity:, selected_index:)
-          return 0 if total <= capacity
-
-          selected = selected_index.clamp(0, total - 1)
-          selected < capacity ? 0 : [ selected - capacity + 1, total - capacity ].min
         end
 
         def pad_rows(rows, height)

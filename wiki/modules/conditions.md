@@ -3,7 +3,7 @@ title: Generation-scoped task conditions
 type: module
 source: lib/hive/conditions/, lib/hive/task_journal.rb, lib/hive/task_projection.rb
 created: 2026-07-17
-updated: 2026-07-17
+updated: 2026-07-18
 tags: [conditions, projection, journal, execute, migration]
 ---
 
@@ -44,6 +44,13 @@ in the separate `<task>/events.jsonl` file and refuses authoritative event
 types. At an execute boundary the order is
 reconciliation, durable batch, snapshot publication, gate evaluation,
 compatibility marker.
+
+Journal envelopes, idempotent journal appends, condition evidence, policy
+descriptors/options, execute-observation deduplication, and task-projection
+copies all normalize nested hash keys through `Hive::StringifyKeys`. The
+transform recurses through arrays, leaves scalar values unchanged, and returns
+new containers, so these durable surfaces cannot drift between shallow and
+deep symbol-key handling.
 
 `Hive::TaskProjection` is a pure journal fold. It performs no git, GitHub, or
 subprocess observation. The atomic `task-projection.json` stores journal

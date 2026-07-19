@@ -278,7 +278,12 @@ module Hive
           return completion_result(:retry, dispatch_token, envelope, aggregate: aggregate)
         end
 
-        aggregate = store.checkpoint_discovery!(dispatch_token, envelope: envelope, now: now)
+        aggregate = store.checkpoint_discovery!(
+          dispatch_token,
+          envelope: envelope,
+          now: now,
+          backoff_sec: discovery_backoff_sec(envelope, now)
+        )
         completion_result(
           if envelope.fetch("complete")
             aggregate.fetch("complete") ? :closed : :classified
@@ -468,6 +473,18 @@ module Hive
         return "missing_envelope" if envelope.nil?
 
         "malformed_envelope"
+      end
+
+      def discovery_backoff_sec(envelope, now)
+        errors = Array(envelope["review_errors"])
+        reasons = errors.filter_map do |error|
+          error.dig("details", "resource_exhaustion", "reason") if error.is_a?(Hash)
+        end
+        daily = %w[daily_agent_spawn_limit daily_token_headroom daily_token_limit]
+        return RETRY_BACKOFF_SEC unless errors.any? && reasons.size == errors.size && (reasons - daily).empty?
+
+        next_day = Time.utc(now.utc.year, now.utc.month, now.utc.day) + 86_400
+        [ (next_day - now).ceil, RETRY_BACKOFF_SEC ].max
       end
 
       def complete_action(token, exit_code, envelope, now)

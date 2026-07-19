@@ -10,6 +10,7 @@ require "hive/config"
 require "hive/lock"
 require "hive/markers"
 require "hive/permission_scope"
+require "hive/process_kill"
 require "hive/stop_hook_installer"
 require "hive/tmux_runner"
 
@@ -1057,16 +1058,7 @@ module Hive
     end
 
     def process_alive?(pid)
-      Process.kill(0, pid)
-      true
-    rescue Errno::ESRCH
-      false
-    rescue Errno::EPERM
-      # We lack permission to signal the pid, but it EXISTS and belongs to
-      # another user — report alive. This is the conservative reading: an
-      # "alive" answer only ever withholds a `process_exited == true`
-      # turn-end signal, never manufactures one (see recorded_claude_pid).
-      true
+      Hive::ProcessKill.pid_alive?(pid)
     end
 
     # Read `result.json` (if present) and translate `status` into the

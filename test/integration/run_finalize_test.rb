@@ -616,7 +616,7 @@ class RunFinalizeTest < Minitest::Test
         FileUtils.rm_f(File.join(task_dir, "worktree.yml"))
 
         _out, err, status = with_captured_exit do
-          Hive::Stages::Finalize.worktree_pointer_or_exit(task)
+          Hive::Stages::Base.worktree_pointer_or_exit(task)
         end
 
         assert_equal 1, status
@@ -626,7 +626,7 @@ class RunFinalizeTest < Minitest::Test
         FileUtils.rm_rf(worktree_path)
 
         _out, err, status = with_captured_exit do
-          Hive::Stages::Finalize.worktree_pointer_or_exit(task)
+          Hive::Stages::Base.worktree_pointer_or_exit(task)
         end
 
         assert_equal 1, status

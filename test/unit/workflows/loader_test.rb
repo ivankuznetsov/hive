@@ -152,7 +152,10 @@ class WorkflowsLoaderTest < Minitest::Test
   end
 
   def test_load_managed_skips_an_invalid_generation
-    lock = { "name" => "demo", "source_commit" => "a" * 40, "manifest_digest" => "b" * 64 }
+    lock = {
+      "name" => "demo", "source_commit" => "a" * 40,
+      "manifest_digest" => "b" * 64, "configuration_digest" => "c" * 64
+    }
     store = Object.new
     store.define_singleton_method(:selections) { [ lock ] }
     store.define_singleton_method(:workflow) { |*| raise Hive::ConfigError, "tampered" }

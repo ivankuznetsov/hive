@@ -1450,7 +1450,9 @@ def test_refactor_patrol_gateway_timeout_and_url_helpers_fail_closed
     transport: Hive::Gh, monotonic_clock: -> { 2.0 }
   )
   assert_raises(Hive::GhError) { expired.send(:remaining_timeout, 1.0) }
-  assert_raises(Hive::GhError) { refactor_patrol_github.send(:validated_github_host, "[") }
+  assert_raises(Hive::GhError) do
+    Hive::Gh::RepositoryIdentity.validated_github_host("[")
+  end
   refute refactor_patrol_github.send(
     :pull_request_url_matches_repository?, "http://[", "acme/demo",
     host: "github.com", number: 7
@@ -1459,7 +1461,7 @@ end
 
 def test_repository_url_helpers_reject_invalid_uris_and_ssh_passwords
   assert_raises(Hive::GhError) do
-    Hive::Gh.send(:validated_github_host, "[")
+    Hive::Gh::RepositoryIdentity.validated_github_host("[")
   end
   refute refactor_patrol_github.send(
     :issue_url_matches_repository?, "http://[", "acme/demo", host: "github.com", number: 7

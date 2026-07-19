@@ -258,7 +258,7 @@ module Hive
       def write_meta(task_folder, slug, finding)
         Hive::TaskMeta.write(
           task_folder,
-          id: allocate_task_id,
+          id: Hive::TaskCounter.next_or_nil,
           slug: slug,
           display_name: display_name(finding),
           workflow: WORKFLOW
@@ -266,12 +266,6 @@ module Hive
         path = File.join(task_folder, "meta.yml")
         fsync_file(path)
         notify_write(:meta_yml, path)
-      end
-
-      def allocate_task_id
-        Hive::TaskCounter.next!
-      rescue Hive::ConcurrentRunError
-        nil
       end
 
       def write_task_md(task_folder, slug, finding, patch, pr_url, now, context:)

@@ -4,6 +4,7 @@ require "time"
 require "yaml"
 require "hive/lock"
 require "hive/markers"
+require "hive/process_kill"
 require "hive/workflows"
 require "hive/daemon/dispatch_request_queue"
 require "hive/daemon/healer_support"
@@ -864,12 +865,7 @@ module Hive
       # marker_attrs_for is provided by HealerSupport.
 
       def pid_alive?(pid)
-        Process.kill(0, pid)
-        true
-      rescue Errno::ESRCH
-        false
-      rescue Errno::EPERM
-        true
+        Hive::ProcessKill.pid_alive?(pid)
       end
 
       def child_pids(pid)

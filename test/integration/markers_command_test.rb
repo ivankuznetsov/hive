@@ -122,6 +122,31 @@ class MarkersCommandTest < Minitest::Test
     end
   end
 
+  def test_commit_lock_error_keeps_published_json_key_set
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        _project, folder, _slug = seed_review_task(dir, marker: :review_stale)
+        lock_error = Hive::ConcurrentRunError.new(
+          "commit lock busy", lock_path: File.join(dir, ".hive-state", ".commit.lock")
+        )
+
+        with_replaced_singleton_method(Hive::Lock, :with_commit_lock, ->(*) { raise lock_error }) do
+          out, _err, status = with_captured_exit do
+            Hive::Commands::Markers.new(
+              "clear", folder, name: "REVIEW_STALE", json: true
+            ).call
+          end
+
+          assert_equal Hive::ExitCodes::TEMPFAIL, status
+          payload = JSON.parse(out)
+          assert_equal %w[error_class error_kind exit_code message ok schema schema_version],
+                       payload.keys.sort
+          refute payload.key?("lock_path")
+        end
+      end
+    end
+  end
+
   def test_slug_ambiguous_across_stages_mentions_absolute_folder_path
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

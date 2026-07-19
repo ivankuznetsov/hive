@@ -730,6 +730,92 @@ class PatrolCommandTest < Minitest::Test
     end
   end
 
+  def test_review_batch_reserves_cycle_capacity_for_a_fixer
+    with_patrol_project do |repo|
+      features = (1..12).map do |index|
+        Hive::Patrol::Feature.new(
+          id: format("feature-%02d", index), kind: "architecture", entrypoints: [],
+          owned_files: [], context_files: [], tests: []
+        )
+      end
+      reviewer = FakeReviewer.new([])
+
+      out, _err, status = with_captured_exit do
+        command_for(mapper: FakeMapper.new(features), reviewer: reviewer).call
+      end
+
+      assert_equal Hive::ExitCodes::SUCCESS, status
+      assert_equal %w[feature-01 feature-02], reviewer.features.map(&:id),
+                   "medium's three-launch cycle must leave one launch available for fixing"
+      payload = JSON.parse(out)
+      assert_equal 2, payload.fetch("features_review_attempted")
+      assert_empty payload.fetch("review_errors")
+      state = JSON.parse(File.read(File.join(repo, ".hive-state", "patrol", "state.json")))
+      assert_equal 2, state.fetch("feature_review_cursor")
+      assert_equal true, state.fetch("feature_review_active")
+    end
+  end
+
+  def test_review_batch_reserves_daily_capacity_for_a_fixer
+    with_patrol_project do |repo|
+      now = Time.now.utc
+      6.times do
+        Hive::UsageDb.record!(
+          agent: "codex", model: nil, project_slug: File.basename(repo),
+          task_slug: "patrol-review", stage: "patrol-review",
+          started_at: now, ended_at: now, input: 1, output: 0, cached: 0
+        )
+      end
+      features = (1..12).map do |index|
+        Hive::Patrol::Feature.new(
+          id: format("feature-%02d", index), kind: "architecture", entrypoints: [],
+          owned_files: [], context_files: [], tests: []
+        )
+      end
+      reviewer = FakeReviewer.new([])
+
+      out, _err, status = with_captured_exit do
+        command_for(mapper: FakeMapper.new(features), reviewer: reviewer).call
+      end
+
+      assert_equal Hive::ExitCodes::SUCCESS, status
+      assert_equal [ "feature-01" ], reviewer.features.map(&:id),
+                   "two remaining daily launches must leave one available for fixing"
+      assert_equal 1, JSON.parse(out).fetch("features_review_attempted")
+    end
+  end
+
+  def test_later_review_error_advances_cursor_past_successful_prefix
+    with_patrol_project do |repo|
+      cfg_path = File.join(repo, ".hive-state", "config.yml")
+      cfg = YAML.safe_load_file(cfg_path, aliases: true)
+      cfg["patrol"]["max_features_per_cycle"] = 3
+      cfg["patrol"]["max_agent_spawns_per_cycle"] = 10
+      File.write(cfg_path, cfg.to_yaml)
+      features = (1..3).map do |index|
+        Hive::Patrol::Feature.new(
+          id: "feature-#{index}", kind: "architecture", entrypoints: [],
+          owned_files: [], context_files: [], tests: []
+        )
+      end
+      reviewer = FakeReviewer.new(
+        [], review_errors: [
+          { "feature_id" => "feature-3", "error" => "agent_failed", "message" => "provider failed" }
+        ]
+      )
+
+      _out, _err, status = with_captured_exit do
+        command_for(mapper: FakeMapper.new(features), reviewer: reviewer, dry_run: true).call
+      end
+
+      assert_equal Hive::ExitCodes::SUCCESS, status
+      state = JSON.parse(File.read(File.join(repo, ".hive-state", "patrol", "state.json")))
+      assert_equal 2, state.fetch("feature_review_cursor"),
+                   "successfully reviewed leading features must not be repeated after a later failure"
+      assert_equal true, state.fetch("feature_review_active")
+    end
+  end
+
   def test_default_reviewer_and_fixer_builders_receive_the_shared_budget
     with_patrol_project do |repo|
       cfg = Hive::Config.load(repo)
@@ -974,6 +1060,20 @@ class PatrolCommandTest < Minitest::Test
       assert_equal false, payload.fetch("ok")
       assert_equal "InternalError", payload.fetch("error_class")
     end
+  end
+
+  def test_unattributable_review_error_does_not_claim_completed_features
+    batch = Hive::Patrol::FeatureBatch::Result.new(
+      features: [ sample_feature ], start_cursor: 0, next_cursor: 0, complete: true
+    )
+    reviewer = Object.new
+    reviewer.define_singleton_method(:review_errors) { [ { "error" => "agent_failed" } ] }
+
+    outcome = command_for.send(:review_outcome, batch, reviewer)
+
+    assert_equal 1, outcome.fetch("features_review_attempted")
+    assert_equal 0, outcome.fetch("features_reviewed")
+    refute outcome.fetch("review_complete")
   end
 
   private

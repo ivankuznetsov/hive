@@ -70,7 +70,7 @@ module Hive
         features, feature_batch, reviewer, findings = with_scan_checkout(project_root, target_sha) do |scan_root|
           mapped = @mapper_factory.call(scan_root, cfg, state).call
           batch = Hive::Patrol::FeatureBatch.new(cfg: cfg, state: state).call(
-            mapped, target_sha: target_sha
+            mapped, target_sha: target_sha, limit: review_launch_limit(token_budget)
           )
           scan_reviewer = build_reviewer(scan_root, cfg, state, token_budget)
           reviewed = stamp_fingerprints(scan_reviewer.call(batch.features), scan_root)
@@ -130,17 +130,13 @@ module Hive
         # partial scan as a clean pass and never looking again (U5).
         now_iso = Time.now.utc.iso8601
         if review.fetch("review_errors").any?
-          snapshot = state.state
-          retry_cursor = if snapshot["feature_review_sha"].to_s == target_sha.to_s
-            snapshot["feature_review_cursor"].to_i
-          else
-            0
-          end
           state.update_state(
             "last_run_at" => now_iso,
             "feature_review_active" => true,
             "feature_review_sha" => target_sha,
-            "feature_review_cursor" => retry_cursor
+            "feature_review_cursor" => retry_feature_cursor(
+              feature_batch, review.fetch("review_errors")
+            )
           )
           scanned_sha = state.state["last_scanned_sha"].to_s
         elsif feature_batch.complete
@@ -170,22 +166,58 @@ module Hive
       def review_outcome(feature_batch, reviewer)
         attempted = feature_batch.features.size
         errors = reviewer.respond_to?(:review_errors) ? Array(reviewer.review_errors) : []
-        attempted_ids = feature_batch.features.map { |feature| feature.id.to_s }
-        failed_ids = errors.filter_map do |error|
-          next unless error.is_a?(Hash)
-
-          id = (error["feature_id"] || error[:feature_id]).to_s
-          id if attempted_ids.include?(id)
-        end.uniq
+        failed_indices = review_failure_indices(feature_batch, errors)
         # An un-attributable error makes the successful count unknowable. Fail
         # closed instead of claiming that every attempted feature completed.
-        succeeded = errors.any? && failed_ids.size != errors.size ? 0 : attempted - failed_ids.size
+        succeeded = if errors.any? && failed_indices.nil?
+          0
+        else
+          attempted - Array(failed_indices).size
+        end
         {
           "features_review_attempted" => attempted,
           "features_reviewed" => succeeded,
           "review_complete" => errors.empty? && feature_batch.complete,
           "review_errors" => errors
         }
+      end
+
+      # Reviewer calls consume the same cycle and daily launch envelope as
+      # fixers. Bound the selected feature batch to launches that can actually
+      # happen and, for a shipping cycle, leave one launch available for the
+      # highest-ranked fix candidate. A zero- or one-launch remainder still
+      # selects one feature so review can progress or report the exact budget
+      # exhaustion instead of presenting an empty batch as complete.
+      def review_launch_limit(token_budget)
+        available = token_budget.remaining_launches
+        if @dry_run
+          [ available, 1 ].max
+        else
+          [ available - 1, 1 ].max
+        end
+      end
+
+      # A later feature failure must pin that feature, not replay already-clean
+      # leading features. Unattributable errors still fail closed at the batch
+      # start because Hive cannot prove which feature completed.
+      def retry_feature_cursor(feature_batch, errors)
+        failed_indices = review_failure_indices(feature_batch, Array(errors))
+        return feature_batch.start_cursor unless failed_indices
+
+        feature_batch.start_cursor + failed_indices.min.to_i
+      end
+
+      def review_failure_indices(feature_batch, errors)
+        attempted_ids = feature_batch.features.map { |feature| feature.id.to_s }
+        indices = errors.filter_map do |error|
+          next unless error.is_a?(Hash)
+
+          id = (error["feature_id"] || error[:feature_id]).to_s
+          attempted_ids.index(id)
+        end
+        return unless indices.size == errors.size && indices.uniq.size == errors.size
+
+        indices
       end
 
       def build_reviewer(root, cfg, state, token_budget)

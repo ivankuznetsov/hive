@@ -272,7 +272,12 @@ module Hive
         profile = Hive::AgentProfiles.lookup(@cfg.dig("patrol", "agent") || "claude", cfg: @cfg)
         launch = Hive::Patrol::AgentLaunch.prepare(profile: profile, prompt: prompt, role: :review)
         unless @token_budget.acquire(stage: STAGE, minimum_tokens: launch.fetch(:minimum_tokens))
-          return { status: :error, error_message: @token_budget.exhaustion_message }
+          exhaustion = @token_budget.resource_exhaustion if @token_budget.respond_to?(:resource_exhaustion)
+          return {
+            status: :error,
+            error_message: @token_budget.exhaustion_message,
+            resource_exhaustion: exhaustion
+          }
         end
         started_at = Time.now.utc
         result = nil

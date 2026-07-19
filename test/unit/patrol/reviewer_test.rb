@@ -491,6 +491,9 @@ class HivePatrolReviewerTest < Minitest::Test
         minimum_tokens >= 0 && stage != "patrol-review"
       end
       budget.define_singleton_method(:exhaustion_message) { "cycle exhausted" }
+      budget.define_singleton_method(:resource_exhaustion) do
+        { reason: "cycle_agent_spawn_limit", limit: 3, observed: 3 }
+      end
       reviewer = Hive::Patrol::Reviewer.new(dir, cfg: cfg, token_budget: budget)
       profile = Struct.new(:name, :initial_context_tokens) do
         def require_cli_capability!(name)
@@ -508,6 +511,10 @@ class HivePatrolReviewerTest < Minitest::Test
 
       assert_equal :error, result.fetch(:status)
       assert_equal "cycle exhausted", result.fetch(:error_message)
+      assert_equal(
+        { reason: "cycle_agent_spawn_limit", limit: 3, observed: 3 },
+        result.fetch(:resource_exhaustion)
+      )
     end
   end
 

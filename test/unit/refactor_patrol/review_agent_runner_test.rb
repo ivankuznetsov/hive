@@ -13,6 +13,9 @@ class RefactorPatrolReviewAgentRunnerTest < Minitest::Test
         minimum_tokens >= 0 && stage != "refactor-patrol-review"
       end
       budget.define_singleton_method(:exhaustion_message) { "architecture cycle exhausted" }
+      budget.define_singleton_method(:resource_exhaustion) do
+        { reason: "daily_agent_spawn_limit", limit: 8, observed: 8 }
+      end
       runner = Hive::RefactorPatrol::ReviewAgentRunner.new(
         project_root: dir, cfg: cfg, state: Hive::RefactorPatrol::StateStore.new(dir),
         token_budget: budget
@@ -31,6 +34,10 @@ class RefactorPatrolReviewAgentRunnerTest < Minitest::Test
 
       assert_equal :error, result.fetch(:status)
       assert_equal "architecture cycle exhausted", result.fetch(:error_message)
+      assert_equal(
+        { reason: "daily_agent_spawn_limit", limit: 8, observed: 8 },
+        result.fetch(:resource_exhaustion)
+      )
     end
   end
 
@@ -306,6 +313,113 @@ class RefactorPatrolReviewAgentRunnerTest < Minitest::Test
 
       assert_equal :error, result.fetch(:status)
       assert_includes result.fetch(:error_message), "theses array"
+    end
+  end
+
+  def test_read_only_output_accepts_one_json_fence_and_preserves_the_raw_message
+    with_tmp_dir do |dir|
+      runner = Hive::RefactorPatrol::ReviewAgentRunner.new(
+        project_root: dir, cfg: cfg, state: Hive::RefactorPatrol::StateStore.new(dir), read_only: true
+      )
+      raw = "```json\n{\"theses\":[]}\n```\n"
+      output = File.join(dir, "review.json")
+
+      result = runner.send(
+        :materialize_read_only_output,
+        { status: :ok, final_message: raw },
+        output
+      )
+
+      assert_equal :ok, result.fetch(:status)
+      assert_equal({ "theses" => [] }, JSON.parse(File.read(output)))
+      assert_equal raw, File.read(File.join(dir, "final-message.txt"))
+    end
+  end
+
+  def test_read_only_output_accepts_one_unlabeled_fence
+    with_tmp_dir do |dir|
+      runner = Hive::RefactorPatrol::ReviewAgentRunner.new(
+        project_root: dir, cfg: cfg, state: Hive::RefactorPatrol::StateStore.new(dir), read_only: true
+      )
+      raw = "```\n{\"theses\":[]}\n```"
+      output = File.join(dir, "review.json")
+
+      result = runner.send(
+        :materialize_read_only_output,
+        { status: :ok, final_message: raw },
+        output
+      )
+
+      assert_equal :ok, result.fetch(:status)
+      assert_equal({ "theses" => [] }, JSON.parse(File.read(output)))
+      assert_equal raw, File.read(File.join(dir, "final-message.txt"))
+    end
+  end
+
+  def test_read_only_output_rejects_prose_around_fences_and_multiple_fences
+    invalid_messages = [
+      "Before\n```json\n{\"theses\":[]}\n```",
+      "```json\n{\"theses\":[]}\n```\nAfter",
+      "```json\n{\"theses\":[]}\n```\n```json\n{\"theses\":[]}\n```"
+    ]
+
+    invalid_messages.each_with_index do |raw, index|
+      with_tmp_dir do |dir|
+        runner = Hive::RefactorPatrol::ReviewAgentRunner.new(
+          project_root: dir, cfg: cfg, state: Hive::RefactorPatrol::StateStore.new(dir), read_only: true
+        )
+        output = File.join(dir, "review-#{index}.json")
+
+        result = runner.send(
+          :materialize_read_only_output,
+          { status: :ok, final_message: raw },
+          output
+        )
+
+        assert_equal :error, result.fetch(:status)
+        refute File.exist?(output)
+        assert_equal raw, File.read(File.join(dir, "final-message.txt"))
+      end
+    end
+  end
+
+  def test_read_only_output_preserves_invalid_raw_message_for_audit
+    with_tmp_dir do |dir|
+      runner = Hive::RefactorPatrol::ReviewAgentRunner.new(
+        project_root: dir, cfg: cfg, state: Hive::RefactorPatrol::StateStore.new(dir), read_only: true
+      )
+      raw = "Here is the result: {\"theses\":[]}"
+      output = File.join(dir, "review.json")
+
+      result = runner.send(
+        :materialize_read_only_output,
+        { status: :ok, final_message: raw },
+        output
+      )
+
+      assert_equal :error, result.fetch(:status)
+      refute File.exist?(output)
+      assert_equal raw, File.read(File.join(dir, "final-message.txt"))
+    end
+  end
+
+  def test_read_only_output_preserves_an_agent_error_final_message_for_audit
+    with_tmp_dir do |dir|
+      runner = Hive::RefactorPatrol::ReviewAgentRunner.new(
+        project_root: dir, cfg: cfg, state: Hive::RefactorPatrol::StateStore.new(dir), read_only: true
+      )
+      raw = "partial response before provider failure"
+      output = File.join(dir, "review.json")
+
+      result = runner.send(
+        :materialize_read_only_output,
+        { status: :error, final_message: raw, error_message: "provider failed" },
+        output
+      )
+
+      assert_equal :error, result.fetch(:status)
+      refute File.exist?(output)
+      assert_equal raw, File.read(File.join(dir, "final-message.txt"))
     end
   end
 

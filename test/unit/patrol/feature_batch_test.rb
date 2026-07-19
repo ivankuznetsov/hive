@@ -66,4 +66,20 @@ class HivePatrolFeatureBatchTest < Minitest::Test
       assert_equal 2, result.features.length
     end
   end
+
+  def test_runtime_limit_can_narrow_the_configured_batch
+    with_tmp_dir do |dir|
+      selector = Hive::Patrol::FeatureBatch.new(
+        cfg: { "patrol" => { "max_features_per_cycle" => 12 } },
+        state: Hive::Patrol::StateStore.new(dir)
+      )
+
+      result = selector.call(features(5), target_sha: "sha", limit: 2)
+
+      assert_equal %w[feature-01 feature-02], result.features.map(&:id)
+      assert_equal 0, result.start_cursor
+      assert_equal 2, result.next_cursor
+      refute result.complete
+    end
+  end
 end

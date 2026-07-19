@@ -39,6 +39,11 @@ class TasksTest < ActionDispatch::IntegrationTest
     assert_select "[role='dialog'][aria-modal='true']", 1
     assert_select "#task_drawer_title", text: /actions probe/i
     assert_select ".task-details #task-state", 1
+    assert_select "form[action=?]", task_transition_path(@project, @slug), minimum: 1
+    %w[approve reject run recover drop].each do |legacy_action|
+      assert_select "form[action$='/#{legacy_action}']", 0,
+                    "drawer mutations must use the guarded transition endpoint"
+    end
     assert_select ".topbar", 0
     assert_select "body > main", 0
   end

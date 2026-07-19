@@ -44,7 +44,8 @@ Rows also include `workflow`, the descriptor id that resolved the task (`"coding
 Board-capable rows add a descriptor-derived `terminal` boolean, semantic
 `fingerprint`, assembled `card_digest`, dominant state/rank, allowed
 transitions, blocked explanation, lock/dependency/queue/retry objects, and
-on-disk operational chips. `fingerprint` changes only for mutation-relevant
+on-disk operational chips for PR, review, queued work, and CI state.
+`fingerprint` changes only for mutation-relevant
 task content; `card_digest` also changes for cross-task and runtime facts. The
 workflow definitions are nested per project because project overlays may use
 the same workflow id with different stage lists.

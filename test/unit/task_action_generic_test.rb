@@ -95,10 +95,19 @@ class TaskActionGenericTest < Minitest::Test
         "direction" => "forward",
         "confirmation" => "none",
         "label" => "Move to Report"
+      },
+      {
+        "destination" => "__delete__",
+        "verb" => "drop",
+        "direction" => "delete",
+        "confirmation" => "slug",
+        "label" => "Drop task"
       }
     ], forward
 
-    assert_empty action_for("gather", :waiting).allowed_transitions
+    waiting = action_for("gather", :waiting).allowed_transitions
+    assert_equal %w[force_approve drop], waiting.map { |transition| transition["verb"] }
+    assert_equal %w[reason slug], waiting.map { |transition| transition["confirmation"] }
   end
 
   def test_council_marker_to_action_matrix

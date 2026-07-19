@@ -6,6 +6,7 @@ class BoardPerformanceTest < ActionDispatch::IntegrationTest
   SCANNED_PER_PROJECT = 500
   VISIBLE_PER_PROJECT = 50
   MAX_RENDER_SECONDS = 1.5
+  MAX_SNAPSHOT_MULTIPLIER = 2.0
   MAX_CARD_BYTES = 8 * 1024
 
   setup do
@@ -30,12 +31,44 @@ class BoardPerformanceTest < ActionDispatch::IntegrationTest
     assert_select ".board-card", visible
     assert_operator elapsed, :<, MAX_RENDER_SECONDS,
                     "initial board render took #{elapsed.round(3)}s (budget #{MAX_RENDER_SECONDS}s)"
-    cards = StatusVisibility.projects(@payload).flat_map { |project| project.fetch("tasks") }
+    projects = StatusVisibility.projects(@payload)
+    cards = projects.flat_map { |project| project.fetch("tasks") }
     assert_equal visible, cards.size
-    sizes = cards.map { |card| JSON.generate(card).bytesize }.sort
+    samples = projects.flat_map do |project|
+      project.fetch("tasks").map { |card| [ project, card ] }
+    end.first(101)
+    sizes = samples.map do |project, card|
+      html = ApplicationController.render(
+        partial: "board/card", locals: { task: card, project: project }
+      )
+      %(<turbo-stream action="replace"><template>#{html}</template></turbo-stream>).bytesize
+    end.sort
     median = sizes.fetch(sizes.size / 2)
     assert_operator median, :<, MAX_CARD_BYTES,
-                    "median serialized card was #{median} bytes (budget #{MAX_CARD_BYTES})"
+                    "median rendered Turbo card payload was #{median} bytes (budget #{MAX_CARD_BYTES})"
+  end
+
+  test "filesystem scan and card assembly stay within twice the scan baseline" do
+    Dir.mktmpdir("hive-board-performance") do |root|
+      projects = real_scan_fixture(root, projects: 10, tasks_per_project: SCANNED_PER_PROJECT)
+      baseline_status = Hive::Commands::Status.new
+      baseline_status.define_singleton_method(:task_payload) do |row|
+        { "slug" => row[:slug], "stage" => row[:stage], "workflow" => row[:workflow] }
+      end
+
+      baseline_started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      baseline_status.json_payload(projects)
+      baseline = Process.clock_gettime(Process::CLOCK_MONOTONIC) - baseline_started
+
+      snapshot_started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      payload = Hive::Commands::Status.new.json_payload(projects)
+      snapshot = Process.clock_gettime(Process::CLOCK_MONOTONIC) - snapshot_started
+
+      assert_equal 10 * SCANNED_PER_PROJECT,
+                   payload.fetch("projects").sum { |project| project.fetch("tasks").size }
+      assert_operator snapshot, :<=, baseline * MAX_SNAPSHOT_MULTIPLIER,
+                      "card snapshot #{snapshot.round(3)}s exceeded 2x filesystem baseline #{baseline.round(3)}s"
+    end
   end
 
   private
@@ -98,5 +131,25 @@ class BoardPerformanceTest < ActionDispatch::IntegrationTest
       "mtime" => observed_at,
       "folder_mtime" => observed_at
     }
+  end
+
+  def real_scan_fixture(root, projects:, tasks_per_project:)
+    old = Time.now - 5.days
+    projects.times.map do |project_index|
+      name = format("disk-%02d", project_index)
+      project_root = File.join(root, name)
+      hive_state = File.join(project_root, ".hive-state")
+      tasks_per_project.times do |task_index|
+        terminal = task_index >= VISIBLE_PER_PROJECT
+        stage = terminal ? "9-done" : "1-inbox"
+        folder = File.join(hive_state, "stages", stage, format("disk-task-%02d-%03d", project_index, task_index))
+        FileUtils.mkdir_p(folder)
+        state_file = File.join(folder, terminal ? "task.md" : "idea.md")
+        File.write(state_file, terminal ? "# done\n\n<!-- COMPLETE -->\n" : "# inbox\n")
+        File.utime(old, old, state_file) if terminal
+        File.utime(old, old, folder) if terminal
+      end
+      { "name" => name, "path" => project_root, "hive_state_path" => hive_state }
+    end
   end
 end

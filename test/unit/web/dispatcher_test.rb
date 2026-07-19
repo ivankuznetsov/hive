@@ -343,6 +343,58 @@ class WebDispatcherTest < Minitest::Test
     end
   end
 
+  def test_repeated_queued_transition_reuses_the_pending_request
+    with_tmp_global_config do
+      with_tmp_git_repo do |dir|
+        capture_io { Hive::Commands::Init.new(dir).call }
+        project = File.basename(dir)
+        capture_io { Hive::Commands::New.new(project, "deduplicated board run").call! }
+        slug = File.basename(Dir[File.join(dir, ".hive-state", "stages", "1-inbox", "*")].first)
+        card = Hive::Commands::Status.new.task_card(project: project, slug: slug)
+        dispatcher = Hive::Web::Dispatcher.new
+
+        first = dispatcher.transition(
+          slug: slug, project: project, destination: "2-brainstorm",
+          expected_fingerprint: card.fetch("fingerprint"), actor: "alice", request_id: "web-dedup-1"
+        )
+        second = dispatcher.transition(
+          slug: slug, project: project, destination: "2-brainstorm",
+          expected_fingerprint: card.fetch("fingerprint"), actor: "alice", request_id: "web-dedup-2"
+        )
+
+        assert_equal first.fetch(:request_id), second.fetch(:request_id)
+        matching = Hive::Daemon::DispatchRequestQueue.pending.select { |request| request.slug == slug }
+        assert_equal 1, matching.size
+      end
+    end
+  end
+
+  def test_server_enforces_every_confirmation_tier
+    dispatcher = Hive::Web::Dispatcher.new
+    confirm = { "confirmation" => "confirm" }
+    reason = { "confirmation" => "reason" }
+    slug = { "confirmation" => "slug" }
+
+    assert_raises(Hive::Error) do
+      dispatcher.send(:validate_confirmation!, confirm, slug: "task-1", confirmation: nil,
+                       reason: nil, confirmation_slug: nil)
+    end
+    dispatcher.send(:validate_confirmation!, confirm, slug: "task-1", confirmation: "confirmed",
+                     reason: nil, confirmation_slug: nil)
+    assert_raises(Hive::Error) do
+      dispatcher.send(:validate_confirmation!, reason, slug: "task-1", confirmation: nil,
+                       reason: "  ", confirmation_slug: nil)
+    end
+    dispatcher.send(:validate_confirmation!, reason, slug: "task-1", confirmation: nil,
+                     reason: "operator override", confirmation_slug: nil)
+    assert_raises(Hive::Error) do
+      dispatcher.send(:validate_confirmation!, slug, slug: "task-1", confirmation: nil,
+                       reason: nil, confirmation_slug: "task-2")
+    end
+    dispatcher.send(:validate_confirmation!, slug, slug: "task-1", confirmation: nil,
+                     reason: nil, confirmation_slug: "task-1")
+  end
+
   def test_drop_hard_deletes_the_task_folder
     with_tmp_global_config do
       with_tmp_git_repo do |dir|

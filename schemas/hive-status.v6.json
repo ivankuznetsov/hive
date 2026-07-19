@@ -384,9 +384,14 @@
       "additionalProperties": false,
       "required": ["destination", "verb", "direction", "confirmation", "label"],
       "properties": {
-        "destination": { "type": "string", "pattern": "^[0-9]+-[a-z0-9][a-z0-9-]*$" },
+        "destination": {
+          "oneOf": [
+            { "type": "string", "pattern": "^[0-9]+-[a-z0-9][a-z0-9-]*$" },
+            { "const": "__delete__" }
+          ]
+        },
         "verb": { "type": "string", "minLength": 1 },
-        "direction": { "type": "string", "enum": ["forward", "backward", "run"] },
+        "direction": { "type": "string", "enum": ["forward", "backward", "run", "recover", "delete"] },
         "confirmation": { "type": "string", "enum": ["none", "confirm", "reason", "slug"] },
         "label": { "type": "string", "minLength": 1 }
       }
@@ -422,6 +427,7 @@
         "request_id": { "type": "string", "minLength": 1 },
         "verb": { "type": ["string", "null"] },
         "requestor": { "type": ["string", "null"] },
+        "actor": { "type": ["string", "null"] },
         "trigger": { "type": ["string", "null"] },
         "created_at": { "type": "string", "format": "date-time" }
       }
@@ -431,7 +437,7 @@
       "additionalProperties": false,
       "required": ["kind", "status", "source", "observed_at"],
       "properties": {
-        "kind": { "type": "string", "enum": ["pr", "review", "queue"] },
+        "kind": { "type": "string", "enum": ["pr", "review", "ci", "queue"] },
         "status": { "type": "string" },
         "source": { "type": "string" },
         "observed_at": { "type": ["string", "null"], "format": "date-time" }

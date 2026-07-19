@@ -12,7 +12,10 @@ class TasksController < ApplicationController
     @questions = open_questions(@row)
     @worktree_exists = worktree_exists?(@row)
     @daemon_enabled = project_daemon_enabled?
-    render partial: "board/drawer" if turbo_frame_request?
+    if turbo_frame_request?
+      @drawer_mode = true
+      render partial: "board/drawer"
+    end
   end
 
   # Per-question answers from the Q&A form (answers[n] => text), written
@@ -83,15 +86,18 @@ class TasksController < ApplicationController
       destination: params.require(:destination),
       expected_fingerprint: params.require(:expected_fingerprint),
       actor: current_login || "local-owner", request_id: request.request_id,
-      reason: params[:reason]
+      confirmation: params[:confirmation], reason: params[:reason],
+      confirmation_slug: params[:confirmation_slug]
     )
     if request.format.json?
       render json: result, status: result[:state] == "queued" ? :accepted : :ok
+    elsif result.dig(:transition, "verb") == "drop"
+      redirect_to board_path, notice: "Dropped #{params[:slug]}"
     else
       redirect_back fallback_location: board_path,
                     notice: result[:state] == "queued" ? "Move queued for #{params[:slug]}" : "Moved #{params[:slug]}"
     end
-  rescue Hive::Error => e
+  rescue Hive::Error, ActionController::ParameterMissing => e
     TransitionMetrics.denied!(
       reason: e.class.name, request_id: request.request_id,
       project: @project["name"], slug: params[:slug], actor: current_login

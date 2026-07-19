@@ -56,20 +56,39 @@
   <% end %>
 
   <div class="task-actions">
-    <% if recovery_action?(@row) %>
-      <%# The bot's Autofix, web-shaped: clears the failure marker (guarded
-          by its attrs) and re-runs the stage verb as one queued sequence. %>
-      <%= button_to "Retry stage", task_recover_path(@project["name"], @row["slug"]),
-            data: { turbo_submits_with: "Queueing…" } %>
-    <% end %>
-    <% if stage_passable?(@row) %>
-      <%= button_to "Approve", task_approve_path(@project["name"], @row["slug"]),
-            params: { from: @row["stage"] }, data: { turbo_submits_with: "Approving…" } %>
-    <% end %>
-    <% if !@daemon_enabled && (dispatch_action = stage_dispatch_action(@row)) %>
-      <%= button_to "Run #{stage_run_verb(@row)}", task_run_path(@project["name"], @row["slug"]),
-            params: { action_name: dispatch_action, stage: @row["stage"] }, class: "btn-secondary",
-            data: { turbo_submits_with: "Queueing…" } %>
+    <% if @drawer_mode %>
+      <% Array(@row["allowed_transitions"]).each do |transition| %>
+      <%= form_with url: task_transition_path(@project["name"], @row["slug"]), method: :post do |form| %>
+        <%= form.hidden_field :destination, value: transition["destination"], id: nil %>
+        <%= form.hidden_field :expected_fingerprint, value: @row["fingerprint"], id: nil %>
+        <% case transition["confirmation"] %>
+        <% when "confirm" %>
+          <label><%= check_box_tag :confirmation, "confirmed", false, required: true %>
+            Confirm <%= transition["label"] %></label>
+        <% when "reason" %>
+          <%= text_field_tag :reason, nil, required: true, placeholder: "Reason",
+                aria: { label: "Reason for #{transition['label']}" } %>
+        <% when "slug" %>
+          <%= text_field_tag :confirmation_slug, nil, required: true, placeholder: @row["slug"],
+                aria: { label: "Type #{@row['slug']} to confirm" } %>
+        <% end %>
+        <%= form.submit transition["label"], data: { turbo_submits_with: "Submitting…" } %>
+      <% end %>
+      <% end %>
+    <% else %>
+      <% if recovery_action?(@row) %>
+        <%= button_to "Retry stage", task_recover_path(@project["name"], @row["slug"]),
+              data: { turbo_submits_with: "Queueing…" } %>
+      <% end %>
+      <% if stage_passable?(@row) %>
+        <%= button_to "Approve", task_approve_path(@project["name"], @row["slug"]),
+              params: { from: @row["stage"] }, data: { turbo_submits_with: "Approving…" } %>
+      <% end %>
+      <% if !@daemon_enabled && (dispatch_action = stage_dispatch_action(@row)) %>
+        <%= button_to "Run #{stage_run_verb(@row)}", task_run_path(@project["name"], @row["slug"]),
+              params: { action_name: dispatch_action, stage: @row["stage"] }, class: "btn-secondary",
+              data: { turbo_submits_with: "Queueing…" } %>
+      <% end %>
     <% end %>
     <% if @worktree_exists %>
       <%= link_to "Diff", task_diff_path(@project["name"], @row["slug"]), class: "btn btn-secondary" %>

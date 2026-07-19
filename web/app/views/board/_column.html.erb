@@ -6,8 +6,9 @@
     <span class="board-count" aria-label="<%= pluralize(tasks.size, "task") %>"><%= tasks.size %></span>
   </header>
   <div class="board-column-cards">
-    <% grouped_board_tasks(tasks, @filters["group"], band["project"]["name"]).each do |lane, lane_tasks| %>
-      <%= render "board/lane", lane: lane, tasks: lane_tasks, grouped: @filters["group"] != "none",
+    <% active_filters = local_assigns.fetch(:filters, @filters) %>
+    <% grouped_board_tasks(tasks, active_filters["group"], band["project"]["name"]).each do |lane, lane_tasks| %>
+      <%= render "board/lane", lane: lane, tasks: lane_tasks, grouped: active_filters["group"] != "none",
                                project: band["project"] %>
     <% end %>
   </div>

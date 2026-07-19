@@ -885,6 +885,27 @@ class CommandsStatusTest < Minitest::Test
     assert_equal original.fetch("fingerprint"), locked.fetch("fingerprint")
   end
 
+  def test_operational_chips_report_on_disk_ci_provenance
+    Dir.mktmpdir("hive-status-ci-chip") do |folder|
+      reviews = File.join(folder, "reviews")
+      FileUtils.mkdir_p(reviews)
+      artifact = File.join(reviews, "ci-blocked.md")
+      File.write(artifact, "CI failed\n")
+
+      chips = Hive::Commands::Status.new.send(
+        :operational_chips,
+        folder: folder, pr_url: nil, queued_request: nil,
+        marker_name: :review_ci_stale, state_file: File.join(folder, "task.md"),
+        mtime: Time.at(1)
+      )
+      ci = chips.find { |chip| chip["kind"] == "ci" }
+
+      assert_equal "blocked", ci.fetch("status")
+      assert_equal "ci-blocked.md", ci.fetch("source")
+      assert_match(/T/, ci.fetch("observed_at"))
+    end
+  end
+
   # The `same_task?` self-reference branch runs in production via `task: row`
   # but was asserted only at the resolver level. A task depending on its own
   # slug must surface as blocked with no blocked_by through the JSON path.

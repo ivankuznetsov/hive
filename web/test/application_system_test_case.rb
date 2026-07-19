@@ -31,4 +31,31 @@ class ApplicationSystemTestCase < ActionDispatch::SystemTestCase
     data["web"] = { "origin" => "http://127.0.0.1", "github" => github }
     File.write(path, data.to_yaml)
   end
+
+  def assert_no_serious_accessibility_violations
+    violations = page.evaluate_script(<<~JS)
+      (() => {
+        const visible = (element) => !!(element.offsetWidth || element.offsetHeight || element.getClientRects().length)
+        const labelText = (element) => {
+          const explicit = element.id && document.querySelector(`label[for="${CSS.escape(element.id)}"]`)
+          return [element.getAttribute("aria-label"), element.getAttribute("aria-labelledby"),
+                  element.closest("label")?.textContent, explicit?.textContent,
+                  element.textContent, element.getAttribute("title"), element.getAttribute("value")]
+            .some((value) => value && value.trim().length > 0)
+        }
+        const violations = []
+        const ids = [...document.querySelectorAll("[id]")].map((element) => element.id)
+        const duplicates = [...new Set(ids.filter((id, index) => ids.indexOf(id) !== index))]
+        if (duplicates.length) violations.push(`duplicate ids: ${duplicates.join(", ")}`)
+        document.querySelectorAll("button, input:not([type=hidden]), select, textarea, a[href]").forEach((element) => {
+          if (visible(element) && !labelText(element)) violations.push(`unnamed ${element.tagName.toLowerCase()}`)
+        })
+        document.querySelectorAll("img").forEach((image) => {
+          if (!image.hasAttribute("alt")) violations.push(`image without alt: ${image.src}`)
+        })
+        return violations
+      })()
+    JS
+    assert_empty violations, "serious accessibility violations: #{violations.join('; ')}"
+  end
 end

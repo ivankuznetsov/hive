@@ -16,7 +16,8 @@
   </label>
   <div class="board-columns" role="list" aria-label="<%= band["project"]["name"] %> <%= band["workflow"]["id"] %> stages">
     <% band["workflow"].fetch("stages", []).each do |stage| %>
-      <%= render "board/column", band: band, stage: stage %>
+      <%= render "board/column", band: band, stage: stage,
+            filters: local_assigns.fetch(:filters, @filters) %>
     <% end %>
   </div>
 </section>

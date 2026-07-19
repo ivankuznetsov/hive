@@ -476,6 +476,8 @@ module Hive
         chips << disk_pr_chip(row) if row[:pr_url]
         reviews = disk_review_chip(row)
         chips << reviews if reviews
+        ci = disk_ci_chip(row)
+        chips << ci if ci
         chips << {
           "kind" => "queue", "status" => "pending", "source" => "dispatch_request",
           "observed_at" => row.dig(:queued_request, "created_at")
@@ -504,6 +506,28 @@ module Hive
           "status" => "#{files.size} artifact#{files.size == 1 ? '' : 's'}",
           "source" => File.basename(latest),
           "observed_at" => safe_file_time(latest)
+        }
+      rescue SystemCallError
+        nil
+      end
+
+      def disk_ci_chip(row)
+        blocked = Dir.glob(File.join(row[:folder].to_s, "reviews", "ci-blocked*.md"))
+          .select { |path| File.file?(path) }
+          .max_by { |path| File.mtime(path) }
+        if blocked
+          return {
+            "kind" => "ci", "status" => "blocked", "source" => File.basename(blocked),
+            "observed_at" => safe_file_time(blocked)
+          }
+        end
+        return nil unless row[:marker_name].to_s == "review_ci_stale"
+
+        state_file = row[:state_file].to_s
+        {
+          "kind" => "ci", "status" => "stale",
+          "source" => File.basename(state_file),
+          "observed_at" => safe_file_time(state_file) || row[:mtime]&.utc&.iso8601(6)
         }
       rescue SystemCallError
         nil

@@ -741,17 +741,27 @@ class TaskActionTest < Minitest::Test
         "direction" => "backward",
         "confirmation" => "confirm",
         "label" => "Send back to Inbox"
+      },
+      {
+        "destination" => "__delete__",
+        "verb" => "drop",
+        "direction" => "delete",
+        "confirmation" => "slug",
+        "label" => "Drop task"
       }
     ], action.allowed_transitions
   end
 
-  def test_guarded_states_have_no_ordinary_transitions
+  def test_guarded_states_expose_only_confirmation_tier_transitions
     task = fake_task(stage_name: "execute", stage_index: 4)
 
     %i[execute_waiting execute_stale error agent_working].each do |marker_name|
       options = marker_name == :agent_working ? { pid_alive: true } : {}
       action = Hive::TaskAction.for(task, marker(marker_name), **options)
-      assert_empty action.allowed_transitions, marker_name
+      transitions = action.allowed_transitions
+      refute_empty transitions, marker_name
+      refute transitions.any? { |transition| transition["confirmation"] == "none" }, marker_name
+      assert transitions.any? { |transition| transition["verb"] == "drop" }, marker_name
     end
   end
 

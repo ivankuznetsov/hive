@@ -1,1 +1,2 @@
-<span id="board_sync" hidden data-epoch="<%= epoch %>" data-generation="<%= generation %>"></span>
+<span id="board_sync" hidden data-epoch="<%= epoch %>" data-generation="<%= generation %>"
+      data-refresh-required="<%= local_assigns.fetch(:refresh_required, false) %>"></span>

@@ -10,6 +10,7 @@ require "hive/daemon/policy"
 require "hive/daemon/plan_approval"
 require "hive/daemon/concurrency_controller"
 require "hive/daemon/child_supervisor"
+require "hive/daemon/transition_metrics"
 require "hive/daemon/status_consumer"
 require "hive/daemon/stale_agent_healer"
 require "hive/daemon/recoverable_error_healer"
@@ -664,6 +665,8 @@ module Hive
               entry.request_id, state_home: dispatch_request_state_home
             )
             continuation = promote_dispatch_sequence(entry, meta, now: now) if entry.exit_code == 0
+            request = claimed_dispatch_request(entry.request_id)
+            audit_web_dispatch!(request) if entry.exit_code == 0 && request && !continuation
             Hive::Daemon::DispatchRequestQueue.discard_sequence(
               entry.request_id, state_home: dispatch_request_state_home
             ) unless entry.exit_code == 0
@@ -1543,8 +1546,7 @@ module Hive
         pending = Hive::Daemon::DispatchRequestQueue.pending(
           state_home: dispatch_request_state_home,
           bad_handler: ->(path:, reason:) {
-            @logger.event(:dispatch_request_rejected,
-                          path: path, reason: reason)
+            log_request_rejection(path: path, reason: reason)
             # `rm_f` is idempotent — quietly does nothing if the
             # file is already gone (concurrent retry, manual cleanup).
             FileUtils.rm_f(path)
@@ -1572,11 +1574,10 @@ module Hive
           begin
             process_dispatch_request_iteration(req, now: now, rows: rows)
           rescue StandardError => e
-            @logger.event(:dispatch_request_rejected,
-                          request_id: req.request_id, project: req.project,
-                          slug: req.slug,
-                          reason: "spawn_failure: #{e.class}: #{e.message[0, 200]}",
-                          path: req.path)
+            log_request_rejection(
+              request_id: req.request_id, project: req.project, slug: req.slug,
+              reason: "spawn_failure: #{e.class}: #{e.message[0, 200]}", path: req.path
+            )
             # Don't remove the file — let the next tick try again.
             # If the failure is persistent (e.g. config corruption),
             # the operator will see repeated rejected events with
@@ -1696,27 +1697,47 @@ module Hive
         false
       end
 
-      def audit_web_dispatch(req)
+      def audit_web_dispatch!(req)
         return unless req.requestor == "web" && !req.actor.to_s.empty?
 
         task = Hive::TaskResolver.new(req.slug, project_filter: req.project).resolve
-        from = "#{task.stage_index}-#{task.stage_name}"
-        Hive::Events.emit(
-          task_folder: task.folder, slug: task.slug, stage: from,
+        return if operator_audit_recorded?(task.folder, req.request_id)
+
+        from = request_stage_guard(req) || "#{task.stage_index}-#{task.stage_name}"
+        current_stage = "#{task.stage_index}-#{task.stage_name}"
+        Hive::Events.emit!(
+          task_folder: task.folder, slug: task.slug, stage: current_stage,
           event_type: :operator_action, agent: "web:#{req.actor}",
-          message: "queued #{req.argv[1]} for #{req.transition_destination}",
+          message: "completed #{req.argv[1]} for #{req.transition_destination}",
           metadata: {
             actor: req.actor, request_id: req.request_id, from: from,
             to: req.transition_destination,
             direction: from == req.transition_destination ? "run" : "forward"
           }
         )
-      rescue Hive::Error, SystemCallError => e
-        @logger.event(
-          :dispatch_request_audit_failed, request_id: req.request_id,
-          project: req.project, slug: req.slug,
-          reason: "#{e.class}: #{e.message[0, 160]}"
-        )
+      end
+
+      def request_stage_guard(req)
+        option = Array(req.argv).index { |value| %w[--from --stage].include?(value) }
+        option && req.argv[option + 1]
+      end
+
+      def operator_audit_recorded?(folder, request_id)
+        path = File.join(folder, "events.jsonl")
+        return false unless File.file?(path)
+
+        File.foreach(path).any? do |line|
+          event = JSON.parse(line)
+          event["event_type"] == "operator_action" && event["request_id"] == request_id
+        rescue JSON::ParserError
+          false
+        end
+      end
+
+      def claimed_dispatch_request(request_id)
+        Hive::Daemon::DispatchRequestQueue.claimed(
+          state_home: dispatch_request_state_home
+        ).find { |delivery| delivery.request.request_id == request_id }&.request
       end
 
       # Host-global maintenance request (project == "__global__"): not tied to
@@ -1781,7 +1802,6 @@ module Hive
             command: command, trigger: req.trigger,
             chat_id: req.chat_id, update_id: req.update_id
           )
-          audit_web_dispatch(req)
           return result
         end
 
@@ -1804,7 +1824,6 @@ module Hive
                       project: req.project, slug: req.slug,
                       command: command, trigger: req.trigger,
                       chat_id: req.chat_id, update_id: req.update_id)
-        audit_web_dispatch(req)
       rescue StandardError
         Hive::Daemon::DispatchRequestQueue.release_claim(
           req.request_id, state_home: dispatch_request_state_home
@@ -1862,6 +1881,9 @@ module Hive
           requestor: (meta && meta[:requestor]) || "bot",
           chat_id: meta && meta[:chat_id],
           update_id: meta && meta[:update_id],
+          actor: meta && meta[:actor],
+          expected_fingerprint: meta && meta[:expected_fingerprint],
+          transition_destination: meta && meta[:transition_destination],
           state_home: dispatch_request_state_home,
           now: now
         )
@@ -1987,6 +2009,9 @@ module Hive
               requestor: request.requestor,
               chat_id: request.chat_id,
               update_id: request.update_id,
+              actor: request.actor,
+              expected_fingerprint: request.expected_fingerprint,
+              transition_destination: request.transition_destination,
               state_home: dispatch_request_state_home,
               now: now
             )
@@ -1996,6 +2021,7 @@ module Hive
             )
             nil
           end
+          audit_web_dispatch!(request) if receipt["exit_status"].zero? && !continuation
           write_attempt_dispatch_result(request, attempt, receipt, now: now) unless continuation
           Hive::Daemon::DispatchRequestQueue.remove(
             request.request_id, state_home: dispatch_request_state_home
@@ -2202,12 +2228,18 @@ module Hive
       end
 
       def reject_request(req, reason:)
-        @logger.event(:dispatch_request_rejected,
-                      request_id: req.request_id, project: req.project,
-                      slug: req.slug, reason: reason, path: req.path)
+        log_request_rejection(
+          request_id: req.request_id, project: req.project,
+          slug: req.slug, reason: reason, path: req.path
+        )
         Hive::Daemon::DispatchRequestQueue.remove(
           req.request_id, state_home: dispatch_request_state_home
         )
+      end
+
+      def log_request_rejection(**attrs)
+        Hive::Daemon::TransitionMetrics.denied!(attrs.fetch(:reason))
+        @logger.event(:dispatch_request_rejected, **attrs)
       end
 
       def expire_request(req)

@@ -3,7 +3,7 @@ title: hive tui
 type: command
 source: lib/hive/tui.rb, lib/hive/tui/**
 created: 2026-04-27
-updated: 2026-06-15
+updated: 2026-07-19
 tags: [command, tui, observability, interactive, diagnostics, task-id, archive, pr]
 ---
 
@@ -170,7 +170,7 @@ the last dispatched snapshot. Identical snapshots do not redraw.
 
 The task grid has a fixed PR column between id and display name. Rows with no parseable pull-request URL render `—`; rows whose `pr_url` ends in `/pull/<number>` render `#<number>` via [[modules/pr]]. When stdout is a TTY, the number is wrapped in an OSC 8 hyperlink by `Hive::Tui::Views::Hyperlink`; invalid or non-http URLs fall back to the plain label. The PR column does not drop under narrow-width layout branches, so very small terminals first hide stage and status before sacrificing the PR signal.
 
-The grid view derives its visible snapshot through scope, slug/name/id filter, and `Snapshot#without_old_archived`. That drops `9-done` rows older than 3 days by row `mtime` (the same state-file timestamp rendered as task age), falling back to `folder_mtime` only for legacy payloads. Marker state is intentionally ignored: complete, unresolved, and markerless done rows all hide by the same age rule. Rows with neither timestamp fail open and stay visible. Cursor movement and `BubbleModel#current_row` use the same filtered projection, so keystrokes cannot dispatch against a hidden row. The default footer does not surface the hidden-archive count; `z` opens the Archive pane when the operator wants the unfiltered archive list. The Archive pane itself renders directly from the unfiltered snapshot and therefore lists every `9-done` task regardless of age.
+The grid view derives its visible snapshot through scope, slug/name/id filter, and `Snapshot#without_old_archived`. That drops workflow-terminal rows older than 3 days by row `mtime` (the same state-file timestamp rendered as task age), falling back to `folder_mtime` only for legacy payloads. Terminal identity comes from the status row/workflow descriptor rather than a hard-coded `9-done` stage, so custom workflows share the board/grid retention contract. Marker state is intentionally ignored: complete, unresolved, and markerless terminal rows all hide by the same age rule. Rows with neither timestamp fail open and stay visible. Cursor movement and `BubbleModel#current_row` use the same filtered projection, so keystrokes cannot dispatch against a hidden row. The default footer does not surface the hidden-archive count; `z` opens the Archive pane when the operator wants the unfiltered archive list. The Archive pane itself renders directly from the unfiltered snapshot and therefore lists every terminal task regardless of age.
 
 Snapshots carry a `current_seen_at` timestamp; if the last successful refresh is older than 5s, the header renders a `[stalled: Xs]` banner and the `@last_error` message is surfaced in the status line. The previous snapshot stays visible — the loop never crashes on a transient JSON / IO error.
 

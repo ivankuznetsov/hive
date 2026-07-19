@@ -9,6 +9,7 @@ export default class extends Controller {
     this.reducedMotion.addEventListener("change", this.refresh)
     this.observer = new MutationObserver(this.refresh)
     this.observer.observe(this.element, { childList: true, subtree: true })
+    this.pending = new WeakMap()
     this.syncCards()
   }
 
@@ -32,8 +33,10 @@ export default class extends Controller {
       return
     }
 
+    const band = card.closest(".board-band")
     this.drag = {
       card,
+      band,
       destinations: this.transitions(card).map((transition) => transition.destination),
       parent: card.parentNode,
       next: card.nextSibling,
@@ -42,7 +45,7 @@ export default class extends Controller {
     card.classList.add("is-dragging")
     event.dataTransfer.effectAllowed = "move"
     event.dataTransfer.setData("text/plain", card.dataset.cardSlug)
-    this.columns().forEach((column) => {
+    this.columns(band).forEach((column) => {
       column.classList.toggle("drop-allowed", this.drag.destinations.includes(column.dataset.stage))
     })
   }
@@ -67,45 +70,54 @@ export default class extends Controller {
 
     event.preventDefault()
     const destination = column.dataset.stage
-    column.querySelector(".board-column-cards")?.append(this.drag.card)
-    this.drag.card.classList.remove("is-dragging")
-    this.drag.card.classList.add("is-transition-pending")
-    this.drag.card.dispatchEvent(new CustomEvent("board:transition-request", {
+    const settlement = this.drag
+    column.querySelector(".board-column-cards")?.append(settlement.card)
+    settlement.card.classList.remove("is-dragging")
+    settlement.card.classList.add("is-transition-pending")
+    this.pending.set(settlement.card, settlement)
+    settlement.card.dispatchEvent(new CustomEvent("board:transition-request", {
       bubbles: false, detail: { destination, source: "drag" }
     }))
-    this.clearColumns()
+    this.clearColumns(settlement.band)
+    this.drag = null
   }
 
   finish() {
     this.drag?.card.classList.remove("is-dragging")
-    this.clearColumns()
+    this.clearColumns(this.drag?.band)
+    this.drag = null
   }
 
-  settled() {
-    this.clearColumns()
-    this.drag = null
+  settled(event) {
+    const card = event.target.closest(".board-card")
+    if (card) this.pending.delete(card)
   }
 
   failed(event) {
-    if (event.detail.source !== "drag" || !this.drag) return
+    if (event.detail.source !== "drag") return
 
-    const { card, parent, next } = this.drag
+    const failedCard = event.target.closest(".board-card")
+    const settlement = failedCard && this.pending.get(failedCard)
+    if (!settlement) return
+
+    const { card, parent, next, band } = settlement
     next?.parentNode === parent ? parent.insertBefore(card, next) : parent.append(card)
     card.classList.remove("is-dragging", "is-transition-pending")
-    this.clearColumns()
-    this.drag = null
+    this.clearColumns(band)
+    this.pending.delete(card)
   }
 
   allowed(column) {
-    return this.drag && column && this.drag.destinations.includes(column.dataset.stage)
+    return this.drag && column && column.closest(".board-band") === this.drag.band &&
+      this.drag.destinations.includes(column.dataset.stage)
   }
 
-  columns() {
-    return Array.from(this.element.querySelectorAll(".board-column"))
+  columns(band = this.drag?.band) {
+    return band ? Array.from(band.querySelectorAll(".board-column")) : []
   }
 
-  clearColumns() {
-    this.columns().forEach((column) => column.classList.remove("drop-allowed", "is-drop-target"))
+  clearColumns(band) {
+    this.columns(band).forEach((column) => column.classList.remove("drop-allowed", "is-drop-target"))
   }
 
   transitions(card) {

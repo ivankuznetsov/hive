@@ -281,9 +281,9 @@ module Hive
       #     the filesystem. A failed acquire never leaves a half-applied move.
       #   - task_lock INNER: blocks a concurrent `hive run` on the same task
       #     during the mv. The .lock file moves with the folder; the standard
-      #     release no-ops on the gone source path. We delete the orphan at
-      #     the new path before committing so the per-process lock metadata
-      #     isn't tracked in hive/state.
+      #     release no-ops on the gone source path. The moved lock remains at
+      #     the destination until audit, commit, and any rollback are settled,
+      #     preventing a runner from entering the task mid-transaction.
       def perform_move_and_commit(task, dest_stage, enforce_admission: false, direction: nil)
         Hive::Lock.with_commit_lock(task.hive_state_path) do
           perform_move_and_commit_under_lock(
@@ -295,6 +295,7 @@ module Hive
 
       def perform_move_and_commit_under_lock(task, dest_stage, enforce_admission:, direction:)
         new_folder = nil
+        commit_action = "approve #{task.stage_index}-#{task.stage_name} -> #{dest_stage}"
         Hive::Lock.with_task_lock(task.folder, slug: task.slug, op: "approve") do
           # Preserve the command's typed collision contract before building
           # a multi-project snapshot: a pre-existing destination necessarily
@@ -305,10 +306,9 @@ module Hive
           Hive::DependencySnapshot.enforce_admission!(task) if enforce_admission
           Hive::Attempts::Context.current&.validate_generation!(task)
           new_folder = move_task!(task, dest_stage)
+          record_commit_or_rollback!(task, dest_stage, new_folder, commit_action, direction: direction)
+          cleanup_orphan_task_lock(new_folder)
         end
-        cleanup_orphan_task_lock(new_folder)
-        commit_action = "approve #{task.stage_index}-#{task.stage_name} -> #{dest_stage}"
-        record_commit_or_rollback!(task, dest_stage, new_folder, commit_action, direction: direction)
         [ new_folder, commit_action ]
       end
 

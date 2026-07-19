@@ -19,17 +19,23 @@
   <%= form_with url: board_path, method: :get, class: "board-filters",
                 data: { controller: "board-filter", turbo_frame: "_top" } do %>
     <%= select_tag :project, options_for_select([["All projects", ""]] + @project_options, @filters["project"]),
+          id: "board_filter_project",
           aria: { label: "Project" }, data: { action: "change->board-filter#submit" } %>
     <%= select_tag :workflow, options_for_select([["All workflows", ""]] + @workflow_options, @filters["workflow"]),
+          id: "board_filter_workflow",
           aria: { label: "Workflow" }, data: { action: "change->board-filter#submit" } %>
     <%= select_tag :state, options_for_select([["All states", ""]] + @state_options, @filters["state"]),
+          id: "board_filter_state",
           aria: { label: "State" }, data: { action: "change->board-filter#submit" } %>
     <%= select_tag :agent, options_for_select([["All agents", ""]] + @agent_options, @filters["agent"]),
+          id: "board_filter_agent",
           aria: { label: "Agent" }, data: { action: "change->board-filter#submit" } %>
     <%= select_tag :group, options_for_select([["No grouping", "none"], ["Agent", "agent"],
                                               ["Dependency", "dependency"], ["Project", "project"]], @filters["group"]),
+          id: "board_filter_group",
           aria: { label: "Group by" }, data: { action: "change->board-filter#submit" } %>
-    <%= search_field_tag :q, @filters["q"], placeholder: "Search tasks…", aria: { label: "Search tasks" },
+    <%= search_field_tag :q, @filters["q"], id: "board_filter_query",
+          placeholder: "Search tasks…", aria: { label: "Search tasks" },
           data: { action: "input->board-filter#search" } %>
     <noscript><%= submit_tag "Apply", class: "btn btn-secondary btn-sm" %></noscript>
   <% end %>

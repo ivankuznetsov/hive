@@ -348,7 +348,10 @@ module Hive
           return {
             chat_id: data["chat_id"], update_id: data["update_id"],
             project: data["project"], slug: data["slug"],
-            requestor: data["requestor"], task_generation: data["task_generation"],
+            requestor: data["requestor"], actor: data["actor"],
+            expected_fingerprint: data["expected_fingerprint"],
+            transition_destination: data["transition_destination"],
+            task_generation: data["task_generation"],
             predecessor_attempt_id: data["predecessor_attempt_id"]
           }
         end
@@ -390,7 +393,8 @@ module Hive
       end
 
       def promote_sequence(request_id, project:, slug:, requestor: "bot", chat_id: nil,
-                           update_id: nil, trigger: "sequence_continuation",
+                           update_id: nil, actor: nil, expected_fingerprint: nil,
+                           transition_destination: nil, trigger: "sequence_continuation",
                            state_home: Hive::Paths.state_home, now: Time.now)
         dir = directory(state_home: state_home)
         path = sequence_path(dir, request_id)
@@ -401,6 +405,8 @@ module Hive
         next_request_id = write_request!(
           project: project, slug: slug, argv: next_argv, requestor: requestor,
           chat_id: chat_id, update_id: update_id, trigger: trigger,
+          actor: actor, expected_fingerprint: expected_fingerprint,
+          transition_destination: transition_destination,
           state_home: state_home, now: now
         )
         if sequence.empty?
@@ -414,7 +420,8 @@ module Hive
           slug: slug.to_s, argv: next_argv, requestor: requestor.to_s,
           chat_id: chat_id, update_id: update_id, trigger: trigger.to_s,
           task_generation: nil, predecessor_attempt_id: nil, inherited_outputs: [],
-          actor: nil, expected_fingerprint: nil, transition_destination: nil,
+          actor: actor, expected_fingerprint: expected_fingerprint,
+          transition_destination: transition_destination,
           schema_version: SCHEMA_VERSION, path: nil
         )
       end

@@ -63,7 +63,9 @@ state transaction. Guarded synchronous web moves append `operator_action`
 after the folder move but before the `hive/state` commit; an append or commit
 failure restores `events.jsonl`, `status.md`, and the task folder together.
 Queued web moves retain the same actor/request identity and emit only after the
-daemon accepts the guarded dispatch. Stale, blocked, illegal, unauthenticated,
+daemon child completes the guarded mutation successfully. Their audit uses the
+strict append path, so a persistence failure leaves the durable request claimed
+and surfaces instead of recording a false success. Stale, blocked, illegal, unauthenticated,
 or otherwise denied requests never append `transition_denied` or any other
 task event; they are logged and counted outside canonical state.
 

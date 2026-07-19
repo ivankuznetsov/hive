@@ -7,6 +7,9 @@ export default class extends Controller {
   keydown(event) {
     if (!this.hasDetailsTarget || !this.detailsTarget.open) return
 
+    event.stopPropagation()
+    if (event.target.matches("input, textarea") && event.key !== "Escape") return
+
     const items = this.itemTargets.filter((item) => !item.disabled)
     const current = items.indexOf(document.activeElement)
     let destination
@@ -29,9 +32,12 @@ export default class extends Controller {
     const button = event.submitter
     if (!button) return
 
+    const form = new FormData(event.currentTarget)
     this.requestMove(button.dataset.destination, {
       confirmation: button.dataset.confirmation,
       label: button.dataset.transitionLabel,
+      reason: form.get("reason"),
+      confirmationSlug: form.get("confirmation_slug"),
       source: "menu"
     })
   }
@@ -42,7 +48,8 @@ export default class extends Controller {
 
   async requestMove(destination, options = {}) {
     if (this.element.dataset.transitionPending === "true") return
-    if (options.confirmation === "confirm" && !window.confirm(`${options.label}?`)) return
+    const confirmation = this.confirmationPayload(options)
+    if (!confirmation) return
 
     this.setPending(true)
     this.announce(`${options.label || "Move"} pending`)
@@ -54,7 +61,11 @@ export default class extends Controller {
           "Content-Type": "application/json",
           "X-CSRF-Token": document.querySelector("meta[name='csrf-token']")?.content || ""
         },
-        body: JSON.stringify({ destination, expected_fingerprint: this.fingerprintValue })
+        body: JSON.stringify({
+          destination,
+          expected_fingerprint: this.fingerprintValue,
+          ...confirmation
+        })
       })
       const payload = await response.json().catch(() => ({}))
       if (!response.ok) throw new TransitionError(payload.message || `Move failed (${response.status})`, payload)
@@ -72,6 +83,23 @@ export default class extends Controller {
         detail: { destination, source: options.source, card: error.payload?.card }
       })
     }
+  }
+
+  confirmationPayload(options) {
+    if (!options.confirmation || options.confirmation === "none") return {}
+    if (options.confirmation === "confirm") {
+      return window.confirm(`${options.label}?`) ? { confirmation: "confirmed" } : null
+    }
+    if (options.confirmation === "reason") {
+      const reason = options.reason?.trim() || window.prompt("Reason for this transition:")?.trim()
+      return reason ? { reason } : null
+    }
+    if (options.confirmation === "slug") {
+      const confirmationSlug = options.confirmationSlug?.trim() ||
+        window.prompt(`Type ${this.element.dataset.cardSlug} to confirm:`)?.trim()
+      return confirmationSlug ? { confirmation_slug: confirmationSlug } : null
+    }
+    return null
   }
 
   setPending(pending) {

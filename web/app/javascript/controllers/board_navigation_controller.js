@@ -6,17 +6,29 @@ export default class extends Controller {
   connect() {
     this.media = window.matchMedia("(max-width: 767px)")
     this.resize = () => this.applyStagePagers()
+    this.morph = new MutationObserver(() => this.reconcileTabStops())
     this.media.addEventListener("change", this.resize)
+    this.morph.observe(this.element, { childList: true, subtree: true })
     this.resetTabStops()
     this.applyStagePagers()
   }
 
   disconnect() {
     this.media.removeEventListener("change", this.resize)
+    this.morph.disconnect()
   }
 
   resetTabStops() {
     this.cardTargets.forEach((card, index) => { card.tabIndex = index === 0 ? 0 : -1 })
+  }
+
+  reconcileTabStops() {
+    const cards = this.cardTargets
+    if (cards.length === 0) return
+
+    const focused = document.activeElement?.closest?.(".board-card")
+    const current = cards.find((card) => card === focused || card.tabIndex === 0) || cards[0]
+    cards.forEach((card) => { card.tabIndex = card === current ? 0 : -1 })
   }
 
   keydown(event) {

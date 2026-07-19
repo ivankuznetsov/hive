@@ -20,6 +20,10 @@ export default class extends Controller {
     const epoch = frame.dataset.epoch
     const generation = Number(frame.dataset.generation)
     if (epoch === this.epochValue && generation === this.generationValue + 1) {
+      if (frame.dataset.refreshRequired === "true") {
+        this.announce("Board update is reconciling")
+        return
+      }
       this.generationValue = generation
       this.announce("Board updated")
       return

@@ -23,6 +23,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
   def setup
     @row_dirs = []
+    Hive::Daemon::TransitionMetrics.reset!
   end
 
   def teardown
@@ -4275,12 +4276,46 @@ end
         rejected = logger.events.find { |(n, attrs)| n == :dispatch_request_rejected && attrs[:request_id] == "BAD" }
         refute_nil rejected
         assert_equal "invalid_argv", rejected[1][:reason]
+        assert_equal 1, Hive::Daemon::TransitionMetrics.snapshot.fetch("invalid_argv")
         assert_empty sup.spawned
         assert_empty Dir.glob(File.join(Q.directory(state_home: state_home), "*.json"))
       ensure
         restore_find_project!
       end
     end
+  end
+
+  def test_queued_web_audit_runs_only_after_successful_completion
+    dispatcher, supervisor, = make_dispatcher
+    audited = []
+    dispatcher.define_singleton_method(:claimed_dispatch_request) do |request_id|
+      Q::Request.new(
+        request_id: request_id, requestor: "web", actor: "alice",
+        project: "p1", slug: "s1", argv: %w[hive run s1 --stage 2-work],
+        transition_destination: "2-work"
+      )
+    end
+    dispatcher.define_singleton_method(:audit_web_dispatch!) { |request| audited << request.request_id }
+    supervisor.next_exits = [
+      ChildExit.new(pid: 1, exit_code: 1, project: "p1", slug: "s1", stage: nil,
+                    command: "hive run s1", started_at: T0, finished_at: T0,
+                    request_id: "failed"),
+      ChildExit.new(pid: 2, exit_code: 0, project: "p1", slug: "s1", stage: nil,
+                    command: "hive run s1", started_at: T0, finished_at: T0,
+                    request_id: "continued"),
+      ChildExit.new(pid: 3, exit_code: 0, project: "p1", slug: "s1", stage: nil,
+                    command: "hive run s1", started_at: T0, finished_at: T0,
+                    request_id: "succeeded")
+    ]
+    dispatcher.define_singleton_method(:refresh_post_completion_mtime) { |_| nil }
+    dispatcher.define_singleton_method(:promote_dispatch_sequence) do |entry, _meta, **|
+      entry.request_id == "continued" ? :continuation : nil
+    end
+    dispatcher.define_singleton_method(:notify_dispatch_result) { |*_, **| nil }
+
+    dispatcher.send(:reap_completed, now: T0 + 1)
+
+    assert_equal [ "succeeded" ], audited
   end
 
   def test_dispatch_request_rejected_when_project_unknown

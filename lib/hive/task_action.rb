@@ -266,32 +266,53 @@ module Hive
     # and destinations. Generic workflows never receive invented backwards
     # semantics, while coding keeps its established prior-gate reject path.
     def allowed_transitions
-      return [] unless transitionable_action?
-
       transitions = []
       stage = workflow_stage
       return transitions unless stage
 
-      if key == Hive::Schemas::TaskActionKind::READY_TO_RUN
+      if transitionable_action?
+        if key == Hive::Schemas::TaskActionKind::READY_TO_RUN
+          transitions << transition_payload(
+            destination: stage.dir, verb: "run", direction: "run",
+            confirmation: "confirm",
+            label: "Run #{stage_label(stage)}"
+          )
+        elsif (destination = task_workflow.next_stage_after(stage.name))
+          transitions << transition_payload(
+            destination: destination.dir,
+            verb: action[:command] == "approve" ? "approve" : action[:command],
+            direction: "forward",
+            label: "Move to #{stage_label(destination)}"
+          )
+        end
+
+        if Hive::Workflows.coding_id?(task_workflow.id) && stage.index > 1
+          prior = task_workflow.stages.fetch(stage.index - 2)
+          transitions << transition_payload(
+            destination: prior.dir, verb: "reject", direction: "backward",
+            confirmation: "confirm", label: "Send back to #{stage_label(prior)}"
+          )
+        end
+      end
+
+      if recovery_transition?
         transitions << transition_payload(
-          destination: stage.dir, verb: "run", direction: "run",
-          confirmation: "confirm",
-          label: "Run #{stage_label(stage)}"
-        )
-      elsif (destination = task_workflow.next_stage_after(stage.name))
-        transitions << transition_payload(
-          destination: destination.dir,
-          verb: action[:command] == "approve" ? "approve" : action[:command],
-          direction: "forward",
-          label: "Move to #{stage_label(destination)}"
+          destination: stage.dir, verb: "recover", direction: "recover",
+          confirmation: "confirm", label: "Retry stage"
         )
       end
 
-      if Hive::Workflows.coding_id?(task_workflow.id) && stage.index > 1
-        prior = task_workflow.stages.fetch(stage.index - 2)
+      if force_transition? && (destination = task_workflow.next_stage_after(stage.name))
         transitions << transition_payload(
-          destination: prior.dir, verb: "reject", direction: "backward",
-          confirmation: "confirm", label: "Send back to #{stage_label(prior)}"
+          destination: destination.dir, verb: "force_approve", direction: "forward",
+          confirmation: "reason", label: "Force move to #{stage_label(destination)}"
+        )
+      end
+
+      unless stage == task_workflow.stages.last
+        transitions << transition_payload(
+          destination: "__delete__", verb: "drop", direction: "delete",
+          confirmation: "slug", label: "Drop task"
         )
       end
       transitions
@@ -345,7 +366,24 @@ module Hive
       Hive::Schemas::TaskActionKind::READY_TO_RUN
     ].freeze
 
+    RECOVERY_TRANSITION_KEYS = [
+      Hive::Schemas::TaskActionKind::RECOVER_EXECUTE,
+      Hive::Schemas::TaskActionKind::RECOVER_REVIEW,
+      Hive::Schemas::TaskActionKind::ERROR
+    ].freeze
+
+    FORCE_TRANSITION_KEYS = [
+      Hive::Schemas::TaskActionKind::NEEDS_INPUT,
+      Hive::Schemas::TaskActionKind::RECOVER_EXECUTE,
+      Hive::Schemas::TaskActionKind::RECOVER_REVIEW,
+      Hive::Schemas::TaskActionKind::READY_TO_RUN,
+      Hive::Schemas::TaskActionKind::ERROR,
+      Hive::Schemas::TaskActionKind::MANUAL_STEERING
+    ].freeze
+
     def transitionable_action? = TRANSITIONABLE_KEYS.include?(key)
+    def recovery_transition? = RECOVERY_TRANSITION_KEYS.include?(key)
+    def force_transition? = FORCE_TRANSITION_KEYS.include?(key)
 
     def transition_payload(destination:, verb:, direction:, label:, confirmation: "none")
       {

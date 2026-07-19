@@ -256,6 +256,31 @@ class HiveCommandsApproveTest < Minitest::Test
     end
   end
 
+  def test_moved_task_lock_survives_through_audit_and_commit
+    Dir.mktmpdir("hive-approve-lock-lifetime") do |root|
+      state = File.join(root, ".hive-state")
+      source = File.join(state, "stages", "2-brainstorm", "slug-260522-abcd")
+      destination = File.join(state, "stages", "3-plan", "slug-260522-abcd")
+      FileUtils.mkdir_p(source)
+      File.write(File.join(source, "brainstorm.md"), "# task\n")
+      current = task(folder: source, hive_state_path: state, project_root: root)
+      cmd = command
+      observed_lock = false
+      cmd.define_singleton_method(:record_commit_or_rollback!) do |_task, _stage, moved, _action, direction:|
+        observed_lock = File.file?(File.join(moved, ".lock")) && direction == "forward"
+      end
+
+      moved, = cmd.send(
+        :perform_move_and_commit_under_lock, current, "3-plan",
+        enforce_admission: false, direction: "forward"
+      )
+
+      assert observed_lock, "the destination lock must cover audit and commit"
+      assert_equal destination, moved
+      refute File.exist?(File.join(destination, ".lock")), "the transaction must clean its moved lock"
+    end
+  end
+
   def test_source_has_tracked_files_reports_git_failures_from_stdout_or_stderr
     cmd = command
     original = Open3.singleton_class.instance_method(:capture3)

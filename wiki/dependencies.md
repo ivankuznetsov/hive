@@ -3,7 +3,7 @@ title: Dependencies
 type: dependencies
 source: Gemfile, hive.gemspec, Gemfile.lock, web/Gemfile, web/Gemfile.lock
 created: 2026-04-25
-updated: 2026-07-18
+updated: 2026-07-19
 tags: [dependencies, gems, runtime]
 ---
 
@@ -16,9 +16,14 @@ tools. The v0.5.3 release-prep checkout is `0.5.3`: `lib/hive.rb`, root
 `hive-cli (0.5.3)`. The release-prep change keeps both lockfiles synchronized
 with public installer URLs and the changelog. Recent root bundle dependency
 commits also bumped RuboCop to 1.88.2, Brakeman from
-8.0.4 to 8.0.5, and `concurrent-ruby` from 1.3.6 to 1.3.7; the separate web
-bundle still resolves its own Brakeman 8.0.4 and `concurrent-ruby` 1.3.6 locks
-as of this refresh.
+8.0.4 to 8.0.5, and `concurrent-ruby` from 1.3.6 to 1.3.7. The separate web
+bundle now resolves Brakeman 8.0.5. Its current primary runtime locks are Rails
+8.1.3, Propshaft 1.3.2, Puma 7.2.1, Importmap Rails 2.2.3, Turbo Rails 2.0.23,
+Stimulus Rails 1.3.4, Jbuilder 2.15.1, Solid Cable 4.0.0, Solid Cache 1.0.10,
+Solid Queue 1.4.0, Bootsnap 1.24.6, Thruster 0.1.21, Image Processing 1.14.0,
+and Redcarpet 3.6.1. Its browser/test locks include Capybara 3.40.0,
+capybara-playwright-driver 0.5.9, playwright-ruby-client 1.60.0, rack-test
+2.2.0, bundler-audit 0.9.3, and rubocop-rails-omakase 1.1.0.
 
 ## Runtime gems
 

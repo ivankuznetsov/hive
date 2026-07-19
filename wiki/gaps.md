@@ -515,12 +515,14 @@ Implementation ownership resolves pi from project/home `settings.json` and Grok 
 Board/grid routing, descriptor-scoped bands, semantic fingerprints, guarded
 menu/drag transitions, queue-time revalidation, operator audit rollback, Turbo
 epoch/generation reconciliation, the drawer, mobile paging, shared workflow
-terminal retention, and the synthetic 20 × 500 render budget are covered in
+terminal retention, the synthetic 20 × 500 render budget, the real-filesystem
+5,000-card assembly comparison, targeted Turbo payload budgets, and the serious
+accessibility gate are covered in
 root/Rails/browser tests. This implementation run did not build a release web
 bundle or Hivebox image and did not exercise the board against a long-running
 real daemon plus external CLI changes on a deployed box. Release verification
 should smoke both explicit routes and the selected `/` default from the managed
 bundle/container, then confirm queue-to-daemon movement and reconnect recovery
-under real process restarts. On-disk PR/review chips intentionally prove only
+under real process restarts. On-disk PR/review/CI chips intentionally prove only
 their recorded source/time; live GitHub freshness remains outside the web
 request path.

@@ -42,36 +42,38 @@
     <% end %>
   <% end %>
 
-  <details class="advanced">
-    <summary>Advanced</summary>
-    <div class="advanced-item">
-      <div>
-        <p class="advanced-title">Send back a stage</p>
-        <p class="muted">Move this task to the previous gate. Artifacts are kept — the prior stage resumes where it left off.</p>
-      </div>
-      <%= button_to "Reject", task_reject_path(@project["name"], @row["slug"]),
-            params: { from: @row["stage"] }, class: "btn-danger",
-            data: { turbo_confirm: "Send #{@row["slug"]} back a stage?" } %>
-    </div>
-    <% unless stage_passable?(@row) %>
+  <% unless @drawer_mode %>
+    <details class="advanced">
+      <summary>Advanced</summary>
       <div class="advanced-item">
         <div>
-          <p class="advanced-title">Force approve</p>
-          <p class="muted">Advance to the next stage even though this one isn't marked complete — the next agent runs with whatever exists now (e.g. unanswered questions stay unanswered).</p>
+          <p class="advanced-title">Send back a stage</p>
+          <p class="muted">Move this task to the previous gate. Artifacts are kept — the prior stage resumes where it left off.</p>
         </div>
-        <%= button_to "Force approve", task_approve_path(@project["name"], @row["slug"]),
-              params: { from: @row["stage"], force: "1" }, class: "btn-secondary",
-              data: { turbo_confirm: "Advance #{@row["slug"]} even though the stage isn't marked complete?" } %>
+        <%= button_to "Reject", task_reject_path(@project["name"], @row["slug"]),
+              params: { from: @row["stage"] }, class: "btn-danger",
+              data: { turbo_confirm: "Send #{@row["slug"]} back a stage?" } %>
       </div>
-    <% end %>
-    <div class="advanced-item">
-      <div>
-        <p class="advanced-title">Drop task</p>
-        <p class="muted">Permanently delete this idea — kills any running agent, removes the task folder, worktree, and branch, and closes a draft PR. The TUI's Shift+X. There is no undo.</p>
+      <% unless stage_passable?(@row) %>
+        <div class="advanced-item">
+          <div>
+            <p class="advanced-title">Force approve</p>
+            <p class="muted">Advance to the next stage even though this one isn't marked complete — the next agent runs with whatever exists now (e.g. unanswered questions stay unanswered).</p>
+          </div>
+          <%= button_to "Force approve", task_approve_path(@project["name"], @row["slug"]),
+                params: { from: @row["stage"], force: "1" }, class: "btn-secondary",
+                data: { turbo_confirm: "Advance #{@row["slug"]} even though the stage isn't marked complete?" } %>
+        </div>
+      <% end %>
+      <div class="advanced-item">
+        <div>
+          <p class="advanced-title">Drop task</p>
+          <p class="muted">Permanently delete this idea — kills any running agent, removes the task folder, worktree, and branch, and closes a draft PR. The TUI's Shift+X. There is no undo.</p>
+        </div>
+        <%= button_to "Drop", task_drop_path(@project["name"], @row["slug"]),
+              params: { from: @row["stage"] }, class: "btn-danger",
+              data: { turbo_confirm: "Permanently delete #{@row["slug"]}? This cannot be undone." } %>
       </div>
-      <%= button_to "Drop", task_drop_path(@project["name"], @row["slug"]),
-            params: { from: @row["stage"] }, class: "btn-danger",
-            data: { turbo_confirm: "Permanently delete #{@row["slug"]}? This cannot be undone." } %>
-    </div>
-  </details>
+    </details>
+  <% end %>
 </div>

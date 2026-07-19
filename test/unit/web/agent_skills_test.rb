@@ -4,7 +4,7 @@ require "hive/web/agent_skills"
 class WebAgentSkillsTest < Minitest::Test
   include HiveTestHelper
 
-  def test_inspect_returns_the_shared_inspector_payload_for_the_project
+  def test_health_returns_the_shared_inspector_payload_for_the_project
     with_tmp_dir do |dir|
       write_project_config(dir)
       captured = {}
@@ -14,7 +14,7 @@ class WebAgentSkillsTest < Minitest::Test
         Struct.new(:row) { def inspect = [ row ] }.new(row)
       end
 
-      result = Hive::Web::AgentSkills.new(inspector_class: inspector_class).inspect("path" => dir)
+      result = Hive::Web::AgentSkills.new(inspector_class: inspector_class).health("path" => dir)
 
       assert_equal [ { "health" => "healthy" } ], result
       assert_equal File.expand_path(dir), captured.fetch(:project_root)
@@ -59,6 +59,7 @@ class WebAgentSkillsTest < Minitest::Test
         Object.new.tap do |command|
           command.define_singleton_method(:call) do
             kwargs.fetch(:output).write("not-json")
+            kwargs.fetch(:error).write("registry request timed out")
             1
           end
         end
@@ -68,6 +69,29 @@ class WebAgentSkillsTest < Minitest::Test
         Hive::Web::AgentSkills.new(setup_command_class: setup_command_class).repair("path" => dir)
       end
       assert_match(/could not read agent skill setup result/, error.message)
+      assert_match(/registry request timed out/, error.message)
+    end
+  end
+
+  def test_repair_preserves_command_stderr_in_the_payload
+    with_tmp_dir do |dir|
+      write_project_config(dir)
+      setup_command_class = factory_for do |kwargs|
+        Object.new.tap do |command|
+          command.define_singleton_method(:call) do
+            kwargs.fetch(:output).puts JSON.generate(
+              "classification" => "residual_failure", "exit_code" => 1,
+              "operation_results" => []
+            )
+            kwargs.fetch(:error).puts "registry unavailable"
+            1
+          end
+        end
+      end
+
+      result = Hive::Web::AgentSkills.new(setup_command_class: setup_command_class).repair("path" => dir)
+
+      assert_equal "registry unavailable", result.fetch("stderr")
     end
   end
 

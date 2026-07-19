@@ -76,10 +76,12 @@ class ReposTest < ActionDispatch::IntegrationTest
     # prompt bind; the system test covers the prompt-skip only implicitly.
     captured_workflow = :unset
     captured_provisioning_input = nil
+    captured_provisioning_error = nil
     original_init_new = Hive::Commands::Init.method(:new)
     Hive::Commands::Init.define_singleton_method(:new) do |*args, **kwargs|
       captured_workflow = kwargs[:workflow]
       captured_provisioning_input = kwargs[:provisioning_input]
+      captured_provisioning_error = kwargs[:provisioning_error]
       original_init_new.call(*args, **kwargs)
     end
 
@@ -105,6 +107,8 @@ class ReposTest < ActionDispatch::IntegrationTest
                "web init must supply its own non-interactive provisioning input instead of inheriting Puma's stdin"
     assert_equal false, captured_provisioning_input.tty?,
                  "a foreground `hive web` TTY must never leak an invisible setup-agents prompt into an HTTP request"
+    assert_instance_of StringIO, captured_provisioning_error,
+                       "web init must capture preflight findings instead of writing them only to Puma stderr"
     config = File.read(File.join(dir, ".hive-state", "config.yml"))
     assert_match(/headless/, config, "the chosen claude mode must land in the project config")
     assert_match(/safetyist/, config, "the chosen triage bias must land in the project config")
@@ -121,6 +125,30 @@ class ReposTest < ActionDispatch::IntegrationTest
                  "recommended discovery must not imply auto-fix consent"
     assert_equal false, parsed_config.dig("refactor_patrol", "issue_filing", "enabled"),
                  "recommended discovery must not imply issue-filing consent"
+  ensure
+    Hive::Commands::Init.define_singleton_method(:new, original_init_new) if original_init_new
+  end
+
+  test "web init surfaces noninteractive provisioning findings after success" do
+    project = create_hive_project!("repos-preflight-warning-app")
+    sign_in!
+    original_init_new = Hive::Commands::Init.method(:new)
+    Hive::Commands::Init.define_singleton_method(:new) do |*_args, **kwargs|
+      Object.new.tap do |command|
+        command.define_singleton_method(:call) do
+          kwargs.fetch(:provisioning_error).puts(
+            "hive: doctor pre-flight — found 1 issue: registry package is unavailable"
+          )
+        end
+      end
+    end
+
+    post repos_path,
+         params: { project: project, settings: { workflow: "coding" } }
+
+    assert_redirected_to repos_path
+    assert_match(/settings applied/, flash[:notice])
+    assert_match(/setup completed.*registry package is unavailable/, flash[:alert])
   ensure
     Hive::Commands::Init.define_singleton_method(:new, original_init_new) if original_init_new
   end

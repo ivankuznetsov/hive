@@ -50,8 +50,14 @@ class AgentsController < ApplicationController
       redirect_to agents_path(project: project_name),
                   notice: "Managed agent skills are ready for #{project_name}."
     else
+      details = repair_failure_details(result)
+      Rails.logger.warn(
+        "agent skill repair incomplete for #{project_name}: " \
+        "#{JSON.generate(classification: result['classification'], details: details)}"
+      )
       redirect_to agents_path(project: project_name),
-                  alert: "Skill setup finished with remaining issues for #{project_name}. Review the health details below."
+                  alert: "Skill setup #{result.fetch('classification', 'failed').to_s.humanize.downcase} " \
+                         "for #{project_name}: #{details.join('; ')}"
     end
   end
 
@@ -64,7 +70,7 @@ class AgentsController < ApplicationController
     return if project_name.empty?
 
     @selected_project = find_project!(project_name)
-    @skill_health = agent_skills.inspect(@selected_project)
+    @skill_health = agent_skills.health(@selected_project)
   end
 
   def agents_auth
@@ -73,6 +79,26 @@ class AgentsController < ApplicationController
 
   def agent_skills
     self.class.agent_skills
+  end
+
+  def repair_failure_details(result)
+    details = Array(result["operation_results"]).filter_map do |operation|
+      next if operation["status"] == "succeeded"
+
+      [ operation["operation_id"], operation["status"], operation["message"] ]
+        .compact.join(": ").squish.first(300)
+    end
+    details << result["message"].to_s.squish.first(300) if result["message"].present?
+    details << result["stderr"].to_s.squish.first(300) if result["stderr"].present?
+    if details.empty?
+      details = Array(result["final_health"]).filter_map do |row|
+        next if row["health"] == "healthy"
+
+        [ row["agent"], row["capability"], row["health"], row["explanation"] ]
+          .compact.join(": ").squish.first(300)
+      end
+    end
+    details.first(3).presence || [ "Review the refreshed health details below." ]
   end
 
   class << self

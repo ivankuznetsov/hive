@@ -18,7 +18,7 @@ module Hive
         @setup_command_class = setup_command_class
       end
 
-      def inspect(project)
+      def health(project)
         project_root, config = project_context(project)
         @inspector_class.new(config: config, project_root: project_root).inspect.map(&:to_h)
       end
@@ -39,9 +39,13 @@ module Hive
         ).call
         payload = JSON.parse(output.string)
         payload["exit_code"] = exit_code unless payload.key?("exit_code")
+        payload["stderr"] = error.string.strip unless error.string.strip.empty?
         payload
       rescue JSON::ParserError
-        raise Hive::Error, "could not read agent skill setup result — run `hive setup-agents` for details"
+        detail = error&.string.to_s.strip
+        message = "could not read agent skill setup result — run `hive setup-agents` for details"
+        message = "#{message}: #{detail}" unless detail.empty?
+        raise Hive::Error, message
       end
 
       private

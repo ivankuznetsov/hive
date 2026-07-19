@@ -100,7 +100,7 @@ class AgentsTest < ActionDispatch::IntegrationTest
       skill_row(health: "conflicting", agent: "claude", capability: "ce-code-review")
     ]
     install_agent_skills_fake(
-      inspect: lambda do |entry|
+      health: lambda do |entry|
         calls << entry.fetch("name")
         rows
       end
@@ -127,7 +127,7 @@ class AgentsTest < ActionDispatch::IntegrationTest
     repairs = []
     rows = [ skill_row(health: "healthy") ]
     install_agent_skills_fake(
-      inspect: ->(_entry) { rows },
+      health: ->(_entry) { rows },
       repair: lambda do |entry|
         repairs << entry.fetch("name")
         { "classification" => "success", "exit_code" => 0 }
@@ -145,6 +145,30 @@ class AgentsTest < ActionDispatch::IntegrationTest
     assert_redirected_to agents_path(project: project)
     assert_equal [ project ], repairs
     assert_equal "Managed agent skills are ready for #{project}.", flash[:notice]
+  end
+
+  test "failed managed skill repair shows and logs the command cause" do
+    project = register_skill_project("agent-repair-failure-app")
+    install_agent_skills_fake(
+      health: ->(_entry) { [ skill_row(health: "missing") ] },
+      repair: lambda do |_entry|
+        {
+          "classification" => "residual_failure", "exit_code" => 1,
+          "operation_results" => [ {
+            "operation_id" => "install-claude-skills",
+            "status" => "failed",
+            "message" => "registry request timed out"
+          } ]
+        }
+      end
+    )
+    sign_in!(login: "alice")
+
+    post agent_skills_repair_path,
+         params: { project: project, consent: "repair_managed_skills" }
+
+    assert_redirected_to agents_path(project: project)
+    assert_match(/residual failure.*install-claude-skills.*registry request timed out/, flash[:alert])
   end
 
   test "paste-back agent (claude) keeps the code form and stops polling at the URL" do
@@ -170,9 +194,9 @@ class AgentsTest < ActionDispatch::IntegrationTest
     name
   end
 
-  def install_agent_skills_fake(inspect:, repair: ->(_entry) { raise "unexpected repair" })
+  def install_agent_skills_fake(health:, repair: ->(_entry) { raise "unexpected repair" })
     service = Object.new
-    service.define_singleton_method(:inspect, &inspect)
+    service.define_singleton_method(:health, &health)
     service.define_singleton_method(:repair, &repair)
     AgentsController.instance_variable_set(:@agent_skills, service)
   end

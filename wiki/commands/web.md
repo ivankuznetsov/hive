@@ -218,9 +218,11 @@ origin also prints the Host-header/reverse-proxy warning.
   project's authored workflows and preselects the current `default_workflow`.
   The selected value is passed as `Hive::Commands::Init.new(..., workflow:)`;
   it is intentionally outside the `prompts:` answers hash. The web adapter
-  also supplies a non-TTY provisioning input, so newly added CLI preflight
-  questions can report their non-interactive remediation but can never wait on
-  Puma's inherited terminal and strand the browser on “Cloning…”. Clone runs call
+  also supplies a non-TTY provisioning input and a request-local error capture,
+  so CLI preflight questions can never wait on Puma's inherited terminal and
+  strand the browser on “Cloning…”. Non-interactive doctor/agent-skill findings
+  return as an alert alongside the successful registration/settings notice
+  instead of disappearing into Puma stderr. Clone runs call
   `gh repo clone` with the session token in `GH_TOKEN`, in a separate process
   group with `HIVEBOX_CLONE_TIMEOUT_SEC` (default 180s) as a hard deadline; on
   failure or timeout the partial target is removed so retry starts clean. A
@@ -261,7 +263,11 @@ origin also prints the Host-header/reverse-proxy warning.
   changes** delegates to `hive setup-agents`' in-process command with explicit
   browser consent and a non-TTY input. It installs or updates missing/stale
   Hive-managed packages and rechecks the result; conflicting and custom skills
-  retain the provisioner's no-overwrite behavior.
+  retain the provisioner's no-overwrite behavior. Failed/residual repair
+  redirects include the command classification and up to three failed/skipped
+  operation messages (or residual health/stderr fallback), and the same bounded
+  details are logged so transient registry failures are distinguishable from
+  persistent configuration conflicts.
 - **Telegram** — first-timer setup guide (collapsible, open while the bot is
   unconfigured) covering BotFather `/newbot`, numeric chat IDs from
   `@userinfobot`, sending `/start` before the round-trip test, the
@@ -327,7 +333,7 @@ for non-directories,
 agent-login status rendering for
 binary PTY output, Grok route reachability, and operator-ward poll flows,
 managed-skill opt-in inspection and consent-gated repair, root favicon/icon
-assets,
+assets, repair failure-cause rendering, successful repo-init preflight alerts,
 workflow list/scaffold delegation, signed preview tamper rejection,
 cross-operation replay/expiry/missing-consent rejection, non-composable update
 escalation consent, real adapter-to-command lifecycle execution, and

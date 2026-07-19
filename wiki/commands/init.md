@@ -3,7 +3,7 @@ title: hive init
 type: command
 source: lib/hive/commands/init.rb
 created: 2026-04-25
-updated: 2026-07-17
+updated: 2026-07-19
 tags: [command, bootstrap, git, prompts, llm-wiki, provisioning]
 ---
 
@@ -95,7 +95,7 @@ or migrated manually.
 12. **Register globally** via `Hive::Config.register_project(name: basename(path), path: path)`, writing into the XDG global config path (`~/.config/hive/config.yml`, or `HIVE_HOME/config.yml`).
 13. Print a human summary, or with `--json` emit the current `hive-init.v2` payload. The full `answers` object and top-level projection include `refactor_patrol_enabled` alongside the existing workflow, agent, reviewer, patrol, limits, daemon, babysitter, and autostart choices. JSON mode suppresses the non-TTY defaults line so stdout remains one document; retained `hive-init.v1` is a compatibility artifact, not the current producer.
 14. Ensure the global daemon service unit exists via `Hive::Commands::Daemon::ServiceInstaller`, recording `daemon.autostart` from the prompt answer in the global config and enabling/starting the platform service only when requested. This is global infrastructure; it does not override the per-project `daemon.enabled` answer.
-15. Run the shared managed-skill inspector as a non-transactional post-init aid. If actionable available rows remain and stdin is a TTY, prompt `Provision unresolved agent skills now? [y/N]:`. Acceptance delegates in-process to [[commands/setup-agents]] with recorded consent, so setup still renders/revalidates its exact aggregate plan but does not prompt a second time. Decline prints scoped remediation. Non-TTY and `--json` never offer or mutate; unavailable-only rows do not prompt. Setup failure leaves the initialized project intact, reports the non-zero setup result, and points to an idempotent standalone rerun.
+15. Run the shared managed-skill inspector as a non-transactional post-init aid. If actionable available rows remain and stdin is a TTY, prompt `Provision unresolved agent skills now? [y/N]:`. Acceptance delegates in-process to [[commands/setup-agents]] with recorded consent, so setup still renders/revalidates its exact aggregate plan but does not prompt a second time. Decline prints scoped remediation. Non-TTY and `--json` never offer or mutate; unavailable-only rows do not prompt. Setup failure leaves the initialized project intact, reports the non-zero setup result, and points to an idempotent standalone rerun. Hive Web supplies both non-TTY input and a request-local `provisioning_error` stream, then presents any findings beside its success notice rather than losing them to server stderr.
 
 If any step from orphan-state creation through global registration raises, init attempts partial rollback before surfacing the failure: delete `.hive-state/config.yml` if present, `git worktree remove --force <project>/.hive-state`, `git branch -D hive/state`, reset init-created main-checkout commits to the pre-init head, and restore/remove init-owned files such as `.gitignore`, `.llm-wiki/`, wiki scaffolding, runtime hooks, scheduler units, and the global registry file. Non-Hive exceptions are wrapped as `Hive::InternalError` (exit 70) so `bin/hive` does not leak a Ruby stack trace. If rollback itself cannot converge, stderr includes the rollback error plus a one-line recovery command so re-running init is not trapped behind an orphan `hive/state` branch.
 

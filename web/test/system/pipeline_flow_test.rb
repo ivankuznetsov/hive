@@ -118,6 +118,27 @@ class PipelineFlowTest < ApplicationSystemTestCase
     ), "a 422 must leave the upload transport retryable"
   end
 
+  test "a successful response clears the permanent composer before Turbo renders" do
+    sign_in!
+    compose_idea "Clear this completed draft"
+    attach_composer_image fixture_image
+    assert_selector ".chip", text: "image1", count: 1
+
+    execute_script(<<~JS)
+      document.querySelector("#composer").dispatchEvent(new CustomEvent("turbo:before-fetch-response", {
+        bubbles: true,
+        detail: { fetchResponse: { succeeded: true } }
+      }))
+    JS
+
+    assert_equal "", find("textarea[aria-label='New idea']").value
+    assert_no_selector ".chip", wait: 0
+    assert_equal 0, page.evaluate_script(
+      "document.querySelector('[data-composer-target=files]').files.length"
+    ), "a successful response must release the upload before a permanent-node reconnect"
+    assert_equal @project, find(".composer select[name='project']").value
+  end
+
   test "composer reconnect rebuilds staged attachments before adding another" do
     sign_in!
     compose_idea "Reconnect attachments"

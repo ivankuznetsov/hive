@@ -93,6 +93,13 @@ manifest metadata binding, static security findings, and runner capabilities
 before asking for confirmation. A managed selection is an atomic lock over an
 immutable catalog-commit generation:
 
+Before consent, Hive shows an agent mapping for every stage, council reviewer,
+and reviser. Suggestions start from the project choices made by `hive init`.
+When one of those agents cannot enforce an actor's non-`yolo` tool scope, Hive
+suggests Claude for that slot instead so accepting all defaults remains
+runnable. An explicit mapping is never rewritten: an incompatible explicit
+choice fails runtime admission before project state changes.
+
 ```text
 .hive-state/workflows/<name>/honeycomb.lock.json
 .hive-state/workflows/<name>/versions/<catalog-commit>/
@@ -102,6 +109,12 @@ New tasks pin the catalog commit and release digest in `meta.yml`. Updating or
 removing the project selection therefore affects only new tasks; generations
 still referenced by existing tasks remain verifiable and runnable. Tampering
 is an integrity error, never an implicit local override.
+
+Lifecycle mutations recheck the selected source commit and manifest digest
+inside the workflow mutation lock. A first install likewise verifies that no
+selection appeared after validation. If another operator changes the selection
+between preview and apply, Hive stops with a retryable conflict instead of
+installing, updating, or removing a generation the caller did not review.
 
 `workflow update --dry-run` validates and returns descriptor, instruction,
 manifest, dependency, permission, command, domain, and file changes without
@@ -121,6 +134,15 @@ generation-free shape. `workflow remove` operates only on Hive-managed locks
 and never deletes task-pinned generations or owner-authored/built-in workflows.
 List and remove work offline; catalog visibility is reported as
 `unknown_offline` until a trusted refresh is available.
+
+Hivebox exposes the same project-scoped lifecycle under **Workflows**. It lists
+built-in, authored, selected, and retained generations; scaffolds project
+workflows; and makes install/update/remove a two-step review. The first step is
+the command's real dry-run disclosure. The second uses a 15-minute signed
+receipt bound to the reviewed package, configuration, and selected baseline;
+security-expanding updates require their own checkbox in addition to ordinary
+update consent. The current legacy `workflow publish` output is shown as a known
+limitation rather than an action that would open an unusable v2 registry PR.
 
 Honeycomb v2 manifests carry coarse disclosure for review and consent, while
 each executable stage, reviewer, and reviser declares its exact runtime

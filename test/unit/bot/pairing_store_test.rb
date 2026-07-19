@@ -162,6 +162,17 @@ class HiveBotPairingStoreTest < Minitest::Test
     end
   end
 
+  def test_strict_pending_distinguishes_a_corrupt_store_from_an_empty_one
+    Dir.mktmpdir("hive-pairing-store") do |dir|
+      store = STORE.new(state_home: dir)
+      File.write(File.join(dir, STORE::FILENAME), "{not json")
+
+      error = assert_raises(STORE::ReadError) { store.pending(strict: true) }
+
+      assert_match(/is unreadable/, error.message)
+    end
+  end
+
   def test_pending_treats_file_vanishing_mid_read_as_empty
     Dir.mktmpdir("hive-pairing-store") do |dir|
       store = STORE.new(state_home: dir, now: -> { Time.utc(2026, 6, 30, 12, 0, 0) })

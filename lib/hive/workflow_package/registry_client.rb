@@ -257,7 +257,12 @@ module Hive
         out, err, status = Timeout.timeout(@timeout_sec) do
           Open3.capture3({ "LC_ALL" => "C", "LANG" => "C" }, "git", *args)
         end
-        raise RegistryError, "registry git operation failed" unless status.success?
+        unless status.success?
+          detail = err.to_s.strip.byteslice(0, 4096).to_s
+          message = "registry git operation failed"
+          message = "#{message}: #{detail}" unless detail.empty?
+          raise RegistryError, message
+        end
 
         binary ? out.b : out
       rescue Timeout::Error

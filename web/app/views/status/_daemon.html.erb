@@ -29,5 +29,9 @@
     <span class="task-meta">
       daemon is down — run <code>hive daemon install --force</code> to repair
     </span>
+  <% elsif !running %>
+    <span class="task-meta">
+      daemon is down — run <code>hive daemon start --detach</code> to resume
+    </span>
   <% end %>
 </section>

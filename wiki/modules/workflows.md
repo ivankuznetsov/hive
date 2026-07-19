@@ -103,7 +103,9 @@ weakening owner-authored descriptor compatibility:
   lifecycle semantics, materializes `packages/NAME/VERSION/` only from the
   exact catalog commit, and rejects tree, release fingerprint, source
   provenance, description, or permission metadata that does not bind to the
-  canonical `manifest.yml`. Review head SHA remains audit data; upstream
+  canonical `manifest.yml`. Failed git operations include bounded stderr in the
+  typed registry error rather than discarding the underlying cause. Review head
+  SHA remains audit data; upstream
   `source_sha` remains source provenance, and neither is the install tree.
 - `ManagedStore` places immutable generations plus digest-addressed
   `configurations/<sha256>.json` execution snapshots and selects both through
@@ -111,7 +113,10 @@ weakening owner-authored descriptor compatibility:
   operator-selected agent/model/effort identity, mapping role/contract, profile
   fingerprint, and per-actor policy fingerprint. Snapshot construction rejects
   non-null pins that the selected profile cannot express as native arguments;
-  unsupported project defaults remain nil. Managed council reviewers and
+  unsupported project defaults remain nil. Automatic agent suggestions also
+  fall back to Claude when the project-default profile cannot enforce a
+  non-`yolo` actor scope; explicit mappings are preserved for the existing
+  fail-closed runtime admission check. Managed council reviewers and
   revisers launch exclusively from their child-slot snapshot identity, so a
   nil child model/effort cannot leak the parent stage's provider-specific
   defaults. Owner-authored unmanaged councils retain their historical parent
@@ -131,6 +136,11 @@ weakening owner-authored descriptor compatibility:
   and redacted optional-input binding/availability. Retained task rows expose
   only a pinned configuration digest, when available, so historical identity
   is not confused with the active selection.
+  Activation distinguishes "no baseline check" from an explicit "still
+  unselected" baseline; selected baselines compare source commit, manifest
+  digest, and configuration digest under the mutation lock. The mutation lock
+  classifies only acquisition/open failures as contention; I/O errors raised by
+  the protected mutation retain their original type and message.
 - `Loader` registers selected managed workflows beside built-ins and authored
   descriptors while rejecting id collisions and reloading when its managed
   fingerprint changes. Task-pinned generations bypass the single-id overlay and

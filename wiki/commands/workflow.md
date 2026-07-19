@@ -55,10 +55,31 @@ configuration from the project's effective agent profiles and durably stores
 the snapshot before writing task metadata, so a later schema-v2 update cannot
 strand the task's configuration pin.
 
+Install binds activation to the still-absent selection observed after package
+validation. An already-selected exact generation and configuration returns
+`already_installed` before activation, but any selection that appears
+concurrently after that check raises `ConcurrentRunError`; there is no
+concurrent-install no-op arm. Web update receipts bind the selected source,
+manifest, and configuration digests plus the candidate package and configuration
+digests. The command checks that identity before remote or destructive work and
+the store rechecks the selected identity inside the mutation lock. A changed
+baseline raises retryable `ConcurrentRunError` instead of applying an action to
+an unreviewed selection.
+
+Activation/commit failures remain failures and trigger best-effort candidate
+cleanup; if cleanup also fails, it is logged without replacing the original
+exception. Once update/remove commits the selection change, later cleanup,
+cleanup-commit, or cache-refresh failures return the successful status with a
+`warnings` array. Hive Web renders those warnings after redirect so retry cannot
+produce a misleading "not installed" result.
+
 Package descriptors cannot select agent/model/effort; immutable installation
 configuration overlays those choices in memory. Planning/development defaults
 follow the project's init choices and reviewer roles cycle configured review
-agents. Updates preserve only slots whose stable ID, role, and
+agents. If a suggested agent cannot enforce a slot's non-`yolo` tool scope,
+the suggestion falls back to Claude; explicit choices remain exact and an
+incompatible explicit mapping fails runtime admission before mutation. Updates
+preserve only slots whose stable ID, role, and
 `mapping_contract` match. Profile drift or contract changes require explicit
 remapping. A non-null model or effort pin is accepted only when the selected
 profile can translate it into native launch arguments; unsupported suggested

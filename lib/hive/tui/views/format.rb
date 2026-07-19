@@ -78,6 +78,13 @@ module Hive
           chunks
         end
 
+        def viewport_start(total:, capacity:, selected_index:)
+          return 0 if total <= capacity
+
+          selected = selected_index.clamp(0, total - 1)
+          selected < capacity ? 0 : [ selected - capacity + 1, total - capacity ].min
+        end
+
         def display_width(label)
           Unicode::DisplayWidth.of(label.to_s)
         end

@@ -33,7 +33,7 @@ The legacy curses backend was removed in plan #003 U11. `HIVE_TUI_BACKEND=curses
 
 Pane focus is keyboard-only; the focused pane border is bright cyan, the inactive pane border is faint. Below 70 cols the project pane is suppressed and the tasks pane occupies the full width — narrow terminals still get a usable view, just without the left-pane drill-down.
 
-The dashboard intentionally has no persistent metadata header. Scope and filter context live in pane titles and prompt modes, while `generated_at` remains an internal snapshot field rather than always-on chrome. The composer computes pane height from `model.rows` minus any stalled banner and footer rows; both panes clip/pad to that budget. The project and task panes use cursor-following viewports, so vertical terminal shrink keeps the selected project/task visible and keeps the footer on-screen instead of letting rows overflow below it.
+The dashboard intentionally has no persistent metadata header. Scope and filter context live in pane titles and prompt modes, while `generated_at` remains an internal snapshot field rather than always-on chrome. The composer computes pane height from `model.rows` minus any stalled banner and footer rows; both panes clip/pad to that budget. The project and task panes use the shared `Views::Format.viewport_start` cursor-following calculation, so vertical terminal shrink keeps the selected project/task visible and keeps the footer on-screen instead of letting rows overflow below it.
 
 ## Modes
 

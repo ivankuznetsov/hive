@@ -69,6 +69,7 @@ For stages 4 and later:
 `Hive::TaskCounter` (`lib/hive/task_counter.rb`) owns `<state_home>/task-counter.yml`:
 
 - `next!` locks `<state_home>/.task-counter.lock`, returns the current id, then writes `next_id: id + 1`.
+- `next_or_nil` performs the same allocation but returns nil only when the counter lock times out, for capture paths that can be repaired by the daemon's id backfiller.
 - `peek` returns the current `next_id`, defaulting to `1` on missing or corrupt YAML.
 - `seed_at_least!(next_id)` advances the counter floor without moving it backwards.
 - Lock timeout raises `Hive::ConcurrentRunError` with `lock_path` set to the counter lock.
@@ -77,7 +78,7 @@ For stages 4 and later:
 
 - `test/unit/task_test.rb` — path parsing, descriptor-driven stage/index validation, workflow selection fallback, derived-path correctness, slug edge cases, and `meta.yml` readers.
 - `test/unit/task_meta_test.rb` — tolerant and strict sidecar reads, dependency validation, workflow selector preservation, corrupt-input mutation refusal, display-name updates, and id backfill.
-- `test/unit/task_counter_test.rb` — first id, sequential ids, corrupt counter fallback, seeding, forked concurrency, and lock timeout.
+- `test/unit/task_counter_test.rb` — first id, sequential ids, fail-soft allocation, corrupt counter fallback, seeding, forked concurrency, and lock timeout.
 
 ## Backlinks
 

@@ -3,6 +3,7 @@ require "time"
 require "timeout"
 require "uri"
 require "yaml"
+require "hive/gh/repository_identity"
 require "hive/secret_patterns"
 
 module Hive
@@ -50,7 +51,7 @@ module Hive
 
     def ensure_authenticated!(cfg = nil, host: nil, timeout_sec: nil)
       args = [ "gh", "auth", "status" ]
-      args.push("--hostname", validated_github_host(host)) if host
+      args.push("--hostname", RepositoryIdentity.validated_github_host(host)) if host
       out, err, status = capture3(*args, cfg: cfg, timeout_sec: timeout_sec)
       return if status.success?
 
@@ -156,7 +157,7 @@ module Hive
           raise Hive::GhError, "repository and host must be provided together for pull-request lookup"
         end
 
-        args.push("--repo", github_repository_target(repository, host))
+        args.push("--repo", RepositoryIdentity.github_repository_target(repository, host))
       end
       out, err, status = capture3(*args, chdir: worktree_path, cfg: cfg)
       unless status.success?
@@ -205,18 +206,6 @@ module Hive
       raise Hive::GhError, "`gh pr view #{number}` returned unparseable JSON: #{e.message}"
     end
 
-    def validated_repository_slug(repository)
-      value = repository.to_s.strip
-      segments = value.split("/", -1)
-      valid = segments.size == 2 && segments.all? do |segment|
-        segment.match?(/\A[a-zA-Z0-9_.-]+\z/) && !%w[. ..].include?(segment)
-      end
-      raise Hive::GhError, "repository must be an owner/name slug" unless valid
-
-      value
-    end
-    private_class_method :validated_repository_slug
-
     def validated_branch_name(branch)
       value = branch.to_s
       unless value.match?(/\A[a-zA-Z0-9][a-zA-Z0-9._\/-]{0,240}\z/) &&
@@ -237,24 +226,6 @@ module Hive
       value
     end
     private_class_method :validated_remote_target
-
-    def validated_github_host(host)
-      value = host.to_s.strip
-      uri = URI.parse("https://#{value}")
-      valid = !value.empty? && uri.host == value && uri.path.empty? &&
-              uri.userinfo.nil? && uri.query.nil? && uri.fragment.nil?
-      raise Hive::GhError, "GitHub host must be a hostname without a scheme or path" unless valid
-
-      value
-    rescue URI::InvalidURIError
-      raise Hive::GhError, "GitHub host must be a hostname without a scheme or path"
-    end
-    private_class_method :validated_github_host
-
-    def github_repository_target(repository, host)
-      "#{validated_github_host(host)}/#{validated_repository_slug(repository)}"
-    end
-    private_class_method :github_repository_target
 
     def pr_state(pr_url, cfg: nil)
       out, err, status = capture3("gh", "pr", "view", pr_url.to_s, "--json", "state", cfg: cfg)
@@ -359,8 +330,8 @@ module Hive
     def remote_identity(host, repository)
       slug = repository.to_s.sub(/\.git\z/i, "")
       {
-        "repository" => validated_repository_slug(slug),
-        "host" => validated_github_host(host)
+        "repository" => RepositoryIdentity.validated_repository_slug(slug),
+        "host" => RepositoryIdentity.validated_github_host(host)
       }
     end
     private_class_method :remote_identity

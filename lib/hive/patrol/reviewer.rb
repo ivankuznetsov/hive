@@ -7,6 +7,7 @@ require "hive/patrol/finding"
 require "hive/patrol/fingerprint"
 require "hive/patrol/runner_task"
 require "hive/patrol/agent_launch"
+require "hive/patrol/review_error_details"
 require "hive/patrol/source_reader"
 require "hive/patrol/state_store"
 require "hive/patrol/token_budget"
@@ -75,7 +76,8 @@ module Hive
                                     output_path: output_path, run_dir: run_dir)
         if agent_failed?(result)
           return record_feature_error(
-            feature, "agent_failed", agent_error_message(result), agent_error_details(result)
+            feature, "agent_failed", agent_error_message(result),
+            Hive::Patrol::ReviewErrorDetails.from_agent_result(result)
           )
         end
 
@@ -95,21 +97,6 @@ module Hive
         return "review agent timed out" if message.empty? && result.is_a?(Hash) && result[:status] == :timeout
 
         message
-      end
-
-      def agent_error_details(result)
-        exhaustion = result.is_a?(Hash) ? result[:resource_exhaustion] : nil
-        return {} unless exhaustion.is_a?(Hash)
-
-        {
-          "details" => {
-            "resource_exhaustion" => {
-              "reason" => exhaustion[:reason].to_s,
-              "limit" => exhaustion[:limit].to_i,
-              "observed" => exhaustion[:observed].to_i
-            }
-          }
-        }
       end
 
       def record_feature_error(feature, kind, message, details = {})

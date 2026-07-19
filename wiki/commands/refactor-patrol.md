@@ -211,7 +211,9 @@ in that pass, including cached failures. Reservation never trusts that
 snapshot: it resolves ownership live again, as do manual PR replay, action
 resume, and every external-effect or handoff fence. Full
 authority requires the target's exact registered name and expanded path to
-still exist. Hive resolves live origin host plus `owner/repo` for every enabled
+still exist. Registration evidence is projected from that same normalized
+name/expanded-path representation, so diagnostics and ownership keys cannot
+drift. Hive resolves live origin host plus `owner/repo` for every enabled
 registration and scans every registered project's action ledger, whether
 currently enabled or disabled, for nonterminal remote continuation evidence.
 A durable creation intent, PR URL, issue URL, or review-task path makes that
@@ -421,8 +423,10 @@ mix snapshots, reset trunk, or create an implicit analysis worktree.
 
 ## State and JSON
 
-Legacy state remains under `.hive-state/refactor_patrol/`. V2 uses a separate
-namespace:
+Legacy state remains under `.hive-state/refactor_patrol/`. It shares directory,
+atomic JSON-write, tolerant-read, and run-artifact mechanics with ordinary
+patrol through `Hive::Patrol::BaseStateStore`, while retaining its own namespace
+and thesis schema. V2 uses a separate namespace:
 
 ```text
 .hive-state/refactor_patrol/v2/

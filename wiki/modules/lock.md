@@ -57,6 +57,12 @@ This is the runner PID-reuse defence: a fresh process with the same PID would
 have a different start time. The optional `claude_pid_start_time` applies the
 same identity principle to the recorded agent child during cleanup.
 
+PID-only observations elsewhere (`status`, daemon child/healer checks,
+Claude-session completion, and migration guards) delegate their common
+`kill(0)` / `ESRCH` / `EPERM` interpretation to
+`Hive::ProcessKill.pid_alive?`. Callers that need identity-safe termination
+still pair that probe with the recorded process start time.
+
 ## `process_start_time(pid)`
 
 Reads `/proc/<pid>/stat` when procfs is available, splits on `") "` to handle `(comm)` containing arbitrary characters, and returns field 22 (overall) — index 19 of the tail because the tail starts after `(comm) `. On macOS, BSD, or containers without readable procfs, it falls back to `ps -o lstart= -p <pid>`. Returns `nil` only when both probes fail, in which case stale-lock detection gracefully degrades to the PID-only check.

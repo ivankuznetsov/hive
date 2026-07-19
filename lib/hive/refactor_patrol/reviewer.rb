@@ -6,6 +6,7 @@ require "hive"
 require "hive/refactor_patrol/review_agent_runner"
 require "hive/refactor_patrol/state_store"
 require "hive/refactor_patrol/thesis_normalizer"
+require "hive/patrol/review_error_details"
 require "hive/patrol/source_reader"
 require "hive/stages/base"
 
@@ -115,7 +116,8 @@ module Hive
         )
         if agent_failed?(result)
           return record_feature_error(
-            feature, "agent_failed", agent_error_message(result), agent_error_details(result)
+            feature, "agent_failed", agent_error_message(result),
+            Hive::Patrol::ReviewErrorDetails.from_agent_result(result)
           )
         end
 
@@ -209,21 +211,6 @@ module Hive
 
       def agent_error_message(result)
         result.is_a?(Hash) ? result[:error_message].to_s : ""
-      end
-
-      def agent_error_details(result)
-        exhaustion = result.is_a?(Hash) ? result[:resource_exhaustion] : nil
-        return {} unless exhaustion.is_a?(Hash)
-
-        {
-          "details" => {
-            "resource_exhaustion" => {
-              "reason" => exhaustion[:reason].to_s,
-              "limit" => exhaustion[:limit].to_i,
-              "observed" => exhaustion[:observed].to_i
-            }
-          }
-        }
       end
 
       def record_feature_error(feature, kind, message, details = {})

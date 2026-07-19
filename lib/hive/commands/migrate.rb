@@ -7,6 +7,7 @@ require "hive/display_name/generator"
 require "hive/git_ops"
 require "hive/lock"
 require "hive/paths"
+require "hive/process_kill"
 require "hive/stages"
 require "hive/task"
 require "hive/task_counter"
@@ -425,14 +426,7 @@ module Hive
       end
 
       def daemon_alive?(pid)
-        Process.kill(0, pid)
-        true
-      rescue Errno::ESRCH
-        false
-      rescue Errno::EPERM
-        # We can't signal it, but the process exists — treat as alive
-        # rather than risk a silent miss.
-        true
+        Hive::ProcessKill.pid_alive?(pid)
       end
 
       def systemctl_available?

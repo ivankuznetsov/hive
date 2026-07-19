@@ -195,6 +195,22 @@ class HiveCommandsDaemonEnvelopeTest < Minitest::Test
     assert_match(/error envelope was not serialisable/, err)
   end
 
+  def test_emit_envelope_rejects_unknown_serialization_failure_policy
+    emitter = Class.new do
+      include Hive::Schemas::EnvelopeEmitter
+
+      def envelope_schema = "hive-daemon-enroll"
+      def envelope_error_kind(_error) = Hive::Schemas::EnrollErrorKind::INTERNAL
+      def envelope_serialization_failure_policy = :typo
+    end.new
+
+    with_replaced_singleton_method(JSON, :generate, ->(*_args) { raise JSON::GeneratorError, "bad json" }) do
+      error = assert_raises(ArgumentError) do
+        emitter.send(:emit_envelope, Hive::Error.new("boom"))
+      end
+      assert_match(/unknown envelope serialization failure policy: :typo/, error.message)
+    end
+  end
 
   # Disk-class errors during the atomic rewrite (ENOSPC / EROFS / EACCES /
   # EXDEV / EDQUOT / EIO) must surface as Hive::ConfigError (exit 78),

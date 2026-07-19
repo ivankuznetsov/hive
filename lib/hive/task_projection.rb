@@ -4,6 +4,7 @@ require "hive/conditions/value"
 require "hive/conditions/policy"
 require "hive/conditions/gate_evaluator"
 require "hive/conditions/shadow_audit"
+require "hive/stringify_keys"
 require "hive/task_journal"
 
 module Hive
@@ -111,7 +112,7 @@ module Hive
     end
 
     def initialize(records:, cursor:, journal_hash:, marker:, registry:)
-      @records = records.map { |record| deep_copy(record) }
+      @records = records.map { |record| Hive::StringifyKeys.call(record) }
       @cursor = cursor
       @journal_hash = journal_hash
       @marker = marker
@@ -183,7 +184,7 @@ module Hive
       self
     end
 
-    def to_h = deep_copy(@data || project.data)
+    def to_h = Hive::StringifyKeys.call(@data || project.data)
     def [](key) = (@data || project.data)[key.to_s]
 
     def current_condition(name)
@@ -195,7 +196,7 @@ module Hive
     # snapshot without republishing it or classifying markers outside this
     # projection boundary.
     def with_marker(marker)
-      copy = deep_copy(to_h)
+      copy = Hive::StringifyKeys.call(to_h)
       copy["compatibility"] = compatibility_for(
         baseline: copy.dig("compatibility", "baseline_present") == true,
         marker: marker
@@ -216,7 +217,7 @@ module Hive
         record.fetch("__attempt_lineage", [])
       end.uniq { |binding| binding.fetch("attempt_id") }
         .sort_by { |binding| binding.fetch("attempt_id") }
-        .map { |binding| deep_copy(binding) }
+        .map { |binding| Hive::StringifyKeys.call(binding) }
     end
 
     def condition_facts
@@ -234,11 +235,11 @@ module Hive
           "task_generation" => record.fetch("task_generation"),
           "ownership_generation" => record["ownership_generation"],
           "commit_generation" => record["commit_generation"],
-          "evidence" => deep_copy(record.fetch("evidence")),
-          "provenance" => deep_copy(record.fetch("provenance")),
-          "payload" => deep_copy(payload.reject { |key, _| %w[condition state].include?(key) }),
+          "evidence" => Hive::StringifyKeys.call(record.fetch("evidence")),
+          "provenance" => Hive::StringifyKeys.call(record.fetch("provenance")),
+          "payload" => Hive::StringifyKeys.call(payload.reject { |key, _| %w[condition state].include?(key) }),
           "event_id" => record.fetch("event_id"),
-          "task" => deep_copy(record["task"]),
+          "task" => Hive::StringifyKeys.call(record["task"]),
           "journal_index" => index,
           "attempt_accepted_at" => record.dig("__attempt", "accepted_at") ||
             record.dig("provenance", "attempt_accepted_at"),
@@ -268,8 +269,8 @@ module Hive
           "from_stage" => payload["from_stage"],
           "to_stage" => payload["to_stage"],
           "source_command" => payload["source_command"],
-          "waived_diagnostics" => deep_copy(payload.fetch("waived_diagnostics", [])),
-          "provenance" => deep_copy(record.fetch("provenance"))
+          "waived_diagnostics" => Hive::StringifyKeys.call(payload.fetch("waived_diagnostics", [])),
+          "provenance" => Hive::StringifyKeys.call(record.fetch("provenance"))
         }
       end
     end
@@ -425,7 +426,7 @@ module Hive
       else
         "newer_observation"
       end
-      deep_copy(fact).merge(
+      Hive::StringifyKeys.call(fact).merge(
         "state" => "superseded",
         "original_state" => fact["state"],
         "superseded_reason" => reason,
@@ -484,7 +485,7 @@ module Hive
     end
 
     def projected_identity(record)
-      deep_copy(record.dig("payload", "identity") || {}).merge(
+      Hive::StringifyKeys.call(record.dig("payload", "identity") || {}).merge(
         "event_id" => record["event_id"],
         "resolved_attempt" => record["attempt_id"]
       )
@@ -494,7 +495,9 @@ module Hive
       marker = if marker
         {
           "name" => marker.respond_to?(:name) ? marker.name.to_s : marker.fetch("name").to_s,
-          "attrs" => deep_copy(marker.respond_to?(:attrs) ? marker.attrs : marker.fetch("attrs", {}))
+          "attrs" => Hive::StringifyKeys.call(
+            marker.respond_to?(:attrs) ? marker.attrs : marker.fetch("attrs", {})
+          )
         }
       end
       {
@@ -502,14 +505,6 @@ module Hive
         "marker" => marker,
         "marker_fallback" => baseline ? nil : marker
       }
-    end
-
-    def deep_copy(value)
-      case value
-      when Hash then value.to_h { |key, child| [ key.to_s, deep_copy(child) ] }
-      when Array then value.map { |child| deep_copy(child) }
-      else value
-      end
     end
   end
 end

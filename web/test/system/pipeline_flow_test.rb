@@ -38,10 +38,6 @@ class PipelineFlowTest < ApplicationSystemTestCase
     click_button "Add idea"
   end
 
-  def task_row(text)
-    find(".task-row", text: text, wait: 5)
-  end
-
   # --- tests ---------------------------------------------------------------
 
   test "login gate, composer with image, live stream update, approve" do
@@ -80,7 +76,9 @@ class PipelineFlowTest < ApplicationSystemTestCase
 
     # Approve through the task page (force-free path is gated; the grid is
     # the redirect target).
-    task_row("Browser test idea").find("a", match: :first).click
+    task_href = "/tasks/#{@project}/#{folder.basename}"
+    assert_selector ".task-row a[href='#{task_href}']", text: "Browser test idea", wait: 5
+    visit task_href
     assert_selector "h1", text: "Browser test idea", wait: 5
     # The state machine drives the buttons: an unmarked stage offers no
     # doomed Approve as a headline action — the Force override lives in the

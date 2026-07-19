@@ -361,22 +361,11 @@ module Hive
       def write_meta(task_folder, slug, pr_number)
         Hive::TaskMeta.write(
           task_folder,
-          id: allocate_task_id,
+          id: Hive::TaskCounter.next_or_nil,
           slug: slug,
           display_name: "Ad-hoc review: PR ##{pr_number}",
           workflow: Hive::Workflows::CODING_ID.to_s
         )
-      end
-
-      # Mirror the patrol handoff (Hive::Patrol::ReviewHandoff#allocate_task_id):
-      # under >30s commit-lock contention TaskCounter.next! raises
-      # ConcurrentRunError. Proceed with id: nil rather than discarding the
-      # already-completed fetch + worktree; the daemon's TaskIdBackfiller
-      # assigns a real id on a later tick.
-      def allocate_task_id
-        Hive::TaskCounter.next!
-      rescue Hive::ConcurrentRunError
-        nil
       end
 
       def write_idea_md(task_folder, slug, pr_number, now)

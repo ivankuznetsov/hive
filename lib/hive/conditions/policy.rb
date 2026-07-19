@@ -1,4 +1,5 @@
 require "hive/conditions/registry"
+require "hive/stringify_keys"
 
 module Hive
   module Conditions
@@ -40,7 +41,7 @@ module Hive
       end
 
       def self.rule_from_descriptor(value, registry: Registry.default)
-        data = stringify(value)
+        data = Hive::StringifyKeys.call(value)
         unless data.is_a?(Hash)
           raise InvalidPolicy, "conditions must be an object"
         end
@@ -59,14 +60,6 @@ module Hive
         )
       rescue KeyError => e
         raise InvalidPolicy, "conditions missing #{e.key}"
-      end
-
-      def self.stringify(value)
-        case value
-        when Hash then value.to_h { |key, child| [ key.to_s, stringify(child) ] }
-        when Array then value.map { |child| stringify(child) }
-        else value
-        end
       end
 
       def initialize(registry: Registry.default)
@@ -99,7 +92,7 @@ module Hive
         inhibitors = condition_list(inhibitors, role: :inhibitor)
         overlap = required & inhibitors
         raise InvalidPolicy, "conditions cannot be both required and inhibitors: #{overlap.join(', ')}" unless overlap.empty?
-        options = self.class.stringify(options)
+        options = Hive::StringifyKeys.call(options)
         raise InvalidPolicy, "condition options must be an object" unless options.is_a?(Hash)
         unknown_options = options.keys - OPTION_KEYS
         raise InvalidPolicy, "unknown condition options: #{unknown_options.join(', ')}" unless unknown_options.empty?

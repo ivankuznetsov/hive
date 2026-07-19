@@ -1,32 +1,31 @@
-require "date"
-require "fileutils"
-require "json"
-require "shellwords"
-require "hive/digest/window"
+require "hive/daemon/digest_scheduler_base"
 require "hive/paths"
 
 module Hive
   module Daemon
-    class DigestScheduler
+    class DigestScheduler < DigestSchedulerBase
       DIGEST_STAGE = "digest".freeze
       DIGEST_PROJECT = "digest".freeze
       DEFAULT_MAX_CATCHUP_DAYS = 7
       # Escalating backoff (seconds) after a non-zero digest exit, mirroring
       # the patrol/merge-watcher failure schedules. Without it a date that
       # keeps failing re-dispatches a paid categorizer agent every poll.
-      FAILURE_BACKOFF_SCHEDULE = [ 60, 300, 900 ].freeze
+      FAILURE_BACKOFF_SCHEDULE = DigestSchedulerBase::FAILURE_BACKOFF_SCHEDULE
+      SCHEDULER_CONTRACT = {
+        project: DIGEST_PROJECT,
+        stage: DIGEST_STAGE,
+        command: "hive digest",
+        failure_event: :digest_failure_backoff,
+        state_unreadable_event: :digest_state_unreadable
+      }.freeze
 
       def initialize(state_path: nil, clock: -> { Time.now }, enabled: false,
                      max_catchup_days: DEFAULT_MAX_CATCHUP_DAYS, logger: nil)
-        @state_path = state_path || File.join(Hive::Paths.state_home, "digest_state.json")
-        @clock = clock
-        @enabled = enabled == true
+        super(
+          state_path: state_path || File.join(Hive::Paths.state_home, "digest_state.json"),
+          clock: clock, enabled: enabled, logger: logger
+        )
         @max_catchup_days = [ max_catchup_days.to_i, 0 ].max
-        @logger = logger
-        @pending = {}
-        # Global failure backoff for the daily job (only one date is ever in
-        # flight at a time): { count:, next_eligible_at: } or nil.
-        @failure = nil
       end
 
       # Apply a SIGHUP config reload in place so an operator enabling the
@@ -79,44 +78,21 @@ module Hive
           return
         end
 
-        @failure = nil
         state = read_state
         last = parse_date(state["last_digested_date"])
-        return if last && last >= local_date
+        if last && last >= local_date
+          @failure = nil
+          return
+        end
 
         write_state("last_digested_date" => local_date.iso8601, "updated_at" => now.utc.iso8601)
-      end
-
-      # Release a date the dispatcher marked pending in `tick` but then
-      # gated (e.g. a concurrency backstop) before spawning, so the next
-      # eligible tick can re-evaluate it. No failure is recorded — the
-      # child never ran. Mirrors PatrolScheduler#cancel.
-      def cancel(date:)
-        @pending.delete(Hive::Digest::Window.parse_date(date).iso8601)
-      end
-
-      def pending?(date)
-        @pending.key?(Hive::Digest::Window.parse_date(date).iso8601)
+        @failure = nil
+      rescue StandardError
+        record_failure(now)
+        raise
       end
 
       private
-
-      def backed_off?(now)
-        @failure && now < @failure[:next_eligible_at]
-      end
-
-      def record_failure(now)
-        count = (@failure&.fetch(:count, 0)).to_i + 1
-        interval = FAILURE_BACKOFF_SCHEDULE[[ count - 1, FAILURE_BACKOFF_SCHEDULE.size - 1 ].min]
-        next_eligible_at = now + interval
-        @failure = { count: count, next_eligible_at: next_eligible_at }
-        @logger&.event(
-          :digest_failure_backoff,
-          failures: count,
-          retry_after_sec: interval,
-          next_eligible_at: next_eligible_at.utc.iso8601
-        )
-      end
 
       def owed_days(last, completed_day)
         return [] if last >= completed_day
@@ -140,56 +116,14 @@ module Hive
         owed.last(@max_catchup_days)
       end
 
-      def dispatch_for(date)
-        iso = date.iso8601
-        {
-          project: DIGEST_PROJECT,
-          slug: iso,
-          stage: DIGEST_STAGE,
-          command: "hive digest --date #{Shellwords.escape(iso)} --json",
-          state_file_mtime: nil,
-          state_file_path: nil,
-          hive_state_path: nil
-        }
-      end
-
-      def read_state
-        return {} unless File.exist?(@state_path)
-
-        parsed = JSON.parse(File.read(@state_path))
-        return parsed if parsed.is_a?(Hash)
-
-        # Valid JSON but the wrong shape (e.g. an array). Treating it as a
-        # silent first-run would reset the cursor forward and permanently
-        # skip every owed un-digested day, so surface it to the operator.
-        log_state_unreadable("expected a JSON object, got #{parsed.class}")
-        {}
-      rescue JSON::ParserError, SystemCallError => e
-        # A corrupt/truncated/unreadable digest_state.json would otherwise be
-        # swallowed to {} and `tick` would treat it as first-run, silently
-        # resetting the cursor to yesterday and skipping owed days with zero
-        # operator signal. Emit a distinct event before degrading.
-        log_state_unreadable("#{e.class}: #{e.message}")
-        {}
-      end
-
-      def log_state_unreadable(reason)
-        @logger&.event(:digest_state_unreadable, path: @state_path, error: reason)
-      end
-
-      def write_state(data)
-        FileUtils.mkdir_p(File.dirname(@state_path))
-        tmp = "#{@state_path}.tmp.#{$$}"
-        File.write(tmp, JSON.pretty_generate(data))
-        File.rename(tmp, @state_path)
-      ensure
-        FileUtils.rm_f(tmp) if tmp && File.exist?(tmp)
-      end
-
       def parse_date(value)
         value && Date.iso8601(value.to_s)
       rescue ArgumentError
         nil
+      end
+
+      def scheduler_contract
+        SCHEDULER_CONTRACT
       end
     end
   end

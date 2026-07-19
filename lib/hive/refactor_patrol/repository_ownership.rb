@@ -328,10 +328,7 @@ module Hive
       end
 
       def registration_evidence(entry)
-        {
-          "name" => entry.fetch("name").to_s,
-          "path" => File.expand_path(entry.fetch("path"))
-        }
+        normalized_entry(entry)
       end
     end
   end

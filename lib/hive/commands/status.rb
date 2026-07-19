@@ -22,11 +22,14 @@ require "hive/task_resolver"
 require "hive/brainstorm_parser"
 require "hive/gh"
 require "hive/pr"
+require "hive/process_kill"
 require "hive/tui/views/hyperlink"
 
 module Hive
   module Commands
     class Status
+      include Hive::Schemas::EnvelopeEmitter
+
       # Stage dir whose `needs_input` rows carry a brainstorm Q&A file we
       # count unanswered questions from (issue #270).
       BRAINSTORM_STAGE_DIR = "2-brainstorm".freeze # coding-scoped: unanswered-question count only parses coding brainstorm.md
@@ -83,24 +86,26 @@ module Hive
       end
 
       def call
-        @stdout_written = false
-        if @diagnose && @diagnose.to_s.strip.empty?
-          raise Hive::Error, "--diagnose requires a non-empty task slug"
+        call_with_envelope do
+          if @diagnose && @diagnose.to_s.strip.empty?
+            raise Hive::Error, "--diagnose requires a non-empty task slug"
+          end
+          if @write && @diagnose.nil?
+            raise Hive::Error, "--write requires --diagnose <task>"
+          end
+          @diagnose ? diagnose_call : do_call
         end
-        if @write && @diagnose.nil?
-          raise Hive::Error, "--write requires --diagnose <task>"
-        end
-        return diagnose_call if @diagnose
-
-        do_call
-      rescue Hive::Error => e
-        emit_error_envelope(e, schema: status_schema_for_call) if @json && !@stdout_written
-        raise
-      rescue StandardError => e
-        wrapped = Hive::InternalError.new("internal error: #{e.class}: #{e.message}")
-        emit_error_envelope(wrapped, schema: status_schema_for_call) if @json && !@stdout_written
-        raise wrapped
       end
+
+      def envelope_schema
+        status_schema_for_call
+      end
+
+      def envelope_error_kind(error)
+        error_kind_for(error)
+      end
+
+      def envelope_serialization_failure_policy = :suppress
 
       # `--diagnose` routes through diagnose_call which emits the
       # `hive-status-diagnose` envelope on success; the top-level rescue
@@ -1240,12 +1245,7 @@ module Hive
       end
 
       def pid_alive?(pid)
-        Process.kill(0, pid)
-        true
-      rescue Errno::ESRCH
-        false
-      rescue Errno::EPERM
-        true
+        Hive::ProcessKill.pid_alive?(pid)
       end
 
       def task_lock_holder(task)
@@ -1306,27 +1306,6 @@ module Hive
         else
           "#{seconds / 86_400}d ago"
         end
-      end
-
-      # Emit an ErrorPayload to stdout. Gated on @json + @stdout_written
-      # so a successful payload write doesn't get double-emitted by the
-      # rescue. `schema:` selects between "hive-status" (plain status)
-      # and "hive-status-diagnose" (the --diagnose route) so consumers
-      # see one envelope shape per CLI invocation.
-      def emit_error_envelope(error, schema: "hive-status")
-        payload = Hive::Schemas::ErrorEnvelope.build(
-          schema: schema,
-          error: error,
-          error_kind: error_kind_for(error)
-        )
-        puts JSON.generate(payload)
-        @stdout_written = true
-      rescue Errno::EPIPE, JSON::GeneratorError
-        # See lib/hive/commands/run.rb#emit_error_envelope for the rationale:
-        # swallow emit-time failures so the original Hive::Error still
-        # propagates with its documented exit_code instead of becoming
-        # exit 1 via bin/hive's outermost rescue.
-        @stdout_written = true
       end
 
       # Map a Hive::Error subclass to a StatusErrorKind value. Status's

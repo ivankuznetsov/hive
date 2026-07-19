@@ -1,6 +1,7 @@
 require "hive/attempts/context"
 require "hive/attempts/store"
 require "hive/conditions/generation_tracker"
+require "hive/implementation_identity/event_builder"
 require "hive/implementation_identity/resolver"
 require "hive/task_journal"
 require "hive/task_projection/store"
@@ -13,6 +14,7 @@ module Hive
         @task = task
         @cfg = cfg
         @attempt_store = attempt_store || default_attempt_store
+        @event_builder = EventBuilder.new(task: task, attempt_store: @attempt_store)
         @writer = writer || Hive::TaskJournal::Writer.new(
           task_folder: task.folder, attempt_store: @attempt_store
         )
@@ -109,7 +111,7 @@ module Hive
         return unless decision.advanced
 
         @writer.append_idempotent(
-          base_event(
+          @event_builder.build(
             context, event_type: "generation_advanced", reason: decision.reason,
             payload: {
               "input_fingerprint" => decision.input_fingerprint,
@@ -121,32 +123,11 @@ module Hive
       end
 
       def identity_event(event_type, selection, context, reason:)
-        base_event(
+        @event_builder.build(
           context, event_type: event_type, reason: reason,
           provenance: { "source" => selection.source },
           payload: { "identity" => persisted_identity(selection) }
         )
-      end
-
-      def base_event(context, event_type:, reason:, provenance: { "source" => "generation_resolver" },
-                     payload: {})
-        attempt = @attempt_store.fetch(context.attempt_id)
-        raise ResolutionError, "durable attempt #{context.attempt_id.inspect} is unavailable" unless attempt
-
-        {
-          event_type: event_type,
-          task: { "id" => task_id, "slug" => @task.slug.to_s },
-          workflow: "coding",
-          stage: attempt["intended_stage"],
-          attempt_id: context.attempt_id,
-          task_generation: context.task_generation,
-          ownership_generation: context.ownership_generation,
-          commit_generation: 0,
-          reason: reason,
-          evidence: [ { "type" => "attempt_lease", "attempt_id" => context.attempt_id } ],
-          provenance: provenance,
-          payload: payload
-        }
       end
 
       def persisted_identity(selection)

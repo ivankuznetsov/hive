@@ -196,20 +196,11 @@ module Hive
         end
 
         snapshot = @checkout_guard_factory.call(entry.fetch("path"), branch)
-                                          .validate_and_snapshot!(merge_sha: aggregate.dig("source", "merge_sha"))
+                                          .validate_and_snapshot!(
+                                            merge_sha: aggregate.dig("source", "merge_sha"),
+                                            analysis_sha: aggregate["analysis_sha"]
+                                          )
         analysis_sha = snapshot.fetch("analysis_sha")
-        pinned_sha = aggregate["analysis_sha"]
-        if pinned_sha && pinned_sha != analysis_sha
-          evidence = {
-            "expected_analysis_sha" => pinned_sha,
-            "current_analysis_sha" => analysis_sha
-          }
-          block(
-            entry, aggregate, reason: "analysis_checkout_changed_after_pin",
-            evidence: evidence, now: now, phase: phase
-          )
-          raise ReservationBlocked.new("analysis_checkout_changed_after_pin", evidence)
-        end
         token = if @dry_run
           { job_id: aggregate.fetch("job_id"), owner: @owner, generation: 0, dry_run: true }
         else
@@ -232,7 +223,8 @@ module Hive
           hive_state_path: entry["hive_state_path"],
           dispatch_token: token.merge(
             kind: :architecture_patrol, phase: :discovery,
-            registration: entry.fetch("name"), result_path: result_path
+            registration: entry.fetch("name"), result_path: result_path,
+            analysis_sha: analysis_sha
           )
         )
       rescue ReservationBlocked

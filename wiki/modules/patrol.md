@@ -64,6 +64,15 @@ observations are excluded from its automatic lane. Architecture patrol
 occurrence, maps language-neutral feature and documentation slices from that
 merge, and requires every architectural thesis to receive a durable accepted,
 flagged, or suppressed disposition before any separately authorized action.
+Architecture v2 fetches and pins an exact committed default-branch SHA, then
+runs mapper, leverage, and reviewer source reads from an ephemeral detached,
+clean worktree. Persistent state and collision ledgers remain rooted in the
+registered project, so a developer's active branch or uncommitted files neither
+alter nor block the analysis. A partial retry rematerializes its original
+pinned SHA even after the default branch advances; an explicit replay of a
+terminal occurrence instead pins the new current-default head. Unclaimed dry
+runs use unique analysis-tree keys, and deterministic claimed retries prune an
+orphaned Git worktree registration when its directory has disappeared.
 
 The two reviewers now use deliberately different breadth. Ordinary mapping
 defaults to four owned plus four context files. Architecture keeps six plus six

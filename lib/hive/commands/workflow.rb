@@ -281,7 +281,8 @@ module Hive
       private_class_method :warn_failed_scaffold_cleanup
 
       def initialize(subcommand, id = nil, project_root: Dir.pwd, json: false, stdout: $stdout, template: DEFAULT_TEMPLATE,
-                     yes: false, dry_run: false, allow_escalation: false, version: nil)
+                     yes: false, dry_run: false, allow_escalation: false, version: nil,
+                     mapping_overrides: [], input_bindings: [])
         @subcommand = subcommand
         @id = id
         @project_root = File.expand_path(project_root)
@@ -292,6 +293,8 @@ module Hive
         @dry_run = dry_run
         @allow_escalation = allow_escalation
         @version = version
+        @mapping_overrides = mapping_overrides
+        @input_bindings = input_bindings
       end
 
       def call
@@ -372,7 +375,8 @@ module Hive
           require "hive/commands/workflow/install"
           Hive::Commands::Workflow::Install.new(
             @id, project_root: @project_root, json: @json, yes: @yes,
-            dry_run: @dry_run, stdout: @stdout
+            dry_run: @dry_run, stdout: @stdout, allow_escalation: @allow_escalation,
+            mapping_overrides: @mapping_overrides, input_bindings: @input_bindings
           )
         when "list"
           raise UsageError.new("workflow list does not accept an id", value: @id) if @id
@@ -389,7 +393,8 @@ module Hive
           require "hive/commands/workflow/update"
           Hive::Commands::Workflow::Update.new(
             @id, project_root: @project_root, json: @json, yes: @yes,
-            allow_escalation: @allow_escalation, dry_run: @dry_run, stdout: @stdout
+            allow_escalation: @allow_escalation, dry_run: @dry_run, stdout: @stdout,
+            mapping_overrides: @mapping_overrides, input_bindings: @input_bindings
           )
         when "publish"
           require "hive/commands/workflow/publish"

@@ -38,7 +38,57 @@ module Hive
 
     def workflow_commit = meta[:workflow_commit]
     def workflow_manifest_digest = meta[:workflow_manifest_digest]
+    def workflow_configuration_digest = meta[:workflow_configuration_digest]
     def managed_workflow? = !workflow_commit.nil? && !workflow_manifest_digest.nil?
+
+    def managed_runtime_context(slot_id)
+      return nil unless managed_workflow?
+
+      store = Hive::WorkflowPackage::ManagedStore.new(@hive_state_path)
+      root = store.generation_path(workflow.id.to_s, workflow_commit)
+      manifest = store.manifest(workflow.id.to_s, workflow_commit, workflow_manifest_digest)
+      metadata = manifest.data.fetch("x-hive", {})
+      configuration = workflow_configuration_digest &&
+                      store.configuration(workflow.id.to_s, workflow_configuration_digest)
+      tools = Array(metadata["tools"]).map { |entry| File.join(root, entry.fetch("path")) }
+      prompt_assets = Array(metadata["prompt_assets"]).map { |entry| File.join(root, entry.fetch("path")) }
+      environment = configuration ? configuration.input_environment_for(slot_id, runtime_metadata: metadata) : {}
+      statuses = configuration ? configuration.input_status_for(slot_id, runtime_metadata: metadata) : []
+      {
+        package_root: root,
+        tools: tools,
+        prompt_assets: prompt_assets,
+        environment: environment,
+        input_statuses: statuses
+      }
+    end
+
+    def managed_prompt_preamble(slot_id)
+      context = managed_runtime_context(slot_id)
+      return nil unless context
+
+      lines = [
+        "Honeycomb package root (immutable, read-only): #{context.fetch(:package_root)}",
+        "Executable slot: #{slot_id}"
+      ]
+      tools = context.fetch(:tools)
+      lines << "Declared package tools: #{tools.join(', ')}" unless tools.empty?
+      prompt_assets = context.fetch(:prompt_assets)
+      lines << "Declared package prompt assets: #{prompt_assets.join(', ')}" unless prompt_assets.empty?
+      statuses = context.fetch(:input_statuses)
+      unless statuses.empty?
+        summary = statuses.map do |entry|
+          "#{entry.fetch('name')}=#{entry.fetch('available') ? 'available' : 'unavailable'}"
+        end
+        lines << "Optional inputs (values are never included in prompts): #{summary.join(', ')}"
+      end
+      lines.join("\n")
+    end
+
+    def managed_prompt(slot_id, body)
+      preamble = managed_prompt_preamble(slot_id)
+      preamble ? "#{preamble}\n\n#{body}" : body
+    end
 
     def initialize(folder)
       folder = File.expand_path(folder)
@@ -143,13 +193,17 @@ module Hive
     # re-enter without deadlock, and `Task.new` (a widely-reused constructor)
     # needs no caller-side lock.
     def resolve_workflow
-      if meta[:workflow_commit] || meta[:workflow_manifest_digest]
+      if meta[:workflow_commit] || meta[:workflow_manifest_digest] || meta[:workflow_configuration_digest]
         unless meta[:workflow] && meta[:workflow_commit] && meta[:workflow_manifest_digest]
           raise InvalidTaskPath, "managed workflow task provenance is incomplete"
         end
         store = Hive::WorkflowPackage::ManagedStore.new(@hive_state_path)
         begin
-          return store.workflow(meta[:workflow], meta[:workflow_commit], meta[:workflow_manifest_digest])
+          return store.workflow(
+            meta[:workflow], meta[:workflow_commit], meta[:workflow_manifest_digest],
+            configuration_digest: meta[:workflow_configuration_digest],
+            cfg: Hive::Config.load(@project_root)
+          )
         rescue Hive::ConfigError => e
           raise InvalidTaskPath, e.message
         end

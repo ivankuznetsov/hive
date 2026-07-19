@@ -51,7 +51,10 @@ module Hive
         store = Hive::WorkflowPackage::ManagedStore.new(hive_state)
         store.selections.each_with_object({}) do |lock, workflows|
           name = lock.fetch("name")
-          workflow = store.workflow(name, lock.fetch("source_commit"), lock.fetch("manifest_digest"))
+          workflow = store.workflow(
+            name, lock.fetch("source_commit"), lock.fetch("manifest_digest"),
+            configuration_digest: lock.fetch("configuration_digest"), verify_profiles: false
+          )
           workflows[workflow.id] = workflow
         rescue Hive::ConfigError => e
           warn "hive: skipping managed workflow #{name.inspect}: #{e.message}"

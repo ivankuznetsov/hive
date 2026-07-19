@@ -76,15 +76,30 @@ class TaskMetaTest < Minitest::Test
     with_tmp_dir do |dir|
       Hive::TaskMeta.write(
         dir, id: 7, slug: "managed-260715-aaaa", display_name: nil, workflow: "demo",
-        workflow_commit: "a" * 40, workflow_manifest_digest: "b" * 64
+        workflow_commit: "a" * 40, workflow_manifest_digest: "b" * 64,
+        workflow_configuration_digest: "c" * 64
       )
 
       assert_equal "a" * 40, Hive::TaskMeta.read(dir)[:workflow_commit]
       assert_equal "b" * 64, Hive::TaskMeta.read(dir)[:workflow_manifest_digest]
+      assert_equal "c" * 64, Hive::TaskMeta.read(dir)[:workflow_configuration_digest]
       Hive::TaskMeta.update_display_name(dir, "Managed")
       Hive::TaskMeta.update_id(dir, 8)
       assert_equal "a" * 40, Hive::TaskMeta.read(dir)[:workflow_commit]
       assert_equal "b" * 64, Hive::TaskMeta.read(dir)[:workflow_manifest_digest]
+      assert_equal "c" * 64, Hive::TaskMeta.read(dir)[:workflow_configuration_digest]
+    end
+  end
+
+
+  def test_configuration_digest_requires_package_provenance
+    with_tmp_dir do |dir|
+      assert_raises(ArgumentError) do
+        Hive::TaskMeta.write(
+          dir, id: 7, slug: "managed-260715-aaaa", display_name: nil,
+          workflow_configuration_digest: "c" * 64
+        )
+      end
     end
   end
 

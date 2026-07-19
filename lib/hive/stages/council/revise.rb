@@ -50,25 +50,27 @@ module Hive
         end
 
         def run_agent!
-          profile = Hive::Stages::Base.stage_profile(@cfg, @stage.name, explicit_agent: @revise.agent || @stage.agent)
+          identity = launch_identity
+          profile = Hive::Stages::Base.stage_profile(@cfg, @stage.name, explicit_agent: identity.fetch(:agent))
           scope = Hive::Stages::Base.stage_permission_scope_or_mark!(
             @cfg,
             @stage.name,
             @task,
             profile,
+            managed_slot: "stages.#{@stage.name}.revise",
             **permission_kwargs
           )
           resource_limits = Hive::Stages::Base.stage_resource_limits(@cfg, @stage)
           result = Hive::Stages::Base.spawn_agent(
             @task,
-            prompt: prompt(profile),
+            prompt: managed_prompt(prompt(profile)),
             add_dirs: scope.fetch(:add_dirs),
             cwd: @task.folder,
             **resource_limits,
             log_label: "#{@stage.name}-revise",
             profile: profile,
-            model: @revise.model || @stage.model,
-            effort: @revise.effort || @stage.effort,
+            model: identity[:model],
+            effort: identity[:effort],
             expected_output: @target_path,
             status_mode: :output_file_exists,
             cfg: @cfg,
@@ -77,6 +79,21 @@ module Hive
           return if result[:status] == :ok
 
           raise Hive::StageError, "council revise failed: #{result[:error_message].to_s[0, 200]}"
+        end
+
+        def launch_identity
+          unless @task.respond_to?(:managed_workflow?) && @task.managed_workflow?
+            return {
+              agent: @revise.agent || @stage.agent,
+              model: @revise.model || @stage.model,
+              effort: @revise.effort || @stage.effort
+            }
+          end
+
+          if @revise.agent.to_s.empty?
+            raise Hive::ConfigError, "managed council reviser is missing its mapped agent"
+          end
+          { agent: @revise.agent, model: @revise.model, effort: @revise.effort }
         end
 
         def prompt(profile)
@@ -96,6 +113,12 @@ module Hive
               user_supplied_tag: Hive::Stages::Base.user_supplied_tag
             )
           )
+        end
+
+        def managed_prompt(body)
+          return body unless @task.respond_to?(:managed_prompt)
+
+          @task.managed_prompt("stages.#{@stage.name}.revise", body)
         end
 
         def timeout_sec

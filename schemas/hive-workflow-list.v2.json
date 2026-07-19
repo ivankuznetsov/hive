@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-workflow-list.v2.json",
+  "title": "hive workflow list output v2",
+  "oneOf": [
+    {"$ref": "#/$defs/SuccessPayload"},
+    {"$ref": "#/$defs/ErrorPayload"}
+  ],
+  "$defs": {
+    "Mapping": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["slot", "mapping_role", "mapping_contract", "agent", "model", "effort", "profile_fingerprint", "policy_fingerprint"],
+      "properties": {
+        "slot": {"type": "string", "minLength": 1},
+        "mapping_role": {"enum": ["planning", "development", "reviewer"]},
+        "mapping_contract": {"type": "string", "minLength": 1},
+        "agent": {"type": "string", "minLength": 1},
+        "model": {"type": ["string", "null"]},
+        "effort": {"type": ["string", "null"]},
+        "profile_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "policy_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "OptionalInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "authorized_slots", "binding", "available"],
+      "properties": {
+        "name": {"type": "string", "pattern": "^[A-Z_][A-Z0-9_]*$"},
+        "authorized_slots": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+        "binding": {"type": ["string", "null"], "pattern": "^[A-Z_][A-Z0-9_]*$"},
+        "available": {"type": "boolean"}
+      }
+    },
+    "Workflow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "origin", "selection", "integrity", "catalog_visibility", "version", "source_commit", "manifest_digest"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "origin": {"enum": ["built_in", "authored", "managed"]},
+        "selection": {"enum": ["selected", "retained", null]},
+        "integrity": {"enum": ["verified", "tampered", "malformed", null]},
+        "catalog_visibility": {"enum": ["unknown_offline", null]},
+        "version": {"type": ["string", "null"]},
+        "source_commit": {"type": ["string", "null"], "pattern": "^[0-9a-f]{40}$"},
+        "manifest_digest": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+        "configuration_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "mappings": {"type": "array", "items": {"$ref": "#/$defs/Mapping"}},
+        "optional_inputs": {"type": "array", "items": {"$ref": "#/$defs/OptionalInput"}}
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "origin": {"const": "managed"},
+              "selection": {"const": "selected"},
+              "integrity": {"const": "verified"}
+            },
+            "required": ["origin", "selection", "integrity"]
+          },
+          "then": {"required": ["configuration_digest", "mappings", "optional_inputs"]}
+        },
+        {
+          "if": {"properties": {"origin": {"enum": ["built_in", "authored"]}}, "required": ["origin"]},
+          "then": {
+            "not": {
+              "anyOf": [
+                {"required": ["configuration_digest"]},
+                {"required": ["mappings"]},
+                {"required": ["optional_inputs"]}
+              ]
+            }
+          }
+        },
+        {
+          "if": {"properties": {"selection": {"const": "retained"}}, "required": ["selection"]},
+          "then": {
+            "not": {
+              "anyOf": [
+                {"required": ["mappings"]},
+                {"required": ["optional_inputs"]}
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "workflows"],
+      "properties": {
+        "schema": {"const": "hive-workflow-list"},
+        "schema_version": {"const": 2},
+        "ok": {"const": true},
+        "workflows": {"type": "array", "items": {"$ref": "#/$defs/Workflow"}}
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "error_class", "error_kind", "exit_code", "message"],
+      "properties": {
+        "schema": {"const": "hive-workflow-list"},
+        "schema_version": {"const": 2},
+        "ok": {"const": false},
+        "error_class": {"type": "string"},
+        "error_kind": {"enum": ["consent_required", "ownership", "update_required", "concurrent_run", "git", "config", "registry", "error"]},
+        "exit_code": {"enum": [1, 64, 69, 70, 75, 78]},
+        "message": {"type": "string"},
+        "holder": {"type": "object", "additionalProperties": true},
+        "lock_path": {"type": "string"}
+      }
+    }
+  }
+}

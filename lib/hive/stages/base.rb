@@ -136,14 +136,19 @@ module Hive
       def stage_permission_scope(cfg, stage_name, task, profile,
                                  base_add_dirs: [ task.folder ],
                                  default_allowed_tools: nil,
-                                 explicit_permission_spec: MISSING_EXPLICIT_PERMISSION_SPEC)
+                                 explicit_permission_spec: MISSING_EXPLICIT_PERMISSION_SPEC,
+                                 managed_slot: nil)
         if task.respond_to?(:managed_workflow?) && task.managed_workflow?
-          require "hive/workflow_package/managed_store"
           require "hive/workflow_package/runtime_policy"
-          store = Hive::WorkflowPackage::ManagedStore.new(task.hive_state_path)
-          manifest = store.manifest(task.workflow.id.to_s, task.workflow_commit, task.workflow_manifest_digest)
-          runtime_policy = Hive::WorkflowPackage::RuntimePolicy.compile(
-            manifest.data.fetch("permissions"), task_folder: task.folder, profile: profile,
+          if explicit_permission_spec.equal?(MISSING_EXPLICIT_PERMISSION_SPEC)
+            raise Hive::ConfigError, "managed executable actor #{managed_slot || stage_name} is missing exact permissions"
+          end
+          slot_id = managed_slot || "stages.#{stage_name}"
+          context = task.managed_runtime_context(slot_id)
+          runtime_policy = Hive::WorkflowPackage::RuntimePolicy.compile_actor(
+            explicit_permission_spec,
+            task_folder: task.folder, profile: profile,
+            package_root: context.fetch(:package_root), environment: context.fetch(:environment),
             policy_dir: managed_policy_dir(task, stage_name)
           )
           return {

@@ -1,5 +1,5 @@
 module Hive
-  VERSION = "0.5.3".freeze
+  VERSION = "0.6.0".freeze
   MIN_CLAUDE_VERSION = "2.1.118".freeze
   # Canonical GitHub org + repo. Referenced by the release probe
   # (UpdateCheck), the brew tap + installer URL (Commands::Update), etc.
@@ -47,10 +47,12 @@ module Hive
       # every other agent-callable command's error envelope; the success arm
       # builds its hash directly.
       "hive-workflow-new" => 1,
-      "hive-workflow-install" => 1,
-      "hive-workflow-list" => 1,
+      "hive-workflow-install" => 2,
+      # v2 gives selected managed rows their active immutable configuration
+      # digest plus redacted per-slot mapping and optional-input discovery.
+      "hive-workflow-list" => 2,
       "hive-workflow-remove" => 1,
-      "hive-workflow-update" => 1,
+      "hive-workflow-update" => 2,
       "hive-workflow-publish" => 1,
       # Global daily shipped digest (`hive digest --json`). The success
       # envelope carries the delivery outcome (status/date/message); hard

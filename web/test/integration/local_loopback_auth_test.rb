@@ -26,6 +26,7 @@ class LocalLoopbackAuthTest < ActionDispatch::IntegrationTest
     get "/"
     assert_response :success, "an enabled loopback bypass must serve the dashboard without a session"
     assert_select "nav[aria-label='Primary'] a", text: "Status"
+    assert_select "nav[aria-label='Primary'] a", text: "Workflows"
     assert_select "nav[aria-label='Primary'] a", text: "Repos"
     assert_select "nav[aria-label='Primary'] a", text: "Agents"
     assert_select "nav[aria-label='Primary'] a", text: "Telegram"

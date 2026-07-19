@@ -100,6 +100,65 @@ class PipelineFlowTest < ApplicationSystemTestCase
            "approve must move the task into 2-brainstorm"
   end
 
+  test "a failed Turbo submission keeps the draft and staged attachment" do
+    sign_in!
+    compose_idea "Keep this failed draft"
+    attach_composer_image fixture_image
+    assert_selector ".chip", text: "image1", count: 1
+
+    execute_script(<<~JS)
+      document.querySelector("#composer").dispatchEvent(new CustomEvent("turbo:submit-end", {
+        bubbles: true,
+        detail: { success: false, fetchResponse: { statusCode: 422 } }
+      }))
+    JS
+
+    assert_equal "Keep this failed draft [image1]", find("textarea[aria-label='New idea']").value
+    assert_selector ".chip", text: "image1", count: 1
+    assert_equal 1, page.evaluate_script(
+      "document.querySelector('[data-composer-target=files]').files.length"
+    ), "a 422 must leave the upload transport retryable"
+  end
+
+  test "composer reconnect rebuilds staged attachments before adding another" do
+    sign_in!
+    compose_idea "Reconnect attachments"
+    attach_composer_image fixture_image
+    assert_selector ".chip", text: "image1", count: 1
+
+    # Move the exact permanent form out and back across animation frames. This
+    # drives a real Stimulus disconnect/connect while preserving the browser's
+    # FileList, matching Turbo moving a permanent node into a morphed document.
+    execute_script(<<~JS)
+      const form = document.querySelector("#composer")
+      const marker = document.createComment("composer reconnect marker")
+      form.before(marker)
+      form.remove()
+      requestAnimationFrame(() => {
+        marker.after(form)
+        requestAnimationFrame(() => { form.dataset.testReconnected = "true" })
+      })
+    JS
+    assert_selector "#composer[data-test-reconnected='true']", wait: 5
+
+    attach_composer_image fixture_image
+
+    assert_selector ".chip", text: "image1", count: 1
+    assert_selector ".chip", text: "image2", count: 1
+    names = page.evaluate_script(
+      "Array.from(document.querySelector('[data-composer-target=files]').files).map(file => file.name)"
+    )
+    assert_equal %w[image1.png image2.png], names,
+                 "reconnect must restore image1 before image2 rebuilds the transport"
+
+    submit_idea
+    assert_selector ".flash-notice", text: "Idea added", wait: 5
+    folder = stage_dir(@project, "1-inbox").children
+                                           .find { |child| child.basename.to_s.start_with?("reconnect-attachments") }
+    assert folder.join("assets", "image1.png").file?
+    assert folder.join("assets", "image2.png").file?
+  end
+
   test "an ownerless box offers the claim flow, not config-editing homework" do
     # No web config at all: the shipped client_id default makes the box
     # CLAIMABLE out of the box — the first sign-in becomes the owner.

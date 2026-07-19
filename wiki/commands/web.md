@@ -195,8 +195,9 @@ origin also prints the Host-header/reverse-proxy warning.
   or retained/deletable generations. Preview forms intentionally use native
   navigation because they return a successful review page rather than Turbo's
   required mutation redirect. Applying requires an explicit checkbox plus a
-  15-minute MessageVerifier receipt bound to project, operation, source, and
-  package/selection commit+digest. The adapter re-fetches candidate packages
+  15-minute MessageVerifier receipt bound to project and operation, plus source
+  for install or workflow name for update/remove, and the exact package or
+  selection commit+digest. The adapter re-fetches candidate packages
   and requires complete candidate/current identity fields; the command/store
   layers recheck the selected baseline, so stale or incomplete receipts fail
   before mutation. Security expansion has a second, non-composable checkbox.
@@ -352,7 +353,10 @@ sanctioned JS exception), Turbo Stream live row arrival without reload, grid
 project-rail filtering with URL sync, composer project sync, and
 `+ Add project` routing, plus re-application after a live broadcast, grid
 scroll plus composer draft preservation across a live broadcast, successful
-composer text/chip/file reset with project-context retention, both approve
+composer text/chip/file reset with project-context retention, failed-submit
+draft/file retention on a 422-shaped Turbo event, and attachment-index rebuild
+after a real Stimulus disconnect/reconnect before adding and submitting another
+image, both approve
 paths (typed refusal page + confirmed force), Q&A round replacement without a
 lingering old form, typed Q&A preservation across a pushed morph, log-tail
 follow/pause/resume with node-preserving frame morph reloads, artifact

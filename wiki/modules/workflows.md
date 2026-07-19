@@ -83,7 +83,7 @@ The upgrade path was live-smoked on the existing hive-bench state checkout on
 `coding` tasks all remained resolvable, with all nine pre-migration status rows
 still visible and the unrelated dirty-state fingerprint unchanged.
 
-`hive workflow new ID` (see [[commands/workflow]]) scaffolds the minimal `inbox -> work -> done` descriptor plus `work.md` instruction and commits those files to `hive/state`. `--template architecture` scaffolds a document-planning workflow with `inbox -> draft -> review(council) -> architecture(agent-terminal)`.
+`hive workflow new ID` (see [[commands/workflow]]) scaffolds the minimal `inbox -> work -> done` descriptor plus `work.md` instruction and commits those files to `hive/state`. The only richer shipped scaffold is `--template research`; Architecture and Writing are installed as full reviewed Honeycomb packages so their agent-slot configuration remains operator-owned.
 
 ## Managed Honeycomb overlay
 

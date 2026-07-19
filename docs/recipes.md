@@ -4,15 +4,15 @@ These recipes are meant to be copied into real project work. They use the curren
 
 ## Build A Document Review Council Workflow
 
-Start from the architecture template when the deliverable is a plan or design
-document rather than code:
+Install the reviewed Architecture workflow when the deliverable is a plan or
+design document rather than code:
 
 ```bash
-hive workflow new architecture --template architecture
+hive workflow install honeycomb/architecture --yes
 hive new <project> --workflow architecture "Plan the system..."
 ```
 
-The template captures the seed in `idea.md`, drafts `draft.md`, runs a native
+The package captures the seed in `idea.md`, researches and drafts the design, runs a native
 `kind: council` review over that draft, and ends on an agent terminal stage that
 produces `architecture.md`. The council writes reviewer artifacts under
 `reviews/` and a triage summary at `reviews/triage.md`.

@@ -22,6 +22,24 @@ class WorkflowPackageRegistryManifestTest < Minitest::Test
     end
   end
 
+  def test_validator_rejects_unbounded_actor_hidden_by_low_risk_registry_disclosure
+    [
+      "permissions: { preset: scoped, bash: true }",
+      "permissions: { preset: scoped, tools: [Read, Write] }"
+    ].each do |actor_policy|
+      with_registry_package do |root, document|
+        workflow_path = File.join(root, "workflow.yml")
+        File.write(workflow_path, File.read(workflow_path).sub("permissions: read-only", actor_policy))
+        rewrite_manifest(root, document)
+
+        result = Hive::WorkflowPackage::Validator.validate(root)
+
+        refute result.valid?
+        assert_includes result.errors.map(&:rule_id), "policy.disclosure_mismatch"
+      end
+    end
+  end
+
   def test_validator_rejects_payload_tamper_and_both_manifest_formats
     with_registry_package do |root, _document|
       File.write(File.join(root, "README.md"), "tampered\n")
@@ -178,6 +196,8 @@ class WorkflowPackageRegistryManifestTest < Minitest::Test
             advance_verb: work
             instruction: instructions/work.md
             permissions: read-only
+            mapping_role: development
+            mapping_contract: demo-work-v1
           - name: done
             kind: terminal
             state_file: done.md
@@ -204,5 +224,16 @@ class WorkflowPackageRegistryManifestTest < Minitest::Test
       File.binwrite(File.join(root, "manifest.yml"), Hive::WorkflowPackage::CanonicalYAML.dump_manifest(document))
       yield root, document
     end
+  end
+
+  def rewrite_manifest(root, document)
+    prefix = "packages/demo/1.0.0/"
+    document["files"] = %w[README.md instructions/work.md workflow.yml].to_h do |relative|
+      [ "#{prefix}#{relative}", Digest::SHA256.file(File.join(root, relative)).hexdigest ]
+    end
+    document["release_sha256"] = Digest::SHA256.hexdigest(
+      Hive::WorkflowPackage::CanonicalYAML.dump_manifest(document, include_release: false)
+    )
+    File.binwrite(File.join(root, "manifest.yml"), Hive::WorkflowPackage::CanonicalYAML.dump_manifest(document))
   end
 end

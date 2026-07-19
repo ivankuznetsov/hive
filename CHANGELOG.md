@@ -2,6 +2,15 @@
 
 All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with user-facing bullets and, for notable releases, descriptive subsections — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
+## 0.6.0
+
+- Install and update full Honeycomb workflows with immutable per-slot
+  agent/model/effort mappings selected by the operator.
+- Bind optional package inputs to authorized executable slots without storing
+  values, and expose manifest-bound tools and prompt assets at runtime.
+- Add bounded council completion for capped editorial workflows while keeping
+  the existing operator-wait behavior as the default.
+
 ## 0.5.3
 
 - Fixed Architecture Patrol merge intake timing out after querying every merged

@@ -465,7 +465,11 @@ module Hive
     option :dry_run, type: :boolean, default: false,
                      desc: "for `install`, `update`, or `remove`: validate and report without changing project state"
     option :allow_escalation, type: :boolean, default: false,
-                              desc: "for `update`: separately allow a security capability increase"
+                              desc: "for `install`/`update`: separately allow unbounded or increased capabilities"
+    option :mapping, type: :array, default: [],
+                     desc: "for `install`/`update`: SLOT=AGENT[,model=MODEL][,effort=EFFORT] overrides"
+    option :input_binding, type: :array, default: [],
+                           desc: "for `install`/`update`: optional input NAME=ENV_NAME bindings"
     option :version, type: :string,
                      desc: "for `publish`: semantic package version"
     def workflow(subcommand = nil, id = nil)
@@ -479,6 +483,8 @@ module Hive
         yes: options[:yes],
         dry_run: options[:dry_run],
         allow_escalation: options[:allow_escalation],
+        mapping_overrides: options[:mapping],
+        input_bindings: options[:input_binding],
         version: options[:version]
       ).call
     end

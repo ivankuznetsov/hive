@@ -4,6 +4,7 @@ require "fileutils"
 require "hive/atomic_file"
 require "hive/attempts/capability"
 require "hive/attempts/record"
+require "hive/stringify_keys"
 require "hive/paths"
 
 module Hive
@@ -88,7 +89,7 @@ module Hive
 
           data.merge(
             "lease_version" => data.fetch("lease_version") + 1,
-            "wrapper" => Record.deep_copy(owner),
+            "wrapper" => Hive::StringifyKeys.call(owner),
             "claim_deadline" => nil,
             "first_heartbeat_deadline" => Record.iso8601(now + first_heartbeat_timeout_sec),
             "diagnostics" => data.fetch("diagnostics").merge("claimed_at" => Record.iso8601(now))
@@ -125,14 +126,14 @@ module Hive
 
       def checkpoint(observed, checkpoint:, now:, worker: nil, output_references: nil, log_reference: nil)
         mutate(observed, allowed_states: [ "running" ]) do |data|
-          next_outputs = output_references.nil? ? data.fetch("current_outputs") : Record.deep_copy(output_references)
+          next_outputs = output_references.nil? ? data.fetch("current_outputs") : Hive::StringifyKeys.call(output_references)
           next_outputs.each { |reference| OutputReference.validate_shape!(reference) }
           OutputReference.validate_shape!(log_reference) if log_reference
           data.merge(
             "lease_version" => data.fetch("lease_version") + 1,
-            "checkpoint" => Record.deep_copy(checkpoint),
+            "checkpoint" => Hive::StringifyKeys.call(checkpoint),
             "latest_revision" => checkpoint["revision"] || checkpoint[:revision] || data["latest_revision"],
-            "worker" => worker ? Record.deep_copy(worker) : data["worker"],
+            "worker" => worker ? Hive::StringifyKeys.call(worker) : data["worker"],
             "current_outputs" => next_outputs,
             "log_reference" => log_reference || data["log_reference"],
             "diagnostics" => data.fetch("diagnostics").merge("checkpoint_at" => Record.iso8601(now))
@@ -151,9 +152,9 @@ module Hive
           "exit_status" => exit_status,
           "started_at" => observed["started_at"],
           "ended_at" => Record.iso8601(now),
-          "final_checkpoint" => Record.deep_copy(final_checkpoint),
-          "output_references" => Record.deep_copy(output_references),
-          "log_reference" => Record.deep_copy(log_reference)
+          "final_checkpoint" => Hive::StringifyKeys.call(final_checkpoint),
+          "output_references" => Hive::StringifyKeys.call(output_references),
+          "log_reference" => Hive::StringifyKeys.call(log_reference)
         }
         Record.validate_receipt!(
           receipt, attempt_id: observed.attempt_id,
@@ -169,9 +170,9 @@ module Hive
             "heartbeat_deadline" => nil,
             "ended_at" => Record.iso8601(now),
             "latest_revision" => final_checkpoint["revision"] || final_checkpoint[:revision] || data["latest_revision"],
-            "checkpoint" => Record.deep_copy(final_checkpoint),
-            "current_outputs" => Record.deep_copy(output_references),
-            "log_reference" => Record.deep_copy(log_reference),
+            "checkpoint" => Hive::StringifyKeys.call(final_checkpoint),
+            "current_outputs" => Hive::StringifyKeys.call(output_references),
+            "log_reference" => Hive::StringifyKeys.call(log_reference),
             "receipt" => receipt
           )
         end
@@ -187,7 +188,7 @@ module Hive
             "heartbeat_deadline" => nil,
             "ended_at" => Record.iso8601(now),
             "loss" => { "reason" => reason, "at" => Record.iso8601(now) },
-            "diagnostics" => data.fetch("diagnostics").merge(Record.deep_copy(diagnostics))
+            "diagnostics" => data.fetch("diagnostics").merge(Hive::StringifyKeys.call(diagnostics))
           )
         end
       end
@@ -196,13 +197,13 @@ module Hive
       # The irreversible state and immutable identity remain unchanged.
       def annotate_lost(observed, output_references:, diagnostics:, now:)
         mutate(observed, allowed_states: [ "lost" ]) do |data|
-          outputs = (data.fetch("current_outputs") + Record.deep_copy(output_references)).uniq
+          outputs = (data.fetch("current_outputs") + Hive::StringifyKeys.call(output_references)).uniq
           outputs.each { |reference| OutputReference.validate_shape!(reference) }
           data.merge(
             "lease_version" => data.fetch("lease_version") + 1,
             "current_outputs" => outputs,
             "diagnostics" => data.fetch("diagnostics").merge(
-              Record.deep_copy(diagnostics).merge("loss_processed_at" => Record.iso8601(now))
+              Hive::StringifyKeys.call(diagnostics).merge("loss_processed_at" => Record.iso8601(now))
             )
           )
         end

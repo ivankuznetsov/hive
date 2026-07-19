@@ -8,7 +8,7 @@ require "hive/task_resolver"
 require "hive/workflows"
 require "hive/task_action"
 require "hive/attempts/context"
-require "hive/attempts/entrypoint"
+require "hive/attempts/command_dispatch"
 require "hive/conditions/transition_guard"
 
 module Hive
@@ -30,6 +30,9 @@ module Hive
     # In `--json` mode the inner Approve and Run are quieted and a single
     # `hive-stage-action` envelope is emitted at the end.
     class StageAction
+      include Hive::Schemas::EnvelopeEmitter
+      include Hive::Attempts::CommandDispatch
+
       def initialize(verb, target, project: nil, from: nil, json: false,
                      recover_merged_error_reason: nil, durable: false,
                      attempt_entrypoint: nil)
@@ -44,53 +47,29 @@ module Hive
       end
 
       def call
-        return dispatch_durable if @durable && !Hive::Attempts::Context.active?
-
-        do_call
-      rescue Hive::Error => e
-        emit_error_envelope(e) if @json
-        raise
-      rescue StandardError => e
-        wrapped = Hive::InternalError.new("internal error: #{e.class}: #{e.message}")
-        emit_error_envelope(wrapped) if @json
-        raise wrapped
+        call_with_envelope do
+          @durable && !Hive::Attempts::Context.active? ? dispatch_durable : do_call
+        end
       end
+
+      def envelope_schema
+        "hive-stage-action"
+      end
+
+      def envelope_extras
+        { "verb" => @verb }
+      end
+
+      def envelope_error_kind(error)
+        error_kind_for(error)
+      end
+
+      def envelope_serialization_failure_policy = :raise
 
       private
 
-      def dispatch_durable
-        task = resolve_task
-        intended_stage = Hive::Workflows.for_verb(@verb).fetch(:target)
-        result = (@attempt_entrypoint || Hive::Attempts::Entrypoint.new).dispatch(
-          task: task,
-          intended_stage: intended_stage,
-          argv: durable_worker_argv(task),
-          interactive: true
-        )
-        handle_durable_failure!(result) unless result.exit_status.zero?
-
-        result
-      end
-
-      def handle_durable_failure!(result)
-        if result.status == :lost
-          exit(result.exit_status) if @json && result.stdout_emitted?
-
-          raise Hive::ConcurrentRunError,
-                "durable attempt lost before producing a receipt for #{@target}: #{result.attempt_id}"
-        end
-
-        if @json && !result.stdout_emitted?
-          raise Hive::AttemptExecutionError.new(
-            "durable attempt #{result.attempt_id} finished with #{result.outcome || 'an error'} " \
-            "(exit #{result.exit_status}) before emitting JSON",
-            exit_code: result.exit_status,
-            attempt_id: result.attempt_id,
-            outcome: result.outcome
-          )
-        end
-
-        exit(result.exit_status)
+      def durable_intended_stage(_task)
+        Hive::Workflows.for_verb(@verb).fetch(:target)
       end
 
       def durable_worker_argv(task)
@@ -277,28 +256,8 @@ module Hive
         payload
       end
 
-      def emit_error_envelope(error)
-        payload = Hive::Schemas::ErrorEnvelope.build(
-          schema: "hive-stage-action",
-          error: error,
-          error_kind: error_kind_for(error),
-          extras: { "verb" => @verb }
-        )
-        puts JSON.generate(payload)
-      end
-
       def error_kind_for(error)
-        case error
-        when Hive::AmbiguousSlug then "ambiguous_slug"
-        when Hive::DestinationCollision then "destination_collision"
-        when Hive::FinalStageReached then "final_stage"
-        when Hive::WrongStage then "wrong_stage"
-        when Hive::RollbackFailed then "rollback_failed"
-        when Hive::InvalidTaskPath then "invalid_task_path"
-        when Hive::DependencyWaitError then "dependency_wait"
-        when Hive::DependencyAdmissionError then "admission_error"
-        else "error"
-        end
+        Hive::Commands::Approve.error_kind_for(error)
       end
 
       def stage_dir(task)

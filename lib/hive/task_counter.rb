@@ -20,6 +20,15 @@ module Hive
       end
     end
 
+    # Capture paths can remain durable without an immediate numeric id; the
+    # daemon backfills it later. Keep that deliberate fail-soft policy distinct
+    # from strict migration and backfill callers of #next!.
+    def next_or_nil(**options)
+      next!(**options)
+    rescue Hive::ConcurrentRunError
+      nil
+    end
+
     def peek
       data = YAML.safe_load(File.read(Hive::Paths.task_counter_path)) || {}
       value = data.is_a?(Hash) ? data["next_id"] : nil

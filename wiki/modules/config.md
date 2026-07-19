@@ -3,7 +3,7 @@ title: Hive::Config
 type: module
 source: lib/hive/config.rb
 created: 2026-04-25
-updated: 2026-07-17
+updated: 2026-07-19
 tags: [config, yaml, validation]
 ---
 
@@ -176,11 +176,15 @@ The built-in downstream policy is `open_pr=medium`, `review.fix=high`, and `revi
 
 `patrol.max_features_per_cycle` defaults to 12, is validated as an integer at
 least one, bounds each ordinary-patrol reviewer batch, and is likewise not
-changed by `patrol.mode`. Ordinary component mapping defaults to four owned
-and four context files. Architecture mapping retains its wider six-owned and
-six-context logical component for deterministic leverage measurement, then
-selects at most four owned files with a 32 KiB source budget for the agent's
-initial view. The first entrypoint is retained even when it alone is larger.
+changed by `patrol.mode`. The runtime batch is further capped by the tighter
+remaining cycle or shared UTC-day launch headroom: normal runs reserve one
+launch for fixing when possible, while dry runs may spend the whole remaining
+envelope on review. Ordinary component mapping defaults to four owned and four
+context files. Architecture mapping retains its wider six-owned and six-context
+logical component for
+deterministic leverage measurement, then selects at most four owned files with
+a 32 KiB source budget for the agent's initial view. The first entrypoint is
+retained even when it alone is larger.
 
 **Architecture patrol has three independent consent gates.**
 `Config::DEFAULTS["refactor_patrol"]["enabled"]`, `auto_fix.enabled`, and

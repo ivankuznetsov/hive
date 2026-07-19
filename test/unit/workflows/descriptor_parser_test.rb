@@ -44,6 +44,30 @@ class WorkflowsDescriptorParserTest < Minitest::Test
       end
     end
   end
+
+  def test_council_rejects_unknown_max_round_policy_and_mapping_role
+    base = {
+      "id" => "invalid-managed-contract",
+      "stages" => [
+        {
+          "name" => "review", "kind" => "council", "state_file" => "review.md",
+          "reviewers" => [ { "name" => "one", "prompt" => "Review." } ],
+          "council" => { "max_rounds" => 2, "on_max_rounds" => "explode" }
+        }
+      ]
+    }
+    error = assert_raises(Hive::ConfigError) do
+      Hive::Workflows::DescriptorParser.parse_hash(base, path: "/tmp/invalid-managed-contract.yml")
+    end
+    assert_includes error.message, "on_max_rounds"
+
+    base["stages"].first["council"].delete("on_max_rounds")
+    base["stages"].first["mapping_role"] = "operator"
+    error = assert_raises(Hive::ConfigError) do
+      Hive::Workflows::DescriptorParser.parse_hash(base, path: "/tmp/invalid-managed-contract.yml")
+    end
+    assert_includes error.message, "mapping_role"
+  end
   include HiveTestHelper
 
   def test_valid_descriptor_maps_user_vocabulary_and_resolves_instruction
@@ -476,6 +500,7 @@ class WorkflowsDescriptorParserTest < Minitest::Test
               "quorum" => 2,
               "max_rounds" => 3,
               "exit_rule" => "consensus",
+              "on_max_rounds" => "complete",
               "triage_output" => "reviews/triage.md",
               "revise" => { "agent" => "claude", "skill" => "/revise" }
             }
@@ -501,6 +526,7 @@ class WorkflowsDescriptorParserTest < Minitest::Test
     assert_equal 2, review.council.quorum
     assert_equal 3, review.council.max_rounds
     assert_equal :consensus, review.council.exit_rule
+    assert_equal :complete, review.council.on_max_rounds
     assert_equal "reviews/triage.md", review.council.triage_output
     assert_equal "/revise", review.council.revise.skill
   end
@@ -530,6 +556,7 @@ class WorkflowsDescriptorParserTest < Minitest::Test
     assert_equal 1, review.council.quorum
     assert_equal 1, review.council.max_rounds
     assert_equal :human, review.council.exit_rule
+    assert_equal :wait, review.council.on_max_rounds
     assert_equal "reviews/triage.md", review.council.triage_output
     assert_nil review.council.revise
   end

@@ -1,5 +1,5 @@
 module Hive
-  VERSION = "0.5.3".freeze
+  VERSION = "0.6.0".freeze
   MIN_CLAUDE_VERSION = "2.1.118".freeze
   # Canonical GitHub org + repo. Referenced by the release probe
   # (UpdateCheck), the brew tap + installer URL (Commands::Update), etc.
@@ -47,10 +47,12 @@ module Hive
       # every other agent-callable command's error envelope; the success arm
       # builds its hash directly.
       "hive-workflow-new" => 1,
-      "hive-workflow-install" => 1,
-      "hive-workflow-list" => 1,
+      "hive-workflow-install" => 2,
+      # v2 gives selected managed rows their active immutable configuration
+      # digest plus redacted per-slot mapping and optional-input discovery.
+      "hive-workflow-list" => 2,
       "hive-workflow-remove" => 1,
-      "hive-workflow-update" => 1,
+      "hive-workflow-update" => 2,
       "hive-workflow-publish" => 1,
       # Global daily shipped digest (`hive digest --json`). The success
       # envelope carries the delivery outcome (status/date/message); hard
@@ -267,36 +269,34 @@ module Hive
     #   * `envelope_error_kind(error)` — map an exception to a
     #     closed-enum `error_kind` value
     #
-    # Used by `Hive::Commands::Forget`, `Hive::Commands::Prune`,
-    # `Hive::Commands::Daemon` (enable/disable), and
-    # `Hive::Commands::AdhocReview`. The eight pre-existing emit sites
-    # (Approve, Markers, Metrics, FindingToggle, Status, Run, Findings,
-    # StageAction) have not yet been migrated — see Issue for the full
-    # sweep. This module exists so new emit sites do not add an 11th copy.
+    # Used by default-stdout command producers whose error schemas share
+    # ErrorEnvelope's common shape. Commands with injected output streams,
+    # variant schema routing, or schema-specific payloads keep specialised
+    # emitters. Metrics, for example, deliberately retains its narrower v1
+    # payload, which omits `error_class`; forcing it through this mixin would
+    # change a published contract rather than remove duplication.
     #
     # Consumers may also override `envelope_extras` to merge per-command
     # fields (e.g. `{"verb" => "review"}`) into the envelope; the default is
-    # no extras.
+    # no extras. `envelope_payload_for` preserves schema-specific field
+    # allowlists, while `envelope_serialization_failure_policy` preserves each
+    # producer's legacy warning, suppression, or re-raise behavior when an
+    # error payload itself cannot be encoded.
     module EnvelopeEmitter
       def call_with_envelope
         @stdout_written = false
         yield
       rescue Hive::Error => e
-        emit_envelope(e) if @json && !@stdout_written
+        emit_envelope(e) if envelope_enabled? && !@stdout_written
         raise
       rescue StandardError => e
         wrapped = Hive::InternalError.new("internal error: #{e.class}: #{e.message}")
-        emit_envelope(wrapped) if @json && !@stdout_written
+        emit_envelope(wrapped) if envelope_enabled? && !@stdout_written
         raise wrapped
       end
 
       def emit_envelope(error)
-        payload = Hive::Schemas::ErrorEnvelope.build(
-          schema: envelope_schema,
-          error: error,
-          error_kind: envelope_error_kind(error),
-          extras: envelope_extras
-        )
+        payload = envelope_payload_for(error)
         puts JSON.generate(payload)
         @stdout_written = true
       rescue Errno::EPIPE
@@ -304,16 +304,49 @@ module Hive
         # for the exit code + stderr line. Nothing to surface.
         @stdout_written = true
       rescue JSON::GeneratorError => e
-        # A non-serialisable payload is a bug, not a closed pipe — don't hide
-        # it. The real error still re-raises through call_with_envelope.
-        warn "[hive] #{envelope_schema} error envelope was not serialisable: #{e.class}: #{e.message}"
+        case envelope_serialization_failure_policy
+        when :raise
+          raise
+        when :warn
+          warn "[hive] #{envelope_schema} error envelope was not serialisable: #{e.class}: #{e.message}"
+        when :suppress
+          nil
+        else
+          raise ArgumentError, "unknown envelope serialization failure policy: " \
+                               "#{envelope_serialization_failure_policy.inspect}"
+        end
         @stdout_written = true
+      end
+
+      def envelope_payload_for(error)
+        Hive::Schemas::ErrorEnvelope.build(
+          schema: envelope_schema,
+          error: error,
+          error_kind: envelope_error_kind(error),
+          extras: envelope_extras_for(error)
+        )
       end
 
       # Per-command fields merged into the error envelope. Override to add
       # e.g. `{"verb" => "review"}`; the default is no extras.
       def envelope_extras
         {}
+      end
+
+      # Composing commands may suppress their child-facing envelope while
+      # still preserving typed exceptions for the outer command.
+      def envelope_enabled?
+        @json
+      end
+
+      # Most extras are command-scoped. Commands with error-specific fields
+      # can override this hook without making the common emitter conditional.
+      def envelope_extras_for(_error)
+        envelope_extras
+      end
+
+      def envelope_serialization_failure_policy
+        :warn
       end
     end
 

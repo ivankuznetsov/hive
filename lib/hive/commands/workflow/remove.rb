@@ -65,7 +65,8 @@ module Hive
 
         def same_selection?(current, expected)
           current.fetch("source_commit") == expected.fetch("source_commit") &&
-            current.fetch("manifest_digest") == expected.fetch("manifest_digest")
+            current.fetch("manifest_digest") == expected.fetch("manifest_digest") &&
+            current.fetch("configuration_digest") == expected.fetch("configuration_digest")
         end
 
         def ownership_error
@@ -85,6 +86,7 @@ module Hive
             "name" => @name,
             "source_commit" => lock.fetch("source_commit"),
             "manifest_digest" => lock.fetch("manifest_digest"),
+            "configuration_digest" => lock.fetch("configuration_digest"),
             "retained_commits" => retained,
             "deletable_commits" => deletable
           }

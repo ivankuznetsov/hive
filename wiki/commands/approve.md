@@ -101,6 +101,10 @@ Different errors carry different structured fields:
 
 The envelope is emitted on stdout BEFORE the exception propagates, mirroring `hive run --json`'s dual-signal pattern (JSON document + non-zero exit code).
 
+`Hive::Commands::Approve.error_kind_for` is the shared transition-error
+classifier. Workflow stage actions delegate to it because their outer envelope
+exposes the same closed error-kind enum while composing this command.
+
 Pinned by `Hive::Schemas::SCHEMA_VERSIONS["hive-approve"]` and the command/schema suites. The current artifact is `schemas/hive-approve.v2.json`; v1 remains available for historical validation.
 
 ## Slug resolution rules

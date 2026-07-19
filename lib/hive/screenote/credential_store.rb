@@ -4,6 +4,7 @@ require "time"
 require "hive"
 require "hive/paths"
 require "hive/screenote/secure_file"
+require "hive/stringify_keys"
 
 module Hive
   module Screenote
@@ -40,7 +41,7 @@ module Hive
           raise Hive::ConfigError, "screenote credentials must be a Hash"
         end
 
-        data = JSON.parse(JSON.generate(stringify_keys(credentials)))
+        data = JSON.parse(JSON.generate(Hive::StringifyKeys.call(credentials)))
         Hive::Screenote::SecureFile.write_json(path, data)
         data
       end
@@ -62,19 +63,6 @@ module Hive
         Time.parse(expires_at) <= now
       rescue ArgumentError
         true
-      end
-
-      private
-
-      def stringify_keys(value)
-        case value
-        when Hash
-          value.to_h { |key, child| [ key.to_s, stringify_keys(child) ] }
-        when Array
-          value.map { |child| stringify_keys(child) }
-        else
-          value
-        end
       end
     end
   end

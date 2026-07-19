@@ -19,6 +19,7 @@
         "name": {"type": "string"},
         "source_commit": {"type": "string"},
         "manifest_digest": {"type": "string"},
+        "configuration_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "retained_commits": {"type": "array", "items": {"type": "string"}},
         "deletable_commits": {"type": "array", "items": {"type": "string"}},
         "warnings": {"type": "array", "items": {"type": "string"}}

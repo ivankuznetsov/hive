@@ -39,7 +39,23 @@ module Hive
     # by a prior call, the assertion fails with WRONG_STAGE (4) so retry
     # loops can branch deterministically.
     class Approve
+      include Hive::Schemas::EnvelopeEmitter
+
       VALID_TERMINAL_MARKERS = %i[complete execute_complete review_complete].freeze
+
+      def self.error_kind_for(error)
+        case error
+        when Hive::AmbiguousSlug then "ambiguous_slug"
+        when Hive::DestinationCollision then "destination_collision"
+        when Hive::FinalStageReached then "final_stage"
+        when Hive::WrongStage then "wrong_stage"
+        when Hive::RollbackFailed then "rollback_failed"
+        when Hive::InvalidTaskPath then "invalid_task_path"
+        when Hive::DependencyWaitError then "dependency_wait"
+        when Hive::DependencyAdmissionError then "admission_error"
+        else "error"
+        end
+      end
 
       def initialize(target, to: nil, from: nil, project: nil, force: false, json: false, quiet: false)
         @target = target
@@ -55,20 +71,25 @@ module Hive
       end
 
       def call
-        do_call
-      rescue Hive::Error => e
-        emit_error_envelope(e) if @json && !@quiet
-        raise
-      rescue StandardError => e
-        # Anything that isn't a typed Hive::Error is an internal bug or an
-        # I/O fault we didn't anticipate (Errno::ENOSPC from mkdir_p, an
-        # Open3 failure, a SystemCallError from the cross-device fallback).
-        # Translate to InternalError so --json callers still get a parseable
-        # envelope on stdout instead of a Ruby trace on stderr, and the
-        # exit code is the documented SOFTWARE (70) rather than nothing.
-        wrapped = Hive::InternalError.new("internal error: #{e.class}: #{e.message}")
-        emit_error_envelope(wrapped) if @json && !@quiet
-        raise wrapped
+        call_with_envelope { do_call }
+      end
+
+      def envelope_schema
+        "hive-approve"
+      end
+
+      def envelope_error_kind(error)
+        error_kind_for(error)
+      end
+
+      def envelope_serialization_failure_policy = :raise
+
+      def envelope_enabled?
+        @json && !@quiet
+      end
+
+      def envelope_extras_for(error)
+        error.is_a?(Hive::FinalStageReached) ? { "stage" => error.stage } : {}
       end
 
       private
@@ -498,28 +519,8 @@ module Hive
         verb ? "hive #{verb} #{task.slug} --from #{stage.dir}" : "hive run #{task.slug}"
       end
 
-      def emit_error_envelope(error)
-        payload = Hive::Schemas::ErrorEnvelope.build(
-          schema: "hive-approve",
-          error: error,
-          error_kind: error_kind_for(error)
-        )
-        payload["stage"] = error.stage if error.is_a?(Hive::FinalStageReached)
-        puts JSON.generate(payload)
-      end
-
       def error_kind_for(error)
-        case error
-        when Hive::AmbiguousSlug then "ambiguous_slug"
-        when Hive::DestinationCollision then "destination_collision"
-        when Hive::FinalStageReached then "final_stage"
-        when Hive::WrongStage then "wrong_stage"
-        when Hive::RollbackFailed then "rollback_failed"
-        when Hive::InvalidTaskPath then "invalid_task_path"
-        when Hive::DependencyWaitError then "dependency_wait"
-        when Hive::DependencyAdmissionError then "admission_error"
-        else "error"
-        end
+        self.class.error_kind_for(error)
       end
     end
   end

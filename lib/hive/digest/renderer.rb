@@ -138,10 +138,7 @@ module Hive
       # Bound the model's overall summary on the raw text (before escaping) so
       # a cut can never split a MarkdownV2 `\x` escape pair.
       def truncate_overall_summary(text)
-        text = text.to_s
-        return text if text.length <= MAX_OVERALL_SUMMARY_LENGTH
-
-        "#{text[0, MAX_OVERALL_SUMMARY_LENGTH - 1].rstrip}…"
+        truncate(text, MAX_OVERALL_SUMMARY_LENGTH)
       end
 
       def render_line(entry)
@@ -158,21 +155,23 @@ module Hive
       # on the raw text (before escaping) so a cut can never split a `\x`
       # MarkdownV2 escape pair.
       def truncate_summary(text)
-        text = text.to_s
-        return text if text.length <= MAX_SUMMARY_LENGTH
-
-        "#{text[0, MAX_SUMMARY_LENGTH - 1].rstrip}…"
+        truncate(text, MAX_SUMMARY_LENGTH)
       end
 
       # Bound the (attacker-influenceable) display label the same way as the
       # summary, on the raw text before escaping, so an overlong label can't
       # push the rendered link line past Telegram's chunk boundary.
       def truncate_label(text)
-        text = text.to_s
-        return text if text.length <= MAX_LABEL_LENGTH
-
-        "#{text[0, MAX_LABEL_LENGTH - 1].rstrip}…"
+        truncate(text, MAX_LABEL_LENGTH)
       end
+
+      def truncate(text, max_length)
+        text = text.to_s
+        return text if text.length <= max_length
+
+        "#{text[0, max_length - 1].rstrip}…"
+      end
+      private_class_method :truncate
 
       def escape_link_target(url)
         url.to_s.gsub(RESERVED_LINK_TARGET) { "\\#{$1}" }

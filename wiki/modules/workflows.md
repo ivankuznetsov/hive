@@ -38,7 +38,7 @@ Per-project descriptors live under `<hive_state_path>/workflows/*.yml`, defaulti
 - stage indexes are derived from array order; non-entry stages default their incoming `advance_verb` to the stage name.
 - every user-authored agent stage declares exactly one of `skill:` or `instruction:`.
 - agent/council stages may declare `agent`, `model`, and `effort`, which override project stage config. They may also declare `budget_usd` and `timeout_sec` resource defaults; explicitly authored non-null project stage keys take precedence, while values introduced only by the merged config defaults do not shadow the descriptor. Budgets accept positive finite numbers, while timeouts require positive integers. Limits are per spawn rather than aggregate across a council; budgets need a profile-native flag, while timeouts also bound command reviewers/revisers.
-- council stages require a `reviewers:` list; each reviewer declares exactly one of `skill`, `instruction`, `prompt`, or `command`, plus optional agent/model/effort/permissions/output basename. The `council:` block carries `quorum`, `max_rounds`, `exit_rule`, `triage_output`, and optional `revise`.
+- council stages require a `reviewers:` list; each reviewer declares exactly one of `skill`, `instruction`, `prompt`, or `command`, plus optional agent/model/effort/permissions/output basename. The `council:` block carries `quorum`, `max_rounds`, `exit_rule`, `on_max_rounds` (`wait` by default or `complete` for a bounded downstream delivery), `triage_output`, and optional `revise`.
 - `instruction:` paths are resolved relative to the descriptor directory and stored on the stage as absolute paths.
 - `permissions:` values are validated through `Hive::PermissionScope` at load time and later passed to the generic agent runner as the explicit permission spec.
 - the last stage may be inert, agent, or council. Active terminal stages require both `COMPLETE` and a non-empty deliverable before `TaskAction` classifies them as archived.
@@ -93,7 +93,11 @@ weakening owner-authored descriptor compatibility:
 - `Manifest`, `RegistryManifest`, `CanonicalJSON`, `CanonicalYAML`, `Validator`, and `SecurityScanner` enforce
   canonical metadata, full path/hash coverage, safe package filesystem shapes,
   package-name descriptor binding, redacted diagnostics, and objective
-  warning/error rules.
+  warning/error rules. Scanner documentation negation is fail-closed: only a
+  narrowly recognized prohibition or absence statement that directly governs
+  the matched behavior suppresses a finding. Exhortations and double negatives
+  such as `do not forget`, `never fail`, `not only`, or `without exception`,
+  plus affirmative behavior after a comma or semicolon, remain reportable.
 - `RegistryClient` consumes canonical `honeycomb-catalog/v2` flat entries,
   applies listed/latest plus exact soft-hidden/yanked and revoked-blocked
   lifecycle semantics, materializes `packages/NAME/VERSION/` only from the
@@ -101,24 +105,49 @@ weakening owner-authored descriptor compatibility:
   provenance, description, or permission metadata that does not bind to the
   canonical `manifest.yml`. Failed git operations include bounded stderr in the
   typed registry error rather than discarding the underlying cause. Review head
-  SHA remains audit data; upstream `source_sha` remains source provenance, and
-  neither is the install tree.
-- `ManagedStore` places immutable generations and selects one through an atomic
-  lock. `TransactionJournal` plus the workflow mutation lock reconcile an
+  SHA remains audit data; upstream
+  `source_sha` remains source provenance, and neither is the install tree.
+- `ManagedStore` places immutable generations plus digest-addressed
+  `configurations/<sha256>.json` execution snapshots and selects both through
+  an atomic lock-schema-v2 pointer. Each snapshot maps stable actor slots to
+  operator-selected agent/model/effort identity, mapping role/contract, profile
+  fingerprint, and per-actor policy fingerprint. Snapshot construction rejects
+  non-null pins that the selected profile cannot express as native arguments;
+  unsupported project defaults remain nil. Managed council reviewers and
+  revisers launch exclusively from their child-slot snapshot identity, so a
+  nil child model/effort cannot leak the parent stage's provider-specific
+  defaults. Owner-authored unmanaged councils retain their historical parent
+  fallback. `TransactionJournal` plus the workflow mutation lock reconcile an
   interrupted activation/removal before Loader or lifecycle access. Selection
-  reads participate in that lock, while cleanup is serialized with managed task
-  creation and stage moves and aborts on unreadable pin metadata. Activation can
-  distinguish "no baseline check" from an explicit "still unselected" baseline;
-  activation and removal compare expected source commit plus manifest digest
-  under the mutation lock so a reviewed lifecycle action cannot race a different
-  selection into place. The mutation lock classifies only acquisition/open
-  failures as contention; I/O errors raised by the protected mutation retain
-  their original type and message.
+  reads participate in that lock. Invalid selected configurations are skipped
+  independently with one named warning, so one missing, malformed, or
+  digest-tampered snapshot cannot hide itself or suppress healthy siblings.
+  Configuration-only activation against an
+  unchanged package generation compares the selected source, manifest, and
+  configuration digests before swapping the pointer. Cleanup is serialized
+  with managed task creation and stage moves and aborts on unreadable or
+  incomplete managed pin provenance. A legacy pin may omit only its
+  configuration digest; workflow, source commit, and manifest digest remain a
+  required tuple. `workflow list --json` schema v2 reads the selected
+  digest-addressed snapshot back through this store to expose per-slot identity
+  and redacted optional-input binding/availability. Retained task rows expose
+  only a pinned configuration digest, when available, so historical identity
+  is not confused with the active selection.
+  Activation distinguishes "no baseline check" from an explicit "still
+  unselected" baseline; selected baselines compare source commit, manifest
+  digest, and configuration digest under the mutation lock. The mutation lock
+  classifies only acquisition/open failures as contention; I/O errors raised by
+  the protected mutation retain their original type and message.
 - `Loader` registers selected managed workflows beside built-ins and authored
   descriptors while rejecting id collisions and reloading when its managed
   fingerprint changes. Task-pinned generations bypass the single-id overlay and
-  validate/load directly from `ManagedStore` by id, source commit, and manifest
-  digest.
+  validate/load directly from `ManagedStore` by id, source commit, manifest
+  digest, and configuration digest. Profile fingerprint drift fails closed.
+  For a legacy lock-schema-v1 selection, task creation derives the compatibility
+  snapshot with the effective project agent profiles and writes that
+  digest-addressed snapshot before `meta.yml` can pin it. The snapshot therefore
+  remains resolvable after an update replaces the selected pointer with schema
+  v2; cleanup retains it while any task references its digest.
 - `SemanticDiff` reports prompt/descriptor changes by hash (never prompt text),
   dependency and policy set changes, file inventory changes, and semantic
   escalation reasons.
@@ -126,15 +155,27 @@ weakening owner-authored descriptor compatibility:
   layout, packages deterministically, runs the shared validator/runtime
   admission, then delegates to a fork-aware PR client.
 
-Managed locks/generations are Hive-owned. Lifecycle commands cannot overwrite a
+Managed locks/generations/configurations are Hive-owned. Lifecycle commands cannot overwrite a
 built-in or `<id>.yml` authored descriptor, and task metadata rewrites preserve
-both managed provenance fields.
+all three managed provenance fields.
 
-Honeycomb v2 permission summaries are not exact runtime policies. The only
-current lossless admission is low-risk task-local read-only; broader summaries
-fail closed. Bench and Docs Sync therefore resolve/verify but are not yet
-installable. `Publisher` also remains on the legacy submission layout and is
-not a v2 package authoring path.
+Honeycomb v2 permission summaries are disclosure/consent data, not executable
+policy. Managed execution uses each stage/reviewer/reviser descriptor's exact
+`permissions:` block. Explicit `yolo`, scoped shell, and unqualified scoped
+file-write actors are portable only after separate high-risk consent; a v2
+manifest hiding that actor surface behind a narrower disclosure is rejected.
+Bounded actors admit only on profiles that enforce the bound. Strict `x-hive`
+metadata declares manifest-hashed executable tools, manifest-hashed prompt
+assets exposed as absolute paths in the managed prompt preamble, and optional
+environment names with authorized stable slots. Package-declared process
+control names are rejected before a value can enter a child environment. Git modes survive
+catalog materialization and generation placement. Generation directories and
+ordinary files are hardened to 0555 and 0444 before same-parent atomic
+publication, trusted executable payloads remain 0555, and reuse repairs mode
+tampering after content validation. Snapshots store environment variable names
+only and inject a current value only into its executing slot.
+`gh` and `qmd` remain baseline Hive dependencies. `Publisher` remains on the
+legacy submission layout and is not a v2 package authoring path.
 
 ## Constants
 

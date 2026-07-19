@@ -19,23 +19,29 @@ module Hive
     class WorkflowLifecycle
       class PreviewChanged < Hive::Error; end
 
-      SelectionIdentity = Data.define(:source_commit, :manifest_digest) do
+      SelectionIdentity = Data.define(:source_commit, :manifest_digest, :configuration_digest) do
         def self.from_selection(selection)
           new(
             source_commit: selection.fetch("source_commit"),
-            manifest_digest: selection.fetch("manifest_digest")
+            manifest_digest: selection.fetch("manifest_digest"),
+            configuration_digest: selection.fetch("configuration_digest")
           )
         end
 
         def self.from_update_preview(preview)
           new(
             source_commit: preview.fetch("from_commit"),
-            manifest_digest: preview.fetch("from_manifest_digest")
+            manifest_digest: preview.fetch("from_manifest_digest"),
+            configuration_digest: preview.fetch("from_configuration_digest")
           )
         end
 
         def to_expected
-          { "source_commit" => source_commit, "manifest_digest" => manifest_digest }
+          {
+            "source_commit" => source_commit,
+            "manifest_digest" => manifest_digest,
+            "configuration_digest" => configuration_digest
+          }
         end
       end
 
@@ -108,6 +114,7 @@ module Hive
         Hive::Commands::Workflow::Install.new(
           source, project_root: project_root(project), json: true, yes: true,
           stdout: StringIO.new, committer: @committer,
+          expected_configuration_digest: expected.fetch("configuration_digest"),
           registry_client: PreviewRegistry.new(registry_client, candidate_identity(expected))
         ).call!
       end
@@ -123,7 +130,10 @@ module Hive
           raise PreviewChanged, "the managed workflow selection changed; preview the update again"
         end
 
-        payload.merge("from_manifest_digest" => before.fetch("manifest_digest"))
+        payload.merge(
+          "from_manifest_digest" => before.fetch("manifest_digest"),
+          "from_configuration_digest" => before.fetch("configuration_digest")
+        )
       end
 
       def update(project, name:, expected:, allow_escalation:)
@@ -136,7 +146,9 @@ module Hive
             "source_commit" => expected.fetch("to_commit"),
             "manifest_digest" => expected.fetch("manifest_digest")
           }, identity_fields: PreviewRegistry::UPDATE_IDENTITY_FIELDS),
-          expected_current: current, committer: @committer
+          expected_current: current,
+          expected_configuration_digest: expected.fetch("configuration_digest"),
+          committer: @committer
         ).call!
       end
 

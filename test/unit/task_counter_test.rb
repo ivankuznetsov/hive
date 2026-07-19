@@ -18,6 +18,13 @@ class TaskCounterTest < Minitest::Test
     end
   end
 
+  def test_next_or_nil_allocates_when_the_counter_is_available
+    with_tmp_global_config do
+      assert_equal 1, Hive::TaskCounter.next_or_nil
+      assert_equal 2, Hive::TaskCounter.peek
+    end
+  end
+
   def test_corrupt_counter_defaults_to_one
     with_tmp_global_config do
       File.write(Hive::Paths.task_counter_path, ":\n:not yaml")
@@ -77,6 +84,7 @@ class TaskCounterTest < Minitest::Test
       error = assert_raises(Hive::ConcurrentRunError) { Hive::TaskCounter.next!(timeout_sec: 0.01) }
       assert_match(/task counter lock/, error.message)
       assert_equal Hive::Paths.task_counter_lock_path, error.lock_path
+      assert_nil Hive::TaskCounter.next_or_nil(timeout_sec: 0.01)
     ensure
       Process.kill("KILL", child) if child
       Process.wait(child) if child

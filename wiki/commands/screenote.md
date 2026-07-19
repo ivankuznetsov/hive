@@ -3,7 +3,7 @@ title: hive connect/disconnect screenote
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/connect.rb, lib/hive/commands/disconnect.rb, lib/hive/screenote/
 created: 2026-06-22
-updated: 2026-06-22
+updated: 2026-07-18
 tags: [command, screenote, oauth, mcp]
 ---
 
@@ -54,6 +54,10 @@ message.
 7. Persist `access_token`, `expires_at`, `token_type`, `scope`, `client_id`,
    `issuer`, `mcp_resource`, `base_url`, `project_id`, and optional
    `refresh_token` through `Hive::Screenote::CredentialStore`.
+
+`CredentialStore` uses the shared non-mutating `Hive::StringifyKeys` transform
+before its JSON round trip, so nested credential metadata follows the same
+string-key contract as durable journal and condition payloads.
 
 Under `--json`, connect streams newline-delimited JSON: first an `authorize`
 line (`ok`, `service`, `stage: "authorize"`, `authorize_url`, `browser_opened`)

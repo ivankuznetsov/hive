@@ -99,10 +99,9 @@ module Hive
         end
       end
 
-      # Emit a JSON error envelope on stdout (mirrors the
-      # `Hive::Commands::Approve#emit_error_envelope` pattern) when --json
-      # is on, then raise the typed Hive::Error so bin/hive's rescue path
-      # produces the documented USAGE (64) exit code.
+      # Emit a JSON error envelope on stdout with EnvelopeEmitter's
+      # single-document guard and typed re-raise pattern, while deliberately
+      # retaining this schema's narrower payload (no `error_class`).
       def fail_usage!(message, kind:)
         error = UsageError.new(message, error_kind: kind)
         if @json

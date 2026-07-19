@@ -27,7 +27,8 @@ class WorkflowsController < ApplicationController
       "project" => project.fetch("name"),
       "source" => source,
       "expected" => @preview.slice(
-        "name", "version", "catalog_commit", "source_commit", "manifest_digest"
+        "name", "version", "catalog_commit", "source_commit", "manifest_digest",
+        "configuration_digest"
       )
     )
     load_page(project)
@@ -63,7 +64,8 @@ class WorkflowsController < ApplicationController
       "name" => name,
       "escalation" => @preview.dig("diff", "escalation") == true,
       "expected" => @preview.slice(
-        "from_commit", "from_manifest_digest", "to_commit", "manifest_digest"
+        "from_commit", "from_manifest_digest", "from_configuration_digest",
+        "to_commit", "manifest_digest", "configuration_digest"
       )
     )
     load_page(project)
@@ -99,7 +101,7 @@ class WorkflowsController < ApplicationController
       "operation" => @preview_operation,
       "project" => project.fetch("name"),
       "name" => name,
-      "expected" => @preview.slice("source_commit", "manifest_digest")
+      "expected" => @preview.slice("source_commit", "manifest_digest", "configuration_digest")
     )
     load_page(project)
     render :index, formats: :html, content_type: "text/html"

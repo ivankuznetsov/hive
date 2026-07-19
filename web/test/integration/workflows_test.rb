@@ -30,7 +30,7 @@ class WorkflowsTest < ActionDispatch::IntegrationTest
       {
         "status" => "dry_run", "name" => "docs", "version" => "1.2.0",
         "catalog_commit" => "b" * 40, "source_commit" => "c" * 40,
-        "manifest_digest" => "d" * 64,
+        "manifest_digest" => "d" * 64, "configuration_digest" => "f" * 64,
         "permissions" => {
           "risk" => "low", "capabilities" => [ "filesystem-read" ],
           "network_hosts" => [], "filesystem_read" => %w[repository task],
@@ -49,7 +49,9 @@ class WorkflowsTest < ActionDispatch::IntegrationTest
       {
         "status" => "dry_run", "name" => name,
         "from_commit" => "a" * 40, "from_manifest_digest" => "e" * 64,
+        "from_configuration_digest" => "1" * 64,
         "to_commit" => "c" * 40, "manifest_digest" => "d" * 64,
+        "configuration_digest" => "f" * 64,
         "diff" => {
           "metadata" => { "version" => { "from" => "1.0.0", "to" => "1.1.0" } },
           "files" => { "added" => [ "README.md" ], "removed" => [], "modified" => [ "workflow.yml" ] },
@@ -73,6 +75,7 @@ class WorkflowsTest < ActionDispatch::IntegrationTest
       {
         "status" => "dry_run", "name" => name,
         "source_commit" => "a" * 40, "manifest_digest" => "e" * 64,
+        "configuration_digest" => "1" * 64,
         "retained_commits" => [ "9" * 40 ], "deletable_commits" => [ "a" * 40 ]
       }
     end
@@ -155,6 +158,7 @@ class WorkflowsTest < ActionDispatch::IntegrationTest
     call = @lifecycle.calls.find { |entry| entry.first == :install }
     assert_equal "honeycomb/docs@1.2.0", call[2]
     assert_equal "c" * 40, call[3].fetch("source_commit")
+    assert_equal "f" * 64, call[3].fetch("configuration_digest")
   end
 
   test "security-expanding update requires ordinary and separate escalation consent" do
@@ -180,6 +184,8 @@ class WorkflowsTest < ActionDispatch::IntegrationTest
     call = @lifecycle.calls.find { |entry| entry.first == :update }
     assert_equal true, call[4]
     assert_equal "a" * 40, call[3].fetch("from_commit")
+    assert_equal "1" * 64, call[3].fetch("from_configuration_digest")
+    assert_equal "f" * 64, call[3].fetch("configuration_digest")
   end
 
   test "removal preview discloses retained and deletable generations before consent" do
@@ -195,6 +201,7 @@ class WorkflowsTest < ActionDispatch::IntegrationTest
     assert_redirected_to workflows_path(project: @project)
     call = @lifecycle.calls.find { |entry| entry.first == :remove }
     assert_equal "a" * 40, call[3].fetch("source_commit")
+    assert_equal "1" * 64, call[3].fetch("configuration_digest")
     assert_match "1 task-pinned generation(s) retained", flash[:notice]
   end
 

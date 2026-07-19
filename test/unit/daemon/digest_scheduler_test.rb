@@ -245,6 +245,28 @@ class HiveDaemonDigestSchedulerTest < Minitest::Test
     end
   end
 
+  def test_complete_write_failure_keeps_day_owed_and_backs_off
+    with_tmp_dir do |dir|
+      write_state(dir, "last_digested_date" => "2026-06-12")
+      logger = StubLogger.new
+      scheduler = scheduler(dir, enabled: true, logger: logger)
+      assert_equal "2026-06-13", scheduler.tick(now: T0).first.fetch(:slug)
+
+      scheduler.define_singleton_method(:write_state) do |_data|
+        raise Errno::ENOSPC, "no space left on device"
+      end
+
+      assert_raises(Errno::ENOSPC) do
+        scheduler.complete(date: "2026-06-13", exit_code: 0, now: T0 + 1)
+      end
+
+      assert_equal "2026-06-12", state(dir).fetch("last_digested_date")
+      assert logger.events.any? { |name, _| name == :digest_failure_backoff }
+      assert_empty scheduler.tick(now: T0 + 30)
+      assert_equal "2026-06-13", scheduler.tick(now: T0 + 61).first.fetch(:slug)
+    end
+  end
+
   def test_reconfigure_enables_a_disabled_scheduler_in_place
     with_tmp_dir do |dir|
       write_state(dir, "last_digested_date" => "2026-06-12")

@@ -3,7 +3,7 @@ title: Hive::AgentProfile + Hive::AgentProfiles
 type: module
 source: lib/hive/agent_profile.rb, lib/hive/agent_profiles.rb, lib/hive/agent_profiles/{claude,codex,pi,grok}.rb, lib/hive/agent_skills/
 created: 2026-04-26
-updated: 2026-07-17
+updated: 2026-07-18
 tags: [agent, profile, registry, architecture, skills, provisioning, permissions, honeycomb]
 ---
 
@@ -71,6 +71,12 @@ Auto-required from `lib/hive/agent_profiles.rb`:
 
 For implementation identity, Claude translates normalized values to `--model <model> --effort <effort>` and Codex to `--model <model> -c model_reasoning_effort=<effort>`. Pi and Grok can resolve and optionally pin a concrete provider-native model but declare effort unsupported. An unsupported effort stays visible as requested while native argv omits it and `effective_effort` remains unset.
 
+`Hive::ImplementationIdentity::EventBuilder` owns the durable journal envelope
+shared by first-time identity capture and legacy reconstruction. It binds the
+task, coding workflow/stage, durable attempt, input/ownership generations,
+attempt-lease evidence, provenance, and payload in one place; `Store` retains
+generation/selection policy and `Reconstructor` retains recovery policy.
+
 - `claude` — default skip flag `--dangerously-skip-permissions`, `--add-dir`, `--max-budget-usd`, headless via `-p`, stream-json output with `--verbose`, Claude skill verifier, interim plus terminal usage extraction, and opt-in verified capabilities for `safe_mode` plus the minimal patrol review/fix contexts. Patrol disables slash commands; review exposes `Read,Grep,Glob,Write`, while fix additionally exposes `Bash,Edit`. The profile reserves 20,000 initial-context tokens for patrol admission. Message-start/delta counters support a true in-flight patrol stop. Min version `2.1.118`. `:state_file_marker` mode. `AgentProfile#permission_flags(mode)` is the single source of truth for permission argv, shared by the headless `Hive::Agent` path and the tmux `Hive::ClaudeLauncher#wrapper_command` path: `bypassPermissions` (and a nil mode) yields `--dangerously-skip-permissions`, any other ordinary Claude mode yields `--permission-mode <mode>`.
 - `codex` — `--dangerously-bypass-approvals-and-sandbox`, `--add-dir`, headless via the `exec` subcommand, `--json` output, and a dedicated `workspace_write_flags` bundle (`--sandbox workspace-write`, approval policy `never`, ephemeral execution, and ignored user config/rules) for confined architecture-patrol fixes. Prompts are delivered on stdin with `-` in argv. No native budget flag. Hive consumes usage events when present, but real interim-event coverage remains unverified, so spawn/day quotas and the wall-clock timeout are the provider-independent fallback. Min version `0.125.0`. `:output_file_exists`.
 - `pi` — no permission flag, no `--add-dir` (triggers `warn_isolation_reduced` when callers pass `add_dirs:` per ADR-018), preflight checks for `~/.pi/agent/auth.json`. Min version `0.70.2`. `:output_file_exists`.
@@ -85,14 +91,12 @@ For implementation identity, Claude translates normalized values to `--model <mo
 - `Hive::RefactorPatrol::Fixer` — accepts only a profile with `workspace_write_supported?` and invokes it through the special `workspace-write` permission mode.
 - `Stages::Base.record_usage` — reads each profile's `usage_extractor` output and stores per-spawn rows in `Hive::UsageDB`.
 - `Hive::Config.validate_role_agent_names!` and `validate_reviewers!` — every `agent:` field in `review.{ci,triage,fix,browser_test}` and `review.reviewers[]` must resolve via `AgentProfiles.lookup`.
-- `Hive::WorkflowPackage::RuntimePolicy` — requires tools, directories,
-  commands, domains, settings isolation, MCP isolation, and environment
-  isolation for every managed actor. Claude declares the full set; other
-  shipped/custom profiles currently fail managed admission. The generated
-  `dontAsk` settings, strict empty MCP config, pre-tool hook, sanitized PATH,
-  child environment, and (for Bash) fail-if-unavailable OS sandbox with a
-  domain allowlist/no unsandboxed escape are shared by headless and tmux spawn
-  paths and are recompiled from task-pinned provenance before spawn.
+- `Hive::WorkflowPackage::RuntimePolicy` — legacy packages can still compile
+  their command/domain policy, while current Honeycomb actors resolve their
+  descriptor `permissions:` independently. Explicit `yolo` works on any
+  profile; bounded mappings fail closed unless the profile enforces them.
+  Managed launches isolate the environment, add the immutable package root,
+  and inject only values authorized for the executing stable slot.
 
 ## Managed skill inspection and provisioning
 

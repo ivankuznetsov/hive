@@ -3,7 +3,7 @@ title: hive refactor-patrol
 type: command
 source: lib/hive/commands/refactor_patrol.rb, lib/hive/refactor_patrol/*
 created: 2026-07-02
-updated: 2026-07-16
+updated: 2026-07-19
 tags: [command, refactor-patrol, architecture, json, daemon]
 ---
 
@@ -135,10 +135,28 @@ and launch ceilings stay shared.
 Usage is attributed to the TUI patrol row; absent provider counts are retained
 as unmetered launches and still consume quota. Budget exhaustion is an ordinary
 retryable incomplete result, so discovery checkpoints completed slices and
-actions retain their exact durable receipts rather than starting new work.
-Malformed envelopes, null/scalar items, and schema-invalid records are review
-errors rather than successful zero-result scans. Evidence is also checked
-against the pinned checkout's real, root-confined, 256 KiB-bounded bytes: cited
+actions retain their exact durable receipts rather than starting new work. PR
+discovery bounds each command to the tighter remaining architecture-cycle or
+shared UTC-day launch headroom. It stops after the first failed feature and
+leaves later slices unattempted rather than manufacturing one failure per
+slice. A fully reviewed bounded batch returns clean partial progress: completed
+feature results are checkpointed, `complete` stays false, and the next command
+resumes the untouched suffix without exposing ordinary scheduling as a review
+error. When every reported error is a shared daily token or launch limit,
+including positive daily token headroom too small for the next initial context,
+the daemon backs the job off until the next UTC day instead of retrying it every
+minute.
+The read-only runner accepts either bare JSON or one whole-message `json` code
+fence, normalizes the accepted object into `theses.json`, and retains the exact
+provider response as `final-message.txt` in the feature run directory for
+quality audits. Real PR-mode run directories are durable and include a
+`review-context.json` binding the artifact to its job, analysis SHA, source PR,
+and feature; only an explicit `--dry-run` uses ephemeral scratch space.
+Surrounding prose, malformed
+envelopes, null/scalar items, and
+schema-invalid records remain review errors rather than successful zero-result
+scans. Evidence is also checked against the pinned checkout's real,
+root-confined, 256 KiB-bounded bytes: cited
 files must exist, line anchors must be in range within that inspection window,
 and snippets must occur exactly within it when present. One unverified citation
 makes the thesis inadmissible. Proposal
@@ -211,7 +229,9 @@ in that pass, including cached failures. Reservation never trusts that
 snapshot: it resolves ownership live again, as do manual PR replay, action
 resume, and every external-effect or handoff fence. Full
 authority requires the target's exact registered name and expanded path to
-still exist. Hive resolves live origin host plus `owner/repo` for every enabled
+still exist. Registration evidence is projected from that same normalized
+name/expanded-path representation, so diagnostics and ownership keys cannot
+drift. Hive resolves live origin host plus `owner/repo` for every enabled
 registration and scans every registered project's action ledger, whether
 currently enabled or disabled, for nonterminal remote continuation evidence.
 A durable creation intent, PR URL, issue URL, or review-task path makes that
@@ -421,8 +441,10 @@ mix snapshots, reset trunk, or create an implicit analysis worktree.
 
 ## State and JSON
 
-Legacy state remains under `.hive-state/refactor_patrol/`. V2 uses a separate
-namespace:
+Legacy state remains under `.hive-state/refactor_patrol/`. It shares directory,
+atomic JSON-write, tolerant-read, and run-artifact mechanics with ordinary
+patrol through `Hive::Patrol::BaseStateStore`, while retaining its own namespace
+and thesis schema. V2 uses a separate namespace:
 
 ```text
 .hive-state/refactor_patrol/v2/

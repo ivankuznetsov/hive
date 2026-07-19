@@ -30,6 +30,9 @@ Shared shell for adapter classes. Subclasses set:
 - `name` — derived from `spec["name"]`.
 - `output_path` — `<task_folder>/reviews/<output_basename>-<pass>.md`.
 - `ensure_reviews_dir!` — `FileUtils.mkdir_p(File.dirname(output_path))`.
+- monotonic deadline clamping — preserves an adapter's configured timeout when
+  no outer deadline exists and otherwise caps each spawn to the review stage's
+  remaining whole-second budget.
 
 `Result` (from Base) is a `Data.define(:name, :output_path, :status, :error_message)` with a `#error?` predicate.
 

@@ -165,21 +165,9 @@ module Hive
         end
 
         def clear_and_retry(data)
-          _prefix, project, slug, stage, marker, *rest = split_callback(data, [ 5, 6, 7 ])
-          match_attr, workflow = recovery_tail(rest)
           # Legacy clear_retry: buttons (from messages predating the Autofix
-          # rename) route here. Go through RecoverySequence.build, not
-          # retry_commands directly, so a stale clear_retry on a manual-only
-          # marker (e.g. EXECUTE_STALE) gets the same "open it on a laptop"
-          # refusal the current Autofix paths enforce — rather than blindly
-          # dispatching markers-clear + a retry verb against a state that has
-          # no safe auto-recovery. callback_data carries no attrs, so this
-          # uses the marker-only manual-only check (ALWAYS_MANUAL_MARKERS).
-          RecoverySequence.build(
-            project: project, slug: slug, stage: stage,
-            marker: marker, match_attr: match_attr, workflow: workflow,
-            result_class: @result_class, clear_keyboard: true
-          )
+          # rename) use the current guarded policy verbatim.
+          autofix(data)
         end
 
         def autofix(data)

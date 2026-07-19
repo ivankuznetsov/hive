@@ -1442,7 +1442,7 @@ module Hive
           unless errors.empty? && feature_results.all? { |item| item.fetch("complete") }
             raise InconsistentRecord, "complete refactor patrol payload retains partial feature progress"
           end
-        elsif errors.empty? || feature_results.all? { |item| item.fetch("complete") } || !payload["zero_reason"].nil?
+        elsif !payload["zero_reason"].nil? || feature_results.empty?
           raise InconsistentRecord, "partial refactor patrol payload lacks retryable feature evidence"
         end
       rescue KeyError => e

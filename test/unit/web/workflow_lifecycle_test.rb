@@ -24,6 +24,11 @@ class WebWorkflowLifecycleTest < Minitest::Test
       @resolution
     end
     @lifecycle = Hive::Web::WorkflowLifecycle.new(registry_client_factory: -> { @registry })
+    test_case = self
+    @lifecycle.define_singleton_method(:selected!) do |_project, _name|
+      test_case.instance_variable_get(:@selected_identity) ||
+        raise(Hive::Commands::Workflow::OwnershipError, "managed workflow is not installed")
+    end
   end
 
   def teardown
@@ -89,13 +94,14 @@ class WebWorkflowLifecycleTest < Minitest::Test
       assert_same @registry, called.call.fetch(:kwargs).fetch(:registry_client)
     end
 
-    expected = reviewed.to_h.transform_keys(&:to_s)
+    expected = reviewed.to_h.transform_keys(&:to_s).merge("configuration_digest" => "e" * 64)
     with_command(Hive::Commands::Workflow::Install, { "status" => "installed" }) do |called|
       result = @lifecycle.install(@project, source: "honeycomb/demo@1.0.0", expected: expected)
 
       assert_equal "installed", result.fetch("status")
       options = called.call.fetch(:kwargs)
       assert options.fetch(:yes)
+      assert_equal "e" * 64, options.fetch(:expected_configuration_digest)
       bound_registry = options.fetch(:registry_client)
       assert_same reviewed, bound_registry.fetch("honeycomb/demo@1.0.0", destination: File.join(@root, "install"))
     end
@@ -104,12 +110,18 @@ class WebWorkflowLifecycleTest < Minitest::Test
   def test_update_preview_rechecks_selection_and_apply_passes_both_identities
     current_commit = "a" * 40
     current_digest = "b" * 64
-    write_selection(source_commit: current_commit, manifest_digest: current_digest)
+    current_configuration = "e" * 64
+    @selected_identity = {
+      "source_commit" => current_commit,
+      "manifest_digest" => current_digest,
+      "configuration_digest" => current_configuration
+    }
     payload = { "status" => "update_available", "from_commit" => current_commit }
     with_command(Hive::Commands::Workflow::Update, payload) do |called|
       preview = @lifecycle.preview_update(@project, name: "demo")
 
       assert_equal current_digest, preview.fetch("from_manifest_digest")
+      assert_equal current_configuration, preview.fetch("from_configuration_digest")
       assert called.call.fetch(:kwargs).fetch(:dry_run)
     end
 
@@ -124,8 +136,10 @@ class WebWorkflowLifecycleTest < Minitest::Test
     expected = {
       "from_commit" => current_commit,
       "from_manifest_digest" => current_digest,
+      "from_configuration_digest" => current_configuration,
       "to_commit" => target.source_commit,
-      "manifest_digest" => target.manifest_digest
+      "manifest_digest" => target.manifest_digest,
+      "configuration_digest" => "f" * 64
     }
     with_command(Hive::Commands::Workflow::Update, { "status" => "updated" }) do |called|
       result = @lifecycle.update(@project, name: "demo", expected: expected, allow_escalation: true)
@@ -134,9 +148,14 @@ class WebWorkflowLifecycleTest < Minitest::Test
       options = called.call.fetch(:kwargs)
       assert options.fetch(:allow_escalation)
       assert_equal(
-        { "source_commit" => current_commit, "manifest_digest" => current_digest },
+        {
+          "source_commit" => current_commit,
+          "manifest_digest" => current_digest,
+          "configuration_digest" => current_configuration
+        },
         options.fetch(:expected_current)
       )
+      assert_equal "f" * 64, options.fetch(:expected_configuration_digest)
       assert_same target,
                   options.fetch(:registry_client).fetch("honeycomb/demo", destination: File.join(@root, "update"))
     end
@@ -150,20 +169,28 @@ class WebWorkflowLifecycleTest < Minitest::Test
   def test_remove_preview_and_apply_recheck_the_selected_generation
     current_commit = "a" * 40
     current_digest = "b" * 64
-    write_selection(source_commit: current_commit, manifest_digest: current_digest)
+    @selected_identity = {
+      "source_commit" => current_commit,
+      "manifest_digest" => current_digest,
+      "configuration_digest" => "e" * 64
+    }
 
     with_command(Hive::Commands::Workflow::Remove, { "status" => "dry_run" }) do |called|
       assert_equal "dry_run", @lifecycle.preview_remove(@project, name: "demo").fetch("status")
       assert called.call.fetch(:kwargs).fetch(:dry_run)
     end
 
-    expected = { "source_commit" => current_commit, "manifest_digest" => current_digest }
+    expected = {
+      "source_commit" => current_commit,
+      "manifest_digest" => current_digest,
+      "configuration_digest" => "e" * 64
+    }
     with_command(Hive::Commands::Workflow::Remove, { "status" => "removed" }) do |called|
       assert_equal "removed", @lifecycle.remove(@project, name: "demo", expected: expected).fetch("status")
       assert_equal expected, called.call.fetch(:kwargs).fetch(:expected_current)
     end
 
-    FileUtils.rm_f(File.join(@state, "workflows", "demo", Hive::WorkflowPackage::ManagedStore::LOCK_FILE))
+    @selected_identity = nil
     error = assert_raises(Hive::Commands::Workflow::OwnershipError) do
       @lifecycle.preview_update(@project, name: "demo")
     end
@@ -192,20 +219,5 @@ class WebWorkflowLifecycleTest < Minitest::Test
 
   def use_resolution(value)
     @registry.instance_variable_set(:@resolution, value)
-  end
-
-  def write_selection(source_commit:, manifest_digest:)
-    path = File.join(@state, "workflows", "demo", Hive::WorkflowPackage::ManagedStore::LOCK_FILE)
-    FileUtils.mkdir_p(File.dirname(path))
-    File.write(path, JSON.generate({
-      "schema_version" => 1,
-      "name" => "demo",
-      "version" => "1.0.0",
-      "catalog_commit" => "c" * 40,
-      "source_commit" => source_commit,
-      "manifest_digest" => manifest_digest,
-      "summary" => "Demo",
-      "permissions" => {}
-    }))
   end
 end

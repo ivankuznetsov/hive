@@ -1,6 +1,7 @@
 require "digest"
 require "hive/conditions/generation_tracker"
 require "hive/git_ops"
+require "hive/stringify_keys"
 require "hive/task_journal"
 require "hive/task_projection/store"
 
@@ -249,7 +250,7 @@ module Hive
         end
 
         def already_recorded?(records, observation)
-          normalized = stringify(observation)
+          normalized = Hive::StringifyKeys.call(observation)
           records.any? do |record|
             record["event_type"] == normalized["event_type"] &&
               record["attempt_id"] == normalized["attempt_id"] &&
@@ -258,14 +259,6 @@ module Hive
               record["reason"] == normalized["reason"] &&
               record["evidence"] == normalized["evidence"] &&
               record["payload"] == normalized["payload"]
-          end
-        end
-
-        def stringify(value)
-          case value
-          when Hash then value.to_h { |key, child| [ key.to_s, stringify(child) ] }
-          when Array then value.map { |child| stringify(child) }
-          else value
           end
         end
 

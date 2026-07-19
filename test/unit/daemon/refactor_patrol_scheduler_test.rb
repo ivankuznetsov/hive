@@ -539,6 +539,71 @@ class HiveDaemonRefactorPatrolSchedulerTest < Minitest::Test
     end
   end
 
+  def test_clean_bounded_progress_retries_without_a_review_error
+    with_project do |_dir, entry, store|
+      enqueue(store)
+      scheduler = scheduler(entry, store)
+      dispatch = scheduler.reserve(scheduler.candidates(now: T0).first, now: T0)
+      scheduler.spawned(dispatch, pid: 1234, process_start_time: "boot", pgid: 1234, now: T0 + 1)
+      partial = complete_zero_envelope(entry).merge(
+        "complete" => false,
+        "review_errors" => [],
+        "feature_results" => [
+          { "feature_id" => "checkout", "complete" => true, "thesis_ids" => [], "errors" => [] }
+        ],
+        "zero_reason" => nil
+      )
+
+      result = scheduler.complete(
+        dispatch_token: dispatch.fetch(:dispatch_token), exit_code: 0,
+        envelope: partial, now: T0 + 2
+      )
+
+      assert_equal :retry, result.fetch(:status)
+      aggregate = store.read_job("job-7")
+      assert_equal [ "checkout" ], aggregate.fetch("feature_results").map { |item| item.fetch("feature_id") }
+      assert_empty aggregate.fetch("review_errors")
+      assert_empty scheduler.candidates(now: T0 + 61)
+      assert_equal [ "job-7" ], scheduler.candidates(now: T0 + 62).map { |item| item.fetch(:job_id) }
+    end
+  end
+
+  def test_daily_patrol_quota_exhaustion_backs_off_until_next_utc_day
+    %w[daily_agent_spawn_limit daily_token_headroom].each do |reason|
+      with_project do |_dir, entry, store|
+        enqueue(store)
+        scheduler = scheduler(entry, store)
+        dispatch = scheduler.reserve(scheduler.candidates(now: T0).first, now: T0)
+        scheduler.spawned(dispatch, pid: 1234, process_start_time: "boot", pgid: 1234, now: T0 + 1)
+        error = {
+          "feature_id" => "checkout", "error" => "agent_failed", "message" => "daily quota exhausted",
+          "details" => {
+            "resource_exhaustion" => {
+              "reason" => reason, "limit" => 8, "observed" => 8
+            }
+          }
+        }
+        partial = complete_zero_envelope(entry).merge(
+          "complete" => false,
+          "review_errors" => [ error ],
+          "feature_results" => [
+            { "feature_id" => "checkout", "complete" => false, "thesis_ids" => [], "errors" => [ error ] }
+          ],
+          "zero_reason" => nil
+        )
+
+        result = scheduler.complete(
+          dispatch_token: dispatch.fetch(:dispatch_token), exit_code: 0,
+          envelope: partial, now: T0 + 2
+        )
+
+        assert_equal :retry, result.fetch(:status), reason
+        assert_empty scheduler.candidates(now: Time.utc(2026, 7, 10, 23, 59, 59)), reason
+        assert_equal [ "job-7" ], scheduler.candidates(now: Time.utc(2026, 7, 11)).map { |item| item.fetch(:job_id) }, reason
+      end
+    end
+  end
+
   def test_dry_run_leaves_authoritative_job_bytes_unchanged
     with_project do |dir, entry, store|
       enqueue(store)

@@ -211,7 +211,9 @@ in that pass, including cached failures. Reservation never trusts that
 snapshot: it resolves ownership live again, as do manual PR replay, action
 resume, and every external-effect or handoff fence. Full
 authority requires the target's exact registered name and expanded path to
-still exist. Hive resolves live origin host plus `owner/repo` for every enabled
+still exist. Registration evidence is projected from that same normalized
+name/expanded-path representation, so diagnostics and ownership keys cannot
+drift. Hive resolves live origin host plus `owner/repo` for every enabled
 registration and scans every registered project's action ledger, whether
 currently enabled or disabled, for nonterminal remote continuation evidence.
 A durable creation intent, PR URL, issue URL, or review-task path makes that

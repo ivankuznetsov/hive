@@ -532,5 +532,11 @@ meaningful `invert-usage-error-contract-ownership` thesis above the configured
 multi-feature scope, and file/diff limits. Durable architecture review run
 directories still have no automatic retention policy, so long-running
 installations should monitor `.hive-state/refactor_patrol/runs/` growth. Retain
-this gap only until the installed v0.6.4 package repeats both patrol modes
-without dirty-checkout, quota-churn, or response-envelope errors.
+Installed v0.6.4 dogfood then exposed a separate ordinary-patrol wire-contract
+gap: reviewers returned meaningful source evidence as multiline excerpts or
+annotated paraphrases, while the validator requires every snippet to be an
+exact substring of one claimed source line and therefore rejected the complete
+finding. v0.6.5 aligns the reviewer prompt with that existing fail-closed
+validator. Retain this gap until the installed v0.6.5 package opens meaningful
+ordinary and Architecture Patrol PRs without dirty-checkout, quota-churn,
+response-envelope, or evidence-contract errors.

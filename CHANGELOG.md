@@ -2,6 +2,13 @@
 
 All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with user-facing bullets and, for notable releases, descriptive subsections — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
+## 0.6.5
+
+- Fixed ordinary patrol discarding source-backed findings when reviewers used
+  multiline excerpts, ellipses, or annotations for evidence snippets. The
+  reviewer prompt now states the validator's exact single-line substring
+  contract without weakening its fail-closed source verification.
+
 ## 0.6.4
 
 - Fixed hivebox occasionally retaining a successfully submitted idea in its

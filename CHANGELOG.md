@@ -2,6 +2,21 @@
 
 All notable changes are documented here, newest first. Hive ships frequent micro-releases (see [docs/RELEASING.md](docs/RELEASING.md#versioning-policy)): each `vX.Y.Z` git tag gets a `## X.Y.Z` section with user-facing bullets and, for notable releases, descriptive subsections — no `[Unreleased]` accumulator. Versioning is [SemVer](https://semver.org): PATCH for fixes and small changes (the common case), MINOR for notable features, MAJOR for milestones.
 
+## 0.6.2
+
+- Fixed ordinary patrol exhausting its launch allowance without advancing past
+  source-verified clean features. Review batches now fit the remaining launch
+  headroom, preserve clean-prefix progress, and keep one fixer launch available
+  when the quota permits it.
+- Fixed Architecture Patrol depending on the registered developer checkout.
+  Discovery and retry now use a detached exact worktree pinned to committed
+  default-branch source, so local branches and uncommitted edits cannot block or
+  contaminate analysis.
+- Fixed Architecture Patrol quota churn and lost reviewer evidence. Bounded
+  runs stop after the first failed slice, back off until the next UTC budget
+  window when daily headroom is exhausted, accept a strict whole-message JSON
+  fence, and retain raw reviewer responses with their job context.
+
 ## 0.6.1
 
 - Fixed Honeycomb installation defaults for scoped workflow actors. When a

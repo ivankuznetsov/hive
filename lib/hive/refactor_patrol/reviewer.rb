@@ -32,13 +32,14 @@ module Hive
 
       def initialize(project_root, cfg:, state: StateStore.new(project_root), agent_runner: nil, dry_run: false,
                      source_pr: nil, read_only: false, monotonic_clock: nil,
-                     token_budget: nil)
+                     token_budget: nil, audit_context: nil)
         @project_root = File.expand_path(project_root)
         @cfg = cfg
         @state = state
         @dry_run = dry_run
         @source_pr = source_pr
         @read_only = read_only
+        @audit_context = audit_context
         @monotonic_clock = monotonic_clock || -> { Process.clock_gettime(Process::CLOCK_MONOTONIC) }
         @agent_runner = agent_runner ||
                         ReviewAgentRunner.new(
@@ -98,6 +99,7 @@ module Hive
           @feature_results << result
           yield feature, feature_theses, result if block_given?
           theses.concat(feature_theses)
+          break if errors.any?
         end
         theses
       end
@@ -108,6 +110,7 @@ module Hive
         # In dry-run mode we must not create durable artifacts under
         # .hive-state/refactor_patrol/; scratch the agent output in a temp dir.
         run_dir = @dry_run ? Dir.mktmpdir("refactor-patrol-review") : @state.run_dir("review")
+        write_audit_context(run_dir, feature)
         output_path = File.join(run_dir, "theses.json")
         prompt = render_prompt(feature, leverage, output_path, max_theses: max_theses)
         result = @agent_runner.call(
@@ -128,6 +131,15 @@ module Hive
         record_feature_error(feature, "review_error", "#{e.class}: #{e.message}")
       ensure
         FileUtils.remove_entry(run_dir) if @dry_run && run_dir && File.directory?(run_dir)
+      end
+
+      def write_audit_context(run_dir, feature)
+        return if @dry_run || !@audit_context
+
+        @state.write_json(
+          File.join(run_dir, "review-context.json"),
+          @audit_context.merge("feature_id" => feature.id.to_s, "feature_kind" => feature.kind.to_s)
+        )
       end
 
       def render_prompt(feature, leverage, output_path, max_theses:)

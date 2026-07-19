@@ -876,6 +876,74 @@ class RefactorPatrolCommandTest < Minitest::Test
     end
   end
 
+  def test_pr_mode_bounds_each_review_batch_to_available_architecture_launches
+    with_refactor_patrol_project do |repo|
+      head = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      features = 8.times.map { |index| feature("slice-#{index}") }
+      reviewer = FakeReviewer.new({})
+      scores = features.to_h { |item| [ item.id, { "score" => 0.9 } ] }
+
+      out, err, status = with_captured_exit do
+        command_for(
+          dry_run: true,
+          pr: "7",
+          manifest_resolver: FakeManifestResolver.new(
+            pr_manifest(merge_sha: head, changed_paths: features.flat_map(&:owned_files))
+          ),
+          features: features,
+          reviewer: reviewer,
+          leverage_scores: scores
+        ).call
+      end
+
+      assert_equal Hive::ExitCodes::SUCCESS, status, "#{out}\n#{err}"
+      payload = JSON.parse(out)
+      assert_equal features.first(6).map(&:id), reviewer.seen_feature_ids
+      refute payload.fetch("complete")
+      assert_equal 6, payload.fetch("features_mapped")
+      assert_equal features.first(6).map(&:id), payload.fetch("feature_results").map { |item| item.fetch("feature_id") }
+      assert_empty payload.fetch("review_errors")
+
+      zero_capacity = Object.new
+      zero_capacity.define_singleton_method(:remaining_launches) { |stage:| 0 }
+      bounded = Hive::Commands::RefactorPatrol.new("demo", pr: "7")
+      assert_equal [ features.first ], bounded.send(:bounded_review_features, features, zero_capacity)
+    end
+  end
+
+  def test_real_pr_mode_keeps_review_runs_durable_while_explicit_dry_run_stays_ephemeral
+    state = Hive::RefactorPatrol::StateStore.new("/repo")
+    budget = Object.new
+    captured = []
+    manifest = pr_manifest
+
+    with_replaced_singleton_method(
+      Hive::RefactorPatrol::Reviewer,
+      :new,
+      lambda do |*args, **kwargs|
+        captured << [ args, kwargs ]
+        :reviewer
+      end
+    ) do
+      real = Hive::Commands::RefactorPatrol.new("demo", json: true, pr: "7")
+      preview = Hive::Commands::RefactorPatrol.new("demo", json: true, pr: "7", dry_run: true)
+      real.instance_variable_set(:@manifest, manifest)
+      preview.instance_variable_set(:@manifest, manifest)
+      real.instance_variable_set(:@checkout_snapshot, { "analysis_sha" => "head" })
+      preview.instance_variable_set(:@checkout_snapshot, { "analysis_sha" => "head" })
+
+      assert_equal :reviewer, real.send(:build_reviewer, "/repo", Hive::Config::DEFAULTS, state, budget)
+      assert_equal :reviewer, preview.send(:build_reviewer, "/repo", Hive::Config::DEFAULTS, state, budget)
+    end
+
+    assert_equal false, captured.fetch(0).last.fetch(:dry_run)
+    assert_equal true, captured.fetch(0).last.fetch(:read_only)
+    assert_equal manifest.fetch("job_id"), captured.fetch(0).last.dig(:audit_context, "job_id")
+    assert_equal "head", captured.fetch(0).last.dig(:audit_context, "analysis_sha")
+    assert_equal true, captured.fetch(1).last.fetch(:dry_run)
+    assert_equal true, captured.fetch(1).last.fetch(:read_only)
+  end
+
   def test_pr_mode_rejects_legacy_scope_flags_and_emits_v2_error
     with_refactor_patrol_project do
       out, _err, status = with_captured_exit do
@@ -1347,7 +1415,7 @@ class RefactorPatrolCommandTest < Minitest::Test
     results = command.send(
       :merged_feature_results, {}, missing, [ feature("search") ], []
     )
-    assert_equal "missing_feature_result", results.fetch(0).dig("errors", 0, "error")
+    assert_empty results
   end
 
   def test_v2_payload_error_fallbacks_and_nonterminal_zero_reason

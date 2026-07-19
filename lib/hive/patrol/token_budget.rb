@@ -54,10 +54,10 @@ module Hive
           return false
         end
 
-        available_tokens = available_tokens(activity, stage)
+        available_tokens, headroom_reason = token_headroom(activity, stage)
         if minimum_tokens > available_tokens
           @last_exhaustion = exhaustion(
-            "insufficient_launch_headroom", activity, stage
+            headroom_reason, activity, stage
           ).merge(required_tokens: minimum_tokens, available_tokens: available_tokens)
           release_launch_lock
           return false
@@ -82,6 +82,29 @@ module Hive
           "#{detail.fetch(:today_spawns)}/#{detail.fetch(:max_agent_spawns_per_day)} today)"
       end
 
+      # Review envelopes expose a compact, provider-neutral limit tuple so
+      # schedulers can distinguish a daily stop from a retryable agent error.
+      def resource_exhaustion
+        detail = @last_exhaustion
+        return nil unless detail
+
+        limit, observed = case detail.fetch(:reason)
+        when "daily_token_limit"
+          [ detail.fetch(:max_tokens_per_day), detail.fetch(:today_tokens) ]
+        when "cycle_token_limit"
+          [ detail.fetch(:max_tokens_per_cycle), detail.fetch(:cycle_tokens) ]
+        when "daily_agent_spawn_limit"
+          [ detail.fetch(:max_agent_spawns_per_day), detail.fetch(:today_spawns) ]
+        when "cycle_agent_spawn_limit"
+          [ detail.fetch(:max_agent_spawns_per_cycle), detail.fetch(:cycle_spawns) ]
+        when "insufficient_launch_headroom", "daily_token_headroom"
+          [ detail.fetch(:available_tokens), detail.fetch(:required_tokens) ]
+        else
+          [ 1, 1 ]
+        end
+        { reason: detail.fetch(:reason), limit: limit.to_i, observed: observed.to_i }
+      end
+
       # Agent CLIs call this limit USD, but on subscription-backed providers it
       # is a budget-equivalent runaway guard rather than an additional charge.
       def max_budget_usd(configured, stage: "patrol")
@@ -96,6 +119,18 @@ module Hive
       def max_tokens(stage: "patrol")
         activity = today_activity
         available_tokens(activity, stage)
+      end
+
+      # Batch planners use the same durable daily accounting and in-process
+      # cycle counter as acquire so they do not reserve capacity that has
+      # already been consumed by an earlier patrol cycle.
+      def remaining_launches(stage: "patrol")
+        activity = today_activity
+        return 0 if @usage_store_failed || activity.fetch(:available) == false
+
+        cycle_remaining = effective_limit("max_agent_spawns_per_cycle", stage) - @cycle_spawns
+        daily_remaining = @limits.fetch("max_agent_spawns_per_day") - activity.fetch(:agent_spawns)
+        [ [ cycle_remaining, daily_remaining ].min, 0 ].max
       end
 
       def record!(result:, profile:, stage:, started_at:)
@@ -209,10 +244,17 @@ module Hive
       end
 
       def available_tokens(activity, stage)
+        token_headroom(activity, stage).first
+      end
+
+      def token_headroom(activity, stage)
         per_agent = effective_limit("max_tokens_per_agent", stage)
         cycle_remaining = effective_limit("max_tokens_per_cycle", stage) - @cycle_tokens
         daily_remaining = @limits.fetch("max_tokens_per_day") - activity.fetch(:tokens)
-        [ per_agent, cycle_remaining, daily_remaining ].min
+        available = [ per_agent, cycle_remaining, daily_remaining ].min
+        reason = daily_remaining <= per_agent && daily_remaining <= cycle_remaining ?
+          "daily_token_headroom" : "insufficient_launch_headroom"
+        [ available, reason ]
       end
 
       def exhaustion(reason, activity, stage)

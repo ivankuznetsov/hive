@@ -1900,6 +1900,10 @@ class RefactorPatrolJobStoreTest < Minitest::Test
       invalid_payloads << valid.merge("review_errors" => [ retry_error ], "feature_results" => [ incomplete ])
       invalid_payloads << valid.merge("review_errors" => [ retry_error ])
       invalid_payloads << valid.merge(
+        "complete" => false, "features_mapped" => 0, "zero_reason" => nil,
+        "review_errors" => [], "feature_results" => []
+      )
+      clean_partial = valid.merge(
         "complete" => false, "zero_reason" => nil, "review_errors" => [],
         "feature_results" => valid.fetch("feature_results")
       )
@@ -1908,6 +1912,7 @@ class RefactorPatrolJobStoreTest < Minitest::Test
           store.send(:assert_matching_discovery_payload!, aggregate, payload)
         end
       end
+      store.send(:assert_matching_discovery_payload!, aggregate, clean_partial)
       assert_raises(Hive::RefactorPatrol::JobStore::InconsistentRecord) do
         store.send(:assert_matching_discovery_payload!, aggregate, valid, intermediate: true)
       end

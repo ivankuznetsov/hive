@@ -3,7 +3,7 @@ title: Hive::Patrol
 type: module
 source: lib/hive/patrol/
 created: 2026-05-28
-updated: 2026-07-18
+updated: 2026-07-19
 tags: [module, patrol, review, worktree, pr, codex]
 ---
 
@@ -98,9 +98,19 @@ Operators normally configure scheduling through `patrol.mode`, which [[modules/c
 Each patrol launch also needs enough remaining allowance for its profile's
 provider-owned initial context reserve plus the rendered prompt bytes. If not,
 `TokenBudget#acquire` returns `insufficient_launch_headroom` without spawning
-or consuming another subscription-backed request. This admission check covers
+or consuming another subscription-backed request. It returns the more specific
+`daily_token_headroom` when the shared UTC-day remainder is the binding limit,
+allowing architecture patrol scheduling to sleep until the next UTC window.
+This admission check covers
 ordinary and architecture review/fix launches; architecture's 2x multiplier
 still cannot bypass the shared daily project cap.
+
+Ordinary review batching also accounts for that shared launch envelope before
+agents start. It selects no more features than the tighter remaining cycle or
+UTC-day quota can launch and, except when at most one launch remains or during a
+dry run, leaves one launch for a fixer. When a later review fails, the SHA-bound
+cursor advances past only the proven-clean prefix; the failed feature and
+remaining suffix stay pinned for retry.
 
 `Hive::Daemon::PatrolScheduler` still consumes the lower-level `patrol.trigger` modes. `continuous` dispatches when either the default branch SHA changed or `poll_interval_sec` has elapsed, allowing patrol to keep reviewing existing feature slices between infrequent merges. Each cycle persists a SHA-bound feature cursor; `last_scanned_sha` advances only after the full mapped sweep succeeds. `new_commits` therefore keeps dispatching successive batches until that sweep completes. `timer` dispatches solely from `last_run_at` age.
 

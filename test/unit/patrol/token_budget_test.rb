@@ -56,6 +56,10 @@ class PatrolTokenBudgetTest < Minitest::Test
 
       refute budget.acquire
       assert_equal "cycle_token_limit", budget.last_exhaustion.fetch(:reason)
+      assert_equal(
+        { reason: "cycle_token_limit", limit: 100, observed: 100 },
+        budget.resource_exhaustion
+      )
       assert_match(/cycle=100\/100 tokens/, budget.exhaustion_message)
     end
   end
@@ -67,6 +71,10 @@ class PatrolTokenBudgetTest < Minitest::Test
 
       refute budget.acquire
       assert_equal "cycle_agent_spawn_limit", budget.last_exhaustion.fetch(:reason)
+      assert_equal(
+        { reason: "cycle_agent_spawn_limit", limit: 1, observed: 1 },
+        budget.resource_exhaustion
+      )
       activity = Hive::UsageDb.patrol_activity(
         scope: { project_slug: File.basename(dir) }, now: now
       )
@@ -84,6 +92,50 @@ class PatrolTokenBudgetTest < Minitest::Test
       )
       refute next_cycle.acquire
       assert_equal "daily_agent_spawn_limit", next_cycle.last_exhaustion.fetch(:reason)
+      assert_equal(
+        { reason: "daily_agent_spawn_limit", limit: 1, observed: 1 },
+        next_cycle.resource_exhaustion
+      )
+    end
+  end
+
+  def test_resource_exhaustion_reports_insufficient_token_headroom
+    with_budget do |budget|
+      refute budget.acquire(stage: "patrol-review", minimum_tokens: 61)
+      assert_equal(
+        { reason: "insufficient_launch_headroom", limit: 60, observed: 61 },
+        budget.resource_exhaustion
+      )
+    end
+  end
+
+  def test_resource_exhaustion_identifies_daily_token_headroom
+    limits = config(
+      max_tokens_per_cycle: 300, max_tokens_per_day: 200,
+      max_tokens_per_agent: 100
+    )
+    with_budget(limits) do |budget, dir, now|
+      assert budget.acquire(stage: "patrol-review")
+      record(budget, now, { input: 170, output: 0, cached: 0 })
+
+      next_cycle = Hive::Patrol::TokenBudget.new(dir, cfg: limits, clock: -> { now })
+      refute next_cycle.acquire(stage: "patrol-review", minimum_tokens: 40)
+      assert_equal "daily_token_headroom", next_cycle.last_exhaustion.fetch(:reason)
+      assert_equal(
+        { reason: "daily_token_headroom", limit: 30, observed: 40 },
+        next_cycle.resource_exhaustion
+      )
+    end
+  end
+
+  def test_remaining_launches_uses_the_tighter_cycle_or_daily_headroom
+    with_budget(config(max_agent_spawns_per_cycle: 3, max_agent_spawns_per_day: 2)) do |budget, _dir, now|
+      assert_equal 2, budget.remaining_launches
+
+      assert budget.acquire(stage: "patrol-review")
+      record(budget, now, { input: 1, output: 0, cached: 0 })
+
+      assert_equal 1, budget.remaining_launches
     end
   end
 
@@ -96,6 +148,10 @@ class PatrolTokenBudgetTest < Minitest::Test
       assert budget.acquire(stage: "patrol-review")
       refute concurrent.acquire(stage: "refactor-patrol-review")
       assert_equal "agent_in_flight", concurrent.last_exhaustion.fetch(:reason)
+      assert_equal(
+        { reason: "agent_in_flight", limit: 1, observed: 1 },
+        concurrent.resource_exhaustion
+      )
 
       record(budget, now, { input: 40, output: 0, cached: 0 })
       assert concurrent.acquire(stage: "refactor-patrol-review")
@@ -144,7 +200,7 @@ class PatrolTokenBudgetTest < Minitest::Test
       record(budget, now, { input: 70, output: 0, cached: 0 })
 
       refute budget.acquire(stage: "patrol-review", minimum_tokens: 40)
-      assert_equal "insufficient_launch_headroom", budget.last_exhaustion.fetch(:reason)
+      assert_equal "daily_token_headroom", budget.last_exhaustion.fetch(:reason)
       assert_equal 40, budget.last_exhaustion.fetch(:required_tokens)
       assert_equal 30, budget.last_exhaustion.fetch(:available_tokens)
       assert_match(/required=40 tokens, available=30/, budget.exhaustion_message)
@@ -183,6 +239,10 @@ class PatrolTokenBudgetTest < Minitest::Test
 
       refute budget.acquire(stage: "refactor-patrol-review")
       assert_equal "daily_token_limit", budget.last_exhaustion.fetch(:reason)
+      assert_equal(
+        { reason: "daily_token_limit", limit: 150, observed: 150 },
+        budget.resource_exhaustion
+      )
     end
 
     with_budget(config(max_agent_spawns_per_cycle: 1, max_agent_spawns_per_day: 2)) do |budget, _dir, now|

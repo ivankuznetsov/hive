@@ -517,3 +517,25 @@ promotion is deliberately explicit/manual.
 ## Pi/Grok concrete-default config discovery needs live drift monitoring (2026-07-17)
 
 Implementation ownership resolves pi from project/home `settings.json` and Grok from project/home `settings.json` or top-level `config.toml`, extracting only provider/model identifiers. Deterministic tests cover those current shapes and ensure PR opening remains unpinned, but neither CLI publishes a Hive-stable config schema. A future upstream path/key change will intentionally fail before execute capture rather than serialize `default` or route to another provider. The next verified CLI upgrade should re-check these read-only paths and update the headless matrix plus fixtures if native configuration moved.
+
+## Patrol quota-progress fixes need post-release dogfood (2026-07-19)
+
+A live medium ordinary-patrol run exposed that the configured 12-feature batch
+could consume its three-launch cycle envelope, report the remaining features as
+errors, and leave the cursor at zero. Live architecture jobs then exposed the
+same exhausted shared 8-launch UTC-day ceiling as one synthetic failure for
+every remaining feature and retried it every minute without starting another
+provider process. An earlier live architecture run also produced a single
+fenced JSON final response that strict parsing rejected, while the ephemeral
+PR-mode run directory removed the raw response before quality review. Focused
+unit and integration tests now pin launch-aware batching, one reserved ordinary
+fixer launch, clean-prefix cursor progress, one-error architecture stops,
+next-UTC-day scheduler backoff, whole-message fence handling, and durable raw
+response retention with job/PR/feature identity. Durable architecture review
+run directories do not yet have an automatic retention policy, so long-running
+installations should monitor `.hive-state/refactor_patrol/runs/` growth. A
+release containing these changes has not yet repeated
+both real runs because the project's shared UTC-day patrol launch quota was
+already exhausted; retain this gap until post-release ordinary and architecture
+dogfood confirms forward progress, no quota churn, and inspectable accepted
+output.

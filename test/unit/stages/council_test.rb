@@ -520,6 +520,29 @@ class StagesCouncilTest < Minitest::Test
     assert_equal "paused", Hive::Stages::Council.action_for(:paused)
   end
 
+  def test_managed_council_children_require_mapped_agents_and_wrap_revise_prompts
+    stage = Hive::Workflow::Stage.new(
+      name: "review", index: 1, state_file: "review.md", kind: :council
+    )
+    task = Object.new
+    task.define_singleton_method(:managed_workflow?) { true }
+    task.define_singleton_method(:managed_prompt) { |slot, body| "#{slot}:#{body}" }
+
+    reviewer = Hive::Workflow::Reviewer.new(name: "missing", prompt: "Review", permissions: "read-only")
+    reviewer_runner = Hive::Stages::Council::Reviewer.new(
+      task: task, cfg: {}, stage: stage, reviewer: reviewer, round: 1, target_path: "/tmp/draft.md"
+    )
+    assert_raises(Hive::ConfigError) { reviewer_runner.send(:launch_identity) }
+
+    revise = Hive::Workflow::Revise.new(prompt: "Revise", permissions: "read-only")
+    revise_runner = Hive::Stages::Council::Revise.new(
+      task: task, cfg: {}, stage: stage, revise: revise, round: 1,
+      target_path: "/tmp/draft.md", triage_path: "/tmp/triage.md"
+    )
+    assert_raises(Hive::ConfigError) { revise_runner.send(:launch_identity) }
+    assert_equal "stages.review.revise:body", revise_runner.send(:managed_prompt, "body")
+  end
+
   private
 
     def with_failing_spawn

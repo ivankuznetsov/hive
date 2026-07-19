@@ -28,11 +28,14 @@ class HoneycombWorkflowLifecycleTest < Minitest::Test
         ).call!
         assert_equal "installed", install.fetch("status")
 
-        task = write_pinned_task(project, old)
+        task = write_pinned_task(
+          project, old, configuration_digest: install.fetch("configuration_digest")
+        )
         managed_task = Hive::Task.new(task)
         prompt_assets = managed_task.managed_runtime_context("stages.work").fetch(:prompt_assets)
         assert_equal [ "rubric.md" ], prompt_assets.map { |path| File.basename(path) }
         assert_includes managed_task.managed_prompt_preamble("stages.work"), prompt_assets.fetch(0)
+        assert_includes managed_task.managed_prompt_preamble("stages.work"), "GSC_INPUT=unavailable"
         current = Hive::WorkflowPackage::ManagedStore.new(File.join(project, ".hive-state"))
         before = selected_state(current)
         candidate = publish_version(registry, versions, "1.1.0", "Inspect the task and report clearly.\n")
@@ -254,14 +257,15 @@ class HoneycombWorkflowLifecycleTest < Minitest::Test
     end
   end
 
-  def write_pinned_task(project, version)
+  def write_pinned_task(project, version, configuration_digest: nil)
     task = File.join(project, ".hive-state", "stages", "1-inbox", "old-task-260715-aaaa")
     FileUtils.mkdir_p(task)
     File.write(File.join(task, "idea.md"), "Original task\n")
     Hive::TaskMeta.write(
       task, id: 1, slug: File.basename(task), display_name: nil, workflow: "demo",
       workflow_commit: version.fetch(:source_commit),
-      workflow_manifest_digest: version.fetch(:manifest_digest)
+      workflow_manifest_digest: version.fetch(:manifest_digest),
+      workflow_configuration_digest: configuration_digest
     )
     task
   end

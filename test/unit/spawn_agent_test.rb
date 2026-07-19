@@ -654,6 +654,19 @@ class SpawnAgentTest < Minitest::Test
     end
   end
 
+  def test_managed_permission_scope_requires_an_exact_actor_policy
+    task = Object.new
+    task.define_singleton_method(:managed_workflow?) { true }
+    task.define_singleton_method(:folder) { Dir.tmpdir }
+
+    error = assert_raises(Hive::ConfigError) do
+      Hive::Stages::Base.stage_permission_scope(
+        {}, "work", task, Hive::AgentProfiles.lookup(:claude), managed_slot: "stages.work"
+      )
+    end
+    assert_match(/missing exact permissions/, error.message)
+  end
+
   def test_stage_permission_scope_yolo_preserves_tmux_builtin_allowlist
     with_tmp_dir do |dir|
       task = make_task(dir, "3-plan")

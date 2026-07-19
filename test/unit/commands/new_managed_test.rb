@@ -41,6 +41,20 @@ class NewManagedWorkflowTest < Minitest::Test
     end
   end
 
+  def test_managed_task_creation_reports_an_unreadable_project_config
+    with_tmp_dir do |project|
+      hive_state = File.join(project, ".hive-state")
+      FileUtils.mkdir_p(hive_state)
+      File.write(File.join(hive_state, "config.yml"), "not: [valid")
+      command = Hive::Commands::New.new("project", "idea")
+
+      error = assert_raises(Hive::Commands::New::ProjectConfigUnreadable) do
+        command.send(:managed_project_config, { "path" => project, "hive_state_path" => hive_state })
+      end
+      assert_includes error.message, File.join(hive_state, "config.yml")
+    end
+  end
+
   private
 
   def write_package(root, commit)

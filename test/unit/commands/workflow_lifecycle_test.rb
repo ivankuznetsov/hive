@@ -91,6 +91,78 @@ class WorkflowLifecycleCommandsTest < Minitest::Test
     end
   end
 
+  def test_interactive_high_risk_install_can_decline_escalation_after_policy_disclosure
+    with_project_and_package(permission_spec: "yolo") do |project, package, resolution|
+      output = StringIO.new
+      payload = Hive::Commands::Workflow::Install.new(
+        "honeycomb/demo", project_root: project, json: false,
+        stdin: TTYInput.new("yes\nno\n"), stdout: output,
+        mapping_overrides: [ "stages.work=claude" ],
+        registry_client: stub_client(package, resolution), committer: ->(*) { }
+      ).call!
+
+      assert_equal "cancelled", payload.fetch("status")
+      assert_includes output.string, "map: stages.work -> claude"
+      assert_includes output.string, "Allow high-risk execution?"
+      assert_includes output.string, "high-risk install cancelled"
+    end
+  end
+
+  def test_malformed_mapping_override_is_rejected
+    with_project_and_package do |project, package, resolution|
+      error = assert_raises(Hive::ConfigError) do
+        Hive::Commands::Workflow::Install.new(
+          "honeycomb/demo", project_root: project, json: true, dry_run: true,
+          mapping_overrides: [ "stages.work=codex,unknown=value" ],
+          stdout: StringIO.new, registry_client: stub_client(package, resolution), committer: ->(*) { }
+        ).call!
+      end
+      assert_match(/malformed/, error.message)
+    end
+  end
+
+  def test_configuration_reconciliation_requires_explicit_contract_and_profile_reconfirmation
+    with_project_and_package do |_project, package, resolution|
+      validated = Hive::WorkflowPackage::Validator.validate!(
+        package, expected_name: resolution.name, expected_manifest_digest: resolution.manifest_digest
+      )
+      generation = {
+        "name" => resolution.name,
+        "source_commit" => resolution.source_commit,
+        "manifest_digest" => resolution.manifest_digest
+      }
+      previous = Hive::WorkflowPackage::Configuration.build(validated.workflow, generation: generation)
+      changed = Hive::Workflow.new(
+        id: validated.workflow.id,
+        stages: validated.workflow.stages.map do |candidate|
+          candidate.name == "work" ? candidate.with(mapping_contract: "demo-work-v2") : candidate
+        end
+      )
+
+      error = assert_raises(Hive::ConfigError) do
+        Hive::Commands::Workflow::ConfigurationResolver.new(
+          workflow: changed, resolution: resolution, cfg: {}, runtime_metadata: {}, previous: previous
+        )
+      end
+      assert_match(/mapping contract changed/, error.message)
+
+      reconfirmed = Hive::Commands::Workflow::ConfigurationResolver.new(
+        workflow: changed, resolution: resolution, cfg: {}, runtime_metadata: {}, previous: previous,
+        mapping_overrides: { "stages.work" => { "agent" => "claude" } }
+      )
+      assert_equal "demo-work-v2", reconfirmed.mappings.fetch(0).fetch("mapping_contract")
+
+      error = assert_raises(Hive::ConfigError) do
+        Hive::Commands::Workflow::ConfigurationResolver.new(
+          workflow: validated.workflow, resolution: resolution,
+          cfg: { "agents" => { "claude" => { "bin" => "/tmp/drifted-claude" } } },
+          runtime_metadata: {}, previous: previous
+        )
+      end
+      assert_match(/profile drifted/, error.message)
+    end
+  end
+
   def test_scoped_shell_and_unqualified_write_require_separate_escalation_acknowledgement
     [
       "{ preset: scoped, bash: true }",
@@ -268,6 +340,32 @@ class WorkflowLifecycleCommandsTest < Minitest::Test
       assert_equal installed.fetch("configuration_digest"), retained.fetch("configuration_digest")
       refute retained.key?("mappings")
       refute retained.key?("optional_inputs")
+    end
+  end
+
+  def test_list_deduplicates_legacy_task_references_without_configuration_pins
+    with_project_and_package do |project, package, resolution|
+      Hive::Commands::Workflow::Install.new(
+        "honeycomb/demo", project_root: project, json: true, yes: true,
+        stdout: StringIO.new, registry_client: stub_client(package, resolution), committer: ->(*) { }
+      ).call!
+      hive_state = File.join(project, ".hive-state")
+      2.times do |index|
+        task = File.join(hive_state, "stages", "1-inbox", "legacy-#{index}-260719-aaaa")
+        Hive::TaskMeta.write(
+          task, id: index + 1, slug: File.basename(task), display_name: nil, workflow: "demo",
+          workflow_commit: resolution.source_commit,
+          workflow_manifest_digest: resolution.manifest_digest
+        )
+      end
+      Hive::WorkflowPackage::ManagedStore.new(hive_state).remove_selection("demo")
+
+      rows = Hive::Commands::Workflow::List.new(
+        project_root: project, json: true, stdout: StringIO.new
+      ).call!.fetch("workflows").select { |entry| entry["name"] == "demo" }
+      assert_equal 1, rows.length
+      assert_equal "retained", rows.fetch(0).fetch("selection")
+      refute rows.fetch(0).key?("configuration_digest")
     end
   end
 

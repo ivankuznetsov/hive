@@ -114,6 +114,75 @@ class WorkflowPackageConfigurationTest < Minitest::Test
     assert_equal [ "--model", "gpt-5.6-sol", "-c", "model_reasoning_effort=high" ], arguments
   end
 
+  def test_input_bindings_require_portable_environment_names_and_report_status
+    error = assert_raises(Hive::ConfigError) do
+      build_configuration(input_bindings: { "GSC_TOKEN" => "not portable" })
+    end
+    assert_match(/environment variable name/, error.message)
+
+    configuration = build_configuration(input_bindings: { "GSC_TOKEN" => "GSC_RUNTIME_TOKEN" })
+    assert_equal [
+      { "name" => "GSC_TOKEN", "binding" => "GSC_RUNTIME_TOKEN", "available" => true }
+    ], configuration.input_status_for(
+      "stages.draft", runtime_metadata: runtime_metadata,
+      environment: { "GSC_RUNTIME_TOKEN" => "secret" }
+    )
+    assert_empty configuration.input_status_for(
+      "stages.review", runtime_metadata: runtime_metadata,
+      environment: { "GSC_RUNTIME_TOKEN" => "secret" }
+    )
+  end
+
+  def test_reviewer_suggestions_use_configured_review_agents
+    configuration = build_configuration(
+      overrides: { "stages.draft" => { "agent" => "codex" } },
+      cfg: { "review" => { "reviewers" => [ { "agent" => "codex" } ] } }
+    )
+
+    mapping = configuration.data.fetch("mappings").fetch("stages.review.reviewers.security")
+    assert_equal "codex", mapping.fetch("agent")
+  end
+
+  def test_apply_rejects_mapping_contract_drift
+    data = JSON.parse(build_configuration.bytes)
+    data.fetch("mappings").fetch("stages.draft")["mapping_contract"] = "draft-v2"
+    drifted = Hive::WorkflowPackage::Configuration.new(data)
+
+    error = assert_raises(Hive::ConfigError) { drifted.apply(workflow, verify_profiles: false) }
+    assert_match(/contract drifted/, error.message)
+  end
+
+  def test_snapshot_shape_validation_rejects_each_malformed_layer
+    valid = JSON.parse(build_configuration.bytes)
+    malformed = [
+      valid.merge("schema_version" => 99),
+      valid.merge("generation" => { "name" => "demo" }),
+      valid.merge("mappings" => {}),
+      valid.merge("mappings" => { "bad slot" => valid.fetch("mappings").values.first })
+    ]
+
+    malformed.each do |data|
+      assert_raises(Hive::ConfigError) { Hive::WorkflowPackage::Configuration.new(data) }
+    end
+  end
+
+  def test_nested_array_helpers_are_recursive_and_configuration_values_must_be_maps
+    configuration = build_configuration
+    stringified = configuration.send(:deep_stringify, [ { key: [ :value ] } ])
+    assert_equal [ { "key" => [ :value ] } ], stringified
+    assert_predicate configuration.send(:deep_freeze, [ [ "value" ] ]), :frozen?
+
+    assert_raises(Hive::ConfigError) do
+      Hive::WorkflowPackage::Configuration.build(
+        workflow,
+        generation: {
+          "name" => "demo", "source_commit" => "a" * 40, "manifest_digest" => "b" * 64
+        },
+        overrides: "invalid"
+      )
+    end
+  end
+
   private
 
   def build_configuration(overrides: nil, input_bindings: {}, cfg: {})

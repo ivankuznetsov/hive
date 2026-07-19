@@ -44,6 +44,30 @@ class WorkflowsDescriptorParserTest < Minitest::Test
       end
     end
   end
+
+  def test_council_rejects_unknown_max_round_policy_and_mapping_role
+    base = {
+      "id" => "invalid-managed-contract",
+      "stages" => [
+        {
+          "name" => "review", "kind" => "council", "state_file" => "review.md",
+          "reviewers" => [ { "name" => "one", "prompt" => "Review." } ],
+          "council" => { "max_rounds" => 2, "on_max_rounds" => "explode" }
+        }
+      ]
+    }
+    error = assert_raises(Hive::ConfigError) do
+      Hive::Workflows::DescriptorParser.parse_hash(base, path: "/tmp/invalid-managed-contract.yml")
+    end
+    assert_includes error.message, "on_max_rounds"
+
+    base["stages"].first["council"].delete("on_max_rounds")
+    base["stages"].first["mapping_role"] = "operator"
+    error = assert_raises(Hive::ConfigError) do
+      Hive::Workflows::DescriptorParser.parse_hash(base, path: "/tmp/invalid-managed-contract.yml")
+    end
+    assert_includes error.message, "mapping_role"
+  end
   include HiveTestHelper
 
   def test_valid_descriptor_maps_user_vocabulary_and_resolves_instruction

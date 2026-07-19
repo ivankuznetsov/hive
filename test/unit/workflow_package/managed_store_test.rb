@@ -426,6 +426,59 @@ class WorkflowPackageManagedStoreTest < Minitest::Test
     end
   end
 
+  def test_generation_configuration_mismatches_fail_at_workflow_activation_and_lock_read
+    with_tmp_dir do |dir|
+      store = Hive::WorkflowPackage::ManagedStore.new(File.join(dir, ".hive-state"))
+      package = File.join(dir, "package")
+      resolution = write_package(package, "a" * 40)
+      store.place_generation(package, resolution)
+      raw = store.workflow("demo", resolution.source_commit, resolution.manifest_digest)
+      mismatched = Hive::WorkflowPackage::Configuration.build(
+        raw,
+        generation: {
+          "name" => "demo", "source_commit" => "c" * 40,
+          "manifest_digest" => resolution.manifest_digest
+        }
+      )
+      store.place_configuration(mismatched)
+
+      assert_raises(Hive::ConfigError) do
+        store.workflow(
+          "demo", resolution.source_commit, resolution.manifest_digest,
+          configuration_digest: mismatched.digest
+        )
+      end
+      assert_raises(Hive::ConfigError) { store.activate(resolution, configuration: mismatched) }
+
+      store.activate(resolution)
+      lock = JSON.parse(File.read(store.lock_path("demo")))
+      lock["configuration_digest"] = mismatched.digest
+      File.write(store.lock_path("demo"), Hive::WorkflowPackage::CanonicalJSON.generate(lock))
+      assert_raises(Hive::ConfigError) { store.selected("demo") }
+    end
+  end
+
+  def test_generation_cleanup_tolerates_an_entry_disappearing_during_mode_repair
+    with_tmp_dir do |dir|
+      root = File.join(dir, "generation")
+      child = File.join(root, "child")
+      FileUtils.mkdir_p(root)
+      File.write(child, "payload")
+      store = Hive::WorkflowPackage::ManagedStore.new(File.join(dir, ".hive-state"))
+      original = File.method(:chmod)
+      replacement = lambda do |mode, path|
+        raise Errno::ENOENT, path if path == child
+
+        original.call(mode, path)
+      end
+
+      with_replaced_singleton_method(File, :chmod, replacement) do
+        store.send(:remove_generation_tree, root)
+      end
+      refute File.exist?(root)
+    end
+  end
+
   private
 
   def assert_invalid_configuration_isolated(expected_reason)

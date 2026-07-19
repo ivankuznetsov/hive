@@ -144,6 +144,88 @@ class WorkflowPackageValidatorTest < Minitest::Test
     end
   end
 
+  def test_registry_actor_contract_diagnostics_cover_nested_permissions_and_identity
+    actor_type = Struct.new(
+      :name, :kind, :permissions, :skill, :reviewers, :council,
+      :agent, :model, :effort, :mapping_role, :mapping_contract, :command
+    )
+    reviewer = actor_type.new(
+      "reviewer", nil, nil, nil, [], nil,
+      "claude", nil, nil, "development", nil, nil
+    )
+    revise = actor_type.new(
+      "revise", nil, nil, nil, [], nil,
+      nil, "model", nil, nil, nil, nil
+    )
+    stage = actor_type.new(
+      "council", :council, "read-only", nil, [ reviewer ], Struct.new(:revise).new(revise),
+      nil, nil, nil, nil, nil, nil
+    )
+    diagnostics = []
+    validator = Hive::WorkflowPackage::Validator.new(
+      Dir.pwd, expected_name: nil, expected_manifest_digest: nil, managed: true
+    )
+
+    validator.send(:validate_managed_workflow, Struct.new(:stages).new([ stage ]), diagnostics, registry: true)
+
+    rules = diagnostics.map(&:rule_id)
+    assert_equal 2, rules.count("policy.missing")
+    assert_equal 2, rules.count("mapping.embedded_identity")
+    assert_equal 3, rules.count("mapping.missing_contract")
+    assert_includes rules, "mapping.invalid_role"
+  end
+
+  def test_registry_extension_rejects_invalid_shapes_paths_and_inventory
+    manifest_type = Struct.new(:data, :file_entries)
+    workflow = Struct.new(:stages).new([])
+    with_tmp_dir do |root|
+      validator = Hive::WorkflowPackage::Validator.new(
+        root, expected_name: nil, expected_manifest_digest: nil, managed: true
+      )
+      diagnostics = []
+      invalid_extension = manifest_type.new({ "x-hive" => { "tools" => [] } }, [])
+      validator.send(:validate_hive_extension, invalid_extension, workflow, diagnostics)
+      assert_includes diagnostics.map(&:rule_id), "x-hive.invalid_shape"
+
+      diagnostics.clear
+      manifest = manifest_type.new({}, [ { "path" => "tools/missing.rb" }, { "path" => "assets/missing.md" } ])
+      validator.send(:validate_hive_tools, "bad", manifest, diagnostics)
+      validator.send(:validate_hive_tools, [ { "path" => "z" }, { "path" => "a" } ], manifest, diagnostics)
+      validator.send(:validate_hive_tools, [ { "path" => "../escape" }, { "path" => "tools/missing.rb" } ], manifest, diagnostics)
+      validator.send(:validate_hive_prompt_assets, "bad", manifest, diagnostics)
+      validator.send(:validate_hive_prompt_assets, [ { "path" => "z" }, { "path" => "a" } ], manifest, diagnostics)
+      validator.send(
+        :validate_hive_prompt_assets,
+        [ { "path" => "../escape" }, { "path" => "assets/missing.md" } ], manifest, diagnostics
+      )
+
+      rules = diagnostics.map(&:rule_id)
+      %w[
+        x-hive.invalid_tools x-hive.invalid_tool_path x-hive.tool_not_executable
+        x-hive.invalid_prompt_assets x-hive.invalid_prompt_asset_path x-hive.prompt_asset_untrusted
+      ].each { |rule| assert_includes rules, rule }
+    end
+  end
+
+  def test_registry_optional_inputs_reject_malformed_duplicates_and_unknown_slots
+    validator = Hive::WorkflowPackage::Validator.new(
+      Dir.pwd, expected_name: nil, expected_manifest_digest: nil, managed: true
+    )
+    diagnostics = []
+    validator.send(:validate_hive_inputs, "bad", [], diagnostics)
+    duplicate = [
+      { "name" => "TOKEN", "authorized_slots" => [ "stages.work" ] },
+      { "name" => "TOKEN", "authorized_slots" => [ "stages.work" ] }
+    ]
+    validator.send(:validate_hive_inputs, duplicate, [ "stages.work" ], diagnostics)
+    invalid_slots = [ { "name" => "TOKEN", "authorized_slots" => [ "stages.missing", "stages.missing" ] } ]
+    validator.send(:validate_hive_inputs, invalid_slots, [ "stages.work" ], diagnostics)
+
+    rules = diagnostics.map(&:rule_id)
+    assert_includes rules, "x-hive.invalid_inputs"
+    assert_includes rules, "x-hive.invalid_input_slots"
+  end
+
   private
 
   def metadata

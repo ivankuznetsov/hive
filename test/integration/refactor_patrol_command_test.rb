@@ -494,6 +494,23 @@ class RefactorPatrolCommandTest < Minitest::Test
     end
   end
 
+  def test_analysis_cleanup_surfaces_removal_failure_and_clears_the_handle
+    worktree = Object.new
+    worktree.define_singleton_method(:remove!) do |force:|
+      raise Hive::WorktreeError, "cleanup failed" if force
+    end
+    command = Hive::Commands::RefactorPatrol.new("demo", pr: "7")
+    command.instance_variable_set(:@analysis_worktree, worktree)
+    command.define_singleton_method(:assert_analysis_worktree!) { true }
+
+    error = assert_raises(Hive::WorktreeError) do
+      command.send(:cleanup_analysis_worktree!)
+    end
+
+    assert_equal "cleanup failed", error.message
+    assert_nil command.instance_variable_get(:@analysis_worktree)
+  end
+
   def test_manual_pr_duplicate_owner_blocks_before_manifest_resolution_or_review
     with_refactor_patrol_project do |repo|
       other = File.join(File.dirname(repo), "duplicate-registration")

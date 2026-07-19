@@ -98,6 +98,35 @@ class RefactorPatrolCheckoutGuardTest < Minitest::Test
     end
   end
 
+  def test_fails_closed_when_remote_default_fetch_fails
+    with_tmp_git_repo do |repo|
+      head = run!("git", "-C", repo, "rev-parse", "HEAD").strip
+      run!("git", "-C", repo, "remote", "add", "origin", File.join(repo, "missing.git"))
+
+      error = assert_raises(Hive::GitError) do
+        Hive::RefactorPatrol::CheckoutGuard.new(repo, default_branch: "master")
+                                          .validate_and_snapshot!(merge_sha: head)
+      end
+
+      assert_includes error.message, "cannot fetch origin/master"
+    end
+  end
+
+  def test_rejects_non_oid_returned_by_git_resolution
+    with_tmp_git_repo do |repo|
+      guard = Hive::RefactorPatrol::CheckoutGuard.new(repo, default_branch: "master")
+      success = Object.new
+      success.define_singleton_method(:success?) { true }
+
+      with_replaced_singleton_method(Open3, :capture3, ->(*) { [ "not-an-oid\n", "", success ] }) do
+        error = assert_raises(Hive::GitError) do
+          guard.send(:resolve_commit!, "refs/heads/master", "local default branch")
+        end
+        assert_includes error.message, "resolved to an invalid object ID"
+      end
+    end
+  end
+
   def test_rejects_non_oid_analysis_commit_before_git_resolution
     with_tmp_git_repo do |repo|
       head = run!("git", "-C", repo, "rev-parse", "HEAD").strip

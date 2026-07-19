@@ -356,11 +356,31 @@ class RefactorPatrolReviewAgentRunnerTest < Minitest::Test
     end
   end
 
-  def test_read_only_output_rejects_prose_around_fences_and_multiple_fences
+  def test_read_only_output_accepts_trailing_rationale_after_one_leading_fence
+    with_tmp_dir do |dir|
+      runner = Hive::RefactorPatrol::ReviewAgentRunner.new(
+        project_root: dir, cfg: cfg, state: Hive::RefactorPatrol::StateStore.new(dir), read_only: true
+      )
+      raw = "```json\n{\"theses\":[]}\n```\n\nNo thesis clears the leverage floor."
+      output = File.join(dir, "review.json")
+
+      result = runner.send(
+        :materialize_read_only_output,
+        { status: :ok, final_message: raw },
+        output
+      )
+
+      assert_equal :ok, result.fetch(:status)
+      assert_equal({ "theses" => [] }, JSON.parse(File.read(output)))
+      assert_equal raw, File.read(File.join(dir, "final-message.txt"))
+    end
+  end
+
+  def test_read_only_output_rejects_leading_prose_and_multiple_fences
     invalid_messages = [
       "Before\n```json\n{\"theses\":[]}\n```",
-      "```json\n{\"theses\":[]}\n```\nAfter",
-      "```json\n{\"theses\":[]}\n```\n```json\n{\"theses\":[]}\n```"
+      "```json\n{\"theses\":[]}\n```\n```json\n{\"theses\":[]}\n```",
+      "```json\n{\"theses\":[]}\n```\n~~~json\n{\"theses\":[{\"id\":\"conflict\"}]}\n~~~"
     ]
 
     invalid_messages.each_with_index do |raw, index|

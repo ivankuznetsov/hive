@@ -76,7 +76,10 @@ produce a misleading "not installed" result.
 Package descriptors cannot select agent/model/effort; immutable installation
 configuration overlays those choices in memory. Planning/development defaults
 follow the project's init choices and reviewer roles cycle configured review
-agents. Updates preserve only slots whose stable ID, role, and
+agents. If a suggested agent cannot enforce a slot's non-`yolo` tool scope,
+the suggestion falls back to Claude; explicit choices remain exact and an
+incompatible explicit mapping fails runtime admission before mutation. Updates
+preserve only slots whose stable ID, role, and
 `mapping_contract` match. Profile drift or contract changes require explicit
 remapping. A non-null model or effort pin is accepted only when the selected
 profile can translate it into native launch arguments; unsupported suggested

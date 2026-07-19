@@ -162,13 +162,15 @@ error. When every reported error is a shared daily token or launch limit,
 including positive daily token headroom too small for the next initial context,
 the daemon backs the job off until the next UTC day instead of retrying it every
 minute.
-The read-only runner accepts either bare JSON or one whole-message `json` code
-fence, normalizes the accepted object into `theses.json`, and retains the exact
+The read-only runner accepts either bare JSON or one leading `json` code fence.
+Plain-text rationale may follow that single fence, but leading prose or another
+fence remains invalid so there is only one canonical structured result. The
+runner normalizes the accepted object into `theses.json` and retains the exact
 provider response as `final-message.txt` in the feature run directory for
 quality audits. Real PR-mode run directories are durable and include a
 `review-context.json` binding the artifact to its job, analysis SHA, source PR,
 and feature; only an explicit `--dry-run` uses ephemeral scratch space.
-Surrounding prose, malformed
+Leading prose, additional fences, malformed
 envelopes, null/scalar items, and
 schema-invalid records remain review errors rather than successful zero-result
 scans. Evidence is also checked against the pinned checkout's real,

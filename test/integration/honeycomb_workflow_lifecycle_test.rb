@@ -32,10 +32,14 @@ class HoneycombWorkflowLifecycleTest < Minitest::Test
           project, old, configuration_digest: install.fetch("configuration_digest")
         )
         managed_task = Hive::Task.new(task)
-        prompt_assets = managed_task.managed_runtime_context("stages.work").fetch(:prompt_assets)
+        context = managed_task.managed_runtime_context("stages.work")
+        prompt_assets = context.fetch(:prompt_assets)
+        preamble = managed_task.managed_prompt_preamble("stages.work", context)
         assert_equal [ "rubric.md" ], prompt_assets.map { |path| File.basename(path) }
-        assert_includes managed_task.managed_prompt_preamble("stages.work"), prompt_assets.fetch(0)
-        assert_includes managed_task.managed_prompt_preamble("stages.work"), "GSC_INPUT=unavailable"
+        assert_includes preamble, prompt_assets.fetch(0)
+        assert_includes preamble, "GSC_INPUT=unavailable"
+        assert_equal "#{preamble}\n\nInspect it.",
+                     managed_task.managed_prompt("stages.work", "Inspect it.", context)
         current = Hive::WorkflowPackage::ManagedStore.new(File.join(project, ".hive-state"))
         before = selected_state(current)
         candidate = publish_version(registry, versions, "1.1.0", "Inspect the task and report clearly.\n")

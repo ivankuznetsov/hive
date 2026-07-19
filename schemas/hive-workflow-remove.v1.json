@@ -20,7 +20,8 @@
         "source_commit": {"type": "string"},
         "manifest_digest": {"type": "string"},
         "retained_commits": {"type": "array", "items": {"type": "string"}},
-        "deletable_commits": {"type": "array", "items": {"type": "string"}}
+        "deletable_commits": {"type": "array", "items": {"type": "string"}},
+        "warnings": {"type": "array", "items": {"type": "string"}}
       }
     },
     "ErrorPayload": {

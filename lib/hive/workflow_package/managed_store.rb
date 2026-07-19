@@ -13,7 +13,11 @@ module Hive
   module WorkflowPackage
     class ManagedStore
       LOCK_FILE = "honeycomb.lock.json".freeze
+      # Tri-state CAS baseline: this sentinel means "do not compare", nil
+      # means "the selection must still be absent", and a hash means "the
+      # selection must still match this exact generation".
       NO_SELECTION_CHECK = Object.new.freeze
+      private_constant :NO_SELECTION_CHECK
 
       attr_reader :hive_state_path, :workflows_dir
 

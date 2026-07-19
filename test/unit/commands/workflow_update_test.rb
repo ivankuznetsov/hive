@@ -98,6 +98,41 @@ class WorkflowUpdateCommandTest < Minitest::Test
     end
   end
 
+  def test_cleanup_failure_does_not_mask_the_activation_error
+    with_update_fixture do |project, store, old, candidate_root, candidate|
+      command = command(
+        project, candidate_root, candidate, yes: true,
+        committer: ->(*) { raise Hive::GitError, "commit failed" }
+      )
+      store.define_singleton_method(:cleanup_unreferenced) { |_name| raise Errno::ENOSPC }
+      command.instance_variable_set(:@store, store)
+
+      error = nil
+      _stdout, stderr = capture_io do
+        error = assert_raises(Hive::GitError) { command.call! }
+      end
+
+      assert_equal "commit failed", error.message
+      assert_match(/candidate cleanup also failed.*ENOSPC/, stderr)
+      assert_equal old.source_commit, store.selected("demo").fetch("source_commit")
+    end
+  end
+
+  def test_post_commit_cleanup_failure_returns_an_updated_warning
+    with_update_fixture do |project, store, _old, candidate_root, candidate|
+      command = command(project, candidate_root, candidate, yes: true)
+      store.define_singleton_method(:cleanup_unreferenced) { |_name| raise Errno::ENOSPC }
+      command.instance_variable_set(:@store, store)
+
+      payload = nil
+      capture_io { payload = command.call! }
+
+      assert_equal "updated", payload.fetch("status")
+      assert_equal candidate.source_commit, store.selected("demo").fetch("source_commit")
+      assert_match(/generation cleanup failed.*already succeeded/, payload.fetch("warnings").first)
+    end
+  end
+
   def test_browser_preview_baseline_must_still_match_before_update
     with_update_fixture do |project, store, old, candidate_root, candidate|
       stale = {

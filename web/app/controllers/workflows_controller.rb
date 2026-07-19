@@ -41,8 +41,10 @@ class WorkflowsController < ApplicationController
     result = workflow_lifecycle.install(
       project, source: receipt.fetch("source"), expected: receipt.fetch("expected")
     )
-    redirect_to workflows_path(project: project.fetch("name")),
-                notice: "#{result.fetch('name')} #{workflow_status_message(result)}."
+    redirect_with_workflow_result(
+      workflows_path(project: project.fetch("name")), result: result,
+      notice: "#{result.fetch('name')} #{workflow_status_message(result)}."
+    )
   end
 
   def preview_update
@@ -82,8 +84,10 @@ class WorkflowsController < ApplicationController
       expected: receipt.fetch("expected"),
       allow_escalation: receipt["escalation"] == true
     )
-    redirect_to workflows_path(project: project.fetch("name")),
-                notice: "#{result.fetch('name')} #{workflow_status_message(result)}."
+    redirect_with_workflow_result(
+      workflows_path(project: project.fetch("name")), result: result,
+      notice: "#{result.fetch('name')} #{workflow_status_message(result)}."
+    )
   end
 
   def preview_remove
@@ -108,9 +112,11 @@ class WorkflowsController < ApplicationController
     result = workflow_lifecycle.remove(
       project, name: receipt.fetch("name"), expected: receipt.fetch("expected")
     )
-    redirect_to workflows_path(project: project.fetch("name")),
-                notice: "#{result.fetch('name')} removed for new tasks; " \
-                        "#{result.fetch('retained_commits').length} task-pinned generation(s) retained."
+    redirect_with_workflow_result(
+      workflows_path(project: project.fetch("name")), result: result,
+      notice: "#{result.fetch('name')} removed for new tasks; " \
+              "#{result.fetch('retained_commits').length} task-pinned generation(s) retained."
+    )
   end
 
   private
@@ -167,6 +173,15 @@ class WorkflowsController < ApplicationController
     when "already_current" then "was already current"
     else result.fetch("status").tr("_", " ")
     end
+  end
+
+  def redirect_with_workflow_result(path, result:, notice:)
+    options = { notice: notice }
+    warnings = Array(result["warnings"])
+    unless warnings.empty?
+      options[:alert] = "Workflow change completed with warnings: #{warnings.join('; ')}"
+    end
+    redirect_to path, **options
   end
 
   def workflow_lifecycle

@@ -49,9 +49,8 @@ module Hive
                 resolution, expected_current: current,
                 commit: -> { commit_state(resolution.name, "installed") }
               )
-            rescue StandardError
-              store.cleanup_unreferenced(resolution.name)
-              raise
+            rescue StandardError => e
+              cleanup_after_failed_activation(resolution.name, e)
             end
             Hive::Workflows::Project.reset!
             emit(payload(resolution, "installed"), human_lines: human_disclosure(resolution))

@@ -184,6 +184,14 @@ class WorkflowPackageRegistryClientTest < Minitest::Test
     with_replaced_singleton_method(Timeout, :timeout, ->(_seconds, &) { raise Timeout::Error }) do
       assert_raises(Hive::WorkflowPackage::RegistryError) { client.send(:git!, "status") }
     end
+
+    failed = Object.new
+    failed.define_singleton_method(:success?) { false }
+    capture = ->(*_args) { [ "", "fatal: registry access denied", failed ] }
+    with_replaced_singleton_method(Open3, :capture3, capture) do
+      error = assert_raises(Hive::WorkflowPackage::RegistryError) { client.send(:git!, "status") }
+      assert_match "fatal: registry access denied", error.message
+    end
   end
 
   def test_catalog_entry_validation_rejects_each_consumer_boundary

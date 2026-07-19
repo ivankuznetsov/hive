@@ -44,11 +44,20 @@ module Hive
             @name, expected_current: lock,
             commit: -> { commit_state(@name, "removed") }
           )
-          retained = store.cleanup_unreferenced(@name)
-          commit_state(@name, "cleaned") if deletable.any?
-          Hive::Workflows::Project.reset!
-          emit(payload("removed", lock, retained, deletable), human_lines: [
-            "hive: removed honeycomb/#{@name}; retained #{retained.length} task-pinned generation(s)"
+          warnings = []
+          cleaned = post_commit_step(warnings, "unreferenced generation cleanup") do
+            store.cleanup_unreferenced(@name)
+          end
+          retained = cleaned if cleaned
+          if cleaned && deletable.any?
+            post_commit_step(warnings, "cleanup state commit") { commit_state(@name, "cleaned") }
+          end
+          post_commit_step(warnings, "workflow cache refresh") { Hive::Workflows::Project.reset! }
+          report = payload("removed", lock, retained, deletable)
+          report["warnings"] = warnings unless warnings.empty?
+          emit(report, human_lines: [
+            "hive: removed honeycomb/#{@name}; retained #{retained.length} task-pinned generation(s)",
+            *warning_lines(warnings)
           ])
         end
 

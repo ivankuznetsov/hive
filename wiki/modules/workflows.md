@@ -3,7 +3,7 @@ title: Hive::Workflows
 type: module
 source: lib/hive/workflows.rb, lib/hive/workflow.rb, lib/hive/workflows/registry.rb, lib/hive/workflows/coding.rb, lib/hive/workflows/content.rb, lib/hive/workflows/bench.rb, lib/hive/workflows/descriptor_parser.rb, lib/hive/workflows/loader.rb, lib/hive/workflows/project.rb, lib/hive/workflow_package/
 created: 2026-04-26
-updated: 2026-07-17
+updated: 2026-07-19
 tags: [module, workflow, verbs, selection, honeycomb, registry]
 ---
 
@@ -99,8 +99,10 @@ weakening owner-authored descriptor compatibility:
   lifecycle semantics, materializes `packages/NAME/VERSION/` only from the
   exact catalog commit, and rejects tree, release fingerprint, source
   provenance, description, or permission metadata that does not bind to the
-  canonical `manifest.yml`. Review head SHA remains audit data; upstream
-  `source_sha` remains source provenance, and neither is the install tree.
+  canonical `manifest.yml`. Failed git operations include bounded stderr in the
+  typed registry error rather than discarding the underlying cause. Review head
+  SHA remains audit data; upstream `source_sha` remains source provenance, and
+  neither is the install tree.
 - `ManagedStore` places immutable generations and selects one through an atomic
   lock. `TransactionJournal` plus the workflow mutation lock reconcile an
   interrupted activation/removal before Loader or lifecycle access. Selection
@@ -109,7 +111,9 @@ weakening owner-authored descriptor compatibility:
   distinguish "no baseline check" from an explicit "still unselected" baseline;
   activation and removal compare expected source commit plus manifest digest
   under the mutation lock so a reviewed lifecycle action cannot race a different
-  selection into place.
+  selection into place. The mutation lock classifies only acquisition/open
+  failures as contention; I/O errors raised by the protected mutation retain
+  their original type and message.
 - `Loader` registers selected managed workflows beside built-ins and authored
   descriptors while rejecting id collisions and reloading when its managed
   fingerprint changes. Task-pinned generations bypass the single-id overlay and

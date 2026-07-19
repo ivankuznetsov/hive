@@ -1,6 +1,7 @@
 require "test_helper"
 
 class WorkflowsTest < ActionDispatch::IntegrationTest
+  include ActiveSupport::Testing::TimeHelpers
   class FakeLifecycle
     attr_reader :calls
 
@@ -195,6 +196,68 @@ class WorkflowsTest < ActionDispatch::IntegrationTest
     call = @lifecycle.calls.find { |entry| entry.first == :remove }
     assert_equal "a" * 40, call[3].fetch("source_commit")
     assert_match "1 task-pinned generation(s) retained", flash[:notice]
+  end
+
+  test "preview receipts cannot be replayed across operations" do
+    post preview_workflow_update_path, params: { project: @project, name: "demo" }
+    token = preview_token(update_workflow_path)
+
+    post remove_workflow_path,
+         params: { preview_token: token, consent: "workflow_remove" }
+
+    assert_response :unprocessable_entity
+    assert_match(/preview does not match this action/, response.body)
+    refute @lifecycle.calls.any? { |call| call.first == :remove }
+  end
+
+  test "expired preview receipt is rejected independently of tampering" do
+    post preview_workflow_remove_path, params: { project: @project, name: "demo" }
+    token = preview_token(remove_workflow_path)
+
+    travel WorkflowsController::PREVIEW_TTL + 1.second do
+      post remove_workflow_path,
+           params: { preview_token: token, consent: "workflow_remove" }
+    end
+
+    assert_response :unprocessable_entity
+    assert_match(/preview expired or changed/, response.body)
+    refute @lifecycle.calls.any? { |call| call.first == :remove }
+  end
+
+  test "every workflow mutation requires its operation-specific consent" do
+    cases = [
+      [ preview_workflow_install_path, { project: @project, source: "honeycomb/docs@1.2.0" }, install_workflow_path ],
+      [ preview_workflow_update_path, { project: @project, name: "demo" }, update_workflow_path ],
+      [ preview_workflow_remove_path, { project: @project, name: "demo" }, remove_workflow_path ]
+    ]
+
+    cases.each do |preview_path, preview_params, apply_path|
+      post preview_path, params: preview_params
+      post apply_path, params: { preview_token: preview_token(apply_path) }
+      assert_response :unprocessable_entity
+      assert_match(/confirm the reviewed workflow/, response.body)
+    end
+
+    refute @lifecycle.calls.any? { |call| %i[install update remove].include?(call.first) }
+  end
+
+  test "completed workflow mutations surface post-commit warnings" do
+    @lifecycle.define_singleton_method(:update) do |*_args, **_kwargs|
+      {
+        "status" => "updated", "name" => "demo",
+        "warnings" => [ "cleanup state commit failed; the workflow selection change already succeeded" ]
+      }
+    end
+    post preview_workflow_update_path, params: { project: @project, name: "demo" }
+    token = preview_token(update_workflow_path)
+
+    post update_workflow_path,
+         params: {
+           preview_token: token, consent: "workflow_update", allow_escalation: "1"
+         }
+
+    assert_redirected_to workflows_path(project: @project)
+    assert_match(/completed with warnings.*cleanup state commit failed/, flash[:alert])
   end
 
   private

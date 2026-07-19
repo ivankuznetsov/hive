@@ -34,15 +34,26 @@ class WebWorkflowLifecycleTest < Minitest::Test
   def test_preview_registry_binds_the_reviewed_candidate_identity
     resolution = resolution()
     use_resolution(resolution)
-    registry = Hive::Web::WorkflowLifecycle::PreviewRegistry.new(@registry, { "name" => "demo" })
+    expected = resolution.to_h.transform_keys(&:to_s)
+    registry = Hive::Web::WorkflowLifecycle::PreviewRegistry.new(@registry, expected)
 
     assert_same resolution, registry.fetch("honeycomb/demo", destination: File.join(@root, "exact"))
 
-    registry = Hive::Web::WorkflowLifecycle::PreviewRegistry.new(@registry, { "name" => "changed" })
+    registry = Hive::Web::WorkflowLifecycle::PreviewRegistry.new(
+      @registry, expected.merge("name" => "changed")
+    )
     error = assert_raises(Hive::Web::WorkflowLifecycle::PreviewChanged) do
       registry.fetch("honeycomb/demo", destination: File.join(@root, "changed"))
     end
     assert_match "preview it again", error.message
+  end
+
+  def test_preview_registry_rejects_an_incomplete_identity
+    error = assert_raises(ArgumentError) do
+      Hive::Web::WorkflowLifecycle::PreviewRegistry.new(@registry, {})
+    end
+
+    assert_match(/identity is missing/, error.message)
   end
 
   def test_templates_list_and_scaffold_delegate_to_the_cli_contract
@@ -128,6 +139,11 @@ class WebWorkflowLifecycleTest < Minitest::Test
       )
       assert_same target,
                   options.fetch(:registry_client).fetch("honeycomb/demo", destination: File.join(@root, "update"))
+    end
+
+    incomplete = expected.reject { |key, _value| key == "from_manifest_digest" }
+    assert_raises(KeyError) do
+      @lifecycle.update(@project, name: "demo", expected: incomplete, allow_escalation: true)
     end
   end
 

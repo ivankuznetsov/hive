@@ -19,19 +19,46 @@ module Hive
     class WorkflowLifecycle
       class PreviewChanged < Hive::Error; end
 
+      SelectionIdentity = Data.define(:source_commit, :manifest_digest) do
+        def self.from_selection(selection)
+          new(
+            source_commit: selection.fetch("source_commit"),
+            manifest_digest: selection.fetch("manifest_digest")
+          )
+        end
+
+        def self.from_update_preview(preview)
+          new(
+            source_commit: preview.fetch("from_commit"),
+            manifest_digest: preview.fetch("from_manifest_digest")
+          )
+        end
+
+        def to_expected
+          { "source_commit" => source_commit, "manifest_digest" => manifest_digest }
+        end
+      end
+
       class PreviewRegistry
         IDENTITY_FIELDS = %w[name version catalog_commit source_commit manifest_digest].freeze
+        UPDATE_IDENTITY_FIELDS = %w[name source_commit manifest_digest].freeze
 
-        def initialize(delegate, expected)
+        def initialize(delegate, expected, identity_fields: IDENTITY_FIELDS)
+          missing = identity_fields.reject do |field|
+            expected.key?(field) && !expected.fetch(field).to_s.empty?
+          end
+          unless missing.empty?
+            raise ArgumentError, "reviewed candidate identity is missing: #{missing.join(', ')}"
+          end
+
           @delegate = delegate
           @expected = expected
+          @identity_fields = identity_fields
         end
 
         def fetch(source, destination:)
           resolution = @delegate.fetch(source, destination: destination)
-          changed = IDENTITY_FIELDS.any? do |field|
-            next false unless @expected.key?(field)
-
+          changed = @identity_fields.any? do |field|
             expected = @expected.fetch(field)
             resolution.public_send(field) != expected
           end
@@ -44,8 +71,10 @@ module Hive
         end
       end
 
-      def initialize(registry_client_factory: -> { Hive::WorkflowPackage::RegistryClient.new })
+      def initialize(registry_client_factory: -> { Hive::WorkflowPackage::RegistryClient.new },
+                     committer: nil)
         @registry_client_factory = registry_client_factory
+        @committer = committer
       end
 
       def templates
@@ -71,14 +100,14 @@ module Hive
       def preview_install(project, source:)
         Hive::Commands::Workflow::Install.new(
           source, project_root: project_root(project), json: true, dry_run: true,
-          stdout: StringIO.new, registry_client: registry_client
+          stdout: StringIO.new, registry_client: registry_client, committer: @committer
         ).call!
       end
 
       def install(project, source:, expected:)
         Hive::Commands::Workflow::Install.new(
           source, project_root: project_root(project), json: true, yes: true,
-          stdout: StringIO.new,
+          stdout: StringIO.new, committer: @committer,
           registry_client: PreviewRegistry.new(registry_client, candidate_identity(expected))
         ).call!
       end
@@ -87,7 +116,7 @@ module Hive
         before = selected!(project, name)
         payload = Hive::Commands::Workflow::Update.new(
           name, project_root: project_root(project), json: true, dry_run: true,
-          stdout: StringIO.new, registry_client: registry_client
+          stdout: StringIO.new, registry_client: registry_client, committer: @committer
         ).call!
         after = selected!(project, name)
         unless same_selection?(before, after) && before.fetch("source_commit") == payload.fetch("from_commit")
@@ -98,7 +127,7 @@ module Hive
       end
 
       def update(project, name:, expected:, allow_escalation:)
-        current = selection_identity(expected)
+        current = SelectionIdentity.from_update_preview(expected).to_expected
         Hive::Commands::Workflow::Update.new(
           name, project_root: project_root(project), json: true, yes: true,
           allow_escalation: allow_escalation, stdout: StringIO.new,
@@ -106,22 +135,24 @@ module Hive
             "name" => name,
             "source_commit" => expected.fetch("to_commit"),
             "manifest_digest" => expected.fetch("manifest_digest")
-          }),
-          expected_current: current
+          }, identity_fields: PreviewRegistry::UPDATE_IDENTITY_FIELDS),
+          expected_current: current, committer: @committer
         ).call!
       end
 
       def preview_remove(project, name:)
         Hive::Commands::Workflow::Remove.new(
           name, project_root: project_root(project), json: true, dry_run: true,
-          stdout: StringIO.new
+          stdout: StringIO.new, committer: @committer
         ).call!
       end
 
       def remove(project, name:, expected:)
         Hive::Commands::Workflow::Remove.new(
           name, project_root: project_root(project), json: true, yes: true,
-          stdout: StringIO.new, expected_current: selection_identity(expected)
+          stdout: StringIO.new,
+          expected_current: SelectionIdentity.from_selection(expected).to_expected,
+          committer: @committer
         ).call!
       end
 
@@ -147,8 +178,7 @@ module Hive
       end
 
       def same_selection?(left, right)
-        left.fetch("source_commit") == right.fetch("source_commit") &&
-          left.fetch("manifest_digest") == right.fetch("manifest_digest")
+        SelectionIdentity.from_selection(left) == SelectionIdentity.from_selection(right)
       end
 
       def candidate_identity(expected)
@@ -158,13 +188,6 @@ module Hive
           "catalog_commit" => expected.fetch("catalog_commit"),
           "source_commit" => expected.fetch("source_commit"),
           "manifest_digest" => expected.fetch("manifest_digest")
-        }
-      end
-
-      def selection_identity(expected)
-        {
-          "source_commit" => expected.fetch("from_commit", expected["source_commit"]),
-          "manifest_digest" => expected.fetch("from_manifest_digest", expected["manifest_digest"])
         }
       end
     end

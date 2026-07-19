@@ -94,6 +94,28 @@ module Hive
           end
         end
 
+        def cleanup_after_failed_activation(name, original_error)
+          store.cleanup_unreferenced(name)
+        rescue StandardError => cleanup_error
+          warn "hive workflow: activation failed with #{original_error.class}: #{original_error.message}; " \
+               "candidate cleanup also failed with #{cleanup_error.class}: #{cleanup_error.message}"
+        ensure
+          raise original_error
+        end
+
+        def post_commit_step(warnings, label)
+          yield
+        rescue StandardError => e
+          message = "#{label} failed (#{e.class}: #{e.message}); the workflow selection change already succeeded"
+          warnings << message
+          warn "hive workflow: #{message}"
+          nil
+        end
+
+        def warning_lines(warnings)
+          warnings.map { |warning| "warning: #{warning}" }
+        end
+
         def error_payload(error)
           Hive::Schemas::ErrorEnvelope.build(
             schema: envelope_schema,

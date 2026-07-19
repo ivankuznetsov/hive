@@ -59,13 +59,15 @@ class WorkflowLifecycleSchemaTest < Minitest::Test
       "hive-workflow-update" => {
         "schema" => "hive-workflow-update", "schema_version" => 1, "ok" => true,
         "status" => "already_current", "name" => "demo", "from_commit" => "a" * 40,
-        "to_commit" => "a" * 40, "manifest_digest" => "c" * 64, "diff" => nil
+        "to_commit" => "a" * 40, "manifest_digest" => "c" * 64, "diff" => nil,
+        "warnings" => [ "cleanup failed after selection changed" ]
       },
       "hive-workflow-remove" => {
         "schema" => "hive-workflow-remove", "schema_version" => 1, "ok" => true,
         "status" => "dry_run", "name" => "demo", "source_commit" => "a" * 40,
         "manifest_digest" => "c" * 64, "retained_commits" => [],
-        "deletable_commits" => [ "a" * 40 ]
+        "deletable_commits" => [ "a" * 40 ],
+        "warnings" => [ "cleanup failed after selection changed" ]
       },
       "hive-workflow-publish" => {
         "schema" => "hive-workflow-publish", "schema_version" => 1, "ok" => true,

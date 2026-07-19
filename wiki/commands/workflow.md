@@ -3,7 +3,7 @@ title: hive workflow
 type: command
 source: lib/hive/cli.rb, lib/hive/commands/workflow.rb, templates/workflows/
 created: 2026-06-21
-updated: 2026-07-18
+updated: 2026-07-19
 tags: [command, workflow, authoring, honeycomb, registry]
 ---
 
@@ -45,12 +45,23 @@ Managed storage is
 and release digest into `meta.yml`; update/remove retain any referenced
 generation. Loader fingerprints include managed locks and selected generations,
 while a pinned task loads its exact descriptor directly from the managed store.
-Install now binds activation to the still-absent (or exact no-op) selection it
-observed after package validation. Update and remove accept an internal expected
+Install binds activation to the still-absent selection observed after package
+validation. An already-selected exact generation returns `already_installed`
+before activation, but any selection that appears concurrently after that
+check raises `ConcurrentRunError`; there is no concurrent-install no-op arm.
+Update and remove accept an internal expected
 source-commit/manifest-digest baseline for browser preview receipts, check it
 before remote or destructive work, and recheck the same selection inside the
 mutation lock. A changed baseline raises retryable `ConcurrentRunError` instead
 of applying a lifecycle action to an unreviewed generation.
+
+Activation/commit failures remain failures and trigger best-effort candidate
+cleanup; if that cleanup also fails, it is logged without replacing the
+original exception. Once update/remove has committed the selection change,
+later cleanup, cleanup-commit, or cache-refresh failures cannot honestly report
+that the mutation failed. Those commands return their successful status with a
+`warnings` array (and human warning lines); Hive Web renders the warnings after
+the redirect so retry does not produce a misleading "not installed" result.
 
 Current v2 permissions are coarse disclosure data. Only the exact low-risk,
 task-local read-only subset maps losslessly to Hive's managed runtime; broader

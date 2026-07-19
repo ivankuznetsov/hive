@@ -121,6 +121,28 @@ class WorkflowLifecycleCommandsTest < Minitest::Test
     end
   end
 
+  def test_install_cleanup_failure_does_not_mask_the_activation_error
+    with_project_and_package do |project, package, resolution|
+      command = Hive::Commands::Workflow::Install.new(
+        "honeycomb/demo", project_root: project, json: true, yes: true,
+        stdout: StringIO.new, registry_client: stub_client(package, resolution),
+        committer: ->(*) { raise Hive::GitError, "commit failed" }
+      )
+      store = Hive::WorkflowPackage::ManagedStore.new(File.join(project, ".hive-state"))
+      store.define_singleton_method(:cleanup_unreferenced) { |_name| raise Errno::ENOSPC }
+      command.instance_variable_set(:@store, store)
+
+      error = nil
+      _stdout, stderr = capture_io do
+        error = assert_raises(Hive::GitError) { command.call! }
+      end
+
+      assert_equal "commit failed", error.message
+      assert_match(/candidate cleanup also failed.*ENOSPC/, stderr)
+      assert_nil store.selected("demo")
+    end
+  end
+
   def test_list_surfaces_authored_and_malformed_entries
     with_project_and_package do |project, package, resolution|
       workflows = File.join(project, ".hive-state", "workflows")
@@ -240,6 +262,29 @@ class WorkflowLifecycleCommandsTest < Minitest::Test
       end
       store = Hive::WorkflowPackage::ManagedStore.new(File.join(project, ".hive-state"))
       assert_equal resolution.source_commit, store.selected("demo").fetch("source_commit")
+    end
+  end
+
+  def test_remove_returns_a_warning_when_post_commit_bookkeeping_fails
+    with_project_and_package do |project, package, resolution|
+      Hive::Commands::Workflow::Install.new(
+        "honeycomb/demo", project_root: project, json: true, yes: true,
+        stdout: StringIO.new, registry_client: stub_client(package, resolution), committer: ->(*) { }
+      ).call!
+      committer = lambda do |action, *_rest|
+        raise Hive::GitError, "cleanup commit failed" if action == "cleaned"
+      end
+      command = Hive::Commands::Workflow::Remove.new(
+        "demo", project_root: project, json: true, yes: true,
+        stdout: StringIO.new, committer: committer
+      )
+
+      payload = nil
+      capture_io { payload = command.call! }
+
+      assert_equal "removed", payload.fetch("status")
+      assert_match(/cleanup state commit failed.*already succeeded/, payload.fetch("warnings").first)
+      assert_nil Hive::WorkflowPackage::ManagedStore.new(File.join(project, ".hive-state")).selected("demo")
     end
   end
 

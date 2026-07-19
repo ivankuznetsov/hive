@@ -197,8 +197,12 @@ origin also prints the Host-header/reverse-proxy warning.
   required mutation redirect. Applying requires an explicit checkbox plus a
   15-minute MessageVerifier receipt bound to project, operation, source, and
   package/selection commit+digest. The adapter re-fetches candidate packages
-  and the command/store layers recheck the selected baseline; stale tabs fail
+  and requires complete candidate/current identity fields; the command/store
+  layers recheck the selected baseline, so stale or incomplete receipts fail
   before mutation. Security expansion has a second, non-composable checkbox.
+  Receipt tests cover cross-operation replay, real expiry, and missing consent
+  for every mutation. A fixture-backed integration test runs the real workflow
+  commands through the adapter for the full preview/apply lifecycle.
   The known legacy-vs-v2 `workflow publish` gap is stated in the page instead
   of exposing a button that opens an unusable registry PR. At mobile widths the
   primary header wraps to a second full-width row, keeping all five sections
@@ -325,7 +329,9 @@ binary PTY output, Grok route reachability, and operator-ward poll flows,
 managed-skill opt-in inspection and consent-gated repair, root favicon/icon
 assets,
 workflow list/scaffold delegation, signed preview tamper rejection,
-non-composable update escalation consent, and removal-retention disclosure,
+cross-operation replay/expiry/missing-consent rejection, non-composable update
+escalation consent, real adapter-to-command lifecycle execution, and
+removal-retention disclosure,
 running/stopped daemon banner behavior plus descriptor-derived terminal-stage
 suppression,
 plain-vs-deep health semantics, the oversized diff cap/truncation notice,

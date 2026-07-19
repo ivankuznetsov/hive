@@ -62,15 +62,19 @@ module Hive
                 expected_current: current,
                 commit: -> { commit_state(@name, "updated") }
               )
-            rescue StandardError
-              store.cleanup_unreferenced(@name)
-              raise
+            rescue StandardError => e
+              cleanup_after_failed_activation(@name, e)
             end
-            retained = store.cleanup_unreferenced(@name)
-            commit_state(@name, "cleaned")
-            Hive::Workflows::Project.reset!
-            emit(payload("updated", current, candidate, diff).merge("retained_commits" => retained),
-                 human_lines: human_diff(payload("updated", current, candidate, diff)))
+            warnings = []
+            retained = post_commit_step(warnings, "unreferenced generation cleanup") do
+              store.cleanup_unreferenced(@name)
+            end
+            post_commit_step(warnings, "cleanup state commit") { commit_state(@name, "cleaned") } if retained
+            post_commit_step(warnings, "workflow cache refresh") { Hive::Workflows::Project.reset! }
+            report = payload("updated", current, candidate, diff)
+            report["retained_commits"] = retained if retained
+            report["warnings"] = warnings unless warnings.empty?
+            emit(report, human_lines: human_diff(report) + warning_lines(warnings))
           end
         end
 

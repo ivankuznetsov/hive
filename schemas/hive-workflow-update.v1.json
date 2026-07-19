@@ -21,7 +21,8 @@
         "to_commit": {"type": "string"},
         "manifest_digest": {"type": "string"},
         "diff": {"type": ["object", "null"]},
-        "retained_commits": {"type": "array", "items": {"type": "string"}}
+        "retained_commits": {"type": "array", "items": {"type": "string"}},
+        "warnings": {"type": "array", "items": {"type": "string"}}
       }
     },
     "ErrorPayload": {

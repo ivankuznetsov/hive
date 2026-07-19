@@ -47,7 +47,7 @@ class HiveCommandsPairingTest < Minitest::Test
   end
 
   FakePendingStore = Struct.new(:entries) do
-    def pending
+    def pending(strict: false)
       entries
     end
   end
@@ -73,7 +73,7 @@ class HiveCommandsPairingTest < Minitest::Test
   # `pending` raises the way a read-only/full state dir would (prune-on-read +
   # lock-file open both write), exercising the clean-envelope guard on list.
   RaisingPendingStore = Class.new do
-    def pending = raise(Errno::EROFS, "state dir is read-only")
+    def pending(strict: false) = raise(Errno::EROFS, "state dir is read-only")
   end
 
   # Approval succeeds through every fallible side effect, then the best-effort

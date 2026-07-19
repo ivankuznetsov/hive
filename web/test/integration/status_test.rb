@@ -28,4 +28,48 @@ class StatusTest < ActionDispatch::IntegrationTest
       Hive::Daemon::StatusReport.define_singleton_method(:new, original_report_new)
     end
   end
+
+
+  test "a stopped installed daemon shows the command that resumes it" do
+    sign_in!
+    with_daemon_status(
+      "running" => false,
+      "service_installed" => true,
+      "binary_drift" => "none"
+    ) do
+      get "/"
+
+      assert_response :success
+      assert_select ".daemon-panel code", text: "hive daemon start --detach"
+    end
+  end
+
+  test "a stopped missing daemon service keeps install repair guidance" do
+    sign_in!
+    with_daemon_status(
+      "running" => false,
+      "service_installed" => false,
+      "binary_drift" => "not_applicable"
+    ) do
+      get "/"
+
+      assert_response :success
+      assert_select ".daemon-panel code", text: "hive daemon install --force"
+    end
+  end
+
+  private
+
+  def with_daemon_status(payload)
+    report = Object.new
+    report.define_singleton_method(:safe_payload) { payload }
+    original_snapshot = StatusBroadcaster.method(:snapshot)
+    original_report_new = Hive::Daemon::StatusReport.method(:new)
+    StatusBroadcaster.define_singleton_method(:snapshot) { { "projects" => [] } }
+    Hive::Daemon::StatusReport.define_singleton_method(:new) { report }
+    yield
+  ensure
+    StatusBroadcaster.define_singleton_method(:snapshot, original_snapshot) if original_snapshot
+    Hive::Daemon::StatusReport.define_singleton_method(:new, original_report_new) if original_report_new
+  end
 end

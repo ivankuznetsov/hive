@@ -5,6 +5,7 @@ require "hive/commands/workflow/list"
 require "hive/commands/workflow/remove"
 require "hive/commands/workflow/update"
 require "hive/task"
+require "hive/web/workflow_lifecycle"
 require "hive/workflow_package/canonical_json"
 require "hive/workflow_package/canonical_yaml"
 require "hive/workflow_package/registry_manifest"
@@ -65,6 +66,55 @@ class HoneycombWorkflowLifecycleTest < Minitest::Test
         assert File.directory?(current.generation_path("demo", old.fetch(:source_commit)))
         refute File.exist?(current.generation_path("demo", candidate.fetch(:source_commit)))
         assert_equal :demo, Hive::Task.new(task).workflow.id
+      end
+    end
+  end
+
+  def test_web_adapter_drives_real_install_update_and_remove_commands
+    with_tmp_git_repo do |registry|
+      versions = {}
+      publish_version(registry, versions, "1.0.0", "Inspect the task.\n")
+      with_project do |project|
+        lifecycle = Hive::Web::WorkflowLifecycle.new(
+          registry_client_factory: lambda do
+            Hive::WorkflowPackage::RegistryClient.new(repository: registry)
+          end,
+          committer: ->(*) { }
+        )
+        web_project = { "path" => project }
+
+        install_preview = lifecycle.preview_install(web_project, source: "honeycomb/demo@1.0.0")
+        installed = lifecycle.install(
+          web_project,
+          source: "honeycomb/demo@1.0.0",
+          expected: install_preview.slice(
+            "name", "version", "catalog_commit", "source_commit", "manifest_digest",
+            "configuration_digest"
+          )
+        )
+        assert_equal "installed", installed.fetch("status")
+
+        publish_version(registry, versions, "1.1.0", "Inspect the task and report clearly.\n")
+        update_preview = lifecycle.preview_update(web_project, name: "demo")
+        updated = lifecycle.update(
+          web_project,
+          name: "demo",
+          expected: update_preview.slice(
+            "from_commit", "from_manifest_digest", "from_configuration_digest",
+            "to_commit", "manifest_digest", "configuration_digest"
+          ),
+          allow_escalation: false
+        )
+        assert_equal "updated", updated.fetch("status")
+
+        remove_preview = lifecycle.preview_remove(web_project, name: "demo")
+        removed = lifecycle.remove(
+          web_project,
+          name: "demo",
+          expected: remove_preview.slice("source_commit", "manifest_digest", "configuration_digest")
+        )
+        assert_equal "removed", removed.fetch("status")
+        assert_nil Hive::WorkflowPackage::ManagedStore.new(File.join(project, ".hive-state")).selected("demo")
       end
     end
   end

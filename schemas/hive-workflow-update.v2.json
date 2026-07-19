@@ -38,7 +38,8 @@
         "configuration_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "mappings": {"type": "array", "items": {"$ref": "#/$defs/Mapping"}, "minItems": 1},
         "optional_inputs": {"type": "array", "items": {"$ref": "#/$defs/OptionalInput"}},
-        "retained_commits": {"type": "array", "items": {"type": "string"}}
+        "retained_commits": {"type": "array", "items": {"type": "string"}},
+        "warnings": {"type": "array", "items": {"type": "string"}}
       }
     },
     "ErrorPayload": {

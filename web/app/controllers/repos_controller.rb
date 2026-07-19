@@ -1,4 +1,5 @@
 require "open3"
+require "stringio"
 require "tempfile"
 
 class ReposController < ApplicationController
@@ -46,8 +47,8 @@ class ReposController < ApplicationController
     if params[:project].present?
       # Re-run setup for an already-registered project (no clone).
       project = find_project!(File.basename(params[:project].to_s.strip))
-      reinit!(project["path"], InitSetup.new(params[:settings]), workflow: selected_workflow)
-      return redirect_to repos_path, notice: "#{project["name"]} settings applied"
+      warning = reinit!(project["path"], InitSetup.new(params[:settings]), workflow: selected_workflow)
+      return redirect_after_init("#{project["name"]} settings applied", warning)
     end
 
     url = params[:url].to_s.strip
@@ -77,8 +78,8 @@ class ReposController < ApplicationController
     setup = InitSetup.new(params[:settings])
     clone!(url, target) unless File.directory?(target)
     normalize_origin!(target)
-    reinit!(target, setup, workflow: selected_workflow)
-    redirect_to repos_path, notice: "#{name} is registered"
+    warning = reinit!(target, setup, workflow: selected_workflow)
+    redirect_after_init("#{name} is registered", warning)
   end
 
   private
@@ -118,9 +119,30 @@ class ReposController < ApplicationController
   end
 
   # The InitSetup adapter rides Init's `prompts:` seam, so a web setup is
-  # indistinguishable from an interactive `hive init`.
+  # indistinguishable from an interactive `hive init`. HTTP requests must
+  # never inherit Puma's terminal: new preflight questions would otherwise
+  # wait forever with no browser surface on which the operator can answer.
   def reinit!(target, setup, workflow: nil)
-    Hive::Commands::Init.new(target, force: true, json: false, prompts: setup, workflow: workflow).call
+    provisioning_error = StringIO.new
+    Hive::Commands::Init.new(
+      target,
+      force: true,
+      json: false,
+      prompts: setup,
+      workflow: workflow,
+      provisioning_input: StringIO.new,
+      provisioning_error: provisioning_error
+    ).call
+    provisioning_error.string.strip.presence
+  end
+
+  def redirect_after_init(notice, warning)
+    options = { notice: notice }
+    if warning
+      Rails.logger.warn("web init completed with provisioning findings: #{warning.squish}")
+      options[:alert] = "Project setup completed with agent-skill findings: #{warning}"
+    end
+    redirect_to repos_path, **options
   end
 
   # A hung clone (slow network, wedged gh) would otherwise hold a Puma

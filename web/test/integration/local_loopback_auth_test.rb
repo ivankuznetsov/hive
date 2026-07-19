@@ -25,6 +25,15 @@ class LocalLoopbackAuthTest < ActionDispatch::IntegrationTest
     # Default integration-test remote_ip is 127.0.0.1 — a loopback request.
     get "/"
     assert_response :success, "an enabled loopback bypass must serve the dashboard without a session"
+    assert_select "nav[aria-label='Primary'] a", text: "Status"
+    assert_select "nav[aria-label='Primary'] a", text: "Workflows"
+    assert_select "nav[aria-label='Primary'] a", text: "Repos"
+    assert_select "nav[aria-label='Primary'] a", text: "Agents"
+    assert_select "nav[aria-label='Primary'] a", text: "Telegram"
+    assert_select ".session-login", text: "Local"
+    assert_select "a", text: "Connect GitHub"
+    assert_select "form[action='/logout']", 0,
+                  "a tokenless local session must not offer a meaningless logout action"
   end
 
   test "bypass enabled but a non-loopback remote still requires login" do

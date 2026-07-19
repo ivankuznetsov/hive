@@ -228,6 +228,37 @@ class WorkflowPackageManagedStoreTest < Minitest::Test
     end
   end
 
+  def test_activation_can_require_that_no_selection_appeared_since_validation
+    with_tmp_dir do |dir|
+      store = Hive::WorkflowPackage::ManagedStore.new(File.join(dir, ".hive-state"))
+      selected = write_package(File.join(dir, "selected"), "a" * 40)
+      candidate = write_package(File.join(dir, "candidate"), "c" * 40)
+      store.place_generation(File.join(dir, "selected"), selected)
+      store.place_generation(File.join(dir, "candidate"), candidate)
+      store.activate(selected)
+
+      assert_raises(Hive::ConcurrentRunError) do
+        store.activate(candidate, expected_current: nil)
+      end
+      assert_equal selected.source_commit, store.selected("demo").fetch("source_commit")
+    end
+  end
+
+  def test_removal_rechecks_the_selected_baseline
+    with_tmp_dir do |dir|
+      store = Hive::WorkflowPackage::ManagedStore.new(File.join(dir, ".hive-state"))
+      selected = write_package(File.join(dir, "selected"), "a" * 40)
+      store.place_generation(File.join(dir, "selected"), selected)
+      store.activate(selected)
+      stale = store.selected("demo").merge("manifest_digest" => "0" * 64)
+
+      assert_raises(Hive::ConcurrentRunError) do
+        store.remove_selection("demo", expected_current: stale)
+      end
+      assert_equal selected.source_commit, store.selected("demo").fetch("source_commit")
+    end
+  end
+
   def test_activation_rejects_a_stale_configuration_baseline_on_the_same_generation
     with_tmp_dir do |dir|
       store = Hive::WorkflowPackage::ManagedStore.new(File.join(dir, ".hive-state"))

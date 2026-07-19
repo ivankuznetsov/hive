@@ -542,5 +542,12 @@ found a reachable bot logger crash, independently proved fail-before and
 pass-after, opened pull request 814, and entered 6-review. This closes the local
 delivery-path uncertainty, but the installed package is still v0.6.4 and has
 not exercised the proposed split accounting or default issue-filing behavior;
-keep the rollout portion of this gap until a later explicitly authorized
-release is installed and monitored.
+v0.6.5 packages those changes. Installed v0.6.4 dogfood also exposed a
+separate ordinary-patrol wire-contract gap: reviewers returned meaningful
+source evidence as multiline excerpts or annotated paraphrases, while the
+validator requires every snippet to be an exact substring of one claimed
+source line and therefore rejected the complete finding. v0.6.5 aligns the
+reviewer prompt with that existing fail-closed validator. Retain this gap until
+the installed v0.6.5 package opens meaningful ordinary and Architecture Patrol
+work without dirty-checkout, quota-churn, response-envelope, or evidence-
+contract errors.

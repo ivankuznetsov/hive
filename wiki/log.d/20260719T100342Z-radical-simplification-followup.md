@@ -17,3 +17,5 @@
   generic agent/council marker actions through their shared stage base.
 - Reused one immutable managed runtime context across each actor's prompt and
   permission setup, and stopped creating empty actor-policy directories.
+- Made task capture resolve managed selection once, loading project config only
+  when a legacy lock actually needs its compatibility snapshot.

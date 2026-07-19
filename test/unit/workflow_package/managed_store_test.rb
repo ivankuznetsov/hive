@@ -183,13 +183,20 @@ class WorkflowPackageManagedStoreTest < Minitest::Test
       store = Hive::WorkflowPackage::ManagedStore.new(hive_state)
       store.place_generation(package, resolution)
       store.activate(resolution)
-      current = store.selected("demo")
+      loaded = false
+      current = store.selected("demo") { loaded = true }
+      refute loaded, "a current lock must not request legacy project config"
       FileUtils.rm_f(store.configuration_path("demo", current.fetch("configuration_digest")))
       legacy_lock = current.reject { |key, _value| %w[configuration_digest legacy_lock_schema].include?(key) }
                            .merge("schema_version" => 1)
       File.write(store.lock_path("demo"), Hive::WorkflowPackage::CanonicalJSON.generate(legacy_lock))
 
-      selected = store.selected("demo")
+      loads = 0
+      selected = store.selected("demo") do
+        loads += 1
+        {}
+      end
+      assert_equal 1, loads
       assert_equal 1, selected.fetch("legacy_lock_schema")
       assert_match(/\A[0-9a-f]{64}\z/, selected.fetch("configuration_digest"))
       assert_equal "claude", Hive::Workflows::Loader.load_dir(store.workflows_dir).fetch(:demo).stage_named("work").agent

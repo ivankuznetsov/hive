@@ -102,9 +102,14 @@ module Hive
         end
       end
 
-      def selected(name, cfg: {})
+      # The optional block supplies project config only when a legacy v1 lock
+      # needs a compatibility snapshot. Current locks and absent selections do
+      # not need to read or validate project config.
+      def selected(name, cfg: {}, &legacy_cfg_loader)
         result = nil
-        with_stable_read { result = selected_unlocked(name, cfg: cfg) }
+        with_stable_read do
+          result = selected_unlocked(name, cfg: cfg, &legacy_cfg_loader)
+        end
         result
       end
 
@@ -266,13 +271,14 @@ module Hive
         MutationLock.with_lock(workflows_dir, shared: true) { yield }
       end
 
-      def selected_unlocked(name, cfg: {}, persist_legacy_configuration: false)
+      def selected_unlocked(name, cfg: {}, persist_legacy_configuration: false, &legacy_cfg_loader)
         return nil unless Hive::Workflows::DescriptorParser::SAFE_SLUG.match?(name.to_s)
 
         data = JSON.parse(File.read(lock_path(name)))
         validate_lock!(data, expected_name: name)
         if data["schema_version"] == 1
-          legacy = legacy_configuration_from_selected_lock(name, cfg: cfg)
+          legacy_cfg = legacy_cfg_loader ? legacy_cfg_loader.call : cfg
+          legacy = legacy_configuration_from_selected_lock(name, cfg: legacy_cfg)
           raise Hive::ConfigError, "managed workflow legacy configuration is unavailable" unless legacy
 
           place_configuration(legacy) if persist_legacy_configuration

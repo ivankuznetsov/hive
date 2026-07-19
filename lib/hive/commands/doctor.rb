@@ -4,6 +4,7 @@ require "timeout"
 
 require "hive"
 require "hive/config"
+require "hive/invoked_binary"
 require "hive/agent_profiles"
 require "hive/agent_profiles/claude"
 require "hive/agent_profiles/codex"
@@ -211,11 +212,7 @@ module Hive
       end
 
       def which(name)
-        ENV["PATH"].to_s.split(File::PATH_SEPARATOR).each do |dir|
-          path = File.join(dir, name)
-          return path if File.file?(path) && File.executable?(path)
-        end
-        nil
+        Hive::InvokedBinary.which(name)
       end
 
       def first_diagnostic_line(*parts)

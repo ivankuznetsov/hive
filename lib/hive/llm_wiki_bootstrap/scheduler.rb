@@ -49,9 +49,8 @@ module Hive
           Description=Run #{service_name} daily
 
           [Timer]
-          OnBootSec=10min
+          OnActiveSec=10min
           OnUnitActiveSec=1d
-          Persistent=true
           Unit=#{service_name}
 
           [Install]

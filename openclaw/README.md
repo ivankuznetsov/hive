@@ -102,6 +102,32 @@ metadata, repeat the command without `--dry-run`. After publication, inspect
 `@ivankuznetsov/hive-cli` and its security audit. A `Review` audit is not a
 malware verdict, but every finding should be resolved or explicitly explained.
 
+ClawHub publication is staged. The publish response can reserve the immutable
+version before pre-publication checks make it visible, so `inspect` may briefly
+report `Version not found` and unversioned installs may still resolve the prior
+release. Do not republish, delete, or increment around that pending state. Poll
+the exact version with a bounded wait:
+
+```bash
+clawhub inspect @ivankuznetsov/hive-cli \
+  --version 0.1.3 \
+  --files \
+  --json
+```
+
+Declare the release live only after the exact version is inspectable and a clean
+temporary install matches the reviewed source:
+
+```bash
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT
+clawhub --workdir "$tmpdir" --dir skills install \
+  @ivankuznetsov/hive-cli \
+  --version 0.1.3
+cmp openclaw/skills/hive/SKILL.md \
+  "$tmpdir/skills/@ivankuznetsov/hive-cli/SKILL.md"
+```
+
 Keep host mutations reviewable: do not suppress package-manager confirmation,
 patch installed Hive files, or write service-manager overrides from the public
 skill. Prefer Hive's diagnose/preview/consent commands.

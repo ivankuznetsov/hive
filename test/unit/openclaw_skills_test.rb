@@ -345,6 +345,10 @@ class OpenClawSkillsTest < Minitest::Test
     assert_includes readme, 'clawhub skill publish "$skill_dir"'
     assert_includes readme, "--slug #{CLAWHUB_SLUG}"
     assert_includes readme, "--version 0.1.3"
+    assert_includes readme, "ClawHub publication is staged"
+    assert_includes readme, "Do not republish, delete, or increment"
+    assert_includes readme, "clawhub inspect #{CLAWHUB_REF}"
+    assert_includes readme, "cmp openclaw/skills/hive/SKILL.md"
     assert_includes readme, "do not publish folders"
     assert_includes readme, "hive-plan"
     refute_includes readme, "for skill in openclaw/skills"

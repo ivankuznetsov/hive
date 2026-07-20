@@ -67,7 +67,7 @@ jobs:
           retention-days: 14
 
   web:
-    name: hivebox web (Rails tests + system)
+    name: Hive web (Rails tests + system)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -95,7 +95,7 @@ jobs:
           BUNDLE_DEPLOYMENT: ""
           BUNDLE_FROZEN: ""
         run: bundle install --jobs 4
-      - name: hivebox golden-path E2E (claim → idea → Q&A → daemon → PR gate)
+      - name: Hive web golden-path E2E (claim → idea → Q&A → daemon → PR gate)
         env:
           GOLDEN_E2E_BUNDLE_PATH: ${{ github.workspace }}/vendor/root-bundle
         run: bin/rails test test/e2e/golden_path_e2e.rb

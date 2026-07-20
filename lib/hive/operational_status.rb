@@ -1,5 +1,6 @@
 require "time"
 require "hive/operational_action"
+require "hive/workflows"
 
 module Hive
   # Agent-first projection over the established hive-status graph. The input
@@ -19,6 +20,7 @@ module Hive
     REPAIR_ACTIONS = %w[error recover_execute recover_review admission_error].freeze
     COMPLETION_ACTIONS = %w[ready_to_archive review_parked].freeze
     HUMAN_ACTIONS = %w[needs_input].freeze
+    CODING_PLAN_STAGE = Hive::Workflows::Registry.default.stage_named("plan").dir.freeze
 
     def initialize(status_payload:, project_context: {}, scheduler_snapshot: nil, now: Time.now.utc)
       @status_payload = status_payload
@@ -465,7 +467,7 @@ module Hive
     end
 
     def daemon_plan_approval?(project, row)
-      daemon_enabled?(project["name"]) && row["workflow"] == "coding" && row["stage"] == "3-plan"
+      daemon_enabled?(project["name"]) && row["workflow"] == "coding" && row["stage"] == CODING_PLAN_STAGE
     end
 
     def reasons_for(project, row)

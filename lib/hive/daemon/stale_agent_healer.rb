@@ -99,6 +99,7 @@ module Hive
       REVIEW_ERROR_AUTO_RECOVERY_LIMIT = 3
       ERROR_AUTO_RECOVERY_LIMIT = 3
       ATTEMPT_LOSS_RECOVERY_LIMIT = 3
+      CODING_REVIEW_STAGE = Hive::Workflows::Registry.default.stage_named("review").dir.freeze
       # `reason=timeout` recovers EXACTLY ONCE, and only on the two stages whose
       # re-entry is provably idempotent — far lower than the agent-loss budget
       # because a timeout means "I ran and didn't finish", not "I was interrupted".
@@ -315,7 +316,7 @@ module Hive
         {
           "project" => values[0].to_s,
           "slug" => values[1].to_s,
-          "stage" => kind == "error" ? values[2].to_s : "6-review",
+          "stage" => kind == "error" ? values[2].to_s : CODING_REVIEW_STAGE,
           "reason" => (kind == "error" ? values[3] : values[2]).to_s,
           "kind" => kind
         }

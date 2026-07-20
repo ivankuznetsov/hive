@@ -92,10 +92,10 @@ To have Claude Code, Codex, or another agent CLI install Hive for you (with OS d
 Hive publishes one OpenClaw skill through ClawHub:
 
 ```bash
-openclaw skills install hive-cli
+openclaw skills install @ivankuznetsov/hive-cli
 ```
 
-Public listing: <https://clawhub.ai/ivankuznetsov/hive-cli>.
+Public listing: <https://clawhub.ai/ivankuznetsov/skills/hive-cli>.
 
 That listing installs the `/hive` slash command. Ask OpenClaw to run the guided
 setup:

@@ -57,6 +57,17 @@ class PipelineFlowTest < ApplicationSystemTestCase
                  wait: 5
     assert_selector ".chip", text: "image1", count: 1
 
+    # Reproduce the filesystem broadcaster winning the race against the POST:
+    # a page-wide refresh at submit-start must not abort the originating form.
+    # Other clients remain eligible for the refresh, and targeted grid streams
+    # on this page remain eligible too.
+    page.execute_script <<~JS
+      document.addEventListener("turbo:submit-start", () => {
+        const stream = document.createElement("turbo-stream")
+        stream.setAttribute("action", "refresh")
+        document.documentElement.appendChild(stream)
+      }, { once: true })
+    JS
     submit_idea
     assert_selector ".flash-notice", text: "Idea added", wait: 5
     assert_equal "", find("textarea[aria-label='New idea']").value,

@@ -115,6 +115,11 @@ origin also prints the Host-header/reverse-proxy warning.
   permanent node, revokes removed preview URLs, and clears the submitted text,
   chips, and upload transport on a successful `turbo:before-fetch-response`
   while the form is still connected (`turbo:submit-end` remains a fallback);
+  while its POST is in flight, that controller suppresses only page-wide
+  `refresh` stream actions on the submitting client so the background
+  filesystem broadcaster cannot abort a server-successful submission before
+  Turbo delivers the success lifecycle (targeted grid replacements and
+  refreshes on other clients continue normally);
   the selected project remains as working context, so the next idea cannot
   accidentally resubmit the completed draft even when Turbo moves the
   permanent node during rendering. No polling JS, no SSE. The daemon strip uses

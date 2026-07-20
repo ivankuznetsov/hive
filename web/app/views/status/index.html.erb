@@ -31,7 +31,7 @@
     the server can't re-render). %>
 <%= form_with url: ideas_path, multipart: true, class: "composer", id: "composer",
               data: { controller: "composer", turbo_permanent: true,
-                      action: "turbo:before-fetch-response->composer#submitted turbo:submit-end->composer#submitted" } do |f| %>
+                      action: "turbo:submit-start->composer#submitting turbo:before-stream-render@document->composer#protectSubmission turbo:before-fetch-response->composer#submitted turbo:submit-end->composer#submitted" } do |f| %>
   <div class="composer-box">
     <%= f.text_area :text, placeholder: "Drop a new idea — paste or attach screenshots…",
           required: true, data: { composer_target: "text", action: "paste->composer#paste" },

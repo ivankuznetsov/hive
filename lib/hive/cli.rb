@@ -314,8 +314,9 @@ module Hive
       ).call
     end
 
-    desc "setup", "Provision local Hive web mode, daemon service, and project enrollment"
-    option :service, type: :boolean, default: false, desc: "also install the managed web service"
+    desc "setup", "Provision Hive web, daemon service, and project enrollment"
+    option :service, type: :boolean, default: true,
+                     desc: "install and start the managed Hive web service (use --no-service to opt out)"
     option :no_bootstrap, type: :boolean, default: false, desc: "diagnose only; do not install qmd or web bundle"
     option :no_init, type: :boolean, default: false, desc: "do not initialize or enroll the current project"
     def setup

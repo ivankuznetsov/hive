@@ -139,7 +139,7 @@ class CliUsageErrorJsonTest < Minitest::Test
       assert_equal Hive::ExitCodes::USAGE, status.exitstatus
       payload = JSON.parse(out)
       assert_equal "hive-setup", payload["schema"]
-      refute payload.key?("schema_version"), "hive-setup JSON is unversioned"
+      assert_equal 1, payload["schema_version"]
       assert_equal false, payload["ok"]
       assert_equal "InvalidTaskPath", payload["error_class"]
       assert_equal "usage", payload["error_kind"]

@@ -49,7 +49,7 @@ JSON_USAGE_ERROR_CONTRACTS = {
   "findings" => { schema: "hive-findings", error_kind: "invalid_task_path" },
   "patrol" => { schema: "hive-patrol", error_kind: "error" },
   "refactor-patrol" => { reporter: :refactor_patrol, error_kind: "error" },
-  "setup" => { schema: "hive-setup", schema_version: false, error_kind: "usage" },
+  "setup" => { schema: "hive-setup", error_kind: "usage" },
   "connect" => { error_kind: "usage", extras: { "service" => "screenote" } },
   "disconnect" => { error_kind: "usage", extras: { "service" => "screenote" } },
   "accept-finding" => {
@@ -323,8 +323,7 @@ def json_usage_error_contract(argv)
 
     return {
       schema: "hive-web-#{subcommand}",
-      error_kind: "invalid_task_path",
-      schema_version: false
+      error_kind: "invalid_task_path"
     }
   when "bot"
     # hive-bot-status is deliberately the usage-error contract for the whole

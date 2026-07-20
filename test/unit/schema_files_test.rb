@@ -29,6 +29,45 @@ require "tmpdir"
 #   3. Pin the same required-key set the producer code emits, so a producer
 #      change without a schema update fails at test time.
 class SchemaFilesTest < Minitest::Test
+  def test_native_web_schema_files_accept_versioned_success_and_error_shapes
+    service = {
+      "platform" => "linux", "unit_path" => "/tmp/hive-web.service",
+      "service_installed" => true, "service_enabled" => true,
+      "service_running" => true, "service_manager_available" => true,
+      "url" => "http://127.0.0.1:4567", "ready" => true, "readiness" => "ready"
+    }
+    samples = {
+      "hive-setup" => {
+        "schema" => "hive-setup", "schema_version" => 1, "ok" => true,
+        "mode" => "managed_service", "url" => service.fetch("url"),
+        "service" => service, "warnings" => [],
+        "phases" => [ { "name" => "web", "ok" => true, "available" => true } ]
+      },
+      "hive-web-status" => {
+        "schema" => "hive-web-status", "schema_version" => 1,
+        "ok" => true, "warnings" => []
+      }.merge(service),
+      "hive-web-install" => {
+        "schema" => "hive-web-install", "schema_version" => 1, "ok" => true,
+        "outcome" => "written", "platform" => "linux",
+        "target_path" => "/tmp/hive-web.service", "backup_path" => nil,
+        "restarted" => false, "messages" => [], "warnings" => []
+      }.merge(service)
+    }
+
+    samples.each do |name, payload|
+      schemer = JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path(name))))
+      assert_empty schemer.validate(payload).to_a, "#{name} success payload must validate"
+
+      error = Hive::Schemas::ErrorEnvelope.build(
+        schema: name,
+        error: Hive::InvalidTaskPath.new("usage"),
+        error_kind: "usage"
+      )
+      assert_empty schemer.validate(error).to_a, "#{name} usage payload must validate"
+    end
+  end
+
   def test_doctor_v1_schema_remains_available_and_v2_payload_validates
     assert File.exist?(Hive::Schemas.schema_path("hive-doctor", version: 1))
     target = Hive::AgentSkills::Target.new(

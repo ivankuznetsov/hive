@@ -207,6 +207,13 @@ class WebCommandTest < Minitest::Test
       define_method(:messages) { [ "installed note" ] }
       define_method(:target_path) { "/tmp/local.hive-web.plist" }
       define_method(:envelope_platform) { "macos" }
+      define_method(:service_state) do
+        {
+          "platform" => "macos", "unit_path" => "/tmp/local.hive-web.plist",
+          "service_installed" => true, "service_enabled" => false,
+          "service_running" => false, "service_manager_available" => true
+        }
+      end
     end
     original = Hive::Commands::Web.const_get(:ServiceInstaller)
     Hive::Commands::Web.send(:remove_const, :ServiceInstaller)
@@ -247,6 +254,7 @@ class WebCommandTest < Minitest::Test
         out, = capture_io { Hive::Commands::Web.new("install", no_bootstrap: true, json: true).call }
         payload = JSON.parse(out)
         assert_equal "hive-web-install", payload["schema"]
+        assert_equal 1, payload["schema_version"]
         assert_equal true, payload["ok"]
         assert_equal "written", payload["outcome"]
         assert_equal "macos", payload["platform"]
@@ -419,14 +427,21 @@ class WebCommandTest < Minitest::Test
 
   def test_status_service_json_emits_status_envelope
     command = Hive::Commands::Web.new("status", json: true)
-    state = { "platform" => "linux", "service_installed" => true, "service_enabled" => false }
+    state = {
+      "platform" => "linux", "service_installed" => true, "service_enabled" => false,
+      "service_running" => false, "service_manager_available" => true
+    }
     out, = with_fake_service_installer(platform: "linux", state: state) do
       capture_io { command.call }
     end
     payload = JSON.parse(out)
     assert_equal "hive-web-status", payload["schema"]
+    assert_equal 1, payload["schema_version"]
     assert_equal true, payload["ok"]
     assert_equal true, payload["service_installed"], "the installer's service_state must be merged into the envelope"
+    assert_equal false, payload["service_running"]
+    assert_equal false, payload["ready"]
+    assert_equal "disabled", payload["readiness"]
   end
 
   # ── rails_app_dir resolution + bootstrap ────────────────────────────

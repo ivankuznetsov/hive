@@ -1,3 +1,5 @@
+require "uri"
+
 class ApplicationController < ActionController::Base
   # Rails 8 enables forgery protection by default; explicit so static
   # scanners (and readers) see the contract without chasing framework
@@ -9,6 +11,7 @@ class ApplicationController < ActionController::Base
   # Changes to the importmap will invalidate the etag for HTML responses
   stale_when_importmap_changes
 
+  before_action :authorize_local_host!
   before_action :require_login
 
   helper_method :current_login, :operator_access?, :operator_label
@@ -84,6 +87,24 @@ class ApplicationController < ActionController::Base
     return false unless ENV["HIVEBOX_LOCAL_LOOPBACK"] == "1"
 
     Hive::Web::Loopback.address?(request.remote_ip)
+  end
+
+  # A loopback socket peer is necessary but not sufficient for the no-auth
+  # operator mode: browsers can be induced to send local requests with an
+  # attacker-controlled Host through DNS rebinding. Admit normalized loopback
+  # hosts plus the host from the explicitly configured origin, before any
+  # controller can read or mutate operator state.
+  def authorize_local_host!
+    return unless ENV["HIVEBOX_LOCAL_LOOPBACK"] == "1"
+    return if Hive::Web::Loopback.address?(request.host)
+
+    origin = ENV["HIVE_WEB_ORIGIN"].presence || ENV["HIVEBOX_ORIGIN"].presence
+    allowed_host = URI.parse(origin).host if origin
+    return if allowed_host && request.host.casecmp?(allowed_host)
+
+    head :forbidden
+  rescue URI::InvalidURIError
+    head :forbidden
   end
 
   def registered_projects

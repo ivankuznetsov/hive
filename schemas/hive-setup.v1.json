@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-setup.v1.json",
+  "title": "hive setup output (v1)",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
+  ],
+  "$defs": {
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "mode", "url", "service", "warnings", "phases"],
+      "properties": {
+        "schema": { "const": "hive-setup" },
+        "schema_version": { "const": 1 },
+        "ok": { "type": "boolean" },
+        "mode": { "enum": ["managed_service", "service_opt_out", "diagnose_only"] },
+        "url": { "type": "string" },
+        "service": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/ServiceState" }] },
+        "warnings": { "type": "array", "items": { "$ref": "#/$defs/Warning" } },
+        "phases": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["name", "ok"],
+            "properties": { "name": { "type": "string" }, "ok": { "type": "boolean" } },
+            "additionalProperties": true
+          }
+        }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "error_class", "error_kind", "exit_code", "message"],
+      "properties": {
+        "schema": { "const": "hive-setup" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "error_class": { "type": "string" },
+        "error_kind": { "type": "string" },
+        "exit_code": { "type": "integer" },
+        "message": { "type": "string" }
+      }
+    },
+    "ServiceState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["platform", "unit_path", "service_installed", "service_enabled", "service_running", "service_manager_available", "url", "ready", "readiness"],
+      "properties": {
+        "platform": { "enum": ["linux", "macos", "unsupported"] },
+        "unit_path": { "type": ["string", "null"] },
+        "service_installed": { "type": "boolean" },
+        "service_enabled": { "type": "boolean" },
+        "service_running": { "type": "boolean" },
+        "service_manager_available": { "type": "boolean" },
+        "url": { "type": "string" },
+        "ready": { "type": "boolean" },
+        "readiness": { "enum": ["ready", "manager_unavailable", "not_installed", "disabled", "inactive", "active_not_ready", "invalid_url"] }
+      }
+    },
+    "Warning": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  }
+}

@@ -67,11 +67,18 @@ class SetupOrchestratorTest < Minitest::Test
     end
   end
 
-  def fake_installer(success: true, wire: "written", target_path: "/tmp/unit.service", messages: [ "note" ])
+  def fake_installer(success: true, wire: "written", target_path: "/tmp/unit.service", messages: [ "note" ],
+                     state: nil)
     installer = Object.new
     installer.define_singleton_method(:install!) { |**_kw| FakeOutcome.new(success, wire) }
     installer.define_singleton_method(:target_path) { target_path }
     installer.define_singleton_method(:messages) { messages }
+    observed = state || {
+      "platform" => "linux", "unit_path" => target_path,
+      "service_installed" => true, "service_enabled" => true,
+      "service_running" => true, "service_manager_available" => true
+    }
+    installer.define_singleton_method(:service_state) { observed }
     installer
   end
 
@@ -102,7 +109,14 @@ class SetupOrchestratorTest < Minitest::Test
               ->(**_kw) { daemon_installer }) do
               with_replaced_singleton_method(Hive::Commands::Web::ServiceInstaller, :new,
                 ->(**_kw) { web_installer }) do
-                stub_web_config { yield }
+                require "hive/web/service_status"
+                status = web_installer.service_state.merge(
+                  "ready" => true, "readiness" => "ready", "url" => "http://127.0.0.1:4567"
+                )
+                with_replaced_singleton_method(Hive::Web::ServiceStatus, :snapshot,
+                  ->(**_kw) { status }) do
+                  stub_web_config { yield }
+                end
               end
             end
           end
@@ -142,9 +156,11 @@ class SetupOrchestratorTest < Minitest::Test
     assert_equal 0, exit_code, "clean diagnostics + all phases ok must exit 0"
     payload = JSON.parse(output.string)
     assert_equal "hive-setup", payload["schema"]
+    assert_equal 1, payload["schema_version"]
+    assert_equal "managed_service", payload["mode"]
     assert_equal true, payload["ok"]
     names = payload["phases"].map { |p| p["name"] }
-    assert_equal %w[diagnostics web_bundle daemon_service enroll web], names,
+    assert_equal %w[diagnostics web_bundle daemon_service enroll web_service web], names,
                  "phases must be recorded in provisioning order"
     assert payload["phases"].all? { |p| p["ok"] }, "every phase ok on the happy path"
   end
@@ -172,6 +188,7 @@ class SetupOrchestratorTest < Minitest::Test
       end
 
     payload = JSON.parse(output.string)
+    assert_equal "diagnose_only", payload["mode"]
     assert_equal %w[diagnostics web], payload["phases"].map { |p| p["name"] },
                  "diagnose-only run records only diagnostics + web"
     assert_equal 0, exit_code, "clean diagnostics with no provisioning still exits via successful?"
@@ -211,27 +228,80 @@ class SetupOrchestratorTest < Minitest::Test
 
     names = JSON.parse(output.string)["phases"].map { |p| p["name"] }
     refute_includes names, "enroll", "--no-init must not record an enroll phase"
-    assert_equal %w[diagnostics web_bundle daemon_service web], names
+    assert_equal %w[diagnostics web_bundle daemon_service web_service web], names
   end
 
   # ── --service: web service installed ─────────────────────────────────
 
-  def test_service_flag_installs_web_service_phase
+  def test_default_installs_web_service_phase
     output = StringIO.new
     diagnostics = diag(ok_row)
 
     with_all_collaborators_ok(diagnostics: diagnostics) do
       with_fake_init do
-        Hive::Commands::Setup.new(json: true, service: true, output: output).call
+        Hive::Commands::Setup.new(json: true, output: output).call
       end
     end
 
     names = JSON.parse(output.string)["phases"].map { |p| p["name"] }
-    assert_includes names, "web_service", "--service must record the web_service phase"
+    assert_includes names, "web_service", "default setup must record the web_service phase"
     web_service = JSON.parse(output.string)["phases"].find { |p| p["name"] == "web_service" }
     assert_equal true, web_service["ok"]
     assert_equal "written", web_service["outcome"]
     assert_equal "/tmp/unit.service", web_service["target_path"]
+    assert_equal true, web_service["service_installed"]
+    assert_equal true, web_service["service_enabled"]
+    assert_equal true, web_service["service_running"]
+    assert_equal true, web_service["ready"]
+  end
+
+  def test_no_service_performs_no_service_mutation_and_reports_observed_state
+    output = StringIO.new
+    diagnostics = diag(ok_row)
+    installer = fake_installer
+    installer.define_singleton_method(:install!) { |**| flunk "--no-service must not mutate the service" }
+
+    with_all_collaborators_ok(diagnostics: diagnostics) do
+      with_fake_init do
+        with_replaced_singleton_method(Hive::Commands::Web::ServiceInstaller, :new, ->(**) { installer }) do
+          Hive::Commands::Setup.new(json: true, service: false, output: output).call
+        end
+      end
+    end
+
+    payload = JSON.parse(output.string)
+    assert_equal "service_opt_out", payload["mode"]
+    phase = payload["phases"].find { |row| row["name"] == "web_service" }
+    assert_equal "opted_out", phase["mutation"]
+    assert_equal true, phase["service_running"]
+    assert_equal true, phase["ready"]
+  end
+
+  def test_failed_web_bundle_blocks_service_install
+    output = StringIO.new
+    diagnostics = diag(ok_row)
+    fake_diag = Object.new
+    fake_diag.define_singleton_method(:run) { diagnostics }
+
+    with_replaced_singleton_method(Hive::Setup::Diagnostics, :new, ->(*) { fake_diag }) do
+      with_replaced_singleton_method(Hive::Web::AppBundle, :ensure!, ->(*) { raise Hive::Error, "bad bundle" }) do
+        with_replaced_singleton_method(Hive::Commands::Daemon::ServiceInstaller, :new,
+          ->(**) { fake_installer }) do
+          with_replaced_singleton_method(Hive::Commands::Web::ServiceInstaller, :new,
+            ->(**) { flunk "service installer must not be constructed after bundle failure" }) do
+            stub_web_config do
+              Hive::Commands::Setup.new(json: true, no_init: true, output: output).call
+            end
+          end
+        end
+      end
+    end
+
+    payload = JSON.parse(output.string)
+    phase = payload["phases"].find { |row| row["name"] == "web_service" }
+    assert_equal false, phase["ok"]
+    assert_equal "blocked", phase["mutation"]
+    assert_match(/web_bundle/, phase["message"])
   end
 
   def test_web_service_failure_records_message_and_fails_exit
@@ -243,7 +313,7 @@ class SetupOrchestratorTest < Minitest::Test
         with_fake_init do
           with_replaced_singleton_method(Hive::Commands::Web::ServiceInstaller, :new,
             ->(**_kw) { raise Errno::EACCES, "/Library/LaunchAgents" }) do
-            Hive::Commands::Setup.new(json: true, service: true, output: output).call
+            Hive::Commands::Setup.new(json: true, output: output).call
           end
         end
       end
@@ -513,7 +583,7 @@ class SetupOrchestratorTest < Minitest::Test
     assert_includes text, "fix git: brew install git", "a hard-failing row with a fix_command must print a fix hint"
     refute_includes text, "fix qmd", "a bootstrappable row must not print a fix hint"
     refute_includes text, "fix ruby", "an ok row must not print a fix hint"
-    assert_includes text, "hive setup: web available with `hive web` at http://127.0.0.1:4567"
+    assert_includes text, "Hive web is not ready at http://127.0.0.1:4567"
   end
 
   def test_emit_json_matches_successful_predicate
@@ -529,6 +599,7 @@ class SetupOrchestratorTest < Minitest::Test
 
     payload = JSON.parse(output.string)
     assert_equal "hive-setup", payload["schema"]
+    assert_equal 1, payload["schema_version"]
     assert_equal false, payload["ok"], "a failed phase must make the JSON envelope ok:false"
     assert_equal 2, payload["phases"].size
   end

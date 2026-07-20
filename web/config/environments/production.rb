@@ -1,4 +1,5 @@
 require "active_support/core_ext/integer/time"
+require "uri"
 
 Rails.application.configure do
   # Settings specified here will take precedence over those in config/application.rb.
@@ -82,14 +83,15 @@ Rails.application.configure do
   # Only use :id for inspections in production.
   config.active_record.attributes_for_inspect = [ :id ]
 
-  # Enable DNS rebinding protection and other `Host` header attacks.
-  # config.hosts = [
-  #   "example.com",     # Allow requests from example.com
-  #   /.*\.example\.com/ # Allow requests from subdomains like `www.example.com`
-  # ]
-  #
-  # Skip DNS rebinding protection for the default health check endpoint.
-  # config.host_authorization = { exclude: ->(request) { request.path == "/up" } }
+  # Enable DNS-rebinding protection for the persistent native service. The
+  # ordinary setup path admits only loopback hostnames/literals; an operator's
+  # explicitly configured origin contributes exactly one additional host.
+  config.hosts = [ "localhost", /\A127(?:\.\d{1,3}){3}\z/, "::1" ]
+  configured_origin = ENV["HIVE_WEB_ORIGIN"].presence || ENV["HIVEBOX_ORIGIN"].presence
+  if configured_origin
+    origin_host = URI.parse(configured_origin).host
+    config.hosts << origin_host if origin_host
+  end
 
   # Turbo Streams connect over Action Cable. Same-origin-as-host covers the
   # normal case with ZERO config — browse the box at any address and the

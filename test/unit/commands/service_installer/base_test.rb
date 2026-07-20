@@ -225,14 +225,17 @@ class ServiceInstallerBaseTest < Minitest::Test
       FileUtils.mkdir_p(File.dirname(installer.target_path))
       File.write(installer.target_path, "unit\n")
 
-      state = installer.service_state
+      state = installer.service_lifecycle_state
 
       assert_equal "linux", state["platform"]
       assert_equal installer.target_path, state["unit_path"]
       assert state["service_installed"], "unit file exists on disk → installed=true"
       assert state["service_enabled"], "is-enabled exit 0 → enabled=true"
-      assert_equal [ %w[systemctl --user is-enabled hive-test] ], seen,
-                   "service_enabled? must use the read-only is-enabled query only"
+      assert state["service_running"], "is-active exit 0 → running=true"
+      assert state["service_manager_available"]
+      assert_equal [ %w[systemctl --user is-enabled hive-test],
+                     %w[systemctl --user is-active --quiet hive-test] ], seen,
+                   "service state must use read-only manager queries only"
     end
   end
 
@@ -242,10 +245,11 @@ class ServiceInstallerBaseTest < Minitest::Test
       installer = TestInstaller.new(host_os: "linux", home: dir,
                                     systemctl_available: true, runner: runner)
 
-      state = installer.service_state
+      state = installer.service_lifecycle_state
 
       refute state["service_installed"], "no unit file on disk → installed=false"
       refute state["service_enabled"], "is-enabled non-zero → enabled=false"
+      refute state["service_running"]
     end
   end
 
@@ -258,9 +262,11 @@ class ServiceInstallerBaseTest < Minitest::Test
       installer = TestInstaller.new(host_os: "linux", home: dir,
                                     systemctl_available: false, runner: runner)
 
-      state = installer.service_state
+      state = installer.service_lifecycle_state
 
       refute state["service_enabled"]
+      refute state["service_running"]
+      refute state["service_manager_available"]
       refute called, "must not probe systemctl when it is unavailable"
     end
   end
@@ -272,11 +278,13 @@ class ServiceInstallerBaseTest < Minitest::Test
       installer = TestInstaller.new(host_os: "darwin", home: dir, runner: runner,
                                     launchctl_available: true)
 
-      state = installer.service_state
+      state = installer.service_lifecycle_state
 
       assert_equal "macos", state["platform"]
       assert state["service_enabled"], "launchctl list exit 0 → loaded → enabled=true"
-      assert_equal [ %w[launchctl list local.hive-test] ], seen,
+      assert state["service_running"]
+      assert_equal [ %w[launchctl list local.hive-test],
+                     %w[launchctl list local.hive-test] ], seen,
                    "macOS probe must be the read-only launchctl list query"
     end
   end
@@ -291,9 +299,11 @@ class ServiceInstallerBaseTest < Minitest::Test
       installer = TestInstaller.new(host_os: "darwin", home: dir, runner: runner,
                                     launchctl_available: false)
 
-      state = installer.service_state
+      state = installer.service_lifecycle_state
 
       refute state["service_enabled"]
+      refute state["service_running"]
+      refute state["service_manager_available"]
       refute called, "must not probe launchctl when it is unavailable"
     end
   end
@@ -308,22 +318,40 @@ class ServiceInstallerBaseTest < Minitest::Test
       installer = TestInstaller.new(host_os: "darwin", home: dir, runner: runner)
       installer.define_singleton_method(:which) { |name| name == "launchctl" ? "/bin/launchctl" : nil }
 
-      state = installer.service_state
+      state = installer.service_lifecycle_state
 
       assert state["service_enabled"], "launchctl present + list exit 0 → enabled=true"
-      assert_equal [ %w[launchctl list local.hive-test] ], seen
+      assert_equal [ %w[launchctl list local.hive-test],
+                     %w[launchctl list local.hive-test] ], seen
+    end
+  end
+
+  def test_macos_lifecycle_distinguishes_loaded_from_running_job
+    with_tmp_dir do |dir|
+      installer = TestInstaller.new(
+        host_os: "darwin", home: dir, launchctl_available: true,
+        runner: ->(_argv) { true },
+        status_reader: ->(_argv) { [ "state = waiting\n", true ] }
+      )
+
+      state = installer.service_lifecycle_state
+
+      assert state["service_enabled"], "loaded job remains enabled"
+      refute state["service_running"], "loaded-but-waiting job must not be called running"
     end
   end
 
   def test_service_state_unsupported_platform
     installer = TestInstaller.new(host_os: "sunos", runner: ->(_argv) { true })
 
-    state = installer.service_state
+    state = installer.service_lifecycle_state
 
     assert_equal "unsupported", state["platform"]
     assert_nil state["unit_path"]
     refute state["service_installed"]
     refute state["service_enabled"]
+    refute state["service_running"]
+    refute state["service_manager_available"]
   end
 
   def test_launchd_label_matches_service_name

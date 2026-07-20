@@ -23,7 +23,7 @@ class LocalLoopbackAuthTest < ActionDispatch::IntegrationTest
   test "loopback request with the bypass enabled skips login" do
     ENV["HIVEBOX_LOCAL_LOOPBACK"] = "1"
     # Default integration-test remote_ip is 127.0.0.1 — a loopback request.
-    get "/"
+    get "/", headers: { "Host" => "localhost" }
     assert_response :success, "an enabled loopback bypass must serve the dashboard without a session"
     assert_select "nav[aria-label='Primary'] a", text: "Status"
     assert_select "nav[aria-label='Primary'] a", text: "Workflows"
@@ -40,7 +40,7 @@ class LocalLoopbackAuthTest < ActionDispatch::IntegrationTest
     ENV["HIVEBOX_LOCAL_LOOPBACK"] = "1"
     # The env var is set, but the request originates off-host: the bypass must
     # NOT apply, or the dashboard would be exposed unauthenticated to a remote.
-    get "/", headers: { "REMOTE_ADDR" => "203.0.113.5" }
+    get "/", headers: { "Host" => "localhost", "REMOTE_ADDR" => "203.0.113.5" }
     assert_redirected_to "/login", "a non-loopback request must require login even with the bypass enabled"
   end
 
@@ -48,5 +48,24 @@ class LocalLoopbackAuthTest < ActionDispatch::IntegrationTest
     ENV.delete("HIVEBOX_LOCAL_LOOPBACK")
     get "/"
     assert_redirected_to "/login", "without HIVEBOX_LOCAL_LOOPBACK every request must authenticate"
+  end
+  test "loopback peer with an attacker controlled Host is rejected" do
+    ENV["HIVEBOX_LOCAL_LOOPBACK"] = "1"
+
+    get "/", headers: { "Host" => "attacker.example" }
+
+    assert_response :forbidden
+  end
+
+  test "loopback peer accepts the explicitly configured origin host" do
+    ENV["HIVEBOX_LOCAL_LOOPBACK"] = "1"
+    prior = ENV["HIVEBOX_ORIGIN"]
+    ENV["HIVEBOX_ORIGIN"] = "https://hive.internal.example"
+
+    get "/", headers: { "Host" => "hive.internal.example" }
+
+    assert_response :success
+  ensure
+    prior.nil? ? ENV.delete("HIVEBOX_ORIGIN") : ENV["HIVEBOX_ORIGIN"] = prior
   end
 end

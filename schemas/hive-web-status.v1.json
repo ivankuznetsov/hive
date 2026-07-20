@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-web-status.v1.json",
+  "title": "hive web status output (v1)",
+  "oneOf": [
+    { "$ref": "#/$defs/SuccessPayload" },
+    { "$ref": "#/$defs/ErrorPayload" }
+  ],
+  "$defs": {
+    "SuccessPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "platform", "unit_path", "service_installed", "service_enabled", "service_running", "service_manager_available", "url", "ready", "readiness", "warnings"],
+      "properties": {
+        "schema": { "const": "hive-web-status" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": true },
+        "platform": { "enum": ["linux", "macos", "unsupported"] },
+        "unit_path": { "type": ["string", "null"] },
+        "service_installed": { "type": "boolean" },
+        "service_enabled": { "type": "boolean" },
+        "service_running": { "type": "boolean" },
+        "service_manager_available": { "type": "boolean" },
+        "url": { "type": "string" },
+        "ready": { "type": "boolean" },
+        "readiness": { "type": "string" },
+        "warnings": { "type": "array", "items": { "type": "object" } }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema", "schema_version", "ok", "error_class", "error_kind", "exit_code", "message"],
+      "properties": {
+        "schema": { "const": "hive-web-status" },
+        "schema_version": { "const": 1 },
+        "ok": { "const": false },
+        "error_class": { "type": "string" },
+        "error_kind": { "type": "string" },
+        "exit_code": { "type": "integer" },
+        "message": { "type": "string" }
+      }
+    }
+  }
+}

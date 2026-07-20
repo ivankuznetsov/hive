@@ -6,11 +6,12 @@ require "hive/invoked_binary"
 require "hive/paths"
 require "hive/setup/diagnostics"
 require "hive/web/app_bundle"
+require "hive/web/service_status"
 
 module Hive
   module Commands
     class Setup
-      def initialize(json: false, service: false, no_bootstrap: false,
+      def initialize(json: false, service: true, no_bootstrap: false,
                      no_init: false, output: $stdout)
         @json = json
         @service = service
@@ -30,12 +31,24 @@ module Hive
         # the daemon and enrolls the cwd.
         unless @no_bootstrap
           bootstrap_qmd_if_missing(diagnostics)
-          bootstrap_web_bundle
+          web_bundle = bootstrap_web_bundle
           install_daemon
           enroll_project unless @no_init
-          install_web_service if @service
+          if @service
+            if web_bundle["ok"]
+              install_web_service
+            else
+              add_phase(
+                "web_service", false,
+                "mutation" => "blocked",
+                "message" => "web service not installed because web_bundle failed"
+              )
+            end
+          else
+            observe_web_service
+          end
         end
-        add_phase("web", true, "url" => web_url)
+        add_web_phase
 
         emit(diagnostics)
         successful?(diagnostics) ? 0 : 1
@@ -58,7 +71,9 @@ module Hive
       end
 
       def add_phase(name, ok, data = {})
-        @phases << { "name" => name, "ok" => ok }.merge(data)
+        row = { "name" => name, "ok" => ok }.merge(data)
+        @phases << row
+        row
       end
 
       # Run one provisioning phase. The block returns [ok, data]; ANY raise
@@ -130,9 +145,42 @@ module Hive
           # Pass the same resolved binary as install_daemon so both managed
           # services point at one hive binary (R8 same-binary guarantee).
           installer = Hive::Commands::Web::ServiceInstaller.new(binary_path: Hive::InvokedBinary.path)
-          outcome = installer.install!(autostart: true, force: true)
-          [ outcome.success?, { "outcome" => outcome.wire_outcome, "target_path" => installer.target_path } ]
+          # Ordinary setup is intentionally drift-safe. A customized unit is
+          # observed and preserved; explicit `hive web install --force` owns
+          # the backup-producing repair path.
+          outcome = installer.install!(autostart: true, force: false)
+          state = Hive::Web::ServiceStatus.snapshot(installer: installer, config: web_config)
+          @web_service = state
+          ok = outcome.success? && service_available?(state)
+          data = {
+            "mutation" => "attempted",
+            "outcome" => outcome.wire_outcome,
+            "target_path" => installer.target_path,
+            "messages" => installer.messages
+          }.merge(state)
+          unless ok
+            data["message"] = if outcome.wire_outcome == "drifted"
+              "customized web service preserved; repair explicitly with `hive web install --force`"
+            else
+              "web service did not reach installed, enabled, running, and ready state"
+            end
+          end
+          [ ok, data ]
         end
+      end
+
+      def observe_web_service
+        phase("web_service") do
+          require "hive/commands/web/service_installer"
+          installer = Hive::Commands::Web::ServiceInstaller.new(binary_path: Hive::InvokedBinary.path)
+          state = Hive::Web::ServiceStatus.snapshot(installer: installer, config: web_config)
+          @web_service = state
+          [ true, { "mutation" => "opted_out", "messages" => installer.messages }.merge(state) ]
+        end
+      end
+
+      def service_available?(state)
+        state.values_at("service_installed", "service_enabled", "service_running", "ready").all?
       end
 
       def current_project_name
@@ -152,15 +200,60 @@ module Hive
       end
 
       def web_url
-        cfg = Hive::Config.load_global_web
-        "http://#{cfg.fetch("bind")}:#{cfg.fetch("port")}"
+        Hive::Web::ServiceStatus.effective_url(web_config)
+      end
+
+      def web_config
+        @web_config ||= Hive::Config.load_global_web
+      end
+
+      def add_web_phase
+        if @no_bootstrap
+          add_phase(
+            "web", true,
+            "url" => web_url,
+            "available" => false,
+            "readiness" => "not_observed",
+            "mutation" => "diagnose_only"
+          )
+          return
+        end
+
+        state = @web_service || {
+          "url" => web_url,
+          "ready" => false,
+          "readiness" => "not_observed"
+        }
+        managed = @service
+        add_phase(
+          "web", managed ? state["ready"] == true : true,
+          "url" => state["url"],
+          "available" => state["ready"] == true,
+          "readiness" => state["readiness"]
+        )
       end
 
       def emit(diagnostics)
         # `ok` derives from successful? (the same predicate the exit code uses)
         # so the JSON envelope and the process exit status can never disagree —
         # a hard diagnostic failure must not report "ok": true while exiting 1.
-        payload = { "schema" => "hive-setup", "ok" => successful?(diagnostics), "phases" => @phases }
+        mode = if @no_bootstrap
+          "diagnose_only"
+        elsif @service
+          "managed_service"
+        else
+          "service_opt_out"
+        end
+        payload = {
+          "schema" => "hive-setup",
+          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-setup"),
+          "ok" => successful?(diagnostics),
+          "mode" => mode,
+          "url" => web_url,
+          "service" => @web_service,
+          "warnings" => [],
+          "phases" => @phases
+        }
         if @json
           @output.puts JSON.generate(payload)
         else
@@ -172,7 +265,13 @@ module Hive
 
             @output.puts "fix #{row.name}: #{row.fix_command}"
           end
-          @output.puts "hive setup: web available with `hive web` at #{web_url}"
+          if @web_service && @web_service["ready"]
+            @output.puts "hive setup: Hive web ready at #{@web_service["url"]}"
+          elsif @service && !@no_bootstrap
+            @output.puts "hive setup: Hive web is not ready at #{web_url}; inspect `hive web status`"
+          else
+            @output.puts "hive setup: Hive web configured at #{web_url}; foreground command: `hive web`"
+          end
         end
       end
     end

@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ivankuznetsov/hive/blob/main/schemas/hive-web-install.v1.json",
+  "title": "hive web install output (v1)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "schema_version", "ok"],
+  "properties": {
+    "schema": { "const": "hive-web-install" },
+    "schema_version": { "const": 1 },
+    "ok": { "type": "boolean" },
+    "outcome": { "enum": ["written", "upgraded", "unchanged", "unsupported", "drifted", "failed"] },
+    "platform": { "enum": ["linux", "macos", "unsupported"] },
+    "target_path": { "type": ["string", "null"] },
+    "backup_path": { "type": ["string", "null"] },
+    "restarted": { "type": "boolean" },
+    "messages": { "type": "array", "items": { "type": "string" } },
+    "warnings": { "type": "array", "items": { "type": "object" } },
+    "unit_path": { "type": ["string", "null"] },
+    "service_installed": { "type": "boolean" },
+    "service_enabled": { "type": "boolean" },
+    "service_running": { "type": "boolean" },
+    "service_manager_available": { "type": "boolean" },
+    "url": { "type": "string" },
+    "ready": { "type": "boolean" },
+    "readiness": { "type": "string" },
+    "error_class": { "type": "string" },
+    "error_kind": { "type": "string" },
+    "exit_code": { "type": "integer" },
+    "message": { "type": "string" }
+  }
+}

@@ -5,6 +5,7 @@ require "hive/paths"
 require "hive/web/session_secret"
 require "hive/web/app_bundle"
 require "hive/web/loopback"
+require "hive/web/service_status"
 require "hive/invoked_binary"
 
 module Hive
@@ -215,25 +216,38 @@ module Hive
       def status_service
         require "hive/commands/web/service_installer"
         installer = Hive::Commands::Web::ServiceInstaller.new
-        state = installer.service_state
+        state = Hive::Web::ServiceStatus.snapshot(installer: installer, config: Hive::Config.load_global_web)
         if @json
-          puts JSON.generate({ "schema" => "hive-web-status", "ok" => true }.merge(state))
+          puts JSON.generate({
+            "schema" => "hive-web-status",
+            "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-web-status"),
+            "ok" => true,
+            "warnings" => []
+          }.merge(state))
         else
-          puts "hive web: service #{state["service_installed"] ? "installed" : "not installed"}"
+          puts "hive web: service " \
+               "installed=#{state["service_installed"]} " \
+               "enabled=#{state["service_enabled"]} " \
+               "running=#{state["service_running"]} " \
+               "ready=#{state["ready"]}"
+          puts "hive web: #{state["ready"] ? "ready at" : "configured at"} #{state["url"]}"
         end
       end
 
       def service_envelope(installer, outcome)
+        state = Hive::Web::ServiceStatus.snapshot(installer: installer, config: Hive::Config.load_global_web)
         {
           "schema" => "hive-web-install",
+          "schema_version" => Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-web-install"),
           "ok" => outcome.success?,
           "outcome" => outcome.wire_outcome,
           "platform" => installer.envelope_platform,
           "target_path" => installer.target_path,
           "backup_path" => outcome.backup_path,
           "restarted" => outcome.restarted,
-          "messages" => installer.messages.dup
-        }
+          "messages" => installer.messages.dup,
+          "warnings" => []
+        }.merge(state)
       end
     end
   end

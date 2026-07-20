@@ -189,6 +189,34 @@ class DaemonStaleAgentHealingTest < Minitest::Test
     end
   end
 
+  def test_full_pipeline_retries_provider_limit_hourly_before_dated_reset
+    with_seeded_task do |dir, _folder, state_file, slug|
+      now = Time.now.utc
+      reset_at = (now + 5 * 86_400).iso8601
+      File.write(
+        state_file,
+        "---\nslug: #{slug}\n---\n\n# #{slug}\n\n" \
+        "<!-- ERROR reason=limits_reached provider=codex retry_after=#{reset_at} marker_id=quota-1 -->\n"
+      )
+      limited_at = now - Hive::AgentLimit.retry_cooldown_sec
+      File.utime(limited_at, limited_at, state_file)
+
+      row = status_rows_via_consumer(dir).find { |candidate| candidate.slug == slug }
+      assert row, "status pipeline must include the quota-held task"
+      assert_equal "limits_reached", row.marker_attrs["reason"]
+      assert_equal reset_at, row.marker_attrs["retry_after"]
+      assert_in_delta limited_at.to_f, row.state_file_mtime.to_f, 1.0,
+                      "status must carry the marker mtime used by the hourly readiness gate"
+
+      @healer.heal([ row ], now: now)
+
+      assert Hive::Markers.current(state_file).none?,
+             "the daemon must retry after one hour even when the provider advertises a later reset"
+      heal = @logger.events.find { |name, attrs| name == :marker_healed && attrs[:reason] == "limits_reached" }
+      assert heal, "expected the quota readiness attempt to be visible in daemon events"
+    end
+  end
+
   def test_full_pipeline_uses_closed_event_enum
     # Smoke check that the events StaleAgentHealer emits are all in
     # the real Hive::Daemon::Logger::EVENTS enum. The FakeLogger above

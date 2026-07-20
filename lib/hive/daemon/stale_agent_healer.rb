@@ -2,6 +2,7 @@ require "digest"
 require "open3"
 require "time"
 require "yaml"
+require "hive/agent_limit"
 require "hive/lock"
 require "hive/markers"
 require "hive/process_kill"
@@ -320,7 +321,7 @@ module Hive
         recovery_key = error_recovery_key(row, marker_reason)
         recovery_limit = error_auto_recovery_limit_for(marker_reason)
         attempts = @error_auto_recoveries[recovery_key]
-        if attempts >= recovery_limit
+        if recovery_limit && attempts >= recovery_limit
           log_recovery_exhausted_once(
             @error_recovery_exhausted,
             recovery_key,
@@ -395,12 +396,10 @@ module Hive
         return true if Hive::Workflows.coding_row?(row) && row.stage.to_s == "8-finalize" && reason == "unpushed_commits" # coding-scoped: unpushed commits are finalize/PR recovery
 
         # A usage/credit limit can hit any stage (brainstorm/plan/execute/…),
-        # so the cooldown retry is not stage-gated. Recoverable only once the
-        # stamped cooldown has elapsed; a missing/unparseable retry_after keeps
-        # the marker manual (legacy markers predate the stamp). Returning false
-        # here — before the budget increment in the caller — means waiting
-        # ticks do NOT consume the retry budget.
-        return cooldown_elapsed?(row, now: now) if reason == "limits_reached"
+        # so the periodic readiness attempt is not stage-gated. A provider's
+        # dated reset is display-only: the latest quota marker's mtime schedules
+        # the next attempt after one cooldown interval.
+        return limit_retry_due?(row, now: now) if reason == "limits_reached"
 
         # A `reason=timeout` on the two side-effect-safe stages recovers EXACTLY
         # ONCE (TIMEOUT_RECOVERY_LIMIT). The agent did the real work but returned
@@ -449,9 +448,13 @@ module Hive
         "terminal_agent_loss"
       end
 
-      # `reason=timeout` is capped at a single re-entry; every other auto-
-      # recoverable error reason shares the agent-loss budget (default 3).
+      # Provider-limit retries are periodic readiness attempts rather than
+      # task-failure recovery, so they remain available until the provider is
+      # usable. `reason=timeout` is capped at a single re-entry; every other
+      # auto-recoverable error reason shares the agent-loss budget (default 3).
       def error_auto_recovery_limit_for(reason)
+        return nil if reason == "limits_reached"
+
         reason == "timeout" ? TIMEOUT_RECOVERY_LIMIT : @error_auto_recovery_limit
       end
 
@@ -460,12 +463,6 @@ module Hive
 
         if Hive::Workflows.coding_row?(row) && row.stage.to_s == "8-finalize" && reason == "unpushed_commits" # coding-scoped: finalize unpushed branch recovery
           return "rerun finalize (`#{command}`) or push the branch manually"
-        end
-
-        if reason == "limits_reached"
-          return "the usage/credit limit did not clear after #{@error_auto_recovery_limit} cooldown " \
-                 "retries — top up credits or wait for the window to reset, then rerun #{row.stage} " \
-                 "(`#{command}`) or run `hive markers clear`"
         end
 
         if reason == "timeout"
@@ -501,7 +498,8 @@ module Hive
         end
         recovery_key = review_error_auto_recovery_key(row, reason: reason)
         attempts = @review_error_auto_recoveries[recovery_key]
-        if attempts >= @review_error_auto_recovery_limit
+        recovery_limit = reason == "limits_reached" ? nil : @review_error_auto_recovery_limit
+        if recovery_limit && attempts >= recovery_limit
           log_recovery_exhausted_once(
             @review_error_recovery_exhausted,
             recovery_key,
@@ -509,7 +507,7 @@ module Hive
             reason: review_heal_label(reason),
             marker_reason: reason,
             attempts: attempts,
-            max_attempts: @review_error_auto_recovery_limit,
+            max_attempts: recovery_limit,
             phase: marker_attrs["phase"],
             pass: marker_attrs["pass"],
             errors_path: reviewer_errors_path(row),
@@ -538,7 +536,7 @@ module Hive
                       pass: marker_attrs["pass"],
                       errors_path: reviewer_errors_path(row),
                       attempts: attempts,
-                      max_attempts: @review_error_auto_recovery_limit)
+                      max_attempts: recovery_limit)
       rescue StandardError => e
         @logger.event(:marker_heal_failed,
                       project: row.project,
@@ -598,31 +596,19 @@ module Hive
       end
 
       def review_error_recovery_remediation(row, reason)
-        if reason == "limits_reached"
-          return "all reviewers' usage/credit limit did not clear after " \
-                 "#{@review_error_auto_recovery_limit} cooldown retries — top up credits or wait " \
-                 "for the window to reset, then rerun review (`hive run #{row.project} #{row.slug}`) " \
-                 "or run `hive markers clear`"
-        end
-
         "rerun review for this task " \
           "(`hive run #{row.project} #{row.slug}`) or inspect the reviewer errors file"
       end
 
-      # True only when the marker carries a `retry_after` ISO8601 stamp AND
-      # `now` is at or past it. A missing/unparseable stamp returns false so
-      # legacy `limits_reached` markers (written before the stamp existed)
-      # still require a manual `hive markers clear` rather than self-healing
-      # immediately. Parse defensively — a garbled stamp must never crash a
-      # tick or be treated as "elapsed".
-      def cooldown_elapsed?(row, now:)
-        raw = marker_attrs_for(row)["retry_after"].to_s
-        return false if raw.empty?
-
-        retry_after = Time.parse(raw)
-        now >= retry_after
-      rescue ArgumentError
-        false
+      # A provider reset hint is display-only: credits, usage, or the active
+      # account can change before it. `AgentLimit` schedules solely from the
+      # quota marker's observed mtime, so legacy/malformed hints cannot strand a
+      # task and each failed readiness attempt naturally starts a new interval.
+      def limit_retry_due?(row, now:)
+        Hive::AgentLimit.retry_due?(
+          limited_at: row.state_file_mtime,
+          now: now
+        )
       end
 
       def review_error_auto_recovery_key(row, reason:)
@@ -652,14 +638,12 @@ module Hive
         attrs = marker_attrs_for(row)
         return true if attrs["reason"].to_s == "review_agent_died"
 
-        # All reviewers hit a usage/credit limit: self-heal once the stamped
-        # cooldown has elapsed (a missing/unparseable retry_after stays
-        # manual). Gated before the caller's budget increment so cooldown-wait
-        # ticks do not burn the retry budget. This is the token/budget
-        # carve-out — every branch below it is a non-limit failure that retries
-        # immediately (bounded), since a credit limit set reason=limits_reached
-        # (the `all_failed_limit` arm in Stages::Review), never the reasons here.
-        return cooldown_elapsed?(row, now: now) if attrs["reason"].to_s == "limits_reached"
+        # All reviewers hit a usage/credit limit: self-heal after one cooldown
+        # interval, regardless of the provider's displayed reset estimate.
+        # These are unbounded readiness attempts, not task-failure retries; a
+        # fresh quota marker resets the hourly clock without consuming the
+        # bounded budget used by the non-limit branches below.
+        return limit_retry_due?(row, now: now) if attrs["reason"].to_s == "limits_reached"
 
         # All reviewers crashed for a non-limit reason (e.g. a native reviewer
         # exited non-zero, a tool/infra fault): bounded rerun. A persistent

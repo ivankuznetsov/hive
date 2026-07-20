@@ -140,18 +140,11 @@ class WebCommandTest < Minitest::Test
           true
         end
 
-        original_exec = Kernel.method(:exec)
-        Kernel.define_singleton_method(:exec) do |env, *argv|
-          raise ExecCaught.new(env, argv)
-        end
-
-        caught = nil
-        begin
+        replacement = ->(env, *argv) { raise ExecCaught.new(env, argv) }
+        caught = with_replaced_singleton_method(Kernel, :exec, replacement) do
           with_replaced_singleton_method(Hive::Web::AppBundle, :assets_ready?, ->(_dir) { true }) do
-            caught = assert_raises(ExecCaught) { capture_io { command.call } }
+            assert_raises(ExecCaught) { capture_io { command.call } }
           end
-        ensure
-          Kernel.define_singleton_method(:exec, original_exec)
         end
 
         rails_commands = system_calls.map { |call| call.last(2) }
@@ -212,17 +205,11 @@ class WebCommandTest < Minitest::Test
           true
         end
 
-        original_exec = Kernel.method(:exec)
-        Kernel.define_singleton_method(:exec) do |env, *argv|
-          raise ExecCaught.new(env, argv)
-        end
-
-        begin
+        replacement = ->(env, *argv) { raise ExecCaught.new(env, argv) }
+        with_replaced_singleton_method(Kernel, :exec, replacement) do
           with_env("RAILS_ENV" => "development") do
             assert_raises(ExecCaught) { capture_io { command.call } }
           end
-        ensure
-          Kernel.define_singleton_method(:exec, original_exec)
         end
 
         assert_equal [ %w[bin/rails db:prepare] ], system_calls.map { |call| call.last(2) },
@@ -241,17 +228,11 @@ class WebCommandTest < Minitest::Test
           true
         end
 
-        original_exec = Kernel.method(:exec)
-        Kernel.define_singleton_method(:exec) do |env, *argv|
-          raise ExecCaught.new(env, argv)
-        end
-
-        begin
+        replacement = ->(env, *argv) { raise ExecCaught.new(env, argv) }
+        with_replaced_singleton_method(Kernel, :exec, replacement) do
           with_env("HIVEBOX_PRECOMPILED_ASSETS" => "1") do
             assert_raises(ExecCaught) { capture_io { command.call } }
           end
-        ensure
-          Kernel.define_singleton_method(:exec, original_exec)
         end
 
         assert_equal [ %w[bin/rails db:prepare] ], system_calls.map { |call| call.last(2) },
@@ -330,22 +311,20 @@ class WebCommandTest < Minitest::Test
         )
       )
 
-      original = Kernel.method(:exec)
-      Kernel.define_singleton_method(:exec) do |env, *argv|
-        raise ExecCaught.new(env, argv)
+      command = Hive::Commands::Web.new
+      system_calls = []
+      command.define_singleton_method(:system) do |*argv|
+        system_calls << argv
+        true
+      end
+      replacement = ->(env, *argv) { raise ExecCaught.new(env, argv) }
+      caught = with_replaced_singleton_method(Kernel, :exec, replacement) do
+        assert_raises(ExecCaught) { capture_io { command.call } }
       end
 
-      caught = nil
-      begin
-        capture_io { Hive::Commands::Web.new.call }
-      rescue ExecCaught => e
-        caught = e
-      ensure
-        Kernel.define_singleton_method(:exec, original)
-      end
-
-      refute_nil caught, "the command must end in Kernel.exec of the rails server"
       assert_equal Hive::Web::AppBundle.hive_cli_root, caught.env["HIVE_CLI_ROOT"]
+      assert_equal [ %w[bin/rails db:prepare] ], system_calls.map { |call| call.last(2) },
+                   "the validated managed bundle should not recompile assets at every restart"
     end
   end
 

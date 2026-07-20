@@ -1,8 +1,9 @@
 # Compile production web assets during startup
 
-- Made production `hive web` precompile fingerprinted CSS and JavaScript before
-  Rails starts, including when assets from an older source revision already
-  exist, while isolating the build from the live web databases.
+- Made production `hive web` guarantee fingerprinted CSS and JavaScript before
+  Rails starts: managed bundles compile and validate during provisioning, while
+  source checkouts and operator overrides compile at startup using storage
+  isolated from the live web databases.
 - Made startup fail closed when precompilation does not produce a usable
   Propshaft manifest and application entrypoints, preventing an apparently
   healthy web service from returning 404s for its advertised assets.

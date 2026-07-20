@@ -48,11 +48,13 @@ recreation), `HIVEBOX_ORIGIN` (extra Action Cable origin allow; same-origin
 host traffic is accepted without config), and
 `HIVEBOX_STORAGE_DIR` (the solid-stack sqlite files, under
 `Hive::Paths.state_home/web-storage` so they live on the `/data` mount). In
-production it runs `bin/rails assets:precompile` on every start and refuses to
-boot unless the resulting manifest and application CSS/JavaScript entrypoints
-are usable; compilation uses temporary build storage rather than the live
-solid-stack databases. This keeps direct source checkouts and updated managed
-bundles from serving stale or missing fingerprinted assets. It then runs
+production it guarantees a usable fingerprinted asset graph before Rails
+starts. Versioned managed bundles compile and validate assets while they are
+provisioned; direct source checkouts and operator-managed app overrides run
+`bin/rails assets:precompile` at startup and refuse to boot unless the resulting
+manifest and application CSS/JavaScript entrypoints are usable. Startup
+compilation uses temporary build storage rather than the live solid-stack
+databases. It then runs
 `bin/rails db:prepare` and execs `bin/rails server`. Outside the container,
 a source checkout, or a bootstrapped managed bundle the command exits 1 with
 guidance — the gem itself does not package the Rails app

@@ -10,9 +10,15 @@ require "hive/reviewers/agent"
 require "hive/task"
 require "hive/task_meta"
 require "hive/workflows/descriptor_parser"
+require "hive/workflows/project"
 
 class InitTest < Minitest::Test
   include HiveTestHelper
+
+  def teardown
+    Hive::Workflows::Project.reset!
+    super
+  end
 
   def test_init_persists_canonical_origin_identity_in_registry
     with_tmp_global_config do

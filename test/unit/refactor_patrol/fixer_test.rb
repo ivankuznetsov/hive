@@ -389,6 +389,20 @@ class RefactorPatrolFixerTest < Minitest::Test
     end
   end
 
+  def test_built_in_documentation_validation_reports_git_spawn_failure
+    capture3 = ->(*_args) { raise Errno::ENOENT, "git" }
+
+    with_replaced_singleton_method(Open3, :capture3, capture3) do
+      validation = fixer("/tmp/project", agent: ->(**) { }).send(
+        :built_in_documentation_validation, "/tmp/project"
+      )
+
+      refute validation.fetch("passed")
+      assert_equal 127, validation.dig("commands", 0, "exit_code")
+      assert_includes validation.dig("commands", 0, "stderr"), "git"
+    end
+  end
+
   def test_staged_rename_cannot_hide_the_vacated_path_from_the_boundary_guard
     with_repo do |repo, _analysis_sha|
       analysis_sha = commit_file(

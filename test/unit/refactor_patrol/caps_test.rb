@@ -48,6 +48,12 @@ class RefactorPatrolCapsTest < Minitest::Test
     refute_includes thesis.risk.fetch("flags"), "cross_feature_impact"
   end
 
+  def test_documentation_paths_cover_named_root_docs_and_document_extensions
+    assert Hive::RefactorPatrol::Caps.documentation_path?("README")
+    assert Hive::RefactorPatrol::Caps.documentation_path?("guides/migration.mdx")
+    refute Hive::RefactorPatrol::Caps.documentation_path?("lib/migration.rb")
+  end
+
   # A thesis is behavior-preserving by contract: working inside files that
   # host public surface is an advisory, not an API change, so it must not
   # disqualify the thesis (no flag, public_api_impact stays false).

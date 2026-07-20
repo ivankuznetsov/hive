@@ -23,6 +23,7 @@ module Hive
       PATROL_STAGE = "refactor-patrol".freeze
       PATROL_SLUG_PREFIX = "refactor-patrol".freeze
       RETRY_BACKOFF_SEC = 60
+      SUPPORTED_REPORT_SCHEMA_VERSIONS = [ 2, Hive::Schemas::SCHEMA_VERSIONS.fetch("hive-refactor-patrol") ].uniq.freeze
 
       class ReservationBlocked < StandardError
         attr_reader :reason, :evidence
@@ -63,9 +64,9 @@ module Hive
         @lease_sec = lease_sec.to_i
         @dry_run = dry_run
         @events = []
-        @schemer = JSONSchemer.schema(
-          Pathname.new(Hive::Schemas.schema_path("hive-refactor-patrol", version: 2))
-        )
+        @schemers = SUPPORTED_REPORT_SCHEMA_VERSIONS.to_h do |version|
+          [ version, JSONSchemer.schema(Pathname.new(Hive::Schemas.schema_path("hive-refactor-patrol", version: version))) ]
+        end
       end
 
       def candidates(now: Time.now)
@@ -270,7 +271,7 @@ module Hive
         entry = entry_for_token(dispatch_token)
         store = store_for(entry)
         aggregate = store.read_job(dispatch_token.fetch(:job_id))
-        unless exit_code == 0 && envelope.is_a?(Hash) && @schemer.valid?(envelope)
+        unless exit_code == 0 && envelope.is_a?(Hash) && valid_report_envelope?(envelope)
           aggregate = store.release_discovery!(
             dispatch_token, reason: completion_failure_reason(exit_code, envelope),
             now: now, backoff_sec: RETRY_BACKOFF_SEC
@@ -480,7 +481,10 @@ module Hive
         reasons = errors.filter_map do |error|
           error.dig("details", "resource_exhaustion", "reason") if error.is_a?(Hash)
         end
-        daily = %w[daily_agent_spawn_limit daily_token_headroom daily_token_limit]
+        daily = %w[
+          daily_agent_spawn_limit daily_architecture_unmetered_spawn_limit
+          daily_token_headroom daily_token_limit
+        ]
         return RETRY_BACKOFF_SEC unless errors.any? && reasons.size == errors.size && (reasons - daily).empty?
 
         next_day = Time.utc(now.utc.year, now.utc.month, now.utc.day) + 86_400
@@ -491,7 +495,7 @@ module Hive
         entry = entry_for_token(token)
         store = store_for(entry)
         aggregate = store.read_job(token.fetch(:job_id))
-        valid = exit_code == 0 && envelope.is_a?(Hash) && @schemer.valid?(envelope) &&
+        valid = exit_code == 0 && envelope.is_a?(Hash) && valid_report_envelope?(envelope) &&
                 envelope["job_id"] == aggregate.fetch("job_id") &&
                 envelope["project"] == entry.fetch("name") &&
                 envelope["project_root"] == entry.fetch("path") &&
@@ -519,6 +523,10 @@ module Hive
         return "action_missing_envelope" if envelope.nil?
 
         "action_malformed_or_mismatched_envelope"
+      end
+
+      def valid_report_envelope?(envelope)
+        @schemers[envelope["schema_version"]]&.valid?(envelope) == true
       end
 
       def completion_result(status, token, envelope, aggregate: nil)

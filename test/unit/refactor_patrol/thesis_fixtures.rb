@@ -87,7 +87,7 @@ module RefactorPatrolThesisFixtures
       },
       "confidence" => "medium",
       "risk" => {
-        "caps" => { "est_files" => 3, "est_diff_lines" => 120, "single_feature" => true },
+        "caps" => { "single_feature" => true },
         "public_api_impact" => false,
         "public_api_details" => [],
         "cross_feature_impact" => false,

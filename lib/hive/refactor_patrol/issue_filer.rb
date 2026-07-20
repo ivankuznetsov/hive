@@ -17,8 +17,6 @@ module Hive
       MAX_BODY_BYTES = 20_000
       CONFIDENCE_ORDER = { "low" => 0, "medium" => 1, "high" => 2 }.freeze
       ANALYSIS_GUARD_REASONS = %w[
-        exceeds_max_files
-        exceeds_max_diff_lines
         not_single_feature
         public_api_impact
         cross_feature_impact
@@ -27,12 +25,13 @@ module Hive
       ].freeze
       DETERMINISTIC_NONFIXABLE_REASONS = %w[
         agent_control_plane_violation
+        auto_fix_disabled
         boundary_violation
-        caps_exceeded
         closed_without_merge
         dependency_change
         fix_guardrail
         missing_validation
+        protected_path
         public_contract_change
         public_contract_safety_unavailable
         secret_detected
@@ -473,6 +472,7 @@ module Hive
           Thesis: `#{thesis.id}`
           Semantic family: `#{family_id}`
           Occurrence fingerprint: `#{thesis.fingerprint}`
+          Follow-up approval: pending
 
           ### Problem and cost
 

@@ -15,7 +15,7 @@ class PatrolAgentLaunchTest < Minitest::Test
 
     assert_equal [ "--safe-mode", "--disable-slash-commands" ], launch.fetch(:cli_flags)
     assert_equal 8_011, launch.fetch(:minimum_tokens)
-    assert_equal 3, launch.fetch(:max_turns)
+    assert_equal 4, launch.fetch(:max_turns)
   end
 
   def test_non_claude_patrol_launch_reserves_prompt_without_claude_flags

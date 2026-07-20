@@ -122,11 +122,13 @@ class InitPromptsTest < Minitest::Test
     assert_equal all_defaults, answers
   end
 
-  def test_non_tty_recommends_refactor_patrol_discovery_without_enabling_side_effects
+  def test_non_tty_recommends_refactor_patrol_without_arming_legacy_config
     prompts, _output = make_prompts("", tty: false)
     answers = prompts.collect
 
     assert_equal true, answers["refactor_patrol_enabled"]
+    # Fresh config renders the recommended full policy from the answer, while
+    # merged fallbacks remain effect-free for legacy partial configurations.
     assert_equal false, Hive::Config::DEFAULTS.dig("refactor_patrol", "auto_fix", "enabled")
     assert_equal false, Hive::Config::DEFAULTS.dig("refactor_patrol", "issue_filing", "enabled")
   end
@@ -516,6 +518,15 @@ class InitPromptsTest < Minitest::Test
     end
   end
 
+  def test_interactive_refactor_patrol_discloses_default_auto_fix_and_issue_fallback
+    prompts, output = make_prompts(interactive_input(refactor_patrol: ""))
+
+    prompts.collect
+
+    assert_match(/attempt confined fixes and pull requests/, output.string)
+    assert_match(/GitHub issues remain the fallback review surface/, output.string)
+  end
+
   def test_interactive_refactor_patrol_no_disables_discovery
     [ "n", "no" ].each do |answer|
       prompts, _output = make_prompts(interactive_input(refactor_patrol: answer))
@@ -541,7 +552,7 @@ class InitPromptsTest < Minitest::Test
     )
 
     assert_equal false, prompts.collect.fetch("refactor_patrol_enabled")
-    refute_includes output.string, "Enable architecture patrol discovery"
+    refute_includes output.string, "Enable architecture patrol for this project"
   end
 
   def test_refactor_patrol_override_requires_a_boolean_or_nil

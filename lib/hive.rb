@@ -1,5 +1,5 @@
 module Hive
-  VERSION = "0.6.4".freeze
+  VERSION = "0.6.5".freeze
   MIN_CLAUDE_VERSION = "2.1.118".freeze
   # Canonical GitHub org + repo. Referenced by the release probe
   # (UpdateCheck), the brew tap + installer URL (Commands::Update), etc.
@@ -38,9 +38,9 @@ module Hive
       "hive-daemon-queue" => 1,
       "hive-patrol" => 2,
       "hive-patrol-finding" => 2,
-      "hive-refactor-patrol" => 2,
+      "hive-refactor-patrol" => 3,
       "hive-refactor-patrol-jobs" => 1,
-      "hive-refactor-patrol-thesis" => 2,
+      "hive-refactor-patrol-thesis" => 3,
       # Scaffold a blank per-project workflow descriptor (`hive workflow new ID
       # --json`). The error arm routes through Hive::Schemas::ErrorEnvelope so
       # its output carries the same schema/schema_version/error_kind keys as

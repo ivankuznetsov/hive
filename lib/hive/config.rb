@@ -447,10 +447,18 @@ module Hive
         "max_tokens_per_agent" => 50_000,
         "max_agent_spawns_per_cycle" => 3,
         "max_agent_spawns_per_day" => 8,
+        # Metered architecture launches follow merge demand and do not consume
+        # the ordinary daily count. Keep a separate durable backstop for a
+        # provider that repeatedly returns no usable token totals.
+        "max_architecture_unmetered_spawns_per_day" => 96,
         "max_budget_usd_per_agent" => 25,
         # Architecture discovery/fixing may use a wider per-cycle and
-        # per-agent envelope, but still shares the mode's daily ceilings.
+        # per-agent envelope, but still shares the mode's daily token ceiling.
         "architecture_budget_multiplier" => 2,
+        # Ordinary fix agents need edit/test/proof turns after inspection;
+        # widen only their per-agent stream cap while preserving cycle/day
+        # token and launch ceilings.
+        "fix_budget_multiplier" => 2,
         # Open ready (non-draft) PRs by default so the babysitter — which
         # skips draft PRs — picks them up. Set `draft_prs: true` per project
         # to revert to draft PRs that need a manual "ready" toggle first.
@@ -491,13 +499,12 @@ module Hive
           ]
         }
       },
-      # Refactor patrol is opt-in and reporting-only in v1. Keep its config
-      # and state independent from patrol so the two commands can diverge.
+      # Refactor patrol remains effect-free for legacy/missing configuration.
+      # Fresh initialization writes the recommended full policy explicitly;
+      # defaults here must not grant mutation authority to an older partial
+      # config that enabled discovery before auto-fix existed.
       "refactor_patrol" => {
         "enabled" => false,
-        # Discovery consent never grants mutation authority. These two gates
-        # are intentionally independent and default off for fresh and legacy
-        # projects alike.
         "auto_fix" => {
           "enabled" => false,
           # Fix agents need a real root-confined write sandbox. Discovery may
@@ -536,12 +543,13 @@ module Hive
           "test" => nil
         },
         "caps" => {
-          "single_feature_only" => true,
+          # Refactoring often removes duplicated ownership across mapped
+          # feature boundaries. Guard contracts and dependencies instead of
+          # treating cross-feature scope or patch size as risky by itself.
+          "single_feature_only" => false,
           "allow_dependency_bumps" => false,
           "allow_public_api_changes" => false,
-          "max_files" => 8,
-          "max_diff_lines" => 400,
-          "allow_cross_feature" => false
+          "allow_cross_feature" => true
         },
         "leverage" => {
           "weights" => {
@@ -2729,7 +2737,9 @@ module Hive
       [ "max_tokens_per_agent", 1 ],
       [ "max_agent_spawns_per_cycle", 1 ],
       [ "max_agent_spawns_per_day", 1 ],
-      [ "architecture_budget_multiplier", 1 ]
+      [ "max_architecture_unmetered_spawns_per_day", 1 ],
+      [ "architecture_budget_multiplier", 1 ],
+      [ "fix_budget_multiplier", 1 ]
     ].freeze
 
     def validate_patrol!(cfg, source_path)
@@ -2878,10 +2888,6 @@ module Hive
       "max_theses_per_run" => 1,
       "max_review_seconds_per_run" => 1
     }.freeze
-    REFACTOR_PATROL_CAP_BOUNDS = {
-      "max_files" => 1,
-      "max_diff_lines" => 1
-    }.freeze
     REFACTOR_PATROL_WEIGHT_KEYS = %w[
       churn
       fan_in
@@ -2985,9 +2991,6 @@ module Hive
 
       REFACTOR_PATROL_CAP_BOOLEAN_KEYS.each do |key|
         validate_boolean!(caps[key], "refactor_patrol.caps.#{key}", source_path)
-      end
-      REFACTOR_PATROL_CAP_BOUNDS.each do |key, min|
-        validate_integer_min!(caps[key], "refactor_patrol.caps.#{key}", min, source_path)
       end
     end
 

@@ -80,7 +80,7 @@ class SessionsController < ApplicationController
 
   def destroy
     reset_session
-    redirect_to login_path
+    redirect_to local_web_mode? ? root_path : login_path
   end
 
   # Dev/test auth seam — the route only exists in local envs, and the action
@@ -98,10 +98,12 @@ class SessionsController < ApplicationController
 
   def admit!(result)
     login = result[:login]
-    claim_ownership!(login) if github_auth.claimable?
-    unless github_auth.owner?(login)
-      return render "errors/show", status: :forbidden,
-                    locals: { heading: "Not allowed", message: "#{login} is not the configured owner." }
+    unless local_loopback_request?
+      claim_ownership!(login) if github_auth.claimable?
+      unless github_auth.owner?(login)
+        return render "errors/show", status: :forbidden,
+                      locals: { heading: "Not allowed", message: "#{login} is not the configured owner." }
+      end
     end
 
     # Rotate the session at the auth boundary; carry the grant into the

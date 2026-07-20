@@ -3,6 +3,10 @@ require "ripper"
 module Hive
   module RefactorPatrol
     class Caps
+      BUILT_IN_DOCUMENTATION_EXTENSIONS = %w[.adoc .asciidoc .markdown .md .rst].freeze
+      BUILT_IN_DOCUMENTATION_BASENAMES = %w[
+        README CHANGELOG CONTRIBUTING SECURITY CODE_OF_CONDUCT
+      ].freeze
       NON_PRODUCTION_SURFACE_PATTERN = %r{(?:\A|/)(?:fixtures?|node_modules|specs?|tests?|vendor)(?:/|\z)}i
       JAVASCRIPT_ENTRYPOINT_EXTENSIONS = %w[cjs js jsx mjs ts tsx].join("|").freeze
       PUBLIC_API_PATTERNS = [
@@ -327,6 +331,20 @@ module Hive
           DEPENDENCY_MANIFEST_PATTERNS.any? { |pattern| normalized.match?(pattern) }
       end
 
+      def self.documentation_path?(path)
+        normalized = normalize_path(path)
+        extension = File.extname(normalized).downcase
+        basename = File.basename(normalized, extension).upcase
+        return true if BUILT_IN_DOCUMENTATION_BASENAMES.include?(basename) &&
+                       (extension.empty? || BUILT_IN_DOCUMENTATION_EXTENSIONS.include?(extension))
+
+        BUILT_IN_DOCUMENTATION_EXTENSIONS.include?(extension)
+      end
+
+      def self.without_legacy_size_flags(values)
+        Array(values).map(&:to_s) - LEGACY_SIZE_FLAGS
+      end
+
       def self.normalize_path(path)
         path.to_s.tr("\\", "/").sub(%r{\A(?:\./)+}, "")
       end
@@ -339,6 +357,7 @@ module Hive
       private_class_method :go_private_package?, :normalize_path
 
       Result = Struct.new(:thesis, :blocked, :flags, keyword_init: true)
+      LEGACY_SIZE_FLAGS = %w[exceeds_max_files exceeds_max_diff_lines].freeze
 
       def initialize(cfg)
         @cfg = cfg
@@ -346,7 +365,7 @@ module Hive
 
       def apply(thesis)
         risk = thesis.risk ||= {}
-        risk["flags"] = Array(risk["flags"]).map(&:to_s)
+        risk["flags"] = self.class.without_legacy_size_flags(risk["flags"])
         risk["advisories"] = Array(risk["advisories"]).map(&:to_s)
         risk["public_api_details"] = Array(risk["public_api_details"])
         risk["cross_feature_details"] = Array(risk["cross_feature_details"])
@@ -367,8 +386,6 @@ module Hive
         declared = thesis.risk.fetch("caps", {})
         caps_cfg = caps
 
-        flags << "exceeds_max_files" if declared["est_files"].to_i > caps_cfg.fetch("max_files", 8).to_i
-        flags << "exceeds_max_diff_lines" if declared["est_diff_lines"].to_i > caps_cfg.fetch("max_diff_lines", 400).to_i
         if caps_cfg.fetch("single_feature_only", true) && declared.key?("single_feature") && declared["single_feature"] != true
           flags << "not_single_feature"
         end
@@ -398,8 +415,6 @@ module Hive
       end
 
       def detect_cross_feature(thesis)
-        return [] if caps.fetch("allow_cross_feature", false)
-
         boundary = thesis.feature_boundary || {}
         # A feature's own entrypoints are part of its boundary; only paths
         # outside both owned_files and entrypoints count as cross-feature.
@@ -412,7 +427,7 @@ module Hive
 
         thesis.risk["cross_feature_impact"] = true
         thesis.risk["cross_feature_details"] |= out_of_boundary
-        [ "cross_feature_impact" ]
+        caps.fetch("allow_cross_feature", false) ? [] : [ "cross_feature_impact" ]
       end
 
       def detect_dependency_bumps(thesis)

@@ -62,10 +62,21 @@ The local Rails web UI is a managed runtime dependency, not part of the CLI
 gem payload. `hive web` resolves `HIVEBOX_WEB_APP_DIR`, then
 `${XDG_DATA_HOME}/hive/web`, then a source checkout `web/`. `hive setup` and
 `hive web` can bootstrap the managed app from the versioned web release bundle
-and run its Rails bundle install. The web storage directory remains under
+into a staging directory, install its Rails bundle, precompile production CSS
+and JavaScript, and verify the required entrypoints plus every manifest asset
+before activating it. A current bundle with missing assets is repaired on the
+next setup or launch. The web
+storage directory remains under
 `${XDG_STATE_HOME}/hive/web-storage`, so the TUI, daemon, and web UI operate
 on the same local registry, project `.hive-state/` directories, and task
-folders.
+folders. Local loopback requests use the `hive` identity and do not require
+GitHub; connecting GitHub only enables repository listing and cloning. Because
+the trust check uses the actual socket peer, a reverse proxy that connects over
+localhost (including Tailscale Serve) retains local mode even when it forwards
+the remote client's address. That proxy becomes part of the access boundary
+and must authenticate or restrict its clients; an unrestricted localhost
+forwarder exposes the no-auth UI. Hivebox is the separate owner-gated container
+deployment of the same Rails application.
 
 ## Agents
 

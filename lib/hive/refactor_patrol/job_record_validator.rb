@@ -277,7 +277,7 @@ module Hive
         strict_hash!(
           caps,
           required: constant(:POLICY_CAP_KEYS),
-          allowed: constant(:POLICY_CAP_KEYS),
+          allowed: constant(:POLICY_CAP_KEYS) + constant(:LEGACY_POLICY_CAP_KEYS),
           label: "policy action caps",
           path: path
         )
@@ -286,10 +286,12 @@ module Hive
             inconsistent!("policy action cap #{key} must be boolean", path)
           end
         end
-        %w[max_files max_diff_lines].each do |key|
-          value = caps.fetch(key)
+        constant(:LEGACY_POLICY_CAP_KEYS).each do |key|
+          next unless caps.key?(key)
+
+          value = caps[key]
           unless value.is_a?(Integer) && value.positive?
-            inconsistent!("policy action cap #{key} must be positive", path)
+            inconsistent!("legacy policy action cap #{key} must be positive", path)
           end
         end
         score = action.fetch("issue_min_leverage_score")

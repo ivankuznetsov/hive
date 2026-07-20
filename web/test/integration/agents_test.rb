@@ -56,7 +56,15 @@ class AgentsTest < ActionDispatch::IntegrationTest
   test "agents page offers the supported Grok device login" do
     sign_in!(login: "alice")
 
-    get agents_path
+    # This scenario exercises the first-login CTA, independent of whether the
+    # developer running the suite has real Grok credentials in their home.
+    original = Hive::AgentProfiles.method(:logged_in?)
+    begin
+      Hive::AgentProfiles.define_singleton_method(:logged_in?) { |_agent| false }
+      get agents_path
+    ensure
+      Hive::AgentProfiles.define_singleton_method(:logged_in?, original)
+    end
 
     assert_response :success
     assert_select "form[action='#{agent_login_path("grok")}'] button", text: "Start login"

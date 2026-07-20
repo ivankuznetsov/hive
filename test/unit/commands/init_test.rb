@@ -115,7 +115,7 @@ class HiveCommandsInitTest < Minitest::Test
     assert_match(/adhoc:\n    reviewers: null\n    fix: true/, enabled)
   end
 
-  def test_project_config_renders_independent_refactor_patrol_consent_gates
+  def test_project_config_renders_refactor_patrol_policy_from_choice
     enabled = render_fresh_config(
       :coding,
       answers: project_config_answers.merge("refactor_patrol_enabled" => true)
@@ -123,14 +123,17 @@ class HiveCommandsInitTest < Minitest::Test
     enabled_raw = YAML.safe_load(enabled).fetch("refactor_patrol")
 
     assert_equal true, enabled_raw.fetch("enabled")
-    assert_equal false, enabled_raw.dig("auto_fix", "enabled")
-    assert_equal false, enabled_raw.dig("issue_filing", "enabled")
+    assert_equal true, enabled_raw.dig("auto_fix", "enabled")
+    assert_equal true, enabled_raw.dig("issue_filing", "enabled")
 
     disabled = render_fresh_config(
       :coding,
       answers: project_config_answers.merge("refactor_patrol_enabled" => false)
     )
-    assert_equal false, YAML.safe_load(disabled).dig("refactor_patrol", "enabled")
+    disabled_raw = YAML.safe_load(disabled).fetch("refactor_patrol")
+    assert_equal false, disabled_raw.fetch("enabled")
+    assert_equal false, disabled_raw.dig("auto_fix", "enabled")
+    assert_equal false, disabled_raw.dig("issue_filing", "enabled")
   end
 
   def test_refactor_patrol_selector_requires_a_boolean_or_nil

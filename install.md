@@ -59,8 +59,8 @@ Ubuntu 22.04+ / glibc Linux fallback (pin to the current release tag, not `main`
 ```bash
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
-# Release maintainers: bump v0.6.4 in both installer URLs when cutting a new stable release.
-curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.6.4/install.sh -o "$tmpdir/hive-install.sh"
+# Release maintainers: bump v0.6.5 in both installer URLs when cutting a new stable release.
+curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.6.5/install.sh -o "$tmpdir/hive-install.sh"
 bash "$tmpdir/hive-install.sh"
 ```
 
@@ -69,8 +69,8 @@ To inspect the installer first, run a dry-run before the real invocation. State 
 ```bash
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
-# Release maintainers: bump v0.6.4 in both installer URLs when cutting a new stable release.
-curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.6.4/install.sh -o "$tmpdir/hive-install.sh"
+# Release maintainers: bump v0.6.5 in both installer URLs when cutting a new stable release.
+curl -fsSL https://raw.githubusercontent.com/ivankuznetsov/hive/v0.6.5/install.sh -o "$tmpdir/hive-install.sh"
 bash "$tmpdir/hive-install.sh" --dry-run
 bash "$tmpdir/hive-install.sh"
 ```
@@ -136,9 +136,14 @@ When the user wants the browser UI, prefer the first-class local setup command:
 It runs diagnostics, installs Hive-owned QMD/web pieces, ensures the daemon
 service, enrolls the current project, and leaves the web UI runnable with
 `"$hive_cmd" web` at `http://127.0.0.1:4567`. Bare `hive web` on a loopback
-bind runs no-auth by default; set `web.local_loopback: false` to require
-GitHub login even on loopback. Use `"$hive_cmd" setup --service` when the user
-also wants a managed `hive-web` service.
+bind runs no-auth against the existing local Hive registry and workflow state;
+GitHub connection is optional and does not claim Hivebox ownership. Loopback
+reverse proxies such as Tailscale Serve retain that local behavior, so the
+proxy must authenticate/restrict its clients (for example with tailnet ACLs);
+an unrestricted forwarder would expose the no-auth local UI. Set
+`web.local_loopback: false` to require GitHub login even on loopback. Use
+`"$hive_cmd" setup --service` when the user also wants a managed `hive-web`
+service.
 
 ## Initialize Project
 

@@ -50,6 +50,12 @@ module Hive
         raw/notes
       ].freeze
 
+      LLM_WIKI_SHARED_RUNTIME_FILES = %w[
+        post-commit-refresh.sh
+        compile-log.sh
+        config.json
+      ].freeze
+
       # Immutable value object (Data.define, matching the Workflow/Stage/
       # AdvanceVerb convention) carrying the resolved descriptor and the
       # provenance of the choice (:flag | :prompt | :implicit). The initialize
@@ -638,11 +644,18 @@ module Hive
         project_paths = (INIT_MAIN_CHECKOUT_PATHS + INIT_MAIN_CHECKOUT_DIRS).map do |path|
           File.join(@project_path, path)
         end
-        project_paths + [
-          File.join(@project_path, ".git", "hooks", "post-commit"),
+        common_dir = Hive::LlmWikiBootstrap.git_common_dir(@project_path)
+        shared_dir = File.join(common_dir, "llm-wiki")
+        shared_paths = [
+          File.join(common_dir, "hooks", "post-commit"),
+          *LLM_WIKI_SHARED_RUNTIME_FILES.map { |name| File.join(shared_dir, name) },
+          shared_dir
+        ]
+
+        (project_paths + shared_paths + [
           *llm_wiki_scheduler_paths,
           Hive::Config.global_config_path
-        ]
+        ]).uniq
       end
 
       def llm_wiki_scheduler_paths

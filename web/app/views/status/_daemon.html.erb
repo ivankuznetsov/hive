@@ -1,16 +1,11 @@
-<section class="daemon-panel">
-  <% running = daemon_status["running"] %>
-  <% drift = daemon_status["binary_drift"].to_s %>
-  <% actionable_drift = Hive::Daemon::StatusReport::BINARY_DRIFT_ACTIONABLE.include?(drift) %>
-  <div>
-    <strong>Daemon</strong>
-    <span class="task-meta"><%= running ? "running" : "not running" %></span>
-    <% if daemon_status["service_installed"] == true %>
-      <span class="task-meta">service installed</span>
-    <% end %>
-    <% if actionable_drift %>
-      <span class="task-meta">binary drift: <%= drift %></span>
-    <% end %>
+<% running = daemon_status["running"] %>
+<% drift = daemon_status["binary_drift"].to_s %>
+<% actionable_drift = Hive::Daemon::StatusReport::BINARY_DRIFT_ACTIONABLE.include?(drift) %>
+<% panel_state = running ? (actionable_drift ? "warning" : "running") : "stopped" %>
+<section class="daemon-panel daemon-panel-<%= panel_state %>" aria-label="Daemon status">
+  <div class="daemon-summary">
+    <span class="status-dot <%= running ? "status-dot-running" : "status-dot-error" %>" aria-hidden="true"></span>
+    <strong>Daemon <%= running ? "running" : "stopped" %></strong>
   </div>
   <%#
     The Repair button only ENQUEUES a daemon-consumed dispatch request
@@ -22,16 +17,19 @@
     guidance instead of a button that silently does nothing.
   %>
   <% if running && actionable_drift %>
-    <%= button_to "Repair", daemon_repair_path, method: :post,
-          class: "btn btn-sm",
-          form: { data: { turbo_confirm: "Reinstall the daemon service with the current hive binary?" } } %>
+    <div class="daemon-action">
+      <span class="daemon-warning">Binary path differs</span>
+      <%= button_to "Repair", daemon_repair_path, method: :post,
+            class: "btn btn-sm",
+            form: { data: { turbo_confirm: "Reinstall the daemon service with the current hive binary?" } } %>
+    </div>
   <% elsif !running && (actionable_drift || daemon_status["service_installed"] == false) %>
-    <span class="task-meta">
-      daemon is down — run <code>hive daemon install --force</code> to repair
+    <span class="daemon-guidance">
+      Run <code>hive daemon install --force</code> to repair the service.
     </span>
   <% elsif !running %>
-    <span class="task-meta">
-      daemon is down — run <code>hive daemon start --detach</code> to resume
+    <span class="daemon-guidance">
+      Run <code>hive daemon start --detach</code> to resume work.
     </span>
   <% end %>
 </section>

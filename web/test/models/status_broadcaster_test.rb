@@ -26,11 +26,64 @@ class StatusBroadcasterTest < ActiveSupport::TestCase
     StatusBroadcaster.feed = nil
   end
 
+  test "projects are ordered by active task count with stable ties" do
+    payload = {
+      "projects" => [
+        { "name" => "idle", "tasks" => [] },
+        { "name" => "busy-first", "tasks" => [ {}, {} ] },
+        { "name" => "busy-second", "tasks" => [ {}, {} ] },
+        { "name" => "active", "tasks" => [ {} ] }
+      ]
+    }
+
+    assert_equal %w[busy-first busy-second active idle],
+                 StatusBroadcaster.projects(payload).map { |project| project["name"] }
+  end
+
+  test "one sorted snapshot renders every live project surface" do
+    payload = {
+      "projects" => [
+        { "name" => "idle", "tasks" => [] },
+        { "name" => "busy", "tasks" => [ {} ] }
+      ]
+    }
+    events = []
+    channel = Turbo::StreamsChannel
+    original_refresh = channel.method(:broadcast_refresh_to)
+    original_replace = channel.method(:broadcast_replace_to)
+    channel.define_singleton_method(:broadcast_refresh_to) do |*args, **kwargs|
+      events << [ :refresh, args, kwargs ]
+    end
+    channel.define_singleton_method(:broadcast_replace_to) do |*args, **kwargs|
+      events << [ :replace, args, kwargs ]
+    end
+
+    StatusBroadcaster.send(:broadcast, payload)
+
+    assert_equal [ :refresh, :replace, :replace, :replace ], events.map(&:first)
+    assert_equal %w[project-nav composer-project projects],
+                 events.drop(1).map { |event| event.last.fetch(:target) }
+    assert_equal [
+      "status/project_nav",
+      "status/composer_project",
+      "status/projects"
+    ], events.drop(1).map { |event| event.last.fetch(:partial) }
+    events.drop(1).each do |event|
+      assert_equal %w[busy idle],
+                   event.last.dig(:locals, :projects).map { |project| project.fetch("name") }
+    end
+    assert_equal({ method: :morph }, events[2].last.fetch(:attributes))
+  ensure
+    channel&.define_singleton_method(:broadcast_refresh_to, original_refresh) if original_refresh
+    channel&.define_singleton_method(:broadcast_replace_to, original_replace) if original_replace
+  end
+
   test "a raising broadcast does not permanently stop live updates" do
     feed = FakeFeed.new
     StatusBroadcaster.feed = feed
     delivered = Queue.new
     calls = 0
+    original_broadcast = StatusBroadcaster.method(:broadcast)
     StatusBroadcaster.define_singleton_method(:broadcast) do |payload|
       calls += 1
       raise "boom" if calls == 1
@@ -50,7 +103,10 @@ class StatusBroadcasterTest < ActiveSupport::TestCase
     assert_equal [ { "name" => "b" } ], payload["projects"],
                  "the broadcast after the failure must still be delivered"
   ensure
-    StatusBroadcaster.singleton_class.remove_method(:broadcast)
+    if original_broadcast
+      StatusBroadcaster.define_singleton_method(:broadcast, original_broadcast)
+      StatusBroadcaster.singleton_class.send(:private, :broadcast)
+    end
     StatusBroadcaster.send(:remove_const, :RETRY_SEC)
     StatusBroadcaster.const_set(:RETRY_SEC, original_retry)
   end

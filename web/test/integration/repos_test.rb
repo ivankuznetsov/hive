@@ -58,11 +58,13 @@ class ReposTest < ActionDispatch::IntegrationTest
     assert_select "input[name='settings[adhoc_auto_fix]'][type='checkbox']", 1,
                   "the web setup must expose the same ad-hoc auto-fix choice as hive init"
     assert_select "input[name='settings[refactor_patrol_enabled]'][type='checkbox'][checked]", 1,
-                  "fresh web setup must recommend architecture patrol discovery"
+                  "fresh web setup must recommend architecture patrol"
+    assert_match(/Architecture patrol \(recommended\)/, response.body)
     assert_select "input[name='settings[refactor_patrol_auto_fix]']", 0,
-                  "discovery consent must not imply an auto-fix control"
+                  "the architecture patrol choice must govern its auto-fix policy"
     assert_select "input[name='settings[refactor_patrol_issue_filing]']", 0,
-                  "discovery consent must not imply an issue-filing control"
+                  "the architecture patrol choice must govern its issue fallback"
+    assert_match(/Accepted findings attempt confined fixes and pull requests/, response.body)
     assert_select "input[name='settings[budgets][brainstorm]']", 1
   end
 
@@ -121,10 +123,10 @@ class ReposTest < ActionDispatch::IntegrationTest
                  "GitHub publishing must stay enabled by default for PR review comments"
     assert_equal true, parsed_config.dig("refactor_patrol", "enabled"),
                  "an omitted web checkbox value must use the fresh-init discovery recommendation"
-    assert_equal false, parsed_config.dig("refactor_patrol", "auto_fix", "enabled"),
-                 "recommended discovery must not imply auto-fix consent"
-    assert_equal false, parsed_config.dig("refactor_patrol", "issue_filing", "enabled"),
-                 "recommended discovery must not imply issue-filing consent"
+    assert_equal true, parsed_config.dig("refactor_patrol", "auto_fix", "enabled"),
+                 "recommended architecture patrol must attempt confined fixes"
+    assert_equal true, parsed_config.dig("refactor_patrol", "issue_filing", "enabled"),
+                 "recommended discovery must produce reviewable GitHub issues"
   ensure
     Hive::Commands::Init.define_singleton_method(:new, original_init_new) if original_init_new
   end
@@ -205,7 +207,10 @@ class ReposTest < ActionDispatch::IntegrationTest
     state_dir = File.join(dir, ".hive-state")
     config_path = File.join(state_dir, "config.yml")
     config = YAML.safe_load_file(config_path)
-    config.fetch("refactor_patrol")["enabled"] = false
+    refactor_patrol = config.fetch("refactor_patrol")
+    refactor_patrol["enabled"] = false
+    refactor_patrol.fetch("auto_fix")["enabled"] = false
+    refactor_patrol.fetch("issue_filing")["enabled"] = false
     File.write(config_path, config.to_yaml)
     system("git", "-C", state_dir, "add", "config.yml", exception: true)
     system("git", "-C", state_dir, "commit", "-qm", "disable architecture patrol", exception: true)

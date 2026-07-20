@@ -12,6 +12,7 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
   include HiveTestHelper
 
   SCRIPT = File.expand_path("../../.llm-wiki/post-commit-refresh.sh", __dir__)
+  SCHEDULED_SCRIPT = File.expand_path("../../.llm-wiki/refresh-wiki.sh", __dir__)
 
   def setup
     @dir = Dir.mktmpdir("llmwiki-hook-")
@@ -261,10 +262,125 @@ class LlmWikiPostCommitRefreshTest < Minitest::Test
     refute_match(/wiki_root="\$main_checkout"/, script)
   end
 
+  def test_scheduled_wrapper_delegates_to_shared_drain_runner_without_touching_dirty_checkout
+    common = git(@main, "rev-parse --path-format=absolute --git-common-dir")
+    shared_runner = File.join(common, "llm-wiki", "post-commit-refresh.sh")
+    args_log = File.join(@dir, "scheduled-args")
+    provider_marker = File.join(@dir, "provider-ran")
+    fake_bin = File.join(@dir, "scheduled-bin")
+    FileUtils.mkdir_p(File.dirname(shared_runner))
+    FileUtils.mkdir_p(fake_bin)
+    File.write(shared_runner, <<~RUNNER)
+      #!/usr/bin/env bash
+      # LLM_WIKI_RUNNER_CAPABILITIES: drain
+      printf '%s\n' "$@" > "$LLM_WIKI_TEST_ARGS_LOG"
+    RUNNER
+    FileUtils.chmod("+x", shared_runner)
+    File.write(File.join(fake_bin, "codex"), <<~PROVIDER)
+      #!/usr/bin/env bash
+      touch "$LLM_WIKI_TEST_PROVIDER_MARKER"
+      exit 99
+    PROVIDER
+    FileUtils.chmod("+x", File.join(fake_bin, "codex"))
+    FileUtils.cp(SCHEDULED_SCRIPT, File.join(@main, ".llm-wiki", "refresh-wiki.sh"))
+
+    File.write(File.join(@main, "wiki", "index.md"), "# user's pending wiki edit\n")
+    File.write(File.join(@main, "untracked.txt"), "user work\n")
+    status_before = git(@main, "status --porcelain=v1")
+    wiki_before = File.binread(File.join(@main, "wiki", "index.md"))
+
+    env = {
+      "HOME" => File.join(@dir, "home"),
+      "PATH" => [ fake_bin, "/usr/bin", "/bin" ].join(File::PATH_SEPARATOR),
+      "LLM_WIKI_TEST_ARGS_LOG" => args_log,
+      "LLM_WIKI_TEST_PROVIDER_MARKER" => provider_marker
+    }
+    command = env.map { |key, value| "#{key}=#{q(value)}" }.join(" ")
+    `cd #{q(@main)} && #{command} bash .llm-wiki/refresh-wiki.sh 2>&1`
+
+    assert_predicate $CHILD_STATUS, :success?
+    assert_equal [ "--project", @main, "--drain" ], File.readlines(args_log, chomp: true)
+    assert_equal status_before, git(@main, "status --porcelain=v1")
+    assert_equal wiki_before, File.binread(File.join(@main, "wiki", "index.md"))
+    refute File.exist?(provider_marker), "the scheduled wrapper must not launch a provider itself"
+  end
+
+  def test_scheduled_empty_drain_uses_real_runner_without_provider_or_checkout_writes
+    provider_marker = File.join(@dir, "empty-drain-provider-ran")
+    provider = File.join(@dir, "empty-drain-provider.sh")
+    File.write(provider, <<~PROVIDER)
+      #!/usr/bin/env bash
+      touch "$LLM_WIKI_TEST_PROVIDER_MARKER"
+      exit 99
+    PROVIDER
+    FileUtils.chmod("+x", provider)
+    FileUtils.cp(SCHEDULED_SCRIPT, File.join(@main, ".llm-wiki", "refresh-wiki.sh"))
+
+    File.write(File.join(@main, "wiki", "index.md"), "# user's pending wiki edit\n")
+    File.write(File.join(@main, "untracked.txt"), "user work\n")
+    status_before = git(@main, "status --porcelain=v1")
+    wiki_before = File.binread(File.join(@main, "wiki", "index.md"))
+    env = {
+      "HOME" => File.join(@dir, "home"),
+      "PATH" => "/usr/bin:/bin",
+      "LLM_WIKI_REFRESH_CMD" => provider,
+      "LLM_WIKI_TEST_PROVIDER_MARKER" => provider_marker,
+      "LLM_WIKI_LOCK_WAIT_SECONDS" => "5"
+    }
+    command = env.map { |key, value| "#{key}=#{q(value)}" }.join(" ")
+
+    `cd #{q(@main)} && #{command} bash .llm-wiki/refresh-wiki.sh 2>&1`
+
+    assert_predicate $CHILD_STATUS, :success?
+    assert_equal status_before, git(@main, "status --porcelain=v1")
+    assert_equal wiki_before, File.binread(File.join(@main, "wiki", "index.md"))
+    refute File.exist?(provider_marker), "an empty scheduled drain must not launch the provider"
+    refute_match(/refs\/heads\/llm-wiki\/refresh/, git(@main, "show-ref"))
+  end
+
+  def test_scheduled_wrapper_falls_back_to_project_runner
+    common = git(@main, "rev-parse --path-format=absolute --git-common-dir")
+    FileUtils.rm_f(File.join(common, "llm-wiki", "post-commit-refresh.sh"))
+    args_log = File.join(@dir, "fallback-args")
+    project_runner = File.join(@main, ".llm-wiki", "post-commit-refresh.sh")
+    File.write(project_runner, <<~RUNNER)
+      #!/usr/bin/env bash
+      # LLM_WIKI_RUNNER_CAPABILITIES: drain
+      printf '%s\n' "$@" > "$LLM_WIKI_TEST_ARGS_LOG"
+    RUNNER
+    FileUtils.chmod("+x", project_runner)
+    FileUtils.cp(SCHEDULED_SCRIPT, File.join(@main, ".llm-wiki", "refresh-wiki.sh"))
+
+    `cd #{q(@main)} && LLM_WIKI_TEST_ARGS_LOG=#{q(args_log)} bash .llm-wiki/refresh-wiki.sh 2>&1`
+
+    assert_predicate $CHILD_STATUS, :success?
+    assert_equal [ "--project", @main, "--drain" ], File.readlines(args_log, chomp: true)
+  end
+
+  def test_scheduled_wrapper_refuses_runner_without_drain_capability
+    common = git(@main, "rev-parse --path-format=absolute --git-common-dir")
+    FileUtils.rm_f(File.join(common, "llm-wiki", "post-commit-refresh.sh"))
+    provider_marker = File.join(@dir, "legacy-runner-ran")
+    project_runner = File.join(@main, ".llm-wiki", "post-commit-refresh.sh")
+    File.write(project_runner, <<~RUNNER)
+      #!/usr/bin/env bash
+      touch "$LLM_WIKI_TEST_PROVIDER_MARKER"
+    RUNNER
+    FileUtils.chmod("+x", project_runner)
+    FileUtils.cp(SCHEDULED_SCRIPT, File.join(@main, ".llm-wiki", "refresh-wiki.sh"))
+
+    output = `cd #{q(@main)} && LLM_WIKI_TEST_PROVIDER_MARKER=#{q(provider_marker)} bash .llm-wiki/refresh-wiki.sh 2>&1`
+
+    refute_predicate $CHILD_STATUS, :success?
+    assert_includes output, "no drain-capable transactional refresh runner was found"
+    refute File.exist?(provider_marker), "a legacy runner must never receive the scheduled drain"
+  end
+
   def test_generated_scripts_match_committed_and_template_copies
     require "hive/llm_wiki_bootstrap/scripts"
     root = File.expand_path("../..", __dir__)
     {
+      "refresh-wiki.sh" => Hive::LlmWikiBootstrap::Scripts.refresh_wiki,
       "post-commit-refresh.sh" => Hive::LlmWikiBootstrap::Scripts.post_commit_refresh,
       "compile-log.sh" => Hive::LlmWikiBootstrap::Scripts.compile_log
     }.each do |name, generated|

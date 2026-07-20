@@ -14,7 +14,6 @@ module Hive
         single_feature_only allow_dependency_bumps allow_public_api_changes
         allow_cross_feature
       ].freeze
-      CAP_LIMITS = %w[max_files max_diff_lines].freeze
 
       Result = Struct.new(:config, :authority, :reasons, :error, keyword_init: true) do
         def authorized?(kind)
@@ -31,7 +30,9 @@ module Hive
           "auto_fix_agent" => refactor.dig("auto_fix", "agent").to_s,
           "min_confidence" => refactor.fetch("min_confidence").to_s,
           "commands" => json_copy(refactor.fetch("commands")),
-          "caps" => json_copy(refactor.fetch("caps")),
+          "caps" => CAP_BOOLEANS.to_h do |key|
+            [ key, refactor.fetch("caps").fetch(key) ]
+          end,
           "issue_min_leverage_score" => refactor.dig(
             "issue_filing", "min_leverage_score"
           ).to_f
@@ -114,9 +115,8 @@ module Hive
       private_class_method :stricter_confidence
 
       def intersect_caps!(target, snapshot, current)
-        CAP_LIMITS.each do |key|
-          target[key] = [ Integer(snapshot.fetch(key)), Integer(current.fetch(key)) ].min
-        end
+        target.delete("max_files")
+        target.delete("max_diff_lines")
         target["single_feature_only"] = snapshot.fetch("single_feature_only") == true ||
                                          current.fetch("single_feature_only") == true
         %w[allow_dependency_bumps allow_public_api_changes allow_cross_feature].each do |key|

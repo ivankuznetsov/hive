@@ -397,7 +397,7 @@ def refactor_patrol_jobs_argv(argv)
   { action: action }
 end
 
-def refactor_patrol_v2_argv?(argv)
+def refactor_patrol_pr_scoped_argv?(argv)
   return true if argv.any? do |arg|
     arg == "--pr" || arg.start_with?("--pr=") ||
       arg == "--job-manifest" || arg.start_with?("--job-manifest=")
@@ -419,8 +419,8 @@ end
 
 def json_usage_error_payload(contract, error, argv: [])
   if contract[:reporter] == :refactor_patrol
-    version = if refactor_patrol_v2_argv?(argv)
-      Hive::RefactorPatrol::Reporter::V2_SCHEMA_VERSION
+    version = if refactor_patrol_pr_scoped_argv?(argv)
+      Hive::RefactorPatrol::Reporter::V3_SCHEMA_VERSION
     else
       Hive::RefactorPatrol::Reporter::V1_SCHEMA_VERSION
     end

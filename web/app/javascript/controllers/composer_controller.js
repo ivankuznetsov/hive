@@ -9,6 +9,7 @@ export default class extends Controller {
   static targets = ["text", "files", "picker", "chips"]
 
   connect() {
+    this.submissionInFlight = false
     this.attachments = new Map()
     this.previewUrls = new Map()
 
@@ -68,6 +69,42 @@ export default class extends Controller {
     this.syncInput()
   }
 
+  submitting(event) {
+    if (event.target === this.element) this.submissionInFlight = true
+  }
+
+  // StatusBroadcaster cannot attach Turbo's request ID because it observes
+  // filesystem changes on a background thread. A page-wide refresh arriving
+  // while this form is submitting would therefore abort the POST after the
+  // server wrote the idea but before Turbo delivered its success lifecycle.
+  // Ignore only refresh streams on the submitting client; targeted project
+  // replacements still render, and other connected clients still refresh.
+  beforeStreamRender(event) {
+    const stream = event.detail?.newStream || event.target
+    if (this.submissionInFlight && stream?.getAttribute("action") === "refresh") {
+      event.preventDefault()
+      return
+    }
+
+    // The server owns the live project order, but the selected project is
+    // unfinished form state owned by this browser. Preserve that choice when
+    // Turbo morphs the select, provided the project still exists.
+    if (stream?.getAttribute("target") !== "composer-project") return
+
+    const selectedProject = this.element.querySelector("#composer-project")?.value
+    if (!selectedProject) return
+
+    const render = event.detail.render
+    event.detail.render = async (newStream) => {
+      await render(newStream)
+
+      const select = this.element.querySelector("#composer-project")
+      const projectStillExists = Array.from(select?.options || [])
+        .some((option) => option.value === selectedProject)
+      if (projectStillExists) select.value = selectedProject
+    }
+  }
+
   // Turbo keeps this form alive across the successful redirect so live grid
   // updates cannot destroy an unfinished idea. That same permanence must not
   // keep a FINISHED idea around. turbo:before-fetch-response arrives while
@@ -77,6 +114,7 @@ export default class extends Controller {
   // context for the next idea.
   submitted(event) {
     const success = event.detail.success ?? event.detail.fetchResponse?.succeeded
+    if (event.type === "turbo:submit-end") this.submissionInFlight = false
     if (!success) return
 
     this.attachments.forEach((_file, label) => this.revokePreview(label))

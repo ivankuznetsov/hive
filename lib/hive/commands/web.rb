@@ -1,5 +1,6 @@
 require "fileutils"
 require "json"
+require "tmpdir"
 require "hive/config"
 require "hive/paths"
 require "hive/web/session_secret"
@@ -76,7 +77,8 @@ module Hive
         # bundle-installed against its own ".."; re-pointing the path source
         # at runtime invalidates that prebuilt bundle (the v0.3.4/v0.3.5
         # image-smoke db:prepare failure).
-        env["HIVE_CLI_ROOT"] = Hive::Web::AppBundle.hive_cli_root if app_dir == Hive::Web::AppBundle.app_dir
+        managed_bundle = app_dir == Hive::Web::AppBundle.app_dir
+        env["HIVE_CLI_ROOT"] = Hive::Web::AppBundle.hive_cli_root if managed_bundle
         # The loopback no-auth bypass is opt-out: an operator can set
         # web.local_loopback: false to force GitHub login even on a loopback
         # bind. Only signal the bypass when both the bind is loopback AND the
@@ -85,6 +87,18 @@ module Hive
         FileUtils.mkdir_p(env.fetch("HIVEBOX_STORAGE_DIR"))
 
         Dir.chdir(app_dir) do
+          precompiled_assets = managed_bundle || ENV["HIVEBOX_PRECOMPILED_ASSETS"] == "1"
+          if env.fetch("RAILS_ENV") == "production" && !precompiled_assets
+            compiled = Dir.mktmpdir("hive-web-assets") do |asset_storage|
+              asset_env = env.merge("HIVEBOX_STORAGE_DIR" => asset_storage)
+              system(asset_env, "bin/rails", "assets:precompile")
+            end
+            unless compiled && Hive::Web::AppBundle.assets_ready?(app_dir)
+              raise Hive::Error,
+                    "hive web: asset precompile failed — check that #{app_dir} is writable " \
+                    "and that the web bundle is installed (cd #{app_dir} && bundle install)"
+            end
+          end
           # Idempotent: creates/migrates the solid-stack sqlite databases on
           # first boot, no-ops afterwards. Array form — no shell involved.
           # Typed error so a persistent failure surfaces as guidance, not a

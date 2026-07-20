@@ -241,42 +241,45 @@ class PipelineFlowTest < ApplicationSystemTestCase
   end
 
   test "the project rail filters the grid and survives live updates" do
-    second = create_hive_project!("second-app")
-    create_task!(@project, "Demo task one")
-    create_task!(second, "Second task one")
+    filtered = create_hive_project!("rail-filter-app")
+    active = create_hive_project!("rail-active-app")
+    create_task!(filtered, "Filter task one")
+    create_task!(active, "Active task one")
     sign_in!
     visit "/"
-    assert_selector ".project-section[data-project-name='#{@project}']"
-    assert_selector ".project-section[data-project-name='second-app']"
+    assert_selector ".project-section[data-project-name='#{filtered}']"
+    assert_selector ".project-section[data-project-name='#{active}']"
 
-    click_button @project
-    assert_selector ".project-section[data-project-name='#{@project}']"
-    assert_no_selector ".project-section[data-project-name='second-app']",
+    click_button filtered
+    assert_selector ".project-section[data-project-name='#{filtered}']"
+    assert_no_selector ".project-section[data-project-name='#{active}']",
                        wait: 5
-    assert_includes page.current_url, "project=#{@project}",
+    assert_includes page.current_url, "project=#{filtered}",
                     "the choice must reach the URL so reloads land filtered"
-    assert_equal @project, find(".composer select[name='project']").value,
+    assert_equal filtered, find(".composer select[name='project']").value,
                  "filtering is a context switch — new ideas should land in that project"
 
     # The broadcast REPLACES the grid, discarding our hidden attributes —
     # the filter must re-apply itself on the fresh DOM.
-    create_task!(second, "Second task two")
-    assert_selector ".project-section[data-project-name='second-app'][hidden]",
+    create_task!(active, "Active task two")
+    assert_selector ".project-section[data-project-name='#{active}'][hidden]",
                     visible: :hidden, wait: 10
-    assert_selector ".task-row", text: "Second task two", visible: :hidden, wait: 10
-    assert_selector ".task-row", text: "Demo task one",
+    assert_selector ".task-row", text: "Active task two", visible: :hidden, wait: 10
+    assert_selector ".task-row", text: "Filter task one",
                     count: 1
-    assert_selector ".project-nav button:nth-of-type(2)", text: "second-app", wait: 10
-    assert_equal [ "second-app", @project ],
-                 all(".composer select[name='project'] option:not([disabled])").map(&:value),
-                 "the permanent composer must adopt the live activity order"
-    assert_equal @project, find(".composer select[name='project']").value,
+    rail_projects = all(".project-nav button").map(&:text)
+    assert_operator rail_projects.index(active), :<, rail_projects.index(filtered),
+                    "the rail must adopt the live activity order"
+    composer_projects = all(".composer select[name='project'] option:not([disabled])").map(&:value)
+    assert_operator composer_projects.index(active), :<, composer_projects.index(filtered),
+                    "the permanent composer must adopt the live activity order"
+    assert_equal filtered, find(".composer select[name='project']").value,
                  "reordering projects must preserve the operator's selection"
 
     click_button "All projects"
-    assert_selector ".project-section[data-project-name='second-app']"
-    assert_selector ".task-row", text: "Second task two"
-    assert_equal @project, find(".composer select[name='project']").value,
+    assert_selector ".project-section[data-project-name='#{active}']"
+    assert_selector ".task-row", text: "Active task two"
+    assert_equal filtered, find(".composer select[name='project']").value,
                  "widening the view must not discard the composer's project choice"
 
     click_link "+ Add project"

@@ -59,6 +59,7 @@ class StatusBroadcaster
     private
 
     def broadcast(payload)
+      sorted_projects = projects(payload)
       # Refresh signal FIRST: it carries no payload and cannot fail on
       # content, while the partial render below can (one bad row). Task
       # pages subscribe to the same channel and morph-refresh on this
@@ -68,9 +69,22 @@ class StatusBroadcaster
       Turbo::StreamsChannel.broadcast_refresh_to(CHANNEL)
       Turbo::StreamsChannel.broadcast_replace_to(
         CHANNEL,
+        target: "project-nav",
+        partial: "status/project_nav",
+        locals: { projects: sorted_projects }
+      )
+      Turbo::StreamsChannel.broadcast_replace_to(
+        CHANNEL,
+        target: "composer-project",
+        attributes: { method: :morph },
+        partial: "status/composer_project",
+        locals: { projects: sorted_projects }
+      )
+      Turbo::StreamsChannel.broadcast_replace_to(
+        CHANNEL,
         target: "projects",
         partial: "status/projects",
-        locals: { projects: projects(payload) }
+        locals: { projects: sorted_projects }
       )
     end
   end

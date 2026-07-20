@@ -134,9 +134,13 @@ origin also prints the Host-header/reverse-proxy warning.
   `StatusFeed` suppresses unchanged snapshots by comparing with only
   `generated_at` and `age_seconds` removed while keeping `mtime` /
   `folder_mtime` as liveness signals. The broadcaster sends the status-channel
-  refresh first, then renders and replaces the `projects` frame over
-  solid_cable, so task pages without that frame still receive a morph signal if
-  the dashboard partial raises. The index opts that refresh into Turbo morphing
+  refresh first, then uses one server-sorted snapshot to replace the project
+  rail, morph the composer project selector, and replace the `projects` frame
+  over solid_cable, so task pages without those targets still receive a morph
+  signal if a dashboard partial raises. The composer's stream hook keeps the
+  browser's current project selection when that project still exists; ordering
+  belongs to the server while unfinished form state remains local. The index
+  opts that refresh into Turbo morphing
   with scroll preservation so a live row arrival does not yank the operator
   back to the top; the composer form is `data-turbo-permanent` because
   typed-but-unsent idea text and staged image chips live in browser state. Its

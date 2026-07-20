@@ -63,11 +63,6 @@ export default class extends Controller {
   }
 
   apply() {
-    const names = Array.from(this.element.querySelectorAll("[data-project-name]"))
-      .map((section) => section.dataset.projectName)
-    this.syncProjectNavigation(names)
-    this.syncComposerProjects(names)
-
     // A ghost deep link (?project= for a renamed/forgotten project) would
     // hide EVERY section with no active rail button — an empty grid with
     // zero explanation. Fall back to All projects and clean the URL.
@@ -86,43 +81,5 @@ export default class extends Controller {
     this.buttonTargets.forEach((button) => {
       button.classList.toggle("active", (button.dataset.projectFilterNameParam || "") === this.selected)
     })
-  }
-
-  syncProjectNavigation(names) {
-    const rail = this.element.querySelector(".project-nav")
-    const addLink = rail?.querySelector(".project-nav-add")
-    if (!rail || !addLink) return
-
-    const buttons = new Map(this.buttonTargets.map((button) => [
-      button.dataset.projectFilterNameParam || "",
-      button
-    ]))
-    names.forEach((name) => {
-      const button = buttons.get(name)
-      if (button) rail.insertBefore(button, addLink)
-    })
-  }
-
-  syncComposerProjects(names) {
-    const select = this.element.querySelector("#composer select[name='project']")
-    if (!select) return
-
-    const desiredValues = names.length > 1 ? ["", ...names] : names
-    if (Array.from(select.options).map((option) => option.value).join("\0") === desiredValues.join("\0")) return
-
-    const selected = select.value
-    const existing = new Map(Array.from(select.options).map((option) => [option.value, option]))
-    const options = names.map((name) => existing.get(name) || new Option(name, name))
-    if (names.length > 1) {
-      const placeholder = existing.get("") || new Option("Project…", "")
-      placeholder.disabled = true
-      placeholder.hidden = true
-      options.unshift(placeholder)
-    }
-    select.replaceChildren(...options)
-
-    if (names.includes(selected)) select.value = selected
-    else if (names.length === 1) select.value = names[0]
-    else select.value = ""
   }
 }

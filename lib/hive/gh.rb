@@ -477,18 +477,11 @@ module Hive
       pr_number = Integer(number)
       raise Hive::GhError, "pull request number must be positive" unless pr_number.positive?
 
-      args = [
-        "gh", "api", "--hostname", github_host,
-        "-H", "Accept: application/vnd.github.diff",
-        "repos/#{repo}/pulls/#{pr_number}"
-      ]
-      out, err, status = capture3(*args, cfg: cfg)
-      unless status.success?
-        raise Hive::GhError,
-              "`gh api` failed while fetching the diff for #{repo}##{pr_number}: #{digest_error_text(out, err)}"
-      end
-
-      out
+      digest_api_text(
+        "repos/#{repo}/pulls/#{pr_number}", host: github_host, cfg: cfg,
+        context: "fetching the diff for #{repo}##{pr_number}",
+        accept: "application/vnd.github.diff"
+      )
     rescue ArgumentError, TypeError => e
       raise Hive::GhError, "invalid pull-request diff input: #{e.message}"
     end
@@ -499,16 +492,10 @@ module Hive
       pr_number = Integer(number)
       raise Hive::GhError, "pull request number must be positive" unless pr_number.positive?
 
-      args = [
-        "gh", "api", "--hostname", github_host,
-        "repos/#{repo}/pulls/#{pr_number}/files?per_page=100",
-        "--paginate", "--slurp"
-      ]
-      out, err, status = capture3(*args, cfg: cfg)
-      unless status.success?
-        raise Hive::GhError,
-              "`gh api` failed while listing files for #{repo}##{pr_number}: #{digest_error_text(out, err)}"
-      end
+      out = digest_api_text(
+        "repos/#{repo}/pulls/#{pr_number}/files?per_page=100", host: github_host, cfg: cfg,
+        context: "listing files for #{repo}##{pr_number}", paginate: true
+      )
       pages = JSON.parse(out)
       unless pages.is_a?(Array) && pages.all? { |page| page.is_a?(Array) }
         raise Hive::GhError, "GitHub returned incomplete file pages for #{repo}##{pr_number}"
@@ -526,16 +513,25 @@ module Hive
     end
 
     def digest_api_json(endpoint, host:, cfg:, context:)
-      out, err, status = capture3("gh", "api", "--hostname", host, endpoint, cfg: cfg)
-      unless status.success?
-        raise Hive::GhError, "`gh api` failed while #{context}: #{digest_error_text(out, err)}"
-      end
-
-      JSON.parse(out)
+      JSON.parse(digest_api_text(endpoint, host: host, cfg: cfg, context: context))
     rescue JSON::ParserError => e
       raise Hive::GhError, "GitHub response was unparseable while #{context}: #{e.message}"
     end
     private_class_method :digest_api_json
+
+    def digest_api_text(endpoint, host:, cfg:, context:, accept: nil, paginate: false)
+      args = [ "gh", "api", "--hostname", host ]
+      args.concat([ "-H", "Accept: #{accept}" ]) if accept
+      args << endpoint
+      args.concat([ "--paginate", "--slurp" ]) if paginate
+      out, err, status = capture3(*args, cfg: cfg)
+      unless status.success?
+        raise Hive::GhError, "`gh api` failed while #{context}: #{digest_error_text(out, err)}"
+      end
+
+      out
+    end
+    private_class_method :digest_api_text
 
     def parse_digest_time(value, label)
       raise ArgumentError, "#{label} is missing" if value.nil? || value.to_s.empty?

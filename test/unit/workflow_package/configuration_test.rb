@@ -3,6 +3,8 @@ require "hive/digest"
 require "hive/workflow_package/configuration"
 
 class WorkflowPackageConfigurationTest < Minitest::Test
+  include HiveTestHelper
+
   def test_builds_byte_stable_snapshot_and_overlays_every_actor
     configuration = build_configuration
     reloaded = Hive::WorkflowPackage::Configuration.load(configuration.bytes)
@@ -41,10 +43,12 @@ class WorkflowPackageConfigurationTest < Minitest::Test
       build_configuration(overrides: { "stages.missing" => { "agent" => "claude" } })
     end
 
-    configuration = build_configuration
-    drifted = { "agents" => { "codex" => { "bin" => "/tmp/different-codex" } } }
-    error = assert_raises(Hive::ConfigError) { configuration.apply(workflow, cfg: drifted) }
-    assert_match(/profile drifted/, error.message)
+    with_env("HIVE_CODEX_BIN" => nil) do
+      configuration = build_configuration
+      drifted = { "agents" => { "codex" => { "bin" => "/tmp/different-codex" } } }
+      error = assert_raises(Hive::ConfigError) { configuration.apply(workflow, cfg: drifted) }
+      assert_match(/profile drifted/, error.message)
+    end
   end
 
   def test_explicit_pins_require_native_profile_support

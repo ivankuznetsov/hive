@@ -1,5 +1,4 @@
 require "open3"
-require "stringio"
 require "tempfile"
 
 class ReposController < ApplicationController
@@ -12,7 +11,7 @@ class ReposController < ApplicationController
 
   def index
     @projects = registered_projects
-    registered_names = @projects.map { |p| p["name"] }.to_set
+    registered_names = @projects.map(&:name).to_set
     # The device-flow grant carries `repo` scope, so the operator's own
     # repositories list directly — no separate GitHub configuration.
     @github_repos = session[:github_token] ? github_repositories(registered_names) : nil
@@ -35,11 +34,11 @@ class ReposController < ApplicationController
     @workflows = InitSetup.workflows
     @current_workflow = Hive::Workflows::CODING_ID.to_s
 
-    project = @project_name && registered_projects.find { |entry| entry["name"] == @project_name }
+    project = @project_name && registered_projects.find { |entry| entry.name == @project_name }
     return unless project
 
-    @workflows = InitSetup.workflows(project["path"])
-    @current_workflow = persisted_default_workflow(project) || @current_workflow
+    @workflows = project.workflows
+    @current_workflow = project.default_workflow || @current_workflow
   end
 
   def create
@@ -47,8 +46,8 @@ class ReposController < ApplicationController
     if params[:project].present?
       # Re-run setup for an already-registered project (no clone).
       project = find_project!(File.basename(params[:project].to_s.strip))
-      warning = reinit!(project["path"], InitSetup.new(params[:settings]), workflow: selected_workflow)
-      return redirect_after_init("#{project["name"]} settings applied", warning)
+      warning = project.setup!(InitSetup.new(params[:settings]), workflow: selected_workflow)
+      return redirect_after_init("#{project.name} settings applied", warning)
     end
 
     url = params[:url].to_s.strip
@@ -78,7 +77,7 @@ class ReposController < ApplicationController
     setup = InitSetup.new(params[:settings])
     clone!(url, target) unless File.directory?(target)
     normalize_origin!(target)
-    warning = reinit!(target, setup, workflow: selected_workflow)
+    warning = Project.new("name" => name, "path" => target).setup!(setup, workflow: selected_workflow)
     redirect_after_init("#{name} is registered", warning)
   end
 
@@ -98,42 +97,6 @@ class ReposController < ApplicationController
     return workflow if Hive::Workflows::DescriptorParser::SAFE_SLUG.match?(workflow)
 
     raise Hive::Error, "invalid workflow id"
-  end
-
-  # The persisted `default_workflow` for a registered project's re-run form, or
-  # nil when none is set. A corrupt/unreadable config.yml degrades to nil (the
-  # caller then falls back to coding) — matching the InitSetup.workflows list
-  # rendered just above, which already survives the same broken file via its own
-  # fallback — rather than letting an unrescued Psych::Exception 500 the very
-  # form an operator opens to repair the project. The rescue is narrowed to the
-  # corrupt/unreadable-config classes (the same set Project#workflow_dir_for
-  # degrades on) so a real bug — a NoMethodError, or a Hive::Error other than
-  # ConfigError — still surfaces instead of masquerading as a benign "fell back
-  # to coding". Config.load (lib/hive/config.rb) does not rescue Psych and
-  # ApplicationController only rescues Hive::Error/ParameterMissing.
-  def persisted_default_workflow(project)
-    Hive::Config.load(project["path"])["default_workflow"].presence
-  rescue Hive::ConfigError, Psych::Exception, SystemCallError, IOError => e
-    Rails.logger.warn("default_workflow unreadable for #{project["name"]}: #{e.class}: #{e.message}")
-    nil
-  end
-
-  # The InitSetup adapter rides Init's `prompts:` seam, so a web setup is
-  # indistinguishable from an interactive `hive init`. HTTP requests must
-  # never inherit Puma's terminal: new preflight questions would otherwise
-  # wait forever with no browser surface on which the operator can answer.
-  def reinit!(target, setup, workflow: nil)
-    provisioning_error = StringIO.new
-    Hive::Commands::Init.new(
-      target,
-      force: true,
-      json: false,
-      prompts: setup,
-      workflow: workflow,
-      provisioning_input: StringIO.new,
-      provisioning_error: provisioning_error
-    ).call
-    provisioning_error.string.strip.presence
   end
 
   def redirect_after_init(notice, warning)

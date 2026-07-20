@@ -5,7 +5,7 @@ class Task
   attr_reader :project
 
   def self.find!(project:, slug:, snapshot: StatusBroadcaster.snapshot)
-    project_payload = snapshot.fetch("projects", []).find { |candidate| candidate["name"] == project["name"] }
+    project_payload = snapshot.fetch("projects", []).find { |candidate| candidate["name"] == project.name }
     attributes = project_payload&.fetch("tasks", [])&.find { |candidate| candidate["slug"] == slug }
     raise Hive::InvalidTaskPath, "unknown task #{slug}" unless attributes
 
@@ -108,7 +108,7 @@ class Task
   end
 
   def latest_log
-    dir = File.join(project["hive_state_path"], "logs", File.basename(slug))
+    dir = File.join(project.hive_state_path, "logs", File.basename(slug))
     path = Dir.glob(File.join(dir, "*.log")).max_by { |candidate| File.mtime(candidate) }
     return nil unless path
 
@@ -134,7 +134,7 @@ class Task
 
   def generic_artifact_order
     Hive::Workflows::Project.synchronize do
-      Hive::Workflows::Project.load!(project["path"])
+      Hive::Workflows::Project.load!(project.path)
       Hive::Workflows::Registry.fetch(self["workflow"].to_sym).stages.map(&:state_file).uniq
     end
   rescue Hive::Workflows::UnknownWorkflow

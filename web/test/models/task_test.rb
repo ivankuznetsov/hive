@@ -2,7 +2,7 @@ require "test_helper"
 
 class TaskTest < ActiveSupport::TestCase
   test "finds the task in its project snapshot" do
-    project = { "name" => "alpha" }
+    project = Project.new("name" => "alpha", "path" => "/tmp/alpha", "hive_state_path" => "/tmp/alpha/.hive-state")
     attributes = { "slug" => "ship-it-260720-abcd", "stage" => "3-plan" }
     snapshot = {
       "projects" => [
@@ -19,7 +19,7 @@ class TaskTest < ActiveSupport::TestCase
 
   test "raises the typed not-found error for an unknown task" do
     error = assert_raises(Hive::InvalidTaskPath) do
-      Task.find!(project: { "name" => "alpha" }, slug: "missing", snapshot: { "projects" => [] })
+      Task.find!(project: Project.new("name" => "alpha"), slug: "missing", snapshot: { "projects" => [] })
     end
 
     assert_equal "unknown task missing", error.message
@@ -33,7 +33,7 @@ class TaskTest < ActiveSupport::TestCase
     media.join("still.png").binwrite("png")
     root.join("outside.png").binwrite("outside")
     task = Task.new(
-      project: { "name" => "alpha" },
+      project: Project.new("name" => "alpha"),
       attributes: { "slug" => "ship-it-260720-abcd", "folder" => folder.to_s }
     )
 

@@ -13,8 +13,8 @@ class WorkflowsController < ApplicationController
       id: params.require(:id),
       template: params[:template].presence || Hive::Commands::Workflow::DEFAULT_TEMPLATE
     )
-    redirect_to workflows_path(project: project.fetch("name")),
-                notice: "Created #{result.fetch('id')} for #{project.fetch('name')}."
+    redirect_to workflows_path(project: project.name),
+                notice: "Created #{result.fetch('id')} for #{project.name}."
   end
 
   def preview_install
@@ -24,7 +24,7 @@ class WorkflowsController < ApplicationController
     @preview_operation = "install"
     @preview_token = sign_preview(
       "operation" => @preview_operation,
-      "project" => project.fetch("name"),
+      "project" => project.name,
       "source" => source,
       "expected" => @preview.slice(
         "name", "version", "catalog_commit", "source_commit", "manifest_digest",
@@ -43,7 +43,7 @@ class WorkflowsController < ApplicationController
       project, source: receipt.fetch("source"), expected: receipt.fetch("expected")
     )
     redirect_with_workflow_result(
-      workflows_path(project: project.fetch("name")), result: result,
+      workflows_path(project: project.name), result: result,
       notice: "#{result.fetch('name')} #{workflow_status_message(result)}."
     )
   end
@@ -53,14 +53,14 @@ class WorkflowsController < ApplicationController
     name = params.require(:name).to_s
     @preview = workflow_lifecycle.preview_update(project, name: name)
     if @preview.fetch("status") == "already_current"
-      return redirect_to workflows_path(project: project.fetch("name")),
+      return redirect_to workflows_path(project: project.name),
                          notice: "#{name} is already current."
     end
 
     @preview_operation = "update"
     @preview_token = sign_preview(
       "operation" => @preview_operation,
-      "project" => project.fetch("name"),
+      "project" => project.name,
       "name" => name,
       "escalation" => @preview.dig("diff", "escalation") == true,
       "expected" => @preview.slice(
@@ -87,7 +87,7 @@ class WorkflowsController < ApplicationController
       allow_escalation: receipt["escalation"] == true
     )
     redirect_with_workflow_result(
-      workflows_path(project: project.fetch("name")), result: result,
+      workflows_path(project: project.name), result: result,
       notice: "#{result.fetch('name')} #{workflow_status_message(result)}."
     )
   end
@@ -99,7 +99,7 @@ class WorkflowsController < ApplicationController
     @preview_operation = "remove"
     @preview_token = sign_preview(
       "operation" => @preview_operation,
-      "project" => project.fetch("name"),
+      "project" => project.name,
       "name" => name,
       "expected" => @preview.slice("source_commit", "manifest_digest", "configuration_digest")
     )
@@ -115,7 +115,7 @@ class WorkflowsController < ApplicationController
       project, name: receipt.fetch("name"), expected: receipt.fetch("expected")
     )
     redirect_with_workflow_result(
-      workflows_path(project: project.fetch("name")), result: result,
+      workflows_path(project: project.name), result: result,
       notice: "#{result.fetch('name')} removed for new tasks; " \
               "#{result.fetch('retained_commits').length} task-pinned generation(s) retained."
     )

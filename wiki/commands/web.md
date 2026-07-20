@@ -265,9 +265,10 @@ origin also prints the Host-header/reverse-proxy warning.
   control: fresh clone setup lists built-ins only (`coding`, `content`, `bench`) with
   `coding` preselected, while "Re-run setup" lists built-ins plus that
   project's authored workflows and preselects the current `default_workflow`.
-  The selected value is passed as `Hive::Commands::Init.new(..., workflow:)`;
-  it is intentionally outside the `prompts:` answers hash. The web adapter
-  also supplies a non-TTY provisioning input and a request-local error capture,
+  The selected value is passed by `Project#setup!` as
+  `Hive::Commands::Init.new(..., workflow:)`; it is intentionally outside the
+  `prompts:` answers hash. The `Project` model also supplies a non-TTY
+  provisioning input and a request-local error capture,
   so CLI preflight questions can never wait on Puma's inherited terminal and
   strand the browser on “Cloning…”. Non-interactive doctor/agent-skill findings
   return as an alert alongside the successful registration/settings notice

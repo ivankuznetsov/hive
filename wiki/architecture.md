@@ -345,8 +345,14 @@ push credentials without docker-exec setup. The container supervisor (tini →
 signal-killed children with backoff, survives malformed config, and
 SIGHUP-reloads the bot set. Details: [[commands/web]].
 
-The Rails layer models a task page as a filesystem-backed `Task`, built from
-the matching status snapshot row and registered project. That model owns task
+The Rails layer wraps each registry entry in a `Project` model. Project lookup,
+config-backed workflow/default/daemon behavior, and the non-interactive
+`Hive::Commands::Init` setup seam live there; controllers and views use named
+project attributes instead of passing registry hashes around. Gem adapters can
+still call `fetch` at the explicit compatibility boundary.
+
+A task page is a filesystem-backed `Task`, built from the matching status
+snapshot row and its `Project`. That model owns task
 reads and their invariants — workflow-aware artifact ordering, brainstorm
 questions, bounded log tails, worktree presence, and media-manifest/path
 validation. `TasksController` renders that resource. Namespaced task-resource

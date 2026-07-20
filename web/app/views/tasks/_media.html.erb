@@ -18,7 +18,7 @@
     <div class="demo-gallery">
       <% media["items"].each do |item| %>
         <figure class="demo-item">
-          <img src="<%= task_media_path(project["name"], task["slug"], item["file"]) %>"
+          <img src="<%= task_media_path(project.name, task["slug"], item["file"]) %>"
                alt="<%= item["caption"].presence || item["file"] %>"
                loading="lazy">
           <% if item["caption"].present? || item["screenote_url"].present? %>

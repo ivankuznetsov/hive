@@ -109,5 +109,5 @@
       <p><%= f.submit "Remove workflow", class: "btn-danger", data: { turbo_submits_with: "Removing…" } %></p>
     <% end %>
   <% end %>
-  <p><%= link_to "Cancel preview", workflows_path(project: project.fetch("name")), class: "btn btn-ghost btn-sm" %></p>
+  <p><%= link_to "Cancel preview", workflows_path(project: project.name), class: "btn btn-ghost btn-sm" %></p>
 </section>

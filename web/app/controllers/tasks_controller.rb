@@ -7,18 +7,11 @@ class TasksController < Tasks::BaseController
     @log = @task.latest_log
     @questions = @task.open_questions
     @worktree_exists = @task.worktree?
-    @daemon_enabled = project_daemon_enabled?
+    @daemon_enabled = @project.daemon_enabled?
     @daemon_running = daemon_running?
   end
 
   private
-
-  def project_daemon_enabled?
-    Hive::Config.load(@project["path"]).dig("daemon", "enabled") != false
-  rescue StandardError => e
-    Rails.logger.warn("project config unreadable for #{@project["name"]}: #{e.class}: #{e.message}")
-    true
-  end
 
   def daemon_running?
     require "hive/daemon/status_report"

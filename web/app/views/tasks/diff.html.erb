@@ -3,8 +3,8 @@
   <h1>Diff</h1>
   <%= stage_badge(@task["stage"]) %>
 </div>
-<p class="task-slug"><%= @project["name"] %> · <%= @task["slug"] %></p>
-<p><%= link_to "← Back to task", task_path(@project["name"], @task["slug"]) %></p>
+<p class="task-slug"><%= @project.name %> · <%= @task["slug"] %></p>
+<p><%= link_to "← Back to task", task_path(@project.name, @task["slug"]) %></p>
 
 <% if @diff.strip.empty? %>
   <div class="empty-state"><p>The worktree has no uncommitted changes.</p></div>

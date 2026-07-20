@@ -68,20 +68,20 @@
     <% if recovery_action?(@task) %>
       <%# The bot's Autofix, web-shaped: clears the failure marker (guarded
           by its attrs) and re-runs the stage verb as one queued sequence. %>
-      <%= button_to "Retry stage", task_recover_path(@project["name"], @task["slug"]),
+      <%= button_to "Retry stage", task_recover_path(@project.name, @task["slug"]),
             data: { turbo_submits_with: "Queueing…" } %>
     <% end %>
     <% if stage_passable?(@task) %>
-      <%= button_to "Approve", task_approve_path(@project["name"], @task["slug"]),
+      <%= button_to "Approve", task_approve_path(@project.name, @task["slug"]),
             params: { from: @task["stage"] }, data: { turbo_submits_with: "Approving…" } %>
     <% end %>
     <% if !@daemon_enabled && (dispatch_action = stage_dispatch_action(@task)) %>
-      <%= button_to "Run #{stage_run_verb(@task)}", task_run_path(@project["name"], @task["slug"]),
+      <%= button_to "Run #{stage_run_verb(@task)}", task_run_path(@project.name, @task["slug"]),
             params: { action_name: dispatch_action, stage: @task["stage"] }, class: "btn-secondary",
             data: { turbo_submits_with: "Queueing…" } %>
     <% end %>
     <% if @worktree_exists %>
-      <%= link_to "Diff", task_diff_path(@project["name"], @task["slug"]), class: "btn btn-secondary" %>
+      <%= link_to "Diff", task_diff_path(@project.name, @task["slug"]), class: "btn btn-secondary" %>
     <% end %>
   </div>
 
@@ -98,7 +98,7 @@
       <%# The id is round-keyed for tests/inspection; typing survival across
         morphs is the answers controller's job (see its header for why
         data-turbo-permanent must NOT be used here). %>
-    <%= form_with url: task_answers_path(@project["name"], @task["slug"]),
+    <%= form_with url: task_answers_path(@project.name, @task["slug"]),
           id: "qa-form-#{@questions.map(&:n).join("-")}" do |f| %>
         <% @questions.each do |question| %>
           <div class="qa-item">
@@ -118,7 +118,7 @@
         arbitrary stages, and without an open question it always fails. %>
     <details class="intervene">
       <summary class="muted">Reply free-form instead (fills Q<%= @questions.first.n %>)</summary>
-      <%= form_with url: task_intervene_path(@project["name"], @task["slug"]),
+      <%= form_with url: task_intervene_path(@project.name, @task["slug"]),
             id: "intervene-form" do |f| %>
         <%= f.text_area :message, required: true,
               placeholder: "Written verbatim as the answer to Q#{@questions.first.n}…" %>

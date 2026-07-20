@@ -200,7 +200,7 @@ origin also prints the Host-header/reverse-proxy warning.
   reason; skipped or absent manifests render nothing. The media route applies a
   first-pass filename constraint (a single component ending in png/jpg/jpeg/gif,
   with `format: false` so a trailing `.rb` cannot masquerade as an implicit
-  format); the strict guarantee lives in the controller's `resolved_media_path`,
+  format); the strict guarantee lives in `Task#media_path`,
   which re-checks the filename against an anchored regex, requires `File.basename`
   equality, and resolves `File.realpath` to confirm containment under
   `<task>/media/` — refusing symlink and path-traversal escapes — before
@@ -217,7 +217,8 @@ origin also prints the Host-header/reverse-proxy warning.
   instead of replacing it on every poll. The poll controller gives the pane
   `tail -f` semantics: it pins to the bottom while following, pauses reloads
   while the operator scrolls up to read, and resumes when scrolled back down.
-  Server-side, the polled `TasksController#log` path reads only a 256 KiB byte
+  Server-side, the polled controller delegates to `Task#latest_log`, which
+  reads only a 256 KiB byte
   window and returns the last 200 lines with a torn leading line dropped, so a
   multi-MB agent log cannot pin a Puma worker every 3 seconds.
   The Diff route has the same bounded-subprocess discipline: it runs

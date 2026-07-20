@@ -47,11 +47,21 @@ It exports `SECRET_KEY_BASE` (derived from the same persisted
 recreation), `HIVEBOX_ORIGIN` (extra Action Cable origin allow; same-origin
 host traffic is accepted without config), and
 `HIVEBOX_STORAGE_DIR` (the solid-stack sqlite files, under
-`Hive::Paths.state_home/web-storage` so they live on the `/data` mount), runs
-`bin/rails db:prepare`, then execs `bin/rails server`. Outside the container,
+`Hive::Paths.state_home/web-storage` so they live on the `/data` mount). In
+production it runs `bin/rails assets:precompile` on every start and refuses to
+boot unless the resulting manifest and application CSS/JavaScript entrypoints
+are usable; compilation uses temporary build storage rather than the live
+solid-stack databases. This keeps direct source checkouts and updated managed
+bundles from serving stale or missing fingerprinted assets. It then runs
+`bin/rails db:prepare` and execs `bin/rails server`. Outside the container,
 a source checkout, or a bootstrapped managed bundle the command exits 1 with
 guidance — the gem itself does not package the Rails app
 (`test/unit/gemspec_test.rb` pins that).
+
+Hivebox keeps a separate asset lifecycle: its container image compiles and
+validates the Rails asset graph during the image build, then exports the
+internal `HIVEBOX_PRECOMPILED_ASSETS=1` marker so the shared launcher does not
+repeat native web preparation at container startup.
 
 `hive web install [--force] [--json]` installs the separate `hive-web` autostart
 service using the invoked user-facing binary path; `hive web start --detach`

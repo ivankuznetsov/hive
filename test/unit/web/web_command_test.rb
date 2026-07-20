@@ -69,6 +69,13 @@ class WebCommandTest < Minitest::Test
       FileUtils.mkdir_p(File.join(dir, "bin"))
       File.write(File.join(dir, "bin", "rails"), <<~SH)
         #!/usr/bin/env bash
+        if [ "$1" = "assets:precompile" ]; then
+          mkdir -p public/assets
+          printf 'body {}\n' > public/assets/application-test.css
+          printf 'export {}\n' > public/assets/application-test.js
+          printf '%s\n' '{"application.css":{"digested_path":"application-test.css"},"application.js":{"digested_path":"application-test.js"}}' > public/assets/.manifest.json
+          exit 0
+        fi
         [ "$1" = "db:prepare" ] && exit #{prepare_exit}
         exit 0
       SH
@@ -123,6 +130,136 @@ class WebCommandTest < Minitest::Test
     end
   end
 
+  def test_production_boot_precompiles_assets_before_starting_rails
+    with_tmp_global_config do
+      with_stub_rails_app(prepare_exit: 0) do
+        command = Hive::Commands::Web.new
+        system_calls = []
+        command.define_singleton_method(:system) do |*argv|
+          system_calls << argv
+          true
+        end
+
+        original_exec = Kernel.method(:exec)
+        Kernel.define_singleton_method(:exec) do |env, *argv|
+          raise ExecCaught.new(env, argv)
+        end
+
+        caught = nil
+        begin
+          with_replaced_singleton_method(Hive::Web::AppBundle, :assets_ready?, ->(_dir) { true }) do
+            caught = assert_raises(ExecCaught) { capture_io { command.call } }
+          end
+        ensure
+          Kernel.define_singleton_method(:exec, original_exec)
+        end
+
+        rails_commands = system_calls.map { |call| call.last(2) }
+        assert_equal [ %w[bin/rails assets:precompile], %w[bin/rails db:prepare] ], rails_commands,
+                     "production boot must compile missing assets before preparing the database"
+        precompile_env = system_calls.first.first
+        refute_equal caught.env.fetch("HIVEBOX_STORAGE_DIR"), precompile_env.fetch("HIVEBOX_STORAGE_DIR"),
+                     "asset compilation must not touch the live solid-stack databases"
+        refute_path_exists precompile_env.fetch("HIVEBOX_STORAGE_DIR"),
+                           "temporary asset-build storage must be removed after compilation"
+      end
+    end
+  end
+
+  def test_production_boot_rejects_precompile_without_usable_assets
+    with_tmp_global_config do
+      with_stub_rails_app(prepare_exit: 0) do
+        command = Hive::Commands::Web.new
+        command.define_singleton_method(:system) { |*_argv| true }
+
+        error = with_replaced_singleton_method(Hive::Web::AppBundle, :assets_ready?, ->(_dir) { false }) do
+          assert_raises(Hive::Error) { capture_io { command.call } }
+        end
+
+        assert_match(/asset precompile failed/, error.message)
+      end
+    end
+  end
+
+  def test_production_boot_stops_when_asset_precompile_command_fails
+    with_tmp_global_config do
+      with_stub_rails_app(prepare_exit: 0) do
+        command = Hive::Commands::Web.new
+        system_calls = []
+        command.define_singleton_method(:system) do |*argv|
+          system_calls << argv
+          argv.last(2) != %w[bin/rails assets:precompile]
+        end
+
+        error = with_replaced_singleton_method(Hive::Web::AppBundle, :assets_ready?, ->(_dir) { true }) do
+          assert_raises(Hive::Error) { capture_io { command.call } }
+        end
+
+        assert_match(/asset precompile failed/, error.message)
+        assert_equal [ %w[bin/rails assets:precompile] ], system_calls.map { |call| call.last(2) },
+                     "a failed compiler must stop startup before db:prepare"
+      end
+    end
+  end
+
+  def test_development_boot_skips_asset_precompile
+    with_tmp_global_config do
+      with_stub_rails_app(prepare_exit: 0) do
+        command = Hive::Commands::Web.new
+        system_calls = []
+        command.define_singleton_method(:system) do |*argv|
+          system_calls << argv
+          true
+        end
+
+        original_exec = Kernel.method(:exec)
+        Kernel.define_singleton_method(:exec) do |env, *argv|
+          raise ExecCaught.new(env, argv)
+        end
+
+        begin
+          with_env("RAILS_ENV" => "development") do
+            assert_raises(ExecCaught) { capture_io { command.call } }
+          end
+        ensure
+          Kernel.define_singleton_method(:exec, original_exec)
+        end
+
+        assert_equal [ %w[bin/rails db:prepare] ], system_calls.map { |call| call.last(2) },
+                     "development boot should leave asset compilation to the Rails development server"
+      end
+    end
+  end
+
+  def test_hivebox_boot_uses_assets_precompiled_into_the_image
+    with_tmp_global_config do
+      with_stub_rails_app(prepare_exit: 0) do
+        command = Hive::Commands::Web.new
+        system_calls = []
+        command.define_singleton_method(:system) do |*argv|
+          system_calls << argv
+          true
+        end
+
+        original_exec = Kernel.method(:exec)
+        Kernel.define_singleton_method(:exec) do |env, *argv|
+          raise ExecCaught.new(env, argv)
+        end
+
+        begin
+          with_env("HIVEBOX_PRECOMPILED_ASSETS" => "1") do
+            assert_raises(ExecCaught) { capture_io { command.call } }
+          end
+        ensure
+          Kernel.define_singleton_method(:exec, original_exec)
+        end
+
+        assert_equal [ %w[bin/rails db:prepare] ], system_calls.map { |call| call.last(2) },
+                     "Hivebox should use the asset graph validated while its image is built"
+      end
+    end
+  end
+
   def test_relative_env_override_exec_env_uses_absolute_gemfile
     with_tmp_global_config do
       Dir.mktmpdir("hive-web-parent") do |parent|
@@ -132,7 +269,16 @@ class WebCommandTest < Minitest::Test
         File.write(File.join(app_dir, "config", "application.rb"), "# rails app marker")
         File.write(File.join(app_dir, "Gemfile"), "# test gemfile")
         FileUtils.mkdir_p(File.join(app_dir, "bin"))
-        File.write(File.join(app_dir, "bin", "rails"), "#!/usr/bin/env bash\nexit 0\n")
+        File.write(File.join(app_dir, "bin", "rails"), <<~SH)
+          #!/usr/bin/env bash
+          if [ "$1" = "assets:precompile" ]; then
+            mkdir -p public/assets
+            printf 'body {}\n' > public/assets/application-test.css
+            printf 'export {}\n' > public/assets/application-test.js
+            printf '%s\n' '{"application.css":{"digested_path":"application-test.css"},"application.js":{"digested_path":"application-test.js"}}' > public/assets/.manifest.json
+          fi
+          exit 0
+        SH
         FileUtils.chmod(0o755, File.join(app_dir, "bin", "rails"))
 
         original = Kernel.method(:exec)

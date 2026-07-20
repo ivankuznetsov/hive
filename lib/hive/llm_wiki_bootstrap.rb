@@ -199,7 +199,7 @@ module Hive
 
     def write_file(path, content)
       FileUtils.mkdir_p(File.dirname(path))
-      File.write(path, content)
+      File.binwrite(path, content)
     end
   end
 end

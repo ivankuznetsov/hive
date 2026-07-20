@@ -17,6 +17,9 @@
   unrelated queue state, or removes the whole shared runtime when init created
   it, including when the target checkout is a linked worktree with a `.git`
   file.
+- Shared runtime copies use binary-safe writes, so applications that configure
+  Ruby's default internal encoding can install the UTF-8 log compiler without
+  a transcoding failure.
 - Added subprocess coverage proving the wrapper preserves dirty tracked and
   untracked primary-checkout work, never launches Codex itself, prefers the
   shared runner, and falls back locally when shared state is unavailable.

@@ -57,14 +57,21 @@ always visible, even before the Hive CLI is installed, and guides first use:
 That guided setup asks for confirmation, installs the Hive CLI through the
 documented platform channel, verifies `hive`/`hv`, and runs
 `hive setup --no-init --json` for local web/daemon provisioning without project
-enrollment. Enrollment is a separate `hive init .` run in the user's terminal,
-where patrol, architecture discovery, daemon, and babysitter defaults are shown
-before confirmation. The skill also covers machine-readable preview/approval
-flows for managed agent provisioning and reviewed Honeycomb workflows,
-ordinary and architecture patrol limits, digest/bench commands, status
-monitoring, and guarded recovery.
+enrollment. On supported Linux/macOS the response reports the loopback URL and
+distinct installed, enabled, running, and ready state for the default managed
+Hive web service, along with daemon setup. Enrollment is a separate
+`hive init .` run in the user's terminal, where patrol, architecture discovery,
+daemon, and babysitter defaults are shown before confirmation. The skill also
+covers machine-readable preview/approval flows for managed agent provisioning
+and reviewed Honeycomb workflows, ordinary and architecture patrol limits,
+digest/bench commands, status monitoring, and guarded recovery.
 The macOS Skills UI can also use the skill's Homebrew installer metadata to
 install the `hive` binary.
+
+Use `/hive web status --json` for read-only web state. Bare `/hive web` is the
+explicit blocking foreground path, not a status probe. The skill must never
+create LAN/public binding or Tailscale exposure; it only reports a non-loopback
+origin that an operator explicitly configured through Hive's existing gates.
 
 ## Local Install For Testing
 

@@ -1,7 +1,8 @@
 # Releasing hive
 
-Hive ships as the `hive-cli` rubygem attached to a signed GitHub Release. All
-three install channels download that same gem:
+Hive ships the `hive-cli` rubygem and managed `hive-web-X.Y.Z.tar.gz` bundle in
+one signed GitHub Release. All three native install channels download the same
+gem, and `hive setup` authenticates and installs the matching web bundle:
 
 - **install.sh** — already works; auto-resolves the latest release.
 - **Homebrew** — `brew install ivankuznetsov/hive/hive` via the
@@ -11,8 +12,9 @@ three install channels download that same gem:
 A push of a `vX.Y.Z` tag triggers `.github/workflows/release.yml`, which:
 
 1. Builds and smoke-tests the gem.
-2. Builds `SHA256SUMS`, cosign-signs it (keyless / Fulcio), and creates the
-   GitHub Release with the gem + `SHA256SUMS{,.sig,.pem}`.
+2. Builds `hive-web-X.Y.Z.tar.gz`, records both the gem and web bundle in
+   `SHA256SUMS`, cosign-signs that manifest (keyless / Fulcio), and creates the
+   GitHub Release with both artifacts plus `SHA256SUMS{,.sig,.pem}`.
 3. Dispatches a `hive-release` `repository_dispatch` to the Homebrew tap
    (gated on `HOMEBREW_TAP_TOKEN`).
 4. Runs the `aur-publish` job (gated on `AUR_SSH_PRIVATE_KEY`): cosign-verifies
@@ -46,8 +48,8 @@ big versions.
   stable.
 
 **How to cut a release:** bump `VERSION` in `lib/hive.rb`, sync **both**
-`Gemfile.lock` and `web/Gemfile.lock` (`hive-cli (X.Y.Z)` — the hivebox web app
-depends on the gem via `path: ".."`, so a stale web lock fails its frozen
+`Gemfile.lock` and `web/Gemfile.lock` (`hive-cli (X.Y.Z)` — Hive web
+depends on the gem via `path: ".."` in a source checkout, so a stale web lock fails its frozen
 `bundle install`), bump the `vX.Y.Z` installer-URL refs in `README.md` /
 `install.md`, add a `## X.Y.Z` CHANGELOG section, PR → merge → `git tag vX.Y.Z
 && git push origin vX.Y.Z`. The tag drives `release.yml` (above). The owner
@@ -169,7 +171,8 @@ version until you bump it manually or set the token.
    git push origin vX.Y.Z
    ```
 4. Watch the run: **build → release-finalize → aur-publish**. Confirm:
-   - The GitHub Release has `hive-cli-X.Y.Z.gem` + `SHA256SUMS{,.sig,.pem}`.
+   - The GitHub Release has `hive-cli-X.Y.Z.gem`,
+     `hive-web-X.Y.Z.tar.gz`, and `SHA256SUMS{,.sig,.pem}`.
    - The tap committed `Formula/hive.rb` at `X.Y.Z` (if `HOMEBREW_TAP_TOKEN` is set).
    - `https://aur.archlinux.org/packages/hive-bin` shows `X.Y.Z` (if `AUR_SSH_PRIVATE_KEY` is set).
 5. Smoke each channel:
@@ -178,6 +181,13 @@ version until you bump it manually or set the token.
    brew install ivankuznetsov/hive/hive && hive --version    # macOS / Linuxbrew
    yay -S hive-bin && hive --version                          # Arch (test aarch64 too)
    ```
+
+   Then run `hive setup --json` in the isolated verification environment and
+   require the same package-root dependency and service-state contract as a
+   normal install. The default release URL is trusted only after cosign
+   verification of `SHA256SUMS` and exact archive-digest verification. A
+   custom remote `HIVE_WEB_BUNDLE_URL` must be paired with the documented exact
+   `HIVE_WEB_BUNDLE_SHA256`; never weaken that requirement to diagnose a mirror.
 
 ---
 
@@ -198,7 +208,7 @@ by `packaging/verify-channel.sh` and the reusable `.github/workflows/install-ver
 3. **Weekly canary** (`install-canary.yml`, Mondays 06:00 UTC + `workflow_dispatch`)
    — re-installs the latest release to catch dependency / base-image drift.
 
-The hivebox image gate is daemon-deep: `packaging/docker/smoke.sh` waits for
+The Hivebox image gate is daemon-deep: `packaging/docker/smoke.sh` waits for
 Rails `/health`, then requires daemon-backed `/health?deep=1` to stay healthy
 across the supervisor's ten-second fast-failure window before checking the
 claimable login and owner gate. It probes deep health again afterward. This

@@ -143,7 +143,7 @@ and never deletes task-pinned generations or owner-authored/built-in workflows.
 List and remove work offline; catalog visibility is reported as
 `unknown_offline` until a trusted refresh is available.
 
-Hivebox exposes the same project-scoped lifecycle under **Workflows**. It lists
+Hive web exposes the same project-scoped lifecycle under **Workflows**. It lists
 built-in, authored, selected, and retained generations; scaffolds project
 workflows; and makes install/update/remove a two-step review. The first step is
 the command's real dry-run disclosure. The second uses a 15-minute signed

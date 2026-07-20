@@ -3,11 +3,11 @@ title: hive web
 type: command
 source: lib/hive/commands/web.rb, lib/hive/web/, web/, packaging/docker/, .github/workflows/release.yml
 created: 2026-06-04
-updated: 2026-07-19
-tags: [command, web, hivebox, rails, turbo]
+updated: 2026-07-20
+tags: [command, web, rails, turbo, hivebox-container]
 ---
 
-**TLDR**: `hive web` boots the hivebox web UI — a vanilla **Rails 8** app
+**TLDR**: `hive web` boots Hive web — a vanilla **Rails 8** app
 (importmap, Turbo, Stimulus, propshaft, solid_cable) living in `web/` at the
 repo root, shipped in the Docker image at `/app/web`. The web tier adds no
 pipeline logic: status reads call `Hive::Commands::Status#json_payload` (via
@@ -26,31 +26,48 @@ path with separate gates.
 ## CLI
 
 `hive web [--bind] [--port]` (defaults from the `web:` config block). The
-command locates the Rails app in this order: `HIVEBOX_WEB_APP_DIR` when it
+command locates the Rails app in this order: `HIVE_WEB_APP_DIR` when it
 points at a real Rails app, the managed version-stamped app under
 `Hive::Paths.web_app_home` (refreshed when stale unless `--no-bootstrap` is
 passed), then a source checkout `web/` next to `lib/`; if none exists and
 bootstrap is allowed, it downloads/extracts the versioned web release bundle.
-Relative `HIVEBOX_WEB_APP_DIR` values are accepted but normalized before the
+Relative `HIVE_WEB_APP_DIR` values are accepted but normalized before the
 Rails env is built, so `BUNDLE_GEMFILE` points at the real app Gemfile after
 the command changes into the app directory.
 It exports `SECRET_KEY_BASE` (derived from the same persisted
 `Hive::Web::SessionSecret` file as before — sessions survive container
-recreation), `HIVEBOX_ORIGIN` (extra Action Cable origin allow; same-origin
+recreation), `HIVE_WEB_ORIGIN` (extra Action Cable origin allow; same-origin
 host traffic is accepted without config), and
-`HIVEBOX_STORAGE_DIR` (the solid-stack sqlite files, under
+`HIVE_WEB_STORAGE_DIR` (the solid-stack sqlite files, under
 `Hive::Paths.state_home/web-storage` so they live on the `/data` mount), runs
 `bin/rails db:prepare`, then execs `bin/rails server`. Outside the container,
 a source checkout, or a bootstrapped managed bundle the command exits 1 with
-guidance — the gem itself does not package the Rails app
-(`test/unit/gemspec_test.rb` pins that).
+guidance. Released package roots include `hive.gemspec`, so the managed bundle
+can resolve its path dependency without a parent source checkout; the Rails
+source itself remains a separate authenticated bundle.
 
 `hive web install [--force] [--json]` installs the separate `hive-web` autostart
 service using the invoked user-facing binary path; `hive web start --detach`
 starts that service and reloads systemd-user first on Linux so a unit written
 while systemd-user was unavailable becomes visible. Foreground
 `hive web start` is equivalent to `hive web`. `status --json` emits
-`hive-web-status`; `install --json` emits `hive-web-install`.
+`hive-web-status.v1`; `install --json` emits `hive-web-install.v1`. Both carry
+deduplicated environment migration warnings, and status separates installed,
+enabled, running, manager availability, URL, and readiness.
+
+## Environment compatibility
+
+`Hive::Web::Environment` is the single resolver for the six shared-app
+settings: `HIVE_WEB_APP_DIR`, `HIVE_WEB_ORIGIN`, `HIVE_WEB_STORAGE_DIR`,
+`HIVE_WEB_LOCAL_LOOPBACK`, `HIVE_WEB_DIFF_TIMEOUT_SEC`, and
+`HIVE_WEB_CLONE_TIMEOUT_SEC`. The corresponding legacy native-web aliases are
+`HIVEBOX_WEB_APP_DIR`, `HIVEBOX_ORIGIN`, `HIVEBOX_STORAGE_DIR`,
+`HIVEBOX_LOCAL_LOOPBACK`, `HIVEBOX_DIFF_TIMEOUT_SEC`, and
+`HIVEBOX_CLONE_TIMEOUT_SEC`. Blank is unset; canonical wins conflicts,
+including invalid canonical values, and old-only or both-set input warns with
+the replacement and next-major support window. Warnings are deduplicated on
+stderr, included in setup/web JSON, and exposed as doctor warning rows.
+Container-only Hivebox variables are deliberately outside this deprecated set.
 
 ## Auth
 
@@ -76,11 +93,13 @@ usable. The local dev/test seam is exempt only for tokenless local sessions.
 
 Local loopback mode is a deliberate no-auth bypass for local foreground use:
 when the CLI bind address is `localhost`, `::1`, or any `127.0.0.0/8` address
-and `web.local_loopback` is not `false`, it exports `HIVEBOX_LOCAL_LOOPBACK=1`.
-Rails still checks that the request peer is loopback before skipping login.
+and `web.local_loopback` is not `false`, it exports `HIVE_WEB_LOCAL_LOOPBACK=1`.
+Rails checks both the request peer and authorized normalized Host before
+skipping login; an attacker-controlled Host is rejected even over a loopback
+socket.
 That connection-authenticated operator sees the complete primary navigation
 and is labelled `Local`; GitHub-dependent repository browsing stays behind an
-explicit **Connect GitHub** action instead of making the rest of hivebox look
+explicit **Connect GitHub** action instead of making the rest of Hive web look
 signed out.
 Non-loopback binds require either `--unsafe` or a configured `web.github.owner`;
 when an owner gate authorizes a non-loopback bind, the CLI warns that
@@ -182,7 +201,7 @@ origin also prints the Host-header/reverse-proxy warning.
   multi-MB agent log cannot pin a Puma worker every 3 seconds.
   The Diff route has the same bounded-subprocess discipline: it runs
   `git diff --` in its own process group, enforces
-  `HIVEBOX_DIFF_TIMEOUT_SEC` (default 15s), writes combined output to a
+  `HIVE_WEB_DIFF_TIMEOUT_SEC` (default 15s), writes combined output to a
   tempfile, and renders at most the first 512 KiB with an explicit truncation
   notice.
   Red diagnostic rows also render a danger banner from
@@ -232,7 +251,7 @@ origin also prints the Host-header/reverse-proxy warning.
   return as an alert alongside the successful registration/settings notice
   instead of disappearing into Puma stderr. Clone runs call
   `gh repo clone` with the session token in `GH_TOKEN`, in a separate process
-  group with `HIVEBOX_CLONE_TIMEOUT_SEC` (default 180s) as a hard deadline; on
+  group with `HIVE_WEB_CLONE_TIMEOUT_SEC` (default 180s) as a hard deadline; on
   failure or timeout the partial target is removed so retry starts clean. A
   pre-existing directory is treated as a local checkout to re-init; a
   pre-existing non-directory target (file/symlink/etc.) is a 422 refusal, and

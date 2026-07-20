@@ -26,8 +26,9 @@ workflow moves tasks through brainstorm, plan, execute, open PR, review,
 artifacts, and finalize stages. Reviewed Honeycomb packages provide additional
 workflows, and the daemon advances enrolled projects in the background.
 
-Use this skill to install or operate the Hive CLI. It is a command adapter, not
-permission to mutate the host: inspect first and apply the consent rules below.
+Use this skill to install or operate the Hive CLI, including native Hive web.
+It is a command adapter, not permission to mutate the host: inspect first and
+apply the consent rules below.
 
 ## Install From ClawHub
 
@@ -46,12 +47,19 @@ This installs the `/hive` slash command. First use is normally:
 ## Common Paths
 
 - `/hive setup` verifies or installs Hive, provisions local web/daemon support,
-  and offers to enroll the current project.
+  and offers to enroll the current project. Hive's normal all-in-one native
+  provisioning command is `hive setup --json`; this guided flow uses
+  `--no-init` so enrollment remains interactive.
+- `/hive setup --no-service` performs the remaining setup work without
+  installing, enabling, starting, stopping, or disabling Hive web.
 - `/hive doctor --json` diagnoses the runtime and managed agent skills without
   changing them; `/hive setup-agents` previews unresolved managed skills and
   asks once before provisioning.
 - `/hive status --json` shows task stages, markers, holds, PR URLs, and next
-  actions; `/hive tui` and `/hive web` provide live terminal and browser views.
+  actions. `/hive tui` provides the live terminal view.
+- `/hive web status --json` observes the native web service without mutation.
+- `/hive web` bootstraps and starts Hive web in the foreground; it blocks until
+  stopped.
 - `/hive new . "build this feature"` creates a task. `/hive plan <task-slug>`,
   `/hive develop <task-slug>`, and `/hive review <task-slug>` operate the main
   coding path.
@@ -136,8 +144,10 @@ fi
 ```
 
 If `hive_cmd` is empty, offer guided setup. Explain that setup installs the CLI
-and per-user services and can enroll the current project. Get explicit user
-confirmation before running an installer.
+and provisions the per-user daemon and loopback Hive web services; initial
+project enrollment remains a separate step. Get explicit user confirmation
+before running an installer. On Windows, use WSL with systemd enabled for the
+native path or offer Hivebox; do not invent a native Windows service manager.
 
 ## Guided Setup
 
@@ -167,8 +177,19 @@ approved install, repeat the strict `hive` / `hv` version check. If neither
 prints a bare `X.Y.Z`, stop and report failure or possible Apache Hive
 shadowing. If verification succeeds, run
 `"${hive_cmd}" setup --no-init --json` for core provisioning and summarize the
-installed version, every setup phase, exact service/install outcome,
-explicitly skipped enrollment, and any diagnose-only login instructions.
+installed version, every setup phase, exact service/install outcome, explicitly
+skipped enrollment, and any diagnose-only login instructions. Parse `mode`,
+`url`, `service.service_installed`, `service.service_enabled`,
+`service.service_running`, `service.ready`, `service.readiness`, `warnings`, and
+`phases`. Report the effective URL, distinct service state, and compatibility
+warnings; never describe the URL as available unless `service.ready` is true.
+
+Setup's untouched configuration is loopback-only. Never add or widen a bind,
+origin, reverse proxy, or Tailscale Serve rule. If setup reports an existing
+explicitly gated non-loopback origin, report that observed operator choice
+without replacing it. Legacy native-web `HIVEBOX_*` aliases may appear in the
+JSON `warnings`; name their `HIVE_WEB_*` replacements. Container-only Hivebox
+settings remain canonical and must not be presented as deprecated.
 
 Initial project enrollment is a separate, consent-gated step. Explain that a
 non-TTY `hive init` takes defaults that enable medium patrol, architecture
@@ -190,6 +211,12 @@ argv array; never interpolate raw user text into a shell string.
 
 Prefer `--json` for inspection and summarize the task slug, stage, marker,
 action, hold/retry state, PR URL, and suggested next command when present.
+
+For web inspection, prefer `hive web status --json`; its
+`hive-web-status.v1` envelope separates installed, enabled, running, and ready.
+Run bare `hive web` only when the user explicitly wants the blocking foreground
+server. Run `hive web install --force` only for an explicitly approved repair
+of a drifted managed unit.
 
 Daemon auto-advance is covered by the user's previously approved enrollment.
 When the enrolled coding daemon is healthy, a printed `next:` line is a
@@ -303,11 +330,12 @@ Before destructive or persistent admin verbs (`drop`, `uninstall`, `update`,
 Apply the same rule to workflow install/update/remove/publish,
 `setup-agents`, patrol starts, outbound `digest`/`bench submit`, and nested
 commands `daemon stop`, `daemon disable --all`, `daemon install --force`,
-`bot stop`, `bot install --force`, `markers clear`, or `approve --force`.
+`web install --force`, `bot stop`, `bot install --force`, `markers clear`, or
+`approve --force`.
 
 Prefer `hive daemon start --detach` for startup. Before `hive daemon start`
-without detach, `hive daemon tail`, `hive bot start --foreground`, or
-`hive bot tail`, explain that it can hold the session and get explicit user
+without detach, `hive web`, `hive daemon tail`, `hive bot start --foreground`,
+or `hive bot tail`, explain that it can hold the session and get explicit user
 confirmation.
 
 ## Marker Recovery

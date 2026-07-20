@@ -297,9 +297,9 @@ sends the next question. The earlier "Codex draft-assist" flow — where
 Path A spawned Codex to draft an answer with write-draft/edit/cancel
 buttons — has been retired; see [[modules/bot]] and [[state-model]].
 
-## Hivebox web pipeline
+## Hive web pipeline
 
-`hive web` serves a vanilla Rails 8 + Turbo app from `web/` (ADR-037; the
+`hive web` serves Hive web, a vanilla Rails 8 + Turbo app from `web/` (ADR-037; the
 original Sinatra/Puma + SSE tier is gone). Auth is the GitHub device flow
 (ADR-036): a configured `web.github.owner` gates entry, while an ownerless
 fresh box is claimable and the first successful login writes
@@ -309,7 +309,7 @@ the current owner on every request and evict old sessions when
 ownership rotation. Reads render
 `Commands::Status#json_payload` snapshots; live updates flow over Turbo
 Streams, with production Action Cable accepting same-origin-as-host and
-`HIVEBOX_ORIGIN` only as an extra allow for split-origin deployments:
+`HIVE_WEB_ORIGIN` only as an extra allow for split-origin deployments:
 `StatusBroadcaster` (self-healing subscriber loop) bridges
 `Hive::Web::StatusFeed` — one shared poller, volatile-field-deduped — to a
 broadcast of the projects frame over solid_cable. Mutations reuse gem

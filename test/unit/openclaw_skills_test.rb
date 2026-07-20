@@ -55,6 +55,8 @@ class OpenClawSkillsTest < Minitest::Test
     assert_includes body, "/hive refactor-patrol"
     assert_includes body, "/hive digest"
     assert_includes body, "/hive bench submit"
+    assert_includes body, "/hive web status --json"
+    assert_includes body, "/hive setup --no-service"
     assert_includes body, "/hive wiki compile-log --check"
     assert_includes body, "wiki/log.d/<timestamp>-<slug>.md"
     assert_includes body, "hive --version"
@@ -66,6 +68,14 @@ class OpenClawSkillsTest < Minitest::Test
     refute_match(/(?:yay|paru)[^\n]*--noconfirm/, body)
     assert_includes body, "daemon install"
     assert_includes body, "setup --no-init --json"
+    assert_includes body, "setup --json"
+    assert_includes body, "service.service_installed"
+    assert_includes body, "service.service_enabled"
+    assert_includes body, "service.service_running"
+    assert_includes body, "service.ready"
+    assert_includes body, "service.readiness"
+    assert_includes body, "HIVE_WEB_*"
+    assert_includes body, "Never add or widen a bind"
     assert_includes body, "slash-command text after `/hive` as arguments for `hive_cmd`"
     assert_includes body, '"${hive_cmd}" --help'
     assert_includes body, "Pass arguments safely"
@@ -190,6 +200,7 @@ class OpenClawSkillsTest < Minitest::Test
       "daemon stop",
       "daemon disable --all",
       "daemon install --force",
+      "web install --force",
       "bot stop",
       "bot install --force",
       "markers clear",
@@ -210,6 +221,7 @@ class OpenClawSkillsTest < Minitest::Test
     assert_includes safety, "explicit user confirmation"
     assert_includes safety, "hive daemon start --detach"
     assert_includes safety, "hive daemon tail"
+    assert_includes safety, "hive web"
     assert_includes safety, "hive bot start --foreground"
     assert_includes safety, "hive bot tail"
   end

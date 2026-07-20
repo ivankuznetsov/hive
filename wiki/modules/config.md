@@ -342,17 +342,26 @@ Global web settings are validated separately for [[commands/web]]:
 `web.github` must be a hash, optional `web.github.owner` and
 `web.github.client_id` must be non-empty strings when set, and
 `web.session_secret_file` must be a non-empty string when set. A blank/missing
-`web.github.owner` is valid and means the first successful hivebox GitHub
+`web.github.owner` is valid and means the first successful Hive web GitHub
 device-flow login claims the box by writing that owner under the global config
 lock; pre-setting the owner keeps the older pinned-owner gate. GitHub sign-in
 uses the OAuth device flow (see [[decisions]] ADR-036), so no client secret
-exists anywhere; `web.github.client_id` defaults to the shared hivebox OAuth
+exists anywhere; `web.github.client_id` defaults to the shared Hive web OAuth
 app — public by design, since device flow is a public-client grant.
-`web.local_loopback: true` is the local foreground default: when `hive web`
+`web.local_loopback: true` is the local and managed-service default: when `hive web`
 binds `localhost`, `::1`, or `127.0.0.0/8`, the CLI exports
-`HIVEBOX_LOCAL_LOOPBACK=1` and Rails skips GitHub login only for requests whose
+`HIVE_WEB_LOCAL_LOOPBACK=1` and Rails skips GitHub login only for requests whose
 peer IP is also loopback. Setting it to `false` forces the normal GitHub owner
 gate even on a loopback bind.
+
+Shared Rails environment input is resolved centrally by
+`Hive::Web::Environment`. The canonical keys are `HIVE_WEB_APP_DIR`,
+`HIVE_WEB_ORIGIN`, `HIVE_WEB_STORAGE_DIR`, `HIVE_WEB_LOCAL_LOOPBACK`,
+`HIVE_WEB_DIFF_TIMEOUT_SEC`, and `HIVE_WEB_CLONE_TIMEOUT_SEC`. Their six named
+native-web `HIVEBOX_*` aliases remain accepted through the next major release:
+blank is unset, canonical wins conflicts, and alias use produces a deduplicated
+migration warning. Container-only Hivebox image/name/bind/port/data/repo,
+session-secret, and supervisor variables are not aliases and never warn.
 
 The current `hive init` JSON summary envelope (`schemas/hive-init.v2.json`) carries the chosen architecture-patrol discovery value as `refactor_patrol_enabled`, alongside the launch and permission-mode choices. The retained v1 schema is a compatibility artifact. See [[commands/init]].
 

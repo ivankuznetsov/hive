@@ -5,7 +5,7 @@ require "hive/refactor_patrol/reporter"
 require "hive/refactor_patrol/thesis"
 
 class RefactorPatrolReporterTest < Minitest::Test
-  def test_v2_dispositions_are_exhaustive_and_below_threshold_is_flagged
+  def test_v3_dispositions_are_exhaustive_and_below_threshold_is_flagged
     accepted = thesis("accepted", confidence: "high", fingerprint: "fp-accepted")
     below_threshold = thesis("below", confidence: "low", fingerprint: "fp-below")
     inadmissible = thesis(
@@ -17,8 +17,8 @@ class RefactorPatrolReporterTest < Minitest::Test
     )
     suppressed = thesis("suppressed", fingerprint: "fp-suppressed")
 
-    payload = reporter.v2_envelope(
-      **v2_args(
+    payload = reporter.v3_envelope(
+      **v3_args(
         theses: [ accepted, below_threshold, inadmissible, suppressed ],
         suppressed: [ { "id" => "suppressed", "reason" => "collision_already_seen", "reference" => "legacy-fp" } ]
       )
@@ -35,15 +35,26 @@ class RefactorPatrolReporterTest < Minitest::Test
     assert_equal false, flagged.fetch("inadmissible").fetch("admissible")
     assert_includes flagged.fetch("inadmissible").fetch("reasons"), "inadmissible"
     assert_includes flagged.fetch("inadmissible").fetch("reasons"), "missing measurable signal"
+    assert v3_schemer.valid?(payload), v3_schemer.validate(payload).map { |error| error["error"] }.inspect
+  end
+
+  def test_historical_v2_report_fixture_with_size_estimates_remains_valid
+    payload = reporter.v3_envelope(**v3_args(theses: [ thesis("accepted", confidence: "high") ]))
+    payload["schema_version"] = 2
+    payload.dig("accepted", 0, "thesis", "risk", "caps").merge!(
+      "est_files" => 8,
+      "est_diff_lines" => 400
+    )
+
     assert v2_schemer.valid?(payload), v2_schemer.validate(payload).map { |error| error["error"] }.inspect
   end
 
-  def test_v2_zero_reasons_distinguish_no_slice_no_theses_and_all_suppressed
-    no_slice = reporter.v2_envelope(**v2_args(features: [], theses: []))
-    no_theses = reporter.v2_envelope(**v2_args(features: [ feature ], theses: []))
+  def test_v3_zero_reasons_distinguish_no_slice_no_theses_and_all_suppressed
+    no_slice = reporter.v3_envelope(**v3_args(features: [], theses: []))
+    no_theses = reporter.v3_envelope(**v3_args(features: [ feature ], theses: []))
     only = thesis("only", fingerprint: "fp-only")
-    all_suppressed = reporter.v2_envelope(
-      **v2_args(
+    all_suppressed = reporter.v3_envelope(
+      **v3_args(
         features: [ feature ],
         theses: [ only ],
         suppressed: [ { "id" => "only", "reason" => "collision_dismissed" } ]
@@ -55,13 +66,13 @@ class RefactorPatrolReporterTest < Minitest::Test
     assert_equal "all_suppressed", all_suppressed.fetch("zero_reason")
     [ no_slice, no_theses, all_suppressed ].each do |payload|
       assert payload.fetch("complete")
-      assert v2_schemer.valid?(payload), v2_schemer.validate(payload).map { |error| error["error"] }.inspect
+      assert v3_schemer.valid?(payload), v3_schemer.validate(payload).map { |error| error["error"] }.inspect
     end
   end
 
-  def test_v2_review_errors_force_partial_even_when_caller_reports_complete
-    payload = reporter.v2_envelope(
-      **v2_args(
+  def test_v3_review_errors_force_partial_even_when_caller_reports_complete
+    payload = reporter.v3_envelope(
+      **v3_args(
         features: [ feature ],
         theses: [],
         complete: true,
@@ -72,10 +83,10 @@ class RefactorPatrolReporterTest < Minitest::Test
     assert_equal false, payload.fetch("complete")
     assert_nil payload.fetch("zero_reason")
     assert_equal "agent_failed", payload.fetch("review_errors").first.fetch("error")
-    assert v2_schemer.valid?(payload), v2_schemer.validate(payload).map { |error| error["error"] }.inspect
+    assert v3_schemer.valid?(payload), v3_schemer.validate(payload).map { |error| error["error"] }.inspect
   end
 
-  def test_v2_actions_do_not_change_analysis_disposition
+  def test_v3_actions_do_not_change_analysis_disposition
     item = thesis("accepted", confidence: "high", fingerprint: "fp-accepted")
     action = {
       "canonical_action_id" => "fix-fp-accepted",
@@ -88,15 +99,15 @@ class RefactorPatrolReporterTest < Minitest::Test
       "receipts" => { "validation" => { "ok" => false } }
     }
 
-    payload = reporter.v2_envelope(**v2_args(theses: [ item ], actions: [ action ]))
+    payload = reporter.v3_envelope(**v3_args(theses: [ item ], actions: [ action ]))
 
     assert_equal [ "accepted" ], payload.fetch("accepted").map { |entry| entry.fetch("id") }
     assert_empty payload.fetch("flagged")
     assert_equal "validation_failed", payload.fetch("actions").first.fetch("outcome")
-    assert v2_schemer.valid?(payload), v2_schemer.validate(payload).map { |error| error["error"] }.inspect
+    assert v3_schemer.valid?(payload), v3_schemer.validate(payload).map { |error| error["error"] }.inspect
   end
 
-  def test_v2_retains_incomplete_measurement_diagnostics_on_flagged_theses
+  def test_v3_retains_incomplete_measurement_diagnostics_on_flagged_theses
     item = thesis(
       "partial", admissible: false,
       admissibility_reason: "incomplete feature leverage measurement",
@@ -113,19 +124,19 @@ class RefactorPatrolReporterTest < Minitest::Test
       ]
     }
 
-    payload = reporter.v2_envelope(**v2_args(theses: [ item ]))
+    payload = reporter.v3_envelope(**v3_args(theses: [ item ]))
     retained = payload.dig("flagged", 0, "thesis", "feature_hotspot", "measurement")
 
     assert_equal "incomplete", retained.fetch("status")
     assert_equal "architecture_map_failed", retained.dig("diagnostics", 0, "kind")
-    assert v2_schemer.valid?(payload), v2_schemer.validate(payload).map { |error| error["error"] }.inspect
+    assert v3_schemer.valid?(payload), v3_schemer.validate(payload).map { |error| error["error"] }.inspect
   end
 
-  def test_v2_rejects_duplicate_thesis_ids_instead_of_losing_a_disposition
+  def test_v3_rejects_duplicate_thesis_ids_instead_of_losing_a_disposition
     duplicate = thesis("same", fingerprint: "fp-one")
 
     error = assert_raises(ArgumentError) do
-      reporter.v2_envelope(**v2_args(theses: [ duplicate, thesis("same", fingerprint: "fp-two") ]))
+      reporter.v3_envelope(**v3_args(theses: [ duplicate, thesis("same", fingerprint: "fp-two") ]))
     end
 
     assert_includes error.message, "duplicate thesis id"
@@ -179,7 +190,7 @@ class RefactorPatrolReporterTest < Minitest::Test
     end
   end
 
-  def test_v2_rejects_duplicate_suppression_ids
+  def test_v3_rejects_duplicate_suppression_ids
     item = thesis("only")
     suppressions = [
       { "id" => "only", "reason" => "already_seen" },
@@ -187,18 +198,18 @@ class RefactorPatrolReporterTest < Minitest::Test
     ]
 
     error = assert_raises(ArgumentError) do
-      reporter.v2_envelope(**v2_args(theses: [ item ], suppressed: suppressions))
+      reporter.v3_envelope(**v3_args(theses: [ item ], suppressed: suppressions))
     end
 
     assert_includes error.message, "duplicate suppressed thesis id"
   end
 
-  def test_v2_rejects_unsupported_and_inconsistent_zero_reasons
+  def test_v3_rejects_unsupported_and_inconsistent_zero_reasons
     unsupported = assert_raises(ArgumentError) do
-      reporter.v2_envelope(**v2_args(features: [], zero_reason: "nothing_here"))
+      reporter.v3_envelope(**v3_args(features: [], zero_reason: "nothing_here"))
     end
     inconsistent = assert_raises(ArgumentError) do
-      reporter.v2_envelope(**v2_args(features: [], zero_reason: "no_theses"))
+      reporter.v3_envelope(**v3_args(features: [], zero_reason: "no_theses"))
     end
 
     assert_includes unsupported.message, "unsupported zero reason"
@@ -213,7 +224,7 @@ class RefactorPatrolReporterTest < Minitest::Test
     )
   end
 
-  def v2_args(overrides = {})
+  def v3_args(overrides = {})
     {
       job_id: "job-1",
       project: "demo",
@@ -281,7 +292,7 @@ class RefactorPatrolReporterTest < Minitest::Test
       },
       confidence: confidence,
       risk: {
-        "caps" => { "est_files" => 2, "est_diff_lines" => 80, "single_feature" => true },
+        "caps" => { "single_feature" => true },
         "public_api_impact" => false,
         "public_api_details" => [],
         "cross_feature_impact" => false,
@@ -295,6 +306,10 @@ class RefactorPatrolReporterTest < Minitest::Test
       follow_up_approval_state: "pending",
       fingerprint: fingerprint
     )
+  end
+
+  def v3_schemer
+    @v3_schemer ||= JSONSchemer.schema(JSON.parse(File.read(Hive::Schemas.schema_path("hive-refactor-patrol", version: 3))))
   end
 
   def v2_schemer

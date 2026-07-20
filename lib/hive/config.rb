@@ -543,12 +543,13 @@ module Hive
           "test" => nil
         },
         "caps" => {
-          "single_feature_only" => true,
+          # Refactoring often removes duplicated ownership across mapped
+          # feature boundaries. Guard contracts and dependencies instead of
+          # treating cross-feature scope or patch size as risky by itself.
+          "single_feature_only" => false,
           "allow_dependency_bumps" => false,
           "allow_public_api_changes" => false,
-          "max_files" => 8,
-          "max_diff_lines" => 400,
-          "allow_cross_feature" => false
+          "allow_cross_feature" => true
         },
         "leverage" => {
           "weights" => {
@@ -2887,10 +2888,6 @@ module Hive
       "max_theses_per_run" => 1,
       "max_review_seconds_per_run" => 1
     }.freeze
-    REFACTOR_PATROL_CAP_BOUNDS = {
-      "max_files" => 1,
-      "max_diff_lines" => 1
-    }.freeze
     REFACTOR_PATROL_WEIGHT_KEYS = %w[
       churn
       fan_in
@@ -2994,9 +2991,6 @@ module Hive
 
       REFACTOR_PATROL_CAP_BOOLEAN_KEYS.each do |key|
         validate_boolean!(caps[key], "refactor_patrol.caps.#{key}", source_path)
-      end
-      REFACTOR_PATROL_CAP_BOUNDS.each do |key, min|
-        validate_integer_min!(caps[key], "refactor_patrol.caps.#{key}", min, source_path)
       end
     end
 

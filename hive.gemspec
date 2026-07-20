@@ -82,5 +82,9 @@ Gem::Specification.new do |spec|
   spec.add_dependency "sqlite3", "~> 2.0"
   spec.add_dependency "telegram-bot-ruby", "~> 2.7"
   spec.add_dependency "thor", "~> 1.3"
+  # The PR-only digest is defined by Europe/London calendar days even when the
+  # host runs in another timezone. Declare tzinfo directly rather than relying
+  # on Rails/ActiveSupport to provide this runtime dependency transitively.
+  spec.add_dependency "tzinfo", "~> 2.0"
   spec.add_dependency "unicode-display_width", "~> 3.2"
 end

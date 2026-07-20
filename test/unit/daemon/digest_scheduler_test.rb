@@ -375,7 +375,7 @@ class HiveDaemonDigestSchedulerTest < Minitest::Test
     end
   end
 
-  def test_dst_boundary_uses_local_completed_day_once
+  def test_dst_boundary_uses_london_completed_day_once_when_host_differs
     with_env("TZ" => "America/New_York") do
       with_tmp_dir do |dir|
         write_state(dir, "last_digested_date" => "2026-03-07")
@@ -384,6 +384,19 @@ class HiveDaemonDigestSchedulerTest < Minitest::Test
         dispatches = scheduler.tick(now: Time.utc(2026, 3, 9, 4, 30, 0))
 
         assert_equal "2026-03-08", dispatches.first.fetch(:slug)
+      end
+    end
+  end
+
+  def test_london_midnight_advances_before_los_angeles_host_midnight
+    with_env("TZ" => "America/Los_Angeles") do
+      with_tmp_dir do |dir|
+        write_state(dir, "last_digested_date" => "2026-06-12")
+        scheduler = scheduler(dir, enabled: true)
+
+        dispatches = scheduler.tick(now: Time.utc(2026, 6, 14, 0, 30, 0))
+
+        assert_equal "2026-06-13", dispatches.first.fetch(:slug)
       end
     end
   end

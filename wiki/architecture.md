@@ -349,8 +349,10 @@ The Rails layer models a task page as a filesystem-backed `Task`, built from
 the matching status snapshot row and registered project. That model owns task
 reads and their invariants — workflow-aware artifact ordering, brainstorm
 questions, bounded log tails, worktree presence, and media-manifest/path
-validation. `TasksController` remains the HTTP and mutation boundary; it does
-not duplicate the task's filesystem behavior.
+validation. `TasksController` renders that resource. Namespaced task-resource
+controllers expose diff, log, media, approval, rejection, drop, run, recovery,
+answer, and intervention through standard `show`/`create` actions; each remains
+a thin HTTP boundary over `Task` or `Hive::Web::Dispatcher`.
 
 ## Dispatch flow (durable generation ownership)
 

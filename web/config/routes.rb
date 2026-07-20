@@ -32,18 +32,18 @@ Rails.application.routes.draw do
   # Task pages are addressed by project name + task slug, mirroring the CLI.
   scope "tasks/:project/:slug", constraints: { slug: /[a-z][a-z0-9-]{0,62}[a-z0-9]/, project: %r{[^/]+} } do
     get  "" => "tasks#show", as: :task
-    get  "diff" => "tasks#diff", as: :task_diff
-    get  "log" => "tasks#log", as: :task_log
-    get  "media/:filename" => "tasks#media", as: :task_media,
+    get  "diff" => "tasks/diffs#show", as: :task_diff
+    get  "log" => "tasks/logs#show", as: :task_log
+    get  "media/:filename" => "tasks/media#show", as: :task_media,
          format: false,
          constraints: { filename: /[\w.-]+\.(?:png|jpe?g|gif)/i }
-    post "approve" => "tasks#approve", as: :task_approve
-    post "reject" => "tasks#reject", as: :task_reject
-    post "drop" => "tasks#drop", as: :task_drop
-    post "run" => "tasks#run_stage", as: :task_run
-    post "recover" => "tasks#recover", as: :task_recover
-    post "intervene" => "tasks#intervene", as: :task_intervene
-    post "answers" => "tasks#answer", as: :task_answers
+    post "approve" => "tasks/approvals#create", as: :task_approve
+    post "reject" => "tasks/rejections#create", as: :task_reject
+    post "drop" => "tasks/drops#create", as: :task_drop
+    post "run" => "tasks/runs#create", as: :task_run
+    post "recover" => "tasks/recoveries#create", as: :task_recover
+    post "intervene" => "tasks/interventions#create", as: :task_intervene
+    post "answers" => "tasks/answers#create", as: :task_answers
   end
 
   get  "repos" => "repos#index", as: :repos

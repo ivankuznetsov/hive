@@ -380,13 +380,12 @@ bundle exec brakeman --force --no-pager --quiet --format github --ignore-config 
 `config/brakeman.ignore` is the root ignore file for scanner false positives.
 Each entry carries a rationale for the trust boundary Brakeman cannot see,
 such as argv-form subprocess calls, integer coercion before shell use, or
-registry-laundered filesystem paths. Commit `83f0a800` added the current
-task-log-path ignore: `TasksController#latest_log` receives the project through
-`ApplicationController#find_project!`, which resolves only registered project
-entries before exposing `hive_state_path`; the route constrains `:slug`, and
-the log path still applies `File.basename(params[:slug])` before joining under
-that registry-derived log root. See [[commands/web]] for the task log-tail
-surface.
+registry-laundered filesystem paths. The old task-log-path ignore from commit
+`83f0a800` is no longer needed: `Tasks::LogsController#show` loads a `Task`
+only after registered-project resolution, and moving the bounded path read to
+`Task#latest_log` lets Brakeman see no controller file sink. Focused integration
+coverage rejects unknown projects and valid-shaped unknown task slugs on the
+log route. See [[commands/web]] for the task log-tail surface.
 
 Brakeman still scans the packaged benchmark runtime even though RuboCop defers
 its style ownership to hive-bench. Its profile probe, Codex judge, and sqlite
@@ -398,8 +397,8 @@ snapshot.
 
 The hivebox task media route also carries a Brakeman file-access ignore. The
 route constrains `:filename` to a single PNG/JPEG/GIF component, then
-`TasksController#resolved_media_path` applies `File.basename`, repeats the
-extension check, resolves the real task folder and media directory, refuses a
+`Task#media_path` requires `File.basename` equality, repeats the extension
+check, resolves the real task folder and media directory, refuses a
 symlinked `media/` root, and streams only files whose realpath remains below
 that media root. `web/test/integration/tasks_test.rb` covers inline streaming,
 traversal/extension/missing-file refusal, and symlinked media-root refusal.

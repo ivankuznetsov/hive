@@ -335,7 +335,7 @@ origin also prints the Host-header/reverse-proxy warning.
   and persist nothing.
 
 Task Drop is routed as `POST /tasks/:project/:slug/drop` →
-`TasksController#drop` → `Hive::Web::Dispatcher#drop` →
+`Tasks::DropsController#create` → `Hive::Web::Dispatcher#drop` →
 `Hive::Commands::Drop`. It is intentionally in-process, not a daemon dispatch:
 the task is gone after success, so the controller redirects to the grid. The
 form posts the row's rendered `stage` as `from`; if the task moved after the
@@ -343,7 +343,7 @@ page rendered, `Commands::Drop` raises `Hive::WrongStage`, Rails renders the
 typed 422 error page, and the moved task folder is left intact.
 
 Task recovery is routed as `POST /tasks/:project/:slug/recover` →
-`TasksController#recover` → `Hive::Web::Dispatcher#recover`. The controller
+`Tasks::RecoveriesController#create` → `Hive::Web::Dispatcher#recover`. The controller
 re-reads the current status row rather than trusting form-posted stage/marker
 state. The dispatcher refuses manual-only states with
 `RecoverySequence.manual_only_text`, derives the most discriminating

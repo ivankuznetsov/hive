@@ -251,7 +251,7 @@ class TasksTest < ActionDispatch::IntegrationTest
 
   test "media route 404s a valid-shape slug that names no task" do
     # A slug that satisfies the route constraint but matches no task row hits
-    # the shared task_row! -> InvalidTaskPath -> 404 path, the same handling
+    # the shared Task.find! -> InvalidTaskPath -> 404 path, the same handling
     # every other action gets for an unknown task (plan U3/U5).
     get "/tasks/#{@project}/ghost-task-260101-zzzz/media/01-home.png"
     assert_response :not_found
@@ -434,6 +434,14 @@ class TasksTest < ActionDispatch::IntegrationTest
 
     # A traversal-shaped slug fails the route constraint outright.
     get "/tasks/#{@project}/..%2f..%2fetc"
+    assert_response :not_found
+  end
+
+  test "log route rejects unknown registered state before reading a path" do
+    get "/tasks/nope/#{@slug}/log"
+    assert_response :not_found
+
+    get "/tasks/#{@project}/ghost-task-260101-zzzz/log"
     assert_response :not_found
   end
 

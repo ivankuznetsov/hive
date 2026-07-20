@@ -122,14 +122,14 @@ class InitPromptsTest < Minitest::Test
     assert_equal all_defaults, answers
   end
 
-  def test_non_tty_recommends_refactor_patrol_discovery_without_enabling_mutation
+  def test_non_tty_recommends_refactor_patrol_without_arming_legacy_config
     prompts, _output = make_prompts("", tty: false)
     answers = prompts.collect
 
     assert_equal true, answers["refactor_patrol_enabled"]
+    # Fresh config renders the recommended full policy from the answer, while
+    # merged fallbacks remain effect-free for legacy partial configurations.
     assert_equal false, Hive::Config::DEFAULTS.dig("refactor_patrol", "auto_fix", "enabled")
-    # The legacy/missing-config default remains effect-free. The fresh config
-    # renderer explicitly enables issue output with the discovery answer.
     assert_equal false, Hive::Config::DEFAULTS.dig("refactor_patrol", "issue_filing", "enabled")
   end
 
@@ -518,14 +518,13 @@ class InitPromptsTest < Minitest::Test
     end
   end
 
-  def test_interactive_refactor_patrol_discloses_default_issue_output_and_disabled_mutation
+  def test_interactive_refactor_patrol_discloses_default_auto_fix_and_issue_fallback
     prompts, output = make_prompts(interactive_input(refactor_patrol: ""))
 
     prompts.collect
 
-    assert_match(/reviewable findings become GitHub issues/, output.string)
-    assert_match(/Automatic code changes remain disabled/, output.string)
-    refute_match(/GitHub issue filing remain/, output.string)
+    assert_match(/attempt confined fixes and pull requests/, output.string)
+    assert_match(/GitHub issues remain the fallback review surface/, output.string)
   end
 
   def test_interactive_refactor_patrol_no_disables_discovery
@@ -553,7 +552,7 @@ class InitPromptsTest < Minitest::Test
     )
 
     assert_equal false, prompts.collect.fetch("refactor_patrol_enabled")
-    refute_includes output.string, "Enable architecture patrol discovery"
+    refute_includes output.string, "Enable architecture patrol for this project"
   end
 
   def test_refactor_patrol_override_requires_a_boolean_or_nil

@@ -349,7 +349,7 @@ class ConfigTest < Minitest::Test
     end
   end
 
-  def test_load_leaves_refactor_patrol_disabled_when_no_config
+  def test_load_keeps_refactor_patrol_inert_when_no_config
     with_tmp_dir do |dir|
       cfg = Hive::Config.load(dir)
 
@@ -376,6 +376,22 @@ class ConfigTest < Minitest::Test
       assert_equal 0.0, cfg.dig("refactor_patrol", "leverage", "weights", "coverage_gap")
       assert_equal 6, cfg.dig("refactor_patrol", "review", "max_owned_files")
       assert_equal 6, cfg.dig("refactor_patrol", "review", "max_context_files")
+    end
+  end
+
+  def test_load_does_not_grant_auto_fix_to_legacy_discovery_only_config
+    with_tmp_dir do |dir|
+      FileUtils.mkdir_p(File.join(dir, ".hive-state"))
+      File.write(File.join(dir, ".hive-state", "config.yml"), <<~YAML)
+        refactor_patrol:
+          enabled: true
+      YAML
+
+      cfg = Hive::Config.load(dir)
+
+      assert_equal true, cfg.dig("refactor_patrol", "enabled")
+      assert_equal false, cfg.dig("refactor_patrol", "auto_fix", "enabled")
+      assert_equal false, cfg.dig("refactor_patrol", "issue_filing", "enabled")
     end
   end
 

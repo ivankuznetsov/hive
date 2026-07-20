@@ -361,9 +361,9 @@ patrol:
 <% end -%>
 
 # Architecture patrol is independent from ordinary patrol. Fresh init
-# recommends read-only discovery with GitHub issues as its review surface.
-# Automatic code changes remain a separate explicit opt-in. Existing projects
-# with no block keep the disabled discovery policy.
+# recommends discovery with confined auto-fix/PR attempts and GitHub issues as
+# the fallback review surface. Existing projects with no block keep the
+# disabled discovery policy.
 refactor_patrol:
   enabled: <%= refactor_patrol_enabled ? "true" : "false" %>
   # Low-leverage proposals remain visible but report-only.
@@ -372,7 +372,7 @@ refactor_patrol:
   # Unfinished features remain durable and resume in a later patrol run.
   max_review_seconds_per_run: 3600
   auto_fix:
-    enabled: false
+    enabled: <%= refactor_patrol_enabled ? "true" : "false" %>
     agent: codex
   commands:
     # Optional project-owned API/contract check for ecosystems without a

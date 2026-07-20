@@ -41,11 +41,11 @@ hive refactor-patrol my-project --show JOB_ID --full --json
 ```
 
 Fresh terminal and web init recommend discovery (`refactor_patrol.enabled:
-true`) with a default-yes choice and explicitly enable reviewable, deduplicated
-GitHub issue output alongside it. Missing configuration in an existing project
-still resolves discovery and issue filing to false; existing projects must opt
-in explicitly. Automatic code mutation remains independently off. Fresh
-headless init can resolve the discovery choice before any project-state write
+true`) with a default-yes choice and explicitly enable confined auto-fix/PR
+attempts plus reviewable, deduplicated issue fallback. Missing configuration in
+an existing project still resolves all three gates to false, and older
+discovery-only configs do not inherit external-effect authority. Fresh headless
+init can resolve the whole architecture-patrol choice before any project-state write
 with `hive init --refactor-patrol` or `hive init --no-refactor-patrol`;
 omitting both keeps the enabled default.
 
@@ -57,7 +57,7 @@ refactor_patrol:
   min_leverage_score: 0.25
   max_theses_per_feature: 1
   auto_fix:
-    enabled: false
+    enabled: true
     agent: codex
   issue_filing:
     enabled: true

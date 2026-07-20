@@ -191,10 +191,11 @@ when it alone is larger.
 
 **Architecture patrol separates discovery, review output, and mutation.**
 `Config::DEFAULTS["refactor_patrol"]["enabled"]`, `auto_fix.enabled`, and
-`issue_filing.enabled` are false, so missing legacy config grants no discovery,
-code-mutation, or remote-write authority. Fresh init recommends discovery,
-writes that answer explicitly, enables issue output with it as the default
-review surface, and keeps auto-fix false. Existing projects opt in explicitly.
+`issue_filing.enabled` are false, so missing or older partial config grants no
+new discovery, mutation, or remote-write authority. Fresh init recommends the
+full workflow, writes that answer explicitly to discovery, auto-fix, and issue
+filing, and uses issues as the fallback review surface. Existing projects opt
+in explicitly.
 The block also owns the
 review agent, confidence/run caps, language-neutral include/exclude rules,
 `docs|format|lint|public_contract|typecheck|test` commands, actual patch

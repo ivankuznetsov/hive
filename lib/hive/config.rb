@@ -500,12 +500,11 @@ module Hive
         }
       },
       # Refactor patrol remains effect-free for legacy/missing configuration.
-      # Fresh initialization renders issue output alongside discovery, while
-      # automatic code mutation remains a separate authority gate.
+      # Fresh initialization writes the recommended full policy explicitly;
+      # defaults here must not grant mutation authority to an older partial
+      # config that enabled discovery before auto-fix existed.
       "refactor_patrol" => {
         "enabled" => false,
-        # Discovery consent never grants mutation or remote-write authority in
-        # a legacy/missing block. Fresh init opts into issue output explicitly.
         "auto_fix" => {
           "enabled" => false,
           # Fix agents need a real root-confined write sandbox. Discovery may

@@ -149,7 +149,7 @@ module Hive
         #     "patrol_mode"       => String,           # ultrapatrol | high | medium | low | off
         #     "triage_bias"       => String,           # courageous | safetyist
         #     "adhoc_auto_fix"    => Boolean           # auto-fix ad-hoc PR reviews
-        #     "refactor_patrol_enabled" => Boolean     # discovery plus review issues
+        #     "refactor_patrol_enabled" => Boolean     # discovery, auto-fix, and review issues
         #     "budgets"  => Hash<String, Integer>,     # 10 keys (LIMIT_KEYS)
         #     "timeouts" => Hash<String, Integer>,     # 10 keys (LIMIT_KEYS)
         #     "daemon_enabled"    => Boolean           # auto-advance pipeline (ADR-024)
@@ -571,9 +571,9 @@ module Hive
         def prompt_refactor_patrol_enabled
           @output.puts ""
           @output.puts "Architecture patrol — review each future merged PR for refactor opportunities."
-          @output.puts "  Discovery stays read-only and reviewable findings become GitHub issues."
-          @output.puts "  Automatic code changes remain disabled unless you enable them later."
-          prompt_yes_no("Enable architecture patrol discovery for this project?", default: true)
+          @output.puts "  Accepted findings attempt confined fixes and pull requests by default."
+          @output.puts "  GitHub issues remain the fallback review surface when no safe fix ships."
+          prompt_yes_no("Enable architecture patrol for this project?", default: true)
         end
 
         def prompt_yes_no(question, default:)

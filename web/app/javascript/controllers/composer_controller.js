@@ -79,10 +79,29 @@ export default class extends Controller {
   // server wrote the idea but before Turbo delivered its success lifecycle.
   // Ignore only refresh streams on the submitting client; targeted project
   // replacements still render, and other connected clients still refresh.
-  protectSubmission(event) {
+  beforeStreamRender(event) {
     const stream = event.detail?.newStream || event.target
     if (this.submissionInFlight && stream?.getAttribute("action") === "refresh") {
       event.preventDefault()
+      return
+    }
+
+    // The server owns the live project order, but the selected project is
+    // unfinished form state owned by this browser. Preserve that choice when
+    // Turbo morphs the select, provided the project still exists.
+    if (stream?.getAttribute("target") !== "composer-project") return
+
+    const selectedProject = this.element.querySelector("#composer-project")?.value
+    if (!selectedProject) return
+
+    const render = event.detail.render
+    event.detail.render = async (newStream) => {
+      await render(newStream)
+
+      const select = this.element.querySelector("#composer-project")
+      const projectStillExists = Array.from(select?.options || [])
+        .some((option) => option.value === selectedProject)
+      if (projectStillExists) select.value = selectedProject
     }
   }
 

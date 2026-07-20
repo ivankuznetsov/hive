@@ -14,16 +14,7 @@
     text). The controller wraps rail AND grid; it re-applies the filter
     after every broadcast replace / morph via a MutationObserver. %>
 <div class="status-layout" data-controller="project-filter">
-  <aside class="project-nav" aria-label="Project filter">
-    <button type="button" class="project-nav-item" data-project-filter-target="button"
-            data-action="project-filter#choose" data-project-filter-name-param="">All projects</button>
-    <% registered_project_names.each do |name| %>
-      <button type="button" class="project-nav-item" data-project-filter-target="button"
-              data-action="project-filter#choose" data-project-filter-name-param="<%= name %>"><%= name %></button>
-    <% end %>
-    <%# A link, not a filter button — adding a project IS a navigation. %>
-    <%= link_to "+ Add project", repos_path, class: "project-nav-item project-nav-add" %>
-  </aside>
+  <%= render "status/project_nav", projects: @projects %>
   <div class="status-main">
 
 <%# data-turbo-permanent: a morph must never touch the composer — it holds
@@ -31,24 +22,21 @@
     the server can't re-render). %>
 <%= form_with url: ideas_path, multipart: true, class: "composer", id: "composer",
               data: { controller: "composer", turbo_permanent: true,
-                      action: "turbo:submit-start->composer#submitting turbo:before-stream-render@document->composer#protectSubmission turbo:before-fetch-response->composer#submitted turbo:submit-end->composer#submitted" } do |f| %>
+                      action: "turbo:submit-start->composer#submitting turbo:before-stream-render@document->composer#beforeStreamRender turbo:before-fetch-response->composer#submitted turbo:submit-end->composer#submitted" } do |f| %>
   <div class="composer-box">
     <%= f.text_area :text, placeholder: "Drop a new idea — paste or attach screenshots…",
           required: true, data: { composer_target: "text", action: "paste->composer#paste" },
           aria: { label: "New idea" } %>
     <div class="attachment-chips" data-composer-target="chips"></div>
     <div class="composer-toolbar">
-      <% names = registered_project_names %>
       <%# The placeholder is a disabled+hidden option: it reads as the closed
           value, but is not an entry in the open list (a selectable
           "Project…" row is noise). required + value="" still blocks submit
           until a real project is chosen. %>
-      <% placeholder = names.size == 1 ? "".html_safe : tag.option("Project…", value: "", selected: true, disabled: true, hidden: true) %>
       <%# select_tag, not f.select: the FormBuilder insists on injecting its
           own blank first option for required selects (an empty row in the
           open list); our hidden placeholder already serves that contract. %>
-      <%= select_tag "project", placeholder + options_for_select(names, names.size == 1 ? names.first : nil),
-            required: true, aria: { label: "Project" } %>
+      <%= render "status/composer_project", projects: @projects %>
       <button type="button" class="btn btn-ghost btn-sm composer-attach" data-action="composer#pick" aria-label="Attach image">
         <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
         Image

@@ -35,10 +35,6 @@ module ApplicationHelper
     tag.span("", class: "status-dot status-dot-#{kind}", title: task["action_label"].presence || "idle")
   end
 
-  def registered_project_names
-    Hive::Config.registered_projects.map { |p| p["name"] }
-  end
-
   MARKDOWN_TAGS = %w[
     h1 h2 h3 h4 h5 h6 p a ul ol li blockquote pre code em strong del hr br img
     table thead tbody tr th td

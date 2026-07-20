@@ -95,7 +95,7 @@ class ReleaseContractTest < Minitest::Test
     assert_equal [ "proof-gate", "install-gate" ], jobs.fetch("release-finalize").fetch("needs")
     assert_includes body, "commits/${candidate_sha}/check-runs"
     assert_includes body, '.app.slug == "github-actions"'
-    assert_includes body, '.path == $path'
+    assert_includes body, ".path == $path"
     assert_includes body, '.event == "workflow_dispatch"'
     assert_includes body, "OpenClaw live Hive operating skill"
     assert_includes body, "live-agent-skills-proof"

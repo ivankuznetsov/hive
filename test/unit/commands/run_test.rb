@@ -35,7 +35,7 @@ class CommandsRunTest < Minitest::Test
       )
       guarded.define_singleton_method(:resolve_task) { current }
 
-      with_replaced_singleton_method(Hive::DependencySnapshot, :enforce_admission!, ->(_task) {}) do
+      with_replaced_singleton_method(Hive::DependencySnapshot, :enforce_admission!, ->(_task) { }) do
         assert_raises(Hive::StaleOperationalObservation) { guarded.call }
       end
       refute File.exist?(File.join(dir, ".lock")), "failed guard must release the task lock"

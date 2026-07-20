@@ -49,6 +49,7 @@ module Hive
         File.chmod(0o700, File.dirname(@path))
         @io = File.open(@path, File::WRONLY | File::CREAT | File::APPEND, 0o600)
         @io.chmod(0o600)
+        seal_torn_tail
         @sequence = self.class.read(@path).last&.sequence.to_i
       end
 
@@ -84,6 +85,24 @@ module Hive
       end
 
       def closed? = @io.closed?
+
+      private
+
+      # A crash mid-append can leave a torn final line with no trailing newline.
+      # Terminate it before the first post-reopen append so the torn bytes stay
+      # an isolated unparseable line instead of fusing with the next frame.
+      def seal_torn_tail
+        return if File.size(@path).zero?
+
+        last_byte = File.open(@path, "rb") do |file|
+          file.seek(-1, IO::SEEK_END)
+          file.read(1)
+        end
+        return if last_byte == "\n"
+
+        @io.syswrite("\n")
+        @io.flush
+      end
     end
   end
 end

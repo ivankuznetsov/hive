@@ -1535,7 +1535,7 @@ class HiveDaemonDispatcherTest < Minitest::Test
 
     dispatcher.tick(now: T0)
 
-    # The shipped digest ticks first (dispatch ordering) and takes the single
+    # The PR digest ticks first (dispatch ordering) and takes the single
     # global digest slot; the answer-digest is blocked and cancelled the SAME
     # tick. Pins the ordering so a silent flip is caught.
     assert_equal 1, sup.spawned.size

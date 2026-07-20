@@ -29,11 +29,12 @@ registered_projects: <%= registered_projects.empty? ? "[]" : "" %>
 #   log_max_files: 5
 #   last_seen_state_file: ~/Dev/hive/.bot.last_seen_update_id
 
-# Daily shipped digest. Defaults ON whenever the Telegram bot is enabled with
-# at least one allowlisted chat — the daemon then schedules one global
-# `hive digest` subprocess after local midnight and sends a Telegram MarkdownV2
-# message (chunked when it exceeds Telegram's length limit) to the first
-# allowlisted chat. Set enabled: false to opt out.
+# Daily merged-PR changelist for the previous Europe/London calendar day.
+# Defaults ON whenever the Telegram bot is enabled with at least one allowlisted
+# chat. The daemon schedules the canonical `hive digest` command, collects
+# complete GitHub PR body/diff evidence from registered repositories, and sends
+# a chunk-safe Telegram MarkdownV2 message to the first allowlisted chat. Set
+# enabled: false to opt out. There is no source selector or task-based mode.
 #
 # digest:
 #   enabled: false         # only needed to opt OUT; otherwise auto-on with the bot

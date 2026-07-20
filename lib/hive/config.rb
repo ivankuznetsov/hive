@@ -566,9 +566,10 @@ module Hive
           "max_owned_files" => 6
         }
       },
-      # Daily shipped digest. The daemon schedules one global `hive digest`
-      # subprocess after each local midnight; the subprocess sends a single
-      # Telegram message across all registered projects.
+      # Daily merged-PR changelist. The daemon schedules one global
+      # `hive digest` subprocess for each completed Europe/London day; the
+      # subprocess sends one chunk-safe Telegram changelist across registered
+      # GitHub projects.
       "digest" => {
         "enabled" => false,
         "agent" => nil,

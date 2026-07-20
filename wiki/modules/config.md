@@ -229,10 +229,10 @@ paths, validates the result, and returns the config-shaped hash the digest
 pipeline needs. Direct callers can still pass `cfg:` explicitly. The relevant
 keys are:
 
-- `digest.agent`, then `patrol.agent`, then `"claude"` for the categorizer
+- `digest.agent`, then `patrol.agent`, then `"claude"` for the changelist
   agent.
-- `budget_usd.digest` and `timeout_sec.digest` for categorizer limits,
-  defaulting inside `Hive::Digest::Categorizer` to `50` and `1800`.
+- `budget_usd.digest` and `timeout_sec.digest` for generator limits,
+  defaulting inside `Hive::Digest::ChangelogGenerator` to `50` and `1800`.
 - `bot.chat_id_allowlist[0]` for Telegram delivery.
 - `bot.log_file` for the sender's bot logger path.
 
@@ -246,7 +246,8 @@ integer chat id, else `false` (the predicate is the private
 (true or false) is always honored; only the unset case is derived. Both
 scheduler-config callers (`Commands::Daemon#start_daemon` and the dispatcher
 SIGHUP reconfigure) load through `load_global_digest_block`, so the derived
-value applies in both.
+value applies in both. The block has no `source` field: the sole digest mode is
+the registered-repository PR changelist, and CLI `--repo` is a runtime filter.
 
 ## Screenote config
 

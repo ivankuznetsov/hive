@@ -192,16 +192,24 @@ That is enough to understand what Hive does: it turns a rough idea into durable 
 
 ## Digest Reports
 
-`hive digest` sends the daily shipped-task digest for the local day that just ended. It scans completed `9-done` tasks, uses the configured digest agent for summaries when there is work to report, and delivers through Telegram.
-
-For a read-only GitHub report of pull requests merged on a local day, use:
+`hive digest` sends the complete changelist for pull requests merged during the
+Europe/London day that just ended. It discovers registered GitHub repositories,
+collects every qualifying PR body and diff, and uses the configured digest
+agent to produce project context and concrete change bullets. Hive task and
+stage state never affects inclusion.
 
 ```bash
-hive digest --source merged-prs --dry-run
-hive digest --source merged-prs --date 2026-06-13 --repo owner/name --json
+hive digest --dry-run
+hive digest --date 2026-06-13 --repo owner/name --json
 ```
 
-The merged-PR source never mutates Hive state and does not run an LLM; it groups merged PRs by repo with mechanical MarkdownV2 output. See [wiki/commands/digest.md](wiki/commands/digest.md) for the full contract and JSON schema details.
+`--repo` is a repeatable, case-insensitive filter over registered repositories,
+not an arbitrary repository selector. Partial GitHub or metric failures are
+shown as scoped warnings; total collection or generation failure sends
+nothing. Dry-run is credential-free, while real delivery uses Telegram. The
+only live JSON identity is `hive-digest` v2. See
+[wiki/commands/digest.md](wiki/commands/digest.md) for the collection, privacy,
+migration, and schema contracts.
 
 ## Manage Hive From Telegram in 2 Minutes
 

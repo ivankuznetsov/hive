@@ -253,7 +253,11 @@ Browser tests never retain a `.task-row` Capybara element across daemon-driven
 Turbo replacements, because a grid broadcast can detach the row while
 Playwright is preparing a click. The system test visits the route from the task
 folder it just created; the golden-path E2E resolves the slug from one
-current-DOM query and visits that stable route directly. Before submitting the
+current-DOM query and visits that stable route directly. The project-rail test
+uses the same discipline for the broadcaster-replaced rail and composer:
+button lookup/click and ordered-value reads each happen in one current-DOM
+JavaScript turn, so Turbo cannot detach a saved node between lookup and action.
+Before submitting the
 brainstorm answer, it waits for the daemon to classify the
 `needs_input` row and for the current `brainstorm.md` mtime second to pass, so
 the answer write is strictly newer than the daemon's edit-resume baseline even

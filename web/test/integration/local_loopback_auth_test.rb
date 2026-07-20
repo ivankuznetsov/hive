@@ -34,6 +34,23 @@ class LocalLoopbackAuthTest < ActionDispatch::IntegrationTest
     assert_select "a", text: "Connect GitHub"
     assert_select "form[action='/logout']", 0,
                   "a tokenless local session must not offer a meaningless logout action"
+    assert_select "a.brand", text: "hive"
+    assert_select "title", text: "hive — status"
+    refute_includes response.body, "hivebox",
+                    "local Hive Web must not present itself as the separate hivebox appliance"
+  end
+
+  test "loopback proxy remains local when it forwards the Tailscale client IP" do
+    ENV["HIVEBOX_LOCAL_LOOPBACK"] = "1"
+
+    get "/", headers: {
+      "REMOTE_ADDR" => "127.0.0.1",
+      "HTTP_X_FORWARDED_FOR" => "100.105.122.109"
+    }
+
+    assert_response :success,
+                    "a localhost Tailscale Serve proxy must not turn Hive Web into a GitHub login gate"
+    assert_select "nav[aria-label='Primary']", 1
   end
 
   test "bypass enabled but a non-loopback remote still requires login" do

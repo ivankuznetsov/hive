@@ -3,7 +3,7 @@ title: Hive::Config
 type: module
 source: lib/hive/config.rb
 created: 2026-04-25
-updated: 2026-07-19
+updated: 2026-07-20
 tags: [config, yaml, validation]
 ---
 
@@ -342,17 +342,23 @@ Global web settings are validated separately for [[commands/web]]:
 `web.github` must be a hash, optional `web.github.owner` and
 `web.github.client_id` must be non-empty strings when set, and
 `web.session_secret_file` must be a non-empty string when set. A blank/missing
-`web.github.owner` is valid and means the first successful hivebox GitHub
+`web.github.owner` is valid and means the first successful Hivebox GitHub
 device-flow login claims the box by writing that owner under the global config
-lock; pre-setting the owner keeps the older pinned-owner gate. GitHub sign-in
+lock; a local Hive Web GitHub connection never claims it. Pre-setting the owner
+keeps the older pinned-owner gate. GitHub sign-in
 uses the OAuth device flow (see [[decisions]] ADR-036), so no client secret
 exists anywhere; `web.github.client_id` defaults to the shared hivebox OAuth
 app — public by design, since device flow is a public-client grant.
 `web.local_loopback: true` is the local foreground default: when `hive web`
 binds `localhost`, `::1`, or `127.0.0.0/8`, the CLI exports
 `HIVEBOX_LOCAL_LOOPBACK=1` and Rails skips GitHub login only for requests whose
-peer IP is also loopback. Setting it to `false` forces the normal GitHub owner
-gate even on a loopback bind.
+actual socket peer (`REMOTE_ADDR`, not proxy-expanded `remote_ip`) is also
+loopback. This preserves local mode through Tailscale Serve and similar
+localhost reverse proxies without trusting arbitrary forwarded headers. The
+proxy must authenticate/restrict its clients because Rails trusts its loopback
+socket connection; use `false` when that boundary cannot be guaranteed.
+Setting it to `false` forces the normal GitHub owner gate even on a loopback
+bind.
 
 The current `hive init` JSON summary envelope (`schemas/hive-init.v2.json`) carries the chosen architecture-patrol discovery value as `refactor_patrol_enabled`, alongside the launch and permission-mode choices. The retained v1 schema is a compatibility artifact. See [[commands/init]].
 
